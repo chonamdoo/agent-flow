@@ -27,6 +27,41 @@
 
 ---
 
+## 구현 현황
+
+**완료**: 좌측 사이드바(프로젝트+에이전트), 3단 뷰(대시보드/칸반/FlowCanvas), 칸반 6열(아이디어→기획→디자인→개발→검수→완료), 인라인 프롬프트+파일 드래그앤드롭, D3-force 에이전트 노드 시각화, SSE 이벤트 스트리밍(mock/real), CLI 래핑 엔진(child_process), Chrome DevTools MCP 설정, 에이전트별 도구 권한 분리, 프로젝트 CRUD API, 실행 기록 저장, 칸반 카드 자동 이동(에이전트 상태 훅), 모바일 반응형
+**미구현**: Google OAuth 인증, 프로젝트 추가/삭제 UI 모달, 실행 기록 상세 뷰어, 에이전트 출력 마크다운 렌더, 실행 비용 집계 대시보드, Railway/Render 배포 설정, macOS CLI 검증
+
+---
+
+## 주요 파일 맵
+
+| 영역 | 경로 |
+|------|------|
+| 메인 페이지 | `src/app/page.tsx` (뷰 라우팅, 오케스트레이션) |
+| CLI 엔드포인트 | `src/app/api/agent/run/route.ts` (spawn claude) |
+| 프로젝트 API | `src/app/api/projects/route.ts` (GET/POST/DELETE) |
+| 실행 기록 API | `src/app/api/executions/route.ts` (GET) |
+| Mock SSE | `src/app/api/events/route.ts` + `src/lib/event-store.ts` |
+| 오케스트레이터 | `src/lib/orchestrator.ts` (runWorkflow, callAgent, REJECT 루프) |
+| 에이전트 프롬프트 | `src/lib/agent-prompts.ts` (시스템 프롬프트, 모델 매핑, 도구 권한) |
+| 타입 정의 | `src/lib/types.ts` (AgentRole, Session, TokenUsage, WorkflowExecution) |
+| 프로젝트 저장 | `src/lib/project-store.ts` (fs CRUD → data/projects.json) |
+| 실행 기록 저장 | `src/lib/execution-store.ts` (fs → data/executions/*.json) |
+| 워크플로우 프리셋 | `src/lib/workflow-templates.ts` (Web/Android/iOS) |
+| 사이드바 | `src/components/AppSidebar.tsx` (프로젝트 목록 + 에이전트 상태) |
+| 칸반 보드 | `src/components/KanbanBoard.tsx` (6열 + 인라인 프롬프트 + 드래그앤드롭) |
+| 대시보드 | `src/components/DashboardMain.tsx` (통계 + 프로젝트 + 실행 기록) |
+| 에이전트 그래프 | `src/components/FlowCanvas.tsx` (D3-force SVG) |
+| 이벤트 로그 | `src/components/Sidebar.tsx` (FlowCanvas 좌측 패널) |
+| 에이전트 상세 | `src/components/AgentDetailCard.tsx` (출력 + 토큰 + 이벤트) |
+| 검증 루프 | `src/components/VerificationLoopPanel.tsx` (CODE→TEST→FIX→PASS) |
+| 이벤트 훅 | `src/hooks/useEventStream.ts` (mock/real 이중 모드) |
+| MCP 설정 | `.mcp.json` (Chrome DevTools) |
+| 프로젝트 데이터 | `data/projects.json` (Trading Journal, CrestyNode) |
+
+---
+
 ## 핵심 코드 패턴
 
 - **뷰 라우팅**: `MainView = 'dashboard' | 'kanban' | 'flow'` — page.tsx에서 조건부 렌더
