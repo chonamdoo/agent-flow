@@ -44,8 +44,8 @@ export async function POST(request: Request) {
       const startTime = Date.now()
       let fullOutput = ''
 
-      // claude CLI 인자 구성
-      const args = ['-p', fullPrompt, '--output-format', 'json']
+      // claude CLI 인자 구성 (npx 경유 — 글로벌 PATH 미등록 대응)
+      const args = ['-y', '@anthropic-ai/claude-code', '-p', fullPrompt, '--output-format', 'json']
 
       if (model) {
         args.push('--model', model)
@@ -62,7 +62,7 @@ export async function POST(request: Request) {
       // 프로젝트 디렉토리에서 실행 (Developer가 실제 파일 수정 가능)
       const cwd = projectPath || process.cwd()
 
-      const proc = spawn('claude', args, {
+      const proc = spawn('npx', args, {
         shell: true,
         timeout: 300000,
         cwd,
