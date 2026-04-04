@@ -13,10 +13,11 @@ const PROJECTS = [
 
 interface TemplateSelectorProps {
   onSelect: (template: WorkflowTemplate, projectId: string) => void
+  onClose?: () => void
   currentProjectId?: string
 }
 
-export default function TemplateSelector({ onSelect, currentProjectId }: TemplateSelectorProps) {
+export default function TemplateSelector({ onSelect, onClose, currentProjectId }: TemplateSelectorProps) {
   const [selectedPlatform, setSelectedPlatform] = useState<Platform | null>(null)
   const [selectedProject, setSelectedProject] = useState<string>(currentProjectId ?? PROJECTS[0].id)
   const [hoveredId, setHoveredId] = useState<string | null>(null)
@@ -27,11 +28,21 @@ export default function TemplateSelector({ onSelect, currentProjectId }: Templat
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm">
       <div className="w-full max-w-3xl rounded-2xl border border-zinc-800 bg-zinc-950 shadow-2xl">
         {/* 헤더 */}
-        <div className="border-b border-zinc-800 px-8 py-6">
-          <h1 className="text-xl font-bold text-white">워크플로우 선택</h1>
-          <p className="mt-1 text-sm text-zinc-500">
-            플랫폼별 프리셋을 선택하거나 커스텀 워크플로우를 만드세요
-          </p>
+        <div className="flex items-start justify-between border-b border-zinc-800 px-8 py-6">
+          <div>
+            <h1 className="text-xl font-bold text-white">워크플로우 선택</h1>
+            <p className="mt-1 text-sm text-zinc-500">
+              플랫폼별 프리셋을 선택하거나 커스텀 워크플로우를 만드세요
+            </p>
+          </div>
+          {onClose && (
+            <button
+              onClick={onClose}
+              className="flex h-8 w-8 items-center justify-center rounded-lg text-zinc-500 hover:bg-zinc-800 hover:text-white transition-colors"
+            >
+              ×
+            </button>
+          )}
         </div>
 
         {/* 프로젝트 선택 */}

@@ -113,7 +113,13 @@ export default function Home() {
 
   // 템플릿 미선택 → 선택 화면
   if (showSelector || !selectedTemplate || !session) {
-    return <TemplateSelector onSelect={handleSelectTemplate} currentProjectId={currentProject} />
+    return (
+      <TemplateSelector
+        onSelect={handleSelectTemplate}
+        onClose={selectedTemplate ? () => setShowSelector(false) : undefined}
+        currentProjectId={currentProject}
+      />
+    )
   }
 
   return (
