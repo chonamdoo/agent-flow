@@ -5,12 +5,20 @@ import type { WorkflowTemplate, Platform } from '@/lib/types'
 import { PLATFORM_META } from '@/lib/types'
 import { WORKFLOW_PRESETS } from '@/lib/workflow-templates'
 
+// 등록된 프로젝트 목록
+const PROJECTS = [
+  { id: 'trading-journal', name: 'Trading Journal', icon: '📈', path: 'trading-journal' },
+  { id: 'crestynode', name: 'CrestyNode', icon: '🦎', path: 'CrestyNode-repo' },
+]
+
 interface TemplateSelectorProps {
-  onSelect: (template: WorkflowTemplate) => void
+  onSelect: (template: WorkflowTemplate, projectId: string) => void
+  currentProjectId?: string
 }
 
-export default function TemplateSelector({ onSelect }: TemplateSelectorProps) {
+export default function TemplateSelector({ onSelect, currentProjectId }: TemplateSelectorProps) {
   const [selectedPlatform, setSelectedPlatform] = useState<Platform | null>(null)
+  const [selectedProject, setSelectedProject] = useState<string>(currentProjectId ?? PROJECTS[0].id)
   const [hoveredId, setHoveredId] = useState<string | null>(null)
 
   const platforms: Platform[] = ['web', 'android', 'ios']
@@ -24,6 +32,25 @@ export default function TemplateSelector({ onSelect }: TemplateSelectorProps) {
           <p className="mt-1 text-sm text-zinc-500">
             플랫폼별 프리셋을 선택하거나 커스텀 워크플로우를 만드세요
           </p>
+        </div>
+
+        {/* 프로젝트 선택 */}
+        <div className="flex items-center gap-3 border-b border-zinc-800 px-8 py-4">
+          <span className="text-xs text-zinc-600 shrink-0">프로젝트</span>
+          {PROJECTS.map((proj) => (
+            <button
+              key={proj.id}
+              onClick={() => setSelectedProject(proj.id)}
+              className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm transition-colors ${
+                selectedProject === proj.id
+                  ? 'bg-emerald-500/10 border border-emerald-500/30 text-white'
+                  : 'bg-zinc-900 border border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-300'
+              }`}
+            >
+              <span>{proj.icon}</span>
+              <span className="font-medium">{proj.name}</span>
+            </button>
+          ))}
         </div>
 
         {/* 플랫폼 탭 */}
@@ -58,7 +85,7 @@ export default function TemplateSelector({ onSelect }: TemplateSelectorProps) {
               return (
                 <button
                   key={template.id}
-                  onClick={() => onSelect(template)}
+                  onClick={() => onSelect(template, selectedProject)}
                   onMouseEnter={() => setHoveredId(template.id)}
                   onMouseLeave={() => setHoveredId(null)}
                   className={`group relative w-full rounded-xl border p-5 text-left transition-all ${
@@ -163,7 +190,7 @@ export default function TemplateSelector({ onSelect }: TemplateSelectorProps) {
                   buildCommand: 'npm run build',
                 },
               }
-              onSelect(custom)
+              onSelect(custom, selectedProject)
             }}
           >
             <div className="flex items-center gap-3">

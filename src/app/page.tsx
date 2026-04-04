@@ -12,10 +12,9 @@ import AgentDetailCard from '@/components/AgentDetailCard'
 import TemplateSelector from '@/components/TemplateSelector'
 import VerificationLoopPanel from '@/components/VerificationLoopPanel'
 
-const PROJECT_PATH = 'trading-journal' // 현재 프로젝트
-
 export default function Home() {
   const [selectedTemplate, setSelectedTemplate] = useState<WorkflowTemplate | null>(null)
+  const [currentProject, setCurrentProject] = useState<string>('trading-journal')
   const [session, setSession] = useState<Session | null>(null)
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null)
   const [showSelector, setShowSelector] = useState(true)
@@ -23,12 +22,12 @@ export default function Home() {
 
   // 초기화: 저장된 워크플로우 복원 (클리어해도 유지)
   useEffect(() => {
-    const savedTemplateId = getProjectWorkflow(PROJECT_PATH)
+    const savedTemplateId = getProjectWorkflow(currentProject)
     if (savedTemplateId) {
       const template = loadWorkflow(savedTemplateId)
       if (template) {
         setSelectedTemplate(template)
-        setSession(createSessionFromTemplate(template, PROJECT_PATH))
+        setSession(createSessionFromTemplate(template, currentProject))
         setShowSelector(false)
         return
       }
@@ -41,15 +40,16 @@ export default function Home() {
   )
 
   // 템플릿 선택 → 세션 생성 + 영속 저장
-  const handleSelectTemplate = useCallback((template: WorkflowTemplate) => {
+  const handleSelectTemplate = useCallback((template: WorkflowTemplate, projectId: string) => {
     setSelectedTemplate(template)
-    const newSession = createSessionFromTemplate(template, PROJECT_PATH)
+    setCurrentProject(projectId)
+    const newSession = createSessionFromTemplate(template, projectId)
     setSession(newSession)
     setSelectedAgentId(null)
     setShowSelector(false)
 
     // 영속 저장: 프로젝트 ↔ 워크플로우 매핑
-    setProjectWorkflow(PROJECT_PATH, template.id)
+    setProjectWorkflow(projectId, template.id)
     if (!template.isPreset) {
       saveWorkflow(template)
     }
@@ -113,7 +113,7 @@ export default function Home() {
 
   // 템플릿 미선택 → 선택 화면
   if (showSelector || !selectedTemplate || !session) {
-    return <TemplateSelector onSelect={handleSelectTemplate} />
+    return <TemplateSelector onSelect={handleSelectTemplate} currentProjectId={currentProject} />
   }
 
   return (
