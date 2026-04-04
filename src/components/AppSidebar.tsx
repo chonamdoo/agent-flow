@@ -19,6 +19,7 @@ interface AppSidebarProps {
   currentView: View
   onSelectDashboard: () => void
   onSelectProject: (id: string) => void
+  onAddProject: () => void
   agents: AgentNodeData[]
   isRunning: boolean
 }
@@ -29,6 +30,7 @@ export default function AppSidebar({
   currentView,
   onSelectDashboard,
   onSelectProject,
+  onAddProject,
   agents,
   isRunning,
 }: AppSidebarProps) {
@@ -70,7 +72,7 @@ export default function AppSidebar({
           <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-600 hidden md:block">
             Projects
           </span>
-          <span className="text-[10px] text-zinc-700 cursor-pointer hover:text-zinc-400 hidden md:block">+</span>
+          <button onClick={onAddProject} className="text-[10px] text-zinc-700 cursor-pointer hover:text-zinc-400 hidden md:block">+</button>
         </div>
 
         <div className="space-y-0.5">

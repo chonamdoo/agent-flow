@@ -14,6 +14,7 @@ import VerificationLoopPanel from '@/components/VerificationLoopPanel'
 import AppSidebar from '@/components/AppSidebar'
 import KanbanBoard from '@/components/KanbanBoard'
 import DashboardMain from '@/components/DashboardMain'
+import AddProjectModal from '@/components/AddProjectModal'
 
 interface Project {
   id: string
@@ -50,6 +51,7 @@ export default function Home() {
   const [isRunning, setIsRunning] = useState(false)
   const [streamingText, setStreamingText] = useState<Record<string, string>>({})
   const [execution, setExecution] = useState<WorkflowExecution | null>(null)
+  const [showAddProject, setShowAddProject] = useState(false)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const abortRef = useRef<AbortController | null>(null)
 
@@ -210,9 +212,23 @@ export default function Home() {
         currentView={mainView}
         onSelectDashboard={handleSelectDashboard}
         onSelectProject={handleSelectProject}
+        onAddProject={() => setShowAddProject(true)}
         agents={sessionAgents}
         isRunning={isRunning}
       />
+
+      {/* 프로젝트 추가 모달 */}
+      {showAddProject && (
+        <AddProjectModal
+          onClose={() => setShowAddProject(false)}
+          onAdd={(p) => {
+            setProjects((prev) => [...prev, p])
+            setSelectedProjectId(p.id)
+            setSelectedProjectPath(p.path)
+            setMainView('kanban')
+          }}
+        />
+      )}
 
       {/* 메인 영역 — 뷰에 따라 교체 */}
       {mainView === 'dashboard' && (
