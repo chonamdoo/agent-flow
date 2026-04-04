@@ -1,9 +1,12 @@
-export { auth as middleware } from '@/lib/auth'
+// Google OAuth 인증 가드 — 배포 시 활성화
+// import { auth as middleware } from '@/lib/auth'
+// export { middleware }
+
+// 현재: 인증 비활성화 (로컬 개발용)
+export default function middleware() {
+  // pass-through
+}
 
 export const config = {
-  // 인증이 필요한 경로 (API + 페이지)
-  // /login, /api/auth, 정적 파일은 제외
-  matcher: [
-    '/((?!login|api/auth|_next/static|_next/image|favicon.ico).*)',
-  ],
+  matcher: ['/((?!_next/static|_next/image|favicon.ico).*)'],
 }
