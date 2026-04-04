@@ -7,9 +7,14 @@ interface EventStreamResult {
   events: AgentEvent[]
   updateAgents: (agents: AgentNodeData[]) => AgentNodeData[]
   updateEdges: (edges: FlowEdge[]) => FlowEdge[]
+  pushEvent: (event: AgentEvent & {
+    agentStateUpdate?: { agentId: string; state: string; tokensUsed?: number }
+    edgeActivation?: { edgeId: string; active: boolean }
+  }) => void
+  clearEvents: () => void
 }
 
-export function useEventStream(templateId?: string): EventStreamResult {
+export function useEventStream(templateId?: string, mode: 'mock' | 'real' = 'mock'): EventStreamResult {
   const [events, setEvents] = useState<AgentEvent[]>([])
   const pendingUpdatesRef = useRef<Array<{
     agentStateUpdate?: { agentId: string; state: string; tokensUsed?: number }
@@ -17,8 +22,10 @@ export function useEventStream(templateId?: string): EventStreamResult {
   }>>([])
   const eventSourceRef = useRef<EventSource | null>(null)
 
+  // Mock 모드: SSE 연결
   useEffect(() => {
-    // 이전 연결 정리
+    if (mode !== 'mock') return
+
     eventSourceRef.current?.close()
     setEvents([])
     pendingUpdatesRef.current = []
@@ -59,7 +66,36 @@ export function useEventStream(templateId?: string): EventStreamResult {
     return () => {
       es.close()
     }
-  }, [templateId])
+  }, [templateId, mode])
+
+  // Real 모드: 오케스트레이터에서 이벤트를 push
+  const pushEvent = useCallback((event: AgentEvent & {
+    agentStateUpdate?: { agentId: string; state: string; tokensUsed?: number }
+    edgeActivation?: { edgeId: string; active: boolean }
+  }) => {
+    const cleanEvent: AgentEvent = {
+      id: event.id,
+      timestamp: event.timestamp,
+      type: event.type,
+      agentId: event.agentId,
+      agentName: event.agentName,
+      payload: event.payload,
+    }
+
+    setEvents((prev) => [...prev, cleanEvent])
+
+    if (event.agentStateUpdate || event.edgeActivation) {
+      pendingUpdatesRef.current.push({
+        agentStateUpdate: event.agentStateUpdate,
+        edgeActivation: event.edgeActivation,
+      })
+    }
+  }, [])
+
+  const clearEvents = useCallback(() => {
+    setEvents([])
+    pendingUpdatesRef.current = []
+  }, [])
 
   const updateAgents = useCallback((agents: AgentNodeData[]): AgentNodeData[] => {
     const updates = pendingUpdatesRef.current.filter((u) => u.agentStateUpdate)
@@ -80,7 +116,6 @@ export function useEventStream(templateId?: string): EventStreamResult {
       })
     }
 
-    // 처리된 상태 업데이트 제거
     pendingUpdatesRef.current = pendingUpdatesRef.current.filter((u) => !u.agentStateUpdate)
     return result
   }, [])
@@ -102,5 +137,5 @@ export function useEventStream(templateId?: string): EventStreamResult {
     return result
   }, [])
 
-  return { events, updateAgents, updateEdges }
+  return { events, updateAgents, updateEdges, pushEvent, clearEvents }
 }

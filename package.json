@@ -9,6 +9,7 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.52.0",
     "d3-force": "^3.0.0",
     "next": "16.2.2",
     "react": "19.2.4",

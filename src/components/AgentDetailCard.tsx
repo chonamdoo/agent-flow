@@ -20,10 +20,12 @@ export default function AgentDetailCard({ agent, events, onClose }: AgentDetailC
       ? Math.round((Date.now() - agent.startedAt) / 1000)
       : 0
 
+  const hasOutput = agent.output && agent.output.length > 0
+
   return (
-    <div className="absolute right-4 top-16 w-80 rounded-xl border border-zinc-800 bg-zinc-950/95 backdrop-blur-sm shadow-2xl">
+    <div className="absolute right-4 top-16 w-96 max-h-[calc(100vh-8rem)] flex flex-col rounded-xl border border-zinc-800 bg-zinc-950/95 backdrop-blur-sm shadow-2xl">
       {/* 헤더 */}
-      <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
+      <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3 shrink-0">
         <div className="flex items-center gap-2">
           <span
             className="flex h-8 w-8 items-center justify-center rounded-full text-sm"
@@ -45,7 +47,7 @@ export default function AgentDetailCard({ agent, events, onClose }: AgentDetailC
       </div>
 
       {/* 상태 정보 */}
-      <div className="grid grid-cols-3 gap-3 border-b border-zinc-800 px-4 py-3">
+      <div className="grid grid-cols-3 gap-3 border-b border-zinc-800 px-4 py-3 shrink-0">
         <InfoItem label="상태">
           <span className="flex items-center gap-1.5">
             <span
@@ -67,22 +69,34 @@ export default function AgentDetailCard({ agent, events, onClose }: AgentDetailC
         </InfoItem>
       </div>
 
+      {/* 에이전트 출력 (스트리밍 또는 최종) */}
+      {hasOutput && (
+        <div className="border-b border-zinc-800 shrink-0 max-h-64 overflow-y-auto">
+          <div className="px-4 py-2">
+            <h4 className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-zinc-600">
+              출력
+              {agent.state === 'thinking' || agent.state === 'running' ? (
+                <span className="ml-1.5 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+              ) : null}
+            </h4>
+            <pre className="whitespace-pre-wrap text-[11px] text-zinc-300 leading-relaxed font-mono">
+              {agent.output && agent.output.length > 2000
+                ? `${agent.output.slice(0, 2000)}\n\n... (${agent.output.length} chars)`
+                : agent.output}
+            </pre>
+          </div>
+        </div>
+      )}
+
       {/* 모델 정보 */}
-      <div className="border-b border-zinc-800 px-4 py-3">
+      <div className="border-b border-zinc-800 px-4 py-3 shrink-0">
         <InfoItem label="모델">
           <span className="text-xs text-zinc-300">{agent.model ?? 'Opus 4.6'}</span>
         </InfoItem>
-        {agent.output && (
-          <div className="mt-2">
-            <InfoItem label="출력">
-              <span className="text-xs text-emerald-400">{agent.output}</span>
-            </InfoItem>
-          </div>
-        )}
       </div>
 
       {/* 이벤트 히스토리 */}
-      <div className="max-h-48 overflow-y-auto px-4 py-3">
+      <div className="overflow-y-auto px-4 py-3 flex-1 min-h-0">
         <h4 className="mb-2 text-[10px] font-bold uppercase tracking-wider text-zinc-600">
           이벤트 히스토리
         </h4>

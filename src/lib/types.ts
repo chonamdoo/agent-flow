@@ -191,6 +191,56 @@ export interface Session {
   verificationLoop: VerificationLoop
 }
 
+// ──────────────────────────────────────────
+// SDK 실행 관련 타입
+// ──────────────────────────────────────────
+
+export interface TokenUsage {
+  inputTokens: number
+  outputTokens: number
+  model: string
+  costUsd: number
+}
+
+export interface AgentResult {
+  role: AgentRole
+  output: string
+  usage: TokenUsage
+  durationMs: number
+  status: 'success' | 'error'
+  errorMessage?: string
+}
+
+export interface WorkflowExecution {
+  id: string
+  userPrompt: string
+  projectId: string
+  results: AgentResult[]
+  status: 'idle' | 'running' | 'completed' | 'failed' | 'stopped'
+  currentAgent: AgentRole | null
+  totalCost: number
+  startedAt: number
+  completedAt?: number
+}
+
+// 모델별 토큰 단가 (per million tokens)
+export const MODEL_PRICING: Record<string, { input: number; output: number }> = {
+  'claude-opus-4-6-20250514': { input: 15, output: 75 },
+  'claude-sonnet-4-6-20250514': { input: 3, output: 15 },
+  'claude-haiku-4-5-20251001': { input: 0.8, output: 4 },
+}
+
+export function calculateCost(
+  inputTokens: number,
+  outputTokens: number,
+  model: string,
+): number {
+  const pricing = MODEL_PRICING[model] ?? MODEL_PRICING['claude-sonnet-4-6-20250514']
+  return (inputTokens * pricing.input + outputTokens * pricing.output) / 1_000_000
+}
+
+// ──────────────────────────────────────────
+
 // D3-force 시뮬레이션용 노드
 export interface SimNode extends AgentNodeData {
   x: number
