@@ -1,8 +1,7 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import type { AgentNodeData } from '@/lib/types'
-import { AGENT_STATE_COLORS } from '@/lib/types'
 
 interface KanbanCard {
   id: string
@@ -32,9 +31,10 @@ interface KanbanBoardProps {
   projectName: string
   prompt: string
   onPromptChange: (value: string) => void
-  onSubmit: () => void
+  onSubmit: (files?: File[]) => void
   isRunning: boolean
   onStop: () => void
+  compact?: boolean // 분할 뷰에서 좁은 모드
 }
 
 export default function KanbanBoard({
@@ -46,63 +46,153 @@ export default function KanbanBoard({
   onSubmit,
   isRunning,
   onStop,
+  compact = false,
 }: KanbanBoardProps) {
+  const [isDragging, setIsDragging] = useState(false)
+  const [attachedFiles, setAttachedFiles] = useState<File[]>([])
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
   const getColumnCards = (columnId: KanbanColumn) =>
     cards.filter((c) => c.status === columnId)
 
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault()
+    setIsDragging(true)
+  }
+  const handleDragLeave = () => setIsDragging(false)
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault()
+    setIsDragging(false)
+    const files = Array.from(e.dataTransfer.files)
+    if (files.length > 0) {
+      setAttachedFiles((prev) => [...prev, ...files])
+    }
+  }
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? [])
+    if (files.length > 0) {
+      setAttachedFiles((prev) => [...prev, ...files])
+    }
+  }
+  const removeFile = (index: number) => {
+    setAttachedFiles((prev) => prev.filter((_, i) => i !== index))
+  }
+
+  const handleSubmit = () => {
+    if (!prompt.trim() || isRunning) return
+    onSubmit(attachedFiles.length > 0 ? attachedFiles : undefined)
+    setAttachedFiles([])
+  }
+
   return (
     <div className="flex h-full flex-col">
-      {/* 프로젝트 헤더 + 인라인 프롬프트 */}
-      <div className="border-b border-zinc-800 px-6 py-4">
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-3">
-            <h1 className="text-sm font-bold text-white">{projectName}</h1>
-            {isRunning && (
-              <span className="flex items-center gap-1.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-0.5 text-[10px] font-medium text-emerald-400">
-                <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
-                하네스 실행 중
-              </span>
-            )}
-          </div>
+      {/* 프로젝트 헤더 */}
+      <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-2.5 shrink-0">
+        <div className="flex items-center gap-3">
+          <h1 className="text-sm font-bold text-white">{projectName}</h1>
           {isRunning && (
-            <button
-              onClick={onStop}
-              className="rounded-md border border-red-500/20 bg-red-500/10 px-3 py-1 text-[11px] font-medium text-red-400 hover:bg-red-500/20 transition-colors"
-            >
-              중지
-            </button>
+            <span className="flex items-center gap-1.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-0.5 text-[10px] font-medium text-emerald-400">
+              <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+              실행 중
+            </span>
           )}
         </div>
+        {isRunning && (
+          <button
+            onClick={onStop}
+            className="rounded-md border border-red-500/20 bg-red-500/10 px-3 py-1 text-[11px] font-medium text-red-400 hover:bg-red-500/20 transition-colors"
+          >
+            중지
+          </button>
+        )}
+      </div>
 
-        {/* 인라인 프롬프트 입력 */}
-        <div className="flex gap-2">
-          <input
-            type="text"
+      {/* 프롬프트 입력 영역 — 확대 + 드래그앤드롭 */}
+      <div
+        className={`border-b border-zinc-800 px-4 py-3 shrink-0 transition-colors ${
+          isDragging ? 'bg-emerald-500/5 border-emerald-500/30' : ''
+        }`}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
+        <div className={`rounded-xl border bg-zinc-900/50 transition-colors ${
+          isDragging ? 'border-emerald-500/40 shadow-lg shadow-emerald-500/5' : 'border-zinc-800'
+        }`}>
+          <textarea
             value={prompt}
             onChange={(e) => onPromptChange(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === 'Enter' && prompt.trim() && !isRunning) onSubmit()
+              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && prompt.trim() && !isRunning) handleSubmit()
             }}
-            placeholder="추가할 기능을 입력하세요... (Enter로 실행)"
-            className="flex-1 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs text-white placeholder:text-zinc-600 focus:outline-none focus:border-zinc-700"
+            placeholder={isDragging
+              ? '파일을 여기에 놓으세요...'
+              : '추가할 기능을 설명하세요...\n이미지나 파일을 드래그하여 첨부할 수 있습니다.'
+            }
+            className="w-full resize-none rounded-t-xl bg-transparent px-4 py-3 text-sm text-white placeholder:text-zinc-600 focus:outline-none"
+            rows={compact ? 3 : 4}
             disabled={isRunning}
           />
-          <button
-            onClick={onSubmit}
-            disabled={!prompt.trim() || isRunning}
-            className={`shrink-0 rounded-lg px-4 py-2 text-xs font-medium transition-all ${
-              prompt.trim() && !isRunning
-                ? 'bg-emerald-500 text-white hover:bg-emerald-400'
-                : 'bg-zinc-800 text-zinc-600 cursor-not-allowed'
-            }`}
-          >
-            하네스 실행
-          </button>
+
+          {/* 첨부 파일 표시 */}
+          {attachedFiles.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 px-4 pb-2">
+              {attachedFiles.map((file, i) => (
+                <span
+                  key={`${file.name}-${i}`}
+                  className="flex items-center gap-1 rounded-md bg-zinc-800 px-2 py-1 text-[10px] text-zinc-400"
+                >
+                  {file.type.startsWith('image/') ? '🖼' : '📎'}
+                  <span className="max-w-24 truncate">{file.name}</span>
+                  <button
+                    onClick={() => removeFile(i)}
+                    className="ml-0.5 text-zinc-600 hover:text-white transition-colors"
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+
+          {/* 하단 바 */}
+          <div className="flex items-center justify-between border-t border-zinc-800/50 px-4 py-2">
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="rounded-md px-2 py-1 text-[11px] text-zinc-600 hover:text-zinc-400 hover:bg-zinc-800 transition-colors"
+                disabled={isRunning}
+              >
+                📎 파일 첨부
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                accept="image/*,.pdf,.md,.txt"
+                onChange={handleFileSelect}
+                className="hidden"
+              />
+              <span className="text-[10px] text-zinc-700">Ctrl+Enter로 실행</span>
+            </div>
+
+            <button
+              onClick={handleSubmit}
+              disabled={!prompt.trim() || isRunning}
+              className={`rounded-lg px-4 py-1.5 text-xs font-medium transition-all ${
+                prompt.trim() && !isRunning
+                  ? 'bg-emerald-500 text-white hover:bg-emerald-400 shadow-lg shadow-emerald-500/20'
+                  : 'bg-zinc-800 text-zinc-600 cursor-not-allowed'
+              }`}
+            >
+              하네스 실행
+            </button>
+          </div>
         </div>
       </div>
 
       {/* 칸반 보드 */}
-      <div className="flex flex-1 gap-3 overflow-x-auto p-4">
+      <div className={`flex flex-1 gap-2 overflow-x-auto p-3 ${compact ? 'gap-1.5 p-2' : ''}`}>
         {COLUMNS.map((column) => {
           const columnCards = getColumnCards(column.id)
           const activeAgent = agents.find(
@@ -113,57 +203,36 @@ export default function KanbanBoard({
               (column.id === 'reviewing' && (a.role === 'security_expert' || a.role === 'reviewer')),
           )
           const isActiveColumn = activeAgent && (
-            activeAgent.state === 'running' ||
-            activeAgent.state === 'thinking' ||
-            activeAgent.state === 'tool_calling'
+            activeAgent.state === 'running' || activeAgent.state === 'thinking' || activeAgent.state === 'tool_calling'
           )
 
           return (
             <div
               key={column.id}
-              className={`flex w-56 shrink-0 flex-col rounded-lg border bg-zinc-900/30 ${
-                isActiveColumn
-                  ? 'border-emerald-500/30 shadow-lg shadow-emerald-500/5'
-                  : 'border-zinc-800/50'
+              className={`flex ${compact ? 'w-36' : 'w-48'} shrink-0 flex-col rounded-lg border bg-zinc-900/30 ${
+                isActiveColumn ? 'border-emerald-500/30 shadow-lg shadow-emerald-500/5' : 'border-zinc-800/50'
               }`}
             >
-              {/* 칼럼 헤더 */}
-              <div className="flex items-center justify-between px-3 py-2.5 border-b border-zinc-800/50">
-                <div className="flex items-center gap-2">
-                  <span
-                    className="inline-block h-2 w-2 rounded-full"
-                    style={{ backgroundColor: column.color }}
-                  />
-                  <span className="text-[11px] font-semibold text-zinc-400">{column.label}</span>
+              <div className="flex items-center justify-between px-2.5 py-2 border-b border-zinc-800/50">
+                <div className="flex items-center gap-1.5">
+                  <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: column.color }} />
+                  <span className="text-[10px] font-semibold text-zinc-400">{column.label}</span>
                 </div>
-                <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] font-mono text-zinc-500">
-                  {columnCards.length}
-                </span>
+                <span className="rounded bg-zinc-800 px-1 py-0.5 text-[9px] font-mono text-zinc-500">{columnCards.length}</span>
               </div>
 
-              {/* 카드 목록 */}
-              <div className="flex-1 space-y-2 overflow-y-auto p-2">
+              <div className="flex-1 space-y-1.5 overflow-y-auto p-1.5">
                 {columnCards.map((card) => (
-                  <KanbanCardItem key={card.id} card={card} />
+                  <KanbanCardItem key={card.id} card={card} compact={compact} />
                 ))}
-
                 {columnCards.length === 0 && !isActiveColumn && (
-                  <div className="py-4 text-center text-[10px] text-zinc-700">
-                    비어 있음
-                  </div>
+                  <div className="py-3 text-center text-[9px] text-zinc-700">비어 있음</div>
                 )}
-
-                {/* 실행 중인 칼럼에 진행 표시 */}
                 {isActiveColumn && activeAgent && (
-                  <div className="rounded-md border border-emerald-500/20 bg-emerald-500/5 p-2.5">
-                    <div className="flex items-center gap-1.5 mb-1">
+                  <div className="rounded-md border border-emerald-500/20 bg-emerald-500/5 p-2">
+                    <div className="flex items-center gap-1.5">
                       <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
-                      <span className="text-[10px] font-medium text-emerald-400">
-                        {activeAgent.name} 작업 중
-                      </span>
-                    </div>
-                    <div className="text-[10px] text-zinc-500">
-                      {activeAgent.state === 'thinking' ? '분석 중...' : '실행 중...'}
+                      <span className="text-[10px] font-medium text-emerald-400">{activeAgent.name}</span>
                     </div>
                   </div>
                 )}
@@ -176,28 +245,15 @@ export default function KanbanBoard({
   )
 }
 
-function KanbanCardItem({ card }: { card: KanbanCard }) {
+function KanbanCardItem({ card, compact }: { card: KanbanCard; compact: boolean }) {
   const timeAgo = getTimeAgo(card.startedAt)
   const isDone = card.status === 'done'
-
   return (
-    <div
-      className={`rounded-md border p-2.5 transition-colors cursor-default ${
-        isDone
-          ? 'border-emerald-500/20 bg-emerald-500/5'
-          : 'border-zinc-800 bg-zinc-900/50 hover:border-zinc-700'
-      }`}
-    >
-      <p className="text-[11px] text-white leading-relaxed line-clamp-2">
-        {card.prompt}
-      </p>
-      <div className="mt-2 flex items-center justify-between">
+    <div className={`rounded-md border p-2 ${isDone ? 'border-emerald-500/20 bg-emerald-500/5' : 'border-zinc-800 bg-zinc-900/50'}`}>
+      <p className={`text-white leading-relaxed ${compact ? 'text-[10px] line-clamp-2' : 'text-[11px] line-clamp-3'}`}>{card.prompt}</p>
+      <div className="mt-1.5 flex items-center justify-between">
         <span className="text-[9px] text-zinc-600">{timeAgo}</span>
-        {card.qaScore && (
-          <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[9px] font-mono text-zinc-400">
-            {card.qaScore}
-          </span>
-        )}
+        {card.qaScore && <span className="rounded bg-zinc-800 px-1 py-0.5 text-[9px] font-mono text-zinc-400">{card.qaScore}</span>}
       </div>
     </div>
   )
@@ -210,18 +266,15 @@ function getTimeAgo(timestamp: number): string {
   if (minutes < 60) return `${minutes}분 전`
   const hours = Math.floor(minutes / 60)
   if (hours < 24) return `${hours}시간 전`
-  const days = Math.floor(hours / 24)
-  return `${days}일 전`
+  return `${Math.floor(hours / 24)}일 전`
 }
 
-// 에이전트 상태 → 칸반 칼럼 매핑
 export function agentStateToColumn(agents: AgentNodeData[]): KanbanColumn {
   const pm = agents.find((a) => a.role === 'pm_planner')
   const designer = agents.find((a) => a.role === 'designer')
   const developer = agents.find((a) => a.role === 'developer')
   const security = agents.find((a) => a.role === 'security_expert')
   const reviewer = agents.find((a) => a.role === 'reviewer')
-
   if (reviewer?.state === 'completed') return 'done'
   if (reviewer?.state === 'running' || reviewer?.state === 'thinking' || security?.state === 'running' || security?.state === 'thinking') return 'reviewing'
   if (developer?.state === 'running' || developer?.state === 'thinking' || developer?.state === 'tool_calling') return 'developing'

@@ -79,7 +79,7 @@ export default function Home() {
   }, [projects, isRunning])
 
   // 하네스 실행
-  const handleSubmit = useCallback(async () => {
+  const handleSubmit = useCallback(async (_files?: File[]) => {
     if (!prompt.trim() || isRunning || !selectedProjectId) return
 
     const cardId = `card-${Date.now()}`
@@ -225,43 +225,61 @@ export default function Home() {
         </div>
       )}
 
-      {mainView === 'flow' && session && (
-        <div className="flex flex-1 flex-col overflow-hidden">
-          <TopBar session={session} events={events} />
-          <div className="flex flex-1 overflow-hidden">
-            <Sidebar
-              agents={session.agents}
-              events={events}
-              agentTeams={session.agentTeams}
-              selectedAgentId={selectedAgentId}
-              onSelectAgent={setSelectedAgentId}
+      {mainView === 'flow' && session && selectedProjectId && (
+        <div className="flex flex-1 overflow-hidden">
+          {/* 좌: 칸반 보드 (compact) */}
+          <div className="flex w-[420px] shrink-0 flex-col border-r border-zinc-800 overflow-hidden">
+            <KanbanBoard
+              cards={projectCards}
+              agents={sessionAgents}
+              projectName={selectedProject?.name ?? selectedProjectId}
+              prompt={prompt}
+              onPromptChange={setPrompt}
+              onSubmit={handleSubmit}
+              isRunning={isRunning}
+              onStop={handleStop}
+              compact
             />
-            <div className="relative flex-1">
-              <FlowCanvas
+          </div>
+
+          {/* 우: FlowCanvas + 이벤트 로그 */}
+          <div className="flex flex-1 flex-col overflow-hidden">
+            <TopBar session={session} events={events} />
+            <div className="flex flex-1 overflow-hidden">
+              <Sidebar
                 agents={session.agents}
-                edges={session.edges}
+                events={events}
+                agentTeams={session.agentTeams}
                 selectedAgentId={selectedAgentId}
                 onSelectAgent={setSelectedAgentId}
-                onUpdateNodeState={null}
               />
-              {selectedAgent && (
-                <AgentDetailCard agent={selectedAgent} events={events} onClose={() => setSelectedAgentId(null)} />
-              )}
-              <div className="absolute bottom-16 right-4 w-56">
-                <VerificationLoopPanel loop={session.verificationLoop} config={template.verificationLoop} />
-              </div>
-              <div className="absolute top-4 left-4 flex items-center gap-2">
-                <button
-                  onClick={() => setMainView(selectedProjectId ? 'kanban' : 'dashboard')}
-                  className="rounded-lg bg-zinc-900/80 border border-zinc-800 px-3 py-1.5 text-xs text-zinc-400 hover:text-white hover:border-zinc-700 transition-colors"
-                >
-                  ← {selectedProjectId ? '칸반 보드' : '대시보드'}
-                </button>
-                {isRunning && (
-                  <button onClick={handleStop} className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs font-medium text-red-400 hover:bg-red-500/20 transition-colors">
-                    중지
-                  </button>
+              <div className="relative flex-1">
+                <FlowCanvas
+                  agents={session.agents}
+                  edges={session.edges}
+                  selectedAgentId={selectedAgentId}
+                  onSelectAgent={setSelectedAgentId}
+                  onUpdateNodeState={null}
+                />
+                {selectedAgent && (
+                  <AgentDetailCard agent={selectedAgent} events={events} onClose={() => setSelectedAgentId(null)} />
                 )}
+                <div className="absolute bottom-16 right-4 w-56">
+                  <VerificationLoopPanel loop={session.verificationLoop} config={template.verificationLoop} />
+                </div>
+                <div className="absolute top-4 left-4 flex items-center gap-2">
+                  <button
+                    onClick={() => setMainView(selectedProjectId ? 'kanban' : 'dashboard')}
+                    className="rounded-lg bg-zinc-900/80 border border-zinc-800 px-3 py-1.5 text-xs text-zinc-400 hover:text-white hover:border-zinc-700 transition-colors"
+                  >
+                    ← {selectedProjectId ? '칸반 보드' : '대시보드'}
+                  </button>
+                  {isRunning && (
+                    <button onClick={handleStop} className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs font-medium text-red-400 hover:bg-red-500/20 transition-colors">
+                      중지
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           </div>
