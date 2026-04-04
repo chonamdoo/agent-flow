@@ -2,6 +2,7 @@
 
 import { useState, useRef } from 'react'
 import type { AgentNodeData } from '@/lib/types'
+import { AGENT_ROLE_META } from '@/lib/types'
 
 interface KanbanCard {
   id: string
@@ -12,6 +13,8 @@ interface KanbanCard {
   currentAgent?: string
   completedAt?: number
   qaScore?: string
+  tags?: string[]
+  completedAgents?: string[]  // 완료된 에이전트 role 목록
 }
 
 type KanbanColumn = 'backlog' | 'planning' | 'designing' | 'developing' | 'reviewing' | 'done'
@@ -245,15 +248,117 @@ export default function KanbanBoard({
   )
 }
 
+// 단계 순서와 진행률 계산
+const STAGE_ORDER: KanbanColumn[] = ['backlog', 'planning', 'designing', 'developing', 'reviewing', 'done']
+function getProgress(status: KanbanColumn): number {
+  const idx = STAGE_ORDER.indexOf(status)
+  return idx >= 0 ? Math.round((idx / (STAGE_ORDER.length - 1)) * 100) : 0
+}
+
+// 에이전트 role → 아바타 정보
+const AGENT_AVATARS: Record<string, { icon: string; color: string }> = {
+  pm_planner: { icon: '📋', color: '#8b5cf6' },
+  designer: { icon: '🎨', color: '#ec4899' },
+  developer: { icon: '⚙️', color: '#34d399' },
+  security_expert: { icon: '🔒', color: '#f59e0b' },
+  reviewer: { icon: '📝', color: '#3b82f6' },
+}
+
 function KanbanCardItem({ card, compact }: { card: KanbanCard; compact: boolean }) {
   const timeAgo = getTimeAgo(card.startedAt)
   const isDone = card.status === 'done'
+  const isFailed = card.qaScore?.includes('REJECT')
+  const progress = getProgress(card.status)
+  const completedAgents = card.completedAgents ?? []
+  const duration = card.completedAt
+    ? Math.round((card.completedAt - card.startedAt) / 1000)
+    : Math.round((Date.now() - card.startedAt) / 1000)
+
   return (
-    <div className={`rounded-md border p-2 ${isDone ? 'border-emerald-500/20 bg-emerald-500/5' : 'border-zinc-800 bg-zinc-900/50'}`}>
-      <p className={`text-white leading-relaxed ${compact ? 'text-[10px] line-clamp-2' : 'text-[11px] line-clamp-3'}`}>{card.prompt}</p>
-      <div className="mt-1.5 flex items-center justify-between">
-        <span className="text-[9px] text-zinc-600">{timeAgo}</span>
-        {card.qaScore && <span className="rounded bg-zinc-800 px-1 py-0.5 text-[9px] font-mono text-zinc-400">{card.qaScore}</span>}
+    <div className={`rounded-lg border p-2.5 transition-all ${
+      isDone
+        ? 'border-emerald-500/20 bg-emerald-500/5'
+        : isFailed
+          ? 'border-red-500/20 bg-red-500/5'
+          : 'border-zinc-800 bg-zinc-900/50 hover:border-zinc-700'
+    }`}>
+      {/* 태그 */}
+      {card.tags && card.tags.length > 0 && (
+        <div className="flex flex-wrap gap-1 mb-1.5">
+          {card.tags.map((tag) => (
+            <span key={tag} className="rounded bg-zinc-800 px-1.5 py-0.5 text-[9px] font-medium text-zinc-500">
+              {tag}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* 프롬프트 텍스트 */}
+      <p className={`text-white leading-relaxed ${compact ? 'text-[10px] line-clamp-2' : 'text-[11px] line-clamp-3'}`}>
+        {card.prompt}
+      </p>
+
+      {/* 진행률 바 */}
+      {!isDone && progress > 0 && (
+        <div className="mt-2 h-1 w-full rounded-full bg-zinc-800 overflow-hidden">
+          <div
+            className="h-full rounded-full bg-emerald-500 transition-all duration-500"
+            style={{ width: `${progress}%` }}
+          />
+        </div>
+      )}
+
+      {/* 하단: 에이전트 아바타 + 메타 */}
+      <div className="mt-2 flex items-center justify-between">
+        <div className="flex items-center gap-1">
+          {/* 완료된 에이전트 아바타들 */}
+          <div className="flex -space-x-1">
+            {completedAgents.slice(0, 5).map((role) => {
+              const avatar = AGENT_AVATARS[role]
+              return avatar ? (
+                <span
+                  key={role}
+                  className="flex h-4 w-4 items-center justify-center rounded-full text-[8px] border border-zinc-900"
+                  style={{ backgroundColor: `${avatar.color}20` }}
+                  title={AGENT_ROLE_META[role as keyof typeof AGENT_ROLE_META]?.label ?? role}
+                >
+                  {avatar.icon}
+                </span>
+              ) : null
+            })}
+          </div>
+
+          {/* 현재 작업 중인 에이전트 */}
+          {card.currentAgent && !isDone && (
+            <span className="flex items-center gap-0.5 text-[9px] text-emerald-400">
+              <span className="inline-block h-1 w-1 animate-pulse rounded-full bg-emerald-400" />
+              {AGENT_AVATARS[card.currentAgent]?.icon}
+            </span>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2">
+          {/* QA 점수 */}
+          {card.qaScore && (
+            <span className={`rounded px-1.5 py-0.5 text-[9px] font-mono font-semibold ${
+              card.qaScore.includes('PASS')
+                ? 'bg-emerald-500/10 text-emerald-400'
+                : card.qaScore.includes('REJECT')
+                  ? 'bg-red-500/10 text-red-400'
+                  : 'bg-zinc-800 text-zinc-400'
+            }`}>
+              {card.qaScore}
+            </span>
+          )}
+
+          {/* 소요 시간 */}
+          <span className="font-mono text-[9px] text-zinc-600">
+            {duration > 60 ? `${Math.floor(duration / 60)}m` : `${duration}s`}
+          </span>
+
+          {/* 시간 */}
+          <span className="text-[9px] text-zinc-700">{timeAgo}</span>
+        </div>
       </div>
     </div>
   )

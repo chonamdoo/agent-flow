@@ -49,14 +49,14 @@ export default function DashboardMain({ projects, onSelectProject }: DashboardMa
 
       <div className="px-6 py-6">
         {/* 통계 카드 */}
-        <div className="grid grid-cols-4 gap-4 mb-8">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4 mb-8">
           <StatCard value={projects.length} label="Projects" />
           <StatCard value={totalRuns} label="Total Runs" />
           <StatCard value={successRuns} label="Completed" accent="emerald" />
           <StatCard value={failedRuns} label="Failed" accent={failedRuns > 0 ? 'red' : undefined} />
         </div>
 
-        <div className="grid grid-cols-2 gap-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           {/* 좌: 프로젝트 */}
           <div>
             <h2 className="mb-3 text-[10px] font-bold uppercase tracking-wider text-zinc-600">

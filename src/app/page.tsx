@@ -32,6 +32,8 @@ interface KanbanCard {
   currentAgent?: string
   completedAt?: number
   qaScore?: string
+  tags?: string[]
+  completedAgents?: string[]
 }
 
 type MainView = 'dashboard' | 'kanban' | 'flow'
@@ -120,10 +122,20 @@ export default function Home() {
               pm_planner: 'planning', designer: 'designing',
               developer: 'developing', security_expert: 'reviewing', reviewer: 'reviewing',
             }
-            if (columnMap[agentId] && (state === 'running' || state === 'thinking')) {
-              setCards((prev) => prev.map((c) =>
-                c.id === cardId ? { ...c, status: columnMap[agentId], currentAgent: agentId } : c,
-              ))
+            if (columnMap[agentId]) {
+              if (state === 'running' || state === 'thinking') {
+                setCards((prev) => prev.map((c) =>
+                  c.id === cardId ? { ...c, status: columnMap[agentId], currentAgent: agentId } : c,
+                ))
+              } else if (state === 'completed') {
+                setCards((prev) => prev.map((c) =>
+                  c.id === cardId ? {
+                    ...c,
+                    currentAgent: undefined,
+                    completedAgents: [...new Set([...(c.completedAgents ?? []), agentId])],
+                  } : c,
+                ))
+              }
             }
           }
         },
@@ -227,8 +239,8 @@ export default function Home() {
 
       {mainView === 'flow' && session && selectedProjectId && (
         <div className="flex flex-1 overflow-hidden">
-          {/* 좌: 칸반 보드 (compact) */}
-          <div className="flex w-[420px] shrink-0 flex-col border-r border-zinc-800 overflow-hidden">
+          {/* 좌: 칸반 보드 (compact) — 모바일에서 숨김 */}
+          <div className="hidden lg:flex w-[420px] shrink-0 flex-col border-r border-zinc-800 overflow-hidden">
             <KanbanBoard
               cards={projectCards}
               agents={sessionAgents}
