@@ -1,21 +1,53 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
+import type { Platform } from '@/lib/types'
+
+interface Project {
+  id: string
+  name: string
+  path: string
+  platform: Platform
+  icon: string
+}
 
 interface PromptInputProps {
   projectId: string
-  onSubmit: (prompt: string) => void
+  projectPath: string
+  onSubmit: (prompt: string, projectId: string, projectPath: string) => void
   onBack: () => void
   isRunning: boolean
 }
 
-export default function PromptInput({ projectId, onSubmit, onBack, isRunning }: PromptInputProps) {
+export default function PromptInput({ projectId, projectPath, onSubmit, onBack, isRunning }: PromptInputProps) {
   const [prompt, setPrompt] = useState('')
+  const [projects, setProjects] = useState<Project[]>([])
+  const [selectedProjectId, setSelectedProjectId] = useState(projectId)
+  const [selectedProjectPath, setSelectedProjectPath] = useState(projectPath)
+
+  // 프로젝트 목록 로드
+  useEffect(() => {
+    fetch('/api/projects')
+      .then((res) => res.json())
+      .then((data) => {
+        setProjects(data)
+        // 초기 프로젝트 경로 설정
+        const proj = data.find((p: Project) => p.id === selectedProjectId)
+        if (proj?.path) setSelectedProjectPath(proj.path)
+      })
+      .catch(() => {})
+  }, [])
+
+  const handleProjectChange = (newId: string) => {
+    setSelectedProjectId(newId)
+    const proj = projects.find((p) => p.id === newId)
+    if (proj?.path) setSelectedProjectPath(proj.path)
+  }
 
   const handleSubmit = () => {
     const trimmed = prompt.trim()
     if (!trimmed || isRunning) return
-    onSubmit(trimmed)
+    onSubmit(trimmed, selectedProjectId, selectedProjectPath)
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -23,6 +55,8 @@ export default function PromptInput({ projectId, onSubmit, onBack, isRunning }: 
       handleSubmit()
     }
   }
+
+  const selectedProject = projects.find((p) => p.id === selectedProjectId)
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-[#09090b] p-4">
@@ -35,16 +69,34 @@ export default function PromptInput({ projectId, onSubmit, onBack, isRunning }: 
           </p>
         </div>
 
-        {/* 프로젝트 뱃지 */}
+        {/* 프로젝트 선택 */}
         <div className="mb-4 flex items-center justify-center gap-2">
-          <span className="rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-400 border border-emerald-500/20">
-            {projectId}
-          </span>
+          <div className="relative">
+            <select
+              value={selectedProjectId}
+              onChange={(e) => handleProjectChange(e.target.value)}
+              className="appearance-none rounded-full bg-zinc-900 border border-zinc-700 pl-3 pr-8 py-1.5 text-xs font-medium text-white focus:outline-none focus:border-emerald-500/50 cursor-pointer"
+            >
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.icon} {p.name}
+                </option>
+              ))}
+            </select>
+            <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-zinc-500">
+              ▼
+            </span>
+          </div>
+          {selectedProject && (
+            <span className="text-[10px] text-zinc-600 max-w-48 truncate" title={selectedProjectPath}>
+              {selectedProjectPath}
+            </span>
+          )}
           <button
             onClick={onBack}
             className="text-xs text-zinc-600 hover:text-zinc-400 transition-colors"
           >
-            변경
+            대시보드
           </button>
         </div>
 

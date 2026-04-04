@@ -5,100 +5,61 @@ import type { Session, WorkflowTemplate, VerificationLoop, WorkflowExecution } f
 import { createSessionFromTemplate } from '@/lib/mock-data'
 import { useEventStream } from '@/hooks/useEventStream'
 import { runWorkflow } from '@/lib/orchestrator'
-import { saveWorkflow, setProjectWorkflow, getProjectWorkflow, loadWorkflow } from '@/lib/workflow-storage'
+import { WORKFLOW_PRESETS } from '@/lib/workflow-templates'
 import FlowCanvas from '@/components/FlowCanvas'
 import Sidebar from '@/components/Sidebar'
 import TopBar from '@/components/TopBar'
 import AgentDetailCard from '@/components/AgentDetailCard'
-import TemplateSelector from '@/components/TemplateSelector'
 import VerificationLoopPanel from '@/components/VerificationLoopPanel'
 import PromptInput from '@/components/PromptInput'
+import Dashboard from '@/components/Dashboard'
 
-type AppMode = 'mock' | 'real'
+type AppView = 'dashboard' | 'prompt' | 'running'
 
 export default function Home() {
-  const [selectedTemplate, setSelectedTemplate] = useState<WorkflowTemplate | null>(null)
+  const [view, setView] = useState<AppView>('dashboard')
   const [currentProject, setCurrentProject] = useState<string>('trading-journal')
   const [currentProjectPath, setCurrentProjectPath] = useState<string>('')
   const [session, setSession] = useState<Session | null>(null)
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null)
-  const [showSelector, setShowSelector] = useState(true)
-  const [showPromptInput, setShowPromptInput] = useState(false)
-  const [mode, setMode] = useState<AppMode>('real')
   const [isRunning, setIsRunning] = useState(false)
   const [streamingText, setStreamingText] = useState<Record<string, string>>({})
   const [execution, setExecution] = useState<WorkflowExecution | null>(null)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const abortRef = useRef<AbortController | null>(null)
 
-  // 이벤트 스트림 (mock/real 이중 모드)
+  // Web 프리셋 기본 사용
+  const template = WORKFLOW_PRESETS[0]
+
+  // 이벤트 스트림 (real 모드 전용)
   const { events, updateAgents, updateEdges, pushEvent, clearEvents } = useEventStream(
-    mode === 'mock' ? selectedTemplate?.id : undefined,
-    mode,
+    undefined, 'real',
   )
 
-  // 초기화: 저장된 워크플로우 복원
-  useEffect(() => {
-    const savedTemplateId = getProjectWorkflow(currentProject)
-    if (savedTemplateId) {
-      const template = loadWorkflow(savedTemplateId)
-      if (template) {
-        setSelectedTemplate(template)
-        if (mode === 'mock') {
-          setSession(createSessionFromTemplate(template, currentProject))
-          setShowSelector(false)
-        }
-        return
-      }
-    }
-    setShowSelector(true)
+  // 대시보드에서 "하네스 실행" 클릭
+  const handleRunHarness = useCallback((projectId: string, projectPath: string) => {
+    setCurrentProject(projectId)
+    setCurrentProjectPath(projectPath)
+    setView('prompt')
   }, [])
 
-  // 템플릿 선택 → 세션 생성
-  const handleSelectTemplate = useCallback(async (template: WorkflowTemplate, projectId: string) => {
-    setSelectedTemplate(template)
+  // 프롬프트 제출 → 하네스 실행
+  const handlePromptSubmit = useCallback(async (
+    userPrompt: string,
+    projectId: string,
+    projectPath: string,
+  ) => {
+    if (isRunning) return
+
     setCurrentProject(projectId)
-    setSelectedAgentId(null)
-    setShowSelector(false)
-
-    // 프로젝트 경로 가져오기
-    try {
-      const res = await fetch('/api/projects')
-      const projects = await res.json()
-      const project = projects.find((p: { id: string }) => p.id === projectId)
-      if (project?.path) {
-        setCurrentProjectPath(project.path)
-      }
-    } catch {
-      // 프로젝트 API 실패 시 무시
-    }
-
-    setProjectWorkflow(projectId, template.id)
-    if (!template.isPreset) {
-      saveWorkflow(template)
-    }
-
-    if (mode === 'real') {
-      // Real 모드: 프롬프트 입력 화면으로
-      setShowPromptInput(true)
-    } else {
-      // Mock 모드: 바로 시뮬레이션
-      const newSession = createSessionFromTemplate(template, projectId)
-      setSession(newSession)
-    }
-  }, [mode])
-
-  // Real 모드: 프롬프트 제출 → 하네스 실행
-  const handlePromptSubmit = useCallback(async (userPrompt: string) => {
-    if (!selectedTemplate || isRunning) return
-
-    setShowPromptInput(false)
+    setCurrentProjectPath(projectPath)
+    setView('running')
     setIsRunning(true)
     clearEvents()
     setStreamingText({})
+    setExecution(null)
 
-    // 세션 생성 (모든 에이전트 idle 상태)
-    const newSession = createSessionFromTemplate(selectedTemplate, currentProject)
+    const newSession = createSessionFromTemplate(template, projectId)
     setSession(newSession)
 
     const controller = new AbortController()
@@ -107,8 +68,8 @@ export default function Home() {
     try {
       const result = await runWorkflow({
         userPrompt,
-        projectId: currentProject,
-        projectPath: currentProjectPath || undefined,
+        projectId,
+        projectPath: projectPath || undefined,
         onEvent: pushEvent,
         onStreaming: (agentId, text) => {
           setStreamingText((prev) => ({
@@ -120,7 +81,7 @@ export default function Home() {
           setExecution(exec)
           setIsRunning(false)
         },
-        onError: (error) => {
+        onError: () => {
           setIsRunning(false)
         },
         costLimit: 5,
@@ -131,15 +92,15 @@ export default function Home() {
     } catch {
       setIsRunning(false)
     }
-  }, [selectedTemplate, currentProject, isRunning, clearEvents, pushEvent])
+  }, [isRunning, clearEvents, pushEvent, template])
 
-  // 중지 버튼
+  // 중지
   const handleStop = useCallback(() => {
     abortRef.current?.abort()
     setIsRunning(false)
   }, [])
 
-  // 이벤트 스트림에서 에이전트 상태 + 검증 루프 동기화
+  // 이벤트 → 에이전트 상태 동기화
   useEffect(() => {
     if (!session) return
 
@@ -159,14 +120,12 @@ export default function Home() {
           ? 'completed'
           : 'active'
 
-      // Real 모드: execution에서 실비용, Mock 모드: 추정 비용
       const totalCost = execution
         ? execution.totalCost
         : (newAgents.reduce((sum, a) => sum + a.tokensUsed, 0) / 1000) * 0.003
 
       const verificationLoop = deriveVerificationLoop(prev.verificationLoop, events)
 
-      // 에이전트 output 업데이트 (스트리밍 텍스트 또는 최종 결과)
       const agentsWithOutput = newAgents.map((a) => {
         const streamText = streamingText[a.id]
         const execResult = execution?.results.find((r) => r.role === a.role)
@@ -186,7 +145,7 @@ export default function Home() {
     })
   }, [events, updateAgents, updateEdges, session !== null, execution, streamingText])
 
-  // 경과 시간 업데이트
+  // 경과 시간 타이머
   useEffect(() => {
     timerRef.current = setInterval(() => {
       setSession((prev) => (prev ? { ...prev } : null))
@@ -204,40 +163,31 @@ export default function Home() {
     setSelectedAgentId(id)
   }, [])
 
-  // 1. 템플릿 선택 화면
-  if (showSelector || !selectedTemplate) {
-    return (
-      <TemplateSelector
-        onSelect={handleSelectTemplate}
-        onClose={selectedTemplate ? () => setShowSelector(false) : undefined}
-        currentProjectId={currentProject}
-      />
-    )
+  // ──────── 뷰 라우팅 ────────
+
+  // 1. 대시보드
+  if (view === 'dashboard') {
+    return <Dashboard onRunHarness={handleRunHarness} />
   }
 
-  // 2. Real 모드: 프롬프트 입력 화면
-  if (showPromptInput && mode === 'real') {
+  // 2. 프롬프트 입력
+  if (view === 'prompt') {
     return (
       <PromptInput
         projectId={currentProject}
+        projectPath={currentProjectPath}
         onSubmit={handlePromptSubmit}
-        onBack={() => setShowSelector(true)}
+        onBack={() => setView('dashboard')}
         isRunning={isRunning}
       />
     )
   }
 
-  // 3. 세션 없음
+  // 3. 실행 화면 (FlowCanvas)
   if (!session) {
-    return (
-      <TemplateSelector
-        onSelect={handleSelectTemplate}
-        currentProjectId={currentProject}
-      />
-    )
+    return <Dashboard onRunHarness={handleRunHarness} />
   }
 
-  // 4. 메인 화면 (FlowCanvas)
   return (
     <div className="flex h-screen flex-col bg-[#09090b]">
       <TopBar session={session} events={events} />
@@ -268,42 +218,22 @@ export default function Home() {
             />
           )}
 
-          {/* 검증 루프 패널 (우측 하단) */}
           <div className="absolute bottom-16 right-4 w-56">
             <VerificationLoopPanel
               loop={session.verificationLoop}
-              config={selectedTemplate.verificationLoop}
+              config={template.verificationLoop}
             />
           </div>
 
-          {/* 좌측 상단: 컨트롤 버튼 */}
+          {/* 좌측 상단: 컨트롤 */}
           <div className="absolute top-4 left-4 flex items-center gap-2">
             <button
-              onClick={() => setShowSelector(true)}
+              onClick={() => setView('dashboard')}
               className="flex items-center gap-1.5 rounded-lg bg-zinc-900/80 border border-zinc-800 px-3 py-1.5 text-xs text-zinc-400 hover:text-white hover:border-zinc-700 transition-colors"
             >
-              ← 워크플로우 변경
+              ← 대시보드
             </button>
 
-            {/* 모드 토글 */}
-            <button
-              onClick={() => {
-                const next = mode === 'mock' ? 'real' : 'mock'
-                setMode(next)
-                if (next === 'real') {
-                  setShowPromptInput(true)
-                }
-              }}
-              className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
-                mode === 'real'
-                  ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
-                  : 'border-zinc-800 bg-zinc-900/80 text-zinc-500'
-              }`}
-            >
-              {mode === 'real' ? 'SDK 모드' : 'Mock 모드'}
-            </button>
-
-            {/* 중지 버튼 */}
             {isRunning && (
               <button
                 onClick={handleStop}
@@ -313,10 +243,9 @@ export default function Home() {
               </button>
             )}
 
-            {/* Real 모드에서 새 실행 */}
-            {mode === 'real' && !isRunning && session.status !== 'active' && (
+            {!isRunning && session.status !== 'active' && (
               <button
-                onClick={() => setShowPromptInput(true)}
+                onClick={() => setView('prompt')}
                 className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-xs font-medium text-emerald-400 hover:bg-emerald-500/20 transition-colors"
               >
                 + 새 실행
@@ -329,9 +258,6 @@ export default function Home() {
   )
 }
 
-/**
- * 이벤트 메시지에서 검증 루프 상태를 추론
- */
 function deriveVerificationLoop(
   prev: VerificationLoop,
   events: { payload: Record<string, unknown> }[],
@@ -353,14 +279,7 @@ function deriveVerificationLoop(
       const errors = msg.split(':').slice(-1)[0]?.trim() ?? ''
       loop.history = [
         ...loop.history.filter((h) => h.round !== round),
-        {
-          round,
-          codeAgentId: 'developer',
-          testResult: 'fail',
-          errors: [errors],
-          fixApplied: false,
-          timestamp: Date.now(),
-        },
+        { round, codeAgentId: 'developer', testResult: 'fail', errors: [errors], fixApplied: false, timestamp: Date.now() },
       ]
     } else if (msg.includes('[검증 루프') && msg.includes('FIX:')) {
       loop = { ...loop, status: 'fixing' }
@@ -373,14 +292,7 @@ function deriveVerificationLoop(
       const round = roundMatch ? parseInt(roundMatch[1], 10) : loop.currentIteration
       loop.history = [
         ...loop.history.filter((h) => h.round !== round),
-        {
-          round,
-          codeAgentId: 'developer',
-          testResult: 'pass',
-          errors: [],
-          fixApplied: false,
-          timestamp: Date.now(),
-        },
+        { round, codeAgentId: 'developer', testResult: 'pass', errors: [], fixApplied: false, timestamp: Date.now() },
       ]
     } else if (msg.includes('[검증 루프 PASS]')) {
       loop = { ...loop, status: 'passed' }
