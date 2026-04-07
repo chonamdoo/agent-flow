@@ -3,7 +3,7 @@
 // export { middleware }
 
 // 현재: 인증 비활성화 (로컬 개발용)
-export default function middleware() {
+export default function proxy() {
   // pass-through
 }
 
