@@ -36,7 +36,11 @@ export function loadProjects(): Project[] {
 
 export function saveProjects(projects: Project[]): void {
   ensureDataDir()
-  fs.writeFileSync(PROJECTS_FILE, JSON.stringify(projects, null, 2), 'utf-8')
+  // Atomic write: tmp file에 먼저 쓰고 rename으로 원자적 교체
+  // 동시 요청으로 인한 lost update 위험을 줄임 (단일 프로세스 한정)
+  const tmp = `${PROJECTS_FILE}.${process.pid}.tmp`
+  fs.writeFileSync(tmp, JSON.stringify(projects, null, 2), 'utf-8')
+  fs.renameSync(tmp, PROJECTS_FILE)
 }
 
 export function addProject(project: Project): Project[] {

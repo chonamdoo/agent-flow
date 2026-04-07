@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "autoMemoryEnabled": true,
+  "enabledMcpjsonServers": ["qmd", "chrome-devtools"],
+  "permissions": {
+    "allow": [
+      "Read",
+      "Glob",
+      "Grep",
+      "Bash(npm run *)",
+      "Bash(npx next build*)",
+      "Bash(node *)",
+      "Bash(qmd *)"
+    ]
+  }
+}

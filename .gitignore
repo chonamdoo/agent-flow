@@ -39,3 +39,12 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# harness artifacts (verification loop outputs — local only)
+SPEC.md
+DESIGN.md
+SELF_CHECK.md
+CODE_REVIEW.md
+DESIGN_REVIEW.md
+SECURITY_REPORT.md
+QA_REPORT.md
