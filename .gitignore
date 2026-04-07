@@ -40,6 +40,9 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
+# shared skills symlinks (managed from root .claude/skills/)
+.claude/skills/*.md
+
 # harness artifacts (verification loop outputs — local only)
 SPEC.md
 DESIGN.md
