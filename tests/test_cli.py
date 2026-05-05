@@ -6,12 +6,14 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+import subprocess
 
 from agent_flow.cli import main
 from agent_flow.adapters.templates import PromptContext, render_stage_prompt
 from agent_flow.core.gates import GateCommand, run_gate
 from agent_flow.core.profiles import load_profile
 from agent_flow.core.workflow import _stage_from_payload
+from agent_flow.core.worktrees import plan_worktree
 
 
 class CliTest(unittest.TestCase):
@@ -369,6 +371,77 @@ class CliTest(unittest.TestCase):
                 )
             self.assertEqual(output.getvalue().strip(), "NEEDS_CHANGES: 1 findings")
             self.assertTrue((run_dir / "recovery.md").is_file())
+
+    def test_plan_worktree_sanitizes_name_and_defaults_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            plan = plan_worktree(root=root, name="Implement Login")
+            self.assertEqual(plan.name, "implement-login")
+            self.assertEqual(plan.branch, "agent-flow/implement-login")
+            self.assertEqual(plan.path, root / ".agent-flow" / "worktrees" / "implement-login")
+
+    def test_worktree_status_reports_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(["worktree", "status", "--root", temp_dir, "--name", "missing"]),
+                    0,
+                )
+            self.assertIn("missing agent-flow/missing", output.getvalue())
+            self.assertTrue(output.getvalue().strip().endswith("missing"))
+
+    def test_worktree_create_creates_git_worktree_and_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_git_repo(root)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(
+                        [
+                            "worktree",
+                            "create",
+                            "--root",
+                            str(root),
+                            "--name",
+                            "slice-a",
+                        ]
+                    ),
+                    0,
+                )
+            worktree = root / ".agent-flow" / "worktrees" / "slice-a"
+            self.assertTrue(worktree.is_dir())
+            self.assertTrue((worktree / "manifest.json").is_file())
+            self.assertIn("slice-a agent-flow/slice-a", output.getvalue())
+
+    def test_worktree_create_rejects_dirty_leader_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_git_repo(root)
+            (root / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+            with self.assertRaises(RuntimeError):
+                main(["worktree", "create", "--root", str(root), "--name", "dirty"])
+
+    def test_worktree_create_allows_untracked_agent_flow_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_git_repo(root)
+            self.assertEqual(main(["init", "--root", str(root)]), 0)
+            self.assertEqual(
+                main(["worktree", "create", "--root", str(root), "--name", "after-init"]),
+                0,
+            )
+            self.assertTrue((root / ".agent-flow" / "worktrees" / "after-init").is_dir())
+
+
+def _init_git_repo(root: Path) -> None:
+    subprocess.run(("git", "init", "-q"), cwd=root, check=True)
+    subprocess.run(("git", "config", "user.email", "test@example.com"), cwd=root, check=True)
+    subprocess.run(("git", "config", "user.name", "Test User"), cwd=root, check=True)
+    (root / "README.md").write_text("# test\n", encoding="utf-8")
+    subprocess.run(("git", "add", "README.md"), cwd=root, check=True)
+    subprocess.run(("git", "commit", "-q", "-m", "init"), cwd=root, check=True)
 
 
 if __name__ == "__main__":

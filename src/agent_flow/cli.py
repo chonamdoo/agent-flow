@@ -17,6 +17,7 @@ from agent_flow.core.artifacts import (
 from agent_flow.core.gates import GateCommand, run_gates
 from agent_flow.core.profiles import detect_profile, load_profile
 from agent_flow.core.review import summarize_reviews, write_review_summary
+from agent_flow.core.worktrees import create_worktree, get_worktree_status, plan_worktree
 from agent_flow.core.state import RunRequest, RunState, start_run, status_summary
 from agent_flow.core.workflow import load_workflow
 
@@ -70,6 +71,17 @@ def main(argv: list[str] | None = None) -> int:
     review_parser.add_argument("--root", default=".")
     review_parser.add_argument("--run-dir", required=True)
     review_parser.add_argument("--reviews", nargs="+", required=True)
+
+    worktree_parser = subparsers.add_parser("worktree")
+    worktree_subparsers = worktree_parser.add_subparsers(dest="worktree_command", required=True)
+    worktree_create = worktree_subparsers.add_parser("create")
+    worktree_create.add_argument("--root", default=".")
+    worktree_create.add_argument("--name", required=True)
+    worktree_create.add_argument("--branch")
+    worktree_create.add_argument("--allow-dirty", action="store_true")
+    worktree_status = worktree_subparsers.add_parser("status")
+    worktree_status.add_argument("--root", default=".")
+    worktree_status.add_argument("--name", required=True)
 
     args = parser.parse_args(argv)
     root = Path(getattr(args, "root", ".")).resolve()
@@ -142,6 +154,18 @@ def main(argv: list[str] | None = None) -> int:
             )
         print(f"{summary.verdict}: {len(summary.findings)} findings")
         return 1 if summary.verdict == "NEEDS_CHANGES" else 0
+
+    if args.command == "worktree":
+        if args.worktree_command == "create":
+            plan = plan_worktree(root=root, name=args.name, branch=args.branch)
+            status = create_worktree(root=root, plan=plan, allow_dirty=args.allow_dirty)
+            print(f"{status.name} {status.branch} {status.path}")
+            return 0
+        if args.worktree_command == "status":
+            status = get_worktree_status(root=root, name=args.name)
+            state = "exists" if status.exists else "missing"
+            print(f"{status.name} {status.branch} {status.path} {state}")
+            return 0
 
     if args.command == "start":
         workflow = load_workflow(args.workflow)

@@ -8,13 +8,14 @@ Default execution is Personal Workflow: the lead orchestrates Runs, stages, prom
 
 ## Current Slice
 
-Make review/fix loop artifacts operational.
+Make Worktree support operational.
 
 ### Scope
 
-- Summarize one or more review artifacts.
-- Produce a review verdict.
-- Write recovery guidance when fixes are needed.
+- Plan deterministic worktree paths and branch names.
+- Create git worktrees for isolated file changes.
+- Refuse dirty leader workspaces by default.
+- Report worktree status from manifest data.
 - Keep AI CLI execution on host adapters/providers; no sandbox support.
 
 ### Non-Goals
@@ -26,5 +27,4 @@ Make review/fix loop artifacts operational.
 
 ## Next Slices
 
-1. Worktree support for file-change isolation.
-2. Optional Team Orchestration state model.
+1. Optional Team Orchestration state model.
