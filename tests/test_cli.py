@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import contextlib
 import io
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 from agent_flow.cli import main
+from agent_flow.core.gates import GateCommand, run_gate
+from agent_flow.core.profiles import load_profile
 from agent_flow.core.workflow import _stage_from_payload
 
 
@@ -83,6 +86,75 @@ class CliTest(unittest.TestCase):
                 {"id": "review", "role": "reviewer", "replicas": True},
                 workflow_id="bad",
             )
+
+    def test_load_profile_reads_packaged_gates(self) -> None:
+        profile = load_profile("node")
+        self.assertEqual(profile.profile_id, "node")
+        self.assertEqual(profile.gates[0].gate_id, "test")
+        self.assertEqual(profile.gates[0].command, ("npm", "test"))
+
+    def test_run_gate_reports_success(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = run_gate(
+                GateCommand("ok", (sys.executable, "-c", "print('ok')")),
+                cwd=Path(temp_dir),
+            )
+            self.assertTrue(result.passed)
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.stdout.strip(), "ok")
+
+    def test_gates_cli_writes_results_for_run_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            run_dir = root / ".agent-flow" / "runs" / "manual"
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(
+                        [
+                            "gates",
+                            "--root",
+                            str(root),
+                            "--profile",
+                            "generic",
+                            "--run-dir",
+                            str(run_dir),
+                        ]
+                    ),
+                    0,
+                )
+            self.assertEqual(output.getvalue().strip(), "generic: 0/0 gates passed")
+            self.assertTrue((run_dir / "gate-results.json").is_file())
+
+    def test_gates_cli_resolves_relative_run_dir_against_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "project"
+            cwd = Path(temp_dir) / "caller"
+            root.mkdir()
+            cwd.mkdir()
+            old_cwd = Path.cwd()
+            try:
+                import os
+
+                os.chdir(cwd)
+                self.assertEqual(
+                    main(
+                        [
+                            "gates",
+                            "--root",
+                            str(root),
+                            "--profile",
+                            "generic",
+                            "--run-dir",
+                            ".agent-flow/runs/manual",
+                        ]
+                    ),
+                    0,
+                )
+            finally:
+                os.chdir(old_cwd)
+            self.assertTrue((root / ".agent-flow" / "runs" / "manual" / "gate-results.json").is_file())
+            self.assertFalse((cwd / ".agent-flow" / "runs" / "manual" / "gate-results.json").exists())
 
 
 if __name__ == "__main__":

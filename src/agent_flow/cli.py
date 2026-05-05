@@ -5,8 +5,9 @@ import sys
 from pathlib import Path
 
 from agent_flow.adapters.registry import detect_adapter
-from agent_flow.core.artifacts import init_project, write_prompt
-from agent_flow.core.profiles import detect_profile
+from agent_flow.core.artifacts import init_project, write_gate_results, write_prompt
+from agent_flow.core.gates import GateCommand, run_gates
+from agent_flow.core.profiles import detect_profile, load_profile
 from agent_flow.core.state import RunRequest, RunState, start_run, status_summary
 from agent_flow.core.workflow import load_workflow
 
@@ -32,6 +33,12 @@ def main(argv: list[str] | None = None) -> int:
     detect_parser = subparsers.add_parser("detect-profile")
     detect_parser.add_argument("--root", default=".")
 
+    gates_parser = subparsers.add_parser("gates")
+    gates_parser.add_argument("--root", default=".")
+    gates_parser.add_argument("--profile", default="auto")
+    gates_parser.add_argument("--run-dir")
+    gates_parser.add_argument("--timeout", type=int, default=600)
+
     args = parser.parse_args(argv)
     root = Path(getattr(args, "root", ".")).resolve()
 
@@ -47,6 +54,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "status":
         print(status_summary(root))
         return 0
+
+    if args.command == "gates":
+        profile_id = detect_profile(root) if args.profile == "auto" else args.profile
+        profile = load_profile(profile_id)
+        commands = [GateCommand(gate.gate_id, gate.command) for gate in profile.gates]
+        results = run_gates(commands, cwd=root, timeout_s=args.timeout)
+        if args.run_dir is not None:
+            write_gate_results(run_dir=_resolve_project_path(root, args.run_dir), results=results)
+        failed = [result for result in results if not result.passed]
+        print(f"{profile.profile_id}: {len(results) - len(failed)}/{len(results)} gates passed")
+        return 1 if failed else 0
 
     if args.command == "start":
         workflow = load_workflow(args.workflow)
@@ -88,6 +106,13 @@ def _write_stage_prompts(*, root: Path, state: RunState, workflow) -> None:
                     "Return a concise artifact with findings, changes, verification, and blockers.\n"
                 ),
             )
+
+
+def _resolve_project_path(root: Path, value: str) -> Path:
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    return root / path
 
 
 if __name__ == "__main__":

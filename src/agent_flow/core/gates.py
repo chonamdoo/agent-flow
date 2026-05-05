@@ -59,10 +59,13 @@ def run_gate(command: GateCommand, *, cwd: Path, timeout_s: int = 600) -> GateRe
     )
 
 
+def run_gates(commands: list[GateCommand], *, cwd: Path, timeout_s: int = 600) -> list[GateResult]:
+    return [run_gate(command, cwd=cwd, timeout_s=timeout_s) for command in commands]
+
+
 def _text(value: str | bytes | None) -> str:
     if value is None:
         return ""
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
     return value
-
