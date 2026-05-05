@@ -168,7 +168,7 @@ function readCurrentRun(root) {
   if (!fs.existsSync(pathName)) {
     throw new Error("no active run. start one with: agent-flow-kit run start --task <task>");
   }
-  return JSON.parse(fs.readFileSync(pathName, "utf8"));
+  return normalizeRunState(root, JSON.parse(fs.readFileSync(pathName, "utf8")));
 }
 
 function assertInstalled(root) {
@@ -176,6 +176,12 @@ function assertInstalled(root) {
     path.join(root, ".agent-flow", "kit.json"),
     path.join(root, ".agent-flow", "workflows", "full-feature.yaml"),
     path.join(root, ".agent-flow", "skills", "full-feature-workflow", "SKILL.md"),
+    ...PHASES.map((phase) => path.join(root, ".agent-flow", "prompts", `${phase.id}.md`)),
+    path.join(root, ".agent-flow", "skills", "domain-grill", "SKILL.md"),
+    path.join(root, ".agent-flow", "skills", "product-brief", "SKILL.md"),
+    path.join(root, ".agent-flow", "skills", "plan-reviewer", "SKILL.md"),
+    path.join(root, ".agent-flow", "skills", "ddd-clean-architecture", "SKILL.md"),
+    path.join(root, ".agent-flow", "skills", "architecture-reviewer", "SKILL.md"),
     path.join(root, ".agent-flow", "bootstrap", "AGENTS.md"),
     path.join(root, ".agent-flow", "bootstrap", "CLAUDE.md"),
     path.join(root, ".agent-flow", "bootstrap", "GEMINI.md"),
@@ -184,6 +190,23 @@ function assertInstalled(root) {
   if (missing.length > 0) {
     throw new Error(`agent-flow is not installed. run: agent-flow-kit install`);
   }
+}
+
+function normalizeRunState(root, state) {
+  if (state.status === "complete" || state.phase === "complete") {
+    return state;
+  }
+  const index = PHASES.findIndex((phase) => phase.id === state.phase);
+  if (index === -1 || index === state.phase_index) {
+    return state;
+  }
+  const normalized = {
+    ...state,
+    phase_index: index,
+  };
+  writeJson(path.join(state.run_dir, "manifest.json"), normalized);
+  writeJson(currentRunPath(root), normalized);
+  return normalized;
 }
 
 function currentRunPath(root) {
@@ -301,7 +324,7 @@ function readArtifactStatus(pathName) {
 function readArtifactVerdict(pathName) {
   const content = fs.readFileSync(pathName, "utf8");
   const match = content.match(/^verdict:\s*([a-z-]+)\s*$/im);
-  return match?.[1];
+  return match?.[1]?.toLowerCase();
 }
 
 function upsertBootstrapBlock(pathName, label) {

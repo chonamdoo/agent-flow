@@ -376,6 +376,40 @@ class CliTest(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertIn("agent-flow is not installed", result.stderr)
 
+    def test_node_workflow_run_rejects_pre_upgrade_install(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            agent_flow = project_root / ".agent-flow"
+            for path_name in [
+                agent_flow / "kit.json",
+                agent_flow / "workflows" / "full-feature.yaml",
+                agent_flow / "skills" / "full-feature-workflow" / "SKILL.md",
+                agent_flow / "bootstrap" / "AGENTS.md",
+                agent_flow / "bootstrap" / "CLAUDE.md",
+                agent_flow / "bootstrap" / "GEMINI.md",
+            ]:
+                path_name.parent.mkdir(parents=True, exist_ok=True)
+                path_name.write_text("old install\n", encoding="utf-8")
+
+            node = _node_executable()
+            result = subprocess.run(
+                (
+                    node,
+                    str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"),
+                    "run",
+                    "start",
+                    "--task",
+                    "demo",
+                ),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("agent-flow is not installed", result.stderr)
+
     def test_node_workflow_run_advances_all_phases_and_handles_complete_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
@@ -452,6 +486,42 @@ class CliTest(unittest.TestCase):
             )
             self.assertEqual(complete.returncode, 0, complete.stderr)
             self.assertIn("workflow already complete: r1", complete.stdout)
+
+    def test_node_workflow_run_normalizes_persisted_phase_index_from_phase_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            self.assertEqual(
+                subprocess.run(
+                    (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
+                    cwd=project_root,
+                    check=False,
+                ).returncode,
+                0,
+            )
+            current_run = project_root / ".agent-flow" / "state" / "current-run.json"
+            state = json.loads(current_run.read_text(encoding="utf-8"))
+            state["phase"] = "red"
+            state["phase_index"] = 0
+            current_run.write_text(f"{json.dumps(state, indent=2)}\n", encoding="utf-8")
+            manifest = Path(state["run_dir"]) / "manifest.json"
+            manifest.write_text(f"{json.dumps(state, indent=2)}\n", encoding="utf-8")
+
+            next_result = subprocess.run(
+                (node, cli, "run", "next"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(next_result.returncode, 0, next_result.stderr)
+            self.assertIn("Current phase: red", next_result.stdout)
+            normalized = json.loads(current_run.read_text(encoding="utf-8"))
+            self.assertEqual(normalized["phase"], "red")
+            self.assertNotEqual(normalized["phase_index"], 0)
 
     def test_node_pr_watch_blocks_pending_and_routes_fix_loops_back_to_watch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -635,7 +705,7 @@ class CliTest(unittest.TestCase):
                 self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
 
             plan_review = run_dir / _node_phase_artifact("plan-review")
-            plan_review.write_text("verdict: request-changes\n", encoding="utf-8")
+            plan_review.write_text("verdict: REQUEST-CHANGES\n", encoding="utf-8")
             result = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=project_root,
@@ -660,7 +730,7 @@ class CliTest(unittest.TestCase):
 
             slice_plan.write_text("updated slice-plan\n", encoding="utf-8")
             self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
-            plan_review.write_text("verdict: approve\n", encoding="utf-8")
+            plan_review.write_text("verdict: APPROVE\n", encoding="utf-8")
             self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
             ddd = run_dir / _node_phase_artifact("ddd-design")
             ddd.write_text("ddd-design\n", encoding="utf-8")
