@@ -49,6 +49,213 @@ class CliTest(unittest.TestCase):
                 (run_dir / "prompts" / "explore.md").read_text(encoding="utf-8"),
             )
 
+    def test_start_can_create_and_record_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_git_repo(root)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(
+                        [
+                            "start",
+                            "development",
+                            "--root",
+                            str(root),
+                            "--task",
+                            "demo",
+                            "--adapter",
+                            "manual",
+                            "--run-id",
+                            "r1",
+                            "--worktree",
+                            "Slice A",
+                        ]
+                    ),
+                    0,
+                )
+            run_dir = root / ".agent-flow" / "runs" / "development" / "r1"
+            manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                manifest["worktree"],
+                {
+                    "name": "slice-a",
+                    "branch": "agent-flow/slice-a",
+                    "path": str(root.resolve() / ".agent-flow" / "worktrees" / "slice-a"),
+                },
+            )
+            self.assertTrue((root / ".agent-flow" / "worktrees" / "slice-a").is_dir())
+
+    def test_start_worktree_rejects_dirty_leader_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_git_repo(root)
+            (root / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+            with self.assertRaises(RuntimeError):
+                main(
+                    [
+                        "start",
+                        "development",
+                        "--root",
+                        str(root),
+                        "--task",
+                        "demo",
+                        "--adapter",
+                        "manual",
+                        "--worktree",
+                        "slice-a",
+                    ]
+                )
+            self.assertFalse((root / ".agent-flow" / "runs" / "development").exists())
+
+    def test_start_worktree_failure_does_not_leave_orphan_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_git_repo(root)
+            self.assertEqual(
+                main(
+                    [
+                        "start",
+                        "development",
+                        "--root",
+                        str(root),
+                        "--task",
+                        "demo",
+                        "--adapter",
+                        "manual",
+                        "--run-id",
+                        "r1",
+                    ]
+                ),
+                0,
+            )
+
+            with self.assertRaises(FileExistsError):
+                main(
+                    [
+                        "start",
+                        "development",
+                        "--root",
+                        str(root),
+                        "--task",
+                        "demo",
+                        "--adapter",
+                        "manual",
+                        "--run-id",
+                        "r1",
+                        "--worktree",
+                        "slice-a",
+                    ]
+                )
+            self.assertFalse((root / ".agent-flow" / "worktrees" / "slice-a").exists())
+
+    def test_start_worktree_write_failure_cleans_run_and_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_git_repo(root)
+
+            with mock.patch("agent_flow.core.state._write_json", side_effect=OSError("manifest failed")):
+                with self.assertRaises(OSError):
+                    main(
+                        [
+                            "start",
+                            "development",
+                            "--root",
+                            str(root),
+                            "--task",
+                            "demo",
+                            "--adapter",
+                            "manual",
+                            "--run-id",
+                            "r1",
+                            "--worktree",
+                            "slice-a",
+                        ]
+                    )
+            self.assertFalse((root / ".agent-flow" / "runs" / "development" / "r1").exists())
+            self.assertFalse((root / ".agent-flow" / "worktrees" / "slice-a").exists())
+
+    def test_start_reuses_existing_worktree_manifest_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_git_repo(root)
+            self.assertEqual(
+                main(
+                    [
+                        "worktree",
+                        "create",
+                        "--root",
+                        str(root),
+                        "--name",
+                        "slice-a",
+                        "--branch",
+                        "custom/slice-a",
+                    ]
+                ),
+                0,
+            )
+
+            self.assertEqual(
+                main(
+                    [
+                        "start",
+                        "development",
+                        "--root",
+                        str(root),
+                        "--task",
+                        "demo",
+                        "--adapter",
+                        "manual",
+                        "--run-id",
+                        "r1",
+                        "--worktree",
+                        "slice-a",
+                    ]
+                ),
+                0,
+            )
+            manifest = json.loads(
+                (root / ".agent-flow" / "runs" / "development" / "r1" / "manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(manifest["worktree"]["branch"], "custom/slice-a")
+
+    def test_start_worktree_can_use_existing_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_git_repo(root)
+            subprocess.run(("git", "branch", "custom/slice-a"), cwd=root, check=True)
+
+            self.assertEqual(
+                main(
+                    [
+                        "start",
+                        "development",
+                        "--root",
+                        str(root),
+                        "--task",
+                        "demo",
+                        "--adapter",
+                        "manual",
+                        "--run-id",
+                        "r1",
+                        "--worktree",
+                        "slice-a",
+                        "--worktree-branch",
+                        "custom/slice-a",
+                    ]
+                ),
+                0,
+            )
+            manifest = json.loads(
+                (root / ".agent-flow" / "runs" / "development" / "r1" / "manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(manifest["worktree"]["branch"], "custom/slice-a")
+            self.assertTrue((root / ".agent-flow" / "worktrees" / "slice-a").is_dir())
+
     def test_detect_profile_defaults_to_generic(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             output = io.StringIO()

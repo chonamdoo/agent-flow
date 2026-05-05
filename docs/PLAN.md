@@ -52,6 +52,8 @@ Make Team state docs final pass operational.
 
 Make Team state lifecycle final review fixes operational.
 
+Make host provider discovery operational.
+
 ### Scope
 
 - Send messages to registered Worker mailboxes.
@@ -70,22 +72,21 @@ Make Team state lifecycle final review fixes operational.
 
 ## Current Slice
 
-Make host provider discovery operational.
+Make worktree-backed run start operational.
 
 ### Scope
 
-- List host provider availability through a public CLI.
-- Keep AI CLI execution on host adapters/providers; no sandbox support.
-- Preserve provider discovery as environment-specific, outside Workflow core.
+- Let a Run request a named Worktree.
+- Record Worktree name, branch, and path in the Run manifest.
+- Preserve existing Worktree dirty-workspace safety checks.
 
 ### Non-Goals
 
-- No provider process execution.
 - No Team Orchestration runtime.
+- No provider process execution.
 - No sandbox execution.
 
 ## Next Slices
 
-1. Worktree-backed run start.
-2. Team runtime tracer.
-3. Installable workflow kit.
+1. Team runtime tracer.
+2. Installable workflow kit.

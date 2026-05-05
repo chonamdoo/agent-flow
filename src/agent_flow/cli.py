@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -42,7 +43,13 @@ from agent_flow.core.team import (
     update_worker_heartbeat,
     validate_team_state_import,
 )
-from agent_flow.core.worktrees import create_worktree, get_worktree_status, plan_worktree
+from agent_flow.core.worktrees import (
+    create_worktree,
+    get_worktree_status,
+    plan_worktree,
+    remove_worktree,
+    worktree_branch_exists,
+)
 from agent_flow.core.state import RunRequest, RunState, start_run, status_summary
 from agent_flow.core.workflow import load_workflow
 from agent_flow.providers.host import list_host_providers
@@ -62,6 +69,9 @@ def main(argv: list[str] | None = None) -> int:
     start_parser.add_argument("--run-id")
     start_parser.add_argument("--adapter", default="auto")
     start_parser.add_argument("--profile", default="auto")
+    start_parser.add_argument("--worktree")
+    start_parser.add_argument("--worktree-branch")
+    start_parser.add_argument("--allow-dirty", action="store_true")
 
     status_parser = subparsers.add_parser("status")
     status_parser.add_argument("--root", default=".")
@@ -540,17 +550,41 @@ def main(argv: list[str] | None = None) -> int:
         workflow = load_workflow(args.workflow)
         profile = detect_profile(root) if args.profile == "auto" else args.profile
         adapter = detect_adapter() if args.adapter == "auto" else args.adapter
-        state = start_run(
-            root=root,
-            request=RunRequest(
-                workflow_id=workflow.workflow_id,
-                task=args.task,
-                adapter=adapter,
-                profile=profile,
-                run_id=args.run_id,
-            ),
-        )
-        _write_stage_prompts(root=root, state=state, workflow=workflow)
+        worktree = None
+        worktree_status = None
+        worktree_preexisting = False
+        worktree_branch_preexisting = False
+        if args.worktree is not None:
+            plan = plan_worktree(root=root, name=args.worktree, branch=args.worktree_branch)
+            worktree_preexisting = plan.path.exists()
+            worktree_branch_preexisting = worktree_branch_exists(root=root, branch=plan.branch)
+            status = create_worktree(root=root, plan=plan, allow_dirty=args.allow_dirty)
+            worktree_status = status
+            worktree = {
+                "name": status.name,
+                "branch": status.branch,
+                "path": str(status.path),
+            }
+        state = None
+        try:
+            state = start_run(
+                root=root,
+                request=RunRequest(
+                    workflow_id=workflow.workflow_id,
+                    task=args.task,
+                    adapter=adapter,
+                    profile=profile,
+                    run_id=args.run_id,
+                    worktree=worktree,
+                ),
+            )
+            _write_stage_prompts(root=root, state=state, workflow=workflow)
+        except Exception:
+            if state is not None and state.run_dir.exists():
+                shutil.rmtree(state.run_dir)
+            if worktree_status is not None and not worktree_preexisting:
+                remove_worktree(root=root, status=worktree_status, delete_branch=not worktree_branch_preexisting)
+            raise
         print(state.run_dir)
         return 0
 

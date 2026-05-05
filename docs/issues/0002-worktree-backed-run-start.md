@@ -11,9 +11,9 @@ Let a Personal Workflow Run optionally create and record a project-local git wor
 
 ## Acceptance criteria
 
-- [ ] Starting a run can request a named Worktree.
-- [ ] The Run manifest records the Worktree name, branch, and path.
-- [ ] Existing Worktree safety checks still prevent accidental dirty-workspace conflicts.
+- [x] Starting a run can request a named Worktree.
+- [x] The Run manifest records the Worktree name, branch, and path.
+- [x] Existing Worktree safety checks still prevent accidental dirty-workspace conflicts.
 
 ## Blocked by
 

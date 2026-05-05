@@ -37,12 +37,33 @@ def create_worktree(*, root: Path, plan: WorktreePlan, allow_dirty: bool = False
     if not allow_dirty and _git_dirty(root):
         raise RuntimeError("leader workspace is dirty; pass --allow-dirty to create a worktree anyway")
     if plan.path.exists():
-        return WorktreeStatus(name=plan.name, branch=plan.branch, path=plan.path, exists=True)
+        return get_worktree_status(root=root, name=plan.name)
     plan.path.parent.mkdir(parents=True, exist_ok=True)
-    _run_git(root, "worktree", "add", "-b", plan.branch, str(plan.path), "HEAD")
+    if worktree_branch_exists(root=root, branch=plan.branch):
+        _run_git(root, "worktree", "add", str(plan.path), plan.branch)
+    else:
+        _run_git(root, "worktree", "add", "-b", plan.branch, str(plan.path), "HEAD")
     status = WorktreeStatus(name=plan.name, branch=plan.branch, path=plan.path, exists=True)
     write_worktree_manifest(root=root, status=status)
     return status
+
+
+def remove_worktree(*, root: Path, status: WorktreeStatus, delete_branch: bool = True) -> None:
+    if status.path.exists():
+        _run_git(root, "worktree", "remove", "--force", str(status.path))
+    if delete_branch:
+        _run_git(root, "branch", "-D", status.branch)
+
+
+def worktree_branch_exists(*, root: Path, branch: str) -> bool:
+    result = subprocess.run(
+        ("git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"),
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result.returncode == 0
 
 
 def get_worktree_status(*, root: Path, name: str) -> WorktreeStatus:

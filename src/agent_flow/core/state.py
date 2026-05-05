@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +17,7 @@ class RunRequest:
     adapter: str
     profile: str
     run_id: str | None = None
+    worktree: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -28,6 +30,7 @@ class RunState:
     status: str
     created_at: str
     run_dir: Path
+    worktree: dict[str, str] | None = None
 
 
 def start_run(*, root: Path, request: RunRequest) -> RunState:
@@ -44,9 +47,14 @@ def start_run(*, root: Path, request: RunRequest) -> RunState:
         status="running",
         created_at=_now(),
         run_dir=run_dir,
+        worktree=request.worktree,
     )
-    _write_json(run_dir / "manifest.json", _state_payload(state))
-    _append_event(run_dir, "started", {"profile": state.profile, "adapter": state.adapter})
+    try:
+        _write_json(run_dir / "manifest.json", _state_payload(state))
+        _append_event(run_dir, "started", {"profile": state.profile, "adapter": state.adapter})
+    except Exception:
+        shutil.rmtree(run_dir)
+        raise
     return state
 
 
@@ -70,6 +78,8 @@ def _append_event(run_dir: Path, event: str, details: dict[str, str]) -> None:
 def _state_payload(state: RunState) -> dict[str, str]:
     payload = asdict(state)
     payload["run_dir"] = str(state.run_dir)
+    if payload["worktree"] is None:
+        del payload["worktree"]
     return payload
 
 
@@ -83,4 +93,3 @@ def _now() -> str:
 
 def _new_run_id() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S") + "-" + uuid4().hex[:8]
-
