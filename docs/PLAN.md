@@ -44,6 +44,8 @@ Make Team state archive list command operational.
 
 Make Team state archive export command operational.
 
+Make Team state archive restore command operational.
+
 ### Scope
 
 - Send messages to registered Worker mailboxes.
@@ -62,13 +64,13 @@ Make Team state archive export command operational.
 
 ## Current Slice
 
-Make Team state archive restore command operational.
+Make Team state archive restore diagnostics operational.
 
 ### Scope
 
-- Restore archived Team State to active state only when no active Team exists.
-- Remove archive metadata from restored active Team State.
-- Preserve archived Team State contents through restore.
+- Write optional archive-restore success and failure reports.
+- Convert restore errors into deterministic CLI output.
+- Preserve restore state semantics; do not add delete behavior.
 - Preserve Team Orchestration as state-only; no worker process execution.
 - Keep AI CLI execution on host adapters/providers; no sandbox support.
 
@@ -81,4 +83,4 @@ Make Team state archive restore command operational.
 
 ## Next Slices
 
-1. Team state archive restore diagnostics.
+1. Team state docs final pass.

@@ -42,6 +42,7 @@ agent-flow team archive --root /path/to/project --team feature-team --reason "wo
 agent-flow team archive-list --root /path/to/project
 agent-flow team archive-export --archive-path /path/to/project/.agent-flow/archive/team/<archive-id>
 agent-flow team archive-restore --root /path/to/project --archive-path /path/to/project/.agent-flow/archive/team/<archive-id>
+agent-flow team archive-restore --root /path/to/project --archive-path /path/to/project/.agent-flow/archive/team/<archive-id> --report /path/to/restore-report.json
 agent-flow team task --root /path/to/project --team feature-team --id task-1 --subject "Implement login"
 agent-flow team worker --root /path/to/project --team feature-team --name worker-1 --role implementer
 agent-flow team claim --root /path/to/project --team feature-team --task task-1 --worker worker-1

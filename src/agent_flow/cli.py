@@ -121,6 +121,7 @@ def main(argv: list[str] | None = None) -> int:
     team_archive_restore = team_subparsers.add_parser("archive-restore")
     team_archive_restore.add_argument("--root", default=".")
     team_archive_restore.add_argument("--archive-path", required=True)
+    team_archive_restore.add_argument("--report")
     team_init = team_subparsers.add_parser("init")
     team_init.add_argument("--root", default=".")
     team_init.add_argument("--name", required=True)
@@ -306,7 +307,28 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{archive.name} archived_at={archive.archived_at} reason={archive.reason} path={archive.archive_path}")
             return 0
         if args.team_command == "archive-restore":
-            archive = restore_team_archive(root=root, archive_path=Path(args.archive_path))
+            try:
+                archive = restore_team_archive(root=root, archive_path=Path(args.archive_path))
+            except Exception as exc:
+                summary = {"valid": False, "errors": [f"cannot restore team archive: {exc}"]}
+                report_error = _write_import_report(args.report, summary)
+                if report_error is not None:
+                    print(report_error)
+                    return 1
+                print(summary["errors"][0])
+                return 1
+            summary = {
+                "valid": True,
+                "team": archive.name,
+                "source_path": archive.source_path,
+                "archive_path": archive.archive_path,
+                "archived_at": archive.archived_at,
+                "reason": archive.reason,
+            }
+            report_error = _write_import_report(args.report, summary)
+            if report_error is not None:
+                print(report_error)
+                return 1
             print(f"{archive.name} restored {archive.source_path}")
             return 0
         if args.team_command == "init":

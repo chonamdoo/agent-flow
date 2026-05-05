@@ -890,9 +890,76 @@ class CliTest(unittest.TestCase):
             archive_path = next((root.resolve() / ".agent-flow" / "archive" / "team").glob("feature-team-*"))
             _create_team_with_task_and_worker(root)
 
-            with self.assertRaises(FileExistsError):
-                main(["team", "archive-restore", "--root", str(root), "--archive-path", str(archive_path)])
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(["team", "archive-restore", "--root", str(root), "--archive-path", str(archive_path)]),
+                    1,
+                )
+            self.assertIn("cannot restore team archive: team already exists: feature-team", output.getvalue())
             self.assertTrue(archive_path.exists())
+
+    def test_team_archive_restore_writes_success_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+            self.assertEqual(
+                main(["team", "archive", "--root", str(root), "--team", "feature-team", "--reason", "done"]),
+                0,
+            )
+            archive_path = next((root.resolve() / ".agent-flow" / "archive" / "team").glob("feature-team-*"))
+            report_path = root / "reports" / "restore.json"
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(
+                        [
+                            "team",
+                            "archive-restore",
+                            "--root",
+                            str(root),
+                            "--archive-path",
+                            str(archive_path),
+                            "--report",
+                            str(report_path),
+                        ]
+                    ),
+                    0,
+                )
+            self.assertIn("feature-team restored", output.getvalue())
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertTrue(report["valid"])
+            self.assertEqual(report["team"], "feature-team")
+            self.assertEqual(report["reason"], "done")
+
+    def test_team_archive_restore_writes_failure_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive_path = root / ".agent-flow" / "archive" / "team" / "missing"
+            report_path = root / "reports" / "restore.json"
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(
+                        [
+                            "team",
+                            "archive-restore",
+                            "--root",
+                            str(root),
+                            "--archive-path",
+                            str(archive_path),
+                            "--report",
+                            str(report_path),
+                        ]
+                    ),
+                    1,
+                )
+            self.assertIn("cannot restore team archive:", output.getvalue())
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertFalse(report["valid"])
+            self.assertIn("cannot restore team archive:", report["errors"][0])
 
     def test_team_archive_restore_recovers_manifest_when_rename_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -913,8 +980,13 @@ class CliTest(unittest.TestCase):
                 return original_rename(self, target)
 
             with mock.patch("pathlib.Path.rename", fail_archive_restore_rename):
-                with self.assertRaises(OSError):
-                    main(["team", "archive-restore", "--root", str(root), "--archive-path", str(archive_path)])
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(
+                        main(["team", "archive-restore", "--root", str(root), "--archive-path", str(archive_path)]),
+                        1,
+                    )
+            self.assertIn("cannot restore team archive: rename failed", output.getvalue())
 
             self.assertTrue(archive_path.is_dir())
             restored_manifest = json.loads((archive_path / "archive.json").read_text(encoding="utf-8"))
