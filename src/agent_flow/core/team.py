@@ -573,10 +573,14 @@ def apply_team_state_import(*, root: Path, payload: object) -> dict[str, object]
             worker_name = safe_worker_name(str(signal["worker"]))
             signal_id = safe_signal_id(str(signal["signal_id"]))
             _write_json(root_dir / "shutdown" / worker_name / f"{signal_id}.json", signal)
-    except Exception:
+    except Exception as exc:
+        errors = [f"cannot apply team import: {exc}"]
         if root_dir.exists():
-            shutil.rmtree(root_dir)
-        raise
+            try:
+                shutil.rmtree(root_dir)
+            except Exception as cleanup_exc:
+                errors.append(f"cannot clean failed team import: {cleanup_exc}")
+        return {"valid": False, "team": team_name, "errors": errors}
     return summary
 
 

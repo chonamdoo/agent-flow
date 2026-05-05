@@ -28,6 +28,8 @@ Make Team state import dry-run file report operational.
 
 Make Team state import apply operational.
 
+Make Team state import conflict reporting operational.
+
 ### Scope
 
 - Send messages to registered Worker mailboxes.
@@ -46,13 +48,13 @@ Make Team state import apply operational.
 
 ## Current Slice
 
-Make Team state import conflict reporting operational.
+Make Team state import cleanup diagnostics operational.
 
 ### Scope
 
-- Write optional import-apply reports as deterministic JSON.
-- Include validation, read, and existing-team conflict errors in the report.
-- Preserve successful import summary fields in the report.
+- Convert internal import-apply write failures into deterministic error summaries.
+- Clean partially created Team State after failed import writes.
+- Include cleanup diagnostics in optional import-apply reports.
 - Preserve Team Orchestration as state-only; no worker process execution.
 - Keep AI CLI execution on host adapters/providers; no sandbox support.
 
@@ -65,4 +67,4 @@ Make Team state import conflict reporting operational.
 
 ## Next Slices
 
-1. Team state import cleanup diagnostics.
+1. Team state import documentation polish.

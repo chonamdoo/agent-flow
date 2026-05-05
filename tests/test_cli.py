@@ -5,6 +5,7 @@ import io
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 import subprocess
 import json
@@ -1184,6 +1185,106 @@ class CliTest(unittest.TestCase):
                 )
             self.assertIn("duplicate mailbox worker: worker-1", output.getvalue())
             self.assertFalse((target_root / ".agent-flow" / "state" / "team" / "feature-team").exists())
+
+    def test_team_import_apply_reports_internal_write_failure_and_cleans_up(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_root = root / "source"
+            target_root = root / "target"
+            _create_team_with_task_and_worker(source_root)
+            export_output = io.StringIO()
+            with contextlib.redirect_stdout(export_output):
+                self.assertEqual(
+                    main(["team", "export", "--root", str(source_root), "--team", "feature-team"]),
+                    0,
+                )
+            snapshot_path = root / "snapshot.json"
+            report_path = root / "reports" / "apply.json"
+            snapshot_path.write_text(export_output.getvalue(), encoding="utf-8")
+
+            from agent_flow.core import team as team_core
+
+            original_write_json = team_core._write_json
+
+            def fail_worker_write(path: Path, payload: object) -> None:
+                if path.name == "identity.json":
+                    raise OSError("disk full")
+                original_write_json(path, payload)
+
+            output = io.StringIO()
+            with mock.patch("agent_flow.core.team._write_json", side_effect=fail_worker_write):
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(
+                        main(
+                            [
+                                "team",
+                                "import-apply",
+                                "--root",
+                                str(target_root),
+                                "--file",
+                                str(snapshot_path),
+                                "--report",
+                                str(report_path),
+                            ]
+                        ),
+                        1,
+                    )
+            self.assertIn("cannot apply team import: disk full", output.getvalue())
+            self.assertFalse((target_root / ".agent-flow" / "state" / "team" / "feature-team").exists())
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertFalse(report["valid"])
+            self.assertIn("cannot apply team import: disk full", report["errors"])
+
+    def test_team_import_apply_reports_cleanup_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_root = root / "source"
+            target_root = root / "target"
+            _create_team_with_task_and_worker(source_root)
+            export_output = io.StringIO()
+            with contextlib.redirect_stdout(export_output):
+                self.assertEqual(
+                    main(["team", "export", "--root", str(source_root), "--team", "feature-team"]),
+                    0,
+                )
+            snapshot_path = root / "snapshot.json"
+            report_path = root / "reports" / "apply.json"
+            snapshot_path.write_text(export_output.getvalue(), encoding="utf-8")
+
+            from agent_flow.core import team as team_core
+
+            original_write_json = team_core._write_json
+
+            def fail_worker_write(path: Path, payload: object) -> None:
+                if path.name == "identity.json":
+                    raise OSError("disk full")
+                original_write_json(path, payload)
+
+            output = io.StringIO()
+            with mock.patch("agent_flow.core.team._write_json", side_effect=fail_worker_write):
+                with mock.patch("agent_flow.core.team.shutil.rmtree", side_effect=OSError("permission denied")):
+                    with contextlib.redirect_stdout(output):
+                        self.assertEqual(
+                            main(
+                                [
+                                    "team",
+                                    "import-apply",
+                                    "--root",
+                                    str(target_root),
+                                    "--file",
+                                    str(snapshot_path),
+                                    "--report",
+                                    str(report_path),
+                                ]
+                            ),
+                            1,
+                        )
+            self.assertIn("cannot apply team import: disk full", output.getvalue())
+            self.assertIn("cannot clean failed team import: permission denied", output.getvalue())
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertFalse(report["valid"])
+            self.assertIn("cannot apply team import: disk full", report["errors"])
+            self.assertIn("cannot clean failed team import: permission denied", report["errors"])
 
     def test_team_import_dry_run_reports_report_write_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
