@@ -476,6 +476,31 @@ def validate_team_state_import(payload: object) -> list[str]:
     return errors
 
 
+def summarize_team_state_import(payload: object) -> dict[str, object]:
+    errors = validate_team_state_import(payload)
+    if errors:
+        return {"valid": False, "errors": errors}
+    if not isinstance(payload, dict):
+        return {"valid": False, "errors": ["payload must be a JSON object"]}
+    team = payload["team"]
+    tasks = payload["tasks"]
+    workers = payload["workers"]
+    heartbeats = payload["heartbeats"]
+    mailboxes = payload["mailboxes"]
+    shutdowns = payload["shutdowns"]
+    message_count = sum(len(messages) for messages in mailboxes.values())
+    return {
+        "valid": True,
+        "team": team["name"],
+        "task_count": len(tasks),
+        "worker_count": len(workers),
+        "heartbeat_count": len(heartbeats),
+        "mailbox_count": len(mailboxes),
+        "message_count": message_count,
+        "shutdown_count": len(shutdowns),
+    }
+
+
 def _finish_task(
     *,
     root: Path,

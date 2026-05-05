@@ -31,6 +31,7 @@ from agent_flow.core.team import (
     mark_message_read,
     request_shutdown,
     send_message,
+    summarize_team_state_import,
     team_status,
     update_worker_heartbeat,
     validate_team_state_import,
@@ -178,6 +179,8 @@ def main(argv: list[str] | None = None) -> int:
     team_export.add_argument("--team", required=True)
     team_import_validate = team_subparsers.add_parser("import-validate")
     team_import_validate.add_argument("--file", required=True)
+    team_import_dry_run = team_subparsers.add_parser("import-dry-run")
+    team_import_dry_run.add_argument("--file", required=True)
 
     args = parser.parse_args(argv)
     root = Path(getattr(args, "root", ".")).resolve()
@@ -390,13 +393,9 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(export_team_state(root=root, team_name=args.team), indent=2, sort_keys=True))
             return 0
         if args.team_command == "import-validate":
-            try:
-                payload = json.loads(Path(args.file).read_text(encoding="utf-8"))
-            except OSError as exc:
-                print(f"cannot read import file: {exc}")
-                return 1
-            except json.JSONDecodeError as exc:
-                print(f"invalid JSON: {exc}")
+            payload = _read_json_file(args.file)
+            if isinstance(payload, str):
+                print(payload)
                 return 1
             errors = validate_team_state_import(payload)
             if errors:
@@ -404,6 +403,22 @@ def main(argv: list[str] | None = None) -> int:
                     print(error)
                 return 1
             print("OK")
+            return 0
+        if args.team_command == "import-dry-run":
+            payload = _read_json_file(args.file)
+            if isinstance(payload, str):
+                print(payload)
+                return 1
+            summary = summarize_team_state_import(payload)
+            if not summary["valid"]:
+                for error in summary["errors"]:
+                    print(error)
+                return 1
+            print(
+                f"{summary['team']} tasks={summary['task_count']} workers={summary['worker_count']} "
+                f"heartbeats={summary['heartbeat_count']} mailboxes={summary['mailbox_count']} "
+                f"messages={summary['message_count']} shutdowns={summary['shutdown_count']}"
+            )
             return 0
 
     if args.command == "start":
@@ -449,6 +464,15 @@ def _write_stage_prompts(*, root: Path, state: RunState, workflow) -> None:
                     )
                 ),
             )
+
+
+def _read_json_file(path: str) -> object | str:
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except OSError as exc:
+        return f"cannot read import file: {exc}"
+    except json.JSONDecodeError as exc:
+        return f"invalid JSON: {exc}"
 
 
 def _resolve_project_path(root: Path, value: str) -> Path:
