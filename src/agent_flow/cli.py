@@ -24,6 +24,9 @@ from agent_flow.core.team import (
     complete_task,
     fail_task,
     init_team,
+    list_messages,
+    mark_message_read,
+    send_message,
     team_status,
 )
 from agent_flow.core.worktrees import create_worktree, get_worktree_status, plan_worktree
@@ -126,6 +129,22 @@ def main(argv: list[str] | None = None) -> int:
     team_fail.add_argument("--task", required=True)
     team_fail.add_argument("--claim-token", required=True)
     team_fail.add_argument("--result", default="")
+    team_message = team_subparsers.add_parser("message")
+    team_message.add_argument("--root", default=".")
+    team_message.add_argument("--team", required=True)
+    team_message.add_argument("--from-actor", required=True)
+    team_message.add_argument("--to-worker", required=True)
+    team_message.add_argument("--body", required=True)
+    team_messages = team_subparsers.add_parser("messages")
+    team_messages.add_argument("--root", default=".")
+    team_messages.add_argument("--team", required=True)
+    team_messages.add_argument("--worker", required=True)
+    team_messages.add_argument("--unread-only", action="store_true")
+    team_read = team_subparsers.add_parser("mark-read")
+    team_read.add_argument("--root", default=".")
+    team_read.add_argument("--team", required=True)
+    team_read.add_argument("--worker", required=True)
+    team_read.add_argument("--message", required=True)
     team_status_parser = team_subparsers.add_parser("status")
     team_status_parser.add_argument("--root", default=".")
     team_status_parser.add_argument("--team", required=True)
@@ -256,6 +275,36 @@ def main(argv: list[str] | None = None) -> int:
                 result=args.result,
             )
             print(f"{task.task_id} {task.status}")
+            return 0
+        if args.team_command == "message":
+            message = send_message(
+                root=root,
+                team_name=args.team,
+                from_actor=args.from_actor,
+                to_worker=args.to_worker,
+                body=args.body,
+            )
+            print(f"{message.message_id} {message.to_worker} unread")
+            return 0
+        if args.team_command == "messages":
+            messages = list_messages(
+                root=root,
+                team_name=args.team,
+                worker_name=args.worker,
+                unread_only=args.unread_only,
+            )
+            for message in messages:
+                state = "read" if message.read else "unread"
+                print(f"{message.message_id} {message.from_actor} {state} {message.body}")
+            return 0
+        if args.team_command == "mark-read":
+            message = mark_message_read(
+                root=root,
+                team_name=args.team,
+                worker_name=args.worker,
+                message_id=args.message,
+            )
+            print(f"{message.message_id} read")
             return 0
         if args.team_command == "status":
             status = team_status(root=root, team_name=args.team)

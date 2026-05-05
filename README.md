@@ -41,6 +41,9 @@ agent-flow team task --root /path/to/project --team feature-team --id task-1 --s
 agent-flow team worker --root /path/to/project --team feature-team --name worker-1 --role implementer
 agent-flow team claim --root /path/to/project --team feature-team --task task-1 --worker worker-1
 agent-flow team complete --root /path/to/project --team feature-team --task task-1 --claim-token <token> --result "done"
+agent-flow team message --root /path/to/project --team feature-team --from-actor lead --to-worker worker-1 --body "Please check auth tests"
+agent-flow team messages --root /path/to/project --team feature-team --worker worker-1 --unread-only
+agent-flow team mark-read --root /path/to/project --team feature-team --worker worker-1 --message <message-id>
 agent-flow team status --root /path/to/project --team feature-team
 agent-flow gates --root /path/to/project --profile auto
 agent-flow status --root /path/to/project

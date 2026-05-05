@@ -759,6 +759,214 @@ class CliTest(unittest.TestCase):
             self.assertEqual(task["status"], "failed")
             self.assertEqual(task["result"], "blocked")
 
+    def test_team_message_list_and_mark_read(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(
+                        [
+                            "team",
+                            "message",
+                            "--root",
+                            str(root),
+                            "--team",
+                            "feature-team",
+                            "--from-actor",
+                            "lead",
+                            "--to-worker",
+                            "worker-1",
+                            "--body",
+                            "Please check auth tests",
+                        ]
+                    ),
+                    0,
+                )
+            message_id = output.getvalue().strip().split()[0]
+            mailbox = _read_mailbox_json(root)
+            self.assertEqual(mailbox[0]["message_id"], message_id)
+            self.assertFalse(mailbox[0]["read"])
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(
+                        [
+                            "team",
+                            "messages",
+                            "--root",
+                            str(root),
+                            "--team",
+                            "feature-team",
+                            "--worker",
+                            "worker-1",
+                            "--unread-only",
+                        ]
+                    ),
+                    0,
+                )
+            self.assertIn("Please check auth tests", output.getvalue())
+
+            self.assertEqual(
+                main(
+                    [
+                        "team",
+                        "mark-read",
+                        "--root",
+                        str(root),
+                        "--team",
+                        "feature-team",
+                        "--worker",
+                        "worker-1",
+                        "--message",
+                        message_id,
+                    ]
+                ),
+                0,
+            )
+            self.assertTrue(_read_mailbox_json(root)[0]["read"])
+
+    def test_team_message_requires_registered_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            main(["team", "init", "--root", str(root), "--name", "feature-team"])
+            with self.assertRaises(FileNotFoundError):
+                main(
+                    [
+                        "team",
+                        "message",
+                        "--root",
+                        str(root),
+                        "--team",
+                        "feature-team",
+                        "--from-actor",
+                        "lead",
+                        "--to-worker",
+                        "missing",
+                        "--body",
+                        "hello",
+                    ]
+                )
+
+    def test_team_worker_reregister_preserves_mailbox(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+            main(
+                [
+                    "team",
+                    "message",
+                    "--root",
+                    str(root),
+                    "--team",
+                    "feature-team",
+                    "--from-actor",
+                    "lead",
+                    "--to-worker",
+                    "worker-1",
+                    "--body",
+                    "keep me",
+                ]
+            )
+            main(
+                [
+                    "team",
+                    "worker",
+                    "--root",
+                    str(root),
+                    "--team",
+                    "feature-team",
+                    "--name",
+                    "worker-1",
+                    "--role",
+                    "reviewer",
+                ]
+            )
+            self.assertEqual(_read_mailbox_json(root)[0]["body"], "keep me")
+
+    def test_team_message_creates_missing_legacy_mailbox_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+            mailbox_path = (
+                root
+                / ".agent-flow"
+                / "state"
+                / "team"
+                / "feature-team"
+                / "mailbox"
+                / "worker-1.json"
+            )
+            mailbox_path.unlink()
+            mailbox_path.parent.rmdir()
+
+            self.assertEqual(
+                main(
+                    [
+                        "team",
+                        "message",
+                        "--root",
+                        str(root),
+                        "--team",
+                        "feature-team",
+                        "--from-actor",
+                        "lead",
+                        "--to-worker",
+                        "worker-1",
+                        "--body",
+                        "legacy mailbox",
+                    ]
+                ),
+                0,
+            )
+            self.assertEqual(_read_mailbox_json(root)[0]["body"], "legacy mailbox")
+
+    def test_team_message_list_during_writes_is_stable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+
+            def send(index: int) -> bool:
+                main(
+                    [
+                        "team",
+                        "message",
+                        "--root",
+                        str(root),
+                        "--team",
+                        "feature-team",
+                        "--from-actor",
+                        "lead",
+                        "--to-worker",
+                        "worker-1",
+                        "--body",
+                        f"msg {index}",
+                    ]
+                )
+                return True
+
+            def list_for_worker(_: int) -> bool:
+                main(
+                    [
+                        "team",
+                        "messages",
+                        "--root",
+                        str(root),
+                        "--team",
+                        "feature-team",
+                        "--worker",
+                        "worker-1",
+                    ]
+                )
+                return True
+
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                results = list(executor.map(lambda i: send(i) if i % 2 == 0 else list_for_worker(i), range(10)))
+            self.assertTrue(all(results))
+            self.assertEqual(len(_read_mailbox_json(root)), 5)
+
     def test_team_claim_allows_only_one_worker(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -857,6 +1065,20 @@ def _read_task_json(root: Path) -> dict[str, object]:
             / "feature-team"
             / "tasks"
             / "task-1.json"
+        ).read_text(encoding="utf-8")
+    )
+
+
+def _read_mailbox_json(root: Path) -> list[dict[str, object]]:
+    return json.loads(
+        (
+            root
+            / ".agent-flow"
+            / "state"
+            / "team"
+            / "feature-team"
+            / "mailbox"
+            / "worker-1.json"
         ).read_text(encoding="utf-8")
     )
 

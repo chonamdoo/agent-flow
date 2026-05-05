@@ -4,4 +4,4 @@ __pycache__/
 *.pyc
 .venv/
 dist/
-
+uv.lock

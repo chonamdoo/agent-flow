@@ -46,6 +46,16 @@ class WorkerHeartbeat:
     updated_at: str
 
 
+@dataclass(frozen=True)
+class MailboxMessage:
+    message_id: str
+    from_actor: str
+    to_worker: str
+    body: str
+    created_at: str
+    read: bool = False
+
+
 def init_team(*, root: Path, name: str, description: str) -> TeamConfig:
     team_name = safe_team_name(name)
     config = TeamConfig(name=team_name, description=description, created_at=_now())
@@ -137,6 +147,10 @@ def add_worker(*, root: Path, team_name: str, worker_name: str, role: str) -> Te
     safe_worker = safe_worker_name(worker_name)
     worker = TeamWorker(name=safe_worker, role=role)
     worker_dir = _team_root(root, safe_team) / "workers" / safe_worker
+    with _mailbox_lock(root=root, team_name=safe_team, worker_name=safe_worker):
+        mailbox_path = _mailbox_path(root=root, team_name=safe_team, worker_name=safe_worker)
+        if not mailbox_path.exists():
+            _write_json(mailbox_path, [])
     _write_json(worker_dir / "identity.json", asdict(worker))
     _write_json(
         worker_dir / "heartbeat.json",
@@ -144,6 +158,75 @@ def add_worker(*, root: Path, team_name: str, worker_name: str, role: str) -> Te
     )
     (worker_dir / "inbox.md").write_text("", encoding="utf-8")
     return worker
+
+
+def send_message(
+    *,
+    root: Path,
+    team_name: str,
+    from_actor: str,
+    to_worker: str,
+    body: str,
+) -> MailboxMessage:
+    safe_team = safe_team_name(team_name)
+    _require_team(root=root, team_name=safe_team)
+    safe_to_worker = safe_worker_name(to_worker)
+    _require_worker(root=root, team_name=safe_team, worker_name=safe_to_worker)
+    safe_from = _safe_actor(from_actor)
+    if not body.strip():
+        raise ValueError("message body must not be empty")
+    message = MailboxMessage(
+        message_id=uuid4().hex,
+        from_actor=safe_from,
+        to_worker=safe_to_worker,
+        body=body,
+        created_at=_now(),
+    )
+    with _mailbox_lock(root=root, team_name=safe_team, worker_name=safe_to_worker):
+        messages = _read_mailbox(root=root, team_name=safe_team, worker_name=safe_to_worker)
+        messages.append(message)
+        _write_mailbox(root=root, team_name=safe_team, worker_name=safe_to_worker, messages=messages)
+    return message
+
+
+def list_messages(*, root: Path, team_name: str, worker_name: str, unread_only: bool = False) -> list[MailboxMessage]:
+    safe_team = safe_team_name(team_name)
+    _require_team(root=root, team_name=safe_team)
+    safe_worker = safe_worker_name(worker_name)
+    _require_worker(root=root, team_name=safe_team, worker_name=safe_worker)
+    with _mailbox_lock(root=root, team_name=safe_team, worker_name=safe_worker):
+        messages = _read_mailbox(root=root, team_name=safe_team, worker_name=safe_worker)
+    if unread_only:
+        return [message for message in messages if not message.read]
+    return messages
+
+
+def mark_message_read(*, root: Path, team_name: str, worker_name: str, message_id: str) -> MailboxMessage:
+    safe_team = safe_team_name(team_name)
+    _require_team(root=root, team_name=safe_team)
+    safe_worker = safe_worker_name(worker_name)
+    _require_worker(root=root, team_name=safe_team, worker_name=safe_worker)
+    with _mailbox_lock(root=root, team_name=safe_team, worker_name=safe_worker):
+        messages = _read_mailbox(root=root, team_name=safe_team, worker_name=safe_worker)
+        updated: list[MailboxMessage] = []
+        selected: MailboxMessage | None = None
+        for message in messages:
+            if message.message_id == message_id:
+                selected = MailboxMessage(
+                    message_id=message.message_id,
+                    from_actor=message.from_actor,
+                    to_worker=message.to_worker,
+                    body=message.body,
+                    created_at=message.created_at,
+                    read=True,
+                )
+                updated.append(selected)
+            else:
+                updated.append(message)
+        if selected is None:
+            raise FileNotFoundError(f"message does not exist: {message_id}")
+        _write_mailbox(root=root, team_name=safe_team, worker_name=safe_worker, messages=updated)
+        return selected
 
 
 def team_status(*, root: Path, team_name: str) -> dict[str, object]:
@@ -209,6 +292,10 @@ def _team_root(root: Path, team_name: str) -> Path:
     return root / ".agent-flow" / "state" / "team" / team_name
 
 
+def _mailbox_path(*, root: Path, team_name: str, worker_name: str) -> Path:
+    return _team_root(root, team_name) / "mailbox" / f"{worker_name}.json"
+
+
 def _require_team(*, root: Path, team_name: str) -> None:
     if not (_team_root(root, team_name) / "config.json").is_file():
         raise FileNotFoundError(f"team is not initialized: {team_name}")
@@ -232,6 +319,27 @@ def _write_task(*, root: Path, team_name: str, task: TeamTask) -> None:
     _write_json(_team_root(root, team_name) / "tasks" / f"{task.task_id}.json", asdict(task))
 
 
+def _read_mailbox(*, root: Path, team_name: str, worker_name: str) -> list[MailboxMessage]:
+    path = _mailbox_path(root=root, team_name=team_name, worker_name=worker_name)
+    if not path.exists():
+        return []
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return [MailboxMessage(**item) for item in payload]
+
+
+def _write_mailbox(
+    *,
+    root: Path,
+    team_name: str,
+    worker_name: str,
+    messages: list[MailboxMessage],
+) -> None:
+    _write_json(
+        _mailbox_path(root=root, team_name=team_name, worker_name=worker_name),
+        [asdict(message) for message in messages],
+    )
+
+
 @contextmanager
 def _task_lock(*, root: Path, team_name: str, task_id: str):
     safe_id = safe_task_id(task_id)
@@ -253,6 +361,28 @@ def _task_lock(*, root: Path, team_name: str, task_id: str):
         lock_dir.rmdir()
 
 
+@contextmanager
+def _mailbox_lock(*, root: Path, team_name: str, worker_name: str):
+    mailbox_dir = _team_root(root, team_name) / "mailbox"
+    mailbox_dir.mkdir(parents=True, exist_ok=True)
+    lock_dir = mailbox_dir / f".lock-{worker_name}"
+    deadline = time.monotonic() + 5
+    acquired = False
+    while time.monotonic() < deadline:
+        try:
+            lock_dir.mkdir()
+            acquired = True
+            break
+        except FileExistsError:
+            time.sleep(0.01)
+    if not acquired:
+        raise TimeoutError(f"timed out waiting for mailbox lock: {worker_name}")
+    try:
+        yield
+    finally:
+        lock_dir.rmdir()
+
+
 def _safe_name(value: str, *, max_length: int, label: str) -> str:
     lowered = value.strip().lower()
     safe = re.sub(r"[^a-z0-9-]+", "-", lowered).strip("-")
@@ -261,6 +391,12 @@ def _safe_name(value: str, *, max_length: int, label: str) -> str:
     if len(safe) > max_length:
         raise ValueError(f"{label} name must be at most {max_length} characters")
     return safe
+
+
+def _safe_actor(value: str) -> str:
+    if value == "lead":
+        return value
+    return safe_worker_name(value)
 
 
 def _write_json(path: Path, payload: object) -> None:

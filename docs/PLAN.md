@@ -8,13 +8,14 @@ Default execution is Personal Workflow: the lead orchestrates Runs, stages, prom
 
 ## Current Slice
 
-Make Team task claiming and transitions operational.
+Make Team mailbox message records operational.
 
 ### Scope
 
-- Allow registered Workers to claim pending Tasks.
-- Move claimed Tasks to `in_progress` with a claim token.
-- Complete or fail Tasks only with the matching claim token.
+- Send messages to registered Worker mailboxes.
+- List messages for a Worker.
+- Filter unread messages.
+- Mark messages as read.
 - Preserve Team Orchestration as state-only; no worker process execution.
 - Keep AI CLI execution on host adapters/providers; no sandbox support.
 
@@ -27,5 +28,4 @@ Make Team task claiming and transitions operational.
 
 ## Next Slices
 
-1. Mailbox message records.
-2. Worker heartbeat update CLI.
+1. Worker heartbeat update CLI.
