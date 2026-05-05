@@ -17,6 +17,15 @@ from agent_flow.core.artifacts import (
 from agent_flow.core.gates import GateCommand, run_gates
 from agent_flow.core.profiles import detect_profile, load_profile
 from agent_flow.core.review import summarize_reviews, write_review_summary
+from agent_flow.core.team import (
+    add_task,
+    add_worker,
+    claim_task,
+    complete_task,
+    fail_task,
+    init_team,
+    team_status,
+)
 from agent_flow.core.worktrees import create_worktree, get_worktree_status, plan_worktree
 from agent_flow.core.state import RunRequest, RunState, start_run, status_summary
 from agent_flow.core.workflow import load_workflow
@@ -82,6 +91,44 @@ def main(argv: list[str] | None = None) -> int:
     worktree_status = worktree_subparsers.add_parser("status")
     worktree_status.add_argument("--root", default=".")
     worktree_status.add_argument("--name", required=True)
+
+    team_parser = subparsers.add_parser("team")
+    team_subparsers = team_parser.add_subparsers(dest="team_command", required=True)
+    team_init = team_subparsers.add_parser("init")
+    team_init.add_argument("--root", default=".")
+    team_init.add_argument("--name", required=True)
+    team_init.add_argument("--description", default="")
+    team_task = team_subparsers.add_parser("task")
+    team_task.add_argument("--root", default=".")
+    team_task.add_argument("--team", required=True)
+    team_task.add_argument("--id", required=True)
+    team_task.add_argument("--subject", required=True)
+    team_task.add_argument("--description", default="")
+    team_worker = team_subparsers.add_parser("worker")
+    team_worker.add_argument("--root", default=".")
+    team_worker.add_argument("--team", required=True)
+    team_worker.add_argument("--name", required=True)
+    team_worker.add_argument("--role", required=True)
+    team_claim = team_subparsers.add_parser("claim")
+    team_claim.add_argument("--root", default=".")
+    team_claim.add_argument("--team", required=True)
+    team_claim.add_argument("--task", required=True)
+    team_claim.add_argument("--worker", required=True)
+    team_complete = team_subparsers.add_parser("complete")
+    team_complete.add_argument("--root", default=".")
+    team_complete.add_argument("--team", required=True)
+    team_complete.add_argument("--task", required=True)
+    team_complete.add_argument("--claim-token", required=True)
+    team_complete.add_argument("--result", default="")
+    team_fail = team_subparsers.add_parser("fail")
+    team_fail.add_argument("--root", default=".")
+    team_fail.add_argument("--team", required=True)
+    team_fail.add_argument("--task", required=True)
+    team_fail.add_argument("--claim-token", required=True)
+    team_fail.add_argument("--result", default="")
+    team_status_parser = team_subparsers.add_parser("status")
+    team_status_parser.add_argument("--root", default=".")
+    team_status_parser.add_argument("--team", required=True)
 
     args = parser.parse_args(argv)
     root = Path(getattr(args, "root", ".")).resolve()
@@ -165,6 +212,57 @@ def main(argv: list[str] | None = None) -> int:
             status = get_worktree_status(root=root, name=args.name)
             state = "exists" if status.exists else "missing"
             print(f"{status.name} {status.branch} {status.path} {state}")
+            return 0
+
+    if args.command == "team":
+        if args.team_command == "init":
+            config = init_team(root=root, name=args.name, description=args.description)
+            print(f"{config.name} {root / '.agent-flow' / 'state' / 'team' / config.name}")
+            return 0
+        if args.team_command == "task":
+            task = add_task(
+                root=root,
+                team_name=args.team,
+                task_id=args.id,
+                subject=args.subject,
+                description=args.description,
+            )
+            print(f"{task.task_id} {task.status}")
+            return 0
+        if args.team_command == "worker":
+            worker = add_worker(root=root, team_name=args.team, worker_name=args.name, role=args.role)
+            print(f"{worker.name} {worker.role} {worker.status}")
+            return 0
+        if args.team_command == "claim":
+            task = claim_task(root=root, team_name=args.team, task_id=args.task, worker_name=args.worker)
+            print(f"{task.task_id} {task.status} {task.owner} {task.claim_token}")
+            return 0
+        if args.team_command == "complete":
+            task = complete_task(
+                root=root,
+                team_name=args.team,
+                task_id=args.task,
+                claim_token=args.claim_token,
+                result=args.result,
+            )
+            print(f"{task.task_id} {task.status}")
+            return 0
+        if args.team_command == "fail":
+            task = fail_task(
+                root=root,
+                team_name=args.team,
+                task_id=args.task,
+                claim_token=args.claim_token,
+                result=args.result,
+            )
+            print(f"{task.task_id} {task.status}")
+            return 0
+        if args.team_command == "status":
+            status = team_status(root=root, team_name=args.team)
+            print(
+                f"{status['team']} tasks={status['task_count']} "
+                f"workers={status['worker_count']} exists={status['exists']}"
+            )
             return 0
 
     if args.command == "start":

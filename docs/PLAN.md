@@ -8,14 +8,14 @@ Default execution is Personal Workflow: the lead orchestrates Runs, stages, prom
 
 ## Current Slice
 
-Make Worktree support operational.
+Make Team task claiming and transitions operational.
 
 ### Scope
 
-- Plan deterministic worktree paths and branch names.
-- Create git worktrees for isolated file changes.
-- Refuse dirty leader workspaces by default.
-- Report worktree status from manifest data.
+- Allow registered Workers to claim pending Tasks.
+- Move claimed Tasks to `in_progress` with a claim token.
+- Complete or fail Tasks only with the matching claim token.
+- Preserve Team Orchestration as state-only; no worker process execution.
 - Keep AI CLI execution on host adapters/providers; no sandbox support.
 
 ### Non-Goals
@@ -27,4 +27,5 @@ Make Worktree support operational.
 
 ## Next Slices
 
-1. Optional Team Orchestration state model.
+1. Mailbox message records.
+2. Worker heartbeat update CLI.

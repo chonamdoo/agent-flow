@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 import subprocess
+import json
+from concurrent.futures import ThreadPoolExecutor
 
 from agent_flow.cli import main
 from agent_flow.adapters.templates import PromptContext, render_stage_prompt
@@ -434,6 +436,375 @@ class CliTest(unittest.TestCase):
             )
             self.assertTrue((root / ".agent-flow" / "worktrees" / "after-init").is_dir())
 
+    def test_team_state_init_task_worker_and_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.assertEqual(
+                main(["team", "init", "--root", str(root), "--name", "Feature Team", "--description", "login"]),
+                0,
+            )
+            self.assertEqual(
+                main(
+                    [
+                        "team",
+                        "task",
+                        "--root",
+                        str(root),
+                        "--team",
+                        "feature-team",
+                        "--id",
+                        "task-1",
+                        "--subject",
+                        "Implement login",
+                    ]
+                ),
+                0,
+            )
+            self.assertEqual(
+                main(
+                    [
+                        "team",
+                        "worker",
+                        "--root",
+                        str(root),
+                        "--team",
+                        "feature-team",
+                        "--name",
+                        "worker-1",
+                        "--role",
+                        "implementer",
+                    ]
+                ),
+                0,
+            )
+            team_root = root / ".agent-flow" / "state" / "team" / "feature-team"
+            self.assertTrue((team_root / "config.json").is_file())
+            self.assertTrue((team_root / "tasks" / "task-1.json").is_file())
+            self.assertTrue((team_root / "workers" / "worker-1" / "identity.json").is_file())
+            self.assertTrue((team_root / "workers" / "worker-1" / "heartbeat.json").is_file())
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(["team", "status", "--root", str(root), "--team", "feature-team"]),
+                    0,
+                )
+            self.assertEqual(output.getvalue().strip(), "feature-team tasks=1 workers=1 exists=True")
+
+    def test_team_rejects_unsafe_task_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.assertEqual(main(["team", "init", "--root", str(root), "--name", "t"]), 0)
+            with self.assertRaises(ValueError):
+                main(
+                    [
+                        "team",
+                        "task",
+                        "--root",
+                        str(root),
+                        "--team",
+                        "t",
+                        "--id",
+                        "../bad",
+                        "--subject",
+                        "bad",
+                    ]
+                )
+
+    def test_team_task_requires_initialized_team(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaises(FileNotFoundError):
+                main(
+                    [
+                        "team",
+                        "task",
+                        "--root",
+                        temp_dir,
+                        "--team",
+                        "missing",
+                        "--id",
+                        "task-1",
+                        "--subject",
+                        "Missing team",
+                    ]
+                )
+
+    def test_team_worker_requires_initialized_team(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaises(FileNotFoundError):
+                main(
+                    [
+                        "team",
+                        "worker",
+                        "--root",
+                        temp_dir,
+                        "--team",
+                        "missing",
+                        "--name",
+                        "worker-1",
+                        "--role",
+                        "implementer",
+                    ]
+                )
+
+    def test_team_claim_and_complete_task(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(
+                        [
+                            "team",
+                            "claim",
+                            "--root",
+                            str(root),
+                            "--team",
+                            "feature-team",
+                            "--task",
+                            "task-1",
+                            "--worker",
+                            "worker-1",
+                        ]
+                    ),
+                    0,
+                )
+            parts = output.getvalue().strip().split()
+            self.assertEqual(parts[:3], ["task-1", "in_progress", "worker-1"])
+            token = parts[3]
+            self.assertEqual(
+                main(
+                    [
+                        "team",
+                        "complete",
+                        "--root",
+                        str(root),
+                        "--team",
+                        "feature-team",
+                        "--task",
+                        "task-1",
+                        "--claim-token",
+                        token,
+                        "--result",
+                        "done",
+                    ]
+                ),
+                0,
+            )
+            task = _read_task_json(root)
+            self.assertEqual(task["status"], "completed")
+            self.assertIsNone(task["claim_token"])
+            self.assertEqual(task["result"], "done")
+
+    def test_team_task_rejects_duplicate_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+            with self.assertRaises(FileExistsError):
+                main(
+                    [
+                        "team",
+                        "task",
+                        "--root",
+                        str(root),
+                        "--team",
+                        "feature-team",
+                        "--id",
+                        "task-1",
+                        "--subject",
+                        "Overwrite",
+                    ]
+                )
+
+    def test_team_task_duplicate_create_is_atomic(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            main(["team", "init", "--root", str(root), "--name", "feature-team"])
+
+            def create(subject: str) -> bool:
+                try:
+                    main(
+                        [
+                            "team",
+                            "task",
+                            "--root",
+                            str(root),
+                            "--team",
+                            "feature-team",
+                            "--id",
+                            "task-1",
+                            "--subject",
+                            subject,
+                        ]
+                    )
+                    return True
+                except FileExistsError:
+                    return False
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                results = list(executor.map(create, ["first", "second"]))
+            self.assertEqual(results.count(True), 1)
+            task = _read_task_json(root)
+            self.assertIn(task["subject"], {"first", "second"})
+
+    def test_team_claim_requires_registered_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            main(["team", "init", "--root", str(root), "--name", "feature-team"])
+            main(
+                [
+                    "team",
+                    "task",
+                    "--root",
+                    str(root),
+                    "--team",
+                    "feature-team",
+                    "--id",
+                    "task-1",
+                    "--subject",
+                    "Implement login",
+                ]
+            )
+            with self.assertRaises(FileNotFoundError):
+                main(
+                    [
+                        "team",
+                        "claim",
+                        "--root",
+                        str(root),
+                        "--team",
+                        "feature-team",
+                        "--task",
+                        "task-1",
+                        "--worker",
+                        "missing-worker",
+                    ]
+                )
+
+    def test_team_complete_requires_matching_claim_token(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+            main(
+                [
+                    "team",
+                    "claim",
+                    "--root",
+                    str(root),
+                    "--team",
+                    "feature-team",
+                    "--task",
+                    "task-1",
+                    "--worker",
+                    "worker-1",
+                ]
+            )
+            with self.assertRaises(PermissionError):
+                main(
+                    [
+                        "team",
+                        "complete",
+                        "--root",
+                        str(root),
+                        "--team",
+                        "feature-team",
+                        "--task",
+                        "task-1",
+                        "--claim-token",
+                        "wrong",
+                    ]
+                )
+
+    def test_team_fail_task(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                main(
+                    [
+                        "team",
+                        "claim",
+                        "--root",
+                        str(root),
+                        "--team",
+                        "feature-team",
+                        "--task",
+                        "task-1",
+                        "--worker",
+                        "worker-1",
+                    ]
+                )
+            token = output.getvalue().strip().split()[3]
+            self.assertEqual(
+                main(
+                    [
+                        "team",
+                        "fail",
+                        "--root",
+                        str(root),
+                        "--team",
+                        "feature-team",
+                        "--task",
+                        "task-1",
+                        "--claim-token",
+                        token,
+                        "--result",
+                        "blocked",
+                    ]
+                ),
+                0,
+            )
+            task = _read_task_json(root)
+            self.assertEqual(task["status"], "failed")
+            self.assertEqual(task["result"], "blocked")
+
+    def test_team_claim_allows_only_one_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+            main(
+                [
+                    "team",
+                    "worker",
+                    "--root",
+                    str(root),
+                    "--team",
+                    "feature-team",
+                    "--name",
+                    "worker-2",
+                    "--role",
+                    "implementer",
+                ]
+            )
+
+            def claim(worker: str) -> bool:
+                try:
+                    main(
+                        [
+                            "team",
+                            "claim",
+                            "--root",
+                            str(root),
+                            "--team",
+                            "feature-team",
+                            "--task",
+                            "task-1",
+                            "--worker",
+                            worker,
+                        ]
+                    )
+                    return True
+                except RuntimeError:
+                    return False
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                results = list(executor.map(claim, ["worker-1", "worker-2"]))
+            self.assertEqual(results.count(True), 1)
+            task = _read_task_json(root)
+            self.assertEqual(task["status"], "in_progress")
+            self.assertIn(task["owner"], {"worker-1", "worker-2"})
+
 
 def _init_git_repo(root: Path) -> None:
     subprocess.run(("git", "init", "-q"), cwd=root, check=True)
@@ -442,6 +813,52 @@ def _init_git_repo(root: Path) -> None:
     (root / "README.md").write_text("# test\n", encoding="utf-8")
     subprocess.run(("git", "add", "README.md"), cwd=root, check=True)
     subprocess.run(("git", "commit", "-q", "-m", "init"), cwd=root, check=True)
+
+
+def _create_team_with_task_and_worker(root: Path) -> None:
+    main(["team", "init", "--root", str(root), "--name", "feature-team"])
+    main(
+        [
+            "team",
+            "task",
+            "--root",
+            str(root),
+            "--team",
+            "feature-team",
+            "--id",
+            "task-1",
+            "--subject",
+            "Implement login",
+        ]
+    )
+    main(
+        [
+            "team",
+            "worker",
+            "--root",
+            str(root),
+            "--team",
+            "feature-team",
+            "--name",
+            "worker-1",
+            "--role",
+            "implementer",
+        ]
+    )
+
+
+def _read_task_json(root: Path) -> dict[str, object]:
+    return json.loads(
+        (
+            root
+            / ".agent-flow"
+            / "state"
+            / "team"
+            / "feature-team"
+            / "tasks"
+            / "task-1.json"
+        ).read_text(encoding="utf-8")
+    )
 
 
 if __name__ == "__main__":

@@ -36,6 +36,12 @@ agent-flow handoff --root /path/to/project --run-dir .agent-flow/runs/developmen
 agent-flow review-summary --root /path/to/project --run-dir .agent-flow/runs/development/<run-id> --reviews .agent-flow/runs/development/<run-id>/artifacts/review-1.md
 agent-flow worktree create --root /path/to/project --name implement-login
 agent-flow worktree status --root /path/to/project --name implement-login
+agent-flow team init --root /path/to/project --name feature-team --description "login work"
+agent-flow team task --root /path/to/project --team feature-team --id task-1 --subject "Implement login"
+agent-flow team worker --root /path/to/project --team feature-team --name worker-1 --role implementer
+agent-flow team claim --root /path/to/project --team feature-team --task task-1 --worker worker-1
+agent-flow team complete --root /path/to/project --team feature-team --task task-1 --claim-token <token> --result "done"
+agent-flow team status --root /path/to/project --team feature-team
 agent-flow gates --root /path/to/project --profile auto
 agent-flow status --root /path/to/project
 agent-flow detect-profile --root /path/to/project
