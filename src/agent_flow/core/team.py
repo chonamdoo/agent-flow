@@ -294,22 +294,45 @@ def acknowledge_shutdown(*, root: Path, team_name: str, worker_name: str, signal
     return acknowledged
 
 
-def team_status(*, root: Path, team_name: str) -> dict[str, object]:
+def team_status(*, root: Path, team_name: str, detail: bool = False) -> dict[str, object]:
     safe_team = safe_team_name(team_name)
     root_dir = _team_root(root, safe_team)
-    tasks = sorted((root_dir / "tasks").glob("*.json")) if (root_dir / "tasks").exists() else []
-    workers = sorted((root_dir / "workers").glob("*/identity.json")) if (root_dir / "workers").exists() else []
+    task_paths = sorted((root_dir / "tasks").glob("*.json")) if (root_dir / "tasks").exists() else []
+    worker_paths = sorted((root_dir / "workers").glob("*/identity.json")) if (root_dir / "workers").exists() else []
+    tasks = []
+    workers = []
     heartbeats = []
-    for worker in workers:
-        heartbeat_path = worker.parent / "heartbeat.json"
+    for worker_path in worker_paths:
+        worker_name = worker_path.parent.name
+        heartbeat_path = worker_path.parent / "heartbeat.json"
         if heartbeat_path.is_file():
             heartbeats.append(WorkerHeartbeat(**json.loads(heartbeat_path.read_text(encoding="utf-8"))))
+    unread_counts: dict[str, int] = {}
+    shutdowns = []
+    if detail:
+        tasks = [TeamTask(**json.loads(path.read_text(encoding="utf-8"))) for path in task_paths]
+        workers = [TeamWorker(**json.loads(path.read_text(encoding="utf-8"))) for path in worker_paths]
+        for worker_path in worker_paths:
+            worker_name = worker_path.parent.name
+            with _mailbox_lock(root=root, team_name=safe_team, worker_name=worker_name):
+                unread_counts[worker_name] = len(
+                    [
+                        message
+                        for message in _read_mailbox(root=root, team_name=safe_team, worker_name=worker_name)
+                        if not message.read
+                    ]
+                )
+        shutdowns = _read_shutdowns(root=root, team_name=safe_team)
     return {
         "team": safe_team,
         "exists": root_dir.exists(),
-        "task_count": len(tasks),
-        "worker_count": len(workers),
+        "task_count": len(task_paths),
+        "worker_count": len(worker_paths),
+        "tasks": tasks,
+        "workers": workers,
         "heartbeats": heartbeats,
+        "unread_counts": unread_counts,
+        "shutdowns": shutdowns,
         "path": str(root_dir),
     }
 
@@ -434,6 +457,16 @@ def _read_shutdown(*, root: Path, team_name: str, worker_name: str, signal_id: s
     return ShutdownSignal(**json.loads(path.read_text(encoding="utf-8")))
 
 
+def _read_shutdowns(*, root: Path, team_name: str) -> list[ShutdownSignal]:
+    shutdown_dir = _team_root(root, team_name) / "shutdown"
+    if not shutdown_dir.exists():
+        return []
+    signals = []
+    for path in sorted(shutdown_dir.glob("*/*.json")):
+        signals.append(ShutdownSignal(**json.loads(path.read_text(encoding="utf-8"))))
+    return signals
+
+
 def _write_shutdown(*, root: Path, team_name: str, signal: ShutdownSignal) -> None:
     _write_json(
         _shutdown_path(root=root, team_name=team_name, worker_name=signal.worker, signal_id=signal.signal_id),
@@ -502,7 +535,9 @@ def _safe_actor(value: str) -> str:
 
 def _write_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f"{json.dumps(payload, indent=2, sort_keys=True)}\n", encoding="utf-8")
+    tmp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    tmp_path.write_text(f"{json.dumps(payload, indent=2, sort_keys=True)}\n", encoding="utf-8")
+    tmp_path.replace(path)
 
 
 def _write_json_create(path: Path, payload: object, *, exists_message: str) -> None:

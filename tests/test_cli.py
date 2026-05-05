@@ -524,6 +524,72 @@ class CliTest(unittest.TestCase):
             self.assertEqual(heartbeat["status"], "reviewing")
             self.assertTrue(heartbeat["alive"])
 
+    def test_team_status_detail_lists_tasks_workers_and_shutdowns(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+            main(
+                [
+                    "team",
+                    "message",
+                    "--root",
+                    str(root),
+                    "--team",
+                    "feature-team",
+                    "--from-actor",
+                    "lead",
+                    "--to-worker",
+                    "worker-1",
+                    "--body",
+                    "status check",
+                ]
+            )
+            main(
+                [
+                    "team",
+                    "shutdown",
+                    "--root",
+                    str(root),
+                    "--team",
+                    "feature-team",
+                    "--worker",
+                    "worker-1",
+                    "--reason",
+                    "done",
+                ]
+            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(["team", "status", "--root", str(root), "--team", "feature-team", "--detail"]),
+                    0,
+                )
+            lines = output.getvalue().strip().splitlines()
+            self.assertIn("task task-1 pending owner=- subject=Implement login", lines)
+            self.assertIn("worker worker-1 role=implementer status=idle unread=1", lines)
+            self.assertTrue(any(line.startswith("shutdown ") and "worker=worker-1 pending reason=done" in line for line in lines))
+
+    def test_team_status_summary_ignores_detail_state_problems(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+            team_root = root / ".agent-flow" / "state" / "team" / "feature-team"
+            mailbox_dir = team_root / "mailbox"
+            (mailbox_dir / "worker-1.json").unlink()
+            mailbox_dir.rmdir()
+            shutdown_dir = team_root / "shutdown" / "worker-1"
+            shutdown_dir.mkdir(parents=True)
+            (shutdown_dir / f'{"a" * 32}.json').write_text("{", encoding="utf-8")
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(["team", "status", "--root", str(root), "--team", "feature-team"]),
+                    0,
+                )
+            self.assertEqual(output.getvalue().strip().splitlines()[0], "feature-team tasks=1 workers=1 exists=True")
+            self.assertFalse(mailbox_dir.exists())
+
     def test_team_heartbeat_can_mark_worker_dead(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

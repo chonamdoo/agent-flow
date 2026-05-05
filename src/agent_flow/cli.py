@@ -169,6 +169,7 @@ def main(argv: list[str] | None = None) -> int:
     team_status_parser = team_subparsers.add_parser("status")
     team_status_parser.add_argument("--root", default=".")
     team_status_parser.add_argument("--team", required=True)
+    team_status_parser.add_argument("--detail", action="store_true")
 
     args = parser.parse_args(argv)
     root = Path(getattr(args, "root", ".")).resolve()
@@ -357,7 +358,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{signal.signal_id} {signal.worker} acknowledged")
             return 0
         if args.team_command == "status":
-            status = team_status(root=root, team_name=args.team)
+            status = team_status(root=root, team_name=args.team, detail=args.detail)
             print(
                 f"{status['team']} tasks={status['task_count']} "
                 f"workers={status['worker_count']} exists={status['exists']}"
@@ -365,6 +366,17 @@ def main(argv: list[str] | None = None) -> int:
             for heartbeat in status["heartbeats"]:
                 state = "alive" if heartbeat.alive else "dead"
                 print(f"{heartbeat.worker} {heartbeat.status} {state} {heartbeat.updated_at}")
+            if args.detail:
+                for task in status["tasks"]:
+                    owner = task.owner or "-"
+                    print(f"task {task.task_id} {task.status} owner={owner} subject={task.subject}")
+                unread_counts = status["unread_counts"]
+                for worker in status["workers"]:
+                    unread = unread_counts.get(worker.name, 0)
+                    print(f"worker {worker.name} role={worker.role} status={worker.status} unread={unread}")
+                for signal in status["shutdowns"]:
+                    state = "acknowledged" if signal.acknowledged else "pending"
+                    print(f"shutdown {signal.signal_id} worker={signal.worker} {state} reason={signal.reason}")
             return 0
 
     if args.command == "start":

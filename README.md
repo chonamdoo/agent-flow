@@ -48,6 +48,7 @@ agent-flow team heartbeat --root /path/to/project --team feature-team --worker w
 agent-flow team shutdown --root /path/to/project --team feature-team --worker worker-1 --reason "slice complete"
 agent-flow team ack-shutdown --root /path/to/project --team feature-team --worker worker-1 --signal <signal-id>
 agent-flow team status --root /path/to/project --team feature-team
+agent-flow team status --root /path/to/project --team feature-team --detail
 agent-flow gates --root /path/to/project --profile auto
 agent-flow status --root /path/to/project
 agent-flow detect-profile --root /path/to/project
