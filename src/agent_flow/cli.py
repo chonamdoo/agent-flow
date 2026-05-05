@@ -22,6 +22,7 @@ from agent_flow.core.team import (
     acknowledge_shutdown,
     add_task,
     add_worker,
+    archive_team,
     claim_task,
     complete_task,
     apply_team_state_import,
@@ -108,6 +109,10 @@ def main(argv: list[str] | None = None) -> int:
     team_subparsers = team_parser.add_subparsers(dest="team_command", required=True)
     team_list = team_subparsers.add_parser("list")
     team_list.add_argument("--root", default=".")
+    team_archive = team_subparsers.add_parser("archive")
+    team_archive.add_argument("--root", default=".")
+    team_archive.add_argument("--team", required=True)
+    team_archive.add_argument("--reason", default="")
     team_init = team_subparsers.add_parser("init")
     team_init.add_argument("--root", default=".")
     team_init.add_argument("--name", required=True)
@@ -280,6 +285,10 @@ def main(argv: list[str] | None = None) -> int:
             teams = list_teams(root=root)
             for team in teams:
                 print(f"{team.name} tasks={team.task_count} workers={team.worker_count} path={team.path}")
+            return 0
+        if args.team_command == "archive":
+            archive = archive_team(root=root, team_name=args.team, reason=args.reason)
+            print(f"{archive.name} archived {archive.archive_path}")
             return 0
         if args.team_command == "init":
             config = init_team(root=root, name=args.name, description=args.description)

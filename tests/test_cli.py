@@ -697,6 +697,91 @@ class CliTest(unittest.TestCase):
                 self.assertEqual(main(["team", "list", "--root", temp_dir]), 0)
             self.assertEqual(output.getvalue(), "")
 
+    def test_team_archive_moves_team_state_to_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(
+                        [
+                            "team",
+                            "archive",
+                            "--root",
+                            str(root),
+                            "--team",
+                            "feature-team",
+                            "--reason",
+                            "done",
+                        ]
+                    ),
+                    0,
+                )
+            self.assertIn("feature-team archived", output.getvalue())
+            resolved_root = root.resolve()
+            team_root = resolved_root / ".agent-flow" / "state" / "team" / "feature-team"
+            self.assertFalse(team_root.exists())
+            archives = list((resolved_root / ".agent-flow" / "archive" / "team").glob("feature-team-*"))
+            self.assertEqual(len(archives), 1)
+            self.assertTrue((archives[0] / "tasks" / "task-1.json").is_file())
+            manifest = json.loads((archives[0] / "archive.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["name"], "feature-team")
+            self.assertEqual(manifest["reason"], "done")
+            self.assertEqual(manifest["source_path"], str(team_root))
+            self.assertEqual(manifest["archive_path"], str(archives[0]))
+            self.assertTrue(manifest["archived_at"])
+
+    def test_team_archive_removes_team_from_active_list(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+            self.assertEqual(
+                main(["team", "archive", "--root", str(root), "--team", "feature-team", "--reason", "done"]),
+                0,
+            )
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["team", "list", "--root", str(root)]), 0)
+            self.assertEqual(output.getvalue(), "")
+
+    def test_team_archive_refuses_existing_archive_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+            archive_root = root / ".agent-flow" / "archive" / "team"
+            archive_root.mkdir(parents=True)
+            archive_dir = archive_root / "feature-team-20260505T062604000000Z"
+            archive_dir.mkdir()
+
+            with mock.patch("agent_flow.core.team._now", return_value="2026-05-05T06:26:04+00:00"):
+                with self.assertRaises(FileExistsError):
+                    main(["team", "archive", "--root", str(root), "--team", "feature-team"])
+            self.assertTrue((root / ".agent-flow" / "state" / "team" / "feature-team").is_dir())
+            self.assertEqual(list(archive_dir.iterdir()), [])
+
+    def test_team_archive_manifest_write_failure_keeps_active_team(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+
+            from agent_flow.core import team as team_core
+
+            original_write_json = team_core._write_json
+
+            def fail_archive_manifest(path: Path, payload: object) -> None:
+                if path.name == "archive.json":
+                    raise OSError("manifest failed")
+                original_write_json(path, payload)
+
+            with mock.patch("agent_flow.core.team._write_json", side_effect=fail_archive_manifest):
+                with self.assertRaises(OSError):
+                    main(["team", "archive", "--root", str(root), "--team", "feature-team"])
+            team_root = root.resolve() / ".agent-flow" / "state" / "team" / "feature-team"
+            self.assertTrue(team_root.is_dir())
+            self.assertEqual(list((root.resolve() / ".agent-flow" / "archive" / "team").glob("feature-team-*")), [])
+
     def test_team_import_validate_accepts_export_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

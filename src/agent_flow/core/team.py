@@ -76,6 +76,15 @@ class TeamSummary:
     path: str
 
 
+@dataclass(frozen=True)
+class TeamArchive:
+    name: str
+    source_path: str
+    archive_path: str
+    archived_at: str
+    reason: str
+
+
 def init_team(*, root: Path, name: str, description: str) -> TeamConfig:
     team_name = safe_team_name(name)
     config = TeamConfig(name=team_name, description=description, created_at=_now())
@@ -109,6 +118,28 @@ def list_teams(*, root: Path) -> list[TeamSummary]:
             )
         )
     return summaries
+
+
+def archive_team(*, root: Path, team_name: str, reason: str) -> TeamArchive:
+    safe_team = safe_team_name(team_name)
+    source_dir = _team_root(root, safe_team)
+    _require_team(root=root, team_name=safe_team)
+    archived_at = _now()
+    archive_name = f"{safe_team}-{_archive_timestamp(archived_at)}"
+    archive_dir = root / ".agent-flow" / "archive" / "team" / archive_name
+    archive_dir.parent.mkdir(parents=True, exist_ok=True)
+    if archive_dir.exists():
+        raise FileExistsError(f"team archive already exists: {archive_name}")
+    archive = TeamArchive(
+        name=safe_team,
+        source_path=str(source_dir),
+        archive_path=str(archive_dir),
+        archived_at=archived_at,
+        reason=reason,
+    )
+    _write_json(source_dir / "archive.json", asdict(archive))
+    source_dir.rename(archive_dir)
+    return archive
 
 
 def add_task(
@@ -818,6 +849,11 @@ def _safe_actor(value: str) -> str:
     if value == "lead":
         return value
     return safe_worker_name(value)
+
+
+def _archive_timestamp(value: str) -> str:
+    timestamp = datetime.fromisoformat(value).astimezone(timezone.utc)
+    return timestamp.strftime("%Y%m%dT%H%M%S%fZ")
 
 
 def _write_json(path: Path, payload: object) -> None:

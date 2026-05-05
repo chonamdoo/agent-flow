@@ -36,6 +36,8 @@ Make Team state import documentation polish operational.
 
 Make Team state list command operational.
 
+Make Team state delete archive plan operational.
+
 ### Scope
 
 - Send messages to registered Worker mailboxes.
@@ -54,13 +56,13 @@ Make Team state list command operational.
 
 ## Current Slice
 
-Make Team state delete archive plan operational.
+Make Team state archive command operational.
 
 ### Scope
 
-- Record archive-before-delete policy for Team State cleanup.
-- Keep destructive delete out of the current implementation.
-- Preserve non-destructive import and recovery posture.
+- Archive active Team State into a recoverable archive directory.
+- Record archive metadata with timestamp and reason.
+- Remove archived Team State from active listing.
 - Preserve Team Orchestration as state-only; no worker process execution.
 - Keep AI CLI execution on host adapters/providers; no sandbox support.
 
@@ -73,4 +75,4 @@ Make Team state delete archive plan operational.
 
 ## Next Slices
 
-1. Team state archive command.
+1. Team state archive list command.
