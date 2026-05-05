@@ -170,17 +170,54 @@ class CliTest(unittest.TestCase):
                 (project_root / ".agent-flow" / "prompts" / "pr-watch.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
-                "agent-flow-kit run next",
+                "npx github:chonamdoo/agent-flow run next",
                 (project_root / "AGENTS.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
-                "agent-flow-kit run next",
+                "npx github:chonamdoo/agent-flow run next",
                 (project_root / "CLAUDE.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
-                "agent-flow-kit run next",
+                "npx github:chonamdoo/agent-flow run next",
                 (project_root / "GEMINI.md").read_text(encoding="utf-8"),
             )
+            self.assertIn(
+                "npx github:chonamdoo/agent-flow run next",
+                (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8"),
+            )
+
+    def test_node_installer_reinstall_updates_managed_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+
+            workflow = project_root / ".agent-flow" / "workflows" / "full-feature.yaml"
+            prompt = project_root / ".agent-flow" / "prompts" / "pr-watch.md"
+            bootstrap = project_root / ".agent-flow" / "bootstrap" / "AGENTS.md"
+            claude_bootstrap = project_root / ".agent-flow" / "bootstrap" / "CLAUDE.md"
+            gemini_bootstrap = project_root / ".agent-flow" / "bootstrap" / "GEMINI.md"
+            skill = project_root / ".agent-flow" / "skills" / "full-feature-workflow" / "SKILL.md"
+            rules = project_root / ".agent-flow" / "rules" / "workflow-contract.md"
+            workflow.write_text("stale workflow\n", encoding="utf-8")
+            prompt.write_text("stale prompt\n", encoding="utf-8")
+            bootstrap.write_text("stale bootstrap\n", encoding="utf-8")
+            claude_bootstrap.write_text("stale claude bootstrap\n", encoding="utf-8")
+            gemini_bootstrap.write_text("stale gemini bootstrap\n", encoding="utf-8")
+            skill.write_text("stale skill\n", encoding="utf-8")
+            rules.write_text("stale rules\n", encoding="utf-8")
+
+            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+
+            self.assertIn("id: full-feature", workflow.read_text(encoding="utf-8"))
+            self.assertIn("status: ci-failed", prompt.read_text(encoding="utf-8"))
+            self.assertIn("npx github:chonamdoo/agent-flow run next", bootstrap.read_text(encoding="utf-8"))
+            self.assertIn("npx github:chonamdoo/agent-flow run next", claude_bootstrap.read_text(encoding="utf-8"))
+            self.assertIn("npx github:chonamdoo/agent-flow run next", gemini_bootstrap.read_text(encoding="utf-8"))
+            self.assertIn("Full Feature Workflow", skill.read_text(encoding="utf-8"))
+            self.assertIn("Workflow Contract", rules.read_text(encoding="utf-8"))
 
     def test_node_installer_detects_node_project_profile(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -436,7 +473,21 @@ class CliTest(unittest.TestCase):
             self.assertEqual(comments.returncode, 0, comments.stderr)
             self.assertIn("Current phase: pr-comment-fix", comments.stdout)
             comment_fix = run_dir / _node_phase_artifact("pr-comment-fix")
+            comment_fix.write_text("old comment fix\n", encoding="utf-8")
+            os.utime(comment_fix, (1, 1))
+            stale_comment_fix = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(stale_comment_fix.returncode, 1)
+            self.assertIn("blocked: stale artifact", stale_comment_fix.stderr)
             comment_fix.write_text("pushed comment fixes\n", encoding="utf-8")
+            same_ms = json.loads((project_root / ".agent-flow" / "state" / "current-run.json").read_text(encoding="utf-8"))
+            entered_ts = _node_epoch_seconds(same_ms["phase_entered_at"])
+            os.utime(comment_fix, (entered_ts, entered_ts))
             back_to_watch = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=project_root,
@@ -446,6 +497,31 @@ class CliTest(unittest.TestCase):
             )
             self.assertEqual(back_to_watch.returncode, 0, back_to_watch.stderr)
             self.assertIn("Current phase: pr-watch", back_to_watch.stdout)
+
+            watch.write_text("status: comments\n", encoding="utf-8")
+            comments_again = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(comments_again.returncode, 0, comments_again.stderr)
+            self.assertIn("Current phase: pr-comment-fix", comments_again.stdout)
+            reused_comment_fix = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(reused_comment_fix.returncode, 1)
+            self.assertIn("blocked: stale artifact", reused_comment_fix.stderr)
+            comment_fix.write_text("pushed second comment fixes\n", encoding="utf-8")
+            self.assertEqual(
+                subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode,
+                0,
+            )
 
             watch.write_text("status: ci-failed\n", encoding="utf-8")
             ci_failed = subprocess.run(
@@ -458,6 +534,17 @@ class CliTest(unittest.TestCase):
             self.assertEqual(ci_failed.returncode, 0, ci_failed.stderr)
             self.assertIn("Current phase: pr-ci-fix", ci_failed.stdout)
             ci_fix = run_dir / _node_phase_artifact("pr-ci-fix")
+            ci_fix.write_text("old ci fixes\n", encoding="utf-8")
+            os.utime(ci_fix, (1, 1))
+            stale_ci_fix = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(stale_ci_fix.returncode, 1)
+            self.assertIn("blocked: stale artifact", stale_ci_fix.stderr)
             ci_fix.write_text("pushed ci fixes\n", encoding="utf-8")
             back_to_watch_again = subprocess.run(
                 (node, cli, "run", "advance"),
@@ -3358,6 +3445,12 @@ def _node_phase_artifact(phase: str) -> Path:
         "handoff": Path("artifacts/handoff.md"),
     }
     return artifacts[phase]
+
+
+def _node_epoch_seconds(value: str) -> float:
+    from datetime import datetime
+
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
 
 
 if __name__ == "__main__":
