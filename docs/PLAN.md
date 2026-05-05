@@ -6,9 +6,11 @@ Build Agent Flow as a reusable Workflow Kit.
 
 Default execution is Personal Workflow: the lead orchestrates Runs, stages, prompts, artifacts, and gates. Team Orchestration is an optional future module with separate Team State.
 
-## Completed Slice
+## Completed Slices
 
 Make Team mailbox message records operational.
+
+Make Worker heartbeat updates operational.
 
 ### Scope
 
@@ -28,23 +30,23 @@ Make Team mailbox message records operational.
 
 ## Current Slice
 
-Make Worker heartbeat updates operational.
+Make Team shutdown signal records operational.
 
 ### Scope
 
-- Update registered Worker heartbeat status from the CLI.
-- Mark a Worker heartbeat alive or dead.
-- Show Worker heartbeat state in Team status.
+- Request shutdown for a registered Worker.
+- Let a Worker acknowledge the shutdown request.
+- Store shutdown signal records under Team State.
 - Preserve Team Orchestration as state-only; no worker process execution.
 - Keep AI CLI execution on host adapters/providers; no sandbox support.
 
 ### Non-Goals
 
 - No Team Orchestration runtime.
-- No process supervision.
+- No process supervision or process termination.
 - No direct Codex/Claude/Gemini provider execution.
 - No sandbox execution.
 
 ## Next Slices
 
-1. Team shutdown signal records.
+1. Team status detail view.

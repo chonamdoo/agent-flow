@@ -45,6 +45,8 @@ agent-flow team message --root /path/to/project --team feature-team --from-actor
 agent-flow team messages --root /path/to/project --team feature-team --worker worker-1 --unread-only
 agent-flow team mark-read --root /path/to/project --team feature-team --worker worker-1 --message <message-id>
 agent-flow team heartbeat --root /path/to/project --team feature-team --worker worker-1 --status reviewing
+agent-flow team shutdown --root /path/to/project --team feature-team --worker worker-1 --reason "slice complete"
+agent-flow team ack-shutdown --root /path/to/project --team feature-team --worker worker-1 --signal <signal-id>
 agent-flow team status --root /path/to/project --team feature-team
 agent-flow gates --root /path/to/project --profile auto
 agent-flow status --root /path/to/project

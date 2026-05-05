@@ -18,6 +18,7 @@ from agent_flow.core.gates import GateCommand, run_gates
 from agent_flow.core.profiles import detect_profile, load_profile
 from agent_flow.core.review import summarize_reviews, write_review_summary
 from agent_flow.core.team import (
+    acknowledge_shutdown,
     add_task,
     add_worker,
     claim_task,
@@ -26,6 +27,7 @@ from agent_flow.core.team import (
     init_team,
     list_messages,
     mark_message_read,
+    request_shutdown,
     send_message,
     team_status,
     update_worker_heartbeat,
@@ -154,6 +156,16 @@ def main(argv: list[str] | None = None) -> int:
     heartbeat_alive = team_heartbeat.add_mutually_exclusive_group()
     heartbeat_alive.add_argument("--alive", action="store_true", default=True)
     heartbeat_alive.add_argument("--dead", action="store_true")
+    team_shutdown = team_subparsers.add_parser("shutdown")
+    team_shutdown.add_argument("--root", default=".")
+    team_shutdown.add_argument("--team", required=True)
+    team_shutdown.add_argument("--worker", required=True)
+    team_shutdown.add_argument("--reason", required=True)
+    team_ack_shutdown = team_subparsers.add_parser("ack-shutdown")
+    team_ack_shutdown.add_argument("--root", default=".")
+    team_ack_shutdown.add_argument("--team", required=True)
+    team_ack_shutdown.add_argument("--worker", required=True)
+    team_ack_shutdown.add_argument("--signal", required=True)
     team_status_parser = team_subparsers.add_parser("status")
     team_status_parser.add_argument("--root", default=".")
     team_status_parser.add_argument("--team", required=True)
@@ -325,6 +337,24 @@ def main(argv: list[str] | None = None) -> int:
             )
             state = "alive" if heartbeat.alive else "dead"
             print(f"{heartbeat.worker} {heartbeat.status} {state} {heartbeat.updated_at}")
+            return 0
+        if args.team_command == "shutdown":
+            signal = request_shutdown(
+                root=root,
+                team_name=args.team,
+                worker_name=args.worker,
+                reason=args.reason,
+            )
+            print(f"{signal.signal_id} {signal.worker} pending")
+            return 0
+        if args.team_command == "ack-shutdown":
+            signal = acknowledge_shutdown(
+                root=root,
+                team_name=args.team,
+                worker_name=args.worker,
+                signal_id=args.signal,
+            )
+            print(f"{signal.signal_id} {signal.worker} acknowledged")
             return 0
         if args.team_command == "status":
             status = team_status(root=root, team_name=args.team)

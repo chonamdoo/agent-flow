@@ -56,6 +56,16 @@ class MailboxMessage:
     read: bool = False
 
 
+@dataclass(frozen=True)
+class ShutdownSignal:
+    signal_id: str
+    worker: str
+    reason: str
+    requested_at: str
+    acknowledged: bool = False
+    acknowledged_at: str | None = None
+
+
 def init_team(*, root: Path, name: str, description: str) -> TeamConfig:
     team_name = safe_team_name(name)
     config = TeamConfig(name=team_name, description=description, created_at=_now())
@@ -63,6 +73,7 @@ def init_team(*, root: Path, name: str, description: str) -> TeamConfig:
     (_team_root(root, team_name) / "tasks").mkdir(parents=True, exist_ok=True)
     (_team_root(root, team_name) / "workers").mkdir(parents=True, exist_ok=True)
     (_team_root(root, team_name) / "mailbox").mkdir(parents=True, exist_ok=True)
+    (_team_root(root, team_name) / "shutdown").mkdir(parents=True, exist_ok=True)
     return config
 
 
@@ -246,6 +257,43 @@ def mark_message_read(*, root: Path, team_name: str, worker_name: str, message_i
         return selected
 
 
+def request_shutdown(*, root: Path, team_name: str, worker_name: str, reason: str) -> ShutdownSignal:
+    safe_team = safe_team_name(team_name)
+    _require_team(root=root, team_name=safe_team)
+    safe_worker = safe_worker_name(worker_name)
+    _require_worker(root=root, team_name=safe_team, worker_name=safe_worker)
+    if not reason.strip():
+        raise ValueError("shutdown reason must not be empty")
+    signal = ShutdownSignal(
+        signal_id=uuid4().hex,
+        worker=safe_worker,
+        reason=reason,
+        requested_at=_now(),
+    )
+    _write_shutdown(root=root, team_name=safe_team, signal=signal)
+    return signal
+
+
+def acknowledge_shutdown(*, root: Path, team_name: str, worker_name: str, signal_id: str) -> ShutdownSignal:
+    safe_team = safe_team_name(team_name)
+    _require_team(root=root, team_name=safe_team)
+    safe_worker = safe_worker_name(worker_name)
+    _require_worker(root=root, team_name=safe_team, worker_name=safe_worker)
+    signal = _read_shutdown(root=root, team_name=safe_team, worker_name=safe_worker, signal_id=signal_id)
+    if signal.worker != safe_worker:
+        raise ValueError(f"shutdown signal worker mismatch: {signal.signal_id}")
+    acknowledged = ShutdownSignal(
+        signal_id=signal.signal_id,
+        worker=safe_worker,
+        reason=signal.reason,
+        requested_at=signal.requested_at,
+        acknowledged=True,
+        acknowledged_at=_now(),
+    )
+    _write_shutdown(root=root, team_name=safe_team, signal=acknowledged)
+    return acknowledged
+
+
 def team_status(*, root: Path, team_name: str) -> dict[str, object]:
     safe_team = safe_team_name(team_name)
     root_dir = _team_root(root, safe_team)
@@ -311,6 +359,13 @@ def safe_task_id(value: str) -> str:
     return stripped
 
 
+def safe_signal_id(value: str) -> str:
+    stripped = value.strip()
+    if not re.fullmatch(r"[a-f0-9]{32}", stripped):
+        raise ValueError(f"unsafe signal id: {value}")
+    return stripped
+
+
 def _team_root(root: Path, team_name: str) -> Path:
     return root / ".agent-flow" / "state" / "team" / team_name
 
@@ -321,6 +376,11 @@ def _mailbox_path(*, root: Path, team_name: str, worker_name: str) -> Path:
 
 def _heartbeat_path(*, root: Path, team_name: str, worker_name: str) -> Path:
     return _team_root(root, team_name) / "workers" / worker_name / "heartbeat.json"
+
+
+def _shutdown_path(*, root: Path, team_name: str, worker_name: str, signal_id: str) -> Path:
+    safe_signal = safe_signal_id(signal_id)
+    return _team_root(root, team_name) / "shutdown" / worker_name / f"{safe_signal}.json"
 
 
 def _require_team(*, root: Path, team_name: str) -> None:
@@ -364,6 +424,20 @@ def _write_mailbox(
     _write_json(
         _mailbox_path(root=root, team_name=team_name, worker_name=worker_name),
         [asdict(message) for message in messages],
+    )
+
+
+def _read_shutdown(*, root: Path, team_name: str, worker_name: str, signal_id: str) -> ShutdownSignal:
+    path = _shutdown_path(root=root, team_name=team_name, worker_name=worker_name, signal_id=signal_id)
+    if not path.is_file():
+        raise FileNotFoundError(f"shutdown signal does not exist: {signal_id}")
+    return ShutdownSignal(**json.loads(path.read_text(encoding="utf-8")))
+
+
+def _write_shutdown(*, root: Path, team_name: str, signal: ShutdownSignal) -> None:
+    _write_json(
+        _shutdown_path(root=root, team_name=team_name, worker_name=signal.worker, signal_id=signal.signal_id),
+        asdict(signal),
     )
 
 

@@ -8,12 +8,14 @@ import unittest
 from pathlib import Path
 import subprocess
 import json
+from dataclasses import asdict
 from concurrent.futures import ThreadPoolExecutor
 
 from agent_flow.cli import main
 from agent_flow.adapters.templates import PromptContext, render_stage_prompt
 from agent_flow.core.gates import GateCommand, run_gate
 from agent_flow.core.profiles import load_profile
+from agent_flow.core.team import ShutdownSignal
 from agent_flow.core.workflow import _stage_from_payload
 from agent_flow.core.worktrees import plan_worktree
 
@@ -482,6 +484,7 @@ class CliTest(unittest.TestCase):
             self.assertTrue((team_root / "tasks" / "task-1.json").is_file())
             self.assertTrue((team_root / "workers" / "worker-1" / "identity.json").is_file())
             self.assertTrue((team_root / "workers" / "worker-1" / "heartbeat.json").is_file())
+            self.assertTrue((team_root / "shutdown").is_dir())
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 self.assertEqual(
@@ -564,6 +567,194 @@ class CliTest(unittest.TestCase):
                         "missing",
                         "--status",
                         "running",
+                    ]
+                )
+
+    def test_team_shutdown_request_and_acknowledge(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(
+                        [
+                            "team",
+                            "shutdown",
+                            "--root",
+                            str(root),
+                            "--team",
+                            "feature-team",
+                            "--worker",
+                            "worker-1",
+                            "--reason",
+                            "slice complete",
+                        ]
+                    ),
+                    0,
+                )
+            signal_id = output.getvalue().strip().split()[0]
+            signal = _read_shutdown_json(root, signal_id)
+            self.assertEqual(signal["signal_id"], signal_id)
+            self.assertEqual(signal["reason"], "slice complete")
+            self.assertFalse(signal["acknowledged"])
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(
+                        [
+                            "team",
+                            "ack-shutdown",
+                            "--root",
+                            str(root),
+                            "--team",
+                            "feature-team",
+                            "--worker",
+                            "worker-1",
+                            "--signal",
+                            signal_id,
+                        ]
+                    ),
+                    0,
+                )
+            self.assertIn("acknowledged", output.getvalue())
+            signal = _read_shutdown_json(root, signal_id)
+            self.assertTrue(signal["acknowledged"])
+            self.assertIsNotNone(signal["acknowledged_at"])
+
+    def test_team_shutdown_keeps_multiple_signal_records(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+            signal_ids = []
+            for reason in ["first", "second"]:
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(
+                        main(
+                            [
+                                "team",
+                                "shutdown",
+                                "--root",
+                                str(root),
+                                "--team",
+                                "feature-team",
+                                "--worker",
+                                "worker-1",
+                                "--reason",
+                                reason,
+                            ]
+                        ),
+                        0,
+                    )
+                signal_ids.append(output.getvalue().strip().split()[0])
+
+            self.assertNotEqual(signal_ids[0], signal_ids[1])
+            self.assertEqual(_read_shutdown_json(root, signal_ids[0])["reason"], "first")
+            self.assertEqual(_read_shutdown_json(root, signal_ids[1])["reason"], "second")
+            self.assertEqual(
+                main(
+                    [
+                        "team",
+                        "ack-shutdown",
+                        "--root",
+                        str(root),
+                        "--team",
+                        "feature-team",
+                        "--worker",
+                        "worker-1",
+                        "--signal",
+                        signal_ids[0],
+                    ]
+                ),
+                0,
+            )
+            self.assertTrue(_read_shutdown_json(root, signal_ids[0])["acknowledged"])
+            self.assertFalse(_read_shutdown_json(root, signal_ids[1])["acknowledged"])
+
+    def test_team_ack_shutdown_rejects_unsafe_signal_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+            with self.assertRaises(ValueError):
+                main(
+                    [
+                        "team",
+                        "ack-shutdown",
+                        "--root",
+                        str(root),
+                        "--team",
+                        "feature-team",
+                        "--worker",
+                        "worker-1",
+                        "--signal",
+                        "../worker-2/bad",
+                    ]
+                )
+
+    def test_team_ack_shutdown_rejects_worker_mismatch_in_signal_record(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+            signal_id = "a" * 32
+            signal_path = (
+                root
+                / ".agent-flow"
+                / "state"
+                / "team"
+                / "feature-team"
+                / "shutdown"
+                / "worker-1"
+                / f"{signal_id}.json"
+            )
+            signal_path.parent.mkdir(parents=True, exist_ok=True)
+            signal_path.write_text(
+                json.dumps(
+                    asdict(
+                        ShutdownSignal(
+                            signal_id=signal_id,
+                            worker="../worker-2",
+                            reason="bad",
+                            requested_at="2026-05-05T00:00:00+00:00",
+                        )
+                    )
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                main(
+                    [
+                        "team",
+                        "ack-shutdown",
+                        "--root",
+                        str(root),
+                        "--team",
+                        "feature-team",
+                        "--worker",
+                        "worker-1",
+                        "--signal",
+                        signal_id,
+                    ]
+                )
+
+    def test_team_shutdown_requires_registered_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            main(["team", "init", "--root", str(root), "--name", "feature-team"])
+            with self.assertRaises(FileNotFoundError):
+                main(
+                    [
+                        "team",
+                        "shutdown",
+                        "--root",
+                        str(root),
+                        "--team",
+                        "feature-team",
+                        "--worker",
+                        "missing",
+                        "--reason",
+                        "stop",
                     ]
                 )
 
@@ -1171,6 +1362,21 @@ def _read_heartbeat_json(root: Path) -> dict[str, object]:
             / "workers"
             / "worker-1"
             / "heartbeat.json"
+        ).read_text(encoding="utf-8")
+    )
+
+
+def _read_shutdown_json(root: Path, signal_id: str) -> dict[str, object]:
+    return json.loads(
+        (
+            root
+            / ".agent-flow"
+            / "state"
+            / "team"
+            / "feature-team"
+            / "shutdown"
+            / "worker-1"
+            / f"{signal_id}.json"
         ).read_text(encoding="utf-8")
     )
 
