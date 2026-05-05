@@ -59,3 +59,13 @@ agent-flow gates --root /path/to/project --profile auto
 agent-flow status --root /path/to/project
 agent-flow detect-profile --root /path/to/project
 ```
+
+## Team State Import
+
+Team State import is intentionally non-destructive.
+
+- `import-validate` checks snapshot shape and references.
+- `import-dry-run` reports the import summary without writing Team State.
+- `import-apply` creates a new Team State only when the target team does not already exist.
+- `--report` writes the same success or failure summary as deterministic JSON.
+- Failed apply attempts remove partially created Team State and report cleanup diagnostics.
