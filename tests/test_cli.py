@@ -662,6 +662,41 @@ class CliTest(unittest.TestCase):
             self.assertEqual(payload["mailboxes"]["worker-1"], [])
             self.assertFalse(mailbox_dir.exists())
 
+    def test_team_list_reports_existing_teams(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+            self.assertEqual(
+                main(
+                    [
+                        "team",
+                        "init",
+                        "--root",
+                        str(root),
+                        "--name",
+                        "Second Team",
+                        "--description",
+                        "another",
+                    ]
+                ),
+                0,
+            )
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["team", "list", "--root", str(root)]), 0)
+            lines = output.getvalue().strip().splitlines()
+            self.assertEqual(len(lines), 2)
+            self.assertIn("feature-team tasks=1 workers=1", lines[0])
+            self.assertIn("second-team tasks=0 workers=0", lines[1])
+
+    def test_team_list_is_empty_without_team_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["team", "list", "--root", temp_dir]), 0)
+            self.assertEqual(output.getvalue(), "")
+
     def test_team_import_validate_accepts_export_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

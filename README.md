@@ -36,6 +36,7 @@ agent-flow handoff --root /path/to/project --run-dir .agent-flow/runs/developmen
 agent-flow review-summary --root /path/to/project --run-dir .agent-flow/runs/development/<run-id> --reviews .agent-flow/runs/development/<run-id>/artifacts/review-1.md
 agent-flow worktree create --root /path/to/project --name implement-login
 agent-flow worktree status --root /path/to/project --name implement-login
+agent-flow team list --root /path/to/project
 agent-flow team init --root /path/to/project --name feature-team --description "login work"
 agent-flow team task --root /path/to/project --team feature-team --id task-1 --subject "Implement login"
 agent-flow team worker --root /path/to/project --team feature-team --name worker-1 --role implementer

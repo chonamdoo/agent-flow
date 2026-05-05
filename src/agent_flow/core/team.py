@@ -67,6 +67,15 @@ class ShutdownSignal:
     acknowledged_at: str | None = None
 
 
+@dataclass(frozen=True)
+class TeamSummary:
+    name: str
+    description: str
+    task_count: int
+    worker_count: int
+    path: str
+
+
 def init_team(*, root: Path, name: str, description: str) -> TeamConfig:
     team_name = safe_team_name(name)
     config = TeamConfig(name=team_name, description=description, created_at=_now())
@@ -76,6 +85,30 @@ def init_team(*, root: Path, name: str, description: str) -> TeamConfig:
     (_team_root(root, team_name) / "mailbox").mkdir(parents=True, exist_ok=True)
     (_team_root(root, team_name) / "shutdown").mkdir(parents=True, exist_ok=True)
     return config
+
+
+def list_teams(*, root: Path) -> list[TeamSummary]:
+    team_root = root / ".agent-flow" / "state" / "team"
+    if not team_root.exists():
+        return []
+    summaries = []
+    for config_path in sorted(team_root.glob("*/config.json")):
+        team_dir = config_path.parent
+        config = TeamConfig(**json.loads(config_path.read_text(encoding="utf-8")))
+        task_count = len(list((team_dir / "tasks").glob("*.json"))) if (team_dir / "tasks").exists() else 0
+        worker_count = (
+            len(list((team_dir / "workers").glob("*/identity.json"))) if (team_dir / "workers").exists() else 0
+        )
+        summaries.append(
+            TeamSummary(
+                name=config.name,
+                description=config.description,
+                task_count=task_count,
+                worker_count=worker_count,
+                path=str(team_dir),
+            )
+        )
+    return summaries
 
 
 def add_task(

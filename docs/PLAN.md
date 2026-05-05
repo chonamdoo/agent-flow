@@ -32,6 +32,8 @@ Make Team state import conflict reporting operational.
 
 Make Team state import cleanup diagnostics operational.
 
+Make Team state import documentation polish operational.
+
 ### Scope
 
 - Send messages to registered Worker mailboxes.
@@ -50,13 +52,13 @@ Make Team state import cleanup diagnostics operational.
 
 ## Current Slice
 
-Make Team state import documentation polish operational.
+Make Team state list command operational.
 
 ### Scope
 
-- Document Team State import command flow.
-- Document non-destructive apply behavior.
-- Document import report and cleanup diagnostics behavior.
+- List project-local Team State records.
+- Include task and worker counts for each Team.
+- Keep listing read-only.
 - Preserve Team Orchestration as state-only; no worker process execution.
 - Keep AI CLI execution on host adapters/providers; no sandbox support.
 
@@ -69,4 +71,4 @@ Make Team state import documentation polish operational.
 
 ## Next Slices
 
-1. Team state list command.
+1. Team state delete archive plan.

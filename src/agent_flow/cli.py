@@ -28,6 +28,7 @@ from agent_flow.core.team import (
     export_team_state,
     fail_task,
     init_team,
+    list_teams,
     list_messages,
     mark_message_read,
     request_shutdown,
@@ -105,6 +106,8 @@ def main(argv: list[str] | None = None) -> int:
 
     team_parser = subparsers.add_parser("team")
     team_subparsers = team_parser.add_subparsers(dest="team_command", required=True)
+    team_list = team_subparsers.add_parser("list")
+    team_list.add_argument("--root", default=".")
     team_init = team_subparsers.add_parser("init")
     team_init.add_argument("--root", default=".")
     team_init.add_argument("--name", required=True)
@@ -273,6 +276,11 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
     if args.command == "team":
+        if args.team_command == "list":
+            teams = list_teams(root=root)
+            for team in teams:
+                print(f"{team.name} tasks={team.task_count} workers={team.worker_count} path={team.path}")
+            return 0
         if args.team_command == "init":
             config = init_team(root=root, name=args.name, description=args.description)
             print(f"{config.name} {root / '.agent-flow' / 'state' / 'team' / config.name}")
