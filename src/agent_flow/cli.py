@@ -186,6 +186,7 @@ def main(argv: list[str] | None = None) -> int:
     team_import_apply = team_subparsers.add_parser("import-apply")
     team_import_apply.add_argument("--root", default=".")
     team_import_apply.add_argument("--file", required=True)
+    team_import_apply.add_argument("--report")
 
     args = parser.parse_args(argv)
     root = Path(getattr(args, "root", ".")).resolve()
@@ -440,12 +441,24 @@ def main(argv: list[str] | None = None) -> int:
         if args.team_command == "import-apply":
             payload = _read_json_file(args.file)
             if isinstance(payload, str):
+                report_error = _write_import_report(args.report, {"valid": False, "errors": [payload]})
+                if report_error is not None:
+                    print(report_error)
+                    return 1
                 print(payload)
                 return 1
             summary = apply_team_state_import(root=root, payload=payload)
             if not summary["valid"]:
+                report_error = _write_import_report(args.report, summary)
+                if report_error is not None:
+                    print(report_error)
+                    return 1
                 for error in summary["errors"]:
                     print(error)
+                return 1
+            report_error = _write_import_report(args.report, summary)
+            if report_error is not None:
+                print(report_error)
                 return 1
             print(f"{summary['team']} imported")
             return 0

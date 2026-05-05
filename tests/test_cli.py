@@ -1022,6 +1022,81 @@ class CliTest(unittest.TestCase):
                 )
             self.assertIn("team already exists: feature-team", output.getvalue())
 
+    def test_team_import_apply_writes_conflict_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+            export_output = io.StringIO()
+            with contextlib.redirect_stdout(export_output):
+                self.assertEqual(
+                    main(["team", "export", "--root", str(root), "--team", "feature-team"]),
+                    0,
+                )
+            snapshot_path = root / "snapshot.json"
+            report_path = root / "reports" / "apply.json"
+            snapshot_path.write_text(export_output.getvalue(), encoding="utf-8")
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(
+                        [
+                            "team",
+                            "import-apply",
+                            "--root",
+                            str(root),
+                            "--file",
+                            str(snapshot_path),
+                            "--report",
+                            str(report_path),
+                        ]
+                    ),
+                    1,
+                )
+            self.assertIn("team already exists: feature-team", output.getvalue())
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertFalse(report["valid"])
+            self.assertIn("team already exists: feature-team", report["errors"])
+
+    def test_team_import_apply_writes_success_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_root = root / "source"
+            target_root = root / "target"
+            _create_team_with_task_and_worker(source_root)
+            export_output = io.StringIO()
+            with contextlib.redirect_stdout(export_output):
+                self.assertEqual(
+                    main(["team", "export", "--root", str(source_root), "--team", "feature-team"]),
+                    0,
+                )
+            snapshot_path = root / "snapshot.json"
+            report_path = root / "reports" / "apply.json"
+            snapshot_path.write_text(export_output.getvalue(), encoding="utf-8")
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(
+                        [
+                            "team",
+                            "import-apply",
+                            "--root",
+                            str(target_root),
+                            "--file",
+                            str(snapshot_path),
+                            "--report",
+                            str(report_path),
+                        ]
+                    ),
+                    0,
+                )
+            self.assertEqual(output.getvalue().strip(), "feature-team imported")
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertTrue(report["valid"])
+            self.assertEqual(report["team"], "feature-team")
+            self.assertEqual(report["task_count"], 1)
+
     def test_team_import_apply_rejects_invalid_snapshot_without_writing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

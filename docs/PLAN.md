@@ -26,6 +26,8 @@ Make Team state schema hardening operational.
 
 Make Team state import dry-run file report operational.
 
+Make Team state import apply operational.
+
 ### Scope
 
 - Send messages to registered Worker mailboxes.
@@ -44,13 +46,13 @@ Make Team state import dry-run file report operational.
 
 ## Current Slice
 
-Make Team state import apply operational.
+Make Team state import conflict reporting operational.
 
 ### Scope
 
-- Import validated Team State JSON into a new Team State directory.
-- Refuse existing Team State; do not overwrite existing team data.
-- Preserve tasks, workers, heartbeats, mailboxes, and shutdown signals.
+- Write optional import-apply reports as deterministic JSON.
+- Include validation, read, and existing-team conflict errors in the report.
+- Preserve successful import summary fields in the report.
 - Preserve Team Orchestration as state-only; no worker process execution.
 - Keep AI CLI execution on host adapters/providers; no sandbox support.
 
@@ -63,4 +65,4 @@ Make Team state import apply operational.
 
 ## Next Slices
 
-1. Team state import conflict reporting.
+1. Team state import cleanup diagnostics.
