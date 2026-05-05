@@ -54,10 +54,10 @@ npx github:chonamdoo/agent-flow run next
 npx github:chonamdoo/agent-flow run advance
 ```
 
-`run advance` only moves to the next phase after the current phase artifact exists. The default phase order is:
+`run advance` only moves to the next phase after the current phase artifact exists. PR watch requires `status: green`, `status: comments`, `status: ci-failed`, or `status: pending`; comments and CI failures route back through fix phases and then return to PR watch before merge. The default phase order is:
 
 ```text
-PRD -> Slice Plan -> branch/worktree -> workflow run start -> RED -> GREEN -> REFACTOR -> gates -> multi-review -> fix loop -> commit -> push/PR -> handoff
+PRD -> Slice Plan -> branch/worktree -> workflow run start -> RED -> GREEN -> REFACTOR -> gates -> multi-review -> fix loop -> commit -> push/PR -> PR watch -> PR comment fix -> PR CI fix -> merge -> handoff
 ```
 
 For copy-based usage, copy the source kit repository or package into a stable local location and run the installed CLI against each project with `--root`. The target project only needs its generated `.agent-flow/` runtime directory unless you intentionally maintain a forked kit.

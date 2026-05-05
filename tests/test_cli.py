@@ -163,6 +163,12 @@ class CliTest(unittest.TestCase):
                 ).is_file()
             )
             self.assertTrue((project_root / ".agent-flow" / "prompts" / "prd.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "prompts" / "pr-watch.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "prompts" / "merge.md").is_file())
+            self.assertIn(
+                "status: ci-failed",
+                (project_root / ".agent-flow" / "prompts" / "pr-watch.md").read_text(encoding="utf-8"),
+            )
             self.assertIn(
                 "agent-flow-kit run next",
                 (project_root / "AGENTS.md").read_text(encoding="utf-8"),
@@ -337,6 +343,8 @@ class CliTest(unittest.TestCase):
                 "fix-loop",
                 "commit",
                 "push-pr",
+                "pr-watch",
+                "merge",
                 "handoff",
             ]
             run_dir = project_root / ".agent-flow" / "runs" / "full-feature" / "r1"
@@ -345,7 +353,8 @@ class CliTest(unittest.TestCase):
                 self.assertEqual(state["phase"], phase)
                 artifact = run_dir / _node_phase_artifact(phase)
                 artifact.parent.mkdir(parents=True, exist_ok=True)
-                artifact.write_text(f"{phase}\n", encoding="utf-8")
+                content = "status: green\n" if phase == "pr-watch" else f"{phase}\n"
+                artifact.write_text(content, encoding="utf-8")
                 advance = subprocess.run(
                     (node, cli, "run", "advance"),
                     cwd=project_root,
@@ -368,6 +377,108 @@ class CliTest(unittest.TestCase):
             )
             self.assertEqual(complete.returncode, 0, complete.stderr)
             self.assertIn("workflow already complete: r1", complete.stdout)
+
+    def test_node_pr_watch_blocks_pending_and_routes_fix_loops_back_to_watch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            self.assertEqual(
+                subprocess.run(
+                    (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
+                    cwd=project_root,
+                    check=False,
+                ).returncode,
+                0,
+            )
+            run_dir = project_root / ".agent-flow" / "runs" / "full-feature" / "r1"
+            for phase in [
+                "prd",
+                "slice-plan",
+                "worktree",
+                "run-start",
+                "red",
+                "green",
+                "refactor",
+                "gates",
+                "multi-review",
+                "fix-loop",
+                "commit",
+                "push-pr",
+            ]:
+                artifact = run_dir / _node_phase_artifact(phase)
+                artifact.parent.mkdir(parents=True, exist_ok=True)
+                artifact.write_text(f"{phase}\n", encoding="utf-8")
+                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+
+            watch = run_dir / _node_phase_artifact("pr-watch")
+            watch.write_text("status: pending\n", encoding="utf-8")
+            pending = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(pending.returncode, 1)
+            self.assertIn("blocked: PR watch is pending", pending.stderr)
+
+            watch.write_text("status: comments\n", encoding="utf-8")
+            comments = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(comments.returncode, 0, comments.stderr)
+            self.assertIn("Current phase: pr-comment-fix", comments.stdout)
+            comment_fix = run_dir / _node_phase_artifact("pr-comment-fix")
+            comment_fix.write_text("pushed comment fixes\n", encoding="utf-8")
+            back_to_watch = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(back_to_watch.returncode, 0, back_to_watch.stderr)
+            self.assertIn("Current phase: pr-watch", back_to_watch.stdout)
+
+            watch.write_text("status: ci-failed\n", encoding="utf-8")
+            ci_failed = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(ci_failed.returncode, 0, ci_failed.stderr)
+            self.assertIn("Current phase: pr-ci-fix", ci_failed.stdout)
+            ci_fix = run_dir / _node_phase_artifact("pr-ci-fix")
+            ci_fix.write_text("pushed ci fixes\n", encoding="utf-8")
+            back_to_watch_again = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(back_to_watch_again.returncode, 0, back_to_watch_again.stderr)
+            self.assertIn("Current phase: pr-watch", back_to_watch_again.stdout)
+
+            watch.write_text("status: green\n", encoding="utf-8")
+            ready = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(ready.returncode, 0, ready.stderr)
+            self.assertIn("Current phase: merge", ready.stdout)
 
     def test_start_can_create_and_record_worktree(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -3240,6 +3351,10 @@ def _node_phase_artifact(phase: str) -> Path:
         "fix-loop": Path("artifacts/fix-loop.md"),
         "commit": Path("artifacts/commit.md"),
         "push-pr": Path("artifacts/push-pr.md"),
+        "pr-watch": Path("artifacts/pr-watch.md"),
+        "pr-comment-fix": Path("artifacts/pr-comment-fix.md"),
+        "pr-ci-fix": Path("artifacts/pr-ci-fix.md"),
+        "merge": Path("artifacts/merge.md"),
         "handoff": Path("artifacts/handoff.md"),
     }
     return artifacts[phase]

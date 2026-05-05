@@ -64,6 +64,8 @@ Make npx project installer operational.
 
 Make installed full-feature workflow enforcement operational.
 
+Make PR watch, fix, and merge workflow phases operational.
+
 ### Scope
 
 - Send messages to registered Worker mailboxes.
@@ -82,7 +84,7 @@ Make installed full-feature workflow enforcement operational.
 
 ## Current Slice
 
-Installed full-feature workflow enforcement is complete.
+PR watch, fix, and merge workflow phases are complete.
 
 ## Next Slices
 

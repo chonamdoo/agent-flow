@@ -106,7 +106,7 @@ function runWorkflowCommand(args) {
     if (!fs.existsSync(artifact)) {
       throw new Error(`blocked: missing artifact ${artifact}`);
     }
-    const nextIndex = state.phase_index + 1;
+    const nextIndex = nextPhaseIndex(state, phase, artifact);
     const nextPhase = PHASES[nextIndex];
     const nextState = {
       ...state,
@@ -205,6 +205,43 @@ function writeFileIfMissing(pathName, content) {
   }
 }
 
+function nextPhaseIndex(state, phase, artifact) {
+  if (phase.id === "pr-watch") {
+    const status = readArtifactStatus(artifact);
+    if (status === "green") {
+      return phaseIndex("merge");
+    }
+    if (status === "comments") {
+      return phaseIndex("pr-comment-fix");
+    }
+    if (status === "ci-failed") {
+      return phaseIndex("pr-ci-fix");
+    }
+    if (status === "pending") {
+      throw new Error("blocked: PR watch is pending");
+    }
+    throw new Error("blocked: pr-watch artifact must include status: green, comments, ci-failed, or pending");
+  }
+  if (phase.id === "pr-comment-fix" || phase.id === "pr-ci-fix") {
+    return phaseIndex("pr-watch");
+  }
+  return state.phase_index + 1;
+}
+
+function phaseIndex(id) {
+  const index = PHASES.findIndex((phase) => phase.id === id);
+  if (index === -1) {
+    throw new Error(`unknown phase: ${id}`);
+  }
+  return index;
+}
+
+function readArtifactStatus(pathName) {
+  const content = fs.readFileSync(pathName, "utf8");
+  const match = content.match(/^status:\s*([a-z-]+)\s*$/im);
+  return match?.[1];
+}
+
 function upsertBootstrapBlock(pathName, label) {
   const start = "<!-- agent-flow:start -->";
   const end = "<!-- agent-flow:end -->";
@@ -265,6 +302,10 @@ const PHASES = [
   { id: "fix-loop", artifact: "artifacts/fix-loop.md", instruction: "Apply review/gate fixes or record that no fixes were required." },
   { id: "commit", artifact: "artifacts/commit.md", instruction: "Commit the verified slice and record the commit hash." },
   { id: "push-pr", artifact: "artifacts/push-pr.md", instruction: "Push the branch or open a PR and record the remote reference." },
+  { id: "pr-watch", artifact: "artifacts/pr-watch.md", instruction: "Poll PR checks and review threads; record status: green, status: comments, status: ci-failed, or status: pending with PR URL." },
+  { id: "pr-comment-fix", artifact: "artifacts/pr-comment-fix.md", instruction: "Resolve actionable PR review comments, commit and push fixes, or record that no comments are pending." },
+  { id: "pr-ci-fix", artifact: "artifacts/pr-ci-fix.md", instruction: "Fix failed PR checks, commit and push fixes, or record that checks are green." },
+  { id: "merge", artifact: "artifacts/merge.md", instruction: "Merge the PR only after approvals, resolved comments, and green checks; record merge SHA or URL." },
   { id: "handoff", artifact: "artifacts/handoff.md", instruction: "Write final handoff with decisions, risks, files, and remaining work." },
 ];
 
@@ -276,7 +317,7 @@ function fullFeatureWorkflowYaml() {
 }
 
 function fullFeatureSkillMarkdown() {
-  return `# Full Feature Workflow\n\nUse this skill for feature work in this project.\n\nAlways drive progress through:\n\n\`\`\`bash\nagent-flow-kit run next\n\`\`\`\n\nCanonical order:\n\n${PHASES.map((phase, index) => `${index + 1}. ${phase.id}`).join("\n")}\n\nDo not skip phases. If a gate or review fails, complete the fix-loop phase before commit/push/handoff.\n`;
+  return `# Full Feature Workflow\n\nUse this skill for feature work in this project.\n\nAlways drive progress through:\n\n\`\`\`bash\nagent-flow-kit run next\n\`\`\`\n\nCanonical order:\n\n${PHASES.map((phase, index) => `${index + 1}. ${phase.id}`).join("\n")}\n\nDo not skip phases. If a gate, review, PR comment, or PR check fails, complete the matching fix phase and push again before merge/handoff.\n`;
 }
 
 function phasePrompt(phase) {
