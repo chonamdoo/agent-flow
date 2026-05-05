@@ -782,6 +782,41 @@ class CliTest(unittest.TestCase):
             self.assertTrue(team_root.is_dir())
             self.assertEqual(list((root.resolve() / ".agent-flow" / "archive" / "team").glob("feature-team-*")), [])
 
+    def test_team_archive_list_reports_archives(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+            with mock.patch("agent_flow.core.team._now", return_value="2026-05-05T06:26:04+00:00"):
+                self.assertEqual(
+                    main(
+                        [
+                            "team",
+                            "archive",
+                            "--root",
+                            str(root),
+                            "--team",
+                            "feature-team",
+                            "--reason",
+                            "done",
+                        ]
+                    ),
+                    0,
+                )
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["team", "archive-list", "--root", str(root)]), 0)
+            line = output.getvalue().strip()
+            self.assertIn("feature-team archived_at=2026-05-05T06:26:04+00:00 reason=done", line)
+            self.assertIn("/.agent-flow/archive/team/feature-team-20260505T062604000000Z", line)
+
+    def test_team_archive_list_is_empty_without_archives(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["team", "archive-list", "--root", temp_dir]), 0)
+            self.assertEqual(output.getvalue(), "")
+
     def test_team_import_validate_accepts_export_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

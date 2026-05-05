@@ -142,6 +142,16 @@ def archive_team(*, root: Path, team_name: str, reason: str) -> TeamArchive:
     return archive
 
 
+def list_team_archives(*, root: Path) -> list[TeamArchive]:
+    archive_root = root / ".agent-flow" / "archive" / "team"
+    if not archive_root.exists():
+        return []
+    archives = []
+    for manifest_path in sorted(archive_root.glob("*/archive.json")):
+        archives.append(TeamArchive(**json.loads(manifest_path.read_text(encoding="utf-8"))))
+    return archives
+
+
 def add_task(
     *,
     root: Path,

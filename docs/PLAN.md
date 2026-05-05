@@ -38,6 +38,8 @@ Make Team state list command operational.
 
 Make Team state delete archive plan operational.
 
+Make Team state archive command operational.
+
 ### Scope
 
 - Send messages to registered Worker mailboxes.
@@ -56,13 +58,13 @@ Make Team state delete archive plan operational.
 
 ## Current Slice
 
-Make Team state archive command operational.
+Make Team state archive list command operational.
 
 ### Scope
 
-- Archive active Team State into a recoverable archive directory.
-- Record archive metadata with timestamp and reason.
-- Remove archived Team State from active listing.
+- List archived Team State records.
+- Include archived timestamp, reason, and path.
+- Keep archive listing read-only.
 - Preserve Team Orchestration as state-only; no worker process execution.
 - Keep AI CLI execution on host adapters/providers; no sandbox support.
 
@@ -75,4 +77,4 @@ Make Team state archive command operational.
 
 ## Next Slices
 
-1. Team state archive list command.
+1. Team state archive export command.

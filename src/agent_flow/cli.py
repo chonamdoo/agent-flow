@@ -29,6 +29,7 @@ from agent_flow.core.team import (
     export_team_state,
     fail_task,
     init_team,
+    list_team_archives,
     list_teams,
     list_messages,
     mark_message_read,
@@ -113,6 +114,8 @@ def main(argv: list[str] | None = None) -> int:
     team_archive.add_argument("--root", default=".")
     team_archive.add_argument("--team", required=True)
     team_archive.add_argument("--reason", default="")
+    team_archive_list = team_subparsers.add_parser("archive-list")
+    team_archive_list.add_argument("--root", default=".")
     team_init = team_subparsers.add_parser("init")
     team_init.add_argument("--root", default=".")
     team_init.add_argument("--name", required=True)
@@ -289,6 +292,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.team_command == "archive":
             archive = archive_team(root=root, team_name=args.team, reason=args.reason)
             print(f"{archive.name} archived {archive.archive_path}")
+            return 0
+        if args.team_command == "archive-list":
+            archives = list_team_archives(root=root)
+            for archive in archives:
+                print(f"{archive.name} archived_at={archive.archived_at} reason={archive.reason} path={archive.archive_path}")
             return 0
         if args.team_command == "init":
             config = init_team(root=root, name=args.name, description=args.description)

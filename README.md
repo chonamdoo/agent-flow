@@ -39,6 +39,7 @@ agent-flow worktree status --root /path/to/project --name implement-login
 agent-flow team list --root /path/to/project
 agent-flow team init --root /path/to/project --name feature-team --description "login work"
 agent-flow team archive --root /path/to/project --team feature-team --reason "work complete"
+agent-flow team archive-list --root /path/to/project
 agent-flow team task --root /path/to/project --team feature-team --id task-1 --subject "Implement login"
 agent-flow team worker --root /path/to/project --team feature-team --name worker-1 --role implementer
 agent-flow team claim --root /path/to/project --team feature-team --task task-1 --worker worker-1
