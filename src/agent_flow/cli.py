@@ -26,6 +26,7 @@ from agent_flow.core.team import (
     claim_task,
     complete_task,
     apply_team_state_import,
+    export_team_archive,
     export_team_state,
     fail_task,
     init_team,
@@ -189,6 +190,8 @@ def main(argv: list[str] | None = None) -> int:
     team_export = team_subparsers.add_parser("export")
     team_export.add_argument("--root", default=".")
     team_export.add_argument("--team", required=True)
+    team_archive_export = team_subparsers.add_parser("archive-export")
+    team_archive_export.add_argument("--archive-path", required=True)
     team_import_validate = team_subparsers.add_parser("import-validate")
     team_import_validate.add_argument("--file", required=True)
     team_import_dry_run = team_subparsers.add_parser("import-dry-run")
@@ -422,6 +425,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.team_command == "export":
             print(json.dumps(export_team_state(root=root, team_name=args.team), indent=2, sort_keys=True))
+            return 0
+        if args.team_command == "archive-export":
+            print(json.dumps(export_team_archive(archive_path=Path(args.archive_path)), indent=2, sort_keys=True))
             return 0
         if args.team_command == "import-validate":
             payload = _read_json_file(args.file)

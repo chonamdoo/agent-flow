@@ -817,6 +817,35 @@ class CliTest(unittest.TestCase):
                 self.assertEqual(main(["team", "archive-list", "--root", temp_dir]), 0)
             self.assertEqual(output.getvalue(), "")
 
+    def test_team_archive_export_matches_active_export_before_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+            active_output = io.StringIO()
+            with contextlib.redirect_stdout(active_output):
+                self.assertEqual(
+                    main(["team", "export", "--root", str(root), "--team", "feature-team"]),
+                    0,
+                )
+            self.assertEqual(
+                main(["team", "archive", "--root", str(root), "--team", "feature-team", "--reason", "done"]),
+                0,
+            )
+            archive_path = next((root.resolve() / ".agent-flow" / "archive" / "team").glob("feature-team-*"))
+
+            archive_output = io.StringIO()
+            with contextlib.redirect_stdout(archive_output):
+                self.assertEqual(main(["team", "archive-export", "--archive-path", str(archive_path)]), 0)
+            self.assertEqual(json.loads(archive_output.getvalue()), json.loads(active_output.getvalue()))
+
+    def test_team_archive_export_requires_archive_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive_path = root / ".agent-flow" / "archive" / "team" / "missing-manifest"
+            archive_path.mkdir(parents=True)
+            with self.assertRaises(FileNotFoundError):
+                main(["team", "archive-export", "--archive-path", str(archive_path)])
+
     def test_team_import_validate_accepts_export_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

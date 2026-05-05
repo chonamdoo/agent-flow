@@ -416,6 +416,20 @@ def export_team_state(*, root: Path, team_name: str) -> dict[str, object]:
     safe_team = safe_team_name(team_name)
     _require_team(root=root, team_name=safe_team)
     root_dir = _team_root(root, safe_team)
+    return _export_team_state_dir(root=root, team_name=safe_team, root_dir=root_dir)
+
+
+def export_team_archive(*, archive_path: Path) -> dict[str, object]:
+    archive_dir = archive_path.resolve()
+    manifest_path = archive_dir / "archive.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"team archive manifest does not exist: {archive_dir}")
+    archive = TeamArchive(**json.loads(manifest_path.read_text(encoding="utf-8")))
+    safe_team = safe_team_name(archive.name)
+    return _export_team_state_dir(root=archive_dir.parents[2], team_name=safe_team, root_dir=archive_dir)
+
+
+def _export_team_state_dir(*, root: Path, team_name: str, root_dir: Path) -> dict[str, object]:
     task_paths = sorted((root_dir / "tasks").glob("*.json")) if (root_dir / "tasks").exists() else []
     worker_paths = sorted((root_dir / "workers").glob("*/identity.json")) if (root_dir / "workers").exists() else []
     heartbeats = []
@@ -425,10 +439,10 @@ def export_team_state(*, root: Path, team_name: str) -> dict[str, object]:
         worker = _read_json(worker_path)
         workers.append(worker)
         worker_name = safe_worker_name(str(worker["name"]))
-        heartbeat_path = _heartbeat_path(root=root, team_name=safe_team, worker_name=worker_name)
+        heartbeat_path = root_dir / "workers" / worker_name / "heartbeat.json"
         if heartbeat_path.is_file():
             heartbeats.append(_read_json(heartbeat_path))
-        mailbox_path = _mailbox_path(root=root, team_name=safe_team, worker_name=worker_name)
+        mailbox_path = root_dir / "mailbox" / f"{worker_name}.json"
         mailboxes[worker_name] = _read_json(mailbox_path) if mailbox_path.is_file() else []
     return {
         "team": _read_json(root_dir / "config.json"),
@@ -436,7 +450,7 @@ def export_team_state(*, root: Path, team_name: str) -> dict[str, object]:
         "workers": workers,
         "heartbeats": heartbeats,
         "mailboxes": mailboxes,
-        "shutdowns": _read_shutdown_payloads(root=root, team_name=safe_team),
+        "shutdowns": _read_shutdown_payloads_from_dir(root_dir),
     }
 
 
@@ -789,7 +803,11 @@ def _read_shutdowns(*, root: Path, team_name: str) -> list[ShutdownSignal]:
 
 
 def _read_shutdown_payloads(*, root: Path, team_name: str) -> list[dict[str, object]]:
-    shutdown_dir = _team_root(root, team_name) / "shutdown"
+    return _read_shutdown_payloads_from_dir(_team_root(root, team_name))
+
+
+def _read_shutdown_payloads_from_dir(root_dir: Path) -> list[dict[str, object]]:
+    shutdown_dir = root_dir / "shutdown"
     if not shutdown_dir.exists():
         return []
     return [_read_json(path) for path in sorted(shutdown_dir.glob("*/*.json"))]
