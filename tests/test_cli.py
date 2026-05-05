@@ -485,6 +485,9 @@ class CliTest(unittest.TestCase):
             self.assertEqual(stale_comment_fix.returncode, 1)
             self.assertIn("blocked: stale artifact", stale_comment_fix.stderr)
             comment_fix.write_text("pushed comment fixes\n", encoding="utf-8")
+            same_ms = json.loads((project_root / ".agent-flow" / "state" / "current-run.json").read_text(encoding="utf-8"))
+            entered_ts = _node_epoch_seconds(same_ms["phase_entered_at"])
+            os.utime(comment_fix, (entered_ts, entered_ts))
             back_to_watch = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=project_root,
@@ -3442,6 +3445,12 @@ def _node_phase_artifact(phase: str) -> Path:
         "handoff": Path("artifacts/handoff.md"),
     }
     return artifacts[phase]
+
+
+def _node_epoch_seconds(value: str) -> float:
+    from datetime import datetime
+
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
 
 
 if __name__ == "__main__":

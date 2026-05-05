@@ -225,7 +225,7 @@ function assertFreshArtifact(state, phase, artifact) {
     return;
   }
   const artifactMtime = fs.statSync(artifact).mtimeMs;
-  if (artifactMtime <= enteredAt) {
+  if (artifactMtime < enteredAt) {
     throw new Error(`blocked: stale artifact ${artifact}`);
   }
 }
