@@ -163,11 +163,38 @@ class CliTest(unittest.TestCase):
                 ).is_file()
             )
             self.assertTrue((project_root / ".agent-flow" / "prompts" / "prd.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "prompts" / "domain-grill.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "prompts" / "domain-map.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "prompts" / "product-brief.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "prompts" / "plan-review.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "prompts" / "ddd-design.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "prompts" / "architecture-review.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "prompts" / "pr-watch.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "prompts" / "merge.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "skills" / "domain-grill" / "SKILL.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "skills" / "product-brief" / "SKILL.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "skills" / "plan-reviewer" / "SKILL.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "skills" / "ddd-clean-architecture" / "SKILL.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "skills" / "architecture-reviewer" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "prompts" / "push-watch.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "prompts" / "push-watch-tick.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "push-watch" / "SKILL.md").is_file())
+            self.assertIn(
+                "verdict: approve",
+                (project_root / ".agent-flow" / "prompts" / "plan-review.md").read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "data / domain / presentation",
+                (project_root / ".agent-flow" / "skills" / "ddd-clean-architecture" / "SKILL.md").read_text(
+                    encoding="utf-8"
+                ),
+            )
+            self.assertIn(
+                "every code comment must be written in Korean",
+                (project_root / ".agent-flow" / "skills" / "full-feature-workflow" / "SKILL.md").read_text(
+                    encoding="utf-8"
+                ),
+            )
             self.assertIn(
                 "status: ci-failed",
                 (project_root / ".agent-flow" / "prompts" / "pr-watch.md").read_text(encoding="utf-8"),
@@ -306,7 +333,7 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(start.returncode, 0, start.stderr)
-            self.assertIn("Current phase: prd", start.stdout)
+            self.assertIn("Current phase: domain-grill", start.stdout)
 
             blocked = subprocess.run(
                 (node, cli, "run", "advance"),
@@ -318,9 +345,9 @@ class CliTest(unittest.TestCase):
             self.assertEqual(blocked.returncode, 1)
             self.assertIn("blocked: missing artifact", blocked.stderr)
 
-            artifact = project_root / ".agent-flow" / "runs" / "full-feature" / "r1" / "artifacts" / "prd.md"
+            artifact = project_root / ".agent-flow" / "runs" / "full-feature" / "r1" / "artifacts" / "domain-grill.md"
             artifact.parent.mkdir(parents=True, exist_ok=True)
-            artifact.write_text("PRD\n", encoding="utf-8")
+            artifact.write_text("domain-grill\n", encoding="utf-8")
 
             advanced = subprocess.run(
                 (node, cli, "run", "advance"),
@@ -330,14 +357,48 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(advanced.returncode, 0, advanced.stderr)
-            self.assertIn("Current phase: slice-plan", advanced.stdout)
+            self.assertIn("Current phase: domain-map", advanced.stdout)
             state = json.loads((project_root / ".agent-flow" / "state" / "current-run.json").read_text(encoding="utf-8"))
-            self.assertEqual(state["phase"], "slice-plan")
+            self.assertEqual(state["phase"], "domain-map")
 
     def test_node_workflow_run_requires_installed_project(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
+            node = _node_executable()
+            result = subprocess.run(
+                (
+                    node,
+                    str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"),
+                    "run",
+                    "start",
+                    "--task",
+                    "demo",
+                ),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("agent-flow is not installed", result.stderr)
+
+    def test_node_workflow_run_rejects_pre_upgrade_install(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            agent_flow = project_root / ".agent-flow"
+            for path_name in [
+                agent_flow / "kit.json",
+                agent_flow / "workflows" / "full-feature.yaml",
+                agent_flow / "skills" / "full-feature-workflow" / "SKILL.md",
+                agent_flow / "bootstrap" / "AGENTS.md",
+                agent_flow / "bootstrap" / "CLAUDE.md",
+                agent_flow / "bootstrap" / "GEMINI.md",
+            ]:
+                path_name.parent.mkdir(parents=True, exist_ok=True)
+                path_name.write_text("old install\n", encoding="utf-8")
+
             node = _node_executable()
             result = subprocess.run(
                 (
@@ -375,8 +436,13 @@ class CliTest(unittest.TestCase):
                 0,
             )
             expected_phases = [
+                "domain-grill",
+                "domain-map",
+                "product-brief",
                 "prd",
                 "slice-plan",
+                "plan-review",
+                "ddd-design",
                 "worktree",
                 "run-start",
                 "red",
@@ -385,6 +451,7 @@ class CliTest(unittest.TestCase):
                 "gates",
                 "multi-review",
                 "fix-loop",
+                "architecture-review",
                 "commit",
                 "push-pr",
                 "pr-watch",
@@ -397,7 +464,12 @@ class CliTest(unittest.TestCase):
                 self.assertEqual(state["phase"], phase)
                 artifact = run_dir / _node_phase_artifact(phase)
                 artifact.parent.mkdir(parents=True, exist_ok=True)
-                content = "status: green\n" if phase == "pr-watch" else f"{phase}\n"
+                if phase == "pr-watch":
+                    content = "status: green\n"
+                elif phase in {"plan-review", "architecture-review"}:
+                    content = "verdict: approve\n"
+                else:
+                    content = f"{phase}\n"
                 artifact.write_text(content, encoding="utf-8")
                 advance = subprocess.run(
                     (node, cli, "run", "advance"),
@@ -422,6 +494,42 @@ class CliTest(unittest.TestCase):
             self.assertEqual(complete.returncode, 0, complete.stderr)
             self.assertIn("workflow already complete: r1", complete.stdout)
 
+    def test_node_workflow_run_normalizes_persisted_phase_index_from_phase_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            self.assertEqual(
+                subprocess.run(
+                    (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
+                    cwd=project_root,
+                    check=False,
+                ).returncode,
+                0,
+            )
+            current_run = project_root / ".agent-flow" / "state" / "current-run.json"
+            state = json.loads(current_run.read_text(encoding="utf-8"))
+            state["phase"] = "red"
+            state["phase_index"] = 0
+            current_run.write_text(f"{json.dumps(state, indent=2)}\n", encoding="utf-8")
+            manifest = Path(state["run_dir"]) / "manifest.json"
+            manifest.write_text(f"{json.dumps(state, indent=2)}\n", encoding="utf-8")
+
+            next_result = subprocess.run(
+                (node, cli, "run", "next"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(next_result.returncode, 0, next_result.stderr)
+            self.assertIn("Current phase: red", next_result.stdout)
+            normalized = json.loads(current_run.read_text(encoding="utf-8"))
+            self.assertEqual(normalized["phase"], "red")
+            self.assertNotEqual(normalized["phase_index"], 0)
+
     def test_node_pr_watch_blocks_pending_and_routes_fix_loops_back_to_watch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
@@ -439,8 +547,13 @@ class CliTest(unittest.TestCase):
             )
             run_dir = project_root / ".agent-flow" / "runs" / "full-feature" / "r1"
             for phase in [
+                "domain-grill",
+                "domain-map",
+                "product-brief",
                 "prd",
                 "slice-plan",
+                "plan-review",
+                "ddd-design",
                 "worktree",
                 "run-start",
                 "red",
@@ -449,12 +562,14 @@ class CliTest(unittest.TestCase):
                 "gates",
                 "multi-review",
                 "fix-loop",
+                "architecture-review",
                 "commit",
                 "push-pr",
             ]:
                 artifact = run_dir / _node_phase_artifact(phase)
                 artifact.parent.mkdir(parents=True, exist_ok=True)
-                artifact.write_text(f"{phase}\n", encoding="utf-8")
+                content = "verdict: approve\n" if phase in {"plan-review", "architecture-review"} else f"{phase}\n"
+                artifact.write_text(content, encoding="utf-8")
                 self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
 
             watch = run_dir / _node_phase_artifact("pr-watch")
@@ -574,6 +689,149 @@ class CliTest(unittest.TestCase):
             self.assertEqual(ready.returncode, 0, ready.stderr)
             self.assertIn("Current phase: merge", ready.stdout)
 
+    def test_node_plan_review_and_architecture_review_route_request_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            self.assertEqual(
+                subprocess.run(
+                    (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
+                    cwd=project_root,
+                    check=False,
+                ).returncode,
+                0,
+            )
+            run_dir = project_root / ".agent-flow" / "runs" / "full-feature" / "r1"
+            for phase in ["domain-grill", "domain-map", "product-brief", "prd", "slice-plan"]:
+                artifact = run_dir / _node_phase_artifact(phase)
+                artifact.parent.mkdir(parents=True, exist_ok=True)
+                artifact.write_text(f"{phase}\n", encoding="utf-8")
+                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+
+            plan_review = run_dir / _node_phase_artifact("plan-review")
+            plan_review.write_text("verdict: REQUEST-CHANGES\n", encoding="utf-8")
+            result = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Current phase: slice-plan", result.stdout)
+
+            slice_plan = run_dir / _node_phase_artifact("slice-plan")
+            os.utime(slice_plan, (1, 1))
+            stale_slice_plan = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(stale_slice_plan.returncode, 1)
+            self.assertIn("blocked: stale artifact", stale_slice_plan.stderr)
+
+            slice_plan.write_text("updated slice-plan\n", encoding="utf-8")
+            self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+            plan_review.write_text("verdict: APPROVE\n", encoding="utf-8")
+            self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+            ddd = run_dir / _node_phase_artifact("ddd-design")
+            ddd.write_text("ddd-design\n", encoding="utf-8")
+            self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+            for phase in [
+                "worktree",
+                "run-start",
+                "red",
+                "green",
+                "refactor",
+                "gates",
+                "multi-review",
+                "fix-loop",
+            ]:
+                artifact = run_dir / _node_phase_artifact(phase)
+                artifact.parent.mkdir(parents=True, exist_ok=True)
+                artifact.write_text(f"{phase}\n", encoding="utf-8")
+                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+
+            architecture_review = run_dir / _node_phase_artifact("architecture-review")
+            architecture_review.write_text("verdict: request-changes\n", encoding="utf-8")
+            result = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Current phase: refactor", result.stdout)
+            refactor = run_dir / _node_phase_artifact("refactor")
+            os.utime(refactor, (1, 1))
+            stale_refactor = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(stale_refactor.returncode, 1)
+            self.assertIn("blocked: stale artifact", stale_refactor.stderr)
+
+            refactor.write_text("updated refactor\n", encoding="utf-8")
+            self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+            for phase, next_phase in [
+                ("gates", "multi-review"),
+                ("multi-review", "fix-loop"),
+                ("fix-loop", "architecture-review"),
+            ]:
+                artifact = run_dir / _node_phase_artifact(phase)
+                os.utime(artifact, (1, 1))
+                stale_artifact = subprocess.run(
+                    (node, cli, "run", "advance"),
+                    cwd=project_root,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(stale_artifact.returncode, 1)
+                self.assertIn("blocked: stale artifact", stale_artifact.stderr)
+
+                artifact.write_text(f"updated {phase}\n", encoding="utf-8")
+                advanced = subprocess.run(
+                    (node, cli, "run", "advance"),
+                    cwd=project_root,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(advanced.returncode, 0, advanced.stderr)
+                self.assertIn(f"Current phase: {next_phase}", advanced.stdout)
+
+            os.utime(architecture_review, (1, 1))
+            stale_architecture_review = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(stale_architecture_review.returncode, 1)
+            self.assertIn("blocked: stale artifact", stale_architecture_review.stderr)
+
+            architecture_review.write_text("verdict: approve\n", encoding="utf-8")
+            approved = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(approved.returncode, 0, approved.stderr)
+            self.assertIn("Current phase: commit", approved.stdout)
+
     def test_node_push_watch_blocks_protected_branches(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
@@ -623,33 +881,7 @@ class CliTest(unittest.TestCase):
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
-            self.assertEqual(
-                subprocess.run(
-                    (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
-                    cwd=project_root,
-                    check=False,
-                ).returncode,
-                0,
-            )
-            run_dir = project_root / ".agent-flow" / "runs" / "full-feature" / "r1"
-            for phase in [
-                "prd",
-                "slice-plan",
-                "worktree",
-                "run-start",
-                "red",
-                "green",
-                "refactor",
-                "gates",
-                "multi-review",
-                "fix-loop",
-                "commit",
-                "push-pr",
-            ]:
-                artifact = run_dir / _node_phase_artifact(phase)
-                artifact.parent.mkdir(parents=True, exist_ok=True)
-                artifact.write_text(f"{phase}\n", encoding="utf-8")
-                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+            run_dir = _node_start_full_feature_at_pr_watch(project_root, node, cli)
             bin_dir = Path(temp_dir) / "bin"
             bin_dir.mkdir()
             gh = bin_dir / "gh"
@@ -3676,8 +3908,13 @@ def _read_shutdown_json(root: Path, signal_id: str) -> dict[str, object]:
 
 def _node_phase_artifact(phase: str) -> Path:
     artifacts = {
+        "domain-grill": Path("artifacts/domain-grill.md"),
+        "domain-map": Path("artifacts/domain-map.md"),
+        "product-brief": Path("artifacts/product-brief.md"),
         "prd": Path("artifacts/prd.md"),
         "slice-plan": Path("artifacts/slice-plan.md"),
+        "plan-review": Path("artifacts/plan-review.md"),
+        "ddd-design": Path("artifacts/ddd-design.md"),
         "worktree": Path("artifacts/worktree.md"),
         "run-start": Path("artifacts/run-start.md"),
         "red": Path("artifacts/red.log"),
@@ -3686,6 +3923,7 @@ def _node_phase_artifact(phase: str) -> Path:
         "gates": Path("gate-results.json"),
         "multi-review": Path("artifacts/multi-review.md"),
         "fix-loop": Path("artifacts/fix-loop.md"),
+        "architecture-review": Path("artifacts/architecture-review.md"),
         "commit": Path("artifacts/commit.md"),
         "push-pr": Path("artifacts/push-pr.md"),
         "pr-watch": Path("artifacts/pr-watch.md"),
@@ -3705,8 +3943,13 @@ def _node_start_full_feature_at_pr_watch(project_root: Path, node: str, cli: str
     )
     run_dir = project_root / ".agent-flow" / "runs" / "full-feature" / "r1"
     for phase in [
+        "domain-grill",
+        "domain-map",
+        "product-brief",
         "prd",
         "slice-plan",
+        "plan-review",
+        "ddd-design",
         "worktree",
         "run-start",
         "red",
@@ -3715,12 +3958,14 @@ def _node_start_full_feature_at_pr_watch(project_root: Path, node: str, cli: str
         "gates",
         "multi-review",
         "fix-loop",
+        "architecture-review",
         "commit",
         "push-pr",
     ]:
         artifact = run_dir / _node_phase_artifact(phase)
         artifact.parent.mkdir(parents=True, exist_ok=True)
-        artifact.write_text(f"{phase}\n", encoding="utf-8")
+        content = "verdict: approve\n" if phase in {"plan-review", "architecture-review"} else f"{phase}\n"
+        artifact.write_text(content, encoding="utf-8")
         subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=True)
     return run_dir
 
