@@ -152,6 +152,26 @@ def list_team_archives(*, root: Path) -> list[TeamArchive]:
     return archives
 
 
+def restore_team_archive(*, root: Path, archive_path: Path) -> TeamArchive:
+    archive_dir = archive_path.resolve()
+    manifest_path = archive_dir / "archive.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"team archive manifest does not exist: {archive_dir}")
+    archive = TeamArchive(**json.loads(manifest_path.read_text(encoding="utf-8")))
+    safe_team = safe_team_name(archive.name)
+    target_dir = _team_root(root, safe_team)
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    if target_dir.exists():
+        raise FileExistsError(f"team already exists: {safe_team}")
+    manifest_path.unlink()
+    try:
+        archive_dir.rename(target_dir)
+    except Exception:
+        _write_json(manifest_path, asdict(archive))
+        raise
+    return archive
+
+
 def add_task(
     *,
     root: Path,
