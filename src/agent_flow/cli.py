@@ -33,6 +33,7 @@ from agent_flow.core.team import (
     send_message,
     team_status,
     update_worker_heartbeat,
+    validate_team_state_import,
 )
 from agent_flow.core.worktrees import create_worktree, get_worktree_status, plan_worktree
 from agent_flow.core.state import RunRequest, RunState, start_run, status_summary
@@ -175,6 +176,8 @@ def main(argv: list[str] | None = None) -> int:
     team_export = team_subparsers.add_parser("export")
     team_export.add_argument("--root", default=".")
     team_export.add_argument("--team", required=True)
+    team_import_validate = team_subparsers.add_parser("import-validate")
+    team_import_validate.add_argument("--file", required=True)
 
     args = parser.parse_args(argv)
     root = Path(getattr(args, "root", ".")).resolve()
@@ -385,6 +388,22 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.team_command == "export":
             print(json.dumps(export_team_state(root=root, team_name=args.team), indent=2, sort_keys=True))
+            return 0
+        if args.team_command == "import-validate":
+            try:
+                payload = json.loads(Path(args.file).read_text(encoding="utf-8"))
+            except OSError as exc:
+                print(f"cannot read import file: {exc}")
+                return 1
+            except json.JSONDecodeError as exc:
+                print(f"invalid JSON: {exc}")
+                return 1
+            errors = validate_team_state_import(payload)
+            if errors:
+                for error in errors:
+                    print(error)
+                return 1
+            print("OK")
             return 0
 
     if args.command == "start":

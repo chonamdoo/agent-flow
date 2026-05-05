@@ -16,6 +16,8 @@ Make Team shutdown signal records operational.
 
 Make Team status detail view operational.
 
+Make Team state export operational.
+
 ### Scope
 
 - Send messages to registered Worker mailboxes.
@@ -34,12 +36,13 @@ Make Team status detail view operational.
 
 ## Current Slice
 
-Make Team state export operational.
+Make Team state import validation operational.
 
 ### Scope
 
-- Export Team State as deterministic JSON.
-- Include team config, tasks, workers, heartbeats, mailboxes, and shutdown signals.
+- Validate exported Team State JSON before future import.
+- Check Team name, task ids/statuses, workers, heartbeat references, mailbox references, and shutdown signal ids.
+- Keep validation read-only; do not create or modify Team State.
 - Preserve Team Orchestration as state-only; no worker process execution.
 - Keep AI CLI execution on host adapters/providers; no sandbox support.
 
@@ -52,4 +55,4 @@ Make Team state export operational.
 
 ## Next Slices
 
-1. Team state import validation.
+1. Team state import dry-run summary.

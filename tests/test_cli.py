@@ -661,6 +661,86 @@ class CliTest(unittest.TestCase):
             self.assertEqual(payload["mailboxes"]["worker-1"], [])
             self.assertFalse(mailbox_dir.exists())
 
+    def test_team_import_validate_accepts_export_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+            export_output = io.StringIO()
+            with contextlib.redirect_stdout(export_output):
+                self.assertEqual(
+                    main(["team", "export", "--root", str(root), "--team", "feature-team"]),
+                    0,
+                )
+            snapshot_path = root / "snapshot.json"
+            snapshot_path.write_text(export_output.getvalue(), encoding="utf-8")
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["team", "import-validate", "--file", str(snapshot_path)]), 0)
+            self.assertEqual(output.getvalue().strip(), "OK")
+
+    def test_team_import_validate_rejects_bad_references(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            snapshot_path = root / "snapshot.json"
+            snapshot_path.write_text(
+                json.dumps(
+                    {
+                        "team": {"name": "feature-team"},
+                        "tasks": [
+                            {"task_id": "task-1", "status": "unknown", "owner": "missing-owner"},
+                            {"task_id": "task-2", "status": ["bad"]},
+                        ],
+                        "workers": [{"name": "worker-1"}],
+                        "heartbeats": [{"worker": "missing"}],
+                        "mailboxes": {"worker-1": [{"to_worker": "other-worker"}]},
+                        "shutdowns": [{"signal_id": "../bad", "worker": "worker-1"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["team", "import-validate", "--file", str(snapshot_path)]), 1)
+            errors = output.getvalue()
+            self.assertIn("invalid task status: unknown", errors)
+            self.assertIn("tasks[1].status must be a string", errors)
+            self.assertIn("task owner references unknown worker: missing-owner", errors)
+            self.assertIn("heartbeat references unknown worker: missing", errors)
+            self.assertIn("mailbox message worker mismatch: worker-1 != other-worker", errors)
+            self.assertIn("shutdowns[0].signal_id is unsafe: ../bad", errors)
+
+    def test_team_import_validate_rejects_incomplete_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            snapshot_path = root / "snapshot.json"
+            snapshot_path.write_text(json.dumps({"team": {"name": "feature-team"}}), encoding="utf-8")
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["team", "import-validate", "--file", str(snapshot_path)]), 1)
+            errors = output.getvalue()
+            self.assertIn("tasks is required", errors)
+            self.assertIn("workers is required", errors)
+            self.assertIn("mailboxes is required", errors)
+
+    def test_team_import_validate_reports_bad_input_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            malformed_path = root / "bad.json"
+            malformed_path.write_text("{", encoding="utf-8")
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["team", "import-validate", "--file", str(malformed_path)]), 1)
+            self.assertIn("invalid JSON:", output.getvalue())
+
+            missing_output = io.StringIO()
+            with contextlib.redirect_stdout(missing_output):
+                self.assertEqual(main(["team", "import-validate", "--file", str(root / "missing.json")]), 1)
+            self.assertIn("cannot read import file:", missing_output.getvalue())
+
     def test_team_heartbeat_can_mark_worker_dead(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

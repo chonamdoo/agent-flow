@@ -365,6 +365,117 @@ def export_team_state(*, root: Path, team_name: str) -> dict[str, object]:
     }
 
 
+def validate_team_state_import(payload: object) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(payload, dict):
+        return ["payload must be a JSON object"]
+    team = payload.get("team")
+    if not isinstance(team, dict):
+        errors.append("team must be an object")
+    else:
+        _validate_safe_field(errors, team, "name", "team.name", safe_team_name)
+    for key in ("tasks", "workers", "heartbeats", "mailboxes", "shutdowns"):
+        if key not in payload:
+            errors.append(f"{key} is required")
+    tasks = _list_field(errors, payload, "tasks")
+    workers = _list_field(errors, payload, "workers")
+    heartbeats = _list_field(errors, payload, "heartbeats")
+    shutdowns = _list_field(errors, payload, "shutdowns")
+    mailboxes = payload.get("mailboxes", {})
+    if not isinstance(mailboxes, dict):
+        errors.append("mailboxes must be an object")
+        mailboxes = {}
+
+    task_ids: set[str] = set()
+    for index, task in enumerate(tasks):
+        if not isinstance(task, dict):
+            errors.append(f"tasks[{index}] must be an object")
+            continue
+        task_id = _validate_safe_field(errors, task, "task_id", f"tasks[{index}].task_id", safe_task_id)
+        if task_id is not None:
+            if task_id in task_ids:
+                errors.append(f"duplicate task id: {task_id}")
+            task_ids.add(task_id)
+        status = task.get("status", "pending")
+        if not isinstance(status, str):
+            errors.append(f"tasks[{index}].status must be a string")
+        elif status not in {"pending", "blocked", "in_progress", "completed", "failed"}:
+            errors.append(f"invalid task status: {status}")
+
+    worker_names: set[str] = set()
+    for index, worker in enumerate(workers):
+        if not isinstance(worker, dict):
+            errors.append(f"workers[{index}] must be an object")
+            continue
+        worker_name = _validate_safe_field(errors, worker, "name", f"workers[{index}].name", safe_worker_name)
+        if worker_name is not None:
+            if worker_name in worker_names:
+                errors.append(f"duplicate worker name: {worker_name}")
+            worker_names.add(worker_name)
+
+    for index, task in enumerate(tasks):
+        if not isinstance(task, dict):
+            continue
+        owner = task.get("owner")
+        if owner is None:
+            continue
+        if not isinstance(owner, str):
+            errors.append(f"tasks[{index}].owner must be a string")
+            continue
+        try:
+            safe_owner = safe_worker_name(owner)
+        except ValueError:
+            errors.append(f"tasks[{index}].owner is unsafe: {owner}")
+            continue
+        if safe_owner not in worker_names:
+            errors.append(f"task owner references unknown worker: {safe_owner}")
+
+    for index, heartbeat in enumerate(heartbeats):
+        if not isinstance(heartbeat, dict):
+            errors.append(f"heartbeats[{index}] must be an object")
+            continue
+        worker_name = _validate_safe_field(errors, heartbeat, "worker", f"heartbeats[{index}].worker", safe_worker_name)
+        if worker_name is not None and worker_name not in worker_names:
+            errors.append(f"heartbeat references unknown worker: {worker_name}")
+
+    for worker_name, messages in mailboxes.items():
+        try:
+            safe_worker = safe_worker_name(str(worker_name))
+        except ValueError:
+            errors.append(f"unsafe mailbox worker: {worker_name}")
+            continue
+        if safe_worker not in worker_names:
+            errors.append(f"mailbox references unknown worker: {safe_worker}")
+        if not isinstance(messages, list):
+            errors.append(f"mailboxes.{safe_worker} must be a list")
+            continue
+        for index, message in enumerate(messages):
+            if not isinstance(message, dict):
+                errors.append(f"mailboxes.{safe_worker}[{index}] must be an object")
+                continue
+            to_worker = _validate_safe_field(
+                errors,
+                message,
+                "to_worker",
+                f"mailboxes.{safe_worker}[{index}].to_worker",
+                safe_worker_name,
+            )
+            if to_worker is not None and to_worker != safe_worker:
+                errors.append(f"mailbox message worker mismatch: {safe_worker} != {to_worker}")
+
+    for index, signal in enumerate(shutdowns):
+        if not isinstance(signal, dict):
+            errors.append(f"shutdowns[{index}] must be an object")
+            continue
+        signal_id = _validate_safe_field(errors, signal, "signal_id", f"shutdowns[{index}].signal_id", safe_signal_id)
+        worker_name = _validate_safe_field(errors, signal, "worker", f"shutdowns[{index}].worker", safe_worker_name)
+        if signal_id is None:
+            continue
+        if worker_name is not None and worker_name not in worker_names:
+            errors.append(f"shutdown references unknown worker: {worker_name}")
+    return errors
+
+
 def _finish_task(
     *,
     root: Path,
@@ -577,6 +688,26 @@ def _write_json(path: Path, payload: object) -> None:
 
 def _read_json(path: Path) -> dict[str, object] | list[dict[str, object]]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _list_field(errors: list[str], payload: dict[str, object], key: str) -> list[object]:
+    value = payload.get(key, [])
+    if not isinstance(value, list):
+        errors.append(f"{key} must be a list")
+        return []
+    return value
+
+
+def _validate_safe_field(errors: list[str], payload: dict[str, object], key: str, label: str, validator) -> str | None:
+    value = payload.get(key)
+    if not isinstance(value, str):
+        errors.append(f"{label} must be a string")
+        return None
+    try:
+        return validator(value)
+    except ValueError:
+        errors.append(f"{label} is unsafe: {value}")
+        return None
 
 
 def _write_json_create(path: Path, payload: object, *, exists_message: str) -> None:
