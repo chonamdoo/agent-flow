@@ -165,9 +165,16 @@ class CliTest(unittest.TestCase):
             self.assertTrue((project_root / ".agent-flow" / "prompts" / "prd.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "prompts" / "pr-watch.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "prompts" / "merge.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "prompts" / "push-watch.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "prompts" / "push-watch-tick.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "skills" / "push-watch" / "SKILL.md").is_file())
             self.assertIn(
                 "status: ci-failed",
                 (project_root / ".agent-flow" / "prompts" / "pr-watch.md").read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "merge requires explicit approval",
+                (project_root / ".agent-flow" / "skills" / "push-watch" / "SKILL.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
                 "npx github:chonamdoo/agent-flow run next",
@@ -566,6 +573,249 @@ class CliTest(unittest.TestCase):
             )
             self.assertEqual(ready.returncode, 0, ready.stderr)
             self.assertIn("Current phase: merge", ready.stdout)
+
+    def test_node_push_watch_blocks_protected_branches(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            subprocess.run(("git", "init", "-q"), cwd=project_root, check=True)
+            subprocess.run(("git", "checkout", "-q", "-b", "main"), cwd=project_root, check=True)
+
+            result = subprocess.run(
+                (node, cli, "run", "push-watch"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("blocked: protected branch main", result.stderr)
+
+    def test_node_push_watch_blocks_detached_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _init_git_repo(project_root)
+            subprocess.run(("git", "checkout", "-q", "--detach", "HEAD"), cwd=project_root, check=True)
+
+            result = subprocess.run(
+                (node, cli, "run", "push-watch"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("blocked: push-watch requires a named git branch", result.stderr)
+
+    def test_node_push_watch_tick_records_failed_ci_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            self.assertEqual(
+                subprocess.run(
+                    (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
+                    cwd=project_root,
+                    check=False,
+                ).returncode,
+                0,
+            )
+            run_dir = project_root / ".agent-flow" / "runs" / "full-feature" / "r1"
+            for phase in [
+                "prd",
+                "slice-plan",
+                "worktree",
+                "run-start",
+                "red",
+                "green",
+                "refactor",
+                "gates",
+                "multi-review",
+                "fix-loop",
+                "commit",
+                "push-pr",
+            ]:
+                artifact = run_dir / _node_phase_artifact(phase)
+                artifact.parent.mkdir(parents=True, exist_ok=True)
+                artifact.write_text(f"{phase}\n", encoding="utf-8")
+                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+            bin_dir = Path(temp_dir) / "bin"
+            bin_dir.mkdir()
+            gh = bin_dir / "gh"
+            gh.write_text(
+                "\n".join(
+                    [
+                        "#!/bin/sh",
+                        "cat <<'JSON'",
+                        '{"url":"https://github.com/acme/demo/pull/7","reviewDecision":"REVIEW_REQUIRED","statusCheckRollup":[{"name":"test","status":"COMPLETED","conclusion":"FAILURE"}]}',
+                        "JSON",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            gh.chmod(0o755)
+
+            result = subprocess.run(
+                (node, cli, "run", "push-watch-tick"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+                env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            watch = run_dir / _node_phase_artifact("pr-watch")
+            watch_text = watch.read_text(encoding="utf-8")
+            self.assertIn("status: ci-failed", watch_text)
+            self.assertIn("https://github.com/acme/demo/pull/7", watch_text)
+
+    def test_node_push_watch_tick_blocks_before_pr_watch_phase(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            subprocess.run(
+                (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
+                cwd=project_root,
+                check=True,
+            )
+
+            result = subprocess.run(
+                (node, cli, "run", "push-watch-tick"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("blocked: push-watch-tick requires current phase pr-watch", result.stderr)
+
+    def test_node_push_watch_tick_treats_legacy_failed_context_as_ci_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            run_dir = _node_start_full_feature_at_pr_watch(project_root, node, cli)
+            bin_dir = Path(temp_dir) / "bin"
+            bin_dir.mkdir()
+            gh = bin_dir / "gh"
+            gh.write_text(
+                "\n".join(
+                    [
+                        "#!/bin/sh",
+                        "cat <<'JSON'",
+                        '{"url":"https://github.com/acme/demo/pull/8","reviewDecision":"APPROVED","statusCheckRollup":[{"context":"lint","state":"FAILURE"}]}',
+                        "JSON",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            gh.chmod(0o755)
+
+            result = subprocess.run(
+                (node, cli, "run", "push-watch-tick"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+                env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("status: ci-failed", (run_dir / _node_phase_artifact("pr-watch")).read_text(encoding="utf-8"))
+
+    def test_node_push_watch_tick_requires_review_approval_before_green(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            run_dir = _node_start_full_feature_at_pr_watch(project_root, node, cli)
+            bin_dir = Path(temp_dir) / "bin"
+            bin_dir.mkdir()
+            gh = bin_dir / "gh"
+            gh.write_text(
+                "\n".join(
+                    [
+                        "#!/bin/sh",
+                        "cat <<'JSON'",
+                        '{"url":"https://github.com/acme/demo/pull/9","statusCheckRollup":[{"name":"test","status":"COMPLETED","conclusion":"SUCCESS"}]}',
+                        "JSON",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            gh.chmod(0o755)
+
+            result = subprocess.run(
+                (node, cli, "run", "push-watch-tick"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+                env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("status: pending", (run_dir / _node_phase_artifact("pr-watch")).read_text(encoding="utf-8"))
+
+    def test_node_push_watch_tick_treats_legacy_success_context_as_green_when_approved(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            run_dir = _node_start_full_feature_at_pr_watch(project_root, node, cli)
+            bin_dir = Path(temp_dir) / "bin"
+            bin_dir.mkdir()
+            gh = bin_dir / "gh"
+            gh.write_text(
+                "\n".join(
+                    [
+                        "#!/bin/sh",
+                        "cat <<'JSON'",
+                        '{"url":"https://github.com/acme/demo/pull/10","reviewDecision":"APPROVED","statusCheckRollup":[{"context":"lint","state":"SUCCESS"}]}',
+                        "JSON",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            gh.chmod(0o755)
+
+            result = subprocess.run(
+                (node, cli, "run", "push-watch-tick"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+                env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("status: green", (run_dir / _node_phase_artifact("pr-watch")).read_text(encoding="utf-8"))
 
     def test_start_can_create_and_record_worktree(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -3445,6 +3695,34 @@ def _node_phase_artifact(phase: str) -> Path:
         "handoff": Path("artifacts/handoff.md"),
     }
     return artifacts[phase]
+
+
+def _node_start_full_feature_at_pr_watch(project_root: Path, node: str, cli: str) -> Path:
+    subprocess.run(
+        (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
+        cwd=project_root,
+        check=True,
+    )
+    run_dir = project_root / ".agent-flow" / "runs" / "full-feature" / "r1"
+    for phase in [
+        "prd",
+        "slice-plan",
+        "worktree",
+        "run-start",
+        "red",
+        "green",
+        "refactor",
+        "gates",
+        "multi-review",
+        "fix-loop",
+        "commit",
+        "push-pr",
+    ]:
+        artifact = run_dir / _node_phase_artifact(phase)
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text(f"{phase}\n", encoding="utf-8")
+        subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=True)
+    return run_dir
 
 
 def _node_epoch_seconds(value: str) -> float:

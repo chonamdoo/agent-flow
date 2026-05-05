@@ -3,6 +3,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { execFileSync, spawnSync } from "node:child_process";
 
 const command = process.argv[2];
 const AGENT_FLOW_COMMAND = "npx github:chonamdoo/agent-flow";
@@ -30,6 +31,9 @@ function installProject() {
     path.join(agentFlowDir, "skills", "full-feature-workflow", "SKILL.md"),
     fullFeatureSkillMarkdown(),
   );
+  writeManagedFile(path.join(agentFlowDir, "skills", "push-watch", "SKILL.md"), pushWatchSkillMarkdown());
+  writeManagedFile(path.join(agentFlowDir, "prompts", "push-watch.md"), pushWatchPromptMarkdown());
+  writeManagedFile(path.join(agentFlowDir, "prompts", "push-watch-tick.md"), pushWatchTickPromptMarkdown());
   for (const phase of PHASES) {
     writeManagedFile(
       path.join(agentFlowDir, "prompts", `${phase.id}.md`),
@@ -97,6 +101,52 @@ function runWorkflowCommand(args) {
     return;
   }
 
+  if (subcommand === "push-watch") {
+    const root = process.cwd();
+    assertInstalled(root);
+    const branch = currentBranch(root);
+    if (["main", "master", "develop"].includes(branch)) {
+      throw new Error(`blocked: protected branch ${branch}`);
+    }
+    const state = {
+      status: "watching",
+      branch,
+      iterations: 0,
+      updated_at: new Date().toISOString(),
+    };
+    writeJson(pushWatchStatePath(root), state);
+    console.log(`push-watch watching branch=${branch}`);
+    return;
+  }
+
+  if (subcommand === "push-watch-tick") {
+    const root = process.cwd();
+    assertInstalled(root);
+    const state = readCurrentRun(root);
+    if (state.phase !== "pr-watch") {
+      throw new Error(`blocked: push-watch-tick requires current phase pr-watch, got ${state.phase}`);
+    }
+    const pr = readPullRequestStatus(root);
+    const watchStatus = pullRequestWatchStatus(pr);
+    const artifact = path.join(state.run_dir, "artifacts", "pr-watch.md");
+    writeManagedFile(
+      artifact,
+      [`status: ${watchStatus}`, `pr: ${pr.url ?? "unknown"}`, `recorded_at: ${new Date().toISOString()}`, ""].join("\n"),
+    );
+    const previous = fs.existsSync(pushWatchStatePath(root))
+      ? JSON.parse(fs.readFileSync(pushWatchStatePath(root), "utf8"))
+      : {};
+    writeJson(pushWatchStatePath(root), {
+      ...previous,
+      status: watchStatus,
+      pr: pr.url ?? null,
+      iterations: Number(previous.iterations ?? 0) + 1,
+      updated_at: new Date().toISOString(),
+    });
+    console.log(`push-watch status=${watchStatus}`);
+    return;
+  }
+
   if (subcommand === "advance") {
     const root = process.cwd();
     const state = readCurrentRun(root);
@@ -131,7 +181,7 @@ function runWorkflowCommand(args) {
     return;
   }
 
-  throw new Error("usage: agent-flow-kit run <start|status|next|advance>");
+  throw new Error("usage: agent-flow-kit run <start|status|next|advance|push-watch|push-watch-tick>");
 }
 
 function detectProfile(rootDir) {
@@ -177,6 +227,64 @@ function assertInstalled(root) {
 
 function currentRunPath(root) {
   return path.join(root, ".agent-flow", "state", "current-run.json");
+}
+
+function pushWatchStatePath(root) {
+  return path.join(root, ".agent-flow", "state", "push-watch.json");
+}
+
+function currentBranch(root) {
+  try {
+    const branch = execFileSync("git", ["branch", "--show-current"], { cwd: root, encoding: "utf8" }).trim();
+    if (!branch) {
+      throw new Error("blocked: push-watch requires a named git branch");
+    }
+    return branch;
+  } catch {
+    throw new Error("blocked: push-watch requires a named git branch");
+  }
+}
+
+function readPullRequestStatus(root) {
+  const result = spawnSync("gh", ["pr", "view", "--json", "url,reviewDecision,statusCheckRollup"], {
+    cwd: root,
+    encoding: "utf8",
+  });
+  if (result.status !== 0) {
+    throw new Error(`blocked: gh pr view failed${result.stderr ? `: ${result.stderr.trim()}` : ""}`);
+  }
+  return JSON.parse(result.stdout);
+}
+
+function pullRequestWatchStatus(pr) {
+  const reviewDecision = String(pr.reviewDecision ?? "").toUpperCase();
+  const checks = Array.isArray(pr.statusCheckRollup) ? pr.statusCheckRollup : [];
+  const hasFailedCheck = checks.some((check) =>
+    ["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED"].includes(
+      String(check.conclusion ?? check.state ?? "").toUpperCase(),
+    ),
+  );
+  if (hasFailedCheck) {
+    return "ci-failed";
+  }
+  if (reviewDecision === "CHANGES_REQUESTED") {
+    return "comments";
+  }
+  const hasPendingCheck =
+    checks.length === 0 ||
+    checks.some((check) => {
+      const status = String(check.status ?? "").toUpperCase();
+      const conclusion = String(check.conclusion ?? "").toUpperCase();
+      const state = String(check.state ?? "").toUpperCase();
+      if (state) {
+        return state !== "SUCCESS";
+      }
+      return status !== "COMPLETED" || (conclusion !== "SUCCESS" && conclusion !== "SKIPPED");
+    });
+  if (hasPendingCheck || reviewDecision !== "APPROVED") {
+    return "pending";
+  }
+  return "green";
 }
 
 function printNext(state) {
@@ -343,6 +451,18 @@ function fullFeatureWorkflowYaml() {
 
 function fullFeatureSkillMarkdown() {
   return `# Full Feature Workflow\n\nUse this skill for feature work in this project.\n\nAlways drive progress through:\n\n\`\`\`bash\n${AGENT_FLOW_COMMAND} run next\n\`\`\`\n\nCanonical order:\n\n${PHASES.map((phase, index) => `${index + 1}. ${phase.id}`).join("\n")}\n\nDo not skip phases. If a gate, review, PR comment, or PR check fails, complete the matching fix phase and push again before merge/handoff.\n`;
+}
+
+function pushWatchSkillMarkdown() {
+  return `# Push Watch\n\nUse this skill after local verification is complete and the branch is ready to publish.\n\nRun:\n\n\`\`\`bash\n${AGENT_FLOW_COMMAND} run push-watch\n\`\`\`\n\nFlow:\n\n1. Sanity check the branch and working tree.\n2. Commit and push the current branch.\n3. Open or record the pull request.\n4. Watch PR checks and review threads.\n5. Route failures through \`pr-comment-fix\` or \`pr-ci-fix\`, then push again and return to \`pr-watch\`.\n6. When checks and comments are green, route to \`merge\`.\n\nRules:\n\n- Protected branches are blocked: main, master, develop.\n- Record PR watch state with \`status: green\`, \`status: comments\`, \`status: ci-failed\`, or \`status: pending\`.\n- merge requires explicit approval. Do not merge unattended.\n`;
+}
+
+function pushWatchPromptMarkdown() {
+  return `# push-watch\n\nCommit, push, open a PR, and start the PR watch loop.\n\nUse \`${AGENT_FLOW_COMMAND} run push-watch\`.\n\nDo not run on protected branches. Do not merge without explicit approval.\n`;
+}
+
+function pushWatchTickPromptMarkdown() {
+  return `# push-watch-tick\n\nPoll the current PR checks and review threads.\n\nUse \`${AGENT_FLOW_COMMAND} run push-watch-tick\`.\n\nWrite \`artifacts/pr-watch.md\` with one status line: \`status: green\`, \`status: comments\`, \`status: ci-failed\`, or \`status: pending\`.\n`;
 }
 
 function phasePrompt(phase) {
