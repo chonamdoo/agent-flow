@@ -26,6 +26,20 @@ src/agent_flow/   Python runner package
 templates/        adapter-specific prompt templates
 ```
 
+## Use In A Project
+
+Agent Flow is a Workflow Kit. Keep this repository as the source kit, then use it from any project by cloning it once and running the CLI against the target project root.
+
+```bash
+git clone https://github.com/chonamdoo/agent-flow.git ~/agent-flow
+cd ~/agent-flow
+python3 -m pip install -e .
+agent-flow init --root /path/to/project
+agent-flow start development --root /path/to/project --task "add login" --adapter auto
+```
+
+For copy-based usage, copy the source kit repository or package into a stable local location and run the installed CLI against each project with `--root`. The target project only needs its generated `.agent-flow/` runtime directory unless you intentionally maintain a forked kit.
+
 ## Example
 
 ```bash

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 import sys
 import tempfile
 import unittest
@@ -11,6 +12,7 @@ import subprocess
 import json
 from dataclasses import asdict
 from concurrent.futures import ThreadPoolExecutor
+from importlib import resources
 
 from agent_flow.cli import main
 from agent_flow.adapters.templates import PromptContext, render_stage_prompt
@@ -48,6 +50,81 @@ class CliTest(unittest.TestCase):
                 "Adapter:",
                 (run_dir / "prompts" / "explore.md").read_text(encoding="utf-8"),
             )
+
+    def test_cli_runs_from_outside_source_tree_with_packaged_resources(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = Path(__file__).resolve().parents[1]
+            external_cwd = Path(temp_dir) / "outside"
+            project_root = Path(temp_dir) / "project"
+            install_target = Path(temp_dir) / "site"
+            package_python = _python_for_package_install()
+            external_cwd.mkdir()
+            install = subprocess.run(
+                (
+                    package_python,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--quiet",
+                    "--target",
+                    str(install_target),
+                    str(repo_root),
+                ),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(install.returncode, 0, install.stderr)
+            init = subprocess.run(
+                (
+                    package_python,
+                    "-m",
+                    "agent_flow.cli",
+                    "init",
+                    "--root",
+                    str(project_root),
+                ),
+                cwd=external_cwd,
+                env={**os.environ, "PYTHONPATH": str(install_target)},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(init.returncode, 0, init.stderr)
+            result = subprocess.run(
+                (
+                    package_python,
+                    "-m",
+                    "agent_flow.cli",
+                    "start",
+                    "development",
+                    "--root",
+                    str(project_root),
+                    "--task",
+                    "demo",
+                    "--adapter",
+                    "manual",
+                    "--run-id",
+                    "r1",
+                ),
+                cwd=external_cwd,
+                env={**os.environ, "PYTHONPATH": str(install_target)},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            run_dir = project_root / ".agent-flow" / "runs" / "development" / "r1"
+            self.assertTrue((project_root / ".agent-flow").is_dir())
+            self.assertTrue((run_dir / "manifest.json").is_file())
+            self.assertTrue((run_dir / "prompts" / "explore.md").is_file())
+
+    def test_workflow_kit_resources_are_packaged(self) -> None:
+        package_root = resources.files("agent_flow")
+        self.assertTrue(package_root.joinpath("workflows", "development.yaml").is_file())
+        self.assertTrue(package_root.joinpath("profiles", "generic.yaml").is_file())
+        self.assertTrue(package_root.joinpath("roles", "default.yaml").is_file())
+        self.assertTrue(package_root.joinpath("templates", "generic", "stage.md").is_file())
 
     def test_start_can_create_and_record_worktree(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2764,6 +2841,33 @@ def _init_git_repo(root: Path) -> None:
     (root / "README.md").write_text("# test\n", encoding="utf-8")
     subprocess.run(("git", "add", "README.md"), cwd=root, check=True)
     subprocess.run(("git", "commit", "-q", "-m", "init"), cwd=root, check=True)
+
+
+def _python_for_package_install() -> str:
+    candidates = [
+        os.environ.get("AGENT_FLOW_TEST_PYTHON"),
+        str(Path.home() / ".cache" / "codex-runtimes" / "codex-primary-runtime" / "dependencies" / "python" / "bin" / "python3"),
+        sys.executable,
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            result = subprocess.run(
+                (
+                    candidate,
+                    "-c",
+                    "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)",
+                ),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        except OSError:
+            continue
+        if result.returncode == 0:
+            return candidate
+    raise RuntimeError("Python >= 3.11 is required for package install smoke test")
 
 
 def _create_team_with_task_and_worker(root: Path) -> None:

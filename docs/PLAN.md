@@ -58,6 +58,8 @@ Make worktree-backed run start operational.
 
 Make team runtime tracer operational.
 
+Make installable workflow kit operational.
+
 ### Scope
 
 - Send messages to registered Worker mailboxes.
@@ -76,19 +78,7 @@ Make team runtime tracer operational.
 
 ## Current Slice
 
-Make installable workflow kit operational.
-
-### Scope
-
-- Document clone/copy usage for new projects.
-- Verify packaged resources include workflows, profiles, roles, and templates.
-- Add an installed-CLI smoke path.
-
-### Non-Goals
-
-- No long-lived Team Orchestration runtime.
-- No process supervision.
-- No sandbox execution.
+Workflow kit feature set is complete.
 
 ## Next Slices
 
