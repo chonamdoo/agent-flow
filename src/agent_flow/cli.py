@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from agent_flow.adapters.registry import detect_adapter
+from agent_flow.adapters.templates import PromptContext, render_stage_prompt
 from agent_flow.core.artifacts import (
     init_project,
     write_gate_results,
@@ -145,14 +146,17 @@ def _write_stage_prompts(*, root: Path, state: RunState, workflow) -> None:
                 root=root,
                 run_dir=state.run_dir,
                 stage_id=prompt_id,
-                content=(
-                    f"# Agent Flow Stage: {stage.stage_id}\n\n"
-                    f"Role: {stage.role}\n"
-                    f"Workflow: {state.workflow_id}\n"
-                    f"Run: {state.run_id}\n"
-                    f"Replica: {replica}/{count}\n\n"
-                    f"Task:\n{state.task}\n\n"
-                    "Return a concise artifact with findings, changes, verification, and blockers.\n"
+                content=render_stage_prompt(
+                    PromptContext(
+                        adapter=state.adapter,
+                        stage_id=stage.stage_id,
+                        role=stage.role,
+                        workflow_id=state.workflow_id,
+                        run_id=state.run_id,
+                        replica=replica,
+                        replicas=count,
+                        task=state.task,
+                    )
                 ),
             )
 

@@ -8,13 +8,13 @@ Default execution is Personal Workflow: the lead orchestrates Runs, stages, prom
 
 ## Current Slice
 
-Make stage results and handoffs operational.
+Make adapter-specific prompt rendering operational.
 
 ### Scope
 
-- Record stage result artifacts under a Run.
-- Write handoffs for stage transitions.
-- Keep handoffs readable from both the Run and the project-level handoff index.
+- Render stage prompts from adapter-specific templates.
+- Select Codex, Claude, or generic templates from the chosen Adapter.
+- Keep unresolved template placeholders as hard failures.
 - Keep AI CLI execution on host adapters/providers; no sandbox support.
 
 ### Non-Goals
@@ -26,7 +26,6 @@ Make stage results and handoffs operational.
 
 ## Next Slices
 
-1. Adapter-specific prompt rendering.
-2. Review/fix loop wiring.
-3. Worktree support for file-change isolation.
-4. Optional Team Orchestration state model.
+1. Review/fix loop wiring.
+2. Worktree support for file-change isolation.
+3. Optional Team Orchestration state model.

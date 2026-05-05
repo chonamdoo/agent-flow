@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 from agent_flow.cli import main
+from agent_flow.adapters.templates import PromptContext, render_stage_prompt
 from agent_flow.core.gates import GateCommand, run_gate
 from agent_flow.core.profiles import load_profile
 from agent_flow.core.workflow import _stage_from_payload
@@ -25,7 +26,7 @@ class CliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             self.assertEqual(
-                main(["start", "development", "--root", str(root), "--task", "demo"]),
+                main(["start", "development", "--root", str(root), "--task", "demo", "--adapter", "manual"]),
                 0,
             )
             manifests = list((root / ".agent-flow" / "runs").glob("development/*/manifest.json"))
@@ -36,6 +37,10 @@ class CliTest(unittest.TestCase):
             self.assertTrue((run_dir / "prompts" / "review-1.md").is_file())
             self.assertTrue((run_dir / "prompts" / "review-2.md").is_file())
             self.assertTrue((run_dir / "prompts" / "review-3.md").is_file())
+            self.assertIn(
+                "Adapter:",
+                (run_dir / "prompts" / "explore.md").read_text(encoding="utf-8"),
+            )
 
     def test_detect_profile_defaults_to_generic(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -215,6 +220,70 @@ class CliTest(unittest.TestCase):
             self.assertTrue(run_handoff.is_file())
             self.assertTrue(project_handoff.is_file())
             self.assertIn("Use profile gates.", run_handoff.read_text(encoding="utf-8"))
+
+    def test_render_stage_prompt_uses_codex_template(self) -> None:
+        prompt = render_stage_prompt(
+            PromptContext(
+                adapter="codex-session",
+                stage_id="explore",
+                role="explorer",
+                workflow_id="development",
+                run_id="r1",
+                replica=1,
+                replicas=1,
+                task="inspect repo",
+            )
+        )
+        self.assertIn("Codex Subagent Stage: explore", prompt)
+        self.assertIn("Spawn a subagent for role `explorer`.", prompt)
+        self.assertIn("Run: r1", prompt)
+
+    def test_render_stage_prompt_uses_claude_template(self) -> None:
+        prompt = render_stage_prompt(
+            PromptContext(
+                adapter="claude-session",
+                stage_id="review",
+                role="reviewer",
+                workflow_id="review",
+                run_id="r2",
+                replica=2,
+                replicas=3,
+                task="review diff",
+            )
+        )
+        self.assertIn("Claude Task Stage: review", prompt)
+        self.assertIn("Replica: 2/3", prompt)
+
+    def test_render_stage_prompt_falls_back_to_generic_template(self) -> None:
+        prompt = render_stage_prompt(
+            PromptContext(
+                adapter="manual",
+                stage_id="qa",
+                role="qa",
+                workflow_id="development",
+                run_id="r3",
+                replica=1,
+                replicas=1,
+                task="run gates",
+            )
+        )
+        self.assertIn("# qa", prompt)
+        self.assertIn("Adapter: manual", prompt)
+
+    def test_render_stage_prompt_allows_task_braces(self) -> None:
+        prompt = render_stage_prompt(
+            PromptContext(
+                adapter="manual",
+                stage_id="implement",
+                role="implementer",
+                workflow_id="development",
+                run_id="r4",
+                replica=1,
+                replicas=1,
+                task="replace {{token}} in docs",
+            )
+        )
+        self.assertIn("replace {{token}} in docs", prompt)
 
 
 if __name__ == "__main__":
