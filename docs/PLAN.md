@@ -62,6 +62,8 @@ Make installable workflow kit operational.
 
 Make npx project installer operational.
 
+Make installed full-feature workflow enforcement operational.
+
 ### Scope
 
 - Send messages to registered Worker mailboxes.
@@ -80,7 +82,7 @@ Make npx project installer operational.
 
 ## Current Slice
 
-Npx project installer is complete.
+Installed full-feature workflow enforcement is complete.
 
 ## Next Slices
 

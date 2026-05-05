@@ -149,6 +149,32 @@ class CliTest(unittest.TestCase):
             self.assertEqual(kit["profile"], "generic")
             self.assertEqual(kit["install_scope"], "project")
             self.assertTrue((project_root / ".agent-flow" / "runs").is_dir())
+            self.assertTrue((project_root / ".agent-flow" / "workflows" / "full-feature.yaml").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "bootstrap" / "CLAUDE.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "bootstrap" / "GEMINI.md").is_file())
+            self.assertTrue(
+                (
+                    project_root
+                    / ".agent-flow"
+                    / "skills"
+                    / "full-feature-workflow"
+                    / "SKILL.md"
+                ).is_file()
+            )
+            self.assertTrue((project_root / ".agent-flow" / "prompts" / "prd.md").is_file())
+            self.assertIn(
+                "agent-flow-kit run next",
+                (project_root / "AGENTS.md").read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "agent-flow-kit run next",
+                (project_root / "CLAUDE.md").read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "agent-flow-kit run next",
+                (project_root / "GEMINI.md").read_text(encoding="utf-8"),
+            )
 
     def test_node_installer_detects_node_project_profile(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -206,6 +232,142 @@ class CliTest(unittest.TestCase):
         self.assertEqual(package["name"], "agent-flow-kit")
         self.assertEqual(package["bin"]["agent-flow-kit"], "bin/agent-flow-kit.mjs")
         self.assertIn("bin", package["files"])
+
+    def test_node_workflow_run_blocks_phase_skip_until_artifact_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            install = subprocess.run(
+                (node, cli, "install"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(install.returncode, 0, install.stderr)
+
+            start = subprocess.run(
+                (node, cli, "run", "start", "--task", "demo feature", "--run-id", "r1"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(start.returncode, 0, start.stderr)
+            self.assertIn("Current phase: prd", start.stdout)
+
+            blocked = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(blocked.returncode, 1)
+            self.assertIn("blocked: missing artifact", blocked.stderr)
+
+            artifact = project_root / ".agent-flow" / "runs" / "full-feature" / "r1" / "artifacts" / "prd.md"
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text("PRD\n", encoding="utf-8")
+
+            advanced = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(advanced.returncode, 0, advanced.stderr)
+            self.assertIn("Current phase: slice-plan", advanced.stdout)
+            state = json.loads((project_root / ".agent-flow" / "state" / "current-run.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["phase"], "slice-plan")
+
+    def test_node_workflow_run_requires_installed_project(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            result = subprocess.run(
+                (
+                    node,
+                    str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"),
+                    "run",
+                    "start",
+                    "--task",
+                    "demo",
+                ),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("agent-flow is not installed", result.stderr)
+
+    def test_node_workflow_run_advances_all_phases_and_handles_complete_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(
+                subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode,
+                0,
+            )
+            self.assertEqual(
+                subprocess.run(
+                    (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
+                    cwd=project_root,
+                    check=False,
+                ).returncode,
+                0,
+            )
+            expected_phases = [
+                "prd",
+                "slice-plan",
+                "worktree",
+                "run-start",
+                "red",
+                "green",
+                "refactor",
+                "gates",
+                "multi-review",
+                "fix-loop",
+                "commit",
+                "push-pr",
+                "handoff",
+            ]
+            run_dir = project_root / ".agent-flow" / "runs" / "full-feature" / "r1"
+            for index, phase in enumerate(expected_phases):
+                state = json.loads((project_root / ".agent-flow" / "state" / "current-run.json").read_text(encoding="utf-8"))
+                self.assertEqual(state["phase"], phase)
+                artifact = run_dir / _node_phase_artifact(phase)
+                artifact.parent.mkdir(parents=True, exist_ok=True)
+                artifact.write_text(f"{phase}\n", encoding="utf-8")
+                advance = subprocess.run(
+                    (node, cli, "run", "advance"),
+                    cwd=project_root,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(advance.returncode, 0, advance.stderr)
+                if index + 1 < len(expected_phases):
+                    self.assertIn(f"Current phase: {expected_phases[index + 1]}", advance.stdout)
+                else:
+                    self.assertIn("workflow complete: r1", advance.stdout)
+
+            complete = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(complete.returncode, 0, complete.stderr)
+            self.assertIn("workflow already complete: r1", complete.stdout)
 
     def test_start_can_create_and_record_worktree(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -3062,6 +3224,25 @@ def _read_shutdown_json(root: Path, signal_id: str) -> dict[str, object]:
             / f"{signal_id}.json"
         ).read_text(encoding="utf-8")
     )
+
+
+def _node_phase_artifact(phase: str) -> Path:
+    artifacts = {
+        "prd": Path("artifacts/prd.md"),
+        "slice-plan": Path("artifacts/slice-plan.md"),
+        "worktree": Path("artifacts/worktree.md"),
+        "run-start": Path("artifacts/run-start.md"),
+        "red": Path("artifacts/red.log"),
+        "green": Path("artifacts/green.log"),
+        "refactor": Path("artifacts/refactor.md"),
+        "gates": Path("gate-results.json"),
+        "multi-review": Path("artifacts/multi-review.md"),
+        "fix-loop": Path("artifacts/fix-loop.md"),
+        "commit": Path("artifacts/commit.md"),
+        "push-pr": Path("artifacts/push-pr.md"),
+        "handoff": Path("artifacts/handoff.md"),
+    }
+    return artifacts[phase]
 
 
 if __name__ == "__main__":

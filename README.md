@@ -38,13 +38,27 @@ agent-flow init --root /path/to/project
 agent-flow start development --root /path/to/project --task "add login" --adapter auto
 ```
 
-For project-local setup from the target project directory, use the Node installer:
+For project-local setup from the target project directory, use the GitHub npx installer:
 
 ```bash
-npx agent-flow-kit@latest install
+npx github:chonamdoo/agent-flow install
 ```
 
-The installer uses the current working directory as the project root, creates `.agent-flow/`, detects a project profile, and writes `.agent-flow/kit.json`.
+The installer uses the current working directory as the project root, creates `.agent-flow/`, detects a project profile, installs the `full-feature` workflow, and writes bootstrap instructions for Codex, Claude, and Gemini.
+
+Start and drive the installed workflow from the same project directory:
+
+```bash
+npx github:chonamdoo/agent-flow run start --task "add login"
+npx github:chonamdoo/agent-flow run next
+npx github:chonamdoo/agent-flow run advance
+```
+
+`run advance` only moves to the next phase after the current phase artifact exists. The default phase order is:
+
+```text
+PRD -> Slice Plan -> branch/worktree -> workflow run start -> RED -> GREEN -> REFACTOR -> gates -> multi-review -> fix loop -> commit -> push/PR -> handoff
+```
 
 For copy-based usage, copy the source kit repository or package into a stable local location and run the installed CLI against each project with `--root`. The target project only needs its generated `.agent-flow/` runtime directory unless you intentionally maintain a forked kit.
 
