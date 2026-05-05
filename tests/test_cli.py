@@ -56,6 +56,31 @@ class CliTest(unittest.TestCase):
                 self.assertEqual(main(["detect-profile", "--root", temp_dir]), 0)
             self.assertEqual(output.getvalue().strip(), "generic")
 
+    def test_provider_list_reports_host_provider_availability(self) -> None:
+        output = io.StringIO()
+        with mock.patch("agent_flow.providers.host.shutil.which") as which:
+            which.side_effect = lambda name: f"/usr/local/bin/{name}" if name == "codex" else None
+            with mock.patch.dict("agent_flow.providers.host.os.environ", {}, clear=True):
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(main(["provider", "list"]), 0)
+        self.assertEqual(
+            output.getvalue().splitlines(),
+            [
+                "manual available command=manual",
+                "codex-session available command=/usr/local/bin/codex",
+                "claude-session unavailable command=claude",
+                "gemini-cli unavailable command=gemini",
+            ],
+        )
+
+    def test_provider_list_treats_host_environment_as_available(self) -> None:
+        output = io.StringIO()
+        with mock.patch("agent_flow.providers.host.shutil.which", return_value=None):
+            with mock.patch.dict("agent_flow.providers.host.os.environ", {"CLAUDECODE": "1"}, clear=True):
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(main(["provider", "list"]), 0)
+        self.assertIn("claude-session available command=claude", output.getvalue())
+
     def test_status_reports_latest_run(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

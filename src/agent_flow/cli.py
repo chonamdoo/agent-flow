@@ -45,6 +45,7 @@ from agent_flow.core.team import (
 from agent_flow.core.worktrees import create_worktree, get_worktree_status, plan_worktree
 from agent_flow.core.state import RunRequest, RunState, start_run, status_summary
 from agent_flow.core.workflow import load_workflow
+from agent_flow.providers.host import list_host_providers
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -67,6 +68,10 @@ def main(argv: list[str] | None = None) -> int:
 
     detect_parser = subparsers.add_parser("detect-profile")
     detect_parser.add_argument("--root", default=".")
+
+    provider_parser = subparsers.add_parser("provider")
+    provider_subparsers = provider_parser.add_subparsers(dest="provider_command", required=True)
+    provider_subparsers.add_parser("list")
 
     gates_parser = subparsers.add_parser("gates")
     gates_parser.add_argument("--root", default=".")
@@ -218,6 +223,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "detect-profile":
         print(detect_profile(root))
         return 0
+
+    if args.command == "provider":
+        if args.provider_command == "list":
+            for provider in list_host_providers():
+                state = "available" if provider.available else "unavailable"
+                print(f"{provider.name} {state} command={provider.command}")
+            return 0
 
     if args.command == "status":
         print(status_summary(root))

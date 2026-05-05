@@ -30,6 +30,7 @@ templates/        adapter-specific prompt templates
 
 ```bash
 agent-flow init --root /path/to/project
+agent-flow provider list
 agent-flow start development --root /path/to/project --task "add login" --adapter auto
 agent-flow record-stage --root /path/to/project --run-dir .agent-flow/runs/development/<run-id> --stage explore --content "..."
 agent-flow handoff --root /path/to/project --run-dir .agent-flow/runs/development/<run-id> --from-stage explore --to-stage implement --decided "..." --remaining "..."

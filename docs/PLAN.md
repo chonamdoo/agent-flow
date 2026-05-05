@@ -70,8 +70,22 @@ Make Team state lifecycle final review fixes operational.
 
 ## Current Slice
 
-Team state lifecycle is complete.
+Make host provider discovery operational.
+
+### Scope
+
+- List host provider availability through a public CLI.
+- Keep AI CLI execution on host adapters/providers; no sandbox support.
+- Preserve provider discovery as environment-specific, outside Workflow core.
+
+### Non-Goals
+
+- No provider process execution.
+- No Team Orchestration runtime.
+- No sandbox execution.
 
 ## Next Slices
 
-No planned Team State lifecycle slices.
+1. Worktree-backed run start.
+2. Team runtime tracer.
+3. Installable workflow kit.
