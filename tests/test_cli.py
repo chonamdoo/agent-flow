@@ -686,15 +686,42 @@ class CliTest(unittest.TestCase):
             snapshot_path.write_text(
                 json.dumps(
                     {
-                        "team": {"name": "feature-team"},
+                        "team": {"name": "feature-team", "description": "", "created_at": "now"},
                         "tasks": [
-                            {"task_id": "task-1", "status": "unknown", "owner": "missing-owner"},
-                            {"task_id": "task-2", "status": ["bad"]},
+                            {
+                                "task_id": "task-1",
+                                "subject": "s",
+                                "description": "d",
+                                "status": "unknown",
+                                "owner": "missing-owner",
+                            },
+                            {"task_id": "task-2", "subject": "s", "description": "d", "status": ["bad"]},
                         ],
-                        "workers": [{"name": "worker-1"}],
-                        "heartbeats": [{"worker": "missing"}],
-                        "mailboxes": {"worker-1": [{"to_worker": "other-worker"}]},
-                        "shutdowns": [{"signal_id": "../bad", "worker": "worker-1"}],
+                        "workers": [{"name": "worker-1", "role": "implementer", "status": "idle"}],
+                        "heartbeats": [
+                            {"worker": "missing", "status": "idle", "alive": True, "updated_at": "now"}
+                        ],
+                        "mailboxes": {
+                            "worker-1": [
+                                {
+                                    "message_id": "m1",
+                                    "from_actor": "lead",
+                                    "to_worker": "other-worker",
+                                    "body": "b",
+                                    "created_at": "now",
+                                    "read": False,
+                                }
+                            ]
+                        },
+                        "shutdowns": [
+                            {
+                                "signal_id": "../bad",
+                                "worker": "worker-1",
+                                "reason": "r",
+                                "requested_at": "now",
+                                "acknowledged": False,
+                            }
+                        ],
                     }
                 ),
                 encoding="utf-8",
@@ -710,6 +737,55 @@ class CliTest(unittest.TestCase):
             self.assertIn("heartbeat references unknown worker: missing", errors)
             self.assertIn("mailbox message worker mismatch: worker-1 != other-worker", errors)
             self.assertIn("shutdowns[0].signal_id is unsafe: ../bad", errors)
+
+    def test_team_import_validate_rejects_bad_schema_types(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            snapshot_path = root / "snapshot.json"
+            snapshot_path.write_text(
+                json.dumps(
+                    {
+                        "team": {"name": "feature-team", "description": 1, "created_at": None},
+                        "tasks": [{"task_id": "task-1", "subject": 1, "description": None}],
+                        "workers": [{"name": "worker-1", "role": None, "status": 2}],
+                        "heartbeats": [{"worker": "worker-1", "status": None, "alive": "yes", "updated_at": 3}],
+                        "mailboxes": {
+                            "worker-1": [
+                                {
+                                    "message_id": 1,
+                                    "from_actor": None,
+                                    "to_worker": "worker-1",
+                                    "body": 3,
+                                    "created_at": None,
+                                    "read": "no",
+                                }
+                            ]
+                        },
+                        "shutdowns": [
+                            {
+                                "signal_id": "a" * 32,
+                                "worker": "worker-1",
+                                "reason": 1,
+                                "requested_at": None,
+                                "acknowledged": "no",
+                                "acknowledged_at": 5,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["team", "import-validate", "--file", str(snapshot_path)]), 1)
+            errors = output.getvalue()
+            self.assertIn("team.description must be a string", errors)
+            self.assertIn("tasks[0].subject must be a string", errors)
+            self.assertIn("workers[0].role must be a string", errors)
+            self.assertIn("heartbeats[0].alive must be a boolean", errors)
+            self.assertIn("mailboxes.worker-1[0].read must be a boolean", errors)
+            self.assertIn("shutdowns[0].acknowledged_at must be a string or null", errors)
 
     def test_team_import_validate_rejects_incomplete_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

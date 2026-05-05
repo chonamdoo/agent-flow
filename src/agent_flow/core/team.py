@@ -374,6 +374,8 @@ def validate_team_state_import(payload: object) -> list[str]:
         errors.append("team must be an object")
     else:
         _validate_safe_field(errors, team, "name", "team.name", safe_team_name)
+        _validate_string_field(errors, team, "description", "team.description")
+        _validate_string_field(errors, team, "created_at", "team.created_at")
     for key in ("tasks", "workers", "heartbeats", "mailboxes", "shutdowns"):
         if key not in payload:
             errors.append(f"{key} is required")
@@ -396,6 +398,8 @@ def validate_team_state_import(payload: object) -> list[str]:
             if task_id in task_ids:
                 errors.append(f"duplicate task id: {task_id}")
             task_ids.add(task_id)
+        _validate_string_field(errors, task, "subject", f"tasks[{index}].subject")
+        _validate_string_field(errors, task, "description", f"tasks[{index}].description")
         status = task.get("status", "pending")
         if not isinstance(status, str):
             errors.append(f"tasks[{index}].status must be a string")
@@ -412,6 +416,8 @@ def validate_team_state_import(payload: object) -> list[str]:
             if worker_name in worker_names:
                 errors.append(f"duplicate worker name: {worker_name}")
             worker_names.add(worker_name)
+        _validate_string_field(errors, worker, "role", f"workers[{index}].role")
+        _validate_string_field(errors, worker, "status", f"workers[{index}].status")
 
     for index, task in enumerate(tasks):
         if not isinstance(task, dict):
@@ -437,6 +443,9 @@ def validate_team_state_import(payload: object) -> list[str]:
         worker_name = _validate_safe_field(errors, heartbeat, "worker", f"heartbeats[{index}].worker", safe_worker_name)
         if worker_name is not None and worker_name not in worker_names:
             errors.append(f"heartbeat references unknown worker: {worker_name}")
+        _validate_string_field(errors, heartbeat, "status", f"heartbeats[{index}].status")
+        _validate_bool_field(errors, heartbeat, "alive", f"heartbeats[{index}].alive")
+        _validate_string_field(errors, heartbeat, "updated_at", f"heartbeats[{index}].updated_at")
 
     for worker_name, messages in mailboxes.items():
         try:
@@ -453,6 +462,8 @@ def validate_team_state_import(payload: object) -> list[str]:
             if not isinstance(message, dict):
                 errors.append(f"mailboxes.{safe_worker}[{index}] must be an object")
                 continue
+            _validate_string_field(errors, message, "message_id", f"mailboxes.{safe_worker}[{index}].message_id")
+            _validate_string_field(errors, message, "from_actor", f"mailboxes.{safe_worker}[{index}].from_actor")
             to_worker = _validate_safe_field(
                 errors,
                 message,
@@ -462,6 +473,9 @@ def validate_team_state_import(payload: object) -> list[str]:
             )
             if to_worker is not None and to_worker != safe_worker:
                 errors.append(f"mailbox message worker mismatch: {safe_worker} != {to_worker}")
+            _validate_string_field(errors, message, "body", f"mailboxes.{safe_worker}[{index}].body")
+            _validate_string_field(errors, message, "created_at", f"mailboxes.{safe_worker}[{index}].created_at")
+            _validate_bool_field(errors, message, "read", f"mailboxes.{safe_worker}[{index}].read")
 
     for index, signal in enumerate(shutdowns):
         if not isinstance(signal, dict):
@@ -473,6 +487,12 @@ def validate_team_state_import(payload: object) -> list[str]:
             continue
         if worker_name is not None and worker_name not in worker_names:
             errors.append(f"shutdown references unknown worker: {worker_name}")
+        _validate_string_field(errors, signal, "reason", f"shutdowns[{index}].reason")
+        _validate_string_field(errors, signal, "requested_at", f"shutdowns[{index}].requested_at")
+        _validate_bool_field(errors, signal, "acknowledged", f"shutdowns[{index}].acknowledged")
+        acknowledged_at = signal.get("acknowledged_at")
+        if acknowledged_at is not None and not isinstance(acknowledged_at, str):
+            errors.append(f"shutdowns[{index}].acknowledged_at must be a string or null")
     return errors
 
 
@@ -733,6 +753,22 @@ def _validate_safe_field(errors: list[str], payload: dict[str, object], key: str
     except ValueError:
         errors.append(f"{label} is unsafe: {value}")
         return None
+
+
+def _validate_string_field(errors: list[str], payload: dict[str, object], key: str, label: str) -> str | None:
+    value = payload.get(key)
+    if not isinstance(value, str):
+        errors.append(f"{label} must be a string")
+        return None
+    return value
+
+
+def _validate_bool_field(errors: list[str], payload: dict[str, object], key: str, label: str) -> bool | None:
+    value = payload.get(key)
+    if not isinstance(value, bool):
+        errors.append(f"{label} must be a boolean")
+        return None
+    return value
 
 
 def _write_json_create(path: Path, payload: object, *, exists_message: str) -> None:
