@@ -728,6 +728,78 @@ class CliTest(unittest.TestCase):
             self.assertEqual(status_lines[0], "feature-team tasks=1 workers=1 exists=True")
             self.assertIn("worker-1 idle alive", status_lines[1])
 
+    def test_team_run_next_completes_pending_task_with_host_command(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(
+                        [
+                            "team",
+                            "run-next",
+                            "--root",
+                            str(root),
+                            "--team",
+                            "feature-team",
+                            "--worker",
+                            "worker-1",
+                            "--command",
+                            sys.executable,
+                            "-c",
+                            "print('runtime ok')",
+                        ]
+                    ),
+                    0,
+                )
+            self.assertEqual(output.getvalue().strip(), "task-1 completed")
+
+            status_output = io.StringIO()
+            with contextlib.redirect_stdout(status_output):
+                self.assertEqual(
+                    main(["team", "status", "--root", str(root), "--team", "feature-team", "--detail"]),
+                    0,
+                )
+            self.assertIn("task task-1 completed owner=worker-1 subject=Implement login", status_output.getvalue())
+
+    def test_team_run_next_fails_task_when_host_command_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(
+                        [
+                            "team",
+                            "run-next",
+                            "--root",
+                            str(root),
+                            "--team",
+                            "feature-team",
+                            "--worker",
+                            "worker-1",
+                            "--command",
+                            sys.executable,
+                            "-c",
+                            "import sys; print('runtime failed'); sys.exit(2)",
+                        ]
+                    ),
+                    1,
+                )
+            self.assertEqual(output.getvalue().strip(), "task-1 failed")
+
+            status_output = io.StringIO()
+            with contextlib.redirect_stdout(status_output):
+                self.assertEqual(
+                    main(["team", "status", "--root", str(root), "--team", "feature-team", "--detail"]),
+                    0,
+                )
+            self.assertIn("task task-1 failed owner=worker-1 subject=Implement login", status_output.getvalue())
+
     def test_team_heartbeat_updates_worker_status(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

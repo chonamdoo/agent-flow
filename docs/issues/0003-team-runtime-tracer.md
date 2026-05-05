@@ -11,9 +11,9 @@ Add the smallest Team Orchestration runtime path that can launch one host-backed
 
 ## Acceptance criteria
 
-- [ ] A runtime command claims one pending Task for one Worker.
-- [ ] The Worker execution uses a host Adapter or Provider, not sandbox execution.
-- [ ] Task completion or failure is reflected through Team State and visible in `team status --detail`.
+- [x] A runtime command claims one pending Task for one Worker.
+- [x] The Worker execution uses a host Adapter or Provider, not sandbox execution.
+- [x] Task completion or failure is reflected through Team State and visible in `team status --detail`.
 
 ## Blocked by
 

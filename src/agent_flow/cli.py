@@ -53,6 +53,7 @@ from agent_flow.core.worktrees import (
 from agent_flow.core.state import RunRequest, RunState, start_run, status_summary
 from agent_flow.core.workflow import load_workflow
 from agent_flow.providers.host import list_host_providers
+from agent_flow.providers.subprocess import ProviderCommand, run_provider
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -152,6 +153,11 @@ def main(argv: list[str] | None = None) -> int:
     team_worker.add_argument("--team", required=True)
     team_worker.add_argument("--name", required=True)
     team_worker.add_argument("--role", required=True)
+    team_run_next = team_subparsers.add_parser("run-next")
+    team_run_next.add_argument("--root", default=".")
+    team_run_next.add_argument("--team", required=True)
+    team_run_next.add_argument("--worker", required=True)
+    team_run_next.add_argument("--command", dest="command_argv", nargs=argparse.REMAINDER, required=True)
     team_claim = team_subparsers.add_parser("claim")
     team_claim.add_argument("--root", default=".")
     team_claim.add_argument("--team", required=True)
@@ -371,6 +377,46 @@ def main(argv: list[str] | None = None) -> int:
             worker = add_worker(root=root, team_name=args.team, worker_name=args.name, role=args.role)
             print(f"{worker.name} {worker.role} {worker.status}")
             return 0
+        if args.team_command == "run-next":
+            if not args.command_argv:
+                print("command is required")
+                return 1
+            status = team_status(root=root, team_name=args.team, detail=True)
+            pending = next((task for task in status["tasks"] if task.status == "pending"), None)
+            if pending is None:
+                print("no pending task")
+                return 1
+            claimed = claim_task(
+                root=root,
+                team_name=args.team,
+                task_id=pending.task_id,
+                worker_name=args.worker,
+            )
+            prompt = f"{claimed.subject}\n\n{claimed.description}\n"
+            result = run_provider(
+                ProviderCommand(name="host-command", argv=tuple(args.command_argv)),
+                prompt=prompt,
+                cwd=root,
+            )
+            output = result.stdout.strip() or result.stderr.strip()
+            if result.failed:
+                task = fail_task(
+                    root=root,
+                    team_name=args.team,
+                    task_id=claimed.task_id,
+                    claim_token=claimed.claim_token or "",
+                    result=output,
+                )
+            else:
+                task = complete_task(
+                    root=root,
+                    team_name=args.team,
+                    task_id=claimed.task_id,
+                    claim_token=claimed.claim_token or "",
+                    result=output,
+                )
+            print(f"{task.task_id} {task.status}")
+            return 1 if result.failed else 0
         if args.team_command == "claim":
             task = claim_task(root=root, team_name=args.team, task_id=args.task, worker_name=args.worker)
             print(f"{task.task_id} {task.status} {task.owner} {task.claim_token}")

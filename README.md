@@ -47,6 +47,7 @@ agent-flow team archive-restore --root /path/to/project --archive-path /path/to/
 agent-flow team archive-restore --root /path/to/project --archive-path /path/to/project/.agent-flow/archive/team/<archive-id> --report /path/to/restore-report.json
 agent-flow team task --root /path/to/project --team feature-team --id task-1 --subject "Implement login"
 agent-flow team worker --root /path/to/project --team feature-team --name worker-1 --role implementer
+agent-flow team run-next --root /path/to/project --team feature-team --worker worker-1 --command python3 -c "print('done')"
 agent-flow team claim --root /path/to/project --team feature-team --task task-1 --worker worker-1
 agent-flow team complete --root /path/to/project --team feature-team --task task-1 --claim-token <token> --result "done"
 agent-flow team message --root /path/to/project --team feature-team --from-actor lead --to-worker worker-1 --body "Please check auth tests"

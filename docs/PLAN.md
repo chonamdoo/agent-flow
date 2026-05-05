@@ -54,6 +54,10 @@ Make Team state lifecycle final review fixes operational.
 
 Make host provider discovery operational.
 
+Make worktree-backed run start operational.
+
+Make team runtime tracer operational.
+
 ### Scope
 
 - Send messages to registered Worker mailboxes.
@@ -72,21 +76,20 @@ Make host provider discovery operational.
 
 ## Current Slice
 
-Make worktree-backed run start operational.
+Make installable workflow kit operational.
 
 ### Scope
 
-- Let a Run request a named Worktree.
-- Record Worktree name, branch, and path in the Run manifest.
-- Preserve existing Worktree dirty-workspace safety checks.
+- Document clone/copy usage for new projects.
+- Verify packaged resources include workflows, profiles, roles, and templates.
+- Add an installed-CLI smoke path.
 
 ### Non-Goals
 
-- No Team Orchestration runtime.
-- No provider process execution.
+- No long-lived Team Orchestration runtime.
+- No process supervision.
 - No sandbox execution.
 
 ## Next Slices
 
-1. Team runtime tracer.
-2. Installable workflow kit.
+No planned slices.
