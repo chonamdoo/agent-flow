@@ -75,3 +75,14 @@ Team State import is intentionally non-destructive.
 - `import-apply` creates a new Team State only when the target team does not already exist.
 - `--report` writes the same success or failure summary as deterministic JSON.
 - Failed apply attempts remove partially created Team State and report cleanup diagnostics.
+
+## Team State Archive
+
+Team State archive is the supported retirement path for completed team work.
+
+- `archive` moves an active Team State into `.agent-flow/archive/team/` and writes an archive manifest.
+- `archive-list` reports archived teams with archive time, reason, and path.
+- `archive-export` writes an import-compatible Team State snapshot from an archive.
+- `archive-restore` moves an archived Team State back only when the active team name is not already present.
+- `archive-restore --report` writes deterministic JSON for both success and failure cases.
+- Destructive Team State deletion is intentionally not part of the current workflow.
