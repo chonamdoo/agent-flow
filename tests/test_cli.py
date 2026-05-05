@@ -156,6 +156,66 @@ class CliTest(unittest.TestCase):
             self.assertTrue((root / ".agent-flow" / "runs" / "manual" / "gate-results.json").is_file())
             self.assertFalse((cwd / ".agent-flow" / "runs" / "manual" / "gate-results.json").exists())
 
+    def test_record_stage_writes_stage_result_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.assertEqual(
+                main(
+                    [
+                        "record-stage",
+                        "--root",
+                        str(root),
+                        "--run-dir",
+                        ".agent-flow/runs/development/r1",
+                        "--stage",
+                        "explore",
+                        "--content",
+                        "Found auth module.",
+                    ]
+                ),
+                0,
+            )
+            path = root / ".agent-flow" / "runs" / "development" / "r1" / "artifacts" / "explore.md"
+            self.assertTrue(path.is_file())
+            self.assertIn("Found auth module.", path.read_text(encoding="utf-8"))
+
+    def test_handoff_writes_run_and_project_index_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.assertEqual(
+                main(
+                    [
+                        "handoff",
+                        "--root",
+                        str(root),
+                        "--run-dir",
+                        ".agent-flow/runs/development/r1",
+                        "--from-stage",
+                        "explore",
+                        "--to-stage",
+                        "implement",
+                        "--decided",
+                        "Use profile gates.",
+                        "--remaining",
+                        "Implement CLI.",
+                    ]
+                ),
+                0,
+            )
+            run_handoff = (
+                root
+                / ".agent-flow"
+                / "runs"
+                / "development"
+                / "r1"
+                / "handoffs"
+                / "explore-to-implement.md"
+            )
+            project_handoff = root / ".agent-flow" / "handoffs" / "explore-to-implement.md"
+            self.assertTrue(run_handoff.is_file())
+            self.assertTrue(project_handoff.is_file())
+            self.assertIn("Use profile gates.", run_handoff.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

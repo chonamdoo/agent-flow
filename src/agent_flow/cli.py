@@ -5,7 +5,13 @@ import sys
 from pathlib import Path
 
 from agent_flow.adapters.registry import detect_adapter
-from agent_flow.core.artifacts import init_project, write_gate_results, write_prompt
+from agent_flow.core.artifacts import (
+    init_project,
+    write_gate_results,
+    write_handoff,
+    write_prompt,
+    write_stage_result,
+)
 from agent_flow.core.gates import GateCommand, run_gates
 from agent_flow.core.profiles import detect_profile, load_profile
 from agent_flow.core.state import RunRequest, RunState, start_run, status_summary
@@ -39,6 +45,24 @@ def main(argv: list[str] | None = None) -> int:
     gates_parser.add_argument("--run-dir")
     gates_parser.add_argument("--timeout", type=int, default=600)
 
+    record_parser = subparsers.add_parser("record-stage")
+    record_parser.add_argument("--root", default=".")
+    record_parser.add_argument("--run-dir", required=True)
+    record_parser.add_argument("--stage", required=True)
+    record_parser.add_argument("--status", default="completed")
+    record_parser.add_argument("--content", required=True)
+
+    handoff_parser = subparsers.add_parser("handoff")
+    handoff_parser.add_argument("--root", default=".")
+    handoff_parser.add_argument("--run-dir", required=True)
+    handoff_parser.add_argument("--from-stage", required=True)
+    handoff_parser.add_argument("--to-stage", required=True)
+    handoff_parser.add_argument("--decided", default="")
+    handoff_parser.add_argument("--rejected", default="")
+    handoff_parser.add_argument("--risks", default="")
+    handoff_parser.add_argument("--files", default="")
+    handoff_parser.add_argument("--remaining", default="")
+
     args = parser.parse_args(argv)
     root = Path(getattr(args, "root", ".")).resolve()
 
@@ -65,6 +89,31 @@ def main(argv: list[str] | None = None) -> int:
         failed = [result for result in results if not result.passed]
         print(f"{profile.profile_id}: {len(results) - len(failed)}/{len(results)} gates passed")
         return 1 if failed else 0
+
+    if args.command == "record-stage":
+        path = write_stage_result(
+            run_dir=_resolve_project_path(root, args.run_dir),
+            stage_id=args.stage,
+            status=args.status,
+            content=args.content,
+        )
+        print(path)
+        return 0
+
+    if args.command == "handoff":
+        path = write_handoff(
+            root=root,
+            run_dir=_resolve_project_path(root, args.run_dir),
+            from_stage=args.from_stage,
+            to_stage=args.to_stage,
+            decided=args.decided,
+            rejected=args.rejected,
+            risks=args.risks,
+            files=args.files,
+            remaining=args.remaining,
+        )
+        print(path)
+        return 0
 
     if args.command == "start":
         workflow = load_workflow(args.workflow)

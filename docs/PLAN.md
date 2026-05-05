@@ -8,14 +8,13 @@ Default execution is Personal Workflow: the lead orchestrates Runs, stages, prom
 
 ## Current Slice
 
-Make Project Profiles operational.
+Make stage results and handoffs operational.
 
 ### Scope
 
-- Load packaged Project Profiles by id.
-- Convert profile gate definitions into executable Gate commands.
-- Add a CLI command to run gates for a target project.
-- Persist gate results as Run artifacts when a run directory is supplied.
+- Record stage result artifacts under a Run.
+- Write handoffs for stage transitions.
+- Keep handoffs readable from both the Run and the project-level handoff index.
 - Keep AI CLI execution on host adapters/providers; no sandbox support.
 
 ### Non-Goals
@@ -27,9 +26,7 @@ Make Project Profiles operational.
 
 ## Next Slices
 
-1. Stage result artifacts and handoffs.
-2. Adapter-specific prompt rendering.
-3. Review/fix loop wiring.
-4. Worktree support for file-change isolation.
-5. Optional Team Orchestration state model.
-
+1. Adapter-specific prompt rendering.
+2. Review/fix loop wiring.
+3. Worktree support for file-change isolation.
+4. Optional Team Orchestration state model.
