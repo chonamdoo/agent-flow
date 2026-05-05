@@ -30,6 +30,17 @@ function installProject() {
     path.join(agentFlowDir, "skills", "full-feature-workflow", "SKILL.md"),
     fullFeatureSkillMarkdown(),
   );
+  writeManagedFile(path.join(agentFlowDir, "skills", "domain-grill", "SKILL.md"), domainGrillSkillMarkdown());
+  writeManagedFile(path.join(agentFlowDir, "skills", "product-brief", "SKILL.md"), productBriefSkillMarkdown());
+  writeManagedFile(path.join(agentFlowDir, "skills", "plan-reviewer", "SKILL.md"), planReviewerSkillMarkdown());
+  writeManagedFile(
+    path.join(agentFlowDir, "skills", "ddd-clean-architecture", "SKILL.md"),
+    dddCleanArchitectureSkillMarkdown(),
+  );
+  writeManagedFile(
+    path.join(agentFlowDir, "skills", "architecture-reviewer", "SKILL.md"),
+    architectureReviewerSkillMarkdown(),
+  );
   for (const phase of PHASES) {
     writeManagedFile(
       path.join(agentFlowDir, "prompts", `${phase.id}.md`),
@@ -217,7 +228,7 @@ function writeManagedFile(pathName, content) {
 }
 
 function assertFreshArtifact(state, phase, artifact) {
-  if (phase.id !== "pr-comment-fix" && phase.id !== "pr-ci-fix") {
+  if (!FRESH_ARTIFACT_PHASE_IDS.has(phase.id)) {
     return;
   }
   const enteredAt = Date.parse(state.phase_entered_at ?? state.updated_at ?? state.started_at ?? "");
@@ -231,6 +242,26 @@ function assertFreshArtifact(state, phase, artifact) {
 }
 
 function nextPhaseIndex(state, phase, artifact) {
+  if (phase.id === "plan-review") {
+    const verdict = readArtifactVerdict(artifact);
+    if (verdict === "approve") {
+      return state.phase_index + 1;
+    }
+    if (verdict === "request-changes") {
+      return phaseIndex("slice-plan");
+    }
+    throw new Error("blocked: plan-review artifact must include verdict: approve or verdict: request-changes");
+  }
+  if (phase.id === "architecture-review") {
+    const verdict = readArtifactVerdict(artifact);
+    if (verdict === "approve") {
+      return state.phase_index + 1;
+    }
+    if (verdict === "request-changes") {
+      return phaseIndex("refactor");
+    }
+    throw new Error("blocked: architecture-review artifact must include verdict: approve or verdict: request-changes");
+  }
   if (phase.id === "pr-watch") {
     const status = readArtifactStatus(artifact);
     if (status === "green") {
@@ -264,6 +295,12 @@ function phaseIndex(id) {
 function readArtifactStatus(pathName) {
   const content = fs.readFileSync(pathName, "utf8");
   const match = content.match(/^status:\s*([a-z-]+)\s*$/im);
+  return match?.[1];
+}
+
+function readArtifactVerdict(pathName) {
+  const content = fs.readFileSync(pathName, "utf8");
+  const match = content.match(/^verdict:\s*([a-z-]+)\s*$/im);
   return match?.[1];
 }
 
@@ -315,8 +352,38 @@ function newRunId() {
 }
 
 const PHASES = [
+  {
+    id: "domain-grill",
+    artifact: "artifacts/domain-grill.md",
+    instruction:
+      "Interview one question at a time, resolve domain decisions, and record decisions, open questions, terms, assumptions, and sources checked.",
+  },
+  {
+    id: "domain-map",
+    artifact: "artifacts/domain-map.md",
+    instruction:
+      "Update or reference CONTEXT.md with glossary, bounded contexts, ubiquitous language, and domain decisions from domain-grill.",
+  },
+  {
+    id: "product-brief",
+    artifact: "artifacts/product-brief.md",
+    instruction:
+      "Validate demand, status quo, target user, narrowest wedge, observed behavior, why now, cut list, and build/defer/cut decision.",
+  },
   { id: "prd", artifact: "artifacts/prd.md", instruction: "Write the PRD before planning slices." },
   { id: "slice-plan", artifact: "artifacts/slice-plan.md", instruction: "Break the PRD into independently shippable slices." },
+  {
+    id: "plan-review",
+    artifact: "artifacts/plan-review.md",
+    instruction:
+      "Review the slice plan like a senior reviewer. Record verdict: approve or verdict: request-changes with missing steps, wrong order, oversized slices, validation gaps, and required changes.",
+  },
+  {
+    id: "ddd-design",
+    artifact: "artifacts/ddd-design.md",
+    instruction:
+      "Design data / domain / presentation boundaries, domain core modules, repository interfaces, repository implementations, and dependency rules.",
+  },
   { id: "worktree", artifact: "artifacts/worktree.md", instruction: "Create or record the dedicated branch/worktree for this slice." },
   { id: "run-start", artifact: "artifacts/run-start.md", instruction: "Record the workflow run setup and selected provider." },
   { id: "red", artifact: "artifacts/red.log", instruction: "Write failing tests first and save the failure output." },
@@ -325,6 +392,12 @@ const PHASES = [
   { id: "gates", artifact: "gate-results.json", instruction: "Run project gates and save structured results." },
   { id: "multi-review", artifact: "artifacts/multi-review.md", instruction: "Run reviewer agents and record approve/request-changes results." },
   { id: "fix-loop", artifact: "artifacts/fix-loop.md", instruction: "Apply review/gate fixes or record that no fixes were required." },
+  {
+    id: "architecture-review",
+    artifact: "artifacts/architecture-review.md",
+    instruction:
+      "Review implemented code against domain decisions and DDD/Clean Architecture. Record verdict: approve or verdict: request-changes with violations and required refactors.",
+  },
   { id: "commit", artifact: "artifacts/commit.md", instruction: "Commit the verified slice and record the commit hash." },
   { id: "push-pr", artifact: "artifacts/push-pr.md", instruction: "Push the branch or open a PR and record the remote reference." },
   { id: "pr-watch", artifact: "artifacts/pr-watch.md", instruction: "Poll PR checks and review threads; record status: green, status: comments, status: ci-failed, or status: pending with PR URL." },
@@ -334,6 +407,19 @@ const PHASES = [
   { id: "handoff", artifact: "artifacts/handoff.md", instruction: "Write final handoff with decisions, risks, files, and remaining work." },
 ];
 
+const FRESH_ARTIFACT_PHASE_IDS = new Set([
+  "slice-plan",
+  "plan-review",
+  "refactor",
+  "gates",
+  "multi-review",
+  "fix-loop",
+  "architecture-review",
+  "pr-watch",
+  "pr-comment-fix",
+  "pr-ci-fix",
+]);
+
 function fullFeatureWorkflowYaml() {
   const stages = PHASES.map(
     (phase) => `  - id: ${phase.id}\n    artifact: ${phase.artifact}\n    instruction: ${JSON.stringify(phase.instruction)}`,
@@ -342,7 +428,27 @@ function fullFeatureWorkflowYaml() {
 }
 
 function fullFeatureSkillMarkdown() {
-  return `# Full Feature Workflow\n\nUse this skill for feature work in this project.\n\nAlways drive progress through:\n\n\`\`\`bash\n${AGENT_FLOW_COMMAND} run next\n\`\`\`\n\nCanonical order:\n\n${PHASES.map((phase, index) => `${index + 1}. ${phase.id}`).join("\n")}\n\nDo not skip phases. If a gate, review, PR comment, or PR check fails, complete the matching fix phase and push again before merge/handoff.\n`;
+  return `# Full Feature Workflow\n\nUse this skill for feature work in this project.\n\nAlways drive progress through:\n\n\`\`\`bash\n${AGENT_FLOW_COMMAND} run next\n\`\`\`\n\nCanonical order:\n\n${PHASES.map((phase, index) => `${index + 1}. ${phase.id}`).join("\n")}\n\nDo not skip phases. If existing docs satisfy a phase, write the required artifact and reference those docs. If a gate, review, PR comment, or PR check fails, complete the matching fix phase and push again before merge/handoff.\n\nCoding rule:\n\n- Code comments are required when intent is not obvious, and every code comment must be written in Korean.\n`;
+}
+
+function domainGrillSkillMarkdown() {
+  return `# Domain Grill\n\nUse during the full-feature domain-grill phase.\n\nRules:\n\n- Ask one question at a time.\n- Provide a recommended answer for every question.\n- Walk each branch of the design tree until decisions are explicit.\n- If a question can be answered from code or docs, inspect those sources instead of asking.\n- Challenge fuzzy domain terms against CONTEXT.md and ADRs when present.\n\nArtifact template:\n\n# Domain Grill\n\n## Goal\n\n## Resolved Decisions\n\n## Open Questions\n\n## Terms To Define\n\n## Risky Assumptions\n\n## Existing Sources Checked\n`;
+}
+
+function productBriefSkillMarkdown() {
+  return `# Product Brief\n\nUse during the full-feature product-brief phase.\n\nAsk YC-style forcing questions before implementation:\n\n1. Demand Reality: what behavior proves people want this?\n2. Status Quo: how do they solve it today?\n3. Desperate Specificity: who is the most painful target user?\n4. Narrowest Wedge: what is the smallest version worth using now?\n5. Observation: what concrete user behavior was observed?\n6. Future Fit: why is now the right time?\n\nArtifact template:\n\n# Product Brief\n\n## Mode\nstartup | builder | internal\n\n## Demand Evidence\n\n## Status Quo\n\n## Target User\n\n## Narrowest Wedge\n\n## Observed Behavior\n\n## Why Now\n\n## Cut List\n\n## Assignment\n\n## Decision\nbuild | defer | cut\n`;
+}
+
+function planReviewerSkillMarkdown() {
+  return `# Plan Reviewer\n\nUse during the full-feature plan-review phase.\n\nReview only. Do not rewrite the plan.\n\nCheck:\n\n- Missing data collection steps.\n- Missing validation steps.\n- Wrong implementation order.\n- Oversized slices that should be split.\n- Missing state/storage steps.\n- Test coverage gaps.\n- Architecture risks before coding.\n\nArtifact template:\n\n# Plan Review\n\nverdict: approve | request-changes\n\n## Scope Checked\n\n## Missing Steps\n\n## Wrong Order\n\n## Oversized Slices\n\n## Validation Gaps\n\n## Data/State Gaps\n\n## Architecture Risks\n\n## Required Changes\n\n## Approval Notes\n`;
+}
+
+function dddCleanArchitectureSkillMarkdown() {
+  return `# DDD Clean Architecture\n\nUse during full-feature ddd-design and architecture-review phases.\n\nDefault architecture is data / domain / presentation with optional shared.\n\nLayer rules:\n\n- domain owns entities, value objects, aggregates, use cases, repository interfaces, domain services, events, errors, policies, and specifications.\n- data owns repository implementations, API/DB clients, persistence models, mappers, and external integrations.\n- presentation owns controllers, routes, components, presenters, view models, and external input handling.\n- shared is optional and must contain only domain-free primitives such as Result, IDs, time, and common errors.\n\nDependency rules:\n\n- domain must not import data or presentation.\n- presentation calls domain use cases.\n- data implements domain repository interfaces.\n- presentation must not call data directly.\n- repository pattern uses interfaces in domain and implementations in data.\n\nCoding rule:\n\n- Code comments are required when intent is not obvious, and every code comment must be written in Korean.\n\nDesign artifact must identify domain core modules and data / domain / presentation boundaries.\n`;
+}
+
+function architectureReviewerSkillMarkdown() {
+  return `# Architecture Reviewer\n\nUse during the full-feature architecture-review phase.\n\nReview implemented code against domain decisions and DDD/Clean Architecture.\n\nArtifact template:\n\n# Architecture Review\n\nverdict: approve | request-changes\n\n## Domain Alignment\n\n## Layer Violations\n\n## Repository Boundary Issues\n\n## Dependency Direction Issues\n\n## Required Refactors\n\n## Approved Exceptions\n`;
 }
 
 function phasePrompt(phase) {
