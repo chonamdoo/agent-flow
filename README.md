@@ -52,6 +52,7 @@ agent-flow team status --root /path/to/project --team feature-team --detail
 agent-flow team export --root /path/to/project --team feature-team
 agent-flow team import-validate --file /path/to/team-state.json
 agent-flow team import-dry-run --file /path/to/team-state.json
+agent-flow team import-dry-run --file /path/to/team-state.json --report /path/to/import-report.json
 agent-flow gates --root /path/to/project --profile auto
 agent-flow status --root /path/to/project
 agent-flow detect-profile --root /path/to/project

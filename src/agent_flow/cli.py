@@ -181,6 +181,7 @@ def main(argv: list[str] | None = None) -> int:
     team_import_validate.add_argument("--file", required=True)
     team_import_dry_run = team_subparsers.add_parser("import-dry-run")
     team_import_dry_run.add_argument("--file", required=True)
+    team_import_dry_run.add_argument("--report")
 
     args = parser.parse_args(argv)
     root = Path(getattr(args, "root", ".")).resolve()
@@ -407,12 +408,24 @@ def main(argv: list[str] | None = None) -> int:
         if args.team_command == "import-dry-run":
             payload = _read_json_file(args.file)
             if isinstance(payload, str):
+                report_error = _write_import_report(args.report, {"valid": False, "errors": [payload]})
+                if report_error is not None:
+                    print(report_error)
+                    return 1
                 print(payload)
                 return 1
             summary = summarize_team_state_import(payload)
             if not summary["valid"]:
+                report_error = _write_import_report(args.report, summary)
+                if report_error is not None:
+                    print(report_error)
+                    return 1
                 for error in summary["errors"]:
                     print(error)
+                return 1
+            report_error = _write_import_report(args.report, summary)
+            if report_error is not None:
+                print(report_error)
                 return 1
             print(
                 f"{summary['team']} tasks={summary['task_count']} workers={summary['worker_count']} "
@@ -473,6 +486,18 @@ def _read_json_file(path: str) -> object | str:
         return f"cannot read import file: {exc}"
     except json.JSONDecodeError as exc:
         return f"invalid JSON: {exc}"
+
+
+def _write_import_report(path: str | None, report: dict[str, object]) -> str | None:
+    if path is None:
+        return None
+    report_path = Path(path)
+    try:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(f"{json.dumps(report, indent=2, sort_keys=True)}\n", encoding="utf-8")
+    except OSError as exc:
+        return f"cannot write import report: {exc}"
+    return None
 
 
 def _resolve_project_path(root: Path, value: str) -> Path:

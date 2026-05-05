@@ -22,6 +22,8 @@ Make Team state import validation operational.
 
 Make Team state import dry-run summary operational.
 
+Make Team state schema hardening operational.
+
 ### Scope
 
 - Send messages to registered Worker mailboxes.
@@ -40,12 +42,12 @@ Make Team state import dry-run summary operational.
 
 ## Current Slice
 
-Make Team state schema hardening operational.
+Make Team state import dry-run file report operational.
 
 ### Scope
 
-- Validate required scalar field types in exported Team State JSON.
-- Keep reference validation and dry-run behavior unchanged.
+- Write optional dry-run summary reports as deterministic JSON.
+- Include validation errors in the report without importing or mutating Team State.
 - Keep validation read-only; do not create or modify Team State.
 - Preserve Team Orchestration as state-only; no worker process execution.
 - Keep AI CLI execution on host adapters/providers; no sandbox support.
@@ -59,4 +61,4 @@ Make Team state schema hardening operational.
 
 ## Next Slices
 
-1. Team state import dry-run file report.
+1. Team state import apply.

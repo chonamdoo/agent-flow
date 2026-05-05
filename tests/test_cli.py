@@ -868,16 +868,123 @@ class CliTest(unittest.TestCase):
                 "feature-team tasks=1 workers=1 heartbeats=1 mailboxes=1 messages=1 shutdowns=1",
             )
 
+    def test_team_import_dry_run_writes_success_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+            export_output = io.StringIO()
+            with contextlib.redirect_stdout(export_output):
+                self.assertEqual(
+                    main(["team", "export", "--root", str(root), "--team", "feature-team"]),
+                    0,
+                )
+            snapshot_path = root / "snapshot.json"
+            report_path = root / "reports" / "import.json"
+            snapshot_path.write_text(export_output.getvalue(), encoding="utf-8")
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(
+                        [
+                            "team",
+                            "import-dry-run",
+                            "--file",
+                            str(snapshot_path),
+                            "--report",
+                            str(report_path),
+                        ]
+                    ),
+                    0,
+                )
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertTrue(report["valid"])
+            self.assertEqual(report["team"], "feature-team")
+            self.assertEqual(report["task_count"], 1)
+
     def test_team_import_dry_run_reports_validation_errors(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             snapshot_path = root / "snapshot.json"
+            report_path = root / "import-report.json"
             snapshot_path.write_text(json.dumps({"team": {"name": "feature-team"}}), encoding="utf-8")
 
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                self.assertEqual(main(["team", "import-dry-run", "--file", str(snapshot_path)]), 1)
+                self.assertEqual(
+                    main(
+                        [
+                            "team",
+                            "import-dry-run",
+                            "--file",
+                            str(snapshot_path),
+                            "--report",
+                            str(report_path),
+                        ]
+                    ),
+                    1,
+                )
             self.assertIn("tasks is required", output.getvalue())
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertFalse(report["valid"])
+            self.assertIn("tasks is required", report["errors"])
+
+    def test_team_import_dry_run_writes_bad_file_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            report_path = root / "import-report.json"
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(
+                        [
+                            "team",
+                            "import-dry-run",
+                            "--file",
+                            str(root / "missing.json"),
+                            "--report",
+                            str(report_path),
+                        ]
+                    ),
+                    1,
+                )
+            self.assertIn("cannot read import file:", output.getvalue())
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertFalse(report["valid"])
+            self.assertIn("cannot read import file:", report["errors"][0])
+
+    def test_team_import_dry_run_reports_report_write_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+            export_output = io.StringIO()
+            with contextlib.redirect_stdout(export_output):
+                self.assertEqual(
+                    main(["team", "export", "--root", str(root), "--team", "feature-team"]),
+                    0,
+                )
+            snapshot_path = root / "snapshot.json"
+            report_path = root / "report-dir"
+            snapshot_path.write_text(export_output.getvalue(), encoding="utf-8")
+            report_path.mkdir()
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(
+                        [
+                            "team",
+                            "import-dry-run",
+                            "--file",
+                            str(snapshot_path),
+                            "--report",
+                            str(report_path),
+                        ]
+                    ),
+                    1,
+                )
+            self.assertIn("cannot write import report:", output.getvalue())
 
     def test_team_heartbeat_can_mark_worker_dead(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
