@@ -337,6 +337,34 @@ def team_status(*, root: Path, team_name: str, detail: bool = False) -> dict[str
     }
 
 
+def export_team_state(*, root: Path, team_name: str) -> dict[str, object]:
+    safe_team = safe_team_name(team_name)
+    _require_team(root=root, team_name=safe_team)
+    root_dir = _team_root(root, safe_team)
+    task_paths = sorted((root_dir / "tasks").glob("*.json")) if (root_dir / "tasks").exists() else []
+    worker_paths = sorted((root_dir / "workers").glob("*/identity.json")) if (root_dir / "workers").exists() else []
+    heartbeats = []
+    mailboxes: dict[str, list[dict[str, object]]] = {}
+    workers = []
+    for worker_path in worker_paths:
+        worker = _read_json(worker_path)
+        workers.append(worker)
+        worker_name = safe_worker_name(str(worker["name"]))
+        heartbeat_path = _heartbeat_path(root=root, team_name=safe_team, worker_name=worker_name)
+        if heartbeat_path.is_file():
+            heartbeats.append(_read_json(heartbeat_path))
+        mailbox_path = _mailbox_path(root=root, team_name=safe_team, worker_name=worker_name)
+        mailboxes[worker_name] = _read_json(mailbox_path) if mailbox_path.is_file() else []
+    return {
+        "team": _read_json(root_dir / "config.json"),
+        "tasks": [_read_json(path) for path in task_paths],
+        "workers": workers,
+        "heartbeats": heartbeats,
+        "mailboxes": mailboxes,
+        "shutdowns": _read_shutdown_payloads(root=root, team_name=safe_team),
+    }
+
+
 def _finish_task(
     *,
     root: Path,
@@ -467,6 +495,13 @@ def _read_shutdowns(*, root: Path, team_name: str) -> list[ShutdownSignal]:
     return signals
 
 
+def _read_shutdown_payloads(*, root: Path, team_name: str) -> list[dict[str, object]]:
+    shutdown_dir = _team_root(root, team_name) / "shutdown"
+    if not shutdown_dir.exists():
+        return []
+    return [_read_json(path) for path in sorted(shutdown_dir.glob("*/*.json"))]
+
+
 def _write_shutdown(*, root: Path, team_name: str, signal: ShutdownSignal) -> None:
     _write_json(
         _shutdown_path(root=root, team_name=team_name, worker_name=signal.worker, signal_id=signal.signal_id),
@@ -538,6 +573,10 @@ def _write_json(path: Path, payload: object) -> None:
     tmp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     tmp_path.write_text(f"{json.dumps(payload, indent=2, sort_keys=True)}\n", encoding="utf-8")
     tmp_path.replace(path)
+
+
+def _read_json(path: Path) -> dict[str, object] | list[dict[str, object]]:
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _write_json_create(path: Path, payload: object, *, exists_message: str) -> None:

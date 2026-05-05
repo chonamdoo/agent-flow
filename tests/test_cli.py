@@ -590,6 +590,77 @@ class CliTest(unittest.TestCase):
             self.assertEqual(output.getvalue().strip().splitlines()[0], "feature-team tasks=1 workers=1 exists=True")
             self.assertFalse(mailbox_dir.exists())
 
+    def test_team_export_outputs_state_snapshot_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+            main(
+                [
+                    "team",
+                    "message",
+                    "--root",
+                    str(root),
+                    "--team",
+                    "feature-team",
+                    "--from-actor",
+                    "lead",
+                    "--to-worker",
+                    "worker-1",
+                    "--body",
+                    "export me",
+                ]
+            )
+            main(
+                [
+                    "team",
+                    "shutdown",
+                    "--root",
+                    str(root),
+                    "--team",
+                    "feature-team",
+                    "--worker",
+                    "worker-1",
+                    "--reason",
+                    "export",
+                ]
+            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(["team", "export", "--root", str(root), "--team", "feature-team"]),
+                    0,
+                )
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["team"]["name"], "feature-team")
+            self.assertEqual(payload["tasks"][0]["task_id"], "task-1")
+            self.assertEqual(payload["workers"][0]["name"], "worker-1")
+            self.assertEqual(payload["mailboxes"]["worker-1"][0]["body"], "export me")
+            self.assertEqual(payload["shutdowns"][0]["reason"], "export")
+
+    def test_team_export_preserves_extra_fields_and_missing_mailbox(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+            team_root = root / ".agent-flow" / "state" / "team" / "feature-team"
+            task_path = team_root / "tasks" / "task-1.json"
+            task = json.loads(task_path.read_text(encoding="utf-8"))
+            task["future_field"] = "kept"
+            task_path.write_text(json.dumps(task), encoding="utf-8")
+            mailbox_dir = team_root / "mailbox"
+            (mailbox_dir / "worker-1.json").unlink()
+            mailbox_dir.rmdir()
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(["team", "export", "--root", str(root), "--team", "feature-team"]),
+                    0,
+                )
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["tasks"][0]["future_field"], "kept")
+            self.assertEqual(payload["mailboxes"]["worker-1"], [])
+            self.assertFalse(mailbox_dir.exists())
+
     def test_team_heartbeat_can_mark_worker_dead(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

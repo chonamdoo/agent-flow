@@ -14,6 +14,8 @@ Make Worker heartbeat updates operational.
 
 Make Team shutdown signal records operational.
 
+Make Team status detail view operational.
+
 ### Scope
 
 - Send messages to registered Worker mailboxes.
@@ -32,12 +34,12 @@ Make Team shutdown signal records operational.
 
 ## Current Slice
 
-Make Team status detail view operational.
+Make Team state export operational.
 
 ### Scope
 
-- Keep the default Team status summary stable.
-- Add a detail view for tasks, workers, unread mailbox counts, and shutdown signals.
+- Export Team State as deterministic JSON.
+- Include team config, tasks, workers, heartbeats, mailboxes, and shutdown signals.
 - Preserve Team Orchestration as state-only; no worker process execution.
 - Keep AI CLI execution on host adapters/providers; no sandbox support.
 
@@ -50,4 +52,4 @@ Make Team status detail view operational.
 
 ## Next Slices
 
-1. Team state export.
+1. Team state import validation.

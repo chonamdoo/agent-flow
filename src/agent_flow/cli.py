@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from agent_flow.core.team import (
     add_worker,
     claim_task,
     complete_task,
+    export_team_state,
     fail_task,
     init_team,
     list_messages,
@@ -170,6 +172,9 @@ def main(argv: list[str] | None = None) -> int:
     team_status_parser.add_argument("--root", default=".")
     team_status_parser.add_argument("--team", required=True)
     team_status_parser.add_argument("--detail", action="store_true")
+    team_export = team_subparsers.add_parser("export")
+    team_export.add_argument("--root", default=".")
+    team_export.add_argument("--team", required=True)
 
     args = parser.parse_args(argv)
     root = Path(getattr(args, "root", ".")).resolve()
@@ -377,6 +382,9 @@ def main(argv: list[str] | None = None) -> int:
                 for signal in status["shutdowns"]:
                     state = "acknowledged" if signal.acknowledged else "pending"
                     print(f"shutdown {signal.signal_id} worker={signal.worker} {state} reason={signal.reason}")
+            return 0
+        if args.team_command == "export":
+            print(json.dumps(export_team_state(root=root, team_name=args.team), indent=2, sort_keys=True))
             return 0
 
     if args.command == "start":
