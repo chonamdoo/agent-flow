@@ -11,10 +11,12 @@ from agent_flow.core.artifacts import (
     write_gate_results,
     write_handoff,
     write_prompt,
+    write_recovery,
     write_stage_result,
 )
 from agent_flow.core.gates import GateCommand, run_gates
 from agent_flow.core.profiles import detect_profile, load_profile
+from agent_flow.core.review import summarize_reviews, write_review_summary
 from agent_flow.core.state import RunRequest, RunState, start_run, status_summary
 from agent_flow.core.workflow import load_workflow
 
@@ -63,6 +65,11 @@ def main(argv: list[str] | None = None) -> int:
     handoff_parser.add_argument("--risks", default="")
     handoff_parser.add_argument("--files", default="")
     handoff_parser.add_argument("--remaining", default="")
+
+    review_parser = subparsers.add_parser("review-summary")
+    review_parser.add_argument("--root", default=".")
+    review_parser.add_argument("--run-dir", required=True)
+    review_parser.add_argument("--reviews", nargs="+", required=True)
 
     args = parser.parse_args(argv)
     root = Path(getattr(args, "root", ".")).resolve()
@@ -115,6 +122,26 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(path)
         return 0
+
+    if args.command == "review-summary":
+        run_dir = _resolve_project_path(root, args.run_dir)
+        review_paths = [_resolve_project_path(root, value) for value in args.reviews]
+        summary = summarize_reviews(review_paths)
+        summary_path = write_review_summary(run_dir=run_dir, summary=summary)
+        if summary.verdict == "NEEDS_CHANGES":
+            write_recovery(
+                run_dir=run_dir,
+                title="Review needs changes",
+                cause="Review findings require a fix stage.",
+                artifacts=[str(summary_path), *(str(path) for path in review_paths)],
+                rerun_command=(
+                    "agent-flow record-stage --stage fix --status completed "
+                    f"--run-dir {args.run_dir} --content '<fix summary>'"
+                ),
+                manual_action="Apply fixes, record the fix stage, then rerun review-summary.",
+            )
+        print(f"{summary.verdict}: {len(summary.findings)} findings")
+        return 1 if summary.verdict == "NEEDS_CHANGES" else 0
 
     if args.command == "start":
         workflow = load_workflow(args.workflow)

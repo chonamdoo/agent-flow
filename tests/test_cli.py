@@ -285,6 +285,91 @@ class CliTest(unittest.TestCase):
         )
         self.assertIn("replace {{token}} in docs", prompt)
 
+    def test_review_summary_lgtm_writes_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            run_dir = root / ".agent-flow" / "runs" / "development" / "r1"
+            review = run_dir / "artifacts" / "review-1.md"
+            review.parent.mkdir(parents=True)
+            review.write_text("## Findings\n- None\n\n## Verdict\nLGTM\n", encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(
+                        [
+                            "review-summary",
+                            "--root",
+                            str(root),
+                            "--run-dir",
+                            ".agent-flow/runs/development/r1",
+                            "--reviews",
+                            ".agent-flow/runs/development/r1/artifacts/review-1.md",
+                        ]
+                    ),
+                    0,
+                )
+            self.assertEqual(output.getvalue().strip(), "LGTM: 0 findings")
+            self.assertTrue((run_dir / "review-summary.json").is_file())
+            self.assertFalse((run_dir / "recovery.md").exists())
+
+    def test_review_summary_needs_changes_writes_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            run_dir = root / ".agent-flow" / "runs" / "development" / "r1"
+            review = run_dir / "artifacts" / "review-1.md"
+            review.parent.mkdir(parents=True)
+            review.write_text(
+                "## Findings\n- Missing regression test @ tests/test_cli.py\n\n## Verdict\nNEEDS_CHANGES\n",
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(
+                        [
+                            "review-summary",
+                            "--root",
+                            str(root),
+                            "--run-dir",
+                            ".agent-flow/runs/development/r1",
+                            "--reviews",
+                            ".agent-flow/runs/development/r1/artifacts/review-1.md",
+                        ]
+                    ),
+                    1,
+                )
+            self.assertEqual(output.getvalue().strip(), "NEEDS_CHANGES: 1 findings")
+            self.assertTrue((run_dir / "review-summary.json").is_file())
+            recovery = run_dir / "recovery.md"
+            self.assertTrue(recovery.is_file())
+            self.assertIn("Review needs changes", recovery.read_text(encoding="utf-8"))
+
+    def test_review_summary_unknown_verdict_needs_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            run_dir = root / ".agent-flow" / "runs" / "development" / "r1"
+            review = run_dir / "artifacts" / "review-1.md"
+            review.parent.mkdir(parents=True)
+            review.write_text("Looks mostly fine, but add tests.\n", encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(
+                        [
+                            "review-summary",
+                            "--root",
+                            str(root),
+                            "--run-dir",
+                            ".agent-flow/runs/development/r1",
+                            "--reviews",
+                            ".agent-flow/runs/development/r1/artifacts/review-1.md",
+                        ]
+                    ),
+                    1,
+                )
+            self.assertEqual(output.getvalue().strip(), "NEEDS_CHANGES: 1 findings")
+            self.assertTrue((run_dir / "recovery.md").is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

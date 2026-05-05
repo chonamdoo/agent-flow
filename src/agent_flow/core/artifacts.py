@@ -98,5 +98,32 @@ def write_handoff(
     return run_path
 
 
+def write_recovery(
+    *,
+    run_dir: Path,
+    title: str,
+    cause: str,
+    artifacts: list[str],
+    rerun_command: str,
+    manual_action: str,
+) -> Path:
+    path = run_dir / "recovery.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        f"# Recovery: {title}",
+        "",
+        f"- Cause: {cause or 'Unknown'}",
+        f"- Rerun Command: {rerun_command or 'None'}",
+        f"- Manual Action: {manual_action or 'None'}",
+        "",
+        "## Artifacts",
+        "",
+    ]
+    lines.extend(f"- {artifact}" for artifact in artifacts) if artifacts else lines.append("- None")
+    lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()

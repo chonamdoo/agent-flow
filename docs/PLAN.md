@@ -8,13 +8,13 @@ Default execution is Personal Workflow: the lead orchestrates Runs, stages, prom
 
 ## Current Slice
 
-Make adapter-specific prompt rendering operational.
+Make review/fix loop artifacts operational.
 
 ### Scope
 
-- Render stage prompts from adapter-specific templates.
-- Select Codex, Claude, or generic templates from the chosen Adapter.
-- Keep unresolved template placeholders as hard failures.
+- Summarize one or more review artifacts.
+- Produce a review verdict.
+- Write recovery guidance when fixes are needed.
 - Keep AI CLI execution on host adapters/providers; no sandbox support.
 
 ### Non-Goals
@@ -26,6 +26,5 @@ Make adapter-specific prompt rendering operational.
 
 ## Next Slices
 
-1. Review/fix loop wiring.
-2. Worktree support for file-change isolation.
-3. Optional Team Orchestration state model.
+1. Worktree support for file-change isolation.
+2. Optional Team Orchestration state model.
