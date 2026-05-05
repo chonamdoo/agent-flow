@@ -5,6 +5,7 @@ import path from "node:path";
 import process from "node:process";
 
 const command = process.argv[2];
+const AGENT_FLOW_COMMAND = "npx github:chonamdoo/agent-flow";
 
 function installProject() {
   const root = process.cwd();
@@ -24,21 +25,21 @@ function installProject() {
     installed_at: new Date().toISOString(),
   };
 
-  writeFileIfMissing(path.join(agentFlowDir, "workflows", "full-feature.yaml"), fullFeatureWorkflowYaml());
-  writeFileIfMissing(
+  writeManagedFile(path.join(agentFlowDir, "workflows", "full-feature.yaml"), fullFeatureWorkflowYaml());
+  writeManagedFile(
     path.join(agentFlowDir, "skills", "full-feature-workflow", "SKILL.md"),
     fullFeatureSkillMarkdown(),
   );
   for (const phase of PHASES) {
-    writeFileIfMissing(
+    writeManagedFile(
       path.join(agentFlowDir, "prompts", `${phase.id}.md`),
       phasePrompt(phase),
     );
   }
-  writeFileIfMissing(path.join(agentFlowDir, "rules", "workflow-contract.md"), workflowContract());
-  writeFileIfMissing(path.join(agentFlowDir, "bootstrap", "AGENTS.md"), bootstrapMarkdown("AGENTS.md"));
-  writeFileIfMissing(path.join(agentFlowDir, "bootstrap", "CLAUDE.md"), bootstrapMarkdown("CLAUDE.md"));
-  writeFileIfMissing(path.join(agentFlowDir, "bootstrap", "GEMINI.md"), bootstrapMarkdown("GEMINI.md"));
+  writeManagedFile(path.join(agentFlowDir, "rules", "workflow-contract.md"), workflowContract());
+  writeManagedFile(path.join(agentFlowDir, "bootstrap", "AGENTS.md"), bootstrapMarkdown("AGENTS.md"));
+  writeManagedFile(path.join(agentFlowDir, "bootstrap", "CLAUDE.md"), bootstrapMarkdown("CLAUDE.md"));
+  writeManagedFile(path.join(agentFlowDir, "bootstrap", "GEMINI.md"), bootstrapMarkdown("GEMINI.md"));
   upsertBootstrapBlock(path.join(root, "AGENTS.md"), "AGENTS.md");
   upsertBootstrapBlock(path.join(root, "CLAUDE.md"), "CLAUDE.md");
   upsertBootstrapBlock(path.join(root, "GEMINI.md"), "GEMINI.md");
@@ -67,6 +68,7 @@ function runWorkflowCommand(args) {
     }
     fs.mkdirSync(path.join(runDir, "artifacts"), { recursive: true });
     fs.mkdirSync(path.join(runDir, "logs"), { recursive: true });
+    const startedAt = new Date().toISOString();
     const state = {
       run_id: runId,
       workflow,
@@ -75,7 +77,8 @@ function runWorkflowCommand(args) {
       phase: PHASES[0].id,
       status: "running",
       run_dir: runDir,
-      started_at: new Date().toISOString(),
+      started_at: startedAt,
+      phase_entered_at: startedAt,
     };
     writeJson(path.join(runDir, "manifest.json"), state);
     writeJson(currentRunPath(root), state);
@@ -106,14 +109,17 @@ function runWorkflowCommand(args) {
     if (!fs.existsSync(artifact)) {
       throw new Error(`blocked: missing artifact ${artifact}`);
     }
+    assertFreshArtifact(state, phase, artifact);
     const nextIndex = nextPhaseIndex(state, phase, artifact);
     const nextPhase = PHASES[nextIndex];
+    const transitionedAt = new Date().toISOString();
     const nextState = {
       ...state,
       phase_index: nextIndex,
       phase: nextPhase?.id ?? "complete",
       status: nextPhase ? "running" : "complete",
-      updated_at: new Date().toISOString(),
+      updated_at: transitionedAt,
+      phase_entered_at: transitionedAt,
     };
     writeJson(path.join(state.run_dir, "manifest.json"), nextState);
     writeJson(currentRunPath(root), nextState);
@@ -205,6 +211,25 @@ function writeFileIfMissing(pathName, content) {
   }
 }
 
+function writeManagedFile(pathName, content) {
+  fs.mkdirSync(path.dirname(pathName), { recursive: true });
+  fs.writeFileSync(pathName, content, "utf8");
+}
+
+function assertFreshArtifact(state, phase, artifact) {
+  if (phase.id !== "pr-comment-fix" && phase.id !== "pr-ci-fix") {
+    return;
+  }
+  const enteredAt = Date.parse(state.phase_entered_at ?? state.updated_at ?? state.started_at ?? "");
+  if (!Number.isFinite(enteredAt)) {
+    return;
+  }
+  const artifactMtime = fs.statSync(artifact).mtimeMs;
+  if (artifactMtime <= enteredAt) {
+    throw new Error(`blocked: stale artifact ${artifact}`);
+  }
+}
+
 function nextPhaseIndex(state, phase, artifact) {
   if (phase.id === "pr-watch") {
     const status = readArtifactStatus(artifact);
@@ -251,11 +276,11 @@ function upsertBootstrapBlock(pathName, label) {
 Before feature work, run:
 
 \`\`\`bash
-agent-flow-kit run start --task "<task>"
-agent-flow-kit run next
+${AGENT_FLOW_COMMAND} run start --task "<task>"
+${AGENT_FLOW_COMMAND} run next
 \`\`\`
 
-Follow the CLI output exactly. Do not manually skip phases; use \`agent-flow-kit run advance\` only after the required artifact exists.
+Follow the CLI output exactly. Do not manually skip phases; use \`${AGENT_FLOW_COMMAND} run advance\` only after the required artifact exists.
 
 ${end}
 `;
@@ -276,11 +301,11 @@ function bootstrapMarkdown(label) {
 Before feature work, run:
 
 \`\`\`bash
-agent-flow-kit run start --task "<task>"
-agent-flow-kit run next
+${AGENT_FLOW_COMMAND} run start --task "<task>"
+${AGENT_FLOW_COMMAND} run next
 \`\`\`
 
-Follow the CLI output exactly. Do not manually skip phases; use \`agent-flow-kit run advance\` only after the required artifact exists.
+Follow the CLI output exactly. Do not manually skip phases; use \`${AGENT_FLOW_COMMAND} run advance\` only after the required artifact exists.
 `;
 }
 
@@ -317,15 +342,15 @@ function fullFeatureWorkflowYaml() {
 }
 
 function fullFeatureSkillMarkdown() {
-  return `# Full Feature Workflow\n\nUse this skill for feature work in this project.\n\nAlways drive progress through:\n\n\`\`\`bash\nagent-flow-kit run next\n\`\`\`\n\nCanonical order:\n\n${PHASES.map((phase, index) => `${index + 1}. ${phase.id}`).join("\n")}\n\nDo not skip phases. If a gate, review, PR comment, or PR check fails, complete the matching fix phase and push again before merge/handoff.\n`;
+  return `# Full Feature Workflow\n\nUse this skill for feature work in this project.\n\nAlways drive progress through:\n\n\`\`\`bash\n${AGENT_FLOW_COMMAND} run next\n\`\`\`\n\nCanonical order:\n\n${PHASES.map((phase, index) => `${index + 1}. ${phase.id}`).join("\n")}\n\nDo not skip phases. If a gate, review, PR comment, or PR check fails, complete the matching fix phase and push again before merge/handoff.\n`;
 }
 
 function phasePrompt(phase) {
-  return `# ${phase.id}\n\n${phase.instruction}\n\nSave the required artifact before running:\n\n\`\`\`bash\nagent-flow-kit run advance\n\`\`\`\n`;
+  return `# ${phase.id}\n\n${phase.instruction}\n\nSave the required artifact before running:\n\n\`\`\`bash\n${AGENT_FLOW_COMMAND} run advance\n\`\`\`\n`;
 }
 
 function workflowContract() {
-  return `# Workflow Contract\n\nThe workflow runner is the source of truth for phase order. Agents may read skills and prompts, but must use \`agent-flow-kit run next\` and \`agent-flow-kit run advance\` to move through the workflow.\n`;
+  return `# Workflow Contract\n\nThe workflow runner is the source of truth for phase order. Agents may read skills and prompts, but must use \`${AGENT_FLOW_COMMAND} run next\` and \`${AGENT_FLOW_COMMAND} run advance\` to move through the workflow.\n`;
 }
 
 try {
