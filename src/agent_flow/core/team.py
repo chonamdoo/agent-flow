@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import time
 from contextlib import contextmanager
 from uuid import uuid4
@@ -436,23 +437,32 @@ def validate_team_state_import(payload: object) -> list[str]:
         if safe_owner not in worker_names:
             errors.append(f"task owner references unknown worker: {safe_owner}")
 
+    heartbeat_workers: set[str] = set()
     for index, heartbeat in enumerate(heartbeats):
         if not isinstance(heartbeat, dict):
             errors.append(f"heartbeats[{index}] must be an object")
             continue
         worker_name = _validate_safe_field(errors, heartbeat, "worker", f"heartbeats[{index}].worker", safe_worker_name)
-        if worker_name is not None and worker_name not in worker_names:
-            errors.append(f"heartbeat references unknown worker: {worker_name}")
+        if worker_name is not None:
+            if worker_name in heartbeat_workers:
+                errors.append(f"duplicate heartbeat worker: {worker_name}")
+            heartbeat_workers.add(worker_name)
+            if worker_name not in worker_names:
+                errors.append(f"heartbeat references unknown worker: {worker_name}")
         _validate_string_field(errors, heartbeat, "status", f"heartbeats[{index}].status")
         _validate_bool_field(errors, heartbeat, "alive", f"heartbeats[{index}].alive")
         _validate_string_field(errors, heartbeat, "updated_at", f"heartbeats[{index}].updated_at")
 
+    mailbox_workers: set[str] = set()
     for worker_name, messages in mailboxes.items():
         try:
             safe_worker = safe_worker_name(str(worker_name))
         except ValueError:
             errors.append(f"unsafe mailbox worker: {worker_name}")
             continue
+        if safe_worker in mailbox_workers:
+            errors.append(f"duplicate mailbox worker: {safe_worker}")
+        mailbox_workers.add(safe_worker)
         if safe_worker not in worker_names:
             errors.append(f"mailbox references unknown worker: {safe_worker}")
         if not isinstance(messages, list):
@@ -477,16 +487,20 @@ def validate_team_state_import(payload: object) -> list[str]:
             _validate_string_field(errors, message, "created_at", f"mailboxes.{safe_worker}[{index}].created_at")
             _validate_bool_field(errors, message, "read", f"mailboxes.{safe_worker}[{index}].read")
 
+    shutdown_ids: set[tuple[str, str]] = set()
     for index, signal in enumerate(shutdowns):
         if not isinstance(signal, dict):
             errors.append(f"shutdowns[{index}] must be an object")
             continue
         signal_id = _validate_safe_field(errors, signal, "signal_id", f"shutdowns[{index}].signal_id", safe_signal_id)
         worker_name = _validate_safe_field(errors, signal, "worker", f"shutdowns[{index}].worker", safe_worker_name)
-        if signal_id is None:
-            continue
-        if worker_name is not None and worker_name not in worker_names:
-            errors.append(f"shutdown references unknown worker: {worker_name}")
+        if signal_id is not None and worker_name is not None:
+            shutdown_key = (worker_name, signal_id)
+            if shutdown_key in shutdown_ids:
+                errors.append(f"duplicate shutdown signal: {worker_name}/{signal_id}")
+            shutdown_ids.add(shutdown_key)
+            if worker_name not in worker_names:
+                errors.append(f"shutdown references unknown worker: {worker_name}")
         _validate_string_field(errors, signal, "reason", f"shutdowns[{index}].reason")
         _validate_string_field(errors, signal, "requested_at", f"shutdowns[{index}].requested_at")
         _validate_bool_field(errors, signal, "acknowledged", f"shutdowns[{index}].acknowledged")
@@ -519,6 +533,51 @@ def summarize_team_state_import(payload: object) -> dict[str, object]:
         "message_count": message_count,
         "shutdown_count": len(shutdowns),
     }
+
+
+def apply_team_state_import(*, root: Path, payload: object) -> dict[str, object]:
+    summary = summarize_team_state_import(payload)
+    if not summary["valid"]:
+        return summary
+    if not isinstance(payload, dict):
+        return {"valid": False, "errors": ["payload must be a JSON object"]}
+    team = payload["team"]
+    team_name = safe_team_name(str(team["name"]))
+    root_dir = _team_root(root, team_name)
+    root_dir.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        root_dir.mkdir()
+    except FileExistsError:
+        return {"valid": False, "errors": [f"team already exists: {team_name}"]}
+    try:
+        _write_json(root_dir / "config.json", team)
+        (root_dir / "tasks").mkdir(parents=True, exist_ok=True)
+        for task in payload["tasks"]:
+            task_id = safe_task_id(str(task["task_id"]))
+            _write_json(root_dir / "tasks" / f"{task_id}.json", task)
+        (root_dir / "workers").mkdir(parents=True, exist_ok=True)
+        for worker in payload["workers"]:
+            worker_name = safe_worker_name(str(worker["name"]))
+            worker_dir = root_dir / "workers" / worker_name
+            _write_json(worker_dir / "identity.json", worker)
+            (worker_dir / "inbox.md").write_text("", encoding="utf-8")
+        for heartbeat in payload["heartbeats"]:
+            worker_name = safe_worker_name(str(heartbeat["worker"]))
+            _write_json(root_dir / "workers" / worker_name / "heartbeat.json", heartbeat)
+        (root_dir / "mailbox").mkdir(parents=True, exist_ok=True)
+        for worker_name, messages in payload["mailboxes"].items():
+            safe_worker = safe_worker_name(str(worker_name))
+            _write_json(root_dir / "mailbox" / f"{safe_worker}.json", messages)
+        (root_dir / "shutdown").mkdir(parents=True, exist_ok=True)
+        for signal in payload["shutdowns"]:
+            worker_name = safe_worker_name(str(signal["worker"]))
+            signal_id = safe_signal_id(str(signal["signal_id"]))
+            _write_json(root_dir / "shutdown" / worker_name / f"{signal_id}.json", signal)
+    except Exception:
+        if root_dir.exists():
+            shutil.rmtree(root_dir)
+        raise
+    return summary
 
 
 def _finish_task(

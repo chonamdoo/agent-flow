@@ -954,6 +954,162 @@ class CliTest(unittest.TestCase):
             self.assertFalse(report["valid"])
             self.assertIn("cannot read import file:", report["errors"][0])
 
+    def test_team_import_apply_creates_new_team_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_root = root / "source"
+            target_root = root / "target"
+            _create_team_with_task_and_worker(source_root)
+            main(
+                [
+                    "team",
+                    "message",
+                    "--root",
+                    str(source_root),
+                    "--team",
+                    "feature-team",
+                    "--from-actor",
+                    "lead",
+                    "--to-worker",
+                    "worker-1",
+                    "--body",
+                    "import me",
+                ]
+            )
+            export_output = io.StringIO()
+            with contextlib.redirect_stdout(export_output):
+                self.assertEqual(
+                    main(["team", "export", "--root", str(source_root), "--team", "feature-team"]),
+                    0,
+                )
+            snapshot_path = root / "snapshot.json"
+            snapshot_path.write_text(export_output.getvalue(), encoding="utf-8")
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(["team", "import-apply", "--root", str(target_root), "--file", str(snapshot_path)]),
+                    0,
+                )
+            self.assertEqual(output.getvalue().strip(), "feature-team imported")
+
+            imported_output = io.StringIO()
+            with contextlib.redirect_stdout(imported_output):
+                self.assertEqual(
+                    main(["team", "export", "--root", str(target_root), "--team", "feature-team"]),
+                    0,
+                )
+            self.assertEqual(json.loads(imported_output.getvalue()), json.loads(export_output.getvalue()))
+
+    def test_team_import_apply_refuses_existing_team(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+            export_output = io.StringIO()
+            with contextlib.redirect_stdout(export_output):
+                self.assertEqual(
+                    main(["team", "export", "--root", str(root), "--team", "feature-team"]),
+                    0,
+                )
+            snapshot_path = root / "snapshot.json"
+            snapshot_path.write_text(export_output.getvalue(), encoding="utf-8")
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(["team", "import-apply", "--root", str(root), "--file", str(snapshot_path)]),
+                    1,
+                )
+            self.assertIn("team already exists: feature-team", output.getvalue())
+
+    def test_team_import_apply_rejects_invalid_snapshot_without_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            snapshot_path = root / "snapshot.json"
+            snapshot_path.write_text(json.dumps({"team": {"name": "feature-team"}}), encoding="utf-8")
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(["team", "import-apply", "--root", str(root), "--file", str(snapshot_path)]),
+                    1,
+                )
+            self.assertIn("tasks is required", output.getvalue())
+            self.assertFalse((root / ".agent-flow" / "state" / "team" / "feature-team").exists())
+
+    def test_team_import_apply_rejects_duplicate_file_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_root = root / "source"
+            target_root = root / "target"
+            _create_team_with_task_and_worker(source_root)
+            signal_output = io.StringIO()
+            with contextlib.redirect_stdout(signal_output):
+                self.assertEqual(
+                    main(
+                        [
+                            "team",
+                            "shutdown",
+                            "--root",
+                            str(source_root),
+                            "--team",
+                            "feature-team",
+                            "--worker",
+                            "worker-1",
+                            "--reason",
+                            "done",
+                        ]
+                    ),
+                    0,
+                )
+            export_output = io.StringIO()
+            with contextlib.redirect_stdout(export_output):
+                self.assertEqual(
+                    main(["team", "export", "--root", str(source_root), "--team", "feature-team"]),
+                    0,
+                )
+            snapshot = json.loads(export_output.getvalue())
+            snapshot["heartbeats"].append(dict(snapshot["heartbeats"][0]))
+            snapshot["shutdowns"].append(dict(snapshot["shutdowns"][0]))
+            snapshot_path = root / "snapshot.json"
+            snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(["team", "import-apply", "--root", str(target_root), "--file", str(snapshot_path)]),
+                    1,
+                )
+            self.assertIn("duplicate heartbeat worker: worker-1", output.getvalue())
+            self.assertIn("duplicate shutdown signal: worker-1/", output.getvalue())
+            self.assertFalse((target_root / ".agent-flow" / "state" / "team" / "feature-team").exists())
+
+    def test_team_import_apply_rejects_duplicate_normalized_mailboxes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_root = root / "source"
+            target_root = root / "target"
+            _create_team_with_task_and_worker(source_root)
+            export_output = io.StringIO()
+            with contextlib.redirect_stdout(export_output):
+                self.assertEqual(
+                    main(["team", "export", "--root", str(source_root), "--team", "feature-team"]),
+                    0,
+                )
+            snapshot = json.loads(export_output.getvalue())
+            snapshot["mailboxes"][" worker-1 "] = []
+            snapshot_path = root / "snapshot.json"
+            snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(["team", "import-apply", "--root", str(target_root), "--file", str(snapshot_path)]),
+                    1,
+                )
+            self.assertIn("duplicate mailbox worker: worker-1", output.getvalue())
+            self.assertFalse((target_root / ".agent-flow" / "state" / "team" / "feature-team").exists())
+
     def test_team_import_dry_run_reports_report_write_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
