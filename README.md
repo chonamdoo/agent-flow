@@ -82,7 +82,7 @@ Team State archive is the supported retirement path for completed team work.
 
 - `archive` moves an active Team State into `.agent-flow/archive/team/` and writes an archive manifest.
 - `archive-list` reports archived teams with archive time, reason, and path.
-- `archive-export` writes an import-compatible Team State snapshot from an archive.
+- `archive-export` prints an import-compatible Team State snapshot from an archive.
 - `archive-restore` moves an archived Team State back only when the active team name is not already present.
 - `archive-restore --report` writes deterministic JSON for both success and failure cases.
 - Destructive Team State deletion is intentionally not part of the current workflow.

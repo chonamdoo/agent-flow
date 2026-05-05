@@ -48,6 +48,8 @@ Make Team state archive restore command operational.
 
 Make Team state archive restore diagnostics operational.
 
+Make Team state docs final pass operational.
+
 ### Scope
 
 - Send messages to registered Worker mailboxes.
@@ -66,13 +68,13 @@ Make Team state archive restore diagnostics operational.
 
 ## Current Slice
 
-Make Team state docs final pass operational.
+Make Team state lifecycle final review fixes operational.
 
 ### Scope
 
-- Document the Team State archive lifecycle.
-- Document restore report behavior.
-- Keep destructive delete outside the current workflow.
+- Require canonical Team State identifiers during import validation.
+- Clean active archive manifests after archive rename failures.
+- Fix archive export documentation wording.
 - Preserve Team Orchestration as state-only; no worker process execution.
 - Keep AI CLI execution on host adapters/providers; no sandbox support.
 
@@ -85,4 +87,4 @@ Make Team state docs final pass operational.
 
 ## Next Slices
 
-1. Team state lifecycle final review.
+1. Team state lifecycle completion.

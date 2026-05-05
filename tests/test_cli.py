@@ -782,6 +782,25 @@ class CliTest(unittest.TestCase):
             self.assertTrue(team_root.is_dir())
             self.assertEqual(list((root.resolve() / ".agent-flow" / "archive" / "team").glob("feature-team-*")), [])
 
+    def test_team_archive_rename_failure_removes_active_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+            team_root = root.resolve() / ".agent-flow" / "state" / "team" / "feature-team"
+            original_rename = Path.rename
+
+            def fail_archive_rename(self: Path, target: Path) -> Path:
+                if self == team_root and target.name.startswith("feature-team-"):
+                    raise OSError("rename failed")
+                return original_rename(self, target)
+
+            with mock.patch("pathlib.Path.rename", fail_archive_rename):
+                with self.assertRaises(OSError):
+                    main(["team", "archive", "--root", str(root), "--team", "feature-team"])
+            self.assertTrue(team_root.is_dir())
+            self.assertFalse((team_root / "archive.json").exists())
+            self.assertEqual(list((root.resolve() / ".agent-flow" / "archive" / "team").glob("feature-team-*")), [])
+
     def test_team_archive_list_reports_archives(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1010,6 +1029,33 @@ class CliTest(unittest.TestCase):
             with contextlib.redirect_stdout(output):
                 self.assertEqual(main(["team", "import-validate", "--file", str(snapshot_path)]), 0)
             self.assertEqual(output.getvalue().strip(), "OK")
+
+    def test_team_import_apply_rejects_noncanonical_team_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            snapshot_path = root / "snapshot.json"
+            snapshot_path.write_text(
+                json.dumps(
+                    {
+                        "team": {"name": "Feature Team", "description": "", "created_at": "now"},
+                        "tasks": [],
+                        "workers": [],
+                        "heartbeats": [],
+                        "mailboxes": {},
+                        "shutdowns": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(["team", "import-apply", "--root", str(root), "--file", str(snapshot_path)]),
+                    1,
+                )
+            self.assertIn("team.name must be canonical: feature-team", output.getvalue())
+            self.assertFalse((root / ".agent-flow" / "state" / "team" / "feature-team").exists())
 
     def test_team_import_validate_rejects_bad_references(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

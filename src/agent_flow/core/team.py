@@ -138,7 +138,16 @@ def archive_team(*, root: Path, team_name: str, reason: str) -> TeamArchive:
         reason=reason,
     )
     _write_json(source_dir / "archive.json", asdict(archive))
-    source_dir.rename(archive_dir)
+    try:
+        source_dir.rename(archive_dir)
+    except Exception:
+        manifest_path = source_dir / "archive.json"
+        if manifest_path.exists():
+            try:
+                manifest_path.unlink()
+            except Exception:
+                pass
+        raise
     return archive
 
 
@@ -542,6 +551,8 @@ def validate_team_state_import(payload: object) -> list[str]:
         except ValueError:
             errors.append(f"tasks[{index}].owner is unsafe: {owner}")
             continue
+        if safe_owner != owner:
+            errors.append(f"tasks[{index}].owner must be canonical: {safe_owner}")
         if safe_owner not in worker_names:
             errors.append(f"task owner references unknown worker: {safe_owner}")
 
@@ -568,6 +579,8 @@ def validate_team_state_import(payload: object) -> list[str]:
         except ValueError:
             errors.append(f"unsafe mailbox worker: {worker_name}")
             continue
+        if safe_worker != worker_name:
+            errors.append(f"mailboxes.{safe_worker} must use canonical worker key: {safe_worker}")
         if safe_worker in mailbox_workers:
             errors.append(f"duplicate mailbox worker: {safe_worker}")
         mailbox_workers.add(safe_worker)
@@ -929,10 +942,13 @@ def _validate_safe_field(errors: list[str], payload: dict[str, object], key: str
         errors.append(f"{label} must be a string")
         return None
     try:
-        return validator(value)
+        safe_value = validator(value)
     except ValueError:
         errors.append(f"{label} is unsafe: {value}")
         return None
+    if safe_value != value:
+        errors.append(f"{label} must be canonical: {safe_value}")
+    return safe_value
 
 
 def _validate_string_field(errors: list[str], payload: dict[str, object], key: str, label: str) -> str | None:
