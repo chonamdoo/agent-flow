@@ -1,0 +1,7 @@
+id: python
+gates:
+  - id: test
+    command: ["pytest"]
+  - id: compile
+    command: ["python", "-m", "compileall", "src"]
+

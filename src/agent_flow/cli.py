@@ -1,0 +1,94 @@
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+from agent_flow.adapters.registry import detect_adapter
+from agent_flow.core.artifacts import init_project, write_prompt
+from agent_flow.core.profiles import detect_profile
+from agent_flow.core.state import RunRequest, RunState, start_run, status_summary
+from agent_flow.core.workflow import load_workflow
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="agent-flow")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    init_parser = subparsers.add_parser("init")
+    init_parser.add_argument("--root", default=".")
+
+    start_parser = subparsers.add_parser("start")
+    start_parser.add_argument("workflow")
+    start_parser.add_argument("--root", default=".")
+    start_parser.add_argument("--task", required=True)
+    start_parser.add_argument("--run-id")
+    start_parser.add_argument("--adapter", default="auto")
+    start_parser.add_argument("--profile", default="auto")
+
+    status_parser = subparsers.add_parser("status")
+    status_parser.add_argument("--root", default=".")
+
+    detect_parser = subparsers.add_parser("detect-profile")
+    detect_parser.add_argument("--root", default=".")
+
+    args = parser.parse_args(argv)
+    root = Path(getattr(args, "root", ".")).resolve()
+
+    if args.command == "init":
+        init_project(root)
+        print(f"initialized {root / '.agent-flow'}")
+        return 0
+
+    if args.command == "detect-profile":
+        print(detect_profile(root))
+        return 0
+
+    if args.command == "status":
+        print(status_summary(root))
+        return 0
+
+    if args.command == "start":
+        workflow = load_workflow(args.workflow)
+        profile = detect_profile(root) if args.profile == "auto" else args.profile
+        adapter = detect_adapter() if args.adapter == "auto" else args.adapter
+        state = start_run(
+            root=root,
+            request=RunRequest(
+                workflow_id=workflow.workflow_id,
+                task=args.task,
+                adapter=adapter,
+                profile=profile,
+                run_id=args.run_id,
+            ),
+        )
+        _write_stage_prompts(root=root, state=state, workflow=workflow)
+        print(state.run_dir)
+        return 0
+
+    return 1
+
+
+def _write_stage_prompts(*, root: Path, state: RunState, workflow) -> None:
+    for stage in workflow.stages:
+        count = stage.replicas if stage.parallel else 1
+        for replica in range(1, count + 1):
+            prompt_id = stage.stage_id if count == 1 else f"{stage.stage_id}-{replica}"
+            write_prompt(
+                root=root,
+                run_dir=state.run_dir,
+                stage_id=prompt_id,
+                content=(
+                    f"# Agent Flow Stage: {stage.stage_id}\n\n"
+                    f"Role: {stage.role}\n"
+                    f"Workflow: {state.workflow_id}\n"
+                    f"Run: {state.run_id}\n"
+                    f"Replica: {replica}/{count}\n\n"
+                    f"Task:\n{state.task}\n\n"
+                    "Return a concise artifact with findings, changes, verification, and blockers.\n"
+                ),
+            )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

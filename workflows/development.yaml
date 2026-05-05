@@ -1,0 +1,22 @@
+id: development
+description: Personal subagent-first development workflow.
+stages:
+  - id: explore
+    role: explorer
+    parallel: false
+  - id: implement
+    role: implementer
+    parallel: false
+  - id: review
+    role: reviewer
+    parallel: true
+    replicas: 3
+  - id: qa
+    role: qa
+    parallel: false
+  - id: fix
+    role: fixer
+    parallel: false
+    loop:
+      max_rounds: 3
+

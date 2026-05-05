@@ -1,0 +1,17 @@
+id: bugfix
+description: Reproduce, fix, review, and verify a defect.
+stages:
+  - id: reproduce
+    role: explorer
+    parallel: false
+  - id: implement-fix
+    role: fixer
+    parallel: false
+  - id: review
+    role: reviewer
+    parallel: true
+    replicas: 3
+  - id: qa
+    role: qa
+    parallel: false
+

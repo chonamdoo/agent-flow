@@ -1,0 +1,7 @@
+id: react-native
+gates:
+  - id: test
+    command: ["npm", "test"]
+  - id: doctor
+    command: ["npx", "react-native", "doctor"]
+

@@ -1,0 +1,9 @@
+id: nextjs
+gates:
+  - id: build
+    command: ["npm", "run", "build"]
+  - id: typecheck
+    command: ["npm", "run", "typecheck"]
+  - id: lint
+    command: ["npm", "run", "lint"]
+

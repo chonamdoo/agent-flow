@@ -1,0 +1,11 @@
+id: review
+description: Review-only workflow for existing changes.
+stages:
+  - id: explore
+    role: explorer
+    parallel: false
+  - id: review
+    role: reviewer
+    parallel: true
+    replicas: 3
+

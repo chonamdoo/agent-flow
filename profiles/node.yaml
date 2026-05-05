@@ -1,0 +1,4 @@
+id: node
+gates:
+  - id: test
+    command: ["npm", "test"]
