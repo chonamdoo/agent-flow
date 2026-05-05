@@ -50,6 +50,8 @@ Make Team state archive restore diagnostics operational.
 
 Make Team state docs final pass operational.
 
+Make Team state lifecycle final review fixes operational.
+
 ### Scope
 
 - Send messages to registered Worker mailboxes.
@@ -68,23 +70,8 @@ Make Team state docs final pass operational.
 
 ## Current Slice
 
-Make Team state lifecycle final review fixes operational.
-
-### Scope
-
-- Require canonical Team State identifiers during import validation.
-- Clean active archive manifests after archive rename failures.
-- Fix archive export documentation wording.
-- Preserve Team Orchestration as state-only; no worker process execution.
-- Keep AI CLI execution on host adapters/providers; no sandbox support.
-
-### Non-Goals
-
-- No Team Orchestration runtime.
-- No process supervision or process termination.
-- No direct Codex/Claude/Gemini provider execution.
-- No sandbox execution.
+Team state lifecycle is complete.
 
 ## Next Slices
 
-1. Team state lifecycle completion.
+No planned Team State lifecycle slices.
