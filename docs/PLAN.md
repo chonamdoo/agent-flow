@@ -60,6 +60,8 @@ Make team runtime tracer operational.
 
 Make installable workflow kit operational.
 
+Make npx project installer operational.
+
 ### Scope
 
 - Send messages to registered Worker mailboxes.
@@ -78,7 +80,7 @@ Make installable workflow kit operational.
 
 ## Current Slice
 
-Workflow kit feature set is complete.
+Npx project installer is complete.
 
 ## Next Slices
 

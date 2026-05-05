@@ -38,6 +38,14 @@ agent-flow init --root /path/to/project
 agent-flow start development --root /path/to/project --task "add login" --adapter auto
 ```
 
+For project-local setup from the target project directory, use the Node installer:
+
+```bash
+npx agent-flow-kit@latest install
+```
+
+The installer uses the current working directory as the project root, creates `.agent-flow/`, detects a project profile, and writes `.agent-flow/kit.json`.
+
 For copy-based usage, copy the source kit repository or package into a stable local location and run the installed CLI against each project with `--root`. The target project only needs its generated `.agent-flow/` runtime directory unless you intentionally maintain a forked kit.
 
 ## Example

@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -125,6 +126,86 @@ class CliTest(unittest.TestCase):
         self.assertTrue(package_root.joinpath("profiles", "generic.yaml").is_file())
         self.assertTrue(package_root.joinpath("roles", "default.yaml").is_file())
         self.assertTrue(package_root.joinpath("templates", "generic", "stage.md").is_file())
+
+    def test_node_installer_initializes_current_project(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            result = subprocess.run(
+                (
+                    node,
+                    str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"),
+                    "install",
+                ),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "agent-flow installed profile=generic")
+            kit = json.loads((project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
+            self.assertEqual(kit["profile"], "generic")
+            self.assertEqual(kit["install_scope"], "project")
+            self.assertTrue((project_root / ".agent-flow" / "runs").is_dir())
+
+    def test_node_installer_detects_node_project_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            (project_root / "package.json").write_text('{"scripts":{"test":"node test.js"}}\n', encoding="utf-8")
+            node = _node_executable()
+            result = subprocess.run(
+                (
+                    node,
+                    str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"),
+                    "install",
+                ),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "agent-flow installed profile=node")
+            kit = json.loads((project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
+            self.assertEqual(kit["profile"], "node")
+
+    def test_node_installer_matches_project_profile_detection(self) -> None:
+        cases = [
+            ("nextjs", {"package.json": '{"dependencies":{"next":"latest"}}\n'}),
+            ("react-native", {"package.json": '{"dependencies":{"react-native":"latest"}}\n'}),
+            ("python", {"pyproject.toml": "[project]\nname='demo'\n"}),
+        ]
+        node = _node_executable()
+        for expected, files in cases:
+            with self.subTest(expected=expected):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    project_root = Path(temp_dir) / "project"
+                    project_root.mkdir()
+                    for name, content in files.items():
+                        (project_root / name).write_text(content, encoding="utf-8")
+                    result = subprocess.run(
+                        (
+                            node,
+                            str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"),
+                            "install",
+                        ),
+                        cwd=project_root,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    kit = json.loads((project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
+                    self.assertEqual(kit["profile"], expected)
+
+    def test_node_installer_package_exposes_npx_bin(self) -> None:
+        package = json.loads((Path(__file__).resolve().parents[1] / "package.json").read_text(encoding="utf-8"))
+        self.assertEqual(package["name"], "agent-flow-kit")
+        self.assertEqual(package["bin"]["agent-flow-kit"], "bin/agent-flow-kit.mjs")
+        self.assertIn("bin", package["files"])
 
     def test_start_can_create_and_record_worktree(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2868,6 +2949,29 @@ def _python_for_package_install() -> str:
         if result.returncode == 0:
             return candidate
     raise RuntimeError("Python >= 3.11 is required for package install smoke test")
+
+
+def _node_executable() -> str:
+    candidates = [
+        os.environ.get("AGENT_FLOW_TEST_NODE"),
+        str(Path.home() / ".cache" / "codex-runtimes" / "codex-primary-runtime" / "dependencies" / "node" / "bin" / "node"),
+        shutil.which("node"),
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            result = subprocess.run(
+                (candidate, "--version"),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        except OSError:
+            continue
+        if result.returncode == 0:
+            return candidate
+    raise RuntimeError("Node.js is required for installer smoke test")
 
 
 def _create_team_with_task_and_worker(root: Path) -> None:

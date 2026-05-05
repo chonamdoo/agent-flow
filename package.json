@@ -1,0 +1,18 @@
+{
+  "name": "agent-flow-kit",
+  "version": "0.1.0",
+  "description": "Project-local installer for the Agent Flow workflow kit.",
+  "bin": {
+    "agent-flow-kit": "bin/agent-flow-kit.mjs"
+  },
+  "files": [
+    "bin",
+    "workflows",
+    "profiles",
+    "roles",
+    "templates",
+    "README.md"
+  ],
+  "license": "MIT",
+  "type": "module"
+}
