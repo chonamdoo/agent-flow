@@ -488,7 +488,84 @@ class CliTest(unittest.TestCase):
                     main(["team", "status", "--root", str(root), "--team", "feature-team"]),
                     0,
                 )
-            self.assertEqual(output.getvalue().strip(), "feature-team tasks=1 workers=1 exists=True")
+            status_lines = output.getvalue().strip().splitlines()
+            self.assertEqual(status_lines[0], "feature-team tasks=1 workers=1 exists=True")
+            self.assertIn("worker-1 idle alive", status_lines[1])
+
+    def test_team_heartbeat_updates_worker_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(
+                        [
+                            "team",
+                            "heartbeat",
+                            "--root",
+                            str(root),
+                            "--team",
+                            "feature-team",
+                            "--worker",
+                            "worker-1",
+                            "--status",
+                            "reviewing",
+                        ]
+                    ),
+                    0,
+                )
+            self.assertIn("worker-1 reviewing alive", output.getvalue())
+            heartbeat = _read_heartbeat_json(root)
+            self.assertEqual(heartbeat["worker"], "worker-1")
+            self.assertEqual(heartbeat["status"], "reviewing")
+            self.assertTrue(heartbeat["alive"])
+
+    def test_team_heartbeat_can_mark_worker_dead(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _create_team_with_task_and_worker(root)
+            self.assertEqual(
+                main(
+                    [
+                        "team",
+                        "heartbeat",
+                        "--root",
+                        str(root),
+                        "--team",
+                        "feature-team",
+                        "--worker",
+                        "worker-1",
+                        "--status",
+                        "stopped",
+                        "--dead",
+                    ]
+                ),
+                0,
+            )
+            heartbeat = _read_heartbeat_json(root)
+            self.assertEqual(heartbeat["status"], "stopped")
+            self.assertFalse(heartbeat["alive"])
+
+    def test_team_heartbeat_requires_registered_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            main(["team", "init", "--root", str(root), "--name", "feature-team"])
+            with self.assertRaises(FileNotFoundError):
+                main(
+                    [
+                        "team",
+                        "heartbeat",
+                        "--root",
+                        str(root),
+                        "--team",
+                        "feature-team",
+                        "--worker",
+                        "missing",
+                        "--status",
+                        "running",
+                    ]
+                )
 
     def test_team_rejects_unsafe_task_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1079,6 +1156,21 @@ def _read_mailbox_json(root: Path) -> list[dict[str, object]]:
             / "feature-team"
             / "mailbox"
             / "worker-1.json"
+        ).read_text(encoding="utf-8")
+    )
+
+
+def _read_heartbeat_json(root: Path) -> dict[str, object]:
+    return json.loads(
+        (
+            root
+            / ".agent-flow"
+            / "state"
+            / "team"
+            / "feature-team"
+            / "workers"
+            / "worker-1"
+            / "heartbeat.json"
         ).read_text(encoding="utf-8")
     )
 

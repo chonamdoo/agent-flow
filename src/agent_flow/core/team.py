@@ -160,6 +160,23 @@ def add_worker(*, root: Path, team_name: str, worker_name: str, role: str) -> Te
     return worker
 
 
+def update_worker_heartbeat(
+    *,
+    root: Path,
+    team_name: str,
+    worker_name: str,
+    status: str,
+    alive: bool,
+) -> WorkerHeartbeat:
+    safe_team = safe_team_name(team_name)
+    _require_team(root=root, team_name=safe_team)
+    safe_worker = safe_worker_name(worker_name)
+    _require_worker(root=root, team_name=safe_team, worker_name=safe_worker)
+    heartbeat = WorkerHeartbeat(worker=safe_worker, status=status, alive=alive, updated_at=_now())
+    _write_json(_heartbeat_path(root=root, team_name=safe_team, worker_name=safe_worker), asdict(heartbeat))
+    return heartbeat
+
+
 def send_message(
     *,
     root: Path,
@@ -234,11 +251,17 @@ def team_status(*, root: Path, team_name: str) -> dict[str, object]:
     root_dir = _team_root(root, safe_team)
     tasks = sorted((root_dir / "tasks").glob("*.json")) if (root_dir / "tasks").exists() else []
     workers = sorted((root_dir / "workers").glob("*/identity.json")) if (root_dir / "workers").exists() else []
+    heartbeats = []
+    for worker in workers:
+        heartbeat_path = worker.parent / "heartbeat.json"
+        if heartbeat_path.is_file():
+            heartbeats.append(WorkerHeartbeat(**json.loads(heartbeat_path.read_text(encoding="utf-8"))))
     return {
         "team": safe_team,
         "exists": root_dir.exists(),
         "task_count": len(tasks),
         "worker_count": len(workers),
+        "heartbeats": heartbeats,
         "path": str(root_dir),
     }
 
@@ -294,6 +317,10 @@ def _team_root(root: Path, team_name: str) -> Path:
 
 def _mailbox_path(*, root: Path, team_name: str, worker_name: str) -> Path:
     return _team_root(root, team_name) / "mailbox" / f"{worker_name}.json"
+
+
+def _heartbeat_path(*, root: Path, team_name: str, worker_name: str) -> Path:
+    return _team_root(root, team_name) / "workers" / worker_name / "heartbeat.json"
 
 
 def _require_team(*, root: Path, team_name: str) -> None:

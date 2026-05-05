@@ -28,6 +28,7 @@ from agent_flow.core.team import (
     mark_message_read,
     send_message,
     team_status,
+    update_worker_heartbeat,
 )
 from agent_flow.core.worktrees import create_worktree, get_worktree_status, plan_worktree
 from agent_flow.core.state import RunRequest, RunState, start_run, status_summary
@@ -145,6 +146,14 @@ def main(argv: list[str] | None = None) -> int:
     team_read.add_argument("--team", required=True)
     team_read.add_argument("--worker", required=True)
     team_read.add_argument("--message", required=True)
+    team_heartbeat = team_subparsers.add_parser("heartbeat")
+    team_heartbeat.add_argument("--root", default=".")
+    team_heartbeat.add_argument("--team", required=True)
+    team_heartbeat.add_argument("--worker", required=True)
+    team_heartbeat.add_argument("--status", required=True)
+    heartbeat_alive = team_heartbeat.add_mutually_exclusive_group()
+    heartbeat_alive.add_argument("--alive", action="store_true", default=True)
+    heartbeat_alive.add_argument("--dead", action="store_true")
     team_status_parser = team_subparsers.add_parser("status")
     team_status_parser.add_argument("--root", default=".")
     team_status_parser.add_argument("--team", required=True)
@@ -306,12 +315,26 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(f"{message.message_id} read")
             return 0
+        if args.team_command == "heartbeat":
+            heartbeat = update_worker_heartbeat(
+                root=root,
+                team_name=args.team,
+                worker_name=args.worker,
+                status=args.status,
+                alive=not args.dead,
+            )
+            state = "alive" if heartbeat.alive else "dead"
+            print(f"{heartbeat.worker} {heartbeat.status} {state} {heartbeat.updated_at}")
+            return 0
         if args.team_command == "status":
             status = team_status(root=root, team_name=args.team)
             print(
                 f"{status['team']} tasks={status['task_count']} "
                 f"workers={status['worker_count']} exists={status['exists']}"
             )
+            for heartbeat in status["heartbeats"]:
+                state = "alive" if heartbeat.alive else "dead"
+                print(f"{heartbeat.worker} {heartbeat.status} {state} {heartbeat.updated_at}")
             return 0
 
     if args.command == "start":

@@ -44,6 +44,7 @@ agent-flow team complete --root /path/to/project --team feature-team --task task
 agent-flow team message --root /path/to/project --team feature-team --from-actor lead --to-worker worker-1 --body "Please check auth tests"
 agent-flow team messages --root /path/to/project --team feature-team --worker worker-1 --unread-only
 agent-flow team mark-read --root /path/to/project --team feature-team --worker worker-1 --message <message-id>
+agent-flow team heartbeat --root /path/to/project --team feature-team --worker worker-1 --status reviewing
 agent-flow team status --root /path/to/project --team feature-team
 agent-flow gates --root /path/to/project --profile auto
 agent-flow status --root /path/to/project
