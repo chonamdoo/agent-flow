@@ -7,6 +7,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 
 const command = process.argv[2];
 const AGENT_FLOW_COMMAND = "npx github:chonamdoo/agent-flow";
+const HOME = process.env.HOME || process.env.USERPROFILE || "";
 
 function installProject() {
   const root = process.cwd();
@@ -17,6 +18,7 @@ function installProject() {
     fs.mkdirSync(path.join(agentFlowDir, name), { recursive: true });
   }
 
+  fs.mkdirSync(path.join(agentFlowDir, "skills", "agent-flow"), { recursive: true });
   fs.mkdirSync(path.join(agentFlowDir, "skills", "full-feature-workflow"), { recursive: true });
 
   const payload = {
@@ -27,6 +29,12 @@ function installProject() {
   };
 
   writeManagedFile(path.join(agentFlowDir, "workflows", "full-feature.yaml"), fullFeatureWorkflowYaml());
+  const agentFlowSkill = agentFlowSkillMarkdown();
+  writeManagedFile(path.join(agentFlowDir, "skills", "agent-flow", "SKILL.md"), agentFlowSkill);
+  if (HOME) {
+    writeManagedFile(path.join(HOME, ".codex", "skills", "agent-flow", "SKILL.md"), agentFlowSkill);
+    writeManagedFile(path.join(HOME, ".claude", "skills", "agent-flow", "SKILL.md"), agentFlowSkill);
+  }
   writeManagedFile(
     path.join(agentFlowDir, "skills", "full-feature-workflow", "SKILL.md"),
     fullFeatureSkillMarkdown(),
@@ -559,6 +567,46 @@ function fullFeatureWorkflowYaml() {
     (phase) => `  - id: ${phase.id}\n    artifact: ${phase.artifact}\n    instruction: ${JSON.stringify(phase.instruction)}`,
   ).join("\n");
   return `id: full-feature\nmode: cli-enforced\nstages:\n${stages}\n`;
+}
+
+function agentFlowSkillMarkdown() {
+  return `---
+name: agent-flow
+description: Use when the user types /agent-flow, asks to start or continue the project workflow, or wants Claude, Codex, or Gemini to drive the agent-flow lifecycle.
+---
+
+# Agent Flow
+
+Use this skill as the common entry point for the project-local agent-flow workflow.
+
+## Slash Trigger
+
+When the user types \`/agent-flow <task>\`, run:
+
+\`\`\`bash
+${AGENT_FLOW_COMMAND} run start --task "<task>"
+\`\`\`
+
+When the user types \`/agent-flow\` with no task:
+
+- Run \`${AGENT_FLOW_COMMAND} run status\` from the project root.
+- If an active run exists, run \`${AGENT_FLOW_COMMAND} run next\`.
+- If no active run exists, ask for a task using \`/agent-flow <task>\`.
+
+When the user types \`/agent-flow status\`, run:
+
+\`\`\`bash
+${AGENT_FLOW_COMMAND} run status
+\`\`\`
+
+## Behavior
+
+- Treat \`/agent-flow\` as a project-local workflow trigger, not as a shell path.
+- Keep \`.agent-flow/runs/<run-id>/\` as internal state; expose it only for status, debugging, or artifact inspection.
+- After a phase writes its artifact, run \`${AGENT_FLOW_COMMAND} run advance\` from the project root.
+- If the workflow pauses for design or slice review, summarize the relevant artifact and wait for user approval before continuing.
+- Code comments are required when intent is not obvious, and every code comment must be written in Korean.
+`;
 }
 
 function fullFeatureSkillMarkdown() {

@@ -184,6 +184,48 @@ def test_invalid_workflow_yaml_clear_error(tmp_path: Path):
         _load_workflow(dup, "x")
 
 
+def test_route_block_returns_without_loop(tmp_path: Path):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.runner import Phase, Runner
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "pr-watch.md").write_text("status: pending\n", encoding="utf-8")
+
+    runner = Runner.__new__(Runner)
+    runner.run_dir = run_dir
+    runner.phases = [
+        Phase(
+            id="pr-watch",
+            description="",
+            routes={"pending": "block"},
+        )
+    ]
+
+    assert runner._next_index(0, runner.phases[0]) == (0, True)
+
+
+def test_backward_route_invalidates_target_artifact(tmp_path: Path):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.runner import Phase, Runner
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    watch = run_dir / "pr-watch.md"
+    watch.write_text("status: comments\n", encoding="utf-8")
+    (run_dir / "pr-comment-fix.md").write_text("fixed\n", encoding="utf-8")
+
+    runner = Runner.__new__(Runner)
+    runner.run_dir = run_dir
+    runner.phases = [
+        Phase(id="pr-watch", description="", routes={"comments": "pr-comment-fix"}),
+        Phase(id="pr-comment-fix", description="", routes={"default": "pr-watch"}),
+    ]
+
+    assert runner._next_index(1, runner.phases[1]) == (0, False)
+    assert not watch.exists()
+
+
 def test_abort_yes_flag_skips_prompt(tmp_path: Path):
     """`agent-flow abort --yes` must not block on confirmation."""
     project = tmp_path / "abort_yes"

@@ -119,7 +119,7 @@ class Runner:
             phase = self.phases[phase_index]
             if has_artifact(self.run_dir, phase.id):
                 print(f"  [skip] {phase.id}")
-                phase_index = self._next_index(phase_index, phase)
+                phase_index, blocked = self._next_index(phase_index, phase)
                 meta = read_meta(self.run_dir)
                 meta["phase_index"] = phase_index
                 meta["current_phase"] = (
@@ -128,6 +128,13 @@ class Runner:
                     else None
                 )
                 write_meta(self.run_dir, meta)
+                if blocked:
+                    print(
+                        f"\n═══ phase '{phase.id}' is blocked. "
+                        f"Update the artifact or rerun the watcher, then "
+                        f"`agent-flow continue`. ═══"
+                    )
+                    return
                 continue
             print(f"  [run]  {phase.id} — {phase.description}")
             completed = adapter.execute(
@@ -149,7 +156,7 @@ class Runner:
                     f"`agent-flow continue` ═══"
                 )
                 return
-            phase_index = self._next_index(phase_index, phase)
+            phase_index, blocked = self._next_index(phase_index, phase)
             meta = read_meta(self.run_dir)
             meta["phase_index"] = phase_index
             meta["current_phase"] = (
@@ -158,13 +165,20 @@ class Runner:
                 else None
             )
             write_meta(self.run_dir, meta)
+            if blocked:
+                print(
+                    f"\n═══ phase '{phase.id}' is blocked. "
+                    f"Update the artifact or rerun the watcher, then "
+                    f"`agent-flow continue`. ═══"
+                )
+                return
 
         mark_inactive(self.run_dir)
         print("\n✓ run complete.")
 
-    def _next_index(self, current_index: int, phase: Phase) -> int:
+    def _next_index(self, current_index: int, phase: Phase) -> tuple[int, bool]:
         if not phase.routes:
-            return current_index + 1
+            return current_index + 1, False
         assert self.run_dir is not None
         artifact = self.run_dir / f"{phase.id}.md"
         text = artifact.read_text(encoding="utf-8") if artifact.exists() else ""
@@ -172,13 +186,17 @@ class Runner:
         target = phase.routes.get(key)
         if target == "block":
             print(f"  [block] {phase.id} status={key}")
-            return current_index
+            return current_index, True
         if target:
             for i, candidate in enumerate(self.phases):
                 if candidate.id == target:
-                    return i
+                    if i <= current_index:
+                        target_artifact = self.run_dir / f"{candidate.id}.md"
+                        if target_artifact.exists():
+                            target_artifact.unlink()
+                    return i, False
             raise ValueError(f"phase {phase.id}: route target not found: {target}")
-        return current_index + 1
+        return current_index + 1, False
 
 
 def _find_kit_root() -> Path:

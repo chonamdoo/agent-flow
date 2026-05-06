@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 const KIT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const PROJECT = process.cwd();
 const AF_DIR = path.join(PROJECT, ".agent-flow");
+const HOME = process.env.HOME || process.env.USERPROFILE || "";
 
 function ensureDir(p) {
   fs.mkdirSync(p, { recursive: true });
@@ -161,6 +162,18 @@ function install() {
     agentFlowSkill,
     path.join(PROJECT, ".codex", "skills", "agent-flow"),
   );
+  const globalCodexSkillStatus = HOME
+    ? linkOrCopyDir(
+        agentFlowSkill,
+        path.join(HOME, ".codex", "skills", "agent-flow"),
+      )
+    : "missing-home";
+  const globalClaudeSkillStatus = HOME
+    ? linkOrCopyDir(
+        agentFlowSkill,
+        path.join(HOME, ".claude", "skills", "agent-flow"),
+      )
+    : "missing-home";
 
   // Keep a small pointer file for users who inspect .claude/skills by hand.
   // The agent-flow skill itself has already been linked or copied above.
@@ -190,6 +203,8 @@ function install() {
     skill_links: {
       claude: claudeSkillStatus,
       codex: codexSkillStatus,
+      global_claude: globalClaudeSkillStatus,
+      global_codex: globalCodexSkillStatus,
       gemini: "GEMINI.md",
     },
   };
@@ -206,6 +221,8 @@ function install() {
   console.log(`  profiles : ${profilesCopied.written} written, ${profilesCopied.skipped} skipped`);
   console.log(`  claude  : agent-flow skill ${claudeSkillStatus}`);
   console.log(`  codex   : agent-flow skill ${codexSkillStatus}`);
+  console.log(`  ~/.claude: agent-flow skill ${globalClaudeSkillStatus}`);
+  console.log(`  ~/.codex : agent-flow skill ${globalCodexSkillStatus}`);
   console.log(``);
   console.log(`Next: /agent-flow <task>`);
   console.log(`      (or: agent-flow run "<task>")`);
