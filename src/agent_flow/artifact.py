@@ -81,7 +81,13 @@ def find_active_run(project_root: Path) -> ActiveRun | None:
     )
 
 
-def create_run(project_root: Path, workflow: str, task: str) -> Path:
+def create_run(
+    project_root: Path,
+    workflow: str,
+    task: str,
+    *,
+    architecture: str | None = None,
+) -> Path:
     """Create a new run directory. Refuses if an active run exists."""
     runs_dir = project_root / RUNS_DIRNAME
     runs_dir.mkdir(parents=True, exist_ok=True)
@@ -112,13 +118,16 @@ def create_run(project_root: Path, workflow: str, task: str) -> Path:
 
         run_path = runs_dir / run_id
         run_path.mkdir()
-        write_meta(run_path, {
+        meta = {
             "run_id": run_id,
             "workflow": workflow,
             "task": task,
             "started_at": datetime.utcnow().isoformat(),
             "current_phase": None,
-        })
+        }
+        if architecture:
+            meta["architecture"] = architecture
+        write_meta(run_path, meta)
         (run_path / ACTIVE_MARKER).write_text("")
         return run_path
     finally:

@@ -43,6 +43,7 @@ class Adapter(ABC):
     def __init__(self) -> None:
         self._profile_snapshot: dict[str, Any] = {}
         self._profile_id: str = "generic"
+        self._architecture: str = "default"
         self._lore_citations: list[Any] = []  # list[Lore]; typed loose to avoid import cycle
 
     @abstractmethod
@@ -67,6 +68,7 @@ class Adapter(ABC):
             f"\n\n## Host-specific guidance\n{host_hint}\n" if host_hint else ""
         )
         profile_block = self._render_profile_block()
+        architecture_block = self._render_architecture_block(phase)
         lore_block = self._render_lore_block(project_root, phase)
         return (
             f"# agent-flow phase: {phase.id}\n\n"
@@ -77,12 +79,39 @@ class Adapter(ABC):
             f"  `{relative_artifact}`\n"
             f"\n## Phase prompt\n\n{body}\n"
             f"{profile_block}"
+            f"{architecture_block}"
             f"{lore_block}"
             f"{host_block}"
             f"\n## When complete\n"
             f"After writing the artifact, run `agent-flow continue` (from "
             f"`{project_root}`) to advance to the next phase."
         )
+
+    def _render_architecture_block(self, phase: "Phase") -> str:
+        if self._architecture == "ddd":
+            if phase.id in {"design", "slice-plan", "ddd-design", "architecture-review"}:
+                return (
+                    "\n## Architecture mode: `ddd`\n\n"
+                    "DDD is explicit for this run. Do not complete this phase "
+                    "as a shallow service split. Design and verify native "
+                    "package/module boundaries for the active stack. Examples: "
+                    "`api/domain` for Python APIs, feature/domain modules for "
+                    "iOS, packages for JVM, or app/lib boundaries for Next.js. "
+                    "If the artifact rejects DDD, label the work `service-layer "
+                    "refactor` instead.\n\n"
+                    "Required design vocabulary: Bounded Context, Aggregates, "
+                    "Entities, Value Objects, Application Use Cases, "
+                    "Infrastructure Adapters, Presentation Routes, Dependency "
+                    "Rule, and an implementation structure map with concrete "
+                    "paths/modules for this project.\n"
+                )
+        if self._architecture == "service-layer":
+            return (
+                "\n## Architecture mode: `service-layer`\n\n"
+                "This run is not DDD. Label structural work as a service-layer "
+                "refactor and do not claim DDD boundaries were enforced.\n"
+            )
+        return ""
 
     def _render_lore_block(self, project_root: Path, phase: "Phase") -> str:
         """Inline relevant lore entries for phases that opt in.

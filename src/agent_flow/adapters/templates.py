@@ -15,6 +15,7 @@ class PromptContext:
     replica: int
     replicas: int
     task: str
+    architecture: str = "default"
 
 
 def render_stage_prompt(context: PromptContext) -> str:
@@ -25,6 +26,8 @@ def render_stage_prompt(context: PromptContext) -> str:
         "role": context.role,
         "workflow_id": context.workflow_id,
         "run_id": context.run_id,
+        "architecture": context.architecture,
+        "architecture_guidance": _architecture_guidance(context.architecture),
         "replica": str(context.replica),
         "replicas": str(context.replicas),
         "task": context.task,
@@ -52,3 +55,22 @@ def _template_name(adapter: str) -> str:
     if adapter.startswith("claude"):
         return "claude"
     return "generic"
+
+
+def _architecture_guidance(architecture: str) -> str:
+    if architecture == "ddd":
+        return (
+            "DDD mode. Require language-agnostic DDD boundaries for the active "
+            "stack: domain, application/use-case, infrastructure, and "
+            "presentation. The design must include Bounded Context, Aggregates, "
+            "Entities, Value Objects, Application Use Cases, Infrastructure "
+            "Adapters, Presentation Routes, Dependency Rule, and concrete "
+            "implementation structure paths/modules. If DDD is not appropriate, "
+            "label the work `service-layer refactor` instead."
+        )
+    if architecture == "service-layer":
+        return (
+            "Service-layer mode. Do not claim DDD. Label structural work as a "
+            "service-layer refactor."
+        )
+    return "Default mode. Infer architecture depth from task and project context."

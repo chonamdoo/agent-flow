@@ -226,6 +226,121 @@ def test_backward_route_invalidates_target_artifact(tmp_path: Path):
     assert not watch.exists()
 
 
+def test_non_git_pr_phases_are_skipped(tmp_path: Path):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.runner import Phase, Runner
+
+    project = tmp_path / "plain"
+    project.mkdir()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    runner = Runner.__new__(Runner)
+    runner.project_root = project
+    runner.run_dir = run_dir
+    runner.architecture = "default"
+
+    phase = Phase(id="pr-watch", description="")
+    assert runner._write_automatic_artifact(phase) is True
+    assert "status: skipped" in (run_dir / "pr-watch.md").read_text(encoding="utf-8")
+
+
+def test_ddd_architecture_review_blocks_incomplete_design_artifact(tmp_path: Path):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.runner import Phase, Runner
+
+    project = tmp_path / "ios_or_python_project"
+    project.mkdir()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "ddd-design.md").write_text(
+        "# ddd-design\n\n"
+        "Bounded Context: Market data\n"
+        "Service layer: services/*\n",
+        encoding="utf-8",
+    )
+
+    runner = Runner.__new__(Runner)
+    runner.project_root = project
+    runner.run_dir = run_dir
+    runner.architecture = "ddd"
+    runner.phases = [
+        Phase(
+            id="architecture-review",
+            description="",
+            routes={"approve": "commit", "request-changes": "refactor", "blocked": "block"},
+        ),
+        Phase(id="commit", description=""),
+    ]
+
+    phase = runner.phases[0]
+    assert runner._write_automatic_artifact(phase) is True
+    text = (run_dir / "architecture-review.md").read_text(encoding="utf-8")
+    assert "verdict: blocked" in text
+    assert "`aggregate`" in text
+    assert "`implementation structure`" in text
+    assert runner._next_index(0, phase) == (0, True)
+
+
+def test_ddd_architecture_review_rechecks_stale_blocked_artifact(tmp_path: Path):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.runner import Phase, Runner
+
+    project = tmp_path / "project"
+    project.mkdir()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    artifact = run_dir / "architecture-review.md"
+    artifact.write_text("verdict: blocked\n", encoding="utf-8")
+    (run_dir / "ddd-design.md").write_text(
+        "# ddd-design\n\n"
+        "## Bounded Context\n"
+        "## Aggregates\n"
+        "## Entities\n"
+        "## Value Objects\n"
+        "## Application Use Cases\n"
+        "## Infrastructure Adapters\n"
+        "## Presentation Routes\n"
+        "## Dependency Rule\n"
+        "## Implementation Structure\n",
+        encoding="utf-8",
+    )
+
+    runner = Runner.__new__(Runner)
+    runner.project_root = project
+    runner.run_dir = run_dir
+    runner.architecture = "ddd"
+    phase = Phase(id="architecture-review", description="")
+
+    assert runner._artifact_needs_auto_revalidation(phase) is True
+    artifact.unlink()
+    assert runner._write_automatic_artifact(phase) is False
+
+
+def test_ddd_architecture_review_rejects_service_layer_refactor_bypass(tmp_path: Path):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.runner import Phase, Runner
+
+    project = tmp_path / "project"
+    project.mkdir()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "ddd-design.md").write_text(
+        "# ddd-design\n\nservice-layer refactor\n",
+        encoding="utf-8",
+    )
+
+    runner = Runner.__new__(Runner)
+    runner.project_root = project
+    runner.run_dir = run_dir
+    runner.architecture = "ddd"
+    phase = Phase(id="architecture-review", description="")
+
+    assert runner._write_automatic_artifact(phase) is True
+    text = (run_dir / "architecture-review.md").read_text(encoding="utf-8")
+    assert "ddd mode cannot be service-layer refactor" in text
+
+
 def test_abort_yes_flag_skips_prompt(tmp_path: Path):
     """`agent-flow abort --yes` must not block on confirmation."""
     project = tmp_path / "abort_yes"

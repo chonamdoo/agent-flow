@@ -39,8 +39,9 @@ phases:
     description: Break PRD into independently shippable slices.
     prompt: |
       Create a small-slice implementation plan. Each slice must be testable,
-      independently reviewable, and have explicit verification. Output:
-      slice-plan.md.
+      independently reviewable, and have explicit verification. If architecture
+      mode is `ddd`, every slice must declare layer scope using domain,
+      application, infrastructure, and presentation. Output: slice-plan.md.
 
   - id: plan-review
     description: Senior-style plan review gate.
@@ -56,10 +57,13 @@ phases:
   - id: ddd-design
     description: DDD and Clean Architecture design.
     prompt: |
-      Design using data / domain / presentation boundaries. Repository
-      interfaces belong inward; repository implementations belong in data.
-      Capture dependency direction, domain core modules, use cases, DTOs,
-      mappers, and presentation contracts. Output: ddd-design.md.
+      Design using DDD and Clean Architecture boundaries. If architecture mode
+      is `ddd`, the artifact must include Bounded Context, Aggregates,
+      Entities, Value Objects, Application Use Cases, Infrastructure Adapters,
+      Presentation Routes, Dependency Rule, and Implementation Structure with
+      concrete paths/modules for the active stack. If DDD is not appropriate,
+      explicitly label the work as `service-layer refactor` instead of DDD.
+      Output: ddd-design.md.
 
   - id: worktree
     description: Create or record the dedicated branch/worktree.
@@ -115,11 +119,12 @@ phases:
     routes:
       approve: commit
       request-changes: refactor
+      blocked: block
     prompt: |
       Compare code against domain-map.md and ddd-design.md. Check layer
       violations, repository boundary leaks, naming drift, and dependency
       direction. Output architecture-review.md with exactly one verdict line:
-      `verdict: approve` or `verdict: request-changes`.
+      `verdict: approve`, `verdict: request-changes`, or `verdict: blocked`.
 
   - id: commit
     description: Commit verified changes.
@@ -145,6 +150,7 @@ phases:
       pending: block
       closed: block
       error: block
+      skipped: handoff
     prompt: |
       Poll PR status and review threads. Output pr-watch.md with exactly one
       status line: `status: green`, `status: has_comments`,
