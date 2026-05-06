@@ -152,8 +152,9 @@ phases:
     routes:
       default: pr-watch
     prompt: |
-      Address actionable PR review comments, commit, push, and summarize
-      comment IDs and fixes. Output: pr-comment-fix.md.
+      Address actionable PR review comments, commit, push, resolve the
+      corresponding GitHub review threads, and summarize comment/thread IDs,
+      fixes, commits, and resolved thread IDs. Output: pr-comment-fix.md.
 
   - id: pr-ci-fix
     description: Fix failing PR CI.

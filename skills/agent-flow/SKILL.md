@@ -41,5 +41,8 @@ agent-flow abort
   status, debugging, or artifact inspection.
 - After a phase writes its artifact, run `agent-flow continue` from the
   project root.
+- If the workflow pauses on PR comments, fix the actionable comments, push, and
+  resolve the corresponding GitHub review threads before returning to
+  `pr-watch`.
 - If the workflow pauses for design or slice review, summarize the relevant
   artifact and wait for user approval before continuing.
