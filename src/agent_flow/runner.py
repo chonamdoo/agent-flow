@@ -202,9 +202,15 @@ class Runner:
 def _find_kit_root() -> Path:
     """Locate the agent-flow kit root (contains workflows/ and profiles/)."""
     here = Path(__file__).resolve()
+    candidates: list[Path] = []
     for parent in here.parents:
         if (parent / "workflows").is_dir() and (parent / "profiles").is_dir():
-            return parent
+            candidates.append(parent)
+    for candidate in candidates:
+        if (candidate / "pyproject.toml").is_file() or (candidate / "package.json").is_file():
+            return candidate
+    if candidates:
+        return candidates[0]
     raise RuntimeError("Could not locate agent-flow kit root from " + str(here))
 
 

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Project-agnostic AI workflow kit. Single entry, AI-driven phase progression. Works with Claude, Codex, and Gemini.",
   "bin": {
-    "agent-flow": "bin/agent-flow-install.mjs",
+    "agent-flow": "bin/agent-flow-kit.mjs",
     "agent-flow-install": "bin/agent-flow-install.mjs",
     "agent-flow-kit": "bin/agent-flow-kit.mjs"
   },

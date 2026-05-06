@@ -56,6 +56,7 @@ from agent_flow.artifact import find_active_run, mark_inactive
 from agent_flow.runner import Runner, ResumeMode
 from agent_flow.providers.host import list_host_providers
 from agent_flow.providers.subprocess import ProviderCommand, run_provider
+from agent_flow.pr_watch import fetch_pr, watch_pr
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -90,6 +91,13 @@ def main(argv: list[str] | None = None) -> int:
 
     status_parser = subparsers.add_parser("status")
     status_parser.add_argument("--root", default=".")
+
+    pr_watch_parser = subparsers.add_parser("pr-watch")
+    pr_watch_parser.add_argument("number", type=int)
+    pr_watch_parser.add_argument("--repo")
+    pr_watch_parser.add_argument("--once", action="store_true")
+    pr_watch_parser.add_argument("--poll-interval", type=int, default=30)
+    pr_watch_parser.add_argument("--max-polls", type=int, default=20)
 
     detect_parser = subparsers.add_parser("detect-profile")
     detect_parser.add_argument("--root", default=".")
@@ -296,6 +304,23 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         print(status_summary(root))
         return 0
+
+    if args.command == "pr-watch":
+        snapshot = (
+            fetch_pr(args.number, repo=args.repo)
+            if args.once
+            else watch_pr(
+                args.number,
+                repo=args.repo,
+                poll_interval_s=args.poll_interval,
+                max_poll_count=args.max_polls,
+            )
+        )
+        if snapshot is None:
+            print(json.dumps({"number": args.number, "status": "error"}))
+            return 1
+        print(json.dumps(snapshot.to_summary(), ensure_ascii=False, indent=2))
+        return 1 if snapshot.status == "error" else 0
 
     if args.command == "gates":
         profile_id = detect_profile(root) if args.profile == "auto" else args.profile

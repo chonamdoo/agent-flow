@@ -307,6 +307,7 @@ class CliTest(unittest.TestCase):
     def test_node_installer_package_exposes_npx_bin(self) -> None:
         package = json.loads((Path(__file__).resolve().parents[1] / "package.json").read_text(encoding="utf-8"))
         self.assertEqual(package["name"], "agent-flow-kit")
+        self.assertEqual(package["bin"]["agent-flow"], "bin/agent-flow-kit.mjs")
         self.assertEqual(package["bin"]["agent-flow-kit"], "bin/agent-flow-kit.mjs")
         self.assertIn("bin", package["files"])
 
@@ -1336,6 +1337,24 @@ class CliTest(unittest.TestCase):
         self.assertEqual(profile.profile_id, "node")
         self.assertEqual(profile.gates[0].gate_id, "test")
         self.assertEqual(profile.gates[0].command, ("npm", "test"))
+        self.assertEqual(load_profile("android").profile_id, "android")
+
+    def test_runner_prefers_repository_kit_root(self) -> None:
+        from agent_flow.runner import _find_kit_root
+
+        self.assertEqual(_find_kit_root(), Path(__file__).resolve().parents[1])
+
+    def test_pr_watch_cli_prints_snapshot_json_once(self) -> None:
+        from agent_flow.pr_watch import PRSnapshot
+
+        output = io.StringIO()
+        snapshot = PRSnapshot(number=4, title="demo", state="OPEN", status="green")
+        with mock.patch("agent_flow.cli.fetch_pr", return_value=snapshot):
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["pr-watch", "4", "--once"]), 0)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["number"], 4)
+        self.assertEqual(payload["status"], "green")
 
     def test_run_gate_reports_success(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

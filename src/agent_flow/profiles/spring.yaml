@@ -1,0 +1,8 @@
+id: spring
+gates:
+  - id: build
+    command: ["./gradlew", "build", "-x", "test"]
+  - id: test
+    command: ["./gradlew", "test"]
+  - id: lint
+    command: ["./gradlew", "check"]

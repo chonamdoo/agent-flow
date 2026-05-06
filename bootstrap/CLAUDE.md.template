@@ -40,7 +40,7 @@ run artifact는 `.agent-flow/runs/<run-id>/`에 저장됩니다. 컨텍스트가
 `.agent-flow/memory/lore/`에 작성된 lore는 **자동으로 인덱싱·검색·인용**됩니다.
 
 - `/agent-flow <task>` 실행 시 task 키워드로 lore 자동 검색 → design phase prompt에 "Relevant lore" 블록으로 인라인 (Constraint/Directive 발췌 포함). 부합하지 않는 항목은 무시하고 인용 조작 금지.
-- `agent-flow lore list` / `search "<query>"` 로 인덱스 직접 조회.
+- `agent-flow lore list` / `agent-flow lore search "<query>"` 로 인덱스 직접 조회.
 - `agent-flow lore compact [--apply]` — 60일 1회 권장. 4-tier 압축 (dedup → stale-drop → weight decay → cluster 후보). dry-run이 기본.
 - `agent-flow lore init <slug>` — 새 lore 파일 스캐폴드.
 

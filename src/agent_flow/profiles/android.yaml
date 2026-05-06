@@ -1,0 +1,8 @@
+id: android
+gates:
+  - id: build
+    command: ["./gradlew", "assembleDevDebug"]
+  - id: test
+    command: ["./gradlew", "testDevDebugUnitTest"]
+  - id: lint
+    command: ["./gradlew", "lintDevDebug"]
