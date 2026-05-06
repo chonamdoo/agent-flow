@@ -307,6 +307,7 @@ class CliTest(unittest.TestCase):
     def test_node_installer_package_exposes_npx_bin(self) -> None:
         package = json.loads((Path(__file__).resolve().parents[1] / "package.json").read_text(encoding="utf-8"))
         self.assertEqual(package["name"], "agent-flow-kit")
+        self.assertEqual(package["bin"]["agent-flow"], "bin/agent-flow-kit.mjs")
         self.assertEqual(package["bin"]["agent-flow-kit"], "bin/agent-flow-kit.mjs")
         self.assertIn("bin", package["files"])
 
@@ -455,6 +456,7 @@ class CliTest(unittest.TestCase):
                 "commit",
                 "push-pr",
                 "pr-watch",
+                "merge-approval",
                 "merge",
                 "handoff",
             ]
@@ -466,7 +468,7 @@ class CliTest(unittest.TestCase):
                 artifact.parent.mkdir(parents=True, exist_ok=True)
                 if phase == "pr-watch":
                     content = "status: green\n"
-                elif phase in {"plan-review", "architecture-review"}:
+                elif phase in {"plan-review", "architecture-review", "merge-approval"}:
                     content = "verdict: approve\n"
                 else:
                     content = f"{phase}\n"
@@ -1336,6 +1338,24 @@ class CliTest(unittest.TestCase):
         self.assertEqual(profile.profile_id, "node")
         self.assertEqual(profile.gates[0].gate_id, "test")
         self.assertEqual(profile.gates[0].command, ("npm", "test"))
+        self.assertEqual(load_profile("android").profile_id, "android")
+
+    def test_runner_prefers_repository_kit_root(self) -> None:
+        from agent_flow.runner import _find_kit_root
+
+        self.assertEqual(_find_kit_root(), Path(__file__).resolve().parents[1])
+
+    def test_pr_watch_cli_prints_snapshot_json_once(self) -> None:
+        from agent_flow.pr_watch import PRSnapshot
+
+        output = io.StringIO()
+        snapshot = PRSnapshot(number=4, title="demo", state="OPEN", status="green")
+        with mock.patch("agent_flow.cli.fetch_pr", return_value=snapshot):
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["pr-watch", "4", "--once"]), 0)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["number"], 4)
+        self.assertEqual(payload["status"], "green")
 
     def test_run_gate_reports_success(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -3929,6 +3949,7 @@ def _node_phase_artifact(phase: str) -> Path:
         "pr-watch": Path("artifacts/pr-watch.md"),
         "pr-comment-fix": Path("artifacts/pr-comment-fix.md"),
         "pr-ci-fix": Path("artifacts/pr-ci-fix.md"),
+        "merge-approval": Path("artifacts/merge-approval.md"),
         "merge": Path("artifacts/merge.md"),
         "handoff": Path("artifacts/handoff.md"),
     }

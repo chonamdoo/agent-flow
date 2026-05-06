@@ -1,0 +1,48 @@
+<!-- agent-flow:start -->
+## Agent Flow
+
+이 프로젝트는 agent-flow 워크플로우 킷이 설치되어 있습니다.
+
+모든 작업은 `/agent-flow`로 시작합니다:
+
+```text
+/agent-flow <task>
+```
+
+`/agent-flow <task>`를 보면 프로젝트 루트에서 `agent-flow run "<task>"`를 실행하세요.
+`/agent-flow`만 입력되면 프로젝트 루트에서 `agent-flow status`로 active run을 확인하세요.
+active run이 있으면 `agent-flow continue`로 이어가고, 없으면 `/agent-flow <task>` 형식으로 작업을 요청하세요.
+
+AI가 task를 보고 phase 깊이를 자동 조절합니다. 사소한 작업은 인터뷰 1Q로 끝나고 큰 기능은 깊게 진행됩니다. 중간에 사용자 검토가 필요한 시점이 오면 멈추고 요청합니다.
+
+진행 중인 run은 자동 감지됩니다:
+
+```text
+/agent-flow          # 이어서 진행
+/agent-flow status   # 진행 상태 확인
+/agent-flow abort    # 진행 중 run 취소 (artifact는 보존)
+```
+
+내부 명령 매핑: `/agent-flow status` → `agent-flow status`, `/agent-flow abort` → `agent-flow abort`.
+`/agent-flow`는 shell path가 아니라 agent-flow skill trigger로 취급하세요.
+
+### 자연어로 흐름 조정
+- "이거 더 큰 일이야, 더 깊게 가자" → AI가 phase 깊이 상향
+- "spec 다시 짜자" → AI가 spec phase로 되돌아가 재작성
+- "이 PR 댓글 정중히 거절해" → AI가 comment-decline 분기
+
+### Artifact
+
+run artifact는 `.agent-flow/runs/<run-id>/`에 저장됩니다. 컨텍스트가 끊겨도 artifact 기반으로 정확히 재개됩니다.
+
+### Memory / Lore
+
+`.agent-flow/memory/lore/`에 작성된 lore는 **자동으로 인덱싱·검색·인용**됩니다.
+
+- `/agent-flow <task>` 실행 시 task 키워드로 lore 자동 검색 → design phase prompt에 "Relevant lore" 블록으로 인라인 (Constraint/Directive 발췌 포함). 부합하지 않는 항목은 무시하고 인용 조작 금지.
+- `agent-flow lore list` / `agent-flow lore search "<query>"` 로 인덱스 직접 조회.
+- `agent-flow lore compact [--apply]` — 60일 1회 권장. 4-tier 압축 (dedup → stale-drop → weight decay → cluster 후보). dry-run이 기본.
+- `agent-flow lore init <slug>` — 새 lore 파일 스캐폴드.
+
+lore 스키마: 프론트매터(title/type/date/scope/weight/tags) + 본문 섹션 `## Constraint`, `## Rejected`, `## Directive` (3필드 필수).
+<!-- agent-flow:end -->

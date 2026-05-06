@@ -1,7 +1,44 @@
 id: react-native
+branching:
+  strategy: trunk
+  base: main
+  integration: main
+  worktree: optional
 gates:
+  - id: lint
+    command: "npm run lint"
+    required: false
+    phase: pre-commit
   - id: test
-    command: ["npm", "test"]
-  - id: doctor
-    command: ["npx", "react-native", "doctor"]
-
+    command: "npm test"
+    required: true
+    phase: pre-push
+  - id: ios-build
+    command: "npx react-native run-ios --no-packager"
+    required: false
+    phase: pre-push
+  - id: android-build
+    command: "cd android && ./gradlew assembleDebug"
+    required: false
+    phase: pre-push
+review_angles:
+  - id: architecture-design
+    prompt: templates/_shared/review/architecture-design.md
+  - id: render-stability
+    prompt: templates/_shared/review/render-stability.md
+  - id: native-bridge
+    prompt: templates/_shared/review/native-bridge.md
+artifacts:
+  prd: optional
+  adr: optional
+  slice_plan: required
+vocabulary:
+  prd: spec
+  adr: decision-log
+  lore: notes
+commit_convention:
+  style: conventional
+  co_author: skip
+pr:
+  target_branch: main
+  merge_strategy: squash

@@ -52,8 +52,11 @@ from agent_flow.core.worktrees import (
 )
 from agent_flow.core.state import RunRequest, RunState, start_run, status_summary
 from agent_flow.core.workflow import load_workflow
+from agent_flow.artifact import find_active_run, mark_inactive
+from agent_flow.runner import Runner, ResumeMode
 from agent_flow.providers.host import list_host_providers
 from agent_flow.providers.subprocess import ProviderCommand, run_provider
+from agent_flow.pr_watch import fetch_pr, watch_pr
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -62,6 +65,18 @@ def main(argv: list[str] | None = None) -> int:
 
     init_parser = subparsers.add_parser("init")
     init_parser.add_argument("--root", default=".")
+
+    run_parser = subparsers.add_parser("run")
+    run_parser.add_argument("task")
+    run_parser.add_argument("--root", default=".")
+    run_parser.add_argument("--workflow", default="default")
+
+    continue_parser = subparsers.add_parser("continue")
+    continue_parser.add_argument("--root", default=".")
+
+    abort_parser = subparsers.add_parser("abort")
+    abort_parser.add_argument("--root", default=".")
+    abort_parser.add_argument("--yes", "-y", action="store_true")
 
     start_parser = subparsers.add_parser("start")
     start_parser.add_argument("workflow")
@@ -76,6 +91,13 @@ def main(argv: list[str] | None = None) -> int:
 
     status_parser = subparsers.add_parser("status")
     status_parser.add_argument("--root", default=".")
+
+    pr_watch_parser = subparsers.add_parser("pr-watch")
+    pr_watch_parser.add_argument("number", type=int)
+    pr_watch_parser.add_argument("--repo")
+    pr_watch_parser.add_argument("--once", action="store_true")
+    pr_watch_parser.add_argument("--poll-interval", type=int, default=30)
+    pr_watch_parser.add_argument("--max-polls", type=int, default=20)
 
     detect_parser = subparsers.add_parser("detect-profile")
     detect_parser.add_argument("--root", default=".")
@@ -236,6 +258,31 @@ def main(argv: list[str] | None = None) -> int:
         print(f"initialized {root / '.agent-flow'}")
         return 0
 
+    if args.command == "run":
+        active = find_active_run(root)
+        if active is not None:
+            print(f"already active: {active.run_id} (task: {active.task!r})")
+            return 2
+        Runner(root, workflow=args.workflow).run(mode=ResumeMode.START, task=args.task)
+        return 0
+
+    if args.command == "continue":
+        active = find_active_run(root)
+        if active is None:
+            print('진행 중인 run 없음. `agent-flow run "<task>"`로 시작하세요.')
+            return 0
+        Runner(root, run_dir=active.path).run(mode=ResumeMode.RESUME)
+        return 0
+
+    if args.command == "abort":
+        active = find_active_run(root)
+        if active is None:
+            print("진행 중인 run 없음 — abort할 대상이 없습니다.")
+            return 0
+        mark_inactive(active.path)
+        print(f"aborted: {active.run_id} (artifacts preserved at {active.path})")
+        return 0
+
     if args.command == "detect-profile":
         print(detect_profile(root))
         return 0
@@ -248,8 +295,32 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
     if args.command == "status":
+        active = find_active_run(root)
+        if active is not None:
+            active.print_status()
+            return 0
+        if not (root / ".agent-flow" / "runs").exists():
+            print("진행 중인 run 없음.")
+            return 0
         print(status_summary(root))
         return 0
+
+    if args.command == "pr-watch":
+        snapshot = (
+            fetch_pr(args.number, repo=args.repo)
+            if args.once
+            else watch_pr(
+                args.number,
+                repo=args.repo,
+                poll_interval_s=args.poll_interval,
+                max_poll_count=args.max_polls,
+            )
+        )
+        if snapshot is None:
+            print(json.dumps({"number": args.number, "status": "error"}))
+            return 1
+        print(json.dumps(snapshot.to_summary(), ensure_ascii=False, indent=2))
+        return 1 if snapshot.status == "error" else 0
 
     if args.command == "gates":
         profile_id = detect_profile(root) if args.profile == "auto" else args.profile

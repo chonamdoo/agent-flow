@@ -1,0 +1,190 @@
+id: full-feature
+description: |
+  Strict full-feature workflow. This is the canonical agent-flow path:
+  domain interview, domain map, product validation, PRD, reviewed slice plan,
+  DDD/Clean design, TDD implementation, review loops, PR watch, and approved
+  merge.
+
+phases:
+  - id: domain-grill
+    description: Interview one question at a time until the domain problem is clear.
+    cite_lore: true
+    prompt: |
+      Run a grill-me style interview. Ask one question at a time unless the
+      codebase already answers it. Capture decisions, open questions, terms,
+      assumptions, and checked sources. Output: domain-grill.md.
+
+  - id: domain-map
+    description: Build or update the domain map from the interview.
+    prompt: |
+      Produce a domain map: glossary, bounded contexts, ubiquitous language,
+      entities, value objects, aggregates, policies, events, and non-goals.
+      Output: domain-map.md.
+
+  - id: product-brief
+    description: Validate whether this is worth building.
+    prompt: |
+      Apply YC office-hours style pressure: target user, painful problem,
+      current workaround, why now, narrowest wedge, value, cut list, and
+      build/defer/cut decision. Output: product-brief.md.
+
+  - id: prd
+    description: Write the product requirements document.
+    prompt: |
+      Write the PRD from domain-map.md and product-brief.md. Include goal,
+      scope, non-goals, user stories, acceptance criteria, edge cases,
+      dependencies, and risks. Output: prd.md.
+
+  - id: slice-plan
+    description: Break PRD into independently shippable slices.
+    prompt: |
+      Create a small-slice implementation plan. Each slice must be testable,
+      independently reviewable, and have explicit verification. Output:
+      slice-plan.md.
+
+  - id: plan-review
+    description: Senior-style plan review gate.
+    routes:
+      approve: ddd-design
+      request-changes: slice-plan
+    prompt: |
+      Review slice-plan.md. Check missing steps, wrong order, oversized work,
+      vague validation, and hidden dependencies. Output plan-review.md with
+      exactly one verdict line: `verdict: approve` or
+      `verdict: request-changes`.
+
+  - id: ddd-design
+    description: DDD and Clean Architecture design.
+    prompt: |
+      Design using data / domain / presentation boundaries. Repository
+      interfaces belong inward; repository implementations belong in data.
+      Capture dependency direction, domain core modules, use cases, DTOs,
+      mappers, and presentation contracts. Output: ddd-design.md.
+
+  - id: worktree
+    description: Create or record the dedicated branch/worktree.
+    prompt: |
+      Create or record the branch/worktree for this slice. Do not work on
+      main/master/develop. Output: worktree.md.
+
+  - id: run-start
+    description: Record run setup.
+    prompt: |
+      Record selected profile, branch, provider, task, and run constraints.
+      Output: run-start.md.
+
+  - id: red
+    description: TDD red phase.
+    prompt: |
+      Write failing tests first. Save the failure summary and command output.
+      Output: red.md.
+
+  - id: green
+    description: TDD green phase.
+    prompt: |
+      Implement the minimum code to pass red tests. Follow the active profile
+      or project instructions for code comment language. Output: green.md.
+
+  - id: refactor
+    description: TDD refactor phase.
+    prompt: |
+      Refactor only after green. Keep behavior stable and summarize structural
+      changes. Output: refactor.md.
+
+  - id: gates
+    description: Run project verification gates.
+    prompt: |
+      Run build, typecheck, lint, and tests according to the active profile.
+      Output: gates.md.
+
+  - id: multi-review
+    description: Run implementation review.
+    multi_review: true
+    prompt: |
+      Review bugs, regressions, missing tests, security boundaries, and scope
+      drift. Output: multi-review.md with approve/request-changes findings.
+
+  - id: fix-loop
+    description: Apply review and gate fixes.
+    prompt: |
+      Apply requested review/gate fixes or record that no fixes were required.
+      Output: fix-loop.md.
+
+  - id: architecture-review
+    description: Review implementation against DDD/Clean design.
+    routes:
+      approve: commit
+      request-changes: refactor
+    prompt: |
+      Compare code against domain-map.md and ddd-design.md. Check layer
+      violations, repository boundary leaks, naming drift, and dependency
+      direction. Output architecture-review.md with exactly one verdict line:
+      `verdict: approve` or `verdict: request-changes`.
+
+  - id: commit
+    description: Commit verified changes.
+    prompt: |
+      Commit the verified slice and record commit hashes/messages. Output:
+      commit.md.
+
+  - id: push-pr
+    description: Push branch and open PR.
+    prompt: |
+      Push branch, open PR, and record PR URL, branch, title, and summary.
+      Output: push-pr.md.
+
+  - id: pr-watch
+    description: Watch PR checks and comments.
+    routes:
+      green: merge-approval
+      merged: handoff
+      comments: pr-comment-fix
+      has_comments: pr-comment-fix
+      ci-failed: pr-ci-fix
+      ci_failed: pr-ci-fix
+      pending: block
+      closed: block
+      error: block
+    prompt: |
+      Poll PR status and review threads. Output pr-watch.md with exactly one
+      status line: `status: green`, `status: has_comments`,
+      `status: ci_failed`, `status: pending`, `status: merged`,
+      `status: closed`, or `status: error`.
+
+  - id: pr-comment-fix
+    description: Fix actionable PR comments.
+    routes:
+      default: pr-watch
+    prompt: |
+      Address actionable PR review comments, commit, push, resolve the
+      corresponding GitHub review threads, and summarize comment/thread IDs,
+      fixes, commits, and resolved thread IDs. Output: pr-comment-fix.md.
+
+  - id: pr-ci-fix
+    description: Fix failing PR CI.
+    routes:
+      default: pr-watch
+    prompt: |
+      Diagnose failing checks, reproduce locally, fix, commit, push, and
+      summarize commands and check URLs. Output: pr-ci-fix.md.
+
+  - id: merge-approval
+    description: Require explicit user approval before merge.
+    routes:
+      approve: merge
+      default: block
+    prompt: |
+      Ask the user for explicit merge approval. Do not merge yet. Output
+      merge-approval.md with exactly `verdict: approve` only after approval.
+
+  - id: merge
+    description: Merge after explicit user approval.
+    prompt: |
+      Merge only after explicit user approval. Record merge strategy, target
+      branch, and merge commit. Output: merge.md.
+
+  - id: handoff
+    description: Final handoff and cleanup.
+    prompt: |
+      Summarize shipped work, verification, PR/merge result, follow-up items,
+      and cleanup state. Output: handoff.md.

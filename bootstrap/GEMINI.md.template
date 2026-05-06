@@ -1,0 +1,43 @@
+<!-- agent-flow:start -->
+## Agent Flow
+
+This project has the agent-flow workflow kit installed.
+
+Use `/agent-flow` for every task:
+
+```text
+/agent-flow <task>
+```
+
+When the user types `/agent-flow <task>`, run `agent-flow run "<task>"` from
+the project root. When the user types `/agent-flow` with no task, run
+`agent-flow status` from the project root; continue an active run with
+`agent-flow continue` if present, otherwise ask for a task in the
+`/agent-flow <task>` format.
+
+The AI infers tier and phase depth. Small tasks collapse phases automatically; feature work expands them. The chain pauses once for spec/slice-plan review.
+
+```text
+/agent-flow          # resume the active run
+/agent-flow status   # progress
+/agent-flow abort    # cancel the active run (artifacts preserved)
+```
+
+Command mapping: `/agent-flow status` → `agent-flow status`, `/agent-flow abort` → `agent-flow abort`.
+Treat `/agent-flow` as a skill trigger, not as a shell path.
+
+### Natural-language steering
+- "deepen this, treat as feature" → escalate
+- "redo the spec" → re-enter spec
+- "decline this PR comment politely" → comment-decline branch
+
+### Artifacts
+
+Run artifacts: `.agent-flow/runs/<run-id>/`. Resumable across sessions because the artifact files are the state machine.
+
+### Memory / Lore
+
+Lore in `.agent-flow/memory/lore/` is auto-indexed and cited at run start. The `design` phase prompt includes a "Relevant lore" block with Constraint/Directive excerpts of matched entries. Cite where they apply; do not fabricate.
+
+CLI: `agent-flow lore list / search "<query>" / compact [--apply] / init <slug>`. Schema: frontmatter + `## Constraint` / `## Rejected` / `## Directive`.
+<!-- agent-flow:end -->

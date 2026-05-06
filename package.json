@@ -1,16 +1,21 @@
 {
   "name": "agent-flow-kit",
   "version": "0.1.0",
-  "description": "Project-local installer for the Agent Flow workflow kit.",
+  "description": "Project-agnostic AI workflow kit. Single entry, AI-driven phase progression. Works with Claude, Codex, and Gemini.",
   "bin": {
+    "agent-flow": "bin/agent-flow-kit.mjs",
+    "agent-flow-install": "bin/agent-flow-install.mjs",
     "agent-flow-kit": "bin/agent-flow-kit.mjs"
   },
   "files": [
     "bin",
     "workflows",
     "profiles",
-    "roles",
     "templates",
+    "bootstrap",
+    "skills",
+    "src",
+    "pyproject.toml",
     "README.md"
   ],
   "license": "MIT",

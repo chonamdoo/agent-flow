@@ -1,0 +1,48 @@
+<!-- agent-flow:start -->
+## Agent Flow
+
+This project has the agent-flow workflow kit installed.
+
+Every task starts with `/agent-flow`:
+
+```text
+/agent-flow <task>
+```
+
+When the user types `/agent-flow <task>`, run `agent-flow run "<task>"` from
+the project root. When the user types `/agent-flow` with no task, run
+`agent-flow status` from the project root; continue an active run with
+`agent-flow continue` if present, otherwise ask for a task in the
+`/agent-flow <task>` format.
+
+The AI infers tier and phase depth from the task. Trivial fixes collapse to a one-question interview and a single slice; feature work expands phases. The chain pauses for user review at the spec/slice-plan handoff and resumes with:
+
+```text
+/agent-flow          # resume the active run
+/agent-flow status   # show progress
+/agent-flow abort    # cancel the active run (artifacts are preserved)
+```
+
+Command mapping: `/agent-flow status` → `agent-flow status`, `/agent-flow abort` → `agent-flow abort`.
+Treat `/agent-flow` as a skill trigger, not as a shell path.
+
+### Steering with natural language
+- "treat this as a feature, deepen the phases" → escalate depth
+- "redo the spec" → re-enter spec phase
+- "decline this PR comment politely" → comment-decline branch
+
+### Artifacts
+
+Run artifacts live at `.agent-flow/runs/<run-id>/`. The chain advances when the previous artifact exists, so context loss does not lose progress.
+
+### Memory / Lore
+
+Lore in `.agent-flow/memory/lore/` is **auto-indexed, searched, and cited**.
+
+- `/agent-flow <task>` searches the lore index using task keywords; matches are inlined into the `design` phase prompt as a "Relevant lore" block (with Constraint/Directive excerpts). Cite where they actually apply; do not fabricate citations.
+- `agent-flow lore list` / `search "<query>"` — direct index access.
+- `agent-flow lore compact [--apply]` — recommended every ~60 days. 4-tier compaction (dedup → stale-drop → weight decay → cluster reports). Dry-run by default.
+- `agent-flow lore init <slug>` — scaffold a new lore file.
+
+Lore schema: frontmatter (title/type/date/scope/weight/tags) + body sections `## Constraint`, `## Rejected`, `## Directive` (the three required fields).
+<!-- agent-flow:end -->
