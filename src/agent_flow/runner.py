@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -44,6 +45,29 @@ from agent_flow.artifact import (
 from agent_flow.cli_detect import detect_available_clis
 from agent_flow.memory.index import LoreIndex
 from agent_flow.memory.lore import Lore
+
+
+ARCHITECTURE_MODES = {"default", "ddd", "service-layer"}
+GIT_DEPENDENT_PHASES = {
+    "commit",
+    "push-pr",
+    "pr-watch",
+    "pr-comment-fix",
+    "pr-ci-fix",
+    "merge",
+    "merge-approval",
+}
+DDD_REQUIRED_DESIGN_SECTIONS = (
+    ("bounded context", ("bounded context", "bounded contexts", "context map", "컨텍스트")),
+    ("aggregate", ("aggregate", "aggregates", "aggregate root", "애그리거트")),
+    ("entity", ("entity", "entities", "엔티티")),
+    ("value object", ("value object", "value objects", "vo", "값 객체")),
+    ("application use case", ("application use case", "application use cases", "use case", "use cases", "interactor", "interactors", "유스케이스")),
+    ("infrastructure adapter", ("infrastructure adapter", "infrastructure adapters", "ports and adapters", "repository adapter", "adapter", "어댑터")),
+    ("presentation route", ("presentation route", "presentation routes", "presentation", "route", "routes", "view", "views", "화면", "라우트")),
+    ("dependency rule", ("dependency rule", "dependency direction", "dependency flow", "의존성")),
+    ("implementation structure", ("implementation structure", "file structure", "module structure", "package structure", "folder structure", "구현 구조", "모듈 구조", "패키지 구조")),
+)
 
 
 class ResumeMode(Enum):
@@ -69,20 +93,30 @@ class Runner:
         project_root: Path,
         workflow: str = "default",
         run_dir: Path | None = None,
+        architecture: str = "default",
     ) -> None:
+        if architecture not in ARCHITECTURE_MODES:
+            raise ValueError(f"invalid architecture mode: {architecture!r}")
         self.project_root = project_root
         self.workflow_name = workflow
         self.run_dir = run_dir
+        self.architecture = architecture
         self.kit_root = _find_kit_root()
         if run_dir is not None:
             meta = read_meta(run_dir)
             self.workflow_name = meta.get("workflow", workflow)
+            self.architecture = meta.get("architecture", architecture)
         self.phases = _load_workflow(self.kit_root, self.workflow_name)
         self.profile_id, self.profile = _load_profile(self.kit_root, project_root)
 
     def run(self, mode: ResumeMode, task: str = "") -> None:
         if mode == ResumeMode.START:
-            self.run_dir = create_run(self.project_root, self.workflow_name, task)
+            self.run_dir = create_run(
+                self.project_root,
+                self.workflow_name,
+                task,
+                architecture=self.architecture,
+            )
             print(f"▶ run started : {self.run_dir.name}")
             print(f"▶ task        : {task}")
         else:
@@ -97,6 +131,7 @@ class Runner:
         print(f"▶ host adapter: {adapter.name}")
         print(f"▶ available  : {cli_summary}")
         print(f"▶ profile    : {self.profile_id}")
+        print(f"▶ architecture: {self.architecture}")
         print(f"▶ workflow   : {self.workflow_name} ({len(self.phases)} phases)\n")
 
         # Inject profile snapshot into adapter so render_envelope can include
@@ -104,6 +139,7 @@ class Runner:
         # is plain instance-attribute assignment.
         adapter._profile_snapshot = self.profile
         adapter._profile_id = self.profile_id
+        adapter._architecture = self.architecture
 
         # Auto-cite lore: search the local lore index for entries relevant
         # to the task description and inject them into the prompt envelope.
@@ -119,6 +155,28 @@ class Runner:
         while phase_index < len(self.phases):
             phase = self.phases[phase_index]
             if has_artifact(self.run_dir, phase.id):
+                if self._artifact_needs_auto_revalidation(phase):
+                    (self.run_dir / f"{phase.id}.md").unlink()
+                else:
+                    print(f"  [skip] {phase.id}")
+                    phase_index, blocked = self._next_index(phase_index, phase)
+                    meta = read_meta(self.run_dir)
+                    meta["phase_index"] = phase_index
+                    meta["current_phase"] = (
+                        self.phases[phase_index].id
+                        if phase_index < len(self.phases)
+                        else None
+                    )
+                    write_meta(self.run_dir, meta)
+                    if blocked:
+                        print(
+                            f"\n═══ phase '{phase.id}' is blocked. "
+                            f"Update the artifact or rerun the watcher, then "
+                            f"`agent-flow continue`. ═══"
+                        )
+                        return
+                    continue
+            if self._write_automatic_artifact(phase):
                 print(f"  [skip] {phase.id}")
                 phase_index, blocked = self._next_index(phase_index, phase)
                 meta = read_meta(self.run_dir)
@@ -199,6 +257,48 @@ class Runner:
             raise ValueError(f"phase {phase.id}: route target not found: {target}")
         return current_index + 1, False
 
+    def _write_automatic_artifact(self, phase: Phase) -> bool:
+        assert self.run_dir is not None
+        if phase.id in GIT_DEPENDENT_PHASES and not _is_git_repo(self.project_root):
+            artifact = self.run_dir / f"{phase.id}.md"
+            artifact.write_text(
+                f"# {phase.id}\n\n"
+                "status: skipped\n"
+                "reason: project root is not a git repository\n",
+                encoding="utf-8",
+            )
+            print(f"  [skip] {phase.id} status=skipped (not a git repository)")
+            return True
+        if self.architecture == "ddd" and phase.id == "architecture-review":
+            missing = _missing_ddd_design_terms(self.run_dir)
+            if missing:
+                artifact = self.run_dir / f"{phase.id}.md"
+                artifact.write_text(
+                    "# architecture-review\n\n"
+                    "verdict: blocked\n"
+                    "status: failed\n\n"
+                    "The DDD design artifact is missing required language-agnostic sections:\n"
+                    + "".join(f"- `{term}`\n" for term in missing),
+                    encoding="utf-8",
+                )
+                print(
+                    "  [fail] architecture-review missing DDD design terms: "
+                    + ", ".join(missing)
+                )
+                return True
+        return False
+
+    def _artifact_needs_auto_revalidation(self, phase: Phase) -> bool:
+        if self.architecture != "ddd" or phase.id != "architecture-review":
+            return False
+        assert self.run_dir is not None
+        artifact = self.run_dir / f"{phase.id}.md"
+        text = artifact.read_text(encoding="utf-8") if artifact.exists() else ""
+        if _route_key(text) != "blocked":
+            return False
+        print(f"  [recheck] {phase.id} status=blocked")
+        return True
+
 
 def _find_kit_root() -> Path:
     """Locate the agent-flow kit root (contains workflows/ and profiles/)."""
@@ -266,8 +366,10 @@ def _route_key(text: str) -> str:
             return canonical
     checks = (
         "request-changes",
+        "blocked",
         "ci-failed",
         "comments",
+        "skipped",
         "pending",
         "green",
         "approve",
@@ -279,6 +381,66 @@ def _route_key(text: str) -> str:
         if f"verdict: {key}" in lowered or f"status: {key}" in lowered:
             return key
     return "default"
+
+
+def _is_git_repo(project_root: Path) -> bool:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and result.stdout.strip() == "true"
+
+
+def _missing_ddd_design_terms(run_dir: Path) -> list[str]:
+    candidates = [run_dir / "ddd-design.md", run_dir / "design.md"]
+    text = ""
+    for candidate in candidates:
+        if candidate.exists():
+            text = candidate.read_text(encoding="utf-8")
+            break
+    if not text:
+        return ["ddd-design.md or design.md"]
+
+    lowered = text.lower()
+    if "service-layer refactor" in lowered:
+        return ["ddd mode cannot be service-layer refactor"]
+
+    section_titles = _design_section_titles(text)
+    return [
+        label
+        for label, aliases in DDD_REQUIRED_DESIGN_SECTIONS
+        if not any(_section_title_matches(section_titles, alias) for alias in aliases)
+    ]
+
+
+def _design_section_titles(text: str) -> list[str]:
+    titles: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        heading = re.match(r"^#{1,6}\s+(.+)$", stripped)
+        if heading:
+            titles.append(_normalize_design_heading(heading.group(1)))
+            continue
+        label = re.match(r"^(?:[-*]\s*)?(?:\d+[.)]\s*)?([^:]{1,80}):", stripped)
+        if label:
+            titles.append(_normalize_design_heading(label.group(1)))
+    return titles
+
+
+def _normalize_design_heading(value: str) -> str:
+    lowered = value.lower()
+    return re.sub(r"\s+", " ", re.sub(r"[`*_#]+", " ", lowered)).strip()
+
+
+def _section_title_matches(section_titles: list[str], alias: str) -> bool:
+    normalized_alias = _normalize_design_heading(alias)
+    return any(normalized_alias in title for title in section_titles)
 
 
 def _load_profile(kit_root: Path, project_root: Path) -> tuple[str, dict[str, Any]]:

@@ -16,6 +16,7 @@ class RunRequest:
     task: str
     adapter: str
     profile: str
+    architecture: str = "default"
     run_id: str | None = None
     worktree: dict[str, str] | None = None
 
@@ -27,6 +28,7 @@ class RunState:
     task: str
     adapter: str
     profile: str
+    architecture: str
     status: str
     created_at: str
     run_dir: Path
@@ -44,6 +46,7 @@ def start_run(*, root: Path, request: RunRequest) -> RunState:
         task=request.task,
         adapter=request.adapter,
         profile=request.profile,
+        architecture=request.architecture,
         status="running",
         created_at=_now(),
         run_dir=run_dir,

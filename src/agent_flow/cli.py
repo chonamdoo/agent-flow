@@ -70,6 +70,11 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("task")
     run_parser.add_argument("--root", default=".")
     run_parser.add_argument("--workflow", default="default")
+    run_parser.add_argument(
+        "--architecture",
+        choices=("default", "ddd", "service-layer"),
+        default="default",
+    )
 
     continue_parser = subparsers.add_parser("continue")
     continue_parser.add_argument("--root", default=".")
@@ -85,6 +90,11 @@ def main(argv: list[str] | None = None) -> int:
     start_parser.add_argument("--run-id")
     start_parser.add_argument("--adapter", default="auto")
     start_parser.add_argument("--profile", default="auto")
+    start_parser.add_argument(
+        "--architecture",
+        choices=("default", "ddd", "service-layer"),
+        default="default",
+    )
     start_parser.add_argument("--worktree")
     start_parser.add_argument("--worktree-branch")
     start_parser.add_argument("--allow-dirty", action="store_true")
@@ -263,7 +273,10 @@ def main(argv: list[str] | None = None) -> int:
         if active is not None:
             print(f"already active: {active.run_id} (task: {active.task!r})")
             return 2
-        Runner(root, workflow=args.workflow).run(mode=ResumeMode.START, task=args.task)
+        Runner(root, workflow=args.workflow, architecture=args.architecture).run(
+            mode=ResumeMode.START,
+            task=args.task,
+        )
         return 0
 
     if args.command == "continue":
@@ -691,6 +704,7 @@ def main(argv: list[str] | None = None) -> int:
                     task=args.task,
                     adapter=adapter,
                     profile=profile,
+                    architecture=args.architecture,
                     run_id=args.run_id,
                     worktree=worktree,
                 ),
@@ -724,6 +738,7 @@ def _write_stage_prompts(*, root: Path, state: RunState, workflow) -> None:
                         role=stage.role,
                         workflow_id=state.workflow_id,
                         run_id=state.run_id,
+                        architecture=state.architecture,
                         replica=replica,
                         replicas=count,
                         task=state.task,
