@@ -35,6 +35,12 @@ Treat `/agent-flow` as a skill trigger, not as a shell path.
 
 Run artifacts live at `.agent-flow/runs/<run-id>/`. The chain advances when the previous artifact exists, so context loss does not lose progress.
 
+### Worktrees
+
+Create git worktrees inside the project root at `.agent-flow/worktrees/<name>/`.
+Do not create sibling folders next to the project unless the user explicitly
+provides an external path.
+
 ### Memory / Lore
 
 Lore in `.agent-flow/memory/lore/` is **auto-indexed, searched, and cited**.
