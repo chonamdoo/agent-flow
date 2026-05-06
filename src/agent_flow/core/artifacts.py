@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_flow.core.gates import GateResult
+from agent_flow.core.report import write_run_report
 
 
 def init_project(root: Path) -> None:
@@ -33,6 +34,7 @@ def write_gate_results(*, run_dir: Path, results: list[GateResult]) -> Path:
         f"{json.dumps([asdict(result) for result in results], indent=2, sort_keys=True)}\n",
         encoding="utf-8",
     )
+    write_run_report(run_dir)
     return path
 
 
@@ -42,6 +44,8 @@ def write_stage_result(
     stage_id: str,
     content: str,
     status: str = "completed",
+    evidence_type: str = "observed",
+    confidence: str = "unknown",
 ) -> Path:
     path = run_dir / "artifacts" / f"{stage_id}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -51,6 +55,8 @@ def write_stage_result(
                 f"# Stage Result: {stage_id}",
                 "",
                 f"- Status: {status}",
+                f"- Evidence Type: {evidence_type}",
+                f"- Confidence: {confidence}",
                 f"- Recorded At: {_now()}",
                 "",
                 content.rstrip(),
@@ -59,6 +65,7 @@ def write_stage_result(
         ),
         encoding="utf-8",
     )
+    write_run_report(run_dir)
     return path
 
 
@@ -91,6 +98,7 @@ def write_handoff(
     run_path = run_dir / "handoffs" / filename
     run_path.parent.mkdir(parents=True, exist_ok=True)
     run_path.write_text(content, encoding="utf-8")
+    write_run_report(run_dir)
 
     project_path = root / ".agent-flow" / "handoffs" / filename
     project_path.parent.mkdir(parents=True, exist_ok=True)
@@ -122,6 +130,7 @@ def write_recovery(
     lines.extend(f"- {artifact}" for artifact in artifacts) if artifacts else lines.append("- None")
     lines.append("")
     path.write_text("\n".join(lines), encoding="utf-8")
+    write_run_report(run_dir)
     return path
 
 

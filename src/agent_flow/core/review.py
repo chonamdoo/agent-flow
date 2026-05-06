@@ -5,6 +5,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
 
+from agent_flow.core.report import write_run_report
+
 ReviewVerdict = Literal["LGTM", "NEEDS_CHANGES"]
 
 
@@ -36,6 +38,7 @@ def write_review_summary(*, run_dir: Path, summary: ReviewSummary) -> Path:
         f"{json.dumps(_summary_payload(summary), indent=2, sort_keys=True)}\n",
         encoding="utf-8",
     )
+    write_run_report(run_dir)
     return path
 
 

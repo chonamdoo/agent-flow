@@ -12,6 +12,7 @@ review flagged.
 """
 from __future__ import annotations
 
+from importlib import resources
 from pathlib import Path
 from types import MappingProxyType
 
@@ -25,6 +26,20 @@ from agent_flow.multi_review import (
     run_distribution,
 )
 
+_BASE_REVIEW_ANGLES: tuple[dict[str, str], ...] = (
+    {
+        "id": "generalist",
+        "prompt": "templates/_shared/review/architecture.md",
+    },
+    {
+        "id": "architecture-design",
+        "prompt": "templates/_shared/review/architecture-design.md",
+    },
+)
+_BASE_REVIEW_PROMPTS = {
+    str(item["prompt"])
+    for item in _BASE_REVIEW_ANGLES
+}
 
 _CLAUDE_HINT = """\
 - For multi-reviewer phases, use the `Task` tool to spawn parallel sub-agents
@@ -116,9 +131,8 @@ def _reviewer_jobs(
     project_root: Path,
     adapter: Adapter,
 ) -> list[ReviewerJob]:
-    angles = adapter._profile_snapshot.get("review_angles") or []
-    if not isinstance(angles, list):
-        return []
+    profile_angles = adapter._profile_snapshot.get("review_angles") or []
+    angles = _merge_review_angles(_BASE_REVIEW_ANGLES, profile_angles)
     jobs: list[ReviewerJob] = []
     base_prompt = adapter.render_envelope(phase, run_dir, project_root)
     for item in angles:
@@ -131,7 +145,7 @@ def _reviewer_jobs(
             f"{base_prompt}\n\n"
             f"## Review angle\n\n"
             f"- id: {angle_id}\n"
-            f"- prompt: {item.get('prompt', '')}\n"
+            f"{_review_angle_prompt(project_root, item.get('prompt', ''))}\n"
         )
         jobs.append(ReviewerJob(
             angle_id=angle_id,
@@ -139,6 +153,58 @@ def _reviewer_jobs(
             output_path=run_dir / f"{phase.id}-{angle_id}.md",
         ))
     return jobs
+
+
+def _merge_review_angles(
+    baseline: tuple[dict[str, str], ...],
+    profile_angles: object,
+) -> list[dict[str, object]]:
+    merged: dict[str, dict[str, object]] = {
+        str(item["id"]): dict(item)
+        for item in baseline
+        if item.get("id")
+    }
+    order = list(merged)
+    for item in profile_angles if isinstance(profile_angles, list) else []:
+        if not isinstance(item, dict):
+            continue
+        angle_id = str(item.get("id") or "").strip()
+        if not angle_id:
+            continue
+        if angle_id not in merged:
+            order.append(angle_id)
+        merged[angle_id] = dict(item)
+    return [merged[angle_id] for angle_id in order]
+
+
+def _review_angle_prompt(project_root: Path, prompt_ref: object) -> str:
+    prompt_path = str(prompt_ref or "").strip()
+    if not prompt_path:
+        raise ValueError("review angle prompt is required")
+    _validate_review_prompt_path(prompt_path)
+    package_path = resources.files("agent_flow").joinpath(prompt_path)
+    repo_path = Path(__file__).resolve().parents[3] / prompt_path
+    project_path = project_root / prompt_path
+    paths = (
+        (package_path, repo_path, project_path)
+        if prompt_path in _BASE_REVIEW_PROMPTS
+        else (project_path, package_path, repo_path)
+    )
+    for path in paths:
+        if path.is_file():
+            return path.read_text(encoding="utf-8")
+    raise FileNotFoundError(f"review angle prompt not found: {prompt_path}")
+
+
+def _validate_review_prompt_path(prompt_path: str) -> None:
+    path = Path(prompt_path)
+    if (
+        path.is_absolute()
+        or path.parts[:3] != ("templates", "_shared", "review")
+        or len(path.parts) != 4
+        or not path.parts[-1].endswith(".md")
+    ):
+        raise ValueError(f"invalid review angle prompt path: {prompt_path}")
 
 
 def _multi_reviewer_block(distribution: Distribution | None = None) -> str:

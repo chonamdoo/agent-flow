@@ -18,3 +18,7 @@ agent-flow = "agent_flow.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_flow"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"bootstrap" = "agent_flow/bootstrap"
+"templates/_shared" = "agent_flow/templates/_shared"

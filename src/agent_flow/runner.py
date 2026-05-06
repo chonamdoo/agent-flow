@@ -43,6 +43,8 @@ from agent_flow.artifact import (
     write_meta,
 )
 from agent_flow.cli_detect import detect_available_clis
+from agent_flow.core.report import write_run_report
+from agent_flow.core.security import ensure_child_path, validate_safe_name
 from agent_flow.memory.index import LoreIndex
 from agent_flow.memory.lore import Lore
 
@@ -232,6 +234,7 @@ class Runner:
                 )
                 return
 
+        write_run_report(self.run_dir)
         mark_inactive(self.run_dir)
         print("\n✓ run complete.")
 
@@ -505,15 +508,11 @@ def _read_kit_profile(project_root: Path) -> str | None:
 
 
 def _validate_yaml_name(name: str, kind: str) -> None:
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name):
-        raise ValueError(f"invalid {kind} name: {name!r}")
+    validate_safe_name(name, kind)
 
 
 def _ensure_child_path(root: Path, path: Path, kind: str) -> None:
-    root_resolved = root.resolve()
-    path_resolved = path.resolve()
-    if path_resolved.parent != root_resolved:
-        raise ValueError(f"{kind} path escapes {root}: {path}")
+    ensure_child_path(root, path, kind)
 
 
 def _search_lore(project_root: Path, task: str, top_k: int = 5) -> list[Lore]:
