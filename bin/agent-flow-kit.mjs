@@ -32,8 +32,8 @@ function installProject() {
   const agentFlowSkill = agentFlowSkillMarkdown();
   writeManagedFile(path.join(agentFlowDir, "skills", "agent-flow", "SKILL.md"), agentFlowSkill);
   if (HOME) {
-    writeManagedFile(path.join(HOME, ".codex", "skills", "agent-flow", "SKILL.md"), agentFlowSkill);
-    writeManagedFile(path.join(HOME, ".claude", "skills", "agent-flow", "SKILL.md"), agentFlowSkill);
+    writeManagedFileIfMissingOrSame(path.join(HOME, ".codex", "skills", "agent-flow", "SKILL.md"), agentFlowSkill);
+    writeManagedFileIfMissingOrSame(path.join(HOME, ".claude", "skills", "agent-flow", "SKILL.md"), agentFlowSkill);
   }
   writeManagedFile(
     path.join(agentFlowDir, "skills", "full-feature-workflow", "SKILL.md"),
@@ -369,6 +369,18 @@ function writeManagedFile(pathName, content) {
   fs.writeFileSync(pathName, content, "utf8");
 }
 
+function writeManagedFileIfMissingOrSame(pathName, content) {
+  fs.mkdirSync(path.dirname(pathName), { recursive: true });
+  if (fs.existsSync(pathName)) {
+    const current = fs.readFileSync(pathName, "utf8");
+    if (current !== content) {
+      return false;
+    }
+  }
+  fs.writeFileSync(pathName, content, "utf8");
+  return true;
+}
+
 function assertFreshArtifact(state, phase, artifact) {
   if (!FRESH_ARTIFACT_PHASE_IDS.has(phase.id)) {
     return;
@@ -407,7 +419,10 @@ function nextPhaseIndex(state, phase, artifact) {
   if (phase.id === "pr-watch") {
     const status = readArtifactStatus(artifact);
     if (status === "green") {
-      return phaseIndex("merge");
+      return phaseIndex("merge-approval");
+    }
+    if (status === "merged") {
+      return phaseIndex("handoff");
     }
     if (status === "comments") {
       return phaseIndex("pr-comment-fix");
@@ -418,7 +433,14 @@ function nextPhaseIndex(state, phase, artifact) {
     if (status === "pending") {
       throw new Error("blocked: PR watch is pending");
     }
-    throw new Error("blocked: pr-watch artifact must include status: green, comments, ci-failed, or pending");
+    throw new Error("blocked: pr-watch artifact must include status: green, comments, ci-failed, merged, or pending");
+  }
+  if (phase.id === "merge-approval") {
+    const verdict = readArtifactVerdict(artifact);
+    if (verdict === "approve") {
+      return phaseIndex("merge");
+    }
+    throw new Error("blocked: merge-approval artifact must include verdict: approve");
   }
   if (phase.id === "pr-comment-fix" || phase.id === "pr-ci-fix") {
     return phaseIndex("pr-watch");
@@ -436,8 +458,11 @@ function phaseIndex(id) {
 
 function readArtifactStatus(pathName) {
   const content = fs.readFileSync(pathName, "utf8");
-  const match = content.match(/^status:\s*([a-z-]+)\s*$/im);
-  return match?.[1];
+  const match = content.match(/^status:\s*([a-z_-]+)\s*$/im);
+  const status = match?.[1]?.toLowerCase();
+  if (status === "has_comments" || status === "has-comments") return "comments";
+  if (status === "ci_failed") return "ci-failed";
+  return status;
 }
 
 function readArtifactVerdict(pathName) {
@@ -542,9 +567,10 @@ const PHASES = [
   },
   { id: "commit", artifact: "artifacts/commit.md", instruction: "Commit the verified slice and record the commit hash." },
   { id: "push-pr", artifact: "artifacts/push-pr.md", instruction: "Push the branch or open a PR and record the remote reference." },
-  { id: "pr-watch", artifact: "artifacts/pr-watch.md", instruction: "Poll PR checks and review threads; record status: green, status: comments, status: ci-failed, or status: pending with PR URL." },
+  { id: "pr-watch", artifact: "artifacts/pr-watch.md", instruction: "Poll PR checks and review threads; record status: green, status: has_comments, status: ci_failed (legacy alias status: ci-failed), status: pending, status: merged, status: closed, or status: error with PR URL." },
   { id: "pr-comment-fix", artifact: "artifacts/pr-comment-fix.md", instruction: "Resolve actionable PR review comments, commit and push fixes, resolve the corresponding GitHub review threads, or record that no comments are pending." },
   { id: "pr-ci-fix", artifact: "artifacts/pr-ci-fix.md", instruction: "Fix failed PR checks, commit and push fixes, or record that checks are green." },
+  { id: "merge-approval", artifact: "artifacts/merge-approval.md", instruction: "Ask for explicit user approval before merge. Record verdict: approve only after approval." },
   { id: "merge", artifact: "artifacts/merge.md", instruction: "Merge the PR only after approvals, resolved comments, and green checks; record merge SHA or URL." },
   { id: "handoff", artifact: "artifacts/handoff.md", instruction: "Write final handoff with decisions, risks, files, and remaining work." },
 ];

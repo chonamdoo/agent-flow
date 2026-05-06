@@ -16,7 +16,14 @@ from pathlib import Path
 from types import MappingProxyType
 
 from agent_flow.adapters.base import Adapter
-from agent_flow.cli_detect import detect_available_clis
+from agent_flow.multi_review import (
+    ReviewerJob,
+    Distribution,
+    distribute,
+    residual_host_jobs,
+    resolve_review_clis,
+    run_distribution,
+)
 
 
 _CLAUDE_HINT = """\
@@ -80,7 +87,10 @@ class HostedAdapter(Adapter):
     def execute(self, phase, run_dir: Path, project_root: Path) -> bool:
         host_hint = self._hint
         if phase.multi_review:
-            host_hint += "\n" + _multi_reviewer_block()
+            distribution = _run_multi_review_distribution(
+                phase, run_dir, project_root, self
+            )
+            host_hint += "\n" + _multi_reviewer_block(distribution)
         prompt = self.render_envelope(
             phase, run_dir, project_root, host_hint=host_hint,
         )
@@ -88,13 +98,56 @@ class HostedAdapter(Adapter):
         return False  # host AI writes the artifact
 
 
-def _multi_reviewer_block() -> str:
+def _run_multi_review_distribution(
+    phase,
+    run_dir: Path,
+    project_root: Path,
+    adapter: Adapter,
+) -> Distribution:
+    jobs = _reviewer_jobs(phase, run_dir, project_root, adapter)
+    distribution = distribute(jobs)
+    run_distribution(distribution, project_root)
+    return distribution
+
+
+def _reviewer_jobs(
+    phase,
+    run_dir: Path,
+    project_root: Path,
+    adapter: Adapter,
+) -> list[ReviewerJob]:
+    angles = adapter._profile_snapshot.get("review_angles") or []
+    if not isinstance(angles, list):
+        return []
+    jobs: list[ReviewerJob] = []
+    base_prompt = adapter.render_envelope(phase, run_dir, project_root)
+    for item in angles:
+        if not isinstance(item, dict):
+            continue
+        angle_id = str(item.get("id") or "").strip()
+        if not angle_id:
+            continue
+        angle_prompt = (
+            f"{base_prompt}\n\n"
+            f"## Review angle\n\n"
+            f"- id: {angle_id}\n"
+            f"- prompt: {item.get('prompt', '')}\n"
+        )
+        jobs.append(ReviewerJob(
+            angle_id=angle_id,
+            prompt=angle_prompt,
+            output_path=run_dir / f"{phase.id}-{angle_id}.md",
+        ))
+    return jobs
+
+
+def _multi_reviewer_block(distribution: Distribution | None = None) -> str:
     """Distribution preview for multi-reviewer phases.
 
     The actual angle list is profile-driven and read by the host AI from
     the profile YAML; this block shows the suggested CLI distribution.
     """
-    available = detect_available_clis()
+    available = resolve_review_clis()
     if not available:
         return ("### Multi-CLI distribution\n"
                 "No external AI CLIs detected. Run all review angles in this "
@@ -117,4 +170,14 @@ def _multi_reviewer_block() -> str:
         "`final-review.md`. For host-CLI angles, use the host-native "
         "parallel sub-agent mechanism."
     )
+    if distribution is not None:
+        residual = residual_host_jobs(distribution)
+        lines.append("")
+        lines.append(f"Distribution summary: {distribution.summary()}.")
+        if residual:
+            lines.append(
+                "Residual host-handled angles: "
+                + ", ".join(job.angle_id for job in residual)
+                + "."
+            )
     return "\n".join(lines) + "\n"

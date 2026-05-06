@@ -14,7 +14,7 @@ gates:
     required: true
     phase: pre-push
   - id: ios-build
-    command: "npx react-native run-ios --terminal=skip"
+    command: "npx react-native run-ios --no-packager"
     required: false
     phase: pre-push
   - id: android-build

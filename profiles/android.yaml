@@ -1,8 +1,8 @@
 id: android
 branching:
   strategy: release-first
-  base: release         # the active release/YY.MM.DD.x branch
-  integration: release  # PRs target release; release later syncs to develop
+  base: release/*        # active release/YY.MM.DD.x branch, resolved by operator
+  integration: release/* # PRs target active release; release later syncs to develop
   worktree: required
 gates:
   - id: build
@@ -36,5 +36,5 @@ commit_convention:
   style: tagged          # [Feat] / [Fix] / [Refactor] / ...
   co_author: skip
 pr:
-  target_branch: release
+  target_branch: release/*
   merge_strategy: merge

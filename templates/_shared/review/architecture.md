@@ -30,7 +30,7 @@ Review for architectural soundness independent of stack-specific patterns: modul
 
 ## Output format
 
-```
+```text
 ## Architecture review findings
 
 ### Must-fix

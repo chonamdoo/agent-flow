@@ -60,12 +60,14 @@ class Lore:
 
     @property
     def fingerprint(self) -> str:
-        """16-char sha256 of normalized (Constraint + Directive).
+        """16-char sha256 of normalized (Constraint + Rejected + Directive).
 
         Used for dedup: two lore entries with the same fingerprint are
         candidates to merge / archive.
         """
-        normalized = (self.constraint + "\n" + self.directive).strip()
+        normalized = "\n".join(
+            [self.constraint, *self.rejected, self.directive]
+        ).strip()
         normalized = re.sub(r"\s+", " ", normalized.lower())
         return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
 
@@ -76,6 +78,7 @@ class Lore:
             self.scope,
             " ".join(self.tags),
             self.constraint,
+            " ".join(self.rejected),
             self.directive,
         ]).lower()
 
@@ -149,18 +152,19 @@ def write_weight(path: Path, new_weight: float) -> None:
     Preserves the rest of the frontmatter and body verbatim.
     """
     text = path.read_text(encoding="utf-8")
+    fm, _body = _split_frontmatter(text)
+    if fm is None:
+        return
+    end = text.find("\n---\n", 4)
+    frontmatter = text[:end]
+    rest = text[end:]
     pattern = re.compile(r"^weight:\s*[\d.]+\s*$", re.MULTILINE)
-    if pattern.search(text):
-        out = pattern.sub(f"weight: {new_weight:.1f}", text, count=1)
+    if pattern.search(frontmatter):
+        out = pattern.sub(
+            f"weight: {new_weight:.1f}", frontmatter, count=1
+        ) + rest
     else:
-        # Frontmatter exists but no weight field — inject before closing ---
-        out = re.sub(
-            r"(\A---\n.*?)(\n---\n)",
-            lambda m: m.group(1) + f"\nweight: {new_weight:.1f}" + m.group(2),
-            text,
-            count=1,
-            flags=re.DOTALL,
-        )
+        out = frontmatter + f"\nweight: {new_weight:.1f}" + rest
     path.write_text(out, encoding="utf-8")
 
 

@@ -82,8 +82,8 @@ phases:
   - id: green
     description: TDD green phase.
     prompt: |
-      Implement the minimum code to pass red tests. Code comments, when
-      needed, must be written in Korean. Output: green.md.
+      Implement the minimum code to pass red tests. Follow the active profile
+      or project instructions for code comment language. Output: green.md.
 
   - id: refactor
     description: TDD refactor phase.
@@ -136,16 +136,20 @@ phases:
   - id: pr-watch
     description: Watch PR checks and comments.
     routes:
-      green: merge
+      green: merge-approval
+      merged: handoff
       comments: pr-comment-fix
+      has_comments: pr-comment-fix
       ci-failed: pr-ci-fix
+      ci_failed: pr-ci-fix
       pending: block
       closed: block
       error: block
     prompt: |
       Poll PR status and review threads. Output pr-watch.md with exactly one
-      status line: `status: green`, `status: comments`, `status: ci-failed`,
-      `status: pending`, `status: closed`, or `status: error`.
+      status line: `status: green`, `status: has_comments`,
+      `status: ci_failed`, `status: pending`, `status: merged`,
+      `status: closed`, or `status: error`.
 
   - id: pr-comment-fix
     description: Fix actionable PR comments.
@@ -163,6 +167,15 @@ phases:
     prompt: |
       Diagnose failing checks, reproduce locally, fix, commit, push, and
       summarize commands and check URLs. Output: pr-ci-fix.md.
+
+  - id: merge-approval
+    description: Require explicit user approval before merge.
+    routes:
+      approve: merge
+      default: block
+    prompt: |
+      Ask the user for explicit merge approval. Do not merge yet. Output
+      merge-approval.md with exactly `verdict: approve` only after approval.
 
   - id: merge
     description: Merge after explicit user approval.

@@ -456,6 +456,7 @@ class CliTest(unittest.TestCase):
                 "commit",
                 "push-pr",
                 "pr-watch",
+                "merge-approval",
                 "merge",
                 "handoff",
             ]
@@ -467,7 +468,7 @@ class CliTest(unittest.TestCase):
                 artifact.parent.mkdir(parents=True, exist_ok=True)
                 if phase == "pr-watch":
                     content = "status: green\n"
-                elif phase in {"plan-review", "architecture-review"}:
+                elif phase in {"plan-review", "architecture-review", "merge-approval"}:
                     content = "verdict: approve\n"
                 else:
                     content = f"{phase}\n"
@@ -3948,6 +3949,7 @@ def _node_phase_artifact(phase: str) -> Path:
         "pr-watch": Path("artifacts/pr-watch.md"),
         "pr-comment-fix": Path("artifacts/pr-comment-fix.md"),
         "pr-ci-fix": Path("artifacts/pr-ci-fix.md"),
+        "merge-approval": Path("artifacts/merge-approval.md"),
         "merge": Path("artifacts/merge.md"),
         "handoff": Path("artifacts/handoff.md"),
     }

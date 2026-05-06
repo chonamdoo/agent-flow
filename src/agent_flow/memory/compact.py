@@ -78,13 +78,13 @@ def compact(index: LoreIndex, today: date | None = None,
     report = CompactReport(dry_run=not apply)
 
     # Tier 2: dedup by fingerprint
-    for fp, group in index.grouped_by_fingerprint().items():
+    for _fingerprint, group in index.grouped_by_fingerprint().items():
         if len(group) <= 1:
             continue
-        group.sort(key=lambda l: (l.date, l.path.name), reverse=True)
+        group.sort(key=lambda lore: (lore.date, lore.path.name), reverse=True)
         kept = group[0]
         for archived in group[1:]:
-            target = archive_dir / archived.path.name
+            target = _archive_target(archive_dir, archived.path)
             if apply and archived.path.exists():
                 archived.path.rename(target)
             report.duplicates_archived.append((kept.path, target))
@@ -96,8 +96,8 @@ def compact(index: LoreIndex, today: date | None = None,
     duplicate_source_paths = {
         # Group above iterated `archived in group[1:]`; track those originals.
         original_archived.path
-        for fp, group in index.grouped_by_fingerprint().items() if len(group) > 1
-        for original_archived in sorted(group, key=lambda l: (l.date, l.path.name), reverse=True)[1:]
+        for _fingerprint, group in index.grouped_by_fingerprint().items() if len(group) > 1
+        for original_archived in sorted(group, key=lambda lore: (lore.date, lore.path.name), reverse=True)[1:]
     }
     stale_source_paths: set[Path] = set()
     for lore in index.entries:
@@ -106,7 +106,7 @@ def compact(index: LoreIndex, today: date | None = None,
         retention = RETENTION_DAYS.get(lore.type, DEFAULT_RETENTION_DAYS)
         age = (today - lore.date).days
         if age > retention:
-            target = archive_dir / lore.path.name
+            target = _archive_target(archive_dir, lore.path)
             if apply:
                 lore.path.rename(target)
             report.stale_archived.append(target)
@@ -138,6 +138,20 @@ def _calc_weight(age_days: int) -> float:
     return 0.3
 
 
+def _archive_target(archive_dir: Path, source: Path) -> Path:
+    target = archive_dir / source.name
+    if not target.exists():
+        return target
+    stem = source.stem
+    suffix = source.suffix
+    counter = 1
+    while True:
+        candidate = archive_dir / f"{stem}-{counter}{suffix}"
+        if not candidate.exists():
+            return candidate
+        counter += 1
+
+
 def _cluster_candidates(index: LoreIndex,
                         min_cluster_size: int = 3) -> list[list[Lore]]:
     """Group lore by shared tag. Clusters of `min_cluster_size`+ entries
@@ -153,7 +167,7 @@ def _cluster_candidates(index: LoreIndex,
         if len(group) < min_cluster_size:
             continue
         # Deduplicate by lore-set (a cluster shared by 2 tags is reported once)
-        key = tuple(sorted(l.path.name for l in group))
+        key = tuple(sorted(lore.path.name for lore in group))
         if key in seen_keys:
             continue
         seen_keys.add(key)

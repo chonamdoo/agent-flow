@@ -26,6 +26,7 @@ from pathlib import Path
 RUNS_DIRNAME = ".agent-flow/runs"
 ACTIVE_MARKER = "active"
 META_FILE = "meta.json"
+ACTIVE_LOCK = "active.lock"
 
 
 class ActiveRunExists(RuntimeError):
@@ -82,35 +83,49 @@ def find_active_run(project_root: Path) -> ActiveRun | None:
 
 def create_run(project_root: Path, workflow: str, task: str) -> Path:
     """Create a new run directory. Refuses if an active run exists."""
-    existing = find_active_run(project_root)
-    if existing is not None:
-        raise ActiveRunExists(
-            f"active run already exists: {existing.run_id} "
-            f"(task: {existing.task!r}). Use `agent-flow continue` to resume "
-            f"or `agent-flow abort` to clear."
-        )
-
     runs_dir = project_root / RUNS_DIRNAME
     runs_dir.mkdir(parents=True, exist_ok=True)
+    lock_dir = runs_dir / ACTIVE_LOCK
+    try:
+        lock_dir.mkdir()
+    except FileExistsError as e:
+        raise ActiveRunExists(
+            "another agent-flow run is starting. Retry after it finishes "
+            "or inspect `.agent-flow/runs/active.lock` if the process died."
+        ) from e
 
-    base_id = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
-    run_id = base_id
-    suffix = 1
-    while (runs_dir / run_id).exists():
-        run_id = f"{base_id}-{suffix}"
-        suffix += 1
+    try:
+        existing = find_active_run(project_root)
+        if existing is not None:
+            raise ActiveRunExists(
+                f"active run already exists: {existing.run_id} "
+                f"(task: {existing.task!r}). Use `agent-flow continue` to resume "
+                f"or `agent-flow abort` to clear."
+            )
 
-    run_path = runs_dir / run_id
-    run_path.mkdir()
-    write_meta(run_path, {
-        "run_id": run_id,
-        "workflow": workflow,
-        "task": task,
-        "started_at": datetime.utcnow().isoformat(),
-        "current_phase": None,
-    })
-    (run_path / ACTIVE_MARKER).write_text("")
-    return run_path
+        base_id = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        run_id = base_id
+        suffix = 1
+        while (runs_dir / run_id).exists():
+            run_id = f"{base_id}-{suffix}"
+            suffix += 1
+
+        run_path = runs_dir / run_id
+        run_path.mkdir()
+        write_meta(run_path, {
+            "run_id": run_id,
+            "workflow": workflow,
+            "task": task,
+            "started_at": datetime.utcnow().isoformat(),
+            "current_phase": None,
+        })
+        (run_path / ACTIVE_MARKER).write_text("")
+        return run_path
+    finally:
+        try:
+            lock_dir.rmdir()
+        except OSError:
+            pass
 
 
 def read_meta(run_path: Path) -> dict:

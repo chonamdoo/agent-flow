@@ -120,6 +120,12 @@ function linkOrCopyDir(src, dest) {
   }
 }
 
+function copySkillDir(src, dest) {
+  if (!fs.existsSync(src)) return "missing-source";
+  const r = copyDir(src, dest);
+  return `copied:${r.written}:${r.skipped}`;
+}
+
 function install() {
   ensureDir(path.join(AF_DIR, "runs"));
   ensureDir(path.join(AF_DIR, "memory"));
@@ -163,13 +169,13 @@ function install() {
     path.join(PROJECT, ".codex", "skills", "agent-flow"),
   );
   const globalCodexSkillStatus = HOME
-    ? linkOrCopyDir(
+    ? copySkillDir(
         agentFlowSkill,
         path.join(HOME, ".codex", "skills", "agent-flow"),
       )
     : "missing-home";
   const globalClaudeSkillStatus = HOME
-    ? linkOrCopyDir(
+    ? copySkillDir(
         agentFlowSkill,
         path.join(HOME, ".claude", "skills", "agent-flow"),
       )

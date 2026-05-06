@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 from dataclasses import dataclass
 
 
@@ -34,7 +35,7 @@ def detect_available_clis() -> list[CliInfo]:
     found: list[CliInfo] = []
     for cli in KNOWN_CLIS:
         if any(shutil.which(b) for b in cli.binaries):
-            found.append(cli)
+            found.append(_normalize_cli(cli))
     return found
 
 
@@ -56,5 +57,29 @@ def detect_host_cli() -> str | None:
 def cli_by_name(name: str) -> CliInfo | None:
     for cli in KNOWN_CLIS:
         if cli.name == name:
-            return cli
+            return _normalize_cli(cli)
     return None
+
+
+def _normalize_cli(cli: CliInfo) -> CliInfo:
+    if cli.name != "codex" or not shutil.which("codex"):
+        return cli
+    if _codex_supports("exec"):
+        return cli
+    if _codex_supports("run"):
+        return CliInfo(name=cli.name, binaries=cli.binaries, invoke=("run",))
+    return cli
+
+
+def _codex_supports(subcommand: str) -> bool:
+    try:
+        result = subprocess.run(
+            ("codex", subcommand, "--help"),
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0

@@ -25,6 +25,7 @@ Adapter contract:
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -215,7 +216,9 @@ def _find_kit_root() -> Path:
 
 
 def _load_workflow(kit_root: Path, name: str) -> list[Phase]:
+    _validate_yaml_name(name, "workflow")
     path = kit_root / "workflows" / f"{name}.yaml"
+    _ensure_child_path(kit_root / "workflows", path, "workflow")
     if not path.exists():
         raise FileNotFoundError(f"Workflow not found: {path}")
     raw = yaml.safe_load(path.read_text()) or {}
@@ -253,6 +256,14 @@ def _load_workflow(kit_root: Path, name: str) -> list[Phase]:
 
 def _route_key(text: str) -> str:
     lowered = text.lower()
+    aliases = {
+        "has_comments": "comments",
+        "has-comments": "comments",
+        "ci_failed": "ci-failed",
+    }
+    for raw, canonical in aliases.items():
+        if f"verdict: {raw}" in lowered or f"status: {raw}" in lowered:
+            return canonical
     checks = (
         "request-changes",
         "ci-failed",
@@ -289,9 +300,11 @@ def _load_profile(kit_root: Path, project_root: Path) -> tuple[str, dict[str, An
     forced = os.environ.get("AGENT_FLOW_PROFILE")
     from_kit = _read_kit_profile(project_root)
     profile_id = forced or from_kit or "generic"
+    _validate_yaml_name(profile_id, "profile")
     explicit_fallback = os.environ.get("AGENT_FLOW_FALLBACK_GENERIC") == "1"
 
     profile_path = kit_root / "profiles" / f"{profile_id}.yaml"
+    _ensure_child_path(kit_root / "profiles", profile_path, "profile")
     if not profile_path.exists():
         # Hard error when kit.json says a profile that doesn't exist (typo).
         # Lenient fallback only when explicitly requested via env var or when
@@ -327,6 +340,18 @@ def _read_kit_profile(project_root: Path) -> str | None:
         return None
     p = data.get("profile")
     return p if isinstance(p, str) else None
+
+
+def _validate_yaml_name(name: str, kind: str) -> None:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name):
+        raise ValueError(f"invalid {kind} name: {name!r}")
+
+
+def _ensure_child_path(root: Path, path: Path, kind: str) -> None:
+    root_resolved = root.resolve()
+    path_resolved = path.resolve()
+    if path_resolved.parent != root_resolved:
+        raise ValueError(f"{kind} path escapes {root}: {path}")
 
 
 def _search_lore(project_root: Path, task: str, top_k: int = 5) -> list[Lore]:

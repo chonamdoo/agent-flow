@@ -44,6 +44,7 @@ class ReviewerJob:
 @dataclass
 class Distribution:
     by_cli: dict[str, list[ReviewerJob]] = field(default_factory=dict)
+    fallback_jobs: list[ReviewerJob] = field(default_factory=list)
     fallback_to_generic: bool = False
     host: str | None = None
 
@@ -59,7 +60,7 @@ class Distribution:
         return ", ".join(parts) if parts else "(no jobs)"
 
 
-def _resolve_clis() -> list[CliInfo]:
+def resolve_review_clis() -> list[CliInfo]:
     forced = os.environ.get("AGENT_FLOW_REVIEWERS")
     if forced:
         out: list[CliInfo] = []
@@ -75,10 +76,14 @@ def distribute(jobs: list[ReviewerJob]) -> Distribution:
     """Round-robin angles across available CLIs, host last."""
     if not jobs:
         return Distribution()
-    available = _resolve_clis()
+    available = resolve_review_clis()
     host = detect_host_cli()
     if not available:
-        return Distribution(fallback_to_generic=True, host=host)
+        return Distribution(
+            fallback_jobs=list(jobs),
+            fallback_to_generic=True,
+            host=host,
+        )
 
     # Host last: non-host CLIs run first.
     ordered = sorted(available, key=lambda c: c.name == host)
@@ -143,12 +148,10 @@ def residual_host_jobs(distribution: Distribution) -> list[ReviewerJob]:
     """Return jobs assigned to the host CLI — these need in-host parallelism
     (e.g., Claude Task tool fan-out), not subprocess invocation.
     """
-    if distribution.fallback_to_generic or distribution.host is None:
-        # No host or generic mode → all jobs are "residual" for the AI.
-        all_jobs: list[ReviewerJob] = []
-        for jobs in distribution.by_cli.values():
-            all_jobs.extend(jobs)
-        return all_jobs
+    if distribution.fallback_to_generic:
+        return list(distribution.fallback_jobs)
+    if distribution.host is None:
+        return []
     return list(distribution.by_cli.get(distribution.host, []))
 
 

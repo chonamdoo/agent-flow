@@ -102,4 +102,4 @@ class LoreIndex:
         return groups
 
     def by_weight(self) -> list[Lore]:
-        return sorted(self.entries, key=lambda l: (-l.weight, l.path.name))
+        return sorted(self.entries, key=lambda lore: (-lore.weight, lore.path.name))
