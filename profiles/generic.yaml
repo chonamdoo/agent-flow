@@ -1,3 +1,26 @@
 id: generic
+branching:
+  strategy: trunk
+  base: main
+  integration: main
+  worktree: optional
 gates: []
-
+review_angles:
+  # Mandatory for every project: DDD + Clean Arch + SOLID + CQRS + Google Repo + Vertical Slices.
+  # Profile additions append after this baseline.
+  - id: architecture-design
+    prompt: templates/_shared/review/architecture-design.md
+artifacts:
+  prd: optional
+  adr: optional
+  slice_plan: required
+vocabulary:
+  prd: spec
+  adr: decision-log
+  lore: notes
+commit_convention:
+  style: freeform
+  co_author: skip
+pr:
+  target_branch: main
+  merge_strategy: squash

@@ -1,4 +1,4 @@
-id: nextjs
+id: ios
 branching:
   strategy: trunk
   base: main
@@ -6,24 +6,24 @@ branching:
   worktree: optional
 gates:
   - id: build
-    command: "npm run build"
+    command: "xcodebuild -scheme App -destination 'platform=iOS Simulator,name=iPhone 15' build"
     required: true
     phase: pre-push
   - id: test
-    command: "npm test"
+    command: "xcodebuild -scheme App -destination 'platform=iOS Simulator,name=iPhone 15' test"
     required: true
-    phase: pre-commit
+    phase: pre-push
   - id: lint
-    command: "npm run lint"
+    command: "swiftlint"
     required: false
     phase: pre-commit
 review_angles:
   - id: architecture-design
     prompt: templates/_shared/review/architecture-design.md
-  - id: render-stability
-    prompt: templates/_shared/review/render-stability.md
-  - id: a11y
-    prompt: templates/_shared/review/a11y.md
+  - id: retain-cycles
+    prompt: templates/_shared/review/retain-cycles.md
+  - id: main-thread
+    prompt: templates/_shared/review/main-thread.md
 artifacts:
   prd: optional
   adr: optional

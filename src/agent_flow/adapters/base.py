@@ -1,18 +1,153 @@
+"""Adapter contract.
+
+Every AI host (HostedAdapter for claude/codex/gemini, GenericAdapter for
+fallback) implements `execute`. The runner only knows the contract; AI-
+specific hints live in the host-name parameterization.
+
+Return semantics:
+  - True  → this call wrote the artifact; runner advances to the next phase.
+  - False → this call emitted a prompt; the host AI must do the work, write
+            the artifact file, and call `agent-flow continue` to resume.
+The artifact path is always `<run_dir>/<phase.id>.md`.
+
+Profile injection:
+  - The runner sets `self._profile_snapshot` and `self._profile_id` on the
+    adapter before invoking execute. `render_envelope` includes a profile
+    block so the host AI sees the parsed profile YAML as data, not as
+    text instructions to "look it up somewhere".
+"""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from abc import ABC, abstractmethod
+from pathlib import Path
+from typing import Any, TYPE_CHECKING
+
+import yaml
+
+if TYPE_CHECKING:
+    from agent_flow.runner import Phase
 
 
-@dataclass(frozen=True)
-class StagePrompt:
-    stage_id: str
-    role: str
-    prompt: str
+class Adapter(ABC):
+    """Base for all host adapters.
+
+    Note: profile state (`_profile_snapshot`, `_profile_id`) is set as
+    *instance* attributes by `__init__`. We deliberately avoid class-level
+    defaults like `_profile_snapshot: dict = {}` to prevent the classic
+    Python footgun where a mutable class default is shared across every
+    instance and silently leaks mutations.
+    """
+
+    name: str = "base"
+
+    def __init__(self) -> None:
+        self._profile_snapshot: dict[str, Any] = {}
+        self._profile_id: str = "generic"
+        self._lore_citations: list[Any] = []  # list[Lore]; typed loose to avoid import cycle
+
+    @abstractmethod
+    def execute(self, phase: "Phase", run_dir: Path, project_root: Path) -> bool:
+        """Run one phase; return True iff the artifact was written."""
+
+    @staticmethod
+    def artifact_path(phase: "Phase", run_dir: Path) -> Path:
+        return run_dir / f"{phase.id}.md"
+
+    def render_envelope(self, phase: "Phase", run_dir: Path,
+                        project_root: Path, host_hint: str = "") -> str:
+        """Render the prompt envelope shared by all AI adapters."""
+        artifact = self.artifact_path(phase, run_dir)
+        relative_artifact = (
+            artifact.relative_to(project_root)
+            if artifact.is_relative_to(project_root)
+            else artifact
+        )
+        body = phase.prompt or "(no prompt body — see workflow YAML)"
+        host_block = (
+            f"\n\n## Host-specific guidance\n{host_hint}\n" if host_hint else ""
+        )
+        profile_block = self._render_profile_block()
+        lore_block = self._render_lore_block(project_root, phase)
+        return (
+            f"# agent-flow phase: {phase.id}\n\n"
+            f"**Description**: {phase.description}\n\n"
+            f"**Run id**: {run_dir.name}\n"
+            f"**Project root**: {project_root}\n"
+            f"**Artifact target** (write this when the phase is complete):\n"
+            f"  `{relative_artifact}`\n"
+            f"\n## Phase prompt\n\n{body}\n"
+            f"{profile_block}"
+            f"{lore_block}"
+            f"{host_block}"
+            f"\n## When complete\n"
+            f"After writing the artifact, run `agent-flow continue` (from "
+            f"`{project_root}`) to advance to the next phase."
+        )
+
+    def _render_lore_block(self, project_root: Path, phase: "Phase") -> str:
+        """Inline relevant lore entries for phases that opt in.
+
+        The runner pre-searches the lore index using the task description and
+        sets `_lore_citations` on this adapter. We surface them here as a
+        digest the host AI can cite or skim. Empty when no matches.
+
+        Phases declare `cite_lore: true` in workflow YAML to receive the
+        block — this avoids hardcoding `phase.id == "design"` so renamed
+        phases or new workflows still work.
+        """
+        if not self._lore_citations:
+            return ""
+        if not getattr(phase, "cite_lore", False):
+            return ""
+        lines = [
+            "\n## Relevant lore (auto-cited from `.agent-flow/memory/lore/`)",
+            "",
+            "These entries match the task keywords. Cite by relative path "
+            "where they actually apply; ignore entries that aren't relevant. "
+            "Do NOT fabricate citations.",
+            "",
+        ]
+        for lore in self._lore_citations:
+            try:
+                rel = lore.path.relative_to(project_root)
+            except ValueError:
+                rel = lore.path
+            lines.append(f"### `{rel}` (weight {lore.weight:.2f}, type {lore.type})")
+            lines.append(f"**Title**: {lore.title}")
+            if lore.constraint:
+                lines.append(f"**Constraint**: {_oneline(lore.constraint, 200)}")
+            if lore.directive:
+                lines.append(f"**Directive**: {_oneline(lore.directive, 200)}")
+            lines.append("")
+        return "\n".join(lines) + "\n"
+
+    def _render_profile_block(self) -> str:
+        """Inline the active profile YAML so the host AI sees real data.
+
+        The runner injects `_profile_snapshot` and `_profile_id` before
+        calling execute. If absent (e.g., adapter constructed standalone),
+        this block is omitted gracefully.
+        """
+        if not self._profile_snapshot:
+            return ""
+        try:
+            yaml_dump = yaml.safe_dump(
+                self._profile_snapshot, sort_keys=False, allow_unicode=True
+            ).rstrip()
+        except yaml.YAMLError:
+            return ""
+        return (
+            f"\n## Active profile: `{self._profile_id}`\n\n"
+            f"This is the parsed profile YAML — use these values directly, "
+            f"don't ask the user to look them up:\n\n"
+            f"```yaml\n{yaml_dump}\n```\n"
+        )
 
 
-class Adapter:
-    name = "manual"
-
-    def render_stage_prompt(self, *, stage_id: str, role: str, task: str) -> StagePrompt:
-        return StagePrompt(stage_id=stage_id, role=role, prompt=f"{role}: {task}\n")
-
+def _oneline(text: str, max_len: int) -> str:
+    """Compress whitespace and truncate for prompt-budget single-line digest."""
+    import re
+    flat = re.sub(r"\s+", " ", text).strip()
+    if len(flat) <= max_len:
+        return flat
+    return flat[:max_len - 1] + "…"

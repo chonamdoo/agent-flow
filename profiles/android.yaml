@@ -1,0 +1,40 @@
+id: android
+branching:
+  strategy: release-first
+  base: release         # the active release/YY.MM.DD.x branch
+  integration: release  # PRs target release; release later syncs to develop
+  worktree: required
+gates:
+  - id: build
+    command: "./gradlew assembleDevDebug"
+    required: true
+    phase: pre-push
+  - id: test
+    command: "./gradlew test"
+    required: true
+    phase: pre-commit
+  - id: lint
+    command: "./gradlew lint"
+    required: false
+    phase: pre-commit
+review_angles:
+  - id: architecture-design
+    prompt: templates/_shared/review/architecture-design.md
+  - id: compose-stability
+    prompt: templates/_shared/review/compose-stability.md
+  - id: test-edge
+    prompt: templates/_shared/review/test-edge.md
+artifacts:
+  prd: optional
+  adr: optional
+  slice_plan: required
+vocabulary:
+  prd: PRD
+  adr: ADR
+  lore: lore
+commit_convention:
+  style: tagged          # [Feat] / [Fix] / [Refactor] / ...
+  co_author: skip
+pr:
+  target_branch: release
+  merge_strategy: merge

@@ -1,0 +1,253 @@
+id: default
+description: |
+  Single full-cycle workflow applied to every project. The chain unifies
+  interview / docs / DDD / Clean Architecture / SOLID into one design phase,
+  then enforces TDD (test-first) implementation. AI infers depth per task —
+  trivial fixes collapse phases, feature work expands them — but the order
+  is invariant.
+
+  Phase order (canonical):
+    design → slice-plan → [pause]
+    → worktree → implement (TDD red→green→refactor inside, per slice)
+    → final-review → fix-loop
+    → commit → push-pr → pr-watch → merge → cleanup
+
+phases:
+  - id: design
+    description: |
+      Unified design phase. Grill-style interview → docs → DDD model → Clean
+      Architecture layer map → SOLID check. Single artifact captures the
+      shared understanding plus the architectural blueprint. Mandatory for
+      every project.
+    cite_lore: true
+    prompt: |
+      Produce the unified design document. Sections in order:
+
+      ## 1. Interview (grill-me)
+      Interview the user one question at a time. Walk every branch of the
+      decision tree. Provide your recommended answer for each question. If
+      the codebase can answer a question, search the codebase rather than
+      asking. Continue until you reach shared understanding of: scope,
+      acceptance criteria, edge cases, non-goals, dependencies, constraints.
+      Trivial tasks may collapse to a single confirmation; feature work
+      expands.
+
+      ## 2. Spec (renamed per profile.vocabulary)
+      Goal, in-scope, out-of-scope, acceptance criteria, observable behavior,
+      dependencies, open risks. If a "Relevant lore" block was injected into
+      this prompt envelope (auto-cited from `.agent-flow/memory/lore/`),
+      cite the entries that actually apply by relative path. Ignore unrelated
+      entries and never fabricate citations for lore that wasn't surfaced.
+
+      ## 3. DDD model
+      - Aggregates (and consistency boundaries)
+      - Bounded contexts touched (cross-context translations explicit)
+      - Ubiquitous language terms (introduced or refined; mark which are new)
+      - Domain events (past tense, minimal payload)
+      - Repository contracts (which aggregates need persistence)
+      For trivial / non-domain changes (config, cosmetic), explicitly note
+      "no domain model impact" and explain.
+
+      ## 4. Clean Architecture layer map
+      Map every proposed change to: domain / usecase / data / presentation.
+      For each layer touched, list:
+      - Concrete additions (new types, new methods)
+      - Modifications to existing types
+      - Cross-layer interfaces affected
+      Verify dependency direction: inner layers must not import from outer.
+      Reject any design that creates outward dependency from domain.
+
+      ## 5. SOLID check
+      For each new class/module/function, verify:
+      - **S**ingle Responsibility: does it have exactly one reason to change?
+      - **O**pen/Closed: extension via composition/strategy, modification
+        avoided?
+      - **L**iskov: subtypes preserve supertype contracts (no surprise nulls,
+        no narrower preconditions)?
+      - **I**nterface Segregation: clients depend only on methods they use?
+      - **D**ependency Inversion: depend on abstractions, not concretions?
+      List violations with the offending name and which principle. If none
+      apply (e.g. one-line config change), note "n/a — change does not
+      introduce new abstractions" and explain.
+
+      ## 6. Decision log (if applicable)
+      If the design introduces or revisits an architectural decision, record
+      it as Constraint / Rejected / Directive (matches lore schema). Skip
+      otherwise.
+
+      Output: design.md (single artifact, all six sections).
+
+  - id: slice-plan
+    description: Decompose the design into TDD-ready slices (≤50% context each).
+    pause_after: true
+    prompt: |
+      Decompose design.md into ordered slices. Each slice must be
+      implementable within ~50% of the context window. Each slice declares:
+      - goal (one sentence, domain-meaningful per ubiquitous language)
+      - layer scope (domain / usecase / data / presentation, or combination)
+      - aggregates touched
+      - test cases that will drive the upcoming TDD red phase (translate
+        acceptance criteria into specific test names)
+      - files expected to change
+      - verification command (profile gate)
+      For trivial tasks one slice is fine. Output: slice-plan.md.
+      The chain pauses here for user review of design.md + slice-plan.md.
+
+  - id: worktree
+    description: Create branch / worktree per profile.branching strategy.
+    prompt: |
+      Create the working branch per profile.branching:
+        - release-first: branch from active release/* and target release for PR
+        - trunk: branch from main and target main
+        - gitflow: branch per gitflow rules
+      Create a git worktree if profile.branching.worktree is `required`.
+      Output: worktree.md (branch name, base, worktree path or "no worktree").
+
+  - id: implement
+    description: |
+      TDD-driven implementation. For each slice, run the full red → green →
+      refactor cycle in order, then move to the next slice. Single artifact
+      records the complete loop per slice. Mandatory test-first; production
+      code is never written before a failing test exists.
+    prompt: |
+      For each slice in slice-plan.md, in order, run the TDD cycle:
+
+      ### RED — failing tests first
+      1. Translate the slice's acceptance criteria into test cases.
+      2. Tests target the layer declared by the design's Clean Architecture
+         map (domain test for domain logic, usecase test for orchestration,
+         data test for repository / mapper).
+      3. Tests use ubiquitous language from the DDD section (aggregate
+         names, event names) — not technical jargon.
+      4. Run tests. They MUST fail with assertion errors (not compile
+         errors, not import errors). If compilation fails, fix compile
+         issues — but do NOT add any production code that would satisfy
+         the assertion.
+
+      ### GREEN — minimum production code
+      5. Implement only what the failing tests demand. No "while I'm here"
+         additions. No speculative abstractions.
+      6. Honor layer assignment from the design's Clean Architecture map.
+      7. Honor SOLID principles from the design's SOLID section.
+      8. **Google Repository Pattern is mandatory** for any data layer
+         work in this slice:
+            - Repository interface lives in domain.
+            - RepositoryImpl in data layer composes LocalDataSource +
+              RemoteDataSource + Mapper.
+            - LocalDataSource is the single source of truth.
+            - DTOs never escape the data layer; mappers convert at the
+              boundary.
+            - Repository returns reactive streams or suspend functions of
+              **domain models**.
+      9. Run tests. All must PASS.
+      10. Run profile gates (build / lint as applicable). All must pass.
+
+      ### REFACTOR — tests stay green
+      11. Apply ubiquitous-language renaming if names drifted from the
+          design.
+      12. Extract methods / classes only where the same code appears 3+
+          times or where naming clarifies intent.
+      13. Tighten layer boundaries; move misplaced code.
+      14. Re-check SOLID; address any newly-emerged violations.
+      15. Re-run tests after each refactor — must remain green.
+      16. Do not add features. Do not add tests in this step.
+
+      Output: implement.md
+      For each slice include:
+        - slice id and goal
+        - RED: test files added, failure messages
+        - GREEN: production files added, test results, gate results
+        - REFACTOR: notable renames / extractions, post-refactor test run
+
+  - id: final-review
+    description: |
+      Final review. Always includes a generalist reviewer plus an
+      architecture-design reviewer (DDD + Clean Architecture + SOLID
+      combined). Profiles add stack-specific specialists on top.
+    multi_review: true
+    prompt: |
+      Spawn parallel reviewers (host adapter chooses parallelism — Claude
+      Task tool, Codex sessions, Gemini sessions):
+        - Generalist (templates/_shared/review/architecture.md)
+        - Architecture-design specialist (templates/_shared/review/architecture-design.md) — MANDATORY
+        - Plus angles declared in profile.review_angles
+      Aggregate findings into final-review.md with severity (must-fix /
+      should-fix / notes) and source angle. Cite paths as `path/to/file:line`.
+
+  - id: fix-loop
+    description: Address review findings (max 3 rounds). Tests stay green.
+    prompt: |
+      For each must-fix finding in final-review.md, apply the change. After
+      each round, re-run all tests and profile gates — they must remain
+      green. Cap at 3 rounds; escalate to user if must-fix list still has
+      items after round 3. Output: fix-loop.md.
+
+  - id: commit
+    description: Stage and commit using profile.commit_convention.
+    prompt: |
+      Group changes into logical commits per profile.commit_convention.style.
+      Do not include co-author trailers unless profile.commit_convention.co_author
+      is `include`. Output: commit.md (commit messages + hashes).
+
+  - id: push-pr
+    description: Push branch and open PR against profile.pr.target_branch.
+    prompt: |
+      Push the branch and open a PR. Body references: design section, slice
+      list, verification results, open risks. Output: push-pr.md (PR URL,
+      title, body summary).
+
+  - id: pr-watch
+    description: Watch PR — auto-respond to comments and CI failures.
+    prompt: |
+      Use agent-flow's built-in PR watcher. Read push-pr.md to find the PR
+      number, then run:
+
+          agent-flow pr-watch <number>           # poll until actionable
+          agent-flow pr-watch <number> --once    # single fetch (debugging)
+
+      The watcher returns a JSON summary with `status` ∈ {green, has_comments,
+      ci_failed, pending, merged, closed, error}.
+
+      Branch on status:
+
+      - **green** → write pr-watch.md noting "all checks green, ready to
+        merge". Workflow advances to the merge phase.
+
+      - **has_comments** → for each comment in `review_comments` /
+        `issue_comments`:
+          * code change requested → make the change in the worktree, commit,
+            push. Re-run `agent-flow pr-watch <number>` to confirm.
+          * discussion / question → reply in the PR thread without code change.
+          * decline (out of scope, conflicting opinion) → reply politely
+            explaining why, no code change.
+        After the loop, write pr-watch.md with the per-comment resolution.
+
+      - **ci_failed** → for each entry in `failed_checks`:
+          * reproduce the failure locally using the project gates
+            (profile.gates).
+          * fix in the worktree, commit, push.
+          * re-run `agent-flow pr-watch <number>`.
+        Write pr-watch.md with per-check fix log.
+
+      - **closed** (not merged) → ask the user before proceeding;
+        write pr-watch.md noting the closed status.
+
+      - **error** → surface the error message; do not retry until user input.
+
+      Output: pr-watch.md (status, actions taken, references to commits /
+      PR comment IDs).
+
+  - id: merge
+    description: Merge using profile.pr.merge_strategy.
+    prompt: |
+      Merge via profile.pr.merge_strategy (squash / rebase / merge). Output:
+      merge.md (merge commit hash, target branch).
+
+  - id: cleanup
+    description: Delete worktree, sync integration branch, archive run.
+    prompt: |
+      Delete the working branch and worktree if created. Sync the integration
+      branch on the local clone. Move the run's `active` marker so subsequent
+      runs do not resume this one. Prompt the user to add a Lore entry if the
+      run produced architectural decisions, failures, or tradeoffs worth
+      preserving. Output: cleanup.md.

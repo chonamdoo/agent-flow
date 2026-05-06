@@ -1,0 +1,53 @@
+# agent-flow profile schema (v1)
+#
+# Profiles describe per-stack behavior without leaking that knowledge into
+# workflow definitions. A workflow phase reads e.g. profile.gates and acts
+# accordingly; the workflow itself stays stack-neutral.
+
+version: 1
+
+# Required fields every profile must declare. Comments document expected
+# semantics; runners read these via PyYAML and validate against this shape.
+
+required:
+  - id                  # unique profile identifier (matches filename stem)
+
+optional:
+  branching:
+    strategy: "release-first | trunk | gitflow"
+    base: "branch name to start work from"
+    integration: "branch where PRs target"
+    worktree: "required | optional | disabled"
+
+  gates:
+    # ordered list of verification commands
+    - id: "stable id (e.g. build, test, lint)"
+      command: "shell command run from project root"
+      required: true
+      phase: "pre-commit | pre-push | post-merge"
+
+  review_angles:
+    # zero or more specialist reviewers added at final-review.
+    # The base run always includes one generalist reviewer; angles are extras.
+    - id: "stable angle id"
+      prompt: "path (relative to kit root) to the prompt template"
+
+  artifacts:
+    prd: "required | optional | skip"
+    adr: "required | optional | skip"
+    slice_plan: "required | optional | skip"
+
+  vocabulary:
+    # Stack-native renaming. Workflow YAML uses canonical ids (spec, decision-log,
+    # notes); the AI substitutes vocabulary[name] when speaking to the user.
+    prd: "spec"
+    adr: "decision-log"
+    lore: "notes"
+
+  commit_convention:
+    style: "conventional | tagged | freeform"
+    co_author: "include | skip"
+
+  pr:
+    target_branch: "main | release | develop"
+    merge_strategy: "squash | rebase | merge"

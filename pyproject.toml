@@ -5,24 +5,16 @@ build-backend = "hatchling.build"
 [project]
 name = "agent-flow"
 version = "0.1.0"
-description = "Personal agent workflow kit with environment adapters and reusable project profiles."
-readme = "README.md"
-requires-python = ">=3.11"
+description = "Project-agnostic AI workflow kit"
+requires-python = ">=3.10"
 dependencies = [
-  "PyYAML>=6.0.2",
+  "pyyaml>=6.0",
+  "click>=8.0",
 ]
+readme = "README.md"
 
 [project.scripts]
 agent-flow = "agent_flow.cli:main"
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_flow"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"workflows" = "agent_flow/workflows"
-"profiles" = "agent_flow/profiles"
-"roles" = "agent_flow/roles"
-"templates" = "agent_flow/templates"
