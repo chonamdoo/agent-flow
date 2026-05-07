@@ -19,6 +19,10 @@ from agent_flow.core.artifacts import (
 from agent_flow.core.gates import GateCommand, run_gates
 from agent_flow.core.profiles import detect_profile, load_profile
 from agent_flow.core.review import summarize_reviews, write_review_summary
+from agent_flow.core.report import write_run_report
+from agent_flow.core.query import explain_run, query_run
+from agent_flow.core.security import resolve_project_path
+from agent_flow.core.watch import write_watch_snapshot
 from agent_flow.core.team import (
     acknowledge_shutdown,
     add_task,
@@ -102,6 +106,25 @@ def main(argv: list[str] | None = None) -> int:
     status_parser = subparsers.add_parser("status")
     status_parser.add_argument("--root", default=".")
 
+    report_parser = subparsers.add_parser("report")
+    report_parser.add_argument("--root", default=".")
+    report_parser.add_argument("--run-dir")
+
+    query_parser = subparsers.add_parser("query")
+    query_parser.add_argument("query")
+    query_parser.add_argument("--root", default=".")
+    query_parser.add_argument("--run-dir")
+    query_parser.add_argument("--limit", type=int, default=10)
+
+    explain_parser = subparsers.add_parser("explain")
+    explain_parser.add_argument("question")
+    explain_parser.add_argument("--root", default=".")
+    explain_parser.add_argument("--run-dir")
+
+    watch_parser = subparsers.add_parser("watch")
+    watch_parser.add_argument("--root", default=".")
+    watch_parser.add_argument("--run-dir")
+
     pr_watch_parser = subparsers.add_parser("pr-watch")
     pr_watch_parser.add_argument("number", type=int)
     pr_watch_parser.add_argument("--repo")
@@ -127,6 +150,8 @@ def main(argv: list[str] | None = None) -> int:
     record_parser.add_argument("--run-dir", required=True)
     record_parser.add_argument("--stage", required=True)
     record_parser.add_argument("--status", default="completed")
+    record_parser.add_argument("--evidence-type", default="observed")
+    record_parser.add_argument("--confidence", default="unknown")
     record_parser.add_argument("--content", required=True)
 
     handoff_parser = subparsers.add_parser("handoff")
@@ -318,6 +343,36 @@ def main(argv: list[str] | None = None) -> int:
         print(status_summary(root))
         return 0
 
+    if args.command == "report":
+        run_dir = _resolve_run_dir(root, args.run_dir)
+        if run_dir is None:
+            return 1
+        print(write_run_report(run_dir))
+        return 0
+
+    if args.command == "query":
+        run_dir = _resolve_run_dir(root, args.run_dir)
+        if run_dir is None:
+            return 1
+        for hit in query_run(run_dir, args.query, limit=args.limit):
+            rel = hit.path.relative_to(run_dir)
+            print(f"{rel}:{hit.line}: {hit.text}")
+        return 0
+
+    if args.command == "explain":
+        run_dir = _resolve_run_dir(root, args.run_dir)
+        if run_dir is None:
+            return 1
+        print(explain_run(run_dir, args.question), end="")
+        return 0
+
+    if args.command == "watch":
+        run_dir = _resolve_run_dir(root, args.run_dir)
+        if run_dir is None:
+            return 1
+        print(write_watch_snapshot(run_dir))
+        return 0
+
     if args.command == "pr-watch":
         snapshot = (
             fetch_pr(args.number, repo=args.repo)
@@ -351,6 +406,8 @@ def main(argv: list[str] | None = None) -> int:
             run_dir=_resolve_project_path(root, args.run_dir),
             stage_id=args.stage,
             status=args.status,
+            evidence_type=args.evidence_type,
+            confidence=args.confidence,
             content=args.content,
         )
         print(path)
@@ -769,10 +826,52 @@ def _write_import_report(path: str | None, report: dict[str, object]) -> str | N
 
 
 def _resolve_project_path(root: Path, value: str) -> Path:
-    path = Path(value)
-    if path.is_absolute():
-        return path
-    return root / path
+    return resolve_project_path(root, value)
+
+
+def _resolve_run_dir(root: Path, value: str | None) -> Path | None:
+    run_dir = _resolve_project_path(root, value) if value else _latest_run_dir(root)
+    if run_dir is None:
+        print("no runs" if value is None else f"run dir not found: {_resolve_project_path(root, value)}", file=sys.stderr)
+        return None
+    if not run_dir.is_dir():
+        print(f"run dir not found: {run_dir}", file=sys.stderr)
+        return None
+    return run_dir
+
+
+def _latest_run_dir(root: Path) -> Path | None:
+    runs_root = root / ".agent-flow" / "runs"
+    if not runs_root.exists():
+        return None
+    candidates = [path.parent for path in runs_root.glob("*/*/manifest.json")]
+    candidates.extend(path for path in runs_root.iterdir() if _is_legacy_run_dir(path))
+    if not candidates:
+        return None
+    return max(candidates, key=_run_activity_mtime)
+
+
+def _run_activity_mtime(path: Path) -> float:
+    mtimes = [path.stat().st_mtime]
+    for child in _run_activity_files(path):
+        mtimes.append(child.stat().st_mtime)
+    return max(mtimes)
+
+
+def _run_activity_files(path: Path) -> list[Path]:
+    files = [
+        child
+        for pattern in ("*.json", "*.jsonl", "*.md", "artifacts/*", "handoffs/*")
+        for child in path.glob(pattern)
+        if child.is_file()
+    ]
+    return files
+
+
+def _is_legacy_run_dir(path: Path) -> bool:
+    if not (path / "meta.json").exists():
+        return False
+    return not any(child.is_dir() and (child / "manifest.json").exists() for child in path.iterdir())
 
 
 if __name__ == "__main__":
