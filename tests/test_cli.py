@@ -1076,7 +1076,8 @@ class CliTest(unittest.TestCase):
                     ),
                     0,
                 )
-            run_dir = root / ".agent-flow" / "runs" / "development" / "r1"
+            worktree = root / ".agent-flow" / "worktrees" / "slice-a"
+            run_dir = worktree / ".agent-flow" / "runs" / "development" / "r1"
             manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(
                 manifest["worktree"],
@@ -1086,14 +1087,14 @@ class CliTest(unittest.TestCase):
                     "path": str(root.resolve() / ".agent-flow" / "worktrees" / "slice-a"),
                 },
             )
-            self.assertTrue((root / ".agent-flow" / "worktrees" / "slice-a").is_dir())
+            self.assertTrue(worktree.is_dir())
 
     def test_start_worktree_rejects_dirty_leader_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             _init_git_repo(root)
             (root / "dirty.txt").write_text("dirty\n", encoding="utf-8")
-            with self.assertRaises(RuntimeError):
+            self.assertEqual(
                 main(
                     [
                         "start",
@@ -1107,10 +1108,12 @@ class CliTest(unittest.TestCase):
                         "--worktree",
                         "slice-a",
                     ]
-                )
+                ),
+                2,
+            )
             self.assertFalse((root / ".agent-flow" / "runs" / "development").exists())
 
-    def test_start_worktree_failure_does_not_leave_orphan_worktree(self) -> None:
+    def test_start_worktree_run_id_is_scoped_to_worktree_root(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             _init_git_repo(root)
@@ -1132,7 +1135,7 @@ class CliTest(unittest.TestCase):
                 0,
             )
 
-            with self.assertRaises(FileExistsError):
+            self.assertEqual(
                 main(
                     [
                         "start",
@@ -1148,8 +1151,22 @@ class CliTest(unittest.TestCase):
                         "--worktree",
                         "slice-a",
                     ]
-                )
-            self.assertFalse((root / ".agent-flow" / "worktrees" / "slice-a").exists())
+                ),
+                0,
+            )
+            self.assertTrue((root / ".agent-flow" / "runs" / "development" / "r1").exists())
+            self.assertTrue(
+                (
+                    root
+                    / ".agent-flow"
+                    / "worktrees"
+                    / "slice-a"
+                    / ".agent-flow"
+                    / "runs"
+                    / "development"
+                    / "r1"
+                ).exists()
+            )
 
     def test_start_worktree_write_failure_cleans_run_and_worktree(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1157,7 +1174,7 @@ class CliTest(unittest.TestCase):
             _init_git_repo(root)
 
             with mock.patch("agent_flow.core.state._write_json", side_effect=OSError("manifest failed")):
-                with self.assertRaises(OSError):
+                self.assertEqual(
                     main(
                         [
                             "start",
@@ -1173,8 +1190,22 @@ class CliTest(unittest.TestCase):
                             "--worktree",
                             "slice-a",
                         ]
-                    )
+                    ),
+                    2,
+                )
             self.assertFalse((root / ".agent-flow" / "runs" / "development" / "r1").exists())
+            self.assertFalse((root / ".agent-flow" / "worktrees" / "slice-a").exists())
+
+    def test_worktree_create_manifest_write_failure_cleans_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_git_repo(root)
+
+            with mock.patch("agent_flow.core.worktrees.write_worktree_manifest", side_effect=OSError("manifest failed")):
+                self.assertEqual(
+                    main(["worktree", "create", "--root", str(root), "--name", "slice-a"]),
+                    2,
+                )
             self.assertFalse((root / ".agent-flow" / "worktrees" / "slice-a").exists())
 
     def test_start_reuses_existing_worktree_manifest_branch(self) -> None:
@@ -1217,7 +1248,17 @@ class CliTest(unittest.TestCase):
                 0,
             )
             manifest = json.loads(
-                (root / ".agent-flow" / "runs" / "development" / "r1" / "manifest.json").read_text(
+                (
+                    root
+                    / ".agent-flow"
+                    / "worktrees"
+                    / "slice-a"
+                    / ".agent-flow"
+                    / "runs"
+                    / "development"
+                    / "r1"
+                    / "manifest.json"
+                ).read_text(
                     encoding="utf-8"
                 )
             )
@@ -1251,7 +1292,17 @@ class CliTest(unittest.TestCase):
                 0,
             )
             manifest = json.loads(
-                (root / ".agent-flow" / "runs" / "development" / "r1" / "manifest.json").read_text(
+                (
+                    root
+                    / ".agent-flow"
+                    / "worktrees"
+                    / "slice-a"
+                    / ".agent-flow"
+                    / "runs"
+                    / "development"
+                    / "r1"
+                    / "manifest.json"
+                ).read_text(
                     encoding="utf-8"
                 )
             )
@@ -1677,8 +1728,7 @@ class CliTest(unittest.TestCase):
             root = Path(temp_dir)
             _init_git_repo(root)
             (root / "dirty.txt").write_text("dirty\n", encoding="utf-8")
-            with self.assertRaises(RuntimeError):
-                main(["worktree", "create", "--root", str(root), "--name", "dirty"])
+            self.assertEqual(main(["worktree", "create", "--root", str(root), "--name", "dirty"]), 2)
 
     def test_worktree_create_allows_untracked_agent_flow_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
