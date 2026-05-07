@@ -6,8 +6,8 @@ Project-agnostic AI workflow kit. Start with `/agent-flow` in Claude Code, Codex
 
 ## Philosophy
 
-1. **One trigger to remember.** `/agent-flow <task>` in Claude / Codex / Gemini, backed by `agent-flow run "<task>"`. Tier inference and phase depth are the AI's job, not the user's.
-2. **Artifacts as state machine.** Each phase writes one `.md` file under `.agent-flow/runs/<run-id>/`. Context loss never loses progress.
+1. **One trigger to remember.** `/agent-flow <task>` in Claude / Codex / Gemini, backed by `agent-flow run "<task>" --worktree "<short-task-slug>"`. Tier inference and phase depth are the AI's job, not the user's.
+2. **Artifacts as state machine.** Each run writes state under `.agent-flow/runs/`; worktree-backed runs write that state inside their isolated `.agent-flow/worktrees/<name>/` checkout. Context loss never loses progress.
 3. **Chain is enforcement.** The next phase cannot start until the previous artifact exists. The slash trigger is only the entry point; the artifact chain blocks skipping.
 4. **Stack-agnostic core, profile-specific knobs.** Workflow YAML stays generic. Profiles supply branching strategy, gate commands, review angles, vocabulary.
 5. **Three AI hosts, one contract.** Claude / Codex / Gemini hosts share a single `HostedAdapter` parameterized by name; only the hint string differs. The runner is unaware of which AI is active.
@@ -29,17 +29,19 @@ The order matters: `pip install -e` first, then `npx ... install`. The bootstrap
 ```text
 # Run lifecycle from Claude / Codex / Gemini
 /agent-flow 유저 프로필 페이지 추가          # start
-/agent-flow                                  # resume after pause / context loss
-/agent-flow status                           # progress check
-/agent-flow abort                            # cancel an active run (artifacts kept)
+/agent-flow                                  # continue a selected worktree
+/agent-flow status                           # progress for a selected worktree
+/agent-flow abort                            # cancel a selected worktree run
 ```
 
 ```bash
 # Direct CLI equivalents
-agent-flow run "유저 프로필 페이지 추가"
-agent-flow continue
-agent-flow status
-agent-flow abort
+agent-flow run "유저 프로필 페이지 추가" --worktree "user-profile"
+agent-flow continue --worktree "user-profile"
+agent-flow status --worktree "user-profile"
+agent-flow abort --worktree "user-profile"
+agent-flow worktree list
+agent-flow worktree remove --name "user-profile"
 
 # Lore (memory) management
 agent-flow lore init <slug>                  # scaffold a new lore entry

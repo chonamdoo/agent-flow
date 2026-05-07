@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -74,6 +75,9 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("task")
     run_parser.add_argument("--root", default=".")
     run_parser.add_argument("--workflow", default="default")
+    run_parser.add_argument("--worktree")
+    run_parser.add_argument("--worktree-branch")
+    run_parser.add_argument("--allow-dirty", action="store_true")
     run_parser.add_argument(
         "--architecture",
         choices=("default", "ddd", "service-layer"),
@@ -82,9 +86,11 @@ def main(argv: list[str] | None = None) -> int:
 
     continue_parser = subparsers.add_parser("continue")
     continue_parser.add_argument("--root", default=".")
+    continue_parser.add_argument("--worktree")
 
     abort_parser = subparsers.add_parser("abort")
     abort_parser.add_argument("--root", default=".")
+    abort_parser.add_argument("--worktree")
     abort_parser.add_argument("--yes", "-y", action="store_true")
 
     start_parser = subparsers.add_parser("start")
@@ -105,6 +111,7 @@ def main(argv: list[str] | None = None) -> int:
 
     status_parser = subparsers.add_parser("status")
     status_parser.add_argument("--root", default=".")
+    status_parser.add_argument("--worktree")
 
     report_parser = subparsers.add_parser("report")
     report_parser.add_argument("--root", default=".")
@@ -180,6 +187,12 @@ def main(argv: list[str] | None = None) -> int:
     worktree_status = worktree_subparsers.add_parser("status")
     worktree_status.add_argument("--root", default=".")
     worktree_status.add_argument("--name", required=True)
+    worktree_list = worktree_subparsers.add_parser("list")
+    worktree_list.add_argument("--root", default=".")
+    worktree_remove = worktree_subparsers.add_parser("remove")
+    worktree_remove.add_argument("--root", default=".")
+    worktree_remove.add_argument("--name", required=True)
+    worktree_remove.add_argument("--keep-branch", action="store_true")
 
     team_parser = subparsers.add_parser("team")
     team_subparsers = team_parser.add_subparsers(dest="team_command", required=True)
@@ -294,26 +307,83 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "run":
-        active = find_active_run(root)
+        run_root = root
+        worktree_status = None
+        worktree_preexisting = False
+        if args.worktree is not None:
+            if not _is_git_repo(root):
+                print("worktree runs require a git repository", file=sys.stderr)
+                return 2
+            try:
+                plan = plan_worktree(root=root, name=args.worktree, branch=args.worktree_branch)
+            except ValueError as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
+            worktree_preexisting = plan.path.exists()
+            if plan.path.exists():
+                active = find_active_run(plan.path)
+                if active is not None:
+                    print(f"already active: {active.run_id} (task: {active.task!r})")
+                    return 2
+            try:
+                worktree_status = create_worktree(root=root, plan=plan, allow_dirty=args.allow_dirty)
+            except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
+                print(_format_cli_error(exc), file=sys.stderr)
+                return 2
+            print(f"worktree: {worktree_status.name} {worktree_status.path}")
+            run_root = worktree_status.path
+        active = find_active_run(run_root) if args.worktree is None else None
         if active is not None:
             print(f"already active: {active.run_id} (task: {active.task!r})")
+            if args.worktree is None and _is_git_repo(root):
+                print(
+                    "parallel worktree run: "
+                    'agent-flow run "<task>" --worktree "<short-task-slug>"'
+                )
             return 2
-        Runner(root, workflow=args.workflow, architecture=args.architecture).run(
-            mode=ResumeMode.START,
-            task=args.task,
-        )
+        try:
+            Runner(run_root, workflow=args.workflow, architecture=args.architecture).run(
+                mode=ResumeMode.START,
+                task=args.task,
+            )
+        except (OSError, ValueError, RuntimeError, KeyError, subprocess.CalledProcessError) as exc:
+            if worktree_status is not None and not worktree_preexisting:
+                _cleanup_worktree_after_failure(root, worktree_status, exc)
+            else:
+                print(_format_cli_error(exc), file=sys.stderr)
+            return 2
         return 0
 
     if args.command == "continue":
-        active = find_active_run(root)
+        try:
+            run_root = _worktree_root(root, args.worktree) if args.worktree else root
+        except ValueError as exc:
+            print(_format_cli_error(exc), file=sys.stderr)
+            return 2
+        if run_root is None:
+            return 1
+        active = find_active_run(run_root)
         if active is None:
-            print('진행 중인 run 없음. `agent-flow run "<task>"`로 시작하세요.')
+            if args.worktree:
+                print(
+                    f'진행 중인 run 없음. `agent-flow run "<task>" '
+                    f'--worktree "{_slug_for_hint(root, args.worktree)}"`로 시작하세요.'
+                )
+            else:
+                print('진행 중인 run 없음. `agent-flow run "<task>"`로 시작하세요.')
             return 0
-        Runner(root, run_dir=active.path).run(mode=ResumeMode.RESUME)
+        Runner(run_root, run_dir=active.path).run(mode=ResumeMode.RESUME)
         return 0
 
     if args.command == "abort":
-        active = find_active_run(root)
+        try:
+            run_root = _worktree_root(root, args.worktree) if args.worktree else root
+        except ValueError as exc:
+            print(_format_cli_error(exc), file=sys.stderr)
+            return 2
+        if run_root is None:
+            return 1
+        active = find_active_run(run_root)
         if active is None:
             print("진행 중인 run 없음 — abort할 대상이 없습니다.")
             return 0
@@ -333,14 +403,21 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
     if args.command == "status":
-        active = find_active_run(root)
+        try:
+            run_root = _worktree_root(root, args.worktree) if args.worktree else root
+        except ValueError as exc:
+            print(_format_cli_error(exc), file=sys.stderr)
+            return 2
+        if run_root is None:
+            return 1
+        active = find_active_run(run_root)
         if active is not None:
             active.print_status()
             return 0
-        if not (root / ".agent-flow" / "runs").exists():
+        if not (run_root / ".agent-flow" / "runs").exists():
             print("진행 중인 run 없음.")
             return 0
-        print(status_summary(root))
+        print(status_summary(run_root))
         return 0
 
     if args.command == "report":
@@ -450,14 +527,81 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "worktree":
         if args.worktree_command == "create":
-            plan = plan_worktree(root=root, name=args.name, branch=args.branch)
-            status = create_worktree(root=root, plan=plan, allow_dirty=args.allow_dirty)
+            try:
+                plan = plan_worktree(root=root, name=args.name, branch=args.branch)
+                status = create_worktree(root=root, plan=plan, allow_dirty=args.allow_dirty)
+            except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
+                print(_format_cli_error(exc), file=sys.stderr)
+                return 2
             print(f"{status.name} {status.branch} {status.path}")
             return 0
         if args.worktree_command == "status":
-            status = get_worktree_status(root=root, name=args.name)
+            try:
+                status = get_worktree_status(root=root, name=args.name)
+            except ValueError as exc:
+                print(_format_cli_error(exc), file=sys.stderr)
+                return 2
             state = "exists" if status.exists else "missing"
             print(f"{status.name} {status.branch} {status.path} {state}")
+            return 0
+        if args.worktree_command == "list":
+            names = _known_worktree_names(root)
+            if not names:
+                print("no worktrees")
+                return 0
+            for name in names:
+                try:
+                    status = get_worktree_status(root=root, name=name)
+                except ValueError:
+                    path = root / ".agent-flow" / "worktrees" / name
+                    print(f"{name} - {path} stale")
+                else:
+                    state = "exists" if _worktree_checkout_exists(status) else "stale"
+                    print(f"{status.name} {status.branch} {status.path} {state}")
+            return 0
+        if args.worktree_command == "remove":
+            try:
+                status = get_worktree_status(root=root, name=args.name)
+            except ValueError as exc:
+                print(_format_cli_error(exc), file=sys.stderr)
+                return 2
+            if not _worktree_checkout_exists(status):
+                stale_dir = root / ".agent-flow" / "worktrees" / status.name
+                if stale_dir.exists():
+                    if not args.keep_branch and status.branch_created_by_agent_flow:
+                        try:
+                            subprocess.run(
+                                ("git", "worktree", "prune"),
+                                cwd=root,
+                                text=True,
+                                capture_output=True,
+                                check=True,
+                            )
+                            if worktree_branch_exists(root=root, branch=status.branch):
+                                subprocess.run(
+                                    ("git", "branch", "-D", status.branch),
+                                    cwd=root,
+                                    text=True,
+                                    capture_output=True,
+                                    check=True,
+                                )
+                        except (OSError, subprocess.CalledProcessError) as exc:
+                            print(_format_cli_error(exc), file=sys.stderr)
+                            return 2
+                    if stale_dir.is_dir():
+                        shutil.rmtree(stale_dir)
+                    else:
+                        stale_dir.unlink()
+                    print(f"removed stale worktree manifest {status.name}")
+                    return 0
+                print(f"worktree not found or missing path: {status.name}", file=sys.stderr)
+                return 1
+            try:
+                remove_worktree(root=root, status=status, delete_branch=not args.keep_branch)
+            except subprocess.CalledProcessError as exc:
+                print(_format_cli_error(exc), file=sys.stderr)
+                return 2
+            print(f"removed {status.name} {status.path}")
             return 0
 
     if args.command == "team":
@@ -734,28 +878,30 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
     if args.command == "start":
-        workflow = load_workflow(args.workflow)
-        profile = detect_profile(root) if args.profile == "auto" else args.profile
-        adapter = detect_adapter() if args.adapter == "auto" else args.adapter
         worktree = None
         worktree_status = None
         worktree_preexisting = False
-        worktree_branch_preexisting = False
-        if args.worktree is not None:
-            plan = plan_worktree(root=root, name=args.worktree, branch=args.worktree_branch)
-            worktree_preexisting = plan.path.exists()
-            worktree_branch_preexisting = worktree_branch_exists(root=root, branch=plan.branch)
-            status = create_worktree(root=root, plan=plan, allow_dirty=args.allow_dirty)
-            worktree_status = status
-            worktree = {
-                "name": status.name,
-                "branch": status.branch,
-                "path": str(status.path),
-            }
         state = None
+        if args.worktree is not None and not _is_git_repo(root):
+            print("worktree runs require a git repository", file=sys.stderr)
+            return 2
         try:
+            workflow = load_workflow(args.workflow)
+            profile = detect_profile(root) if args.profile == "auto" else args.profile
+            adapter = detect_adapter() if args.adapter == "auto" else args.adapter
+            if args.worktree is not None:
+                plan = plan_worktree(root=root, name=args.worktree, branch=args.worktree_branch)
+                worktree_preexisting = plan.path.exists()
+                status = create_worktree(root=root, plan=plan, allow_dirty=args.allow_dirty)
+                worktree_status = status
+                worktree = {
+                    "name": status.name,
+                    "branch": status.branch,
+                    "path": str(status.path),
+                }
+            state_root = Path(worktree["path"]) if worktree is not None else root
             state = start_run(
-                root=root,
+                root=state_root,
                 request=RunRequest(
                     workflow_id=workflow.workflow_id,
                     task=args.task,
@@ -766,13 +912,15 @@ def main(argv: list[str] | None = None) -> int:
                     worktree=worktree,
                 ),
             )
-            _write_stage_prompts(root=root, state=state, workflow=workflow)
-        except Exception:
+            _write_stage_prompts(root=state_root, state=state, workflow=workflow)
+        except (OSError, ValueError, RuntimeError, KeyError, subprocess.CalledProcessError) as exc:
             if state is not None and state.run_dir.exists():
                 shutil.rmtree(state.run_dir)
             if worktree_status is not None and not worktree_preexisting:
-                remove_worktree(root=root, status=worktree_status, delete_branch=not worktree_branch_preexisting)
-            raise
+                _cleanup_worktree_after_failure(root, worktree_status, exc)
+            else:
+                print(_format_cli_error(exc), file=sys.stderr)
+            return 2
         print(state.run_dir)
         return 0
 
@@ -838,6 +986,64 @@ def _resolve_run_dir(root: Path, value: str | None) -> Path | None:
         print(f"run dir not found: {run_dir}", file=sys.stderr)
         return None
     return run_dir
+
+
+def _worktree_root(root: Path, name: str) -> Path | None:
+    status = get_worktree_status(root=root, name=name)
+    if _worktree_checkout_exists(status):
+        return status.path
+    known = _known_worktree_names(root)
+    suffix = f" known worktrees: {', '.join(known)}" if known else " no known worktrees"
+    print(f"worktree not found or missing path: {status.name}.{suffix}", file=sys.stderr)
+    return None
+
+
+def _known_worktree_names(root: Path) -> list[str]:
+    worktrees_root = root / ".agent-flow" / "worktrees"
+    if not worktrees_root.exists():
+        return []
+    return sorted(path.name for path in worktrees_root.iterdir() if path.is_dir())
+
+
+def _worktree_checkout_exists(status) -> bool:
+    return status.exists and (status.path / ".git").exists()
+
+
+def _format_cli_error(exc: BaseException) -> str:
+    if isinstance(exc, subprocess.CalledProcessError):
+        detail = (exc.stderr or exc.stdout or str(exc)).strip()
+        return detail or str(exc)
+    return str(exc)
+
+
+def _cleanup_worktree_after_failure(root: Path, status, original: BaseException) -> None:
+    try:
+        remove_worktree(root=root, status=status)
+    except (subprocess.CalledProcessError, OSError) as cleanup_exc:
+        print(
+            f"warning: failed to clean up worktree {status.name}: "
+            f"{_format_cli_error(cleanup_exc)}",
+            file=sys.stderr,
+        )
+    print(_format_cli_error(original), file=sys.stderr)
+
+
+def _slug_for_hint(root: Path, value: str) -> str:
+    try:
+        return plan_worktree(root=root, name=value).name
+    except ValueError:
+        return value
+
+
+def _is_git_repo(root: Path) -> bool:
+    result = subprocess.run(
+        ("git", "rev-parse", "--git-dir"),
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result.returncode == 0
 
 
 def _latest_run_dir(root: Path) -> Path | None:
