@@ -686,6 +686,71 @@ def test_watch_command_writes_latest_run_snapshot(tmp_path: Path):
     assert payload["pending"] == ["review.md"]
 
 
+def test_watch_dedupes_structured_artifacts(tmp_path: Path):
+    project = tmp_path / "watch_dedupe_project"
+    project.mkdir()
+    run_dir = project / ".agent-flow" / "runs" / "development" / "r1"
+    artifact_dir = run_dir / "artifacts"
+    artifact_dir.mkdir(parents=True)
+    (run_dir / "manifest.json").write_text(
+        '{"run_id":"r1","workflow_id":"development","task":"watch"}',
+        encoding="utf-8",
+    )
+    (run_dir / "review.md").write_text("status: blocked\n", encoding="utf-8")
+    (artifact_dir / "review.md").write_text(
+        "# Stage Result: review\n\n- Status: completed\n",
+        encoding="utf-8",
+    )
+
+    result = _run_cli(["watch"], project)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((run_dir / "watch.json").read_text(encoding="utf-8"))
+    assert payload["artifact_count"] == 1
+    assert payload["blocked"] == []
+
+
+def test_watch_uses_newest_state_metadata(tmp_path: Path):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.core.watch import write_watch_snapshot
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    artifact = run_dir / "review.md"
+    manifest = run_dir / "manifest.json"
+    meta = run_dir / "meta.json"
+    artifact.write_text("status: completed\n", encoding="utf-8")
+    manifest.write_text("{}", encoding="utf-8")
+    meta.write_text("{}", encoding="utf-8")
+    now = time.time()
+    os.utime(manifest, (now - 20, now - 20))
+    os.utime(artifact, (now - 10, now - 10))
+    os.utime(meta, (now, now))
+
+    write_watch_snapshot(run_dir)
+    payload = json.loads((run_dir / "watch.json").read_text(encoding="utf-8"))
+    assert payload["needs_continue"] is False
+
+
+def test_run_report_ignores_unreadable_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.core.report import write_run_report
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    manifest = run_dir / "manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+
+    original_read_text = Path.read_text
+
+    def fail_manifest(path: Path, *args, **kwargs):
+        if path == manifest:
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_manifest)
+    assert write_run_report(run_dir).is_file()
+
+
 def test_run_dir_commands_reject_missing_run_dir(tmp_path: Path):
     project = tmp_path / "missing_run_dir_project"
     project.mkdir()

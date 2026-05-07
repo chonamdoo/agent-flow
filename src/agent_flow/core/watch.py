@@ -24,17 +24,24 @@ def write_watch_snapshot(run_dir: Path) -> Path:
 def _artifact_paths(run_dir: Path) -> list[Path]:
     paths = sorted((run_dir / "artifacts").glob("*.md")) if (run_dir / "artifacts").is_dir() else []
     paths.extend(sorted(path for path in run_dir.glob("*.md") if path.name not in {"RUN_REPORT.md", "recovery.md"}))
-    return paths
+    paths_by_stage: dict[str, Path] = {}
+    for path in paths:
+        artifact = read_phase_artifact(path)
+        previous = paths_by_stage.get(artifact.stage_id)
+        if previous is None or _artifact_priority(path, run_dir) > _artifact_priority(previous, run_dir):
+            paths_by_stage[artifact.stage_id] = path
+    return sorted(paths_by_stage.values())
 
 
 def _needs_continue(run_dir: Path, artifacts: list[Path]) -> bool:
     manifest = run_dir / "manifest.json"
     meta = run_dir / "meta.json"
-    state_file = manifest if manifest.exists() else meta
-    if not state_file.exists() or not artifacts:
+    state_files = [path for path in (manifest, meta) if path.exists()]
+    if not state_files or not artifacts:
         return False
+    latest_state_mtime = max(path.stat().st_mtime for path in state_files)
     latest_artifact_mtime = max(path.stat().st_mtime for path in artifacts)
-    return latest_artifact_mtime > state_file.stat().st_mtime
+    return latest_artifact_mtime > latest_state_mtime
 
 
 def _artifact_state_buckets(artifacts: list[Path]) -> dict[str, list[str]]:
@@ -47,3 +54,7 @@ def _artifact_state_buckets(artifacts: list[Path]) -> dict[str, list[str]]:
         elif "pending" in state:
             buckets["pending"].append(path.name)
     return buckets
+
+
+def _artifact_priority(path: Path, run_dir: Path) -> int:
+    return 1 if path.parent == run_dir / "artifacts" else 0
