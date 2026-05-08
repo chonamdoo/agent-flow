@@ -177,6 +177,21 @@ class CliTest(unittest.TestCase):
             self.assertTrue((project_root / ".agent-flow" / "skills" / "plan-reviewer" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "ddd-clean-architecture" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "architecture-reviewer" / "SKILL.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "skills" / "android-mvi-feature" / "SKILL.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "skills" / "android-module-creator" / "SKILL.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "skills" / "android-code-review" / "SKILL.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "skills" / "android-debugging" / "SKILL.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "skills" / "graphify" / "SKILL.md").is_file())
+            self.assertTrue(
+                (
+                    project_root
+                    / ".agent-flow"
+                    / "skills"
+                    / "android-guides"
+                    / "references"
+                    / "architecture-rules-guide.md"
+                ).is_file()
+            )
             self.assertTrue((project_root / ".agent-flow" / "prompts" / "push-watch.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "prompts" / "push-watch-tick.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "push-watch" / "SKILL.md").is_file())
@@ -220,6 +235,64 @@ class CliTest(unittest.TestCase):
                 "npx github:chonamdoo/agent-flow run next",
                 (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8"),
             )
+            gitignore = (project_root / ".gitignore").read_text(encoding="utf-8")
+            self.assertIn("graphify-out/manifest.json", gitignore)
+            self.assertIn("graphify-out/cost.json", gitignore)
+
+    def test_node_installer_can_include_graphify(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            result = subprocess.run(
+                (
+                    node,
+                    str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"),
+                    "install",
+                    "--with-graphify",
+                ),
+                cwd=project_root,
+                env={**os.environ, "AGENT_FLOW_GRAPHIFY_DRY_RUN": "1"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("graphify installed status=dry-run", result.stdout)
+            kit = json.loads((project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
+            self.assertEqual(kit["graphify"]["package"], "graphifyy")
+            self.assertEqual(kit["graphify"]["command"], "graphify")
+            self.assertEqual(kit["graphify"]["status"], "dry-run")
+            self.assertEqual(kit["graphify"]["platforms"], ["claude", "codex", "gemini"])
+
+    def test_legacy_node_installer_can_include_graphify(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            result = subprocess.run(
+                (
+                    node,
+                    str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-install.mjs"),
+                    "install",
+                    "--with-graphify",
+                ),
+                cwd=project_root,
+                env={**os.environ, "AGENT_FLOW_GRAPHIFY_DRY_RUN": "1"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("graphify: dry-run", result.stdout)
+            kit = json.loads((project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
+            self.assertEqual(kit["graphify"]["package"], "graphifyy")
+            self.assertEqual(kit["graphify"]["command"], "graphify")
+            self.assertEqual(kit["graphify"]["status"], "dry-run")
+            self.assertEqual(kit["graphify"]["platforms"], ["claude", "codex", "gemini"])
+            gitignore = (project_root / ".gitignore").read_text(encoding="utf-8")
+            self.assertIn("graphify-out/manifest.json", gitignore)
+            self.assertIn("graphify-out/cost.json", gitignore)
 
     def test_node_installer_reinstall_updates_managed_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -281,6 +354,7 @@ class CliTest(unittest.TestCase):
             ("nextjs", {"package.json": '{"dependencies":{"next":"latest"}}\n'}),
             ("react-native", {"package.json": '{"dependencies":{"react-native":"latest"}}\n'}),
             ("python", {"pyproject.toml": "[project]\nname='demo'\n"}),
+            ("android", {"settings.gradle.kts": 'pluginManagement { repositories { google() } }\n'}),
         ]
         node = _node_executable()
         for expected, files in cases:
@@ -1475,6 +1549,15 @@ class CliTest(unittest.TestCase):
             with contextlib.redirect_stdout(output):
                 self.assertEqual(main(["detect-profile", "--root", temp_dir]), 0)
             self.assertEqual(output.getvalue().strip(), "generic")
+
+    def test_detect_profile_reports_android_for_gradle_project(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "settings.gradle.kts").write_text("", encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["detect-profile", "--root", temp_dir]), 0)
+            self.assertEqual(output.getvalue().strip(), "android")
 
     def test_provider_list_reports_host_provider_availability(self) -> None:
         output = io.StringIO()

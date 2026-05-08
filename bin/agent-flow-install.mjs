@@ -11,6 +11,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 
 const KIT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const PROJECT = process.cwd();
@@ -137,6 +138,7 @@ function install() {
   bootstrapMarkdown("CLAUDE.md");
   bootstrapMarkdown("AGENTS.md");
   bootstrapMarkdown("GEMINI.md");
+  upsertGitignore(path.join(PROJECT, ".gitignore"), ["graphify-out/manifest.json", "graphify-out/cost.json"]);
 
   // Copy bundled skills into project-local skills dir.
   // Host-AI-specific skill paths (`.claude/skills/`, `.codex/skills/`) are
@@ -214,6 +216,9 @@ function install() {
       gemini: "GEMINI.md",
     },
   };
+  if (process.argv.includes("--with-graphify")) {
+    kitJson.graphify = installGraphify();
+  }
   fs.writeFileSync(
     path.join(AF_DIR, "kit.json"),
     JSON.stringify(kitJson, null, 2)
@@ -229,17 +234,136 @@ function install() {
   console.log(`  codex   : agent-flow skill ${codexSkillStatus}`);
   console.log(`  ~/.claude: agent-flow skill ${globalClaudeSkillStatus}`);
   console.log(`  ~/.codex : agent-flow skill ${globalCodexSkillStatus}`);
+  if (kitJson.graphify) {
+    console.log(`  graphify: ${kitJson.graphify.status}`);
+  }
   console.log(``);
   console.log(`Next: /agent-flow <task>`);
   console.log(`      (or: agent-flow run "<task>")`);
   console.log(`(If 'agent-flow' isn't on PATH yet: pip install -e ${KIT_ROOT})`);
 }
 
+function installGraphify() {
+  if (process.env.AGENT_FLOW_GRAPHIFY_DRY_RUN === "1") {
+    return {
+      status: "dry-run",
+      package: "graphifyy",
+      command: "graphify",
+      platforms: ["claude", "codex", "gemini"],
+    };
+  }
+  const installer = installGraphifyPackage();
+  const platforms = runGraphifyInstall();
+  return {
+    status: "installed",
+    package: "graphifyy",
+    command: "graphify",
+    installer,
+    platforms,
+  };
+}
+
+function upsertGitignore(pathName, entries) {
+  const current = fs.existsSync(pathName) ? fs.readFileSync(pathName, "utf8") : "";
+  const lines = current.split(/\r?\n/);
+  const existing = new Set(lines.map((line) => line.trim()));
+  const missing = entries.filter((entry) => !existing.has(entry) && !existing.has("graphify-out/"));
+  if (missing.length === 0) {
+    return;
+  }
+  const prefix = current.trimEnd();
+  const next = `${prefix}${prefix ? "\n" : ""}${missing.join("\n")}\n`;
+  fs.writeFileSync(pathName, next, "utf8");
+}
+
+function runChecked(commandName, args) {
+  const result = spawnSync(commandName, args, {
+    cwd: PROJECT,
+    stdio: "inherit",
+    env: process.env,
+  });
+  if (result.error) {
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    throw new Error(`${commandName} ${args.join(" ")} failed with exit ${result.status}`);
+  }
+}
+
+function runOptional(commandName, args) {
+  const result = spawnSync(commandName, args, {
+    cwd: PROJECT,
+    stdio: "inherit",
+    env: process.env,
+  });
+  if (result.error && result.error.code === "ENOENT") {
+    return false;
+  }
+  if (result.error) {
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    throw new Error(`${commandName} ${args.join(" ")} failed with exit ${result.status}`);
+  }
+  return true;
+}
+
+function installGraphifyPackage() {
+  if (runCandidate("uv", ["tool", "install", "--python", "3.12", "--force", "graphifyy"])) {
+    return "uv tool";
+  }
+  const python = preferredPython();
+  if (runCandidate("pipx", ["install", "--python", python, "--force", "graphifyy"])) {
+    return "pipx";
+  }
+  runChecked(python, ["-m", "pip", "install", "graphifyy"]);
+  return "pip";
+}
+
+function runGraphifyInstall() {
+  runGraphifyCommand(["install"]);
+  runGraphifyCommand(["install", "--platform", "codex"]);
+  runGraphifyCommand(["install", "--platform", "gemini"]);
+  return ["claude", "codex", "gemini"];
+}
+
+function runGraphifyCommand(args) {
+  if (runOptional("graphify", args)) {
+    return;
+  }
+  runChecked(preferredPython(), ["-m", "graphify", ...args]);
+}
+
+function runCandidate(commandName, args) {
+  const result = spawnSync(commandName, args, {
+    cwd: PROJECT,
+    stdio: "inherit",
+    env: process.env,
+  });
+  if (result.error && result.error.code === "ENOENT") {
+    return false;
+  }
+  if (result.error) {
+    throw result.error;
+  }
+  return result.status === 0;
+}
+
+function preferredPython() {
+  for (const candidate of ["python3.12", "python3.11", "python3.10", "python3"]) {
+    const result = spawnSync(candidate, ["--version"], { stdio: "ignore" });
+    if (!result.error && result.status === 0) {
+      return candidate;
+    }
+  }
+  return "python3";
+}
+
 const cmd = process.argv[2];
 if (cmd === "install") {
   install();
 } else if (cmd === "--help" || cmd === "-h" || !cmd) {
-  console.log("Usage: npx <agent-flow-package> install");
+  console.log("Usage: npx <agent-flow-package> install [--with-graphify]");
   process.exit(0);
 } else {
   console.error(`Unknown command: ${cmd}`);
