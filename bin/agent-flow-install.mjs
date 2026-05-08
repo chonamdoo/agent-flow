@@ -220,7 +220,7 @@ function install() {
       gemini: "GEMINI.md",
     },
   };
-  if (process.argv.includes("--with-graphify")) {
+  if (!process.argv.includes("--without-graphify")) {
     kitJson.graphify = installGraphify();
   }
   fs.writeFileSync(
@@ -254,16 +254,23 @@ function installGraphify() {
       package: "graphifyy",
       command: "graphify",
       platforms: ["claude", "codex", "gemini"],
+      graph: {
+        status: "dry-run",
+        command: "graphify .",
+        output: "graphify-out/",
+      },
     };
   }
   const installer = installGraphifyPackage();
   const platforms = runGraphifyInstall();
+  const graph = runGraphifyProjectGraph();
   return {
     status: "installed",
     package: "graphifyy",
     command: "graphify",
     installer,
     platforms,
+    graph,
   };
 }
 
@@ -331,6 +338,15 @@ function runGraphifyInstall() {
   return ["claude", "codex", "gemini"];
 }
 
+function runGraphifyProjectGraph() {
+  runGraphifyCommand(["."]);
+  return {
+    status: "generated",
+    command: "graphify .",
+    output: "graphify-out/",
+  };
+}
+
 function runGraphifyCommand(args) {
   if (runOptional("graphify", args)) {
     return;
@@ -384,7 +400,7 @@ const cmd = process.argv[2];
 if (cmd === "install") {
   install();
 } else if (cmd === "--help" || cmd === "-h" || !cmd) {
-  console.log("Usage: npx <agent-flow-package> install [--with-graphify]");
+  console.log("Usage: npx <agent-flow-package> install [--without-graphify]");
   process.exit(0);
 } else {
   console.error(`Unknown command: ${cmd}`);
