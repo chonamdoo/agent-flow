@@ -545,7 +545,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "review":
         if args.review_command == "retry":
-            _print_review_retry_status(args.reviewer, args.retry_after)
+            try:
+                _print_review_retry_status(args.reviewer, args.retry_after)
+            except ValueError as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
             return 0
 
     if args.command == "worktree":
@@ -1077,8 +1081,10 @@ def _parse_retry_after_arg(value: str | None) -> datetime | None:
         return None
     try:
         parsed = datetime.fromisoformat(value)
-    except ValueError:
-        return None
+    except ValueError as exc:
+        raise ValueError(
+            "--retry-after must be ISO-8601, e.g. 2026-05-08T10:40:00+00:00"
+        ) from exc
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)

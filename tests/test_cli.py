@@ -735,6 +735,16 @@ class CliTest(unittest.TestCase):
             )
             self.assertEqual(pending.returncode, 1)
             self.assertIn("blocked: PR watch is pending", pending.stderr)
+            pending_status = subprocess.run(
+                (node, cli, "run", "status"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(pending_status.returncode, 0, pending_status.stderr)
+            self.assertIn("reason: route_blocked", pending_status.stdout)
+            self.assertIn("next_command: npx github:chonamdoo/agent-flow run next", pending_status.stdout)
 
             watch.write_text("status: comments\n", encoding="utf-8")
             comments = subprocess.run(
@@ -1531,6 +1541,10 @@ class CliTest(unittest.TestCase):
                 0,
             )
             run_dir = root / ".agent-flow" / "runs" / "review" / "r1"
+            manifest = run_dir / "manifest.json"
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+            payload["current_phase"] = "explore"
+            manifest.write_text(json.dumps(payload), encoding="utf-8")
             self.assertEqual(
                 main(
                     [
@@ -1615,6 +1629,15 @@ class CliTest(unittest.TestCase):
             f"next_command: agent-flow review retry --reviewer claude --retry-after {retry_after}",
             lines,
         )
+
+    def test_review_retry_rejects_malformed_retry_after(self) -> None:
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.assertEqual(
+                main(["review", "retry", "--reviewer", "claude", "--retry-after", "not-a-date"]),
+                2,
+            )
+        self.assertIn("--retry-after must be ISO-8601", stderr.getvalue())
 
     def test_node_status_escapes_task_newlines_and_emits_json(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

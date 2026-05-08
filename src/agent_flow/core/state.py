@@ -196,7 +196,8 @@ def _current_stage_status(
 ) -> tuple[str, str | None]:
     if isinstance(manifest_phase, str) and manifest_phase:
         artifact = run_dir / "artifacts" / f"{manifest_phase}.md"
-        return manifest_phase, str(artifact)
+        if not artifact.exists():
+            return manifest_phase, str(artifact)
     try:
         workflow = load_workflow(workflow_id)
     except (OSError, ValueError):

@@ -26,9 +26,8 @@ import os
 import re
 import shlex
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 from agent_flow.cli_detect import (
     CliInfo,
@@ -216,19 +215,40 @@ def _rate_limit_payload(r: SubprocessResult) -> dict[str, str] | None:
 
 
 def _parse_retry_after(text: str) -> str:
-    zone = ZoneInfo("Asia/Seoul")
-    now = datetime.now(zone)
-    match = re.search(r"resets?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", text, re.IGNORECASE)
+    now = datetime.now(timezone.utc)
+    relative = re.search(
+        r"resets?\s+in\s+(\d+)\s*(minutes?|mins?|m|hours?|hrs?|h)\b",
+        text,
+        re.IGNORECASE,
+    )
+    if relative:
+        amount = int(relative.group(1))
+        unit = relative.group(2).lower()
+        delta = timedelta(hours=amount) if unit.startswith("h") else timedelta(minutes=amount)
+        return (now + delta).isoformat()
+
+    match = re.search(
+        r"resets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?",
+        text,
+        re.IGNORECASE,
+    )
     if not match:
-        return now.isoformat()
+        return (now + timedelta(hours=1)).isoformat()
     hour = int(match.group(1))
     minute = int(match.group(2) or 0)
+    if hour > 23 or minute > 59:
+        return (now + timedelta(hours=1)).isoformat()
     suffix = (match.group(3) or "").lower()
     if suffix == "pm" and hour != 12:
         hour += 12
     if suffix == "am" and hour == 12:
         hour = 0
-    candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    candidate = datetime.now().astimezone().replace(
+        hour=hour,
+        minute=minute,
+        second=0,
+        microsecond=0,
+    ).astimezone(timezone.utc)
     if candidate <= now:
         candidate += timedelta(days=1)
     return candidate.isoformat()

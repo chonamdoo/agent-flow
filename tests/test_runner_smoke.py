@@ -887,12 +887,14 @@ def test_required_markers_block_incomplete_artifact(tmp_path: Path):
 
 def test_render_angle_result_marks_claude_rate_limit_as_blocker(tmp_path: Path):
     sys.path.insert(0, str(KIT_ROOT / "src"))
+    from datetime import datetime, timezone
+
     from agent_flow.multi_review import _render_angle_result
     from agent_flow.subprocess_pool import SubprocessResult
 
     result = SubprocessResult(
         job_id="claude-generalist",
-        stderr="You've hit your limit. Usage limit resets 2:40pm.",
+        stderr="You've hit your limit. Usage limit resets at 2:40pm.",
         returncode=1,
     )
 
@@ -904,6 +906,9 @@ def test_render_angle_result_marks_claude_rate_limit_as_blocker(tmp_path: Path):
     assert "retry_after:" in artifact
     assert "next_command: agent-flow review retry --reviewer claude --retry-after " in artifact
     assert '"reason": "reviewer_rate_limited"' in artifact
+    retry_after = next(line for line in artifact.splitlines() if line.startswith("retry_after: "))
+    parsed = datetime.fromisoformat(retry_after.removeprefix("retry_after: "))
+    assert parsed > datetime.now(timezone.utc)
 
 
 def test_generic_stub_does_not_write_completion_markers(tmp_path: Path, monkeypatch):

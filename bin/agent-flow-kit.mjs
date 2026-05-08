@@ -360,11 +360,22 @@ function printStatus(state) {
       phase.required_markers ?? [],
     );
     status = "blocked";
-    reason = missing.length > 0
-      ? "missing_completion_markers"
-      : "phase_artifact_written_advance_required";
+    if (missing.length > 0) {
+      reason = "missing_completion_markers";
+    } else {
+      try {
+        nextPhaseIndex(state, phase, requiredArtifact);
+        reason = "phase_artifact_written_advance_required";
+      } catch (_error) {
+        reason = "route_blocked";
+      }
+    }
   }
-  const nextCommand = complete ? "none" : `${AGENT_FLOW_COMMAND} run advance`;
+  const nextCommand = complete
+    ? "none"
+    : reason === "route_blocked"
+      ? `${AGENT_FLOW_COMMAND} run next`
+      : `${AGENT_FLOW_COMMAND} run advance`;
   const payload = {
     status,
     run: `${state.workflow}/${state.run_id}`,
