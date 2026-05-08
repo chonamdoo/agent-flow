@@ -24,6 +24,16 @@ npx <path-to-this-kit> install
 
 The order matters: `pip install -e` first, then `npx ... install`. The bootstrap markdown references the `agent-flow` binary, which step 1 makes available.
 
+To install the optional Graphify knowledge-graph skill at the same time:
+
+```bash
+npx <path-to-this-kit> install --with-graphify
+```
+
+Graphify installs the PyPI package `graphifyy`, registers Claude/Codex/Gemini assistant commands, exposes the `graphify` CLI, and writes graph outputs to `graphify-out/`. The installer ignores only local Graphify bookkeeping files (`graphify-out/manifest.json`, `graphify-out/cost.json`) so teams can choose whether to commit the graph report and JSON.
+
+After installation, run `graphify .` from a terminal, `/graphify .` in Claude/Gemini-style assistants, or `$graphify .` in Codex.
+
 ## Use
 
 ```text

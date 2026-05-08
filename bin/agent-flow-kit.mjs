@@ -4,10 +4,13 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { execFileSync, spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 const command = process.argv[2];
 const AGENT_FLOW_COMMAND = "npx github:chonamdoo/agent-flow";
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
+const KIT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const installArgs = process.argv.slice(3);
 
 function installProject() {
   const root = process.cwd();
@@ -51,6 +54,7 @@ function installProject() {
     architectureReviewerSkillMarkdown(),
   );
   writeManagedFile(path.join(agentFlowDir, "skills", "push-watch", "SKILL.md"), pushWatchSkillMarkdown());
+  copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "skills"), path.join(agentFlowDir, "skills"));
   writeManagedFile(path.join(agentFlowDir, "prompts", "push-watch.md"), pushWatchPromptMarkdown());
   writeManagedFile(path.join(agentFlowDir, "prompts", "push-watch-tick.md"), pushWatchTickPromptMarkdown());
   for (const phase of PHASES) {
@@ -63,12 +67,20 @@ function installProject() {
   writeManagedFile(path.join(agentFlowDir, "bootstrap", "AGENTS.md"), bootstrapMarkdown("AGENTS.md"));
   writeManagedFile(path.join(agentFlowDir, "bootstrap", "CLAUDE.md"), bootstrapMarkdown("CLAUDE.md"));
   writeManagedFile(path.join(agentFlowDir, "bootstrap", "GEMINI.md"), bootstrapMarkdown("GEMINI.md"));
+  upsertGitignore(path.join(root, ".gitignore"), ["graphify-out/manifest.json", "graphify-out/cost.json"]);
   upsertBootstrapBlock(path.join(root, "AGENTS.md"), "AGENTS.md");
   upsertBootstrapBlock(path.join(root, "CLAUDE.md"), "CLAUDE.md");
   upsertBootstrapBlock(path.join(root, "GEMINI.md"), "GEMINI.md");
 
+  if (installArgs.includes("--with-graphify")) {
+    payload.graphify = installGraphify(root);
+  }
+
   fs.writeFileSync(path.join(agentFlowDir, "kit.json"), `${JSON.stringify(payload, null, 2)}\n`, "utf8");
   console.log(`agent-flow installed profile=${profile}`);
+  if (payload.graphify) {
+    console.log(`graphify installed status=${payload.graphify.status}`);
+  }
 }
 
 function runWorkflowCommand(args) {
@@ -218,6 +230,14 @@ function detectProfile(rootDir) {
   }
   if (fs.existsSync(path.join(rootDir, "pyproject.toml"))) {
     return "python";
+  }
+  if (
+    fs.existsSync(path.join(rootDir, "build.gradle")) ||
+    fs.existsSync(path.join(rootDir, "settings.gradle")) ||
+    fs.existsSync(path.join(rootDir, "build.gradle.kts")) ||
+    fs.existsSync(path.join(rootDir, "settings.gradle.kts"))
+  ) {
+    return "android";
   }
   return "generic";
 }
@@ -439,6 +459,146 @@ function writeManagedFileIfMissingOrSame(pathName, content) {
   return true;
 }
 
+function copyBundledDirIfMissingOrSame(src, dest) {
+  if (!fs.existsSync(src)) {
+    return;
+  }
+  fs.mkdirSync(dest, { recursive: true });
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    const srcPath = path.join(src, entry.name);
+    const destPath = path.join(dest, entry.name);
+    if (entry.isDirectory()) {
+      copyBundledDirIfMissingOrSame(srcPath, destPath);
+      continue;
+    }
+    if (!entry.isFile()) {
+      continue;
+    }
+    const content = fs.readFileSync(srcPath, "utf8");
+    writeManagedFileIfMissingOrSame(destPath, content);
+  }
+}
+
+function installGraphify(root) {
+  if (process.env.AGENT_FLOW_GRAPHIFY_DRY_RUN === "1") {
+    return {
+      status: "dry-run",
+      package: "graphifyy",
+      command: "graphify",
+      platforms: ["claude", "codex", "gemini"],
+    };
+  }
+  const installer = installGraphifyPackage(root);
+  const platforms = runGraphifyInstall(root);
+  return {
+    status: "installed",
+    package: "graphifyy",
+    command: "graphify",
+    installer,
+    platforms,
+  };
+}
+
+function runChecked(commandName, args, cwd) {
+  const result = spawnSync(commandName, args, {
+    cwd,
+    stdio: "inherit",
+    env: process.env,
+  });
+  if (result.error) {
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    throw new Error(`${commandName} ${args.join(" ")} failed with exit ${result.status}`);
+  }
+}
+
+function runOptional(commandName, args, cwd) {
+  const result = spawnSync(commandName, args, {
+    cwd,
+    stdio: "inherit",
+    env: process.env,
+  });
+  if (result.error && result.error.code === "ENOENT") {
+    return false;
+  }
+  if (result.error) {
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    throw new Error(`${commandName} ${args.join(" ")} failed with exit ${result.status}`);
+  }
+  return true;
+}
+
+function installGraphifyPackage(root) {
+  if (runCandidate("uv", ["tool", "install", "--python", "3.12", "--force", "graphifyy"], root)) {
+    return "uv tool";
+  }
+  const python = preferredPython();
+  if (runCandidate("pipx", ["install", "--python", python, "--force", "graphifyy"], root)) {
+    return "pipx";
+  }
+  runChecked(python, ["-m", "pip", "install", "graphifyy"], root);
+  return "pip";
+}
+
+function runGraphifyInstall(root) {
+  runGraphifyCommand(["install"], root);
+  runGraphifyCommand(["install", "--platform", "codex"], root);
+  runGraphifyCommand(["install", "--platform", "gemini"], root);
+  return ["claude", "codex", "gemini"];
+}
+
+function runGraphifyCommand(args, root) {
+  if (runOptional("graphify", args, root)) {
+    return;
+  }
+  const graphify = graphifyExecutable();
+  runChecked(graphify.command, [...graphify.prefixArgs, ...args], root);
+}
+
+function runCandidate(commandName, args, cwd) {
+  const result = spawnSync(commandName, args, {
+    cwd,
+    stdio: "inherit",
+    env: process.env,
+  });
+  if (result.error && result.error.code === "ENOENT") {
+    return false;
+  }
+  if (result.error) {
+    throw result.error;
+  }
+  return result.status === 0;
+}
+
+function preferredPython() {
+  for (const candidate of ["python3.12", "python3.11", "python3.10", "python3", "python"]) {
+    const result = spawnSync(candidate, ["--version"], { stdio: "ignore" });
+    if (!result.error && result.status === 0) {
+      return candidate;
+    }
+  }
+  return "python3";
+}
+
+function graphifyExecutable() {
+  for (const candidate of [
+    path.join(process.env.UV_TOOL_BIN_DIR || "", "graphify"),
+    path.join(process.env.PIPX_BIN_DIR || "", "graphify"),
+    path.join(HOME, ".local", "bin", "graphify"),
+  ]) {
+    if (!candidate) {
+      continue;
+    }
+    if (fs.existsSync(candidate)) {
+      return { command: candidate, prefixArgs: [] };
+    }
+  }
+  return { command: preferredPython(), prefixArgs: ["-m", "graphify"] };
+}
+
 function assertFreshArtifact(state, phase, artifact) {
   if (!FRESH_ARTIFACT_PHASE_IDS.has(phase.id)) {
     return;
@@ -632,6 +792,19 @@ ${end}
   }
   const prefix = current.trim() ? `${current.trimEnd()}\n\n` : `# ${label}\n\n`;
   fs.writeFileSync(pathName, `${prefix}${block}`, "utf8");
+}
+
+function upsertGitignore(pathName, entries) {
+  const current = fs.existsSync(pathName) ? fs.readFileSync(pathName, "utf8") : "";
+  const lines = current.split(/\r?\n/);
+  const existing = new Set(lines.map((line) => line.trim()));
+  const missing = entries.filter((entry) => !existing.has(entry) && !existing.has("graphify-out/"));
+  if (missing.length === 0) {
+    return;
+  }
+  const prefix = current.trimEnd();
+  const next = `${prefix}${prefix ? "\n" : ""}${missing.join("\n")}\n`;
+  fs.writeFileSync(pathName, next, "utf8");
 }
 
 function bootstrapMarkdown(label) {
@@ -836,7 +1009,7 @@ try {
     process.exit(0);
   }
 
-  console.error("usage: agent-flow-kit install | run <start|status|next|advance>");
+  console.error("usage: agent-flow-kit install [--with-graphify] | run <start|status|next|advance>");
   process.exit(1);
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));
