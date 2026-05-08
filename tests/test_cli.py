@@ -347,11 +347,53 @@ class CliTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             kit = json.loads((project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
             self.assertEqual(kit["graphify"]["installer"], "existing")
+            self.assertEqual(kit["graphify"]["skill_location"], "~/.agents/skills/graphify")
+            self.assertEqual(
+                kit["graphify"]["removed_duplicate_skills"],
+                ["~/.gemini/skills/graphify", "~/.claude/skills/graphify"],
+            )
             self.assertEqual(kit["graphify"]["graph"]["status"], "generated")
             self.assertTrue((fake_home / ".agents" / "skills" / "graphify" / "SKILL.md").is_file())
             self.assertFalse((fake_home / ".gemini" / "skills" / "graphify").exists())
             self.assertFalse((fake_home / ".claude" / "skills" / "graphify").exists())
             self.assertTrue((project_root / "graphify-out" / "graph.json").is_file())
+
+            legacy_project_root = root / "legacy-project"
+            legacy_project_root.mkdir()
+            (fake_home / ".gemini" / "skills" / "graphify").mkdir(parents=True)
+            (fake_home / ".claude" / "skills" / "graphify").mkdir(parents=True)
+            (fake_home / ".gemini" / "skills" / "graphify" / "SKILL.md").write_text(
+                "---\nname: graphify\n---\n",
+                encoding="utf-8",
+            )
+            (fake_home / ".claude" / "skills" / "graphify" / "SKILL.md").write_text(
+                "---\nname: graphify\n---\n",
+                encoding="utf-8",
+            )
+            legacy_result = subprocess.run(
+                (
+                    node,
+                    str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-install.mjs"),
+                    "install",
+                ),
+                cwd=legacy_project_root,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(legacy_result.returncode, 0, legacy_result.stderr)
+            legacy_kit = json.loads((legacy_project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
+            self.assertEqual(legacy_kit["graphify"]["installer"], "existing")
+            self.assertEqual(legacy_kit["graphify"]["skill_location"], "~/.agents/skills/graphify")
+            self.assertEqual(
+                legacy_kit["graphify"]["removed_duplicate_skills"],
+                ["~/.gemini/skills/graphify", "~/.claude/skills/graphify"],
+            )
+            self.assertEqual(legacy_kit["graphify"]["graph"]["status"], "generated")
+            self.assertFalse((fake_home / ".gemini" / "skills" / "graphify").exists())
+            self.assertFalse((fake_home / ".claude" / "skills" / "graphify").exists())
+            self.assertTrue((legacy_project_root / "graphify-out" / "graph.json").is_file())
 
     def test_legacy_node_installer_installs_graphify_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -45,6 +45,7 @@ Manual equivalent:
 ```bash
 uv tool install graphifyy
 graphify install
+graphify .
 ```
 
 The PyPI package is `graphifyy`; the CLI command is `graphify`.
