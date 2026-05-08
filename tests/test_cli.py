@@ -16,6 +16,8 @@ from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 from importlib import resources
 
+os.environ.setdefault("AGENT_FLOW_GRAPHIFY_DRY_RUN", "1")
+
 from agent_flow.cli import main
 from agent_flow.adapters.templates import PromptContext, render_stage_prompt
 from agent_flow.core.gates import GateCommand, run_gate
@@ -138,6 +140,7 @@ class CliTest(unittest.TestCase):
                     node,
                     str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"),
                     "install",
+                    "--without-graphify",
                 ),
                 cwd=project_root,
                 text=True,
@@ -239,7 +242,7 @@ class CliTest(unittest.TestCase):
             self.assertIn("graphify-out/manifest.json", gitignore)
             self.assertIn("graphify-out/cost.json", gitignore)
 
-    def test_node_installer_can_include_graphify(self) -> None:
+    def test_node_installer_installs_graphify_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
@@ -249,7 +252,6 @@ class CliTest(unittest.TestCase):
                     node,
                     str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"),
                     "install",
-                    "--with-graphify",
                 ),
                 cwd=project_root,
                 env={**os.environ, "AGENT_FLOW_GRAPHIFY_DRY_RUN": "1"},
@@ -264,8 +266,32 @@ class CliTest(unittest.TestCase):
             self.assertEqual(kit["graphify"]["command"], "graphify")
             self.assertEqual(kit["graphify"]["status"], "dry-run")
             self.assertEqual(kit["graphify"]["platforms"], ["claude", "codex", "gemini"])
+            self.assertEqual(kit["graphify"]["graph"]["status"], "dry-run")
+            self.assertEqual(kit["graphify"]["graph"]["command"], "graphify .")
 
-    def test_legacy_node_installer_can_include_graphify(self) -> None:
+    def test_node_installer_can_skip_graphify(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            result = subprocess.run(
+                (
+                    node,
+                    str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"),
+                    "install",
+                    "--without-graphify",
+                ),
+                cwd=project_root,
+                env={**os.environ, "AGENT_FLOW_GRAPHIFY_DRY_RUN": "1"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            kit = json.loads((project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
+            self.assertNotIn("graphify", kit)
+
+    def test_legacy_node_installer_installs_graphify_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
@@ -275,7 +301,6 @@ class CliTest(unittest.TestCase):
                     node,
                     str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-install.mjs"),
                     "install",
-                    "--with-graphify",
                 ),
                 cwd=project_root,
                 env={**os.environ, "AGENT_FLOW_GRAPHIFY_DRY_RUN": "1"},
@@ -290,6 +315,8 @@ class CliTest(unittest.TestCase):
             self.assertEqual(kit["graphify"]["command"], "graphify")
             self.assertEqual(kit["graphify"]["status"], "dry-run")
             self.assertEqual(kit["graphify"]["platforms"], ["claude", "codex", "gemini"])
+            self.assertEqual(kit["graphify"]["graph"]["status"], "dry-run")
+            self.assertEqual(kit["graphify"]["graph"]["command"], "graphify .")
             gitignore = (project_root / ".gitignore").read_text(encoding="utf-8")
             self.assertIn("graphify-out/manifest.json", gitignore)
             self.assertIn("graphify-out/cost.json", gitignore)
@@ -338,6 +365,7 @@ class CliTest(unittest.TestCase):
                     node,
                     str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"),
                     "install",
+                    "--without-graphify",
                 ),
                 cwd=project_root,
                 text=True,

@@ -24,15 +24,15 @@ npx <path-to-this-kit> install
 
 The order matters: `pip install -e` first, then `npx ... install`. The bootstrap markdown references the `agent-flow` binary, which step 1 makes available.
 
-To install the optional Graphify knowledge-graph skill at the same time:
+Graphify is installed automatically. To skip it:
 
 ```bash
-npx <path-to-this-kit> install --with-graphify
+npx <path-to-this-kit> install --without-graphify
 ```
 
-Graphify installs the PyPI package `graphifyy`, registers Claude/Codex/Gemini assistant commands, exposes the `graphify` CLI, and writes graph outputs to `graphify-out/`. The installer ignores only local Graphify bookkeeping files (`graphify-out/manifest.json`, `graphify-out/cost.json`) so teams can choose whether to commit the graph report and JSON.
+Graphify installs the PyPI package `graphifyy`, registers Claude/Codex/Gemini assistant commands, exposes the `graphify` CLI, and runs `graphify .` once to build the initial project graph under `graphify-out/`. If Graphify installation or graph generation fails, the default agent-flow bootstrap stops; use `--without-graphify` only when the project intentionally skips Graphify. The installer ignores only local Graphify bookkeeping files (`graphify-out/manifest.json`, `graphify-out/cost.json`) so teams can choose whether to commit the graph report and JSON.
 
-After installation, run `graphify .` from a terminal, `/graphify .` in Claude/Gemini-style assistants, or `$graphify .` in Codex.
+After installation, rerun `graphify .` from a terminal, `/graphify .` in Claude/Gemini-style assistants, or `$graphify .` in Codex whenever the graph should be refreshed.
 
 ## Use
 

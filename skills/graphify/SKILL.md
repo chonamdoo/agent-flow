@@ -2,8 +2,8 @@
 name: graphify
 description: |
   Use when the user asks to build, query, inspect, or explain a repository
-  knowledge graph with Graphify. Graphify is optional and is installed by
-  running agent-flow install with --with-graphify.
+  knowledge graph with Graphify. Graphify is installed by default during
+  agent-flow install unless --without-graphify is passed.
 ---
 
 # Graphify
@@ -15,10 +15,22 @@ analysis.
 
 ## Install
 
-Agent-flow can install Graphify during project bootstrap:
+Agent-flow installs Graphify during project bootstrap:
 
 ```bash
-npx github:chonamdoo/agent-flow install --with-graphify
+npx github:chonamdoo/agent-flow install
+```
+
+The bootstrap also runs `graphify .` once from the project root to create the
+initial repository graph.
+
+If Graphify cannot be installed or the initial graph cannot be generated, the
+default bootstrap fails instead of continuing with a partial setup.
+
+Skip Graphify when needed:
+
+```bash
+npx github:chonamdoo/agent-flow install --without-graphify
 ```
 
 Manual equivalent:
@@ -67,5 +79,7 @@ graphify query "where is authentication handled?"
   codebase map.
 - Do not commit local bookkeeping files such as `graphify-out/manifest.json`
   or `graphify-out/cost.json`.
+- Refresh the graph with `graphify .` after meaningful code changes.
 - If `graphify` is missing, tell the user to reinstall with
-  `--with-graphify` or run the manual install commands above.
+  `npx github:chonamdoo/agent-flow install` or run the manual install commands
+  above.

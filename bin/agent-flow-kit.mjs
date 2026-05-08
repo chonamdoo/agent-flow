@@ -72,7 +72,7 @@ function installProject() {
   upsertBootstrapBlock(path.join(root, "CLAUDE.md"), "CLAUDE.md");
   upsertBootstrapBlock(path.join(root, "GEMINI.md"), "GEMINI.md");
 
-  if (installArgs.includes("--with-graphify")) {
+  if (!installArgs.includes("--without-graphify")) {
     payload.graphify = installGraphify(root);
   }
 
@@ -486,16 +486,23 @@ function installGraphify(root) {
       package: "graphifyy",
       command: "graphify",
       platforms: ["claude", "codex", "gemini"],
+      graph: {
+        status: "dry-run",
+        command: "graphify .",
+        output: "graphify-out/",
+      },
     };
   }
   const installer = installGraphifyPackage(root);
   const platforms = runGraphifyInstall(root);
+  const graph = runGraphifyProjectGraph(root);
   return {
     status: "installed",
     package: "graphifyy",
     command: "graphify",
     installer,
     platforms,
+    graph,
   };
 }
 
@@ -548,6 +555,15 @@ function runGraphifyInstall(root) {
   runGraphifyCommand(["install", "--platform", "codex"], root);
   runGraphifyCommand(["install", "--platform", "gemini"], root);
   return ["claude", "codex", "gemini"];
+}
+
+function runGraphifyProjectGraph(root) {
+  runGraphifyCommand(["."], root);
+  return {
+    status: "generated",
+    command: "graphify .",
+    output: "graphify-out/",
+  };
 }
 
 function runGraphifyCommand(args, root) {
@@ -1009,7 +1025,7 @@ try {
     process.exit(0);
   }
 
-  console.error("usage: agent-flow-kit install [--with-graphify] | run <start|status|next|advance>");
+  console.error("usage: agent-flow-kit install [--without-graphify] | run <start|status|next|advance>");
   process.exit(1);
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));
