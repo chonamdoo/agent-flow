@@ -558,15 +558,20 @@ function installGraphifyPackage(root) {
 }
 
 function graphifyAvailable(root) {
-  if (runCandidateQuiet("graphify", ["--help"], root)) {
+  if (runCandidateQuiet("graphify", ["--help"], root) && runCandidateQuiet("graphify", ["install", "--help"], root)) {
     return true;
   }
   const graphify = graphifyExecutable();
-  return runCandidateQuiet(graphify.command, [...graphify.prefixArgs, "--help"], root);
+  return (
+    runCandidateQuiet(graphify.command, [...graphify.prefixArgs, "--help"], root) &&
+    runCandidateQuiet(graphify.command, [...graphify.prefixArgs, "install", "--help"], root)
+  );
 }
 
 function runGraphifyInstall(root) {
   runGraphifyCommand(["install"], root);
+  runGraphifyCommand(["install", "--platform", "codex"], root);
+  runGraphifyCommand(["install", "--platform", "gemini"], root);
   return {
     platforms: ["claude", "codex", "gemini"],
     skillLocation: "~/.agents/skills/graphify",
@@ -581,6 +586,7 @@ function canonicalizeGraphifySkill() {
   const canonical = path.join(HOME, ".agents", "skills", "graphify");
   const candidates = [
     canonical,
+    path.join(HOME, ".codex", "skills", "graphify"),
     path.join(HOME, ".gemini", "skills", "graphify"),
     path.join(HOME, ".claude", "skills", "graphify"),
   ];

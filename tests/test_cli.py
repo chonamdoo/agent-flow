@@ -305,9 +305,11 @@ class CliTest(unittest.TestCase):
                 "#!/usr/bin/env sh\n"
                 "set -eu\n"
                 "if [ \"${1:-}\" = \"--help\" ]; then exit 0; fi\n"
+                "if [ \"${1:-}\" = \"install\" ] && [ \"${2:-}\" = \"--help\" ]; then exit 0; fi\n"
                 "if [ \"${1:-}\" = \"install\" ]; then\n"
-                "  mkdir -p \"$HOME/.agents/skills/graphify\" \"$HOME/.gemini/skills/graphify\" \"$HOME/.claude/skills/graphify\"\n"
+                "  mkdir -p \"$HOME/.agents/skills/graphify\" \"$HOME/.codex/skills/graphify\" \"$HOME/.gemini/skills/graphify\" \"$HOME/.claude/skills/graphify\"\n"
                 "  printf '%s\\n' '---' 'name: graphify' '---' > \"$HOME/.agents/skills/graphify/SKILL.md\"\n"
+                "  printf '%s\\n' '---' 'name: graphify' '---' > \"$HOME/.codex/skills/graphify/SKILL.md\"\n"
                 "  printf '%s\\n' '---' 'name: graphify' '---' > \"$HOME/.gemini/skills/graphify/SKILL.md\"\n"
                 "  printf '%s\\n' '---' 'name: graphify' '---' > \"$HOME/.claude/skills/graphify/SKILL.md\"\n"
                 "  exit 0\n"
@@ -358,10 +360,11 @@ class CliTest(unittest.TestCase):
             self.assertEqual(kit["graphify"]["skill_location"], "~/.agents/skills/graphify")
             self.assertCountEqual(
                 kit["graphify"]["removed_duplicate_skills"],
-                ["~/.gemini/skills/graphify", "~/.claude/skills/graphify"],
+                ["~/.codex/skills/graphify", "~/.gemini/skills/graphify", "~/.claude/skills/graphify"],
             )
             self.assertEqual(kit["graphify"]["graph"]["status"], "generated")
             self.assertTrue((fake_home / ".agents" / "skills" / "graphify" / "SKILL.md").is_file())
+            self.assertFalse((fake_home / ".codex" / "skills" / "graphify").exists())
             self.assertFalse((fake_home / ".gemini" / "skills" / "graphify").exists())
             self.assertFalse((fake_home / ".claude" / "skills" / "graphify").exists())
             self.assertTrue((project_root / "graphify-out" / "graph.json").is_file())
@@ -369,8 +372,13 @@ class CliTest(unittest.TestCase):
 
             legacy_project_root = root / "legacy-project"
             legacy_project_root.mkdir()
+            (fake_home / ".codex" / "skills" / "graphify").mkdir(parents=True)
             (fake_home / ".gemini" / "skills" / "graphify").mkdir(parents=True)
             (fake_home / ".claude" / "skills" / "graphify").mkdir(parents=True)
+            (fake_home / ".codex" / "skills" / "graphify" / "SKILL.md").write_text(
+                "---\nname: graphify\n---\n",
+                encoding="utf-8",
+            )
             (fake_home / ".gemini" / "skills" / "graphify" / "SKILL.md").write_text(
                 "---\nname: graphify\n---\n",
                 encoding="utf-8",
@@ -397,9 +405,10 @@ class CliTest(unittest.TestCase):
             self.assertEqual(legacy_kit["graphify"]["skill_location"], "~/.agents/skills/graphify")
             self.assertCountEqual(
                 legacy_kit["graphify"]["removed_duplicate_skills"],
-                ["~/.gemini/skills/graphify", "~/.claude/skills/graphify"],
+                ["~/.codex/skills/graphify", "~/.gemini/skills/graphify", "~/.claude/skills/graphify"],
             )
             self.assertEqual(legacy_kit["graphify"]["graph"]["status"], "generated")
+            self.assertFalse((fake_home / ".codex" / "skills" / "graphify").exists())
             self.assertFalse((fake_home / ".gemini" / "skills" / "graphify").exists())
             self.assertFalse((fake_home / ".claude" / "skills" / "graphify").exists())
             self.assertTrue((legacy_project_root / "graphify-out" / "graph.json").is_file())
