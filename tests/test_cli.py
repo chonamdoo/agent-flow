@@ -322,13 +322,21 @@ class CliTest(unittest.TestCase):
             )
             graphify.chmod(0o755)
             uv = fake_bin / "uv"
-            uv.write_text("#!/usr/bin/env sh\nexit 97\n", encoding="utf-8")
+            uv_marker = fake_home / "uv-invoked"
+            uv.write_text(
+                "#!/usr/bin/env sh\n"
+                "set -eu\n"
+                ": > \"$AGENT_FLOW_TEST_UV_MARKER\"\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
             uv.chmod(0o755)
 
             env = {
                 **os.environ,
                 "HOME": str(fake_home),
                 "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+                "AGENT_FLOW_TEST_UV_MARKER": str(uv_marker),
             }
             env.pop("AGENT_FLOW_GRAPHIFY_DRY_RUN", None)
             node = _node_executable()
@@ -357,6 +365,7 @@ class CliTest(unittest.TestCase):
             self.assertFalse((fake_home / ".gemini" / "skills" / "graphify").exists())
             self.assertFalse((fake_home / ".claude" / "skills" / "graphify").exists())
             self.assertTrue((project_root / "graphify-out" / "graph.json").is_file())
+            self.assertFalse(uv_marker.exists())
 
             legacy_project_root = root / "legacy-project"
             legacy_project_root.mkdir()
@@ -394,6 +403,7 @@ class CliTest(unittest.TestCase):
             self.assertFalse((fake_home / ".gemini" / "skills" / "graphify").exists())
             self.assertFalse((fake_home / ".claude" / "skills" / "graphify").exists())
             self.assertTrue((legacy_project_root / "graphify-out" / "graph.json").is_file())
+            self.assertFalse(uv_marker.exists())
 
     def test_legacy_node_installer_installs_graphify_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
