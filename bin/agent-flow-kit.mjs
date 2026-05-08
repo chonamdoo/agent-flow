@@ -111,7 +111,7 @@ function runWorkflowCommand(args) {
 
   if (subcommand === "status") {
     const state = readCurrentRun(process.cwd());
-    console.log(`${state.workflow} ${state.run_id} ${state.status} phase=${state.phase}`);
+    printStatus(state);
     return;
   }
 
@@ -179,6 +179,7 @@ function runWorkflowCommand(args) {
       throw new Error(`blocked: missing artifact ${artifact}`);
     }
     assertFreshArtifact(state, phase, artifact);
+    assertCompletionMarkers(phase, artifact);
     const nextIndex = nextPhaseIndex(state, phase, artifact);
     const nextPhase = PHASES[nextIndex];
     const transitionedAt = new Date().toISOString();
@@ -344,6 +345,52 @@ function printNext(state) {
   console.log(`Instruction: ${phase.instruction}`);
 }
 
+function printStatus(state) {
+  const phase = PHASES[state.phase_index];
+  const complete = state.status === "complete" || state.phase === "complete" || !phase;
+  const requiredArtifact = phase ? path.join(state.run_dir, phase.artifact) : null;
+  let status = complete ? "complete" : state.status;
+  let reason = complete ? "workflow_complete" : "in_progress";
+  if (!complete && requiredArtifact && !fs.existsSync(requiredArtifact)) {
+    status = "awaiting_host";
+    reason = "missing_phase_artifact";
+  } else if (!complete && requiredArtifact) {
+    const missing = missingMarkers(
+      fs.readFileSync(requiredArtifact, "utf8"),
+      phase.required_markers ?? [],
+    );
+    status = "blocked";
+    reason = missing.length > 0
+      ? "missing_completion_markers"
+      : "phase_artifact_written_advance_required";
+  }
+  const nextCommand = complete ? "none" : `${AGENT_FLOW_COMMAND} run advance`;
+  const payload = {
+    status,
+    run: `${state.workflow}/${state.run_id}`,
+    task: state.task ?? "",
+    current_phase: phase?.id ?? "-",
+    reason,
+    required_artifact: requiredArtifact,
+    next_command: nextCommand,
+  };
+  console.log(`${state.workflow} ${state.run_id} ${status} phase=${phase?.id ?? "-"}`);
+  console.log(`status: ${statusValue(status)}`);
+  console.log(`run: ${statusValue(payload.run)}`);
+  console.log(`task: ${statusValue(payload.task)}`);
+  console.log(`current_phase: ${statusValue(payload.current_phase)}`);
+  console.log(`reason: ${statusValue(reason)}`);
+  if (requiredArtifact) {
+    console.log(`required_artifact: ${statusValue(requiredArtifact)}`);
+  }
+  console.log(`next_command: ${statusValue(nextCommand)}`);
+  console.log(`status_json: ${JSON.stringify(payload)}`);
+}
+
+function statusValue(value) {
+  return String(value).replace(/\r/g, "\\r").replace(/\n/g, "\\n");
+}
+
 function optionValue(args, name) {
   const index = args.indexOf(name);
   if (index === -1) {
@@ -393,6 +440,83 @@ function assertFreshArtifact(state, phase, artifact) {
   if (artifactMtime < enteredAt) {
     throw new Error(`blocked: stale artifact ${artifact}`);
   }
+}
+
+function assertCompletionMarkers(phase, artifact) {
+  const markers = phase.required_markers ?? [];
+  if (markers.length === 0) {
+    return;
+  }
+  const content = fs.readFileSync(artifact, "utf8");
+  const missing = missingMarkers(content, markers);
+  if (missing.length > 0) {
+    throw new Error(`blocked: ${phase.id} artifact missing completion markers: ${missing.join(", ")}`);
+  }
+}
+
+function missingMarkers(content, markers) {
+  const lines = completionGateLines(content);
+  return markers.filter((marker) => {
+    const normalized = marker.trim().toLowerCase();
+    return !lines.some((line) => lineMatchesMarker(line, normalized));
+  });
+}
+
+function completionGateLines(content) {
+  const lines = content.split(/\r?\n/);
+  const out = [];
+  let inGate = false;
+  let inFence = false;
+  for (const line of lines) {
+    if (line.startsWith("    ") || line.startsWith("\t")) {
+      continue;
+    }
+    const stripped = line.trim();
+    const lowered = stripped.toLowerCase();
+    if (lowered.startsWith("```") || lowered.startsWith("~~~")) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) {
+      continue;
+    }
+    if (lowered.startsWith("#")) {
+      const heading = lowered.replace(/^#+/, "").trim();
+      if (heading === "completion gate") {
+        inGate = true;
+        continue;
+      }
+      if (inGate) {
+        break;
+      }
+    }
+    if (inGate) {
+      out.push(lowered);
+    }
+  }
+  return out;
+}
+
+function lineMatchesMarker(line, marker) {
+  if (marker.endsWith(":")) {
+    return line.startsWith(marker) && line.slice(marker.length).trim().length > 0;
+  }
+  const separator = marker.indexOf(":");
+  if (separator !== -1 && marker.slice(separator + 1).includes("|")) {
+    const lineSeparator = line.indexOf(":");
+    if (lineSeparator === -1) {
+      return false;
+    }
+    const lineKey = line.slice(0, lineSeparator).trim();
+    const markerKey = marker.slice(0, separator).trim();
+    const allowed = marker
+      .slice(separator + 1)
+      .split("|")
+      .map((value) => value.trim())
+      .filter(Boolean);
+    return lineKey === markerKey && allowed.includes(line.slice(lineSeparator + 1).trim());
+  }
+  return line === marker;
 }
 
 function nextPhaseIndex(state, phase, artifact) {
@@ -522,14 +646,16 @@ const PHASES = [
   {
     id: "domain-grill",
     artifact: "artifacts/domain-grill.md",
+    required_markers: ["grill-me: complete", "shared_understanding: reached"],
     instruction:
-      "Interview one question at a time, resolve domain decisions, and record decisions, open questions, terms, assumptions, and sources checked.",
+      "Interview one question at a time, resolve domain decisions, and record decisions, open questions, terms, assumptions, and sources checked. End with a ## Completion Gate section containing marker lines: grill-me: complete and shared_understanding: reached.",
   },
   {
     id: "domain-map",
     artifact: "artifacts/domain-map.md",
+    required_markers: ["grill-with-docs: complete", "context_docs_checked: true", "context_docs_updated: true|not_needed"],
     instruction:
-      "Update or reference CONTEXT.md with glossary, bounded contexts, ubiquitous language, and domain decisions from domain-grill.",
+      "Update or reference CONTEXT.md with glossary, bounded contexts, ubiquitous language, and domain decisions from domain-grill. End with a ## Completion Gate section containing marker lines: grill-with-docs: complete, context_docs_checked: true, and context_docs_updated: true or not_needed.",
   },
   {
     id: "product-brief",
@@ -590,7 +716,13 @@ const FRESH_ARTIFACT_PHASE_IDS = new Set([
 
 function fullFeatureWorkflowYaml() {
   const stages = PHASES.map(
-    (phase) => `  - id: ${phase.id}\n    artifact: ${phase.artifact}\n    instruction: ${JSON.stringify(phase.instruction)}`,
+    (phase) => {
+      const markers = (phase.required_markers ?? [])
+        .map((marker) => `      - ${JSON.stringify(marker)}`)
+        .join("\n");
+      const markerBlock = markers ? `\n    required_markers:\n${markers}` : "";
+      return `  - id: ${phase.id}\n    artifact: ${phase.artifact}${markerBlock}\n    instruction: ${JSON.stringify(phase.instruction)}`;
+    },
   ).join("\n");
   return `id: full-feature\nmode: cli-enforced\nstages:\n${stages}\n`;
 }
@@ -640,7 +772,7 @@ function fullFeatureSkillMarkdown() {
 }
 
 function domainGrillSkillMarkdown() {
-  return `# Domain Grill\n\nUse during the full-feature domain-grill phase.\n\nRules:\n\n- Ask one question at a time.\n- Provide a recommended answer for every question.\n- Walk each branch of the design tree until decisions are explicit.\n- If a question can be answered from code or docs, inspect those sources instead of asking.\n- Challenge fuzzy domain terms against CONTEXT.md and ADRs when present.\n\nArtifact template:\n\n# Domain Grill\n\n## Goal\n\n## Resolved Decisions\n\n## Open Questions\n\n## Terms To Define\n\n## Risky Assumptions\n\n## Existing Sources Checked\n`;
+  return `# Domain Grill\n\nUse during the full-feature domain-grill phase.\n\nRules:\n\n- Ask one question at a time.\n- Provide a recommended answer for every question.\n- Walk each branch of the design tree until decisions are explicit.\n- If a question can be answered from code or docs, inspect those sources instead of asking.\n- Challenge fuzzy domain terms against CONTEXT.md and ADRs when present.\n- Do not mark the artifact complete while unresolved questions remain.\n\nArtifact template:\n\n# Domain Grill\n\n## Goal\n\n## Resolved Decisions\n\n## Open Questions\n\n## Terms To Define\n\n## Risky Assumptions\n\n## Existing Sources Checked\n\n## Completion Gate\n\ngrill-me: complete\nshared_understanding: reached\n`;
 }
 
 function productBriefSkillMarkdown() {
@@ -672,11 +804,14 @@ function pushWatchTickPromptMarkdown() {
 }
 
 function phasePrompt(phase) {
-  return `# ${phase.id}\n\n${phase.instruction}\n\nSave the required artifact before running:\n\n\`\`\`bash\n${AGENT_FLOW_COMMAND} run advance\n\`\`\`\n`;
+  const markers = phase.required_markers?.length
+    ? `\n\n## Completion markers\n\nThe runner blocks this phase until the artifact includes a \`## Completion Gate\` section with these marker lines:\n\n${phase.required_markers.map((marker) => `- \`${marker}\``).join("\n")}\n`
+    : "";
+  return `# ${phase.id}\n\n${phase.instruction}${markers}\n\nSave the required artifact before running:\n\n\`\`\`bash\n${AGENT_FLOW_COMMAND} run advance\n\`\`\`\n`;
 }
 
 function workflowContract() {
-  return `# Workflow Contract\n\nThe workflow runner is the source of truth for phase order. Agents may read skills and prompts, but must use \`${AGENT_FLOW_COMMAND} run next\` and \`${AGENT_FLOW_COMMAND} run advance\` to move through the workflow.\n`;
+  return `# Workflow Contract\n\nThe workflow runner is the source of truth for phase order. Agents may read skills and prompts, but must use \`${AGENT_FLOW_COMMAND} run next\` and \`${AGENT_FLOW_COMMAND} run advance\` to move through the workflow.\n\nPhases with completion markers are not complete just because the artifact file exists. The artifact must include every required marker printed by \`${AGENT_FLOW_COMMAND} run next\`.\n`;
 }
 
 try {

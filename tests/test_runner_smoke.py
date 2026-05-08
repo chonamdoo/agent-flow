@@ -775,6 +775,160 @@ def test_route_block_returns_without_loop(tmp_path: Path):
     assert runner._next_index(0, runner.phases[0]) == (0, True)
 
 
+def test_required_markers_block_incomplete_artifact(tmp_path: Path):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.runner import Phase, Runner
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "domain-grill.md").write_text("notes only\n", encoding="utf-8")
+
+    runner = Runner.__new__(Runner)
+    runner.run_dir = run_dir
+    phase = Phase(
+        id="domain-grill",
+        description="",
+        required_markers=("grill-me: complete", "shared_understanding: reached"),
+    )
+
+    assert runner._missing_required_markers(phase) == [
+        "grill-me: complete",
+        "shared_understanding: reached",
+    ]
+
+    (run_dir / "domain-grill.md").write_text(
+        "TODO: add grill-me: complete later\n"
+        "shared_understanding: reached\n",
+        encoding="utf-8",
+    )
+
+    assert runner._missing_required_markers(phase) == [
+        "grill-me: complete",
+        "shared_understanding: reached",
+    ]
+
+    (run_dir / "domain-grill.md").write_text(
+        "notes\n"
+        "grill-me: complete\n"
+        "shared_understanding: reached\n",
+        encoding="utf-8",
+    )
+
+    assert runner._missing_required_markers(phase) == [
+        "grill-me: complete",
+        "shared_understanding: reached",
+    ]
+
+    (run_dir / "domain-grill.md").write_text(
+        "notes\n"
+        "```\n"
+        "## Completion Gate\n"
+        "grill-me: complete\n"
+        "shared_understanding: reached\n"
+        "```\n",
+        encoding="utf-8",
+    )
+
+    assert runner._missing_required_markers(phase) == [
+        "grill-me: complete",
+        "shared_understanding: reached",
+    ]
+
+    (run_dir / "domain-grill.md").write_text(
+        "notes\n"
+        "## Completion Gate\n"
+        "```\n"
+        "grill-me: complete\n"
+        "shared_understanding: reached\n"
+        "```\n",
+        encoding="utf-8",
+    )
+
+    assert runner._missing_required_markers(phase) == [
+        "grill-me: complete",
+        "shared_understanding: reached",
+    ]
+
+    (run_dir / "domain-grill.md").write_text(
+        "notes\n"
+        "    ## Completion Gate\n"
+        "    grill-me: complete\n"
+        "    shared_understanding: reached\n",
+        encoding="utf-8",
+    )
+
+    assert runner._missing_required_markers(phase) == [
+        "grill-me: complete",
+        "shared_understanding: reached",
+    ]
+
+    (run_dir / "domain-grill.md").write_text(
+        "notes\n"
+        "## Completion Gate\n"
+        "grill-me: complete\n"
+        "shared_understanding: reached\n",
+        encoding="utf-8",
+    )
+
+    assert runner._missing_required_markers(phase) == []
+
+    phase = Phase(
+        id="domain-map",
+        description="",
+        required_markers=("context_docs_updated: true|not_needed",),
+    )
+    (run_dir / "domain-map.md").write_text("## Completion Gate\ncontext_docs_updated:\n", encoding="utf-8")
+    assert runner._missing_required_markers(phase) == ["context_docs_updated: true|not_needed"]
+    (run_dir / "domain-map.md").write_text("## Completion Gate\ncontext_docs_updated: maybe\n", encoding="utf-8")
+    assert runner._missing_required_markers(phase) == ["context_docs_updated: true|not_needed"]
+    (run_dir / "domain-map.md").write_text("## Completion Gate\ncontext_docs_updated: not_needed\n", encoding="utf-8")
+    assert runner._missing_required_markers(phase) == []
+
+
+def test_render_angle_result_marks_claude_rate_limit_as_blocker(tmp_path: Path):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.multi_review import _render_angle_result
+    from agent_flow.subprocess_pool import SubprocessResult
+
+    result = SubprocessResult(
+        job_id="claude-generalist",
+        stderr="You've hit your limit. Usage limit resets 2:40pm.",
+        returncode=1,
+    )
+
+    artifact = _render_angle_result(result)
+
+    assert "status: blocked" in artifact
+    assert "reason: reviewer_rate_limited" in artifact
+    assert "reviewer: claude" in artifact
+    assert "retry_after:" in artifact
+    assert "next_command: agent-flow review retry --reviewer claude --retry-after " in artifact
+    assert '"reason": "reviewer_rate_limited"' in artifact
+
+
+def test_generic_stub_does_not_write_completion_markers(tmp_path: Path, monkeypatch):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.adapters.generic import GenericAdapter
+    from agent_flow.runner import Phase
+
+    run_dir = tmp_path / "run"
+    project_root = tmp_path / "project"
+    run_dir.mkdir()
+    project_root.mkdir()
+    phase = Phase(
+        id="domain-grill",
+        description="",
+        required_markers=("grill-me: complete", "shared_understanding: reached"),
+    )
+    monkeypatch.setenv("AGENT_FLOW_GENERIC_MODE", "stub")
+
+    assert GenericAdapter().execute(phase, run_dir=run_dir, project_root=project_root)
+    artifact = run_dir / "domain-grill.md"
+    text = artifact.read_text(encoding="utf-8")
+    assert "grill-me: complete" not in text
+    assert "shared_understanding: reached" not in text
+
+
 def test_backward_route_invalidates_target_artifact(tmp_path: Path):
     sys.path.insert(0, str(KIT_ROOT / "src"))
     from agent_flow.runner import Phase, Runner

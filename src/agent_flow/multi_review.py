@@ -21,9 +21,14 @@ Override:
 """
 from __future__ import annotations
 
+import json
 import os
+import re
+import shlex
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from agent_flow.cli_detect import (
     CliInfo,
@@ -156,6 +161,23 @@ def residual_host_jobs(distribution: Distribution) -> list[ReviewerJob]:
 
 
 def _render_angle_result(r: SubprocessResult) -> str:
+    rate_limit = _rate_limit_payload(r)
+    if rate_limit is not None:
+        lines = [
+            f"# {r.job_id}",
+            "",
+            "status: blocked",
+            "reason: reviewer_rate_limited",
+            f"reviewer: {rate_limit['reviewer']}",
+            f"retry_after: {rate_limit['retry_after']}",
+            f"next_command: {rate_limit['next_command']}",
+            f"status_json: {json.dumps(rate_limit, sort_keys=True)}",
+        ]
+        if r.stdout.strip():
+            lines += ["", "## stdout", "", r.stdout]
+        if r.stderr.strip():
+            lines += ["", "## stderr", "", r.stderr]
+        return "\n".join(lines) + "\n"
     status = "OK" if r.ok else ("TIMEOUT" if r.timed_out else "ERROR")
     parts = [
         f"# {r.job_id}",
@@ -171,3 +193,42 @@ def _render_angle_result(r: SubprocessResult) -> str:
     if r.stderr.strip():
         parts += ["", "## stderr", "", r.stderr]
     return "\n".join(parts) + "\n"
+
+
+def _rate_limit_payload(r: SubprocessResult) -> dict[str, str] | None:
+    reviewer = r.job_id.split("-", 1)[0]
+    text = "\n".join(part for part in (r.stdout, r.stderr, r.error or "") if part)
+    lowered = text.lower()
+    if reviewer != "claude" or "limit" not in lowered or "reset" not in lowered:
+        return None
+    retry_after = _parse_retry_after(text)
+    return {
+        "status": "blocked",
+        "reason": "reviewer_rate_limited",
+        "reviewer": reviewer,
+        "retry_after": retry_after,
+        "next_command": (
+            "agent-flow review retry "
+            f"--reviewer {shlex.quote(reviewer)} "
+            f"--retry-after {shlex.quote(retry_after)}"
+        ),
+    }
+
+
+def _parse_retry_after(text: str) -> str:
+    zone = ZoneInfo("Asia/Seoul")
+    now = datetime.now(zone)
+    match = re.search(r"resets?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", text, re.IGNORECASE)
+    if not match:
+        return now.isoformat()
+    hour = int(match.group(1))
+    minute = int(match.group(2) or 0)
+    suffix = (match.group(3) or "").lower()
+    if suffix == "pm" and hour != 12:
+        hour += 12
+    if suffix == "am" and hour == 12:
+        hour = 0
+    candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if candidate <= now:
+        candidate += timedelta(days=1)
+    return candidate.isoformat()

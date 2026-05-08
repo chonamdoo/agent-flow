@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_flow.adapters.registry import detect_adapter
@@ -177,6 +179,13 @@ def main(argv: list[str] | None = None) -> int:
     review_parser.add_argument("--run-dir", required=True)
     review_parser.add_argument("--reviews", nargs="+", required=True)
 
+    review_command_parser = subparsers.add_parser("review")
+    review_command_subparsers = review_command_parser.add_subparsers(dest="review_command", required=True)
+    review_retry = review_command_subparsers.add_parser("retry")
+    review_retry.add_argument("--root", default=".")
+    review_retry.add_argument("--reviewer", required=True)
+    review_retry.add_argument("--retry-after")
+
     worktree_parser = subparsers.add_parser("worktree")
     worktree_subparsers = worktree_parser.add_subparsers(dest="worktree_command", required=True)
     worktree_create = worktree_subparsers.add_parser("create")
@@ -342,7 +351,12 @@ def main(argv: list[str] | None = None) -> int:
                 )
             return 2
         try:
-            Runner(run_root, workflow=args.workflow, architecture=args.architecture).run(
+            Runner(
+                run_root,
+                workflow=args.workflow,
+                architecture=args.architecture,
+                next_command=_continue_command(root, args.worktree),
+            ).run(
                 mode=ResumeMode.START,
                 task=args.task,
             )
@@ -372,7 +386,11 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print('진행 중인 run 없음. `agent-flow run "<task>"`로 시작하세요.')
             return 0
-        Runner(run_root, run_dir=active.path).run(mode=ResumeMode.RESUME)
+        Runner(
+            run_root,
+            run_dir=active.path,
+            next_command=_continue_command(root, args.worktree),
+        ).run(mode=ResumeMode.RESUME)
         return 0
 
     if args.command == "abort":
@@ -412,7 +430,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         active = find_active_run(run_root)
         if active is not None:
-            active.print_status()
+            active.print_status(next_command=_continue_command(root, args.worktree))
             return 0
         if not (run_root / ".agent-flow" / "runs").exists():
             print("진행 중인 run 없음.")
@@ -524,6 +542,11 @@ def main(argv: list[str] | None = None) -> int:
             )
         print(f"{summary.verdict}: {len(summary.findings)} findings")
         return 1 if summary.verdict == "NEEDS_CHANGES" else 0
+
+    if args.command == "review":
+        if args.review_command == "retry":
+            _print_review_retry_status(args.reviewer, args.retry_after)
+            return 0
 
     if args.command == "worktree":
         if args.worktree_command == "create":
@@ -998,6 +1021,13 @@ def _worktree_root(root: Path, name: str) -> Path | None:
     return None
 
 
+def _continue_command(root: Path, worktree: str | None) -> str:
+    command = f"agent-flow continue --root {shlex.quote(str(root))}"
+    if worktree is None:
+        return command
+    return command + f" --worktree {shlex.quote(_slug_for_hint(root, worktree))}"
+
+
 def _known_worktree_names(root: Path) -> list[str]:
     worktrees_root = root / ".agent-flow" / "worktrees"
     if not worktrees_root.exists():
@@ -1014,6 +1044,44 @@ def _format_cli_error(exc: BaseException) -> str:
         detail = (exc.stderr or exc.stdout or str(exc)).strip()
         return detail or str(exc)
     return str(exc)
+
+
+def _status_value(value: object) -> str:
+    return str(value).replace("\r", "\\r").replace("\n", "\\n")
+
+
+def _print_review_retry_status(reviewer: str, retry_after: str | None) -> None:
+    retry_at = _parse_retry_after_arg(retry_after)
+    retry_command = f"agent-flow review retry --reviewer {shlex.quote(reviewer)}"
+    if retry_after is not None:
+        retry_command += f" --retry-after {shlex.quote(retry_after)}"
+    if retry_at is not None and retry_at > datetime.now(timezone.utc):
+        print("status: blocked")
+        print("reason: reviewer_rate_limited")
+        print(f"reviewer: {_status_value(reviewer)}")
+        print(f"retry_after: {_status_value(retry_after)}")
+        print("required_action: wait_until_retry_after")
+        print(f"next_command: {_status_value(retry_command)}")
+        return
+    print("status: awaiting_retry")
+    print("reason: reviewer_retry_ready")
+    print(f"reviewer: {_status_value(reviewer)}")
+    if retry_after is not None:
+        print(f"retry_after: {_status_value(retry_after)}")
+    print("required_action: rerun_review_now")
+    print("next_command: none")
+
+
+def _parse_retry_after_arg(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _cleanup_worktree_after_failure(root: Path, status, original: BaseException) -> None:
