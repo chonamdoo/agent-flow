@@ -254,6 +254,8 @@ function installGraphify() {
       package: "graphifyy",
       command: "graphify",
       platforms: ["claude", "codex", "gemini"],
+      skill_location: "~/.agents/skills/graphify",
+      removed_duplicate_skills: [],
       graph: {
         status: "dry-run",
         command: "graphify .",
@@ -262,14 +264,16 @@ function installGraphify() {
     };
   }
   const installer = installGraphifyPackage();
-  const platforms = runGraphifyInstall();
+  const skillInstall = runGraphifyInstall();
   const graph = runGraphifyProjectGraph();
   return {
     status: "installed",
     package: "graphifyy",
     command: "graphify",
     installer,
-    platforms,
+    platforms: skillInstall.platforms,
+    skill_location: skillInstall.skillLocation,
+    removed_duplicate_skills: skillInstall.removedDuplicates,
     graph,
   };
 }
@@ -320,6 +324,9 @@ function runOptional(commandName, args) {
 }
 
 function installGraphifyPackage() {
+  if (graphifyAvailable()) {
+    return "existing";
+  }
   if (runCandidate("uv", ["tool", "install", "--python", "3.12", "--force", "graphifyy"])) {
     return "uv tool";
   }
@@ -331,11 +338,57 @@ function installGraphifyPackage() {
   return "pip";
 }
 
+function graphifyAvailable() {
+  if (runCandidateQuiet("graphify", ["--help"])) {
+    return true;
+  }
+  const graphify = graphifyExecutable();
+  return runCandidateQuiet(graphify.command, [...graphify.prefixArgs, "--help"]);
+}
+
 function runGraphifyInstall() {
   runGraphifyCommand(["install"]);
-  runGraphifyCommand(["install", "--platform", "codex"]);
-  runGraphifyCommand(["install", "--platform", "gemini"]);
-  return ["claude", "codex", "gemini"];
+  return {
+    platforms: ["claude", "codex", "gemini"],
+    skillLocation: "~/.agents/skills/graphify",
+    removedDuplicates: canonicalizeGraphifySkill(),
+  };
+}
+
+function canonicalizeGraphifySkill() {
+  if (!HOME) {
+    return [];
+  }
+  const canonical = path.join(HOME, ".agents", "skills", "graphify");
+  const candidates = [
+    canonical,
+    path.join(HOME, ".gemini", "skills", "graphify"),
+    path.join(HOME, ".claude", "skills", "graphify"),
+  ];
+  const existing = candidates
+    .filter((candidate) => fs.existsSync(path.join(candidate, "SKILL.md")))
+    .sort((a, b) => {
+      const aTime = fs.statSync(path.join(a, "SKILL.md")).mtimeMs;
+      const bTime = fs.statSync(path.join(b, "SKILL.md")).mtimeMs;
+      return bTime - aTime;
+    });
+  if (existing.length === 0) {
+    throw new Error("graphify install completed, but no graphify skill was found");
+  }
+  const source = existing[0];
+  if (source !== canonical) {
+    fs.rmSync(canonical, { recursive: true, force: true });
+    fs.mkdirSync(path.dirname(canonical), { recursive: true });
+    fs.cpSync(source, canonical, { recursive: true, force: true });
+  }
+  const removed = [];
+  for (const duplicate of candidates.filter((candidate) => candidate !== canonical)) {
+    if (fs.existsSync(duplicate)) {
+      fs.rmSync(duplicate, { recursive: true, force: true });
+      removed.push(duplicate.replace(`${HOME}/`, "~/"));
+    }
+  }
+  return removed;
 }
 
 function runGraphifyProjectGraph() {
@@ -366,6 +419,18 @@ function runCandidate(commandName, args) {
   }
   if (result.error) {
     throw result.error;
+  }
+  return result.status === 0;
+}
+
+function runCandidateQuiet(commandName, args) {
+  const result = spawnSync(commandName, args, {
+    cwd: PROJECT,
+    stdio: "ignore",
+    env: process.env,
+  });
+  if (result.error) {
+    return false;
   }
   return result.status === 0;
 }

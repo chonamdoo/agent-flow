@@ -30,7 +30,7 @@ Graphify is installed automatically. To skip it:
 npx <path-to-this-kit> install --without-graphify
 ```
 
-Graphify installs the PyPI package `graphifyy`, registers Claude/Codex/Gemini assistant commands, exposes the `graphify` CLI, and runs `graphify .` once to build the initial project graph under `graphify-out/`. If Graphify installation or graph generation fails, the default agent-flow bootstrap stops; use `--without-graphify` only when the project intentionally skips Graphify. The installer ignores only local Graphify bookkeeping files (`graphify-out/manifest.json`, `graphify-out/cost.json`) so teams can choose whether to commit the graph report and JSON.
+Graphify installs the PyPI package `graphifyy` only when the `graphify` CLI is not already available, registers one shared skill at `~/.agents/skills/graphify`, removes duplicate host-specific copies, exposes the `graphify` CLI, and runs `graphify .` once to build the initial project graph under `graphify-out/`. If Graphify installation or graph generation fails, the default agent-flow bootstrap stops; use `--without-graphify` only when the project intentionally skips Graphify. The installer ignores only local Graphify bookkeeping files (`graphify-out/manifest.json`, `graphify-out/cost.json`) so teams can choose whether to commit the graph report and JSON.
 
 After installation, rerun `graphify .` from a terminal, `/graphify .` in Claude/Gemini-style assistants, or `$graphify .` in Codex whenever the graph should be refreshed.
 

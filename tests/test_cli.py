@@ -291,6 +291,68 @@ class CliTest(unittest.TestCase):
             kit = json.loads((project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
             self.assertNotIn("graphify", kit)
 
+    def test_node_installer_reuses_existing_graphify_and_removes_duplicate_skills(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project_root = root / "project"
+            fake_home = root / "home"
+            fake_bin = root / "bin"
+            project_root.mkdir()
+            fake_home.mkdir()
+            fake_bin.mkdir()
+            graphify = fake_bin / "graphify"
+            graphify.write_text(
+                "#!/usr/bin/env sh\n"
+                "set -eu\n"
+                "if [ \"${1:-}\" = \"--help\" ]; then exit 0; fi\n"
+                "if [ \"${1:-}\" = \"install\" ]; then\n"
+                "  mkdir -p \"$HOME/.agents/skills/graphify\" \"$HOME/.gemini/skills/graphify\" \"$HOME/.claude/skills/graphify\"\n"
+                "  printf '%s\\n' '---' 'name: graphify' '---' > \"$HOME/.agents/skills/graphify/SKILL.md\"\n"
+                "  printf '%s\\n' '---' 'name: graphify' '---' > \"$HOME/.gemini/skills/graphify/SKILL.md\"\n"
+                "  printf '%s\\n' '---' 'name: graphify' '---' > \"$HOME/.claude/skills/graphify/SKILL.md\"\n"
+                "  exit 0\n"
+                "fi\n"
+                "if [ \"${1:-}\" = \".\" ]; then\n"
+                "  mkdir -p graphify-out\n"
+                "  printf '{}\\n' > graphify-out/graph.json\n"
+                "  exit 0\n"
+                "fi\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            graphify.chmod(0o755)
+            uv = fake_bin / "uv"
+            uv.write_text("#!/usr/bin/env sh\nexit 97\n", encoding="utf-8")
+            uv.chmod(0o755)
+
+            env = {
+                **os.environ,
+                "HOME": str(fake_home),
+                "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+            }
+            env.pop("AGENT_FLOW_GRAPHIFY_DRY_RUN", None)
+            node = _node_executable()
+            result = subprocess.run(
+                (
+                    node,
+                    str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"),
+                    "install",
+                ),
+                cwd=project_root,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            kit = json.loads((project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
+            self.assertEqual(kit["graphify"]["installer"], "existing")
+            self.assertEqual(kit["graphify"]["graph"]["status"], "generated")
+            self.assertTrue((fake_home / ".agents" / "skills" / "graphify" / "SKILL.md").is_file())
+            self.assertFalse((fake_home / ".gemini" / "skills" / "graphify").exists())
+            self.assertFalse((fake_home / ".claude" / "skills" / "graphify").exists())
+            self.assertTrue((project_root / "graphify-out" / "graph.json").is_file())
+
     def test_legacy_node_installer_installs_graphify_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
