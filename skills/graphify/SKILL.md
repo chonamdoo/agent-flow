@@ -21,8 +21,15 @@ Agent-flow installs Graphify during project bootstrap:
 npx github:chonamdoo/agent-flow install
 ```
 
+If the `graphify` CLI is already installed, bootstrap reuses it instead of
+reinstalling the package for every project.
+
 The bootstrap also runs `graphify .` once from the project root to create the
 initial repository graph.
+
+The bootstrap keeps a single shared global skill at
+`~/.agents/skills/graphify` and removes duplicate host-specific copies from
+`~/.gemini/skills/graphify` and `~/.claude/skills/graphify`.
 
 If Graphify cannot be installed or the initial graph cannot be generated, the
 default bootstrap fails instead of continuing with a partial setup.
@@ -38,6 +45,7 @@ Manual equivalent:
 ```bash
 uv tool install graphifyy
 graphify install
+graphify .
 ```
 
 The PyPI package is `graphifyy`; the CLI command is `graphify`.

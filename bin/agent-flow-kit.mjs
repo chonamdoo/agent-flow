@@ -486,6 +486,8 @@ function installGraphify(root) {
       package: "graphifyy",
       command: "graphify",
       platforms: ["claude", "codex", "gemini"],
+      skill_location: "~/.agents/skills/graphify",
+      removed_duplicate_skills: [],
       graph: {
         status: "dry-run",
         command: "graphify .",
@@ -494,14 +496,16 @@ function installGraphify(root) {
     };
   }
   const installer = installGraphifyPackage(root);
-  const platforms = runGraphifyInstall(root);
+  const skillInstall = runGraphifyInstall(root);
   const graph = runGraphifyProjectGraph(root);
   return {
     status: "installed",
     package: "graphifyy",
     command: "graphify",
     installer,
-    platforms,
+    platforms: skillInstall.platforms,
+    skill_location: skillInstall.skillLocation,
+    removed_duplicate_skills: skillInstall.removedDuplicates,
     graph,
   };
 }
@@ -539,6 +543,9 @@ function runOptional(commandName, args, cwd) {
 }
 
 function installGraphifyPackage(root) {
+  if (graphifyAvailable(root)) {
+    return "existing";
+  }
   if (runCandidate("uv", ["tool", "install", "--python", "3.12", "--force", "graphifyy"], root)) {
     return "uv tool";
   }
@@ -550,11 +557,66 @@ function installGraphifyPackage(root) {
   return "pip";
 }
 
+function graphifyAvailable(root) {
+  if (runCandidateQuiet("graphify", ["--help"], root) && runCandidateQuiet("graphify", ["install", "--help"], root)) {
+    return true;
+  }
+  const graphify = graphifyExecutable();
+  return (
+    runCandidateQuiet(graphify.command, [...graphify.prefixArgs, "--help"], root) &&
+    runCandidateQuiet(graphify.command, [...graphify.prefixArgs, "install", "--help"], root)
+  );
+}
+
 function runGraphifyInstall(root) {
   runGraphifyCommand(["install"], root);
   runGraphifyCommand(["install", "--platform", "codex"], root);
   runGraphifyCommand(["install", "--platform", "gemini"], root);
-  return ["claude", "codex", "gemini"];
+  return {
+    platforms: ["claude", "codex", "gemini"],
+    skillLocation: "~/.agents/skills/graphify",
+    removedDuplicates: canonicalizeGraphifySkill(),
+  };
+}
+
+function canonicalizeGraphifySkill() {
+  if (!HOME) {
+    return [];
+  }
+  const canonical = path.join(HOME, ".agents", "skills", "graphify");
+  const candidates = [
+    canonical,
+    path.join(HOME, ".codex", "skills", "graphify"),
+    path.join(HOME, ".gemini", "skills", "graphify"),
+    path.join(HOME, ".claude", "skills", "graphify"),
+  ];
+  const existing = candidates
+    .filter((candidate) => fs.existsSync(path.join(candidate, "SKILL.md")))
+    .sort((a, b) => {
+      const aTime = fs.statSync(path.join(a, "SKILL.md")).mtimeMs;
+      const bTime = fs.statSync(path.join(b, "SKILL.md")).mtimeMs;
+      return bTime - aTime;
+    });
+  if (existing.length === 0) {
+    throw new Error("graphify install completed, but no graphify skill was found");
+  }
+  const source = existing[0];
+  if (source !== canonical) {
+    fs.mkdirSync(path.dirname(canonical), { recursive: true });
+    const tempCanonical = `${canonical}.tmp.${process.pid}`;
+    fs.rmSync(tempCanonical, { recursive: true, force: true });
+    fs.cpSync(source, tempCanonical, { recursive: true });
+    fs.rmSync(canonical, { recursive: true, force: true });
+    fs.renameSync(tempCanonical, canonical);
+  }
+  const removed = [];
+  for (const duplicate of candidates.filter((candidate) => candidate !== canonical)) {
+    if (fs.existsSync(duplicate)) {
+      fs.rmSync(duplicate, { recursive: true, force: true });
+      removed.push(duplicate.replace(`${HOME}/`, "~/"));
+    }
+  }
+  return removed;
 }
 
 function runGraphifyProjectGraph(root) {
@@ -585,6 +647,18 @@ function runCandidate(commandName, args, cwd) {
   }
   if (result.error) {
     throw result.error;
+  }
+  return result.status === 0;
+}
+
+function runCandidateQuiet(commandName, args, cwd) {
+  const result = spawnSync(commandName, args, {
+    cwd,
+    stdio: "ignore",
+    env: process.env,
+  });
+  if (result.error) {
+    return false;
   }
   return result.status === 0;
 }
