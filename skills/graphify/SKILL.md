@@ -32,7 +32,7 @@ The PyPI package is `graphifyy`; the CLI command is `graphify`.
 
 ## Use
 
-From a project root:
+In Claude/Gemini chat from a project rooted workspace:
 
 ```bash
 /graphify .

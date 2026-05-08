@@ -56,8 +56,12 @@ function detectProfile() {
       fs.existsSync(path.join(PROJECT, "requirements.txt"))) {
     return "python";
   }
-  if (fs.existsSync(path.join(PROJECT, "build.gradle.kts")) ||
-      fs.existsSync(path.join(PROJECT, "settings.gradle.kts"))) {
+  if (
+      fs.existsSync(path.join(PROJECT, "build.gradle")) ||
+      fs.existsSync(path.join(PROJECT, "settings.gradle")) ||
+      fs.existsSync(path.join(PROJECT, "build.gradle.kts")) ||
+      fs.existsSync(path.join(PROJECT, "settings.gradle.kts"))
+  ) {
     return "android";
   }
   if (fs.existsSync(path.join(PROJECT, "package.json"))) {
@@ -331,7 +335,8 @@ function runGraphifyCommand(args) {
   if (runOptional("graphify", args)) {
     return;
   }
-  runChecked(preferredPython(), ["-m", "graphify", ...args]);
+  const graphify = graphifyExecutable();
+  runChecked(graphify.command, [...graphify.prefixArgs, ...args]);
 }
 
 function runCandidate(commandName, args) {
@@ -350,13 +355,29 @@ function runCandidate(commandName, args) {
 }
 
 function preferredPython() {
-  for (const candidate of ["python3.12", "python3.11", "python3.10", "python3"]) {
+  for (const candidate of ["python3.12", "python3.11", "python3.10", "python3", "python"]) {
     const result = spawnSync(candidate, ["--version"], { stdio: "ignore" });
     if (!result.error && result.status === 0) {
       return candidate;
     }
   }
   return "python3";
+}
+
+function graphifyExecutable() {
+  for (const candidate of [
+    path.join(process.env.UV_TOOL_BIN_DIR || "", "graphify"),
+    path.join(process.env.PIPX_BIN_DIR || "", "graphify"),
+    path.join(HOME, ".local", "bin", "graphify"),
+  ]) {
+    if (!candidate) {
+      continue;
+    }
+    if (fs.existsSync(candidate)) {
+      return { command: candidate, prefixArgs: [] };
+    }
+  }
+  return { command: preferredPython(), prefixArgs: ["-m", "graphify"] };
 }
 
 const cmd = process.argv[2];

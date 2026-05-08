@@ -355,6 +355,7 @@ class CliTest(unittest.TestCase):
             ("react-native", {"package.json": '{"dependencies":{"react-native":"latest"}}\n'}),
             ("python", {"pyproject.toml": "[project]\nname='demo'\n"}),
             ("android", {"settings.gradle.kts": 'pluginManagement { repositories { google() } }\n'}),
+            ("android", {"settings.gradle": "pluginManagement { repositories { google() } }\n"}),
         ]
         node = _node_executable()
         for expected, files in cases:
@@ -1554,6 +1555,15 @@ class CliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             (root / "settings.gradle.kts").write_text("", encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["detect-profile", "--root", temp_dir]), 0)
+            self.assertEqual(output.getvalue().strip(), "android")
+
+    def test_detect_profile_reports_android_for_groovy_gradle_project(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "settings.gradle").write_text("", encoding="utf-8")
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 self.assertEqual(main(["detect-profile", "--root", temp_dir]), 0)

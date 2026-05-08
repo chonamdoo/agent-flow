@@ -29,7 +29,12 @@ def detect_profile(root: Path) -> str:
         return "node"
     if (root / "pyproject.toml").exists():
         return "python"
-    if (root / "build.gradle.kts").exists() or (root / "settings.gradle.kts").exists():
+    if (
+        (root / "build.gradle").exists()
+        or (root / "settings.gradle").exists()
+        or (root / "build.gradle.kts").exists()
+        or (root / "settings.gradle.kts").exists()
+    ):
         return "android"
     return "generic"
 
