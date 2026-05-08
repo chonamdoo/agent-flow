@@ -19,8 +19,12 @@ import json
 import os
 import sys
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
+
+import yaml
+
+from agent_flow.core.markers import missing_markers, normalize_required_markers
 
 
 RUNS_DIRNAME = ".agent-flow/runs"
@@ -41,17 +45,58 @@ class ActiveRun:
     task: str
     started_at: str
 
-    def print_status(self) -> None:
+    def print_status(self, *, next_command: str = "agent-flow continue") -> None:
         artifacts = sorted(p.name for p in self.path.glob("*.md"))
         meta = read_meta(self.path)
+        current_phase = meta.get("current_phase") or "-"
+        required_artifact = (
+            self.path / f"{current_phase}.md"
+            if current_phase != "-"
+            else None
+        )
+        structured_status = "running"
+        reason = "in_progress"
+        if required_artifact is not None and not required_artifact.exists():
+            structured_status = "awaiting_host"
+            reason = "missing_phase_artifact"
+        elif required_artifact is not None:
+            missing_markers = _missing_completion_markers(
+                self.path,
+                self.workflow,
+                current_phase,
+            )
+            structured_status = "blocked"
+            reason = (
+                "missing_completion_markers"
+                if missing_markers
+                else "phase_artifact_written_continue_required"
+            )
+        payload = {
+            "status": structured_status,
+            "run": f"{self.workflow}/{self.run_id}",
+            "task": self.task,
+            "current_phase": current_phase,
+            "reason": reason,
+            "required_artifact": str(required_artifact) if required_artifact is not None else None,
+            "next_command": next_command,
+        }
         print(f"Run id     : {self.run_id}")
         print(f"Workflow   : {self.workflow}")
-        print(f"Task       : {self.task}")
+        print(f"Task       : {_status_value(self.task)}")
         print(f"Started at : {self.started_at}")
-        print(f"Phase      : {meta.get('current_phase') or '-'}")
+        print(f"Phase      : {current_phase}")
         print(f"Artifacts  : {len(artifacts)} written")
         for a in artifacts:
             print(f"  - {a}")
+        print(f"status: {_status_value(structured_status)}")
+        print(f"run: {_status_value(payload['run'])}")
+        print(f"task: {_status_value(self.task)}")
+        print(f"current_phase: {_status_value(current_phase)}")
+        print(f"reason: {_status_value(reason)}")
+        if required_artifact is not None:
+            print(f"required_artifact: {_status_value(required_artifact)}")
+        print(f"next_command: {_status_value(next_command)}")
+        print(f"status_json: {json.dumps(payload, sort_keys=True)}")
 
 
 def find_active_run(project_root: Path) -> ActiveRun | None:
@@ -109,7 +154,8 @@ def create_run(
                 f"or `agent-flow abort` to clear."
             )
 
-        base_id = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        now = datetime.now(timezone.utc)
+        base_id = now.strftime("%Y%m%d-%H%M%S")
         run_id = base_id
         suffix = 1
         while (runs_dir / run_id).exists():
@@ -122,7 +168,7 @@ def create_run(
             "run_id": run_id,
             "workflow": workflow,
             "task": task,
-            "started_at": datetime.utcnow().isoformat(),
+            "started_at": now.isoformat(),
             "current_phase": None,
         }
         if architecture:
@@ -185,3 +231,47 @@ def mark_inactive(run_path: Path) -> None:
 
 def has_artifact(run_path: Path, phase_id: str) -> bool:
     return (run_path / f"{phase_id}.md").exists()
+
+
+def _missing_completion_markers(
+    run_path: Path,
+    workflow: str,
+    phase_id: str,
+) -> list[str]:
+    markers = _required_markers(run_path, workflow, phase_id)
+    artifact = run_path / f"{phase_id}.md"
+    if not markers or not artifact.exists():
+        return []
+    return _missing_markers(artifact.read_text(encoding="utf-8"), markers)
+
+
+def _required_markers(run_path: Path, workflow: str, phase_id: str) -> tuple[str, ...]:
+    project_root = run_path.parents[2] if len(run_path.parents) >= 3 else None
+    candidates = []
+    if project_root is not None:
+        candidates.append(project_root / ".agent-flow" / "workflows" / f"{workflow}.yaml")
+    candidates.append(Path(__file__).resolve().parent / "workflows" / f"{workflow}.yaml")
+    candidates.append(Path(__file__).resolve().parents[2] / "workflows" / f"{workflow}.yaml")
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            continue
+        phases = raw.get("phases") if isinstance(raw, dict) else None
+        if not isinstance(phases, list):
+            continue
+        for phase in phases:
+            if not isinstance(phase, dict) or str(phase.get("id")) != phase_id:
+                continue
+            return normalize_required_markers(phase.get("required_markers"))
+    return ()
+
+
+def _missing_markers(text: str, markers: tuple[str, ...]) -> list[str]:
+    return missing_markers(text, markers)
+
+
+def _status_value(value: object) -> str:
+    return str(value).replace("\r", "\\r").replace("\n", "\\n")

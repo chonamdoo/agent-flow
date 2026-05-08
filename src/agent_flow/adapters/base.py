@@ -69,6 +69,7 @@ class Adapter(ABC):
         )
         profile_block = self._render_profile_block()
         architecture_block = self._render_architecture_block(phase)
+        completion_gate_block = self._render_completion_gate_block(phase)
         lore_block = self._render_lore_block(project_root, phase)
         return (
             f"# agent-flow phase: {phase.id}\n\n"
@@ -80,6 +81,7 @@ class Adapter(ABC):
             f"\n## Phase prompt\n\n{body}\n"
             f"{profile_block}"
             f"{architecture_block}"
+            f"{completion_gate_block}"
             f"{lore_block}"
             f"{host_block}"
             f"\n## When complete\n"
@@ -112,6 +114,25 @@ class Adapter(ABC):
                 "refactor and do not claim DDD boundaries were enforced.\n"
             )
         return ""
+
+    def _render_completion_gate_block(self, phase: "Phase") -> str:
+        markers = getattr(phase, "required_markers", ())
+        if not markers:
+            return ""
+        lines = [
+            "\n## Completion gate",
+            "",
+            "Do not write the artifact as complete until the phase genuinely "
+            "satisfies these markers. The runner blocks advancement when any "
+            "marker is missing. The artifact must include a `## Completion Gate` "
+            "heading followed by the marker lines.",
+            "",
+            "Required marker lines:",
+            "",
+        ]
+        lines.extend(f"- `{marker}`" for marker in markers)
+        lines.append("")
+        return "\n".join(lines)
 
     def _render_lore_block(self, project_root: Path, phase: "Phase") -> str:
         """Inline relevant lore entries for phases that opt in.

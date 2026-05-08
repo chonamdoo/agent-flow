@@ -9,17 +9,46 @@ phases:
   - id: domain-grill
     description: Interview one question at a time until the domain problem is clear.
     cite_lore: true
+    required_markers:
+      - "grill-me: complete"
+      - "shared_understanding: reached"
     prompt: |
       Run a grill-me style interview. Ask one question at a time unless the
       codebase already answers it. Capture decisions, open questions, terms,
-      assumptions, and checked sources. Output: domain-grill.md.
+      assumptions, and checked sources.
+
+      Do not complete this phase while unresolved questions remain. Only after
+      the one-question-at-a-time interview reaches shared understanding, end
+      domain-grill.md with a `## Completion Gate` section:
+
+          ## Completion Gate
+          grill-me: complete
+          shared_understanding: reached
 
   - id: domain-map
     description: Build or update the domain map from the interview.
+    required_markers:
+      - "grill-with-docs: complete"
+      - "context_docs_checked: true"
+      - "context_docs_updated: true|not_needed"
     prompt: |
       Produce a domain map: glossary, bounded contexts, ubiquitous language,
       entities, value objects, aggregates, policies, events, and non-goals.
-      Output: domain-map.md.
+      Use grill-with-docs rules: check CONTEXT.md / CONTEXT-MAP.md / docs/adr
+      when present, challenge conflicting terms, sharpen fuzzy terminology,
+      and update CONTEXT.md inline when a domain term is resolved.
+
+      Do not complete this phase until documentation has been checked and any
+      needed context updates have been made. End domain-map.md with a
+      `## Completion Gate` section:
+
+          ## Completion Gate
+          grill-with-docs: complete
+          context_docs_checked: true
+          context_docs_updated: true
+
+      If no context doc update is needed, use `context_docs_updated: not_needed`
+      and explain why in the artifact.
 
   - id: product-brief
     description: Validate whether this is worth building.

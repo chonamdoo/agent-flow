@@ -45,6 +45,7 @@ from agent_flow.artifact import (
 from agent_flow.cli_detect import detect_available_clis
 from agent_flow.core.report import write_run_report
 from agent_flow.core.security import ensure_child_path, validate_safe_name
+from agent_flow.core.markers import missing_markers, normalize_required_markers
 from agent_flow.memory.index import LoreIndex
 from agent_flow.memory.lore import Lore
 
@@ -87,6 +88,7 @@ class Phase:
     multi_review: bool = False  # Triggers fan-out hint in adapter envelope
     cite_lore: bool = False     # Inject relevant lore into prompt envelope
     routes: dict[str, str] | None = None
+    required_markers: tuple[str, ...] = ()
 
 
 class Runner:
@@ -96,6 +98,7 @@ class Runner:
         workflow: str = "default",
         run_dir: Path | None = None,
         architecture: str = "default",
+        next_command: str = "agent-flow continue",
     ) -> None:
         if architecture not in ARCHITECTURE_MODES:
             raise ValueError(f"invalid architecture mode: {architecture!r}")
@@ -103,6 +106,7 @@ class Runner:
         self.workflow_name = workflow
         self.run_dir = run_dir
         self.architecture = architecture
+        self.next_command = next_command
         self.kit_root = _find_kit_root()
         if run_dir is not None:
             meta = read_meta(run_dir)
@@ -157,6 +161,22 @@ class Runner:
         while phase_index < len(self.phases):
             phase = self.phases[phase_index]
             if has_artifact(self.run_dir, phase.id):
+                missing_markers = self._missing_required_markers(phase)
+                if missing_markers:
+                    artifact = self.run_dir / f"{phase.id}.md"
+                    print(
+                        f"\n═══ phase '{phase.id}' is blocked. "
+                        f"Artifact is missing completion markers: "
+                        f"{', '.join(missing_markers)}. "
+                        f"Update the artifact, then `{self.next_command}`. ═══"
+                    )
+                    self._print_structured_status(
+                        status="blocked",
+                        phase=phase,
+                        reason="missing_completion_markers",
+                        required_artifact=artifact,
+                    )
+                    return
                 if self._artifact_needs_auto_revalidation(phase):
                     (self.run_dir / f"{phase.id}.md").unlink()
                 else:
@@ -174,7 +194,12 @@ class Runner:
                         print(
                             f"\n═══ phase '{phase.id}' is blocked. "
                             f"Update the artifact or rerun the watcher, then "
-                            f"`agent-flow continue`. ═══"
+                            f"`{self.next_command}`. ═══"
+                        )
+                        self._print_structured_status(
+                            status="blocked",
+                            phase=phase,
+                            reason="route_blocked",
                         )
                         return
                     continue
@@ -193,7 +218,12 @@ class Runner:
                     print(
                         f"\n═══ phase '{phase.id}' is blocked. "
                         f"Update the artifact or rerun the watcher, then "
-                        f"`agent-flow continue`. ═══"
+                        f"`{self.next_command}`. ═══"
+                    )
+                    self._print_structured_status(
+                        status="blocked",
+                        phase=phase,
+                        reason="route_blocked",
                     )
                     return
                 continue
@@ -208,13 +238,41 @@ class Runner:
             if not completed:
                 print(
                     f"\n═══ phase '{phase.id}' awaits host AI. "
-                    f"Write artifact → `agent-flow continue`. ═══"
+                    f"Write artifact → `{self.next_command}`. ═══"
+                )
+                self._print_structured_status(
+                    status="awaiting_host",
+                    phase=phase,
+                    reason="missing_phase_artifact",
+                    required_artifact=self.run_dir / f"{phase.id}.md",
+                )
+                return
+            missing_markers = self._missing_required_markers(phase)
+            if missing_markers:
+                artifact = self.run_dir / f"{phase.id}.md"
+                print(
+                    f"\n═══ phase '{phase.id}' is blocked. "
+                    f"Artifact is missing completion markers: "
+                    f"{', '.join(missing_markers)}. "
+                    f"Update the artifact, then `{self.next_command}`. ═══"
+                )
+                self._print_structured_status(
+                    status="blocked",
+                    phase=phase,
+                    reason="missing_completion_markers",
+                    required_artifact=artifact,
                 )
                 return
             if phase.pause_after:
                 print(
                     f"\n═══ pause: '{phase.id}' 결과 검토 후 "
-                    f"`agent-flow continue` ═══"
+                    f"`{self.next_command}` ═══"
+                )
+                self._print_structured_status(
+                    status="blocked",
+                    phase=phase,
+                    reason="pause_after",
+                    required_artifact=self.run_dir / f"{phase.id}.md",
                 )
                 return
             phase_index, blocked = self._next_index(phase_index, phase)
@@ -230,13 +288,24 @@ class Runner:
                 print(
                     f"\n═══ phase '{phase.id}' is blocked. "
                     f"Update the artifact or rerun the watcher, then "
-                    f"`agent-flow continue`. ═══"
+                    f"`{self.next_command}`. ═══"
+                )
+                self._print_structured_status(
+                    status="blocked",
+                    phase=phase,
+                    reason="route_blocked",
                 )
                 return
 
-        write_run_report(self.run_dir)
+        report_path = write_run_report(self.run_dir)
         mark_inactive(self.run_dir)
         print("\n✓ run complete.")
+        self._print_structured_status(
+            status="complete",
+            phase=None,
+            reason="workflow_complete",
+            report=report_path,
+        )
 
     def _next_index(self, current_index: int, phase: Phase) -> tuple[int, bool]:
         if not phase.routes:
@@ -302,6 +371,54 @@ class Runner:
         print(f"  [recheck] {phase.id} status=blocked")
         return True
 
+    def _missing_required_markers(self, phase: Phase) -> list[str]:
+        if not phase.required_markers:
+            return []
+        assert self.run_dir is not None
+        artifact = self.run_dir / f"{phase.id}.md"
+        if not artifact.exists():
+            return []
+        return _missing_markers(
+            artifact.read_text(encoding="utf-8"),
+            phase.required_markers,
+        )
+
+    def _print_structured_status(
+        self,
+        *,
+        status: str,
+        phase: Phase | None,
+        reason: str,
+        required_artifact: Path | None = None,
+        report: Path | None = None,
+    ) -> None:
+        assert self.run_dir is not None
+        meta = read_meta(self.run_dir)
+        required_artifact_text = str(required_artifact) if required_artifact is not None else None
+        report_text = str(report) if report is not None else None
+        next_command = "none" if status == "complete" else self.next_command
+        payload = {
+            "status": status,
+            "run": f"{self.workflow_name}/{self.run_dir.name}",
+            "task": meta.get("task", ""),
+            "current_phase": phase.id if phase is not None else "-",
+            "reason": reason,
+            "required_artifact": required_artifact_text,
+            "report": report_text,
+            "next_command": next_command,
+        }
+        print(f"status: {_status_value(status)}")
+        print(f"run: {_status_value(payload['run'])}")
+        print(f"task: {_status_value(payload['task'])}")
+        print(f"current_phase: {phase.id if phase is not None else '-'}")
+        print(f"reason: {_status_value(reason)}")
+        if required_artifact is not None:
+            print(f"required_artifact: {_status_value(required_artifact_text)}")
+        if report is not None:
+            print(f"report: {_status_value(report_text)}")
+        print(f"next_command: {_status_value(next_command)}")
+        print(f"status_json: {json.dumps(payload, sort_keys=True)}")
+
 
 def _find_kit_root() -> Path:
     """Locate the agent-flow kit root (contains workflows/ and profiles/)."""
@@ -354,6 +471,7 @@ def _load_workflow(kit_root: Path, name: str) -> list[Phase]:
             multi_review=bool(p.get("multi_review", False)),
             cite_lore=bool(p.get("cite_lore", False)),
             routes=p.get("routes"),
+            required_markers=normalize_required_markers(p.get("required_markers")),
         ))
     return out
 
@@ -384,6 +502,14 @@ def _route_key(text: str) -> str:
         if f"verdict: {key}" in lowered or f"status: {key}" in lowered:
             return key
     return "default"
+
+
+def _missing_markers(text: str, markers: tuple[str, ...]) -> list[str]:
+    return missing_markers(text, markers)
+
+
+def _status_value(value: object) -> str:
+    return str(value).replace("\r", "\\r").replace("\n", "\\n")
 
 
 def _is_git_repo(project_root: Path) -> bool:
