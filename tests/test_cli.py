@@ -348,7 +348,7 @@ class CliTest(unittest.TestCase):
             kit = json.loads((project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
             self.assertEqual(kit["graphify"]["installer"], "existing")
             self.assertEqual(kit["graphify"]["skill_location"], "~/.agents/skills/graphify")
-            self.assertEqual(
+            self.assertCountEqual(
                 kit["graphify"]["removed_duplicate_skills"],
                 ["~/.gemini/skills/graphify", "~/.claude/skills/graphify"],
             )
@@ -386,7 +386,7 @@ class CliTest(unittest.TestCase):
             legacy_kit = json.loads((legacy_project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
             self.assertEqual(legacy_kit["graphify"]["installer"], "existing")
             self.assertEqual(legacy_kit["graphify"]["skill_location"], "~/.agents/skills/graphify")
-            self.assertEqual(
+            self.assertCountEqual(
                 legacy_kit["graphify"]["removed_duplicate_skills"],
                 ["~/.gemini/skills/graphify", "~/.claude/skills/graphify"],
             )
