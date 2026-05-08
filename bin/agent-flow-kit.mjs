@@ -602,9 +602,12 @@ function canonicalizeGraphifySkill() {
   }
   const source = existing[0];
   if (source !== canonical) {
-    fs.rmSync(canonical, { recursive: true, force: true });
     fs.mkdirSync(path.dirname(canonical), { recursive: true });
-    fs.cpSync(source, canonical, { recursive: true, force: true });
+    const tempCanonical = `${canonical}.tmp.${process.pid}`;
+    fs.rmSync(tempCanonical, { recursive: true, force: true });
+    fs.cpSync(source, tempCanonical, { recursive: true });
+    fs.rmSync(canonical, { recursive: true, force: true });
+    fs.renameSync(tempCanonical, canonical);
   }
   const removed = [];
   for (const duplicate of candidates.filter((candidate) => candidate !== canonical)) {
