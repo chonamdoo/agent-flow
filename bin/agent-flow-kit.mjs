@@ -13,9 +13,10 @@ const KIT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const installArgs = process.argv.slice(3);
 
 function installProject() {
-  const root = process.cwd();
+  const root = resolveInstallRoot(process.cwd());
   const agentFlowDir = path.join(root, ".agent-flow");
   const profile = detectProfile(root);
+  const existingPayload = readExistingKit(agentFlowDir);
 
   for (const name of ["runs", "state", "handoffs", "team", "worktrees", "workflows", "skills", "prompts", "rules", "bootstrap"]) {
     fs.mkdirSync(path.join(agentFlowDir, name), { recursive: true });
@@ -28,7 +29,7 @@ function installProject() {
     install_scope: "project",
     profile,
     root: ".",
-    installed_at: new Date().toISOString(),
+    installed_at: existingPayload?.installed_at || new Date().toISOString(),
   };
 
   writeManagedFile(path.join(agentFlowDir, "workflows", "full-feature.yaml"), fullFeatureWorkflowYaml());
@@ -57,6 +58,7 @@ function installProject() {
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "skills"), path.join(agentFlowDir, "skills"));
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "scripts"), path.join(root, "scripts"));
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "rules", "context"), path.join(root, ".Codex", "rules", "context"));
+  copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "context"), path.join(root, ".Codex", "context"));
   writeManagedFileIfMissingOrSame(
     path.join(root, ".Codex", "rules", "codebase-rubric.md"),
     fs.readFileSync(path.join(KIT_ROOT, ".Codex", "rules", "codebase-rubric.md"), "utf8"),
@@ -79,7 +81,7 @@ function installProject() {
   upsertBootstrapBlock(path.join(root, "GEMINI.md"), "GEMINI.md");
 
   if (!installArgs.includes("--without-graphify")) {
-    payload.graphify = installGraphify(root);
+    payload.graphify = installGraphify(root, existingPayload?.graphify);
   }
 
   fs.writeFileSync(path.join(agentFlowDir, "kit.json"), `${JSON.stringify(payload, null, 2)}\n`, "utf8");
@@ -91,6 +93,7 @@ function installProject() {
 
 function runWorkflowCommand(args) {
   const subcommand = args[0];
+  const root = resolveAgentFlowRoot(process.cwd());
   if (subcommand === "start") {
     const task = optionValue(args, "--task");
     if (!task) {
@@ -101,7 +104,6 @@ function runWorkflowCommand(args) {
       throw new Error(`unknown workflow: ${workflow}`);
     }
     const runId = optionValue(args, "--run-id") ?? newRunId();
-    const root = process.cwd();
     assertInstalled(root);
     const runDir = path.join(root, ".agent-flow", "runs", workflow, runId);
     const runDirRel = path.join(".agent-flow", "runs", workflow, runId);
@@ -129,20 +131,19 @@ function runWorkflowCommand(args) {
   }
 
   if (subcommand === "status") {
-    const state = readCurrentRun(process.cwd());
+    const state = readCurrentRun(root);
     printStatus(state);
     return;
   }
 
   if (subcommand === "next") {
-    printNext(readCurrentRun(process.cwd()));
+    printNext(readCurrentRun(root));
     return;
   }
 
   if (subcommand === "push-watch") {
-    const root = process.cwd();
     assertInstalled(root);
-    const branch = currentBranch(root);
+    const branch = currentBranch(process.cwd());
     if (["main", "master", "develop"].includes(branch)) {
       throw new Error(`blocked: protected branch ${branch}`);
     }
@@ -158,14 +159,13 @@ function runWorkflowCommand(args) {
   }
 
   if (subcommand === "push-watch-tick") {
-    const root = process.cwd();
     assertInstalled(root);
     const state = readCurrentRun(root);
     if (state.phase !== "pr-watch") {
       throw new Error(`blocked: push-watch-tick requires current phase pr-watch, got ${state.phase}`);
     }
     const runDir = resolveRunDir(root, state.run_dir);
-    const pr = readPullRequestStatus(root);
+    const pr = readPullRequestStatus(process.cwd());
     const watchStatus = pullRequestWatchStatus(pr);
     const artifact = path.join(runDir, "artifacts", "pr-watch.md");
     writeManagedFile(
@@ -187,7 +187,6 @@ function runWorkflowCommand(args) {
   }
 
   if (subcommand === "advance") {
-    const root = process.cwd();
     const state = readCurrentRun(root);
     const runDir = resolveRunDir(root, state.run_dir);
     if (state.status === "complete" || state.phase === "complete") {
@@ -249,6 +248,37 @@ function detectProfile(rootDir) {
     return "android";
   }
   return "generic";
+}
+
+function resolveAgentFlowRoot(start) {
+  const parts = start.split(path.sep);
+  const markerIndex = parts.lastIndexOf(".agent-flow");
+  if (markerIndex !== -1) {
+    const root = parts.slice(0, markerIndex).join(path.sep) || path.sep;
+    if (fs.existsSync(path.join(root, ".agent-flow", "kit.json"))) {
+      return root;
+    }
+  }
+  let current = start;
+  while (true) {
+    if (fs.existsSync(path.join(current, ".agent-flow", "kit.json"))) {
+      return current;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return start;
+    }
+    current = parent;
+  }
+}
+
+function resolveInstallRoot(start) {
+  const parts = start.split(path.sep);
+  const markerIndex = parts.lastIndexOf(".agent-flow");
+  if (markerIndex !== -1) {
+    return parts.slice(0, markerIndex).join(path.sep) || path.sep;
+  }
+  return start;
 }
 
 function readCurrentRun(root) {
@@ -451,6 +481,18 @@ function writeJson(pathName, payload) {
   fs.writeFileSync(pathName, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 }
 
+function readExistingKit(agentFlowDir) {
+  const kitPath = path.join(agentFlowDir, "kit.json");
+  if (!fs.existsSync(kitPath)) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(fs.readFileSync(kitPath, "utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
 function writeFileIfMissing(pathName, content) {
   fs.mkdirSync(path.dirname(pathName), { recursive: true });
   if (!fs.existsSync(pathName)) {
@@ -470,6 +512,7 @@ function writeManagedFileIfMissingOrSame(pathName, content) {
     if (current !== content) {
       return false;
     }
+    return true;
   }
   fs.writeFileSync(pathName, content, "utf8");
   return true;
@@ -495,7 +538,7 @@ function copyBundledDirIfMissingOrSame(src, dest) {
   }
 }
 
-function installGraphify(root) {
+function installGraphify(root, existingGraphify) {
   if (process.env.AGENT_FLOW_GRAPHIFY_DRY_RUN === "1") {
     return {
       status: "dry-run",
@@ -509,6 +552,12 @@ function installGraphify(root) {
         command: "graphify .",
         output: "graphify-out/",
       },
+    };
+  }
+  if (existingGraphify && graphifyAvailable(root)) {
+    return {
+      ...existingGraphify,
+      status: "reused",
     };
   }
   const installer = installGraphifyPackage(root);
@@ -1101,7 +1150,7 @@ function phasePrompt(phase) {
 }
 
 function workflowContract() {
-  return `# Workflow Contract\n\nThe workflow runner is the source of truth for phase order. Agents may read skills and prompts, but must use \`${AGENT_FLOW_COMMAND} run next\` and \`${AGENT_FLOW_COMMAND} run advance\` to move through the workflow.\n\nPhases with completion markers are not complete just because the artifact file exists. The artifact must include every required marker printed by \`${AGENT_FLOW_COMMAND} run next\`.\n\nContext rules:\n\n- Artifacts and manifests must use repo-relative paths; local absolute paths are forbidden.\n- Do not paste full docs or raw logs into artifacts. Summarize and link by relative path.\n- \`CONTEXT.md\` is hot context only and must stay under 200 lines.\n- Current and future vocabulary must stay separated.\n- Follow the phase context map in \`.Codex/rules/context/\` for phase-specific context loading.\n`;
+  return `# Workflow Contract\n\nThe workflow runner is the source of truth for phase order. Agents may read skills and prompts, but must use \`${AGENT_FLOW_COMMAND} run next\` and \`${AGENT_FLOW_COMMAND} run advance\` to move through the workflow.\n\nPhases with completion markers are not complete just because the artifact file exists. The artifact must include every required marker printed by \`${AGENT_FLOW_COMMAND} run next\`.\n\nImplementation rules:\n\n- Run every phase through the runner. Do not skip review, QA, PR watch, or fix-loop phases.\n- Code comments are required when intent is not obvious.\n- Every new or modified code comment must be written in Korean.\n- If review or QA fails, return to the fix phase before continuing.\n\nDocument size rules:\n\n- \`CONTEXT.md\`, grill-me docs, grill-with-docs outputs, and long planning docs must stay under 200 lines each.\n- If a source doc grows past 200 lines, create or refresh a matching \`*-summary.md\` under \`.Codex/rules/\` and use that summary as agent context.\n- Preserve the original long doc only as reference; do not load it as hot context unless the current phase needs a specific section.\n- Artifacts must link to long docs by repo-relative path and summarize only the needed decision, not paste the full content.\n\nContext rules:\n\n- Artifacts and manifests must use repo-relative paths; local absolute paths are forbidden.\n- Do not paste full docs or raw logs into artifacts. Summarize and link by relative path.\n- \`CONTEXT.md\` is hot context only and must stay under 200 lines.\n- Current and future vocabulary must stay separated.\n- Follow the phase context map in \`.Codex/rules/context/\` for phase-specific context loading.\n`;
 }
 
 try {

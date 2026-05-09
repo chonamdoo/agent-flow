@@ -184,6 +184,10 @@ function install() {
     path.join(KIT_ROOT, ".Codex", "rules", "context"),
     path.join(PROJECT, ".Codex", "rules", "context"),
   );
+  const contextTreeCopied = copyDir(
+    path.join(KIT_ROOT, ".Codex", "context"),
+    path.join(PROJECT, ".Codex", "context"),
+  );
   copyFileIfMissingOrSame(
     path.join(KIT_ROOT, ".Codex", "rules", "codebase-rubric.md"),
     path.join(PROJECT, ".Codex", "rules", "codebase-rubric.md"),
@@ -236,6 +240,7 @@ function install() {
     workflows_copied: workflowsCopied,
     profiles_copied: profilesCopied,
     templates_copied: templatesCopied,
+    context_tree_copied: contextTreeCopied,
     skill_links: {
       claude: claudeSkillStatus,
       codex: codexSkillStatus,
