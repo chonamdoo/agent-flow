@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import shutil
 from dataclasses import asdict, dataclass
@@ -142,7 +143,7 @@ def _state_payload(state: RunState) -> dict[str, str]:
         worktree = dict(payload["worktree"])
         raw_path = worktree.get("path")
         if raw_path:
-            worktree["path"] = _relative_run_dir(str(raw_path))
+            worktree["path"] = _safe_relative_path(str(raw_path))
         payload["worktree"] = worktree
     if payload["worktree"] is None:
         del payload["worktree"]
@@ -240,6 +241,13 @@ def _relative_run_dir(run_dir: str) -> str:
         index = parts.index(marker)
         return str(Path(*parts[index:]))
     return run_dir
+
+
+def _safe_relative_path(path: str) -> str:
+    rel_path = _relative_run_dir(path)
+    if Path(rel_path).is_absolute() or re.match(r"^[A-Za-z]:[\\/]", rel_path):
+        return Path(path.replace("\\", "/")).name or "worktree"
+    return rel_path
 
 
 def _status_value(value: object) -> str:
