@@ -6,7 +6,7 @@ branching:
   worktree: required
 gates:
   - id: context-lint
-    command: "python3 scripts/check_context_docs.py"
+    command: "node scripts/check-context-docs.mjs"
     required: true
     phase: pre-commit
   - id: build

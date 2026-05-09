@@ -18,7 +18,7 @@
 Run:
 
 ```bash
-python3 scripts/check_context_docs.py
+node scripts/check-context-docs.mjs
 ```
 
 The gate checks hot context size, conflict markers, absolute path leaks, current/future vocabulary drift, and Agent Flow artifact path policy.
