@@ -10,4 +10,4 @@ Context rules:
 - Do not paste full docs or raw logs into artifacts. Summarize and link by relative path.
 - `CONTEXT.md` is hot context only and must stay under 200 lines.
 - Current and future vocabulary must stay separated.
-- Follow `.Codex/rules/context/agent-flow-context-map.md` for phase-specific context loading.
+- Follow the phase context map in `.Codex/rules/context/` for phase-specific context loading.

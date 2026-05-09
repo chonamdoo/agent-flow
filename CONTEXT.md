@@ -1,6 +1,6 @@
 # Agent Flow Hot Context
 
-항상 로드되는 hot context다. 200줄 이하 유지. 긴 도메인/워크플로우 설명은 `.Codex/rules/context/`에서 phase별로만 읽는다.
+항상 로드되는 hot context다. 200줄 미만 유지. 긴 도메인/워크플로우 설명은 `.Codex/rules/context/`에서 phase별로만 읽는다.
 
 ## 작업 원칙
 
@@ -45,7 +45,7 @@ Team Orchestration은 optional future module이다. current Personal Workflow와
 - **Team State**: future team coordination state.
 - **Mailbox**: future Worker/lead 비동기 메시지 큐.
 - **Heartbeat**: future Worker liveness record.
-- **Worktree**: 독립 변경을 만들기 위한 git worktree. 필요 시 프로젝트 내부 `.agent-flow/worktrees/` 또는 `.codex/worktrees/` 사용.
+- **Worktree**: 독립 변경을 만들기 위한 git worktree. 프로젝트 내부 `.agent-flow/worktrees/`를 사용.
 
 ## 금지어 / 혼동어
 

@@ -8,7 +8,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTEXT = ROOT / "CONTEXT.md"
-ABSOLUTE_PATH_RE = re.compile(r"(?<![\w.-])(?:/Users/|/home/|/private/var/|[A-Za-z]:[\\/])")
+ABSOLUTE_PATH_RE = re.compile(
+    r"(?<![\w.-])(?:/Users/|/home/|/private/var/|/workspace/|/tmp/|/var/|/opt/|/mnt/|[A-Za-z]:[\\/])"
+)
 CONFLICT_RE = re.compile(r"^(<<<<<<<|=======|>>>>>>>)", re.MULTILINE)
 FUTURE_TERMS = ("Worker", "Task", "Team State", "Mailbox", "Heartbeat")
 
@@ -32,15 +34,15 @@ def _check_context(errors: list[str]) -> None:
         return
     text = CONTEXT.read_text(encoding="utf-8")
     lines = text.splitlines()
-    if len(lines) > 200:
-        errors.append(f"CONTEXT.md has {len(lines)} lines; limit is 200")
+    if len(lines) >= 200:
+        errors.append(f"CONTEXT.md has {len(lines)} lines; must be under 200 lines")
     _check_text("CONTEXT.md", text, errors)
-    current = _section(text, "Current Vocabulary", "Future Vocabulary")
+    current = _section_until_next_heading(text, "Current Vocabulary")
     if current is None:
         errors.append("CONTEXT.md must include Current Vocabulary before Future Vocabulary")
         current = ""
     for term in FUTURE_TERMS:
-        if re.search(rf"\b{re.escape(term)}\b", current):
+        if re.search(rf"\b{re.escape(term)}\b", current, flags=re.IGNORECASE):
             errors.append(f"future term used in current vocabulary: {term}")
     if "Future Vocabulary" not in text:
         errors.append("CONTEXT.md must separate current and future vocabulary")
@@ -96,6 +98,12 @@ def _required_context_files() -> tuple[Path, ...]:
 
 def _section(text: str, start: str, end: str) -> str | None:
     pattern = rf"^## {re.escape(start)}\s*$([\s\S]*?)^## {re.escape(end)}\s*$"
+    match = re.search(pattern, text, re.MULTILINE)
+    return match.group(1) if match else None
+
+
+def _section_until_next_heading(text: str, start: str) -> str | None:
+    pattern = rf"^## {re.escape(start)}\s*$([\s\S]*?)(?=^## |\Z)"
     match = re.search(pattern, text, re.MULTILINE)
     return match.group(1) if match else None
 

@@ -75,8 +75,9 @@ def status_summary(root: Path) -> str:
     run_id = payload["run_id"]
     raw_status = payload["status"]
     task = payload.get("task", "")
-    run_dir = payload.get("run_dir") or str(manifests[-1].parent)
-    resolved_run_dir = _resolve_run_dir(root, run_dir)
+    raw_run_dir = payload.get("run_dir") or str(manifests[-1].parent)
+    resolved_run_dir = _resolve_run_dir(root, raw_run_dir)
+    run_dir = _relative_run_dir(str(resolved_run_dir))
     current_phase, required_artifact = _current_stage_status(
         workflow_id,
         resolved_run_dir,
@@ -90,7 +91,7 @@ def status_summary(root: Path) -> str:
         raw_status,
         payload,
         current_phase,
-        run_dir,
+        raw_run_dir,
     )
     status_payload = {
         "status": status,
