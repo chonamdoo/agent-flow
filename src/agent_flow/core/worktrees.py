@@ -157,7 +157,7 @@ def write_worktree_manifest(*, root: Path, status: WorktreeStatus) -> Path:
     path = root / ".agent-flow" / "worktrees" / status.name / "manifest.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = asdict(status)
-    payload["path"] = str(status.path)
+    payload["path"] = str(status.path.relative_to(root))
     path.write_text(f"{json.dumps(payload, indent=2, sort_keys=True)}\n", encoding="utf-8")
     return path
 

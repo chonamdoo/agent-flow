@@ -14,6 +14,8 @@
     "templates",
     "bootstrap",
     "skills",
+    "scripts",
+    ".Codex",
     "src",
     "pyproject.toml",
     "README.md"

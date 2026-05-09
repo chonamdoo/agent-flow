@@ -5,6 +5,10 @@ branching:
   integration: release/* # PRs target active release; release later syncs to develop
   worktree: required
 gates:
+  - id: context-lint
+    command: "python3 scripts/check_context_docs.py"
+    required: true
+    phase: pre-commit
   - id: build
     command: "./gradlew assembleDevDebug"
     required: true

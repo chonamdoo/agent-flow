@@ -76,11 +76,13 @@ def status_summary(root: Path) -> str:
     raw_status = payload["status"]
     task = payload.get("task", "")
     run_dir = payload.get("run_dir") or str(manifests[-1].parent)
+    resolved_run_dir = _resolve_run_dir(root, run_dir)
     current_phase, required_artifact = _current_stage_status(
         workflow_id,
-        Path(run_dir),
+        resolved_run_dir,
         payload.get("current_phase") or payload.get("phase"),
     )
+    required_artifact = _relative_run_dir(required_artifact) if required_artifact is not None else None
     status = _structured_status(raw_status, required_artifact)
     reason = _reason_for_status(raw_status, required_artifact)
     next_command, next_command_template, required_action = _next_command_for_status(
@@ -134,10 +136,21 @@ def _append_event(run_dir: Path, event: str, details: dict[str, str]) -> None:
 
 def _state_payload(state: RunState) -> dict[str, str]:
     payload = asdict(state)
-    payload["run_dir"] = str(state.run_dir)
+    payload["run_dir"] = str(Path(".agent-flow") / "runs" / state.workflow_id / state.run_id)
+    if isinstance(payload.get("worktree"), dict):
+        worktree = dict(payload["worktree"])
+        raw_path = worktree.get("path")
+        if raw_path:
+            worktree["path"] = _relative_run_dir(str(raw_path))
+        payload["worktree"] = worktree
     if payload["worktree"] is None:
         del payload["worktree"]
     return payload
+
+
+def _resolve_run_dir(root: Path, run_dir: str) -> Path:
+    path = Path(run_dir)
+    return path if path.is_absolute() else root / path
 
 
 def _write_json(path: Path, payload: object) -> None:
