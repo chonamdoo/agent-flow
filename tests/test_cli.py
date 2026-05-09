@@ -1470,7 +1470,7 @@ class CliTest(unittest.TestCase):
                 {
                     "name": "slice-a",
                     "branch": "agent-flow/slice-a",
-                    "path": str(root.resolve() / ".agent-flow" / "worktrees" / "slice-a"),
+                    "path": ".agent-flow/worktrees/slice-a",
                 },
             )
             self.assertTrue(worktree.is_dir())
@@ -1764,8 +1764,7 @@ class CliTest(unittest.TestCase):
             self.assertIn("reason: missing_stage_artifact", lines)
             self.assertIn("required_action: write_stage_artifact", lines)
             self.assertIn(
-                "required_artifact: "
-                + str(root / ".agent-flow" / "runs" / "review" / "r1" / "artifacts" / "explore.md"),
+                "required_artifact: .agent-flow/runs/review/r1/artifacts/explore.md",
                 lines,
             )
             self.assertIn("next_command: none", lines)
@@ -1812,7 +1811,7 @@ class CliTest(unittest.TestCase):
             lines = output.getvalue().strip().splitlines()
             self.assertIn("current_phase: review-1", lines)
             self.assertIn(
-                "required_artifact: " + str(run_dir / "artifacts" / "review-1.md"),
+                "required_artifact: .agent-flow/runs/review/r1/artifacts/review-1.md",
                 lines,
             )
             self.assertIn("next_command: none", lines)

@@ -5,6 +5,10 @@ branching:
   integration: main
   worktree: optional
 gates:
+  - id: context-lint
+    command: "python3 scripts/check_context_docs.py"
+    required: true
+    phase: pre-commit
   - id: build
     command: "xcodebuild -scheme App -destination 'platform=iOS Simulator,name=iPhone 15' build"
     required: true

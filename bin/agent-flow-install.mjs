@@ -101,6 +101,18 @@ function copyDir(src, dest) {
   return { written, skipped };
 }
 
+function copyFileIfMissingOrSame(src, dest) {
+  if (!fs.existsSync(src)) return false;
+  ensureDir(path.dirname(dest));
+  const srcContent = fs.readFileSync(src, "utf8");
+  if (fs.existsSync(dest) && fs.readFileSync(dest, "utf8") !== srcContent) {
+    console.log(`  ! skipped (user-modified): ${path.relative(PROJECT, dest)}`);
+    return false;
+  }
+  fs.copyFileSync(src, dest);
+  return true;
+}
+
 function pathExists(p) {
   try {
     fs.lstatSync(p);
@@ -163,6 +175,18 @@ function install() {
   const templatesCopied = copyDir(
     path.join(KIT_ROOT, "templates"),
     path.join(AF_DIR, "templates"),
+  );
+  const scriptsCopied = copyDir(
+    path.join(KIT_ROOT, "scripts"),
+    path.join(PROJECT, "scripts"),
+  );
+  const contextRulesCopied = copyDir(
+    path.join(KIT_ROOT, ".Codex", "rules", "context"),
+    path.join(PROJECT, ".Codex", "rules", "context"),
+  );
+  copyFileIfMissingOrSame(
+    path.join(KIT_ROOT, ".Codex", "rules", "codebase-rubric.md"),
+    path.join(PROJECT, ".Codex", "rules", "codebase-rubric.md"),
   );
 
   const agentFlowSkill = path.join(AF_DIR, "skills", "agent-flow");

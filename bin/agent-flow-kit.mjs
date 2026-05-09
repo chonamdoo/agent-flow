@@ -27,7 +27,7 @@ function installProject() {
   const payload = {
     install_scope: "project",
     profile,
-    root,
+    root: ".",
     installed_at: new Date().toISOString(),
   };
 
@@ -55,6 +55,12 @@ function installProject() {
   );
   writeManagedFile(path.join(agentFlowDir, "skills", "push-watch", "SKILL.md"), pushWatchSkillMarkdown());
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "skills"), path.join(agentFlowDir, "skills"));
+  copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "scripts"), path.join(root, "scripts"));
+  copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "rules", "context"), path.join(root, ".Codex", "rules", "context"));
+  writeManagedFileIfMissingOrSame(
+    path.join(root, ".Codex", "rules", "codebase-rubric.md"),
+    fs.readFileSync(path.join(KIT_ROOT, ".Codex", "rules", "codebase-rubric.md"), "utf8"),
+  );
   writeManagedFile(path.join(agentFlowDir, "prompts", "push-watch.md"), pushWatchPromptMarkdown());
   writeManagedFile(path.join(agentFlowDir, "prompts", "push-watch-tick.md"), pushWatchTickPromptMarkdown());
   for (const phase of PHASES) {
@@ -98,6 +104,7 @@ function runWorkflowCommand(args) {
     const root = process.cwd();
     assertInstalled(root);
     const runDir = path.join(root, ".agent-flow", "runs", workflow, runId);
+    const runDirRel = path.join(".agent-flow", "runs", workflow, runId);
     if (fs.existsSync(runDir)) {
       throw new Error(`run already exists: ${runId}`);
     }
@@ -111,7 +118,7 @@ function runWorkflowCommand(args) {
       phase_index: 0,
       phase: PHASES[0].id,
       status: "running",
-      run_dir: runDir,
+      run_dir: runDirRel,
       started_at: startedAt,
       phase_entered_at: startedAt,
     };
@@ -157,9 +164,10 @@ function runWorkflowCommand(args) {
     if (state.phase !== "pr-watch") {
       throw new Error(`blocked: push-watch-tick requires current phase pr-watch, got ${state.phase}`);
     }
+    const runDir = resolveRunDir(root, state.run_dir);
     const pr = readPullRequestStatus(root);
     const watchStatus = pullRequestWatchStatus(pr);
-    const artifact = path.join(state.run_dir, "artifacts", "pr-watch.md");
+    const artifact = path.join(runDir, "artifacts", "pr-watch.md");
     writeManagedFile(
       artifact,
       [`status: ${watchStatus}`, `pr: ${pr.url ?? "unknown"}`, `recorded_at: ${new Date().toISOString()}`, ""].join("\n"),
@@ -181,12 +189,13 @@ function runWorkflowCommand(args) {
   if (subcommand === "advance") {
     const root = process.cwd();
     const state = readCurrentRun(root);
+    const runDir = resolveRunDir(root, state.run_dir);
     if (state.status === "complete" || state.phase === "complete") {
       console.log(`workflow already complete: ${state.run_id}`);
       return;
     }
     const phase = PHASES[state.phase_index];
-    const artifact = path.join(state.run_dir, phase.artifact);
+    const artifact = path.join(runDir, phase.artifact);
     if (!fs.existsSync(artifact)) {
       throw new Error(`blocked: missing artifact ${artifact}`);
     }
@@ -203,7 +212,7 @@ function runWorkflowCommand(args) {
       updated_at: transitionedAt,
       phase_entered_at: transitionedAt,
     };
-    writeJson(path.join(state.run_dir, "manifest.json"), nextState);
+    writeJson(path.join(runDir, "manifest.json"), nextState);
     writeJson(currentRunPath(root), nextState);
     if (nextPhase) {
       printNext(nextState);
@@ -250,6 +259,10 @@ function readCurrentRun(root) {
   return normalizeRunState(root, JSON.parse(fs.readFileSync(pathName, "utf8")));
 }
 
+function resolveRunDir(root, runDir) {
+  return path.isAbsolute(runDir) ? runDir : path.join(root, runDir);
+}
+
 function assertInstalled(root) {
   const required = [
     path.join(root, ".agent-flow", "kit.json"),
@@ -286,7 +299,7 @@ function normalizeRunState(root, state) {
     ...state,
     phase_index: index,
   };
-  writeJson(path.join(state.run_dir, "manifest.json"), normalized);
+  writeJson(path.join(resolveRunDir(root, state.run_dir), "manifest.json"), normalized);
   writeJson(currentRunPath(root), normalized);
   return normalized;
 }
@@ -367,16 +380,19 @@ function printNext(state) {
 
 function printStatus(state) {
   const phase = PHASES[state.phase_index];
+  const root = process.cwd();
+  const resolvedRunDir = resolveRunDir(root, state.run_dir);
   const complete = state.status === "complete" || state.phase === "complete" || !phase;
   const requiredArtifact = phase ? path.join(state.run_dir, phase.artifact) : null;
+  const resolvedRequiredArtifact = phase ? path.join(resolvedRunDir, phase.artifact) : null;
   let status = complete ? "complete" : state.status;
   let reason = complete ? "workflow_complete" : "in_progress";
-  if (!complete && requiredArtifact && !fs.existsSync(requiredArtifact)) {
+  if (!complete && resolvedRequiredArtifact && !fs.existsSync(resolvedRequiredArtifact)) {
     status = "awaiting_host";
     reason = "missing_phase_artifact";
   } else if (!complete && requiredArtifact) {
     const missing = missingMarkers(
-      fs.readFileSync(requiredArtifact, "utf8"),
+      fs.readFileSync(resolvedRequiredArtifact, "utf8"),
       phase.required_markers ?? [],
     );
     status = "blocked";
@@ -384,7 +400,7 @@ function printStatus(state) {
       reason = "missing_completion_markers";
     } else {
       try {
-        nextPhaseIndex(state, phase, requiredArtifact);
+        nextPhaseIndex(state, phase, resolvedRequiredArtifact);
         reason = "phase_artifact_written_advance_required";
       } catch (_error) {
         reason = "route_blocked";
@@ -929,7 +945,7 @@ const PHASES = [
     artifact: "artifacts/domain-map.md",
     required_markers: ["grill-with-docs: complete", "context_docs_checked: true", "context_docs_updated: true|not_needed"],
     instruction:
-      "Update or reference CONTEXT.md with glossary, bounded contexts, ubiquitous language, and domain decisions from domain-grill. End with a ## Completion Gate section containing marker lines: grill-with-docs: complete, context_docs_checked: true, and context_docs_updated: true or not_needed.",
+      "Use CONTEXT.md plus .Codex/rules/context/domain-glossary-full.md. Keep CONTEXT.md hot-only and under 200 lines; move expanded domain detail to .Codex/rules/context/. End with a ## Completion Gate section containing marker lines: grill-with-docs: complete, context_docs_checked: true, and context_docs_updated: true or not_needed.",
   },
   {
     id: "product-brief",
@@ -956,7 +972,7 @@ const PHASES = [
   { id: "red", artifact: "artifacts/red.log", instruction: "Write failing tests first and save the failure output." },
   { id: "green", artifact: "artifacts/green.log", instruction: "Implement the minimum change and save passing test output." },
   { id: "refactor", artifact: "artifacts/refactor.md", instruction: "Refactor only after green and summarize changed structure." },
-  { id: "gates", artifact: "gate-results.json", instruction: "Run project gates and save structured results." },
+  { id: "gates", artifact: "gate-results.json", instruction: "Run project gates, including context lint for docs-only changes, and save structured results." },
   { id: "multi-review", artifact: "artifacts/multi-review.md", instruction: "Run reviewer agents and record approve/request-changes results." },
   { id: "fix-loop", artifact: "artifacts/fix-loop.md", instruction: "Apply review/gate fixes or record that no fixes were required." },
   {
@@ -1085,7 +1101,7 @@ function phasePrompt(phase) {
 }
 
 function workflowContract() {
-  return `# Workflow Contract\n\nThe workflow runner is the source of truth for phase order. Agents may read skills and prompts, but must use \`${AGENT_FLOW_COMMAND} run next\` and \`${AGENT_FLOW_COMMAND} run advance\` to move through the workflow.\n\nPhases with completion markers are not complete just because the artifact file exists. The artifact must include every required marker printed by \`${AGENT_FLOW_COMMAND} run next\`.\n`;
+  return `# Workflow Contract\n\nThe workflow runner is the source of truth for phase order. Agents may read skills and prompts, but must use \`${AGENT_FLOW_COMMAND} run next\` and \`${AGENT_FLOW_COMMAND} run advance\` to move through the workflow.\n\nPhases with completion markers are not complete just because the artifact file exists. The artifact must include every required marker printed by \`${AGENT_FLOW_COMMAND} run next\`.\n\nContext rules:\n\n- Artifacts and manifests must use repo-relative paths; local absolute paths are forbidden.\n- Do not paste full docs or raw logs into artifacts. Summarize and link by relative path.\n- \`CONTEXT.md\` is hot context only and must stay under 200 lines.\n- Current and future vocabulary must stay separated.\n- Follow the phase context map in \`.Codex/rules/context/\` for phase-specific context loading.\n`;
 }
 
 try {
