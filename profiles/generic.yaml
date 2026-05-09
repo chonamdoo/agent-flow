@@ -6,7 +6,7 @@ branching:
   worktree: optional
 gates:
   - id: context-lint
-    command: "node scripts/check-context-docs.ts"
+    command: "node scripts/check-context-docs.mjs"
     required: true
     phase: pre-commit
 review_angles:

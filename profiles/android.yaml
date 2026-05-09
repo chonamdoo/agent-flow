@@ -6,7 +6,7 @@ branching:
   worktree: required
 gates:
   - id: context-lint
-    command: "node scripts/check-context-docs.ts"
+    command: "node scripts/check-context-docs.mjs"
     required: true
     phase: pre-commit
   - id: build
