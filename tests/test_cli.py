@@ -283,6 +283,28 @@ class CliTest(unittest.TestCase):
 
             self.assertEqual(start.returncode, 0, start.stderr)
             self.assertTrue((project_root / ".agent-flow" / "runs" / "full-feature" / "r1").is_dir())
+            artifact = project_root / ".agent-flow" / "runs" / "full-feature" / "r1" / "artifacts" / "domain-grill.md"
+            artifact.write_text(
+                "## Completion Gate\n"
+                "grill-me: complete\n"
+                "shared_understanding: reached\n",
+                encoding="utf-8",
+            )
+            status = subprocess.run(
+                (
+                    node,
+                    str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"),
+                    "run",
+                    "status",
+                ),
+                cwd=worktree,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(status.returncode, 0, status.stderr)
+            self.assertIn("reason: phase_artifact_written_advance_required", status.stdout)
+            self.assertNotIn("reason: missing_phase_artifact", status.stdout)
 
     def test_node_installer_from_agent_flow_worktree_updates_parent_install(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

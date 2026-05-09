@@ -132,7 +132,7 @@ function runWorkflowCommand(args) {
 
   if (subcommand === "status") {
     const state = readCurrentRun(root);
-    printStatus(state);
+    printStatus(state, root);
     return;
   }
 
@@ -408,9 +408,8 @@ function printNext(state) {
   console.log(`Instruction: ${phase.instruction}`);
 }
 
-function printStatus(state) {
+function printStatus(state, root) {
   const phase = PHASES[state.phase_index];
-  const root = process.cwd();
   const resolvedRunDir = resolveRunDir(root, state.run_dir);
   const complete = state.status === "complete" || state.phase === "complete" || !phase;
   const requiredArtifact = phase ? path.join(state.run_dir, phase.artifact) : null;

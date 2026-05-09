@@ -33,9 +33,9 @@ function checkContext(result) {
     return;
   }
   const text = readText(CONTEXT);
-  const lines = text.split(/\r?\n/);
-  if (lines.length >= MAX_HOT_DOC_LINES) {
-    result.push(`CONTEXT.md has ${lines.length} lines; must be under ${MAX_HOT_DOC_LINES} lines`);
+  const lineCount = countLines(text);
+  if (lineCount >= MAX_HOT_DOC_LINES) {
+    result.push(`CONTEXT.md has ${lineCount} lines; must be under ${MAX_HOT_DOC_LINES} lines`);
   }
   checkText("CONTEXT.md", text, result);
   const current = sectionUntilNextHeading(text, "Current Vocabulary");
@@ -106,7 +106,7 @@ function checkContextTree(result) {
     if (fs.statSync(nodePath).isFile()) {
       indexedFiles.add(path.resolve(nodePath));
       const text = readText(nodePath);
-      const lineCount = text.split(/\r?\n/).length;
+      const lineCount = countLines(text);
       if (lineCount >= MAX_HOT_DOC_LINES) {
         result.push(`${relPath} has ${lineCount} lines; split into leaf docs under ${MAX_HOT_DOC_LINES} lines`);
       }
@@ -175,6 +175,13 @@ function checkText(label, text, result) {
   if (ABSOLUTE_PATH_RE.test(text)) {
     result.push(`absolute local path in ${label}`);
   }
+}
+
+function countLines(text) {
+  if (text.length === 0) {
+    return 0;
+  }
+  return text.replace(/\r?\n$/, "").split(/\r?\n/).length;
 }
 
 function requiredContextFiles() {
