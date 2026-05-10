@@ -243,6 +243,28 @@ class CliTest(unittest.TestCase):
             self.assertIn("graphify-out/manifest.json", gitignore)
             self.assertIn("graphify-out/cost.json", gitignore)
 
+    def test_node_installer_accepts_run_install_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            result = subprocess.run(
+                (
+                    node,
+                    str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"),
+                    "run",
+                    "install",
+                    "--without-graphify",
+                ),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "agent-flow installed profile=generic")
+            self.assertTrue((project_root / ".agent-flow" / "kit.json").is_file())
+
     def test_node_runner_uses_parent_install_from_agent_flow_worktree(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
