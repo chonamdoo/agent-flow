@@ -221,7 +221,7 @@ function runWorkflowCommand(args) {
     return;
   }
 
-  throw new Error("usage: agent-flow-kit run <start|status|next|advance|push-watch|push-watch-tick>");
+  throw new Error("usage: agent-flow-kit run <install|start|status|next|advance|push-watch|push-watch-tick>");
 }
 
 function detectProfile(rootDir) {
