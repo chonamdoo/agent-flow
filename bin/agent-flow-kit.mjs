@@ -1168,7 +1168,7 @@ try {
     process.exit(0);
   }
 
-  console.error("usage: agent-flow-kit install [--without-graphify] | run <install|start|status|next|advance>");
+  console.error("usage: agent-flow-kit install [--without-graphify] | run <install|start|status|next|advance|push-watch|push-watch-tick>");
   process.exit(1);
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));
