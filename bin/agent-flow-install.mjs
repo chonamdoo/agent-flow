@@ -180,6 +180,10 @@ function install() {
     path.join(KIT_ROOT, "scripts"),
     path.join(PROJECT, "scripts"),
   );
+  const codexAgentsCopied = copyDir(
+    path.join(KIT_ROOT, ".Codex", "agents"),
+    path.join(PROJECT, ".Codex", "agents"),
+  );
   const contextRulesCopied = copyDir(
     path.join(KIT_ROOT, ".Codex", "rules", "context"),
     path.join(PROJECT, ".Codex", "rules", "context"),
@@ -240,6 +244,7 @@ function install() {
     workflows_copied: workflowsCopied,
     profiles_copied: profilesCopied,
     templates_copied: templatesCopied,
+    codex_agents_copied: codexAgentsCopied,
     context_tree_copied: contextTreeCopied,
     skill_links: {
       claude: claudeSkillStatus,

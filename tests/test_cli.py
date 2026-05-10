@@ -198,7 +198,12 @@ class CliTest(unittest.TestCase):
             self.assertTrue((project_root / ".agent-flow" / "prompts" / "push-watch.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "prompts" / "push-watch-tick.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "push-watch" / "SKILL.md").is_file())
+            self.assertTrue((project_root / ".Codex" / "agents" / "code-reviewer.md").is_file())
             self.assertTrue((project_root / ".Codex" / "context" / "tree.jsonl").is_file())
+            self.assertIn(
+                "verdict: approve | request-changes",
+                (project_root / ".Codex" / "agents" / "code-reviewer.md").read_text(encoding="utf-8"),
+            )
             self.assertIn(
                 "verdict: approve",
                 (project_root / ".agent-flow" / "prompts" / "plan-review.md").read_text(encoding="utf-8"),
@@ -352,6 +357,7 @@ class CliTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue((project_root / ".agent-flow" / "kit.json").is_file())
             self.assertFalse((worktree / ".agent-flow" / "kit.json").exists())
+            self.assertTrue((project_root / ".Codex" / "agents" / "code-reviewer.md").is_file())
             self.assertTrue((project_root / ".Codex" / "context" / "tree.jsonl").is_file())
 
     def test_node_installer_installs_graphify_by_default(self) -> None:
@@ -586,6 +592,7 @@ class CliTest(unittest.TestCase):
             self.assertFalse((fake_home / ".gemini" / "skills" / "graphify").exists())
             self.assertFalse((fake_home / ".claude" / "skills" / "graphify").exists())
             self.assertTrue((legacy_project_root / "graphify-out" / "graph.json").is_file())
+            self.assertTrue((legacy_project_root / ".Codex" / "agents" / "code-reviewer.md").is_file())
             self.assertFalse(uv_marker.exists())
 
     def test_legacy_node_installer_installs_graphify_by_default(self) -> None:
@@ -612,6 +619,7 @@ class CliTest(unittest.TestCase):
             self.assertEqual(kit["graphify"]["command"], "graphify")
             self.assertEqual(kit["graphify"]["status"], "dry-run")
             self.assertEqual(kit["graphify"]["platforms"], ["claude", "codex", "gemini"])
+            self.assertTrue((project_root / ".Codex" / "agents" / "code-reviewer.md").is_file())
             self.assertEqual(kit["graphify"]["graph"]["status"], "dry-run")
             self.assertEqual(kit["graphify"]["graph"]["command"], "graphify .")
             gitignore = (project_root / ".gitignore").read_text(encoding="utf-8")
