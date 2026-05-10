@@ -57,6 +57,7 @@ function installProject() {
   writeManagedFile(path.join(agentFlowDir, "skills", "push-watch", "SKILL.md"), pushWatchSkillMarkdown());
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "skills"), path.join(agentFlowDir, "skills"));
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "scripts"), path.join(root, "scripts"));
+  copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "agents"), path.join(root, ".Codex", "agents"));
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "rules", "context"), path.join(root, ".Codex", "rules", "context"));
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "context"), path.join(root, ".Codex", "context"));
   writeManagedFileIfMissingOrSame(
@@ -310,6 +311,7 @@ function assertInstalled(root) {
     path.join(root, ".agent-flow", "bootstrap", "AGENTS.md"),
     path.join(root, ".agent-flow", "bootstrap", "CLAUDE.md"),
     path.join(root, ".agent-flow", "bootstrap", "GEMINI.md"),
+    path.join(root, ".Codex", "agents", "code-reviewer.md"),
   ];
   const missing = required.filter((pathName) => !fs.existsSync(pathName));
   if (missing.length > 0) {
