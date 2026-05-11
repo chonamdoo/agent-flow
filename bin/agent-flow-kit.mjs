@@ -292,11 +292,11 @@ function resolveInstallRoot(start) {
 
 function resolveManagedWorktreeRoot(start) {
   const parts = start.split(path.sep);
-  for (const marker of [".agent-flow", ".codex", ".Codex"]) {
-    const markerIndex = parts.lastIndexOf(marker);
-    if (markerIndex !== -1 && parts[markerIndex + 1] === "worktrees") {
-      return parts.slice(0, markerIndex).join(path.sep) || path.sep;
-    }
+  const markers = new Set([".agent-flow", ".codex", ".Codex"]);
+  for (let index = parts.length - 2; index >= 0; index -= 1) {
+    if (parts[index + 1] !== "worktrees") continue;
+    if (!markers.has(parts[index])) continue;
+    return parts.slice(0, index).join(path.sep) || path.sep;
   }
   return null;
 }
