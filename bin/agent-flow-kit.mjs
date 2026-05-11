@@ -1088,8 +1088,11 @@ ${AGENT_FLOW_COMMAND} run start --task "<task>"
 When the user types \`/agent-flow\` with no task:
 
 - Run \`${AGENT_FLOW_COMMAND} run status\` from the project root.
-- If an active run exists, run \`${AGENT_FLOW_COMMAND} run next\`.
-- If no active run exists, ask for a task using \`/agent-flow <task>\`.
+- Treat the status command output as the only source of truth.
+- If status exits 0 and reports an active run, run \`${AGENT_FLOW_COMMAND} run next\`.
+- If status exits non-zero with \`no active run\`, ask for a task using \`/agent-flow <task>\`.
+- Do not infer npm, npx, or install failure unless the command actually exits non-zero with that error.
+- Do not run install just because a new session started.
 
 When the user types \`/agent-flow status\`, run:
 
@@ -1101,6 +1104,7 @@ ${AGENT_FLOW_COMMAND} run status
 
 - Treat \`/agent-flow\` as a project-local workflow trigger, not as a shell path.
 - Keep \`.agent-flow/runs/<run-id>/\` as internal state; expose it only for status, debugging, or artifact inspection.
+- On a new session, always check \`${AGENT_FLOW_COMMAND} run status\` first and continue from that result.
 - After a phase writes its artifact, run \`${AGENT_FLOW_COMMAND} run advance\` from the project root.
 - If the workflow pauses for design or slice review, summarize the relevant artifact and wait for user approval before continuing.
 - Code comments are required when intent is not obvious, and every code comment must be written in Korean.

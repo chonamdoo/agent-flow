@@ -244,6 +244,11 @@ class CliTest(unittest.TestCase):
                 "npx github:chonamdoo/agent-flow run next",
                 (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8"),
             )
+            agent_flow_skill = (project_root / ".agent-flow" / "skills" / "agent-flow" / "SKILL.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("Treat the status command output as the only source of truth.", agent_flow_skill)
+            self.assertIn("Do not run install just because a new session started.", agent_flow_skill)
             gitignore = (project_root / ".gitignore").read_text(encoding="utf-8")
             self.assertIn("graphify-out/manifest.json", gitignore)
             self.assertIn("graphify-out/cost.json", gitignore)
