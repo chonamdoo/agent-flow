@@ -252,6 +252,10 @@ function detectProfile(rootDir) {
 }
 
 function resolveAgentFlowRoot(start) {
+  const worktreeRoot = resolveManagedWorktreeRoot(start);
+  if (worktreeRoot && fs.existsSync(path.join(worktreeRoot, ".agent-flow", "kit.json"))) {
+    return worktreeRoot;
+  }
   const parts = start.split(path.sep);
   const markerIndex = parts.lastIndexOf(".agent-flow");
   if (markerIndex !== -1) {
@@ -274,12 +278,27 @@ function resolveAgentFlowRoot(start) {
 }
 
 function resolveInstallRoot(start) {
+  const worktreeRoot = resolveManagedWorktreeRoot(start);
+  if (worktreeRoot) {
+    return worktreeRoot;
+  }
   const parts = start.split(path.sep);
   const markerIndex = parts.lastIndexOf(".agent-flow");
   if (markerIndex !== -1) {
     return parts.slice(0, markerIndex).join(path.sep) || path.sep;
   }
   return start;
+}
+
+function resolveManagedWorktreeRoot(start) {
+  const parts = start.split(path.sep);
+  for (const marker of [".agent-flow", ".codex", ".Codex"]) {
+    const markerIndex = parts.lastIndexOf(marker);
+    if (markerIndex !== -1 && parts[markerIndex + 1] === "worktrees") {
+      return parts.slice(0, markerIndex).join(path.sep) || path.sep;
+    }
+  }
+  return null;
 }
 
 function readCurrentRun(root) {

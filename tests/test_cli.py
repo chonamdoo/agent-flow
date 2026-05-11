@@ -338,6 +338,48 @@ class CliTest(unittest.TestCase):
             self.assertIn("reason: phase_artifact_written_advance_required", status.stdout)
             self.assertNotIn("reason: missing_phase_artifact", status.stdout)
 
+    def test_node_runner_uses_parent_install_from_codex_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            install = subprocess.run(
+                (
+                    node,
+                    str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"),
+                    "install",
+                    "--without-graphify",
+                ),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(install.returncode, 0, install.stderr)
+            worktree = project_root / ".codex" / "worktrees" / "slice"
+            worktree.mkdir(parents=True)
+
+            start = subprocess.run(
+                (
+                    node,
+                    str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"),
+                    "run",
+                    "start",
+                    "--task",
+                    "ship slice",
+                    "--run-id",
+                    "r1",
+                ),
+                cwd=worktree,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(start.returncode, 0, start.stderr)
+            self.assertTrue((project_root / ".agent-flow" / "runs" / "full-feature" / "r1").is_dir())
+            self.assertFalse((worktree / ".agent-flow" / "runs" / "full-feature" / "r1").exists())
+
     def test_node_installer_from_agent_flow_worktree_updates_parent_install(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
@@ -364,6 +406,32 @@ class CliTest(unittest.TestCase):
             self.assertFalse((worktree / ".agent-flow" / "kit.json").exists())
             self.assertTrue((project_root / ".Codex" / "agents" / "code-reviewer.md").is_file())
             self.assertTrue((project_root / ".Codex" / "context" / "tree.jsonl").is_file())
+
+    def test_node_installer_from_codex_worktree_updates_parent_install(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            worktree = project_root / ".codex" / "worktrees" / "slice"
+            worktree.mkdir(parents=True)
+
+            result = subprocess.run(
+                (
+                    node,
+                    str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"),
+                    "install",
+                    "--without-graphify",
+                ),
+                cwd=worktree,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((project_root / ".agent-flow" / "kit.json").is_file())
+            self.assertFalse((worktree / ".agent-flow" / "kit.json").exists())
+            self.assertTrue((project_root / ".Codex" / "agents" / "code-reviewer.md").is_file())
 
     def test_node_installer_installs_graphify_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
