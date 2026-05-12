@@ -1,4 +1,14 @@
 id: android
+branching:
+  strategy: release-first
+  base: release/*
+  integration: release/*
+  worktree: required
+  naming:
+    prefix: "agent-flow/"
+    slug_style: kebab-case
+    slug_source: feature title
+    max_slug_length: 60
 gates:
   - id: build
     command: ["./gradlew", "assembleDevDebug"]
@@ -6,3 +16,6 @@ gates:
     command: ["./gradlew", "testDevDebugUnitTest"]
   - id: lint
     command: ["./gradlew", "lintDevDebug"]
+pr:
+  target_branch: release/*
+  merge_strategy: merge

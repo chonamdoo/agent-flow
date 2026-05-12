@@ -1,6 +1,8 @@
 .agent-flow/
 .codex/
 .gemini/
+.claude/worktrees/
+.claude/settings.local.json
 AGENTS.md
 CLAUDE.md
 GEMINI.md

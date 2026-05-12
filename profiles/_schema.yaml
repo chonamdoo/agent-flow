@@ -18,6 +18,14 @@ optional:
     base: "branch name to start work from"
     integration: "branch where PRs target"
     worktree: "required | optional | disabled"
+    naming:
+      prefix: "namespace prefix for agent-generated branches (e.g. agent-flow/)"
+      slug_style: "kebab-case | snake_case"
+      slug_source: "feature title | slice id | free-form short summary"
+      max_slug_length: 60
+      examples:
+        - "agent-flow/chat-search-bottom-padding"
+        - "agent-flow/og-metadata-preview"
 
   gates:
     # ordered list of verification commands

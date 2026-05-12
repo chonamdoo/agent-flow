@@ -1,9 +1,14 @@
 id: android
 branching:
   strategy: release-first
-  base: release/*        # active release/YY.MM.DD.x branch, resolved by operator
-  integration: release/* # PRs target active release; release later syncs to develop
+  base: release/*        # 활성 release/YY.M.D.x 브랜치, 운영자가 확인
+  integration: release/* # PR은 활성 release 브랜치로 보내고 이후 develop에 동기화
   worktree: required
+  naming:
+    prefix: "agent-flow/"
+    slug_style: kebab-case
+    slug_source: feature title
+    max_slug_length: 60
 gates:
   - id: context-lint
     command: "node scripts/check-context-docs.mjs"
