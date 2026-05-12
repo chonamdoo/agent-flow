@@ -76,7 +76,24 @@ function installProject() {
   writeManagedFile(path.join(agentFlowDir, "bootstrap", "AGENTS.md"), bootstrapMarkdown("AGENTS.md"));
   writeManagedFile(path.join(agentFlowDir, "bootstrap", "CLAUDE.md"), bootstrapMarkdown("CLAUDE.md"));
   writeManagedFile(path.join(agentFlowDir, "bootstrap", "GEMINI.md"), bootstrapMarkdown("GEMINI.md"));
-  upsertGitignore(path.join(root, ".gitignore"), ["graphify-out/manifest.json", "graphify-out/cost.json"]);
+  upsertGitignore(path.join(root, ".gitignore"), [
+    ".agent-flow/",
+    ".codex/",
+    ".gemini/",
+    ".claude/worktrees/",
+    ".claude/settings.local.json",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "GEMINI.md",
+    "AGENTS/",
+    "CLAUDE/",
+    "GEMINI/",
+    "scripts/check-context-docs.*",
+    "graphify/",
+    "agent-flow/",
+    "graphify-out/manifest.json",
+    "graphify-out/cost.json",
+  ]);
   upsertBootstrapBlock(path.join(root, "AGENTS.md"), "AGENTS.md");
   upsertBootstrapBlock(path.join(root, "CLAUDE.md"), "CLAUDE.md");
   upsertBootstrapBlock(path.join(root, "GEMINI.md"), "GEMINI.md");
@@ -973,13 +990,34 @@ function upsertGitignore(pathName, entries) {
   const current = fs.existsSync(pathName) ? fs.readFileSync(pathName, "utf8") : "";
   const lines = current.split(/\r?\n/);
   const existing = new Set(lines.map((line) => line.trim()));
-  const missing = entries.filter((entry) => !existing.has(entry) && !existing.has("graphify-out/"));
+  const missing = entries.filter((entry) => !isGitignoreEntryCovered(entry, existing));
   if (missing.length === 0) {
     return;
   }
   const prefix = current.trimEnd();
   const next = `${prefix}${prefix ? "\n" : ""}${missing.join("\n")}\n`;
   fs.writeFileSync(pathName, next, "utf8");
+}
+
+function isGitignoreEntryCovered(entry, existing) {
+  if (existing.has(entry)) {
+    return true;
+  }
+  const normalized = entry.replace(/^\/+/, "");
+  const parts = normalized.split("/");
+  for (let index = 1; index < parts.length; index += 1) {
+    const parent = `${parts.slice(0, index).join("/")}/`;
+    const parentWithoutSlash = parent.replace(/\/$/, "");
+    if (
+      existing.has(parent) ||
+      existing.has(parentWithoutSlash) ||
+      existing.has(`/${parent}`) ||
+      existing.has(`/${parentWithoutSlash}`)
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function bootstrapMarkdown(label) {
@@ -1036,7 +1074,12 @@ const PHASES = [
     instruction:
       "Design data / domain / presentation boundaries, domain core modules, repository interfaces, repository implementations, and dependency rules.",
   },
-  { id: "worktree", artifact: "artifacts/worktree.md", instruction: "Create or record the dedicated branch/worktree for this slice." },
+  {
+    id: "worktree",
+    artifact: "artifacts/worktree.md",
+    instruction:
+      "Create or record the dedicated branch/worktree for this slice. Follow profile.branching.naming when present: <prefix><slug>, slug_style, slug_source, and max_slug_length.",
+  },
   { id: "run-start", artifact: "artifacts/run-start.md", instruction: "Record the workflow run setup and selected provider." },
   { id: "red", artifact: "artifacts/red.log", instruction: "Write failing tests first and save the failure output." },
   { id: "green", artifact: "artifacts/green.log", instruction: "Implement the minimum change and save passing test output." },
@@ -1051,7 +1094,12 @@ const PHASES = [
       "Review implemented code against domain decisions and DDD/Clean Architecture. Record verdict: approve or verdict: request-changes with violations and required refactors.",
   },
   { id: "commit", artifact: "artifacts/commit.md", instruction: "Commit the verified slice and record the commit hash." },
-  { id: "push-pr", artifact: "artifacts/push-pr.md", instruction: "Push the branch or open a PR and record the remote reference." },
+  {
+    id: "push-pr",
+    artifact: "artifacts/push-pr.md",
+    instruction:
+      "Push the branch or open a PR against profile.pr.target_branch; for release-first profiles, verify the target is the active release/* branch. Record the remote reference.",
+  },
   { id: "pr-watch", artifact: "artifacts/pr-watch.md", instruction: "Poll PR checks and review threads; record status: green, status: has_comments, status: ci_failed (legacy alias status: ci-failed), status: pending, status: merged, status: closed, or status: error with PR URL." },
   { id: "pr-comment-fix", artifact: "artifacts/pr-comment-fix.md", instruction: "Resolve actionable PR review comments, commit and push fixes, resolve the corresponding GitHub review threads, or record that no comments are pending." },
   { id: "pr-ci-fix", artifact: "artifacts/pr-ci-fix.md", instruction: "Fix failed PR checks, commit and push fixes, or record that checks are green." },

@@ -28,6 +28,11 @@ Review for architectural soundness independent of stack-specific patterns: modul
    - Are errors propagated as types meaningful at the call site, or swallowed/rethrown as opaque exceptions?
    - Are nullable/optional decisions consistent with the module's idioms?
 
+7. **Workflow / process gates** (profile-driven)
+   - Does the PR target match `profile.pr.target_branch`? For `release-first` profiles, verify the target is the active `release/*` branch, not `main` or a stale release line.
+   - When `profile.branching.naming` is set, does the working branch follow `<prefix><slug>` per the configured `slug_style`?
+   - Are required `profile.gates` represented in the verification evidence?
+
 ## Output format
 
 ```text

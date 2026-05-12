@@ -16,6 +16,7 @@
 - 빌드, 타입체크, 린트 실행 조건이 명확한가.
 - 새로 추가하거나 수정한 코드 주석이 모두 한국어인가.
 - agent-flow phase artifact와 completion marker가 요구사항을 만족하는가.
+- PR target branch가 프로필의 `pr.target_branch`와 일치하는가. release-first 프로필이면 활성 `release/*` 브랜치인지 확인한다.
 
 ## 출력 형식
 

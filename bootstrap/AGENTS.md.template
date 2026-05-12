@@ -1,54 +1,53 @@
 <!-- agent-flow:start -->
 ## Agent Flow
 
-This project has the agent-flow workflow kit installed.
+이 프로젝트는 agent-flow 워크플로우 킷이 설치되어 있습니다.
 
-Every task starts with `/agent-flow`:
+모든 작업은 `/agent-flow`로 시작합니다:
 
 ```text
 /agent-flow <task>
 ```
 
-When the user types `/agent-flow <task>`, run `agent-flow run "<task>"` from
-the project root. When the user types `/agent-flow` with no task, run
-`agent-flow status` from the project root; continue an active run with
-`agent-flow continue` if present, otherwise ask for a task in the
-`/agent-flow <task>` format.
+`/agent-flow <task>`를 보면 프로젝트 루트에서 `agent-flow run "<task>"`를 실행하세요.
+`/agent-flow`만 입력되면 프로젝트 루트에서 `agent-flow status`로 active run을 확인하세요.
+active run이 있으면 `agent-flow continue`로 이어가고, 없으면 `/agent-flow <task>` 형식으로 작업을 요청하세요.
 
-The AI infers tier and phase depth from the task. Trivial fixes collapse to a one-question interview and a single slice; feature work expands phases. The chain pauses for user review at the spec/slice-plan handoff and resumes with:
+AI가 task를 보고 phase 깊이를 자동 조절합니다. 사소한 작업은 인터뷰 1Q로 끝나고 큰 기능은 깊게 진행됩니다. 중간에 사용자 검토가 필요한 시점이 오면 멈추고 요청합니다.
+
+진행 중인 run은 자동 감지됩니다:
 
 ```text
-/agent-flow          # resume the active run
-/agent-flow status   # show progress
-/agent-flow abort    # cancel the active run (artifacts are preserved)
+/agent-flow          # 이어서 진행
+/agent-flow status   # 진행 상태 확인
+/agent-flow abort    # 진행 중 run 취소 (artifact는 보존)
 ```
 
-Command mapping: `/agent-flow status` → `agent-flow status`, `/agent-flow abort` → `agent-flow abort`.
-Treat `/agent-flow` as a skill trigger, not as a shell path.
+내부 명령 매핑: `/agent-flow status` → `agent-flow status`, `/agent-flow abort` → `agent-flow abort`.
+`/agent-flow`는 shell path가 아니라 agent-flow skill trigger로 취급하세요.
 
-### Steering with natural language
-- "treat this as a feature, deepen the phases" → escalate depth
-- "redo the spec" → re-enter spec phase
-- "decline this PR comment politely" → comment-decline branch
+### 자연어로 흐름 조정
+- "이거 더 큰 일이야, 더 깊게 가자" → AI가 phase 깊이 상향
+- "spec 다시 짜자" → AI가 spec phase로 되돌아가 재작성
+- "이 PR 댓글 정중히 거절해" → AI가 comment-decline 분기
 
-### Artifacts
+### Artifact
 
-Run artifacts live at `.agent-flow/runs/<run-id>/`. The chain advances when the previous artifact exists, so context loss does not lose progress.
+run artifact는 `.agent-flow/runs/<run-id>/`에 저장됩니다. 컨텍스트가 끊겨도 artifact 기반으로 정확히 재개됩니다.
 
 ### Worktrees
 
-Create git worktrees inside the project root at `.agent-flow/worktrees/<name>/`.
-Do not create sibling folders next to the project unless the user explicitly
-provides an external path.
+git worktree는 프로젝트 루트 내부의 `.agent-flow/worktrees/<name>/`에 생성하세요.
+사용자가 외부 경로를 명시적으로 지정한 경우가 아니면 프로젝트 루트 옆에 형제 폴더를 만들지 않습니다.
 
 ### Memory / Lore
 
-Lore in `.agent-flow/memory/lore/` is **auto-indexed, searched, and cited**.
+`.agent-flow/memory/lore/`에 작성된 lore는 **자동으로 인덱싱·검색·인용**됩니다.
 
-- `/agent-flow <task>` searches the lore index using task keywords; matches are inlined into the `design` phase prompt as a "Relevant lore" block (with Constraint/Directive excerpts). Cite where they actually apply; do not fabricate citations.
-- `agent-flow lore list` / `search "<query>"` — direct index access.
-- `agent-flow lore compact [--apply]` — recommended every ~60 days. 4-tier compaction (dedup → stale-drop → weight decay → cluster reports). Dry-run by default.
-- `agent-flow lore init <slug>` — scaffold a new lore file.
+- `/agent-flow <task>` 실행 시 task 키워드로 lore 자동 검색 → design phase prompt에 "Relevant lore" 블록으로 인라인 (Constraint/Directive 발췌 포함). 부합하지 않는 항목은 무시하고 인용 조작 금지.
+- `agent-flow lore list` / `agent-flow lore search "<query>"` 로 인덱스 직접 조회.
+- `agent-flow lore compact [--apply]` — 60일 1회 권장. 4-tier 압축 (dedup → stale-drop → weight decay → cluster 후보). dry-run이 기본.
+- `agent-flow lore init <slug>` — 새 lore 파일 스캐폴드.
 
-Lore schema: frontmatter (title/type/date/scope/weight/tags) + body sections `## Constraint`, `## Rejected`, `## Directive` (the three required fields).
+lore 스키마: 프론트매터(title/type/date/scope/weight/tags) + 본문 섹션 `## Constraint`, `## Rejected`, `## Directive` (3필드 필수).
 <!-- agent-flow:end -->

@@ -100,6 +100,10 @@ phases:
         - release-first: branch from active release/* and target release for PR
         - trunk: branch from main and target main
         - gitflow: branch per gitflow rules
+      If profile.branching.naming is present, the branch name MUST follow it:
+        - `<prefix><slug>` where prefix and slug_style come from the profile.
+        - slug is derived from the configured slug_source and converted to slug_style.
+        - truncate to max_slug_length without breaking words.
       Create a git worktree if profile.branching.worktree is `required`.
       Output: worktree.md (branch name, base, worktree path or "no worktree").
 

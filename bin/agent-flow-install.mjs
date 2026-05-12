@@ -154,7 +154,24 @@ function install() {
   bootstrapMarkdown("CLAUDE.md");
   bootstrapMarkdown("AGENTS.md");
   bootstrapMarkdown("GEMINI.md");
-  upsertGitignore(path.join(PROJECT, ".gitignore"), ["graphify-out/manifest.json", "graphify-out/cost.json"]);
+  upsertGitignore(path.join(PROJECT, ".gitignore"), [
+    ".agent-flow/",
+    ".codex/",
+    ".gemini/",
+    ".claude/worktrees/",
+    ".claude/settings.local.json",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "GEMINI.md",
+    "AGENTS/",
+    "CLAUDE/",
+    "GEMINI/",
+    "scripts/check-context-docs.*",
+    "graphify/",
+    "agent-flow/",
+    "graphify-out/manifest.json",
+    "graphify-out/cost.json",
+  ]);
 
   // Copy bundled skills into project-local skills dir.
   // Host-AI-specific skill paths (`.claude/skills/`, `.codex/skills/`) are
@@ -316,13 +333,34 @@ function upsertGitignore(pathName, entries) {
   const current = fs.existsSync(pathName) ? fs.readFileSync(pathName, "utf8") : "";
   const lines = current.split(/\r?\n/);
   const existing = new Set(lines.map((line) => line.trim()));
-  const missing = entries.filter((entry) => !existing.has(entry) && !existing.has("graphify-out/"));
+  const missing = entries.filter((entry) => !isGitignoreEntryCovered(entry, existing));
   if (missing.length === 0) {
     return;
   }
   const prefix = current.trimEnd();
   const next = `${prefix}${prefix ? "\n" : ""}${missing.join("\n")}\n`;
   fs.writeFileSync(pathName, next, "utf8");
+}
+
+function isGitignoreEntryCovered(entry, existing) {
+  if (existing.has(entry)) {
+    return true;
+  }
+  const normalized = entry.replace(/^\/+/, "");
+  const parts = normalized.split("/");
+  for (let index = 1; index < parts.length; index += 1) {
+    const parent = `${parts.slice(0, index).join("/")}/`;
+    const parentWithoutSlash = parent.replace(/\/$/, "");
+    if (
+      existing.has(parent) ||
+      existing.has(parentWithoutSlash) ||
+      existing.has(`/${parent}`) ||
+      existing.has(`/${parentWithoutSlash}`)
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function runChecked(commandName, args) {
