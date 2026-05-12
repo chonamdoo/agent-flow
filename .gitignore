@@ -1,4 +1,15 @@
 .agent-flow/
+.codex/
+.gemini/
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+AGENTS/
+CLAUDE/
+GEMINI/
+scripts/check-context-docs.*
+graphify/
+agent-flow/
 .DS_Store
 .pytest_cache/
 __pycache__/
