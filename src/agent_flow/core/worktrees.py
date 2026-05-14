@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -208,7 +209,9 @@ def _safe_component(value: str) -> str:
     lowered = value.strip().lower()
     safe = re.sub(r"[^a-z0-9._-]+", "-", lowered).strip("-")
     if not safe or safe.startswith(".") or ".." in safe:
-        raise ValueError("worktree name must contain at least one safe character")
+        # 한글 등 비ASCII task도 기본 worktree 이름으로 쓸 수 있게 안정적인 fallback을 둔다.
+        digest = hashlib.sha1(lowered.encode("utf-8")).hexdigest()[:8]
+        safe = f"task-{digest}"
     return safe
 
 

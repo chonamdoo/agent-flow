@@ -66,6 +66,9 @@ phases:
 
   - id: plan-review
     description: Senior-style plan review gate. Runner routes approve→ddd-design, request-changes→slice-plan.
+    routes:
+      approve: ddd-design
+      request-changes: slice-plan
     prompt: |
       Review slice-plan.md. Check missing steps, wrong order, oversized work,
       vague validation, and hidden dependencies. Output plan-review.md with
@@ -127,6 +130,14 @@ phases:
 
   - id: gates
     description: Run project verification gates. Runner routes fail→fix-loop, pass→multi-review.
+    routes:
+      green: multi-review
+      approve: multi-review
+      request-changes: fix-loop
+      blocked: fix-loop
+      error: fix-loop
+      pending: block
+      default: fix-loop
     prompt: |
       Run build, typecheck, lint, tests, and context lint according to the
       active profile. Docs-only PRs must still run context lint. Save
@@ -135,6 +146,9 @@ phases:
 
   - id: multi-review
     description: Run implementation review with 2+ independent reviewers. Runner routes approve→architecture-review, request-changes→fix-loop.
+    routes:
+      approve: architecture-review
+      request-changes: fix-loop
     prompt: |
       Run 2+ independent reviewer agents. Each reviewer uses code-reviewer.md
       as basis and outputs an independent verdict: approve or request-changes.
@@ -147,6 +161,8 @@ phases:
 
   - id: fix-loop
     description: Apply review and gate fixes. Runner always routes back to gates for re-verification.
+    routes:
+      default: gates
     prompt: |
       Apply code-generation-discipline while fixing review/gate failures. New
       or modified code must include Korean comments. Language-specific guide
@@ -155,6 +171,10 @@ phases:
 
   - id: architecture-review
     description: Review implementation against DDD/Clean design. Runner routes approve→commit, request-changes→refactor.
+    routes:
+      approve: commit
+      request-changes: refactor
+      blocked: refactor
     prompt: |
       Compare code against domain-grill.md and ddd-design.md. Check layer
       violations, repository boundary leaks, naming drift, and dependency
@@ -175,6 +195,17 @@ phases:
 
   - id: pr-watch
     description: Watch PR checks and comments. Runner routes green→merge-approval, comments→pr-comment-fix, ci-failed→pr-ci-fix, merged/skipped→handoff.
+    routes:
+      green: merge-approval
+      merged: handoff
+      comments: pr-comment-fix
+      has_comments: pr-comment-fix
+      ci-failed: pr-ci-fix
+      ci_failed: pr-ci-fix
+      pending: block
+      closed: block
+      error: block
+      skipped: handoff
     prompt: |
       Poll PR status and review threads. Output pr-watch.md with exactly one
       status line: `status: green`, `status: has_comments`,
@@ -183,6 +214,8 @@ phases:
 
   - id: pr-comment-fix
     description: Fix actionable PR comments. Runner routes back to pr-watch.
+    routes:
+      default: pr-watch
     prompt: |
       Address actionable PR review comments, commit, push, resolve the
       corresponding GitHub review threads, and summarize comment/thread IDs,
@@ -190,12 +223,17 @@ phases:
 
   - id: pr-ci-fix
     description: Fix failing PR CI. Runner routes back to pr-watch.
+    routes:
+      default: pr-watch
     prompt: |
       Diagnose failing checks, reproduce locally, fix, commit, push, and
       summarize commands and check URLs. Output: pr-ci-fix.md.
 
   - id: merge-approval
     description: Require explicit user approval before merge. Runner routes approve→merge.
+    routes:
+      approve: merge
+      default: block
     prompt: |
       Ask the user for explicit merge approval. Do not merge yet. Output
       merge-approval.md with exactly `verdict: approve` only after approval.

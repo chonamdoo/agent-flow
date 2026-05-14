@@ -130,6 +130,40 @@ class CliTest(unittest.TestCase):
         self.assertTrue(package_root.joinpath("roles", "default.yaml").is_file())
         self.assertTrue(package_root.joinpath("templates", "generic", "stage.md").is_file())
 
+    def test_full_feature_workflow_keeps_python_runner_routes(self) -> None:
+        import yaml
+
+        workflow_path = (
+            Path(__file__).resolve().parents[1]
+            / "src"
+            / "agent_flow"
+            / "workflows"
+            / "full-feature.yaml"
+        )
+        payload = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+        phases = {phase["id"]: phase for phase in payload["phases"]}
+        # Python runner가 verdict/status에 따라 재작업 phase로 되돌아가는지 고정한다.
+        self.assertEqual(phases["plan-review"]["routes"]["request-changes"], "slice-plan")
+        self.assertEqual(phases["gates"]["routes"]["request-changes"], "fix-loop")
+        self.assertEqual(phases["gates"]["routes"]["green"], "multi-review")
+        self.assertEqual(phases["multi-review"]["routes"]["request-changes"], "fix-loop")
+        self.assertEqual(phases["fix-loop"]["routes"]["default"], "gates")
+        self.assertEqual(phases["architecture-review"]["routes"]["blocked"], "refactor")
+        self.assertEqual(phases["pr-watch"]["routes"]["comments"], "pr-comment-fix")
+        self.assertEqual(phases["pr-watch"]["routes"]["ci-failed"], "pr-ci-fix")
+        self.assertEqual(phases["pr-comment-fix"]["routes"]["default"], "pr-watch")
+        self.assertEqual(phases["pr-ci-fix"]["routes"]["default"], "pr-watch")
+        self.assertEqual(phases["merge-approval"]["routes"]["default"], "block")
+
+    def test_python_runner_route_key_understands_gate_results(self) -> None:
+        from agent_flow.runner import _route_key
+
+        # gates 결과 JSON과 status alias가 같은 route key로 정규화되어야 한다.
+        self.assertEqual(_route_key('{"passed": true, "results": []}'), "green")
+        self.assertEqual(_route_key('{"passed": false, "results": []}'), "request-changes")
+        self.assertEqual(_route_key("status: failed"), "request-changes")
+        self.assertEqual(_route_key("status: pass"), "green")
+
     def test_node_installer_initializes_current_project(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
@@ -2852,6 +2886,12 @@ class CliTest(unittest.TestCase):
             self.assertEqual(plan.name, "feat-implement-login")
             self.assertEqual(plan.branch, "feat/implement-login")
             self.assertEqual(plan.path, root / ".agent-flow" / "worktrees" / "feat-implement-login")
+
+            korean_plan = plan_worktree(root=root, name="버그 수정")
+            # 한글 task도 deterministic fallback slug로 worktree를 만들 수 있어야 한다.
+            self.assertRegex(korean_plan.name, r"^feat-task-[a-f0-9]{8}$")
+            self.assertEqual(korean_plan.branch, korean_plan.name.replace("feat-", "feat/", 1))
+            self.assertEqual(korean_plan.path, root / ".agent-flow" / "worktrees" / korean_plan.name)
 
     def test_worktree_status_reports_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

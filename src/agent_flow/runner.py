@@ -477,10 +477,19 @@ def _load_workflow(kit_root: Path, name: str) -> list[Phase]:
 
 def _route_key(text: str) -> str:
     lowered = text.lower()
+    # gates 결과 JSON을 그대로 붙여도 Python runner가 pass/fail 분기를 해석하게 한다.
+    if re.search(r'"passed"\s*:\s*true', lowered):
+        return "green"
+    if re.search(r'"passed"\s*:\s*false', lowered):
+        return "request-changes"
     aliases = {
         "has_comments": "comments",
         "has-comments": "comments",
         "ci_failed": "ci-failed",
+        "failed": "request-changes",
+        "fail": "request-changes",
+        "passed": "green",
+        "pass": "green",
     }
     for raw, canonical in aliases.items():
         if f"verdict: {raw}" in lowered or f"status: {raw}" in lowered:
