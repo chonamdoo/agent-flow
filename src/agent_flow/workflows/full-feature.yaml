@@ -110,7 +110,7 @@ phases:
       tests first. Language-specific guide selection follows the
       code-generation-discipline Before Starting checklist. Save the failure
       summary and command output.
-      Output: red.log.
+      Output: red.md.
 
   - id: green
     description: TDD green phase.
@@ -118,7 +118,7 @@ phases:
       Apply code-generation-discipline. Implement the minimum code to pass red
       tests. Language-specific guide selection follows the
       code-generation-discipline Before Starting checklist.
-      New or modified code must include Korean comments. Output: green.log.
+      New or modified code must include Korean comments. Output: green.md.
 
   - id: refactor
     description: TDD refactor phase.
@@ -143,7 +143,7 @@ phases:
       Run build, typecheck, lint, tests, and context lint according to the
       active profile. Docs-only PRs must still run context lint. Save
       structured JSON with a top-level `passed` boolean and a `results` array.
-      Output: artifacts/gate-results.json.
+      Output: gates.md.
 
   - id: multi-review
     description: Run implementation review with 2+ independent reviewers. Runner routes approve→architecture-review, request-changes→fix-loop.

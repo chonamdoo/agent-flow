@@ -60,6 +60,7 @@ GIT_DEPENDENT_PHASES = {
     "merge",
     "merge-approval",
 }
+FIX_LOOP_MAX_ROUNDS = 3
 DDD_REQUIRED_DESIGN_SECTIONS = (
     ("bounded context", ("bounded context", "bounded contexts", "context map", "컨텍스트")),
     ("aggregate", ("aggregate", "aggregates", "aggregate root", "애그리거트")),
@@ -315,6 +316,14 @@ class Runner:
         text = artifact.read_text(encoding="utf-8") if artifact.exists() else ""
         key = _route_key(text)
         target = phase.routes.get(key)
+        if phase.id == "gates":
+            if target == "fix-loop":
+                rounds = self._increment_fix_loop_rounds()
+                if rounds > FIX_LOOP_MAX_ROUNDS:
+                    print(f"  [block] fix-loop exceeded {FIX_LOOP_MAX_ROUNDS} rounds")
+                    return current_index, True
+            elif target:
+                self._reset_fix_loop_rounds()
         if target == "block":
             print(f"  [block] {phase.id} status={key}")
             return current_index, True
@@ -328,6 +337,23 @@ class Runner:
                     return i, False
             raise ValueError(f"phase {phase.id}: route target not found: {target}")
         return current_index + 1, False
+
+    def _increment_fix_loop_rounds(self) -> int:
+        assert self.run_dir is not None
+        meta = read_meta(self.run_dir)
+        rounds = _fix_loop_rounds(meta) + 1
+        # gates 실패 루프는 run meta에 저장해서 재시작 후에도 상한을 유지한다.
+        meta["fix_loop_rounds"] = rounds
+        write_meta(self.run_dir, meta)
+        return rounds
+
+    def _reset_fix_loop_rounds(self) -> None:
+        assert self.run_dir is not None
+        meta = read_meta(self.run_dir)
+        if "fix_loop_rounds" not in meta:
+            return
+        meta.pop("fix_loop_rounds", None)
+        write_meta(self.run_dir, meta)
 
     def _write_automatic_artifact(self, phase: Phase) -> bool:
         assert self.run_dir is not None
@@ -475,13 +501,24 @@ def _load_workflow(kit_root: Path, name: str) -> list[Phase]:
         ))
     return out
 
+
+def _fix_loop_rounds(meta: dict[str, Any]) -> int:
+    raw = meta.get("fix_loop_rounds", 0)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _route_key(text: str) -> str:
     lowered = text.lower()
-    # gates 결과 JSON을 그대로 붙여도 Python runner가 pass/fail 분기를 해석하게 한다.
-    if re.search(r'"passed"\s*:\s*true', lowered):
-        return "green"
-    if re.search(r'"passed"\s*:\s*false', lowered):
-        return "request-changes"
+    # gates 결과 JSON은 nested result가 아니라 top-level passed만 route source로 본다.
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        payload = None
+    if isinstance(payload, dict) and isinstance(payload.get("passed"), bool):
+        return "green" if payload["passed"] else "request-changes"
     aliases = {
         "has_comments": "comments",
         "has-comments": "comments",

@@ -8,6 +8,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 
+PROTECTED_WORKTREE_BRANCHES = {"main", "master", "develop"}
+
+
 @dataclass(frozen=True)
 class WorktreePlan:
     name: str
@@ -30,6 +33,8 @@ def plan_worktree(*, root: Path, name: str, branch: str | None = None) -> Worktr
     safe_name = _feature_worktree_name(name)
     selected_branch = branch or f"feat/{safe_name.removeprefix('feat-')}"
     _validate_branch(selected_branch)
+    if selected_branch in PROTECTED_WORKTREE_BRANCHES:
+        raise ValueError(f"protected worktree branch is not allowed: {selected_branch}")
     return WorktreePlan(
         name=safe_name,
         branch=selected_branch,

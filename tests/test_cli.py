@@ -154,6 +154,9 @@ class CliTest(unittest.TestCase):
         self.assertEqual(phases["pr-comment-fix"]["routes"]["default"], "pr-watch")
         self.assertEqual(phases["pr-ci-fix"]["routes"]["default"], "pr-watch")
         self.assertEqual(phases["merge-approval"]["routes"]["default"], "block")
+        self.assertIn("Output: red.md.", phases["red"]["prompt"])
+        self.assertIn("Output: green.md.", phases["green"]["prompt"])
+        self.assertIn("Output: gates.md.", phases["gates"]["prompt"])
 
     def test_python_runner_route_key_understands_gate_results(self) -> None:
         from agent_flow.runner import _route_key
@@ -161,8 +164,41 @@ class CliTest(unittest.TestCase):
         # gates 결과 JSON과 status alias가 같은 route key로 정규화되어야 한다.
         self.assertEqual(_route_key('{"passed": true, "results": []}'), "green")
         self.assertEqual(_route_key('{"passed": false, "results": []}'), "request-changes")
+        self.assertEqual(
+            _route_key('{"passed": false, "results": [{"id": "lint", "passed": true}]}'),
+            "request-changes",
+        )
         self.assertEqual(_route_key("status: failed"), "request-changes")
         self.assertEqual(_route_key("status: pass"), "green")
+
+    def test_python_runner_fix_loop_round_cap_blocks_after_three_gate_failures(self) -> None:
+        from agent_flow.artifact import read_meta, write_meta
+        from agent_flow.runner import Phase, Runner
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir)
+            write_meta(run_dir, {})
+            runner = Runner.__new__(Runner)
+            runner.run_dir = run_dir
+            runner.phases = [
+                Phase(id="gates", description="", routes={"request-changes": "fix-loop", "green": "multi-review"}),
+                Phase(id="fix-loop", description="", routes={"default": "gates"}),
+                Phase(id="multi-review", description=""),
+            ]
+            gates = runner.phases[0]
+
+            for expected_round in (1, 2, 3):
+                (run_dir / "gates.md").write_text('{"passed": false, "results": []}', encoding="utf-8")
+                self.assertEqual(runner._next_index(0, gates), (1, False))
+                self.assertEqual(read_meta(run_dir)["fix_loop_rounds"], expected_round)
+
+            (run_dir / "gates.md").write_text('{"passed": false, "results": []}', encoding="utf-8")
+            # gates 실패가 3회를 넘으면 fix-loop로 더 보내지 않고 사용자가 개입하도록 막는다.
+            self.assertEqual(runner._next_index(0, gates), (0, True))
+
+            (run_dir / "gates.md").write_text('{"passed": true, "results": []}', encoding="utf-8")
+            self.assertEqual(runner._next_index(0, gates), (2, False))
+            self.assertNotIn("fix_loop_rounds", read_meta(run_dir))
 
     def test_source_profiles_use_argv_command_lists(self) -> None:
         import yaml
@@ -2925,6 +2961,8 @@ class CliTest(unittest.TestCase):
                 fallback_plan = plan_worktree(root=root, name="No Git")
             # git 확인이 불가능한 환경에서는 기존 HEAD fallback으로 plan 생성만 유지한다.
             self.assertEqual(fallback_plan.base_ref, "HEAD")
+            with self.assertRaises(ValueError):
+                plan_worktree(root=root, name="Mainline", branch="main")
 
     def test_worktree_status_reports_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
