@@ -89,11 +89,12 @@ phases:
   - id: worktree
     description: Create an isolated git worktree for parallel task safety.
     prompt: |
-      Run `git worktree add .agent-flow/worktrees/feat-<slug>/ -b feat/<slug>`
-      to create an isolated worktree. Do not just create a branch — a physical
-      worktree is required for parallel task isolation. Do not work on
-      main/master/develop. Follow profile.branching.naming when present.
-      Record worktree path, branch name, and base commit.
+      Run `git worktree add -b feat/<slug> .agent-flow/worktrees/feat-<slug>/ main`
+      to create an isolated worktree without switching the leader branch. Do
+      not just create a branch — a physical worktree is required for parallel
+      task isolation. Do not work on main/master/develop. Follow
+      profile.branching.naming when present. Record worktree path, branch name,
+      and base commit.
       Output: worktree.md.
 
   - id: run-start

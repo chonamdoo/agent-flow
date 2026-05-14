@@ -1115,7 +1115,7 @@ ${AGENT_FLOW_COMMAND} run "<task>"
 \`\`\`
 
 install은 프로젝트당 1회만 수행합니다. 새 세션이 시작됐다는 이유로 install을 다시 실행하지 않습니다.
-Follow the CLI output exactly. Git projects start inside \`.agent-flow/worktrees/feat-<slug>/\`; continue with the printed \`next_command\`.
+Follow the CLI output exactly. Git projects start inside \`.agent-flow/worktrees/feat-<slug>/\` without switching the leader branch; continue with the printed \`next_command\`.
 
 ${end}
 `;
@@ -1174,7 +1174,7 @@ ${AGENT_FLOW_COMMAND} run "<task>"
 \`\`\`
 
 install은 프로젝트당 1회만 수행합니다. 새 세션이 시작됐다는 이유로 install을 다시 실행하지 않습니다.
-Follow the CLI output exactly. Git projects start inside \`.agent-flow/worktrees/feat-<slug>/\`; continue with the printed \`next_command\`.
+Follow the CLI output exactly. Git projects start inside \`.agent-flow/worktrees/feat-<slug>/\` without switching the leader branch; continue with the printed \`next_command\`.
 
 During code generation and modification phases, apply \`code-generation-discipline\`. Language-specific guide and comment rules follow the \`code-generation-discipline\` Before Starting checklist.
 `;
@@ -1222,7 +1222,7 @@ const PHASES = [
     id: "worktree",
     artifact: "artifacts/worktree.md",
     instruction:
-      "Run git worktree add to create an isolated worktree at .agent-flow/worktrees/feat-<slug>/ with branch feat/<slug>. Do not just create a branch — a physical worktree is required for parallel task isolation. Do not work on main/master/develop. Follow profile.branching.naming when present. Record worktree path, branch name, and base commit.",
+      "Run git worktree add -b feat/<slug> .agent-flow/worktrees/feat-<slug>/ main to create an isolated worktree without switching the leader branch. Do not just create a branch — a physical worktree is required for parallel task isolation. Do not work on main/master/develop. Follow profile.branching.naming when present. Record worktree path, branch name, and base commit.",
   },
   { id: "run-start", artifact: "artifacts/run-start.md", instruction: "Record the workflow run setup and selected provider." },
   {
@@ -1317,7 +1317,7 @@ ${AGENT_FLOW_COMMAND} run "<task>"
 \`\`\`
 
 Do not reinstall agent-flow for each task. Install is project setup, not the normal task entry.
-In a git repo, \`${AGENT_FLOW_COMMAND} run "<task>"\` starts the run inside \`.agent-flow/worktrees/feat-<slug>/\` on branch \`feat/<slug>\`.
+In a git repo, \`${AGENT_FLOW_COMMAND} run "<task>"\` starts the run inside \`.agent-flow/worktrees/feat-<slug>/\` on branch \`feat/<slug>\` without switching the leader branch.
 
 When the user types \`/agent-flow\` with no task:
 

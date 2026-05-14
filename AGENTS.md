@@ -35,7 +35,7 @@ domain-grill → product-brief → prd → slice-plan → plan-review → ddd-de
 - `gates` fail → `fix-loop` → `gates` 순환. 3회 초과 시 사용자 에스컬레이션.
 - `multi-review`는 2+ 독립 reviewer 필수. 1개만으로 approve 불가.
 - `architecture-review`의 `blocked` verdict → `refactor`로 라우팅.
-- worktree phase는 `git worktree add` 필수. `git checkout -b` 금지.
+- worktree phase는 `git worktree add -b <branch> <path> main` 필수. leader worktree에서 `git checkout`/`git switch`로 브랜치를 바꾸지 않는다.
 
 <!-- agent-flow:start -->
 ## Agent Flow

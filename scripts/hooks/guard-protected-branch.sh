@@ -16,7 +16,7 @@ if echo "$CMD" | grep -qE '^\s*git\s+(commit|push)\b'; then
   case "$BRANCH" in
     main|master|develop)
       echo "BLOCKED: 보호 브랜치 '$BRANCH'에서 직접 커밋/푸시하지 마세요."
-      echo "git worktree add .agent-flow/worktrees/feat-<slug>/ -b feat/<slug> 로 작업 브랜치를 만드세요."
+      echo "git worktree add -b feat/<slug> .agent-flow/worktrees/feat-<slug>/ main 로 작업 브랜치를 만드세요."
       exit 2
       ;;
   esac

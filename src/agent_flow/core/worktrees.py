@@ -13,6 +13,7 @@ class WorktreePlan:
     name: str
     branch: str
     path: Path
+    base_ref: str
     branch_explicit: bool = False
 
 
@@ -33,6 +34,8 @@ def plan_worktree(*, root: Path, name: str, branch: str | None = None) -> Worktr
         name=safe_name,
         branch=selected_branch,
         path=root / ".agent-flow" / "worktrees" / safe_name,
+        # leader worktree가 feature branch여도 새 작업은 기본 브랜치 commit에서 시작한다.
+        base_ref=_default_base_ref(root),
         branch_explicit=branch is not None,
     )
 
@@ -58,7 +61,7 @@ def create_worktree(*, root: Path, plan: WorktreePlan, allow_dirty: bool = False
         _run_git(root, "worktree", "add", str(plan.path), plan.branch)
         branch_created = False
     else:
-        _run_git(root, "worktree", "add", "-b", plan.branch, str(plan.path), "HEAD")
+        _run_git(root, "worktree", "add", "-b", plan.branch, str(plan.path), plan.base_ref)
         branch_created = True
     status = WorktreeStatus(
         name=plan.name,
@@ -94,6 +97,28 @@ def worktree_branch_exists(*, root: Path, branch: str) -> bool:
         capture_output=True,
         check=False,
     )
+    return result.returncode == 0
+
+
+def _default_base_ref(root: Path) -> str:
+    for ref in ("main", "origin/main", "master", "origin/master", "develop", "origin/develop"):
+        if _git_commit_ref_exists(root=root, ref=ref):
+            return ref
+    return "HEAD"
+
+
+def _git_commit_ref_exists(*, root: Path, ref: str) -> bool:
+    try:
+        result = subprocess.run(
+            ("git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"),
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        # git을 호출할 수 없으면 기본 ref 후보가 없는 것으로 보고 HEAD fallback을 쓴다.
+        return False
     return result.returncode == 0
 
 

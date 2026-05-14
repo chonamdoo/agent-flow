@@ -2921,6 +2921,10 @@ class CliTest(unittest.TestCase):
             self.assertRegex(korean_plan.name, r"^feat-task-[a-f0-9]{8}$")
             self.assertEqual(korean_plan.branch, korean_plan.name.replace("feat-", "feat/", 1))
             self.assertEqual(korean_plan.path, root / ".agent-flow" / "worktrees" / korean_plan.name)
+            with mock.patch("agent_flow.core.worktrees.subprocess.run", side_effect=OSError("no git")):
+                fallback_plan = plan_worktree(root=root, name="No Git")
+            # git 확인이 불가능한 환경에서는 기존 HEAD fallback으로 plan 생성만 유지한다.
+            self.assertEqual(fallback_plan.base_ref, "HEAD")
 
     def test_worktree_status_reports_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2957,6 +2961,43 @@ class CliTest(unittest.TestCase):
             self.assertTrue((worktree / "manifest.json").is_file())
             self.assertIn("feat-slice-a feat/slice-a", output.getvalue())
 
+    def test_worktree_create_uses_main_base_without_switching_leader(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_git_repo(root)
+            subprocess.run(("git", "branch", "-M", "main"), cwd=root, check=True)
+            main_sha = subprocess.run(
+                ("git", "rev-parse", "main"),
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout.strip()
+            subprocess.run(("git", "checkout", "-q", "-b", "codex/current"), cwd=root, check=True)
+            (root / "feature.txt").write_text("feature\n", encoding="utf-8")
+            subprocess.run(("git", "add", "feature.txt"), cwd=root, check=True)
+            subprocess.run(("git", "commit", "-q", "-m", "feature"), cwd=root, check=True)
+
+            self.assertEqual(main(["worktree", "create", "--root", str(root), "--name", "slice-a"]), 0)
+
+            leader_branch = subprocess.run(
+                ("git", "branch", "--show-current"),
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout.strip()
+            worktree_head = subprocess.run(
+                ("git", "rev-parse", "HEAD"),
+                cwd=root / ".agent-flow" / "worktrees" / "feat-slice-a",
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout.strip()
+            # leader worktree는 feature branch에 남고, 새 worktree만 main commit에서 시작한다.
+            self.assertEqual(leader_branch, "codex/current")
+            self.assertEqual(worktree_head, main_sha)
+
     def test_worktree_create_rejects_dirty_leader_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -2974,6 +3015,29 @@ class CliTest(unittest.TestCase):
                 0,
             )
             self.assertTrue((root / ".agent-flow" / "worktrees" / "feat-after-init").is_dir())
+
+    def test_guard_worktree_blocks_leader_branch_switch(self) -> None:
+        script = Path(__file__).resolve().parents[1] / "scripts" / "hooks" / "guard-worktree.sh"
+        payload = json.dumps({"tool_input": {"command": "git switch codex/current && npm test"}})
+        result = subprocess.run(
+            ("bash", str(script)),
+            input=payload,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        # agent가 기준 worktree의 브랜치 표시를 바꾸는 명령을 실행하지 못하게 막는다.
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("기준 worktree", result.stdout)
+
+        allowed = subprocess.run(
+            ("bash", str(script)),
+            input=json.dumps({"tool_input": {"command": "git checkout -- README.md"}}),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(allowed.returncode, 0)
 
     def test_team_state_init_task_worker_and_status(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
