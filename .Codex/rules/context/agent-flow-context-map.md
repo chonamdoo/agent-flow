@@ -4,8 +4,7 @@ Phase별로 읽을 context source를 제한한다.
 
 | Phase | Load |
 | --- | --- |
-| domain-grill | `CONTEXT.md` + `.Codex/rules/context/domain-glossary-full.md` |
-| domain-map | `CONTEXT.md` + `.Codex/rules/context/domain-glossary-full.md` + relevant ADRs |
+| domain-grill | `CONTEXT.md` + `.Codex/rules/context/domain-glossary-full.md` + relevant ADRs |
 | product-brief | `CONTEXT.md` + `.Codex/rules/context/research-context.md` + relevant brief/issue only |
 | prd | `CONTEXT.md` + relevant issue/brief only |
 | slice-plan | `CONTEXT.md` + PRD + dependency map if needed |

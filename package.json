@@ -4,7 +4,8 @@
   "description": "Project-agnostic AI workflow kit. Single entry, AI-driven phase progression. Works with Claude, Codex, and Gemini.",
   "scripts": {
     "context:check": "node scripts/check-context-docs.mjs",
-    "test": "PYTHONPATH=src python3 -m unittest tests.test_cli -q && node scripts/check-context-docs.mjs"
+    "parity:check": "node scripts/check-agent-flow-parity.mjs",
+    "test": "PYTHONPATH=src python3 -m unittest tests.test_cli -q && node scripts/check-context-docs.mjs && node scripts/check-agent-flow-parity.mjs"
   },
   "bin": {
     "agent-flow": "bin/agent-flow-kit.mjs",

@@ -5,49 +5,39 @@ description: Use when the user types /agent-flow, asks to start or continue the 
 
 # Agent Flow
 
-Use this skill as the common entry point for the project-local `agent-flow`
-workflow.
+Use this skill as the common entry point for the project-local agent-flow workflow.
 
 ## Slash Trigger
 
 When the user types `/agent-flow <task>`, run:
 
 ```bash
-agent-flow run "<task>" --worktree "<short-task-slug>"
+agent-flow run "<task>"
 ```
 
-Use a short kebab-case worktree slug derived from the task. The run path is
-worktree-backed and may run alongside other active runs.
+Do not reinstall agent-flow for each task. Install is project setup, not the normal task entry.
+In a git repo, `agent-flow run "<task>"` starts the run inside `.agent-flow/worktrees/feat-<slug>/` on branch `feat/<slug>`.
 
 When the user types `/agent-flow` with no task:
 
-- Run `agent-flow worktree list` to see available worktrees.
-- If exactly one worktree is listed, use that slug.
-- If multiple worktrees are listed, ask the user which slug to continue.
-- Run `agent-flow continue --worktree "<short-task-slug>"`.
+- Run `agent-flow status` from the project root.
+- Treat the status command output as the only source of truth.
+- If status exits 0 and reports an active run, follow the `next_command` from status.
+- If status exits non-zero with `no active run`, ask for a task using `/agent-flow <task>`.
+- Do not infer npm, npx, or install failure unless the command actually exits non-zero with that error.
+- Do not run install just because a new session started.
 
 When the user types `/agent-flow status`, run:
 
 ```bash
-agent-flow status --worktree "<short-task-slug>"
-```
-
-When the user types `/agent-flow abort`, run:
-
-```bash
-agent-flow abort --worktree "<short-task-slug>"
+agent-flow status
 ```
 
 ## Behavior
 
 - Treat `/agent-flow` as a project-local workflow trigger, not as a shell path.
-- Keep `.agent-flow/runs/` and `.agent-flow/worktrees/` as internal state; expose them only for
-  status, debugging, or artifact inspection.
-- Worktree-backed runs write their run artifacts inside the worktree checkout.
-- After a completed or aborted worktree run no longer needs its checkout, run
-  `agent-flow worktree remove --name "<short-task-slug>"`.
-- If the workflow pauses on PR comments, fix the actionable comments, push, and
-  resolve the corresponding GitHub review threads before returning to
-  `pr-watch`.
-- If the workflow pauses for design or slice review, summarize the relevant
-  artifact and wait for user approval before continuing.
+- Keep `.agent-flow/worktrees/feat-<slug>/.agent-flow/runs/<workflow>/<run-id>/` as internal state for git projects; expose it only for status, debugging, or artifact inspection.
+- On a new session, always check `agent-flow status` first and continue from that result.
+- After a phase writes its artifact, run the `next_command` printed by status or the current phase output.
+- If the workflow pauses for design or slice review, summarize the relevant artifact and wait for user approval before continuing.
+- During code generation and modification phases, apply `code-generation-discipline`. Language-specific guide and comment rules follow the `code-generation-discipline` Before Starting checklist.

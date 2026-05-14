@@ -1,0 +1,4 @@
+interface:
+  display_name: "Code Generation Discipline"
+  short_description: "Common implementation checklist for safe code generation."
+  default_prompt: "Apply the code-generation-discipline checklist before, during, and after changing code."

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -7,11 +8,15 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 
+PROTECTED_WORKTREE_BRANCHES = {"main", "master", "develop"}
+
+
 @dataclass(frozen=True)
 class WorktreePlan:
     name: str
     branch: str
     path: Path
+    base_ref: str
     branch_explicit: bool = False
 
 
@@ -25,13 +30,17 @@ class WorktreeStatus:
 
 
 def plan_worktree(*, root: Path, name: str, branch: str | None = None) -> WorktreePlan:
-    safe_name = _safe_component(name)
-    selected_branch = branch or f"agent-flow/{safe_name}"
+    safe_name = _feature_worktree_name(name)
+    selected_branch = branch or f"feat/{safe_name.removeprefix('feat-')}"
     _validate_branch(selected_branch)
+    if selected_branch in PROTECTED_WORKTREE_BRANCHES:
+        raise ValueError(f"protected worktree branch is not allowed: {selected_branch}")
     return WorktreePlan(
         name=safe_name,
         branch=selected_branch,
         path=root / ".agent-flow" / "worktrees" / safe_name,
+        # leader worktree가 feature branch여도 새 작업은 기본 브랜치 commit에서 시작한다.
+        base_ref=_default_base_ref(root),
         branch_explicit=branch is not None,
     )
 
@@ -57,7 +66,7 @@ def create_worktree(*, root: Path, plan: WorktreePlan, allow_dirty: bool = False
         _run_git(root, "worktree", "add", str(plan.path), plan.branch)
         branch_created = False
     else:
-        _run_git(root, "worktree", "add", "-b", plan.branch, str(plan.path), "HEAD")
+        _run_git(root, "worktree", "add", "-b", plan.branch, str(plan.path), plan.base_ref)
         branch_created = True
     status = WorktreeStatus(
         name=plan.name,
@@ -93,6 +102,28 @@ def worktree_branch_exists(*, root: Path, branch: str) -> bool:
         capture_output=True,
         check=False,
     )
+    return result.returncode == 0
+
+
+def _default_base_ref(root: Path) -> str:
+    for ref in ("main", "origin/main", "master", "origin/master", "develop", "origin/develop"):
+        if _git_commit_ref_exists(root=root, ref=ref):
+            return ref
+    return "HEAD"
+
+
+def _git_commit_ref_exists(*, root: Path, ref: str) -> bool:
+    try:
+        result = subprocess.run(
+            ("git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"),
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        # git을 호출할 수 없으면 기본 ref 후보가 없는 것으로 보고 HEAD fallback을 쓴다.
+        return False
     return result.returncode == 0
 
 
@@ -208,8 +239,16 @@ def _safe_component(value: str) -> str:
     lowered = value.strip().lower()
     safe = re.sub(r"[^a-z0-9._-]+", "-", lowered).strip("-")
     if not safe or safe.startswith(".") or ".." in safe:
-        raise ValueError("worktree name must contain at least one safe character")
+        # 한글 등 비ASCII task도 기본 worktree 이름으로 쓸 수 있게 안정적인 fallback을 둔다.
+        digest = hashlib.sha1(lowered.encode("utf-8")).hexdigest()[:8]
+        safe = f"task-{digest}"
     return safe
+
+
+def _feature_worktree_name(value: str) -> str:
+    # worktree 디렉터리는 slash를 못 쓰므로 feat/<slug> 브랜치와 feat-<slug> 디렉터리를 짝지어 둔다.
+    safe = _safe_component(value)
+    return safe if safe.startswith("feat-") else f"feat-{safe}"
 
 
 def _validate_branch(value: str) -> None:

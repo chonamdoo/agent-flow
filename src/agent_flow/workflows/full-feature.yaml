@@ -1,9 +1,12 @@
 id: full-feature
 description: |
   Strict full-feature workflow. This is the canonical agent-flow path:
-  domain interview, domain map, product validation, PRD, reviewed slice plan,
+  domain interview with compact domain map, product validation, PRD, reviewed slice plan,
   DDD/Clean design, TDD implementation, review loops, PR watch, and approved
   merge.
+
+  Routing is enforced by the runner (bin/agent-flow-kit.mjs nextPhaseIndex).
+  This YAML is the phase definition source; the runner is the routing authority.
 
 context_policy: ".Codex/rules/context/agent-flow-context-map.md"
 
@@ -12,41 +15,27 @@ phases:
     description: Interview one question at a time until the domain problem is clear.
     cite_lore: true
     required_markers:
-      - "grill-me: complete"
+      - "grill-with-docs: complete"
       - "shared_understanding: reached"
+      - "context_docs_checked: true"
+      - "context_docs_updated: true|not_needed"
     prompt: |
-      Run a grill-me style interview. Ask one question at a time unless the
-      codebase already answers it. Capture decisions, open questions, terms,
-      assumptions, and checked sources.
+      Run the internal grill-with-docs skill. Ask one question at a time unless
+      the codebase or docs already answer it. Challenge terms against CONTEXT.md
+      and ADRs, sharpen fuzzy language, stress-test domain relationships with
+      concrete scenarios, cross-check user claims against code, update CONTEXT.md
+      inline when terms are resolved, create docs lazily, and offer ADRs only for
+      hard-to-reverse, surprising trade-off decisions. Before completion,
+      normalize the output into a compact domain map and keep expanded detail in
+      .Codex/rules/context/ instead of hot CONTEXT.md.
 
       Do not complete this phase while unresolved questions remain. Only after
       the one-question-at-a-time interview reaches shared understanding, end
       domain-grill.md with a `## Completion Gate` section:
 
           ## Completion Gate
-          grill-me: complete
-          shared_understanding: reached
-
-  - id: domain-map
-    description: Build or update the domain map from the interview.
-    required_markers:
-      - "grill-with-docs: complete"
-      - "context_docs_checked: true"
-      - "context_docs_updated: true|not_needed"
-    prompt: |
-      Produce a domain map: glossary, bounded contexts, ubiquitous language,
-      entities, value objects, aggregates, policies, events, and non-goals.
-      Use CONTEXT.md plus .Codex/rules/context/domain-glossary-full.md.
-      Challenge conflicting terms, sharpen fuzzy terminology, and keep
-      CONTEXT.md hot-only. Move expanded glossary/rationale into
-      .Codex/rules/context/ instead of pasting long docs into CONTEXT.md.
-
-      Do not complete this phase until documentation has been checked and any
-      needed context updates have been made. End domain-map.md with a
-      `## Completion Gate` section:
-
-          ## Completion Gate
           grill-with-docs: complete
+          shared_understanding: reached
           context_docs_checked: true
           context_docs_updated: true
 
@@ -63,7 +52,7 @@ phases:
   - id: prd
     description: Write the product requirements document.
     prompt: |
-      Write the PRD from domain-map.md and product-brief.md. Include goal,
+      Write the PRD from domain-grill.md and product-brief.md. Include goal,
       scope, non-goals, user stories, acceptance criteria, edge cases,
       dependencies, and risks. Output: prd.md.
 
@@ -76,7 +65,7 @@ phases:
       application, infrastructure, and presentation. Output: slice-plan.md.
 
   - id: plan-review
-    description: Senior-style plan review gate.
+    description: Senior-style plan review gate. Runner routes approve→ddd-design, request-changes→slice-plan.
     routes:
       approve: ddd-design
       request-changes: slice-plan
@@ -98,10 +87,15 @@ phases:
       Output: ddd-design.md.
 
   - id: worktree
-    description: Create or record the dedicated branch/worktree.
+    description: Create an isolated git worktree for parallel task safety.
     prompt: |
-      Create or record the branch/worktree for this slice. Do not work on
-      main/master/develop. Output: worktree.md.
+      Run `git worktree add -b feat/<slug> .agent-flow/worktrees/feat-<slug>/ main`
+      to create an isolated worktree without switching the leader branch. Do
+      not just create a branch — a physical worktree is required for parallel
+      task isolation. Do not work on main/master/develop. Follow
+      profile.branching.naming when present. Record worktree path, branch name,
+      and base commit.
+      Output: worktree.md.
 
   - id: run-start
     description: Record run setup.
@@ -112,49 +106,78 @@ phases:
   - id: red
     description: TDD red phase.
     prompt: |
-      Write failing tests first. Save the failure summary and command output.
+      Apply code-generation-discipline before writing tests. Write failing
+      tests first. Language-specific guide selection follows the
+      code-generation-discipline Before Starting checklist. Save the failure
+      summary and command output.
       Output: red.md.
 
   - id: green
     description: TDD green phase.
     prompt: |
-      Implement the minimum code to pass red tests. Follow the active profile
-      or project instructions for code comment language. Output: green.md.
+      Apply code-generation-discipline. Implement the minimum code to pass red
+      tests. Language-specific guide selection follows the
+      code-generation-discipline Before Starting checklist.
+      New or modified code must include Korean comments. Output: green.md.
 
   - id: refactor
     description: TDD refactor phase.
     prompt: |
-      Refactor only after green. Keep behavior stable and summarize structural
-      changes. Output: refactor.md.
+      Apply code-generation-discipline. Refactor only after green. Keep
+      behavior stable, language-specific guide selection follows the
+      code-generation-discipline Before Starting checklist, keep required
+      Korean code comments, and summarize structural changes.
+      Output: refactor.md.
 
   - id: gates
-    description: Run project verification gates.
+    description: Run project verification gates. Runner routes fail→fix-loop, pass→multi-review.
+    routes:
+      green: multi-review
+      approve: multi-review
+      request-changes: fix-loop
+      blocked: fix-loop
+      error: fix-loop
+      pending: block
+      default: fix-loop
     prompt: |
       Run build, typecheck, lint, tests, and context lint according to the
-      active profile. Docs-only PRs must still run context lint. Output:
-      gate-results.json.
+      active profile. Docs-only PRs must still run context lint. Save
+      structured JSON with a top-level `passed` boolean and a `results` array.
+      Output: gates.md.
 
   - id: multi-review
-    description: Run implementation review.
-    multi_review: true
+    description: Run implementation review with 2+ independent reviewers. Runner routes approve→architecture-review, request-changes→fix-loop.
+    routes:
+      approve: architecture-review
+      request-changes: fix-loop
     prompt: |
-      Review bugs, regressions, missing tests, security boundaries, and scope
-      drift. Output: multi-review.md with approve/request-changes findings.
+      Run 2+ independent reviewer agents. Each reviewer uses code-reviewer.md
+      as basis and outputs an independent verdict: approve or request-changes.
+      Any request-changes from any reviewer makes the overall verdict
+      request-changes. Default reviewers are Codex sub-agents; Claude/Gemini
+      are optional when available. Provider failure falls back to Codex
+      sub-agents only. Record per-reviewer verdicts and write a single overall
+      verdict line: `verdict: approve` or `verdict: request-changes`.
+      Output: multi-review.md.
 
   - id: fix-loop
-    description: Apply review and gate fixes.
+    description: Apply review and gate fixes. Runner always routes back to gates for re-verification.
+    routes:
+      default: gates
     prompt: |
-      Apply requested review/gate fixes or record that no fixes were required.
-      Output: fix-loop.md.
+      Apply code-generation-discipline while fixing review/gate failures. New
+      or modified code must include Korean comments. Language-specific guide
+      selection follows the code-generation-discipline Before Starting
+      checklist, or record that no fixes were required. Output: fix-loop.md.
 
   - id: architecture-review
-    description: Review implementation against DDD/Clean design.
+    description: Review implementation against DDD/Clean design. Runner routes approve→commit, request-changes→refactor.
     routes:
       approve: commit
       request-changes: refactor
-      blocked: block
+      blocked: refactor
     prompt: |
-      Compare code against domain-map.md and ddd-design.md. Check layer
+      Compare code against domain-grill.md and ddd-design.md. Check layer
       violations, repository boundary leaks, naming drift, and dependency
       direction. Output architecture-review.md with exactly one verdict line:
       `verdict: approve`, `verdict: request-changes`, or `verdict: blocked`.
@@ -172,7 +195,7 @@ phases:
       Use repo-relative paths only. Output: push-pr.md.
 
   - id: pr-watch
-    description: Watch PR checks and comments.
+    description: Watch PR checks and comments. Runner routes green→merge-approval, comments→pr-comment-fix, ci-failed→pr-ci-fix, merged/skipped→handoff.
     routes:
       green: merge-approval
       merged: handoff
@@ -186,12 +209,12 @@ phases:
       skipped: handoff
     prompt: |
       Poll PR status and review threads. Output pr-watch.md with exactly one
-      status line: `status: green`, `status: has_comments`,
-      `status: ci_failed`, `status: pending`, `status: merged`,
-      `status: closed`, or `status: error`.
+      status line: `status: green`, `status: comments`,
+      `status: ci-failed`, `status: pending`, `status: merged`,
+      `status: skipped`, `status: closed`, or `status: error`.
 
   - id: pr-comment-fix
-    description: Fix actionable PR comments.
+    description: Fix actionable PR comments. Runner routes back to pr-watch.
     routes:
       default: pr-watch
     prompt: |
@@ -200,7 +223,7 @@ phases:
       fixes, commits, and resolved thread IDs. Output: pr-comment-fix.md.
 
   - id: pr-ci-fix
-    description: Fix failing PR CI.
+    description: Fix failing PR CI. Runner routes back to pr-watch.
     routes:
       default: pr-watch
     prompt: |
@@ -208,7 +231,7 @@ phases:
       summarize commands and check URLs. Output: pr-ci-fix.md.
 
   - id: merge-approval
-    description: Require explicit user approval before merge.
+    description: Require explicit user approval before merge. Runner routes approve→merge.
     routes:
       approve: merge
       default: block

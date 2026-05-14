@@ -1,43 +1,44 @@
 <!-- agent-flow:start -->
 ## Agent Flow
 
-This project has the agent-flow workflow kit installed.
+이 프로젝트는 agent-flow 워크플로우 킷이 설치되어 있습니다.
 
-Use `/agent-flow` for every task:
+모든 작업은 `/agent-flow`로 시작합니다:
 
 ```text
 /agent-flow <task>
 ```
 
-When the user types `/agent-flow <task>`, run `agent-flow run "<task>"` from
-the project root. When the user types `/agent-flow` with no task, run
-`agent-flow status` from the project root; continue an active run with
-`agent-flow continue` if present, otherwise ask for a task in the
-`/agent-flow <task>` format.
+install은 프로젝트당 1회만 수행합니다. 새 세션이 시작됐다는 이유로 install을 다시 실행하지 않습니다.
+`/agent-flow <task>`를 보면 프로젝트 루트에서 `agent-flow run "<task>"`를 실행하세요.
+git repo에서는 이 명령이 `.agent-flow/worktrees/feat-<slug>/` worktree를 만들고 그 안에서 run을 시작합니다.
+`/agent-flow`만 입력되면 프로젝트 루트에서 `agent-flow status`로 active run을 확인하세요.
+active run이 있으면 status 출력의 `next_command`를 그대로 실행하고, 없으면 `/agent-flow <task>` 형식으로 작업을 요청하세요.
 
-The AI infers tier and phase depth. Small tasks collapse phases automatically; feature work expands them. The chain pauses once for spec/slice-plan review.
+코드 생성·수정 phase에서는 `code-generation-discipline`을 적용합니다. 언어별 guide 선택과 주석 규칙은 `code-generation-discipline`의 Before Starting 체크리스트를 따릅니다.
+
+진행 중인 run은 자동 감지됩니다:
 
 ```text
-/agent-flow          # resume the active run
-/agent-flow status   # progress
-/agent-flow abort    # cancel the active run (artifacts preserved)
+/agent-flow          # 이어서 진행
+/agent-flow status   # 진행 상태 확인
 ```
+`/agent-flow`는 shell path가 아니라 agent-flow skill trigger로 취급하세요.
 
-Command mapping: `/agent-flow status` → `agent-flow status`, `/agent-flow abort` → `agent-flow abort`.
-Treat `/agent-flow` as a skill trigger, not as a shell path.
+### Artifact
 
-### Natural-language steering
-- "deepen this, treat as feature" → escalate
-- "redo the spec" → re-enter spec
-- "decline this PR comment politely" → comment-decline branch
+run artifact는 `.agent-flow/runs/<run-id>/`에 저장됩니다. 컨텍스트가 끊겨도 artifact 기반으로 정확히 재개됩니다.
 
-### Artifacts
+### Worktrees
 
-Run artifacts: `.agent-flow/runs/<run-id>/`. Resumable across sessions because the artifact files are the state machine.
+git worktree는 프로젝트 루트 내부의 `.agent-flow/worktrees/<name>/`에 `git worktree add`로 생성합니다.
+기본 이름은 `.agent-flow/worktrees/feat-<slug>/`, 기본 브랜치는 `feat/<slug>`입니다.
+기준 브랜치는 checkout/switch 하지 말고 `git worktree add -b feat/<slug> .agent-flow/worktrees/feat-<slug>/ main`처럼 마지막 인자로 지정합니다.
+브랜치만 만들지 않습니다 — 물리적 worktree가 병렬 작업 격리에 필수입니다.
+사용자가 외부 경로를 명시적으로 지정한 경우가 아니면 프로젝트 루트 옆에 형제 폴더를 만들지 않습니다.
 
 ### Memory / Lore
 
-Lore in `.agent-flow/memory/lore/` is auto-indexed and cited at run start. The `design` phase prompt includes a "Relevant lore" block with Constraint/Directive excerpts of matched entries. Cite where they apply; do not fabricate.
-
-CLI: `agent-flow lore list / search "<query>" / compact [--apply] / init <slug>`. Schema: frontmatter + `## Constraint` / `## Rejected` / `## Directive`.
+`.agent-flow/memory/lore/`에 작성된 lore는 자동으로 인덱싱·검색·인용됩니다.
+`agent-flow lore list` / `agent-flow lore search "<query>"`로 조회합니다.
 <!-- agent-flow:end -->

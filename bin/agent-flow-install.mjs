@@ -45,8 +45,7 @@ function bootstrapMarkdown(label) {
 }
 
 function detectProfile() {
-  // Minimal stack detection. The Python runner does richer detection at
-  // first run; this is just for the install banner.
+  // 설치 배너도 Python CLI와 같은 profile을 보여줘야 agent가 다른 guide를 고르지 않는다.
   if (fs.existsSync(path.join(PROJECT, "next.config.js")) ||
       fs.existsSync(path.join(PROJECT, "next.config.mjs")) ||
       fs.existsSync(path.join(PROJECT, "next.config.ts"))) {
@@ -65,8 +64,19 @@ function detectProfile() {
     return "android";
   }
   if (fs.existsSync(path.join(PROJECT, "package.json"))) {
+    const packageText = fs.readFileSync(path.join(PROJECT, "package.json"), "utf8");
+    if (packageText.includes("react-native")) {
+      return "react-native";
+    }
+    if (packageText.includes("\"next\"")) {
+      return "nextjs";
+    }
+    if (fs.existsSync(path.join(PROJECT, "tsconfig.json"))) {
+      return "typescript";
+    }
     return "node";
   }
+  // npm gate를 실행할 수 없는 tsconfig 단독 프로젝트는 generic으로 둔다.
   return "generic";
 }
 
@@ -158,8 +168,7 @@ function install() {
     ".agent-flow/",
     ".codex/",
     ".gemini/",
-    ".claude/worktrees/",
-    ".claude/settings.local.json",
+    ".claude/",
     "AGENTS.md",
     "CLAUDE.md",
     "GEMINI.md",
@@ -314,19 +323,41 @@ function installGraphify() {
       },
     };
   }
-  const installer = installGraphifyPackage();
-  const skillInstall = runGraphifyInstall();
-  const graph = runGraphifyProjectGraph();
-  return {
-    status: "installed",
-    package: "graphifyy",
-    command: "graphify",
-    installer,
-    platforms: skillInstall.platforms,
-    skill_location: skillInstall.skillLocation,
-    removed_duplicate_skills: skillInstall.removedDuplicates,
-    graph,
-  };
+  try {
+    const installer = installGraphifyPackage();
+    const skillInstall = runGraphifyInstall();
+    const graph = runGraphifyProjectGraph();
+    return {
+      status: "installed",
+      package: "graphifyy",
+      command: "graphify",
+      installer,
+      platforms: skillInstall.platforms,
+      skill_location: skillInstall.skillLocation,
+      removed_duplicate_skills: skillInstall.removedDuplicates,
+      graph,
+    };
+  } catch (error) {
+    // graphify는 보조 인덱서라 실패해도 agent-flow 설치와 worktree 시작을 막지 않는다.
+    return {
+      status: "skipped",
+      package: "graphifyy",
+      command: "graphify",
+      reason: formatGraphifyError(error),
+      platforms: ["claude", "codex", "gemini"],
+      skill_location: "~/.agents/skills/graphify",
+      removed_duplicate_skills: [],
+      graph: {
+        status: "skipped",
+        command: "graphify .",
+        output: "graphify-out/",
+      },
+    };
+  }
+}
+
+function formatGraphifyError(error) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function upsertGitignore(pathName, entries) {

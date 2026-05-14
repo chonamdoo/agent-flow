@@ -5,8 +5,8 @@
 ## 작업 원칙
 
 - 응답은 한국어. 코드/명령/식별자는 영어 원문 유지.
-- 코드 주석은 반드시 한국어. 새로 추가/수정하는 주석에 영어 주석 금지.
-- 요청하지 않은 리팩터, 주석, 문서화, 에러 핸들링 금지.
+- 요청하지 않은 리팩터, 문서화, 에러 핸들링 금지.
+- 코드 주석 규칙은 `code-generation-discipline` 참조.
 - 모르면 읽고 확인. 추측 금지.
 - 큰 변경 전 짧은 계획 제시. 단순 수정은 바로 실행.
 - 파괴적 작업은 사전 확인.
@@ -29,10 +29,10 @@
 
 ## Current Lifecycle
 
-1. `agent-flow run start --task "<task>"`가 Run을 만든다.
-2. `agent-flow run next`가 현재 phase와 요구 artifact를 출력한다.
+1. `agent-flow run "<task>"`가 Run을 만들고 git repo에서는 `.agent-flow/worktrees/feat-<slug>/` worktree에서 시작한다.
+2. `agent-flow status` 또는 직전 phase 출력의 `next_command`가 다음 실행 명령을 결정한다.
 3. agent는 phase context map에 맞는 문서만 읽는다.
-4. artifact 작성 후 `agent-flow run advance`로만 전환한다.
+4. artifact 작성 후에도 runner가 출력한 `next_command`로만 전환한다.
 5. gates/review/PR comment 실패는 fix-loop로 돌아간다.
 6. push/pr-watch는 checks와 review threads가 green일 때만 merge로 간다.
 
@@ -45,7 +45,7 @@ Team Orchestration은 optional future module이다. current Personal Workflow와
 - **Team State**: future team coordination state.
 - **Mailbox**: future Worker/lead 비동기 메시지 큐.
 - **Heartbeat**: future Worker liveness record.
-- **Worktree**: 독립 변경을 만들기 위한 git worktree. 프로젝트 내부 `.agent-flow/worktrees/`를 사용.
+- **Worktree**: 독립 변경을 만들기 위한 git worktree. 프로젝트 내부 `.agent-flow/worktrees/feat-<slug>/`를 사용하고 브랜치는 `feat/<slug>`를 기본값으로 둔다.
 
 ## 금지어 / 혼동어
 

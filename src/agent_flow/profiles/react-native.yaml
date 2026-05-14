@@ -1,7 +1,16 @@
 id: react-native
+branching:
+  strategy: trunk
+  base: main
+  integration: main
+  worktree: required
+  naming:
+    prefix: "feat/"
+    slug_style: kebab-case
+    slug_source: feature title
+    max_slug_length: 60
 gates:
   - id: test
     command: ["npm", "test"]
   - id: doctor
     command: ["npx", "react-native", "doctor"]
-

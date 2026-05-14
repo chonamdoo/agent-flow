@@ -3,22 +3,27 @@ branching:
   strategy: trunk
   base: main
   integration: main
-  worktree: optional
+  worktree: required
+  naming:
+    prefix: "feat/"
+    slug_style: kebab-case
+    slug_source: feature title
+    max_slug_length: 60
 gates:
   - id: context-lint
-    command: "node scripts/check-context-docs.mjs"
+    command: ["node", "scripts/check-context-docs.mjs"]
     required: true
     phase: pre-commit
   - id: type
-    command: "mypy ."
+    command: ["mypy", "."]
     required: false
     phase: pre-commit
   - id: lint
-    command: "ruff check ."
+    command: ["ruff", "check", "."]
     required: false
     phase: pre-commit
   - id: test
-    command: "pytest -q"
+    command: ["pytest", "-q"]
     required: true
     phase: pre-push
 review_angles:

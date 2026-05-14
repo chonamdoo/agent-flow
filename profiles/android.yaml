@@ -5,25 +5,25 @@ branching:
   integration: release/* # PR은 활성 release 브랜치로 보내고 이후 develop에 동기화
   worktree: required
   naming:
-    prefix: "agent-flow/"
+    prefix: "feat/"
     slug_style: kebab-case
     slug_source: feature title
     max_slug_length: 60
 gates:
   - id: context-lint
-    command: "node scripts/check-context-docs.mjs"
+    command: ["node", "scripts/check-context-docs.mjs"]
     required: true
     phase: pre-commit
   - id: build
-    command: "./gradlew assembleDevDebug"
+    command: ["./gradlew", "assembleDevDebug"]
     required: true
     phase: pre-push
   - id: test
-    command: "./gradlew test"
+    command: ["./gradlew", "test"]
     required: true
     phase: pre-commit
   - id: lint
-    command: "./gradlew lint"
+    command: ["./gradlew", "lint"]
     required: false
     phase: pre-commit
 review_angles:

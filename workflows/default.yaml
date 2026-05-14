@@ -23,14 +23,15 @@ phases:
     prompt: |
       Produce the unified design document. Sections in order:
 
-      ## 1. Interview (grill-me)
+      ## 1. Interview (grill-with-docs)
       Interview the user one question at a time. Walk every branch of the
       decision tree. Provide your recommended answer for each question. If
       the codebase can answer a question, search the codebase rather than
-      asking. Continue until you reach shared understanding of: scope,
-      acceptance criteria, edge cases, non-goals, dependencies, constraints.
-      Trivial tasks may collapse to a single confirmation; feature work
-      expands.
+      asking. Challenge terms against CONTEXT.md and ADRs, cross-check user
+      claims against code, and update docs inline when terms are resolved.
+      Continue until you reach shared understanding of: scope, acceptance
+      criteria, edge cases, non-goals, dependencies, constraints. Trivial tasks
+      may collapse to a single confirmation; feature work expands.
 
       ## 2. Spec (renamed per profile.vocabulary)
       Goal, in-scope, out-of-scope, acceptance criteria, observable behavior,
@@ -94,7 +95,7 @@ phases:
       The chain pauses here for user review of design.md + slice-plan.md.
 
   - id: worktree
-    description: Create branch / worktree per profile.branching strategy.
+    description: Create an isolated git worktree per profile.branching strategy.
     prompt: |
       Create the working branch per profile.branching:
         - release-first: branch from active release/* and target release for PR
@@ -104,8 +105,10 @@ phases:
         - `<prefix><slug>` where prefix and slug_style come from the profile.
         - slug is derived from the configured slug_source and converted to slug_style.
         - truncate to max_slug_length without breaking words.
-      Create a git worktree if profile.branching.worktree is `required`.
-      Output: worktree.md (branch name, base, worktree path or "no worktree").
+      Create a git worktree before implementation. Default directory naming is
+      `.agent-flow/worktrees/feat-<slug>/`; default branch naming is
+      `feat/<slug>`. Do not continue from the leader checkout.
+      Output: worktree.md (branch name, base, worktree path).
 
   - id: implement
     description: |
