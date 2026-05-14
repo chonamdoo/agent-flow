@@ -1148,7 +1148,11 @@ class CliTest(unittest.TestCase):
             state["phase"] = "red"
             state["phase_index"] = 0
             current_run.write_text(f"{json.dumps(state, indent=2)}\n", encoding="utf-8")
-            manifest = Path(state["run_dir"]) / "manifest.json"
+            # run_dir는 project root 기준 상대 경로로 저장되므로 clean worktree에서도 명시적으로 해석한다.
+            run_dir = Path(state["run_dir"])
+            if not run_dir.is_absolute():
+                run_dir = project_root / run_dir
+            manifest = run_dir / "manifest.json"
             manifest.write_text(f"{json.dumps(state, indent=2)}\n", encoding="utf-8")
 
             next_result = subprocess.run(
