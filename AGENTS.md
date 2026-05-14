@@ -7,7 +7,7 @@
 
 ## Architecture
 
-```
+```text
 bin/agent-flow-kit.mjs  ← JS runner (phase routing, install, artifact validation)
 src/agent_flow/         ← Python CLI (runner, adapters, gates, multi-review, worktrees)
 workflows/              ← Source YAML (full-feature, bugfix, review 등)

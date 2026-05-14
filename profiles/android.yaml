@@ -11,19 +11,19 @@ branching:
     max_slug_length: 60
 gates:
   - id: context-lint
-    command: "node scripts/check-context-docs.mjs"
+    command: ["node", "scripts/check-context-docs.mjs"]
     required: true
     phase: pre-commit
   - id: build
-    command: "./gradlew assembleDevDebug"
+    command: ["./gradlew", "assembleDevDebug"]
     required: true
     phase: pre-push
   - id: test
-    command: "./gradlew test"
+    command: ["./gradlew", "test"]
     required: true
     phase: pre-commit
   - id: lint
-    command: "./gradlew lint"
+    command: ["./gradlew", "lint"]
     required: false
     phase: pre-commit
 review_angles:

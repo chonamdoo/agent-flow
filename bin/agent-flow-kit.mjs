@@ -276,10 +276,7 @@ function detectProfile(rootDir) {
   ) {
     return "android";
   }
-  // package.json 없이 tsconfig만 있는 Deno/Bun/라이브러리도 TypeScript로 본다.
-  if (fs.existsSync(path.join(rootDir, "tsconfig.json"))) {
-    return "typescript";
-  }
+  // npm gate를 실행할 수 없는 tsconfig 단독 프로젝트는 generic으로 둔다.
   return "generic";
 }
 
@@ -1267,7 +1264,7 @@ const PHASES = [
     instruction:
       "Push the branch or open a PR against profile.pr.target_branch; for release-first profiles, verify the target is the active release/* branch. Record the remote reference.",
   },
-  { id: "pr-watch", artifact: "artifacts/pr-watch.md", instruction: "Poll PR checks and review threads; record status: green, status: has_comments, status: ci_failed (legacy alias status: ci-failed), status: pending, status: merged, status: closed, or status: error with PR URL." },
+  { id: "pr-watch", artifact: "artifacts/pr-watch.md", instruction: "Poll PR checks and review threads; record status: green, status: comments, status: ci-failed, status: pending, status: merged, status: closed, or status: error with PR URL." },
   { id: "pr-comment-fix", artifact: "artifacts/pr-comment-fix.md", instruction: "Resolve actionable PR review comments, commit and push fixes, resolve the corresponding GitHub review threads, or record that no comments are pending." },
   { id: "pr-ci-fix", artifact: "artifacts/pr-ci-fix.md", instruction: "Fix failed PR checks, commit and push fixes, or record that checks are green." },
   { id: "merge-approval", artifact: "artifacts/merge-approval.md", instruction: "Ask for explicit user approval before merge. Record verdict: approve only after approval." },

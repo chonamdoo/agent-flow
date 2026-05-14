@@ -6,9 +6,10 @@ hot paths.
 ## What to verify
 
 1. **JPA fetch strategy**
-   - `@OneToMany` / `@ManyToOne` default to LAZY. Endpoints that serialize
-     the parent + children must eagerly fetch via `JOIN FETCH` or entity
-     graph; otherwise each child triggers a separate query.
+   - `@OneToMany` / `@ManyToMany` default to LAZY; `@ManyToOne` /
+     `@OneToOne` default to EAGER. Endpoints that serialize the parent +
+     children must eagerly fetch via `JOIN FETCH` or entity graph; otherwise
+     each child triggers a separate query.
    - `@EntityGraph` declared on repository method or `@NamedEntityGraph`.
 
 2. **Repository methods returning collections**

@@ -208,8 +208,8 @@ phases:
       skipped: handoff
     prompt: |
       Poll PR status and review threads. Output pr-watch.md with exactly one
-      status line: `status: green`, `status: has_comments`,
-      `status: ci_failed`, `status: pending`, `status: merged`,
+      status line: `status: green`, `status: comments`,
+      `status: ci-failed`, `status: pending`, `status: merged`,
       `status: skipped`, `status: closed`, or `status: error`.
 
   - id: pr-comment-fix

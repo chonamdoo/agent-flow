@@ -164,6 +164,21 @@ class CliTest(unittest.TestCase):
         self.assertEqual(_route_key("status: failed"), "request-changes")
         self.assertEqual(_route_key("status: pass"), "green")
 
+    def test_source_profiles_use_argv_command_lists(self) -> None:
+        import yaml
+
+        profiles_root = Path(__file__).resolve().parents[1] / "profiles"
+        for profile_path in profiles_root.glob("*.yaml"):
+            if profile_path.name.startswith("_"):
+                continue
+            payload = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
+            for gate in payload.get("gates", []):
+                command = gate.get("command")
+                # source profile도 packaged profile과 같은 subprocess argv 계약을 따른다.
+                self.assertIsInstance(command, list, profile_path.name)
+                self.assertTrue(command, profile_path.name)
+                self.assertTrue(all(isinstance(part, str) and part for part in command), profile_path.name)
+
     def test_node_installer_initializes_current_project(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
@@ -808,7 +823,7 @@ class CliTest(unittest.TestCase):
             ("react-native", {"package.json": '{"dependencies":{"react-native":"latest"}}\n'}),
             ("python", {"pyproject.toml": "[project]\nname='demo'\n"}),
             ("typescript", {"package.json": '{"scripts":{"test":"node test.js"}}\n', "tsconfig.json": "{}\n"}),
-            ("typescript", {"tsconfig.json": "{}\n"}),
+            ("generic", {"tsconfig.json": "{}\n"}),
             ("android", {"settings.gradle.kts": 'pluginManagement { repositories { google() } }\n'}),
             ("android", {"settings.gradle": "pluginManagement { repositories { google() } }\n"}),
         ]
@@ -2314,6 +2329,14 @@ class CliTest(unittest.TestCase):
                 self.assertEqual(main(["detect-profile", "--root", temp_dir]), 0)
             self.assertEqual(output.getvalue().strip(), "android")
 
+    def test_is_git_repo_treats_missing_git_as_non_git(self) -> None:
+        from agent_flow.cli import _is_git_repo
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # git 실행 파일이 없는 환경에서도 run/start가 non-git fallback으로 이어져야 한다.
+            with mock.patch("agent_flow.cli.subprocess.run", side_effect=FileNotFoundError):
+                self.assertFalse(_is_git_repo(Path(temp_dir)))
+
     def test_provider_list_reports_host_provider_availability(self) -> None:
         output = io.StringIO()
         with mock.patch("agent_flow.providers.host.shutil.which") as which:
@@ -2567,7 +2590,8 @@ class CliTest(unittest.TestCase):
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 self.assertEqual(main(["detect-profile", "--root", str(root)]), 0)
-            self.assertEqual(output.getvalue().strip(), "typescript")
+            # package.json 없는 tsconfig 단독 프로젝트는 npm gate를 강제하지 않는다.
+            self.assertEqual(output.getvalue().strip(), "generic")
 
     def test_workflow_stage_rejects_invalid_parallel_type(self) -> None:
         with self.assertRaises(ValueError):
@@ -2588,6 +2612,11 @@ class CliTest(unittest.TestCase):
         self.assertEqual(profile.profile_id, "node")
         self.assertEqual(profile.gates[0].gate_id, "test")
         self.assertEqual(profile.gates[0].command, ("npm", "test"))
+        # npm 기반 TypeScript profile은 subprocess argv list로 검증 명령을 보관한다.
+        typescript = load_profile("typescript")
+        self.assertEqual(typescript.gates[1].gate_id, "typecheck")
+        self.assertEqual(typescript.gates[1].command, ("npx", "tsc", "--noEmit"))
+        self.assertEqual(load_profile("nextjs").gates[0].command, ("npm", "run", "build"))
         self.assertEqual(load_profile("android").profile_id, "android")
 
     def test_runner_prefers_repository_kit_root(self) -> None:

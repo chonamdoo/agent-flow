@@ -30,7 +30,7 @@ optional:
   gates:
     # ordered list of verification commands
     - id: "stable id (e.g. build, test, lint)"
-      command: "shell command run from project root"
+      command: ["command", "argument"]
       required: true
       phase: "pre-commit | pre-push | post-merge"
 

@@ -39,9 +39,7 @@ def detect_profile(root: Path) -> str:
         or (root / "settings.gradle.kts").exists()
     ):
         return "android"
-    # package.json 없이 tsconfig만 있는 Deno/Bun/라이브러리도 TypeScript로 본다.
-    if (root / "tsconfig.json").exists():
-        return "typescript"
+    # npm gate를 실행할 수 없는 tsconfig 단독 프로젝트는 generic으로 둔다.
     return "generic"
 
 

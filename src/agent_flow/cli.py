@@ -1114,13 +1114,17 @@ def _slug_for_hint(root: Path, value: str) -> str:
 
 
 def _is_git_repo(root: Path) -> bool:
-    result = subprocess.run(
-        ("git", "rev-parse", "--git-dir"),
-        cwd=root,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            ("git", "rev-parse", "--git-dir"),
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        # git이 없는 환경은 non-git 프로젝트처럼 처리해서 run/start fallback을 살린다.
+        return False
     return result.returncode == 0
 
 

@@ -11,19 +11,19 @@ branching:
     max_slug_length: 60
 gates:
   - id: context-lint
-    command: "node scripts/check-context-docs.mjs"
+    command: ["node", "scripts/check-context-docs.mjs"]
     required: true
     phase: pre-commit
   - id: build
-    command: "xcodebuild -scheme App -destination 'platform=iOS Simulator,name=iPhone 15' build"
+    command: ["xcodebuild", "-scheme", "App", "-destination", "platform=iOS Simulator,name=iPhone 15", "build"]
     required: true
     phase: pre-push
   - id: test
-    command: "xcodebuild -scheme App -destination 'platform=iOS Simulator,name=iPhone 15' test"
+    command: ["xcodebuild", "-scheme", "App", "-destination", "platform=iOS Simulator,name=iPhone 15", "test"]
     required: true
     phase: pre-push
   - id: lint
-    command: "swiftlint"
+    command: ["swiftlint"]
     required: false
     phase: pre-commit
 review_angles:

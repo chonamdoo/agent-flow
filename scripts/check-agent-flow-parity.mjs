@@ -5,33 +5,56 @@ import path from "node:path";
 
 const ROOT = process.cwd();
 const failures = [];
+const missingFiles = new Set();
 
 function read(rel) {
   return fs.readFileSync(path.join(ROOT, rel), "utf8");
 }
 
+function readIfExists(rel) {
+  const abs = path.join(ROOT, rel);
+  if (!fs.existsSync(abs)) {
+    recordMissingFile(rel);
+    return null;
+  }
+  return fs.readFileSync(abs, "utf8");
+}
+
 function assertFile(rel) {
   if (!fs.existsSync(path.join(ROOT, rel))) {
+    recordMissingFile(rel);
+  }
+}
+
+function recordMissingFile(rel) {
+  if (!missingFiles.has(rel)) {
+    // 누락 파일도 집계해서 한 번에 보고해야 parity drift 원인을 놓치지 않는다.
+    missingFiles.add(rel);
     failures.push(`missing file: ${rel}`);
   }
 }
 
 function assertContains(rel, needle) {
-  const text = read(rel);
+  const text = readIfExists(rel);
+  if (text === null) return;
   if (!text.includes(needle)) {
     failures.push(`${rel} missing ${JSON.stringify(needle)}`);
   }
 }
 
 function assertNotContains(rel, needle) {
-  const text = read(rel);
+  const text = readIfExists(rel);
+  if (text === null) return;
   if (text.includes(needle)) {
     failures.push(`${rel} still contains ${JSON.stringify(needle)}`);
   }
 }
 
 function assertSame(a, b) {
-  if (read(a) !== read(b)) {
+  const aText = readIfExists(a);
+  const bText = readIfExists(b);
+  if (aText === null || bText === null) return;
+  if (aText !== bText) {
     failures.push(`${a} differs from ${b}`);
   }
 }

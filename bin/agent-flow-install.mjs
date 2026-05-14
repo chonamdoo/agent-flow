@@ -76,9 +76,7 @@ function detectProfile() {
     }
     return "node";
   }
-  if (fs.existsSync(path.join(PROJECT, "tsconfig.json"))) {
-    return "typescript";
-  }
+  // npm gate를 실행할 수 없는 tsconfig 단독 프로젝트는 generic으로 둔다.
   return "generic";
 }
 
