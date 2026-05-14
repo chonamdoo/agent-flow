@@ -9,11 +9,13 @@ The installed `full-feature` workflow starts at PRD and slice planning. It can m
 Add lightweight, CLI-enforced full-feature phases for:
 
 - `domain-grill`
-- `domain-map`
 - `product-brief`
 - `plan-review`
 - `ddd-design`
 - `architecture-review`
+
+`domain-grill` owns the compact domain map output; there is no separate
+mapping phase.
 
 ## Scope
 

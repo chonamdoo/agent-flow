@@ -7,7 +7,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const command = process.argv[2];
-const AGENT_FLOW_COMMAND = "npx github:chonamdoo/agent-flow";
+const AGENT_FLOW_COMMAND = "agent-flow";
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
 const KIT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const installArgs = process.argv.slice(3);
@@ -80,8 +80,7 @@ function installProject() {
     ".agent-flow/",
     ".codex/",
     ".gemini/",
-    ".claude/worktrees/",
-    ".claude/settings.local.json",
+    ".claude/",
     "AGENTS.md",
     "CLAUDE.md",
     "GEMINI.md",
@@ -97,6 +96,8 @@ function installProject() {
   upsertBootstrapBlock(path.join(root, "AGENTS.md"), "AGENTS.md");
   upsertBootstrapBlock(path.join(root, "CLAUDE.md"), "CLAUDE.md");
   upsertBootstrapBlock(path.join(root, "GEMINI.md"), "GEMINI.md");
+  makeHooksExecutable(root);
+  installClaudeHooks(root);
 
   if (!installArgs.includes("--without-graphify")) {
     payload.graphify = installGraphify(root, existingPayload?.graphify);
@@ -221,6 +222,11 @@ function runWorkflowCommand(args) {
     const nextIndex = nextPhaseIndex(state, phase, artifact);
     const nextPhase = PHASES[nextIndex];
     const transitionedAt = new Date().toISOString();
+    const fixLoopRounds = phase.id === "fix-loop"
+      ? (state.fix_loop_rounds ?? 0) + 1
+      : nextPhase?.id === "gates" && phase.id !== "fix-loop"
+        ? 0
+        : state.fix_loop_rounds;
     const nextState = {
       ...state,
       phase_index: nextIndex,
@@ -228,6 +234,7 @@ function runWorkflowCommand(args) {
       status: nextPhase ? "running" : "complete",
       updated_at: transitionedAt,
       phase_entered_at: transitionedAt,
+      fix_loop_rounds: fixLoopRounds,
     };
     writeJson(path.join(runDir, "manifest.json"), nextState);
     writeJson(currentRunPath(root), nextState);
@@ -252,6 +259,10 @@ function detectProfile(rootDir) {
     if (packageText.includes("next")) {
       return "nextjs";
     }
+    // 일반 TypeScript 프로젝트는 node보다 좁은 profile을 써야 gate와 skill routing이 맞다.
+    if (fs.existsSync(path.join(rootDir, "tsconfig.json"))) {
+      return "typescript";
+    }
     return "node";
   }
   if (fs.existsSync(path.join(rootDir, "pyproject.toml"))) {
@@ -264,6 +275,10 @@ function detectProfile(rootDir) {
     fs.existsSync(path.join(rootDir, "settings.gradle.kts"))
   ) {
     return "android";
+  }
+  // package.json 없이 tsconfig만 있는 Deno/Bun/라이브러리도 TypeScript로 본다.
+  if (fs.existsSync(path.join(rootDir, "tsconfig.json"))) {
+    return "typescript";
   }
   return "generic";
 }
@@ -321,7 +336,7 @@ function resolveManagedWorktreeRoot(start) {
 function readCurrentRun(root) {
   const pathName = currentRunPath(root);
   if (!fs.existsSync(pathName)) {
-    throw new Error("no active run. start one with: agent-flow-kit run start --task <task>");
+    throw new Error('no active run. start one with: agent-flow run "<task>"');
   }
   return normalizeRunState(root, JSON.parse(fs.readFileSync(pathName, "utf8")));
 }
@@ -337,11 +352,15 @@ function assertInstalled(root) {
     path.join(root, ".agent-flow", "skills", "full-feature-workflow", "SKILL.md"),
     ...PHASES.map((phase) => path.join(root, ".agent-flow", "prompts", `${phase.id}.md`)),
     path.join(root, ".agent-flow", "skills", "domain-grill", "SKILL.md"),
+    path.join(root, ".agent-flow", "skills", "grill-with-docs", "SKILL.md"),
     path.join(root, ".agent-flow", "skills", "product-brief", "SKILL.md"),
     path.join(root, ".agent-flow", "skills", "plan-reviewer", "SKILL.md"),
     path.join(root, ".agent-flow", "skills", "ddd-clean-architecture", "SKILL.md"),
     path.join(root, ".agent-flow", "skills", "architecture-reviewer", "SKILL.md"),
     path.join(root, ".agent-flow", "skills", "push-watch", "SKILL.md"),
+    path.join(root, ".agent-flow", "skills", "code-generation-discipline", "SKILL.md"),
+    path.join(root, ".agent-flow", "skills", "react-development-guide", "SKILL.md"),
+    path.join(root, ".agent-flow", "skills", "react-native-development-guide", "SKILL.md"),
     path.join(root, ".agent-flow", "prompts", "push-watch.md"),
     path.join(root, ".agent-flow", "prompts", "push-watch-tick.md"),
     path.join(root, ".agent-flow", "bootstrap", "AGENTS.md"),
@@ -597,19 +616,41 @@ function installGraphify(root, existingGraphify) {
       status: "reused",
     };
   }
-  const installer = installGraphifyPackage(root);
-  const skillInstall = runGraphifyInstall(root);
-  const graph = runGraphifyProjectGraph(root);
-  return {
-    status: "installed",
-    package: "graphifyy",
-    command: "graphify",
-    installer,
-    platforms: skillInstall.platforms,
-    skill_location: skillInstall.skillLocation,
-    removed_duplicate_skills: skillInstall.removedDuplicates,
-    graph,
-  };
+  try {
+    const installer = installGraphifyPackage(root);
+    const skillInstall = runGraphifyInstall(root);
+    const graph = runGraphifyProjectGraph(root);
+    return {
+      status: "installed",
+      package: "graphifyy",
+      command: "graphify",
+      installer,
+      platforms: skillInstall.platforms,
+      skill_location: skillInstall.skillLocation,
+      removed_duplicate_skills: skillInstall.removedDuplicates,
+      graph,
+    };
+  } catch (error) {
+    // graphify는 보조 인덱서라 실패해도 agent-flow 설치와 worktree 시작을 막지 않는다.
+    return {
+      status: "skipped",
+      package: "graphifyy",
+      command: "graphify",
+      reason: formatGraphifyError(error),
+      platforms: ["claude", "codex", "gemini"],
+      skill_location: "~/.agents/skills/graphify",
+      removed_duplicate_skills: [],
+      graph: {
+        status: "skipped",
+        command: "graphify .",
+        output: "graphify-out/",
+      },
+    };
+  }
+}
+
+function formatGraphifyError(error) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function runChecked(commandName, args, cwd) {
@@ -882,6 +923,14 @@ function lineMatchesMarker(line, marker) {
   return line === marker;
 }
 
+const FIX_LOOP_MAX_ROUNDS = 3;
+
+const ROUTED_PHASE_IDS = new Set([
+  "plan-review", "gates", "multi-review", "fix-loop",
+  "architecture-review", "pr-watch", "merge-approval",
+  "pr-comment-fix", "pr-ci-fix",
+]);
+
 function nextPhaseIndex(state, phase, artifact) {
   if (phase.id === "plan-review") {
     const verdict = readArtifactVerdict(artifact);
@@ -893,15 +942,39 @@ function nextPhaseIndex(state, phase, artifact) {
     }
     throw new Error("blocked: plan-review artifact must include verdict: approve or verdict: request-changes");
   }
+  if (phase.id === "gates") {
+    const passed = readGatesPassed(artifact);
+    if (!passed) {
+      return phaseIndex("fix-loop");
+    }
+    return state.phase_index + 1;
+  }
+  if (phase.id === "multi-review") {
+    const verdict = readMultiReviewVerdict(artifact);
+    if (verdict === "approve") {
+      return phaseIndex("architecture-review");
+    }
+    if (verdict === "request-changes") {
+      return phaseIndex("fix-loop");
+    }
+    throw new Error("blocked: multi-review artifact must include verdict: approve or verdict: request-changes");
+  }
+  if (phase.id === "fix-loop") {
+    const rounds = (state.fix_loop_rounds ?? 0) + 1;
+    if (rounds > FIX_LOOP_MAX_ROUNDS) {
+      throw new Error(`blocked: fix-loop exceeded ${FIX_LOOP_MAX_ROUNDS} rounds — escalate to user`);
+    }
+    return phaseIndex("gates");
+  }
   if (phase.id === "architecture-review") {
     const verdict = readArtifactVerdict(artifact);
     if (verdict === "approve") {
       return state.phase_index + 1;
     }
-    if (verdict === "request-changes") {
+    if (verdict === "request-changes" || verdict === "blocked") {
       return phaseIndex("refactor");
     }
-    throw new Error("blocked: architecture-review artifact must include verdict: approve or verdict: request-changes");
+    throw new Error("blocked: architecture-review artifact must include verdict: approve, request-changes, or blocked");
   }
   if (phase.id === "pr-watch") {
     const status = readArtifactStatus(artifact);
@@ -909,6 +982,9 @@ function nextPhaseIndex(state, phase, artifact) {
       return phaseIndex("merge-approval");
     }
     if (status === "merged") {
+      return phaseIndex("handoff");
+    }
+    if (status === "skipped") {
       return phaseIndex("handoff");
     }
     if (status === "comments") {
@@ -920,7 +996,7 @@ function nextPhaseIndex(state, phase, artifact) {
     if (status === "pending") {
       throw new Error("blocked: PR watch is pending");
     }
-    throw new Error("blocked: pr-watch artifact must include status: green, comments, ci-failed, merged, or pending");
+    throw new Error("blocked: pr-watch artifact must include status: green, comments, ci-failed, skipped, merged, or pending");
   }
   if (phase.id === "merge-approval") {
     const verdict = readArtifactVerdict(artifact);
@@ -932,7 +1008,10 @@ function nextPhaseIndex(state, phase, artifact) {
   if (phase.id === "pr-comment-fix" || phase.id === "pr-ci-fix") {
     return phaseIndex("pr-watch");
   }
-  return state.phase_index + 1;
+  if (!ROUTED_PHASE_IDS.has(phase.id)) {
+    return state.phase_index + 1;
+  }
+  throw new Error(`blocked: unhandled routing for phase ${phase.id}`);
 }
 
 function phaseIndex(id) {
@@ -958,6 +1037,74 @@ function readArtifactVerdict(pathName) {
   return match?.[1]?.toLowerCase();
 }
 
+function assertMinReviewerCount(pathName, minimum) {
+  const content = fs.readFileSync(pathName, "utf8");
+  const reviewers = parseReviewerVerdicts(content);
+  if (reviewers.size >= minimum) {
+    return;
+  }
+  throw new Error(`blocked: multi-review artifact must contain at least ${minimum} independent reviewer verdicts`);
+}
+
+function readMultiReviewVerdict(pathName) {
+  const content = fs.readFileSync(pathName, "utf8");
+  const reviewers = parseReviewerVerdicts(content);
+  if (reviewers.size < 2) {
+    throw new Error("blocked: multi-review artifact must contain at least 2 independent reviewer verdicts");
+  }
+  const overall = readArtifactVerdict(pathName);
+  const verdicts = [...reviewers.values()];
+  if (verdicts.includes("request-changes")) {
+    return "request-changes";
+  }
+  if (overall === "approve" && verdicts.every((verdict) => verdict === "approve")) {
+    return "approve";
+  }
+  if (overall === "request-changes") {
+    return "request-changes";
+  }
+  throw new Error("blocked: multi-review artifact must include matching reviewer verdicts and overall verdict");
+}
+
+function parseReviewerVerdicts(content) {
+  // reviewer id를 키로 정규화해 한 reviewer가 여러 번 approve를 찍어도 독립 리뷰로 세지 않는다.
+  const reviewers = new Map();
+  const linePattern = /^reviewer[-_ ]?([a-z0-9-]*)[^\n]*verdict:\s*(approve|request-changes)\s*$/gim;
+  for (const match of content.matchAll(linePattern)) {
+    const reviewerId = (match[1] || `line-${reviewers.size + 1}`).toLowerCase();
+    reviewers.set(reviewerId, match[2].toLowerCase());
+  }
+  const sections = content.split(/^##\s+Reviewer\s*([^\n]*)/im);
+  for (let index = 1; index < sections.length; index += 2) {
+    const reviewerId = (sections[index].trim() || `section-${index}`).toLowerCase();
+    const verdict = sections[index + 1]?.match(/verdict:\s*(approve|request-changes)/i)?.[1]?.toLowerCase();
+    if (verdict) {
+      reviewers.set(reviewerId, verdict);
+    }
+  }
+  return reviewers;
+}
+
+function readGatesPassed(pathName) {
+  try {
+    const content = fs.readFileSync(pathName, "utf8");
+    const data = JSON.parse(content);
+    if (typeof data.passed !== "boolean" || !Array.isArray(data.results) || data.results.length === 0) {
+      return false;
+    }
+    // 완료 보고는 실제 실행한 gate command와 결과가 함께 있을 때만 허용한다.
+    const resultsPass = data.results.every((r) =>
+      r &&
+      typeof r.command === "string" &&
+      r.command.trim().length > 0 &&
+      (r.passed === true || r.status === "pass" || r.status === "ok"),
+    );
+    return data.passed && resultsPass;
+  } catch {
+    return false;
+  }
+}
+
 function upsertBootstrapBlock(pathName, label) {
   const start = "<!-- agent-flow:start -->";
   const end = "<!-- agent-flow:end -->";
@@ -967,11 +1114,11 @@ function upsertBootstrapBlock(pathName, label) {
 Before feature work, run:
 
 \`\`\`bash
-${AGENT_FLOW_COMMAND} run start --task "<task>"
-${AGENT_FLOW_COMMAND} run next
+${AGENT_FLOW_COMMAND} run "<task>"
 \`\`\`
 
-Follow the CLI output exactly. Do not manually skip phases; use \`${AGENT_FLOW_COMMAND} run advance\` only after the required artifact exists.
+install은 프로젝트당 1회만 수행합니다. 새 세션이 시작됐다는 이유로 install을 다시 실행하지 않습니다.
+Follow the CLI output exactly. Git projects start inside \`.agent-flow/worktrees/feat-<slug>/\`; continue with the printed \`next_command\`.
 
 ${end}
 `;
@@ -1026,11 +1173,13 @@ function bootstrapMarkdown(label) {
 Before feature work, run:
 
 \`\`\`bash
-${AGENT_FLOW_COMMAND} run start --task "<task>"
-${AGENT_FLOW_COMMAND} run next
+${AGENT_FLOW_COMMAND} run "<task>"
 \`\`\`
 
-Follow the CLI output exactly. Do not manually skip phases; use \`${AGENT_FLOW_COMMAND} run advance\` only after the required artifact exists.
+install은 프로젝트당 1회만 수행합니다. 새 세션이 시작됐다는 이유로 install을 다시 실행하지 않습니다.
+Follow the CLI output exactly. Git projects start inside \`.agent-flow/worktrees/feat-<slug>/\`; continue with the printed \`next_command\`.
+
+During code generation and modification phases, apply \`code-generation-discipline\`. Language-specific guide and comment rules follow the \`code-generation-discipline\` Before Starting checklist.
 `;
 }
 
@@ -1043,16 +1192,14 @@ const PHASES = [
   {
     id: "domain-grill",
     artifact: "artifacts/domain-grill.md",
-    required_markers: ["grill-me: complete", "shared_understanding: reached"],
+    required_markers: [
+      "grill-with-docs: complete",
+      "shared_understanding: reached",
+      "context_docs_checked: true",
+      "context_docs_updated: true|not_needed",
+    ],
     instruction:
-      "Interview one question at a time, resolve domain decisions, and record decisions, open questions, terms, assumptions, and sources checked. End with a ## Completion Gate section containing marker lines: grill-me: complete and shared_understanding: reached.",
-  },
-  {
-    id: "domain-map",
-    artifact: "artifacts/domain-map.md",
-    required_markers: ["grill-with-docs: complete", "context_docs_checked: true", "context_docs_updated: true|not_needed"],
-    instruction:
-      "Use CONTEXT.md plus .Codex/rules/context/domain-glossary-full.md. Keep CONTEXT.md hot-only and under 200 lines; move expanded domain detail to .Codex/rules/context/. End with a ## Completion Gate section containing marker lines: grill-with-docs: complete, context_docs_checked: true, and context_docs_updated: true or not_needed.",
+      "Run the internal grill-with-docs skill. Ask one question at a time unless code or docs answer it, challenge CONTEXT.md/ADR terminology, stress-test terms with concrete scenarios, cross-check user claims against code, update docs inline when terms resolve, normalize the compact domain map, and end with marker lines: grill-with-docs: complete, shared_understanding: reached, context_docs_checked: true, and context_docs_updated: true or not_needed.",
   },
   {
     id: "product-brief",
@@ -1078,15 +1225,35 @@ const PHASES = [
     id: "worktree",
     artifact: "artifacts/worktree.md",
     instruction:
-      "Create or record the dedicated branch/worktree for this slice. Follow profile.branching.naming when present: <prefix><slug>, slug_style, slug_source, and max_slug_length.",
+      "Run git worktree add to create an isolated worktree at .agent-flow/worktrees/feat-<slug>/ with branch feat/<slug>. Do not just create a branch — a physical worktree is required for parallel task isolation. Do not work on main/master/develop. Follow profile.branching.naming when present. Record worktree path, branch name, and base commit.",
   },
   { id: "run-start", artifact: "artifacts/run-start.md", instruction: "Record the workflow run setup and selected provider." },
-  { id: "red", artifact: "artifacts/red.log", instruction: "Write failing tests first and save the failure output." },
-  { id: "green", artifact: "artifacts/green.log", instruction: "Implement the minimum change and save passing test output." },
-  { id: "refactor", artifact: "artifacts/refactor.md", instruction: "Refactor only after green and summarize changed structure." },
-  { id: "gates", artifact: "gate-results.json", instruction: "Run project gates, including context lint for docs-only changes, and save structured results." },
-  { id: "multi-review", artifact: "artifacts/multi-review.md", instruction: "Run reviewer agents and record approve/request-changes results." },
-  { id: "fix-loop", artifact: "artifacts/fix-loop.md", instruction: "Apply review/gate fixes or record that no fixes were required." },
+  {
+    id: "red",
+    artifact: "artifacts/red.log",
+    instruction:
+      "Apply code-generation-discipline before writing tests. Write failing tests first. Select python-development-guide, typescript-development-guide, react-development-guide, react-native-development-guide, or chrisbanes skills only when the changed files require them. Save the failure output.",
+  },
+  {
+    id: "green",
+    artifact: "artifacts/green.log",
+    instruction:
+      "Apply code-generation-discipline. Implement the minimum change, apply selected language-specific guides as secondary checklists, add required Korean code comments, and save passing test output.",
+  },
+  {
+    id: "refactor",
+    artifact: "artifacts/refactor.md",
+    instruction:
+      "Apply code-generation-discipline. Refactor only after green, keep behavior stable, apply selected language-specific guides as secondary checklists, keep required Korean code comments, and summarize changed structure.",
+  },
+  { id: "gates", artifact: "artifacts/gate-results.json", instruction: "Run build, typecheck, lint, tests, and context lint according to the active profile. Docs-only changes must still run context lint. Save structured JSON with a top-level passed boolean and a results array." },
+  { id: "multi-review", artifact: "artifacts/multi-review.md", instruction: "Run 2+ independent reviewer agents. Each reviewer uses code-reviewer.md as basis and outputs an independent verdict: approve or request-changes. Any request-changes from any reviewer makes the overall verdict request-changes. Default reviewers are Codex sub-agents; Claude/Gemini are optional when available. Provider failure falls back to Codex sub-agents only. Record per-reviewer verdicts and write a single overall verdict line." },
+  {
+    id: "fix-loop",
+    artifact: "artifacts/fix-loop.md",
+    instruction:
+      "Apply code-generation-discipline while fixing review/gate failures, add required Korean code comments, apply selected language-specific guides as secondary checklists, or record that no fixes were required.",
+  },
   {
     id: "architecture-review",
     artifact: "artifacts/architecture-review.md",
@@ -1149,14 +1316,17 @@ Use this skill as the common entry point for the project-local agent-flow workfl
 When the user types \`/agent-flow <task>\`, run:
 
 \`\`\`bash
-${AGENT_FLOW_COMMAND} run start --task "<task>"
+${AGENT_FLOW_COMMAND} run "<task>"
 \`\`\`
+
+Do not reinstall agent-flow for each task. Install is project setup, not the normal task entry.
+In a git repo, \`${AGENT_FLOW_COMMAND} run "<task>"\` starts the run inside \`.agent-flow/worktrees/feat-<slug>/\` on branch \`feat/<slug>\`.
 
 When the user types \`/agent-flow\` with no task:
 
-- Run \`${AGENT_FLOW_COMMAND} run status\` from the project root.
+- Run \`${AGENT_FLOW_COMMAND} status\` from the project root.
 - Treat the status command output as the only source of truth.
-- If status exits 0 and reports an active run, run \`${AGENT_FLOW_COMMAND} run next\`.
+- If status exits 0 and reports an active run, follow the \`next_command\` from status.
 - If status exits non-zero with \`no active run\`, ask for a task using \`/agent-flow <task>\`.
 - Do not infer npm, npx, or install failure unless the command actually exits non-zero with that error.
 - Do not run install just because a new session started.
@@ -1164,26 +1334,26 @@ When the user types \`/agent-flow\` with no task:
 When the user types \`/agent-flow status\`, run:
 
 \`\`\`bash
-${AGENT_FLOW_COMMAND} run status
+${AGENT_FLOW_COMMAND} status
 \`\`\`
 
 ## Behavior
 
 - Treat \`/agent-flow\` as a project-local workflow trigger, not as a shell path.
-- Keep \`.agent-flow/runs/<run-id>/\` as internal state; expose it only for status, debugging, or artifact inspection.
-- On a new session, always check \`${AGENT_FLOW_COMMAND} run status\` first and continue from that result.
-- After a phase writes its artifact, run \`${AGENT_FLOW_COMMAND} run advance\` from the project root.
+- Keep \`.agent-flow/worktrees/feat-<slug>/.agent-flow/runs/<workflow>/<run-id>/\` as internal state for git projects; expose it only for status, debugging, or artifact inspection.
+- On a new session, always check \`${AGENT_FLOW_COMMAND} status\` first and continue from that result.
+- After a phase writes its artifact, run the \`next_command\` printed by status or the current phase output.
 - If the workflow pauses for design or slice review, summarize the relevant artifact and wait for user approval before continuing.
-- Code comments are required when intent is not obvious, and every code comment must be written in Korean.
+- Apply code-generation-discipline for code generation and modification phases. Language-specific guide and comment rules follow the code-generation-discipline Before Starting checklist.
 `;
 }
 
 function fullFeatureSkillMarkdown() {
-  return `# Full Feature Workflow\n\nUse this skill for feature work in this project.\n\nAlways drive progress through:\n\n\`\`\`bash\n${AGENT_FLOW_COMMAND} run next\n\`\`\`\n\nCanonical order:\n\n${PHASES.map((phase, index) => `${index + 1}. ${phase.id}`).join("\n")}\n\nDo not skip phases. If existing docs satisfy a phase, write the required artifact and reference those docs. If a gate, review, PR comment, or PR check fails, complete the matching fix phase and push again before merge/handoff.\n\nCoding rule:\n\n- Code comments are required when intent is not obvious, and every code comment must be written in Korean.\n`;
+  return `# Full Feature Workflow\n\nUse this skill for feature work in this project.\n\nAlways drive progress through the runner output. Run \`${AGENT_FLOW_COMMAND} status\`, then execute the printed \`next_command\` exactly.\n\nDo not skip phases. If existing docs satisfy a phase, write the required artifact and reference those docs. If a gate, review, PR comment, or PR check fails, complete the matching fix phase and push again before merge/handoff.\n\nApply \`code-generation-discipline\` during code phases. Language-specific guide and comment rules follow the \`code-generation-discipline\` Before Starting checklist.\n`;
 }
 
 function domainGrillSkillMarkdown() {
-  return `# Domain Grill\n\nUse during the full-feature domain-grill phase.\n\nRules:\n\n- Ask one question at a time.\n- Provide a recommended answer for every question.\n- Walk each branch of the design tree until decisions are explicit.\n- If a question can be answered from code or docs, inspect those sources instead of asking.\n- Challenge fuzzy domain terms against CONTEXT.md and ADRs when present.\n- Do not mark the artifact complete while unresolved questions remain.\n\nArtifact template:\n\n# Domain Grill\n\n## Goal\n\n## Resolved Decisions\n\n## Open Questions\n\n## Terms To Define\n\n## Risky Assumptions\n\n## Existing Sources Checked\n\n## Completion Gate\n\ngrill-me: complete\nshared_understanding: reached\n`;
+  return `# Domain Grill\n\nUse during the full-feature domain-grill phase. This phase uses the internal grill-with-docs discipline.\n\nRules:\n\n- Ask one question at a time and provide a recommended answer.\n- If code, CONTEXT.md, CONTEXT-MAP.md, or ADRs can answer the question, inspect those sources instead of asking.\n- Challenge terminology conflicts against CONTEXT.md and ADRs immediately.\n- Stress-test domain relationships with concrete edge-case scenarios.\n- Cross-check user claims against code before treating them as facts.\n- Update CONTEXT.md inline when a domain term is resolved; keep implementation details out.\n- Keep expanded glossary/rationale in .Codex/rules/context/ instead of hot CONTEXT.md.\n- Create CONTEXT.md, CONTEXT-MAP.md, and ADR files lazily; only write them when there is resolved content.\n- Offer ADRs only for hard-to-reverse, surprising trade-off decisions.\n- Do not mark the artifact complete while unresolved questions remain.\n\nArtifact template:\n\n# Domain Grill\n\n## Goal\n\n## Resolved Decisions\n\n## Domain Map\n\n## Open Questions\n\n## Terms Defined / Updated in CONTEXT.md\n\n## ADRs Created\n\n## Risky Assumptions\n\n## Existing Sources Checked\n\n## Completion Gate\n\ngrill-with-docs: complete\nshared_understanding: reached\ncontext_docs_checked: true\ncontext_docs_updated: true|not_needed\n`;
 }
 
 function productBriefSkillMarkdown() {
@@ -1195,7 +1365,7 @@ function planReviewerSkillMarkdown() {
 }
 
 function dddCleanArchitectureSkillMarkdown() {
-  return `# DDD Clean Architecture\n\nUse during full-feature ddd-design and architecture-review phases.\n\nDefault architecture is data / domain / presentation with optional shared.\n\nLayer rules:\n\n- domain owns entities, value objects, aggregates, use cases, repository interfaces, domain services, events, errors, policies, and specifications.\n- data owns repository implementations, API/DB clients, persistence models, mappers, and external integrations.\n- presentation owns controllers, routes, components, presenters, view models, and external input handling.\n- shared is optional and must contain only domain-free primitives such as Result, IDs, time, and common errors.\n\nDependency rules:\n\n- domain must not import data or presentation.\n- presentation calls domain use cases.\n- data implements domain repository interfaces.\n- presentation must not call data directly.\n- repository pattern uses interfaces in domain and implementations in data.\n\nCoding rule:\n\n- Code comments are required when intent is not obvious, and every code comment must be written in Korean.\n\nDesign artifact must identify domain core modules and data / domain / presentation boundaries.\n`;
+  return `# DDD Clean Architecture\n\nUse during full-feature ddd-design and architecture-review phases.\n\nDefault architecture is data / domain / presentation with optional shared.\n\nLayer rules:\n\n- domain owns entities, value objects, aggregates, use cases, repository interfaces, domain services, events, errors, policies, and specifications.\n- data owns repository implementations, API/DB clients, persistence models, mappers, and external integrations.\n- presentation owns controllers, routes, components, presenters, view models, and external input handling.\n- shared is optional and must contain only domain-free primitives such as Result, IDs, time, and common errors.\n\nDependency rules:\n\n- domain must not import data or presentation.\n- presentation calls domain use cases.\n- data implements domain repository interfaces.\n- presentation must not call data directly.\n- repository pattern uses interfaces in domain and implementations in data.\n\nDesign artifact must identify domain core modules and data / domain / presentation boundaries.\n`;
 }
 
 function architectureReviewerSkillMarkdown() {
@@ -1221,8 +1391,107 @@ function phasePrompt(phase) {
   return `# ${phase.id}\n\n${phase.instruction}${markers}\n\nSave the required artifact before running:\n\n\`\`\`bash\n${AGENT_FLOW_COMMAND} run advance\n\`\`\`\n`;
 }
 
+function claudeHooksSettings() {
+  return {
+    hooks: {
+      PreToolUse: [
+        {
+          matcher: "Bash",
+          hooks: [
+            { type: "command", command: "scripts/hooks/guard-worktree.sh" },
+            { type: "command", command: "scripts/hooks/guard-protected-branch.sh" },
+          ],
+        },
+      ],
+      Stop: [
+        {
+          matcher: "",
+          hooks: [{ type: "command", command: "scripts/hooks/show-phase-status.sh" }],
+        },
+      ],
+    },
+  };
+}
+
+function installClaudeHooks(root) {
+  const settingsPath = path.join(root, ".claude", "settings.json");
+  let settings = {};
+  if (fs.existsSync(settingsPath)) {
+    try {
+      settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+    } catch {
+      settings = {};
+    }
+  }
+  if (!settings.hooks) {
+    settings.hooks = {};
+  }
+  const desired = claudeHooksSettings().hooks;
+  for (const [event, entries] of Object.entries(desired)) {
+    if (!settings.hooks[event]) {
+      settings.hooks[event] = [];
+    }
+    for (const entry of entries) {
+      const existing = settings.hooks[event].find((e) => e.matcher === entry.matcher);
+      if (existing) {
+        if (!existing.hooks) {
+          existing.hooks = [];
+        }
+        for (const hook of entry.hooks) {
+          if (!existing.hooks.some((h) => h.command === hook.command)) {
+            existing.hooks.push(hook);
+          }
+        }
+      } else {
+        settings.hooks[event].push(entry);
+      }
+    }
+  }
+  fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+  fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+}
+
+function makeHooksExecutable(root) {
+  const hooksDir = path.join(root, "scripts", "hooks");
+  if (!fs.existsSync(hooksDir)) {
+    return;
+  }
+  for (const entry of fs.readdirSync(hooksDir)) {
+    if (entry.endsWith(".sh")) {
+      fs.chmodSync(path.join(hooksDir, entry), 0o755);
+    }
+  }
+}
+
 function workflowContract() {
-  return `# Workflow Contract\n\nThe workflow runner is the source of truth for phase order. Agents may read skills and prompts, but must use \`${AGENT_FLOW_COMMAND} run next\` and \`${AGENT_FLOW_COMMAND} run advance\` to move through the workflow.\n\nPhases with completion markers are not complete just because the artifact file exists. The artifact must include every required marker printed by \`${AGENT_FLOW_COMMAND} run next\`.\n\nImplementation rules:\n\n- Run every phase through the runner. Do not skip review, QA, PR watch, or fix-loop phases.\n- Code comments are required when intent is not obvious.\n- Every new or modified code comment must be written in Korean.\n- If review or QA fails, return to the fix phase before continuing.\n\nDocument size rules:\n\n- \`CONTEXT.md\`, grill-me docs, grill-with-docs outputs, and long planning docs must stay under 200 lines each.\n- If a source doc grows past 200 lines, create or refresh a matching \`*-summary.md\` under \`.Codex/rules/\` and use that summary as agent context.\n- Preserve the original long doc only as reference; do not load it as hot context unless the current phase needs a specific section.\n- Artifacts must link to long docs by repo-relative path and summarize only the needed decision, not paste the full content.\n\nContext rules:\n\n- Artifacts and manifests must use repo-relative paths; local absolute paths are forbidden.\n- Do not paste full docs or raw logs into artifacts. Summarize and link by relative path.\n- \`CONTEXT.md\` is hot context only and must stay under 200 lines.\n- Current and future vocabulary must stay separated.\n- Follow the phase context map in \`.Codex/rules/context/\` for phase-specific context loading.\n`;
+  return `# Workflow Contract
+
+The workflow runner is the source of truth for phase order. Agents may read skills and prompts, but must follow the runner's printed \`next_command\` exactly to move through the workflow.
+
+Phases with completion markers are not complete just because the artifact file exists. The artifact must include every required marker printed by the current phase or status output.
+
+Implementation rules:
+
+- Run every phase through the runner. Do not skip review, QA, PR watch, or fix-loop phases.
+- Apply \`code-generation-discipline\` during red, green, refactor, and fix-loop phases. Language-specific guide and comment rules follow the \`code-generation-discipline\` Before Starting checklist.
+- If review or QA fails, return to the fix phase before continuing.
+- The gates->fix-loop->gates loop re-verifies after every fix. multi-review approve skips fix-loop; request-changes routes through fix-loop->gates.
+
+Document size rules:
+
+- \`CONTEXT.md\`, grill-with-docs outputs, compact domain maps, and long planning docs must stay under 200 lines each.
+- If a source doc grows past 200 lines, create or refresh a matching \`*-summary.md\` under \`.Codex/rules/\` and use that summary as agent context.
+- Preserve the original long doc only as reference; do not load it as hot context unless the current phase needs a specific section.
+- Artifacts must link to long docs by repo-relative path and summarize only the needed decision, not paste the full content.
+
+Context rules:
+
+- Artifacts and manifests must use repo-relative paths; local absolute paths are forbidden.
+- Do not paste full docs or raw logs into artifacts. Summarize and link by relative path.
+- \`CONTEXT.md\` is hot context only and must stay under 200 lines.
+- Current and future vocabulary must stay separated.
+- Follow the phase context map in \`.Codex/rules/context/\` for phase-specific context loading.
+`;
 }
 
 try {

@@ -1,6 +1,6 @@
 {"id":"context","parent":null,"path":".Codex/rules/context","summary":"Agent Flow context policy and phase-specific context map.","phase":"all"}
 {"id":"context.maintenance","parent":"context","path":".Codex/rules/context/context-maintenance.md","summary":"Context size, separation, path, and artifact maintenance rules.","phase":"all"}
 {"id":"context.map","parent":"context","path":".Codex/rules/context/agent-flow-context-map.md","summary":"Phase-specific context loading map; prevents loading all docs by default.","phase":"all"}
-{"id":"context.domain","parent":"context","path":".Codex/rules/context/domain-glossary-full.md","summary":"Expanded domain vocabulary kept outside hot CONTEXT.md.","phase":"domain-map"}
+{"id":"context.domain","parent":"context","path":".Codex/rules/context/domain-glossary-full.md","summary":"Expanded domain vocabulary kept outside hot CONTEXT.md.","phase":"domain-grill"}
 {"id":"context.research","parent":"context","path":".Codex/rules/context/research-context.md","summary":"Research context for phases that need external or product evidence.","phase":"product-brief"}
 {"id":"context.paper-runtime","parent":"context","path":".Codex/rules/context/paper-runtime-context.md","summary":"Runtime notes for paper/document processing contexts.","phase":"implementation"}

@@ -168,7 +168,6 @@ class CliTest(unittest.TestCase):
             )
             self.assertTrue((project_root / ".agent-flow" / "prompts" / "prd.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "prompts" / "domain-grill.md").is_file())
-            self.assertTrue((project_root / ".agent-flow" / "prompts" / "domain-map.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "prompts" / "product-brief.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "prompts" / "plan-review.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "prompts" / "ddd-design.md").is_file())
@@ -176,6 +175,7 @@ class CliTest(unittest.TestCase):
             self.assertTrue((project_root / ".agent-flow" / "prompts" / "pr-watch.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "prompts" / "merge.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "domain-grill" / "SKILL.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "skills" / "grill-with-docs" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "product-brief" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "plan-reviewer" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "ddd-clean-architecture" / "SKILL.md").is_file())
@@ -215,10 +215,23 @@ class CliTest(unittest.TestCase):
                 ),
             )
             self.assertIn(
-                "every code comment must be written in Korean",
+                "code-generation-discipline",
                 (project_root / ".agent-flow" / "skills" / "full-feature-workflow" / "SKILL.md").read_text(
                     encoding="utf-8"
                 ),
+            )
+            self.assertTrue(
+                (project_root / ".agent-flow" / "skills" / "code-generation-discipline" / "SKILL.md").is_file()
+            )
+            self.assertTrue(
+                (project_root / ".agent-flow" / "skills" / "react-development-guide" / "SKILL.md").is_file()
+            )
+            self.assertTrue(
+                (project_root / ".agent-flow" / "skills" / "react-native-development-guide" / "SKILL.md").is_file()
+            )
+            self.assertIn(
+                "code-generation-discipline",
+                (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
                 "status: ci-failed",
@@ -229,19 +242,19 @@ class CliTest(unittest.TestCase):
                 (project_root / ".agent-flow" / "skills" / "push-watch" / "SKILL.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
-                "npx github:chonamdoo/agent-flow run next",
+                'agent-flow run "<task>"',
                 (project_root / "AGENTS.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
-                "npx github:chonamdoo/agent-flow run next",
+                'agent-flow run "<task>"',
                 (project_root / "CLAUDE.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
-                "npx github:chonamdoo/agent-flow run next",
+                'agent-flow run "<task>"',
                 (project_root / "GEMINI.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
-                "npx github:chonamdoo/agent-flow run next",
+                'agent-flow run "<task>"',
                 (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8"),
             )
             agent_flow_skill = (project_root / ".agent-flow" / "skills" / "agent-flow" / "SKILL.md").read_text(
@@ -316,12 +329,7 @@ class CliTest(unittest.TestCase):
             self.assertEqual(start.returncode, 0, start.stderr)
             self.assertTrue((project_root / ".agent-flow" / "runs" / "full-feature" / "r1").is_dir())
             artifact = project_root / ".agent-flow" / "runs" / "full-feature" / "r1" / "artifacts" / "domain-grill.md"
-            artifact.write_text(
-                "## Completion Gate\n"
-                "grill-me: complete\n"
-                "shared_understanding: reached\n",
-                encoding="utf-8",
-            )
+            artifact.write_text(_node_phase_content("domain-grill"), encoding="utf-8")
             status = subprocess.run(
                 (
                     node,
@@ -731,9 +739,9 @@ class CliTest(unittest.TestCase):
 
             self.assertIn("id: full-feature", workflow.read_text(encoding="utf-8"))
             self.assertIn("status: ci-failed", prompt.read_text(encoding="utf-8"))
-            self.assertIn("npx github:chonamdoo/agent-flow run next", bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("npx github:chonamdoo/agent-flow run next", claude_bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("npx github:chonamdoo/agent-flow run next", gemini_bootstrap.read_text(encoding="utf-8"))
+            self.assertIn('agent-flow run "<task>"', bootstrap.read_text(encoding="utf-8"))
+            self.assertIn('agent-flow run "<task>"', claude_bootstrap.read_text(encoding="utf-8"))
+            self.assertIn('agent-flow run "<task>"', gemini_bootstrap.read_text(encoding="utf-8"))
             self.assertIn("Full Feature Workflow", skill.read_text(encoding="utf-8"))
             self.assertIn("Workflow Contract", rules.read_text(encoding="utf-8"))
 
@@ -765,6 +773,8 @@ class CliTest(unittest.TestCase):
             ("nextjs", {"package.json": '{"dependencies":{"next":"latest"}}\n'}),
             ("react-native", {"package.json": '{"dependencies":{"react-native":"latest"}}\n'}),
             ("python", {"pyproject.toml": "[project]\nname='demo'\n"}),
+            ("typescript", {"package.json": '{"scripts":{"test":"node test.js"}}\n', "tsconfig.json": "{}\n"}),
+            ("typescript", {"tsconfig.json": "{}\n"}),
             ("android", {"settings.gradle.kts": 'pluginManagement { repositories { google() } }\n'}),
             ("android", {"settings.gradle": "pluginManagement { repositories { google() } }\n"}),
         ]
@@ -833,7 +843,7 @@ class CliTest(unittest.TestCase):
             self.assertEqual(status.returncode, 0, status.stderr)
             self.assertIn("status: awaiting_host", status.stdout)
             self.assertIn("reason: missing_phase_artifact", status.stdout)
-            self.assertIn("next_command: npx github:chonamdoo/agent-flow run advance", status.stdout)
+            self.assertIn("next_command: agent-flow run advance", status.stdout)
             self.assertIn("status_json:", status.stdout)
 
             blocked = subprocess.run(
@@ -861,7 +871,7 @@ class CliTest(unittest.TestCase):
             self.assertIn("missing completion markers", missing_markers.stderr)
 
             artifact.write_text(
-                "TODO: add grill-me: complete before handoff\n"
+                "TODO: add grill-with-docs: complete before handoff\n"
                 "shared_understanding: reached\n",
                 encoding="utf-8",
             )
@@ -873,10 +883,10 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(false_positive.returncode, 1)
-            self.assertIn("grill-me: complete", false_positive.stderr)
+            self.assertIn("grill-with-docs: complete", false_positive.stderr)
 
             artifact.write_text(
-                "grill-me: complete\n"
+                "grill-with-docs: complete\n"
                 "shared_understanding: reached\n",
                 encoding="utf-8",
             )
@@ -893,7 +903,7 @@ class CliTest(unittest.TestCase):
             artifact.write_text(
                 "## Completion Gate\n"
                 "```\n"
-                "grill-me: complete\n"
+                "grill-with-docs: complete\n"
                 "shared_understanding: reached\n"
                 "```\n",
                 encoding="utf-8",
@@ -911,7 +921,7 @@ class CliTest(unittest.TestCase):
             artifact.write_text(
                 "```\n"
                 "## Completion Gate\n"
-                "grill-me: complete\n"
+                "grill-with-docs: complete\n"
                 "shared_understanding: reached\n"
                 "```\n",
                 encoding="utf-8",
@@ -929,7 +939,7 @@ class CliTest(unittest.TestCase):
             artifact.write_text(
                 "notes\n"
                 "    ## Completion Gate\n"
-                "    grill-me: complete\n"
+                "    grill-with-docs: complete\n"
                 "    shared_understanding: reached\n",
                 encoding="utf-8",
             )
@@ -943,8 +953,25 @@ class CliTest(unittest.TestCase):
             self.assertEqual(indented_heading.returncode, 1)
             self.assertIn("missing completion markers", indented_heading.stderr)
 
-            artifact.write_text(_node_phase_content("domain-grill"), encoding="utf-8")
+            artifact.write_text(
+                "## Completion Gate\n"
+                "grill-with-docs: complete\n"
+                "shared_understanding: reached\n"
+                "context_docs_checked: true\n"
+                "context_docs_updated: maybe\n",
+                encoding="utf-8",
+            )
+            bad_value = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(bad_value.returncode, 1)
+            self.assertIn("context_docs_updated: true|not_needed", bad_value.stderr)
 
+            artifact.write_text(_node_phase_content("domain-grill"), encoding="utf-8")
             status = subprocess.run(
                 (node, cli, "run", "status"),
                 cwd=project_root,
@@ -965,38 +992,9 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(advanced.returncode, 0, advanced.stderr)
-            self.assertIn("Current phase: domain-map", advanced.stdout)
+            self.assertIn("Current phase: product-brief", advanced.stdout)
             state = json.loads((project_root / ".agent-flow" / "state" / "current-run.json").read_text(encoding="utf-8"))
-            self.assertEqual(state["phase"], "domain-map")
-
-            domain_map = project_root / ".agent-flow" / "runs" / "full-feature" / "r1" / "artifacts" / "domain-map.md"
-            domain_map.write_text(
-                "## Completion Gate\n"
-                "grill-with-docs: complete\n"
-                "context_docs_checked: true\n"
-                "context_docs_updated: maybe\n",
-                encoding="utf-8",
-            )
-            bad_value = subprocess.run(
-                (node, cli, "run", "advance"),
-                cwd=project_root,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(bad_value.returncode, 1)
-            self.assertIn("context_docs_updated: true|not_needed", bad_value.stderr)
-
-            domain_map.write_text(_node_phase_content("domain-map"), encoding="utf-8")
-            good_value = subprocess.run(
-                (node, cli, "run", "advance"),
-                cwd=project_root,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(good_value.returncode, 0, good_value.stderr)
-            self.assertIn("Current phase: product-brief", good_value.stdout)
+            self.assertEqual(state["phase"], "product-brief")
 
     def test_node_workflow_run_requires_installed_project(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1074,7 +1072,6 @@ class CliTest(unittest.TestCase):
             )
             expected_phases = [
                 "domain-grill",
-                "domain-map",
                 "product-brief",
                 "prd",
                 "slice-plan",
@@ -1087,7 +1084,6 @@ class CliTest(unittest.TestCase):
                 "refactor",
                 "gates",
                 "multi-review",
-                "fix-loop",
                 "architecture-review",
                 "commit",
                 "push-pr",
@@ -1186,7 +1182,6 @@ class CliTest(unittest.TestCase):
             run_dir = project_root / ".agent-flow" / "runs" / "full-feature" / "r1"
             for phase in [
                 "domain-grill",
-                "domain-map",
                 "product-brief",
                 "prd",
                 "slice-plan",
@@ -1199,7 +1194,6 @@ class CliTest(unittest.TestCase):
                 "refactor",
                 "gates",
                 "multi-review",
-                "fix-loop",
                 "architecture-review",
                 "commit",
                 "push-pr",
@@ -1230,7 +1224,7 @@ class CliTest(unittest.TestCase):
             )
             self.assertEqual(pending_status.returncode, 0, pending_status.stderr)
             self.assertIn("reason: route_blocked", pending_status.stdout)
-            self.assertIn("next_command: npx github:chonamdoo/agent-flow run next", pending_status.stdout)
+            self.assertIn("next_command: agent-flow run next", pending_status.stdout)
 
             watch.write_text("status: comments\n", encoding="utf-8")
             comments = subprocess.run(
@@ -1353,7 +1347,7 @@ class CliTest(unittest.TestCase):
                 0,
             )
             run_dir = project_root / ".agent-flow" / "runs" / "full-feature" / "r1"
-            for phase in ["domain-grill", "domain-map", "product-brief", "prd", "slice-plan"]:
+            for phase in ["domain-grill", "product-brief", "prd", "slice-plan"]:
                 artifact = run_dir / _node_phase_artifact(phase)
                 artifact.parent.mkdir(parents=True, exist_ok=True)
                 artifact.write_text(_node_phase_content(phase), encoding="utf-8")
@@ -1398,7 +1392,6 @@ class CliTest(unittest.TestCase):
                 "refactor",
                 "gates",
                 "multi-review",
-                "fix-loop",
             ]:
                 artifact = run_dir / _node_phase_artifact(phase)
                 artifact.parent.mkdir(parents=True, exist_ok=True)
@@ -1432,8 +1425,7 @@ class CliTest(unittest.TestCase):
             self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
             for phase, next_phase in [
                 ("gates", "multi-review"),
-                ("multi-review", "fix-loop"),
-                ("fix-loop", "architecture-review"),
+                ("multi-review", "architecture-review"),
             ]:
                 artifact = run_dir / _node_phase_artifact(phase)
                 os.utime(artifact, (1, 1))
@@ -1479,6 +1471,299 @@ class CliTest(unittest.TestCase):
             )
             self.assertEqual(approved.returncode, 0, approved.stderr)
             self.assertIn("Current phase: commit", approved.stdout)
+
+    def test_node_gates_fail_routes_to_fix_loop_and_back(self) -> None:
+        """gates fail → fix-loop → gates → multi-review 순환 테스트."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            self.assertEqual(
+                subprocess.run(
+                    (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
+                    cwd=project_root,
+                    check=False,
+                ).returncode,
+                0,
+            )
+            run_dir = project_root / ".agent-flow" / "runs" / "full-feature" / "r1"
+            for phase in [
+                "domain-grill", "product-brief", "prd",
+                "slice-plan", "plan-review", "ddd-design", "worktree",
+                "run-start", "red", "green", "refactor",
+            ]:
+                artifact = run_dir / _node_phase_artifact(phase)
+                artifact.parent.mkdir(parents=True, exist_ok=True)
+                content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase)
+                artifact.write_text(content, encoding="utf-8")
+                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+
+            state = json.loads((project_root / ".agent-flow" / "state" / "current-run.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["phase"], "gates")
+
+            gates_artifact = run_dir / _node_phase_artifact("gates")
+            gates_artifact.parent.mkdir(parents=True, exist_ok=True)
+            gates_artifact.write_text('{"passed": false, "results": [{"name": "lint", "passed": false}]}\n', encoding="utf-8")
+            result = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Current phase: fix-loop", result.stdout)
+
+            fix_loop_artifact = run_dir / _node_phase_artifact("fix-loop")
+            fix_loop_artifact.write_text("fix-loop\n", encoding="utf-8")
+            result = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Current phase: gates", result.stdout)
+
+            gates_artifact.write_text(
+                '{"passed": true, "results": [{"id": "lint", "command": "npm run lint", "passed": true}]}\n',
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Current phase: multi-review", result.stdout)
+
+    def test_node_multi_review_request_changes_routes_to_fix_loop(self) -> None:
+        """multi-review request-changes → fix-loop → gates 순환 테스트."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            self.assertEqual(
+                subprocess.run(
+                    (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
+                    cwd=project_root,
+                    check=False,
+                ).returncode,
+                0,
+            )
+            run_dir = project_root / ".agent-flow" / "runs" / "full-feature" / "r1"
+            for phase in [
+                "domain-grill", "product-brief", "prd",
+                "slice-plan", "plan-review", "ddd-design", "worktree",
+                "run-start", "red", "green", "refactor", "gates",
+            ]:
+                artifact = run_dir / _node_phase_artifact(phase)
+                artifact.parent.mkdir(parents=True, exist_ok=True)
+                content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase)
+                artifact.write_text(content, encoding="utf-8")
+                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+
+            state = json.loads((project_root / ".agent-flow" / "state" / "current-run.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["phase"], "multi-review")
+
+            mr_artifact = run_dir / _node_phase_artifact("multi-review")
+            mr_artifact.write_text(
+                "## Reviewer 1\nreviewer-1 verdict: approve\n\n"
+                "## Reviewer 2\nreviewer-2 verdict: request-changes\n\n"
+                "verdict: request-changes\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Current phase: fix-loop", result.stdout)
+
+            fix_loop_artifact = run_dir / _node_phase_artifact("fix-loop")
+            fix_loop_artifact.write_text("fix-loop\n", encoding="utf-8")
+            result = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Current phase: gates", result.stdout)
+
+            gates_artifact = run_dir / _node_phase_artifact("gates")
+            gates_artifact.write_text(_node_phase_content("gates"), encoding="utf-8")
+            result = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Current phase: multi-review", result.stdout)
+
+            mr_artifact.write_text(
+                "## Reviewer 1\nreviewer-1 verdict: approve\n\n"
+                "## Reviewer 2\nreviewer-2 verdict: approve\n\n"
+                "verdict: approve\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Current phase: architecture-review", result.stdout)
+
+    def test_node_fix_loop_round_cap_blocks_after_max(self) -> None:
+        """fix-loop 3회 초과 시 에러로 차단."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            self.assertEqual(
+                subprocess.run(
+                    (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
+                    cwd=project_root,
+                    check=False,
+                ).returncode,
+                0,
+            )
+            run_dir = project_root / ".agent-flow" / "runs" / "full-feature" / "r1"
+            for phase in [
+                "domain-grill", "product-brief", "prd",
+                "slice-plan", "plan-review", "ddd-design", "worktree",
+                "run-start", "red", "green", "refactor",
+            ]:
+                artifact = run_dir / _node_phase_artifact(phase)
+                artifact.parent.mkdir(parents=True, exist_ok=True)
+                content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase)
+                artifact.write_text(content, encoding="utf-8")
+                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+
+            for round_num in range(3):
+                gates_artifact = run_dir / _node_phase_artifact("gates")
+                gates_artifact.parent.mkdir(parents=True, exist_ok=True)
+                gates_artifact.write_text('{"passed": false}\n', encoding="utf-8")
+                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+                fix_artifact = run_dir / _node_phase_artifact("fix-loop")
+                fix_artifact.write_text(f"fix round {round_num + 1}\n", encoding="utf-8")
+                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+
+            gates_artifact = run_dir / _node_phase_artifact("gates")
+            gates_artifact.write_text('{"passed": false}\n', encoding="utf-8")
+            self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+            fix_artifact = run_dir / _node_phase_artifact("fix-loop")
+            fix_artifact.write_text("fix round 4\n", encoding="utf-8")
+            result = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("fix-loop exceeded", result.stderr)
+
+    def test_node_architecture_review_blocked_routes_to_refactor(self) -> None:
+        """architecture-review blocked verdict → refactor 라우팅."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            self.assertEqual(
+                subprocess.run(
+                    (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
+                    cwd=project_root,
+                    check=False,
+                ).returncode,
+                0,
+            )
+            run_dir = project_root / ".agent-flow" / "runs" / "full-feature" / "r1"
+            for phase in [
+                "domain-grill", "product-brief", "prd",
+                "slice-plan", "plan-review", "ddd-design", "worktree",
+                "run-start", "red", "green", "refactor", "gates", "multi-review",
+            ]:
+                artifact = run_dir / _node_phase_artifact(phase)
+                artifact.parent.mkdir(parents=True, exist_ok=True)
+                content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase)
+                artifact.write_text(content, encoding="utf-8")
+                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+
+            arch_artifact = run_dir / _node_phase_artifact("architecture-review")
+            arch_artifact.write_text("verdict: blocked\n", encoding="utf-8")
+            result = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Current phase: refactor", result.stdout)
+
+    def test_node_multi_review_rejects_single_reviewer(self) -> None:
+        """multi-review artifact에 1개 reviewer만 있으면 차단."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            self.assertEqual(
+                subprocess.run(
+                    (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
+                    cwd=project_root,
+                    check=False,
+                ).returncode,
+                0,
+            )
+            run_dir = project_root / ".agent-flow" / "runs" / "full-feature" / "r1"
+            for phase in [
+                "domain-grill", "product-brief", "prd",
+                "slice-plan", "plan-review", "ddd-design", "worktree",
+                "run-start", "red", "green", "refactor", "gates",
+            ]:
+                artifact = run_dir / _node_phase_artifact(phase)
+                artifact.parent.mkdir(parents=True, exist_ok=True)
+                content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase)
+                artifact.write_text(content, encoding="utf-8")
+                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+
+            mr_artifact = run_dir / _node_phase_artifact("multi-review")
+            mr_artifact.write_text(
+                "## Reviewer 1\nreviewer-1 verdict: approve\n\nverdict: approve\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("at least 2 independent reviewer verdicts", result.stderr)
 
     def test_node_push_watch_blocks_protected_branches(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1722,15 +2007,15 @@ class CliTest(unittest.TestCase):
                     ),
                     0,
                 )
-            worktree = root / ".agent-flow" / "worktrees" / "slice-a"
+            worktree = root / ".agent-flow" / "worktrees" / "feat-slice-a"
             run_dir = worktree / ".agent-flow" / "runs" / "development" / "r1"
             manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(
                 manifest["worktree"],
                 {
-                    "name": "slice-a",
-                    "branch": "agent-flow/slice-a",
-                    "path": ".agent-flow/worktrees/slice-a",
+                    "name": "feat-slice-a",
+                    "branch": "feat/slice-a",
+                    "path": ".agent-flow/worktrees/feat-slice-a",
                 },
             )
             self.assertTrue(worktree.is_dir())
@@ -1800,13 +2085,24 @@ class CliTest(unittest.TestCase):
                 ),
                 0,
             )
-            self.assertTrue((root / ".agent-flow" / "runs" / "development" / "r1").exists())
             self.assertTrue(
                 (
                     root
                     / ".agent-flow"
                     / "worktrees"
-                    / "slice-a"
+                    / "feat-demo"
+                    / ".agent-flow"
+                    / "runs"
+                    / "development"
+                    / "r1"
+                ).exists()
+            )
+            self.assertTrue(
+                (
+                    root
+                    / ".agent-flow"
+                    / "worktrees"
+                    / "feat-slice-a"
                     / ".agent-flow"
                     / "runs"
                     / "development"
@@ -1840,7 +2136,7 @@ class CliTest(unittest.TestCase):
                     2,
                 )
             self.assertFalse((root / ".agent-flow" / "runs" / "development" / "r1").exists())
-            self.assertFalse((root / ".agent-flow" / "worktrees" / "slice-a").exists())
+            self.assertFalse((root / ".agent-flow" / "worktrees" / "feat-slice-a").exists())
 
     def test_worktree_create_manifest_write_failure_cleans_worktree(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1852,7 +2148,7 @@ class CliTest(unittest.TestCase):
                     main(["worktree", "create", "--root", str(root), "--name", "slice-a"]),
                     2,
                 )
-            self.assertFalse((root / ".agent-flow" / "worktrees" / "slice-a").exists())
+            self.assertFalse((root / ".agent-flow" / "worktrees" / "feat-slice-a").exists())
 
     def test_start_reuses_existing_worktree_manifest_branch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1898,7 +2194,7 @@ class CliTest(unittest.TestCase):
                     root
                     / ".agent-flow"
                     / "worktrees"
-                    / "slice-a"
+                    / "feat-slice-a"
                     / ".agent-flow"
                     / "runs"
                     / "development"
@@ -1942,7 +2238,7 @@ class CliTest(unittest.TestCase):
                     root
                     / ".agent-flow"
                     / "worktrees"
-                    / "slice-a"
+                    / "feat-slice-a"
                     / ".agent-flow"
                     / "runs"
                     / "development"
@@ -1953,7 +2249,7 @@ class CliTest(unittest.TestCase):
                 )
             )
             self.assertEqual(manifest["worktree"]["branch"], "custom/slice-a")
-            self.assertTrue((root / ".agent-flow" / "worktrees" / "slice-a").is_dir())
+            self.assertTrue((root / ".agent-flow" / "worktrees" / "feat-slice-a").is_dir())
 
     def test_detect_profile_defaults_to_generic(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2188,7 +2484,7 @@ class CliTest(unittest.TestCase):
             run_dir = next((root / ".agent-flow" / "runs").iterdir())
             (run_dir / "domain-grill.md").write_text(
                 "## Completion Gate\n"
-                "TODO: grill-me: complete\n"
+                "TODO: grill-with-docs: complete\n"
                 "shared_understanding: reached\n",
                 encoding="utf-8",
             )
@@ -2217,6 +2513,23 @@ class CliTest(unittest.TestCase):
             with contextlib.redirect_stdout(output):
                 self.assertEqual(main(["detect-profile", "--root", str(root)]), 0)
             self.assertEqual(output.getvalue().strip(), "python")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "package.json").write_text('{"scripts":{"test":"node test.js"}}', encoding="utf-8")
+            (root / "tsconfig.json").write_text("{}\n", encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["detect-profile", "--root", str(root)]), 0)
+            self.assertEqual(output.getvalue().strip(), "typescript")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "tsconfig.json").write_text("{}\n", encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["detect-profile", "--root", str(root)]), 0)
+            self.assertEqual(output.getvalue().strip(), "typescript")
 
     def test_workflow_stage_rejects_invalid_parallel_type(self) -> None:
         with self.assertRaises(ValueError):
@@ -2532,9 +2845,9 @@ class CliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             plan = plan_worktree(root=root, name="Implement Login")
-            self.assertEqual(plan.name, "implement-login")
-            self.assertEqual(plan.branch, "agent-flow/implement-login")
-            self.assertEqual(plan.path, root / ".agent-flow" / "worktrees" / "implement-login")
+            self.assertEqual(plan.name, "feat-implement-login")
+            self.assertEqual(plan.branch, "feat/implement-login")
+            self.assertEqual(plan.path, root / ".agent-flow" / "worktrees" / "feat-implement-login")
 
     def test_worktree_status_reports_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2544,7 +2857,7 @@ class CliTest(unittest.TestCase):
                     main(["worktree", "status", "--root", temp_dir, "--name", "missing"]),
                     0,
                 )
-            self.assertIn("missing agent-flow/missing", output.getvalue())
+            self.assertIn("feat-missing feat/missing", output.getvalue())
             self.assertTrue(output.getvalue().strip().endswith("missing"))
 
     def test_worktree_create_creates_git_worktree_and_manifest(self) -> None:
@@ -2566,10 +2879,10 @@ class CliTest(unittest.TestCase):
                     ),
                     0,
                 )
-            worktree = root / ".agent-flow" / "worktrees" / "slice-a"
+            worktree = root / ".agent-flow" / "worktrees" / "feat-slice-a"
             self.assertTrue(worktree.is_dir())
             self.assertTrue((worktree / "manifest.json").is_file())
-            self.assertIn("slice-a agent-flow/slice-a", output.getvalue())
+            self.assertIn("feat-slice-a feat/slice-a", output.getvalue())
 
     def test_worktree_create_rejects_dirty_leader_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2587,7 +2900,7 @@ class CliTest(unittest.TestCase):
                 main(["worktree", "create", "--root", str(root), "--name", "after-init"]),
                 0,
             )
-            self.assertTrue((root / ".agent-flow" / "worktrees" / "after-init").is_dir())
+            self.assertTrue((root / ".agent-flow" / "worktrees" / "feat-after-init").is_dir())
 
     def test_team_state_init_task_worker_and_status(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -4827,7 +5140,6 @@ def _read_shutdown_json(root: Path, signal_id: str) -> dict[str, object]:
 def _node_phase_artifact(phase: str) -> Path:
     artifacts = {
         "domain-grill": Path("artifacts/domain-grill.md"),
-        "domain-map": Path("artifacts/domain-map.md"),
         "product-brief": Path("artifacts/product-brief.md"),
         "prd": Path("artifacts/prd.md"),
         "slice-plan": Path("artifacts/slice-plan.md"),
@@ -4838,7 +5150,7 @@ def _node_phase_artifact(phase: str) -> Path:
         "red": Path("artifacts/red.log"),
         "green": Path("artifacts/green.log"),
         "refactor": Path("artifacts/refactor.md"),
-        "gates": Path("gate-results.json"),
+        "gates": Path("artifacts/gate-results.json"),
         "multi-review": Path("artifacts/multi-review.md"),
         "fix-loop": Path("artifacts/fix-loop.md"),
         "architecture-review": Path("artifacts/architecture-review.md"),
@@ -4857,14 +5169,21 @@ def _node_phase_artifact(phase: str) -> Path:
 def _node_phase_content(phase: str, prefix: str = "") -> str:
     content = f"{prefix}{phase}\n"
     if phase == "domain-grill":
-        return content + "## Completion Gate\ngrill-me: complete\nshared_understanding: reached\n"
-    if phase == "domain-map":
         return (
             content
             + "## Completion Gate\n"
             + "grill-with-docs: complete\n"
+            + "shared_understanding: reached\n"
             + "context_docs_checked: true\n"
             + "context_docs_updated: not_needed\n"
+        )
+    if phase == "gates":
+        return '{"passed": true, "results": [{"id": "test", "command": "npm test", "passed": true}]}\n'
+    if phase == "multi-review":
+        return (
+            "## Reviewer 1\nreviewer-1 verdict: approve\n\n"
+            "## Reviewer 2\nreviewer-2 verdict: approve\n\n"
+            "verdict: approve\n"
         )
     return content
 
@@ -4878,7 +5197,6 @@ def _node_start_full_feature_at_pr_watch(project_root: Path, node: str, cli: str
     run_dir = project_root / ".agent-flow" / "runs" / "full-feature" / "r1"
     for phase in [
         "domain-grill",
-        "domain-map",
         "product-brief",
         "prd",
         "slice-plan",
@@ -4891,7 +5209,6 @@ def _node_start_full_feature_at_pr_watch(project_root: Path, node: str, cli: str
         "refactor",
         "gates",
         "multi-review",
-        "fix-loop",
         "architecture-review",
         "commit",
         "push-pr",

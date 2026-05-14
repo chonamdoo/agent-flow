@@ -1,0 +1,4 @@
+interface:
+  display_name: "AGENTS.md Improver"
+  short_description: "Audit and optimize AGENTS.md project memory."
+  default_prompt: "Audit and improve AGENTS.md files for concise, current, actionable Codex project context."

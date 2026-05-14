@@ -319,12 +319,14 @@ def main(argv: list[str] | None = None) -> int:
         run_root = root
         worktree_status = None
         worktree_preexisting = False
-        if args.worktree is not None:
+        # git repo에서는 별도 지정이 없어도 task 이름으로 격리 worktree를 먼저 만든다.
+        worktree_name = args.worktree if args.worktree is not None else (args.task if _is_git_repo(root) else None)
+        if worktree_name is not None:
             if not _is_git_repo(root):
                 print("worktree runs require a git repository", file=sys.stderr)
                 return 2
             try:
-                plan = plan_worktree(root=root, name=args.worktree, branch=args.worktree_branch)
+                plan = plan_worktree(root=root, name=worktree_name, branch=args.worktree_branch)
             except ValueError as exc:
                 print(str(exc), file=sys.stderr)
                 return 2
@@ -341,13 +343,13 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             print(f"worktree: {worktree_status.name} {worktree_status.path}")
             run_root = worktree_status.path
-        active = find_active_run(run_root) if args.worktree is None else None
+        active = find_active_run(run_root) if worktree_name is None else None
         if active is not None:
             print(f"already active: {active.run_id} (task: {active.task!r})")
-            if args.worktree is None and _is_git_repo(root):
+            if worktree_name is None and _is_git_repo(root):
                 print(
                     "parallel worktree run: "
-                    'agent-flow run "<task>" --worktree "<short-task-slug>"'
+                    'agent-flow run "<task>"'
                 )
             return 2
         try:
@@ -355,7 +357,7 @@ def main(argv: list[str] | None = None) -> int:
                 run_root,
                 workflow=args.workflow,
                 architecture=args.architecture,
-                next_command=_continue_command(root, args.worktree),
+                next_command=_continue_command(root, worktree_name),
             ).run(
                 mode=ResumeMode.START,
                 task=args.task,
@@ -909,15 +911,17 @@ def main(argv: list[str] | None = None) -> int:
         worktree_status = None
         worktree_preexisting = False
         state = None
-        if args.worktree is not None and not _is_git_repo(root):
+        # start 명령도 run과 동일하게 git repo에서는 worktree를 기본 시작점으로 삼는다.
+        worktree_name = args.worktree if args.worktree is not None else (args.task if _is_git_repo(root) else None)
+        if worktree_name is not None and not _is_git_repo(root):
             print("worktree runs require a git repository", file=sys.stderr)
             return 2
         try:
             workflow = load_workflow(args.workflow)
             profile = detect_profile(root) if args.profile == "auto" else args.profile
             adapter = detect_adapter() if args.adapter == "auto" else args.adapter
-            if args.worktree is not None:
-                plan = plan_worktree(root=root, name=args.worktree, branch=args.worktree_branch)
+            if worktree_name is not None:
+                plan = plan_worktree(root=root, name=worktree_name, branch=args.worktree_branch)
                 worktree_preexisting = plan.path.exists()
                 status = create_worktree(root=root, plan=plan, allow_dirty=args.allow_dirty)
                 worktree_status = status

@@ -153,9 +153,9 @@ def test_worktree_run_continue_status_abort(tmp_path: Path):
 
     r1 = _run_cli(["run", "worktree task", "--worktree", "Long Press"], project)
     assert r1.returncode == 0, r1.stderr
-    assert "worktree: long-press" in r1.stdout
+    assert "worktree: feat-long-press" in r1.stdout
 
-    worktree = project / ".agent-flow" / "worktrees" / "long-press"
+    worktree = project / ".agent-flow" / "worktrees" / "feat-long-press"
     run_dir = next((worktree / ".agent-flow" / "runs").iterdir())
     assert (run_dir / "active").exists()
 
@@ -169,7 +169,7 @@ def test_worktree_run_continue_status_abort(tmp_path: Path):
 
     r_empty_continue = _run_cli(["continue", "--worktree", "long-press"], project)
     assert r_empty_continue.returncode == 0
-    assert '--worktree "long-press"' in r_empty_continue.stdout
+    assert '--worktree "feat-long-press"' in r_empty_continue.stdout
 
     r2 = _run_cli(["run", "abort me", "--worktree", "long-press"], project)
     assert r2.returncode == 0, r2.stderr
@@ -180,7 +180,7 @@ def test_worktree_run_continue_status_abort(tmp_path: Path):
 
     r_list = _run_cli(["worktree", "list"], project)
     assert r_list.returncode == 0
-    assert "long-press" in r_list.stdout
+    assert "feat-long-press" in r_list.stdout
 
     r_remove = _run_cli(["worktree", "remove", "--name", "long-press"], project)
     assert r_remove.returncode == 0, r_remove.stderr
@@ -200,8 +200,8 @@ def test_worktree_list_empty_and_multiple(tmp_path: Path):
     assert _run_cli(["worktree", "create", "--name", "two"], project).returncode == 0
     r_list = _run_cli(["worktree", "list"], project)
     assert r_list.returncode == 0
-    assert "one agent-flow/one" in r_list.stdout
-    assert "two agent-flow/two" in r_list.stdout
+    assert "feat-one feat/one" in r_list.stdout
+    assert "feat-two feat/two" in r_list.stdout
 
 
 def test_worktree_list_tolerates_invalid_stale_directory_name(tmp_path: Path):
@@ -222,15 +222,15 @@ def test_worktree_remove_cleans_stale_manifest(tmp_path: Path):
     project = tmp_path / "stale-worktree"
     project.mkdir()
     _init_git_project(project)
-    subprocess.run(["git", "branch", "agent-flow/ghost"], cwd=project, check=True)
-    stale_dir = project / ".agent-flow" / "worktrees" / "ghost"
+    subprocess.run(["git", "branch", "feat/ghost"], cwd=project, check=True)
+    stale_dir = project / ".agent-flow" / "worktrees" / "feat-ghost"
     stale_dir.mkdir(parents=True)
     (stale_dir / "manifest.json").write_text(
         json.dumps(
             {
-                "name": "ghost",
-                "branch": "agent-flow/ghost",
-                "path": str(project / ".agent-flow" / "worktrees" / "ghost"),
+                "name": "feat-ghost",
+                "branch": "feat/ghost",
+                "path": str(project / ".agent-flow" / "worktrees" / "feat-ghost"),
                 "exists": True,
                 "branch_created_by_agent_flow": True,
             }
@@ -240,27 +240,27 @@ def test_worktree_remove_cleans_stale_manifest(tmp_path: Path):
 
     r_list = _run_cli(["worktree", "list"], project)
     assert r_list.returncode == 0
-    assert "ghost agent-flow/ghost" in r_list.stdout
+    assert "feat-ghost feat/ghost" in r_list.stdout
     assert "stale" in r_list.stdout
 
     r_remove = _run_cli(["worktree", "remove", "--name", "ghost"], project)
     assert r_remove.returncode == 0
     assert "removed stale" in r_remove.stdout
     assert not stale_dir.exists()
-    assert not _branch_exists(project, "agent-flow/ghost")
+    assert not _branch_exists(project, "feat/ghost")
 
 
 def test_worktree_status_tolerates_corrupt_manifest(tmp_path: Path):
     project = tmp_path / "corrupt-manifest"
     project.mkdir()
     _init_git_project(project)
-    worktree_dir = project / ".agent-flow" / "worktrees" / "ghost"
+    worktree_dir = project / ".agent-flow" / "worktrees" / "feat-ghost"
     worktree_dir.mkdir(parents=True)
     (worktree_dir / "manifest.json").write_text("{bad json", encoding="utf-8")
 
     r_status = _run_cli(["worktree", "status", "--name", "ghost"], project)
     assert r_status.returncode == 0
-    assert "ghost agent-flow/ghost" in r_status.stdout
+    assert "feat-ghost feat/ghost" in r_status.stdout
 
 
 def test_worktree_remove_does_not_trust_string_owned_manifest_flag(tmp_path: Path):
@@ -268,12 +268,12 @@ def test_worktree_remove_does_not_trust_string_owned_manifest_flag(tmp_path: Pat
     project.mkdir()
     _init_git_project(project)
     subprocess.run(["git", "branch", "feature/keep"], cwd=project, check=True)
-    stale_dir = project / ".agent-flow" / "worktrees" / "ghost"
+    stale_dir = project / ".agent-flow" / "worktrees" / "feat-ghost"
     stale_dir.mkdir(parents=True)
     (stale_dir / "manifest.json").write_text(
         json.dumps(
             {
-                "name": "ghost",
+                "name": "feat-ghost",
                 "branch": "feature/keep",
                 "path": str(stale_dir),
                 "exists": True,
@@ -294,12 +294,12 @@ def test_worktree_remove_does_not_trust_manifest_owned_branch(tmp_path: Path):
     project.mkdir()
     _init_git_project(project)
     subprocess.run(["git", "branch", "feature/keep"], cwd=project, check=True)
-    stale_dir = project / ".agent-flow" / "worktrees" / "ghost"
+    stale_dir = project / ".agent-flow" / "worktrees" / "feat-ghost"
     stale_dir.mkdir(parents=True)
     (stale_dir / "manifest.json").write_text(
         json.dumps(
             {
-                "name": "ghost",
+                "name": "feat-ghost",
                 "branch": "feature/keep",
                 "path": str(stale_dir),
                 "exists": True,
@@ -319,12 +319,12 @@ def test_worktree_status_sanitizes_malformed_manifest_name_and_branch(tmp_path: 
     project = tmp_path / "malformed-manifest-fields"
     project.mkdir()
     _init_git_project(project)
-    worktree_dir = project / ".agent-flow" / "worktrees" / "ghost"
+    worktree_dir = project / ".agent-flow" / "worktrees" / "feat-ghost"
     worktree_dir.mkdir(parents=True)
     (worktree_dir / "manifest.json").write_text(
         json.dumps(
             {
-                "name": "../ghost",
+                "name": "../feat-ghost",
                 "branch": "../main",
                 "path": str(worktree_dir),
                 "exists": True,
@@ -336,7 +336,7 @@ def test_worktree_status_sanitizes_malformed_manifest_name_and_branch(tmp_path: 
 
     r_status = _run_cli(["worktree", "status", "--name", "ghost"], project)
     assert r_status.returncode == 0
-    assert "ghost agent-flow/ghost" in r_status.stdout
+    assert "feat-ghost feat/ghost" in r_status.stdout
 
 
 def test_worktree_remove_does_not_trust_manifest_path(tmp_path: Path):
@@ -346,14 +346,14 @@ def test_worktree_remove_does_not_trust_manifest_path(tmp_path: Path):
 
     r_victim = _run_cli(["worktree", "create", "--name", "victim"], project)
     assert r_victim.returncode == 0, r_victim.stderr
-    victim_dir = project / ".agent-flow" / "worktrees" / "victim"
-    stale_dir = project / ".agent-flow" / "worktrees" / "ghost"
+    victim_dir = project / ".agent-flow" / "worktrees" / "feat-victim"
+    stale_dir = project / ".agent-flow" / "worktrees" / "feat-ghost"
     stale_dir.mkdir(parents=True)
     (stale_dir / "manifest.json").write_text(
         json.dumps(
             {
-                "name": "ghost",
-                "branch": "agent-flow/ghost",
+                "name": "feat-ghost",
+                "branch": "feat/ghost",
                 "path": str(victim_dir),
                 "exists": True,
                 "branch_created_by_agent_flow": True,
@@ -375,7 +375,7 @@ def test_worktree_remove_handles_stale_path_file(tmp_path: Path):
     _init_git_project(project)
     worktrees_root = project / ".agent-flow" / "worktrees"
     worktrees_root.mkdir(parents=True)
-    stale_file = worktrees_root / "ghost"
+    stale_file = worktrees_root / "feat-ghost"
     stale_file.write_text("not a directory\n", encoding="utf-8")
 
     r_remove = _run_cli(["worktree", "remove", "--name", "ghost"], project)
@@ -391,15 +391,15 @@ def test_worktree_remove_prunes_real_stale_owned_worktree_and_deletes_auto_branc
 
     r_create = _run_cli(["worktree", "create", "--name", "ghost"], project)
     assert r_create.returncode == 0, r_create.stderr
-    stale_dir = project / ".agent-flow" / "worktrees" / "ghost"
-    assert _branch_exists(project, "agent-flow/ghost")
+    stale_dir = project / ".agent-flow" / "worktrees" / "feat-ghost"
+    assert _branch_exists(project, "feat/ghost")
     shutil.rmtree(stale_dir)
     stale_dir.mkdir(parents=True)
     (stale_dir / "manifest.json").write_text(
         json.dumps(
             {
-                "name": "ghost",
-                "branch": "agent-flow/ghost",
+                "name": "feat-ghost",
+                "branch": "feat/ghost",
                 "path": str(stale_dir),
                 "exists": True,
                 "branch_created_by_agent_flow": True,
@@ -411,14 +411,14 @@ def test_worktree_remove_prunes_real_stale_owned_worktree_and_deletes_auto_branc
     r_remove = _run_cli(["worktree", "remove", "--name", "ghost"], project)
     assert r_remove.returncode == 0, r_remove.stderr
     assert not stale_dir.exists()
-    assert not _branch_exists(project, "agent-flow/ghost")
+    assert not _branch_exists(project, "feat/ghost")
 
 
 def test_worktree_create_rejects_stale_path_reuse(tmp_path: Path):
     project = tmp_path / "stale-path-reuse"
     project.mkdir()
     _init_git_project(project)
-    stale_dir = project / ".agent-flow" / "worktrees" / "task"
+    stale_dir = project / ".agent-flow" / "worktrees" / "feat-task"
     stale_dir.mkdir(parents=True)
 
     r_create = _run_cli(["worktree", "create", "--name", "task"], project)
@@ -430,15 +430,15 @@ def test_worktree_remove_keep_branch_preserves_stale_owned_branch(tmp_path: Path
     project = tmp_path / "stale-keep-branch"
     project.mkdir()
     _init_git_project(project)
-    subprocess.run(["git", "branch", "agent-flow/ghost"], cwd=project, check=True)
-    stale_dir = project / ".agent-flow" / "worktrees" / "ghost"
+    subprocess.run(["git", "branch", "feat/ghost"], cwd=project, check=True)
+    stale_dir = project / ".agent-flow" / "worktrees" / "feat-ghost"
     stale_dir.mkdir(parents=True)
     (stale_dir / "manifest.json").write_text(
         json.dumps(
             {
-                "name": "ghost",
-                "branch": "agent-flow/ghost",
-                "path": str(project / ".agent-flow" / "worktrees" / "ghost"),
+                "name": "feat-ghost",
+                "branch": "feat/ghost",
+                "path": str(project / ".agent-flow" / "worktrees" / "feat-ghost"),
                 "exists": True,
                 "branch_created_by_agent_flow": True,
             }
@@ -449,7 +449,7 @@ def test_worktree_remove_keep_branch_preserves_stale_owned_branch(tmp_path: Path
     r_remove = _run_cli(["worktree", "remove", "--name", "ghost", "--keep-branch"], project)
     assert r_remove.returncode == 0
     assert not stale_dir.exists()
-    assert _branch_exists(project, "agent-flow/ghost")
+    assert _branch_exists(project, "feat/ghost")
 
 
 def test_worktree_selector_requires_existing_worktree(tmp_path: Path):
@@ -529,7 +529,7 @@ def test_worktree_run_rejects_existing_branch_mismatch(tmp_path: Path):
     r_continue = _run_cli(["continue", "--worktree", "task"], project)
     assert r_continue.returncode == 0, r_continue.stderr
 
-    r2 = _run_cli(["run", "other", "--worktree", "task", "--worktree-branch", "agent-flow/other"], project)
+    r2 = _run_cli(["run", "other", "--worktree", "task", "--worktree-branch", "feat/other"], project)
     assert r2.returncode == 2
     assert "already uses branch" in r2.stderr
 
@@ -541,12 +541,12 @@ def test_worktree_create_and_start_reject_existing_branch_mismatch(tmp_path: Pat
 
     r_create = _run_cli(["worktree", "create", "--name", "task"], project)
     assert r_create.returncode == 0, r_create.stderr
-    r_mismatch = _run_cli(["worktree", "create", "--name", "task", "--branch", "agent-flow/other"], project)
+    r_mismatch = _run_cli(["worktree", "create", "--name", "task", "--branch", "feat/other"], project)
     assert r_mismatch.returncode == 2
     assert "already uses branch" in r_mismatch.stderr
 
     r_start_mismatch = _run_cli(
-        ["start", "development", "--task", "task", "--worktree", "task", "--worktree-branch", "agent-flow/other"],
+        ["start", "development", "--task", "task", "--worktree", "task", "--worktree-branch", "feat/other"],
         project,
     )
     assert r_start_mismatch.returncode == 2
@@ -560,7 +560,7 @@ def test_start_worktree_writes_state_inside_worktree(tmp_path: Path):
 
     r_start = _run_cli(["start", "development", "--task", "task", "--worktree", "task"], project)
     assert r_start.returncode == 0, r_start.stderr
-    worktree = project / ".agent-flow" / "worktrees" / "task"
+    worktree = project / ".agent-flow" / "worktrees" / "feat-task"
     run_dir = next((worktree / ".agent-flow" / "runs" / "development").iterdir())
     assert (run_dir / "manifest.json").exists()
     assert not (project / ".agent-flow" / "runs" / "default").exists()
@@ -578,8 +578,8 @@ def test_worktree_run_cleans_up_new_worktree_on_start_failure(tmp_path: Path):
     r1 = _run_cli(["run", "task", "--worktree", "task", "--workflow", "missing"], project)
     assert r1.returncode == 2
     assert "Traceback" not in r1.stderr
-    assert not (project / ".agent-flow" / "worktrees" / "task").exists()
-    assert not _branch_exists(project, "agent-flow/task")
+    assert not (project / ".agent-flow" / "worktrees" / "feat-task").exists()
+    assert not _branch_exists(project, "feat/task")
 
 
 def test_start_worktree_cleans_up_new_worktree_on_start_failure(tmp_path: Path):
@@ -590,8 +590,8 @@ def test_start_worktree_cleans_up_new_worktree_on_start_failure(tmp_path: Path):
     r1 = _run_cli(["start", "missing", "--task", "task", "--worktree", "task"], project)
     assert r1.returncode == 2
     assert "Traceback" not in r1.stderr
-    assert not (project / ".agent-flow" / "worktrees" / "task").exists()
-    assert not _branch_exists(project, "agent-flow/task")
+    assert not (project / ".agent-flow" / "worktrees" / "feat-task").exists()
+    assert not _branch_exists(project, "feat/task")
 
 
 def test_worktree_remove_preserves_preexisting_branch_by_default(tmp_path: Path):
@@ -614,10 +614,10 @@ def test_worktree_remove_deletes_agent_flow_created_branch(tmp_path: Path):
 
     r_create = _run_cli(["worktree", "create", "--name", "task"], project)
     assert r_create.returncode == 0, r_create.stderr
-    assert _branch_exists(project, "agent-flow/task")
+    assert _branch_exists(project, "feat/task")
     r_remove = _run_cli(["worktree", "remove", "--name", "task"], project)
     assert r_remove.returncode == 0, r_remove.stderr
-    assert not _branch_exists(project, "agent-flow/task")
+    assert not _branch_exists(project, "feat/task")
 
 
 def test_live_worktree_remove_does_not_trust_manifest_branch_redirect(tmp_path: Path):
@@ -628,11 +628,11 @@ def test_live_worktree_remove_does_not_trust_manifest_branch_redirect(tmp_path: 
 
     r_create = _run_cli(["worktree", "create", "--name", "task"], project)
     assert r_create.returncode == 0, r_create.stderr
-    worktree = project / ".agent-flow" / "worktrees" / "task"
+    worktree = project / ".agent-flow" / "worktrees" / "feat-task"
     (worktree / "manifest.json").write_text(
         json.dumps(
             {
-                "name": "task",
+                "name": "feat-task",
                 "branch": "feature/keep",
                 "path": str(worktree),
                 "exists": True,
@@ -645,7 +645,7 @@ def test_live_worktree_remove_does_not_trust_manifest_branch_redirect(tmp_path: 
     r_remove = _run_cli(["worktree", "remove", "--name", "task"], project)
     assert r_remove.returncode == 0, r_remove.stderr
     assert _branch_exists(project, "feature/keep")
-    assert _branch_exists(project, "agent-flow/task")
+    assert _branch_exists(project, "feat/task")
 
 
 def test_worktree_remove_keep_branch_preserves_agent_flow_created_branch(tmp_path: Path):
@@ -657,7 +657,7 @@ def test_worktree_remove_keep_branch_preserves_agent_flow_created_branch(tmp_pat
     assert r_create.returncode == 0, r_create.stderr
     r_remove = _run_cli(["worktree", "remove", "--name", "task", "--keep-branch"], project)
     assert r_remove.returncode == 0, r_remove.stderr
-    assert _branch_exists(project, "agent-flow/task")
+    assert _branch_exists(project, "feat/task")
 
 
 def test_worktree_run_failure_preserves_preexisting_branch(tmp_path: Path):
@@ -670,7 +670,7 @@ def test_worktree_run_failure_preserves_preexisting_branch(tmp_path: Path):
     assert r1.returncode == 2
     assert "Traceback" not in r1.stderr
     assert _branch_exists(project, "shared")
-    assert not (project / ".agent-flow" / "worktrees" / "task").exists()
+    assert not (project / ".agent-flow" / "worktrees" / "feat-task").exists()
 
 
 def test_worktree_run_reports_dirty_leader_without_traceback(tmp_path: Path):
@@ -693,7 +693,7 @@ def test_worktree_run_allow_dirty_overrides_dirty_leader(tmp_path: Path):
 
     r1 = _run_cli(["run", "task", "--worktree", "task", "--allow-dirty"], project)
     assert r1.returncode == 0, r1.stderr
-    assert (project / ".agent-flow" / "worktrees" / "task").exists()
+    assert (project / ".agent-flow" / "worktrees" / "feat-task").exists()
 
 
 def test_malformed_meta_does_not_crash(tmp_path: Path):
@@ -788,34 +788,34 @@ def test_required_markers_block_incomplete_artifact(tmp_path: Path):
     phase = Phase(
         id="domain-grill",
         description="",
-        required_markers=("grill-me: complete", "shared_understanding: reached"),
+        required_markers=("grill-with-docs: complete", "shared_understanding: reached"),
     )
 
     assert runner._missing_required_markers(phase) == [
-        "grill-me: complete",
+        "grill-with-docs: complete",
         "shared_understanding: reached",
     ]
 
     (run_dir / "domain-grill.md").write_text(
-        "TODO: add grill-me: complete later\n"
+        "TODO: add grill-with-docs: complete later\n"
         "shared_understanding: reached\n",
         encoding="utf-8",
     )
 
     assert runner._missing_required_markers(phase) == [
-        "grill-me: complete",
+        "grill-with-docs: complete",
         "shared_understanding: reached",
     ]
 
     (run_dir / "domain-grill.md").write_text(
         "notes\n"
-        "grill-me: complete\n"
+        "grill-with-docs: complete\n"
         "shared_understanding: reached\n",
         encoding="utf-8",
     )
 
     assert runner._missing_required_markers(phase) == [
-        "grill-me: complete",
+        "grill-with-docs: complete",
         "shared_understanding: reached",
     ]
 
@@ -823,14 +823,14 @@ def test_required_markers_block_incomplete_artifact(tmp_path: Path):
         "notes\n"
         "```\n"
         "## Completion Gate\n"
-        "grill-me: complete\n"
+        "grill-with-docs: complete\n"
         "shared_understanding: reached\n"
         "```\n",
         encoding="utf-8",
     )
 
     assert runner._missing_required_markers(phase) == [
-        "grill-me: complete",
+        "grill-with-docs: complete",
         "shared_understanding: reached",
     ]
 
@@ -838,34 +838,34 @@ def test_required_markers_block_incomplete_artifact(tmp_path: Path):
         "notes\n"
         "## Completion Gate\n"
         "```\n"
-        "grill-me: complete\n"
+        "grill-with-docs: complete\n"
         "shared_understanding: reached\n"
         "```\n",
         encoding="utf-8",
     )
 
     assert runner._missing_required_markers(phase) == [
-        "grill-me: complete",
+        "grill-with-docs: complete",
         "shared_understanding: reached",
     ]
 
     (run_dir / "domain-grill.md").write_text(
         "notes\n"
         "    ## Completion Gate\n"
-        "    grill-me: complete\n"
+        "    grill-with-docs: complete\n"
         "    shared_understanding: reached\n",
         encoding="utf-8",
     )
 
     assert runner._missing_required_markers(phase) == [
-        "grill-me: complete",
+        "grill-with-docs: complete",
         "shared_understanding: reached",
     ]
 
     (run_dir / "domain-grill.md").write_text(
         "notes\n"
         "## Completion Gate\n"
-        "grill-me: complete\n"
+        "grill-with-docs: complete\n"
         "shared_understanding: reached\n",
         encoding="utf-8",
     )
@@ -873,15 +873,15 @@ def test_required_markers_block_incomplete_artifact(tmp_path: Path):
     assert runner._missing_required_markers(phase) == []
 
     phase = Phase(
-        id="domain-map",
+        id="domain-grill",
         description="",
         required_markers=("context_docs_updated: true|not_needed",),
     )
-    (run_dir / "domain-map.md").write_text("## Completion Gate\ncontext_docs_updated:\n", encoding="utf-8")
+    (run_dir / "domain-grill.md").write_text("## Completion Gate\ncontext_docs_updated:\n", encoding="utf-8")
     assert runner._missing_required_markers(phase) == ["context_docs_updated: true|not_needed"]
-    (run_dir / "domain-map.md").write_text("## Completion Gate\ncontext_docs_updated: maybe\n", encoding="utf-8")
+    (run_dir / "domain-grill.md").write_text("## Completion Gate\ncontext_docs_updated: maybe\n", encoding="utf-8")
     assert runner._missing_required_markers(phase) == ["context_docs_updated: true|not_needed"]
-    (run_dir / "domain-map.md").write_text("## Completion Gate\ncontext_docs_updated: not_needed\n", encoding="utf-8")
+    (run_dir / "domain-grill.md").write_text("## Completion Gate\ncontext_docs_updated: not_needed\n", encoding="utf-8")
     assert runner._missing_required_markers(phase) == []
 
 
@@ -923,14 +923,14 @@ def test_generic_stub_does_not_write_completion_markers(tmp_path: Path, monkeypa
     phase = Phase(
         id="domain-grill",
         description="",
-        required_markers=("grill-me: complete", "shared_understanding: reached"),
+        required_markers=("grill-with-docs: complete", "shared_understanding: reached"),
     )
     monkeypatch.setenv("AGENT_FLOW_GENERIC_MODE", "stub")
 
     assert GenericAdapter().execute(phase, run_dir=run_dir, project_root=project_root)
     artifact = run_dir / "domain-grill.md"
     text = artifact.read_text(encoding="utf-8")
-    assert "grill-me: complete" not in text
+    assert "grill-with-docs: complete" not in text
     assert "shared_understanding: reached" not in text
 
 

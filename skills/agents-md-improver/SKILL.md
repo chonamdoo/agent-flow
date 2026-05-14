@@ -17,7 +17,7 @@ Find relevant instruction files without scanning generated folders:
 rg --files -g 'AGENTS.md' -g '!node_modules' -g '!build' -g '!dist' -g '!coverage' -g '!vendor' -g '!.git'
 ```
 
-Include `/Users/namdoo/.codex/AGENTS.md` only when the task explicitly concerns global Codex behavior.
+Include `~/.codex/AGENTS.md` only when the task explicitly concerns global Codex behavior.
 
 Common locations:
 
@@ -25,7 +25,7 @@ Common locations:
 | --- | --- |
 | `./AGENTS.md` | Primary project context checked into the repo |
 | nested `AGENTS.md` | Package, app, or module-specific rules |
-| `/Users/namdoo/.codex/AGENTS.md` | User-wide Codex defaults |
+| `~/.codex/AGENTS.md` | User-wide Codex defaults |
 | `.Codex/rules/` | Larger imported rules or compressed docs when the project uses that pattern |
 
 ### Phase 2: Assess Quality

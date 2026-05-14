@@ -25,8 +25,8 @@ class WorktreeStatus:
 
 
 def plan_worktree(*, root: Path, name: str, branch: str | None = None) -> WorktreePlan:
-    safe_name = _safe_component(name)
-    selected_branch = branch or f"agent-flow/{safe_name}"
+    safe_name = _feature_worktree_name(name)
+    selected_branch = branch or f"feat/{safe_name.removeprefix('feat-')}"
     _validate_branch(selected_branch)
     return WorktreePlan(
         name=safe_name,
@@ -210,6 +210,12 @@ def _safe_component(value: str) -> str:
     if not safe or safe.startswith(".") or ".." in safe:
         raise ValueError("worktree name must contain at least one safe character")
     return safe
+
+
+def _feature_worktree_name(value: str) -> str:
+    # worktree 디렉터리는 slash를 못 쓰므로 feat/<slug> 브랜치와 feat-<slug> 디렉터리를 짝지어 둔다.
+    safe = _safe_component(value)
+    return safe if safe.startswith("feat-") else f"feat-{safe}"
 
 
 def _validate_branch(value: str) -> None:

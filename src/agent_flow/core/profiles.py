@@ -26,6 +26,9 @@ def detect_profile(root: Path) -> str:
             return "react-native"
         if "next" in package_text:
             return "nextjs"
+        # 일반 TypeScript 프로젝트는 node보다 좁은 profile을 써야 gate와 skill routing이 맞다.
+        if (root / "tsconfig.json").exists():
+            return "typescript"
         return "node"
     if (root / "pyproject.toml").exists():
         return "python"
@@ -36,6 +39,9 @@ def detect_profile(root: Path) -> str:
         or (root / "settings.gradle.kts").exists()
     ):
         return "android"
+    # package.json 없이 tsconfig만 있는 Deno/Bun/라이브러리도 TypeScript로 본다.
+    if (root / "tsconfig.json").exists():
+        return "typescript"
     return "generic"
 
 

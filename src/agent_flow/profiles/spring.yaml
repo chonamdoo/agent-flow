@@ -1,4 +1,14 @@
 id: spring
+branching:
+  strategy: gitflow
+  base: develop
+  integration: develop
+  worktree: required
+  naming:
+    prefix: "feat/"
+    slug_style: kebab-case
+    slug_source: feature title
+    max_slug_length: 60
 gates:
   - id: build
     command: ["./gradlew", "build", "-x", "test"]

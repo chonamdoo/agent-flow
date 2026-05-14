@@ -7,7 +7,7 @@ Use these sections only when they fit the repo. Do not force every section into 
 - Keep root `AGENTS.md` short and repo-specific.
 - Put long details in `.Codex/rules/` when the project already imports rules from there.
 - Prefer commands, paths, gotchas, and verification steps over prose.
-- Avoid duplicating global preferences from `/Users/namdoo/.codex/AGENTS.md`.
+- Avoid duplicating global preferences from `~/.codex/AGENTS.md`.
 
 ## Recommended Sections
 

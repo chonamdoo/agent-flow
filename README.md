@@ -6,8 +6,8 @@ Project-agnostic AI workflow kit. Start with `/agent-flow` in Claude Code, Codex
 
 ## Philosophy
 
-1. **One trigger to remember.** `/agent-flow <task>` in Claude / Codex / Gemini, backed by `agent-flow run "<task>" --worktree "<short-task-slug>"`. Tier inference and phase depth are the AI's job, not the user's.
-2. **Artifacts as state machine.** Each run writes state under `.agent-flow/runs/`; worktree-backed runs write that state inside their isolated `.agent-flow/worktrees/<name>/` checkout. Context loss never loses progress.
+1. **One trigger to remember.** `/agent-flow <task>` in Claude / Codex / Gemini, backed by `agent-flow run "<task>"`. Git projects start inside `.agent-flow/worktrees/feat-<slug>/` on branch `feat/<slug>`; installer setup is not repeated per task.
+2. **Artifacts as state machine.** Each run writes state under `.agent-flow/runs/`; git-backed runs write that state inside their isolated `.agent-flow/worktrees/feat-<slug>/` checkout. Context loss never loses progress.
 3. **Chain is enforcement.** The next phase cannot start until the previous artifact exists. The slash trigger is only the entry point; the artifact chain blocks skipping.
 4. **Stack-agnostic core, profile-specific knobs.** Workflow YAML stays generic. Profiles supply branching strategy, gate commands, review angles, vocabulary.
 5. **Three AI hosts, one contract.** Claude / Codex / Gemini hosts share a single `HostedAdapter` parameterized by name; only the hint string differs. The runner is unaware of which AI is active.
@@ -30,7 +30,7 @@ Graphify is installed automatically. To skip it:
 npx <path-to-this-kit> install --without-graphify
 ```
 
-Graphify installs the PyPI package `graphifyy` only when the `graphify` CLI is not already available, registers one shared skill at `~/.agents/skills/graphify`, removes duplicate host-specific copies, exposes the `graphify` CLI, and runs `graphify .` once to build the initial project graph under `graphify-out/`. If Graphify installation or graph generation fails, the default agent-flow bootstrap stops; use `--without-graphify` only when the project intentionally skips Graphify. The installer ignores only local Graphify bookkeeping files (`graphify-out/manifest.json`, `graphify-out/cost.json`) so teams can choose whether to commit the graph report and JSON.
+Graphify installs the PyPI package `graphifyy` only when the `graphify` CLI is not already available, registers one shared skill at `~/.agents/skills/graphify`, removes duplicate host-specific copies, exposes the `graphify` CLI, and runs `graphify .` once to build the initial project graph under `graphify-out/`. Graphify is auxiliary: if installation or graph generation fails, agent-flow still installs and records the skipped reason. The installer ignores only local Graphify bookkeeping files (`graphify-out/manifest.json`, `graphify-out/cost.json`) so teams can choose whether to commit the graph report and JSON.
 
 After installation, rerun `graphify .` from a terminal, `/graphify .` in Claude/Gemini-style assistants, or `$graphify .` in Codex whenever the graph should be refreshed.
 
@@ -46,12 +46,12 @@ After installation, rerun `graphify .` from a terminal, `/graphify .` in Claude/
 
 ```bash
 # Direct CLI equivalents
-agent-flow run "유저 프로필 페이지 추가" --worktree "user-profile"
-agent-flow continue --worktree "user-profile"
-agent-flow status --worktree "user-profile"
-agent-flow abort --worktree "user-profile"
+agent-flow run "유저 프로필 페이지 추가"
+agent-flow continue --worktree "feat-user-profile"
+agent-flow status --worktree "feat-user-profile"
+agent-flow abort --worktree "feat-user-profile"
 agent-flow worktree list
-agent-flow worktree remove --name "user-profile"
+agent-flow worktree remove --name "feat-user-profile"
 
 # Lore (memory) management
 agent-flow lore init <slug>                  # scaffold a new lore entry
