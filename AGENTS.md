@@ -26,13 +26,24 @@ scripts/hooks/          ← PreToolUse/Stop hooks (guard-worktree, guard-protect
 - `profiles/_schema.yaml`: profile 필드 스키마 (gates, branching, worktree).
 - `skills/code-generation-discipline/SKILL.md`: 코드 생성 기준의 canonical source.
 
-## Phase Chain
+## Workflow Contract
 
-domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → gates → (fix-loop ↔ gates) → multi-review → architecture-review → commit → push-pr → pr-watch → (pr-comment-fix / pr-ci-fix → pr-watch) → merge-approval → merge → handoff
+- 활성 workflow와 current phase는 항상 `agent-flow status` 출력 기준이다.
+- phase 이동은 status의 `next_command`를 그대로 따른다. `agent-flow continue`나 `agent-flow run advance`를 추측하지 않는다.
+- `default.yaml`: design → slice-plan → worktree → implement → final-review ↔ fix-loop → commit → push-pr → pr-watch → merge → cleanup
+- `full-feature.yaml`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → gates ↔ fix-loop → multi-review → architecture-review → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
+
+## Context Economy
+
+- Codex / Claude / Gemini user-facing 답변은 기본적으로 짧은 한글로 한다.
+- 코드/명령/식별자는 영어 그대로 유지한다.
+- 긴 설명, 긴 로그, 전체 파일 붙여넣기 금지.
+- 필요한 경우만 current phase, 수행한 action, `next_command`, blocker를 요약한다.
+- 모든 guide를 항상 로드하지 말고 변경 파일에 필요한 guide만 읽는다.
 
 ## Gotchas
 
-- `gates` fail → `fix-loop` → `gates` 순환. 3회 초과 시 사용자 에스컬레이션.
+- `full-feature`는 `gates` fail → `fix-loop` → `gates` 순환. `default`의 gates는 `implement` completion marker로 강제한다.
 - `multi-review`는 2+ 독립 reviewer 필수. 1개만으로 approve 불가.
 - `architecture-review`의 `blocked` verdict → `refactor`로 라우팅.
 - worktree phase는 `git worktree add -b <branch> <path> main` 필수. leader worktree에서 `git checkout`/`git switch`로 브랜치를 바꾸지 않는다.
@@ -40,13 +51,13 @@ domain-grill → product-brief → prd → slice-plan → plan-review → ddd-de
 <!-- agent-flow:start -->
 ## Agent Flow
 
-Before feature work, run:
+Before feature work, check status first:
 
 ```bash
-agent-flow run "<task>"
+agent-flow status
 ```
 
 install은 프로젝트당 1회만 수행합니다. 새 세션이 시작됐다는 이유로 install을 다시 실행하지 않습니다.
-Follow the CLI output exactly. Git projects start inside `.agent-flow/worktrees/feat-<slug>/`; continue with the printed `next_command`.
+Follow the CLI output exactly. If no run is active, start with `agent-flow run "<task>"`. If a run is active, continue with the printed `next_command`.
 
 <!-- agent-flow:end -->

@@ -10,9 +10,19 @@ branching:
     slug_source: feature title
     max_slug_length: 60
 gates:
+  - id: context-lint
+    command: ["node", "scripts/check-context-docs.mjs"]
+    required: true
+    phase: pre-commit
   - id: build
     command: ["npm", "run", "build"]
-  - id: typecheck
-    command: ["npm", "run", "typecheck"]
+    required: true
+    phase: pre-push
+  - id: test
+    command: ["npm", "test"]
+    required: true
+    phase: pre-commit
   - id: lint
     command: ["npm", "run", "lint"]
+    required: false
+    phase: pre-commit

@@ -58,12 +58,22 @@ def _parse_verdict(content: str) -> ReviewVerdict:
         if normalized in {"## VERDICT", "# VERDICT"}:
             verdict_heading_seen = True
             continue
-        if normalized in {"LGTM", "VERDICT: LGTM", "- VERDICT: LGTM"}:
+        if normalized in {
+            "LGTM",
+            "VERDICT: LGTM",
+            "- VERDICT: LGTM",
+            "APPROVE",
+            "VERDICT: APPROVE",
+            "- VERDICT: APPROVE",
+        }:
             return "LGTM"
         if normalized in {
             "NEEDS_CHANGES",
             "VERDICT: NEEDS_CHANGES",
             "- VERDICT: NEEDS_CHANGES",
+            "REQUEST-CHANGES",
+            "VERDICT: REQUEST-CHANGES",
+            "- VERDICT: REQUEST-CHANGES",
         }:
             return "NEEDS_CHANGES"
         if verdict_heading_seen and normalized:

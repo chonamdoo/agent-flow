@@ -217,7 +217,8 @@ def _multi_reviewer_block(distribution: Distribution | None = None) -> str:
     if not available:
         return ("### Multi-CLI distribution\n"
                 "No external AI CLIs detected. Run all review angles in this "
-                "session via parallel sub-agents (host-native mechanism).\n")
+                "session via parallel sub-agents (host-native mechanism). "
+                "Approval requires 2+ independent reviewer verdicts.\n")
     names = [c.name for c in available]
     lines = [
         "### Multi-CLI distribution",
@@ -236,6 +237,11 @@ def _multi_reviewer_block(distribution: Distribution | None = None) -> str:
         "`final-review.md`. For host-CLI angles, use the host-native "
         "parallel sub-agent mechanism."
     )
+    if distribution is not None and distribution.insufficient_reviewers:
+        lines.append(
+            "Only one external reviewer provider is available. Add host-native "
+            "sub-agents so the artifact contains 2+ independent reviewer verdicts."
+        )
     if distribution is not None:
         residual = residual_host_jobs(distribution)
         lines.append("")

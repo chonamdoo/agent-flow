@@ -116,6 +116,8 @@ phases:
       refactor cycle in order, then move to the next slice. Single artifact
       records the complete loop per slice. Mandatory test-first; production
       code is never written before a failing test exists.
+    required_markers:
+      - "gates: all_passed"
     prompt: |
       For each slice in slice-plan.md, in order, run the TDD cycle:
 
@@ -166,12 +168,21 @@ phases:
         - GREEN: production files added, test results, gate results
         - REFACTOR: notable renames / extractions, post-refactor test run
 
+      Before writing implement.md, run all profile gates. Only when every gate
+      exits 0, append:
+
+          ## Completion Gate
+          gates: all_passed
+
   - id: final-review
     description: |
       Final review. Always includes a generalist reviewer plus an
       architecture-design reviewer (DDD + Clean Architecture + SOLID
       combined). Profiles add stack-specific specialists on top.
     multi_review: true
+    routes:
+      approve: commit
+      request-changes: fix-loop
     prompt: |
       Spawn parallel reviewers (host adapter chooses parallelism — Claude
       Task tool, Codex sessions, Gemini sessions):
@@ -180,6 +191,8 @@ phases:
         - Plus angles declared in profile.review_angles
       Aggregate findings into final-review.md with severity (must-fix /
       should-fix / notes) and source angle. Cite paths as `path/to/file:line`.
+      End with exactly one verdict line: `verdict: approve` or
+      `verdict: request-changes`.
 
   - id: fix-loop
     description: Address review findings (max 3 rounds). Tests stay green.

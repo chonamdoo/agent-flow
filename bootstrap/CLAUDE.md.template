@@ -14,6 +14,20 @@ install은 프로젝트당 1회만 수행합니다. 새 세션이 시작됐다�
 git repo에서는 이 명령이 `.agent-flow/worktrees/feat-<slug>/` worktree를 만들고 그 안에서 run을 시작합니다.
 `/agent-flow`만 입력되면 프로젝트 루트에서 `agent-flow status`로 active run을 확인하세요.
 active run이 있으면 status 출력의 `next_command`를 그대로 실행하고, 없으면 `/agent-flow <task>` 형식으로 작업을 요청하세요.
+활성 workflow와 current phase는 항상 `agent-flow status` 출력 기준입니다. `agent-flow continue`나 `agent-flow run advance`를 추측하지 마세요.
+
+### Workflow Contract
+
+- `default.yaml`: design → slice-plan → worktree → implement → final-review ↔ fix-loop → commit → push-pr → pr-watch → merge → cleanup
+- `full-feature.yaml`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → gates ↔ fix-loop → multi-review → architecture-review → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
+
+### Context Economy
+
+- User-facing 답변은 짧은 한글이 기본입니다.
+- 코드/명령/식별자는 영어 그대로 유지합니다.
+- 긴 설명, 긴 로그, 전체 파일 붙여넣기 금지.
+- 필요한 경우만 current phase, action, `next_command`, blocker를 요약합니다.
+- 모든 guide를 항상 로드하지 말고 변경 파일에 필요한 guide만 읽습니다.
 
 코드 생성·수정 phase에서는 `code-generation-discipline`을 적용합니다. 언어별 guide 선택과 주석 규칙은 `code-generation-discipline`의 Before Starting 체크리스트를 따릅니다.
 Android/Kotlin/Compose/KMP 작업은 Android profile의 `chrisbanes_skills`에 선언된 로컬 설치 skill 파일을 plain text로 먼저 읽습니다. 없거나 읽을 수 없으면 `no content: <skill>`로 기록합니다.
