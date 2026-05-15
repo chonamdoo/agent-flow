@@ -70,12 +70,16 @@ for (const rel of fullFeatureWorkflowCopies) {
   assertFile(rel);
   assertContains(rel, "id: domain-grill");
   assertContains(rel, "context_docs_updated: true|not_needed");
+  assertContains(rel, "Default reviewers are two Codex sub-agents");
   assertNotContains(rel, "id: domain-map");
   assertNotContains(rel, "grill-me");
 }
 
 assertSame("workflows/default.yaml", "src/agent_flow/workflows/default.yaml");
 assertSame("workflows/full-feature.yaml", "src/agent_flow/workflows/full-feature.yaml");
+assertContains("workflows/full-feature.yaml", "multi_review: true");
+assertContains("src/agent_flow/workflows/full-feature.yaml", "multi_review: true");
+assertContains(".agent-flow/prompts/multi-review.md", "Default reviewers are two Codex sub-agents");
 
 // skill source와 설치본이 달라지면 다른 프로젝트로 전파될 때 기준이 갈린다.
 assertSame("skills/grill-with-docs/SKILL.md", ".agent-flow/skills/grill-with-docs/SKILL.md");
@@ -133,10 +137,12 @@ for (const rel of [
   assertContains(rel, "install은 프로젝트당 1회만");
   assertContains(rel, "next_command");
   assertContains(rel, "짧은 한글");
+  assertContains(rel, "Codex sub-agent 2개");
 }
 
 assertContains(".agent-flow/rules/workflow-contract.md", "gates: all_passed");
 assertContains(".agent-flow/rules/workflow-contract.md", "short Korean");
+assertContains(".agent-flow/rules/workflow-contract.md", "two Codex sub-agents");
 
 if (failures.length > 0) {
   console.error(`agent-flow-parity: FAIL (${failures.length})`);

@@ -2,12 +2,10 @@
 
 The final-review phase fans out N review angles. Distribution rules:
 
-  - 0 CLIs detected → "generic" (host AI handles all angles itself).
-  - 1 CLI → all angles to that CLI; host adapter decides whether to do
-    them via in-host parallelism (Claude Task tool, Codex sessions) or
-    sequentially.
-  - 2+ CLIs → round-robin assignment, host CLI last (it already has the
-    user's session attention; let other CLIs run first via subprocess).
+  - Default → host AI must use two Codex sub-agents.
+  - 1 opt-in CLI → all angles to that CLI plus Codex sub-agent fallback so the
+    final artifact still has 2+ independent reviewer verdicts.
+  - 2+ opt-in CLIs → round-robin assignment, host CLI last.
 
 Async execution:
   - Each non-host CLI is invoked via subprocess in parallel (asyncio).
@@ -16,8 +14,8 @@ Async execution:
     the host AI can aggregate whatever completed into `final-review.md`.
 
 Override:
-  AGENT_FLOW_REVIEWERS="claude,codex,gemini" forces the order/list.
-  AGENT_FLOW_REVIEWERS="claude" pins all angles to Claude regardless.
+  AGENT_FLOW_REVIEWERS="claude,codex,gemini" opts into optional providers.
+  AGENT_FLOW_REVIEWERS="claude" pins all angles to Claude plus fallback guard.
 """
 from __future__ import annotations
 
@@ -32,7 +30,6 @@ from pathlib import Path
 from agent_flow.cli_detect import (
     CliInfo,
     cli_by_name,
-    detect_available_clis,
     detect_host_cli,
 )
 from agent_flow.subprocess_pool import SubprocessJob, SubprocessResult, run_parallel
@@ -58,7 +55,7 @@ class Distribution:
 
     def summary(self) -> str:
         if self.fallback_to_generic:
-            return "generic (host handles all angles with 2+ independent reviewer verdicts)"
+            return "Codex sub-agents (host records 2+ independent reviewer verdicts)"
         parts = [f"{cli}:{len(jobs)}" for cli, jobs in self.by_cli.items() if jobs]
         if self.host:
             parts.append(f"(host={self.host})")
@@ -67,14 +64,14 @@ class Distribution:
 
 def resolve_review_clis() -> list[CliInfo]:
     forced = os.environ.get("AGENT_FLOW_REVIEWERS")
-    if forced:
-        out: list[CliInfo] = []
-        for name in (n.strip() for n in forced.split(",")):
-            cli = cli_by_name(name)
-            if cli is not None:
-                out.append(cli)
-        return out
-    return detect_available_clis()
+    if not forced:
+        return []
+    out: list[CliInfo] = []
+    for name in (n.strip() for n in forced.split(",")):
+        cli = cli_by_name(name)
+        if cli is not None:
+            out.append(cli)
+    return out
 
 
 def distribute(jobs: list[ReviewerJob]) -> Distribution:

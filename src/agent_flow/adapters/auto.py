@@ -8,9 +8,8 @@ Detection order:
 The Claude / Codex / Gemini hosts share a single `HostedAdapter` class
 parameterized by name; only the hint string differs.
 
-Note: this picks the *host* adapter only. Multi-reviewer phases distribute
-across all installed CLIs via multi_review.distribute(); see cli_detect.py
-and multi_review.py.
+Note: this picks the *host* adapter only. Multi-reviewer optional providers
+are opt-in via AGENT_FLOW_REVIEWERS; see cli_detect.py and multi_review.py.
 """
 from __future__ import annotations
 

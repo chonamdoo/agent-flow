@@ -1074,12 +1074,18 @@ function parseReviewerVerdicts(content) {
   const reviewers = new Map();
   const linePattern = /^reviewer[-_ ]?([a-z0-9-]*)[^\n]*verdict:\s*(approve|request-changes)\s*$/gim;
   for (const match of content.matchAll(linePattern)) {
-    const reviewerId = (match[1] || `line-${reviewers.size + 1}`).toLowerCase();
+    if (!match[1]) {
+      continue;
+    }
+    const reviewerId = match[1].toLowerCase();
     reviewers.set(reviewerId, match[2].toLowerCase());
   }
-  const sections = content.split(/^##\s+Reviewer\s*([^\n]*)/im);
+  const sections = content.split(/^##[ \t]+Reviewer[ \t]*([^\n]*)/im);
   for (let index = 1; index < sections.length; index += 2) {
-    const reviewerId = (sections[index].trim() || `section-${index}`).toLowerCase();
+    const reviewerId = sections[index].trim().toLowerCase();
+    if (!reviewerId) {
+      continue;
+    }
     const verdict = sections[index + 1]?.match(/verdict:\s*(approve|request-changes)/i)?.[1]?.toLowerCase();
     if (verdict) {
       reviewers.set(reviewerId, verdict);
@@ -1126,13 +1132,14 @@ Follow the CLI output exactly. If no run is active, start with \`${AGENT_FLOW_CO
 ### Workflow Contract
 
 - 활성 workflow와 current phase는 항상 \`${AGENT_FLOW_COMMAND} status\` 출력 기준이다.
-- phase 이동은 status의 \`next_command\`를 그대로 따른다.
+- phase 이동은 status의 \`next_command\`를 그대로 따른다. \`${AGENT_FLOW_COMMAND} continue\`나 \`${AGENT_FLOW_COMMAND} run advance\`를 추측하지 않는다.
 - \`default.yaml\`: design → slice-plan → worktree → implement → final-review ↔ fix-loop → commit → push-pr → pr-watch → merge → cleanup
 - \`full-feature.yaml\`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → gates ↔ fix-loop → multi-review → architecture-review → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
+- \`multi-review\` 기본은 Codex sub-agent 2개. Claude/Gemini는 optional이며, 2+ 독립 reviewer 없이는 approve 불가.
 
 ### Context Economy
 
-- User-facing 답변은 짧은 한글이 기본이다.
+- Codex / Claude / Gemini user-facing 답변은 기본적으로 짧은 한글로 한다.
 - 코드/명령/식별자는 영어 그대로 유지한다.
 - 긴 설명, 긴 로그, 전체 파일 붙여넣기 금지.
 - 필요한 경우만 current phase, action, \`next_command\`, blocker를 요약한다.
@@ -1196,6 +1203,22 @@ ${AGENT_FLOW_COMMAND} run "<task>"
 
 install은 프로젝트당 1회만 수행합니다. 새 세션이 시작됐다는 이유로 install을 다시 실행하지 않습니다.
 Follow the CLI output exactly. Git projects start inside \`.agent-flow/worktrees/feat-<slug>/\` without switching the leader branch; continue with the printed \`next_command\`.
+
+### Workflow Contract
+
+- 활성 workflow와 current phase는 항상 \`${AGENT_FLOW_COMMAND} status\` 출력 기준이다.
+- phase 이동은 status의 \`next_command\`를 그대로 따른다. \`${AGENT_FLOW_COMMAND} continue\`나 \`${AGENT_FLOW_COMMAND} run advance\`를 추측하지 않는다.
+- \`default.yaml\`: design → slice-plan → worktree → implement → final-review ↔ fix-loop → commit → push-pr → pr-watch → merge → cleanup
+- \`full-feature.yaml\`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → gates ↔ fix-loop → multi-review → architecture-review → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
+- \`multi-review\` 기본은 Codex sub-agent 2개. Claude/Gemini는 optional이며, 2+ 독립 reviewer 없이는 approve 불가.
+
+### Context Economy
+
+- Codex / Claude / Gemini user-facing 답변은 기본적으로 짧은 한글로 한다.
+- 코드/명령/식별자는 영어 그대로 유지한다.
+- 긴 설명, 긴 로그, 전체 파일 붙여넣기 금지.
+- 필요한 경우만 current phase, action, \`next_command\`, blocker를 요약한다.
+- 모든 guide를 항상 로드하지 말고 변경 파일에 필요한 guide만 읽는다.
 
 During code generation and modification phases, apply \`code-generation-discipline\`. Language-specific guide and comment rules follow the \`code-generation-discipline\` Before Starting checklist.
 For Android/Kotlin/Compose/KMP work, read the matching locally installed skill file from the Android profile's \`chrisbanes_skills\` as plain text before implementation. If missing or unreadable, record \`no content: <skill>\`.
@@ -1266,7 +1289,7 @@ const PHASES = [
       "Apply code-generation-discipline. Refactor only after green, keep behavior stable, apply selected language-specific guides as secondary checklists, keep required Korean code comments, and summarize changed structure.",
   },
   { id: "gates", artifact: "artifacts/gate-results.json", instruction: "Run build, typecheck, lint, tests, and context lint according to the active profile. Docs-only changes must still run context lint. Save structured JSON with a top-level passed boolean and a results array." },
-  { id: "multi-review", artifact: "artifacts/multi-review.md", instruction: "Run 2+ independent reviewer agents. Each reviewer uses code-reviewer.md as basis and outputs an independent verdict: approve or request-changes. Any request-changes from any reviewer makes the overall verdict request-changes. Default reviewers are Codex sub-agents; Claude/Gemini are optional when available. Provider failure falls back to Codex sub-agents only. Record per-reviewer verdicts and write a single overall verdict line." },
+  { id: "multi-review", artifact: "artifacts/multi-review.md", instruction: "Run 2+ independent reviewer agents. Each reviewer uses code-reviewer.md as basis and outputs an independent verdict: approve or request-changes. Any request-changes from any reviewer makes the overall verdict request-changes. Default reviewers are two Codex sub-agents; Claude/Gemini are optional when available. Provider failure falls back to Codex sub-agents only. Record per-reviewer verdicts and write a single overall verdict line." },
   {
     id: "fix-loop",
     artifact: "artifacts/fix-loop.md",
@@ -1495,6 +1518,7 @@ Implementation rules:
 - Apply \`code-generation-discipline\` during red, green, refactor, and fix-loop phases. Language-specific guide and comment rules follow the \`code-generation-discipline\` Before Starting checklist.
 - If review or QA fails, return to the fix phase before continuing.
 - The gates->fix-loop->gates loop re-verifies after every fix. multi-review approve skips fix-loop; request-changes routes through fix-loop->gates.
+- Code review defaults to two Codex sub-agents. Claude/Gemini are optional providers, and approve requires 2+ independent reviewer verdicts.
 - In the default workflow, gates are enforced by the \`implement\` phase completion marker: \`gates: all_passed\`.
 
 Document size rules:

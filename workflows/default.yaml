@@ -184,8 +184,8 @@ phases:
       approve: commit
       request-changes: fix-loop
     prompt: |
-      Spawn parallel reviewers (host adapter chooses parallelism — Claude
-      Task tool, Codex sessions, Gemini sessions):
+      Spawn two Codex sub-agents in parallel by default. Claude/Gemini
+      providers are optional extras when available:
         - Generalist (templates/_shared/review/architecture.md)
         - Architecture-design specialist (templates/_shared/review/architecture-design.md) — MANDATORY
         - Plus angles declared in profile.review_angles
