@@ -561,8 +561,9 @@ def _independent_reviewer_verdict_count(text: str) -> int:
         stripped = line.strip()
         lowered = stripped.lower()
         if stripped.startswith("#"):
-            key = _reviewer_key(lowered) if "reviewer" in lowered else ""
-            current_reviewer = key if key not in {"", "reviewer"} else None
+            heading = re.match(r"^#{1,6}\s*reviewer\s+(.+)$", lowered)
+            key = _normalized_reviewer_heading_id(heading.group(1) if heading else "")
+            current_reviewer = key or None
             continue
         if "verdict:" not in lowered:
             continue
@@ -573,8 +574,8 @@ def _independent_reviewer_verdict_count(text: str) -> int:
         if prefix in {"overall", "overall verdict", "final", "final verdict"}:
             continue
         if prefix:
-            key = _reviewer_key(prefix)
-            if key not in {"", "reviewer"}:
+            key = _normalized_reviewer_id(prefix)
+            if key:
                 reviewers.add(key)
         elif current_reviewer is not None:
             reviewers.add(current_reviewer)
@@ -584,6 +585,63 @@ def _independent_reviewer_verdict_count(text: str) -> int:
 def _reviewer_key(value: str) -> str:
     normalized = re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
     return normalized or value
+
+
+def _normalized_reviewer_id(value: str) -> str:
+    # 섹션 라벨과 종합 verdict는 독립 reviewer id로 세지 않는다.
+    key = _reviewer_key(value)
+    key = re.sub(r"^reviewer\b", "", key).strip()
+    generic_labels = {
+        "verdict",
+        "verdicts",
+        "overall",
+        "final",
+        "summary",
+        "review",
+        "reviews",
+        "feedback",
+        "report",
+        "reports",
+        "assessment",
+        "assessments",
+        "analysis",
+        "analyses",
+        "decision",
+        "decisions",
+        "conclusion",
+        "conclusions",
+        "status",
+        "statuses",
+        "approval",
+        "approvals",
+        "note",
+        "notes",
+        "finding",
+        "findings",
+        "comment",
+        "comments",
+        "output",
+        "outputs",
+        "result",
+        "results",
+        "scope",
+        "check",
+        "checks",
+        "checklist",
+        "details",
+        "detail",
+    }
+    if not key or any(part in generic_labels for part in key.split()):
+        return ""
+    return key
+
+
+def _normalized_reviewer_heading_id(value: str) -> str:
+    # Reviewer heading은 numbered/lettered reviewer만 독립 id로 인정한다.
+    key = _normalized_reviewer_id(value)
+    if re.fullmatch(r"(?:[0-9]+|[a-z])", key):
+        return key
+    return ""
 
 
 def _missing_markers(text: str, markers: tuple[str, ...]) -> list[str]:

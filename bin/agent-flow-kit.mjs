@@ -1074,15 +1074,15 @@ function parseReviewerVerdicts(content) {
   const reviewers = new Map();
   const linePattern = /^reviewer[-_ ]?([a-z0-9-]*)[^\n]*verdict:\s*(approve|request-changes)\s*$/gim;
   for (const match of content.matchAll(linePattern)) {
-    if (!match[1]) {
+    const reviewerId = normalizeReviewerId(match[1]);
+    if (!reviewerId) {
       continue;
     }
-    const reviewerId = match[1].toLowerCase();
     reviewers.set(reviewerId, match[2].toLowerCase());
   }
   const sections = content.split(/^##[ \t]+Reviewer[ \t]*([^\n]*)/im);
   for (let index = 1; index < sections.length; index += 2) {
-    const reviewerId = sections[index].trim().toLowerCase();
+    const reviewerId = normalizeReviewerHeadingId(sections[index]);
     if (!reviewerId) {
       continue;
     }
@@ -1092,6 +1092,65 @@ function parseReviewerVerdicts(content) {
     }
   }
   return reviewers;
+}
+
+function normalizeReviewerId(value) {
+  // 섹션 라벨과 종합 verdict는 독립 reviewer id로 세지 않는다.
+  const genericLabels = new Set([
+    "verdict",
+    "verdicts",
+    "overall",
+    "final",
+    "summary",
+    "review",
+    "reviews",
+    "feedback",
+    "report",
+    "reports",
+    "assessment",
+    "assessments",
+    "analysis",
+    "analyses",
+    "decision",
+    "decisions",
+    "conclusion",
+    "conclusions",
+    "status",
+    "statuses",
+    "approval",
+    "approvals",
+    "note",
+    "notes",
+    "finding",
+    "findings",
+    "comment",
+    "comments",
+    "output",
+    "outputs",
+    "result",
+    "results",
+    "scope",
+    "check",
+    "checks",
+    "checklist",
+    "details",
+    "detail",
+  ]);
+  const key = String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/^reviewer\b/, "")
+    .trim();
+  if (!key || key.split(/\s+/).some((part) => genericLabels.has(part))) {
+    return "";
+  }
+  return key;
+}
+
+function normalizeReviewerHeadingId(value) {
+  // Reviewer heading은 numbered/lettered reviewer만 독립 id로 인정한다.
+  const key = normalizeReviewerId(value);
+  return /^(?:[0-9]+|[a-z])$/.test(key) ? key : "";
 }
 
 function readGatesPassed(pathName) {

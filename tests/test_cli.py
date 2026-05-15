@@ -260,6 +260,30 @@ class CliTest(unittest.TestCase):
             self.assertEqual(runner._next_index(0, phase), (0, True))
 
             (run_dir / "multi-review.md").write_text(
+                "## Reviewer Verdicts\nverdict: approve\n\n"
+                "reviewer-1 verdict: approve\n\n"
+                "Overall verdict: approve\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(runner._next_index(0, phase), (0, True))
+
+            (run_dir / "multi-review.md").write_text(
+                "## Reviewer Notes\nverdict: approve\n\n"
+                "reviewer-1 verdict: approve\n\n"
+                "Overall verdict: approve\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(runner._next_index(0, phase), (0, True))
+
+            (run_dir / "multi-review.md").write_text(
+                "## Reviewer Feedback\nverdict: approve\n\n"
+                "reviewer-1 verdict: approve\n\n"
+                "Overall verdict: approve\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(runner._next_index(0, phase), (0, True))
+
+            (run_dir / "multi-review.md").write_text(
                 "## Reviewer 1\nverdict: approve\n\n## Reviewer 2\nverdict: approve\n\nverdict: approve\n",
                 encoding="utf-8",
             )
@@ -292,6 +316,22 @@ class CliTest(unittest.TestCase):
 
             (run_dir / "final-review.md").write_text(
                 "reviewer verdict: approve\n## Reviewer\nverdict: approve\nverdict: approve\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(runner._next_index(0, phase), (0, True))
+
+            (run_dir / "final-review.md").write_text(
+                "## Reviewer Verdicts\nverdict: approve\n\n"
+                "reviewer-1 verdict: approve\n\n"
+                "Overall verdict: approve\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(runner._next_index(0, phase), (0, True))
+
+            (run_dir / "final-review.md").write_text(
+                "## Reviewer Notes\nverdict: approve\n\n"
+                "reviewer-1 verdict: approve\n\n"
+                "Overall verdict: approve\n",
                 encoding="utf-8",
             )
             self.assertEqual(runner._next_index(0, phase), (0, True))
@@ -2004,6 +2044,38 @@ class CliTest(unittest.TestCase):
 
             mr_artifact.write_text(
                 "reviewer-1 verdict: approve\n## Reviewer\nverdict: approve\nverdict: approve\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("at least 2 independent reviewer verdicts", result.stderr)
+
+            mr_artifact.write_text(
+                "## Reviewer Notes\nverdict: approve\n\n"
+                "reviewer-1 verdict: approve\n\n"
+                "verdict: approve\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("at least 2 independent reviewer verdicts", result.stderr)
+
+            mr_artifact.write_text(
+                "## Reviewer Feedback\nverdict: approve\n\n"
+                "reviewer-1 verdict: approve\n\n"
+                "verdict: approve\n",
                 encoding="utf-8",
             )
             result = subprocess.run(
