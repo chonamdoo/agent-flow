@@ -147,6 +147,7 @@ phases:
 
   - id: multi-review
     description: Run implementation review with 2+ independent reviewers. Runner routes approve→architecture-review, request-changes→fix-loop.
+    multi_review: true
     routes:
       approve: architecture-review
       request-changes: fix-loop
@@ -154,7 +155,7 @@ phases:
       Run 2+ independent reviewer agents. Each reviewer uses code-reviewer.md
       as basis and outputs an independent verdict: approve or request-changes.
       Any request-changes from any reviewer makes the overall verdict
-      request-changes. Default reviewers are Codex sub-agents; Claude/Gemini
+      request-changes. Default reviewers are two Codex sub-agents; Claude/Gemini
       are optional when available. Provider failure falls back to Codex
       sub-agents only. Record per-reviewer verdicts and write a single overall
       verdict line: `verdict: approve` or `verdict: request-changes`.

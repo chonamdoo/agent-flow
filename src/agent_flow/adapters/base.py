@@ -7,7 +7,7 @@ specific hints live in the host-name parameterization.
 Return semantics:
   - True  → this call wrote the artifact; runner advances to the next phase.
   - False → this call emitted a prompt; the host AI must do the work, write
-            the artifact file, and call `agent-flow continue` to resume.
+            the artifact file, then follow `agent-flow status` / `next_command`.
 The artifact path is always `<run_dir>/<phase.id>.md`.
 
 Profile injection:
@@ -85,8 +85,8 @@ class Adapter(ABC):
             f"{lore_block}"
             f"{host_block}"
             f"\n## When complete\n"
-            f"After writing the artifact, run `agent-flow continue` (from "
-            f"`{project_root}`) to advance to the next phase."
+            f"After writing the artifact, run `agent-flow status` from "
+            f"`{project_root}` and follow the printed `next_command`."
         )
 
     def _render_architecture_block(self, phase: "Phase") -> str:

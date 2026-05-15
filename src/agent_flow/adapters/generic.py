@@ -8,7 +8,7 @@ Two modes selectable via env var:
 
   AGENT_FLOW_GENERIC_MODE=emit
     Prints the prompt to stdout and returns False, expecting a human (or
-    untracked AI) to write the artifact and re-run `agent-flow continue`.
+    untracked AI) to write the artifact and follow status `next_command`.
 """
 from __future__ import annotations
 
@@ -26,7 +26,8 @@ class GenericAdapter(Adapter):
             phase, run_dir, project_root,
             host_hint="No AI host detected. Paste the phase prompt into your "
                       "AI of choice; have it write the artifact at the path "
-                      "above; then run `agent-flow continue`.",
+                      "above; then run `agent-flow status` and follow "
+                      "`next_command`.",
         )
         print(prompt)
         if os.environ.get("AGENT_FLOW_GENERIC_MODE", "stub") == "stub":

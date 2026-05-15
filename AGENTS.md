@@ -44,7 +44,7 @@ scripts/hooks/          ← PreToolUse/Stop hooks (guard-worktree, guard-protect
 ## Gotchas
 
 - `full-feature`는 `gates` fail → `fix-loop` → `gates` 순환. `default`의 gates는 `implement` completion marker로 강제한다.
-- `multi-review`는 2+ 독립 reviewer 필수. 1개만으로 approve 불가.
+- `multi-review` 기본은 Codex sub-agent 2개. Claude/Gemini는 optional이며, 2+ 독립 reviewer 없이는 approve 불가.
 - `architecture-review`의 `blocked` verdict → `refactor`로 라우팅.
 - worktree phase는 `git worktree add -b <branch> <path> main` 필수. leader worktree에서 `git checkout`/`git switch`로 브랜치를 바꾸지 않는다.
 

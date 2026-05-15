@@ -53,10 +53,10 @@ _CLAUDE_HINT = """\
 """
 
 _CODEX_HINT = """\
-- For multi-reviewer phases, agent-flow has already distributed angles
-  across installed CLIs. Use Bash to invoke each non-host CLI in parallel
-  (background `&` + wait, or per-angle subprocess). Aggregate stdout into
-  the artifact.
+- For multi-reviewer phases, spawn two Codex sub-agents in parallel by
+  default. Use Claude/Gemini only as optional extra providers when available.
+- If agent-flow already distributed angles across installed CLIs, invoke each
+  non-host CLI in parallel and aggregate stdout into the artifact.
 - Per-angle artifacts are written by agent-flow as `final-review-<angle>.md`
   when subprocess delegation succeeds; aggregate them into the final
   `final-review.md` summary.
@@ -216,13 +216,14 @@ def _multi_reviewer_block(distribution: Distribution | None = None) -> str:
     available = resolve_review_clis()
     if not available:
         return ("### Multi-CLI distribution\n"
-                "No external AI CLIs detected. Run all review angles in this "
-                "session via parallel sub-agents (host-native mechanism). "
+                "No optional reviewer providers configured. Spawn two Codex "
+                "sub-agents in parallel by default, then aggregate their "
+                "independent verdicts. "
                 "Approval requires 2+ independent reviewer verdicts.\n")
     names = [c.name for c in available]
     lines = [
         "### Multi-CLI distribution",
-        f"Detected installed CLIs: {', '.join(names)}.",
+        f"Configured optional reviewer providers: {', '.join(names)}.",
         "",
         "When fanning out review angles, distribute round-robin across "
         "the installed CLIs (host last). For non-host CLIs, invoke via "
@@ -239,7 +240,7 @@ def _multi_reviewer_block(distribution: Distribution | None = None) -> str:
     )
     if distribution is not None and distribution.insufficient_reviewers:
         lines.append(
-            "Only one external reviewer provider is available. Add host-native "
+            "Only one external reviewer provider is available. Add Codex "
             "sub-agents so the artifact contains 2+ independent reviewer verdicts."
         )
     if distribution is not None:
