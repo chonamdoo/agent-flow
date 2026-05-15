@@ -11,6 +11,7 @@ const AGENT_FLOW_COMMAND = "agent-flow";
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
 const KIT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const installArgs = process.argv.slice(3);
+const forceManaged = installArgs.includes("--force-managed");
 
 function installProject() {
   const root = resolveInstallRoot(process.cwd());
@@ -36,8 +37,8 @@ function installProject() {
   const agentFlowSkill = agentFlowSkillMarkdown();
   writeManagedFile(path.join(agentFlowDir, "skills", "agent-flow", "SKILL.md"), agentFlowSkill);
   if (HOME) {
-    writeManagedFileIfMissingOrSame(path.join(HOME, ".codex", "skills", "agent-flow", "SKILL.md"), agentFlowSkill);
-    writeManagedFileIfMissingOrSame(path.join(HOME, ".claude", "skills", "agent-flow", "SKILL.md"), agentFlowSkill);
+    writeManagedFileIfMissingOrSame(path.join(HOME, ".codex", "skills", "agent-flow", "SKILL.md"), agentFlowSkill, forceManaged);
+    writeManagedFileIfMissingOrSame(path.join(HOME, ".claude", "skills", "agent-flow", "SKILL.md"), agentFlowSkill, forceManaged);
   }
   writeManagedFile(
     path.join(agentFlowDir, "skills", "full-feature-workflow", "SKILL.md"),
@@ -55,14 +56,15 @@ function installProject() {
     architectureReviewerSkillMarkdown(),
   );
   writeManagedFile(path.join(agentFlowDir, "skills", "push-watch", "SKILL.md"), pushWatchSkillMarkdown());
-  copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "skills"), path.join(agentFlowDir, "skills"));
-  copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "scripts"), path.join(root, "scripts"));
-  copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "agents"), path.join(root, ".Codex", "agents"));
-  copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "rules", "context"), path.join(root, ".Codex", "rules", "context"));
-  copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "context"), path.join(root, ".Codex", "context"));
+  copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "skills"), path.join(agentFlowDir, "skills"), forceManaged);
+  copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "scripts"), path.join(root, "scripts"), forceManaged);
+  copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "agents"), path.join(root, ".Codex", "agents"), forceManaged);
+  copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "rules", "context"), path.join(root, ".Codex", "rules", "context"), forceManaged);
+  copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "context"), path.join(root, ".Codex", "context"), forceManaged);
   writeManagedFileIfMissingOrSame(
     path.join(root, ".Codex", "rules", "codebase-rubric.md"),
     fs.readFileSync(path.join(KIT_ROOT, ".Codex", "rules", "codebase-rubric.md"), "utf8"),
+    forceManaged,
   );
   writeManagedFile(path.join(agentFlowDir, "prompts", "push-watch.md"), pushWatchPromptMarkdown());
   writeManagedFile(path.join(agentFlowDir, "prompts", "push-watch-tick.md"), pushWatchTickPromptMarkdown());
@@ -558,10 +560,14 @@ function writeManagedFile(pathName, content) {
   fs.writeFileSync(pathName, content, "utf8");
 }
 
-function writeManagedFileIfMissingOrSame(pathName, content) {
+function writeManagedFileIfMissingOrSame(pathName, content, force = false) {
   fs.mkdirSync(path.dirname(pathName), { recursive: true });
   if (fs.existsSync(pathName)) {
     const current = fs.readFileSync(pathName, "utf8");
+    if (force) {
+      fs.writeFileSync(pathName, content, "utf8");
+      return true;
+    }
     if (current !== content) {
       return false;
     }
@@ -571,7 +577,7 @@ function writeManagedFileIfMissingOrSame(pathName, content) {
   return true;
 }
 
-function copyBundledDirIfMissingOrSame(src, dest) {
+function copyBundledDirIfMissingOrSame(src, dest, force = false) {
   if (!fs.existsSync(src)) {
     return;
   }
@@ -580,14 +586,14 @@ function copyBundledDirIfMissingOrSame(src, dest) {
     const srcPath = path.join(src, entry.name);
     const destPath = path.join(dest, entry.name);
     if (entry.isDirectory()) {
-      copyBundledDirIfMissingOrSame(srcPath, destPath);
+      copyBundledDirIfMissingOrSame(srcPath, destPath, force);
       continue;
     }
     if (!entry.isFile()) {
       continue;
     }
     const content = fs.readFileSync(srcPath, "utf8");
-    writeManagedFileIfMissingOrSame(destPath, content);
+    writeManagedFileIfMissingOrSame(destPath, content, force);
   }
 }
 
@@ -1177,6 +1183,7 @@ install은 프로젝트당 1회만 수행합니다. 새 세션이 시작됐다�
 Follow the CLI output exactly. Git projects start inside \`.agent-flow/worktrees/feat-<slug>/\` without switching the leader branch; continue with the printed \`next_command\`.
 
 During code generation and modification phases, apply \`code-generation-discipline\`. Language-specific guide and comment rules follow the \`code-generation-discipline\` Before Starting checklist.
+For Android/Kotlin/Compose/KMP work, read the matching locally installed skill file from the Android profile's \`chrisbanes_skills\` as plain text before implementation. If missing or unreadable, record \`no content: <skill>\`.
 `;
 }
 
@@ -1507,7 +1514,7 @@ try {
     process.exit(0);
   }
 
-  console.error("usage: agent-flow-kit install [--without-graphify] | run <install|start|status|next|advance|push-watch|push-watch-tick>");
+  console.error("usage: agent-flow-kit install [--without-graphify] [--force-managed] | run <install|start|status|next|advance|push-watch|push-watch-tick>");
   process.exit(1);
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));
