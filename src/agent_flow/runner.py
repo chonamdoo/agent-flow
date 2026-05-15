@@ -560,6 +560,9 @@ def _independent_reviewer_verdict_count(text: str) -> int:
     for line in text.splitlines():
         stripped = line.strip()
         lowered = stripped.lower()
+        if not stripped:
+            current_reviewer = None
+            continue
         if stripped.startswith("#"):
             heading = re.match(r"^#{1,6}\s*reviewer\s+(.+)$", lowered)
             key = _normalized_reviewer_heading_id(heading.group(1) if heading else "")
@@ -568,7 +571,7 @@ def _independent_reviewer_verdict_count(text: str) -> int:
         if "verdict:" not in lowered:
             continue
         verdict = lowered.split("verdict:", 1)[1].strip()
-        if verdict not in {"approve", "request-changes", "lgtm", "needs_changes"}:
+        if verdict not in {"approve", "request-changes"}:
             continue
         prefix = lowered.split("verdict:", 1)[0].strip(" -")
         if prefix in {"overall", "overall verdict", "final", "final verdict"}:

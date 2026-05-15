@@ -284,6 +284,22 @@ class CliTest(unittest.TestCase):
             self.assertEqual(runner._next_index(0, phase), (0, True))
 
             (run_dir / "multi-review.md").write_text(
+                "## Reviewer 1\nverdict: lgtm\n\n"
+                "## Reviewer 2\nverdict: lgtm\n\n"
+                "Overall verdict: approve\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(runner._next_index(0, phase), (0, True))
+
+            (run_dir / "multi-review.md").write_text(
+                "## Reviewer 1\nverdict: approve\n\n"
+                "## Reviewer 2\nverdict: lgtm\n\n"
+                "verdict: approve\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(runner._next_index(0, phase), (0, True))
+
+            (run_dir / "multi-review.md").write_text(
                 "## Reviewer 1\nverdict: approve\n\n## Reviewer 2\nverdict: approve\n\nverdict: approve\n",
                 encoding="utf-8",
             )
@@ -1003,6 +1019,7 @@ class CliTest(unittest.TestCase):
 
             self.assertIn("id: full-feature", workflow.read_text(encoding="utf-8"))
             self.assertIn("Default reviewers are two Codex sub-agents", workflow.read_text(encoding="utf-8"))
+            self.assertIn("multi_review: true", workflow.read_text(encoding="utf-8"))
             self.assertIn("status: ci-failed", prompt.read_text(encoding="utf-8"))
             self.assertIn(
                 "Default reviewers are two Codex sub-agents",
@@ -2075,6 +2092,22 @@ class CliTest(unittest.TestCase):
             mr_artifact.write_text(
                 "## Reviewer Feedback\nverdict: approve\n\n"
                 "reviewer-1 verdict: approve\n\n"
+                "verdict: approve\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("at least 2 independent reviewer verdicts", result.stderr)
+
+            mr_artifact.write_text(
+                "## Reviewer 1\nverdict: approve\n\n"
+                "## Reviewer 2\nverdict: lgtm\n\n"
                 "verdict: approve\n",
                 encoding="utf-8",
             )

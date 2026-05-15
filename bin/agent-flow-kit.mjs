@@ -1086,7 +1086,8 @@ function parseReviewerVerdicts(content) {
     if (!reviewerId) {
       continue;
     }
-    const verdict = sections[index + 1]?.match(/verdict:\s*(approve|request-changes)/i)?.[1]?.toLowerCase();
+    const reviewerBlock = sections[index + 1]?.split(/\n\s*\n/, 1)[0] ?? "";
+    const verdict = reviewerBlock.match(/^\s*verdict:\s*(approve|request-changes)\s*$/im)?.[1]?.toLowerCase();
     if (verdict) {
       reviewers.set(reviewerId, verdict);
     }
@@ -1348,7 +1349,7 @@ const PHASES = [
       "Apply code-generation-discipline. Refactor only after green, keep behavior stable, apply selected language-specific guides as secondary checklists, keep required Korean code comments, and summarize changed structure.",
   },
   { id: "gates", artifact: "artifacts/gate-results.json", instruction: "Run build, typecheck, lint, tests, and context lint according to the active profile. Docs-only changes must still run context lint. Save structured JSON with a top-level passed boolean and a results array." },
-  { id: "multi-review", artifact: "artifacts/multi-review.md", instruction: "Run 2+ independent reviewer agents. Each reviewer uses code-reviewer.md as basis and outputs an independent verdict: approve or request-changes. Any request-changes from any reviewer makes the overall verdict request-changes. Default reviewers are two Codex sub-agents; Claude/Gemini are optional when available. Provider failure falls back to Codex sub-agents only. Record per-reviewer verdicts and write a single overall verdict line." },
+  { id: "multi-review", artifact: "artifacts/multi-review.md", multi_review: true, instruction: "Run 2+ independent reviewer agents. Each reviewer uses code-reviewer.md as basis and outputs an independent verdict: approve or request-changes. Any request-changes from any reviewer makes the overall verdict request-changes. Default reviewers are two Codex sub-agents; Claude/Gemini are optional when available. Provider failure falls back to Codex sub-agents only. Record per-reviewer verdicts and write a single overall verdict line." },
   {
     id: "fix-loop",
     artifact: "artifacts/fix-loop.md",
@@ -1396,7 +1397,8 @@ function fullFeatureWorkflowYaml() {
         .map((marker) => `      - ${JSON.stringify(marker)}`)
         .join("\n");
       const markerBlock = markers ? `\n    required_markers:\n${markers}` : "";
-      return `  - id: ${phase.id}\n    artifact: ${phase.artifact}${markerBlock}\n    instruction: ${JSON.stringify(phase.instruction)}`;
+      const multiReviewBlock = phase.multi_review ? "\n    multi_review: true" : "";
+      return `  - id: ${phase.id}\n    artifact: ${phase.artifact}${multiReviewBlock}${markerBlock}\n    instruction: ${JSON.stringify(phase.instruction)}`;
     },
   ).join("\n");
   return `id: full-feature\nmode: cli-enforced\nstages:\n${stages}\n`;
@@ -1421,7 +1423,7 @@ ${AGENT_FLOW_COMMAND} run "<task>"
 \`\`\`
 
 Do not reinstall agent-flow for each task. Install is project setup, not the normal task entry.
-In a git repo, \`${AGENT_FLOW_COMMAND} run "<task>"\` starts the run inside \`.agent-flow/worktrees/feat-<slug>/\` on branch \`feat/<slug>\` without switching the leader branch.
+In a git repo, \`${AGENT_FLOW_COMMAND} run "<task>"\` starts the run inside \`.agent-flow/worktrees/feat-<slug>/\` on branch \`feat/<slug>\`.
 
 When the user types \`/agent-flow\` with no task:
 
@@ -1445,7 +1447,9 @@ ${AGENT_FLOW_COMMAND} status
 - On a new session, always check \`${AGENT_FLOW_COMMAND} status\` first and continue from that result.
 - After a phase writes its artifact, run the \`next_command\` printed by status or the current phase output.
 - If the workflow pauses for design or slice review, summarize the relevant artifact and wait for user approval before continuing.
-- Apply code-generation-discipline for code generation and modification phases. Language-specific guide and comment rules follow the code-generation-discipline Before Starting checklist.
+- During code generation and modification phases, apply \`code-generation-discipline\`. Language-specific guide and comment rules follow the \`code-generation-discipline\` Before Starting checklist.
+- Keep user-facing replies short Korean by default. Keep code, commands, paths, and identifiers in English.
+- Do not paste long logs or whole files. Summarize only current phase, action, \`next_command\`, and blocker when useful.
 `;
 }
 

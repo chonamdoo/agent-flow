@@ -71,14 +71,13 @@ for (const rel of fullFeatureWorkflowCopies) {
   assertContains(rel, "id: domain-grill");
   assertContains(rel, "context_docs_updated: true|not_needed");
   assertContains(rel, "Default reviewers are two Codex sub-agents");
+  assertContains(rel, "multi_review: true");
   assertNotContains(rel, "id: domain-map");
   assertNotContains(rel, "grill-me");
 }
 
 assertSame("workflows/default.yaml", "src/agent_flow/workflows/default.yaml");
 assertSame("workflows/full-feature.yaml", "src/agent_flow/workflows/full-feature.yaml");
-assertContains("workflows/full-feature.yaml", "multi_review: true");
-assertContains("src/agent_flow/workflows/full-feature.yaml", "multi_review: true");
 assertContains(".agent-flow/prompts/multi-review.md", "Default reviewers are two Codex sub-agents");
 
 // skill source와 설치본이 달라지면 다른 프로젝트로 전파될 때 기준이 갈린다.
