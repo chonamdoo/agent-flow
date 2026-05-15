@@ -17,7 +17,7 @@
 - 새로 추가하거나 수정한 코드 주석이 모두 한국어인가.
 - Python 변경은 `python-development-guide`, TypeScript/TSX 변경은 `typescript-development-guide`를 보조 체크리스트로 확인했는가.
 - React Web/Next.js/TSX 컴포넌트 변경은 `react-development-guide`, React Native/Expo/RN 앱 변경은 `react-native-development-guide`를 보조 체크리스트로 확인했는가.
-- Android/Kotlin/Compose/KMP 변경은 관련 chrisbanes skill을 우선 체크리스트로 확인했는가.
+- Android/Kotlin/Compose/KMP 변경은 `android-code-review`와 Android profile의 `chrisbanes_skills.review[*].skill` 로컬 설치본을 우선 체크리스트로 확인했는가. 로컬 내용이 없으면 `no content: <skill>`로 기록했는가.
 - agent-flow phase artifact와 completion marker가 요구사항을 만족하는가.
 - PR target branch가 프로필의 `pr.target_branch`와 일치하는가. release-first 프로필이면 활성 `release/*` 브랜치인지 확인한다.
 

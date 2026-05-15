@@ -11,6 +11,28 @@ description: |
 Review only changed behavior unless the user asks for a broader audit. Read the
 diff and relevant existing patterns directly before deciding.
 
+## chrisbanes Skills
+
+For Android/Kotlin/Compose/KMP diffs, read the matching locally installed
+chrisbanes skill file as plain text before approving. Use these skill names as
+checklist labels:
+
+- Compose state/effects: `compose-state-authoring`, `compose-state-hoisting`,
+  `compose-state-holder-ui-split`, `compose-side-effects`
+- Compose performance: `compose-recomposition-performance`,
+  `compose-stability-diagnostics`, `compose-state-deferred-reads`
+- Compose UI API/layout: `compose-modifier-and-layout-style`,
+  `compose-slot-api-pattern`, `compose-animations`, `compose-focus-navigation`
+- Compose tests: `compose-ui-testing-patterns`
+- Kotlin: `kotlin-coroutines-structured-concurrency`,
+  `kotlin-flow-state-event-modeling`, `kotlin-types-value-class`
+- KMP: `kotlin-multiplatform-expect-actual`
+
+Do not parse upstream frontmatter through the native skill loader. If a local
+skill file is missing, unreadable, or raises `mapping values are not allowed in
+this context`, record `no content: <skill>` under Verification Gaps and continue
+with the bundled references below.
+
 ## Review Order
 
 1. Scope: changed files, affected modules, generated files, Gradle changes.
@@ -58,4 +80,3 @@ Approve only when:
 - `../android-guides/references/kotlin-concurrency-guide.md`
 - `../android-guides/references/data-layer-guide.md`
 - `../android-guides/references/testing-guide.md`
-

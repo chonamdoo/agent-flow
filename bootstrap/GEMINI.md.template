@@ -16,6 +16,7 @@ git repo에서는 이 명령이 `.agent-flow/worktrees/feat-<slug>/` worktree를
 active run이 있으면 status 출력의 `next_command`를 그대로 실행하고, 없으면 `/agent-flow <task>` 형식으로 작업을 요청하세요.
 
 코드 생성·수정 phase에서는 `code-generation-discipline`을 적용합니다. 언어별 guide 선택과 주석 규칙은 `code-generation-discipline`의 Before Starting 체크리스트를 따릅니다.
+Android/Kotlin/Compose/KMP 작업은 Android profile의 `chrisbanes_skills`에 선언된 로컬 설치 skill 파일을 plain text로 먼저 읽습니다. 없거나 읽을 수 없으면 `no content: <skill>`로 기록합니다.
 
 진행 중인 run은 자동 감지됩니다:
 
