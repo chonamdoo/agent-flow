@@ -40,6 +40,27 @@ optional:
     - id: "stable angle id"
       prompt: "path (relative to kit root) to the prompt template"
 
+  chrisbanes_skills:
+    # Optional host-readable Android/Kotlin/Compose/KMP skill routing.
+    # Use exact skill names from https://github.com/chrisbanes/skills/tree/main.
+    source: "https://github.com/chrisbanes/skills/tree/main"
+    local_only: true
+    search_paths:
+      - "~/.codex/skills/{skill}/SKILL.md"
+      - "~/.claude/skills/{skill}/SKILL.md"
+      - "~/.agents/skills/{skill}/SKILL.md"
+      - ".agent-flow/skills/{skill}/SKILL.md"
+    load_policy:
+      - "read matching local skill files as plain text"
+      - "do not parse upstream frontmatter through the native skill loader"
+      - "if missing or unreadable, record no content for that skill"
+    implementation:
+      - skill: "exact skill name"
+        when: "trigger condition"
+    review:
+      - skill: "exact skill name"
+        when: "review trigger condition"
+
   artifacts:
     prd: "required | optional | skip"
     adr: "required | optional | skip"

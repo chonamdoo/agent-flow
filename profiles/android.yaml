@@ -29,10 +29,98 @@ gates:
 review_angles:
   - id: architecture-design
     prompt: templates/_shared/review/architecture-design.md
+  - id: android-chrisbanes
+    prompt: templates/_shared/review/android-chrisbanes.md
   - id: compose-stability
     prompt: templates/_shared/review/compose-stability.md
   - id: test-edge
     prompt: templates/_shared/review/test-edge.md
+chrisbanes_skills:
+  source: https://github.com/chrisbanes/skills/tree/main
+  local_only: true
+  search_paths:
+    - ~/.codex/skills/{skill}/SKILL.md
+    - ~/.claude/skills/{skill}/SKILL.md
+    - ~/.agents/skills/{skill}/SKILL.md
+    - .agent-flow/skills/{skill}/SKILL.md
+  load_policy:
+    - 변경 영역과 맞는 로컬 설치 skill 파일을 plain text로 읽는다.
+    - upstream frontmatter는 native skill loader로 파싱하지 않는다.
+    - 파일이 없거나 읽을 수 없거나 YAML parse 오류가 나면 `no content: <skill>`로 기록하고 계속 진행한다.
+  implementation:
+    - skill: android-mvi-feature
+      when: Compose screen, ViewModel state, or MVI action work
+    - skill: android-module-creator
+      when: Android module or Gradle boundary work
+    - skill: android-debugging
+      when: crash, race, recomposition, or failing test diagnosis
+    - skill: compose-state-authoring
+      when: local Compose state, remember, or state accessors change
+    - skill: compose-state-hoisting
+      when: deciding local state vs hoisted state vs state holder
+    - skill: compose-state-holder-ui-split
+      when: screen state holder and plain UI split changes
+    - skill: compose-side-effects
+      when: LaunchedEffect, DisposableEffect, event Flow, navigation, snackbar, or analytics changes
+    - skill: compose-recomposition-performance
+      when: recomposition, jank, stability, or deferred read work
+    - skill: compose-stability-diagnostics
+      when: Compose stability, strong skipping, or compiler reports are relevant
+    - skill: compose-state-deferred-reads
+      when: scroll, animation, gesture, or frame-rate state is read
+    - skill: compose-modifier-and-layout-style
+      when: modifier APIs, layout APIs, or caller-placeable components change
+    - skill: compose-slot-api-pattern
+      when: reusable Compose component slots change
+    - skill: compose-animations
+      when: Compose animation APIs or transitions change
+    - skill: compose-focus-navigation
+      when: keyboard, TV, D-pad, or accessibility focus changes
+    - skill: compose-ui-testing-patterns
+      when: Compose UI tests, semantics, focus tests, or screenshot tests change
+    - skill: kotlin-coroutines-structured-concurrency
+      when: CoroutineScope, launch, cancellation, blocking, or suspend boundaries change
+    - skill: kotlin-flow-state-event-modeling
+      when: StateFlow, SharedFlow, Channel, stateIn, or one-shot events change
+    - skill: kotlin-multiplatform-expect-actual
+      when: KMP expect/actual or platform boundary changes
+    - skill: kotlin-types-value-class
+      when: single-field domain types or Compose-stable value types change
+  review:
+    - skill: android-code-review
+      when: any Android/Kotlin/Compose/KMP diff
+    - skill: compose-state-authoring
+      when: Compose state changed
+    - skill: compose-state-hoisting
+      when: state ownership changed
+    - skill: compose-state-holder-ui-split
+      when: screen state holder or UI split changed
+    - skill: compose-side-effects
+      when: Compose effects or event collection changed
+    - skill: compose-recomposition-performance
+      when: recomposition, jank, or stability risk exists
+    - skill: compose-stability-diagnostics
+      when: stable/unstable parameters or skipping behavior changed
+    - skill: compose-state-deferred-reads
+      when: frame-rate state reads changed
+    - skill: compose-modifier-and-layout-style
+      when: modifiers or layout APIs changed
+    - skill: compose-slot-api-pattern
+      when: slot APIs changed
+    - skill: compose-animations
+      when: animations changed
+    - skill: compose-focus-navigation
+      when: focus behavior changed
+    - skill: compose-ui-testing-patterns
+      when: Compose UI tests changed or are missing
+    - skill: kotlin-coroutines-structured-concurrency
+      when: coroutine ownership or cancellation risk exists
+    - skill: kotlin-flow-state-event-modeling
+      when: Flow state or event modeling changed
+    - skill: kotlin-multiplatform-expect-actual
+      when: KMP boundaries changed
+    - skill: kotlin-types-value-class
+      when: value classes or single-field domain types changed
 artifacts:
   prd: optional
   adr: optional
