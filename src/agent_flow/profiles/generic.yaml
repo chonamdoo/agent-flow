@@ -9,4 +9,8 @@ branching:
     slug_style: kebab-case
     slug_source: feature title
     max_slug_length: 60
-gates: []
+gates:
+  - id: context-lint
+    command: ["node", "scripts/check-context-docs.mjs"]
+    required: true
+    phase: pre-commit

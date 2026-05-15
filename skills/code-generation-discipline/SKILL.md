@@ -14,6 +14,7 @@ Use this as the common implementation discipline. Do not score it. Apply it as a
 - Check existing patterns, helpers, APIs, and project instructions before adding a new approach.
 - Choose the smallest code path that can satisfy the request.
 - Define the verification command or observable check before editing.
+- For agent-flow user-facing updates, default to short Korean and keep code, commands, paths, and identifiers in English.
 - Select language-specific support only for files you will touch:
   - Python files (`*.py`): apply `python-development-guide`.
   - TypeScript/TSX files (`*.ts`, `*.tsx`): apply `typescript-development-guide`.
@@ -38,4 +39,4 @@ Use this as the common implementation discipline. Do not score it. Apply it as a
 - Run the verification command chosen before editing, plus build/typecheck/lint/tests when relevant.
 - If review or QA fails, return to the fix phase before continuing.
 - Do not report completion if verification was not run or could not run.
-- Summarize changed files, verification, and remaining risk briefly.
+- Summarize changed files, verification, and remaining risk briefly. Do not paste long logs or whole files.

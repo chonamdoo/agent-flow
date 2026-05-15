@@ -59,14 +59,14 @@ function assertSame(a, b) {
   }
 }
 
-const workflowCopies = [
+const fullFeatureWorkflowCopies = [
   "workflows/full-feature.yaml",
   "src/agent_flow/workflows/full-feature.yaml",
   ".agent-flow/workflows/full-feature.yaml",
 ];
 
 // phase 제거가 source/generated copy 중 한 곳에만 반영되는 drift를 막는다.
-for (const rel of workflowCopies) {
+for (const rel of fullFeatureWorkflowCopies) {
   assertFile(rel);
   assertContains(rel, "id: domain-grill");
   assertContains(rel, "context_docs_updated: true|not_needed");
@@ -74,8 +74,49 @@ for (const rel of workflowCopies) {
   assertNotContains(rel, "grill-me");
 }
 
+assertSame("workflows/default.yaml", "src/agent_flow/workflows/default.yaml");
+assertSame("workflows/full-feature.yaml", "src/agent_flow/workflows/full-feature.yaml");
+
 // skill source와 설치본이 달라지면 다른 프로젝트로 전파될 때 기준이 갈린다.
 assertSame("skills/grill-with-docs/SKILL.md", ".agent-flow/skills/grill-with-docs/SKILL.md");
+assertSame("skills/agent-flow/SKILL.md", ".agent-flow/skills/agent-flow/SKILL.md");
+assertSame("skills/code-generation-discipline/SKILL.md", ".agent-flow/skills/code-generation-discipline/SKILL.md");
+
+function gateIds(text) {
+  const lines = text.split("\n");
+  const ids = [];
+  let inGates = false;
+  for (const line of lines) {
+    if (line === "gates:") {
+      inGates = true;
+      continue;
+    }
+    if (inGates && line && !line.startsWith(" ")) {
+      break;
+    }
+    if (!inGates) continue;
+    const match = line.match(/^\s+- id: (.+)$/);
+    if (match) ids.push(match[1].trim());
+  }
+  return ids;
+}
+
+for (const entry of fs.readdirSync(path.join(ROOT, "profiles")).sort()) {
+  if (!entry.endsWith(".yaml") || entry === "_schema.yaml") continue;
+  const source = `profiles/${entry}`;
+  const packaged = `src/agent_flow/profiles/${entry}`;
+  const sourceText = readIfExists(source);
+  const packagedText = readIfExists(packaged);
+  if (sourceText === null || packagedText === null) continue;
+  const sourceGates = gateIds(sourceText);
+  const packagedGates = gateIds(packagedText);
+  if (sourceGates.join("|") !== packagedGates.join("|")) {
+    failures.push(`${packaged} gates differ from ${source}`);
+  }
+  if (sourceGates.includes("context-lint") !== packagedGates.includes("context-lint")) {
+    failures.push(`${packaged} context-lint presence differs from ${source}`);
+  }
+}
 
 // bootstrap은 반복 install 대신 기존 설치된 CLI로 worktree run을 시작해야 한다.
 for (const rel of [
@@ -88,8 +129,14 @@ for (const rel of [
 ]) {
   assertFile(rel);
   assertContains(rel, 'agent-flow run "<task>"');
+  assertContains(rel, "agent-flow status");
   assertContains(rel, "install은 프로젝트당 1회만");
+  assertContains(rel, "next_command");
+  assertContains(rel, "짧은 한글");
 }
+
+assertContains(".agent-flow/rules/workflow-contract.md", "gates: all_passed");
+assertContains(".agent-flow/rules/workflow-contract.md", "short Korean");
 
 if (failures.length > 0) {
   console.error(`agent-flow-parity: FAIL (${failures.length})`);

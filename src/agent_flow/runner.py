@@ -316,6 +316,10 @@ class Runner:
         text = artifact.read_text(encoding="utf-8") if artifact.exists() else ""
         key = _route_key(text)
         target = phase.routes.get(key)
+        if phase.multi_review and key in {"approve", "green"}:
+            if _independent_reviewer_verdict_count(text) < 2:
+                print("  [block] multi-review requires 2+ independent reviewer verdicts")
+                return current_index, True
         if phase.id == "gates":
             if target == "fix-loop":
                 rounds = self._increment_fix_loop_rounds()
@@ -548,6 +552,33 @@ def _route_key(text: str) -> str:
         if f"verdict: {key}" in lowered or f"status: {key}" in lowered:
             return key
     return "default"
+
+
+def _independent_reviewer_verdict_count(text: str) -> int:
+    reviewers: set[str] = set()
+    current_reviewer: str | None = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        lowered = stripped.lower()
+        if stripped.startswith("#"):
+            current_reviewer = _reviewer_key(lowered) if "reviewer" in lowered else None
+            continue
+        if "verdict:" not in lowered:
+            continue
+        verdict = lowered.split("verdict:", 1)[1].strip()
+        if verdict not in {"approve", "request-changes", "lgtm", "needs_changes"}:
+            continue
+        prefix = lowered.split("verdict:", 1)[0].strip(" -")
+        if prefix:
+            reviewers.add(_reviewer_key(prefix))
+        elif current_reviewer is not None:
+            reviewers.add(current_reviewer)
+    return len(reviewers)
+
+
+def _reviewer_key(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+    return normalized or value
 
 
 def _missing_markers(text: str, markers: tuple[str, ...]) -> list[str]:

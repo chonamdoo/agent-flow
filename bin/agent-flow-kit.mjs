@@ -1114,14 +1114,29 @@ function upsertBootstrapBlock(pathName, label) {
   const block = `${start}
 ## Agent Flow
 
-Before feature work, run:
+Before feature work, check status first:
 
 \`\`\`bash
-${AGENT_FLOW_COMMAND} run "<task>"
+${AGENT_FLOW_COMMAND} status
 \`\`\`
 
 install은 프로젝트당 1회만 수행합니다. 새 세션이 시작됐다는 이유로 install을 다시 실행하지 않습니다.
-Follow the CLI output exactly. Git projects start inside \`.agent-flow/worktrees/feat-<slug>/\` without switching the leader branch; continue with the printed \`next_command\`.
+Follow the CLI output exactly. If no run is active, start with \`${AGENT_FLOW_COMMAND} run "<task>"\`. If a run is active, continue with the printed \`next_command\`.
+
+### Workflow Contract
+
+- 활성 workflow와 current phase는 항상 \`${AGENT_FLOW_COMMAND} status\` 출력 기준이다.
+- phase 이동은 status의 \`next_command\`를 그대로 따른다.
+- \`default.yaml\`: design → slice-plan → worktree → implement → final-review ↔ fix-loop → commit → push-pr → pr-watch → merge → cleanup
+- \`full-feature.yaml\`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → gates ↔ fix-loop → multi-review → architecture-review → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
+
+### Context Economy
+
+- User-facing 답변은 짧은 한글이 기본이다.
+- 코드/명령/식별자는 영어 그대로 유지한다.
+- 긴 설명, 긴 로그, 전체 파일 붙여넣기 금지.
+- 필요한 경우만 current phase, action, \`next_command\`, blocker를 요약한다.
+- 모든 guide를 항상 로드하지 말고 변경 파일에 필요한 guide만 읽는다.
 
 ${end}
 `;
@@ -1480,6 +1495,7 @@ Implementation rules:
 - Apply \`code-generation-discipline\` during red, green, refactor, and fix-loop phases. Language-specific guide and comment rules follow the \`code-generation-discipline\` Before Starting checklist.
 - If review or QA fails, return to the fix phase before continuing.
 - The gates->fix-loop->gates loop re-verifies after every fix. multi-review approve skips fix-loop; request-changes routes through fix-loop->gates.
+- In the default workflow, gates are enforced by the \`implement\` phase completion marker: \`gates: all_passed\`.
 
 Document size rules:
 
@@ -1495,6 +1511,8 @@ Context rules:
 - \`CONTEXT.md\` is hot context only and must stay under 200 lines.
 - Current and future vocabulary must stay separated.
 - Follow the phase context map in \`.Codex/rules/context/\` for phase-specific context loading.
+- User-facing agent-flow replies must be short Korean by default. Keep code, commands, paths, and identifiers in English.
+- Summarize only current phase, action, \`next_command\`, and blocker when useful.
 `;
 }
 

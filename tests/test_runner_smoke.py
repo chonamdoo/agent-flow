@@ -775,6 +775,54 @@ def test_route_block_returns_without_loop(tmp_path: Path):
     assert runner._next_index(0, runner.phases[0]) == (0, True)
 
 
+def test_default_final_review_request_changes_routes_to_fix_loop(tmp_path: Path):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.runner import Phase, Runner
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "final-review.md").write_text("verdict: request-changes\n", encoding="utf-8")
+
+    runner = Runner.__new__(Runner)
+    runner.run_dir = run_dir
+    runner.phases = [
+        Phase(id="final-review", description="", multi_review=True, routes={"approve": "commit", "request-changes": "fix-loop"}),
+        Phase(id="fix-loop", description=""),
+        Phase(id="commit", description=""),
+    ]
+
+    assert runner._next_index(0, runner.phases[0]) == (1, False)
+
+
+def test_default_final_review_approve_requires_two_reviewers(tmp_path: Path):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.runner import Phase, Runner
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    phase = Phase(
+        id="final-review",
+        description="",
+        multi_review=True,
+        routes={"approve": "commit", "request-changes": "fix-loop"},
+    )
+    runner = Runner.__new__(Runner)
+    runner.run_dir = run_dir
+    runner.phases = [phase, Phase(id="fix-loop", description=""), Phase(id="commit", description="")]
+
+    (run_dir / "final-review.md").write_text(
+        "## Reviewer 1\nreviewer-1 verdict: approve\n\nverdict: approve\n",
+        encoding="utf-8",
+    )
+    assert runner._next_index(0, phase) == (0, True)
+
+    (run_dir / "final-review.md").write_text(
+        "## Reviewer 1\nverdict: approve\n\n## Reviewer 2\nverdict: approve\n\nverdict: approve\n",
+        encoding="utf-8",
+    )
+    assert runner._next_index(0, phase) == (2, False)
+
+
 def test_required_markers_block_incomplete_artifact(tmp_path: Path):
     sys.path.insert(0, str(KIT_ROOT / "src"))
     from agent_flow.runner import Phase, Runner
@@ -909,6 +957,32 @@ def test_render_angle_result_marks_claude_rate_limit_as_blocker(tmp_path: Path):
     retry_after = next(line for line in artifact.splitlines() if line.startswith("retry_after: "))
     parsed = datetime.fromisoformat(retry_after.removeprefix("retry_after: "))
     assert parsed > datetime.now(timezone.utc)
+
+
+@pytest.mark.parametrize(
+    ("job_id", "stderr", "reviewer"),
+    [
+        ("codex-generalist", "429 too many requests; rate limit resets in 5 minutes", "codex"),
+        ("gemini-generalist", "resource exhausted: quota exceeded; retry later", "gemini"),
+    ],
+)
+def test_render_angle_result_marks_provider_rate_limits_as_blockers(
+    job_id: str,
+    stderr: str,
+    reviewer: str,
+):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.multi_review import _render_angle_result
+    from agent_flow.subprocess_pool import SubprocessResult
+
+    result = SubprocessResult(job_id=job_id, stderr=stderr, returncode=1)
+
+    artifact = _render_angle_result(result)
+
+    assert "status: blocked" in artifact
+    assert "reason: reviewer_rate_limited" in artifact
+    assert f"reviewer: {reviewer}" in artifact
+    assert f"next_command: agent-flow review retry --reviewer {reviewer} --retry-after " in artifact
 
 
 def test_generic_stub_does_not_write_completion_markers(tmp_path: Path, monkeypatch):

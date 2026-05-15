@@ -22,6 +22,7 @@ from agent_flow.cli import main
 from agent_flow.adapters.templates import PromptContext, render_stage_prompt
 from agent_flow.core.gates import GateCommand, run_gate
 from agent_flow.core.profiles import load_profile
+from agent_flow.core.review import _parse_verdict
 from agent_flow.core.team import ShutdownSignal
 from agent_flow.core.workflow import _stage_from_payload
 from agent_flow.core.worktrees import plan_worktree
@@ -157,6 +158,19 @@ class CliTest(unittest.TestCase):
         self.assertIn("Output: red.md.", phases["red"]["prompt"])
         self.assertIn("Output: green.md.", phases["green"]["prompt"])
         self.assertIn("Output: gates.md.", phases["gates"]["prompt"])
+
+        default_path = (
+            Path(__file__).resolve().parents[1]
+            / "src"
+            / "agent_flow"
+            / "workflows"
+            / "default.yaml"
+        )
+        default_payload = yaml.safe_load(default_path.read_text(encoding="utf-8"))
+        default_phases = {phase["id"]: phase for phase in default_payload["phases"]}
+        self.assertEqual(default_phases["implement"]["required_markers"], ["gates: all_passed"])
+        self.assertEqual(default_phases["final-review"]["routes"]["request-changes"], "fix-loop")
+        self.assertEqual(default_phases["final-review"]["routes"]["approve"], "commit")
 
     def test_python_runner_route_key_understands_gate_results(self) -> None:
         from agent_flow.runner import _route_key
@@ -2646,13 +2660,13 @@ class CliTest(unittest.TestCase):
     def test_load_profile_reads_packaged_gates(self) -> None:
         profile = load_profile("node")
         self.assertEqual(profile.profile_id, "node")
-        self.assertEqual(profile.gates[0].gate_id, "test")
-        self.assertEqual(profile.gates[0].command, ("npm", "test"))
+        self.assertEqual(profile.gates[0].gate_id, "context-lint")
+        self.assertEqual(profile.gates[0].command, ("node", "scripts/check-context-docs.mjs"))
         # npm 기반 TypeScript profile은 subprocess argv list로 검증 명령을 보관한다.
         typescript = load_profile("typescript")
         self.assertEqual(typescript.gates[1].gate_id, "typecheck")
         self.assertEqual(typescript.gates[1].command, ("npx", "tsc", "--noEmit"))
-        self.assertEqual(load_profile("nextjs").gates[0].command, ("npm", "run", "build"))
+        self.assertEqual(load_profile("nextjs").gates[1].command, ("npm", "run", "build"))
         self.assertEqual(load_profile("android").profile_id, "android")
 
     def test_runner_prefers_repository_kit_root(self) -> None:
@@ -2885,6 +2899,71 @@ class CliTest(unittest.TestCase):
             self.assertEqual(output.getvalue().strip(), "LGTM: 0 findings")
             self.assertTrue((run_dir / "review-summary.json").is_file())
             self.assertFalse((run_dir / "recovery.md").exists())
+
+    def test_review_parser_accepts_agent_verdict_contract(self) -> None:
+        self.assertEqual(_parse_verdict("verdict: approve\n"), "LGTM")
+        self.assertEqual(_parse_verdict("verdict: request-changes\n"), "NEEDS_CHANGES")
+
+    def test_default_final_review_routes_by_verdict(self) -> None:
+        from agent_flow.runner import Phase, Runner
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir)
+            phase = Phase(
+                id="final-review",
+                description="",
+                multi_review=True,
+                routes={"approve": "commit", "request-changes": "fix-loop"},
+            )
+            runner = Runner.__new__(Runner)
+            runner.run_dir = run_dir
+            runner.phases = [phase, Phase(id="fix-loop", description=""), Phase(id="commit", description="")]
+
+            (run_dir / "final-review.md").write_text("verdict: request-changes\n", encoding="utf-8")
+            self.assertEqual(runner._next_index(0, phase), (1, False))
+
+            (run_dir / "final-review.md").write_text(
+                "## Reviewer 1\nverdict: approve\n\n"
+                "## Reviewer 2\nverdict: approve\n\n"
+                "verdict: approve\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(runner._next_index(0, phase), (2, False))
+
+    def test_default_final_review_blocks_single_reviewer_approve(self) -> None:
+        from agent_flow.runner import Phase, Runner
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir)
+            phase = Phase(
+                id="final-review",
+                description="",
+                multi_review=True,
+                routes={"approve": "commit", "request-changes": "fix-loop"},
+            )
+            runner = Runner.__new__(Runner)
+            runner.run_dir = run_dir
+            runner.phases = [phase, Phase(id="fix-loop", description=""), Phase(id="commit", description="")]
+            (run_dir / "final-review.md").write_text(
+                "## Reviewer 1\nreviewer-1 verdict: approve\n\nverdict: approve\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(runner._next_index(0, phase), (0, True))
+
+    def test_provider_rate_limits_render_retry_status(self) -> None:
+        from agent_flow.multi_review import _render_angle_result
+        from agent_flow.subprocess_pool import SubprocessResult
+
+        cases = [
+            ("codex-generalist", "429 too many requests; rate limit resets in 5 minutes", "codex"),
+            ("gemini-generalist", "resource exhausted: quota exceeded; retry later", "gemini"),
+        ]
+        for job_id, stderr, reviewer in cases:
+            artifact = _render_angle_result(SubprocessResult(job_id=job_id, stderr=stderr, returncode=1))
+            self.assertIn("reason: reviewer_rate_limited", artifact)
+            self.assertIn(f"reviewer: {reviewer}", artifact)
+            self.assertIn(f"next_command: agent-flow review retry --reviewer {reviewer}", artifact)
 
     def test_review_summary_needs_changes_writes_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

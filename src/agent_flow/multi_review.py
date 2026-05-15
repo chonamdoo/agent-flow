@@ -50,6 +50,7 @@ class Distribution:
     by_cli: dict[str, list[ReviewerJob]] = field(default_factory=dict)
     fallback_jobs: list[ReviewerJob] = field(default_factory=list)
     fallback_to_generic: bool = False
+    insufficient_reviewers: bool = False
     host: str | None = None
 
     def empty(self) -> bool:
@@ -57,7 +58,7 @@ class Distribution:
 
     def summary(self) -> str:
         if self.fallback_to_generic:
-            return "generic (no AI CLI detected — host AI handles all angles)"
+            return "generic (host handles all angles with 2+ independent reviewer verdicts)"
         parts = [f"{cli}:{len(jobs)}" for cli, jobs in self.by_cli.items() if jobs]
         if self.host:
             parts.append(f"(host={self.host})")
@@ -86,6 +87,7 @@ def distribute(jobs: list[ReviewerJob]) -> Distribution:
         return Distribution(
             fallback_jobs=list(jobs),
             fallback_to_generic=True,
+            insufficient_reviewers=True,
             host=host,
         )
 
@@ -96,7 +98,11 @@ def distribute(jobs: list[ReviewerJob]) -> Distribution:
     for i, job in enumerate(jobs):
         cli = ordered[i % len(ordered)]
         by_cli[cli.name].append(job)
-    return Distribution(by_cli=by_cli, host=host)
+    return Distribution(
+        by_cli=by_cli,
+        insufficient_reviewers=len(ordered) < 2,
+        host=host,
+    )
 
 
 def run_distribution(distribution: Distribution, project_root: Path,
@@ -198,7 +204,13 @@ def _rate_limit_payload(r: SubprocessResult) -> dict[str, str] | None:
     reviewer = r.job_id.split("-", 1)[0]
     text = "\n".join(part for part in (r.stdout, r.stderr, r.error or "") if part)
     lowered = text.lower()
-    if reviewer != "claude" or "limit" not in lowered or "reset" not in lowered:
+    signals = {
+        "claude": ("limit", "rate limit", "too many requests", "429"),
+        "codex": ("rate limit", "too many requests", "429"),
+        "gemini": ("quota exceeded", "resource exhausted", "429"),
+    }
+    reviewer_signals = signals.get(reviewer, ("rate limit", "too many requests", "429"))
+    if not any(signal in lowered for signal in reviewer_signals):
         return None
     retry_after = _parse_retry_after(text)
     return {
