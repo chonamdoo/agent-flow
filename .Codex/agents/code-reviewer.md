@@ -19,6 +19,7 @@
 - React Web/Next.js/TSX 컴포넌트 변경은 `react-development-guide`, React Native/Expo/RN 앱 변경은 `react-native-development-guide`를 보조 체크리스트로 확인했는가.
 - Android/Kotlin/Compose/KMP 변경은 `android-code-review`와 Android profile의 `chrisbanes_skills.review[*].skill` 로컬 설치본을 우선 체크리스트로 확인했는가. 로컬 내용이 없으면 `no content: <skill>`로 기록했는가.
 - agent-flow phase artifact와 completion marker가 요구사항을 만족하는가.
+- `.Codex/rules/concise-output.md` 기준으로 finding은 짧게 쓰되 verdict/status marker는 원문 유지했는가.
 - PR target branch가 프로필의 `pr.target_branch`와 일치하는가. release-first 프로필이면 활성 `release/*` 브랜치인지 확인한다.
 
 언어/framework guide 위반은 실제 버그, 런타임 위험, 접근성 회귀, hook rule 위반, hydration/server-client boundary 문제, 성능 회귀, 보안 위험, 테스트 실패, 프로젝트 규칙 위반일 때만 blocking으로 본다. 일반론이나 스타일 차이는 suggestion으로만 남긴다.
@@ -42,3 +43,5 @@ verdict: approve | request-changes
 ```
 
 `request-changes`일 때는 반드시 파일 경로와 라인 번호를 포함한다.
+Finding은 한 줄에 하나만 작성한다: `path/to/file:L42: must-fix: 문제. 수정.`
+Severity는 `must-fix`, `should-fix`, `note`만 쓴다. 이모지는 쓰지 않는다.
