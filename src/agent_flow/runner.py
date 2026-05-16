@@ -96,6 +96,8 @@ class Runner:
     def __init__(
         self,
         project_root: Path,
+        state_root: Path | None = None,
+        config_root: Path | None = None,
         workflow: str = "default",
         run_dir: Path | None = None,
         architecture: str = "default",
@@ -104,6 +106,8 @@ class Runner:
         if architecture not in ARCHITECTURE_MODES:
             raise ValueError(f"invalid architecture mode: {architecture!r}")
         self.project_root = project_root
+        self.state_root = state_root or project_root
+        self.config_root = config_root or project_root
         self.workflow_name = workflow
         self.run_dir = run_dir
         self.architecture = architecture
@@ -114,12 +118,12 @@ class Runner:
             self.workflow_name = meta.get("workflow", workflow)
             self.architecture = meta.get("architecture", architecture)
         self.phases = _load_workflow(self.kit_root, self.workflow_name)
-        self.profile_id, self.profile = _load_profile(self.kit_root, project_root)
+        self.profile_id, self.profile = _load_profile(self.kit_root, self.config_root)
 
     def run(self, mode: ResumeMode, task: str = "") -> None:
         if mode == ResumeMode.START:
             self.run_dir = create_run(
-                self.project_root,
+                self.state_root,
                 self.workflow_name,
                 task,
                 architecture=self.architecture,

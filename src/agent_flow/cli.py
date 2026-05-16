@@ -53,9 +53,12 @@ from agent_flow.core.team import (
 from agent_flow.core.worktrees import (
     create_worktree,
     get_worktree_status,
+    known_worktree_names,
     plan_worktree,
+    remove_worktree_metadata,
     remove_worktree,
     worktree_branch_exists,
+    worktree_runtime_root,
 )
 from agent_flow.core.state import RunRequest, RunState, start_run, status_summary
 from agent_flow.core.workflow import load_workflow
@@ -317,6 +320,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "run":
         run_root = root
+        state_root = root
         worktree_status = None
         worktree_preexisting = False
         # git repo에서는 별도 지정이 없어도 task 이름으로 격리 worktree를 먼저 만든다.
@@ -330,12 +334,8 @@ def main(argv: list[str] | None = None) -> int:
             except ValueError as exc:
                 print(str(exc), file=sys.stderr)
                 return 2
+            state_root = worktree_runtime_root(root=root, name=plan.name)
             worktree_preexisting = plan.path.exists()
-            if plan.path.exists():
-                active = find_active_run(plan.path)
-                if active is not None:
-                    print(f"already active: {active.run_id} (task: {active.task!r})")
-                    return 2
             try:
                 worktree_status = create_worktree(root=root, plan=plan, allow_dirty=args.allow_dirty)
             except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
@@ -343,7 +343,8 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             print(f"worktree: {worktree_status.name} {worktree_status.path}")
             run_root = worktree_status.path
-        active = find_active_run(run_root) if worktree_name is None else None
+            state_root = worktree_runtime_root(root=root, name=worktree_status.name)
+        active = find_active_run(state_root)
         if active is not None:
             print(f"already active: {active.run_id} (task: {active.task!r})")
             if worktree_name is None and _is_git_repo(root):
@@ -355,6 +356,8 @@ def main(argv: list[str] | None = None) -> int:
         try:
             Runner(
                 run_root,
+                state_root=state_root,
+                config_root=root,
                 workflow=args.workflow,
                 architecture=args.architecture,
                 next_command=_continue_command(root, worktree_name),
@@ -372,13 +375,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "continue":
         try:
-            run_root = _worktree_root(root, args.worktree) if args.worktree else root
+            run_root, state_root = _worktree_context(root, args.worktree) if args.worktree else (root, root)
         except ValueError as exc:
             print(_format_cli_error(exc), file=sys.stderr)
             return 2
         if run_root is None:
             return 1
-        active = find_active_run(run_root)
+        active = find_active_run(state_root)
         if active is None:
             if args.worktree:
                 print(
@@ -391,19 +394,21 @@ def main(argv: list[str] | None = None) -> int:
         Runner(
             run_root,
             run_dir=active.path,
+            state_root=state_root,
+            config_root=root,
             next_command=_continue_command(root, args.worktree),
         ).run(mode=ResumeMode.RESUME)
         return 0
 
     if args.command == "abort":
         try:
-            run_root = _worktree_root(root, args.worktree) if args.worktree else root
+            run_root, state_root = _worktree_context(root, args.worktree) if args.worktree else (root, root)
         except ValueError as exc:
             print(_format_cli_error(exc), file=sys.stderr)
             return 2
         if run_root is None:
             return 1
-        active = find_active_run(run_root)
+        active = find_active_run(state_root)
         if active is None:
             print("진행 중인 run 없음 — abort할 대상이 없습니다.")
             return 0
@@ -424,20 +429,20 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "status":
         try:
-            run_root = _worktree_root(root, args.worktree) if args.worktree else root
+            run_root, state_root = _worktree_context(root, args.worktree) if args.worktree else (root, root)
         except ValueError as exc:
             print(_format_cli_error(exc), file=sys.stderr)
             return 2
         if run_root is None:
             return 1
-        active = find_active_run(run_root)
+        active = find_active_run(state_root)
         if active is not None:
             active.print_status(next_command=_continue_command(root, args.worktree))
             return 0
-        if not (run_root / ".agent-flow" / "runs").exists():
+        if not (state_root / ".agent-flow" / "runs").exists():
             print("진행 중인 run 없음.")
             return 0
-        print(status_summary(run_root))
+        print(status_summary(state_root))
         return 0
 
     if args.command == "report":
@@ -596,7 +601,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             if not _worktree_checkout_exists(status):
                 stale_dir = root / ".agent-flow" / "worktrees" / status.name
-                if stale_dir.exists():
+                if stale_dir.exists() or status.name in _known_worktree_names(root):
                     if not args.keep_branch and status.branch_created_by_agent_flow:
                         try:
                             subprocess.run(
@@ -619,8 +624,9 @@ def main(argv: list[str] | None = None) -> int:
                             return 2
                     if stale_dir.is_dir():
                         shutil.rmtree(stale_dir)
-                    else:
+                    elif stale_dir.exists():
                         stale_dir.unlink()
+                    remove_worktree_metadata(root=root, name=status.name)
                     print(f"removed stale worktree manifest {status.name}")
                     return 0
                 print(f"worktree not found or missing path: {status.name}", file=sys.stderr)
@@ -930,7 +936,7 @@ def main(argv: list[str] | None = None) -> int:
                     "branch": status.branch,
                     "path": str(status.path),
                 }
-            state_root = Path(worktree["path"]) if worktree is not None else root
+            state_root = worktree_runtime_root(root=root, name=worktree["name"]) if worktree is not None else root
             state = start_run(
                 root=state_root,
                 request=RunRequest(
@@ -1029,6 +1035,16 @@ def _worktree_root(root: Path, name: str) -> Path | None:
     return None
 
 
+def _worktree_context(root: Path, name: str) -> tuple[Path | None, Path]:
+    status = get_worktree_status(root=root, name=name)
+    if _worktree_checkout_exists(status):
+        return status.path, worktree_runtime_root(root=root, name=status.name)
+    known = _known_worktree_names(root)
+    suffix = f" known worktrees: {', '.join(known)}" if known else " no known worktrees"
+    print(f"worktree not found or missing path: {status.name}.{suffix}", file=sys.stderr)
+    return None, worktree_runtime_root(root=root, name=status.name)
+
+
 def _continue_command(root: Path, worktree: str | None) -> str:
     command = f"agent-flow continue --root {shlex.quote(str(root))}"
     if worktree is None:
@@ -1037,10 +1053,7 @@ def _continue_command(root: Path, worktree: str | None) -> str:
 
 
 def _known_worktree_names(root: Path) -> list[str]:
-    worktrees_root = root / ".agent-flow" / "worktrees"
-    if not worktrees_root.exists():
-        return []
-    return sorted(path.name for path in worktrees_root.iterdir() if path.is_dir())
+    return known_worktree_names(root=root)
 
 
 def _worktree_checkout_exists(status) -> bool:

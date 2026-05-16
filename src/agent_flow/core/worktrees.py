@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -92,6 +93,7 @@ def remove_worktree(*, root: Path, status: WorktreeStatus, delete_branch: bool =
         _run_git(root, "worktree", "remove", "--force", str(status.path))
     if branch_to_delete is not None:
         _run_git(root, "branch", "-D", branch_to_delete)
+    remove_worktree_metadata(root=root, name=status.name)
 
 
 def worktree_branch_exists(*, root: Path, branch: str) -> bool:
@@ -129,7 +131,10 @@ def _git_commit_ref_exists(*, root: Path, ref: str) -> bool:
 
 def get_worktree_status(*, root: Path, name: str) -> WorktreeStatus:
     plan = plan_worktree(root=root, name=name)
-    manifest = root / ".agent-flow" / "worktrees" / plan.name / "manifest.json"
+    manifest = _worktree_manifest_path(root=root, name=plan.name)
+    legacy_manifest = _legacy_worktree_manifest_path(root=root, name=plan.name)
+    if not manifest.exists() and legacy_manifest.exists():
+        manifest = legacy_manifest
     if manifest.exists():
         try:
             payload = json.loads(manifest.read_text(encoding="utf-8"))
@@ -185,12 +190,37 @@ def get_worktree_status(*, root: Path, name: str) -> WorktreeStatus:
 
 
 def write_worktree_manifest(*, root: Path, status: WorktreeStatus) -> Path:
-    path = root / ".agent-flow" / "worktrees" / status.name / "manifest.json"
+    path = _worktree_manifest_path(root=root, name=status.name)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = asdict(status)
     payload["path"] = str(status.path.relative_to(root))
+    payload["leader_root"] = str(root)
     path.write_text(f"{json.dumps(payload, indent=2, sort_keys=True)}\n", encoding="utf-8")
     return path
+
+
+def worktree_runtime_root(*, root: Path, name: str) -> Path:
+    return _agent_flow_git_dir(root) / "worktrees" / _feature_worktree_name(name)
+
+
+def known_worktree_names(*, root: Path) -> list[str]:
+    names: set[str] = set()
+    checkout_root = root / ".agent-flow" / "worktrees"
+    if checkout_root.exists():
+        names.update(path.name for path in checkout_root.iterdir() if path.is_dir())
+    runtime_root = _agent_flow_git_dir(root) / "worktrees"
+    if runtime_root.exists():
+        names.update(path.name for path in runtime_root.iterdir() if path.is_dir())
+    return sorted(names)
+
+
+def remove_worktree_metadata(*, root: Path, name: str) -> None:
+    runtime_root = worktree_runtime_root(root=root, name=name)
+    if runtime_root.exists():
+        shutil.rmtree(runtime_root)
+    legacy_manifest = _legacy_worktree_manifest_path(root=root, name=name)
+    if legacy_manifest.exists():
+        legacy_manifest.unlink()
 
 
 def _git_dirty(root: Path) -> bool:
@@ -201,6 +231,30 @@ def _git_dirty(root: Path) -> bool:
         if not _is_agent_flow_status_line(line)
     ]
     return bool(dirty_lines)
+
+
+def _worktree_manifest_path(*, root: Path, name: str) -> Path:
+    return worktree_runtime_root(root=root, name=name) / "manifest.json"
+
+
+def _legacy_worktree_manifest_path(*, root: Path, name: str) -> Path:
+    return root / ".agent-flow" / "worktrees" / _feature_worktree_name(name) / "manifest.json"
+
+
+def _agent_flow_git_dir(root: Path) -> Path:
+    result = subprocess.run(
+        ("git", "rev-parse", "--git-common-dir"),
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return root / ".agent-flow"
+    git_common = Path(result.stdout.strip())
+    if not git_common.is_absolute():
+        git_common = root / git_common
+    return git_common / "agent-flow"
 
 
 def _is_agent_flow_status_line(line: str) -> bool:

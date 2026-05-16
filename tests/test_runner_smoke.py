@@ -55,6 +55,10 @@ def _branch_exists(project: Path, branch: str) -> bool:
     return result.returncode == 0
 
 
+def _worktree_runtime_root(project: Path, name: str) -> Path:
+    return project / ".git" / "agent-flow" / "worktrees" / name
+
+
 def test_full_cycle(tmp_path: Path):
     project = tmp_path / "proj"
     project.mkdir()
@@ -156,8 +160,11 @@ def test_worktree_run_continue_status_abort(tmp_path: Path):
     assert "worktree: feat-long-press" in r1.stdout
 
     worktree = project / ".agent-flow" / "worktrees" / "feat-long-press"
-    run_dir = next((worktree / ".agent-flow" / "runs").iterdir())
+    runtime_root = _worktree_runtime_root(project, "feat-long-press")
+    run_dir = next((runtime_root / ".agent-flow" / "runs").iterdir())
     assert (run_dir / "active").exists()
+    assert not (worktree / ".agent-flow").exists()
+    assert not (worktree / "manifest.json").exists()
 
     r_status = _run_cli(["status", "--worktree", "Long Press"], project)
     assert r_status.returncode == 0
@@ -173,7 +180,7 @@ def test_worktree_run_continue_status_abort(tmp_path: Path):
 
     r2 = _run_cli(["run", "abort me", "--worktree", "long-press"], project)
     assert r2.returncode == 0, r2.stderr
-    active = next(p for p in (worktree / ".agent-flow" / "runs").iterdir() if (p / "active").exists())
+    active = next(p for p in (runtime_root / ".agent-flow" / "runs").iterdir() if (p / "active").exists())
     r_abort = _run_cli(["abort", "--worktree", "long-press", "--yes"], project)
     assert r_abort.returncode == 0
     assert not (active / "active").exists()
@@ -553,7 +560,7 @@ def test_worktree_create_and_start_reject_existing_branch_mismatch(tmp_path: Pat
     assert "already uses branch" in r_start_mismatch.stderr
 
 
-def test_start_worktree_writes_state_inside_worktree(tmp_path: Path):
+def test_start_worktree_writes_state_outside_worktree(tmp_path: Path):
     project = tmp_path / "start-worktree-state"
     project.mkdir()
     _init_git_project(project)
@@ -561,8 +568,10 @@ def test_start_worktree_writes_state_inside_worktree(tmp_path: Path):
     r_start = _run_cli(["start", "development", "--task", "task", "--worktree", "task"], project)
     assert r_start.returncode == 0, r_start.stderr
     worktree = project / ".agent-flow" / "worktrees" / "feat-task"
-    run_dir = next((worktree / ".agent-flow" / "runs" / "development").iterdir())
+    runtime_root = _worktree_runtime_root(project, "feat-task")
+    run_dir = next((runtime_root / ".agent-flow" / "runs" / "development").iterdir())
     assert (run_dir / "manifest.json").exists()
+    assert not (worktree / ".agent-flow").exists()
     assert not (project / ".agent-flow" / "runs" / "default").exists()
 
     r_status = _run_cli(["status", "--worktree", "task"], project)
@@ -629,7 +638,7 @@ def test_live_worktree_remove_does_not_trust_manifest_branch_redirect(tmp_path: 
     r_create = _run_cli(["worktree", "create", "--name", "task"], project)
     assert r_create.returncode == 0, r_create.stderr
     worktree = project / ".agent-flow" / "worktrees" / "feat-task"
-    (worktree / "manifest.json").write_text(
+    (_worktree_runtime_root(project, "feat-task") / "manifest.json").write_text(
         json.dumps(
             {
                 "name": "feat-task",
