@@ -1,9 +1,10 @@
 """Artifact directory management.
 
-Each run lives at `.agent-flow/runs/<run-id>/`. Phases write a single .md
-artifact when they complete; the runner uses these files as the source of
-truth for "what has been done." An `active` marker file distinguishes the
-in-flight run.
+Each run lives under the active state root's `.agent-flow/runs/<run-id>/`.
+Git worktree runs use a git-private state root so runtime files do not dirty
+the worktree checkout. Phases write a single .md artifact when they complete;
+the runner uses these files as the source of truth for "what has been done."
+An `active` marker file distinguishes the in-flight run.
 
 Robustness fixes applied (post-review):
   - read_meta tolerates missing / malformed JSON (returns {} with warning)

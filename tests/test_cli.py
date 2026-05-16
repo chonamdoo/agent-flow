@@ -25,7 +25,7 @@ from agent_flow.core.profiles import load_profile
 from agent_flow.core.review import _parse_verdict
 from agent_flow.core.team import ShutdownSignal
 from agent_flow.core.workflow import _stage_from_payload
-from agent_flow.core.worktrees import plan_worktree
+from agent_flow.core.worktrees import plan_worktree, worktree_runtime_root
 
 
 class CliTest(unittest.TestCase):
@@ -575,6 +575,35 @@ class CliTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.strip(), "agent-flow installed profile=generic")
             self.assertTrue((project_root / ".agent-flow" / "kit.json").is_file())
+
+    def test_node_installer_skips_managed_worktree_reinstall(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            worktree_root = project_root / ".agent-flow" / "worktrees" / "feat-task"
+            worktree_root.mkdir(parents=True)
+            node = _node_executable()
+            installer = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            initial = subprocess.run(
+                (node, installer, "install", "--without-graphify"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(initial.returncode, 0, initial.stderr)
+
+            result = subprocess.run(
+                (node, installer, "install", "--without-graphify"),
+                cwd=worktree_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("worktree install skipped", result.stdout)
+            self.assertFalse((worktree_root / ".agent-flow").exists())
+            self.assertFalse((worktree_root / "AGENTS.md").exists())
 
     def test_node_runner_uses_parent_install_from_agent_flow_worktree(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2386,7 +2415,7 @@ class CliTest(unittest.TestCase):
                     0,
                 )
             worktree = root / ".agent-flow" / "worktrees" / "feat-slice-a"
-            run_dir = worktree / ".agent-flow" / "runs" / "development" / "r1"
+            run_dir = worktree_runtime_root(root=root, name="feat-slice-a") / ".agent-flow" / "runs" / "development" / "r1"
             manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(
                 manifest["worktree"],
@@ -2465,10 +2494,7 @@ class CliTest(unittest.TestCase):
             )
             self.assertTrue(
                 (
-                    root
-                    / ".agent-flow"
-                    / "worktrees"
-                    / "feat-demo"
+                    worktree_runtime_root(root=root, name="feat-demo")
                     / ".agent-flow"
                     / "runs"
                     / "development"
@@ -2477,10 +2503,7 @@ class CliTest(unittest.TestCase):
             )
             self.assertTrue(
                 (
-                    root
-                    / ".agent-flow"
-                    / "worktrees"
-                    / "feat-slice-a"
+                    worktree_runtime_root(root=root, name="feat-slice-a")
                     / ".agent-flow"
                     / "runs"
                     / "development"
@@ -2569,10 +2592,7 @@ class CliTest(unittest.TestCase):
             )
             manifest = json.loads(
                 (
-                    root
-                    / ".agent-flow"
-                    / "worktrees"
-                    / "feat-slice-a"
+                    worktree_runtime_root(root=root, name="feat-slice-a")
                     / ".agent-flow"
                     / "runs"
                     / "development"
@@ -2613,10 +2633,7 @@ class CliTest(unittest.TestCase):
             )
             manifest = json.loads(
                 (
-                    root
-                    / ".agent-flow"
-                    / "worktrees"
-                    / "feat-slice-a"
+                    worktree_runtime_root(root=root, name="feat-slice-a")
                     / ".agent-flow"
                     / "runs"
                     / "development"
@@ -3353,10 +3370,11 @@ class CliTest(unittest.TestCase):
                         ]
                     ),
                     0,
-                )
+            )
             worktree = root / ".agent-flow" / "worktrees" / "feat-slice-a"
             self.assertTrue(worktree.is_dir())
-            self.assertTrue((worktree / "manifest.json").is_file())
+            self.assertTrue((worktree_runtime_root(root=root, name="feat-slice-a") / "manifest.json").is_file())
+            self.assertFalse((worktree / "manifest.json").exists())
             self.assertIn("feat-slice-a feat/slice-a", output.getvalue())
 
     def test_worktree_create_uses_main_base_without_switching_leader(self) -> None:

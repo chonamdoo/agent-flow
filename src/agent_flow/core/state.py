@@ -71,12 +71,24 @@ def status_summary(root: Path) -> str:
     manifests = sorted(runs_root.glob("*/*/manifest.json"), key=lambda p: p.stat().st_mtime)
     if not manifests:
         return "no runs"
-    payload = json.loads(manifests[-1].read_text(encoding="utf-8"))
+    manifest = None
+    payload = None
+    for candidate in reversed(manifests):
+        try:
+            candidate_payload = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if all(candidate_payload.get(key) for key in ("workflow_id", "run_id", "status")):
+            manifest = candidate
+            payload = candidate_payload
+            break
+    if manifest is None or payload is None:
+        return "no runs"
     workflow_id = payload["workflow_id"]
     run_id = payload["run_id"]
     raw_status = payload["status"]
     task = payload.get("task", "")
-    raw_run_dir = payload.get("run_dir") or str(manifests[-1].parent)
+    raw_run_dir = payload.get("run_dir") or str(manifest.parent)
     resolved_run_dir = _resolve_run_dir(root, raw_run_dir)
     run_dir = _relative_run_dir(str(resolved_run_dir))
     current_phase, required_artifact = _current_stage_status(
