@@ -496,6 +496,14 @@ class CliTest(unittest.TestCase):
                 (project_root / ".agent-flow" / "skills" / "code-generation-discipline" / "SKILL.md").is_file()
             )
             self.assertTrue(
+                (project_root / ".agent-flow" / "skills" / "agent-flow-concise-output" / "SKILL.md").is_file()
+            )
+            concise_rule = project_root / ".Codex" / "rules" / "concise-output.md"
+            self.assertTrue(concise_rule.is_file())
+            self.assertIn("verdict: approve", concise_rule.read_text(encoding="utf-8"))
+            self.assertIn("verdict: request-changes", concise_rule.read_text(encoding="utf-8"))
+            self.assertIn("next_command", concise_rule.read_text(encoding="utf-8"))
+            self.assertTrue(
                 (project_root / ".agent-flow" / "skills" / "react-development-guide" / "SKILL.md").is_file()
             )
             self.assertTrue(

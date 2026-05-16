@@ -190,7 +190,9 @@ phases:
         - Architecture-design specialist (templates/_shared/review/architecture-design.md) — MANDATORY
         - Plus angles declared in profile.review_angles
       Aggregate findings into final-review.md with severity (must-fix /
-      should-fix / notes) and source angle. Cite paths as `path/to/file:line`.
+      should-fix / note) and source angle. Cite paths as `path/to/file:line`.
+      Apply agent-flow-concise-output: one finding per line, Korean concise
+      prose, no emoji, and parser verdict markers unchanged.
       End with exactly one verdict line: `verdict: approve` or
       `verdict: request-changes`.
 
@@ -206,6 +208,8 @@ phases:
     description: Stage and commit using profile.commit_convention.
     prompt: |
       Group changes into logical commits per profile.commit_convention.style.
+      Use agent-flow-concise-output commit rules: Conventional Commit subject
+      target 50 chars, hard cap 72 chars, body only when the reason is unclear.
       Do not include co-author trailers unless profile.commit_convention.co_author
       is `include`. Output: commit.md (commit messages + hashes).
 

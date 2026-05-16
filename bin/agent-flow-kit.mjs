@@ -66,6 +66,11 @@ function installProject() {
     fs.readFileSync(path.join(KIT_ROOT, ".Codex", "rules", "codebase-rubric.md"), "utf8"),
     forceManaged,
   );
+  writeManagedFileIfMissingOrSame(
+    path.join(root, ".Codex", "rules", "concise-output.md"),
+    fs.readFileSync(path.join(KIT_ROOT, "skills", "agent-flow-concise-output", "concise-output.md"), "utf8"),
+    forceManaged,
+  );
   writeManagedFile(path.join(agentFlowDir, "prompts", "push-watch.md"), pushWatchPromptMarkdown());
   writeManagedFile(path.join(agentFlowDir, "prompts", "push-watch-tick.md"), pushWatchTickPromptMarkdown());
   for (const phase of PHASES) {
@@ -1349,7 +1354,7 @@ const PHASES = [
       "Apply code-generation-discipline. Refactor only after green, keep behavior stable, apply selected language-specific guides as secondary checklists, keep required Korean code comments, and summarize changed structure.",
   },
   { id: "gates", artifact: "artifacts/gate-results.json", instruction: "Run build, typecheck, lint, tests, and context lint according to the active profile. Docs-only changes must still run context lint. Save structured JSON with a top-level passed boolean and a results array." },
-  { id: "multi-review", artifact: "artifacts/multi-review.md", multi_review: true, instruction: "Run 2+ independent reviewer agents. Each reviewer uses code-reviewer.md as basis and outputs an independent verdict: approve or request-changes. Any request-changes from any reviewer makes the overall verdict request-changes. Default reviewers are two Codex sub-agents; Claude/Gemini are optional when available. Provider failure falls back to Codex sub-agents only. Record per-reviewer verdicts and write a single overall verdict line." },
+  { id: "multi-review", artifact: "artifacts/multi-review.md", multi_review: true, instruction: "Run 2+ independent reviewer agents. Each reviewer uses code-reviewer.md and agent-flow-concise-output as basis and outputs an independent verdict: approve or request-changes. Any request-changes from any reviewer makes the overall verdict request-changes. Default reviewers are two Codex sub-agents; Claude/Gemini are optional when available. Provider failure falls back to Codex sub-agents only. Record per-reviewer verdicts and write a single overall verdict line." },
   {
     id: "fix-loop",
     artifact: "artifacts/fix-loop.md",
@@ -1360,9 +1365,9 @@ const PHASES = [
     id: "architecture-review",
     artifact: "artifacts/architecture-review.md",
     instruction:
-      "Review implemented code against domain decisions and DDD/Clean Architecture. Record verdict: approve or verdict: request-changes with violations and required refactors.",
+      "Review implemented code against domain decisions and DDD/Clean Architecture. Apply agent-flow-concise-output for findings. Record verdict: approve or verdict: request-changes with violations and required refactors.",
   },
-  { id: "commit", artifact: "artifacts/commit.md", instruction: "Commit the verified slice and record the commit hash." },
+  { id: "commit", artifact: "artifacts/commit.md", instruction: "Commit the verified slice and record the commit hash. Use agent-flow-concise-output commit rules: Conventional Commit subject target 50 chars, hard cap 72 chars, body only when the reason is unclear." },
   {
     id: "push-pr",
     artifact: "artifacts/push-pr.md",

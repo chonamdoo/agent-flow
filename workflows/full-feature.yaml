@@ -159,6 +159,8 @@ phases:
       are optional when available. Provider failure falls back to Codex
       sub-agents only. Record per-reviewer verdicts and write a single overall
       verdict line: `verdict: approve` or `verdict: request-changes`.
+      Apply agent-flow-concise-output: one finding per line, Korean concise
+      prose, no emoji, and parser verdict markers unchanged.
       Output: multi-review.md.
 
   - id: fix-loop
@@ -182,12 +184,16 @@ phases:
       violations, repository boundary leaks, naming drift, and dependency
       direction. Output architecture-review.md with exactly one verdict line:
       `verdict: approve`, `verdict: request-changes`, or `verdict: blocked`.
+      Apply agent-flow-concise-output for findings and keep verdict markers
+      unchanged.
 
   - id: commit
     description: Commit verified changes.
     prompt: |
-      Commit the verified slice and record commit hashes/messages. Output:
-      commit.md.
+      Commit the verified slice and record commit hashes/messages. Use
+      agent-flow-concise-output commit rules: Conventional Commit subject
+      target 50 chars, hard cap 72 chars, body only when the reason is unclear.
+      Output: commit.md.
 
   - id: push-pr
     description: Push branch and open PR.
