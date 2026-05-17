@@ -330,28 +330,28 @@ class CliTest(unittest.TestCase):
             self.assertEqual(runner._next_index(0, phase), (0, True))
 
             (run_dir / "multi-review.md").write_text(
-                "## Reviewer 1\nreviewer-source: sub-agent\nverdict: approve\n\n"
+                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
                 "## Overall\nstatus: passed\n",
                 encoding="utf-8",
             )
             self.assertEqual(runner._next_index(0, phase), (0, True))
 
             (run_dir / "multi-review.md").write_text(
-                "## Reviewer 1\nreviewer-source: sub-agent\nverdict: approve\n\n"
+                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
                 "## Overall\nverdict: approve\nverdict: request-changes\n",
                 encoding="utf-8",
             )
             self.assertEqual(runner._next_index(0, phase), (0, True))
 
             (run_dir / "multi-review.md").write_text(
-                "## Reviewer 1\nreviewer-source: sub-agent\nverdict: approve\n\n"
+                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
                 "## Overall\nverdict: request-changes\n\n## Overall\nverdict: approve\n",
                 encoding="utf-8",
             )
             self.assertEqual(runner._next_index(0, phase), (0, True))
 
             (run_dir / "multi-review.md").write_text(
-                "## Reviewer 1\nreviewer-source: sub-agent\nverdict: approve\n\n"
+                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
                 "## Final\nverdict: approve\n",
                 encoding="utf-8",
             )
@@ -402,7 +402,7 @@ class CliTest(unittest.TestCase):
             self.assertEqual(runner._next_index(0, phase), (0, True))
 
             (run_dir / "multi-review.md").write_text(
-                "## Reviewer 1\nreviewer-source: sub-agent\nverdict: approve\n\n"
+                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
                 "## Reviewer 2\nverdict: lgtm\n\n"
                 "## Overall\n"
                 "verdict: approve\n",
@@ -411,8 +411,8 @@ class CliTest(unittest.TestCase):
             self.assertEqual(runner._next_index(0, phase), (2, False))
 
             (run_dir / "multi-review.md").write_text(
-                "## Reviewer 1\nreviewer-source: sub-agent\nverdict: approve\n\n"
-                "## Reviewer 2\nreviewer-source: sub-agent\nverdict: approve\n\n## Overall\nverdict: approve\n",
+                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
+                "## Reviewer 2\nreviewer-source: sub-agent\nreviewer-2 verdict: approve\n\n## Overall\nverdict: approve\n",
                 encoding="utf-8",
             )
             self.assertEqual(runner._next_index(0, phase), (2, False))
@@ -469,8 +469,8 @@ class CliTest(unittest.TestCase):
             self.assertEqual(runner._next_index(0, phase), (2, False))
 
             (run_dir / "final-review.md").write_text(
-                "## Reviewer 1\nreviewer-source: sub-agent\nverdict: approve\n\n"
-                "## Reviewer 2\nreviewer-source: sub-agent\nverdict: approve\n\n## Overall\nverdict: approve\n",
+                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
+                "## Reviewer 2\nreviewer-source: sub-agent\nreviewer-2 verdict: approve\n\n## Overall\nverdict: approve\n",
                 encoding="utf-8",
             )
             self.assertEqual(runner._next_index(0, phase), (2, False))
@@ -2397,7 +2397,7 @@ class CliTest(unittest.TestCase):
             self.assertIn("matching reviewer verdicts and overall verdict", result.stderr)
 
             mr_artifact.write_text(
-                "## Reviewer 1\nreviewer-source: sub-agent\nverdict: approve\n\n"
+                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
                 "## Overall\nstatus: passed\n",
                 encoding="utf-8",
             )
@@ -2412,7 +2412,7 @@ class CliTest(unittest.TestCase):
             self.assertIn("matching reviewer verdicts and overall verdict", result.stderr)
 
             mr_artifact.write_text(
-                "## Reviewer 1\nreviewer-source: sub-agent\nverdict: approve\n\n"
+                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
                 "## Overall\nverdict: approve\nverdict: request-changes\n",
                 encoding="utf-8",
             )
@@ -2427,7 +2427,7 @@ class CliTest(unittest.TestCase):
             self.assertIn("overall verdict must be approve or request-changes", result.stderr)
 
             mr_artifact.write_text(
-                "## Reviewer 1\nreviewer-source: sub-agent\nverdict: approve\n\n"
+                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
                 "## Overall\nverdict: request-changes\n\n## Overall\nverdict: approve\n",
                 encoding="utf-8",
             )
@@ -2442,7 +2442,7 @@ class CliTest(unittest.TestCase):
             self.assertIn("overall verdict must be approve or request-changes", result.stderr)
 
             mr_artifact.write_text(
-                "## Reviewer 1\nreviewer-source: sub-agent\nverdict: approve\n\n"
+                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
                 "## Final\nverdict: approve\n",
                 encoding="utf-8",
             )
@@ -3515,7 +3515,7 @@ class CliTest(unittest.TestCase):
             runner.phases = [phase, Phase(id="fix-loop", description=""), Phase(id="commit", description="")]
 
             (run_dir / "final-review.md").write_text(
-                "## Reviewer 1\nreviewer-source: sub-agent\nverdict: request-changes\n\n"
+                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: request-changes\n\n"
                 "## Overall\n"
                 "verdict: request-changes\n",
                 encoding="utf-8",
@@ -3523,8 +3523,8 @@ class CliTest(unittest.TestCase):
             self.assertEqual(runner._next_index(0, phase), (1, False))
 
             (run_dir / "final-review.md").write_text(
-                "## Reviewer 1\nreviewer-source: sub-agent\nverdict: approve\n\n"
-                "## Reviewer 2\nreviewer-source: sub-agent\nverdict: approve\n\n"
+                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
+                "## Reviewer 2\nreviewer-source: sub-agent\nreviewer-2 verdict: approve\n\n"
                 "## Overall\n"
                 "verdict: approve\n",
                 encoding="utf-8",
