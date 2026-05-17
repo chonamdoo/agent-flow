@@ -42,9 +42,11 @@ _BASE_REVIEW_PROMPTS = {
 }
 
 _CLAUDE_HINT = """\
-- For multi-reviewer phases, use the `Task` tool to spawn parallel sub-agents
-  — one per review angle. Send all Task calls in a single assistant message
-  so they execute in parallel.
+- For multi-reviewer phases, use the `Task` tool to spawn at least one
+  reviewer sub-agent. When the changed scope spans multiple areas, split the
+  scope and spawn one additional reviewer sub-agent in the same assistant
+  message so they execute in parallel.
+- Each reviewer section must include `reviewer-source: sub-agent`.
 - Use `TodoWrite` for slice tracking during `implement` phase. Mark each
   TDD red→green→refactor step in_progress / completed.
 - For long-running phases, prefer parallel reads (multiple `Read` calls in
@@ -53,8 +55,12 @@ _CLAUDE_HINT = """\
 """
 
 _CODEX_HINT = """\
-- For multi-reviewer phases, spawn two Codex sub-agents in parallel by
-  default. Use Claude/Gemini only as optional extra providers when available.
+- For multi-reviewer phases, spawn at least one Codex reviewer sub-agent.
+  When the changed scope spans multiple areas, split the scope and spawn one
+  additional Codex reviewer sub-agent in parallel.
+- Each reviewer section must include `reviewer-source: sub-agent`.
+- After recording each Codex sub-agent result in `final-review.md`, close that
+  sub-agent session.
 - If agent-flow already distributed angles across installed CLIs, invoke each
   non-host CLI in parallel and aggregate stdout into the artifact.
 - Per-angle artifacts are written by agent-flow as `final-review-<angle>.md`
@@ -67,6 +73,8 @@ _GEMINI_HINT = """\
 - For multi-reviewer phases, agent-flow has already distributed angles
   across installed CLIs. Invoke each non-host CLI as a subprocess; capture
   stdout per angle and aggregate into the artifact.
+- For host-handled review, use at least one host-native reviewer sub-agent.
+  Each reviewer section must include `reviewer-source: sub-agent`.
 - Per-angle artifacts are written by agent-flow as `final-review-<angle>.md`
   when subprocess delegation succeeds; the host aggregates these into the
   final `final-review.md`.
@@ -120,7 +128,7 @@ def _run_multi_review_distribution(
     adapter: Adapter,
 ) -> Distribution:
     jobs = _reviewer_jobs(phase, run_dir, project_root, adapter)
-    distribution = distribute(jobs)
+    distribution = distribute(jobs, host=adapter.name)
     run_distribution(distribution, project_root)
     return distribution
 
@@ -216,10 +224,13 @@ def _multi_reviewer_block(distribution: Distribution | None = None) -> str:
     available = resolve_review_clis()
     if not available:
         return ("### Multi-CLI distribution\n"
-                "No optional reviewer providers configured. Spawn two Codex "
-                "sub-agents in parallel by default, then aggregate their "
-                "independent verdicts. "
-                "Approval requires 2+ independent reviewer verdicts.\n")
+                "No optional reviewer providers configured. Spawn at least "
+                "one host-native reviewer sub-agent, then aggregate its independent "
+                "verdict. If the changed scope spans multiple areas, split the "
+                "scope and spawn one additional host-native reviewer sub-agent. "
+                "Each reviewer section must include `reviewer-source: sub-agent`. "
+                "Close sub-agent sessions after recording results. "
+                "Approval requires 1+ independent sub-agent reviewer verdict.\n")
     names = [c.name for c in available]
     lines = [
         "### Multi-CLI distribution",
@@ -236,12 +247,16 @@ def _multi_reviewer_block(distribution: Distribution | None = None) -> str:
     lines.append(
         "Capture each subprocess's stdout and aggregate into "
         "`final-review.md`. For host-CLI angles, use the host-native "
-        "parallel sub-agent mechanism."
+        "sub-agent mechanism with at least one reviewer sub-agent. Add one "
+        "more reviewer sub-agent when the changed scope spans multiple areas. "
+        "Each reviewer section must include `reviewer-source: sub-agent`. "
+        "Close sub-agent sessions after recording results."
     )
     if distribution is not None and distribution.insufficient_reviewers:
         lines.append(
-            "Only one external reviewer provider is available. Add Codex "
-            "sub-agents so the artifact contains 2+ independent reviewer verdicts."
+            "Only one reviewer provider is available. Ensure a host "
+            "sub-agent runs so the artifact contains 1+ independent sub-agent "
+            "reviewer verdict."
         )
     if distribution is not None:
         residual = residual_host_jobs(distribution)

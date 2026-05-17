@@ -176,24 +176,29 @@ phases:
 
   - id: final-review
     description: |
-      Final review. Always includes a generalist reviewer plus an
-      architecture-design reviewer (DDD + Clean Architecture + SOLID
-      combined). Profiles add stack-specific specialists on top.
+      Final review. Requires at least one active-host reviewer sub-agent.
+      Split scope across one additional reviewer sub-agent when changes span
+      multiple areas. Profiles add stack-specific specialists on top.
     multi_review: true
     routes:
       approve: commit
       request-changes: fix-loop
     prompt: |
-      Spawn two Codex sub-agents in parallel by default. Claude/Gemini
-      providers are optional extras when available:
+      Spawn at least one active-host reviewer sub-agent (Codex sub-agent in
+      Codex, Claude sub-agent in Claude, Gemini sub-agent in Gemini). If the
+      changed scope spans multiple areas, split the scope and spawn one
+      additional active-host reviewer sub-agent in parallel. Additional
+      non-host providers are optional extras when available:
         - Generalist (templates/_shared/review/architecture.md)
         - Architecture-design specialist (templates/_shared/review/architecture-design.md) — MANDATORY
         - Plus angles declared in profile.review_angles
+      Each reviewer section must include `reviewer-source: sub-agent`.
+      After recording each sub-agent result, close that sub-agent session.
       Aggregate findings into final-review.md with severity (must-fix /
       should-fix / note) and source angle. Cite paths as `path/to/file:line`.
       Apply agent-flow-concise-output: one finding per line, Korean concise
       prose, no emoji, and parser verdict markers unchanged.
-      End with exactly one verdict line: `verdict: approve` or
+      End with `## Overall` followed by exactly one verdict line: `verdict: approve` or
       `verdict: request-changes`.
 
   - id: fix-loop

@@ -70,7 +70,13 @@ for (const rel of fullFeatureWorkflowCopies) {
   assertFile(rel);
   assertContains(rel, "id: domain-grill");
   assertContains(rel, "context_docs_updated: true|not_needed");
-  assertContains(rel, "Default reviewers are two Codex sub-agents");
+  assertContains(rel, "Default reviewer is an active-host sub-agent");
+  assertContains(rel, "Gemini sub-agent in Gemini");
+  assertContains(rel, "reviewer-source: sub-agent");
+  assertContains(rel, "close that sub-agent session");
+  assertContains(rel, "## Overall");
+  assertContains(rel, "verdict: approve");
+  assertContains(rel, "verdict: request-changes");
   assertContains(rel, "multi_review: true");
   assertNotContains(rel, "id: domain-map");
   assertNotContains(rel, "grill-me");
@@ -78,7 +84,20 @@ for (const rel of fullFeatureWorkflowCopies) {
 
 assertSame("workflows/default.yaml", "src/agent_flow/workflows/default.yaml");
 assertSame("workflows/full-feature.yaml", "src/agent_flow/workflows/full-feature.yaml");
-assertContains(".agent-flow/prompts/multi-review.md", "Default reviewers are two Codex sub-agents");
+assertContains("workflows/default.yaml", "active-host reviewer sub-agent");
+assertContains("workflows/default.yaml", "Gemini sub-agent in Gemini");
+assertContains("workflows/default.yaml", "reviewer-source: sub-agent");
+assertContains("workflows/default.yaml", "close that sub-agent session");
+assertContains("workflows/default.yaml", "## Overall");
+assertContains("workflows/default.yaml", "verdict: approve");
+assertContains("workflows/default.yaml", "verdict: request-changes");
+assertContains(".agent-flow/prompts/multi-review.md", "Default reviewer is an active-host sub-agent");
+assertContains(".agent-flow/prompts/multi-review.md", "Gemini sub-agent in Gemini");
+assertContains(".agent-flow/prompts/multi-review.md", "reviewer-source: sub-agent");
+assertContains(".agent-flow/prompts/multi-review.md", "close that sub-agent session");
+assertContains(".agent-flow/prompts/multi-review.md", "## Overall");
+assertContains(".agent-flow/prompts/multi-review.md", "verdict: approve");
+assertContains(".agent-flow/prompts/multi-review.md", "verdict: request-changes");
 
 // skill source와 설치본이 달라지면 다른 프로젝트로 전파될 때 기준이 갈린다.
 assertSame("skills/grill-with-docs/SKILL.md", ".agent-flow/skills/grill-with-docs/SKILL.md");
@@ -136,12 +155,25 @@ for (const rel of [
   assertContains(rel, "install은 프로젝트당 1회만");
   assertContains(rel, "next_command");
   assertContains(rel, "짧은 한글");
-  assertContains(rel, "Codex sub-agent 2개");
+  assertContains(rel, "현재 사용 중인 CLI(활성 host)의 sub-agent 1개가 필수");
+  assertContains(rel, "활성 host가 아닌 추가 provider는 optional");
+  assertNotContains(rel, "예: Claude/Gemini");
+  assertContains(rel, "reviewer-source: sub-agent");
+  assertContains(rel, "sub-agent를 닫는다");
+  assertContains(rel, "## Overall");
+  assertContains(rel, "verdict: approve");
+  assertContains(rel, "verdict: request-changes");
 }
 
 assertContains(".agent-flow/rules/workflow-contract.md", "gates: all_passed");
 assertContains(".agent-flow/rules/workflow-contract.md", "short Korean");
-assertContains(".agent-flow/rules/workflow-contract.md", "two Codex sub-agents");
+assertContains(".agent-flow/rules/workflow-contract.md", "one active-host sub-agent");
+assertContains(".agent-flow/rules/workflow-contract.md", "Gemini sub-agent in Gemini");
+assertContains(".agent-flow/rules/workflow-contract.md", "reviewer-source: sub-agent");
+assertContains(".agent-flow/rules/workflow-contract.md", "close that sub-agent session");
+assertContains(".agent-flow/rules/workflow-contract.md", "## Overall");
+assertContains(".agent-flow/rules/workflow-contract.md", "verdict: approve");
+assertContains(".agent-flow/rules/workflow-contract.md", "verdict: request-changes");
 
 if (failures.length > 0) {
   console.error(`agent-flow-parity: FAIL (${failures.length})`);
