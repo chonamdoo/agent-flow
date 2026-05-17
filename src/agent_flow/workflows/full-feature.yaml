@@ -146,19 +146,25 @@ phases:
       Output: gates.md.
 
   - id: multi-review
-    description: Run implementation review with 2+ independent reviewers. Runner routes approve→architecture-review, request-changes→fix-loop.
+    description: Run implementation review with at least one independent sub-agent reviewer. Runner routes approve→architecture-review, request-changes→fix-loop.
     multi_review: true
     routes:
       approve: architecture-review
       request-changes: fix-loop
     prompt: |
-      Run 2+ independent reviewer agents. Each reviewer uses code-reviewer.md
-      as basis and outputs an independent verdict: approve or request-changes.
+      Run at least one independent sub-agent reviewer. If the changed scope
+      spans multiple areas, split the scope and run one additional reviewer
+      sub-agent in parallel. Each reviewer uses code-reviewer.md as basis and
+      outputs an independent verdict: approve or request-changes.
       Any request-changes from any reviewer makes the overall verdict
-      request-changes. Default reviewers are two Codex sub-agents; Claude/Gemini
-      are optional when available. Provider failure falls back to Codex
-      sub-agents only. Record per-reviewer verdicts and write a single overall
-      verdict line: `verdict: approve` or `verdict: request-changes`.
+      request-changes. Default reviewer is an active-host sub-agent (Codex
+      sub-agent in Codex, Claude sub-agent in Claude). Claude/Gemini are
+      optional when available. Provider failure falls back to active-host
+      sub-agents only. Each reviewer section must include
+      `reviewer-source: sub-agent`. After recording each sub-agent result,
+      close that sub-agent session. Record per-reviewer verdicts and end with
+      `## Overall` followed by exactly one verdict line: `verdict: approve` or
+      `verdict: request-changes`.
       Apply agent-flow-concise-output: one finding per line, Korean concise
       prose, no emoji, and parser verdict markers unchanged.
       Output: multi-review.md.

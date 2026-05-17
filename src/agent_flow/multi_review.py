@@ -2,9 +2,10 @@
 
 The final-review phase fans out N review angles. Distribution rules:
 
-  - Default → host AI must use two Codex sub-agents.
-  - 1 opt-in CLI → all angles to that CLI plus Codex sub-agent fallback so the
-    final artifact still has 2+ independent reviewer verdicts.
+  - Default → host AI must use at least one host-native sub-agent.
+  - Scope split → host AI adds one more sub-agent when changes span areas.
+  - 1 opt-in CLI → all angles to that CLI plus host sub-agent fallback so the
+    final artifact still has at least one independent reviewer verdict.
   - 2+ opt-in CLIs → round-robin assignment, host CLI last.
 
 Async execution:
@@ -55,7 +56,7 @@ class Distribution:
 
     def summary(self) -> str:
         if self.fallback_to_generic:
-            return "Codex sub-agents (host records 2+ independent reviewer verdicts)"
+            return "host-native sub-agent required (host records reviewer verdict)"
         parts = [f"{cli}:{len(jobs)}" for cli, jobs in self.by_cli.items() if jobs]
         if self.host:
             parts.append(f"(host={self.host})")
@@ -74,12 +75,12 @@ def resolve_review_clis() -> list[CliInfo]:
     return out
 
 
-def distribute(jobs: list[ReviewerJob]) -> Distribution:
+def distribute(jobs: list[ReviewerJob], host: str | None = None) -> Distribution:
     """Round-robin angles across available CLIs, host last."""
     if not jobs:
         return Distribution()
     available = resolve_review_clis()
-    host = detect_host_cli()
+    host = host or detect_host_cli()
     if not available:
         return Distribution(
             fallback_jobs=list(jobs),
@@ -95,6 +96,9 @@ def distribute(jobs: list[ReviewerJob]) -> Distribution:
     for i, job in enumerate(jobs):
         cli = ordered[i % len(ordered)]
         by_cli[cli.name].append(job)
+    if host and not by_cli.get(host):
+        by_cli.setdefault(host, [])
+        by_cli[host].append(jobs[0])
     return Distribution(
         by_cli=by_cli,
         insufficient_reviewers=len(ordered) < 2,

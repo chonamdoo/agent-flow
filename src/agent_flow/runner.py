@@ -318,11 +318,17 @@ class Runner:
         assert self.run_dir is not None
         artifact = self.run_dir / f"{phase.id}.md"
         text = artifact.read_text(encoding="utf-8") if artifact.exists() else ""
-        key = _route_key(text)
+        key = _multi_review_route_key(text) if phase.multi_review else _route_key(text)
         target = phase.routes.get(key)
-        if phase.multi_review and key in {"approve", "green"}:
-            if _independent_reviewer_verdict_count(text) < 2:
-                print("  [block] multi-review requires 2+ independent reviewer verdicts")
+        if phase.multi_review:
+            if key == "missing-reviewer":
+                print("  [block] multi-review requires 1+ independent sub-agent reviewer verdict")
+                return current_index, True
+            if key == "invalid-verdict":
+                print("  [block] multi-review requires overall verdict approve or request-changes")
+                return current_index, True
+            if key == "default":
+                print("  [block] multi-review requires top-level verdict line")
                 return current_index, True
         if phase.id == "gates":
             if target == "fix-loop":
@@ -558,19 +564,109 @@ def _route_key(text: str) -> str:
     return "default"
 
 
+def _multi_review_route_key(text: str) -> str:
+    verdicts = _independent_reviewer_verdicts(text)
+    if _legacy_multi_review_request_changes(text):
+        return "request-changes"
+    overall = _multi_review_overall_route_key(text)
+    if not verdicts:
+        return "missing-reviewer"
+    if overall == "default":
+        return "default"
+    if overall == "invalid-verdict":
+        return "invalid-verdict"
+    if "request-changes" in verdicts.values() or overall == "request-changes":
+        return "request-changes"
+    if overall == "approve":
+        return "approve"
+    return "invalid-verdict"
+
+
+def _legacy_multi_review_request_changes(text: str) -> bool:
+    lines = [line.strip().lower() for line in text.splitlines() if line.strip()]
+    return len(lines) == 1 and lines[0] in {
+        "verdict: request-changes",
+        "status: failed",
+        "status: fail",
+    }
+
+
+def _multi_review_overall_route_key(text: str) -> str:
+    in_overall_section = False
+    verdicts: list[str] = []
+    overall_sections = 0
+    for line in text.splitlines():
+        stripped = line.strip().lower()
+        heading = re.match(r"^(#{1,6})\s+(.+)$", stripped)
+        if heading:
+            title = heading.group(2)
+            in_overall_section = bool(
+                heading.group(1) == "##"
+                and title == "overall"
+            )
+            if in_overall_section:
+                overall_sections += 1
+            continue
+        if not in_overall_section:
+            continue
+        match = re.match(r"^verdict:\s*([a-z_-]+)\s*$", stripped)
+        if not match:
+            continue
+        verdicts.append(match.group(1))
+    if overall_sections > 1:
+        return "invalid-verdict"
+    if not verdicts:
+        return "default"
+    if len(verdicts) != 1:
+        return "invalid-verdict"
+    return verdicts[0]
+
+
+def _route_alias(raw: str) -> str:
+    aliases = {
+        "has_comments": "comments",
+        "has-comments": "comments",
+        "ci_failed": "ci-failed",
+        "failed": "request-changes",
+        "fail": "request-changes",
+        "passed": "green",
+        "pass": "green",
+    }
+    return aliases.get(raw, raw)
+
+
 def _independent_reviewer_verdict_count(text: str) -> int:
-    reviewers: set[str] = set()
+    return len(_independent_reviewer_verdicts(text))
+
+
+def _independent_reviewer_verdicts(text: str) -> dict[str, str]:
+    reviewers: dict[str, dict[str, object]] = {}
     current_reviewer: str | None = None
     for line in text.splitlines():
         stripped = line.strip()
         lowered = stripped.lower()
         if not stripped:
-            current_reviewer = None
             continue
         if stripped.startswith("#"):
-            heading = re.match(r"^#{1,6}\s*reviewer\s+(.+)$", lowered)
-            key = _normalized_reviewer_heading_id(heading.group(1) if heading else "")
-            current_reviewer = key or None
+            if re.match(r"^##\s*(?:overall|final)(?:\s+verdict)?\s*$", lowered):
+                current_reviewer = None
+                continue
+            heading = re.match(r"^##\s*reviewer\s+(.+)$", lowered)
+            if heading:
+                key = _normalized_reviewer_heading_id(heading.group(1))
+                current_reviewer = key or None
+            continue
+        source_match = re.match(
+            r"^(reviewer[-_ ]?[a-z0-9-]+)\s+(?:reviewer[-_ ]?source|source):\s*(.+)$",
+            lowered,
+        )
+        if source_match:
+            key = _normalized_reviewer_id(source_match.group(1))
+            if key and _is_subagent_source(source_match.group(2)):
+                reviewers.setdefault(key, {"subagent": False, "verdict": None})["subagent"] = True
+            continue
+        if current_reviewer is not None and _line_marks_subagent_source(lowered):
+            reviewers.setdefault(current_reviewer, {"subagent": False, "verdict": None})["subagent"] = True
             continue
         if "verdict:" not in lowered:
             continue
@@ -583,10 +679,25 @@ def _independent_reviewer_verdict_count(text: str) -> int:
         if prefix:
             key = _normalized_reviewer_id(prefix)
             if key:
-                reviewers.add(key)
+                reviewers.setdefault(key, {"subagent": False, "verdict": None})["verdict"] = verdict
         elif current_reviewer is not None:
-            reviewers.add(current_reviewer)
-    return len(reviewers)
+            reviewers.setdefault(current_reviewer, {"subagent": False, "verdict": None})["verdict"] = verdict
+    return {
+        reviewer: str(state["verdict"])
+        for reviewer, state in reviewers.items()
+        if state["subagent"] and state["verdict"]
+    }
+
+
+def _line_marks_subagent_source(value: str) -> bool:
+    return bool(
+        re.search(r"(?:reviewer[-_ ]?source|source)\s*:\s*(.+)$", value)
+        and _is_subagent_source(value)
+    )
+
+
+def _is_subagent_source(value: str) -> bool:
+    return bool(re.search(r"\bsub[-_ ]?agent\b", value))
 
 
 def _reviewer_key(value: str) -> str:

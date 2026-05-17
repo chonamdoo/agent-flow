@@ -1066,34 +1066,79 @@ function assertMinReviewerCount(pathName, minimum) {
 
 function readMultiReviewVerdict(pathName) {
   const content = fs.readFileSync(pathName, "utf8");
-  const reviewers = parseReviewerVerdicts(content);
-  if (reviewers.size < 2) {
-    throw new Error("blocked: multi-review artifact must contain at least 2 independent reviewer verdicts");
-  }
-  const overall = readArtifactVerdict(pathName);
-  const verdicts = [...reviewers.values()];
-  if (verdicts.includes("request-changes")) {
+  if (isLegacyMultiReviewRequestChanges(content)) {
     return "request-changes";
   }
+  const overall = readMultiReviewOverallVerdict(content);
+  if (overall && !["approve", "request-changes"].includes(overall)) {
+    throw new Error("blocked: multi-review artifact overall verdict must be approve or request-changes");
+  }
+  const reviewers = parseReviewerVerdicts(content);
+  if (reviewers.size < 1) {
+    throw new Error("blocked: multi-review artifact must contain at least 1 independent sub-agent reviewer verdict");
+  }
+  const verdicts = [...reviewers.values()];
   if (overall === "approve" && verdicts.every((verdict) => verdict === "approve")) {
     return "approve";
   }
-  if (overall === "request-changes") {
+  if (overall === "request-changes" || (overall && verdicts.includes("request-changes"))) {
     return "request-changes";
   }
   throw new Error("blocked: multi-review artifact must include matching reviewer verdicts and overall verdict");
 }
 
+function isLegacyMultiReviewRequestChanges(content) {
+  const lines = content.split(/\r?\n/).map((line) => line.trim().toLowerCase()).filter(Boolean);
+  return lines.length === 1 && [
+    "verdict: request-changes",
+    "status: failed",
+    "status: fail",
+  ].includes(lines[0]);
+}
+
+function readMultiReviewOverallVerdict(content) {
+  const sections = content.split(/^##[ \t]+Overall[ \t]*$/im);
+  if (sections.length < 2) {
+    return undefined;
+  }
+  if (sections.length > 2) {
+    return "invalid-verdict";
+  }
+  const overallBlock = sections[sections.length - 1].split(/^#{1,6}[ \t]+/m, 1)[0] ?? "";
+  const verdicts = [...overallBlock.matchAll(/^verdict:\s*([a-z-]+)\s*$/gim)]
+    .map((match) => match[1].toLowerCase());
+  if (verdicts.length === 0) {
+    return undefined;
+  }
+  if (verdicts.length !== 1) {
+    return "invalid-verdict";
+  }
+  return verdicts[0];
+}
+
 function parseReviewerVerdicts(content) {
   // reviewer id를 키로 정규화해 한 reviewer가 여러 번 approve를 찍어도 독립 리뷰로 세지 않는다.
   const reviewers = new Map();
+  const stateFor = (reviewerId) => {
+    if (!reviewers.has(reviewerId)) {
+      reviewers.set(reviewerId, { subagent: false, verdict: undefined });
+    }
+    return reviewers.get(reviewerId);
+  };
+  const sourcePattern = /^(reviewer[-_ ]?[a-z0-9-]+)\s+(?:reviewer[-_ ]?source|source):\s*(.+)$/gim;
+  for (const match of content.matchAll(sourcePattern)) {
+    const reviewerId = normalizeReviewerId(match[1]);
+    if (reviewerId && isSubagentSource(match[2])) {
+      stateFor(reviewerId).subagent = true;
+    }
+  }
   const linePattern = /^reviewer[-_ ]?([a-z0-9-]*)[^\n]*verdict:\s*(approve|request-changes)\s*$/gim;
   for (const match of content.matchAll(linePattern)) {
     const reviewerId = normalizeReviewerId(match[1]);
     if (!reviewerId) {
       continue;
     }
-    reviewers.set(reviewerId, match[2].toLowerCase());
+    stateFor(reviewerId).verdict = match[2].toLowerCase();
   }
   const sections = content.split(/^##[ \t]+Reviewer[ \t]*([^\n]*)/im);
   for (let index = 1; index < sections.length; index += 2) {
@@ -1101,13 +1146,28 @@ function parseReviewerVerdicts(content) {
     if (!reviewerId) {
       continue;
     }
-    const reviewerBlock = sections[index + 1]?.split(/\n\s*\n/, 1)[0] ?? "";
+    const reviewerBlock = sections[index + 1]?.split(/\n##[ \t]+(?:Reviewer|Overall|Final)\b/i, 1)[0] ?? "";
+    if (hasSubagentSource(reviewerBlock)) {
+      stateFor(reviewerId).subagent = true;
+    }
     const verdict = reviewerBlock.match(/^\s*verdict:\s*(approve|request-changes)\s*$/im)?.[1]?.toLowerCase();
     if (verdict) {
-      reviewers.set(reviewerId, verdict);
+      stateFor(reviewerId).verdict = verdict;
     }
   }
-  return reviewers;
+  return new Map(
+    [...reviewers.entries()]
+      .filter(([, state]) => state.subagent && state.verdict)
+      .map(([reviewerId, state]) => [reviewerId, state.verdict])
+  );
+}
+
+function hasSubagentSource(value) {
+  return /(?:reviewer[-_ ]?source|source)\s*:\s*.*\bsub[-_ ]?agent\b/i.test(value);
+}
+
+function isSubagentSource(value) {
+  return /\bsub[-_ ]?agent\b/i.test(value);
 }
 
 function normalizeReviewerId(value) {
@@ -1210,7 +1270,7 @@ Follow the CLI output exactly. If no run is active, start with \`${AGENT_FLOW_CO
 - phase 이동은 status의 \`next_command\`를 그대로 따른다. \`${AGENT_FLOW_COMMAND} continue\`나 \`${AGENT_FLOW_COMMAND} run advance\`를 추측하지 않는다.
 - \`default.yaml\`: design → slice-plan → worktree → implement → final-review ↔ fix-loop → commit → push-pr → pr-watch → merge → cleanup
 - \`full-feature.yaml\`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → gates ↔ fix-loop → multi-review → architecture-review → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
-- \`multi-review\` 기본은 Codex sub-agent 2개. Claude/Gemini는 optional이며, 2+ 독립 reviewer 없이는 approve 불가.
+- \`multi-review\`는 현재 사용 중인 CLI의 sub-agent 1개가 필수다. 범위가 나뉘면 추가 sub-agent 1개를 병렬 실행하고, \`reviewer-source: sub-agent\`를 기록한 뒤 sub-agent를 닫는다. 마지막에 \`## Overall\`과 \`verdict: approve\` 또는 \`verdict: request-changes\`만 기록한다. Claude/Gemini는 optional이다.
 
 ### Context Economy
 
@@ -1285,7 +1345,7 @@ Follow the CLI output exactly. Git projects start inside \`.agent-flow/worktrees
 - phase 이동은 status의 \`next_command\`를 그대로 따른다. \`${AGENT_FLOW_COMMAND} continue\`나 \`${AGENT_FLOW_COMMAND} run advance\`를 추측하지 않는다.
 - \`default.yaml\`: design → slice-plan → worktree → implement → final-review ↔ fix-loop → commit → push-pr → pr-watch → merge → cleanup
 - \`full-feature.yaml\`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → gates ↔ fix-loop → multi-review → architecture-review → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
-- \`multi-review\` 기본은 Codex sub-agent 2개. Claude/Gemini는 optional이며, 2+ 독립 reviewer 없이는 approve 불가.
+- \`multi-review\`는 현재 사용 중인 CLI의 sub-agent 1개가 필수다. 범위가 나뉘면 추가 sub-agent 1개를 병렬 실행하고, \`reviewer-source: sub-agent\`를 기록한 뒤 sub-agent를 닫는다. 마지막에 \`## Overall\`과 \`verdict: approve\` 또는 \`verdict: request-changes\`만 기록한다. Claude/Gemini는 optional이다.
 
 ### Context Economy
 
@@ -1364,7 +1424,7 @@ const PHASES = [
       "Apply code-generation-discipline. Refactor only after green, keep behavior stable, apply selected language-specific guides as secondary checklists, keep required Korean code comments, and summarize changed structure.",
   },
   { id: "gates", artifact: "artifacts/gate-results.json", instruction: "Run build, typecheck, lint, tests, and context lint according to the active profile. Docs-only changes must still run context lint. Save structured JSON with a top-level passed boolean and a results array." },
-  { id: "multi-review", artifact: "artifacts/multi-review.md", multi_review: true, instruction: "Run 2+ independent reviewer agents. Each reviewer uses code-reviewer.md and agent-flow-concise-output as basis and outputs an independent verdict: approve or request-changes. Any request-changes from any reviewer makes the overall verdict request-changes. Default reviewers are two Codex sub-agents; Claude/Gemini are optional when available. Provider failure falls back to Codex sub-agents only. Record per-reviewer verdicts and write a single overall verdict line." },
+  { id: "multi-review", artifact: "artifacts/multi-review.md", multi_review: true, instruction: "Run at least one independent active-host sub-agent reviewer. If the changed scope spans multiple areas, split the scope and run one additional reviewer sub-agent in parallel. Each reviewer uses code-reviewer.md and agent-flow-concise-output as basis and outputs an independent verdict: approve or request-changes. Any request-changes from any reviewer makes the overall verdict request-changes. Default reviewer is an active-host sub-agent; Claude/Gemini are optional when available. Provider failure falls back to active-host sub-agents only. Each reviewer section must include reviewer-source: sub-agent. After recording each sub-agent result, close that sub-agent session. Record per-reviewer verdicts and end with ## Overall followed by exactly one verdict line: verdict: approve or verdict: request-changes." },
   {
     id: "fix-loop",
     artifact: "artifacts/fix-loop.md",
@@ -1596,7 +1656,7 @@ Implementation rules:
 - Apply \`code-generation-discipline\` during red, green, refactor, and fix-loop phases. Language-specific guide and comment rules follow the \`code-generation-discipline\` Before Starting checklist.
 - If review or QA fails, return to the fix phase before continuing.
 - The gates->fix-loop->gates loop re-verifies after every fix. multi-review approve skips fix-loop; request-changes routes through fix-loop->gates.
-- Code review defaults to two Codex sub-agents. Claude/Gemini are optional providers, and approve requires 2+ independent reviewer verdicts.
+- Code review requires at least one active-host sub-agent. If the changed scope spans multiple areas, run one additional active-host sub-agent in parallel. Claude/Gemini are optional providers, and approve requires 1+ independent sub-agent reviewer verdict with reviewer-source: sub-agent. After recording each sub-agent result, close that sub-agent session. End multi-review artifacts with ## Overall followed by exactly one verdict line: verdict: approve or verdict: request-changes.
 - In the default workflow, gates are enforced by the \`implement\` phase completion marker: \`gates: all_passed\`.
 
 Document size rules:
