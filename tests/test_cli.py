@@ -231,11 +231,17 @@ class CliTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"AGENT_FLOW_REVIEWERS": "codex"}, clear=True):
             self.assertEqual([cli.name for cli in resolve_review_clis()], ["codex"])
         with mock.patch.dict(os.environ, {"AGENT_FLOW_REVIEWERS": "claude,gemini"}, clear=True):
-            distribution = distribute([
+            jobs = [
                 ReviewerJob("generalist", "prompt", Path("generalist.md")),
                 ReviewerJob("architecture-design", "prompt", Path("architecture-design.md")),
-            ], host="codex")
-            self.assertEqual([job.angle_id for job in residual_host_jobs(distribution)], ["generalist"])
+            ]
+            distribution = distribute(jobs, host="codex")
+            host_jobs = residual_host_jobs(distribution)
+            assigned_jobs = [job for assigned in distribution.by_cli.values() for job in assigned]
+            self.assertGreater(len(host_jobs), 0)
+            self.assertTrue({job.angle_id for job in host_jobs}.issubset({job.angle_id for job in jobs}))
+            self.assertEqual(len(assigned_jobs), len(jobs))
+            self.assertEqual({id(job) for job in assigned_jobs}, {id(job) for job in jobs})
         with mock.patch.dict(os.environ, {"AGENT_FLOW_REVIEWERS": "codex,claude"}, clear=True):
             distribution = distribute([
                 ReviewerJob("generalist", "prompt", Path("generalist.md")),
@@ -288,6 +294,10 @@ class CliTest(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(runner._next_index(0, phase), (0, True))
+
+            for legacy_status in ("verdict: request-changes\n", "status: failed\n", "status: fail\n"):
+                (run_dir / "multi-review.md").write_text(legacy_status, encoding="utf-8")
+                self.assertEqual(runner._next_index(0, phase), (0, True))
 
             (run_dir / "multi-review.md").write_text(
                 "## Reviewer 1\n\nreviewer-source: sub-agent\nverdict: approve\n",
@@ -603,7 +613,7 @@ class CliTest(unittest.TestCase):
                 (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
-                "현재 사용 중인 CLI의 sub-agent 1개가 필수",
+                "현재 사용 중인 CLI(활성 host)의 sub-agent 1개가 필수",
                 (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
@@ -631,7 +641,7 @@ class CliTest(unittest.TestCase):
                 (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
-                "현재 사용 중인 CLI의 sub-agent 1개가 필수",
+                "현재 사용 중인 CLI(활성 host)의 sub-agent 1개가 필수",
                 (project_root / "AGENTS.md").read_text(encoding="utf-8"),
             )
             agent_flow_skill = (project_root / ".agent-flow" / "skills" / "agent-flow" / "SKILL.md").read_text(
@@ -1145,10 +1155,15 @@ class CliTest(unittest.TestCase):
 
             self.assertIn("id: full-feature", workflow.read_text(encoding="utf-8"))
             self.assertIn("Default reviewer is an active-host sub-agent", workflow.read_text(encoding="utf-8"))
+            self.assertIn("Gemini sub-agent in Gemini", workflow.read_text(encoding="utf-8"))
             self.assertIn("multi_review: true", workflow.read_text(encoding="utf-8"))
             self.assertIn("status: ci-failed", prompt.read_text(encoding="utf-8"))
             self.assertIn(
                 "Default reviewer is an active-host sub-agent",
+                (project_root / ".agent-flow" / "prompts" / "multi-review.md").read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "Gemini sub-agent in Gemini",
                 (project_root / ".agent-flow" / "prompts" / "multi-review.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
@@ -1174,9 +1189,15 @@ class CliTest(unittest.TestCase):
             self.assertIn('agent-flow run "<task>"', bootstrap.read_text(encoding="utf-8"))
             self.assertIn('agent-flow run "<task>"', claude_bootstrap.read_text(encoding="utf-8"))
             self.assertIn('agent-flow run "<task>"', gemini_bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("현재 사용 중인 CLI의 sub-agent 1개가 필수", bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("현재 사용 중인 CLI의 sub-agent 1개가 필수", claude_bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("현재 사용 중인 CLI의 sub-agent 1개가 필수", gemini_bootstrap.read_text(encoding="utf-8"))
+            self.assertIn("현재 사용 중인 CLI(활성 host)의 sub-agent 1개가 필수", bootstrap.read_text(encoding="utf-8"))
+            self.assertIn("현재 사용 중인 CLI(활성 host)의 sub-agent 1개가 필수", claude_bootstrap.read_text(encoding="utf-8"))
+            self.assertIn("현재 사용 중인 CLI(활성 host)의 sub-agent 1개가 필수", gemini_bootstrap.read_text(encoding="utf-8"))
+            self.assertIn("활성 host가 아닌 추가 provider는 optional", bootstrap.read_text(encoding="utf-8"))
+            self.assertIn("활성 host가 아닌 추가 provider는 optional", claude_bootstrap.read_text(encoding="utf-8"))
+            self.assertIn("활성 host가 아닌 추가 provider는 optional", gemini_bootstrap.read_text(encoding="utf-8"))
+            self.assertNotIn("예: Claude/Gemini", bootstrap.read_text(encoding="utf-8"))
+            self.assertNotIn("예: Claude/Gemini", claude_bootstrap.read_text(encoding="utf-8"))
+            self.assertNotIn("예: Claude/Gemini", gemini_bootstrap.read_text(encoding="utf-8"))
             self.assertIn("reviewer-source: sub-agent", bootstrap.read_text(encoding="utf-8"))
             self.assertIn("reviewer-source: sub-agent", claude_bootstrap.read_text(encoding="utf-8"))
             self.assertIn("reviewer-source: sub-agent", gemini_bootstrap.read_text(encoding="utf-8"))
@@ -1195,6 +1216,7 @@ class CliTest(unittest.TestCase):
             self.assertIn("Full Feature Workflow", skill.read_text(encoding="utf-8"))
             self.assertIn("Workflow Contract", rules.read_text(encoding="utf-8"))
             self.assertIn("one active-host sub-agent", rules.read_text(encoding="utf-8"))
+            self.assertIn("Gemini sub-agent in Gemini", rules.read_text(encoding="utf-8"))
             self.assertIn("reviewer-source: sub-agent", rules.read_text(encoding="utf-8"))
             self.assertIn("close that sub-agent session", rules.read_text(encoding="utf-8"))
             self.assertIn("## Overall", rules.read_text(encoding="utf-8"))
@@ -2270,6 +2292,18 @@ class CliTest(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 1)
             self.assertIn("at least 1 independent sub-agent reviewer verdict", result.stderr)
+
+            for legacy_status in ("verdict: request-changes\n", "status: failed\n", "status: fail\n"):
+                mr_artifact.write_text(legacy_status, encoding="utf-8")
+                result = subprocess.run(
+                    (node, cli, "run", "advance"),
+                    cwd=project_root,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("at least 1 independent sub-agent reviewer verdict", result.stderr)
 
             mr_artifact.write_text(
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n",
@@ -3445,7 +3479,12 @@ class CliTest(unittest.TestCase):
             runner.run_dir = run_dir
             runner.phases = [phase, Phase(id="fix-loop", description=""), Phase(id="commit", description="")]
 
-            (run_dir / "final-review.md").write_text("verdict: request-changes\n", encoding="utf-8")
+            (run_dir / "final-review.md").write_text(
+                "## Reviewer 1\nreviewer-source: sub-agent\nverdict: request-changes\n\n"
+                "## Overall\n"
+                "verdict: request-changes\n",
+                encoding="utf-8",
+            )
             self.assertEqual(runner._next_index(0, phase), (1, False))
 
             (run_dir / "final-review.md").write_text(

@@ -158,9 +158,10 @@ phases:
       outputs an independent verdict: approve or request-changes.
       Any request-changes from any reviewer makes the overall verdict
       request-changes. Default reviewer is an active-host sub-agent (Codex
-      sub-agent in Codex, Claude sub-agent in Claude). Claude/Gemini are
-      optional when available. Provider failure falls back to active-host
-      sub-agents only. Each reviewer section must include
+      sub-agent in Codex, Claude sub-agent in Claude, Gemini sub-agent in Gemini).
+      Additional non-host providers are optional when available.
+      Provider failure falls back to active-host sub-agents only. Each reviewer
+      section must include
       `reviewer-source: sub-agent`. After recording each sub-agent result,
       close that sub-agent session. Record per-reviewer verdicts and end with
       `## Overall` followed by exactly one verdict line: `verdict: approve` or

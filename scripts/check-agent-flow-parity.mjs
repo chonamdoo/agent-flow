@@ -71,6 +71,7 @@ for (const rel of fullFeatureWorkflowCopies) {
   assertContains(rel, "id: domain-grill");
   assertContains(rel, "context_docs_updated: true|not_needed");
   assertContains(rel, "Default reviewer is an active-host sub-agent");
+  assertContains(rel, "Gemini sub-agent in Gemini");
   assertContains(rel, "reviewer-source: sub-agent");
   assertContains(rel, "close that sub-agent session");
   assertContains(rel, "## Overall");
@@ -84,12 +85,14 @@ for (const rel of fullFeatureWorkflowCopies) {
 assertSame("workflows/default.yaml", "src/agent_flow/workflows/default.yaml");
 assertSame("workflows/full-feature.yaml", "src/agent_flow/workflows/full-feature.yaml");
 assertContains("workflows/default.yaml", "active-host reviewer sub-agent");
+assertContains("workflows/default.yaml", "Gemini sub-agent in Gemini");
 assertContains("workflows/default.yaml", "reviewer-source: sub-agent");
 assertContains("workflows/default.yaml", "close that sub-agent session");
 assertContains("workflows/default.yaml", "## Overall");
 assertContains("workflows/default.yaml", "verdict: approve");
 assertContains("workflows/default.yaml", "verdict: request-changes");
 assertContains(".agent-flow/prompts/multi-review.md", "Default reviewer is an active-host sub-agent");
+assertContains(".agent-flow/prompts/multi-review.md", "Gemini sub-agent in Gemini");
 assertContains(".agent-flow/prompts/multi-review.md", "reviewer-source: sub-agent");
 assertContains(".agent-flow/prompts/multi-review.md", "close that sub-agent session");
 assertContains(".agent-flow/prompts/multi-review.md", "## Overall");
@@ -152,7 +155,9 @@ for (const rel of [
   assertContains(rel, "install은 프로젝트당 1회만");
   assertContains(rel, "next_command");
   assertContains(rel, "짧은 한글");
-  assertContains(rel, "현재 사용 중인 CLI의 sub-agent 1개가 필수");
+  assertContains(rel, "현재 사용 중인 CLI(활성 host)의 sub-agent 1개가 필수");
+  assertContains(rel, "활성 host가 아닌 추가 provider는 optional");
+  assertNotContains(rel, "예: Claude/Gemini");
   assertContains(rel, "reviewer-source: sub-agent");
   assertContains(rel, "sub-agent를 닫는다");
   assertContains(rel, "## Overall");
@@ -163,6 +168,7 @@ for (const rel of [
 assertContains(".agent-flow/rules/workflow-contract.md", "gates: all_passed");
 assertContains(".agent-flow/rules/workflow-contract.md", "short Korean");
 assertContains(".agent-flow/rules/workflow-contract.md", "one active-host sub-agent");
+assertContains(".agent-flow/rules/workflow-contract.md", "Gemini sub-agent in Gemini");
 assertContains(".agent-flow/rules/workflow-contract.md", "reviewer-source: sub-agent");
 assertContains(".agent-flow/rules/workflow-contract.md", "close that sub-agent session");
 assertContains(".agent-flow/rules/workflow-contract.md", "## Overall");

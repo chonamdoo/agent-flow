@@ -566,8 +566,6 @@ def _route_key(text: str) -> str:
 
 def _multi_review_route_key(text: str) -> str:
     verdicts = _independent_reviewer_verdicts(text)
-    if _legacy_multi_review_request_changes(text):
-        return "request-changes"
     overall = _multi_review_overall_route_key(text)
     if not verdicts:
         return "missing-reviewer"
@@ -580,15 +578,6 @@ def _multi_review_route_key(text: str) -> str:
     if overall == "approve":
         return "approve"
     return "invalid-verdict"
-
-
-def _legacy_multi_review_request_changes(text: str) -> bool:
-    lines = [line.strip().lower() for line in text.splitlines() if line.strip()]
-    return len(lines) == 1 and lines[0] in {
-        "verdict: request-changes",
-        "status: failed",
-        "status: fail",
-    }
 
 
 def _multi_review_overall_route_key(text: str) -> str:
@@ -620,19 +609,6 @@ def _multi_review_overall_route_key(text: str) -> str:
     if len(verdicts) != 1:
         return "invalid-verdict"
     return verdicts[0]
-
-
-def _route_alias(raw: str) -> str:
-    aliases = {
-        "has_comments": "comments",
-        "has-comments": "comments",
-        "ci_failed": "ci-failed",
-        "failed": "request-changes",
-        "fail": "request-changes",
-        "passed": "green",
-        "pass": "green",
-    }
-    return aliases.get(raw, raw)
 
 
 def _independent_reviewer_verdict_count(text: str) -> int:

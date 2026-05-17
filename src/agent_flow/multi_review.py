@@ -97,8 +97,9 @@ def distribute(jobs: list[ReviewerJob], host: str | None = None) -> Distribution
         cli = ordered[i % len(ordered)]
         by_cli[cli.name].append(job)
     if host and not by_cli.get(host):
-        by_cli.setdefault(host, [])
-        by_cli[host].append(jobs[0])
+        donor_jobs = next((assigned for assigned in by_cli.values() if assigned), None)
+        if donor_jobs:
+            by_cli.setdefault(host, []).append(donor_jobs.pop(0))
     return Distribution(
         by_cli=by_cli,
         insufficient_reviewers=len(ordered) < 2,

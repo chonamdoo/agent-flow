@@ -1066,9 +1066,6 @@ function assertMinReviewerCount(pathName, minimum) {
 
 function readMultiReviewVerdict(pathName) {
   const content = fs.readFileSync(pathName, "utf8");
-  if (isLegacyMultiReviewRequestChanges(content)) {
-    return "request-changes";
-  }
   const overall = readMultiReviewOverallVerdict(content);
   if (overall && !["approve", "request-changes"].includes(overall)) {
     throw new Error("blocked: multi-review artifact overall verdict must be approve or request-changes");
@@ -1085,15 +1082,6 @@ function readMultiReviewVerdict(pathName) {
     return "request-changes";
   }
   throw new Error("blocked: multi-review artifact must include matching reviewer verdicts and overall verdict");
-}
-
-function isLegacyMultiReviewRequestChanges(content) {
-  const lines = content.split(/\r?\n/).map((line) => line.trim().toLowerCase()).filter(Boolean);
-  return lines.length === 1 && [
-    "verdict: request-changes",
-    "status: failed",
-    "status: fail",
-  ].includes(lines[0]);
 }
 
 function readMultiReviewOverallVerdict(content) {
@@ -1270,7 +1258,7 @@ Follow the CLI output exactly. If no run is active, start with \`${AGENT_FLOW_CO
 - phase 이동은 status의 \`next_command\`를 그대로 따른다. \`${AGENT_FLOW_COMMAND} continue\`나 \`${AGENT_FLOW_COMMAND} run advance\`를 추측하지 않는다.
 - \`default.yaml\`: design → slice-plan → worktree → implement → final-review ↔ fix-loop → commit → push-pr → pr-watch → merge → cleanup
 - \`full-feature.yaml\`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → gates ↔ fix-loop → multi-review → architecture-review → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
-- \`multi-review\`는 현재 사용 중인 CLI의 sub-agent 1개가 필수다. 범위가 나뉘면 추가 sub-agent 1개를 병렬 실행하고, \`reviewer-source: sub-agent\`를 기록한 뒤 sub-agent를 닫는다. 마지막에 \`## Overall\`과 \`verdict: approve\` 또는 \`verdict: request-changes\`만 기록한다. Claude/Gemini는 optional이다.
+- \`multi-review\`는 현재 사용 중인 CLI(활성 host)의 sub-agent 1개가 필수다. 범위가 나뉘면 추가 sub-agent 1개를 병렬 실행하고, \`reviewer-source: sub-agent\`를 기록한 뒤 sub-agent를 닫는다. 마지막에 \`## Overall\`과 \`verdict: approve\` 또는 \`verdict: request-changes\`만 기록한다. 활성 host가 아닌 추가 provider는 optional이다.
 
 ### Context Economy
 
@@ -1345,7 +1333,7 @@ Follow the CLI output exactly. Git projects start inside \`.agent-flow/worktrees
 - phase 이동은 status의 \`next_command\`를 그대로 따른다. \`${AGENT_FLOW_COMMAND} continue\`나 \`${AGENT_FLOW_COMMAND} run advance\`를 추측하지 않는다.
 - \`default.yaml\`: design → slice-plan → worktree → implement → final-review ↔ fix-loop → commit → push-pr → pr-watch → merge → cleanup
 - \`full-feature.yaml\`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → gates ↔ fix-loop → multi-review → architecture-review → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
-- \`multi-review\`는 현재 사용 중인 CLI의 sub-agent 1개가 필수다. 범위가 나뉘면 추가 sub-agent 1개를 병렬 실행하고, \`reviewer-source: sub-agent\`를 기록한 뒤 sub-agent를 닫는다. 마지막에 \`## Overall\`과 \`verdict: approve\` 또는 \`verdict: request-changes\`만 기록한다. Claude/Gemini는 optional이다.
+- \`multi-review\`는 현재 사용 중인 CLI(활성 host)의 sub-agent 1개가 필수다. 범위가 나뉘면 추가 sub-agent 1개를 병렬 실행하고, \`reviewer-source: sub-agent\`를 기록한 뒤 sub-agent를 닫는다. 마지막에 \`## Overall\`과 \`verdict: approve\` 또는 \`verdict: request-changes\`만 기록한다. 활성 host가 아닌 추가 provider는 optional이다.
 
 ### Context Economy
 
@@ -1424,7 +1412,7 @@ const PHASES = [
       "Apply code-generation-discipline. Refactor only after green, keep behavior stable, apply selected language-specific guides as secondary checklists, keep required Korean code comments, and summarize changed structure.",
   },
   { id: "gates", artifact: "artifacts/gate-results.json", instruction: "Run build, typecheck, lint, tests, and context lint according to the active profile. Docs-only changes must still run context lint. Save structured JSON with a top-level passed boolean and a results array." },
-  { id: "multi-review", artifact: "artifacts/multi-review.md", multi_review: true, instruction: "Run at least one independent active-host sub-agent reviewer. If the changed scope spans multiple areas, split the scope and run one additional reviewer sub-agent in parallel. Each reviewer uses code-reviewer.md and agent-flow-concise-output as basis and outputs an independent verdict: approve or request-changes. Any request-changes from any reviewer makes the overall verdict request-changes. Default reviewer is an active-host sub-agent; Claude/Gemini are optional when available. Provider failure falls back to active-host sub-agents only. Each reviewer section must include reviewer-source: sub-agent. After recording each sub-agent result, close that sub-agent session. Record per-reviewer verdicts and end with ## Overall followed by exactly one verdict line: verdict: approve or verdict: request-changes." },
+  { id: "multi-review", artifact: "artifacts/multi-review.md", multi_review: true, instruction: "Run at least one independent active-host sub-agent reviewer. If the changed scope spans multiple areas, split the scope and run one additional reviewer sub-agent in parallel. Each reviewer uses code-reviewer.md and agent-flow-concise-output as basis and outputs an independent verdict: approve or request-changes. Any request-changes from any reviewer makes the overall verdict request-changes. Default reviewer is an active-host sub-agent (Codex sub-agent in Codex, Claude sub-agent in Claude, Gemini sub-agent in Gemini); additional non-host providers are optional when available. Provider failure falls back to active-host sub-agents only. Each reviewer section must include reviewer-source: sub-agent. After recording each sub-agent result, close that sub-agent session. Record per-reviewer verdicts and end with ## Overall followed by exactly one verdict line: verdict: approve or verdict: request-changes." },
   {
     id: "fix-loop",
     artifact: "artifacts/fix-loop.md",
@@ -1656,7 +1644,7 @@ Implementation rules:
 - Apply \`code-generation-discipline\` during red, green, refactor, and fix-loop phases. Language-specific guide and comment rules follow the \`code-generation-discipline\` Before Starting checklist.
 - If review or QA fails, return to the fix phase before continuing.
 - The gates->fix-loop->gates loop re-verifies after every fix. multi-review approve skips fix-loop; request-changes routes through fix-loop->gates.
-- Code review requires at least one active-host sub-agent. If the changed scope spans multiple areas, run one additional active-host sub-agent in parallel. Claude/Gemini are optional providers, and approve requires 1+ independent sub-agent reviewer verdict with reviewer-source: sub-agent. After recording each sub-agent result, close that sub-agent session. End multi-review artifacts with ## Overall followed by exactly one verdict line: verdict: approve or verdict: request-changes.
+- Code review requires at least one active-host sub-agent (Codex sub-agent in Codex, Claude sub-agent in Claude, Gemini sub-agent in Gemini). If the changed scope spans multiple areas, run one additional active-host sub-agent in parallel. Additional non-host providers are optional, and approve requires 1+ independent sub-agent reviewer verdict with reviewer-source: sub-agent. After recording each sub-agent result, close that sub-agent session. End multi-review artifacts with ## Overall followed by exactly one verdict line: verdict: approve or verdict: request-changes.
 - In the default workflow, gates are enforced by the \`implement\` phase completion marker: \`gates: all_passed\`.
 
 Document size rules:

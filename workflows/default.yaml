@@ -185,10 +185,10 @@ phases:
       request-changes: fix-loop
     prompt: |
       Spawn at least one active-host reviewer sub-agent (Codex sub-agent in
-      Codex, Claude sub-agent in Claude). If the changed scope spans multiple
-      areas, split the scope and spawn one additional active-host reviewer
-      sub-agent in parallel. Claude/Gemini providers are optional extras when
-      available:
+      Codex, Claude sub-agent in Claude, Gemini sub-agent in Gemini). If the
+      changed scope spans multiple areas, split the scope and spawn one
+      additional active-host reviewer sub-agent in parallel. Additional
+      non-host providers are optional extras when available:
         - Generalist (templates/_shared/review/architecture.md)
         - Architecture-design specialist (templates/_shared/review/architecture-design.md) — MANDATORY
         - Plus angles declared in profile.review_angles
