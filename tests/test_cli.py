@@ -308,7 +308,10 @@ class CliTest(unittest.TestCase):
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (0, True))
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(runner._next_index(0, phase), (0, True))
+            self.assertIn("requires ## Overall with exactly one verdict", output.getvalue())
 
             for legacy_status in ("verdict: request-changes\n", "status: failed\n", "status: fail\n"):
                 (run_dir / "multi-review.md").write_text(legacy_status, encoding="utf-8")

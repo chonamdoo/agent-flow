@@ -328,7 +328,10 @@ class Runner:
                 print("  [block] multi-review requires overall verdict approve or request-changes")
                 return current_index, True
             if key == "default":
-                print("  [block] multi-review requires top-level verdict line")
+                print(
+                    "  [block] multi-review requires ## Overall with exactly one "
+                    "verdict: approve or verdict: request-changes line"
+                )
                 return current_index, True
         if phase.id == "gates":
             if target == "fix-loop":
