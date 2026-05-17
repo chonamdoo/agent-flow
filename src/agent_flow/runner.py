@@ -666,14 +666,13 @@ def _independent_reviewer_verdicts(text: str) -> dict[str, str]:
 
 
 def _line_marks_subagent_source(value: str) -> bool:
-    return bool(
-        re.search(r"(?:reviewer[-_ ]?source|source)\s*:\s*(.+)$", value)
-        and _is_subagent_source(value)
-    )
+    source_match = re.search(r"(?:reviewer[-_ ]?source|source)\s*:\s*(.+)$", value)
+    return bool(source_match and _is_subagent_source(source_match.group(1)))
 
 
 def _is_subagent_source(value: str) -> bool:
-    return bool(re.search(r"\bsub[-_ ]?agent\b", value))
+    normalized = re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+    return normalized in {"sub agent", "subagent"}
 
 
 def _reviewer_key(value: str) -> str:

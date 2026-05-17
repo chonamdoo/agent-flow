@@ -1151,11 +1151,13 @@ function parseReviewerVerdicts(content) {
 }
 
 function hasSubagentSource(value) {
-  return /(?:reviewer[-_ ]?source|source)\s*:\s*.*\bsub[-_ ]?agent\b/i.test(value);
+  const sourcePattern = /(?:^|\n)\s*(?:reviewer[-_ ]?source|source)\s*:\s*([^\n]+)/gi;
+  return [...String(value).matchAll(sourcePattern)].some((match) => isSubagentSource(match[1]));
 }
 
 function isSubagentSource(value) {
-  return /\bsub[-_ ]?agent\b/i.test(value);
+  const normalized = String(value).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  return normalized === "sub agent" || normalized === "subagent";
 }
 
 function normalizeReviewerId(value) {

@@ -290,6 +290,21 @@ class CliTest(unittest.TestCase):
             self.assertEqual(runner._next_index(0, phase), (2, False))
 
             (run_dir / "multi-review.md").write_text(
+                "## Reviewer 1\nreviewer-source: non-sub-agent\nreviewer-1 verdict: approve\n\n"
+                "## Overall\nverdict: approve\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(runner._next_index(0, phase), (0, True))
+
+            (run_dir / "multi-review.md").write_text(
+                "reviewer-1 source: non-sub-agent\n"
+                "reviewer-1 verdict: approve\n\n"
+                "## Overall\nverdict: approve\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(runner._next_index(0, phase), (0, True))
+
+            (run_dir / "multi-review.md").write_text(
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n",
                 encoding="utf-8",
             )
@@ -2295,6 +2310,23 @@ class CliTest(unittest.TestCase):
 
             for legacy_status in ("verdict: request-changes\n", "status: failed\n", "status: fail\n"):
                 mr_artifact.write_text(legacy_status, encoding="utf-8")
+                result = subprocess.run(
+                    (node, cli, "run", "advance"),
+                    cwd=project_root,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("at least 1 independent sub-agent reviewer verdict", result.stderr)
+
+            for bad_source in (
+                "## Reviewer 1\nreviewer-source: non-sub-agent\nreviewer-1 verdict: approve\n\n"
+                "## Overall\nverdict: approve\n",
+                "reviewer-1 source: non-sub-agent\nreviewer-1 verdict: approve\n\n"
+                "## Overall\nverdict: approve\n",
+            ):
+                mr_artifact.write_text(bad_source, encoding="utf-8")
                 result = subprocess.run(
                     (node, cli, "run", "advance"),
                     cwd=project_root,
