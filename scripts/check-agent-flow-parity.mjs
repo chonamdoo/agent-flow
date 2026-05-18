@@ -2,17 +2,21 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
-const ROOT = process.cwd();
+const SOURCE_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const HOME = process.env.HOME || process.env.USERPROFILE || "";
+const INSTALL_ROOT = resolveInstalledRoot(process.cwd()) ?? SOURCE_ROOT;
 const failures = [];
 const missingFiles = new Set();
 
 function read(rel) {
-  return fs.readFileSync(path.join(ROOT, rel), "utf8");
+  return fs.readFileSync(absPath(rel), "utf8");
 }
 
 function readIfExists(rel) {
-  const abs = path.join(ROOT, rel);
+  const abs = absPath(rel);
   if (!fs.existsSync(abs)) {
     recordMissingFile(rel);
     return null;
@@ -21,9 +25,17 @@ function readIfExists(rel) {
 }
 
 function assertFile(rel) {
-  if (!fs.existsSync(path.join(ROOT, rel))) {
+  if (!fs.existsSync(absPath(rel))) {
     recordMissingFile(rel);
   }
+}
+
+function absPath(rel) {
+  return path.join(rootFor(rel), rel);
+}
+
+function rootFor(rel) {
+  return rel.startsWith(".agent-flow/") ? INSTALL_ROOT : SOURCE_ROOT;
 }
 
 function recordMissingFile(rel) {
@@ -123,7 +135,7 @@ function gateIds(text) {
   return ids;
 }
 
-for (const entry of fs.readdirSync(path.join(ROOT, "profiles")).sort()) {
+for (const entry of fs.readdirSync(path.join(SOURCE_ROOT, "profiles")).sort()) {
   if (!entry.endsWith(".yaml") || entry === "_schema.yaml") continue;
   const source = `profiles/${entry}`;
   const packaged = `src/agent_flow/profiles/${entry}`;
@@ -174,6 +186,79 @@ assertContains(".agent-flow/rules/workflow-contract.md", "close that sub-agent s
 assertContains(".agent-flow/rules/workflow-contract.md", "## Overall");
 assertContains(".agent-flow/rules/workflow-contract.md", "verdict: approve");
 assertContains(".agent-flow/rules/workflow-contract.md", "verdict: request-changes");
+
+function resolveInstalledRoot(start) {
+  const managedRoot = resolveManagedWorktreeRoot(start);
+  if (managedRoot && fs.existsSync(path.join(managedRoot, ".agent-flow", "kit.json"))) {
+    return managedRoot;
+  }
+  const gitCommonRoot = resolveGitCommonWorktreeRoot(start);
+  if (gitCommonRoot && fs.existsSync(path.join(gitCommonRoot, ".agent-flow", "kit.json"))) {
+    return gitCommonRoot;
+  }
+  let current = start;
+  while (true) {
+    if (fs.existsSync(path.join(current, ".agent-flow", "kit.json"))) {
+      return current;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return null;
+    }
+    current = parent;
+  }
+}
+
+function resolveManagedWorktreeRoot(start) {
+  const parts = start.split(path.sep);
+  const markers = new Set([".agent-flow", ".codex", ".Codex"]);
+  for (let index = parts.length - 2; index >= 0; index -= 1) {
+    if (parts[index + 1] !== "worktrees") continue;
+    if (!markers.has(parts[index])) continue;
+    const root = parts.slice(0, index).join(path.sep) || path.sep;
+    // 홈의 전역 Codex worktree는 설치 루트가 아니라 git common root를 따라간다.
+    if (HOME && samePath(root, HOME) && (parts[index] === ".codex" || parts[index] === ".Codex")) {
+      continue;
+    }
+    return root;
+  }
+  return null;
+}
+
+function samePath(left, right) {
+  try {
+    return fs.realpathSync.native(left) === fs.realpathSync.native(right);
+  } catch {
+    // 심볼릭 링크가 섞인 임시 경로에서도 홈 비교는 보수적으로 처리한다.
+    return path.resolve(left) === path.resolve(right);
+  }
+}
+
+function resolveGitCommonWorktreeRoot(start) {
+  const topLevel = gitOutput(start, ["rev-parse", "--show-toplevel"]);
+  const commonDir = gitOutput(start, ["rev-parse", "--git-common-dir"]);
+  if (!topLevel || !commonDir) {
+    return null;
+  }
+  const resolvedCommonDir = path.resolve(topLevel, commonDir);
+  if (path.basename(resolvedCommonDir) !== ".git") {
+    return null;
+  }
+  return path.dirname(resolvedCommonDir);
+}
+
+function gitOutput(cwd, args) {
+  const result = spawnSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  if (result.error || result.status !== 0) {
+    return null;
+  }
+  const output = result.stdout.trim();
+  return output || null;
+}
 
 if (failures.length > 0) {
   console.error(`agent-flow-parity: FAIL (${failures.length})`);
