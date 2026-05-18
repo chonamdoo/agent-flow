@@ -302,6 +302,10 @@ function resolveAgentFlowRoot(start) {
   if (worktreeRoot && fs.existsSync(path.join(worktreeRoot, ".agent-flow", "kit.json"))) {
     return worktreeRoot;
   }
+  const gitCommonRoot = resolveGitCommonWorktreeRoot(start);
+  if (gitCommonRoot && fs.existsSync(path.join(gitCommonRoot, ".agent-flow", "kit.json"))) {
+    return gitCommonRoot;
+  }
   const parts = start.split(path.sep);
   const markerIndex = parts.lastIndexOf(".agent-flow");
   if (markerIndex !== -1) {
@@ -328,6 +332,10 @@ function resolveInstallRoot(start) {
   if (worktreeRoot) {
     return worktreeRoot;
   }
+  const gitCommonRoot = resolveGitCommonWorktreeRoot(start);
+  if (gitCommonRoot) {
+    return gitCommonRoot;
+  }
   const parts = start.split(path.sep);
   const markerIndex = parts.lastIndexOf(".agent-flow");
   if (markerIndex !== -1) {
@@ -342,9 +350,49 @@ function resolveManagedWorktreeRoot(start) {
   for (let index = parts.length - 2; index >= 0; index -= 1) {
     if (parts[index + 1] !== "worktrees") continue;
     if (!markers.has(parts[index])) continue;
-    return parts.slice(0, index).join(path.sep) || path.sep;
+    const root = parts.slice(0, index).join(path.sep) || path.sep;
+    // 홈의 전역 Codex worktree는 프로젝트 내부 worktree가 아니다.
+    if (HOME && samePath(root, HOME) && (parts[index] === ".codex" || parts[index] === ".Codex")) {
+      continue;
+    }
+    return root;
   }
   return null;
+}
+
+function samePath(left, right) {
+  try {
+    return fs.realpathSync.native(left) === fs.realpathSync.native(right);
+  } catch {
+    // 심볼릭 링크가 섞인 임시 경로에서도 홈 비교는 보수적으로 처리한다.
+    return path.resolve(left) === path.resolve(right);
+  }
+}
+
+function resolveGitCommonWorktreeRoot(start) {
+  const topLevel = gitOutput(start, ["rev-parse", "--show-toplevel"]);
+  const commonDir = gitOutput(start, ["rev-parse", "--git-common-dir"]);
+  if (!topLevel || !commonDir) {
+    return null;
+  }
+  const resolvedCommonDir = path.resolve(topLevel, commonDir);
+  if (path.basename(resolvedCommonDir) !== ".git") {
+    return null;
+  }
+  return path.dirname(resolvedCommonDir);
+}
+
+function gitOutput(cwd, args) {
+  const result = spawnSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  if (result.error || result.status !== 0) {
+    return null;
+  }
+  const output = result.stdout.trim();
+  return output || null;
 }
 
 function readCurrentRun(root) {
