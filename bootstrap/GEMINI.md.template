@@ -20,7 +20,7 @@ active run이 있으면 status 출력의 `next_command`를 그대로 실행하�
 
 - `default.yaml`: design → slice-plan → worktree → implement → final-review ↔ fix-loop → commit → push-pr → pr-watch → merge → cleanup
 - `full-feature.yaml`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → gates ↔ fix-loop → multi-review → architecture-review → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
-- `multi-review`는 현재 사용 중인 CLI(활성 host)의 sub-agent 1개가 필수다. 범위가 나뉘면 추가 sub-agent 1개를 병렬 실행하고, `reviewer-source: sub-agent`를 기록한 뒤 sub-agent를 닫는다. 마지막에 `## Overall`과 `verdict: approve` 또는 `verdict: request-changes`만 기록한다. 활성 host가 아닌 추가 provider는 optional이다.
+- `multi-review`는 현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수다. 두 sub-agent를 병렬 실행하고, `reviewer-source: sub-agent`를 기록한 뒤 sub-agent를 닫는다. 마지막에 `## Overall`과 `verdict: approve` 또는 `verdict: request-changes`만 기록한다. 활성 host가 아닌 추가 provider는 optional이다.
 
 ### Context Economy
 
@@ -29,6 +29,9 @@ active run이 있으면 status 출력의 `next_command`를 그대로 실행하�
 - 긴 설명, 긴 로그, 전체 파일 붙여넣기 금지.
 - 필요한 경우만 current phase, action, `next_command`, blocker를 요약합니다.
 - 모든 guide를 항상 로드하지 말고 변경 파일에 필요한 guide만 읽습니다.
+- 프로젝트 skill은 `skills/<name>/SKILL.md` 또는 private `.agent-flow/local-skills/<name>/SKILL.md`에 둡니다.
+- install/bootstrap 후 `.agent-flow/skills/index.json` metadata를 보고 필요한 skill만 읽습니다. 모든 SKILL.md 전문을 항상 읽지 않습니다.
+- Claude/Codex/Gemini 프로젝트 skill 경로는 leader checkout의 install 결과를 따릅니다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않습니다.
 
 코드 생성·수정 phase에서는 `code-generation-discipline`을 적용합니다. 언어별 guide 선택과 주석 규칙은 `code-generation-discipline`의 Before Starting 체크리스트를 따릅니다.
 Android/Kotlin/Compose/KMP 작업은 Android profile의 `chrisbanes_skills`에 선언된 로컬 설치 skill 파일을 plain text로 먼저 읽습니다. 없거나 읽을 수 없으면 `no content: <skill>`로 기록합니다.

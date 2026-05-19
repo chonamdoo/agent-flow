@@ -25,6 +25,7 @@ Adapter contract:
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -137,6 +138,7 @@ class Runner:
             print(f"▶ task        : {meta.get('task', '')}")
 
         adapter = detect_adapter()
+        self._adapter_name = adapter.name
         clis = detect_available_clis()
         cli_summary = ", ".join(c.name for c in clis) if clis else "none (generic fallback)"
         print(f"▶ host adapter: {adapter.name}")
@@ -318,7 +320,12 @@ class Runner:
         assert self.run_dir is not None
         artifact = self.run_dir / f"{phase.id}.md"
         text = artifact.read_text(encoding="utf-8") if artifact.exists() else ""
-        key = _multi_review_route_key(text) if phase.multi_review else _route_key(text)
+        if phase.multi_review:
+            key = _multi_review_route_key(text, phase.id)
+        elif phase.id == "gates":
+            key = _gates_route_key(text)
+        else:
+            key = _route_key(text)
         target = phase.routes.get(key)
         if phase.multi_review:
             if key == "missing-reviewer":
@@ -344,6 +351,9 @@ class Runner:
         if target == "block":
             print(f"  [block] {phase.id} status={key}")
             return current_index, True
+        if target is None:
+            print(f"  [block] {phase.id} status={key} has no route")
+            return current_index, True
         if target:
             for i, candidate in enumerate(self.phases):
                 if candidate.id == target:
@@ -351,6 +361,14 @@ class Runner:
                         target_artifact = self.run_dir / f"{candidate.id}.md"
                         if target_artifact.exists():
                             target_artifact.unlink()
+                    elif i > current_index + 1:
+                        for skipped in self.phases[current_index + 1:i]:
+                            skipped_artifact = self.run_dir / f"{skipped.id}.md"
+                            if not skipped_artifact.exists():
+                                skipped_artifact.write_text(
+                                    f"# {skipped.id}\n\nstatus: skipped\nreason: route_to_{target}\n",
+                                    encoding="utf-8",
+                                )
                     return i, False
             raise ValueError(f"phase {phase.id}: route target not found: {target}")
         return current_index + 1, False
@@ -416,6 +434,11 @@ class Runner:
 
     def _missing_required_markers(self, phase: Phase) -> list[str]:
         if not phase.required_markers:
+            return []
+        if (
+            getattr(self, "_adapter_name", "") == "generic"
+            and os.environ.get("AGENT_FLOW_GENERIC_MODE", "stub") == "stub"
+        ):
             return []
         assert self.run_dir is not None
         artifact = self.run_dir / f"{phase.id}.md"
@@ -535,7 +558,12 @@ def _route_key(text: str) -> str:
     except json.JSONDecodeError:
         payload = None
     if isinstance(payload, dict) and isinstance(payload.get("passed"), bool):
-        return "green" if payload["passed"] else "request-changes"
+        results = payload.get("results")
+        if payload["passed"] is True:
+            if _gate_results_prove_pass(results):
+                return "green"
+            return "default"
+        return "request-changes"
     aliases = {
         "has_comments": "comments",
         "has-comments": "comments",
@@ -545,12 +573,9 @@ def _route_key(text: str) -> str:
         "passed": "green",
         "pass": "green",
     }
-    for raw, canonical in aliases.items():
-        if f"verdict: {raw}" in lowered or f"status: {raw}" in lowered:
-            return canonical
     checks = (
-        "request-changes",
         "blocked",
+        "request-changes",
         "ci-failed",
         "comments",
         "skipped",
@@ -561,26 +586,74 @@ def _route_key(text: str) -> str:
         "closed",
         "error",
     )
+    for line in lowered.splitlines():
+        match = re.match(r"^\s*(?:verdict|status):\s*([a-z_-]+)\s*$", line)
+        if not match:
+            continue
+        raw = match.group(1)
+        canonical = aliases.get(raw, raw)
+        if canonical in checks:
+            return canonical
+    for raw, canonical in aliases.items():
+        if f"verdict: {raw}\n" in lowered or f"status: {raw}\n" in lowered:
+            return canonical
     for key in checks:
-        if f"verdict: {key}" in lowered or f"status: {key}" in lowered:
+        if f"verdict: {key}\n" in lowered or f"status: {key}\n" in lowered:
             return key
     return "default"
 
 
-def _multi_review_route_key(text: str) -> str:
+def _gates_route_key(text: str) -> str:
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return "default"
+    if not isinstance(payload, dict) or not isinstance(payload.get("passed"), bool):
+        return "default"
+    if payload["passed"] is True:
+        return "green" if _gate_results_prove_pass(payload.get("results")) else "default"
+    return "request-changes"
+
+
+def _multi_review_route_key(text: str, phase_id: str = "") -> str:
     verdicts = _independent_reviewer_verdicts(text)
     overall = _multi_review_overall_route_key(text)
     if not verdicts:
         return "missing-reviewer"
-    if overall == "default":
-        return "default"
     if overall == "invalid-verdict":
         return "invalid-verdict"
+    if overall == "default":
+        return "default"
     if "request-changes" in verdicts.values() or overall == "request-changes":
         return "request-changes"
-    if overall == "approve":
+    has_subagent = _has_subagent_reviewer(text)
+    if overall == "approve" and has_subagent and len(verdicts) >= 2:
         return "approve"
     return "invalid-verdict"
+
+
+def _gate_results_prove_pass(results: object) -> bool:
+    if not isinstance(results, list) or not results:
+        return False
+    for result in results:
+        if not isinstance(result, dict):
+            return False
+        command = result.get("command")
+        if not isinstance(command, str) or not command.strip():
+            return False
+        if not _gate_result_has_evidence(result):
+            return False
+        if not (result.get("passed") is True or result.get("status") in {"pass", "ok"}):
+            return False
+    return True
+
+
+def _gate_result_has_evidence(result: dict[str, object]) -> bool:
+    for key in ("output", "stdout", "stderr", "artifact", "path"):
+        value = result.get(key)
+        if isinstance(value, str) and value.strip():
+            return True
+    return False
 
 
 def _multi_review_overall_route_key(text: str) -> str:
@@ -636,16 +709,24 @@ def _independent_reviewer_verdicts(text: str) -> dict[str, str]:
                 current_reviewer = key or None
             continue
         source_match = re.match(
-            r"^(reviewer[-_ ]?[a-z0-9-]+)\s+(?:reviewer[-_ ]?source|source):\s*(.+)$",
+            r"^(reviewer[-_ ]?[a-z0-9-]+)\s+reviewer[-_ ]?source:\s*(.+)$",
             lowered,
         )
         if source_match:
             key = _normalized_reviewer_id(source_match.group(1))
-            if key and _is_subagent_source(source_match.group(2)):
-                reviewers.setdefault(key, {"subagent": False, "verdict": None})["subagent"] = True
+            if key:
+                state = reviewers.setdefault(key, {"has_source": False, "subagent": False, "verdict": None})
+                state["has_source"] = True
+                if _is_subagent_source(source_match.group(2)):
+                    state["subagent"] = True
             continue
         if current_reviewer is not None and _line_marks_subagent_source(lowered):
-            reviewers.setdefault(current_reviewer, {"subagent": False, "verdict": None})["subagent"] = True
+            state = reviewers.setdefault(current_reviewer, {"has_source": False, "subagent": False, "verdict": None})
+            state["has_source"] = True
+            state["subagent"] = True
+            continue
+        if current_reviewer is not None and _line_marks_non_subagent_source(lowered):
+            reviewers.setdefault(current_reviewer, {"has_source": True, "subagent": False, "verdict": None})
             continue
         if "verdict:" not in lowered:
             continue
@@ -658,19 +739,28 @@ def _independent_reviewer_verdicts(text: str) -> dict[str, str]:
         if prefix:
             key = _normalized_reviewer_id(prefix)
             if key:
-                reviewers.setdefault(key, {"subagent": False, "verdict": None})["verdict"] = verdict
+                reviewers.setdefault(key, {"has_source": False, "subagent": False, "verdict": None})["verdict"] = verdict
         elif current_reviewer is not None:
-            reviewers.setdefault(current_reviewer, {"subagent": False, "verdict": None})["verdict"] = verdict
+            reviewers.setdefault(current_reviewer, {"has_source": False, "subagent": False, "verdict": None})["verdict"] = verdict
     return {
         reviewer: str(state["verdict"])
         for reviewer, state in reviewers.items()
-        if state["subagent"] and state["verdict"]
+        if state["verdict"] and state["subagent"]
     }
 
 
 def _line_marks_subagent_source(value: str) -> bool:
-    source_match = re.search(r"(?:reviewer[-_ ]?source|source)\s*:\s*(.+)$", value)
+    source_match = re.search(r"reviewer[-_ ]?source\s*:\s*(.+)$", value)
     return bool(source_match and _is_subagent_source(source_match.group(1)))
+
+
+def _line_marks_non_subagent_source(value: str) -> bool:
+    source_match = re.search(r"reviewer[-_ ]?source\s*:\s*(.+)$", value)
+    return bool(source_match and not _is_subagent_source(source_match.group(1)))
+
+
+def _has_subagent_reviewer(text: str) -> bool:
+    return any(_line_marks_subagent_source(line.strip().lower()) for line in text.splitlines())
 
 
 def _is_subagent_source(value: str) -> bool:

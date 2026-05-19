@@ -526,6 +526,17 @@ def test_worktree_branch_validation_rejects_invalid_refs(tmp_path: Path):
         assert "unsafe worktree branch" in result.stderr
 
 
+def test_worktree_branch_must_use_feat_prefix(tmp_path: Path):
+    project = tmp_path / "feat-branch-prefix"
+    project.mkdir()
+    _init_git_project(project)
+
+    result = _run_cli(["run", "task", "--worktree", "task", "--worktree-branch", "feature/task"], project)
+
+    assert result.returncode == 2
+    assert "worktree branch must start with feat/" in result.stderr
+
+
 def test_worktree_run_rejects_existing_branch_mismatch(tmp_path: Path):
     project = tmp_path / "branch-mismatch"
     project.mkdir()
@@ -607,13 +618,13 @@ def test_worktree_remove_preserves_preexisting_branch_by_default(tmp_path: Path)
     project = tmp_path / "preserve-branch"
     project.mkdir()
     _init_git_project(project)
-    subprocess.run(["git", "branch", "shared"], cwd=project, check=True)
+    subprocess.run(["git", "branch", "feat/shared"], cwd=project, check=True)
 
-    r_create = _run_cli(["worktree", "create", "--name", "task", "--branch", "shared"], project)
+    r_create = _run_cli(["worktree", "create", "--name", "task", "--branch", "feat/shared"], project)
     assert r_create.returncode == 0, r_create.stderr
     r_remove = _run_cli(["worktree", "remove", "--name", "task"], project)
     assert r_remove.returncode == 0, r_remove.stderr
-    assert _branch_exists(project, "shared")
+    assert _branch_exists(project, "feat/shared")
 
 
 def test_worktree_remove_deletes_agent_flow_created_branch(tmp_path: Path):
@@ -673,12 +684,12 @@ def test_worktree_run_failure_preserves_preexisting_branch(tmp_path: Path):
     project = tmp_path / "failure-preserve-branch"
     project.mkdir()
     _init_git_project(project)
-    subprocess.run(["git", "branch", "shared"], cwd=project, check=True)
+    subprocess.run(["git", "branch", "feat/shared"], cwd=project, check=True)
 
-    r1 = _run_cli(["run", "task", "--worktree", "task", "--worktree-branch", "shared", "--workflow", "missing"], project)
+    r1 = _run_cli(["run", "task", "--worktree", "task", "--worktree-branch", "feat/shared", "--workflow", "missing"], project)
     assert r1.returncode == 2
     assert "Traceback" not in r1.stderr
-    assert _branch_exists(project, "shared")
+    assert _branch_exists(project, "feat/shared")
     assert not (project / ".agent-flow" / "worktrees" / "feat-task").exists()
 
 
@@ -790,7 +801,11 @@ def test_default_final_review_request_changes_routes_to_fix_loop(tmp_path: Path)
 
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    (run_dir / "final-review.md").write_text("verdict: request-changes\n", encoding="utf-8")
+    (run_dir / "final-review.md").write_text(
+        "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: request-changes\n\n"
+        "## Overall\nverdict: request-changes\n",
+        encoding="utf-8",
+    )
 
     runner = Runner.__new__(Runner)
     runner.run_dir = run_dir
@@ -801,6 +816,32 @@ def test_default_final_review_request_changes_routes_to_fix_loop(tmp_path: Path)
     ]
 
     assert runner._next_index(0, runner.phases[0]) == (1, False)
+
+    (run_dir / "final-review.md").write_text("verdict: request-changes\n", encoding="utf-8")
+    assert runner._next_index(0, runner.phases[0]) == (0, True)
+
+
+def test_route_key_requires_exact_status_or_verdict_lines():
+    from agent_flow.runner import _route_key
+
+    assert _route_key("verdict: approved\n") == "default"
+    assert _route_key("status: passed with warnings\n") == "default"
+    assert _route_key("verdict: request-changes pending\n") == "default"
+    assert _route_key("status: passed\n") == "green"
+
+
+def test_route_without_target_blocks_instead_of_falling_through(tmp_path: Path):
+    from agent_flow.runner import Phase, Runner
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "final-review.md").write_text("status: blocked\n", encoding="utf-8")
+    phase = Phase(id="final-review", description="", routes={"approve": "commit", "request-changes": "fix-loop"})
+    runner = Runner.__new__(Runner)
+    runner.run_dir = run_dir
+    runner.phases = [phase, Phase(id="fix-loop", description=""), Phase(id="commit", description="")]
+
+    assert runner._next_index(0, phase) == (0, True)
 
 
 def test_default_final_review_approve_requires_two_reviewers(tmp_path: Path):
@@ -829,7 +870,7 @@ def test_default_final_review_approve_requires_two_reviewers(tmp_path: Path):
         "## Reviewer 1\nverdict: approve\n\n## Reviewer 2\nverdict: approve\n\nverdict: approve\n",
         encoding="utf-8",
     )
-    assert runner._next_index(0, phase) == (2, False)
+    assert runner._next_index(0, phase) == (0, True)
 
 
 def test_required_markers_block_incomplete_artifact(tmp_path: Path):
