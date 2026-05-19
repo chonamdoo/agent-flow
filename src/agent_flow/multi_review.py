@@ -2,10 +2,9 @@
 
 The final-review phase fans out N review angles. Distribution rules:
 
-  - Default → host AI must use at least one host-native sub-agent.
-  - Scope split → host AI adds one more sub-agent when changes span areas.
+  - Default → host AI must use at least two host-native sub-agents.
   - 1 opt-in CLI → all angles to that CLI plus host sub-agent fallback so the
-    final artifact still has at least one independent reviewer verdict.
+    final artifact still has at least two independent reviewer verdicts.
   - 2+ opt-in CLIs → round-robin assignment, host CLI last.
 
 Async execution:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import shutil
 import subprocess
@@ -19,17 +20,27 @@ from agent_flow.core.artifacts import (
     write_recovery,
     write_stage_result,
 )
+from agent_flow.core.context_contract import (
+    append_context_event,
+    check_system_invariants,
+    ensure_context_contract,
+    offload_tool_output,
+    write_system_invariants,
+)
 from agent_flow.core.gates import GateCommand, run_gates
 from agent_flow.core.profiles import detect_profile, load_profile
 from agent_flow.core.review import summarize_reviews, write_review_summary
 from agent_flow.core.report import write_run_report
 from agent_flow.core.query import explain_run, query_run
 from agent_flow.core.security import resolve_project_path
+from agent_flow.core.tool_lint import lint_tools
 from agent_flow.core.watch import write_watch_snapshot
 from agent_flow.core.team import (
     acknowledge_shutdown,
     add_task,
     add_worker,
+    approve_worker_call,
+    approve_task_result,
     archive_team,
     claim_task,
     complete_task,
@@ -46,9 +57,13 @@ from agent_flow.core.team import (
     restore_team_archive,
     send_message,
     summarize_team_state_import,
+    safe_team_name,
+    safe_worker_name,
     team_status,
     update_worker_heartbeat,
     validate_team_state_import,
+    write_worker_brief,
+    write_worker_result,
 )
 from agent_flow.core.worktrees import (
     create_worktree,
@@ -62,6 +77,8 @@ from agent_flow.core.worktrees import (
 )
 from agent_flow.core.state import RunRequest, RunState, start_run, status_summary
 from agent_flow.core.workflow import load_workflow
+from agent_flow.eval import run_eval
+from agent_flow.memory.entities import EntityMemoryIndex
 from agent_flow.artifact import find_active_run, mark_inactive
 from agent_flow.runner import Runner, ResumeMode
 from agent_flow.providers.host import list_host_providers
@@ -157,6 +174,44 @@ def main(argv: list[str] | None = None) -> int:
     gates_parser.add_argument("--run-dir")
     gates_parser.add_argument("--timeout", type=int, default=600)
 
+    eval_parser = subparsers.add_parser("eval")
+    eval_parser.add_argument("--root", default=".")
+    eval_parser.add_argument("--fixtures")
+    eval_parser.add_argument("--judge-command", nargs=argparse.REMAINDER)
+    eval_parser.add_argument("--run-dir")
+
+    tools_parser = subparsers.add_parser("tools")
+    tools_subparsers = tools_parser.add_subparsers(dest="tools_command", required=True)
+    tools_lint = tools_subparsers.add_parser("lint")
+    tools_lint.add_argument("--root", default=".")
+
+    context_parser = subparsers.add_parser("context")
+    context_subparsers = context_parser.add_subparsers(dest="context_command", required=True)
+    context_init = context_subparsers.add_parser("init")
+    context_init.add_argument("--root", default=".")
+    context_init.add_argument("--run-dir")
+    context_event = context_subparsers.add_parser("event")
+    context_event.add_argument("--root", default=".")
+    context_event.add_argument("--run-dir")
+    context_event.add_argument("--event", required=True)
+    context_event.add_argument("--details-json", default="{}")
+    context_offload = context_subparsers.add_parser("offload")
+    context_offload.add_argument("--root", default=".")
+    context_offload.add_argument("--run-dir")
+    context_offload.add_argument("--name", required=True)
+    context_offload.add_argument("--content", required=True)
+    context_invariants = context_subparsers.add_parser("check-invariants")
+    context_invariants.add_argument("--root", default=".")
+    context_invariants.add_argument("--run-dir")
+    context_write_invariants = context_subparsers.add_parser("write-invariants")
+    context_write_invariants.add_argument("--root", default=".")
+
+    memory_parser = subparsers.add_parser("memory")
+    memory_subparsers = memory_parser.add_subparsers(dest="memory_command", required=True)
+    memory_entities = memory_subparsers.add_parser("entities")
+    memory_entities.add_argument("--root", default=".")
+    memory_entities.add_argument("--dir")
+
     record_parser = subparsers.add_parser("record-stage")
     record_parser.add_argument("--root", default=".")
     record_parser.add_argument("--run-dir", required=True)
@@ -230,6 +285,33 @@ def main(argv: list[str] | None = None) -> int:
     team_task.add_argument("--id", required=True)
     team_task.add_argument("--subject", required=True)
     team_task.add_argument("--description", default="")
+    team_brief = team_subparsers.add_parser("brief")
+    team_brief.add_argument("--root", default=".")
+    team_brief.add_argument("--team", required=True)
+    team_brief.add_argument("--task", required=True)
+    team_brief.add_argument("--worker", required=True)
+    team_brief.add_argument("--brief", required=True)
+    team_brief.add_argument("--write-scope", default="none")
+    team_approve_worker = team_subparsers.add_parser("approve-worker")
+    team_approve_worker.add_argument("--root", default=".")
+    team_approve_worker.add_argument("--team", required=True)
+    team_approve_worker.add_argument("--task", required=True)
+    team_approve_worker.add_argument("--worker", required=True)
+    team_approve_worker.add_argument("--reviewer", default="lead")
+    team_approve_worker.add_argument("--write-scope", default="none")
+    team_result = team_subparsers.add_parser("result")
+    team_result.add_argument("--root", default=".")
+    team_result.add_argument("--team", required=True)
+    team_result.add_argument("--task", required=True)
+    team_result.add_argument("--worker", required=True)
+    team_result.add_argument("--result", required=True)
+    team_approve = team_subparsers.add_parser("approve")
+    team_approve.add_argument("--root", default=".")
+    team_approve.add_argument("--team", required=True)
+    team_approve.add_argument("--task", required=True)
+    team_approve.add_argument("--reviewer", default="lead")
+    team_approve.add_argument("--verdict", choices=("approve", "request-changes"), required=True)
+    team_approve.add_argument("--notes", default="")
     team_worker = team_subparsers.add_parser("worker")
     team_worker.add_argument("--root", default=".")
     team_worker.add_argument("--team", required=True)
@@ -312,6 +394,9 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     root = Path(getattr(args, "root", ".")).resolve()
+    root, inferred_worktree = _resolve_cli_root_context(root, getattr(args, "worktree", None))
+    if inferred_worktree is not None and hasattr(args, "worktree") and args.worktree is None:
+        args.worktree = inferred_worktree
 
     if args.command == "init":
         init_project(root)
@@ -503,6 +588,82 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{profile.profile_id}: {len(results) - len(failed)}/{len(results)} gates passed")
         return 1 if failed else 0
 
+    if args.command == "eval":
+        fixture_path = _resolve_project_path(root, args.fixtures) if args.fixtures else None
+        run_dir = _resolve_project_path(root, args.run_dir) if args.run_dir else None
+        results = run_eval(
+            root=root,
+            fixture_path=fixture_path,
+            judge_command=tuple(args.judge_command) if args.judge_command else None,
+            run_dir=run_dir,
+        )
+        failed = [result for result in results if not result.passed]
+        print(f"eval: {len(results) - len(failed)}/{len(results)} fixtures passed")
+        for result in failed:
+            print(f"{result.fixture_id}: {result.reason}")
+        return 1 if failed else 0
+
+    if args.command == "tools":
+        if args.tools_command == "lint":
+            findings = lint_tools(root)
+            for finding in findings:
+                print(f"{finding.severity}: {finding.path}: {finding.message}")
+            print(f"tools lint: {len(findings)} findings")
+            return 1 if any(finding.severity == "error" for finding in findings) else 0
+
+    if args.command == "context":
+        run_dir = _resolve_project_path(root, args.run_dir) if getattr(args, "run_dir", None) else None
+        if args.context_command == "init":
+            print(ensure_context_contract(root=root, run_dir=run_dir))
+            return 0
+        if args.context_command == "event":
+            try:
+                details = json.loads(args.details_json)
+            except json.JSONDecodeError as exc:
+                print(f"invalid details JSON: {exc}", file=sys.stderr)
+                return 2
+            if not isinstance(details, dict):
+                print("details JSON must be an object", file=sys.stderr)
+                return 2
+            print(append_context_event(root=root, run_dir=run_dir, event=args.event, details=details))
+            return 0
+        if args.context_command == "offload":
+            print(offload_tool_output(root=root, run_dir=run_dir, name=args.name, content=args.content))
+            return 0
+        if args.context_command == "check-invariants":
+            failures = check_system_invariants(root=root, run_dir=run_dir)
+            for failure in failures:
+                print(failure)
+            print(f"system-invariants: {len(failures)} failures")
+            return 1 if failures else 0
+        if args.context_command == "write-invariants":
+            print(
+                write_system_invariants(
+                    root=root,
+                    invariants=[
+                        "Preserve agent-flow status/next_command as workflow source of truth.",
+                        "Do not reinstall or regenerate skill links from a managed worktree.",
+                        "Use path-only inputs for long context; store large output under context tool_outputs/.",
+                    ],
+                )
+            )
+            return 0
+
+    if args.command == "memory":
+        if args.memory_command == "entities":
+            memory_dir = _resolve_project_path(root, args.dir) if args.dir else root / ".agent-flow" / "memory" / "entities"
+            index = EntityMemoryIndex.load(memory_dir)
+            print(
+                f"entities: {len(index.entries)} entries "
+                f"stale={len(index.stale)} conflicts={len(index.conflicts)} skipped={len(index.skipped)}"
+            )
+            for entity, entries in index.conflicts:
+                sources = ", ".join(str(entry.path) for entry in entries)
+                print(f"conflict: {entity}: {sources}")
+            for path, reason in index.skipped:
+                print(f"skipped: {path}: {reason}")
+            return 1 if index.conflicts or index.skipped else 0
+
     if args.command == "record-stage":
         path = write_stage_result(
             run_dir=_resolve_project_path(root, args.run_dir),
@@ -693,6 +854,49 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(f"{task.task_id} {task.status}")
             return 0
+        if args.team_command == "brief":
+            brief = write_worker_brief(
+                root=root,
+                team_name=args.team,
+                task_id=args.task,
+                worker_name=args.worker,
+                brief=args.brief,
+                write_scope=args.write_scope,
+            )
+            print(f"{brief.task_id} brief {brief.worker}")
+            return 0
+        if args.team_command == "approve-worker":
+            approval = approve_worker_call(
+                root=root,
+                team_name=args.team,
+                task_id=args.task,
+                worker_name=args.worker,
+                reviewer=args.reviewer,
+                write_scope=args.write_scope,
+            )
+            print(f"{approval.task_id} approved-worker {approval.worker} {approval.write_scope}")
+            return 0
+        if args.team_command == "result":
+            result = write_worker_result(
+                root=root,
+                team_name=args.team,
+                task_id=args.task,
+                worker_name=args.worker,
+                result=args.result,
+            )
+            print(f"{result.task_id} result {result.worker}")
+            return 0
+        if args.team_command == "approve":
+            approval = approve_task_result(
+                root=root,
+                team_name=args.team,
+                task_id=args.task,
+                reviewer=args.reviewer,
+                verdict=args.verdict,
+                notes=args.notes,
+            )
+            print(f"{approval.task_id} {approval.verdict} {approval.reviewer}")
+            return 0
         if args.team_command == "worker":
             worker = add_worker(root=root, team_name=args.team, worker_name=args.name, role=args.role)
             print(f"{worker.name} {worker.role} {worker.status}")
@@ -706,13 +910,23 @@ def main(argv: list[str] | None = None) -> int:
             if pending is None:
                 print("no pending task")
                 return 1
+            prompt = _team_run_next_prompt(
+                root=root,
+                team_name=args.team,
+                task_id=pending.task_id,
+                worker_name=args.worker,
+                fallback_subject=pending.subject,
+                fallback_description=pending.description,
+            )
+            if prompt is None:
+                print(f"worker not approved for task: {pending.task_id}")
+                return 1
             claimed = claim_task(
                 root=root,
                 team_name=args.team,
                 task_id=pending.task_id,
                 worker_name=args.worker,
             )
-            prompt = f"{claimed.subject}\n\n{claimed.description}\n"
             result = run_provider(
                 ProviderCommand(name="host-command", argv=tuple(args.command_argv)),
                 prompt=prompt,
@@ -1010,6 +1224,57 @@ def _write_import_report(path: str | None, report: dict[str, object]) -> str | N
     return None
 
 
+def _team_run_next_prompt(
+    *,
+    root: Path,
+    team_name: str,
+    task_id: str,
+    worker_name: str,
+    fallback_subject: str,
+    fallback_description: str,
+) -> str | None:
+    safe_team = safe_team_name(team_name)
+    safe_worker = safe_worker_name(worker_name)
+    contract_dir = root / ".agent-flow" / "state" / "team" / safe_team / "tasks" / task_id
+    approvals_path = contract_dir / "workers_approved.json"
+    brief_path = contract_dir / "worker-brief.md"
+    if not approvals_path.exists() or not brief_path.exists():
+        return None
+    try:
+        approvals = json.loads(approvals_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(approvals, list):
+        return None
+    approval = next(
+        (
+            item
+            for item in approvals
+            if isinstance(item, dict)
+            and item.get("task_id") == task_id
+            and item.get("worker") == safe_worker
+        ),
+        None,
+    )
+    if approval is None:
+        return None
+    write_scope = str(approval.get("write_scope", "none"))
+    lines = [
+        fallback_subject,
+        "",
+        fallback_description,
+        "",
+        "## Worker Contract",
+        "",
+        f"worker-brief.md: {brief_path}",
+        f"workers_approved.json: {approvals_path}",
+        f"write_scope: {write_scope}",
+        "Use path-only input for large context. Read only the files needed for this task.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def _resolve_project_path(root: Path, value: str) -> Path:
     return resolve_project_path(root, value)
 
@@ -1124,6 +1389,75 @@ def _slug_for_hint(root: Path, value: str) -> str:
         return plan_worktree(root=root, name=value).name
     except ValueError:
         return value
+
+
+def _resolve_cli_root_context(root: Path, worktree: str | None) -> tuple[Path, str | None]:
+    managed = _managed_worktree_context(root)
+    if managed is not None:
+        leader_root, inferred_worktree = managed
+        return leader_root, worktree or inferred_worktree
+    cwd_managed = _managed_worktree_context(Path.cwd())
+    if cwd_managed is not None and (_same_path(root, Path.cwd()) or _same_path(root, cwd_managed[0])):
+        leader_root, inferred_worktree = cwd_managed
+        return leader_root, worktree or inferred_worktree
+    git_common_root = _git_common_worktree_root(root)
+    if git_common_root is not None:
+        return git_common_root, worktree
+    return root, worktree
+
+
+def _managed_worktree_context(path: Path) -> tuple[Path, str] | None:
+    resolved = path.resolve()
+    parts = resolved.parts
+    markers = {".agent-flow", ".codex", ".Codex"}
+    for index in range(len(parts) - 2, 0, -1):
+        if parts[index] not in markers or parts[index + 1] != "worktrees":
+            continue
+        root = Path(*parts[:index])
+        if parts[index] in {".codex", ".Codex"} and _same_path(root, _home_path()):
+            continue
+        return root, parts[index + 2]
+    return None
+
+
+def _git_common_worktree_root(root: Path) -> Path | None:
+    try:
+        top_level = subprocess.run(
+            ("git", "rev-parse", "--show-toplevel"),
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        common_dir = subprocess.run(
+            ("git", "rev-parse", "--git-common-dir"),
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if top_level.returncode != 0 or common_dir.returncode != 0:
+        return None
+    common_path = Path(common_dir.stdout.strip())
+    if not common_path.is_absolute():
+        common_path = Path(top_level.stdout.strip()) / common_path
+    if common_path.name != ".git":
+        return None
+    return common_path.parent.resolve()
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve() == right.resolve()
+    except OSError:
+        return left.absolute() == right.absolute()
+
+
+def _home_path() -> Path:
+    home = os.environ.get("HOME") or os.environ.get("USERPROFILE") or str(Path.home())
+    return Path(home).expanduser()
 
 
 def _is_git_repo(root: Path) -> bool:

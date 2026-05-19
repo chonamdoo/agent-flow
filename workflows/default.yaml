@@ -176,18 +176,15 @@ phases:
 
   - id: final-review
     description: |
-      Final review. Requires at least one active-host reviewer sub-agent.
-      Split scope across one additional reviewer sub-agent when changes span
-      multiple areas. Profiles add stack-specific specialists on top.
+      Final review. Requires at least two independent active-host reviewer
+      sub-agents before approve. Profiles add stack-specific specialists on top.
     multi_review: true
     routes:
       approve: commit
       request-changes: fix-loop
     prompt: |
-      Spawn at least one active-host reviewer sub-agent (Codex sub-agent in
-      Codex, Claude sub-agent in Claude, Gemini sub-agent in Gemini). If the
-      changed scope spans multiple areas, split the scope and spawn one
-      additional active-host reviewer sub-agent in parallel. Additional
+      Spawn at least two active-host reviewer sub-agents (Codex sub-agent in
+      Codex, Claude sub-agent in Claude, Gemini sub-agent in Gemini). Additional
       non-host providers are optional extras when available:
         - Generalist (templates/_shared/review/architecture.md)
         - Architecture-design specialist (templates/_shared/review/architecture-design.md) — MANDATORY

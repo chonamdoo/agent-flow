@@ -146,18 +146,17 @@ phases:
       Output: gates.md.
 
   - id: multi-review
-    description: Run implementation review with at least one independent sub-agent reviewer. Runner routes approve→architecture-review, request-changes→fix-loop.
+    description: Run implementation review with at least two independent sub-agent reviewers before approve. Runner routes approve→architecture-review, request-changes→fix-loop.
     multi_review: true
     routes:
       approve: architecture-review
       request-changes: fix-loop
     prompt: |
-      Run at least one independent sub-agent reviewer. If the changed scope
-      spans multiple areas, split the scope and run one additional reviewer
-      sub-agent in parallel. Each reviewer uses code-reviewer.md as basis and
+      Run at least two independent sub-agent reviewers in parallel. Each
+      reviewer uses code-reviewer.md as basis and
       outputs an independent verdict: approve or request-changes.
       Any request-changes from any reviewer makes the overall verdict
-      request-changes. Default reviewer is an active-host sub-agent (Codex
+      request-changes. Default reviewers are active-host sub-agents (Codex
       sub-agent in Codex, Claude sub-agent in Claude, Gemini sub-agent in Gemini).
       Additional non-host providers are optional when available.
       Provider failure falls back to active-host sub-agents only. Each reviewer

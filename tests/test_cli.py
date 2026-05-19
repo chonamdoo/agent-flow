@@ -149,7 +149,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(phases["gates"]["routes"]["green"], "multi-review")
         self.assertEqual(phases["multi-review"]["routes"]["request-changes"], "fix-loop")
         self.assertTrue(phases["multi-review"]["multi_review"])
-        self.assertIn("Default reviewer is an active-host sub-agent", phases["multi-review"]["prompt"])
+        self.assertIn("Default reviewers are active-host sub-agents", phases["multi-review"]["prompt"])
         self.assertIn("close that sub-agent session", phases["multi-review"]["prompt"])
         self.assertIn("reviewer-source: sub-agent", phases["multi-review"]["prompt"])
         self.assertIn("## Overall", phases["multi-review"]["prompt"])
@@ -178,7 +178,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(default_phases["implement"]["required_markers"], ["gates: all_passed"])
         self.assertEqual(default_phases["final-review"]["routes"]["request-changes"], "fix-loop")
         self.assertEqual(default_phases["final-review"]["routes"]["approve"], "commit")
-        self.assertIn("at least one active-host reviewer sub-agent", default_phases["final-review"]["prompt"])
+        self.assertIn("at least two active-host reviewer sub-agents", default_phases["final-review"]["prompt"])
         self.assertIn("reviewer-source: sub-agent", default_phases["final-review"]["prompt"])
         self.assertIn("close that sub-agent session", default_phases["final-review"]["prompt"])
         self.assertIn("## Overall", default_phases["final-review"]["prompt"])
@@ -186,31 +186,37 @@ class CliTest(unittest.TestCase):
         self.assertIn("verdict: request-changes", default_phases["final-review"]["prompt"])
 
     def test_python_runner_route_key_understands_gate_results(self) -> None:
-        from agent_flow.runner import _route_key
+        from agent_flow.runner import _gates_route_key, _route_key
 
-        # gates 결과 JSON과 status alias가 같은 route key로 정규화되어야 한다.
-        self.assertEqual(_route_key('{"passed": true, "results": []}'), "green")
-        self.assertEqual(_route_key('{"passed": false, "results": []}'), "request-changes")
+        # gates 통과 JSON은 실제 command 결과가 있을 때만 green으로 정규화된다.
+        self.assertEqual(_gates_route_key('{"passed": true}'), "default")
+        self.assertEqual(_gates_route_key('{"passed": true, "results": []}'), "default")
         self.assertEqual(
-            _route_key('{"passed": false, "results": [{"id": "lint", "passed": true}]}'),
+            _gates_route_key('{"passed": true, "results": [{"command": "npm test", "passed": true, "output": "ok"}]}'),
+            "green",
+        )
+        self.assertEqual(_gates_route_key('{"passed": false, "results": []}'), "request-changes")
+        self.assertEqual(
+            _gates_route_key('{"passed": false, "results": [{"id": "lint", "passed": true}]}'),
             "request-changes",
         )
         self.assertEqual(_route_key("status: failed"), "request-changes")
         self.assertEqual(_route_key("status: pass"), "green")
+        self.assertEqual(_gates_route_key("status: pass"), "default")
 
     def test_codex_multi_review_requires_one_codex_subagent(self) -> None:
         from agent_flow.adapters.hosted import HostedAdapter, _multi_reviewer_block
 
         adapter = HostedAdapter("codex")
-        self.assertIn("spawn at least one Codex reviewer sub-agent", adapter._hint)
+        self.assertIn("spawn at least two Codex reviewer sub-agents", adapter._hint)
         self.assertIn("reviewer-source: sub-agent", adapter._hint)
         self.assertIn("close that", adapter._hint)
 
         with mock.patch("agent_flow.adapters.hosted.resolve_review_clis", return_value=[]):
             block = _multi_reviewer_block()
-        self.assertIn("Spawn at least one host-native reviewer sub-agent", block)
+        self.assertIn("Spawn at least two host-native reviewer sub-agents", block)
         self.assertIn("reviewer-source: sub-agent", block)
-        self.assertIn("1+ independent sub-agent reviewer verdict", block)
+        self.assertIn("2+ independent sub-agent reviewer verdicts", block)
 
     def test_optional_reviewer_clis_are_opt_in(self) -> None:
         from agent_flow.multi_review import (
@@ -284,7 +290,9 @@ class CliTest(unittest.TestCase):
             ]
 
             (run_dir / "multi-review.md").write_text(
-                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n## Overall\nverdict: approve\n",
+                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
+                "## Reviewer 2\nreviewer-source: sub-agent\nreviewer-2 verdict: approve\n\n"
+                "## Overall\nverdict: approve\n",
                 encoding="utf-8",
             )
             self.assertEqual(runner._next_index(0, phase), (2, False))
@@ -312,6 +320,12 @@ class CliTest(unittest.TestCase):
             with contextlib.redirect_stdout(output):
                 self.assertEqual(runner._next_index(0, phase), (0, True))
             self.assertIn("requires ## Overall with exactly one verdict", output.getvalue())
+
+            (run_dir / "multi-review.md").write_text(
+                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: request-changes\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(runner._next_index(0, phase), (0, True))
 
             for legacy_status in ("verdict: request-changes\n", "status: failed\n", "status: fail\n"):
                 (run_dir / "multi-review.md").write_text(legacy_status, encoding="utf-8")
@@ -371,7 +385,7 @@ class CliTest(unittest.TestCase):
                 "verdict: approve\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (2, False))
+            self.assertEqual(runner._next_index(0, phase), (0, True))
 
             (run_dir / "multi-review.md").write_text(
                 "## Reviewer Notes\nverdict: approve\n\n"
@@ -381,12 +395,14 @@ class CliTest(unittest.TestCase):
                 "verdict: approve\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (2, False))
+            self.assertEqual(runner._next_index(0, phase), (0, True))
 
             (run_dir / "multi-review.md").write_text(
                 "## Reviewer Feedback\nverdict: approve\n\n"
-                "reviewer-1 source: sub-agent\n"
+                "reviewer-1 reviewer-source: sub-agent\n"
                 "reviewer-1 verdict: approve\n\n"
+                "reviewer-2 reviewer-source: sub-agent\n"
+                "reviewer-2 verdict: approve\n\n"
                 "## Overall\n"
                 "verdict: approve\n",
                 encoding="utf-8",
@@ -408,7 +424,7 @@ class CliTest(unittest.TestCase):
                 "verdict: approve\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (2, False))
+            self.assertEqual(runner._next_index(0, phase), (0, True))
 
             (run_dir / "multi-review.md").write_text(
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
@@ -437,10 +453,18 @@ class CliTest(unittest.TestCase):
             ]
 
             (run_dir / "final-review.md").write_text(
-                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n## Overall\nverdict: approve\n",
+                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
+                "## Reviewer 2\nreviewer-source: sub-agent\nreviewer-2 verdict: approve\n\n"
+                "## Overall\nverdict: approve\n",
                 encoding="utf-8",
             )
             self.assertEqual(runner._next_index(0, phase), (2, False))
+
+            (run_dir / "final-review.md").write_text(
+                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: request-changes\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(runner._next_index(0, phase), (0, True))
 
             (run_dir / "final-review.md").write_text(
                 "reviewer verdict: approve\n## Reviewer\nverdict: approve\nverdict: approve\n",
@@ -450,8 +474,10 @@ class CliTest(unittest.TestCase):
 
             (run_dir / "final-review.md").write_text(
                 "## Reviewer Verdicts\nverdict: approve\n\n"
-                "reviewer-1 source: sub-agent\n"
+                "reviewer-1 reviewer-source: sub-agent\n"
                 "reviewer-1 verdict: approve\n\n"
+                "reviewer-2 reviewer-source: sub-agent\n"
+                "reviewer-2 verdict: approve\n\n"
                 "## Overall\n"
                 "verdict: approve\n",
                 encoding="utf-8",
@@ -460,8 +486,10 @@ class CliTest(unittest.TestCase):
 
             (run_dir / "final-review.md").write_text(
                 "## Reviewer Notes\nverdict: approve\n\n"
-                "reviewer-1 source: sub-agent\n"
+                "reviewer-1 reviewer-source: sub-agent\n"
                 "reviewer-1 verdict: approve\n\n"
+                "reviewer-2 reviewer-source: sub-agent\n"
+                "reviewer-2 verdict: approve\n\n"
                 "## Overall\n"
                 "verdict: approve\n",
                 encoding="utf-8",
@@ -501,6 +529,15 @@ class CliTest(unittest.TestCase):
             self.assertEqual(runner._next_index(0, gates), (0, True))
 
             (run_dir / "gates.md").write_text('{"passed": true, "results": []}', encoding="utf-8")
+            self.assertEqual(runner._next_index(0, gates), (0, True))
+
+            (run_dir / "gates.md").write_text("status: pass\n", encoding="utf-8")
+            self.assertEqual(runner._next_index(0, gates), (0, True))
+
+            (run_dir / "gates.md").write_text(
+                '{"passed": true, "results": [{"command": "npm test", "passed": true, "output": "ok"}]}',
+                encoding="utf-8",
+            )
             self.assertEqual(runner._next_index(0, gates), (2, False))
             self.assertNotIn("fix_loop_rounds", read_meta(run_dir))
 
@@ -631,7 +668,7 @@ class CliTest(unittest.TestCase):
                 (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
-                "현재 사용 중인 CLI(활성 host)의 sub-agent 1개가 필수",
+                "현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수",
                 (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
@@ -659,7 +696,7 @@ class CliTest(unittest.TestCase):
                 (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
-                "현재 사용 중인 CLI(활성 host)의 sub-agent 1개가 필수",
+                "현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수",
                 (project_root / "AGENTS.md").read_text(encoding="utf-8"),
             )
             agent_flow_skill = (project_root / ".agent-flow" / "skills" / "agent-flow" / "SKILL.md").read_text(
@@ -712,6 +749,37 @@ class CliTest(unittest.TestCase):
             result = subprocess.run(
                 (node, installer, "install", "--without-graphify"),
                 cwd=worktree_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("worktree install skipped", result.stdout)
+            self.assertFalse((worktree_root / ".agent-flow").exists())
+            self.assertFalse((worktree_root / "AGENTS.md").exists())
+
+    def test_legacy_node_installer_skips_managed_worktree_reinstall(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            worktree_root = project_root / ".agent-flow" / "worktrees" / "feat-task"
+            worktree_root.mkdir(parents=True)
+            node = _node_executable()
+            kit_installer = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            legacy_installer = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-install.mjs")
+            initial = subprocess.run(
+                (node, kit_installer, "install", "--without-graphify"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(initial.returncode, 0, initial.stderr)
+
+            result = subprocess.run(
+                (node, legacy_installer, "install", "--without-graphify"),
+                cwd=worktree_root,
+                env={**os.environ, "AGENT_FLOW_GRAPHIFY_DRY_RUN": "1"},
                 text=True,
                 capture_output=True,
                 check=False,
@@ -825,7 +893,52 @@ class CliTest(unittest.TestCase):
                     self.assertTrue((project_root / ".agent-flow" / "runs" / "full-feature" / run_id).is_dir())
                     self.assertFalse((worktree / ".agent-flow" / "runs" / "full-feature" / run_id).exists())
 
-    def test_node_installer_from_agent_flow_worktree_updates_parent_install(self) -> None:
+    def test_python_cli_status_from_managed_worktree_uses_parent_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "project"
+            root.mkdir()
+            _init_git_repo(root)
+            self.assertEqual(main(["run", "slice", "--root", str(root)]), 0)
+            worktree = root / ".agent-flow" / "worktrees" / "feat-slice"
+            self.assertTrue((worktree / ".git").exists())
+
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(worktree)
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(main(["status"]), 0)
+            finally:
+                os.chdir(old_cwd)
+
+            status = output.getvalue()
+            self.assertIn("Run id", status)
+            self.assertIn("current_phase: slice-plan", status)
+            self.assertIn(f"next_command: agent-flow continue --root {root.resolve()} --worktree feat-slice", status)
+            self.assertFalse((worktree / ".agent-flow" / "runs").exists())
+
+    def test_python_cli_run_from_managed_worktree_reuses_parent_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "project"
+            root.mkdir()
+            _init_git_repo(root)
+            self.assertEqual(main(["run", "slice", "--root", str(root)]), 0)
+            worktree = root / ".agent-flow" / "worktrees" / "feat-slice"
+
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(worktree)
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(main(["run", "other"]), 2)
+            finally:
+                os.chdir(old_cwd)
+
+            self.assertIn("already active", output.getvalue())
+            self.assertFalse((root / ".agent-flow" / "worktrees" / "feat-other").exists())
+            self.assertFalse((worktree / ".agent-flow" / "worktrees").exists())
+
+    def test_node_installer_from_agent_flow_worktree_without_root_install_is_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
@@ -846,13 +959,12 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
 
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertTrue((project_root / ".agent-flow" / "kit.json").is_file())
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("managed worktree install blocked", result.stderr)
+            self.assertFalse((project_root / ".agent-flow" / "kit.json").exists())
             self.assertFalse((worktree / ".agent-flow" / "kit.json").exists())
-            self.assertTrue((project_root / ".Codex" / "agents" / "code-reviewer.md").is_file())
-            self.assertTrue((project_root / ".Codex" / "context" / "tree.jsonl").is_file())
 
-    def test_node_installer_from_codex_worktree_updates_parent_install(self) -> None:
+    def test_node_installer_from_codex_worktree_without_root_install_is_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
@@ -875,10 +987,10 @@ class CliTest(unittest.TestCase):
                         check=False,
                     )
 
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertTrue((project_root / ".agent-flow" / "kit.json").is_file())
+                    self.assertEqual(result.returncode, 1)
+                    self.assertIn("managed worktree install blocked", result.stderr)
+                    self.assertFalse((project_root / ".agent-flow" / "kit.json").exists())
                     self.assertFalse((worktree / ".agent-flow" / "kit.json").exists())
-                    self.assertTrue((project_root / ".Codex" / "agents" / "code-reviewer.md").is_file())
 
     def test_node_installer_from_external_codex_worktree_updates_git_common_install(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -896,6 +1008,36 @@ class CliTest(unittest.TestCase):
                 (
                     node,
                     str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"),
+                    "install",
+                    "--without-graphify",
+                ),
+                cwd=worktree,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((project_root / ".agent-flow" / "kit.json").is_file())
+            self.assertFalse((worktree / ".agent-flow" / "kit.json").exists())
+
+    def test_legacy_node_installer_from_external_codex_worktree_updates_git_common_install(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            _init_git_repo(project_root)
+            home = Path(temp_dir) / "home"
+            worktree = home / ".codex" / "worktrees" / "slice" / "project"
+            worktree.parent.mkdir(parents=True)
+            subprocess.run(("git", "worktree", "add", "-q", "--detach", str(worktree), "HEAD"), cwd=project_root, check=True)
+            node = _node_executable()
+            env = {**os.environ, "HOME": str(home), "AGENT_FLOW_GRAPHIFY_DRY_RUN": "1"}
+
+            result = subprocess.run(
+                (
+                    node,
+                    str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-install.mjs"),
                     "install",
                     "--without-graphify",
                 ),
@@ -1239,12 +1381,12 @@ class CliTest(unittest.TestCase):
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
 
             self.assertIn("id: full-feature", workflow.read_text(encoding="utf-8"))
-            self.assertIn("Default reviewer is an active-host sub-agent", workflow.read_text(encoding="utf-8"))
+            self.assertIn("Default reviewers are active-host sub-agents", workflow.read_text(encoding="utf-8"))
             self.assertIn("Gemini sub-agent in Gemini", workflow.read_text(encoding="utf-8"))
             self.assertIn("multi_review: true", workflow.read_text(encoding="utf-8"))
             self.assertIn("status: ci-failed", prompt.read_text(encoding="utf-8"))
             self.assertIn(
-                "Default reviewer is an active-host sub-agent",
+                "Default reviewers are active-host sub-agents",
                 (project_root / ".agent-flow" / "prompts" / "multi-review.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
@@ -1274,9 +1416,9 @@ class CliTest(unittest.TestCase):
             self.assertIn('agent-flow run "<task>"', bootstrap.read_text(encoding="utf-8"))
             self.assertIn('agent-flow run "<task>"', claude_bootstrap.read_text(encoding="utf-8"))
             self.assertIn('agent-flow run "<task>"', gemini_bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("현재 사용 중인 CLI(활성 host)의 sub-agent 1개가 필수", bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("현재 사용 중인 CLI(활성 host)의 sub-agent 1개가 필수", claude_bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("현재 사용 중인 CLI(활성 host)의 sub-agent 1개가 필수", gemini_bootstrap.read_text(encoding="utf-8"))
+            self.assertIn("현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수", bootstrap.read_text(encoding="utf-8"))
+            self.assertIn("현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수", claude_bootstrap.read_text(encoding="utf-8"))
+            self.assertIn("현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수", gemini_bootstrap.read_text(encoding="utf-8"))
             self.assertIn("활성 host가 아닌 추가 provider는 optional", bootstrap.read_text(encoding="utf-8"))
             self.assertIn("활성 host가 아닌 추가 provider는 optional", claude_bootstrap.read_text(encoding="utf-8"))
             self.assertIn("활성 host가 아닌 추가 provider는 optional", gemini_bootstrap.read_text(encoding="utf-8"))
@@ -1300,7 +1442,7 @@ class CliTest(unittest.TestCase):
             self.assertIn("verdict: request-changes", gemini_bootstrap.read_text(encoding="utf-8"))
             self.assertIn("Full Feature Workflow", skill.read_text(encoding="utf-8"))
             self.assertIn("Workflow Contract", rules.read_text(encoding="utf-8"))
-            self.assertIn("one active-host sub-agent", rules.read_text(encoding="utf-8"))
+            self.assertIn("two active-host sub-agents", rules.read_text(encoding="utf-8"))
             self.assertIn("Gemini sub-agent in Gemini", rules.read_text(encoding="utf-8"))
             self.assertIn("reviewer-source: sub-agent", rules.read_text(encoding="utf-8"))
             self.assertIn("close that sub-agent session", rules.read_text(encoding="utf-8"))
@@ -2096,7 +2238,7 @@ class CliTest(unittest.TestCase):
             self.assertIn("Current phase: gates", result.stdout)
 
             gates_artifact.write_text(
-                '{"passed": true, "results": [{"id": "lint", "command": "npm run lint", "passed": true}]}\n',
+                '{"passed": true, "results": [{"id": "lint", "command": "npm run lint", "passed": true, "output": "ok"}]}\n',
                 encoding="utf-8",
             )
             result = subprocess.run(
@@ -2395,6 +2537,10 @@ class CliTest(unittest.TestCase):
                 "## Overall\nverdict: approve\n",
                 "reviewer-1 source: non-sub-agent\nreviewer-1 verdict: approve\n\n"
                 "## Overall\nverdict: approve\n",
+                "reviewer-1 source: sub-agent\nreviewer-1 verdict: approve\n\n"
+                "## Overall\nverdict: approve\n",
+                "## Reviewer 1\nsource: sub-agent\nverdict: approve\n\n"
+                "## Overall\nverdict: approve\n",
             ):
                 mr_artifact.write_text(bad_source, encoding="utf-8")
                 result = subprocess.run(
@@ -2524,7 +2670,9 @@ class CliTest(unittest.TestCase):
             self.assertIn("matching reviewer verdicts and overall verdict", result.stderr)
 
             mr_artifact.write_text(
-                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n## Overall\nverdict: approve\n",
+                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
+                "## Reviewer 2\nreviewer-source: sub-agent\nreviewer-2 verdict: approve\n\n"
+                "## Overall\nverdict: approve\n",
                 encoding="utf-8",
             )
             result = subprocess.run(
@@ -2929,7 +3077,7 @@ class CliTest(unittest.TestCase):
                         "--name",
                         "slice-a",
                         "--branch",
-                        "custom/slice-a",
+                        "feat/slice-a",
                     ]
                 ),
                 0,
@@ -2966,13 +3114,13 @@ class CliTest(unittest.TestCase):
                     encoding="utf-8"
                 )
             )
-            self.assertEqual(manifest["worktree"]["branch"], "custom/slice-a")
+            self.assertEqual(manifest["worktree"]["branch"], "feat/slice-a")
 
     def test_start_worktree_can_use_existing_branch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             _init_git_repo(root)
-            subprocess.run(("git", "branch", "custom/slice-a"), cwd=root, check=True)
+            subprocess.run(("git", "branch", "feat/slice-a"), cwd=root, check=True)
 
             self.assertEqual(
                 main(
@@ -2990,7 +3138,7 @@ class CliTest(unittest.TestCase):
                         "--worktree",
                         "slice-a",
                         "--worktree-branch",
-                        "custom/slice-a",
+                        "feat/slice-a",
                     ]
                 ),
                 0,
@@ -3007,7 +3155,7 @@ class CliTest(unittest.TestCase):
                     encoding="utf-8"
                 )
             )
-            self.assertEqual(manifest["worktree"]["branch"], "custom/slice-a")
+            self.assertEqual(manifest["worktree"]["branch"], "feat/slice-a")
             self.assertTrue((root / ".agent-flow" / "worktrees" / "feat-slice-a").is_dir())
 
     def test_detect_profile_defaults_to_generic(self) -> None:
@@ -3598,7 +3746,7 @@ class CliTest(unittest.TestCase):
             )
             self.assertEqual(runner._next_index(0, phase), (2, False))
 
-    def test_default_final_review_allows_one_subagent_reviewer_approve(self) -> None:
+    def test_default_final_review_blocks_one_subagent_reviewer_approve(self) -> None:
         from agent_flow.runner import Phase, Runner
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -3617,7 +3765,7 @@ class CliTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            self.assertEqual(runner._next_index(0, phase), (2, False))
+            self.assertEqual(runner._next_index(0, phase), (0, True))
 
     def test_provider_rate_limits_render_retry_status(self) -> None:
         from agent_flow.multi_review import _render_angle_result
@@ -3886,6 +4034,7 @@ class CliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             _create_team_with_task_and_worker(root)
+            _approve_worker_for_task(root)
 
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
@@ -3922,6 +4071,7 @@ class CliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             _create_team_with_task_and_worker(root)
+            _approve_worker_for_task(root)
 
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
@@ -6002,6 +6152,45 @@ def _create_team_with_task_and_worker(root: Path) -> None:
     )
 
 
+def _approve_worker_for_task(root: Path) -> None:
+    main(
+        [
+            "team",
+            "brief",
+            "--root",
+            str(root),
+            "--team",
+            "feature-team",
+            "--task",
+            "task-1",
+            "--worker",
+            "worker-1",
+            "--brief",
+            "Use the worker-brief contract.",
+            "--write-scope",
+            "tasks-only",
+        ]
+    )
+    main(
+        [
+            "team",
+            "approve-worker",
+            "--root",
+            str(root),
+            "--team",
+            "feature-team",
+            "--task",
+            "task-1",
+            "--worker",
+            "worker-1",
+            "--reviewer",
+            "lead",
+            "--write-scope",
+            "tasks-only",
+        ]
+    )
+
+
 def _read_task_json(root: Path) -> dict[str, object]:
     return json.loads(
         (
@@ -6101,7 +6290,7 @@ def _node_phase_content(phase: str, prefix: str = "") -> str:
             + "context_docs_updated: not_needed\n"
         )
     if phase == "gates":
-        return '{"passed": true, "results": [{"id": "test", "command": "npm test", "passed": true}]}\n'
+        return '{"passed": true, "results": [{"id": "test", "command": "npm test", "passed": true, "output": "ok"}]}\n'
     if phase == "multi-review":
         return (
             "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"

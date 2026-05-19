@@ -9,17 +9,76 @@
 // every host CLI sees the same workflow contract.
 
 import fs from "node:fs";
+import crypto from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
 const KIT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const PROJECT = process.cwd();
-const AF_DIR = path.join(PROJECT, ".agent-flow");
+const REQUESTED_PROJECT = process.cwd();
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
+const PROJECT = resolveInstallProject(REQUESTED_PROJECT);
+const AF_DIR = path.join(PROJECT, ".agent-flow");
 
 function ensureDir(p) {
   fs.mkdirSync(p, { recursive: true });
+}
+
+function resolveManagedWorktreeRoot(start) {
+  const parts = path.resolve(start).split(path.sep);
+  const markers = new Set([".agent-flow", ".codex", ".Codex"]);
+  for (let index = parts.length - 2; index >= 0; index -= 1) {
+    if (parts[index + 1] !== "worktrees") continue;
+    if (!markers.has(parts[index])) continue;
+    const root = parts.slice(0, index).join(path.sep) || path.sep;
+    if (HOME && samePath(root, HOME) && (parts[index] === ".codex" || parts[index] === ".Codex")) {
+      continue;
+    }
+    return root;
+  }
+  return null;
+}
+
+function resolveInstallProject(start) {
+  const managedRoot = resolveManagedWorktreeRoot(start);
+  if (managedRoot) return managedRoot;
+  const gitCommonRoot = resolveGitCommonWorktreeRoot(start);
+  if (gitCommonRoot) return gitCommonRoot;
+  return start;
+}
+
+function resolveGitCommonWorktreeRoot(start) {
+  const topLevel = gitOutput(start, ["rev-parse", "--show-toplevel"]);
+  const commonDir = gitOutput(start, ["rev-parse", "--git-common-dir"]);
+  if (!topLevel || !commonDir) {
+    return null;
+  }
+  const resolvedCommonDir = path.resolve(topLevel, commonDir);
+  if (path.basename(resolvedCommonDir) !== ".git") {
+    return null;
+  }
+  return path.dirname(resolvedCommonDir);
+}
+
+function gitOutput(cwd, args) {
+  const result = spawnSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  if (result.error || result.status !== 0) {
+    return null;
+  }
+  const output = result.stdout.trim();
+  return output || null;
+}
+
+function samePath(left, right) {
+  try {
+    return fs.realpathSync.native(left) === fs.realpathSync.native(right);
+  } catch {
+    return path.resolve(left) === path.resolve(right);
+  }
 }
 
 function bootstrapMarkdown(label) {
@@ -153,11 +212,272 @@ function copySkillDir(src, dest) {
   return `copied:${r.written}:${r.skipped}`;
 }
 
+function installProjectSkills() {
+  const previousIndex = readJsonIfExists(path.join(AF_DIR, "skills", "index.json"));
+  const selected = selectProjectSkills();
+  const links = [];
+  for (const skill of selected.skills) {
+    for (const host of skill.hosts) {
+      links.push(linkProjectSkill(skill, host, previousIndex));
+    }
+  }
+  links.push(...removeStaleProjectSkillLinks(selected.skills, previousIndex));
+  const index = { ...selected, links };
+  fs.writeFileSync(path.join(AF_DIR, "skills", "index.json"), `${JSON.stringify(index, null, 2)}\n`);
+  return index;
+}
+
+function selectProjectSkills() {
+  const discovered = [
+    ...discoverSkills(path.join(AF_DIR, "local-skills"), "local"),
+    ...discoverSkills(path.join(PROJECT, "skills"), "project"),
+    ...discoverSkills(path.join(AF_DIR, "skills"), "bundled"),
+  ];
+  const byName = new Map();
+  const warnings = [];
+  for (const skill of discovered) {
+    const current = byName.get(skill.name);
+    if (!current || skill.priority < current.priority) byName.set(skill.name, skill);
+    warnings.push(...skill.warnings);
+  }
+  const skills = [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+  const conflicts = skills.map((skill) => ({
+    name: skill.name,
+    selected: skill.path,
+    ignored: discovered
+      .filter((candidate) => candidate.name === skill.name && candidate.path !== skill.path)
+      .sort((a, b) => a.priority - b.priority)
+      .map((candidate) => candidate.path),
+  })).filter((conflict) => conflict.ignored.length > 0);
+  return {
+    version: 1,
+    skills: skills.map(({ priority, warnings: _warnings, ...skill }) => skill),
+    conflicts,
+    warnings,
+  };
+}
+
+function discoverSkills(baseDir, source) {
+  if (!fs.existsSync(baseDir)) return [];
+  const priority = { local: 0, project: 1, bundled: 2 }[source] ?? 99;
+  const skills = [];
+  for (const entry of fs.readdirSync(baseDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const skillPath = path.join(baseDir, entry.name, "SKILL.md");
+    if (!fs.existsSync(skillPath)) continue;
+    const text = fs.readFileSync(skillPath, "utf8");
+    const metadata = parseSkillMetadata(text, entry.name);
+    const relativePath = path.relative(PROJECT, skillPath);
+    skills.push({
+      name: metadata.name,
+      path: relativePath,
+      source,
+      hosts: metadata.hosts,
+      tags: metadata.tags,
+      description: metadata.description,
+      trigger: metadata.trigger,
+      hash: crypto.createHash("sha256").update(text).digest("hex"),
+      priority,
+      warnings: metadata.warnings.map((message) => `${relativePath}: ${message}`),
+    });
+  }
+  return skills;
+}
+
+function parseSkillMetadata(text, fallbackName) {
+  const frontmatter = splitSkillFrontmatter(text);
+  const metadata = frontmatter ? parseSimpleYaml(frontmatter) : {};
+  const warnings = [];
+  const parsedName = String(metadata.name || fallbackName);
+  const name = safeSkillName(parsedName);
+  if (name !== parsedName) warnings.push(`unsafe skill name ignored: ${parsedName}`);
+  const hostValues = Array.isArray(metadata.hosts) ? metadata.hosts : [];
+  const knownHosts = new Set(["claude", "codex", "gemini"]);
+  const hosts = [];
+  for (const host of hostValues) {
+    const normalized = String(host).trim().toLowerCase();
+    if (knownHosts.has(normalized)) hosts.push(normalized);
+    else if (normalized) warnings.push(`unknown host ignored: ${normalized}`);
+  }
+  const body = text.replace(/^---\n[\s\S]*?\n---\n?/, "");
+  const useWhen = body.split(/\r?\n/).find((line) => /^\s*use when\b/i.test(line));
+  return {
+    name,
+    description: String(metadata.description || useWhen || ""),
+    hosts: hostValues.length > 0 ? [...new Set(hosts)] : ["claude", "codex", "gemini"],
+    tags: Array.isArray(metadata.tags) ? metadata.tags.map(String) : [],
+    trigger: String(metadata.trigger || metadata.description || useWhen || ""),
+    warnings,
+  };
+}
+
+function safeSkillName(value) {
+  const candidate = String(value).trim();
+  return /^[A-Za-z0-9._-]+$/.test(candidate) && !candidate.startsWith(".") && !candidate.includes("..") && candidate !== "."
+    ? candidate
+    : String(candidate || "skill")
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, "-")
+        .replace(/^-+|-+$/g, "") || "skill";
+}
+
+function removeStaleProjectSkillLinks(skills, previousIndex) {
+  if (!previousIndex || !Array.isArray(previousIndex.links)) return [];
+  const desired = new Set(skills.flatMap((skill) => skill.hosts.map((host) => `${host}:${skill.name}`)));
+  const removed = [];
+  for (const link of previousIndex.links) {
+    if (!link || !link.name || !link.host || !link.path) continue;
+    if (desired.has(`${link.host}:${link.name}`)) continue;
+    const target = path.join(PROJECT, link.path);
+    const hostRoot = path.join(PROJECT, `.${link.host}`, "skills");
+    if (pathHasSymlink(PROJECT, hostRoot)) {
+      removed.push({ name: link.name, host: link.host, path: link.path, status: "skipped-host-root-symlink" });
+      continue;
+    }
+    ensureChildPath(hostRoot, target);
+    const stat = lstatIfExists(target);
+    if (!stat) continue;
+    if (stat.isSymbolicLink()) {
+      fs.unlinkSync(target);
+      removed.push({ name: link.name, host: link.host, path: link.path, status: "removed-stale" });
+      continue;
+    }
+    const previousHash = previousSkillHash(previousIndex, link.name);
+    const skillFile = path.join(target, "SKILL.md");
+    if (stat.isDirectory() && previousHash && fs.existsSync(skillFile)) {
+      const currentHash = crypto.createHash("sha256").update(fs.readFileSync(skillFile, "utf8")).digest("hex");
+      if (currentHash === previousHash) {
+        fs.rmSync(target, { recursive: true, force: true });
+        removed.push({ name: link.name, host: link.host, path: link.path, status: "removed-stale-copied" });
+      }
+    }
+  }
+  return removed;
+}
+
+function lstatIfExists(pathName) {
+  try {
+    return fs.lstatSync(pathName);
+  } catch (error) {
+    if (error && error.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+function splitSkillFrontmatter(text) {
+  if (!text.startsWith("---\n")) return null;
+  const end = text.indexOf("\n---\n", 4);
+  return end === -1 ? null : text.slice(4, end);
+}
+
+function parseSimpleYaml(text) {
+  const metadata = {};
+  let listKey = null;
+  for (const line of text.split(/\r?\n/)) {
+    const listItem = line.match(/^\s+-\s*(.+)$/);
+    if (listItem && listKey) {
+      metadata[listKey].push(listItem[1].trim().replace(/^['"]|['"]$/g, ""));
+      continue;
+    }
+    const match = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
+    if (!match) {
+      listKey = null;
+      continue;
+    }
+    const raw = match[2].trim();
+    const key = match[1];
+    if (raw.startsWith("[") && raw.endsWith("]")) {
+      metadata[key] = raw.slice(1, -1).split(",").map((item) => item.trim().replace(/^['"]|['"]$/g, "")).filter(Boolean);
+      listKey = null;
+    } else if (raw === "") {
+      metadata[key] = [];
+      listKey = key;
+    } else {
+      metadata[key] = raw.replace(/^['"]|['"]$/g, "");
+      listKey = null;
+    }
+  }
+  return metadata;
+}
+
+function linkProjectSkill(skill, host, previousIndex) {
+  const srcDir = path.dirname(path.join(PROJECT, skill.path));
+  const hostRoot = path.join(PROJECT, `.${host}`, "skills");
+  if (pathHasSymlink(PROJECT, hostRoot)) {
+    return { name: skill.name, host, path: path.relative(PROJECT, hostRoot), status: "skipped-host-root-symlink" };
+  }
+  const destDir = path.join(hostRoot, skill.name);
+  ensureChildPath(hostRoot, destDir);
+  const destSkill = path.join(destDir, "SKILL.md");
+  const previousHash = previousSkillHash(previousIndex, skill.name);
+  if (fs.existsSync(destDir)) {
+    const stat = fs.lstatSync(destDir);
+    if (stat.isSymbolicLink()) fs.unlinkSync(destDir);
+    else if (fs.existsSync(destSkill)) {
+      const currentHash = crypto.createHash("sha256").update(fs.readFileSync(destSkill, "utf8")).digest("hex");
+      if (currentHash !== skill.hash && currentHash !== previousHash) {
+        return { name: skill.name, host, path: path.relative(PROJECT, destDir), status: "skipped-user-modified" };
+      }
+      fs.rmSync(destDir, { recursive: true, force: true });
+    } else {
+      return { name: skill.name, host, path: path.relative(PROJECT, destDir), status: "skipped-existing" };
+    }
+  }
+  return { name: skill.name, host, path: path.relative(PROJECT, destDir), status: linkOrCopyDir(srcDir, destDir) };
+}
+
+function previousSkillHash(previousIndex, name) {
+  if (!previousIndex || !Array.isArray(previousIndex.skills)) return "";
+  return previousIndex.skills.find((skill) => skill && skill.name === name)?.hash || "";
+}
+
+function readJsonIfExists(pathName) {
+  if (!fs.existsSync(pathName)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(pathName, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function ensureChildPath(parent, child) {
+  const parentResolved = path.resolve(parent);
+  const childResolved = path.resolve(child);
+  const relative = path.relative(parentResolved, childResolved);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error(`path escapes parent: ${child}`);
+  }
+}
+
+function pathHasSymlink(root, target) {
+  const relative = path.relative(root, target);
+  const parts = relative.split(path.sep).filter(Boolean);
+  let cursor = root;
+  for (const part of parts) {
+    cursor = path.join(cursor, part);
+    const stat = lstatIfExists(cursor);
+    if (stat && stat.isSymbolicLink()) return true;
+  }
+  return false;
+}
+
 function install() {
+  const managedRoot = resolveManagedWorktreeRoot(REQUESTED_PROJECT);
+  if (managedRoot) {
+    if (fs.existsSync(path.join(managedRoot, ".agent-flow", "kit.json"))) {
+      console.log(`agent-flow already installed root=${managedRoot}`);
+      console.log("worktree install skipped; reinstall from the leader checkout if needed");
+      return;
+    }
+    console.error("managed worktree install blocked; install from the leader checkout first");
+    process.exitCode = 1;
+    return;
+  }
   ensureDir(path.join(AF_DIR, "runs"));
   ensureDir(path.join(AF_DIR, "memory"));
   ensureDir(path.join(AF_DIR, "memory", "lore"));
   ensureDir(path.join(AF_DIR, "memory", "lore", "archive"));
+  ensureDir(path.join(AF_DIR, "local-skills"));
 
   const profile = detectProfile();
 
@@ -166,6 +486,7 @@ function install() {
   bootstrapMarkdown("GEMINI.md");
   upsertGitignore(path.join(PROJECT, ".gitignore"), [
     ".agent-flow/",
+    ".agent-flow/local-skills/",
     ".codex/",
     ".gemini/",
     ".claude/",
@@ -190,6 +511,7 @@ function install() {
     path.join(KIT_ROOT, "skills"),
     path.join(AF_DIR, "skills"),
   );
+  const skillIndex = installProjectSkills();
   const workflowsCopied = copyDir(
     path.join(KIT_ROOT, "workflows"),
     path.join(AF_DIR, "workflows"),
@@ -232,18 +554,6 @@ function install() {
     agentFlowSkill,
     path.join(PROJECT, ".codex", "skills", "agent-flow"),
   );
-  const globalCodexSkillStatus = HOME
-    ? copySkillDir(
-        agentFlowSkill,
-        path.join(HOME, ".codex", "skills", "agent-flow"),
-      )
-    : "missing-home";
-  const globalClaudeSkillStatus = HOME
-    ? copySkillDir(
-        agentFlowSkill,
-        path.join(HOME, ".claude", "skills", "agent-flow"),
-      )
-    : "missing-home";
 
   // Keep a small pointer file for users who inspect .claude/skills by hand.
   // The agent-flow skill itself has already been linked or copied above.
@@ -275,9 +585,13 @@ function install() {
     skill_links: {
       claude: claudeSkillStatus,
       codex: codexSkillStatus,
-      global_claude: globalClaudeSkillStatus,
-      global_codex: globalCodexSkillStatus,
       gemini: "GEMINI.md",
+    },
+    skill_index: {
+      path: ".agent-flow/skills/index.json",
+      skills: skillIndex.skills.length,
+      conflicts: skillIndex.conflicts.length,
+      warnings: skillIndex.warnings.length,
     },
   };
   if (!process.argv.includes("--without-graphify")) {
@@ -296,8 +610,6 @@ function install() {
   console.log(`  profiles : ${profilesCopied.written} written, ${profilesCopied.skipped} skipped`);
   console.log(`  claude  : agent-flow skill ${claudeSkillStatus}`);
   console.log(`  codex   : agent-flow skill ${codexSkillStatus}`);
-  console.log(`  ~/.claude: agent-flow skill ${globalClaudeSkillStatus}`);
-  console.log(`  ~/.codex : agent-flow skill ${globalCodexSkillStatus}`);
   if (kitJson.graphify) {
     console.log(`  graphify: ${kitJson.graphify.status}`);
   }

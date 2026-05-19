@@ -36,6 +36,8 @@ def plan_worktree(*, root: Path, name: str, branch: str | None = None) -> Worktr
     _validate_branch(selected_branch)
     if selected_branch in PROTECTED_WORKTREE_BRANCHES:
         raise ValueError(f"protected worktree branch is not allowed: {selected_branch}")
+    if not selected_branch.startswith("feat/"):
+        raise ValueError(f"worktree branch must start with feat/: {selected_branch}")
     return WorktreePlan(
         name=safe_name,
         branch=selected_branch,
@@ -293,6 +295,8 @@ def _safe_component(value: str) -> str:
     lowered = value.strip().lower()
     safe = re.sub(r"[^a-z0-9._-]+", "-", lowered).strip("-")
     if not safe or safe.startswith(".") or ".." in safe:
+        if not any(char.isalnum() for char in lowered):
+            raise ValueError(f"worktree name must contain at least one safe character: {value}")
         # 한글 등 비ASCII task도 기본 worktree 이름으로 쓸 수 있게 안정적인 fallback을 둔다.
         digest = hashlib.sha1(lowered.encode("utf-8")).hexdigest()[:8]
         safe = f"task-{digest}"

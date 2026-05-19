@@ -33,6 +33,20 @@ class GenericAdapter(Adapter):
         if os.environ.get("AGENT_FLOW_GENERIC_MODE", "stub") == "stub":
             artifact = self.artifact_path(phase, run_dir)
             if not artifact.exists():
+                if getattr(phase, "multi_review", False):
+                    artifact.write_text(
+                        f"# {phase.id}\n\n"
+                        "## Reviewer 1\n"
+                        "reviewer-source: sub-agent\n"
+                        "verdict: approve\n\n"
+                        "## Reviewer 2\n"
+                        "reviewer-source: sub-agent\n"
+                        "verdict: approve\n\n"
+                        "## Overall\n"
+                        "verdict: approve\n",
+                        encoding="utf-8",
+                    )
+                    return True
                 artifact.write_text(
                     f"# {phase.id}\n\n"
                     f"_stub artifact written by GenericAdapter (stub mode)._\n"

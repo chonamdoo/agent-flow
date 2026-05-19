@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import fs from "node:fs";
+import crypto from "node:crypto";
 import path from "node:path";
 import process from "node:process";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -17,21 +18,26 @@ function installProject() {
   const requestedRoot = process.cwd();
   const managedWorktreeRoot = resolveManagedWorktreeRoot(requestedRoot);
   if (
-    managedWorktreeRoot &&
-    fs.existsSync(path.join(managedWorktreeRoot, ".agent-flow", "kit.json"))
+    managedWorktreeRoot
   ) {
-    console.log(`agent-flow already installed root=${managedWorktreeRoot}`);
-    console.log("worktree install skipped; reinstall from the leader checkout if needed");
+    if (fs.existsSync(path.join(managedWorktreeRoot, ".agent-flow", "kit.json"))) {
+      console.log(`agent-flow already installed root=${managedWorktreeRoot}`);
+      console.log("worktree install skipped; reinstall from the leader checkout if needed");
+    } else {
+      throw new Error("managed worktree install blocked; install from the leader checkout first");
+    }
     return;
   }
   const root = resolveInstallRoot(requestedRoot);
   const agentFlowDir = path.join(root, ".agent-flow");
   const profile = detectProfile(root);
   const existingPayload = readExistingKit(agentFlowDir);
+  const previousSkillIndex = readJsonIfExists(path.join(agentFlowDir, "skills", "index.json"));
 
   for (const name of ["runs", "state", "handoffs", "team", "worktrees", "workflows", "skills", "prompts", "rules", "bootstrap"]) {
     fs.mkdirSync(path.join(agentFlowDir, name), { recursive: true });
   }
+  fs.mkdirSync(path.join(agentFlowDir, "local-skills"), { recursive: true });
 
   fs.mkdirSync(path.join(agentFlowDir, "skills", "agent-flow"), { recursive: true });
   fs.mkdirSync(path.join(agentFlowDir, "skills", "full-feature-workflow"), { recursive: true });
@@ -46,10 +52,6 @@ function installProject() {
   writeManagedFile(path.join(agentFlowDir, "workflows", "full-feature.yaml"), fullFeatureWorkflowYaml());
   const agentFlowSkill = agentFlowSkillMarkdown();
   writeManagedFile(path.join(agentFlowDir, "skills", "agent-flow", "SKILL.md"), agentFlowSkill);
-  if (HOME) {
-    writeManagedFileIfMissingOrSame(path.join(HOME, ".codex", "skills", "agent-flow", "SKILL.md"), agentFlowSkill, forceManaged);
-    writeManagedFileIfMissingOrSame(path.join(HOME, ".claude", "skills", "agent-flow", "SKILL.md"), agentFlowSkill, forceManaged);
-  }
   writeManagedFile(
     path.join(agentFlowDir, "skills", "full-feature-workflow", "SKILL.md"),
     fullFeatureSkillMarkdown(),
@@ -67,6 +69,7 @@ function installProject() {
   );
   writeManagedFile(path.join(agentFlowDir, "skills", "push-watch", "SKILL.md"), pushWatchSkillMarkdown());
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "skills"), path.join(agentFlowDir, "skills"), forceManaged);
+  const skillIndex = installProjectSkills(root, agentFlowDir, previousSkillIndex);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "scripts"), path.join(root, "scripts"), forceManaged);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "agents"), path.join(root, ".Codex", "agents"), forceManaged);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "rules", "context"), path.join(root, ".Codex", "rules", "context"), forceManaged);
@@ -95,6 +98,7 @@ function installProject() {
   writeManagedFile(path.join(agentFlowDir, "bootstrap", "GEMINI.md"), bootstrapMarkdown("GEMINI.md"));
   upsertGitignore(path.join(root, ".gitignore"), [
     ".agent-flow/",
+    ".agent-flow/local-skills/",
     ".codex/",
     ".gemini/",
     ".claude/",
@@ -119,6 +123,12 @@ function installProject() {
   if (!installArgs.includes("--without-graphify")) {
     payload.graphify = installGraphify(root, existingPayload?.graphify);
   }
+  payload.skill_index = {
+    path: ".agent-flow/skills/index.json",
+    skills: skillIndex.skills.length,
+    conflicts: skillIndex.conflicts.length,
+    warnings: skillIndex.warnings.length,
+  };
 
   fs.writeFileSync(path.join(agentFlowDir, "kit.json"), `${JSON.stringify(payload, null, 2)}\n`, "utf8");
   console.log(`agent-flow installed profile=${profile}`);
@@ -660,6 +670,305 @@ function copyBundledDirIfMissingOrSame(src, dest, force = false) {
   }
 }
 
+function installProjectSkills(root, agentFlowDir, previousIndex) {
+  const selected = selectProjectSkills(root, agentFlowDir);
+  const links = [];
+  for (const skill of selected.skills) {
+    for (const host of skill.hosts) {
+      links.push(linkProjectSkill(root, skill, host, previousIndex));
+    }
+  }
+  links.push(...removeStaleProjectSkillLinks(root, selected.skills, previousIndex));
+  const index = { ...selected, links };
+  fs.writeFileSync(
+    path.join(agentFlowDir, "skills", "index.json"),
+    `${JSON.stringify(index, null, 2)}\n`,
+    "utf8",
+  );
+  return index;
+}
+
+function selectProjectSkills(root, agentFlowDir) {
+  const discovered = [
+    ...discoverSkills(path.join(agentFlowDir, "local-skills"), "local", root),
+    ...discoverSkills(path.join(root, "skills"), "project", root),
+    ...discoverSkills(path.join(agentFlowDir, "skills"), "bundled", root, new Set(["index.json"])),
+  ];
+  const byName = new Map();
+  const warnings = [];
+  for (const skill of discovered) {
+    const current = byName.get(skill.name);
+    if (!current || skill.priority < current.priority) {
+      byName.set(skill.name, skill);
+    }
+    warnings.push(...skill.warnings);
+  }
+  const skills = [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+  const conflicts = [];
+  for (const skill of skills) {
+    const ignored = discovered
+      .filter((candidate) => candidate.name === skill.name && candidate.path !== skill.path)
+      .sort((a, b) => a.priority - b.priority)
+      .map((candidate) => candidate.path);
+    if (ignored.length > 0) {
+      conflicts.push({ name: skill.name, selected: skill.path, ignored });
+    }
+  }
+  return {
+    version: 1,
+    skills: skills.map(({ priority, warnings: _warnings, ...skill }) => skill),
+    conflicts,
+    warnings,
+  };
+}
+
+function discoverSkills(baseDir, source, root, ignoredNames = new Set()) {
+  if (!fs.existsSync(baseDir)) {
+    return [];
+  }
+  const priority = { local: 0, project: 1, bundled: 2 }[source] ?? 99;
+  const skills = [];
+  for (const entry of fs.readdirSync(baseDir, { withFileTypes: true })) {
+    if (!entry.isDirectory() || ignoredNames.has(entry.name)) {
+      continue;
+    }
+    const skillPath = path.join(baseDir, entry.name, "SKILL.md");
+    if (!fs.existsSync(skillPath)) {
+      continue;
+    }
+    const text = fs.readFileSync(skillPath, "utf8");
+    const metadata = parseSkillMetadata(text, entry.name);
+    const relativePath = path.relative(root, skillPath);
+    skills.push({
+      name: metadata.name,
+      path: relativePath,
+      source,
+      hosts: metadata.hosts,
+      tags: metadata.tags,
+      description: metadata.description,
+      trigger: metadata.trigger,
+      hash: crypto.createHash("sha256").update(text).digest("hex"),
+      priority,
+      warnings: metadata.warnings.map((message) => `${relativePath}: ${message}`),
+    });
+  }
+  return skills;
+}
+
+function parseSkillMetadata(text, fallbackName) {
+  const frontmatter = splitSkillFrontmatter(text);
+  const metadata = frontmatter ? parseSimpleYaml(frontmatter) : {};
+  const warnings = [];
+  const parsedName = String(metadata.name || fallbackName);
+  const name = safeSkillName(parsedName);
+  if (name !== parsedName) {
+    warnings.push(`unsafe skill name ignored: ${parsedName}`);
+  }
+  const hostValues = Array.isArray(metadata.hosts) ? metadata.hosts : [];
+  const knownHosts = new Set(["claude", "codex", "gemini"]);
+  const hosts = [];
+  for (const host of hostValues) {
+    const normalized = String(host).trim().toLowerCase();
+    if (knownHosts.has(normalized)) {
+      hosts.push(normalized);
+    } else if (normalized) {
+      warnings.push(`unknown host ignored: ${normalized}`);
+    }
+  }
+  const body = text.replace(/^---\n[\s\S]*?\n---\n?/, "");
+  const useWhen = body.split(/\r?\n/).find((line) => /^\s*use when\b/i.test(line));
+  return {
+    name,
+    description: String(metadata.description || useWhen || ""),
+    hosts: hostValues.length > 0 ? [...new Set(hosts)] : ["claude", "codex", "gemini"],
+    tags: Array.isArray(metadata.tags) ? metadata.tags.map(String) : [],
+    trigger: String(metadata.trigger || metadata.description || useWhen || ""),
+    warnings,
+  };
+}
+
+function safeSkillName(value) {
+  const candidate = String(value).trim();
+  return /^[A-Za-z0-9._-]+$/.test(candidate) && !candidate.startsWith(".") && !candidate.includes("..") && candidate !== "."
+    ? candidate
+    : String(candidate || "skill")
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, "-")
+        .replace(/^-+|-+$/g, "") || "skill";
+}
+
+function removeStaleProjectSkillLinks(root, skills, previousIndex) {
+  if (!previousIndex || !Array.isArray(previousIndex.links)) {
+    return [];
+  }
+  const desired = new Set(skills.flatMap((skill) => skill.hosts.map((host) => `${host}:${skill.name}`)));
+  const removed = [];
+  for (const link of previousIndex.links) {
+    if (!link || !link.name || !link.host || !link.path) {
+      continue;
+    }
+    const key = `${link.host}:${link.name}`;
+    if (desired.has(key)) {
+      continue;
+    }
+    const target = path.join(root, link.path);
+    const hostRoot = path.join(root, `.${link.host}`, "skills");
+    if (pathHasSymlink(root, hostRoot)) {
+      removed.push({ name: link.name, host: link.host, path: link.path, status: "skipped-host-root-symlink" });
+      continue;
+    }
+    ensureChildPath(hostRoot, target);
+    const stat = lstatIfExists(target);
+    if (!stat) {
+      continue;
+    }
+    if (stat.isSymbolicLink()) {
+      fs.unlinkSync(target);
+      removed.push({ name: link.name, host: link.host, path: link.path, status: "removed-stale" });
+      continue;
+    }
+    const previousHash = previousSkillHash(previousIndex, link.name);
+    const skillFile = path.join(target, "SKILL.md");
+    if (stat.isDirectory() && previousHash && fs.existsSync(skillFile)) {
+      const currentHash = crypto.createHash("sha256").update(fs.readFileSync(skillFile, "utf8")).digest("hex");
+      if (currentHash === previousHash) {
+        fs.rmSync(target, { recursive: true, force: true });
+        removed.push({ name: link.name, host: link.host, path: link.path, status: "removed-stale-copied" });
+      }
+    }
+  }
+  return removed;
+}
+
+function lstatIfExists(pathName) {
+  try {
+    return fs.lstatSync(pathName);
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+}
+
+function splitSkillFrontmatter(text) {
+  if (!text.startsWith("---\n")) {
+    return null;
+  }
+  const end = text.indexOf("\n---\n", 4);
+  if (end === -1) {
+    return null;
+  }
+  return text.slice(4, end);
+}
+
+function parseSimpleYaml(text) {
+  const metadata = {};
+  let listKey = null;
+  for (const line of text.split(/\r?\n/)) {
+    const listItem = line.match(/^\s+-\s*(.+)$/);
+    if (listItem && listKey) {
+      metadata[listKey].push(listItem[1].trim().replace(/^['"]|['"]$/g, ""));
+      continue;
+    }
+    const match = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
+    if (!match) {
+      listKey = null;
+      continue;
+    }
+    const key = match[1];
+    const raw = match[2].trim();
+    if (raw.startsWith("[") && raw.endsWith("]")) {
+      metadata[key] = raw.slice(1, -1).split(",").map((item) => item.trim().replace(/^['"]|['"]$/g, "")).filter(Boolean);
+      listKey = null;
+    } else if (raw === "") {
+      metadata[key] = [];
+      listKey = key;
+    } else {
+      metadata[key] = raw.replace(/^['"]|['"]$/g, "");
+      listKey = null;
+    }
+  }
+  return metadata;
+}
+
+function linkProjectSkill(root, skill, host, previousIndex) {
+  const srcDir = path.dirname(path.join(root, skill.path));
+  const hostRoot = path.join(root, `.${host}`, "skills");
+  if (pathHasSymlink(root, hostRoot)) {
+    return { name: skill.name, host, path: path.relative(root, hostRoot), status: "skipped-host-root-symlink" };
+  }
+  const destDir = path.join(hostRoot, skill.name);
+  ensureChildPath(hostRoot, destDir);
+  const destSkill = path.join(destDir, "SKILL.md");
+  const previousHash = previousSkillHash(previousIndex, skill.name);
+  if (fs.existsSync(destDir)) {
+    const stat = fs.lstatSync(destDir);
+    if (stat.isSymbolicLink()) {
+      fs.unlinkSync(destDir);
+    } else if (fs.existsSync(destSkill)) {
+      const currentHash = crypto.createHash("sha256").update(fs.readFileSync(destSkill, "utf8")).digest("hex");
+      if (currentHash !== skill.hash && currentHash !== previousHash) {
+        return { name: skill.name, host, path: path.relative(root, destDir), status: "skipped-user-modified" };
+      }
+      fs.rmSync(destDir, { recursive: true, force: true });
+    } else {
+      return { name: skill.name, host, path: path.relative(root, destDir), status: "skipped-existing" };
+    }
+  }
+  fs.mkdirSync(path.dirname(destDir), { recursive: true });
+  const relTarget = path.relative(path.dirname(destDir), srcDir);
+  try {
+    fs.symlinkSync(relTarget, destDir, "dir");
+    return { name: skill.name, host, path: path.relative(root, destDir), status: "linked" };
+  } catch {
+    copyBundledDirIfMissingOrSame(srcDir, destDir, true);
+    return { name: skill.name, host, path: path.relative(root, destDir), status: "copied" };
+  }
+}
+
+function previousSkillHash(previousIndex, name) {
+  if (!previousIndex || !Array.isArray(previousIndex.skills)) {
+    return "";
+  }
+  const previous = previousIndex.skills.find((skill) => skill && skill.name === name);
+  return previous?.hash || "";
+}
+
+function readJsonIfExists(pathName) {
+  if (!fs.existsSync(pathName)) {
+    return null;
+  }
+  try {
+    return JSON.parse(fs.readFileSync(pathName, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function ensureChildPath(parent, child) {
+  const parentResolved = path.resolve(parent);
+  const childResolved = path.resolve(child);
+  const relative = path.relative(parentResolved, childResolved);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error(`path escapes parent: ${child}`);
+  }
+}
+
+function pathHasSymlink(root, target) {
+  const relative = path.relative(root, target);
+  const parts = relative.split(path.sep).filter(Boolean);
+  let cursor = root;
+  for (const part of parts) {
+    cursor = path.join(cursor, part);
+    const stat = lstatIfExists(cursor);
+    if (stat && stat.isSymbolicLink()) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function installGraphify(root, existingGraphify) {
   if (process.env.AGENT_FLOW_GRAPHIFY_DRY_RUN === "1") {
     return {
@@ -1123,6 +1432,9 @@ function readMultiReviewVerdict(pathName) {
     throw new Error("blocked: multi-review artifact must contain at least 1 independent sub-agent reviewer verdict");
   }
   const verdicts = [...reviewers.values()];
+  if (overall === "approve" && reviewers.size < 2) {
+    throw new Error("blocked: multi-review approve requires at least 2 independent sub-agent reviewer verdicts");
+  }
   if (overall === "approve" && verdicts.every((verdict) => verdict === "approve")) {
     return "approve";
   }
@@ -1161,7 +1473,7 @@ function parseReviewerVerdicts(content) {
     }
     return reviewers.get(reviewerId);
   };
-  const sourcePattern = /^(reviewer[-_ ]?[a-z0-9-]+)\s+(?:reviewer[-_ ]?source|source):\s*(.+)$/gim;
+  const sourcePattern = /^(reviewer[-_ ]?[a-z0-9-]+)\s+reviewer[-_ ]?source:\s*(.+)$/gim;
   for (const match of content.matchAll(sourcePattern)) {
     const reviewerId = normalizeReviewerId(match[1]);
     if (reviewerId && isSubagentSource(match[2])) {
@@ -1199,7 +1511,7 @@ function parseReviewerVerdicts(content) {
 }
 
 function hasSubagentSource(value) {
-  const sourcePattern = /(?:^|\n)\s*(?:reviewer[-_ ]?source|source)\s*:\s*([^\n]+)/gi;
+  const sourcePattern = /(?:^|\n)\s*reviewer[-_ ]?source\s*:\s*([^\n]+)/gi;
   return [...String(value).matchAll(sourcePattern)].some((match) => isSubagentSource(match[1]));
 }
 
@@ -1274,17 +1586,27 @@ function readGatesPassed(pathName) {
     if (typeof data.passed !== "boolean" || !Array.isArray(data.results) || data.results.length === 0) {
       return false;
     }
-    // 완료 보고는 실제 실행한 gate command와 결과가 함께 있을 때만 허용한다.
+    // 완료 보고는 실제 실행한 gate command와 결과 evidence가 함께 있을 때만 허용한다.
     const resultsPass = data.results.every((r) =>
       r &&
       typeof r.command === "string" &&
       r.command.trim().length > 0 &&
+      hasGateEvidence(r) &&
       (r.passed === true || r.status === "pass" || r.status === "ok"),
     );
     return data.passed && resultsPass;
   } catch {
     return false;
   }
+}
+
+function hasGateEvidence(result) {
+  for (const key of ["output", "stdout", "stderr", "artifact", "path"]) {
+    if (typeof result[key] === "string" && result[key].trim().length > 0) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function upsertBootstrapBlock(pathName, label) {
@@ -1308,7 +1630,7 @@ Follow the CLI output exactly. If no run is active, start with \`${AGENT_FLOW_CO
 - phase 이동은 status의 \`next_command\`를 그대로 따른다. \`${AGENT_FLOW_COMMAND} continue\`나 \`${AGENT_FLOW_COMMAND} run advance\`를 추측하지 않는다.
 - \`default.yaml\`: design → slice-plan → worktree → implement → final-review ↔ fix-loop → commit → push-pr → pr-watch → merge → cleanup
 - \`full-feature.yaml\`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → gates ↔ fix-loop → multi-review → architecture-review → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
-- \`multi-review\`는 현재 사용 중인 CLI(활성 host)의 sub-agent 1개가 필수다. 범위가 나뉘면 추가 sub-agent 1개를 병렬 실행하고, \`reviewer-source: sub-agent\`를 기록한 뒤 sub-agent를 닫는다. 마지막에 \`## Overall\`과 \`verdict: approve\` 또는 \`verdict: request-changes\`만 기록한다. 활성 host가 아닌 추가 provider는 optional이다.
+- \`multi-review\`는 현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수다. 두 sub-agent를 병렬 실행하고, \`reviewer-source: sub-agent\`를 기록한 뒤 sub-agent를 닫는다. 마지막에 \`## Overall\`과 \`verdict: approve\` 또는 \`verdict: request-changes\`만 기록한다. 활성 host가 아닌 추가 provider는 optional이다.
 
 ### Context Economy
 
@@ -1317,6 +1639,9 @@ Follow the CLI output exactly. If no run is active, start with \`${AGENT_FLOW_CO
 - 긴 설명, 긴 로그, 전체 파일 붙여넣기 금지.
 - 필요한 경우만 current phase, action, \`next_command\`, blocker를 요약한다.
 - 모든 guide를 항상 로드하지 말고 변경 파일에 필요한 guide만 읽는다.
+- 프로젝트 skill은 \`skills/<name>/SKILL.md\` 또는 private \`.agent-flow/local-skills/<name>/SKILL.md\`에 둔다.
+- install/bootstrap 후 \`.agent-flow/skills/index.json\` metadata를 보고 필요한 skill만 읽는다. 모든 SKILL.md 전문을 항상 읽지 않는다.
+- Claude/Codex/Gemini 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.
 
 ${end}
 `;
@@ -1383,7 +1708,7 @@ Follow the CLI output exactly. Git projects start inside \`.agent-flow/worktrees
 - phase 이동은 status의 \`next_command\`를 그대로 따른다. \`${AGENT_FLOW_COMMAND} continue\`나 \`${AGENT_FLOW_COMMAND} run advance\`를 추측하지 않는다.
 - \`default.yaml\`: design → slice-plan → worktree → implement → final-review ↔ fix-loop → commit → push-pr → pr-watch → merge → cleanup
 - \`full-feature.yaml\`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → gates ↔ fix-loop → multi-review → architecture-review → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
-- \`multi-review\`는 현재 사용 중인 CLI(활성 host)의 sub-agent 1개가 필수다. 범위가 나뉘면 추가 sub-agent 1개를 병렬 실행하고, \`reviewer-source: sub-agent\`를 기록한 뒤 sub-agent를 닫는다. 마지막에 \`## Overall\`과 \`verdict: approve\` 또는 \`verdict: request-changes\`만 기록한다. 활성 host가 아닌 추가 provider는 optional이다.
+- \`multi-review\`는 현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수다. 두 sub-agent를 병렬 실행하고, \`reviewer-source: sub-agent\`를 기록한 뒤 sub-agent를 닫는다. 마지막에 \`## Overall\`과 \`verdict: approve\` 또는 \`verdict: request-changes\`만 기록한다. 활성 host가 아닌 추가 provider는 optional이다.
 
 ### Context Economy
 
@@ -1392,6 +1717,9 @@ Follow the CLI output exactly. Git projects start inside \`.agent-flow/worktrees
 - 긴 설명, 긴 로그, 전체 파일 붙여넣기 금지.
 - 필요한 경우만 current phase, action, \`next_command\`, blocker를 요약한다.
 - 모든 guide를 항상 로드하지 말고 변경 파일에 필요한 guide만 읽는다.
+- 프로젝트 skill은 \`skills/<name>/SKILL.md\` 또는 private \`.agent-flow/local-skills/<name>/SKILL.md\`에 둔다.
+- install/bootstrap 후 \`.agent-flow/skills/index.json\` metadata를 보고 필요한 skill만 읽는다. 모든 SKILL.md 전문을 항상 읽지 않는다.
+- Claude/Codex/Gemini 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.
 
 During code generation and modification phases, apply \`code-generation-discipline\`. Language-specific guide and comment rules follow the \`code-generation-discipline\` Before Starting checklist.
 For Android/Kotlin/Compose/KMP work, read the matching locally installed skill file from the Android profile's \`chrisbanes_skills\` as plain text before implementation. If missing or unreadable, record \`no content: <skill>\`.
@@ -1462,7 +1790,7 @@ const PHASES = [
       "Apply code-generation-discipline. Refactor only after green, keep behavior stable, apply selected language-specific guides as secondary checklists, keep required Korean code comments, and summarize changed structure.",
   },
   { id: "gates", artifact: "artifacts/gate-results.json", instruction: "Run build, typecheck, lint, tests, and context lint according to the active profile. Docs-only changes must still run context lint. Save structured JSON with a top-level passed boolean and a results array." },
-  { id: "multi-review", artifact: "artifacts/multi-review.md", multi_review: true, instruction: "Run at least one independent active-host sub-agent reviewer. If the changed scope spans multiple areas, split the scope and run one additional reviewer sub-agent in parallel. Each reviewer uses code-reviewer.md and agent-flow-concise-output as basis and outputs an independent verdict: approve or request-changes. Any request-changes from any reviewer makes the overall verdict request-changes. Default reviewer is an active-host sub-agent (Codex sub-agent in Codex, Claude sub-agent in Claude, Gemini sub-agent in Gemini); additional non-host providers are optional when available. Provider failure falls back to active-host sub-agents only. Each reviewer section must include reviewer-source: sub-agent. After recording each sub-agent result, close that sub-agent session. Record per-reviewer verdicts and end with ## Overall followed by exactly one verdict line: verdict: approve or verdict: request-changes." },
+  { id: "multi-review", artifact: "artifacts/multi-review.md", multi_review: true, instruction: "Run at least two independent active-host sub-agent reviewers. If the changed scope spans multiple areas, split the scope and run one additional reviewer sub-agent in parallel. Each reviewer uses code-reviewer.md and agent-flow-concise-output as basis and outputs an independent verdict: approve or request-changes. Any request-changes from any reviewer makes the overall verdict request-changes. Default reviewers are active-host sub-agents (Codex sub-agent in Codex, Claude sub-agent in Claude, Gemini sub-agent in Gemini); additional non-host providers are optional when available. Provider failure falls back to active-host sub-agents only. Each reviewer section must include reviewer-source: sub-agent. After recording each sub-agent result, close that sub-agent session. Record per-reviewer verdicts and end with ## Overall followed by exactly one verdict line: verdict: approve or verdict: request-changes." },
   {
     id: "fix-loop",
     artifact: "artifacts/fix-loop.md",
@@ -1694,7 +2022,7 @@ Implementation rules:
 - Apply \`code-generation-discipline\` during red, green, refactor, and fix-loop phases. Language-specific guide and comment rules follow the \`code-generation-discipline\` Before Starting checklist.
 - If review or QA fails, return to the fix phase before continuing.
 - The gates->fix-loop->gates loop re-verifies after every fix. multi-review approve skips fix-loop; request-changes routes through fix-loop->gates.
-- Code review requires at least one active-host sub-agent (Codex sub-agent in Codex, Claude sub-agent in Claude, Gemini sub-agent in Gemini). If the changed scope spans multiple areas, run one additional active-host sub-agent in parallel. Additional non-host providers are optional, and approve requires 1+ independent sub-agent reviewer verdict with reviewer-source: sub-agent. After recording each sub-agent result, close that sub-agent session. End multi-review artifacts with ## Overall followed by exactly one verdict line: verdict: approve or verdict: request-changes.
+- Code review requires at least two active-host sub-agents (Codex sub-agent in Codex, Claude sub-agent in Claude, Gemini sub-agent in Gemini). If the changed scope spans multiple areas, run one additional active-host sub-agent in parallel. Additional non-host providers are optional, and approve requires 2+ independent sub-agent reviewer verdicts with reviewer-source: sub-agent. After recording each sub-agent result, close that sub-agent session. End multi-review artifacts with ## Overall followed by exactly one verdict line: verdict: approve or verdict: request-changes.
 - In the default workflow, gates are enforced by the \`implement\` phase completion marker: \`gates: all_passed\`.
 
 Document size rules:

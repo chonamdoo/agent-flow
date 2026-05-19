@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Literal
 
 TaskStatus = Literal["pending", "blocked", "in_progress", "completed", "failed"]
+MAX_BRIEF_CHARS = 4000
+MAX_RESULT_CHARS = 8000
 
 
 @dataclass(frozen=True)
@@ -68,6 +70,41 @@ class ShutdownSignal:
 
 
 @dataclass(frozen=True)
+class WorkerBrief:
+    task_id: str
+    worker: str
+    brief: str
+    write_scope: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class WorkerResult:
+    task_id: str
+    worker: str
+    result: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class TaskApproval:
+    task_id: str
+    verdict: str
+    reviewer: str
+    notes: str
+    decided_at: str
+
+
+@dataclass(frozen=True)
+class WorkerApproval:
+    task_id: str
+    worker: str
+    reviewer: str
+    write_scope: str
+    approved_at: str
+
+
+@dataclass(frozen=True)
 class TeamSummary:
     name: str
     description: str
@@ -104,7 +141,7 @@ def list_teams(*, root: Path) -> list[TeamSummary]:
     for config_path in sorted(team_root.glob("*/config.json")):
         team_dir = config_path.parent
         config = TeamConfig(**json.loads(config_path.read_text(encoding="utf-8")))
-        task_count = len(list((team_dir / "tasks").glob("*.json"))) if (team_dir / "tasks").exists() else 0
+        task_count = len(_task_json_paths(team_dir)) if (team_dir / "tasks").exists() else 0
         worker_count = (
             len(list((team_dir / "workers").glob("*/identity.json"))) if (team_dir / "workers").exists() else 0
         )
@@ -196,6 +233,166 @@ def add_task(
     task = TeamTask(task_id=safe_id, subject=subject, description=description)
     _write_json_create(task_path, asdict(task), exists_message=f"task already exists: {safe_id}")
     return task
+
+
+def write_worker_brief(
+    *,
+    root: Path,
+    team_name: str,
+    task_id: str,
+    worker_name: str,
+    brief: str,
+    write_scope: str = "none",
+) -> WorkerBrief:
+    safe_team = safe_team_name(team_name)
+    _require_team(root=root, team_name=safe_team)
+    safe_id = safe_task_id(task_id)
+    safe_worker = safe_worker_name(worker_name)
+    _require_worker(root=root, team_name=safe_team, worker_name=safe_worker)
+    _read_task(root=root, team_name=safe_team, task_id=safe_id)
+    if not brief.strip():
+        raise ValueError("brief must not be empty")
+    if len(brief) > MAX_BRIEF_CHARS:
+        raise ValueError(f"brief must be at most {MAX_BRIEF_CHARS} characters; move detail to files and reference paths")
+    safe_scope = _validate_write_scope(write_scope)
+    created_at = _now()
+    worker_brief = WorkerBrief(
+        task_id=safe_id,
+        worker=safe_worker,
+        brief=brief,
+        write_scope=safe_scope,
+        created_at=created_at,
+    )
+    _write_json(_team_root(root, safe_team) / "tasks" / f"{safe_id}.brief.json", asdict(worker_brief))
+    (_team_root(root, safe_team) / "tasks" / f"{safe_id}.brief.md").write_text(
+        f"# Worker Brief: {safe_id}\n\nworker: {safe_worker}\nwrite_scope: {safe_scope}\n\n{brief.strip()}\n",
+        encoding="utf-8",
+    )
+    contract_dir = _task_contract_dir(root=root, team_name=safe_team, task_id=safe_id)
+    _write_text(
+        contract_dir / "worker-brief.md",
+        f"# worker-brief\n\ntask_id: {safe_id}\nworker: {safe_worker}\nwrite_scope: {safe_scope}\n\n{brief.strip()}\n",
+    )
+    _append_task_event(
+        root=root,
+        team_name=safe_team,
+        task_id=safe_id,
+        event="worker_brief_written",
+        details={"worker": safe_worker, "write_scope": safe_scope, "brief_path": str(contract_dir / "worker-brief.md")},
+    )
+    return worker_brief
+
+
+def approve_worker_call(
+    *,
+    root: Path,
+    team_name: str,
+    task_id: str,
+    worker_name: str,
+    reviewer: str,
+    write_scope: str = "none",
+) -> WorkerApproval:
+    safe_team = safe_team_name(team_name)
+    _require_team(root=root, team_name=safe_team)
+    safe_id = safe_task_id(task_id)
+    safe_worker = safe_worker_name(worker_name)
+    _require_worker(root=root, team_name=safe_team, worker_name=safe_worker)
+    _read_task(root=root, team_name=safe_team, task_id=safe_id)
+    approval = WorkerApproval(
+        task_id=safe_id,
+        worker=safe_worker,
+        reviewer=_safe_actor(reviewer),
+        write_scope=_validate_write_scope(write_scope),
+        approved_at=_now(),
+    )
+    contract_dir = _task_contract_dir(root=root, team_name=safe_team, task_id=safe_id)
+    approvals_path = contract_dir / "workers_approved.json"
+    approvals = _read_json(approvals_path) if approvals_path.is_file() else []
+    if not isinstance(approvals, list):
+        approvals = []
+    approvals.append(asdict(approval))
+    _write_json(approvals_path, approvals)
+    _append_task_event(
+        root=root,
+        team_name=safe_team,
+        task_id=safe_id,
+        event="worker_approved",
+        details={"worker": safe_worker, "reviewer": approval.reviewer, "write_scope": approval.write_scope},
+    )
+    return approval
+
+
+def write_worker_result(
+    *,
+    root: Path,
+    team_name: str,
+    task_id: str,
+    worker_name: str,
+    result: str,
+) -> WorkerResult:
+    safe_team = safe_team_name(team_name)
+    _require_team(root=root, team_name=safe_team)
+    safe_id = safe_task_id(task_id)
+    safe_worker = safe_worker_name(worker_name)
+    _require_worker(root=root, team_name=safe_team, worker_name=safe_worker)
+    _read_task(root=root, team_name=safe_team, task_id=safe_id)
+    if not result.strip():
+        raise ValueError("result must not be empty")
+    if len(result) > MAX_RESULT_CHARS:
+        raise ValueError(f"result must be at most {MAX_RESULT_CHARS} characters; move detail to files and reference paths")
+    worker_result = WorkerResult(task_id=safe_id, worker=safe_worker, result=result, created_at=_now())
+    _write_json(_team_root(root, safe_team) / "tasks" / f"{safe_id}.result.json", asdict(worker_result))
+    (_team_root(root, safe_team) / "tasks" / f"{safe_id}.result.md").write_text(
+        f"# Worker Result: {safe_id}\n\nworker: {safe_worker}\n\n{result.strip()}\n",
+        encoding="utf-8",
+    )
+    contract_dir = _task_contract_dir(root=root, team_name=safe_team, task_id=safe_id)
+    _write_text(
+        contract_dir / "worker-result.md",
+        f"# worker-result\n\ntask_id: {safe_id}\nworker: {safe_worker}\n\n{result.strip()}\n",
+    )
+    _append_task_event(
+        root=root,
+        team_name=safe_team,
+        task_id=safe_id,
+        event="worker_result_written",
+        details={"worker": safe_worker, "result_path": str(contract_dir / "worker-result.md")},
+    )
+    return worker_result
+
+
+def approve_task_result(
+    *,
+    root: Path,
+    team_name: str,
+    task_id: str,
+    reviewer: str,
+    verdict: str,
+    notes: str = "",
+) -> TaskApproval:
+    safe_team = safe_team_name(team_name)
+    _require_team(root=root, team_name=safe_team)
+    safe_id = safe_task_id(task_id)
+    _read_task(root=root, team_name=safe_team, task_id=safe_id)
+    safe_reviewer = _safe_actor(reviewer)
+    if verdict not in {"approve", "request-changes"}:
+        raise ValueError("verdict must be approve or request-changes")
+    approval = TaskApproval(
+        task_id=safe_id,
+        verdict=verdict,
+        reviewer=safe_reviewer,
+        notes=notes,
+        decided_at=_now(),
+    )
+    _write_json(_team_root(root, safe_team) / "tasks" / f"{safe_id}.approval.json", asdict(approval))
+    _append_task_event(
+        root=root,
+        team_name=safe_team,
+        task_id=safe_id,
+        event="task_result_approval",
+        details={"reviewer": safe_reviewer, "verdict": verdict},
+    )
+    return approval
 
 
 def claim_task(*, root: Path, team_name: str, task_id: str, worker_name: str) -> TeamTask:
@@ -401,7 +598,7 @@ def acknowledge_shutdown(*, root: Path, team_name: str, worker_name: str, signal
 def team_status(*, root: Path, team_name: str, detail: bool = False) -> dict[str, object]:
     safe_team = safe_team_name(team_name)
     root_dir = _team_root(root, safe_team)
-    task_paths = sorted((root_dir / "tasks").glob("*.json")) if (root_dir / "tasks").exists() else []
+    task_paths = _task_json_paths(root_dir)
     worker_paths = sorted((root_dir / "workers").glob("*/identity.json")) if (root_dir / "workers").exists() else []
     tasks = []
     workers = []
@@ -759,6 +956,52 @@ def safe_signal_id(value: str) -> str:
 
 def _team_root(root: Path, team_name: str) -> Path:
     return root / ".agent-flow" / "state" / "team" / team_name
+
+
+def _task_json_paths(team_dir: Path) -> list[Path]:
+    tasks_dir = team_dir / "tasks"
+    if not tasks_dir.exists():
+        return []
+    paths: list[Path] = []
+    for path in sorted(tasks_dir.glob("*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict) and "task_id" in payload and "subject" in payload and "description" in payload:
+            paths.append(path)
+    return paths
+
+
+def _task_contract_dir(*, root: Path, team_name: str, task_id: str) -> Path:
+    safe_id = safe_task_id(task_id)
+    path = _team_root(root, team_name) / "tasks" / safe_id
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _append_task_event(*, root: Path, team_name: str, task_id: str, event: str, details: dict[str, object]) -> None:
+    contract_dir = _task_contract_dir(root=root, team_name=team_name, task_id=task_id)
+    payload = {"ts": _now(), "event": event, "details": details}
+    with (contract_dir / "events.jsonl").open("a", encoding="utf-8") as file:
+        file.write(f"{json.dumps(payload, ensure_ascii=False, sort_keys=True)}\n")
+
+
+def _write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def _validate_write_scope(value: str) -> str:
+    scope = value.strip()
+    if scope in {"none", "tasks-only"}:
+        return scope
+    if not scope:
+        raise ValueError("write_scope must not be empty")
+    for part in [item.strip() for item in scope.split(",")]:
+        if not part or part.startswith("/") or ".." in part or "\\" in part:
+            raise ValueError(f"unsafe write_scope: {value}")
+    return scope
 
 
 def _mailbox_path(*, root: Path, team_name: str, worker_name: str) -> Path:
