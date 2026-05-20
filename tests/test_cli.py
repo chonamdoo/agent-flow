@@ -162,9 +162,9 @@ class CliTest(unittest.TestCase):
         self.assertEqual(phases["pr-comment-fix"]["routes"]["default"], "pr-watch")
         self.assertEqual(phases["pr-ci-fix"]["routes"]["default"], "pr-watch")
         self.assertEqual(phases["merge-approval"]["routes"]["default"], "block")
-        self.assertIn("Output: red.md.", phases["red"]["prompt"])
-        self.assertIn("Output: green.md.", phases["green"]["prompt"])
-        self.assertIn("Output: gates.md.", phases["gates"]["prompt"])
+        self.assertIn("Output: artifacts/red.log.", phases["red"]["prompt"])
+        self.assertIn("Output: artifacts/green.log.", phases["green"]["prompt"])
+        self.assertIn("Output: artifacts/gate-results.json.", phases["gates"]["prompt"])
 
         default_path = (
             Path(__file__).resolve().parents[1]

@@ -12,6 +12,7 @@ from agent_flow.core.commands import run_safe_command
 
 
 PROTECTED_WORKTREE_BRANCHES = {"main", "master", "develop"}
+GIT_WORKTREE_TIMEOUT_S = 300
 
 
 @dataclass(frozen=True)
@@ -246,7 +247,8 @@ def _is_agent_flow_status_line(line: str) -> bool:
 
 
 def _run_git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    result = run_safe_command(("git", *args), cwd=root)
+    # worktree add/remove는 큰 저장소나 느린 디스크에서 30초를 넘을 수 있어 별도 여유를 둔다.
+    result = run_safe_command(("git", *args), cwd=root, timeout_s=GIT_WORKTREE_TIMEOUT_S)
     if not result.ok:
         # 호출자는 기존 subprocess 예외 경로로 처리하므로 형태를 유지한다.
         raise subprocess.CalledProcessError(
