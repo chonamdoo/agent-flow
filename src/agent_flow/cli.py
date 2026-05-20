@@ -27,7 +27,9 @@ from agent_flow.core.context_contract import (
     offload_tool_output,
     write_system_invariants,
 )
+from agent_flow.core.commands import run_safe_command
 from agent_flow.core.gates import GateCommand, run_gates
+from agent_flow.core.phase_workflow import load_phase_workflow_definition
 from agent_flow.core.profiles import detect_profile, load_profile
 from agent_flow.core.review import summarize_reviews, write_review_summary
 from agent_flow.core.report import write_run_report
@@ -80,7 +82,7 @@ from agent_flow.core.workflow import load_workflow
 from agent_flow.eval import run_eval
 from agent_flow.memory.entities import EntityMemoryIndex
 from agent_flow.artifact import find_active_run, mark_inactive
-from agent_flow.runner import Runner, ResumeMode
+from agent_flow.runner import Runner, ResumeMode, _find_kit_root
 from agent_flow.providers.host import list_host_providers
 from agent_flow.providers.subprocess import ProviderCommand, run_provider
 from agent_flow.pr_watch import fetch_pr, watch_pr
@@ -184,6 +186,12 @@ def main(argv: list[str] | None = None) -> int:
     tools_subparsers = tools_parser.add_subparsers(dest="tools_command", required=True)
     tools_lint = tools_subparsers.add_parser("lint")
     tools_lint.add_argument("--root", default=".")
+
+    workflow_parser = subparsers.add_parser("workflow")
+    workflow_subparsers = workflow_parser.add_subparsers(dest="workflow_command", required=True)
+    workflow_export = workflow_subparsers.add_parser("export")
+    workflow_export.add_argument("--workflow", default="full-feature")
+    workflow_export.add_argument("--format", choices=("json",), default="json")
 
     context_parser = subparsers.add_parser("context")
     context_subparsers = context_parser.add_subparsers(dest="context_command", required=True)
@@ -611,6 +619,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f"tools lint: {len(findings)} findings")
             return 1 if any(finding.severity == "error" for finding in findings) else 0
 
+    if args.command == "workflow":
+        if args.workflow_command == "export":
+            try:
+                definition = load_phase_workflow_definition(_find_kit_root(), args.workflow)
+            except (OSError, ValueError) as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
+            print(json.dumps(definition.to_json_dict(), ensure_ascii=False, sort_keys=True))
+            return 0
+
     if args.command == "context":
         run_dir = _resolve_project_path(root, args.run_dir) if getattr(args, "run_dir", None) else None
         if args.context_command == "init":
@@ -764,25 +782,15 @@ def main(argv: list[str] | None = None) -> int:
                 stale_dir = root / ".agent-flow" / "worktrees" / status.name
                 if stale_dir.exists() or status.name in _known_worktree_names(root):
                     if not args.keep_branch and status.branch_created_by_agent_flow:
-                        try:
-                            subprocess.run(
-                                ("git", "worktree", "prune"),
-                                cwd=root,
-                                text=True,
-                                capture_output=True,
-                                check=True,
-                            )
-                            if worktree_branch_exists(root=root, branch=status.branch):
-                                subprocess.run(
-                                    ("git", "branch", "-D", status.branch),
-                                    cwd=root,
-                                    text=True,
-                                    capture_output=True,
-                                    check=True,
-                                )
-                        except (OSError, subprocess.CalledProcessError) as exc:
-                            print(_format_cli_error(exc), file=sys.stderr)
+                        prune = run_safe_command(("git", "worktree", "prune"), cwd=root)
+                        if not prune.ok:
+                            print(_format_safe_command_error(prune), file=sys.stderr)
                             return 2
+                        if worktree_branch_exists(root=root, branch=status.branch):
+                            delete = run_safe_command(("git", "branch", "-D", status.branch), cwd=root)
+                            if not delete.ok:
+                                print(_format_safe_command_error(delete), file=sys.stderr)
+                                return 2
                     if stale_dir.is_dir():
                         shutil.rmtree(stale_dir)
                     elif stale_dir.exists():
@@ -1332,6 +1340,15 @@ def _format_cli_error(exc: BaseException) -> str:
     return str(exc)
 
 
+def _format_safe_command_error(result) -> str:
+    # safe command 오류는 CLI 루프가 죽지 않게 stderr 중심으로 짧게 노출한다.
+    detail = (result.stderr or result.stdout or result.error or "").strip()
+    command = " ".join(result.args)
+    if result.timed_out:
+        return f"{command} timed out: {detail}"
+    return f"{command} failed: {detail}".strip()
+
+
 def _status_value(value: object) -> str:
     return str(value).replace("\r", "\\r").replace("\n", "\\n")
 
@@ -1421,24 +1438,10 @@ def _managed_worktree_context(path: Path) -> tuple[Path, str] | None:
 
 
 def _git_common_worktree_root(root: Path) -> Path | None:
-    try:
-        top_level = subprocess.run(
-            ("git", "rev-parse", "--show-toplevel"),
-            cwd=root,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        common_dir = subprocess.run(
-            ("git", "rev-parse", "--git-common-dir"),
-            cwd=root,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-    except OSError:
-        return None
-    if top_level.returncode != 0 or common_dir.returncode != 0:
+    # worktree root 탐지는 relay 진입점이므로 git hang을 짧게 실패 처리한다.
+    top_level = run_safe_command(("git", "rev-parse", "--show-toplevel"), cwd=root)
+    common_dir = run_safe_command(("git", "rev-parse", "--git-common-dir"), cwd=root)
+    if not top_level.ok or not common_dir.ok:
         return None
     common_path = Path(common_dir.stdout.strip())
     if not common_path.is_absolute():
@@ -1461,18 +1464,9 @@ def _home_path() -> Path:
 
 
 def _is_git_repo(root: Path) -> bool:
-    try:
-        result = subprocess.run(
-            ("git", "rev-parse", "--git-dir"),
-            cwd=root,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-    except OSError:
-        # git이 없는 환경은 non-git 프로젝트처럼 처리해서 run/start fallback을 살린다.
-        return False
-    return result.returncode == 0
+    result = run_safe_command(("git", "rev-parse", "--git-dir"), cwd=root, timeout_s=5)
+    # git이 없거나 응답하지 않는 환경은 non-git 프로젝트처럼 처리해서 fallback을 살린다.
+    return result.ok
 
 
 def _latest_run_dir(root: Path) -> Path | None:

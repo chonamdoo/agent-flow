@@ -8,6 +8,8 @@ import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from agent_flow.core.commands import run_safe_command
+
 
 PROTECTED_WORKTREE_BRANCHES = {"main", "master", "develop"}
 
@@ -99,14 +101,8 @@ def remove_worktree(*, root: Path, status: WorktreeStatus, delete_branch: bool =
 
 
 def worktree_branch_exists(*, root: Path, branch: str) -> bool:
-    result = subprocess.run(
-        ("git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"),
-        cwd=root,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    return result.returncode == 0
+    result = run_safe_command(("git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"), cwd=root)
+    return result.ok
 
 
 def _default_base_ref(root: Path) -> str:
@@ -117,18 +113,9 @@ def _default_base_ref(root: Path) -> str:
 
 
 def _git_commit_ref_exists(*, root: Path, ref: str) -> bool:
-    try:
-        result = subprocess.run(
-            ("git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"),
-            cwd=root,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-    except OSError:
-        # git을 호출할 수 없으면 기본 ref 후보가 없는 것으로 보고 HEAD fallback을 쓴다.
-        return False
-    return result.returncode == 0
+    result = run_safe_command(("git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"), cwd=root)
+    # git을 호출할 수 없으면 기본 ref 후보가 없는 것으로 보고 HEAD fallback을 쓴다.
+    return result.ok
 
 
 def get_worktree_status(*, root: Path, name: str) -> WorktreeStatus:
@@ -244,14 +231,8 @@ def _legacy_worktree_manifest_path(*, root: Path, name: str) -> Path:
 
 
 def _agent_flow_git_dir(root: Path) -> Path:
-    result = subprocess.run(
-        ("git", "rev-parse", "--git-common-dir"),
-        cwd=root,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if result.returncode != 0:
+    result = run_safe_command(("git", "rev-parse", "--git-common-dir"), cwd=root)
+    if not result.ok:
         return root / ".agent-flow"
     git_common = Path(result.stdout.strip())
     if not git_common.is_absolute():
@@ -265,27 +246,24 @@ def _is_agent_flow_status_line(line: str) -> bool:
 
 
 def _run_git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ("git", *args),
-        cwd=root,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
+    result = run_safe_command(("git", *args), cwd=root)
+    if not result.ok:
+        # 호출자는 기존 subprocess 예외 경로로 처리하므로 형태를 유지한다.
+        raise subprocess.CalledProcessError(
+            result.returncode or 1,
+            result.args,
+            output=result.stdout,
+            stderr=result.stderr,
+        )
+    return subprocess.CompletedProcess(result.args, result.returncode or 0, result.stdout, result.stderr)
 
 
 def _owned_branch_for_live_worktree(*, root: Path, status: WorktreeStatus) -> str | None:
     planned_branch = plan_worktree(root=root, name=status.name).branch
     if not status.branch_created_by_agent_flow or status.branch != planned_branch:
         return None
-    result = subprocess.run(
-        ("git", "-C", str(status.path), "branch", "--show-current"),
-        cwd=root,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if result.returncode != 0:
+    result = run_safe_command(("git", "-C", str(status.path), "branch", "--show-current"), cwd=root)
+    if not result.ok:
         return None
     current_branch = result.stdout.strip()
     return current_branch if current_branch == planned_branch else None

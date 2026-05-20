@@ -4,7 +4,7 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
 import process from "node:process";
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const command = process.argv[2];
@@ -13,6 +13,7 @@ const HOME = process.env.HOME || process.env.USERPROFILE || "";
 const KIT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const installArgs = process.argv.slice(3);
 const forceManaged = installArgs.includes("--force-managed");
+let cachedFullFeatureWorkflow = null;
 
 function installProject() {
   const requestedRoot = process.cwd();
@@ -33,6 +34,7 @@ function installProject() {
   const profile = detectProfile(root);
   const existingPayload = readExistingKit(agentFlowDir);
   const previousSkillIndex = readJsonIfExists(path.join(agentFlowDir, "skills", "index.json"));
+  const phases = fullFeaturePhases();
 
   for (const name of ["runs", "state", "handoffs", "team", "worktrees", "workflows", "skills", "prompts", "rules", "bootstrap"]) {
     fs.mkdirSync(path.join(agentFlowDir, name), { recursive: true });
@@ -86,7 +88,7 @@ function installProject() {
   );
   writeManagedFile(path.join(agentFlowDir, "prompts", "push-watch.md"), pushWatchPromptMarkdown());
   writeManagedFile(path.join(agentFlowDir, "prompts", "push-watch-tick.md"), pushWatchTickPromptMarkdown());
-  for (const phase of PHASES) {
+  for (const phase of phases) {
     writeManagedFile(
       path.join(agentFlowDir, "prompts", `${phase.id}.md`),
       phasePrompt(phase),
@@ -151,6 +153,7 @@ function runWorkflowCommand(args) {
     }
     const runId = optionValue(args, "--run-id") ?? newRunId();
     assertInstalled(root);
+    const phases = fullFeaturePhases();
     const runDir = path.join(root, ".agent-flow", "runs", workflow, runId);
     const runDirRel = path.join(".agent-flow", "runs", workflow, runId);
     if (fs.existsSync(runDir)) {
@@ -164,7 +167,7 @@ function runWorkflowCommand(args) {
       workflow,
       task,
       phase_index: 0,
-      phase: PHASES[0].id,
+      phase: phases[0].id,
       status: "running",
       run_dir: runDirRel,
       started_at: startedAt,
@@ -239,7 +242,8 @@ function runWorkflowCommand(args) {
       console.log(`workflow already complete: ${state.run_id}`);
       return;
     }
-    const phase = PHASES[state.phase_index];
+    const phases = fullFeaturePhases();
+    const phase = phases[state.phase_index];
     const artifact = path.join(runDir, phase.artifact);
     if (!fs.existsSync(artifact)) {
       throw new Error(`blocked: missing artifact ${artifact}`);
@@ -247,7 +251,7 @@ function runWorkflowCommand(args) {
     assertFreshArtifact(state, phase, artifact);
     assertCompletionMarkers(phase, artifact);
     const nextIndex = nextPhaseIndex(state, phase, artifact);
-    const nextPhase = PHASES[nextIndex];
+    const nextPhase = phases[nextIndex];
     const transitionedAt = new Date().toISOString();
     const fixLoopRounds = phase.id === "fix-loop"
       ? (state.fix_loop_rounds ?? 0) + 1
@@ -274,6 +278,150 @@ function runWorkflowCommand(args) {
   }
 
   throw new Error("usage: agent-flow-kit run <install|start|status|next|advance|push-watch|push-watch-tick>");
+}
+
+function loadWorkflowDefinition(name) {
+  if (!/^[A-Za-z0-9_-]+$/.test(name)) {
+    throw new Error(`unsafe workflow name: ${name}`);
+  }
+  const workflowPath = path.join(KIT_ROOT, "workflows", `${name}.yaml`);
+  const text = fs.readFileSync(workflowPath, "utf8");
+  const definition = exportWorkflowDefinition(name);
+  return {
+    id: definition.id,
+    text,
+    phases: normalizeExportedPhases(definition, name),
+  };
+}
+
+function fullFeatureWorkflow() {
+  if (cachedFullFeatureWorkflow === null) {
+    cachedFullFeatureWorkflow = loadWorkflowDefinition("full-feature");
+  }
+  return cachedFullFeatureWorkflow;
+}
+
+function fullFeaturePhases() {
+  return fullFeatureWorkflow().phases;
+}
+
+function exportWorkflowDefinition(name) {
+  const result = safeSpawnSync(preferredPython(), [
+    "-m",
+    "agent_flow.cli",
+    "workflow",
+    "export",
+    "--workflow",
+    name,
+    "--format",
+    "json",
+  ], {
+    cwd: KIT_ROOT,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      PYTHONPATH: [path.join(KIT_ROOT, "src"), process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
+    },
+    timeout: 10_000,
+  });
+  if (result.error || result.status !== 0) {
+    const detail = result.error?.message || result.stderr?.trim() || `exit ${result.status}`;
+    throw new Error(`workflow export failed for ${name}: ${detail}`);
+  }
+  try {
+    return JSON.parse(result.stdout);
+  } catch (error) {
+    throw new Error(`workflow export returned invalid JSON for ${name}: ${error.message}`);
+  }
+}
+
+function normalizeExportedPhases(definition, name) {
+  // Node wrapper는 phase schema를 재해석하지 않고 Python 정규화 결과만 검증한다.
+  if (!definition || typeof definition !== "object") {
+    throw new Error(`workflow export ${name}: expected object`);
+  }
+  if (typeof definition.id !== "string" || !definition.id) {
+    throw new Error(`workflow export ${name}: missing id`);
+  }
+  if (!Array.isArray(definition.phases) || definition.phases.length === 0) {
+    throw new Error(`workflow export ${name}: missing phases`);
+  }
+  return definition.phases.map((phase, index) => normalizeExportedPhase(phase, name, index));
+}
+
+function normalizeExportedPhase(phase, name, index) {
+  if (!phase || typeof phase !== "object") {
+    throw new Error(`workflow export ${name}: phase ${index} must be an object`);
+  }
+  const id = requireExportedString(phase.id, name, index, "id");
+  const description = optionalExportedString(phase.description, name, index, "description", "");
+  const prompt = phase.prompt === null
+    ? null
+    : optionalExportedString(phase.prompt, name, index, "prompt", "");
+  const artifact = requireExportedString(phase.artifact, name, index, "artifact");
+  const requiredMarkers = normalizeExportedStringList(phase.required_markers, name, index, "required_markers");
+  return {
+    id,
+    artifact,
+    description,
+    instruction: prompt || description,
+    required_markers: requiredMarkers,
+    multi_review: normalizeExportedBoolean(phase.multi_review, name, index, "multi_review"),
+    routes: normalizeExportedRoutes(phase.routes, name, index),
+  };
+}
+
+function requireExportedString(value, name, index, field) {
+  if (typeof value !== "string" || !value) {
+    throw new Error(`workflow export ${name}: phase ${index} ${field} must be a non-empty string`);
+  }
+  return value;
+}
+
+function optionalExportedString(value, name, index, field, fallback) {
+  if (value === undefined) {
+    return fallback;
+  }
+  if (typeof value !== "string") {
+    throw new Error(`workflow export ${name}: phase ${index} ${field} must be a string`);
+  }
+  return value;
+}
+
+function normalizeExportedBoolean(value, name, index, field) {
+  if (value === undefined) {
+    return false;
+  }
+  if (typeof value !== "boolean") {
+    throw new Error(`workflow export ${name}: phase ${index} ${field} must be a boolean`);
+  }
+  return value;
+}
+
+function normalizeExportedStringList(value, name, index, field) {
+  if (value === undefined) {
+    return [];
+  }
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw new Error(`workflow export ${name}: phase ${index} ${field} must be a string array`);
+  }
+  return value;
+}
+
+function normalizeExportedRoutes(value, name, index) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`workflow export ${name}: phase ${index} routes must be an object`);
+  }
+  for (const [key, target] of Object.entries(value)) {
+    if (typeof key !== "string" || typeof target !== "string") {
+      throw new Error(`workflow export ${name}: phase ${index} routes must map strings to strings`);
+    }
+  }
+  return value;
 }
 
 function detectProfile(rootDir) {
@@ -393,7 +541,7 @@ function resolveGitCommonWorktreeRoot(start) {
 }
 
 function gitOutput(cwd, args) {
-  const result = spawnSync("git", args, {
+  const result = safeSpawnSync("git", args, {
     cwd,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "ignore"],
@@ -403,6 +551,14 @@ function gitOutput(cwd, args) {
   }
   const output = result.stdout.trim();
   return output || null;
+}
+
+function safeSpawnSync(commandName, args, options = {}) {
+  // 외부 CLI는 자동 relay를 멈추지 않도록 기본 timeout을 둔다.
+  return spawnSync(commandName, args, {
+    timeout: options.timeout ?? 30_000,
+    ...options,
+  });
 }
 
 function readCurrentRun(root) {
@@ -418,11 +574,12 @@ function resolveRunDir(root, runDir) {
 }
 
 function assertInstalled(root) {
+  const phases = fullFeaturePhases();
   const required = [
     path.join(root, ".agent-flow", "kit.json"),
     path.join(root, ".agent-flow", "workflows", "full-feature.yaml"),
     path.join(root, ".agent-flow", "skills", "full-feature-workflow", "SKILL.md"),
-    ...PHASES.map((phase) => path.join(root, ".agent-flow", "prompts", `${phase.id}.md`)),
+    ...phases.map((phase) => path.join(root, ".agent-flow", "prompts", `${phase.id}.md`)),
     path.join(root, ".agent-flow", "skills", "domain-grill", "SKILL.md"),
     path.join(root, ".agent-flow", "skills", "grill-with-docs", "SKILL.md"),
     path.join(root, ".agent-flow", "skills", "product-brief", "SKILL.md"),
@@ -450,7 +607,7 @@ function normalizeRunState(root, state) {
   if (state.status === "complete" || state.phase === "complete") {
     return state;
   }
-  const index = PHASES.findIndex((phase) => phase.id === state.phase);
+  const index = fullFeaturePhases().findIndex((phase) => phase.id === state.phase);
   if (index === -1 || index === state.phase_index) {
     return state;
   }
@@ -472,24 +629,26 @@ function pushWatchStatePath(root) {
 }
 
 function currentBranch(root) {
-  try {
-    const branch = execFileSync("git", ["branch", "--show-current"], { cwd: root, encoding: "utf8" }).trim();
-    if (!branch) {
-      throw new Error("blocked: push-watch requires a named git branch");
-    }
-    return branch;
-  } catch {
+  const result = safeSpawnSync("git", ["branch", "--show-current"], {
+    cwd: root,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const branch = result.stdout?.trim() ?? "";
+  if (result.error || result.status !== 0 || !branch) {
     throw new Error("blocked: push-watch requires a named git branch");
   }
+  return branch;
 }
 
 function readPullRequestStatus(root) {
-  const result = spawnSync("gh", ["pr", "view", "--json", "url,reviewDecision,statusCheckRollup"], {
+  const result = safeSpawnSync("gh", ["pr", "view", "--json", "url,reviewDecision,statusCheckRollup"], {
     cwd: root,
     encoding: "utf8",
   });
   if (result.status !== 0) {
-    throw new Error(`blocked: gh pr view failed${result.stderr ? `: ${result.stderr.trim()}` : ""}`);
+    const detail = result.error?.message ?? result.stderr?.trim() ?? "unknown error";
+    throw new Error(`blocked: gh pr view failed: ${detail}`);
   }
   return JSON.parse(result.stdout);
 }
@@ -526,7 +685,7 @@ function pullRequestWatchStatus(pr) {
 }
 
 function printNext(state) {
-  const phase = PHASES[state.phase_index];
+  const phase = fullFeaturePhases()[state.phase_index];
   if (!phase) {
     console.log(`workflow complete: ${state.run_id}`);
     return;
@@ -538,7 +697,7 @@ function printNext(state) {
 }
 
 function printStatus(state, root) {
-  const phase = PHASES[state.phase_index];
+  const phase = fullFeaturePhases()[state.phase_index];
   const resolvedRunDir = resolveRunDir(root, state.run_dir);
   const complete = state.status === "complete" || state.phase === "complete" || !phase;
   const requiredArtifact = phase ? path.join(state.run_dir, phase.artifact) : null;
@@ -1029,10 +1188,11 @@ function formatGraphifyError(error) {
 }
 
 function runChecked(commandName, args, cwd) {
-  const result = spawnSync(commandName, args, {
+  const result = safeSpawnSync(commandName, args, {
     cwd,
     stdio: "inherit",
     env: process.env,
+    timeout: 120_000,
   });
   if (result.error) {
     throw result.error;
@@ -1043,10 +1203,11 @@ function runChecked(commandName, args, cwd) {
 }
 
 function runOptional(commandName, args, cwd) {
-  const result = spawnSync(commandName, args, {
+  const result = safeSpawnSync(commandName, args, {
     cwd,
     stdio: "inherit",
     env: process.env,
+    timeout: 120_000,
   });
   if (result.error && result.error.code === "ENOENT") {
     return false;
@@ -1155,10 +1316,11 @@ function runGraphifyCommand(args, root) {
 }
 
 function runCandidate(commandName, args, cwd) {
-  const result = spawnSync(commandName, args, {
+  const result = safeSpawnSync(commandName, args, {
     cwd,
     stdio: "inherit",
     env: process.env,
+    timeout: 120_000,
   });
   if (result.error && result.error.code === "ENOENT") {
     return false;
@@ -1170,7 +1332,7 @@ function runCandidate(commandName, args, cwd) {
 }
 
 function runCandidateQuiet(commandName, args, cwd) {
-  const result = spawnSync(commandName, args, {
+  const result = safeSpawnSync(commandName, args, {
     cwd,
     stdio: "ignore",
     env: process.env,
@@ -1182,8 +1344,21 @@ function runCandidateQuiet(commandName, args, cwd) {
 }
 
 function preferredPython() {
-  for (const candidate of ["python3.12", "python3.11", "python3.10", "python3", "python"]) {
-    const result = spawnSync(candidate, ["--version"], { stdio: "ignore" });
+  const virtualEnvPython = process.env.VIRTUAL_ENV
+    ? path.join(process.env.VIRTUAL_ENV, process.platform === "win32" ? "Scripts/python.exe" : "bin/python")
+    : null;
+  const candidates = [
+    process.env.PYTHON,
+    process.env.PYTHON_EXECUTABLE,
+    virtualEnvPython,
+    "python3.12",
+    "python3.11",
+    "python3.10",
+    "python3",
+    "python",
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    const result = safeSpawnSync(candidate, ["--version"], { stdio: "ignore" });
     if (!result.error && result.status === 0) {
       return candidate;
     }
@@ -1300,97 +1475,60 @@ function lineMatchesMarker(line, marker) {
 
 const FIX_LOOP_MAX_ROUNDS = 3;
 
-const ROUTED_PHASE_IDS = new Set([
-  "plan-review", "gates", "multi-review", "fix-loop",
-  "architecture-review", "pr-watch", "merge-approval",
-  "pr-comment-fix", "pr-ci-fix",
-]);
-
 function nextPhaseIndex(state, phase, artifact) {
-  if (phase.id === "plan-review") {
-    const verdict = readArtifactVerdict(artifact);
-    if (verdict === "approve") {
-      return state.phase_index + 1;
-    }
-    if (verdict === "request-changes") {
-      return phaseIndex("slice-plan");
-    }
-    throw new Error("blocked: plan-review artifact must include verdict: approve or verdict: request-changes");
-  }
-  if (phase.id === "gates") {
-    const passed = readGatesPassed(artifact);
-    if (!passed) {
-      return phaseIndex("fix-loop");
-    }
-    return state.phase_index + 1;
-  }
-  if (phase.id === "multi-review") {
-    const verdict = readMultiReviewVerdict(artifact);
-    if (verdict === "approve") {
-      return phaseIndex("architecture-review");
-    }
-    if (verdict === "request-changes") {
-      return phaseIndex("fix-loop");
-    }
-    throw new Error("blocked: multi-review artifact must include verdict: approve or verdict: request-changes");
-  }
   if (phase.id === "fix-loop") {
     const rounds = (state.fix_loop_rounds ?? 0) + 1;
     if (rounds > FIX_LOOP_MAX_ROUNDS) {
       throw new Error(`blocked: fix-loop exceeded ${FIX_LOOP_MAX_ROUNDS} rounds — escalate to user`);
     }
-    return phaseIndex("gates");
   }
-  if (phase.id === "architecture-review") {
-    const verdict = readArtifactVerdict(artifact);
-    if (verdict === "approve") {
-      return state.phase_index + 1;
+  if (!phase.routes) {
+    return state.phase_index + 1;
+  }
+  const key = nodeRouteKey(phase, artifact);
+  const target = phase.routes[key] ?? phase.routes.default;
+  if (!target) {
+    throw new Error(`blocked: ${phase.id} artifact has no route for ${key}`);
+  }
+  if (target === "block") {
+    if (phase.id === "pr-watch" && key === "pending") {
+      throw new Error("blocked: PR watch is pending");
     }
-    if (verdict === "request-changes" || verdict === "blocked") {
-      return phaseIndex("refactor");
+    throw new Error(`blocked: ${phase.id} route ${key}`);
+  }
+  return phaseIndex(target);
+}
+
+function nodeRouteKey(phase, artifact) {
+  if (phase.id === "gates") {
+    return readGatesPassed(artifact) ? "green" : "request-changes";
+  }
+  if (phase.id === "multi-review") {
+    const verdict = readMultiReviewVerdict(artifact);
+    if (verdict === "approve" || verdict === "request-changes") {
+      return verdict;
     }
-    throw new Error("blocked: architecture-review artifact must include verdict: approve, request-changes, or blocked");
+    throw new Error("blocked: multi-review artifact must include verdict: approve or verdict: request-changes");
   }
   if (phase.id === "pr-watch") {
     const status = readArtifactStatus(artifact);
-    if (status === "green") {
-      return phaseIndex("merge-approval");
-    }
-    if (status === "merged") {
-      return phaseIndex("handoff");
-    }
-    if (status === "skipped") {
-      return phaseIndex("handoff");
-    }
-    if (status === "comments") {
-      return phaseIndex("pr-comment-fix");
-    }
-    if (status === "ci-failed") {
-      return phaseIndex("pr-ci-fix");
-    }
-    if (status === "pending") {
-      throw new Error("blocked: PR watch is pending");
+    if (["green", "merged", "skipped", "comments", "ci-failed", "pending", "closed", "error"].includes(status)) {
+      return status;
     }
     throw new Error("blocked: pr-watch artifact must include status: green, comments, ci-failed, skipped, merged, or pending");
   }
-  if (phase.id === "merge-approval") {
+  if (phase.id === "plan-review" || phase.id === "architecture-review" || phase.id === "merge-approval") {
     const verdict = readArtifactVerdict(artifact);
-    if (verdict === "approve") {
-      return phaseIndex("merge");
+    if (verdict) {
+      return verdict;
     }
-    throw new Error("blocked: merge-approval artifact must include verdict: approve");
+    throw new Error(`blocked: ${phase.id} artifact must include verdict`);
   }
-  if (phase.id === "pr-comment-fix" || phase.id === "pr-ci-fix") {
-    return phaseIndex("pr-watch");
-  }
-  if (!ROUTED_PHASE_IDS.has(phase.id)) {
-    return state.phase_index + 1;
-  }
-  throw new Error(`blocked: unhandled routing for phase ${phase.id}`);
+  return readArtifactStatus(artifact) ?? readArtifactVerdict(artifact) ?? "default";
 }
 
 function phaseIndex(id) {
-  const index = PHASES.findIndex((phase) => phase.id === id);
+  const index = fullFeaturePhases().findIndex((phase) => phase.id === id);
   if (index === -1) {
     throw new Error(`unknown phase: ${id}`);
   }
@@ -1731,93 +1869,6 @@ function newRunId() {
   return `${stamp}-${Math.random().toString(16).slice(2, 10)}`;
 }
 
-const PHASES = [
-  {
-    id: "domain-grill",
-    artifact: "artifacts/domain-grill.md",
-    required_markers: [
-      "grill-with-docs: complete",
-      "shared_understanding: reached",
-      "context_docs_checked: true",
-      "context_docs_updated: true|not_needed",
-    ],
-    instruction:
-      "Run the internal grill-with-docs skill. Ask one question at a time unless code or docs answer it, challenge CONTEXT.md/ADR terminology, stress-test terms with concrete scenarios, cross-check user claims against code, update docs inline when terms resolve, normalize the compact domain map, and end with marker lines: grill-with-docs: complete, shared_understanding: reached, context_docs_checked: true, and context_docs_updated: true or not_needed.",
-  },
-  {
-    id: "product-brief",
-    artifact: "artifacts/product-brief.md",
-    instruction:
-      "Validate demand, status quo, target user, narrowest wedge, observed behavior, why now, cut list, and build/defer/cut decision.",
-  },
-  { id: "prd", artifact: "artifacts/prd.md", instruction: "Write the PRD before planning slices." },
-  { id: "slice-plan", artifact: "artifacts/slice-plan.md", instruction: "Break the PRD into independently shippable slices." },
-  {
-    id: "plan-review",
-    artifact: "artifacts/plan-review.md",
-    instruction:
-      "Review the slice plan like a senior reviewer. Record verdict: approve or verdict: request-changes with missing steps, wrong order, oversized slices, validation gaps, and required changes.",
-  },
-  {
-    id: "ddd-design",
-    artifact: "artifacts/ddd-design.md",
-    instruction:
-      "Design data / domain / presentation boundaries, domain core modules, repository interfaces, repository implementations, and dependency rules.",
-  },
-  {
-    id: "worktree",
-    artifact: "artifacts/worktree.md",
-    instruction:
-      "Run git worktree add -b feat/<slug> .agent-flow/worktrees/feat-<slug>/ main to create an isolated worktree without switching the leader branch. Do not just create a branch — a physical worktree is required for parallel task isolation. Do not work on main/master/develop. Follow profile.branching.naming when present. Record worktree path, branch name, and base commit.",
-  },
-  { id: "run-start", artifact: "artifacts/run-start.md", instruction: "Record the workflow run setup and selected provider." },
-  {
-    id: "red",
-    artifact: "artifacts/red.log",
-    instruction:
-      "Apply code-generation-discipline before writing tests. Write failing tests first. Select python-development-guide, typescript-development-guide, react-development-guide, react-native-development-guide, or chrisbanes skills only when the changed files require them. Save the failure output.",
-  },
-  {
-    id: "green",
-    artifact: "artifacts/green.log",
-    instruction:
-      "Apply code-generation-discipline. Implement the minimum change, apply selected language-specific guides as secondary checklists, add required Korean code comments, and save passing test output.",
-  },
-  {
-    id: "refactor",
-    artifact: "artifacts/refactor.md",
-    instruction:
-      "Apply code-generation-discipline. Refactor only after green, keep behavior stable, apply selected language-specific guides as secondary checklists, keep required Korean code comments, and summarize changed structure.",
-  },
-  { id: "gates", artifact: "artifacts/gate-results.json", instruction: "Run build, typecheck, lint, tests, and context lint according to the active profile. Docs-only changes must still run context lint. Save structured JSON with a top-level passed boolean and a results array." },
-  { id: "multi-review", artifact: "artifacts/multi-review.md", multi_review: true, instruction: "Run at least two independent active-host sub-agent reviewers. If the changed scope spans multiple areas, split the scope and run one additional reviewer sub-agent in parallel. Each reviewer uses code-reviewer.md and agent-flow-concise-output as basis and outputs an independent verdict: approve or request-changes. Any request-changes from any reviewer makes the overall verdict request-changes. Default reviewers are active-host sub-agents (Codex sub-agent in Codex, Claude sub-agent in Claude, Gemini sub-agent in Gemini); additional non-host providers are optional when available. Provider failure falls back to active-host sub-agents only. Each reviewer section must include reviewer-source: sub-agent. After recording each sub-agent result, close that sub-agent session. Record per-reviewer verdicts and end with ## Overall followed by exactly one verdict line: verdict: approve or verdict: request-changes." },
-  {
-    id: "fix-loop",
-    artifact: "artifacts/fix-loop.md",
-    instruction:
-      "Apply code-generation-discipline while fixing review/gate failures, add required Korean code comments, apply selected language-specific guides as secondary checklists, or record that no fixes were required.",
-  },
-  {
-    id: "architecture-review",
-    artifact: "artifacts/architecture-review.md",
-    instruction:
-      "Review implemented code against domain decisions and DDD/Clean Architecture. Apply agent-flow-concise-output for findings. Record verdict: approve or verdict: request-changes with violations and required refactors.",
-  },
-  { id: "commit", artifact: "artifacts/commit.md", instruction: "Commit the verified slice and record the commit hash. Use agent-flow-concise-output commit rules: Conventional Commit subject target 50 chars, hard cap 72 chars, body only when the reason is unclear." },
-  {
-    id: "push-pr",
-    artifact: "artifacts/push-pr.md",
-    instruction:
-      "Push the branch or open a PR against profile.pr.target_branch; for release-first profiles, verify the target is the active release/* branch. Record the remote reference.",
-  },
-  { id: "pr-watch", artifact: "artifacts/pr-watch.md", instruction: "Poll PR checks and review threads; record status: green, status: comments, status: ci-failed, status: pending, status: merged, status: closed, or status: error with PR URL." },
-  { id: "pr-comment-fix", artifact: "artifacts/pr-comment-fix.md", instruction: "Resolve actionable PR review comments, commit and push fixes, resolve the corresponding GitHub review threads, or record that no comments are pending." },
-  { id: "pr-ci-fix", artifact: "artifacts/pr-ci-fix.md", instruction: "Fix failed PR checks, commit and push fixes, or record that checks are green." },
-  { id: "merge-approval", artifact: "artifacts/merge-approval.md", instruction: "Ask for explicit user approval before merge. Record verdict: approve only after approval." },
-  { id: "merge", artifact: "artifacts/merge.md", instruction: "Merge the PR only after approvals, resolved comments, and green checks; record merge SHA or URL." },
-  { id: "handoff", artifact: "artifacts/handoff.md", instruction: "Write final handoff with decisions, risks, files, and remaining work." },
-];
-
 const FRESH_ARTIFACT_PHASE_IDS = new Set([
   "slice-plan",
   "plan-review",
@@ -1832,17 +1883,7 @@ const FRESH_ARTIFACT_PHASE_IDS = new Set([
 ]);
 
 function fullFeatureWorkflowYaml() {
-  const stages = PHASES.map(
-    (phase) => {
-      const markers = (phase.required_markers ?? [])
-        .map((marker) => `      - ${JSON.stringify(marker)}`)
-        .join("\n");
-      const markerBlock = markers ? `\n    required_markers:\n${markers}` : "";
-      const multiReviewBlock = phase.multi_review ? "\n    multi_review: true" : "";
-      return `  - id: ${phase.id}\n    artifact: ${phase.artifact}${multiReviewBlock}${markerBlock}\n    instruction: ${JSON.stringify(phase.instruction)}`;
-    },
-  ).join("\n");
-  return `id: full-feature\nmode: cli-enforced\nstages:\n${stages}\n`;
+  return fullFeatureWorkflow().text;
 }
 
 function agentFlowSkillMarkdown() {

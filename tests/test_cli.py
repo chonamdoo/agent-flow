@@ -185,6 +185,20 @@ class CliTest(unittest.TestCase):
         self.assertIn("verdict: approve", default_phases["final-review"]["prompt"])
         self.assertIn("verdict: request-changes", default_phases["final-review"]["prompt"])
 
+    def test_workflow_export_outputs_normalized_phase_contract(self) -> None:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(main(["workflow", "export", "--workflow", "full-feature"]), 0)
+        payload = json.loads(output.getvalue())
+        phases = {phase["id"]: phase for phase in payload["phases"]}
+        self.assertEqual(payload["id"], "full-feature")
+        self.assertEqual(phases["domain-grill"]["artifact"], "artifacts/domain-grill.md")
+        self.assertIn("grill-with-docs: complete", phases["domain-grill"]["required_markers"])
+        self.assertEqual(phases["red"]["artifact"], "artifacts/red.log")
+        self.assertEqual(phases["green"]["artifact"], "artifacts/green.log")
+        self.assertEqual(phases["gates"]["artifact"], "artifacts/gate-results.json")
+        self.assertEqual(phases["gates"]["routes"]["green"], "multi-review")
+
     def test_python_runner_route_key_understands_gate_results(self) -> None:
         from agent_flow.runner import _gates_route_key, _route_key
 
@@ -749,6 +763,7 @@ class CliTest(unittest.TestCase):
             result = subprocess.run(
                 (node, installer, "install", "--without-graphify"),
                 cwd=worktree_root,
+                env={**os.environ, "PATH": ""},
                 text=True,
                 capture_output=True,
                 check=False,
@@ -1472,6 +1487,27 @@ class CliTest(unittest.TestCase):
             self.assertEqual(result.stdout.strip(), "agent-flow installed profile=node")
             kit = json.loads((project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
             self.assertEqual(kit["profile"], "node")
+
+    def test_node_installer_uses_source_workflow_yaml_for_prompts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            result = subprocess.run(
+                (node, cli, "install", "--without-graphify"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            source_workflow = (Path(__file__).resolve().parents[1] / "workflows" / "full-feature.yaml").read_text(encoding="utf-8")
+            installed_workflow = (project_root / ".agent-flow" / "workflows" / "full-feature.yaml").read_text(encoding="utf-8")
+            self.assertEqual(installed_workflow, source_workflow)
+            prompt = (project_root / ".agent-flow" / "prompts" / "product-brief.md").read_text(encoding="utf-8")
+            self.assertIn("Apply YC office-hours style pressure", prompt)
+            self.assertNotIn("Validate demand, status quo", prompt)
 
     def test_node_installer_matches_project_profile_detection(self) -> None:
         cases = [
@@ -3188,7 +3224,7 @@ class CliTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             # git 실행 파일이 없는 환경에서도 run/start가 non-git fallback으로 이어져야 한다.
-            with mock.patch("agent_flow.cli.subprocess.run", side_effect=FileNotFoundError):
+            with mock.patch("agent_flow.core.commands.subprocess.run", side_effect=FileNotFoundError):
                 self.assertFalse(_is_git_repo(Path(temp_dir)))
 
     def test_provider_list_reports_host_provider_availability(self) -> None:
@@ -3852,7 +3888,7 @@ class CliTest(unittest.TestCase):
             self.assertRegex(korean_plan.name, r"^feat-task-[a-f0-9]{8}$")
             self.assertEqual(korean_plan.branch, korean_plan.name.replace("feat-", "feat/", 1))
             self.assertEqual(korean_plan.path, root / ".agent-flow" / "worktrees" / korean_plan.name)
-            with mock.patch("agent_flow.core.worktrees.subprocess.run", side_effect=OSError("no git")):
+            with mock.patch("agent_flow.core.commands.subprocess.run", side_effect=OSError("no git")):
                 fallback_plan = plan_worktree(root=root, name="No Git")
             # git 확인이 불가능한 환경에서는 기존 HEAD fallback으로 plan 생성만 유지한다.
             self.assertEqual(fallback_plan.base_ref, "HEAD")
