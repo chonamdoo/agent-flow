@@ -983,6 +983,62 @@ def test_required_markers_block_incomplete_artifact(tmp_path: Path):
     assert runner._missing_required_markers(phase) == []
 
 
+def test_runner_uses_normalized_artifact_path(tmp_path: Path):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.runner import Runner
+
+    project = tmp_path / "project"
+    run_dir = tmp_path / "run"
+    project.mkdir()
+    run_dir.mkdir()
+    runner = Runner(project, run_dir=run_dir, workflow="full-feature")
+    phase = next(phase for phase in runner.phases if phase.id == "domain-grill")
+    artifact = run_dir / phase.artifact
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text(
+        "## Completion Gate\n"
+        "grill-with-docs: complete\n"
+        "shared_understanding: reached\n"
+        "context_docs_checked: true\n"
+        "context_docs_updated: not_needed\n",
+        encoding="utf-8",
+    )
+    runner._adapter_name = "codex"
+
+    assert phase.artifact == "artifacts/domain-grill.md"
+    assert runner._has_artifact(phase)
+    assert runner._missing_required_markers(phase) == []
+
+
+def test_status_uses_normalized_artifact_path(tmp_path: Path, capsys):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.artifact import ActiveRun, write_meta
+
+    run_dir = tmp_path / "project" / ".agent-flow" / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    write_meta(
+        run_dir,
+        {
+            "workflow": "full-feature",
+            "task": "demo",
+            "current_phase": "domain-grill",
+            "started_at": "2026-05-20T00:00:00+00:00",
+        },
+    )
+
+    ActiveRun(
+        path=run_dir,
+        run_id="r1",
+        workflow="full-feature",
+        task="demo",
+        started_at="2026-05-20T00:00:00+00:00",
+    ).print_status()
+
+    output = capsys.readouterr().out
+    assert "required_artifact:" in output
+    assert "artifacts/domain-grill.md" in output
+
+
 def test_render_angle_result_marks_claude_rate_limit_as_blocker(tmp_path: Path):
     sys.path.insert(0, str(KIT_ROOT / "src"))
     from datetime import datetime, timezone
@@ -1064,15 +1120,16 @@ def test_backward_route_invalidates_target_artifact(tmp_path: Path):
 
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    watch = run_dir / "pr-watch.md"
+    watch = run_dir / "artifacts" / "pr-watch.md"
+    watch.parent.mkdir()
     watch.write_text("status: comments\n", encoding="utf-8")
-    (run_dir / "pr-comment-fix.md").write_text("fixed\n", encoding="utf-8")
+    (run_dir / "artifacts" / "pr-comment-fix.md").write_text("fixed\n", encoding="utf-8")
 
     runner = Runner.__new__(Runner)
     runner.run_dir = run_dir
     runner.phases = [
-        Phase(id="pr-watch", description="", routes={"comments": "pr-comment-fix"}),
-        Phase(id="pr-comment-fix", description="", routes={"default": "pr-watch"}),
+        Phase(id="pr-watch", description="", routes={"comments": "pr-comment-fix"}, artifact="artifacts/pr-watch.md"),
+        Phase(id="pr-comment-fix", description="", routes={"default": "pr-watch"}, artifact="artifacts/pr-comment-fix.md"),
     ]
 
     assert runner._next_index(1, runner.phases[1]) == (0, False)
@@ -1179,7 +1236,7 @@ def test_ddd_architecture_review_rejects_service_layer_refactor_bypass(tmp_path:
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     (run_dir / "ddd-design.md").write_text(
-        "# ddd-design\n\nservice-layer refactor\n",
+        "# ddd-design\n\n## service-layer refactor\n",
         encoding="utf-8",
     )
 
@@ -1194,6 +1251,52 @@ def test_ddd_architecture_review_rejects_service_layer_refactor_bypass(tmp_path:
     assert "ddd mode cannot be service-layer refactor" in text
 
 
+def test_ddd_design_validation_ignores_body_paragraph_labels(tmp_path: Path):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.runner import _missing_ddd_design_terms
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "ddd-design.md").write_text(
+        "# ddd-design\n\n"
+        "This paragraph mentions Bounded Context: Market data, Aggregates: Trade,\n"
+        "Entities: Position, Value Objects: Price, Application Use Cases: Import,\n"
+        "Infrastructure Adapters: Broker, Presentation Routes: Dashboard,\n"
+        "Dependency Rule: inward, and Implementation Structure: packages.\n"
+        "It also says this is not a service-layer refactor.\n",
+        encoding="utf-8",
+    )
+
+    missing = _missing_ddd_design_terms(run_dir)
+
+    assert "bounded context" in missing
+    assert "implementation structure" in missing
+    assert "ddd mode cannot be service-layer refactor" not in missing
+
+
+def test_ddd_design_validation_accepts_markdown_heading_and_list_labels(tmp_path: Path):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.runner import _missing_ddd_design_terms
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "ddd-design.md").write_text(
+        "# ddd-design\n\n"
+        "## Bounded Context\n"
+        "- Aggregates: Trade Journal\n"
+        "- Entities: Entry\n"
+        "- Value Objects: Money\n"
+        "- Application Use Cases: Import Trades\n"
+        "- Infrastructure Adapters: Exchange Client\n"
+        "- Presentation Routes: Dashboard\n"
+        "- Dependency Rule: domain inward\n"
+        "- Implementation Structure: src/domain src/data\n",
+        encoding="utf-8",
+    )
+
+    assert _missing_ddd_design_terms(run_dir) == []
+
+
 def test_abort_yes_flag_skips_prompt(tmp_path: Path):
     """`agent-flow abort --yes` must not block on confirmation."""
     project = tmp_path / "abort_yes"
@@ -1203,6 +1306,40 @@ def test_abort_yes_flag_skips_prompt(tmp_path: Path):
     r2 = _run_cli(["abort", "--yes"], project)
     assert r2.returncode == 0
     assert "aborted" in r2.stdout.lower()
+
+
+def test_run_safe_command_times_out_without_hanging(tmp_path: Path):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.core.commands import run_safe_command
+
+    result = run_safe_command(
+        [sys.executable, "-c", "import time; time.sleep(2)"],
+        cwd=tmp_path,
+        timeout_s=1,
+    )
+
+    assert result.returncode is None
+    assert result.timed_out is True
+    assert result.ok is False
+
+
+def test_worktree_git_commands_use_longer_timeout(tmp_path: Path, monkeypatch):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.core import worktrees
+    from agent_flow.core.commands import SafeCommandResult
+
+    captured: dict[str, int] = {}
+
+    def fake_run_safe_command(args, *, cwd=None, input_text=None, timeout_s=0):
+        captured["timeout_s"] = timeout_s
+        return SafeCommandResult(args=tuple(args), returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(worktrees, "run_safe_command", fake_run_safe_command)
+
+    worktrees._run_git(tmp_path, "worktree", "add", "path", "branch")
+
+    assert captured["timeout_s"] == worktrees.GIT_WORKTREE_TIMEOUT_S
+    assert captured["timeout_s"] > 30
 
 
 def test_cli_detection_runs():

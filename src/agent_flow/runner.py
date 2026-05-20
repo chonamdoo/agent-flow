@@ -27,7 +27,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -38,15 +37,16 @@ import yaml
 from agent_flow.adapters.auto import detect_adapter
 from agent_flow.artifact import (
     create_run,
-    has_artifact,
     mark_inactive,
     read_meta,
     write_meta,
 )
 from agent_flow.cli_detect import detect_available_clis
+from agent_flow.core.commands import run_safe_command
+from agent_flow.core.phase_workflow import load_phase_workflow_definition
 from agent_flow.core.report import write_run_report
 from agent_flow.core.security import ensure_child_path, validate_safe_name
-from agent_flow.core.markers import missing_markers, normalize_required_markers
+from agent_flow.core.markers import missing_markers
 from agent_flow.memory.index import LoreIndex
 from agent_flow.memory.lore import Lore
 
@@ -91,6 +91,7 @@ class Phase:
     cite_lore: bool = False     # Inject relevant lore into prompt envelope
     routes: dict[str, str] | None = None
     required_markers: tuple[str, ...] = ()
+    artifact: str = ""
 
 
 class Runner:
@@ -167,10 +168,10 @@ class Runner:
         phase_index = int(meta.get("phase_index", 0) or 0)
         while phase_index < len(self.phases):
             phase = self.phases[phase_index]
-            if has_artifact(self.run_dir, phase.id):
+            if self._has_artifact(phase):
                 missing_markers = self._missing_required_markers(phase)
                 if missing_markers:
-                    artifact = self.run_dir / f"{phase.id}.md"
+                    artifact = self._existing_artifact_path(phase)
                     print(
                         f"\n═══ phase '{phase.id}' is blocked. "
                         f"Artifact is missing completion markers: "
@@ -185,7 +186,7 @@ class Runner:
                     )
                     return
                 if self._artifact_needs_auto_revalidation(phase):
-                    (self.run_dir / f"{phase.id}.md").unlink()
+                    self._existing_artifact_path(phase).unlink()
                 else:
                     print(f"  [skip] {phase.id}")
                     phase_index, blocked = self._next_index(phase_index, phase)
@@ -251,12 +252,12 @@ class Runner:
                     status="awaiting_host",
                     phase=phase,
                     reason="missing_phase_artifact",
-                    required_artifact=self.run_dir / f"{phase.id}.md",
+                    required_artifact=self._artifact_path(phase),
                 )
                 return
             missing_markers = self._missing_required_markers(phase)
             if missing_markers:
-                artifact = self.run_dir / f"{phase.id}.md"
+                artifact = self._existing_artifact_path(phase)
                 print(
                     f"\n═══ phase '{phase.id}' is blocked. "
                     f"Artifact is missing completion markers: "
@@ -279,7 +280,7 @@ class Runner:
                     status="blocked",
                     phase=phase,
                     reason="pause_after",
-                    required_artifact=self.run_dir / f"{phase.id}.md",
+                    required_artifact=self._artifact_path(phase),
                 )
                 return
             phase_index, blocked = self._next_index(phase_index, phase)
@@ -318,7 +319,7 @@ class Runner:
         if not phase.routes:
             return current_index + 1, False
         assert self.run_dir is not None
-        artifact = self.run_dir / f"{phase.id}.md"
+        artifact = self._existing_artifact_path(phase)
         text = artifact.read_text(encoding="utf-8") if artifact.exists() else ""
         if phase.multi_review:
             key = _multi_review_route_key(text, phase.id)
@@ -358,13 +359,14 @@ class Runner:
             for i, candidate in enumerate(self.phases):
                 if candidate.id == target:
                     if i <= current_index:
-                        target_artifact = self.run_dir / f"{candidate.id}.md"
+                        target_artifact = self._existing_artifact_path(candidate)
                         if target_artifact.exists():
                             target_artifact.unlink()
                     elif i > current_index + 1:
                         for skipped in self.phases[current_index + 1:i]:
-                            skipped_artifact = self.run_dir / f"{skipped.id}.md"
+                            skipped_artifact = self._artifact_path(skipped)
                             if not skipped_artifact.exists():
+                                skipped_artifact.parent.mkdir(parents=True, exist_ok=True)
                                 skipped_artifact.write_text(
                                     f"# {skipped.id}\n\nstatus: skipped\nreason: route_to_{target}\n",
                                     encoding="utf-8",
@@ -393,7 +395,8 @@ class Runner:
     def _write_automatic_artifact(self, phase: Phase) -> bool:
         assert self.run_dir is not None
         if phase.id in GIT_DEPENDENT_PHASES and not _is_git_repo(self.project_root):
-            artifact = self.run_dir / f"{phase.id}.md"
+            artifact = self._artifact_path(phase)
+            artifact.parent.mkdir(parents=True, exist_ok=True)
             artifact.write_text(
                 f"# {phase.id}\n\n"
                 "status: skipped\n"
@@ -405,7 +408,8 @@ class Runner:
         if self.architecture == "ddd" and phase.id == "architecture-review":
             missing = _missing_ddd_design_terms(self.run_dir)
             if missing:
-                artifact = self.run_dir / f"{phase.id}.md"
+                artifact = self._artifact_path(phase)
+                artifact.parent.mkdir(parents=True, exist_ok=True)
                 artifact.write_text(
                     "# architecture-review\n\n"
                     "verdict: blocked\n"
@@ -425,7 +429,7 @@ class Runner:
         if self.architecture != "ddd" or phase.id != "architecture-review":
             return False
         assert self.run_dir is not None
-        artifact = self.run_dir / f"{phase.id}.md"
+        artifact = self._existing_artifact_path(phase)
         text = artifact.read_text(encoding="utf-8") if artifact.exists() else ""
         if _route_key(text) != "blocked":
             return False
@@ -441,13 +445,33 @@ class Runner:
         ):
             return []
         assert self.run_dir is not None
-        artifact = self.run_dir / f"{phase.id}.md"
+        artifact = self._existing_artifact_path(phase)
         if not artifact.exists():
             return []
         return _missing_markers(
             artifact.read_text(encoding="utf-8"),
             phase.required_markers,
         )
+
+    def _artifact_path(self, phase: Phase) -> Path:
+        assert self.run_dir is not None
+        return self.run_dir / (phase.artifact or f"{phase.id}.md")
+
+    def _legacy_artifact_path(self, phase: Phase) -> Path:
+        assert self.run_dir is not None
+        return self.run_dir / f"{phase.id}.md"
+
+    def _existing_artifact_path(self, phase: Phase) -> Path:
+        artifact = self._artifact_path(phase)
+        if artifact.exists():
+            return artifact
+        legacy_artifact = self._legacy_artifact_path(phase)
+        if legacy_artifact.exists():
+            return legacy_artifact
+        return artifact
+
+    def _has_artifact(self, phase: Phase) -> bool:
+        return self._artifact_path(phase).exists() or self._legacy_artifact_path(phase).exists()
 
     def _print_structured_status(
         self,
@@ -502,44 +526,22 @@ def _find_kit_root() -> Path:
 
 
 def _load_workflow(kit_root: Path, name: str) -> list[Phase]:
-    _validate_yaml_name(name, "workflow")
-    path = kit_root / "workflows" / f"{name}.yaml"
-    _ensure_child_path(kit_root / "workflows", path, "workflow")
-    if not path.exists():
-        raise FileNotFoundError(f"Workflow not found: {path}")
-    raw = yaml.safe_load(path.read_text()) or {}
-    if not isinstance(raw, dict):
-        raise ValueError(f"workflow {path}: top-level must be a mapping")
-    phases_raw = raw.get("phases") or []
-    if not isinstance(phases_raw, list) or not phases_raw:
-        raise ValueError(f"workflow {path}: missing or empty `phases`")
-    out: list[Phase] = []
-    seen_ids: set[str] = set()
-    for i, p in enumerate(phases_raw):
-        if not isinstance(p, dict) or "id" not in p:
-            raise ValueError(
-                f"workflow {path}: phase {i} missing `id` (got {p!r})"
-            )
-        pid = str(p["id"])
-        if pid in seen_ids:
-            raise ValueError(
-                f"workflow {path}: duplicate phase id {pid!r} at index {i}. "
-                f"Each phase id must be unique — `has_artifact` would silently "
-                f"skip the second."
-            )
-        seen_ids.add(pid)
-        out.append(Phase(
-            id=pid,
-            description=str(p.get("description", "")),
-            prompt=p.get("prompt"),
-            pause_after=bool(p.get("pause_after", False)),
-            optional=bool(p.get("optional", False)),
-            multi_review=bool(p.get("multi_review", False)),
-            cite_lore=bool(p.get("cite_lore", False)),
-            routes=p.get("routes"),
-            required_markers=normalize_required_markers(p.get("required_markers")),
-        ))
-    return out
+    definition = load_phase_workflow_definition(kit_root, name)
+    return [
+        Phase(
+            id=phase.id,
+            description=phase.description,
+            prompt=phase.prompt,
+            pause_after=phase.pause_after,
+            optional=phase.optional,
+            multi_review=phase.multi_review,
+            cite_lore=phase.cite_lore,
+            routes=phase.routes,
+            required_markers=phase.required_markers,
+            artifact=phase.artifact,
+        )
+        for phase in definition.phases
+    ]
 
 
 def _fix_loop_rounds(meta: dict[str, Any]) -> int:
@@ -839,17 +841,8 @@ def _status_value(value: object) -> str:
 
 
 def _is_git_repo(project_root: Path) -> bool:
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--is-inside-work-tree"],
-            cwd=project_root,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return result.returncode == 0 and result.stdout.strip() == "true"
+    result = run_safe_command(["git", "rev-parse", "--is-inside-work-tree"], cwd=project_root, timeout_s=5)
+    return result.ok and result.stdout.strip() == "true"
 
 
 def _missing_ddd_design_terms(run_dir: Path) -> list[str]:
@@ -862,11 +855,9 @@ def _missing_ddd_design_terms(run_dir: Path) -> list[str]:
     if not text:
         return ["ddd-design.md or design.md"]
 
-    lowered = text.lower()
-    if "service-layer refactor" in lowered:
-        return ["ddd mode cannot be service-layer refactor"]
-
     section_titles = _design_section_titles(text)
+    if any(_section_title_matches(section_titles, alias) for alias in ("service-layer refactor", "service layer refactor")):
+        return ["ddd mode cannot be service-layer refactor"]
     return [
         label
         for label, aliases in DDD_REQUIRED_DESIGN_SECTIONS
@@ -876,13 +867,20 @@ def _missing_ddd_design_terms(run_dir: Path) -> list[str]:
 
 def _design_section_titles(text: str) -> list[str]:
     titles: list[str] = []
+    in_fence = False
     for line in text.splitlines():
+        if line.startswith("```") or line.startswith("~~~"):
+            in_fence = not in_fence
+            continue
+        if in_fence or line.startswith("    ") or line.startswith("\t"):
+            continue
         stripped = line.strip()
+        # DDD 판정은 Markdown heading과 list label만 본다. 본문 문장은 relay를 막지 않는다.
         heading = re.match(r"^#{1,6}\s+(.+)$", stripped)
         if heading:
             titles.append(_normalize_design_heading(heading.group(1)))
             continue
-        label = re.match(r"^(?:[-*]\s*)?(?:\d+[.)]\s*)?([^:]{1,80}):", stripped)
+        label = re.match(r"^(?:[-*+]\s+|\d+[.)]\s+)(?:\*\*)?([^:]{1,80}?)(?:\*\*)?\s*:", stripped)
         if label:
             titles.append(_normalize_design_heading(label.group(1)))
     return titles
@@ -890,12 +888,14 @@ def _design_section_titles(text: str) -> list[str]:
 
 def _normalize_design_heading(value: str) -> str:
     lowered = value.lower()
-    return re.sub(r"\s+", " ", re.sub(r"[`*_#]+", " ", lowered)).strip()
+    cleaned = re.sub(r"[`*_#]+", " ", lowered)
+    cleaned = re.sub(r"^\s*\d+(?:[.)]|\s+-)\s*", "", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip(" :-")
 
 
 def _section_title_matches(section_titles: list[str], alias: str) -> bool:
     normalized_alias = _normalize_design_heading(alias)
-    return any(normalized_alias in title for title in section_titles)
+    return any(title == normalized_alias or title.startswith(f"{normalized_alias} ") for title in section_titles)
 
 
 def _load_profile(kit_root: Path, project_root: Path) -> tuple[str, dict[str, Any]]:

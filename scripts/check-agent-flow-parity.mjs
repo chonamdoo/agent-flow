@@ -79,6 +79,23 @@ const fullFeatureWorkflowCopies = [
   ...(CHECK_INSTALLED_COPY ? [".agent-flow/workflows/full-feature.yaml"] : []),
 ];
 
+const exportedWorkflow = workflowExport("full-feature");
+if (exportedWorkflow) {
+  const exportedPhases = Object.fromEntries(exportedWorkflow.phases.map((phase) => [phase.id, phase]));
+  if (exportedWorkflow.id !== "full-feature") {
+    failures.push("workflow export full-feature id mismatch");
+  }
+  if (exportedPhases["domain-grill"]?.artifact !== "artifacts/domain-grill.md") {
+    failures.push("workflow export domain-grill artifact mismatch");
+  }
+  if (exportedPhases["gates"]?.routes?.green !== "multi-review") {
+    failures.push("workflow export gates green route mismatch");
+  }
+  if (exportedPhases["red"]?.artifact !== "artifacts/red.log") {
+    failures.push("workflow export red artifact mismatch");
+  }
+}
+
 // phase 제거가 source/generated copy 중 한 곳에만 반영되는 drift를 막는다.
 for (const rel of fullFeatureWorkflowCopies) {
   assertFile(rel);
@@ -262,12 +279,77 @@ function gitOutput(cwd, args) {
     cwd,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "ignore"],
+    timeout: 30_000,
   });
   if (result.error || result.status !== 0) {
     return null;
   }
   const output = result.stdout.trim();
   return output || null;
+}
+
+function workflowExport(name) {
+  const env = {
+    ...process.env,
+    PYTHONPATH: [path.join(SOURCE_ROOT, "src"), process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
+  };
+  const result = spawnSync(preferredPython(), [
+    "-m",
+    "agent_flow.cli",
+    "workflow",
+    "export",
+    "--workflow",
+    name,
+    "--format",
+    "json",
+  ], {
+    cwd: SOURCE_ROOT,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    env,
+    timeout: 30_000,
+  });
+  if (result.error || result.status !== 0) {
+    failures.push(`workflow export failed: ${result.error?.message || result.stderr.trim() || result.status}`);
+    return null;
+  }
+  try {
+    const payload = JSON.parse(result.stdout);
+    if (!Array.isArray(payload.phases)) {
+      failures.push("workflow export phases must be an array");
+      return null;
+    }
+    return payload;
+  } catch (error) {
+    failures.push(`workflow export invalid JSON: ${error.message}`);
+    return null;
+  }
+}
+
+function preferredPython() {
+  const virtualEnvPython = process.env.VIRTUAL_ENV
+    ? path.join(process.env.VIRTUAL_ENV, process.platform === "win32" ? "Scripts/python.exe" : "bin/python")
+    : null;
+  const candidates = [
+    process.env.PYTHON,
+    process.env.PYTHON_EXECUTABLE,
+    virtualEnvPython,
+    "python3.12",
+    "python3.11",
+    "python3.10",
+    "python3",
+    "python",
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    const result = spawnSync(candidate, ["--version"], {
+      stdio: "ignore",
+      timeout: 30_000,
+    });
+    if (!result.error && result.status === 0) {
+      return candidate;
+    }
+  }
+  return "python3";
 }
 
 if (failures.length > 0) {

@@ -26,6 +26,7 @@ from pathlib import Path
 import yaml
 
 from agent_flow.core.markers import missing_markers, normalize_required_markers
+from agent_flow.core.phase_workflow import load_phase_workflow_definition
 
 
 RUNS_DIRNAME = ".agent-flow/runs"
@@ -47,12 +48,13 @@ class ActiveRun:
     started_at: str
 
     def print_status(self, *, next_command: str = "agent-flow continue") -> None:
-        artifacts = sorted(p.name for p in self.path.glob("*.md"))
+        artifacts = sorted(str(p.relative_to(self.path)) for p in self.path.rglob("*") if p.is_file())
         meta = read_meta(self.path)
         current_phase = meta.get("current_phase") or "-"
+        artifact_rel, _markers = _phase_contract(self.path, self.workflow, current_phase)
         required_artifact = (
-            self.path / f"{current_phase}.md"
-            if current_phase != "-"
+            _existing_phase_artifact(self.path, current_phase, artifact_rel)
+            if current_phase != "-" and artifact_rel is not None
             else None
         )
         structured_status = "running"
@@ -239,16 +241,21 @@ def _missing_completion_markers(
     workflow: str,
     phase_id: str,
 ) -> list[str]:
-    markers = _required_markers(run_path, workflow, phase_id)
-    artifact = run_path / f"{phase_id}.md"
+    artifact_rel, markers = _phase_contract(run_path, workflow, phase_id)
+    artifact = _existing_phase_artifact(run_path, phase_id, artifact_rel)
     if not markers or not artifact.exists():
         return []
     return _missing_markers(artifact.read_text(encoding="utf-8"), markers)
 
 
 def _required_markers(run_path: Path, workflow: str, phase_id: str) -> tuple[str, ...]:
+    _artifact_rel, markers = _phase_contract(run_path, workflow, phase_id)
+    return markers
+
+
+def _phase_contract(run_path: Path, workflow: str, phase_id: str) -> tuple[Path | None, tuple[str, ...]]:
     project_root = run_path.parents[2] if len(run_path.parents) >= 3 else None
-    candidates = []
+    candidates: list[Path] = []
     if project_root is not None:
         candidates.append(project_root / ".agent-flow" / "workflows" / f"{workflow}.yaml")
     candidates.append(Path(__file__).resolve().parent / "workflows" / f"{workflow}.yaml")
@@ -256,6 +263,14 @@ def _required_markers(run_path: Path, workflow: str, phase_id: str) -> tuple[str
     for path in candidates:
         if not path.exists():
             continue
+        try:
+            definition = load_phase_workflow_definition(path.parent.parent, workflow)
+        except (OSError, ValueError):
+            definition = None
+        if definition is not None:
+            for phase in definition.phases:
+                if phase.id == phase_id:
+                    return Path(phase.artifact), phase.required_markers
         try:
             raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         except (OSError, yaml.YAMLError):
@@ -266,8 +281,16 @@ def _required_markers(run_path: Path, workflow: str, phase_id: str) -> tuple[str
         for phase in phases:
             if not isinstance(phase, dict) or str(phase.get("id")) != phase_id:
                 continue
-            return normalize_required_markers(phase.get("required_markers"))
-    return ()
+            return Path(f"{phase_id}.md"), normalize_required_markers(phase.get("required_markers"))
+    return (Path(f"{phase_id}.md") if phase_id != "-" else None, ())
+
+
+def _existing_phase_artifact(run_path: Path, phase_id: str, artifact_rel: Path | None) -> Path:
+    artifact = run_path / artifact_rel if artifact_rel is not None else run_path / f"{phase_id}.md"
+    legacy_artifact = run_path / f"{phase_id}.md"
+    if not artifact.exists() and legacy_artifact.exists():
+        return legacy_artifact
+    return artifact
 
 
 def _missing_markers(text: str, markers: tuple[str, ...]) -> list[str]:
