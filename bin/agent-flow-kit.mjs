@@ -924,7 +924,7 @@ function parseSkillMetadata(text, fallbackName) {
     warnings.push(`unsafe skill name ignored: ${parsedName}`);
   }
   const hostValues = Array.isArray(metadata.hosts) ? metadata.hosts : [];
-  const knownHosts = new Set(["claude", "codex", "gemini"]);
+  const knownHosts = new Set(["claude", "codex", "gemini", "antigravity"]);
   const hosts = [];
   for (const host of hostValues) {
     const normalized = String(host).trim().toLowerCase();
@@ -939,7 +939,7 @@ function parseSkillMetadata(text, fallbackName) {
   return {
     name,
     description: String(metadata.description || useWhen || ""),
-    hosts: hostValues.length > 0 ? [...new Set(hosts)] : ["claude", "codex", "gemini"],
+    hosts: hostValues.length > 0 ? [...new Set(hosts)] : ["claude", "codex", "gemini", "antigravity"],
     tags: Array.isArray(metadata.tags) ? metadata.tags.map(String) : [],
     trigger: String(metadata.trigger || metadata.description || useWhen || ""),
     warnings,
@@ -971,7 +971,7 @@ function removeStaleProjectSkillLinks(root, skills, previousIndex) {
       continue;
     }
     const target = path.join(root, link.path);
-    const hostRoot = path.join(root, `.${link.host}`, "skills");
+    const hostRoot = hostSkillRoot(root, link.host);
     if (pathHasSymlink(root, hostRoot)) {
       removed.push({ name: link.name, host: link.host, path: link.path, status: "skipped-host-root-symlink" });
       continue;
@@ -1053,7 +1053,7 @@ function parseSimpleYaml(text) {
 
 function linkProjectSkill(root, skill, host, previousIndex) {
   const srcDir = path.dirname(path.join(root, skill.path));
-  const hostRoot = path.join(root, `.${host}`, "skills");
+  const hostRoot = hostSkillRoot(root, host);
   if (pathHasSymlink(root, hostRoot)) {
     return { name: skill.name, host, path: path.relative(root, hostRoot), status: "skipped-host-root-symlink" };
   }
@@ -1084,6 +1084,13 @@ function linkProjectSkill(root, skill, host, previousIndex) {
     copyBundledDirIfMissingOrSame(srcDir, destDir, true);
     return { name: skill.name, host, path: path.relative(root, destDir), status: "copied" };
   }
+}
+
+function hostSkillRoot(root, host) {
+  if (host === "antigravity") {
+    return path.join(root, ".gemini", "antigravity", "skills");
+  }
+  return path.join(root, `.${host}`, "skills");
 }
 
 function previousSkillHash(previousIndex, name) {
@@ -1772,14 +1779,14 @@ Follow the CLI output exactly. If no run is active, start with \`${AGENT_FLOW_CO
 
 ### Context Economy
 
-- Codex / Claude / Gemini user-facing 답변은 기본적으로 짧은 한글로 한다.
+- Codex / Claude / Gemini / Antigravity user-facing 답변은 기본적으로 짧은 한글로 한다.
 - 코드/명령/식별자는 영어 그대로 유지한다.
 - 긴 설명, 긴 로그, 전체 파일 붙여넣기 금지.
 - 필요한 경우만 current phase, action, \`next_command\`, blocker를 요약한다.
 - 모든 guide를 항상 로드하지 말고 변경 파일에 필요한 guide만 읽는다.
 - 프로젝트 skill은 \`skills/<name>/SKILL.md\` 또는 private \`.agent-flow/local-skills/<name>/SKILL.md\`에 둔다.
 - install/bootstrap 후 \`.agent-flow/skills/index.json\` metadata를 보고 필요한 skill만 읽는다. 모든 SKILL.md 전문을 항상 읽지 않는다.
-- Claude/Codex/Gemini 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.
+- Claude/Codex/Gemini/Antigravity 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.
 
 ${end}
 `;
@@ -1850,14 +1857,14 @@ Follow the CLI output exactly. Git projects start inside \`.agent-flow/worktrees
 
 ### Context Economy
 
-- Codex / Claude / Gemini user-facing 답변은 기본적으로 짧은 한글로 한다.
+- Codex / Claude / Gemini / Antigravity user-facing 답변은 기본적으로 짧은 한글로 한다.
 - 코드/명령/식별자는 영어 그대로 유지한다.
 - 긴 설명, 긴 로그, 전체 파일 붙여넣기 금지.
 - 필요한 경우만 current phase, action, \`next_command\`, blocker를 요약한다.
 - 모든 guide를 항상 로드하지 말고 변경 파일에 필요한 guide만 읽는다.
 - 프로젝트 skill은 \`skills/<name>/SKILL.md\` 또는 private \`.agent-flow/local-skills/<name>/SKILL.md\`에 둔다.
 - install/bootstrap 후 \`.agent-flow/skills/index.json\` metadata를 보고 필요한 skill만 읽는다. 모든 SKILL.md 전문을 항상 읽지 않는다.
-- Claude/Codex/Gemini 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.
+- Claude/Codex/Gemini/Antigravity 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.
 
 During code generation and modification phases, apply \`code-generation-discipline\`. Language-specific guide and comment rules follow the \`code-generation-discipline\` Before Starting checklist.
 For Android/Kotlin/Compose/KMP work, read the matching locally installed skill file from the Android profile's \`chrisbanes_skills\` as plain text before implementation. If missing or unreadable, record \`no content: <skill>\`.

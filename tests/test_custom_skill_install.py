@@ -53,6 +53,7 @@ def test_project_skill_links_all_hosts_and_index_omits_body(tmp_path: Path) -> N
     assert result.returncode == 0, result.stderr
     for host in ("claude", "codex", "gemini"):
         assert (project / f".{host}" / "skills" / "my-skill" / "SKILL.md").exists()
+    assert (project / ".gemini" / "antigravity" / "skills" / "my-skill" / "SKILL.md").exists()
     index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
     selected = next(skill for skill in index["skills"] if skill["name"] == "my-skill")
     assert selected["source"] == "project"
@@ -87,6 +88,25 @@ def test_host_limited_skill_links_only_requested_host(tmp_path: Path) -> None:
     assert (project / ".codex" / "skills" / "codex-only" / "SKILL.md").exists()
     assert not (project / ".claude" / "skills" / "codex-only").exists()
     assert not (project / ".gemini" / "skills" / "codex-only").exists()
+    assert not (project / ".gemini" / "antigravity" / "skills" / "codex-only").exists()
+
+
+def test_antigravity_skill_links_to_antigravity_path(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    _skill(project / "skills" / "antigravity-only", "ANTIGRAVITY", hosts="[antigravity]")
+
+    result = _install(project)
+
+    assert result.returncode == 0, result.stderr
+    assert (project / ".gemini" / "antigravity" / "skills" / "antigravity-only" / "SKILL.md").exists()
+    assert not (project / ".gemini" / "skills" / "antigravity-only").exists()
+    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    selected = next(skill for skill in index["skills"] if skill["name"] == "antigravity-only")
+    assert selected["hosts"] == ["antigravity"]
+    link = next(link for link in index["links"] if link["name"] == "antigravity-only")
+    assert link["host"] == "antigravity"
+    assert link["path"] == ".gemini/antigravity/skills/antigravity-only"
 
 
 def test_host_limited_skill_accepts_yaml_block_list(tmp_path: Path) -> None:

@@ -1,16 +1,16 @@
 # agent-flow
 
-Project-agnostic AI workflow kit. Start with `/agent-flow` in Claude Code, Codex, or Gemini; the same CLI core writes the same artifacts underneath.
+Project-agnostic AI workflow kit. Start with `/agent-flow` in Claude Code, Codex, Gemini, or Antigravity; the same CLI core writes the same artifacts underneath.
 
 > **Status**: Phase 1–5 active. Scaffold, real adapters, multi-CLI fan-out, 8 profiles, Lore engine (parse / search / 4-tier compaction / auto-cite), PR-watch (gh-CLI polling with status classification). Phase 6 (optional sandboxing) deferred.
 
 ## Philosophy
 
-1. **One trigger to remember.** `/agent-flow <task>` in Claude / Codex / Gemini, backed by `agent-flow run "<task>"`. Git projects start inside `.agent-flow/worktrees/feat-<slug>/` on branch `feat/<slug>`; installer setup is not repeated per task.
+1. **One trigger to remember.** `/agent-flow <task>` in Claude / Codex / Gemini / Antigravity, backed by `agent-flow run "<task>"`. Git projects start inside `.agent-flow/worktrees/feat-<slug>/` on branch `feat/<slug>`; installer setup is not repeated per task.
 2. **Artifacts as state machine.** Each run writes state under `.agent-flow/runs/`; git-backed worktree runs keep runtime state under the repository git dir at `.git/agent-flow/worktrees/feat-<slug>/`. Context loss never loses progress.
 3. **Chain is enforcement.** The next phase cannot start until the previous artifact exists. The slash trigger is only the entry point; the artifact chain blocks skipping.
 4. **Stack-agnostic core, profile-specific knobs.** Workflow YAML stays generic. Profiles supply branching strategy, gate commands, review angles, vocabulary.
-5. **Three AI hosts, one contract.** Claude / Codex / Gemini hosts share a single `HostedAdapter` parameterized by name; only the hint string differs. The runner is unaware of which AI is active.
+5. **Hosted AI contract.** Claude / Codex / Gemini / Antigravity hosts share a single `HostedAdapter` parameterized by name; only the hint string differs. The runner is unaware of which AI is active.
 
 ## Install (in any project root)
 
@@ -37,7 +37,7 @@ After installation, rerun `graphify .` from a terminal, `/graphify .` in Claude/
 ## Use
 
 ```text
-# Run lifecycle from Claude / Codex / Gemini
+# Run lifecycle from Claude / Codex / Gemini / Antigravity
 /agent-flow 유저 프로필 페이지 추가          # start
 /agent-flow                                  # continue a selected worktree
 /agent-flow status                           # progress for a selected worktree
@@ -112,7 +112,7 @@ For phases marked `multi_review: true` (currently `final-review`), the runner di
 - **1 CLI** → all angles on that CLI (host adapter handles in-host parallelism — Claude `Task` tool, etc.)
 - **0 CLIs** → host AI handles all angles itself
 
-Override with `AGENT_FLOW_REVIEWERS="claude,codex,gemini"`. Per-angle artifacts (`final-review-<angle>.md`) survive partial timeouts — one slow CLI does not block siblings.
+Override with `AGENT_FLOW_REVIEWERS="claude,codex,gemini"` or `AGENT_FLOW_REVIEWERS="antigravity"`. Per-angle artifacts (`final-review-<angle>.md`) survive partial timeouts — one slow CLI does not block siblings.
 
 ## Honesty notes
 

@@ -36,7 +36,7 @@ agent-flow status
 ## Behavior
 
 - Treat `/agent-flow` as a project-local workflow trigger, not as a shell path.
-- Keep `.agent-flow/worktrees/feat-<slug>/.agent-flow/runs/<workflow>/<run-id>/` as internal state for git projects; expose it only for status, debugging, or artifact inspection.
+- Keep git-project runtime state private under the repository git dir, such as `.git/agent-flow/worktrees/feat-<slug>/`; expose it only for status, debugging, or artifact inspection.
 - On a new session, always check `agent-flow status` first and continue from that result.
 - After a phase writes its artifact, run the `next_command` printed by status or the current phase output.
 - If the workflow pauses for design or slice review, summarize the relevant artifact and wait for user approval before continuing.

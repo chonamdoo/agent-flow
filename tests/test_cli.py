@@ -250,6 +250,8 @@ class CliTest(unittest.TestCase):
             self.assertEqual(distribution.by_cli, {})
         with mock.patch.dict(os.environ, {"AGENT_FLOW_REVIEWERS": "codex"}, clear=True):
             self.assertEqual([cli.name for cli in resolve_review_clis()], ["codex"])
+        with mock.patch.dict(os.environ, {"AGENT_FLOW_REVIEWERS": "antigravity"}, clear=True):
+            self.assertEqual([cli.name for cli in resolve_review_clis()], ["gemini"])
         with mock.patch.dict(os.environ, {"AGENT_FLOW_REVIEWERS": "claude,gemini"}, clear=True):
             jobs = [
                 ReviewerJob("generalist", "prompt", Path("generalist.md")),
@@ -3250,10 +3252,12 @@ class CliTest(unittest.TestCase):
         with mock.patch("agent_flow.cli_detect.shutil.which") as which:
             which.side_effect = lambda name: f"/usr/local/bin/{name}" if name == "agy" else None
             cli = cli_by_name("gemini")
+            antigravity_cli = cli_by_name("antigravity")
 
         self.assertIsNotNone(cli)
         self.assertEqual(cli.binaries, ("agy",))
         self.assertEqual(cli.invoke, ("-p",))
+        self.assertEqual(antigravity_cli, cli)
 
     def test_provider_list_reports_antigravity_cli(self) -> None:
         output = io.StringIO()

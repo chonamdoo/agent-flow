@@ -60,8 +60,13 @@ def detect_host_cli() -> str | None:
 
 
 def cli_by_name(name: str) -> CliInfo | None:
+    normalized = {
+        "agy": "gemini",
+        "antigravity": "gemini",
+        "antigravity-cli": "gemini",
+    }.get(name, name)
     for cli in KNOWN_CLIS:
-        if cli.name == name:
+        if cli.name == normalized:
             return _normalize_cli(cli)
     return None
 
