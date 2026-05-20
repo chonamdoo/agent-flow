@@ -3204,9 +3204,39 @@ class CliTest(unittest.TestCase):
                 "manual available command=manual",
                 "codex-session available command=/usr/local/bin/codex",
                 "claude-session unavailable command=claude",
-                "gemini-cli unavailable command=gemini",
+                "antigravity-cli unavailable command=agy",
             ],
         )
+
+    def test_gemini_reviewer_uses_antigravity_cli_launcher(self) -> None:
+        from agent_flow.cli_detect import cli_by_name
+
+        with mock.patch("agent_flow.cli_detect.shutil.which") as which:
+            which.side_effect = lambda name: f"/usr/local/bin/{name}" if name == "agy" else None
+            cli = cli_by_name("gemini")
+
+        self.assertIsNotNone(cli)
+        self.assertEqual(cli.binaries, ("agy",))
+        self.assertEqual(cli.invoke, ("-p",))
+
+    def test_provider_list_reports_antigravity_cli(self) -> None:
+        output = io.StringIO()
+        with mock.patch("agent_flow.providers.host.shutil.which") as which:
+            which.side_effect = lambda name: f"/usr/local/bin/{name}" if name == "agy" else None
+            with mock.patch.dict("agent_flow.providers.host.os.environ", {}, clear=True):
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(main(["provider", "list"]), 0)
+
+        self.assertIn("antigravity-cli available command=/usr/local/bin/agy", output.getvalue())
+
+    def test_antigravity_environment_marks_provider_available(self) -> None:
+        output = io.StringIO()
+        with mock.patch("agent_flow.providers.host.shutil.which", return_value=None):
+            with mock.patch.dict("agent_flow.providers.host.os.environ", {"ANTIGRAVITY_HOME": "/tmp/ag"}, clear=True):
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(main(["provider", "list"]), 0)
+
+        self.assertIn("antigravity-cli available command=agy", output.getvalue())
 
     def test_provider_list_treats_host_environment_as_available(self) -> None:
         output = io.StringIO()

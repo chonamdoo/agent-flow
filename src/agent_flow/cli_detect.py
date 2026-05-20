@@ -25,8 +25,8 @@ KNOWN_CLIS: tuple[CliInfo, ...] = (
     CliInfo(name="claude", binaries=("claude",), invoke=("-p",)),
     # OpenAI Codex CLI: `codex exec "<prompt>"` (older `codex run` also seen)
     CliInfo(name="codex", binaries=("codex",), invoke=("exec",)),
-    # Google Gemini CLI: `gemini -p "<prompt>"`
-    CliInfo(name="gemini", binaries=("gemini",), invoke=("-p",)),
+    # 소비자용 Gemini CLI 경로는 Antigravity CLI로 전환됐으므로 `agy -p "<prompt>"`를 쓴다.
+    CliInfo(name="gemini", binaries=("agy", "antigravity"), invoke=("-p",)),
 )
 
 
@@ -49,7 +49,12 @@ def detect_host_cli() -> str | None:
         return "claude"
     if os.environ.get("CODEX_CLI") or os.environ.get("CODEX_HOME"):
         return "codex"
-    if os.environ.get("GEMINI_CLI") or os.environ.get("GEMINI_HOME"):
+    if (
+        os.environ.get("ANTIGRAVITY_CLI")
+        or os.environ.get("ANTIGRAVITY_HOME")
+        or os.environ.get("GEMINI_CLI")
+        or os.environ.get("GEMINI_HOME")
+    ):
         return "gemini"
     return None
 
@@ -62,6 +67,12 @@ def cli_by_name(name: str) -> CliInfo | None:
 
 
 def _normalize_cli(cli: CliInfo) -> CliInfo:
+    if cli.name == "gemini":
+        # Antigravity 설치 환경마다 launcher 이름이 달라질 수 있어 실제 발견된 binary로 고정한다.
+        for binary in cli.binaries:
+            if shutil.which(binary):
+                return CliInfo(name=cli.name, binaries=(binary,), invoke=cli.invoke)
+        return cli
     if cli.name != "codex" or not shutil.which("codex"):
         return cli
     if _codex_supports("exec"):
