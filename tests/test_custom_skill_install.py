@@ -299,6 +299,9 @@ def test_android_upstream_skills_are_not_installed_or_vendored(tmp_path: Path) -
     assert "chrisbanes_skills" not in kit
     bootstrap = (project / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8")
     assert "missing local <group>: <skill>" in bootstrap
+    android_profile = (project / ".agent-flow" / "profiles" / "android.yaml").read_text(encoding="utf-8")
+    assert "source: https://github.com/android/skills" in android_profile
+    assert "source: https://github.com/chrisbanes/skills/tree/main/skills" in android_profile
 
 
 def test_android_skill_policy_is_active_host_local_only() -> None:
