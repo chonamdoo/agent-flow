@@ -20,7 +20,7 @@ Use this as the common implementation discipline. Do not score it. Apply it as a
   - TypeScript/TSX files (`*.ts`, `*.tsx`): apply `typescript-development-guide`.
   - React Web, Next.js, or TSX component/hook/rendering/accessibility changes: apply `react-development-guide`.
   - React Native, Expo, Metro, navigation, permissions, native bridge, or RN app UI changes: apply `react-native-development-guide`.
-  - Android, Kotlin, Jetpack Compose, or KMP files: apply the relevant chrisbanes skill.
+  - Android, Kotlin, Jetpack Compose, or KMP files: apply the relevant Android profile `android_skills` and `chrisbanes_skills` entries.
 
 ## During Implementation
 

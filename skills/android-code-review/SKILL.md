@@ -11,11 +11,11 @@ description: |
 Review only changed behavior unless the user asks for a broader audit. Read the
 diff and relevant existing patterns directly before deciding.
 
-## chrisbanes Skills
+## Android Profile Skills
 
-For Android/Kotlin/Compose/KMP diffs, read the matching locally installed
-chrisbanes skill file as plain text before approving. Use these skill names as
-checklist labels:
+For Android/Kotlin/Compose/KMP diffs, read matching entries from the Android
+profile's `android_skills` and `chrisbanes_skills` as plain text before
+approving. Use these chrisbanes skill names as checklist labels:
 
 - Compose state/effects: `compose-state-authoring`, `compose-state-hoisting`,
   `compose-state-holder-ui-split`, `compose-side-effects`
@@ -28,10 +28,12 @@ checklist labels:
   `kotlin-flow-state-event-modeling`, `kotlin-types-value-class`
 - KMP: `kotlin-multiplatform-expect-actual`
 
-Do not parse upstream frontmatter through the native skill loader. If a local
-skill file is missing, unreadable, or raises `mapping values are not allowed in
-this context`, record `no content: <skill>` under Verification Gaps and continue
-with the bundled references below.
+Do not parse upstream frontmatter through the native skill loader. For
+`android_skills`, read `.agent-flow/vendor/android-skills/`. For
+`chrisbanes_skills`, use the first readable configured path and fallback to
+`.agent-flow/vendor/chrisbanes-skills/skills/`. If a file is missing or
+unreadable, record the gap under Verification Gaps and continue with the bundled
+references below.
 
 ## Review Order
 

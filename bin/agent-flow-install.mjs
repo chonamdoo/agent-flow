@@ -11,6 +11,7 @@
 import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
+import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
@@ -19,6 +20,8 @@ const REQUESTED_PROJECT = process.cwd();
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
 const PROJECT = resolveInstallProject(REQUESTED_PROJECT);
 const AF_DIR = path.join(PROJECT, ".agent-flow");
+const ANDROID_SKILLS_REPO = "https://github.com/android/skills.git";
+const CHRISBANES_SKILLS_REPO = "https://github.com/chrisbanes/skills.git";
 
 function ensureDir(p) {
   fs.mkdirSync(p, { recursive: true });
@@ -210,6 +213,130 @@ function copySkillDir(src, dest) {
   if (!fs.existsSync(src)) return "missing-source";
   const r = copyDir(src, dest);
   return `copied:${r.written}:${r.skipped}`;
+}
+
+function installAndroidSkillsVendor(profile) {
+  if (profile !== "android") return { status: "skipped", reason: "profile-not-android" };
+  if (process.argv.includes("--without-android-skills") || process.env.AGENT_FLOW_SKIP_ANDROID_SKILLS === "1") {
+    return { status: "skipped", reason: "disabled" };
+  }
+  const vendorDir = path.join(AF_DIR, "vendor", "android-skills");
+  const markerPath = path.join(vendorDir, ".agent-flow-managed.json");
+  const sourceDir = process.env.AGENT_FLOW_ANDROID_SKILLS_SOURCE_DIR;
+  let tempRoot = null;
+  try {
+    tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agent-flow-android-skills-"));
+    const checkoutDir = sourceDir ? path.resolve(sourceDir) : path.join(tempRoot, "repo");
+    if (!sourceDir) {
+      const clone = spawnSync("git", ["clone", "--depth", "1", ANDROID_SKILLS_REPO, checkoutDir], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 60_000,
+      });
+      if (clone.error || clone.status !== 0) {
+        const detail = clone.error?.message || clone.stderr?.trim() || `exit ${clone.status}`;
+        return { status: "unavailable", source: ANDROID_SKILLS_REPO, reason: detail };
+      }
+    }
+    if (!fs.existsSync(checkoutDir)) {
+      return { status: "unavailable", source: sourceDir ?? ANDROID_SKILLS_REPO, reason: "missing-source" };
+    }
+    if (fs.existsSync(vendorDir) && !fs.existsSync(markerPath)) {
+      return { status: "skipped-existing", source: sourceDir ?? ANDROID_SKILLS_REPO, path: path.relative(PROJECT, vendorDir) };
+    }
+    fs.rmSync(vendorDir, { recursive: true, force: true });
+    copyExternalVendorDir(checkoutDir, vendorDir);
+    const commit = sourceDir ? null : gitOutput(checkoutDir, ["rev-parse", "HEAD"]);
+    const payload = {
+      status: "installed",
+      source: sourceDir ?? ANDROID_SKILLS_REPO,
+      path: path.relative(PROJECT, vendorDir),
+      commit,
+      skills: countSkillFiles(vendorDir),
+      native_loader: false,
+    };
+    fs.writeFileSync(markerPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+    return payload;
+  } catch (error) {
+    return { status: "unavailable", source: sourceDir ?? ANDROID_SKILLS_REPO, reason: error.message };
+  } finally {
+    if (tempRoot) {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  }
+}
+
+function installChrisbanesSkillsVendor(profile) {
+  if (profile !== "android") return { status: "skipped", reason: "profile-not-android" };
+  if (process.argv.includes("--without-chrisbanes-skills") || process.env.AGENT_FLOW_SKIP_CHRISBANES_SKILLS === "1") {
+    return { status: "skipped", reason: "disabled" };
+  }
+  const vendorDir = path.join(AF_DIR, "vendor", "chrisbanes-skills");
+  const markerPath = path.join(vendorDir, ".agent-flow-managed.json");
+  const sourceDir = process.env.AGENT_FLOW_CHRISBANES_SKILLS_SOURCE_DIR;
+  let tempRoot = null;
+  try {
+    tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agent-flow-chrisbanes-skills-"));
+    const checkoutDir = sourceDir ? path.resolve(sourceDir) : path.join(tempRoot, "repo");
+    if (!sourceDir) {
+      const clone = spawnSync("git", ["clone", "--depth", "1", CHRISBANES_SKILLS_REPO, checkoutDir], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 60_000,
+      });
+      if (clone.error || clone.status !== 0) {
+        const detail = clone.error?.message || clone.stderr?.trim() || `exit ${clone.status}`;
+        return { status: "unavailable", source: CHRISBANES_SKILLS_REPO, reason: detail };
+      }
+    }
+    if (!fs.existsSync(checkoutDir)) {
+      return { status: "unavailable", source: sourceDir ?? CHRISBANES_SKILLS_REPO, reason: "missing-source" };
+    }
+    if (fs.existsSync(vendorDir) && !fs.existsSync(markerPath)) {
+      return { status: "skipped-existing", source: sourceDir ?? CHRISBANES_SKILLS_REPO, path: path.relative(PROJECT, vendorDir) };
+    }
+    fs.rmSync(vendorDir, { recursive: true, force: true });
+    copyExternalVendorDir(checkoutDir, vendorDir);
+    const commit = sourceDir ? null : gitOutput(checkoutDir, ["rev-parse", "HEAD"]);
+    const payload = {
+      status: "installed",
+      source: sourceDir ?? CHRISBANES_SKILLS_REPO,
+      path: path.relative(PROJECT, vendorDir),
+      commit,
+      skills: countSkillFiles(path.join(vendorDir, "skills")),
+      native_loader: false,
+    };
+    fs.writeFileSync(markerPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+    return payload;
+  } catch (error) {
+    return { status: "unavailable", source: sourceDir ?? CHRISBANES_SKILLS_REPO, reason: error.message };
+  } finally {
+    if (tempRoot) {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  }
+}
+
+function copyExternalVendorDir(src, dest) {
+  ensureDir(dest);
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    if (entry.name === ".git") continue;
+    const srcPath = path.join(src, entry.name);
+    const destPath = path.join(dest, entry.name);
+    if (entry.isDirectory()) copyExternalVendorDir(srcPath, destPath);
+    else if (entry.isFile()) fs.copyFileSync(srcPath, destPath);
+  }
+}
+
+function countSkillFiles(root) {
+  if (!fs.existsSync(root)) return 0;
+  let count = 0;
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    const child = path.join(root, entry.name);
+    if (entry.isDirectory()) count += countSkillFiles(child);
+    else if (entry.isFile() && entry.name === "SKILL.md") count += 1;
+  }
+  return count;
 }
 
 function installProjectSkills() {
@@ -511,6 +638,8 @@ function install() {
     path.join(KIT_ROOT, "skills"),
     path.join(AF_DIR, "skills"),
   );
+  const androidSkills = installAndroidSkillsVendor(profile);
+  const chrisbanesSkills = installChrisbanesSkillsVendor(profile);
   const skillIndex = installProjectSkills();
   const workflowsCopied = copyDir(
     path.join(KIT_ROOT, "workflows"),
@@ -582,6 +711,8 @@ function install() {
     templates_copied: templatesCopied,
     codex_agents_copied: codexAgentsCopied,
     context_tree_copied: contextTreeCopied,
+    android_skills: androidSkills,
+    chrisbanes_skills: chrisbanesSkills,
     skill_links: {
       claude: claudeSkillStatus,
       codex: codexSkillStatus,
@@ -608,6 +739,12 @@ function install() {
   console.log(`  skills  : ${skillsCopied.written} written, ${skillsCopied.skipped} skipped`);
   console.log(`  workflows: ${workflowsCopied.written} written, ${workflowsCopied.skipped} skipped`);
   console.log(`  profiles : ${profilesCopied.written} written, ${profilesCopied.skipped} skipped`);
+  if (androidSkills.status !== "skipped") {
+    console.log(`  android skills: ${androidSkills.status}`);
+  }
+  if (chrisbanesSkills.status !== "skipped") {
+    console.log(`  chrisbanes skills: ${chrisbanesSkills.status}`);
+  }
   console.log(`  claude  : agent-flow skill ${claudeSkillStatus}`);
   console.log(`  codex   : agent-flow skill ${codexSkillStatus}`);
   if (kitJson.graphify) {
