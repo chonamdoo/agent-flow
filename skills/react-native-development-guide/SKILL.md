@@ -11,7 +11,7 @@ Use this as a secondary checklist after user request, repo instructions, existin
 
 - Include React Native app code, Expo/RN TSX, navigation, permissions, native bridge boundaries, platform-specific UI, FlatList/ScrollView, keyboard, safe area, accessibility, lifecycle, offline, and smoke flows.
 - Exclude Kotlin/Android native implementation details, iOS native implementation details, and TypeScript language generalities.
-- If native Android/Kotlin/Compose/KMP code changes, apply the relevant chrisbanes skill first.
+- If native Android/Kotlin/Compose/KMP code changes, apply the relevant Android profile `android_skills` and `chrisbanes_skills` entries first.
 
 ## Write
 

@@ -40,20 +40,41 @@ optional:
     - id: "stable angle id"
       prompt: "path (relative to kit root) to the prompt template"
 
-  chrisbanes_skills:
+  android_skills:
     # Optional host-readable Android/Kotlin/Compose/KMP skill routing.
-    # Use exact skill names from https://github.com/chrisbanes/skills/tree/main.
-    source: "https://github.com/chrisbanes/skills/tree/main"
-    local_only: true
+    # Use exact skill paths from https://github.com/android/skills.
+    source: "https://github.com/android/skills"
+    vendor_dir: ".agent-flow/vendor/android-skills"
+    native_loader: false
+    hosts: ["codex", "claude", "antigravity"]
+    search_paths:
+      - ".agent-flow/vendor/android-skills/{skill}/SKILL.md"
+    load_policy:
+      - "read matching vendored upstream skill files as plain text"
+      - "do not copy or link upstream Android skills into native host skill directories"
+      - "if missing or unreadable, record no matching android_skills and continue"
+    implementation:
+      - skill: "exact skill name"
+        when: "trigger condition"
+    review:
+      - skill: "exact skill name"
+        when: "review trigger condition"
+
+  chrisbanes_skills:
+    # Optional host-readable Compose/Kotlin/KMP skill routing.
+    # Use exact skill names from https://github.com/chrisbanes/skills/tree/main/skills.
+    source: "https://github.com/chrisbanes/skills/tree/main/skills"
+    vendor_dir: ".agent-flow/vendor/chrisbanes-skills/skills"
+    native_loader: false
     search_paths:
       - "~/.codex/skills/{skill}/SKILL.md"
       - "~/.claude/skills/{skill}/SKILL.md"
       - "~/.agents/skills/{skill}/SKILL.md"
-      - ".agent-flow/skills/{skill}/SKILL.md"
+      - ".agent-flow/vendor/chrisbanes-skills/skills/{skill}/SKILL.md"
     load_policy:
-      - "read matching local skill files as plain text"
-      - "do not parse upstream frontmatter through the native skill loader"
-      - "if missing or unreadable, record no content for that skill"
+      - "read matching native or vendored skill files as plain text"
+      - "do not load the same skill from multiple host paths"
+      - "if missing or unreadable, record no matching chrisbanes_skills and continue"
     implementation:
       - skill: "exact skill name"
         when: "trigger condition"

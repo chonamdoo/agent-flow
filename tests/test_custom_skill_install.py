@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -18,13 +19,14 @@ def _node() -> str:
     return node
 
 
-def _install(project: Path) -> subprocess.CompletedProcess[str]:
+def _install(project: Path, *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         (_node(), str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"), "install", "--without-graphify"),
         cwd=project,
         text=True,
         capture_output=True,
         check=False,
+        env=env,
     )
 
 
@@ -277,3 +279,41 @@ def test_host_skill_root_symlink_is_skipped_not_written_outside_project(tmp_path
     assert not (outside / "skills" / "demo").exists()
     index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
     assert any(link["status"] == "skipped-host-root-symlink" for link in index["links"])
+
+
+def test_android_upstream_skills_are_vendored_not_native_host_links(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "settings.gradle").write_text("pluginManagement { repositories { google() } }\n", encoding="utf-8")
+
+    android_source = tmp_path / "android-skills-source"
+    (android_source / "system" / "edge-to-edge").mkdir(parents=True)
+    (android_source / "system" / "edge-to-edge" / "SKILL.md").write_text("android edge-to-edge\n", encoding="utf-8")
+
+    chrisbanes_source = tmp_path / "chrisbanes-skills-source"
+    (chrisbanes_source / "skills" / "compose-state-hoisting").mkdir(parents=True)
+    (chrisbanes_source / "skills" / "compose-state-hoisting" / "SKILL.md").write_text("compose state hoisting\n", encoding="utf-8")
+
+    env = {
+        **os.environ,
+        "AGENT_FLOW_ANDROID_SKILLS_SOURCE_DIR": str(android_source),
+        "AGENT_FLOW_CHRISBANES_SKILLS_SOURCE_DIR": str(chrisbanes_source),
+    }
+    result = _install(project, env=env)
+
+    assert result.returncode == 0, result.stderr
+    assert (
+        project / ".agent-flow" / "vendor" / "android-skills" / "system" / "edge-to-edge" / "SKILL.md"
+    ).exists()
+    assert (
+        project / ".agent-flow" / "vendor" / "chrisbanes-skills" / "skills" / "compose-state-hoisting" / "SKILL.md"
+    ).exists()
+    assert not (project / ".codex" / "skills" / "edge-to-edge").exists()
+    assert not (project / ".claude" / "skills" / "edge-to-edge").exists()
+    assert not (project / ".gemini" / "antigravity" / "skills" / "edge-to-edge").exists()
+
+    kit = json.loads((project / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
+    assert kit["android_skills"]["status"] == "installed"
+    assert kit["android_skills"]["native_loader"] is False
+    assert kit["chrisbanes_skills"]["status"] == "installed"
+    assert kit["chrisbanes_skills"]["native_loader"] is False

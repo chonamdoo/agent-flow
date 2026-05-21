@@ -29,24 +29,83 @@ gates:
 review_angles:
   - id: architecture-design
     prompt: templates/_shared/review/architecture-design.md
-  - id: android-chrisbanes
-    prompt: templates/_shared/review/android-chrisbanes.md
+  - id: android-skills
+    prompt: templates/_shared/review/android-skills.md
   - id: compose-stability
     prompt: templates/_shared/review/compose-stability.md
   - id: test-edge
     prompt: templates/_shared/review/test-edge.md
+android_skills:
+  source: https://github.com/android/skills
+  vendor_dir: .agent-flow/vendor/android-skills
+  native_loader: false
+  hosts:
+    - codex
+    - claude
+    - antigravity
+  search_paths:
+    - .agent-flow/vendor/android-skills/{skill}/SKILL.md
+  load_policy:
+    - Android/Kotlin/Compose/KMP 개발 또는 코드 리뷰 전 변경 영역과 맞는 upstream skill을 plain text로 읽는다.
+    - Codex/Claude/Antigravity native skill directory에는 upstream Android skill을 복사하거나 링크하지 않는다.
+    - "`.agent-flow/vendor/android-skills/` 단일 vendor copy를 공통 참조해 host별 중복 노출을 막는다."
+    - 맞는 항목이 없거나 파일이 없으면 `no matching android_skills: <reason>`로 기록하고 계속 진행한다.
+  implementation:
+    - skill: system/edge-to-edge
+      when: system bars, insets, edge-to-edge, status bar, navigation bar, or cutout behavior changes
+    - skill: jetpack-compose/adaptive
+      when: Compose adaptive layout, window size classes, foldables, tablets, or responsive UI changes
+    - skill: navigation/navigation-3
+      when: Jetpack Navigation 3, back stack, or navigation migration work
+    - skill: testing/testing-setup
+      when: Android test setup, Gradle test dependencies, instrumentation, Robolectric, or missing test scaffolding changes
+    - skill: camera/camera1-to-camerax
+      when: Camera1, Camera2, or CameraX migration work
+    - skill: performance/r8-analyzer
+      when: R8, shrinker, minification, obfuscation, mapping, or release size work
+    - skill: profilers/perfetto-trace-analysis
+      when: Perfetto trace, startup, jank, frame timing, or system performance analysis
+    - skill: profilers/perfetto-sql
+      when: Perfetto SQL query or trace metric work
+    - skill: play/play-billing-library-version-upgrade
+      when: Play Billing Library upgrade work
+    - skill: play/engage-sdk-integration
+      when: Google Play Engage SDK integration work
+    - skill: identity/verified-email
+      when: verified email or identity API work
+    - skill: device-ai/appfunctions
+      when: Android app functions or device AI integration work
+    - skill: devtools/android-cli
+      when: Android CLI tooling, adb, emulator, sdkmanager, or command-line build setup changes
+    - skill: xr/display-glasses-with-jetpack-compose-glimmer
+      when: Android XR display glasses or Compose Glimmer work
+  review:
+    - skill: system/edge-to-edge
+      when: reviewing system bars, insets, fullscreen, or edge-to-edge behavior
+    - skill: jetpack-compose/adaptive
+      when: reviewing Compose adaptive UI, tablets, foldables, or responsive layout
+    - skill: navigation/navigation-3
+      when: reviewing navigation graph, back stack, or Navigation 3 migration
+    - skill: testing/testing-setup
+      when: reviewing Android test coverage, test setup, or missing tests
+    - skill: performance/r8-analyzer
+      when: reviewing release shrinker, R8, mapping, or app size risk
+    - skill: profilers/perfetto-trace-analysis
+      when: reviewing performance fixes backed by Perfetto traces
 chrisbanes_skills:
-  source: https://github.com/chrisbanes/skills/tree/main
-  local_only: true
+  source: https://github.com/chrisbanes/skills/tree/main/skills
+  vendor_dir: .agent-flow/vendor/chrisbanes-skills/skills
+  native_loader: false
   search_paths:
     - ~/.codex/skills/{skill}/SKILL.md
     - ~/.claude/skills/{skill}/SKILL.md
     - ~/.agents/skills/{skill}/SKILL.md
-    - .agent-flow/skills/{skill}/SKILL.md
+    - .agent-flow/vendor/chrisbanes-skills/skills/{skill}/SKILL.md
   load_policy:
-    - 변경 영역과 맞는 로컬 설치 skill 파일을 plain text로 읽는다.
-    - upstream frontmatter는 native skill loader로 파싱하지 않는다.
-    - 파일이 없거나 읽을 수 없거나 YAML parse 오류가 나면 `no content: <skill>`로 기록하고 계속 진행한다.
+    - Android/Kotlin/Compose/KMP 개발 또는 코드 리뷰 전 변경 영역과 맞는 chrisbanes skill을 plain text로 읽는다.
+    - host native skill directory에 이미 설치된 경우에도 다른 host 경로를 중복 로드하지 않는다.
+    - "native 경로에 없거나 일부 host에서 누락되면 `.agent-flow/vendor/chrisbanes-skills/skills/`를 fallback으로 읽는다."
+    - 파일이 없거나 읽을 수 없으면 `no matching chrisbanes_skills: <reason>`로 기록하고 계속 진행한다.
   implementation:
     - skill: android-mvi-feature
       when: Compose screen, ViewModel state, or MVI action work
