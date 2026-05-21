@@ -5,17 +5,18 @@ Android profile's `android_skills` and `chrisbanes_skills`.
 
 ## Required routing
 
-Before approving, choose matching entries from both profile lists when relevant:
+Before approving, choose matching entries from both profile lists when relevant.
+Resolve them through the current active host only:
 
-- `android_skills.review`: upstream Android skills from
-  `.agent-flow/vendor/android-skills/`
-- `chrisbanes_skills.review`: Compose/Kotlin skills from the first readable
-  configured path, falling back to `.agent-flow/vendor/chrisbanes-skills/skills/`
+- Codex: `~/.codex/skills/{skill}/SKILL.md`
+- Claude: `~/.claude/skills/{skill}/SKILL.md`
+- Antigravity: `~/.agents/skills/{skill}/SKILL.md`
 
-Read selected `SKILL.md` files as plain text. Do not copy upstream Android
-skills into `.codex/skills`, `.claude/skills`, `.gemini/skills`, or
-`.gemini/antigravity/skills`, and do not load the same skill from multiple host
-paths.
+Read selected `SKILL.md` files as plain text. Do not install, copy, link, or
+vendor Android skills. Do not load the same skill from multiple host paths. If a
+required local skill is missing from the current host path, stop approval and
+report `missing local android_skills: <skill>` or
+`missing local chrisbanes_skills: <skill>` with the profile source URL.
 
 ## Review focus
 
@@ -36,5 +37,5 @@ paths.
 ## Output
 
 Use the standard review angle output. Cite local skill paths used in Calibration.
-If none were readable, cite `no matching android_skills` or
-`no matching chrisbanes_skills`.
+If a required local skill is missing, request changes with the missing skill and
+source URL.

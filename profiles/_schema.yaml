@@ -42,17 +42,19 @@ optional:
 
   android_skills:
     # Optional host-readable Android/Kotlin/Compose/KMP skill routing.
-    # Use exact skill paths from https://github.com/android/skills.
+    # Use exact installed skill names from https://github.com/android/skills.
     source: "https://github.com/android/skills"
-    vendor_dir: ".agent-flow/vendor/android-skills"
-    native_loader: false
-    hosts: ["codex", "claude", "antigravity"]
-    search_paths:
-      - ".agent-flow/vendor/android-skills/{skill}/SKILL.md"
+    install_policy: "never"
+    active_host_only: true
+    load_mode: "plain_text"
+    hosts:
+      codex: "~/.codex/skills/{skill}/SKILL.md"
+      claude: "~/.claude/skills/{skill}/SKILL.md"
+      antigravity: "~/.agents/skills/{skill}/SKILL.md"
     load_policy:
-      - "read matching vendored upstream skill files as plain text"
-      - "do not copy or link upstream Android skills into native host skill directories"
-      - "if missing or unreadable, record no matching android_skills and continue"
+      - "read only matching local skill files for the active host"
+      - "do not install, copy, link, vendor, or fallback to another host path"
+      - "if required local skill is missing, report missing local android_skills and ask the user to install from source"
     implementation:
       - skill: "exact skill name"
         when: "trigger condition"
@@ -64,17 +66,17 @@ optional:
     # Optional host-readable Compose/Kotlin/KMP skill routing.
     # Use exact skill names from https://github.com/chrisbanes/skills/tree/main/skills.
     source: "https://github.com/chrisbanes/skills/tree/main/skills"
-    vendor_dir: ".agent-flow/vendor/chrisbanes-skills/skills"
-    native_loader: false
-    search_paths:
-      - "~/.codex/skills/{skill}/SKILL.md"
-      - "~/.claude/skills/{skill}/SKILL.md"
-      - "~/.agents/skills/{skill}/SKILL.md"
-      - ".agent-flow/vendor/chrisbanes-skills/skills/{skill}/SKILL.md"
+    install_policy: "never"
+    active_host_only: true
+    load_mode: "plain_text"
+    hosts:
+      codex: "~/.codex/skills/{skill}/SKILL.md"
+      claude: "~/.claude/skills/{skill}/SKILL.md"
+      antigravity: "~/.agents/skills/{skill}/SKILL.md"
     load_policy:
-      - "read matching native or vendored skill files as plain text"
-      - "do not load the same skill from multiple host paths"
-      - "if missing or unreadable, record no matching chrisbanes_skills and continue"
+      - "read only matching local skill files for the active host"
+      - "do not install, copy, link, vendor, or fallback to another host path"
+      - "if required local skill is missing, report missing local chrisbanes_skills and ask the user to install from source"
     implementation:
       - skill: "exact skill name"
         when: "trigger condition"

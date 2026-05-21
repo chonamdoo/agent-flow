@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -281,39 +280,60 @@ def test_host_skill_root_symlink_is_skipped_not_written_outside_project(tmp_path
     assert any(link["status"] == "skipped-host-root-symlink" for link in index["links"])
 
 
-def test_android_upstream_skills_are_vendored_not_native_host_links(tmp_path: Path) -> None:
+def test_android_upstream_skills_are_not_installed_or_vendored(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
     (project / "settings.gradle").write_text("pluginManagement { repositories { google() } }\n", encoding="utf-8")
 
-    android_source = tmp_path / "android-skills-source"
-    (android_source / "system" / "edge-to-edge").mkdir(parents=True)
-    (android_source / "system" / "edge-to-edge" / "SKILL.md").write_text("android edge-to-edge\n", encoding="utf-8")
-
-    chrisbanes_source = tmp_path / "chrisbanes-skills-source"
-    (chrisbanes_source / "skills" / "compose-state-hoisting").mkdir(parents=True)
-    (chrisbanes_source / "skills" / "compose-state-hoisting" / "SKILL.md").write_text("compose state hoisting\n", encoding="utf-8")
-
-    env = {
-        **os.environ,
-        "AGENT_FLOW_ANDROID_SKILLS_SOURCE_DIR": str(android_source),
-        "AGENT_FLOW_CHRISBANES_SKILLS_SOURCE_DIR": str(chrisbanes_source),
-    }
-    result = _install(project, env=env)
+    result = _install(project)
 
     assert result.returncode == 0, result.stderr
-    assert (
-        project / ".agent-flow" / "vendor" / "android-skills" / "system" / "edge-to-edge" / "SKILL.md"
-    ).exists()
-    assert (
-        project / ".agent-flow" / "vendor" / "chrisbanes-skills" / "skills" / "compose-state-hoisting" / "SKILL.md"
-    ).exists()
+    assert not (project / ".agent-flow" / "vendor" / "android-skills").exists()
+    assert not (project / ".agent-flow" / "vendor" / "chrisbanes-skills").exists()
     assert not (project / ".codex" / "skills" / "edge-to-edge").exists()
     assert not (project / ".claude" / "skills" / "edge-to-edge").exists()
-    assert not (project / ".gemini" / "antigravity" / "skills" / "edge-to-edge").exists()
+    assert not (project / ".agents" / "skills" / "edge-to-edge").exists()
 
     kit = json.loads((project / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
-    assert kit["android_skills"]["status"] == "installed"
-    assert kit["android_skills"]["native_loader"] is False
-    assert kit["chrisbanes_skills"]["status"] == "installed"
-    assert kit["chrisbanes_skills"]["native_loader"] is False
+    assert "android_skills" not in kit
+    assert "chrisbanes_skills" not in kit
+    bootstrap = (project / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8")
+    assert "missing local <group>: <skill>" in bootstrap
+
+
+def test_android_skill_policy_is_active_host_local_only() -> None:
+    profile_paths = [
+        KIT_ROOT / "profiles" / "android.yaml",
+        KIT_ROOT / "src" / "agent_flow" / "profiles" / "android.yaml",
+    ]
+    policy_paths = [
+        KIT_ROOT / "profiles" / "_schema.yaml",
+        KIT_ROOT / "templates" / "_shared" / "review" / "android-skills.md",
+        KIT_ROOT / "templates" / "_shared" / "review" / "android-chrisbanes.md",
+        KIT_ROOT / "skills" / "android-code-review" / "SKILL.md",
+    ]
+
+    for path in profile_paths:
+        text = path.read_text(encoding="utf-8")
+        assert "install_policy: never" in text
+        assert "active_host_only: true" in text
+        assert "codex: ~/.codex/skills/{skill}/SKILL.md" in text
+        assert "claude: ~/.claude/skills/{skill}/SKILL.md" in text
+        assert "antigravity: ~/.agents/skills/{skill}/SKILL.md" in text
+        assert "missing local android_skills: <skill>" in text
+        assert "missing local chrisbanes_skills: <skill>" in text
+        assert "vendor_dir" not in text
+        assert "native_loader" not in text
+        assert ".agent-flow/vendor" not in text
+
+    for path in policy_paths:
+        text = path.read_text(encoding="utf-8")
+        assert "~/.codex/skills/{skill}/SKILL.md" in text
+        assert "~/.claude/skills/{skill}/SKILL.md" in text
+        assert "~/.agents/skills/{skill}/SKILL.md" in text
+        assert "falling back to" not in text
+        assert ".agent-flow/vendor/android-skills" not in text
+        assert ".agent-flow/vendor/chrisbanes-skills" not in text
+
+    kit_text = (KIT_ROOT / "bin" / "agent-flow-kit.mjs").read_text(encoding="utf-8")
+    assert "missing local <group>: <skill>" in kit_text

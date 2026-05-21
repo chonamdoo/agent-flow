@@ -34,7 +34,7 @@ active run이 있으면 status 출력의 `next_command`를 그대로 실행하�
 - Claude/Codex/Gemini/Antigravity 프로젝트 skill 경로는 leader checkout의 install 결과를 따릅니다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않습니다.
 
 코드 생성·수정 phase에서는 `code-generation-discipline`을 적용합니다. 언어별 guide 선택과 주석 규칙은 `code-generation-discipline`의 Before Starting 체크리스트를 따릅니다.
-Android/Kotlin/Compose/KMP 작업은 Android profile의 `android_skills`와 `chrisbanes_skills`에서 변경 영역과 맞는 항목을 plain text로 먼저 읽습니다. upstream Android skill은 `.agent-flow/vendor/`에서만 공통 참조하고 host native skill directory에는 중복 설치하지 않습니다.
+Android/Kotlin/Compose/KMP 작업은 Android profile의 `android_skills`와 `chrisbanes_skills`에서 변경 영역과 맞는 로컬 설치 skill만 plain text로 먼저 읽습니다. 현재 실행 host의 경로 하나만 사용하고, 다른 host 경로를 중복 로드하지 않습니다. 필요한 skill이 현재 host에 없으면 설치하지 말고 `missing local <group>: <skill>`와 source URL을 사용자에게 알려 설치를 요청합니다.
 
 진행 중인 run은 자동 감지됩니다:
 

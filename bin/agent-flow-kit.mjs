@@ -4,7 +4,6 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
 import process from "node:process";
-import os from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -14,8 +13,6 @@ const HOME = process.env.HOME || process.env.USERPROFILE || "";
 const KIT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const installArgs = process.argv.slice(3);
 const forceManaged = installArgs.includes("--force-managed");
-const ANDROID_SKILLS_REPO = "https://github.com/android/skills.git";
-const CHRISBANES_SKILLS_REPO = "https://github.com/chrisbanes/skills.git";
 let cachedFullFeatureWorkflow = null;
 
 function installProject() {
@@ -74,8 +71,6 @@ function installProject() {
   );
   writeManagedFile(path.join(agentFlowDir, "skills", "push-watch", "SKILL.md"), pushWatchSkillMarkdown());
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "skills"), path.join(agentFlowDir, "skills"), forceManaged);
-  payload.android_skills = installAndroidSkillsVendor(root, agentFlowDir, profile);
-  payload.chrisbanes_skills = installChrisbanesSkillsVendor(root, agentFlowDir, profile);
   const skillIndex = installProjectSkills(root, agentFlowDir, previousSkillIndex);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "scripts"), path.join(root, "scripts"), forceManaged);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "agents"), path.join(root, ".Codex", "agents"), forceManaged);
@@ -832,152 +827,6 @@ function copyBundledDirIfMissingOrSame(src, dest, force = false) {
     const content = fs.readFileSync(srcPath, "utf8");
     writeManagedFileIfMissingOrSame(destPath, content, force);
   }
-}
-
-function installAndroidSkillsVendor(root, agentFlowDir, profile) {
-  if (profile !== "android") {
-    return { status: "skipped", reason: "profile-not-android" };
-  }
-  if (installArgs.includes("--without-android-skills") || process.env.AGENT_FLOW_SKIP_ANDROID_SKILLS === "1") {
-    return { status: "skipped", reason: "disabled" };
-  }
-  const vendorDir = path.join(agentFlowDir, "vendor", "android-skills");
-  const markerPath = path.join(vendorDir, ".agent-flow-managed.json");
-  const sourceDir = process.env.AGENT_FLOW_ANDROID_SKILLS_SOURCE_DIR;
-  let tempRoot = null;
-  try {
-    tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agent-flow-android-skills-"));
-    const checkoutDir = sourceDir ? path.resolve(sourceDir) : path.join(tempRoot, "repo");
-    if (!sourceDir) {
-      const clone = safeSpawnSync("git", ["clone", "--depth", "1", ANDROID_SKILLS_REPO, checkoutDir], {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-        timeout: 60_000,
-      });
-      if (clone.error || clone.status !== 0) {
-        const detail = clone.error?.message || clone.stderr?.trim() || `exit ${clone.status}`;
-        return { status: "unavailable", source: ANDROID_SKILLS_REPO, reason: detail };
-      }
-    }
-    if (!fs.existsSync(checkoutDir)) {
-      return { status: "unavailable", source: sourceDir ?? ANDROID_SKILLS_REPO, reason: "missing-source" };
-    }
-    if (fs.existsSync(vendorDir) && !fs.existsSync(markerPath)) {
-      return {
-        status: "skipped-existing",
-        source: sourceDir ?? ANDROID_SKILLS_REPO,
-        path: path.relative(root, vendorDir),
-      };
-    }
-    fs.rmSync(vendorDir, { recursive: true, force: true });
-    copyExternalVendorDir(checkoutDir, vendorDir);
-    const commit = sourceDir ? null : gitOutput(checkoutDir, ["rev-parse", "HEAD"]);
-    const payload = {
-      status: "installed",
-      source: sourceDir ?? ANDROID_SKILLS_REPO,
-      path: path.relative(root, vendorDir),
-      commit,
-      skills: countSkillFiles(vendorDir),
-      native_loader: false,
-    };
-    fs.writeFileSync(markerPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
-    return payload;
-  } catch (error) {
-    return { status: "unavailable", source: sourceDir ?? ANDROID_SKILLS_REPO, reason: error.message };
-  } finally {
-    if (tempRoot) {
-      fs.rmSync(tempRoot, { recursive: true, force: true });
-    }
-  }
-}
-
-function installChrisbanesSkillsVendor(root, agentFlowDir, profile) {
-  if (profile !== "android") {
-    return { status: "skipped", reason: "profile-not-android" };
-  }
-  if (installArgs.includes("--without-chrisbanes-skills") || process.env.AGENT_FLOW_SKIP_CHRISBANES_SKILLS === "1") {
-    return { status: "skipped", reason: "disabled" };
-  }
-  const vendorDir = path.join(agentFlowDir, "vendor", "chrisbanes-skills");
-  const markerPath = path.join(vendorDir, ".agent-flow-managed.json");
-  const sourceDir = process.env.AGENT_FLOW_CHRISBANES_SKILLS_SOURCE_DIR;
-  let tempRoot = null;
-  try {
-    tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agent-flow-chrisbanes-skills-"));
-    const checkoutDir = sourceDir ? path.resolve(sourceDir) : path.join(tempRoot, "repo");
-    if (!sourceDir) {
-      const clone = safeSpawnSync("git", ["clone", "--depth", "1", CHRISBANES_SKILLS_REPO, checkoutDir], {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-        timeout: 60_000,
-      });
-      if (clone.error || clone.status !== 0) {
-        const detail = clone.error?.message || clone.stderr?.trim() || `exit ${clone.status}`;
-        return { status: "unavailable", source: CHRISBANES_SKILLS_REPO, reason: detail };
-      }
-    }
-    if (!fs.existsSync(checkoutDir)) {
-      return { status: "unavailable", source: sourceDir ?? CHRISBANES_SKILLS_REPO, reason: "missing-source" };
-    }
-    if (fs.existsSync(vendorDir) && !fs.existsSync(markerPath)) {
-      return {
-        status: "skipped-existing",
-        source: sourceDir ?? CHRISBANES_SKILLS_REPO,
-        path: path.relative(root, vendorDir),
-      };
-    }
-    fs.rmSync(vendorDir, { recursive: true, force: true });
-    copyExternalVendorDir(checkoutDir, vendorDir);
-    const commit = sourceDir ? null : gitOutput(checkoutDir, ["rev-parse", "HEAD"]);
-    const payload = {
-      status: "installed",
-      source: sourceDir ?? CHRISBANES_SKILLS_REPO,
-      path: path.relative(root, vendorDir),
-      commit,
-      skills: countSkillFiles(path.join(vendorDir, "skills")),
-      native_loader: false,
-    };
-    fs.writeFileSync(markerPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
-    return payload;
-  } catch (error) {
-    return { status: "unavailable", source: sourceDir ?? CHRISBANES_SKILLS_REPO, reason: error.message };
-  } finally {
-    if (tempRoot) {
-      fs.rmSync(tempRoot, { recursive: true, force: true });
-    }
-  }
-}
-
-function copyExternalVendorDir(src, dest) {
-  fs.mkdirSync(dest, { recursive: true });
-  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
-    if (entry.name === ".git") {
-      continue;
-    }
-    const srcPath = path.join(src, entry.name);
-    const destPath = path.join(dest, entry.name);
-    if (entry.isDirectory()) {
-      copyExternalVendorDir(srcPath, destPath);
-    } else if (entry.isFile()) {
-      fs.copyFileSync(srcPath, destPath);
-    }
-  }
-}
-
-function countSkillFiles(root) {
-  if (!fs.existsSync(root)) {
-    return 0;
-  }
-  let count = 0;
-  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
-    const child = path.join(root, entry.name);
-    if (entry.isDirectory()) {
-      count += countSkillFiles(child);
-    } else if (entry.isFile() && entry.name === "SKILL.md") {
-      count += 1;
-    }
-  }
-  return count;
 }
 
 function installProjectSkills(root, agentFlowDir, previousIndex) {
@@ -2026,7 +1875,7 @@ Follow the CLI output exactly. Git projects start inside \`.agent-flow/worktrees
 - Claude/Codex/Gemini/Antigravity 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.
 
 During code generation and modification phases, apply \`code-generation-discipline\`. Language-specific guide and comment rules follow the \`code-generation-discipline\` Before Starting checklist.
-For Android/Kotlin/Compose/KMP work, read matching entries from the Android profile's \`android_skills\` and \`chrisbanes_skills\` as plain text before implementation or review. Upstream Android skills live under \`.agent-flow/vendor/\` and must not be copied or linked into host-native skill directories, so Codex, Claude, and Antigravity do not show duplicate skills.
+For Android/Kotlin/Compose/KMP work, read only the matching local skill files from the Android profile's \`android_skills\` and \`chrisbanes_skills\` for the active host. Do not install, copy, link, or load duplicate skills from other host directories. If a required local skill is missing, report \`missing local <group>: <skill>\` with the profile source URL and ask the user to install it.
 `;
 }
 

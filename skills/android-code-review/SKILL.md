@@ -28,12 +28,17 @@ approving. Use these chrisbanes skill names as checklist labels:
   `kotlin-flow-state-event-modeling`, `kotlin-types-value-class`
 - KMP: `kotlin-multiplatform-expect-actual`
 
-Do not parse upstream frontmatter through the native skill loader. For
-`android_skills`, read `.agent-flow/vendor/android-skills/`. For
-`chrisbanes_skills`, use the first readable configured path and fallback to
-`.agent-flow/vendor/chrisbanes-skills/skills/`. If a file is missing or
-unreadable, record the gap under Verification Gaps and continue with the bundled
-references below.
+Do not parse upstream frontmatter through the native skill loader. Resolve
+skills through the current active host only:
+
+- Codex: `~/.codex/skills/{skill}/SKILL.md`
+- Claude: `~/.claude/skills/{skill}/SKILL.md`
+- Antigravity: `~/.agents/skills/{skill}/SKILL.md`
+
+Do not install, copy, link, vendor, or fallback to another host path. If a
+required local skill is missing, stop approval and report
+`missing local android_skills: <skill>` or
+`missing local chrisbanes_skills: <skill>` with the profile source URL.
 
 ## Review Order
 
