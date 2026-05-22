@@ -169,9 +169,23 @@ class Runner:
         while phase_index < len(self.phases):
             phase = self.phases[phase_index]
             if self._has_artifact(phase):
+                artifact = self._existing_artifact_path(phase)
+                blocked_reason = self._artifact_block_reason(artifact)
+                if blocked_reason:
+                    print(
+                        f"\n═══ phase '{phase.id}' is blocked. "
+                        f"{blocked_reason}. Update the artifact, then "
+                        f"`{self.next_command}`. ═══"
+                    )
+                    self._print_structured_status(
+                        status="blocked",
+                        phase=phase,
+                        reason=blocked_reason,
+                        required_artifact=artifact,
+                    )
+                    return
                 missing_markers = self._missing_required_markers(phase)
                 if missing_markers:
-                    artifact = self._existing_artifact_path(phase)
                     print(
                         f"\n═══ phase '{phase.id}' is blocked. "
                         f"Artifact is missing completion markers: "
@@ -253,6 +267,21 @@ class Runner:
                     phase=phase,
                     reason="missing_phase_artifact",
                     required_artifact=self._artifact_path(phase),
+                )
+                return
+            artifact = self._existing_artifact_path(phase)
+            blocked_reason = self._artifact_block_reason(artifact)
+            if blocked_reason:
+                print(
+                    f"\n═══ phase '{phase.id}' is blocked. "
+                    f"{blocked_reason}. Update the artifact, then "
+                    f"`{self.next_command}`. ═══"
+                )
+                self._print_structured_status(
+                    status="blocked",
+                    phase=phase,
+                    reason=blocked_reason,
+                    required_artifact=artifact,
                 )
                 return
             missing_markers = self._missing_required_markers(phase)
@@ -441,7 +470,7 @@ class Runner:
             return []
         if (
             getattr(self, "_adapter_name", "") == "generic"
-            and os.environ.get("AGENT_FLOW_GENERIC_MODE", "stub") == "stub"
+            and os.environ.get("AGENT_FLOW_GENERIC_MODE") == "stub-success"
         ):
             return []
         assert self.run_dir is not None
@@ -469,6 +498,17 @@ class Runner:
         if legacy_artifact.exists():
             return legacy_artifact
         return artifact
+
+    def _artifact_block_reason(self, artifact: Path) -> str | None:
+        if not artifact.exists():
+            return None
+        text = artifact.read_text(encoding="utf-8")
+        if (
+            "_stub artifact written by GenericAdapter (stub mode)._" in text
+            and os.environ.get("AGENT_FLOW_GENERIC_MODE") != "stub-success"
+        ):
+            return "generic_stub_artifact"
+        return None
 
     def _has_artifact(self, phase: Phase) -> bool:
         return self._artifact_path(phase).exists() or self._legacy_artifact_path(phase).exists()

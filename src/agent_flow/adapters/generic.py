@@ -1,14 +1,18 @@
 """Generic fallback adapter.
 
-Two modes selectable via env var:
+환경 변수로 세 동작을 고른다.
 
-  AGENT_FLOW_GENERIC_MODE=stub  (default for tests)
-    Stubs the artifact and returns True so the loop advances. Useful for
-    smoke tests of the runner state machine.
+  AGENT_FLOW_GENERIC_MODE=emit  (기본값)
+    프롬프트만 출력하고 False를 반환한다. 사람 또는 외부 AI가 artifact를
+    작성한 뒤 status의 `next_command`를 따라야 한다.
 
-  AGENT_FLOW_GENERIC_MODE=emit
-    Prints the prompt to stdout and returns False, expecting a human (or
-    untracked AI) to write the artifact and follow status `next_command`.
+  AGENT_FLOW_GENERIC_MODE=stub
+    blocked stub artifact를 쓰고 True를 반환한다. runner는 workflow를
+    진행하지 않고 degraded/blocked phase로 보고한다.
+
+  AGENT_FLOW_GENERIC_MODE=stub-success
+    기존 smoke test 전용 모드다. AI host 없이 state machine을 검증할 때만
+    artifact를 성공 처리한다.
 """
 from __future__ import annotations
 
@@ -30,7 +34,8 @@ class GenericAdapter(Adapter):
                       "`next_command`.",
         )
         print(prompt)
-        if os.environ.get("AGENT_FLOW_GENERIC_MODE", "stub") == "stub":
+        mode = os.environ.get("AGENT_FLOW_GENERIC_MODE", "emit")
+        if mode == "stub-success":
             artifact = self.artifact_path(phase, run_dir)
             if not artifact.exists():
                 if getattr(phase, "multi_review", False):
@@ -52,4 +57,31 @@ class GenericAdapter(Adapter):
                     f"_stub artifact written by GenericAdapter (stub mode)._\n"
                 )
             return True
+        if getattr(phase, "multi_review", False):
+            self._write_blocked_stub(
+                phase,
+                run_dir,
+                reason="No AI host detected; active-host reviewer sub-agents are unavailable.",
+            )
+            return True
+        if mode == "stub":
+            self._write_blocked_stub(
+                phase,
+                run_dir,
+                reason="GenericAdapter stub mode cannot complete workflow phases.",
+            )
+            return True
         return False
+
+    def _write_blocked_stub(self, phase, run_dir: Path, *, reason: str) -> None:
+        artifact = self.artifact_path(phase, run_dir)
+        if artifact.exists():
+            return
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text(
+            f"# {phase.id}\n\n"
+            "status: blocked\n"
+            f"reason: {reason}\n\n"
+            "_stub artifact written by GenericAdapter (stub mode)._\n",
+            encoding="utf-8",
+        )

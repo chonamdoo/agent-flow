@@ -917,7 +917,11 @@ class CliTest(unittest.TestCase):
             root = Path(temp_dir) / "project"
             root.mkdir()
             _init_git_repo(root)
-            self.assertEqual(main(["run", "slice", "--root", str(root)]), 0)
+            with mock.patch.dict(os.environ, {
+                "AGENT_FLOW_ADAPTER": "generic",
+                "AGENT_FLOW_GENERIC_MODE": "stub-success",
+            }):
+                self.assertEqual(main(["run", "slice", "--root", str(root)]), 0)
             worktree = root / ".agent-flow" / "worktrees" / "feat-slice"
             self.assertTrue((worktree / ".git").exists())
 

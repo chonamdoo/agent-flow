@@ -16,6 +16,8 @@ Design points:
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -54,6 +56,7 @@ async def _run_one(job: SubprocessJob) -> SubprocessResult:
             cwd=str(job.cwd),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
     except FileNotFoundError as e:
         return SubprocessResult(
@@ -80,11 +83,7 @@ async def _run_one(job: SubprocessJob) -> SubprocessResult:
             duration_s=time.monotonic() - started,
         )
     except asyncio.TimeoutError:
-        # Soft kill, then drain to release pipes.
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
+        _kill_process_tree(proc)
         try:
             stdout, stderr = await proc.communicate()
             captured_out = stdout.decode("utf-8", errors="replace")
@@ -99,6 +98,19 @@ async def _run_one(job: SubprocessJob) -> SubprocessResult:
             timed_out=True,
             duration_s=time.monotonic() - started,
         )
+
+
+def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
+    pid = proc.pid
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    except OSError:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
 
 
 async def run_parallel_async(jobs: Sequence[SubprocessJob]) -> list[SubprocessResult]:

@@ -27,8 +27,20 @@ KIT_ROOT = Path(__file__).resolve().parent.parent
 
 def _run_cli(args: list[str], cwd: Path, env_extra: dict | None = None):
     env = os.environ.copy()
+    for key in tuple(env):
+        if key.startswith("AGENT_FLOW_") or key in {
+            "CLAUDECODE",
+            "CLAUDE_CLI",
+            "CODEX_CLI",
+            "ANTIGRAVITY_CLI",
+            "ANTIGRAVITY_HOME",
+            "GEMINI_CLI",
+            "GEMINI_HOME",
+        }:
+            env.pop(key, None)
     env["PYTHONPATH"] = str(KIT_ROOT / "src")
     env["AGENT_FLOW_ADAPTER"] = "generic"
+    env["AGENT_FLOW_GENERIC_MODE"] = "stub-success"
     if env_extra:
         env.update(env_extra)
     return subprocess.run(
@@ -93,6 +105,34 @@ def test_full_cycle(tmp_path: Path):
     for a in expected_post:
         assert (run_dir / f"{a}.md").exists(), f"missing post-pause: {a}"
     assert not (run_dir / "active").exists()
+
+
+def test_generic_stub_mode_blocks_instead_of_completing(tmp_path: Path):
+    project = tmp_path / "stub-blocked"
+    project.mkdir()
+
+    result = _run_cli(
+        ["run", "test feature"],
+        project,
+        env_extra={"AGENT_FLOW_GENERIC_MODE": "stub"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "generic_stub_artifact" in result.stdout
+    runs = list((project / ".agent-flow" / "runs").iterdir())
+    assert len(runs) == 1
+    run_dir = runs[0]
+    assert (run_dir / "active").exists()
+    assert (run_dir / "design.md").exists()
+    assert not (run_dir / "slice-plan.md").exists()
+
+    status = _run_cli(
+        ["status"],
+        project,
+        env_extra={"AGENT_FLOW_GENERIC_MODE": "stub"},
+    )
+    assert status.returncode == 0
+    assert "reason: generic_stub_artifact" in status.stdout
 
 
 def test_no_active_run(tmp_path: Path):

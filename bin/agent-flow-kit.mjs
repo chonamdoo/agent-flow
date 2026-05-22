@@ -608,6 +608,10 @@ function assertInstalled(root) {
   if (missing.length > 0) {
     throw new Error(`agent-flow is not installed. run: agent-flow-kit install`);
   }
+  const codeReviewer = path.join(root, ".Codex", "agents", "code-reviewer.md");
+  if (!fs.readFileSync(codeReviewer, "utf8").trim()) {
+    throw new Error("agent-flow is not installed correctly: .Codex/agents/code-reviewer.md is empty");
+  }
 }
 
 function normalizeRunState(root, state) {

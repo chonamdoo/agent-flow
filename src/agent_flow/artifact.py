@@ -63,17 +63,21 @@ class ActiveRun:
             structured_status = "awaiting_host"
             reason = "missing_phase_artifact"
         elif required_artifact is not None:
-            missing_markers = _missing_completion_markers(
-                self.path,
-                self.workflow,
-                current_phase,
-            )
             structured_status = "blocked"
-            reason = (
-                "missing_completion_markers"
-                if missing_markers
-                else "phase_artifact_written_continue_required"
-            )
+            stub_reason = _artifact_block_reason(required_artifact)
+            if stub_reason:
+                reason = stub_reason
+            else:
+                missing_markers = _missing_completion_markers(
+                    self.path,
+                    self.workflow,
+                    current_phase,
+                )
+                reason = (
+                    "missing_completion_markers"
+                    if missing_markers
+                    else "phase_artifact_written_continue_required"
+                )
         payload = {
             "status": structured_status,
             "run": f"{self.workflow}/{self.run_id}",
@@ -299,3 +303,12 @@ def _missing_markers(text: str, markers: tuple[str, ...]) -> list[str]:
 
 def _status_value(value: object) -> str:
     return str(value).replace("\r", "\\r").replace("\n", "\\n")
+
+
+def _artifact_block_reason(artifact: Path) -> str | None:
+    if not artifact.exists():
+        return None
+    text = artifact.read_text(encoding="utf-8")
+    if "_stub artifact written by GenericAdapter (stub mode)._" in text:
+        return "generic_stub_artifact"
+    return None
