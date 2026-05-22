@@ -20,18 +20,11 @@ phases:
       - "context_docs_checked: true"
       - "context_docs_updated: true|not_needed"
     prompt: |
-      Run the internal grill-with-docs skill. Ask one question at a time unless
-      the codebase or docs already answer it. Challenge terms against CONTEXT.md
-      and ADRs, sharpen fuzzy language, stress-test domain relationships with
-      concrete scenarios, cross-check user claims against code, update CONTEXT.md
-      inline when terms are resolved, create docs lazily, and offer ADRs only for
-      hard-to-reverse, surprising trade-off decisions. Before completion,
-      normalize the output into a compact domain map and keep expanded detail in
-      .Codex/rules/context/ instead of hot CONTEXT.md.
+      Run `.agent-flow/skills/domain-grill/SKILL.md` exactly as written, using its linked
+      `CONTEXT-FORMAT.md` and `ADR-FORMAT.md`.
 
-      Do not complete this phase while unresolved questions remain. Only after
-      the one-question-at-a-time interview reaches shared understanding, end
-      domain-grill.md with a `## Completion Gate` section:
+      Write the session result to domain-grill.md. When shared understanding is
+      reached, end with a `## Completion Gate` section:
 
           ## Completion Gate
           grill-with-docs: complete
