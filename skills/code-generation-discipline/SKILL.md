@@ -15,12 +15,13 @@ Use this as the common implementation discipline. Do not score it. Apply it as a
 - Choose the smallest code path that can satisfy the request.
 - Define the verification command or observable check before editing.
 - For agent-flow user-facing updates, default to short Korean and keep code, commands, paths, and identifiers in English.
-- Select language-specific support only for files you will touch:
-  - Python files (`*.py`): apply `python-development-guide`.
-  - TypeScript/TSX files (`*.ts`, `*.tsx`): apply `typescript-development-guide`.
-  - React Web, Next.js, or TSX component/hook/rendering/accessibility changes: apply `react-development-guide`.
-  - React Native, Expo, Metro, navigation, permissions, native bridge, or RN app UI changes: apply `react-native-development-guide`.
-  - Android, Kotlin, Jetpack Compose, or KMP files: apply the relevant Android profile `android_skills` and `chrisbanes_skills` entries.
+- For code generation, modification, and code review, identify every language/framework touched and read all matching local skill files before writing or judging code:
+  - Python files (`*.py`): read `python-development-guide`.
+  - TypeScript/TSX files (`*.ts`, `*.tsx`): read `typescript-development-guide`.
+  - React Web, Next.js, or TSX component/hook/rendering/accessibility changes: read `react-development-guide`.
+  - React Native, Expo, Metro, navigation, permissions, native bridge, or RN app UI changes: read `react-native-development-guide`.
+  - Android, Kotlin, Jetpack Compose, or KMP files: read every relevant local skill from the active Android profile's `android_skills` and `chrisbanes_skills`.
+- If a required language/framework skill is not installed at the active host path, report `missing local <group>: <skill>` with the configured source URL and do not proceed until the user installs it or explicitly overrides.
 
 ## During Implementation
 
@@ -28,7 +29,7 @@ Use this as the common implementation discipline. Do not score it. Apply it as a
 - Do not add unrelated refactors, formatting churn, docs, or error handling.
 - Prefer existing local patterns and helpers over new abstractions.
 - Add a new abstraction only when it removes real duplication or matches an existing pattern.
-- Use the selected language-specific guide as a secondary checklist. Repo patterns and task scope stay first.
+- Use the selected language-specific guides as secondary checklists. Repo patterns and task scope stay first.
 - Every new or modified code block must include Korean comments. Do not leave English comments in changed code.
 - Remove unused imports, variables, functions, and files created by the change.
 

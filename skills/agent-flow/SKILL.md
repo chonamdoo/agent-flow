@@ -40,6 +40,6 @@ agent-flow status
 - On a new session, always check `agent-flow status` first and continue from that result.
 - After a phase writes its artifact, run the `next_command` printed by status or the current phase output.
 - If the workflow pauses for design or slice review, summarize the relevant artifact and wait for user approval before continuing.
-- During code generation and modification phases, apply `code-generation-discipline`. Language-specific guide and comment rules follow the `code-generation-discipline` Before Starting checklist.
+- During code generation, modification, and code review phases, apply `code-generation-discipline`. Read every matching language/framework skill before writing or judging code. If a required local skill is missing, report it and wait for install or explicit override.
 - Keep user-facing replies short Korean by default. Keep code, commands, paths, and identifiers in English.
 - Do not paste long logs or whole files. Summarize only current phase, action, `next_command`, and blocker when useful.

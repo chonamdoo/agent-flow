@@ -101,6 +101,7 @@ for (const rel of fullFeatureWorkflowCopies) {
   assertFile(rel);
   assertContains(rel, "id: domain-grill");
   assertContains(rel, "context_docs_updated: true|not_needed");
+  assertContains(rel, "skills_checked: true");
   assertContains(rel, "Default reviewers are active-host sub-agents");
   assertContains(rel, "Gemini sub-agent in Gemini");
   assertContains(rel, "reviewer-source: sub-agent");
@@ -124,6 +125,7 @@ assertContains("workflows/default.yaml", "verdict: approve");
 assertContains("workflows/default.yaml", "verdict: request-changes");
 if (CHECK_INSTALLED_COPY) {
   assertContains(".agent-flow/prompts/multi-review.md", "Default reviewers are active-host sub-agents");
+  assertContains(".agent-flow/prompts/multi-review.md", "skills_checked: true");
   assertContains(".agent-flow/prompts/multi-review.md", "Gemini sub-agent in Gemini");
   assertContains(".agent-flow/prompts/multi-review.md", "reviewer-source: sub-agent");
   assertContains(".agent-flow/prompts/multi-review.md", "close that sub-agent session");
@@ -135,6 +137,9 @@ if (CHECK_INSTALLED_COPY) {
 // skill source와 설치본이 달라지면 다른 프로젝트로 전파될 때 기준이 갈린다.
 if (CHECK_INSTALLED_COPY) {
   assertSame("skills/grill-with-docs/SKILL.md", ".agent-flow/skills/grill-with-docs/SKILL.md");
+  assertSame("skills/domain-grill/SKILL.md", ".agent-flow/skills/domain-grill/SKILL.md");
+  assertSame("skills/domain-grill/CONTEXT-FORMAT.md", ".agent-flow/skills/domain-grill/CONTEXT-FORMAT.md");
+  assertSame("skills/domain-grill/ADR-FORMAT.md", ".agent-flow/skills/domain-grill/ADR-FORMAT.md");
   assertSame("skills/agent-flow/SKILL.md", ".agent-flow/skills/agent-flow/SKILL.md");
   assertSame("skills/code-generation-discipline/SKILL.md", ".agent-flow/skills/code-generation-discipline/SKILL.md");
 }

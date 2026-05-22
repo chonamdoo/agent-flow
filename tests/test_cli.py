@@ -193,9 +193,11 @@ class CliTest(unittest.TestCase):
         phases = {phase["id"]: phase for phase in payload["phases"]}
         self.assertEqual(payload["id"], "full-feature")
         self.assertEqual(phases["domain-grill"]["artifact"], "artifacts/domain-grill.md")
-        self.assertIn("grill-with-docs: complete", phases["domain-grill"]["required_markers"])
+        self.assertIn("domain-grill: complete", phases["domain-grill"]["required_markers"])
         self.assertEqual(phases["red"]["artifact"], "artifacts/red.log")
         self.assertEqual(phases["green"]["artifact"], "artifacts/green.log")
+        for phase_id in ("red", "green", "refactor", "fix-loop", "multi-review", "architecture-review"):
+            self.assertIn("skills_checked: true", phases[phase_id]["required_markers"])
         self.assertEqual(phases["gates"]["artifact"], "artifacts/gate-results.json")
         self.assertEqual(phases["gates"]["routes"]["green"], "multi-review")
 
@@ -1614,7 +1616,7 @@ class CliTest(unittest.TestCase):
             self.assertIn("missing completion markers", missing_markers.stderr)
 
             artifact.write_text(
-                "TODO: add grill-with-docs: complete before handoff\n"
+                "TODO: add domain-grill: complete before handoff\n"
                 "shared_understanding: reached\n",
                 encoding="utf-8",
             )
@@ -1626,10 +1628,10 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(false_positive.returncode, 1)
-            self.assertIn("grill-with-docs: complete", false_positive.stderr)
+            self.assertIn("domain-grill: complete", false_positive.stderr)
 
             artifact.write_text(
-                "grill-with-docs: complete\n"
+                "domain-grill: complete\n"
                 "shared_understanding: reached\n",
                 encoding="utf-8",
             )
@@ -1646,7 +1648,7 @@ class CliTest(unittest.TestCase):
             artifact.write_text(
                 "## Completion Gate\n"
                 "```\n"
-                "grill-with-docs: complete\n"
+                "domain-grill: complete\n"
                 "shared_understanding: reached\n"
                 "```\n",
                 encoding="utf-8",
@@ -1664,7 +1666,7 @@ class CliTest(unittest.TestCase):
             artifact.write_text(
                 "```\n"
                 "## Completion Gate\n"
-                "grill-with-docs: complete\n"
+                "domain-grill: complete\n"
                 "shared_understanding: reached\n"
                 "```\n",
                 encoding="utf-8",
@@ -1682,7 +1684,7 @@ class CliTest(unittest.TestCase):
             artifact.write_text(
                 "notes\n"
                 "    ## Completion Gate\n"
-                "    grill-with-docs: complete\n"
+                "    domain-grill: complete\n"
                 "    shared_understanding: reached\n",
                 encoding="utf-8",
             )
@@ -1698,7 +1700,7 @@ class CliTest(unittest.TestCase):
 
             artifact.write_text(
                 "## Completion Gate\n"
-                "grill-with-docs: complete\n"
+                "domain-grill: complete\n"
                 "shared_understanding: reached\n"
                 "context_docs_checked: true\n"
                 "context_docs_updated: maybe\n",
@@ -1843,7 +1845,7 @@ class CliTest(unittest.TestCase):
                 artifact.parent.mkdir(parents=True, exist_ok=True)
                 if phase == "pr-watch":
                     content = "status: green\n"
-                elif phase in {"plan-review", "architecture-review", "merge-approval"}:
+                elif phase in {"plan-review", "merge-approval"}:
                     content = "verdict: approve\n"
                 else:
                     content = _node_phase_content(phase)
@@ -1947,7 +1949,7 @@ class CliTest(unittest.TestCase):
             ]:
                 artifact = run_dir / _node_phase_artifact(phase)
                 artifact.parent.mkdir(parents=True, exist_ok=True)
-                content = "verdict: approve\n" if phase in {"plan-review", "architecture-review"} else _node_phase_content(phase)
+                content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase)
                 artifact.write_text(content, encoding="utf-8")
                 self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
 
@@ -2146,7 +2148,10 @@ class CliTest(unittest.TestCase):
                 self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
 
             architecture_review = run_dir / _node_phase_artifact("architecture-review")
-            architecture_review.write_text("verdict: request-changes\n", encoding="utf-8")
+            architecture_review.write_text(
+                "verdict: request-changes\n\n## Completion Gate\nskills_checked: true\n",
+                encoding="utf-8",
+            )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=project_root,
@@ -2168,7 +2173,7 @@ class CliTest(unittest.TestCase):
             self.assertEqual(stale_refactor.returncode, 1)
             self.assertIn("blocked: stale artifact", stale_refactor.stderr)
 
-            refactor.write_text("updated refactor\n", encoding="utf-8")
+            refactor.write_text(_node_phase_content("refactor", "updated "), encoding="utf-8")
             self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
             for phase, next_phase in [
                 ("gates", "multi-review"),
@@ -2208,7 +2213,7 @@ class CliTest(unittest.TestCase):
             self.assertEqual(stale_architecture_review.returncode, 1)
             self.assertIn("blocked: stale artifact", stale_architecture_review.stderr)
 
-            architecture_review.write_text("verdict: approve\n", encoding="utf-8")
+            architecture_review.write_text(_node_phase_content("architecture-review"), encoding="utf-8")
             approved = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=project_root,
@@ -2264,7 +2269,7 @@ class CliTest(unittest.TestCase):
             self.assertIn("Current phase: fix-loop", result.stdout)
 
             fix_loop_artifact = run_dir / _node_phase_artifact("fix-loop")
-            fix_loop_artifact.write_text("fix-loop\n", encoding="utf-8")
+            fix_loop_artifact.write_text(_node_phase_content("fix-loop"), encoding="utf-8")
             result = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=project_root,
@@ -2321,11 +2326,12 @@ class CliTest(unittest.TestCase):
             self.assertEqual(state["phase"], "multi-review")
 
             mr_artifact = run_dir / _node_phase_artifact("multi-review")
-            mr_artifact.write_text(
+            mr_artifact.write_text(_with_skills_gate(
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
                 "## Reviewer 2\nreviewer-source: sub-agent\nreviewer-2 verdict: request-changes\n\n"
                 "## Overall\n"
                 "verdict: request-changes\n",
+            ),
                 encoding="utf-8",
             )
             result = subprocess.run(
@@ -2339,7 +2345,7 @@ class CliTest(unittest.TestCase):
             self.assertIn("Current phase: fix-loop", result.stdout)
 
             fix_loop_artifact = run_dir / _node_phase_artifact("fix-loop")
-            fix_loop_artifact.write_text("fix-loop\n", encoding="utf-8")
+            fix_loop_artifact.write_text(_node_phase_content("fix-loop"), encoding="utf-8")
             result = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=project_root,
@@ -2362,11 +2368,12 @@ class CliTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("Current phase: multi-review", result.stdout)
 
-            mr_artifact.write_text(
+            mr_artifact.write_text(_with_skills_gate(
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
                 "## Reviewer 2\nreviewer-source: sub-agent\nreviewer-2 verdict: approve\n\n"
                 "## Overall\n"
                 "verdict: approve\n",
+            ),
                 encoding="utf-8",
             )
             result = subprocess.run(
@@ -2413,14 +2420,14 @@ class CliTest(unittest.TestCase):
                 gates_artifact.write_text('{"passed": false}\n', encoding="utf-8")
                 self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
                 fix_artifact = run_dir / _node_phase_artifact("fix-loop")
-                fix_artifact.write_text(f"fix round {round_num + 1}\n", encoding="utf-8")
+                fix_artifact.write_text(_node_phase_content("fix-loop"), encoding="utf-8")
                 self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
 
             gates_artifact = run_dir / _node_phase_artifact("gates")
             gates_artifact.write_text('{"passed": false}\n', encoding="utf-8")
             self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
             fix_artifact = run_dir / _node_phase_artifact("fix-loop")
-            fix_artifact.write_text("fix round 4\n", encoding="utf-8")
+            fix_artifact.write_text(_node_phase_content("fix-loop"), encoding="utf-8")
             result = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=project_root,
@@ -2460,7 +2467,10 @@ class CliTest(unittest.TestCase):
                 self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
 
             arch_artifact = run_dir / _node_phase_artifact("architecture-review")
-            arch_artifact.write_text("verdict: blocked\n", encoding="utf-8")
+            arch_artifact.write_text(
+                "verdict: blocked\n\n## Completion Gate\nskills_checked: true\n",
+                encoding="utf-8",
+            )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=project_root,
@@ -2500,8 +2510,9 @@ class CliTest(unittest.TestCase):
                 self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
 
             mr_artifact = run_dir / _node_phase_artifact("multi-review")
-            mr_artifact.write_text(
+            mr_artifact.write_text(_with_skills_gate(
                 "reviewer verdict: approve\n## Reviewer\nverdict: approve\nverdict: approve\n",
+            ),
                 encoding="utf-8",
             )
             result = subprocess.run(
@@ -2514,8 +2525,9 @@ class CliTest(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertIn("at least 1 independent sub-agent reviewer verdict", result.stderr)
 
-            mr_artifact.write_text(
+            mr_artifact.write_text(_with_skills_gate(
                 "## Reviewer Notes\nverdict: approve\n\nverdict: approve\n",
+            ),
                 encoding="utf-8",
             )
             result = subprocess.run(
@@ -2528,9 +2540,10 @@ class CliTest(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertIn("at least 1 independent sub-agent reviewer verdict", result.stderr)
 
-            mr_artifact.write_text(
+            mr_artifact.write_text(_with_skills_gate(
                 "## Reviewer 1\nverdict: lgtm\n\n"
                 "verdict: approve\n",
+            ),
                 encoding="utf-8",
             )
             result = subprocess.run(
@@ -2543,9 +2556,10 @@ class CliTest(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertIn("at least 1 independent sub-agent reviewer verdict", result.stderr)
 
-            mr_artifact.write_text(
+            mr_artifact.write_text(_with_skills_gate(
                 "Reviewer verdict: approve\nReviewer verdict: approve\n"
                 "verdict: approve\n",
+            ),
                 encoding="utf-8",
             )
             result = subprocess.run(
@@ -2559,7 +2573,7 @@ class CliTest(unittest.TestCase):
             self.assertIn("at least 1 independent sub-agent reviewer verdict", result.stderr)
 
             for legacy_status in ("verdict: request-changes\n", "status: failed\n", "status: fail\n"):
-                mr_artifact.write_text(legacy_status, encoding="utf-8")
+                mr_artifact.write_text(_with_skills_gate(legacy_status), encoding="utf-8")
                 result = subprocess.run(
                     (node, cli, "run", "advance"),
                     cwd=project_root,
@@ -2580,7 +2594,7 @@ class CliTest(unittest.TestCase):
                 "## Reviewer 1\nsource: sub-agent\nverdict: approve\n\n"
                 "## Overall\nverdict: approve\n",
             ):
-                mr_artifact.write_text(bad_source, encoding="utf-8")
+                mr_artifact.write_text(_with_skills_gate(bad_source), encoding="utf-8")
                 result = subprocess.run(
                     (node, cli, "run", "advance"),
                     cwd=project_root,
@@ -2591,8 +2605,9 @@ class CliTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 1)
                 self.assertIn("at least 1 independent sub-agent reviewer verdict", result.stderr)
 
-            mr_artifact.write_text(
+            mr_artifact.write_text(_with_skills_gate(
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n",
+            ),
                 encoding="utf-8",
             )
             result = subprocess.run(
@@ -2605,8 +2620,9 @@ class CliTest(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertIn("matching reviewer verdicts and overall verdict", result.stderr)
 
-            mr_artifact.write_text(
+            mr_artifact.write_text(_with_skills_gate(
                 "## Reviewer 1\n\nreviewer-source: sub-agent\nverdict: approve\n",
+            ),
                 encoding="utf-8",
             )
             result = subprocess.run(
@@ -2619,8 +2635,9 @@ class CliTest(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertIn("matching reviewer verdicts and overall verdict", result.stderr)
 
-            mr_artifact.write_text(
+            mr_artifact.write_text(_with_skills_gate(
                 "## Reviewer 1\nreviewer-source: sub-agent\n### Findings\nverdict: approve\n",
+            ),
                 encoding="utf-8",
             )
             result = subprocess.run(
@@ -2633,8 +2650,9 @@ class CliTest(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertIn("matching reviewer verdicts and overall verdict", result.stderr)
 
-            mr_artifact.write_text(
+            mr_artifact.write_text(_with_skills_gate(
                 "## Reviewer 1\nreviewer-source: sub-agent\n# Code Review\nverdict: approve\n",
+            ),
                 encoding="utf-8",
             )
             result = subprocess.run(
@@ -2647,9 +2665,10 @@ class CliTest(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertIn("matching reviewer verdicts and overall verdict", result.stderr)
 
-            mr_artifact.write_text(
+            mr_artifact.write_text(_with_skills_gate(
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
                 "## Overall\nstatus: passed\n",
+            ),
                 encoding="utf-8",
             )
             result = subprocess.run(
@@ -2662,9 +2681,10 @@ class CliTest(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertIn("matching reviewer verdicts and overall verdict", result.stderr)
 
-            mr_artifact.write_text(
+            mr_artifact.write_text(_with_skills_gate(
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
                 "## Overall\nverdict: approve\nverdict: request-changes\n",
+            ),
                 encoding="utf-8",
             )
             result = subprocess.run(
@@ -2677,9 +2697,10 @@ class CliTest(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertIn("overall verdict must be approve or request-changes", result.stderr)
 
-            mr_artifact.write_text(
+            mr_artifact.write_text(_with_skills_gate(
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
                 "## Overall\nverdict: request-changes\n\n## Overall\nverdict: approve\n",
+            ),
                 encoding="utf-8",
             )
             result = subprocess.run(
@@ -2692,9 +2713,10 @@ class CliTest(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertIn("overall verdict must be approve or request-changes", result.stderr)
 
-            mr_artifact.write_text(
+            mr_artifact.write_text(_with_skills_gate(
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
                 "## Final\nverdict: approve\n",
+            ),
                 encoding="utf-8",
             )
             result = subprocess.run(
@@ -2707,10 +2729,11 @@ class CliTest(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertIn("matching reviewer verdicts and overall verdict", result.stderr)
 
-            mr_artifact.write_text(
+            mr_artifact.write_text(_with_skills_gate(
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
                 "## Reviewer 2\nreviewer-source: sub-agent\nreviewer-2 verdict: approve\n\n"
                 "## Overall\nverdict: approve\n",
+            ),
                 encoding="utf-8",
             )
             result = subprocess.run(
@@ -3469,7 +3492,7 @@ class CliTest(unittest.TestCase):
             run_dir = next((root / ".agent-flow" / "runs").iterdir())
             (run_dir / "domain-grill.md").write_text(
                 "## Completion Gate\n"
-                "TODO: grill-with-docs: complete\n"
+                "TODO: domain-grill: complete\n"
                 "shared_understanding: reached\n",
                 encoding="utf-8",
             )
@@ -6350,11 +6373,12 @@ def _node_phase_artifact(phase: str) -> Path:
 
 def _node_phase_content(phase: str, prefix: str = "") -> str:
     content = f"{prefix}{phase}\n"
+    skills_gate = "## Completion Gate\nskills_checked: true\n"
     if phase == "domain-grill":
         return (
             content
             + "## Completion Gate\n"
-            + "grill-with-docs: complete\n"
+            + "domain-grill: complete\n"
             + "shared_understanding: reached\n"
             + "context_docs_checked: true\n"
             + "context_docs_updated: not_needed\n"
@@ -6367,8 +6391,18 @@ def _node_phase_content(phase: str, prefix: str = "") -> str:
             "## Reviewer 2\nreviewer-source: sub-agent\nreviewer-2 verdict: approve\n\n"
             "## Overall\n"
             "verdict: approve\n"
+            "\n## Completion Gate\n"
+            "skills_checked: true\n"
         )
+    if phase == "architecture-review":
+        return content + "verdict: approve\n\n" + skills_gate
+    if phase in {"red", "green", "refactor", "fix-loop"}:
+        return content + skills_gate
     return content
+
+
+def _with_skills_gate(content: str) -> str:
+    return f"{content.rstrip()}\n\n## Completion Gate\nskills_checked: true\n"
 
 
 def _node_start_full_feature_at_pr_watch(project_root: Path, node: str, cli: str) -> Path:
@@ -6398,7 +6432,7 @@ def _node_start_full_feature_at_pr_watch(project_root: Path, node: str, cli: str
     ]:
         artifact = run_dir / _node_phase_artifact(phase)
         artifact.parent.mkdir(parents=True, exist_ok=True)
-        content = "verdict: approve\n" if phase in {"plan-review", "architecture-review"} else _node_phase_content(phase)
+        content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase)
         artifact.write_text(content, encoding="utf-8")
         subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=True)
     return run_dir

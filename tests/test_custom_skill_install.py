@@ -61,6 +61,23 @@ def test_project_skill_links_all_hosts_and_index_omits_body(tmp_path: Path) -> N
     assert "BODY SHOULD NOT BE IN INDEX" not in json.dumps(index)
 
 
+def test_bundled_workflow_skills_are_internal_and_only_agent_flow_is_registered(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+
+    result = _install(project)
+
+    assert result.returncode == 0, result.stderr
+    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    assert [skill["name"] for skill in index["skills"]] == ["agent-flow"]
+    assert {link["name"] for link in index["links"]} == {"agent-flow"}
+    assert (project / ".agent-flow" / "skills" / "domain-grill" / "SKILL.md").exists()
+    assert (project / ".agent-flow" / "skills" / "full-feature-workflow" / "SKILL.md").exists()
+    assert not (project / ".codex" / "skills" / "domain-grill").exists()
+    assert not (project / ".codex" / "skills" / "grill-with-docs").exists()
+    assert not (project / ".codex" / "skills" / "full-feature-workflow").exists()
+
+
 def test_local_skill_priority_beats_project_and_bundled_conflict_is_recorded(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()

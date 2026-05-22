@@ -886,34 +886,34 @@ def test_required_markers_block_incomplete_artifact(tmp_path: Path):
     phase = Phase(
         id="domain-grill",
         description="",
-        required_markers=("grill-with-docs: complete", "shared_understanding: reached"),
+        required_markers=("domain-grill: complete", "shared_understanding: reached"),
     )
 
     assert runner._missing_required_markers(phase) == [
-        "grill-with-docs: complete",
+        "domain-grill: complete",
         "shared_understanding: reached",
     ]
 
     (run_dir / "domain-grill.md").write_text(
-        "TODO: add grill-with-docs: complete later\n"
+        "TODO: add domain-grill: complete later\n"
         "shared_understanding: reached\n",
         encoding="utf-8",
     )
 
     assert runner._missing_required_markers(phase) == [
-        "grill-with-docs: complete",
+        "domain-grill: complete",
         "shared_understanding: reached",
     ]
 
     (run_dir / "domain-grill.md").write_text(
         "notes\n"
-        "grill-with-docs: complete\n"
+        "domain-grill: complete\n"
         "shared_understanding: reached\n",
         encoding="utf-8",
     )
 
     assert runner._missing_required_markers(phase) == [
-        "grill-with-docs: complete",
+        "domain-grill: complete",
         "shared_understanding: reached",
     ]
 
@@ -921,14 +921,14 @@ def test_required_markers_block_incomplete_artifact(tmp_path: Path):
         "notes\n"
         "```\n"
         "## Completion Gate\n"
-        "grill-with-docs: complete\n"
+        "domain-grill: complete\n"
         "shared_understanding: reached\n"
         "```\n",
         encoding="utf-8",
     )
 
     assert runner._missing_required_markers(phase) == [
-        "grill-with-docs: complete",
+        "domain-grill: complete",
         "shared_understanding: reached",
     ]
 
@@ -936,34 +936,34 @@ def test_required_markers_block_incomplete_artifact(tmp_path: Path):
         "notes\n"
         "## Completion Gate\n"
         "```\n"
-        "grill-with-docs: complete\n"
+        "domain-grill: complete\n"
         "shared_understanding: reached\n"
         "```\n",
         encoding="utf-8",
     )
 
     assert runner._missing_required_markers(phase) == [
-        "grill-with-docs: complete",
+        "domain-grill: complete",
         "shared_understanding: reached",
     ]
 
     (run_dir / "domain-grill.md").write_text(
         "notes\n"
         "    ## Completion Gate\n"
-        "    grill-with-docs: complete\n"
+        "    domain-grill: complete\n"
         "    shared_understanding: reached\n",
         encoding="utf-8",
     )
 
     assert runner._missing_required_markers(phase) == [
-        "grill-with-docs: complete",
+        "domain-grill: complete",
         "shared_understanding: reached",
     ]
 
     (run_dir / "domain-grill.md").write_text(
         "notes\n"
         "## Completion Gate\n"
-        "grill-with-docs: complete\n"
+        "domain-grill: complete\n"
         "shared_understanding: reached\n",
         encoding="utf-8",
     )
@@ -997,7 +997,7 @@ def test_runner_uses_normalized_artifact_path(tmp_path: Path):
     artifact.parent.mkdir(parents=True)
     artifact.write_text(
         "## Completion Gate\n"
-        "grill-with-docs: complete\n"
+        "domain-grill: complete\n"
         "shared_understanding: reached\n"
         "context_docs_checked: true\n"
         "context_docs_updated: not_needed\n",
@@ -1103,14 +1103,14 @@ def test_generic_stub_does_not_write_completion_markers(tmp_path: Path, monkeypa
     phase = Phase(
         id="domain-grill",
         description="",
-        required_markers=("grill-with-docs: complete", "shared_understanding: reached"),
+        required_markers=("domain-grill: complete", "shared_understanding: reached"),
     )
     monkeypatch.setenv("AGENT_FLOW_GENERIC_MODE", "stub")
 
     assert GenericAdapter().execute(phase, run_dir=run_dir, project_root=project_root)
     artifact = run_dir / "domain-grill.md"
     text = artifact.read_text(encoding="utf-8")
-    assert "grill-with-docs: complete" not in text
+    assert "domain-grill: complete" not in text
     assert "shared_understanding: reached" not in text
 
 

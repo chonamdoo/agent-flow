@@ -23,7 +23,7 @@ phases:
     prompt: |
       Produce the unified design document. Sections in order:
 
-      ## 1. Interview (grill-with-docs)
+      ## 1. Interview (domain-grill)
       Interview the user one question at a time. Walk every branch of the
       decision tree. Provide your recommended answer for each question. If
       the codebase can answer a question, search the codebase rather than

@@ -19,6 +19,7 @@ const REQUESTED_PROJECT = process.cwd();
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
 const PROJECT = resolveInstallProject(REQUESTED_PROJECT);
 const AF_DIR = path.join(PROJECT, ".agent-flow");
+const BUNDLED_HOST_SKILL_NAMES = new Set(["agent-flow"]);
 
 function ensureDir(p) {
   fs.mkdirSync(p, { recursive: true });
@@ -230,8 +231,8 @@ function installProjectSkills() {
 function selectProjectSkills() {
   const discovered = [
     ...discoverSkills(path.join(AF_DIR, "local-skills"), "local"),
-    ...discoverSkills(path.join(PROJECT, "skills"), "project"),
-    ...discoverSkills(path.join(AF_DIR, "skills"), "bundled"),
+    ...discoverProjectSkills(),
+    ...discoverSkills(path.join(AF_DIR, "skills"), "bundled", new Set(), BUNDLED_HOST_SKILL_NAMES),
   ];
   const byName = new Map();
   const warnings = [];
@@ -257,12 +258,20 @@ function selectProjectSkills() {
   };
 }
 
-function discoverSkills(baseDir, source) {
+function discoverProjectSkills() {
+  if (samePath(PROJECT, KIT_ROOT)) {
+    return [];
+  }
+  return discoverSkills(path.join(PROJECT, "skills"), "project");
+}
+
+function discoverSkills(baseDir, source, ignoredNames = new Set(), allowedNames = null) {
   if (!fs.existsSync(baseDir)) return [];
   const priority = { local: 0, project: 1, bundled: 2 }[source] ?? 99;
   const skills = [];
   for (const entry of fs.readdirSync(baseDir, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
+    if (!entry.isDirectory() || ignoredNames.has(entry.name)) continue;
+    if (allowedNames && !allowedNames.has(entry.name)) continue;
     const skillPath = path.join(baseDir, entry.name, "SKILL.md");
     if (!fs.existsSync(skillPath)) continue;
     const text = fs.readFileSync(skillPath, "utf8");

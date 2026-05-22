@@ -14,6 +14,7 @@ const KIT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const installArgs = process.argv.slice(3);
 const forceManaged = installArgs.includes("--force-managed");
 let cachedFullFeatureWorkflow = null;
+const BUNDLED_HOST_SKILL_NAMES = new Set(["agent-flow"]);
 
 function installProject() {
   const requestedRoot = process.cwd();
@@ -588,7 +589,6 @@ function assertInstalled(root) {
     path.join(root, ".agent-flow", "skills", "full-feature-workflow", "SKILL.md"),
     ...phases.map((phase) => path.join(root, ".agent-flow", "prompts", `${phase.id}.md`)),
     path.join(root, ".agent-flow", "skills", "domain-grill", "SKILL.md"),
-    path.join(root, ".agent-flow", "skills", "grill-with-docs", "SKILL.md"),
     path.join(root, ".agent-flow", "skills", "product-brief", "SKILL.md"),
     path.join(root, ".agent-flow", "skills", "plan-reviewer", "SKILL.md"),
     path.join(root, ".agent-flow", "skills", "ddd-clean-architecture", "SKILL.md"),
@@ -857,8 +857,14 @@ function installProjectSkills(root, agentFlowDir, previousIndex) {
 function selectProjectSkills(root, agentFlowDir) {
   const discovered = [
     ...discoverSkills(path.join(agentFlowDir, "local-skills"), "local", root),
-    ...discoverSkills(path.join(root, "skills"), "project", root),
-    ...discoverSkills(path.join(agentFlowDir, "skills"), "bundled", root, new Set(["index.json"])),
+    ...discoverProjectSkills(root),
+    ...discoverSkills(
+      path.join(agentFlowDir, "skills"),
+      "bundled",
+      root,
+      new Set(["index.json"]),
+      BUNDLED_HOST_SKILL_NAMES,
+    ),
   ];
   const byName = new Map();
   const warnings = [];
@@ -888,7 +894,14 @@ function selectProjectSkills(root, agentFlowDir) {
   };
 }
 
-function discoverSkills(baseDir, source, root, ignoredNames = new Set()) {
+function discoverProjectSkills(root) {
+  if (samePath(root, KIT_ROOT)) {
+    return [];
+  }
+  return discoverSkills(path.join(root, "skills"), "project", root);
+}
+
+function discoverSkills(baseDir, source, root, ignoredNames = new Set(), allowedNames = null) {
   if (!fs.existsSync(baseDir)) {
     return [];
   }
@@ -896,6 +909,9 @@ function discoverSkills(baseDir, source, root, ignoredNames = new Set()) {
   const skills = [];
   for (const entry of fs.readdirSync(baseDir, { withFileTypes: true })) {
     if (!entry.isDirectory() || ignoredNames.has(entry.name)) {
+      continue;
+    }
+    if (allowedNames && !allowedNames.has(entry.name)) {
       continue;
     }
     const skillPath = path.join(baseDir, entry.name, "SKILL.md");
@@ -1881,8 +1897,8 @@ Follow the CLI output exactly. Git projects start inside \`.agent-flow/worktrees
 - install/bootstrap 후 \`.agent-flow/skills/index.json\` metadata를 보고 필요한 skill만 읽는다. 모든 SKILL.md 전문을 항상 읽지 않는다.
 - Claude/Codex/Gemini/Antigravity 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.
 
-During code generation and modification phases, apply \`code-generation-discipline\`. Language-specific guide and comment rules follow the \`code-generation-discipline\` Before Starting checklist.
-For Android/Kotlin/Compose/KMP work, read only the matching local skill files from the Android profile's \`android_skills\` and \`chrisbanes_skills\` for the active host. Do not install, copy, link, or load duplicate skills from other host directories. If a required local skill is missing, report \`missing local <group>: <skill>\` with the profile source URL and ask the user to install it.
+During code generation, modification, and code review phases, apply \`code-generation-discipline\`. Read every matching language/framework skill before writing or judging code.
+For Android/Kotlin/Compose/KMP work, read every relevant local skill file from the Android profile's \`android_skills\` and \`chrisbanes_skills\` for the active host. Do not install, copy, link, or load duplicate skills from other host directories. If a required local skill is missing, report \`missing local <group>: <skill>\` with the profile source URL and ask the user to install it.
 `;
 }
 
@@ -1951,19 +1967,18 @@ ${AGENT_FLOW_COMMAND} status
 - On a new session, always check \`${AGENT_FLOW_COMMAND} status\` first and continue from that result.
 - After a phase writes its artifact, run the \`next_command\` printed by status or the current phase output.
 - If the workflow pauses for design or slice review, summarize the relevant artifact and wait for user approval before continuing.
-- During code generation and modification phases, apply \`code-generation-discipline\`. Language-specific guide and comment rules follow the \`code-generation-discipline\` Before Starting checklist.
+- During code generation, modification, and code review phases, apply \`code-generation-discipline\`. Read every matching language/framework skill before writing or judging code. If a required local skill is missing, report it and wait for install or explicit override.
 - Keep user-facing replies short Korean by default. Keep code, commands, paths, and identifiers in English.
 - Do not paste long logs or whole files. Summarize only current phase, action, \`next_command\`, and blocker when useful.
 `;
 }
 
 function fullFeatureSkillMarkdown() {
-  return `---\nname: full-feature-workflow\ndescription: Use this skill for feature work in this project.\n---\n\n# Full Feature Workflow\n\nUse this skill for feature work in this project.\n\nAlways drive progress through the runner output. Run \`${AGENT_FLOW_COMMAND} status\`, then execute the printed \`next_command\` exactly.\n\nDo not skip phases. If existing docs satisfy a phase, write the required artifact and reference those docs. If a gate, review, PR comment, or PR check fails, complete the matching fix phase and push again before merge/handoff.\n\nApply \`code-generation-discipline\` during code phases. Language-specific guide and comment rules follow the \`code-generation-discipline\` Before Starting checklist.\n`;
+  return `---\nname: full-feature-workflow\ndescription: Use this skill for feature work in this project.\n---\n\n# Full Feature Workflow\n\nUse this skill for feature work in this project.\n\nAlways drive progress through the runner output. Run \`${AGENT_FLOW_COMMAND} status\`, then execute the printed \`next_command\` exactly.\n\nDo not skip phases. If existing docs satisfy a phase, write the required artifact and reference those docs. If a gate, review, PR comment, or PR check fails, complete the matching fix phase and push again before merge/handoff.\n\nApply \`code-generation-discipline\` during code and review phases. Read every matching language/framework skill before writing or judging code.\n`;
 }
 
 function domainGrillSkillMarkdown() {
-  const skill = fs.readFileSync(path.join(KIT_ROOT, "skills", "grill-with-docs", "SKILL.md"), "utf8");
-  return skill.replace(/^name: grill-with-docs$/m, "name: domain-grill");
+  return fs.readFileSync(path.join(KIT_ROOT, "skills", "domain-grill", "SKILL.md"), "utf8");
 }
 
 function productBriefSkillMarkdown() {
@@ -2083,7 +2098,7 @@ Phases with completion markers are not complete just because the artifact file e
 Implementation rules:
 
 - Run every phase through the runner. Do not skip review, QA, PR watch, or fix-loop phases.
-- Apply \`code-generation-discipline\` during red, green, refactor, and fix-loop phases. Language-specific guide and comment rules follow the \`code-generation-discipline\` Before Starting checklist.
+- Apply \`code-generation-discipline\` during red, green, refactor, fix-loop, and review phases. Read every matching language/framework skill before writing or judging code.
 - If review or QA fails, return to the fix phase before continuing.
 - The gates->fix-loop->gates loop re-verifies after every fix. multi-review approve skips fix-loop; request-changes routes through fix-loop->gates.
 - Code review requires at least two active-host sub-agents (Codex sub-agent in Codex, Claude sub-agent in Claude, Gemini sub-agent in Gemini). If the changed scope spans multiple areas, run one additional active-host sub-agent in parallel. Additional non-host providers are optional, and approve requires 2+ independent sub-agent reviewer verdicts with reviewer-source: sub-agent. After recording each sub-agent result, close that sub-agent session. End multi-review artifacts with ## Overall followed by exactly one verdict line: verdict: approve or verdict: request-changes.
@@ -2091,7 +2106,7 @@ Implementation rules:
 
 Document size rules:
 
-- \`CONTEXT.md\`, grill-with-docs outputs, compact domain maps, and long planning docs must stay under 200 lines each.
+- \`CONTEXT.md\`, domain-grill outputs, compact domain maps, and long planning docs must stay under 200 lines each.
 - If a source doc grows past 200 lines, create or refresh a matching \`*-summary.md\` under \`.Codex/rules/\` and use that summary as agent context.
 - Preserve the original long doc only as reference; do not load it as hot context unless the current phase needs a specific section.
 - Artifacts must link to long docs by repo-relative path and summarize only the needed decision, not paste the full content.

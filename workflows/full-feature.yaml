@@ -15,7 +15,7 @@ phases:
     description: Interview one question at a time until the domain problem is clear.
     cite_lore: true
     required_markers:
-      - "grill-with-docs: complete"
+      - "domain-grill: complete"
       - "shared_understanding: reached"
       - "context_docs_checked: true"
       - "context_docs_updated: true|not_needed"
@@ -27,7 +27,7 @@ phases:
       reached, end with a `## Completion Gate` section:
 
           ## Completion Gate
-          grill-with-docs: complete
+          domain-grill: complete
           shared_understanding: reached
           context_docs_checked: true
           context_docs_updated: true
@@ -98,28 +98,54 @@ phases:
 
   - id: red
     description: TDD red phase.
+    required_markers:
+      - "skills_checked: true"
     prompt: |
       Apply code-generation-discipline before writing tests. Write failing
-      tests first. Language-specific guide selection follows the
-      code-generation-discipline Before Starting checklist. Save the failure
-      summary and command output.
+      tests first. Read every matching language/framework skill before
+      writing tests. Save the failure summary and command output.
+      If a required local skill is missing, do not complete this artifact;
+      report `missing local <group>: <skill>` with the source URL to the user.
+      End with:
+
+          ## Completion Gate
+          skills_checked: true
+
       Output: artifacts/red.log.
 
   - id: green
     description: TDD green phase.
+    required_markers:
+      - "skills_checked: true"
     prompt: |
       Apply code-generation-discipline. Implement the minimum code to pass red
-      tests. Language-specific guide selection follows the
-      code-generation-discipline Before Starting checklist.
-      New or modified code must include Korean comments. Output: artifacts/green.log.
+      tests. Read every matching language/framework skill before writing code.
+      New or modified code must include Korean comments. If a required local
+      skill is missing, do not complete this artifact; report
+      `missing local <group>: <skill>` with the source URL to the user.
+      End with:
+
+          ## Completion Gate
+          skills_checked: true
+
+      Output: artifacts/green.log.
 
   - id: refactor
     description: TDD refactor phase.
+    required_markers:
+      - "skills_checked: true"
     prompt: |
       Apply code-generation-discipline. Refactor only after green. Keep
-      behavior stable, language-specific guide selection follows the
-      code-generation-discipline Before Starting checklist, keep required
-      Korean code comments, and summarize structural changes.
+      behavior stable, read every matching language/framework skill before
+      changing code, keep required Korean code comments, and summarize
+      structural changes.
+      If a required local skill is missing, do not complete this artifact;
+      report `missing local <group>: <skill>` with the source URL to the user.
+      End with:
+
+          ## Completion Gate
+          skills_checked: true
+
       Output: refactor.md.
 
   - id: gates
@@ -141,6 +167,8 @@ phases:
   - id: multi-review
     description: Run implementation review with at least two independent sub-agent reviewers before approve. Runner routes approve→architecture-review, request-changes→fix-loop.
     multi_review: true
+    required_markers:
+      - "skills_checked: true"
     routes:
       approve: architecture-review
       request-changes: fix-loop
@@ -160,20 +188,40 @@ phases:
       `verdict: request-changes`.
       Apply agent-flow-concise-output: one finding per line, Korean concise
       prose, no emoji, and parser verdict markers unchanged.
+      Before judging code, read every matching language/framework local skill.
+      If a required local skill is missing, do not complete this artifact;
+      report `missing local <group>: <skill>` with the source URL to the user.
+      Also include:
+
+          ## Completion Gate
+          skills_checked: true
+
       Output: multi-review.md.
 
   - id: fix-loop
     description: Apply review and gate fixes. Runner always routes back to gates for re-verification.
+    required_markers:
+      - "skills_checked: true"
     routes:
       default: gates
     prompt: |
       Apply code-generation-discipline while fixing review/gate failures. New
-      or modified code must include Korean comments. Language-specific guide
-      selection follows the code-generation-discipline Before Starting
-      checklist, or record that no fixes were required. Output: fix-loop.md.
+      or modified code must include Korean comments. Read every matching
+      language/framework skill before writing or judging code, or record that
+      no fixes were required. If a required local skill is missing, do not
+      complete this artifact; report `missing local <group>: <skill>` with
+      the source URL to the user.
+      End with:
+
+          ## Completion Gate
+          skills_checked: true
+
+      Output: fix-loop.md.
 
   - id: architecture-review
     description: Review implementation against DDD/Clean design. Runner routes approve→commit, request-changes→refactor.
+    required_markers:
+      - "skills_checked: true"
     routes:
       approve: commit
       request-changes: refactor
@@ -185,6 +233,13 @@ phases:
       `verdict: approve`, `verdict: request-changes`, or `verdict: blocked`.
       Apply agent-flow-concise-output for findings and keep verdict markers
       unchanged.
+      Before judging code, read every matching language/framework local skill.
+      If a required local skill is missing, do not complete this artifact;
+      report `missing local <group>: <skill>` with the source URL to the user.
+      End with:
+
+          ## Completion Gate
+          skills_checked: true
 
   - id: commit
     description: Commit verified changes.
