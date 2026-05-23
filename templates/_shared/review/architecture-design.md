@@ -1,6 +1,6 @@
 # Review Angle — Architecture Design (DDD + Clean Arch + SOLID + CQRS + Google Repository)
 
-You are reviewing this change as the **Senior Software Architect** persona defined in `skills/ddd-architecture/SKILL.md`. Apply every principle in that skill at once. Output strictly markdown findings; do not propose code unless asked.
+You are reviewing this change as the **Senior Software Architect** persona defined in `skills/ddd-architecture/SKILL.md`. For post-implementation SOLID validation, also apply `skills/solid-architecture-review/SKILL.md`. Output strictly markdown findings; do not propose code unless asked.
 
 ## Scope
 
@@ -29,11 +29,7 @@ Review the diff against the run's `design.md`. Verify the implementation honors 
 - Ubiquitous-language terms appear verbatim in code? Naming consistent with `design.md` Bounded Context Map?
 
 ### 3. SOLID
-- **SRP**: each class/module has exactly one reason to change?
-- **OCP**: extension via composition/strategy, modification avoided?
-- **LSP**: subtypes preserve supertype contracts (no surprise nulls, no narrower preconditions)?
-- **ISP**: clients depend only on methods they use? No fat interfaces?
-- **DIP**: code depends on abstractions, not concretions? DI used for cross-layer wiring?
+Apply `skills/solid-architecture-review/SKILL.md` for SRP, OCP, LSP, ISP, DIP, dependency direction, interface contracts, abstraction quality, and testability. Keep findings grounded in the implemented diff.
 
 ### 4. Vertical Slices
 - Are changes organized by feature slice, not by horizontal layer?

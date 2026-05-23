@@ -74,3 +74,5 @@ skipped.
 - **`final-review` phase** — applied as the `architecture-design` review
   angle (`templates/_shared/review/architecture-design.md`). The review
   checks the implemented diff against the design's claims.
+- For post-implementation SOLID validation, use
+  `solid-architecture-review`.

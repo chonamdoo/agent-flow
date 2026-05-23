@@ -176,6 +176,8 @@ phases:
       Run at least two independent sub-agent reviewers in parallel. Each
       reviewer uses code-reviewer.md as basis and
       outputs an independent verdict: approve or request-changes.
+      For architecture/SOLID findings, reviewers also apply
+      solid-architecture-review.
       Any request-changes from any reviewer makes the overall verdict
       request-changes. Default reviewers are active-host sub-agents (Codex
       sub-agent in Codex, Claude sub-agent in Claude, Gemini sub-agent in Gemini).
@@ -229,7 +231,8 @@ phases:
     prompt: |
       Compare code against domain-grill.md and ddd-design.md. Check layer
       violations, repository boundary leaks, naming drift, and dependency
-      direction. Output architecture-review.md with exactly one verdict line:
+      direction. Apply solid-architecture-review for post-implementation SOLID
+      validation. Output architecture-review.md with exactly one verdict line:
       `verdict: approve`, `verdict: request-changes`, or `verdict: blocked`.
       Apply agent-flow-concise-output for findings and keep verdict markers
       unchanged.
