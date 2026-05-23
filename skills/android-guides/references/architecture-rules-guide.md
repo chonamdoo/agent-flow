@@ -1,7 +1,8 @@
 # Android Architecture Rules
 
-These are default rules for Android projects using layered or Clean
-Architecture. Project-local rules win when they are explicit.
+Canonical layer boundary and dependency-direction rules live in
+`skills/clean-architecture/SKILL.md`. These are Android-specific naming and
+ownership notes. Project-local rules win when they are explicit.
 
 ## Layer Ownership
 
@@ -16,8 +17,8 @@ Architecture. Project-local rules win when they are explicit.
 
 ## Dependency Direction
 
-- Domain must not import Android framework, Retrofit, Room, Compose, Hilt, or
-  presentation classes.
+- Domain/Application must not import Android framework, Retrofit, Room, Compose,
+  Hilt, or presentation classes.
 - Data may depend on domain contracts and external clients.
 - Presentation may depend on domain/usecase and design-system APIs.
 - Feature-to-feature direct dependencies are suspect; prefer navigation APIs or
@@ -30,4 +31,3 @@ Architecture. Project-local rules win when they are explicit.
 - Does the repository act as the single source of truth when cache/local data
   exists?
 - Are domain errors translated once, not scattered across UI branches?
-

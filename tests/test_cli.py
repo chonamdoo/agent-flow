@@ -175,9 +175,19 @@ class CliTest(unittest.TestCase):
         )
         default_payload = yaml.safe_load(default_path.read_text(encoding="utf-8"))
         default_phases = {phase["id"]: phase for phase in default_payload["phases"]}
-        self.assertEqual(default_phases["implement"]["required_markers"], ["gates: all_passed"])
+        self.assertEqual(
+            default_phases["implement"]["required_markers"],
+            [
+                "gates: all_passed",
+                "skills_checked: true",
+                "clean-architecture: applied",
+                "android-local-skills: checked|n/a",
+                "android-local-skills-used:",
+            ],
+        )
         self.assertEqual(default_phases["final-review"]["routes"]["request-changes"], "fix-loop")
         self.assertEqual(default_phases["final-review"]["routes"]["approve"], "commit")
+        self.assertIn("skills_checked: true", default_phases["final-review"]["required_markers"])
         self.assertIn("at least two active-host reviewer sub-agents", default_phases["final-review"]["prompt"])
         self.assertIn("reviewer-source: sub-agent", default_phases["final-review"]["prompt"])
         self.assertIn("close that sub-agent session", default_phases["final-review"]["prompt"])
@@ -198,6 +208,11 @@ class CliTest(unittest.TestCase):
         self.assertEqual(phases["green"]["artifact"], "artifacts/green.log")
         for phase_id in ("red", "green", "refactor", "fix-loop", "multi-review", "architecture-review"):
             self.assertIn("skills_checked: true", phases[phase_id]["required_markers"])
+        self.assertIn("clean-architecture: applied", phases["green"]["required_markers"])
+        self.assertIn("clean-architecture: applied", phases["fix-loop"]["required_markers"])
+        self.assertIn("clean-architecture-review: applied", phases["multi-review"]["required_markers"])
+        self.assertIn("dependency-rule: pass|fail", phases["architecture-review"]["required_markers"])
+        self.assertIn("android-local-skills: checked|n/a", phases["green"]["required_markers"])
         self.assertEqual(phases["gates"]["artifact"], "artifacts/gate-results.json")
         self.assertEqual(phases["gates"]["routes"]["green"], "multi-review")
 
@@ -623,11 +638,12 @@ class CliTest(unittest.TestCase):
             self.assertTrue((project_root / ".agent-flow" / "skills" / "product-brief" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "plan-reviewer" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "ddd-clean-architecture" / "SKILL.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "skills" / "clean-architecture" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "architecture-reviewer" / "SKILL.md").is_file())
-            self.assertTrue((project_root / ".agent-flow" / "skills" / "android-mvi-feature" / "SKILL.md").is_file())
-            self.assertTrue((project_root / ".agent-flow" / "skills" / "android-module-creator" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "android-code-review" / "SKILL.md").is_file())
-            self.assertTrue((project_root / ".agent-flow" / "skills" / "android-debugging" / "SKILL.md").is_file())
+            self.assertFalse((project_root / ".agent-flow" / "skills" / "android-mvi-feature").exists())
+            self.assertFalse((project_root / ".agent-flow" / "skills" / "android-module-creator").exists())
+            self.assertFalse((project_root / ".agent-flow" / "skills" / "android-debugging").exists())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "graphify" / "SKILL.md").is_file())
             self.assertTrue(
                 (
@@ -653,7 +669,7 @@ class CliTest(unittest.TestCase):
                 (project_root / ".agent-flow" / "prompts" / "plan-review.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
-                "data / domain / presentation",
+                "skills/clean-architecture/SKILL.md",
                 (project_root / ".agent-flow" / "skills" / "ddd-clean-architecture" / "SKILL.md").read_text(
                     encoding="utf-8"
                 ),
@@ -1161,6 +1177,67 @@ class CliTest(unittest.TestCase):
             kit = json.loads((project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
             self.assertNotIn("graphify", kit)
 
+    def test_node_installers_ignore_profile_managed_host_only_project_skills(self) -> None:
+        installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            node = _node_executable()
+            for installer_name in installers:
+                project_root = root / installer_name
+                project_root.mkdir()
+                skill_dir = project_root / "skills" / "android-mvi-feature"
+                skill_dir.mkdir(parents=True)
+                (skill_dir / "SKILL.md").write_text(
+                    "---\n"
+                    "name: android-mvi-feature\n"
+                    "hosts: [codex]\n"
+                    "---\n"
+                    "# Android MVI Feature\n",
+                    encoding="utf-8",
+                )
+                alias_dir = project_root / ".agent-flow" / "local-skills" / "aliased-compose"
+                alias_dir.mkdir(parents=True)
+                (alias_dir / "SKILL.md").write_text(
+                    "---\n"
+                    "name: compose-state-authoring\n"
+                    "hosts: [codex]\n"
+                    "---\n"
+                    "# Compose State Authoring\n",
+                    encoding="utf-8",
+                )
+                edge_dir = project_root / "skills" / "edge-to-edge"
+                edge_dir.mkdir(parents=True)
+                (edge_dir / "SKILL.md").write_text(
+                    "---\n"
+                    "name: edge-to-edge\n"
+                    "hosts: [codex]\n"
+                    "---\n"
+                    "# Edge To Edge\n",
+                    encoding="utf-8",
+                )
+                result = subprocess.run(
+                    (
+                        node,
+                        str(Path(__file__).resolve().parents[1] / "bin" / installer_name),
+                        "install",
+                        "--without-graphify",
+                    ),
+                    cwd=project_root,
+                    env={**os.environ, "AGENT_FLOW_GRAPHIFY_DRY_RUN": "1"},
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                index = json.loads((project_root / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+                skill_names = {skill["name"] for skill in index["skills"]}
+                self.assertNotIn("android-mvi-feature", skill_names)
+                self.assertNotIn("compose-state-authoring", skill_names)
+                self.assertNotIn("edge-to-edge", skill_names)
+                self.assertFalse((project_root / ".codex" / "skills" / "android-mvi-feature").exists())
+                self.assertFalse((project_root / ".codex" / "skills" / "compose-state-authoring").exists())
+                self.assertFalse((project_root / ".codex" / "skills" / "edge-to-edge").exists())
+
     def test_node_installer_reuses_existing_graphify_and_removes_duplicate_skills(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1374,6 +1451,9 @@ class CliTest(unittest.TestCase):
             self.assertTrue((project_root / ".Codex" / "agents" / "code-reviewer.md").is_file())
             self.assertEqual(kit["graphify"]["graph"]["status"], "dry-run")
             self.assertEqual(kit["graphify"]["graph"]["command"], "graphify .")
+            self.assertFalse((project_root / ".agent-flow" / "skills" / "android-mvi-feature").exists())
+            self.assertFalse((project_root / ".agent-flow" / "skills" / "android-module-creator").exists())
+            self.assertFalse((project_root / ".agent-flow" / "skills" / "android-debugging").exists())
             gitignore = (project_root / ".gitignore").read_text(encoding="utf-8")
             self.assertIn("graphify-out/manifest.json", gitignore)
             self.assertIn("graphify-out/cost.json", gitignore)
@@ -1744,6 +1824,68 @@ class CliTest(unittest.TestCase):
             self.assertIn("Current phase: product-brief", advanced.stdout)
             state = json.loads((project_root / ".agent-flow" / "state" / "current-run.json").read_text(encoding="utf-8"))
             self.assertEqual(state["phase"], "product-brief")
+
+    def test_node_heading_required_markers_ignore_fenced_examples(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            self.assertEqual(
+                subprocess.run(
+                    (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
+                    cwd=project_root,
+                    check=False,
+                ).returncode,
+                0,
+            )
+            run_dir = project_root / ".agent-flow" / "runs" / "full-feature" / "r1"
+            for phase in ["domain-grill", "product-brief", "prd", "slice-plan", "plan-review"]:
+                artifact = run_dir / _node_phase_artifact(phase)
+                artifact.parent.mkdir(parents=True, exist_ok=True)
+                content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase)
+                artifact.write_text(content, encoding="utf-8")
+                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+
+            ddd_artifact = run_dir / _node_phase_artifact("ddd-design")
+            ddd_artifact.write_text(
+                "```\n"
+                "## Clean Architecture Boundary Map\n"
+                "## Dependency Rule\n"
+                "## Use Case Boundaries\n"
+                "## Repository Boundaries\n"
+                "## Cache Boundary\n"
+                "## Mapping Boundary\n"
+                "## Composition Root\n"
+                "## Testability Boundary\n"
+                "```\n"
+                "## Completion Gate\n"
+                "usecase-interface: n/a\n"
+                "usecase-composition: none\n"
+                "cache-required: no\n"
+                "memory-cache: n/a\n"
+                "disk-cache: n/a\n"
+                "cache-invalidation-policy: n/a\n"
+                "remote-dto-domain-mapper: n/a\n"
+                "entity-domain-mapper: n/a\n"
+                "domain-ui-mapper: n/a\n"
+                "solid-srp-change-reason: n/a\n"
+                "solid-ocp-extension-points: n/a\n"
+                "solid-lsp-contracts: n/a\n"
+                "solid-isp-consumer-ports: n/a\n"
+                "solid-dip-dependency-direction: inward\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("## Clean Architecture Boundary Map", result.stderr)
 
     def test_node_workflow_run_requires_installed_project(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2135,7 +2277,7 @@ class CliTest(unittest.TestCase):
             plan_review.write_text("verdict: APPROVE\n", encoding="utf-8")
             self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
             ddd = run_dir / _node_phase_artifact("ddd-design")
-            ddd.write_text("ddd-design\n", encoding="utf-8")
+            ddd.write_text(_node_phase_content("ddd-design"), encoding="utf-8")
             self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
             for phase in [
                 "worktree",
@@ -2153,7 +2295,7 @@ class CliTest(unittest.TestCase):
 
             architecture_review = run_dir / _node_phase_artifact("architecture-review")
             architecture_review.write_text(
-                "verdict: request-changes\n\n## Completion Gate\nskills_checked: true\n",
+                _node_phase_content("architecture-review").replace("verdict: approve", "verdict: request-changes"),
                 encoding="utf-8",
             )
             result = subprocess.run(
@@ -2377,6 +2519,40 @@ class CliTest(unittest.TestCase):
                 "## Reviewer 2\nreviewer-source: sub-agent\nreviewer-2 verdict: approve\n\n"
                 "## Overall\n"
                 "verdict: approve\n",
+            ) + "dependency-rule: fail\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Current phase: fix-loop", result.stdout)
+
+            fix_loop_artifact.write_text(_node_phase_content("fix-loop"), encoding="utf-8")
+            self.assertEqual(
+                subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode,
+                0,
+            )
+            gates_artifact.write_text(_node_phase_content("gates"), encoding="utf-8")
+            result = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Current phase: multi-review", result.stdout)
+
+            mr_artifact.write_text(_with_skills_gate(
+                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
+                "## Reviewer 2\nreviewer-source: sub-agent\nreviewer-2 verdict: approve\n\n"
+                "## Overall\n"
+                "verdict: approve\n",
             ),
                 encoding="utf-8",
             )
@@ -2389,6 +2565,59 @@ class CliTest(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("Current phase: architecture-review", result.stdout)
+
+    def test_node_default_final_review_uses_multi_review_rules(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            self.assertEqual(
+                subprocess.run(
+                    (node, cli, "run", "start", "--workflow", "default", "--task", "demo", "--run-id", "r1"),
+                    cwd=project_root,
+                    check=False,
+                ).returncode,
+                0,
+            )
+            run_dir = project_root / ".agent-flow" / "runs" / "default" / "r1"
+            for phase in ["design", "slice-plan", "worktree", "implement"]:
+                artifact = run_dir / f"{phase}.md"
+                artifact.parent.mkdir(parents=True, exist_ok=True)
+                artifact.write_text(_node_phase_content(phase), encoding="utf-8")
+                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+
+            final_artifact = run_dir / "final-review.md"
+            final_artifact.write_text(_with_final_review_gate("verdict: approve\n"), encoding="utf-8")
+            result = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("at least 1 independent sub-agent reviewer verdict", result.stderr)
+
+            final_artifact.write_text(
+                _with_final_review_gate(
+                    "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
+                    "## Reviewer 2\nreviewer-source: sub-agent\nreviewer-2 verdict: approve\n\n"
+                    "## Overall\nverdict: approve\n",
+                    dependency_rule="fail",
+                ),
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Current phase: fix-loop", result.stdout)
 
     def test_node_fix_loop_round_cap_blocks_after_max(self) -> None:
         """fix-loop 3회 초과 시 에러로 차단."""
@@ -2472,7 +2701,7 @@ class CliTest(unittest.TestCase):
 
             arch_artifact = run_dir / _node_phase_artifact("architecture-review")
             arch_artifact.write_text(
-                "verdict: blocked\n\n## Completion Gate\nskills_checked: true\n",
+                _node_phase_content("architecture-review").replace("verdict: approve", "verdict: blocked"),
                 encoding="utf-8",
             )
             result = subprocess.run(
@@ -6351,6 +6580,7 @@ def _node_phase_artifact(phase: str) -> Path:
         "domain-grill": Path("artifacts/domain-grill.md"),
         "product-brief": Path("artifacts/product-brief.md"),
         "prd": Path("artifacts/prd.md"),
+        "design": Path("artifacts/design.md"),
         "slice-plan": Path("artifacts/slice-plan.md"),
         "plan-review": Path("artifacts/plan-review.md"),
         "ddd-design": Path("artifacts/ddd-design.md"),
@@ -6361,6 +6591,8 @@ def _node_phase_artifact(phase: str) -> Path:
         "refactor": Path("artifacts/refactor.md"),
         "gates": Path("artifacts/gate-results.json"),
         "multi-review": Path("artifacts/multi-review.md"),
+        "implement": Path("artifacts/implement.md"),
+        "final-review": Path("artifacts/final-review.md"),
         "fix-loop": Path("artifacts/fix-loop.md"),
         "architecture-review": Path("artifacts/architecture-review.md"),
         "commit": Path("artifacts/commit.md"),
@@ -6370,6 +6602,7 @@ def _node_phase_artifact(phase: str) -> Path:
         "pr-ci-fix": Path("artifacts/pr-ci-fix.md"),
         "merge-approval": Path("artifacts/merge-approval.md"),
         "merge": Path("artifacts/merge.md"),
+        "cleanup": Path("artifacts/cleanup.md"),
         "handoff": Path("artifacts/handoff.md"),
     }
     return artifacts[phase]
@@ -6377,7 +6610,57 @@ def _node_phase_artifact(phase: str) -> Path:
 
 def _node_phase_content(phase: str, prefix: str = "") -> str:
     content = f"{prefix}{phase}\n"
-    skills_gate = "## Completion Gate\nskills_checked: true\n"
+    skills_gate = (
+        "## Completion Gate\n"
+        "skills_checked: true\n"
+        "android-local-skills: n/a\n"
+        "android-local-skills-used: n/a\n"
+    )
+    clean_design_gate = (
+        "## Clean Architecture Boundary Map\n"
+        "## Dependency Rule\n"
+        "## Use Case Boundaries\n"
+        "## Repository Boundaries\n"
+        "## Cache Boundary\n"
+        "## Mapping Boundary\n"
+        "## Composition Root\n"
+        "## Testability Boundary\n"
+        "## Completion Gate\n"
+        "usecase-interface: n/a\n"
+        "usecase-composition: none\n"
+        "cache-required: no\n"
+        "memory-cache: n/a\n"
+        "disk-cache: n/a\n"
+        "cache-invalidation-policy: n/a\n"
+        "remote-dto-domain-mapper: n/a\n"
+        "entity-domain-mapper: n/a\n"
+        "domain-ui-mapper: n/a\n"
+        "solid-srp-change-reason: n/a\n"
+        "solid-ocp-extension-points: n/a\n"
+        "solid-lsp-contracts: n/a\n"
+        "solid-isp-consumer-ports: n/a\n"
+        "solid-dip-dependency-direction: inward\n"
+    )
+    clean_review_gate = (
+        "clean-architecture: applied\n"
+        "dependency-rule: pass\n"
+        "usecase-boundary: n/a\n"
+        "usecase-calls-usecase: pass\n"
+        "repository-boundary: pass\n"
+        "cache-boundary: n/a\n"
+        "memory-disk-cache-separated: n/a\n"
+        "mapping-boundary: n/a\n"
+        "dto-entity-domain-ui-separated: pass\n"
+        "solid-boundary-check: pass\n"
+    )
+    clean_code_review_gate = (
+        "clean-architecture-review: applied\n"
+        "usecase-interface-check: applied\n"
+        "usecase-composition-check: applied\n"
+        "cache-boundary-check: applied\n"
+        "mapping-boundary-check: applied\n"
+        "solid-clean-architecture-check: applied\n"
+    )
     if phase == "domain-grill":
         return (
             content
@@ -6389,6 +6672,8 @@ def _node_phase_content(phase: str, prefix: str = "") -> str:
         )
     if phase == "gates":
         return '{"passed": true, "results": [{"id": "test", "command": "npm test", "passed": true, "output": "ok"}]}\n'
+    if phase in {"design", "ddd-design"}:
+        return content + clean_design_gate
     if phase == "multi-review":
         return (
             "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
@@ -6397,16 +6682,67 @@ def _node_phase_content(phase: str, prefix: str = "") -> str:
             "verdict: approve\n"
             "\n## Completion Gate\n"
             "skills_checked: true\n"
+            + clean_code_review_gate
+            + "android-local-skills: n/a\n"
+            + "android-local-skills-used: n/a\n"
         )
     if phase == "architecture-review":
-        return content + "verdict: approve\n\n" + skills_gate
+        return content + "verdict: approve\n\n" + skills_gate + clean_review_gate
+    if phase == "implement":
+        return (
+            content
+            + "## Completion Gate\n"
+            + "gates: all_passed\n"
+            + "skills_checked: true\n"
+            + "clean-architecture: applied\n"
+            + "android-local-skills: n/a\n"
+            + "android-local-skills-used: n/a\n"
+        )
+    if phase in {"green", "refactor", "fix-loop"}:
+        return content + skills_gate + "clean-architecture: applied\n"
     if phase in {"red", "green", "refactor", "fix-loop"}:
         return content + skills_gate
     return content
 
 
 def _with_skills_gate(content: str) -> str:
-    return f"{content.rstrip()}\n\n## Completion Gate\nskills_checked: true\n"
+    return (
+        f"{content.rstrip()}\n\n## Completion Gate\n"
+        "skills_checked: true\n"
+        "clean-architecture-review: applied\n"
+        "usecase-interface-check: applied\n"
+        "usecase-composition-check: applied\n"
+        "cache-boundary-check: applied\n"
+        "mapping-boundary-check: applied\n"
+        "solid-clean-architecture-check: applied\n"
+        "android-local-skills: n/a\n"
+        "android-local-skills-used: n/a\n"
+    )
+
+
+def _with_final_review_gate(content: str, dependency_rule: str = "pass") -> str:
+    return (
+        f"{content.rstrip()}\n\n## Completion Gate\n"
+        "skills_checked: true\n"
+        "clean-architecture: applied\n"
+        f"dependency-rule: {dependency_rule}\n"
+        "usecase-boundary: n/a\n"
+        "usecase-calls-usecase: pass\n"
+        "repository-boundary: pass\n"
+        "cache-boundary: n/a\n"
+        "memory-disk-cache-separated: n/a\n"
+        "mapping-boundary: n/a\n"
+        "dto-entity-domain-ui-separated: pass\n"
+        "solid-boundary-check: pass\n"
+        "clean-architecture-review: applied\n"
+        "usecase-interface-check: applied\n"
+        "usecase-composition-check: applied\n"
+        "cache-boundary-check: applied\n"
+        "mapping-boundary-check: applied\n"
+        "solid-clean-architecture-check: applied\n"
+        "android-local-skills: n/a\n"
+        "android-local-skills-used: n/a\n"
+    )
 
 
 def _node_start_full_feature_at_pr_watch(project_root: Path, node: str, cli: str) -> Path:

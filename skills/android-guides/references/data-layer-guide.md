@@ -1,25 +1,23 @@
-# Android Data Layer Guide
+# Android Data Layer Notes
 
-## Responsibilities
+Canonical layer, repository, cache, mapper, DTO/entity/domain/UI separation, and
+SOLID boundary rules live in `skills/clean-architecture/SKILL.md`. Do not repeat
+or override them here.
 
-- API/database clients know transport and persistence details.
-- Data sources wrap clients and expose raw data operations.
-- Repositories combine data sources, own cache/source-of-truth policy, map DTOs
-  to domain models, and translate low-level failures.
-- Domain and presentation should not consume DTOs directly.
+Use this file only for Android-specific adapter details after
+`clean-architecture` has defined the boundary.
 
-## Repository Rules
+## Android-specific checks
 
-- Keep repository interfaces in domain when using Clean Architecture.
-- Keep repository implementations in data.
-- Return domain models or domain results, not Retrofit/Room types.
-- Centralize retry, cache invalidation, and error translation where possible.
-
-## Mapping
-
-- DTO -> data model -> domain model is acceptable when the project separates
-  network and persistence.
-- Do not leak nullable transport fields into domain without an explicit domain
-  meaning.
-- Empty responses should map to a defined empty state or domain result.
-
+- Retrofit, Room, DataStore, file storage, SDK clients, and platform APIs stay in
+  data/infrastructure adapters.
+- `Flow`, `suspend`, paging, and dispatcher choices must match existing project
+  conventions at the repository/data-source boundary.
+- Room entities and Retrofit DTOs do not cross into domain/application or UI
+  state without a mapper.
+- Hilt modules or manual DI belong at the composition root; domain/application
+  code does not import Hilt annotations.
+- Network, database, and cache error types are translated before crossing into
+  domain/application contracts.
+- Offline, paging, and cache invalidation policy must be explicit when local
+  storage or disk cache is involved.

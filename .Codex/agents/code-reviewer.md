@@ -17,7 +17,10 @@
 - 새로 추가하거나 수정한 코드 주석이 모두 한국어인가.
 - Python 변경은 `python-development-guide`, TypeScript/TSX 변경은 `typescript-development-guide`를 보조 체크리스트로 확인했는가.
 - React Web/Next.js/TSX 컴포넌트 변경은 `react-development-guide`, React Native/Expo/RN 앱 변경은 `react-native-development-guide`를 보조 체크리스트로 확인했는가.
-- Android/Kotlin/Compose/KMP 변경은 `android-code-review`와 Android profile의 `chrisbanes_skills.review[*].skill` 로컬 설치본을 우선 체크리스트로 확인했는가. 로컬 내용이 없으면 `no content: <skill>`로 기록했는가.
+- Android/Kotlin/Compose/KMP 변경은 `android-code-review`, Android profile의 `android_skills.review[*].skill`, `chrisbanes_skills.review[*].skill` 로컬 설치본을 현재 host 경로에서만 읽었는가.
+- 필요한 Android/Chris Banes skill이 로컬에 없으면 `missing local android_skills: <skill>` 또는 `missing local chrisbanes_skills: <skill>`와 source URL을 기록하고 `request-changes`로 판단했는가.
+- 설계/구현 변경이면 `skills/clean-architecture/SKILL.md`를 적용했는가.
+- Clean Architecture must-fix 조건이 있으면 `request-changes`로 판단했는가.
 - agent-flow phase artifact와 completion marker가 요구사항을 만족하는가.
 - `.Codex/rules/concise-output.md` 기준으로 finding은 짧게 쓰되 verdict/status marker는 원문 유지했는가.
 - PR target branch가 프로필의 `pr.target_branch`와 일치하는가. release-first 프로필이면 활성 `release/*` 브랜치인지 확인한다.
@@ -40,6 +43,17 @@ verdict: approve | request-changes
 ## Required Changes
 
 ## Approval Notes
+
+## Completion Gate
+skills_checked: true
+clean-architecture-review: applied
+usecase-interface-check: applied
+usecase-composition-check: applied
+cache-boundary-check: applied
+mapping-boundary-check: applied
+solid-clean-architecture-check: applied
+android-local-skills: checked|n/a
+android-local-skills-used: <skill list or n/a>
 ```
 
 `request-changes`일 때는 반드시 파일 경로와 라인 번호를 포함한다.

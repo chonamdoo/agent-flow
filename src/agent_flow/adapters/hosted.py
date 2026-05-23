@@ -35,6 +35,10 @@ _BASE_REVIEW_ANGLES: tuple[dict[str, str], ...] = (
         "id": "architecture-design",
         "prompt": "templates/_shared/review/architecture-design.md",
     },
+    {
+        "id": "clean-architecture",
+        "prompt": "templates/_shared/review/clean-architecture.md",
+    },
 )
 _BASE_REVIEW_PROMPTS = {
     str(item["prompt"])

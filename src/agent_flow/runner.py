@@ -46,7 +46,7 @@ from agent_flow.core.commands import run_safe_command
 from agent_flow.core.phase_workflow import load_phase_workflow_definition
 from agent_flow.core.report import write_run_report
 from agent_flow.core.security import ensure_child_path, validate_safe_name
-from agent_flow.core.markers import missing_markers
+from agent_flow.core.markers import has_failure_markers, missing_markers
 from agent_flow.memory.index import LoreIndex
 from agent_flow.memory.lore import Lore
 
@@ -64,14 +64,13 @@ GIT_DEPENDENT_PHASES = {
 FIX_LOOP_MAX_ROUNDS = 3
 DDD_REQUIRED_DESIGN_SECTIONS = (
     ("bounded context", ("bounded context", "bounded contexts", "context map", "컨텍스트")),
+    ("ubiquitous language", ("ubiquitous language", "ubiquitous language terms", "domain language", "보편 언어", "유비쿼터스 언어")),
     ("aggregate", ("aggregate", "aggregates", "aggregate root", "애그리거트")),
     ("entity", ("entity", "entities", "엔티티")),
     ("value object", ("value object", "value objects", "vo", "값 객체")),
-    ("application use case", ("application use case", "application use cases", "use case", "use cases", "interactor", "interactors", "유스케이스")),
-    ("infrastructure adapter", ("infrastructure adapter", "infrastructure adapters", "ports and adapters", "repository adapter", "adapter", "어댑터")),
-    ("presentation route", ("presentation route", "presentation routes", "presentation", "route", "routes", "view", "views", "화면", "라우트")),
-    ("dependency rule", ("dependency rule", "dependency direction", "dependency flow", "의존성")),
-    ("implementation structure", ("implementation structure", "file structure", "module structure", "package structure", "folder structure", "구현 구조", "모듈 구조", "패키지 구조")),
+    ("domain event", ("domain event", "domain events", "도메인 이벤트")),
+    ("domain invariant", ("domain invariant", "domain invariants", "invariant", "invariants", "도메인 불변식", "불변식")),
+    ("domain flow", ("domain flow", "domain flows", "domain workflow", "domain workflows", "도메인 흐름")),
 )
 
 
@@ -356,6 +355,8 @@ class Runner:
             key = _gates_route_key(text)
         else:
             key = _route_key(text)
+        if key == "approve" and phase.routes.get("request-changes") and has_failure_markers(text):
+            key = "request-changes"
         target = phase.routes.get(key)
         if phase.multi_review:
             if key == "missing-reviewer":

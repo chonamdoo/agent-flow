@@ -1,58 +1,103 @@
-# Review Angle — Clean Architecture
+# Review Angle - Clean Architecture
 
-You are reviewing this change through a **Clean Architecture lens**. The four layers are: **domain → usecase → data → presentation**. Inner layers must not depend on outer layers. Output strictly markdown findings.
+You are reviewing this change through `skills/clean-architecture/SKILL.md`.
+Output strictly markdown findings. Do not propose code unless asked.
 
 ## What to verify
 
-1. **Dependency direction**
-   - Does any domain module import from `data`, `presentation`, framework, or infrastructure?
-   - Does any usecase module import from `presentation`?
-   - Are framework imports (`androidx`, `org.springframework`, `react`, `flask`) confined to outer layers?
+1. Dependency rule
+   - Domain/Application imports no UI, DB, HTTP, SDK, or framework implementation.
+   - Presentation/UI/Controller/ViewModel/Handler depends on UseCase ports, not
+     Repository Impl, DataSource, or Cache implementation.
+   - UseCase Impl depends on Repository Interface, not Repository Impl.
 
-2. **Domain purity**
-   - Domain models are POJO/POKO/dataclass with no annotations from frameworks (`@Entity`, `@Serializable` from network libs, `@Composable`, etc).
-   - Repository interfaces live in domain; implementations live in data.
-   - No I/O (DB, HTTP, file) in domain.
+2. UseCase boundary
+   - One UseCase represents one user intent or application action.
+   - Interface + Impl exists when module size, public contract, feature calls, or
+     DI binding requires it.
+   - UseCase does not inject or call another UseCase directly.
+   - Shared flow logic is a Domain Service, Policy, pure function, or explicitly
+     named Application Workflow/Orchestrator.
+   - UseCase does not handle DTO, DB Entity, or UI Model.
 
-3. **Use case shape**
-   - One use case = one user intent. Use cases orchestrate domain + repositories, not multiple unrelated flows.
-   - Use case input/output types are domain-owned (not DTOs, not UI models).
-   - Use cases do not hold state across calls.
+3. Repository boundary
+   - Repository Interface is a domain/application port.
+   - Repository Impl is a data/infrastructure adapter.
+   - Repository is the single source of truth, not just an API wrapper.
+   - Repository Interface returns domain models only.
 
-4. **Data layer responsibilities**
-   - Mappers convert between data DTOs and domain models. The domain never sees a DTO.
-   - Caching, retry, batching, deduplication live here — not in domain or usecase.
-   - Errors are translated to domain-meaningful types before crossing the layer boundary.
+4. Cache boundary
+   - Cache is a data-layer detail behind an interface.
+   - MemoryCache and DiskCache are split when lifetime or change reason differs.
+   - Cache never exposes internal mutable storage.
+   - Restart-required data is not stored only in MemoryCache.
+   - Temporary data is not persisted to DiskCache without need.
 
-5. **Presentation isolation**
-   - ViewModels/Controllers depend on use cases or repository interfaces, not concrete data implementations.
-   - UI models are derived from domain models via mappers; no domain leakage into views (raw entity ids, internal flags).
-   - Side effects (navigation, toasts, persistence) flow through explicit interfaces, not direct calls.
+5. Mapping boundary
+   - Remote DTO, DB Entity, Domain Model, and UI Model are separate.
+   - Mapper sits at the boundary it crosses and only converts.
+   - No DTO/DB Entity is exposed as domain/application/presentation state.
+   - Domain Model has no ORM, serialization, or framework annotations.
+   - No giant mapper handles Remote DTO, DB Entity, and UI Model conversions together.
 
-6. **Cross-cutting**
-   - DI module wiring respects layer boundaries (domain modules do not bind framework types).
-   - Test code follows the same dependency direction (domain tests have no Android/framework imports).
+6. SOLID architecture validation
+   - SRP: separated by reason to change.
+   - OCP: extension points exist only at real variation points.
+   - LSP: implementations and fakes preserve interface contracts.
+   - ISP: consumers do not depend on unused methods.
+   - DIP: high-level policy depends on abstractions.
 
-7. **Layer crossings via interfaces**
-   - Every cross-layer call goes through an interface owned by the inner layer ("Dependency Inversion").
-   - No outer-layer concrete types appear in inner-layer signatures.
+## Must-fix policy
+
+Any violation listed as a must-fix in `skills/clean-architecture/SKILL.md` must
+produce `verdict: request-changes`.
+
+## Required completion gate
+
+The review artifact must include:
+
+```text
+## Completion Gate
+clean-architecture: applied
+dependency-rule: pass|fail
+usecase-boundary: pass|fail|n/a
+usecase-calls-usecase: pass|fail
+repository-boundary: pass|fail
+cache-boundary: pass|fail|n/a
+memory-disk-cache-separated: pass|fail|n/a
+mapping-boundary: pass|fail|n/a
+dto-entity-domain-ui-separated: pass|fail
+solid-boundary-check: pass|fail
+```
+
+For code-review or multi-review artifacts, include:
+
+```text
+## Completion Gate
+clean-architecture-review: applied
+usecase-interface-check: applied
+usecase-composition-check: applied
+cache-boundary-check: applied
+mapping-boundary-check: applied
+solid-clean-architecture-check: applied
+```
 
 ## Output format
 
-```
+```markdown
 ## Clean Architecture review findings
 
-### Must-fix (layer violations)
-- <severity:high> [path:line] <which layer is violated and how>. Why: <one sentence>.
+### Must-fix
+- <severity:high> [path:line] <boundary violation>. Why: <one sentence>.
 
-### Should-fix (boundary smells)
+### Should-fix
 - <severity:med> ...
 
-### Notes (style / future hardening)
+### Notes
 - <severity:low> ...
 
-### One thing this change got right (calibration)
-- ...
+### Overall
+verdict: approve | request-changes
 ```
 
-Cite paths as `path/to/file:line`. If a category is empty, write "none". Keep total under 250 lines. Be specific about which layer violation occurs in — "domain imports `okhttp`" beats "wrong dependency".
+Cite paths as `path/to/file:line`. If a category is empty, write `none`.

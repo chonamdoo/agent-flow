@@ -15,6 +15,41 @@ const installArgs = process.argv.slice(3);
 const forceManaged = installArgs.includes("--force-managed");
 let cachedFullFeatureWorkflow = null;
 const BUNDLED_HOST_SKILL_NAMES = new Set(["agent-flow"]);
+const PROFILE_MANAGED_HOST_ONLY_SKILLS = new Set([
+  "adaptive",
+  "android-cli",
+  "android-debugging",
+  "android-module-creator",
+  "android-mvi-feature",
+  "appfunctions",
+  "camera1-to-camerax",
+  "compose-animations",
+  "compose-focus-navigation",
+  "compose-modifier-and-layout-style",
+  "compose-recomposition-performance",
+  "compose-side-effects",
+  "compose-slot-api-pattern",
+  "compose-stability-diagnostics",
+  "compose-state-authoring",
+  "compose-state-deferred-reads",
+  "compose-state-hoisting",
+  "compose-state-holder-ui-split",
+  "compose-ui-testing-patterns",
+  "display-glasses-with-jetpack-compose-glimmer",
+  "edge-to-edge",
+  "engage-sdk-integration",
+  "kotlin-coroutines-structured-concurrency",
+  "kotlin-flow-state-event-modeling",
+  "kotlin-multiplatform-expect-actual",
+  "kotlin-types-value-class",
+  "navigation-3",
+  "perfetto-sql",
+  "perfetto-trace-analysis",
+  "play-billing-library-version-upgrade",
+  "r8-analyzer",
+  "testing-setup",
+  "verified-email",
+]);
 
 function installProject() {
   const requestedRoot = process.cwd();
@@ -77,7 +112,12 @@ function installProject() {
     architectureReviewerSkillMarkdown(),
   );
   writeManagedFile(path.join(agentFlowDir, "skills", "push-watch", "SKILL.md"), pushWatchSkillMarkdown());
-  copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "skills"), path.join(agentFlowDir, "skills"), forceManaged);
+  copyBundledDirIfMissingOrSame(
+    path.join(KIT_ROOT, "skills"),
+    path.join(agentFlowDir, "skills"),
+    forceManaged,
+    PROFILE_MANAGED_HOST_ONLY_SKILLS,
+  );
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "profiles"), path.join(agentFlowDir, "profiles"), forceManaged);
   const skillIndex = installProjectSkills(root, agentFlowDir, previousSkillIndex);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "scripts"), path.join(root, "scripts"), forceManaged);
@@ -156,12 +196,12 @@ function runWorkflowCommand(args) {
       throw new Error("run start requires --task");
     }
     const workflow = optionValue(args, "--workflow") ?? "full-feature";
-    if (workflow !== "full-feature") {
+    if (!["default", "full-feature"].includes(workflow)) {
       throw new Error(`unknown workflow: ${workflow}`);
     }
     const runId = optionValue(args, "--run-id") ?? newRunId();
     assertInstalled(root);
-    const phases = fullFeaturePhases();
+    const phases = workflowPhases(workflow);
     const runDir = path.join(root, ".agent-flow", "runs", workflow, runId);
     const runDirRel = path.join(".agent-flow", "runs", workflow, runId);
     if (fs.existsSync(runDir)) {
@@ -250,7 +290,7 @@ function runWorkflowCommand(args) {
       console.log(`workflow already complete: ${state.run_id}`);
       return;
     }
-    const phases = fullFeaturePhases();
+    const phases = workflowPhases(state.workflow);
     const phase = phases[state.phase_index];
     const artifact = path.join(runDir, phase.artifact);
     if (!fs.existsSync(artifact)) {
@@ -258,7 +298,7 @@ function runWorkflowCommand(args) {
     }
     assertFreshArtifact(state, phase, artifact);
     assertCompletionMarkers(phase, artifact);
-    const nextIndex = nextPhaseIndex(state, phase, artifact);
+    const nextIndex = nextPhaseIndex(state, phases, phase, artifact);
     const nextPhase = phases[nextIndex];
     const transitionedAt = new Date().toISOString();
     const fixLoopRounds = phase.id === "fix-loop"
@@ -311,6 +351,10 @@ function fullFeatureWorkflow() {
 
 function fullFeaturePhases() {
   return fullFeatureWorkflow().phases;
+}
+
+function workflowPhases(name) {
+  return name === "full-feature" ? fullFeaturePhases() : loadWorkflowDefinition(name).phases;
 }
 
 function exportWorkflowDefinition(name) {
@@ -592,6 +636,7 @@ function assertInstalled(root) {
     path.join(root, ".agent-flow", "skills", "product-brief", "SKILL.md"),
     path.join(root, ".agent-flow", "skills", "plan-reviewer", "SKILL.md"),
     path.join(root, ".agent-flow", "skills", "ddd-clean-architecture", "SKILL.md"),
+    path.join(root, ".agent-flow", "skills", "clean-architecture", "SKILL.md"),
     path.join(root, ".agent-flow", "skills", "architecture-reviewer", "SKILL.md"),
     path.join(root, ".agent-flow", "skills", "push-watch", "SKILL.md"),
     path.join(root, ".agent-flow", "skills", "code-generation-discipline", "SKILL.md"),
@@ -618,7 +663,7 @@ function normalizeRunState(root, state) {
   if (state.status === "complete" || state.phase === "complete") {
     return state;
   }
-  const index = fullFeaturePhases().findIndex((phase) => phase.id === state.phase);
+  const index = workflowPhases(state.workflow).findIndex((phase) => phase.id === state.phase);
   if (index === -1 || index === state.phase_index) {
     return state;
   }
@@ -696,7 +741,7 @@ function pullRequestWatchStatus(pr) {
 }
 
 function printNext(state) {
-  const phase = fullFeaturePhases()[state.phase_index];
+  const phase = workflowPhases(state.workflow)[state.phase_index];
   if (!phase) {
     console.log(`workflow complete: ${state.run_id}`);
     return;
@@ -708,7 +753,7 @@ function printNext(state) {
 }
 
 function printStatus(state, root) {
-  const phase = fullFeaturePhases()[state.phase_index];
+  const phase = workflowPhases(state.workflow)[state.phase_index];
   const resolvedRunDir = resolveRunDir(root, state.run_dir);
   const complete = state.status === "complete" || state.phase === "complete" || !phase;
   const requiredArtifact = phase ? path.join(state.run_dir, phase.artifact) : null;
@@ -728,7 +773,7 @@ function printStatus(state, root) {
       reason = "missing_completion_markers";
     } else {
       try {
-        nextPhaseIndex(state, phase, resolvedRequiredArtifact);
+        nextPhaseIndex(state, workflowPhases(state.workflow), phase, resolvedRequiredArtifact);
         reason = "phase_artifact_written_advance_required";
       } catch (_error) {
         reason = "route_blocked";
@@ -820,7 +865,7 @@ function writeManagedFileIfMissingOrSame(pathName, content, force = false) {
   return true;
 }
 
-function copyBundledDirIfMissingOrSame(src, dest, force = false) {
+function copyBundledDirIfMissingOrSame(src, dest, force = false, excludedRootDirs = new Set(), isRoot = true) {
   if (!fs.existsSync(src)) {
     return;
   }
@@ -829,7 +874,11 @@ function copyBundledDirIfMissingOrSame(src, dest, force = false) {
     const srcPath = path.join(src, entry.name);
     const destPath = path.join(dest, entry.name);
     if (entry.isDirectory()) {
-      copyBundledDirIfMissingOrSame(srcPath, destPath, force);
+      if (isRoot && excludedRootDirs.has(entry.name)) {
+        removeManagedDirIfSame(srcPath, destPath, force);
+        continue;
+      }
+      copyBundledDirIfMissingOrSame(srcPath, destPath, force, excludedRootDirs, false);
       continue;
     }
     if (!entry.isFile()) {
@@ -838,6 +887,46 @@ function copyBundledDirIfMissingOrSame(src, dest, force = false) {
     const content = fs.readFileSync(srcPath, "utf8");
     writeManagedFileIfMissingOrSame(destPath, content, force);
   }
+}
+
+function removeManagedDirIfSame(src, dest, force = false) {
+  if (!fs.existsSync(dest)) {
+    return;
+  }
+  if (!force && !dirContentsMatch(src, dest)) {
+    return;
+  }
+  fs.rmSync(dest, { recursive: true, force: true });
+}
+
+function dirContentsMatch(src, dest) {
+  if (!fs.existsSync(src) || !fs.existsSync(dest)) {
+    return false;
+  }
+  const srcEntries = fs.readdirSync(src, { withFileTypes: true });
+  const destEntries = fs.readdirSync(dest, { withFileTypes: true });
+  if (srcEntries.length !== destEntries.length) {
+    return false;
+  }
+  const destByName = new Map(destEntries.map((entry) => [entry.name, entry]));
+  for (const srcEntry of srcEntries) {
+    const destEntry = destByName.get(srcEntry.name);
+    if (!destEntry || srcEntry.isDirectory() !== destEntry.isDirectory() || srcEntry.isFile() !== destEntry.isFile()) {
+      return false;
+    }
+    const srcPath = path.join(src, srcEntry.name);
+    const destPath = path.join(dest, srcEntry.name);
+    if (srcEntry.isDirectory()) {
+      if (!dirContentsMatch(srcPath, destPath)) {
+        return false;
+      }
+      continue;
+    }
+    if (srcEntry.isFile() && fs.readFileSync(srcPath, "utf8") !== fs.readFileSync(destPath, "utf8")) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function installProjectSkills(root, agentFlowDir, previousIndex) {
@@ -860,7 +949,7 @@ function installProjectSkills(root, agentFlowDir, previousIndex) {
 
 function selectProjectSkills(root, agentFlowDir) {
   const discovered = [
-    ...discoverSkills(path.join(agentFlowDir, "local-skills"), "local", root),
+    ...discoverSkills(path.join(agentFlowDir, "local-skills"), "local", root, PROFILE_MANAGED_HOST_ONLY_SKILLS),
     ...discoverProjectSkills(root),
     ...discoverSkills(
       path.join(agentFlowDir, "skills"),
@@ -902,7 +991,7 @@ function discoverProjectSkills(root) {
   if (samePath(root, KIT_ROOT)) {
     return [];
   }
-  return discoverSkills(path.join(root, "skills"), "project", root);
+  return discoverSkills(path.join(root, "skills"), "project", root, PROFILE_MANAGED_HOST_ONLY_SKILLS);
 }
 
 function discoverSkills(baseDir, source, root, ignoredNames = new Set(), allowedNames = null) {
@@ -924,6 +1013,9 @@ function discoverSkills(baseDir, source, root, ignoredNames = new Set(), allowed
     }
     const text = fs.readFileSync(skillPath, "utf8");
     const metadata = parseSkillMetadata(text, entry.name);
+    if (ignoredNames.has(metadata.name)) {
+      continue;
+    }
     const relativePath = path.relative(root, skillPath);
     skills.push({
       name: metadata.name,
@@ -1454,8 +1546,37 @@ function missingMarkers(content, markers) {
   const lines = completionGateLines(content);
   return markers.filter((marker) => {
     const normalized = marker.trim().toLowerCase();
-    return !lines.some((line) => lineMatchesMarker(line, normalized));
+    return !markerPresent(content, lines, normalized);
   });
+}
+
+function markerPresent(content, gateLines, marker) {
+  if (marker.startsWith("#")) {
+    return headingPresent(content, marker);
+  }
+  return gateLines.some((line) => lineMatchesMarker(line, marker));
+}
+
+function headingPresent(content, marker) {
+  let inFence = false;
+  for (const line of content.split(/\r?\n/)) {
+    if (line.startsWith("    ") || line.startsWith("\t")) {
+      continue;
+    }
+    const stripped = line.trim();
+    const lowered = stripped.toLowerCase();
+    if (lowered.startsWith("```") || lowered.startsWith("~~~")) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) {
+      continue;
+    }
+    if (lowered.startsWith("#") && lowered === marker) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function completionGateLines(content) {
@@ -1515,9 +1636,17 @@ function lineMatchesMarker(line, marker) {
   return line === marker;
 }
 
+function artifactHasFailureMarkers(pathName) {
+  const content = fs.readFileSync(pathName, "utf8");
+  return completionGateLines(content).some((line) => {
+    const separator = line.indexOf(":");
+    return separator !== -1 && line.slice(separator + 1).trim() === "fail";
+  });
+}
+
 const FIX_LOOP_MAX_ROUNDS = 3;
 
-function nextPhaseIndex(state, phase, artifact) {
+function nextPhaseIndex(state, phases, phase, artifact) {
   if (phase.id === "fix-loop") {
     const rounds = (state.fix_loop_rounds ?? 0) + 1;
     if (rounds > FIX_LOOP_MAX_ROUNDS) {
@@ -1538,16 +1667,19 @@ function nextPhaseIndex(state, phase, artifact) {
     }
     throw new Error(`blocked: ${phase.id} route ${key}`);
   }
-  return phaseIndex(target);
+  return phaseIndex(phases, target);
 }
 
 function nodeRouteKey(phase, artifact) {
   if (phase.id === "gates") {
     return readGatesPassed(artifact) ? "green" : "request-changes";
   }
-  if (phase.id === "multi-review") {
+  if (phase.multi_review) {
     const verdict = readMultiReviewVerdict(artifact);
     if (verdict === "approve" || verdict === "request-changes") {
+      if (verdict === "approve" && phase.routes?.["request-changes"] && artifactHasFailureMarkers(artifact)) {
+        return "request-changes";
+      }
       return verdict;
     }
     throw new Error("blocked: multi-review artifact must include verdict: approve or verdict: request-changes");
@@ -1562,6 +1694,9 @@ function nodeRouteKey(phase, artifact) {
   if (phase.id === "plan-review" || phase.id === "architecture-review" || phase.id === "merge-approval") {
     const verdict = readArtifactVerdict(artifact);
     if (verdict) {
+      if (verdict === "approve" && phase.routes?.["request-changes"] && artifactHasFailureMarkers(artifact)) {
+        return "request-changes";
+      }
       return verdict;
     }
     throw new Error(`blocked: ${phase.id} artifact must include verdict`);
@@ -1569,8 +1704,8 @@ function nodeRouteKey(phase, artifact) {
   return readArtifactStatus(artifact) ?? readArtifactVerdict(artifact) ?? "default";
 }
 
-function phaseIndex(id) {
-  const index = fullFeaturePhases().findIndex((phase) => phase.id === id);
+function phaseIndex(phases, id) {
+  const index = phases.findIndex((phase) => phase.id === id);
   if (index === -1) {
     throw new Error(`unknown phase: ${id}`);
   }
@@ -1994,7 +2129,7 @@ function planReviewerSkillMarkdown() {
 }
 
 function dddCleanArchitectureSkillMarkdown() {
-  return `---\nname: ddd-clean-architecture\ndescription: Use during full-feature ddd-design and architecture-review phases.\n---\n\n# DDD Clean Architecture\n\nUse during full-feature ddd-design and architecture-review phases.\n\nDefault architecture is data / domain / presentation with optional shared.\n\nLayer rules:\n\n- domain owns entities, value objects, aggregates, use cases, repository interfaces, domain services, events, errors, policies, and specifications.\n- data owns repository implementations, API/DB clients, persistence models, mappers, and external integrations.\n- presentation owns controllers, routes, components, presenters, view models, and external input handling.\n- shared is optional and must contain only domain-free primitives such as Result, IDs, time, and common errors.\n\nDependency rules:\n\n- domain must not import data or presentation.\n- presentation calls domain use cases.\n- data implements domain repository interfaces.\n- presentation must not call data directly.\n- repository pattern uses interfaces in domain and implementations in data.\n\nDesign artifact must identify domain core modules and data / domain / presentation boundaries.\n`;
+  return `---\nname: ddd-clean-architecture\ndescription: Legacy compatibility shim for full-feature ddd-design and architecture-review phases. Prefer ddd-architecture first, then clean-architecture.\n---\n\n# DDD Clean Architecture\n\nThis legacy skill delegates responsibility:\n\n1. Apply \`skills/ddd-architecture/SKILL.md\` for Bounded Context, Ubiquitous Language, Entities, Value Objects, Aggregates, Domain Events, Domain Invariants, and Domain Flow.\n2. Apply \`skills/clean-architecture/SKILL.md\` for layer boundaries, dependency direction, UseCase ports/impls, Repository ports/adapters, Cache, Mapper, Composition Root, Testability, and SOLID architecture validation.\n\nDo not treat DDD and Clean Architecture as one responsibility. DDD defines the domain; Clean Architecture protects it with boundaries.\n`;
 }
 
 function architectureReviewerSkillMarkdown() {

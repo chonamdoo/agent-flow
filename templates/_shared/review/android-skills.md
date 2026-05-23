@@ -17,6 +17,7 @@ vendor Android skills. Do not load the same skill from multiple host paths. If a
 required local skill is missing from the current host path, stop approval and
 report `missing local android_skills: <skill>` or
 `missing local chrisbanes_skills: <skill>` with the profile source URL.
+If no Android/Kotlin/Compose/KMP files changed, mark the completion gate `n/a`.
 
 ## Review focus
 
@@ -39,3 +40,11 @@ report `missing local android_skills: <skill>` or
 Use the standard review angle output. Cite local skill paths used in Calibration.
 If a required local skill is missing, request changes with the missing skill and
 source URL.
+
+Include this completion gate:
+
+```text
+## Completion Gate
+android-local-skills: checked|n/a
+android-local-skills-used: <skill list or n/a>
+```

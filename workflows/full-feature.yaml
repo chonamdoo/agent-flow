@@ -69,14 +69,68 @@ phases:
       `verdict: request-changes`.
 
   - id: ddd-design
-    description: DDD and Clean Architecture design.
+    description: DDD first, then Clean Architecture design.
+    required_markers:
+      - "## Clean Architecture Boundary Map"
+      - "## Dependency Rule"
+      - "## Use Case Boundaries"
+      - "usecase-interface: required|optional|n/a"
+      - "usecase-composition: none|domain-service|application-service|orchestrator|justified"
+      - "## Repository Boundaries"
+      - "## Cache Boundary"
+      - "cache-required: yes|no"
+      - "memory-cache: required|optional|n/a"
+      - "disk-cache: required|optional|n/a"
+      - "cache-invalidation-policy:"
+      - "## Mapping Boundary"
+      - "remote-dto-domain-mapper: required|optional|n/a"
+      - "entity-domain-mapper: required|optional|n/a"
+      - "domain-ui-mapper: required|optional|n/a"
+      - "## Composition Root"
+      - "## Testability Boundary"
+      - "solid-srp-change-reason:"
+      - "solid-ocp-extension-points:"
+      - "solid-lsp-contracts:"
+      - "solid-isp-consumer-ports:"
+      - "solid-dip-dependency-direction:"
     prompt: |
-      Design using DDD and Clean Architecture boundaries. If architecture mode
-      is `ddd`, the artifact must include Bounded Context, Aggregates,
-      Entities, Value Objects, Application Use Cases, Infrastructure Adapters,
-      Presentation Routes, Dependency Rule, and Implementation Structure with
-      concrete paths/modules for the active stack. If DDD is not appropriate,
-      explicitly label the work as `service-layer refactor` instead of DDD.
+      Apply `skills/ddd-architecture/SKILL.md` first to model the domain:
+      Bounded Context, Ubiquitous Language, Entities, Value Objects,
+      Aggregates, Domain Events, Domain Invariants, and Domain Flow.
+      Then apply `skills/clean-architecture/SKILL.md` to define layer
+      boundaries, dependency direction, UseCase ports/impls, Repository
+      ports/adapters, Cache, Mapper, Composition Root, Testability, and SOLID
+      architecture validation.
+      Include these Clean Architecture subsections exactly:
+      - `## Clean Architecture Boundary Map`
+      - `## Dependency Rule`
+      - `## Use Case Boundaries`
+      - `## Repository Boundaries`
+      - `## Cache Boundary`
+      - `## Mapping Boundary`
+      - `## Composition Root`
+      - `## Testability Boundary`
+      If DDD is not appropriate, explicitly label the work as
+      `service-layer refactor` and still complete the Clean Architecture
+      boundary markers when code boundaries are touched.
+      End with:
+
+          ## Completion Gate
+          usecase-interface: required|optional|n/a
+          usecase-composition: none|domain-service|application-service|orchestrator|justified
+          cache-required: yes|no
+          memory-cache: required|optional|n/a
+          disk-cache: required|optional|n/a
+          cache-invalidation-policy: <policy or n/a>
+          remote-dto-domain-mapper: required|optional|n/a
+          entity-domain-mapper: required|optional|n/a
+          domain-ui-mapper: required|optional|n/a
+          solid-srp-change-reason: <summary>
+          solid-ocp-extension-points: <summary>
+          solid-lsp-contracts: <summary>
+          solid-isp-consumer-ports: <summary>
+          solid-dip-dependency-direction: <summary>
+
       Output: ddd-design.md.
 
   - id: worktree
@@ -100,16 +154,23 @@ phases:
     description: TDD red phase.
     required_markers:
       - "skills_checked: true"
+      - "android-local-skills: checked|n/a"
+      - "android-local-skills-used:"
     prompt: |
       Apply code-generation-discipline before writing tests. Write failing
       tests first. Read every matching language/framework skill before
-      writing tests. Save the failure summary and command output.
+      writing tests. For Android/Kotlin/Compose/KMP tests, read matching local
+      skills from the active Android profile's `android_skills` and
+      `chrisbanes_skills` through the current host path only. Save the failure
+      summary and command output.
       If a required local skill is missing, do not complete this artifact;
       report `missing local <group>: <skill>` with the source URL to the user.
       End with:
 
           ## Completion Gate
           skills_checked: true
+          android-local-skills: checked|n/a
+          android-local-skills-used: <skill list or n/a>
 
       Output: artifacts/red.log.
 
@@ -117,9 +178,16 @@ phases:
     description: TDD green phase.
     required_markers:
       - "skills_checked: true"
+      - "clean-architecture: applied"
+      - "android-local-skills: checked|n/a"
+      - "android-local-skills-used:"
     prompt: |
       Apply code-generation-discipline. Implement the minimum code to pass red
-      tests. Read every matching language/framework skill before writing code.
+      tests. Apply `skills/clean-architecture/SKILL.md`. Read every matching
+      language/framework skill before writing code. For
+      Android/Kotlin/Compose/KMP code, read matching local skills from the active
+      Android profile's `android_skills` and `chrisbanes_skills` through the
+      current host path only.
       New or modified code must include Korean comments. If a required local
       skill is missing, do not complete this artifact; report
       `missing local <group>: <skill>` with the source URL to the user.
@@ -127,6 +195,9 @@ phases:
 
           ## Completion Gate
           skills_checked: true
+          clean-architecture: applied
+          android-local-skills: checked|n/a
+          android-local-skills-used: <skill list or n/a>
 
       Output: artifacts/green.log.
 
@@ -134,17 +205,26 @@ phases:
     description: TDD refactor phase.
     required_markers:
       - "skills_checked: true"
+      - "clean-architecture: applied"
+      - "android-local-skills: checked|n/a"
+      - "android-local-skills-used:"
     prompt: |
       Apply code-generation-discipline. Refactor only after green. Keep
-      behavior stable, read every matching language/framework skill before
-      changing code, keep required Korean code comments, and summarize
-      structural changes.
+      behavior stable, apply `skills/clean-architecture/SKILL.md`, read every
+      matching language/framework skill before changing code, keep required
+      Korean code comments, and summarize structural changes. For
+      Android/Kotlin/Compose/KMP code, read matching local skills from the active
+      Android profile's `android_skills` and `chrisbanes_skills` through the
+      current host path only.
       If a required local skill is missing, do not complete this artifact;
       report `missing local <group>: <skill>` with the source URL to the user.
       End with:
 
           ## Completion Gate
           skills_checked: true
+          clean-architecture: applied
+          android-local-skills: checked|n/a
+          android-local-skills-used: <skill list or n/a>
 
       Output: refactor.md.
 
@@ -169,6 +249,14 @@ phases:
     multi_review: true
     required_markers:
       - "skills_checked: true"
+      - "clean-architecture-review: applied"
+      - "usecase-interface-check: applied"
+      - "usecase-composition-check: applied"
+      - "cache-boundary-check: applied"
+      - "mapping-boundary-check: applied"
+      - "solid-clean-architecture-check: applied"
+      - "android-local-skills: checked|n/a"
+      - "android-local-skills-used:"
     routes:
       approve: architecture-review
       request-changes: fix-loop
@@ -177,7 +265,8 @@ phases:
       reviewer uses code-reviewer.md as basis and
       outputs an independent verdict: approve or request-changes.
       For architecture/SOLID findings, reviewers also apply
-      solid-architecture-review.
+      `skills/clean-architecture/SKILL.md`; any must-fix condition from that
+      skill makes the overall verdict `request-changes`.
       Any request-changes from any reviewer makes the overall verdict
       request-changes. Default reviewers are active-host sub-agents (Codex
       sub-agent in Codex, Claude sub-agent in Claude, Gemini sub-agent in Gemini).
@@ -191,12 +280,23 @@ phases:
       Apply agent-flow-concise-output: one finding per line, Korean concise
       prose, no emoji, and parser verdict markers unchanged.
       Before judging code, read every matching language/framework local skill.
+      For Android/Kotlin/Compose/KMP changes, read matching local skills from
+      the active Android profile's `android_skills` and `chrisbanes_skills`
+      through the current host path only.
       If a required local skill is missing, do not complete this artifact;
       report `missing local <group>: <skill>` with the source URL to the user.
       Also include:
 
           ## Completion Gate
           skills_checked: true
+          clean-architecture-review: applied
+          usecase-interface-check: applied
+          usecase-composition-check: applied
+          cache-boundary-check: applied
+          mapping-boundary-check: applied
+          solid-clean-architecture-check: applied
+          android-local-skills: checked|n/a
+          android-local-skills-used: <skill list or n/a>
 
       Output: multi-review.md.
 
@@ -204,19 +304,28 @@ phases:
     description: Apply review and gate fixes. Runner always routes back to gates for re-verification.
     required_markers:
       - "skills_checked: true"
+      - "clean-architecture: applied"
+      - "android-local-skills: checked|n/a"
+      - "android-local-skills-used:"
     routes:
       default: gates
     prompt: |
       Apply code-generation-discipline while fixing review/gate failures. New
       or modified code must include Korean comments. Read every matching
       language/framework skill before writing or judging code, or record that
-      no fixes were required. If a required local skill is missing, do not
-      complete this artifact; report `missing local <group>: <skill>` with
-      the source URL to the user.
+      no fixes were required. Apply `skills/clean-architecture/SKILL.md` to
+      any boundary-affecting fix. For Android/Kotlin/Compose/KMP fixes, read
+      matching local skills from the active Android profile's `android_skills`
+      and `chrisbanes_skills` through the current host path only. If a required
+      local skill is missing, do not complete this artifact; report
+      `missing local <group>: <skill>` with the source URL to the user.
       End with:
 
           ## Completion Gate
           skills_checked: true
+          clean-architecture: applied
+          android-local-skills: checked|n/a
+          android-local-skills-used: <skill list or n/a>
 
       Output: fix-loop.md.
 
@@ -224,6 +333,18 @@ phases:
     description: Review implementation against DDD/Clean design. Runner routes approve→commit, request-changes→refactor.
     required_markers:
       - "skills_checked: true"
+      - "clean-architecture: applied"
+      - "dependency-rule: pass|fail"
+      - "usecase-boundary: pass|fail|n/a"
+      - "usecase-calls-usecase: pass|fail"
+      - "repository-boundary: pass|fail"
+      - "cache-boundary: pass|fail|n/a"
+      - "memory-disk-cache-separated: pass|fail|n/a"
+      - "mapping-boundary: pass|fail|n/a"
+      - "dto-entity-domain-ui-separated: pass|fail"
+      - "solid-boundary-check: pass|fail"
+      - "android-local-skills: checked|n/a"
+      - "android-local-skills-used:"
     routes:
       approve: commit
       request-changes: refactor
@@ -231,18 +352,35 @@ phases:
     prompt: |
       Compare code against domain-grill.md and ddd-design.md. Check layer
       violations, repository boundary leaks, naming drift, and dependency
-      direction. Apply solid-architecture-review for post-implementation SOLID
-      validation. Output architecture-review.md with exactly one verdict line:
+      direction. Apply `skills/ddd-architecture/SKILL.md` first for domain fit,
+      then `skills/clean-architecture/SKILL.md` for boundaries and SOLID
+      validation. Any Clean Architecture must-fix condition makes the verdict
+      `request-changes`. Output architecture-review.md with exactly one verdict line:
       `verdict: approve`, `verdict: request-changes`, or `verdict: blocked`.
       Apply agent-flow-concise-output for findings and keep verdict markers
       unchanged.
       Before judging code, read every matching language/framework local skill.
+      For Android/Kotlin/Compose/KMP changes, read matching local skills from
+      the active Android profile's `android_skills` and `chrisbanes_skills`
+      through the current host path only.
       If a required local skill is missing, do not complete this artifact;
       report `missing local <group>: <skill>` with the source URL to the user.
       End with:
 
           ## Completion Gate
           skills_checked: true
+          clean-architecture: applied
+          dependency-rule: pass|fail
+          usecase-boundary: pass|fail|n/a
+          usecase-calls-usecase: pass|fail
+          repository-boundary: pass|fail
+          cache-boundary: pass|fail|n/a
+          memory-disk-cache-separated: pass|fail|n/a
+          mapping-boundary: pass|fail|n/a
+          dto-entity-domain-ui-separated: pass|fail
+          solid-boundary-check: pass|fail
+          android-local-skills: checked|n/a
+          android-local-skills-used: <skill list or n/a>
 
   - id: commit
     description: Commit verified changes.

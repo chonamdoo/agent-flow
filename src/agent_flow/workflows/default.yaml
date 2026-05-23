@@ -20,6 +20,29 @@ phases:
       shared understanding plus the architectural blueprint. Mandatory for
       every project.
     cite_lore: true
+    required_markers:
+      - "## Clean Architecture Boundary Map"
+      - "## Dependency Rule"
+      - "## Use Case Boundaries"
+      - "usecase-interface: required|optional|n/a"
+      - "usecase-composition: none|domain-service|application-service|orchestrator|justified"
+      - "## Repository Boundaries"
+      - "## Cache Boundary"
+      - "cache-required: yes|no"
+      - "memory-cache: required|optional|n/a"
+      - "disk-cache: required|optional|n/a"
+      - "cache-invalidation-policy:"
+      - "## Mapping Boundary"
+      - "remote-dto-domain-mapper: required|optional|n/a"
+      - "entity-domain-mapper: required|optional|n/a"
+      - "domain-ui-mapper: required|optional|n/a"
+      - "## Composition Root"
+      - "## Testability Boundary"
+      - "solid-srp-change-reason:"
+      - "solid-ocp-extension-points:"
+      - "solid-lsp-contracts:"
+      - "solid-isp-consumer-ports:"
+      - "solid-dip-dependency-direction:"
     prompt: |
       Produce the unified design document. Sections in order:
 
@@ -41,15 +64,16 @@ phases:
       entries and never fabricate citations for lore that wasn't surfaced.
 
       ## 3. DDD model
+      Apply `skills/ddd-architecture/SKILL.md` first.
       - Aggregates (and consistency boundaries)
       - Bounded contexts touched (cross-context translations explicit)
       - Ubiquitous language terms (introduced or refined; mark which are new)
       - Domain events (past tense, minimal payload)
-      - Repository contracts (which aggregates need persistence)
       For trivial / non-domain changes (config, cosmetic), explicitly note
       "no domain model impact" and explain.
 
       ## 4. Clean Architecture layer map
+      Apply `skills/clean-architecture/SKILL.md` after the DDD model.
       Map every proposed change to: domain / usecase / data / presentation.
       For each layer touched, list:
       - Concrete additions (new types, new methods)
@@ -57,6 +81,15 @@ phases:
       - Cross-layer interfaces affected
       Verify dependency direction: inner layers must not import from outer.
       Reject any design that creates outward dependency from domain.
+      Include these subsections exactly:
+      - `## Clean Architecture Boundary Map`
+      - `## Dependency Rule`
+      - `## Use Case Boundaries`
+      - `## Repository Boundaries`
+      - `## Cache Boundary`
+      - `## Mapping Boundary`
+      - `## Composition Root`
+      - `## Testability Boundary`
 
       ## 5. SOLID check
       For each new class/module/function, verify:
@@ -77,6 +110,23 @@ phases:
       otherwise.
 
       Output: design.md (single artifact, all six sections).
+      End with:
+
+          ## Completion Gate
+          usecase-interface: required|optional|n/a
+          usecase-composition: none|domain-service|application-service|orchestrator|justified
+          cache-required: yes|no
+          memory-cache: required|optional|n/a
+          disk-cache: required|optional|n/a
+          cache-invalidation-policy: <policy or n/a>
+          remote-dto-domain-mapper: required|optional|n/a
+          entity-domain-mapper: required|optional|n/a
+          domain-ui-mapper: required|optional|n/a
+          solid-srp-change-reason: <summary>
+          solid-ocp-extension-points: <summary>
+          solid-lsp-contracts: <summary>
+          solid-isp-consumer-ports: <summary>
+          solid-dip-dependency-direction: <summary>
 
   - id: slice-plan
     description: Decompose the design into TDD-ready slices (≤50% context each).
@@ -118,6 +168,10 @@ phases:
       code is never written before a failing test exists.
     required_markers:
       - "gates: all_passed"
+      - "skills_checked: true"
+      - "clean-architecture: applied"
+      - "android-local-skills: checked|n/a"
+      - "android-local-skills-used:"
     prompt: |
       For each slice in slice-plan.md, in order, run the TDD cycle:
 
@@ -136,18 +190,24 @@ phases:
       ### GREEN — minimum production code
       5. Implement only what the failing tests demand. No "while I'm here"
          additions. No speculative abstractions.
-      6. Honor layer assignment from the design's Clean Architecture map.
+      6. Apply `skills/clean-architecture/SKILL.md` and honor layer assignment
+         from the design's Clean Architecture map.
+      6a. For Android/Kotlin/Compose/KMP files, read matching local skills from
+          the active Android profile's `android_skills` and `chrisbanes_skills`
+          through the current host path only. If required skills are missing,
+          report `missing local <group>: <skill>` with the source URL and do
+          not claim completion without user override.
       7. Honor SOLID principles from the design's SOLID section.
-      8. **Google Repository Pattern is mandatory** for any data layer
-         work in this slice:
-            - Repository interface lives in domain.
-            - RepositoryImpl in data layer composes LocalDataSource +
-              RemoteDataSource + Mapper.
-            - LocalDataSource is the single source of truth.
-            - DTOs never escape the data layer; mappers convert at the
-              boundary.
-            - Repository returns reactive streams or suspend functions of
-              **domain models**.
+      8. For any data layer work, enforce the repository boundary from
+         `skills/clean-architecture/SKILL.md`:
+            - Repository interface is the domain/application port.
+            - Repository implementation is the data/infrastructure adapter.
+            - Repository is the single source of truth.
+            - DTOs, DB entities, data sources, and cache implementations do
+              not escape the data layer.
+            - Mappers convert at the relevant boundary.
+         For Android profile work, also apply
+         `skills/android-guides/references/data-layer-guide.md`.
       9. Run tests. All must PASS.
       10. Run profile gates (build / lint as applicable). All must pass.
 
@@ -173,12 +233,36 @@ phases:
 
           ## Completion Gate
           gates: all_passed
+          skills_checked: true
+          clean-architecture: applied
+          android-local-skills: checked|n/a
+          android-local-skills-used: <skill list or n/a>
 
   - id: final-review
     description: |
       Final review. Requires at least two independent active-host reviewer
       sub-agents before approve. Profiles add stack-specific specialists on top.
     multi_review: true
+    required_markers:
+      - "skills_checked: true"
+      - "clean-architecture: applied"
+      - "dependency-rule: pass|fail"
+      - "usecase-boundary: pass|fail|n/a"
+      - "usecase-calls-usecase: pass|fail"
+      - "repository-boundary: pass|fail"
+      - "cache-boundary: pass|fail|n/a"
+      - "memory-disk-cache-separated: pass|fail|n/a"
+      - "mapping-boundary: pass|fail|n/a"
+      - "dto-entity-domain-ui-separated: pass|fail"
+      - "solid-boundary-check: pass|fail"
+      - "clean-architecture-review: applied"
+      - "usecase-interface-check: applied"
+      - "usecase-composition-check: applied"
+      - "cache-boundary-check: applied"
+      - "mapping-boundary-check: applied"
+      - "solid-clean-architecture-check: applied"
+      - "android-local-skills: checked|n/a"
+      - "android-local-skills-used:"
     routes:
       approve: commit
       request-changes: fix-loop
@@ -188,6 +272,7 @@ phases:
       non-host providers are optional extras when available:
         - Generalist (templates/_shared/review/architecture.md)
         - Architecture-design specialist (templates/_shared/review/architecture-design.md) — MANDATORY
+        - Clean Architecture specialist (templates/_shared/review/clean-architecture.md) — MANDATORY
         - Plus angles declared in profile.review_angles
       Each reviewer section must include `reviewer-source: sub-agent`.
       After recording each sub-agent result, close that sub-agent session.
@@ -195,16 +280,70 @@ phases:
       should-fix / note) and source angle. Cite paths as `path/to/file:line`.
       Apply agent-flow-concise-output: one finding per line, Korean concise
       prose, no emoji, and parser verdict markers unchanged.
+      Read every matching language/framework skill before review and record
+      `skills_checked: true`.
+      If `skills/clean-architecture/SKILL.md` is not applied, or any must-fix
+      condition from that skill is present, the overall verdict is
+      `verdict: request-changes`.
+      For Android/Kotlin/Compose/KMP changes, read matching local skills from
+      the active Android profile's `android_skills` and `chrisbanes_skills`
+      through the current host path only. If required skills are missing,
+      report `missing local <group>: <skill>` with the source URL and use
+      `verdict: request-changes`.
       End with `## Overall` followed by exactly one verdict line: `verdict: approve` or
       `verdict: request-changes`.
+      Also include:
+
+          ## Completion Gate
+          skills_checked: true
+          clean-architecture: applied
+          dependency-rule: pass|fail
+          usecase-boundary: pass|fail|n/a
+          usecase-calls-usecase: pass|fail
+          repository-boundary: pass|fail
+          cache-boundary: pass|fail|n/a
+          memory-disk-cache-separated: pass|fail|n/a
+          mapping-boundary: pass|fail|n/a
+          dto-entity-domain-ui-separated: pass|fail
+          solid-boundary-check: pass|fail
+          clean-architecture-review: applied
+          usecase-interface-check: applied
+          usecase-composition-check: applied
+          cache-boundary-check: applied
+          mapping-boundary-check: applied
+          solid-clean-architecture-check: applied
+          android-local-skills: checked|n/a
+          android-local-skills-used: <skill list or n/a>
 
   - id: fix-loop
     description: Address review findings (max 3 rounds). Tests stay green.
+    required_markers:
+      - "skills_checked: true"
+      - "clean-architecture: applied"
+      - "android-local-skills: checked|n/a"
+      - "android-local-skills-used:"
+    routes:
+      default: final-review
     prompt: |
       For each must-fix finding in final-review.md, apply the change. After
       each round, re-run all tests and profile gates — they must remain
       green. Cap at 3 rounds; escalate to user if must-fix list still has
-      items after round 3. Output: fix-loop.md.
+      items after round 3. Read every matching language/framework skill before
+      writing or judging code. Apply `skills/clean-architecture/SKILL.md` to
+      any boundary-affecting fix. For Android/Kotlin/Compose/KMP fixes, read
+      matching local skills from the active Android profile's `android_skills`
+      and `chrisbanes_skills` through the current host path only. If a required
+      local skill is missing, do not complete this artifact; report
+      `missing local <group>: <skill>` with the source URL to the user.
+      End with:
+
+          ## Completion Gate
+          skills_checked: true
+          clean-architecture: applied
+          android-local-skills: checked|n/a
+          android-local-skills-used: <skill list or n/a>
+
+      Output: fix-loop.md.
 
   - id: commit
     description: Stage and commit using profile.commit_convention.

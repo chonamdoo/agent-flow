@@ -20,6 +20,41 @@ const HOME = process.env.HOME || process.env.USERPROFILE || "";
 const PROJECT = resolveInstallProject(REQUESTED_PROJECT);
 const AF_DIR = path.join(PROJECT, ".agent-flow");
 const BUNDLED_HOST_SKILL_NAMES = new Set(["agent-flow"]);
+const PROFILE_MANAGED_HOST_ONLY_SKILLS = new Set([
+  "adaptive",
+  "android-cli",
+  "android-debugging",
+  "android-module-creator",
+  "android-mvi-feature",
+  "appfunctions",
+  "camera1-to-camerax",
+  "compose-animations",
+  "compose-focus-navigation",
+  "compose-modifier-and-layout-style",
+  "compose-recomposition-performance",
+  "compose-side-effects",
+  "compose-slot-api-pattern",
+  "compose-stability-diagnostics",
+  "compose-state-authoring",
+  "compose-state-deferred-reads",
+  "compose-state-hoisting",
+  "compose-state-holder-ui-split",
+  "compose-ui-testing-patterns",
+  "display-glasses-with-jetpack-compose-glimmer",
+  "edge-to-edge",
+  "engage-sdk-integration",
+  "kotlin-coroutines-structured-concurrency",
+  "kotlin-flow-state-event-modeling",
+  "kotlin-multiplatform-expect-actual",
+  "kotlin-types-value-class",
+  "navigation-3",
+  "perfetto-sql",
+  "perfetto-trace-analysis",
+  "play-billing-library-version-upgrade",
+  "r8-analyzer",
+  "testing-setup",
+  "verified-email",
+]);
 
 function ensureDir(p) {
   fs.mkdirSync(p, { recursive: true });
@@ -140,7 +175,7 @@ function detectProfile() {
   return "generic";
 }
 
-function copyDir(src, dest) {
+function copyDir(src, dest, excludedRootDirs = new Set(), isRoot = true) {
   // Recursive copy without overwriting user-modified files. If a file exists
   // at dest with different content, leave it (user customization wins) and
   // print a notice. Brand-new files are always written.
@@ -151,7 +186,13 @@ function copyDir(src, dest) {
     const srcPath = path.join(src, entry.name);
     const destPath = path.join(dest, entry.name);
     if (entry.isDirectory()) {
-      const r = copyDir(srcPath, destPath);
+      if (isRoot && excludedRootDirs.has(entry.name)) {
+        const r = removeDirIfSame(srcPath, destPath);
+        written += r.written;
+        skipped += r.skipped;
+        continue;
+      }
+      const r = copyDir(srcPath, destPath, excludedRootDirs, false);
       written += r.written;
       skipped += r.skipped;
     } else if (entry.isFile()) {
@@ -169,6 +210,37 @@ function copyDir(src, dest) {
     }
   }
   return { written, skipped };
+}
+
+function removeDirIfSame(src, dest) {
+  if (!fs.existsSync(dest)) return { written: 0, skipped: 0 };
+  if (!dirContentsMatch(src, dest)) return { written: 0, skipped: 1 };
+  fs.rmSync(dest, { recursive: true, force: true });
+  return { written: 1, skipped: 0 };
+}
+
+function dirContentsMatch(src, dest) {
+  if (!fs.existsSync(src) || !fs.existsSync(dest)) return false;
+  const srcEntries = fs.readdirSync(src, { withFileTypes: true });
+  const destEntries = fs.readdirSync(dest, { withFileTypes: true });
+  if (srcEntries.length !== destEntries.length) return false;
+  const destByName = new Map(destEntries.map((entry) => [entry.name, entry]));
+  for (const srcEntry of srcEntries) {
+    const destEntry = destByName.get(srcEntry.name);
+    if (!destEntry || srcEntry.isDirectory() !== destEntry.isDirectory() || srcEntry.isFile() !== destEntry.isFile()) {
+      return false;
+    }
+    const srcPath = path.join(src, srcEntry.name);
+    const destPath = path.join(dest, srcEntry.name);
+    if (srcEntry.isDirectory()) {
+      if (!dirContentsMatch(srcPath, destPath)) return false;
+      continue;
+    }
+    if (srcEntry.isFile() && fs.readFileSync(srcPath, "utf8") !== fs.readFileSync(destPath, "utf8")) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function copyFileIfMissingOrSame(src, dest) {
@@ -230,7 +302,7 @@ function installProjectSkills() {
 
 function selectProjectSkills() {
   const discovered = [
-    ...discoverSkills(path.join(AF_DIR, "local-skills"), "local"),
+    ...discoverSkills(path.join(AF_DIR, "local-skills"), "local", PROFILE_MANAGED_HOST_ONLY_SKILLS),
     ...discoverProjectSkills(),
     ...discoverSkills(path.join(AF_DIR, "skills"), "bundled", new Set(), BUNDLED_HOST_SKILL_NAMES),
   ];
@@ -262,7 +334,7 @@ function discoverProjectSkills() {
   if (samePath(PROJECT, KIT_ROOT)) {
     return [];
   }
-  return discoverSkills(path.join(PROJECT, "skills"), "project");
+  return discoverSkills(path.join(PROJECT, "skills"), "project", PROFILE_MANAGED_HOST_ONLY_SKILLS);
 }
 
 function discoverSkills(baseDir, source, ignoredNames = new Set(), allowedNames = null) {
@@ -276,6 +348,7 @@ function discoverSkills(baseDir, source, ignoredNames = new Set(), allowedNames 
     if (!fs.existsSync(skillPath)) continue;
     const text = fs.readFileSync(skillPath, "utf8");
     const metadata = parseSkillMetadata(text, entry.name);
+    if (ignoredNames.has(metadata.name)) continue;
     const relativePath = path.relative(PROJECT, skillPath);
     skills.push({
       name: metadata.name,
@@ -519,6 +592,7 @@ function install() {
   const skillsCopied = copyDir(
     path.join(KIT_ROOT, "skills"),
     path.join(AF_DIR, "skills"),
+    PROFILE_MANAGED_HOST_ONLY_SKILLS,
   );
   const skillIndex = installProjectSkills();
   const workflowsCopied = copyDir(

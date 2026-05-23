@@ -861,6 +861,32 @@ def test_default_final_review_request_changes_routes_to_fix_loop(tmp_path: Path)
     assert runner._next_index(0, runner.phases[0]) == (0, True)
 
 
+def test_review_fail_marker_overrides_approve_verdict(tmp_path: Path):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.runner import Phase, Runner
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "final-review.md").write_text(
+        "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
+        "## Reviewer 2\nreviewer-source: sub-agent\nreviewer-2 verdict: approve\n\n"
+        "## Overall\nverdict: approve\n\n"
+        "## Completion Gate\n"
+        "dependency-rule: fail\n",
+        encoding="utf-8",
+    )
+
+    runner = Runner.__new__(Runner)
+    runner.run_dir = run_dir
+    runner.phases = [
+        Phase(id="final-review", description="", multi_review=True, routes={"approve": "commit", "request-changes": "fix-loop"}),
+        Phase(id="fix-loop", description=""),
+        Phase(id="commit", description=""),
+    ]
+
+    assert runner._next_index(0, runner.phases[0]) == (1, False)
+
+
 def test_route_key_requires_exact_status_or_verdict_lines():
     from agent_flow.runner import _route_key
 
@@ -1021,6 +1047,42 @@ def test_required_markers_block_incomplete_artifact(tmp_path: Path):
     assert runner._missing_required_markers(phase) == ["context_docs_updated: true|not_needed"]
     (run_dir / "domain-grill.md").write_text("## Completion Gate\ncontext_docs_updated: not_needed\n", encoding="utf-8")
     assert runner._missing_required_markers(phase) == []
+
+    phase = Phase(
+        id="domain-grill",
+        description="",
+        required_markers=("## Clean Architecture Boundary Map", "dependency-rule: pass|fail"),
+    )
+    (run_dir / "domain-grill.md").write_text(
+        "## Clean Architecture Boundary Map\n"
+        "notes\n"
+        "## Completion Gate\n"
+        "dependency-rule: pass\n",
+        encoding="utf-8",
+    )
+    assert runner._missing_required_markers(phase) == []
+
+    (run_dir / "domain-grill.md").write_text(
+        "```\n"
+        "## Clean Architecture Boundary Map\n"
+        "```\n"
+        "## Completion Gate\n"
+        "dependency-rule: pass\n",
+        encoding="utf-8",
+    )
+    assert runner._missing_required_markers(phase) == ["## Clean Architecture Boundary Map"]
+
+    phase = Phase(
+        id="domain-grill",
+        description="",
+        required_markers=("android-local-skills: checked|n/a",),
+    )
+    (run_dir / "domain-grill.md").write_text(
+        "## Completion Gate\n"
+        "android-local-skills: missing\n",
+        encoding="utf-8",
+    )
+    assert runner._missing_required_markers(phase) == ["android-local-skills: checked|n/a"]
 
 
 def test_runner_uses_normalized_artifact_path(tmp_path: Path):
@@ -1228,7 +1290,7 @@ def test_ddd_architecture_review_blocks_incomplete_design_artifact(tmp_path: Pat
     text = (run_dir / "architecture-review.md").read_text(encoding="utf-8")
     assert "verdict: blocked" in text
     assert "`aggregate`" in text
-    assert "`implementation structure`" in text
+    assert "`domain flow`" in text
     assert runner._next_index(0, phase) == (0, True)
 
 
@@ -1245,14 +1307,13 @@ def test_ddd_architecture_review_rechecks_stale_blocked_artifact(tmp_path: Path)
     (run_dir / "ddd-design.md").write_text(
         "# ddd-design\n\n"
         "## Bounded Context\n"
+        "## Ubiquitous Language\n"
         "## Aggregates\n"
         "## Entities\n"
         "## Value Objects\n"
-        "## Application Use Cases\n"
-        "## Infrastructure Adapters\n"
-        "## Presentation Routes\n"
-        "## Dependency Rule\n"
-        "## Implementation Structure\n",
+        "## Domain Events\n"
+        "## Domain Invariants\n"
+        "## Domain Flow\n",
         encoding="utf-8",
     )
 
@@ -1300,9 +1361,9 @@ def test_ddd_design_validation_ignores_body_paragraph_labels(tmp_path: Path):
     (run_dir / "ddd-design.md").write_text(
         "# ddd-design\n\n"
         "This paragraph mentions Bounded Context: Market data, Aggregates: Trade,\n"
-        "Entities: Position, Value Objects: Price, Application Use Cases: Import,\n"
-        "Infrastructure Adapters: Broker, Presentation Routes: Dashboard,\n"
-        "Dependency Rule: inward, and Implementation Structure: packages.\n"
+        "Ubiquitous Language: trade desk, Entities: Position, Value Objects: Price,\n"
+        "Domain Events: Trade Imported, Domain Invariants: balanced position,\n"
+        "and Domain Flow: import trades.\n"
         "It also says this is not a service-layer refactor.\n",
         encoding="utf-8",
     )
@@ -1310,7 +1371,7 @@ def test_ddd_design_validation_ignores_body_paragraph_labels(tmp_path: Path):
     missing = _missing_ddd_design_terms(run_dir)
 
     assert "bounded context" in missing
-    assert "implementation structure" in missing
+    assert "domain flow" in missing
     assert "ddd mode cannot be service-layer refactor" not in missing
 
 
@@ -1323,14 +1384,13 @@ def test_ddd_design_validation_accepts_markdown_heading_and_list_labels(tmp_path
     (run_dir / "ddd-design.md").write_text(
         "# ddd-design\n\n"
         "## Bounded Context\n"
+        "## Ubiquitous Language\n"
         "- Aggregates: Trade Journal\n"
         "- Entities: Entry\n"
         "- Value Objects: Money\n"
-        "- Application Use Cases: Import Trades\n"
-        "- Infrastructure Adapters: Exchange Client\n"
-        "- Presentation Routes: Dashboard\n"
-        "- Dependency Rule: domain inward\n"
-        "- Implementation Structure: src/domain src/data\n",
+        "- Domain Events: Trade Imported\n"
+        "- Domain Invariants: Entry amount is non-zero\n"
+        "- Domain Flow: Import creates journal entries\n",
         encoding="utf-8",
     )
 
@@ -1404,9 +1464,10 @@ def test_multi_review_jobs_include_mandatory_baseline(tmp_path: Path):
     run_dir.mkdir()
 
     jobs = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
-    assert [job.angle_id for job in jobs] == ["generalist", "architecture-design"]
+    assert [job.angle_id for job in jobs] == ["generalist", "architecture-design", "clean-architecture"]
     assert "Review Angle" in jobs[0].prompt
     assert "Architecture Design" in jobs[1].prompt
+    assert "Clean Architecture" in jobs[2].prompt
 
 
 def test_multi_review_jobs_dedupe_profile_baseline(tmp_path: Path):
@@ -1435,6 +1496,7 @@ def test_multi_review_jobs_dedupe_profile_baseline(tmp_path: Path):
     assert [job.angle_id for job in jobs] == [
         "generalist",
         "architecture-design",
+        "clean-architecture",
         "compose-stability",
     ]
 
@@ -1460,7 +1522,7 @@ def test_multi_review_profile_can_override_baseline_prompt(tmp_path: Path):
     run_dir.mkdir()
 
     jobs = _reviewer_jobs(phase, run_dir, project, adapter)
-    assert [job.angle_id for job in jobs] == ["generalist", "architecture-design"]
+    assert [job.angle_id for job in jobs] == ["generalist", "architecture-design", "clean-architecture"]
     assert "custom prompt body" in jobs[0].prompt
 
 
@@ -1554,7 +1616,7 @@ def test_multi_review_packaged_prompt_survives_project_templates_dir(tmp_path: P
     run_dir.mkdir()
 
     jobs = _reviewer_jobs(phase, run_dir, project, adapter)
-    assert [job.angle_id for job in jobs] == ["generalist", "architecture-design"]
+    assert [job.angle_id for job in jobs] == ["generalist", "architecture-design", "clean-architecture"]
     assert "Review Angle" in jobs[0].prompt
 
 
