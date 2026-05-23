@@ -1,78 +1,72 @@
 ---
 name: ddd-architecture
-description: |
-  DDD + Clean Architecture design skill for agent-flow's `design` and
-  `final-review` phases. Defines the principles, the design output format,
-  and how the skill is invoked from the workflow. Bundled by agent-flow and
-  copied into project skills on install.
-version: 1
+description: Domain-Driven Design skill for agent-flow design and final-review phases. Use when modeling bounded contexts, ubiquitous language, entities, value objects, aggregates, domain events, domain invariants, and domain flows; apply clean-architecture afterward when layer boundaries or dependency direction are involved.
+version: 2
 trigger:
   - "design"
   - "architecture"
   - "DDD"
-  - "Clean Architecture"
+  - "Domain-Driven Design"
   - "Bounded Context"
-  - "use case"
+  - "Aggregate"
+  - "Entity"
+  - "Value Object"
 phases_invoked: [design, final-review]
 ---
 
 # ddd-architecture skill
 
-This skill drives the `design` phase (interview + spec + DDD model + Clean
-Architecture map + SOLID check) and the `final-review` phase's
-`architecture-design` review angle. Apply with judgment — collapse principles
-that don't apply to the task at hand. A 1-line config change does not need a
-Bounded Context map; a new feature module does.
+This skill covers domain modeling only. It answers "what is the domain?"
+For layer boundaries, dependency direction, UseCase port/impl boundaries,
+Repository port/adapter boundaries, Cache, Mapper, Composition Root,
+Testability, and SOLID architecture validation, apply
+`skills/clean-architecture/SKILL.md` after this skill.
+
+When both DDD and Clean Architecture are needed, apply order is:
+
+1. `ddd-architecture`: define domain terms, contexts, models, invariants, and flows.
+2. `clean-architecture`: protect that model with layers, ports, adapters, and dependency rules.
 
 ## Core principles
 
-These are defaults; profiles or projects may opt out where they don't fit.
+These are defaults; profiles or projects may opt out where they do not fit.
 
-- **Clean Architecture** — dependency direction inward. Domain has no
-  framework / DB / network imports. Repository **interface** in domain;
-  implementation in data.
-- **DDD Tactical Design** (when domain modeling applies) — Entity, Value
-  Object, Aggregate, Domain Service distinguished. Aggregate root is the
-  only mutation entry point. Cross-aggregate references by id.
-- **Vertical Slices** — feature-based folders, not horizontal `controllers/`
-  / `services/` layers as the top-level organizing principle.
-- **Ubiquitous Language** — names in code match the domain expert's terms.
-- **SOLID** — applied to new abstractions. Trivial code without new
-  abstractions is exempt.
-- **CQRS** — Command and Query use cases distinguished where it adds value
-  (high-traffic reads, different data shapes). Not mandatory.
-- **No side effects in domain** — entities are pure. Side effects (DB,
-  HTTP, clock) injected as interfaces.
-- **Google Repository Pattern** — applies to projects that have a data
-  layer. Repository = single source of truth. Composes `LocalDataSource`
-  + `RemoteDataSource` + `Mapper`. Returns reactive streams or suspend
-  functions of **domain models** (never DTOs). Cache / retry / error
-  translation lives in Repository. *Skip this section entirely if the
-  project has no data layer (pure CLI tool, library, etc).*
+- **Bounded Context** — define where each domain term has one meaning. Cross-context
+  relationships are explicit: partnership, customer-supplier, conformist, ACL,
+  open-host, or separate-way.
+- **Ubiquitous Language** — code names match stakeholder terms. Transport,
+  persistence, and UI vocabulary must not rename domain concepts.
+- **Entity** — identity matters across time. Behavior and invariants that belong
+  to the entity stay on the entity.
+- **Value Object** — identity does not matter. Equality is value-based and
+  invalid states are rejected at construction.
+- **Aggregate** — consistency boundary. Aggregate root is the mutation entry
+  point. Cross-aggregate references use identity, not object references.
+- **Domain Event** — past-tense fact about a meaningful state transition. Payload
+  is minimal: ids plus essential context.
+- **Domain Invariant** — business rule protected by aggregate/entity/value object,
+  not scattered in controllers or persistence adapters.
+- **Domain Flow** — describe the business sequence in domain terms before
+  implementation details.
 
-## Output: `design.md` sections
+## Output: DDD sections
 
-The `design` phase produces a single `design.md` with these sections, in
-order. Sections that don't apply may be marked "n/a — \<one-line why\>" and
-skipped.
+Design artifacts that need domain modeling should include:
 
-1. **Architecture Overview** — layer breakdown + vertical slices used.
-2. **Bounded Context Map** — context boundaries; cross-context relationships
-   (partnership / customer-supplier / conformist / ACL / open-host).
-3. **Domain Model** — Aggregate roots, Value Objects, Domain Events,
-   key invariants.
-4. **Use Cases (CQRS where applicable)** — Command/Query specs, I/O types.
-5. **File Structure** — folder layout (domain/usecase/data/presentation per
-   slice). Data layer specifics (Repository / LocalDataSource /
-   RemoteDataSource / Mapper) when applicable.
-6. **Validation Check** — short summary of how the design honors each
-   principle that applies; explicit "n/a" for those that don't.
+1. **Bounded Context Map** — contexts touched; relationship type; translations.
+2. **Ubiquitous Language** — new/refined terms and rejected ambiguous terms.
+3. **Domain Model** — Entities, Value Objects, Aggregates, Domain Services.
+4. **Domain Events** — emitted facts, payload, and consumers when known.
+5. **Domain Invariants** — where each invariant is enforced.
+6. **Domain Flow** — user/business flow using domain language.
 
-## Invocation from agent-flow
+Sections that do not apply may be marked `n/a - <one-line reason>`.
 
-- **`design` phase** — produces `design.md` (the six sections above).
-- **`final-review` phase** — applied as the `architecture-design` review
-  angle (`templates/_shared/review/architecture-design.md`). The review
-  checks the implemented diff against the design's claims.
-- For post-implementation SOLID validation, use
-  `solid-architecture-review`.
+## Review focus
+
+- Domain language drift.
+- Persistence/transport/UI names leaking into domain names.
+- Missing or oversized aggregate boundaries.
+- Invariants enforced outside the domain model.
+- Domain events named as commands instead of facts.
+- Anemic models caused by moving domain behavior into procedural services.

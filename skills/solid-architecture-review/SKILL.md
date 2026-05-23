@@ -1,6 +1,6 @@
 ---
 name: solid-architecture-review
-description: Implementation review skill for SOLID principles, Clean Architecture boundaries, dependency direction, responsibility separation, interface contracts, substitutability, abstraction quality, and testability across languages and frameworks. Use during final-review, multi-review, architecture-review, or code-review after implementation.
+description: Legacy detailed SOLID review reference for responsibility separation, interface contracts, substitutability, abstraction quality, and testability across languages and frameworks. Prefer clean-architecture for required Clean Architecture boundary markers; use this only when a deeper SOLID explanation is needed during final-review, multi-review, architecture-review, or code-review.
 version: 1
 trigger:
   - "SOLID"
@@ -19,7 +19,10 @@ phases_invoked: [final-review, multi-review, architecture-review, code-review]
 
 # solid-architecture-review skill
 
-This skill reviews implemented code against SOLID principles and Clean Architecture boundaries.
+This is a legacy detailed SOLID reference. Required Clean Architecture boundary
+markers and must-fix policy live in `skills/clean-architecture/SKILL.md`.
+Apply `clean-architecture` first, then use this file only when deeper SOLID
+reasoning is needed.
 
 It is stack-agnostic by default. Apply the rules to the project's actual language, framework, and architecture style. When stack-specific skills exist, combine this skill with them instead of duplicating framework details here.
 

@@ -95,17 +95,14 @@ class Adapter(ABC):
                 return (
                     "\n## Architecture mode: `ddd`\n\n"
                     "DDD is explicit for this run. Do not complete this phase "
-                    "as a shallow service split. Design and verify native "
-                    "package/module boundaries for the active stack. Examples: "
-                    "`api/domain` for Python APIs, feature/domain modules for "
-                    "iOS, packages for JVM, or app/lib boundaries for Next.js. "
+                    "as a shallow service split. Model the domain vocabulary, "
+                    "context boundaries, objects, events, invariants, and "
+                    "domain flow before Clean Architecture boundary checks. "
                     "If the artifact rejects DDD, label the work `service-layer "
                     "refactor` instead.\n\n"
                     "Required design vocabulary: Bounded Context, Aggregates, "
-                    "Entities, Value Objects, Application Use Cases, "
-                    "Infrastructure Adapters, Presentation Routes, Dependency "
-                    "Rule, and an implementation structure map with concrete "
-                    "paths/modules for this project.\n"
+                    "Ubiquitous Language, Entities, Value Objects, Domain "
+                    "Events, Domain Invariants, and Domain Flow.\n"
                 )
         if self._architecture == "service-layer":
             return (

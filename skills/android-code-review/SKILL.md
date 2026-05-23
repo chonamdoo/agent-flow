@@ -39,12 +39,16 @@ Do not install, copy, link, vendor, or fallback to another host path. If a
 required local skill is missing, stop approval and report
 `missing local android_skills: <skill>` or
 `missing local chrisbanes_skills: <skill>` with the profile source URL.
+Record `android-local-skills: checked|n/a` and
+`android-local-skills-used: <skill list or n/a>` in the review artifact's
+`## Completion Gate`.
 
 ## Review Order
 
 1. Scope: changed files, affected modules, generated files, Gradle changes.
 2. Requirement fit: what the user asked for versus what changed.
-3. Architecture: dependency direction and layer ownership.
+3. Architecture: apply `clean-architecture` for dependency direction and layer
+   ownership, then Android-specific guides for platform details.
 4. UI state: loading/success/empty/error, event handling, lifecycle collection.
 5. Compose: stability, recomposition risk, lazy list keys, remembered work.
 6. Coroutine/Flow: cancellation, dispatcher choice, race conditions.
@@ -83,6 +87,7 @@ Approve only when:
 
 - `../android-guides/references/code-review-checklist.md`
 - `../android-guides/references/architecture-rules-guide.md`
+- `../clean-architecture/SKILL.md`
 - `../android-guides/references/compose-performance-guide.md`
 - `../android-guides/references/kotlin-concurrency-guide.md`
 - `../android-guides/references/data-layer-guide.md`

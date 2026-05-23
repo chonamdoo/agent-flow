@@ -60,13 +60,14 @@ def _template_name(adapter: str) -> str:
 def _architecture_guidance(architecture: str) -> str:
     if architecture == "ddd":
         return (
-            "DDD mode. Require language-agnostic DDD boundaries for the active "
-            "stack: domain, application/use-case, infrastructure, and "
-            "presentation. The design must include Bounded Context, Aggregates, "
-            "Entities, Value Objects, Application Use Cases, Infrastructure "
-            "Adapters, Presentation Routes, Dependency Rule, and concrete "
-            "implementation structure paths/modules. If DDD is not appropriate, "
-            "label the work `service-layer refactor` instead."
+            "DDD mode. Require language-agnostic domain modeling for the active "
+            "stack. The design must include Bounded Context, Ubiquitous "
+            "Language, Aggregates, Entities, Value Objects, Domain Events, "
+            "Domain Invariants, and Domain Flow. Layer boundaries, dependency "
+            "direction, ports, adapters, and implementation structure are "
+            "validated by the clean-architecture skill and its required "
+            "markers. If DDD is not appropriate, label the work "
+            "`service-layer refactor` instead."
         )
     if architecture == "service-layer":
         return (

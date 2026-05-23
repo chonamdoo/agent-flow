@@ -21,6 +21,7 @@ Use this as the common implementation discipline. Do not score it. Apply it as a
   - React Web, Next.js, or TSX component/hook/rendering/accessibility changes: read `react-development-guide`.
   - React Native, Expo, Metro, navigation, permissions, native bridge, or RN app UI changes: read `react-native-development-guide`.
   - Android, Kotlin, Jetpack Compose, or KMP files: read every relevant local skill from the active Android profile's `android_skills` and `chrisbanes_skills`.
+- If Android/Kotlin/Compose/KMP files are changed, record `android-local-skills: checked|n/a` and `android-local-skills-used: <skill list or n/a>` in the phase artifact's `## Completion Gate`.
 - If a required language/framework skill is not installed at the active host path, report `missing local <group>: <skill>` with the configured source URL and do not proceed until the user installs it or explicitly overrides.
 
 ## During Implementation

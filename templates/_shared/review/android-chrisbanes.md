@@ -11,3 +11,5 @@ the profile source URL. Current host paths are Codex
 `~/.codex/skills/{skill}/SKILL.md`, Claude
 `~/.claude/skills/{skill}/SKILL.md`, and Antigravity
 `~/.agents/skills/{skill}/SKILL.md`. Cite the skill paths used in Calibration.
+End review artifacts with `android-local-skills: checked|n/a` and
+`android-local-skills-used: <skill list or n/a>` in `## Completion Gate`.

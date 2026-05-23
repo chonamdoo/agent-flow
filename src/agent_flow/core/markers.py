@@ -21,8 +21,35 @@ def missing_markers(text: str, markers: tuple[str, ...]) -> list[str]:
     return [
         marker
         for marker in markers
-        if not any(_line_matches_marker(line, marker.strip().lower()) for line in lines)
+        if not _marker_present(text, lines, marker.strip().lower())
     ]
+
+
+def has_failure_markers(text: str) -> bool:
+    return any(_line_has_failure_marker(line) for line in _completion_gate_lines(text))
+
+
+def _marker_present(text: str, gate_lines: list[str], marker: str) -> bool:
+    if marker.startswith("#"):
+        return _heading_present(text, marker)
+    return any(_line_matches_marker(line, marker) for line in gate_lines)
+
+
+def _heading_present(text: str, marker: str) -> bool:
+    in_fence = False
+    for line in text.splitlines():
+        if line.startswith("    ") or line.startswith("\t"):
+            continue
+        stripped = line.strip()
+        lowered = stripped.lower()
+        if lowered.startswith("```") or lowered.startswith("~~~"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        if lowered.startswith("#") and lowered == marker:
+            return True
+    return False
 
 
 def _completion_gate_lines(text: str) -> list[str]:
@@ -50,6 +77,11 @@ def _completion_gate_lines(text: str) -> list[str]:
         if in_gate:
             out.append(stripped.lower())
     return out
+
+
+def _line_has_failure_marker(line: str) -> bool:
+    _key, separator, value = line.partition(":")
+    return separator == ":" and value.strip() == "fail"
 
 
 def _line_matches_marker(line: str, marker: str) -> bool:

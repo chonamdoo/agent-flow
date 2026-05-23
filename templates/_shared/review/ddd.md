@@ -26,10 +26,11 @@ You are reviewing this change through a **DDD lens**. The code under review is p
    - Is behavior on the entity/aggregate, or scattered into utility services?
    - Are domain rules expressed as methods, not branches in callers?
 
-6. **Repository contract**
-   - Does the repository interface live in the domain layer (not infrastructure)?
-   - Does it return aggregates, not rows / DTOs?
-   - Are queries domain-meaningful (`findActiveOrdersFor(customerId)`) rather than generic CRUD?
+6. **Clean Architecture handoff**
+   - If layer boundaries, repository ports/adapters, use cases, caches, or mappers
+     are involved, did the artifact apply `clean-architecture` after this DDD pass?
+   - Do not duplicate Clean Architecture findings here; record only the domain
+     model issue and let the Clean Architecture angle judge dependency boundaries.
 
 ## Output format
 
