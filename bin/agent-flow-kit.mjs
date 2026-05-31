@@ -1957,6 +1957,7 @@ Follow the CLI output exactly. If no run is active, start with \`${AGENT_FLOW_CO
 - 프로젝트 skill은 \`skills/<name>/SKILL.md\` 또는 private \`.agent-flow/local-skills/<name>/SKILL.md\`에 둔다.
 - install/bootstrap 후 \`.agent-flow/skills/index.json\` metadata를 보고 필요한 skill만 읽는다. 모든 SKILL.md 전문을 항상 읽지 않는다.
 - Claude/Codex/Gemini/Antigravity 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.
+- Claude hook이 자동 차단하는 보호 브랜치 commit/push와 leader checkout/switch 금지는 Codex에서도 동일하게 지킨다.
 
 ${end}
 `;
@@ -2035,6 +2036,7 @@ Follow the CLI output exactly. Git projects start inside \`.agent-flow/worktrees
 - 프로젝트 skill은 \`skills/<name>/SKILL.md\` 또는 private \`.agent-flow/local-skills/<name>/SKILL.md\`에 둔다.
 - install/bootstrap 후 \`.agent-flow/skills/index.json\` metadata를 보고 필요한 skill만 읽는다. 모든 SKILL.md 전문을 항상 읽지 않는다.
 - Claude/Codex/Gemini/Antigravity 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.
+- Claude hook이 자동 차단하는 보호 브랜치 commit/push와 leader checkout/switch 금지는 Codex에서도 동일하게 지킨다.
 
 During code generation, modification, and code review phases, apply \`code-generation-discipline\`. Read every matching language/framework skill before writing or judging code.
 For Android/Kotlin/Compose/KMP work, read every relevant local skill file from the Android profile's \`android_skills\` and \`chrisbanes_skills\` for the active host. Do not install, copy, link, or load duplicate skills from other host directories. If a required local skill is missing, report \`missing local <group>: <skill>\` with the profile source URL and ask the user to install it.

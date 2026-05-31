@@ -4359,6 +4359,41 @@ class CliTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("기준 worktree", result.stdout)
 
+        chained = subprocess.run(
+            ("bash", str(script)),
+            input=json.dumps({"tool_input": {"cmd": "cd . && git checkout -b feat/test"}}),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(chained.returncode, 2)
+        self.assertIn("브랜치만 만들지", chained.stdout)
+
+        for command in (
+            "git -C . checkout -b feat/test",
+            "command git checkout -b feat/test",
+            "env TEST=1 git checkout -B feat/test",
+        ):
+            blocked_create = subprocess.run(
+                ("bash", str(script)),
+                input=json.dumps({"tool_input": {"command": command}}),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(blocked_create.returncode, 2, command)
+            self.assertIn("브랜치만 만들지", blocked_create.stdout)
+
+        blocked_detach = subprocess.run(
+            ("bash", str(script)),
+            input=json.dumps({"tool_input": {"command": "git checkout --detach main"}}),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(blocked_detach.returncode, 2)
+        self.assertIn("기준 worktree", blocked_detach.stdout)
+
         allowed = subprocess.run(
             ("bash", str(script)),
             input=json.dumps({"tool_input": {"command": "git checkout -- README.md"}}),
@@ -4367,6 +4402,71 @@ class CliTest(unittest.TestCase):
             check=False,
         )
         self.assertEqual(allowed.returncode, 0)
+
+    def test_guard_protected_branch_blocks_chained_commit(self) -> None:
+        script = Path(__file__).resolve().parents[1] / "scripts" / "hooks" / "guard-protected-branch.sh"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_git_repo(root)
+            feature_worktree = root / "feature-worktree"
+            subprocess.run(
+                ("git", "worktree", "add", "-q", "-b", "feat/test", str(feature_worktree), "main"),
+                cwd=root,
+                check=True,
+            )
+            for command in (
+                "cd . && git commit -m test",
+                "git -C . commit -m test",
+                "command git commit -m test",
+                "env TEST=1 git push origin main",
+            ):
+                result = subprocess.run(
+                    ("bash", str(script)),
+                    cwd=root,
+                    input=json.dumps({"tool_input": {"cmd": command}}),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 2, command)
+                self.assertIn("보호 브랜치", result.stdout)
+
+            allowed = subprocess.run(
+                ("bash", str(script)),
+                cwd=root,
+                input=json.dumps({"tool_input": {"cmd": f"git -C {feature_worktree} commit -m test"}}),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(allowed.returncode, 0)
+
+            allowed_cd = subprocess.run(
+                ("bash", str(script)),
+                cwd=root,
+                input=json.dumps({"tool_input": {"cmd": f"cd {feature_worktree} && git commit -m test"}}),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(allowed_cd.returncode, 0)
+
+            for command in (
+                f"(cd {feature_worktree} && true); git commit -m test",
+                f"(cd {feature_worktree} && git status); git push origin main",
+                "cd missing-dir || git commit -m test",
+                "cd /no/such/path; git push origin main",
+            ):
+                blocked_after_subshell = subprocess.run(
+                    ("bash", str(script)),
+                    cwd=root,
+                    input=json.dumps({"tool_input": {"cmd": command}}),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(blocked_after_subshell.returncode, 2, command)
+                self.assertIn("보호 브랜치", blocked_after_subshell.stdout)
 
     def test_team_state_init_task_worker_and_status(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

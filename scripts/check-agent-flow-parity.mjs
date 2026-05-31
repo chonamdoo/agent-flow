@@ -205,6 +205,7 @@ for (const rel of [
   assertContains(rel, "## Overall");
   assertContains(rel, "verdict: approve");
   assertContains(rel, "verdict: request-changes");
+  assertContains(rel, "보호 브랜치 commit/push와 leader checkout/switch 금지는 Codex에서도 동일");
 }
 
 if (CHECK_INSTALLED_COPY) {

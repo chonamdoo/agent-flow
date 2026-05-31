@@ -1,25 +1,158 @@
 #!/bin/bash
 # agent-flow PreToolUse hook: main/master/develop 브랜치에서 커밋·푸시 차단
 INPUT=$(cat)
-CMD=$(python3 -c "
+PROTECTED_BRANCH=$(python3 -c "
 import sys, json
+import os
+import re
+import shlex
+import subprocess
+
+def command_from(value):
+    if isinstance(value, dict):
+        tool_input = value.get('tool_input')
+        if isinstance(tool_input, dict):
+            for key in ('command', 'cmd'):
+                if isinstance(tool_input.get(key), str):
+                    return tool_input[key]
+        for key in ('command', 'cmd'):
+            if isinstance(value.get(key), str):
+                return value[key]
+        for child in value.values():
+            found = command_from(child)
+            if found:
+                return found
+    if isinstance(value, list):
+        for child in value:
+            found = command_from(child)
+            if found:
+                return found
+    return ''
+
+def skip_env(tokens):
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', token):
+            index += 1
+            continue
+        if token in ('-i', '--ignore-environment'):
+            index += 1
+            continue
+        if token in ('-u', '--unset') and index + 1 < len(tokens):
+            index += 2
+            continue
+        break
+    return tokens[index:]
+
+def git_parts(tokens):
+    while tokens:
+        if tokens[0] == 'command':
+            tokens = tokens[1:]
+            continue
+        if tokens[0] == 'env':
+            tokens = skip_env(tokens)
+            continue
+        break
+    if not tokens or tokens[0] != 'git':
+        return [], []
+    index = 1
+    global_args = []
+    options_with_value = {
+        '-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env', '--exec-path',
+    }
+    while index < len(tokens) and tokens[index].startswith('-') and tokens[index] != '--':
+        option = tokens[index]
+        global_args.append(option)
+        index += 1
+        if option in options_with_value and index < len(tokens):
+            global_args.append(tokens[index])
+            index += 1
+    if index < len(tokens) and tokens[index] == '--':
+        index += 1
+    return tokens[index:], global_args
+
+def current_branch(global_args, cwd):
+    result = subprocess.run(
+        ['git', *global_args, 'branch', '--show-current'],
+        cwd=cwd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if result.returncode != 0:
+        return ''
+    return result.stdout.strip()
+
+def shell_tokens(command):
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=';&|()')
+        lexer.whitespace_split = True
+        for token in lexer:
+            if token and all(char in ';&|()' for char in token):
+                for char in token:
+                    yield char
+            else:
+                yield token
+    except ValueError:
+        return
+
+def inspect_tokens(tokens, cwd):
+    if not tokens:
+        return '', cwd
+    if tokens[0] == 'cd':
+        target = tokens[1] if len(tokens) > 1 else os.path.expanduser('~')
+        next_cwd = os.path.abspath(os.path.join(cwd, target)) if not os.path.isabs(target) else target
+        return '', next_cwd if os.path.isdir(next_cwd) else cwd
+    args, global_args = git_parts(tokens)
+    if args and args[0] in ('commit', 'push'):
+        branch = current_branch(global_args, cwd)
+        if branch in ('main', 'master', 'develop'):
+            return branch, cwd
+    return '', cwd
+
+def classify(command):
+    cwd_stack = [os.getcwd()]
+    current = []
+    for token in shell_tokens(command):
+        if token in ';&|':
+            branch, cwd_stack[-1] = inspect_tokens(current, cwd_stack[-1])
+            if branch:
+                return branch
+            current = []
+            continue
+        if token == '(':
+            branch, cwd_stack[-1] = inspect_tokens(current, cwd_stack[-1])
+            if branch:
+                return branch
+            current = []
+            cwd_stack.append(cwd_stack[-1])
+            continue
+        if token == ')':
+            branch, cwd_stack[-1] = inspect_tokens(current, cwd_stack[-1])
+            if branch:
+                return branch
+            current = []
+            if len(cwd_stack) > 1:
+                cwd_stack.pop()
+            continue
+        current.append(token)
+    branch, cwd_stack[-1] = inspect_tokens(current, cwd_stack[-1])
+    if branch:
+        return branch
+    return ''
+
 d = json.load(sys.stdin)
-print(d.get('tool_input', {}).get('command', ''))
+print(classify(command_from(d)))
 " 2>/dev/null <<< "$INPUT")
 
-if [ -z "$CMD" ]; then
+if [ -z "$PROTECTED_BRANCH" ]; then
   exit 0
 fi
 
-if echo "$CMD" | grep -qE '^\s*git\s+(commit|push)\b'; then
-  BRANCH=$(git branch --show-current 2>/dev/null)
-  case "$BRANCH" in
-    main|master|develop)
-      echo "BLOCKED: 보호 브랜치 '$BRANCH'에서 직접 커밋/푸시하지 마세요."
-      echo "git worktree add -b feat/<slug> .agent-flow/worktrees/feat-<slug>/ main 로 작업 브랜치를 만드세요."
-      exit 2
-      ;;
-  esac
-fi
+echo "BLOCKED: 보호 브랜치 '$PROTECTED_BRANCH'에서 직접 커밋/푸시하지 마세요."
+echo "git worktree add -b feat/<slug> .agent-flow/worktrees/feat-<slug>/ main 로 작업 브랜치를 만드세요."
+exit 2
 
 exit 0

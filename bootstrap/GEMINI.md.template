@@ -54,6 +54,7 @@ git worktree는 프로젝트 루트 내부의 `.agent-flow/worktrees/<name>/`에
 기본 이름은 `.agent-flow/worktrees/feat-<slug>/`, 기본 브랜치는 `feat/<slug>`입니다.
 기준 브랜치는 checkout/switch 하지 말고 `git worktree add -b feat/<slug> .agent-flow/worktrees/feat-<slug>/ main`처럼 마지막 인자로 지정합니다.
 브랜치만 만들지 않습니다 — 물리적 worktree가 병렬 작업 격리에 필수입니다.
+Claude hook이 자동 차단하는 보호 브랜치 commit/push와 leader checkout/switch 금지는 Codex에서도 동일하게 지킵니다.
 사용자가 외부 경로를 명시적으로 지정한 경우가 아니면 프로젝트 루트 옆에 형제 폴더를 만들지 않습니다.
 
 ### Memory / Lore
