@@ -742,6 +742,75 @@ class CliTest(unittest.TestCase):
             self.assertIn("graphify-out/manifest.json", gitignore)
             self.assertIn("graphify-out/cost.json", gitignore)
 
+    def test_node_installer_writes_cwd_independent_hook_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project with space"
+            project_root.mkdir()
+            settings_path = project_root / ".claude" / "settings.json"
+            settings_path.parent.mkdir()
+            settings_path.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            "PreToolUse": [
+                                {
+                                    "matcher": "Bash",
+                                    "hooks": [
+                                        {"type": "command", "command": "scripts/hooks/guard-worktree.sh"},
+                                        {"type": "command", "command": "scripts/hooks/guard-protected-branch.sh"},
+                                    ],
+                                }
+                            ],
+                            "Stop": [
+                                {
+                                    "matcher": "",
+                                    "hooks": [{"type": "command", "command": "scripts/hooks/show-phase-status.sh"}],
+                                }
+                            ],
+                        }
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            node = _node_executable()
+            result = subprocess.run(
+                (
+                    node,
+                    str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"),
+                    "install",
+                    "--without-graphify",
+                ),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+            commands = [
+                hook["command"]
+                for event in ("PreToolUse", "Stop")
+                for entry in settings["hooks"][event]
+                for hook in entry["hooks"]
+            ]
+            resolved_root = project_root.resolve()
+            expected = [
+                f"'{resolved_root / 'scripts' / 'hooks' / 'guard-worktree.sh'}'",
+                f"'{resolved_root / 'scripts' / 'hooks' / 'guard-protected-branch.sh'}'",
+                f"'{resolved_root / 'scripts' / 'hooks' / 'show-phase-status.sh'}'",
+            ]
+            self.assertEqual(commands, expected)
+            stop_hook = subprocess.run(
+                ("/bin/sh", "-c", commands[-1]),
+                cwd=temp_dir,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(stop_hook.returncode, 0, stop_hook.stderr)
+
     def test_node_installer_accepts_run_install_alias(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"

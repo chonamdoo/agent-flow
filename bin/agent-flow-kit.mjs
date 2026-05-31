@@ -2155,22 +2155,50 @@ function phasePrompt(phase) {
   return `# ${phase.id}\n\n${phase.instruction}${markers}\n\nSave the required artifact before running:\n\n\`\`\`bash\n${AGENT_FLOW_COMMAND} run advance\n\`\`\`\n`;
 }
 
-function claudeHooksSettings() {
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", "'\\''")}'`;
+}
+
+function hookScriptCommand(root, scriptName) {
+  return shellQuote(path.join(root, "scripts", "hooks", scriptName));
+}
+
+function unquoteShellWord(value) {
+  if (typeof value !== "string") {
+    return "";
+  }
+  if (value.startsWith("'") && value.endsWith("'")) {
+    return value.slice(1, -1).replaceAll("'\\''", "'");
+  }
+  return value;
+}
+
+function managedHookScriptName(command) {
+  const normalized = unquoteShellWord(command).replaceAll("\\", "/");
+  for (const scriptName of ["guard-worktree.sh", "guard-protected-branch.sh", "show-phase-status.sh"]) {
+    if (normalized === `scripts/hooks/${scriptName}` || normalized.endsWith(`/scripts/hooks/${scriptName}`)) {
+      return scriptName;
+    }
+  }
+  return null;
+}
+
+function claudeHooksSettings(root) {
   return {
     hooks: {
       PreToolUse: [
         {
           matcher: "Bash",
           hooks: [
-            { type: "command", command: "scripts/hooks/guard-worktree.sh" },
-            { type: "command", command: "scripts/hooks/guard-protected-branch.sh" },
+            { type: "command", command: hookScriptCommand(root, "guard-worktree.sh") },
+            { type: "command", command: hookScriptCommand(root, "guard-protected-branch.sh") },
           ],
         },
       ],
       Stop: [
         {
           matcher: "",
-          hooks: [{ type: "command", command: "scripts/hooks/show-phase-status.sh" }],
+          hooks: [{ type: "command", command: hookScriptCommand(root, "show-phase-status.sh") }],
         },
       ],
     },
@@ -2190,7 +2218,7 @@ function installClaudeHooks(root) {
   if (!settings.hooks) {
     settings.hooks = {};
   }
-  const desired = claudeHooksSettings().hooks;
+  const desired = claudeHooksSettings(root).hooks;
   for (const [event, entries] of Object.entries(desired)) {
     if (!settings.hooks[event]) {
       settings.hooks[event] = [];
@@ -2202,7 +2230,13 @@ function installClaudeHooks(root) {
           existing.hooks = [];
         }
         for (const hook of entry.hooks) {
-          if (!existing.hooks.some((h) => h.command === hook.command)) {
+          const scriptName = managedHookScriptName(hook.command);
+          const matchingHook = existing.hooks.find(
+            (h) => scriptName && managedHookScriptName(h.command) === scriptName,
+          );
+          if (matchingHook) {
+            Object.assign(matchingHook, hook);
+          } else if (!existing.hooks.some((h) => h.command === hook.command)) {
             existing.hooks.push(hook);
           }
         }
