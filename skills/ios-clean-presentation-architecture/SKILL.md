@@ -1,0 +1,161 @@
+---
+name: ios-clean-presentation-architecture
+description: Use when creating, modifying, or reviewing an iOS Clean Architecture presentation layer with SwiftUI/UIKit state holders, explicit UiState, UiModel mapping, dependency injection, and state-based presentation code review.
+required_markers:
+  - "presentation-skill: ios"
+  - "presentation-state-based-development: applied|n/a"
+  - "presentation-state-review: pass|fail"
+  - "ui-state-modeling: explicit"
+  - "presentation-mapping-boundary: domain-to-uimodel|n/a"
+  - "di-boundary: swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a"
+---
+
+# iOS Clean Presentation Architecture
+
+Use this skill for iOS feature work where SwiftUI or UIKit presentation code should follow a reusable Clean Architecture pattern.
+
+## Evidence Basis
+
+- Apple SwiftUI `EnvironmentValues`: SwiftUI views can read values from the environment, and custom environment values can be created with `@Entry`.
+- Apple Observation migration guide: starting with iOS 17, SwiftUI supports `@Observable`; Apple recommends `State` and `Environment` for observable models instead of object-specific wrappers when fully adopting Observation.
+- Apple `StateObject` / `EnvironmentObject`: still valid for `ObservableObject` code and incremental migration.
+- GitHub API check on 2026-06-01: `Swinject/Swinject` had the highest stars among checked Swift DI containers; `Factory`, `swift-dependencies`, and `Needle` were active alternatives.
+- Library docs: Factory targets Swift/SwiftUI container DI and previews/tests; swift-dependencies is inspired by SwiftUI environment; Needle is compile-time safe; Swinject is a mature Swift DI container.
+
+## Architecture Rule
+
+- `presentation` owns SwiftUI views, UIKit view controllers, state holders, UI events, presentation models, mappers, and navigation effects.
+- `domain` owns entities, use cases, repository protocols, and pure business rules.
+- `data` or `infrastructure` implements repository protocols and API/storage/native adapters.
+- Presentation code depends on domain use cases or ports, not concrete API clients, storage clients, or repository implementations.
+- Platform APIs such as Keychain, CoreLocation, Photos, notifications, and analytics should be wrapped behind ports/adapters before reaching presentation state holders.
+
+## DI Rule
+
+iOS has no built-in Hilt equivalent. Use this priority:
+
+1. Prefer initializer injection for local dependencies.
+2. Use a composition root such as `AppDependencies`, `SceneDependencies`, or feature builder/factory to wire concrete implementations once.
+3. In SwiftUI, use `EnvironmentValues` / `@Environment` for app-level dependencies and feature dependencies that must flow through a view tree.
+4. If using iOS 17+ Observation, prefer `@Observable` state holders with `@State` ownership and `@Environment` injection where it fits the tree.
+5. Use `@StateObject`, `@ObservedObject`, and `@EnvironmentObject` only when the project still uses `ObservableObject` or needs incremental migration.
+6. Use an external DI library only when direct composition and SwiftUI environment become too large or the repo already standardizes on a library.
+
+Library selection:
+- Existing repo standard wins.
+- For new SwiftUI container-based DI, prefer `Factory` when a library is justified.
+- For controllable live/test/preview dependencies, especially clients like date, UUID, API, storage, or feature flags, consider `swift-dependencies`.
+- For mature general-purpose container DI or existing UIKit-heavy codebases, `Swinject` is acceptable.
+- For large modular apps that need generated compile-time-safe dependency graphs, consider `Needle`.
+- Do not introduce a DI library for a small feature when initializer injection plus composition root is enough.
+
+## Direct DI Shape
+
+Use direct DI before a container:
+
+```swift
+struct AppDependencies {
+    var searchUseCase: SearchUseCase
+}
+
+extension EnvironmentValues {
+    @Entry var appDependencies: AppDependencies = .live
+}
+```
+
+If the project toolchain cannot use `@Entry`, use the older `EnvironmentKey` shape instead:
+
+```swift
+private struct AppDependenciesKey: EnvironmentKey {
+    static let defaultValue: AppDependencies = .live
+}
+
+extension EnvironmentValues {
+    var appDependencies: AppDependencies {
+        get { self[AppDependenciesKey.self] }
+        set { self[AppDependenciesKey.self] = newValue }
+    }
+}
+```
+
+At the composition root, create concrete dependencies once and inject them through initializers or environment values. Tests and previews should replace `AppDependencies` with test doubles.
+
+## Package Shape
+
+Feature presentation packages should stay screen-oriented:
+- `Features/<Feature>/Presentation/<Screen>/<Screen>View.swift`
+- `Features/<Feature>/Presentation/<Screen>/<Screen>ViewModel.swift`
+- `Features/<Feature>/Presentation/<Screen>/Model/<Screen>UiState.swift`
+- `Features/<Feature>/Presentation/<Screen>/Model/<Screen>UiEvent.swift`
+- `Features/<Feature>/Presentation/<Screen>/Model/<Screen>UiModel.swift`
+- `Features/<Feature>/Presentation/<Screen>/Mapper/*Mapper.swift`
+- `Features/<Feature>/Presentation/<Screen>/Components/*`
+
+Presentation mappers must convert domain data into presentation models before state reaches SwiftUI views or UIKit view controllers.
+Presentation model types must use the `UiModel` postfix, for example `<Screen>ItemUiModel`.
+
+## State Holder Rule
+
+Use a screen-level state holder:
+- SwiftUI iOS 17+: `@MainActor @Observable final class <Screen>ViewModel`
+- SwiftUI incremental/older code: `@MainActor final class <Screen>ViewModel: ObservableObject`
+- UIKit: `@MainActor final class <Screen>ViewModel` with explicit observation/binding used by the project
+
+State patterns:
+- expose explicit `UiState`, preferably an enum with associated data
+- model not-ready, loading, refreshing, empty, error, success, offline, and permission states when they can occur
+- do not use fake domain sentinel values as initial UI state
+- keep pagination cursors, selected ids, cancellation handles, optimistic updates, and retry state private in the state holder
+- keep UI-only focus, scroll, animation, sheet, and text editing state local unless it drives domain work
+- all UI state mutation should happen on `MainActor`
+
+Event patterns:
+- treat navigation, toast/banner, haptic feedback, permission prompts, share sheets, and imperative focus as one-shot effects
+- do not store fire-once effects as durable `UiState`
+- prefer callback outputs or a narrow `UiEvent` stream only when the screen truly needs one-shot effects
+
+## View Rule
+
+Split state-holder wiring from rendering:
+- composition root or screen container creates/injects dependencies
+- view owns or receives the state holder according to the project pattern
+- rendering view receives plain `uiState` and callbacks where possible
+- child views receive only the data/callbacks they need
+- views should not construct repositories, API clients, storage clients, or DI containers
+- SwiftUI previews must be able to inject fake dependencies or fixed `UiState`
+
+## Review Checklist
+
+- dependency flow uses initializer injection, composition root, or SwiftUI environment; external DI is justified or already present
+- native/platform APIs are wrapped before reaching the state holder
+- `UiState` is explicit and covers all states that can occur
+- domain data is mapped to `UiModel` before rendering
+- `UiModel` postfix is used for presentation models
+- state holder owns async orchestration and exposes callbacks/events
+- UI state mutation is `MainActor` safe
+- views stay render-focused and receive plain state/callbacks
+- one-shot effects are not modeled as durable UI state
+- review output includes the required markers below
+
+## Required Markers
+
+When this skill is used for presentation development or code review, include these markers in the completion artifact or review output:
+
+- `presentation-skill: ios`
+- `presentation-state-based-development: applied|n/a`
+- `presentation-state-review: pass|fail`
+- `ui-state-modeling: explicit`
+- `presentation-mapping-boundary: domain-to-uimodel|n/a`
+- `di-boundary: swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a`
+
+## Sources
+
+- Apple Environment values: https://developer.apple.com/documentation/swiftui/environment-values
+- Apple `@Entry`: https://developer.apple.com/documentation/SwiftUI/Entry%28%29
+- Apple Observation migration: https://developer.apple.com/documentation/SwiftUI/Migrating-from-the-observable-object-protocol-to-the-observable-macro
+- Apple `StateObject`: https://developer.apple.com/documentation/swiftui/stateobject
+- Apple `EnvironmentObject`: https://developer.apple.com/documentation/swiftui/environmentobject
+- Factory: https://github.com/hmlongco/Factory
+- swift-dependencies: https://github.com/pointfreeco/swift-dependencies
+- Swinject: https://github.com/Swinject/Swinject
+- Needle: https://github.com/uber/needle
