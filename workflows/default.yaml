@@ -170,6 +170,12 @@ phases:
       - "gates: all_passed"
       - "skills_checked: true"
       - "clean-architecture: applied"
+      - "presentation-skill: android|react|react-native|ios|n/a"
+      - "presentation-state-based-development: applied|n/a"
+      - "presentation-state-review: pass|n/a"
+      - "ui-state-modeling: explicit|n/a"
+      - "presentation-mapping-boundary: domain-to-uimodel|n/a"
+      - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a"
       - "android-local-skills: checked|n/a"
       - "android-local-skills-used:"
     prompt: |
@@ -235,6 +241,12 @@ phases:
           gates: all_passed
           skills_checked: true
           clean-architecture: applied
+          presentation-skill: n/a
+          presentation-state-based-development: n/a
+          presentation-state-review: n/a
+          ui-state-modeling: n/a
+          presentation-mapping-boundary: n/a
+          di-boundary: n/a
           android-local-skills: checked|n/a
           android-local-skills-used: <skill list or n/a>
 
@@ -261,6 +273,11 @@ phases:
       - "cache-boundary-check: applied"
       - "mapping-boundary-check: applied"
       - "solid-clean-architecture-check: applied"
+      - "presentation-skill: android|react|react-native|ios|n/a"
+      - "presentation-state-review: pass|fail|n/a"
+      - "ui-state-modeling: explicit|n/a"
+      - "presentation-mapping-boundary: domain-to-uimodel|n/a"
+      - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a"
       - "android-local-skills: checked|n/a"
       - "android-local-skills-used:"
     routes:
@@ -312,6 +329,11 @@ phases:
           cache-boundary-check: applied
           mapping-boundary-check: applied
           solid-clean-architecture-check: applied
+          presentation-skill: n/a
+          presentation-state-review: n/a
+          ui-state-modeling: n/a
+          presentation-mapping-boundary: n/a
+          di-boundary: n/a
           android-local-skills: checked|n/a
           android-local-skills-used: <skill list or n/a>
 
@@ -320,6 +342,12 @@ phases:
     required_markers:
       - "skills_checked: true"
       - "clean-architecture: applied"
+      - "presentation-skill: android|react|react-native|ios|n/a"
+      - "presentation-state-based-development: applied|n/a"
+      - "presentation-state-review: pass|n/a"
+      - "ui-state-modeling: explicit|n/a"
+      - "presentation-mapping-boundary: domain-to-uimodel|n/a"
+      - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a"
       - "android-local-skills: checked|n/a"
       - "android-local-skills-used:"
     routes:
@@ -340,6 +368,12 @@ phases:
           ## Completion Gate
           skills_checked: true
           clean-architecture: applied
+          presentation-skill: n/a
+          presentation-state-based-development: n/a
+          presentation-state-review: n/a
+          ui-state-modeling: n/a
+          presentation-mapping-boundary: n/a
+          di-boundary: n/a
           android-local-skills: checked|n/a
           android-local-skills-used: <skill list or n/a>
 
