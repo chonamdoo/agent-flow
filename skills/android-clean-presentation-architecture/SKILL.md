@@ -181,4 +181,3 @@ When this skill is used for presentation development or code review, include the
 - StateFlow and SharedFlow: https://developer.android.com/kotlin/flow/stateflow-and-sharedflow
 - Compose state: https://developer.android.com/develop/ui/compose/state
 - AndroidX Startup: https://developer.android.com/topic/libraries/app-startup
-- Samantha Architecture Guide: /Users/namdoo/Downloads/samantha-architecture-guide.zip
