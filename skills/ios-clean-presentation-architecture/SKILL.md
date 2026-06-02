@@ -80,6 +80,23 @@ extension EnvironmentValues {
 
 At the composition root, create concrete dependencies once and inject them through initializers or environment values. Tests and previews should replace `AppDependencies` with test doubles.
 
+## Swinject Rule
+
+Use Swinject only when the repo already standardizes on it, direct composition has become too large, or UIKit/modular service registration needs a mature runtime container.
+
+Registration shape:
+- Group related registrations in Swinject `Assembly` types by feature, layer, or integration boundary.
+- Build the `Assembler` at the app, scene, test, or feature composition root.
+- Keep `Container` mutation inside composition roots and assemblies. Presentation code should receive concrete dependencies, factories, or a narrow `Resolver`/dependency hook, not the mutable container.
+- Use Swinject registration arguments for runtime screen inputs such as route ids. Do not store navigation state inside the container.
+- Prefer initializer injection inside resolved types. Use property, method, or `initCompleted` injection only for UIKit/storyboard integration or unavoidable circular dependencies.
+
+Lifetime and tests:
+- Choose object scopes deliberately: `.transient` for new instances, `.graph` for one resolution graph, `.container` for app-wide shared instances, `.hierarchy` for parent/child container sharing, and `.weak` only for weakly shared instances.
+- Use child containers or alternate assemblies for tests, previews, and mock implementations.
+- If resolutions can cross threads, resolve through `container.synchronize()` as a `Resolver`; direct `Container.resolve` is not thread safe.
+- Treat circular dependencies as a design smell. If unavoidable, make one side property-based and wire it with `initCompleted`.
+
 ## Package Shape
 
 Feature presentation packages should stay screen-oriented:
@@ -127,6 +144,8 @@ Split state-holder wiring from rendering:
 ## Review Checklist
 
 - dependency flow uses initializer injection, composition root, or SwiftUI environment; external DI is justified or already present
+- if Swinject is used, registrations are grouped in assemblies and the assembler/container is built at a composition root
+- if Swinject is used, object scopes are explicit and container mutation does not leak into presentation
 - native/platform APIs are wrapped before reaching the state holder
 - `UiState` is explicit and covers all states that can occur
 - domain data is mapped to `UiModel` before rendering
@@ -158,4 +177,10 @@ When this skill is used for presentation development or code review, include the
 - Factory: https://github.com/hmlongco/Factory
 - swift-dependencies: https://github.com/pointfreeco/swift-dependencies
 - Swinject: https://github.com/Swinject/Swinject
+- Swinject Assembler: https://github.com/Swinject/Swinject/blob/master/Documentation/Assembler.md
+- Swinject Object Scopes: https://github.com/Swinject/Swinject/blob/master/Documentation/ObjectScopes.md
+- Swinject Container Hierarchy: https://github.com/Swinject/Swinject/blob/master/Documentation/ContainerHierarchy.md
+- Swinject Thread Safety: https://github.com/Swinject/Swinject/blob/master/Documentation/ThreadSafety.md
+- Swinject Injection Patterns: https://github.com/Swinject/Swinject/blob/master/Documentation/InjectionPatterns.md
+- Swinject Circular Dependencies: https://github.com/Swinject/Swinject/blob/master/Documentation/CircularDependencies.md
 - Needle: https://github.com/uber/needle

@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import site
 import shutil
 import sys
 import tempfile
@@ -26,6 +27,16 @@ from agent_flow.core.review import _parse_verdict
 from agent_flow.core.team import ShutdownSignal
 from agent_flow.core.workflow import _stage_from_payload
 from agent_flow.core.worktrees import plan_worktree, worktree_runtime_root
+
+
+def _node_test_env(**overrides: str) -> dict[str, str]:
+    env = {**os.environ, **overrides}
+    python_paths = [
+        env.get("PYTHONPATH"),
+        site.getusersitepackages(),
+    ]
+    env["PYTHONPATH"] = os.pathsep.join(path for path in python_paths if path)
+    return env
 
 
 class CliTest(unittest.TestCase):
@@ -181,6 +192,12 @@ class CliTest(unittest.TestCase):
                 "gates: all_passed",
                 "skills_checked: true",
                 "clean-architecture: applied",
+                "presentation-skill: android|react|react-native|ios|n/a",
+                "presentation-state-based-development: applied|n/a",
+                "presentation-state-review: pass|n/a",
+                "ui-state-modeling: explicit|n/a",
+                "presentation-mapping-boundary: domain-to-uimodel|n/a",
+                "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a",
                 "android-local-skills: checked|n/a",
                 "android-local-skills-used:",
             ],
@@ -212,6 +229,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("clean-architecture: applied", phases["fix-loop"]["required_markers"])
         self.assertIn("clean-architecture-review: applied", phases["multi-review"]["required_markers"])
         self.assertIn("dependency-rule: pass|fail", phases["architecture-review"]["required_markers"])
+        self.assertIn("presentation-skill: android|react|react-native|ios|n/a", phases["green"]["required_markers"])
         self.assertIn("android-local-skills: checked|n/a", phases["green"]["required_markers"])
         self.assertEqual(phases["gates"]["artifact"], "artifacts/gate-results.json")
         self.assertEqual(phases["gates"]["routes"]["green"], "multi-review")
@@ -1110,7 +1128,7 @@ class CliTest(unittest.TestCase):
             worktree.parent.mkdir(parents=True)
             subprocess.run(("git", "worktree", "add", "-q", "--detach", str(worktree), "HEAD"), cwd=project_root, check=True)
             node = _node_executable()
-            env = {**os.environ, "HOME": str(home)}
+            env = _node_test_env(HOME=str(home))
 
             result = subprocess.run(
                 (
@@ -1140,7 +1158,7 @@ class CliTest(unittest.TestCase):
             worktree.parent.mkdir(parents=True)
             subprocess.run(("git", "worktree", "add", "-q", "--detach", str(worktree), "HEAD"), cwd=project_root, check=True)
             node = _node_executable()
-            env = {**os.environ, "HOME": str(home), "AGENT_FLOW_GRAPHIFY_DRY_RUN": "1"}
+            env = _node_test_env(HOME=str(home), AGENT_FLOW_GRAPHIFY_DRY_RUN="1")
 
             result = subprocess.run(
                 (
@@ -1173,7 +1191,7 @@ class CliTest(unittest.TestCase):
             worktree = home / ".codex" / "worktrees" / "slice" / "project"
             worktree.parent.mkdir(parents=True)
             subprocess.run(("git", "worktree", "add", "-q", "--detach", str(worktree), "HEAD"), cwd=project_root, check=True)
-            env = {**os.environ, "HOME": str(home)}
+            env = _node_test_env(HOME=str(home))
 
             start = subprocess.run(
                 (
@@ -1350,12 +1368,11 @@ class CliTest(unittest.TestCase):
             )
             uv.chmod(0o755)
 
-            env = {
-                **os.environ,
-                "HOME": str(fake_home),
-                "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
-                "AGENT_FLOW_TEST_UV_MARKER": str(uv_marker),
-            }
+            env = _node_test_env(
+                HOME=str(fake_home),
+                PATH=f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+                AGENT_FLOW_TEST_UV_MARKER=str(uv_marker),
+            )
             env.pop("AGENT_FLOW_GRAPHIFY_DRY_RUN", None)
             node = _node_executable()
             result = subprocess.run(
@@ -1418,13 +1435,12 @@ class CliTest(unittest.TestCase):
                 encoding="utf-8",
             )
             graphify.chmod(0o755)
-            env = {
-                **os.environ,
-                "HOME": str(fake_home),
-                "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
-                "AGENT_FLOW_TEST_GRAPHIFY_COUNTER": str(counter),
-                "AGENT_FLOW_TEST_UV_MARKER": str(uv_marker),
-            }
+            env = _node_test_env(
+                HOME=str(fake_home),
+                PATH=f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+                AGENT_FLOW_TEST_GRAPHIFY_COUNTER=str(counter),
+                AGENT_FLOW_TEST_UV_MARKER=str(uv_marker),
+            )
             env.pop("AGENT_FLOW_GRAPHIFY_DRY_RUN", None)
             node = _node_executable()
 
@@ -6777,12 +6793,24 @@ def _node_phase_artifact(phase: str) -> Path:
     return artifacts[phase]
 
 
+def _node_presentation_gate() -> str:
+    return (
+        "presentation-skill: n/a\n"
+        "presentation-state-based-development: n/a\n"
+        "presentation-state-review: n/a\n"
+        "ui-state-modeling: n/a\n"
+        "presentation-mapping-boundary: n/a\n"
+        "di-boundary: n/a\n"
+    )
+
+
 def _node_phase_content(phase: str, prefix: str = "") -> str:
     content = f"{prefix}{phase}\n"
     skills_gate = (
         "## Completion Gate\n"
         "skills_checked: true\n"
-        "android-local-skills: n/a\n"
+        + _node_presentation_gate()
+        + "android-local-skills: n/a\n"
         "android-local-skills-used: n/a\n"
     )
     clean_design_gate = (
@@ -6852,6 +6880,7 @@ def _node_phase_content(phase: str, prefix: str = "") -> str:
             "\n## Completion Gate\n"
             "skills_checked: true\n"
             + clean_code_review_gate
+            + _node_presentation_gate()
             + "android-local-skills: n/a\n"
             + "android-local-skills-used: n/a\n"
         )
@@ -6864,6 +6893,7 @@ def _node_phase_content(phase: str, prefix: str = "") -> str:
             + "gates: all_passed\n"
             + "skills_checked: true\n"
             + "clean-architecture: applied\n"
+            + _node_presentation_gate()
             + "android-local-skills: n/a\n"
             + "android-local-skills-used: n/a\n"
         )
@@ -6884,7 +6914,8 @@ def _with_skills_gate(content: str) -> str:
         "cache-boundary-check: applied\n"
         "mapping-boundary-check: applied\n"
         "solid-clean-architecture-check: applied\n"
-        "android-local-skills: n/a\n"
+        + _node_presentation_gate()
+        + "android-local-skills: n/a\n"
         "android-local-skills-used: n/a\n"
     )
 
@@ -6909,7 +6940,8 @@ def _with_final_review_gate(content: str, dependency_rule: str = "pass") -> str:
         "cache-boundary-check: applied\n"
         "mapping-boundary-check: applied\n"
         "solid-clean-architecture-check: applied\n"
-        "android-local-skills: n/a\n"
+        + _node_presentation_gate()
+        + "android-local-skills: n/a\n"
         "android-local-skills-used: n/a\n"
     )
 
