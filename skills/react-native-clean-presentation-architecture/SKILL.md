@@ -18,6 +18,9 @@ Use this skill for React Native or Expo feature work where presentation code sho
 
 - React official Context docs provide the built-in provider mechanism React Native uses for passing app-level values through the tree.
 - React Native native/platform APIs should stay behind adapters so presentation state holders depend on domain/application ports.
+- React Native Turbo Native Modules docs define typed JavaScript specs for custom native platform APIs.
+- React Native FlatList docs require stable keys and `extraData` when render output depends on external state.
+- React Native SafeAreaView is deprecated in current docs; prefer `react-native-safe-area-context` for safe area handling.
 - React Native has no official Hilt-equivalent DI container; external containers should be introduced only when project shape justifies them.
 - npm downloads check on 2026-06-02 for 2026-05-02..2026-05-31: `tsyringe` 23,949,329; `inversify` 8,334,605; `typed-inject` 3,066,359; `awilix` 1,904,000; `typedi` 1,878,420.
 
@@ -28,6 +31,7 @@ Use this skill for React Native or Expo feature work where presentation code sho
 - `data` or `infrastructure` implements repository interfaces and HTTP/storage/native-client adapters.
 - Presentation code depends on domain use cases or ports, not concrete native modules, API clients, or repository implementations.
 - Native platform APIs should be wrapped behind ports/adapters before reaching presentation state holders.
+- Permissions, linking, storage, sensors, and native modules should be represented as application/domain ports before presentation uses them.
 
 ## DI Rule
 
@@ -40,6 +44,7 @@ React Native runs on React, so it does not have a Hilt-equivalent official DI fr
 
 Provider rules:
 - create providers near composition roots such as `App`, navigation root, or feature boundaries
+- create context objects outside components
 - expose typed hooks such as `useSearchDependencies()`
 - throw a clear error when a required provider is missing
 - keep provider values stable only when identity churn causes real rerender risk
@@ -68,6 +73,7 @@ Use a custom hook as the screen state holder:
 - expose user actions as named callbacks
 - keep async orchestration, pagination, refresh, retry, and navigation-effect decisions inside the hook
 - keep rendering inside components
+- do not force a single `Action` reducer shape unless the repo already uses reducer/action patterns
 
 State patterns:
 - model not-ready, loading, refreshing, empty, error, success, offline, and permission states explicitly when they can occur
@@ -78,6 +84,7 @@ State patterns:
 
 Event patterns:
 - treat navigation, toast, snackbar, haptic feedback, permission prompts, and imperative focus as one-shot effects
+- treat deep links, external app links, and native permission prompts as external effects, not durable render state
 - do not store fire-once effects as durable `uiState`
 - prefer callback outputs from the state holder or a narrow event queue only when the screen truly needs one-shot effects
 
@@ -89,17 +96,22 @@ Split state-holder wiring from rendering:
 - child components receive only the data/callbacks they need
 - presentational components should not import use cases, repositories, API clients, native modules, or DI containers
 - list components should use stable domain ids as keys
+- pass `extraData` or another explicit prop when `FlatList` item rendering depends on state outside `data`
+- use `react-native-safe-area-context` or the repo's existing safe-area boundary instead of deprecated core `SafeAreaView`
 - platform-specific UI branches should stay in presentation, while platform API calls stay behind adapters
 
 ## Review Checklist
 
 - dependency flow uses props or `Context` providers; external DI is justified or already present
 - native APIs are wrapped before reaching the state holder
+- permissions, linking, storage, sensors, and custom native modules are accessed through ports/adapters
 - `uiState` is explicit and covers not-ready, loading, refreshing, empty, error, success, offline, and permission states that can occur
 - domain data is mapped to `UiModel` before rendering
 - `UiModel` postfix is used for presentation models
 - state-holder hook owns async orchestration and exposes callbacks
 - components stay render-focused and receive plain props
+- `FlatList` keys and external render dependencies are explicit
+- safe-area handling does not use deprecated core `SafeAreaView` for new code
 - one-shot effects are not modeled as durable UI state
 - review output includes the required markers below
 
@@ -118,7 +130,12 @@ When this skill is used for presentation development or code review, include the
 
 - React `createContext`: https://react.dev/reference/react/createContext
 - React `useContext`: https://react.dev/reference/react/useContext
-- React Native native modules: https://reactnative.dev/docs/native-modules-intro
+- React `useEffect`: https://react.dev/reference/react/useEffect
+- React Native Turbo Native Modules: https://reactnative.dev/docs/turbo-native-modules-introduction
+- React Native PermissionsAndroid: https://reactnative.dev/docs/permissionsandroid
+- React Native Linking: https://reactnative.dev/docs/linking
+- React Native FlatList: https://reactnative.dev/docs/flatlist
+- React Native SafeAreaView deprecation: https://reactnative.dev/docs/safeareaview
 - tsyringe: https://github.com/microsoft/tsyringe
 - npm downloads API: https://api.npmjs.org/downloads/point/last-month/tsyringe
 - npm downloads API for inversify: https://api.npmjs.org/downloads/point/last-month/inversify

@@ -28,6 +28,10 @@ Use this skill for Android feature work where presentation code should follow a 
 - `data` implements domain repositories and binds implementations to interfaces.
 - `network` provides Retrofit/API infrastructure.
 - ViewModels do not inject Retrofit APIs, data sources, or repository implementations directly when a domain use case exists.
+- Keep public feature contracts, including route keys and exported entry contracts, in `feature:*:api` when the repo uses feature api/presentation split.
+- Keep Compose screens, routes, ViewModels, UI contracts, UI models, and mappers in `feature:*:presentation`.
+- DTOs, entities owned by data, Retrofit models, data sources, and data DI must not reach presentation.
+- Do not add `BaseViewModel`, `BaseUiState`, or inherited error hooks for new presentation work. Use explicit helpers and mappers.
 
 ## Package Shape
 
@@ -61,6 +65,13 @@ Binding rule:
 - Put shared app/data/network bindings in `SingletonComponent` only when the instance is app-wide.
 - Do not create Hilt modules for use cases that can use `@Inject constructor`.
 
+Route arguments and startup:
+- Use `@HiltViewModel` with normal `@Inject` when no route argument is needed.
+- Use `@HiltViewModel(assistedFactory = ...)` plus `@AssistedInject` when the ViewModel needs a NavKey or serializable route value.
+- `@AssistedFactory.create(...)` should take only the NavKey or route value. Other dependencies stay normal Hilt injections.
+- ViewModel creation belongs in the route/navigation entry wiring, not inside `Screen`.
+- Use AndroidX Startup `Initializer` for one-shot SDK initialization. If initializer code needs Hilt dependencies, use Hilt `@EntryPoint` plus `EntryPointAccessors.fromApplication(...)`.
+
 ## ViewModel Rule
 
 ViewModels are screen-level state holders:
@@ -71,6 +82,9 @@ ViewModels are screen-level state holders:
 - keep mutable state private
 - expose one-shot events as `Flow<ScreenUiEvent>`
 - convert non-suspending UI callbacks into `viewModelScope.launch`
+- use `fun onAction(action: ScreenUiAction)` when the screen has multiple events or branchy behavior
+- do not hold `Context`, `Activity`, `NavController`, `Navigator`, `Router`, launchers, `Intent`, `WebView`, or Compose state objects
+- do not call navigation APIs directly. Emit state or event; route/navigation wiring executes navigation.
 
 State patterns:
 - For imperative screen state, use private `MutableStateFlow<ScreenUiState>` and public `asStateFlow()`.
@@ -111,15 +125,25 @@ Keep `UiState` immutable:
 ## Compose Screen Rule
 
 Split state-holder wiring from rendering:
-- top-level screen/route obtains the ViewModel with `hiltViewModel()`
-- collect `uiState` with `collectAsStateWithLifecycle()`
-- collect `uiEventFlow` inside `LaunchedEffect` and lifecycle-aware collection when the screen needs navigation or snackbars
+- route/top-level wiring obtains the ViewModel with `hiltViewModel()`
+- route/top-level wiring collects `uiState` with `collectAsStateWithLifecycle()`
+- route/top-level wiring collects `uiEventFlow` inside `LaunchedEffect` and lifecycle-aware collection when the screen needs navigation or snackbars
 - pass plain `uiState` and callbacks to child composables
+- screen/content composables are stateless: receive `uiState` and callbacks, render, and emit actions upward
+- screen/content composables should not call `hiltViewModel()`, `viewModel()`, `collectAsStateWithLifecycle()`, or navigation APIs
 - child composables should not know about Hilt, repositories, use cases, or ViewModels
+- collect navigation and one-shot commands with `collect`, not `collectLatest`
 
 Keep UI-local state local:
 - scroll, focus, text field editing state, pager state, and animation state can stay in Compose unless they drive business or repository work
 - if UI-local state coordinates multiple fields and operations, extract a plain state holder remembered in composition
+
+## Navigation Rule
+
+- Feature api modules define serializable route keys or public route contracts.
+- Feature presentation modules install concrete navigation entries or screen factories.
+- App/core navigation composes feature installers; it should not know screen internals.
+- Route keys carry serializable data only. Do not put lambdas, `NavController`, `Context`, or mutable objects in route keys.
 
 ## Review Checklist
 
@@ -129,10 +153,14 @@ Keep UI-local state local:
 - one-shot events use `Channel(...).receiveAsFlow()` or another deliberate event model.
 - flows converted to UI state use one shared `stateIn` value, not per-call `stateIn`.
 - `SharingStarted.WhileSubscribed(5_000)` is acceptable only when stale cached `.value` is not used as a fresh source.
-- Compose screens collect with lifecycle APIs and pass state/callbacks downward.
+- Route/top-level Compose wiring collects with lifecycle APIs and passes state/callbacks downward.
+- Route/top-level wiring owns ViewModel collection, one-shot event collection, and navigation/platform calls.
+- Screen/content composables are stateless and do not obtain ViewModels, lifecycle flows, Hilt dependencies, or navigation APIs.
 - `@Provides` and `@Binds` are placed in the layer that owns the constructed dependency.
+- assisted ViewModel factories pass only route values through assisted parameters.
 - use cases with `@Inject constructor` are not manually bound without need.
 - repositories/data sources do not store ad-hoc or app-wide `CoroutineScope` for UI-triggered work.
+- feature api exposes only public route/contracts; data-layer DTOs and implementations do not leak into presentation.
 
 ## Required Markers
 
@@ -152,3 +180,4 @@ When this skill is used for presentation development or code review, include the
 - Android ViewModel: https://developer.android.com/topic/libraries/architecture/viewmodel
 - StateFlow and SharedFlow: https://developer.android.com/kotlin/flow/stateflow-and-sharedflow
 - Compose state: https://developer.android.com/develop/ui/compose/state
+- AndroidX Startup: https://developer.android.com/topic/libraries/app-startup
