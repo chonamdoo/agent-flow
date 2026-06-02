@@ -146,7 +146,8 @@ function installProject() {
   writeManagedFile(path.join(agentFlowDir, "bootstrap", "AGENTS.md"), bootstrapMarkdown("AGENTS.md"));
   writeManagedFile(path.join(agentFlowDir, "bootstrap", "CLAUDE.md"), bootstrapMarkdown("CLAUDE.md"));
   writeManagedFile(path.join(agentFlowDir, "bootstrap", "GEMINI.md"), bootstrapMarkdown("GEMINI.md"));
-  upsertGitignore(path.join(root, ".gitignore"), [
+  const gitignorePath = path.join(root, ".gitignore");
+  upsertGitignore(gitignorePath, [
     ".agent-flow/",
     ".agent-flow/local-skills/",
     ".codex/",
@@ -159,20 +160,20 @@ function installProject() {
     "CLAUDE/",
     "GEMINI/",
     "scripts/check-context-docs.*",
-    "graphify/",
     "agent-flow/",
+  ]);
+  removeGitignoreEntries(gitignorePath, [
+    "graphify/",
     "graphify-out/manifest.json",
     "graphify-out/cost.json",
   ]);
+  removeLegacyProjectSkillCopies(root, "graphify");
   upsertBootstrapBlock(path.join(root, "AGENTS.md"), "AGENTS.md");
   upsertBootstrapBlock(path.join(root, "CLAUDE.md"), "CLAUDE.md");
   upsertBootstrapBlock(path.join(root, "GEMINI.md"), "GEMINI.md");
   makeHooksExecutable(root);
   installClaudeHooks(root);
 
-  if (!installArgs.includes("--without-graphify")) {
-    payload.graphify = installGraphify(root, existingPayload?.graphify);
-  }
   payload.skill_index = {
     path: ".agent-flow/skills/index.json",
     skills: skillIndex.skills.length,
@@ -182,9 +183,6 @@ function installProject() {
 
   fs.writeFileSync(path.join(agentFlowDir, "kit.json"), `${JSON.stringify(payload, null, 2)}\n`, "utf8");
   console.log(`agent-flow installed profile=${profile}`);
-  if (payload.graphify) {
-    console.log(`graphify installed status=${payload.graphify.status}`);
-  }
 }
 
 function runWorkflowCommand(args) {
@@ -1254,221 +1252,6 @@ function pathHasSymlink(root, target) {
   return false;
 }
 
-function installGraphify(root, existingGraphify) {
-  if (process.env.AGENT_FLOW_GRAPHIFY_DRY_RUN === "1") {
-    return {
-      status: "dry-run",
-      package: "graphifyy",
-      command: "graphify",
-      platforms: ["claude", "codex", "gemini"],
-      skill_location: "~/.agents/skills/graphify",
-      removed_duplicate_skills: [],
-      graph: {
-        status: "dry-run",
-        command: "graphify .",
-        output: "graphify-out/",
-      },
-    };
-  }
-  if (existingGraphify && graphifyAvailable(root)) {
-    return {
-      ...existingGraphify,
-      status: "reused",
-    };
-  }
-  try {
-    const installer = installGraphifyPackage(root);
-    const skillInstall = runGraphifyInstall(root);
-    const graph = runGraphifyProjectGraph(root);
-    return {
-      status: "installed",
-      package: "graphifyy",
-      command: "graphify",
-      installer,
-      platforms: skillInstall.platforms,
-      skill_location: skillInstall.skillLocation,
-      removed_duplicate_skills: skillInstall.removedDuplicates,
-      graph,
-    };
-  } catch (error) {
-    // graphify는 보조 인덱서라 실패해도 agent-flow 설치와 worktree 시작을 막지 않는다.
-    return {
-      status: "skipped",
-      package: "graphifyy",
-      command: "graphify",
-      reason: formatGraphifyError(error),
-      platforms: ["claude", "codex", "gemini"],
-      skill_location: "~/.agents/skills/graphify",
-      removed_duplicate_skills: [],
-      graph: {
-        status: "skipped",
-        command: "graphify .",
-        output: "graphify-out/",
-      },
-    };
-  }
-}
-
-function formatGraphifyError(error) {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function runChecked(commandName, args, cwd) {
-  const result = safeSpawnSync(commandName, args, {
-    cwd,
-    stdio: "inherit",
-    env: process.env,
-    timeout: 120_000,
-  });
-  if (result.error) {
-    throw result.error;
-  }
-  if (result.status !== 0) {
-    throw new Error(`${commandName} ${args.join(" ")} failed with exit ${result.status}`);
-  }
-}
-
-function runOptional(commandName, args, cwd) {
-  const result = safeSpawnSync(commandName, args, {
-    cwd,
-    stdio: "inherit",
-    env: process.env,
-    timeout: 120_000,
-  });
-  if (result.error && result.error.code === "ENOENT") {
-    return false;
-  }
-  if (result.error) {
-    throw result.error;
-  }
-  if (result.status !== 0) {
-    throw new Error(`${commandName} ${args.join(" ")} failed with exit ${result.status}`);
-  }
-  return true;
-}
-
-function installGraphifyPackage(root) {
-  if (graphifyAvailable(root)) {
-    return "existing";
-  }
-  if (runCandidate("uv", ["tool", "install", "--python", "3.12", "--force", "graphifyy"], root)) {
-    return "uv tool";
-  }
-  const python = preferredPython();
-  if (runCandidate("pipx", ["install", "--python", python, "--force", "graphifyy"], root)) {
-    return "pipx";
-  }
-  runChecked(python, ["-m", "pip", "install", "graphifyy"], root);
-  return "pip";
-}
-
-function graphifyAvailable(root) {
-  if (runCandidateQuiet("graphify", ["--help"], root) && runCandidateQuiet("graphify", ["install", "--help"], root)) {
-    return true;
-  }
-  const graphify = graphifyExecutable();
-  return (
-    runCandidateQuiet(graphify.command, [...graphify.prefixArgs, "--help"], root) &&
-    runCandidateQuiet(graphify.command, [...graphify.prefixArgs, "install", "--help"], root)
-  );
-}
-
-function runGraphifyInstall(root) {
-  runGraphifyCommand(["install"], root);
-  runGraphifyCommand(["install", "--platform", "codex"], root);
-  runGraphifyCommand(["install", "--platform", "gemini"], root);
-  return {
-    platforms: ["claude", "codex", "gemini"],
-    skillLocation: "~/.agents/skills/graphify",
-    removedDuplicates: canonicalizeGraphifySkill(),
-  };
-}
-
-function canonicalizeGraphifySkill() {
-  if (!HOME) {
-    return [];
-  }
-  const canonical = path.join(HOME, ".agents", "skills", "graphify");
-  const candidates = [
-    canonical,
-    path.join(HOME, ".codex", "skills", "graphify"),
-    path.join(HOME, ".gemini", "skills", "graphify"),
-    path.join(HOME, ".claude", "skills", "graphify"),
-  ];
-  const existing = candidates
-    .filter((candidate) => fs.existsSync(path.join(candidate, "SKILL.md")))
-    .sort((a, b) => {
-      const aTime = fs.statSync(path.join(a, "SKILL.md")).mtimeMs;
-      const bTime = fs.statSync(path.join(b, "SKILL.md")).mtimeMs;
-      return bTime - aTime;
-    });
-  if (existing.length === 0) {
-    throw new Error("graphify install completed, but no graphify skill was found");
-  }
-  const source = existing[0];
-  if (source !== canonical) {
-    fs.mkdirSync(path.dirname(canonical), { recursive: true });
-    const tempCanonical = `${canonical}.tmp.${process.pid}`;
-    fs.rmSync(tempCanonical, { recursive: true, force: true });
-    fs.cpSync(source, tempCanonical, { recursive: true });
-    fs.rmSync(canonical, { recursive: true, force: true });
-    fs.renameSync(tempCanonical, canonical);
-  }
-  const removed = [];
-  for (const duplicate of candidates.filter((candidate) => candidate !== canonical)) {
-    if (fs.existsSync(duplicate)) {
-      fs.rmSync(duplicate, { recursive: true, force: true });
-      removed.push(duplicate.replace(`${HOME}/`, "~/"));
-    }
-  }
-  return removed;
-}
-
-function runGraphifyProjectGraph(root) {
-  runGraphifyCommand(["."], root);
-  return {
-    status: "generated",
-    command: "graphify .",
-    output: "graphify-out/",
-  };
-}
-
-function runGraphifyCommand(args, root) {
-  if (runOptional("graphify", args, root)) {
-    return;
-  }
-  const graphify = graphifyExecutable();
-  runChecked(graphify.command, [...graphify.prefixArgs, ...args], root);
-}
-
-function runCandidate(commandName, args, cwd) {
-  const result = safeSpawnSync(commandName, args, {
-    cwd,
-    stdio: "inherit",
-    env: process.env,
-    timeout: 120_000,
-  });
-  if (result.error && result.error.code === "ENOENT") {
-    return false;
-  }
-  if (result.error) {
-    throw result.error;
-  }
-  return result.status === 0;
-}
-
-function runCandidateQuiet(commandName, args, cwd) {
-  const result = safeSpawnSync(commandName, args, {
-    cwd,
-    stdio: "ignore",
-    env: process.env,
-  });
-  if (result.error) {
-    return false;
-  }
-  return result.status === 0;
-}
-
 function preferredPython() {
   const virtualEnvPython = process.env.VIRTUAL_ENV
     ? path.join(process.env.VIRTUAL_ENV, process.platform === "win32" ? "Scripts/python.exe" : "bin/python")
@@ -1498,22 +1281,6 @@ function pythonSupportsWorkflowExport(candidate) {
     timeout: 5_000,
   });
   return !result.error && result.status === 0;
-}
-
-function graphifyExecutable() {
-  for (const candidate of [
-    path.join(process.env.UV_TOOL_BIN_DIR || "", "graphify"),
-    path.join(process.env.PIPX_BIN_DIR || "", "graphify"),
-    path.join(HOME, ".local", "bin", "graphify"),
-  ]) {
-    if (!candidate) {
-      continue;
-    }
-    if (fs.existsSync(candidate)) {
-      return { command: candidate, prefixArgs: [] };
-    }
-  }
-  return { command: preferredPython(), prefixArgs: ["-m", "graphify"] };
 }
 
 function assertFreshArtifact(state, phase, artifact) {
@@ -1985,6 +1752,30 @@ function upsertGitignore(pathName, entries) {
   fs.writeFileSync(pathName, next, "utf8");
 }
 
+function removeGitignoreEntries(pathName, entries) {
+  if (!fs.existsSync(pathName)) return;
+  const removals = new Set(entries);
+  const current = fs.readFileSync(pathName, "utf8");
+  const lines = current.split(/\r?\n/);
+  const filtered = lines.filter((line) => !removals.has(line.trim()));
+  if (filtered.length === lines.length) return;
+  const next = `${filtered.join("\n").replace(/\n*$/, "")}\n`;
+  fs.writeFileSync(pathName, next, "utf8");
+}
+
+function removeLegacyProjectSkillCopies(projectRoot, skillName) {
+  for (const parent of [
+    path.join(projectRoot, ".agent-flow", "skills"),
+    path.join(projectRoot, ".claude", "skills"),
+    path.join(projectRoot, ".codex", "skills"),
+    path.join(projectRoot, ".Codex", "skills"),
+    path.join(projectRoot, ".gemini", "skills"),
+    path.join(projectRoot, ".gemini", "antigravity", "skills"),
+  ]) {
+    fs.rmSync(path.join(parent, skillName), { recursive: true, force: true });
+  }
+}
+
 function isGitignoreEntryCovered(entry, existing) {
   if (existing.has(entry)) {
     return true;
@@ -2314,7 +2105,7 @@ try {
     process.exit(0);
   }
 
-  console.error("usage: agent-flow-kit install [--without-graphify] [--force-managed] | run <install|start|status|next|advance|push-watch|push-watch-tick>");
+  console.error("usage: agent-flow-kit install [--force-managed] | run <install|start|status|next|advance|push-watch|push-watch-tick>");
   process.exit(1);
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));

@@ -566,7 +566,8 @@ function install() {
   bootstrapMarkdown("CLAUDE.md");
   bootstrapMarkdown("AGENTS.md");
   bootstrapMarkdown("GEMINI.md");
-  upsertGitignore(path.join(PROJECT, ".gitignore"), [
+  const gitignorePath = path.join(PROJECT, ".gitignore");
+  upsertGitignore(gitignorePath, [
     ".agent-flow/",
     ".agent-flow/local-skills/",
     ".codex/",
@@ -579,11 +580,14 @@ function install() {
     "CLAUDE/",
     "GEMINI/",
     "scripts/check-context-docs.*",
-    "graphify/",
     "agent-flow/",
+  ]);
+  removeGitignoreEntries(gitignorePath, [
+    "graphify/",
     "graphify-out/manifest.json",
     "graphify-out/cost.json",
   ]);
+  removeLegacyProjectSkillCopies(PROJECT, "graphify");
 
   // Copy bundled skills into project-local skills dir.
   // Host-AI-specific skill paths (`.claude/skills/`, `.codex/skills/`) are
@@ -677,9 +681,6 @@ function install() {
       warnings: skillIndex.warnings.length,
     },
   };
-  if (!process.argv.includes("--without-graphify")) {
-    kitJson.graphify = installGraphify();
-  }
   fs.writeFileSync(
     path.join(AF_DIR, "kit.json"),
     JSON.stringify(kitJson, null, 2)
@@ -693,66 +694,10 @@ function install() {
   console.log(`  profiles : ${profilesCopied.written} written, ${profilesCopied.skipped} skipped`);
   console.log(`  claude  : agent-flow skill ${claudeSkillStatus}`);
   console.log(`  codex   : agent-flow skill ${codexSkillStatus}`);
-  if (kitJson.graphify) {
-    console.log(`  graphify: ${kitJson.graphify.status}`);
-  }
   console.log(``);
   console.log(`Next: /agent-flow <task>`);
   console.log(`      (or: agent-flow run "<task>")`);
   console.log(`(If 'agent-flow' isn't on PATH yet: pip install -e ${KIT_ROOT})`);
-}
-
-function installGraphify() {
-  if (process.env.AGENT_FLOW_GRAPHIFY_DRY_RUN === "1") {
-    return {
-      status: "dry-run",
-      package: "graphifyy",
-      command: "graphify",
-      platforms: ["claude", "codex", "gemini"],
-      skill_location: "~/.agents/skills/graphify",
-      removed_duplicate_skills: [],
-      graph: {
-        status: "dry-run",
-        command: "graphify .",
-        output: "graphify-out/",
-      },
-    };
-  }
-  try {
-    const installer = installGraphifyPackage();
-    const skillInstall = runGraphifyInstall();
-    const graph = runGraphifyProjectGraph();
-    return {
-      status: "installed",
-      package: "graphifyy",
-      command: "graphify",
-      installer,
-      platforms: skillInstall.platforms,
-      skill_location: skillInstall.skillLocation,
-      removed_duplicate_skills: skillInstall.removedDuplicates,
-      graph,
-    };
-  } catch (error) {
-    // graphify는 보조 인덱서라 실패해도 agent-flow 설치와 worktree 시작을 막지 않는다.
-    return {
-      status: "skipped",
-      package: "graphifyy",
-      command: "graphify",
-      reason: formatGraphifyError(error),
-      platforms: ["claude", "codex", "gemini"],
-      skill_location: "~/.agents/skills/graphify",
-      removed_duplicate_skills: [],
-      graph: {
-        status: "skipped",
-        command: "graphify .",
-        output: "graphify-out/",
-      },
-    };
-  }
-}
-
-function formatGraphifyError(error) {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function upsertGitignore(pathName, entries) {
@@ -766,6 +711,30 @@ function upsertGitignore(pathName, entries) {
   const prefix = current.trimEnd();
   const next = `${prefix}${prefix ? "\n" : ""}${missing.join("\n")}\n`;
   fs.writeFileSync(pathName, next, "utf8");
+}
+
+function removeGitignoreEntries(pathName, entries) {
+  if (!fs.existsSync(pathName)) return;
+  const removals = new Set(entries);
+  const current = fs.readFileSync(pathName, "utf8");
+  const lines = current.split(/\r?\n/);
+  const filtered = lines.filter((line) => !removals.has(line.trim()));
+  if (filtered.length === lines.length) return;
+  const next = `${filtered.join("\n").replace(/\n*$/, "")}\n`;
+  fs.writeFileSync(pathName, next, "utf8");
+}
+
+function removeLegacyProjectSkillCopies(projectRoot, skillName) {
+  for (const parent of [
+    path.join(projectRoot, ".agent-flow", "skills"),
+    path.join(projectRoot, ".claude", "skills"),
+    path.join(projectRoot, ".codex", "skills"),
+    path.join(projectRoot, ".Codex", "skills"),
+    path.join(projectRoot, ".gemini", "skills"),
+    path.join(projectRoot, ".gemini", "antigravity", "skills"),
+  ]) {
+    fs.rmSync(path.join(parent, skillName), { recursive: true, force: true });
+  }
 }
 
 function isGitignoreEntryCovered(entry, existing) {
@@ -789,190 +758,11 @@ function isGitignoreEntryCovered(entry, existing) {
   return false;
 }
 
-function runChecked(commandName, args) {
-  const result = spawnSync(commandName, args, {
-    cwd: PROJECT,
-    stdio: "inherit",
-    env: process.env,
-  });
-  if (result.error) {
-    throw result.error;
-  }
-  if (result.status !== 0) {
-    throw new Error(`${commandName} ${args.join(" ")} failed with exit ${result.status}`);
-  }
-}
-
-function runOptional(commandName, args) {
-  const result = spawnSync(commandName, args, {
-    cwd: PROJECT,
-    stdio: "inherit",
-    env: process.env,
-  });
-  if (result.error && result.error.code === "ENOENT") {
-    return false;
-  }
-  if (result.error) {
-    throw result.error;
-  }
-  if (result.status !== 0) {
-    throw new Error(`${commandName} ${args.join(" ")} failed with exit ${result.status}`);
-  }
-  return true;
-}
-
-function installGraphifyPackage() {
-  if (graphifyAvailable()) {
-    return "existing";
-  }
-  if (runCandidate("uv", ["tool", "install", "--python", "3.12", "--force", "graphifyy"])) {
-    return "uv tool";
-  }
-  const python = preferredPython();
-  if (runCandidate("pipx", ["install", "--python", python, "--force", "graphifyy"])) {
-    return "pipx";
-  }
-  runChecked(python, ["-m", "pip", "install", "graphifyy"]);
-  return "pip";
-}
-
-function graphifyAvailable() {
-  if (runCandidateQuiet("graphify", ["--help"]) && runCandidateQuiet("graphify", ["install", "--help"])) {
-    return true;
-  }
-  const graphify = graphifyExecutable();
-  return (
-    runCandidateQuiet(graphify.command, [...graphify.prefixArgs, "--help"]) &&
-    runCandidateQuiet(graphify.command, [...graphify.prefixArgs, "install", "--help"])
-  );
-}
-
-function runGraphifyInstall() {
-  runGraphifyCommand(["install"]);
-  runGraphifyCommand(["install", "--platform", "codex"]);
-  runGraphifyCommand(["install", "--platform", "gemini"]);
-  return {
-    platforms: ["claude", "codex", "gemini"],
-    skillLocation: "~/.agents/skills/graphify",
-    removedDuplicates: canonicalizeGraphifySkill(),
-  };
-}
-
-function canonicalizeGraphifySkill() {
-  if (!HOME) {
-    return [];
-  }
-  const canonical = path.join(HOME, ".agents", "skills", "graphify");
-  const candidates = [
-    canonical,
-    path.join(HOME, ".codex", "skills", "graphify"),
-    path.join(HOME, ".gemini", "skills", "graphify"),
-    path.join(HOME, ".claude", "skills", "graphify"),
-  ];
-  const existing = candidates
-    .filter((candidate) => fs.existsSync(path.join(candidate, "SKILL.md")))
-    .sort((a, b) => {
-      const aTime = fs.statSync(path.join(a, "SKILL.md")).mtimeMs;
-      const bTime = fs.statSync(path.join(b, "SKILL.md")).mtimeMs;
-      return bTime - aTime;
-    });
-  if (existing.length === 0) {
-    throw new Error("graphify install completed, but no graphify skill was found");
-  }
-  const source = existing[0];
-  if (source !== canonical) {
-    fs.mkdirSync(path.dirname(canonical), { recursive: true });
-    const tempCanonical = `${canonical}.tmp.${process.pid}`;
-    fs.rmSync(tempCanonical, { recursive: true, force: true });
-    fs.cpSync(source, tempCanonical, { recursive: true });
-    fs.rmSync(canonical, { recursive: true, force: true });
-    fs.renameSync(tempCanonical, canonical);
-  }
-  const removed = [];
-  for (const duplicate of candidates.filter((candidate) => candidate !== canonical)) {
-    if (fs.existsSync(duplicate)) {
-      fs.rmSync(duplicate, { recursive: true, force: true });
-      removed.push(duplicate.replace(`${HOME}/`, "~/"));
-    }
-  }
-  return removed;
-}
-
-function runGraphifyProjectGraph() {
-  runGraphifyCommand(["."]);
-  return {
-    status: "generated",
-    command: "graphify .",
-    output: "graphify-out/",
-  };
-}
-
-function runGraphifyCommand(args) {
-  if (runOptional("graphify", args)) {
-    return;
-  }
-  const graphify = graphifyExecutable();
-  runChecked(graphify.command, [...graphify.prefixArgs, ...args]);
-}
-
-function runCandidate(commandName, args) {
-  const result = spawnSync(commandName, args, {
-    cwd: PROJECT,
-    stdio: "inherit",
-    env: process.env,
-  });
-  if (result.error && result.error.code === "ENOENT") {
-    return false;
-  }
-  if (result.error) {
-    throw result.error;
-  }
-  return result.status === 0;
-}
-
-function runCandidateQuiet(commandName, args) {
-  const result = spawnSync(commandName, args, {
-    cwd: PROJECT,
-    stdio: "ignore",
-    env: process.env,
-  });
-  if (result.error) {
-    return false;
-  }
-  return result.status === 0;
-}
-
-function preferredPython() {
-  for (const candidate of ["python3.12", "python3.11", "python3.10", "python3", "python"]) {
-    const result = spawnSync(candidate, ["--version"], { stdio: "ignore" });
-    if (!result.error && result.status === 0) {
-      return candidate;
-    }
-  }
-  return "python3";
-}
-
-function graphifyExecutable() {
-  for (const candidate of [
-    path.join(process.env.UV_TOOL_BIN_DIR || "", "graphify"),
-    path.join(process.env.PIPX_BIN_DIR || "", "graphify"),
-    path.join(HOME, ".local", "bin", "graphify"),
-  ]) {
-    if (!candidate) {
-      continue;
-    }
-    if (fs.existsSync(candidate)) {
-      return { command: candidate, prefixArgs: [] };
-    }
-  }
-  return { command: preferredPython(), prefixArgs: ["-m", "graphify"] };
-}
-
 const cmd = process.argv[2];
 if (cmd === "install") {
   install();
 } else if (cmd === "--help" || cmd === "-h" || !cmd) {
-  console.log("Usage: npx <agent-flow-package> install [--without-graphify]");
+  console.log("Usage: npx <agent-flow-package> install");
   process.exit(0);
 } else {
   console.error(`Unknown command: ${cmd}`);

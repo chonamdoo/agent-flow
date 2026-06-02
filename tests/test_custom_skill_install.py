@@ -20,7 +20,7 @@ def _node() -> str:
 
 def _install(project: Path, *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        (_node(), str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"), "install", "--without-graphify"),
+        (_node(), str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"), "install"),
         cwd=project,
         text=True,
         capture_output=True,

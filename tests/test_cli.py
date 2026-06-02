@@ -17,8 +17,6 @@ from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 from importlib import resources
 
-os.environ.setdefault("AGENT_FLOW_GRAPHIFY_DRY_RUN", "1")
-
 from agent_flow.cli import main
 from agent_flow.adapters.templates import PromptContext, render_stage_prompt
 from agent_flow.core.gates import GateCommand, run_gate
@@ -621,7 +619,6 @@ class CliTest(unittest.TestCase):
                     node,
                     str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"),
                     "install",
-                    "--without-graphify",
                 ),
                 cwd=project_root,
                 text=True,
@@ -633,6 +630,7 @@ class CliTest(unittest.TestCase):
             kit = json.loads((project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
             self.assertEqual(kit["profile"], "generic")
             self.assertEqual(kit["install_scope"], "project")
+            self.assertNotIn("graphify", kit)
             self.assertTrue((project_root / ".agent-flow" / "runs").is_dir())
             self.assertTrue((project_root / ".agent-flow" / "workflows" / "full-feature.yaml").is_file())
             self.assertTrue((project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").is_file())
@@ -666,7 +664,7 @@ class CliTest(unittest.TestCase):
             self.assertFalse((project_root / ".agent-flow" / "skills" / "android-mvi-feature").exists())
             self.assertFalse((project_root / ".agent-flow" / "skills" / "android-module-creator").exists())
             self.assertFalse((project_root / ".agent-flow" / "skills" / "android-debugging").exists())
-            self.assertTrue((project_root / ".agent-flow" / "skills" / "graphify" / "SKILL.md").is_file())
+            self.assertFalse((project_root / ".agent-flow" / "skills" / "graphify").exists())
             self.assertTrue(
                 (
                     project_root
@@ -760,10 +758,6 @@ class CliTest(unittest.TestCase):
             )
             self.assertIn("Treat the status command output as the only source of truth.", agent_flow_skill)
             self.assertIn("Do not run install just because a new session started.", agent_flow_skill)
-            gitignore = (project_root / ".gitignore").read_text(encoding="utf-8")
-            self.assertIn("graphify-out/manifest.json", gitignore)
-            self.assertIn("graphify-out/cost.json", gitignore)
-
     def test_node_installer_writes_cwd_independent_hook_commands(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project with space"
@@ -802,7 +796,6 @@ class CliTest(unittest.TestCase):
                     node,
                     str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"),
                     "install",
-                    "--without-graphify",
                 ),
                 cwd=project_root,
                 text=True,
@@ -833,6 +826,57 @@ class CliTest(unittest.TestCase):
             )
             self.assertEqual(stop_hook.returncode, 0, stop_hook.stderr)
 
+    def test_node_installers_remove_legacy_graphify_artifacts(self) -> None:
+        installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
+        managed_skill_roots = (
+            ".agent-flow/skills",
+            ".claude/skills",
+            ".codex/skills",
+            ".Codex/skills",
+            ".gemini/skills",
+            ".gemini/antigravity/skills",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            node = _node_executable()
+            for installer_name in installers:
+                with self.subTest(installer=installer_name):
+                    project_root = root / installer_name
+                    project_root.mkdir()
+                    (project_root / ".gitignore").write_text(
+                        "node_modules/\n"
+                        "graphify/\n"
+                        "graphify-out/manifest.json\n"
+                        "graphify-out/cost.json\n",
+                        encoding="utf-8",
+                    )
+                    for skill_root in managed_skill_roots:
+                        skill_dir = project_root / skill_root / "graphify"
+                        skill_dir.mkdir(parents=True, exist_ok=True)
+                        (skill_dir / "SKILL.md").write_text("---\nname: graphify\n---\n", encoding="utf-8")
+
+                    result = subprocess.run(
+                        (
+                            node,
+                            str(Path(__file__).resolve().parents[1] / "bin" / installer_name),
+                            "install",
+                        ),
+                        cwd=project_root,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    kit = json.loads((project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
+                    self.assertNotIn("graphify", kit)
+                    gitignore = (project_root / ".gitignore").read_text(encoding="utf-8")
+                    self.assertNotIn("graphify/", gitignore)
+                    self.assertNotIn("graphify-out/manifest.json", gitignore)
+                    self.assertNotIn("graphify-out/cost.json", gitignore)
+                    for skill_root in managed_skill_roots:
+                        self.assertFalse((project_root / skill_root / "graphify").exists(), skill_root)
+
     def test_node_installer_accepts_run_install_alias(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
@@ -844,7 +888,6 @@ class CliTest(unittest.TestCase):
                     str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"),
                     "run",
                     "install",
-                    "--without-graphify",
                 ),
                 cwd=project_root,
                 text=True,
@@ -863,7 +906,7 @@ class CliTest(unittest.TestCase):
             node = _node_executable()
             installer = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             initial = subprocess.run(
-                (node, installer, "install", "--without-graphify"),
+                (node, installer, "install"),
                 cwd=project_root,
                 text=True,
                 capture_output=True,
@@ -872,7 +915,7 @@ class CliTest(unittest.TestCase):
             self.assertEqual(initial.returncode, 0, initial.stderr)
 
             result = subprocess.run(
-                (node, installer, "install", "--without-graphify"),
+                (node, installer, "install"),
                 cwd=worktree_root,
                 env={**os.environ, "PATH": ""},
                 text=True,
@@ -894,7 +937,7 @@ class CliTest(unittest.TestCase):
             kit_installer = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             legacy_installer = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-install.mjs")
             initial = subprocess.run(
-                (node, kit_installer, "install", "--without-graphify"),
+                (node, kit_installer, "install"),
                 cwd=project_root,
                 text=True,
                 capture_output=True,
@@ -903,9 +946,8 @@ class CliTest(unittest.TestCase):
             self.assertEqual(initial.returncode, 0, initial.stderr)
 
             result = subprocess.run(
-                (node, legacy_installer, "install", "--without-graphify"),
+                (node, legacy_installer, "install"),
                 cwd=worktree_root,
-                env={**os.environ, "AGENT_FLOW_GRAPHIFY_DRY_RUN": "1"},
                 text=True,
                 capture_output=True,
                 check=False,
@@ -926,7 +968,6 @@ class CliTest(unittest.TestCase):
                     node,
                     str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"),
                     "install",
-                    "--without-graphify",
                 ),
                 cwd=project_root,
                 text=True,
@@ -984,7 +1025,6 @@ class CliTest(unittest.TestCase):
                     node,
                     str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"),
                     "install",
-                    "--without-graphify",
                 ),
                 cwd=project_root,
                 text=True,
@@ -1081,7 +1121,6 @@ class CliTest(unittest.TestCase):
                     node,
                     str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"),
                     "install",
-                    "--without-graphify",
                 ),
                 cwd=worktree,
                 text=True,
@@ -1109,7 +1148,6 @@ class CliTest(unittest.TestCase):
                             node,
                             str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"),
                             "install",
-                            "--without-graphify",
                         ),
                         cwd=worktree,
                         text=True,
@@ -1139,7 +1177,6 @@ class CliTest(unittest.TestCase):
                     node,
                     str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"),
                     "install",
-                    "--without-graphify",
                 ),
                 cwd=worktree,
                 env=env,
@@ -1162,14 +1199,13 @@ class CliTest(unittest.TestCase):
             worktree.parent.mkdir(parents=True)
             subprocess.run(("git", "worktree", "add", "-q", "--detach", str(worktree), "HEAD"), cwd=project_root, check=True)
             node = _node_executable()
-            env = _node_test_env(HOME=str(home), AGENT_FLOW_GRAPHIFY_DRY_RUN="1")
+            env = _node_test_env(HOME=str(home))
 
             result = subprocess.run(
                 (
                     node,
                     str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-install.mjs"),
                     "install",
-                    "--without-graphify",
                 ),
                 cwd=worktree,
                 env=env,
@@ -1189,7 +1225,7 @@ class CliTest(unittest.TestCase):
             _init_git_repo(project_root)
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            install = subprocess.run((node, cli, "install", "--without-graphify"), cwd=project_root, text=True, capture_output=True, check=False)
+            install = subprocess.run((node, cli, "install"), cwd=project_root, text=True, capture_output=True, check=False)
             self.assertEqual(install.returncode, 0, install.stderr)
             home = Path(temp_dir) / "home"
             worktree = home / ".codex" / "worktrees" / "slice" / "project"
@@ -1218,55 +1254,6 @@ class CliTest(unittest.TestCase):
             self.assertEqual(start.returncode, 0, start.stderr)
             self.assertTrue((project_root / ".agent-flow" / "runs" / "full-feature" / "r1").is_dir())
             self.assertFalse((worktree / ".agent-flow" / "runs" / "full-feature" / "r1").exists())
-
-    def test_node_installer_installs_graphify_by_default(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            project_root = Path(temp_dir) / "project"
-            project_root.mkdir()
-            node = _node_executable()
-            result = subprocess.run(
-                (
-                    node,
-                    str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"),
-                    "install",
-                ),
-                cwd=project_root,
-                env={**os.environ, "AGENT_FLOW_GRAPHIFY_DRY_RUN": "1"},
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("graphify installed status=dry-run", result.stdout)
-            kit = json.loads((project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
-            self.assertEqual(kit["graphify"]["package"], "graphifyy")
-            self.assertEqual(kit["graphify"]["command"], "graphify")
-            self.assertEqual(kit["graphify"]["status"], "dry-run")
-            self.assertEqual(kit["graphify"]["platforms"], ["claude", "codex", "gemini"])
-            self.assertEqual(kit["graphify"]["graph"]["status"], "dry-run")
-            self.assertEqual(kit["graphify"]["graph"]["command"], "graphify .")
-
-    def test_node_installer_can_skip_graphify(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            project_root = Path(temp_dir) / "project"
-            project_root.mkdir()
-            node = _node_executable()
-            result = subprocess.run(
-                (
-                    node,
-                    str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"),
-                    "install",
-                    "--without-graphify",
-                ),
-                cwd=project_root,
-                env={**os.environ, "AGENT_FLOW_GRAPHIFY_DRY_RUN": "1"},
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            kit = json.loads((project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
-            self.assertNotIn("graphify", kit)
 
     def test_node_installers_ignore_profile_managed_host_only_project_skills(self) -> None:
         installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
@@ -1311,10 +1298,8 @@ class CliTest(unittest.TestCase):
                         node,
                         str(Path(__file__).resolve().parents[1] / "bin" / installer_name),
                         "install",
-                        "--without-graphify",
                     ),
                     cwd=project_root,
-                    env={**os.environ, "AGENT_FLOW_GRAPHIFY_DRY_RUN": "1"},
                     text=True,
                     capture_output=True,
                     check=False,
@@ -1328,224 +1313,6 @@ class CliTest(unittest.TestCase):
                 self.assertFalse((project_root / ".codex" / "skills" / "android-mvi-feature").exists())
                 self.assertFalse((project_root / ".codex" / "skills" / "compose-state-authoring").exists())
                 self.assertFalse((project_root / ".codex" / "skills" / "edge-to-edge").exists())
-
-    def test_node_installer_reuses_existing_graphify_and_removes_duplicate_skills(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            project_root = root / "project"
-            fake_home = root / "home"
-            fake_bin = root / "bin"
-            project_root.mkdir()
-            fake_home.mkdir()
-            fake_bin.mkdir()
-            graphify = fake_bin / "graphify"
-            graphify.write_text(
-                "#!/usr/bin/env sh\n"
-                "set -eu\n"
-                "if [ \"${1:-}\" = \"--help\" ]; then exit 0; fi\n"
-                "if [ \"${1:-}\" = \"install\" ] && [ \"${2:-}\" = \"--help\" ]; then exit 0; fi\n"
-                "if [ \"${1:-}\" = \"install\" ]; then\n"
-                "  mkdir -p \"$HOME/.agents/skills/graphify\" \"$HOME/.codex/skills/graphify\" \"$HOME/.gemini/skills/graphify\" \"$HOME/.claude/skills/graphify\"\n"
-                "  printf '%s\\n' '---' 'name: graphify' '---' > \"$HOME/.agents/skills/graphify/SKILL.md\"\n"
-                "  printf '%s\\n' '---' 'name: graphify' '---' > \"$HOME/.codex/skills/graphify/SKILL.md\"\n"
-                "  printf '%s\\n' '---' 'name: graphify' '---' > \"$HOME/.gemini/skills/graphify/SKILL.md\"\n"
-                "  printf '%s\\n' '---' 'name: graphify' '---' > \"$HOME/.claude/skills/graphify/SKILL.md\"\n"
-                "  exit 0\n"
-                "fi\n"
-                "if [ \"${1:-}\" = \".\" ]; then\n"
-                "  mkdir -p graphify-out\n"
-                "  printf '{}\\n' > graphify-out/graph.json\n"
-                "  exit 0\n"
-                "fi\n"
-                "exit 1\n",
-                encoding="utf-8",
-            )
-            graphify.chmod(0o755)
-            uv = fake_bin / "uv"
-            uv_marker = fake_home / "uv-invoked"
-            uv.write_text(
-                "#!/usr/bin/env sh\n"
-                "set -eu\n"
-                ": > \"$AGENT_FLOW_TEST_UV_MARKER\"\n"
-                "exit 0\n",
-                encoding="utf-8",
-            )
-            uv.chmod(0o755)
-
-            env = _node_test_env(
-                HOME=str(fake_home),
-                PATH=f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
-                AGENT_FLOW_TEST_UV_MARKER=str(uv_marker),
-            )
-            env.pop("AGENT_FLOW_GRAPHIFY_DRY_RUN", None)
-            node = _node_executable()
-            result = subprocess.run(
-                (
-                    node,
-                    str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"),
-                    "install",
-                ),
-                cwd=project_root,
-                env=env,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            kit = json.loads((project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
-            self.assertEqual(kit["graphify"]["installer"], "existing")
-            self.assertEqual(kit["graphify"]["skill_location"], "~/.agents/skills/graphify")
-            self.assertCountEqual(
-                kit["graphify"]["removed_duplicate_skills"],
-                ["~/.codex/skills/graphify", "~/.gemini/skills/graphify", "~/.claude/skills/graphify"],
-            )
-            self.assertEqual(kit["graphify"]["graph"]["status"], "generated")
-            self.assertTrue((fake_home / ".agents" / "skills" / "graphify" / "SKILL.md").is_file())
-            self.assertFalse((fake_home / ".codex" / "skills" / "graphify").exists())
-            self.assertFalse((fake_home / ".gemini" / "skills" / "graphify").exists())
-            self.assertFalse((fake_home / ".claude" / "skills" / "graphify").exists())
-            self.assertTrue((project_root / "graphify-out" / "graph.json").is_file())
-
-    def test_node_installer_does_not_reinstall_graphify_when_kit_exists(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            project_root = root / "project"
-            fake_home = root / "home"
-            fake_bin = root / "bin"
-            counter = root / "graphify-count"
-            uv_marker = root / "uv-invoked"
-            project_root.mkdir()
-            fake_home.mkdir()
-            fake_bin.mkdir()
-            graphify = fake_bin / "graphify"
-            graphify.write_text(
-                "#!/usr/bin/env sh\n"
-                "set -eu\n"
-                "if [ \"${1:-}\" = \"--help\" ]; then exit 0; fi\n"
-                "if [ \"${1:-}\" = \"install\" ] && [ \"${2:-}\" = \"--help\" ]; then exit 0; fi\n"
-                "if [ \"${1:-}\" = \"install\" ]; then\n"
-                "  printf 'install\\n' >> \"$AGENT_FLOW_TEST_GRAPHIFY_COUNTER\"\n"
-                "  mkdir -p \"$HOME/.agents/skills/graphify\"\n"
-                "  printf '%s\\n' '---' 'name: graphify' '---' > \"$HOME/.agents/skills/graphify/SKILL.md\"\n"
-                "  exit 0\n"
-                "fi\n"
-                "if [ \"${1:-}\" = \".\" ]; then\n"
-                "  printf 'graph\\n' >> \"$AGENT_FLOW_TEST_GRAPHIFY_COUNTER\"\n"
-                "  mkdir -p graphify-out\n"
-                "  printf '{}\\n' > graphify-out/graph.json\n"
-                "  exit 0\n"
-                "fi\n"
-                "exit 1\n",
-                encoding="utf-8",
-            )
-            graphify.chmod(0o755)
-            env = _node_test_env(
-                HOME=str(fake_home),
-                PATH=f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
-                AGENT_FLOW_TEST_GRAPHIFY_COUNTER=str(counter),
-                AGENT_FLOW_TEST_UV_MARKER=str(uv_marker),
-            )
-            env.pop("AGENT_FLOW_GRAPHIFY_DRY_RUN", None)
-            node = _node_executable()
-
-            for _ in range(2):
-                result = subprocess.run(
-                    (
-                        node,
-                        str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"),
-                        "install",
-                    ),
-                    cwd=project_root,
-                    env=env,
-                    text=True,
-                    capture_output=True,
-                    check=False,
-                )
-                self.assertEqual(result.returncode, 0, result.stderr)
-
-            self.assertEqual(counter.read_text(encoding="utf-8").splitlines(), ["install", "install", "install", "graph"])
-            kit = json.loads((project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
-            self.assertEqual(kit["graphify"]["status"], "reused")
-            self.assertFalse(uv_marker.exists())
-
-            legacy_project_root = root / "legacy-project"
-            legacy_project_root.mkdir()
-            (fake_home / ".codex" / "skills" / "graphify").mkdir(parents=True)
-            (fake_home / ".gemini" / "skills" / "graphify").mkdir(parents=True)
-            (fake_home / ".claude" / "skills" / "graphify").mkdir(parents=True)
-            (fake_home / ".codex" / "skills" / "graphify" / "SKILL.md").write_text(
-                "---\nname: graphify\n---\n",
-                encoding="utf-8",
-            )
-            (fake_home / ".gemini" / "skills" / "graphify" / "SKILL.md").write_text(
-                "---\nname: graphify\n---\n",
-                encoding="utf-8",
-            )
-            (fake_home / ".claude" / "skills" / "graphify" / "SKILL.md").write_text(
-                "---\nname: graphify\n---\n",
-                encoding="utf-8",
-            )
-            legacy_result = subprocess.run(
-                (
-                    node,
-                    str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-install.mjs"),
-                    "install",
-                ),
-                cwd=legacy_project_root,
-                env=env,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(legacy_result.returncode, 0, legacy_result.stderr)
-            legacy_kit = json.loads((legacy_project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
-            self.assertEqual(legacy_kit["graphify"]["installer"], "existing")
-            self.assertEqual(legacy_kit["graphify"]["skill_location"], "~/.agents/skills/graphify")
-            self.assertCountEqual(
-                legacy_kit["graphify"]["removed_duplicate_skills"],
-                ["~/.codex/skills/graphify", "~/.gemini/skills/graphify", "~/.claude/skills/graphify"],
-            )
-            self.assertEqual(legacy_kit["graphify"]["graph"]["status"], "generated")
-            self.assertFalse((fake_home / ".codex" / "skills" / "graphify").exists())
-            self.assertFalse((fake_home / ".gemini" / "skills" / "graphify").exists())
-            self.assertFalse((fake_home / ".claude" / "skills" / "graphify").exists())
-            self.assertTrue((legacy_project_root / "graphify-out" / "graph.json").is_file())
-            self.assertTrue((legacy_project_root / ".Codex" / "agents" / "code-reviewer.md").is_file())
-            self.assertFalse(uv_marker.exists())
-
-    def test_legacy_node_installer_installs_graphify_by_default(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            project_root = Path(temp_dir) / "project"
-            project_root.mkdir()
-            node = _node_executable()
-            result = subprocess.run(
-                (
-                    node,
-                    str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-install.mjs"),
-                    "install",
-                ),
-                cwd=project_root,
-                env={**os.environ, "AGENT_FLOW_GRAPHIFY_DRY_RUN": "1"},
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("graphify: dry-run", result.stdout)
-            kit = json.loads((project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
-            self.assertEqual(kit["graphify"]["package"], "graphifyy")
-            self.assertEqual(kit["graphify"]["command"], "graphify")
-            self.assertEqual(kit["graphify"]["status"], "dry-run")
-            self.assertEqual(kit["graphify"]["platforms"], ["claude", "codex", "gemini"])
-            self.assertTrue((project_root / ".Codex" / "agents" / "code-reviewer.md").is_file())
-            self.assertEqual(kit["graphify"]["graph"]["status"], "dry-run")
-            self.assertEqual(kit["graphify"]["graph"]["command"], "graphify .")
-            self.assertFalse((project_root / ".agent-flow" / "skills" / "android-mvi-feature").exists())
-            self.assertFalse((project_root / ".agent-flow" / "skills" / "android-module-creator").exists())
-            self.assertFalse((project_root / ".agent-flow" / "skills" / "android-debugging").exists())
-            gitignore = (project_root / ".gitignore").read_text(encoding="utf-8")
-            self.assertIn("graphify-out/manifest.json", gitignore)
-            self.assertIn("graphify-out/cost.json", gitignore)
 
     def test_node_installer_reinstall_updates_managed_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1653,7 +1420,6 @@ class CliTest(unittest.TestCase):
                     node,
                     str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"),
                     "install",
-                    "--without-graphify",
                 ),
                 cwd=project_root,
                 text=True,
@@ -1672,7 +1438,7 @@ class CliTest(unittest.TestCase):
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             result = subprocess.run(
-                (node, cli, "install", "--without-graphify"),
+                (node, cli, "install"),
                 cwd=project_root,
                 text=True,
                 capture_output=True,

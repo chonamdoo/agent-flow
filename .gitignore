@@ -9,7 +9,6 @@
 /CLAUDE/
 /GEMINI/
 scripts/check-context-docs.*
-graphify/
 agent-flow/
 AUDIT.md
 .DS_Store
@@ -19,5 +18,3 @@ __pycache__/
 .venv/
 dist/
 uv.lock
-graphify-out/manifest.json
-graphify-out/cost.json

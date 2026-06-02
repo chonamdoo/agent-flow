@@ -24,16 +24,6 @@ npx <path-to-this-kit> install
 
 The order matters: `pip install -e` first, then `npx ... install`. The bootstrap markdown references the `agent-flow` binary, which step 1 makes available.
 
-Graphify is installed automatically. To skip it:
-
-```bash
-npx <path-to-this-kit> install --without-graphify
-```
-
-Graphify installs the PyPI package `graphifyy` only when the `graphify` CLI is not already available, registers one shared skill at `~/.agents/skills/graphify`, removes duplicate host-specific copies, exposes the `graphify` CLI, and runs `graphify .` once to build the initial project graph under `graphify-out/`. Graphify is auxiliary: if installation or graph generation fails, agent-flow still installs and records the skipped reason. The installer ignores only local Graphify bookkeeping files (`graphify-out/manifest.json`, `graphify-out/cost.json`) so teams can choose whether to commit the graph report and JSON.
-
-After installation, rerun `graphify .` from a terminal, `/graphify .` in Claude/Gemini-style assistants, or `$graphify .` in Codex whenever the graph should be refreshed.
-
 ## Use
 
 ```text
