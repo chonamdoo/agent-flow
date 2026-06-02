@@ -19,6 +19,9 @@ Use this skill for React Web feature work where presentation code should follow 
 - React official Context docs provide the built-in provider mechanism for passing app-level values through the component tree.
 - React official Context docs say context values are read from the nearest provider and re-render consumers when the value changes.
 - React official Effects docs define effects as synchronization with external systems; derived render state should not move into effects.
+- Next.js App Router docs default layouts/pages to Server Components for server
+  data fetching and use Client Components for state, event handlers, effects,
+  and browser APIs.
 - React has no official Hilt-equivalent DI container; external containers should be introduced only when project shape justifies them.
 - npm downloads check on 2026-06-02 for 2026-05-02..2026-05-31: `tsyringe` 23,949,329; `inversify` 8,334,605; `typed-inject` 3,066,359; `awilix` 1,904,000; `typedi` 1,878,420.
 
@@ -30,6 +33,20 @@ Use this skill for React Web feature work where presentation code should follow 
 - Presentation code depends on domain use cases or ports, not concrete API clients or repository implementations.
 - Components should receive plain props and callbacks; they should not construct domain/data dependencies.
 - Browser APIs, analytics, storage, routing, and other external systems should be wrapped behind ports/adapters before reaching state-holder hooks.
+
+## Data and Error Boundary
+
+- Fetch, Next.js route handlers/server actions, HTTP clients, storage, cookies,
+  and browser API details stay in `data`, `infrastructure`, or server adapters.
+- Transport/storage failure types are raw diagnostics until mapped by repository
+  implementations or data mappers into domain error/result types.
+- Use cases return domain result/error types and add only business-rule errors.
+- Components receive presentation state, events, and `UiModel`/error UI models,
+  not DTOs, `Response` objects, raw HTTP errors, or storage errors.
+- Presentation mappers convert domain models and domain errors into UI models
+  before state reaches components.
+- Effects synchronize with external systems only; do not move domain-to-UI
+  derivation or error mapping into `useEffect`.
 
 ## DI Rule
 

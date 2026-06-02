@@ -34,6 +34,8 @@ platform-specific failures.
      not raw exception strings.
    - JS-side handles permission-denied / not-supported distinctly from
      unknown failure.
+   - Data/application adapters map native errors to domain error/result types;
+     React Native screens receive only presentation error models.
 
 6. **Turbo / Fabric / New Architecture**
    - Codegen specs match runtime method signatures.

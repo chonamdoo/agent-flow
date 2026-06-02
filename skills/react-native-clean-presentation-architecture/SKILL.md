@@ -17,6 +17,9 @@ Use this skill for React Native or Expo feature work where presentation code sho
 ## Evidence Basis
 
 - React official Context docs provide the built-in provider mechanism React Native uses for passing app-level values through the tree.
+- React official Effects docs define effects as synchronization with external systems; derived render state should not move into effects.
+- React Native networking docs provide `fetch` for network requests and require
+  catching errors thrown by `fetch`.
 - React Native native/platform APIs should stay behind adapters so presentation state holders depend on domain/application ports.
 - React Native Turbo Native Modules docs define typed JavaScript specs for custom native platform APIs.
 - React Native FlatList docs require stable keys and `extraData` when render output depends on external state.
@@ -32,6 +35,20 @@ Use this skill for React Native or Expo feature work where presentation code sho
 - Presentation code depends on domain use cases or ports, not concrete native modules, API clients, or repository implementations.
 - Native platform APIs should be wrapped behind ports/adapters before reaching presentation state holders.
 - Permissions, linking, storage, sensors, and native modules should be represented as application/domain ports before presentation uses them.
+
+## Data and Error Boundary
+
+- Fetch, HTTP clients, secure storage, AsyncStorage, native modules, permissions,
+  and platform SDK details stay in `data`, `infrastructure`, or native adapters.
+- Network/storage/native failure types are raw diagnostics until mapped by
+  repository implementations or data mappers into domain error/result types.
+- Use cases return domain result/error types and add only business-rule errors.
+- Screens and components receive presentation state, events, and `UiModel`/error
+  UI models, not DTOs, `Response` objects, raw native errors, or storage errors.
+- Presentation mappers convert domain models and domain errors into UI models
+  before state reaches React Native screens.
+- Effects synchronize with native/external systems only; do not move
+  domain-to-UI derivation or error mapping into `useEffect`.
 
 ## DI Rule
 

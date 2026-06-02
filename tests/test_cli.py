@@ -192,6 +192,8 @@ class CliTest(unittest.TestCase):
                 "gates: all_passed",
                 "skills_checked: true",
                 "clean-architecture: applied",
+                "project-local-skills: checked|n/a",
+                "project-local-skills-used:",
                 "presentation-skill: android|react|react-native|ios|n/a",
                 "presentation-state-based-development: applied|n/a",
                 "presentation-state-review: pass|n/a",
@@ -225,6 +227,8 @@ class CliTest(unittest.TestCase):
         self.assertEqual(phases["green"]["artifact"], "artifacts/green.log")
         for phase_id in ("red", "green", "refactor", "fix-loop", "multi-review", "architecture-review"):
             self.assertIn("skills_checked: true", phases[phase_id]["required_markers"])
+            self.assertIn("project-local-skills: checked|n/a", phases[phase_id]["required_markers"])
+            self.assertIn("project-local-skills-used:", phases[phase_id]["required_markers"])
         self.assertIn("clean-architecture: applied", phases["green"]["required_markers"])
         self.assertIn("clean-architecture: applied", phases["fix-loop"]["required_markers"])
         self.assertIn("clean-architecture-review: applied", phases["multi-review"]["required_markers"])
@@ -1946,6 +1950,7 @@ class CliTest(unittest.TestCase):
                 "## Testability Boundary\n"
                 "```\n"
                 "## Completion Gate\n"
+                "clean-architecture: applied\n"
                 "usecase-interface: n/a\n"
                 "usecase-composition: none\n"
                 "cache-required: no\n"
@@ -6804,11 +6809,17 @@ def _node_presentation_gate() -> str:
     )
 
 
+def _node_project_local_gate() -> str:
+    # 테스트 fixture에서는 프로젝트별 로컬 skill이 적용되지 않은 경우를 명시한다.
+    return "project-local-skills: n/a\nproject-local-skills-used: n/a\n"
+
+
 def _node_phase_content(phase: str, prefix: str = "") -> str:
     content = f"{prefix}{phase}\n"
     skills_gate = (
         "## Completion Gate\n"
         "skills_checked: true\n"
+        + _node_project_local_gate()
         + _node_presentation_gate()
         + "android-local-skills: n/a\n"
         "android-local-skills-used: n/a\n"
@@ -6823,6 +6834,7 @@ def _node_phase_content(phase: str, prefix: str = "") -> str:
         "## Composition Root\n"
         "## Testability Boundary\n"
         "## Completion Gate\n"
+        "clean-architecture: applied\n"
         "usecase-interface: n/a\n"
         "usecase-composition: none\n"
         "cache-required: no\n"
@@ -6880,6 +6892,7 @@ def _node_phase_content(phase: str, prefix: str = "") -> str:
             "\n## Completion Gate\n"
             "skills_checked: true\n"
             + clean_code_review_gate
+            + _node_project_local_gate()
             + _node_presentation_gate()
             + "android-local-skills: n/a\n"
             + "android-local-skills-used: n/a\n"
@@ -6893,6 +6906,7 @@ def _node_phase_content(phase: str, prefix: str = "") -> str:
             + "gates: all_passed\n"
             + "skills_checked: true\n"
             + "clean-architecture: applied\n"
+            + _node_project_local_gate()
             + _node_presentation_gate()
             + "android-local-skills: n/a\n"
             + "android-local-skills-used: n/a\n"
@@ -6909,7 +6923,8 @@ def _with_skills_gate(content: str) -> str:
         f"{content.rstrip()}\n\n## Completion Gate\n"
         "skills_checked: true\n"
         "clean-architecture-review: applied\n"
-        "usecase-interface-check: applied\n"
+        + _node_project_local_gate()
+        + "usecase-interface-check: applied\n"
         "usecase-composition-check: applied\n"
         "cache-boundary-check: applied\n"
         "mapping-boundary-check: applied\n"
@@ -6925,7 +6940,8 @@ def _with_final_review_gate(content: str, dependency_rule: str = "pass") -> str:
         f"{content.rstrip()}\n\n## Completion Gate\n"
         "skills_checked: true\n"
         "clean-architecture: applied\n"
-        f"dependency-rule: {dependency_rule}\n"
+        + _node_project_local_gate()
+        + f"dependency-rule: {dependency_rule}\n"
         "usecase-boundary: n/a\n"
         "usecase-calls-usecase: pass\n"
         "repository-boundary: pass\n"

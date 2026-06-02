@@ -170,6 +170,8 @@ phases:
       - "gates: all_passed"
       - "skills_checked: true"
       - "clean-architecture: applied"
+      - "project-local-skills: checked|n/a"
+      - "project-local-skills-used:"
       - "presentation-skill: android|react|react-native|ios|n/a"
       - "presentation-state-based-development: applied|n/a"
       - "presentation-state-review: pass|n/a"
@@ -241,6 +243,8 @@ phases:
           gates: all_passed
           skills_checked: true
           clean-architecture: applied
+          project-local-skills: checked|n/a
+          project-local-skills-used: <skill list or n/a>
           presentation-skill: n/a
           presentation-state-based-development: n/a
           presentation-state-review: n/a
@@ -258,6 +262,8 @@ phases:
     required_markers:
       - "skills_checked: true"
       - "clean-architecture: applied"
+      - "project-local-skills: checked|n/a"
+      - "project-local-skills-used:"
       - "dependency-rule: pass|fail"
       - "usecase-boundary: pass|fail|n/a"
       - "usecase-calls-usecase: pass|fail"
@@ -314,6 +320,8 @@ phases:
           ## Completion Gate
           skills_checked: true
           clean-architecture: applied
+          project-local-skills: checked|n/a
+          project-local-skills-used: <skill list or n/a>
           dependency-rule: pass|fail
           usecase-boundary: pass|fail|n/a
           usecase-calls-usecase: pass|fail
@@ -342,6 +350,8 @@ phases:
     required_markers:
       - "skills_checked: true"
       - "clean-architecture: applied"
+      - "project-local-skills: checked|n/a"
+      - "project-local-skills-used:"
       - "presentation-skill: android|react|react-native|ios|n/a"
       - "presentation-state-based-development: applied|n/a"
       - "presentation-state-review: pass|n/a"
@@ -368,6 +378,8 @@ phases:
           ## Completion Gate
           skills_checked: true
           clean-architecture: applied
+          project-local-skills: checked|n/a
+          project-local-skills-used: <skill list or n/a>
           presentation-skill: n/a
           presentation-state-based-development: n/a
           presentation-state-review: n/a

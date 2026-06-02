@@ -72,6 +72,7 @@ phases:
     description: DDD first, then Clean Architecture design.
     required_markers:
       - "## Clean Architecture Boundary Map"
+      - "clean-architecture: applied"
       - "## Dependency Rule"
       - "## Use Case Boundaries"
       - "usecase-interface: required|optional|n/a"
@@ -116,6 +117,7 @@ phases:
       End with:
 
           ## Completion Gate
+          clean-architecture: applied
           usecase-interface: required|optional|n/a
           usecase-composition: none|domain-service|application-service|orchestrator|justified
           cache-required: yes|no
@@ -154,6 +156,8 @@ phases:
     description: TDD red phase.
     required_markers:
       - "skills_checked: true"
+      - "project-local-skills: checked|n/a"
+      - "project-local-skills-used:"
       - "presentation-skill: android|react|react-native|ios|n/a"
       - "android-local-skills: checked|n/a"
       - "android-local-skills-used:"
@@ -170,6 +174,8 @@ phases:
 
           ## Completion Gate
           skills_checked: true
+          project-local-skills: checked|n/a
+          project-local-skills-used: <skill list or n/a>
           presentation-skill: n/a
           android-local-skills: checked|n/a
           android-local-skills-used: <skill list or n/a>
@@ -181,6 +187,8 @@ phases:
     required_markers:
       - "skills_checked: true"
       - "clean-architecture: applied"
+      - "project-local-skills: checked|n/a"
+      - "project-local-skills-used:"
       - "presentation-skill: android|react|react-native|ios|n/a"
       - "presentation-state-based-development: applied|n/a"
       - "presentation-state-review: pass|n/a"
@@ -204,6 +212,8 @@ phases:
           ## Completion Gate
           skills_checked: true
           clean-architecture: applied
+          project-local-skills: checked|n/a
+          project-local-skills-used: <skill list or n/a>
           presentation-skill: n/a
           presentation-state-based-development: n/a
           presentation-state-review: n/a
@@ -220,6 +230,8 @@ phases:
     required_markers:
       - "skills_checked: true"
       - "clean-architecture: applied"
+      - "project-local-skills: checked|n/a"
+      - "project-local-skills-used:"
       - "presentation-skill: android|react|react-native|ios|n/a"
       - "presentation-state-based-development: applied|n/a"
       - "presentation-state-review: pass|n/a"
@@ -243,6 +255,8 @@ phases:
           ## Completion Gate
           skills_checked: true
           clean-architecture: applied
+          project-local-skills: checked|n/a
+          project-local-skills-used: <skill list or n/a>
           presentation-skill: n/a
           presentation-state-based-development: n/a
           presentation-state-review: n/a
@@ -276,6 +290,8 @@ phases:
     required_markers:
       - "skills_checked: true"
       - "clean-architecture-review: applied"
+      - "project-local-skills: checked|n/a"
+      - "project-local-skills-used:"
       - "presentation-skill: android|react|react-native|ios|n/a"
       - "presentation-state-review: pass|fail|n/a"
       - "ui-state-modeling: explicit|n/a"
@@ -321,6 +337,8 @@ phases:
           ## Completion Gate
           skills_checked: true
           clean-architecture-review: applied
+          project-local-skills: checked|n/a
+          project-local-skills-used: <skill list or n/a>
           presentation-skill: n/a
           presentation-state-review: n/a
           ui-state-modeling: n/a
@@ -341,6 +359,8 @@ phases:
     required_markers:
       - "skills_checked: true"
       - "clean-architecture: applied"
+      - "project-local-skills: checked|n/a"
+      - "project-local-skills-used:"
       - "presentation-skill: android|react|react-native|ios|n/a"
       - "presentation-state-based-development: applied|n/a"
       - "presentation-state-review: pass|n/a"
@@ -366,6 +386,8 @@ phases:
           ## Completion Gate
           skills_checked: true
           clean-architecture: applied
+          project-local-skills: checked|n/a
+          project-local-skills-used: <skill list or n/a>
           presentation-skill: n/a
           presentation-state-based-development: n/a
           presentation-state-review: n/a
@@ -382,6 +404,8 @@ phases:
     required_markers:
       - "skills_checked: true"
       - "clean-architecture: applied"
+      - "project-local-skills: checked|n/a"
+      - "project-local-skills-used:"
       - "dependency-rule: pass|fail"
       - "usecase-boundary: pass|fail|n/a"
       - "usecase-calls-usecase: pass|fail"
@@ -423,6 +447,8 @@ phases:
           ## Completion Gate
           skills_checked: true
           clean-architecture: applied
+          project-local-skills: checked|n/a
+          project-local-skills-used: <skill list or n/a>
           dependency-rule: pass|fail
           usecase-boundary: pass|fail|n/a
           usecase-calls-usecase: pass|fail

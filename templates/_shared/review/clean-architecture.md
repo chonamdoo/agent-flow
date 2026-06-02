@@ -40,7 +40,15 @@ Output strictly markdown findings. Do not propose code unless asked.
    - Domain Model has no ORM, serialization, or framework annotations.
    - No giant mapper handles Remote DTO, DB Entity, and UI Model conversions together.
 
-6. SOLID architecture validation
+6. Error boundary
+   - Raw transport/storage/native failures stay in data/infrastructure adapters.
+   - Repository Impl or data mapper translates raw failures to domain app errors.
+   - UseCase returns domain result/error types and adds only business-rule errors.
+   - Presentation maps domain errors to UI error models before UI rendering.
+   - UI components/views/screens never receive DTOs, HTTP `Response`, URLSession
+     responses, native exception strings, or storage failure types.
+
+7. SOLID architecture validation
    - SRP: separated by reason to change.
    - OCP: extension points exist only at real variation points.
    - LSP: implementations and fakes preserve interface contracts.

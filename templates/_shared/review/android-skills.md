@@ -34,6 +34,11 @@ If no Android/Kotlin/Compose/KMP files changed, mark the completion gate `n/a`.
    boundaries, `StateFlow`, `SharedFlow`, `Channel`, `stateIn`, and event loss.
 6. KMP and domain types: expect/actual boundaries, platform interop shape,
    `@JvmInline value class` suitability, and Compose stability implications.
+7. Data/error boundaries: `api` for Retrofit services, `source.remote` and
+   `source.local` for data source implementations, DTO/request/response models
+   in `model`, conversions in `mapper`, `NetworkFailure -> AppError` in
+   repository/data mappers, and `AppError -> ErrorUiModel` in presentation
+   mappers.
 
 ## Output
 

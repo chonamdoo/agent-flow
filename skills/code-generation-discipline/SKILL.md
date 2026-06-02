@@ -28,6 +28,7 @@ Use this as the common implementation discipline. Do not score it. Apply it as a
   - iOS/SwiftUI/UIKit presentation: read `ios-clean-presentation-architecture`.
 - Presentation work must be state-based. Record `presentation-skill: android|react|react-native|ios|n/a`, `presentation-state-based-development: applied|n/a`, `presentation-state-review: pass|fail|n/a`, `ui-state-modeling: explicit|n/a`, `presentation-mapping-boundary: domain-to-uimodel|n/a`, and `di-boundary: <hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a>` in the completion gate when relevant.
 - Completion Gate markers must use concrete values that the marker parser accepts. Do not leave angle-bracket placeholders; use `n/a` only when the marker is genuinely not relevant.
+- If project-local skills were checked, record `project-local-skills: checked` and `project-local-skills-used: <skill list>` in the phase artifact's `## Completion Gate`. If no project-local skill applies, record `project-local-skills: n/a` and `project-local-skills-used: n/a`.
 - If Android/Kotlin/Compose/KMP files are changed, record `android-local-skills: checked|n/a` and `android-local-skills-used: <skill list or n/a>` in the phase artifact's `## Completion Gate`.
 - If a required language/framework skill is not installed at the active host path, report `missing local <group>: <skill>` with the configured source URL and do not proceed until the user installs it or explicitly overrides.
 

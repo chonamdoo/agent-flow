@@ -75,8 +75,20 @@ def _completion_gate_lines(text: str) -> list[str]:
             if in_gate:
                 break
         if in_gate:
-            out.append(stripped.lower())
+            out.append(_normalize_marker_line(stripped).lower())
     return out
+
+
+def _normalize_marker_line(line: str) -> str:
+    # Completion Gate 마커는 체크리스트나 diff 추가 줄에서도 같은 값으로 비교한다.
+    candidate = line.strip()
+    if candidate.startswith("+"):
+        candidate = candidate[1:].strip()
+    lowered = candidate.lower()
+    for prefix in ("- [x] ", "- [ ] ", "- ", "* "):
+        if lowered.startswith(prefix):
+            return candidate[len(prefix):].strip()
+    return candidate
 
 
 def _line_has_failure_marker(line: str) -> bool:

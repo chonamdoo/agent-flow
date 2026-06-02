@@ -1036,6 +1036,28 @@ def test_required_markers_block_incomplete_artifact(tmp_path: Path):
 
     assert runner._missing_required_markers(phase) == []
 
+    # 체크리스트로 작성한 Completion Gate도 동일한 마커로 인정한다.
+    (run_dir / "domain-grill.md").write_text(
+        "notes\n"
+        "## Completion Gate\n"
+        "- [x] domain-grill: complete\n"
+        "* shared_understanding: reached\n",
+        encoding="utf-8",
+    )
+
+    assert runner._missing_required_markers(phase) == []
+
+    # diff에서 복사한 추가 줄도 Completion Gate 마커로 인정한다.
+    (run_dir / "domain-grill.md").write_text(
+        "notes\n"
+        "## Completion Gate\n"
+        "+ domain-grill: complete\n"
+        "+ shared_understanding: reached\n",
+        encoding="utf-8",
+    )
+
+    assert runner._missing_required_markers(phase) == []
+
     phase = Phase(
         id="domain-grill",
         description="",

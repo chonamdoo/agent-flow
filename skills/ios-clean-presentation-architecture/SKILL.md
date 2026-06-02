@@ -19,6 +19,9 @@ Use this skill for iOS feature work where SwiftUI or UIKit presentation code sho
 - Apple SwiftUI `EnvironmentValues`: SwiftUI views can read values from the environment, and custom environment values can be created with `@Entry`.
 - Apple Observation migration guide: starting with iOS 17, SwiftUI supports `@Observable`; Apple recommends `State` and `Environment` for observable models instead of object-specific wrappers when fully adopting Observation.
 - Apple `StateObject` / `EnvironmentObject`: still valid for `ObservableObject` code and incremental migration.
+- Apple `URLSession` docs define asynchronous network transfers that return data
+  and `URLResponse` or throw errors.
+- Apple Swift `Result` docs model success and failure as typed associated values.
 - GitHub API check on 2026-06-01: `Swinject/Swinject` had the highest stars among checked Swift DI containers; `Factory`, `swift-dependencies`, and `Needle` were active alternatives.
 - Library docs: Factory targets Swift/SwiftUI container DI and previews/tests; swift-dependencies is inspired by SwiftUI environment; Needle is compile-time safe; Swinject is a mature Swift DI container.
 
@@ -29,6 +32,19 @@ Use this skill for iOS feature work where SwiftUI or UIKit presentation code sho
 - `data` or `infrastructure` implements repository protocols and API/storage/native adapters.
 - Presentation code depends on domain use cases or ports, not concrete API clients, storage clients, or repository implementations.
 - Platform APIs such as Keychain, CoreLocation, Photos, notifications, and analytics should be wrapped behind ports/adapters before reaching presentation state holders.
+
+## Data and Error Boundary
+
+- URLSession, decoding, transport failures, Keychain, database, cache, and native
+  SDK details stay in `data` or `infrastructure`.
+- Network/storage failure types are raw diagnostics until mapped by repository
+  implementations or data mappers into domain error/result types.
+- Use cases return domain result/error types and add only business-rule errors.
+- SwiftUI views and UIKit view controllers receive presentation state, events,
+  and `UiModel`/error UI models, not DTOs, URLSession responses, or raw storage
+  errors.
+- Presentation mappers convert domain models and domain errors into UI models
+  before state reaches SwiftUI/UIKit.
 
 ## DI Rule
 
