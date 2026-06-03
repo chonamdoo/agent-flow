@@ -17,8 +17,10 @@
 - 새로 추가하거나 수정한 코드 주석이 모두 한국어인가.
 - Python 변경은 `python-development-guide`, TypeScript/TSX 변경은 `typescript-development-guide`를 보조 체크리스트로 확인했는가.
 - React Web/Next.js/TSX 컴포넌트 변경은 `react-development-guide`, React Native/Expo/RN 앱 변경은 `react-native-development-guide`를 보조 체크리스트로 확인했는가.
-- Android/Kotlin/Compose/KMP 변경은 `android-code-review`, Android profile의 `android_skills.review[*].skill`, `chrisbanes_skills.review[*].skill` 로컬 설치본을 현재 host 경로에서만 읽었는가.
+- presentation 변경은 플랫폼별 `android-clean-presentation-architecture`, `react-clean-presentation-architecture`, `react-native-clean-presentation-architecture`, `ios-clean-presentation-architecture` 중 해당 skill을 확인했는가.
+- Android/Kotlin/Compose/KMP 변경은 `android-code-review`, Android profile의 `android_skills.review[*].skill`, `chrisbanes_skills.review[*].skill` 로컬 설치본을 현재 host 경로에서만 읽었는가. 로컬 설치본은 `.agent-flow/local-skills/<skill>/SKILL.md`, `.agent-flow/skills/<skill>/SKILL.md`, 또는 현재 host의 local skill 경로에 있는 실제 `SKILL.md`다.
 - 필요한 Android/Chris Banes skill이 로컬에 없으면 `missing local android_skills: <skill>` 또는 `missing local chrisbanes_skills: <skill>`와 source URL을 기록하고 `request-changes`로 판단했는가.
+- Android/Kotlin/Compose/KMP 변경인데 `android-local-skills-used`가 비어 있거나 `n/a`이고 일반 Compose/Kotlin 관례만 적용했다면 `request-changes`로 판단했는가.
 - 설계/구현 변경이면 `skills/clean-architecture/SKILL.md`를 적용했는가.
 - Clean Architecture must-fix 조건이 있으면 `request-changes`로 판단했는가.
 - agent-flow phase artifact와 completion marker가 요구사항을 만족하는가.
@@ -47,6 +49,12 @@ verdict: approve | request-changes
 ## Completion Gate
 skills_checked: true
 clean-architecture-review: applied
+presentation-skill: android|react|react-native|ios|n/a
+presentation-state-based-development: applied|n/a
+presentation-state-review: pass|fail|n/a
+ui-state-modeling: explicit|n/a
+presentation-mapping-boundary: domain-to-uimodel|n/a
+di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a
 usecase-interface-check: applied
 usecase-composition-check: applied
 cache-boundary-check: applied

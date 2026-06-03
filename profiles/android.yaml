@@ -1,8 +1,8 @@
 id: android
 branching:
-  strategy: release-first
-  base: release/*        # 활성 release/YY.M.D.x 브랜치, 운영자가 확인
-  integration: release/* # PR은 활성 release 브랜치로 보내고 이후 develop에 동기화
+  strategy: trunk
+  base: main
+  integration: main
   worktree: required
   naming:
     prefix: "feat/"
@@ -191,5 +191,5 @@ commit_convention:
   style: tagged          # [Feat] / [Fix] / [Refactor] / ...
   co_author: skip
 pr:
-  target_branch: release/*
+  target_branch: main
   merge_strategy: merge

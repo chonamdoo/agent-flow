@@ -18,6 +18,9 @@ Use this skill for React Native or Expo feature work where presentation code sho
 
 - React official Context docs provide the built-in provider mechanism React Native uses for passing app-level values through the tree.
 - React official Effects docs define effects as synchronization with external systems; derived render state should not move into effects.
+- React official state structure docs recommend grouping related state, avoiding contradictions, and avoiding redundant or duplicated state.
+- React official reducer docs recommend reducer actions that describe one user interaction and pure reducer functions for complex state transitions.
+- React Native state docs define props as parent-owned fixed data and state as data that changes over time; React Native state follows React state semantics.
 - React Native networking docs provide `fetch` for network requests and require
   catching errors thrown by `fetch`.
 - React Native native/platform APIs should stay behind adapters so presentation state holders depend on domain/application ports.
@@ -73,6 +76,7 @@ Feature presentation packages should stay screen-oriented:
 - `features/<feature>/presentation/<screen>/<Screen>.tsx`
 - `features/<feature>/presentation/<screen>/use<Screen>ViewModel.ts`
 - `features/<feature>/presentation/<screen>/model/<Screen>UiState.ts`
+- `features/<feature>/presentation/<screen>/model/<Screen>UiAction.ts`
 - `features/<feature>/presentation/<screen>/model/<Screen>UiEvent.ts`
 - `features/<feature>/presentation/<screen>/model/<Screen>UiModel.ts`
 - `features/<feature>/presentation/<screen>/mapper/*Mapper.ts`
@@ -93,11 +97,22 @@ Use a custom hook as the screen state holder:
 - do not force a single `Action` reducer shape unless the repo already uses reducer/action patterns
 
 State patterns:
-- model not-ready, loading, refreshing, empty, error, success, offline, and permission states explicitly when they can occur
+- model `not-ready`, `loading`, `refreshing`, `placeholder`, `empty`, `error`, `success`, `offline`, and `permission-required` states explicitly when they can occur
+- define `UiState` as a discriminated union, normally by `status` or `type`, instead of multiple booleans that can contradict each other
 - do not use fake domain sentinel values as initial UI state
 - keep request ids, abort controllers, pagination cursors, selected ids, and optimistic update state private in the state holder
 - preserve cancellation with `AbortController` or the project’s existing request cancellation pattern
 - keep keyboard, scroll, focus, and animation state local unless it drives business work
+
+`UiState`, `UiAction`, and `UiEvent` roles:
+- `UiState` is durable render data. It must be enough to redraw the screen from props/state after navigation focus changes.
+- `UiAction` is user or UI input. Use a discriminated union when the screen uses a reducer or has branchy behavior; otherwise named callbacks are acceptable but must map to explicit actions conceptually.
+- `UiEvent` is a transient screen-container effect such as navigation, toast, haptic feedback, permission prompt, deep link, focus, or analytics trigger.
+
+Reducer/action patterns:
+- use `useReducer` when state transitions are complex, coupled, or bug-prone
+- keep reducers pure and free of requests, timers, navigation, native module calls, storage, and other side effects
+- model each action as one user interaction or external result, not as many field-level patches when one semantic action exists
 
 Event patterns:
 - treat navigation, toast, snackbar, haptic feedback, permission prompts, and imperative focus as one-shot effects
@@ -122,11 +137,14 @@ Split state-holder wiring from rendering:
 - dependency flow uses props or `Context` providers; external DI is justified or already present
 - native APIs are wrapped before reaching the state holder
 - permissions, linking, storage, sensors, and custom native modules are accessed through ports/adapters
-- `uiState` is explicit and covers not-ready, loading, refreshing, empty, error, success, offline, and permission states that can occur
+- `uiState` is a discriminated union and covers not-ready, loading, refreshing, placeholder, empty, error, success, offline, and permission states that can occur
+- `uiState` has no contradictory booleans or duplicated derived fields
+- `UiAction`, `UiEvent`, and `UiState` roles are explicit for branchy screens
 - domain data is mapped to `UiModel` before rendering
 - `UiModel` postfix is used for presentation models
 - state-holder hook owns async orchestration and exposes callbacks
 - components stay render-focused and receive plain props
+- reducer logic, when present, is pure and side-effect free
 - `FlatList` keys and external render dependencies are explicit
 - safe-area handling does not use deprecated core `SafeAreaView` for new code
 - one-shot effects are not modeled as durable UI state
@@ -148,6 +166,10 @@ When this skill is used for presentation development or code review, include the
 - React `createContext`: https://react.dev/reference/react/createContext
 - React `useContext`: https://react.dev/reference/react/useContext
 - React `useEffect`: https://react.dev/reference/react/useEffect
+- Choosing the State Structure: https://react.dev/learn/choosing-the-state-structure
+- Extracting State Logic into a Reducer: https://react.dev/learn/extracting-state-logic-into-a-reducer
+- Separating Events from Effects: https://react.dev/learn/separating-events-from-effects
+- React Native State: https://reactnative.dev/docs/state
 - React Native Turbo Native Modules: https://reactnative.dev/docs/turbo-native-modules-introduction
 - React Native PermissionsAndroid: https://reactnative.dev/docs/permissionsandroid
 - React Native Linking: https://reactnative.dev/docs/linking

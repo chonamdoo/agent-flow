@@ -17,6 +17,10 @@ Use this skill for iOS feature work where SwiftUI or UIKit presentation code sho
 ## Evidence Basis
 
 - Apple SwiftUI `EnvironmentValues`: SwiftUI views can read values from the environment, and custom environment values can be created with `@Entry`.
+- Apple SwiftUI user-interface state docs define least-common-ancestor state ownership, read-only values, and `Binding` for two-way child access.
+- Apple SwiftUI model-data docs define observable model data as separate from views and use Observation to keep UI updated.
+- Apple `State` docs define `@State` as a private source of truth for value state in a view hierarchy.
+- Apple `Binding` docs define a binding as a two-way connection to a source of truth stored elsewhere.
 - Apple Observation migration guide: starting with iOS 17, SwiftUI supports `@Observable`; Apple recommends `State` and `Environment` for observable models instead of object-specific wrappers when fully adopting Observation.
 - Apple `StateObject` / `EnvironmentObject`: still valid for `ObservableObject` code and incremental migration.
 - Apple `URLSession` docs define asynchronous network transfers that return data
@@ -119,6 +123,7 @@ Feature presentation packages should stay screen-oriented:
 - `Features/<Feature>/Presentation/<Screen>/<Screen>View.swift`
 - `Features/<Feature>/Presentation/<Screen>/<Screen>ViewModel.swift`
 - `Features/<Feature>/Presentation/<Screen>/Model/<Screen>UiState.swift`
+- `Features/<Feature>/Presentation/<Screen>/Model/<Screen>UiAction.swift`
 - `Features/<Feature>/Presentation/<Screen>/Model/<Screen>UiEvent.swift`
 - `Features/<Feature>/Presentation/<Screen>/Model/<Screen>UiModel.swift`
 - `Features/<Feature>/Presentation/<Screen>/Mapper/*Mapper.swift`
@@ -136,16 +141,22 @@ Use a screen-level state holder:
 
 State patterns:
 - expose explicit `UiState`, preferably an enum with associated data
-- model not-ready, loading, refreshing, empty, error, success, offline, and permission states when they can occur
+- model `notReady`, `loading`, `refreshing`, `placeholder`, `empty`, `error`, `success`, `offline`, and `permissionRequired` cases when they can occur
 - do not use fake domain sentinel values as initial UI state
 - keep pagination cursors, selected ids, cancellation handles, optimistic updates, and retry state private in the state holder
 - keep UI-only focus, scroll, animation, sheet, and text editing state local unless it drives domain work
 - all UI state mutation should happen on `MainActor`
+- use SwiftUI `@State` for view-local transient state, `Binding` for child write access to an existing source of truth, and `Environment` for shared observable dependencies when that is the project pattern
+
+`UiState`, `UiAction`, and `UiEvent` roles:
+- `UiState` is durable render data. It must be enough to redraw the screen from the state holder.
+- `UiAction` is user or UI input flowing to the state holder. Use an enum when the screen has branchy behavior; direct methods are acceptable for simple screens but must map to explicit actions conceptually.
+- `UiEvent` is a transient view/container effect such as navigation, toast/banner, haptic feedback, permission prompt, share sheet, focus, or analytics trigger.
 
 Event patterns:
 - treat navigation, toast/banner, haptic feedback, permission prompts, share sheets, and imperative focus as one-shot effects
 - do not store fire-once effects as durable `UiState`
-- prefer callback outputs or a narrow `UiEvent` stream only when the screen truly needs one-shot effects
+- prefer callback outputs, `AsyncStream<UiEvent>`, Combine publisher, or the repo's existing narrow event stream only when the screen truly needs one-shot effects
 
 ## View Rule
 
@@ -163,7 +174,8 @@ Split state-holder wiring from rendering:
 - if Swinject is used, registrations are grouped in assemblies and the assembler/container is built at a composition root
 - if Swinject is used, object scopes are explicit and container mutation does not leak into presentation
 - native/platform APIs are wrapped before reaching the state holder
-- `UiState` is explicit and covers all states that can occur
+- `UiState` is an enum or equivalent explicit type and covers not-ready/loading/refreshing/placeholder/empty/error/success/offline/permission states that can occur
+- `UiAction`, `UiEvent`, and `UiState` roles are explicit for branchy screens
 - domain data is mapped to `UiModel` before rendering
 - `UiModel` postfix is used for presentation models
 - state holder owns async orchestration and exposes callbacks/events
@@ -185,6 +197,11 @@ When this skill is used for presentation development or code review, include the
 
 ## Sources
 
+- Apple managing user interface state: https://developer.apple.com/documentation/swiftui/managing-user-interface-state
+- Apple model data: https://developer.apple.com/documentation/SwiftUI/Model-data
+- Apple `State`: https://developer.apple.com/documentation/swiftui/state
+- Apple `Binding`: https://developer.apple.com/documentation/SwiftUI/Binding
+- Apple `Observable`: https://developer.apple.com/documentation/Observation/Observable
 - Apple Environment values: https://developer.apple.com/documentation/swiftui/environment-values
 - Apple `@Entry`: https://developer.apple.com/documentation/SwiftUI/Entry%28%29
 - Apple Observation migration: https://developer.apple.com/documentation/SwiftUI/Migrating-from-the-observable-object-protocol-to-the-observable-macro

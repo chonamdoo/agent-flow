@@ -205,6 +205,7 @@ phases:
           through the current host path only. If required skills are missing,
           report `missing local <group>: <skill>` with the source URL and do
           not claim completion without user override.
+          General Compose/Kotlin convention does not count as loaded skill usage.
       7. Honor SOLID principles from the design's SOLID section.
       8. For any data layer work, enforce the repository boundary from
          `skills/clean-architecture/SKILL.md`:
@@ -313,6 +314,7 @@ phases:
       through the current host path only. If required skills are missing,
       report `missing local <group>: <skill>` with the source URL and use
       `verdict: request-changes`.
+      General Compose/Kotlin convention does not count as loaded skill usage.
       End with `## Overall` followed by exactly one verdict line: `verdict: approve` or
       `verdict: request-changes`.
       Also include:
@@ -373,6 +375,7 @@ phases:
       and `chrisbanes_skills` through the current host path only. If a required
       local skill is missing, do not complete this artifact; report
       `missing local <group>: <skill>` with the source URL to the user.
+      General Compose/Kotlin convention does not count as loaded skill usage.
       End with:
 
           ## Completion Gate

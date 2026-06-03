@@ -1,8 +1,8 @@
 id: android
 branching:
-  strategy: release-first
-  base: release/*
-  integration: release/*
+  strategy: trunk
+  base: main
+  integration: main
   worktree: required
   naming:
     prefix: "feat/"
@@ -180,5 +180,5 @@ chrisbanes_skills:
     - skill: kotlin-types-value-class
       when: value classes or single-field domain types changed
 pr:
-  target_branch: release/*
+  target_branch: main
   merge_strategy: merge

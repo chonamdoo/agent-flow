@@ -20,6 +20,19 @@ Use this skill for Android feature work where presentation code should follow a 
 - Android architecture docs position `ViewModel` as the screen-level state holder.
 - Android coroutine/Flow docs support `StateFlow`, `stateIn`, and `SharingStarted` for observable UI state.
 - Jetpack Compose state docs support state flowing down and events flowing up, with lifecycle-aware collection in Android UI.
+- Android UI layer docs separate screen UI state from UI element state and describe UDF/state holders as the UI state production pipeline.
+- Android UI events docs distinguish durable state from transient events and recommend reducing critical one-off events to UI state when delivery matters.
+- Compose state hoisting docs require immutable state down and events up from the lowest correct state owner.
+- Compose stability docs allow `@Stable` on types whose mutation contract Compose cannot otherwise infer.
+
+## Compose/Kotlin Local Skill Loading
+
+For Android/Kotlin/Compose/KMP implementation or review:
+- Load every matching local `compose-*`, `kotlin-*`, `navigation-3`, `edge-to-edge`, `adaptive`, and `testing-setup` `SKILL.md` named by the active Android profile.
+- Prefer project-local skills under `.agent-flow/local-skills/<skill>/SKILL.md`; otherwise use `.agent-flow/skills/<skill>/SKILL.md` or the current host's configured local skill directory.
+- Record loaded skills as `android-local-skills-used: <skill list>`.
+- Use `android-local-skills-used: n/a` only when no matching Android/Compose/Kotlin skill exists.
+- Do not say "Compose/Kotlin convention applied" or approve Compose/Kotlin code if matching local skill files were not explicitly loaded in the current work session.
 
 ## Architecture Rule
 
@@ -39,6 +52,7 @@ Feature presentation packages should stay screen-oriented:
 - `presentation/<flow>/<screen>/<Screen>.kt`
 - `presentation/<flow>/<screen>/<Screen>ViewModel.kt`
 - `presentation/<flow>/<screen>/model/<Screen>UiState.kt`
+- `presentation/<flow>/<screen>/model/<Screen>UiAction.kt`
 - `presentation/<flow>/<screen>/model/<Screen>UiEvent.kt`
 - `presentation/<flow>/<screen>/model/<Screen>UiModel.kt`
 - `presentation/<flow>/<screen>/mapper/*Mapper.kt`
@@ -80,7 +94,8 @@ ViewModels are screen-level state holders:
 - inject domain use cases and platform abstractions
 - expose immutable `StateFlow<ScreenUiState>`
 - keep mutable state private
-- expose one-shot events as `Flow<ScreenUiEvent>`
+- accept user input through named callbacks for simple screens or `fun onAction(action: ScreenUiAction)` for branchy screens
+- expose one-shot UI behavior effects as `Flow<ScreenUiEvent>` only when they cannot be reduced to durable `ScreenUiState`
 - convert non-suspending UI callbacks into `viewModelScope.launch`
 - use `fun onAction(action: ScreenUiAction)` when the screen has multiple events or branchy behavior
 - do not hold `Context`, `Activity`, `NavController`, `Navigator`, `Router`, launchers, `Intent`, `WebView`, or Compose state objects
@@ -94,7 +109,8 @@ State patterns:
 - Keep paging request ids, selected item ids, and active `Job` handles private inside the ViewModel.
 
 Event patterns:
-- Use `Channel<ScreenUiEvent>(Channel.BUFFERED)` plus `receiveAsFlow()` for single-consumer navigation/snackbar/toast events.
+- Prefer modeling critical results as `ScreenUiState`; use `ScreenUiEvent` only for UI behavior such as navigation, snackbar, toast, permission launcher, browser intent, focus, or haptic feedback.
+- Use `Channel<ScreenUiEvent>(Channel.BUFFERED)` plus `receiveAsFlow()` for single-consumer UI behavior events.
 - Do not model fire-once effects as `StateFlow`.
 - Prefer explicit `UiEvent` sealed interfaces over raw strings or lambdas from ViewModel to UI.
 
@@ -105,17 +121,23 @@ Coroutine rule:
 
 ## UiState Rule
 
-Use `sealed interface <Screen>UiState` for screen state:
+Use `@Stable sealed interface <Screen>UiState` for screen state by default:
 - `data object NotReady` or a domain-specific not-ready state when input is missing
 - `data object Loading`
 - `data object Refreshing` when refresh is visually distinct from first load
+- `data object Placeholder` or `data class Placeholder(...)` when skeleton rows/cards need stable placeholder `UiModel`s
 - `data object Empty` or `SearchNotReady` when absence is a real UI state
 - `data class Success(...)`
 - `data class Error(...)`
 - `data object Offline` when network absence is a distinct UI state
 - `data object PermissionRequired` when permission is required before content can load
 
-Avoid fake domain sentinel values. If not-ready, loading, refreshing, empty, error, offline, permission-required, or success can happen, model it explicitly in the `UiState` type.
+`UiState`, `UiAction`, and `UiEvent` roles:
+- `UiState` is durable render data. It must be replayable and enough to redraw the screen after recreation.
+- `UiAction` is user or UI input flowing upward to the state holder.
+- `UiEvent` is a transient UI behavior command consumed by route/top-level wiring.
+
+Avoid fake domain sentinel values. If not-ready, loading, refreshing, placeholder, empty, error, offline, permission-required, or success can happen, model it explicitly in the `UiState` type.
 
 Keep `UiState` immutable:
 - expose presentation `UiModel` types, not mutable domain/data entities
@@ -149,8 +171,10 @@ Keep UI-local state local:
 
 - `ViewModel` constructor injects use cases/platform abstractions, not data implementation classes.
 - `uiState` is public immutable `StateFlow`; mutable state is private.
-- `UiState` is explicit for not-ready/loading/refreshing/empty/error/offline/permission/success states that can occur; no fake domain default.
-- one-shot events use `Channel(...).receiveAsFlow()` or another deliberate event model.
+- `UiState` is `@Stable sealed interface` unless the repo has a documented exception.
+- `UiState` is explicit for not-ready/loading/refreshing/placeholder/empty/error/offline/permission/success states that can occur; no fake domain default.
+- `UiAction`, `UiEvent`, and `UiState` roles are explicit; transient `UiEvent`s are not used for durable state.
+- one-shot UI behavior events use `Channel(...).receiveAsFlow()` or another deliberate event model.
 - flows converted to UI state use one shared `stateIn` value, not per-call `stateIn`.
 - `SharingStarted.WhileSubscribed(5_000)` is acceptable only when stale cached `.value` is not used as a fresh source.
 - Route/top-level Compose wiring collects with lifecycle APIs and passes state/callbacks downward.
@@ -178,6 +202,12 @@ When this skill is used for presentation development or code review, include the
 - Android Hilt: https://developer.android.com/training/dependency-injection/hilt-android
 - Hilt and Jetpack integrations: https://developer.android.com/training/dependency-injection/hilt-jetpack
 - Android ViewModel: https://developer.android.com/topic/libraries/architecture/viewmodel
+- Android UI layer: https://developer.android.com/topic/architecture/ui-layer
+- Android state holders and UI state: https://developer.android.com/topic/architecture/ui-layer/stateholders
+- Android UI state production: https://developer.android.com/topic/architecture/ui-layer/state-production
+- Android UI events: https://developer.android.com/topic/architecture/ui-layer/events
 - StateFlow and SharedFlow: https://developer.android.com/kotlin/flow/stateflow-and-sharedflow
 - Compose state: https://developer.android.com/develop/ui/compose/state
+- Compose state hoisting: https://developer.android.com/develop/ui/compose/state-hoisting
+- Compose stability: https://developer.android.com/develop/ui/compose/performance/stability
 - AndroidX Startup: https://developer.android.com/topic/libraries/app-startup

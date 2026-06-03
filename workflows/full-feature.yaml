@@ -170,6 +170,7 @@ phases:
       summary and command output.
       If a required local skill is missing, do not complete this artifact;
       report `missing local <group>: <skill>` with the source URL to the user.
+      General Compose/Kotlin convention does not count as loaded skill usage.
       End with:
 
           ## Completion Gate
@@ -207,6 +208,7 @@ phases:
       New or modified code must include Korean comments. If a required local
       skill is missing, do not complete this artifact; report
       `missing local <group>: <skill>` with the source URL to the user.
+      General Compose/Kotlin convention does not count as loaded skill usage.
       End with:
 
           ## Completion Gate
@@ -250,6 +252,7 @@ phases:
       current host path only.
       If a required local skill is missing, do not complete this artifact;
       report `missing local <group>: <skill>` with the source URL to the user.
+      General Compose/Kotlin convention does not count as loaded skill usage.
       End with:
 
           ## Completion Gate
@@ -332,6 +335,7 @@ phases:
       through the current host path only.
       If a required local skill is missing, do not complete this artifact;
       report `missing local <group>: <skill>` with the source URL to the user.
+      General Compose/Kotlin convention does not count as loaded skill usage.
       Also include:
 
           ## Completion Gate
@@ -381,6 +385,7 @@ phases:
       and `chrisbanes_skills` through the current host path only. If a required
       local skill is missing, do not complete this artifact; report
       `missing local <group>: <skill>` with the source URL to the user.
+      General Compose/Kotlin convention does not count as loaded skill usage.
       End with:
 
           ## Completion Gate
@@ -442,6 +447,7 @@ phases:
       through the current host path only.
       If a required local skill is missing, do not complete this artifact;
       report `missing local <group>: <skill>` with the source URL to the user.
+      General Compose/Kotlin convention does not count as loaded skill usage.
       End with:
 
           ## Completion Gate

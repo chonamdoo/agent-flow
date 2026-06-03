@@ -20,7 +20,7 @@ Use this as the common implementation discipline. Do not score it. Apply it as a
   - TypeScript/TSX files (`*.ts`, `*.tsx`): read `typescript-development-guide`.
   - React Web, Next.js, or TSX component/hook/rendering/accessibility changes: read `react-development-guide`.
   - React Native, Expo, Metro, navigation, permissions, native bridge, or RN app UI changes: read `react-native-development-guide`.
-  - Android, Kotlin, Jetpack Compose, or KMP files: read every relevant local skill from the active Android profile's `android_skills` and `chrisbanes_skills`.
+  - Android, Kotlin, Jetpack Compose, or KMP files: read every relevant local `SKILL.md` from the active Android profile's `android_skills` and `chrisbanes_skills`. Local means the project/host-installed skill path such as `.agent-flow/local-skills/<skill>/SKILL.md`, `.agent-flow/skills/<skill>/SKILL.md`, or the current host's configured local skill directory.
 - For presentation-layer code generation, modification, and code review, also read the matching presentation architecture skill before writing or judging code:
   - Android/Kotlin/Compose presentation: read `android-clean-presentation-architecture`.
   - React Web/Next.js/TSX presentation: read `react-clean-presentation-architecture`.
@@ -29,7 +29,7 @@ Use this as the common implementation discipline. Do not score it. Apply it as a
 - Presentation work must be state-based. Record `presentation-skill: android|react|react-native|ios|n/a`, `presentation-state-based-development: applied|n/a`, `presentation-state-review: pass|fail|n/a`, `ui-state-modeling: explicit|n/a`, `presentation-mapping-boundary: domain-to-uimodel|n/a`, and `di-boundary: <hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a>` in the completion gate when relevant.
 - Completion Gate markers must use concrete values that the marker parser accepts. Do not leave angle-bracket placeholders; use `n/a` only when the marker is genuinely not relevant.
 - If project-local skills were checked, record `project-local-skills: checked` and `project-local-skills-used: <skill list>` in the phase artifact's `## Completion Gate`. If no project-local skill applies, record `project-local-skills: n/a` and `project-local-skills-used: n/a`.
-- If Android/Kotlin/Compose/KMP files are changed, record `android-local-skills: checked|n/a` and `android-local-skills-used: <skill list or n/a>` in the phase artifact's `## Completion Gate`.
+- If Android/Kotlin/Compose/KMP files are changed, record `android-local-skills: checked` and `android-local-skills-used: <explicit loaded skill list>` in the phase artifact's `## Completion Gate`. Use `n/a` only when no matching Android/Compose/Kotlin skill exists. Do not claim Compose/Kotlin convention was applied unless the matching local `SKILL.md` files were explicitly loaded in the current work session.
 - If a required language/framework skill is not installed at the active host path, report `missing local <group>: <skill>` with the configured source URL and do not proceed until the user installs it or explicitly overrides.
 
 ## During Implementation
