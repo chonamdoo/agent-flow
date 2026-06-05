@@ -21,7 +21,7 @@ Use this as the common implementation discipline. Do not score it. Apply it as a
   - React Web, Next.js, or TSX component/hook/rendering/accessibility changes: read `react-development-guide`.
   - React Native, Expo, Metro, navigation, permissions, native bridge, or RN app UI changes: read `react-native-development-guide`.
   - Android, Kotlin, Jetpack Compose, or KMP files: read every relevant local `SKILL.md` from the active Android profile's `android_skills` and `chrisbanes_skills`. Local means the project/host-installed skill path such as `.agent-flow/local-skills/<skill>/SKILL.md`, `.agent-flow/skills/<skill>/SKILL.md`, or the current host's configured local skill directory.
-- For Android app-wide error handling, common dialog/snackbar/toast hosts, SessionExpired navigation, Navi3 root back stack resets, or Retrofit CallAdapter error mapping, read `android-appshell-error-handling`.
+- For app-wide error handling, common dialog/snackbar/toast hosts, SessionExpired navigation, root navigation resets, or API/domain common error mapping, read the matching app-shell skill: `android-appshell-error-handling`, `react-app-shell-error-handling`, `react-native-app-shell-error-handling`, or `ios-app-shell-error-handling`.
 - For presentation-layer code generation, modification, and code review, also read the matching presentation architecture skill before writing or judging code:
   - Android/Kotlin/Compose presentation: read `android-clean-presentation-architecture`.
   - React Web/Next.js/TSX presentation: read `react-clean-presentation-architecture`.

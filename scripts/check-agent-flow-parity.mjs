@@ -73,6 +73,34 @@ function assertSame(a, b) {
   }
 }
 
+function yamlFileNames(rel) {
+  const dir = absPath(rel);
+  if (!fs.existsSync(dir)) {
+    recordMissingFile(rel);
+    return [];
+  }
+  return fs.readdirSync(dir)
+    .filter((entry) => entry.endsWith(".yaml"))
+    .sort();
+}
+
+function assertSameYamlFileSet(sourceDir, otherDir) {
+  const sourceFiles = yamlFileNames(sourceDir);
+  const otherFiles = yamlFileNames(otherDir);
+  const sourceSet = new Set(sourceFiles);
+  const otherSet = new Set(otherFiles);
+  for (const file of sourceFiles) {
+    if (!otherSet.has(file)) {
+      failures.push(`${otherDir} missing ${file} from ${sourceDir}`);
+    }
+  }
+  for (const file of otherFiles) {
+    if (!sourceSet.has(file)) {
+      failures.push(`${otherDir} has extra ${file} not in ${sourceDir}`);
+    }
+  }
+}
+
 const fullFeatureWorkflowCopies = [
   "workflows/full-feature.yaml",
   "src/agent_flow/workflows/full-feature.yaml",
@@ -114,8 +142,18 @@ for (const rel of fullFeatureWorkflowCopies) {
   assertNotContains(rel, "grill-me");
 }
 
-assertSame("workflows/default.yaml", "src/agent_flow/workflows/default.yaml");
-assertSame("workflows/full-feature.yaml", "src/agent_flow/workflows/full-feature.yaml");
+assertSameYamlFileSet("workflows", "src/agent_flow/workflows");
+if (CHECK_INSTALLED_COPY) {
+  assertSameYamlFileSet("workflows", ".agent-flow/workflows");
+}
+for (const entry of fs.readdirSync(path.join(SOURCE_ROOT, "workflows")).sort()) {
+  if (!entry.endsWith(".yaml")) continue;
+  const source = `workflows/${entry}`;
+  assertSame(source, `src/agent_flow/workflows/${entry}`);
+  if (CHECK_INSTALLED_COPY) {
+    assertSame(source, `.agent-flow/workflows/${entry}`);
+  }
+}
 assertContains("workflows/default.yaml", "active-host reviewer sub-agents");
 assertContains("workflows/default.yaml", "Gemini sub-agent in Gemini");
 assertContains("workflows/default.yaml", "reviewer-source: sub-agent");
@@ -163,13 +201,23 @@ function gateIds(text) {
   return ids;
 }
 
+assertSameYamlFileSet("profiles", "src/agent_flow/profiles");
+if (CHECK_INSTALLED_COPY) {
+  assertSameYamlFileSet("profiles", ".agent-flow/profiles");
+}
 for (const entry of fs.readdirSync(path.join(SOURCE_ROOT, "profiles")).sort()) {
-  if (!entry.endsWith(".yaml") || entry === "_schema.yaml") continue;
+  if (!entry.endsWith(".yaml")) continue;
   const source = `profiles/${entry}`;
   const packaged = `src/agent_flow/profiles/${entry}`;
   const sourceText = readIfExists(source);
   const packagedText = readIfExists(packaged);
   if (sourceText === null || packagedText === null) continue;
+  if (sourceText !== packagedText) {
+    failures.push(`${packaged} differs from ${source}`);
+  }
+  if (CHECK_INSTALLED_COPY) {
+    assertSame(source, `.agent-flow/profiles/${entry}`);
+  }
   const sourceGates = gateIds(sourceText);
   const packagedGates = gateIds(packagedText);
   if (sourceGates.join("|") !== packagedGates.join("|")) {
@@ -351,11 +399,19 @@ function preferredPython() {
       stdio: "ignore",
       timeout: 30_000,
     });
-    if (!result.error && result.status === 0) {
+    if (!result.error && result.status === 0 && pythonSupportsWorkflowExport(candidate)) {
       return candidate;
     }
   }
   return "python3";
+}
+
+function pythonSupportsWorkflowExport(candidate) {
+  const result = spawnSync(candidate, ["-c", "import yaml"], {
+    stdio: "ignore",
+    timeout: 5_000,
+  });
+  return !result.error && result.status === 0;
 }
 
 if (failures.length > 0) {

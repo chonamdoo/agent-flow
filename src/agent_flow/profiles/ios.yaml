@@ -26,3 +26,24 @@ gates:
     command: ["swiftlint"]
     required: false
     phase: pre-commit
+review_angles:
+  - id: architecture-design
+    prompt: templates/_shared/review/architecture-design.md
+  - id: retain-cycles
+    prompt: templates/_shared/review/retain-cycles.md
+  - id: main-thread
+    prompt: templates/_shared/review/main-thread.md
+artifacts:
+  prd: optional
+  adr: optional
+  slice_plan: required
+vocabulary:
+  prd: spec
+  adr: decision-log
+  lore: notes
+commit_convention:
+  style: conventional
+  co_author: skip
+pr:
+  target_branch: main
+  merge_strategy: squash

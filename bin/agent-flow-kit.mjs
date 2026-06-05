@@ -14,7 +14,13 @@ const KIT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const installArgs = process.argv.slice(3);
 const forceManaged = installArgs.includes("--force-managed");
 let cachedFullFeatureWorkflow = null;
-const BUNDLED_HOST_SKILL_NAMES = new Set(["agent-flow"]);
+const BUNDLED_HOST_SKILL_NAMES = new Set([
+  "agent-flow",
+  "android-appshell-error-handling",
+  "ios-app-shell-error-handling",
+  "react-app-shell-error-handling",
+  "react-native-app-shell-error-handling",
+]);
 const PROFILE_MANAGED_HOST_ONLY_SKILLS = new Set([
   "adaptive",
   "android-cli",
@@ -88,6 +94,7 @@ function installProject() {
   };
 
   writeManagedFile(path.join(agentFlowDir, "workflows", "full-feature.yaml"), fullFeatureWorkflowYaml());
+  copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "workflows"), path.join(agentFlowDir, "workflows"), forceManaged);
   const agentFlowSkill = agentFlowSkillMarkdown();
   writeManagedFile(path.join(agentFlowDir, "skills", "agent-flow", "SKILL.md"), agentFlowSkill);
   writeManagedFile(

@@ -179,6 +179,17 @@ chrisbanes_skills:
       when: KMP boundaries changed
     - skill: kotlin-types-value-class
       when: value classes or single-field domain types changed
+artifacts:
+  prd: optional
+  adr: optional
+  slice_plan: required
+vocabulary:
+  prd: PRD
+  adr: ADR
+  lore: lore
+commit_convention:
+  style: tagged          # [Feat] / [Fix] / [Refactor] / ...
+  co_author: skip
 pr:
   target_branch: main
   merge_strategy: merge

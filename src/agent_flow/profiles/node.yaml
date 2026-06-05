@@ -26,3 +26,24 @@ gates:
     command: ["npm", "test"]
     required: true
     phase: pre-push
+review_angles:
+  - id: architecture-design
+    prompt: templates/_shared/review/architecture-design.md
+  - id: types
+    prompt: templates/_shared/review/types.md
+  - id: io-safety
+    prompt: templates/_shared/review/io-safety.md
+artifacts:
+  prd: optional
+  adr: optional
+  slice_plan: required
+vocabulary:
+  prd: spec
+  adr: decision-log
+  lore: notes
+commit_convention:
+  style: conventional
+  co_author: skip
+pr:
+  target_branch: main
+  merge_strategy: squash

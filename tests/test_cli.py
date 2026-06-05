@@ -1314,6 +1314,112 @@ class CliTest(unittest.TestCase):
                 self.assertFalse((project_root / ".codex" / "skills" / "compose-state-authoring").exists())
                 self.assertFalse((project_root / ".codex" / "skills" / "edge-to-edge").exists())
 
+    def test_node_installers_link_default_host_skills_to_antigravity_path(self) -> None:
+        installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            node = _node_executable()
+            for installer_name in installers:
+                with self.subTest(installer=installer_name):
+                    project_root = root / f"{installer_name}-antigravity"
+                    skill_dir = project_root / "skills" / "default-host-skill"
+                    skill_dir.mkdir(parents=True)
+                    (skill_dir / "SKILL.md").write_text(
+                        "---\n"
+                        "name: default-host-skill\n"
+                        "description: Use when testing default host skill links.\n"
+                        "---\n"
+                        "# Default Host Skill\n",
+                        encoding="utf-8",
+                    )
+
+                    result = subprocess.run(
+                        (
+                            node,
+                            str(Path(__file__).resolve().parents[1] / "bin" / installer_name),
+                            "install",
+                        ),
+                        cwd=project_root,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    # 기본 host skill은 Antigravity에서도 Gemini 하위 경로에 연결돼야 한다.
+                    self.assertTrue(
+                        (
+                            project_root
+                            / ".gemini"
+                            / "antigravity"
+                            / "skills"
+                            / "default-host-skill"
+                            / "SKILL.md"
+                        ).exists()
+                    )
+                    self.assertFalse((project_root / ".antigravity" / "skills" / "default-host-skill").exists())
+                    index = json.loads(
+                        (project_root / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8")
+                    )
+                    selected = next(skill for skill in index["skills"] if skill["name"] == "default-host-skill")
+                    self.assertEqual(selected["hosts"], ["claude", "codex", "gemini", "antigravity"])
+                    link = next(
+                        link
+                        for link in index["links"]
+                        if link["name"] == "default-host-skill" and link["host"] == "antigravity"
+                    )
+                    self.assertEqual(link["path"], ".gemini/antigravity/skills/default-host-skill")
+
+    def test_node_installers_refresh_managed_workflow_skills(self) -> None:
+        installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
+        rels = (
+            ".agent-flow/workflows/full-feature.yaml",
+            ".agent-flow/skills/full-feature-workflow/SKILL.md",
+            ".agent-flow/skills/product-brief/SKILL.md",
+            ".agent-flow/skills/plan-reviewer/SKILL.md",
+            ".agent-flow/skills/ddd-clean-architecture/SKILL.md",
+            ".agent-flow/skills/architecture-reviewer/SKILL.md",
+            ".agent-flow/skills/push-watch/SKILL.md",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            node = _node_executable()
+            installed_roots: dict[str, Path] = {}
+            for installer_name in installers:
+                with self.subTest(installer=installer_name):
+                    project_root = root / f"{installer_name}-managed"
+                    stale_workflow = project_root / ".agent-flow" / "workflows" / "full-feature.yaml"
+                    stale_workflow.parent.mkdir(parents=True)
+                    stale_workflow.write_text("stale: true\n", encoding="utf-8")
+
+                    result = subprocess.run(
+                        (
+                            node,
+                            str(Path(__file__).resolve().parents[1] / "bin" / installer_name),
+                            "install",
+                        ),
+                        cwd=project_root,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    # managed workflow와 generated skill은 stale 설치본을 남기면 안 된다.
+                    self.assertIn("id: domain-grill", stale_workflow.read_text(encoding="utf-8"))
+                    for rel in rels:
+                        self.assertTrue((project_root / rel).is_file(), rel)
+                    installed_roots[installer_name] = project_root
+
+            kit_root = installed_roots["agent-flow-kit.mjs"]
+            legacy_root = installed_roots["agent-flow-install.mjs"]
+            for rel in rels:
+                self.assertEqual(
+                    (kit_root / rel).read_text(encoding="utf-8"),
+                    (legacy_root / rel).read_text(encoding="utf-8"),
+                    rel,
+                )
+
     def test_node_installer_reinstall_updates_managed_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"

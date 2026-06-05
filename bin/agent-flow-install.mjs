@@ -15,11 +15,18 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
 const KIT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const AGENT_FLOW_COMMAND = "agent-flow";
 const REQUESTED_PROJECT = process.cwd();
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
 const PROJECT = resolveInstallProject(REQUESTED_PROJECT);
 const AF_DIR = path.join(PROJECT, ".agent-flow");
-const BUNDLED_HOST_SKILL_NAMES = new Set(["agent-flow"]);
+const BUNDLED_HOST_SKILL_NAMES = new Set([
+  "agent-flow",
+  "android-appshell-error-handling",
+  "ios-app-shell-error-handling",
+  "react-app-shell-error-handling",
+  "react-native-app-shell-error-handling",
+]);
 const PROFILE_MANAGED_HOST_ONLY_SKILLS = new Set([
   "adaptive",
   "android-cli",
@@ -255,6 +262,11 @@ function copyFileIfMissingOrSame(src, dest) {
   return true;
 }
 
+function writeManagedFile(pathName, content) {
+  ensureDir(path.dirname(pathName));
+  fs.writeFileSync(pathName, content, "utf8");
+}
+
 function pathExists(p) {
   try {
     fs.lstatSync(p);
@@ -374,7 +386,7 @@ function parseSkillMetadata(text, fallbackName) {
   const name = safeSkillName(parsedName);
   if (name !== parsedName) warnings.push(`unsafe skill name ignored: ${parsedName}`);
   const hostValues = Array.isArray(metadata.hosts) ? metadata.hosts : [];
-  const knownHosts = new Set(["claude", "codex", "gemini"]);
+  const knownHosts = new Set(["claude", "codex", "gemini", "antigravity"]);
   const hosts = [];
   for (const host of hostValues) {
     const normalized = String(host).trim().toLowerCase();
@@ -386,7 +398,7 @@ function parseSkillMetadata(text, fallbackName) {
   return {
     name,
     description: String(metadata.description || useWhen || ""),
-    hosts: hostValues.length > 0 ? [...new Set(hosts)] : ["claude", "codex", "gemini"],
+    hosts: hostValues.length > 0 ? [...new Set(hosts)] : ["claude", "codex", "gemini", "antigravity"],
     tags: Array.isArray(metadata.tags) ? metadata.tags.map(String) : [],
     trigger: String(metadata.trigger || metadata.description || useWhen || ""),
     warnings,
@@ -411,7 +423,7 @@ function removeStaleProjectSkillLinks(skills, previousIndex) {
     if (!link || !link.name || !link.host || !link.path) continue;
     if (desired.has(`${link.host}:${link.name}`)) continue;
     const target = path.join(PROJECT, link.path);
-    const hostRoot = path.join(PROJECT, `.${link.host}`, "skills");
+    const hostRoot = hostSkillRoot(link.host);
     if (pathHasSymlink(PROJECT, hostRoot)) {
       removed.push({ name: link.name, host: link.host, path: link.path, status: "skipped-host-root-symlink" });
       continue;
@@ -484,7 +496,7 @@ function parseSimpleYaml(text) {
 
 function linkProjectSkill(skill, host, previousIndex) {
   const srcDir = path.dirname(path.join(PROJECT, skill.path));
-  const hostRoot = path.join(PROJECT, `.${host}`, "skills");
+  const hostRoot = hostSkillRoot(host);
   if (pathHasSymlink(PROJECT, hostRoot)) {
     return { name: skill.name, host, path: path.relative(PROJECT, hostRoot), status: "skipped-host-root-symlink" };
   }
@@ -506,6 +518,52 @@ function linkProjectSkill(skill, host, previousIndex) {
     }
   }
   return { name: skill.name, host, path: path.relative(PROJECT, destDir), status: linkOrCopyDir(srcDir, destDir) };
+}
+
+function hostSkillRoot(host) {
+  // Antigravity는 Gemini 하위 skill 경로를 사용한다.
+  if (host === "antigravity") {
+    return path.join(PROJECT, ".gemini", "antigravity", "skills");
+  }
+  return path.join(PROJECT, `.${host}`, "skills");
+}
+
+function installManagedWorkflowSkills() {
+  const generatedSkills = new Map([
+    ["full-feature-workflow", fullFeatureSkillMarkdown()],
+    ["product-brief", productBriefSkillMarkdown()],
+    ["plan-reviewer", planReviewerSkillMarkdown()],
+    ["ddd-clean-architecture", dddCleanArchitectureSkillMarkdown()],
+    ["architecture-reviewer", architectureReviewerSkillMarkdown()],
+    ["push-watch", pushWatchSkillMarkdown()],
+  ]);
+  for (const [name, content] of generatedSkills) {
+    writeManagedFile(path.join(AF_DIR, "skills", name, "SKILL.md"), content);
+  }
+}
+
+function fullFeatureSkillMarkdown() {
+  return `---\nname: full-feature-workflow\ndescription: Use this skill for feature work in this project.\n---\n\n# Full Feature Workflow\n\nUse this skill for feature work in this project.\n\nAlways drive progress through the runner output. Run \`${AGENT_FLOW_COMMAND} status\`, then execute the printed \`next_command\` exactly.\n\nDo not skip phases. If existing docs satisfy a phase, write the required artifact and reference those docs. If a gate, review, PR comment, or PR check fails, complete the matching fix phase and push again before merge/handoff.\n\nApply \`code-generation-discipline\` during code and review phases. Read every matching language/framework skill before writing or judging code.\n`;
+}
+
+function productBriefSkillMarkdown() {
+  return `---\nname: product-brief\ndescription: Use during the full-feature product-brief phase.\n---\n\n# Product Brief\n\nUse during the full-feature product-brief phase.\n\nAsk YC-style forcing questions before implementation:\n\n1. Demand Reality: what behavior proves people want this?\n2. Status Quo: how do they solve it today?\n3. Desperate Specificity: who is the most painful target user?\n4. Narrowest Wedge: what is the smallest version worth using now?\n5. Observation: what concrete user behavior was observed?\n6. Future Fit: why is now the right time?\n\nArtifact template:\n\n# Product Brief\n\n## Mode\nstartup | builder | internal\n\n## Demand Evidence\n\n## Status Quo\n\n## Target User\n\n## Narrowest Wedge\n\n## Observed Behavior\n\n## Why Now\n\n## Cut List\n\n## Assignment\n\n## Decision\nbuild | defer | cut\n`;
+}
+
+function planReviewerSkillMarkdown() {
+  return `---\nname: plan-reviewer\ndescription: Use during the full-feature plan-review phase.\n---\n\n# Plan Reviewer\n\nUse during the full-feature plan-review phase.\n\nReview only. Do not rewrite the plan.\n\nCheck:\n\n- Missing data collection steps.\n- Missing validation steps.\n- Wrong implementation order.\n- Oversized slices that should be split.\n- Missing state/storage steps.\n- Test coverage gaps.\n- Architecture risks before coding.\n\nArtifact template:\n\n# Plan Review\n\nverdict: approve | request-changes\n\n## Scope Checked\n\n## Missing Steps\n\n## Wrong Order\n\n## Oversized Slices\n\n## Validation Gaps\n\n## Data/State Gaps\n\n## Architecture Risks\n\n## Required Changes\n\n## Approval Notes\n`;
+}
+
+function dddCleanArchitectureSkillMarkdown() {
+  return `---\nname: ddd-clean-architecture\ndescription: Legacy compatibility shim for full-feature ddd-design and architecture-review phases. Prefer ddd-architecture first, then clean-architecture.\n---\n\n# DDD Clean Architecture\n\nThis legacy skill delegates responsibility:\n\n1. Apply \`skills/ddd-architecture/SKILL.md\` for Bounded Context, Ubiquitous Language, Entities, Value Objects, Aggregates, Domain Events, Domain Invariants, and Domain Flow.\n2. Apply \`skills/clean-architecture/SKILL.md\` for layer boundaries, dependency direction, UseCase ports/impls, Repository ports/adapters, Cache, Mapper, Composition Root, Testability, and SOLID architecture validation.\n\nDo not treat DDD and Clean Architecture as one responsibility. DDD defines the domain; Clean Architecture protects it with boundaries.\n`;
+}
+
+function architectureReviewerSkillMarkdown() {
+  return `---\nname: architecture-reviewer\ndescription: Use during the full-feature architecture-review phase.\n---\n\n# Architecture Reviewer\n\nUse during the full-feature architecture-review phase.\n\nReview implemented code against domain decisions and DDD/Clean Architecture.\n\nArtifact template:\n\n# Architecture Review\n\nverdict: approve | request-changes\n\n## Domain Alignment\n\n## Layer Violations\n\n## Repository Boundary Issues\n\n## Dependency Direction Issues\n\n## Required Refactors\n\n## Approved Exceptions\n`;
+}
+
+function pushWatchSkillMarkdown() {
+  return `---\nname: push-watch\ndescription: Use this skill after local verification is complete and the branch is ready to publish.\n---\n\n# Push Watch\n\nUse this skill after local verification is complete and the branch is ready to publish.\n\nRun:\n\n\`\`\`bash\n${AGENT_FLOW_COMMAND} run push-watch\n\`\`\`\n\nFlow:\n\n1. Sanity check the branch and working tree.\n2. Commit and push the current branch.\n3. Open or record the pull request.\n4. Watch PR checks and review threads.\n5. Route failures through \`pr-comment-fix\` or \`pr-ci-fix\`; comment fixes must also resolve the corresponding GitHub review threads.\n6. Push again and return to \`pr-watch\`.\n7. When checks and comments are green, route to \`merge\`.\n\nRules:\n\n- Protected branches are blocked: main, master, develop.\n- Record PR watch state with \`status: green\`, \`status: comments\`, \`status: ci-failed\`, or \`status: pending\`.\n- merge requires explicit approval. Do not merge unattended.\n`;
 }
 
 function previousSkillHash(previousIndex, name) {
@@ -588,6 +646,10 @@ function install() {
     "graphify-out/cost.json",
   ]);
   removeLegacyProjectSkillCopies(PROJECT, "graphify");
+  writeManagedFile(
+    path.join(AF_DIR, "workflows", "full-feature.yaml"),
+    fs.readFileSync(path.join(KIT_ROOT, "workflows", "full-feature.yaml"), "utf8"),
+  );
 
   // Copy bundled skills into project-local skills dir.
   // Host-AI-specific skill paths (`.claude/skills/`, `.codex/skills/`) are
@@ -598,6 +660,7 @@ function install() {
     path.join(AF_DIR, "skills"),
     PROFILE_MANAGED_HOST_ONLY_SKILLS,
   );
+  installManagedWorkflowSkills();
   const skillIndex = installProjectSkills();
   const workflowsCopied = copyDir(
     path.join(KIT_ROOT, "workflows"),

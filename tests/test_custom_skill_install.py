@@ -61,7 +61,7 @@ def test_project_skill_links_all_hosts_and_index_omits_body(tmp_path: Path) -> N
     assert "BODY SHOULD NOT BE IN INDEX" not in json.dumps(index)
 
 
-def test_bundled_workflow_skills_are_internal_and_only_agent_flow_is_registered(tmp_path: Path) -> None:
+def test_bundled_workflow_skills_are_internal_and_host_skills_are_registered(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
 
@@ -69,8 +69,20 @@ def test_bundled_workflow_skills_are_internal_and_only_agent_flow_is_registered(
 
     assert result.returncode == 0, result.stderr
     index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
-    assert [skill["name"] for skill in index["skills"]] == ["agent-flow"]
-    assert {link["name"] for link in index["links"]} == {"agent-flow"}
+    assert [skill["name"] for skill in index["skills"]] == [
+        "agent-flow",
+        "android-appshell-error-handling",
+        "ios-app-shell-error-handling",
+        "react-app-shell-error-handling",
+        "react-native-app-shell-error-handling",
+    ]
+    assert {link["name"] for link in index["links"]} == {
+        "agent-flow",
+        "android-appshell-error-handling",
+        "ios-app-shell-error-handling",
+        "react-app-shell-error-handling",
+        "react-native-app-shell-error-handling",
+    }
     assert (project / ".agent-flow" / "skills" / "domain-grill" / "SKILL.md").exists()
     assert (project / ".agent-flow" / "skills" / "full-feature-workflow" / "SKILL.md").exists()
     assert not (project / ".codex" / "skills" / "domain-grill").exists()
