@@ -1105,6 +1105,12 @@ def test_required_markers_block_incomplete_artifact(tmp_path: Path):
         encoding="utf-8",
     )
     assert runner._missing_required_markers(phase) == ["android-local-skills: checked|n/a"]
+    (run_dir / "domain-grill.md").write_text(
+        "## Completion Gate\n"
+        "android-local-skills: optional\n",
+        encoding="utf-8",
+    )
+    assert runner._missing_required_markers(phase) == []
 
 
 def test_runner_uses_normalized_artifact_path(tmp_path: Path):

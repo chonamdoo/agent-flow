@@ -6671,13 +6671,14 @@ def _node_phase_artifact(phase: str) -> Path:
 
 
 def _node_presentation_gate() -> str:
+    # n/a 허용 marker는 optional alias도 통과해야 한다.
     return (
-        "presentation-skill: n/a\n"
-        "presentation-state-based-development: n/a\n"
-        "presentation-state-review: n/a\n"
-        "ui-state-modeling: n/a\n"
-        "presentation-mapping-boundary: n/a\n"
-        "di-boundary: n/a\n"
+        "presentation-skill: optional\n"
+        "presentation-state-based-development: optional\n"
+        "presentation-state-review: optional\n"
+        "ui-state-modeling: optional\n"
+        "presentation-mapping-boundary: optional\n"
+        "di-boundary: optional\n"
     )
 
 

@@ -105,5 +105,8 @@ def _line_matches_marker(line: str, marker: str) -> bool:
         if line_separator != ":" or line_key.strip() != key.strip():
             return False
         allowed = {part.strip() for part in value.split("|") if part.strip()}
+        # n/a 마커는 artifact에서 optional로 써도 같은 비적용 상태로 인정한다.
+        if "n/a" in allowed:
+            allowed.add("optional")
         return line_value.strip() in allowed
     return line == marker

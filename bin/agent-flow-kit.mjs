@@ -1405,6 +1405,10 @@ function lineMatchesMarker(line, marker) {
       .split("|")
       .map((value) => value.trim())
       .filter(Boolean);
+    // n/a 마커는 artifact에서 optional로 써도 같은 비적용 상태로 인정한다.
+    if (allowed.includes("n/a")) {
+      allowed.push("optional");
+    }
     return lineKey === markerKey && allowed.includes(line.slice(lineSeparator + 1).trim());
   }
   return line === marker;
