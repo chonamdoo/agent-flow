@@ -38,7 +38,10 @@ If no Android/Kotlin/Compose/KMP files changed, mark the completion gate `n/a`.
    `source.local` for data source implementations, DTO/request/response models
    in `model`, conversions in `mapper`, `NetworkFailure -> AppError` in
    repository/data mappers, and `AppError -> ErrorUiModel` in presentation
-   mappers.
+   mappers. For app-wide common errors, verify that AppShell owns common
+   dialog/snackbar/toast hosts and root navigation; feature ViewModels only
+   notify common errors and do not hold `NavController`, `Context`, dialogs, or
+   login-flow stack reset logic.
 
 ## Output
 
