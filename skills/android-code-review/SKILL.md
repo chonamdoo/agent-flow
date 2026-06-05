@@ -53,6 +53,7 @@ Record `android-local-skills: checked|n/a` and
 5. Compose: stability, recomposition risk, lazy list keys, remembered work.
 6. Coroutine/Flow: cancellation, dispatcher choice, race conditions.
 7. Data: DTO/domain separation, repository source-of-truth behavior, errors.
+   For app-wide common errors, apply `android-appshell-error-handling`.
 8. Tests/gates: unit tests, UI tests, build, lint, and missing edge cases.
 
 ## Findings
@@ -92,3 +93,4 @@ Approve only when:
 - `../android-guides/references/kotlin-concurrency-guide.md`
 - `../android-guides/references/data-layer-guide.md`
 - `../android-guides/references/testing-guide.md`
+- `../android-appshell-error-handling/SKILL.md`
