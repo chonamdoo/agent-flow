@@ -211,6 +211,12 @@ class CliTest(unittest.TestCase):
         self.assertIn("## Overall", default_phases["final-review"]["prompt"])
         self.assertIn("verdict: approve", default_phases["final-review"]["prompt"])
         self.assertIn("verdict: request-changes", default_phases["final-review"]["prompt"])
+        self.assertEqual(default_phases["pr-watch"]["routes"]["green"], "merge")
+        self.assertEqual(default_phases["pr-watch"]["routes"]["has_comments"], "pr-comment-fix")
+        self.assertEqual(default_phases["pr-watch"]["routes"]["ci_failed"], "pr-ci-fix")
+        self.assertEqual(default_phases["pr-watch"]["routes"]["pending"], "block")
+        self.assertEqual(default_phases["pr-comment-fix"]["routes"]["default"], "pr-watch")
+        self.assertEqual(default_phases["pr-ci-fix"]["routes"]["default"], "pr-watch")
 
     def test_workflow_export_outputs_normalized_phase_contract(self) -> None:
         output = io.StringIO()
@@ -251,8 +257,16 @@ class CliTest(unittest.TestCase):
             _gates_route_key('{"passed": false, "results": [{"id": "lint", "passed": true}]}'),
             "request-changes",
         )
-        self.assertEqual(_route_key("status: failed"), "request-changes")
-        self.assertEqual(_route_key("status: pass"), "green")
+        self.assertEqual(_route_key("status: failed"), "default")
+        self.assertEqual(_route_key("status: pass"), "default")
+        self.assertEqual(_route_key("- status: green"), "default")
+        self.assertEqual(_route_key("note: status: green"), "default")
+        self.assertEqual(_route_key("  status: green"), "default")
+        self.assertEqual(_route_key("- verdict: approve"), "default")
+        self.assertEqual(_route_key("status: green"), "green")
+        self.assertEqual(_route_key("status: ci_failed"), "ci_failed")
+        self.assertEqual(_route_key("status: has_comments"), "has_comments")
+        self.assertEqual(_route_key("status: has-comments"), "default")
         self.assertEqual(_gates_route_key("status: pass"), "default")
 
     def test_codex_multi_review_requires_one_codex_subagent(self) -> None:
@@ -580,6 +594,7 @@ class CliTest(unittest.TestCase):
             (run_dir / "gates.md").write_text('{"passed": false, "results": []}', encoding="utf-8")
             # gates 실패가 3회를 넘으면 fix-loop로 더 보내지 않고 사용자가 개입하도록 막는다.
             self.assertEqual(runner._next_index(0, gates), (0, True))
+            self.assertEqual(read_meta(run_dir)["fix_loop_rounds"], 3)
 
             (run_dir / "gates.md").write_text('{"passed": true, "results": []}', encoding="utf-8")
             self.assertEqual(runner._next_index(0, gates), (0, True))
@@ -593,6 +608,21 @@ class CliTest(unittest.TestCase):
             )
             self.assertEqual(runner._next_index(0, gates), (2, False))
             self.assertNotIn("fix_loop_rounds", read_meta(run_dir))
+
+    def test_python_runner_uses_default_route_like_node_runner(self) -> None:
+        from agent_flow.runner import Phase, Runner
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir)
+            runner = Runner.__new__(Runner)
+            runner.run_dir = run_dir
+            runner.phases = [
+                Phase(id="fix-loop", description="", routes={"default": "gates"}),
+                Phase(id="gates", description=""),
+            ]
+            (run_dir / "fix-loop.md").write_text("status: done\n", encoding="utf-8")
+
+            self.assertEqual(runner._next_index(0, runner.phases[0]), (1, False))
 
     def test_source_profiles_use_argv_command_lists(self) -> None:
         import yaml
@@ -678,6 +708,10 @@ class CliTest(unittest.TestCase):
             self.assertTrue((project_root / ".agent-flow" / "prompts" / "push-watch.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "prompts" / "push-watch-tick.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "push-watch" / "SKILL.md").is_file())
+            self.assertTrue(
+                (project_root / ".agent-flow" / "templates" / "_shared" / "review" / "architecture-design.md").is_file()
+            )
+            self.assertTrue((project_root / ".agent-flow" / "templates" / "generic" / "stage.md").is_file())
             self.assertTrue((project_root / ".Codex" / "agents" / "code-reviewer.md").is_file())
             self.assertTrue((project_root / ".Codex" / "context" / "tree.jsonl").is_file())
             self.assertIn(
@@ -1761,7 +1795,14 @@ class CliTest(unittest.TestCase):
             self.assertEqual(bad_value.returncode, 1)
             self.assertIn("context_docs_updated: true|not_needed", bad_value.stderr)
 
-            artifact.write_text(_node_phase_content("domain-grill"), encoding="utf-8")
+            artifact.write_text(
+                "## Completion Gate\n"
+                "- [x] domain-grill: complete\n"
+                "* shared_understanding: reached\n"
+                "+ context_docs_checked: true\n"
+                "- context_docs_updated: not_needed\n",
+                encoding="utf-8",
+            )
             status = subprocess.run(
                 (node, cli, "run", "status"),
                 cwd=project_root,
@@ -2137,7 +2178,7 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(reused_comment_fix.returncode, 1)
-            self.assertIn("blocked: stale artifact", reused_comment_fix.stderr)
+            self.assertIn("blocked: missing artifact", reused_comment_fix.stderr)
             comment_fix.write_text("pushed second comment fixes\n", encoding="utf-8")
             self.assertEqual(
                 subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode,
@@ -2223,16 +2264,15 @@ class CliTest(unittest.TestCase):
             self.assertIn("Current phase: slice-plan", result.stdout)
 
             slice_plan = run_dir / _node_phase_artifact("slice-plan")
-            os.utime(slice_plan, (1, 1))
-            stale_slice_plan = subprocess.run(
+            missing_slice_plan = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=project_root,
                 text=True,
                 capture_output=True,
                 check=False,
             )
-            self.assertEqual(stale_slice_plan.returncode, 1)
-            self.assertIn("blocked: stale artifact", stale_slice_plan.stderr)
+            self.assertEqual(missing_slice_plan.returncode, 1)
+            self.assertIn("blocked: missing artifact", missing_slice_plan.stderr)
 
             slice_plan.write_text("updated slice-plan\n", encoding="utf-8")
             self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
@@ -2270,16 +2310,15 @@ class CliTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("Current phase: refactor", result.stdout)
             refactor = run_dir / _node_phase_artifact("refactor")
-            os.utime(refactor, (1, 1))
-            stale_refactor = subprocess.run(
+            missing_refactor = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=project_root,
                 text=True,
                 capture_output=True,
                 check=False,
             )
-            self.assertEqual(stale_refactor.returncode, 1)
-            self.assertIn("blocked: stale artifact", stale_refactor.stderr)
+            self.assertEqual(missing_refactor.returncode, 1)
+            self.assertIn("blocked: missing artifact", missing_refactor.stderr)
 
             refactor.write_text(_node_phase_content("refactor", "updated "), encoding="utf-8")
             self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
@@ -2288,16 +2327,15 @@ class CliTest(unittest.TestCase):
                 ("multi-review", "architecture-review"),
             ]:
                 artifact = run_dir / _node_phase_artifact(phase)
-                os.utime(artifact, (1, 1))
-                stale_artifact = subprocess.run(
+                missing_artifact = subprocess.run(
                     (node, cli, "run", "advance"),
                     cwd=project_root,
                     text=True,
                     capture_output=True,
                     check=False,
                 )
-                self.assertEqual(stale_artifact.returncode, 1)
-                self.assertIn("blocked: stale artifact", stale_artifact.stderr)
+                self.assertEqual(missing_artifact.returncode, 1)
+                self.assertIn("blocked: missing artifact", missing_artifact.stderr)
 
                 artifact.write_text(_node_phase_content(phase, prefix="updated "), encoding="utf-8")
                 advanced = subprocess.run(
@@ -2310,16 +2348,15 @@ class CliTest(unittest.TestCase):
                 self.assertEqual(advanced.returncode, 0, advanced.stderr)
                 self.assertIn(f"Current phase: {next_phase}", advanced.stdout)
 
-            os.utime(architecture_review, (1, 1))
-            stale_architecture_review = subprocess.run(
+            missing_architecture_review = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=project_root,
                 text=True,
                 capture_output=True,
                 check=False,
             )
-            self.assertEqual(stale_architecture_review.returncode, 1)
-            self.assertIn("blocked: stale artifact", stale_architecture_review.stderr)
+            self.assertEqual(missing_architecture_review.returncode, 1)
+            self.assertIn("blocked: missing artifact", missing_architecture_review.stderr)
 
             architecture_review.write_text(_node_phase_content("architecture-review"), encoding="utf-8")
             approved = subprocess.run(
@@ -2620,9 +2657,6 @@ class CliTest(unittest.TestCase):
 
             gates_artifact = run_dir / _node_phase_artifact("gates")
             gates_artifact.write_text('{"passed": false}\n', encoding="utf-8")
-            self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
-            fix_artifact = run_dir / _node_phase_artifact("fix-loop")
-            fix_artifact.write_text(_node_phase_content("fix-loop"), encoding="utf-8")
             result = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=project_root,
@@ -2632,6 +2666,10 @@ class CliTest(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 1)
             self.assertIn("fix-loop exceeded", result.stderr)
+            current_state = json.loads(
+                (project_root / ".agent-flow" / "state" / "current-run.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(current_state["fix_loop_rounds"], 3)
 
     def test_node_architecture_review_blocked_routes_to_refactor(self) -> None:
         """architecture-review blocked verdict → refactor 라우팅."""

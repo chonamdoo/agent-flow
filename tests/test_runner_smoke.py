@@ -893,7 +893,12 @@ def test_route_key_requires_exact_status_or_verdict_lines():
     assert _route_key("verdict: approved\n") == "default"
     assert _route_key("status: passed with warnings\n") == "default"
     assert _route_key("verdict: request-changes pending\n") == "default"
-    assert _route_key("status: passed\n") == "green"
+    assert _route_key("status: passed\n") == "default"
+    assert _route_key("- status: green\n") == "default"
+    assert _route_key("note: status: green\n") == "default"
+    assert _route_key("  status: green\n") == "default"
+    assert _route_key("- verdict: approve\n") == "default"
+    assert _route_key("status: green\n") == "green"
 
 
 def test_route_without_target_blocks_instead_of_falling_through(tmp_path: Path):
@@ -1264,6 +1269,34 @@ def test_backward_route_invalidates_target_artifact(tmp_path: Path):
 
     assert runner._next_index(1, runner.phases[1]) == (0, False)
     assert not watch.exists()
+    assert not (run_dir / "artifacts" / "pr-comment-fix.md").exists()
+
+
+def test_backward_route_invalidates_intermediate_fresh_artifacts(tmp_path: Path):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.runner import Phase, Runner
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    phases = [
+        Phase(id="refactor", description=""),
+        Phase(id="gates", description=""),
+        Phase(id="multi-review", description=""),
+        Phase(id="architecture-review", description="", routes={"blocked": "refactor"}),
+    ]
+    for phase in phases:
+        (run_dir / f"{phase.id}.md").write_text(
+            "verdict: blocked\n" if phase.id == "architecture-review" else "stale\n",
+            encoding="utf-8",
+        )
+
+    runner = Runner.__new__(Runner)
+    runner.run_dir = run_dir
+    runner.phases = phases
+
+    assert runner._next_index(3, phases[3]) == (0, False)
+    for phase in phases:
+        assert not (run_dir / f"{phase.id}.md").exists()
 
 
 def test_non_git_pr_phases_are_skipped(tmp_path: Path):

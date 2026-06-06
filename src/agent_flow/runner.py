@@ -61,6 +61,18 @@ GIT_DEPENDENT_PHASES = {
     "merge",
     "merge-approval",
 }
+FRESH_ARTIFACT_PHASES = {
+    "slice-plan",
+    "plan-review",
+    "refactor",
+    "gates",
+    "multi-review",
+    "fix-loop",
+    "architecture-review",
+    "pr-watch",
+    "pr-comment-fix",
+    "pr-ci-fix",
+}
 FIX_LOOP_MAX_ROUNDS = 3
 DDD_REQUIRED_DESIGN_SECTIONS = (
     ("bounded context", ("bounded context", "bounded contexts", "context map", "컨텍스트")),
@@ -358,6 +370,8 @@ class Runner:
         if key == "approve" and phase.routes.get("request-changes") and has_failure_markers(text):
             key = "request-changes"
         target = phase.routes.get(key)
+        if target is None:
+            target = phase.routes.get("default")
         if phase.multi_review:
             if key == "missing-reviewer":
                 print("  [block] multi-review requires 1+ independent sub-agent reviewer verdict")
@@ -389,9 +403,12 @@ class Runner:
             for i, candidate in enumerate(self.phases):
                 if candidate.id == target:
                     if i <= current_index:
-                        target_artifact = self._existing_artifact_path(candidate)
-                        if target_artifact.exists():
-                            target_artifact.unlink()
+                        for stale_phase in self.phases[i:current_index + 1]:
+                            if stale_phase.id not in FRESH_ARTIFACT_PHASES:
+                                continue
+                            stale_artifact = self._existing_artifact_path(stale_phase)
+                            if stale_artifact.exists():
+                                stale_artifact.unlink()
                     elif i > current_index + 1:
                         for skipped in self.phases[current_index + 1:i]:
                             skipped_artifact = self._artifact_path(skipped)
@@ -409,6 +426,8 @@ class Runner:
         assert self.run_dir is not None
         meta = read_meta(self.run_dir)
         rounds = _fix_loop_rounds(meta) + 1
+        if rounds > FIX_LOOP_MAX_ROUNDS:
+            return rounds
         # gates 실패 루프는 run meta에 저장해서 재시작 후에도 상한을 유지한다.
         meta["fix_loop_rounds"] = rounds
         write_meta(self.run_dir, meta)
@@ -607,20 +626,13 @@ def _route_key(text: str) -> str:
                 return "green"
             return "default"
         return "request-changes"
-    aliases = {
-        "has_comments": "comments",
-        "has-comments": "comments",
-        "ci_failed": "ci-failed",
-        "failed": "request-changes",
-        "fail": "request-changes",
-        "passed": "green",
-        "pass": "green",
-    }
     checks = (
         "blocked",
         "request-changes",
         "ci-failed",
+        "ci_failed",
         "comments",
+        "has_comments",
         "skipped",
         "pending",
         "green",
@@ -630,18 +642,11 @@ def _route_key(text: str) -> str:
         "error",
     )
     for line in lowered.splitlines():
-        match = re.match(r"^\s*(?:verdict|status):\s*([a-z_-]+)\s*$", line)
+        match = re.match(r"^(?:verdict|status):\s*([a-z_-]+)\s*$", line)
         if not match:
             continue
-        raw = match.group(1)
-        canonical = aliases.get(raw, raw)
-        if canonical in checks:
-            return canonical
-    for raw, canonical in aliases.items():
-        if f"verdict: {raw}\n" in lowered or f"status: {raw}\n" in lowered:
-            return canonical
-    for key in checks:
-        if f"verdict: {key}\n" in lowered or f"status: {key}\n" in lowered:
+        key = match.group(1)
+        if key in checks:
             return key
     return "default"
 

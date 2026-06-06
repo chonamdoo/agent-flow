@@ -52,6 +52,13 @@ class GenericAdapter(Adapter):
                         encoding="utf-8",
                     )
                     return True
+                if phase.id == "pr-watch":
+                    artifact.write_text(
+                        f"# {phase.id}\n\n"
+                        "status: green\n",
+                        encoding="utf-8",
+                    )
+                    return True
                 artifact.write_text(
                     f"# {phase.id}\n\n"
                     f"_stub artifact written by GenericAdapter (stub mode)._\n"

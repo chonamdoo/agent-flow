@@ -56,6 +56,14 @@ const PROFILE_MANAGED_HOST_ONLY_SKILLS = new Set([
   "testing-setup",
   "verified-email",
 ]);
+const GENERATED_PROJECT_SKILL_NAMES = new Set([
+  "architecture-reviewer",
+  "ddd-clean-architecture",
+  "full-feature-workflow",
+  "plan-reviewer",
+  "product-brief",
+  "push-watch",
+]);
 
 function installProject() {
   const requestedRoot = process.cwd();
@@ -78,7 +86,7 @@ function installProject() {
   const previousSkillIndex = readJsonIfExists(path.join(agentFlowDir, "skills", "index.json"));
   const phases = fullFeaturePhases();
 
-  for (const name of ["runs", "state", "handoffs", "team", "worktrees", "workflows", "skills", "prompts", "rules", "bootstrap"]) {
+  for (const name of ["runs", "state", "handoffs", "team", "worktrees", "workflows", "skills", "templates", "prompts", "rules", "bootstrap"]) {
     fs.mkdirSync(path.join(agentFlowDir, name), { recursive: true });
   }
   fs.mkdirSync(path.join(agentFlowDir, "local-skills"), { recursive: true });
@@ -94,7 +102,14 @@ function installProject() {
   };
 
   writeManagedFile(path.join(agentFlowDir, "workflows", "full-feature.yaml"), fullFeatureWorkflowYaml());
-  copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "workflows"), path.join(agentFlowDir, "workflows"), forceManaged);
+  copyBundledDirIfMissingOrSame(
+    path.join(KIT_ROOT, "workflows"),
+    path.join(agentFlowDir, "workflows"),
+    forceManaged,
+    new Set(),
+    true,
+    forceManaged,
+  );
   const agentFlowSkill = agentFlowSkillMarkdown();
   writeManagedFile(path.join(agentFlowDir, "skills", "agent-flow", "SKILL.md"), agentFlowSkill);
   writeManagedFile(
@@ -124,9 +139,13 @@ function installProject() {
     path.join(agentFlowDir, "skills"),
     forceManaged,
     PROFILE_MANAGED_HOST_ONLY_SKILLS,
+    true,
+    forceManaged,
+    new Set(["index.json", ...GENERATED_PROJECT_SKILL_NAMES]),
   );
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "profiles"), path.join(agentFlowDir, "profiles"), forceManaged);
-  const skillIndex = installProjectSkills(root, agentFlowDir, previousSkillIndex);
+  copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "templates"), path.join(agentFlowDir, "templates"), forceManaged, new Set(), true, forceManaged);
+  const skillIndex = installProjectSkills(root, agentFlowDir, previousSkillIndex, forceManaged);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "scripts"), path.join(root, "scripts"), forceManaged);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "agents"), path.join(root, ".Codex", "agents"), forceManaged);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "rules", "context"), path.join(root, ".Codex", "rules", "context"), forceManaged);
@@ -304,13 +323,10 @@ function runWorkflowCommand(args) {
     assertFreshArtifact(state, phase, artifact);
     assertCompletionMarkers(phase, artifact);
     const nextIndex = nextPhaseIndex(state, phases, phase, artifact);
+    syncRouteArtifacts(runDir, phases, state.phase_index, nextIndex);
     const nextPhase = phases[nextIndex];
     const transitionedAt = new Date().toISOString();
-    const fixLoopRounds = phase.id === "fix-loop"
-      ? (state.fix_loop_rounds ?? 0) + 1
-      : nextPhase?.id === "gates" && phase.id !== "fix-loop"
-        ? 0
-        : state.fix_loop_rounds;
+    const fixLoopRounds = nextFixLoopRounds(state, phase, nextPhase);
     const nextState = {
       ...state,
       phase_index: nextIndex,
@@ -870,12 +886,22 @@ function writeManagedFileIfMissingOrSame(pathName, content, force = false) {
   return true;
 }
 
-function copyBundledDirIfMissingOrSame(src, dest, force = false, excludedRootDirs = new Set(), isRoot = true) {
+function copyBundledDirIfMissingOrSame(
+  src,
+  dest,
+  force = false,
+  excludedRootDirs = new Set(),
+  isRoot = true,
+  pruneExtraneous = false,
+  preservedExtraneousRootNames = new Set(),
+) {
   if (!fs.existsSync(src)) {
     return;
   }
   fs.mkdirSync(dest, { recursive: true });
+  const sourceNames = new Set();
   for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    sourceNames.add(entry.name);
     const srcPath = path.join(src, entry.name);
     const destPath = path.join(dest, entry.name);
     if (entry.isDirectory()) {
@@ -883,7 +909,7 @@ function copyBundledDirIfMissingOrSame(src, dest, force = false, excludedRootDir
         removeManagedDirIfSame(srcPath, destPath, force);
         continue;
       }
-      copyBundledDirIfMissingOrSame(srcPath, destPath, force, excludedRootDirs, false);
+      copyBundledDirIfMissingOrSame(srcPath, destPath, force, excludedRootDirs, false, pruneExtraneous, preservedExtraneousRootNames);
       continue;
     }
     if (!entry.isFile()) {
@@ -891,6 +917,13 @@ function copyBundledDirIfMissingOrSame(src, dest, force = false, excludedRootDir
     }
     const content = fs.readFileSync(srcPath, "utf8");
     writeManagedFileIfMissingOrSame(destPath, content, force);
+  }
+  if (force && pruneExtraneous) {
+    for (const entry of fs.readdirSync(dest, { withFileTypes: true })) {
+      if (!sourceNames.has(entry.name) && !(isRoot && preservedExtraneousRootNames.has(entry.name))) {
+        fs.rmSync(path.join(dest, entry.name), { recursive: true, force: true });
+      }
+    }
   }
 }
 
@@ -934,15 +967,15 @@ function dirContentsMatch(src, dest) {
   return true;
 }
 
-function installProjectSkills(root, agentFlowDir, previousIndex) {
+function installProjectSkills(root, agentFlowDir, previousIndex, force = false) {
   const selected = selectProjectSkills(root, agentFlowDir);
   const links = [];
   for (const skill of selected.skills) {
     for (const host of skill.hosts) {
-      links.push(linkProjectSkill(root, skill, host, previousIndex));
+      links.push(linkProjectSkill(root, skill, host, previousIndex, force));
     }
   }
-  links.push(...removeStaleProjectSkillLinks(root, selected.skills, previousIndex));
+  links.push(...removeStaleProjectSkillLinks(root, selected.skills, previousIndex, force));
   const index = { ...selected, links };
   fs.writeFileSync(
     path.join(agentFlowDir, "skills", "index.json"),
@@ -1080,7 +1113,7 @@ function safeSkillName(value) {
         .replace(/^-+|-+$/g, "") || "skill";
 }
 
-function removeStaleProjectSkillLinks(root, skills, previousIndex) {
+function removeStaleProjectSkillLinks(root, skills, previousIndex, force = false) {
   if (!previousIndex || !Array.isArray(previousIndex.links)) {
     return [];
   }
@@ -1108,6 +1141,11 @@ function removeStaleProjectSkillLinks(root, skills, previousIndex) {
     if (stat.isSymbolicLink()) {
       fs.unlinkSync(target);
       removed.push({ name: link.name, host: link.host, path: link.path, status: "removed-stale" });
+      continue;
+    }
+    if (force) {
+      fs.rmSync(target, { recursive: true, force: true });
+      removed.push({ name: link.name, host: link.host, path: link.path, status: "removed-stale-forced" });
       continue;
     }
     const previousHash = previousSkillHash(previousIndex, link.name);
@@ -1175,7 +1213,7 @@ function parseSimpleYaml(text) {
   return metadata;
 }
 
-function linkProjectSkill(root, skill, host, previousIndex) {
+function linkProjectSkill(root, skill, host, previousIndex, force = false) {
   const srcDir = path.dirname(path.join(root, skill.path));
   const hostRoot = hostSkillRoot(root, host);
   if (pathHasSymlink(root, hostRoot)) {
@@ -1191,9 +1229,11 @@ function linkProjectSkill(root, skill, host, previousIndex) {
       fs.unlinkSync(destDir);
     } else if (fs.existsSync(destSkill)) {
       const currentHash = crypto.createHash("sha256").update(fs.readFileSync(destSkill, "utf8")).digest("hex");
-      if (currentHash !== skill.hash && currentHash !== previousHash) {
+      if (!force && currentHash !== skill.hash && currentHash !== previousHash) {
         return { name: skill.name, host, path: path.relative(root, destDir), status: "skipped-user-modified" };
       }
+      fs.rmSync(destDir, { recursive: true, force: true });
+    } else if (force) {
       fs.rmSync(destDir, { recursive: true, force: true });
     } else {
       return { name: skill.name, host, path: path.relative(root, destDir), status: "skipped-existing" };
@@ -1382,10 +1422,24 @@ function completionGateLines(content) {
       }
     }
     if (inGate) {
-      out.push(lowered);
+      out.push(normalizeCompletionMarkerLine(stripped).toLowerCase());
     }
   }
   return out;
+}
+
+function normalizeCompletionMarkerLine(line) {
+  let candidate = line.trim();
+  if (candidate.startsWith("+")) {
+    candidate = candidate.slice(1).trim();
+  }
+  const lowered = candidate.toLowerCase();
+  for (const prefix of ["- [x] ", "- [ ] ", "- ", "* "]) {
+    if (lowered.startsWith(prefix)) {
+      return candidate.slice(prefix.length).trim();
+    }
+  }
+  return candidate;
 }
 
 function lineMatchesMarker(line, marker) {
@@ -1425,12 +1479,6 @@ function artifactHasFailureMarkers(pathName) {
 const FIX_LOOP_MAX_ROUNDS = 3;
 
 function nextPhaseIndex(state, phases, phase, artifact) {
-  if (phase.id === "fix-loop") {
-    const rounds = (state.fix_loop_rounds ?? 0) + 1;
-    if (rounds > FIX_LOOP_MAX_ROUNDS) {
-      throw new Error(`blocked: fix-loop exceeded ${FIX_LOOP_MAX_ROUNDS} rounds — escalate to user`);
-    }
-  }
   if (!phase.routes) {
     return state.phase_index + 1;
   }
@@ -1445,12 +1493,58 @@ function nextPhaseIndex(state, phases, phase, artifact) {
     }
     throw new Error(`blocked: ${phase.id} route ${key}`);
   }
+  if (phase.id === "gates" && target === "fix-loop") {
+    const rounds = (state.fix_loop_rounds ?? 0) + 1;
+    if (rounds > FIX_LOOP_MAX_ROUNDS) {
+      throw new Error(`blocked: fix-loop exceeded ${FIX_LOOP_MAX_ROUNDS} rounds — escalate to user`);
+    }
+  }
   return phaseIndex(phases, target);
+}
+
+function syncRouteArtifacts(runDir, phases, currentIndex, nextIndex) {
+  if (nextIndex <= currentIndex) {
+    for (const phase of phases.slice(nextIndex, currentIndex + 1)) {
+      if (!FRESH_ARTIFACT_PHASE_IDS.has(phase.id)) {
+        continue;
+      }
+      const artifact = path.join(runDir, phase.artifact);
+      if (fs.existsSync(artifact)) {
+        fs.unlinkSync(artifact);
+      }
+    }
+    return;
+  }
+  if (nextIndex <= currentIndex + 1) {
+    return;
+  }
+  for (const phase of phases.slice(currentIndex + 1, nextIndex)) {
+    const artifact = path.join(runDir, phase.artifact);
+    if (fs.existsSync(artifact)) {
+      continue;
+    }
+    fs.mkdirSync(path.dirname(artifact), { recursive: true });
+    fs.writeFileSync(
+      artifact,
+      `# ${phase.id}\n\nstatus: skipped\nreason: route_to_${phases[nextIndex].id}\n`,
+      "utf8",
+    );
+  }
+}
+
+function nextFixLoopRounds(state, phase, nextPhase) {
+  if (phase.id === "gates" && nextPhase?.id === "fix-loop") {
+    return (state.fix_loop_rounds ?? 0) + 1;
+  }
+  if (phase.id === "gates" && state.fix_loop_rounds !== undefined) {
+    return undefined;
+  }
+  return state.fix_loop_rounds;
 }
 
 function nodeRouteKey(phase, artifact) {
   if (phase.id === "gates") {
-    return readGatesPassed(artifact) ? "green" : "request-changes";
+    return readGatesRouteKey(artifact);
   }
   if (phase.multi_review) {
     const verdict = readMultiReviewVerdict(artifact);
@@ -1464,20 +1558,20 @@ function nodeRouteKey(phase, artifact) {
   }
   if (phase.id === "pr-watch") {
     const status = readArtifactStatus(artifact);
-    if (["green", "merged", "skipped", "comments", "ci-failed", "pending", "closed", "error"].includes(status)) {
+    if (["green", "merged", "skipped", "comments", "has_comments", "ci-failed", "ci_failed", "pending", "closed", "error"].includes(status)) {
       return status;
     }
-    throw new Error("blocked: pr-watch artifact must include status: green, comments, ci-failed, skipped, merged, or pending");
+    return "default";
   }
   if (phase.id === "plan-review" || phase.id === "architecture-review" || phase.id === "merge-approval") {
     const verdict = readArtifactVerdict(artifact);
-    if (verdict) {
+    if (["approve", "request-changes", "blocked"].includes(verdict)) {
       if (verdict === "approve" && phase.routes?.["request-changes"] && artifactHasFailureMarkers(artifact)) {
         return "request-changes";
       }
       return verdict;
     }
-    throw new Error(`blocked: ${phase.id} artifact must include verdict`);
+    return "default";
   }
   return readArtifactStatus(artifact) ?? readArtifactVerdict(artifact) ?? "default";
 }
@@ -1493,10 +1587,7 @@ function phaseIndex(phases, id) {
 function readArtifactStatus(pathName) {
   const content = fs.readFileSync(pathName, "utf8");
   const match = content.match(/^status:\s*([a-z_-]+)\s*$/im);
-  const status = match?.[1]?.toLowerCase();
-  if (status === "has_comments" || status === "has-comments") return "comments";
-  if (status === "ci_failed") return "ci-failed";
-  return status;
+  return match?.[1]?.toLowerCase();
 }
 
 function readArtifactVerdict(pathName) {
@@ -1673,11 +1764,15 @@ function normalizeReviewerHeadingId(value) {
 }
 
 function readGatesPassed(pathName) {
+  return readGatesRouteKey(pathName) === "green";
+}
+
+function readGatesRouteKey(pathName) {
   try {
     const content = fs.readFileSync(pathName, "utf8");
     const data = JSON.parse(content);
     if (typeof data.passed !== "boolean" || !Array.isArray(data.results) || data.results.length === 0) {
-      return false;
+      return typeof data.passed === "boolean" && data.passed === false ? "request-changes" : "default";
     }
     // 완료 보고는 실제 실행한 gate command와 결과 evidence가 함께 있을 때만 허용한다.
     const resultsPass = data.results.every((r) =>
@@ -1687,9 +1782,12 @@ function readGatesPassed(pathName) {
       hasGateEvidence(r) &&
       (r.passed === true || r.status === "pass" || r.status === "ok"),
     );
-    return data.passed && resultsPass;
+    if (data.passed === true) {
+      return resultsPass ? "green" : "default";
+    }
+    return "request-changes";
   } catch {
-    return false;
+    return "default";
   }
 }
 
@@ -1721,7 +1819,7 @@ Follow the CLI output exactly. If no run is active, start with \`${AGENT_FLOW_CO
 
 - 활성 workflow와 current phase는 항상 \`${AGENT_FLOW_COMMAND} status\` 출력 기준이다.
 - phase 이동은 status의 \`next_command\`를 그대로 따른다. \`${AGENT_FLOW_COMMAND} continue\`나 \`${AGENT_FLOW_COMMAND} run advance\`를 추측하지 않는다.
-- \`default.yaml\`: design → slice-plan → worktree → implement → final-review ↔ fix-loop → commit → push-pr → pr-watch → merge → cleanup
+- \`default.yaml\`: design → slice-plan → worktree → implement → final-review ↔ fix-loop → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge → cleanup
 - \`full-feature.yaml\`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → gates ↔ fix-loop → multi-review → architecture-review → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
 - \`multi-review\`는 현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수다. 두 sub-agent를 병렬 실행하고, \`reviewer-source: sub-agent\`를 기록한 뒤 sub-agent를 닫는다. 마지막에 \`## Overall\`과 \`verdict: approve\` 또는 \`verdict: request-changes\`만 기록한다. 활성 host가 아닌 추가 provider는 optional이다.
 
@@ -1824,7 +1922,7 @@ Follow the CLI output exactly. Git projects start inside \`.agent-flow/worktrees
 
 - 활성 workflow와 current phase는 항상 \`${AGENT_FLOW_COMMAND} status\` 출력 기준이다.
 - phase 이동은 status의 \`next_command\`를 그대로 따른다. \`${AGENT_FLOW_COMMAND} continue\`나 \`${AGENT_FLOW_COMMAND} run advance\`를 추측하지 않는다.
-- \`default.yaml\`: design → slice-plan → worktree → implement → final-review ↔ fix-loop → commit → push-pr → pr-watch → merge → cleanup
+- \`default.yaml\`: design → slice-plan → worktree → implement → final-review ↔ fix-loop → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge → cleanup
 - \`full-feature.yaml\`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → gates ↔ fix-loop → multi-review → architecture-review → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
 - \`multi-review\`는 현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수다. 두 sub-agent를 병렬 실행하고, \`reviewer-source: sub-agent\`를 기록한 뒤 sub-agent를 닫는다. 마지막에 \`## Overall\`과 \`verdict: approve\` 또는 \`verdict: request-changes\`만 기록한다. 활성 host가 아닌 추가 provider는 optional이다.
 

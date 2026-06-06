@@ -16,6 +16,8 @@ import { spawnSync } from "node:child_process";
 
 const KIT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const AGENT_FLOW_COMMAND = "agent-flow";
+const INSTALL_ARGS = process.argv.slice(3);
+const FORCE_MANAGED = INSTALL_ARGS.includes("--force-managed");
 const REQUESTED_PROJECT = process.cwd();
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
 const PROJECT = resolveInstallProject(REQUESTED_PROJECT);
@@ -61,6 +63,14 @@ const PROFILE_MANAGED_HOST_ONLY_SKILLS = new Set([
   "r8-analyzer",
   "testing-setup",
   "verified-email",
+]);
+const GENERATED_PROJECT_SKILL_NAMES = new Set([
+  "architecture-reviewer",
+  "ddd-clean-architecture",
+  "full-feature-workflow",
+  "plan-reviewer",
+  "product-brief",
+  "push-watch",
 ]);
 
 function ensureDir(p) {
@@ -182,31 +192,49 @@ function detectProfile() {
   return "generic";
 }
 
-function copyDir(src, dest, excludedRootDirs = new Set(), isRoot = true) {
+function copyDir(
+  src,
+  dest,
+  excludedRootDirs = new Set(),
+  isRoot = true,
+  force = false,
+  pruneExtraneous = false,
+  preservedExtraneousRootNames = new Set(),
+) {
   // Recursive copy without overwriting user-modified files. If a file exists
   // at dest with different content, leave it (user customization wins) and
   // print a notice. Brand-new files are always written.
   if (!fs.existsSync(src)) return { written: 0, skipped: 0 };
   let written = 0, skipped = 0;
   ensureDir(dest);
+  const sourceNames = new Set();
   for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    sourceNames.add(entry.name);
     const srcPath = path.join(src, entry.name);
     const destPath = path.join(dest, entry.name);
     if (entry.isDirectory()) {
       if (isRoot && excludedRootDirs.has(entry.name)) {
-        const r = removeDirIfSame(srcPath, destPath);
+        const r = removeDirIfSame(srcPath, destPath, force);
         written += r.written;
         skipped += r.skipped;
         continue;
       }
-      const r = copyDir(srcPath, destPath, excludedRootDirs, false);
+      const r = copyDir(
+        srcPath,
+        destPath,
+        excludedRootDirs,
+        false,
+        force,
+        pruneExtraneous,
+        preservedExtraneousRootNames,
+      );
       written += r.written;
       skipped += r.skipped;
     } else if (entry.isFile()) {
       if (fs.existsSync(destPath)) {
         const srcContent = fs.readFileSync(srcPath, "utf8");
         const destContent = fs.readFileSync(destPath, "utf8");
-        if (srcContent !== destContent) {
+        if (srcContent !== destContent && !force) {
           skipped += 1;
           console.log(`  ! skipped (user-modified): ${path.relative(PROJECT, destPath)}`);
           continue;
@@ -216,11 +244,22 @@ function copyDir(src, dest, excludedRootDirs = new Set(), isRoot = true) {
       written += 1;
     }
   }
+  if (force && pruneExtraneous) {
+    for (const entry of fs.readdirSync(dest, { withFileTypes: true })) {
+      if (!sourceNames.has(entry.name) && !(isRoot && preservedExtraneousRootNames.has(entry.name))) {
+        fs.rmSync(path.join(dest, entry.name), { recursive: true, force: true });
+      }
+    }
+  }
   return { written, skipped };
 }
 
-function removeDirIfSame(src, dest) {
+function removeDirIfSame(src, dest, force = false) {
   if (!fs.existsSync(dest)) return { written: 0, skipped: 0 };
+  if (force) {
+    fs.rmSync(dest, { recursive: true, force: true });
+    return { written: 1, skipped: 0 };
+  }
   if (!dirContentsMatch(src, dest)) return { written: 0, skipped: 1 };
   fs.rmSync(dest, { recursive: true, force: true });
   return { written: 1, skipped: 0 };
@@ -297,16 +336,16 @@ function copySkillDir(src, dest) {
   return `copied:${r.written}:${r.skipped}`;
 }
 
-function installProjectSkills() {
+function installProjectSkills(forceManaged = false) {
   const previousIndex = readJsonIfExists(path.join(AF_DIR, "skills", "index.json"));
   const selected = selectProjectSkills();
   const links = [];
   for (const skill of selected.skills) {
     for (const host of skill.hosts) {
-      links.push(linkProjectSkill(skill, host, previousIndex));
+      links.push(linkProjectSkill(skill, host, previousIndex, forceManaged));
     }
   }
-  links.push(...removeStaleProjectSkillLinks(selected.skills, previousIndex));
+  links.push(...removeStaleProjectSkillLinks(selected.skills, previousIndex, forceManaged));
   const index = { ...selected, links };
   fs.writeFileSync(path.join(AF_DIR, "skills", "index.json"), `${JSON.stringify(index, null, 2)}\n`);
   return index;
@@ -415,7 +454,7 @@ function safeSkillName(value) {
         .replace(/^-+|-+$/g, "") || "skill";
 }
 
-function removeStaleProjectSkillLinks(skills, previousIndex) {
+function removeStaleProjectSkillLinks(skills, previousIndex, forceManaged = false) {
   if (!previousIndex || !Array.isArray(previousIndex.links)) return [];
   const desired = new Set(skills.flatMap((skill) => skill.hosts.map((host) => `${host}:${skill.name}`)));
   const removed = [];
@@ -434,6 +473,11 @@ function removeStaleProjectSkillLinks(skills, previousIndex) {
     if (stat.isSymbolicLink()) {
       fs.unlinkSync(target);
       removed.push({ name: link.name, host: link.host, path: link.path, status: "removed-stale" });
+      continue;
+    }
+    if (forceManaged) {
+      fs.rmSync(target, { recursive: true, force: true });
+      removed.push({ name: link.name, host: link.host, path: link.path, status: "removed-stale-forced" });
       continue;
     }
     const previousHash = previousSkillHash(previousIndex, link.name);
@@ -494,7 +538,7 @@ function parseSimpleYaml(text) {
   return metadata;
 }
 
-function linkProjectSkill(skill, host, previousIndex) {
+function linkProjectSkill(skill, host, previousIndex, forceManaged = false) {
   const srcDir = path.dirname(path.join(PROJECT, skill.path));
   const hostRoot = hostSkillRoot(host);
   if (pathHasSymlink(PROJECT, hostRoot)) {
@@ -506,7 +550,10 @@ function linkProjectSkill(skill, host, previousIndex) {
   const previousHash = previousSkillHash(previousIndex, skill.name);
   if (fs.existsSync(destDir)) {
     const stat = fs.lstatSync(destDir);
-    if (stat.isSymbolicLink()) fs.unlinkSync(destDir);
+    if (forceManaged) {
+      if (stat.isSymbolicLink()) fs.unlinkSync(destDir);
+      else fs.rmSync(destDir, { recursive: true, force: true });
+    } else if (stat.isSymbolicLink()) fs.unlinkSync(destDir);
     else if (fs.existsSync(destSkill)) {
       const currentHash = crypto.createHash("sha256").update(fs.readFileSync(destSkill, "utf8")).digest("hex");
       if (currentHash !== skill.hash && currentHash !== previousHash) {
@@ -659,36 +706,63 @@ function install() {
     path.join(KIT_ROOT, "skills"),
     path.join(AF_DIR, "skills"),
     PROFILE_MANAGED_HOST_ONLY_SKILLS,
+    true,
+    FORCE_MANAGED,
+    FORCE_MANAGED,
+    new Set(["index.json", ...GENERATED_PROJECT_SKILL_NAMES]),
   );
   installManagedWorkflowSkills();
-  const skillIndex = installProjectSkills();
+  const skillIndex = installProjectSkills(FORCE_MANAGED);
   const workflowsCopied = copyDir(
     path.join(KIT_ROOT, "workflows"),
     path.join(AF_DIR, "workflows"),
+    new Set(),
+    true,
+    FORCE_MANAGED,
+    FORCE_MANAGED,
   );
   const profilesCopied = copyDir(
     path.join(KIT_ROOT, "profiles"),
     path.join(AF_DIR, "profiles"),
+    new Set(),
+    true,
+    FORCE_MANAGED,
   );
   const templatesCopied = copyDir(
     path.join(KIT_ROOT, "templates"),
     path.join(AF_DIR, "templates"),
+    new Set(),
+    true,
+    FORCE_MANAGED,
+    FORCE_MANAGED,
   );
   const scriptsCopied = copyDir(
     path.join(KIT_ROOT, "scripts"),
     path.join(PROJECT, "scripts"),
+    new Set(),
+    true,
+    FORCE_MANAGED,
   );
   const codexAgentsCopied = copyDir(
     path.join(KIT_ROOT, ".Codex", "agents"),
     path.join(PROJECT, ".Codex", "agents"),
+    new Set(),
+    true,
+    FORCE_MANAGED,
   );
   const contextRulesCopied = copyDir(
     path.join(KIT_ROOT, ".Codex", "rules", "context"),
     path.join(PROJECT, ".Codex", "rules", "context"),
+    new Set(),
+    true,
+    FORCE_MANAGED,
   );
   const contextTreeCopied = copyDir(
     path.join(KIT_ROOT, ".Codex", "context"),
     path.join(PROJECT, ".Codex", "context"),
+    new Set(),
+    true,
+    FORCE_MANAGED,
   );
   copyFileIfMissingOrSame(
     path.join(KIT_ROOT, ".Codex", "rules", "codebase-rubric.md"),
@@ -825,7 +899,7 @@ const cmd = process.argv[2];
 if (cmd === "install") {
   install();
 } else if (cmd === "--help" || cmd === "-h" || !cmd) {
-  console.log("Usage: npx <agent-flow-package> install");
+  console.log("Usage: npx <agent-flow-package> install [--force-managed]");
   process.exit(0);
 } else {
   console.error(`Unknown command: ${cmd}`);

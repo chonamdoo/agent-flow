@@ -10,7 +10,7 @@ description: |
     design → slice-plan → [pause]
     → worktree → implement (TDD red→green→refactor inside, per slice)
     → final-review → fix-loop
-    → commit → push-pr → pr-watch → merge → cleanup
+    → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge → cleanup
 
 phases:
   - id: design
@@ -348,7 +348,7 @@ phases:
           android-local-skills-used: <skill list or n/a>
 
   - id: fix-loop
-    description: Address review findings (max 3 rounds). Tests stay green.
+    description: Address review findings. Tests stay green.
     required_markers:
       - "skills_checked: true"
       - "clean-architecture: applied"
@@ -367,10 +367,10 @@ phases:
     prompt: |
       For each must-fix finding in final-review.md, apply the change. After
       each round, re-run all tests and profile gates — they must remain
-      green. Cap at 3 rounds; escalate to user if must-fix list still has
-      items after round 3. Read every matching language/framework skill before
-      writing or judging code. Apply `skills/clean-architecture/SKILL.md` to
-      any boundary-affecting fix. For Android/Kotlin/Compose/KMP fixes, read
+      green. Follow the runner's printed next_command for each fix/review
+      loop. Read every matching language/framework skill before writing or
+      judging code. Apply `skills/clean-architecture/SKILL.md` to any
+      boundary-affecting fix. For Android/Kotlin/Compose/KMP fixes, read
       matching local skills from the active Android profile's `android_skills`
       and `chrisbanes_skills` through the current host path only. If a required
       local skill is missing, do not complete this artifact; report
@@ -412,6 +412,17 @@ phases:
 
   - id: pr-watch
     description: Watch PR — auto-respond to comments and CI failures.
+    routes:
+      green: merge
+      merged: cleanup
+      comments: pr-comment-fix
+      has_comments: pr-comment-fix
+      ci-failed: pr-ci-fix
+      ci_failed: pr-ci-fix
+      pending: block
+      closed: block
+      error: block
+      skipped: cleanup
     prompt: |
       Use agent-flow's built-in PR watcher. Read push-pr.md to find the PR
       number, then run:
@@ -419,8 +430,10 @@ phases:
           agent-flow pr-watch <number>           # poll until actionable
           agent-flow pr-watch <number> --once    # single fetch (debugging)
 
-      The watcher returns a JSON summary with `status` ∈ {green, has_comments,
-      ci_failed, pending, merged, closed, error}.
+      The watcher returns a JSON summary with `status` ∈ {green, comments,
+      has_comments, ci-failed, ci_failed, pending, merged, skipped, closed,
+      error}. `comments` aliases `has_comments`; `ci-failed` aliases
+      `ci_failed`.
 
       Branch on status:
 
@@ -450,6 +463,23 @@ phases:
 
       Output: pr-watch.md (status, actions taken, references to commits /
       PR comment IDs).
+
+  - id: pr-comment-fix
+    description: Fix actionable PR comments. Runner routes back to pr-watch.
+    routes:
+      default: pr-watch
+    prompt: |
+      Address actionable PR review comments, commit, push, resolve the
+      corresponding GitHub review threads, and summarize comment/thread IDs,
+      fixes, commits, and resolved thread IDs. Output: pr-comment-fix.md.
+
+  - id: pr-ci-fix
+    description: Fix failing PR CI. Runner routes back to pr-watch.
+    routes:
+      default: pr-watch
+    prompt: |
+      Reproduce failing PR checks locally, fix them, commit, push, and summarize
+      failed check names, commands, fixes, and commits. Output: pr-ci-fix.md.
 
   - id: merge
     description: Merge using profile.pr.merge_strategy.
