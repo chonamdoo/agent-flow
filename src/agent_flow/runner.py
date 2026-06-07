@@ -66,6 +66,7 @@ FRESH_ARTIFACT_PHASES = {
     "plan-review",
     "refactor",
     "gates",
+    "comment-authoring",
     "multi-review",
     "fix-loop",
     "architecture-review",

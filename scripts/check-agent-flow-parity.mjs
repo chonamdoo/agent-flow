@@ -166,8 +166,11 @@ if (exportedWorkflow) {
   if (exportedPhases["domain-grill"]?.artifact !== "artifacts/domain-grill.md") {
     failures.push("workflow export domain-grill artifact mismatch");
   }
-  if (exportedPhases["gates"]?.routes?.green !== "multi-review") {
+  if (exportedPhases["gates"]?.routes?.green !== "comment-authoring") {
     failures.push("workflow export gates green route mismatch");
+  }
+  if (exportedPhases["comment-authoring"]?.routes?.default !== "multi-review") {
+    failures.push("workflow export comment-authoring route mismatch");
   }
   if (exportedPhases["red"]?.artifact !== "artifacts/red.log") {
     failures.push("workflow export red artifact mismatch");
@@ -197,6 +200,9 @@ if (exportedDefaultWorkflow) {
   if (exportedPhases["pr-ci-fix"]?.routes?.default !== "pr-watch") {
     failures.push("workflow export default pr-ci-fix route mismatch");
   }
+  if (exportedPhases["comment-authoring"]?.routes?.default !== "final-review") {
+    failures.push("workflow export default comment-authoring route mismatch");
+  }
   assertRouteParity(exportedDefaultWorkflow);
 }
 
@@ -206,6 +212,10 @@ for (const rel of fullFeatureWorkflowCopies) {
   assertContains(rel, "id: domain-grill");
   assertContains(rel, "context_docs_updated: true|not_needed");
   assertContains(rel, "skills_checked: true");
+  assertContains(rel, "id: comment-authoring");
+  assertContains(rel, "comment-authoring: applied");
+  assertContains(rel, "comment-checker: checked|unavailable|n/a");
+  assertContains(rel, "`n/a` only when the changed diff has no");
   assertContains(rel, "Default reviewers are active-host sub-agents");
   assertContains(rel, "Gemini sub-agent in Gemini");
   assertContains(rel, "reviewer-source: sub-agent");
@@ -237,6 +247,11 @@ assertContains("workflows/default.yaml", "close that sub-agent session");
 assertContains("workflows/default.yaml", "## Overall");
 assertContains("workflows/default.yaml", "verdict: approve");
 assertContains("workflows/default.yaml", "verdict: request-changes");
+assertContains("workflows/default.yaml", "id: comment-authoring");
+assertContains("workflows/default.yaml", "`n/a` only when the changed diff has no");
+assertContains("workflows/default.yaml", "comment-scope: final-pass-only");
+assertContains("skills/code-generation-discipline/SKILL.md", "Write comments only when code alone cannot carry the reason or contract.");
+assertNotContains("skills/code-generation-discipline/SKILL.md", "Every new or modified code block must include Korean " + "comments");
 if (CHECK_INSTALLED_COPY) {
   assertContains(".agent-flow/prompts/multi-review.md", "Default reviewers are active-host sub-agents");
   assertContains(".agent-flow/prompts/multi-review.md", "skills_checked: true");
@@ -611,6 +626,26 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
   const label = `bin/${installer}`;
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agent-flow-install-parity-"));
   try {
+    const seededHooksPath = path.join(tempRoot, ".Codex", "hooks.json");
+    fs.mkdirSync(path.dirname(seededHooksPath), { recursive: true });
+    fs.writeFileSync(
+      seededHooksPath,
+      `${JSON.stringify(
+        {
+          hooks: {
+            PostToolUse: [
+              {
+                matcher: "CustomTool",
+                hooks: [{ type: "command", command: "custom-post-hook" }],
+              },
+            ],
+          },
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
     const result = spawnSync(process.execPath, [path.join(SOURCE_ROOT, "bin", installer), "install", "--force-managed"], {
       cwd: tempRoot,
       encoding: "utf8",
@@ -631,6 +666,54 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
       }
       if (fs.readFileSync(installedPath, "utf8") !== sourceText) {
         failures.push(`${label} clean install ${installedRel} differs from ${rel}`);
+      }
+    }
+    const installedHooks = path.join(tempRoot, ".Codex", "hooks.json");
+    if (!fs.existsSync(installedHooks)) {
+      failures.push(`${label} clean install missing .Codex/hooks.json`);
+    } else {
+      const hooksText = fs.readFileSync(installedHooks, "utf8");
+      if (!hooksText.includes("comment-checker.py")) {
+        failures.push(`${label} clean install .Codex/hooks.json missing comment-checker hook`);
+      }
+      if (!hooksText.includes("custom-post-hook")) {
+        failures.push(`${label} clean install .Codex/hooks.json did not preserve existing custom hook`);
+      }
+      if (!hooksText.includes(path.join(tempRoot, "scripts", "hooks", "comment-checker.py"))) {
+        failures.push(`${label} clean install .Codex/hooks.json does not use project-local comment-checker`);
+      }
+      if (hooksText.includes(SOURCE_ROOT)) {
+        failures.push(`${label} clean install .Codex/hooks.json leaks source root`);
+      }
+    }
+    const installedChecker = path.join(tempRoot, "scripts", "hooks", "comment-checker.py");
+    if (!fs.existsSync(installedChecker)) {
+      failures.push(`${label} clean install missing scripts/hooks/comment-checker.py`);
+    } else {
+      try {
+        fs.accessSync(installedChecker, fs.constants.X_OK);
+      } catch {
+        failures.push(`${label} clean install comment-checker.py is not executable`);
+      }
+    }
+    const claudeSettingsPath = path.join(tempRoot, ".claude", "settings.json");
+    if (!fs.existsSync(claudeSettingsPath)) {
+      failures.push(`${label} clean install missing .claude/settings.json`);
+    } else {
+      const claudeSettingsText = fs.readFileSync(claudeSettingsPath, "utf8");
+      if (!claudeSettingsText.includes("PostToolUse") || !claudeSettingsText.includes("comment-checker.py")) {
+        failures.push(`${label} clean install .claude/settings.json missing comment-checker PostToolUse hook`);
+      }
+      if (!claudeSettingsText.includes(path.join(tempRoot, "scripts", "hooks", "comment-checker.py"))) {
+        failures.push(`${label} clean install .claude/settings.json does not use project-local comment-checker`);
+      }
+      if (claudeSettingsText.includes(SOURCE_ROOT)) {
+        failures.push(`${label} clean install .claude/settings.json leaks source root`);
+      }
+    }
+    for (const skillName of ["comment-authoring-discipline", "comment-checker"]) {
+      if (!fs.existsSync(path.join(tempRoot, ".agent-flow", "skills", skillName, "SKILL.md"))) {
+        failures.push(`${label} clean install missing ${skillName} skill`);
       }
     }
     seedStaleForceManagedInstall(tempRoot);

@@ -25,6 +25,8 @@ const AF_DIR = path.join(PROJECT, ".agent-flow");
 const BUNDLED_HOST_SKILL_NAMES = new Set([
   "agent-flow",
   "android-appshell-error-handling",
+  "comment-authoring-discipline",
+  "comment-checker",
   "ios-app-shell-error-handling",
   "react-app-shell-error-handling",
   "react-native-app-shell-error-handling",
@@ -289,10 +291,14 @@ function dirContentsMatch(src, dest) {
   return true;
 }
 
-function copyFileIfMissingOrSame(src, dest) {
+function copyFileIfMissingOrSame(src, dest, force = false) {
   if (!fs.existsSync(src)) return false;
   ensureDir(path.dirname(dest));
   const srcContent = fs.readFileSync(src, "utf8");
+  if (force) {
+    fs.copyFileSync(src, dest);
+    return true;
+  }
   if (fs.existsSync(dest) && fs.readFileSync(dest, "utf8") !== srcContent) {
     console.log(`  ! skipped (user-modified): ${path.relative(PROJECT, dest)}`);
     return false;
@@ -301,9 +307,181 @@ function copyFileIfMissingOrSame(src, dest) {
   return true;
 }
 
+function writeFileIfMissingOrSame(dest, content, force = false) {
+  ensureDir(path.dirname(dest));
+  if (force) {
+    fs.writeFileSync(dest, content, "utf8");
+    return true;
+  }
+  if (fs.existsSync(dest) && fs.readFileSync(dest, "utf8") !== content) {
+    console.log(`  ! skipped (user-modified): ${path.relative(PROJECT, dest)}`);
+    return false;
+  }
+  fs.writeFileSync(dest, content, "utf8");
+  return true;
+}
+
 function writeManagedFile(pathName, content) {
   ensureDir(path.dirname(pathName));
   fs.writeFileSync(pathName, content, "utf8");
+}
+
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", "'\\''")}'`;
+}
+
+function hookScriptCommand(root, scriptName) {
+  return shellQuote(path.join(root, "scripts", "hooks", scriptName));
+}
+
+function codexHooksSettings(root) {
+  return {
+    hooks: {
+      PreToolUse: [
+        {
+          matcher: "Bash",
+          hooks: [
+            { type: "command", command: hookScriptCommand(root, "guard-worktree.sh") },
+            { type: "command", command: hookScriptCommand(root, "guard-protected-branch.sh") },
+          ],
+        },
+      ],
+      PostToolUse: [
+        {
+          matcher: "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit)$",
+          hooks: [{ type: "command", command: hookScriptCommand(root, "comment-checker.py") }],
+        },
+      ],
+      Stop: [
+        {
+          hooks: [{ type: "command", command: hookScriptCommand(root, "show-phase-status.sh") }],
+        },
+      ],
+    },
+  };
+}
+
+function unquoteShellWord(value) {
+  if (typeof value !== "string") {
+    return "";
+  }
+  if (value.startsWith("'") && value.endsWith("'")) {
+    return value.slice(1, -1).replaceAll("'\\''", "'");
+  }
+  return value;
+}
+
+function managedHookScriptName(command) {
+  const normalized = unquoteShellWord(command).replaceAll("\\", "/");
+  for (const scriptName of ["guard-worktree.sh", "guard-protected-branch.sh", "show-phase-status.sh", "comment-checker.py"]) {
+    if (normalized === `scripts/hooks/${scriptName}` || normalized.endsWith(`/scripts/hooks/${scriptName}`)) {
+      return scriptName;
+    }
+  }
+  return null;
+}
+
+function mergeHookSettings(settings, desired) {
+  if (!settings.hooks) {
+    settings.hooks = {};
+  }
+  for (const [event, entries] of Object.entries(desired)) {
+    if (!settings.hooks[event]) {
+      settings.hooks[event] = [];
+    }
+    for (const entry of entries) {
+      const existing = settings.hooks[event].find((e) => e.matcher === entry.matcher);
+      if (existing) {
+        if (!existing.hooks) {
+          existing.hooks = [];
+        }
+        for (const hook of entry.hooks) {
+          const scriptName = managedHookScriptName(hook.command);
+          const matchingHook = existing.hooks.find(
+            (h) => scriptName && managedHookScriptName(h.command) === scriptName,
+          );
+          if (matchingHook) {
+            Object.assign(matchingHook, hook);
+          } else if (!existing.hooks.some((h) => h.command === hook.command)) {
+            existing.hooks.push(hook);
+          }
+        }
+      } else {
+        settings.hooks[event].push(entry);
+      }
+    }
+  }
+}
+
+function installCodexHooks(root) {
+  const settingsPath = path.join(root, ".Codex", "hooks.json");
+  let settings = {};
+  if (fs.existsSync(settingsPath)) {
+    try {
+      settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+    } catch {
+      settings = {};
+    }
+  }
+  mergeHookSettings(settings, codexHooksSettings(root).hooks);
+  ensureDir(path.dirname(settingsPath));
+  fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+  return true;
+}
+
+function claudeHooksSettings(root) {
+  return {
+    hooks: {
+      PreToolUse: [
+        {
+          matcher: "Bash",
+          hooks: [
+            { type: "command", command: hookScriptCommand(root, "guard-worktree.sh") },
+            { type: "command", command: hookScriptCommand(root, "guard-protected-branch.sh") },
+          ],
+        },
+      ],
+      PostToolUse: [
+        {
+          matcher: "Write|Edit|MultiEdit",
+          hooks: [{ type: "command", command: hookScriptCommand(root, "comment-checker.py") }],
+        },
+      ],
+      Stop: [
+        {
+          matcher: "",
+          hooks: [{ type: "command", command: hookScriptCommand(root, "show-phase-status.sh") }],
+        },
+      ],
+    },
+  };
+}
+
+function installClaudeHooks(root) {
+  const settingsPath = path.join(root, ".claude", "settings.json");
+  let settings = {};
+  if (fs.existsSync(settingsPath)) {
+    try {
+      settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+    } catch {
+      settings = {};
+    }
+  }
+  mergeHookSettings(settings, claudeHooksSettings(root).hooks);
+  ensureDir(path.dirname(settingsPath));
+  fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+}
+
+function makeHooksExecutable(root) {
+  const hooksDir = path.join(root, "scripts", "hooks");
+  if (!fs.existsSync(hooksDir)) {
+    return;
+  }
+  for (const entry of fs.readdirSync(hooksDir)) {
+    if (entry.endsWith(".sh") || entry === "comment-checker.py") {
+      fs.chmodSync(path.join(hooksDir, entry), 0o755);
+    }
+  }
 }
 
 function pathExists(p) {
@@ -743,6 +921,9 @@ function install() {
     true,
     FORCE_MANAGED,
   );
+  makeHooksExecutable(PROJECT);
+  const codexHooksCopied = installCodexHooks(PROJECT);
+  installClaudeHooks(PROJECT);
   const codexAgentsCopied = copyDir(
     path.join(KIT_ROOT, ".Codex", "agents"),
     path.join(PROJECT, ".Codex", "agents"),
@@ -767,6 +948,7 @@ function install() {
   copyFileIfMissingOrSame(
     path.join(KIT_ROOT, ".Codex", "rules", "codebase-rubric.md"),
     path.join(PROJECT, ".Codex", "rules", "codebase-rubric.md"),
+    FORCE_MANAGED,
   );
 
   const agentFlowSkill = path.join(AF_DIR, "skills", "agent-flow");
@@ -805,6 +987,7 @@ function install() {
     profiles_copied: profilesCopied,
     templates_copied: templatesCopied,
     codex_agents_copied: codexAgentsCopied,
+    codex_hooks_copied: codexHooksCopied,
     context_tree_copied: contextTreeCopied,
     skill_links: {
       claude: claudeSkillStatus,

@@ -155,7 +155,11 @@ class CliTest(unittest.TestCase):
         # Python runner가 verdict/status에 따라 재작업 phase로 되돌아가는지 고정한다.
         self.assertEqual(phases["plan-review"]["routes"]["request-changes"], "slice-plan")
         self.assertEqual(phases["gates"]["routes"]["request-changes"], "fix-loop")
-        self.assertEqual(phases["gates"]["routes"]["green"], "multi-review")
+        self.assertEqual(phases["gates"]["routes"]["green"], "comment-authoring")
+        self.assertEqual(phases["gates"]["routes"]["approve"], "comment-authoring")
+        self.assertEqual(phases["comment-authoring"]["routes"]["default"], "multi-review")
+        self.assertIn("comment-authoring: applied", phases["comment-authoring"]["required_markers"])
+        self.assertIn("Do not refactor", phases["comment-authoring"]["prompt"])
         self.assertEqual(phases["multi-review"]["routes"]["request-changes"], "fix-loop")
         self.assertTrue(phases["multi-review"]["multi_review"])
         self.assertIn("Default reviewers are active-host sub-agents", phases["multi-review"]["prompt"])
@@ -204,6 +208,11 @@ class CliTest(unittest.TestCase):
         )
         self.assertEqual(default_phases["final-review"]["routes"]["request-changes"], "fix-loop")
         self.assertEqual(default_phases["final-review"]["routes"]["approve"], "commit")
+        self.assertEqual(default_phases["fix-loop"]["routes"]["default"], "comment-authoring")
+        self.assertEqual(default_phases["comment-authoring"]["routes"]["default"], "final-review")
+        self.assertIn("comment-authoring: applied", default_phases["comment-authoring"]["required_markers"])
+        self.assertIn("comment-checker: checked|unavailable|n/a", default_phases["comment-authoring"]["required_markers"])
+        self.assertIn("Do not refactor", default_phases["comment-authoring"]["prompt"])
         self.assertIn("skills_checked: true", default_phases["final-review"]["required_markers"])
         self.assertIn("at least two active-host reviewer sub-agents", default_phases["final-review"]["prompt"])
         self.assertIn("reviewer-source: sub-agent", default_phases["final-review"]["prompt"])
@@ -240,7 +249,8 @@ class CliTest(unittest.TestCase):
         self.assertIn("presentation-skill: android|react|react-native|ios|n/a", phases["green"]["required_markers"])
         self.assertIn("android-local-skills: checked|n/a", phases["green"]["required_markers"])
         self.assertEqual(phases["gates"]["artifact"], "artifacts/gate-results.json")
-        self.assertEqual(phases["gates"]["routes"]["green"], "multi-review")
+        self.assertEqual(phases["gates"]["routes"]["green"], "comment-authoring")
+        self.assertEqual(phases["comment-authoring"]["routes"]["default"], "multi-review")
 
     def test_python_runner_route_key_understands_gate_results(self) -> None:
         from agent_flow.runner import _gates_route_key, _route_key
@@ -738,6 +748,24 @@ class CliTest(unittest.TestCase):
                 (project_root / ".agent-flow" / "skills" / "code-generation-discipline" / "SKILL.md").is_file()
             )
             self.assertTrue(
+                (project_root / ".agent-flow" / "skills" / "comment-authoring-discipline" / "SKILL.md").is_file()
+            )
+            self.assertTrue((project_root / ".agent-flow" / "skills" / "comment-checker" / "SKILL.md").is_file())
+            self.assertTrue((project_root / ".Codex" / "hooks.json").is_file())
+            codex_hooks = json.loads((project_root / ".Codex" / "hooks.json").read_text(encoding="utf-8"))
+            codex_hook_commands = [
+                hook["command"]
+                for entry in codex_hooks["hooks"]["PostToolUse"]
+                for hook in entry["hooks"]
+            ]
+            expected_comment_checker = f"'{project_root.resolve() / 'scripts' / 'hooks' / 'comment-checker.py'}'"
+            self.assertIn(
+                expected_comment_checker,
+                codex_hook_commands,
+            )
+            self.assertNotIn(str(Path(__file__).resolve().parents[1]), "\n".join(codex_hook_commands))
+            self.assertTrue(os.access(project_root / "scripts" / "hooks" / "comment-checker.py", os.X_OK))
+            self.assertTrue(
                 (project_root / ".agent-flow" / "skills" / "agent-flow-concise-output" / "SKILL.md").is_file()
             )
             concise_rule = project_root / ".Codex" / "rules" / "concise-output.md"
@@ -840,7 +868,7 @@ class CliTest(unittest.TestCase):
             settings = json.loads(settings_path.read_text(encoding="utf-8"))
             commands = [
                 hook["command"]
-                for event in ("PreToolUse", "Stop")
+                for event in ("PreToolUse", "PostToolUse", "Stop")
                 for entry in settings["hooks"][event]
                 for hook in entry["hooks"]
             ]
@@ -848,6 +876,7 @@ class CliTest(unittest.TestCase):
             expected = [
                 f"'{resolved_root / 'scripts' / 'hooks' / 'guard-worktree.sh'}'",
                 f"'{resolved_root / 'scripts' / 'hooks' / 'guard-protected-branch.sh'}'",
+                f"'{resolved_root / 'scripts' / 'hooks' / 'comment-checker.py'}'",
                 f"'{resolved_root / 'scripts' / 'hooks' / 'show-phase-status.sh'}'",
             ]
             self.assertEqual(commands, expected)
@@ -859,6 +888,83 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(stop_hook.returncode, 0, stop_hook.stderr)
+
+    def test_legacy_node_installer_writes_claude_comment_checker_hook(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "legacy project with space"
+            project_root.mkdir()
+            node = _node_executable()
+            result = subprocess.run(
+                (
+                    node,
+                    str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-install.mjs"),
+                    "install",
+                ),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            settings = json.loads((project_root / ".claude" / "settings.json").read_text(encoding="utf-8"))
+            commands = [
+                hook["command"]
+                for event in ("PreToolUse", "PostToolUse", "Stop")
+                for entry in settings["hooks"][event]
+                for hook in entry["hooks"]
+            ]
+            expected_checker = f"'{project_root.resolve() / 'scripts' / 'hooks' / 'comment-checker.py'}'"
+            self.assertIn(expected_checker, commands)
+            self.assertTrue(os.access(project_root / "scripts" / "hooks" / "comment-checker.py", os.X_OK))
+
+    def test_node_installers_merge_existing_codex_hooks(self) -> None:
+        for installer in ("agent-flow-kit.mjs", "agent-flow-install.mjs"):
+            with self.subTest(installer=installer):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    project_root = Path(temp_dir) / "project with existing codex hook"
+                    project_root.mkdir()
+                    hooks_path = project_root / ".Codex" / "hooks.json"
+                    hooks_path.parent.mkdir()
+                    hooks_path.write_text(
+                        json.dumps(
+                            {
+                                "hooks": {
+                                    "PostToolUse": [
+                                        {
+                                            "matcher": "CustomTool",
+                                            "hooks": [{"type": "command", "command": "custom-post-hook"}],
+                                        }
+                                    ]
+                                }
+                            },
+                            indent=2,
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    node = _node_executable()
+                    result = subprocess.run(
+                        (
+                            node,
+                            str(Path(__file__).resolve().parents[1] / "bin" / installer),
+                            "install",
+                        ),
+                        cwd=project_root,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    codex_hooks = json.loads(hooks_path.read_text(encoding="utf-8"))
+                    commands = [
+                        hook["command"]
+                        for entries in codex_hooks["hooks"].values()
+                        for entry in entries
+                        for hook in entry["hooks"]
+                    ]
+                    expected_checker = f"'{project_root.resolve() / 'scripts' / 'hooks' / 'comment-checker.py'}'"
+                    self.assertIn("custom-post-hook", commands)
+                    self.assertIn(expected_checker, commands)
 
     def test_node_installers_remove_legacy_graphify_artifacts(self) -> None:
         installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
@@ -1977,6 +2083,7 @@ class CliTest(unittest.TestCase):
                 "green",
                 "refactor",
                 "gates",
+                "comment-authoring",
                 "multi-review",
                 "architecture-review",
                 "commit",
@@ -2091,6 +2198,7 @@ class CliTest(unittest.TestCase):
                 "green",
                 "refactor",
                 "gates",
+                "comment-authoring",
                 "multi-review",
                 "architecture-review",
                 "commit",
@@ -2288,6 +2396,7 @@ class CliTest(unittest.TestCase):
                 "green",
                 "refactor",
                 "gates",
+                "comment-authoring",
                 "multi-review",
             ]:
                 artifact = run_dir / _node_phase_artifact(phase)
@@ -2323,7 +2432,8 @@ class CliTest(unittest.TestCase):
             refactor.write_text(_node_phase_content("refactor", "updated "), encoding="utf-8")
             self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
             for phase, next_phase in [
-                ("gates", "multi-review"),
+                ("gates", "comment-authoring"),
+                ("comment-authoring", "multi-review"),
                 ("multi-review", "architecture-review"),
             ]:
                 artifact = run_dir / _node_phase_artifact(phase)
@@ -2370,7 +2480,7 @@ class CliTest(unittest.TestCase):
             self.assertIn("Current phase: commit", approved.stdout)
 
     def test_node_gates_fail_routes_to_fix_loop_and_back(self) -> None:
-        """gates fail → fix-loop → gates → multi-review 순환 테스트."""
+        """gates fail → fix-loop → gates → comment-authoring → multi-review 순환 테스트."""
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
@@ -2437,6 +2547,18 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Current phase: comment-authoring", result.stdout)
+
+            comment_artifact = run_dir / _node_phase_artifact("comment-authoring")
+            comment_artifact.write_text(_node_phase_content("comment-authoring"), encoding="utf-8")
+            result = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("Current phase: multi-review", result.stdout)
 
     def test_node_multi_review_request_changes_routes_to_fix_loop(self) -> None:
@@ -2459,7 +2581,7 @@ class CliTest(unittest.TestCase):
             for phase in [
                 "domain-grill", "product-brief", "prd",
                 "slice-plan", "plan-review", "ddd-design", "worktree",
-                "run-start", "red", "green", "refactor", "gates",
+                "run-start", "red", "green", "refactor", "gates", "comment-authoring",
             ]:
                 artifact = run_dir / _node_phase_artifact(phase)
                 artifact.parent.mkdir(parents=True, exist_ok=True)
@@ -2511,6 +2633,18 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Current phase: comment-authoring", result.stdout)
+
+            comment_artifact = run_dir / _node_phase_artifact("comment-authoring")
+            comment_artifact.write_text(_node_phase_content("comment-authoring"), encoding="utf-8")
+            result = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("Current phase: multi-review", result.stdout)
 
             mr_artifact.write_text(_with_skills_gate(
@@ -2537,6 +2671,17 @@ class CliTest(unittest.TestCase):
                 0,
             )
             gates_artifact.write_text(_node_phase_content("gates"), encoding="utf-8")
+            result = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Current phase: comment-authoring", result.stdout)
+
+            comment_artifact.write_text(_node_phase_content("comment-authoring"), encoding="utf-8")
             result = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=project_root,
@@ -2586,6 +2731,10 @@ class CliTest(unittest.TestCase):
                 artifact.parent.mkdir(parents=True, exist_ok=True)
                 artifact.write_text(_node_phase_content(phase), encoding="utf-8")
                 self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+
+            comment_artifact = run_dir / "comment-authoring.md"
+            comment_artifact.write_text(_node_phase_content("comment-authoring"), encoding="utf-8")
+            self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
 
             final_artifact = run_dir / "final-review.md"
             final_artifact.write_text(_with_final_review_gate("verdict: approve\n"), encoding="utf-8")
@@ -2691,7 +2840,7 @@ class CliTest(unittest.TestCase):
             for phase in [
                 "domain-grill", "product-brief", "prd",
                 "slice-plan", "plan-review", "ddd-design", "worktree",
-                "run-start", "red", "green", "refactor", "gates", "multi-review",
+                "run-start", "red", "green", "refactor", "gates", "comment-authoring", "multi-review",
             ]:
                 artifact = run_dir / _node_phase_artifact(phase)
                 artifact.parent.mkdir(parents=True, exist_ok=True)
@@ -2734,7 +2883,7 @@ class CliTest(unittest.TestCase):
             for phase in [
                 "domain-grill", "product-brief", "prd",
                 "slice-plan", "plan-review", "ddd-design", "worktree",
-                "run-start", "red", "green", "refactor", "gates",
+                "run-start", "red", "green", "refactor", "gates", "comment-authoring",
             ]:
                 artifact = run_dir / _node_phase_artifact(phase)
                 artifact.parent.mkdir(parents=True, exist_ok=True)
@@ -6690,6 +6839,7 @@ def _node_phase_artifact(phase: str) -> Path:
         "green": Path("artifacts/green.log"),
         "refactor": Path("artifacts/refactor.md"),
         "gates": Path("artifacts/gate-results.json"),
+        "comment-authoring": Path("artifacts/comment-authoring.md"),
         "multi-review": Path("artifacts/multi-review.md"),
         "implement": Path("artifacts/implement.md"),
         "final-review": Path("artifacts/final-review.md"),
@@ -6792,6 +6942,17 @@ def _node_phase_content(phase: str, prefix: str = "") -> str:
         )
     if phase == "gates":
         return '{"passed": true, "results": [{"id": "test", "command": "npm test", "passed": true, "output": "ok"}]}\n'
+    if phase == "comment-authoring":
+        return (
+            content
+            + "## Completion Gate\n"
+            + "comment-authoring: applied\n"
+            + "comment-checker: checked\n"
+            + "comment-scope: final-pass-only\n"
+            + "refactor-scope: none\n"
+            + "performance-optimization: none\n"
+            + "module-split: none\n"
+        )
     if phase in {"design", "ddd-design"}:
         return content + clean_design_gate
     if phase == "multi-review":
@@ -6893,6 +7054,7 @@ def _node_start_full_feature_at_pr_watch(project_root: Path, node: str, cli: str
         "green",
         "refactor",
         "gates",
+        "comment-authoring",
         "multi-review",
         "architecture-review",
         "commit",

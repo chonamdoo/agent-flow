@@ -17,6 +17,8 @@ let cachedFullFeatureWorkflow = null;
 const BUNDLED_HOST_SKILL_NAMES = new Set([
   "agent-flow",
   "android-appshell-error-handling",
+  "comment-authoring-discipline",
+  "comment-checker",
   "ios-app-shell-error-handling",
   "react-app-shell-error-handling",
   "react-native-app-shell-error-handling",
@@ -150,6 +152,7 @@ function installProject() {
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "agents"), path.join(root, ".Codex", "agents"), forceManaged);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "rules", "context"), path.join(root, ".Codex", "rules", "context"), forceManaged);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "context"), path.join(root, ".Codex", "context"), forceManaged);
+  installCodexHooks(root);
   writeManagedFileIfMissingOrSame(
     path.join(root, ".Codex", "rules", "codebase-rubric.md"),
     fs.readFileSync(path.join(KIT_ROOT, ".Codex", "rules", "codebase-rubric.md"), "utf8"),
@@ -1819,8 +1822,8 @@ Follow the CLI output exactly. If no run is active, start with \`${AGENT_FLOW_CO
 
 - 활성 workflow와 current phase는 항상 \`${AGENT_FLOW_COMMAND} status\` 출력 기준이다.
 - phase 이동은 status의 \`next_command\`를 그대로 따른다. \`${AGENT_FLOW_COMMAND} continue\`나 \`${AGENT_FLOW_COMMAND} run advance\`를 추측하지 않는다.
-- \`default.yaml\`: design → slice-plan → worktree → implement → final-review ↔ fix-loop → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge → cleanup
-- \`full-feature.yaml\`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → gates ↔ fix-loop → multi-review → architecture-review → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
+- \`default.yaml\`: design → slice-plan → worktree → implement → comment-authoring → final-review ↔ fix-loop → comment-authoring → final-review → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge → cleanup
+- \`full-feature.yaml\`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → gates ↔ fix-loop → comment-authoring → multi-review → architecture-review → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
 - \`multi-review\`는 현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수다. 두 sub-agent를 병렬 실행하고, \`reviewer-source: sub-agent\`를 기록한 뒤 sub-agent를 닫는다. 마지막에 \`## Overall\`과 \`verdict: approve\` 또는 \`verdict: request-changes\`만 기록한다. 활성 host가 아닌 추가 provider는 optional이다.
 
 ### Context Economy
@@ -1922,8 +1925,8 @@ Follow the CLI output exactly. Git projects start inside \`.agent-flow/worktrees
 
 - 활성 workflow와 current phase는 항상 \`${AGENT_FLOW_COMMAND} status\` 출력 기준이다.
 - phase 이동은 status의 \`next_command\`를 그대로 따른다. \`${AGENT_FLOW_COMMAND} continue\`나 \`${AGENT_FLOW_COMMAND} run advance\`를 추측하지 않는다.
-- \`default.yaml\`: design → slice-plan → worktree → implement → final-review ↔ fix-loop → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge → cleanup
-- \`full-feature.yaml\`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → gates ↔ fix-loop → multi-review → architecture-review → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
+- \`default.yaml\`: design → slice-plan → worktree → implement → comment-authoring → final-review ↔ fix-loop → comment-authoring → final-review → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge → cleanup
+- \`full-feature.yaml\`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → gates ↔ fix-loop → comment-authoring → multi-review → architecture-review → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
 - \`multi-review\`는 현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수다. 두 sub-agent를 병렬 실행하고, \`reviewer-source: sub-agent\`를 기록한 뒤 sub-agent를 닫는다. 마지막에 \`## Overall\`과 \`verdict: approve\` 또는 \`verdict: request-changes\`만 기록한다. 활성 host가 아닌 추가 provider는 optional이다.
 
 ### Context Economy
@@ -1953,6 +1956,7 @@ const FRESH_ARTIFACT_PHASE_IDS = new Set([
   "plan-review",
   "refactor",
   "gates",
+  "comment-authoring",
   "multi-review",
   "fix-loop",
   "architecture-review",
@@ -2077,7 +2081,7 @@ function unquoteShellWord(value) {
 
 function managedHookScriptName(command) {
   const normalized = unquoteShellWord(command).replaceAll("\\", "/");
-  for (const scriptName of ["guard-worktree.sh", "guard-protected-branch.sh", "show-phase-status.sh"]) {
+  for (const scriptName of ["guard-worktree.sh", "guard-protected-branch.sh", "show-phase-status.sh", "comment-checker.py"]) {
     if (normalized === `scripts/hooks/${scriptName}` || normalized.endsWith(`/scripts/hooks/${scriptName}`)) {
       return scriptName;
     }
@@ -2085,7 +2089,7 @@ function managedHookScriptName(command) {
   return null;
 }
 
-function claudeHooksSettings(root) {
+function codexHooksSettings(root) {
   return {
     hooks: {
       PreToolUse: [
@@ -2097,9 +2101,14 @@ function claudeHooksSettings(root) {
           ],
         },
       ],
+      PostToolUse: [
+        {
+          matcher: "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit)$",
+          hooks: [{ type: "command", command: hookScriptCommand(root, "comment-checker.py") }],
+        },
+      ],
       Stop: [
         {
-          matcher: "",
           hooks: [{ type: "command", command: hookScriptCommand(root, "show-phase-status.sh") }],
         },
       ],
@@ -2107,20 +2116,10 @@ function claudeHooksSettings(root) {
   };
 }
 
-function installClaudeHooks(root) {
-  const settingsPath = path.join(root, ".claude", "settings.json");
-  let settings = {};
-  if (fs.existsSync(settingsPath)) {
-    try {
-      settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
-    } catch {
-      settings = {};
-    }
-  }
+function mergeHookSettings(settings, desired) {
   if (!settings.hooks) {
     settings.hooks = {};
   }
-  const desired = claudeHooksSettings(root).hooks;
   for (const [event, entries] of Object.entries(desired)) {
     if (!settings.hooks[event]) {
       settings.hooks[event] = [];
@@ -2147,6 +2146,62 @@ function installClaudeHooks(root) {
       }
     }
   }
+}
+
+function installCodexHooks(root) {
+  const settingsPath = path.join(root, ".Codex", "hooks.json");
+  let settings = {};
+  if (fs.existsSync(settingsPath)) {
+    try {
+      settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+    } catch {
+      settings = {};
+    }
+  }
+  mergeHookSettings(settings, codexHooksSettings(root).hooks);
+  fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+  fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+}
+
+function claudeHooksSettings(root) {
+  return {
+    hooks: {
+      PreToolUse: [
+        {
+          matcher: "Bash",
+          hooks: [
+            { type: "command", command: hookScriptCommand(root, "guard-worktree.sh") },
+            { type: "command", command: hookScriptCommand(root, "guard-protected-branch.sh") },
+          ],
+        },
+      ],
+      PostToolUse: [
+        {
+          matcher: "Write|Edit|MultiEdit",
+          hooks: [{ type: "command", command: hookScriptCommand(root, "comment-checker.py") }],
+        },
+      ],
+      Stop: [
+        {
+          matcher: "",
+          hooks: [{ type: "command", command: hookScriptCommand(root, "show-phase-status.sh") }],
+        },
+      ],
+    },
+  };
+}
+
+function installClaudeHooks(root) {
+  const settingsPath = path.join(root, ".claude", "settings.json");
+  let settings = {};
+  if (fs.existsSync(settingsPath)) {
+    try {
+      settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+    } catch {
+      settings = {};
+    }
+  }
+  mergeHookSettings(settings, claudeHooksSettings(root).hooks);
   fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
   fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
 }
@@ -2157,7 +2212,7 @@ function makeHooksExecutable(root) {
     return;
   }
   for (const entry of fs.readdirSync(hooksDir)) {
-    if (entry.endsWith(".sh")) {
+    if (entry.endsWith(".sh") || entry === "comment-checker.py") {
       fs.chmodSync(path.join(hooksDir, entry), 0o755);
     }
   }
@@ -2175,7 +2230,7 @@ Implementation rules:
 - Run every phase through the runner. Do not skip review, QA, PR watch, or fix-loop phases.
 - Apply \`code-generation-discipline\` during red, green, refactor, fix-loop, and review phases. Read every matching language/framework skill before writing or judging code.
 - If review or QA fails, return to the fix phase before continuing.
-- The gates->fix-loop->gates loop re-verifies after every fix. multi-review approve skips fix-loop; request-changes routes through fix-loop->gates.
+- The gates->fix-loop->gates loop re-verifies after every fix, then routes through comment-authoring before multi-review. multi-review approve skips fix-loop; request-changes routes through fix-loop->gates->comment-authoring.
 - Code review requires at least two active-host sub-agents (Codex sub-agent in Codex, Claude sub-agent in Claude, Gemini sub-agent in Gemini). If the changed scope spans multiple areas, run one additional active-host sub-agent in parallel. Additional non-host providers are optional, and approve requires 2+ independent sub-agent reviewer verdicts with reviewer-source: sub-agent. After recording each sub-agent result, close that sub-agent session. End multi-review artifacts with ## Overall followed by exactly one verdict line: verdict: approve or verdict: request-changes.
 - In the default workflow, gates are enforced by the \`implement\` phase completion marker: \`gates: all_passed\`.
 

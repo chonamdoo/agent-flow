@@ -99,7 +99,7 @@ def test_full_cycle(tmp_path: Path):
     assert "run complete" in r2.stdout
 
     expected_post = [
-        "worktree", "implement", "final-review", "fix-loop",
+        "worktree", "implement", "comment-authoring", "final-review", "fix-loop",
         "commit", "push-pr", "pr-watch", "merge", "cleanup",
     ]
     for a in expected_post:

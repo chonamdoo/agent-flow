@@ -9,7 +9,7 @@ description: |
   Phase order (canonical):
     design → slice-plan → [pause]
     → worktree → implement (TDD red→green→refactor inside, per slice)
-    → final-review → fix-loop
+    → comment-authoring → final-review ↔ fix-loop → comment-authoring → final-review
     → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge → cleanup
 
 phases:
@@ -255,6 +255,42 @@ phases:
           android-local-skills: checked|n/a
           android-local-skills-used: <skill list or n/a>
 
+  - id: comment-authoring
+    description: Final comment-quality pass before final-review. Runner routes to final-review.
+    required_markers:
+      - "comment-authoring: applied"
+      - "comment-checker: checked|unavailable|n/a"
+      - "comment-scope: final-pass-only"
+      - "refactor-scope: none"
+      - "performance-optimization: none"
+      - "module-split: none"
+    routes:
+      default: final-review
+    prompt: |
+      Apply `skills/comment-authoring-discipline/SKILL.md` to the changed diff
+      before final-review. Add no comments by default. Add or keep comments only
+      for WHY, external constraints, workarounds, security, performance,
+      concurrency/lifecycle, complex algorithms or regex, business/domain rules,
+      and public API contracts.
+
+      Remove or rewrite WHAT/HOW comments that restate code. Do not refactor,
+      optimize performance, split modules, rename broadly, or expand scope.
+      Run comment-checker or the configured hook when available. Record
+      `checked` when it ran, `unavailable` only when no project-local
+      checker/hook command exists, and `n/a` only when the changed diff has no
+      code files to inspect.
+
+      Output: comment-authoring.md.
+      End with:
+
+          ## Completion Gate
+          comment-authoring: applied
+          comment-checker: checked|unavailable|n/a
+          comment-scope: final-pass-only
+          refactor-scope: none
+          performance-optimization: none
+          module-split: none
+
   - id: final-review
     description: |
       Final review. Requires at least two independent active-host reviewer
@@ -363,7 +399,7 @@ phases:
       - "android-local-skills: checked|n/a"
       - "android-local-skills-used:"
     routes:
-      default: final-review
+      default: comment-authoring
     prompt: |
       For each must-fix finding in final-review.md, apply the change. After
       each round, re-run all tests and profile gates — they must remain

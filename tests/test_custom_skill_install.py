@@ -72,6 +72,8 @@ def test_bundled_workflow_skills_are_internal_and_host_skills_are_registered(tmp
     assert [skill["name"] for skill in index["skills"]] == [
         "agent-flow",
         "android-appshell-error-handling",
+        "comment-authoring-discipline",
+        "comment-checker",
         "ios-app-shell-error-handling",
         "react-app-shell-error-handling",
         "react-native-app-shell-error-handling",
@@ -79,6 +81,8 @@ def test_bundled_workflow_skills_are_internal_and_host_skills_are_registered(tmp
     assert {link["name"] for link in index["links"]} == {
         "agent-flow",
         "android-appshell-error-handling",
+        "comment-authoring-discipline",
+        "comment-checker",
         "ios-app-shell-error-handling",
         "react-app-shell-error-handling",
         "react-native-app-shell-error-handling",

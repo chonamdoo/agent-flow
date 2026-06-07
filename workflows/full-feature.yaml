@@ -205,8 +205,7 @@ phases:
       Android/Kotlin/Compose/KMP code, read matching local skills from the active
       Android profile's `android_skills` and `chrisbanes_skills` through the
       current host path only.
-      New or modified code must include Korean comments. If a required local
-      skill is missing, do not complete this artifact; report
+      If a required local skill is missing, do not complete this artifact; report
       `missing local <group>: <skill>` with the source URL to the user.
       General Compose/Kotlin convention does not count as loaded skill usage.
       End with:
@@ -245,8 +244,8 @@ phases:
     prompt: |
       Apply code-generation-discipline. Refactor only after green. Keep
       behavior stable, apply `skills/clean-architecture/SKILL.md`, read every
-      matching language/framework skill before changing code, keep required
-      Korean code comments, and summarize structural changes. For
+      matching language/framework skill before changing code, and summarize
+      structural changes. For
       Android/Kotlin/Compose/KMP code, read matching local skills from the active
       Android profile's `android_skills` and `chrisbanes_skills` through the
       current host path only.
@@ -272,10 +271,10 @@ phases:
       Output: refactor.md.
 
   - id: gates
-    description: Run project verification gates. Runner routes fail→fix-loop, pass→multi-review.
+    description: Run project verification gates. Runner routes fail→fix-loop, pass→comment-authoring.
     routes:
-      green: multi-review
-      approve: multi-review
+      green: comment-authoring
+      approve: comment-authoring
       request-changes: fix-loop
       blocked: fix-loop
       error: fix-loop
@@ -286,6 +285,42 @@ phases:
       active profile. Docs-only PRs must still run context lint. Save
       structured JSON with a top-level `passed` boolean and a `results` array.
       Output: artifacts/gate-results.json.
+
+  - id: comment-authoring
+    description: Final comment-quality pass before multi-review. Runner routes to multi-review.
+    required_markers:
+      - "comment-authoring: applied"
+      - "comment-checker: checked|unavailable|n/a"
+      - "comment-scope: final-pass-only"
+      - "refactor-scope: none"
+      - "performance-optimization: none"
+      - "module-split: none"
+    routes:
+      default: multi-review
+    prompt: |
+      Apply `skills/comment-authoring-discipline/SKILL.md` to the changed diff
+      before multi-review. Add no comments by default. Add or keep comments only
+      for WHY, external constraints, workarounds, security, performance,
+      concurrency/lifecycle, complex algorithms or regex, business/domain rules,
+      and public API contracts.
+
+      Remove or rewrite WHAT/HOW comments that restate code. Do not refactor,
+      optimize performance, split modules, rename broadly, or expand scope.
+      Run comment-checker or the configured hook when available. Record
+      `checked` when it ran, `unavailable` only when no project-local
+      checker/hook command exists, and `n/a` only when the changed diff has no
+      code files to inspect.
+
+      Output: artifacts/comment-authoring.md.
+      End with:
+
+          ## Completion Gate
+          comment-authoring: applied
+          comment-checker: checked|unavailable|n/a
+          comment-scope: final-pass-only
+          refactor-scope: none
+          performance-optimization: none
+          module-split: none
 
   - id: multi-review
     description: Run implementation review with at least two independent sub-agent reviewers before approve. Runner routes approve→architecture-review, request-changes→fix-loop.
@@ -376,10 +411,9 @@ phases:
     routes:
       default: gates
     prompt: |
-      Apply code-generation-discipline while fixing review/gate failures. New
-      or modified code must include Korean comments. Read every matching
-      language/framework skill before writing or judging code, or record that
-      no fixes were required. Apply `skills/clean-architecture/SKILL.md` to
+      Apply code-generation-discipline while fixing review/gate failures. Read
+      every matching language/framework skill before writing or judging code, or
+      record that no fixes were required. Apply `skills/clean-architecture/SKILL.md` to
       any boundary-affecting fix. For Android/Kotlin/Compose/KMP fixes, read
       matching local skills from the active Android profile's `android_skills`
       and `chrisbanes_skills` through the current host path only. If a required
