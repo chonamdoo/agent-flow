@@ -1274,6 +1274,15 @@ function legacyHostSkillRoot(root, linkPath) {
   if (normalized.startsWith(".codex/skills/")) {
     return path.join(root, ".codex", "skills");
   }
+  // gemini/antigravity host는 제거됐지만 과거 index가 기록한 link 정리는
+  // 계속돼야 한다. hostSkillRoot로 유도하면 .antigravity/skills처럼 실제
+  // 경로와 어긋나 ensureChildPath가 throw하며 install이 중단된다.
+  if (normalized.startsWith(".gemini/antigravity/skills/")) {
+    return path.join(root, ".gemini", "antigravity", "skills");
+  }
+  if (normalized.startsWith(".gemini/skills/")) {
+    return path.join(root, ".gemini", "skills");
+  }
   return null;
 }
 

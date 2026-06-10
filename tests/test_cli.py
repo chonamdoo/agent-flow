@@ -1207,6 +1207,63 @@ class CliTest(unittest.TestCase):
                     for skill_root in managed_skill_roots:
                         self.assertFalse((project_root / skill_root / "graphify").exists(), skill_root)
 
+    def test_node_installers_remove_legacy_antigravity_skill_links(self) -> None:
+        installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
+        legacy_link_paths = {
+            "antigravity": ".gemini/antigravity/skills/agent-flow",
+            "gemini": ".gemini/skills/agent-flow",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            node = _node_executable()
+            for installer_name in installers:
+                with self.subTest(installer=installer_name):
+                    project_root = root / installer_name
+                    project_root.mkdir()
+                    source_dir = project_root / ".agent-flow" / "skills" / "agent-flow"
+                    source_dir.mkdir(parents=True)
+                    (source_dir / "SKILL.md").write_text("---\nname: agent-flow\n---\n", encoding="utf-8")
+                    for link_path in legacy_link_paths.values():
+                        target = project_root / link_path
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.symlink_to(source_dir)
+                    index = {
+                        "skills": [
+                            {
+                                "name": "agent-flow",
+                                "source": "bundled",
+                                "hosts": ["claude", "codex"],
+                                "path": ".agent-flow/skills/agent-flow",
+                            }
+                        ],
+                        "links": [
+                            {"name": "agent-flow", "host": host, "path": link_path, "status": "linked"}
+                            for host, link_path in legacy_link_paths.items()
+                        ],
+                    }
+                    (project_root / ".agent-flow" / "skills" / "index.json").write_text(
+                        json.dumps(index), encoding="utf-8"
+                    )
+
+                    result = subprocess.run(
+                        (
+                            node,
+                            str(Path(__file__).resolve().parents[1] / "bin" / installer_name),
+                            "install",
+                        ),
+                        cwd=project_root,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+
+                    # 제거된 host의 legacy symlink가 ensureChildPath에서 throw하면
+                    # install 전체가 중단된다. 정리는 성공하고 link만 사라져야 한다.
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    for link_path in legacy_link_paths.values():
+                        self.assertFalse((project_root / link_path).is_symlink(), link_path)
+                        self.assertFalse((project_root / link_path).exists(), link_path)
+
     def test_node_installer_accepts_run_install_alias(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
