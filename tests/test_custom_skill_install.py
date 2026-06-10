@@ -52,9 +52,8 @@ def test_project_skill_links_all_hosts_and_index_omits_body(tmp_path: Path) -> N
     result = _install(project)
 
     assert result.returncode == 0, result.stderr
-    for host in ("claude", "codex", "gemini"):
+    for host in ("claude", "codex"):
         assert (project / f".{host}" / "skills" / "my-skill" / "SKILL.md").exists()
-    assert (project / ".gemini" / "antigravity" / "skills" / "my-skill" / "SKILL.md").exists()
     index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
     selected = next(skill for skill in index["skills"] if skill["name"] == "my-skill")
     assert selected["source"] == "project"
@@ -69,16 +68,7 @@ def test_bundled_workflow_skills_are_internal_and_host_skills_are_registered(tmp
 
     assert result.returncode == 0, result.stderr
     index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
-    assert [skill["name"] for skill in index["skills"]] == [
-        "agent-flow",
-        "android-appshell-error-handling",
-        "comment-authoring-discipline",
-        "comment-checker",
-        "ios-app-shell-error-handling",
-        "react-app-shell-error-handling",
-        "react-native-app-shell-error-handling",
-    ]
-    assert {link["name"] for link in index["links"]} == {
+    host_skills = {
         "agent-flow",
         "android-appshell-error-handling",
         "comment-authoring-discipline",
@@ -87,11 +77,17 @@ def test_bundled_workflow_skills_are_internal_and_host_skills_are_registered(tmp
         "react-app-shell-error-handling",
         "react-native-app-shell-error-handling",
     }
+    indexed = {skill["name"] for skill in index["skills"]}
+    # bundled skill은 전부 index에 노출되어야 agent가 발견할 수 있다.
+    assert host_skills <= indexed
+    assert {"full-feature-workflow", "domain-grill", "architecture-reviewer", "push-watch"} <= indexed
+    # host 디렉토리 link는 host skill 7종으로 제한한다.
+    assert {link["name"] for link in index["links"]} == host_skills
     assert (project / ".agent-flow" / "skills" / "domain-grill" / "SKILL.md").exists()
     assert (project / ".agent-flow" / "skills" / "full-feature-workflow" / "SKILL.md").exists()
-    assert not (project / ".codex" / "skills" / "domain-grill").exists()
-    assert not (project / ".codex" / "skills" / "grill-with-docs").exists()
-    assert not (project / ".codex" / "skills" / "full-feature-workflow").exists()
+    assert not (project / ".Codex" / "skills" / "domain-grill").exists()
+    assert not (project / ".Codex" / "skills" / "grill-with-docs").exists()
+    assert not (project / ".Codex" / "skills" / "full-feature-workflow").exists()
 
 
 def test_local_skill_priority_beats_project_and_bundled_conflict_is_recorded(tmp_path: Path) -> None:
@@ -119,28 +115,9 @@ def test_host_limited_skill_links_only_requested_host(tmp_path: Path) -> None:
     result = _install(project)
 
     assert result.returncode == 0, result.stderr
-    assert (project / ".codex" / "skills" / "codex-only" / "SKILL.md").exists()
+    assert (project / ".Codex" / "skills" / "codex-only" / "SKILL.md").exists()
     assert not (project / ".claude" / "skills" / "codex-only").exists()
-    assert not (project / ".gemini" / "skills" / "codex-only").exists()
-    assert not (project / ".gemini" / "antigravity" / "skills" / "codex-only").exists()
 
-
-def test_antigravity_skill_links_to_antigravity_path(tmp_path: Path) -> None:
-    project = tmp_path / "project"
-    project.mkdir()
-    _skill(project / "skills" / "antigravity-only", "ANTIGRAVITY", hosts="[antigravity]")
-
-    result = _install(project)
-
-    assert result.returncode == 0, result.stderr
-    assert (project / ".gemini" / "antigravity" / "skills" / "antigravity-only" / "SKILL.md").exists()
-    assert not (project / ".gemini" / "skills" / "antigravity-only").exists()
-    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
-    selected = next(skill for skill in index["skills"] if skill["name"] == "antigravity-only")
-    assert selected["hosts"] == ["antigravity"]
-    link = next(link for link in index["links"] if link["name"] == "antigravity-only")
-    assert link["host"] == "antigravity"
-    assert link["path"] == ".gemini/antigravity/skills/antigravity-only"
 
 
 def test_host_limited_skill_accepts_yaml_block_list(tmp_path: Path) -> None:
@@ -163,16 +140,15 @@ def test_host_limited_skill_accepts_yaml_block_list(tmp_path: Path) -> None:
     result = _install(project)
 
     assert result.returncode == 0, result.stderr
-    assert (project / ".codex" / "skills" / "codex-block-list" / "SKILL.md").exists()
+    assert (project / ".Codex" / "skills" / "codex-block-list" / "SKILL.md").exists()
     assert not (project / ".claude" / "skills" / "codex-block-list").exists()
-    assert not (project / ".gemini" / "skills" / "codex-block-list").exists()
 
 
 def test_existing_user_modified_skill_is_not_overwritten(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
     _skill(project / "skills" / "my-skill", "PROJECT")
-    dest = project / ".codex" / "skills" / "my-skill"
+    dest = project / ".Codex" / "skills" / "my-skill"
     dest.mkdir(parents=True)
     (dest / "SKILL.md").write_text("user modified\n", encoding="utf-8")
 
@@ -252,14 +228,14 @@ def test_stale_host_skill_link_removed_when_hosts_change(tmp_path: Path) -> None
     skill_dir = project / "skills" / "demo"
     _skill(skill_dir, "CODEX", hosts="[codex]")
     assert _install(project).returncode == 0
-    assert (project / ".codex" / "skills" / "demo" / "SKILL.md").exists()
+    assert (project / ".Codex" / "skills" / "demo" / "SKILL.md").exists()
 
     _skill(skill_dir, "CLAUDE", hosts="[claude]")
     result = _install(project)
 
     assert result.returncode == 0, result.stderr
     assert (project / ".claude" / "skills" / "demo" / "SKILL.md").exists()
-    assert not (project / ".codex" / "skills" / "demo").exists()
+    assert not (project / ".Codex" / "skills" / "demo").exists()
 
 
 def test_stale_broken_host_skill_symlink_removed_when_skill_deleted(tmp_path: Path) -> None:
@@ -268,7 +244,7 @@ def test_stale_broken_host_skill_symlink_removed_when_skill_deleted(tmp_path: Pa
     skill_dir = project / "skills" / "demo"
     _skill(skill_dir, "CODEX", hosts="[codex]")
     assert _install(project).returncode == 0
-    codex_link = project / ".codex" / "skills" / "demo"
+    codex_link = project / ".Codex" / "skills" / "demo"
     assert codex_link.exists() or codex_link.is_symlink()
 
     (skill_dir / "SKILL.md").unlink()
@@ -284,7 +260,7 @@ def test_stale_copied_host_skill_dir_removed_when_skill_deleted(tmp_path: Path) 
     skill_dir = project / "skills" / "demo"
     _skill(skill_dir, "CODEX", hosts="[codex]")
     assert _install(project).returncode == 0
-    codex_link = project / ".codex" / "skills" / "demo"
+    codex_link = project / ".Codex" / "skills" / "demo"
     if codex_link.is_symlink():
         codex_link.unlink()
         codex_link.mkdir(parents=True)
@@ -302,7 +278,7 @@ def test_host_skill_root_symlink_is_skipped_not_written_outside_project(tmp_path
     outside = tmp_path / "outside"
     project.mkdir()
     outside.mkdir()
-    (project / ".codex").symlink_to(outside, target_is_directory=True)
+    (project / ".Codex").symlink_to(outside, target_is_directory=True)
     _skill(project / "skills" / "demo", "CODEX", hosts="[codex]")
 
     result = _install(project)
@@ -323,7 +299,7 @@ def test_android_upstream_skills_are_not_installed_or_vendored(tmp_path: Path) -
     assert result.returncode == 0, result.stderr
     assert not (project / ".agent-flow" / "vendor" / "android-skills").exists()
     assert not (project / ".agent-flow" / "vendor" / "chrisbanes-skills").exists()
-    assert not (project / ".codex" / "skills" / "edge-to-edge").exists()
+    assert not (project / ".Codex" / "skills" / "edge-to-edge").exists()
     assert not (project / ".claude" / "skills" / "edge-to-edge").exists()
     assert not (project / ".agents" / "skills" / "edge-to-edge").exists()
 
@@ -355,7 +331,6 @@ def test_android_skill_policy_is_active_host_local_only() -> None:
         assert "active_host_only: true" in text
         assert "codex: ~/.codex/skills/{skill}/SKILL.md" in text
         assert "claude: ~/.claude/skills/{skill}/SKILL.md" in text
-        assert "antigravity: ~/.agents/skills/{skill}/SKILL.md" in text
         assert "missing local android_skills: <skill>" in text
         assert "missing local chrisbanes_skills: <skill>" in text
         assert "vendor_dir" not in text
@@ -366,7 +341,6 @@ def test_android_skill_policy_is_active_host_local_only() -> None:
         text = path.read_text(encoding="utf-8")
         assert "~/.codex/skills/{skill}/SKILL.md" in text
         assert "~/.claude/skills/{skill}/SKILL.md" in text
-        assert "~/.agents/skills/{skill}/SKILL.md" in text
         assert "falling back to" not in text
         assert ".agent-flow/vendor/android-skills" not in text
         assert ".agent-flow/vendor/chrisbanes-skills" not in text

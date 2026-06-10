@@ -12,6 +12,17 @@ const HOME = process.env.HOME || process.env.USERPROFILE || "";
 const SOURCE_IS_MANAGED_WORKTREE = resolveManagedWorktreeRoot(SOURCE_ROOT) !== null;
 const CHECK_INSTALLED_COPY = !SOURCE_IS_MANAGED_WORKTREE;
 const INSTALL_ROOT = resolveInstalledRoot(process.cwd()) ?? SOURCE_ROOT;
+// bin/agent-flow-install.mjs / bin/agent-flow-kit.mjs의 BUNDLED_HOST_SKILL_NAMES와
+// 동일해야 한다. allowlist 밖 bundled skill은 host link 없이 index에만 노출된다.
+const BUNDLED_HOST_SKILL_NAMES = new Set([
+  "agent-flow",
+  "android-appshell-error-handling",
+  "comment-authoring-discipline",
+  "comment-checker",
+  "ios-app-shell-error-handling",
+  "react-app-shell-error-handling",
+  "react-native-app-shell-error-handling",
+]);
 const failures = [];
 const missingFiles = new Set();
 
@@ -175,6 +186,33 @@ if (exportedWorkflow) {
   if (exportedPhases["red"]?.artifact !== "artifacts/red.log") {
     failures.push("workflow export red artifact mismatch");
   }
+  if (exportedPhases["architecture-review"]?.routes?.approve !== "commit") {
+    failures.push("workflow export architecture-review approve route mismatch");
+  }
+  if (exportedPhases["architecture-review"]?.routes?.["request-changes"] !== "refactor") {
+    failures.push("workflow export architecture-review request-changes route mismatch");
+  }
+  if (exportedPhases["architecture-review"]?.routes?.blocked !== "refactor") {
+    failures.push("workflow export architecture-review blocked route mismatch");
+  }
+  if (exportedPhases["merge-approval"]?.routes?.approve !== "merge") {
+    failures.push("workflow export merge-approval approve route mismatch");
+  }
+  if (exportedPhases["merge-approval"]?.routes?.default !== "block") {
+    failures.push("workflow export merge-approval default route mismatch");
+  }
+  if (exportedPhases["fix-loop"]?.routes?.default !== "gates") {
+    failures.push("workflow export fix-loop route mismatch");
+  }
+  if (exportedPhases["multi-review"]?.multi_review !== true) {
+    failures.push("workflow export multi-review multi_review flag mismatch");
+  }
+  if (exportedPhases["pr-watch"]?.routes?.merged !== "handoff") {
+    failures.push("workflow export pr-watch merged route mismatch");
+  }
+  if (exportedPhases["pr-watch"]?.routes?.skipped !== "handoff") {
+    failures.push("workflow export pr-watch skipped route mismatch");
+  }
   assertRouteParity(exportedWorkflow);
   assertFixLoopRoundParity(exportedWorkflow);
   assertBackwardFreshArtifactSafety(exportedWorkflow);
@@ -203,7 +241,27 @@ if (exportedDefaultWorkflow) {
   if (exportedPhases["comment-authoring"]?.routes?.default !== "final-review") {
     failures.push("workflow export default comment-authoring route mismatch");
   }
+  if (exportedPhases["final-review"]?.routes?.approve !== "commit") {
+    failures.push("workflow export default final-review approve route mismatch");
+  }
+  if (exportedPhases["final-review"]?.routes?.["request-changes"] !== "fix-loop") {
+    failures.push("workflow export default final-review request-changes route mismatch");
+  }
+  if (exportedPhases["final-review"]?.multi_review !== true) {
+    failures.push("workflow export default final-review multi_review flag mismatch");
+  }
+  if (exportedPhases["fix-loop"]?.routes?.default !== "comment-authoring") {
+    failures.push("workflow export default fix-loop route mismatch");
+  }
+  if (exportedPhases["pr-watch"]?.routes?.merged !== "cleanup") {
+    failures.push("workflow export default pr-watch merged route mismatch");
+  }
+  if (exportedPhases["pr-watch"]?.routes?.skipped !== "cleanup") {
+    failures.push("workflow export default pr-watch skipped route mismatch");
+  }
   assertRouteParity(exportedDefaultWorkflow);
+  assertBackwardFreshArtifactSafety(exportedDefaultWorkflow);
+  assertCompletionMarkerPrefixParity(exportedDefaultWorkflow);
 }
 
 // phase 제거가 source/generated copy 중 한 곳에만 반영되는 drift를 막는다.
@@ -217,7 +275,7 @@ for (const rel of fullFeatureWorkflowCopies) {
   assertContains(rel, "comment-checker: checked|unavailable|n/a");
   assertContains(rel, "`n/a` only when the changed diff has no");
   assertContains(rel, "Default reviewers are active-host sub-agents");
-  assertContains(rel, "Gemini sub-agent in Gemini");
+  assertNotContains(rel, "Gemini sub-agent in Gemini");
   assertContains(rel, "reviewer-source: sub-agent");
   assertContains(rel, "close that sub-agent session");
   assertContains(rel, "## Overall");
@@ -241,7 +299,7 @@ for (const entry of fs.readdirSync(path.join(SOURCE_ROOT, "workflows")).sort()) 
   }
 }
 assertContains("workflows/default.yaml", "active-host reviewer sub-agents");
-assertContains("workflows/default.yaml", "Gemini sub-agent in Gemini");
+assertNotContains("workflows/default.yaml", "Gemini sub-agent");
 assertContains("workflows/default.yaml", "reviewer-source: sub-agent");
 assertContains("workflows/default.yaml", "close that sub-agent session");
 assertContains("workflows/default.yaml", "## Overall");
@@ -255,12 +313,15 @@ assertNotContains("skills/code-generation-discipline/SKILL.md", "Every new or mo
 if (CHECK_INSTALLED_COPY) {
   assertContains(".agent-flow/prompts/multi-review.md", "Default reviewers are active-host sub-agents");
   assertContains(".agent-flow/prompts/multi-review.md", "skills_checked: true");
-  assertContains(".agent-flow/prompts/multi-review.md", "Gemini sub-agent in Gemini");
+  assertNotContains(".agent-flow/prompts/multi-review.md", "Gemini sub-agent");
   assertContains(".agent-flow/prompts/multi-review.md", "reviewer-source: sub-agent");
   assertContains(".agent-flow/prompts/multi-review.md", "close that sub-agent session");
   assertContains(".agent-flow/prompts/multi-review.md", "## Overall");
   assertContains(".agent-flow/prompts/multi-review.md", "verdict: approve");
   assertContains(".agent-flow/prompts/multi-review.md", "verdict: request-changes");
+  assertNotContains("workflows/full-feature.yaml", "Gemini sub-agent");
+  assertNotContains("bootstrap/AGENTS.md.template", "Gemini sub-agent");
+  assertNotContains("bootstrap/CLAUDE.md.template", "Gemini sub-agent");
 }
 
 // skill source와 설치본이 달라지면 다른 프로젝트로 전파될 때 기준이 갈린다.
@@ -328,19 +389,15 @@ for (const entry of fs.readdirSync(path.join(SOURCE_ROOT, "profiles")).sort()) {
 
 // bootstrap은 반복 install 대신 기존 설치된 CLI로 worktree run을 시작해야 한다.
 assertSame("bootstrap/AGENTS.md.template", "bootstrap/CLAUDE.md.template");
-assertSame("bootstrap/AGENTS.md.template", "bootstrap/GEMINI.md.template");
 if (CHECK_INSTALLED_COPY) {
   assertSameBodyAfterTitle(".agent-flow/bootstrap/AGENTS.md", ".agent-flow/bootstrap/CLAUDE.md");
-  assertSameBodyAfterTitle(".agent-flow/bootstrap/AGENTS.md", ".agent-flow/bootstrap/GEMINI.md");
 }
 for (const rel of [
   "bootstrap/AGENTS.md.template",
   "bootstrap/CLAUDE.md.template",
-  "bootstrap/GEMINI.md.template",
   ...(CHECK_INSTALLED_COPY ? [
     ".agent-flow/bootstrap/AGENTS.md",
     ".agent-flow/bootstrap/CLAUDE.md",
-    ".agent-flow/bootstrap/GEMINI.md",
   ] : []),
 ]) {
   assertFile(rel);
@@ -364,7 +421,7 @@ if (CHECK_INSTALLED_COPY) {
   assertContains(".agent-flow/rules/workflow-contract.md", "gates: all_passed");
   assertContains(".agent-flow/rules/workflow-contract.md", "short Korean");
   assertContains(".agent-flow/rules/workflow-contract.md", "two active-host sub-agents");
-  assertContains(".agent-flow/rules/workflow-contract.md", "Gemini sub-agent in Gemini");
+  assertNotContains(".agent-flow/rules/workflow-contract.md", "Gemini sub-agent in Gemini");
   assertContains(".agent-flow/rules/workflow-contract.md", "reviewer-source: sub-agent");
   assertContains(".agent-flow/rules/workflow-contract.md", "close that sub-agent session");
   assertContains(".agent-flow/rules/workflow-contract.md", "## Overall");
@@ -505,6 +562,28 @@ function assertRouteParity(workflow) {
       "{\"passed\": true, \"results\": [{\"command\": \"npm test\", \"passed\": true, \"output\": \"ok\"}]}\n",
     ],
   ];
+  // verdict/status 라우팅 phase는 required marker까지 채운 artifact로 검사해야
+  // marker 누락이 아니라 route key 해석의 parity를 본다.
+  const routeKeyCases = [
+    ["architecture-review", "approve"],
+    ["architecture-review", "request-changes"],
+    ["architecture-review", "blocked"],
+    ["merge-approval", "approve"],
+    ["merge-approval", "request-changes"],
+    ["pr-watch", "merged"],
+    ["pr-watch", "skipped"],
+    ["pr-watch", "closed"],
+    ["pr-watch", "error"],
+    ["pr-watch", "pending"],
+    ["fix-loop", "default"],
+  ];
+  for (const [phaseId, key] of routeKeyCases) {
+    const phase = workflow.phases.find((candidate) => candidate.id === phaseId);
+    if (!phase) {
+      continue;
+    }
+    cases.push([`${phaseId} ${key}`, phaseId, routeArtifactContent(phase, key)]);
+  }
   for (const [label, phaseId, content] of cases) {
     if (!phaseIds.has(phaseId)) {
       continue;
@@ -522,27 +601,32 @@ function assertRouteParity(workflow) {
 }
 
 function assertCompletionMarkerPrefixParity(workflow) {
-  const phase = workflow.phases.find((candidate) => candidate.id === "domain-grill");
-  if (!phase) {
-    return;
-  }
-  const content = [
-    "## Completion Gate",
-    "- [x] domain-grill: complete",
-    "* shared_understanding: reached",
-    "+ context_docs_checked: true",
-    "- context_docs_updated: not_needed",
-    "",
-  ].join("\n");
-  const pythonMissing = pythonMissingCompletionMarkers(content, phase.required_markers ?? []);
-  const node = nodePhaseOutcome(workflow, phase.id, content);
-  if (pythonMissing === null || !node) {
-    return;
-  }
-  const pythonPasses = pythonMissing.length === 0;
-  const nodePasses = node.outcome !== "blocked";
-  if (pythonPasses !== nodePasses) {
-    failures.push(`python/node completion marker prefix mismatch: python_missing=${pythonMissing.join(",")} node=${node.outcome}`);
+  // marker만으로 완료가 결정되는 모든 phase를 검사한다. verdict/status/JSON으로
+  // 라우팅되는 phase는 marker 외 입력이 outcome을 좌우하므로 제외한다.
+  const prefixes = ["- [x] ", "* ", "+ ", "- ", ""];
+  for (const phase of workflow.phases) {
+    const markers = phase.required_markers ?? [];
+    if (markers.length === 0 || phase.multi_review) {
+      continue;
+    }
+    const routeKeys = Object.keys(phase.routes ?? {});
+    if (routeKeys.some((key) => key !== "default")) {
+      continue;
+    }
+    const lines = markers.map((marker, index) => `${prefixes[index % prefixes.length]}${renderCompletionMarker(marker)}`);
+    const content = ["## Completion Gate", ...lines, ""].join("\n");
+    const pythonMissing = pythonMissingCompletionMarkers(content, markers);
+    const node = nodePhaseOutcome(workflow, phase.id, content);
+    if (pythonMissing === null || !node) {
+      continue;
+    }
+    const pythonPasses = pythonMissing.length === 0;
+    const nodePasses = node.outcome !== "blocked";
+    if (pythonPasses !== nodePasses) {
+      failures.push(
+        `python/node completion marker prefix mismatch (${phase.id}): python_missing=${pythonMissing.join(",")} node=${node.outcome}`,
+      );
+    }
   }
 }
 
@@ -759,8 +843,81 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
     } else {
       assertHostSkillParity(tempRoot, JSON.parse(fs.readFileSync(indexPath, "utf8")), label);
     }
+    assertInstalledHookParity(label, tempRoot);
+    assertSkillIndexComplete(label, tempRoot);
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+}
+
+function readJsonSafe(pathName) {
+  try {
+    return JSON.parse(fs.readFileSync(pathName, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function assertInstalledHookParity(label, tempRoot) {
+  const claude = readJsonSafe(path.join(tempRoot, ".claude", "settings.json"));
+  const codex = readJsonSafe(path.join(tempRoot, ".Codex", "hooks.json"));
+  if (!claude?.hooks || !codex?.hooks) {
+    failures.push(`${label} install missing claude or codex hook settings`);
+    return;
+  }
+  const managedScripts = ["guard-worktree.sh", "guard-protected-branch.sh", "comment-checker.py", "show-phase-status.sh"];
+  for (const [host, settings] of [["claude", claude], ["codex", codex]]) {
+    for (const event of ["PreToolUse", "PostToolUse", "Stop"]) {
+      const entries = settings.hooks[event];
+      if (!Array.isArray(entries) || entries.length === 0) {
+        failures.push(`${label} ${host} hooks missing ${event}`);
+      }
+    }
+    const text = JSON.stringify(settings);
+    for (const script of managedScripts) {
+      if (!text.includes(script)) {
+        failures.push(`${label} ${host} hooks missing ${script}`);
+      }
+    }
+    const stopEntries = settings.hooks.Stop;
+    if (Array.isArray(stopEntries) && stopEntries.length !== 1) {
+      failures.push(`${label} ${host} Stop hook entries must stay 1 after reinstall, got ${stopEntries.length}`);
+    }
+  }
+  // 기존 사용자 hook이 보존되면 managed entry가 index 0이 아닐 수 있으므로
+  // comment-checker.py를 가진 entry를 찾아 matcher를 검사한다.
+  const managedPostToolUseMatcher = (settings) =>
+    (settings.hooks.PostToolUse ?? []).find((entry) =>
+      (entry.hooks ?? []).some((hook) => String(hook.command ?? "").includes("comment-checker.py")),
+    )?.matcher ?? "";
+  const claudeMatcher = managedPostToolUseMatcher(claude);
+  if (claudeMatcher !== "^(Write|Edit|MultiEdit)$") {
+    failures.push(`${label} claude PostToolUse matcher must be ^(Write|Edit|MultiEdit)$, got ${claudeMatcher}`);
+  }
+  const codexMatcher = managedPostToolUseMatcher(codex);
+  if (!codexMatcher.includes("apply_patch")) {
+    failures.push(`${label} codex PostToolUse matcher must cover apply_patch, got ${codexMatcher}`);
+  }
+}
+
+function assertSkillIndexComplete(label, tempRoot) {
+  const skillsDir = path.join(tempRoot, ".agent-flow", "skills");
+  const index = readJsonSafe(path.join(skillsDir, "index.json"));
+  if (!index || !Array.isArray(index.skills)) {
+    failures.push(`${label} skill index unreadable`);
+    return;
+  }
+  const indexed = new Set(index.skills.map((skill) => skill.name));
+  for (const entry of fs.readdirSync(skillsDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    if (!fs.existsSync(path.join(skillsDir, entry.name, "SKILL.md"))) {
+      continue;
+    }
+    if (!indexed.has(entry.name)) {
+      failures.push(`${label} installed skill missing from index.json: ${entry.name}`);
+    }
   }
 }
 
@@ -1009,7 +1166,16 @@ function assertHostSkillParity(root, index, label = "clean install") {
       continue;
     }
     const claudeSkill = path.join(root, ".claude", "skills", name, "SKILL.md");
-    const codexSkill = path.join(root, ".codex", "skills", name, "SKILL.md");
+    // installer의 hostSkillRoot("codex")는 .Codex로 고정한다. 소문자 .codex는
+    // case-sensitive FS에서 다른 경로가 되어 설치 결과를 못 찾는다.
+    const codexSkill = path.join(root, ".Codex", "skills", name, "SKILL.md");
+    if (skill.source === "bundled" && !BUNDLED_HOST_SKILL_NAMES.has(name)) {
+      // 설치 계약: allowlist 밖 bundled skill은 host link를 만들지 않는다.
+      if (fs.existsSync(claudeSkill) || fs.existsSync(codexSkill)) {
+        failures.push(`${label} unexpected host skill link for bundled ${name}`);
+      }
+      continue;
+    }
     const sourceSkill = path.join(root, skill.path);
     if (!fs.existsSync(claudeSkill)) {
       failures.push(`${label} missing Claude skill link for ${name}`);
@@ -1256,10 +1422,13 @@ function preferredPython() {
   const virtualEnvPython = process.env.VIRTUAL_ENV
     ? path.join(process.env.VIRTUAL_ENV, process.platform === "win32" ? "Scripts/python.exe" : "bin/python")
     : null;
+  // HOME이 바뀌면 user-site의 yaml을 잃는 시스템 python 대신 kit 자체 venv를 우선한다.
+  const kitVenvPython = path.join(SOURCE_ROOT, ".venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
   const candidates = [
     process.env.PYTHON,
     process.env.PYTHON_EXECUTABLE,
     virtualEnvPython,
+    fs.existsSync(kitVenvPython) ? kitVenvPython : null,
     "python3.12",
     "python3.11",
     "python3.10",

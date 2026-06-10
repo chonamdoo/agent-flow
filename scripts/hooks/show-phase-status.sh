@@ -4,8 +4,40 @@ if [ ! -f ".agent-flow/kit.json" ]; then
   exit 0
 fi
 
-STATUS=$(agent-flow status 2>/dev/null)
-if [ $? -eq 0 ] && [ -n "$STATUS" ]; then
-  echo "[agent-flow] $STATUS"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AGENT_FLOW="$(command -v agent-flow 2>/dev/null)"
+if [ -z "$AGENT_FLOW" ]; then
+  for candidate in "$SCRIPT_DIR/../../.venv/bin/agent-flow" ".venv/bin/agent-flow"; do
+    if [ -x "$candidate" ]; then
+      AGENT_FLOW="$candidate"
+      break
+    fi
+  done
 fi
+if [ -z "$AGENT_FLOW" ]; then
+  exit 0
+fi
+
+# Stop hook stdout은 JSON으로 파싱된다. 평문 출력은 Claude Code의
+# "invalid stop hook json output" 에러를 유발하고 사용자에게 표시되지도 않는다.
+# macOS에는 GNU timeout이 없으므로 status 호출도 python subprocess timeout으로
+# 감싸 hook이 세션 종료를 무기한 막지 않게 한다.
+AGENT_FLOW="$AGENT_FLOW" python3 - <<'PY' 2>/dev/null || exit 0
+import json, os, subprocess
+
+try:
+    result = subprocess.run(
+        [os.environ["AGENT_FLOW"], "status"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+except (OSError, subprocess.TimeoutExpired):
+    raise SystemExit(0)
+status = result.stdout.strip()
+if result.returncode != 0 or not status:
+    raise SystemExit(0)
+print(json.dumps({"systemMessage": "[agent-flow] " + status}, ensure_ascii=False))
+PY
 exit 0

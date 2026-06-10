@@ -53,8 +53,16 @@ def _read_review(path: Path) -> ReviewInput:
 
 def _parse_verdict(content: str) -> ReviewVerdict:
     verdict_heading_seen = False
+    in_code_fence = False
     for line in content.splitlines():
-        normalized = line.strip().upper()
+        stripped = line.strip()
+        # 코드 블록 안의 verdict 예시 문구를 실제 verdict로 오인하지 않는다.
+        if stripped.startswith("```"):
+            in_code_fence = not in_code_fence
+            continue
+        if in_code_fence:
+            continue
+        normalized = stripped.upper()
         if normalized in {"## VERDICT", "# VERDICT"}:
             verdict_heading_seen = True
             continue

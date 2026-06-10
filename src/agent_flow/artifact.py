@@ -26,7 +26,7 @@ from pathlib import Path
 import yaml
 
 from agent_flow.core.markers import missing_markers, normalize_required_markers
-from agent_flow.core.phase_workflow import load_phase_workflow_definition
+from agent_flow.core.phase_workflow import find_kit_root, load_phase_workflow_definition
 
 
 RUNS_DIRNAME = ".agent-flow/runs"
@@ -262,6 +262,11 @@ def _phase_contract(run_path: Path, workflow: str, phase_id: str) -> tuple[Path 
     candidates: list[Path] = []
     if project_root is not None:
         candidates.append(project_root / ".agent-flow" / "workflows" / f"{workflow}.yaml")
+    # runner와 같은 kit root를 우선해 phase routing과 marker 검증이 같은 YAML을 본다.
+    try:
+        candidates.append(find_kit_root() / "workflows" / f"{workflow}.yaml")
+    except RuntimeError:
+        pass
     candidates.append(Path(__file__).resolve().parent / "workflows" / f"{workflow}.yaml")
     candidates.append(Path(__file__).resolve().parents[2] / "workflows" / f"{workflow}.yaml")
     for path in candidates:

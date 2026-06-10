@@ -1,6 +1,6 @@
 ---
 name: code-generation-discipline
-description: Common code generation and code modification discipline for agent-flow. Use before and during implementation, TDD red/green/refactor, fix-loop, bug fixes, feature work, and any task where Codex, Claude, Gemini, or another agent writes or changes code. Enforces start-before, during-implementation, and after-implementation checks without a scoring rubric.
+description: Common code generation and code modification discipline for agent-flow. Use before and during implementation, TDD red/green/refactor, fix-loop, bug fixes, feature work, and any task where Codex, Claude, or another agent writes or changes code. Enforces start-before, during-implementation, and after-implementation checks without a scoring rubric.
 ---
 
 # Code Generation Discipline

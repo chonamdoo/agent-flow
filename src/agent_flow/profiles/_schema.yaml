@@ -50,7 +50,6 @@ optional:
     hosts:
       codex: "~/.codex/skills/{skill}/SKILL.md"
       claude: "~/.claude/skills/{skill}/SKILL.md"
-      antigravity: "~/.agents/skills/{skill}/SKILL.md"
     load_policy:
       - "read only matching local skill files for the active host"
       - "do not install, copy, link, vendor, or fallback to another host path"
@@ -72,7 +71,6 @@ optional:
     hosts:
       codex: "~/.codex/skills/{skill}/SKILL.md"
       claude: "~/.claude/skills/{skill}/SKILL.md"
-      antigravity: "~/.agents/skills/{skill}/SKILL.md"
     load_policy:
       - "read only matching local skill files for the active host"
       - "do not install, copy, link, vendor, or fallback to another host path"

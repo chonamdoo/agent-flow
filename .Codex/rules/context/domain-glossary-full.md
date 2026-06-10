@@ -10,7 +10,7 @@ Agent Flow is a project-agnostic workflow kit. This file keeps expanded domain v
 - **Phase**: a step in a Workflow. It has an id, prompt/instruction, required artifact, and optional completion markers.
 - **Role**: responsibility required by a phase. It is not a concrete model, provider, CLI, or subagent.
 - **Adapter**: environment strategy that maps roles and phase prompts to execution. Examples: hosted agent, CLI subprocess, manual prompt flow.
-- **Provider**: concrete external execution target used by an adapter, usually a host CLI such as Codex, Claude, or Gemini.
+- **Provider**: concrete external execution target used by an adapter, usually a host CLI such as Codex or Claude.
 - **Run**: one execution instance of a Workflow for one task. It owns runtime state and artifacts.
 - **Artifact**: durable record created by a phase. It should summarize decisions, evidence, validation, and review state without raw log floods.
 - **Handoff**: artifact optimized for the next phase. It preserves decisions, rejected options, risks, relevant files, and remaining work.

@@ -354,7 +354,7 @@ phases:
       skill makes the overall verdict `request-changes`.
       Any request-changes from any reviewer makes the overall verdict
       request-changes. Default reviewers are active-host sub-agents (Codex
-      sub-agent in Codex, Claude sub-agent in Claude, Gemini sub-agent in Gemini).
+      sub-agent in Codex, Claude sub-agent in Claude).
       Additional non-host providers are optional when available.
       Provider failure falls back to active-host sub-agents only. Each reviewer
       section must include

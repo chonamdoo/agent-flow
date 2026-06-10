@@ -20,7 +20,7 @@
 - **Phase**: Workflow 내부 단계. 이 repo의 current 용어는 Stage가 아니라 Phase다.
 - **Role**: phase가 요구하는 책임. concrete subagent/model/provider가 아니다.
 - **Adapter**: 현재 환경에서 role을 실행 가능한 방식으로 바꾸는 전략.
-- **Provider**: Codex, Claude, Gemini 같은 외부 실행 대상 wrapper.
+- **Provider**: Codex, Claude 같은 외부 실행 대상 wrapper.
 - **Run**: 하나의 Workflow 실행 인스턴스. git branch나 전체 session이 아니다.
 - **Artifact**: phase 결과/검증/리뷰를 저장하는 재사용 record file. raw log 저장소가 아니다.
 - **Handoff**: 다음 phase가 필요한 결정, 리스크, 관련 파일, 남은 일을 요약하는 artifact.

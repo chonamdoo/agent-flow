@@ -168,7 +168,10 @@ def _resolve_run_dir(root: Path, run_dir: str) -> Path:
 
 
 def _write_json(path: Path, payload: object) -> None:
-    path.write_text(f"{json.dumps(payload, indent=2, sort_keys=True)}\n", encoding="utf-8")
+    # 중단(Ctrl-C 등) 시 manifest가 반쯤 쓰인 채 남지 않도록 원자적으로 교체한다.
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(f"{json.dumps(payload, indent=2, sort_keys=True)}\n", encoding="utf-8")
+    tmp.replace(path)
 
 
 def _next_command_for_status(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import time
@@ -1100,21 +1101,8 @@ def _write_shutdown(*, root: Path, team_name: str, signal: ShutdownSignal) -> No
 def _task_lock(*, root: Path, team_name: str, task_id: str):
     safe_id = safe_task_id(task_id)
     lock_dir = _team_root(root, team_name) / "tasks" / f".lock-{safe_id}"
-    deadline = time.monotonic() + 5
-    acquired = False
-    while time.monotonic() < deadline:
-        try:
-            lock_dir.mkdir()
-            acquired = True
-            break
-        except FileExistsError:
-            time.sleep(0.01)
-    if not acquired:
-        raise TimeoutError(f"timed out waiting for task lock: {safe_id}")
-    try:
+    with _dir_lock(lock_dir, f"task lock: {safe_id}"):
         yield
-    finally:
-        lock_dir.rmdir()
 
 
 @contextmanager
@@ -1122,21 +1110,64 @@ def _mailbox_lock(*, root: Path, team_name: str, worker_name: str):
     mailbox_dir = _team_root(root, team_name) / "mailbox"
     mailbox_dir.mkdir(parents=True, exist_ok=True)
     lock_dir = mailbox_dir / f".lock-{worker_name}"
+    with _dir_lock(lock_dir, f"mailbox lock: {worker_name}"):
+        yield
+
+
+@contextmanager
+def _dir_lock(lock_dir: Path, label: str):
     deadline = time.monotonic() + 5
     acquired = False
     while time.monotonic() < deadline:
         try:
             lock_dir.mkdir()
-            acquired = True
-            break
         except FileExistsError:
+            # 잠금 소유 프로세스가 죽었으면 stale lockdir을 회수해 영구 대기를 막는다.
+            if _reclaim_stale_lock(lock_dir):
+                continue
             time.sleep(0.01)
+            continue
+        # mkdir 직후 pid를 남겨야 그 사이 SIGKILL로 죽어도 _reclaim_stale_lock이
+        # 회수할 수 있다. pid 없는 lockdir은 회수 불가로 영구 잠김이 된다.
+        try:
+            (lock_dir / "pid").write_text(str(os.getpid()), encoding="utf-8")
+        except OSError:
+            # pid를 못 남기면 lockdir을 거둬야 다음 호출이 영구 대기하지 않는다.
+            shutil.rmtree(lock_dir, ignore_errors=True)
+            raise
+        acquired = True
+        break
     if not acquired:
-        raise TimeoutError(f"timed out waiting for mailbox lock: {worker_name}")
+        raise TimeoutError(f"timed out waiting for {label}")
     try:
         yield
     finally:
-        lock_dir.rmdir()
+        shutil.rmtree(lock_dir, ignore_errors=True)
+
+
+def _reclaim_stale_lock(lock_dir: Path) -> bool:
+    try:
+        pid = int((lock_dir / "pid").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return False
+    if _pid_alive(pid):
+        return False
+    shutil.rmtree(lock_dir, ignore_errors=True)
+    return True
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def _safe_name(value: str, *, max_length: int, label: str) -> str:

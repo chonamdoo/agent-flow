@@ -32,10 +32,6 @@ def _run_cli(args: list[str], cwd: Path, env_extra: dict | None = None):
             "CLAUDECODE",
             "CLAUDE_CLI",
             "CODEX_CLI",
-            "ANTIGRAVITY_CLI",
-            "ANTIGRAVITY_HOME",
-            "GEMINI_CLI",
-            "GEMINI_HOME",
         }:
             env.pop(key, None)
     env["PYTHONPATH"] = str(KIT_ROOT / "src")
@@ -1204,7 +1200,6 @@ def test_render_angle_result_marks_claude_rate_limit_as_blocker(tmp_path: Path):
     ("job_id", "stderr", "reviewer"),
     [
         ("codex-generalist", "429 too many requests; rate limit resets in 5 minutes", "codex"),
-        ("gemini-generalist", "resource exhausted: quota exceeded; retry later", "gemini"),
     ],
 )
 def test_render_angle_result_marks_provider_rate_limits_as_blockers(
@@ -1510,7 +1505,7 @@ def test_cli_detection_runs():
     clis = detect_available_clis()
     assert isinstance(clis, list)
     for c in clis:
-        assert c.name in {"claude", "codex", "gemini"}
+        assert c.name in {"claude", "codex"}
 
 
 def test_multi_review_jobs_include_mandatory_baseline(tmp_path: Path):

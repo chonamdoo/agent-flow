@@ -328,7 +328,7 @@ phases:
       request-changes: fix-loop
     prompt: |
       Spawn at least two active-host reviewer sub-agents (Codex sub-agent in
-      Codex, Claude sub-agent in Claude, Gemini sub-agent in Gemini). Additional
+      Codex, Claude sub-agent in Claude). Additional
       non-host providers are optional extras when available:
         - Generalist (templates/_shared/review/architecture.md)
         - Architecture-design specialist (templates/_shared/review/architecture-design.md) — MANDATORY

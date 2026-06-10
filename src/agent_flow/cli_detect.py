@@ -2,7 +2,7 @@
 
 The runner uses this to (a) pick a host adapter when none is forced and
 (b) distribute multi-reviewer phases across whichever CLIs are present.
-A user with all three CLIs installed gets diverse opinions; a user with
+A user with both CLIs installed gets diverse opinions; a user with
 only Claude gets parallel sub-agents within Claude.
 """
 from __future__ import annotations
@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class CliInfo:
-    name: str             # canonical id: claude / codex / gemini
+    name: str             # canonical id: claude / codex
     binaries: tuple[str, ...]   # candidates to check on PATH
     invoke: tuple[str, ...]     # argv prefix to invoke a one-shot prompt
 
@@ -25,8 +25,6 @@ KNOWN_CLIS: tuple[CliInfo, ...] = (
     CliInfo(name="claude", binaries=("claude",), invoke=("-p",)),
     # OpenAI Codex CLI: `codex exec "<prompt>"` (older `codex run` also seen)
     CliInfo(name="codex", binaries=("codex",), invoke=("exec",)),
-    # 소비자용 Gemini CLI 경로는 Antigravity CLI로 전환됐으므로 `agy -p "<prompt>"`를 쓴다.
-    CliInfo(name="gemini", binaries=("agy", "antigravity"), invoke=("-p",)),
 )
 
 
@@ -43,28 +41,25 @@ def detect_host_cli() -> str | None:
     """Best-effort detection of which AI CLI is hosting the current process.
 
     Falls back to env-var hints exported by each CLI. Returns the canonical
-    id (claude / codex / gemini) or None.
+    id (claude / codex) or None.
+
+    주의: codex는 PATH 휴리스틱을 쓰므로 호스트가 아닌 일반 셸에서도 codex
+    바이너리가 설치돼 있으면 "codex"를 반환할 수 있다. 호스트 확정 신호가
+    필요한 호출자는 env 힌트(CLAUDECODE/CODEX_CLI 등)가 있는 경우만 신뢰한다.
     """
     if os.environ.get("CLAUDECODE") or os.environ.get("CLAUDE_CLI"):
         return "claude"
     if os.environ.get("CODEX_CLI") or os.environ.get("CODEX_HOME"):
         return "codex"
-    if (
-        os.environ.get("ANTIGRAVITY_CLI")
-        or os.environ.get("ANTIGRAVITY_HOME")
-        or os.environ.get("GEMINI_CLI")
-        or os.environ.get("GEMINI_HOME")
-    ):
-        return "gemini"
+    # Codex CLI는 호스트 env 힌트를 export하지 않는 버전이 있어 PATH로 보강한다.
+    # Claude는 항상 CLAUDECODE를 export하므로 PATH fallback에서 제외한다.
+    if shutil.which("codex"):
+        return "codex"
     return None
 
 
 def cli_by_name(name: str) -> CliInfo | None:
-    normalized = {
-        "agy": "gemini",
-        "antigravity": "gemini",
-        "antigravity-cli": "gemini",
-    }.get(name, name)
+    normalized = name
     for cli in KNOWN_CLIS:
         if cli.name == normalized:
             return _normalize_cli(cli)
@@ -72,12 +67,6 @@ def cli_by_name(name: str) -> CliInfo | None:
 
 
 def _normalize_cli(cli: CliInfo) -> CliInfo:
-    if cli.name == "gemini":
-        # Antigravity 설치 환경마다 launcher 이름이 달라질 수 있어 실제 발견된 binary로 고정한다.
-        for binary in cli.binaries:
-            if shutil.which(binary):
-                return CliInfo(name=cli.name, binaries=(binary,), invoke=cli.invoke)
-        return cli
     if cli.name != "codex" or not shutil.which("codex"):
         return cli
     if _codex_supports("exec"):

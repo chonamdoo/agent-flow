@@ -223,7 +223,12 @@ def _classify(number: int, data: dict[str, Any]) -> PRSnapshot:
         if isinstance(r, dict)
         and r.get("state") in ("COMMENTED", "CHANGES_REQUESTED")
     ]
-    issue_comments = data.get("comments") or []
+    # bot 코멘트(codecov[bot], CI 리포터 등)는 사람이 해소할 수 없으므로
+    # pr-comment-fix로 라우팅하면 has_comments에서 영원히 못 빠져나온다.
+    issue_comments = [
+        c for c in (data.get("comments") or [])
+        if isinstance(c, dict) and not _is_bot_comment(c)
+    ]
 
     if failed:
         return PRSnapshot(
@@ -246,6 +251,24 @@ def _classify(number: int, data: dict[str, Any]) -> PRSnapshot:
     return PRSnapshot(
         number=number, title=title, state=state, status="green",
     )
+
+
+def _is_bot_comment(comment: dict[str, Any]) -> bool:
+    author = comment.get("author")
+    if not isinstance(author, dict):
+        return False
+    if author.get("is_bot") or author.get("isBot"):
+        return True
+    login = str(author.get("login") or "")
+    return login.endswith("[bot]") or login.endswith("-bot") or login in {
+        "github-actions",
+        "dependabot",
+        "codecov",
+        "coveralls",
+        "sonarcloud",
+        "vercel",
+        "netlify",
+    }
 
 
 def _truncate(text: str, max_len: int) -> str:

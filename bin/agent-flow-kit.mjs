@@ -174,20 +174,17 @@ function installProject() {
   writeManagedFile(path.join(agentFlowDir, "rules", "workflow-contract.md"), workflowContract());
   writeManagedFile(path.join(agentFlowDir, "bootstrap", "AGENTS.md"), bootstrapMarkdown("AGENTS.md"));
   writeManagedFile(path.join(agentFlowDir, "bootstrap", "CLAUDE.md"), bootstrapMarkdown("CLAUDE.md"));
-  writeManagedFile(path.join(agentFlowDir, "bootstrap", "GEMINI.md"), bootstrapMarkdown("GEMINI.md"));
   const gitignorePath = path.join(root, ".gitignore");
   upsertGitignore(gitignorePath, [
     ".agent-flow/",
     ".agent-flow/local-skills/",
     ".codex/",
-    ".gemini/",
+    ".Codex/",
     ".claude/",
     "AGENTS.md",
     "CLAUDE.md",
-    "GEMINI.md",
     "AGENTS/",
     "CLAUDE/",
-    "GEMINI/",
     "scripts/check-context-docs.*",
     "agent-flow/",
   ]);
@@ -199,7 +196,6 @@ function installProject() {
   removeLegacyProjectSkillCopies(root, "graphify");
   upsertBootstrapBlock(path.join(root, "AGENTS.md"), "AGENTS.md");
   upsertBootstrapBlock(path.join(root, "CLAUDE.md"), "CLAUDE.md");
-  upsertBootstrapBlock(path.join(root, "GEMINI.md"), "GEMINI.md");
   makeHooksExecutable(root);
   installClaudeHooks(root);
 
@@ -501,22 +497,14 @@ function normalizeExportedRoutes(value, name, index) {
 }
 
 function detectProfile(rootDir) {
-  const packagePath = path.join(rootDir, "package.json");
-  if (fs.existsSync(packagePath)) {
-    const packageText = fs.readFileSync(packagePath, "utf8");
-    if (packageText.includes("react-native")) {
-      return "react-native";
-    }
-    if (packageText.includes("next")) {
-      return "nextjs";
-    }
-    // 일반 TypeScript 프로젝트는 node보다 좁은 profile을 써야 gate와 skill routing이 맞다.
-    if (fs.existsSync(path.join(rootDir, "tsconfig.json"))) {
-      return "typescript";
-    }
-    return "node";
+  // 설치 배너도 Python CLI·install.mjs와 같은 profile을 보여줘야 agent가 다른 guide를 고르지 않는다.
+  if (fs.existsSync(path.join(rootDir, "next.config.js")) ||
+      fs.existsSync(path.join(rootDir, "next.config.mjs")) ||
+      fs.existsSync(path.join(rootDir, "next.config.ts"))) {
+    return "nextjs";
   }
-  if (fs.existsSync(path.join(rootDir, "pyproject.toml"))) {
+  if (fs.existsSync(path.join(rootDir, "pyproject.toml")) ||
+      fs.existsSync(path.join(rootDir, "requirements.txt"))) {
     return "python";
   }
   if (
@@ -526,6 +514,21 @@ function detectProfile(rootDir) {
     fs.existsSync(path.join(rootDir, "settings.gradle.kts"))
   ) {
     return "android";
+  }
+  const packagePath = path.join(rootDir, "package.json");
+  if (fs.existsSync(packagePath)) {
+    const packageText = fs.readFileSync(packagePath, "utf8");
+    if (packageText.includes("react-native")) {
+      return "react-native";
+    }
+    if (packageText.includes("\"next\"")) {
+      return "nextjs";
+    }
+    // 일반 TypeScript 프로젝트는 node보다 좁은 profile을 써야 gate와 skill routing이 맞다.
+    if (fs.existsSync(path.join(rootDir, "tsconfig.json"))) {
+      return "typescript";
+    }
+    return "node";
   }
   // npm gate를 실행할 수 없는 tsconfig 단독 프로젝트는 generic으로 둔다.
   return "generic";
@@ -670,7 +673,6 @@ function assertInstalled(root) {
     path.join(root, ".agent-flow", "prompts", "push-watch-tick.md"),
     path.join(root, ".agent-flow", "bootstrap", "AGENTS.md"),
     path.join(root, ".agent-flow", "bootstrap", "CLAUDE.md"),
-    path.join(root, ".agent-flow", "bootstrap", "GEMINI.md"),
     path.join(root, ".Codex", "agents", "code-reviewer.md"),
   ];
   const missing = required.filter((pathName) => !fs.existsSync(pathName));
@@ -974,6 +976,11 @@ function installProjectSkills(root, agentFlowDir, previousIndex, force = false) 
   const selected = selectProjectSkills(root, agentFlowDir);
   const links = [];
   for (const skill of selected.skills) {
+    // bundled skill 중 host 디렉토리 link 대상은 BUNDLED_HOST_SKILL_NAMES뿐이다.
+    // 나머지 bundled skill은 index에만 노출해 agent가 발견할 수 있게 한다.
+    if (skill.source === "bundled" && !BUNDLED_HOST_SKILL_NAMES.has(skill.name)) {
+      continue;
+    }
     for (const host of skill.hosts) {
       links.push(linkProjectSkill(root, skill, host, previousIndex, force));
     }
@@ -996,8 +1003,7 @@ function selectProjectSkills(root, agentFlowDir) {
       path.join(agentFlowDir, "skills"),
       "bundled",
       root,
-      new Set(["index.json"]),
-      BUNDLED_HOST_SKILL_NAMES,
+      new Set(["index.json", ...PROFILE_MANAGED_HOST_ONLY_SKILLS]),
     ),
   ];
   const byName = new Map();
@@ -1084,7 +1090,7 @@ function parseSkillMetadata(text, fallbackName) {
     warnings.push(`unsafe skill name ignored: ${parsedName}`);
   }
   const hostValues = Array.isArray(metadata.hosts) ? metadata.hosts : [];
-  const knownHosts = new Set(["claude", "codex", "gemini", "antigravity"]);
+  const knownHosts = new Set(["claude", "codex"]);
   const hosts = [];
   for (const host of hostValues) {
     const normalized = String(host).trim().toLowerCase();
@@ -1099,7 +1105,7 @@ function parseSkillMetadata(text, fallbackName) {
   return {
     name,
     description: String(metadata.description || useWhen || ""),
-    hosts: hostValues.length > 0 ? [...new Set(hosts)] : ["claude", "codex", "gemini", "antigravity"],
+    hosts: hostValues.length > 0 ? [...new Set(hosts)] : ["claude", "codex"],
     tags: Array.isArray(metadata.tags) ? metadata.tags.map(String) : [],
     trigger: String(metadata.trigger || metadata.description || useWhen || ""),
     warnings,
@@ -1131,7 +1137,9 @@ function removeStaleProjectSkillLinks(root, skills, previousIndex, force = false
       continue;
     }
     const target = path.join(root, link.path);
-    const hostRoot = hostSkillRoot(root, link.host);
+    // 과거 index는 .codex(소문자) 경로를 기록했다. case-sensitive FS에서
+    // ensureChildPath가 .Codex와 어긋나 throw하지 않도록 기록된 casing을 따른다.
+    const hostRoot = legacyHostSkillRoot(root, link.path) ?? hostSkillRoot(root, link.host);
     if (pathHasSymlink(root, hostRoot)) {
       removed.push({ name: link.name, host: link.host, path: link.path, status: "skipped-host-root-symlink" });
       continue;
@@ -1254,10 +1262,19 @@ function linkProjectSkill(root, skill, host, previousIndex, force = false) {
 }
 
 function hostSkillRoot(root, host) {
-  if (host === "antigravity") {
-    return path.join(root, ".gemini", "antigravity", "skills");
+  // case-sensitive FS에서 .codex/.Codex가 갈라지지 않도록 .Codex로 고정한다.
+  if (host === "codex") {
+    return path.join(root, ".Codex", "skills");
   }
   return path.join(root, `.${host}`, "skills");
+}
+
+function legacyHostSkillRoot(root, linkPath) {
+  const normalized = String(linkPath).replaceAll("\\", "/");
+  if (normalized.startsWith(".codex/skills/")) {
+    return path.join(root, ".codex", "skills");
+  }
+  return null;
 }
 
 function previousSkillHash(previousIndex, name) {
@@ -1306,10 +1323,13 @@ function preferredPython() {
   const virtualEnvPython = process.env.VIRTUAL_ENV
     ? path.join(process.env.VIRTUAL_ENV, process.platform === "win32" ? "Scripts/python.exe" : "bin/python")
     : null;
+  // HOME이 바뀌면 user-site의 yaml을 잃는 시스템 python 대신 kit 자체 venv를 우선한다.
+  const kitVenvPython = path.join(KIT_ROOT, ".venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
   const candidates = [
     process.env.PYTHON,
     process.env.PYTHON_EXECUTABLE,
     virtualEnvPython,
+    fs.existsSync(kitVenvPython) ? kitVenvPython : null,
     "python3.12",
     "python3.11",
     "python3.10",
@@ -1496,7 +1516,8 @@ function nextPhaseIndex(state, phases, phase, artifact) {
     }
     throw new Error(`blocked: ${phase.id} route ${key}`);
   }
-  if (phase.id === "gates" && target === "fix-loop") {
+  // gates뿐 아니라 fix-loop로 라우팅하는 모든 phase에 같은 상한을 적용한다 (Python runner와 동일).
+  if (target === "fix-loop") {
     const rounds = (state.fix_loop_rounds ?? 0) + 1;
     if (rounds > FIX_LOOP_MAX_ROUNDS) {
       throw new Error(`blocked: fix-loop exceeded ${FIX_LOOP_MAX_ROUNDS} rounds — escalate to user`);
@@ -1536,10 +1557,11 @@ function syncRouteArtifacts(runDir, phases, currentIndex, nextIndex) {
 }
 
 function nextFixLoopRounds(state, phase, nextPhase) {
-  if (phase.id === "gates" && nextPhase?.id === "fix-loop") {
+  const routesToFixLoop = Boolean(phase.routes) && Object.values(phase.routes).includes("fix-loop");
+  if (routesToFixLoop && nextPhase?.id === "fix-loop") {
     return (state.fix_loop_rounds ?? 0) + 1;
   }
-  if (phase.id === "gates" && state.fix_loop_rounds !== undefined) {
+  if (routesToFixLoop && state.fix_loop_rounds !== undefined) {
     return undefined;
   }
   return state.fix_loop_rounds;
@@ -1632,7 +1654,8 @@ function readMultiReviewVerdict(pathName) {
 }
 
 function readMultiReviewOverallVerdict(content) {
-  const sections = content.split(/^##[ \t]+Overall[ \t]*$/im);
+  // Python runner와 같은 heading alias(Overall/Final [Verdict])를 인정한다.
+  const sections = content.split(/^##[ \t]+(?:Overall|Final)(?:[ \t]+Verdict)?[ \t]*$/im);
   if (sections.length < 2) {
     return undefined;
   }
@@ -1761,9 +1784,10 @@ function normalizeReviewerId(value) {
 }
 
 function normalizeReviewerHeadingId(value) {
-  // Reviewer heading은 numbered/lettered reviewer만 독립 id로 인정한다.
+  // Reviewer heading은 1-2 단어 id(claude, agent 1 등)만 독립 id로 인정한다.
+  // 긴 서술형 heading은 reviewer가 아니라 prose일 가능성이 높아 제외한다.
   const key = normalizeReviewerId(value);
-  return /^(?:[0-9]+|[a-z])$/.test(key) ? key : "";
+  return /^[a-z0-9]+(?: [a-z0-9]+)?$/.test(key) ? key : "";
 }
 
 function readGatesPassed(pathName) {
@@ -1828,14 +1852,14 @@ Follow the CLI output exactly. If no run is active, start with \`${AGENT_FLOW_CO
 
 ### Context Economy
 
-- Codex / Claude / Gemini / Antigravity user-facing 답변은 기본적으로 짧은 한글로 한다.
+- Codex / Claude user-facing 답변은 기본적으로 짧은 한글로 한다.
 - 코드/명령/식별자는 영어 그대로 유지한다.
 - 긴 설명, 긴 로그, 전체 파일 붙여넣기 금지.
 - 필요한 경우만 current phase, action, \`next_command\`, blocker를 요약한다.
 - 모든 guide를 항상 로드하지 말고 변경 파일에 필요한 guide만 읽는다.
 - 프로젝트 skill은 \`skills/<name>/SKILL.md\` 또는 private \`.agent-flow/local-skills/<name>/SKILL.md\`에 둔다.
 - install/bootstrap 후 \`.agent-flow/skills/index.json\` metadata를 보고 필요한 skill만 읽는다. 모든 SKILL.md 전문을 항상 읽지 않는다.
-- Claude/Codex/Gemini/Antigravity 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.
+- Claude/Codex 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.
 - Claude hook이 자동 차단하는 보호 브랜치 commit/push와 leader checkout/switch 금지는 Codex에서도 동일하게 지킨다.
 
 ${end}
@@ -1931,14 +1955,14 @@ Follow the CLI output exactly. Git projects start inside \`.agent-flow/worktrees
 
 ### Context Economy
 
-- Codex / Claude / Gemini / Antigravity user-facing 답변은 기본적으로 짧은 한글로 한다.
+- Codex / Claude user-facing 답변은 기본적으로 짧은 한글로 한다.
 - 코드/명령/식별자는 영어 그대로 유지한다.
 - 긴 설명, 긴 로그, 전체 파일 붙여넣기 금지.
 - 필요한 경우만 current phase, action, \`next_command\`, blocker를 요약한다.
 - 모든 guide를 항상 로드하지 말고 변경 파일에 필요한 guide만 읽는다.
 - 프로젝트 skill은 \`skills/<name>/SKILL.md\` 또는 private \`.agent-flow/local-skills/<name>/SKILL.md\`에 둔다.
 - install/bootstrap 후 \`.agent-flow/skills/index.json\` metadata를 보고 필요한 skill만 읽는다. 모든 SKILL.md 전문을 항상 읽지 않는다.
-- Claude/Codex/Gemini/Antigravity 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.
+- Claude/Codex 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.
 - Claude hook이 자동 차단하는 보호 브랜치 commit/push와 leader checkout/switch 금지는 Codex에서도 동일하게 지킨다.
 
 During code generation, modification, and code review phases, apply \`code-generation-discipline\`. Read every matching language/framework skill before writing or judging code.
@@ -1957,6 +1981,7 @@ const FRESH_ARTIFACT_PHASE_IDS = new Set([
   "refactor",
   "gates",
   "comment-authoring",
+  "final-review",
   "multi-review",
   "fix-loop",
   "architecture-review",
@@ -1972,7 +1997,7 @@ function fullFeatureWorkflowYaml() {
 function agentFlowSkillMarkdown() {
   return `---
 name: agent-flow
-description: Use when the user types /agent-flow, asks to start or continue the project workflow, or wants Claude, Codex, or Gemini to drive the agent-flow lifecycle.
+description: Use when the user types /agent-flow, asks to start or continue the project workflow, or wants Claude or Codex to drive the agent-flow lifecycle.
 ---
 
 # Agent Flow
@@ -2125,7 +2150,7 @@ function mergeHookSettings(settings, desired) {
       settings.hooks[event] = [];
     }
     for (const entry of entries) {
-      const existing = settings.hooks[event].find((e) => e.matcher === entry.matcher);
+      const existing = settings.hooks[event].find((e) => (e.matcher ?? "") === (entry.matcher ?? ""));
       if (existing) {
         if (!existing.hooks) {
           existing.hooks = [];
@@ -2148,16 +2173,23 @@ function mergeHookSettings(settings, desired) {
   }
 }
 
+function readHookSettings(settingsPath) {
+  if (!fs.existsSync(settingsPath)) {
+    return {};
+  }
+  try {
+    return JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+  } catch {
+    const backupPath = `${settingsPath}.bak`;
+    fs.copyFileSync(settingsPath, backupPath);
+    console.error(`warning: could not parse ${settingsPath}; backed up to ${backupPath} before overwriting`);
+    return {};
+  }
+}
+
 function installCodexHooks(root) {
   const settingsPath = path.join(root, ".Codex", "hooks.json");
-  let settings = {};
-  if (fs.existsSync(settingsPath)) {
-    try {
-      settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
-    } catch {
-      settings = {};
-    }
-  }
+  const settings = readHookSettings(settingsPath);
   mergeHookSettings(settings, codexHooksSettings(root).hooks);
   fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
   fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
@@ -2177,13 +2209,12 @@ function claudeHooksSettings(root) {
       ],
       PostToolUse: [
         {
-          matcher: "Write|Edit|MultiEdit",
+          matcher: "^(Write|Edit|MultiEdit)$",
           hooks: [{ type: "command", command: hookScriptCommand(root, "comment-checker.py") }],
         },
       ],
       Stop: [
         {
-          matcher: "",
           hooks: [{ type: "command", command: hookScriptCommand(root, "show-phase-status.sh") }],
         },
       ],
@@ -2193,14 +2224,7 @@ function claudeHooksSettings(root) {
 
 function installClaudeHooks(root) {
   const settingsPath = path.join(root, ".claude", "settings.json");
-  let settings = {};
-  if (fs.existsSync(settingsPath)) {
-    try {
-      settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
-    } catch {
-      settings = {};
-    }
-  }
+  const settings = readHookSettings(settingsPath);
   mergeHookSettings(settings, claudeHooksSettings(root).hooks);
   fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
   fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
@@ -2231,7 +2255,7 @@ Implementation rules:
 - Apply \`code-generation-discipline\` during red, green, refactor, fix-loop, and review phases. Read every matching language/framework skill before writing or judging code.
 - If review or QA fails, return to the fix phase before continuing.
 - The gates->fix-loop->gates loop re-verifies after every fix, then routes through comment-authoring before multi-review. multi-review approve skips fix-loop; request-changes routes through fix-loop->gates->comment-authoring.
-- Code review requires at least two active-host sub-agents (Codex sub-agent in Codex, Claude sub-agent in Claude, Gemini sub-agent in Gemini). If the changed scope spans multiple areas, run one additional active-host sub-agent in parallel. Additional non-host providers are optional, and approve requires 2+ independent sub-agent reviewer verdicts with reviewer-source: sub-agent. After recording each sub-agent result, close that sub-agent session. End multi-review artifacts with ## Overall followed by exactly one verdict line: verdict: approve or verdict: request-changes.
+- Code review requires at least two active-host sub-agents (Codex sub-agent in Codex, Claude sub-agent in Claude). If the changed scope spans multiple areas, run one additional active-host sub-agent in parallel. Additional non-host providers are optional, and approve requires 2+ independent sub-agent reviewer verdicts with reviewer-source: sub-agent. After recording each sub-agent result, close that sub-agent session. End multi-review artifacts with ## Overall followed by exactly one verdict line: verdict: approve or verdict: request-changes.
 - In the default workflow, gates are enforced by the \`implement\` phase completion marker: \`gates: all_passed\`.
 
 Document size rules:

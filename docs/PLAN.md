@@ -79,7 +79,7 @@ Make PR watch, fix, and merge workflow phases operational.
 
 - No Team Orchestration runtime.
 - No Worktree management.
-- No direct Codex/Claude/Gemini provider execution.
+- No direct Codex/Claude provider execution.
 - No sandbox execution.
 
 ## Current Slice

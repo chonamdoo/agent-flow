@@ -5,6 +5,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -22,6 +23,7 @@ class WorktreePlan:
     path: Path
     base_ref: str
     branch_explicit: bool = False
+    requested_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -31,6 +33,7 @@ class WorktreeStatus:
     path: Path
     exists: bool
     branch_created_by_agent_flow: bool = False
+    requested_name: str = ""
 
 
 def plan_worktree(*, root: Path, name: str, branch: str | None = None) -> WorktreePlan:
@@ -48,6 +51,7 @@ def plan_worktree(*, root: Path, name: str, branch: str | None = None) -> Worktr
         # leader worktree가 feature branch여도 새 작업은 기본 브랜치 commit에서 시작한다.
         base_ref=_default_base_ref(root),
         branch_explicit=branch is not None,
+        requested_name=name,
     )
 
 
@@ -66,6 +70,7 @@ def create_worktree(*, root: Path, plan: WorktreePlan, allow_dirty: bool = False
                 f"worktree {plan.name} already uses branch {existing.branch}; "
                 f"requested {plan.branch}"
             )
+        _assert_same_requested_name(root=root, plan=plan)
         return existing
     plan.path.parent.mkdir(parents=True, exist_ok=True)
     if worktree_branch_exists(root=root, branch=plan.branch):
@@ -80,6 +85,7 @@ def create_worktree(*, root: Path, plan: WorktreePlan, allow_dirty: bool = False
         path=plan.path,
         exists=True,
         branch_created_by_agent_flow=branch_created,
+        requested_name=plan.requested_name,
     )
     try:
         write_worktree_manifest(root=root, status=status)
@@ -99,6 +105,28 @@ def remove_worktree(*, root: Path, status: WorktreeStatus, delete_branch: bool =
     if branch_to_delete is not None:
         _run_git(root, "branch", "-D", branch_to_delete)
     remove_worktree_metadata(root=root, name=status.name)
+
+
+def _assert_same_requested_name(*, root: Path, plan: WorktreePlan) -> None:
+    # 서로 다른 이름이 같은 safe name으로 정규화되면 기존 worktree를 조용히
+    # 재사용해 상태가 섞일 수 있다. 명시적 별칭 재사용(--worktree)은 지원되는
+    # 플로우라 차단하지 않고, 기록된 원본 이름과 다르면 경고만 남긴다.
+    manifest = _worktree_manifest_path(root=root, name=plan.name)
+    if not manifest.exists():
+        return
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    recorded = payload.get("requested_name")
+    if not isinstance(recorded, str) or not recorded or not plan.requested_name:
+        return
+    if recorded != plan.requested_name:
+        print(
+            f"warning: worktree {plan.name} was created for '{recorded}'; "
+            f"reusing it for '{plan.requested_name}'",
+            file=sys.stderr,
+        )
 
 
 def worktree_branch_exists(*, root: Path, branch: str) -> bool:

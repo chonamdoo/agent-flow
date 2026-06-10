@@ -46,8 +46,8 @@ def test_blocks_new_low_value_comment() -> None:
     )
 
     assert result.returncode == 2
-    assert "low-value comments" in result.stdout
-    assert "Initialize value" in result.stdout
+    assert "low-value comments" in result.stderr
+    assert "Initialize value" in result.stderr
 
 
 def test_blocks_new_inline_low_value_comment() -> None:
@@ -60,7 +60,7 @@ def test_blocks_new_inline_low_value_comment() -> None:
     )
 
     assert result.returncode == 2
-    assert "Initialize value" in result.stdout
+    assert "Initialize value" in result.stderr
 
 
 def test_blocks_todo_and_section_even_with_detail_words() -> None:
@@ -153,7 +153,7 @@ def test_blocks_duplicate_low_value_comment_added_again() -> None:
     )
 
     assert result.returncode == 2
-    assert "Initialize value" in result.stdout
+    assert "Initialize value" in result.stderr
 
 
 def test_allows_why_and_public_api_comments() -> None:
@@ -180,7 +180,7 @@ def test_apply_patch_detects_added_comment() -> None:
     result = run_checker({"command": patch})
 
     assert result.returncode == 2
-    assert "src/demo.ts" in result.stdout
+    assert "src/demo.ts" in result.stderr
 
 
 def test_freeform_apply_patch_detects_added_comment() -> None:
@@ -201,7 +201,7 @@ def test_freeform_apply_patch_detects_added_comment() -> None:
     )
 
     assert result.returncode == 2
-    assert "Set active flag" in result.stdout
+    assert "Set active flag" in result.stderr
 
 
 def test_apply_patch_detects_added_inline_comment() -> None:
@@ -214,7 +214,7 @@ def test_apply_patch_detects_added_inline_comment() -> None:
     result = run_checker({"command": patch})
 
     assert result.returncode == 2
-    assert "Set value" in result.stdout
+    assert "Set value" in result.stderr
 
 
 def test_apply_patch_ignores_comment_markers_inside_multiline_strings() -> None:
@@ -261,7 +261,7 @@ def test_apply_patch_detects_multiline_block_comment() -> None:
     result = run_checker({"command": patch})
 
     assert result.returncode == 2
-    assert "Initialize value" in result.stdout
+    assert "Initialize value" in result.stderr
 
 
 def test_apply_patch_detects_block_comment_when_delimiters_are_context() -> None:
@@ -276,7 +276,7 @@ def test_apply_patch_detects_block_comment_when_delimiters_are_context() -> None
     result = run_checker({"command": patch})
 
     assert result.returncode == 2
-    assert "Initialize value" in result.stdout
+    assert "Initialize value" in result.stderr
 
 
 def test_write_detects_multiline_block_comment() -> None:
@@ -293,7 +293,7 @@ def test_write_detects_multiline_block_comment() -> None:
     )
 
     assert result.returncode == 2
-    assert "Set value" in result.stdout
+    assert "Set value" in result.stderr
 
 
 def test_blocks_low_value_line_added_inside_allowed_block_comment() -> None:
@@ -312,7 +312,7 @@ def test_blocks_low_value_line_added_inside_allowed_block_comment() -> None:
     )
 
     assert result.returncode == 2
-    assert "Set value" in result.stdout
+    assert "Set value" in result.stderr
 
 
 def test_allows_constraint_detail_line_inside_block_comment() -> None:
@@ -399,7 +399,7 @@ def test_apply_patch_blocks_low_value_line_added_inside_allowed_block_comment() 
     result = run_checker({"command": patch})
 
     assert result.returncode == 2
-    assert "Set value" in result.stdout
+    assert "Set value" in result.stderr
 
 
 def test_multi_edit_detects_added_comment() -> None:
@@ -421,7 +421,7 @@ def test_multi_edit_detects_added_comment() -> None:
     )
 
     assert result.returncode == 2
-    assert "Return value" in result.stdout
+    assert "Return value" in result.stderr
 
 
 def test_multi_edit_detects_added_inline_comment() -> None:
@@ -443,4 +443,20 @@ def test_multi_edit_detects_added_inline_comment() -> None:
     )
 
     assert result.returncode == 2
-    assert "Check active" in result.stdout
+    assert "Check active" in result.stderr
+
+def test_freeform_string_tool_input_without_patch_marker_passes_silently() -> None:
+    # Codex가 '*** Begin Patch' 없는 부분 patch 문자열을 보내면 의도적으로 통과시킨다.
+    # 이 동작을 고정해 두지 않으면 향후 리팩터가 false positive를 만들 수 있다.
+    result = run_payload(
+        {
+            "tool_name": "apply_patch",
+            "hook_event_name": "PostToolUse",
+            "cwd": str(ROOT),
+            "tool_input": "+// Set active flag\n+active = true\n",
+        }
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert result.stderr == ""

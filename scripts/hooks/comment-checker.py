@@ -58,10 +58,11 @@ def main() -> int:
     if not findings:
         return 0
 
-    print("comment-checker: newly added low-value comments detected")
+    # exit 2일 때 Claude/Codex는 stderr만 모델에 전달한다. stdout은 무시된다.
+    print("comment-checker: newly added low-value comments detected", file=sys.stderr)
     for file_path, line, text in findings[:20]:
-        print(f"- {file_path}:{line}: {text}")
-    print("Keep WHY, constraint, workaround, security, performance, concurrency, or public API comments; remove comments that only restate code.")
+        print(f"- {file_path}:{line}: {text}", file=sys.stderr)
+    print("Keep WHY, constraint, workaround, security, performance, concurrency, or public API comments; remove comments that only restate code.", file=sys.stderr)
     return 2
 
 

@@ -14,7 +14,7 @@ Async execution:
     the host AI can aggregate whatever completed into `final-review.md`.
 
 Override:
-  AGENT_FLOW_REVIEWERS="claude,codex,gemini" opts into optional providers.
+  AGENT_FLOW_REVIEWERS="claude,codex" opts into optional providers.
   AGENT_FLOW_REVIEWERS="claude" pins all angles to Claude plus fallback guard.
 """
 from __future__ import annotations
@@ -208,7 +208,6 @@ def _rate_limit_payload(r: SubprocessResult) -> dict[str, str] | None:
     signals = {
         "claude": ("limit", "rate limit", "too many requests", "429"),
         "codex": ("rate limit", "too many requests", "429"),
-        "gemini": ("quota exceeded", "resource exhausted", "429"),
     }
     reviewer_signals = signals.get(reviewer, ("rate limit", "too many requests", "429"))
     if not any(signal in lowered for signal in reviewer_signals):

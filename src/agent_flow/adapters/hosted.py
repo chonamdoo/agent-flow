@@ -1,8 +1,8 @@
 """Hosted adapter — one class, parameterized by host.
 
-Replaces the previous Claude / Codex / Gemini subclass trio. Each host
+Replaces the previous Claude / Codex subclass pair. Each host
 contributes only:
-  - a name (claude / codex / gemini)
+  - a name (claude / codex)
   - a host-specific hint string
 
 Real behavior divergence (multi-reviewer fan-out, parallel sub-agents) is
@@ -70,24 +70,11 @@ _CODEX_HINT = """\
 - Cite file:line references using the `path/to/file:42` format.
 """
 
-_GEMINI_HINT = """\
-- For multi-reviewer phases, agent-flow has already distributed angles
-  across installed CLIs. Invoke each non-host CLI as a subprocess; capture
-  stdout per angle and aggregate into the artifact.
-- For host-handled review, use at least two host-native reviewer sub-agents.
-  Each reviewer section must include `reviewer-source: sub-agent`.
-- Per-angle artifacts are written by agent-flow as `final-review-<angle>.md`
-  when subprocess delegation succeeds; the host aggregates these into the
-  final `final-review.md`.
-- Cite file:line references using the `path/to/file:42` format.
-"""
-
 # Read-only mapping. Wrapped to prevent third-party runtime mutation that
 # would silently change adapter behavior across the process.
 _HOST_HINTS: MappingProxyType[str, str] = MappingProxyType({
     "claude": _CLAUDE_HINT,
     "codex": _CODEX_HINT,
-    "gemini": _GEMINI_HINT,
 })
 
 

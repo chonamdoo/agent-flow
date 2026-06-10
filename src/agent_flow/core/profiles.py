@@ -20,17 +20,15 @@ class ProjectProfile:
 
 
 def detect_profile(root: Path) -> str:
-    if (root / "package.json").exists():
-        package_text = (root / "package.json").read_text(encoding="utf-8", errors="ignore")
-        if "react-native" in package_text:
-            return "react-native"
-        if "next" in package_text:
-            return "nextjs"
-        # 일반 TypeScript 프로젝트는 node보다 좁은 profile을 써야 gate와 skill routing이 맞다.
-        if (root / "tsconfig.json").exists():
-            return "typescript"
-        return "node"
-    if (root / "pyproject.toml").exists():
+    # 설치 스크립트(install.mjs/kit.mjs)와 동일한 우선순위를 유지해야
+    # 설치 배너와 런타임 gate/skill routing이 같은 profile을 본다.
+    if (
+        (root / "next.config.js").exists()
+        or (root / "next.config.mjs").exists()
+        or (root / "next.config.ts").exists()
+    ):
+        return "nextjs"
+    if (root / "pyproject.toml").exists() or (root / "requirements.txt").exists():
         return "python"
     if (
         (root / "build.gradle").exists()
@@ -39,6 +37,16 @@ def detect_profile(root: Path) -> str:
         or (root / "settings.gradle.kts").exists()
     ):
         return "android"
+    if (root / "package.json").exists():
+        package_text = (root / "package.json").read_text(encoding="utf-8", errors="ignore")
+        if "react-native" in package_text:
+            return "react-native"
+        if '"next"' in package_text:
+            return "nextjs"
+        # 일반 TypeScript 프로젝트는 node보다 좁은 profile을 써야 gate와 skill routing이 맞다.
+        if (root / "tsconfig.json").exists():
+            return "typescript"
+        return "node"
     # npm gate를 실행할 수 없는 tsconfig 단독 프로젝트는 generic으로 둔다.
     return "generic"
 

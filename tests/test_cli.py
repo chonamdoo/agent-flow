@@ -311,9 +311,7 @@ class CliTest(unittest.TestCase):
             self.assertEqual(distribution.by_cli, {})
         with mock.patch.dict(os.environ, {"AGENT_FLOW_REVIEWERS": "codex"}, clear=True):
             self.assertEqual([cli.name for cli in resolve_review_clis()], ["codex"])
-        with mock.patch.dict(os.environ, {"AGENT_FLOW_REVIEWERS": "antigravity"}, clear=True):
-            self.assertEqual([cli.name for cli in resolve_review_clis()], ["gemini"])
-        with mock.patch.dict(os.environ, {"AGENT_FLOW_REVIEWERS": "claude,gemini"}, clear=True):
+        with mock.patch.dict(os.environ, {"AGENT_FLOW_REVIEWERS": "claude,codex"}, clear=True):
             jobs = [
                 ReviewerJob("generalist", "prompt", Path("generalist.md")),
                 ReviewerJob("architecture-design", "prompt", Path("architecture-design.md")),
@@ -675,7 +673,6 @@ class CliTest(unittest.TestCase):
             self.assertTrue((project_root / ".agent-flow" / "workflows" / "full-feature.yaml").is_file())
             self.assertTrue((project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "bootstrap" / "CLAUDE.md").is_file())
-            self.assertTrue((project_root / ".agent-flow" / "bootstrap" / "GEMINI.md").is_file())
             self.assertTrue(
                 (
                     project_root
@@ -802,10 +799,6 @@ class CliTest(unittest.TestCase):
             self.assertIn(
                 'agent-flow run "<task>"',
                 (project_root / "CLAUDE.md").read_text(encoding="utf-8"),
-            )
-            self.assertIn(
-                'agent-flow run "<task>"',
-                (project_root / "GEMINI.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
                 'agent-flow run "<task>"',
@@ -965,6 +958,203 @@ class CliTest(unittest.TestCase):
                     expected_checker = f"'{project_root.resolve() / 'scripts' / 'hooks' / 'comment-checker.py'}'"
                     self.assertIn("custom-post-hook", commands)
                     self.assertIn(expected_checker, commands)
+
+    def test_node_installers_dedupe_stop_hook_on_upgrade(self) -> None:
+        # 과거 설치본은 Stop entry에 matcher: ""를 기록했다. 재설치 시 중복되면 안 된다.
+        for installer in ("agent-flow-kit.mjs", "agent-flow-install.mjs"):
+            with self.subTest(installer=installer):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    project_root = Path(temp_dir) / "project"
+                    project_root.mkdir()
+                    node = _node_executable()
+                    stop_command = f"'{project_root.resolve() / 'scripts' / 'hooks' / 'show-phase-status.sh'}'"
+                    seeded = {
+                        "hooks": {
+                            "Stop": [
+                                {
+                                    "matcher": "",
+                                    "hooks": [{"type": "command", "command": stop_command}],
+                                }
+                            ]
+                        }
+                    }
+                    for seeded_path in (
+                        project_root / ".Codex" / "hooks.json",
+                        project_root / ".claude" / "settings.json",
+                    ):
+                        seeded_path.parent.mkdir(parents=True, exist_ok=True)
+                        seeded_path.write_text(json.dumps(seeded, indent=2) + "\n", encoding="utf-8")
+                    result = subprocess.run(
+                        (
+                            node,
+                            str(Path(__file__).resolve().parents[1] / "bin" / installer),
+                            "install",
+                        ),
+                        cwd=project_root,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    for settings_path in (
+                        project_root / ".Codex" / "hooks.json",
+                        project_root / ".claude" / "settings.json",
+                    ):
+                        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+                        self.assertEqual(
+                            len(settings["hooks"]["Stop"]), 1, f"{installer}: {settings_path}"
+                        )
+
+    def test_stop_hook_emits_valid_json_for_active_run(self) -> None:
+        # Stop hook stdout은 JSON이어야 한다. 평문은 invalid stop hook json output 에러를 만든다.
+        hook = Path(__file__).resolve().parents[1] / "scripts" / "hooks" / "show-phase-status.sh"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            (project_root / ".agent-flow").mkdir(parents=True)
+            (project_root / ".agent-flow" / "kit.json").write_text("{}\n", encoding="utf-8")
+            fake_bin = Path(temp_dir) / "bin"
+            fake_bin.mkdir()
+            fake_cli = fake_bin / "agent-flow"
+            fake_cli.write_text(
+                "#!/bin/sh\nprintf 'status: running\\nnext_command: agent-flow run advance\\n'\n",
+                encoding="utf-8",
+            )
+            fake_cli.chmod(0o755)
+            env = {**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}"}
+            result = subprocess.run(
+                ("/bin/bash", str(hook)),
+                cwd=project_root,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertIn("[agent-flow]", payload["systemMessage"])
+            self.assertIn("status: running", payload["systemMessage"])
+            self.assertIn("next_command", payload["systemMessage"])
+
+    def test_guard_hooks_report_block_reason_on_stderr(self) -> None:
+        # exit 2일 때 Claude/Codex는 stderr만 모델에 전달한다. stdout은 무시된다.
+        hooks_dir = Path(__file__).resolve().parents[1] / "scripts" / "hooks"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir) / "repo"
+            repo.mkdir()
+            git_env = {
+                **os.environ,
+                "GIT_AUTHOR_NAME": "t",
+                "GIT_AUTHOR_EMAIL": "t@example.com",
+                "GIT_COMMITTER_NAME": "t",
+                "GIT_COMMITTER_EMAIL": "t@example.com",
+            }
+            subprocess.run(("git", "init", "-q", "-b", "main", str(repo)), check=True)
+            subprocess.run(
+                ("git", "-C", str(repo), "commit", "--allow-empty", "-q", "-m", "init"),
+                check=True,
+                env=git_env,
+            )
+            cases = (
+                (
+                    hooks_dir / "guard-worktree.sh",
+                    {"tool_name": "Bash", "tool_input": {"command": "git checkout -b feat/x"}},
+                ),
+                (
+                    hooks_dir / "guard-protected-branch.sh",
+                    {"tool_name": "Bash", "tool_input": {"command": "git commit -m x"}},
+                ),
+            )
+            for hook, payload in cases:
+                with self.subTest(hook=hook.name):
+                    result = subprocess.run(
+                        ("/bin/bash", str(hook)),
+                        cwd=repo,
+                        input=json.dumps(payload),
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn("BLOCKED", result.stderr)
+                    self.assertEqual(result.stdout, "")
+
+    def test_guard_worktree_allows_non_branch_checkout(self) -> None:
+        hook = Path(__file__).resolve().parents[1] / "scripts" / "hooks" / "guard-worktree.sh"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir) / "repo"
+            repo.mkdir()
+            git_env = {
+                **os.environ,
+                "GIT_AUTHOR_NAME": "t",
+                "GIT_AUTHOR_EMAIL": "t@example.com",
+                "GIT_COMMITTER_NAME": "t",
+                "GIT_COMMITTER_EMAIL": "t@example.com",
+            }
+            subprocess.run(("git", "init", "-q", "-b", "main", str(repo)), check=True)
+            subprocess.run(
+                ("git", "-C", str(repo), "commit", "--allow-empty", "-q", "-m", "init"),
+                check=True,
+                env=git_env,
+            )
+            subprocess.run(("git", "-C", str(repo), "tag", "v1.0.0"), check=True)
+            subprocess.run(("git", "-C", str(repo), "branch", "other"), check=True)
+            allowed_commands = (
+                "git checkout v1.0.0",
+                "git checkout HEAD~0",
+                "git checkout missing-file.txt",
+            )
+            for command in allowed_commands:
+                with self.subTest(command=command):
+                    result = subprocess.run(
+                        ("/bin/bash", str(hook)),
+                        cwd=repo,
+                        input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}),
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+            blocked = subprocess.run(
+                ("/bin/bash", str(hook)),
+                cwd=repo,
+                input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "git checkout other"}}),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+            self.assertIn("BLOCKED", blocked.stderr)
+
+    def test_guard_protected_branch_ignores_unparseable_command(self) -> None:
+        # shlex가 중간까지 토큰을 내보내고 실패해도 부분 토큰으로 차단하면 안 된다.
+        hook = Path(__file__).resolve().parents[1] / "scripts" / "hooks" / "guard-protected-branch.sh"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir) / "repo"
+            repo.mkdir()
+            git_env = {
+                **os.environ,
+                "GIT_AUTHOR_NAME": "t",
+                "GIT_AUTHOR_EMAIL": "t@example.com",
+                "GIT_COMMITTER_NAME": "t",
+                "GIT_COMMITTER_EMAIL": "t@example.com",
+            }
+            subprocess.run(("git", "init", "-q", "-b", "main", str(repo)), check=True)
+            subprocess.run(
+                ("git", "-C", str(repo), "commit", "--allow-empty", "-q", "-m", "init"),
+                check=True,
+                env=git_env,
+            )
+            result = subprocess.run(
+                ("/bin/bash", str(hook)),
+                cwd=repo,
+                input=json.dumps(
+                    {"tool_name": "Bash", "tool_input": {"command": 'git commit -m "unclosed'}}
+                ),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_node_installers_remove_legacy_graphify_artifacts(self) -> None:
         installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
@@ -1454,14 +1644,14 @@ class CliTest(unittest.TestCase):
                 self.assertFalse((project_root / ".codex" / "skills" / "compose-state-authoring").exists())
                 self.assertFalse((project_root / ".codex" / "skills" / "edge-to-edge").exists())
 
-    def test_node_installers_link_default_host_skills_to_antigravity_path(self) -> None:
+    def test_node_installers_link_default_host_skills_to_claude_and_codex(self) -> None:
         installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             node = _node_executable()
             for installer_name in installers:
                 with self.subTest(installer=installer_name):
-                    project_root = root / f"{installer_name}-antigravity"
+                    project_root = root / f"{installer_name}-default-hosts"
                     skill_dir = project_root / "skills" / "default-host-skill"
                     skill_dir.mkdir(parents=True)
                     (skill_dir / "SKILL.md").write_text(
@@ -1486,29 +1676,16 @@ class CliTest(unittest.TestCase):
                     )
 
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    # 기본 host skill은 Antigravity에서도 Gemini 하위 경로에 연결돼야 한다.
-                    self.assertTrue(
-                        (
-                            project_root
-                            / ".gemini"
-                            / "antigravity"
-                            / "skills"
-                            / "default-host-skill"
-                            / "SKILL.md"
-                        ).exists()
-                    )
-                    self.assertFalse((project_root / ".antigravity" / "skills" / "default-host-skill").exists())
+                    self.assertTrue((project_root / ".claude" / "skills" / "default-host-skill" / "SKILL.md").exists())
+                    self.assertTrue((project_root / ".Codex" / "skills" / "default-host-skill" / "SKILL.md").exists())
                     index = json.loads(
                         (project_root / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8")
                     )
                     selected = next(skill for skill in index["skills"] if skill["name"] == "default-host-skill")
-                    self.assertEqual(selected["hosts"], ["claude", "codex", "gemini", "antigravity"])
-                    link = next(
-                        link
-                        for link in index["links"]
-                        if link["name"] == "default-host-skill" and link["host"] == "antigravity"
-                    )
-                    self.assertEqual(link["path"], ".gemini/antigravity/skills/default-host-skill")
+                    self.assertIn("claude", selected["hosts"])
+                    self.assertIn("codex", selected["hosts"])
+                    self.assertNotIn("gemini", selected["hosts"])
+                    self.assertNotIn("antigravity", selected["hosts"])
 
     def test_node_installers_refresh_managed_workflow_skills(self) -> None:
         installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
@@ -1572,14 +1749,12 @@ class CliTest(unittest.TestCase):
             prompt = project_root / ".agent-flow" / "prompts" / "pr-watch.md"
             bootstrap = project_root / ".agent-flow" / "bootstrap" / "AGENTS.md"
             claude_bootstrap = project_root / ".agent-flow" / "bootstrap" / "CLAUDE.md"
-            gemini_bootstrap = project_root / ".agent-flow" / "bootstrap" / "GEMINI.md"
             skill = project_root / ".agent-flow" / "skills" / "full-feature-workflow" / "SKILL.md"
             rules = project_root / ".agent-flow" / "rules" / "workflow-contract.md"
             workflow.write_text("stale workflow\n", encoding="utf-8")
             prompt.write_text("stale prompt\n", encoding="utf-8")
             bootstrap.write_text("stale bootstrap\n", encoding="utf-8")
             claude_bootstrap.write_text("stale claude bootstrap\n", encoding="utf-8")
-            gemini_bootstrap.write_text("stale gemini bootstrap\n", encoding="utf-8")
             skill.write_text("stale skill\n", encoding="utf-8")
             rules.write_text("stale rules\n", encoding="utf-8")
 
@@ -1587,15 +1762,15 @@ class CliTest(unittest.TestCase):
 
             self.assertIn("id: full-feature", workflow.read_text(encoding="utf-8"))
             self.assertIn("Default reviewers are active-host sub-agents", workflow.read_text(encoding="utf-8"))
-            self.assertIn("Gemini sub-agent in Gemini", workflow.read_text(encoding="utf-8"))
+            self.assertNotIn("Gemini sub-agent", workflow.read_text(encoding="utf-8"))
             self.assertIn("multi_review: true", workflow.read_text(encoding="utf-8"))
             self.assertIn("status: ci-failed", prompt.read_text(encoding="utf-8"))
             self.assertIn(
                 "Default reviewers are active-host sub-agents",
                 (project_root / ".agent-flow" / "prompts" / "multi-review.md").read_text(encoding="utf-8"),
             )
-            self.assertIn(
-                "Gemini sub-agent in Gemini",
+            self.assertNotIn(
+                "Gemini sub-agent",
                 (project_root / ".agent-flow" / "prompts" / "multi-review.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
@@ -1620,35 +1795,26 @@ class CliTest(unittest.TestCase):
             )
             self.assertIn('agent-flow run "<task>"', bootstrap.read_text(encoding="utf-8"))
             self.assertIn('agent-flow run "<task>"', claude_bootstrap.read_text(encoding="utf-8"))
-            self.assertIn('agent-flow run "<task>"', gemini_bootstrap.read_text(encoding="utf-8"))
             self.assertIn("현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수", bootstrap.read_text(encoding="utf-8"))
             self.assertIn("현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수", claude_bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수", gemini_bootstrap.read_text(encoding="utf-8"))
             self.assertIn("활성 host가 아닌 추가 provider는 optional", bootstrap.read_text(encoding="utf-8"))
             self.assertIn("활성 host가 아닌 추가 provider는 optional", claude_bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("활성 host가 아닌 추가 provider는 optional", gemini_bootstrap.read_text(encoding="utf-8"))
             self.assertNotIn("예: Claude/Gemini", bootstrap.read_text(encoding="utf-8"))
             self.assertNotIn("예: Claude/Gemini", claude_bootstrap.read_text(encoding="utf-8"))
-            self.assertNotIn("예: Claude/Gemini", gemini_bootstrap.read_text(encoding="utf-8"))
             self.assertIn("reviewer-source: sub-agent", bootstrap.read_text(encoding="utf-8"))
             self.assertIn("reviewer-source: sub-agent", claude_bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("reviewer-source: sub-agent", gemini_bootstrap.read_text(encoding="utf-8"))
             self.assertIn("sub-agent를 닫는다", bootstrap.read_text(encoding="utf-8"))
             self.assertIn("sub-agent를 닫는다", claude_bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("sub-agent를 닫는다", gemini_bootstrap.read_text(encoding="utf-8"))
             self.assertIn("## Overall", bootstrap.read_text(encoding="utf-8"))
             self.assertIn("## Overall", claude_bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("## Overall", gemini_bootstrap.read_text(encoding="utf-8"))
             self.assertIn("verdict: approve", bootstrap.read_text(encoding="utf-8"))
             self.assertIn("verdict: approve", claude_bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("verdict: approve", gemini_bootstrap.read_text(encoding="utf-8"))
             self.assertIn("verdict: request-changes", bootstrap.read_text(encoding="utf-8"))
             self.assertIn("verdict: request-changes", claude_bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("verdict: request-changes", gemini_bootstrap.read_text(encoding="utf-8"))
             self.assertIn("Full Feature Workflow", skill.read_text(encoding="utf-8"))
             self.assertIn("Workflow Contract", rules.read_text(encoding="utf-8"))
             self.assertIn("two active-host sub-agents", rules.read_text(encoding="utf-8"))
-            self.assertIn("Gemini sub-agent in Gemini", rules.read_text(encoding="utf-8"))
+            self.assertNotIn("Gemini sub-agent", rules.read_text(encoding="utf-8"))
             self.assertIn("reviewer-source: sub-agent", rules.read_text(encoding="utf-8"))
             self.assertIn("close that sub-agent session", rules.read_text(encoding="utf-8"))
             self.assertIn("## Overall", rules.read_text(encoding="utf-8"))
@@ -2029,7 +2195,6 @@ class CliTest(unittest.TestCase):
                 agent_flow / "skills" / "full-feature-workflow" / "SKILL.md",
                 agent_flow / "bootstrap" / "AGENTS.md",
                 agent_flow / "bootstrap" / "CLAUDE.md",
-                agent_flow / "bootstrap" / "GEMINI.md",
             ]:
                 path_name.parent.mkdir(parents=True, exist_ok=True)
                 path_name.write_text("old install\n", encoding="utf-8")
@@ -3109,7 +3274,8 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(result.returncode, 1)
-            self.assertIn("matching reviewer verdicts and overall verdict", result.stderr)
+            # ## Final은 overall alias로 인정되므로 reviewer 수 부족이 정확한 차단 사유다.
+            self.assertIn("approve requires at least 2 independent sub-agent reviewer verdicts", result.stderr)
 
             mr_artifact.write_text(_with_skills_gate(
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
@@ -3647,41 +3813,8 @@ class CliTest(unittest.TestCase):
                 "manual available command=manual",
                 "codex-session available command=/usr/local/bin/codex",
                 "claude-session unavailable command=claude",
-                "antigravity-cli unavailable command=agy",
             ],
         )
-
-    def test_gemini_reviewer_uses_antigravity_cli_launcher(self) -> None:
-        from agent_flow.cli_detect import cli_by_name
-
-        with mock.patch("agent_flow.cli_detect.shutil.which") as which:
-            which.side_effect = lambda name: f"/usr/local/bin/{name}" if name == "agy" else None
-            cli = cli_by_name("gemini")
-            antigravity_cli = cli_by_name("antigravity")
-
-        self.assertIsNotNone(cli)
-        self.assertEqual(cli.binaries, ("agy",))
-        self.assertEqual(cli.invoke, ("-p",))
-        self.assertEqual(antigravity_cli, cli)
-
-    def test_provider_list_reports_antigravity_cli(self) -> None:
-        output = io.StringIO()
-        with mock.patch("agent_flow.providers.host.shutil.which") as which:
-            which.side_effect = lambda name: f"/usr/local/bin/{name}" if name == "agy" else None
-            with mock.patch.dict("agent_flow.providers.host.os.environ", {}, clear=True):
-                with contextlib.redirect_stdout(output):
-                    self.assertEqual(main(["provider", "list"]), 0)
-
-        self.assertIn("antigravity-cli available command=/usr/local/bin/agy", output.getvalue())
-
-    def test_antigravity_environment_marks_provider_available(self) -> None:
-        output = io.StringIO()
-        with mock.patch("agent_flow.providers.host.shutil.which", return_value=None):
-            with mock.patch.dict("agent_flow.providers.host.os.environ", {"ANTIGRAVITY_HOME": "/tmp/ag"}, clear=True):
-                with contextlib.redirect_stdout(output):
-                    self.assertEqual(main(["provider", "list"]), 0)
-
-        self.assertIn("antigravity-cli available command=agy", output.getvalue())
 
     def test_provider_list_treats_host_environment_as_available(self) -> None:
         output = io.StringIO()
@@ -4248,7 +4381,6 @@ class CliTest(unittest.TestCase):
 
         cases = [
             ("codex-generalist", "429 too many requests; rate limit resets in 5 minutes", "codex"),
-            ("gemini-generalist", "resource exhausted: quota exceeded; retry later", "gemini"),
         ]
         for job_id, stderr, reviewer in cases:
             artifact = _render_angle_result(SubprocessResult(job_id=job_id, stderr=stderr, returncode=1))
@@ -4437,7 +4569,7 @@ class CliTest(unittest.TestCase):
         )
         # agent가 기준 worktree의 브랜치 표시를 바꾸는 명령을 실행하지 못하게 막는다.
         self.assertEqual(result.returncode, 2)
-        self.assertIn("기준 worktree", result.stdout)
+        self.assertIn("기준 worktree", result.stderr)
 
         chained = subprocess.run(
             ("bash", str(script)),
@@ -4447,7 +4579,7 @@ class CliTest(unittest.TestCase):
             check=False,
         )
         self.assertEqual(chained.returncode, 2)
-        self.assertIn("브랜치만 만들지", chained.stdout)
+        self.assertIn("브랜치만 만들지", chained.stderr)
 
         for command in (
             "git -C . checkout -b feat/test",
@@ -4462,7 +4594,7 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(blocked_create.returncode, 2, command)
-            self.assertIn("브랜치만 만들지", blocked_create.stdout)
+            self.assertIn("브랜치만 만들지", blocked_create.stderr)
 
         blocked_detach = subprocess.run(
             ("bash", str(script)),
@@ -4472,7 +4604,7 @@ class CliTest(unittest.TestCase):
             check=False,
         )
         self.assertEqual(blocked_detach.returncode, 2)
-        self.assertIn("기준 worktree", blocked_detach.stdout)
+        self.assertIn("기준 worktree", blocked_detach.stderr)
 
         allowed = subprocess.run(
             ("bash", str(script)),
@@ -4509,7 +4641,7 @@ class CliTest(unittest.TestCase):
                     check=False,
                 )
                 self.assertEqual(result.returncode, 2, command)
-                self.assertIn("보호 브랜치", result.stdout)
+                self.assertIn("보호 브랜치", result.stderr)
 
             allowed = subprocess.run(
                 ("bash", str(script)),
@@ -4546,7 +4678,7 @@ class CliTest(unittest.TestCase):
                     check=False,
                 )
                 self.assertEqual(blocked_after_subshell.returncode, 2, command)
-                self.assertIn("보호 브랜치", blocked_after_subshell.stdout)
+                self.assertIn("보호 브랜치", blocked_after_subshell.stderr)
 
     def test_team_state_init_task_worker_and_status(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

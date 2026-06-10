@@ -1,13 +1,10 @@
 .agent-flow/
 .codex/
-.gemini/
 .claude/
 /AGENTS.md
 /CLAUDE.md
-/GEMINI.md
 /AGENTS/
 /CLAUDE/
-/GEMINI/
 scripts/check-context-docs.*
 agent-flow/
 AUDIT.md
@@ -20,4 +17,3 @@ dist/
 uv.lock
 AGENTS.md
 CLAUDE.md
-GEMINI.md

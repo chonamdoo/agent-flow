@@ -73,30 +73,38 @@ def git_parts(tokens):
     return tokens[index:], global_args
 
 def current_branch(global_args, cwd):
-    result = subprocess.run(
-        ['git', *global_args, 'branch', '--show-current'],
-        cwd=cwd,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
+    # git이 멈추거나 없을 때 hook이 도구 호출을 무기한 막지 않도록 방어한다.
+    try:
+        result = subprocess.run(
+            ['git', *global_args, 'branch', '--show-current'],
+            cwd=cwd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ''
     if result.returncode != 0:
         return ''
     return result.stdout.strip()
 
 def shell_tokens(command):
+    # shlex는 ValueError 전에 일부 토큰을 이미 내보내므로, 부분 토큰으로
+    # 오판하지 않도록 전체 파싱이 성공한 경우에만 토큰을 반환한다.
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars=';&|()')
         lexer.whitespace_split = True
-        for token in lexer:
-            if token and all(char in ';&|()' for char in token):
-                for char in token:
-                    yield char
-            else:
-                yield token
+        tokens = list(lexer)
     except ValueError:
         return
+    for token in tokens:
+        if token and all(char in ';&|()' for char in token):
+            for char in token:
+                yield char
+        else:
+            yield token
 
 def inspect_tokens(tokens, cwd):
     if not tokens:
@@ -151,8 +159,7 @@ if [ -z "$PROTECTED_BRANCH" ]; then
   exit 0
 fi
 
-echo "BLOCKED: 보호 브랜치 '$PROTECTED_BRANCH'에서 직접 커밋/푸시하지 마세요."
-echo "git worktree add -b feat/<slug> .agent-flow/worktrees/feat-<slug>/ main 로 작업 브랜치를 만드세요."
+# exit 2일 때 Claude는 stderr만 모델에 전달한다. stdout은 무시된다.
+echo "BLOCKED: 보호 브랜치 '$PROTECTED_BRANCH'에서 직접 커밋/푸시하지 마세요." >&2
+echo "git worktree add -b feat/<slug> .agent-flow/worktrees/feat-<slug>/ main 로 작업 브랜치를 만드세요." >&2
 exit 2
-
-exit 0

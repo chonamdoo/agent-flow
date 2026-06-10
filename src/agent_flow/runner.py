@@ -43,7 +43,7 @@ from agent_flow.artifact import (
 )
 from agent_flow.cli_detect import detect_available_clis
 from agent_flow.core.commands import run_safe_command
-from agent_flow.core.phase_workflow import load_phase_workflow_definition
+from agent_flow.core.phase_workflow import find_kit_root, load_phase_workflow_definition
 from agent_flow.core.report import write_run_report
 from agent_flow.core.security import ensure_child_path, validate_safe_name
 from agent_flow.core.markers import has_failure_markers, missing_markers
@@ -67,6 +67,7 @@ FRESH_ARTIFACT_PHASES = {
     "refactor",
     "gates",
     "comment-authoring",
+    "final-review",
     "multi-review",
     "fix-loop",
     "architecture-review",
@@ -369,6 +370,7 @@ class Runner:
         else:
             key = _route_key(text)
         if key == "approve" and phase.routes.get("request-changes") and has_failure_markers(text):
+            print("  [route] approve overridden to request-changes: Completion Gate has failure markers")
             key = "request-changes"
         target = phase.routes.get(key)
         if target is None:
@@ -376,6 +378,9 @@ class Runner:
         if phase.multi_review:
             if key == "missing-reviewer":
                 print("  [block] multi-review requires 1+ independent sub-agent reviewer verdict")
+                return current_index, True
+            if key == "insufficient-reviewers":
+                print("  [block] multi-review approve requires 2+ independent sub-agent reviewer verdicts")
                 return current_index, True
             if key == "invalid-verdict":
                 print("  [block] multi-review requires overall verdict approve or request-changes")
@@ -386,14 +391,17 @@ class Runner:
                     "verdict: approve or verdict: request-changes line"
                 )
                 return current_index, True
-        if phase.id == "gates":
-            if target == "fix-loop":
-                rounds = self._increment_fix_loop_rounds()
-                if rounds > FIX_LOOP_MAX_ROUNDS:
-                    print(f"  [block] fix-loop exceeded {FIX_LOOP_MAX_ROUNDS} rounds")
-                    return current_index, True
-            elif target:
-                self._reset_fix_loop_rounds()
+        # gates뿐 아니라 final-review/multi-review 등 fix-loop로 라우팅하는
+        # 모든 phase에 같은 상한을 적용해야 review ↔ fix-loop가 무한 루프하지 않는다.
+        if target == "fix-loop":
+            rounds = self._increment_fix_loop_rounds()
+            if rounds > FIX_LOOP_MAX_ROUNDS:
+                print(f"  [block] fix-loop exceeded {FIX_LOOP_MAX_ROUNDS} rounds")
+                return current_index, True
+        elif target and target != "block" and "fix-loop" in phase.routes.values():
+            # block은 진행이 아니므로 리셋하지 않는다. kit.mjs도 block에서
+            # fix_loop_rounds를 건드리지 않아 두 런타임이 같은 상한을 유지한다.
+            self._reset_fix_loop_rounds()
         if target == "block":
             print(f"  [block] {phase.id} status={key}")
             return current_index, True
@@ -573,17 +581,8 @@ class Runner:
 
 def _find_kit_root() -> Path:
     """Locate the agent-flow kit root (contains workflows/ and profiles/)."""
-    here = Path(__file__).resolve()
-    candidates: list[Path] = []
-    for parent in here.parents:
-        if (parent / "workflows").is_dir() and (parent / "profiles").is_dir():
-            candidates.append(parent)
-    for candidate in candidates:
-        if (candidate / "pyproject.toml").is_file() or (candidate / "package.json").is_file():
-            return candidate
-    if candidates:
-        return candidates[0]
-    raise RuntimeError("Could not locate agent-flow kit root from " + str(here))
+    # artifact.py의 marker 검증과 같은 kit root를 봐야 routing/검증 YAML이 갈라지지 않는다.
+    return find_kit_root()
 
 
 def _load_workflow(kit_root: Path, name: str) -> list[Phase]:
@@ -678,6 +677,8 @@ def _multi_review_route_key(text: str, phase_id: str = "") -> str:
     has_subagent = _has_subagent_reviewer(text)
     if overall == "approve" and has_subagent and len(verdicts) >= 2:
         return "approve"
+    if overall == "approve" and has_subagent and len(verdicts) == 1:
+        return "insufficient-reviewers"
     return "invalid-verdict"
 
 
@@ -714,9 +715,10 @@ def _multi_review_overall_route_key(text: str) -> str:
         heading = re.match(r"^(#{1,6})\s+(.+)$", stripped)
         if heading:
             title = heading.group(2)
+            # reviewer 파서와 같은 heading alias(overall/final [verdict])를 인정한다.
             in_overall_section = bool(
                 heading.group(1) == "##"
-                and title == "overall"
+                and re.fullmatch(r"(?:overall|final)(?:\s+verdict)?", title.strip())
             )
             if in_overall_section:
                 overall_sections += 1
@@ -872,9 +874,10 @@ def _normalized_reviewer_id(value: str) -> str:
 
 
 def _normalized_reviewer_heading_id(value: str) -> str:
-    # Reviewer heading은 numbered/lettered reviewer만 독립 id로 인정한다.
+    # Reviewer heading은 1-2 단어 id(claude, agent 1 등)만 독립 id로 인정한다.
+    # 긴 서술형 heading은 reviewer가 아니라 prose일 가능성이 높아 제외한다.
     key = _normalized_reviewer_id(value)
-    if re.fullmatch(r"(?:[0-9]+|[a-z])", key):
+    if re.fullmatch(r"[a-z0-9]+(?: [a-z0-9]+)?", key):
         return key
     return ""
 

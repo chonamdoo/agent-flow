@@ -5,7 +5,7 @@
 //   npx <agent-flow-package> install
 //
 // The installer creates .agent-flow/ (runs, memory, kit metadata) and
-// upserts an agent-flow block into CLAUDE.md / AGENTS.md / GEMINI.md so
+// upserts an agent-flow block into CLAUDE.md / AGENTS.md so
 // every host CLI sees the same workflow contract.
 
 import fs from "node:fs";
@@ -390,7 +390,7 @@ function mergeHookSettings(settings, desired) {
       settings.hooks[event] = [];
     }
     for (const entry of entries) {
-      const existing = settings.hooks[event].find((e) => e.matcher === entry.matcher);
+      const existing = settings.hooks[event].find((e) => (e.matcher ?? "") === (entry.matcher ?? ""));
       if (existing) {
         if (!existing.hooks) {
           existing.hooks = [];
@@ -413,16 +413,23 @@ function mergeHookSettings(settings, desired) {
   }
 }
 
+function readHookSettings(settingsPath) {
+  if (!fs.existsSync(settingsPath)) {
+    return {};
+  }
+  try {
+    return JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+  } catch {
+    const backupPath = `${settingsPath}.bak`;
+    fs.copyFileSync(settingsPath, backupPath);
+    console.error(`warning: could not parse ${settingsPath}; backed up to ${backupPath} before overwriting`);
+    return {};
+  }
+}
+
 function installCodexHooks(root) {
   const settingsPath = path.join(root, ".Codex", "hooks.json");
-  let settings = {};
-  if (fs.existsSync(settingsPath)) {
-    try {
-      settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
-    } catch {
-      settings = {};
-    }
-  }
+  const settings = readHookSettings(settingsPath);
   mergeHookSettings(settings, codexHooksSettings(root).hooks);
   ensureDir(path.dirname(settingsPath));
   fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
@@ -443,13 +450,12 @@ function claudeHooksSettings(root) {
       ],
       PostToolUse: [
         {
-          matcher: "Write|Edit|MultiEdit",
+          matcher: "^(Write|Edit|MultiEdit)$",
           hooks: [{ type: "command", command: hookScriptCommand(root, "comment-checker.py") }],
         },
       ],
       Stop: [
         {
-          matcher: "",
           hooks: [{ type: "command", command: hookScriptCommand(root, "show-phase-status.sh") }],
         },
       ],
@@ -459,14 +465,7 @@ function claudeHooksSettings(root) {
 
 function installClaudeHooks(root) {
   const settingsPath = path.join(root, ".claude", "settings.json");
-  let settings = {};
-  if (fs.existsSync(settingsPath)) {
-    try {
-      settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
-    } catch {
-      settings = {};
-    }
-  }
+  const settings = readHookSettings(settingsPath);
   mergeHookSettings(settings, claudeHooksSettings(root).hooks);
   ensureDir(path.dirname(settingsPath));
   fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
@@ -519,6 +518,11 @@ function installProjectSkills(forceManaged = false) {
   const selected = selectProjectSkills();
   const links = [];
   for (const skill of selected.skills) {
+    // bundled skill 중 host 디렉토리 link 대상은 BUNDLED_HOST_SKILL_NAMES뿐이다.
+    // 나머지 bundled skill은 index에만 노출해 agent가 발견할 수 있게 한다.
+    if (skill.source === "bundled" && !BUNDLED_HOST_SKILL_NAMES.has(skill.name)) {
+      continue;
+    }
     for (const host of skill.hosts) {
       links.push(linkProjectSkill(skill, host, previousIndex, forceManaged));
     }
@@ -533,7 +537,7 @@ function selectProjectSkills() {
   const discovered = [
     ...discoverSkills(path.join(AF_DIR, "local-skills"), "local", PROFILE_MANAGED_HOST_ONLY_SKILLS),
     ...discoverProjectSkills(),
-    ...discoverSkills(path.join(AF_DIR, "skills"), "bundled", new Set(), BUNDLED_HOST_SKILL_NAMES),
+    ...discoverSkills(path.join(AF_DIR, "skills"), "bundled", PROFILE_MANAGED_HOST_ONLY_SKILLS),
   ];
   const byName = new Map();
   const warnings = [];
@@ -603,7 +607,7 @@ function parseSkillMetadata(text, fallbackName) {
   const name = safeSkillName(parsedName);
   if (name !== parsedName) warnings.push(`unsafe skill name ignored: ${parsedName}`);
   const hostValues = Array.isArray(metadata.hosts) ? metadata.hosts : [];
-  const knownHosts = new Set(["claude", "codex", "gemini", "antigravity"]);
+  const knownHosts = new Set(["claude", "codex"]);
   const hosts = [];
   for (const host of hostValues) {
     const normalized = String(host).trim().toLowerCase();
@@ -615,7 +619,7 @@ function parseSkillMetadata(text, fallbackName) {
   return {
     name,
     description: String(metadata.description || useWhen || ""),
-    hosts: hostValues.length > 0 ? [...new Set(hosts)] : ["claude", "codex", "gemini", "antigravity"],
+    hosts: hostValues.length > 0 ? [...new Set(hosts)] : ["claude", "codex"],
     tags: Array.isArray(metadata.tags) ? metadata.tags.map(String) : [],
     trigger: String(metadata.trigger || metadata.description || useWhen || ""),
     warnings,
@@ -640,7 +644,9 @@ function removeStaleProjectSkillLinks(skills, previousIndex, forceManaged = fals
     if (!link || !link.name || !link.host || !link.path) continue;
     if (desired.has(`${link.host}:${link.name}`)) continue;
     const target = path.join(PROJECT, link.path);
-    const hostRoot = hostSkillRoot(link.host);
+    // 과거 index는 .codex(소문자) 경로를 기록했다. case-sensitive FS에서
+    // ensureChildPath가 .Codex와 어긋나 throw하지 않도록 기록된 casing을 따른다.
+    const hostRoot = legacyHostSkillRoot(link.path) ?? hostSkillRoot(link.host);
     if (pathHasSymlink(PROJECT, hostRoot)) {
       removed.push({ name: link.name, host: link.host, path: link.path, status: "skipped-host-root-symlink" });
       continue;
@@ -746,11 +752,19 @@ function linkProjectSkill(skill, host, previousIndex, forceManaged = false) {
 }
 
 function hostSkillRoot(host) {
-  // Antigravity는 Gemini 하위 skill 경로를 사용한다.
-  if (host === "antigravity") {
-    return path.join(PROJECT, ".gemini", "antigravity", "skills");
+  // case-sensitive FS에서 .codex/.Codex가 갈라지지 않도록 .Codex로 고정한다.
+  if (host === "codex") {
+    return path.join(PROJECT, ".Codex", "skills");
   }
   return path.join(PROJECT, `.${host}`, "skills");
+}
+
+function legacyHostSkillRoot(linkPath) {
+  const normalized = String(linkPath).replaceAll("\\", "/");
+  if (normalized.startsWith(".codex/skills/")) {
+    return path.join(PROJECT, ".codex", "skills");
+  }
+  return null;
 }
 
 function installManagedWorkflowSkills() {
@@ -826,6 +840,21 @@ function pathHasSymlink(root, target) {
   return false;
 }
 
+function runKitInstall() {
+  // kit.mjs가 prompts/rules/bootstrap/concise-output의 canonical generator다.
+  // 여기서 먼저 실행하지 않으면 assertInstalled가 요구하는 파일이 빠진다.
+  // 단, kit.mjs는 yaml 가능한 python이 필요하므로 없는 환경에서는 경고 후 계속한다.
+  const kitCli = path.join(path.dirname(fileURLToPath(import.meta.url)), "agent-flow-kit.mjs");
+  const args = [kitCli, "install", ...(FORCE_MANAGED ? ["--force-managed"] : [])];
+  const result = spawnSync(process.execPath, args, { cwd: PROJECT, encoding: "utf8" });
+  if (result.status !== 0) {
+    const detail = (result.stderr || result.stdout || String(result.error || "unknown error")).trim().split("\n")[0];
+    console.error(`warning: agent-flow-kit install skipped (${detail}); .agent-flow prompts/bootstrap may be incomplete until \`agent-flow-kit install\` succeeds`);
+    return false;
+  }
+  return true;
+}
+
 function install() {
   const managedRoot = resolveManagedWorktreeRoot(REQUESTED_PROJECT);
   if (managedRoot) {
@@ -838,6 +867,7 @@ function install() {
     process.exitCode = 1;
     return;
   }
+  runKitInstall();
   ensureDir(path.join(AF_DIR, "runs"));
   ensureDir(path.join(AF_DIR, "memory"));
   ensureDir(path.join(AF_DIR, "memory", "lore"));
@@ -848,20 +878,17 @@ function install() {
 
   bootstrapMarkdown("CLAUDE.md");
   bootstrapMarkdown("AGENTS.md");
-  bootstrapMarkdown("GEMINI.md");
   const gitignorePath = path.join(PROJECT, ".gitignore");
   upsertGitignore(gitignorePath, [
     ".agent-flow/",
     ".agent-flow/local-skills/",
     ".codex/",
-    ".gemini/",
+    ".Codex/",
     ".claude/",
     "AGENTS.md",
     "CLAUDE.md",
-    "GEMINI.md",
     "AGENTS/",
     "CLAUDE/",
-    "GEMINI/",
     "scripts/check-context-docs.*",
     "agent-flow/",
   ]);
@@ -958,7 +985,7 @@ function install() {
   );
   const codexSkillStatus = linkOrCopyDir(
     agentFlowSkill,
-    path.join(PROJECT, ".codex", "skills", "agent-flow"),
+    path.join(hostSkillRoot("codex"), "agent-flow"),
   );
 
   // Keep a small pointer file for users who inspect .claude/skills by hand.
@@ -979,6 +1006,7 @@ function install() {
   const kitJson = {
     kit: "agent-flow",
     version: "0.1.0",
+    install_scope: "project",
     profile,
     project_root: PROJECT,
     installed_at: new Date().toISOString(),
@@ -992,7 +1020,6 @@ function install() {
     skill_links: {
       claude: claudeSkillStatus,
       codex: codexSkillStatus,
-      gemini: "GEMINI.md",
     },
     skill_index: {
       path: ".agent-flow/skills/index.json",
