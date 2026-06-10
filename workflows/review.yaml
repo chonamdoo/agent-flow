@@ -1,11 +1,36 @@
 id: review
 description: Review-only workflow for existing changes.
-stages:
+phases:
   - id: explore
     role: explorer
-    parallel: false
+    description: Inspect the changed files and review context.
+    prompt: |
+      Inspect the changed files, tests, and relevant project instructions. Record
+      the review scope, touched languages, and verification evidence available.
+      Output: explore.md.
+
   - id: review
     role: reviewer
     parallel: true
     replicas: 3
+    description: Review existing changes.
+    multi_review: true
+    routes:
+      approve: handoff
+      request-changes: handoff
+    prompt: |
+      Run at least two independent sub-agent reviewers in parallel. Each reviewer
+      checks bugs, regressions, missing tests, and contract drift.
+      Each reviewer section must include `reviewer-source: sub-agent` and an
+      independent verdict: approve or request-changes. Any request-changes from
+      any reviewer makes the overall verdict request-changes.
+      End with `## Overall` followed by exactly one verdict line:
+      `verdict: approve` or `verdict: request-changes`.
+      Output: review.md.
 
+  - id: handoff
+    role: reviewer
+    description: Summarize the review verdict.
+    prompt: |
+      Summarize the review verdict and list only actionable findings that remain.
+      Output: handoff.md.

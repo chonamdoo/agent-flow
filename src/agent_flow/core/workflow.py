@@ -28,8 +28,10 @@ def load_workflow(workflow_id: str) -> Workflow:
     if payload.get("id") != workflow_id:
         raise ValueError(f"workflow id mismatch: {workflow_id}")
     stages = payload.get("stages")
+    if stages is None:
+        stages = payload.get("phases")
     if not isinstance(stages, list) or not stages:
-        raise ValueError(f"workflow stages must be a non-empty list: {workflow_id}")
+        raise ValueError(f"workflow stages/phases must be a non-empty list: {workflow_id}")
     return Workflow(
         workflow_id=payload["id"],
         stages=tuple(

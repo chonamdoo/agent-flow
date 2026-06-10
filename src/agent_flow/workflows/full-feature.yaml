@@ -40,14 +40,14 @@ phases:
     prompt: |
       Apply YC office-hours style pressure: target user, painful problem,
       current workaround, why now, narrowest wedge, value, cut list, and
-      build/defer/cut decision. Output: product-brief.md.
+      build/defer/cut decision. Output: artifacts/product-brief.md.
 
   - id: prd
     description: Write the product requirements document.
     prompt: |
       Write the PRD from domain-grill.md and product-brief.md. Include goal,
       scope, non-goals, user stories, acceptance criteria, edge cases,
-      dependencies, and risks. Output: prd.md.
+      dependencies, and risks. Output: artifacts/prd.md.
 
   - id: slice-plan
     description: Break PRD into independently shippable slices.
@@ -55,7 +55,7 @@ phases:
       Create a small-slice implementation plan. Each slice must be testable,
       independently reviewable, and have explicit verification. If architecture
       mode is `ddd`, every slice must declare layer scope using domain,
-      application, infrastructure, and presentation. Output: slice-plan.md.
+      application, infrastructure, and presentation. Output: artifacts/slice-plan.md.
 
   - id: plan-review
     description: Senior-style plan review gate. Runner routes approve→ddd-design, request-changes→slice-plan.
@@ -133,7 +133,7 @@ phases:
           solid-isp-consumer-ports: <summary>
           solid-dip-dependency-direction: <summary>
 
-      Output: ddd-design.md.
+      Output: artifacts/ddd-design.md.
 
   - id: worktree
     description: Create an isolated git worktree for parallel task safety.
@@ -144,13 +144,13 @@ phases:
       task isolation. Do not work on main/master/develop. Follow
       profile.branching.naming when present. Record worktree path, branch name,
       and base commit.
-      Output: worktree.md.
+      Output: artifacts/worktree.md.
 
   - id: run-start
     description: Record run setup.
     prompt: |
       Record selected profile, branch, provider, task, and run constraints.
-      Output: run-start.md.
+      Output: artifacts/run-start.md.
 
   - id: red
     description: TDD red phase.
@@ -268,7 +268,7 @@ phases:
           android-local-skills: checked|n/a
           android-local-skills-used: <skill list or n/a>
 
-      Output: refactor.md.
+      Output: artifacts/refactor.md.
 
   - id: gates
     description: Run project verification gates. Runner routes fail→fix-loop, pass→comment-authoring.
@@ -284,6 +284,8 @@ phases:
       Run build, typecheck, lint, tests, and context lint according to the
       active profile. Docs-only PRs must still run context lint. Save
       structured JSON with a top-level `passed` boolean and a `results` array.
+      When an explicit route status is needed, also include top-level `status`
+      as `green`, `approve`, `request-changes`, `blocked`, `error`, or `pending`.
       Output: artifacts/gate-results.json.
 
   - id: comment-authoring
@@ -391,7 +393,7 @@ phases:
           android-local-skills: checked|n/a
           android-local-skills-used: <skill list or n/a>
 
-      Output: multi-review.md.
+      Output: artifacts/multi-review.md.
 
   - id: fix-loop
     description: Apply review and gate fixes. Runner always routes back to gates for re-verification.
@@ -436,7 +438,7 @@ phases:
           android-local-skills: checked|n/a
           android-local-skills-used: <skill list or n/a>
 
-      Output: fix-loop.md.
+      Output: artifacts/fix-loop.md.
 
   - id: architecture-review
     description: Review implementation against DDD/Clean design. Runner routes approve→commit, request-changes→refactor.
@@ -512,13 +514,13 @@ phases:
       Commit the verified slice and record commit hashes/messages. Use
       agent-flow-concise-output commit rules: Conventional Commit subject
       target 50 chars, hard cap 72 chars, body only when the reason is unclear.
-      Output: commit.md.
+      Output: artifacts/commit.md.
 
   - id: push-pr
     description: Push branch and open PR.
     prompt: |
       Push branch, open PR, and record PR URL, branch, title, and summary.
-      Use repo-relative paths only. Output: push-pr.md.
+      Use repo-relative paths only. Output: artifacts/push-pr.md.
 
   - id: pr-watch
     description: Watch PR checks and comments. Runner routes green→merge-approval, comments→pr-comment-fix, ci-failed→pr-ci-fix, merged/skipped→handoff.
@@ -546,7 +548,7 @@ phases:
     prompt: |
       Address actionable PR review comments, commit, push, resolve the
       corresponding GitHub review threads, and summarize comment/thread IDs,
-      fixes, commits, and resolved thread IDs. Output: pr-comment-fix.md.
+      fixes, commits, and resolved thread IDs. Output: artifacts/pr-comment-fix.md.
 
   - id: pr-ci-fix
     description: Fix failing PR CI. Runner routes back to pr-watch.
@@ -554,7 +556,7 @@ phases:
       default: pr-watch
     prompt: |
       Diagnose failing checks, reproduce locally, fix, commit, push, and
-      summarize commands and check URLs. Output: pr-ci-fix.md.
+      summarize commands and check URLs. Output: artifacts/pr-ci-fix.md.
 
   - id: merge-approval
     description: Require explicit user approval before merge. Runner routes approve→merge.
@@ -569,10 +571,10 @@ phases:
     description: Merge after explicit user approval.
     prompt: |
       Merge only after explicit user approval. Record merge strategy, target
-      branch, and merge commit. Output: merge.md.
+      branch, and merge commit. Output: artifacts/merge.md.
 
   - id: handoff
     description: Final handoff and cleanup.
     prompt: |
       Summarize shipped work, verification, PR/merge result, follow-up items,
-      and cleanup state. Output: handoff.md.
+      and cleanup state. Output: artifacts/handoff.md.

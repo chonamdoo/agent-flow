@@ -932,8 +932,8 @@ function install() {
     path.join(AF_DIR, "workflows"),
     new Set(),
     true,
-    FORCE_MANAGED,
-    FORCE_MANAGED,
+    true,
+    true,
   );
   const profilesCopied = copyDir(
     path.join(KIT_ROOT, "profiles"),
