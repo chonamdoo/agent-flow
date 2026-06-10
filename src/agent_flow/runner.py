@@ -28,6 +28,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -60,20 +61,6 @@ GIT_DEPENDENT_PHASES = {
     "pr-ci-fix",
     "merge",
     "merge-approval",
-}
-FRESH_ARTIFACT_PHASES = {
-    "slice-plan",
-    "plan-review",
-    "refactor",
-    "gates",
-    "comment-authoring",
-    "final-review",
-    "multi-review",
-    "fix-loop",
-    "architecture-review",
-    "pr-watch",
-    "pr-comment-fix",
-    "pr-ci-fix",
 }
 FIX_LOOP_MAX_ROUNDS = 3
 DDD_REQUIRED_DESIGN_SECTIONS = (
@@ -183,7 +170,10 @@ class Runner:
             phase = self.phases[phase_index]
             if self._has_artifact(phase):
                 artifact = self._existing_artifact_path(phase)
-                blocked_reason = self._artifact_block_reason(artifact)
+                blocked_reason = (
+                    self._stale_artifact_block_reason(artifact, meta)
+                    or self._artifact_block_reason(artifact)
+                )
                 if blocked_reason:
                     print(
                         f"\n═══ phase '{phase.id}' is blocked. "
@@ -283,7 +273,10 @@ class Runner:
                 )
                 return
             artifact = self._existing_artifact_path(phase)
-            blocked_reason = self._artifact_block_reason(artifact)
+            blocked_reason = (
+                self._stale_artifact_block_reason(artifact, meta)
+                or self._artifact_block_reason(artifact)
+            )
             if blocked_reason:
                 print(
                     f"\n═══ phase '{phase.id}' is blocked. "
@@ -413,8 +406,6 @@ class Runner:
                 if candidate.id == target:
                     if i <= current_index:
                         for stale_phase in self.phases[i:current_index + 1]:
-                            if stale_phase.id not in FRESH_ARTIFACT_PHASES:
-                                continue
                             stale_artifact = self._existing_artifact_path(stale_phase)
                             if stale_artifact.exists():
                                 stale_artifact.unlink()
@@ -539,6 +530,22 @@ class Runner:
             return "generic_stub_artifact"
         return None
 
+    def _stale_artifact_block_reason(self, artifact: Path, meta: dict[str, Any]) -> str | None:
+        entered_at = _meta_timestamp(
+            meta.get("phase_entered_at")
+            or meta.get("updated_at")
+            or meta.get("started_at")
+        )
+        if entered_at is None:
+            return None
+        try:
+            artifact_mtime = artifact.stat().st_mtime
+        except FileNotFoundError:
+            return None
+        if artifact_mtime < entered_at:
+            return "stale_artifact"
+        return None
+
     def _has_artifact(self, phase: Phase) -> bool:
         return self._artifact_path(phase).exists() or self._legacy_artifact_path(phase).exists()
 
@@ -612,6 +619,18 @@ def _fix_loop_rounds(meta: dict[str, Any]) -> int:
         return 0
 
 
+def _meta_timestamp(value: object) -> float | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
 def _route_key(text: str) -> str:
     lowered = text.lower()
     # gates 결과 JSON은 nested result가 아니라 top-level passed만 route source로 본다.
@@ -658,6 +677,13 @@ def _gates_route_key(text: str) -> str:
         return "default"
     if not isinstance(payload, dict) or not isinstance(payload.get("passed"), bool):
         return "default"
+    status = payload.get("status")
+    if isinstance(status, str):
+        normalized_status = status.strip().lower().replace("_", "-")
+        if payload["passed"] is True and normalized_status in {"green", "approve"}:
+            return normalized_status
+        if payload["passed"] is False and normalized_status in {"request-changes", "blocked", "error", "pending"}:
+            return normalized_status
     if payload["passed"] is True:
         return "green" if _gate_results_prove_pass(payload.get("results")) else "default"
     return "request-changes"

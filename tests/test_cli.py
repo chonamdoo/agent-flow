@@ -140,6 +140,43 @@ class CliTest(unittest.TestCase):
         self.assertTrue(package_root.joinpath("roles", "default.yaml").is_file())
         self.assertTrue(package_root.joinpath("templates", "generic", "stage.md").is_file())
 
+    def test_all_packaged_workflows_export_phase_artifacts(self) -> None:
+        workflows_root = resources.files("agent_flow").joinpath("workflows")
+        workflow_names = sorted(
+            path.name.removesuffix(".yaml")
+            for path in workflows_root.iterdir()
+            if path.name.endswith(".yaml")
+        )
+        self.assertGreaterEqual(set(workflow_names), {"bugfix", "default", "development", "full-feature", "review"})
+
+        for workflow_name in workflow_names:
+            with self.subTest(workflow=workflow_name):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(main(["workflow", "export", "--workflow", workflow_name]), 0)
+                payload = json.loads(output.getvalue())
+                self.assertEqual(payload["id"], workflow_name)
+                phase_ids = [phase["id"] for phase in payload["phases"]]
+                self.assertEqual(len(phase_ids), len(set(phase_ids)))
+                self.assertGreater(len(phase_ids), 0)
+                phase_set = set(phase_ids)
+                for phase in payload["phases"]:
+                    artifact = phase["artifact"]
+                    self.assertFalse(Path(artifact).is_absolute(), artifact)
+                    self.assertNotIn("..", Path(artifact).parts, artifact)
+                    self.assertRegex(artifact, r"\.(md|json|log)$")
+                    prompt = phase.get("prompt") or ""
+                    output_paths = [
+                        segment.strip().split()[0].strip("`.,")
+                        for segment in prompt.replace("\n", " ").split("Output:")[1:]
+                        if segment.strip()
+                    ]
+                    if output_paths:
+                        self.assertIn(artifact, output_paths)
+                    for target in (phase.get("routes") or {}).values():
+                        if target != "block":
+                            self.assertIn(target, phase_set)
+
     def test_full_feature_workflow_keeps_python_runner_routes(self) -> None:
         import yaml
 
@@ -262,11 +299,22 @@ class CliTest(unittest.TestCase):
             _gates_route_key('{"passed": true, "results": [{"command": "npm test", "passed": true, "output": "ok"}]}'),
             "green",
         )
+        self.assertEqual(
+            _gates_route_key('{"passed": true, "status": "approve", "results": [{"command": "npm test", "passed": true, "output": "ok"}]}'),
+            "approve",
+        )
         self.assertEqual(_gates_route_key('{"passed": false, "results": []}'), "request-changes")
         self.assertEqual(
             _gates_route_key('{"passed": false, "results": [{"id": "lint", "passed": true}]}'),
             "request-changes",
         )
+        self.assertEqual(
+            _gates_route_key('{"passed": false, "status": "request-changes", "results": []}'),
+            "request-changes",
+        )
+        self.assertEqual(_gates_route_key('{"passed": false, "status": "blocked", "results": []}'), "blocked")
+        self.assertEqual(_gates_route_key('{"passed": false, "status": "error", "results": []}'), "error")
+        self.assertEqual(_gates_route_key('{"passed": false, "status": "pending", "results": []}'), "pending")
         self.assertEqual(_route_key("status: failed"), "default")
         self.assertEqual(_route_key("status: pass"), "default")
         self.assertEqual(_route_key("- status: green"), "default")
@@ -2476,6 +2524,16 @@ class CliTest(unittest.TestCase):
             )
             self.assertEqual(stale_comment_fix.returncode, 1)
             self.assertIn("blocked: stale artifact", stale_comment_fix.stderr)
+            stale_comment_status = subprocess.run(
+                (node, cli, "run", "status"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(stale_comment_status.returncode, 0, stale_comment_status.stderr)
+            self.assertIn("reason: stale_artifact", stale_comment_status.stdout)
+            self.assertIn("next_command: agent-flow run advance", stale_comment_status.stdout)
             comment_fix.write_text("pushed comment fixes\n", encoding="utf-8")
             same_ms = json.loads((project_root / ".agent-flow" / "state" / "current-run.json").read_text(encoding="utf-8"))
             entered_ts = _node_epoch_seconds(same_ms["phase_entered_at"])

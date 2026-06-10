@@ -107,10 +107,10 @@ function installProject() {
   copyBundledDirIfMissingOrSame(
     path.join(KIT_ROOT, "workflows"),
     path.join(agentFlowDir, "workflows"),
-    forceManaged,
+    true,
     new Set(),
     true,
-    forceManaged,
+    true,
   );
   const agentFlowSkill = agentFlowSkillMarkdown();
   writeManagedFile(path.join(agentFlowDir, "skills", "agent-flow", "SKILL.md"), agentFlowSkill);
@@ -219,9 +219,6 @@ function runWorkflowCommand(args) {
       throw new Error("run start requires --task");
     }
     const workflow = optionValue(args, "--workflow") ?? "full-feature";
-    if (!["default", "full-feature"].includes(workflow)) {
-      throw new Error(`unknown workflow: ${workflow}`);
-    }
     const runId = optionValue(args, "--run-id") ?? newRunId();
     assertInstalled(root);
     const phases = workflowPhases(workflow);
@@ -795,7 +792,9 @@ function printStatus(state, root) {
       phase.required_markers ?? [],
     );
     status = "blocked";
-    if (missing.length > 0) {
+    if (artifactIsStale(state, resolvedRequiredArtifact)) {
+      reason = "stale_artifact";
+    } else if (missing.length > 0) {
       reason = "missing_completion_markers";
     } else {
       try {
@@ -1334,11 +1333,16 @@ function preferredPython() {
     : null;
   // HOME이 바뀌면 user-site의 yaml을 잃는 시스템 python 대신 kit 자체 venv를 우선한다.
   const kitVenvPython = path.join(KIT_ROOT, ".venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
+  const leaderRoot = resolveManagedWorktreeRoot(KIT_ROOT);
+  const leaderVenvPython = leaderRoot
+    ? path.join(leaderRoot, ".venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python")
+    : null;
   const candidates = [
     process.env.PYTHON,
     process.env.PYTHON_EXECUTABLE,
     virtualEnvPython,
     fs.existsSync(kitVenvPython) ? kitVenvPython : null,
+    leaderVenvPython && fs.existsSync(leaderVenvPython) ? leaderVenvPython : null,
     "python3.12",
     "python3.11",
     "python3.10",
@@ -1351,7 +1355,7 @@ function preferredPython() {
       return candidate;
     }
   }
-  return "python3";
+  throw new Error("no Python with PyYAML available for workflow export");
 }
 
 function pythonSupportsWorkflowExport(candidate) {
@@ -1363,17 +1367,19 @@ function pythonSupportsWorkflowExport(candidate) {
 }
 
 function assertFreshArtifact(state, phase, artifact) {
-  if (!FRESH_ARTIFACT_PHASE_IDS.has(phase.id)) {
+  if (!artifactIsStale(state, artifact)) {
     return;
   }
+  throw new Error(`blocked: stale artifact ${artifact}`);
+}
+
+function artifactIsStale(state, artifact) {
   const enteredAt = Date.parse(state.phase_entered_at ?? state.updated_at ?? state.started_at ?? "");
   if (!Number.isFinite(enteredAt)) {
-    return;
+    return false;
   }
   const artifactMtime = fs.statSync(artifact).mtimeMs;
-  if (artifactMtime < enteredAt) {
-    throw new Error(`blocked: stale artifact ${artifact}`);
-  }
+  return artifactMtime < enteredAt;
 }
 
 function assertCompletionMarkers(phase, artifact) {
@@ -1538,9 +1544,6 @@ function nextPhaseIndex(state, phases, phase, artifact) {
 function syncRouteArtifacts(runDir, phases, currentIndex, nextIndex) {
   if (nextIndex <= currentIndex) {
     for (const phase of phases.slice(nextIndex, currentIndex + 1)) {
-      if (!FRESH_ARTIFACT_PHASE_IDS.has(phase.id)) {
-        continue;
-      }
       const artifact = path.join(runDir, phase.artifact);
       if (fs.existsSync(artifact)) {
         fs.unlinkSync(artifact);
@@ -1808,7 +1811,25 @@ function readGatesRouteKey(pathName) {
     const content = fs.readFileSync(pathName, "utf8");
     const data = JSON.parse(content);
     if (typeof data.passed !== "boolean" || !Array.isArray(data.results) || data.results.length === 0) {
+      if (typeof data.passed === "boolean" && typeof data.status === "string") {
+        const status = data.status.trim().toLowerCase().replace(/_/g, "-");
+        if (data.passed === true && ["green", "approve"].includes(status)) {
+          return status;
+        }
+        if (data.passed === false && ["request-changes", "blocked", "error", "pending"].includes(status)) {
+          return status;
+        }
+      }
       return typeof data.passed === "boolean" && data.passed === false ? "request-changes" : "default";
+    }
+    if (typeof data.status === "string") {
+      const status = data.status.trim().toLowerCase().replace(/_/g, "-");
+      if (data.passed === true && ["green", "approve"].includes(status)) {
+        return status;
+      }
+      if (data.passed === false && ["request-changes", "blocked", "error", "pending"].includes(status)) {
+        return status;
+      }
     }
     // 완료 보고는 실제 실행한 gate command와 결과 evidence가 함께 있을 때만 허용한다.
     const resultsPass = data.results.every((r) =>
@@ -1983,21 +2004,6 @@ function newRunId() {
   const stamp = new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0, 14);
   return `${stamp}-${Math.random().toString(16).slice(2, 10)}`;
 }
-
-const FRESH_ARTIFACT_PHASE_IDS = new Set([
-  "slice-plan",
-  "plan-review",
-  "refactor",
-  "gates",
-  "comment-authoring",
-  "final-review",
-  "multi-review",
-  "fix-loop",
-  "architecture-review",
-  "pr-watch",
-  "pr-comment-fix",
-  "pr-ci-fix",
-]);
 
 function fullFeatureWorkflowYaml() {
   return fullFeatureWorkflow().text;

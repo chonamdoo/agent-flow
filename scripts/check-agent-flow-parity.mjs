@@ -25,6 +25,7 @@ const BUNDLED_HOST_SKILL_NAMES = new Set([
 ]);
 const failures = [];
 const missingFiles = new Set();
+const workflowExportCache = new Map();
 
 function read(rel) {
   return fs.readFileSync(absPath(rel), "utf8");
@@ -213,10 +214,6 @@ if (exportedWorkflow) {
   if (exportedPhases["pr-watch"]?.routes?.skipped !== "handoff") {
     failures.push("workflow export pr-watch skipped route mismatch");
   }
-  assertRouteParity(exportedWorkflow);
-  assertFixLoopRoundParity(exportedWorkflow);
-  assertBackwardFreshArtifactSafety(exportedWorkflow);
-  assertCompletionMarkerPrefixParity(exportedWorkflow);
   assertCleanInstallCopiesTemplates();
 }
 
@@ -259,10 +256,9 @@ if (exportedDefaultWorkflow) {
   if (exportedPhases["pr-watch"]?.routes?.skipped !== "cleanup") {
     failures.push("workflow export default pr-watch skipped route mismatch");
   }
-  assertRouteParity(exportedDefaultWorkflow);
-  assertBackwardFreshArtifactSafety(exportedDefaultWorkflow);
-  assertCompletionMarkerPrefixParity(exportedDefaultWorkflow);
 }
+
+assertAllWorkflowContracts();
 
 // phase 제거가 source/generated copy 중 한 곳에만 반영되는 drift를 막는다.
 for (const rel of fullFeatureWorkflowCopies) {
@@ -504,6 +500,9 @@ function gitOutput(cwd, args) {
 }
 
 function workflowExport(name) {
+  if (workflowExportCache.has(name)) {
+    return workflowExportCache.get(name);
+  }
   const env = {
     ...process.env,
     PYTHONPATH: [path.join(SOURCE_ROOT, "src"), process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
@@ -526,19 +525,76 @@ function workflowExport(name) {
   });
   if (result.error || result.status !== 0) {
     failures.push(`workflow export failed: ${result.error?.message || result.stderr.trim() || result.status}`);
+    workflowExportCache.set(name, null);
     return null;
   }
   try {
     const payload = JSON.parse(result.stdout);
     if (!Array.isArray(payload.phases)) {
       failures.push("workflow export phases must be an array");
+      workflowExportCache.set(name, null);
       return null;
     }
+    workflowExportCache.set(name, payload);
     return payload;
   } catch (error) {
     failures.push(`workflow export invalid JSON: ${error.message}`);
+    workflowExportCache.set(name, null);
     return null;
   }
+}
+
+function assertAllWorkflowContracts() {
+  for (const name of yamlFileNames("workflows").map((file) => file.replace(/\.yaml$/, ""))) {
+    const workflow = workflowExport(name);
+    if (!workflow) {
+      continue;
+    }
+    if (workflow.id !== name) {
+      failures.push(`workflow export ${name} id mismatch: ${workflow.id}`);
+    }
+    assertWorkflowArtifactContract(workflow);
+    assertRouteParity(workflow);
+    assertFixLoopRoundParity(workflow);
+    assertBackwardFreshArtifactSafety(workflow);
+    assertCompletionMarkerPrefixParity(workflow);
+  }
+}
+
+function assertWorkflowArtifactContract(workflow) {
+  const phaseIds = new Set();
+  for (const phase of workflow.phases) {
+    if (phaseIds.has(phase.id)) {
+      failures.push(`workflow ${workflow.id} duplicate phase id ${phase.id}`);
+    }
+    phaseIds.add(phase.id);
+  }
+  for (const phase of workflow.phases) {
+    if (typeof phase.artifact !== "string" || phase.artifact.length === 0) {
+      failures.push(`workflow ${workflow.id} phase ${phase.id} missing artifact`);
+      continue;
+    }
+    if (path.isAbsolute(phase.artifact) || phase.artifact.split(/[\\/]+/).includes("..")) {
+      failures.push(`workflow ${workflow.id} phase ${phase.id} unsafe artifact ${phase.artifact}`);
+    }
+    if (!/\.(md|json|log)$/.test(phase.artifact)) {
+      failures.push(`workflow ${workflow.id} phase ${phase.id} unsupported artifact extension ${phase.artifact}`);
+    }
+    const outputs = promptOutputArtifacts(phase.prompt ?? phase.instruction ?? "");
+    if (outputs.length > 0 && !outputs.includes(phase.artifact)) {
+      failures.push(`workflow ${workflow.id} phase ${phase.id} output/artifact mismatch: artifact=${phase.artifact} outputs=${outputs.join(",")}`);
+    }
+    for (const target of Object.values(phase.routes ?? {})) {
+      if (target !== "block" && !phaseIds.has(target)) {
+        failures.push(`workflow ${workflow.id} phase ${phase.id} route targets unknown phase ${target}`);
+      }
+    }
+  }
+}
+
+function promptOutputArtifacts(prompt) {
+  return [...prompt.matchAll(/Output:\s+`?([A-Za-z0-9_./-]+\.(?:md|json|log))`?\.?/g)]
+    .map((match) => match[1]);
 }
 
 function assertRouteParity(workflow) {
@@ -562,27 +618,10 @@ function assertRouteParity(workflow) {
       "{\"passed\": true, \"results\": [{\"command\": \"npm test\", \"passed\": true, \"output\": \"ok\"}]}\n",
     ],
   ];
-  // verdict/status 라우팅 phase는 required marker까지 채운 artifact로 검사해야
-  // marker 누락이 아니라 route key 해석의 parity를 본다.
-  const routeKeyCases = [
-    ["architecture-review", "approve"],
-    ["architecture-review", "request-changes"],
-    ["architecture-review", "blocked"],
-    ["merge-approval", "approve"],
-    ["merge-approval", "request-changes"],
-    ["pr-watch", "merged"],
-    ["pr-watch", "skipped"],
-    ["pr-watch", "closed"],
-    ["pr-watch", "error"],
-    ["pr-watch", "pending"],
-    ["fix-loop", "default"],
-  ];
-  for (const [phaseId, key] of routeKeyCases) {
-    const phase = workflow.phases.find((candidate) => candidate.id === phaseId);
-    if (!phase) {
-      continue;
+  for (const phase of workflow.phases) {
+    for (const key of Object.keys(phase.routes ?? {})) {
+      cases.push([`${phase.id} ${key}`, phase.id, routeArtifactContent(phase, key)]);
     }
-    cases.push([`${phaseId} ${key}`, phaseId, routeArtifactContent(phase, key)]);
   }
   for (const [label, phaseId, content] of cases) {
     if (!phaseIds.has(phaseId)) {
@@ -631,21 +670,26 @@ function assertCompletionMarkerPrefixParity(workflow) {
 }
 
 function assertFixLoopRoundParity(workflow) {
-  const content = "{\"passed\": false}\n";
-  const pythonAllowed = pythonPhaseOutcome(workflow, "gates", content, { fix_loop_rounds: 2 });
-  const nodeAllowed = nodePhaseOutcome(workflow, "gates", content, { fix_loop_rounds: 2 });
+  const phase = workflow.phases.find((candidate) => Object.values(candidate.routes ?? {}).includes("fix-loop"));
+  if (!phase) {
+    return;
+  }
+  const key = Object.entries(phase.routes).find(([, target]) => target === "fix-loop")?.[0];
+  const content = routeArtifactContent(phase, key);
+  const pythonAllowed = pythonPhaseOutcome(workflow, phase.id, content, { fix_loop_rounds: 2 });
+  const nodeAllowed = nodePhaseOutcome(workflow, phase.id, content, { fix_loop_rounds: 2 });
   if (pythonAllowed && nodeAllowed) {
     if (pythonAllowed.outcome !== nodeAllowed.outcome || pythonAllowed.fix_loop_rounds !== nodeAllowed.fix_loop_rounds) {
-      failures.push("python/node fix-loop round 3 mismatch");
+      failures.push(`python/node fix-loop round 3 mismatch (${workflow.id} ${phase.id})`);
     }
   }
-  const pythonBlocked = pythonPhaseOutcome(workflow, "gates", content, { fix_loop_rounds: 3 });
-  const nodeBlocked = nodePhaseOutcome(workflow, "gates", content, { fix_loop_rounds: 3 });
+  const pythonBlocked = pythonPhaseOutcome(workflow, phase.id, content, { fix_loop_rounds: 3 });
+  const nodeBlocked = nodePhaseOutcome(workflow, phase.id, content, { fix_loop_rounds: 3 });
   if (pythonBlocked && nodeBlocked && (pythonBlocked.outcome !== "blocked" || nodeBlocked.outcome !== "blocked")) {
-    failures.push(`python/node fix-loop round cap mismatch: python=${pythonBlocked.outcome} node=${nodeBlocked.outcome}`);
+    failures.push(`python/node fix-loop round cap mismatch (${workflow.id} ${phase.id}): python=${pythonBlocked.outcome} node=${nodeBlocked.outcome}`);
   }
   if (pythonBlocked && nodeBlocked && pythonBlocked.fix_loop_rounds !== nodeBlocked.fix_loop_rounds) {
-    failures.push(`python/node blocked fix-loop round state mismatch: python=${pythonBlocked.fix_loop_rounds} node=${nodeBlocked.fix_loop_rounds}`);
+    failures.push(`python/node blocked fix-loop round state mismatch (${workflow.id} ${phase.id}): python=${pythonBlocked.fix_loop_rounds} node=${nodeBlocked.fix_loop_rounds}`);
   }
 }
 
@@ -688,6 +732,22 @@ function backwardFreshRouteCases(workflow) {
 }
 
 function routeArtifactContent(phase, key) {
+  if (phase.id === "gates") {
+    if (key === "green" || key === "approve") {
+      return JSON.stringify({
+        passed: true,
+        status: key,
+        results: [{ command: "npm test", passed: true, output: "ok" }],
+      }) + "\n";
+    }
+    if (key === "request-changes" || key === "blocked" || key === "error" || key === "pending") {
+      return JSON.stringify({ passed: false, status: key, results: [] }) + "\n";
+    }
+    return JSON.stringify({ passed: true }) + "\n";
+  }
+  if (phase.multi_review) {
+    return phaseArtifactWithMarkers(phase, multiReviewArtifactContent(key));
+  }
   if (phase.id === "plan-review" || phase.id === "architecture-review" || phase.id === "merge-approval") {
     return phaseArtifactWithMarkers(phase, `verdict: ${key}`);
   }
@@ -698,6 +758,25 @@ function routeArtifactContent(phase, key) {
     return phaseArtifactWithMarkers(phase, "");
   }
   return phaseArtifactWithMarkers(phase, `status: ${key}`);
+}
+
+function multiReviewArtifactContent(key) {
+  const reviewerAVerdict = key === "request-changes" ? "request-changes" : "approve";
+  const reviewerBVerdict = "approve";
+  const overall = key === "request-changes" ? "request-changes" : "approve";
+  return [
+    "## Reviewer A",
+    "reviewer-source: sub-agent",
+    `verdict: ${reviewerAVerdict}`,
+    "",
+    "## Reviewer B",
+    "reviewer-source: sub-agent",
+    `verdict: ${reviewerBVerdict}`,
+    "",
+    "## Overall",
+    `verdict: ${overall}`,
+    "",
+  ].join("\n");
 }
 
 function assertCleanInstallCopiesTemplates() {

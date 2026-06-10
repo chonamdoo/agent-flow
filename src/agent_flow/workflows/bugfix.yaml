@@ -1,17 +1,62 @@
 id: bugfix
 description: Reproduce, fix, review, and verify a defect.
-stages:
+phases:
   - id: reproduce
     role: explorer
-    parallel: false
+    description: Reproduce the reported defect and capture the failing behavior.
+    prompt: |
+      Reproduce the defect. Record exact steps, observed behavior, expected behavior,
+      and the smallest failing command or test when available.
+      Output: reproduce.md.
+
   - id: implement-fix
     role: fixer
-    parallel: false
+    description: Fix the reproduced defect.
+    prompt: |
+      Fix only the reproduced defect. Keep the change scoped to the failing behavior
+      and update or add the narrowest regression test that proves the fix.
+      Output: implement-fix.md.
+
   - id: review
     role: reviewer
     parallel: true
     replicas: 3
+    description: Review the bug fix.
+    multi_review: true
+    routes:
+      approve: qa
+      request-changes: implement-fix
+    prompt: |
+      Run at least two independent sub-agent reviewers in parallel. Each reviewer
+      checks the reproduced failure, the fix scope, regression coverage, and
+      unintended behavior changes.
+      Each reviewer section must include `reviewer-source: sub-agent` and an
+      independent verdict: approve or request-changes. Any request-changes from
+      any reviewer makes the overall verdict request-changes.
+      End with `## Overall` followed by exactly one verdict line:
+      `verdict: approve` or `verdict: request-changes`.
+      Output: review.md.
+
   - id: qa
     role: qa
-    parallel: false
+    description: Verify the fixed defect.
+    routes:
+      green: handoff
+      approve: handoff
+      request-changes: implement-fix
+      blocked: implement-fix
+      error: implement-fix
+      default: implement-fix
+    prompt: |
+      Run the regression test and the smallest relevant quality checks for the
+      touched stack. Output `status: green` when verified, or
+      `status: request-changes`, `status: blocked`, or `status: error` with the
+      exact failure.
+      Output: qa.md.
 
+  - id: handoff
+    role: qa
+    description: Summarize the defect fix result.
+    prompt: |
+      Summarize the reproduced defect, fix, verification, and any residual risk.
+      Output: handoff.md.
