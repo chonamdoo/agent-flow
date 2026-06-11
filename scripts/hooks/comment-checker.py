@@ -11,6 +11,7 @@ from typing import Iterable
 
 CODE_EXTENSIONS = {
     ".py",
+    ".java",
     ".kt",
     ".kts",
     ".ts",
@@ -18,6 +19,37 @@ CODE_EXTENSIONS = {
     ".js",
     ".jsx",
     ".swift",
+}
+
+EXCLUDED_PATH_PARTS = {
+    ".git",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".tox",
+    "__pycache__",
+    "node_modules",
+}
+
+EXCLUDED_AGENT_FLOW_DIRS = {
+    "cache",
+    "caches",
+    "index",
+    "indexes",
+    "logs",
+    "memory",
+    "runs",
+}
+
+EXCLUDED_TOOL_MEMORY_DIRS = {
+    ".claude",
+    ".codex",
+    ".gemini",
+}
+
+EXCLUDED_TOOL_MEMORY_NAMES = {
+    "memory.json",
+    "memory.md",
 }
 
 ALLOWED_REASON_RE = re.compile(
@@ -71,7 +103,7 @@ def check_payload(payload: object) -> Iterable[tuple[str, int, str]]:
     if tool and not re.search(r"(apply_patch|write|edit|multiedit|multi_edit)", tool, re.IGNORECASE):
         return []
 
-    tool_input = find_first(payload, ("tool_input",))
+    tool_input = find_first(payload, ("tool_input", "input", "parameters"))
     if isinstance(tool_input, str):
         if "*** Begin Patch" in tool_input:
             return check_patch(tool_input)
@@ -96,7 +128,7 @@ def check_payload(payload: object) -> Iterable[tuple[str, int, str]]:
 
 def check_edit_mapping(tool_input: dict[str, object]) -> list[tuple[str, int, str]]:
     file_path = string_value(tool_input.get("file_path")) or string_value(tool_input.get("path"))
-    if not file_path or not is_code_file(file_path):
+    if not file_path or not should_check_file(file_path):
         return []
 
     new_text = (
@@ -154,7 +186,7 @@ def check_patch(patch_text: str) -> list[tuple[str, int, str]]:
             current_file = raw.split(": ", 1)[1].strip()
             line_number = 0
             continue
-        if not current_file or not is_code_file(current_file):
+        if not current_file or not should_check_file(current_file):
             continue
         if raw.startswith("@@"):
             flush_hunk()
@@ -393,6 +425,24 @@ def normalize_comment_text(text: str) -> str:
 
 def is_code_file(file_path: str) -> bool:
     return Path(file_path).suffix.lower() in CODE_EXTENSIONS
+
+
+def should_check_file(file_path: str) -> bool:
+    return not is_excluded_path(file_path) and is_code_file(file_path)
+
+
+def is_excluded_path(file_path: str) -> bool:
+    parts = tuple(part.lower() for part in re.split(r"[\\/]+", file_path) if part and part != ".")
+    if EXCLUDED_PATH_PARTS.intersection(parts):
+        return True
+    if parts and parts[-1] in EXCLUDED_TOOL_MEMORY_NAMES:
+        return True
+    for index, part in enumerate(parts[:-1]):
+        if part == ".agent-flow" and parts[index + 1] in EXCLUDED_AGENT_FLOW_DIRS:
+            return True
+        if part in EXCLUDED_TOOL_MEMORY_DIRS and parts[index + 1] == "memory":
+            return True
+    return False
 
 
 def find_mapping(value: object, key: str) -> dict[str, object] | None:

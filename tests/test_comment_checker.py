@@ -36,6 +36,20 @@ def run_payload(payload: object) -> subprocess.CompletedProcess[str]:
     )
 
 
+def host_payload(
+    tool_key: str,
+    input_key: str,
+    tool_name: str,
+    tool_input: object,
+) -> dict[str, object]:
+    return {
+        tool_key: tool_name,
+        "hook_event_name": "PostToolUse",
+        "cwd": str(ROOT),
+        input_key: tool_input,
+    }
+
+
 def test_blocks_new_low_value_comment() -> None:
     result = run_checker(
         {
@@ -47,6 +61,19 @@ def test_blocks_new_low_value_comment() -> None:
 
     assert result.returncode == 2
     assert "low-value comments" in result.stderr
+    assert "Initialize value" in result.stderr
+
+
+def test_blocks_java_low_value_comment() -> None:
+    result = run_checker(
+        {
+            "file_path": "Sample.java",
+            "old_string": "class Sample {}\n",
+            "new_string": "// Initialize value\nclass Sample {}\n",
+        }
+    )
+
+    assert result.returncode == 2
     assert "Initialize value" in result.stderr
 
 
@@ -181,6 +208,126 @@ def test_apply_patch_detects_added_comment() -> None:
 
     assert result.returncode == 2
     assert "src/demo.ts" in result.stderr
+
+
+def test_skips_generated_artifact_and_memory_paths() -> None:
+    paths = [
+        ".git/agent-flow/worktrees/feat-x/.agent-flow/runs/full-feature/smoke/artifacts/design.py",
+        ".agent-flow/runs/default/task/artifacts/design.py",
+        ".agent-flow/cache/hook.py",
+        ".agent-flow/caches/hook.py",
+        ".agent-flow/index/hook.py",
+        ".agent-flow/memory/session.py",
+        ".agent-flow/logs/hook.py",
+        ".agent-flow/indexes/comments.py",
+        ".Codex/memory/session.py",
+        r".git\agent-flow\worktrees\feat-x\.agent-flow\runs\full-feature\smoke\artifacts\design.py",
+    ]
+    for file_path in paths:
+        result = run_checker(
+            {
+                "file_path": file_path,
+                "old_string": "value = 1\n",
+                "new_string": "# Initialize value\nvalue = 1\n",
+            }
+        )
+
+        assert result.returncode == 0, file_path
+        assert result.stderr == ""
+
+
+def test_skips_agent_flow_run_markdown_artifact() -> None:
+    result = run_checker(
+        {
+            "file_path": ".git/agent-flow/worktrees/feat-x/.agent-flow/runs/full-feature/smoke/artifacts/design.md",
+            "old_string": "",
+            "new_string": "## Open decisions (surfaced, defaulted)\n",
+        }
+    )
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+
+
+def test_apply_patch_skips_generated_artifact_path() -> None:
+    patch = """*** Begin Patch
+*** Update File: .git/agent-flow/worktrees/feat-x/.agent-flow/runs/full-feature/smoke/artifacts/design.py
+@@
++# Set value
++value = 1
+*** End Patch
+"""
+    result = run_checker({"command": patch})
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+
+
+def test_codex_and_claude_payloads_share_path_scope_for_write_edit_multiedit() -> None:
+    artifact_path = ".git/agent-flow/worktrees/feat-x/.agent-flow/runs/full-feature/smoke/artifacts/design.py"
+    source_path = "src/demo.py"
+    cases = [
+        (
+            "Write",
+            lambda file_path: {
+                "file_path": file_path,
+                "content": "# Initialize value\nvalue = 1\n",
+            },
+        ),
+        (
+            "Edit",
+            lambda file_path: {
+                "file_path": file_path,
+                "old_string": "value = 1\n",
+                "new_string": "# Initialize value\nvalue = 1\n",
+            },
+        ),
+        (
+            "MultiEdit",
+            lambda file_path: {
+                "file_path": file_path,
+                "edits": [
+                    {
+                        "old_string": "value = 1\n",
+                        "new_string": "# Initialize value\nvalue = 1\n",
+                    }
+                ],
+            },
+        ),
+    ]
+    for tool_key, input_key in (("tool", "input"), ("tool_name", "tool_input")):
+        for tool_name, make_input in cases:
+            artifact = run_payload(host_payload(tool_key, input_key, tool_name, make_input(artifact_path)))
+            source = run_payload(host_payload(tool_key, input_key, tool_name, make_input(source_path)))
+
+            assert artifact.returncode == 0, (tool_key, tool_name)
+            assert artifact.stderr == ""
+            assert source.returncode == 2, (tool_key, tool_name)
+            assert "Initialize value" in source.stderr
+
+
+def test_codex_apply_patch_payload_shares_path_scope() -> None:
+    artifact_patch = """*** Begin Patch
+*** Update File: .git/agent-flow/worktrees/feat-x/.agent-flow/runs/full-feature/smoke/artifacts/design.py
+@@
++# Set value
++value = 1
+*** End Patch
+"""
+    source_patch = """*** Begin Patch
+*** Update File: src/demo.py
+@@
++# Set value
++value = 1
+*** End Patch
+"""
+    artifact = run_payload(host_payload("tool", "input", "apply_patch", artifact_patch))
+    source = run_payload(host_payload("tool", "input", "apply_patch", source_patch))
+
+    assert artifact.returncode == 0
+    assert artifact.stderr == ""
+    assert source.returncode == 2
+    assert "Set value" in source.stderr
 
 
 def test_freeform_apply_patch_detects_added_comment() -> None:
