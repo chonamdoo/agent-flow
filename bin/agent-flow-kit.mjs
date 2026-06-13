@@ -148,7 +148,8 @@ function installProject() {
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "profiles"), path.join(agentFlowDir, "profiles"), forceManaged);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "templates"), path.join(agentFlowDir, "templates"), forceManaged, new Set(), true, forceManaged);
   const skillIndex = installProjectSkills(root, agentFlowDir, previousSkillIndex, forceManaged);
-  copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "scripts"), path.join(root, "scripts"), forceManaged);
+  copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "scripts"), path.join(agentFlowDir, "scripts"), forceManaged);
+  removeManagedDirIfSame(path.join(KIT_ROOT, "scripts"), path.join(root, "scripts"), forceManaged);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "agents"), path.join(root, ".Codex", "agents"), forceManaged);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "rules", "context"), path.join(root, ".Codex", "rules", "context"), forceManaged);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "context"), path.join(root, ".Codex", "context"), forceManaged);
@@ -2106,7 +2107,7 @@ function shellQuote(value) {
 }
 
 function hookScriptCommand(root, scriptName) {
-  return shellQuote(path.join(root, "scripts", "hooks", scriptName));
+  return shellQuote(path.join(root, ".agent-flow", "scripts", "hooks", scriptName));
 }
 
 function unquoteShellWord(value) {
@@ -2120,9 +2121,16 @@ function unquoteShellWord(value) {
 }
 
 function managedHookScriptName(command) {
-  const normalized = unquoteShellWord(command).replaceAll("\\", "/");
+  const normalized = unquoteShellWord(command).replaceAll("\\", "/").replaceAll("'", "").replaceAll('"', "");
   for (const scriptName of ["guard-worktree.sh", "guard-protected-branch.sh", "show-phase-status.sh", "comment-checker.py"]) {
-    if (normalized === `scripts/hooks/${scriptName}` || normalized.endsWith(`/scripts/hooks/${scriptName}`)) {
+    if (
+      normalized === `.agent-flow/scripts/hooks/${scriptName}` ||
+      normalized === `scripts/hooks/${scriptName}` ||
+      normalized.endsWith(`/.agent-flow/scripts/hooks/${scriptName}`) ||
+      normalized.endsWith(`/scripts/hooks/${scriptName}`) ||
+      normalized.includes(`/.agent-flow/scripts/hooks/${scriptName}`) ||
+      normalized.includes(`/scripts/hooks/${scriptName}`)
+    ) {
       return scriptName;
     }
   }
@@ -2202,12 +2210,34 @@ function readHookSettings(settingsPath) {
   }
 }
 
+function mergeHookConfig(settings, source) {
+  if (!source || typeof source !== "object") {
+    return;
+  }
+  for (const [key, value] of Object.entries(source)) {
+    if (key !== "hooks" && settings[key] === undefined) {
+      settings[key] = value;
+    }
+  }
+  if (source.hooks) {
+    mergeHookSettings(settings, source.hooks);
+  }
+}
+
 function installCodexHooks(root) {
-  const settingsPath = path.join(root, ".Codex", "hooks.json");
-  const settings = readHookSettings(settingsPath);
+  const settingsPaths = [
+    path.join(root, ".Codex", "hooks.json"),
+    path.join(root, ".codex", "hooks.json"),
+  ];
+  const settings = {};
+  for (const settingsPath of settingsPaths) {
+    mergeHookConfig(settings, readHookSettings(settingsPath));
+  }
   mergeHookSettings(settings, codexHooksSettings(root).hooks);
-  fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-  fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+  for (const settingsPath of settingsPaths) {
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+  }
 }
 
 function claudeHooksSettings(root) {
@@ -2246,7 +2276,7 @@ function installClaudeHooks(root) {
 }
 
 function makeHooksExecutable(root) {
-  const hooksDir = path.join(root, "scripts", "hooks");
+  const hooksDir = path.join(root, ".agent-flow", "scripts", "hooks");
   if (!fs.existsSync(hooksDir)) {
     return;
   }

@@ -831,33 +831,40 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
         failures.push(`${label} clean install ${installedRel} differs from ${rel}`);
       }
     }
-    const installedHooks = path.join(tempRoot, ".Codex", "hooks.json");
-    if (!fs.existsSync(installedHooks)) {
-      failures.push(`${label} clean install missing .Codex/hooks.json`);
-    } else {
+    const installedChecker = path.join(tempRoot, ".agent-flow", "scripts", "hooks", "comment-checker.py");
+    for (const [rel, installedHooks] of [
+      [".Codex/hooks.json", path.join(tempRoot, ".Codex", "hooks.json")],
+      [".codex/hooks.json", path.join(tempRoot, ".codex", "hooks.json")],
+    ]) {
+      if (!fs.existsSync(installedHooks)) {
+        failures.push(`${label} clean install missing ${rel}`);
+        continue;
+      }
       const hooksText = fs.readFileSync(installedHooks, "utf8");
       if (!hooksText.includes("comment-checker.py")) {
-        failures.push(`${label} clean install .Codex/hooks.json missing comment-checker hook`);
+        failures.push(`${label} clean install ${rel} missing comment-checker hook`);
       }
       if (!hooksText.includes("custom-post-hook")) {
-        failures.push(`${label} clean install .Codex/hooks.json did not preserve existing custom hook`);
+        failures.push(`${label} clean install ${rel} did not preserve existing custom hook`);
       }
-      if (!hooksText.includes(path.join(tempRoot, "scripts", "hooks", "comment-checker.py"))) {
-        failures.push(`${label} clean install .Codex/hooks.json does not use project-local comment-checker`);
+      if (!hooksText.includes(installedChecker)) {
+        failures.push(`${label} clean install ${rel} does not use installed comment-checker`);
       }
       if (hooksText.includes(SOURCE_ROOT)) {
-        failures.push(`${label} clean install .Codex/hooks.json leaks source root`);
+        failures.push(`${label} clean install ${rel} leaks source root`);
       }
     }
-    const installedChecker = path.join(tempRoot, "scripts", "hooks", "comment-checker.py");
     if (!fs.existsSync(installedChecker)) {
-      failures.push(`${label} clean install missing scripts/hooks/comment-checker.py`);
+      failures.push(`${label} clean install missing .agent-flow/scripts/hooks/comment-checker.py`);
     } else {
       try {
         fs.accessSync(installedChecker, fs.constants.X_OK);
       } catch {
         failures.push(`${label} clean install comment-checker.py is not executable`);
       }
+    }
+    if (fs.existsSync(path.join(tempRoot, "scripts", "hooks", "comment-checker.py"))) {
+      failures.push(`${label} clean install duplicated legacy scripts/hooks/comment-checker.py`);
     }
     const claudeSettingsPath = path.join(tempRoot, ".claude", "settings.json");
     if (!fs.existsSync(claudeSettingsPath)) {
@@ -867,8 +874,8 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
       if (!claudeSettingsText.includes("PostToolUse") || !claudeSettingsText.includes("comment-checker.py")) {
         failures.push(`${label} clean install .claude/settings.json missing comment-checker PostToolUse hook`);
       }
-      if (!claudeSettingsText.includes(path.join(tempRoot, "scripts", "hooks", "comment-checker.py"))) {
-        failures.push(`${label} clean install .claude/settings.json does not use project-local comment-checker`);
+      if (!claudeSettingsText.includes(installedChecker)) {
+        failures.push(`${label} clean install .claude/settings.json does not use installed comment-checker`);
       }
       if (claudeSettingsText.includes(SOURCE_ROOT)) {
         failures.push(`${label} clean install .claude/settings.json leaks source root`);
@@ -940,12 +947,13 @@ function readJsonSafe(pathName) {
 function assertInstalledHookParity(label, tempRoot) {
   const claude = readJsonSafe(path.join(tempRoot, ".claude", "settings.json"));
   const codex = readJsonSafe(path.join(tempRoot, ".Codex", "hooks.json"));
-  if (!claude?.hooks || !codex?.hooks) {
+  const lowerCodex = readJsonSafe(path.join(tempRoot, ".codex", "hooks.json"));
+  if (!claude?.hooks || !codex?.hooks || !lowerCodex?.hooks) {
     failures.push(`${label} install missing claude or codex hook settings`);
     return;
   }
   const managedScripts = ["guard-worktree.sh", "guard-protected-branch.sh", "comment-checker.py", "show-phase-status.sh"];
-  for (const [host, settings] of [["claude", claude], ["codex", codex]]) {
+  for (const [host, settings] of [["claude", claude], ["codex", codex], ["codex-lower", lowerCodex]]) {
     for (const event of ["PreToolUse", "PostToolUse", "Stop"]) {
       const entries = settings.hooks[event];
       if (!Array.isArray(entries) || entries.length === 0) {
@@ -976,6 +984,10 @@ function assertInstalledHookParity(label, tempRoot) {
   const codexMatcher = managedPostToolUseMatcher(codex);
   if (!codexMatcher.includes("apply_patch")) {
     failures.push(`${label} codex PostToolUse matcher must cover apply_patch, got ${codexMatcher}`);
+  }
+  const lowerCodexMatcher = managedPostToolUseMatcher(lowerCodex);
+  if (!lowerCodexMatcher.includes("apply_patch")) {
+    failures.push(`${label} codex-lower PostToolUse matcher must cover apply_patch, got ${lowerCodexMatcher}`);
   }
 }
 

@@ -331,7 +331,7 @@ function shellQuote(value) {
 }
 
 function hookScriptCommand(root, scriptName) {
-  return shellQuote(path.join(root, "scripts", "hooks", scriptName));
+  return shellQuote(path.join(root, ".agent-flow", "scripts", "hooks", scriptName));
 }
 
 function codexHooksSettings(root) {
@@ -372,9 +372,16 @@ function unquoteShellWord(value) {
 }
 
 function managedHookScriptName(command) {
-  const normalized = unquoteShellWord(command).replaceAll("\\", "/");
+  const normalized = unquoteShellWord(command).replaceAll("\\", "/").replaceAll("'", "").replaceAll('"', "");
   for (const scriptName of ["guard-worktree.sh", "guard-protected-branch.sh", "show-phase-status.sh", "comment-checker.py"]) {
-    if (normalized === `scripts/hooks/${scriptName}` || normalized.endsWith(`/scripts/hooks/${scriptName}`)) {
+    if (
+      normalized === `.agent-flow/scripts/hooks/${scriptName}` ||
+      normalized === `scripts/hooks/${scriptName}` ||
+      normalized.endsWith(`/.agent-flow/scripts/hooks/${scriptName}`) ||
+      normalized.endsWith(`/scripts/hooks/${scriptName}`) ||
+      normalized.includes(`/.agent-flow/scripts/hooks/${scriptName}`) ||
+      normalized.includes(`/scripts/hooks/${scriptName}`)
+    ) {
       return scriptName;
     }
   }
@@ -427,12 +434,34 @@ function readHookSettings(settingsPath) {
   }
 }
 
+function mergeHookConfig(settings, source) {
+  if (!source || typeof source !== "object") {
+    return;
+  }
+  for (const [key, value] of Object.entries(source)) {
+    if (key !== "hooks" && settings[key] === undefined) {
+      settings[key] = value;
+    }
+  }
+  if (source.hooks) {
+    mergeHookSettings(settings, source.hooks);
+  }
+}
+
 function installCodexHooks(root) {
-  const settingsPath = path.join(root, ".Codex", "hooks.json");
-  const settings = readHookSettings(settingsPath);
+  const settingsPaths = [
+    path.join(root, ".Codex", "hooks.json"),
+    path.join(root, ".codex", "hooks.json"),
+  ];
+  const settings = {};
+  for (const settingsPath of settingsPaths) {
+    mergeHookConfig(settings, readHookSettings(settingsPath));
+  }
   mergeHookSettings(settings, codexHooksSettings(root).hooks);
-  ensureDir(path.dirname(settingsPath));
-  fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+  for (const settingsPath of settingsPaths) {
+    ensureDir(path.dirname(settingsPath));
+    fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+  }
   return true;
 }
 
@@ -472,7 +501,7 @@ function installClaudeHooks(root) {
 }
 
 function makeHooksExecutable(root) {
-  const hooksDir = path.join(root, "scripts", "hooks");
+  const hooksDir = path.join(root, ".agent-flow", "scripts", "hooks");
   if (!fs.existsSync(hooksDir)) {
     return;
   }
@@ -952,11 +981,12 @@ function install() {
   );
   const scriptsCopied = copyDir(
     path.join(KIT_ROOT, "scripts"),
-    path.join(PROJECT, "scripts"),
+    path.join(AF_DIR, "scripts"),
     new Set(),
     true,
     FORCE_MANAGED,
   );
+  removeDirIfSame(path.join(KIT_ROOT, "scripts"), path.join(PROJECT, "scripts"), FORCE_MANAGED);
   makeHooksExecutable(PROJECT);
   const codexHooksCopied = installCodexHooks(PROJECT);
   installClaudeHooks(PROJECT);

@@ -796,20 +796,26 @@ class CliTest(unittest.TestCase):
                 (project_root / ".agent-flow" / "skills" / "comment-authoring-discipline" / "SKILL.md").is_file()
             )
             self.assertTrue((project_root / ".agent-flow" / "skills" / "comment-checker" / "SKILL.md").is_file())
-            self.assertTrue((project_root / ".Codex" / "hooks.json").is_file())
-            codex_hooks = json.loads((project_root / ".Codex" / "hooks.json").read_text(encoding="utf-8"))
-            codex_hook_commands = [
-                hook["command"]
-                for entry in codex_hooks["hooks"]["PostToolUse"]
-                for hook in entry["hooks"]
-            ]
-            expected_comment_checker = f"'{project_root.resolve() / 'scripts' / 'hooks' / 'comment-checker.py'}'"
-            self.assertIn(
-                expected_comment_checker,
-                codex_hook_commands,
+            expected_comment_checker = (
+                f"'{project_root.resolve() / '.agent-flow' / 'scripts' / 'hooks' / 'comment-checker.py'}'"
             )
-            self.assertNotIn(str(Path(__file__).resolve().parents[1]), "\n".join(codex_hook_commands))
-            self.assertTrue(os.access(project_root / "scripts" / "hooks" / "comment-checker.py", os.X_OK))
+            for hooks_path in (
+                project_root / ".Codex" / "hooks.json",
+                project_root / ".codex" / "hooks.json",
+            ):
+                self.assertTrue(hooks_path.is_file())
+                codex_hooks = json.loads(hooks_path.read_text(encoding="utf-8"))
+                codex_hook_commands = [
+                    hook["command"]
+                    for entry in codex_hooks["hooks"]["PostToolUse"]
+                    for hook in entry["hooks"]
+                ]
+                self.assertIn(expected_comment_checker, codex_hook_commands)
+                self.assertNotIn(str(Path(__file__).resolve().parents[1]), "\n".join(codex_hook_commands))
+            self.assertTrue(
+                os.access(project_root / ".agent-flow" / "scripts" / "hooks" / "comment-checker.py", os.X_OK)
+            )
+            self.assertFalse((project_root / "scripts" / "hooks" / "comment-checker.py").exists())
             self.assertTrue(
                 (project_root / ".agent-flow" / "skills" / "agent-flow-concise-output" / "SKILL.md").is_file()
             )
@@ -915,10 +921,10 @@ class CliTest(unittest.TestCase):
             ]
             resolved_root = project_root.resolve()
             expected = [
-                f"'{resolved_root / 'scripts' / 'hooks' / 'guard-worktree.sh'}'",
-                f"'{resolved_root / 'scripts' / 'hooks' / 'guard-protected-branch.sh'}'",
-                f"'{resolved_root / 'scripts' / 'hooks' / 'comment-checker.py'}'",
-                f"'{resolved_root / 'scripts' / 'hooks' / 'show-phase-status.sh'}'",
+                f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-worktree.sh'}'",
+                f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-protected-branch.sh'}'",
+                f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'comment-checker.py'}'",
+                f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'show-phase-status.sh'}'",
             ]
             self.assertEqual(commands, expected)
             stop_hook = subprocess.run(
@@ -954,19 +960,108 @@ class CliTest(unittest.TestCase):
                 for entry in settings["hooks"][event]
                 for hook in entry["hooks"]
             ]
-            expected_checker = f"'{project_root.resolve() / 'scripts' / 'hooks' / 'comment-checker.py'}'"
+            expected_checker = (
+                f"'{project_root.resolve() / '.agent-flow' / 'scripts' / 'hooks' / 'comment-checker.py'}'"
+            )
             self.assertIn(expected_checker, commands)
-            self.assertTrue(os.access(project_root / "scripts" / "hooks" / "comment-checker.py", os.X_OK))
+            self.assertTrue(
+                os.access(project_root / ".agent-flow" / "scripts" / "hooks" / "comment-checker.py", os.X_OK)
+            )
+            self.assertFalse((project_root / "scripts" / "hooks" / "comment-checker.py").exists())
 
-    def test_node_installers_merge_existing_codex_hooks(self) -> None:
+    def test_node_installers_remove_managed_legacy_root_scripts(self) -> None:
         for installer in ("agent-flow-kit.mjs", "agent-flow-install.mjs"):
             with self.subTest(installer=installer):
                 with tempfile.TemporaryDirectory() as temp_dir:
-                    project_root = Path(temp_dir) / "project with existing codex hook"
+                    project_root = Path(temp_dir) / "project"
                     project_root.mkdir()
-                    hooks_path = project_root / ".Codex" / "hooks.json"
-                    hooks_path.parent.mkdir()
-                    hooks_path.write_text(
+                    shutil.copytree(Path(__file__).resolve().parents[1] / "scripts", project_root / "scripts")
+                    node = _node_executable()
+                    result = subprocess.run(
+                        (
+                            node,
+                            str(Path(__file__).resolve().parents[1] / "bin" / installer),
+                            "install",
+                        ),
+                        cwd=project_root,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertTrue(
+                        (project_root / ".agent-flow" / "scripts" / "hooks" / "comment-checker.py").is_file()
+                    )
+                    self.assertFalse((project_root / "scripts").exists())
+
+    def test_node_installers_merge_existing_codex_hooks(self) -> None:
+        for installer in ("agent-flow-kit.mjs", "agent-flow-install.mjs"):
+            for seed_dir, custom_command in (
+                (".Codex", "custom-upper-post-hook"),
+                (".codex", "custom-lower-post-hook"),
+            ):
+                with self.subTest(installer=installer, seed_dir=seed_dir):
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        project_root = Path(temp_dir) / "project with existing codex hook"
+                        project_root.mkdir()
+                        hooks_path = project_root / seed_dir / "hooks.json"
+                        hooks_path.parent.mkdir()
+                        hooks_path.write_text(
+                            json.dumps(
+                                {
+                                    "hooks": {
+                                        "PostToolUse": [
+                                            {
+                                                "matcher": "CustomTool",
+                                                "hooks": [{"type": "command", "command": custom_command}],
+                                            }
+                                        ]
+                                    }
+                                },
+                                indent=2,
+                            )
+                            + "\n",
+                            encoding="utf-8",
+                        )
+                        node = _node_executable()
+                        result = subprocess.run(
+                            (
+                                node,
+                                str(Path(__file__).resolve().parents[1] / "bin" / installer),
+                                "install",
+                            ),
+                            cwd=project_root,
+                            text=True,
+                            capture_output=True,
+                            check=False,
+                        )
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        expected_checker = (
+                            f"'{project_root.resolve() / '.agent-flow' / 'scripts' / 'hooks' / 'comment-checker.py'}'"
+                        )
+                        for installed_hooks_path in (
+                            project_root / ".Codex" / "hooks.json",
+                            project_root / ".codex" / "hooks.json",
+                        ):
+                            codex_hooks = json.loads(installed_hooks_path.read_text(encoding="utf-8"))
+                            commands = [
+                                hook["command"]
+                                for entries in codex_hooks["hooks"].values()
+                                for entry in entries
+                                for hook in entry["hooks"]
+                            ]
+                            self.assertIn(custom_command, commands)
+                            self.assertIn(expected_checker, commands)
+
+    def test_node_installers_preserve_existing_claude_custom_hooks(self) -> None:
+        for installer in ("agent-flow-kit.mjs", "agent-flow-install.mjs"):
+            with self.subTest(installer=installer):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    project_root = Path(temp_dir) / "project with existing claude hook"
+                    project_root.mkdir()
+                    settings_path = project_root / ".claude" / "settings.json"
+                    settings_path.parent.mkdir()
+                    settings_path.write_text(
                         json.dumps(
                             {
                                 "hooks": {
@@ -996,62 +1091,84 @@ class CliTest(unittest.TestCase):
                         check=False,
                     )
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    codex_hooks = json.loads(hooks_path.read_text(encoding="utf-8"))
+                    settings = json.loads(settings_path.read_text(encoding="utf-8"))
                     commands = [
                         hook["command"]
-                        for entries in codex_hooks["hooks"].values()
+                        for entries in settings["hooks"].values()
                         for entry in entries
                         for hook in entry["hooks"]
                     ]
-                    expected_checker = f"'{project_root.resolve() / 'scripts' / 'hooks' / 'comment-checker.py'}'"
+                    expected_checker = (
+                        f"'{project_root.resolve() / '.agent-flow' / 'scripts' / 'hooks' / 'comment-checker.py'}'"
+                    )
                     self.assertIn("custom-post-hook", commands)
                     self.assertIn(expected_checker, commands)
 
     def test_node_installers_dedupe_stop_hook_on_upgrade(self) -> None:
         # 과거 설치본은 Stop entry에 matcher: ""를 기록했다. 재설치 시 중복되면 안 된다.
         for installer in ("agent-flow-kit.mjs", "agent-flow-install.mjs"):
-            with self.subTest(installer=installer):
-                with tempfile.TemporaryDirectory() as temp_dir:
-                    project_root = Path(temp_dir) / "project"
-                    project_root.mkdir()
-                    node = _node_executable()
-                    stop_command = f"'{project_root.resolve() / 'scripts' / 'hooks' / 'show-phase-status.sh'}'"
-                    seeded = {
-                        "hooks": {
-                            "Stop": [
-                                {
-                                    "matcher": "",
-                                    "hooks": [{"type": "command", "command": stop_command}],
-                                }
-                            ]
-                        }
-                    }
-                    for seeded_path in (
-                        project_root / ".Codex" / "hooks.json",
-                        project_root / ".claude" / "settings.json",
-                    ):
-                        seeded_path.parent.mkdir(parents=True, exist_ok=True)
-                        seeded_path.write_text(json.dumps(seeded, indent=2) + "\n", encoding="utf-8")
-                    result = subprocess.run(
-                        (
-                            node,
-                            str(Path(__file__).resolve().parents[1] / "bin" / installer),
-                            "install",
-                        ),
-                        cwd=project_root,
-                        text=True,
-                        capture_output=True,
-                        check=False,
-                    )
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    for settings_path in (
-                        project_root / ".Codex" / "hooks.json",
-                        project_root / ".claude" / "settings.json",
-                    ):
-                        settings = json.loads(settings_path.read_text(encoding="utf-8"))
-                        self.assertEqual(
-                            len(settings["hooks"]["Stop"]), 1, f"{installer}: {settings_path}"
+            for scenario, codex_dir in (("root-script", ".Codex"), ("cd-script", ".codex")):
+                with self.subTest(installer=installer, scenario=scenario):
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        project_root = Path(temp_dir) / "project"
+                        project_root.mkdir()
+                        node = _node_executable()
+                        stop_command = f"'{project_root.resolve() / 'scripts' / 'hooks' / 'show-phase-status.sh'}'"
+                        cd_stop_command = (
+                            f"cd '{project_root.resolve()}' && "
+                            f"'{project_root.resolve() / '.agent-flow' / 'scripts' / 'hooks' / 'show-phase-status.sh'}'"
                         )
+                        expected_stop_command = (
+                            f"'{project_root.resolve() / '.agent-flow' / 'scripts' / 'hooks' / 'show-phase-status.sh'}'"
+                        )
+                        legacy_command = stop_command if scenario == "root-script" else cd_stop_command
+                        seeded = {
+                            "hooks": {
+                                "Stop": [
+                                    {
+                                        "matcher": "",
+                                        "hooks": [{"type": "command", "command": legacy_command}],
+                                    }
+                                ]
+                            }
+                        }
+                        for seeded_path in (
+                            project_root / codex_dir / "hooks.json",
+                            project_root / ".claude" / "settings.json",
+                        ):
+                            seeded_path.parent.mkdir(parents=True, exist_ok=True)
+                            seeded_path.write_text(json.dumps(seeded, indent=2) + "\n", encoding="utf-8")
+                        result = subprocess.run(
+                            (
+                                node,
+                                str(Path(__file__).resolve().parents[1] / "bin" / installer),
+                                "install",
+                            ),
+                            cwd=project_root,
+                            text=True,
+                            capture_output=True,
+                            check=False,
+                        )
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        for settings_path in (
+                            project_root / ".Codex" / "hooks.json",
+                            project_root / ".codex" / "hooks.json",
+                            project_root / ".claude" / "settings.json",
+                        ):
+                            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+                            self.assertEqual(
+                                len(settings["hooks"]["Stop"]), 1, f"{installer}: {settings_path}"
+                            )
+                            stop_commands = [
+                                hook["command"]
+                                for entry in settings["hooks"]["Stop"]
+                                for hook in entry["hooks"]
+                            ]
+                            self.assertEqual(
+                                stop_commands.count(expected_stop_command), 1, f"{installer}: {settings_path}"
+                            )
+                            self.assertNotIn(stop_command, stop_commands)
+                            self.assertNotIn(cd_stop_command, stop_commands)
 
     def test_stop_hook_emits_valid_json_for_active_run(self) -> None:
         # Stop hook stdout은 JSON이어야 한다. 평문은 invalid stop hook json output 에러를 만든다.
