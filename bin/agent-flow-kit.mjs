@@ -2139,6 +2139,17 @@ function managedHookScriptName(command) {
   return null;
 }
 
+function trustedManagedHookScriptName(root, command) {
+  const normalized = unquoteShellWord(command).replaceAll("\\", "/");
+  const normalizedRoot = path.resolve(root).replaceAll("\\", "/");
+  for (const scriptName of ["guard-worktree.sh", "guard-protected-branch.sh", "show-phase-status.sh", "comment-checker.py"]) {
+    if (normalized === `${normalizedRoot}/.agent-flow/scripts/hooks/${scriptName}`) {
+      return scriptName;
+    }
+  }
+  return null;
+}
+
 function codexHooksSettings(root) {
   return {
     hooks: {
@@ -2226,6 +2237,180 @@ function mergeHookConfig(settings, source) {
   }
 }
 
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function tomlBasicString(value) {
+  return String(value).replaceAll("\\", "\\\\").replaceAll("\"", "\\\"");
+}
+
+function upsertTomlValue(text, tableHeader, key, value) {
+  const tableName = tableHeader.slice(1, -1);
+  const tablePattern = new RegExp(`(^|\\n)\\s*\\[\\s*${escapeRegex(tableName)}\\s*\\]\\s*(?:#.*)?\\n([\\s\\S]*?)(?=\\n\\s*\\[[^\\n]+\\]|$)`);
+  const keyPattern = new RegExp(`(^|\\n)\\s*${escapeRegex(key)}\\s*=.*(?=\\n|$)`);
+  const match = text.match(tablePattern);
+  if (!match) {
+    const prefix = text.trim() ? `${text.replace(/\n*$/, "\n\n")}` : "";
+    return `${prefix}${tableHeader}\n${key} = ${value}\n`;
+  }
+  return text.replace(tablePattern, (full, leading, body) => {
+    const nextBody = keyPattern.test(body)
+      ? body.replace(keyPattern, `$1${key} = ${value}`)
+      : `${body.replace(/\n*$/, "")}\n${key} = ${value}\n`;
+    return `${leading}${tableHeader}\n${nextBody}`;
+  });
+}
+
+function codexConfigPath() {
+  if (!HOME) {
+    return null;
+  }
+  return path.join(HOME, ".codex", "config.toml");
+}
+
+function upsertCodexConfigTableValue(tableHeader, key, value) {
+  const configPath = codexConfigPath();
+  if (!configPath) {
+    return false;
+  }
+  const current = fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : "";
+  const next = upsertTomlValue(current, tableHeader, key, value);
+  if (next === current) {
+    return true;
+  }
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  fs.writeFileSync(configPath, next.endsWith("\n") ? next : `${next}\n`, "utf8");
+  return true;
+}
+
+function resolveCodexBinary() {
+  const candidates = [
+    process.env.CODEX_CLI_PATH,
+    "/Applications/Codex.app/Contents/Resources/codex",
+    "codex",
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    const result = spawnSync(candidate, ["--version"], { encoding: "utf8", timeout: 3000 });
+    if (!result.error && result.status === 0) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function queryCodexProjectHookHashes(root) {
+  const codexBinary = resolveCodexBinary();
+  if (!codexBinary) {
+    return [];
+  }
+  const helper = String.raw`
+const { spawn } = require("child_process");
+const codexBinary = process.argv[1];
+const root = process.argv[2];
+const responses = [];
+let finished = false;
+let stdoutBuffer = "";
+const proc = spawn(codexBinary, ["app-server", "--stdio"], { stdio: ["pipe", "pipe", "pipe"] });
+proc.stdout.on("data", (chunk) => {
+  stdoutBuffer += chunk.toString();
+  let newlineIndex;
+  while ((newlineIndex = stdoutBuffer.indexOf("\n")) !== -1) {
+    handleLine(stdoutBuffer.slice(0, newlineIndex));
+    stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
+  }
+});
+proc.stderr.on("data", () => {});
+function handleLine(line) {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return;
+  }
+  try {
+    const response = JSON.parse(trimmed);
+    responses.push(response);
+    if (response.id === 2) {
+      finish(response);
+    }
+  } catch {
+    // Ignore non-JSON app-server output.
+  }
+}
+function send(id, method, params) {
+  proc.stdin.write(JSON.stringify({ id, method, params }) + "\n");
+}
+setTimeout(() => {
+  send(1, "initialize", {
+    clientInfo: { name: "agent-flow-install", title: null, version: "1" },
+    capabilities: { experimentalApi: true, requestAttestation: false },
+  });
+  setTimeout(() => send(2, "hooks/list", { cwds: [root] }), 250);
+}, 50);
+function finish(response) {
+  if (finished) {
+    return;
+  }
+  finished = true;
+  if (!response || response.error) {
+    proc.kill("SIGTERM");
+    process.exit(1);
+  }
+  const entry = response.result?.data?.find((item) => item.cwd === root);
+  const sourcePath = root + "/.codex/hooks.json";
+  const hooks = (entry?.hooks ?? [])
+    .filter((hook) => hook.sourcePath === sourcePath && hook.key && hook.currentHash)
+    .map((hook) => ({ key: hook.key, trustedHash: hook.currentHash, command: hook.command ?? "" }));
+  console.log(JSON.stringify(hooks));
+  proc.kill("SIGTERM");
+}
+const timer = setTimeout(() => finish(responses.find((item) => item.id === 2)), 3000);
+proc.on("exit", () => {
+  if (stdoutBuffer.trim()) {
+    handleLine(stdoutBuffer);
+    stdoutBuffer = "";
+  }
+  clearTimeout(timer);
+  if (!finished) {
+    finish(responses.find((item) => item.id === 2));
+  }
+});
+`;
+  const result = spawnSync(process.execPath, ["-e", helper, codexBinary, root], {
+    encoding: "utf8",
+    timeout: 8000,
+  });
+  if (result.error || result.status !== 0) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(result.stdout.trim());
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function installCodexTrustState(root) {
+  if (process.env.AGENT_FLOW_SKIP_CODEX_TRUST === "1") {
+    return;
+  }
+  const projectHeader = `[projects."${tomlBasicString(root)}"]`;
+  if (!upsertCodexConfigTableValue(projectHeader, "trust_level", "\"trusted\"")) {
+    console.error("warning: Codex project trust not registered; HOME is unavailable");
+    return;
+  }
+  const hooks = queryCodexProjectHookHashes(root);
+  const managedHooks = hooks.filter((hook) => trustedManagedHookScriptName(root, hook.command));
+  if (managedHooks.length === 0) {
+    console.error("warning: Codex hook trust not registered; codex app-server did not return project hooks");
+    return;
+  }
+  for (const hook of managedHooks) {
+    const hookHeader = `[hooks.state."${tomlBasicString(hook.key)}"]`;
+    upsertCodexConfigTableValue(hookHeader, "trusted_hash", `"${tomlBasicString(hook.trustedHash)}"`);
+  }
+}
+
 function installCodexHooks(root) {
   const settingsPaths = [
     path.join(root, ".Codex", "hooks.json"),
@@ -2240,6 +2425,7 @@ function installCodexHooks(root) {
     fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
     fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
   }
+  installCodexTrustState(root);
 }
 
 function claudeHooksSettings(root) {

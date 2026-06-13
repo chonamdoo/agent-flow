@@ -164,13 +164,19 @@ function checkAgentFlowArtifacts(result: string[]): void {
   if (!fs.existsSync(agentFlow)) {
     return;
   }
-  for (const file of listFiles(agentFlow)) {
-    if (![".md", ".json", ".jsonl"].includes(path.extname(file))) {
+  for (const relDir of ["runs", "handoffs", "memory"]) {
+    const artifactDir = path.join(agentFlow, relDir);
+    if (!fs.existsSync(artifactDir)) {
       continue;
     }
-    const text = readText(file);
-    if (ABSOLUTE_PATH_RE.test(text)) {
-      result.push(`absolute local path in Agent Flow artifact: ${relative(file)}`);
+    for (const file of listFiles(artifactDir)) {
+      if (![".md", ".json", ".jsonl"].includes(path.extname(file))) {
+        continue;
+      }
+      const text = readText(file);
+      if (ABSOLUTE_PATH_RE.test(text)) {
+        result.push(`absolute local path in Agent Flow artifact: ${relative(file)}`);
+      }
     }
   }
 }

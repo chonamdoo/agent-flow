@@ -27,6 +27,9 @@ from agent_flow.core.workflow import _stage_from_payload
 from agent_flow.core.worktrees import plan_worktree, worktree_runtime_root
 
 
+os.environ.setdefault("AGENT_FLOW_SKIP_CODEX_TRUST", "1")
+
+
 def _node_test_env(**overrides: str) -> dict[str, str]:
     env = {**os.environ, **overrides}
     python_paths = [

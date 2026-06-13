@@ -163,6 +163,14 @@ function recursiveFiles(relDir) {
   return out.sort();
 }
 
+for (const installer of ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"]) {
+  assertContains(installer, "function installCodexTrustState(root)");
+  assertContains(installer, "function queryCodexProjectHookHashes(root)");
+  assertContains(installer, "function trustedManagedHookScriptName(root, command)");
+  assertContains(installer, "normalized === `${normalizedRoot}/.agent-flow/scripts/hooks/${scriptName}`");
+  assertContains(installer, "[hooks.state.");
+}
+
 const fullFeatureWorkflowCopies = [
   "workflows/full-feature.yaml",
   "src/agent_flow/workflows/full-feature.yaml",
@@ -808,6 +816,7 @@ function assertInstallerSelfInstallKeepsSourceScripts(installer) {
     }
     const result = spawnSync(process.execPath, [path.join(tempKitRoot, "bin", installer), "install", "--force-managed"], {
       cwd: tempKitRoot,
+      env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1" },
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
@@ -853,6 +862,7 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
     );
     const result = spawnSync(process.execPath, [path.join(SOURCE_ROOT, "bin", installer), "install", "--force-managed"], {
       cwd: tempRoot,
+      env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1" },
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
@@ -932,6 +942,7 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
     const forceResult = spawnSync(process.execPath, [path.join(SOURCE_ROOT, "bin", installer), "install", "--force-managed"], {
       cwd: tempRoot,
       encoding: "utf8",
+      env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1" },
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
     });
@@ -1184,6 +1195,7 @@ function nodeBackwardFreshArtifactOutcome(workflow, testCase) {
     const install = spawnSync(process.execPath, [path.join(SOURCE_ROOT, "bin/agent-flow-kit.mjs"), "install", "--force-managed"], {
       cwd: tempRoot,
       encoding: "utf8",
+      env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1" },
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
     });
@@ -1487,6 +1499,7 @@ function nodePhaseOutcome(workflow, phaseId, content, stateOverrides = {}) {
   try {
     const install = spawnSync(process.execPath, [path.join(SOURCE_ROOT, "bin/agent-flow-kit.mjs"), "install", "--force-managed"], {
       cwd: tempRoot,
+      env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1" },
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
