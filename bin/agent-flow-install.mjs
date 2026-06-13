@@ -986,7 +986,9 @@ function install() {
     true,
     FORCE_MANAGED,
   );
-  removeDirIfSame(path.join(KIT_ROOT, "scripts"), path.join(PROJECT, "scripts"), FORCE_MANAGED);
+  if (!samePath(PROJECT, KIT_ROOT)) {
+    removeDirIfSame(path.join(KIT_ROOT, "scripts"), path.join(PROJECT, "scripts"), FORCE_MANAGED);
+  }
   makeHooksExecutable(PROJECT);
   const codexHooksCopied = installCodexHooks(PROJECT);
   installClaudeHooks(PROJECT);
