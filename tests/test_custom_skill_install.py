@@ -90,6 +90,39 @@ def test_bundled_workflow_skills_are_internal_and_host_skills_are_registered(tmp
     assert not (project / ".Codex" / "skills" / "full-feature-workflow").exists()
 
 
+def test_clean_architecture_skill_installs_platform_standard(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+
+    result = _install(project)
+
+    assert result.returncode == 0, result.stderr
+    skill = (
+        project / ".agent-flow" / "skills" / "clean-architecture" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    reference = (
+        project
+        / ".agent-flow"
+        / "skills"
+        / "clean-architecture"
+        / "references"
+        / "platform-standard.md"
+    ).read_text(encoding="utf-8")
+    assert "references/platform-standard.md" in skill
+    assert "## Adoption Rule" in skill
+    assert "Android/Samantha structure" in skill
+    assert "Hilt-equivalent" in skill
+    assert "## Adoption Policy" in reference
+    assert "Android/Samantha structure is the canonical source" in reference
+    assert "## Module Families" in reference
+    assert "Core Design System" in reference
+    assert "## Dependency Injection Rules" in reference
+    assert "FastAPI" in reference
+    assert "`Depends`" in reference
+    assert "Hilt binding responsibilities" in reference
+    assert "## Boundary Smell List" in reference
+
+
 def test_local_skill_priority_beats_project_and_bundled_conflict_is_recorded(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
