@@ -782,6 +782,48 @@ function multiReviewArtifactContent(key) {
 function assertCleanInstallCopiesTemplates() {
   for (const installer of ["agent-flow-kit.mjs", "agent-flow-install.mjs"]) {
     assertInstallerCleanInstallCopiesTemplates(installer);
+    assertInstallerSelfInstallKeepsSourceScripts(installer);
+  }
+}
+
+function assertInstallerSelfInstallKeepsSourceScripts(installer) {
+  const label = `bin/${installer}`;
+  const tempParent = fs.mkdtempSync(path.join(os.tmpdir(), "agent-flow-self-install-parity-"));
+  const tempKitRoot = path.join(tempParent, "kit");
+  try {
+    fs.cpSync(SOURCE_ROOT, tempKitRoot, {
+      recursive: true,
+      filter: (source) => {
+        const rel = path.relative(SOURCE_ROOT, source);
+        const parts = rel.split(path.sep);
+        return !parts.some((part) =>
+          [".agent-flow", ".git", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".venv", "__pycache__", "node_modules"].includes(part),
+        );
+      },
+    });
+    const sourceChecker = path.join(tempKitRoot, "scripts", "hooks", "comment-checker.py");
+    if (!fs.existsSync(sourceChecker)) {
+      failures.push(`${label} self install fixture missing source scripts/hooks/comment-checker.py`);
+      return;
+    }
+    const result = spawnSync(process.execPath, [path.join(tempKitRoot, "bin", installer), "install", "--force-managed"], {
+      cwd: tempKitRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 30_000,
+    });
+    if (result.error || result.status !== 0) {
+      failures.push(`${label} self install parity failed: ${result.error?.message || result.stderr.trim() || result.status}`);
+      return;
+    }
+    if (!fs.existsSync(sourceChecker)) {
+      failures.push(`${label} self install removed source scripts/hooks/comment-checker.py`);
+    }
+    if (!fs.existsSync(path.join(tempKitRoot, ".agent-flow", "scripts", "hooks", "comment-checker.py"))) {
+      failures.push(`${label} self install missing .agent-flow/scripts/hooks/comment-checker.py`);
+    }
+  } finally {
+    fs.rmSync(tempParent, { recursive: true, force: true });
   }
 }
 
