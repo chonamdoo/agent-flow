@@ -1,6 +1,6 @@
 ---
 name: react-native-operational-adoption
-description: "Supplemental React Native and Expo development skill. Use alongside react-native-development-guide when writing, modifying, or reviewing RN app code that touches architecture, app shell, navigation, Hermes/RN upgrade strategy, New Architecture boundaries, native modules, micro-frontend routing, signed OTA bundles with rollback, legacy/new RN coexistence, FlashList, MMKV, Reanimated, Relay/SWR, react-native-web parity, or mobile observability. Do not use for React Web-only work, generic React component styling, generic TypeScript issues, or reverse-engineering Toss itself."
+description: "Supplemental React Native and Expo development skill. Use alongside react-native-development-guide when writing, modifying, or reviewing RN app code that touches architecture, app shell, navigation, Hermes/RN upgrade strategy, New Architecture boundaries, native modules, micro-frontend routing, signed OTA bundles with rollback, legacy/new RN coexistence, FlashList, MMKV, Reanimated, Relay/SWR, react-native-web parity, or mobile observability. Do not use for React Web-only work, generic React component styling, generic TypeScript issues, or reverse-engineering a specific third-party app itself."
 ---
 
 # React Native Operational Adoption
@@ -14,9 +14,9 @@ description: "Supplemental React Native and Expo development skill. Use alongsid
 
 ## Source Basis
 
-Read [references/toss-rn-analysis-summary.md](references/toss-rn-analysis-summary.md) when the task asks why these patterns exist or asks for Toss/Granite evidence.
+Read [references/react-native-operational-patterns.md](references/react-native-operational-patterns.md) when the task asks why these patterns exist or asks for React Native operational adoption rationale.
 
-Treat the source as an architecture signal, not a dependency recipe. Do not copy Toss private artifacts such as `im.toss.react:framework`, `@granite-js/*`, or `0.84.0-toss.*`.
+Treat the source as an architecture signal, not a dependency recipe. Prefer official React Native and Hermes releases. Do not copy private framework names, private Maven/npm scopes, or vendor-forked React Native builds.
 
 ## Before Starting
 
@@ -74,7 +74,7 @@ Confirm current project facts before proposing changes:
 
 ## Review Checklist
 
-- Does the proposal avoid private Toss dependencies and RN forks unless explicitly justified?
+- Does the proposal avoid private/vendor dependencies and RN forks unless explicitly justified?
 - Are React Web and RN responsibilities separated where platform behavior differs?
 - Is OTA either out of scope or covered by signature verification, staged activation, rollback, and monitoring?
 - Is legacy/new RN coexistence temporary, observable, and tied to removal criteria?
@@ -85,7 +85,7 @@ Confirm current project facts before proposing changes:
 
 ## Avoid
 
-- Replacing the app architecture just to mimic Toss.
+- Replacing the app architecture just to mimic a third-party app.
 - Introducing MFE for a single-team app with one release train.
 - Adding OTA without signing and rollback.
 - Treating `react-native-web` as free code sharing.
