@@ -260,6 +260,10 @@ class CliTest(unittest.TestCase):
         self.assertIn("## Overall", default_phases["final-review"]["prompt"])
         self.assertIn("verdict: approve", default_phases["final-review"]["prompt"])
         self.assertIn("verdict: request-changes", default_phases["final-review"]["prompt"])
+        self.assertIn("skills/clean-architecture-core/SKILL.md", default_phases["final-review"]["prompt"])
+        self.assertIn("skills/clean-architecture/SKILL.md", default_phases["final-review"]["prompt"])
+        self.assertIn("must-avoid or failing checklist", default_phases["final-review"]["prompt"])
+        self.assertIn("core skill is present", default_phases["final-review"]["prompt"])
         self.assertEqual(default_phases["pr-watch"]["routes"]["green"], "merge")
         self.assertEqual(default_phases["pr-watch"]["routes"]["has_comments"], "pr-comment-fix")
         self.assertEqual(default_phases["pr-watch"]["routes"]["ci_failed"], "pr-ci-fix")
@@ -285,12 +289,38 @@ class CliTest(unittest.TestCase):
         self.assertIn("clean-architecture: applied", phases["green"]["required_markers"])
         self.assertIn("clean-architecture: applied", phases["fix-loop"]["required_markers"])
         self.assertIn("clean-architecture-review: applied", phases["multi-review"]["required_markers"])
+        multi_review_prompt = phases["multi-review"]["prompt"]
+        self.assertIn("skills/clean-architecture-core/SKILL.md", multi_review_prompt)
+        self.assertIn("skills/clean-architecture/SKILL.md", multi_review_prompt)
+        self.assertIn("must-avoid or failing", multi_review_prompt)
+        self.assertIn("core skill makes the overall verdict", multi_review_prompt)
         self.assertIn("dependency-rule: pass|fail", phases["architecture-review"]["required_markers"])
+        architecture_review_prompt = phases["architecture-review"]["prompt"]
+        self.assertIn("skills/clean-architecture-core/SKILL.md", architecture_review_prompt)
+        self.assertIn("skills/clean-architecture/SKILL.md", architecture_review_prompt)
+        self.assertIn("must-avoid or failing checklist", architecture_review_prompt)
+        self.assertIn("skill makes the verdict", architecture_review_prompt)
         self.assertIn("presentation-skill: android|react|react-native|ios|n/a", phases["green"]["required_markers"])
         self.assertIn("android-local-skills: checked|n/a", phases["green"]["required_markers"])
         self.assertEqual(phases["gates"]["artifact"], "artifacts/gate-results.json")
         self.assertEqual(phases["gates"]["routes"]["green"], "comment-authoring")
         self.assertEqual(phases["comment-authoring"]["routes"]["default"], "multi-review")
+
+    def test_clean_architecture_review_template_routes_policy_to_core_skill(self) -> None:
+        template = (
+            Path(__file__).resolve().parents[1]
+            / "templates"
+            / "_shared"
+            / "review"
+            / "clean-architecture.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("skills/clean-architecture-core/SKILL.md", template)
+        self.assertIn("must-avoid rule", template)
+        self.assertIn("failing required checklist item", template)
+        self.assertIn("skills/clean-architecture/SKILL.md", template)
+        self.assertIn("compatibility markers", template)
+        self.assertNotIn("must-fix in `skills/clean-architecture/SKILL.md`", template)
+        self.assertNotIn("listed as a must-fix in `skills/clean-architecture/SKILL.md`", template)
 
     def test_python_runner_route_key_understands_gate_results(self) -> None:
         from agent_flow.runner import _gates_route_key, _route_key
@@ -445,7 +475,7 @@ class CliTest(unittest.TestCase):
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 self.assertEqual(runner._next_index(0, phase), (0, True))
-            self.assertIn("requires ## Overall with exactly one verdict", output.getvalue())
+            self.assertIn("requires 2+ independent sub-agent reviewer verdicts", output.getvalue())
 
             (run_dir / "multi-review.md").write_text(
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: request-changes\n",
@@ -746,7 +776,13 @@ class CliTest(unittest.TestCase):
             self.assertTrue((project_root / ".agent-flow" / "skills" / "product-brief" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "plan-reviewer" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "ddd-clean-architecture" / "SKILL.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "skills" / "clean-architecture-core" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "clean-architecture" / "SKILL.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "skills" / "android-clean-architecture" / "SKILL.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "skills" / "ios-clean-architecture" / "SKILL.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "skills" / "react-clean-architecture" / "SKILL.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "skills" / "react-native-clean-architecture" / "SKILL.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "skills" / "python-api-clean-architecture" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "architecture-reviewer" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "android-code-review" / "SKILL.md").is_file())
             self.assertFalse((project_root / ".agent-flow" / "skills" / "android-mvi-feature").exists())
@@ -3400,7 +3436,7 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(result.returncode, 1)
-            self.assertIn("matching reviewer verdicts and overall verdict", result.stderr)
+            self.assertIn("at least 2 independent sub-agent reviewer verdicts", result.stderr)
 
             mr_artifact.write_text(_with_skills_gate(
                 "## Reviewer 1\n\nreviewer-source: sub-agent\nverdict: approve\n",
@@ -3415,7 +3451,7 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(result.returncode, 1)
-            self.assertIn("matching reviewer verdicts and overall verdict", result.stderr)
+            self.assertIn("at least 2 independent sub-agent reviewer verdicts", result.stderr)
 
             mr_artifact.write_text(_with_skills_gate(
                 "## Reviewer 1\nreviewer-source: sub-agent\n### Findings\nverdict: approve\n",
@@ -3430,7 +3466,7 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(result.returncode, 1)
-            self.assertIn("matching reviewer verdicts and overall verdict", result.stderr)
+            self.assertIn("at least 2 independent sub-agent reviewer verdicts", result.stderr)
 
             mr_artifact.write_text(_with_skills_gate(
                 "## Reviewer 1\nreviewer-source: sub-agent\n# Code Review\nverdict: approve\n",
@@ -3445,7 +3481,7 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(result.returncode, 1)
-            self.assertIn("matching reviewer verdicts and overall verdict", result.stderr)
+            self.assertIn("at least 2 independent sub-agent reviewer verdicts", result.stderr)
 
             mr_artifact.write_text(_with_skills_gate(
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
@@ -3461,7 +3497,7 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(result.returncode, 1)
-            self.assertIn("matching reviewer verdicts and overall verdict", result.stderr)
+            self.assertIn("at least 2 independent sub-agent reviewer verdicts", result.stderr)
 
             mr_artifact.write_text(_with_skills_gate(
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
@@ -3510,7 +3546,23 @@ class CliTest(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 1)
             # ## Final은 overall alias로 인정되므로 reviewer 수 부족이 정확한 차단 사유다.
-            self.assertIn("approve requires at least 2 independent sub-agent reviewer verdicts", result.stderr)
+            self.assertIn("at least 2 independent sub-agent reviewer verdicts", result.stderr)
+
+            mr_artifact.write_text(_with_skills_gate(
+                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: request-changes\n\n"
+                "## Overall\nverdict: request-changes\n",
+            ),
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("at least 2 independent sub-agent reviewer verdicts", result.stderr)
 
             mr_artifact.write_text(_with_skills_gate(
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
@@ -4574,6 +4626,15 @@ class CliTest(unittest.TestCase):
 
             (run_dir / "final-review.md").write_text(
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: request-changes\n\n"
+                "## Overall\n"
+                "verdict: request-changes\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(runner._next_index(0, phase), (0, True))
+
+            (run_dir / "final-review.md").write_text(
+                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: request-changes\n\n"
+                "## Reviewer 2\nreviewer-source: sub-agent\nreviewer-2 verdict: approve\n\n"
                 "## Overall\n"
                 "verdict: request-changes\n",
                 encoding="utf-8",

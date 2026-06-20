@@ -342,9 +342,10 @@ phases:
       prose, no emoji, and parser verdict markers unchanged.
       Read every matching language/framework skill before review and record
       `skills_checked: true`.
-      If `skills/clean-architecture/SKILL.md` is not applied, or any must-fix
-      condition from that skill is present, the overall verdict is
-      `verdict: request-changes`.
+      If `skills/clean-architecture-core/SKILL.md` is not applied after
+      compatibility markers from `skills/clean-architecture/SKILL.md`, or any
+      must-avoid or failing checklist condition from the core skill is present,
+      the overall verdict is `verdict: request-changes`.
       For Android/Kotlin/Compose/KMP changes, read matching local skills from
       the active Android profile's `android_skills` and `chrisbanes_skills`
       through the current host path only. If required skills are missing,

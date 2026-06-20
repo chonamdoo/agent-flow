@@ -217,7 +217,7 @@ def _multi_reviewer_block(distribution: Distribution | None = None) -> str:
                 "verdicts. "
                 "Each reviewer section must include `reviewer-source: sub-agent`. "
                 "Close sub-agent sessions after recording results. "
-                "Approval requires 2+ independent sub-agent reviewer verdicts.\n")
+                "Multi-review requires 2+ independent sub-agent reviewer verdicts.\n")
     names = [c.name for c in available]
     lines = [
         "### Multi-CLI distribution",

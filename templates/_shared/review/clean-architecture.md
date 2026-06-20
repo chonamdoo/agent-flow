@@ -57,8 +57,11 @@ Output strictly markdown findings. Do not propose code unless asked.
 
 ## Must-fix policy
 
-Any violation listed as a must-fix in `skills/clean-architecture/SKILL.md` must
-produce `verdict: request-changes`.
+Any violation listed in `skills/clean-architecture-core/SKILL.md` as a
+must-avoid rule, or any failing required checklist item from that core skill,
+must produce `verdict: request-changes`. Use
+`skills/clean-architecture/SKILL.md` only for compatibility markers and skill
+loading order.
 
 ## Required completion gate
 

@@ -199,15 +199,12 @@ When this skill is used for presentation development or code review, include the
 
 ## Sources
 
-- Android Hilt: https://developer.android.com/training/dependency-injection/hilt-android
-- Hilt and Jetpack integrations: https://developer.android.com/training/dependency-injection/hilt-jetpack
-- Android ViewModel: https://developer.android.com/topic/libraries/architecture/viewmodel
-- Android UI layer: https://developer.android.com/topic/architecture/ui-layer
-- Android state holders and UI state: https://developer.android.com/topic/architecture/ui-layer/stateholders
-- Android UI state production: https://developer.android.com/topic/architecture/ui-layer/state-production
-- Android UI events: https://developer.android.com/topic/architecture/ui-layer/events
-- StateFlow and SharedFlow: https://developer.android.com/kotlin/flow/stateflow-and-sharedflow
-- Compose state: https://developer.android.com/develop/ui/compose/state
-- Compose state hoisting: https://developer.android.com/develop/ui/compose/state-hoisting
-- Compose stability: https://developer.android.com/develop/ui/compose/performance/stability
-- AndroidX Startup: https://developer.android.com/topic/libraries/app-startup
+- Android Hilt docs
+- Hilt and Jetpack integration docs
+- Android ViewModel docs
+- Android UI layer docs
+- Android state holder and UI state production docs
+- Android UI events docs
+- StateFlow and SharedFlow docs
+- Compose state, state hoisting, and stability docs
+- AndroidX Startup docs
