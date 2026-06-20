@@ -352,8 +352,10 @@ phases:
       reviewer uses code-reviewer.md as basis and
       outputs an independent verdict: approve or request-changes.
       For architecture/SOLID findings, reviewers also apply
-      `skills/clean-architecture/SKILL.md`; any must-fix condition from that
-      skill makes the overall verdict `request-changes`.
+      `skills/clean-architecture-core/SKILL.md` and the compatibility markers
+      in `skills/clean-architecture/SKILL.md`; any must-avoid or failing
+      checklist condition from the core skill makes the overall verdict
+      `request-changes`.
       Any request-changes from any reviewer makes the overall verdict
       request-changes. Default reviewers are active-host sub-agents (Codex
       sub-agent in Codex, Claude sub-agent in Claude).
@@ -471,9 +473,11 @@ phases:
       Compare code against domain-grill.md and ddd-design.md. Check layer
       violations, repository boundary leaks, naming drift, and dependency
       direction. Apply `skills/ddd-architecture/SKILL.md` first for domain fit,
-      then `skills/clean-architecture/SKILL.md` for boundaries and SOLID
-      validation. Any Clean Architecture must-fix condition makes the verdict
-      `request-changes`. Output architecture-review.md with exactly one verdict line:
+      then `skills/clean-architecture-core/SKILL.md` plus compatibility markers
+      from `skills/clean-architecture/SKILL.md` for boundaries and SOLID
+      validation. Any must-avoid or failing checklist condition from the core
+      skill makes the verdict `request-changes`. Output architecture-review.md
+      with exactly one verdict line:
       `verdict: approve`, `verdict: request-changes`, or `verdict: blocked`.
       Apply agent-flow-concise-output for findings and keep verdict markers
       unchanged.

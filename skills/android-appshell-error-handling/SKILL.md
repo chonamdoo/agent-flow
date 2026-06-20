@@ -1,6 +1,6 @@
 ---
 name: android-appshell-error-handling
-description: Use when implementing or reviewing Android Kotlin Compose app-wide error handling where feature ViewModels notify common errors and an AppShell/SamanthaApp layer owns common dialogs, snackbars, toasts, root navigation, Navi3 back stack resets, SessionExpired handling, or Retrofit CallAdapter error mapping.
+description: Use when implementing or reviewing Android Kotlin Compose app-wide error handling where feature ViewModels notify common errors and an AppShell layer owns common dialogs, snackbars, toasts, root navigation, Navigation3 back stack resets, SessionExpired handling, or Retrofit CallAdapter error mapping.
 ---
 
 # Android AppShell Error Handling

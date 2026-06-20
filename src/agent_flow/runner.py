@@ -373,7 +373,7 @@ class Runner:
                 print("  [block] multi-review requires 1+ independent sub-agent reviewer verdict")
                 return current_index, True
             if key == "insufficient-reviewers":
-                print("  [block] multi-review approve requires 2+ independent sub-agent reviewer verdicts")
+                print("  [block] multi-review requires 2+ independent sub-agent reviewer verdicts")
                 return current_index, True
             if key == "invalid-verdict":
                 print("  [block] multi-review requires overall verdict approve or request-changes")
@@ -696,6 +696,8 @@ def _multi_review_route_key(text: str, phase_id: str = "") -> str:
         return "missing-reviewer"
     if overall == "invalid-verdict":
         return "invalid-verdict"
+    if len(verdicts) < 2:
+        return "insufficient-reviewers"
     if overall == "default":
         return "default"
     if "request-changes" in verdicts.values() or overall == "request-changes":
@@ -703,8 +705,6 @@ def _multi_review_route_key(text: str, phase_id: str = "") -> str:
     has_subagent = _has_subagent_reviewer(text)
     if overall == "approve" and has_subagent and len(verdicts) >= 2:
         return "approve"
-    if overall == "approve" and has_subagent and len(verdicts) == 1:
-        return "insufficient-reviewers"
     return "invalid-verdict"
 
 

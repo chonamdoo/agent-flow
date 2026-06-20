@@ -66,6 +66,14 @@ const GENERATED_PROJECT_SKILL_NAMES = new Set([
   "product-brief",
   "push-watch",
 ]);
+const SKILL_DEPENDENCIES = new Map([
+  ["clean-architecture", ["clean-architecture-core"]],
+  ["android-clean-architecture", ["clean-architecture-core"]],
+  ["ios-clean-architecture", ["clean-architecture-core"]],
+  ["react-clean-architecture", ["clean-architecture-core"]],
+  ["react-native-clean-architecture", ["clean-architecture-core"]],
+  ["python-api-clean-architecture", ["clean-architecture-core"]],
+]);
 
 function installProject() {
   const requestedRoot = process.cwd();
@@ -663,7 +671,13 @@ function assertInstalled(root) {
     path.join(root, ".agent-flow", "skills", "product-brief", "SKILL.md"),
     path.join(root, ".agent-flow", "skills", "plan-reviewer", "SKILL.md"),
     path.join(root, ".agent-flow", "skills", "ddd-clean-architecture", "SKILL.md"),
+    path.join(root, ".agent-flow", "skills", "clean-architecture-core", "SKILL.md"),
     path.join(root, ".agent-flow", "skills", "clean-architecture", "SKILL.md"),
+    path.join(root, ".agent-flow", "skills", "android-clean-architecture", "SKILL.md"),
+    path.join(root, ".agent-flow", "skills", "ios-clean-architecture", "SKILL.md"),
+    path.join(root, ".agent-flow", "skills", "react-clean-architecture", "SKILL.md"),
+    path.join(root, ".agent-flow", "skills", "react-native-clean-architecture", "SKILL.md"),
+    path.join(root, ".agent-flow", "skills", "python-api-clean-architecture", "SKILL.md"),
     path.join(root, ".agent-flow", "skills", "architecture-reviewer", "SKILL.md"),
     path.join(root, ".agent-flow", "skills", "push-watch", "SKILL.md"),
     path.join(root, ".agent-flow", "skills", "code-generation-discipline", "SKILL.md"),
@@ -1018,6 +1032,7 @@ function selectProjectSkills(root, agentFlowDir) {
     warnings.push(...skill.warnings);
   }
   const skills = [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+  warnings.push(...validateSkillDependencies(skills));
   const conflicts = [];
   for (const skill of skills) {
     const ignored = discovered
@@ -1034,6 +1049,19 @@ function selectProjectSkills(root, agentFlowDir) {
     conflicts,
     warnings,
   };
+}
+
+function validateSkillDependencies(skills) {
+  const names = new Set(skills.map((skill) => skill.name));
+  const warnings = [];
+  for (const skill of skills) {
+    for (const required of skill.requires || []) {
+      if (!names.has(required)) {
+        warnings.push(`${skill.name}: missing required skill ${required}`);
+      }
+    }
+  }
+  return warnings;
 }
 
 function discoverProjectSkills(root) {
@@ -1071,6 +1099,7 @@ function discoverSkills(baseDir, source, root, ignoredNames = new Set(), allowed
       path: relativePath,
       source,
       hosts: metadata.hosts,
+      requires: skillRequires(metadata.name),
       tags: metadata.tags,
       description: metadata.description,
       trigger: metadata.trigger,
@@ -1112,6 +1141,10 @@ function parseSkillMetadata(text, fallbackName) {
     trigger: String(metadata.trigger || metadata.description || useWhen || ""),
     warnings,
   };
+}
+
+function skillRequires(name) {
+  return SKILL_DEPENDENCIES.get(name) || [];
 }
 
 function safeSkillName(value) {
@@ -1656,8 +1689,8 @@ function readMultiReviewVerdict(pathName) {
     throw new Error("blocked: multi-review artifact must contain at least 1 independent sub-agent reviewer verdict");
   }
   const verdicts = [...reviewers.values()];
-  if (overall === "approve" && reviewers.size < 2) {
-    throw new Error("blocked: multi-review approve requires at least 2 independent sub-agent reviewer verdicts");
+  if (reviewers.size < 2) {
+    throw new Error("blocked: multi-review artifact must contain at least 2 independent sub-agent reviewer verdicts");
   }
   if (overall === "approve" && verdicts.every((verdict) => verdict === "approve")) {
     return "approve";
@@ -2488,7 +2521,7 @@ Implementation rules:
 - Apply \`code-generation-discipline\` during red, green, refactor, fix-loop, and review phases. Read every matching language/framework skill before writing or judging code.
 - If review or QA fails, return to the fix phase before continuing.
 - The gates->fix-loop->gates loop re-verifies after every fix, then routes through comment-authoring before multi-review. multi-review approve skips fix-loop; request-changes routes through fix-loop->gates->comment-authoring.
-- Code review requires at least two active-host sub-agents (Codex sub-agent in Codex, Claude sub-agent in Claude). If the changed scope spans multiple areas, run one additional active-host sub-agent in parallel. Additional non-host providers are optional, and approve requires 2+ independent sub-agent reviewer verdicts with reviewer-source: sub-agent. After recording each sub-agent result, close that sub-agent session. End multi-review artifacts with ## Overall followed by exactly one verdict line: verdict: approve or verdict: request-changes.
+- Code review requires at least two active-host sub-agents (Codex sub-agent in Codex, Claude sub-agent in Claude). If the changed scope spans multiple areas, run one additional active-host sub-agent in parallel. Additional non-host providers are optional, and every multi-review verdict requires 2+ independent sub-agent reviewer verdicts with reviewer-source: sub-agent. After recording each sub-agent result, close that sub-agent session. End multi-review artifacts with ## Overall followed by exactly one verdict line: verdict: approve or verdict: request-changes.
 - In the default workflow, gates are enforced by the \`implement\` phase completion marker: \`gates: all_passed\`.
 
 Document size rules:

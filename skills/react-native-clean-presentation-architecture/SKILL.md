@@ -163,21 +163,13 @@ When this skill is used for presentation development or code review, include the
 
 ## Sources
 
-- React `createContext`: https://react.dev/reference/react/createContext
-- React `useContext`: https://react.dev/reference/react/useContext
-- React `useEffect`: https://react.dev/reference/react/useEffect
-- Choosing the State Structure: https://react.dev/learn/choosing-the-state-structure
-- Extracting State Logic into a Reducer: https://react.dev/learn/extracting-state-logic-into-a-reducer
-- Separating Events from Effects: https://react.dev/learn/separating-events-from-effects
-- React Native State: https://reactnative.dev/docs/state
-- React Native Turbo Native Modules: https://reactnative.dev/docs/turbo-native-modules-introduction
-- React Native PermissionsAndroid: https://reactnative.dev/docs/permissionsandroid
-- React Native Linking: https://reactnative.dev/docs/linking
-- React Native FlatList: https://reactnative.dev/docs/flatlist
-- React Native SafeAreaView deprecation: https://reactnative.dev/docs/safeareaview
-- tsyringe: https://github.com/microsoft/tsyringe
-- npm downloads API: https://api.npmjs.org/downloads/point/last-month/tsyringe
-- npm downloads API for inversify: https://api.npmjs.org/downloads/point/last-month/inversify
-- npm downloads API for typed-inject: https://api.npmjs.org/downloads/point/last-month/typed-inject
-- npm downloads API for awilix: https://api.npmjs.org/downloads/point/last-month/awilix
-- npm downloads API for typedi: https://api.npmjs.org/downloads/point/last-month/typedi
+- React createContext/useContext docs
+- React state and effects docs
+- React Native state docs
+- React Native Turbo Native Modules docs
+- React Native PermissionsAndroid docs
+- React Native Linking docs
+- React Native FlatList docs
+- React Native SafeAreaView docs
+- TSyringe README
+- npm package metadata API

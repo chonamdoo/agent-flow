@@ -159,17 +159,8 @@ When this skill is used for presentation development or code review, include the
 
 ## Sources
 
-- React `createContext`: https://react.dev/reference/react/createContext
-- React `useContext`: https://react.dev/reference/react/useContext
-- Passing data deeply with context: https://react.dev/learn/passing-data-deeply-with-context
-- React `useEffect`: https://react.dev/reference/react/useEffect
-- Choosing the State Structure: https://react.dev/learn/choosing-the-state-structure
-- Sharing State Between Components: https://react.dev/learn/sharing-state-between-components
-- Extracting State Logic into a Reducer: https://react.dev/learn/extracting-state-logic-into-a-reducer
-- Separating Events from Effects: https://react.dev/learn/separating-events-from-effects
-- tsyringe: https://github.com/microsoft/tsyringe
-- npm downloads API: https://api.npmjs.org/downloads/point/last-month/tsyringe
-- npm downloads API for inversify: https://api.npmjs.org/downloads/point/last-month/inversify
-- npm downloads API for typed-inject: https://api.npmjs.org/downloads/point/last-month/typed-inject
-- npm downloads API for awilix: https://api.npmjs.org/downloads/point/last-month/awilix
-- npm downloads API for typedi: https://api.npmjs.org/downloads/point/last-month/typedi
+- React createContext/useContext docs
+- React context and state structure docs
+- React useEffect and event separation docs
+- TSyringe README
+- npm package metadata API

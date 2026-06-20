@@ -197,23 +197,12 @@ When this skill is used for presentation development or code review, include the
 
 ## Sources
 
-- Apple managing user interface state: https://developer.apple.com/documentation/swiftui/managing-user-interface-state
-- Apple model data: https://developer.apple.com/documentation/SwiftUI/Model-data
-- Apple `State`: https://developer.apple.com/documentation/swiftui/state
-- Apple `Binding`: https://developer.apple.com/documentation/SwiftUI/Binding
-- Apple `Observable`: https://developer.apple.com/documentation/Observation/Observable
-- Apple Environment values: https://developer.apple.com/documentation/swiftui/environment-values
-- Apple `@Entry`: https://developer.apple.com/documentation/SwiftUI/Entry%28%29
-- Apple Observation migration: https://developer.apple.com/documentation/SwiftUI/Migrating-from-the-observable-object-protocol-to-the-observable-macro
-- Apple `StateObject`: https://developer.apple.com/documentation/swiftui/stateobject
-- Apple `EnvironmentObject`: https://developer.apple.com/documentation/swiftui/environmentobject
-- Factory: https://github.com/hmlongco/Factory
-- swift-dependencies: https://github.com/pointfreeco/swift-dependencies
-- Swinject: https://github.com/Swinject/Swinject
-- Swinject Assembler: https://github.com/Swinject/Swinject/blob/master/Documentation/Assembler.md
-- Swinject Object Scopes: https://github.com/Swinject/Swinject/blob/master/Documentation/ObjectScopes.md
-- Swinject Container Hierarchy: https://github.com/Swinject/Swinject/blob/master/Documentation/ContainerHierarchy.md
-- Swinject Thread Safety: https://github.com/Swinject/Swinject/blob/master/Documentation/ThreadSafety.md
-- Swinject Injection Patterns: https://github.com/Swinject/Swinject/blob/master/Documentation/InjectionPatterns.md
-- Swinject Circular Dependencies: https://github.com/Swinject/Swinject/blob/master/Documentation/CircularDependencies.md
-- Needle: https://github.com/uber/needle
+- Apple SwiftUI user interface state docs
+- Apple SwiftUI model data docs
+- Apple SwiftUI State, Binding, Observation, and Environment docs
+- Factory README
+- swift-dependencies README
+- Swinject README
+- Swinject Assembler, object scope, container hierarchy, thread safety,
+  injection pattern, and circular dependency docs
+- Needle README

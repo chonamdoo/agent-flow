@@ -80,7 +80,18 @@ def test_bundled_workflow_skills_are_internal_and_host_skills_are_registered(tmp
     indexed = {skill["name"] for skill in index["skills"]}
     # bundled skill은 전부 index에 노출되어야 agent가 발견할 수 있다.
     assert host_skills <= indexed
-    assert {"full-feature-workflow", "domain-grill", "architecture-reviewer", "push-watch"} <= indexed
+    assert {
+        "full-feature-workflow",
+        "domain-grill",
+        "architecture-reviewer",
+        "push-watch",
+        "clean-architecture-core",
+        "android-clean-architecture",
+        "ios-clean-architecture",
+        "react-clean-architecture",
+        "react-native-clean-architecture",
+        "python-api-clean-architecture",
+    } <= indexed
     # host 디렉토리 link는 host skill 7종으로 제한한다.
     assert {link["name"] for link in index["links"]} == host_skills
     assert (project / ".agent-flow" / "skills" / "domain-grill" / "SKILL.md").exists()
@@ -90,37 +101,46 @@ def test_bundled_workflow_skills_are_internal_and_host_skills_are_registered(tmp
     assert not (project / ".Codex" / "skills" / "full-feature-workflow").exists()
 
 
-def test_clean_architecture_skill_installs_platform_standard(tmp_path: Path) -> None:
+def test_clean_architecture_skills_install_core_and_platform_dependency_graph(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
 
     result = _install(project)
 
     assert result.returncode == 0, result.stderr
-    skill = (
+    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    skills = {skill["name"]: skill for skill in index["skills"]}
+    platform_skills = {
+        "android-clean-architecture",
+        "ios-clean-architecture",
+        "react-clean-architecture",
+        "react-native-clean-architecture",
+        "python-api-clean-architecture",
+    }
+
+    assert "clean-architecture-core" in skills
+    assert "clean-architecture" in skills
+    assert platform_skills <= set(skills)
+    assert skills["clean-architecture"]["requires"] == ["clean-architecture-core"]
+    for name in platform_skills:
+        assert skills[name]["requires"] == ["clean-architecture-core"]
+    assert not any("missing required skill" in warning for warning in index["warnings"])
+
+    core = (
+        project / ".agent-flow" / "skills" / "clean-architecture-core" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    android = (
+        project / ".agent-flow" / "skills" / "android-clean-architecture" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    alias = (
         project / ".agent-flow" / "skills" / "clean-architecture" / "SKILL.md"
     ).read_text(encoding="utf-8")
-    reference = (
-        project
-        / ".agent-flow"
-        / "skills"
-        / "clean-architecture"
-        / "references"
-        / "platform-standard.md"
-    ).read_text(encoding="utf-8")
-    assert "references/platform-standard.md" in skill
-    assert "## Adoption Rule" in skill
-    assert "Android/Samantha structure" in skill
-    assert "Hilt-equivalent" in skill
-    assert "## Adoption Policy" in reference
-    assert "Android/Samantha structure is the canonical source" in reference
-    assert "## Module Families" in reference
-    assert "Core Design System" in reference
-    assert "## Dependency Injection Rules" in reference
-    assert "FastAPI" in reference
-    assert "`Depends`" in reference
-    assert "Hilt binding responsibilities" in reference
-    assert "## Boundary Smell List" in reference
+    assert "repository-impl-direct-api-service: pass|fail" in core
+    assert "HomeRepositoryImpl -> HomeRemoteDataSource -> HomeApiService" in android
+    assert "Compatibility Alias" in alias
+    assert "Samantha" not in core + android + alias
+    assert "http://" not in core + android + alias
+    assert "https://" not in core + android + alias
 
 
 def test_local_skill_priority_beats_project_and_bundled_conflict_is_recorded(tmp_path: Path) -> None:
