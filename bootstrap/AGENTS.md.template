@@ -18,8 +18,8 @@ active run이 있으면 status 출력의 `next_command`를 그대로 실행하�
 
 ### Workflow Contract
 
-- `default.yaml`: design → slice-plan → worktree → implement → comment-authoring → final-review ↔ fix-loop → comment-authoring → final-review → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge → cleanup
-- `full-feature.yaml`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → gates ↔ fix-loop → comment-authoring → multi-review → architecture-review → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
+- `default.yaml`: design → slice-plan → worktree → implement → comment-authoring → final-review → gates ↔ fix-loop → comment-authoring → final-review → gates → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge → cleanup
+- `full-feature.yaml`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → comment-authoring → multi-review → architecture-review → gates ↔ fix-loop → comment-authoring → multi-review → architecture-review → gates → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
 - `multi-review`는 현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수다. 두 sub-agent를 병렬 실행하고, `reviewer-source: sub-agent`를 기록한 뒤 sub-agent를 닫는다. 마지막에 `## Overall`과 `verdict: approve` 또는 `verdict: request-changes`만 기록한다. 활성 host가 아닌 추가 provider는 optional이다.
 
 ### Context Economy
@@ -33,8 +33,8 @@ active run이 있으면 status 출력의 `next_command`를 그대로 실행하�
 - install/bootstrap 후 `.agent-flow/skills/index.json` metadata를 보고 필요한 skill만 읽습니다. 모든 SKILL.md 전문을 항상 읽지 않습니다.
 - Claude/Codex 프로젝트 skill 경로는 leader checkout의 install 결과를 따릅니다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않습니다.
 
-코드 생성·수정·코드리뷰 phase에서는 `code-generation-discipline`을 적용합니다. 변경 언어/프레임워크와 맞는 모든 로컬 skill을 먼저 읽은 뒤 작성하거나 판단합니다. 필요한 skill이 현재 host에 없으면 설치하지 말고 `missing local <group>: <skill>`와 source URL을 사용자에게 알려 설치를 요청합니다.
-Android/Kotlin/Compose/KMP 작업은 Android profile의 `android_skills`와 `chrisbanes_skills`에서 변경 영역과 맞는 로컬 설치 skill을 전부 plain text로 먼저 읽습니다. 현재 실행 host의 경로 하나만 사용하고, 다른 host 경로를 중복 로드하지 않습니다.
+코드 생성·수정·코드리뷰 phase에서는 `code-generation-discipline`을 적용합니다. active profile, installed skill index, changed files, task scope로 필요한 profile skill만 결정하고, 관련 없는 platform skill은 요구하지 않습니다.
+Android/Kotlin/Compose/KMP 변경 때만 Android profile의 `android_skills`와 `chrisbanes_skills`에서 변경 영역과 맞는 로컬 설치 skill을 plain text로 읽습니다. React Native의 `android/` native code를 직접 변경한 경우에도 Android profile mapping을 추가 적용합니다. 필요한 skill이 현재 host에 없으면 설치하지 말고 `missing local <group>: <skill>`와 source URL을 사용자에게 알려 설치를 요청합니다.
 
 진행 중인 run은 자동 감지됩니다:
 

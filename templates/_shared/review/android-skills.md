@@ -52,6 +52,8 @@ Include this completion gate:
 
 ```text
 ## Completion Gate
-android-local-skills: checked|n/a
-android-local-skills-used: <skill list or n/a>
+android-local-skills: checked
+android-local-skills-used: <skill list>
+chrisbanes-skills: checked|n/a
+chrisbanes-skills-used: <skill list or n/a>
 ```

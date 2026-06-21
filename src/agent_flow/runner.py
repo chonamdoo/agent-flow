@@ -6,12 +6,13 @@ the enforcement mechanism: a phase only advances when the previous artifact
 exists, and the run only ends when all phases complete.
 
 Profile awareness:
-  - The active profile is detected at install time (`kit.json:profile`) and
-    re-read on each run.
+  - The active profile selection is detected at install time
+    (`kit.json:profile` or `kit.json:profiles`) and re-read on each run.
   - Profile YAML (branching / gates / review_angles / vocabulary / etc) is
     parsed and injected into the prompt envelope so the host AI sees the
     stack-specific knobs as real data, not as text instructions to "look it
-    up somewhere".
+    up somewhere". Multi-profile installs inject a composite snapshot with
+    each selected profile preserved.
 
 Workflow validation:
   - Empty / missing `phases` raises a clear error rather than KeyError.
@@ -391,9 +392,9 @@ class Runner:
             if rounds > FIX_LOOP_MAX_ROUNDS:
                 print(f"  [block] fix-loop exceeded {FIX_LOOP_MAX_ROUNDS} rounds")
                 return current_index, True
-        elif target and target != "block" and "fix-loop" in phase.routes.values():
-            # block은 진행이 아니므로 리셋하지 않는다. kit.mjs도 block에서
-            # fix_loop_rounds를 건드리지 않아 두 런타임이 같은 상한을 유지한다.
+        elif phase.id == "gates" and target and target != "block" and "fix-loop" in phase.routes.values():
+            # reviewer approve 이후 QA가 최종 통과할 때만 reset한다. review 재실행
+            # 단계에서 reset하면 QA/review loop cap이 무력화된다.
             self._reset_fix_loop_rounds()
         if target == "block":
             print(f"  [block] {phase.id} status={key}")
@@ -681,7 +682,7 @@ def _gates_route_key(text: str) -> str:
     if isinstance(status, str):
         normalized_status = status.strip().lower().replace("_", "-")
         if payload["passed"] is True and normalized_status in {"green", "approve"}:
-            return normalized_status
+            return normalized_status if _gate_results_prove_pass(payload.get("results")) else "default"
         if payload["passed"] is False and normalized_status in {"request-changes", "blocked", "error", "pending"}:
             return normalized_status
     if payload["passed"] is True:
@@ -696,12 +697,12 @@ def _multi_review_route_key(text: str, phase_id: str = "") -> str:
         return "missing-reviewer"
     if overall == "invalid-verdict":
         return "invalid-verdict"
+    if "request-changes" in verdicts.values() or overall == "request-changes":
+        return "request-changes"
     if len(verdicts) < 2:
         return "insufficient-reviewers"
     if overall == "default":
         return "default"
-    if "request-changes" in verdicts.values() or overall == "request-changes":
-        return "request-changes"
     has_subagent = _has_subagent_reviewer(text)
     if overall == "approve" and has_subagent and len(verdicts) >= 2:
         return "approve"
@@ -711,9 +712,13 @@ def _multi_review_route_key(text: str, phase_id: str = "") -> str:
 def _gate_results_prove_pass(results: object) -> bool:
     if not isinstance(results, list) or not results:
         return False
+    required_seen = False
     for result in results:
         if not isinstance(result, dict):
             return False
+        if result.get("required") is False:
+            continue
+        required_seen = True
         command = result.get("command")
         if not isinstance(command, str) or not command.strip():
             return False
@@ -721,13 +726,17 @@ def _gate_results_prove_pass(results: object) -> bool:
             return False
         if not (result.get("passed") is True or result.get("status") in {"pass", "ok"}):
             return False
-    return True
+    return required_seen
 
 
 def _gate_result_has_evidence(result: dict[str, object]) -> bool:
     for key in ("output", "stdout", "stderr", "artifact", "path"):
         value = result.get(key)
         if isinstance(value, str) and value.strip():
+            return True
+    for key in ("exit_code", "exitCode"):
+        value = result.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value == 0:
             return True
     return False
 
@@ -737,8 +746,9 @@ def _multi_review_overall_route_key(text: str) -> str:
     verdicts: list[str] = []
     overall_sections = 0
     for line in text.splitlines():
-        stripped = line.strip().lower()
-        heading = re.match(r"^(#{1,6})\s+(.+)$", stripped)
+        stripped = line.strip()
+        lowered = stripped.lower()
+        heading = re.match(r"^(#{1,6})\s+(.+)$", lowered)
         if heading:
             title = heading.group(2)
             # reviewer 파서와 같은 heading alias(overall/final [verdict])를 인정한다.
@@ -751,7 +761,7 @@ def _multi_review_overall_route_key(text: str) -> str:
             continue
         if not in_overall_section:
             continue
-        match = re.match(r"^verdict:\s*([a-z_-]+)\s*$", stripped)
+        match = re.match(r"^verdict:\s*(approve|request-changes)\s*$", stripped)
         if not match:
             continue
         verdicts.append(match.group(1))
@@ -807,10 +817,11 @@ def _independent_reviewer_verdicts(text: str) -> dict[str, str]:
             continue
         if "verdict:" not in lowered:
             continue
-        verdict = lowered.split("verdict:", 1)[1].strip()
-        if verdict not in {"approve", "request-changes"}:
+        verdict_match = re.match(r"^(.*?)verdict:\s*(approve|request-changes)\s*$", stripped)
+        if not verdict_match:
             continue
-        prefix = lowered.split("verdict:", 1)[0].strip(" -")
+        prefix = verdict_match.group(1).strip(" -").lower()
+        verdict = verdict_match.group(2)
         if prefix in {"overall", "overall verdict", "final", "final verdict"}:
             continue
         if prefix:
@@ -842,7 +853,14 @@ def _has_subagent_reviewer(text: str) -> bool:
 
 def _is_subagent_source(value: str) -> bool:
     normalized = re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
-    return normalized in {"sub agent", "subagent"}
+    return normalized in {
+        "sub agent",
+        "subagent",
+        "host sub agent",
+        "host subagent",
+        "active host sub agent",
+        "active host subagent",
+    }
 
 
 def _reviewer_key(value: str) -> str:
@@ -979,10 +997,11 @@ def _load_profile(kit_root: Path, project_root: Path) -> tuple[str, dict[str, An
 
     Resolution order:
       1. `AGENT_FLOW_PROFILE` env override (always wins; user opted in)
-      2. `.agent-flow/kit.json:profile` written by the installer
-      3. fall back to "generic"
+      2. `.agent-flow/kit.json:profiles` written by filtered installer
+      3. `.agent-flow/kit.json:profile` written by the installer
+      4. fall back to "generic"
 
-    A typo in `kit.json:profile` would otherwise run the entire workflow
+    A typo in `kit.json:profile(s)` would otherwise run the entire workflow
     against the wrong stack (wrong branching, gates, PR target) — a
     correctness bug, not a degraded mode. So we treat that case as a hard
     error unless `AGENT_FLOW_FALLBACK_GENERIC=1` opts into silent fallback.
@@ -991,10 +1010,44 @@ def _load_profile(kit_root: Path, project_root: Path) -> tuple[str, dict[str, An
     """
     import os
     forced = os.environ.get("AGENT_FLOW_PROFILE")
-    from_kit = _read_kit_profile(project_root)
-    profile_id = forced or from_kit or "generic"
-    _validate_yaml_name(profile_id, "profile")
     explicit_fallback = os.environ.get("AGENT_FLOW_FALLBACK_GENERIC") == "1"
+    if forced:
+        return _load_single_profile(
+            kit_root,
+            forced,
+            strict_missing=False,
+            explicit_fallback=explicit_fallback,
+            source="AGENT_FLOW_PROFILE",
+        )
+
+    from_kit_profiles = _read_kit_profiles(project_root)
+    if from_kit_profiles:
+        return _load_profile_union(
+            kit_root,
+            from_kit_profiles,
+            explicit_fallback=explicit_fallback,
+        )
+
+    from_kit = _read_kit_profile(project_root)
+    profile_id = from_kit or "generic"
+    return _load_single_profile(
+        kit_root,
+        profile_id,
+        strict_missing=bool(from_kit),
+        explicit_fallback=explicit_fallback,
+        source=".agent-flow/kit.json:profile" if from_kit else "default",
+    )
+
+
+def _load_single_profile(
+    kit_root: Path,
+    profile_id: str,
+    *,
+    strict_missing: bool,
+    explicit_fallback: bool,
+    source: str,
+) -> tuple[str, dict[str, Any]]:
+    _validate_yaml_name(profile_id, "profile")
 
     profile_path = kit_root / "profiles" / f"{profile_id}.yaml"
     _ensure_child_path(kit_root / "profiles", profile_path, "profile")
@@ -1002,10 +1055,10 @@ def _load_profile(kit_root: Path, project_root: Path) -> tuple[str, dict[str, An
         # Hard error when kit.json says a profile that doesn't exist (typo).
         # Lenient fallback only when explicitly requested via env var or when
         # the resolution path was already "generic" (true unknown setup).
-        if forced is None and from_kit and not explicit_fallback:
+        if strict_missing and not explicit_fallback:
             raise FileNotFoundError(
                 f"profile {profile_id!r} not found at {profile_path}. "
-                f"Likely a typo in `.agent-flow/kit.json:profile`. "
+                f"Likely a typo in `{source}`. "
                 f"Set `AGENT_FLOW_FALLBACK_GENERIC=1` to fall back silently, "
                 f"or fix the kit.json value."
             )
@@ -1023,16 +1076,110 @@ def _load_profile(kit_root: Path, project_root: Path) -> tuple[str, dict[str, An
     return profile_id, raw
 
 
+def _load_profile_union(
+    kit_root: Path,
+    profile_ids: list[str],
+    *,
+    explicit_fallback: bool,
+) -> tuple[str, dict[str, Any]]:
+    loaded: list[tuple[str, dict[str, Any]]] = []
+    for profile_id in profile_ids:
+        loaded.append(
+            _load_single_profile(
+                kit_root,
+                profile_id,
+                strict_missing=True,
+                explicit_fallback=explicit_fallback,
+                source=".agent-flow/kit.json:profiles",
+            )
+        )
+    deduped = _dedupe_loaded_profiles(loaded)
+    if not deduped:
+        return _load_single_profile(
+            kit_root,
+            "generic",
+            strict_missing=False,
+            explicit_fallback=explicit_fallback,
+            source="default",
+        )
+    if len(deduped) == 1:
+        return deduped[0]
+    active_ids = [profile_id for profile_id, _ in deduped]
+    return ",".join(active_ids), {
+        "id": "multi-profile",
+        "active_profiles": active_ids,
+        "profiles": [profile for _, profile in deduped],
+        "review_angles": _merge_profile_list_field(deduped, "review_angles"),
+        "gates": _merge_profile_list_field(deduped, "gates"),
+        "skills": {
+            profile_id: profile.get("skills", {})
+            for profile_id, profile in deduped
+            if isinstance(profile.get("skills"), dict)
+        },
+        "architecture": {
+            profile_id: profile.get("architecture")
+            for profile_id, profile in deduped
+            if isinstance(profile.get("architecture"), dict)
+        },
+    }
+
+
+def _dedupe_loaded_profiles(profiles: list[tuple[str, dict[str, Any]]]) -> list[tuple[str, dict[str, Any]]]:
+    deduped: list[tuple[str, dict[str, Any]]] = []
+    seen: set[str] = set()
+    for profile_id, profile in profiles:
+        if profile_id in seen:
+            continue
+        seen.add(profile_id)
+        deduped.append((profile_id, profile))
+    return deduped
+
+
+def _merge_profile_list_field(profiles: list[tuple[str, dict[str, Any]]], field: str) -> list[Any]:
+    merged: list[Any] = []
+    seen: set[str] = set()
+    for _, profile in profiles:
+        values = profile.get(field)
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            key = json.dumps(value, sort_keys=True, ensure_ascii=False)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(value)
+    return merged
+
+
 def _read_kit_profile(project_root: Path) -> str | None:
+    data = _read_kit_json(project_root)
+    p = data.get("profile")
+    return p if isinstance(p, str) else None
+
+
+def _read_kit_profiles(project_root: Path) -> list[str]:
+    data = _read_kit_json(project_root)
+    profiles = data.get("profiles")
+    if not isinstance(profiles, list):
+        return []
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for profile in profiles:
+        if isinstance(profile, str) and profile and profile not in seen:
+            deduped.append(profile)
+            seen.add(profile)
+    return deduped
+
+
+def _read_kit_json(project_root: Path) -> dict[str, Any]:
     kit_json = project_root / ".agent-flow" / "kit.json"
     if not kit_json.exists():
-        return None
+        return {}
     try:
         data = json.loads(kit_json.read_text())
     except (json.JSONDecodeError, OSError):
-        return None
-    p = data.get("profile")
-    return p if isinstance(p, str) else None
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _validate_yaml_name(name: str, kind: str) -> None:

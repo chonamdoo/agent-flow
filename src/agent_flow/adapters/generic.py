@@ -38,6 +38,7 @@ class GenericAdapter(Adapter):
         if mode == "stub-success":
             artifact = self.artifact_path(phase, run_dir)
             if not artifact.exists():
+                artifact.parent.mkdir(parents=True, exist_ok=True)
                 if getattr(phase, "multi_review", False):
                     artifact.write_text(
                         f"# {phase.id}\n\n"
@@ -49,6 +50,16 @@ class GenericAdapter(Adapter):
                         "verdict: approve\n\n"
                         "## Overall\n"
                         "verdict: approve\n",
+                        encoding="utf-8",
+                    )
+                    return True
+                if phase.id == "gates":
+                    artifact.write_text(
+                        '{"passed": true, "status": "green", '
+                        '"results": [{"id": "stub", '
+                        '"command": "agent-flow generic stub-success", '
+                        '"argv": ["agent-flow", "generic", "stub-success"], '
+                        '"passed": true, "exit_code": 0}]}\n',
                         encoding="utf-8",
                     )
                     return True

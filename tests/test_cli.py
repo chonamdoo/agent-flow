@@ -195,8 +195,8 @@ class CliTest(unittest.TestCase):
         # Python runner가 verdict/status에 따라 재작업 phase로 되돌아가는지 고정한다.
         self.assertEqual(phases["plan-review"]["routes"]["request-changes"], "slice-plan")
         self.assertEqual(phases["gates"]["routes"]["request-changes"], "fix-loop")
-        self.assertEqual(phases["gates"]["routes"]["green"], "comment-authoring")
-        self.assertEqual(phases["gates"]["routes"]["approve"], "comment-authoring")
+        self.assertEqual(phases["gates"]["routes"]["green"], "commit")
+        self.assertEqual(phases["gates"]["routes"]["approve"], "commit")
         self.assertEqual(phases["comment-authoring"]["routes"]["default"], "multi-review")
         self.assertIn("comment-authoring: applied", phases["comment-authoring"]["required_markers"])
         self.assertIn("Do not refactor", phases["comment-authoring"]["prompt"])
@@ -208,8 +208,9 @@ class CliTest(unittest.TestCase):
         self.assertIn("## Overall", phases["multi-review"]["prompt"])
         self.assertIn("verdict: approve", phases["multi-review"]["prompt"])
         self.assertIn("verdict: request-changes", phases["multi-review"]["prompt"])
-        self.assertEqual(phases["fix-loop"]["routes"]["default"], "gates")
-        self.assertEqual(phases["architecture-review"]["routes"]["blocked"], "refactor")
+        self.assertEqual(phases["fix-loop"]["routes"]["default"], "comment-authoring")
+        self.assertEqual(phases["architecture-review"]["routes"]["approve"], "gates")
+        self.assertNotIn("blocked", phases["architecture-review"]["routes"])
         self.assertEqual(phases["pr-watch"]["routes"]["comments"], "pr-comment-fix")
         self.assertEqual(phases["pr-watch"]["routes"]["ci-failed"], "pr-ci-fix")
         self.assertEqual(phases["pr-comment-fix"]["routes"]["default"], "pr-watch")
@@ -231,8 +232,12 @@ class CliTest(unittest.TestCase):
         self.assertEqual(
             default_phases["implement"]["required_markers"],
             [
-                "gates: all_passed",
                 "skills_checked: true",
+                "profile-skill-selection: applied",
+                "active-profiles:",
+                "changed-file-skill-resolution: applied",
+                "required-profile-skills: checked",
+                "missing-required-profile-skills:",
                 "clean-architecture: applied",
                 "project-local-skills: checked|n/a",
                 "project-local-skills-used:",
@@ -242,18 +247,22 @@ class CliTest(unittest.TestCase):
                 "ui-state-modeling: explicit|n/a",
                 "presentation-mapping-boundary: domain-to-uimodel|n/a",
                 "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a",
-                "android-local-skills: checked|n/a",
-                "android-local-skills-used:",
             ],
         )
         self.assertEqual(default_phases["final-review"]["routes"]["request-changes"], "fix-loop")
-        self.assertEqual(default_phases["final-review"]["routes"]["approve"], "commit")
+        self.assertEqual(default_phases["final-review"]["routes"]["approve"], "gates")
+        self.assertEqual(default_phases["gates"]["routes"]["green"], "commit")
+        self.assertEqual(default_phases["gates"]["routes"]["request-changes"], "fix-loop")
         self.assertEqual(default_phases["fix-loop"]["routes"]["default"], "comment-authoring")
         self.assertEqual(default_phases["comment-authoring"]["routes"]["default"], "final-review")
         self.assertIn("comment-authoring: applied", default_phases["comment-authoring"]["required_markers"])
         self.assertIn("comment-checker: checked|unavailable|n/a", default_phases["comment-authoring"]["required_markers"])
         self.assertIn("Do not refactor", default_phases["comment-authoring"]["prompt"])
         self.assertIn("skills_checked: true", default_phases["final-review"]["required_markers"])
+        self.assertIn("codex-claude-parity-check: pass|fail", default_phases["final-review"]["required_markers"])
+        self.assertIn("hook-parity-check: pass|fail", default_phases["final-review"]["required_markers"])
+        self.assertIn("codex-claude-parity-check: pass|fail", default_phases["final-review"]["prompt"])
+        self.assertIn("hook-parity-check: pass|fail", default_phases["final-review"]["prompt"])
         self.assertIn("at least two active-host reviewer sub-agents", default_phases["final-review"]["prompt"])
         self.assertIn("reviewer-source: sub-agent", default_phases["final-review"]["prompt"])
         self.assertIn("close that sub-agent session", default_phases["final-review"]["prompt"])
@@ -284,11 +293,20 @@ class CliTest(unittest.TestCase):
         self.assertEqual(phases["green"]["artifact"], "artifacts/green.log")
         for phase_id in ("red", "green", "refactor", "fix-loop", "multi-review", "architecture-review"):
             self.assertIn("skills_checked: true", phases[phase_id]["required_markers"])
+            self.assertIn("profile-skill-selection: applied", phases[phase_id]["required_markers"])
+            self.assertIn("changed-file-skill-resolution: applied", phases[phase_id]["required_markers"])
+            self.assertIn("required-profile-skills: checked", phases[phase_id]["required_markers"])
+            self.assertIn("missing-required-profile-skills:", phases[phase_id]["required_markers"])
             self.assertIn("project-local-skills: checked|n/a", phases[phase_id]["required_markers"])
             self.assertIn("project-local-skills-used:", phases[phase_id]["required_markers"])
         self.assertIn("clean-architecture: applied", phases["green"]["required_markers"])
         self.assertIn("clean-architecture: applied", phases["fix-loop"]["required_markers"])
         self.assertIn("clean-architecture-review: applied", phases["multi-review"]["required_markers"])
+        for phase_id in ("multi-review", "architecture-review"):
+            self.assertIn("codex-claude-parity-check: pass|fail", phases[phase_id]["required_markers"])
+            self.assertIn("hook-parity-check: pass|fail", phases[phase_id]["required_markers"])
+            self.assertIn("codex-claude-parity-check: pass|fail", phases[phase_id]["prompt"])
+            self.assertIn("hook-parity-check: pass|fail", phases[phase_id]["prompt"])
         multi_review_prompt = phases["multi-review"]["prompt"]
         self.assertIn("skills/clean-architecture-core/SKILL.md", multi_review_prompt)
         self.assertIn("skills/clean-architecture/SKILL.md", multi_review_prompt)
@@ -301,9 +319,10 @@ class CliTest(unittest.TestCase):
         self.assertIn("must-avoid or failing checklist", architecture_review_prompt)
         self.assertIn("skill makes the verdict", architecture_review_prompt)
         self.assertIn("presentation-skill: android|react|react-native|ios|n/a", phases["green"]["required_markers"])
-        self.assertIn("android-local-skills: checked|n/a", phases["green"]["required_markers"])
+        self.assertNotIn("android-local-skills: checked|n/a", phases["green"]["required_markers"])
+        self.assertIn("Android/Chris Banes skills are required only", phases["green"]["prompt"])
         self.assertEqual(phases["gates"]["artifact"], "artifacts/gate-results.json")
-        self.assertEqual(phases["gates"]["routes"]["green"], "comment-authoring")
+        self.assertEqual(phases["gates"]["routes"]["green"], "commit")
         self.assertEqual(phases["comment-authoring"]["routes"]["default"], "multi-review")
 
     def test_clean_architecture_review_template_routes_policy_to_core_skill(self) -> None:
@@ -330,6 +349,19 @@ class CliTest(unittest.TestCase):
         self.assertEqual(_gates_route_key('{"passed": true, "results": []}'), "default")
         self.assertEqual(
             _gates_route_key('{"passed": true, "results": [{"command": "npm test", "passed": true, "output": "ok"}]}'),
+            "green",
+        )
+        self.assertEqual(
+            _gates_route_key('{"passed": true, "results": [{"command": "npm test", "passed": true, "exit_code": 0}]}'),
+            "green",
+        )
+        self.assertEqual(
+            _gates_route_key(
+                '{"passed": true, "results": ['
+                '{"command": "npm test", "passed": true, "exit_code": 0, "required": true},'
+                '{"command": "npm run lint", "passed": false, "stderr": "missing", "required": false}'
+                "]}"
+            ),
             "green",
         )
         self.assertEqual(
@@ -454,6 +486,22 @@ class CliTest(unittest.TestCase):
             self.assertEqual(runner._next_index(0, phase), (2, False))
 
             (run_dir / "multi-review.md").write_text(
+                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: APPROVE\n\n"
+                "## Reviewer 2\nreviewer-source: sub-agent\nreviewer-2 verdict: APPROVE\n\n"
+                "## Overall\nverdict: APPROVE\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(runner._next_index(0, phase), (0, True))
+
+            (run_dir / "multi-review.md").write_text(
+                "## Reviewer 1\nreviewer-source: codex sub-agent\nreviewer-1 verdict: approve\n\n"
+                "## Reviewer 2\nreviewer-source: claude sub-agent\nreviewer-2 verdict: approve\n\n"
+                "## Overall\nverdict: approve\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(runner._next_index(0, phase), (0, True))
+
+            (run_dir / "multi-review.md").write_text(
                 "## Reviewer 1\nreviewer-source: non-sub-agent\nreviewer-1 verdict: approve\n\n"
                 "## Overall\nverdict: approve\n",
                 encoding="utf-8",
@@ -481,7 +529,7 @@ class CliTest(unittest.TestCase):
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: request-changes\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (0, True))
+            self.assertEqual(runner._next_index(0, phase), (1, False))
 
             for legacy_status in ("verdict: request-changes\n", "status: failed\n", "status: fail\n"):
                 (run_dir / "multi-review.md").write_text(legacy_status, encoding="utf-8")
@@ -620,7 +668,7 @@ class CliTest(unittest.TestCase):
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: request-changes\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (0, True))
+            self.assertEqual(runner._next_index(0, phase), (1, False))
 
             (run_dir / "final-review.md").write_text(
                 "reviewer verdict: approve\n## Reviewer\nverdict: approve\nverdict: approve\n",
@@ -658,6 +706,307 @@ class CliTest(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(runner._next_index(0, phase), (2, False))
+
+    def test_python_architecture_review_requires_two_active_host_reviewers(self) -> None:
+        from agent_flow.runner import Phase, Runner
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir)
+            phase = Phase(
+                id="architecture-review",
+                description="",
+                multi_review=True,
+                routes={"approve": "gates", "request-changes": "refactor"},
+            )
+            runner = Runner.__new__(Runner)
+            runner.run_dir = run_dir
+            runner.phases = [
+                phase,
+                Phase(id="refactor", description=""),
+                Phase(id="gates", description=""),
+            ]
+
+            (run_dir / "architecture-review.md").write_text(
+                "## Reviewer A\nreviewer-source: sub-agent\nverdict: approve\n\n"
+                "## Reviewer B\nreviewer-source: sub-agent\nverdict: approve\n\n"
+                "## Overall\nverdict: approve\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(runner._next_index(0, phase), (2, False))
+
+            (run_dir / "architecture-review.md").write_text(
+                "## Reviewer A\nreviewer-source: sub-agent\nverdict: approve\n\n"
+                "## Reviewer B\nreviewer-source: sub-agent\nverdict: request-changes\n\n"
+                "## Overall\nverdict: request-changes\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(runner._next_index(0, phase), (1, False))
+
+            (run_dir / "architecture-review.md").write_text(
+                "## Reviewer A\nreviewer-source: sub-agent\nverdict: approve\n\n"
+                "## Overall\nverdict: approve\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(runner._next_index(0, phase), (0, True))
+
+    def test_architecture_lint_validates_android_roles_and_packages(self) -> None:
+        from agent_flow.core.architecture_lint import changed_files, lint_profiles, lint_project
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            good = root / "core" / "domain" / "chat" / "src" / "main" / "java" / "com" / "example" / "app" / "core" / "domain" / "chat" / "Chat.kt"
+            good.parent.mkdir(parents=True, exist_ok=True)
+            good.write_text("package com.example.app.core.domain.chat\nclass Chat\n", encoding="utf-8")
+            pair = root / "core" / "data" / "chat"
+            pair.mkdir(parents=True)
+            self.assertEqual(lint_project(root, "android", files=[str(good.relative_to(root))]), [])
+
+            settings = root / "settings.gradle.kts"
+            settings.write_text(
+                'include(":core:platform")\n'
+                'include(":core:platform:camera")\n'
+                'include(":core:domain:chat", ":core:data:chat")\n',
+                encoding="utf-8",
+            )
+            adapter = root / "core" / "platform" / "camera" / "src" / "main" / "java" / "com" / "example" / "app" / "core" / "platform" / "camera" / "Camera.kt"
+            adapter.parent.mkdir(parents=True, exist_ok=True)
+            adapter.write_text("package com.example.app.core.platform.camera\nclass Camera\n", encoding="utf-8")
+            self.assertEqual(lint_project(root, "android", files=[str(adapter.relative_to(root))]), [])
+
+            platform_root_file = root / "core" / "platform" / "src" / "main" / "java" / "com" / "example" / "app" / "core" / "platform" / "Platform.kt"
+            platform_root_file.parent.mkdir(parents=True, exist_ok=True)
+            platform_root_file.write_text("package com.example.app.core.platform\nclass Platform\n", encoding="utf-8")
+            self.assertEqual(lint_project(root, "android", files=[str(platform_root_file.relative_to(root))]), [])
+
+            bad_adapter = root / "core" / "platform" / "location" / "src" / "main" / "java" / "com" / "example" / "app" / "core" / "platform" / "Location.kt"
+            bad_adapter.parent.mkdir(parents=True, exist_ok=True)
+            bad_adapter.write_text("package com.example.app.core.platform\nclass Location\n", encoding="utf-8")
+            adapter_findings = lint_project(root, "android", files=[str(bad_adapter.relative_to(root))])
+            adapter_messages = "\n".join(finding.message for finding in adapter_findings)
+            self.assertIn("does not match role suffix core.platform.location", adapter_messages)
+            self.assertIn("Gradle module :core:platform:location is not declared in settings", adapter_messages)
+
+            domain_build = root / "core" / "domain" / "chat" / "build.gradle.kts"
+            domain_build.write_text(
+                'namespace = "com.example.app.core.data.chat"\n'
+                "dependencies { implementation(projects.core.data.chat) }\n",
+                encoding="utf-8",
+            )
+            direction_findings = lint_project(root, "android", files=[str(good.relative_to(root))])
+            direction_messages = "\n".join(f.message for f in direction_findings)
+            self.assertIn("forbidden Gradle dependency :core:data", direction_messages)
+            self.assertIn("namespace com.example.app.core.data.chat does not match role suffix core.domain.chat", direction_messages)
+            direct_build_findings = lint_project(root, "android", files=[str(domain_build.relative_to(root))])
+            direct_build_messages = "\n".join(f.message for f in direct_build_findings)
+            self.assertIn("forbidden Gradle dependency :core:data", direct_build_messages)
+            self.assertIn("namespace com.example.app.core.data.chat does not match role suffix core.domain.chat", direct_build_messages)
+            self.assertNotIn("requires package declaration", direct_build_messages)
+
+            java_file = root / "core" / "domain" / "news" / "src" / "main" / "java" / "com" / "example" / "app" / "core" / "domain" / "news" / "News.java"
+            java_file.parent.mkdir(parents=True, exist_ok=True)
+            java_file.write_text("package com.example.app.core.domain.news;\nclass News {}\n", encoding="utf-8")
+            (root / "core" / "data" / "news").mkdir(parents=True)
+            settings.write_text(settings.read_text(encoding="utf-8") + 'include(":core:domain:news")\n', encoding="utf-8")
+            self.assertEqual(lint_project(root, "android", files=[str(java_file.relative_to(root))]), [])
+
+            domain_entity = root / "core" / "domain" / "orders" / "src" / "main" / "java" / "com" / "example" / "app" / "core" / "domain" / "orders" / "OrderEntity.kt"
+            domain_entity.parent.mkdir(parents=True, exist_ok=True)
+            domain_entity.write_text("package com.example.app.core.domain.orders\nclass OrderEntity\n", encoding="utf-8")
+            (root / "core" / "data" / "orders").mkdir(parents=True)
+            settings.write_text(settings.read_text(encoding="utf-8") + 'include(":core:domain:orders")\n', encoding="utf-8")
+            self.assertEqual(lint_project(root, "android", files=[str(domain_entity.relative_to(root))]), [])
+
+            missing_package = root / "core" / "domain" / "profile" / "src" / "main" / "java" / "com" / "example" / "app" / "core" / "domain" / "profile" / "Profile.kt"
+            missing_package.parent.mkdir(parents=True, exist_ok=True)
+            missing_package.write_text("class Profile\n", encoding="utf-8")
+            (root / "core" / "data" / "profile").mkdir(parents=True)
+            missing_package_findings = lint_project(root, "android", files=[str(missing_package.relative_to(root))])
+            self.assertIn("core-domain requires package declaration", "\n".join(f.message for f in missing_package_findings))
+
+            data_file = root / "core" / "data" / "chat" / "src" / "main" / "java" / "com" / "example" / "app" / "core" / "data" / "chat" / "ChatData.kt"
+            data_file.parent.mkdir(parents=True, exist_ok=True)
+            data_file.write_text("package com.example.app.core.data.chat\nclass ChatData\n", encoding="utf-8")
+            data_build = root / "core" / "data" / "chat" / "build.gradle.kts"
+            data_build.write_text("dependencies {}\n", encoding="utf-8")
+            data_findings = lint_project(root, "android", files=[str(data_file.relative_to(root))])
+            self.assertIn("core-data must depend on :core:domain:chat", "\n".join(f.message for f in data_findings))
+
+            hyphen_source = root / "core" / "data" / "user-profile" / "src" / "main" / "java" / "com" / "example" / "app" / "core" / "data" / "user_profile" / "UserProfileData.kt"
+            hyphen_source.parent.mkdir(parents=True, exist_ok=True)
+            hyphen_source.write_text("package com.example.app.core.data.user_profile\nclass UserProfileData\n", encoding="utf-8")
+            (root / "core" / "domain" / "user-profile").mkdir(parents=True)
+            hyphen_build = root / "core" / "data" / "user-profile" / "build.gradle.kts"
+            hyphen_build.write_text("dependencies { implementation(projects.core.domain.userProfile) }\n", encoding="utf-8")
+            settings.write_text(settings.read_text(encoding="utf-8") + 'include(":core:domain:user-profile", ":core:data:user-profile")\n', encoding="utf-8")
+            self.assertEqual(lint_project(root, "android", files=[str(hyphen_source.relative_to(root))]), [])
+
+            groovy_domain = root / "core" / "domain" / "payments"
+            groovy_domain.mkdir(parents=True)
+            groovy_build = root / "core" / "data" / "payments" / "build.gradle"
+            groovy_build.parent.mkdir(parents=True)
+            groovy_build.write_text("namespace 'com.example.app.core.domain.payments'\ndependencies {}\n", encoding="utf-8")
+            settings.write_text(
+                settings.read_text(encoding="utf-8")
+                + 'include(":core:domain:payments", ":core:data:payments")\n',
+                encoding="utf-8",
+            )
+            groovy_findings = lint_project(root, "android", files=[str(groovy_build.relative_to(root))])
+            groovy_messages = "\n".join(f.message for f in groovy_findings)
+            self.assertIn("namespace com.example.app.core.domain.payments does not match role suffix core.data.payments", groovy_messages)
+            self.assertIn("core-data must depend on :core:domain:payments", groovy_messages)
+
+            bad = root / "core" / "domain" / "billing" / "src" / "main" / "java" / "com" / "example" / "app" / "core" / "data" / "billing" / "BillingDto.kt"
+            bad.parent.mkdir(parents=True, exist_ok=True)
+            bad.write_text("package com.example.app.core.data.billing\nclass BillingDto\n", encoding="utf-8")
+            findings = lint_project(root, "android", files=[str(bad.relative_to(root))])
+            messages = "\n".join(finding.message for finding in findings)
+            self.assertIn("forbidden token Dto", messages)
+            self.assertIn("does not match role suffix core.domain.billing", messages)
+            self.assertIn("requires paired role core-data", messages)
+
+            presentation = root / "feature" / "checkout" / "presentation" / "src" / "main" / "java" / "com" / "example" / "app" / "feature" / "checkout" / "presentation" / "CheckoutScreen.kt"
+            presentation.parent.mkdir(parents=True, exist_ok=True)
+            presentation.write_text(
+                "package com.example.app.feature.checkout.presentation\n"
+                "import com.example.app.core.data.checkout.CheckoutDTO\n"
+                "class CheckoutScreen\n",
+                encoding="utf-8",
+            )
+            (root / "feature" / "checkout" / "api").mkdir(parents=True)
+            presentation_findings = lint_project(root, "android", files=[str(presentation.relative_to(root))])
+            self.assertIn("feature-presentation contains forbidden token Dto", "\n".join(f.message for f in presentation_findings))
+
+            test_file = root / "tests" / "test_billing.py"
+            test_file.parent.mkdir(parents=True, exist_ok=True)
+            test_file.write_text("def test_billing(): pass\n", encoding="utf-8")
+            self.assertEqual(lint_project(root, "python", files=[str(test_file.relative_to(root))]), [])
+
+            ordinary_python = root / "src" / "agent_flow" / "cli.py"
+            ordinary_python.parent.mkdir(parents=True, exist_ok=True)
+            ordinary_python.write_text("def main(): pass\n", encoding="utf-8")
+            self.assertEqual(lint_project(root, "python", files=[str(ordinary_python.relative_to(root))]), [])
+
+            python_wrong = root / "src" / "core" / "wrong" / "thing.py"
+            python_wrong.parent.mkdir(parents=True, exist_ok=True)
+            python_wrong.write_text("value = 1\n", encoding="utf-8")
+            python_wrong_findings = lint_project(root, "python", files=[str(python_wrong.relative_to(root))])
+            self.assertIn("path is outside profile architecture role mapping", "\n".join(f.message for f in python_wrong_findings))
+
+            unmanaged = root / "components" / "Button.tsx"
+            unmanaged.parent.mkdir(parents=True, exist_ok=True)
+            unmanaged.write_text("export function Button() { return null }\n", encoding="utf-8")
+            unmanaged_findings = lint_project(root, "nextjs", files=[str(unmanaged.relative_to(root))])
+            self.assertIn("path is outside profile architecture role mapping", "\n".join(f.message for f in unmanaged_findings))
+            self.assertEqual(lint_project(root, "android", files=["settings.gradle.kts"]), [])
+
+            managed_outside_role = root / "src" / "core" / "wrong" / "Thing.ts"
+            managed_outside_role.parent.mkdir(parents=True, exist_ok=True)
+            managed_outside_role.write_text("export const thing = 1\n", encoding="utf-8")
+            managed_findings = lint_project(root, "nextjs", files=[str(managed_outside_role.relative_to(root))])
+            self.assertIn("path is outside profile architecture role mapping", "\n".join(f.message for f in managed_findings))
+
+            web_entity = root / "src" / "core" / "domain" / "orders" / "OrderEntity.ts"
+            web_entity.parent.mkdir(parents=True, exist_ok=True)
+            web_entity.write_text("export class OrderEntity {}\n", encoding="utf-8")
+            (root / "src" / "core" / "data" / "orders").mkdir(parents=True)
+            self.assertEqual(lint_project(root, "nextjs", files=[str(web_entity.relative_to(root))]), [])
+
+            web_presentation_dto = root / "src" / "features" / "checkout" / "presentation" / "CheckoutScreen.tsx"
+            web_presentation_dto.parent.mkdir(parents=True, exist_ok=True)
+            web_presentation_dto.write_text('import { CheckoutDTO } from "../../data/checkout/CheckoutDTO"\n', encoding="utf-8")
+            (root / "src" / "features" / "checkout" / "api").mkdir(parents=True, exist_ok=True)
+            web_presentation_findings = lint_project(root, "nextjs", files=[str(web_presentation_dto.relative_to(root))])
+            self.assertIn("feature-presentation contains forbidden token Dto", "\n".join(f.message for f in web_presentation_findings))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            android_file = root / "core" / "domain" / "chat" / "src" / "main" / "java" / "com" / "example" / "app" / "core" / "domain" / "chat" / "Chat.kt"
+            android_file.parent.mkdir(parents=True, exist_ok=True)
+            android_file.write_text("package com.example.app.core.domain.chat\nclass Chat\n", encoding="utf-8")
+            (root / "core" / "data" / "chat").mkdir(parents=True)
+            partitioned = lint_profiles(root, ["android", "react-native"], files=[str(android_file.relative_to(root))])
+            self.assertEqual(partitioned["android"], [])
+            self.assertEqual(partitioned["react-native"], [])
+
+            rn_screen = root / "src" / "features" / "checkout" / "presentation" / "Checkout.tsx"
+            rn_screen.parent.mkdir(parents=True, exist_ok=True)
+            rn_screen.write_text("export function Checkout() { return null }\n", encoding="utf-8")
+            (root / "src" / "features" / "checkout" / "api").mkdir(parents=True)
+            rn_partitioned = lint_profiles(root, ["android", "react-native"], files=[str(rn_screen.relative_to(root))])
+            self.assertEqual(rn_partitioned["android"], [])
+            self.assertEqual(rn_partitioned["react-native"], [])
+
+            rn_android = root / "android" / "app" / "src" / "main" / "java" / "com" / "example" / "MainApplication.kt"
+            rn_android.parent.mkdir(parents=True, exist_ok=True)
+            rn_android.write_text("package com.example\nclass MainApplication\n", encoding="utf-8")
+            self.assertEqual(lint_profiles(root, ["react-native"], files=[str(rn_android.relative_to(root))]), {"react-native": [], "android": []})
+
+            rn_bad = root / "android" / "app" / "src" / "main" / "java" / "com" / "example" / "CheckoutDTO.kt"
+            rn_bad.write_text("package com.example\nclass CheckoutDTO\n", encoding="utf-8")
+            rn_bad_findings = lint_profiles(root, ["react-native"], files=[str(rn_bad.relative_to(root))])
+            self.assertIn("app-shell contains forbidden token Dto", "\n".join(f.message for f in rn_bad_findings["android"]))
+
+            outside = root / "components" / "Button.tsx"
+            outside.parent.mkdir(parents=True, exist_ok=True)
+            outside.write_text("export function Button() { return null }\n", encoding="utf-8")
+            partitioned_outside = lint_profiles(root, ["nextjs", "android"], files=[str(outside.relative_to(root))])
+            self.assertIn(
+                "path is outside profile architecture role mapping",
+                "\n".join(f.message for findings in partitioned_outside.values() for f in findings),
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            rn_entity = root / "src" / "core" / "domain" / "orders" / "OrderEntity.ts"
+            rn_entity.parent.mkdir(parents=True, exist_ok=True)
+            rn_entity.write_text("export class OrderEntity {}\n", encoding="utf-8")
+            (root / "src" / "core" / "data" / "orders").mkdir(parents=True)
+            self.assertEqual(lint_project(root, "react-native", files=[str(rn_entity.relative_to(root))]), [])
+
+            rn_bad = root / "src" / "features" / "checkout" / "presentation" / "CheckoutScreen.tsx"
+            rn_bad.parent.mkdir(parents=True, exist_ok=True)
+            rn_bad.write_text('import { CheckoutEntity } from "../../data/checkout/CheckoutEntity"\n', encoding="utf-8")
+            (root / "src" / "features" / "checkout" / "api").mkdir(parents=True, exist_ok=True)
+            rn_bad_findings = lint_project(root, "react-native", files=[str(rn_bad.relative_to(root))])
+            self.assertIn("feature-presentation contains forbidden token Entity", "\n".join(f.message for f in rn_bad_findings))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ios_entity = root / "Sources" / "Core" / "Domain" / "Orders" / "OrderEntity.swift"
+            ios_entity.parent.mkdir(parents=True, exist_ok=True)
+            ios_entity.write_text("struct OrderEntity {}\n", encoding="utf-8")
+            (root / "Sources" / "Core" / "Data" / "Orders").mkdir(parents=True)
+            self.assertEqual(lint_project(root, "ios", files=[str(ios_entity.relative_to(root))]), [])
+
+            ios_bad = root / "Sources" / "Features" / "Checkout" / "Presentation" / "CheckoutView.swift"
+            ios_bad.parent.mkdir(parents=True, exist_ok=True)
+            ios_bad.write_text("struct CheckoutDTOView {}\n", encoding="utf-8")
+            (root / "Sources" / "Features" / "Checkout" / "API").mkdir(parents=True, exist_ok=True)
+            ios_bad_findings = lint_project(root, "ios", files=[str(ios_bad.relative_to(root))])
+            self.assertIn("feature-presentation contains forbidden token DTO", "\n".join(f.message for f in ios_bad_findings))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            py_entity = root / "src" / "core" / "domain" / "orders" / "order_entity.py"
+            py_entity.parent.mkdir(parents=True, exist_ok=True)
+            py_entity.write_text("class OrderEntity: pass\n", encoding="utf-8")
+            (root / "src" / "core" / "data" / "orders").mkdir(parents=True)
+            self.assertEqual(lint_project(root, "python", files=[str(py_entity.relative_to(root))]), [])
+
+            py_bad = root / "src" / "features" / "checkout" / "presentation" / "checkout_view.py"
+            py_bad.parent.mkdir(parents=True, exist_ok=True)
+            py_bad.write_text("from src.core.data.checkout.dto import CheckoutDTO\n", encoding="utf-8")
+            (root / "src" / "features" / "checkout" / "api").mkdir(parents=True, exist_ok=True)
+            py_bad_findings = lint_project(root, "python", files=[str(py_bad.relative_to(root))])
+            self.assertIn("feature-presentation contains forbidden token DTO", "\n".join(f.message for f in py_bad_findings))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subprocess.run(("git", "init", "-q"), cwd=root, check=True)
+            untracked = root / "core" / "domain" / "chat" / "New.kt"
+            untracked.parent.mkdir(parents=True, exist_ok=True)
+            untracked.write_text("class New\n", encoding="utf-8")
+            self.assertIn("core/domain/chat/New.kt", changed_files(root))
 
     def test_python_runner_fix_loop_round_cap_blocks_after_three_gate_failures(self) -> None:
         from agent_flow.artifact import read_meta, write_meta
@@ -807,11 +1156,12 @@ class CliTest(unittest.TestCase):
             )
             self.assertTrue((project_root / ".agent-flow" / "templates" / "generic" / "stage.md").is_file())
             self.assertTrue((project_root / ".Codex" / "agents" / "code-reviewer.md").is_file())
+            code_reviewer = (project_root / ".Codex" / "agents" / "code-reviewer.md").read_text(encoding="utf-8")
             self.assertTrue((project_root / ".Codex" / "context" / "tree.jsonl").is_file())
-            self.assertIn(
-                "verdict: approve | request-changes",
-                (project_root / ".Codex" / "agents" / "code-reviewer.md").read_text(encoding="utf-8"),
-            )
+            self.assertIn("verdict: approve | request-changes", code_reviewer)
+            self.assertIn("project-local-skills: checked|n/a", code_reviewer)
+            self.assertIn("dependency-rule: pass|fail", code_reviewer)
+            self.assertIn("repository-boundary: pass|fail", code_reviewer)
             self.assertIn(
                 "verdict: approve",
                 (project_root / ".agent-flow" / "prompts" / "plan-review.md").read_text(encoding="utf-8"),
@@ -2445,6 +2795,64 @@ class CliTest(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertIn("agent-flow is not installed", result.stderr)
 
+    def test_node_workflow_run_accepts_filtered_profile_install(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            install = subprocess.run(
+                (node, cli, "install", "--profile", "android"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(install.returncode, 0, install.stderr)
+            self.assertFalse((project_root / ".agent-flow" / "skills" / "ios-clean-architecture").exists())
+            self.assertFalse((project_root / ".agent-flow" / "skills" / "react-native-clean-architecture").exists())
+
+            result = subprocess.run(
+                (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Current phase: domain-grill", result.stdout)
+
+    def test_node_workflow_run_accepts_project_skill_index_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            skill_dir = project_root / "skills" / "my-skill"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: my-skill\ndescription: Use when testing project skills.\n---\n\nBody\n",
+                encoding="utf-8",
+            )
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            install = subprocess.run(
+                (node, cli, "install", "--profile", "android"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(install.returncode, 0, install.stderr)
+
+            result = subprocess.run(
+                (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Current phase: domain-grill", result.stdout)
+
     def test_node_workflow_run_rejects_pre_upgrade_install(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
@@ -2508,10 +2916,10 @@ class CliTest(unittest.TestCase):
                 "red",
                 "green",
                 "refactor",
-                "gates",
                 "comment-authoring",
                 "multi-review",
                 "architecture-review",
+                "gates",
                 "commit",
                 "push-pr",
                 "pr-watch",
@@ -2623,10 +3031,10 @@ class CliTest(unittest.TestCase):
                 "red",
                 "green",
                 "refactor",
-                "gates",
                 "comment-authoring",
                 "multi-review",
                 "architecture-review",
+                "gates",
                 "commit",
                 "push-pr",
             ]:
@@ -2831,7 +3239,6 @@ class CliTest(unittest.TestCase):
                 "red",
                 "green",
                 "refactor",
-                "gates",
                 "comment-authoring",
                 "multi-review",
             ]:
@@ -2868,7 +3275,6 @@ class CliTest(unittest.TestCase):
             refactor.write_text(_node_phase_content("refactor", "updated "), encoding="utf-8")
             self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
             for phase, next_phase in [
-                ("gates", "comment-authoring"),
                 ("comment-authoring", "multi-review"),
                 ("multi-review", "architecture-review"),
             ]:
@@ -2913,10 +3319,25 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(approved.returncode, 0, approved.stderr)
-            self.assertIn("Current phase: commit", approved.stdout)
+            self.assertIn("Current phase: gates", approved.stdout)
+
+            gates = run_dir / _node_phase_artifact("gates")
+            gates.write_text(
+                '{"passed": true, "results": [{"id": "lint", "command": "npm run lint", "passed": true, "exit_code": 0}]}\n',
+                encoding="utf-8",
+            )
+            committed = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(committed.returncode, 0, committed.stderr)
+            self.assertIn("Current phase: commit", committed.stdout)
 
     def test_node_gates_fail_routes_to_fix_loop_and_back(self) -> None:
-        """gates fail → fix-loop → gates → comment-authoring → multi-review 순환 테스트."""
+        """gates fail → fix-loop → review → gates 순환 테스트."""
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
@@ -2936,6 +3357,7 @@ class CliTest(unittest.TestCase):
                 "domain-grill", "product-brief", "prd",
                 "slice-plan", "plan-review", "ddd-design", "worktree",
                 "run-start", "red", "green", "refactor",
+                "comment-authoring", "multi-review", "architecture-review",
             ]:
                 artifact = run_dir / _node_phase_artifact(phase)
                 artifact.parent.mkdir(parents=True, exist_ok=True)
@@ -2969,20 +3391,6 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("Current phase: gates", result.stdout)
-
-            gates_artifact.write_text(
-                '{"passed": true, "results": [{"id": "lint", "command": "npm run lint", "passed": true, "output": "ok"}]}\n',
-                encoding="utf-8",
-            )
-            result = subprocess.run(
-                (node, cli, "run", "advance"),
-                cwd=project_root,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("Current phase: comment-authoring", result.stdout)
 
             comment_artifact = run_dir / _node_phase_artifact("comment-authoring")
@@ -2997,8 +3405,46 @@ class CliTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("Current phase: multi-review", result.stdout)
 
+            multi_review = run_dir / _node_phase_artifact("multi-review")
+            multi_review.write_text(_node_phase_content("multi-review"), encoding="utf-8")
+            result = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Current phase: architecture-review", result.stdout)
+
+            architecture_review = run_dir / _node_phase_artifact("architecture-review")
+            architecture_review.write_text(_node_phase_content("architecture-review"), encoding="utf-8")
+            result = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Current phase: gates", result.stdout)
+
+            gates_artifact.write_text(
+                '{"passed": true, "results": [{"id": "lint", "command": "npm run lint", "passed": true, "output": "ok"}]}\n',
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Current phase: commit", result.stdout)
+
     def test_node_multi_review_request_changes_routes_to_fix_loop(self) -> None:
-        """multi-review request-changes → fix-loop → gates 순환 테스트."""
+        """multi-review request-changes → fix-loop → review 순환 테스트."""
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
@@ -3017,7 +3463,7 @@ class CliTest(unittest.TestCase):
             for phase in [
                 "domain-grill", "product-brief", "prd",
                 "slice-plan", "plan-review", "ddd-design", "worktree",
-                "run-start", "red", "green", "refactor", "gates", "comment-authoring",
+                "run-start", "red", "green", "refactor", "comment-authoring",
             ]:
                 artifact = run_dir / _node_phase_artifact(phase)
                 artifact.parent.mkdir(parents=True, exist_ok=True)
@@ -3049,18 +3495,6 @@ class CliTest(unittest.TestCase):
 
             fix_loop_artifact = run_dir / _node_phase_artifact("fix-loop")
             fix_loop_artifact.write_text(_node_phase_content("fix-loop"), encoding="utf-8")
-            result = subprocess.run(
-                (node, cli, "run", "advance"),
-                cwd=project_root,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("Current phase: gates", result.stdout)
-
-            gates_artifact = run_dir / _node_phase_artifact("gates")
-            gates_artifact.write_text(_node_phase_content("gates"), encoding="utf-8")
             result = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=project_root,
@@ -3106,17 +3540,6 @@ class CliTest(unittest.TestCase):
                 subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode,
                 0,
             )
-            gates_artifact.write_text(_node_phase_content("gates"), encoding="utf-8")
-            result = subprocess.run(
-                (node, cli, "run", "advance"),
-                cwd=project_root,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("Current phase: comment-authoring", result.stdout)
-
             comment_artifact.write_text(_node_phase_content("comment-authoring"), encoding="utf-8")
             result = subprocess.run(
                 (node, cli, "run", "advance"),
@@ -3232,6 +3655,11 @@ class CliTest(unittest.TestCase):
                 self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
 
             for round_num in range(3):
+                for phase in ("comment-authoring", "multi-review", "architecture-review"):
+                    artifact = run_dir / _node_phase_artifact(phase)
+                    artifact.parent.mkdir(parents=True, exist_ok=True)
+                    artifact.write_text(_node_phase_content(phase), encoding="utf-8")
+                    self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
                 gates_artifact = run_dir / _node_phase_artifact("gates")
                 gates_artifact.parent.mkdir(parents=True, exist_ok=True)
                 gates_artifact.write_text('{"passed": false}\n', encoding="utf-8")
@@ -3240,6 +3668,10 @@ class CliTest(unittest.TestCase):
                 fix_artifact.write_text(_node_phase_content("fix-loop"), encoding="utf-8")
                 self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
 
+            for phase in ("comment-authoring", "multi-review", "architecture-review"):
+                artifact = run_dir / _node_phase_artifact(phase)
+                artifact.write_text(_node_phase_content(phase), encoding="utf-8")
+                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
             gates_artifact = run_dir / _node_phase_artifact("gates")
             gates_artifact.write_text('{"passed": false}\n', encoding="utf-8")
             result = subprocess.run(
@@ -3256,8 +3688,8 @@ class CliTest(unittest.TestCase):
             )
             self.assertEqual(current_state["fix_loop_rounds"], 3)
 
-    def test_node_architecture_review_blocked_routes_to_refactor(self) -> None:
-        """architecture-review blocked verdict → refactor 라우팅."""
+    def test_node_architecture_review_request_changes_routes_to_refactor(self) -> None:
+        """architecture-review request-changes verdict → refactor 라우팅."""
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
@@ -3276,7 +3708,7 @@ class CliTest(unittest.TestCase):
             for phase in [
                 "domain-grill", "product-brief", "prd",
                 "slice-plan", "plan-review", "ddd-design", "worktree",
-                "run-start", "red", "green", "refactor", "gates", "comment-authoring", "multi-review",
+                "run-start", "red", "green", "refactor", "comment-authoring", "multi-review",
             ]:
                 artifact = run_dir / _node_phase_artifact(phase)
                 artifact.parent.mkdir(parents=True, exist_ok=True)
@@ -3286,7 +3718,7 @@ class CliTest(unittest.TestCase):
 
             arch_artifact = run_dir / _node_phase_artifact("architecture-review")
             arch_artifact.write_text(
-                _node_phase_content("architecture-review").replace("verdict: approve", "verdict: blocked"),
+                _node_phase_content("architecture-review").replace("verdict: approve", "verdict: request-changes"),
                 encoding="utf-8",
             )
             result = subprocess.run(
@@ -3319,7 +3751,7 @@ class CliTest(unittest.TestCase):
             for phase in [
                 "domain-grill", "product-brief", "prd",
                 "slice-plan", "plan-review", "ddd-design", "worktree",
-                "run-start", "red", "green", "refactor", "gates", "comment-authoring",
+                "run-start", "red", "green", "refactor", "comment-authoring",
             ]:
                 artifact = run_dir / _node_phase_artifact(phase)
                 artifact.parent.mkdir(parents=True, exist_ok=True)
@@ -3439,6 +3871,23 @@ class CliTest(unittest.TestCase):
             self.assertIn("at least 2 independent sub-agent reviewer verdicts", result.stderr)
 
             mr_artifact.write_text(_with_skills_gate(
+                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: APPROVE\n\n"
+                "## Reviewer 2\nreviewer-source: sub-agent\nreviewer-2 verdict: APPROVE\n\n"
+                "## Overall\nverdict: APPROVE\n",
+            ),
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("overall verdict must be approve or request-changes", result.stderr)
+
+            mr_artifact.write_text(_with_skills_gate(
                 "## Reviewer 1\n\nreviewer-source: sub-agent\nverdict: approve\n",
             ),
                 encoding="utf-8",
@@ -3549,8 +3998,9 @@ class CliTest(unittest.TestCase):
             self.assertIn("at least 2 independent sub-agent reviewer verdicts", result.stderr)
 
             mr_artifact.write_text(_with_skills_gate(
-                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: request-changes\n\n"
-                "## Overall\nverdict: request-changes\n",
+                "## Reviewer 1\nreviewer-source: codex sub-agent\nreviewer-1 verdict: approve\n\n"
+                "## Reviewer 2\nreviewer-source: claude sub-agent\nreviewer-2 verdict: approve\n\n"
+                "## Overall\nverdict: approve\n",
             ),
                 encoding="utf-8",
             )
@@ -3562,10 +4012,10 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(result.returncode, 1)
-            self.assertIn("at least 2 independent sub-agent reviewer verdicts", result.stderr)
+            self.assertIn("at least 1 independent sub-agent reviewer verdict", result.stderr)
 
             mr_artifact.write_text(_with_skills_gate(
-                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
+                "## Reviewer 1\nreviewer-source: active-host sub-agent\nreviewer-1 verdict: approve\n\n"
                 "## Reviewer 2\nreviewer-source: sub-agent\nreviewer-2 verdict: approve\n\n"
                 "## Overall\nverdict: approve\n",
             ),
@@ -3579,6 +4029,51 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_node_multi_review_single_request_changes_routes_to_fix_loop(self) -> None:
+        """sub-agent reviewer 1명의 request-changes도 fix-loop로 라우팅한다."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            self.assertEqual(
+                subprocess.run(
+                    (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
+                    cwd=project_root,
+                    check=False,
+                ).returncode,
+                0,
+            )
+            run_dir = project_root / ".agent-flow" / "runs" / "full-feature" / "r1"
+            for phase in [
+                "domain-grill", "product-brief", "prd",
+                "slice-plan", "plan-review", "ddd-design", "worktree",
+                "run-start", "red", "green", "refactor", "comment-authoring",
+            ]:
+                artifact = run_dir / _node_phase_artifact(phase)
+                artifact.parent.mkdir(parents=True, exist_ok=True)
+                content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase)
+                artifact.write_text(content, encoding="utf-8")
+                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+
+            mr_artifact = run_dir / _node_phase_artifact("multi-review")
+            mr_artifact.write_text(_with_skills_gate(
+                "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: request-changes\n\n"
+                "## Overall\nverdict: request-changes\n",
+            ),
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Current phase: fix-loop", result.stdout)
 
     def test_node_push_watch_blocks_protected_branches(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -4079,6 +4574,16 @@ class CliTest(unittest.TestCase):
                 self.assertEqual(main(["detect-profile", "--root", temp_dir]), 0)
             self.assertEqual(output.getvalue().strip(), "android")
 
+    def test_detect_profile_prefers_react_native_over_gradle(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "package.json").write_text('{"dependencies":{"react-native":"latest"}}\n', encoding="utf-8")
+            (root / "settings.gradle.kts").write_text("", encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["detect-profile", "--root", temp_dir]), 0)
+            self.assertEqual(output.getvalue().strip(), "react-native")
+
     def test_is_git_repo_treats_missing_git_as_non_git(self) -> None:
         from agent_flow.cli import _is_git_repo
 
@@ -4342,6 +4847,14 @@ class CliTest(unittest.TestCase):
             # package.json 없는 tsconfig 단독 프로젝트는 npm gate를 강제하지 않는다.
             self.assertEqual(output.getvalue().strip(), "generic")
 
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "Package.swift").write_text("// swift-tools-version: 5.9\n", encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["detect-profile", "--root", str(root)]), 0)
+            self.assertEqual(output.getvalue().strip(), "ios")
+
     def test_workflow_stage_rejects_invalid_parallel_type(self) -> None:
         with self.assertRaises(ValueError):
             _stage_from_payload(
@@ -4365,8 +4878,22 @@ class CliTest(unittest.TestCase):
         typescript = load_profile("typescript")
         self.assertEqual(typescript.gates[1].gate_id, "typecheck")
         self.assertEqual(typescript.gates[1].command, ("npx", "tsc", "--noEmit"))
-        self.assertEqual(load_profile("nextjs").gates[1].command, ("npm", "run", "build"))
-        self.assertEqual(load_profile("android").profile_id, "android")
+        nextjs_gates = {gate.gate_id: gate.command for gate in load_profile("nextjs").gates}
+        self.assertEqual(nextjs_gates["architecture-lint"], ("agent-flow", "architecture-lint", "--profile", "nextjs"))
+        self.assertEqual(nextjs_gates["build"], ("npm", "run", "build"))
+        python_gates = {gate.gate_id: gate for gate in load_profile("python").gates}
+        self.assertFalse(python_gates["type"].required)
+        self.assertFalse(python_gates["lint"].required)
+        self.assertFalse(python_gates["test"].required)
+        android = load_profile("android")
+        self.assertEqual(android.profile_id, "android")
+        android_required = android.skills["required_review"]
+        self.assertEqual(android_required[0]["group"], "profile")
+        self.assertIn("android-code-review", android_required[0]["skills"])
+        self.assertEqual(android_required[1]["group"], "android_skills")
+        self.assertEqual(android_required[2]["group"], "chrisbanes_skills")
+        rn_required = load_profile("react-native").skills["required_review"]
+        self.assertEqual(rn_required[1]["group"], "android-native-escalation")
 
     def test_runner_prefers_repository_kit_root(self) -> None:
         from agent_flow.runner import _find_kit_root
@@ -4419,7 +4946,266 @@ class CliTest(unittest.TestCase):
                     0,
                 )
             self.assertEqual(output.getvalue().strip(), "generic: 1/1 gates passed")
+            gate_payload = json.loads((run_dir / "artifacts" / "gate-results.json").read_text(encoding="utf-8"))
+            self.assertTrue(gate_payload["passed"])
+            self.assertIsInstance(gate_payload["results"], list)
+            self.assertEqual(gate_payload["results"][0]["command"], "node scripts/check-context-docs.mjs")
+            self.assertEqual(gate_payload["results"][0]["argv"], ["node", "scripts/check-context-docs.mjs"])
+            self.assertTrue(gate_payload["results"][0]["required"])
             self.assertTrue((run_dir / "gate-results.json").is_file())
+
+    def test_gate_results_allow_optional_failures(self) -> None:
+        from agent_flow.core.artifacts import write_gate_results
+        from agent_flow.core.gates import GateResult
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir)
+            write_gate_results(
+                run_dir=run_dir,
+                results=[
+                    GateResult("context-lint", ("node", "scripts/check-context-docs.mjs"), True, 0, "ok", ""),
+                    GateResult("lint", ("ruff", "check", "."), False, None, "", "missing", required=False),
+                ],
+            )
+            payload = json.loads((run_dir / "artifacts" / "gate-results.json").read_text(encoding="utf-8"))
+            self.assertTrue(payload["passed"])
+            self.assertEqual(payload["status"], "green")
+            self.assertFalse(payload["results"][1]["required"])
+
+    def test_gates_cli_uses_installed_profile_union_when_auto(self) -> None:
+        from agent_flow.core.gates import GateResult
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            kit = root / ".agent-flow"
+            kit.mkdir()
+            (kit / "kit.json").write_text(
+                json.dumps({"profile": "android", "profiles": ["android", "react-native"]}),
+                encoding="utf-8",
+            )
+            captured: list[GateCommand] = []
+
+            def fake_run_gates(commands: list[GateCommand], *, cwd: Path, timeout_s: int = 600) -> list[GateResult]:
+                captured.extend(commands)
+                return [
+                    GateResult(command.gate_id, command.command, True, 0, "", "")
+                    for command in commands
+                ]
+
+            output = io.StringIO()
+            with mock.patch("agent_flow.cli.run_gates", side_effect=fake_run_gates):
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(main(["gates", "--root", str(root)]), 0)
+
+            commands = [command.command for command in captured]
+            architecture_command = (sys.executable, "-m", "agent_flow.core.architecture_lint", "--profile", "android,react-native")
+            self.assertIn(architecture_command, commands)
+            self.assertNotIn((sys.executable, "-m", "agent_flow.core.architecture_lint", "--profile", "android"), commands)
+            self.assertNotIn((sys.executable, "-m", "agent_flow.core.architecture_lint", "--profile", "react-native"), commands)
+            gate_ids = [command.gate_id for command in captured]
+            self.assertLess(gate_ids.index("android:build"), gate_ids.index("architecture-lint"))
+            self.assertLess(gate_ids.index("react-native:android-build"), gate_ids.index("react-native:lint"))
+            self.assertLess(gate_ids.index("react-native:android-build"), gate_ids.index("android:lint"))
+            self.assertEqual(output.getvalue().strip(), "android,react-native: 9/9 gates passed")
+
+    def test_profile_gate_commands_enforce_build_typecheck_lint_order(self) -> None:
+        from agent_flow.cli import _profile_gate_commands
+
+        typescript_ids = [command.gate_id for command in _profile_gate_commands(["typescript"])]
+        self.assertLess(typescript_ids.index("build"), typescript_ids.index("typecheck"))
+        self.assertLess(typescript_ids.index("typecheck"), typescript_ids.index("lint"))
+
+        react_native_ids = [command.gate_id for command in _profile_gate_commands(["react-native"])]
+        self.assertLess(react_native_ids.index("android-build"), react_native_ids.index("lint"))
+        self.assertLess(react_native_ids.index("ios-build"), react_native_ids.index("lint"))
+
+    def test_gates_cli_reports_unknown_profile_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(main(["gates", "--root", str(root), "--profile", "does-not-exist"]), 1)
+
+            self.assertIn("unknown profile: does-not-exist", err.getvalue())
+            self.assertNotIn("Traceback", err.getvalue())
+
+    def test_architecture_lint_cli_reports_unknown_profile_without_traceback(self) -> None:
+        from agent_flow.core.architecture_lint import main as architecture_lint_main
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(architecture_lint_main(["--root", temp_dir, "--profile", "does-not-exist"]), 1)
+
+            self.assertIn("unknown profile: does-not-exist", err.getvalue())
+            self.assertNotIn("Traceback", err.getvalue())
+
+    def test_gates_and_architecture_lint_use_literal_worktree_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            kit = root / ".agent-flow"
+            kit.mkdir(parents=True)
+            (kit / "kit.json").write_text(
+                json.dumps({"profile": "android", "profiles": ["android", "react-native"]}),
+                encoding="utf-8",
+            )
+            worktree = root / ".agent-flow" / "worktrees" / "semantic-architecture-parity"
+            scripts = worktree / "scripts"
+            scripts.mkdir(parents=True)
+            (worktree / ".git").write_text("gitdir: ../../.git/worktrees/semantic-architecture-parity\n", encoding="utf-8")
+            (scripts / "check-context-docs.mjs").write_text("process.exit(0);\n", encoding="utf-8")
+
+            output = io.StringIO()
+            captured: list[GateCommand] = []
+
+            def fake_run_gates(commands: list[GateCommand], *, cwd: Path, timeout_s: int = 600):
+                captured.extend(commands)
+                from agent_flow.core.gates import GateResult
+
+                self.assertEqual(cwd.resolve(), worktree.resolve())
+                return [
+                    GateResult(command.gate_id, command.command, True, 0, "", "")
+                    for command in commands
+                ]
+
+            with mock.patch("agent_flow.cli.run_gates", side_effect=fake_run_gates):
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(
+                        main(
+                            [
+                                "gates",
+                                "--root",
+                                str(root),
+                                "--worktree",
+                                "semantic-architecture-parity",
+                            ]
+                        ),
+                        0,
+                    )
+            self.assertEqual(output.getvalue().strip(), "android,react-native: 9/9 gates passed")
+            self.assertIn(
+                (sys.executable, "-m", "agent_flow.core.architecture_lint", "--profile", "android,react-native"),
+                [command.command for command in captured],
+            )
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(
+                        [
+                            "gates",
+                            "--root",
+                            str(root),
+                            "--worktree",
+                            "semantic-architecture-parity",
+                            "--profile",
+                            "generic",
+                        ]
+                    ),
+                    0,
+                )
+            self.assertEqual(output.getvalue().strip(), "generic: 1/1 gates passed")
+
+            output = io.StringIO()
+            captured_lint: dict[str, object] = {}
+
+            def fake_lint_profiles(cwd: Path, profile_ids: list[str], files: list[str] | None = None):
+                captured_lint["cwd"] = cwd
+                captured_lint["profile_ids"] = profile_ids
+                captured_lint["files"] = files
+                return {profile_id: [] for profile_id in profile_ids}
+
+            with mock.patch("agent_flow.cli.lint_profiles", side_effect=fake_lint_profiles):
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(
+                        main(
+                            [
+                                "architecture-lint",
+                                "--root",
+                                str(root),
+                                "--worktree",
+                                "semantic-architecture-parity",
+                            ]
+                        ),
+                        0,
+                    )
+            self.assertEqual(captured_lint["cwd"].resolve(), worktree.resolve())
+            self.assertEqual(captured_lint["profile_ids"], ["android", "react-native"])
+            self.assertIn("android,react-native: architecture lint passed", output.getvalue())
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    main(
+                        [
+                            "architecture-lint",
+                            "--root",
+                            str(root),
+                            "--worktree",
+                            "semantic-architecture-parity",
+                            "--profile",
+                            "generic",
+                        ]
+                    ),
+                    0,
+                )
+            self.assertIn("generic: architecture lint passed", output.getvalue())
+
+    def test_node_architecture_lint_accepts_worktree_argument(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            worktree = root / ".agent-flow" / "worktrees" / "semantic-architecture-parity"
+            worktree.mkdir(parents=True)
+            (worktree / ".git").write_text("gitdir: ../../.git/worktrees/semantic-architecture-parity\n", encoding="utf-8")
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            result = subprocess.run(
+                (
+                    node,
+                    cli,
+                    "architecture-lint",
+                    "--root",
+                    str(root),
+                    "--worktree",
+                    "semantic-architecture-parity",
+                    "--profile",
+                    "generic",
+                ),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("generic: architecture lint passed", result.stdout)
+
+    def test_node_gates_accepts_worktree_argument(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            worktree = root / ".agent-flow" / "worktrees" / "semantic-architecture-parity"
+            scripts = worktree / "scripts"
+            scripts.mkdir(parents=True)
+            (worktree / ".git").write_text("gitdir: ../../.git/worktrees/semantic-architecture-parity\n", encoding="utf-8")
+            (scripts / "check-context-docs.mjs").write_text("process.exit(0);\n", encoding="utf-8")
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            result = subprocess.run(
+                (
+                    node,
+                    cli,
+                    "gates",
+                    "--root",
+                    str(root),
+                    "--worktree",
+                    "semantic-architecture-parity",
+                    "--profile",
+                    "generic",
+                ),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("generic: 1/1 gates passed", result.stdout)
 
     def test_gates_cli_resolves_relative_run_dir_against_root(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -4451,8 +5237,10 @@ class CliTest(unittest.TestCase):
                 )
             finally:
                 os.chdir(old_cwd)
+            self.assertTrue((root / ".agent-flow" / "runs" / "manual" / "artifacts" / "gate-results.json").is_file())
             self.assertTrue((root / ".agent-flow" / "runs" / "manual" / "gate-results.json").is_file())
             self.assertFalse((cwd / ".agent-flow" / "runs" / "manual" / "gate-results.json").exists())
+            self.assertFalse((cwd / ".agent-flow" / "runs" / "manual" / "artifacts" / "gate-results.json").exists())
 
     def test_record_stage_writes_stage_result_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -4630,7 +5418,7 @@ class CliTest(unittest.TestCase):
                 "verdict: request-changes\n",
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, phase), (0, True))
+            self.assertEqual(runner._next_index(0, phase), (1, False))
 
             (run_dir / "final-review.md").write_text(
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: request-changes\n\n"
@@ -7303,15 +8091,32 @@ def _node_project_local_gate() -> str:
     return "project-local-skills: n/a\nproject-local-skills-used: n/a\n"
 
 
+def _node_profile_skill_gate() -> str:
+    return (
+        "profile-skill-selection: applied\n"
+        "active-profiles: generic\n"
+        "changed-file-skill-resolution: applied\n"
+        "required-profile-skills: checked\n"
+        "missing-required-profile-skills: none\n"
+    )
+
+
+def _node_review_parity_gate() -> str:
+    return (
+        "architecture-contract-check: n/a\n"
+        "codex-claude-parity-check: pass\n"
+        "hook-parity-check: pass\n"
+    )
+
+
 def _node_phase_content(phase: str, prefix: str = "") -> str:
     content = f"{prefix}{phase}\n"
     skills_gate = (
         "## Completion Gate\n"
         "skills_checked: true\n"
+        + _node_profile_skill_gate()
         + _node_project_local_gate()
         + _node_presentation_gate()
-        + "android-local-skills: n/a\n"
-        "android-local-skills-used: n/a\n"
     )
     clean_design_gate = (
         "## Clean Architecture Boundary Map\n"
@@ -7391,25 +8196,30 @@ def _node_phase_content(phase: str, prefix: str = "") -> str:
             "verdict: approve\n"
             "\n## Completion Gate\n"
             "skills_checked: true\n"
+            + _node_profile_skill_gate()
+            + _node_review_parity_gate()
             + clean_code_review_gate
             + _node_project_local_gate()
             + _node_presentation_gate()
-            + "android-local-skills: n/a\n"
-            + "android-local-skills-used: n/a\n"
         )
     if phase == "architecture-review":
-        return content + "verdict: approve\n\n" + skills_gate + clean_review_gate
+        return (
+            "## Reviewer A\nreviewer-source: sub-agent\nverdict: approve\n\n"
+            "## Reviewer B\nreviewer-source: sub-agent\nverdict: approve\n\n"
+            "## Overall\nverdict: approve\n\n"
+            + skills_gate
+            + _node_review_parity_gate()
+            + clean_review_gate
+        )
     if phase == "implement":
         return (
             content
             + "## Completion Gate\n"
-            + "gates: all_passed\n"
             + "skills_checked: true\n"
+            + _node_profile_skill_gate()
             + "clean-architecture: applied\n"
             + _node_project_local_gate()
             + _node_presentation_gate()
-            + "android-local-skills: n/a\n"
-            + "android-local-skills-used: n/a\n"
         )
     if phase in {"green", "refactor", "fix-loop"}:
         return content + skills_gate + "clean-architecture: applied\n"
@@ -7422,7 +8232,9 @@ def _with_skills_gate(content: str) -> str:
     return (
         f"{content.rstrip()}\n\n## Completion Gate\n"
         "skills_checked: true\n"
-        "clean-architecture-review: applied\n"
+        + _node_profile_skill_gate()
+        + _node_review_parity_gate()
+        + "clean-architecture-review: applied\n"
         + _node_project_local_gate()
         + "usecase-interface-check: applied\n"
         "usecase-composition-check: applied\n"
@@ -7430,8 +8242,6 @@ def _with_skills_gate(content: str) -> str:
         "mapping-boundary-check: applied\n"
         "solid-clean-architecture-check: applied\n"
         + _node_presentation_gate()
-        + "android-local-skills: n/a\n"
-        "android-local-skills-used: n/a\n"
     )
 
 
@@ -7439,7 +8249,9 @@ def _with_final_review_gate(content: str, dependency_rule: str = "pass") -> str:
     return (
         f"{content.rstrip()}\n\n## Completion Gate\n"
         "skills_checked: true\n"
-        "clean-architecture: applied\n"
+        + _node_profile_skill_gate()
+        + _node_review_parity_gate()
+        + "clean-architecture: applied\n"
         + _node_project_local_gate()
         + f"dependency-rule: {dependency_rule}\n"
         "usecase-boundary: n/a\n"
@@ -7457,8 +8269,6 @@ def _with_final_review_gate(content: str, dependency_rule: str = "pass") -> str:
         "mapping-boundary-check: applied\n"
         "solid-clean-architecture-check: applied\n"
         + _node_presentation_gate()
-        + "android-local-skills: n/a\n"
-        "android-local-skills-used: n/a\n"
     )
 
 
@@ -7481,10 +8291,10 @@ def _node_start_full_feature_at_pr_watch(project_root: Path, node: str, cli: str
         "red",
         "green",
         "refactor",
-        "gates",
         "comment-authoring",
         "multi-review",
         "architecture-review",
+        "gates",
         "commit",
         "push-pr",
     ]:

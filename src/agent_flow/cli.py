@@ -20,6 +20,7 @@ from agent_flow.core.artifacts import (
     write_recovery,
     write_stage_result,
 )
+from agent_flow.core.architecture_lint import lint_profiles
 from agent_flow.core.context_contract import (
     append_context_event,
     check_system_invariants,
@@ -30,7 +31,7 @@ from agent_flow.core.context_contract import (
 from agent_flow.core.commands import run_safe_command
 from agent_flow.core.gates import GateCommand, run_gates
 from agent_flow.core.phase_workflow import load_phase_workflow_definition
-from agent_flow.core.profiles import detect_profile, load_profile
+from agent_flow.core.profiles import active_profile_ids, detect_profile, load_profile
 from agent_flow.core.review import summarize_reviews, write_review_summary
 from agent_flow.core.report import write_run_report
 from agent_flow.core.query import explain_run, query_run
@@ -175,6 +176,13 @@ def main(argv: list[str] | None = None) -> int:
     gates_parser.add_argument("--profile", default="auto")
     gates_parser.add_argument("--run-dir")
     gates_parser.add_argument("--timeout", type=int, default=600)
+    gates_parser.add_argument("--worktree")
+
+    architecture_lint_parser = subparsers.add_parser("architecture-lint")
+    architecture_lint_parser.add_argument("--root", default=".")
+    architecture_lint_parser.add_argument("--profile", default="auto")
+    architecture_lint_parser.add_argument("--files", nargs="*")
+    architecture_lint_parser.add_argument("--worktree")
 
     eval_parser = subparsers.add_parser("eval")
     eval_parser.add_argument("--root", default=".")
@@ -401,7 +409,8 @@ def main(argv: list[str] | None = None) -> int:
     team_import_apply.add_argument("--report")
 
     args = parser.parse_args(argv)
-    root = Path(getattr(args, "root", ".")).resolve()
+    requested_root = Path(getattr(args, "root", ".")).resolve()
+    root = requested_root
     root, inferred_worktree = _resolve_cli_root_context(root, getattr(args, "worktree", None))
     if inferred_worktree is not None and hasattr(args, "worktree") and args.worktree is None:
         args.worktree = inferred_worktree
@@ -586,15 +595,55 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if snapshot.status == "error" else 0
 
     if args.command == "gates":
-        profile_id = detect_profile(root) if args.profile == "auto" else args.profile
-        profile = load_profile(profile_id)
-        commands = [GateCommand(gate.gate_id, gate.command) for gate in profile.gates]
-        results = run_gates(commands, cwd=root, timeout_s=args.timeout)
+        command_root = _command_project_root(root, requested_root, getattr(args, "worktree", None))
+        if command_root is None:
+            return 1
+        try:
+            profile_ids = active_profile_ids(
+                _profile_source_root(root, requested_root, getattr(args, "worktree", None)),
+                args.profile,
+            )
+            commands = _profile_gate_commands(profile_ids)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        results = run_gates(commands, cwd=command_root, timeout_s=args.timeout)
         if args.run_dir is not None:
-            write_gate_results(run_dir=_resolve_project_path(root, args.run_dir), results=results)
+            write_gate_results(run_dir=_resolve_project_path(command_root, args.run_dir), results=results)
         failed = [result for result in results if not result.passed]
-        print(f"{profile.profile_id}: {len(results) - len(failed)}/{len(results)} gates passed")
-        return 1 if failed else 0
+        required_results = [result for result in results if result.required]
+        failed_required = [result for result in required_results if not result.passed]
+        if failed and any(not result.required for result in failed):
+            print(
+                f"{','.join(profile_ids)}: "
+                f"{len(required_results) - len(failed_required)}/{len(required_results)} required gates passed "
+                f"({len(results) - len(failed)}/{len(results)} total gates passed)"
+            )
+        else:
+            print(f"{','.join(profile_ids)}: {len(results) - len(failed)}/{len(results)} gates passed")
+        return 1 if failed_required else 0
+
+    if args.command == "architecture-lint":
+        command_root = _command_project_root(root, requested_root, getattr(args, "worktree", None))
+        if command_root is None:
+            return 1
+        try:
+            profile_ids = active_profile_ids(
+                _profile_source_root(root, requested_root, getattr(args, "worktree", None)),
+                args.profile,
+            )
+            findings_by_profile = lint_profiles(command_root, profile_ids, files=args.files)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        if not any(findings_by_profile.values()):
+            print(f"{','.join(profile_ids)}: architecture lint passed")
+            return 0
+        print(f"{','.join(profile_ids)}: architecture lint failed", file=sys.stderr)
+        for profile_id, findings in findings_by_profile.items():
+            for finding in findings:
+                print(f"- [{profile_id}] {finding.path}: {finding.message}", file=sys.stderr)
+        return 1
 
     if args.command == "eval":
         fixture_path = _resolve_project_path(root, args.fixtures) if args.fixtures else None
@@ -1287,6 +1336,82 @@ def _resolve_project_path(root: Path, value: str) -> Path:
     return resolve_project_path(root, value)
 
 
+def _profile_gate_commands(profile_ids: list[str]) -> list[GateCommand]:
+    commands: list[tuple[int, GateCommand]] = []
+    seen: set[tuple[str, ...]] = set()
+    multi_profile = len(profile_ids) > 1
+    architecture_lint_added = False
+    architecture_lint_profile = ",".join(profile_ids)
+    order = 0
+    for profile_id in profile_ids:
+        profile = load_profile(profile_id)
+        for gate in profile.gates:
+            command = _normalize_profile_gate_command(profile.profile_id, gate.gate_id, gate.command)
+            required = gate.required
+            gate_id = f"{profile.profile_id}:{gate.gate_id}" if multi_profile else gate.gate_id
+            if multi_profile and _is_architecture_lint_gate(gate.gate_id, gate.command):
+                if architecture_lint_added:
+                    continue
+                command = _architecture_lint_command(architecture_lint_profile)
+                gate_id = "architecture-lint"
+                required = True
+                architecture_lint_added = True
+            if command in seen:
+                continue
+            seen.add(command)
+            commands.append((order, GateCommand(gate_id, command, required=required)))
+            order += 1
+    return [
+        command
+        for _, command in sorted(
+            commands,
+            key=lambda item: (*_gate_order_key(item[1]), item[0]),
+        )
+    ]
+
+
+def _is_architecture_lint_gate(gate_id: str, command: tuple[str, ...]) -> bool:
+    return gate_id == "architecture-lint" or "architecture-lint" in command
+
+
+def _normalize_profile_gate_command(profile_id: str, gate_id: str, command: tuple[str, ...]) -> tuple[str, ...]:
+    if _is_architecture_lint_gate(gate_id, command):
+        profile_index = command.index("--profile") + 1 if "--profile" in command else -1
+        if profile_index > 0 and profile_index < len(command):
+            return _architecture_lint_command(command[profile_index])
+    if profile_id == "python" and command:
+        if command[0] in {"mypy", "pytest", "ruff"}:
+            return (sys.executable, "-m", command[0], *command[1:])
+    return command
+
+
+def _architecture_lint_command(profile_ids: str) -> tuple[str, ...]:
+    return (sys.executable, "-m", "agent_flow.core.architecture_lint", "--profile", profile_ids)
+
+
+def _gate_order_key(gate: GateCommand) -> tuple[int, int, str]:
+    gate_id = gate.gate_id
+    command = " ".join(gate.command).lower()
+    lowered = f"{gate_id} {command}".lower()
+    if any(token in lowered for token in ("build", "assemble", "xcodebuild")):
+        return (0, _profile_gate_kind_tiebreaker(lowered), gate_id)
+    if any(token in lowered for token in ("typecheck", "tsc", "mypy", "pyright", "type ")):
+        return (1, _profile_gate_kind_tiebreaker(lowered), gate_id)
+    if any(token in lowered for token in ("lint", "ruff", "detekt", "ktlint", "check-context-docs", "architecture-lint")):
+        return (2, _profile_gate_kind_tiebreaker(lowered), gate_id)
+    if "test" in lowered or "pytest" in lowered:
+        return (3, _profile_gate_kind_tiebreaker(lowered), gate_id)
+    return (4, _profile_gate_kind_tiebreaker(lowered), gate_id)
+
+
+def _profile_gate_kind_tiebreaker(text: str) -> int:
+    if "architecture-lint" in text:
+        return 0
+    if "context" in text:
+        return 1
+    return 2
+
+
 def _resolve_run_dir(root: Path, value: str | None) -> Path | None:
     run_dir = _resolve_project_path(root, value) if value else _latest_run_dir(root)
     if run_dir is None:
@@ -1316,6 +1441,27 @@ def _worktree_context(root: Path, name: str) -> tuple[Path | None, Path]:
     suffix = f" known worktrees: {', '.join(known)}" if known else " no known worktrees"
     print(f"worktree not found or missing path: {status.name}.{suffix}", file=sys.stderr)
     return None, worktree_runtime_root(root=root, name=status.name)
+
+
+def _command_project_root(config_root: Path, requested_root: Path, worktree: str | None) -> Path | None:
+    if worktree is None:
+        return config_root
+    managed = _managed_worktree_context(requested_root)
+    if managed is not None and managed[1] == worktree:
+        return requested_root
+    literal_checkout = config_root / ".agent-flow" / "worktrees" / worktree
+    if (literal_checkout / ".git").exists():
+        return literal_checkout
+    return _worktree_root(config_root, worktree)
+
+
+def _profile_source_root(config_root: Path, requested_root: Path, worktree: str | None) -> Path:
+    if worktree is None:
+        return config_root
+    managed = _managed_worktree_context(requested_root)
+    if managed is not None and managed[1] == worktree:
+        return managed[0]
+    return config_root
 
 
 def _continue_command(root: Path, worktree: str | None) -> str:

@@ -23,6 +23,9 @@ import pytest
 
 
 KIT_ROOT = Path(__file__).resolve().parent.parent
+SRC_ROOT = KIT_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
 
 
 def _run_cli(args: list[str], cwd: Path, env_extra: dict | None = None):
@@ -95,12 +98,47 @@ def test_full_cycle(tmp_path: Path):
     assert "run complete" in r2.stdout
 
     expected_post = [
-        "worktree", "implement", "comment-authoring", "final-review", "fix-loop",
+        "worktree", "implement", "comment-authoring", "final-review", "artifacts/gate-results", "fix-loop",
         "commit", "push-pr", "pr-watch", "merge", "cleanup",
     ]
     for a in expected_post:
-        assert (run_dir / f"{a}.md").exists(), f"missing post-pause: {a}"
+        assert (run_dir / f"{a}.md").exists() or (run_dir / f"{a}.json").exists(), f"missing post-pause: {a}"
     assert not (run_dir / "active").exists()
+
+
+def test_runner_injects_installed_profile_union_into_prompt(tmp_path: Path):
+    from agent_flow.adapters.generic import GenericAdapter
+    from agent_flow.runner import Phase, Runner
+
+    project = tmp_path / "multi-profile"
+    project.mkdir()
+    kit = project / ".agent-flow"
+    kit.mkdir()
+    (kit / "kit.json").write_text(
+        json.dumps({"profile": "android", "profiles": ["android", "react-native"]}),
+        encoding="utf-8",
+    )
+
+    runner = Runner(project_root=project)
+    assert runner.profile_id == "android,react-native"
+    assert runner.profile["id"] == "multi-profile"
+    assert runner.profile["active_profiles"] == ["android", "react-native"]
+    assert len(runner.profile["profiles"]) == 2
+    assert runner.profile["profiles"][0]["id"] == "android"
+    assert runner.profile["profiles"][1]["id"] == "react-native"
+
+    adapter = GenericAdapter()
+    adapter._profile_id = runner.profile_id
+    adapter._profile_snapshot = runner.profile
+    prompt = adapter.render_envelope(
+        Phase(id="design", description="Design", prompt="Do work."),
+        project / ".agent-flow" / "runs" / "r1",
+        project,
+    )
+    assert "## Active profile: `android,react-native`" in prompt
+    assert "active_profiles:" in prompt
+    assert "- android" in prompt
+    assert "- react-native" in prompt
 
 
 def test_generic_stub_mode_blocks_instead_of_completing(tmp_path: Path):
@@ -209,6 +247,7 @@ def test_worktree_run_continue_status_abort(tmp_path: Path):
     r_continue = _run_cli(["continue", "--worktree", "long-press"], project)
     assert r_continue.returncode == 0, r_continue.stderr
     assert "run complete" in r_continue.stdout
+    assert (run_dir / "artifacts" / "gate-results.json").exists()
 
     r_empty_continue = _run_cli(["continue", "--worktree", "long-press"], project)
     assert r_empty_continue.returncode == 0
@@ -883,6 +922,32 @@ def test_review_fail_marker_overrides_approve_verdict(tmp_path: Path):
     assert runner._next_index(0, runner.phases[0]) == (1, False)
 
 
+def test_missing_required_profile_skills_marker_overrides_approve_verdict(tmp_path: Path):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.runner import Phase, Runner
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "final-review.md").write_text(
+        "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
+        "## Reviewer 2\nreviewer-source: sub-agent\nreviewer-2 verdict: approve\n\n"
+        "## Overall\nverdict: approve\n\n"
+        "## Completion Gate\n"
+        "missing-required-profile-skills: missing local profile: ios-clean-architecture\n",
+        encoding="utf-8",
+    )
+
+    runner = Runner.__new__(Runner)
+    runner.run_dir = run_dir
+    runner.phases = [
+        Phase(id="final-review", description="", multi_review=True, routes={"approve": "commit", "request-changes": "fix-loop"}),
+        Phase(id="fix-loop", description=""),
+        Phase(id="commit", description=""),
+    ]
+
+    assert runner._next_index(0, runner.phases[0]) == (1, False)
+
+
 def test_route_key_requires_exact_status_or_verdict_lines():
     from agent_flow.runner import _route_key
 
@@ -1098,17 +1163,17 @@ def test_required_markers_block_incomplete_artifact(tmp_path: Path):
     phase = Phase(
         id="domain-grill",
         description="",
-        required_markers=("android-local-skills: checked|n/a",),
+        required_markers=("profile-skill-selection: applied|skipped",),
     )
     (run_dir / "domain-grill.md").write_text(
         "## Completion Gate\n"
-        "android-local-skills: missing\n",
+        "profile-skill-selection: missing\n",
         encoding="utf-8",
     )
-    assert runner._missing_required_markers(phase) == ["android-local-skills: checked|n/a"]
+    assert runner._missing_required_markers(phase) == ["profile-skill-selection: applied|skipped"]
     (run_dir / "domain-grill.md").write_text(
         "## Completion Gate\n"
-        "android-local-skills: optional\n",
+        "profile-skill-selection: skipped\n",
         encoding="utf-8",
     )
     assert runner._missing_required_markers(phase) == []

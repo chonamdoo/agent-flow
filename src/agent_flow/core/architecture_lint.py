@@ -1,0 +1,558 @@
+from __future__ import annotations
+
+import argparse
+import re
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from agent_flow.core.profiles import active_profile_ids, load_profile_payload
+
+
+SOURCE_SUFFIXES = {".gradle", ".kt", ".kts", ".java", ".swift", ".py", ".ts", ".tsx", ".js", ".jsx"}
+IGNORED_PARTS = {
+    ".agent-flow",
+    ".git",
+    ".gradle",
+    ".idea",
+    "build",
+    "node_modules",
+    "__pycache__",
+    "__tests__",
+    "tests",
+    "test",
+    "androidTest",
+    "commonTest",
+    "iosTest",
+}
+TEST_NAME_RE = re.compile(r"(^test_|[_-]test$|[_-]test\.|testcase|tests?$)", re.IGNORECASE)
+CORE_FAMILY_SEGMENTS = {
+    "data",
+    "design-system",
+    "designsystem",
+    "domain",
+    "navigation",
+    "network",
+    "permission",
+    "platform",
+    "resources",
+    "ui",
+}
+PLACEHOLDER_RESERVED_SEGMENTS = {"src", "build", "gradle", ".gradle"}
+
+
+@dataclass(frozen=True)
+class Finding:
+    path: str
+    message: str
+
+
+@dataclass(frozen=True)
+class RoleMatch:
+    role: dict[str, Any]
+    captures: dict[str, str]
+    pattern: str
+
+
+def lint_project(root: Path, profile_id: str, files: list[str] | None = None) -> list[Finding]:
+    profile = load_profile_payload(profile_id)
+    architecture = profile.get("architecture")
+    if not isinstance(architecture, dict):
+        return []
+    roles = architecture.get("roles")
+    if not isinstance(roles, list):
+        return []
+    candidates = files if files is not None else changed_files(root)
+    normalized_candidates = normalized_candidate_files(candidates)
+    if not architecture_lint_is_active(root, architecture, normalized_candidates):
+        return []
+    findings: list[Finding] = []
+    managed_roots = architecture_managed_roots(roles)
+    for rel_path in normalized_candidates:
+        path = root / rel_path
+        match = match_role(rel_path, roles)
+        if match is None:
+            if managed_roots and not is_root_gradle_config(rel_path):
+                findings.append(Finding(rel_path, "path is outside profile architecture role mapping"))
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace") if path.exists() and path.is_file() else ""
+        findings.extend(validate_forbidden_tokens(rel_path, text, match.role))
+        findings.extend(validate_package_suffix(rel_path, text, match.role, match.captures))
+        findings.extend(validate_gradle_namespace(root, rel_path, match))
+        findings.extend(validate_declared_modules(root, rel_path, match.role, match.captures))
+        findings.extend(validate_gradle_dependencies(root, rel_path, match))
+        findings.extend(validate_pair(root, rel_path, roles, match))
+    return findings
+
+
+def lint_profiles(root: Path, profile_ids: list[str], files: list[str] | None = None) -> dict[str, list[Finding]]:
+    candidates = normalized_candidate_files(files if files is not None else changed_files(root))
+    profile_ids = expanded_lint_profile_ids(profile_ids, candidates)
+    if len(profile_ids) <= 1:
+        return {
+            profile_id: lint_project(root, profile_id, files=files)
+            for profile_id in profile_ids
+        }
+    contexts = {
+        profile_id: profile_lint_context(profile_id)
+        for profile_id in profile_ids
+    }
+    selected: dict[str, list[str]] = {profile_id: [] for profile_id in profile_ids}
+    for rel_path in candidates:
+        relevant_profiles = [
+            profile_id
+            for profile_id, context in contexts.items()
+            if context_path_is_relevant(rel_path, context)
+        ]
+        if not relevant_profiles:
+            fallback = first_profile_with_roles(profile_ids, contexts)
+            if fallback:
+                relevant_profiles = [fallback]
+        for profile_id in relevant_profiles:
+            selected[profile_id].append(rel_path)
+    return {
+        profile_id: lint_project(root, profile_id, files=profile_files)
+        for profile_id, profile_files in selected.items()
+    }
+
+
+def expanded_lint_profile_ids(profile_ids: list[str], candidates: list[str]) -> list[str]:
+    expanded = list(profile_ids)
+    if "react-native" in expanded and "android" not in expanded:
+        if any(path == "android" or path.startswith("android/") for path in candidates):
+            expanded.append("android")
+    return expanded
+
+
+def profile_lint_context(profile_id: str) -> tuple[list[object], tuple[str, ...]]:
+    profile = load_profile_payload(profile_id)
+    architecture = profile.get("architecture")
+    if not isinstance(architecture, dict):
+        return ([], ())
+    roles = architecture.get("roles")
+    if not isinstance(roles, list):
+        return ([], ())
+    return (roles, architecture_managed_roots(roles))
+
+
+def context_path_is_relevant(rel_path: str, context: tuple[list[object], tuple[str, ...]]) -> bool:
+    roles, managed_roots = context
+    if not roles:
+        return False
+    if is_root_gradle_config(rel_path):
+        return True
+    if match_role(rel_path, roles) is not None:
+        return True
+    return is_managed_architecture_path(rel_path, managed_roots)
+
+
+def first_profile_with_roles(profile_ids: list[str], contexts: dict[str, tuple[list[object], tuple[str, ...]]]) -> str:
+    for profile_id in profile_ids:
+        roles, _managed_roots = contexts.get(profile_id, ([], ()))
+        if roles:
+            return profile_id
+    return ""
+
+
+def architecture_lint_is_active(root: Path, architecture: dict[str, Any], candidates: list[str]) -> bool:
+    if architecture.get("strict_when_roots_present") is not True:
+        return True
+    activation_roots = architecture.get("activation_roots")
+    if not isinstance(activation_roots, list):
+        return True
+    roots = tuple(
+        item.strip("/")
+        for item in activation_roots
+        if isinstance(item, str) and item.strip("/")
+    )
+    if not roots:
+        return True
+    return any(root_path_is_active(candidate, roots) for candidate in candidates) or any(
+        (root / activation_root).exists() for activation_root in roots
+    )
+
+
+def root_path_is_active(rel_path: str, activation_roots: tuple[str, ...]) -> bool:
+    return any(rel_path == activation_root or rel_path.startswith(f"{activation_root}/") for activation_root in activation_roots)
+
+
+def changed_files(root: Path) -> list[str]:
+    if not (root / ".git").exists():
+        return []
+    tracked = subprocess.run(
+        ["git", "diff", "--name-only", "--diff-filter=ACMRTUXB", "HEAD", "--"],
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    untracked = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard"],
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    files: list[str] = []
+    if tracked.returncode == 0:
+        files.extend(line.strip() for line in tracked.stdout.splitlines() if line.strip())
+    if untracked.returncode == 0:
+        files.extend(line.strip() for line in untracked.stdout.splitlines() if line.strip())
+    return list(dict.fromkeys(files))
+
+
+def normalized_candidate_files(files: list[str]) -> list[str]:
+    normalized: list[str] = []
+    for file_name in files:
+        rel_path = file_name.replace("\\", "/").strip("/")
+        if not rel_path or any(part in IGNORED_PARTS for part in rel_path.split("/")):
+            continue
+        if is_test_file(rel_path):
+            continue
+        if Path(rel_path).suffix not in SOURCE_SUFFIXES:
+            continue
+        normalized.append(rel_path)
+    return normalized
+
+
+def is_test_file(rel_path: str) -> bool:
+    path = Path(rel_path)
+    stem = path.stem
+    if stem.endswith(("Test", "Tests", "Spec", "Specs")):
+        return True
+    return bool(TEST_NAME_RE.search(stem))
+
+
+def match_role(rel_path: str, roles: list[object]) -> RoleMatch | None:
+    matches: list[RoleMatch] = []
+    for role in roles:
+        if not isinstance(role, dict):
+            continue
+        paths = role.get("paths")
+        if not isinstance(paths, list):
+            continue
+        for pattern in paths:
+            if not isinstance(pattern, str):
+                continue
+            captures = match_pattern(rel_path, pattern)
+            if captures is not None:
+                matches.append(RoleMatch(role=role, captures=captures, pattern=pattern))
+    if not matches:
+        return None
+    return max(matches, key=lambda match: pattern_specificity(match.pattern))
+
+
+def pattern_specificity(pattern: str) -> tuple[int, int]:
+    parts = [part for part in pattern.strip("/").split("/") if part]
+    static_count = sum(1 for part in parts if not re.fullmatch(r"<[a-zA-Z][a-zA-Z0-9_-]*>", part))
+    return (len(parts), static_count)
+
+
+def match_pattern(rel_path: str, pattern: str) -> dict[str, str] | None:
+    path_parts = rel_path.split("/")
+    pattern_parts = pattern.strip("/").split("/")
+    if len(path_parts) < len(pattern_parts):
+        return None
+    captures: dict[str, str] = {}
+    for index, part in enumerate(pattern_parts):
+        expected = pattern_parts[index]
+        actual = path_parts[index]
+        token = re.fullmatch(r"<([a-zA-Z][a-zA-Z0-9_-]*)>", expected)
+        if token:
+            if actual in PLACEHOLDER_RESERVED_SEGMENTS:
+                return None
+            captures[token.group(1)] = actual
+            continue
+        if expected != actual:
+            return None
+    return captures
+
+
+def architecture_managed_roots(roles: list[object]) -> tuple[str, ...]:
+    roots: set[str] = set()
+    for role in roles:
+        if not isinstance(role, dict):
+            continue
+        paths = role.get("paths")
+        if not isinstance(paths, list):
+            continue
+        for pattern in paths:
+            if isinstance(pattern, str):
+                root = static_prefix_before_placeholder(pattern)
+                if root:
+                    roots.add(root)
+                    family_parent = architecture_family_parent(root)
+                    if family_parent:
+                        roots.add(family_parent)
+    return tuple(sorted(roots, key=lambda value: (-len(value), value)))
+
+
+def static_prefix_before_placeholder(pattern: str) -> str:
+    parts: list[str] = []
+    for part in pattern.strip("/").split("/"):
+        if re.fullmatch(r"<[a-zA-Z][a-zA-Z0-9_-]*>", part):
+            break
+        if part:
+            parts.append(part)
+    return "/".join(parts)
+
+
+def architecture_family_parent(root: str) -> str:
+    parts = root.split("/")
+    if len(parts) <= 1:
+        return ""
+    if parts[-1].lower() in CORE_FAMILY_SEGMENTS:
+        return "/".join(parts[:-1])
+    return ""
+
+
+def is_managed_architecture_path(rel_path: str, managed_roots: tuple[str, ...]) -> bool:
+    return any(rel_path == root or rel_path.startswith(f"{root}/") for root in managed_roots)
+
+
+def validate_forbidden_tokens(rel_path: str, text: str, role: dict[str, Any]) -> list[Finding]:
+    findings: list[Finding] = []
+    forbidden = role.get("forbidden")
+    if not isinstance(forbidden, list):
+        return findings
+    haystacks = [Path(rel_path).name, text]
+    for token in forbidden:
+        if not isinstance(token, str) or not token:
+            continue
+        lowered_token = token.lower()
+        if any(lowered_token in haystack.lower() for haystack in haystacks):
+            findings.append(Finding(rel_path, f"{role.get('id', 'role')} contains forbidden token {token}"))
+    return findings
+
+
+def validate_package_suffix(rel_path: str, text: str, role: dict[str, Any], captures: dict[str, str]) -> list[Finding]:
+    suffix = role.get("package_suffix")
+    if not isinstance(suffix, str) or not suffix:
+        return []
+    if is_gradle_build_file(rel_path):
+        return []
+    package_name = package_from_source(text)
+    if not package_name:
+        return [Finding(rel_path, f"{role.get('id', 'role')} requires package declaration")]
+    expected = suffix
+    for key, value in captures.items():
+        expected = expected.replace(f"<{key}>", package_segment(value))
+    if not package_name.endswith(expected):
+        return [Finding(rel_path, f"package {package_name} does not match role suffix {expected}")]
+    return []
+
+
+def validate_gradle_namespace(root: Path, rel_path: str, match: RoleMatch) -> list[Finding]:
+    suffix = match.role.get("package_suffix")
+    if not isinstance(suffix, str) or not suffix:
+        return []
+    build_file = role_build_file(root, match.pattern, match.captures, rel_path)
+    if build_file is None:
+        return []
+    namespace = namespace_from_gradle(build_file)
+    if not namespace:
+        return []
+    expected = suffix
+    for key, value in match.captures.items():
+        expected = expected.replace(f"<{key}>", package_segment(value))
+    if not namespace.endswith(expected):
+        return [Finding(rel_path, f"namespace {namespace} does not match role suffix {expected}")]
+    return []
+
+
+def validate_pair(root: Path, rel_path: str, roles: list[object], match: RoleMatch) -> list[Finding]:
+    pair_id = match.role.get("pair_with")
+    if not isinstance(pair_id, str) or not pair_id:
+        return []
+    if not match.captures:
+        return []
+    pair_role = next((role for role in roles if isinstance(role, dict) and role.get("id") == pair_id), None)
+    if not isinstance(pair_role, dict):
+        return []
+    pair_paths = pair_role.get("paths")
+    if not isinstance(pair_paths, list):
+        return []
+    for pattern in pair_paths:
+        if not isinstance(pattern, str):
+            continue
+        concrete = pattern
+        for key, value in match.captures.items():
+            concrete = concrete.replace(f"<{key}>", value)
+        if (root / concrete).exists():
+            return []
+    return [Finding(rel_path, f"{match.role.get('id', 'role')} requires paired role {pair_id}")]
+
+
+def validate_declared_modules(root: Path, rel_path: str, role: dict[str, Any], captures: dict[str, str]) -> list[Finding]:
+    expected = expected_modules(role, captures)
+    if not expected:
+        return []
+    declared = declared_gradle_modules(root)
+    if not declared:
+        return []
+    missing = [module for module in expected if module not in declared]
+    return [Finding(rel_path, f"Gradle module {module} is not declared in settings") for module in missing]
+
+
+def validate_gradle_dependencies(root: Path, rel_path: str, match: RoleMatch) -> list[Finding]:
+    build_file = role_build_file(root, match.pattern, match.captures, rel_path)
+    if build_file is None:
+        return []
+    dependencies = gradle_project_dependencies(build_file)
+    role_id = str(match.role.get("id", ""))
+    findings: list[Finding] = []
+    for module in forbidden_gradle_dependencies(role_id, match.captures):
+        if module in dependencies or any(dep.startswith(f"{module}:") for dep in dependencies):
+            findings.append(Finding(str(build_file.relative_to(root)), f"{role_id} has forbidden Gradle dependency {module}"))
+    required = required_gradle_dependencies(role_id, match.captures)
+    for module in required:
+        if module not in dependencies:
+            findings.append(Finding(str(build_file.relative_to(root)), f"{role_id} must depend on {module}"))
+    return findings
+
+
+def expected_modules(role: dict[str, Any], captures: dict[str, str]) -> list[str]:
+    modules = role.get("modules")
+    if not isinstance(modules, list):
+        return []
+    expected: list[str] = []
+    for module in modules:
+        if not isinstance(module, str):
+            continue
+        concrete = replace_placeholders(module, captures)
+        if "<" not in concrete and concrete not in expected:
+            expected.append(concrete)
+    return expected
+
+
+def declared_gradle_modules(root: Path) -> set[str]:
+    settings = next((root / name for name in ("settings.gradle.kts", "settings.gradle") if (root / name).is_file()), None)
+    if settings is None:
+        return set()
+    text = settings.read_text(encoding="utf-8", errors="replace")
+    modules = set(re.findall(r"['\"](:[A-Za-z0-9_:-]+)['\"]", text))
+    modules.update(re.findall(r"include\s+['\"](:[A-Za-z0-9_:-]+)['\"]", text))
+    return modules
+
+
+def role_build_file(root: Path, pattern: str, captures: dict[str, str], rel_path: str | None = None) -> Path | None:
+    if rel_path and is_gradle_build_file(rel_path):
+        path = root / rel_path
+        if path.is_file():
+            return path
+    role_root = root / replace_placeholders(pattern, captures)
+    for name in ("build.gradle.kts", "build.gradle"):
+        path = role_root / name
+        if path.is_file():
+            return path
+    return None
+
+
+def gradle_project_dependencies(path: Path) -> set[str]:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    dependencies = set(re.findall(r"project\(\s*['\"](:[A-Za-z0-9_:-]+)['\"]\s*\)", text))
+    dependencies.update(re.findall(r"project\s+['\"](:[A-Za-z0-9_:-]+)['\"]", text))
+    dependencies.update(type_safe_project_dependencies(text))
+    return dependencies
+
+
+def type_safe_project_dependencies(text: str) -> set[str]:
+    modules: set[str] = set()
+    for match in re.finditer(r"\bprojects((?:\.[A-Za-z_][A-Za-z0-9_]*)+)", text):
+        parts = [part for part in match.group(1).split(".") if part]
+        if not parts:
+            continue
+        modules.add(":" + ":".join(parts))
+        modules.add(":" + ":".join(gradle_accessor_segment_to_module(part) for part in parts))
+    return modules
+
+
+def gradle_accessor_segment_to_module(segment: str) -> str:
+    kebab = re.sub(r"([a-z0-9])([A-Z])", r"\1-\2", segment)
+    return kebab.replace("_", "-").lower()
+
+
+def forbidden_gradle_dependencies(role_id: str, captures: dict[str, str]) -> list[str]:
+    if role_id == "core-domain":
+        return [":app", ":core:data", ":core:network", ":core:platform", ":core:navigation:impl", ":feature"]
+    if role_id == "core-data":
+        return [":app", ":feature"]
+    if role_id == "feature-api":
+        return [":app", ":core:data", ":feature:" + captures.get("feature", "") + ":presentation"]
+    if role_id == "feature-presentation":
+        return [":app", ":core:data"]
+    if role_id == "navigation-api":
+        return [":app", ":core:navigation:impl", ":feature"]
+    return []
+
+
+def required_gradle_dependencies(role_id: str, captures: dict[str, str]) -> list[str]:
+    if role_id == "core-data" and captures.get("context"):
+        return [f":core:domain:{captures['context']}"]
+    if role_id == "feature-presentation" and captures.get("feature"):
+        return [f":feature:{captures['feature']}:api"]
+    if role_id == "navigation-impl":
+        return [":core:navigation:api"]
+    return []
+
+
+def replace_placeholders(value: str, captures: dict[str, str]) -> str:
+    concrete = value
+    for key, replacement in captures.items():
+        concrete = concrete.replace(f"<{key}>", replacement)
+    return concrete
+
+
+def package_from_source(text: str) -> str:
+    for line in text.splitlines():
+        match = re.match(r"^\s*package\s+([A-Za-z_][A-Za-z0-9_.]*)\s*;?\s*$", line)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def is_root_gradle_config(rel_path: str) -> bool:
+    return rel_path in {"settings.gradle", "settings.gradle.kts", "build.gradle", "build.gradle.kts"}
+
+
+def is_gradle_build_file(rel_path: str) -> bool:
+    return Path(rel_path).name in {"build.gradle", "build.gradle.kts"}
+
+
+def namespace_from_gradle(path: Path) -> str:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    match = re.search(r"\bnamespace\s*=?\s*['\"]([A-Za-z_][A-Za-z0-9_.]*)['\"]", text)
+    return match.group(1) if match else ""
+
+
+def package_segment(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_]", "", value.replace("-", "_")).lower()
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="agent-flow architecture-lint")
+    parser.add_argument("--root", default=".")
+    parser.add_argument("--profile", default="auto")
+    parser.add_argument("--files", nargs="*")
+    args = parser.parse_args(argv)
+    root = Path(args.root).resolve()
+    try:
+        profile_ids = active_profile_ids(root, args.profile)
+        findings_by_profile = lint_profiles(root, profile_ids, files=args.files)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if not any(findings_by_profile.values()):
+        print(f"{','.join(profile_ids)}: architecture lint passed")
+        return 0
+    print(f"{','.join(profile_ids)}: architecture lint failed", file=sys.stderr)
+    for profile_id, findings in findings_by_profile.items():
+        for finding in findings:
+            print(f"- [{profile_id}] {finding.path}: {finding.message}", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

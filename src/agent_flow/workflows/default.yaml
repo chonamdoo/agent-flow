@@ -9,7 +9,7 @@ description: |
   Phase order (canonical):
     design → slice-plan → [pause]
     → worktree → implement (TDD red→green→refactor inside, per slice)
-    → comment-authoring → final-review ↔ fix-loop → comment-authoring → final-review
+    → comment-authoring → final-review → gates ↔ fix-loop → comment-authoring → final-review → gates
     → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge → cleanup
 
 phases:
@@ -167,8 +167,12 @@ phases:
       records the complete loop per slice. Mandatory test-first; production
       code is never written before a failing test exists.
     required_markers:
-      - "gates: all_passed"
       - "skills_checked: true"
+      - "profile-skill-selection: applied"
+      - "active-profiles:"
+      - "changed-file-skill-resolution: applied"
+      - "required-profile-skills: checked"
+      - "missing-required-profile-skills:"
       - "clean-architecture: applied"
       - "project-local-skills: checked|n/a"
       - "project-local-skills-used:"
@@ -178,8 +182,6 @@ phases:
       - "ui-state-modeling: explicit|n/a"
       - "presentation-mapping-boundary: domain-to-uimodel|n/a"
       - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a"
-      - "android-local-skills: checked|n/a"
-      - "android-local-skills-used:"
     prompt: |
       For each slice in slice-plan.md, in order, run the TDD cycle:
 
@@ -200,12 +202,13 @@ phases:
          additions. No speculative abstractions.
       6. Apply `skills/clean-architecture/SKILL.md` and honor layer assignment
          from the design's Clean Architecture map.
-      6a. For Android/Kotlin/Compose/KMP files, read matching local skills from
-          the active Android profile's `android_skills` and `chrisbanes_skills`
-          through the current host path only. If required skills are missing,
-          report `missing local <group>: <skill>` with the source URL and do
-          not claim completion without user override.
-          General Compose/Kotlin convention does not count as loaded skill usage.
+      6a. Resolve required skills from active profile metadata, installed skill
+          index, changed files, and task scope. Load only the touched profile
+          skill union. Android/Chris Banes skills are required only for
+          Android/Kotlin/Compose/KMP files or React Native `android/` native
+          code. If required skills are missing, report
+          `missing local <group>: <skill>` with the source URL and do not claim
+          completion without user override.
       7. Honor SOLID principles from the design's SOLID section.
       8. For any data layer work, enforce the repository boundary from
          `skills/clean-architecture/SKILL.md`:
@@ -218,7 +221,8 @@ phases:
          For Android profile work, also apply
          `skills/android-guides/references/data-layer-guide.md`.
       9. Run tests. All must PASS.
-      10. Run profile gates (build / lint as applicable). All must pass.
+      10. Run focused implementation tests needed to prove the slice behavior.
+          Completion QA gates run only after final-review approve.
 
       ### REFACTOR — tests stay green
       11. Apply ubiquitous-language renaming if names drifted from the
@@ -234,15 +238,18 @@ phases:
       For each slice include:
         - slice id and goal
         - RED: test files added, failure messages
-        - GREEN: production files added, test results, gate results
+        - GREEN: production files added, test results
         - REFACTOR: notable renames / extractions, post-refactor test run
 
-      Before writing implement.md, run all profile gates. Only when every gate
-      exits 0, append:
+      Before writing implement.md, append:
 
           ## Completion Gate
-          gates: all_passed
           skills_checked: true
+          profile-skill-selection: applied
+          active-profiles: <profile list>
+          changed-file-skill-resolution: applied
+          required-profile-skills: checked
+          missing-required-profile-skills: none|<list>
           clean-architecture: applied
           project-local-skills: checked|n/a
           project-local-skills-used: <skill list or n/a>
@@ -252,8 +259,13 @@ phases:
           ui-state-modeling: n/a
           presentation-mapping-boundary: n/a
           di-boundary: n/a
-          android-local-skills: checked|n/a
-          android-local-skills-used: <skill list or n/a>
+
+      If Android/Kotlin/Compose/KMP files are changed, add:
+
+          android-local-skills: checked
+          android-local-skills-used: <skill list>
+          chrisbanes-skills: checked|n/a
+          chrisbanes-skills-used: <skill list or n/a>
 
   - id: comment-authoring
     description: Final comment-quality pass before final-review. Runner routes to final-review.
@@ -298,6 +310,14 @@ phases:
     multi_review: true
     required_markers:
       - "skills_checked: true"
+      - "profile-skill-selection: applied"
+      - "active-profiles:"
+      - "changed-file-skill-resolution: applied"
+      - "required-profile-skills: checked"
+      - "missing-required-profile-skills:"
+      - "architecture-contract-check: pass|fail|n/a"
+      - "codex-claude-parity-check: pass|fail"
+      - "hook-parity-check: pass|fail"
       - "clean-architecture: applied"
       - "project-local-skills: checked|n/a"
       - "project-local-skills-used:"
@@ -321,10 +341,8 @@ phases:
       - "ui-state-modeling: explicit|n/a"
       - "presentation-mapping-boundary: domain-to-uimodel|n/a"
       - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a"
-      - "android-local-skills: checked|n/a"
-      - "android-local-skills-used:"
     routes:
-      approve: commit
+      approve: gates
       request-changes: fix-loop
     prompt: |
       Spawn at least two active-host reviewer sub-agents (Codex sub-agent in
@@ -340,24 +358,32 @@ phases:
       should-fix / note) and source angle. Cite paths as `path/to/file:line`.
       Apply agent-flow-concise-output: one finding per line, Korean concise
       prose, no emoji, and parser verdict markers unchanged.
-      Read every matching language/framework skill before review and record
-      `skills_checked: true`.
+      Resolve required review skills from active profile metadata,
+      `.agent-flow/skills/index.json`, changed files, and task scope. Review
+      only the touched profile skill union and record `skills_checked: true`.
       If `skills/clean-architecture-core/SKILL.md` is not applied after
       compatibility markers from `skills/clean-architecture/SKILL.md`, or any
       must-avoid or failing checklist condition from the core skill is present,
       the overall verdict is `verdict: request-changes`.
-      For Android/Kotlin/Compose/KMP changes, read matching local skills from
-      the active Android profile's `android_skills` and `chrisbanes_skills`
-      through the current host path only. If required skills are missing,
-      report `missing local <group>: <skill>` with the source URL and use
-      `verdict: request-changes`.
-      General Compose/Kotlin convention does not count as loaded skill usage.
+      Android/Chris Banes skills are required only for Android/Kotlin/Compose/
+      KMP changes or React Native `android/` native code. If required skills are
+      missing, report `missing local <group>: <skill>` with the source URL and
+      use `verdict: request-changes`. Unrelated platform skill absence must not
+      block.
       End with `## Overall` followed by exactly one verdict line: `verdict: approve` or
       `verdict: request-changes`.
       Also include:
 
           ## Completion Gate
           skills_checked: true
+          profile-skill-selection: applied
+          active-profiles: <profile list>
+          changed-file-skill-resolution: applied
+          required-profile-skills: checked
+          missing-required-profile-skills: none|<list>
+          architecture-contract-check: pass|fail|n/a
+          codex-claude-parity-check: pass|fail
+          hook-parity-check: pass|fail
           clean-architecture: applied
           project-local-skills: checked|n/a
           project-local-skills-used: <skill list or n/a>
@@ -381,13 +407,43 @@ phases:
           ui-state-modeling: n/a
           presentation-mapping-boundary: n/a
           di-boundary: n/a
-          android-local-skills: checked|n/a
-          android-local-skills-used: <skill list or n/a>
+
+      If Android/Kotlin/Compose/KMP files are changed, add:
+
+          android-local-skills: checked
+          android-local-skills-used: <skill list>
+          chrisbanes-skills: checked|n/a
+          chrisbanes-skills-used: <skill list or n/a>
+
+  - id: gates
+    description: Run project verification gates after final-review approve. Runner routes fail→fix-loop, pass→commit.
+    artifact: artifacts/gate-results.json
+    routes:
+      green: commit
+      approve: commit
+      request-changes: fix-loop
+      blocked: fix-loop
+      error: fix-loop
+      pending: block
+      default: fix-loop
+    prompt: |
+      Run QA only after required reviewers approve. Execute profile gates in
+      BUILD -> TYPECHECK -> LINT order where applicable, plus context lint.
+      Docs-only PRs must still run context lint. Save structured JSON with a
+      top-level `passed` boolean and a `results` array. When an explicit route
+      status is needed, also include top-level `status` as `green`, `approve`,
+      `request-changes`, `blocked`, `error`, or `pending`.
+      Output: artifacts/gate-results.json.
 
   - id: fix-loop
     description: Address review findings. Tests stay green.
     required_markers:
       - "skills_checked: true"
+      - "profile-skill-selection: applied"
+      - "active-profiles:"
+      - "changed-file-skill-resolution: applied"
+      - "required-profile-skills: checked"
+      - "missing-required-profile-skills:"
       - "clean-architecture: applied"
       - "project-local-skills: checked|n/a"
       - "project-local-skills-used:"
@@ -397,26 +453,28 @@ phases:
       - "ui-state-modeling: explicit|n/a"
       - "presentation-mapping-boundary: domain-to-uimodel|n/a"
       - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a"
-      - "android-local-skills: checked|n/a"
-      - "android-local-skills-used:"
     routes:
       default: comment-authoring
     prompt: |
-      For each must-fix finding in final-review.md, apply the change. After
-      each round, re-run all tests and profile gates — they must remain
-      green. Follow the runner's printed next_command for each fix/review
-      loop. Read every matching language/framework skill before writing or
-      judging code. Apply `skills/clean-architecture/SKILL.md` to any
-      boundary-affecting fix. For Android/Kotlin/Compose/KMP fixes, read
-      matching local skills from the active Android profile's `android_skills`
-      and `chrisbanes_skills` through the current host path only. If a required
-      local skill is missing, do not complete this artifact; report
-      `missing local <group>: <skill>` with the source URL to the user.
-      General Compose/Kotlin convention does not count as loaded skill usage.
+      For each must-fix finding in final-review.md or gate-results.json, apply
+      the change. After QA failures, return through review before running gates
+      again. Follow the runner's printed next_command for each fix/review
+      loop. Resolve required skills from active profile metadata, installed
+      skill index, changed files, and task scope before writing or judging code.
+      Apply `skills/clean-architecture/SKILL.md` to any boundary-affecting fix.
+      Android/Chris Banes skills are required only for Android/Kotlin/Compose/
+      KMP fixes or React Native `android/` native code. If a required local
+      skill is missing, do not complete this artifact; report
+      `missing local <group>: <skill>` with the source URL.
       End with:
 
           ## Completion Gate
           skills_checked: true
+          profile-skill-selection: applied
+          active-profiles: <profile list>
+          changed-file-skill-resolution: applied
+          required-profile-skills: checked
+          missing-required-profile-skills: none|<list>
           clean-architecture: applied
           project-local-skills: checked|n/a
           project-local-skills-used: <skill list or n/a>
@@ -426,8 +484,13 @@ phases:
           ui-state-modeling: n/a
           presentation-mapping-boundary: n/a
           di-boundary: n/a
-          android-local-skills: checked|n/a
-          android-local-skills-used: <skill list or n/a>
+
+      If Android/Kotlin/Compose/KMP files are changed, add:
+
+          android-local-skills: checked
+          android-local-skills-used: <skill list>
+          chrisbanes-skills: checked|n/a
+          chrisbanes-skills-used: <skill list or n/a>
 
       Output: fix-loop.md.
 

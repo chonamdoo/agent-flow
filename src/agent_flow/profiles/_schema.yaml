@@ -40,6 +40,35 @@ optional:
     - id: "stable angle id"
       prompt: "path (relative to kit root) to the prompt template"
 
+  skills:
+    # Project-local skills selected when installing this profile.
+    # The installer auto-includes declared dependencies such as clean-architecture-core.
+    install:
+      - "skill-name"
+    # Review-time required skills are resolved from active profile + changed files.
+    # Missing required skills block only the touched platform/profile.
+    required_review:
+      - group: "profile | android_skills | chrisbanes_skills | android-native-escalation"
+        skills: ["skill-name"]
+        profiles: ["optional escalated profile id"]
+        when: "changed file/task scope that requires this group"
+        missing: "missing local <skill-group>: <skill>"
+
+  architecture:
+    # Canonical clean architecture role mapping. Paths are platform-native,
+    # but role ids remain semantic and cross-platform.
+    contract: "clean-architecture-core"
+    platform: "android | react-native | react | ios | python"
+    strict_when_roots_present: "optional bool; if true, deterministic lint is n/a until activation_roots exist or are changed"
+    activation_roots: ["optional path roots that indicate the architecture contract is adopted"]
+    roles:
+      - id: "app-shell | core-domain | core-data | feature-api | feature-presentation | core-ui | core-network | core-platform | core-platform-adapter | navigation-api | navigation-impl"
+        paths: ["platform/native/path/<context-or-feature>"]
+        modules: ["optional module id pattern"]
+        package_suffix: "optional package suffix pattern"
+        pair_with: "optional role id that must exist for the same semantic boundary"
+        forbidden: ["optional token that must not appear in this role"]
+
   android_skills:
     # Optional host-readable Android/Kotlin/Compose/KMP skill routing.
     # Use exact installed skill names from https://github.com/android/skills.

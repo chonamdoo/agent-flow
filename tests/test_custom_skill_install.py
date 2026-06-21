@@ -18,9 +18,13 @@ def _node() -> str:
     return node
 
 
-def _install(project: Path, *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+def _install(
+    project: Path,
+    *args: str,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        (_node(), str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"), "install"),
+        (_node(), str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"), "install", *args),
         cwd=project,
         text=True,
         capture_output=True,
@@ -141,6 +145,188 @@ def test_clean_architecture_skills_install_core_and_platform_dependency_graph(tm
     assert "Samantha" not in core + android + alias
     assert "http://" not in core + android + alias
     assert "https://" not in core + android + alias
+
+
+def test_android_profile_installs_android_skills_and_common_dependencies_only(tmp_path: Path) -> None:
+    project = tmp_path / "android-project"
+    project.mkdir()
+    (project / "settings.gradle.kts").write_text("pluginManagement {}\n", encoding="utf-8")
+
+    result = _install(project)
+
+    assert result.returncode == 0, result.stderr
+    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    names = {skill["name"] for skill in index["skills"]}
+    assert index["selection"]["profiles"] == ["android"]
+    assert "clean-architecture-core" in names
+    assert "android-clean-architecture" in names
+    assert "android-code-review" in names
+    assert "react-native-clean-architecture" not in names
+    assert "ios-clean-architecture" not in names
+    assert not (project / ".agent-flow" / "skills" / "react-native-clean-architecture").exists()
+
+
+def test_multi_profile_install_uses_union_and_dependency_closure(tmp_path: Path) -> None:
+    project = tmp_path / "mixed-project"
+    project.mkdir()
+
+    result = _install(project, "--profile", "android", "--profile", "react-native")
+
+    assert result.returncode == 0, result.stderr
+    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    names = {skill["name"] for skill in index["skills"]}
+    assert index["selection"]["profiles"] == ["android", "react-native"]
+    assert "clean-architecture-core" in names
+    assert "android-clean-architecture" in names
+    assert "react-native-clean-architecture" in names
+    assert "ios-clean-architecture" not in names
+
+
+def test_reinstall_preserves_previously_selected_profile_skills(tmp_path: Path) -> None:
+    project = tmp_path / "mixed-project"
+    project.mkdir()
+
+    first = _install(project, "--profile", "android", "--profile", "react-native")
+    assert first.returncode == 0, first.stderr
+    second = _install(project, "--profile", "android")
+    assert second.returncode == 0, second.stderr
+
+    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    names = {skill["name"] for skill in index["skills"]}
+    assert index["selection"]["profiles"] == ["android", "react-native"]
+    assert "android-clean-architecture" in names
+    assert "react-native-clean-architecture" in names
+
+
+def test_plain_reinstall_preserves_filtered_profile_selection(tmp_path: Path) -> None:
+    project = tmp_path / "android-project"
+    project.mkdir()
+
+    first = _install(project, "--profile", "android")
+    assert first.returncode == 0, first.stderr
+    second = _install(project)
+    assert second.returncode == 0, second.stderr
+
+    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    names = {skill["name"] for skill in index["skills"]}
+    assert index["selection"]["mode"] == "filtered"
+    assert index["selection"]["profiles"] == ["android"]
+    assert "android-clean-architecture" in names
+    assert "react-native-clean-architecture" not in names
+    assert "ios-clean-architecture" not in names
+
+
+def test_plain_reinstall_preserves_filtered_selection_over_detected_profile(tmp_path: Path) -> None:
+    project = tmp_path / "rn-project"
+    project.mkdir()
+    (project / "package.json").write_text('{"dependencies":{"react-native":"latest"}}\n', encoding="utf-8")
+    (project / "settings.gradle.kts").write_text("pluginManagement {}\n", encoding="utf-8")
+
+    first = _install(project, "--profile", "android")
+    assert first.returncode == 0, first.stderr
+    second = _install(project)
+    assert second.returncode == 0, second.stderr
+
+    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    names = {skill["name"] for skill in index["skills"]}
+    assert index["selection"]["mode"] == "filtered"
+    assert index["selection"]["profiles"] == ["android"]
+    assert "android-clean-architecture" in names
+    assert "react-native-clean-architecture" not in names
+
+
+def test_filtered_reinstall_after_all_install_does_not_preserve_unselected_platforms(tmp_path: Path) -> None:
+    project = tmp_path / "android-project"
+    project.mkdir()
+
+    first = _install(project)
+    assert first.returncode == 0, first.stderr
+    second = _install(project, "--profile", "android")
+    assert second.returncode == 0, second.stderr
+
+    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    names = {skill["name"] for skill in index["skills"]}
+    assert index["selection"]["profiles"] == ["android"]
+    assert "android-clean-architecture" in names
+    assert "react-native-clean-architecture" not in names
+    assert "ios-clean-architecture" not in names
+    assert not (project / ".agent-flow" / "skills" / "react-native-clean-architecture").exists()
+    assert not (project / ".agent-flow" / "skills" / "ios-clean-architecture").exists()
+
+
+def test_ios_project_auto_selects_ios_profile_skills(tmp_path: Path) -> None:
+    project = tmp_path / "ios-project"
+    project.mkdir()
+    (project / "Package.swift").write_text("// swift-tools-version: 5.9\n", encoding="utf-8")
+
+    result = _install(project)
+
+    assert result.returncode == 0, result.stderr
+    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    names = {skill["name"] for skill in index["skills"]}
+    assert index["selection"]["profiles"] == ["ios"]
+    assert "ios-clean-architecture" in names
+    assert "ios-clean-presentation-architecture" in names
+    assert "android-code-review" not in names
+    assert "react-native-clean-architecture" not in names
+
+
+def test_react_native_project_with_gradle_auto_selects_react_native_profile(tmp_path: Path) -> None:
+    project = tmp_path / "rn-project"
+    project.mkdir()
+    (project / "package.json").write_text('{"dependencies":{"react-native":"latest"}}\n', encoding="utf-8")
+    (project / "settings.gradle.kts").write_text("", encoding="utf-8")
+
+    result = _install(project)
+
+    assert result.returncode == 0, result.stderr
+    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    names = {skill["name"] for skill in index["skills"]}
+    assert index["selection"]["profiles"] == ["react-native"]
+    assert "react-native-clean-architecture" in names
+    assert "android-code-review" not in names
+
+
+def test_skill_metadata_dependencies_are_indexed_and_auto_installed(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    dependency = project / "skills" / "dependency-skill"
+    dependency.mkdir(parents=True)
+    (dependency / "SKILL.md").write_text(
+        "---\n"
+        "name: dependency-skill\n"
+        "title: Dependency Skill\n"
+        "description: Use when testing dependencies.\n"
+        "---\n"
+        "Use when testing dependencies.\n",
+        encoding="utf-8",
+    )
+    consumer = project / "skills" / "consumer-skill"
+    consumer.mkdir(parents=True)
+    (consumer / "SKILL.md").write_text(
+        "---\n"
+        "id: consumer-skill-id\n"
+        "name: consumer-skill\n"
+        "title: Consumer Skill\n"
+        "description: Use when testing dependency closure.\n"
+        "dependencies: [dependency-skill]\n"
+        "---\n"
+        "Use when testing dependency closure.\n",
+        encoding="utf-8",
+    )
+
+    result = _install(project, "--skills", "consumer-skill")
+
+    assert result.returncode == 0, result.stderr
+    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    skills = {skill["name"]: skill for skill in index["skills"]}
+    assert {"consumer-skill", "dependency-skill"} <= set(skills)
+    assert skills["consumer-skill"]["id"] == "consumer-skill-id"
+    assert skills["consumer-skill"]["title"] == "Consumer Skill"
+    assert skills["consumer-skill"]["dependencies"] == ["dependency-skill"]
+    assert skills["consumer-skill"]["requires"] == ["dependency-skill"]
+    assert (project / ".Codex" / "skills" / "dependency-skill" / "SKILL.md").exists()
+    assert (project / ".claude" / "skills" / "dependency-skill" / "SKILL.md").exists()
 
 
 def test_local_skill_priority_beats_project_and_bundled_conflict_is_recorded(tmp_path: Path) -> None:
