@@ -82,11 +82,24 @@ def test_bundled_workflow_skills_are_internal_and_host_skills_are_registered(tmp
         "react-native-app-shell-error-handling",
     }
     indexed = {skill["name"] for skill in index["skills"]}
+    matt_skill_closure = {
+        "codebase-design",
+        "diagnosing-bugs",
+        "domain-modeling",
+        "grill-with-docs",
+        "grilling",
+        "improve-codebase-architecture",
+        "qa",
+        "setup-matt-pocock-skills",
+        "tdd",
+        "to-issues",
+        "to-prd",
+        "triage",
+    }
     # bundled skill은 전부 index에 노출되어야 agent가 발견할 수 있다.
     assert host_skills <= indexed
     assert {
         "full-feature-workflow",
-        "domain-grill",
         "architecture-reviewer",
         "push-watch",
         "clean-architecture-core",
@@ -96,12 +109,14 @@ def test_bundled_workflow_skills_are_internal_and_host_skills_are_registered(tmp
         "react-native-clean-architecture",
         "python-api-clean-architecture",
     } <= indexed
+    assert matt_skill_closure <= indexed
     # host 디렉토리 link는 host skill 7종으로 제한한다.
     assert {link["name"] for link in index["links"]} == host_skills
-    assert (project / ".agent-flow" / "skills" / "domain-grill" / "SKILL.md").exists()
+    assert (project / ".agent-flow" / "skills" / "domain-modeling" / "SKILL.md").exists()
     assert (project / ".agent-flow" / "skills" / "full-feature-workflow" / "SKILL.md").exists()
-    assert not (project / ".Codex" / "skills" / "domain-grill").exists()
-    assert not (project / ".Codex" / "skills" / "grill-with-docs").exists()
+    for host_dir in (".Codex", ".claude"):
+        for skill in matt_skill_closure:
+            assert not (project / host_dir / "skills" / skill).exists()
     assert not (project / ".Codex" / "skills" / "full-feature-workflow").exists()
 
 
@@ -157,8 +172,23 @@ def test_android_profile_installs_android_skills_and_common_dependencies_only(tm
     assert result.returncode == 0, result.stderr
     index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
     names = {skill["name"] for skill in index["skills"]}
+    matt_skill_closure = {
+        "codebase-design",
+        "diagnosing-bugs",
+        "domain-modeling",
+        "grill-with-docs",
+        "grilling",
+        "improve-codebase-architecture",
+        "qa",
+        "setup-matt-pocock-skills",
+        "tdd",
+        "to-issues",
+        "to-prd",
+        "triage",
+    }
     assert index["selection"]["profiles"] == ["android"]
     assert "clean-architecture-core" in names
+    assert matt_skill_closure <= names
     assert "android-clean-architecture" in names
     assert "android-code-review" in names
     assert "react-native-clean-architecture" not in names

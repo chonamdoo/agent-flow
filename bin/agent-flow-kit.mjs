@@ -123,13 +123,6 @@ function installProject() {
     path.join(agentFlowDir, "skills", "full-feature-workflow", "SKILL.md"),
     fullFeatureSkillMarkdown(),
   );
-  writeManagedFile(path.join(agentFlowDir, "skills", "domain-grill", "SKILL.md"), domainGrillSkillMarkdown());
-  for (const name of ["CONTEXT-FORMAT.md", "ADR-FORMAT.md"]) {
-    writeManagedFile(
-      path.join(agentFlowDir, "skills", "domain-grill", name),
-      fs.readFileSync(path.join(KIT_ROOT, "skills", "grill-with-docs", name), "utf8"),
-    );
-  }
   writeManagedFile(path.join(agentFlowDir, "skills", "product-brief", "SKILL.md"), productBriefSkillMarkdown());
   writeManagedFile(path.join(agentFlowDir, "skills", "plan-reviewer", "SKILL.md"), planReviewerSkillMarkdown());
   writeManagedFile(
@@ -701,7 +694,7 @@ function assertInstalled(root) {
     path.join(root, ".agent-flow", "skills", "index.json"),
     path.join(root, ".agent-flow", "skills", "full-feature-workflow", "SKILL.md"),
     ...phases.map((phase) => path.join(root, ".agent-flow", "prompts", `${phase.id}.md`)),
-    path.join(root, ".agent-flow", "skills", "domain-grill", "SKILL.md"),
+    path.join(root, ".agent-flow", "skills", "domain-modeling", "SKILL.md"),
     path.join(root, ".agent-flow", "skills", "product-brief", "SKILL.md"),
     path.join(root, ".agent-flow", "skills", "plan-reviewer", "SKILL.md"),
     path.join(root, ".agent-flow", "skills", "ddd-clean-architecture", "SKILL.md"),
@@ -2208,10 +2201,6 @@ ${AGENT_FLOW_COMMAND} status
 
 function fullFeatureSkillMarkdown() {
   return `---\nname: full-feature-workflow\ndescription: Use this skill for feature work in this project.\n---\n\n# Full Feature Workflow\n\nUse this skill for feature work in this project.\n\nAlways drive progress through the runner output. Run \`${AGENT_FLOW_COMMAND} status\`, then execute the printed \`next_command\` exactly.\n\nDo not skip phases. If existing docs satisfy a phase, write the required artifact and reference those docs. If a gate, review, PR comment, or PR check fails, complete the matching fix phase and push again before merge/handoff.\n\nApply \`code-generation-discipline\` during code and review phases. Resolve required skills from active profile metadata, installed skill index, changed files, and task scope before writing or judging code.\n`;
-}
-
-function domainGrillSkillMarkdown() {
-  return fs.readFileSync(path.join(KIT_ROOT, "skills", "domain-grill", "SKILL.md"), "utf8");
 }
 
 function productBriefSkillMarkdown() {

@@ -20,8 +20,10 @@ phases:
       - "context_docs_checked: true"
       - "context_docs_updated: true|not_needed"
     prompt: |
-      Run `.agent-flow/skills/domain-grill/SKILL.md` exactly as written, using its linked
-      `CONTEXT-FORMAT.md` and `ADR-FORMAT.md`.
+      Run `.agent-flow/skills/grill-with-docs/SKILL.md` exactly as written.
+      Resolve its `/grilling` and `/domain-modeling` references from
+      `.agent-flow/skills/grilling/SKILL.md` and
+      `.agent-flow/skills/domain-modeling/SKILL.md`.
 
       Write the session result to domain-grill.md. When shared understanding is
       reached, end with a `## Completion Gate` section:
@@ -45,9 +47,12 @@ phases:
   - id: prd
     description: Write the product requirements document.
     prompt: |
-      Write the PRD from domain-grill.md and product-brief.md. Include goal,
-      scope, non-goals, user stories, acceptance criteria, edge cases,
-      dependencies, and risks. Output: artifacts/prd.md.
+      Apply `.agent-flow/skills/to-prd/SKILL.md`. Resolve its
+      `/setup-matt-pocock-skills` reference from
+      `.agent-flow/skills/setup-matt-pocock-skills/SKILL.md`. Write the PRD
+      from domain-grill.md and product-brief.md. Include goal, scope,
+      non-goals, user stories, acceptance criteria, edge cases, dependencies,
+      and risks. Output: artifacts/prd.md.
 
   - id: slice-plan
     description: Break PRD into independently shippable slices.
@@ -165,8 +170,10 @@ phases:
       - "project-local-skills-used:"
       - "presentation-skill: android|react|react-native|ios|n/a"
     prompt: |
-      Apply code-generation-discipline before writing tests. Write failing
-      tests first. Resolve required skills from active profile metadata,
+      Apply code-generation-discipline and `.agent-flow/skills/tdd/SKILL.md`
+      before writing tests. Resolve its `/codebase-design` reference from
+      `.agent-flow/skills/codebase-design/SKILL.md`. Write failing tests first.
+      Resolve required skills from active profile metadata,
       `.agent-flow/skills/index.json`, changed files, and task scope. Read only
       the touched profile skill union before writing tests. Android/Kotlin/
       Compose/KMP changes require Android profile skills, `android-code-review`,
@@ -217,10 +224,11 @@ phases:
       - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a"
     prompt: |
       Apply code-generation-discipline. Implement the minimum code to pass red
-      tests. Apply `skills/clean-architecture/SKILL.md`. Resolve required
-      skills from active profile metadata, installed skill index, changed files,
-      and task scope. Read only the touched profile skill union before writing
-      code. Android/Chris Banes skills are required only for Android/Kotlin/
+      tests. Apply `.agent-flow/skills/tdd/SKILL.md` and
+      `skills/clean-architecture/SKILL.md`. Resolve required skills from active
+      profile metadata, installed skill index, changed files, and task scope.
+      Read only the touched profile skill union before writing code.
+      Android/Chris Banes skills are required only for Android/Kotlin/
       Compose/KMP changes or React Native `android/` native code. If a required
       local skill is missing, do not complete this artifact; report
       `missing local <group>: <skill>` with the source URL.
@@ -274,11 +282,12 @@ phases:
       default: comment-authoring
     prompt: |
       Apply code-generation-discipline. Refactor only after green. Keep
-      behavior stable, apply `skills/clean-architecture/SKILL.md`, read every
-      required profile skill before changing code, and summarize structural
-      changes. Required skills come from active profile metadata, installed
-      skill index, changed files, and task scope. Android/Chris Banes skills are
-      required only for Android/Kotlin/Compose/KMP changes or React Native
+      behavior stable, apply `.agent-flow/skills/tdd/SKILL.md` and
+      `skills/clean-architecture/SKILL.md`, read every required profile skill
+      before changing code, and summarize structural changes. Required skills
+      come from active profile metadata, installed skill index, changed files,
+      and task scope. Android/Chris Banes skills are required only for
+      Android/Kotlin/Compose/KMP changes or React Native
       `android/` native code. If a required local skill is missing, do not
       complete this artifact; report `missing local <group>: <skill>` with the
       source URL.
