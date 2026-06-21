@@ -12,6 +12,7 @@ const command = process.argv[2];
 const AGENT_FLOW_COMMAND = "agent-flow";
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
 const KIT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const RUNTIME_PYTHON_RELATIVE = path.join(".agent-flow", "runtime", "python");
 const installArgs = process.argv.slice(3);
 const forceManaged = installArgs.includes("--force-managed");
 let cachedFullFeatureWorkflow = null;
@@ -154,6 +155,14 @@ function installProject() {
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "templates"), path.join(agentFlowDir, "templates"), forceManaged, new Set(), true, forceManaged);
   const skillIndex = installProjectSkills(root, agentFlowDir, previousSkillIndex, forceManaged, installSelection);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "scripts"), path.join(agentFlowDir, "scripts"), forceManaged);
+  copyBundledDirIfMissingOrSame(
+    path.join(KIT_ROOT, "src", "agent_flow"),
+    path.join(root, RUNTIME_PYTHON_RELATIVE, "agent_flow"),
+    true,
+    new Set(),
+    true,
+    true,
+  );
   if (!samePath(root, KIT_ROOT)) {
     removeManagedDirIfSame(path.join(KIT_ROOT, "scripts"), path.join(root, "scripts"), forceManaged);
   }
@@ -2655,9 +2664,15 @@ function runGates(args) {
 }
 
 function runPythonCliCommand(subcommand, args) {
+  const root = resolveAgentFlowRoot(process.cwd());
+  const pythonPathEntries = [
+    root ? installedPythonRuntimePath(root) : "",
+    path.join(KIT_ROOT, "src"),
+    process.env.PYTHONPATH,
+  ].filter(Boolean);
   const env = {
     ...process.env,
-    PYTHONPATH: [path.join(KIT_ROOT, "src"), process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
+    PYTHONPATH: [...new Set(pythonPathEntries)].join(path.delimiter),
   };
   const result = safeSpawnSync(
     "python3",
@@ -2673,6 +2688,11 @@ function runPythonCliCommand(subcommand, args) {
     throw result.error;
   }
   process.exit(result.status ?? 1);
+}
+
+function installedPythonRuntimePath(root) {
+  const runtimePath = path.join(root, RUNTIME_PYTHON_RELATIVE);
+  return fs.existsSync(path.join(runtimePath, "agent_flow", "__init__.py")) ? runtimePath : "";
 }
 
 try {

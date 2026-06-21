@@ -14,6 +14,10 @@ gates:
     command: ["node", "scripts/check-context-docs.mjs"]
     required: true
     phase: pre-commit
+  - id: architecture-lint
+    command: ["agent-flow", "architecture-lint", "--profile", "generic"]
+    required: true
+    phase: pre-commit
 review_angles:
   # Mandatory for every project: DDD + Clean Arch + SOLID + CQRS + Google Repo + Vertical Slices.
   # Profile additions append after this baseline.

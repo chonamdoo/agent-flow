@@ -40,6 +40,30 @@ def _node_test_env(**overrides: str) -> dict[str, str]:
     return env
 
 
+def _write_minimal_context_docs(root: Path) -> None:
+    root.joinpath("CONTEXT.md").write_text(
+        "# Context\n\n## Current Vocabulary\n\n- Project\n\n## Future Vocabulary\n\n- Worker\n",
+        encoding="utf-8",
+    )
+    context_root = root / ".Codex" / "rules" / "context"
+    context_root.mkdir(parents=True, exist_ok=True)
+    required = [
+        "domain-glossary-full.md",
+        "research-context.md",
+        "paper-runtime-context.md",
+        "agent-flow-context-map.md",
+        "context-maintenance.md",
+    ]
+    records = []
+    for name in required:
+        rel = f".Codex/rules/context/{name}"
+        (context_root / name).write_text(f"# {name}\n\nMinimal context.\n", encoding="utf-8")
+        records.append({"id": name, "path": rel, "summary": "Minimal context.", "parent": None})
+    tree = root / ".Codex" / "context" / "tree.jsonl"
+    tree.parent.mkdir(parents=True, exist_ok=True)
+    tree.write_text("".join(f"{json.dumps(record)}\n" for record in records), encoding="utf-8")
+
+
 class CliTest(unittest.TestCase):
     def test_init_creates_agent_flow_dirs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1103,6 +1127,64 @@ class CliTest(unittest.TestCase):
             self.assertTrue((project_root / ".agent-flow" / "workflows" / "full-feature.yaml").is_file())
             self.assertTrue((project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "bootstrap" / "CLAUDE.md").is_file())
+            runtime = project_root / ".agent-flow" / "runtime" / "python"
+            self.assertTrue((runtime / "agent_flow" / "core" / "architecture_lint.py").is_file())
+            runtime_env = {**os.environ, "PYTHONPATH": str(runtime)}
+            lint_result = subprocess.run(
+                (
+                    sys.executable,
+                    "-m",
+                    "agent_flow.core.architecture_lint",
+                    "--root",
+                    str(project_root),
+                    "--profile",
+                    "generic",
+                ),
+                cwd=project_root,
+                env=runtime_env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(lint_result.returncode, 0, lint_result.stderr)
+            _write_minimal_context_docs(project_root)
+            context_result = subprocess.run(
+                (node, str(project_root / ".agent-flow" / "scripts" / "check-context-docs.mjs")),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(context_result.returncode, 0, context_result.stderr)
+            run_dir = project_root / ".agent-flow" / "runs" / "runtime-check"
+            gates_result = subprocess.run(
+                (
+                    sys.executable,
+                    "-m",
+                    "agent_flow.cli",
+                    "gates",
+                    "--root",
+                    str(project_root),
+                    "--profile",
+                    "generic",
+                    "--run-dir",
+                    str(run_dir),
+                ),
+                cwd=project_root,
+                env=runtime_env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(gates_result.returncode, 0, gates_result.stderr)
+            self.assertIn("generic:", gates_result.stdout)
+            gate_payload = json.loads((run_dir / "artifacts" / "gate-results.json").read_text(encoding="utf-8"))
+            self.assertTrue(gate_payload["passed"])
+            gate_payload_text = json.dumps(gate_payload)
+            self.assertIn("agent_flow.core.architecture_lint", gate_payload_text)
+            self.assertNotIn("No module named 'agent_flow'", gate_payload_text)
+            architecture_result = next(result for result in gate_payload["results"] if result["gate_id"] == "architecture-lint")
+            self.assertTrue(architecture_result["passed"])
             self.assertTrue(
                 (
                     project_root
@@ -2362,12 +2444,14 @@ class CliTest(unittest.TestCase):
             claude_bootstrap = project_root / ".agent-flow" / "bootstrap" / "CLAUDE.md"
             skill = project_root / ".agent-flow" / "skills" / "full-feature-workflow" / "SKILL.md"
             rules = project_root / ".agent-flow" / "rules" / "workflow-contract.md"
+            runtime_lint = project_root / ".agent-flow" / "runtime" / "python" / "agent_flow" / "core" / "architecture_lint.py"
             workflow.write_text("stale workflow\n", encoding="utf-8")
             prompt.write_text("stale prompt\n", encoding="utf-8")
             bootstrap.write_text("stale bootstrap\n", encoding="utf-8")
             claude_bootstrap.write_text("stale claude bootstrap\n", encoding="utf-8")
             skill.write_text("stale skill\n", encoding="utf-8")
             rules.write_text("stale rules\n", encoding="utf-8")
+            runtime_lint.write_text("stale runtime\n", encoding="utf-8")
 
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
 
@@ -2376,6 +2460,8 @@ class CliTest(unittest.TestCase):
             self.assertNotIn("Gemini sub-agent", workflow.read_text(encoding="utf-8"))
             self.assertIn("multi_review: true", workflow.read_text(encoding="utf-8"))
             self.assertIn("status: ci-failed", prompt.read_text(encoding="utf-8"))
+            self.assertIn("def main(", runtime_lint.read_text(encoding="utf-8"))
+            self.assertNotIn("stale runtime", runtime_lint.read_text(encoding="utf-8"))
             self.assertIn(
                 "Default reviewers are active-host sub-agents",
                 (project_root / ".agent-flow" / "prompts" / "multi-review.md").read_text(encoding="utf-8"),
@@ -4874,10 +4960,14 @@ class CliTest(unittest.TestCase):
         self.assertEqual(profile.profile_id, "node")
         self.assertEqual(profile.gates[0].gate_id, "context-lint")
         self.assertEqual(profile.gates[0].command, ("node", "scripts/check-context-docs.mjs"))
+        self.assertEqual(profile.gates[1].gate_id, "architecture-lint")
+        self.assertEqual(profile.gates[1].command, ("agent-flow", "architecture-lint", "--profile", "node"))
         # npm 기반 TypeScript profile은 subprocess argv list로 검증 명령을 보관한다.
         typescript = load_profile("typescript")
-        self.assertEqual(typescript.gates[1].gate_id, "typecheck")
-        self.assertEqual(typescript.gates[1].command, ("npx", "tsc", "--noEmit"))
+        self.assertEqual(typescript.gates[1].gate_id, "architecture-lint")
+        self.assertEqual(typescript.gates[1].command, ("agent-flow", "architecture-lint", "--profile", "typescript"))
+        self.assertEqual(typescript.gates[2].gate_id, "typecheck")
+        self.assertEqual(typescript.gates[2].command, ("npx", "tsc", "--noEmit"))
         nextjs_gates = {gate.gate_id: gate.command for gate in load_profile("nextjs").gates}
         self.assertEqual(nextjs_gates["architecture-lint"], ("agent-flow", "architecture-lint", "--profile", "nextjs"))
         self.assertEqual(nextjs_gates["build"], ("npm", "run", "build"))
@@ -4925,8 +5015,8 @@ class CliTest(unittest.TestCase):
     def test_gates_cli_writes_results_for_run_dir(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            scripts = root / "scripts"
-            scripts.mkdir()
+            scripts = root / ".agent-flow" / "scripts"
+            scripts.mkdir(parents=True)
             (scripts / "check-context-docs.mjs").write_text("process.exit(0);\n", encoding="utf-8")
             run_dir = root / ".agent-flow" / "runs" / "manual"
             output = io.StringIO()
@@ -4945,13 +5035,17 @@ class CliTest(unittest.TestCase):
                     ),
                     0,
                 )
-            self.assertEqual(output.getvalue().strip(), "generic: 1/1 gates passed")
+            self.assertEqual(output.getvalue().strip(), "generic: 2/2 gates passed")
             gate_payload = json.loads((run_dir / "artifacts" / "gate-results.json").read_text(encoding="utf-8"))
             self.assertTrue(gate_payload["passed"])
             self.assertIsInstance(gate_payload["results"], list)
-            self.assertEqual(gate_payload["results"][0]["command"], "node scripts/check-context-docs.mjs")
-            self.assertEqual(gate_payload["results"][0]["argv"], ["node", "scripts/check-context-docs.mjs"])
-            self.assertTrue(gate_payload["results"][0]["required"])
+            results_by_command = {result["command"]: result for result in gate_payload["results"]}
+            self.assertEqual(
+                results_by_command["node .agent-flow/scripts/check-context-docs.mjs"]["argv"],
+                ["node", ".agent-flow/scripts/check-context-docs.mjs"],
+            )
+            self.assertTrue(results_by_command["node .agent-flow/scripts/check-context-docs.mjs"]["required"])
+            self.assertIn("agent_flow.core.architecture_lint", " ".join(results_by_command))
             self.assertTrue((run_dir / "gate-results.json").is_file())
 
     def test_gate_results_allow_optional_failures(self) -> None:
@@ -5012,6 +5106,7 @@ class CliTest(unittest.TestCase):
         from agent_flow.cli import _profile_gate_commands
 
         typescript_ids = [command.gate_id for command in _profile_gate_commands(["typescript"])]
+        self.assertIn("architecture-lint", typescript_ids)
         self.assertLess(typescript_ids.index("build"), typescript_ids.index("typecheck"))
         self.assertLess(typescript_ids.index("typecheck"), typescript_ids.index("lint"))
 
@@ -5050,8 +5145,9 @@ class CliTest(unittest.TestCase):
                 encoding="utf-8",
             )
             worktree = root / ".agent-flow" / "worktrees" / "semantic-architecture-parity"
-            scripts = worktree / "scripts"
+            scripts = kit / "scripts"
             scripts.mkdir(parents=True)
+            worktree.mkdir(parents=True)
             (worktree / ".git").write_text("gitdir: ../../.git/worktrees/semantic-architecture-parity\n", encoding="utf-8")
             (scripts / "check-context-docs.mjs").write_text("process.exit(0);\n", encoding="utf-8")
 
@@ -5104,7 +5200,7 @@ class CliTest(unittest.TestCase):
                     ),
                     0,
                 )
-            self.assertEqual(output.getvalue().strip(), "generic: 1/1 gates passed")
+            self.assertEqual(output.getvalue().strip(), "generic: 2/2 gates passed")
 
             output = io.StringIO()
             captured_lint: dict[str, object] = {}
@@ -5182,10 +5278,16 @@ class CliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             worktree = root / ".agent-flow" / "worktrees" / "semantic-architecture-parity"
-            scripts = worktree / "scripts"
+            scripts = root / ".agent-flow" / "scripts"
             scripts.mkdir(parents=True)
+            worktree.mkdir(parents=True)
             (worktree / ".git").write_text("gitdir: ../../.git/worktrees/semantic-architecture-parity\n", encoding="utf-8")
-            (scripts / "check-context-docs.mjs").write_text("process.exit(0);\n", encoding="utf-8")
+            (scripts / "check-context-docs.mjs").write_text(
+                (Path(__file__).resolve().parents[1] / "scripts" / "check-context-docs.mjs").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            _write_minimal_context_docs(root)
+            run_dir = root / ".agent-flow" / "runs" / "worktree-runtime"
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             result = subprocess.run(
@@ -5199,13 +5301,25 @@ class CliTest(unittest.TestCase):
                     "semantic-architecture-parity",
                     "--profile",
                     "generic",
+                    "--run-dir",
+                    str(run_dir),
                 ),
                 text=True,
                 capture_output=True,
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("generic: 1/1 gates passed", result.stdout)
+            self.assertIn("generic: 2/2 gates passed", result.stdout)
+            gate_payload_text = (run_dir / "artifacts" / "gate-results.json").read_text(encoding="utf-8")
+            self.assertNotIn(str(root), gate_payload_text)
+            context_result = subprocess.run(
+                (node, str(scripts / "check-context-docs.mjs")),
+                cwd=worktree,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(context_result.returncode, 0, context_result.stdout + context_result.stderr)
 
     def test_gates_cli_resolves_relative_run_dir_against_root(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -5213,8 +5327,8 @@ class CliTest(unittest.TestCase):
             cwd = Path(temp_dir) / "caller"
             root.mkdir()
             cwd.mkdir()
-            scripts = root / "scripts"
-            scripts.mkdir()
+            scripts = root / ".agent-flow" / "scripts"
+            scripts.mkdir(parents=True)
             (scripts / "check-context-docs.mjs").write_text("process.exit(0);\n", encoding="utf-8")
             old_cwd = Path.cwd()
             try:
