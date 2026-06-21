@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -11,12 +13,15 @@ import yaml
 class ProfileGate:
     gate_id: str
     command: tuple[str, ...]
+    required: bool = True
 
 
 @dataclass(frozen=True)
 class ProjectProfile:
     profile_id: str
     gates: tuple[ProfileGate, ...]
+    skills: dict[str, Any]
+    architecture: dict[str, Any] | None
 
 
 def detect_profile(root: Path) -> str:
@@ -28,8 +33,19 @@ def detect_profile(root: Path) -> str:
         or (root / "next.config.ts").exists()
     ):
         return "nextjs"
+    if (
+        (root / "Package.swift").exists()
+        or any(root.glob("*.xcodeproj"))
+        or any(root.glob("*.xcworkspace"))
+    ):
+        return "ios"
     if (root / "pyproject.toml").exists() or (root / "requirements.txt").exists():
         return "python"
+    package_path = root / "package.json"
+    if package_path.exists():
+        package_text = package_path.read_text(encoding="utf-8", errors="ignore")
+        if "react-native" in package_text:
+            return "react-native"
     if (
         (root / "build.gradle").exists()
         or (root / "settings.gradle").exists()
@@ -37,8 +53,8 @@ def detect_profile(root: Path) -> str:
         or (root / "settings.gradle.kts").exists()
     ):
         return "android"
-    if (root / "package.json").exists():
-        package_text = (root / "package.json").read_text(encoding="utf-8", errors="ignore")
+    if package_path.exists():
+        package_text = package_path.read_text(encoding="utf-8", errors="ignore")
         if "react-native" in package_text:
             return "react-native"
         if '"next"' in package_text:
@@ -51,8 +67,20 @@ def detect_profile(root: Path) -> str:
     return "generic"
 
 
+def active_profile_ids(root: Path, requested: str = "auto") -> list[str]:
+    if requested != "auto":
+        return _dedupe_profiles(_split_profiles(requested))
+    kit_profiles = _read_kit_profiles(root)
+    if kit_profiles:
+        return kit_profiles
+    kit_profile = _read_kit_profile(root)
+    if kit_profile:
+        return [kit_profile]
+    return [detect_profile(root)]
+
+
 def load_profile(profile_id: str) -> ProjectProfile:
-    payload = yaml.safe_load(_read_profile_text(profile_id))
+    payload = load_profile_payload(profile_id)
     if not isinstance(payload, dict):
         raise ValueError(f"profile must be a mapping: {profile_id}")
     if payload.get("id") != profile_id:
@@ -63,7 +91,16 @@ def load_profile(profile_id: str) -> ProjectProfile:
     return ProjectProfile(
         profile_id=profile_id,
         gates=tuple(_gate_from_payload(item, profile_id=profile_id) for item in gates),
+        skills=payload.get("skills") if isinstance(payload.get("skills"), dict) else {},
+        architecture=payload.get("architecture") if isinstance(payload.get("architecture"), dict) else None,
     )
+
+
+def load_profile_payload(profile_id: str) -> dict[str, Any]:
+    payload = yaml.safe_load(_read_profile_text(profile_id))
+    if not isinstance(payload, dict):
+        raise ValueError(f"profile must be a mapping: {profile_id}")
+    return payload
 
 
 def _gate_from_payload(item: object, *, profile_id: str) -> ProfileGate:
@@ -79,7 +116,12 @@ def _gate_from_payload(item: object, *, profile_id: str) -> ProfileGate:
         or not all(isinstance(part, str) and part for part in command)
     ):
         raise ValueError(f"profile gate command must be a non-empty string list: {profile_id}:{gate_id}")
-    return ProfileGate(gate_id=gate_id, command=tuple(command))
+    required = item.get("required")
+    return ProfileGate(
+        gate_id=gate_id,
+        command=tuple(command),
+        required=required if isinstance(required, bool) else True,
+    )
 
 
 def _read_profile_text(profile_id: str) -> str:
@@ -87,4 +129,49 @@ def _read_profile_text(profile_id: str) -> str:
     if package_path.is_file():
         return package_path.read_text(encoding="utf-8")
     repo_path = Path(__file__).resolve().parents[3] / "profiles" / f"{profile_id}.yaml"
+    if not repo_path.is_file():
+        raise ValueError(f"unknown profile: {profile_id}")
     return repo_path.read_text(encoding="utf-8")
+
+
+def _read_kit_profiles(root: Path) -> list[str]:
+    data = _read_kit_json(root)
+    profiles = data.get("profiles")
+    if isinstance(profiles, list):
+        return _dedupe_profiles(profile for profile in profiles if isinstance(profile, str))
+    return []
+
+
+def _read_kit_profile(root: Path) -> str:
+    data = _read_kit_json(root)
+    profile = data.get("profile")
+    return profile if isinstance(profile, str) and profile else ""
+
+
+def _read_kit_json(root: Path) -> dict[str, Any]:
+    path = root / ".agent-flow" / "kit.json"
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _split_profiles(value: str) -> list[str]:
+    return [profile.strip() for profile in value.split(",") if profile.strip()]
+
+
+def _dedupe_profiles(values: object) -> list[str]:
+    profiles: list[str] = []
+    seen: set[str] = set()
+    try:
+        iterator = iter(values)  # type: ignore[arg-type]
+    except TypeError:
+        return profiles
+    for value in iterator:
+        if isinstance(value, str) and value and value not in seen:
+            profiles.append(value)
+            seen.add(value)
+    return profiles

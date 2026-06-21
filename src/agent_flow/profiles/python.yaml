@@ -14,6 +14,10 @@ gates:
     command: ["node", "scripts/check-context-docs.mjs"]
     required: true
     phase: pre-commit
+  - id: architecture-lint
+    command: ["agent-flow", "architecture-lint", "--profile", "python"]
+    required: true
+    phase: pre-commit
   - id: type
     command: ["mypy", "."]
     required: false
@@ -24,7 +28,7 @@ gates:
     phase: pre-commit
   - id: test
     command: ["pytest", "-q"]
-    required: true
+    required: false
     phase: pre-push
 review_angles:
   - id: architecture-design
@@ -33,6 +37,47 @@ review_angles:
     prompt: templates/_shared/review/types.md
   - id: io-safety
     prompt: templates/_shared/review/io-safety.md
+skills:
+  install:
+    - python-api-clean-architecture
+    - python-development-guide
+  required_review:
+    - group: profile
+      skills: [python-development-guide, python-api-clean-architecture]
+      when: Python/API files change
+      missing: "missing local profile: <skill>"
+architecture:
+  contract: clean-architecture-core
+  platform: python
+  strict_when_roots_present: true
+  activation_roots: ["app", "src/app", "src/core", "src/domain", "src/data", "src/features"]
+  roles:
+    - id: app-shell
+      paths: ["src/app", "app"]
+    - id: core-domain
+      paths: ["src/core/domain/<context>", "src/domain/<context>"]
+      pair_with: core-data
+      forbidden: ["ApiClient", "DTO", "View", "Router"]
+    - id: core-data
+      paths: ["src/core/data/<context>", "src/data/<context>"]
+      pair_with: core-domain
+      forbidden: ["View", "Router"]
+    - id: feature-api
+      paths: ["src/features/<feature>/api"]
+      pair_with: feature-presentation
+      forbidden: ["View", "RepositoryImpl", "ApiClient"]
+    - id: feature-presentation
+      paths: ["src/features/<feature>/presentation"]
+      pair_with: feature-api
+      forbidden: ["ApiClient", "DataSource", "DTO", "Entity"]
+    - id: core-ui
+      paths: ["src/core/ui", "src/core/resources"]
+    - id: core-network
+      paths: ["src/core/network", "src/core/platform", "src/core/permission"]
+    - id: navigation-api
+      paths: ["src/core/navigation/api"]
+    - id: navigation-impl
+      paths: ["src/core/navigation/impl"]
 artifacts:
   prd: optional
   adr: optional

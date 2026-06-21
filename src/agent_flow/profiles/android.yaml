@@ -14,6 +14,10 @@ gates:
     command: ["node", "scripts/check-context-docs.mjs"]
     required: true
     phase: pre-commit
+  - id: architecture-lint
+    command: ["agent-flow", "architecture-lint", "--profile", "android"]
+    required: true
+    phase: pre-commit
   - id: build
     command: ["./gradlew", "assembleDevDebug"]
     required: true
@@ -35,6 +39,94 @@ review_angles:
     prompt: templates/_shared/review/compose-stability.md
   - id: test-edge
     prompt: templates/_shared/review/test-edge.md
+skills:
+  install:
+    - android-appshell-error-handling
+    - android-clean-architecture
+    - android-clean-presentation-architecture
+    - android-code-review
+    - android-guides
+  required_review:
+    - group: profile
+      skills: [android-code-review, android-clean-architecture]
+      when: Android/Kotlin/Compose/KMP files or Android profile architecture roles change
+      missing: "missing local profile: <skill>"
+    - group: android_skills
+      skills_from: android_skills.review
+      when: Android review scope matches an android_skills.review entry
+      missing: "missing local android_skills: <skill>"
+    - group: chrisbanes_skills
+      skills_from: chrisbanes_skills.review
+      when: Compose/Kotlin/KMP review scope matches a chrisbanes_skills.review entry
+      missing: "missing local chrisbanes_skills: <skill>"
+architecture:
+  contract: clean-architecture-core
+  platform: android
+  roles:
+    - id: app-shell
+      paths: ["app", "android/app"]
+      modules: [":app"]
+      forbidden: ["ApiService", "RemoteDataSource", "Dto", "Entity"]
+    - id: core-domain
+      paths: ["core/domain/<context>"]
+      modules: [":core:domain:<context>"]
+      package_suffix: "core.domain.<context>"
+      pair_with: core-data
+      forbidden: ["ApiService", "RemoteDataSource", "Dto", "@Composable", "ViewModel"]
+    - id: core-data
+      paths: ["core/data/<context>"]
+      modules: [":core:data:<context>"]
+      package_suffix: "core.data.<context>"
+      pair_with: core-domain
+      forbidden: ["@Composable", "ViewModel"]
+    - id: feature-api
+      paths: ["feature/<feature>/api"]
+      modules: [":feature:<feature>:api"]
+      package_suffix: "feature.<feature>.api"
+      pair_with: feature-presentation
+      forbidden: ["Screen", "ViewModel", "RepositoryImpl", "RemoteDataSource", "ApiService"]
+    - id: feature-presentation
+      paths: ["feature/<feature>/presentation"]
+      modules: [":feature:<feature>:presentation"]
+      package_suffix: "feature.<feature>.presentation"
+      pair_with: feature-api
+      forbidden: ["ApiService", "RemoteDataSource", "Dto", "Entity"]
+    - id: core-design-system
+      paths: ["core/designsystem"]
+      modules: [":core:designsystem"]
+      package_suffix: "core.designsystem"
+    - id: core-ui
+      paths: ["core/ui"]
+      modules: [":core:ui"]
+      package_suffix: "core.ui"
+    - id: core-resources
+      paths: ["core/resources"]
+      modules: [":core:resources"]
+      package_suffix: "core.resources"
+    - id: core-network
+      paths: ["core/network"]
+      modules: [":core:network"]
+      package_suffix: "core.network"
+    - id: core-platform
+      paths: ["core/platform"]
+      modules: [":core:platform"]
+      package_suffix: "core.platform"
+    - id: core-platform-adapter
+      paths: ["core/platform/<adapter>"]
+      modules: [":core:platform:<adapter>"]
+      package_suffix: "core.platform.<adapter>"
+    - id: core-permission
+      paths: ["core/permission"]
+      modules: [":core:permission"]
+      package_suffix: "core.permission"
+    - id: navigation-api
+      paths: ["core/navigation/api"]
+      modules: [":core:navigation:api"]
+      package_suffix: "core.navigation.api"
+    - id: navigation-impl
+      paths: ["core/navigation/impl"]
+      modules: [":core:navigation:impl"]
+      package_suffix: "core.navigation.impl"
 android_skills:
   source: https://github.com/android/skills
   install_policy: never

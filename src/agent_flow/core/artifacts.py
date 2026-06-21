@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -28,14 +27,39 @@ def write_prompt(*, root: Path, run_dir: Path, stage_id: str, content: str) -> P
 
 
 def write_gate_results(*, run_dir: Path, results: list[GateResult]) -> Path:
-    path = run_dir / "gate-results.json"
+    passed = all(result.passed or not result.required for result in results)
+    serialized_results = [_gate_result_payload(result) for result in results]
+    payload = {
+        "passed": passed,
+        "status": "green" if passed else "request-changes",
+        "results": serialized_results,
+    }
+    path = run_dir / "artifacts" / "gate-results.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        f"{json.dumps([asdict(result) for result in results], indent=2, sort_keys=True)}\n",
+        f"{json.dumps(payload, indent=2, sort_keys=True)}\n",
+        encoding="utf-8",
+    )
+    legacy_path = run_dir / "gate-results.json"
+    legacy_path.write_text(
+        f"{json.dumps(serialized_results, indent=2, sort_keys=True)}\n",
         encoding="utf-8",
     )
     write_run_report(run_dir)
     return path
+
+
+def _gate_result_payload(result: GateResult) -> dict[str, object]:
+    return {
+        "gate_id": result.gate_id,
+        "command": " ".join(result.command),
+        "argv": list(result.command),
+        "passed": result.passed,
+        "required": result.required,
+        "exit_code": result.exit_code,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+    }
 
 
 def write_stage_result(

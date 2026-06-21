@@ -13,6 +13,7 @@ import crypto from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { SKILL_DEPENDENCIES, mergeInstallSelectionWithPrevious, resolveInstallSelection } from "../lib/skill-selection.mjs";
 
 const KIT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const AGENT_FLOW_COMMAND = "agent-flow";
@@ -165,9 +166,23 @@ function detectProfile() {
       fs.existsSync(path.join(PROJECT, "next.config.ts"))) {
     return "nextjs";
   }
+  if (
+      fs.existsSync(path.join(PROJECT, "Package.swift")) ||
+      hasChildWithSuffix(PROJECT, ".xcodeproj") ||
+      hasChildWithSuffix(PROJECT, ".xcworkspace")
+  ) {
+    return "ios";
+  }
   if (fs.existsSync(path.join(PROJECT, "pyproject.toml")) ||
       fs.existsSync(path.join(PROJECT, "requirements.txt"))) {
     return "python";
+  }
+  const earlyPackagePath = path.join(PROJECT, "package.json");
+  if (fs.existsSync(earlyPackagePath)) {
+    const packageText = fs.readFileSync(earlyPackagePath, "utf8");
+    if (packageText.includes("react-native")) {
+      return "react-native";
+    }
   }
   if (
       fs.existsSync(path.join(PROJECT, "build.gradle")) ||
@@ -194,6 +209,13 @@ function detectProfile() {
   return "generic";
 }
 
+function hasChildWithSuffix(rootDir, suffix) {
+  if (!fs.existsSync(rootDir)) {
+    return false;
+  }
+  return fs.readdirSync(rootDir).some((name) => name.endsWith(suffix));
+}
+
 function copyDir(
   src,
   dest,
@@ -202,6 +224,7 @@ function copyDir(
   force = false,
   pruneExtraneous = false,
   preservedExtraneousRootNames = new Set(),
+  allowedRootDirs = null,
 ) {
   // Recursive copy without overwriting user-modified files. If a file exists
   // at dest with different content, leave it (user customization wins) and
@@ -215,6 +238,12 @@ function copyDir(
     const srcPath = path.join(src, entry.name);
     const destPath = path.join(dest, entry.name);
     if (entry.isDirectory()) {
+      if (isRoot && allowedRootDirs && !allowedRootDirs.has(entry.name)) {
+        const r = removeDirIfSame(srcPath, destPath, force);
+        written += r.written;
+        skipped += r.skipped;
+        continue;
+      }
       if (isRoot && excludedRootDirs.has(entry.name)) {
         const r = removeDirIfSame(srcPath, destPath, force);
         written += r.written;
@@ -229,6 +258,7 @@ function copyDir(
         force,
         pruneExtraneous,
         preservedExtraneousRootNames,
+        null,
       );
       written += r.written;
       skipped += r.skipped;
@@ -728,9 +758,9 @@ function copySkillDir(src, dest) {
   return `copied:${r.written}:${r.skipped}`;
 }
 
-function installProjectSkills(forceManaged = false) {
+function installProjectSkills(forceManaged = false, installSelection = null) {
   const previousIndex = readJsonIfExists(path.join(AF_DIR, "skills", "index.json"));
-  const selected = selectProjectSkills();
+  const selected = selectProjectSkills(installSelection);
   const links = [];
   for (const skill of selected.skills) {
     // bundled skill 중 host 디렉토리 link 대상은 BUNDLED_HOST_SKILL_NAMES뿐이다.
@@ -748,7 +778,7 @@ function installProjectSkills(forceManaged = false) {
   return index;
 }
 
-function selectProjectSkills() {
+function selectProjectSkills(installSelection = null) {
   const discovered = [
     ...discoverSkills(path.join(AF_DIR, "local-skills"), "local", PROFILE_MANAGED_HOST_ONLY_SKILLS),
     ...discoverProjectSkills(),
@@ -761,7 +791,11 @@ function selectProjectSkills() {
     if (!current || skill.priority < current.priority) byName.set(skill.name, skill);
     warnings.push(...skill.warnings);
   }
-  const skills = [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+  const allowed = installSelection?.skillNames || null;
+  const skills = [...byName.values()]
+    .filter((skill) => !allowed || allowed.has(skill.name))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  warnings.push(...validateSkillDependencies(skills));
   const conflicts = skills.map((skill) => ({
     name: skill.name,
     selected: skill.path,
@@ -772,10 +806,28 @@ function selectProjectSkills() {
   })).filter((conflict) => conflict.ignored.length > 0);
   return {
     version: 1,
+    selection: {
+      mode: allowed ? "filtered" : "all",
+      profiles: installSelection?.profiles || [],
+      explicit_skills: installSelection?.explicitSkills || [],
+    },
     skills: skills.map(({ priority, warnings: _warnings, ...skill }) => skill),
     conflicts,
     warnings,
   };
+}
+
+function validateSkillDependencies(skills) {
+  const names = new Set(skills.map((skill) => skill.name));
+  const warnings = [];
+  for (const skill of skills) {
+    for (const required of skill.requires || []) {
+      if (!names.has(required)) {
+        warnings.push(`${skill.name}: missing required skill ${required}`);
+      }
+    }
+  }
+  return warnings;
 }
 
 function discoverProjectSkills() {
@@ -799,13 +851,27 @@ function discoverSkills(baseDir, source, ignoredNames = new Set(), allowedNames 
     if (ignoredNames.has(metadata.name)) continue;
     const relativePath = path.relative(PROJECT, skillPath);
     skills.push({
+      id: metadata.id,
       name: metadata.name,
+      title: metadata.title,
       path: relativePath,
       source,
       hosts: metadata.hosts,
+      requires: metadata.requires,
+      dependencies: metadata.dependencies,
+      optionalDependencies: metadata.optionalDependencies,
+      platforms: metadata.platforms,
+      stacks: metadata.stacks,
+      references: metadata.references,
+      hostSupport: metadata.hostSupport,
+      workflowPhases: metadata.workflowPhases,
+      reviewAngles: metadata.reviewAngles,
+      installGroup: metadata.installGroup,
+      excludes: metadata.excludes,
       tags: metadata.tags,
       description: metadata.description,
       trigger: metadata.trigger,
+      triggers: metadata.triggers,
       hash: crypto.createHash("sha256").update(text).digest("hex"),
       priority,
       warnings: metadata.warnings.map((message) => `${relativePath}: ${message}`),
@@ -832,13 +898,39 @@ function parseSkillMetadata(text, fallbackName) {
   const body = text.replace(/^---\n[\s\S]*?\n---\n?/, "");
   const useWhen = body.split(/\r?\n/).find((line) => /^\s*use when\b/i.test(line));
   return {
+    id: String(metadata.id || name),
     name,
+    title: String(metadata.title || ""),
     description: String(metadata.description || useWhen || ""),
     hosts: hostValues.length > 0 ? [...new Set(hosts)] : ["claude", "codex"],
     tags: Array.isArray(metadata.tags) ? metadata.tags.map(String) : [],
     trigger: String(metadata.trigger || metadata.description || useWhen || ""),
+    triggers: arrayValue(metadata.triggers),
+    platforms: arrayValue(metadata.platforms),
+    stacks: arrayValue(metadata.stacks),
+    dependencies: uniqueStrings([...arrayValue(metadata.dependencies), ...arrayValue(metadata.requires)]),
+    requires: uniqueStrings([...skillRequires(name), ...arrayValue(metadata.dependencies), ...arrayValue(metadata.requires)]),
+    optionalDependencies: arrayValue(metadata.optionalDependencies),
+    references: arrayValue(metadata.references),
+    hostSupport: arrayValue(metadata.hostSupport),
+    workflowPhases: arrayValue(metadata.workflowPhases),
+    reviewAngles: arrayValue(metadata.reviewAngles),
+    installGroup: String(metadata.installGroup || ""),
+    excludes: arrayValue(metadata.excludes || metadata.conflicts),
     warnings,
   };
+}
+
+function skillRequires(name) {
+  return SKILL_DEPENDENCIES.get(name) || [];
+}
+
+function arrayValue(value) {
+  return Array.isArray(value) ? value.map(String) : [];
+}
+
+function uniqueStrings(values) {
+  return [...new Set(values.map(String).filter(Boolean))];
 }
 
 function safeSkillName(value) {
@@ -1006,7 +1098,7 @@ function installManagedWorkflowSkills() {
 }
 
 function fullFeatureSkillMarkdown() {
-  return `---\nname: full-feature-workflow\ndescription: Use this skill for feature work in this project.\n---\n\n# Full Feature Workflow\n\nUse this skill for feature work in this project.\n\nAlways drive progress through the runner output. Run \`${AGENT_FLOW_COMMAND} status\`, then execute the printed \`next_command\` exactly.\n\nDo not skip phases. If existing docs satisfy a phase, write the required artifact and reference those docs. If a gate, review, PR comment, or PR check fails, complete the matching fix phase and push again before merge/handoff.\n\nApply \`code-generation-discipline\` during code and review phases. Read every matching language/framework skill before writing or judging code.\n`;
+  return `---\nname: full-feature-workflow\ndescription: Use this skill for feature work in this project.\n---\n\n# Full Feature Workflow\n\nUse this skill for feature work in this project.\n\nAlways drive progress through the runner output. Run \`${AGENT_FLOW_COMMAND} status\`, then execute the printed \`next_command\` exactly.\n\nDo not skip phases. If existing docs satisfy a phase, write the required artifact and reference those docs. If a gate, review, PR comment, or PR check fails, complete the matching fix phase and push again before merge/handoff.\n\nApply \`code-generation-discipline\` during code and review phases. Resolve required skills from active profile metadata, installed skill index, changed files, and task scope before writing or judging code.\n`;
 }
 
 function productBriefSkillMarkdown() {
@@ -1022,7 +1114,7 @@ function dddCleanArchitectureSkillMarkdown() {
 }
 
 function architectureReviewerSkillMarkdown() {
-  return `---\nname: architecture-reviewer\ndescription: Use during the full-feature architecture-review phase.\n---\n\n# Architecture Reviewer\n\nUse during the full-feature architecture-review phase.\n\nReview implemented code against domain decisions and DDD/Clean Architecture.\n\nArtifact template:\n\n# Architecture Review\n\nverdict: approve | request-changes\n\n## Domain Alignment\n\n## Layer Violations\n\n## Repository Boundary Issues\n\n## Dependency Direction Issues\n\n## Required Refactors\n\n## Approved Exceptions\n`;
+  return `---\nname: architecture-reviewer\ndescription: Use during the full-feature architecture-review phase.\n---\n\n# Architecture Reviewer\n\nUse during the full-feature architecture-review phase.\n\nReview implemented code against domain decisions and DDD/Clean Architecture. Run two independent active-host reviewer sub-agents before approve. Each reviewer section must include \`reviewer-source: sub-agent\`; optional cross-host reviewers are extra evidence and do not replace active-host reviewers.\n\nArtifact template:\n\n# Architecture Review\n\n## Reviewer 1\nreviewer-source: sub-agent\nverdict: approve | request-changes\n\n## Findings\n\n## Domain Alignment\n\n## Layer Violations\n\n## Repository Boundary Issues\n\n## Dependency Direction Issues\n\n## Required Refactors\n\n## Approved Exceptions\n\n## Reviewer 2\nreviewer-source: sub-agent\nverdict: approve | request-changes\n\n## Findings\n\n## Overall\nverdict: approve | request-changes\n\n## Completion Gate\nskills_checked: true\nprofile-skill-selection: applied\nactive-profiles: <profile list>\nchanged-file-skill-resolution: applied\nrequired-profile-skills: checked\nmissing-required-profile-skills: none|<list>\narchitecture-contract-check: pass|fail|n/a\ncodex-claude-parity-check: pass|fail\nhook-parity-check: pass|fail\nclean-architecture: applied\nproject-local-skills: checked|n/a\nproject-local-skills-used: <skill list or n/a>\ndependency-rule: pass|fail\nusecase-boundary: pass|fail|n/a\nusecase-calls-usecase: pass|fail\nrepository-boundary: pass|fail\ncache-boundary: pass|fail|n/a\nmemory-disk-cache-separated: pass|fail|n/a\nmapping-boundary: pass|fail|n/a\ndto-entity-domain-ui-separated: pass|fail\nsolid-boundary-check: pass|fail\npresentation-skill: android|react|react-native|ios|n/a\npresentation-state-review: pass|fail|n/a\nui-state-modeling: explicit|n/a\npresentation-mapping-boundary: domain-to-uimodel|n/a\ndi-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a\n`;
 }
 
 function pushWatchSkillMarkdown() {
@@ -1069,7 +1161,8 @@ function runKitInstall() {
   // 여기서 먼저 실행하지 않으면 assertInstalled가 요구하는 파일이 빠진다.
   // 단, kit.mjs는 yaml 가능한 python이 필요하므로 없는 환경에서는 경고 후 계속한다.
   const kitCli = path.join(path.dirname(fileURLToPath(import.meta.url)), "agent-flow-kit.mjs");
-  const args = [kitCli, "install", ...(FORCE_MANAGED ? ["--force-managed"] : [])];
+  const forwarded = INSTALL_ARGS.filter((arg) => arg !== "install");
+  const args = [kitCli, "install", ...forwarded];
   const result = spawnSync(process.execPath, args, { cwd: PROJECT, encoding: "utf8" });
   if (result.status !== 0) {
     const detail = (result.stderr || result.stdout || String(result.error || "unknown error")).trim().split("\n")[0];
@@ -1099,6 +1192,9 @@ function install() {
   ensureDir(path.join(AF_DIR, "local-skills"));
 
   const profile = detectProfile();
+  const previousSkillIndex = readJsonIfExists(path.join(AF_DIR, "skills", "index.json"));
+  let installSelection = resolveInstallSelection({ args: INSTALL_ARGS, detectedProfile: profile, kitRoot: KIT_ROOT, projectRoot: PROJECT });
+  installSelection = mergeInstallSelectionWithPrevious(installSelection, previousSkillIndex, KIT_ROOT, PROJECT);
 
   bootstrapMarkdown("CLAUDE.md");
   bootstrapMarkdown("AGENTS.md");
@@ -1139,9 +1235,10 @@ function install() {
     FORCE_MANAGED,
     FORCE_MANAGED,
     new Set(["index.json", ...GENERATED_PROJECT_SKILL_NAMES]),
+    installSelection.copyRootNames,
   );
   installManagedWorkflowSkills();
-  const skillIndex = installProjectSkills(FORCE_MANAGED);
+  const skillIndex = installProjectSkills(FORCE_MANAGED, installSelection);
   const workflowsCopied = copyDir(
     path.join(KIT_ROOT, "workflows"),
     path.join(AF_DIR, "workflows"),
@@ -1235,6 +1332,8 @@ function install() {
     version: "0.1.0",
     install_scope: "project",
     profile,
+    profiles: installSelection.profiles,
+    selected_skills: installSelection.skillNames ? [...installSelection.skillNames].sort() : "all",
     project_root: PROJECT,
     installed_at: new Date().toISOString(),
     skills_copied: skillsCopied,

@@ -37,6 +37,14 @@ review_angles:
     prompt: templates/_shared/review/types.md
   - id: io-safety
     prompt: templates/_shared/review/io-safety.md
+skills:
+  install:
+    - typescript-development-guide
+  required_review:
+    - group: profile
+      skills: [typescript-development-guide]
+      when: TypeScript files change
+      missing: "missing local profile: <skill>"
 artifacts:
   prd: optional
   adr: optional

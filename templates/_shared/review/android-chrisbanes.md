@@ -10,5 +10,6 @@ other host paths. If a required local skill is missing, request installation fro
 the profile source URL. Current host paths are Codex
 `~/.codex/skills/{skill}/SKILL.md` and Claude
 `~/.claude/skills/{skill}/SKILL.md`. Cite the skill paths used in Calibration.
-End review artifacts with `android-local-skills: checked|n/a` and
-`android-local-skills-used: <skill list or n/a>` in `## Completion Gate`.
+End review artifacts with `android-local-skills: checked`,
+`android-local-skills-used: <skill list>`, `chrisbanes-skills: checked|n/a`,
+and `chrisbanes-skills-used: <skill list or n/a>` in `## Completion Gate`.

@@ -14,6 +14,10 @@ gates:
     command: ["node", "scripts/check-context-docs.mjs"]
     required: true
     phase: pre-commit
+  - id: architecture-lint
+    command: ["agent-flow", "architecture-lint", "--profile", "react-native"]
+    required: true
+    phase: pre-commit
   - id: lint
     command: ["npm", "run", "lint"]
     required: false
@@ -37,6 +41,55 @@ review_angles:
     prompt: templates/_shared/review/render-stability.md
   - id: native-bridge
     prompt: templates/_shared/review/native-bridge.md
+skills:
+  install:
+    - react-native-app-shell-error-handling
+    - react-native-clean-architecture
+    - react-native-clean-presentation-architecture
+    - react-native-development-guide
+    - react-native-operational-adoption
+    - typescript-development-guide
+  required_review:
+    - group: profile
+      skills: [react-native-development-guide, react-native-clean-architecture]
+      when: React Native/Expo files change
+      missing: "missing local profile: <skill>"
+    - group: android-native-escalation
+      profiles: [android]
+      when: React Native android/ native code changes
+      missing: "missing local android_skills: <skill>"
+architecture:
+  contract: clean-architecture-core
+  platform: react-native
+  roles:
+    - id: app-shell
+      paths: ["src/app", "app"]
+    - id: android-native
+      paths: ["android"]
+    - id: core-domain
+      paths: ["src/core/domain/<context>"]
+      pair_with: core-data
+      forbidden: ["ApiClient", "Dto", "View", "Screen"]
+    - id: core-data
+      paths: ["src/core/data/<context>"]
+      pair_with: core-domain
+      forbidden: ["View", "Screen"]
+    - id: feature-api
+      paths: ["src/features/<feature>/api"]
+      pair_with: feature-presentation
+      forbidden: ["Screen", "ViewModel", "RepositoryImpl", "ApiClient"]
+    - id: feature-presentation
+      paths: ["src/features/<feature>/presentation"]
+      pair_with: feature-api
+      forbidden: ["ApiClient", "DataSource", "Dto", "Entity"]
+    - id: core-ui
+      paths: ["src/core/ui", "src/core/design-system", "src/core/resources"]
+    - id: core-network
+      paths: ["src/core/network", "src/core/platform", "src/core/permission"]
+    - id: navigation-api
+      paths: ["src/core/navigation/api"]
+    - id: navigation-impl
+      paths: ["src/core/navigation/impl"]
 artifacts:
   prd: optional
   adr: optional

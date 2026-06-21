@@ -10,17 +10,23 @@
 
 ## 확인 항목
 
-- 요청한 동작이 실제로 구현됐는가.
+- correctness: 요청한 동작이 실제로 구현됐는가.
+- readability: 기존 흐름과 이름이 읽기 쉽고 유지보수 가능한가.
+- architecture: profile의 architecture contract와 Clean Architecture 경계를 지키는가.
+- security: 권한, 비밀, 입력값, 외부 호출 보안 위험이 없는가.
+- performance: 불필요한 반복, 렌더링, I/O, 빌드 비용 회귀가 없는가.
 - 기존 동작이 깨질 위험이 있는가.
 - 테스트가 변경 위험을 충분히 막는가.
 - 빌드, 타입체크, 린트 실행 조건이 명확한가.
 - 새로 추가하거나 수정한 코드 주석이 모두 한국어인가.
-- Python 변경은 `python-development-guide`, TypeScript/TSX 변경은 `typescript-development-guide`를 보조 체크리스트로 확인했는가.
-- React Web/Next.js/TSX 컴포넌트 변경은 `react-development-guide`, React Native/Expo/RN 앱 변경은 `react-native-development-guide`를 보조 체크리스트로 확인했는가.
-- presentation 변경은 플랫폼별 `android-clean-presentation-architecture`, `react-clean-presentation-architecture`, `react-native-clean-presentation-architecture`, `ios-clean-presentation-architecture` 중 해당 skill을 확인했는가.
-- Android/Kotlin/Compose/KMP 변경은 `android-code-review`, Android profile의 `android_skills.review[*].skill`, `chrisbanes_skills.review[*].skill` 로컬 설치본을 현재 host 경로에서만 읽었는가. 로컬 설치본은 `.agent-flow/local-skills/<skill>/SKILL.md`, `.agent-flow/skills/<skill>/SKILL.md`, 또는 현재 host의 local skill 경로에 있는 실제 `SKILL.md`다.
-- 필요한 Android/Chris Banes skill이 로컬에 없으면 `missing local android_skills: <skill>` 또는 `missing local chrisbanes_skills: <skill>`와 source URL을 기록하고 `request-changes`로 판단했는가.
-- Android/Kotlin/Compose/KMP 변경인데 `android-local-skills-used`가 비어 있거나 `n/a`이고 일반 Compose/Kotlin 관례만 적용했다면 `request-changes`로 판단했는가.
+- active profile, `.agent-flow/skills/index.json`, changed files, task scope를 보고 필요한 profile skill만 결정했는가.
+- 선택되지 않았고 변경 파일에도 관련 없는 platform skill 누락을 무시했는가.
+- Python 변경은 Python profile의 required skill group만 확인했는가.
+- TypeScript/React/Next 변경은 React/Next/TypeScript profile의 required skill group만 확인했는가.
+- React Native/Expo 변경은 React Native profile의 required skill group만 확인했는가. RN의 `android/` native code를 직접 변경한 경우에만 Android profile mapping과 Android 관련 skill을 추가 적용했는가.
+- iOS/Swift 변경은 iOS profile의 required skill group만 확인했는가.
+- Android/Kotlin/Compose/KMP 변경은 `android-code-review`, Android profile의 `android_skills.review[*].skill`, 필요한 `chrisbanes_skills.review[*].skill` 로컬 설치본을 현재 host 경로에서만 읽었는가.
+- 필요한 profile/local skill이 없으면 `missing local <skill-group>: <skill>`와 source URL을 기록하고 `request-changes`로 판단했는가.
 - 설계/구현 변경이면 `skills/clean-architecture/SKILL.md`를 적용했는가.
 - Clean Architecture must-fix 조건이 있으면 `request-changes`로 판단했는가.
 - agent-flow phase artifact와 completion marker가 요구사항을 만족하는가.
@@ -48,6 +54,26 @@ verdict: approve | request-changes
 
 ## Completion Gate
 skills_checked: true
+profile-skill-selection: applied
+active-profiles: <profile list>
+changed-file-skill-resolution: applied
+required-profile-skills: checked
+missing-required-profile-skills: none|<list>
+architecture-contract-check: pass|fail|n/a
+codex-claude-parity-check: pass|fail
+hook-parity-check: pass|fail
+clean-architecture: applied
+project-local-skills: checked|n/a
+project-local-skills-used: <skill list or n/a>
+dependency-rule: pass|fail
+usecase-boundary: pass|fail|n/a
+usecase-calls-usecase: pass|fail
+repository-boundary: pass|fail
+cache-boundary: pass|fail|n/a
+memory-disk-cache-separated: pass|fail|n/a
+mapping-boundary: pass|fail|n/a
+dto-entity-domain-ui-separated: pass|fail
+solid-boundary-check: pass|fail
 clean-architecture-review: applied
 presentation-skill: android|react|react-native|ios|n/a
 presentation-state-based-development: applied|n/a
@@ -60,8 +86,15 @@ usecase-composition-check: applied
 cache-boundary-check: applied
 mapping-boundary-check: applied
 solid-clean-architecture-check: applied
-android-local-skills: checked|n/a
-android-local-skills-used: <skill list or n/a>
+```
+
+Android profile이 active이고 Android/Kotlin/Compose/KMP 변경이 있을 때만 아래 marker를 추가한다:
+
+```markdown
+android-local-skills: checked
+android-local-skills-used: <skill list>
+chrisbanes-skills: checked|n/a
+chrisbanes-skills-used: <skill list or n/a>
 ```
 
 `request-changes`일 때는 반드시 파일 경로와 라인 번호를 포함한다.

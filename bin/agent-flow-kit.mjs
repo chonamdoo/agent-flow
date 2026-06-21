@@ -6,6 +6,7 @@ import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { SKILL_DEPENDENCIES, mergeInstallSelectionWithPrevious, resolveInstallSelection } from "../lib/skill-selection.mjs";
 
 const command = process.argv[2];
 const AGENT_FLOW_COMMAND = "agent-flow";
@@ -66,15 +67,6 @@ const GENERATED_PROJECT_SKILL_NAMES = new Set([
   "product-brief",
   "push-watch",
 ]);
-const SKILL_DEPENDENCIES = new Map([
-  ["clean-architecture", ["clean-architecture-core"]],
-  ["android-clean-architecture", ["clean-architecture-core"]],
-  ["ios-clean-architecture", ["clean-architecture-core"]],
-  ["react-clean-architecture", ["clean-architecture-core"]],
-  ["react-native-clean-architecture", ["clean-architecture-core"]],
-  ["python-api-clean-architecture", ["clean-architecture-core"]],
-]);
-
 function installProject() {
   const requestedRoot = process.cwd();
   const managedWorktreeRoot = resolveManagedWorktreeRoot(requestedRoot);
@@ -92,8 +84,10 @@ function installProject() {
   const root = resolveInstallRoot(requestedRoot);
   const agentFlowDir = path.join(root, ".agent-flow");
   const profile = detectProfile(root);
+  let installSelection = resolveInstallSelection({ args: installArgs, detectedProfile: profile, kitRoot: KIT_ROOT, projectRoot: root });
   const existingPayload = readExistingKit(agentFlowDir);
   const previousSkillIndex = readJsonIfExists(path.join(agentFlowDir, "skills", "index.json"));
+  installSelection = mergeInstallSelectionWithPrevious(installSelection, previousSkillIndex, KIT_ROOT, root);
   const phases = fullFeaturePhases();
 
   for (const name of ["runs", "state", "handoffs", "team", "worktrees", "workflows", "skills", "templates", "prompts", "rules", "bootstrap"]) {
@@ -107,6 +101,8 @@ function installProject() {
   const payload = {
     install_scope: "project",
     profile,
+    profiles: installSelection.profiles,
+    selected_skills: installSelection.skillNames ? [...installSelection.skillNames].sort() : "all",
     root: ".",
     installed_at: existingPayload?.installed_at || new Date().toISOString(),
   };
@@ -152,10 +148,11 @@ function installProject() {
     true,
     forceManaged,
     new Set(["index.json", ...GENERATED_PROJECT_SKILL_NAMES]),
+    installSelection.copyRootNames,
   );
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "profiles"), path.join(agentFlowDir, "profiles"), forceManaged);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "templates"), path.join(agentFlowDir, "templates"), forceManaged, new Set(), true, forceManaged);
-  const skillIndex = installProjectSkills(root, agentFlowDir, previousSkillIndex, forceManaged);
+  const skillIndex = installProjectSkills(root, agentFlowDir, previousSkillIndex, forceManaged, installSelection);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "scripts"), path.join(agentFlowDir, "scripts"), forceManaged);
   if (!samePath(root, KIT_ROOT)) {
     removeManagedDirIfSame(path.join(KIT_ROOT, "scripts"), path.join(root, "scripts"), forceManaged);
@@ -511,9 +508,23 @@ function detectProfile(rootDir) {
       fs.existsSync(path.join(rootDir, "next.config.ts"))) {
     return "nextjs";
   }
+  if (
+    fs.existsSync(path.join(rootDir, "Package.swift")) ||
+    hasChildWithSuffix(rootDir, ".xcodeproj") ||
+    hasChildWithSuffix(rootDir, ".xcworkspace")
+  ) {
+    return "ios";
+  }
   if (fs.existsSync(path.join(rootDir, "pyproject.toml")) ||
       fs.existsSync(path.join(rootDir, "requirements.txt"))) {
     return "python";
+  }
+  const earlyPackagePath = path.join(rootDir, "package.json");
+  if (fs.existsSync(earlyPackagePath)) {
+    const packageText = fs.readFileSync(earlyPackagePath, "utf8");
+    if (packageText.includes("react-native")) {
+      return "react-native";
+    }
   }
   if (
     fs.existsSync(path.join(rootDir, "build.gradle")) ||
@@ -540,6 +551,13 @@ function detectProfile(rootDir) {
   }
   // npm gate를 실행할 수 없는 tsconfig 단독 프로젝트는 generic으로 둔다.
   return "generic";
+}
+
+function hasChildWithSuffix(rootDir, suffix) {
+  if (!fs.existsSync(rootDir)) {
+    return false;
+  }
+  return fs.readdirSync(rootDir).some((name) => name.endsWith(suffix));
 }
 
 function resolveAgentFlowRoot(start) {
@@ -662,27 +680,25 @@ function resolveRunDir(root, runDir) {
 
 function assertInstalled(root) {
   const phases = fullFeaturePhases();
+  const skillIndex = readJsonIfExists(path.join(root, ".agent-flow", "skills", "index.json"));
+  const selectedSkillPaths = Array.isArray(skillIndex?.skills)
+    ? skillIndex.skills
+        .map((skill) => selectedSkillPath(root, skill))
+        .filter(Boolean)
+    : [];
   const required = [
     path.join(root, ".agent-flow", "kit.json"),
     path.join(root, ".agent-flow", "workflows", "full-feature.yaml"),
+    path.join(root, ".agent-flow", "skills", "index.json"),
     path.join(root, ".agent-flow", "skills", "full-feature-workflow", "SKILL.md"),
     ...phases.map((phase) => path.join(root, ".agent-flow", "prompts", `${phase.id}.md`)),
     path.join(root, ".agent-flow", "skills", "domain-grill", "SKILL.md"),
     path.join(root, ".agent-flow", "skills", "product-brief", "SKILL.md"),
     path.join(root, ".agent-flow", "skills", "plan-reviewer", "SKILL.md"),
     path.join(root, ".agent-flow", "skills", "ddd-clean-architecture", "SKILL.md"),
-    path.join(root, ".agent-flow", "skills", "clean-architecture-core", "SKILL.md"),
-    path.join(root, ".agent-flow", "skills", "clean-architecture", "SKILL.md"),
-    path.join(root, ".agent-flow", "skills", "android-clean-architecture", "SKILL.md"),
-    path.join(root, ".agent-flow", "skills", "ios-clean-architecture", "SKILL.md"),
-    path.join(root, ".agent-flow", "skills", "react-clean-architecture", "SKILL.md"),
-    path.join(root, ".agent-flow", "skills", "react-native-clean-architecture", "SKILL.md"),
-    path.join(root, ".agent-flow", "skills", "python-api-clean-architecture", "SKILL.md"),
     path.join(root, ".agent-flow", "skills", "architecture-reviewer", "SKILL.md"),
     path.join(root, ".agent-flow", "skills", "push-watch", "SKILL.md"),
-    path.join(root, ".agent-flow", "skills", "code-generation-discipline", "SKILL.md"),
-    path.join(root, ".agent-flow", "skills", "react-development-guide", "SKILL.md"),
-    path.join(root, ".agent-flow", "skills", "react-native-development-guide", "SKILL.md"),
+    ...selectedSkillPaths,
     path.join(root, ".agent-flow", "prompts", "push-watch.md"),
     path.join(root, ".agent-flow", "prompts", "push-watch-tick.md"),
     path.join(root, ".agent-flow", "bootstrap", "AGENTS.md"),
@@ -697,6 +713,19 @@ function assertInstalled(root) {
   if (!fs.readFileSync(codeReviewer, "utf8").trim()) {
     throw new Error("agent-flow is not installed correctly: .Codex/agents/code-reviewer.md is empty");
   }
+}
+
+function selectedSkillPath(root, skill) {
+  if (!skill || typeof skill !== "object") {
+    return null;
+  }
+  if (typeof skill.path === "string" && skill.path) {
+    return path.isAbsolute(skill.path) ? skill.path : path.join(root, skill.path);
+  }
+  if (typeof skill.name === "string" && skill.name) {
+    return path.join(root, ".agent-flow", "skills", skill.name, "SKILL.md");
+  }
+  return null;
 }
 
 function normalizeRunState(root, state) {
@@ -915,6 +944,7 @@ function copyBundledDirIfMissingOrSame(
   isRoot = true,
   pruneExtraneous = false,
   preservedExtraneousRootNames = new Set(),
+  allowedRootDirs = null,
 ) {
   if (!fs.existsSync(src)) {
     return;
@@ -926,11 +956,15 @@ function copyBundledDirIfMissingOrSame(
     const srcPath = path.join(src, entry.name);
     const destPath = path.join(dest, entry.name);
     if (entry.isDirectory()) {
+      if (isRoot && allowedRootDirs && !allowedRootDirs.has(entry.name)) {
+        removeManagedDirIfSame(srcPath, destPath, force);
+        continue;
+      }
       if (isRoot && excludedRootDirs.has(entry.name)) {
         removeManagedDirIfSame(srcPath, destPath, force);
         continue;
       }
-      copyBundledDirIfMissingOrSame(srcPath, destPath, force, excludedRootDirs, false, pruneExtraneous, preservedExtraneousRootNames);
+      copyBundledDirIfMissingOrSame(srcPath, destPath, force, excludedRootDirs, false, pruneExtraneous, preservedExtraneousRootNames, null);
       continue;
     }
     if (!entry.isFile()) {
@@ -988,8 +1022,8 @@ function dirContentsMatch(src, dest) {
   return true;
 }
 
-function installProjectSkills(root, agentFlowDir, previousIndex, force = false) {
-  const selected = selectProjectSkills(root, agentFlowDir);
+function installProjectSkills(root, agentFlowDir, previousIndex, force = false, installSelection = null) {
+  const selected = selectProjectSkills(root, agentFlowDir, installSelection);
   const links = [];
   for (const skill of selected.skills) {
     // bundled skill 중 host 디렉토리 link 대상은 BUNDLED_HOST_SKILL_NAMES뿐이다.
@@ -1011,7 +1045,7 @@ function installProjectSkills(root, agentFlowDir, previousIndex, force = false) 
   return index;
 }
 
-function selectProjectSkills(root, agentFlowDir) {
+function selectProjectSkills(root, agentFlowDir, installSelection = null) {
   const discovered = [
     ...discoverSkills(path.join(agentFlowDir, "local-skills"), "local", root, PROFILE_MANAGED_HOST_ONLY_SKILLS),
     ...discoverProjectSkills(root),
@@ -1031,7 +1065,10 @@ function selectProjectSkills(root, agentFlowDir) {
     }
     warnings.push(...skill.warnings);
   }
-  const skills = [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+  const allowed = installSelection?.skillNames || null;
+  const skills = [...byName.values()]
+    .filter((skill) => !allowed || allowed.has(skill.name))
+    .sort((a, b) => a.name.localeCompare(b.name));
   warnings.push(...validateSkillDependencies(skills));
   const conflicts = [];
   for (const skill of skills) {
@@ -1045,6 +1082,11 @@ function selectProjectSkills(root, agentFlowDir) {
   }
   return {
     version: 1,
+    selection: {
+      mode: allowed ? "filtered" : "all",
+      profiles: installSelection?.profiles || [],
+      explicit_skills: installSelection?.explicitSkills || [],
+    },
     skills: skills.map(({ priority, warnings: _warnings, ...skill }) => skill),
     conflicts,
     warnings,
@@ -1095,14 +1137,27 @@ function discoverSkills(baseDir, source, root, ignoredNames = new Set(), allowed
     }
     const relativePath = path.relative(root, skillPath);
     skills.push({
+      id: metadata.id,
       name: metadata.name,
+      title: metadata.title,
       path: relativePath,
       source,
       hosts: metadata.hosts,
-      requires: skillRequires(metadata.name),
+      requires: metadata.requires,
+      dependencies: metadata.dependencies,
+      optionalDependencies: metadata.optionalDependencies,
+      platforms: metadata.platforms,
+      stacks: metadata.stacks,
+      references: metadata.references,
+      hostSupport: metadata.hostSupport,
+      workflowPhases: metadata.workflowPhases,
+      reviewAngles: metadata.reviewAngles,
+      installGroup: metadata.installGroup,
+      excludes: metadata.excludes,
       tags: metadata.tags,
       description: metadata.description,
       trigger: metadata.trigger,
+      triggers: metadata.triggers,
       hash: crypto.createHash("sha256").update(text).digest("hex"),
       priority,
       warnings: metadata.warnings.map((message) => `${relativePath}: ${message}`),
@@ -1134,17 +1189,39 @@ function parseSkillMetadata(text, fallbackName) {
   const body = text.replace(/^---\n[\s\S]*?\n---\n?/, "");
   const useWhen = body.split(/\r?\n/).find((line) => /^\s*use when\b/i.test(line));
   return {
+    id: String(metadata.id || name),
     name,
+    title: String(metadata.title || ""),
     description: String(metadata.description || useWhen || ""),
     hosts: hostValues.length > 0 ? [...new Set(hosts)] : ["claude", "codex"],
     tags: Array.isArray(metadata.tags) ? metadata.tags.map(String) : [],
     trigger: String(metadata.trigger || metadata.description || useWhen || ""),
+    triggers: arrayValue(metadata.triggers),
+    platforms: arrayValue(metadata.platforms),
+    stacks: arrayValue(metadata.stacks),
+    dependencies: uniqueStrings([...arrayValue(metadata.dependencies), ...arrayValue(metadata.requires)]),
+    requires: uniqueStrings([...skillRequires(name), ...arrayValue(metadata.dependencies), ...arrayValue(metadata.requires)]),
+    optionalDependencies: arrayValue(metadata.optionalDependencies),
+    references: arrayValue(metadata.references),
+    hostSupport: arrayValue(metadata.hostSupport),
+    workflowPhases: arrayValue(metadata.workflowPhases),
+    reviewAngles: arrayValue(metadata.reviewAngles),
+    installGroup: String(metadata.installGroup || ""),
+    excludes: arrayValue(metadata.excludes || metadata.conflicts),
     warnings,
   };
 }
 
 function skillRequires(name) {
   return SKILL_DEPENDENCIES.get(name) || [];
+}
+
+function arrayValue(value) {
+  return Array.isArray(value) ? value.map(String) : [];
+}
+
+function uniqueStrings(values) {
+  return [...new Set(values.map(String).filter(Boolean))];
 }
 
 function safeSkillName(value) {
@@ -1546,7 +1623,15 @@ function artifactHasFailureMarkers(pathName) {
   const content = fs.readFileSync(pathName, "utf8");
   return completionGateLines(content).some((line) => {
     const separator = line.indexOf(":");
-    return separator !== -1 && line.slice(separator + 1).trim() === "fail";
+    if (separator === -1) {
+      return false;
+    }
+    const key = line.slice(0, separator).trim();
+    const value = line.slice(separator + 1).trim();
+    if (value === "fail") {
+      return true;
+    }
+    return key === "missing-required-profile-skills" && !["", "none", "n/a"].includes(value);
   });
 }
 
@@ -1609,7 +1694,7 @@ function nextFixLoopRounds(state, phase, nextPhase) {
   if (routesToFixLoop && nextPhase?.id === "fix-loop") {
     return (state.fix_loop_rounds ?? 0) + 1;
   }
-  if (routesToFixLoop && state.fix_loop_rounds !== undefined) {
+  if (phase.id === "gates" && routesToFixLoop && state.fix_loop_rounds !== undefined) {
     return undefined;
   }
   return state.fix_loop_rounds;
@@ -1620,7 +1705,7 @@ function nodeRouteKey(phase, artifact) {
     return readGatesRouteKey(artifact);
   }
   if (phase.multi_review) {
-    const verdict = readMultiReviewVerdict(artifact);
+    const verdict = readMultiReviewVerdict(artifact, phase.id);
     if (verdict === "approve" || verdict === "request-changes") {
       if (verdict === "approve" && phase.routes?.["request-changes"] && artifactHasFailureMarkers(artifact)) {
         return "request-changes";
@@ -1678,7 +1763,7 @@ function assertMinReviewerCount(pathName, minimum) {
   throw new Error(`blocked: multi-review artifact must contain at least ${minimum} independent reviewer verdicts`);
 }
 
-function readMultiReviewVerdict(pathName) {
+function readMultiReviewVerdict(pathName, phaseId = "") {
   const content = fs.readFileSync(pathName, "utf8");
   const overall = readMultiReviewOverallVerdict(content);
   if (overall && !["approve", "request-changes"].includes(overall)) {
@@ -1689,14 +1774,14 @@ function readMultiReviewVerdict(pathName) {
     throw new Error("blocked: multi-review artifact must contain at least 1 independent sub-agent reviewer verdict");
   }
   const verdicts = [...reviewers.values()];
+  if (overall === "request-changes" || verdicts.includes("request-changes")) {
+    return "request-changes";
+  }
   if (reviewers.size < 2) {
     throw new Error("blocked: multi-review artifact must contain at least 2 independent sub-agent reviewer verdicts");
   }
   if (overall === "approve" && verdicts.every((verdict) => verdict === "approve")) {
     return "approve";
-  }
-  if (overall === "request-changes" || (overall && verdicts.includes("request-changes"))) {
-    return "request-changes";
   }
   throw new Error("blocked: multi-review artifact must include matching reviewer verdicts and overall verdict");
 }
@@ -1712,7 +1797,7 @@ function readMultiReviewOverallVerdict(content) {
   }
   const overallBlock = sections[sections.length - 1].split(/^#{1,6}[ \t]+/m, 1)[0] ?? "";
   const verdicts = [...overallBlock.matchAll(/^verdict:\s*([a-z-]+)\s*$/gim)]
-    .map((match) => match[1].toLowerCase());
+    .map((match) => match[1]);
   if (verdicts.length === 0) {
     return undefined;
   }
@@ -1744,7 +1829,10 @@ function parseReviewerVerdicts(content) {
     if (!reviewerId) {
       continue;
     }
-    stateFor(reviewerId).verdict = match[2].toLowerCase();
+    if (!["approve", "request-changes"].includes(match[2])) {
+      continue;
+    }
+    stateFor(reviewerId).verdict = match[2];
   }
   const sections = content.split(/^##[ \t]+Reviewer[ \t]*([^\n]*)/im);
   for (let index = 1; index < sections.length; index += 2) {
@@ -1756,7 +1844,10 @@ function parseReviewerVerdicts(content) {
     if (hasSubagentSource(reviewerBlock)) {
       stateFor(reviewerId).subagent = true;
     }
-    const verdict = reviewerBlock.match(/^\s*verdict:\s*(approve|request-changes)\s*$/im)?.[1]?.toLowerCase();
+    const verdict = reviewerBlock.match(/^\s*verdict:\s*(approve|request-changes)\s*$/im)?.[1];
+    if (verdict && !["approve", "request-changes"].includes(verdict)) {
+      continue;
+    }
     if (verdict) {
       stateFor(reviewerId).verdict = verdict;
     }
@@ -1775,7 +1866,14 @@ function hasSubagentSource(value) {
 
 function isSubagentSource(value) {
   const normalized = String(value).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-  return normalized === "sub agent" || normalized === "subagent";
+  return [
+    "sub agent",
+    "subagent",
+    "host sub agent",
+    "host subagent",
+    "active host sub agent",
+    "active host subagent",
+  ].includes(normalized);
 }
 
 function normalizeReviewerId(value) {
@@ -1849,32 +1947,32 @@ function readGatesRouteKey(pathName) {
     if (typeof data.passed !== "boolean" || !Array.isArray(data.results) || data.results.length === 0) {
       if (typeof data.passed === "boolean" && typeof data.status === "string") {
         const status = data.status.trim().toLowerCase().replace(/_/g, "-");
-        if (data.passed === true && ["green", "approve"].includes(status)) {
-          return status;
-        }
         if (data.passed === false && ["request-changes", "blocked", "error", "pending"].includes(status)) {
           return status;
         }
       }
       return typeof data.passed === "boolean" && data.passed === false ? "request-changes" : "default";
     }
+    // 완료 보고는 실제 실행한 gate command와 결과 evidence가 함께 있을 때만 허용한다.
+    const requiredResults = data.results.filter((r) => r && r.required !== false);
+    const resultsPass =
+      requiredResults.length > 0 &&
+      requiredResults.every((r) =>
+        r &&
+        typeof r.command === "string" &&
+        r.command.trim().length > 0 &&
+        hasGateEvidence(r) &&
+        (r.passed === true || r.status === "pass" || r.status === "ok"),
+      );
     if (typeof data.status === "string") {
       const status = data.status.trim().toLowerCase().replace(/_/g, "-");
       if (data.passed === true && ["green", "approve"].includes(status)) {
-        return status;
+        return resultsPass ? status : "default";
       }
       if (data.passed === false && ["request-changes", "blocked", "error", "pending"].includes(status)) {
         return status;
       }
     }
-    // 완료 보고는 실제 실행한 gate command와 결과 evidence가 함께 있을 때만 허용한다.
-    const resultsPass = data.results.every((r) =>
-      r &&
-      typeof r.command === "string" &&
-      r.command.trim().length > 0 &&
-      hasGateEvidence(r) &&
-      (r.passed === true || r.status === "pass" || r.status === "ok"),
-    );
     if (data.passed === true) {
       return resultsPass ? "green" : "default";
     }
@@ -1887,6 +1985,11 @@ function readGatesRouteKey(pathName) {
 function hasGateEvidence(result) {
   for (const key of ["output", "stdout", "stderr", "artifact", "path"]) {
     if (typeof result[key] === "string" && result[key].trim().length > 0) {
+      return true;
+    }
+  }
+  for (const key of ["exit_code", "exitCode"]) {
+    if (Number.isInteger(result[key]) && result[key] === 0) {
       return true;
     }
   }
@@ -1912,8 +2015,8 @@ Follow the CLI output exactly. If no run is active, start with \`${AGENT_FLOW_CO
 
 - 활성 workflow와 current phase는 항상 \`${AGENT_FLOW_COMMAND} status\` 출력 기준이다.
 - phase 이동은 status의 \`next_command\`를 그대로 따른다. \`${AGENT_FLOW_COMMAND} continue\`나 \`${AGENT_FLOW_COMMAND} run advance\`를 추측하지 않는다.
-- \`default.yaml\`: design → slice-plan → worktree → implement → comment-authoring → final-review ↔ fix-loop → comment-authoring → final-review → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge → cleanup
-- \`full-feature.yaml\`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → gates ↔ fix-loop → comment-authoring → multi-review → architecture-review → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
+- \`default.yaml\`: design → slice-plan → worktree → implement → comment-authoring → final-review → gates ↔ fix-loop → comment-authoring → final-review → gates → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge → cleanup
+- \`full-feature.yaml\`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → comment-authoring → multi-review → architecture-review → gates ↔ fix-loop → comment-authoring → multi-review → architecture-review → gates → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
 - \`multi-review\`는 현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수다. 두 sub-agent를 병렬 실행하고, \`reviewer-source: sub-agent\`를 기록한 뒤 sub-agent를 닫는다. 마지막에 \`## Overall\`과 \`verdict: approve\` 또는 \`verdict: request-changes\`만 기록한다. 활성 host가 아닌 추가 provider는 optional이다.
 
 ### Context Economy
@@ -2015,8 +2118,8 @@ Follow the CLI output exactly. Git projects start inside \`.agent-flow/worktrees
 
 - 활성 workflow와 current phase는 항상 \`${AGENT_FLOW_COMMAND} status\` 출력 기준이다.
 - phase 이동은 status의 \`next_command\`를 그대로 따른다. \`${AGENT_FLOW_COMMAND} continue\`나 \`${AGENT_FLOW_COMMAND} run advance\`를 추측하지 않는다.
-- \`default.yaml\`: design → slice-plan → worktree → implement → comment-authoring → final-review ↔ fix-loop → comment-authoring → final-review → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge → cleanup
-- \`full-feature.yaml\`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → gates ↔ fix-loop → comment-authoring → multi-review → architecture-review → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
+- \`default.yaml\`: design → slice-plan → worktree → implement → comment-authoring → final-review → gates ↔ fix-loop → comment-authoring → final-review → gates → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge → cleanup
+- \`full-feature.yaml\`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → comment-authoring → multi-review → architecture-review → gates ↔ fix-loop → comment-authoring → multi-review → architecture-review → gates → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
 - \`multi-review\`는 현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수다. 두 sub-agent를 병렬 실행하고, \`reviewer-source: sub-agent\`를 기록한 뒤 sub-agent를 닫는다. 마지막에 \`## Overall\`과 \`verdict: approve\` 또는 \`verdict: request-changes\`만 기록한다. 활성 host가 아닌 추가 provider는 optional이다.
 
 ### Context Economy
@@ -2031,8 +2134,8 @@ Follow the CLI output exactly. Git projects start inside \`.agent-flow/worktrees
 - Claude/Codex 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.
 - Claude hook이 자동 차단하는 보호 브랜치 commit/push와 leader checkout/switch 금지는 Codex에서도 동일하게 지킨다.
 
-During code generation, modification, and code review phases, apply \`code-generation-discipline\`. Read every matching language/framework skill before writing or judging code.
-For Android/Kotlin/Compose/KMP work, read every relevant local skill file from the Android profile's \`android_skills\` and \`chrisbanes_skills\` for the active host. Do not install, copy, link, or load duplicate skills from other host directories. If a required local skill is missing, report \`missing local <group>: <skill>\` with the profile source URL and ask the user to install it.
+During code generation, modification, and code review phases, apply \`code-generation-discipline\`. Resolve required skills from active profile metadata, installed skill index, changed files, and task scope. Load only the touched profile skill union.
+For Android/Kotlin/Compose/KMP changes, read matching local skill files from the Android profile's \`android_skills\` and \`chrisbanes_skills\` for the active host. React Native \`android/\` native changes also apply the Android profile mapping. Do not require unrelated platform skills, and do not install, copy, link, or load duplicate skills from other host directories. If a required local skill is missing, report \`missing local <group>: <skill>\` with the profile source URL and ask the user to install it.
 `;
 }
 
@@ -2088,14 +2191,14 @@ ${AGENT_FLOW_COMMAND} status
 - On a new session, always check \`${AGENT_FLOW_COMMAND} status\` first and continue from that result.
 - After a phase writes its artifact, run the \`next_command\` printed by status or the current phase output.
 - If the workflow pauses for design or slice review, summarize the relevant artifact and wait for user approval before continuing.
-- During code generation, modification, and code review phases, apply \`code-generation-discipline\`. Read every matching language/framework skill before writing or judging code. If a required local skill is missing, report it and wait for install or explicit override.
+- During code generation, modification, and code review phases, apply \`code-generation-discipline\`. Resolve required skills from active profile metadata, installed skill index, changed files, and task scope. Load only the touched profile skill union. If a required local skill is missing, report it and wait for install or explicit override.
 - Keep user-facing replies short Korean by default. Keep code, commands, paths, and identifiers in English.
 - Do not paste long logs or whole files. Summarize only current phase, action, \`next_command\`, and blocker when useful.
 `;
 }
 
 function fullFeatureSkillMarkdown() {
-  return `---\nname: full-feature-workflow\ndescription: Use this skill for feature work in this project.\n---\n\n# Full Feature Workflow\n\nUse this skill for feature work in this project.\n\nAlways drive progress through the runner output. Run \`${AGENT_FLOW_COMMAND} status\`, then execute the printed \`next_command\` exactly.\n\nDo not skip phases. If existing docs satisfy a phase, write the required artifact and reference those docs. If a gate, review, PR comment, or PR check fails, complete the matching fix phase and push again before merge/handoff.\n\nApply \`code-generation-discipline\` during code and review phases. Read every matching language/framework skill before writing or judging code.\n`;
+  return `---\nname: full-feature-workflow\ndescription: Use this skill for feature work in this project.\n---\n\n# Full Feature Workflow\n\nUse this skill for feature work in this project.\n\nAlways drive progress through the runner output. Run \`${AGENT_FLOW_COMMAND} status\`, then execute the printed \`next_command\` exactly.\n\nDo not skip phases. If existing docs satisfy a phase, write the required artifact and reference those docs. If a gate, review, PR comment, or PR check fails, complete the matching fix phase and push again before merge/handoff.\n\nApply \`code-generation-discipline\` during code and review phases. Resolve required skills from active profile metadata, installed skill index, changed files, and task scope before writing or judging code.\n`;
 }
 
 function domainGrillSkillMarkdown() {
@@ -2115,7 +2218,7 @@ function dddCleanArchitectureSkillMarkdown() {
 }
 
 function architectureReviewerSkillMarkdown() {
-  return `---\nname: architecture-reviewer\ndescription: Use during the full-feature architecture-review phase.\n---\n\n# Architecture Reviewer\n\nUse during the full-feature architecture-review phase.\n\nReview implemented code against domain decisions and DDD/Clean Architecture.\n\nArtifact template:\n\n# Architecture Review\n\nverdict: approve | request-changes\n\n## Domain Alignment\n\n## Layer Violations\n\n## Repository Boundary Issues\n\n## Dependency Direction Issues\n\n## Required Refactors\n\n## Approved Exceptions\n`;
+  return `---\nname: architecture-reviewer\ndescription: Use during the full-feature architecture-review phase.\n---\n\n# Architecture Reviewer\n\nUse during the full-feature architecture-review phase.\n\nReview implemented code against domain decisions and DDD/Clean Architecture. Run two independent active-host reviewer sub-agents before approve. Each reviewer section must include \`reviewer-source: sub-agent\`; optional cross-host reviewers are extra evidence and do not replace active-host reviewers.\n\nArtifact template:\n\n# Architecture Review\n\n## Reviewer 1\nreviewer-source: sub-agent\nverdict: approve | request-changes\n\n## Findings\n\n## Domain Alignment\n\n## Layer Violations\n\n## Repository Boundary Issues\n\n## Dependency Direction Issues\n\n## Required Refactors\n\n## Approved Exceptions\n\n## Reviewer 2\nreviewer-source: sub-agent\nverdict: approve | request-changes\n\n## Findings\n\n## Overall\nverdict: approve | request-changes\n\n## Completion Gate\nskills_checked: true\nprofile-skill-selection: applied\nactive-profiles: <profile list>\nchanged-file-skill-resolution: applied\nrequired-profile-skills: checked\nmissing-required-profile-skills: none|<list>\narchitecture-contract-check: pass|fail|n/a\ncodex-claude-parity-check: pass|fail\nhook-parity-check: pass|fail\nclean-architecture: applied\nproject-local-skills: checked|n/a\nproject-local-skills-used: <skill list or n/a>\ndependency-rule: pass|fail\nusecase-boundary: pass|fail|n/a\nusecase-calls-usecase: pass|fail\nrepository-boundary: pass|fail\ncache-boundary: pass|fail|n/a\nmemory-disk-cache-separated: pass|fail|n/a\nmapping-boundary: pass|fail|n/a\ndto-entity-domain-ui-separated: pass|fail\nsolid-boundary-check: pass|fail\npresentation-skill: android|react|react-native|ios|n/a\npresentation-state-review: pass|fail|n/a\nui-state-modeling: explicit|n/a\npresentation-mapping-boundary: domain-to-uimodel|n/a\ndi-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a\n`;
 }
 
 function pushWatchSkillMarkdown() {
@@ -2518,11 +2621,11 @@ Phases with completion markers are not complete just because the artifact file e
 Implementation rules:
 
 - Run every phase through the runner. Do not skip review, QA, PR watch, or fix-loop phases.
-- Apply \`code-generation-discipline\` during red, green, refactor, fix-loop, and review phases. Read every matching language/framework skill before writing or judging code.
+- Apply \`code-generation-discipline\` during red, green, refactor, fix-loop, and review phases. Resolve required skills from active profile metadata, installed skill index, changed files, and task scope before writing or judging code.
 - If review or QA fails, return to the fix phase before continuing.
-- The gates->fix-loop->gates loop re-verifies after every fix, then routes through comment-authoring before multi-review. multi-review approve skips fix-loop; request-changes routes through fix-loop->gates->comment-authoring.
+- Required review happens before completion QA. After reviewer approve, gates run BUILD -> TYPECHECK -> LINT where applicable. If review or QA fails, fix-loop routes back through comment-authoring and review before gates run again.
 - Code review requires at least two active-host sub-agents (Codex sub-agent in Codex, Claude sub-agent in Claude). If the changed scope spans multiple areas, run one additional active-host sub-agent in parallel. Additional non-host providers are optional, and every multi-review verdict requires 2+ independent sub-agent reviewer verdicts with reviewer-source: sub-agent. After recording each sub-agent result, close that sub-agent session. End multi-review artifacts with ## Overall followed by exactly one verdict line: verdict: approve or verdict: request-changes.
-- In the default workflow, gates are enforced by the \`implement\` phase completion marker: \`gates: all_passed\`.
+- In the default workflow, gates run as their own phase after final-review approve.
 
 Document size rules:
 
@@ -2543,6 +2646,35 @@ Context rules:
 `;
 }
 
+function runArchitectureLint(args) {
+  runPythonCliCommand("architecture-lint", args);
+}
+
+function runGates(args) {
+  runPythonCliCommand("gates", args);
+}
+
+function runPythonCliCommand(subcommand, args) {
+  const env = {
+    ...process.env,
+    PYTHONPATH: [path.join(KIT_ROOT, "src"), process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
+  };
+  const result = safeSpawnSync(
+    "python3",
+    ["-m", "agent_flow.cli", subcommand, ...args],
+    {
+      cwd: process.cwd(),
+      env,
+      encoding: "utf8",
+      stdio: ["ignore", "inherit", "inherit"],
+    },
+  );
+  if (result.error) {
+    throw result.error;
+  }
+  process.exit(result.status ?? 1);
+}
+
 try {
   if (command === "install") {
     installProject();
@@ -2559,7 +2691,15 @@ try {
     process.exit(0);
   }
 
-  console.error("usage: agent-flow-kit install [--force-managed] | run <install|start|status|next|advance|push-watch|push-watch-tick>");
+  if (command === "architecture-lint") {
+    runArchitectureLint(process.argv.slice(3));
+  }
+
+  if (command === "gates") {
+    runGates(process.argv.slice(3));
+  }
+
+  console.error("usage: agent-flow-kit install [--force-managed] | gates [--profile <id>] [--worktree <name>] | architecture-lint [--profile <id>] [--files ...] | run <install|start|status|next|advance|push-watch|push-watch-tick>");
   process.exit(1);
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));

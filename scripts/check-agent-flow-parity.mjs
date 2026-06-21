@@ -97,6 +97,22 @@ function assertSameBodyAfterTitle(a, b) {
   }
 }
 
+function assertPhaseOrder(actual, expected, label) {
+  let previous = -1;
+  for (const phase of expected) {
+    const index = actual.indexOf(phase);
+    if (index === -1) {
+      failures.push(`${label} missing phase ${phase}`);
+      return;
+    }
+    if (index <= previous) {
+      failures.push(`${label} expected ${expected.join(" -> ")}, got ${actual.join(" -> ")}`);
+      return;
+    }
+    previous = index;
+  }
+}
+
 function yamlFileNames(rel) {
   const dir = absPath(rel);
   if (!fs.existsSync(dir)) {
@@ -180,14 +196,23 @@ const fullFeatureWorkflowCopies = [
 const exportedWorkflow = workflowExport("full-feature");
 if (exportedWorkflow) {
   const exportedPhases = Object.fromEntries(exportedWorkflow.phases.map((phase) => [phase.id, phase]));
+  const fullFeatureOrder = exportedWorkflow.phases.map((phase) => phase.id);
   if (exportedWorkflow.id !== "full-feature") {
     failures.push("workflow export full-feature id mismatch");
   }
+  assertPhaseOrder(
+    fullFeatureOrder,
+    ["refactor", "comment-authoring", "multi-review", "architecture-review", "gates", "fix-loop", "commit"],
+    "full-feature review-before-QA order",
+  );
   if (exportedPhases["domain-grill"]?.artifact !== "artifacts/domain-grill.md") {
     failures.push("workflow export domain-grill artifact mismatch");
   }
-  if (exportedPhases["gates"]?.routes?.green !== "comment-authoring") {
+  if (exportedPhases["gates"]?.routes?.green !== "commit") {
     failures.push("workflow export gates green route mismatch");
+  }
+  if (exportedPhases["gates"]?.artifact !== "artifacts/gate-results.json") {
+    failures.push("workflow export gates artifact mismatch");
   }
   if (exportedPhases["comment-authoring"]?.routes?.default !== "multi-review") {
     failures.push("workflow export comment-authoring route mismatch");
@@ -195,14 +220,14 @@ if (exportedWorkflow) {
   if (exportedPhases["red"]?.artifact !== "artifacts/red.log") {
     failures.push("workflow export red artifact mismatch");
   }
-  if (exportedPhases["architecture-review"]?.routes?.approve !== "commit") {
+  if (exportedPhases["architecture-review"]?.routes?.approve !== "gates") {
     failures.push("workflow export architecture-review approve route mismatch");
   }
   if (exportedPhases["architecture-review"]?.routes?.["request-changes"] !== "refactor") {
     failures.push("workflow export architecture-review request-changes route mismatch");
   }
-  if (exportedPhases["architecture-review"]?.routes?.blocked !== "refactor") {
-    failures.push("workflow export architecture-review blocked route mismatch");
+  if (Object.prototype.hasOwnProperty.call(exportedPhases["architecture-review"]?.routes ?? {}, "blocked")) {
+    failures.push("workflow export architecture-review blocked route should be absent");
   }
   if (exportedPhases["merge-approval"]?.routes?.approve !== "merge") {
     failures.push("workflow export merge-approval approve route mismatch");
@@ -210,7 +235,7 @@ if (exportedWorkflow) {
   if (exportedPhases["merge-approval"]?.routes?.default !== "block") {
     failures.push("workflow export merge-approval default route mismatch");
   }
-  if (exportedPhases["fix-loop"]?.routes?.default !== "gates") {
+  if (exportedPhases["fix-loop"]?.routes?.default !== "comment-authoring") {
     failures.push("workflow export fix-loop route mismatch");
   }
   if (exportedPhases["multi-review"]?.multi_review !== true) {
@@ -246,7 +271,7 @@ if (exportedDefaultWorkflow) {
   if (exportedPhases["comment-authoring"]?.routes?.default !== "final-review") {
     failures.push("workflow export default comment-authoring route mismatch");
   }
-  if (exportedPhases["final-review"]?.routes?.approve !== "commit") {
+  if (exportedPhases["final-review"]?.routes?.approve !== "gates") {
     failures.push("workflow export default final-review approve route mismatch");
   }
   if (exportedPhases["final-review"]?.routes?.["request-changes"] !== "fix-loop") {
@@ -266,7 +291,140 @@ if (exportedDefaultWorkflow) {
   }
 }
 
+assertCodeReviewerCoversWorkflowMarkers("default", "final-review");
+assertCodeReviewerCoversWorkflowMarkers("full-feature", "multi-review");
+assertCodeReviewerCoversWorkflowMarkers("full-feature", "architecture-review");
+
 assertAllWorkflowContracts();
+assertPythonContract("profile gate build/typecheck/lint order", `
+from agent_flow.cli import _profile_gate_commands
+
+def gate_ids(profile):
+    return [command.gate_id for command in _profile_gate_commands([profile])]
+
+def require_before(ids, left, right):
+    if ids.index(left) > ids.index(right):
+        raise AssertionError(f"{left} must run before {right}: {ids}")
+
+typescript = gate_ids("typescript")
+require_before(typescript, "build", "typecheck")
+require_before(typescript, "typecheck", "lint")
+
+react_native = gate_ids("react-native")
+require_before(react_native, "android-build", "lint")
+require_before(react_native, "ios-build", "lint")
+
+union = [command.gate_id for command in _profile_gate_commands(["android", "react-native"])]
+union_commands = [command.command for command in _profile_gate_commands(["android", "react-native"])]
+require_before(union, "react-native:android-build", "architecture-lint")
+require_before(union, "react-native:android-build", "android:lint")
+architecture_command = next((command for command in union_commands if command[-2:] == ("--profile", "android,react-native")), None)
+if architecture_command is None or "agent_flow.core.architecture_lint" not in architecture_command:
+    raise AssertionError(union_commands)
+if any(command[-2:] == ("--profile", "android") for command in union_commands):
+    raise AssertionError(union_commands)
+	`);
+assertPythonContract("react-native profile wins over Gradle", `
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from agent_flow.core.profiles import detect_profile
+
+with TemporaryDirectory() as temp_dir:
+    root = Path(temp_dir)
+    (root / "package.json").write_text(json.dumps({"dependencies": {"react-native": "latest"}}), encoding="utf-8")
+    (root / "settings.gradle.kts").write_text("", encoding="utf-8")
+    if detect_profile(root) != "react-native":
+        raise AssertionError(detect_profile(root))
+`);
+assertPythonContract("multi-profile architecture lint partitions files", `
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from agent_flow.core.architecture_lint import lint_profiles
+
+with TemporaryDirectory() as temp_dir:
+    root = Path(temp_dir)
+    source = root / "core" / "domain" / "chat" / "src" / "main" / "java" / "com" / "example" / "app" / "core" / "domain" / "chat" / "Chat.kt"
+    source.parent.mkdir(parents=True)
+    source.write_text("package com.example.app.core.domain.chat\\nclass Chat\\n", encoding="utf-8")
+    (root / "core" / "data" / "chat").mkdir(parents=True)
+    findings = lint_profiles(root, ["android", "react-native"], files=[str(source.relative_to(root))])
+    if findings["android"] or findings["react-native"]:
+        raise AssertionError(findings)
+
+    outside = root / "components" / "Button.tsx"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("export function Button() { return null }\\n", encoding="utf-8")
+    outside_findings = lint_profiles(root, ["nextjs", "android"], files=[str(outside.relative_to(root))])
+    if not any(item.message == "path is outside profile architecture role mapping" for values in outside_findings.values() for item in values):
+        raise AssertionError(outside_findings)
+
+    rn_android = root / "android" / "app" / "src" / "main" / "java" / "com" / "example" / "MainApplication.kt"
+    rn_android.parent.mkdir(parents=True)
+    rn_android.write_text("package com.example\\nclass MainApplication\\n", encoding="utf-8")
+    rn_findings = lint_profiles(root, ["react-native"], files=[str(rn_android.relative_to(root))])
+    if rn_findings["react-native"] or rn_findings["android"]:
+        raise AssertionError(rn_findings)
+
+    bad_android = root / "android" / "app" / "src" / "main" / "java" / "com" / "example" / "CheckoutDTO.kt"
+    bad_android.write_text("package com.example\\nclass CheckoutDTO\\n", encoding="utf-8")
+    bad_findings = lint_profiles(root, ["react-native"], files=[str(bad_android.relative_to(root))])
+    if not any("forbidden token Dto" in item.message for item in bad_findings["android"]):
+        raise AssertionError(bad_findings)
+`);
+assertPythonContract("architecture lint parses Gradle type-safe accessors", `
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from agent_flow.core.architecture_lint import lint_project
+
+with TemporaryDirectory() as temp_dir:
+    root = Path(temp_dir)
+    source = root / "core" / "domain" / "chat" / "src" / "main" / "java" / "com" / "example" / "app" / "core" / "domain" / "chat" / "Chat.kt"
+    source.parent.mkdir(parents=True)
+    source.write_text("package com.example.app.core.domain.chat\\nclass Chat\\n", encoding="utf-8")
+    (root / "core" / "data" / "chat").mkdir(parents=True)
+    build = root / "core" / "domain" / "chat" / "build.gradle.kts"
+    build.write_text("dependencies { implementation(projects.core.data.chat) }\\n", encoding="utf-8")
+    findings = lint_project(root, "android", files=[str(source.relative_to(root))])
+    if not any(":core:data" in item.message for item in findings):
+        raise AssertionError(findings)
+`);
+assertPythonContract("gate results use workflow artifact schema", `
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from agent_flow.core.artifacts import write_gate_results
+from agent_flow.core.gates import GateResult
+
+with TemporaryDirectory() as temp_dir:
+    run_dir = Path(temp_dir)
+    path = write_gate_results(run_dir=run_dir, results=[
+        GateResult("build", ("npm", "run", "build"), True, 0, "ok", "")
+    ])
+    if path != run_dir / "artifacts" / "gate-results.json":
+        raise AssertionError(path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("passed") is not True or not isinstance(payload.get("results"), list):
+        raise AssertionError(payload)
+    if payload["results"][0].get("command") != "npm run build":
+        raise AssertionError(payload)
+`);
+assertPythonContract("gate status green requires evidence", `
+from agent_flow.runner import _gates_route_key
+
+if _gates_route_key('{"passed": true, "status": "green"}') != "default":
+    raise AssertionError("status-only gate passed")
+`);
+assertPythonContract("unknown profile is controlled error", `
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from agent_flow.cli import main
+
+with TemporaryDirectory() as temp_dir:
+    code = main(["gates", "--root", temp_dir, "--profile", "does-not-exist"])
+    if code != 1:
+        raise AssertionError(code)
+`);
 
 // phase 제거가 source/generated copy 중 한 곳에만 반영되는 drift를 막는다.
 for (const rel of fullFeatureWorkflowCopies) {
@@ -422,7 +580,9 @@ for (const rel of [
 }
 
 if (CHECK_INSTALLED_COPY) {
-  assertContains(".agent-flow/rules/workflow-contract.md", "gates: all_passed");
+  assertContains(".agent-flow/rules/workflow-contract.md", "Required review happens before completion QA");
+  assertContains(".agent-flow/rules/workflow-contract.md", "gates run BUILD -> TYPECHECK -> LINT");
+  assertContains(".agent-flow/rules/workflow-contract.md", "default workflow, gates run as their own phase");
   assertContains(".agent-flow/rules/workflow-contract.md", "short Korean");
   assertContains(".agent-flow/rules/workflow-contract.md", "two active-host sub-agents");
   assertNotContains(".agent-flow/rules/workflow-contract.md", "Gemini sub-agent in Gemini");
@@ -549,6 +709,52 @@ function workflowExport(name) {
     failures.push(`workflow export invalid JSON: ${error.message}`);
     workflowExportCache.set(name, null);
     return null;
+  }
+}
+
+function assertCodeReviewerCoversWorkflowMarkers(workflowName, phaseId) {
+  const workflow = workflowExport(workflowName);
+  if (!workflow) return;
+  const phase = workflow.phases.find((item) => item.id === phaseId);
+  if (!phase) {
+    failures.push(`workflow export ${workflowName} missing ${phaseId}`);
+    return;
+  }
+  const reviewerText = readIfExists(".Codex/agents/code-reviewer.md");
+  if (reviewerText === null) return;
+  const reviewerMarkerKeys = new Set(
+    reviewerText
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => /^[A-Za-z0-9_-]+:\s+/.test(line))
+      .map(markerKey),
+  );
+  for (const marker of phase.required_markers ?? []) {
+    const key = markerKey(marker);
+    if (key && !reviewerMarkerKeys.has(key)) {
+      failures.push(`code-reviewer missing marker for ${workflowName}:${phaseId}: ${marker}`);
+    }
+  }
+}
+
+function markerKey(marker) {
+  return String(marker).split(":", 1)[0].trim();
+}
+
+function assertPythonContract(label, code) {
+  const env = {
+    ...process.env,
+    PYTHONPATH: [path.join(SOURCE_ROOT, "src"), process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
+  };
+  const result = spawnSync(preferredPython(), ["-c", code], {
+    cwd: SOURCE_ROOT,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    env,
+    timeout: 30_000,
+  });
+  if (result.error || result.status !== 0) {
+    failures.push(`${label} failed: ${result.error?.message || result.stderr.trim() || result.status}`);
   }
 }
 
@@ -754,7 +960,7 @@ function routeArtifactContent(phase, key) {
     return JSON.stringify({ passed: true }) + "\n";
   }
   if (phase.multi_review) {
-    return phaseArtifactWithMarkers(phase, multiReviewArtifactContent(key));
+    return phaseArtifactWithMarkers(phase, multiReviewArtifactContent(key, phase.id));
   }
   if (phase.id === "plan-review" || phase.id === "architecture-review" || phase.id === "merge-approval") {
     return phaseArtifactWithMarkers(phase, `verdict: ${key}`);
@@ -768,7 +974,7 @@ function routeArtifactContent(phase, key) {
   return phaseArtifactWithMarkers(phase, `status: ${key}`);
 }
 
-function multiReviewArtifactContent(key) {
+function multiReviewArtifactContent(key, phaseId = "") {
   const reviewerAVerdict = key === "request-changes" ? "request-changes" : "approve";
   const reviewerBVerdict = "approve";
   const overall = key === "request-changes" ? "request-changes" : "approve";

@@ -93,7 +93,15 @@ def _normalize_marker_line(line: str) -> str:
 
 def _line_has_failure_marker(line: str) -> bool:
     _key, separator, value = line.partition(":")
-    return separator == ":" and value.strip() == "fail"
+    if separator != ":":
+        return False
+    key = _key.strip()
+    normalized_value = value.strip()
+    if normalized_value == "fail":
+        return True
+    if key == "missing-required-profile-skills" and normalized_value not in {"", "none", "n/a"}:
+        return True
+    return False
 
 
 def _line_matches_marker(line: str, marker: str) -> bool:

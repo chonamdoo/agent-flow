@@ -8,7 +8,8 @@ Return semantics:
   - True  → this call wrote the artifact; runner advances to the next phase.
   - False → this call emitted a prompt; the host AI must do the work, write
             the artifact file, then follow `agent-flow status` / `next_command`.
-The artifact path is always `<run_dir>/<phase.id>.md`.
+The artifact path is `<run_dir>/<phase.artifact>` when the workflow declares
+one, otherwise `<run_dir>/<phase.id>.md`.
 
 Profile injection:
   - The runner sets `self._profile_snapshot` and `self._profile_id` on the
@@ -52,7 +53,7 @@ class Adapter(ABC):
 
     @staticmethod
     def artifact_path(phase: "Phase", run_dir: Path) -> Path:
-        return run_dir / f"{phase.id}.md"
+        return run_dir / (phase.artifact or f"{phase.id}.md")
 
     def render_envelope(self, phase: "Phase", run_dir: Path,
                         project_root: Path, host_hint: str = "") -> str:
