@@ -25,9 +25,11 @@ class GateResult:
 
 
 def run_gate(command: GateCommand, *, cwd: Path, timeout_s: int = 600) -> GateResult:
+    executable_command = _resolve_gate_command(command.command, cwd)
+    recorded_command = _recorded_gate_command(executable_command, cwd)
     try:
         completed = subprocess.run(
-            command.command,
+            executable_command,
             cwd=cwd,
             env=_gate_environment(cwd),
             text=True,
@@ -38,7 +40,7 @@ def run_gate(command: GateCommand, *, cwd: Path, timeout_s: int = 600) -> GateRe
     except subprocess.TimeoutExpired as exc:
         return GateResult(
             gate_id=command.gate_id,
-            command=command.command,
+            command=recorded_command,
             passed=False,
             exit_code=None,
             stdout=_text(exc.stdout),
@@ -48,7 +50,7 @@ def run_gate(command: GateCommand, *, cwd: Path, timeout_s: int = 600) -> GateRe
     except OSError as exc:
         return GateResult(
             gate_id=command.gate_id,
-            command=command.command,
+            command=recorded_command,
             passed=False,
             exit_code=None,
             stdout="",
@@ -57,7 +59,7 @@ def run_gate(command: GateCommand, *, cwd: Path, timeout_s: int = 600) -> GateRe
         )
     return GateResult(
         gate_id=command.gate_id,
-        command=command.command,
+        command=recorded_command,
         passed=completed.returncode == 0,
         exit_code=completed.returncode,
         stdout=completed.stdout,
@@ -72,11 +74,67 @@ def run_gates(commands: list[GateCommand], *, cwd: Path, timeout_s: int = 600) -
 
 def _gate_environment(cwd: Path) -> dict[str, str]:
     env = os.environ.copy()
+    python_paths: list[Path] = []
+    runtime_path = _installed_python_runtime_path(cwd)
+    if runtime_path is not None:
+        python_paths.append(runtime_path)
     src_path = cwd / "src"
     if src_path.is_dir():
-        current = env.get("PYTHONPATH")
-        env["PYTHONPATH"] = str(src_path) if not current else f"{src_path}{os.pathsep}{current}"
+        python_paths.append(src_path)
+    kit_path = Path(__file__).resolve().parents[2]
+    python_paths.append(kit_path)
+    current = env.get("PYTHONPATH")
+    if current:
+        python_paths.extend(Path(item) for item in current.split(os.pathsep) if item)
+    env["PYTHONPATH"] = os.pathsep.join(str(path) for path in dict.fromkeys(python_paths))
     return env
+
+
+def _installed_python_runtime_path(cwd: Path) -> Path | None:
+    for root in _candidate_agent_flow_roots(cwd):
+        runtime_path = root / ".agent-flow" / "runtime" / "python"
+        if (runtime_path / "agent_flow" / "__init__.py").is_file():
+            return runtime_path
+    return None
+
+
+def _resolve_gate_command(command: tuple[str, ...], cwd: Path) -> tuple[str, ...]:
+    if command == ("node", "scripts/check-context-docs.mjs"):
+        script = _installed_agent_flow_file(cwd, "scripts", "check-context-docs.mjs")
+        if script is not None:
+            return ("node", os.path.relpath(script, cwd.resolve()))
+    return command
+
+
+def _recorded_gate_command(command: tuple[str, ...], cwd: Path) -> tuple[str, ...]:
+    recorded: list[str] = []
+    for part in command:
+        if Path(part).is_absolute():
+            recorded.append(os.path.relpath(part, cwd.resolve()))
+        else:
+            recorded.append(part)
+    return tuple(recorded)
+
+
+def _installed_agent_flow_file(cwd: Path, *parts: str) -> Path | None:
+    for root in _candidate_agent_flow_roots(cwd):
+        candidate = root / ".agent-flow" / Path(*parts)
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _candidate_agent_flow_roots(cwd: Path) -> list[Path]:
+    resolved = cwd.resolve()
+    roots: list[Path] = []
+    if (resolved / ".agent-flow").is_dir():
+        roots.append(resolved)
+    parts = resolved.parts
+    if ".agent-flow" in parts:
+        marker_index = parts.index(".agent-flow")
+        roots.append(Path(*parts[:marker_index]) if marker_index else Path("/"))
+    roots.extend(resolved.parents)
+    return list(dict.fromkeys(roots))
 
 
 def _text(value: str | bytes | None) -> str:

@@ -296,6 +296,11 @@ assertCodeReviewerCoversWorkflowMarkers("full-feature", "multi-review");
 assertCodeReviewerCoversWorkflowMarkers("full-feature", "architecture-review");
 
 assertAllWorkflowContracts();
+assertContains("bin/agent-flow-kit.mjs", "RUNTIME_PYTHON_RELATIVE");
+assertContains("bin/agent-flow-kit.mjs", "src\", \"agent_flow");
+assertContains("src/agent_flow/core/gates.py", "\".agent-flow\" / \"runtime\" / \"python\"");
+assertContains("src/agent_flow/core/gates.py", "_resolve_gate_command");
+assertContains("scripts/check-context-docs.mjs", 'path.basename(SCRIPT_ROOT) === ".agent-flow"');
 assertPythonContract("profile gate build/typecheck/lint order", `
 from agent_flow.cli import _profile_gate_commands
 
@@ -307,6 +312,13 @@ def require_before(ids, left, right):
         raise AssertionError(f"{left} must run before {right}: {ids}")
 
 typescript = gate_ids("typescript")
+for profile in ("android", "generic", "ios", "nextjs", "node", "python", "react-native", "spring", "typescript"):
+    ids = gate_ids(profile)
+    if "architecture-lint" not in ids:
+        raise AssertionError(f"{profile} missing architecture-lint gate: {ids}")
+generic_commands = [command.command for command in _profile_gate_commands(["generic"])]
+if ("node", "scripts/check-context-docs.mjs") not in generic_commands:
+    raise AssertionError(generic_commands)
 require_before(typescript, "build", "typecheck")
 require_before(typescript, "typecheck", "lint")
 

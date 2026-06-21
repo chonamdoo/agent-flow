@@ -339,7 +339,7 @@ def validate_package_suffix(rel_path: str, text: str, role: dict[str, Any], capt
     expected = suffix
     for key, value in captures.items():
         expected = expected.replace(f"<{key}>", package_segment(value))
-    if not package_name.endswith(expected):
+    if f".{expected}." not in f".{package_name}.":
         return [Finding(rel_path, f"package {package_name} does not match role suffix {expected}")]
     return []
 

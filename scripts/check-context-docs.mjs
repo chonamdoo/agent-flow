@@ -3,7 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const SCRIPT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const ROOT = path.basename(SCRIPT_ROOT) === ".agent-flow" ? path.dirname(SCRIPT_ROOT) : SCRIPT_ROOT;
 const CONTEXT = path.join(ROOT, "CONTEXT.md");
 const CONTEXT_TREE = path.join(ROOT, ".Codex", "context", "tree.jsonl");
 const MAX_HOT_DOC_LINES = 200;

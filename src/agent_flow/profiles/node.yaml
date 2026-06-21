@@ -14,6 +14,10 @@ gates:
     command: ["node", "scripts/check-context-docs.mjs"]
     required: true
     phase: pre-commit
+  - id: architecture-lint
+    command: ["agent-flow", "architecture-lint", "--profile", "node"]
+    required: true
+    phase: pre-commit
   - id: typecheck
     command: ["npm", "run", "typecheck"]
     required: false
