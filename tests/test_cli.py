@@ -1202,7 +1202,7 @@ class CliTest(unittest.TestCase):
             self.assertTrue((project_root / ".agent-flow" / "prompts" / "architecture-review.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "prompts" / "pr-watch.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "prompts" / "merge.md").is_file())
-            self.assertTrue((project_root / ".agent-flow" / "skills" / "domain-grill" / "SKILL.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "skills" / "domain-modeling" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "grill-with-docs" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "product-brief" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "plan-reviewer" / "SKILL.md").is_file())
