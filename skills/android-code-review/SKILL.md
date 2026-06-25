@@ -33,6 +33,7 @@ skills through the current active host only:
 
 - Codex: `~/.codex/skills/{skill}/SKILL.md`
 - Claude: `~/.claude/skills/{skill}/SKILL.md`
+- OMP: `~/.omp/agent/skills/{skill}/SKILL.md`
 
 Do not install, copy, link, vendor, or fallback to another host path. If a
 required local skill is missing, stop approval and report

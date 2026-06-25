@@ -54,6 +54,8 @@ def _template_name(adapter: str) -> str:
         return "codex"
     if adapter.startswith("claude"):
         return "claude"
+    if adapter.startswith("omp"):
+        return "omp"
     return "generic"
 
 

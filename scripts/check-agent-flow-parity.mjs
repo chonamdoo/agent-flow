@@ -97,6 +97,23 @@ function assertSameBodyAfterTitle(a, b) {
   }
 }
 
+function stripFrontmatter(text) {
+  if (!text.startsWith("---\n")) {
+    return text;
+  }
+  const end = text.indexOf("\n---\n", 4);
+  return end === -1 ? text : text.slice(end + "\n---\n".length).replace(/^\n/, "");
+}
+
+function assertSameBodyAfterOptionalFrontmatter(a, b) {
+  const aText = readIfExists(a);
+  const bText = readIfExists(b);
+  if (aText === null || bText === null) return;
+  if (stripFrontmatter(aText) !== stripFrontmatter(bText)) {
+    failures.push(`${a} body differs from ${b}`);
+  }
+}
+
 function assertPhaseOrder(actual, expected, label) {
   let previous = -1;
   for (const phase of expected) {
@@ -185,6 +202,8 @@ for (const installer of ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"]
   assertContains(installer, "function trustedManagedHookScriptName(root, command)");
   assertContains(installer, "normalized === `${normalizedRoot}/.agent-flow/scripts/hooks/${scriptName}`");
   assertContains(installer, "[hooks.state.");
+  assertContains(installer, "function installOmpHooks(root)");
+  assertContains(installer, ".omp\", \"extensions\", \"agent-flow-hooks.ts");
 }
 
 const fullFeatureWorkflowCopies = [
@@ -602,8 +621,14 @@ for (const rel of [
   assertContains(rel, "## Overall");
   assertContains(rel, "verdict: approve");
   assertContains(rel, "verdict: request-changes");
-  assertContains(rel, "보호 브랜치 commit/push와 leader checkout/switch 금지는 Codex에서도 동일");
+  assertContains(rel, "보호 브랜치 commit/push와 leader checkout/switch 금지는 모든 host에서 동일");
 }
+
+assertFile(".Codex/agents/code-reviewer.md");
+assertFile(".claude/agents/code-reviewer.md");
+assertSameBodyAfterOptionalFrontmatter(".Codex/agents/code-reviewer.md", ".claude/agents/code-reviewer.md");
+assertContains(".claude/agents/code-reviewer.md", "name: code-reviewer");
+assertContains(".claude/agents/code-reviewer.md", "description:");
 
 if (CHECK_INSTALLED_COPY) {
   assertContains(".agent-flow/rules/workflow-contract.md", "Required review happens before completion QA");
@@ -746,19 +771,21 @@ function assertCodeReviewerCoversWorkflowMarkers(workflowName, phaseId) {
     failures.push(`workflow export ${workflowName} missing ${phaseId}`);
     return;
   }
-  const reviewerText = readIfExists(".Codex/agents/code-reviewer.md");
-  if (reviewerText === null) return;
-  const reviewerMarkerKeys = new Set(
-    reviewerText
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => /^[A-Za-z0-9_-]+:\s+/.test(line))
-      .map(markerKey),
-  );
-  for (const marker of phase.required_markers ?? []) {
-    const key = markerKey(marker);
-    if (key && !reviewerMarkerKeys.has(key)) {
-      failures.push(`code-reviewer missing marker for ${workflowName}:${phaseId}: ${marker}`);
+  for (const reviewerRel of [".Codex/agents/code-reviewer.md", ".claude/agents/code-reviewer.md"]) {
+    const reviewerText = readIfExists(reviewerRel);
+    if (reviewerText === null) continue;
+    const reviewerMarkerKeys = new Set(
+      stripFrontmatter(reviewerText)
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => /^[A-Za-z0-9_-]+:\s+/.test(line))
+        .map(markerKey),
+    );
+    for (const marker of phase.required_markers ?? []) {
+      const key = markerKey(marker);
+      if (key && !reviewerMarkerKeys.has(key)) {
+        failures.push(`${reviewerRel} missing marker for ${workflowName}:${phaseId}: ${marker}`);
+      }
     }
   }
 }
@@ -1191,8 +1218,8 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
     if (fs.existsSync(path.join(tempRoot, ".agent-flow", "skills", "stale-skill", "SKILL.md"))) {
       failures.push(`${label} force install left stale .agent-flow/skills file`);
     }
-    for (const host of ["claude", "codex"]) {
-      if (fs.existsSync(path.join(tempRoot, `.${host}`, "skills", "demo-stale", "SKILL.md"))) {
+    for (const host of ["claude", "codex", "omp"]) {
+      if (fs.existsSync(hostSkillFile(tempRoot, host, "demo-stale"))) {
         failures.push(`${label} force install left previous-index stale ${host} skill link`);
       }
     }
@@ -1233,8 +1260,9 @@ function assertInstalledHookParity(label, tempRoot) {
   const claude = readJsonSafe(path.join(tempRoot, ".claude", "settings.json"));
   const codex = readJsonSafe(path.join(tempRoot, ".Codex", "hooks.json"));
   const lowerCodex = readJsonSafe(path.join(tempRoot, ".codex", "hooks.json"));
-  if (!claude?.hooks || !codex?.hooks || !lowerCodex?.hooks) {
-    failures.push(`${label} install missing claude or codex hook settings`);
+  const ompExtension = path.join(tempRoot, ".omp", "extensions", "agent-flow-hooks.ts");
+  if (!claude?.hooks || !codex?.hooks || !lowerCodex?.hooks || !fs.existsSync(ompExtension)) {
+    failures.push(`${label} install missing claude, codex, or omp hook settings`);
     return;
   }
   const managedScripts = ["guard-worktree.sh", "guard-protected-branch.sh", "comment-checker.py", "show-phase-status.sh"];
@@ -1263,8 +1291,8 @@ function assertInstalledHookParity(label, tempRoot) {
       (entry.hooks ?? []).some((hook) => String(hook.command ?? "").includes("comment-checker.py")),
     )?.matcher ?? "";
   const claudeMatcher = managedPostToolUseMatcher(claude);
-  if (claudeMatcher !== "^(Write|Edit|MultiEdit)$") {
-    failures.push(`${label} claude PostToolUse matcher must be ^(Write|Edit|MultiEdit)$, got ${claudeMatcher}`);
+  if (!claudeMatcher.includes("apply_patch")) {
+    failures.push(`${label} claude PostToolUse matcher must cover apply_patch, got ${claudeMatcher}`);
   }
   const codexMatcher = managedPostToolUseMatcher(codex);
   if (!codexMatcher.includes("apply_patch")) {
@@ -1273,6 +1301,21 @@ function assertInstalledHookParity(label, tempRoot) {
   const lowerCodexMatcher = managedPostToolUseMatcher(lowerCodex);
   if (!lowerCodexMatcher.includes("apply_patch")) {
     failures.push(`${label} codex-lower PostToolUse matcher must cover apply_patch, got ${lowerCodexMatcher}`);
+  }
+  const ompExtensionText = fs.readFileSync(ompExtension, "utf8");
+  for (const script of managedScripts) {
+    if (!ompExtensionText.includes(script)) {
+      failures.push(`${label} omp extension missing ${script}`);
+    }
+  }
+  if (!ompExtensionText.includes("tool_call") || !ompExtensionText.includes("tool_result") || !ompExtensionText.includes("session_shutdown")) {
+    failures.push(`${label} omp extension missing tool/session hook events`);
+  }
+  if (!ompExtensionText.includes("pi.on(\"context\"") || !ompExtensionText.includes("ctx?.models?.current") || !ompExtensionText.includes("CLAUDE.md") || !ompExtensionText.includes("AGENTS.md")) {
+    failures.push(`${label} omp extension missing model-specific root context routing`);
+  }
+  if (!ompExtensionText.includes("syncRootContextFiles") || !ompExtensionText.includes("modifiedRootContextFiles")) {
+    failures.push(`${label} omp extension missing root AGENTS.md/CLAUDE.md sync`);
   }
 }
 
@@ -1307,8 +1350,8 @@ function seedStaleForceManagedInstall(root) {
   const staleSkill = path.join(root, ".agent-flow", "skills", "stale-skill", "SKILL.md");
   fs.mkdirSync(path.dirname(staleSkill), { recursive: true });
   fs.writeFileSync(staleSkill, "---\nname: stale-skill\n---\n# Stale Skill\n", "utf8");
-  for (const host of ["claude", "codex"]) {
-    const skillDir = path.join(root, `.${host}`, "skills", "agent-flow");
+  for (const host of ["claude", "codex", "omp"]) {
+    const skillDir = path.join(hostSkillRoot(root, host), "agent-flow");
     removePathOrSymlink(skillDir);
     fs.mkdirSync(skillDir, { recursive: true });
     fs.writeFileSync(path.join(skillDir, "SKILL.md"), `---\nname: agent-flow\n---\n# stale ${host}\n`, "utf8");
@@ -1320,8 +1363,8 @@ function seedPreviousIndexStaleHostSkill(root) {
   const staleName = "demo-stale";
   const previousSkillText = "---\nname: demo-stale\n---\n# Previous Demo Stale\n";
   const currentHostText = "---\nname: demo-stale\n---\n# User Modified Demo Stale\n";
-  for (const host of ["claude", "codex"]) {
-    const skillDir = path.join(root, `.${host}`, "skills", staleName);
+  for (const host of ["claude", "codex", "omp"]) {
+    const skillDir = path.join(hostSkillRoot(root, host), staleName);
     removePathOrSymlink(skillDir);
     fs.mkdirSync(skillDir, { recursive: true });
     fs.writeFileSync(path.join(skillDir, "SKILL.md"), currentHostText, "utf8");
@@ -1335,7 +1378,7 @@ function seedPreviousIndexStaleHostSkill(root) {
       name: staleName,
       source: "project",
       path: "skills/demo-stale/SKILL.md",
-      hosts: ["claude", "codex"],
+      hosts: ["claude", "codex", "omp"],
       priority: 50,
       hash: staleHash,
       warnings: [],
@@ -1344,7 +1387,8 @@ function seedPreviousIndexStaleHostSkill(root) {
   index.links = [
     ...(index.links ?? []),
     { name: staleName, host: "claude", path: ".claude/skills/demo-stale", status: "copied" },
-    { name: staleName, host: "codex", path: ".codex/skills/demo-stale", status: "copied" },
+    { name: staleName, host: "codex", path: ".Codex/skills/demo-stale", status: "copied" },
+    { name: staleName, host: "omp", path: ".omp/skills/demo-stale", status: "copied" },
   ];
   fs.writeFileSync(indexPath, `${JSON.stringify(index, null, 2)}\n`, "utf8");
 }
@@ -1534,52 +1578,61 @@ function renderCompletionMarker(marker) {
   return trimmed;
 }
 
+function hostSkillRoot(root, host) {
+  if (host === "codex") {
+    return path.join(root, ".Codex", "skills");
+  }
+  if (host === "omp") {
+    return path.join(root, ".omp", "skills");
+  }
+  return path.join(root, `.${host}`, "skills");
+}
+
+function hostSkillFile(root, host, name) {
+  return path.join(hostSkillRoot(root, host), name, "SKILL.md");
+}
+
 function assertHostSkillParity(root, index, label = "clean install") {
+  const expectedHosts = ["claude", "codex", "omp"];
   const skills = new Map((index.skills ?? []).map((skill) => [skill.name, skill]));
   const links = index.links ?? [];
   for (const [name, skill] of skills) {
     const hosts = new Set(skill.hosts ?? []);
-    if (!hosts.has("claude") || !hosts.has("codex")) {
+    if (!expectedHosts.every((host) => hosts.has(host))) {
       continue;
     }
-    const claudeSkill = path.join(root, ".claude", "skills", name, "SKILL.md");
-    // installer의 hostSkillRoot("codex")는 .Codex로 고정한다. 소문자 .codex는
-    // case-sensitive FS에서 다른 경로가 되어 설치 결과를 못 찾는다.
-    const codexSkill = path.join(root, ".Codex", "skills", name, "SKILL.md");
+    const hostSkillFiles = expectedHosts.map((host) => [host, hostSkillFile(root, host, name)]);
     if (skill.source === "bundled" && !BUNDLED_HOST_SKILL_NAMES.has(name)) {
       // 설치 계약: allowlist 밖 bundled skill은 host link를 만들지 않는다.
-      if (fs.existsSync(claudeSkill) || fs.existsSync(codexSkill)) {
-        failures.push(`${label} unexpected host skill link for bundled ${name}`);
+      for (const [host, skillFile] of hostSkillFiles) {
+        if (fs.existsSync(skillFile)) {
+          failures.push(`${label} unexpected ${host} skill link for bundled ${name}`);
+        }
       }
       continue;
     }
     const sourceSkill = path.join(root, skill.path);
-    if (!fs.existsSync(claudeSkill)) {
-      failures.push(`${label} missing Claude skill link for ${name}`);
-      continue;
-    }
-    if (!fs.existsSync(codexSkill)) {
-      failures.push(`${label} missing Codex skill link for ${name}`);
-      continue;
-    }
     if (!fs.existsSync(sourceSkill)) {
       failures.push(`${label} missing project skill source for ${name}`);
       continue;
     }
-    if (fs.readFileSync(claudeSkill, "utf8") !== fs.readFileSync(codexSkill, "utf8")) {
-      failures.push(`${label} Claude/Codex skill content differs for ${name}`);
+    for (const [host, skillFile] of hostSkillFiles) {
+      if (!fs.existsSync(skillFile)) {
+        failures.push(`${label} missing ${host} skill link for ${name}`);
+        continue;
+      }
+      if (fs.readFileSync(skillFile, "utf8") !== fs.readFileSync(sourceSkill, "utf8")) {
+        failures.push(`${label} ${host}/project skill content differs for ${name}`);
+      }
     }
-    if (fs.readFileSync(claudeSkill, "utf8") !== fs.readFileSync(sourceSkill, "utf8")) {
-      failures.push(`${label} host/project skill content differs for ${name}`);
-    }
-    const claudeLink = links.find((link) => link.name === name && link.host === "claude");
-    const codexLink = links.find((link) => link.name === name && link.host === "codex");
-    if (!claudeLink || !codexLink) {
-      failures.push(`${label} missing Claude/Codex index link pair for ${name}`);
+    const hostLinks = expectedHosts.map((host) => links.find((link) => link.name === name && link.host === host));
+    if (hostLinks.some((link) => !link)) {
+      failures.push(`${label} missing host index link set for ${name}`);
       continue;
     }
-    if (claudeLink.status !== codexLink.status) {
-      failures.push(`${label} Claude/Codex link status differs for ${name}: claude=${claudeLink.status} codex=${codexLink.status}`);
+    const statuses = new Set(hostLinks.map((link) => link.status));
+    if (statuses.size !== 1) {
+      failures.push(`${label} host link status differs for ${name}: ${hostLinks.map((link) => `${link.host}=${link.status}`).join(" ")}`);
     }
   }
 }

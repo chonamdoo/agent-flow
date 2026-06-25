@@ -1,6 +1,6 @@
 ---
 name: comment-authoring-discipline
-description: Use as the final comment-quality pass before final-review, multi-review, or architecture-review after code changes. Applies equally in Codex and Claude for Python, Kotlin, React Web, React Native, iOS, Swift, and SwiftUI.
+description: Use as the final comment-quality pass before final-review, multi-review, or architecture-review after code changes. Applies equally in Codex, Claude, and OMP for Python, Kotlin, React Web, React Native, iOS, Swift, and SwiftUI.
 ---
 
 # Comment Authoring Discipline

@@ -221,6 +221,7 @@ def test_skips_generated_artifact_and_memory_paths() -> None:
         ".agent-flow/logs/hook.py",
         ".agent-flow/indexes/comments.py",
         ".Codex/memory/session.py",
+        ".omp/memory/session.py",
         r".git\agent-flow\worktrees\feat-x\.agent-flow\runs\full-feature\smoke\artifacts\design.py",
     ]
     for file_path in paths:
@@ -263,7 +264,7 @@ def test_apply_patch_skips_generated_artifact_path() -> None:
     assert result.stderr == ""
 
 
-def test_codex_and_claude_payloads_share_path_scope_for_write_edit_multiedit() -> None:
+def test_codex_claude_and_omp_payloads_share_path_scope_for_write_edit_multiedit() -> None:
     artifact_path = ".git/agent-flow/worktrees/feat-x/.agent-flow/runs/full-feature/smoke/artifacts/design.py"
     source_path = "src/demo.py"
     cases = [

@@ -17,6 +17,7 @@ def list_host_providers() -> list[HostProviderStatus]:
         HostProviderStatus(name="manual", command="manual", available=True),
         _host_provider("codex-session", executable="codex", env_var="CODEX_HOME"),
         _host_provider("claude-session", executable="claude", env_var="CLAUDECODE"),
+        _host_provider("omp-session", executable="omp", env_var="OMP_PROFILE"),
     ]
 
 

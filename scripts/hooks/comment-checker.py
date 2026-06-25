@@ -44,6 +44,7 @@ EXCLUDED_AGENT_FLOW_DIRS = {
 EXCLUDED_TOOL_MEMORY_DIRS = {
     ".claude",
     ".codex",
+    ".omp",
     ".gemini",
 }
 
@@ -90,7 +91,7 @@ def main() -> int:
     if not findings:
         return 0
 
-    # exit 2일 때 Claude/Codex는 stderr만 모델에 전달한다. stdout은 무시된다.
+    # exit 2일 때 Claude/Codex/OMP는 stderr만 모델에 전달한다. stdout은 무시된다.
     print("comment-checker: newly added low-value comments detected", file=sys.stderr)
     for file_path, line, text in findings[:20]:
         print(f"- {file_path}:{line}: {text}", file=sys.stderr)

@@ -14,8 +14,8 @@ Async execution:
     the host AI can aggregate whatever completed into `final-review.md`.
 
 Override:
-  AGENT_FLOW_REVIEWERS="claude,codex" opts into optional providers.
-  AGENT_FLOW_REVIEWERS="claude" pins all angles to Claude plus fallback guard.
+  AGENT_FLOW_REVIEWERS="claude,codex,omp" opts into optional providers.
+  AGENT_FLOW_REVIEWERS="omp" pins all angles to OMP plus fallback guard.
 """
 from __future__ import annotations
 

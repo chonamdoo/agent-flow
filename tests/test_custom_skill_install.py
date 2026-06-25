@@ -56,11 +56,17 @@ def test_project_skill_links_all_hosts_and_index_omits_body(tmp_path: Path) -> N
     result = _install(project)
 
     assert result.returncode == 0, result.stderr
-    for host in ("claude", "codex"):
-        assert (project / f".{host}" / "skills" / "my-skill" / "SKILL.md").exists()
+    host_roots = {
+        "claude": project / ".claude" / "skills",
+        "codex": project / ".Codex" / "skills",
+        "omp": project / ".omp" / "skills",
+    }
+    for host_root in host_roots.values():
+        assert (host_root / "my-skill" / "SKILL.md").exists()
     index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
     selected = next(skill for skill in index["skills"] if skill["name"] == "my-skill")
     assert selected["source"] == "project"
+    assert set(selected["hosts"]) == {"claude", "codex", "omp"}
     assert "BODY SHOULD NOT BE IN INDEX" not in json.dumps(index)
 
 
@@ -386,6 +392,20 @@ def test_host_limited_skill_links_only_requested_host(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert (project / ".Codex" / "skills" / "codex-only" / "SKILL.md").exists()
     assert not (project / ".claude" / "skills" / "codex-only").exists()
+    assert not (project / ".omp" / "skills" / "codex-only").exists()
+
+
+def test_host_limited_skill_links_only_omp(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    _skill(project / "skills" / "omp-only", "OMP", hosts="[omp]")
+
+    result = _install(project)
+
+    assert result.returncode == 0, result.stderr
+    assert (project / ".omp" / "skills" / "omp-only" / "SKILL.md").exists()
+    assert not (project / ".Codex" / "skills" / "omp-only").exists()
+    assert not (project / ".claude" / "skills" / "omp-only").exists()
 
 
 
@@ -411,6 +431,7 @@ def test_host_limited_skill_accepts_yaml_block_list(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert (project / ".Codex" / "skills" / "codex-block-list" / "SKILL.md").exists()
     assert not (project / ".claude" / "skills" / "codex-block-list").exists()
+    assert not (project / ".omp" / "skills" / "codex-block-list").exists()
 
 
 def test_existing_user_modified_skill_is_not_overwritten(tmp_path: Path) -> None:
@@ -570,6 +591,7 @@ def test_android_upstream_skills_are_not_installed_or_vendored(tmp_path: Path) -
     assert not (project / ".agent-flow" / "vendor" / "chrisbanes-skills").exists()
     assert not (project / ".Codex" / "skills" / "edge-to-edge").exists()
     assert not (project / ".claude" / "skills" / "edge-to-edge").exists()
+    assert not (project / ".omp" / "skills" / "edge-to-edge").exists()
     assert not (project / ".agents" / "skills" / "edge-to-edge").exists()
 
     kit = json.loads((project / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
@@ -600,6 +622,7 @@ def test_android_skill_policy_is_active_host_local_only() -> None:
         assert "active_host_only: true" in text
         assert "codex: ~/.codex/skills/{skill}/SKILL.md" in text
         assert "claude: ~/.claude/skills/{skill}/SKILL.md" in text
+        assert "omp: ~/.omp/agent/skills/{skill}/SKILL.md" in text
         assert "missing local android_skills: <skill>" in text
         assert "missing local chrisbanes_skills: <skill>" in text
         assert "vendor_dir" not in text
@@ -610,6 +633,7 @@ def test_android_skill_policy_is_active_host_local_only() -> None:
         text = path.read_text(encoding="utf-8")
         assert "~/.codex/skills/{skill}/SKILL.md" in text
         assert "~/.claude/skills/{skill}/SKILL.md" in text
+        assert "~/.omp/agent/skills/{skill}/SKILL.md" in text
         assert "falling back to" not in text
         assert ".agent-flow/vendor/android-skills" not in text
         assert ".agent-flow/vendor/chrisbanes-skills" not in text

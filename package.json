@@ -22,6 +22,7 @@
     "skills",
     "scripts",
     ".Codex",
+    ".claude",
     "src",
     "pyproject.toml",
     "README.md"
