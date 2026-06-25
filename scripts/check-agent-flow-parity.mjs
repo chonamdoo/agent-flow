@@ -1308,7 +1308,7 @@ function assertInstalledHookParity(label, tempRoot) {
       failures.push(`${label} omp extension missing ${script}`);
     }
   }
-  if (!ompExtensionText.includes("tool_call") || !ompExtensionText.includes("tool_result") || !ompExtensionText.includes("session_stop")) {
+  if (!ompExtensionText.includes("tool_call") || !ompExtensionText.includes("tool_result") || !ompExtensionText.includes("session_shutdown")) {
     failures.push(`${label} omp extension missing tool/session hook events`);
   }
   if (!ompExtensionText.includes("pi.on(\"context\"") || !ompExtensionText.includes("ctx?.models?.current") || !ompExtensionText.includes("CLAUDE.md") || !ompExtensionText.includes("AGENTS.md")) {

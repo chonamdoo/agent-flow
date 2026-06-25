@@ -49,7 +49,7 @@ def detect_host_cli() -> str | None:
     바이너리가 설치돼 있으면 해당 host를 반환할 수 있다. 호스트 확정 신호가
     필요한 호출자는 env 힌트(OMP_PROFILE/CLAUDECODE/CODEX_CLI 등)가 있는 경우만 신뢰한다.
     """
-    if os.environ.get("OMP_PROFILE") or os.environ.get("PI_CODING_AGENT_DIR"):
+    if os.environ.get("OMP_PROFILE"):
         return "omp"
     if os.environ.get("CLAUDECODE") or os.environ.get("CLAUDE_CLI"):
         return "claude"

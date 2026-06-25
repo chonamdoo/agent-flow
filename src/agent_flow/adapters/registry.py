@@ -5,7 +5,7 @@ import shutil
 
 
 def detect_adapter() -> str:
-    if os.environ.get("OMP_PROFILE") or os.environ.get("PI_CODING_AGENT_DIR"):
+    if os.environ.get("OMP_PROFILE"):
         return "omp-session"
     if os.environ.get("CODEX_CLI") or os.environ.get("CODEX_HOME"):
         return "codex-session"

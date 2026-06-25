@@ -2669,8 +2669,8 @@ export default function agentFlowHooks(pi) {
     }
   });
 
-  pi.on("session_stop", async (_event, ctx) => {
-    const result = await runHook("show-phase-status.sh", { hook_event_name: "session_stop" }, ctx);
+  pi.on("session_shutdown", async (_event, ctx) => {
+    const result = await runHook("show-phase-status.sh", { hook_event_name: "session_shutdown" }, ctx);
     const message = parseSystemMessage(result.reason);
     if (message && ctx?.hasUI && typeof ctx.ui?.notify === "function") {
       await ctx.ui.notify(message, "info");

@@ -1325,6 +1325,7 @@ class CliTest(unittest.TestCase):
             self.assertIn("guard-protected-branch.sh", omp_extension_text)
             self.assertIn("comment-checker.py", omp_extension_text)
             self.assertIn("show-phase-status.sh", omp_extension_text)
+            self.assertIn("session_shutdown", omp_extension_text)
             self.assertIn('pi.on("context"', omp_extension_text)
             self.assertIn("ctx?.models?.current", omp_extension_text)
             self.assertIn("CLAUDE.md", omp_extension_text)
@@ -4899,6 +4900,38 @@ if (!codexText.includes(path.join(process.cwd(), "AGENTS.md"))) {
             with mock.patch.dict("agent_flow.cli_detect.os.environ", {}, clear=True):
                 self.assertEqual(detect_host_cli(), "codex")
 
+    def test_storage_dir_env_does_not_select_omp_host(self) -> None:
+        from agent_flow.adapters.registry import detect_adapter
+        from agent_flow.cli_detect import detect_host_cli
+
+        with mock.patch("agent_flow.adapters.registry.shutil.which", return_value=None):
+            with mock.patch.dict(
+                "agent_flow.adapters.registry.os.environ",
+                {"PI_CODING_AGENT_DIR": "/tmp/omp"},
+                clear=True,
+            ):
+                self.assertEqual(detect_adapter(), "manual")
+            with mock.patch.dict(
+                "agent_flow.adapters.registry.os.environ",
+                {"PI_CODING_AGENT_DIR": "/tmp/omp", "CODEX_HOME": "/tmp/codex"},
+                clear=True,
+            ):
+                self.assertEqual(detect_adapter(), "codex-session")
+
+        with mock.patch("agent_flow.cli_detect.shutil.which", return_value=None):
+            with mock.patch.dict(
+                "agent_flow.cli_detect.os.environ",
+                {"PI_CODING_AGENT_DIR": "/tmp/omp"},
+                clear=True,
+            ):
+                self.assertIsNone(detect_host_cli())
+            with mock.patch.dict(
+                "agent_flow.cli_detect.os.environ",
+                {"PI_CODING_AGENT_DIR": "/tmp/omp", "CODEX_HOME": "/tmp/codex"},
+                clear=True,
+            ):
+                self.assertEqual(detect_host_cli(), "codex")
+
     def test_provider_list_treats_host_environment_as_available(self) -> None:
         output = io.StringIO()
         with mock.patch("agent_flow.providers.host.shutil.which", return_value=None):
@@ -4908,10 +4941,16 @@ if (!codexText.includes(path.join(process.cwd(), "AGENTS.md"))) {
         self.assertIn("claude-session available command=claude", output.getvalue())
         output = io.StringIO()
         with mock.patch("agent_flow.providers.host.shutil.which", return_value=None):
-            with mock.patch.dict("agent_flow.providers.host.os.environ", {"PI_CODING_AGENT_DIR": "/tmp/omp"}, clear=True):
+            with mock.patch.dict("agent_flow.providers.host.os.environ", {"OMP_PROFILE": "default"}, clear=True):
                 with contextlib.redirect_stdout(output):
                     self.assertEqual(main(["provider", "list"]), 0)
         self.assertIn("omp-session available command=omp", output.getvalue())
+        output = io.StringIO()
+        with mock.patch("agent_flow.providers.host.shutil.which", return_value=None):
+            with mock.patch.dict("agent_flow.providers.host.os.environ", {"PI_CODING_AGENT_DIR": "/tmp/omp"}, clear=True):
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(main(["provider", "list"]), 0)
+        self.assertIn("omp-session unavailable command=omp", output.getvalue())
 
     def test_status_reports_latest_run(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
