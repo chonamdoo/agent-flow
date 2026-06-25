@@ -5,8 +5,16 @@ import shutil
 
 
 def detect_adapter() -> str:
-    if os.environ.get("CODEX_HOME") or shutil.which("codex"):
+    if os.environ.get("OMP_PROFILE") or os.environ.get("PI_CODING_AGENT_DIR"):
+        return "omp-session"
+    if os.environ.get("CODEX_CLI") or os.environ.get("CODEX_HOME"):
         return "codex-session"
-    if os.environ.get("CLAUDECODE") or shutil.which("claude"):
+    if os.environ.get("CLAUDECODE") or os.environ.get("CLAUDE_CLI"):
+        return "claude-session"
+    if shutil.which("codex"):
+        return "codex-session"
+    if shutil.which("omp"):
+        return "omp-session"
+    if shutil.which("claude"):
         return "claude-session"
     return "manual"

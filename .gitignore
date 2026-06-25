@@ -1,6 +1,8 @@
 .agent-flow/
 .codex/
-.claude/
+.claude/*
+!.claude/agents/
+!.claude/agents/code-reviewer.md
 /AGENTS.md
 /CLAUDE.md
 /AGENTS/

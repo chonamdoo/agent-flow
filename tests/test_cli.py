@@ -40,6 +40,13 @@ def _node_test_env(**overrides: str) -> dict[str, str]:
     return env
 
 
+def _strip_markdown_frontmatter(text: str) -> str:
+    if not text.startswith("---\n"):
+        return text
+    end = text.find("\n---\n", 4)
+    return text if end == -1 else text[end + len("\n---\n") :].lstrip("\n")
+
+
 def _write_minimal_context_docs(root: Path) -> None:
     root.joinpath("CONTEXT.md").write_text(
         "# Context\n\n## Current Vocabulary\n\n- Project\n\n## Future Vocabulary\n\n- Worker\n",
@@ -91,6 +98,24 @@ class CliTest(unittest.TestCase):
                 "Adapter:",
                 (run_dir / "prompts" / "explore.md").read_text(encoding="utf-8"),
             )
+
+    def test_render_stage_prompt_uses_omp_template(self) -> None:
+        prompt = render_stage_prompt(
+            PromptContext(
+                adapter="omp-session",
+                stage_id="review",
+                role="Reviewer",
+                workflow_id="default",
+                run_id="run-1",
+                replica=1,
+                replicas=1,
+                task="Check parity.",
+            )
+        )
+
+        self.assertIn("# OMP Task Stage: review", prompt)
+        self.assertIn("Use the task tool", prompt)
+
 
     def test_cli_runs_from_outside_source_tree_with_packaged_resources(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -423,6 +448,9 @@ class CliTest(unittest.TestCase):
         self.assertIn("spawn at least two Codex reviewer sub-agents", adapter._hint)
         self.assertIn("reviewer-source: sub-agent", adapter._hint)
         self.assertIn("close that", adapter._hint)
+        omp_adapter = HostedAdapter("omp")
+        self.assertIn("spawn at least two", omp_adapter._hint)
+        self.assertIn("OMP reviewer sub-agents", omp_adapter._hint)
 
         with mock.patch("agent_flow.adapters.hosted.resolve_review_clis", return_value=[]):
             block = _multi_reviewer_block()
@@ -1237,8 +1265,15 @@ class CliTest(unittest.TestCase):
                 (project_root / ".agent-flow" / "templates" / "_shared" / "review" / "architecture-design.md").is_file()
             )
             self.assertTrue((project_root / ".agent-flow" / "templates" / "generic" / "stage.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "templates" / "omp" / "stage.md").is_file())
             self.assertTrue((project_root / ".Codex" / "agents" / "code-reviewer.md").is_file())
             code_reviewer = (project_root / ".Codex" / "agents" / "code-reviewer.md").read_text(encoding="utf-8")
+            self.assertTrue((project_root / ".claude" / "agents" / "code-reviewer.md").is_file())
+            claude_code_reviewer = (project_root / ".claude" / "agents" / "code-reviewer.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertEqual(code_reviewer, _strip_markdown_frontmatter(claude_code_reviewer))
+            self.assertIn("name: code-reviewer", claude_code_reviewer)
             self.assertTrue((project_root / ".Codex" / "context" / "tree.jsonl").is_file())
             self.assertIn("verdict: approve | request-changes", code_reviewer)
             self.assertIn("project-local-skills: checked|n/a", code_reviewer)
@@ -1283,6 +1318,21 @@ class CliTest(unittest.TestCase):
                 ]
                 self.assertIn(expected_comment_checker, codex_hook_commands)
                 self.assertNotIn(str(Path(__file__).resolve().parents[1]), "\n".join(codex_hook_commands))
+            omp_extension = project_root / ".omp" / "extensions" / "agent-flow-hooks.ts"
+            self.assertTrue(omp_extension.is_file())
+            omp_extension_text = omp_extension.read_text(encoding="utf-8")
+            self.assertIn("guard-worktree.sh", omp_extension_text)
+            self.assertIn("guard-protected-branch.sh", omp_extension_text)
+            self.assertIn("comment-checker.py", omp_extension_text)
+            self.assertIn("show-phase-status.sh", omp_extension_text)
+            self.assertIn('pi.on("context"', omp_extension_text)
+            self.assertIn("ctx?.models?.current", omp_extension_text)
+            self.assertIn("CLAUDE.md", omp_extension_text)
+            self.assertIn("AGENTS.md", omp_extension_text)
+            self.assertIn("syncRootContextFiles", omp_extension_text)
+            self.assertIn("modifiedRootContextFiles", omp_extension_text)
+            self.assertNotIn(str(Path(__file__).resolve().parents[1]), omp_extension_text)
+            self.assertTrue((project_root / ".omp" / "skills" / "agent-flow" / "SKILL.md").exists())
             self.assertTrue(
                 os.access(project_root / ".agent-flow" / "scripts" / "hooks" / "comment-checker.py", os.X_OK)
             )
@@ -1672,7 +1722,7 @@ class CliTest(unittest.TestCase):
             self.assertIn("next_command", payload["systemMessage"])
 
     def test_guard_hooks_report_block_reason_on_stderr(self) -> None:
-        # exit 2일 때 Claude/Codex는 stderr만 모델에 전달한다. stdout은 무시된다.
+        # exit 2일 때 Claude/Codex/OMP는 stderr만 모델에 전달한다. stdout은 무시된다.
         hooks_dir = Path(__file__).resolve().parents[1] / "scripts" / "hooks"
         with tempfile.TemporaryDirectory() as temp_dir:
             repo = Path(temp_dir) / "repo"
@@ -1799,6 +1849,7 @@ class CliTest(unittest.TestCase):
             ".claude/skills",
             ".codex/skills",
             ".Codex/skills",
+            ".omp/skills",
             ".gemini/skills",
             ".gemini/antigravity/skills",
         )
@@ -2333,11 +2384,135 @@ class CliTest(unittest.TestCase):
                 self.assertNotIn("android-mvi-feature", skill_names)
                 self.assertNotIn("compose-state-authoring", skill_names)
                 self.assertNotIn("edge-to-edge", skill_names)
-                self.assertFalse((project_root / ".codex" / "skills" / "android-mvi-feature").exists())
-                self.assertFalse((project_root / ".codex" / "skills" / "compose-state-authoring").exists())
-                self.assertFalse((project_root / ".codex" / "skills" / "edge-to-edge").exists())
+                for host_root in (project_root / ".Codex" / "skills", project_root / ".codex" / "skills", project_root / ".omp" / "skills"):
+                    self.assertFalse((host_root / "android-mvi-feature").exists())
+                    self.assertFalse((host_root / "compose-state-authoring").exists())
+                    self.assertFalse((host_root / "edge-to-edge").exists())
 
-    def test_node_installers_link_default_host_skills_to_claude_and_codex(self) -> None:
+    def test_node_installers_copy_claude_code_reviewer_from_codex_source(self) -> None:
+        installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            node = _node_executable()
+            for installer_name in installers:
+                with self.subTest(installer=installer_name):
+                    project_root = root / f"{installer_name}-reviewer-agent"
+                    project_root.mkdir()
+                    result = subprocess.run(
+                        (
+                            node,
+                            str(Path(__file__).resolve().parents[1] / "bin" / installer_name),
+                            "install",
+                        ),
+                        cwd=project_root,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    codex_reviewer = (project_root / ".Codex" / "agents" / "code-reviewer.md").read_text(
+                        encoding="utf-8"
+                    )
+                    claude_reviewer = (project_root / ".claude" / "agents" / "code-reviewer.md").read_text(
+                        encoding="utf-8"
+                    )
+                    self.assertEqual(codex_reviewer, _strip_markdown_frontmatter(claude_reviewer))
+                    self.assertIn("name: code-reviewer", claude_reviewer)
+
+    def test_node_installers_omp_hook_syncs_root_context_files(self) -> None:
+        installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            node = _node_executable()
+            for installer_name in installers:
+                with self.subTest(installer=installer_name):
+                    project_root = root / f"{installer_name}-omp-context-sync"
+                    project_root.mkdir()
+                    result = subprocess.run(
+                        (
+                            node,
+                            str(Path(__file__).resolve().parents[1] / "bin" / installer_name),
+                            "install",
+                        ),
+                        cwd=project_root,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+                    (project_root / "CLAUDE.md").write_text("claude-updated\n", encoding="utf-8")
+                    (project_root / "AGENTS.md").write_text("agents-old\n", encoding="utf-8")
+                    extension_ts = project_root / ".omp" / "extensions" / "agent-flow-hooks.ts"
+                    extension_mjs = project_root / ".omp" / "extensions" / "agent-flow-hooks.mjs"
+                    extension_mjs.write_text(extension_ts.read_text(encoding="utf-8"), encoding="utf-8")
+                    exercise = project_root / "exercise-omp-hooks.mjs"
+                    exercise.write_text(
+                        """
+import fs from "node:fs";
+import path from "node:path";
+import agentFlowHooks from "./.omp/extensions/agent-flow-hooks.mjs";
+
+const handlers = new Map();
+agentFlowHooks({
+  setLabel() {},
+  on(name, handler) {
+    handlers.set(name, handler);
+  },
+});
+
+if (!handlers.has("tool_result") || !handlers.has("context")) {
+  throw new Error("missing OMP hook handlers");
+}
+
+await handlers.get("tool_result")(
+  { toolName: "Write", input: { file_path: "CLAUDE.md" } },
+  { cwd: process.cwd() },
+);
+if (fs.readFileSync("AGENTS.md", "utf8") !== fs.readFileSync("CLAUDE.md", "utf8")) {
+  throw new Error("CLAUDE.md did not sync to AGENTS.md");
+}
+
+fs.writeFileSync("AGENTS.md", "agents-updated\\n", "utf8");
+await handlers.get("tool_result")(
+  { toolName: "Edit", input: { path: "AGENTS.md" } },
+  { cwd: process.cwd() },
+);
+if (fs.readFileSync("CLAUDE.md", "utf8") !== fs.readFileSync("AGENTS.md", "utf8")) {
+  throw new Error("AGENTS.md did not sync to CLAUDE.md");
+}
+
+const claudeContext = await handlers.get("context")(
+  { messages: [] },
+  { cwd: process.cwd(), models: { current() { return { provider: "anthropic", id: "claude-sonnet" }; } } },
+);
+const claudeText = claudeContext.messages.at(-1).content[0].text;
+if (!claudeText.includes(path.join(process.cwd(), "CLAUDE.md"))) {
+  throw new Error("Claude model did not receive CLAUDE.md");
+}
+
+const codexContext = await handlers.get("context")(
+  { messages: [] },
+  { cwd: process.cwd(), models: { current() { return { provider: "openai", id: "gpt-5" }; } } },
+);
+const codexText = codexContext.messages.at(-1).content[0].text;
+if (!codexText.includes(path.join(process.cwd(), "AGENTS.md"))) {
+  throw new Error("Codex/OpenAI model did not receive AGENTS.md");
+}
+""",
+                        encoding="utf-8",
+                    )
+                    exercise_result = subprocess.run(
+                        (node, str(exercise)),
+                        cwd=project_root,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(exercise_result.returncode, 0, exercise_result.stderr)
+
+    def test_node_installers_link_default_host_skills_to_claude_codex_and_omp(self) -> None:
         installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -2371,12 +2546,14 @@ class CliTest(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertTrue((project_root / ".claude" / "skills" / "default-host-skill" / "SKILL.md").exists())
                     self.assertTrue((project_root / ".Codex" / "skills" / "default-host-skill" / "SKILL.md").exists())
+                    self.assertTrue((project_root / ".omp" / "skills" / "default-host-skill" / "SKILL.md").exists())
                     index = json.loads(
                         (project_root / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8")
                     )
                     selected = next(skill for skill in index["skills"] if skill["name"] == "default-host-skill")
                     self.assertIn("claude", selected["hosts"])
                     self.assertIn("codex", selected["hosts"])
+                    self.assertIn("omp", selected["hosts"])
                     self.assertNotIn("gemini", selected["hosts"])
                     self.assertNotIn("antigravity", selected["hosts"])
 
@@ -4691,8 +4868,36 @@ class CliTest(unittest.TestCase):
                 "manual available command=manual",
                 "codex-session available command=/usr/local/bin/codex",
                 "claude-session unavailable command=claude",
+                "omp-session unavailable command=omp",
             ],
         )
+
+    def test_auto_adapter_prefers_host_env_before_omp_path_fallback(self) -> None:
+        from agent_flow.adapters.registry import detect_adapter
+
+        with mock.patch("agent_flow.adapters.registry.shutil.which") as which:
+            which.side_effect = lambda name: f"/usr/local/bin/{name}" if name == "omp" else None
+            with mock.patch.dict("agent_flow.adapters.registry.os.environ", {"CODEX_HOME": "/tmp/codex"}, clear=True):
+                self.assertEqual(detect_adapter(), "codex-session")
+
+        with mock.patch("agent_flow.adapters.registry.shutil.which") as which:
+            which.side_effect = lambda name: f"/usr/local/bin/{name}" if name == "omp" else None
+            with mock.patch.dict("agent_flow.adapters.registry.os.environ", {"CLAUDECODE": "1"}, clear=True):
+                self.assertEqual(detect_adapter(), "claude-session")
+
+    def test_auto_adapter_prefers_codex_path_before_omp_path_fallback(self) -> None:
+        from agent_flow.adapters.registry import detect_adapter
+        from agent_flow.cli_detect import detect_host_cli
+
+        def both_codex_and_omp(name: str) -> str | None:
+            return f"/usr/local/bin/{name}" if name in {"codex", "omp"} else None
+
+        with mock.patch("agent_flow.adapters.registry.shutil.which", side_effect=both_codex_and_omp):
+            with mock.patch.dict("agent_flow.adapters.registry.os.environ", {}, clear=True):
+                self.assertEqual(detect_adapter(), "codex-session")
+        with mock.patch("agent_flow.cli_detect.shutil.which", side_effect=both_codex_and_omp):
+            with mock.patch.dict("agent_flow.cli_detect.os.environ", {}, clear=True):
+                self.assertEqual(detect_host_cli(), "codex")
 
     def test_provider_list_treats_host_environment_as_available(self) -> None:
         output = io.StringIO()
@@ -4701,6 +4906,12 @@ class CliTest(unittest.TestCase):
                 with contextlib.redirect_stdout(output):
                     self.assertEqual(main(["provider", "list"]), 0)
         self.assertIn("claude-session available command=claude", output.getvalue())
+        output = io.StringIO()
+        with mock.patch("agent_flow.providers.host.shutil.which", return_value=None):
+            with mock.patch.dict("agent_flow.providers.host.os.environ", {"PI_CODING_AGENT_DIR": "/tmp/omp"}, clear=True):
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(main(["provider", "list"]), 0)
+        self.assertIn("omp-session available command=omp", output.getvalue())
 
     def test_status_reports_latest_run(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

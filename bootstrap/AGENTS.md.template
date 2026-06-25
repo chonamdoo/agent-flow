@@ -31,7 +31,7 @@ active run이 있으면 status 출력의 `next_command`를 그대로 실행하�
 - 모든 guide를 항상 로드하지 말고 변경 파일에 필요한 guide만 읽습니다.
 - 프로젝트 skill은 `skills/<name>/SKILL.md` 또는 private `.agent-flow/local-skills/<name>/SKILL.md`에 둡니다.
 - install/bootstrap 후 `.agent-flow/skills/index.json` metadata를 보고 필요한 skill만 읽습니다. 모든 SKILL.md 전문을 항상 읽지 않습니다.
-- Claude/Codex 프로젝트 skill 경로는 leader checkout의 install 결과를 따릅니다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않습니다.
+- Claude/Codex/OMP 프로젝트 skill 경로는 leader checkout의 install 결과를 따릅니다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않습니다.
 
 코드 생성·수정·코드리뷰 phase에서는 `code-generation-discipline`을 적용합니다. active profile, installed skill index, changed files, task scope로 필요한 profile skill만 결정하고, 관련 없는 platform skill은 요구하지 않습니다.
 Android/Kotlin/Compose/KMP 변경 때만 Android profile의 `android_skills`와 `chrisbanes_skills`에서 변경 영역과 맞는 로컬 설치 skill을 plain text로 읽습니다. React Native의 `android/` native code를 직접 변경한 경우에도 Android profile mapping을 추가 적용합니다. 필요한 skill이 현재 host에 없으면 설치하지 말고 `missing local <group>: <skill>`와 source URL을 사용자에게 알려 설치를 요청합니다.
@@ -54,7 +54,7 @@ git worktree는 프로젝트 루트 내부의 `.agent-flow/worktrees/<name>/`에
 기본 이름은 `.agent-flow/worktrees/feat-<slug>/`, 기본 브랜치는 `feat/<slug>`입니다.
 기준 브랜치는 checkout/switch 하지 말고 `git worktree add -b feat/<slug> .agent-flow/worktrees/feat-<slug>/ main`처럼 마지막 인자로 지정합니다.
 브랜치만 만들지 않습니다 — 물리적 worktree가 병렬 작업 격리에 필수입니다.
-Claude hook이 자동 차단하는 보호 브랜치 commit/push와 leader checkout/switch 금지는 Codex에서도 동일하게 지킵니다.
+Claude/Codex/OMP hook이 자동 차단하는 보호 브랜치 commit/push와 leader checkout/switch 금지는 모든 host에서 동일하게 지킵니다.
 사용자가 외부 경로를 명시적으로 지정한 경우가 아니면 프로젝트 루트 옆에 형제 폴더를 만들지 않습니다.
 
 ### Memory / Lore

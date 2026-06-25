@@ -10,6 +10,7 @@ Resolve them through the current active host only:
 
 - Codex: `~/.codex/skills/{skill}/SKILL.md`
 - Claude: `~/.claude/skills/{skill}/SKILL.md`
+- OMP: `~/.omp/agent/skills/{skill}/SKILL.md`
 
 Read selected `SKILL.md` files as plain text. Do not install, copy, link, or
 vendor Android skills. Do not load the same skill from multiple host paths. If a

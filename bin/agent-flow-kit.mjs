@@ -16,6 +16,7 @@ const RUNTIME_PYTHON_RELATIVE = path.join(".agent-flow", "runtime", "python");
 const installArgs = process.argv.slice(3);
 const forceManaged = installArgs.includes("--force-managed");
 let cachedFullFeatureWorkflow = null;
+const PROJECT_SKILL_HOSTS = Object.freeze(["claude", "codex", "omp"]);
 const BUNDLED_HOST_SKILL_NAMES = new Set([
   "agent-flow",
   "android-appshell-error-handling",
@@ -160,6 +161,7 @@ function installProject() {
     removeManagedDirIfSame(path.join(KIT_ROOT, "scripts"), path.join(root, "scripts"), forceManaged);
   }
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "agents"), path.join(root, ".Codex", "agents"), forceManaged);
+  copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".claude", "agents"), path.join(root, ".claude", "agents"), forceManaged);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "rules", "context"), path.join(root, ".Codex", "rules", "context"), forceManaged);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "context"), path.join(root, ".Codex", "context"), forceManaged);
   installCodexHooks(root);
@@ -191,6 +193,7 @@ function installProject() {
     ".codex/",
     ".Codex/",
     ".claude/",
+    ".omp/",
     "AGENTS.md",
     "CLAUDE.md",
     "AGENTS/",
@@ -208,6 +211,7 @@ function installProject() {
   upsertBootstrapBlock(path.join(root, "CLAUDE.md"), "CLAUDE.md");
   makeHooksExecutable(root);
   installClaudeHooks(root);
+  installOmpHooks(root);
 
   payload.skill_index = {
     path: ".agent-flow/skills/index.json",
@@ -611,13 +615,13 @@ function resolveInstallRoot(start) {
 
 function resolveManagedWorktreeRoot(start) {
   const parts = start.split(path.sep);
-  const markers = new Set([".agent-flow", ".codex", ".Codex"]);
+  const markers = new Set([".agent-flow", ".codex", ".Codex", ".omp"]);
   for (let index = parts.length - 2; index >= 0; index -= 1) {
     if (parts[index + 1] !== "worktrees") continue;
     if (!markers.has(parts[index])) continue;
     const root = parts.slice(0, index).join(path.sep) || path.sep;
-    // 홈의 전역 Codex worktree는 프로젝트 내부 worktree가 아니다.
-    if (HOME && samePath(root, HOME) && (parts[index] === ".codex" || parts[index] === ".Codex")) {
+    // 홈의 전역 Codex/OMP worktree는 프로젝트 내부 worktree가 아니다.
+    if (HOME && samePath(root, HOME) && (parts[index] === ".codex" || parts[index] === ".Codex" || parts[index] === ".omp")) {
       continue;
     }
     return root;
@@ -706,14 +710,19 @@ function assertInstalled(root) {
     path.join(root, ".agent-flow", "bootstrap", "AGENTS.md"),
     path.join(root, ".agent-flow", "bootstrap", "CLAUDE.md"),
     path.join(root, ".Codex", "agents", "code-reviewer.md"),
+    path.join(root, ".claude", "agents", "code-reviewer.md"),
   ];
   const missing = required.filter((pathName) => !fs.existsSync(pathName));
   if (missing.length > 0) {
     throw new Error(`agent-flow is not installed. run: agent-flow-kit install`);
   }
-  const codeReviewer = path.join(root, ".Codex", "agents", "code-reviewer.md");
-  if (!fs.readFileSync(codeReviewer, "utf8").trim()) {
-    throw new Error("agent-flow is not installed correctly: .Codex/agents/code-reviewer.md is empty");
+  for (const codeReviewer of [
+    path.join(root, ".Codex", "agents", "code-reviewer.md"),
+    path.join(root, ".claude", "agents", "code-reviewer.md"),
+  ]) {
+    if (!fs.readFileSync(codeReviewer, "utf8").trim()) {
+      throw new Error(`agent-flow is not installed correctly: ${path.relative(root, codeReviewer)} is empty`);
+    }
   }
 }
 
@@ -1178,7 +1187,7 @@ function parseSkillMetadata(text, fallbackName) {
     warnings.push(`unsafe skill name ignored: ${parsedName}`);
   }
   const hostValues = Array.isArray(metadata.hosts) ? metadata.hosts : [];
-  const knownHosts = new Set(["claude", "codex"]);
+  const knownHosts = new Set(PROJECT_SKILL_HOSTS);
   const hosts = [];
   for (const host of hostValues) {
     const normalized = String(host).trim().toLowerCase();
@@ -1195,7 +1204,7 @@ function parseSkillMetadata(text, fallbackName) {
     name,
     title: String(metadata.title || ""),
     description: String(metadata.description || useWhen || ""),
-    hosts: hostValues.length > 0 ? [...new Set(hosts)] : ["claude", "codex"],
+    hosts: hostValues.length > 0 ? [...new Set(hosts)] : [...PROJECT_SKILL_HOSTS],
     tags: Array.isArray(metadata.tags) ? metadata.tags.map(String) : [],
     trigger: String(metadata.trigger || metadata.description || useWhen || ""),
     triggers: arrayValue(metadata.triggers),
@@ -1379,6 +1388,9 @@ function hostSkillRoot(root, host) {
   // case-sensitive FS에서 .codex/.Codex가 갈라지지 않도록 .Codex로 고정한다.
   if (host === "codex") {
     return path.join(root, ".Codex", "skills");
+  }
+  if (host === "omp") {
+    return path.join(root, ".omp", "skills");
   }
   return path.join(root, `.${host}`, "skills");
 }
@@ -2023,15 +2035,15 @@ Follow the CLI output exactly. If no run is active, start with \`${AGENT_FLOW_CO
 
 ### Context Economy
 
-- Codex / Claude user-facing 답변은 기본적으로 짧은 한글로 한다.
+- Claude/Codex/OMP user-facing 답변은 기본적으로 짧은 한글로 한다.
 - 코드/명령/식별자는 영어 그대로 유지한다.
 - 긴 설명, 긴 로그, 전체 파일 붙여넣기 금지.
 - 필요한 경우만 current phase, action, \`next_command\`, blocker를 요약한다.
 - 모든 guide를 항상 로드하지 말고 변경 파일에 필요한 guide만 읽는다.
 - 프로젝트 skill은 \`skills/<name>/SKILL.md\` 또는 private \`.agent-flow/local-skills/<name>/SKILL.md\`에 둔다.
 - install/bootstrap 후 \`.agent-flow/skills/index.json\` metadata를 보고 필요한 skill만 읽는다. 모든 SKILL.md 전문을 항상 읽지 않는다.
-- Claude/Codex 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.
-- Claude hook이 자동 차단하는 보호 브랜치 commit/push와 leader checkout/switch 금지는 Codex에서도 동일하게 지킨다.
+- Claude/Codex/OMP 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.
+- Claude/Codex/OMP hook이 자동 차단하는 보호 브랜치 commit/push와 leader checkout/switch 금지는 모든 host에서 동일하게 지킨다.
 
 ${end}
 `;
@@ -2076,6 +2088,7 @@ function removeLegacyProjectSkillCopies(projectRoot, skillName) {
     path.join(projectRoot, ".claude", "skills"),
     path.join(projectRoot, ".codex", "skills"),
     path.join(projectRoot, ".Codex", "skills"),
+    path.join(projectRoot, ".omp", "skills"),
     path.join(projectRoot, ".gemini", "skills"),
     path.join(projectRoot, ".gemini", "antigravity", "skills"),
   ]) {
@@ -2126,15 +2139,15 @@ Follow the CLI output exactly. Git projects start inside \`.agent-flow/worktrees
 
 ### Context Economy
 
-- Codex / Claude user-facing 답변은 기본적으로 짧은 한글로 한다.
+- Claude/Codex/OMP user-facing 답변은 기본적으로 짧은 한글로 한다.
 - 코드/명령/식별자는 영어 그대로 유지한다.
 - 긴 설명, 긴 로그, 전체 파일 붙여넣기 금지.
 - 필요한 경우만 current phase, action, \`next_command\`, blocker를 요약한다.
 - 모든 guide를 항상 로드하지 말고 변경 파일에 필요한 guide만 읽는다.
 - 프로젝트 skill은 \`skills/<name>/SKILL.md\` 또는 private \`.agent-flow/local-skills/<name>/SKILL.md\`에 둔다.
 - install/bootstrap 후 \`.agent-flow/skills/index.json\` metadata를 보고 필요한 skill만 읽는다. 모든 SKILL.md 전문을 항상 읽지 않는다.
-- Claude/Codex 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.
-- Claude hook이 자동 차단하는 보호 브랜치 commit/push와 leader checkout/switch 금지는 Codex에서도 동일하게 지킨다.
+- Claude/Codex/OMP 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.
+- Claude/Codex/OMP hook이 자동 차단하는 보호 브랜치 commit/push와 leader checkout/switch 금지는 모든 host에서 동일하게 지킨다.
 
 During code generation, modification, and code review phases, apply \`code-generation-discipline\`. Resolve required skills from active profile metadata, installed skill index, changed files, and task scope. Load only the touched profile skill union.
 For Android/Kotlin/Compose/KMP changes, read matching local skill files from the Android profile's \`android_skills\` and \`chrisbanes_skills\` for the active host. React Native \`android/\` native changes also apply the Android profile mapping. Do not require unrelated platform skills, and do not install, copy, link, or load duplicate skills from other host directories. If a required local skill is missing, report \`missing local <group>: <skill>\` with the profile source URL and ask the user to install it.
@@ -2153,7 +2166,7 @@ function fullFeatureWorkflowYaml() {
 function agentFlowSkillMarkdown() {
   return `---
 name: agent-flow
-description: Use when the user types /agent-flow, asks to start or continue the project workflow, or wants Claude or Codex to drive the agent-flow lifecycle.
+description: Use when the user types /agent-flow, asks to start or continue the project workflow, or wants Claude, Codex, or OMP to drive the agent-flow lifecycle.
 ---
 
 # Agent Flow
@@ -2490,9 +2503,9 @@ function finish(response) {
     process.exit(1);
   }
   const entry = response.result?.data?.find((item) => item.cwd === root);
-  const sourcePath = root + "/.codex/hooks.json";
+  const sourcePaths = new Set([root + "/.Codex/hooks.json", root + "/.codex/hooks.json"]);
   const hooks = (entry?.hooks ?? [])
-    .filter((hook) => hook.sourcePath === sourcePath && hook.key && hook.currentHash)
+    .filter((hook) => sourcePaths.has(hook.sourcePath) && hook.key && hook.currentHash)
     .map((hook) => ({ key: hook.key, trustedHash: hook.currentHash, command: hook.command ?? "" }));
   console.log(JSON.stringify(hooks));
   proc.kill("SIGTERM");
@@ -2576,7 +2589,7 @@ function claudeHooksSettings(root) {
       ],
       PostToolUse: [
         {
-          matcher: "^(Write|Edit|MultiEdit)$",
+          matcher: "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit)$",
           hooks: [{ type: "command", command: hookScriptCommand(root, "comment-checker.py") }],
         },
       ],
@@ -2595,6 +2608,386 @@ function installClaudeHooks(root) {
   mergeHookSettings(settings, claudeHooksSettings(root).hooks);
   fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
   fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+}
+
+function ompHooksExtensionSource() {
+  return String.raw`import fs from "node:fs";
+import { spawn } from "node:child_process";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+const HOOK_DIR = path.join(ROOT, ".agent-flow", "scripts", "hooks");
+const WRITE_TOOL_RE = /^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit)$/i;
+
+export default function agentFlowHooks(pi) {
+  if (typeof pi.setLabel === "function") {
+    pi.setLabel("agent-flow hooks");
+  }
+
+
+  pi.on("context", async (event, ctx) => {
+    const messages = Array.isArray(event?.messages) ? event.messages : [];
+    const projectContext = modelSpecificProjectContext(ctx);
+    if (!projectContext || hasContextPath(messages, projectContext.filePath)) {
+      return;
+    }
+    return { messages: [...messages, projectContext.message] };
+  });
+  pi.on("tool_call", async (event, ctx) => {
+    if (!isBashTool(event?.toolName)) {
+      return;
+    }
+    const payload = hookPayload(event, ctx);
+    for (const scriptName of ["guard-worktree.sh", "guard-protected-branch.sh"]) {
+      const result = await runHook(scriptName, payload, ctx);
+      if (result.block) {
+        return { block: true, reason: result.reason };
+      }
+    }
+  });
+
+  pi.on("tool_result", async (event, ctx) => {
+    if (!WRITE_TOOL_RE.test(String(event?.toolName || ""))) {
+      return;
+    }
+    const syncError = syncRootContextFiles(event, ctx);
+    if (syncError) {
+      return {
+        content: [{ type: "text", text: syncError }],
+        details: { agentFlowHook: "sync-root-context" },
+        isError: true,
+      };
+    }
+    const result = await runHook("comment-checker.py", hookPayload(event, ctx), ctx);
+    if (result.block) {
+      return {
+        content: [{ type: "text", text: result.reason }],
+        details: { agentFlowHook: "comment-checker.py" },
+        isError: true,
+      };
+    }
+  });
+
+  pi.on("session_stop", async (_event, ctx) => {
+    const result = await runHook("show-phase-status.sh", { hook_event_name: "session_stop" }, ctx);
+    const message = parseSystemMessage(result.reason);
+    if (message && ctx?.hasUI && typeof ctx.ui?.notify === "function") {
+      await ctx.ui.notify(message, "info");
+    }
+  });
+}
+
+function hookPayload(event, ctx) {
+  const input = event?.input || {};
+  const toolName = String(event?.toolName || "");
+  return {
+    tool_name: toolName,
+    tool: toolName,
+    hook_event_name: String(event?.type || ""),
+    tool_input: input,
+    input,
+    parameters: input,
+    cwd: ctx?.cwd || ROOT,
+  };
+}
+
+function modelSpecificProjectContext(ctx) {
+  const fileName = contextFileNameForModel(ctx);
+  const filePath = path.join(ROOT, fileName);
+  const message = contextMessage(fileName, filePath);
+  if (message) {
+    return { fileName, filePath, message };
+  }
+  if (fileName === "CLAUDE.md") {
+    const fallbackName = "AGENTS.md";
+    const fallbackPath = path.join(ROOT, fallbackName);
+    const fallbackMessage = contextMessage(fallbackName, fallbackPath);
+    return fallbackMessage ? { fileName: fallbackName, filePath: fallbackPath, message: fallbackMessage } : null;
+  }
+  return null;
+}
+
+function contextFileNameForModel(ctx) {
+  const text = currentModelText(ctx);
+  if (/\b(anthropic|claude)\b/.test(text)) {
+    return "CLAUDE.md";
+  }
+  return "AGENTS.md";
+}
+
+function currentModelText(ctx) {
+  let model = null;
+  try {
+    model = ctx?.models?.current?.() || ctx?.model || null;
+  } catch {
+    model = ctx?.model || null;
+  }
+  if (typeof model === "string") {
+    return model.toLowerCase();
+  }
+  if (!model || typeof model !== "object") {
+    return "";
+  }
+  return [
+    model.provider,
+    model.providerId,
+    model.id,
+    model.model,
+    model.modelId,
+    model.name,
+    model.canonicalId,
+  ].filter(Boolean).map(String).join(" ").toLowerCase();
+}
+
+function contextMessage(fileName, filePath) {
+  if (!pathExists(filePath)) {
+    return null;
+  }
+  let content = "";
+  try {
+    content = fs.readFileSync(filePath, "utf8");
+  } catch {
+    return null;
+  }
+  if (!content.trim()) {
+    return null;
+  }
+  return {
+    role: "user",
+    content: [{
+      type: "text",
+      text: [
+        "<context>",
+        '<file path="' + escapeAttribute(filePath) + '" source="agent-flow-omp-model-context">',
+        content.trimEnd(),
+        "</file>",
+        "</context>",
+      ].join("\n"),
+    }],
+  };
+}
+
+function hasContextPath(messages, filePath) {
+  const normalized = String(filePath).replaceAll("\\", "/");
+  return messages.some((message) => messageText(message).replaceAll("\\", "/").includes(normalized));
+}
+
+function messageText(message) {
+  const content = message?.content;
+  if (typeof content === "string") {
+    return content;
+  }
+  if (!Array.isArray(content)) {
+    return "";
+  }
+  return content.map((part) => typeof part?.text === "string" ? part.text : "").join("\n");
+}
+
+function pathExists(filePath) {
+  try {
+    fs.statSync(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function escapeAttribute(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function syncRootContextFiles(event, ctx) {
+  const direction = rootContextSyncDirection(event, ctx);
+  if (!direction) {
+    return "";
+  }
+  try {
+    const content = fs.readFileSync(direction.sourcePath, "utf8");
+    const current = pathExists(direction.destPath) ? fs.readFileSync(direction.destPath, "utf8") : "";
+    if (current !== content) {
+      fs.writeFileSync(direction.destPath, content, "utf8");
+    }
+    return "";
+  } catch (error) {
+    return "agent-flow hook failed to sync " + direction.sourceName + " to " + direction.destName + ": " + String(error?.message || error);
+  }
+}
+
+function rootContextSyncDirection(event, ctx) {
+  const changed = modifiedRootContextFiles(event?.input, ctx?.cwd || ROOT);
+  if (changed.has("CLAUDE.md")) {
+    return {
+      sourceName: "CLAUDE.md",
+      destName: "AGENTS.md",
+      sourcePath: path.join(ROOT, "CLAUDE.md"),
+      destPath: path.join(ROOT, "AGENTS.md"),
+    };
+  }
+  if (changed.has("AGENTS.md")) {
+    return {
+      sourceName: "AGENTS.md",
+      destName: "CLAUDE.md",
+      sourcePath: path.join(ROOT, "AGENTS.md"),
+      destPath: path.join(ROOT, "CLAUDE.md"),
+    };
+  }
+  return null;
+}
+
+function modifiedRootContextFiles(input, cwd) {
+  const changed = new Set();
+  for (const filePath of collectModifiedPaths(input)) {
+    const fileName = rootContextFileName(filePath, cwd);
+    if (fileName) {
+      changed.add(fileName);
+    }
+  }
+  return changed;
+}
+
+function collectModifiedPaths(input) {
+  const paths = [];
+  const visit = (value) => {
+    if (typeof value === "string") {
+      paths.push(...pathsFromPatch(value));
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        visit(item);
+      }
+      return;
+    }
+    if (!value || typeof value !== "object") {
+      return;
+    }
+    for (const key of ["file_path", "filePath", "path", "filename"]) {
+      if (typeof value[key] === "string") {
+        paths.push(value[key]);
+      }
+    }
+    for (const key of ["patch", "command"]) {
+      if (typeof value[key] === "string") {
+        paths.push(...pathsFromPatch(value[key]));
+      }
+    }
+    if (Array.isArray(value.edits)) {
+      visit(value.edits);
+    }
+  };
+  visit(input);
+  return paths;
+}
+
+function pathsFromPatch(text) {
+  if (!text.includes("CLAUDE.md") && !text.includes("AGENTS.md")) {
+    return [];
+  }
+  const paths = [];
+  for (const line of text.split(/\r?\n/)) {
+    const tagged = line.match(/^\[([^#\]\r\n]+)#[0-9A-Fa-f]+\]$/);
+    if (tagged) {
+      paths.push(tagged[1]);
+      continue;
+    }
+    const unified = line.match(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/);
+    if (unified) {
+      paths.push(unified[1].trim());
+    }
+  }
+  return paths;
+}
+
+function rootContextFileName(filePath, cwd) {
+  const resolved = path.resolve(cwd || ROOT, filePath);
+  for (const fileName of ["CLAUDE.md", "AGENTS.md"]) {
+    if (samePath(resolved, path.join(ROOT, fileName))) {
+      return fileName;
+    }
+  }
+  return "";
+}
+
+function samePath(left, right) {
+  return path.resolve(left) === path.resolve(right);
+}
+
+function isBashTool(toolName) {
+  return /^(Bash|bash)$/.test(String(toolName || ""));
+}
+
+async function runHook(scriptName, payload, ctx) {
+  const scriptPath = path.join(HOOK_DIR, scriptName);
+  const result = await spawnHook(scriptPath, JSON.stringify(payload), ctx?.cwd || ROOT);
+  const reason = (result.stderr || result.stdout || "").trim();
+  if (result.status === 0) {
+    return { block: false, reason };
+  }
+  return { block: true, reason: reason || "agent-flow hook blocked: " + scriptName };
+}
+
+function spawnHook(scriptPath, input, cwd) {
+  return new Promise((resolve) => {
+    const proc = spawn(scriptPath, [], { cwd, stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const finish = (result) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      try {
+        proc.kill("SIGTERM");
+      } catch {
+      }
+      finish({ status: 124, stdout, stderr: stderr || "agent-flow hook timed out" });
+    }, 8000);
+    proc.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    proc.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    proc.on("error", () => {
+      finish({ status: 0, stdout: "", stderr: "" });
+    });
+    proc.on("close", (status) => {
+      finish({ status: status ?? 0, stdout, stderr });
+    });
+    proc.stdin.end(input);
+  });
+}
+
+function parseSystemMessage(text) {
+  if (!text) {
+    return "";
+  }
+  try {
+    const parsed = JSON.parse(text);
+    return String(parsed.systemMessage || "");
+  } catch {
+    return text;
+  }
+}
+`;
+}
+
+function installOmpHooks(root) {
+  return writeManagedFileIfMissingOrSame(
+    path.join(root, ".omp", "extensions", "agent-flow-hooks.ts"),
+    ompHooksExtensionSource(),
+    forceManaged,
+  );
 }
 
 function makeHooksExecutable(root) {
@@ -2622,7 +3015,7 @@ Implementation rules:
 - Apply \`code-generation-discipline\` during red, green, refactor, fix-loop, and review phases. Resolve required skills from active profile metadata, installed skill index, changed files, and task scope before writing or judging code.
 - If review or QA fails, return to the fix phase before continuing.
 - Required review happens before completion QA. After reviewer approve, gates run BUILD -> TYPECHECK -> LINT where applicable. If review or QA fails, fix-loop routes back through comment-authoring and review before gates run again.
-- Code review requires at least two active-host sub-agents (Codex sub-agent in Codex, Claude sub-agent in Claude). If the changed scope spans multiple areas, run one additional active-host sub-agent in parallel. Additional non-host providers are optional, and every multi-review verdict requires 2+ independent sub-agent reviewer verdicts with reviewer-source: sub-agent. After recording each sub-agent result, close that sub-agent session. End multi-review artifacts with ## Overall followed by exactly one verdict line: verdict: approve or verdict: request-changes.
+- Code review requires at least two active-host sub-agents (Codex sub-agent in Codex, Claude sub-agent in Claude, OMP sub-agent in OMP). If the changed scope spans multiple areas, run one additional active-host sub-agent in parallel. Additional non-host providers are optional, and every multi-review verdict requires 2+ independent sub-agent reviewer verdicts with reviewer-source: sub-agent. After recording each sub-agent result, close that sub-agent session. End multi-review artifacts with ## Overall followed by exactly one verdict line: verdict: approve or verdict: request-changes.
 - In the default workflow, gates run as their own phase after final-review approve.
 
 Document size rules:

@@ -1,6 +1,6 @@
 ---
 name: agent-flow
-description: Use when the user types /agent-flow, asks to start or continue the project workflow, or wants Claude or Codex to drive the agent-flow lifecycle.
+description: Use when the user types /agent-flow, asks to start or continue the project workflow, or wants Claude, Codex, or OMP to drive the agent-flow lifecycle.
 ---
 
 # Agent Flow

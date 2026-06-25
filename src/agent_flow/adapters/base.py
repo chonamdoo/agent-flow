@@ -1,6 +1,6 @@
 """Adapter contract.
 
-Every AI host (HostedAdapter for claude/codex, GenericAdapter for
+Every AI host (HostedAdapter for claude/codex/omp, GenericAdapter for
 fallback) implements `execute`. The runner only knows the contract; AI-
 specific hints live in the host-name parameterization.
 

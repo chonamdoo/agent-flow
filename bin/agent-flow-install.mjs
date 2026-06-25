@@ -23,6 +23,7 @@ const REQUESTED_PROJECT = process.cwd();
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
 const PROJECT = resolveInstallProject(REQUESTED_PROJECT);
 const AF_DIR = path.join(PROJECT, ".agent-flow");
+const PROJECT_SKILL_HOSTS = Object.freeze(["claude", "codex", "omp"]);
 const BUNDLED_HOST_SKILL_NAMES = new Set([
   "agent-flow",
   "android-appshell-error-handling",
@@ -82,12 +83,12 @@ function ensureDir(p) {
 
 function resolveManagedWorktreeRoot(start) {
   const parts = path.resolve(start).split(path.sep);
-  const markers = new Set([".agent-flow", ".codex", ".Codex"]);
+  const markers = new Set([".agent-flow", ".codex", ".Codex", ".omp"]);
   for (let index = parts.length - 2; index >= 0; index -= 1) {
     if (parts[index + 1] !== "worktrees") continue;
     if (!markers.has(parts[index])) continue;
     const root = parts.slice(0, index).join(path.sep) || path.sep;
-    if (HOME && samePath(root, HOME) && (parts[index] === ".codex" || parts[index] === ".Codex")) {
+    if (HOME && samePath(root, HOME) && (parts[index] === ".codex" || parts[index] === ".Codex" || parts[index] === ".omp")) {
       continue;
     }
     return root;
@@ -608,9 +609,9 @@ function finish(response) {
     process.exit(1);
   }
   const entry = response.result?.data?.find((item) => item.cwd === root);
-  const sourcePath = root + "/.codex/hooks.json";
+  const sourcePaths = new Set([root + "/.Codex/hooks.json", root + "/.codex/hooks.json"]);
   const hooks = (entry?.hooks ?? [])
-    .filter((hook) => hook.sourcePath === sourcePath && hook.key && hook.currentHash)
+    .filter((hook) => sourcePaths.has(hook.sourcePath) && hook.key && hook.currentHash)
     .map((hook) => ({ key: hook.key, trustedHash: hook.currentHash, command: hook.command ?? "" }));
   console.log(JSON.stringify(hooks));
   proc.kill("SIGTERM");
@@ -695,7 +696,7 @@ function claudeHooksSettings(root) {
       ],
       PostToolUse: [
         {
-          matcher: "^(Write|Edit|MultiEdit)$",
+          matcher: "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit)$",
           hooks: [{ type: "command", command: hookScriptCommand(root, "comment-checker.py") }],
         },
       ],
@@ -714,6 +715,386 @@ function installClaudeHooks(root) {
   mergeHookSettings(settings, claudeHooksSettings(root).hooks);
   ensureDir(path.dirname(settingsPath));
   fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+}
+
+function ompHooksExtensionSource() {
+  return String.raw`import fs from "node:fs";
+import { spawn } from "node:child_process";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+const HOOK_DIR = path.join(ROOT, ".agent-flow", "scripts", "hooks");
+const WRITE_TOOL_RE = /^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit)$/i;
+
+export default function agentFlowHooks(pi) {
+  if (typeof pi.setLabel === "function") {
+    pi.setLabel("agent-flow hooks");
+  }
+
+
+  pi.on("context", async (event, ctx) => {
+    const messages = Array.isArray(event?.messages) ? event.messages : [];
+    const projectContext = modelSpecificProjectContext(ctx);
+    if (!projectContext || hasContextPath(messages, projectContext.filePath)) {
+      return;
+    }
+    return { messages: [...messages, projectContext.message] };
+  });
+  pi.on("tool_call", async (event, ctx) => {
+    if (!isBashTool(event?.toolName)) {
+      return;
+    }
+    const payload = hookPayload(event, ctx);
+    for (const scriptName of ["guard-worktree.sh", "guard-protected-branch.sh"]) {
+      const result = await runHook(scriptName, payload, ctx);
+      if (result.block) {
+        return { block: true, reason: result.reason };
+      }
+    }
+  });
+
+  pi.on("tool_result", async (event, ctx) => {
+    if (!WRITE_TOOL_RE.test(String(event?.toolName || ""))) {
+      return;
+    }
+    const syncError = syncRootContextFiles(event, ctx);
+    if (syncError) {
+      return {
+        content: [{ type: "text", text: syncError }],
+        details: { agentFlowHook: "sync-root-context" },
+        isError: true,
+      };
+    }
+    const result = await runHook("comment-checker.py", hookPayload(event, ctx), ctx);
+    if (result.block) {
+      return {
+        content: [{ type: "text", text: result.reason }],
+        details: { agentFlowHook: "comment-checker.py" },
+        isError: true,
+      };
+    }
+  });
+
+  pi.on("session_stop", async (_event, ctx) => {
+    const result = await runHook("show-phase-status.sh", { hook_event_name: "session_stop" }, ctx);
+    const message = parseSystemMessage(result.reason);
+    if (message && ctx?.hasUI && typeof ctx.ui?.notify === "function") {
+      await ctx.ui.notify(message, "info");
+    }
+  });
+}
+
+function hookPayload(event, ctx) {
+  const input = event?.input || {};
+  const toolName = String(event?.toolName || "");
+  return {
+    tool_name: toolName,
+    tool: toolName,
+    hook_event_name: String(event?.type || ""),
+    tool_input: input,
+    input,
+    parameters: input,
+    cwd: ctx?.cwd || ROOT,
+  };
+}
+
+function modelSpecificProjectContext(ctx) {
+  const fileName = contextFileNameForModel(ctx);
+  const filePath = path.join(ROOT, fileName);
+  const message = contextMessage(fileName, filePath);
+  if (message) {
+    return { fileName, filePath, message };
+  }
+  if (fileName === "CLAUDE.md") {
+    const fallbackName = "AGENTS.md";
+    const fallbackPath = path.join(ROOT, fallbackName);
+    const fallbackMessage = contextMessage(fallbackName, fallbackPath);
+    return fallbackMessage ? { fileName: fallbackName, filePath: fallbackPath, message: fallbackMessage } : null;
+  }
+  return null;
+}
+
+function contextFileNameForModel(ctx) {
+  const text = currentModelText(ctx);
+  if (/\b(anthropic|claude)\b/.test(text)) {
+    return "CLAUDE.md";
+  }
+  return "AGENTS.md";
+}
+
+function currentModelText(ctx) {
+  let model = null;
+  try {
+    model = ctx?.models?.current?.() || ctx?.model || null;
+  } catch {
+    model = ctx?.model || null;
+  }
+  if (typeof model === "string") {
+    return model.toLowerCase();
+  }
+  if (!model || typeof model !== "object") {
+    return "";
+  }
+  return [
+    model.provider,
+    model.providerId,
+    model.id,
+    model.model,
+    model.modelId,
+    model.name,
+    model.canonicalId,
+  ].filter(Boolean).map(String).join(" ").toLowerCase();
+}
+
+function contextMessage(fileName, filePath) {
+  if (!pathExists(filePath)) {
+    return null;
+  }
+  let content = "";
+  try {
+    content = fs.readFileSync(filePath, "utf8");
+  } catch {
+    return null;
+  }
+  if (!content.trim()) {
+    return null;
+  }
+  return {
+    role: "user",
+    content: [{
+      type: "text",
+      text: [
+        "<context>",
+        '<file path="' + escapeAttribute(filePath) + '" source="agent-flow-omp-model-context">',
+        content.trimEnd(),
+        "</file>",
+        "</context>",
+      ].join("\n"),
+    }],
+  };
+}
+
+function hasContextPath(messages, filePath) {
+  const normalized = String(filePath).replaceAll("\\", "/");
+  return messages.some((message) => messageText(message).replaceAll("\\", "/").includes(normalized));
+}
+
+function messageText(message) {
+  const content = message?.content;
+  if (typeof content === "string") {
+    return content;
+  }
+  if (!Array.isArray(content)) {
+    return "";
+  }
+  return content.map((part) => typeof part?.text === "string" ? part.text : "").join("\n");
+}
+
+function pathExists(filePath) {
+  try {
+    fs.statSync(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function escapeAttribute(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function syncRootContextFiles(event, ctx) {
+  const direction = rootContextSyncDirection(event, ctx);
+  if (!direction) {
+    return "";
+  }
+  try {
+    const content = fs.readFileSync(direction.sourcePath, "utf8");
+    const current = pathExists(direction.destPath) ? fs.readFileSync(direction.destPath, "utf8") : "";
+    if (current !== content) {
+      fs.writeFileSync(direction.destPath, content, "utf8");
+    }
+    return "";
+  } catch (error) {
+    return "agent-flow hook failed to sync " + direction.sourceName + " to " + direction.destName + ": " + String(error?.message || error);
+  }
+}
+
+function rootContextSyncDirection(event, ctx) {
+  const changed = modifiedRootContextFiles(event?.input, ctx?.cwd || ROOT);
+  if (changed.has("CLAUDE.md")) {
+    return {
+      sourceName: "CLAUDE.md",
+      destName: "AGENTS.md",
+      sourcePath: path.join(ROOT, "CLAUDE.md"),
+      destPath: path.join(ROOT, "AGENTS.md"),
+    };
+  }
+  if (changed.has("AGENTS.md")) {
+    return {
+      sourceName: "AGENTS.md",
+      destName: "CLAUDE.md",
+      sourcePath: path.join(ROOT, "AGENTS.md"),
+      destPath: path.join(ROOT, "CLAUDE.md"),
+    };
+  }
+  return null;
+}
+
+function modifiedRootContextFiles(input, cwd) {
+  const changed = new Set();
+  for (const filePath of collectModifiedPaths(input)) {
+    const fileName = rootContextFileName(filePath, cwd);
+    if (fileName) {
+      changed.add(fileName);
+    }
+  }
+  return changed;
+}
+
+function collectModifiedPaths(input) {
+  const paths = [];
+  const visit = (value) => {
+    if (typeof value === "string") {
+      paths.push(...pathsFromPatch(value));
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        visit(item);
+      }
+      return;
+    }
+    if (!value || typeof value !== "object") {
+      return;
+    }
+    for (const key of ["file_path", "filePath", "path", "filename"]) {
+      if (typeof value[key] === "string") {
+        paths.push(value[key]);
+      }
+    }
+    for (const key of ["patch", "command"]) {
+      if (typeof value[key] === "string") {
+        paths.push(...pathsFromPatch(value[key]));
+      }
+    }
+    if (Array.isArray(value.edits)) {
+      visit(value.edits);
+    }
+  };
+  visit(input);
+  return paths;
+}
+
+function pathsFromPatch(text) {
+  if (!text.includes("CLAUDE.md") && !text.includes("AGENTS.md")) {
+    return [];
+  }
+  const paths = [];
+  for (const line of text.split(/\r?\n/)) {
+    const tagged = line.match(/^\[([^#\]\r\n]+)#[0-9A-Fa-f]+\]$/);
+    if (tagged) {
+      paths.push(tagged[1]);
+      continue;
+    }
+    const unified = line.match(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/);
+    if (unified) {
+      paths.push(unified[1].trim());
+    }
+  }
+  return paths;
+}
+
+function rootContextFileName(filePath, cwd) {
+  const resolved = path.resolve(cwd || ROOT, filePath);
+  for (const fileName of ["CLAUDE.md", "AGENTS.md"]) {
+    if (samePath(resolved, path.join(ROOT, fileName))) {
+      return fileName;
+    }
+  }
+  return "";
+}
+
+function samePath(left, right) {
+  return path.resolve(left) === path.resolve(right);
+}
+
+function isBashTool(toolName) {
+  return /^(Bash|bash)$/.test(String(toolName || ""));
+}
+
+async function runHook(scriptName, payload, ctx) {
+  const scriptPath = path.join(HOOK_DIR, scriptName);
+  const result = await spawnHook(scriptPath, JSON.stringify(payload), ctx?.cwd || ROOT);
+  const reason = (result.stderr || result.stdout || "").trim();
+  if (result.status === 0) {
+    return { block: false, reason };
+  }
+  return { block: true, reason: reason || "agent-flow hook blocked: " + scriptName };
+}
+
+function spawnHook(scriptPath, input, cwd) {
+  return new Promise((resolve) => {
+    const proc = spawn(scriptPath, [], { cwd, stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const finish = (result) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      try {
+        proc.kill("SIGTERM");
+      } catch {
+      }
+      finish({ status: 124, stdout, stderr: stderr || "agent-flow hook timed out" });
+    }, 8000);
+    proc.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    proc.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    proc.on("error", () => {
+      finish({ status: 0, stdout: "", stderr: "" });
+    });
+    proc.on("close", (status) => {
+      finish({ status: status ?? 0, stdout, stderr });
+    });
+    proc.stdin.end(input);
+  });
+}
+
+function parseSystemMessage(text) {
+  if (!text) {
+    return "";
+  }
+  try {
+    const parsed = JSON.parse(text);
+    return String(parsed.systemMessage || "");
+  } catch {
+    return text;
+  }
+}
+`;
+}
+
+function installOmpHooks(root) {
+  return writeFileIfMissingOrSame(
+    path.join(root, ".omp", "extensions", "agent-flow-hooks.ts"),
+    ompHooksExtensionSource(),
+    FORCE_MANAGED,
+  );
 }
 
 function makeHooksExecutable(root) {
@@ -888,7 +1269,7 @@ function parseSkillMetadata(text, fallbackName) {
   const name = safeSkillName(parsedName);
   if (name !== parsedName) warnings.push(`unsafe skill name ignored: ${parsedName}`);
   const hostValues = Array.isArray(metadata.hosts) ? metadata.hosts : [];
-  const knownHosts = new Set(["claude", "codex"]);
+  const knownHosts = new Set(PROJECT_SKILL_HOSTS);
   const hosts = [];
   for (const host of hostValues) {
     const normalized = String(host).trim().toLowerCase();
@@ -902,7 +1283,7 @@ function parseSkillMetadata(text, fallbackName) {
     name,
     title: String(metadata.title || ""),
     description: String(metadata.description || useWhen || ""),
-    hosts: hostValues.length > 0 ? [...new Set(hosts)] : ["claude", "codex"],
+    hosts: hostValues.length > 0 ? [...new Set(hosts)] : [...PROJECT_SKILL_HOSTS],
     tags: Array.isArray(metadata.tags) ? metadata.tags.map(String) : [],
     trigger: String(metadata.trigger || metadata.description || useWhen || ""),
     triggers: arrayValue(metadata.triggers),
@@ -1063,6 +1444,9 @@ function hostSkillRoot(host) {
   if (host === "codex") {
     return path.join(PROJECT, ".Codex", "skills");
   }
+  if (host === "omp") {
+    return path.join(PROJECT, ".omp", "skills");
+  }
   return path.join(PROJECT, `.${host}`, "skills");
 }
 
@@ -1205,6 +1589,7 @@ function install() {
     ".codex/",
     ".Codex/",
     ".claude/",
+    ".omp/",
     "AGENTS.md",
     "CLAUDE.md",
     "AGENTS/",
@@ -1224,7 +1609,7 @@ function install() {
   );
 
   // Copy bundled skills into project-local skills dir.
-  // Host-AI-specific skill paths (`.claude/skills/`, `.codex/skills/`) are
+  // Host-AI-specific skill paths (`.claude/skills/`, `.Codex/skills/`, `.omp/skills/`) are
   // populated by symlinking from .agent-flow/skills/ where possible, so
   // updates to the kit propagate without re-installing.
   const skillsCopied = copyDir(
@@ -1275,9 +1660,17 @@ function install() {
   makeHooksExecutable(PROJECT);
   const codexHooksCopied = installCodexHooks(PROJECT);
   installClaudeHooks(PROJECT);
+  const ompHooksCopied = installOmpHooks(PROJECT);
   const codexAgentsCopied = copyDir(
     path.join(KIT_ROOT, ".Codex", "agents"),
     path.join(PROJECT, ".Codex", "agents"),
+    new Set(),
+    true,
+    FORCE_MANAGED,
+  );
+  const claudeAgentsCopied = copyDir(
+    path.join(KIT_ROOT, ".claude", "agents"),
+    path.join(PROJECT, ".claude", "agents"),
     new Set(),
     true,
     FORCE_MANAGED,
@@ -1311,6 +1704,10 @@ function install() {
     agentFlowSkill,
     path.join(hostSkillRoot("codex"), "agent-flow"),
   );
+  const ompSkillStatus = linkOrCopyDir(
+    agentFlowSkill,
+    path.join(hostSkillRoot("omp"), "agent-flow"),
+  );
 
   // Keep a small pointer file for users who inspect .claude/skills by hand.
   // The agent-flow skill itself has already been linked or copied above.
@@ -1341,11 +1738,14 @@ function install() {
     profiles_copied: profilesCopied,
     templates_copied: templatesCopied,
     codex_agents_copied: codexAgentsCopied,
+    claude_agents_copied: claudeAgentsCopied,
     codex_hooks_copied: codexHooksCopied,
+    omp_hooks_copied: ompHooksCopied,
     context_tree_copied: contextTreeCopied,
     skill_links: {
       claude: claudeSkillStatus,
       codex: codexSkillStatus,
+      omp: ompSkillStatus,
     },
     skill_index: {
       path: ".agent-flow/skills/index.json",
@@ -1367,6 +1767,7 @@ function install() {
   console.log(`  profiles : ${profilesCopied.written} written, ${profilesCopied.skipped} skipped`);
   console.log(`  claude  : agent-flow skill ${claudeSkillStatus}`);
   console.log(`  codex   : agent-flow skill ${codexSkillStatus}`);
+  console.log(`  omp     : agent-flow skill ${ompSkillStatus}`);
   console.log(``);
   console.log(`Next: /agent-flow <task>`);
   console.log(`      (or: agent-flow run "<task>")`);
@@ -1403,6 +1804,7 @@ function removeLegacyProjectSkillCopies(projectRoot, skillName) {
     path.join(projectRoot, ".claude", "skills"),
     path.join(projectRoot, ".codex", "skills"),
     path.join(projectRoot, ".Codex", "skills"),
+    path.join(projectRoot, ".omp", "skills"),
     path.join(projectRoot, ".gemini", "skills"),
     path.join(projectRoot, ".gemini", "antigravity", "skills"),
   ]) {

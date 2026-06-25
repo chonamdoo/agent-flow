@@ -5,7 +5,7 @@ Detection order:
   2. detect_host_cli() — env-var hints exported by each CLI
   3. fallback to generic adapter (prompts go to stdout)
 
-The Claude / Codex hosts share a single `HostedAdapter` class
+The Claude / Codex / OMP hosts share a single `HostedAdapter` class
 parameterized by name; only the hint string differs.
 
 Note: this picks the *host* adapter only. Multi-reviewer optional providers
@@ -21,7 +21,7 @@ from agent_flow.adapters.hosted import HostedAdapter
 from agent_flow.cli_detect import detect_host_cli
 
 
-_HOSTED = {"claude", "codex"}
+_HOSTED = {"claude", "codex", "omp"}
 
 
 def detect_adapter() -> Adapter:

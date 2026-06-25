@@ -1,8 +1,8 @@
 """Hosted adapter — one class, parameterized by host.
 
-Replaces the previous Claude / Codex subclass pair. Each host
-contributes only:
-  - a name (claude / codex)
+Replaces the previous Claude / Codex subclass pair and also covers OMP.
+Each host contributes only:
+  - a name (claude / codex / omp)
   - a host-specific hint string
 
 Real behavior divergence (multi-reviewer fan-out, parallel sub-agents) is
@@ -70,11 +70,22 @@ _CODEX_HINT = """\
 - Cite file:line references using the `path/to/file:42` format.
 """
 
+_OMP_HINT = """\
+- For multi-reviewer phases, use the `task` tool to spawn at least two
+  OMP reviewer sub-agents in the same assistant message so they execute in
+  parallel.
+- Each reviewer section must include `reviewer-source: sub-agent`.
+- For long-running phases, prefer parallel reads/tool calls over sequential
+  exploration.
+- Cite file:line references using the `path/to/file:42` format.
+"""
+
 # Read-only mapping. Wrapped to prevent third-party runtime mutation that
 # would silently change adapter behavior across the process.
 _HOST_HINTS: MappingProxyType[str, str] = MappingProxyType({
     "claude": _CLAUDE_HINT,
     "codex": _CODEX_HINT,
+    "omp": _OMP_HINT,
 })
 
 

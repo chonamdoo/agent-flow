@@ -27,7 +27,7 @@ from typing import Sequence
 @dataclass
 class SubprocessJob:
     job_id: str             # stable id used for artifact naming
-    binary: str             # CLI binary name (e.g. "claude", "codex")
+    binary: str             # CLI binary name (e.g. "claude", "codex", "omp")
     args: tuple[str, ...]   # full argv after binary (e.g. ("-p", "<prompt>"))
     cwd: Path
     timeout_s: int = 600    # default 10 minutes per job
