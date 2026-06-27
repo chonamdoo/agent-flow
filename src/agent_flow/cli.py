@@ -539,7 +539,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         active = find_active_run(state_root)
         if active is not None:
-            active.print_status(next_command=_continue_command(root, args.worktree))
+            active.print_status(next_command=_continue_command(root, args.worktree), config_root=root)
             return 0
         if not (state_root / ".agent-flow" / "runs").exists():
             print("진행 중인 run 없음.")

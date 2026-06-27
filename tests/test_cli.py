@@ -21,6 +21,11 @@ from agent_flow.cli import main
 from agent_flow.adapters.templates import PromptContext, render_stage_prompt
 from agent_flow.core.gates import GateCommand, run_gate
 from agent_flow.core.profiles import load_profile
+from agent_flow.core.local_skills import (
+    applicable_code_review_skill_docs,
+    local_skill_prompt_block,
+    missing_local_skill_markers,
+)
 from agent_flow.core.review import _parse_verdict
 from agent_flow.core.team import ShutdownSignal
 from agent_flow.core.workflow import _stage_from_payload
@@ -374,6 +379,164 @@ class CliTest(unittest.TestCase):
         self.assertEqual(phases["gates"]["routes"]["green"], "commit")
         self.assertEqual(phases["comment-authoring"]["routes"]["default"], "multi-review")
 
+    def test_project_local_code_review_skills_filter_non_code_skills(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _write_local_skill_index(root)
+
+            docs = applicable_code_review_skill_docs(root, "implement")
+            self.assertEqual([doc.name for doc in docs], ["samantha-architecture-guide"])
+            self.assertEqual([doc.name for doc in applicable_code_review_skill_docs(root, "review")], ["samantha-architecture-guide"])
+            self.assertEqual([doc.name for doc in applicable_code_review_skill_docs(root, "implement-fix")], ["samantha-architecture-guide"])
+            self.assertEqual([doc.name for doc in applicable_code_review_skill_docs(root, "pr-comment-fix")], ["samantha-architecture-guide"])
+            self.assertEqual([doc.name for doc in applicable_code_review_skill_docs(root, "pr-ci-fix")], ["samantha-architecture-guide"])
+            self.assertEqual(applicable_code_review_skill_docs(root, "push-pr"), ())
+
+            prompt_block = local_skill_prompt_block(root, "final-review")
+            self.assertIn(".agent-flow/local-skills/samantha-architecture-guide/SKILL.md", prompt_block)
+            self.assertIn("project-local-skill-docs: applied", prompt_block)
+            self.assertNotIn("figma-screen-spec/SKILL.md", prompt_block)
+            self.assertNotIn("release-first-branch-pr/SKILL.md", prompt_block)
+            self.assertNotIn("pr-review-flow/SKILL.md", prompt_block)
+            self.assertNotIn("merge-review-flow/SKILL.md", prompt_block)
+            self.assertNotIn("release-branch-review/SKILL.md", prompt_block)
+
+    def test_project_local_code_review_skills_fallback_ignores_usage_boilerplate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            skill_path = root / ".agent-flow" / "local-skills" / "react-hooks-review" / "SKILL.md"
+            skill_path.parent.mkdir(parents=True)
+            skill_path.write_text(
+                "---\n"
+                "name: react-hooks-review\n"
+                "description: Use when writing or reviewing React hooks.\n"
+                "---\n"
+                "\n"
+                "# React Hooks Review\n"
+                "\n"
+                "Do not install this skill globally.\n",
+                encoding="utf-8",
+            )
+
+            docs = applicable_code_review_skill_docs(root, "implement")
+            self.assertEqual([doc.name for doc in docs], ["react-hooks-review"])
+
+    def test_project_local_code_review_skills_require_applied_markers(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _write_local_skill_index(root)
+            missing = missing_local_skill_markers(
+                "## Completion Gate\n"
+                "project-local-skills: n/a\n"
+                "project-local-skills-used: n/a\n",
+                root,
+                "implement",
+            )
+            self.assertIn("project-local-skills: checked", missing)
+            self.assertIn("project-local-skills-used: <applicable local skill list>", missing)
+            self.assertIn("project-local-skill-docs: applied", missing)
+
+            self.assertEqual(
+                missing_local_skill_markers(
+                    "## Completion Gate\n"
+                    "project-local-skills: checked\n"
+                    "project-local-skills-used: samantha-architecture-guide\n"
+                    "project-local-skill-docs: applied\n",
+                    root,
+                    "implement",
+                ),
+                [],
+            )
+
+    def test_project_local_code_review_skills_require_all_applicable_docs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _write_local_skill_index(root)
+            index_path = root / ".agent-flow" / "skills" / "index.json"
+            payload = json.loads(index_path.read_text(encoding="utf-8"))
+            payload["skills"].append(
+                {
+                    "name": "api-contract-guide",
+                    "path": ".agent-flow/local-skills/api-contract-guide/SKILL.md",
+                    "source": "local",
+                    "description": "Use for code review of API contracts.",
+                }
+            )
+            payload["skills"].append(
+                {
+                    "name": "api",
+                    "path": ".agent-flow/local-skills/api/SKILL.md",
+                    "source": "local",
+                    "description": "Use for code review of APIs.",
+                }
+            )
+            index_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            missing = missing_local_skill_markers(
+                "## Completion Gate\n"
+                "project-local-skills: checked\n"
+                "project-local-skills-used: samantha-architecture-guide\n"
+                "project-local-skill-docs: applied\n",
+                root,
+                "review",
+            )
+            self.assertIn("project-local-skills-used: <applicable local skill list>", missing)
+
+            self.assertEqual(
+                missing_local_skill_markers(
+                    "## Completion Gate\n"
+                    "project-local-skills: checked\n"
+                    "project-local-skills-used: api, api-contract-guide, samantha-architecture-guide\n"
+                    "project-local-skill-docs: applied\n",
+                    root,
+                    "review",
+                ),
+                [],
+            )
+
+    def test_project_local_code_review_skills_flatten_index_metadata_arrays(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            index_path = root / ".agent-flow" / "skills" / "index.json"
+            index_path.parent.mkdir(parents=True, exist_ok=True)
+            index_path.write_text(
+                json.dumps(
+                    {
+                        "skills": [
+                            {
+                                "name": "metadata-only-guide",
+                                "path": ".agent-flow/local-skills/metadata-only-guide/SKILL.md",
+                                "source": "local",
+                                "description": "",
+                                "tags": ["code", "review"],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            docs = applicable_code_review_skill_docs(root, "implement")
+            self.assertEqual([doc.name for doc in docs], ["metadata-only-guide"])
+
+    def test_project_local_code_review_skills_do_not_block_when_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _write_local_skill_index(root, include_code_skill=False)
+
+            self.assertEqual(applicable_code_review_skill_docs(root, "implement"), ())
+            self.assertEqual(local_skill_prompt_block(root, "implement"), "")
+            self.assertEqual(
+                missing_local_skill_markers(
+                    "## Completion Gate\n"
+                    "project-local-skills: n/a\n"
+                    "project-local-skills-used: n/a\n",
+                    root,
+                    "implement",
+                ),
+                [],
+            )
+
     def test_clean_architecture_review_template_routes_policy_to_core_skill(self) -> None:
         template = (
             Path(__file__).resolve().parents[1]
@@ -509,6 +672,31 @@ class CliTest(unittest.TestCase):
         self.assertIn("agent-flow status", prompt)
         self.assertIn("next_command", prompt)
         self.assertNotIn("agent-flow continue", prompt)
+
+    def test_adapter_local_skill_prompt_uses_config_root(self) -> None:
+        from agent_flow.adapters.generic import GenericAdapter
+        from agent_flow.runner import Phase
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_root = Path(temp_dir) / "leader"
+            project_root = Path(temp_dir) / "worktree"
+            config_root.mkdir()
+            project_root.mkdir()
+            _write_local_skill_index(config_root)
+            adapter = GenericAdapter()
+            adapter._config_root = config_root
+
+            prompt = adapter.render_envelope(
+                Phase(id="implement", description=""),
+                project_root / ".agent-flow" / "runs" / "default" / "r1",
+                project_root,
+            )
+
+        self.assertIn(".agent-flow/local-skills/samantha-architecture-guide/SKILL.md", prompt)
+        self.assertIn(
+            str(config_root / ".agent-flow" / "local-skills" / "samantha-architecture-guide" / "SKILL.md"),
+            prompt,
+        )
 
     def test_python_multi_review_approve_requires_subagent_reviewer(self) -> None:
         from agent_flow.runner import Phase, Runner
@@ -3036,6 +3224,128 @@ if (!codexText.includes(path.join(process.cwd(), "AGENTS.md"))) {
             )
             self.assertEqual(result.returncode, 1)
             self.assertIn("## Clean Architecture Boundary Map", result.stderr)
+
+    def test_node_run_enforces_project_local_code_review_skill_markers_when_present(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            _write_local_skill_files(project_root)
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            green_prompt = (project_root / ".agent-flow" / "prompts" / "green.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("samantha-architecture-guide/SKILL.md", green_prompt)
+            self.assertIn(".agent-flow/local-skills/api/SKILL.md", green_prompt)
+            self.assertIn("api-contract-guide/SKILL.md", green_prompt)
+            self.assertIn("project-local-skill-docs: applied", green_prompt)
+            self.assertNotIn("figma-screen-spec/SKILL.md", green_prompt)
+            self.assertNotIn("release-first-branch-pr/SKILL.md", green_prompt)
+            self.assertNotIn("pr-review-flow/SKILL.md", green_prompt)
+            self.assertNotIn("merge-review-flow/SKILL.md", green_prompt)
+            self.assertNotIn("release-branch-review/SKILL.md", green_prompt)
+            self.assertEqual(
+                subprocess.run(
+                    (node, cli, "run", "start", "--workflow", "default", "--task", "demo", "--run-id", "r1"),
+                    cwd=project_root,
+                    check=False,
+                ).returncode,
+                0,
+            )
+            state_path = project_root / ".agent-flow" / "state" / "current-run.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state.update({"workflow": "default", "phase_index": 3, "phase": "implement", "status": "running"})
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            run_dir = project_root / ".agent-flow" / "runs" / "default" / "r1"
+            (run_dir / "manifest.json").write_text(json.dumps(state), encoding="utf-8")
+            next_prompt = subprocess.run(
+                (node, cli, "run", "next"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(next_prompt.returncode, 0, next_prompt.stderr)
+            self.assertIn("api-contract-guide/SKILL.md", next_prompt.stdout)
+            self.assertIn("project-local-skill-docs: applied", next_prompt.stdout)
+            artifact = run_dir / "implement.md"
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text(_node_implement_gate(local_skill=False), encoding="utf-8")
+
+            missing_local = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(missing_local.returncode, 1)
+            self.assertIn("project-local-skills: checked", missing_local.stderr)
+            self.assertIn("project-local-skill-docs: applied", missing_local.stderr)
+
+            artifact.write_text(
+                _node_implement_gate(local_skill=True).replace("api, ", ""),
+                encoding="utf-8",
+            )
+            partial_local = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(partial_local.returncode, 1)
+            self.assertIn("project-local-skills-used: <applicable local skill list>", partial_local.stderr)
+
+            artifact.write_text(_node_implement_gate(local_skill=True), encoding="utf-8")
+            advanced = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(advanced.returncode, 0, advanced.stderr)
+            self.assertIn("Current phase: comment-authoring", advanced.stdout)
+
+    def test_node_run_enforces_project_local_skills_for_bugfix_code_phases(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            _write_local_skill_files(project_root)
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            self.assertEqual(
+                subprocess.run(
+                    (node, cli, "run", "start", "--workflow", "bugfix", "--task", "demo", "--run-id", "r1"),
+                    cwd=project_root,
+                    check=False,
+                ).returncode,
+                0,
+            )
+            state_path = project_root / ".agent-flow" / "state" / "current-run.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state.update({"workflow": "bugfix", "phase_index": 1, "phase": "implement-fix", "status": "running"})
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            run_dir = project_root / ".agent-flow" / "runs" / "bugfix" / "r1"
+            (run_dir / "manifest.json").write_text(json.dumps(state), encoding="utf-8")
+            artifact = run_dir / "implement-fix.md"
+            artifact.write_text(
+                "## Completion Gate\nproject-local-skills: n/a\nproject-local-skills-used: n/a\n",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("project-local-skills: checked", result.stderr)
 
     def test_node_workflow_run_requires_installed_project(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -8404,6 +8714,74 @@ def _read_shutdown_json(root: Path, signal_id: str) -> dict[str, object]:
     )
 
 
+def _write_local_skill_index(root: Path, *, include_code_skill: bool = True) -> None:
+    skills = [
+        {
+            "name": "figma-screen-spec",
+            "path": ".agent-flow/local-skills/figma-screen-spec/SKILL.md",
+            "source": "local",
+            "description": "Use when a Figma design link is provided for screen work.",
+        },
+        {
+            "name": "release-first-branch-pr",
+            "path": ".agent-flow/local-skills/release-first-branch-pr/SKILL.md",
+            "source": "local",
+            "description": "Use for git commit, push, PR, branch, worktrees, and cleanup.",
+        },
+        {
+            "name": "pr-review-flow",
+            "path": ".agent-flow/local-skills/pr-review-flow/SKILL.md",
+            "source": "local",
+            "description": "Use during PR code review.",
+        },
+        {
+            "name": "merge-review-flow",
+            "path": ".agent-flow/local-skills/merge-review-flow/SKILL.md",
+            "source": "local",
+            "description": "Use during merge review.",
+        },
+        {
+            "name": "release-branch-review",
+            "path": ".agent-flow/local-skills/release-branch-review/SKILL.md",
+            "source": "local",
+            "description": "Use during release branch review.",
+        },
+    ]
+    if include_code_skill:
+        skills.append(
+            {
+                "name": "samantha-architecture-guide",
+                "path": ".agent-flow/local-skills/samantha-architecture-guide/SKILL.md",
+                "source": "local",
+                "description": "Use before Samantha Android code development or review involving modules.",
+            }
+        )
+    index_path = root / ".agent-flow" / "skills" / "index.json"
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    index_path.write_text(json.dumps({"skills": skills}), encoding="utf-8")
+
+def _write_local_skill_files(root: Path) -> None:
+    skills = {
+        "figma-screen-spec": "Use when a Figma design link is provided for screen work.",
+        "release-first-branch-pr": "Use for git commit, push, PR, branch, worktrees, and cleanup.",
+        "pr-review-flow": "Use during PR code review.",
+        "merge-review-flow": "Use during merge review.",
+        "release-branch-review": "Use during release branch review.",
+        "api": "Use for code review of APIs.",
+        "api-contract-guide": "Use for code review of API contracts.",
+        "samantha-architecture-guide": "Use before Samantha Android code development or review involving modules. Do not install this skill globally.",
+    }
+    for name, description in skills.items():
+        skill_path = root / ".agent-flow" / "local-skills" / name / "SKILL.md"
+        skill_path.parent.mkdir(parents=True, exist_ok=True)
+        skill_path.write_text(
+            f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n",
+            encoding="utf-8",
+        )
+
+
+
+
 def _node_phase_artifact(phase: str) -> Path:
     artifacts = {
         "domain-grill": Path("artifacts/domain-grill.md"),
@@ -8453,6 +8831,25 @@ def _node_presentation_gate() -> str:
 def _node_project_local_gate() -> str:
     # 테스트 fixture에서는 프로젝트별 로컬 skill이 적용되지 않은 경우를 명시한다.
     return "project-local-skills: n/a\nproject-local-skills-used: n/a\n"
+
+def _node_project_local_applied_gate() -> str:
+    return (
+        "project-local-skills: checked\n"
+        "project-local-skills-used: api, api-contract-guide, samantha-architecture-guide\n"
+        "project-local-skill-docs: applied\n"
+    )
+
+
+def _node_implement_gate(*, local_skill: bool) -> str:
+    return (
+        "## Completion Gate\n"
+        "skills_checked: true\n"
+        + _node_profile_skill_gate()
+        + "clean-architecture: applied\n"
+        + (_node_project_local_applied_gate() if local_skill else _node_project_local_gate())
+        + _node_presentation_gate()
+    )
+
 
 
 def _node_profile_skill_gate() -> str:

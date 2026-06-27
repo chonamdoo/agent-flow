@@ -29,6 +29,15 @@ def has_failure_markers(text: str) -> bool:
     return any(_line_has_failure_marker(line) for line in _completion_gate_lines(text))
 
 
+def completion_gate_marker_values(text: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in _completion_gate_lines(text):
+        key, separator, value = line.partition(":")
+        if separator == ":":
+            values[key.strip()] = value.strip()
+    return values
+
+
 def _marker_present(text: str, gate_lines: list[str], marker: str) -> bool:
     if marker.startswith("#"):
         return _heading_present(text, marker)

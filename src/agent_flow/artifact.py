@@ -26,6 +26,7 @@ from pathlib import Path
 import yaml
 
 from agent_flow.core.markers import missing_markers, normalize_required_markers
+from agent_flow.core.local_skills import missing_local_skill_markers
 from agent_flow.core.phase_workflow import find_kit_root, load_phase_workflow_definition
 
 
@@ -47,7 +48,7 @@ class ActiveRun:
     task: str
     started_at: str
 
-    def print_status(self, *, next_command: str = "agent-flow continue") -> None:
+    def print_status(self, *, next_command: str = "agent-flow continue", config_root: Path | None = None) -> None:
         artifacts = sorted(str(p.relative_to(self.path)) for p in self.path.rglob("*") if p.is_file())
         meta = read_meta(self.path)
         current_phase = meta.get("current_phase") or "-"
@@ -72,6 +73,7 @@ class ActiveRun:
                     self.path,
                     self.workflow,
                     current_phase,
+                    config_root=config_root,
                 )
                 reason = (
                     "missing_completion_markers"
@@ -244,12 +246,17 @@ def _missing_completion_markers(
     run_path: Path,
     workflow: str,
     phase_id: str,
+    *,
+    config_root: Path | None = None,
 ) -> list[str]:
     artifact_rel, markers = _phase_contract(run_path, workflow, phase_id)
     artifact = _existing_phase_artifact(run_path, phase_id, artifact_rel)
-    if not markers or not artifact.exists():
+    if not artifact.exists():
         return []
-    return _missing_markers(artifact.read_text(encoding="utf-8"), markers)
+    text = artifact.read_text(encoding="utf-8")
+    missing = _missing_markers(text, markers) if markers else []
+    missing.extend(missing_local_skill_markers(text, config_root or run_path, phase_id))
+    return missing
 
 
 def _required_markers(run_path: Path, workflow: str, phase_id: str) -> tuple[str, ...]:

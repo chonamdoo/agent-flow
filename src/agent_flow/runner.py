@@ -49,6 +49,7 @@ from agent_flow.core.phase_workflow import find_kit_root, load_phase_workflow_de
 from agent_flow.core.report import write_run_report
 from agent_flow.core.security import ensure_child_path, validate_safe_name
 from agent_flow.core.markers import has_failure_markers, missing_markers
+from agent_flow.core.local_skills import missing_local_skill_markers
 from agent_flow.memory.index import LoreIndex
 from agent_flow.memory.lore import Lore
 
@@ -155,6 +156,7 @@ class Runner:
         adapter._profile_snapshot = self.profile
         adapter._profile_id = self.profile_id
         adapter._architecture = self.architecture
+        adapter._config_root = self.config_root
 
         # Auto-cite lore: search the local lore index for entries relevant
         # to the task description and inject them into the prompt envelope.
@@ -487,8 +489,6 @@ class Runner:
         return True
 
     def _missing_required_markers(self, phase: Phase) -> list[str]:
-        if not phase.required_markers:
-            return []
         if (
             getattr(self, "_adapter_name", "") == "generic"
             and os.environ.get("AGENT_FLOW_GENERIC_MODE") == "stub-success"
@@ -498,10 +498,10 @@ class Runner:
         artifact = self._existing_artifact_path(phase)
         if not artifact.exists():
             return []
-        return _missing_markers(
-            artifact.read_text(encoding="utf-8"),
-            phase.required_markers,
-        )
+        text = artifact.read_text(encoding="utf-8")
+        missing = list(_missing_markers(text, phase.required_markers))
+        missing.extend(missing_local_skill_markers(text, self.config_root, phase.id))
+        return missing
 
     def _artifact_path(self, phase: Phase) -> Path:
         assert self.run_dir is not None
