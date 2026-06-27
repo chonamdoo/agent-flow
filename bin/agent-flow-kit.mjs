@@ -180,7 +180,7 @@ function installProject() {
   for (const phase of phases) {
     writeManagedFile(
       path.join(agentFlowDir, "prompts", `${phase.id}.md`),
-      phasePrompt(phase),
+      phasePrompt(phase, root),
     );
   }
   writeManagedFile(path.join(agentFlowDir, "rules", "workflow-contract.md"), workflowContract());
@@ -257,7 +257,7 @@ function runWorkflowCommand(args) {
     };
     writeJson(path.join(runDir, "manifest.json"), state);
     writeJson(currentRunPath(root), state);
-    printNext(state);
+    printNext(state, root);
     return;
   }
 
@@ -268,7 +268,7 @@ function runWorkflowCommand(args) {
   }
 
   if (subcommand === "next") {
-    printNext(readCurrentRun(root));
+    printNext(readCurrentRun(root), root);
     return;
   }
 
@@ -331,7 +331,7 @@ function runWorkflowCommand(args) {
       throw new Error(`blocked: missing artifact ${artifact}`);
     }
     assertFreshArtifact(state, phase, artifact);
-    assertCompletionMarkers(phase, artifact);
+    assertCompletionMarkers(phase, artifact, root);
     const nextIndex = nextPhaseIndex(state, phases, phase, artifact);
     syncRouteArtifacts(runDir, phases, state.phase_index, nextIndex);
     const nextPhase = phases[nextIndex];
@@ -349,7 +349,7 @@ function runWorkflowCommand(args) {
     writeJson(path.join(runDir, "manifest.json"), nextState);
     writeJson(currentRunPath(root), nextState);
     if (nextPhase) {
-      printNext(nextState);
+      printNext(nextState, root);
     } else {
       console.log(`workflow complete: ${state.run_id}`);
     }
@@ -820,16 +820,17 @@ function pullRequestWatchStatus(pr) {
   return "green";
 }
 
-function printNext(state) {
+function printNext(state, root = null) {
   const phase = workflowPhases(state.workflow)[state.phase_index];
   if (!phase) {
     console.log(`workflow complete: ${state.run_id}`);
     return;
   }
+  const localSkillBlock = root ? localSkillPromptBlock(root, phase.id) : "";
   console.log(`Current phase: ${phase.id}`);
   console.log(`Run: ${state.run_id}`);
   console.log(`Required artifact: ${path.join(state.run_dir, phase.artifact)}`);
-  console.log(`Instruction: ${phase.instruction}`);
+  console.log(`Instruction: ${phase.instruction}${localSkillBlock}`);
 }
 
 function printStatus(state, root) {
@@ -844,9 +845,10 @@ function printStatus(state, root) {
     status = "awaiting_host";
     reason = "missing_phase_artifact";
   } else if (!complete && requiredArtifact) {
-    const missing = missingMarkers(
+    const missing = missingMarkersForPhase(
       fs.readFileSync(resolvedRequiredArtifact, "utf8"),
-      phase.required_markers ?? [],
+      phase,
+      root,
     );
     status = "blocked";
     if (artifactIsStale(state, resolvedRequiredArtifact)) {
@@ -1509,13 +1511,9 @@ function artifactIsStale(state, artifact) {
   return artifactMtime < enteredAt;
 }
 
-function assertCompletionMarkers(phase, artifact) {
-  const markers = phase.required_markers ?? [];
-  if (markers.length === 0) {
-    return;
-  }
+function assertCompletionMarkers(phase, artifact, root) {
   const content = fs.readFileSync(artifact, "utf8");
-  const missing = missingMarkers(content, markers);
+  const missing = missingMarkersForPhase(content, phase, root);
   if (missing.length > 0) {
     throw new Error(`blocked: ${phase.id} artifact missing completion markers: ${missing.join(", ")}`);
   }
@@ -1527,6 +1525,255 @@ function missingMarkers(content, markers) {
     const normalized = marker.trim().toLowerCase();
     return !markerPresent(content, lines, normalized);
   });
+}
+
+const CODE_REVIEW_LOCAL_SKILL_PHASES = new Set([
+  "implement",
+  "implement-fix",
+  "red",
+  "green",
+  "refactor",
+  "fix-loop",
+  "final-review",
+  "review",
+  "pr-comment-fix",
+  "pr-ci-fix",
+  "multi-review",
+  "architecture-review",
+]);
+const PROJECT_LOCAL_SKILL_APPLIED_MARKER = "project-local-skill-docs: applied";
+const PROJECT_LOCAL_SKILL_INCLUDE_TERMS = [
+  "code development",
+  "code generation",
+  "code review",
+  "development or review",
+  "developing or reviewing",
+  "implementing or reviewing",
+  "writing or reviewing",
+  "modifying or reviewing",
+  "architecture review",
+  "android code",
+  "kotlin implementation",
+  "compose implementation",
+  "코드 개발",
+  "코드 작성",
+  "코드 수정",
+  "코드 리뷰",
+  "코드리뷰",
+  "구현·리뷰",
+  "개발/수정/리뷰",
+  "작성·리뷰",
+];
+const PROJECT_LOCAL_SKILL_EXCLUDE_TERMS = [
+  "figma",
+  "screen-spec",
+  "screen spec",
+  "design link",
+  "figma.com/design",
+  "git commit",
+  "git push",
+  "pull request",
+  "pull-request",
+  "pr-review",
+  "pr review",
+  "branch-pr",
+  "branch base",
+  "branch creation",
+  "branch review",
+  "release branch",
+  "worktree",
+  "cleanup",
+  "merge cleanup",
+  "merge review",
+  "release-first",
+  "pretooluse",
+  "posttooluse",
+  "guard-worktree",
+  "guard-protected-branch",
+  "comment-checker",
+  "claude hook",
+  "codex hook",
+  "agent-flow lifecycle",
+  "workflow lifecycle",
+];
+const PROJECT_LOCAL_SKILL_EXCLUDE_TOKEN_PATTERN = /(^|[^a-z0-9])(pr|branch|merge)([^a-z0-9]|$)/;
+
+function missingMarkersForPhase(content, phase, root) {
+  const missing = missingMarkers(content, phase.required_markers ?? []);
+  missing.push(...missingProjectLocalSkillMarkers(content, root, phase.id));
+  return missing;
+}
+
+function localSkillPromptBlock(root, phaseId) {
+  const docs = applicableProjectLocalSkillDocs(root, phaseId);
+  if (docs.length === 0) {
+    return "";
+  }
+  return [
+    "",
+    "",
+    "## Project-local code/review skills",
+    "",
+    "Project-local markdown skill docs that apply to code generation or code review were found.",
+    "Read only the applicable docs before completing this phase. Design/Figma, hook, branch, PR, merge, and cleanup skills are intentionally excluded here.",
+    "",
+    "Applicable docs:",
+    "",
+    ...docs.map((doc) => localSkillPromptLine(root, doc)),
+    "",
+    "When this block appears, the `## Completion Gate` must include:",
+    "",
+    "```text",
+    "project-local-skills: checked",
+    "project-local-skills-used: <comma-separated applicable skill names>",
+    PROJECT_LOCAL_SKILL_APPLIED_MARKER,
+    "```",
+    "",
+    "If this block is absent, `project-local-skills: n/a` remains valid.",
+    "",
+  ].join("\n");
+}
+
+function localSkillPromptLine(root, doc) {
+  const absolutePath = path.isAbsolute(doc.path)
+    ? doc.path
+    : path.join(root, doc.path);
+  return `- \`${doc.path}\` (\`${doc.name}\`) — \`${absolutePath}\``;
+}
+
+function missingProjectLocalSkillMarkers(content, root, phaseId) {
+  const docs = applicableProjectLocalSkillDocs(root, phaseId);
+  if (docs.length === 0) {
+    return [];
+  }
+  const values = completionGateMarkerValues(content);
+  const missing = [];
+  if (values.get("project-local-skills") !== "checked") {
+    missing.push("project-local-skills: checked");
+  }
+  const used = (values.get("project-local-skills-used") ?? "").trim();
+  const usedNames = new Set(
+    used
+      .split(",")
+      .map((name) => name.trim().replace(/^`|`$/g, "").toLowerCase())
+      .filter(Boolean),
+  );
+  if (["", "n/a", "none", "optional"].includes(used)) {
+    missing.push("project-local-skills-used: <applicable local skill list>");
+  } else if (!docs.every((doc) => usedNames.has(doc.name.toLowerCase()))) {
+    missing.push("project-local-skills-used: <applicable local skill list>");
+  }
+  if (values.get("project-local-skill-docs") !== "applied") {
+    missing.push(PROJECT_LOCAL_SKILL_APPLIED_MARKER);
+  }
+  return missing;
+}
+
+function applicableProjectLocalSkillDocs(root, phaseId) {
+  if (!CODE_REVIEW_LOCAL_SKILL_PHASES.has(phaseId)) {
+    return [];
+  }
+  return projectLocalSkillDocs(root)
+    .filter((doc) => isCodeReviewLocalSkill(doc))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function projectLocalSkillDocs(root) {
+  const indexDocs = localSkillDocsFromIndex(root);
+  if (indexDocs.length > 0) {
+    return dedupeLocalSkillDocs(indexDocs);
+  }
+  return dedupeLocalSkillDocs(localSkillDocsFromTree(root));
+}
+
+function localSkillDocsFromIndex(root) {
+  const indexPath = path.join(root, ".agent-flow", "skills", "index.json");
+  if (!fs.existsSync(indexPath)) {
+    return [];
+  }
+  let payload;
+  try {
+    payload = JSON.parse(fs.readFileSync(indexPath, "utf8"));
+  } catch (_error) {
+    return [];
+  }
+  if (!Array.isArray(payload.skills)) {
+    return [];
+  }
+  return payload.skills
+    .filter((skill) => skill && ["local", "project"].includes(skill.source))
+    .filter((skill) => isProjectLocalSkillPath(String(skill.path ?? "")))
+    .map((skill) => ({
+      name: String(skill.name || path.basename(path.dirname(String(skill.path ?? "")))),
+      path: String(skill.path ?? ""),
+      description: [
+        skill.description,
+        skill.trigger,
+        ...(Array.isArray(skill.tags) ? skill.tags : []),
+        ...(Array.isArray(skill.workflowPhases) ? skill.workflowPhases : []),
+        ...(Array.isArray(skill.reviewAngles) ? skill.reviewAngles : []),
+      ].filter(Boolean).join(" "),
+    }));
+}
+
+function localSkillDocsFromTree(root) {
+  const base = path.join(root, ".agent-flow", "local-skills");
+  if (!fs.existsSync(base)) {
+    return [];
+  }
+  return fs.readdirSync(base, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => {
+      const skillPath = path.join(base, entry.name, "SKILL.md");
+      if (!fs.existsSync(skillPath)) {
+        return null;
+      }
+      return {
+        name: entry.name,
+        path: path.relative(root, skillPath).split(path.sep).join("/"),
+        description: localSkillMetadataText(skillPath),
+      };
+    })
+    .filter(Boolean);
+}
+
+function localSkillMetadataText(skillPath) {
+  try {
+    const text = fs.readFileSync(skillPath, "utf8");
+    const frontmatter = text.match(/^---\n([\s\S]*?)\n---/);
+    return frontmatter ? frontmatter[1] : text.split(/\r?\n/).slice(0, 20).join("\n");
+  } catch (_error) {
+    return "";
+  }
+}
+
+function isProjectLocalSkillPath(relPath) {
+  const normalized = relPath.replaceAll("\\", "/");
+  return (
+    normalized.endsWith("/SKILL.md") &&
+    (normalized.startsWith(".agent-flow/local-skills/") || normalized.startsWith("skills/"))
+  );
+}
+
+function isCodeReviewLocalSkill(doc) {
+  const haystack = `${doc.name} ${doc.path} ${doc.description}`.toLowerCase();
+  if (
+    PROJECT_LOCAL_SKILL_EXCLUDE_TERMS.some((term) => haystack.includes(term)) ||
+    PROJECT_LOCAL_SKILL_EXCLUDE_TOKEN_PATTERN.test(haystack)
+  ) {
+    return false;
+  }
+  return PROJECT_LOCAL_SKILL_INCLUDE_TERMS.some((term) => haystack.includes(term));
+}
+
+function dedupeLocalSkillDocs(docs) {
+  const byName = new Map();
+  for (const doc of docs) {
+    if (!byName.has(doc.name)) {
+      byName.set(doc.name, doc);
+    }
+  }
+  return [...byName.values()];
 }
 
 function markerPresent(content, gateLines, marker) {
@@ -1591,6 +1838,17 @@ function completionGateLines(content) {
     }
   }
   return out;
+}
+
+function completionGateMarkerValues(content) {
+  const values = new Map();
+  for (const line of completionGateLines(content)) {
+    const separator = line.indexOf(":");
+    if (separator !== -1) {
+      values.set(line.slice(0, separator).trim(), line.slice(separator + 1).trim());
+    }
+  }
+  return values;
 }
 
 function normalizeCompletionMarkerLine(line) {
@@ -2244,11 +2502,12 @@ function pushWatchTickPromptMarkdown() {
   return `# push-watch-tick\n\nPoll the current PR checks and review threads.\n\nUse \`${AGENT_FLOW_COMMAND} run push-watch-tick\`.\n\nWrite \`artifacts/pr-watch.md\` with one status line: \`status: green\`, \`status: comments\`, \`status: ci-failed\`, or \`status: pending\`.\n`;
 }
 
-function phasePrompt(phase) {
+function phasePrompt(phase, root = null) {
   const markers = phase.required_markers?.length
     ? `\n\n## Completion markers\n\nThe runner blocks this phase until the artifact includes a \`## Completion Gate\` section with these marker lines:\n\n${phase.required_markers.map((marker) => `- \`${marker}\``).join("\n")}\n`
     : "";
-  return `# ${phase.id}\n\n${phase.instruction}${markers}\n\nSave the required artifact before running:\n\n\`\`\`bash\n${AGENT_FLOW_COMMAND} run advance\n\`\`\`\n`;
+  const localSkillBlock = root ? localSkillPromptBlock(root, phase.id) : "";
+  return `# ${phase.id}\n\n${phase.instruction}${markers}${localSkillBlock}\n\nSave the required artifact before running:\n\n\`\`\`bash\n${AGENT_FLOW_COMMAND} run advance\n\`\`\`\n`;
 }
 
 function shellQuote(value) {

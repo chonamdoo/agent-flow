@@ -31,7 +31,7 @@ description: Use as the independent code reviewer after implementation changes. 
 - React Native/Expo 변경은 React Native profile의 required skill group만 확인했는가. RN의 `android/` native code를 직접 변경한 경우에만 Android profile mapping과 Android 관련 skill을 추가 적용했는가.
 - iOS/Swift 변경은 iOS profile의 required skill group만 확인했는가.
 - Android/Kotlin/Compose/KMP 변경은 `android-code-review`, Android profile의 `android_skills.review[*].skill`, 필요한 `chrisbanes_skills.review[*].skill` 로컬 설치본을 현재 host 경로에서만 읽었는가.
-- 필요한 profile/local skill이 없으면 `missing local <skill-group>: <skill>`와 source URL을 기록하고 `request-changes`로 판단했는가.
+- 필요한 profile/local skill이 없으면 `missing local <skill-group>: <skill>`와 source URL을 기록하고 `request-changes`로 판단했는가. Project-local skill은 코드 작성/리뷰에 적용되는 로컬 markdown skill만 포함하며 Figma/design, hook, branch, PR, merge, cleanup skill은 제외했는가.
 - 설계/구현 변경이면 `skills/clean-architecture/SKILL.md`를 적용했는가.
 - Clean Architecture must-fix 조건이 있으면 `request-changes`로 판단했는가.
 - agent-flow phase artifact와 completion marker가 요구사항을 만족하는가.
@@ -70,6 +70,7 @@ hook-parity-check: pass|fail
 clean-architecture: applied
 project-local-skills: checked|n/a
 project-local-skills-used: <skill list or n/a>
+project-local-skill-docs: applied|n/a
 dependency-rule: pass|fail
 usecase-boundary: pass|fail|n/a
 usecase-calls-usecase: pass|fail
