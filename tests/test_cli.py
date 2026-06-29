@@ -1515,9 +1515,13 @@ class CliTest(unittest.TestCase):
             self.assertIn("show-phase-status.sh", omp_extension_text)
             self.assertIn("session_shutdown", omp_extension_text)
             self.assertIn('pi.on("context"', omp_extension_text)
-            self.assertIn("ctx?.models?.current", omp_extension_text)
-            self.assertIn("CLAUDE.md", omp_extension_text)
-            self.assertIn("AGENTS.md", omp_extension_text)
+            self.assertIn('message?.customType !== "agent-flow-model-context"', omp_extension_text)
+            self.assertIn('message?.details?.source !== "agent-flow-omp-model-context"', omp_extension_text)
+            self.assertIn("!messageText(message).includes('source=\"agent-flow-omp-model-context\"')", omp_extension_text)
+            self.assertNotIn("modelSpecificProjectContext", omp_extension_text)
+            self.assertNotIn("contextMessage(", omp_extension_text)
+            self.assertNotIn("content.trimEnd()", omp_extension_text)
+            self.assertNotIn("<context>", omp_extension_text)
             self.assertIn("syncRootContextFiles", omp_extension_text)
             self.assertIn("modifiedRootContextFiles", omp_extension_text)
             self.assertNotIn(str(Path(__file__).resolve().parents[1]), omp_extension_text)
@@ -2672,72 +2676,51 @@ if (fs.readFileSync("CLAUDE.md", "utf8") !== fs.readFileSync("AGENTS.md", "utf8"
   throw new Error("AGENTS.md did not sync to CLAUDE.md");
 }
 
-const contextText = (message) => {
-  if (typeof message?.content === "string") {
-    return message.content;
-  }
-  if (Array.isArray(message?.content)) {
-    return message.content.map((part) => typeof part?.text === "string" ? part.text : "").join("\\n");
-  }
-  return "";
+const staleModelContext = {
+  role: "custom",
+  customType: "agent-flow-model-context",
+  display: false,
+  attribution: "agent",
+  details: {
+    fileName: "AGENTS.md",
+    filePath: path.join(process.cwd(), "AGENTS.md"),
+    source: "agent-flow-omp-model-context",
+  },
+  content: "<context>leaked root context</context>",
 };
-
-const assertRootContextMessage = (label, result, fileName, expectedContent) => {
-  const message = result.messages.at(-1);
-  const expectedPath = path.join(process.cwd(), fileName);
-  if (message.role !== "custom") {
-    throw new Error(`${label} context role must be custom`);
-  }
-  if (message.customType !== "agent-flow-model-context") {
-    throw new Error(`${label} context customType mismatch`);
-  }
-  if (message.display !== false) {
-    throw new Error(`${label} context must be hidden`);
-  }
-  if (message.attribution !== "agent") {
-    throw new Error(`${label} context attribution mismatch`);
-  }
-  if (message.details?.fileName !== fileName || message.details?.filePath !== expectedPath || message.details?.source !== "agent-flow-omp-model-context") {
-    throw new Error(`${label} context details mismatch`);
-  }
-  const text = contextText(message);
-  if (!text.includes('source="agent-flow-omp-model-context"')) {
-    throw new Error(`${label} context source marker missing`);
-  }
-  if (!text.includes(expectedPath)) {
-    throw new Error(`${label} context file path missing`);
-  }
-  if (!text.includes(expectedContent)) {
-    throw new Error(`${label} context content missing`);
-  }
-  return { message, text };
+const materializedModelContext = {
+  role: "developer",
+  content: [
+    {
+      type: "text",
+      text: '<context>\\n<file path="AGENTS.md" source="agent-flow-omp-model-context">\\nleaked root context\\n</file>\\n</context>',
+    },
+  ],
 };
+const visibleMessage = { role: "user", content: "keep me" };
+const scrubbedContext = await handlers.get("context")(
+  { messages: [visibleMessage, staleModelContext, materializedModelContext] },
+  { cwd: process.cwd(), models: { current() { return { provider: "anthropic", id: "claude-sonnet" }; } } },
+);
+if (!scrubbedContext || scrubbedContext.messages.length !== 1 || scrubbedContext.messages[0] !== visibleMessage) {
+  throw new Error("Stale hidden or materialized root context message should be stripped");
+}
 
 const claudeContext = await handlers.get("context")(
   { messages: [] },
   { cwd: process.cwd(), models: { current() { return { provider: "anthropic", id: "claude-sonnet" }; } } },
 );
-const claude = assertRootContextMessage("Claude", claudeContext, "CLAUDE.md", "agents-updated");
-const duplicateClaudeContext = await handlers.get("context")(
-  { messages: claudeContext.messages },
-  { cwd: process.cwd(), models: { current() { return { provider: "anthropic", id: "claude-sonnet" }; } } },
-);
-if (duplicateClaudeContext !== undefined) {
-  throw new Error("Duplicate custom context message should be skipped");
-}
-const duplicateClaudeTextBlockContext = await handlers.get("context")(
-  { messages: [{ role: "user", content: [{ type: "text", text: claude.text }] }] },
-  { cwd: process.cwd(), models: { current() { return { provider: "anthropic", id: "claude-sonnet" }; } } },
-);
-if (duplicateClaudeTextBlockContext !== undefined) {
-  throw new Error("Duplicate text-block context message should be skipped");
+if (claudeContext !== undefined) {
+  throw new Error("Context hook must not inject Claude root context");
 }
 
 const codexContext = await handlers.get("context")(
   { messages: [] },
   { cwd: process.cwd(), models: { current() { return { provider: "openai", id: "gpt-5" }; } } },
 );
-assertRootContextMessage("Codex/OpenAI", codexContext, "AGENTS.md", "agents-updated");
+if (codexContext !== undefined) {
+  throw new Error("Context hook must not inject Codex/OpenAI root context");
+}
 """,
                         encoding="utf-8",
                     )
