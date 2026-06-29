@@ -1314,6 +1314,12 @@ function assertInstalledHookParity(label, tempRoot) {
   if (!ompExtensionText.includes("pi.on(\"context\"") || !ompExtensionText.includes("ctx?.models?.current") || !ompExtensionText.includes("CLAUDE.md") || !ompExtensionText.includes("AGENTS.md")) {
     failures.push(`${label} omp extension missing model-specific root context routing`);
   }
+  if (!ompExtensionText.includes('role: "custom"') || !ompExtensionText.includes('customType: "agent-flow-model-context"') || !ompExtensionText.includes("display: false")) {
+    failures.push(`${label} omp extension must hide model context as a custom message`);
+  }
+  if (ompExtensionText.includes('role: "user"')) {
+    failures.push(`${label} omp extension must not inject model context as a visible user message`);
+  }
   if (!ompExtensionText.includes("syncRootContextFiles") || !ompExtensionText.includes("modifiedRootContextFiles")) {
     failures.push(`${label} omp extension missing root AGENTS.md/CLAUDE.md sync`);
   }
