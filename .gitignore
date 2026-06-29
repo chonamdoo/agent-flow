@@ -20,3 +20,5 @@ uv.lock
 AGENTS.md
 CLAUDE.md
 .Codex/
+.claude/
+.omp/
