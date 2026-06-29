@@ -48,8 +48,10 @@ def _stage_from_payload(item: object, *, workflow_id: str) -> Stage:
     role = item.get("role")
     if not isinstance(stage_id, str) or not stage_id:
         raise ValueError(f"workflow stage id missing: {workflow_id}")
-    if not isinstance(role, str) or not role:
-        raise ValueError(f"workflow stage role missing: {workflow_id}:{stage_id}")
+    if role is None:
+        role = ""
+    elif not isinstance(role, str):
+        raise ValueError(f"workflow stage role must be a string: {workflow_id}:{stage_id}")
     parallel = item.get("parallel", False)
     replicas = item.get("replicas", 1)
     if not isinstance(parallel, bool):
