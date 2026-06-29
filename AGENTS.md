@@ -51,20 +51,20 @@ Follow the CLI output exactly. If no run is active, start with `agent-flow run "
 
 - 활성 workflow와 current phase는 항상 `agent-flow status` 출력 기준이다.
 - phase 이동은 status의 `next_command`를 그대로 따른다. `agent-flow continue`나 `agent-flow run advance`를 추측하지 않는다.
-- `default.yaml`: design → slice-plan → worktree → implement → comment-authoring → final-review ↔ fix-loop → comment-authoring → final-review → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge → cleanup
-- `full-feature.yaml`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → gates ↔ fix-loop → comment-authoring → multi-review → architecture-review → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
+- `default.yaml`: design → slice-plan → worktree → implement → comment-authoring → final-review → gates ↔ fix-loop → comment-authoring → final-review → gates → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge → cleanup
+- `full-feature.yaml`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → comment-authoring → multi-review → architecture-review → gates ↔ fix-loop → comment-authoring → multi-review → architecture-review → gates → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
 - `multi-review`는 현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수다. 두 sub-agent를 병렬 실행하고, `reviewer-source: sub-agent`를 기록한 뒤 sub-agent를 닫는다. 마지막에 `## Overall`과 `verdict: approve` 또는 `verdict: request-changes`만 기록한다. 활성 host가 아닌 추가 provider는 optional이다.
 
 ### Context Economy
 
-- Codex / Claude user-facing 답변은 기본적으로 짧은 한글로 한다.
+- Claude/Codex/OMP user-facing 답변은 기본적으로 짧은 한글로 한다.
 - 코드/명령/식별자는 영어 그대로 유지한다.
 - 긴 설명, 긴 로그, 전체 파일 붙여넣기 금지.
 - 필요한 경우만 current phase, action, `next_command`, blocker를 요약한다.
 - 모든 guide를 항상 로드하지 말고 변경 파일에 필요한 guide만 읽는다.
 - 프로젝트 skill은 `skills/<name>/SKILL.md` 또는 private `.agent-flow/local-skills/<name>/SKILL.md`에 둔다.
 - install/bootstrap 후 `.agent-flow/skills/index.json` metadata를 보고 필요한 skill만 읽는다. 모든 SKILL.md 전문을 항상 읽지 않는다.
-- Claude/Codex 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.
-- Claude hook이 자동 차단하는 보호 브랜치 commit/push와 leader checkout/switch 금지는 Codex에서도 동일하게 지킨다.
+- Claude/Codex/OMP 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.
+- Claude/Codex/OMP hook이 자동 차단하는 보호 브랜치 commit/push와 leader checkout/switch 금지는 모든 host에서 동일하게 지킨다.
 
 <!-- agent-flow:end -->
