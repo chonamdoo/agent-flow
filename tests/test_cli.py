@@ -1422,7 +1422,6 @@ class CliTest(unittest.TestCase):
             self.assertTrue((project_root / ".agent-flow" / "skills" / "grill-with-docs" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "product-brief" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "plan-reviewer" / "SKILL.md").is_file())
-            self.assertTrue((project_root / ".agent-flow" / "skills" / "ddd-clean-architecture" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "clean-architecture-core" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "clean-architecture" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "android-clean-architecture" / "SKILL.md").is_file())
@@ -1470,12 +1469,6 @@ class CliTest(unittest.TestCase):
             self.assertIn(
                 "verdict: approve",
                 (project_root / ".agent-flow" / "prompts" / "plan-review.md").read_text(encoding="utf-8"),
-            )
-            self.assertIn(
-                "skills/clean-architecture/SKILL.md",
-                (project_root / ".agent-flow" / "skills" / "ddd-clean-architecture" / "SKILL.md").read_text(
-                    encoding="utf-8"
-                ),
             )
             self.assertIn(
                 "code-generation-discipline",
@@ -2794,7 +2787,6 @@ if (codexContext !== undefined) {
             ".agent-flow/skills/full-feature-workflow/SKILL.md",
             ".agent-flow/skills/product-brief/SKILL.md",
             ".agent-flow/skills/plan-reviewer/SKILL.md",
-            ".agent-flow/skills/ddd-clean-architecture/SKILL.md",
             ".agent-flow/skills/architecture-reviewer/SKILL.md",
             ".agent-flow/skills/push-watch/SKILL.md",
         )
