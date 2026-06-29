@@ -2672,23 +2672,72 @@ if (fs.readFileSync("CLAUDE.md", "utf8") !== fs.readFileSync("AGENTS.md", "utf8"
   throw new Error("AGENTS.md did not sync to CLAUDE.md");
 }
 
+const contextText = (message) => {
+  if (typeof message?.content === "string") {
+    return message.content;
+  }
+  if (Array.isArray(message?.content)) {
+    return message.content.map((part) => typeof part?.text === "string" ? part.text : "").join("\\n");
+  }
+  return "";
+};
+
+const assertRootContextMessage = (label, result, fileName, expectedContent) => {
+  const message = result.messages.at(-1);
+  const expectedPath = path.join(process.cwd(), fileName);
+  if (message.role !== "custom") {
+    throw new Error(`${label} context role must be custom`);
+  }
+  if (message.customType !== "agent-flow-model-context") {
+    throw new Error(`${label} context customType mismatch`);
+  }
+  if (message.display !== false) {
+    throw new Error(`${label} context must be hidden`);
+  }
+  if (message.attribution !== "agent") {
+    throw new Error(`${label} context attribution mismatch`);
+  }
+  if (message.details?.fileName !== fileName || message.details?.filePath !== expectedPath || message.details?.source !== "agent-flow-omp-model-context") {
+    throw new Error(`${label} context details mismatch`);
+  }
+  const text = contextText(message);
+  if (!text.includes('source="agent-flow-omp-model-context"')) {
+    throw new Error(`${label} context source marker missing`);
+  }
+  if (!text.includes(expectedPath)) {
+    throw new Error(`${label} context file path missing`);
+  }
+  if (!text.includes(expectedContent)) {
+    throw new Error(`${label} context content missing`);
+  }
+  return { message, text };
+};
+
 const claudeContext = await handlers.get("context")(
   { messages: [] },
   { cwd: process.cwd(), models: { current() { return { provider: "anthropic", id: "claude-sonnet" }; } } },
 );
-const claudeText = claudeContext.messages.at(-1).content[0].text;
-if (!claudeText.includes(path.join(process.cwd(), "CLAUDE.md"))) {
-  throw new Error("Claude model did not receive CLAUDE.md");
+const claude = assertRootContextMessage("Claude", claudeContext, "CLAUDE.md", "agents-updated");
+const duplicateClaudeContext = await handlers.get("context")(
+  { messages: claudeContext.messages },
+  { cwd: process.cwd(), models: { current() { return { provider: "anthropic", id: "claude-sonnet" }; } } },
+);
+if (duplicateClaudeContext !== undefined) {
+  throw new Error("Duplicate custom context message should be skipped");
+}
+const duplicateClaudeTextBlockContext = await handlers.get("context")(
+  { messages: [{ role: "user", content: [{ type: "text", text: claude.text }] }] },
+  { cwd: process.cwd(), models: { current() { return { provider: "anthropic", id: "claude-sonnet" }; } } },
+);
+if (duplicateClaudeTextBlockContext !== undefined) {
+  throw new Error("Duplicate text-block context message should be skipped");
 }
 
 const codexContext = await handlers.get("context")(
   { messages: [] },
   { cwd: process.cwd(), models: { current() { return { provider: "openai", id: "gpt-5" }; } } },
 );
-const codexText = codexContext.messages.at(-1).content[0].text;
-if (!codexText.includes(path.join(process.cwd(), "AGENTS.md"))) {
-  throw new Error("Codex/OpenAI model did not receive AGENTS.md");
-}
+assertRootContextMessage("Codex/OpenAI", codexContext, "AGENTS.md", "agents-updated");
 """,
                         encoding="utf-8",
                     )

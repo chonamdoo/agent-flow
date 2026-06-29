@@ -3013,17 +3013,22 @@ function contextMessage(fileName, filePath) {
     return null;
   }
   return {
-    role: "user",
-    content: [{
-      type: "text",
-      text: [
-        "<context>",
-        '<file path="' + escapeAttribute(filePath) + '" source="agent-flow-omp-model-context">',
-        content.trimEnd(),
-        "</file>",
-        "</context>",
-      ].join("\n"),
-    }],
+    role: "custom",
+    customType: "agent-flow-model-context",
+    display: false,
+    attribution: "agent",
+    details: {
+      fileName,
+      filePath,
+      source: "agent-flow-omp-model-context",
+    },
+    content: [
+      "<context>",
+      '<file path="' + escapeAttribute(filePath) + '" source="agent-flow-omp-model-context">',
+      content.trimEnd(),
+      "</file>",
+      "</context>",
+    ].join("\n"),
   };
 }
 
