@@ -733,13 +733,21 @@ export default function agentFlowHooks(pi) {
   }
 
 
-  pi.on("context", async (event, ctx) => {
+  pi.on("context", async (event) => {
     const messages = Array.isArray(event?.messages) ? event.messages : [];
-    const projectContext = modelSpecificProjectContext(ctx);
-    if (!projectContext || hasContextPath(messages, projectContext.filePath)) {
-      return;
+    const filtered = messages.filter((message) => {
+      if (message?.customType === "agent-flow-model-context" || message?.details?.source === "agent-flow-omp-model-context") {
+        return false;
+      }
+      if (message?.role === "user") {
+        return true;
+      }
+      const text = messageText(message).trim();
+      return !(text.startsWith("<context>") && text.endsWith("</context>") && /<file\b[^>]*\bsource="agent-flow-omp-model-context"/.test(text));
+    });
+    if (filtered.length !== messages.length) {
+      return { messages: filtered };
     }
-    return { messages: [...messages, projectContext.message] };
   });
   pi.on("tool_call", async (event, ctx) => {
     if (!isBashTool(event?.toolName)) {
@@ -785,6 +793,7 @@ export default function agentFlowHooks(pi) {
   });
 }
 
+
 function hookPayload(event, ctx) {
   const input = event?.input || {};
   const toolName = String(event?.toolName || "");
@@ -799,92 +808,6 @@ function hookPayload(event, ctx) {
   };
 }
 
-function modelSpecificProjectContext(ctx) {
-  const fileName = contextFileNameForModel(ctx);
-  const filePath = path.join(ROOT, fileName);
-  const message = contextMessage(fileName, filePath);
-  if (message) {
-    return { fileName, filePath, message };
-  }
-  if (fileName === "CLAUDE.md") {
-    const fallbackName = "AGENTS.md";
-    const fallbackPath = path.join(ROOT, fallbackName);
-    const fallbackMessage = contextMessage(fallbackName, fallbackPath);
-    return fallbackMessage ? { fileName: fallbackName, filePath: fallbackPath, message: fallbackMessage } : null;
-  }
-  return null;
-}
-
-function contextFileNameForModel(ctx) {
-  const text = currentModelText(ctx);
-  if (/\b(anthropic|claude)\b/.test(text)) {
-    return "CLAUDE.md";
-  }
-  return "AGENTS.md";
-}
-
-function currentModelText(ctx) {
-  let model = null;
-  try {
-    model = ctx?.models?.current?.() || ctx?.model || null;
-  } catch {
-    model = ctx?.model || null;
-  }
-  if (typeof model === "string") {
-    return model.toLowerCase();
-  }
-  if (!model || typeof model !== "object") {
-    return "";
-  }
-  return [
-    model.provider,
-    model.providerId,
-    model.id,
-    model.model,
-    model.modelId,
-    model.name,
-    model.canonicalId,
-  ].filter(Boolean).map(String).join(" ").toLowerCase();
-}
-
-function contextMessage(fileName, filePath) {
-  if (!pathExists(filePath)) {
-    return null;
-  }
-  let content = "";
-  try {
-    content = fs.readFileSync(filePath, "utf8");
-  } catch {
-    return null;
-  }
-  if (!content.trim()) {
-    return null;
-  }
-  return {
-    role: "custom",
-    customType: "agent-flow-model-context",
-    display: false,
-    attribution: "agent",
-    details: {
-      fileName,
-      filePath,
-      source: "agent-flow-omp-model-context",
-    },
-    content: [
-      "<context>",
-      '<file path="' + escapeAttribute(filePath) + '" source="agent-flow-omp-model-context">',
-      content.trimEnd(),
-      "</file>",
-      "</context>",
-    ].join("\n"),
-  };
-}
-
-function hasContextPath(messages, filePath) {
-  const normalized = String(filePath).replaceAll("\\", "/");
-  return messages.some((message) => messageText(message).replaceAll("\\", "/").includes(normalized));
-}
-
 function messageText(message) {
   const content = message?.content;
   if (typeof content === "string") {
@@ -896,6 +819,7 @@ function messageText(message) {
   return content.map((part) => typeof part?.text === "string" ? part.text : "").join("\n");
 }
 
+
 function pathExists(filePath) {
   try {
     fs.statSync(filePath);
@@ -905,13 +829,6 @@ function pathExists(filePath) {
   }
 }
 
-function escapeAttribute(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
-}
 
 function syncRootContextFiles(event, ctx) {
   const direction = rootContextSyncDirection(event, ctx);

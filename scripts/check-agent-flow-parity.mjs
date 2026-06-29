@@ -1311,11 +1311,11 @@ function assertInstalledHookParity(label, tempRoot) {
   if (!ompExtensionText.includes("tool_call") || !ompExtensionText.includes("tool_result") || !ompExtensionText.includes("session_shutdown")) {
     failures.push(`${label} omp extension missing tool/session hook events`);
   }
-  if (!ompExtensionText.includes("pi.on(\"context\"") || !ompExtensionText.includes("ctx?.models?.current") || !ompExtensionText.includes("CLAUDE.md") || !ompExtensionText.includes("AGENTS.md")) {
-    failures.push(`${label} omp extension missing model-specific root context routing`);
+  if (!ompExtensionText.includes("pi.on(\"context\"") || !ompExtensionText.includes('message?.customType === "agent-flow-model-context"') || !ompExtensionText.includes('message?.details?.source === "agent-flow-omp-model-context"') || !ompExtensionText.includes('message?.role === "user"') || !ompExtensionText.includes('text.startsWith("<context>")') || !ompExtensionText.includes('/<file\\b[^>]*\\bsource="agent-flow-omp-model-context"/.test(text)')) {
+    failures.push(`${label} omp extension must scrub stale hidden root context messages`);
   }
-  if (!ompExtensionText.includes('role: "custom"') || !ompExtensionText.includes('customType: "agent-flow-model-context"') || !ompExtensionText.includes("display: false")) {
-    failures.push(`${label} omp extension must hide model context as a custom message`);
+  if (ompExtensionText.includes("modelSpecificProjectContext") || ompExtensionText.includes("contextMessage(") || ompExtensionText.includes("content.trimEnd()")) {
+    failures.push(`${label} omp extension must not inject root context message content`);
   }
   if (ompExtensionText.includes('role: "user"')) {
     failures.push(`${label} omp extension must not inject model context as a visible user message`);
