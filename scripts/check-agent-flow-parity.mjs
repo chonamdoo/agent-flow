@@ -1225,7 +1225,6 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
     }
     for (const name of [
       "architecture-reviewer",
-      "ddd-clean-architecture",
       "full-feature-workflow",
       "plan-reviewer",
       "product-brief",

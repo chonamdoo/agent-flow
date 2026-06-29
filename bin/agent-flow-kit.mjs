@@ -63,7 +63,6 @@ const PROFILE_MANAGED_HOST_ONLY_SKILLS = new Set([
 ]);
 const GENERATED_PROJECT_SKILL_NAMES = new Set([
   "architecture-reviewer",
-  "ddd-clean-architecture",
   "full-feature-workflow",
   "plan-reviewer",
   "product-brief",
@@ -126,10 +125,6 @@ function installProject() {
   );
   writeManagedFile(path.join(agentFlowDir, "skills", "product-brief", "SKILL.md"), productBriefSkillMarkdown());
   writeManagedFile(path.join(agentFlowDir, "skills", "plan-reviewer", "SKILL.md"), planReviewerSkillMarkdown());
-  writeManagedFile(
-    path.join(agentFlowDir, "skills", "ddd-clean-architecture", "SKILL.md"),
-    dddCleanArchitectureSkillMarkdown(),
-  );
   writeManagedFile(
     path.join(agentFlowDir, "skills", "architecture-reviewer", "SKILL.md"),
     architectureReviewerSkillMarkdown(),
@@ -701,7 +696,6 @@ function assertInstalled(root) {
     path.join(root, ".agent-flow", "skills", "domain-modeling", "SKILL.md"),
     path.join(root, ".agent-flow", "skills", "product-brief", "SKILL.md"),
     path.join(root, ".agent-flow", "skills", "plan-reviewer", "SKILL.md"),
-    path.join(root, ".agent-flow", "skills", "ddd-clean-architecture", "SKILL.md"),
     path.join(root, ".agent-flow", "skills", "architecture-reviewer", "SKILL.md"),
     path.join(root, ".agent-flow", "skills", "push-watch", "SKILL.md"),
     ...selectedSkillPaths,
@@ -2480,10 +2474,6 @@ function productBriefSkillMarkdown() {
 
 function planReviewerSkillMarkdown() {
   return `---\nname: plan-reviewer\ndescription: Use during the full-feature plan-review phase.\n---\n\n# Plan Reviewer\n\nUse during the full-feature plan-review phase.\n\nReview only. Do not rewrite the plan.\n\nCheck:\n\n- Missing data collection steps.\n- Missing validation steps.\n- Wrong implementation order.\n- Oversized slices that should be split.\n- Missing state/storage steps.\n- Test coverage gaps.\n- Architecture risks before coding.\n\nArtifact template:\n\n# Plan Review\n\nverdict: approve | request-changes\n\n## Scope Checked\n\n## Missing Steps\n\n## Wrong Order\n\n## Oversized Slices\n\n## Validation Gaps\n\n## Data/State Gaps\n\n## Architecture Risks\n\n## Required Changes\n\n## Approval Notes\n`;
-}
-
-function dddCleanArchitectureSkillMarkdown() {
-  return `---\nname: ddd-clean-architecture\ndescription: Legacy compatibility shim for full-feature ddd-design and architecture-review phases. Prefer ddd-architecture first, then clean-architecture.\n---\n\n# DDD Clean Architecture\n\nThis legacy skill delegates responsibility:\n\n1. Apply \`skills/ddd-architecture/SKILL.md\` for Bounded Context, Ubiquitous Language, Entities, Value Objects, Aggregates, Domain Events, Domain Invariants, and Domain Flow.\n2. Apply \`skills/clean-architecture/SKILL.md\` for layer boundaries, dependency direction, UseCase ports/impls, Repository ports/adapters, Cache, Mapper, Composition Root, Testability, and SOLID architecture validation.\n\nDo not treat DDD and Clean Architecture as one responsibility. DDD defines the domain; Clean Architecture protects it with boundaries.\n`;
 }
 
 function architectureReviewerSkillMarkdown() {
