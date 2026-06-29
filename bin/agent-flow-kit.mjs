@@ -2887,11 +2887,16 @@ export default function agentFlowHooks(pi) {
 
   pi.on("context", async (event) => {
     const messages = Array.isArray(event?.messages) ? event.messages : [];
-    const filtered = messages.filter((message) =>
-      message?.customType !== "agent-flow-model-context"
-      && message?.details?.source !== "agent-flow-omp-model-context"
-      && !messageText(message).includes('source="agent-flow-omp-model-context"')
-    );
+    const filtered = messages.filter((message) => {
+      if (message?.customType === "agent-flow-model-context" || message?.details?.source === "agent-flow-omp-model-context") {
+        return false;
+      }
+      if (message?.role === "user") {
+        return true;
+      }
+      const text = messageText(message).trim();
+      return !(text.startsWith("<context>") && text.endsWith("</context>") && /<file\b[^>]*\bsource="agent-flow-omp-model-context"/.test(text));
+    });
     if (filtered.length !== messages.length) {
       return { messages: filtered };
     }

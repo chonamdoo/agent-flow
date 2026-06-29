@@ -1515,13 +1515,14 @@ class CliTest(unittest.TestCase):
             self.assertIn("show-phase-status.sh", omp_extension_text)
             self.assertIn("session_shutdown", omp_extension_text)
             self.assertIn('pi.on("context"', omp_extension_text)
-            self.assertIn('message?.customType !== "agent-flow-model-context"', omp_extension_text)
-            self.assertIn('message?.details?.source !== "agent-flow-omp-model-context"', omp_extension_text)
-            self.assertIn("!messageText(message).includes('source=\"agent-flow-omp-model-context\"')", omp_extension_text)
+            self.assertIn('message?.customType === "agent-flow-model-context"', omp_extension_text)
+            self.assertIn('message?.details?.source === "agent-flow-omp-model-context"', omp_extension_text)
+            self.assertIn('message?.role === "user"', omp_extension_text)
+            self.assertIn('text.startsWith("<context>")', omp_extension_text)
+            self.assertIn('/<file\\b[^>]*\\bsource="agent-flow-omp-model-context"/.test(text)', omp_extension_text)
             self.assertNotIn("modelSpecificProjectContext", omp_extension_text)
             self.assertNotIn("contextMessage(", omp_extension_text)
             self.assertNotIn("content.trimEnd()", omp_extension_text)
-            self.assertNotIn("<context>", omp_extension_text)
             self.assertIn("syncRootContextFiles", omp_extension_text)
             self.assertIn("modifiedRootContextFiles", omp_extension_text)
             self.assertNotIn(str(Path(__file__).resolve().parents[1]), omp_extension_text)
@@ -2697,12 +2698,20 @@ const materializedModelContext = {
     },
   ],
 };
+const normalMarkerMessage = {
+  role: "developer",
+  content: 'debug log: source="agent-flow-omp-model-context"',
+};
+const userQuotedContext = {
+  role: "user",
+  content: '<context>\\n<file path="AGENTS.md" source="agent-flow-omp-model-context">\\nquoted by user\\n</file>\\n</context>',
+};
 const visibleMessage = { role: "user", content: "keep me" };
 const scrubbedContext = await handlers.get("context")(
-  { messages: [visibleMessage, staleModelContext, materializedModelContext] },
+  { messages: [visibleMessage, normalMarkerMessage, userQuotedContext, staleModelContext, materializedModelContext] },
   { cwd: process.cwd(), models: { current() { return { provider: "anthropic", id: "claude-sonnet" }; } } },
 );
-if (!scrubbedContext || scrubbedContext.messages.length !== 1 || scrubbedContext.messages[0] !== visibleMessage) {
+if (!scrubbedContext || scrubbedContext.messages.length !== 3 || scrubbedContext.messages[0] !== visibleMessage || scrubbedContext.messages[1] !== normalMarkerMessage || scrubbedContext.messages[2] !== userQuotedContext) {
   throw new Error("Stale hidden or materialized root context message should be stripped");
 }
 
