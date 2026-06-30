@@ -5605,6 +5605,38 @@ if (codexContext !== undefined) {
             self.assertEqual(result.exit_code, 0)
             self.assertEqual(result.stdout.strip(), "ok")
 
+    def test_context_docs_checker_uses_managed_worktree_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "project"
+            worktree = root / ".agent-flow" / "worktrees" / "feat-task"
+            scripts = root / ".agent-flow" / "scripts"
+            scripts.mkdir(parents=True)
+            worktree.mkdir(parents=True)
+            shutil.copy(
+                Path(__file__).resolve().parents[1] / "scripts" / "check-context-docs.mjs",
+                scripts / "check-context-docs.mjs",
+            )
+            _write_minimal_context_docs(root)
+
+            result = run_gate(
+                GateCommand("context-lint", ("node", "scripts/check-context-docs.mjs")),
+                cwd=worktree,
+                timeout_s=30,
+            )
+
+            self.assertEqual(result.command, ("node", "../../scripts/check-context-docs.mjs"))
+            self.assertFalse(result.passed)
+            self.assertIn("CONTEXT.md missing", result.stdout)
+
+            _write_minimal_context_docs(worktree)
+            result = run_gate(
+                GateCommand("context-lint", ("node", "scripts/check-context-docs.mjs")),
+                cwd=worktree,
+                timeout_s=30,
+            )
+
+            self.assertTrue(result.passed, result.stdout + result.stderr)
+
     def test_gates_cli_writes_results_for_run_dir(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
