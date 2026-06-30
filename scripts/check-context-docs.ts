@@ -10,7 +10,14 @@ type ContextTreeRecord = {
   summary?: unknown;
 };
 
-const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+type ManagedWorktreeContext = {
+  leaderRoot: string;
+  worktreeRoot: string;
+};
+
+const SCRIPT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const INSTALLED_ROOT = path.basename(SCRIPT_ROOT) === ".agent-flow" ? path.dirname(SCRIPT_ROOT) : SCRIPT_ROOT;
+const ROOT = resolveContextRoot(INSTALLED_ROOT, process.cwd());
 const CONTEXT = path.join(ROOT, "CONTEXT.md");
 const CONTEXT_TREE = path.join(ROOT, ".Codex", "context", "tree.jsonl");
 const MAX_HOT_DOC_LINES = 200;
@@ -33,6 +40,37 @@ if (errors.length > 0) {
 }
 
 console.log("context-docs: OK");
+
+function resolveContextRoot(installedRoot: string, cwd: string): string {
+  const worktree = managedWorktreeContext(cwd);
+  if (worktree !== undefined && samePath(worktree.leaderRoot, installedRoot)) {
+    return worktree.worktreeRoot;
+  }
+  return installedRoot;
+}
+
+function managedWorktreeContext(cwd: string): ManagedWorktreeContext | undefined {
+  const resolved = path.resolve(cwd);
+  const parts = resolved.split(path.sep);
+  for (let index = parts.length - 3; index > 0; index -= 1) {
+    if (parts[index] !== ".agent-flow" || parts[index + 1] !== "worktrees") {
+      continue;
+    }
+    return {
+      leaderRoot: parts.slice(0, index).join(path.sep) || path.sep,
+      worktreeRoot: parts.slice(0, index + 3).join(path.sep) || path.sep,
+    };
+  }
+  return undefined;
+}
+
+function samePath(left: string, right: string): boolean {
+  try {
+    return fs.realpathSync.native(left) === fs.realpathSync.native(right);
+  } catch {
+    return path.resolve(left) === path.resolve(right);
+  }
+}
 
 function checkContext(result: string[]): void {
   if (!fs.existsSync(CONTEXT)) {
