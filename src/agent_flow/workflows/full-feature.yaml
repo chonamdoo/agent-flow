@@ -556,8 +556,10 @@ phases:
       pending: block
       default: fix-loop
     prompt: |
-      Run QA only after required reviewers approve. Execute profile gates in
-      BUILD -> TYPECHECK -> LINT order where applicable, plus context lint.
+      Run QA only after required reviewers approve. Execute configured
+      profile gates. CI/CD owns lint/static/check commands; managed local
+      profile gates keep agent-flow context/architecture checks and build/test
+      checks only.
       Docs-only PRs must still run context lint. Save
       structured JSON with a top-level `passed` boolean and a `results` array.
       When an explicit route status is needed, also include top-level `status`

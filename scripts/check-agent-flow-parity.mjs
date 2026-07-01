@@ -320,7 +320,7 @@ assertContains("bin/agent-flow-kit.mjs", "src\", \"agent_flow");
 assertContains("src/agent_flow/core/gates.py", "\".agent-flow\" / \"runtime\" / \"python\"");
 assertContains("src/agent_flow/core/gates.py", "_resolve_gate_command");
 assertContains("scripts/check-context-docs.mjs", 'path.basename(SCRIPT_ROOT) === ".agent-flow"');
-assertPythonContract("profile gate build/typecheck/lint order", `
+assertPythonContract("profile gate configured order", `
 from agent_flow.cli import _profile_gate_commands
 
 def gate_ids(profile):
@@ -338,17 +338,23 @@ for profile in ("android", "generic", "ios", "nextjs", "node", "python", "react-
 generic_commands = [command.command for command in _profile_gate_commands(["generic"])]
 if ("node", ".agent-flow/scripts/check-context-docs.mjs") not in generic_commands:
     raise AssertionError(generic_commands)
-require_before(typescript, "build", "typecheck")
-require_before(typescript, "typecheck", "lint")
+for static_gate in ("lint", "type", "typecheck"):
+    if static_gate in typescript:
+        raise AssertionError(f"typescript must not include local static gate: {typescript}")
+if "build" not in typescript or "test" not in typescript:
+    raise AssertionError(typescript)
 
 react_native = gate_ids("react-native")
-require_before(react_native, "android-build", "lint")
-require_before(react_native, "ios-build", "lint")
+if "lint" in react_native:
+    raise AssertionError(f"react-native must not include local lint gate: {react_native}")
+if "android-build" not in react_native or "ios-build" not in react_native:
+    raise AssertionError(react_native)
 
 union = [command.gate_id for command in _profile_gate_commands(["android", "react-native"])]
 union_commands = [command.command for command in _profile_gate_commands(["android", "react-native"])]
 require_before(union, "react-native:android-build", "architecture-lint")
-require_before(union, "react-native:android-build", "android:lint")
+if "android:lint" in union or "react-native:lint" in union:
+    raise AssertionError(f"local lint gates must not be present: {union}")
 architecture_command = next((command for command in union_commands if command[-2:] == ("--profile", "android,react-native")), None)
 if architecture_command is None or "agent_flow.core.architecture_lint" not in architecture_command:
     raise AssertionError(union_commands)
@@ -632,7 +638,7 @@ assertContains(".claude/agents/code-reviewer.md", "description:");
 
 if (CHECK_INSTALLED_COPY) {
   assertContains(".agent-flow/rules/workflow-contract.md", "Required review happens before completion QA");
-  assertContains(".agent-flow/rules/workflow-contract.md", "gates run BUILD -> TYPECHECK -> LINT");
+  assertContains(".agent-flow/rules/workflow-contract.md", "gates run the configured profile checks");
   assertContains(".agent-flow/rules/workflow-contract.md", "default workflow, gates run as their own phase");
   assertContains(".agent-flow/rules/workflow-contract.md", "short Korean");
   assertContains(".agent-flow/rules/workflow-contract.md", "two active-host sub-agents");
