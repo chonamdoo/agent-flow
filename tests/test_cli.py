@@ -5586,18 +5586,18 @@ if (codexContext !== undefined) {
         self.assertEqual(profile.gates[0].command, ("node", ".agent-flow/scripts/check-context-docs.mjs"))
         self.assertEqual(profile.gates[1].gate_id, "architecture-lint")
         self.assertEqual(profile.gates[1].command, ("agent-flow", "architecture-lint", "--profile", "node"))
-        # npm 기반 TypeScript profile은 subprocess argv list로 검증 명령을 보관한다.
         typescript = load_profile("typescript")
         self.assertEqual(typescript.gates[1].gate_id, "architecture-lint")
         self.assertEqual(typescript.gates[1].command, ("agent-flow", "architecture-lint", "--profile", "typescript"))
-        self.assertEqual(typescript.gates[2].gate_id, "typecheck")
-        self.assertEqual(typescript.gates[2].command, ("npx", "tsc", "--noEmit"))
+        typescript_gates = {gate.gate_id: gate for gate in typescript.gates}
+        self.assertNotIn("typecheck", typescript_gates)
+        self.assertNotIn("lint", typescript_gates)
         nextjs_gates = {gate.gate_id: gate.command for gate in load_profile("nextjs").gates}
         self.assertEqual(nextjs_gates["architecture-lint"], ("agent-flow", "architecture-lint", "--profile", "nextjs"))
         self.assertEqual(nextjs_gates["build"], ("npm", "run", "build"))
         python_gates = {gate.gate_id: gate for gate in load_profile("python").gates}
-        self.assertFalse(python_gates["type"].required)
-        self.assertFalse(python_gates["lint"].required)
+        self.assertNotIn("type", python_gates)
+        self.assertNotIn("lint", python_gates)
         self.assertFalse(python_gates["test"].required)
         android = load_profile("android")
         self.assertEqual(android.profile_id, "android")
@@ -5762,21 +5762,24 @@ if (codexContext !== undefined) {
             self.assertNotIn((sys.executable, "-m", "agent_flow.core.architecture_lint", "--profile", "react-native"), commands)
             gate_ids = [command.gate_id for command in captured]
             self.assertLess(gate_ids.index("android:build"), gate_ids.index("architecture-lint"))
-            self.assertLess(gate_ids.index("react-native:android-build"), gate_ids.index("react-native:lint"))
-            self.assertLess(gate_ids.index("react-native:android-build"), gate_ids.index("android:lint"))
-            self.assertEqual(output.getvalue().strip(), "android,react-native: 9/9 gates passed")
+            self.assertNotIn("android:lint", gate_ids)
+            self.assertNotIn("react-native:lint", gate_ids)
+            self.assertEqual(output.getvalue().strip(), "android,react-native: 7/7 gates passed")
 
-    def test_profile_gate_commands_enforce_build_typecheck_lint_order(self) -> None:
+    def test_profile_gate_commands_enforce_configured_gate_order(self) -> None:
         from agent_flow.cli import _profile_gate_commands
 
         typescript_ids = [command.gate_id for command in _profile_gate_commands(["typescript"])]
         self.assertIn("architecture-lint", typescript_ids)
-        self.assertLess(typescript_ids.index("build"), typescript_ids.index("typecheck"))
-        self.assertLess(typescript_ids.index("typecheck"), typescript_ids.index("lint"))
+        self.assertNotIn("lint", typescript_ids)
+        self.assertNotIn("typecheck", typescript_ids)
+        self.assertIn("build", typescript_ids)
+        self.assertIn("test", typescript_ids)
 
         react_native_ids = [command.gate_id for command in _profile_gate_commands(["react-native"])]
-        self.assertLess(react_native_ids.index("android-build"), react_native_ids.index("lint"))
-        self.assertLess(react_native_ids.index("ios-build"), react_native_ids.index("lint"))
+        self.assertNotIn("lint", react_native_ids)
+        self.assertIn("android-build", react_native_ids)
+        self.assertIn("ios-build", react_native_ids)
 
     def test_gates_cli_reports_unknown_profile_without_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -5842,7 +5845,7 @@ if (codexContext !== undefined) {
                         ),
                         0,
                     )
-            self.assertEqual(output.getvalue().strip(), "android,react-native: 9/9 gates passed")
+            self.assertEqual(output.getvalue().strip(), "android,react-native: 7/7 gates passed")
             self.assertIn(
                 (sys.executable, "-m", "agent_flow.core.architecture_lint", "--profile", "android,react-native"),
                 [command.command for command in captured],

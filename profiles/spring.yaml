@@ -26,10 +26,6 @@ gates:
     command: ["./gradlew", "test"]
     required: true
     phase: pre-push
-  - id: lint
-    command: ["./gradlew", "check"]
-    required: false
-    phase: pre-commit
 review_angles:
   - id: architecture-design
     prompt: templates/_shared/review/architecture-design.md

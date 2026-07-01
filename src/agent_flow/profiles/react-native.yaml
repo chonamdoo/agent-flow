@@ -18,10 +18,6 @@ gates:
     command: ["agent-flow", "architecture-lint", "--profile", "react-native"]
     required: true
     phase: pre-commit
-  - id: lint
-    command: ["npm", "run", "lint"]
-    required: false
-    phase: pre-commit
   - id: test
     command: ["npm", "test"]
     required: true
