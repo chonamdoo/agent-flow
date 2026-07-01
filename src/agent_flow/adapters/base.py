@@ -19,6 +19,7 @@ Profile injection:
 """
 from __future__ import annotations
 
+import copy
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
@@ -70,10 +71,10 @@ class Adapter(ABC):
         host_block = (
             f"\n\n## Host-specific guidance\n{host_hint}\n" if host_hint else ""
         )
-        profile_block = self._render_profile_block()
+        config_root = self._config_root or project_root
+        profile_block = self._render_profile_block(config_root)
         architecture_block = self._render_architecture_block(phase)
         completion_gate_block = self._render_completion_gate_block(phase)
-        config_root = self._config_root or project_root
         local_skill_block = local_skill_prompt_block(config_root, phase.id)
         lore_block = self._render_lore_block(project_root, phase)
         return (
@@ -174,7 +175,7 @@ class Adapter(ABC):
             lines.append("")
         return "\n".join(lines) + "\n"
 
-    def _render_profile_block(self) -> str:
+    def _render_profile_block(self, config_root: Path) -> str:
         """Inline the active profile YAML so the host AI sees real data.
 
         The runner injects `_profile_snapshot` and `_profile_id` before
@@ -184,8 +185,9 @@ class Adapter(ABC):
         if not self._profile_snapshot:
             return ""
         try:
+            profile_snapshot = _profile_snapshot_for_prompt(self._profile_snapshot, config_root)
             yaml_dump = yaml.safe_dump(
-                self._profile_snapshot, sort_keys=False, allow_unicode=True
+                profile_snapshot, sort_keys=False, allow_unicode=True
             ).rstrip()
         except yaml.YAMLError:
             return ""
@@ -195,6 +197,34 @@ class Adapter(ABC):
             f"don't ask the user to look them up:\n\n"
             f"```yaml\n{yaml_dump}\n```\n"
         )
+
+
+def _profile_snapshot_for_prompt(snapshot: dict[str, Any], config_root: Path) -> dict[str, Any]:
+    normalized = copy.deepcopy(snapshot)
+    _normalize_context_docs_commands(normalized, config_root)
+    return normalized
+
+
+def _normalize_context_docs_commands(value: object, config_root: Path) -> None:
+    if isinstance(value, dict):
+        if _is_context_docs_command(value.get("command")):
+            value["command"] = ["node", _context_docs_script_for_prompt(config_root)]
+        for nested in value.values():
+            _normalize_context_docs_commands(nested, config_root)
+    elif isinstance(value, list):
+        for item in value:
+            _normalize_context_docs_commands(item, config_root)
+
+
+def _is_context_docs_command(value: object) -> bool:
+    return value in (
+        ["node", "scripts/check-context-docs.mjs"],
+        ["node", ".agent-flow/scripts/check-context-docs.mjs"],
+    )
+
+
+def _context_docs_script_for_prompt(config_root: Path) -> str:
+    return ".agent-flow/scripts/check-context-docs.mjs"
 
 
 def _oneline(text: str, max_len: int) -> str:

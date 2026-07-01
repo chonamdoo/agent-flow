@@ -698,6 +698,37 @@ class CliTest(unittest.TestCase):
             prompt,
         )
 
+    def test_host_adapters_render_context_lint_from_agent_flow_scripts(self) -> None:
+        from agent_flow.adapters.hosted import HostedAdapter
+        from agent_flow.runner import Phase
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            run_dir = project_root / ".agent-flow" / "runs" / "default" / "r1"
+            profile = {
+                "id": "android",
+                "gates": [
+                    {
+                        "id": "context-lint",
+                        "command": ["node", "scripts/check-context-docs.mjs"],
+                    }
+                ],
+            }
+            for host in ("claude", "codex", "omp"):
+                adapter = HostedAdapter(host)
+                adapter._profile_id = "android"
+                adapter._profile_snapshot = profile
+                adapter._config_root = project_root
+
+                prompt = adapter.render_envelope(
+                    Phase(id="gates", description=""),
+                    run_dir,
+                    project_root,
+                )
+
+                self.assertIn("- .agent-flow/scripts/check-context-docs.mjs", prompt)
+                self.assertNotIn("- scripts/check-context-docs.mjs", prompt)
+
     def test_python_multi_review_approve_requires_subagent_reviewer(self) -> None:
         from agent_flow.runner import Phase, Runner
 
@@ -5552,7 +5583,7 @@ if (codexContext !== undefined) {
         profile = load_profile("node")
         self.assertEqual(profile.profile_id, "node")
         self.assertEqual(profile.gates[0].gate_id, "context-lint")
-        self.assertEqual(profile.gates[0].command, ("node", "scripts/check-context-docs.mjs"))
+        self.assertEqual(profile.gates[0].command, ("node", ".agent-flow/scripts/check-context-docs.mjs"))
         self.assertEqual(profile.gates[1].gate_id, "architecture-lint")
         self.assertEqual(profile.gates[1].command, ("agent-flow", "architecture-lint", "--profile", "node"))
         # npm 기반 TypeScript profile은 subprocess argv list로 검증 명령을 보관한다.
@@ -5635,6 +5666,14 @@ if (codexContext !== undefined) {
                 timeout_s=30,
             )
 
+            self.assertTrue(result.passed, result.stdout + result.stderr)
+            result = run_gate(
+                GateCommand("context-lint", ("node", ".agent-flow/scripts/check-context-docs.mjs")),
+                cwd=worktree,
+                timeout_s=30,
+            )
+
+            self.assertEqual(result.command, ("node", "../../scripts/check-context-docs.mjs"))
             self.assertTrue(result.passed, result.stdout + result.stderr)
 
     def test_gates_cli_writes_results_for_run_dir(self) -> None:
@@ -5912,6 +5951,7 @@ if (codexContext !== undefined) {
                 encoding="utf-8",
             )
             _write_minimal_context_docs(root)
+            _write_minimal_context_docs(worktree)
             run_dir = root / ".agent-flow" / "runs" / "worktree-runtime"
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")

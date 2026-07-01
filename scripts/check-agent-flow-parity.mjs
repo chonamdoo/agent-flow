@@ -336,7 +336,7 @@ for profile in ("android", "generic", "ios", "nextjs", "node", "python", "react-
     if "architecture-lint" not in ids:
         raise AssertionError(f"{profile} missing architecture-lint gate: {ids}")
 generic_commands = [command.command for command in _profile_gate_commands(["generic"])]
-if ("node", "scripts/check-context-docs.mjs") not in generic_commands:
+if ("node", ".agent-flow/scripts/check-context-docs.mjs") not in generic_commands:
     raise AssertionError(generic_commands)
 require_before(typescript, "build", "typecheck")
 require_before(typescript, "typecheck", "lint")
