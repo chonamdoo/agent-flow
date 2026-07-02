@@ -558,12 +558,12 @@ phases:
     prompt: |
       Run QA only after required reviewers approve. Execute configured
       profile gates. CI/CD owns lint/static/check commands; managed local
-      profile gates keep agent-flow context/architecture checks and build/test
+      profile gates keep agent-flow architecture checks and build/test
       checks only.
-      Docs-only PRs must still run context lint. Save
-      structured JSON with a top-level `passed` boolean and a `results` array.
-      When an explicit route status is needed, also include top-level `status`
-      as `green`, `approve`, `request-changes`, `blocked`, `error`, or `pending`.
+      Save structured JSON with a top-level `passed` boolean and a `results`
+      array. When an explicit route status is needed, also include top-level
+      `status` as `green`, `approve`, `request-changes`, `blocked`, `error`, or
+      `pending`.
       Output: artifacts/gate-results.json.
 
   - id: fix-loop

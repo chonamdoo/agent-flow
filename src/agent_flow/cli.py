@@ -1397,7 +1397,7 @@ def _gate_order_key(gate: GateCommand) -> tuple[int, int, str]:
         return (0, _profile_gate_kind_tiebreaker(lowered), gate_id)
     if any(token in lowered for token in ("typecheck", "tsc", "mypy", "pyright", "type ")):
         return (1, _profile_gate_kind_tiebreaker(lowered), gate_id)
-    if any(token in lowered for token in ("lint", "ruff", "detekt", "ktlint", "check-context-docs", "architecture-lint")):
+    if any(token in lowered for token in ("lint", "ruff", "detekt", "ktlint", "architecture-lint")):
         return (2, _profile_gate_kind_tiebreaker(lowered), gate_id)
     if "test" in lowered or "pytest" in lowered:
         return (3, _profile_gate_kind_tiebreaker(lowered), gate_id)
