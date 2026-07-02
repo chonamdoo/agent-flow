@@ -14,7 +14,7 @@ Agent Flow is a project-agnostic workflow kit. This file keeps expanded domain v
 - **Run**: one execution instance of a Workflow for one task. It owns runtime state and artifacts.
 - **Artifact**: durable record created by a phase. It should summarize decisions, evidence, validation, and review state without raw log floods.
 - **Handoff**: artifact optimized for the next phase. It preserves decisions, rejected options, risks, relevant files, and remaining work.
-- **Gate**: executable validation command declared by a Project Profile. Examples: build, lint, typecheck, tests, context lint.
+- **Gate**: executable validation command declared by a Project Profile. Examples: build, lint, typecheck, tests.
 - **Personal Workflow**: current default execution model where one lead controls the Run, delegates stage-scoped work, and advances phases.
 
 ## Future Terms

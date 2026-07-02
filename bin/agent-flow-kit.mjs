@@ -144,6 +144,7 @@ function installProject() {
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "templates"), path.join(agentFlowDir, "templates"), forceManaged, new Set(), true, forceManaged);
   const skillIndex = installProjectSkills(root, agentFlowDir, previousSkillIndex, forceManaged, installSelection);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "scripts"), path.join(agentFlowDir, "scripts"), forceManaged);
+  removeStaleContextDocsScripts(agentFlowDir, forceManaged);
   copyBundledDirIfMissingOrSame(
     path.join(KIT_ROOT, "src", "agent_flow"),
     path.join(root, RUNTIME_PYTHON_RELATIVE, "agent_flow"),
@@ -193,10 +194,10 @@ function installProject() {
     "CLAUDE.md",
     "AGENTS/",
     "CLAUDE/",
-    "scripts/check-context-docs.*",
     "agent-flow/",
   ]);
   removeGitignoreEntries(gitignorePath, [
+    "scripts/check-context-docs.*",
     "graphify/",
     "graphify-out/manifest.json",
     "graphify-out/cost.json",
@@ -997,6 +998,15 @@ function removeManagedDirIfSame(src, dest, force = false) {
     return;
   }
   fs.rmSync(dest, { recursive: true, force: true });
+}
+
+function removeStaleContextDocsScripts(agentFlowDir, force = false) {
+  if (!force) {
+    return;
+  }
+  for (const filename of ["check-context-docs.mjs", "check-context-docs.ts"]) {
+    fs.rmSync(path.join(agentFlowDir, "scripts", filename), { force: true });
+  }
 }
 
 function dirContentsMatch(src, dest) {
@@ -3185,7 +3195,7 @@ Implementation rules:
 - Run every phase through the runner. Do not skip review, QA, PR watch, or fix-loop phases.
 - Apply \`code-generation-discipline\` during red, green, refactor, fix-loop, and review phases. Resolve required skills from active profile metadata, installed skill index, changed files, and task scope before writing or judging code.
 - If review or QA fails, return to the fix phase before continuing.
-- Required review happens before completion QA. After reviewer approve, gates run the configured profile checks. CI/CD owns lint/static/check commands; managed local profile gates keep agent-flow context/architecture checks and build/test checks only. If review or QA fails, fix-loop routes back through comment-authoring and review before gates run again.
+- Required review happens before completion QA. After reviewer approve, gates run the configured profile checks. CI/CD owns lint/static/check commands; managed local profile gates keep agent-flow architecture checks and build/test checks only. If review or QA fails, fix-loop routes back through comment-authoring and review before gates run again.
 - Code review requires at least two active-host sub-agents (Codex sub-agent in Codex, Claude sub-agent in Claude, OMP sub-agent in OMP). If the changed scope spans multiple areas, run one additional active-host sub-agent in parallel. Additional non-host providers are optional, and every multi-review verdict requires 2+ independent sub-agent reviewer verdicts with reviewer-source: sub-agent. After recording each sub-agent result, close that sub-agent session. End multi-review artifacts with ## Overall followed by exactly one verdict line: verdict: approve or verdict: request-changes.
 - In the default workflow, gates run as their own phase after final-review approve.
 
@@ -3219,8 +3229,8 @@ function runGates(args) {
 function runPythonCliCommand(subcommand, args) {
   const root = resolveAgentFlowRoot(process.cwd());
   const pythonPathEntries = [
-    root ? installedPythonRuntimePath(root) : "",
     path.join(KIT_ROOT, "src"),
+    root ? installedPythonRuntimePath(root) : "",
     process.env.PYTHONPATH,
   ].filter(Boolean);
   const env = {

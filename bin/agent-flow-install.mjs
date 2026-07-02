@@ -297,6 +297,13 @@ function removeDirIfSame(src, dest, force = false) {
   return { written: 1, skipped: 0 };
 }
 
+function removeStaleContextDocsScripts(agentFlowDir, force = false) {
+  if (!force) return;
+  for (const filename of ["check-context-docs.mjs", "check-context-docs.ts"]) {
+    fs.rmSync(path.join(agentFlowDir, "scripts", filename), { force: true });
+  }
+}
+
 function dirContentsMatch(src, dest) {
   if (!fs.existsSync(src) || !fs.existsSync(dest)) return false;
   const srcEntries = fs.readdirSync(src, { withFileTypes: true });
@@ -1510,10 +1517,10 @@ function install() {
     "CLAUDE.md",
     "AGENTS/",
     "CLAUDE/",
-    "scripts/check-context-docs.*",
     "agent-flow/",
   ]);
   removeGitignoreEntries(gitignorePath, [
+    "scripts/check-context-docs.*",
     "graphify/",
     "graphify-out/manifest.json",
     "graphify-out/cost.json",
@@ -1570,6 +1577,7 @@ function install() {
     true,
     FORCE_MANAGED,
   );
+  removeStaleContextDocsScripts(AF_DIR, FORCE_MANAGED);
   if (!samePath(PROJECT, KIT_ROOT)) {
     removeDirIfSame(path.join(KIT_ROOT, "scripts"), path.join(PROJECT, "scripts"), FORCE_MANAGED);
   }

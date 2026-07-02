@@ -6,12 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-_CONTEXT_DOCS_GATE_COMMANDS = {
-    ("node", "scripts/check-context-docs.mjs"),
-    ("node", ".agent-flow/scripts/check-context-docs.mjs"),
-}
-
-
 @dataclass(frozen=True)
 class GateCommand:
     gate_id: str
@@ -105,10 +99,6 @@ def _installed_python_runtime_path(cwd: Path) -> Path | None:
 
 
 def _resolve_gate_command(command: tuple[str, ...], cwd: Path) -> tuple[str, ...]:
-    if command in _CONTEXT_DOCS_GATE_COMMANDS:
-        script = _installed_agent_flow_file(cwd, "scripts", "check-context-docs.mjs")
-        if script is not None:
-            return ("node", os.path.relpath(script, cwd.resolve()))
     return command
 
 
@@ -120,14 +110,6 @@ def _recorded_gate_command(command: tuple[str, ...], cwd: Path) -> tuple[str, ..
         else:
             recorded.append(part)
     return tuple(recorded)
-
-
-def _installed_agent_flow_file(cwd: Path, *parts: str) -> Path | None:
-    for root in _candidate_agent_flow_roots(cwd):
-        candidate = root / ".agent-flow" / Path(*parts)
-        if candidate.is_file():
-            return candidate
-    return None
 
 
 def _candidate_agent_flow_roots(cwd: Path) -> list[Path]:

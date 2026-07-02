@@ -319,7 +319,6 @@ assertContains("bin/agent-flow-kit.mjs", "RUNTIME_PYTHON_RELATIVE");
 assertContains("bin/agent-flow-kit.mjs", "src\", \"agent_flow");
 assertContains("src/agent_flow/core/gates.py", "\".agent-flow\" / \"runtime\" / \"python\"");
 assertContains("src/agent_flow/core/gates.py", "_resolve_gate_command");
-assertContains("scripts/check-context-docs.mjs", 'path.basename(SCRIPT_ROOT) === ".agent-flow"');
 assertPythonContract("profile gate configured order", `
 from agent_flow.cli import _profile_gate_commands
 
@@ -335,8 +334,10 @@ for profile in ("android", "generic", "ios", "nextjs", "node", "python", "react-
     ids = gate_ids(profile)
     if "architecture-lint" not in ids:
         raise AssertionError(f"{profile} missing architecture-lint gate: {ids}")
+    if "context-lint" in ids:
+        raise AssertionError(f"{profile} must not include context-lint gate: {ids}")
 generic_commands = [command.command for command in _profile_gate_commands(["generic"])]
-if ("node", ".agent-flow/scripts/check-context-docs.mjs") not in generic_commands:
+if any(part == "check-context-docs.mjs" or part.endswith("/check-context-docs.mjs") for command in generic_commands for part in command):
     raise AssertionError(generic_commands)
 for static_gate in ("lint", "type", "typecheck"):
     if static_gate in typescript:
@@ -594,9 +595,6 @@ for (const entry of fs.readdirSync(path.join(SOURCE_ROOT, "profiles")).sort()) {
   const packagedGates = gateIds(packagedText);
   if (sourceGates.join("|") !== packagedGates.join("|")) {
     failures.push(`${packaged} gates differ from ${source}`);
-  }
-  if (sourceGates.includes("context-lint") !== packagedGates.includes("context-lint")) {
-    failures.push(`${packaged} context-lint presence differs from ${source}`);
   }
 }
 
