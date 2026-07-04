@@ -8570,7 +8570,7 @@ if (codexContext !== undefined) {
 
 
 def _init_git_repo(root: Path) -> None:
-    subprocess.run(("git", "init", "-q"), cwd=root, check=True)
+    subprocess.run(("git", "init", "-q", "-b", "main"), cwd=root, check=True)
     subprocess.run(("git", "config", "user.email", "test@example.com"), cwd=root, check=True)
     subprocess.run(("git", "config", "user.name", "Test User"), cwd=root, check=True)
     (root / "README.md").write_text("# test\n", encoding="utf-8")

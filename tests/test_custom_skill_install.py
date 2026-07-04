@@ -89,6 +89,7 @@ def test_bundled_workflow_skills_are_internal_and_host_skills_are_registered(tmp
     }
     indexed = {skill["name"] for skill in index["skills"]}
     matt_skill_closure = {
+        "code-review",
         "codebase-design",
         "diagnosing-bugs",
         "domain-modeling",
@@ -179,6 +180,7 @@ def test_android_profile_installs_android_skills_and_common_dependencies_only(tm
     index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
     names = {skill["name"] for skill in index["skills"]}
     matt_skill_closure = {
+        "code-review",
         "codebase-design",
         "diagnosing-bugs",
         "domain-modeling",
