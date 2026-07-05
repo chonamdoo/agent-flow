@@ -1,6 +1,6 @@
 ---
 name: ios-clean-presentation-architecture
-description: Use when creating, modifying, or reviewing an iOS Clean Architecture presentation layer with SwiftUI/UIKit state holders, explicit UiState, UiModel mapping, dependency injection, and state-based presentation code review.
+description: Defines iOS Clean Architecture presentation-layer guidance for SwiftUI/UIKit state holders, explicit UiState, UiModel mapping, dependency injection, and state-based presentation review. Use when creating, modifying, or reviewing iOS feature presentation code for durable screen state and domain-to-UiModel boundaries.
 required_markers:
   - "presentation-skill: ios"
   - "presentation-state-based-development: applied|n/a"
@@ -13,6 +13,18 @@ required_markers:
 # iOS Clean Presentation Architecture
 
 Use this skill for iOS feature work where SwiftUI or UIKit presentation code should follow a reusable Clean Architecture pattern.
+
+## Quick start
+
+1. Use this for feature or screen presentation state: SwiftUI/UIKit state holders, dependency injection, `UiState`/`UiAction`/`UiEvent`, `UiModel` mapping, and render-focused views.
+2. Start by locating the screen state holder and its domain dependencies, then model durable `UiState` before wiring SwiftUI/UIKit views.
+3. If the task is app-wide common error UI, session expiry, maintenance mode, root navigation reset, or global alert/sheet/toast ownership, use `ios-app-shell-error-handling` instead.
+
+## Do not use for
+
+- AppShell/root-coordinator common error hosts, `SessionExpired`/`Maintenance` flow switching, or root navigation resets; use `ios-app-shell-error-handling`.
+- Data, infrastructure, or domain implementation design except to enforce presentation boundaries and mapper responsibilities.
+
 
 ## Evidence Basis
 

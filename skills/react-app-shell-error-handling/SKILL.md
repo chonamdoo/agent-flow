@@ -1,12 +1,19 @@
 ---
 name: react-app-shell-error-handling
-description: Use when implementing or reviewing React Web app-wide error handling where feature components notify common errors and an AppShell, root layout, root route, or client provider layer owns global dialogs, snackbars, toasts, auth flow switching, router resets, SessionExpired handling, Maintenance handling, React Router layout/error boundaries, or Next.js App Router layout/error boundaries.
+description: Defines React Web app-shell common-error handling where feature components notify common errors and AppShell, root layout, root route, or client provider layers own global UI, auth flow switching, router resets, SessionExpired handling, Maintenance handling, and framework error-boundary boundaries. Use when implementing or reviewing React Web app-wide error handling.
 ---
 
 # React App Shell Error Handling
 
 Use this with `code-generation-discipline` for React Web common error handling
 implementation or review.
+
+## Quick start
+
+1. Use this for common errors whose UI or side effects must be owned above feature routes: `SessionExpired`, `Maintenance`, `Forbidden`, and server-wide business codes.
+2. Start by deciding whether `notify(error)` returns `true`; if it does, route the error to AppShell/root provider and keep feature `uiState` limited to local errors.
+3. If the task is ordinary screen `uiState`, state-holder hook DI, `UiModel` mapping, or render-focused components without global hosts/router reset, use `react-clean-presentation-architecture` instead.
+
 
 ## Official Basis
 
@@ -29,6 +36,12 @@ implementation or review.
 - React Router root/layout route navigation resets.
 - Next.js App Router root layout/provider boundary decisions.
 - Review of feature components, hooks, or stores that handle global errors.
+
+## Do not use for
+
+- Feature-local validation or fetch errors that should render inline as screen `uiState`.
+- General state-holder hook, component, DI, or presentation mapper design without AppShell/root-layout global error UI/router reset; use `react-clean-presentation-architecture`.
+
 
 ## AppShell Role
 

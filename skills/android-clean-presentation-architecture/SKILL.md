@@ -1,6 +1,6 @@
 ---
 name: android-clean-presentation-architecture
-description: Use when creating, modifying, or reviewing an Android Clean Architecture presentation layer with Hilt DI, ViewModel, StateFlow uiState, one-shot UI events, and Compose screen wiring.
+description: Defines Android Clean Architecture presentation-layer guidance for Hilt DI, ViewModel, StateFlow uiState, one-shot UI events, and Compose screen wiring. Use when creating, modifying, or reviewing Android feature presentation code for state-based UI and domain-to-UiModel boundaries.
 required_markers:
   - "presentation-skill: android"
   - "presentation-state-based-development: applied|n/a"
@@ -13,6 +13,18 @@ required_markers:
 # Android Clean Presentation Architecture
 
 Use this skill for Android feature work where presentation code should follow a reusable Clean Architecture pattern.
+
+## Quick start
+
+1. Use this for feature or screen presentation state: Hilt entry wiring, ViewModel state holders, `UiState`/`UiAction`/`UiEvent`, `UiModel` mapping, and stateless Compose rendering.
+2. Start by locating the screen state holder and its domain dependencies, then model durable `UiState` before wiring Compose routes/screens.
+3. If the task is app-wide common error UI, session expiry, maintenance mode, root navigation reset, or global dialog/snackbar/toast ownership, use `android-appshell-error-handling` instead.
+
+## Do not use for
+
+- AppShell-owned common error hosts, `SessionExpired`/`Maintenance` root flow switching, or Navi3 root back stack resets; use `android-appshell-error-handling`.
+- Data, network, or domain implementation design except to enforce presentation boundaries and mapper responsibilities.
+
 
 ## Evidence Basis
 

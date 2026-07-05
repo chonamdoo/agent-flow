@@ -1,15 +1,24 @@
 ---
 name: agent-flow-concise-output
 description: >
-  Korean concise output adapter for agent-flow review, commit, and artifact
-  output. Keeps technical accuracy and parser markers intact while reducing
-  prose. Use when writing review findings, commit messages, phase artifacts,
-  PR summaries, or compressed context summaries.
+  Adapts agent-flow reviews, commits, phase artifacts, PR summaries, and
+  compressed context summaries into concise Korean while preserving parser
+  markers and technical tokens. Use when writing agent-flow review findings,
+  commit messages, phase artifacts, PR summaries, or compressed context
+  summaries.
 ---
 
 # Agent Flow Concise Output
 
 Use this skill to reduce prose while preserving agent-flow contracts.
+
+## Quick start
+
+1. Apply this as an output adapter after the main workflow or review skill has determined the substance.
+2. Shorten only prose; preserve parser markers, paths, commands, identifiers, code, and required verdict/status lines byte-for-byte.
+3. If a one-page rules file is needed for Codex/installer integration, read [concise-output.md](concise-output.md).
+
+This is not a standalone workflow skill. It pairs with `agent-flow` and review/commit/artifact-writing phases, and it does not replace the underlying review, QA, commit, or phase contract.
 The installer also writes `concise-output.md` to `.Codex/rules/concise-output.md`.
 
 ## Rules

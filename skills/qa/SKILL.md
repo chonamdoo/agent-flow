@@ -7,6 +7,15 @@ description: Interactive QA session where user reports bugs or issues conversati
 
 Run an interactive QA session. The user describes problems they're encountering. You clarify, explore the codebase for context, and file GitHub issues that are durable, user-focused, and use the project's domain language.
 
+## Quick start
+
+1. Let the user describe one problem in their own words.
+2. Ask at most 2-3 short clarifying questions if the expected behavior, actual behavior, or repro steps are missing.
+3. Explore only enough codebase context to use correct domain language; do not diagnose or fix.
+4. File durable GitHub issue(s), share URLs, then ask whether there is another QA report.
+
+Use this for live conversational bug intake. Use `triage` for issues or PRs already in the tracker, `to-prd` for turning an already-discussed feature into a PRD, `to-issues` for breaking an approved plan into slices, and `grilling` when the plan itself still needs decisions.
+
 ## For each issue the user raises
 
 ### 1. Listen and lightly clarify
@@ -23,7 +32,7 @@ Do NOT over-interview. If the description is clear enough to file, move on.
 
 While talking to the user, kick off an Agent (subagent_type=Explore) in the background to understand the relevant area. The goal is NOT to find a fix — it's to:
 
-- Learn the domain language used in that area (check UBIQUITOUS_LANGUAGE.md)
+- Learn the domain language used in that area (check `CONTEXT.md`, `CONTEXT-MAP.md`, or the configured domain docs)
 - Understand what the feature is supposed to do
 - Identify the user-facing behavior boundary
 

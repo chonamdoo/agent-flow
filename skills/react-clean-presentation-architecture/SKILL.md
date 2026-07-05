@@ -1,6 +1,6 @@
 ---
 name: react-clean-presentation-architecture
-description: Use when creating, modifying, or reviewing a React Clean Architecture presentation layer with Context Provider DI, state-holder hooks, uiState modeling, UiModel mapping, and state-based presentation code review.
+description: Defines React Web Clean Architecture presentation-layer guidance for Context Provider DI, state-holder hooks, uiState modeling, UiModel mapping, and state-based presentation review. Use when creating, modifying, or reviewing React Web feature presentation code for durable UI state and domain-to-UiModel boundaries.
 required_markers:
   - "presentation-skill: react"
   - "presentation-state-based-development: applied|n/a"
@@ -13,6 +13,18 @@ required_markers:
 # React Clean Presentation Architecture
 
 Use this skill for React Web feature work where presentation code should follow a reusable Clean Architecture pattern.
+
+## Quick start
+
+1. Use this for feature or screen presentation state: dependency providers, state-holder hooks, `uiState`/`UiAction`/`UiEvent`, `UiModel` mapping, and render-focused components.
+2. Start by locating the state-holder hook and its domain dependencies, then model durable `uiState` before wiring route/page and screen components.
+3. If the task is app-wide common error UI, session expiry, maintenance mode, auth-flow switching, router reset, or global dialog/snackbar/toast ownership, use `react-app-shell-error-handling` instead.
+
+## Do not use for
+
+- AppShell/root-layout common error hosts, `SessionExpired`/`Maintenance` flow switching, router resets, or global toast/snackbar containers; use `react-app-shell-error-handling`.
+- Data, server, or domain implementation design except to enforce presentation boundaries and mapper responsibilities.
+
 
 ## Evidence Basis
 

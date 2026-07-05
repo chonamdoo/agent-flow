@@ -1,6 +1,6 @@
 ---
 name: react-native-clean-presentation-architecture
-description: Use when creating, modifying, or reviewing a React Native Clean Architecture presentation layer with Context Provider DI, state-holder hooks, uiState modeling, UiModel mapping, navigation effects, and state-based presentation code review.
+description: Defines React Native Clean Architecture presentation-layer guidance for Context Provider DI, state-holder hooks, uiState modeling, UiModel mapping, navigation effects, and state-based presentation review. Use when creating, modifying, or reviewing React Native or Expo feature presentation code for durable UI state and domain-to-UiModel boundaries.
 required_markers:
   - "presentation-skill: react-native"
   - "presentation-state-based-development: applied|n/a"
@@ -13,6 +13,18 @@ required_markers:
 # React Native Clean Presentation Architecture
 
 Use this skill for React Native or Expo feature work where presentation code should follow a reusable Clean Architecture pattern.
+
+## Quick start
+
+1. Use this for feature or screen presentation state: dependency providers, state-holder hooks, `uiState`/`UiAction`/`UiEvent`, `UiModel` mapping, navigation effects, and render-focused screens.
+2. Start by locating the state-holder hook and its domain dependencies, then model durable `uiState` before wiring navigation containers/screens.
+3. If the task is app-wide common error UI, session expiry, maintenance mode, auth-flow switching, navigation reset, or global Modal/snackbar/toast ownership, use `react-native-app-shell-error-handling` instead.
+
+## Do not use for
+
+- AppShell-owned common error hosts, `SessionExpired`/`Maintenance` flow switching, root navigation resets, or global Modal/snackbar/toast containers; use `react-native-app-shell-error-handling`.
+- Data, native module, or domain implementation design except to enforce presentation boundaries and mapper responsibilities.
+
 
 ## Evidence Basis
 

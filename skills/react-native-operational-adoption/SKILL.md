@@ -1,9 +1,21 @@
 ---
 name: react-native-operational-adoption
-description: "Supplemental React Native and Expo development skill. Use alongside react-native-development-guide when writing, modifying, or reviewing RN app code that touches architecture, app shell, navigation, Hermes/RN upgrade strategy, New Architecture boundaries, native modules, micro-frontend routing, signed OTA bundles with rollback, legacy/new RN coexistence, FlashList, MMKV, Reanimated, Relay/SWR, react-native-web parity, or mobile observability. Do not use for React Web-only work, generic React component styling, generic TypeScript issues, or reverse-engineering a specific third-party app itself."
+description: Supplemental React Native and Expo operational architecture guide for app shells, navigation, Hermes/RN upgrades, New Architecture boundaries, native modules, OTA rollout, storage, performance libraries, web parity, and observability. Use when RN work touches architecture or operational adoption decisions, alongside `react-native-development-guide`; do not use standalone, for React Web-only work, generic TypeScript issues, styling-only changes, or third-party app reverse engineering.
 ---
 
 # React Native Operational Adoption
+
+This is a supplemental skill, not a standalone workflow. Pair it with
+`react-native-development-guide` for every React Native or Expo implementation
+or review, and add architecture-specific skills only when their boundary is
+actually touched.
+
+## Quick start
+
+1. Confirm the task changes RN/Expo operational architecture rather than ordinary component styling.
+2. Load `react-native-development-guide` first, then use this skill for the operational decision.
+3. Identify current project facts: RN/Expo version, Hermes/New Architecture status, navigation, native modules, OTA/release policy, and observability.
+4. Prefer official releases and existing project boundaries; add rollout, rollback, and monitoring checks for operational changes.
 
 ## Use With
 

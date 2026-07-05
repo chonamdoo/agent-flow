@@ -1,12 +1,19 @@
 ---
 name: react-native-app-shell-error-handling
-description: Use when implementing or reviewing React Native app-wide error handling where screens notify common errors and App.tsx/AppShell owns NavigationContainer, root stack/tab navigation, global Modal, snackbar, toast hosts, auth flow switching, navigation reset, SessionExpired handling, and Maintenance handling.
+description: Defines React Native app-shell common-error handling where screens notify common errors and App.tsx/AppShell owns NavigationContainer, root stack/tab navigation, global Modal/snackbar/toast hosts, auth flow switching, navigation reset, SessionExpired handling, and Maintenance handling. Use when implementing or reviewing React Native app-wide error handling.
 ---
 
 # React Native App Shell Error Handling
 
 Use this with `code-generation-discipline` for React Native common error handling
 implementation or review.
+
+## Quick start
+
+1. Use this for common errors whose UI or side effects must be owned above feature screens: `SessionExpired`, `Maintenance`, `Forbidden`, and server-wide business codes.
+2. Start by deciding whether `notify(error)` returns `true`; if it does, route the error to AppShell and keep screen `uiState` limited to local errors.
+3. If the task is ordinary screen `uiState`, state-holder hook DI, `UiModel` mapping, or render-focused screens without global hosts/navigation reset, use `react-native-clean-presentation-architecture` instead.
+
 
 ## Official Basis
 
@@ -25,6 +32,12 @@ implementation or review.
 - Root stack/tab auth flow switching.
 - Navigation reset to login or maintenance roots.
 - Review of screens/hooks/stores that handle global errors.
+
+## Do not use for
+
+- Screen-local validation or fetch errors that should render inline as screen `uiState`.
+- General state-holder hook, screen, DI, native adapter, or presentation mapper design without AppShell-owned global error UI/root navigation; use `react-native-clean-presentation-architecture`.
+
 
 ## AppShell Role
 

@@ -1,13 +1,24 @@
 ---
 name: solid-architecture-review
-description: SOLID architecture review checklist for code review, final review, and architecture review. Use with clean-architecture-core when dependency direction, use case/repository boundaries, or platform architecture are also in scope.
+description: Reviews code against SOLID principles and reports architecture findings with severity. Use when code review, final review, or architecture review needs SRP/OCP/LSP/ISP/DIP checks; pair with clean-architecture-core when dependency direction, use case/repository boundaries, or platform architecture are also in scope.
 ---
 
 # SOLID Architecture Review
 
-Use this skill for SOLID-specific review. Load `clean-architecture-core` when
-layer boundaries, repository/source/cache/mapper rules, or DI direction are in
-scope.
+This is a standalone SOLID review checklist when the question is class/module
+responsibility, substitutability, interface size, or dependency inversion. Pair
+it with `clean-architecture-core` when layer boundaries, repository, source,
+cache, mapper, or DI-direction rules are in scope.
+
+## Quick start
+
+1. Review the changed modules for one concrete reason to change, explicit
+   extension seams, substitutable implementations, narrow interfaces, and
+   inward-facing dependencies.
+2. Escalate from SOLID-only to `clean-architecture-core` if findings depend on
+   use case, repository, mapper, cache, or platform-layer rules.
+3. Lead with findings and then include the principle summary and completion
+   markers.
 
 ## Review Priority
 

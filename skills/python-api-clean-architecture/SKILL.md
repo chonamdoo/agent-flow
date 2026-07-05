@@ -1,12 +1,17 @@
 ---
 name: python-api-clean-architecture
-description: Python API-service Clean Architecture adapter for the platform-neutral clean-architecture-core contract. Use for FastAPI/Django/Flask API handlers, app container/factory DI, usecase/repository/source/mapper boundaries, and Python API architecture review without a UI presentation layer.
+description: Python API-service platform adapter for `clean-architecture-core` that maps the core contract to FastAPI/Django/Flask handlers, app containers/factories, framework DI at the API edge, and repository/source/mapper boundaries. Use when applying Clean Architecture to Python API services or reviewing API/data/DI boundaries without a UI presentation layer.
 ---
 
 # Python API Clean Architecture
 
-Load `clean-architecture-core` first. This skill adds Python API-service layout
-and DI details only.
+This is not a standalone Clean Architecture guide. Load [`clean-architecture-core`](../clean-architecture-core/SKILL.md) first; this skill adds Python API-service layout, framework-edge DI, and adapter-boundary details only.
+
+## Quick start
+
+1. Apply the layer, dependency-direction, and review rules from `clean-architecture-core`.
+2. Use this adapter only to translate those rules into Python API packages, app container/factory wiring, framework-edge dependencies, and response/data-source boundaries.
+3. If the task is UI presentation architecture, use the relevant platform presentation skill instead; this adapter is for API-service boundaries without a UI layer.
 
 ## Package Shape
 

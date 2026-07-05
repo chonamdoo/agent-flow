@@ -4,6 +4,7 @@
   "description": "Project-agnostic AI workflow kit. Single entry, AI-driven phase progression. Works with Claude and Codex.",
   "scripts": {
     "parity:check": "node scripts/check-agent-flow-parity.mjs",
+    "skills:validate": "node scripts/validate-skills.mjs",
     "test": "PYTHONPATH=src python3 -m unittest tests.test_cli -q && python3 -m pytest -q tests/test_custom_skill_install.py tests/test_architecture_lint.py && node scripts/check-agent-flow-parity.mjs"
   },
   "bin": {

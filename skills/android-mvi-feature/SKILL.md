@@ -1,10 +1,6 @@
 ---
 name: android-mvi-feature
-description: |
-  Use when implementing or refactoring an Android feature screen with Kotlin,
-  Jetpack Compose, ViewModel state, and MVI-style user actions. Applies to
-  new screens, screen additions inside an existing feature module, and
-  presentation refactors that need predictable state handling.
+description: Android MVI feature-screen implementation guide for Kotlin, Jetpack Compose, ViewModel state, user actions, UI models, and predictable state handling. Use when implementing or refactoring Android feature screens in an existing module; do not use for creating new modules, generic Android debugging, or non-Android React/TypeScript/Python UI.
 ---
 
 # Android MVI Feature
@@ -12,6 +8,19 @@ description: |
 Use this skill for Android screen work in an `android` profile project. Keep it
 project-agnostic: inspect the target app's existing modules, package names,
 base classes, design system, and navigation before creating files.
+
+## Quick start
+
+1. Find the closest existing screen and mirror its package, navigation, DI, state, and design-system conventions.
+2. Define the screen contract first: `UiState`, user `Action`s, data/use-case inputs, and visible state branches.
+3. Implement from state holder to UI: ViewModel, mapper/model, entry view, state-branching screen, then components.
+4. Verify loading, success, empty, and error states unless the repository has a stronger pattern.
+
+## Non-goals
+
+- Do not use this to create Gradle modules; use `android-module-creator`.
+- Do not use it as a root-cause workflow for broken behavior; use `android-debugging`.
+- Do not apply it to React Web, React Native JS/TS screens, Python, or generic TypeScript UI.
 
 ## Process
 
@@ -60,9 +69,9 @@ feature/<feature>/presentation/src/main/java/<package>/<feature>/presentation/<s
 
 ## References
 
-- `../android-guides/references/mvi-feature-guide.md`
-- `../android-guides/references/compose-ui-guide.md`
-- `../android-guides/references/compose-performance-guide.md`
-- `../android-guides/references/data-layer-guide.md`
-- `../android-guides/references/error-handling-guide.md`
+- [mvi-feature-guide.md](../android-guides/references/mvi-feature-guide.md) when defining actions, UI state, ViewModel behavior, and screen file shape.
+- [compose-ui-guide.md](../android-guides/references/compose-ui-guide.md) when building Compose layout, semantics, previews, or components.
+- [compose-performance-guide.md](../android-guides/references/compose-performance-guide.md) when state reads, stability, lazy lists, or frame-time work are relevant.
+- [data-layer-guide.md](../android-guides/references/data-layer-guide.md) when the screen reads, mutates, maps, or caches domain data.
+- [error-handling-guide.md](../android-guides/references/error-handling-guide.md) when modeling screen errors, retries, or app-wide failure handling.
 
