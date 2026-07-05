@@ -1,11 +1,18 @@
 ---
 name: react-native-development-guide
-description: React Native and Expo implementation and review checklist. Use only when writing, modifying, or reviewing React Native app code, Expo/RN TSX, navigation, permissions, native bridge boundaries, platform-specific UI, FlatList/ScrollView performance, keyboard/safe-area behavior, accessibility, lifecycle, offline, or mobile smoke flows. Do not use for Kotlin/Android native internals, iOS native internals, TypeScript generalities, or broad rewrites.
+description: React Native and Expo implementation and review checklist for RN TSX, navigation, permissions, native bridge boundaries, platform UI, lists, keyboard/safe-area behavior, accessibility, lifecycle, offline handling, and mobile smoke flows. Use when writing, modifying, or reviewing React Native or Expo app code; do not use for React Web-only work, Android/iOS native internals, TypeScript generalities, or broad rewrites.
 ---
 
 # React Native Development Guide
 
 Use this as a secondary checklist after user request, repo instructions, existing repo patterns, and `code-generation-discipline`. Do not score it. Do not use best-practice generalities to force broad rewrites.
+
+## Quick start
+
+1. Confirm the changed scope is React Native or Expo app code, not React Web-only or native Android/iOS internals.
+2. Read the nearest existing screen, navigation route, platform boundary, and permission/lifecycle pattern.
+3. Preserve mobile states for loading, offline, denied permissions, keyboard/safe area, and platform differences touched by the change.
+4. Run only the targeted typecheck, test, lint, or device/simulator smoke path that covers the edited flow.
 
 ## Scope
 

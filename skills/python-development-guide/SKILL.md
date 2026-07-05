@@ -1,11 +1,23 @@
 ---
 name: python-development-guide
-description: Python-specific implementation and review checklist. Use only when writing, modifying, or reviewing Python files (`*.py`) or Python project configuration. Apply as a secondary guide after repo patterns and task scope; do not use it to demand broad rewrites.
+description: Python implementation and review checklist for safe, idiomatic changes in Python files and Python project configuration. Use when writing, modifying, or reviewing Python files (`*.py`) or Python-specific config such as `pyproject.toml`, `ruff`, `mypy`, or `pytest`; do not use for non-Python code or broad architecture rewrites.
 ---
 
 # Python Development Guide
 
 Use this only for Python code in the changed scope. Do not score it.
+
+## Quick start
+
+1. Confirm the changed scope contains Python source or Python-specific config.
+2. Read nearby code plus `pyproject.toml` or tool config before applying generic advice.
+3. Make the narrow change, then add or update focused tests for the changed branch or regression.
+4. Run only the targeted Python check that covers the edit.
+
+## Scope
+
+- Include Python source, packaging/configuration, CLIs, file handling, typing, exceptions, and pytest-style behavior.
+- Exclude TypeScript, React, Android, shell-only tooling, and repo-wide architecture rewrites.
 
 ## Write
 

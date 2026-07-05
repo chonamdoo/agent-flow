@@ -1,11 +1,20 @@
 ---
 name: domain-modeling
-description: Build and sharpen a project's domain model. Use when the user wants to pin down domain terminology or a ubiquitous language, record an architectural decision, or when another skill needs to maintain the domain model.
+description: Maintains a project's domain model by sharpening vocabulary, recording glossary terms, and offering ADRs for meaningful trade-offs. Use when the user wants ubiquitous language, domain terminology, bounded-context clarification, ADR capture, or when another workflow needs decisions documented while designing.
 ---
 
 # Domain Modeling
 
 Actively build and sharpen the project's domain model as you design. This is the *active* discipline — challenging terms, inventing edge-case scenarios, and writing the glossary and decisions down the moment they crystallise. (Merely *reading* `CONTEXT.md` for vocabulary is not this skill — that's a one-line habit any skill can do. This skill is for when you're changing the model, not just consuming it.)
+
+## Quick start
+
+1. Read the nearest `CONTEXT.md` or `CONTEXT-MAP.md` before changing vocabulary.
+2. Challenge overloaded or conflicting terms immediately.
+3. Update `CONTEXT.md` as soon as a term is resolved, using [CONTEXT-FORMAT.md](./CONTEXT-FORMAT.md).
+4. Offer an ADR only for hard-to-reverse, surprising trade-offs, using [ADR-FORMAT.md](./ADR-FORMAT.md).
+
+This is a standalone domain-documentation skill and a companion to workflow skills such as `grilling`, `triage`, and `improve-codebase-architecture` when their conversations settle domain language or ADR-worthy decisions.
 
 ## File structure
 

@@ -1,6 +1,6 @@
 ---
 name: setup-matt-pocock-skills
-description: Configure this repo for the engineering skills — set up its issue tracker, triage label vocabulary, and domain doc layout. Run once before first use of the other engineering skills.
+description: Configures a repo for the engineering workflow skills by recording its issue tracker, triage label vocabulary, and domain-doc layout. Use when setting up these skills in a repo for the first time, when tracker/domain conventions are missing, or when switching issue trackers or triage labels.
 disable-model-invocation: true
 ---
 
@@ -13,6 +13,21 @@ Scaffold the per-repo configuration that the engineering skills assume:
 - **Domain docs** — where `CONTEXT.md` and ADRs live, and the consumer rules for reading them
 
 This is a prompt-driven skill, not a deterministic script. Explore, present what you found, confirm with the user, then write.
+
+## Quick start
+
+1. Explore the repo for existing issue-tracker, agent-instruction, domain, ADR, and scratch conventions.
+2. Walk the user through issue tracker, triage labels, and domain-doc layout one decision at a time.
+3. Show the exact `## Agent skills` block and generated `docs/agents/*.md` drafts before writing.
+4. Write only after confirmation, using the matching seed templates below.
+
+## Seed templates
+
+- [issue-tracker-github.md](./issue-tracker-github.md) — read when the repo uses GitHub Issues.
+- [issue-tracker-gitlab.md](./issue-tracker-gitlab.md) — read when the repo uses GitLab Issues.
+- [issue-tracker-local.md](./issue-tracker-local.md) — read when issues should be local markdown files.
+- [triage-labels.md](./triage-labels.md) — read when recording label/role mappings.
+- [domain.md](./domain.md) — read when recording single-context or multi-context domain docs.
 
 ## Process
 
@@ -112,7 +127,7 @@ The block:
 [one-line summary of layout — "single-context" or "multi-context"]. See `docs/agents/domain.md`.
 ```
 
-Then write the three docs files using the seed templates in this skill folder as a starting point:
+Then write the three docs files using the seed templates in this skill folder as a starting point. Read only the template matching the user's tracker choice, plus the label and domain templates:
 
 - [issue-tracker-github.md](./issue-tracker-github.md) — GitHub issue tracker
 - [issue-tracker-gitlab.md](./issue-tracker-gitlab.md) — GitLab issue tracker

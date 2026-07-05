@@ -1,6 +1,6 @@
 ---
 name: improve-codebase-architecture
-description: Scan a codebase for deepening opportunities, present them as a visual HTML report, then grill through whichever one you pick.
+description: Finds codebase deepening opportunities, presents them in a visual HTML architecture report, then grills the selected refactor direction. Use when the user wants to improve codebase architecture, find deep modules or seams, make code more testable or AI-navigable, or choose an architectural refactor candidate.
 disable-model-invocation: true
 ---
 
@@ -12,6 +12,15 @@ This command is _informed_ by the project's domain model and built on a shared d
 
 - Run the `/codebase-design` skill for the architecture vocabulary (**module**, **interface**, **depth**, **seam**, **adapter**, **leverage**, **locality**) and its principles (the deletion test, "the interface is the test surface", "one adapter = hypothetical seam, two = real"). Use these terms exactly in every suggestion — don't drift into "component," "service," "API," or "boundary."
 - The domain language in `CONTEXT.md` gives names to good seams; ADRs in `docs/adr/` record decisions this command should not re-litigate.
+
+## Quick start
+
+1. Read the domain glossary and relevant ADRs before judging architecture.
+2. Use `codebase-design` vocabulary exactly: module, interface, depth, seam, adapter, leverage, locality.
+3. Explore for friction and shallow modules, then write the visual report using [HTML-REPORT.md](HTML-REPORT.md).
+4. After the user picks a candidate, switch to `/grilling`; pair with `/domain-modeling` only when terms or decisions need to be captured.
+
+This is a workflow skill. It is not a general code review, implementation plan, or issue-triage flow.
 
 ## Process
 

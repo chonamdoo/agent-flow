@@ -1,6 +1,6 @@
 ---
 name: triage
-description: Move issues and external PRs through a state machine of triage roles — categorise, verify, grill if needed, and write agent-ready briefs.
+description: Moves existing issues and external PRs through triage roles by categorizing, verifying, grilling if needed, and writing agent-ready briefs. Use when the user wants to triage tracker items, review incoming issues or PRs, move labels/states, respond to reporter activity, or prepare an issue for an agent or human.
 disable-model-invocation: true
 ---
 
@@ -9,6 +9,16 @@ disable-model-invocation: true
 Move issues on the project issue tracker through a small state machine of triage roles.
 
 If this repo treats external pull requests as a request surface (see the issue-tracker config), triage covers them too: **a PR is an issue with attached code** — same roles, same states, same machine, with a few deltas marked "for a PR" below. Resolve a bare `#42` to an issue or PR per the tracker config.
+
+## Quick start
+
+1. Resolve whether the target is an issue or PR, then read its body, comments, labels, and prior triage notes.
+2. Explore the relevant codebase/domain context and check for redundancy or prior rejection.
+3. Recommend one category role and one state role, then wait for maintainer direction.
+4. Verify the claim before grilling or posting an agent brief.
+5. Apply the chosen outcome with the required AI-triage disclaimer.
+
+Use this for existing tracker items. Use `qa` for live issue intake, `to-prd` for synthesizing a feature PRD from conversation, `to-issues` for splitting an approved plan into slices, and `grilling` when an idea needs decision pressure before tracker changes.
 
 Every comment or issue posted to the issue tracker during triage **must** start with this disclaimer:
 

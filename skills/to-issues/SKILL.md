@@ -1,6 +1,6 @@
 ---
 name: to-issues
-description: Break a plan, spec, or PRD into independently-grabbable issues on the project issue tracker using tracer-bullet vertical slices.
+description: Breaks a plan, spec, PRD, or parent issue into independently grabbable tracker issues using tracer-bullet vertical slices. Use when the user wants to turn an approved plan or PRD into implementation issues, split a large issue, or prepare AFK-agent-ready work items.
 disable-model-invocation: true
 ---
 
@@ -9,6 +9,15 @@ disable-model-invocation: true
 Break a plan into independently-grabbable issues using vertical slices (tracer bullets).
 
 The issue tracker and triage label vocabulary should have been provided to you — run `/setup-matt-pocock-skills` if not.
+
+## Quick start
+
+1. Work from the existing plan, spec, PRD, or parent issue; do not invent missing product decisions.
+2. Explore the codebase only enough to name slices in domain language and spot prefactoring needs.
+3. Draft thin end-to-end tracer-bullet slices with blockers.
+4. Get approval for granularity and dependencies before publishing issues.
+
+Use `to-prd` first when the source is only a conversation or feature idea. Use `qa` for live bug intake, `triage` for existing tracker items, and `grilling` when the plan still needs decisions.
 
 ## Process
 

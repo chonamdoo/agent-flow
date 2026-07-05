@@ -3,6 +3,15 @@ name: code-review
 description: Review the changes since a fixed point (commit, branch, tag, or merge-base) along two axes — Standards (does the code follow this repo's documented coding standards?) and Spec (does the code match what the originating issue/PRD asked for?). Runs both reviews in parallel sub-agents and reports them side by side. Use when the user wants to review a branch, a PR, work-in-progress changes, or asks to "review since X".
 ---
 
+# Code Review
+
+## Quick start
+
+1. Pin the fixed point the user supplied.
+2. Identify the spec source and standards sources.
+3. Spawn the Standards and Spec reviewers in parallel.
+4. Aggregate the two axes without merging or reranking them.
+
 Two-axis review of the diff between `HEAD` and a fixed point the user supplies:
 
 - **Standards** — does the code conform to this repo's documented coding standards?

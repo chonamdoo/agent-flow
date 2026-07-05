@@ -1,11 +1,17 @@
 ---
 name: agent-flow
-description: Use when the user types /agent-flow, asks to start or continue the project workflow, or wants Claude, Codex, or OMP to drive the agent-flow lifecycle.
+description: Runs the project-local agent-flow lifecycle from slash-triggered tasks, status checks, and phase next commands. Use when the user types /agent-flow, asks to start or continue the project workflow, or wants Claude, Codex, or OMP to drive the agent-flow lifecycle.
 ---
 
 # Agent Flow
 
 Use this skill as the common entry point for the project-local agent-flow workflow.
+
+## Quick start
+
+1. From the project root, run `agent-flow status` for `/agent-flow` with no task, or `agent-flow run "<task>"` for `/agent-flow <task>`.
+2. Treat the command output as the source of truth and follow its `next_command`.
+3. Do not reinstall agent-flow or infer missing setup unless an agent-flow command exits non-zero with that setup error.
 
 ## Slash Trigger
 
