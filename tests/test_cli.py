@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import os
+import re
 import site
 import shutil
 import sys
@@ -22,9 +24,12 @@ from agent_flow.adapters.templates import PromptContext, render_stage_prompt
 from agent_flow.core.gates import GateCommand, run_gate
 from agent_flow.core.profiles import load_profile
 from agent_flow.core.local_skills import (
+    LOCAL_SKILL_PLAN_HASH_VERSION,
+    _project_local_skill_docs,
     applicable_code_review_skill_docs,
     local_skill_prompt_block,
     missing_local_skill_markers,
+    project_local_skill_plan_hash,
 )
 from agent_flow.core.review import _parse_verdict
 from agent_flow.core.team import ShutdownSignal
@@ -36,7 +41,22 @@ os.environ.setdefault("AGENT_FLOW_SKIP_CODEX_TRUST", "1")
 
 
 def _node_test_env(**overrides: str) -> dict[str, str]:
-    env = {**os.environ, **overrides}
+    env = dict(os.environ)
+    for key in (
+        "AGENT_FLOW_HOST",
+        "OMP_PROFILE",
+        "PI_CODING_AGENT_DIR",
+        "CLAUDECODE",
+        "CLAUDE_CLI",
+        "CLAUDE_CONFIG_DIR",
+        "CODEX_CLI",
+        "CODEX_HOME",
+        "CODEX_SHELL",
+        "CODEX_THREAD_ID",
+        "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+    ):
+        env.pop(key, None)
+    env.update(overrides)
     python_paths = [
         env.get("PYTHONPATH"),
         site.getusersitepackages(),
@@ -52,6 +72,90 @@ def _strip_markdown_frontmatter(text: str) -> str:
     return text if end == -1 else text[end + len("\n---\n") :].lstrip("\n")
 
 
+def _write_node_active_run(root: Path, workspace: Path, run_id: str = "active") -> dict[str, object]:
+    run_dir = Path(".agent-flow") / "runs" / "default" / run_id
+    state: dict[str, object] = {
+        "run_id": run_id,
+        "workflow": "default",
+        "run_dir": run_dir.as_posix(),
+        "status": "running",
+        "phase": "implement",
+        "workspace_root": str(workspace),
+    }
+    manifest = root / run_dir / "manifest.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(json.dumps(state), encoding="utf-8")
+    pointer = root / ".agent-flow" / "state" / "current-run.json"
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    pointer.write_text(json.dumps(state), encoding="utf-8")
+    return state
+
+
+def _install_test_project_runtime(root: Path, launcher_source: str) -> None:
+    launcher = root / ".agent-flow" / "bin" / "agent-flow"
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    launcher.write_text(launcher_source, encoding="utf-8")
+    launcher.chmod(0o755)
+    runtime_root = root / ".agent-flow" / "runtime" / "node"
+    entrypoint = runtime_root / "bin" / "agent-flow-kit.mjs"
+    entrypoint.parent.mkdir(parents=True, exist_ok=True)
+    entrypoint.write_text("// test runtime\n", encoding="utf-8")
+    python_runtime_root = root / ".agent-flow" / "runtime" / "python"
+    python_package = python_runtime_root / "agent_flow"
+    python_package.mkdir(parents=True, exist_ok=True)
+    (python_package / "__init__.py").write_text("", encoding="utf-8")
+    digest = hashlib.sha256()
+    for file in sorted(candidate for candidate in runtime_root.rglob("*") if candidate.is_file()):
+        digest.update(file.relative_to(runtime_root).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(file.read_bytes())
+        digest.update(b"\0")
+    python_digest = hashlib.sha256()
+    for file in sorted(candidate for candidate in python_runtime_root.rglob("*") if candidate.is_file()):
+        python_digest.update(file.relative_to(python_runtime_root).as_posix().encode("utf-8"))
+        python_digest.update(b"\0")
+        python_digest.update(file.read_bytes())
+        python_digest.update(b"\0")
+    contract = {
+        "version": 2,
+        "launcher": {
+            "path": ".agent-flow/bin/agent-flow",
+            "sha256": hashlib.sha256(launcher.read_bytes()).hexdigest(),
+        },
+        "node_runtime": {
+            "root": ".agent-flow/runtime/node",
+            "entrypoint": ".agent-flow/runtime/node/bin/agent-flow-kit.mjs",
+            "tree_hash": digest.hexdigest(),
+        },
+        "python_runtime": {
+            "root": ".agent-flow/runtime/python",
+            "tree_hash": python_digest.hexdigest(),
+        },
+    }
+    commitment = hashlib.sha256(
+        json.dumps({"version": 2, "contract": contract}, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    (root / ".agent-flow" / "kit.json").write_text(
+        json.dumps(
+            {
+                "node_runtime": {
+                    "path": ".agent-flow/runtime/node/bin/agent-flow-kit.mjs",
+                    "tree_hash": contract["node_runtime"]["tree_hash"],
+                },
+                "python_runtime": {
+                    "path": ".agent-flow/runtime/python",
+                    "tree_hash": contract["python_runtime"]["tree_hash"],
+                },
+                "project_runtime_contract": contract,
+                "project_runtime_contract_commitment_version": 2,
+                "project_runtime_contract_commitment": commitment,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 class CliTest(unittest.TestCase):
     def test_init_creates_agent_flow_dirs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -63,11 +167,13 @@ class CliTest(unittest.TestCase):
     def test_start_creates_manifest_and_prompts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir).resolve()
+            _init_git_repo(root)
             self.assertEqual(
                 main(["start", "development", "--root", str(root), "--task", "demo", "--adapter", "manual"]),
                 0,
             )
-            manifests = list((root / ".agent-flow" / "runs").glob("development/*/manifest.json"))
+            state_root = worktree_runtime_root(root=root, name="demo")
+            manifests = list((state_root / ".agent-flow" / "runs").glob("development/*/manifest.json"))
             self.assertEqual(len(manifests), 1)
             run_dir = manifests[0].parent
             self.assertTrue((run_dir / "events.jsonl").is_file())
@@ -79,6 +185,45 @@ class CliTest(unittest.TestCase):
                 "Adapter:",
                 (run_dir / "prompts" / "explore.md").read_text(encoding="utf-8"),
             )
+
+    def test_start_preserves_installed_profile_union(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            _init_git_repo(root)
+            subprocess.run(("git", "branch", "develop", "main"), cwd=root, check=True)
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            install = subprocess.run(
+                (node, cli, "install", "--profile", "spring,python"),
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(install.returncode, 0, install.stderr)
+
+            self.assertEqual(
+                main([
+                    "start",
+                    "development",
+                    "--root",
+                    str(root),
+                    "--task",
+                    "profile union",
+                    "--adapter",
+                    "manual",
+                    "--run-id",
+                    "r1",
+                ]),
+                0,
+            )
+
+            manifest = json.loads(
+                (worktree_runtime_root(root=root, name="profile union") / ".agent-flow" / "runs" / "development" / "r1" / "manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(manifest["profile"], "spring,python")
 
     def test_render_stage_prompt_uses_omp_template(self) -> None:
         prompt = render_stage_prompt(
@@ -106,6 +251,8 @@ class CliTest(unittest.TestCase):
             install_target = Path(temp_dir) / "site"
             package_python = _python_for_package_install()
             external_cwd.mkdir()
+            project_root.mkdir()
+            _init_git_repo(project_root)
             install = subprocess.run(
                 (
                     package_python,
@@ -161,7 +308,13 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            run_dir = project_root / ".agent-flow" / "runs" / "development" / "r1"
+            run_dir = (
+                worktree_runtime_root(root=project_root, name="demo")
+                / ".agent-flow"
+                / "runs"
+                / "development"
+                / "r1"
+            )
             self.assertTrue((project_root / ".agent-flow").is_dir())
             self.assertTrue((run_dir / "manifest.json").is_file())
             self.assertTrue((run_dir / "prompts" / "explore.md").is_file())
@@ -240,7 +393,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("verdict: request-changes", phases["multi-review"]["prompt"])
         self.assertEqual(phases["fix-loop"]["routes"]["default"], "comment-authoring")
         self.assertEqual(phases["architecture-review"]["routes"]["approve"], "gates")
-        self.assertNotIn("blocked", phases["architecture-review"]["routes"])
+        self.assertEqual(phases["architecture-review"]["routes"]["blocked"], "refactor")
         self.assertEqual(phases["pr-watch"]["routes"]["comments"], "pr-comment-fix")
         self.assertEqual(phases["pr-watch"]["routes"]["ci-failed"], "pr-ci-fix")
         self.assertEqual(phases["pr-comment-fix"]["routes"]["default"], "pr-watch")
@@ -289,9 +442,10 @@ class CliTest(unittest.TestCase):
         self.assertIn("comment-checker: checked|unavailable|n/a", default_phases["comment-authoring"]["required_markers"])
         self.assertIn("Do not refactor", default_phases["comment-authoring"]["prompt"])
         self.assertIn("skills_checked: true", default_phases["final-review"]["required_markers"])
-        self.assertIn("codex-claude-parity-check: pass|fail", default_phases["final-review"]["required_markers"])
+        self.assertIn("host-parity-check: pass|fail", default_phases["final-review"]["required_markers"])
         self.assertIn("hook-parity-check: pass|fail", default_phases["final-review"]["required_markers"])
-        self.assertIn("codex-claude-parity-check: pass|fail", default_phases["final-review"]["prompt"])
+        self.assertIn("host-parity-check: pass|fail", default_phases["final-review"]["prompt"])
+        self.assertIn("Claude, Codex, and OMP workflow", default_phases["final-review"]["prompt"])
         self.assertIn("hook-parity-check: pass|fail", default_phases["final-review"]["prompt"])
         self.assertIn("at least two active-host reviewer sub-agents", default_phases["final-review"]["prompt"])
         self.assertIn("reviewer-source: sub-agent", default_phases["final-review"]["prompt"])
@@ -333,9 +487,10 @@ class CliTest(unittest.TestCase):
         self.assertIn("clean-architecture: applied", phases["fix-loop"]["required_markers"])
         self.assertIn("clean-architecture-review: applied", phases["multi-review"]["required_markers"])
         for phase_id in ("multi-review", "architecture-review"):
-            self.assertIn("codex-claude-parity-check: pass|fail", phases[phase_id]["required_markers"])
+            self.assertIn("host-parity-check: pass|fail", phases[phase_id]["required_markers"])
             self.assertIn("hook-parity-check: pass|fail", phases[phase_id]["required_markers"])
-            self.assertIn("codex-claude-parity-check: pass|fail", phases[phase_id]["prompt"])
+            self.assertIn("host-parity-check: pass|fail", phases[phase_id]["prompt"])
+            self.assertIn("Claude, Codex, and OMP workflow", phases[phase_id]["prompt"])
             self.assertIn("hook-parity-check: pass|fail", phases[phase_id]["prompt"])
         multi_review_prompt = phases["multi-review"]["prompt"]
         self.assertIn("skills/clean-architecture-core/SKILL.md", multi_review_prompt)
@@ -355,29 +510,35 @@ class CliTest(unittest.TestCase):
         self.assertEqual(phases["gates"]["routes"]["green"], "commit")
         self.assertEqual(phases["comment-authoring"]["routes"]["default"], "multi-review")
 
-    def test_project_local_code_review_skills_filter_non_code_skills(self) -> None:
+    def test_project_local_code_review_phases_load_explicit_always_skills(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             _write_local_skill_index(root)
 
             docs = applicable_code_review_skill_docs(root, "implement")
-            self.assertEqual([doc.name for doc in docs], ["samantha-architecture-guide"])
-            self.assertEqual([doc.name for doc in applicable_code_review_skill_docs(root, "review")], ["samantha-architecture-guide"])
-            self.assertEqual([doc.name for doc in applicable_code_review_skill_docs(root, "implement-fix")], ["samantha-architecture-guide"])
-            self.assertEqual([doc.name for doc in applicable_code_review_skill_docs(root, "pr-comment-fix")], ["samantha-architecture-guide"])
-            self.assertEqual([doc.name for doc in applicable_code_review_skill_docs(root, "pr-ci-fix")], ["samantha-architecture-guide"])
+            expected = [
+                "figma-screen-spec",
+                "merge-review-flow",
+                "pr-review-flow",
+                "release-branch-review",
+                "release-first-branch-pr",
+                "samantha-architecture-guide",
+            ]
+            self.assertEqual([doc.name for doc in docs], expected)
+            self.assertTrue(all(doc.activation == "always" for doc in docs))
+            self.assertEqual([doc.name for doc in applicable_code_review_skill_docs(root, "review")], expected)
+            self.assertEqual([doc.name for doc in applicable_code_review_skill_docs(root, "implement-fix")], expected)
+            self.assertEqual([doc.name for doc in applicable_code_review_skill_docs(root, "pr-comment-fix")], expected)
+            self.assertEqual([doc.name for doc in applicable_code_review_skill_docs(root, "pr-ci-fix")], expected)
             self.assertEqual(applicable_code_review_skill_docs(root, "push-pr"), ())
 
             prompt_block = local_skill_prompt_block(root, "final-review")
             self.assertIn(".agent-flow/local-skills/samantha-architecture-guide/SKILL.md", prompt_block)
             self.assertIn("project-local-skill-docs: applied", prompt_block)
-            self.assertNotIn("figma-screen-spec/SKILL.md", prompt_block)
-            self.assertNotIn("release-first-branch-pr/SKILL.md", prompt_block)
-            self.assertNotIn("pr-review-flow/SKILL.md", prompt_block)
-            self.assertNotIn("merge-review-flow/SKILL.md", prompt_block)
-            self.assertNotIn("release-branch-review/SKILL.md", prompt_block)
+            for name in expected:
+                self.assertIn(f"{name}/SKILL.md", prompt_block)
 
-    def test_project_local_code_review_skills_fallback_ignores_usage_boilerplate(self) -> None:
+    def test_metadata_less_local_skill_stays_on_demand_despite_usage_boilerplate(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             skill_path = root / ".agent-flow" / "local-skills" / "react-hooks-review" / "SKILL.md"
@@ -395,7 +556,35 @@ class CliTest(unittest.TestCase):
             )
 
             docs = applicable_code_review_skill_docs(root, "implement")
-            self.assertEqual([doc.name for doc in docs], ["react-hooks-review"])
+            self.assertEqual(docs, ())
+            self.assertEqual(local_skill_prompt_block(root, "implement"), "")
+
+    def test_samantha_metadata_less_skills_are_discoverable_but_not_injected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            names = (
+                "figma-screen-spec",
+                "release-first-branch-pr",
+                "samantha-architecture-guide",
+                "samantha-translation-sync",
+            )
+            for name in names:
+                skill_path = root / ".agent-flow" / "local-skills" / name / "SKILL.md"
+                skill_path.parent.mkdir(parents=True)
+                skill_path.write_text(
+                    f"---\nname: {name}\ndescription: Samantha local skill.\n---\n\n# {name}\n",
+                    encoding="utf-8",
+                )
+
+            discovered = _project_local_skill_docs(root)
+
+            self.assertEqual(tuple(doc.name for doc in discovered), names)
+            self.assertTrue(all(doc.activation == "on-demand" for doc in discovered))
+            self.assertEqual(applicable_code_review_skill_docs(root, "implement"), ())
+            self.assertEqual(applicable_code_review_skill_docs(root, "final-review"), ())
+            self.assertEqual(local_skill_prompt_block(root, "implement"), "")
+            self.assertEqual(LOCAL_SKILL_PLAN_HASH_VERSION, 2)
+            self.assertEqual(len(project_local_skill_plan_hash(root)), 64)
 
     def test_project_local_code_review_skills_require_applied_markers(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -416,7 +605,7 @@ class CliTest(unittest.TestCase):
                 missing_local_skill_markers(
                     "## Completion Gate\n"
                     "project-local-skills: checked\n"
-                    "project-local-skills-used: samantha-architecture-guide\n"
+                    "project-local-skills-used: figma-screen-spec, merge-review-flow, pr-review-flow, release-branch-review, release-first-branch-pr, samantha-architecture-guide\n"
                     "project-local-skill-docs: applied\n",
                     root,
                     "implement",
@@ -436,6 +625,7 @@ class CliTest(unittest.TestCase):
                     "path": ".agent-flow/local-skills/api-contract-guide/SKILL.md",
                     "source": "local",
                     "description": "Use for code review of API contracts.",
+                    "activation": "always",
                 }
             )
             payload["skills"].append(
@@ -444,9 +634,11 @@ class CliTest(unittest.TestCase):
                     "path": ".agent-flow/local-skills/api/SKILL.md",
                     "source": "local",
                     "description": "Use for code review of APIs.",
+                    "activation": "always",
                 }
             )
             index_path.write_text(json.dumps(payload), encoding="utf-8")
+            _write_local_skill_files(root)
 
             missing = missing_local_skill_markers(
                 "## Completion Gate\n"
@@ -462,7 +654,7 @@ class CliTest(unittest.TestCase):
                 missing_local_skill_markers(
                     "## Completion Gate\n"
                     "project-local-skills: checked\n"
-                    "project-local-skills-used: api, api-contract-guide, samantha-architecture-guide\n"
+                    "project-local-skills-used: api, api-contract-guide, figma-screen-spec, merge-review-flow, pr-review-flow, release-branch-review, release-first-branch-pr, samantha-architecture-guide\n"
                     "project-local-skill-docs: applied\n",
                     root,
                     "review",
@@ -470,7 +662,7 @@ class CliTest(unittest.TestCase):
                 [],
             )
 
-    def test_project_local_code_review_skills_flatten_index_metadata_arrays(self) -> None:
+    def test_metadata_less_index_skill_stays_on_demand_with_descriptive_arrays(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             index_path = root / ".agent-flow" / "skills" / "index.json"
@@ -491,15 +683,16 @@ class CliTest(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            skill_path = root / ".agent-flow" / "local-skills" / "metadata-only-guide" / "SKILL.md"
+            skill_path.parent.mkdir(parents=True)
+            skill_path.write_text("# Metadata only guide\n", encoding="utf-8")
 
             docs = applicable_code_review_skill_docs(root, "implement")
-            self.assertEqual([doc.name for doc in docs], ["metadata-only-guide"])
+            self.assertEqual(docs, ())
 
     def test_project_local_code_review_skills_do_not_block_when_absent(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            _write_local_skill_index(root, include_code_skill=False)
-
             self.assertEqual(applicable_code_review_skill_docs(root, "implement"), ())
             self.assertEqual(local_skill_prompt_block(root, "implement"), "")
             self.assertEqual(
@@ -512,6 +705,84 @@ class CliTest(unittest.TestCase):
                 ),
                 [],
             )
+
+    def test_project_local_code_review_skills_accept_installed_snapshot_without_local_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            skill_path = root / ".agent-flow" / "skills" / "installed-policy" / "SKILL.md"
+            skill_path.parent.mkdir(parents=True)
+            skill_path.write_text("# Installed policy\n", encoding="utf-8")
+            index_path = root / ".agent-flow" / "skills" / "index.json"
+            index_path.write_text(
+                json.dumps(
+                    {
+                        "skills": [
+                            {
+                                "name": "installed-policy",
+                                "path": ".agent-flow/skills/installed-policy/SKILL.md",
+                                "source": "project",
+                                "activation": "always",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            docs = applicable_code_review_skill_docs(root, "implement")
+
+            self.assertEqual([doc.name for doc in docs], ["installed-policy"])
+            self.assertFalse((root / ".agent-flow" / "local-skills").exists())
+
+    def test_project_local_code_review_skills_reject_missing_indexed_local_skill(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            index_path = root / ".agent-flow" / "skills" / "index.json"
+            index_path.parent.mkdir(parents=True)
+            index_path.write_text(
+                json.dumps(
+                    {
+                        "skills": [
+                            {
+                                "name": "missing-policy",
+                                "path": ".agent-flow/local-skills/missing-policy/SKILL.md",
+                                "source": "local",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "project-local skill root is unreadable"):
+                applicable_code_review_skill_docs(root, "implement")
+
+    def test_project_local_code_review_skills_reject_symlinked_indexed_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            outside = root / "outside-policy"
+            outside.mkdir()
+            (outside / "SKILL.md").write_text("# Outside policy\n", encoding="utf-8")
+            installed = root / ".agent-flow" / "skills"
+            installed.mkdir(parents=True)
+            (installed / "linked-policy").symlink_to(outside, target_is_directory=True)
+            (installed / "index.json").write_text(
+                json.dumps(
+                    {
+                        "skills": [
+                            {
+                                "name": "linked-policy",
+                                "path": ".agent-flow/skills/linked-policy/SKILL.md",
+                                "source": "project",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "must be a real directory"):
+                applicable_code_review_skill_docs(root, "implement")
 
     def test_clean_architecture_review_template_routes_policy_to_core_skill(self) -> None:
         template = (
@@ -645,9 +916,105 @@ class CliTest(unittest.TestCase):
                 project_root / ".agent-flow" / "runs" / "default" / "r1",
                 project_root,
             )
-        self.assertIn("agent-flow status", prompt)
+        self.assertIn("agent-flow-python status", prompt)
         self.assertIn("next_command", prompt)
         self.assertNotIn("agent-flow continue", prompt)
+
+    def test_python_pause_after_requires_explicit_approval(self) -> None:
+        from agent_flow.artifact import ActiveRun, read_meta, write_meta
+        from agent_flow.runner import Phase, Runner
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir)
+            artifact = run_dir / "slice-plan.md"
+            artifact.write_text("version one\n", encoding="utf-8")
+            write_meta(
+                run_dir,
+                {
+                    "run_id": "r1",
+                    "workflow": "default",
+                    "task": "pause parity",
+                },
+            )
+            runner = Runner.__new__(Runner)
+            runner.run_dir = run_dir
+            runner.project_root = run_dir
+            runner.workflow_name = "default"
+            runner.next_command = "agent-flow-python continue"
+            phase = Phase(id="slice-plan", description="", pause_after=True)
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(runner._pause_after_blocks(phase, artifact))
+            paused_meta = read_meta(run_dir)
+            first_requested_at = paused_meta["pause_after_pending"]["requested_at"]
+            paused_meta.update(
+                {
+                    "current_phase": "slice-plan",
+                    "phase_index": 1,
+                    "started_at": "2026-07-11T00:00:00+00:00",
+                }
+            )
+            write_meta(run_dir, paused_meta)
+            status = io.StringIO()
+            with contextlib.redirect_stdout(status):
+                ActiveRun(
+                    path=run_dir,
+                    run_id="r1",
+                    workflow="default",
+                    task="pause parity",
+                    started_at="2026-07-11T00:00:00+00:00",
+                ).print_status(config_root=run_dir, workspace_root=run_dir)
+            self.assertIn("reason: pause_after", status.getvalue())
+            self.assertIn(
+                "next_command: agent-flow-python continue --approve-pause",
+                status.getvalue(),
+            )
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(runner._pause_after_blocks(phase, artifact))
+                self.assertEqual(
+                    read_meta(run_dir)["pause_after_pending"]["requested_at"],
+                    first_requested_at,
+                )
+                self.assertFalse(
+                    runner._pause_after_blocks(phase, artifact, approve_pause=True)
+                )
+                approved = read_meta(run_dir)["pause_after_approval"]
+                self.assertIn("approved_at", approved)
+                runner._clear_pause_after_pending(phase, artifact)
+                self.assertNotIn("pause_after_pending", read_meta(run_dir))
+                artifact.write_text("version two\n", encoding="utf-8")
+                self.assertTrue(
+                    runner._pause_after_blocks(phase, artifact, approve_pause=True)
+                )
+                changed_pending = read_meta(run_dir)["pause_after_pending"]
+
+            self.assertNotEqual(
+                approved["artifact_sha256"],
+                changed_pending["artifact_sha256"],
+            )
+            self.assertIn("pause_after_pending", read_meta(run_dir))
+
+    def test_python_run_defaults_to_full_feature(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_git_repo(root)
+            output = io.StringIO()
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "AGENT_FLOW_ADAPTER": "generic",
+                    "AGENT_FLOW_GENERIC_MODE": "stub",
+                },
+            ), contextlib.redirect_stdout(output):
+                self.assertEqual(main(["run", "full contract", "--root", str(root)]), 0)
+
+            state_root = worktree_runtime_root(root=root, name="full contract")
+            run_dir = next((state_root / ".agent-flow" / "runs").iterdir())
+            meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["workflow"], "full-feature")
+            self.assertEqual(meta["current_phase"], "domain-grill")
+            self.assertIn("current_phase: domain-grill", output.getvalue())
 
     def test_adapter_local_skill_prompt_uses_config_root(self) -> None:
         from agent_flow.adapters.generic import GenericAdapter
@@ -1342,7 +1709,13 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout.strip(), "agent-flow installed profile=generic")
+            self.assertEqual(
+                result.stdout.strip().splitlines(),
+                [
+                    "agent-flow installed profile=generic",
+                    "next_command: ./.agent-flow/bin/agent-flow status",
+                ],
+            )
             kit = json.loads((project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
             self.assertEqual(kit["profile"], "generic")
             self.assertEqual(kit["install_scope"], "project")
@@ -1352,8 +1725,10 @@ class CliTest(unittest.TestCase):
             self.assertTrue((project_root / ".agent-flow" / "workflows" / "full-feature.yaml").is_file())
             self.assertTrue((project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "bootstrap" / "CLAUDE.md").is_file())
+            self.assertTrue(os.access(project_root / ".agent-flow" / "bin" / "agent-flow", os.X_OK))
             runtime = project_root / ".agent-flow" / "runtime" / "python"
             self.assertTrue((runtime / "agent_flow" / "core" / "architecture_lint.py").is_file())
+            self.assertTrue((runtime / "agent_flow" / "core" / "codex_trust.py").is_file())
             self.assertFalse((project_root / ".agent-flow" / "scripts" / "check-context-docs.mjs").exists())
             runtime_env = {**os.environ, "PYTHONPATH": str(runtime)}
             lint_result = subprocess.run(
@@ -1425,27 +1800,18 @@ class CliTest(unittest.TestCase):
             self.assertTrue((project_root / ".agent-flow" / "skills" / "plan-reviewer" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "clean-architecture-core" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "clean-architecture" / "SKILL.md").is_file())
-            self.assertTrue((project_root / ".agent-flow" / "skills" / "android-clean-architecture" / "SKILL.md").is_file())
-            self.assertTrue((project_root / ".agent-flow" / "skills" / "ios-clean-architecture" / "SKILL.md").is_file())
-            self.assertTrue((project_root / ".agent-flow" / "skills" / "react-clean-architecture" / "SKILL.md").is_file())
-            self.assertTrue((project_root / ".agent-flow" / "skills" / "react-native-clean-architecture" / "SKILL.md").is_file())
-            self.assertTrue((project_root / ".agent-flow" / "skills" / "python-api-clean-architecture" / "SKILL.md").is_file())
+            self.assertFalse((project_root / ".agent-flow" / "skills" / "android-clean-architecture").exists())
+            self.assertFalse((project_root / ".agent-flow" / "skills" / "ios-clean-architecture").exists())
+            self.assertFalse((project_root / ".agent-flow" / "skills" / "react-clean-architecture").exists())
+            self.assertFalse((project_root / ".agent-flow" / "skills" / "react-native-clean-architecture").exists())
+            self.assertFalse((project_root / ".agent-flow" / "skills" / "python-api-clean-architecture").exists())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "architecture-reviewer" / "SKILL.md").is_file())
-            self.assertTrue((project_root / ".agent-flow" / "skills" / "android-code-review" / "SKILL.md").is_file())
+            self.assertFalse((project_root / ".agent-flow" / "skills" / "android-code-review").exists())
             self.assertFalse((project_root / ".agent-flow" / "skills" / "android-mvi-feature").exists())
             self.assertFalse((project_root / ".agent-flow" / "skills" / "android-module-creator").exists())
             self.assertFalse((project_root / ".agent-flow" / "skills" / "android-debugging").exists())
             self.assertFalse((project_root / ".agent-flow" / "skills" / "graphify").exists())
-            self.assertTrue(
-                (
-                    project_root
-                    / ".agent-flow"
-                    / "skills"
-                    / "android-guides"
-                    / "references"
-                    / "architecture-rules-guide.md"
-                ).is_file()
-            )
+            self.assertFalse((project_root / ".agent-flow" / "skills" / "android-guides").exists())
             self.assertTrue((project_root / ".agent-flow" / "prompts" / "push-watch.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "prompts" / "push-watch-tick.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "push-watch" / "SKILL.md").is_file())
@@ -1460,7 +1826,12 @@ class CliTest(unittest.TestCase):
             claude_code_reviewer = (project_root / ".claude" / "agents" / "code-reviewer.md").read_text(
                 encoding="utf-8"
             )
+            self.assertTrue((project_root / ".omp" / "agents" / "code-reviewer.md").is_file())
+            omp_code_reviewer = (project_root / ".omp" / "agents" / "code-reviewer.md").read_text(
+                encoding="utf-8"
+            )
             self.assertEqual(code_reviewer, _strip_markdown_frontmatter(claude_code_reviewer))
+            self.assertEqual(omp_code_reviewer, claude_code_reviewer)
             self.assertIn("name: code-reviewer", claude_code_reviewer)
             self.assertTrue((project_root / ".Codex" / "context" / "tree.jsonl").is_file())
             self.assertIn("verdict: approve | request-changes", code_reviewer)
@@ -1487,6 +1858,7 @@ class CliTest(unittest.TestCase):
             expected_comment_checker = (
                 f"'{project_root.resolve() / '.agent-flow' / 'scripts' / 'hooks' / 'comment-checker.py'}'"
             )
+            canonical_write_matcher = None
             for hooks_path in (
                 project_root / ".Codex" / "hooks.json",
                 project_root / ".codex" / "hooks.json",
@@ -1499,15 +1871,53 @@ class CliTest(unittest.TestCase):
                     for hook in entry["hooks"]
                 ]
                 self.assertIn(expected_comment_checker, codex_hook_commands)
+                codex_write_matchers = "\n".join(
+                    entry.get("matcher", "")
+                    for event in ("PreToolUse", "PostToolUse")
+                    for entry in codex_hooks["hooks"][event]
+                )
+                self.assertIn("NotebookEdit", codex_write_matchers)
+                self.assertIn("notebook_edit", codex_write_matchers)
+                write_matchers = {
+                    entry.get("matcher", "")
+                    for event in ("PreToolUse", "PostToolUse")
+                    for entry in codex_hooks["hooks"][event]
+                    if entry.get("matcher", "") not in {"", "Bash"}
+                }
+                self.assertEqual(len(write_matchers), 1)
+                current_matcher = next(iter(write_matchers))
+                if canonical_write_matcher is None:
+                    canonical_write_matcher = current_matcher
+                self.assertEqual(current_matcher, canonical_write_matcher)
                 self.assertNotIn(str(Path(__file__).resolve().parents[1]), "\n".join(codex_hook_commands))
+            claude_settings = json.loads(
+                (project_root / ".claude" / "settings.json").read_text(encoding="utf-8")
+            )
+            claude_write_matchers = "\n".join(
+                entry.get("matcher", "")
+                for event in ("PreToolUse", "PostToolUse")
+                for entry in claude_settings["hooks"][event]
+            )
+            self.assertIn("NotebookEdit", claude_write_matchers)
+            self.assertIn("notebook_edit", claude_write_matchers)
+            claude_matcher_set = {
+                entry.get("matcher", "")
+                for event in ("PreToolUse", "PostToolUse")
+                for entry in claude_settings["hooks"][event]
+                if entry.get("matcher", "") not in {"", "Bash"}
+            }
+            self.assertEqual(claude_matcher_set, {canonical_write_matcher})
             omp_extension = project_root / ".omp" / "extensions" / "agent-flow-hooks.ts"
             self.assertTrue(omp_extension.is_file())
             omp_extension_text = omp_extension.read_text(encoding="utf-8")
+            self.assertIn('process.env.AGENT_FLOW_HOST ||= "omp"', omp_extension_text)
             self.assertIn("guard-worktree.sh", omp_extension_text)
             self.assertIn("guard-protected-branch.sh", omp_extension_text)
             self.assertIn("comment-checker.py", omp_extension_text)
             self.assertIn("show-phase-status.sh", omp_extension_text)
-            self.assertIn("session_shutdown", omp_extension_text)
+            self.assertIn('pi.on("session_stop"', omp_extension_text)
+            self.assertNotIn('pi.on("agent_end"', omp_extension_text)
+            self.assertNotIn('pi.on("session_shutdown"', omp_extension_text)
             self.assertIn('pi.on("context"', omp_extension_text)
             self.assertIn('message?.customType === "agent-flow-model-context"', omp_extension_text)
             self.assertIn('message?.details?.source === "agent-flow-omp-model-context"', omp_extension_text)
@@ -1517,8 +1927,31 @@ class CliTest(unittest.TestCase):
             self.assertNotIn("modelSpecificProjectContext", omp_extension_text)
             self.assertNotIn("contextMessage(", omp_extension_text)
             self.assertNotIn("content.trimEnd()", omp_extension_text)
-            self.assertIn("syncRootContextFiles", omp_extension_text)
-            self.assertIn("modifiedRootContextFiles", omp_extension_text)
+            self.assertNotIn("syncRootContextFiles", omp_extension_text)
+            self.assertNotIn("modifiedRootContextFiles", omp_extension_text)
+            self.assertIn(
+                "apply_patch|Write|Edit|MultiEdit|NotebookEdit|Eval|Python|Notebook|"
+                "write|edit|multi_edit|multiedit|notebook_edit|notebookedit|eval|python|notebook",
+                omp_extension_text,
+            )
+            self.assertNotIn("$/i", omp_extension_text)
+            omp_matcher_line = next(
+                line.strip()
+                for line in omp_extension_text.splitlines()
+                if line.strip().startswith("const WRITE_TOOL_RE = /")
+            )
+            omp_matcher = omp_matcher_line[len("const WRITE_TOOL_RE = /") : -2]
+            self.assertEqual(omp_matcher, canonical_write_matcher)
+            expected_write_tools = {
+                "apply_patch", "Write", "Edit", "MultiEdit", "NotebookEdit",
+                "Eval", "Python", "Notebook", "write", "edit", "multi_edit",
+                "multiedit", "notebook_edit", "notebookedit", "eval", "python",
+                "notebook",
+            }
+            for tool_name in expected_write_tools:
+                self.assertIsNotNone(re.fullmatch(canonical_write_matcher, tool_name))
+            for tool_name in ("APPLY_PATCH", "EDIT", "NoTeBoOk", "Bash", "Read"):
+                self.assertIsNone(re.fullmatch(canonical_write_matcher, tool_name))
             self.assertNotIn(str(Path(__file__).resolve().parents[1]), omp_extension_text)
             self.assertTrue((project_root / ".omp" / "skills" / "agent-flow" / "SKILL.md").exists())
             self.assertTrue(
@@ -1533,12 +1966,8 @@ class CliTest(unittest.TestCase):
             self.assertIn("verdict: approve", concise_rule.read_text(encoding="utf-8"))
             self.assertIn("verdict: request-changes", concise_rule.read_text(encoding="utf-8"))
             self.assertIn("next_command", concise_rule.read_text(encoding="utf-8"))
-            self.assertTrue(
-                (project_root / ".agent-flow" / "skills" / "react-development-guide" / "SKILL.md").is_file()
-            )
-            self.assertTrue(
-                (project_root / ".agent-flow" / "skills" / "react-native-development-guide" / "SKILL.md").is_file()
-            )
+            self.assertFalse((project_root / ".agent-flow" / "skills" / "react-development-guide").exists())
+            self.assertFalse((project_root / ".agent-flow" / "skills" / "react-native-development-guide").exists())
             self.assertIn(
                 "code-generation-discipline",
                 (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8"),
@@ -1632,6 +2061,8 @@ class CliTest(unittest.TestCase):
             expected = [
                 f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-worktree.sh'}'",
                 f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-protected-branch.sh'}'",
+                f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-worktree-write.py'}'",
+                f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-worktree-write.py'}'",
                 f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'comment-checker.py'}'",
                 f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'show-phase-status.sh'}'",
             ]
@@ -1914,8 +2345,16 @@ class CliTest(unittest.TestCase):
         hook = Path(__file__).resolve().parents[1] / "scripts" / "hooks" / "show-phase-status.sh"
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
-            (project_root / ".agent-flow").mkdir(parents=True)
-            (project_root / ".agent-flow" / "kit.json").write_text("{}\n", encoding="utf-8")
+            project_root.mkdir()
+            _init_git_repo(project_root)
+            (project_root / ".agent-flow" / "state").mkdir(parents=True)
+            worktree = Path(temp_dir) / "feature"
+            subprocess.run(
+                ("git", "worktree", "add", "-q", "-b", "feat/status", str(worktree), "main"),
+                cwd=project_root,
+                check=True,
+            )
+            _write_node_active_run(project_root, worktree)
             fake_bin = Path(temp_dir) / "bin"
             fake_bin.mkdir()
             fake_cli = fake_bin / "agent-flow"
@@ -1924,6 +2363,10 @@ class CliTest(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_cli.chmod(0o755)
+            _install_test_project_runtime(
+                project_root,
+                "#!/bin/sh\nprintf 'status: running\\nnext_command: agent-flow run advance\\n'\n",
+            )
             env = {**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}"}
             result = subprocess.run(
                 ("/bin/bash", str(hook)),
@@ -1938,6 +2381,123 @@ class CliTest(unittest.TestCase):
             self.assertIn("[agent-flow]", payload["systemMessage"])
             self.assertIn("status: running", payload["systemMessage"])
             self.assertIn("next_command", payload["systemMessage"])
+
+    def test_stop_hook_runs_status_from_registered_pinned_worktree(self) -> None:
+        hook = Path(__file__).resolve().parents[1] / "scripts" / "hooks" / "show-phase-status.sh"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            _init_git_repo(project_root)
+            runtime = project_root / ".agent-flow"
+            (runtime / "state").mkdir(parents=True)
+            worktree = Path(temp_dir) / "external-feature"
+            subprocess.run(
+                ("git", "worktree", "add", "-q", "-b", "codex/status", str(worktree), "main"),
+                cwd=project_root,
+                check=True,
+            )
+            _write_node_active_run(project_root, worktree)
+            fake_bin = Path(temp_dir) / "bin"
+            fake_bin.mkdir()
+            fake_cli = fake_bin / "agent-flow"
+            fake_cli.write_text(
+                "#!/bin/sh\nprintf 'cwd: %s\\nstatus: running\\n' \"$PWD\"\n",
+                encoding="utf-8",
+            )
+            fake_cli.chmod(0o755)
+            _install_test_project_runtime(
+                project_root,
+                "#!/bin/sh\nprintf 'cwd: %s\\nstatus: running\\n' \"$PWD\"\n",
+            )
+            env = {**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}"}
+            result = subprocess.run(
+                ("/bin/bash", str(hook)),
+                cwd=project_root,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertIn(f"cwd: {worktree.resolve()}", payload["systemMessage"])
+
+    def test_stop_hook_reports_python_active_run_from_registered_worktree(self) -> None:
+        hook = Path(__file__).resolve().parents[1] / "scripts" / "hooks" / "show-phase-status.sh"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            _init_git_repo(project_root)
+            (project_root / ".agent-flow").mkdir()
+            _install_test_project_runtime(project_root, "#!/bin/sh\nexit 0\n")
+            worktree = Path(temp_dir) / "python-feature"
+            subprocess.run(
+                ("git", "worktree", "add", "-q", "-b", "feat/python", str(worktree), "main"),
+                cwd=project_root,
+                check=True,
+            )
+            runtime = project_root / ".git" / "agent-flow" / "worktrees" / "feat-python"
+            run_dir = runtime / ".agent-flow" / "runs" / "python-run"
+            run_dir.mkdir(parents=True)
+            (run_dir / "active").touch()
+            (run_dir / "meta.json").write_text(
+                json.dumps({"run_id": "python-run", "workflow": "default", "task": "python"}),
+                encoding="utf-8",
+            )
+            (runtime / "manifest.json").write_text(
+                json.dumps(
+                    {"name": "feat-python", "branch": "feat/python", "path": str(worktree)}
+                ),
+                encoding="utf-8",
+            )
+            python_package = project_root / ".agent-flow" / "runtime" / "python" / "agent_flow"
+            python_package.mkdir(parents=True)
+            (python_package / "__init__.py").write_text("", encoding="utf-8")
+            (python_package / "cli.py").write_text(
+                "import os, sys\n"
+                "print(f'cwd: {os.getcwd()}')\n"
+                "print('args: ' + ' '.join(sys.argv[1:]))\n"
+                "print('status: running')\n",
+                encoding="utf-8",
+            )
+            env = dict(os.environ)
+            result = subprocess.run(
+                ("/bin/bash", str(hook)),
+                cwd=project_root,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertIn(f"cwd: {worktree.resolve()}", payload["systemMessage"])
+            self.assertIn("--worktree feat-python", payload["systemMessage"])
+
+            second_active = (
+                project_root
+                / ".git"
+                / "agent-flow"
+                / "worktrees"
+                / "feat-other"
+                / ".agent-flow"
+                / "runs"
+                / "other"
+                / "active"
+            )
+            second_active.parent.mkdir(parents=True)
+            second_active.touch()
+            ambiguous = subprocess.run(
+                ("/bin/bash", str(hook)),
+                cwd=project_root,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(ambiguous.returncode, 0, ambiguous.stderr)
+            blocked_payload = json.loads(ambiguous.stdout)
+            self.assertIn("blocked: multiple Python runs are active", blocked_payload["systemMessage"])
 
     def test_guard_hooks_report_block_reason_on_stderr(self) -> None:
         # exit 2일 때 Claude/Codex/OMP는 stderr만 모델에 전달한다. stdout은 무시된다.
@@ -1981,6 +2541,453 @@ class CliTest(unittest.TestCase):
                     self.assertEqual(result.returncode, 2, result.stderr)
                     self.assertIn("BLOCKED", result.stderr)
                     self.assertEqual(result.stdout, "")
+
+    def test_guard_worktree_write_blocks_bash_mutation_from_active_leader(self) -> None:
+        hook = Path(__file__).resolve().parents[1] / "scripts" / "hooks" / "guard-worktree-write.py"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "repo"
+            root.mkdir()
+            _init_git_repo(root)
+            _write_node_active_run(
+                root,
+                root / ".agent-flow" / "worktrees" / "feat-active",
+            )
+            for command in (
+                "touch leader-bypass.txt",
+                "printf x | tee leader-bypass.txt",
+                "sed -i '' README.md",
+                "sed -n 'w leader-bypass.txt' README.md",
+                "git diff --output=leader-bypass.txt",
+                "python3 -c 'open(\"leader-bypass.txt\", \"w\").write(\"x\")'",
+                "git status\ntouch leader-bypass.txt",
+                "bash -lc 'touch leader-bypass.txt'",
+                "sh -c 'touch leader-bypass.txt'",
+                "zsh -lc 'touch leader-bypass.txt'",
+                "agent-flow-python run another-task",
+                "agent-flow-python run status",
+                "agent-flow-python run advance",
+            ):
+                result = subprocess.run(
+                    (str(hook),),
+                    cwd=root,
+                    input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 2, command)
+                self.assertIn("blocked leader checkout command", result.stderr)
+            for command in (
+                "git status --short",
+                "rg --files",
+                "agent-flow status",
+                "agent-flow run status",
+                "agent-flow run advance",
+                "agent-flow-python status",
+                "agent-flow-python continue --root . --worktree feat-active",
+            ):
+                result = subprocess.run(
+                    (str(hook),),
+                    cwd=root,
+                    input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, command)
+            worktree = root / ".agent-flow" / "worktrees" / "feat-active"
+            subprocess.run(
+                ("git", "worktree", "add", "-q", "-b", "feat/active", str(worktree), "main"),
+                cwd=root,
+                check=True,
+            )
+            allowed = subprocess.run(
+                (str(hook),),
+                cwd=worktree,
+                input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "npm test"}}),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+            for command in (
+                f"touch {root / 'leader-bypass.txt'}",
+                "touch ../../../leader-relative-bypass.txt",
+                f"cp README.md {root / 'README-copy.md'}",
+                f"git -C {root} reset --hard HEAD",
+                f"bash -lc 'touch {root / 'wrapped-bypass.txt'}'",
+                "sh -c 'cp README.md ../../../wrapped-copy.md'",
+                f"touch {Path(temp_dir) / 'outside-pinned.txt'}",
+                f"cp README.md {Path(temp_dir) / 'outside-copy.md'}",
+                f"python3 -c 'open(\"{Path(temp_dir) / 'python-bypass.py'}\", \"w\").write(\"x\")'",
+                "python3 -c 'from pathlib import Path; Path.cwd().parents[2].joinpath(\"leader-bypass.txt\").write_text(\"x\")'",
+                "python3 -Ec'from pathlib import Path; Path.cwd().parents[2].joinpath(\"python-cluster-bypass.txt\").write_text(\"x\")'",
+                "node -e 'require(\"fs\").writeFileSync(require(\"path\").resolve(process.cwd(), \"../../../node-bypass.txt\"), \"x\")'",
+                "ruby -e 'File.write(File.expand_path(\"../../../ruby-bypass.txt\"), \"x\")'",
+                "ruby -we 'File.write(File.expand_path(\"../../../ruby-cluster-bypass.txt\"), \"x\")'",
+                "perl -we 'open my $fh, q(>), q(../../../perl-bypass.txt)'",
+                f"npm --prefix {Path(temp_dir) / 'outside-package'} test",
+                f"ln -s {Path(temp_dir)} outside-link",
+                f"git worktree add {Path(temp_dir) / 'extra-worktree'} -b feat/extra main",
+                f"git diff --output={Path(temp_dir) / 'outside.diff'}",
+                f"GIT_WORK_TREE={root} git reset --hard HEAD",
+                "git -c alias.s=switch s main",
+                f"git -c core.worktree={root} reset --hard HEAD",
+                "git -c remote.origin.push=HEAD:main push origin",
+                "git -c push.default=matching push origin",
+                "git -c remote.origin.mirror=true push origin",
+                f"git clone https://example.com/repo.git {Path(temp_dir) / 'clone'}",
+                "git init ../../../outside-git",
+                f"git push file://{Path(temp_dir) / 'bare.git'} HEAD:refs/heads/feat/test",
+            ):
+                blocked_from_worktree = subprocess.run(
+                    (str(hook),),
+                    cwd=worktree,
+                    input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(blocked_from_worktree.returncode, 2, command)
+                self.assertIn("outside the active worktree", blocked_from_worktree.stderr)
+            for command in (
+                "touch feature.py",
+                f"touch {worktree / 'absolute-feature.py'}",
+                "cp README.md README-copy.md",
+                "bash -lc 'touch wrapped-feature.py'",
+                "python3 -m pytest --collect-only",
+                "node --check local-script.js",
+                "npm test >/dev/null",
+                "ln -s README.md readme-link",
+                "git worktree list --porcelain",
+                "git diff --output=local.diff",
+                "git -C . status --short",
+                "git clone https://example.com/repo.git local-clone",
+                "git push https://example.com/repo.git HEAD:refs/heads/feat/test",
+                "git add src/example.py",
+            ):
+                allowed_in_worktree = subprocess.run(
+                    (str(hook),),
+                    cwd=worktree,
+                    input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(allowed_in_worktree.returncode, 0, command)
+            control_artifact = root / ".agent-flow" / "runs" / "default" / "active" / "design.md"
+            control_bash = subprocess.run(
+                (str(hook),),
+                cwd=worktree,
+                input=json.dumps(
+                    {"tool_name": "Bash", "tool_input": {"command": f"touch {control_artifact}"}}
+                ),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(control_bash.returncode, 0, control_bash.stderr)
+            control_patch = subprocess.run(
+                (str(hook),),
+                cwd=root,
+                input=json.dumps(
+                    {
+                        "tool_name": "apply_patch",
+                        "tool_input": (
+                            "*** Begin Patch\n"
+                            f"*** Add File: {control_artifact}\n"
+                            "*** End Patch"
+                        ),
+                    }
+                ),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(control_patch.returncode, 0, control_patch.stderr)
+            for blocked_control_target in (
+                root / ".agent-flow" / "runs" / "default" / "active" / "manifest.json",
+                root / ".agent-flow" / "runs" / "default" / "active" / "meta.json",
+                root / ".agent-flow" / "runs" / "default" / "active" / "artifacts",
+                root / ".agent-flow" / "runs" / "default" / "old" / "design.md",
+                root / ".agent-flow" / "state" / "current-run.json",
+            ):
+                blocked_control_patch = subprocess.run(
+                    (str(hook),),
+                    cwd=root,
+                    input=json.dumps(
+                        {
+                            "tool_name": "apply_patch",
+                            "tool_input": (
+                                "*** Begin Patch\n"
+                                f"*** Update File: {blocked_control_target}\n"
+                                "*** End Patch"
+                            ),
+                        }
+                    ),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(blocked_control_patch.returncode, 2, blocked_control_target)
+            raw_patch = (
+                "*** Begin Patch\n"
+                f"*** Update File: {worktree / 'feature.py'}\n"
+                "*** End Patch"
+            )
+            absolute_target = subprocess.run(
+                (str(hook),),
+                cwd=root,
+                input=json.dumps({"tool_name": "apply_patch", "tool_input": raw_patch}),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(absolute_target.returncode, 0, absolute_target.stderr)
+            leader_target = subprocess.run(
+                (str(hook),),
+                cwd=root,
+                input=json.dumps(
+                    {
+                        "tool_name": "apply_patch",
+                        "tool_input": "*** Begin Patch\n*** Update File: feature.py\n*** End Patch",
+                    }
+                ),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(leader_target.returncode, 2)
+            self.assertIn("outside the active worktree", leader_target.stderr)
+
+    def test_guard_worktree_write_protects_leader_without_active_run(self) -> None:
+        hook = Path(__file__).resolve().parents[1] / "scripts" / "hooks" / "guard-worktree-write.py"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "repo"
+            root.mkdir()
+            _init_git_repo(root)
+            for command in (
+                "touch leader-bypass.txt",
+                "git status\ntouch leader-bypass.txt",
+                "bash -lc 'touch leader-bypass.txt'",
+            ):
+                result = subprocess.run(
+                    (str(hook),),
+                    cwd=root,
+                    input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 2, command)
+                self.assertIn("blocked leader checkout command", result.stderr)
+            for command in ("git status --short", "agent-flow run fix-login-bug"):
+                result = subprocess.run(
+                    (str(hook),),
+                    cwd=root,
+                    input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, command)
+            relative_patch = subprocess.run(
+                (str(hook),),
+                cwd=root,
+                input=json.dumps(
+                    {
+                        "tool_name": "apply_patch",
+                        "tool_input": "*** Begin Patch\n*** Update File: feature.py\n*** End Patch",
+                    }
+                ),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(relative_patch.returncode, 2)
+            self.assertIn("blocked leader checkout write", relative_patch.stderr)
+
+    def test_guard_worktree_write_allows_registered_pinned_worktree_paths(self) -> None:
+        hook = Path(__file__).resolve().parents[1] / "scripts" / "hooks" / "guard-worktree-write.py"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "repo"
+            root.mkdir()
+            _init_git_repo(root)
+            worktrees = (
+                root / ".agent-flow" / "worktrees" / "feat-internal",
+                root / ".codex" / "worktrees" / "feat-codex",
+                root / ".claude" / "worktrees" / "feat-claude",
+                root / ".omp" / "worktrees" / "feat-omp",
+                Path(temp_dir) / "external-feature",
+            )
+            for index, worktree in enumerate(worktrees):
+                with self.subTest(worktree=worktree):
+                    subprocess.run(
+                        (
+                            "git",
+                            "worktree",
+                            "add",
+                            "-q",
+                            "-b",
+                        f"{'codex' if index == 1 else 'claude' if index == 2 else 'omp' if index == 3 else 'feat'}/pinned-{index}",
+                            str(worktree),
+                            "main",
+                        ),
+                        cwd=root,
+                        check=True,
+                    )
+                    _write_node_active_run(root, worktree)
+                    absolute_patch = subprocess.run(
+                        (str(hook),),
+                        cwd=root,
+                        input=json.dumps(
+                            {
+                                "tool_name": "apply_patch",
+                                "tool_input": (
+                                    "*** Begin Patch\n"
+                                    f"*** Update File: {worktree / 'feature.py'}\n"
+                                    "*** End Patch"
+                                ),
+                            }
+                        ),
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(absolute_patch.returncode, 0, absolute_patch.stderr)
+                    worktree_bash = subprocess.run(
+                        (str(hook),),
+                        cwd=worktree,
+                        input=json.dumps(
+                            {"tool_name": "Bash", "tool_input": {"command": "touch feature.py"}}
+                        ),
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(worktree_bash.returncode, 0, worktree_bash.stderr)
+
+    def test_guard_worktree_write_resolves_python_active_run_control_root(self) -> None:
+        hook = Path(__file__).resolve().parents[1] / "scripts" / "hooks" / "guard-worktree-write.py"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "repo"
+            root.mkdir()
+            _init_git_repo(root)
+            worktree = root / ".agent-flow" / "worktrees" / "feat-python"
+            subprocess.run(
+                ("git", "worktree", "add", "-q", "-b", "feat/python", str(worktree), "main"),
+                cwd=root,
+                check=True,
+            )
+            runtime = root / ".git" / "agent-flow" / "worktrees" / "feat-python"
+            run_dir = runtime / ".agent-flow" / "runs" / "python-run"
+            run_dir.mkdir(parents=True)
+            (run_dir / "active").touch()
+            (run_dir / "meta.json").write_text(
+                json.dumps(
+                    {
+                        "run_id": "python-run",
+                        "workflow": "default",
+                        "task": "python task",
+                        "current_phase": "design",
+                        "phase_index": 0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (runtime / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "name": "feat-python",
+                        "branch": "feat/python",
+                        "path": str(worktree.relative_to(root)),
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            current_artifact = run_dir / "design.md"
+            allowed_control = subprocess.run(
+                (str(hook),),
+                cwd=root,
+                input=json.dumps(
+                    {
+                        "tool_name": "apply_patch",
+                        "tool_input": (
+                            "*** Begin Patch\n"
+                            f"*** Add File: {current_artifact}\n"
+                            "*** End Patch"
+                        ),
+                    }
+                ),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(allowed_control.returncode, 0, allowed_control.stderr)
+            control_bash = subprocess.run(
+                (str(hook),),
+                cwd=worktree,
+                input=json.dumps(
+                    {"tool_name": "Bash", "tool_input": {"command": f"touch {current_artifact}"}}
+                ),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(control_bash.returncode, 0, control_bash.stderr)
+            for target in (run_dir / "meta.json", root / "leader.py"):
+                blocked = subprocess.run(
+                    (str(hook),),
+                    cwd=worktree,
+                    input=json.dumps(
+                        {"tool_name": "Bash", "tool_input": {"command": f"touch {target}"}}
+                    ),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(blocked.returncode, 2, target)
+
+            second_active = (
+                root
+                / ".git"
+                / "agent-flow"
+                / "worktrees"
+                / "feat-other"
+                / ".agent-flow"
+                / "runs"
+                / "other"
+                / "active"
+            )
+            second_active.parent.mkdir(parents=True)
+            second_active.touch()
+            ambiguous = subprocess.run(
+                (str(hook),),
+                cwd=worktree,
+                input=json.dumps(
+                    {"tool_name": "Bash", "tool_input": {"command": "touch local.py"}}
+                ),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(ambiguous.returncode, 2)
+            self.assertIn("multiple Python runs", ambiguous.stderr)
+            second_active.unlink()
+            (run_dir / "meta.json").write_text("{invalid", encoding="utf-8")
+            corrupt = subprocess.run(
+                (str(hook),),
+                cwd=worktree,
+                input=json.dumps(
+                    {"tool_name": "Bash", "tool_input": {"command": "touch local.py"}}
+                ),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(corrupt.returncode, 2)
+            self.assertIn("metadata is unreadable", corrupt.stderr)
 
     def test_guard_worktree_allows_non_branch_checkout(self) -> None:
         hook = Path(__file__).resolve().parents[1] / "scripts" / "hooks" / "guard-worktree.sh"
@@ -2060,13 +3067,14 @@ class CliTest(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_node_installers_remove_legacy_graphify_artifacts(self) -> None:
+    def test_node_installers_preserve_unauthenticated_graphify_artifacts(self) -> None:
         installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
         managed_skill_roots = (
             ".agent-flow/skills",
             ".claude/skills",
             ".codex/skills",
             ".Codex/skills",
+            ".agents/skills",
             ".omp/skills",
             ".gemini/skills",
             ".gemini/antigravity/skills",
@@ -2106,11 +3114,11 @@ class CliTest(unittest.TestCase):
                     kit = json.loads((project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
                     self.assertNotIn("graphify", kit)
                     gitignore = (project_root / ".gitignore").read_text(encoding="utf-8")
-                    self.assertNotIn("graphify/", gitignore)
-                    self.assertNotIn("graphify-out/manifest.json", gitignore)
-                    self.assertNotIn("graphify-out/cost.json", gitignore)
+                    self.assertIn("graphify/", gitignore)
+                    self.assertIn("graphify-out/manifest.json", gitignore)
+                    self.assertIn("graphify-out/cost.json", gitignore)
                     for skill_root in managed_skill_roots:
-                        self.assertFalse((project_root / skill_root / "graphify").exists(), skill_root)
+                        self.assertTrue((project_root / skill_root / "graphify").exists(), skill_root)
 
     def test_node_installers_remove_legacy_antigravity_skill_links(self) -> None:
         installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
@@ -2125,30 +3133,57 @@ class CliTest(unittest.TestCase):
                 with self.subTest(installer=installer_name):
                     project_root = root / installer_name
                     project_root.mkdir()
+                    initial = subprocess.run(
+                        (
+                            node,
+                            str(Path(__file__).resolve().parents[1] / "bin" / installer_name),
+                            "install",
+                        ),
+                        cwd=project_root,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(initial.returncode, 0, initial.stderr)
                     source_dir = project_root / ".agent-flow" / "skills" / "agent-flow"
-                    source_dir.mkdir(parents=True)
-                    (source_dir / "SKILL.md").write_text("---\nname: agent-flow\n---\n", encoding="utf-8")
                     for link_path in legacy_link_paths.values():
                         target = project_root / link_path
                         target.parent.mkdir(parents=True, exist_ok=True)
-                        target.symlink_to(source_dir)
-                    index = {
-                        "skills": [
-                            {
-                                "name": "agent-flow",
-                                "source": "bundled",
-                                "hosts": ["claude", "codex"],
-                                "path": ".agent-flow/skills/agent-flow",
-                            }
-                        ],
-                        "links": [
-                            {"name": "agent-flow", "host": host, "path": link_path, "status": "linked"}
-                            for host, link_path in legacy_link_paths.items()
-                        ],
-                    }
-                    (project_root / ".agent-flow" / "skills" / "index.json").write_text(
-                        json.dumps(index), encoding="utf-8"
+                        target.symlink_to(os.path.relpath(source_dir, start=target.parent))
+                    index_path = project_root / ".agent-flow" / "skills" / "index.json"
+                    index = json.loads(index_path.read_text(encoding="utf-8"))
+                    index["links"].extend(
+                        {
+                            "name": "agent-flow",
+                            "host": host,
+                            "path": link_path,
+                            "status": "linked",
+                            "tree_integrity": None,
+                        }
+                        for host, link_path in legacy_link_paths.items()
                     )
+                    index_path.write_text(json.dumps(index), encoding="utf-8")
+                    kit_path = project_root / ".agent-flow" / "kit.json"
+                    kit = json.loads(kit_path.read_text(encoding="utf-8"))
+                    link_rows = sorted(
+                        (
+                            link["name"],
+                            link["host"],
+                            link["path"],
+                            link["status"],
+                            link.get("tree_integrity"),
+                        )
+                        for link in index["links"]
+                    )
+                    commitment_payload = {
+                        "version": 1,
+                        "skill_plan_hash": kit["skill_plan_hash"],
+                        "links": link_rows,
+                    }
+                    kit["skill_links_commitment"] = hashlib.sha256(
+                        json.dumps(commitment_payload, separators=(",", ":")).encode("utf-8")
+                    ).hexdigest()
+                    kit_path.write_text(json.dumps(kit), encoding="utf-8")
 
                     result = subprocess.run(
                         (
@@ -2187,7 +3222,13 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout.strip(), "agent-flow installed profile=generic")
+            self.assertEqual(
+                result.stdout.strip().splitlines(),
+                [
+                    "agent-flow installed profile=generic",
+                    "next_command: ./.agent-flow/bin/agent-flow status",
+                ],
+            )
             self.assertTrue((project_root / ".agent-flow" / "kit.json").is_file())
 
     def test_node_installer_skips_managed_worktree_reinstall(self) -> None:
@@ -2254,6 +3295,7 @@ class CliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
+            _init_git_repo(project_root)
             node = _node_executable()
             install = subprocess.run(
                 (
@@ -2267,8 +3309,12 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(install.returncode, 0, install.stderr)
-            worktree = project_root / ".agent-flow" / "worktrees" / "slice"
-            worktree.mkdir(parents=True)
+            worktree = project_root / ".agent-flow" / "worktrees" / "feat-slice"
+            subprocess.run(
+                ("git", "worktree", "add", "-q", "-b", "feat/slice", str(worktree), "main"),
+                cwd=project_root,
+                check=True,
+            )
 
             start = subprocess.run(
                 (
@@ -2288,6 +3334,12 @@ class CliTest(unittest.TestCase):
             )
 
             self.assertEqual(start.returncode, 0, start.stderr)
+            state = json.loads(
+                (project_root / ".agent-flow" / "state" / "current-run.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertTrue(os.path.samefile(state["workspace_root"], worktree))
             self.assertTrue((project_root / ".agent-flow" / "runs" / "full-feature" / "r1").is_dir())
             artifact = project_root / ".agent-flow" / "runs" / "full-feature" / "r1" / "artifacts" / "domain-grill.md"
             artifact.write_text(_node_phase_content("domain-grill"), encoding="utf-8")
@@ -2311,6 +3363,7 @@ class CliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
+            _init_git_repo(project_root)
             node = _node_executable()
             install = subprocess.run(
                 (
@@ -2327,8 +3380,21 @@ class CliTest(unittest.TestCase):
             for index, marker in enumerate((".codex", ".Codex"), start=1):
                 with self.subTest(marker=marker):
                     run_id = f"r{index}"
-                    worktree = project_root / marker / "worktrees" / "slice"
-                    worktree.mkdir(parents=True, exist_ok=True)
+                    worktree = project_root / marker / "worktrees" / f"feat-slice-{index}"
+                    subprocess.run(
+                        (
+                            "git",
+                            "worktree",
+                            "add",
+                            "-q",
+                            "-b",
+                            f"feat/slice-{index}",
+                            str(worktree),
+                            "main",
+                        ),
+                        cwd=project_root,
+                        check=True,
+                    )
 
                     start = subprocess.run(
                         (
@@ -2347,9 +3413,19 @@ class CliTest(unittest.TestCase):
                         check=False,
                     )
 
-                    self.assertEqual(start.returncode, 0, start.stderr)
-                    self.assertTrue((project_root / ".agent-flow" / "runs" / "full-feature" / run_id).is_dir())
-                    self.assertFalse((worktree / ".agent-flow" / "runs" / "full-feature" / run_id).exists())
+                    if index == 1:
+                        self.assertEqual(start.returncode, 0, start.stderr)
+                        state = json.loads(
+                            (project_root / ".agent-flow" / "state" / "current-run.json").read_text(
+                                encoding="utf-8"
+                            )
+                        )
+                        self.assertTrue(os.path.samefile(state["workspace_root"], worktree))
+                        self.assertTrue((project_root / ".agent-flow" / "runs" / "full-feature" / run_id).is_dir())
+                        self.assertFalse((worktree / ".agent-flow" / "runs" / "full-feature" / run_id).exists())
+                    else:
+                        self.assertNotEqual(start.returncode, 0)
+                        self.assertIn("active run", start.stderr)
 
     def test_python_cli_status_from_managed_worktree_uses_parent_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2360,7 +3436,7 @@ class CliTest(unittest.TestCase):
                 "AGENT_FLOW_ADAPTER": "generic",
                 "AGENT_FLOW_GENERIC_MODE": "stub-success",
             }):
-                self.assertEqual(main(["run", "slice", "--root", str(root)]), 0)
+                self.assertEqual(main(["run", "slice", "--root", str(root), "--workflow", "default"]), 0)
             worktree = root / ".agent-flow" / "worktrees" / "feat-slice"
             self.assertTrue((worktree / ".git").exists())
 
@@ -2376,15 +3452,67 @@ class CliTest(unittest.TestCase):
             status = output.getvalue()
             self.assertIn("Run id", status)
             self.assertIn("current_phase: slice-plan", status)
-            self.assertIn(f"next_command: agent-flow continue --root {root.resolve()} --worktree feat-slice", status)
+            self.assertIn(f"workspace_root: {worktree.resolve()}", status)
+            self.assertIn(f"next_command: agent-flow-python continue --root {root.resolve()} --worktree feat-slice", status)
             self.assertFalse((worktree / ".agent-flow" / "runs").exists())
+
+            leader_output = io.StringIO()
+            with contextlib.redirect_stdout(leader_output):
+                self.assertEqual(main(["status", "--root", str(root)]), 0)
+            self.assertIn("current_phase: slice-plan", leader_output.getvalue())
+            self.assertIn(f"workspace_root: {worktree.resolve()}", leader_output.getvalue())
+            self.assertIn(
+                f"next_command: agent-flow-python continue --root {root.resolve()} --worktree feat-slice",
+                leader_output.getvalue(),
+            )
+
+    def test_python_cli_leader_status_finds_external_registered_worktree_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "project"
+            root.mkdir()
+            _init_git_repo(root)
+            worktree = Path(temp_dir) / "external-feature"
+            subprocess.run(
+                ("git", "worktree", "add", "-q", "--detach", str(worktree), "HEAD"),
+                cwd=root,
+                check=True,
+            )
+
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(worktree)
+                with mock.patch.dict(os.environ, {
+                    "AGENT_FLOW_ADAPTER": "generic",
+                    "AGENT_FLOW_GENERIC_MODE": "stub-success",
+                }):
+                    self.assertEqual(main(["run", "external slice", "--workflow", "default"]), 0)
+            finally:
+                os.chdir(old_cwd)
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["status", "--root", str(root)]), 0)
+
+            self.assertIn("current_phase: slice-plan", output.getvalue())
+            self.assertIn(f"workspace_root: {worktree.resolve()}", output.getvalue())
+            self.assertIn(
+                f"next_command: agent-flow-python continue --root {root.resolve()} --worktree feat-external-slice",
+                output.getvalue(),
+            )
+            status_json = next(
+                line.removeprefix("status_json: ")
+                for line in output.getvalue().splitlines()
+                if line.startswith("status_json: ")
+            )
+            self.assertEqual(json.loads(status_json)["workspace_root"], str(worktree.resolve()))
+            self.assertFalse((root / ".agent-flow" / "worktrees" / "feat-external-slice").exists())
 
     def test_python_cli_run_from_managed_worktree_reuses_parent_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "project"
             root.mkdir()
             _init_git_repo(root)
-            self.assertEqual(main(["run", "slice", "--root", str(root)]), 0)
+            self.assertEqual(main(["run", "slice", "--root", str(root), "--workflow", "default"]), 0)
             worktree = root / ".agent-flow" / "worktrees" / "feat-slice"
 
             old_cwd = Path.cwd()
@@ -2399,6 +3527,23 @@ class CliTest(unittest.TestCase):
             self.assertIn("already active", output.getvalue())
             self.assertFalse((root / ".agent-flow" / "worktrees" / "feat-other").exists())
             self.assertFalse((worktree / ".agent-flow" / "worktrees").exists())
+
+    def test_python_cli_second_prompt_from_leader_does_not_create_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "project"
+            root.mkdir()
+            _init_git_repo(root)
+            with mock.patch.dict(os.environ, {
+                "AGENT_FLOW_ADAPTER": "generic",
+                "AGENT_FLOW_GENERIC_MODE": "stub-success",
+            }):
+                self.assertEqual(main(["run", "first task", "--root", str(root), "--workflow", "default"]), 0)
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(main(["run", "second task", "--root", str(root)]), 2)
+            self.assertIn("already active", output.getvalue())
+            self.assertTrue((root / ".agent-flow" / "worktrees" / "feat-first-task").exists())
+            self.assertFalse((root / ".agent-flow" / "worktrees" / "feat-second-task").exists())
 
     def test_node_installer_from_agent_flow_worktree_without_root_install_is_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2546,8 +3691,42 @@ class CliTest(unittest.TestCase):
             self.assertEqual(start.returncode, 0, start.stderr)
             self.assertTrue((project_root / ".agent-flow" / "runs" / "full-feature" / "r1").is_dir())
             self.assertFalse((worktree / ".agent-flow" / "runs" / "full-feature" / "r1").exists())
+            branch = subprocess.run(
+                ("git", "branch", "--show-current"),
+                cwd=worktree,
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout.strip()
+            self.assertEqual(branch, "feat/ship-slice")
+            state = json.loads(
+                (project_root / ".agent-flow" / "state" / "current-run.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(Path(state["workspace_root"]), worktree.resolve())
+            self.assertIn(f"workspace_root: {worktree.resolve()}", start.stdout)
+            status = subprocess.run(
+                (node, cli, "status"),
+                cwd=project_root,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(status.returncode, 0, status.stderr)
+            self.assertIn(f"workspace_root: {worktree.resolve()}", status.stdout)
+            current_prompt = subprocess.run(
+                (node, cli, "run", "next"),
+                cwd=project_root,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(current_prompt.returncode, 0, current_prompt.stderr)
+            self.assertIn(f"workspace_root: {worktree.resolve()}", current_prompt.stdout)
+            self.assertFalse((project_root / ".agent-flow" / "worktrees" / "feat-ship-slice").exists())
 
-    def test_node_installers_ignore_profile_managed_host_only_project_skills(self) -> None:
+    def test_node_installers_index_all_project_local_skills(self) -> None:
         installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -2599,15 +3778,15 @@ class CliTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 index = json.loads((project_root / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
                 skill_names = {skill["name"] for skill in index["skills"]}
-                self.assertNotIn("android-mvi-feature", skill_names)
-                self.assertNotIn("compose-state-authoring", skill_names)
-                self.assertNotIn("edge-to-edge", skill_names)
-                for host_root in (project_root / ".Codex" / "skills", project_root / ".codex" / "skills", project_root / ".omp" / "skills"):
-                    self.assertFalse((host_root / "android-mvi-feature").exists())
-                    self.assertFalse((host_root / "compose-state-authoring").exists())
-                    self.assertFalse((host_root / "edge-to-edge").exists())
+                self.assertIn("android-mvi-feature", skill_names)
+                self.assertIn("compose-state-authoring", skill_names)
+                self.assertIn("edge-to-edge", skill_names)
+                for name in ("android-mvi-feature", "compose-state-authoring", "edge-to-edge"):
+                    self.assertTrue((project_root / ".agents" / "skills" / name / "SKILL.md").exists())
+                    self.assertFalse((project_root / ".claude" / "skills" / name).exists())
+                    self.assertFalse((project_root / ".omp" / "skills" / name).exists())
 
-    def test_node_installers_copy_claude_code_reviewer_from_codex_source(self) -> None:
+    def test_node_installers_create_equivalent_host_code_reviewers(self) -> None:
         installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -2635,10 +3814,14 @@ class CliTest(unittest.TestCase):
                     claude_reviewer = (project_root / ".claude" / "agents" / "code-reviewer.md").read_text(
                         encoding="utf-8"
                     )
+                    omp_reviewer = (project_root / ".omp" / "agents" / "code-reviewer.md").read_text(
+                        encoding="utf-8"
+                    )
                     self.assertEqual(codex_reviewer, _strip_markdown_frontmatter(claude_reviewer))
+                    self.assertEqual(omp_reviewer, claude_reviewer)
                     self.assertIn("name: code-reviewer", claude_reviewer)
 
-    def test_node_installers_omp_hook_syncs_root_context_files(self) -> None:
+    def test_node_installers_omp_hooks_cover_stop_delivery_and_context(self) -> None:
         installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -2680,16 +3863,88 @@ agentFlowHooks({
   },
 });
 
-if (!handlers.has("tool_result") || !handlers.has("context")) {
+if (!handlers.has("tool_result") || !handlers.has("context") || !handlers.has("session_stop")) {
   throw new Error("missing OMP hook handlers");
+}
+if (handlers.has("agent_end")) {
+  throw new Error("OMP phase status must use main-session session_stop semantics");
+}
+
+const notifications = [];
+const statusHook = `#!/usr/bin/env bash
+printf '%s\\\\n' '{"systemMessage":"phase status"}'
+`;
+fs.writeFileSync(
+  path.join(process.cwd(), ".agent-flow", "scripts", "hooks", "show-phase-status.sh"),
+  statusHook,
+  { mode: 0o755 },
+);
+const uiResult = await handlers.get("session_stop")(
+  { messages: [] },
+  {
+    cwd: process.cwd(),
+    hasUI: true,
+    ui: { notify(message, level) { notifications.push([message, level]); } },
+  },
+);
+if (uiResult !== undefined) {
+  throw new Error("OMP session_stop status hook must not alter routing");
+}
+if (JSON.stringify(notifications) !== JSON.stringify([["phase status", "info"]])) {
+  throw new Error("OMP session_stop must notify phase status with UI");
+}
+
+const originalStderrWrite = process.stderr.write.bind(process.stderr);
+let headlessStderr = "";
+process.stderr.write = (chunk) => {
+  headlessStderr += String(chunk);
+  return true;
+};
+let headlessResult;
+try {
+  headlessResult = await handlers.get("session_stop")(
+    { messages: [] },
+    { cwd: process.cwd(), hasUI: false },
+  );
+} finally {
+  process.stderr.write = originalStderrWrite;
+}
+if (headlessResult !== undefined) {
+  throw new Error("OMP headless session_stop status hook must not alter routing");
+}
+if (headlessStderr !== "phase status\\n") {
+  throw new Error("OMP headless session_stop must expose phase status on stderr");
+}
+
+fs.writeFileSync(
+  path.join(process.cwd(), ".agent-flow", "scripts", "hooks", "show-phase-status.sh"),
+  "#!/usr/bin/env bash\\nexit 0\\n",
+  { mode: 0o755 },
+);
+headlessStderr = "";
+process.stderr.write = (chunk) => {
+  headlessStderr += String(chunk);
+  return true;
+};
+let emptyResult;
+try {
+  emptyResult = await handlers.get("session_stop")(
+    { messages: [] },
+    { cwd: process.cwd(), hasUI: false },
+  );
+} finally {
+  process.stderr.write = originalStderrWrite;
+}
+if (emptyResult !== undefined || headlessStderr !== "") {
+  throw new Error("OMP session_stop must stay silent when phase status is empty");
 }
 
 await handlers.get("tool_result")(
   { toolName: "Write", input: { file_path: "CLAUDE.md" } },
   { cwd: process.cwd() },
 );
-if (fs.readFileSync("AGENTS.md", "utf8") !== fs.readFileSync("CLAUDE.md", "utf8")) {
-  throw new Error("CLAUDE.md did not sync to AGENTS.md");
+if (fs.readFileSync("AGENTS.md", "utf8") !== "agents-old\\n") {
+  throw new Error("OMP added host-only CLAUDE.md to AGENTS.md synchronization");
 }
 
 fs.writeFileSync("AGENTS.md", "agents-updated\\n", "utf8");
@@ -2697,8 +3952,8 @@ await handlers.get("tool_result")(
   { toolName: "Edit", input: { path: "AGENTS.md" } },
   { cwd: process.cwd() },
 );
-if (fs.readFileSync("CLAUDE.md", "utf8") !== fs.readFileSync("AGENTS.md", "utf8")) {
-  throw new Error("AGENTS.md did not sync to CLAUDE.md");
+if (fs.readFileSync("CLAUDE.md", "utf8") !== "claude-updated\\n") {
+  throw new Error("OMP added host-only AGENTS.md to CLAUDE.md synchronization");
 }
 
 const staleModelContext = {
@@ -2754,6 +4009,15 @@ const codexContext = await handlers.get("context")(
 if (codexContext !== undefined) {
   throw new Error("Context hook must not inject Codex/OpenAI root context");
 }
+
+fs.unlinkSync(path.join(process.cwd(), ".agent-flow", "scripts", "hooks", "guard-worktree.sh"));
+const missingHookResult = await handlers.get("tool_call")(
+  { toolName: "Bash", input: { command: "git status" } },
+  { cwd: process.cwd() },
+);
+if (!missingHookResult?.block || !String(missingHookResult.reason || "").includes("failed to start")) {
+  throw new Error("Missing OMP hook subprocess must fail closed");
+}
 """,
                         encoding="utf-8",
                     )
@@ -2799,7 +4063,7 @@ if (codexContext !== undefined) {
 
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertTrue((project_root / ".claude" / "skills" / "default-host-skill" / "SKILL.md").exists())
-                    self.assertTrue((project_root / ".Codex" / "skills" / "default-host-skill" / "SKILL.md").exists())
+                    self.assertTrue((project_root / ".agents" / "skills" / "default-host-skill" / "SKILL.md").exists())
                     self.assertTrue((project_root / ".omp" / "skills" / "default-host-skill" / "SKILL.md").exists())
                     index = json.loads(
                         (project_root / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8")
@@ -2966,7 +4230,13 @@ if (codexContext !== undefined) {
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout.strip(), "agent-flow installed profile=node")
+            self.assertEqual(
+                result.stdout.strip().splitlines(),
+                [
+                    "agent-flow installed profile=node",
+                    "next_command: ./.agent-flow/bin/agent-flow status",
+                ],
+            )
             kit = json.loads((project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
             self.assertEqual(kit["profile"], "node")
 
@@ -2994,6 +4264,7 @@ if (codexContext !== undefined) {
     def test_node_installer_matches_project_profile_detection(self) -> None:
         cases = [
             ("nextjs", {"package.json": '{"dependencies":{"next":"latest"}}\n'}),
+            ("react", {"package.json": '{"dependencies":{"react":"latest"}}\n'}),
             ("react-native", {"package.json": '{"dependencies":{"react-native":"latest"}}\n'}),
             ("python", {"pyproject.toml": "[project]\nname='demo'\n"}),
             ("typescript", {"package.json": '{"scripts":{"test":"node test.js"}}\n', "tsconfig.json": "{}\n"}),
@@ -3035,6 +4306,7 @@ if (codexContext !== undefined) {
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
+            _init_git_repo(project_root)
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             install = subprocess.run(
@@ -3066,7 +4338,7 @@ if (codexContext !== undefined) {
             self.assertEqual(status.returncode, 0, status.stderr)
             self.assertIn("status: awaiting_host", status.stdout)
             self.assertIn("reason: missing_phase_artifact", status.stdout)
-            self.assertIn("next_command: agent-flow run advance", status.stdout)
+            self.assertIn("next_command: ./.agent-flow/bin/agent-flow run next", status.stdout)
             self.assertIn("status_json:", status.stdout)
 
             blocked = subprocess.run(
@@ -3230,6 +4502,7 @@ if (codexContext !== undefined) {
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
+            _init_git_repo(project_root)
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
@@ -3293,6 +4566,7 @@ if (codexContext !== undefined) {
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
+            _init_git_repo(project_root)
             _write_local_skill_files(project_root)
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
@@ -3304,11 +4578,14 @@ if (codexContext !== undefined) {
             self.assertIn(".agent-flow/local-skills/api/SKILL.md", green_prompt)
             self.assertIn("api-contract-guide/SKILL.md", green_prompt)
             self.assertIn("project-local-skill-docs: applied", green_prompt)
-            self.assertNotIn("figma-screen-spec/SKILL.md", green_prompt)
-            self.assertNotIn("release-first-branch-pr/SKILL.md", green_prompt)
-            self.assertNotIn("pr-review-flow/SKILL.md", green_prompt)
-            self.assertNotIn("merge-review-flow/SKILL.md", green_prompt)
-            self.assertNotIn("release-branch-review/SKILL.md", green_prompt)
+            for name in (
+                "figma-screen-spec",
+                "release-first-branch-pr",
+                "pr-review-flow",
+                "merge-review-flow",
+                "release-branch-review",
+            ):
+                self.assertIn(f"{name}/SKILL.md", green_prompt)
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--workflow", "default", "--task", "demo", "--run-id", "r1"),
@@ -3377,6 +4654,7 @@ if (codexContext !== undefined) {
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
+            _init_git_repo(project_root)
             _write_local_skill_files(project_root)
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
@@ -3437,6 +4715,7 @@ if (codexContext !== undefined) {
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
+            _init_git_repo(project_root)
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             install = subprocess.run(
@@ -3464,6 +4743,7 @@ if (codexContext !== undefined) {
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
+            _init_git_repo(project_root)
             skill_dir = project_root / "skills" / "my-skill"
             skill_dir.mkdir(parents=True)
             (skill_dir / "SKILL.md").write_text(
@@ -3528,6 +4808,7 @@ if (codexContext !== undefined) {
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
+            _init_git_repo(project_root)
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(
@@ -3605,6 +4886,7 @@ if (codexContext !== undefined) {
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
+            _init_git_repo(project_root)
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
@@ -3645,6 +4927,7 @@ if (codexContext !== undefined) {
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
+            _init_git_repo(project_root)
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
@@ -3702,7 +4985,7 @@ if (codexContext !== undefined) {
             )
             self.assertEqual(pending_status.returncode, 0, pending_status.stderr)
             self.assertIn("reason: route_blocked", pending_status.stdout)
-            self.assertIn("next_command: agent-flow run next", pending_status.stdout)
+            self.assertIn("next_command: ./.agent-flow/bin/agent-flow run next", pending_status.stdout)
 
             watch.write_text("status: comments\n", encoding="utf-8")
             comments = subprocess.run(
@@ -3735,7 +5018,7 @@ if (codexContext !== undefined) {
             )
             self.assertEqual(stale_comment_status.returncode, 0, stale_comment_status.stderr)
             self.assertIn("reason: stale_artifact", stale_comment_status.stdout)
-            self.assertIn("next_command: agent-flow run advance", stale_comment_status.stdout)
+            self.assertIn("next_command: ./.agent-flow/bin/agent-flow run next", stale_comment_status.stdout)
             comment_fix.write_text("pushed comment fixes\n", encoding="utf-8")
             same_ms = json.loads((project_root / ".agent-flow" / "state" / "current-run.json").read_text(encoding="utf-8"))
             entered_ts = _node_epoch_seconds(same_ms["phase_entered_at"])
@@ -3823,6 +5106,7 @@ if (codexContext !== undefined) {
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
+            _init_git_repo(project_root)
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
@@ -3979,6 +5263,7 @@ if (codexContext !== undefined) {
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
+            _init_git_repo(project_root)
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
@@ -4086,6 +5371,7 @@ if (codexContext !== undefined) {
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
+            _init_git_repo(project_root)
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
@@ -4211,6 +5497,7 @@ if (codexContext !== undefined) {
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
+            _init_git_repo(project_root)
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
@@ -4228,6 +5515,15 @@ if (codexContext !== undefined) {
                 artifact.parent.mkdir(parents=True, exist_ok=True)
                 artifact.write_text(_node_phase_content(phase), encoding="utf-8")
                 self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+                if phase == "slice-plan":
+                    self.assertEqual(
+                        subprocess.run(
+                            (node, cli, "run", "advance", "--approve-pause"),
+                            cwd=project_root,
+                            check=False,
+                        ).returncode,
+                        0,
+                    )
 
             comment_artifact = run_dir / "comment-authoring.md"
             comment_artifact.write_text(_node_phase_content("comment-authoring"), encoding="utf-8")
@@ -4269,6 +5565,7 @@ if (codexContext !== undefined) {
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
+            _init_git_repo(project_root)
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
@@ -4331,6 +5628,7 @@ if (codexContext !== undefined) {
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
+            _init_git_repo(project_root)
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
@@ -4374,6 +5672,7 @@ if (codexContext !== undefined) {
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
+            _init_git_repo(project_root)
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
@@ -4523,7 +5822,7 @@ if (codexContext !== undefined) {
                 check=False,
             )
             self.assertEqual(result.returncode, 1)
-            self.assertIn("overall verdict must be approve or request-changes", result.stderr)
+            self.assertIn("at least 1 independent sub-agent reviewer verdict", result.stderr)
 
             mr_artifact.write_text(_with_skills_gate(
                 "## Reviewer 1\n\nreviewer-source: sub-agent\nverdict: approve\n",
@@ -4584,7 +5883,7 @@ if (codexContext !== undefined) {
                 check=False,
             )
             self.assertEqual(result.returncode, 1)
-            self.assertIn("at least 2 independent sub-agent reviewer verdicts", result.stderr)
+            self.assertIn("overall verdict must be approve or request-changes", result.stderr)
 
             mr_artifact.write_text(_with_skills_gate(
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
@@ -4673,6 +5972,7 @@ if (codexContext !== undefined) {
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
+            _init_git_repo(project_root)
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
@@ -4759,6 +6059,7 @@ if (codexContext !== undefined) {
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
+            _init_git_repo(project_root)
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
@@ -4799,6 +6100,7 @@ if (codexContext !== undefined) {
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
+            _init_git_repo(project_root)
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
@@ -4823,6 +6125,7 @@ if (codexContext !== undefined) {
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
+            _init_git_repo(project_root)
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
@@ -4860,6 +6163,7 @@ if (codexContext !== undefined) {
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
+            _init_git_repo(project_root)
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
@@ -4897,6 +6201,7 @@ if (codexContext !== undefined) {
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
+            _init_git_repo(project_root)
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
@@ -5145,14 +6450,15 @@ if (codexContext !== undefined) {
             )
             self.assertEqual(manifest["worktree"]["branch"], "feat/slice-a")
 
-    def test_start_worktree_can_use_existing_branch(self) -> None:
+    def test_start_worktree_rejects_existing_explicit_branch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             _init_git_repo(root)
             subprocess.run(("git", "branch", "feat/slice-a"), cwd=root, check=True)
 
-            self.assertEqual(
-                main(
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                result = main(
                     [
                         "start",
                         "development",
@@ -5169,23 +6475,11 @@ if (codexContext !== undefined) {
                         "--worktree-branch",
                         "feat/slice-a",
                     ]
-                ),
-                0,
-            )
-            manifest = json.loads(
-                (
-                    worktree_runtime_root(root=root, name="feat-slice-a")
-                    / ".agent-flow"
-                    / "runs"
-                    / "development"
-                    / "r1"
-                    / "manifest.json"
-                ).read_text(
-                    encoding="utf-8"
                 )
-            )
-            self.assertEqual(manifest["worktree"]["branch"], "feat/slice-a")
-            self.assertTrue((root / ".agent-flow" / "worktrees" / "feat-slice-a").is_dir())
+
+            self.assertEqual(result, 2)
+            self.assertIn("explicit worktree branch already exists", stderr.getvalue())
+            self.assertFalse((root / ".agent-flow" / "worktrees" / "feat-slice-a").exists())
 
     def test_detect_profile_defaults_to_generic(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -5221,6 +6515,18 @@ if (codexContext !== undefined) {
             with contextlib.redirect_stdout(output):
                 self.assertEqual(main(["detect-profile", "--root", temp_dir]), 0)
             self.assertEqual(output.getvalue().strip(), "react-native")
+
+    def test_detect_profile_reports_react_for_react_project(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "package.json").write_text(
+                '{"dependencies":{"react":"latest"}}\n',
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["detect-profile", "--root", str(root)]), 0)
+            self.assertEqual(output.getvalue().strip(), "react")
 
     def test_is_git_repo_treats_missing_git_as_non_git(self) -> None:
         from agent_flow.cli import _is_git_repo
@@ -5260,6 +6566,89 @@ if (codexContext !== undefined) {
             with mock.patch.dict("agent_flow.adapters.registry.os.environ", {"CLAUDECODE": "1"}, clear=True):
                 self.assertEqual(detect_adapter(), "claude-session")
 
+    def test_host_env_detection_has_deterministic_override_and_child_precedence(self) -> None:
+        from agent_flow.cli_detect import detect_host_from_env
+
+        self.assertEqual(
+            detect_host_from_env(
+                {
+                    "AGENT_FLOW_HOST": " CoDeX ",
+                    "PI_CODING_AGENT_DIR": "/tmp/omp",
+                }
+            ),
+            "codex",
+        )
+        self.assertEqual(
+            detect_host_from_env(
+                {
+                    "AGENT_FLOW_HOST": "invalid",
+                    "PI_CODING_AGENT_DIR": "/tmp/omp",
+                }
+            ),
+            "omp",
+        )
+        self.assertEqual(
+            detect_host_from_env(
+                {
+                    "CLAUDE_CLI": "1",
+                    "PI_CODING_AGENT_DIR": "/tmp/omp",
+                }
+            ),
+            "claude",
+        )
+        self.assertEqual(
+            detect_host_from_env(
+                {
+                    "CODEX_THREAD_ID": "desktop-thread",
+                    "PI_CODING_AGENT_DIR": "/tmp/omp",
+                }
+            ),
+            "codex",
+        )
+        self.assertEqual(
+            detect_host_from_env(
+                {
+                    "OMP_PROFILE": "child",
+                    "CODEX_HOME": "/tmp/codex",
+                }
+            ),
+            "omp",
+        )
+        self.assertEqual(
+            detect_host_from_env(
+                {
+                    "CLAUDECODE": "1",
+                    "CODEX_INTERNAL_ORIGINATOR_OVERRIDE": "desktop",
+                }
+            ),
+            "claude",
+        )
+        for marker in (
+            "CODEX_CLI",
+            "CODEX_HOME",
+            "CODEX_SHELL",
+            "CODEX_THREAD_ID",
+            "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+        ):
+            with self.subTest(marker=marker):
+                self.assertEqual(detect_host_from_env({marker: "1"}), "codex")
+        self.assertIsNone(detect_host_from_env({}))
+
+    def test_codex_desktop_marker_selects_both_python_adapter_paths(self) -> None:
+        from agent_flow.adapters.auto import detect_adapter as detect_hosted_adapter
+        from agent_flow.adapters.registry import detect_adapter as detect_session_adapter
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "CODEX_THREAD_ID": "desktop-thread",
+                "PI_CODING_AGENT_DIR": "/tmp/omp",
+            },
+            clear=True,
+        ):
+            self.assertEqual(detect_session_adapter(), "codex-session")
+            self.assertEqual(detect_hosted_adapter().name, "codex")
+
     def test_auto_adapter_prefers_codex_path_before_omp_path_fallback(self) -> None:
         from agent_flow.adapters.registry import detect_adapter
         from agent_flow.cli_detect import detect_host_cli
@@ -5274,7 +6663,7 @@ if (codexContext !== undefined) {
             with mock.patch.dict("agent_flow.cli_detect.os.environ", {}, clear=True):
                 self.assertEqual(detect_host_cli(), "codex")
 
-    def test_storage_dir_env_does_not_select_omp_host(self) -> None:
+    def test_omp_child_marker_precedes_inherited_weak_codex_home(self) -> None:
         from agent_flow.adapters.registry import detect_adapter
         from agent_flow.cli_detect import detect_host_cli
 
@@ -5284,13 +6673,13 @@ if (codexContext !== undefined) {
                 {"PI_CODING_AGENT_DIR": "/tmp/omp"},
                 clear=True,
             ):
-                self.assertEqual(detect_adapter(), "manual")
+                self.assertEqual(detect_adapter(), "omp-session")
             with mock.patch.dict(
                 "agent_flow.adapters.registry.os.environ",
                 {"PI_CODING_AGENT_DIR": "/tmp/omp", "CODEX_HOME": "/tmp/codex"},
                 clear=True,
             ):
-                self.assertEqual(detect_adapter(), "codex-session")
+                self.assertEqual(detect_adapter(), "omp-session")
 
         with mock.patch("agent_flow.cli_detect.shutil.which", return_value=None):
             with mock.patch.dict(
@@ -5298,24 +6687,39 @@ if (codexContext !== undefined) {
                 {"PI_CODING_AGENT_DIR": "/tmp/omp"},
                 clear=True,
             ):
-                self.assertIsNone(detect_host_cli())
+                self.assertEqual(detect_host_cli(), "omp")
             with mock.patch.dict(
                 "agent_flow.cli_detect.os.environ",
                 {"PI_CODING_AGENT_DIR": "/tmp/omp", "CODEX_HOME": "/tmp/codex"},
                 clear=True,
             ):
-                self.assertEqual(detect_host_cli(), "codex")
+                self.assertEqual(detect_host_cli(), "omp")
 
     def test_provider_list_treats_host_environment_as_available(self) -> None:
         output = io.StringIO()
         with mock.patch("agent_flow.providers.host.shutil.which", return_value=None):
-            with mock.patch.dict("agent_flow.providers.host.os.environ", {"CLAUDECODE": "1"}, clear=True):
+            with mock.patch.dict(
+                "agent_flow.providers.host.os.environ",
+                {
+                    "CLAUDECODE": "1",
+                    "PI_CODING_AGENT_DIR": "/tmp/omp",
+                },
+                clear=True,
+            ):
                 with contextlib.redirect_stdout(output):
                     self.assertEqual(main(["provider", "list"]), 0)
         self.assertIn("claude-session available command=claude", output.getvalue())
+        self.assertIn("omp-session unavailable command=omp", output.getvalue())
         output = io.StringIO()
         with mock.patch("agent_flow.providers.host.shutil.which", return_value=None):
-            with mock.patch.dict("agent_flow.providers.host.os.environ", {"OMP_PROFILE": "default"}, clear=True):
+            with mock.patch.dict(
+                "agent_flow.providers.host.os.environ",
+                {
+                    "OMP_PROFILE": "default",
+                    "CODEX_HOME": "/tmp/codex",
+                },
+                clear=True,
+            ):
                 with contextlib.redirect_stdout(output):
                     self.assertEqual(main(["provider", "list"]), 0)
         self.assertIn("omp-session available command=omp", output.getvalue())
@@ -5324,18 +6728,51 @@ if (codexContext !== undefined) {
             with mock.patch.dict("agent_flow.providers.host.os.environ", {"PI_CODING_AGENT_DIR": "/tmp/omp"}, clear=True):
                 with contextlib.redirect_stdout(output):
                     self.assertEqual(main(["provider", "list"]), 0)
+        self.assertIn("omp-session available command=omp", output.getvalue())
+
+        output = io.StringIO()
+        with mock.patch("agent_flow.providers.host.shutil.which", return_value=None):
+            with mock.patch.dict(
+                "agent_flow.providers.host.os.environ",
+                {
+                    "AGENT_FLOW_HOST": "codex",
+                    "PI_CODING_AGENT_DIR": "/tmp/omp",
+                },
+                clear=True,
+            ):
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(main(["provider", "list"]), 0)
+        self.assertIn("codex-session available command=codex", output.getvalue())
+        self.assertIn("omp-session unavailable command=omp", output.getvalue())
+
+        output = io.StringIO()
+        with mock.patch("agent_flow.providers.host.shutil.which", return_value=None):
+            with mock.patch.dict(
+                "agent_flow.providers.host.os.environ",
+                {
+                    "CODEX_SHELL": "desktop",
+                    "PI_CODING_AGENT_DIR": "/tmp/omp",
+                },
+                clear=True,
+            ):
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(main(["provider", "list"]), 0)
+        self.assertIn("codex-session available command=codex", output.getvalue())
         self.assertIn("omp-session unavailable command=omp", output.getvalue())
 
     def test_status_reports_latest_run(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir).resolve()
+            _init_git_repo(root)
             self.assertEqual(
                 main(["start", "review", "--root", str(root), "--task", "review demo", "--run-id", "r1"]),
                 0,
             )
+            state_root = worktree_runtime_root(root=root, name="review demo")
+            worktree_root = plan_worktree(root=root, name="review demo").path
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                self.assertEqual(main(["status", "--root", str(root)]), 0)
+                self.assertEqual(main(["status", "--root", str(worktree_root)]), 0)
             lines = output.getvalue().strip().splitlines()
             self.assertEqual(lines[0], "review r1 awaiting_host")
             self.assertIn("status: awaiting_host", lines)
@@ -5350,8 +6787,8 @@ if (codexContext !== undefined) {
             )
             self.assertIn("next_command: none", lines)
             self.assertIn(
-                "next_command_template: agent-flow record-stage --root "
-                + str(root)
+                "next_command_template: agent-flow-python record-stage --root "
+                + str(state_root)
                 + " --run-dir .agent-flow/runs/review/r1 --stage explore --content '<stage result>'",
                 lines,
             )
@@ -5360,11 +6797,14 @@ if (codexContext !== undefined) {
     def test_status_summary_advances_to_next_missing_stage_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir).resolve()
+            _init_git_repo(root)
             self.assertEqual(
                 main(["start", "review", "--root", str(root), "--task", "review demo", "--run-id", "r1"]),
                 0,
             )
-            run_dir = root / ".agent-flow" / "runs" / "review" / "r1"
+            state_root = worktree_runtime_root(root=root, name="review demo")
+            worktree_root = plan_worktree(root=root, name="review demo").path
+            run_dir = state_root / ".agent-flow" / "runs" / "review" / "r1"
             manifest = run_dir / "manifest.json"
             payload = json.loads(manifest.read_text(encoding="utf-8"))
             payload["current_phase"] = "explore"
@@ -5374,7 +6814,7 @@ if (codexContext !== undefined) {
                     [
                         "record-stage",
                         "--root",
-                        str(root),
+                        str(state_root),
                         "--run-dir",
                         ".agent-flow/runs/review/r1",
                         "--stage",
@@ -5388,7 +6828,7 @@ if (codexContext !== undefined) {
 
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                self.assertEqual(main(["status", "--root", str(root)]), 0)
+                self.assertEqual(main(["status", "--root", str(worktree_root)]), 0)
             lines = output.getvalue().strip().splitlines()
             self.assertIn("current_phase: review-1", lines)
             self.assertIn(
@@ -5398,8 +6838,8 @@ if (codexContext !== undefined) {
             self.assertIn("next_command: none", lines)
             self.assertIn("required_action: write_stage_artifact", lines)
             self.assertIn(
-                "next_command_template: agent-flow record-stage --root "
-                + str(root)
+                "next_command_template: agent-flow-python record-stage --root "
+                + str(state_root)
                 + " --run-dir .agent-flow/runs/review/r1 --stage review-1 --content '<stage result>'",
                 lines,
             )
@@ -5407,14 +6847,16 @@ if (codexContext !== undefined) {
     def test_status_escapes_task_newlines_and_emits_json(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
+            _init_git_repo(root)
             task = "review demo\nstatus: complete\nreason: injected"
             self.assertEqual(
                 main(["start", "review", "--root", str(root), "--task", task, "--run-id", "r1"]),
                 0,
             )
+            worktree_root = plan_worktree(root=root, name=task).path
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                self.assertEqual(main(["status", "--root", str(root)]), 0)
+                self.assertEqual(main(["status", "--root", str(worktree_root)]), 0)
             lines = output.getvalue().strip().splitlines()
             self.assertIn(r"task: review demo\nstatus: complete\nreason: injected", lines)
             self.assertNotIn("reason: injected", lines)
@@ -5450,7 +6892,7 @@ if (codexContext !== undefined) {
         self.assertIn(f"retry_after: {retry_after}", lines)
         self.assertIn("required_action: wait_until_retry_after", lines)
         self.assertIn(
-            f"next_command: agent-flow review retry --reviewer claude --retry-after {retry_after}",
+            f"next_command: agent-flow-python review retry --reviewer claude --retry-after {retry_after}",
             lines,
         )
 
@@ -5467,6 +6909,7 @@ if (codexContext !== undefined) {
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
+            _init_git_repo(project_root)
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
@@ -5494,9 +6937,134 @@ if (codexContext !== undefined) {
             payload = json.loads(status_json.removeprefix("status_json: "))
             self.assertEqual(payload["task"], task)
 
+    def test_python_status_relays_canonical_active_node_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "project"
+            root.mkdir()
+            _init_git_repo(root)
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            install = subprocess.run(
+                (node, cli, "install", "--profile", "python"),
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=False,
+                env=_node_test_env(AGENT_FLOW_SKIP_CODEX_TRUST="1"),
+            )
+            self.assertEqual(install.returncode, 0, install.stderr)
+            start = subprocess.run(
+                (
+                    node,
+                    cli,
+                    "run",
+                    "start",
+                    "--workflow",
+                    "default",
+                    "--task",
+                    "node status relay",
+                    "--run-id",
+                    "node-relay",
+                ),
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=False,
+                env=_node_test_env(AGENT_FLOW_SKIP_CODEX_TRUST="1"),
+            )
+            self.assertEqual(start.returncode, 0, start.stderr)
+            pinned_cli = root / ".agent-flow" / "runtime" / "node" / "bin" / "agent-flow-kit.mjs"
+            self.assertTrue(pinned_cli.is_file())
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), mock.patch(
+                "agent_flow.cli._find_kit_root",
+                return_value=root / "unavailable-source-kit",
+            ), mock.patch.dict(os.environ, {"PYTHONPATH": ""}, clear=False):
+                self.assertEqual(main(["status", "--root", str(root)]), 0)
+
+            lines = output.getvalue().strip().splitlines()
+            self.assertIn("run: default/node-relay", lines)
+            self.assertIn("current_phase: design", lines)
+            self.assertIn("next_command: ./.agent-flow/bin/agent-flow run advance", lines)
+            self.assertNotIn("진행 중인 run 없음.", lines)
+
+            pinned_lib = root / ".agent-flow" / "runtime" / "node" / "lib" / "host-detection.mjs"
+            pinned_lib_bytes = pinned_lib.read_bytes()
+            pinned_lib.write_text(
+                pinned_lib.read_text(encoding="utf-8") + "\n// tampered\n",
+                encoding="utf-8",
+            )
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                self.assertEqual(main(["status", "--root", str(root)]), 2)
+            self.assertIn("pinned Node runtime changed after install", stderr.getvalue())
+            pinned_lib.write_bytes(pinned_lib_bytes)
+
+            pinned_python = root / ".agent-flow" / "runtime" / "python" / "agent_flow" / "__init__.py"
+            pinned_python.write_bytes(pinned_python.read_bytes() + b"# tampered\n")
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                self.assertEqual(main(["status", "--root", str(root)]), 2)
+            self.assertIn("pinned Python runtime changed after install", stderr.getvalue())
+
+    def test_node_status_relays_canonical_active_python_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "project"
+            root.mkdir()
+            _init_git_repo(root)
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            install = subprocess.run(
+                (node, cli, "install", "--profile", "python"),
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=False,
+                env=_node_test_env(AGENT_FLOW_SKIP_CODEX_TRUST="1"),
+            )
+            self.assertEqual(install.returncode, 0, install.stderr)
+            with mock.patch.dict(
+                os.environ,
+                {"AGENT_FLOW_ADAPTER": "generic", "AGENT_FLOW_GENERIC_MODE": "emit"},
+                clear=False,
+            ):
+                self.assertEqual(
+                    main(
+                        [
+                            "run",
+                            "python status relay",
+                            "--root",
+                            str(root),
+                            "--workflow",
+                            "default",
+                        ]
+                    ),
+                    0,
+                )
+
+            status = subprocess.run(
+                (node, cli, "status"),
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=False,
+                env=_node_test_env(AGENT_FLOW_SKIP_CODEX_TRUST="1"),
+            )
+
+            self.assertEqual(status.returncode, 0, status.stderr)
+            lines = status.stdout.strip().splitlines()
+            self.assertTrue(any(line.startswith("run: default/") for line in lines))
+            self.assertIn("current_phase: design", lines)
+            self.assertTrue(
+                any(line.startswith("next_command: agent-flow-python continue") for line in lines)
+            )
+            self.assertNotIn('no active run. start one with: agent-flow run "<task>"', status.stderr)
+
     def test_status_reports_missing_completion_markers_for_active_run(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
+            _init_git_repo(root)
             with mock.patch.dict(
                 os.environ,
                 {"AGENT_FLOW_ADAPTER": "generic", "AGENT_FLOW_GENERIC_MODE": "emit"},
@@ -5506,8 +7074,12 @@ if (codexContext !== undefined) {
                     main(["run", "demo task", "--root", str(root), "--workflow", "full-feature"]),
                     0,
                 )
-            run_dir = next((root / ".agent-flow" / "runs").iterdir())
-            (run_dir / "domain-grill.md").write_text(
+            state_root = worktree_runtime_root(root=root, name="demo task")
+            worktree_root = plan_worktree(root=root, name="demo task").path
+            run_dir = next((state_root / ".agent-flow" / "runs").iterdir())
+            artifact = run_dir / "artifacts" / "domain-grill.md"
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text(
                 "## Completion Gate\n"
                 "TODO: domain-grill: complete\n"
                 "shared_understanding: reached\n",
@@ -5516,7 +7088,7 @@ if (codexContext !== undefined) {
 
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                self.assertEqual(main(["status", "--root", str(root)]), 0)
+                self.assertEqual(main(["status", "--root", str(worktree_root)]), 0)
             lines = output.getvalue().strip().splitlines()
             self.assertIn("status: blocked", lines)
             self.assertIn("reason: missing_completion_markers", lines)
@@ -5584,19 +7156,19 @@ if (codexContext !== undefined) {
         self.assertEqual(profile.profile_id, "node")
         node_gates = {gate.gate_id: gate.command for gate in profile.gates}
         self.assertNotIn("context-lint", node_gates)
-        self.assertEqual(node_gates["architecture-lint"], ("agent-flow", "architecture-lint", "--profile", "node"))
+        self.assertEqual(node_gates["architecture-lint"], ("./.agent-flow/bin/agent-flow", "architecture-lint", "--profile", "node"))
         typescript = load_profile("typescript")
         typescript_gates = {gate.gate_id: gate for gate in typescript.gates}
         self.assertNotIn("context-lint", typescript_gates)
         self.assertEqual(
             typescript_gates["architecture-lint"].command,
-            ("agent-flow", "architecture-lint", "--profile", "typescript"),
+            ("./.agent-flow/bin/agent-flow", "architecture-lint", "--profile", "typescript"),
         )
         self.assertNotIn("typecheck", typescript_gates)
         self.assertNotIn("lint", typescript_gates)
         nextjs_gates = {gate.gate_id: gate.command for gate in load_profile("nextjs").gates}
         self.assertNotIn("context-lint", nextjs_gates)
-        self.assertEqual(nextjs_gates["architecture-lint"], ("agent-flow", "architecture-lint", "--profile", "nextjs"))
+        self.assertEqual(nextjs_gates["architecture-lint"], ("./.agent-flow/bin/agent-flow", "architecture-lint", "--profile", "nextjs"))
         self.assertEqual(nextjs_gates["build"], ("npm", "run", "build"))
         python_gates = {gate.gate_id: gate for gate in load_profile("python").gates}
         self.assertNotIn("context-lint", python_gates)
@@ -5609,7 +7181,8 @@ if (codexContext !== undefined) {
         self.assertEqual(android_required[0]["group"], "profile")
         self.assertIn("android-code-review", android_required[0]["skills"])
         self.assertEqual(android_required[1]["group"], "android_skills")
-        self.assertEqual(android_required[2]["group"], "chrisbanes_skills")
+        self.assertEqual(android_required[2]["group"], "android_ecosystem_skills")
+        self.assertEqual(android_required[3]["group"], "chrisbanes_skills")
         rn_required = load_profile("react-native").skills["required_review"]
         self.assertEqual(rn_required[1]["group"], "android-native-escalation")
 
@@ -5669,6 +7242,51 @@ if (codexContext !== undefined) {
             self.assertIn("agent_flow.core.architecture_lint", " ".join(results_by_command))
             self.assertTrue((run_dir / "gate-results.json").is_file())
 
+    def test_gates_without_worktree_argument_use_active_python_worktree(self) -> None:
+        from agent_flow.core.gates import GateResult
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_git_repo(root)
+            self.assertEqual(
+                main(
+                    [
+                        "start",
+                        "development",
+                        "--root",
+                        str(root),
+                        "--task",
+                        "active gates",
+                        "--adapter",
+                        "manual",
+                        "--run-id",
+                        "r1",
+                        "--worktree",
+                        "active gates",
+                    ]
+                ),
+                0,
+            )
+            worktree = plan_worktree(root=root, name="active gates").path.resolve()
+
+            def fake_run_gates(
+                commands: list[GateCommand],
+                *,
+                cwd: Path,
+                timeout_s: int = 600,
+            ) -> list[GateResult]:
+                self.assertEqual(cwd.resolve(), worktree)
+                return [
+                    GateResult(command.gate_id, command.command, True, 0, "", "")
+                    for command in commands
+                ]
+
+            with mock.patch("agent_flow.cli.run_gates", side_effect=fake_run_gates):
+                self.assertEqual(
+                    main(["gates", "--root", str(root), "--profile", "generic"]),
+                    0,
+                )
+
     def test_gate_results_allow_optional_failures(self) -> None:
         from agent_flow.core.artifacts import write_gate_results
         from agent_flow.core.gates import GateResult
@@ -5692,12 +7310,7 @@ if (codexContext !== undefined) {
 
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            kit = root / ".agent-flow"
-            kit.mkdir()
-            (kit / "kit.json").write_text(
-                json.dumps({"profile": "android", "profiles": ["android", "react-native"]}),
-                encoding="utf-8",
-            )
+            _write_installed_profile_snapshot(root, ["android", "react-native"])
             captured: list[GateCommand] = []
 
             def fake_run_gates(commands: list[GateCommand], *, cwd: Path, timeout_s: int = 600) -> list[GateResult]:
@@ -5722,6 +7335,69 @@ if (codexContext !== undefined) {
             self.assertNotIn("android:lint", gate_ids)
             self.assertNotIn("react-native:lint", gate_ids)
             self.assertEqual(output.getvalue().strip(), "android,react-native: 6/6 gates passed")
+
+    def test_public_gates_and_architecture_lint_fail_closed_on_installed_snapshot_corruption(self) -> None:
+        for target_name in ("kit.json", "skills/index.json"):
+            with self.subTest(target=target_name), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                _write_installed_profile_snapshot(root, ["generic"])
+                target = root / ".agent-flow" / target_name
+                target.write_text("{invalid", encoding="utf-8")
+                for command in ("gates", "architecture-lint"):
+                    err = io.StringIO()
+                    with contextlib.redirect_stderr(err):
+                        self.assertEqual(main([command, "--root", str(root)]), 1)
+                    self.assertIn("installed", err.getvalue())
+                    self.assertNotIn("Traceback", err.getvalue())
+
+    @unittest.skipIf(os.name == "nt", "Windows does not expose POSIX execute bits")
+    def test_public_gates_and_architecture_lint_fail_closed_on_non_executable_managed_hook(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _write_installed_profile_snapshot(root, ["generic"])
+            script = (
+                root
+                / ".agent-flow"
+                / "scripts"
+                / "hooks"
+                / "guard-worktree.sh"
+            )
+            script.chmod(0o644)
+
+            for command in ("gates", "architecture-lint"):
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    self.assertEqual(main([command, "--root", str(root)]), 1)
+                self.assertIn(
+                    "managed hook script is not executable",
+                    err.getvalue(),
+                )
+                self.assertNotIn("Traceback", err.getvalue())
+
+    def test_public_gates_fail_closed_on_active_node_skill_pin_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _write_installed_profile_snapshot(root, ["generic"])
+            run_dir = root / ".agent-flow" / "runs" / "default" / "pin-mismatch"
+            run_dir.mkdir(parents=True)
+            manifest = {
+                "run_id": "pin-mismatch",
+                "workflow": "default",
+                "run_dir": ".agent-flow/runs/default/pin-mismatch",
+                "status": "running",
+                "phase": "design",
+                "skill_plan_hash": "wrong",
+                "skill_plan_hash_version": 2,
+                "local_skill_plan_hash": "wrong",
+                "local_skill_plan_hash_version": 1,
+            }
+            (run_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(main(["gates", "--root", str(root)]), 1)
+            self.assertIn("active Node run skill plan pin", err.getvalue())
 
     def test_profile_gate_commands_enforce_configured_gate_order(self) -> None:
         from agent_flow.cli import _profile_gate_commands
@@ -5762,12 +7438,7 @@ if (codexContext !== undefined) {
     def test_gates_and_architecture_lint_use_literal_worktree_name(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            kit = root / ".agent-flow"
-            kit.mkdir(parents=True)
-            (kit / "kit.json").write_text(
-                json.dumps({"profile": "android", "profiles": ["android", "react-native"]}),
-                encoding="utf-8",
-            )
+            _write_installed_profile_snapshot(root, ["android", "react-native"])
             worktree = root / ".agent-flow" / "worktrees" / "semantic-architecture-parity"
             worktree.mkdir(parents=True)
             (worktree / ".git").write_text("gitdir: ../../.git/worktrees/semantic-architecture-parity\n", encoding="utf-8")
@@ -6187,7 +7858,7 @@ if (codexContext !== undefined) {
             artifact = _render_angle_result(SubprocessResult(job_id=job_id, stderr=stderr, returncode=1))
             self.assertIn("reason: reviewer_rate_limited", artifact)
             self.assertIn(f"reviewer: {reviewer}", artifact)
-            self.assertIn(f"next_command: agent-flow review retry --reviewer {reviewer}", artifact)
+            self.assertIn(f"next_command: agent-flow-python review retry --reviewer {reviewer}", artifact)
 
     def test_review_summary_needs_changes_writes_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -6256,16 +7927,140 @@ if (codexContext !== undefined) {
             self.assertEqual(plan.path, root / ".agent-flow" / "worktrees" / "feat-implement-login")
 
             korean_plan = plan_worktree(root=root, name="버그 수정")
-            # 한글 task도 deterministic fallback slug로 worktree를 만들 수 있어야 한다.
-            self.assertRegex(korean_plan.name, r"^feat-task-[a-f0-9]{8}$")
+            self.assertEqual(korean_plan.name, "feat-버그-수정")
             self.assertEqual(korean_plan.branch, korean_plan.name.replace("feat-", "feat/", 1))
             self.assertEqual(korean_plan.path, root / ".agent-flow" / "worktrees" / korean_plan.name)
+            image_plan = plan_worktree(root=root, name="checkout.png 결제 오류 수정")
+            self.assertEqual(image_plan.name, "feat-결제-오류-수정")
+            figma_plan = plan_worktree(
+                root=root,
+                name="https://www.figma.com/design/abc/File?node-id=1 로그인 화면 개선",
+            )
+            self.assertEqual(figma_plan.name, "feat-로그인-화면-개선")
+            artifact_only = plan_worktree(root=root, name="checkout.png")
+            self.assertEqual(artifact_only.name, "feat-task-attachment")
+            limited = plan_worktree(
+                root=root,
+                name="implement a very long checkout recovery workflow name",
+                max_slug_length=20,
+            )
+            self.assertLessEqual(len(limited.branch.removeprefix("feat/")), 20)
             with mock.patch("agent_flow.core.commands.subprocess.run", side_effect=OSError("no git")):
                 fallback_plan = plan_worktree(root=root, name="No Git")
             # git 확인이 불가능한 환경에서는 기존 HEAD fallback으로 plan 생성만 유지한다.
             self.assertEqual(fallback_plan.base_ref, "HEAD")
             with self.assertRaises(ValueError):
                 plan_worktree(root=root, name="Mainline", branch="main")
+
+    def test_node_and_python_semantic_worktree_names_match_artifact_edge_cases(self) -> None:
+        cases = [
+            {"task": "checkout.png: 결제", "max_length": 60, "expected": "결제"},
+            {
+                "task": "![screen](/tmp/checkout.png) 결제 흐름",
+                "max_length": 60,
+                "expected": "결제-흐름",
+            },
+            {
+                "task": "![screen](/tmp/My Screen (1).png) 결제 흐름",
+                "max_length": 60,
+                "expected": "결제-흐름",
+            },
+            {
+                "task": "[screen](/tmp/checkout.png): 결제",
+                "max_length": 60,
+                "expected": "결제",
+            },
+            {
+                "task": "작업 /tmp/My Screen.png: 결제 오류",
+                "max_length": 60,
+                "expected": "작업-결제-오류",
+            },
+            {
+                "task": "./assets/My Screen.png 로그인 개선",
+                "max_length": 60,
+                "expected": "로그인-개선",
+            },
+            {
+                "task": '"../My Screen.png" 결제 수정',
+                "max_length": 60,
+                "expected": "결제-수정",
+            },
+            {
+                "task": "검토 https://www.figma.com/design/abc/File?node-id=1 로그인 개선",
+                "max_length": 60,
+                "expected": "검토-로그인-개선",
+            },
+            {
+                "task": "figma.com/design/abc/File 로그인 개선",
+                "max_length": 60,
+                "expected": "로그인-개선",
+            },
+            {
+                "task": "[로그인 흐름](docs/spec.md) 개선",
+                "max_length": 60,
+                "expected": "로그인-흐름-개선",
+            },
+            {"task": "checkout.png", "max_length": 60, "expected": None},
+            {
+                "task": "![screen](/tmp/checkout.png)",
+                "max_length": 60,
+                "expected": None,
+            },
+            {"task": "📱 checkout.png", "max_length": 60, "expected": None},
+            {"task": "📱🚀", "max_length": 60, "expected": None},
+            {"task": "결제🚀화면!!!", "max_length": 60, "expected": "결제-화면"},
+            {"task": "𠮷" * 16 + " 🚀 개선", "max_length": 12, "expected": None},
+            {
+                "task": "implement deterministic profile selection and host parity "
+                "/tmp/first-screen.png",
+                "max_length": 24,
+                "expected": None,
+            },
+            {
+                "task": "implement deterministic profile selection and host parity "
+                "https://figma.com/design/other/file",
+                "max_length": 24,
+                "expected": None,
+            },
+        ]
+        python_slugs = [
+            plan_worktree(
+                root=Path("/tmp/agent-flow-naming-parity"),
+                name=case["task"],
+                max_slug_length=case["max_length"],
+                base_ref="main",
+            ).branch.removeprefix("feat/")
+            for case in cases
+        ]
+        module_url = (
+            Path(__file__).resolve().parents[1] / "lib" / "worktree-naming.mjs"
+        ).as_uri()
+        script = (
+            'import fs from "node:fs";'
+            f'import {{ semanticWorktreeSlug }} from {json.dumps(module_url)};'
+            'const cases = JSON.parse(fs.readFileSync(0, "utf8"));'
+            'console.log(JSON.stringify(cases.map((item) => '
+            'semanticWorktreeSlug(item.task, item.max_length))));'
+        )
+        node_result = subprocess.run(
+            (_node_executable(), "--input-type=module", "--eval", script),
+            input=json.dumps(cases, ensure_ascii=False),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(node_result.returncode, 0, node_result.stderr)
+        node_slugs = json.loads(node_result.stdout)
+
+        self.assertEqual(node_slugs, python_slugs)
+        for index, case in enumerate(cases):
+            if case["expected"] is not None:
+                self.assertEqual(python_slugs[index], case["expected"])
+        for index in (10, 11, 12, 13):
+            self.assertEqual(python_slugs[index], "task-attachment")
+        self.assertEqual(len(python_slugs[-3]), 12)
+        self.assertRegex(python_slugs[-3], r"^𠮷{5}-[a-f0-9]{6}$")
+        self.assertEqual(python_slugs[-2], python_slugs[-1])
 
     def test_worktree_status_reports_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -6386,6 +8181,11 @@ if (codexContext !== undefined) {
             "git -C . checkout -b feat/test",
             "command git checkout -b feat/test",
             "env TEST=1 git checkout -B feat/test",
+            "echo safe\ngit checkout -b feat/test",
+            "bash -lc 'echo safe; git checkout -b feat/test'",
+            "bash --norc -lc 'git checkout -b feat/test'",
+            "sh -c 'git checkout -b feat/test'",
+            "zsh -lc 'git checkout -b feat/test'",
         ):
             blocked_create = subprocess.run(
                 ("bash", str(script)),
@@ -6432,6 +8232,11 @@ if (codexContext !== undefined) {
                 "git -C . commit -m test",
                 "command git commit -m test",
                 "env TEST=1 git push origin main",
+                "echo safe\ngit commit -m test",
+                "bash -lc 'echo safe; git commit -m test'",
+                "bash --norc -lc 'git commit -m test'",
+                "sh -c 'git push origin main'",
+                "zsh -lc 'git commit -m test'",
             ):
                 result = subprocess.run(
                     ("bash", str(script)),
@@ -6463,6 +8268,44 @@ if (codexContext !== undefined) {
                 check=False,
             )
             self.assertEqual(allowed_cd.returncode, 0)
+
+            for command in (
+                "git push origin HEAD:main",
+                "git push origin :refs/heads/main",
+                "git push origin :",
+                "git push origin main:",
+                "git push --delete origin develop",
+                "git push --mirror origin",
+                "git push origin --all",
+                "echo safe\ngit push origin HEAD:master",
+                "bash -lc 'git push origin HEAD:refs/heads/main'",
+                f"git -C {feature_worktree} push origin feat/test:master",
+            ):
+                protected_target = subprocess.run(
+                    ("bash", str(script)),
+                    cwd=feature_worktree,
+                    input=json.dumps({"tool_input": {"cmd": command}}),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(protected_target.returncode, 2, command)
+                self.assertIn("보호 브랜치", protected_target.stderr)
+
+            for command in (
+                "git push origin feat/test",
+                "git push origin HEAD:refs/heads/feat/test",
+                "git push origin refs/heads/main:refs/heads/archive-main",
+            ):
+                feature_push = subprocess.run(
+                    ("bash", str(script)),
+                    cwd=feature_worktree,
+                    input=json.dumps({"tool_input": {"cmd": command}}),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(feature_push.returncode, 0, command)
 
             for command in (
                 f"(cd {feature_worktree} && true); git commit -m test",
@@ -8568,6 +10411,145 @@ if (codexContext !== undefined) {
             self.assertEqual(task["status"], "in_progress")
             self.assertIn(task["owner"], {"worker-1", "worker-2"})
 
+    def test_node_status_detects_live_skill_snapshot_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_git_repo(root)
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            env = {**os.environ, "AGENT_FLOW_SKIP_CODEX_TRUST": "1"}
+            install = subprocess.run(
+                (node, cli, "install"),
+                cwd=root,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(install.returncode, 0, install.stderr)
+            start = subprocess.run(
+                (node, cli, "run", "start", "--task", "demo", "--workflow", "default", "--run-id", "r1"),
+                cwd=root,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(start.returncode, 0, start.stderr)
+            skill = root / ".agent-flow" / "skills" / "code-generation-discipline" / "SKILL.md"
+            skill.write_text(skill.read_text(encoding="utf-8") + "\nmutated\n", encoding="utf-8")
+
+            status = subprocess.run(
+                (node, cli, "status"),
+                cwd=root,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(status.returncode, 0)
+            self.assertIn("installed skill snapshot changed", status.stderr)
+
+    def test_node_run_pins_semantic_worktree_and_blocks_second_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_git_repo(root)
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            env = {**os.environ, "AGENT_FLOW_SKIP_CODEX_TRUST": "1"}
+            subprocess.run((node, cli, "install"), cwd=root, env=env, check=True)
+            task = "https://www.figma.com/design/abc/File?node-id=1 로그인 화면 개선"
+            started = subprocess.run(
+                (node, cli, "run", "start", "--task", task, "--workflow", "default", "--run-id", "r1"),
+                cwd=root,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(started.returncode, 0, started.stderr)
+            expected_worktree = root / ".agent-flow" / "worktrees" / "feat-로그인-화면-개선"
+            state_path = root / ".agent-flow" / "state" / "current-run.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(Path(state["workspace_root"]), expected_worktree.resolve())
+            self.assertIn(f"workspace_root: {expected_worktree.resolve()}", started.stdout)
+            branch = subprocess.run(
+                ("git", "branch", "--show-current"),
+                cwd=expected_worktree,
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout.strip()
+            self.assertEqual(branch, "feat/로그인-화면-개선")
+
+            second = subprocess.run(
+                (node, cli, "run", "another task"),
+                cwd=root,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(second.returncode, 0)
+            self.assertIn("active run", second.stderr)
+            self.assertFalse((root / ".agent-flow" / "worktrees" / "feat-another-task").exists())
+
+            artifact = root / ".agent-flow" / "runs" / "default" / "r1" / "design.md"
+            artifact.write_text(_node_phase_content("design"), encoding="utf-8")
+            advanced = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=root,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(advanced.returncode, 0, advanced.stderr)
+            advanced_state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(advanced_state["workspace_root"], state["workspace_root"])
+
+    def test_node_active_run_cannot_repin_between_registered_worktrees(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_git_repo(root)
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            env = {**os.environ, "AGENT_FLOW_SKIP_CODEX_TRUST": "1"}
+            subprocess.run((node, cli, "install"), cwd=root, env=env, check=True)
+            subprocess.run(
+                (node, cli, "run", "start", "--task", "demo", "--workflow", "default", "--run-id", "r1"),
+                cwd=root,
+                env=env,
+                check=True,
+            )
+            worktree_a = root / ".agent-flow" / "worktrees" / "feat-a"
+            worktree_b = root / ".agent-flow" / "worktrees" / "feat-b"
+            subprocess.run(("git", "worktree", "add", "-q", "-b", "feat/a", str(worktree_a), "main"), cwd=root, check=True)
+            subprocess.run(("git", "worktree", "add", "-q", "-b", "feat/b", str(worktree_b), "main"), cwd=root, check=True)
+
+            first = subprocess.run(
+                (node, cli, "status"),
+                cwd=worktree_a,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(first.returncode, 0)
+            self.assertIn("pinned to", first.stderr)
+            second = subprocess.run(
+                (node, cli, "status"),
+                cwd=worktree_b,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(second.returncode, 0)
+            self.assertIn("pinned to", second.stderr)
+
 
 def _init_git_repo(root: Path) -> None:
     subprocess.run(("git", "init", "-q", "-b", "main"), cwd=root, check=True)
@@ -8757,6 +10739,165 @@ def _read_shutdown_json(root: Path, signal_id: str) -> dict[str, object]:
     )
 
 
+def _write_installed_profile_snapshot(root: Path, profiles: list[str]) -> None:
+    from agent_flow.core.skill_plan import (
+        compute_skill_plan_hash,
+        hash_skill_tree,
+        managed_hook_contract_commitment,
+        managed_host_files_commitment,
+    )
+
+    skill_dir = root / ".agent-flow" / "skills" / "code-generation-discipline"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: code-generation-discipline\n---\n\n# Discipline\n",
+        encoding="utf-8",
+    )
+    index = {
+        "selection": {
+            "profile_selection": "explicit",
+            "profiles": profiles,
+            "skill_profiles": profiles,
+            "explicit_skills": [],
+            "required_review": {},
+            "conditional_skills": {},
+            "profile_routing": {},
+        },
+        "skills": [
+            {
+                "name": "code-generation-discipline",
+                "source": "project-snapshot",
+                "source_host": None,
+                "path": ".agent-flow/skills/code-generation-discipline/SKILL.md",
+                "tree_hash": hash_skill_tree(skill_dir),
+                "profiles": profiles,
+            }
+        ],
+    }
+    index_path = root / ".agent-flow" / "skills" / "index.json"
+    index_path.write_text(json.dumps(index), encoding="utf-8")
+    profile_root = root / ".agent-flow" / "profiles"
+    profile_root.mkdir()
+    for profile in dict.fromkeys([*profiles, "generic"]):
+        (profile_root / f"{profile}.yaml").write_text(
+            (Path(__file__).resolve().parents[1] / "profiles" / f"{profile}.yaml").read_text(
+                encoding="utf-8"
+            ),
+            encoding="utf-8",
+        )
+    digest = compute_skill_plan_hash(index, root, verify_trees=True)
+    managed_files: dict[str, dict[str, str]] = {}
+    for relative, content in {
+        ".Codex/agents/code-reviewer.md": b"codex reviewer\n",
+        ".claude/agents/code-reviewer.md": b"claude reviewer\n",
+        ".omp/agents/code-reviewer.md": b"omp reviewer\n",
+        ".omp/extensions/agent-flow-hooks.ts": b"omp hooks\n",
+    }.items():
+        destination = root.joinpath(*relative.split("/"))
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(content)
+        managed_files[relative] = {
+            "source": relative,
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
+    kit = {
+        "profile": profiles[0] if profiles else "generic",
+        "primary_profile": profiles[0] if profiles else "generic",
+        "profile_selection": "explicit",
+        "profiles": profiles,
+        "skill_plan_hash": digest,
+        "skill_plan_hash_version": 2,
+        "managed_host_files": {"version": 1, "files": managed_files},
+        "managed_host_files_commitment_version": 1,
+    }
+    kit["managed_host_files_commitment"] = managed_host_files_commitment(kit)
+    _write_managed_hook_contract_fixture(root, kit)
+    kit["managed_hook_contract_commitment"] = managed_hook_contract_commitment(kit)
+    (root / ".agent-flow" / "kit.json").write_text(
+        json.dumps(kit),
+        encoding="utf-8",
+    )
+
+
+def _write_managed_hook_contract_fixture(root: Path, kit: dict[str, object]) -> None:
+    matcher = (
+        "^(apply_patch|Write|Edit|MultiEdit|NotebookEdit|write|edit|multi_edit|"
+        "multiedit|notebook_edit|notebookedit)$"
+    )
+    command_root = root.resolve()
+
+    def hook(name: str) -> dict[str, str]:
+        command = command_root / ".agent-flow" / "scripts" / "hooks" / name
+        return {"type": "command", "command": f"'{command}'"}
+
+    settings = {
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "Bash",
+                    "hooks": [
+                        hook("guard-worktree.sh"),
+                        hook("guard-protected-branch.sh"),
+                        hook("guard-worktree-write.py"),
+                    ],
+                },
+                {"matcher": matcher, "hooks": [hook("guard-worktree-write.py")]},
+            ],
+            "PostToolUse": [
+                {"matcher": matcher, "hooks": [hook("comment-checker.py")]}
+            ],
+            "Stop": [{"hooks": [hook("show-phase-status.sh")]}],
+        }
+    }
+    projection = sorted(
+        [
+            ["PostToolUse", matcher, "command", "comment-checker.py"],
+            ["PreToolUse", "Bash", "command", "guard-protected-branch.sh"],
+            ["PreToolUse", "Bash", "command", "guard-worktree-write.py"],
+            ["PreToolUse", "Bash", "command", "guard-worktree.sh"],
+            ["PreToolUse", matcher, "command", "guard-worktree-write.py"],
+            ["Stop", "", "command", "show-phase-status.sh"],
+        ]
+    )
+    projection_hash = hashlib.sha256(
+        json.dumps(projection, separators=(",", ":")).encode()
+    ).hexdigest()
+    configs = {}
+    for relative in (
+        ".Codex/hooks.json",
+        ".codex/hooks.json",
+        ".claude/settings.json",
+    ):
+        destination = root.joinpath(*relative.split("/"))
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(json.dumps(settings), encoding="utf-8")
+        configs[relative] = {"sha256": projection_hash}
+    scripts = {}
+    for name in (
+        "guard-worktree.sh",
+        "guard-worktree-write.py",
+        "guard-protected-branch.sh",
+        "show-phase-status.sh",
+        "comment-checker.py",
+    ):
+        relative = f".agent-flow/scripts/hooks/{name}"
+        destination = root.joinpath(*relative.split("/"))
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        content = f"{name}\n".encode()
+        destination.write_bytes(content)
+        destination.chmod(0o755)
+        scripts[relative] = {
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "mode": "executable",
+        }
+    kit["managed_hook_contract"] = {
+        "version": 2,
+        "configs": configs,
+        "scripts": scripts,
+    }
+    kit["managed_hook_contract_commitment_version"] = 2
+
+
 def _write_local_skill_index(root: Path, *, include_code_skill: bool = True) -> None:
     skills = [
         {
@@ -8799,9 +10940,18 @@ def _write_local_skill_index(root: Path, *, include_code_skill: bool = True) -> 
                 "description": "Use before Samantha Android code development or review involving modules.",
             }
         )
+    for skill in skills:
+        skill["activation"] = "always"
     index_path = root / ".agent-flow" / "skills" / "index.json"
     index_path.parent.mkdir(parents=True, exist_ok=True)
     index_path.write_text(json.dumps({"skills": skills}), encoding="utf-8")
+    for skill in skills:
+        skill_path = root / str(skill["path"])
+        skill_path.parent.mkdir(parents=True, exist_ok=True)
+        skill_path.write_text(
+            f"---\nname: {skill['name']}\ndescription: {skill['description']}\n---\n\n# {skill['name']}\n",
+            encoding="utf-8",
+        )
 
 def _write_local_skill_files(root: Path) -> None:
     skills = {
@@ -8818,7 +10968,7 @@ def _write_local_skill_files(root: Path) -> None:
         skill_path = root / ".agent-flow" / "local-skills" / name / "SKILL.md"
         skill_path.parent.mkdir(parents=True, exist_ok=True)
         skill_path.write_text(
-            f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n",
+            f"---\nname: {name}\ndescription: {description}\nactivation: always\n---\n\n# {name}\n",
             encoding="utf-8",
         )
 
@@ -8878,7 +11028,7 @@ def _node_project_local_gate() -> str:
 def _node_project_local_applied_gate() -> str:
     return (
         "project-local-skills: checked\n"
-        "project-local-skills-used: api, api-contract-guide, samantha-architecture-guide\n"
+        "project-local-skills-used: api, api-contract-guide, figma-screen-spec, merge-review-flow, pr-review-flow, release-branch-review, release-first-branch-pr, samantha-architecture-guide\n"
         "project-local-skill-docs: applied\n"
     )
 
@@ -8908,7 +11058,7 @@ def _node_profile_skill_gate() -> str:
 def _node_review_parity_gate() -> str:
     return (
         "architecture-contract-check: n/a\n"
-        "codex-claude-parity-check: pass\n"
+        "host-parity-check: pass\n"
         "hook-parity-check: pass\n"
     )
 

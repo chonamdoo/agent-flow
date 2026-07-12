@@ -6,17 +6,11 @@ Android profile's `android_skills` and `chrisbanes_skills`.
 ## Required routing
 
 Before approving, choose matching entries from both profile lists when relevant.
-Resolve them through the current active host only:
-
-- Codex: `~/.codex/skills/{skill}/SKILL.md`
-- Claude: `~/.claude/skills/{skill}/SKILL.md`
-- OMP: `~/.omp/agent/skills/{skill}/SKILL.md`
-
-Read selected `SKILL.md` files as plain text. Do not install, copy, link, or
-vendor Android skills. Do not load the same skill from multiple host paths. If a
-required local skill is missing from the current host path, stop approval and
-report `missing local android_skills: <skill>` or
-`missing local chrisbanes_skills: <skill>` with the profile source URL.
+Resolve each entry through `.agent-flow/skills/index.json` in the leader checkout
+and read only the indexed project snapshot. Codex, Claude, and OMP must use that
+same path and tree hash. If a required snapshot is missing or its hash differs,
+stop approval and report `missing local android_skills: <skill>` or
+`missing local chrisbanes_skills: <skill>`. Never fall back to host-global paths.
 If no Android/Kotlin/Compose/KMP files changed, mark the completion gate `n/a`.
 
 ## Review focus
@@ -45,9 +39,8 @@ If no Android/Kotlin/Compose/KMP files changed, mark the completion gate `n/a`.
 
 ## Output
 
-Use the standard review angle output. Cite local skill paths used in Calibration.
-If a required local skill is missing, request changes with the missing skill and
-source URL.
+Use the standard review angle output. Cite indexed project skill paths used in Calibration.
+If a required snapshot is missing, request changes with the missing skill.
 
 Include this completion gate:
 

@@ -131,7 +131,7 @@ def watch_pr(number: int, repo: str | None = None,
     when 10 users x 10 PRs are watching simultaneously.
 
     Progress messages go to stderr so the polling output doesn't pollute
-    `agent-flow pr-watch 123 > status.json` redirects. Final snapshot is
+    `agent-flow-python pr-watch 123 > status.json` redirects. Final snapshot is
     the function return — caller prints it to stdout if needed.
     """
     import random

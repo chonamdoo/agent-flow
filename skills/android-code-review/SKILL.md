@@ -38,17 +38,11 @@ approving. Use these chrisbanes skill names as checklist labels:
   `kotlin-flow-state-event-modeling`, `kotlin-types-value-class`
 - KMP: `kotlin-multiplatform-expect-actual`
 
-Do not parse upstream frontmatter through the native skill loader. Resolve
-skills through the current active host only:
-
-- Codex: `~/.codex/skills/{skill}/SKILL.md`
-- Claude: `~/.claude/skills/{skill}/SKILL.md`
-- OMP: `~/.omp/agent/skills/{skill}/SKILL.md`
-
-Do not install, copy, link, vendor, or fallback to another host path. If a
-required local skill is missing, stop approval and report
-`missing local android_skills: <skill>` or
-`missing local chrisbanes_skills: <skill>` with the profile source URL.
+Resolve skills through the leader checkout's `.agent-flow/skills/index.json`.
+Codex, Claude, and OMP must read the same indexed project snapshot and verify its
+tree hash. Do not fall back to a host-global path. If a required snapshot is
+missing or changed, stop approval and report `missing local android_skills:
+<skill>` or `missing local chrisbanes_skills: <skill>`.
 Record `android-local-skills: checked`,
 `android-local-skills-used: <skill list>`, `chrisbanes-skills: checked|n/a`,
 and `chrisbanes-skills-used: <skill list or n/a>` in the review artifact's

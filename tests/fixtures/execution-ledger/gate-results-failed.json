@@ -1,0 +1,19 @@
+{
+  "passed": false,
+  "results": [
+    {
+      "argv": [
+        "npm",
+        "test"
+      ],
+      "command": "npm test",
+      "exit_code": 1,
+      "gate_id": "test",
+      "passed": false,
+      "required": true,
+      "stderr": "AssertionError: expected true but received false\nsecond line is not fingerprinted\n",
+      "stdout": ""
+    }
+  ],
+  "status": "request-changes"
+}

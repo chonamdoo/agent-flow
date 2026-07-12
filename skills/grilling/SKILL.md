@@ -1,24 +1,12 @@
 ---
 name: grilling
-description: Stress-test a plan or design through a one-question-at-a-time interview that explores decisions, dependencies, and trade-offs. Use when the user wants to grill, stress-test, pressure-test, or sharpen a plan before implementation; pair with `domain-modeling` only when domain terms or ADR-worthy decisions need to be captured.
+description: Grill the user relentlessly about a plan or design. Use when the user wants to stress-test a plan before building, or uses any 'grill' trigger phrases.
 ---
 
-
-# Grilling
-
-This is a standalone interviewing skill. It sharpens a plan through questions only; it does not create issues, triage existing tickets, file QA reports, or implement the plan.
-
-## Quick start
-
-1. Restate the plan or design in one sentence.
-2. Ask the single most load-bearing unresolved question and include your recommended answer.
-3. Wait for the user's answer before asking the next question.
-4. Explore the codebase instead of asking when the repo can answer the question directly.
-
-## Interview rules
+Interview me relentlessly about every aspect of this plan until we reach a shared understanding. Walk down each branch of the design tree, resolving dependencies between decisions one-by-one. For each question, provide your recommended answer.
 
 Ask the questions one at a time, waiting for feedback on each question before continuing. Asking multiple questions at once is bewildering.
 
-If a question can be answered by exploring the codebase, explore the codebase instead.
+If a *fact* can be found by exploring the codebase, look it up rather than asking me. The *decisions*, though, are mine — put each one to me and wait for my answer.
 
 Do not enact the plan until I confirm we have reached a shared understanding.

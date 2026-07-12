@@ -3,14 +3,13 @@ from __future__ import annotations
 import os
 import shutil
 
+from agent_flow.cli_detect import detect_host_from_env
+
 
 def detect_adapter() -> str:
-    if os.environ.get("OMP_PROFILE"):
-        return "omp-session"
-    if os.environ.get("CODEX_CLI") or os.environ.get("CODEX_HOME"):
-        return "codex-session"
-    if os.environ.get("CLAUDECODE") or os.environ.get("CLAUDE_CLI"):
-        return "claude-session"
+    host = detect_host_from_env(os.environ)
+    if host is not None:
+        return f"{host}-session"
     if shutil.which("codex"):
         return "codex-session"
     if shutil.which("omp"):

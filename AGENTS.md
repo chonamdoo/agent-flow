@@ -31,7 +31,7 @@ scripts/hooks/          ← PreToolUse/Stop hooks (guard-worktree, guard-protect
 - `full-feature`는 `gates` fail → `fix-loop` → `gates` 순환. `default`의 gates는 `implement` completion marker로 강제한다.
 - `multi-review`는 활성 host(현재 사용 중인 CLI)의 sub-agent 2개가 필수. 활성 host가 아닌 추가 provider는 optional이며, 2+ 독립 reviewer 없이는 approve 불가.
 - `architecture-review`의 `request-changes`/`blocked` verdict → `refactor`로 라우팅.
-- worktree phase는 `git worktree add -b <branch> <path> main` 필수. leader worktree에서 `git checkout`/`git switch`로 브랜치를 바꾸지 않는다.
+- runner가 profile의 base/naming 설정으로 worktree를 생성·고정한다. worktree phase는 동일 checkout을 검증·재사용하며 두 번째 worktree를 만들지 않는다.
 
 Workflow Contract와 Context Economy는 아래 agent-flow 블록이 canonical source다. 여기에 중복으로 적지 않는다.
 
@@ -41,16 +41,16 @@ Workflow Contract와 Context Economy는 아래 agent-flow 블록이 canonical so
 Before feature work, check status first:
 
 ```bash
-agent-flow status
+./.agent-flow/bin/agent-flow status
 ```
 
 install은 프로젝트당 1회만 수행합니다. 새 세션이 시작됐다는 이유로 install을 다시 실행하지 않습니다.
-Follow the CLI output exactly. If no run is active, start with `agent-flow run "<task>"`. If a run is active, continue with the printed `next_command`.
+Follow the CLI output exactly. If no run is active, start with `./.agent-flow/bin/agent-flow run "<task>"`. If a run is active, continue with the printed `next_command`.
 
 ### Workflow Contract
 
-- 활성 workflow와 current phase는 항상 `agent-flow status` 출력 기준이다.
-- phase 이동은 status의 `next_command`를 그대로 따른다. `agent-flow continue`나 `agent-flow run advance`를 추측하지 않는다.
+- 활성 workflow와 current phase는 항상 `./.agent-flow/bin/agent-flow status` 출력 기준이다.
+- phase 이동은 status의 `next_command`를 그대로 따른다. `./.agent-flow/bin/agent-flow continue`나 `./.agent-flow/bin/agent-flow run advance`를 추측하지 않는다.
 - `default.yaml`: design → slice-plan → worktree → implement → comment-authoring → final-review → gates ↔ fix-loop → comment-authoring → final-review → gates → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge → cleanup
 - `full-feature.yaml`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → comment-authoring → multi-review → architecture-review → gates ↔ fix-loop → comment-authoring → multi-review → architecture-review → gates → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
 - `multi-review`는 현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수다. 두 sub-agent를 병렬 실행하고, `reviewer-source: sub-agent`를 기록한 뒤 sub-agent를 닫는다. 마지막에 `## Overall`과 `verdict: approve` 또는 `verdict: request-changes`만 기록한다. 활성 host가 아닌 추가 provider는 optional이다.
@@ -62,6 +62,7 @@ Follow the CLI output exactly. If no run is active, start with `agent-flow run "
 - 긴 설명, 긴 로그, 전체 파일 붙여넣기 금지.
 - 필요한 경우만 current phase, action, `next_command`, blocker를 요약한다.
 - 모든 guide를 항상 로드하지 말고 변경 파일에 필요한 guide만 읽는다.
+- 무메타데이터 project-local skill은 세 host에 설치·노출하되 `on-demand`로 유지한다. `always`는 `workflowPhases`가 없으면 코드 작성·리뷰 phase에만 적용하고, 명시된 경우 해당 phase에만 적용한다. `conditional`은 비코드 phase를 포함해 현재 phase와 task/path selector가 모두 매칭될 때만 강제해서 읽는다.
 - 프로젝트 skill은 `skills/<name>/SKILL.md` 또는 private `.agent-flow/local-skills/<name>/SKILL.md`에 둔다.
 - install/bootstrap 후 `.agent-flow/skills/index.json` metadata를 보고 필요한 skill만 읽는다. 모든 SKILL.md 전문을 항상 읽지 않는다.
 - Claude/Codex/OMP 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.

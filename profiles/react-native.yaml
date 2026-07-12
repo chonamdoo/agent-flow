@@ -11,7 +11,7 @@ branching:
     max_slug_length: 60
 gates:
   - id: architecture-lint
-    command: ["agent-flow", "architecture-lint", "--profile", "react-native"]
+    command: ["./.agent-flow/bin/agent-flow", "architecture-lint", "--profile", "react-native"]
     required: true
     phase: pre-commit
   - id: test
@@ -55,7 +55,7 @@ architecture:
   platform: react-native
   roles:
     - id: app-shell
-      paths: ["src/app", "app"]
+      paths: ["src/app", "app", "pages"]
     - id: android-native
       paths: ["android"]
     - id: core-domain
@@ -81,7 +81,7 @@ architecture:
     - id: navigation-api
       paths: ["src/core/navigation/api"]
     - id: navigation-impl
-      paths: ["src/core/navigation/impl"]
+      paths: ["src/core/navigation/impl", "src/core/navigation"]
 artifacts:
   prd: optional
   adr: optional

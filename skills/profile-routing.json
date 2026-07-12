@@ -1,0 +1,381 @@
+{
+  "version": 1,
+  "profiles": {
+    "android": {
+      "family": "jvm",
+      "priority": 60,
+      "task_terms": ["android", "jetpack compose", "kotlin", "wear os", "wearos", "kmp", "안드로이드", "코틀린", "컴포즈", "웨어 os"],
+      "file_rules": [
+        { "extensions": [".kt", ".kts", ".java"], "prefixes": ["android/", "app/", "feature/", "core/", "wear/", "benchmark/", "build-logic/"] },
+        { "prefixes": ["android/"] },
+        { "extensions": [".kt", ".kts", ".java"], "path_terms": ["app/src/", "src/androidtest/", "src/test/"] },
+        { "extensions": [".kt", ".kts", ".java"] },
+        { "names": ["AndroidManifest.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "gradle.properties", "libs.versions.toml"] },
+        { "extensions": [".xml"], "path_terms": ["res/", "manifest"] }
+      ],
+      "skill_routes": [
+        {
+          "id": "agp-9-upgrade",
+          "task_terms": ["agp 9", "android gradle plugin 9", "built-in kotlin", "built in kotlin", "new agp dsl", "legacy-kapt", "agp upgrade"],
+          "file_rules": [
+            { "path_terms": ["agp-9", "agp9", "built-in-kotlin", "legacy-kapt"] }
+          ],
+          "skills": ["agp-9-upgrade"]
+        },
+        {
+          "id": "android-intent-security",
+          "task_terms": ["intent security", "intent redirection", "pendingintent security", "exported component", "caller verification", "signature permission"],
+          "file_rules": [
+            { "names": ["AndroidManifest.xml"] },
+            { "extensions": [".kt", ".kts", ".java"], "path_terms": ["intent", "pendingintent", "receiver", "service", "provider"] }
+          ],
+          "skills": ["android-intent-security"]
+        },
+        {
+          "id": "play-policy-insights",
+          "task_terms": ["play policy", "google play policy", "data safety", "restricted permission", "account deletion", "demo credentials", "privacy disclosure", "play compliance"],
+          "file_rules": [
+            { "path_terms": ["play-policy", "play_policy", "data-safety", "data_safety", "privacy", "account-deletion", "restricted-permission"] }
+          ],
+          "skills": ["play-policy-insights"]
+        },
+        {
+          "id": "compose-state",
+          "task_terms": ["compose state", "state hoisting", "viewmodel", "ui state"],
+          "file_rules": [
+            { "extensions": [".kt", ".kts"], "path_terms": ["compose", "screen", "viewmodel", "state", "presentation", "ui/"] }
+          ],
+          "skills": ["android-mvi-feature", "compose-state-authoring", "compose-state-hoisting", "compose-state-holder-ui-split", "kotlin-flow-state-event-modeling"]
+        },
+        {
+          "id": "compose-effects",
+          "task_terms": ["compose side effect", "launchedeffect", "navigation event", "snackbar event"],
+          "file_rules": [
+            { "extensions": [".kt", ".kts"], "path_terms": ["effect", "event", "navigation", "snackbar", "analytics", "collector", "viewmodel"] }
+          ],
+          "skills": ["compose-side-effects", "kotlin-coroutines-structured-concurrency", "kotlin-flow-state-event-modeling"]
+        },
+        {
+          "id": "compose-performance",
+          "task_terms": ["compose performance", "recomposition", "stability", "compose animation"],
+          "file_rules": [
+            { "extensions": [".kt", ".kts"], "path_terms": ["performance", "recomposition", "stability", "animation", "scroll", "gesture"] }
+          ],
+          "skills": ["compose-animations", "compose-recomposition-performance", "compose-stability-diagnostics", "compose-state-deferred-reads"]
+        },
+        {
+          "id": "compose-layout",
+          "task_terms": ["compose modifier", "modifier parameter", "modifier chain", "root composable", "conditional layout", "compose slot"],
+          "file_rules": [
+            { "extensions": [".kt", ".kts"], "path_terms": ["component", "layout", "modifier", "slot", "designsystem", "ui/"] }
+          ],
+          "skills": ["compose-modifier-and-layout-style", "compose-slot-api-pattern"]
+        },
+        {
+          "id": "adaptive-layout",
+          "task_terms": ["adaptive layout", "adaptive navigation", "navigation suite", "navigation3 scene", "foldable", "window size", "tablet layout", "gridcells.adaptive", "compose grid", "compose flexbox", "compose mediaquery", "mediaquery", "pointer precision", "viewing distance", "desktop compose", "android tv", "android auto", "android xr"],
+          "file_rules": [
+            { "path_terms": ["adaptive", "windowsize", "foldable", "tablet", "responsive"] }
+          ],
+          "skills": ["adaptive"]
+        },
+        {
+          "id": "compose-focus",
+          "task_terms": ["compose focus", "dpad", "keyboard navigation", "android tv"],
+          "file_rules": [
+            { "extensions": [".kt", ".kts"], "path_terms": ["focus", "keyboard", "dpad", "accessibility", "tv/"] }
+          ],
+          "skills": ["compose-focus-navigation"]
+        },
+        {
+          "id": "android-testing",
+          "task_terms": ["android test", "compose test", "android localization test"],
+          "file_rules": [
+            { "path_terms": ["test/", "androidtest/", "screenshot", "localization"] }
+          ],
+          "skills": ["compose-ui-testing-patterns", "testing-localization", "testing-setup"]
+        },
+        {
+          "id": "android-debugging",
+          "task_terms": ["android crash", "android debug", "android failure"],
+          "file_rules": [
+            { "path_terms": ["crash", "debug", "error", "failure", "failing"] }
+          ],
+          "skills": ["android-debugging"]
+        },
+        {
+          "id": "android-cli",
+          "task_terms": ["android cli", "android create", "android docs", "android sdk", "android emulator", "android avd", "adb", "sdkmanager", "apk deployment", "android layout command", "android journey", "android studio command"],
+          "file_rules": [
+            { "path_terms": ["adb", "emulator", "sdkmanager", "android-cli"] }
+          ],
+          "skills": ["android-cli"]
+        },
+        {
+          "id": "kotlin-concurrency",
+          "task_terms": ["kotlin coroutine", "kotlin flow", "structured concurrency", "coroutinescope", "runblocking", "cancellationexception", "coroutine cancellation", "fire and forget coroutine", "init launch"],
+          "file_rules": [
+            { "extensions": [".kt", ".kts"], "path_terms": ["repository", "datasource", "usecase", "viewmodel", "coroutine", "flow", "async", "worker"] }
+          ],
+          "skills": ["kotlin-coroutines-structured-concurrency", "kotlin-flow-state-event-modeling"]
+        },
+        {
+          "id": "kotlin-multiplatform",
+          "task_terms": ["kotlin multiplatform", "kmp", "expect actual"],
+          "file_rules": [
+            { "path_terms": ["commonmain/", "androidmain/", "iosmain/", "shared/", "kmp/"] }
+          ],
+          "skills": ["kotlin-multiplatform-expect-actual"]
+        },
+        {
+          "id": "kotlin-domain-types",
+          "file_rules": [
+            { "extensions": [".kt", ".kts"], "path_terms": ["domain/", "model/", "value", "id.kt"] }
+          ],
+          "skills": ["kotlin-types-value-class"]
+        },
+        {
+          "id": "android-navigation",
+          "task_terms": ["android navigation", "navigation 3", "nav graph"],
+          "file_rules": [
+            { "path_terms": ["navigation", "navgraph", "route"] }
+          ],
+          "skills": ["compose-side-effects", "navigation-3"]
+        },
+        {
+          "id": "system-ui",
+          "task_terms": ["edge to edge", "system bar", "status bar", "navigation bar", "window inset", "ime inset", "ime padding", "ime overlap", "keyboard overlap", "soft keyboard", "display cutout"],
+          "file_rules": [
+            { "path_terms": ["inset", "systembar", "statusbar", "navigationbar", "fullscreen", "edge-to-edge"] }
+          ],
+          "skills": ["edge-to-edge"]
+        },
+        {
+          "id": "android-performance",
+          "task_terms": ["perfetto", "android performance", "jank", "startup trace"],
+          "file_rules": [
+            { "path_terms": ["perfetto", "trace", "jank", "startup", "frame"] }
+          ],
+          "skills": ["compose-recomposition-performance", "perfetto-sql", "perfetto-trace-analysis"]
+        },
+        {
+          "id": "android-build",
+          "file_rules": [
+            { "names": ["build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "gradle.properties", "libs.versions.toml"] },
+            { "path_terms": ["buildsrc/", "convention/", "module/"] }
+          ],
+          "skills": ["android-module-creator", "testing-setup"]
+        },
+        {
+          "id": "android-release",
+          "task_terms": ["r8", "proguard", "android release", "app shrinker"],
+          "file_rules": [
+            { "path_terms": ["proguard", "r8", "shrinker", "release"] }
+          ],
+          "skills": ["r8-analyzer"]
+        },
+        {
+          "id": "xml-compose-migration",
+          "task_terms": ["xml to compose", "view to compose", "compose migration"],
+          "file_rules": [
+            { "extensions": [".xml"], "path_terms": ["layout/", "view"] },
+            { "path_terms": ["xmltocompose", "xml-to-compose"] }
+          ],
+          "skills": ["migrate-xml-views-to-jetpack-compose"]
+        },
+        {
+          "id": "compose-styles",
+          "task_terms": ["compose styles", "compose styles api", "modifier.styleable", "style scope", "style state", "experimentalfoundationstyleapi"],
+          "file_rules": [
+            { "path_terms": ["styles", "stylesheet", "designsystem"] }
+          ],
+          "skills": ["styles"]
+        },
+        {
+          "id": "android-localization",
+          "task_terms": ["android localization", "android locale", "strings xml"],
+          "file_rules": [
+            { "path_terms": ["values-", "locale", "localization", "strings.xml"] }
+          ],
+          "skills": ["testing-localization"]
+        },
+        {
+          "id": "camera-api",
+          "task_terms": ["camera1", "camera2", "camerax", "android camera", "legacy camera", "surfaceholder", "processcameraprovider", "cameraxviewfinder"],
+          "file_rules": [
+            { "path_terms": ["camera"] }
+          ],
+          "skills": ["camera1-to-camerax"]
+        },
+        {
+          "id": "billing-api",
+          "task_terms": ["play billing", "billing library"],
+          "file_rules": [
+            { "path_terms": ["billing"] }
+          ],
+          "skills": ["play-billing-library-version-upgrade"]
+        },
+        {
+          "id": "engage-api",
+          "task_terms": ["play engage", "engage sdk"],
+          "file_rules": [
+            { "path_terms": ["engage"] }
+          ],
+          "skills": ["engage-sdk-integration"]
+        },
+        {
+          "id": "verified-email-api",
+          "task_terms": ["verified email", "credential manager verified email", "digitalcredential email", "getdigitalcredentialoption", "openid4vp email", "sd-jwt email", "otp-less email", "passwordless email verification", "email account recovery", "userinfo credential"],
+          "file_rules": [
+            { "path_terms": ["verifiedemail", "verified-email"] }
+          ],
+          "skills": ["verified-email"]
+        },
+        {
+          "id": "app-functions-api",
+          "task_terms": ["app functions", "appfunctions"],
+          "file_rules": [
+            { "path_terms": ["appfunction"] }
+          ],
+          "skills": ["appfunctions"]
+        },
+        {
+          "id": "android-xr-api",
+          "task_terms": ["android xr", "compose glimmer", "glimmertheme", "display glasses", "projected activity", "projected context"],
+          "file_rules": [
+            { "path_terms": ["glimmer", "displayglasses", "xr/"] }
+          ],
+          "skills": ["display-glasses-with-jetpack-compose-glimmer"]
+        },
+        {
+          "id": "wear-compose-material3",
+          "task_terms": ["wear os", "wearos", "watch face", "wear material3", "wear material 3", "compose material 3 for wear", "transforminglazycolumn", "appscaffold wear", "screenscaffold wear", "웨어 os", "워치 페이스", "웨어 컴포즈"],
+          "file_rules": [
+            { "path_terms": ["wear/", "wearos", "watch/", "watchface"] }
+          ],
+          "skills": ["jetpack-compose-m3"]
+        }
+      ]
+    },
+    "ios": {
+      "family": "apple",
+      "priority": 50,
+      "task_terms": ["ios", "swift", "swiftui", "xcode", "아이오에스", "스위프트", "스위프트ui"],
+      "file_rules": [
+        { "prefixes": ["ios/"] },
+        { "extensions": [".swift", ".m", ".mm", ".h"] },
+        { "names": ["Package.swift", "Podfile", "project.pbxproj"] }
+      ]
+    },
+    "nextjs": {
+      "family": "javascript",
+      "priority": 50,
+      "task_terms": ["next.js", "nextjs", "app router", "넥스트", "넥스트js", "앱 라우터"],
+      "file_rules": [
+        { "extensions": [".js", ".jsx", ".ts", ".tsx", ".css", ".scss"], "path_terms": ["app/", "pages/", "src/app/", "src/pages/"] },
+        { "extensions": [".js", ".jsx", ".ts", ".tsx", ".css", ".scss"] },
+        { "names": ["next.config.js", "next.config.mjs", "next.config.ts", "package.json", "tsconfig.json"] }
+      ]
+    },
+    "node": {
+      "family": "javascript",
+      "priority": 30,
+      "task_terms": ["node.js", "nodejs", "express", "nestjs", "backend api", "노드", "노드js", "익스프레스", "백엔드 api"],
+      "file_rules": [
+        { "extensions": [".js", ".mjs", ".cjs", ".ts", ".tsx"], "path_terms": ["server/", "backend/", "services/", "api/", "scripts/", "cli/"] },
+        { "extensions": [".js", ".mjs", ".cjs", ".ts", ".tsx"] },
+        { "names": ["package.json", "tsconfig.json"] }
+      ],
+      "skill_routes": [
+        {
+          "id": "node-typescript",
+          "task_terms": ["typescript", "type script", "tsconfig", "타입스크립트"],
+          "file_rules": [
+            { "extensions": [".ts", ".tsx", ".mts", ".cts"] },
+            { "names": ["tsconfig.json"] }
+          ],
+          "skills": ["typescript-development-guide"]
+        }
+      ]
+    },
+    "python": {
+      "family": "python",
+      "priority": 50,
+      "task_terms": ["python", "django", "flask", "fastapi", "pytest", "파이썬", "장고", "플라스크"],
+      "file_rules": [
+        { "extensions": [".py", ".pyi"] },
+        { "names": ["pyproject.toml", "requirements.txt", "requirements-dev.txt", "Pipfile", "poetry.lock", "uv.lock"] }
+      ]
+    },
+    "react": {
+      "family": "javascript",
+      "priority": 40,
+      "task_terms": ["react", "react-native-web", "react native web", "react web", "reactjs", "vite", "리액트", "리액트 웹"],
+      "file_rules": [
+        { "extensions": [".js", ".jsx", ".ts", ".tsx", ".css", ".scss"], "path_terms": ["components/", "hooks/", "src/components/", "src/hooks/"] },
+        { "extensions": [".js", ".jsx", ".ts", ".tsx", ".css", ".scss"] },
+        { "names": ["package.json", "tsconfig.json", "vite.config.js", "vite.config.ts"] }
+      ]
+    },
+    "react-native": {
+      "family": "javascript",
+      "priority": 60,
+      "task_terms": ["react native", "react-native", "rn", "expo", "metro", "native bridge", "리액트 네이티브", "리액트네이티브", "엑스포", "네이티브 브리지"],
+      "file_rules": [
+        { "extensions": [".js", ".jsx", ".ts", ".tsx"], "path_terms": ["screens/", "src/screens/", "native/", "src/native/"] },
+        { "extensions": [".js", ".jsx", ".ts", ".tsx"] },
+        { "names": ["app.json", "app.config.js", "app.config.ts", "metro.config.js", "package.json", "tsconfig.json"] }
+      ]
+    },
+    "spring": {
+      "family": "jvm",
+      "priority": 70,
+      "task_terms": ["spring", "spring boot", "springboot", "jpa", "hibernate", "maven", "스프링", "스프링 부트", "메이븐", "하이버네이트"],
+      "file_rules": [
+        { "extensions": [".java", ".kt", ".kts"], "path_terms": ["src/main/java/", "src/main/kotlin/", "src/test/java/", "src/test/kotlin/"] },
+        { "extensions": [".java", ".kt", ".kts"] },
+        { "names": ["build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "pom.xml", "application.yml", "application.yaml", "application.properties"] }
+      ]
+    },
+    "typescript": {
+      "family": "javascript",
+      "priority": 20,
+      "task_terms": ["typescript", "tsconfig", "타입스크립트"],
+      "file_rules": [
+        { "extensions": [".ts", ".tsx"] },
+        { "names": ["package.json", "tsconfig.json"] }
+      ]
+    },
+    "generic": {
+      "family": "generic",
+      "priority": 0,
+      "fallback": true,
+      "task_terms": [],
+      "file_rules": [
+        { "any_file": true }
+      ]
+    }
+  },
+  "escalations": {
+    "react-native": [
+      {
+        "profile": "android",
+        "install_roots": ["android"],
+        "task_terms": ["android", "kotlin", "jetpack compose", "gradle", "native android", "안드로이드", "코틀린", "컴포즈", "그래들"],
+        "file_rules": [
+          { "prefixes": ["android/"] },
+          { "path_terms": ["/android/"] }
+        ]
+      },
+      {
+        "profile": "ios",
+        "install_roots": ["ios"],
+        "task_terms": ["ios", "swift", "swiftui", "xcode", "native ios", "아이오에스", "스위프트", "엑스코드"],
+        "file_rules": [
+          { "prefixes": ["ios/"] },
+          { "path_terms": ["/ios/"] }
+        ]
+      }
+    ]
+  }
+}

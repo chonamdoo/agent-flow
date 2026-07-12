@@ -10,6 +10,7 @@ requires-python = ">=3.10"
 dependencies = [
   "pyyaml>=6.0",
   "click>=8.0",
+  "tomli>=2.0; python_version < '3.11'",
 ]
 readme = "README.md"
 
@@ -19,11 +20,16 @@ dev = [
 ]
 
 [project.scripts]
+# Node remains the public workflow entry point. The Python compatibility CLI
+# preserves the same run/worktree safety contract. Keep the historical
+# `agent-flow` alias for pip/pipx upgrade compatibility.
 agent-flow = "agent_flow.cli:main"
+agent-flow-python = "agent_flow.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_flow"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "bootstrap" = "agent_flow/bootstrap"
+"skills" = "agent_flow/skills"
 "templates/_shared" = "agent_flow/templates/_shared"

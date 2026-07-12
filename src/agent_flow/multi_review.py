@@ -219,7 +219,7 @@ def _rate_limit_payload(r: SubprocessResult) -> dict[str, str] | None:
         "reviewer": reviewer,
         "retry_after": retry_after,
         "next_command": (
-            "agent-flow review retry "
+            "agent-flow-python review retry "
             f"--reviewer {shlex.quote(reviewer)} "
             f"--retry-after {shlex.quote(retry_after)}"
         ),

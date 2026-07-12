@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 
@@ -29,6 +30,35 @@ KNOWN_CLIS: tuple[CliInfo, ...] = (
     CliInfo(name="omp", binaries=("omp",), invoke=("-p",)),
 )
 
+_HOSTS = frozenset({"claude", "codex", "omp"})
+
+
+def detect_host_from_env(env: Mapping[str, str] | None = None) -> str | None:
+    source = os.environ if env is None else env
+    raw_override = source.get("AGENT_FLOW_HOST", "")
+    override = raw_override.strip().lower() if isinstance(raw_override, str) else ""
+    if override in _HOSTS:
+        return override
+    if source.get("CLAUDECODE") or source.get("CLAUDE_CLI"):
+        return "claude"
+    if any(
+        source.get(marker)
+        for marker in (
+            "CODEX_CLI",
+            "CODEX_SHELL",
+            "CODEX_THREAD_ID",
+            "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+        )
+    ):
+        return "codex"
+    if source.get("OMP_PROFILE"):
+        return "omp"
+    if source.get("PI_CODING_AGENT_DIR"):
+        return "omp"
+    if source.get("CODEX_HOME"):
+        return "codex"
+    return None
+
 
 def detect_available_clis() -> list[CliInfo]:
     """Return CLIs whose binary resolves on PATH."""
@@ -47,14 +77,11 @@ def detect_host_cli() -> str | None:
 
     주의: OMP/Codex는 PATH 휴리스틱을 쓰므로 호스트가 아닌 일반 셸에서도
     바이너리가 설치돼 있으면 해당 host를 반환할 수 있다. 호스트 확정 신호가
-    필요한 호출자는 env 힌트(OMP_PROFILE/CLAUDECODE/CODEX_CLI 등)가 있는 경우만 신뢰한다.
+    필요한 호출자는 env 힌트가 있는 경우만 신뢰한다.
     """
-    if os.environ.get("OMP_PROFILE"):
-        return "omp"
-    if os.environ.get("CLAUDECODE") or os.environ.get("CLAUDE_CLI"):
-        return "claude"
-    if os.environ.get("CODEX_CLI") or os.environ.get("CODEX_HOME"):
-        return "codex"
+    host = detect_host_from_env()
+    if host is not None:
+        return host
     # OMP/Codex CLI는 호스트 env 힌트를 export하지 않는 버전이 있어 PATH로 보강한다.
     # Codex fallback을 먼저 유지해야 Codex+OMP 둘 다 설치된 기존 환경이 OMP로 오인되지 않는다.
     if shutil.which("codex"):

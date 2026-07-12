@@ -4,6 +4,8 @@ import os
 import shutil
 from dataclasses import dataclass
 
+from agent_flow.cli_detect import detect_host_from_env
+
 
 @dataclass(frozen=True)
 class HostProviderStatus:
@@ -13,21 +15,20 @@ class HostProviderStatus:
 
 
 def list_host_providers() -> list[HostProviderStatus]:
+    active_host = detect_host_from_env(os.environ)
     return [
         HostProviderStatus(name="manual", command="manual", available=True),
-        _host_provider("codex-session", executable="codex", env_var="CODEX_HOME"),
-        _host_provider("claude-session", executable="claude", env_var="CLAUDECODE"),
-        _host_provider("omp-session", executable="omp", env_var="OMP_PROFILE"),
+        _host_provider("codex-session", executable="codex", active=active_host == "codex"),
+        _host_provider("claude-session", executable="claude", active=active_host == "claude"),
+        _host_provider("omp-session", executable="omp", active=active_host == "omp"),
     ]
 
 
-def _host_provider(name: str, *, executable: str, env_var: str | None) -> HostProviderStatus:
+def _host_provider(name: str, *, executable: str, active: bool) -> HostProviderStatus:
     resolved = shutil.which(executable)
-    available = resolved is not None or (env_var is not None and bool(os.environ.get(env_var)))
     return HostProviderStatus(
         name=name,
         command=resolved or executable,
-        available=available,
+        available=resolved is not None or active,
     )
-
 

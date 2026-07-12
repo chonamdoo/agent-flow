@@ -7,9 +7,13 @@ import shutil
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from agent_flow.core.artifacts import init_project
+from agent_flow.core.local_skills import LOCAL_SKILL_PLAN_HASH_VERSION
+from agent_flow.core.lore_snapshot import lore_snapshot_metadata, reconcile_lore_snapshot
+from agent_flow.core.skill_plan import installed_skill_plan_pin, reconcile_skill_plan_pin
 from agent_flow.core.workflow import load_workflow
 
 
@@ -22,6 +26,8 @@ class RunRequest:
     architecture: str = "default"
     run_id: str | None = None
     worktree: dict[str, str] | None = None
+    config_root: Path | None = None
+    worktree_mode: str = "required"
 
 
 @dataclass(frozen=True)
@@ -36,9 +42,20 @@ class RunState:
     created_at: str
     run_dir: Path
     worktree: dict[str, str] | None = None
+    skill_plan_hash: str | None = None
+    skill_plan_hash_version: int = 2
+    local_skill_plan_hash: str | None = None
+    local_skill_plan_hash_version: int = LOCAL_SKILL_PLAN_HASH_VERSION
+    lore_snapshot_version: int = 1
+    lore_snapshot_hash: str = ""
+    lore_citations: tuple[dict[str, Any], ...] = ()
+    worktree_mode: str = "required"
 
 
 def start_run(*, root: Path, request: RunRequest) -> RunState:
+    config_root = request.config_root or _snapshot_config_root(root)
+    skill_plan_pin = installed_skill_plan_pin(config_root)
+    lore_snapshot = lore_snapshot_metadata(config_root, request.task)
     init_project(root)
     run_id = request.run_id or _new_run_id()
     run_dir = root / ".agent-flow" / "runs" / request.workflow_id / run_id
@@ -54,6 +71,17 @@ def start_run(*, root: Path, request: RunRequest) -> RunState:
         created_at=_now(),
         run_dir=run_dir,
         worktree=request.worktree,
+        worktree_mode=request.worktree_mode,
+        skill_plan_hash=skill_plan_pin.get("skill_plan_hash"),
+        skill_plan_hash_version=skill_plan_pin.get("skill_plan_hash_version", 2),
+        local_skill_plan_hash=skill_plan_pin.get("local_skill_plan_hash"),
+        local_skill_plan_hash_version=skill_plan_pin.get(
+            "local_skill_plan_hash_version",
+            LOCAL_SKILL_PLAN_HASH_VERSION,
+        ),
+        lore_snapshot_version=lore_snapshot["lore_snapshot_version"],
+        lore_snapshot_hash=lore_snapshot["lore_snapshot_hash"],
+        lore_citations=tuple(lore_snapshot["lore_citations"]),
     )
     try:
         _write_json(run_dir / "manifest.json", _state_payload(state))
@@ -84,6 +112,8 @@ def status_summary(root: Path) -> str:
             break
     if manifest is None or payload is None:
         return "no runs"
+    if payload.get("status") not in {"complete", "aborted"}:
+        payload = _verify_manifest_snapshots(root, manifest, payload)
     workflow_id = payload["workflow_id"]
     run_id = payload["run_id"]
     raw_status = payload["status"]
@@ -142,13 +172,92 @@ def status_summary(root: Path) -> str:
     )
 
 
+def verify_run_state_snapshots(
+    *,
+    state_root: Path,
+    run_dir: Path,
+    config_root: Path | None = None,
+    prompt_root: Path | None = None,
+) -> dict[str, Any]:
+    """Verify a manifest immediately before a compatibility-runner prompt."""
+    manifest = run_dir / "manifest.json"
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"blocked: run manifest is unreadable: {manifest}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"blocked: run manifest must be a JSON object: {manifest}")
+    return _verify_manifest_snapshots(
+        state_root,
+        manifest,
+        payload,
+        config_root=config_root,
+        prompt_root=prompt_root,
+    )
+
+
+def _verify_manifest_snapshots(
+    state_root: Path,
+    manifest: Path,
+    payload: dict[str, Any],
+    *,
+    config_root: Path | None = None,
+    prompt_root: Path | None = None,
+) -> dict[str, Any]:
+    resolved_config_root = config_root or _snapshot_config_root(state_root)
+    if not all(
+        isinstance(payload.get(key), str) and payload[key]
+        for key in ("run_id", "workflow_id")
+    ):
+        raise RuntimeError(
+            "blocked: legacy run manifest is missing its identity; restore manifest.json"
+        )
+    prompt_emitted = any((manifest.parent / "prompts").glob("*.md"))
+    legacy_skill_pin = (
+        not payload.get("skill_plan_hash")
+        or payload.get("skill_plan_hash_version") != 2
+        or not payload.get("local_skill_plan_hash")
+        or payload.get("local_skill_plan_hash_version")
+        != LOCAL_SKILL_PLAN_HASH_VERSION
+    )
+    if legacy_skill_pin and prompt_emitted:
+        current_pin = installed_skill_plan_pin(resolved_config_root)
+        if current_pin:
+            raise RuntimeError(
+                "blocked: a legacy run already emitted stage prompts; "
+                "its original skill snapshot cannot be reconstructed safely"
+            )
+    updated, skill_changed = reconcile_skill_plan_pin(payload, resolved_config_root)
+    updated, _citations, lore_changed = reconcile_lore_snapshot(
+        updated,
+        resolved_config_root,
+        prompt_root or resolved_config_root,
+        allow_migration=not prompt_emitted,
+    )
+    if skill_changed or lore_changed:
+        _write_json(manifest, updated)
+    return updated
+
+
+def _snapshot_config_root(state_root: Path) -> Path:
+    direct_index = state_root / ".agent-flow" / "skills" / "index.json"
+    if direct_index.exists():
+        return state_root
+    for candidate in (state_root, *state_root.parents):
+        if candidate.name == ".git":
+            leader = candidate.parent
+            if (leader / ".agent-flow" / "skills" / "index.json").exists():
+                return leader
+    return state_root
+
+
 def _append_event(run_dir: Path, event: str, details: dict[str, str]) -> None:
     payload = {"ts": _now(), "event": event, "details": details}
     with (run_dir / "events.jsonl").open("a", encoding="utf-8") as file:
         file.write(f"{json.dumps(payload, sort_keys=True)}\n")
 
 
-def _state_payload(state: RunState) -> dict[str, str]:
+def _state_payload(state: RunState) -> dict[str, Any]:
     payload = asdict(state)
     payload["run_dir"] = str(Path(".agent-flow") / "runs" / state.workflow_id / state.run_id)
     if isinstance(payload.get("worktree"), dict):
@@ -185,7 +294,7 @@ def _next_command_for_status(
         return "none", "none", "none"
     if current_phase != "-":
         command_template = (
-            "agent-flow record-stage "
+            "agent-flow-python record-stage "
             f"--root {shlex.quote(str(root))} "
             f"--run-dir {shlex.quote(_relative_run_dir(run_dir))} "
             f"--stage {shlex.quote(current_phase)} "
@@ -195,11 +304,11 @@ def _next_command_for_status(
     worktree = payload.get("worktree")
     if isinstance(worktree, dict) and worktree.get("name"):
         command = (
-            f"agent-flow continue --root {shlex.quote(str(root))} "
+            f"agent-flow-python continue --root {shlex.quote(str(root))} "
             f"--worktree {shlex.quote(str(worktree['name']))}"
         )
         return command, command, "continue"
-    command = f"agent-flow continue --root {shlex.quote(str(root))}"
+    command = f"agent-flow-python continue --root {shlex.quote(str(root))}"
     return command, command, "continue"
 
 

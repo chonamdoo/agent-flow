@@ -1,4 +1,13 @@
-#!/usr/bin/env python3
+#!/bin/sh
+""":"
+TRUSTED_PYTHON=/usr/bin/python3
+if [ ! -f "$TRUSTED_PYTHON" ] || [ ! -x "$TRUSTED_PYTHON" ]; then
+    echo "comment-checker: blocked because trusted Python interpreter is unavailable or unsafe" >&2
+    exit 2
+fi
+exec "$TRUSTED_PYTHON" "$0" "$@"
+exit 2
+":"""
 from __future__ import annotations
 
 import json
