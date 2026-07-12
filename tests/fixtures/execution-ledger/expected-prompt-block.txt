@@ -1,0 +1,4 @@
+## Execution ledger (advisory; run fixture-run, round 2/3)
+- Before retrying, change the action that produced this repeated gate failure.
+- Gate test exit 1: AssertionError: expected true but received false
+- Review: src/a.py:12 dependency boundary remains inverted

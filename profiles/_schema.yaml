@@ -45,13 +45,14 @@ optional:
     # The installer auto-includes declared dependencies such as clean-architecture-core.
     install:
       - "skill-name"
-    # Review-time required skills are resolved from active profile + changed files.
+    # Code/review required skills are resolved from active profile + changed files + task scope.
+    # Deterministic profile family/priority and task terms live in skills/profile-routing.json.
     # Missing required skills block only the touched platform/profile.
     required_review:
-      - group: "profile | android_skills | chrisbanes_skills | android-native-escalation"
+      - group: "profile | android_skills | chrisbanes_skills | typescript_skills | android-native-escalation"
         skills: ["skill-name"]
         profiles: ["optional escalated profile id"]
-        when: "changed file/task scope that requires this group"
+        when: "human-readable scope; runtime matching is defined by skills/profile-routing.json"
         missing: "missing local <skill-group>: <skill>"
 
   architecture:
@@ -73,45 +74,53 @@ optional:
     # Optional host-readable Android/Kotlin/Compose/KMP skill routing.
     # Use exact installed skill names from https://github.com/android/skills.
     source: "https://github.com/android/skills"
-    install_policy: "never"
-    active_host_only: true
-    load_mode: "plain_text"
-    hosts:
+    install_policy: "project_snapshot"
+    active_host_only: false
+    load_mode: "indexed_snapshot"
+    bootstrap_hosts:
       codex: "~/.codex/skills/{skill}/SKILL.md"
       claude: "~/.claude/skills/{skill}/SKILL.md"
       omp: "~/.omp/agent/skills/{skill}/SKILL.md"
     load_policy:
-      - "read only matching local skill files for the active host"
-      - "do not install, copy, link, vendor, or fallback to another host path"
-      - "if required local skill is missing, report missing local android_skills and ask the user to install from source"
+      - "install one whole-tree project snapshot and read only that snapshot at runtime"
+      - "fail when a required skill cannot be resolved"
     implementation:
       - skill: "exact skill name"
         when: "trigger condition"
     review:
       - skill: "exact skill name"
-        when: "review trigger condition"
+        when: "human-readable review trigger; deterministic paths are in skills/profile-routing.json"
 
   chrisbanes_skills:
     # Optional host-readable Compose/Kotlin/KMP skill routing.
     # Use exact skill names from https://github.com/chrisbanes/skills/tree/main/skills.
     source: "https://github.com/chrisbanes/skills/tree/main/skills"
-    install_policy: "never"
-    active_host_only: true
-    load_mode: "plain_text"
-    hosts:
+    install_policy: "project_snapshot"
+    active_host_only: false
+    load_mode: "indexed_snapshot"
+    bootstrap_hosts:
       codex: "~/.codex/skills/{skill}/SKILL.md"
       claude: "~/.claude/skills/{skill}/SKILL.md"
       omp: "~/.omp/agent/skills/{skill}/SKILL.md"
     load_policy:
-      - "read only matching local skill files for the active host"
-      - "do not install, copy, link, vendor, or fallback to another host path"
-      - "if required local skill is missing, report missing local chrisbanes_skills and ask the user to install from source"
+      - "install one whole-tree project snapshot and read only that snapshot at runtime"
+      - "fail when a required skill cannot be resolved"
     implementation:
       - skill: "exact skill name"
         when: "trigger condition"
     review:
       - skill: "exact skill name"
-        when: "review trigger condition"
+        when: "human-readable review trigger; deterministic paths are in skills/profile-routing.json"
+
+  typescript_skills:
+    # Optional conditional TypeScript guidance for a broader runtime profile,
+    # such as Node.js projects that may contain either JavaScript or TypeScript.
+    implementation:
+      - skill: "typescript-development-guide"
+        when: "TypeScript task or changed-file route matches"
+    review:
+      - skill: "typescript-development-guide"
+        when: "TypeScript review task or changed-file route matches"
 
   artifacts:
     prd: "required | optional | skip"

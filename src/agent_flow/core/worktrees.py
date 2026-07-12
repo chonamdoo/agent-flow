@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import sys
+import unicodedata
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -14,6 +15,45 @@ from agent_flow.core.commands import run_safe_command
 
 PROTECTED_WORKTREE_BRANCHES = {"main", "master", "develop"}
 GIT_WORKTREE_TIMEOUT_S = 300
+ARTIFACT_EXTENSION_SOURCE = (
+    r"fig|figma|png|jpe?g|gif|webp|svg|pdf|sketch|avif|bmp|ico|tiff?|heic|heif|psd"
+)
+MARKDOWN_REFERENCE_PATTERN = re.compile(
+    r"(!?)\[([^\]\r\n]*)\]\(((?:[^()\r\n]|\([^()\r\n]*\))*)\)"
+)
+URL_PATTERN = re.compile(
+    r"(?:https?://|file://|www\.)[^\s<]+|figma\.com/[^\s<]+",
+    flags=re.IGNORECASE,
+)
+QUOTED_ARTIFACT_PATTERN = re.compile(
+    rf"([\"'`“‘])[^\r\n]*?\.(?:{ARTIFACT_EXTENSION_SOURCE})"
+    rf"(?:[?#][^\s\"'`”’]*)?[\"'`”’]",
+    flags=re.IGNORECASE,
+)
+PATH_ARTIFACT_PATTERN = re.compile(
+    r"(^|[\s(\[\{,:;])"
+    r"(?:[A-Za-z]:[\\/]|(?:~|\.\.?)[\\/]|[\\/]"
+    r"|(?:[^\s/\\()<>\[\]{}:;,]+[\\/])+)"
+    rf"[^\r\n]*?\.(?:{ARTIFACT_EXTENSION_SOURCE})"
+    r"(?:[?#][^\s:;,)\]\}>]*)?(?=$|[\s:;,)\]\}>])",
+    flags=re.IGNORECASE,
+)
+BARE_ARTIFACT_PATTERN = re.compile(
+    r"(^|[\s(\[\{,:;])[^\s/\\()<>\[\]{}]+?\."
+    rf"(?:{ARTIFACT_EXTENSION_SOURCE})(?:[?#][^\s:;,)\]\}}>]*)?"
+    r"(?=$|[\s:;,)\]\}>])",
+    flags=re.IGNORECASE,
+)
+ARTIFACT_DESTINATION_PATTERN = re.compile(
+    rf"\.(?:{ARTIFACT_EXTENSION_SOURCE})(?:[?#][^\s>]*)?"
+    r"(?:\s+[\"'][^\"']*[\"'])?\s*>?$",
+    flags=re.IGNORECASE,
+)
+FIGMA_DESTINATION_PATTERN = re.compile(
+    r"^(?:https?://)?(?:www\.)?figma\.com/",
+    flags=re.IGNORECASE,
+)
+SEMANTIC_NEUTRAL_FALLBACK = "task-attachment"
 
 
 @dataclass(frozen=True)
@@ -36,8 +76,15 @@ class WorktreeStatus:
     requested_name: str = ""
 
 
-def plan_worktree(*, root: Path, name: str, branch: str | None = None) -> WorktreePlan:
-    safe_name = _feature_worktree_name(name)
+def plan_worktree(
+    *,
+    root: Path,
+    name: str,
+    branch: str | None = None,
+    max_slug_length: int = 60,
+    base_ref: str | None = None,
+) -> WorktreePlan:
+    safe_name = _feature_worktree_name(name, max_slug_length=max_slug_length)
     selected_branch = branch or f"feat/{safe_name.removeprefix('feat-')}"
     _validate_branch(selected_branch)
     if selected_branch in PROTECTED_WORKTREE_BRANCHES:
@@ -49,10 +96,118 @@ def plan_worktree(*, root: Path, name: str, branch: str | None = None) -> Worktr
         branch=selected_branch,
         path=root / ".agent-flow" / "worktrees" / safe_name,
         # leader worktree가 feature branch여도 새 작업은 기본 브랜치 commit에서 시작한다.
-        base_ref=_default_base_ref(root),
+        base_ref=base_ref or _default_base_ref(root),
         branch_explicit=branch is not None,
         requested_name=name,
     )
+
+
+def plan_fresh_worktree(
+    *,
+    root: Path,
+    name: str,
+    branch: str | None = None,
+    max_slug_length: int = 60,
+    base_ref: str | None = None,
+    reuse_registered: bool = False,
+) -> WorktreePlan:
+    """Allocate a new deterministic path/branch without reusing completed work."""
+    initial = plan_worktree(
+        root=root,
+        name=name,
+        branch=branch,
+        max_slug_length=max_slug_length,
+        base_ref=base_ref,
+    )
+    reusable = _matching_registered_worktree(root=root, plan=initial)
+    if reuse_registered and reusable is not None:
+        return WorktreePlan(
+            name=initial.name,
+            branch=reusable.branch,
+            path=reusable.path,
+            base_ref=initial.base_ref,
+            branch_explicit=branch is not None,
+            requested_name=name,
+        )
+    if branch is not None or reuse_registered:
+        runtime_root = worktree_runtime_root(root=root, name=initial.name)
+        if (
+            initial.path.exists()
+            or initial.path.is_symlink()
+            or runtime_root.exists()
+            or runtime_root.is_symlink()
+        ):
+            existing = get_worktree_status(root=root, name=initial.name)
+            if existing.exists and existing.branch and existing.branch != initial.branch:
+                raise ValueError(
+                    f"worktree {initial.name} already uses branch {existing.branch}, "
+                    f"not {initial.branch}"
+                )
+            raise ValueError(
+                f"explicit worktree branch or path already exists: {initial.branch}"
+            )
+        if worktree_branch_exists(root=root, branch=initial.branch):
+            raise ValueError(f"explicit worktree branch already exists: {initial.branch}")
+        return initial
+    base_slug = initial.name.removeprefix("feat-")
+    limit = max(12, min(int(max_slug_length), 100))
+    counter = 1
+    while True:
+        suffix = "" if counter == 1 else f"-{counter}"
+        stem = base_slug[: max(1, limit - len(suffix))].rstrip("-") or "task"
+        slug = f"{stem}{suffix}"
+        candidate = WorktreePlan(
+            name=f"feat-{slug}",
+            branch=f"feat/{slug}",
+            path=root / ".agent-flow" / "worktrees" / f"feat-{slug}",
+            base_ref=initial.base_ref,
+            branch_explicit=False,
+            requested_name=name,
+        )
+        if (
+            not candidate.path.exists()
+            and not candidate.path.is_symlink()
+            and not worktree_runtime_root(root=root, name=candidate.name).exists()
+            and not worktree_runtime_root(root=root, name=candidate.name).is_symlink()
+            and not worktree_branch_exists(root=root, branch=candidate.branch)
+        ):
+            return candidate
+        counter += 1
+
+
+def _matching_registered_worktree(
+    *,
+    root: Path,
+    plan: WorktreePlan,
+) -> WorktreeStatus | None:
+    manifest = _worktree_manifest_path(root=root, name=plan.name)
+    legacy_manifest = _legacy_worktree_manifest_path(root=root, name=plan.name)
+    if not manifest.exists() and legacy_manifest.exists():
+        manifest = legacy_manifest
+    if manifest.is_symlink() or not manifest.is_file():
+        return None
+    status = get_worktree_status(root=root, name=plan.name)
+    if (
+        not status.exists
+        or status.name != plan.name
+        or status.branch != plan.branch
+        or not _registered_worktree_matches(
+            root=root,
+            path=status.path,
+            branch=status.branch,
+        )
+    ):
+        return None
+    return status
+
+
+def validate_worktree_identifier(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value).strip()
+    if normalized.lower().startswith("feat-"):
+        normalized = normalized[5:]
+    if not any(unicodedata.category(character)[0] in {"L", "N"} for character in normalized):
+        raise ValueError(f"worktree name must contain at least one safe character: {value}")
+    return value
 
 
 def create_worktree(*, root: Path, plan: WorktreePlan, allow_dirty: bool = False) -> WorktreeStatus:
@@ -62,7 +217,7 @@ def create_worktree(*, root: Path, plan: WorktreePlan, allow_dirty: bool = False
         if not (plan.path / ".git").exists():
             raise RuntimeError(
                 f"worktree path exists but is not a git worktree: {plan.path}. "
-                f"Run `agent-flow worktree remove --name {plan.name}` to clear stale state."
+                f"Run `agent-flow-python worktree remove --name {plan.name}` to clear stale state."
             )
         existing = get_worktree_status(root=root, name=plan.name)
         if plan.branch_explicit and existing.branch != plan.branch:
@@ -148,6 +303,7 @@ def _git_commit_ref_exists(*, root: Path, ref: str) -> bool:
 
 
 def get_worktree_status(*, root: Path, name: str) -> WorktreeStatus:
+    validate_worktree_identifier(name)
     plan = plan_worktree(root=root, name=name)
     manifest = _worktree_manifest_path(root=root, name=plan.name)
     legacy_manifest = _legacy_worktree_manifest_path(root=root, name=plan.name)
@@ -191,11 +347,19 @@ def get_worktree_status(*, root: Path, name: str) -> WorktreeStatus:
             and manifest_branch_valid
             and status_branch == plan.branch
         )
+        status_path = plan.path
+        manifest_path = payload.get("path")
+        if isinstance(manifest_path, str) and manifest_path:
+            candidate = Path(manifest_path)
+            candidate = candidate if candidate.is_absolute() else root / candidate
+            candidate = candidate.resolve()
+            if _registered_worktree_matches(root=root, path=candidate, branch=status_branch):
+                status_path = candidate
         return WorktreeStatus(
             name=status_name,
             branch=status_branch,
-            path=plan.path,
-            exists=plan.path.exists(),
+            path=status_path,
+            exists=status_path.exists(),
             branch_created_by_agent_flow=branch_created,
         )
     return WorktreeStatus(
@@ -211,7 +375,10 @@ def write_worktree_manifest(*, root: Path, status: WorktreeStatus) -> Path:
     path = _worktree_manifest_path(root=root, name=status.name)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = asdict(status)
-    payload["path"] = str(status.path.relative_to(root))
+    try:
+        payload["path"] = str(status.path.relative_to(root))
+    except ValueError:
+        payload["path"] = str(status.path)
     payload["leader_root"] = str(root)
     path.write_text(f"{json.dumps(payload, indent=2, sort_keys=True)}\n", encoding="utf-8")
     return path
@@ -223,12 +390,49 @@ def worktree_runtime_root(*, root: Path, name: str) -> Path:
 
 def known_worktree_names(*, root: Path) -> list[str]:
     names: set[str] = set()
-    checkout_root = root / ".agent-flow" / "worktrees"
-    if checkout_root.exists():
-        names.update(path.name for path in checkout_root.iterdir() if path.is_dir())
-    runtime_root = _agent_flow_git_dir(root) / "worktrees"
-    if runtime_root.exists():
-        names.update(path.name for path in runtime_root.iterdir() if path.is_dir())
+    runtime_state_root = _agent_flow_git_dir(root)
+    for state_root, label, boundary in (
+        (root / ".agent-flow", "checkout", root),
+        (runtime_state_root, "runtime", runtime_state_root.parent),
+    ):
+        if not state_root.exists() and not state_root.is_symlink():
+            continue
+        if state_root.is_symlink() or not state_root.is_dir():
+            raise RuntimeError(
+                f"blocked: unsafe agent-flow worktree {label} state root: {state_root}"
+            )
+        try:
+            state_root.resolve().relative_to(boundary.resolve())
+        except ValueError as exc:
+            raise RuntimeError(
+                f"blocked: agent-flow worktree {label} state root escapes its boundary: {state_root}"
+            ) from exc
+        candidate_root = state_root / "worktrees"
+        if not candidate_root.exists() and not candidate_root.is_symlink():
+            continue
+        if candidate_root.is_symlink() or not candidate_root.is_dir():
+            raise RuntimeError(
+                f"blocked: unsafe agent-flow worktree {label} root: {candidate_root}"
+            )
+        resolved_root = candidate_root.resolve()
+        for candidate in candidate_root.iterdir():
+            if candidate.is_symlink():
+                raise RuntimeError(
+                    f"blocked: unsafe agent-flow worktree {label} entry: {candidate}"
+                )
+            if candidate.is_file():
+                continue
+            if not candidate.is_dir():
+                raise RuntimeError(
+                    f"blocked: unsafe agent-flow worktree {label} entry: {candidate}"
+                )
+            try:
+                candidate.resolve().relative_to(resolved_root)
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"blocked: agent-flow worktree {label} entry escapes its root: {candidate}"
+                ) from exc
+            names.add(candidate.name)
     return sorted(names)
 
 
@@ -299,22 +503,61 @@ def _owned_branch_for_live_worktree(*, root: Path, status: WorktreeStatus) -> st
     return current_branch if current_branch == planned_branch else None
 
 
-def _safe_component(value: str) -> str:
-    lowered = value.strip().lower()
-    safe = re.sub(r"[^a-z0-9._-]+", "-", lowered).strip("-")
-    if not safe or safe.startswith(".") or ".." in safe:
-        if not any(char.isalnum() for char in lowered):
-            raise ValueError(f"worktree name must contain at least one safe character: {value}")
-        # 한글 등 비ASCII task도 기본 worktree 이름으로 쓸 수 있게 안정적인 fallback을 둔다.
-        digest = hashlib.sha1(lowered.encode("utf-8")).hexdigest()[:8]
-        safe = f"task-{digest}"
+def _registered_worktree_matches(*, root: Path, path: Path, branch: str) -> bool:
+    result = run_safe_command(("git", "worktree", "list", "--porcelain"), cwd=root)
+    if not result.ok:
+        return False
+    return any(
+        block.startswith(f"worktree {path}\n") and f"\nbranch refs/heads/{branch}" in block
+        for block in result.stdout.split("\n\n")
+    )
+
+
+def _safe_component(value: str, *, max_length: int = 60) -> str:
+    normalized = unicodedata.normalize("NFKC", value).strip().lower()
+    without_artifacts = _strip_artifact_references(normalized)
+    safe = "".join(
+        character if unicodedata.category(character)[0] in {"L", "N"} else "-"
+        for character in without_artifacts
+    )
+    safe = safe.strip("-")
+    safe = re.sub(r"-+", "-", safe)
+    if not safe:
+        safe = SEMANTIC_NEUTRAL_FALLBACK
+    limit = max(12, min(int(max_length), 100))
+    if len(safe) > limit:
+        digest = hashlib.sha1(safe.encode("utf-8")).hexdigest()[:6]
+        safe = f"{safe[: limit - 7].rstrip('-')}-{digest}"
     return safe
 
 
-def _feature_worktree_name(value: str) -> str:
-    # worktree 디렉터리는 slash를 못 쓰므로 feat/<slug> 브랜치와 feat-<slug> 디렉터리를 짝지어 둔다.
-    safe = _safe_component(value)
-    return safe if safe.startswith("feat-") else f"feat-{safe}"
+def _strip_artifact_references(value: str) -> str:
+    def replace_markdown(match: re.Match[str]) -> str:
+        image_marker, label, destination = match.groups()
+        normalized_destination = destination.strip().removeprefix("<").removesuffix(">")
+        if (
+            image_marker
+            or FIGMA_DESTINATION_PATTERN.search(normalized_destination)
+            or ARTIFACT_DESTINATION_PATTERN.search(normalized_destination)
+        ):
+            return " "
+        return f" {label} "
+
+    stripped = MARKDOWN_REFERENCE_PATTERN.sub(replace_markdown, value)
+    stripped = URL_PATTERN.sub(" ", stripped)
+    stripped = QUOTED_ARTIFACT_PATTERN.sub(" ", stripped)
+    stripped = PATH_ARTIFACT_PATTERN.sub(lambda match: match.group(1), stripped)
+    return BARE_ARTIFACT_PATTERN.sub(lambda match: match.group(1), stripped)
+
+
+def _feature_worktree_name(value: str, *, max_slug_length: int = 60) -> str:
+    # Keep the deterministic feat/<slug> branch ↔ feat-<slug> directory
+    # contract shared by YAML, Python, Node, and all host adapters.
+    normalized = unicodedata.normalize("NFKC", value).strip()
+    if normalized.lower().startswith("feat-"):
+        normalized = normalized[5:]
+    slug = _safe_component(normalized, max_length=max_slug_length)
+    return f"feat-{slug}"
 
 
 def _validate_branch(value: str) -> None:

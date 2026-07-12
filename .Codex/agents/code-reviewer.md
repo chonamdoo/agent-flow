@@ -25,8 +25,8 @@
 - TypeScript/React/Next 변경은 React/Next/TypeScript profile의 required skill group만 확인했는가.
 - React Native/Expo 변경은 React Native profile의 required skill group만 확인했는가. RN의 `android/` native code를 직접 변경한 경우에만 Android profile mapping과 Android 관련 skill을 추가 적용했는가.
 - iOS/Swift 변경은 iOS profile의 required skill group만 확인했는가.
-- Android/Kotlin/Compose/KMP 변경은 `android-code-review`, Android profile의 `android_skills.review[*].skill`, 필요한 `chrisbanes_skills.review[*].skill` 로컬 설치본을 현재 host 경로에서만 읽었는가.
-- 필요한 profile/local skill이 없으면 `missing local <skill-group>: <skill>`와 source URL을 기록하고 `request-changes`로 판단했는가. Project-local skill은 코드 작성/리뷰에 적용되는 로컬 markdown skill만 포함하며 Figma/design, hook, branch, PR, merge, cleanup skill은 제외했는가.
+- Android/Kotlin/Compose/KMP 변경은 `android-code-review`, Android profile의 `android_skills.review[*].skill`, 필요한 `chrisbanes_skills.review[*].skill`을 `.agent-flow/skills/index.json`으로 검증된 leader 설치 스냅샷에서만 읽었는가.
+- 필요한 profile/local skill이 없으면 `missing local <skill-group>: <skill>`와 설치 스냅샷 경로를 기록하고 `request-changes`로 판단했는가. Project-local skill은 이름이나 주제로 추론하지 않고 activation metadata로만 결정했는가. 무메타데이터 항목은 `on-demand`로 유지하고, 명시적 `always`와 현재 phase/task/path selector에 매칭된 `conditional` 항목만 적용했는가.
 - 설계/구현 변경이면 `skills/clean-architecture/SKILL.md`를 적용했는가.
 - Clean Architecture must-fix 조건이 있으면 `request-changes`로 판단했는가.
 - agent-flow phase artifact와 completion marker가 요구사항을 만족하는가.
@@ -60,7 +60,7 @@ changed-file-skill-resolution: applied
 required-profile-skills: checked
 missing-required-profile-skills: none|<list>
 architecture-contract-check: pass|fail|n/a
-codex-claude-parity-check: pass|fail
+host-parity-check: pass|fail
 hook-parity-check: pass|fail
 clean-architecture: applied
 project-local-skills: checked|n/a

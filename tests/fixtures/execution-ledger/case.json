@@ -1,0 +1,45 @@
+{
+  "base_commit": "0123456789abcdef",
+  "experiment": {
+    "caps_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "experiment_id": "experiment-fixture",
+    "model_id": "model-fixture",
+    "system_prompt_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "tool_permissions_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "generated_at": "2026-01-02T03:04:05.000Z",
+  "mode": "ledger-always",
+  "round": 1,
+  "run_id": "fixture-run",
+  "run_snapshot": {
+    "runtime_id": "test",
+    "profile_snapshot_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "installed_skill_plan_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "local_skill_plan_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "lore_snapshot_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "prompt_controls_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "task": "repair the deterministic fixture",
+  "workflow_id": "fixture-workflow",
+  "workflow_phases": [
+    {
+      "artifact": "artifacts/gate-results.json",
+      "id": "gates",
+      "routes": {
+        "request-changes": "fix-loop"
+      }
+    },
+    {
+      "artifact": "final-review.md",
+      "id": "final-review",
+      "multi_review": true,
+      "routes": {
+        "request-changes": "fix-loop"
+      }
+    },
+    {
+      "artifact": "fix-loop.md",
+      "id": "fix-loop"
+    }
+  ]
+}

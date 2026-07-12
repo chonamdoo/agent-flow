@@ -9,7 +9,7 @@ Use this skill as the common entry point for the project-local agent-flow workfl
 
 ## Quick start
 
-1. From the project root, run `agent-flow status` for `/agent-flow` with no task, or `agent-flow run "<task>"` for `/agent-flow <task>`.
+1. From the project root, run `./.agent-flow/bin/agent-flow status` for `/agent-flow` with no task, or `./.agent-flow/bin/agent-flow run "<task>"` for `/agent-flow <task>`.
 2. Treat the command output as the source of truth and follow its `next_command`.
 3. Do not reinstall agent-flow or infer missing setup unless an agent-flow command exits non-zero with that setup error.
 
@@ -18,15 +18,15 @@ Use this skill as the common entry point for the project-local agent-flow workfl
 When the user types `/agent-flow <task>`, run:
 
 ```bash
-agent-flow run "<task>"
+./.agent-flow/bin/agent-flow run "<task>"
 ```
 
 Do not reinstall agent-flow for each task. Install is project setup, not the normal task entry.
-In a git repo, `agent-flow run "<task>"` starts the run inside `.agent-flow/worktrees/feat-<slug>/` on branch `feat/<slug>`.
+In a git repo, `./.agent-flow/bin/agent-flow run "<task>"` starts the run inside `.agent-flow/worktrees/feat-<slug>/` on branch `feat/<slug>`.
 
 When the user types `/agent-flow` with no task:
 
-- Run `agent-flow status` from the project root.
+- Run `./.agent-flow/bin/agent-flow status` from the project root.
 - Treat the status command output as the only source of truth.
 - If status exits 0 and reports an active run, follow the `next_command` from status.
 - If status exits non-zero with `no active run`, ask for a task using `/agent-flow <task>`.
@@ -36,16 +36,17 @@ When the user types `/agent-flow` with no task:
 When the user types `/agent-flow status`, run:
 
 ```bash
-agent-flow status
+./.agent-flow/bin/agent-flow status
 ```
 
 ## Behavior
 
 - Treat `/agent-flow` as a project-local workflow trigger, not as a shell path.
 - Keep git-project runtime state private under the repository git dir, such as `.git/agent-flow/worktrees/feat-<slug>/`; expose it only for status, debugging, or artifact inspection.
-- On a new session, always check `agent-flow status` first and continue from that result.
+- On a new session, always check `./.agent-flow/bin/agent-flow status` first and continue from that result.
 - After a phase writes its artifact, run the `next_command` printed by status or the current phase output.
 - If the workflow pauses for design or slice review, summarize the relevant artifact and wait for user approval before continuing.
+- A paused run advances only through the printed `--approve-pause` command after approval; repeating the plain command stays blocked.
 - During code generation, modification, and code review phases, apply `code-generation-discipline`. Read every matching language/framework skill before writing or judging code. If a required local skill is missing, report it and wait for install or explicit override.
 - Keep user-facing replies short Korean by default. Keep code, commands, paths, and identifiers in English.
 - Do not paste long logs or whole files. Summarize only current phase, action, `next_command`, and blocker when useful.

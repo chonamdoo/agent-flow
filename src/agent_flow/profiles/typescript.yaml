@@ -11,7 +11,7 @@ branching:
     max_slug_length: 60
 gates:
   - id: architecture-lint
-    command: ["agent-flow", "architecture-lint", "--profile", "typescript"]
+    command: ["./.agent-flow/bin/agent-flow", "architecture-lint", "--profile", "typescript"]
     required: true
     phase: pre-commit
   - id: test

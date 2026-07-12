@@ -4,13 +4,10 @@ Compatibility alias for older profiles. Use
 `templates/_shared/review/android-skills.md` as the canonical review angle.
 
 Before approving Android, Kotlin, Jetpack Compose, or KMP changes, read only
-matching local entries from the active Android profile's `android_skills` and
-`chrisbanes_skills` for the current host. Do not load duplicate skills from
-other host paths. If a required local skill is missing, request installation from
-the profile source URL. Current host paths are Codex
-`~/.codex/skills/{skill}/SKILL.md`, Claude
-`~/.claude/skills/{skill}/SKILL.md`, and OMP
-`~/.omp/agent/skills/{skill}/SKILL.md`. Cite the skill paths used in Calibration.
+matching entries through the leader checkout's `.agent-flow/skills/index.json`.
+Codex, Claude, and OMP must use the same indexed project snapshot and tree hash.
+Never fall back to host-global paths. If a required snapshot is missing or
+changed, request changes and cite the indexed project paths used in Calibration.
 End review artifacts with `android-local-skills: checked`,
 `android-local-skills-used: <skill list>`, `chrisbanes-skills: checked|n/a`,
 and `chrisbanes-skills-used: <skill list or n/a>` in `## Completion Gate`.
