@@ -148,6 +148,7 @@ def _requested_paths(tool_input: dict[str, object]) -> list[str]:
 
 
 def _shell_mutation_paths(command: str) -> tuple[bool, list[str]]:
+    unsafe_substitution = re.search(r"(?<!\\)(?:\$\(|`|<\(|>\()", command) is not None
     paths = [
         match.group(2)
         for match in re.finditer(
@@ -219,11 +220,20 @@ def _shell_mutation_paths(command: str) -> tuple[bool, list[str]]:
             and len(git_arguments) > 1
             and git_arguments[1] == "list"
         )
+        for index, word in enumerate(words):
+            if word.startswith("--output="):
+                paths.append(word.split("=", 1)[1])
+                mutating_options = True
+            elif word == "--output":
+                mutating_options = True
+                if index + 1 < len(words):
+                    paths.append(words[index + 1])
     proven_read_only = (
         bool(command_names)
         and all(name in READ_ONLY_SHELL_COMMANDS for name in command_names)
         and git_read_only
         and not mutating_options
+        and not unsafe_substitution
     )
     mutating = (
         bool(paths)
@@ -235,7 +245,7 @@ def _shell_mutation_paths(command: str) -> tuple[bool, list[str]]:
     )
     if not mutating:
         return False, []
-    dynamic_target = False
+    dynamic_target = unsafe_substitution
     for match in re.finditer(r"(?:^|\s)(?:[A-Za-z_][A-Za-z0-9_]*|of|dest|destination)=([^\s;&|]+)", command):
         candidate = match.group(1).strip("'\"")
         if candidate.startswith(("/", "./", "../")):
@@ -280,6 +290,61 @@ def _shell_mutation_paths(command: str) -> tuple[bool, list[str]]:
     return True, list(dict.fromkeys(paths))
 
 
+def _is_pinned_workspace_launcher(command: str) -> bool:
+    if re.search(r"(?<!\\)(?:\$\(|`|<\(|>\(|[;&|]|\d*>>?|&>)", command):
+        return False
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return False
+    while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):
+        words.pop(0)
+    if words and Path(words[0]).name.lower() == "env":
+        words.pop(0)
+        while words and (words[0].startswith("-") or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0])):
+            words.pop(0)
+    if not words:
+        return False
+    command_name = Path(words[0]).name.lower()
+    arguments = words[1:]
+    if command_name == "npm":
+        return bool(arguments) and arguments[0] in {"test", "run", "run-script"}
+    if command_name in {"pytest", "py.test"}:
+        return True
+    if command_name.startswith("python"):
+        return len(arguments) >= 2 and arguments[:2] == ["-m", "pytest"]
+    if command_name == "node":
+        return bool(arguments) and (
+            arguments[0] == "--test"
+            or Path(arguments[0]).name.startswith(("check-", "validate-"))
+        )
+    return False
+
+
+def _is_agent_flow_launcher(command: str) -> bool:
+    if re.search(r"(?<!\\)(?:\$\(|`|<\(|>\(|[;&|]|\d*>>?|&>)", command):
+        return False
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return False
+    while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):
+        words.pop(0)
+    if words and Path(words[0]).name.lower() == "env":
+        words.pop(0)
+        while words and (words[0].startswith("-") or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0])):
+            words.pop(0)
+    if not words:
+        return False
+    command_name = Path(words[0]).name.lower()
+    arguments = words[1:]
+    return (
+        command_name in {"agent-flow", "agent-flow-kit", "agent-flow-kit.mjs"}
+        and bool(arguments)
+        and arguments[0] in {"status", "continue", "run"}
+    )
+
+
 def main() -> int:
     try:
         payload = json.load(sys.stdin)
@@ -302,6 +367,8 @@ def main() -> int:
             mutating, paths = _shell_mutation_paths(command)
             if not mutating:
                 return 0
+            if not paths and _is_agent_flow_launcher(command):
+                return 0
             pinned_root = Path(active.identity.workspace_root).resolve(strict=True)
             current_root = cwd.resolve(strict=True)
             if current_root != pinned_root:
@@ -313,6 +380,8 @@ def main() -> int:
                     f"phase={payload.get('phase') or 'unknown'} "
                     "reason=mutating shell command must run from pinned workspace"
                 )
+            if not paths and _is_pinned_workspace_launcher(command):
+                return 0
         else:
             paths = _requested_paths(tool_input)
         if not paths:

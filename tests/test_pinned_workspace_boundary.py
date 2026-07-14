@@ -331,6 +331,61 @@ def test_wrapped_and_computed_shell_targets_fail_closed(
 
 
 @pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_shell_substitutions_and_git_output_fail_closed(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    commands = (
+        f"cat <(cp shared.txt {leader / 'shared.txt'})",
+        f"cat $(touch {leader / 'shared.txt'})",
+        f"git diff --output={leader / 'shared.txt'}",
+    )
+
+    for command in commands:
+        result = _bash_guard(leader, worktree, command, host=host)
+        assert result.returncode == 2, (command, result.stderr)
+    assert (leader / "shared.txt").read_text(encoding="utf-8") == "leader\n"
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+@pytest.mark.parametrize(
+    "command",
+    (
+        "agent-flow status",
+        "agent-flow continue",
+        "npm test",
+        "python3 -m pytest -q",
+        "node --test tests/test_skill_source_runtime.mjs",
+    ),
+)
+def test_pinned_workspace_launchers_are_allowed(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+    command: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+
+    result = _bash_guard(leader, worktree, command, host=host)
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+@pytest.mark.parametrize("command", ("agent-flow status", "agent-flow continue"))
+def test_agent_flow_launcher_is_allowed_from_leader(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+    command: str,
+) -> None:
+    leader, _worktree, _runtime, _run_dir = pinned_run
+
+    result = _bash_guard(leader, leader, command, host=host)
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
 def test_unclassified_shell_command_fails_closed_from_the_leader(
     pinned_run: tuple[Path, Path, Path, Path],
     host: str,
