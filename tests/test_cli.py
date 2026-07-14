@@ -33,6 +33,7 @@ from agent_flow.core.worktrees import plan_worktree, worktree_runtime_root
 
 
 os.environ.setdefault("AGENT_FLOW_SKIP_CODEX_TRUST", "1")
+os.environ.setdefault("AGENT_FLOW_AUTO_EXTERNAL_SKILLS", "0")
 
 
 def _node_test_env(**overrides: str) -> dict[str, str]:
@@ -2233,15 +2234,14 @@ class CliTest(unittest.TestCase):
                         check=False,
                     )
 
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    kit = json.loads((project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
-                    self.assertNotIn("graphify", kit)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("no authenticated index", result.stderr)
                     gitignore = (project_root / ".gitignore").read_text(encoding="utf-8")
-                    self.assertNotIn("graphify/", gitignore)
-                    self.assertNotIn("graphify-out/manifest.json", gitignore)
-                    self.assertNotIn("graphify-out/cost.json", gitignore)
+                    self.assertIn("graphify/", gitignore)
+                    self.assertIn("graphify-out/manifest.json", gitignore)
+                    self.assertIn("graphify-out/cost.json", gitignore)
                     for skill_root in managed_skill_roots:
-                        self.assertFalse((project_root / skill_root / "graphify").exists(), skill_root)
+                        self.assertTrue((project_root / skill_root / "graphify").exists(), skill_root)
 
     def test_node_installers_remove_legacy_antigravity_skill_links(self) -> None:
         installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
@@ -2293,12 +2293,10 @@ class CliTest(unittest.TestCase):
                         check=False,
                     )
 
-                    # 제거된 host의 legacy symlink가 ensureChildPath에서 throw하면
-                    # install 전체가 중단된다. 정리는 성공하고 link만 사라져야 한다.
+                    # 레거시 기록에는 filesystem kind와 target commitment가 없다.
                     self.assertEqual(result.returncode, 0, result.stderr)
                     for link_path in legacy_link_paths.values():
-                        self.assertFalse((project_root / link_path).is_symlink(), link_path)
-                        self.assertFalse((project_root / link_path).exists(), link_path)
+                        self.assertTrue((project_root / link_path).is_symlink(), link_path)
 
     def test_node_installer_accepts_run_install_alias(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2653,7 +2651,11 @@ class CliTest(unittest.TestCase):
             home = Path(temp_dir) / "home"
             worktree = home / ".codex" / "worktrees" / "slice" / "project"
             worktree.parent.mkdir(parents=True)
-            subprocess.run(("git", "worktree", "add", "-q", "--detach", str(worktree), "HEAD"), cwd=project_root, check=True)
+            subprocess.run(
+                ("git", "worktree", "add", "-q", "-b", "feat/node-external", str(worktree), "HEAD"),
+                cwd=project_root,
+                check=True,
+            )
             env = _node_test_env(HOME=str(home))
 
             start = subprocess.run(
