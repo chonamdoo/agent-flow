@@ -17,6 +17,37 @@ KIT_ROOT = Path(__file__).resolve().parent.parent
 GUARD = KIT_ROOT / "scripts" / "hooks" / "guard-worktree-write.py"
 
 
+def _tree_integrity(root: Path) -> str:
+    entries: list[dict[str, object]] = []
+
+    def visit(current: Path, relative: str) -> None:
+        stat = current.lstat()
+        entries.append({"path": relative, "type": "directory", "mode": stat.st_mode & 0o777})
+        for child in sorted(current.iterdir(), key=lambda path: path.name):
+            child_relative = f"{relative}/{child.name}" if relative else child.name
+            child_stat = child.lstat()
+            if child.is_dir():
+                visit(child, child_relative)
+            else:
+                entries.append(
+                    {
+                        "path": child_relative,
+                        "type": "file",
+                        "mode": child_stat.st_mode & 0o777,
+                        "sha256": hashlib.sha256(child.read_bytes()).hexdigest(),
+                    }
+                )
+
+    visit(root, "")
+    entries.sort(key=lambda entry: str(entry["path"]))
+    payload = json.dumps(
+        {"version": 1, "entries": entries},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
 def _git(root: Path, *args: str) -> str:
     result = subprocess.run(
         ("git", "-C", str(root), *args),
@@ -80,6 +111,54 @@ def pinned_run(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
         "workspace": identity,
     }
     (run_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    launcher = leader / ".agent-flow" / "bin" / "agent-flow"
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    node_runtime = leader / ".agent-flow" / "runtime" / "node"
+    node_entry = node_runtime / "bin" / "agent-flow-kit.mjs"
+    node_entry.parent.mkdir(parents=True)
+    node_entry.write_text("process.exit(0);\n", encoding="utf-8")
+    for relative in (
+        "lib",
+        "workflows",
+        "profiles",
+        "skills",
+        "templates",
+        "scripts",
+        "bootstrap",
+        "src/agent_flow",
+        ".Codex/agents",
+        ".Codex/rules",
+        ".Codex/context",
+        ".claude/agents",
+    ):
+        (node_runtime / relative).mkdir(parents=True, exist_ok=True)
+    (node_runtime / "lib" / "skill-selection.mjs").write_text("export {};\n", encoding="utf-8")
+    node = shutil.which("node")
+    (leader / ".agent-flow" / "kit.json").write_text(
+        json.dumps(
+            {
+                "project_runtime_contract": {
+                    "version": 1,
+                    "launcher": {
+                        "path": ".agent-flow/bin/agent-flow",
+                        "sha256": hashlib.sha256(launcher.read_bytes()).hexdigest(),
+                    },
+                    "node": {"path": str(Path(node or sys.executable).resolve())},
+                    "python": {
+                        "path": str(Path(sys.executable).absolute()),
+                        "resolved_path": str(Path(sys.executable).resolve()),
+                    },
+                    "runtime": {
+                        "path": ".agent-flow/runtime/node",
+                        "integrity": _tree_integrity(node_runtime),
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
     return leader, worktree, runtime, run_dir
 
 
@@ -119,9 +198,15 @@ def _bash_guard(
     *,
     host: str = "codex",
     phase: str = "implement",
+    env_override: dict[str, str | None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
     env["PYTHONPATH"] = str(KIT_ROOT / "src")
+    for name, value in (env_override or {}).items():
+        if value is None:
+            env.pop(name, None)
+        else:
+            env[name] = value
     payload = {
         "tool_name": "Bash",
         "cwd": str(cwd),
@@ -352,14 +437,12 @@ def test_shell_substitutions_and_git_output_fail_closed(
 @pytest.mark.parametrize(
     "command",
     (
-        "agent-flow status",
-        "agent-flow continue",
         "npm test",
         "python3 -m pytest -q",
         "node --test tests/test_skill_source_runtime.mjs",
     ),
 )
-def test_pinned_workspace_launchers_are_allowed(
+def test_unsandboxed_gate_launchers_are_rejected(
     pinned_run: tuple[Path, Path, Path, Path],
     host: str,
     command: str,
@@ -368,21 +451,175 @@ def test_pinned_workspace_launchers_are_allowed(
 
     result = _bash_guard(leader, worktree, command, host=host)
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 2
+    assert "did not declare a target path" in result.stderr
 
 
 @pytest.mark.parametrize("host", ("codex", "claude", "omp"))
-@pytest.mark.parametrize("command", ("agent-flow status", "agent-flow continue"))
+@pytest.mark.parametrize("subcommand", ("status", "continue"))
 def test_agent_flow_launcher_is_allowed_from_leader(
     pinned_run: tuple[Path, Path, Path, Path],
     host: str,
-    command: str,
+    subcommand: str,
 ) -> None:
     leader, _worktree, _runtime, _run_dir = pinned_run
+    command = f"{leader / '.agent-flow' / 'bin' / 'agent-flow'} {subcommand}"
 
     result = _bash_guard(leader, leader, command, host=host)
 
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_authenticated_sandboxed_gate_launcher_is_allowed(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    launcher = leader / ".agent-flow" / "bin" / "agent-flow"
+
+    result = _bash_guard(leader, worktree, f"{launcher} gate -- npm test", host=host)
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_path_shadowed_agent_flow_launcher_is_rejected(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    fake = worktree / "agent-flow"
+    fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake.chmod(0o755)
+
+    result = _bash_guard(leader, worktree, "PATH=. agent-flow status", host=host)
+
+    assert result.returncode == 2
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+@pytest.mark.parametrize("variable", ("NODE_OPTIONS", "LD_PRELOAD"))
+def test_environment_prefixed_agent_flow_launcher_is_rejected(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+    variable: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    launcher = leader / ".agent-flow" / "bin" / "agent-flow"
+
+    result = _bash_guard(leader, worktree, f"{variable}=payload {launcher} status", host=host)
+
+    assert result.returncode == 2
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_inherited_node_options_rejects_agent_flow_launcher(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    launcher = leader / ".agent-flow" / "bin" / "agent-flow"
+
+    result = _bash_guard(
+        leader,
+        worktree,
+        f"{launcher} status",
+        host=host,
+        env_override={"NODE_OPTIONS": "--require=/tmp/payload.js"},
+    )
+
+    assert result.returncode == 2
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_replaced_project_agent_flow_launcher_is_rejected(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    launcher = leader / ".agent-flow" / "bin" / "agent-flow"
+    launcher.write_text("#!/bin/sh\ntouch ../escaped\n", encoding="utf-8")
+    launcher.chmod(0o755)
+
+    result = _bash_guard(leader, worktree, f"{launcher} status", host=host)
+
+    assert result.returncode == 2
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_replaced_project_node_runtime_is_rejected(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    launcher = leader / ".agent-flow" / "bin" / "agent-flow"
+    node_entry = leader / ".agent-flow" / "runtime" / "node" / "bin" / "agent-flow-kit.mjs"
+    node_entry.write_text("process.exit(1);\n", encoding="utf-8")
+
+    result = _bash_guard(leader, worktree, f"{launcher} status", host=host)
+
+    assert result.returncode == 2
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_global_launcher_dependency_tamper_is_rejected(
+    pinned_run: tuple[Path, Path, Path, Path],
+    tmp_path: Path,
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    python_runtime = leader / ".agent-flow" / "runtime" / "python" / "agent_flow"
+    (python_runtime / "core").mkdir(parents=True)
+    shutil.copy2(KIT_ROOT / "src" / "agent_flow" / "__init__.py", python_runtime / "__init__.py")
+    shutil.copy2(KIT_ROOT / "src" / "agent_flow" / "core" / "__init__.py", python_runtime / "core" / "__init__.py")
+    shutil.copy2(
+        KIT_ROOT / "src" / "agent_flow" / "core" / "workspace_boundary.py",
+        python_runtime / "core" / "workspace_boundary.py",
+    )
+    package = tmp_path / "global-package"
+    shutil.copytree(leader / ".agent-flow" / "runtime" / "node", package)
+    global_bin = tmp_path / "global-bin"
+    global_bin.mkdir()
+    launcher = global_bin / "agent-flow"
+    launcher.symlink_to(package / "bin" / "agent-flow-kit.mjs")
+    command = f"{launcher} status"
+    clean_python_env = {
+        name: None
+        for name in ("PYTHON", "PYTHON_EXECUTABLE", "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP")
+    }
+
+    accepted = _bash_guard(
+        leader,
+        worktree,
+        command,
+        host=host,
+        env_override=clean_python_env,
+    )
+    (package / "lib" / "skill-selection.mjs").write_text("throw new Error('tampered');\n", encoding="utf-8")
+    rejected = _bash_guard(
+        leader,
+        worktree,
+        command,
+        host=host,
+        env_override=clean_python_env,
+    )
+
+    assert accepted.returncode == 0, accepted.stderr
+    assert rejected.returncode == 2
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_agent_flow_install_alias_is_not_a_runtime_launcher(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    launcher = leader / ".agent-flow" / "bin" / "agent-flow"
+
+    result = _bash_guard(leader, worktree, f"{launcher} run install", host=host)
+
+    assert result.returncode == 2
 
 
 @pytest.mark.parametrize("host", ("codex", "claude", "omp"))

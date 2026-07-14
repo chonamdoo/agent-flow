@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -38,6 +40,21 @@ SHELL_MUTATORS = {
     "touch",
     "truncate",
 }
+RUNTIME_SOURCE_DIRECTORIES = (
+    "bin",
+    "lib",
+    "workflows",
+    "profiles",
+    "skills",
+    "templates",
+    "scripts",
+    "bootstrap",
+    "src/agent_flow",
+    ".Codex/agents",
+    ".Codex/rules",
+    ".Codex/context",
+    ".claude/agents",
+)
 READ_ONLY_SHELL_COMMANDS = {
     "basename",
     "cat",
@@ -290,58 +307,161 @@ def _shell_mutation_paths(command: str) -> tuple[bool, list[str]]:
     return True, list(dict.fromkeys(paths))
 
 
-def _is_pinned_workspace_launcher(command: str) -> bool:
+def _is_agent_flow_launcher(command: str, cwd: Path, leader_root: Path, pinned_root: Path) -> bool:
     if re.search(r"(?<!\\)(?:\$\(|`|<\(|>\(|[;&|]|\d*>>?|&>)", command):
         return False
-    try:
-        words = shlex.split(command)
-    except ValueError:
-        return False
-    while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):
-        words.pop(0)
-    if words and Path(words[0]).name.lower() == "env":
-        words.pop(0)
-        while words and (words[0].startswith("-") or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0])):
-            words.pop(0)
-    if not words:
-        return False
-    command_name = Path(words[0]).name.lower()
-    arguments = words[1:]
-    if command_name == "npm":
-        return bool(arguments) and arguments[0] in {"test", "run", "run-script"}
-    if command_name in {"pytest", "py.test"}:
-        return True
-    if command_name.startswith("python"):
-        return len(arguments) >= 2 and arguments[:2] == ["-m", "pytest"]
-    if command_name == "node":
-        return bool(arguments) and (
-            arguments[0] == "--test"
-            or Path(arguments[0]).name.startswith(("check-", "validate-"))
+    if any(
+        os.environ.get(name)
+        for name in (
+            "NODE_OPTIONS",
+            "NODE_PATH",
+            "BASH_ENV",
+            "ENV",
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "DYLD_INSERT_LIBRARIES",
+            "DYLD_LIBRARY_PATH",
         )
-    return False
-
-
-def _is_agent_flow_launcher(command: str) -> bool:
-    if re.search(r"(?<!\\)(?:\$\(|`|<\(|>\(|[;&|]|\d*>>?|&>)", command):
+    ):
         return False
     try:
         words = shlex.split(command)
     except ValueError:
         return False
-    while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):
-        words.pop(0)
-    if words and Path(words[0]).name.lower() == "env":
-        words.pop(0)
-        while words and (words[0].startswith("-") or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0])):
-            words.pop(0)
-    if not words:
+    if (
+        not words
+        or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0])
+        or Path(words[0]).name.lower() == "env"
+    ):
         return False
-    command_name = Path(words[0]).name.lower()
+    command_token = words[0]
+    command_name = Path(command_token).name.lower()
     arguments = words[1:]
-    return (
-        command_name in {"agent-flow", "agent-flow-kit", "agent-flow-kit.mjs"}
-        and bool(arguments)
-        and arguments[0] in {"status", "continue", "run"}
+    if command_name not in {"agent-flow", "agent-flow-kit"} or not arguments:
+        return False
+    if arguments[0] not in {"status", "continue", "run", "gate", "gates", "architecture-lint"}:
+        return False
+    if arguments[:2] == ["run", "install"]:
+        return False
+    if "/" in command_token or "\\" in command_token:
+        candidate = (cwd / command_token).resolve(strict=True) if not Path(command_token).is_absolute() else Path(command_token).resolve(strict=True)
+    else:
+        found = shutil.which(command_token)
+        if not found:
+            return False
+        candidate = Path(found).resolve(strict=True)
+    local_launcher = leader_root / ".agent-flow" / "bin" / "agent-flow"
+    if local_launcher.exists() and candidate == local_launcher.resolve(strict=True):
+        kit_path = leader_root / ".agent-flow" / "kit.json"
+        try:
+            runtime = leader_root / ".agent-flow" / "runtime" / "node"
+            for managed_path in (local_launcher, kit_path, runtime):
+                cursor = leader_root
+                for part in managed_path.relative_to(leader_root).parts:
+                    cursor /= part
+                    if cursor.is_symlink():
+                        return False
+            kit = json.loads(kit_path.read_text(encoding="utf-8"))
+            contract = kit["project_runtime_contract"]
+            launcher_contract = contract["launcher"]
+            runtime_contract = contract["runtime"]
+            node_contract = contract["node"]
+            python_contract = contract["python"]
+            if (
+                contract["version"] != 1
+                or launcher_contract["path"] != ".agent-flow/bin/agent-flow"
+                or runtime_contract["path"] != ".agent-flow/runtime/node"
+                or Path(node_contract["path"]).resolve(strict=True) != Path(node_contract["path"])
+                or not Path(python_contract["path"]).is_absolute()
+                or Path(python_contract["path"]).resolve(strict=True) != Path(python_contract["resolved_path"])
+            ):
+                return False
+            if local_launcher.is_symlink() or local_launcher.stat().st_nlink != 1:
+                return False
+            return (
+                hashlib.sha256(local_launcher.read_bytes()).hexdigest() == launcher_contract["sha256"]
+                and _runtime_tree_integrity(runtime) == runtime_contract["integrity"]
+            )
+        except (KeyError, OSError, TypeError, ValueError):
+            return False
+    if any(
+        os.environ.get(name)
+        for name in ("PYTHON", "PYTHON_EXECUTABLE", "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP")
+    ):
+        return False
+    if any(candidate == root or root in candidate.parents for root in (leader_root, pinned_root)):
+        return False
+    runtime_root = leader_root / ".agent-flow" / "runtime" / "node"
+    runtime = runtime_root / "bin" / "agent-flow-kit.mjs"
+    kit_path = leader_root / ".agent-flow" / "kit.json"
+    cursor = leader_root
+    for part in runtime.relative_to(leader_root).parts:
+        cursor /= part
+        stat = cursor.lstat() if cursor.exists() else None
+        if stat is None or cursor.is_symlink():
+            return False
+    if not runtime.is_file() or runtime.stat().st_nlink != 1 or not candidate.is_file() or candidate.is_symlink():
+        return False
+    try:
+        contract = json.loads(kit_path.read_text(encoding="utf-8"))["project_runtime_contract"]
+        node_path = Path(contract["node"]["path"])
+        selected_node = shutil.which("node")
+        return (
+            contract["version"] == 1
+            and contract["runtime"]["path"] == ".agent-flow/runtime/node"
+            and _runtime_tree_integrity(runtime_root) == contract["runtime"]["integrity"]
+            and selected_node is not None
+            and Path(selected_node).resolve(strict=True) == node_path.resolve(strict=True)
+            and hashlib.sha256(runtime.read_bytes()).digest() == hashlib.sha256(candidate.read_bytes()).digest()
+            and _global_runtime_matches(candidate, runtime_root)
+        )
+    except (KeyError, OSError, TypeError, ValueError):
+        return False
+
+
+def _runtime_tree_integrity(root: Path) -> str:
+    entries: list[dict[str, object]] = []
+
+    def visit(current: Path, relative: str) -> None:
+        stat = current.lstat()
+        if current.is_symlink() or not current.is_dir():
+            raise ValueError(f"unsafe runtime path: {current}")
+        entries.append({"path": relative, "type": "directory", "mode": stat.st_mode & 0o777})
+        for child in sorted(current.iterdir(), key=lambda path: path.name):
+            child_relative = f"{relative}/{child.name}" if relative else child.name
+            child_stat = child.lstat()
+            if child.is_symlink():
+                raise ValueError(f"unsafe runtime path: {child}")
+            if child.is_dir():
+                visit(child, child_relative)
+            elif child.is_file():
+                entries.append(
+                    {
+                        "path": child_relative,
+                        "type": "file",
+                        "mode": child_stat.st_mode & 0o777,
+                        "sha256": hashlib.sha256(child.read_bytes()).hexdigest(),
+                    }
+                )
+            else:
+                raise ValueError(f"unsafe runtime path: {child}")
+
+    visit(root, "")
+    entries.sort(key=lambda entry: str(entry["path"]))
+    payload = json.dumps(
+        {"version": 1, "entries": entries},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _global_runtime_matches(candidate: Path, installed_runtime: Path) -> bool:
+    package_root = candidate.parent.parent
+    return all(
+        _runtime_tree_integrity(package_root / relative)
+        == _runtime_tree_integrity(installed_runtime / relative)
+        for relative in RUNTIME_SOURCE_DIRECTORIES
     )
 
 
@@ -367,9 +487,10 @@ def main() -> int:
             mutating, paths = _shell_mutation_paths(command)
             if not mutating:
                 return 0
-            if not paths and _is_agent_flow_launcher(command):
-                return 0
             pinned_root = Path(active.identity.workspace_root).resolve(strict=True)
+            leader_root = _leader_root(cwd).resolve(strict=True)
+            if _is_agent_flow_launcher(command, cwd, leader_root, pinned_root):
+                return 0
             current_root = cwd.resolve(strict=True)
             if current_root != pinned_root:
                 raise boundary_error(
@@ -380,8 +501,6 @@ def main() -> int:
                     f"phase={payload.get('phase') or 'unknown'} "
                     "reason=mutating shell command must run from pinned workspace"
                 )
-            if not paths and _is_pinned_workspace_launcher(command):
-                return 0
         else:
             paths = _requested_paths(tool_input)
         if not paths:

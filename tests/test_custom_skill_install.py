@@ -335,6 +335,83 @@ def test_node_run_rejects_skill_index_tamper(tmp_path: Path) -> None:
     assert "commitment" in result.stderr
 
 
+def test_sandboxed_gate_cannot_write_outside_pinned_workspace(tmp_path: Path) -> None:
+    if sys.platform != "darwin" and shutil.which("bwrap") is None:
+        pytest.skip("platform sandbox is unavailable")
+    project = tmp_path / "project"
+    outside = tmp_path / "outside.txt"
+    project.mkdir()
+    outside.write_text("outside\n", encoding="utf-8")
+    assert _install(project).returncode == 0
+    started = _command(project, "run", "start", "--task", "sandbox")
+    assert started.returncode == 0, started.stderr
+    benign = _command(project, "gate", "--", sys.executable, "-c", "print('ok')")
+    escaped = _command(
+        project,
+        "gate",
+        "--",
+        sys.executable,
+        "-c",
+        f"from pathlib import Path; Path({str(outside)!r}).write_text('changed')",
+    )
+
+    assert benign.returncode == 0, benign.stderr
+    assert escaped.returncode != 0
+    assert outside.read_text(encoding="utf-8") == "outside\n"
+
+
+def test_sandboxed_gate_never_uses_path_shadowed_bubblewrap(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    fake_bin = tmp_path / "bin"
+    marker = tmp_path / "fake-bwrap-ran"
+    project.mkdir()
+    fake_bin.mkdir()
+    fake = fake_bin / "bwrap"
+    fake.write_text(f"#!/bin/sh\ntouch {marker}\nexit 0\n", encoding="utf-8")
+    fake.chmod(0o755)
+    assert _install(project).returncode == 0
+    assert _command(project, "run", "start", "--task", "sandbox").returncode == 0
+    env = {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"}
+
+    result = _command(project, "gate", "--", sys.executable, "-c", "print('ok')", env=env)
+
+    assert not marker.exists()
+    if sys.platform == "darwin" or Path("/usr/bin/bwrap").is_file():
+        assert result.returncode == 0, result.stderr
+    else:
+        assert result.returncode != 0
+
+
+def test_sandboxed_python_cli_uses_the_contracted_interpreter(tmp_path: Path) -> None:
+    if sys.platform != "darwin" and not Path("/usr/bin/bwrap").is_file():
+        pytest.skip("platform sandbox is unavailable")
+    project = tmp_path / "project"
+    marker = project / "contracted-python-ran"
+    python = project / "python-with-yaml"
+    project.mkdir()
+    yaml_site = Path(yaml.__file__).resolve().parent.parent
+    python.write_text(
+        "#!/bin/sh\n"
+        f"PYTHONPATH={shlex.quote(str(yaml_site))}${{PYTHONPATH:+:$PYTHONPATH}}\n"
+        "export PYTHONPATH\n"
+        f"if [ \"$1\" = \"-m\" ] && [ \"$2\" = \"agent_flow.cli\" ] "
+        f"&& [ \"$3\" = \"architecture-lint\" ]; then : > {shlex.quote(str(marker))}; fi\n"
+        f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+    env = {"PYTHON": str(python), "PYTHON_EXECUTABLE": str(python)}
+    assert _install(project, env=env).returncode == 0
+    marker.unlink(missing_ok=True)
+    assert _command(project, "run", "start", "--task", "python contract", env=env).returncode == 0
+    marker.unlink(missing_ok=True)
+
+    result = _command(project, "architecture-lint", env=env)
+
+    assert result.returncode == 0, result.stderr
+    assert marker.is_file()
+
+
 def test_reinstall_commits_transaction_without_residue(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()

@@ -4868,6 +4868,7 @@ ${AGENT_FLOW_COMMAND} status
 - Keep git-project runtime state private under the repository git dir, such as \`.git/agent-flow/worktrees/feat-<slug>/\`; expose it only for status, debugging, or artifact inspection.
 - On a new session, always check \`${AGENT_FLOW_COMMAND} status\` first and continue from that result.
 - After a phase writes its artifact, run the \`next_command\` printed by status or the current phase output.
+- Run direct build, test, typecheck, and lint commands from the pinned worktree through \`${AGENT_FLOW_COMMAND} gate -- <command ...>\`; do not run unsandboxed gate launchers.
 - If the workflow pauses for design or slice review, summarize the relevant artifact and wait for user approval before continuing.
 - During code generation, modification, and code review phases, apply \`code-generation-discipline\`. Resolve required skills from active profile metadata, installed skill index, changed files, and task scope. Load only the touched profile skill union. If a required local skill is missing, report it and wait for install or explicit override.
 - Keep user-facing replies short Korean by default. Keep code, commands, paths, and identifiers in English.
@@ -5744,32 +5745,115 @@ Context rules:
 }
 
 function runArchitectureLint(args) {
-  runPythonCliCommand("architecture-lint", args);
+  runSandboxedPythonCliCommand("architecture-lint", args);
 }
 
 function runGates(args) {
-  runPythonCliCommand("gates", args);
+  runSandboxedPythonCliCommand("gates", args);
 }
 
-function runPythonCliCommand(subcommand, args) {
+function trustedLinuxBubblewrap() {
+  const candidate = "/usr/bin/bwrap";
+  try {
+    const stat = fs.lstatSync(candidate);
+    if (
+      !stat.isFile()
+      || stat.isSymbolicLink()
+      || stat.uid !== 0
+      || stat.nlink !== 1
+      || (stat.mode & 0o022) !== 0
+    ) return null;
+    fs.accessSync(candidate, fs.constants.X_OK);
+    return candidate;
+  } catch {
+    return null;
+  }
+}
+
+function sandboxProfilePath(pathName) {
+  return String(pathName).replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+}
+
+function runSandboxedGate(args, extraEnv = {}) {
+  const separator = args.indexOf("--");
+  const gateArgs = separator === -1 ? args : args.slice(separator + 1);
+  if (gateArgs.length === 0) throw new Error("gate requires a command after --");
   const root = resolveAgentFlowRoot(process.cwd());
+  assertInstalled(root);
+  const state = assertNodeRunBoundary(readCurrentRun(root), root);
+  assertNodeSkillPlanPinned(state, root);
+  const pinned = fs.realpathSync(state.workspace_root ?? root);
+  const invocation = gitOutput(process.cwd(), ["rev-parse", "--show-toplevel"])
+    ?? fs.realpathSync(process.cwd());
+  if (!samePath(invocation, pinned)) {
+    throw new Error(`blocked: sandboxed gate must run from pinned workspace ${pinned}`);
+  }
+  const gateRuntime = path.join(pinned, ".agent-flow", "gate-runtime");
+  const gateHome = path.join(gateRuntime, "home");
+  const gateTemp = path.join(gateRuntime, "tmp");
+  ensureManagedDirectory(gateHome, pinned);
+  ensureManagedDirectory(gateTemp, pinned);
+  const env = {
+    ...process.env,
+    ...extraEnv,
+    HOME: gateHome,
+    TMPDIR: gateTemp,
+    TEMP: gateTemp,
+    TMP: gateTemp,
+  };
+  let executable;
+  let sandboxArgs;
+  if (process.platform === "darwin" && fs.existsSync("/usr/bin/sandbox-exec")) {
+    const profile = [
+      "(version 1)",
+      "(allow default)",
+      "(deny file-write*)",
+      `(allow file-write* (subpath "${sandboxProfilePath(pinned)}"))`,
+      "(allow file-write* (literal \"/dev/null\") (literal \"/dev/tty\"))",
+    ].join(" ");
+    executable = "/usr/bin/sandbox-exec";
+    sandboxArgs = ["-p", profile, ...gateArgs];
+  } else if (process.platform === "linux") {
+    executable = trustedLinuxBubblewrap();
+    if (!executable) throw new Error("blocked: sandboxed gate requires bwrap on Linux");
+    sandboxArgs = [
+      "--die-with-parent",
+      "--ro-bind", "/", "/",
+      "--bind", pinned, pinned,
+      "--dev-bind", "/dev", "/dev",
+      "--proc", "/proc",
+      "--chdir", pinned,
+      "--",
+      ...gateArgs,
+    ];
+  } else {
+    throw new Error(`blocked: sandboxed gate is unsupported on ${process.platform}`);
+  }
+  const result = safeSpawnSync(executable, sandboxArgs, {
+    cwd: pinned,
+    env,
+    stdio: "inherit",
+    timeout: 30 * 60 * 1000,
+  });
+  if (result.error) throw result.error;
+  process.exit(result.status ?? 1);
+}
+
+function runSandboxedPythonCliCommand(subcommand, args) {
+  const root = resolveAgentFlowRoot(process.cwd());
+  const python = projectPythonPath();
   const pythonPathEntries = [
     path.join(KIT_ROOT, "src"),
     root ? installedPythonRuntimePath(root) : "",
     process.env.PYTHONPATH,
   ].filter(Boolean);
-  const env = {
-    ...process.env,
-    PYTHONPATH: [...new Set(pythonPathEntries)].join(path.delimiter),
-  };
-  const result = safeSpawnSync(
-    "python3",
-    ["-m", "agent_flow.cli", subcommand, ...args],
+  runSandboxedGate(
+    ["--", python, "-m", "agent_flow.cli", subcommand, ...args],
     {
-      cwd: process.cwd(),
-      env,
-      encoding: "utf8",
-      stdio: ["ignore", "inherit", "inherit"],
+      PYTHONDONTWRITEBYTECODE: "1",
+      PYTHONNOUSERSITE: "1",
+      PYTHONSAFEPATH: "1",
+      PYTHONPATH: [...new Set(pythonPathEntries)].join(path.delimiter),
     },
   );
 }
@@ -5842,7 +5926,11 @@ try {
     runGates(process.argv.slice(3));
   }
 
-  console.error("usage: agent-flow-kit install [--force-managed] | sync | gates [--profile <id>] [--worktree <name>] | architecture-lint [--profile <id>] [--files ...] | run <install|start|status|next|advance|push-watch|push-watch-tick>");
+  if (command === "gate") {
+    runSandboxedGate(process.argv.slice(3));
+  }
+
+  console.error("usage: agent-flow-kit install [--force-managed] | sync | status | continue | gate -- <command ...> | gates [--profile <id>] [--worktree <name>] | architecture-lint [--profile <id>] [--files ...] | run <task|install|start|status|next|advance|push-watch|push-watch-tick>");
   process.exit(1);
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));

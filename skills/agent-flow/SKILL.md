@@ -45,6 +45,7 @@ agent-flow status
 - Keep git-project runtime state private under the repository git dir, such as `.git/agent-flow/worktrees/feat-<slug>/`; expose it only for status, debugging, or artifact inspection.
 - On a new session, always check `agent-flow status` first and continue from that result.
 - After a phase writes its artifact, run the `next_command` printed by status or the current phase output.
+- Run direct build, test, typecheck, and lint commands from the pinned worktree through `agent-flow gate -- <command ...>`; do not run unsandboxed gate launchers.
 - If the workflow pauses for design or slice review, summarize the relevant artifact and wait for user approval before continuing.
 - During code generation, modification, and code review phases, apply `code-generation-discipline`. Read every matching language/framework skill before writing or judging code. If a required local skill is missing, report it and wait for install or explicit override.
 - Keep user-facing replies short Korean by default. Keep code, commands, paths, and identifiers in English.
