@@ -71,8 +71,7 @@ phases:
       Review slice-plan.md. Check missing steps, wrong order, oversized work,
       vague validation, and hidden dependencies. Output plan-review.md with
       exactly one verdict line: `verdict: approve` or
-      `verdict: request-changes`. Include `## Findings`; list each actionable
-      finding as one `- ` item, or write `- none` when approving.
+      `verdict: request-changes`.
 
   - id: ddd-design
     description: DDD first, then Clean Architecture design.
@@ -144,12 +143,12 @@ phases:
   - id: worktree
     description: Create an isolated git worktree for parallel task safety.
     prompt: |
-      The runner already created and pinned an isolated worktree from
-      `profile.branching.base` when this run started. Verify and reuse that exact
-      worktree; do not create or switch to another branch/worktree in this phase.
-      Do not work on main/master/develop. Confirm profile.branching.naming and
-      record worktree path, branch name, and base commit. If the pinned worktree
-      is absent, stop instead of falling back to the leader checkout.
+      Run `git worktree add -b feat/<slug> .agent-flow/worktrees/feat-<slug>/ main`
+      to create an isolated worktree without switching the leader branch. Do
+      not just create a branch — a physical worktree is required for parallel
+      task isolation. Do not work on main/master/develop. Follow
+      profile.branching.naming when present. Record worktree path, branch name,
+      and base commit.
       Output: artifacts/worktree.md.
 
   - id: run-start
@@ -182,7 +181,7 @@ phases:
       `android/` native changes also apply Android profile mapping. Unrelated
       platform skill absence must not block. Save the failure summary and
       command output. If a required local skill is missing, do not complete this
-      artifact; report `missing local <group>: <skill>` and do not use a host-global fallback.
+      artifact; report `missing local <group>: <skill>` with the source URL.
       End with:
 
           ## Completion Gate
@@ -232,7 +231,7 @@ phases:
       Android/Chris Banes skills are required only for Android/Kotlin/
       Compose/KMP changes or React Native `android/` native code. If a required
       local skill is missing, do not complete this artifact; report
-      `missing local <group>: <skill>` and do not use a host-global fallback.
+      `missing local <group>: <skill>` with the source URL.
       End with:
 
           ## Completion Gate
@@ -290,8 +289,8 @@ phases:
       and task scope. Android/Chris Banes skills are required only for
       Android/Kotlin/Compose/KMP changes or React Native
       `android/` native code. If a required local skill is missing, do not
-      complete this artifact; report `missing local <group>: <skill>` and do
-      not use a host-global fallback.
+      complete this artifact; report `missing local <group>: <skill>` with the
+      source URL.
       End with:
 
           ## Completion Gate
@@ -367,7 +366,7 @@ phases:
       - "required-profile-skills: checked"
       - "missing-required-profile-skills:"
       - "architecture-contract-check: pass|fail|n/a"
-      - "host-parity-check: pass|fail"
+      - "codex-claude-parity-check: pass|fail"
       - "hook-parity-check: pass|fail"
       - "clean-architecture-review: applied"
       - "project-local-skills: checked|n/a"
@@ -401,9 +400,7 @@ phases:
       Provider failure falls back to active-host sub-agents only. Each reviewer
       section must include
       `reviewer-source: sub-agent`. After recording each sub-agent result,
-      close that sub-agent session. Under each reviewer, include `## Findings`
-      and list each actionable finding as one `- ` item, or `- none`. Record
-      per-reviewer verdicts and end with
+      close that sub-agent session. Record per-reviewer verdicts and end with
       `## Overall` followed by exactly one verdict line: `verdict: approve` or
       `verdict: request-changes`.
       Apply agent-flow-concise-output: one finding per line, Korean concise
@@ -413,11 +410,9 @@ phases:
       only the touched profile skill union. Android/Chris Banes skills are
       required only for Android/Kotlin/Compose/KMP changes or React Native
       `android/` native code. If a required local skill is missing, record
-      `missing local <group>: <skill>` and make that
+      `missing local <group>: <skill>` with the source URL and make that
       reviewer verdict `request-changes`. Unrelated platform skill absence must
-      not block. Do not use a host-global fallback.
-      Set `host-parity-check: pass` only after Claude, Codex, and OMP workflow
-      routing and hook behavior are all verified as equivalent for this change.
+      not block.
       Also include:
 
           ## Completion Gate
@@ -428,7 +423,7 @@ phases:
           required-profile-skills: checked
           missing-required-profile-skills: none|<list>
           architecture-contract-check: pass|fail|n/a
-          host-parity-check: pass|fail
+          codex-claude-parity-check: pass|fail
           hook-parity-check: pass|fail
           clean-architecture-review: applied
           project-local-skills: checked|n/a
@@ -454,7 +449,7 @@ phases:
       Output: artifacts/multi-review.md.
 
   - id: architecture-review
-    description: Review implementation against DDD/Clean design. Runner routes approve→gates, request-changes/blocked→refactor.
+    description: Review implementation against DDD/Clean design. Runner routes approve→gates, request-changes→refactor.
     multi_review: true
     required_markers:
       - "skills_checked: true"
@@ -464,7 +459,7 @@ phases:
       - "required-profile-skills: checked"
       - "missing-required-profile-skills:"
       - "architecture-contract-check: pass|fail|n/a"
-      - "host-parity-check: pass|fail"
+      - "codex-claude-parity-check: pass|fail"
       - "hook-parity-check: pass|fail"
       - "clean-architecture: applied"
       - "project-local-skills: checked|n/a"
@@ -486,7 +481,6 @@ phases:
     routes:
       approve: gates
       request-changes: refactor
-      blocked: refactor
     prompt: |
       Run two independent active-host reviewer sub-agents before QA.
       Each required reviewer section must include `reviewer-source: sub-agent`.
@@ -503,9 +497,7 @@ phases:
       from either reviewer makes the overall verdict request-changes.
       Output architecture-review.md with each reviewer section and end with
       `## Overall` followed by exactly one verdict line:
-      `verdict: approve`, `verdict: request-changes`, or `verdict: blocked`.
-      `status: blocked` is also accepted instead of a verdict when the review
-      itself cannot complete. Never emit both `status` and `verdict` route fields.
+      `verdict: approve` or `verdict: request-changes`.
       Apply agent-flow-concise-output for findings and keep verdict markers
       unchanged.
       Before judging code, resolve required review skills from active profile
@@ -515,8 +507,6 @@ phases:
       `android/` native code. Missing required profile skills make that reviewer
       verdict `request-changes`; unrelated platform skill absence must be
       ignored.
-      Set `host-parity-check: pass` only after Claude, Codex, and OMP workflow
-      routing and hook behavior are all verified as equivalent for this change.
       End with:
 
           ## Completion Gate
@@ -527,7 +517,7 @@ phases:
           required-profile-skills: checked
           missing-required-profile-skills: none|<list>
           architecture-contract-check: pass|fail|n/a
-          host-parity-check: pass|fail
+          codex-claude-parity-check: pass|fail
           hook-parity-check: pass|fail
           clean-architecture: applied
           project-local-skills: checked|n/a
@@ -604,8 +594,8 @@ phases:
       installed skill index, changed files, and task scope. Android/Chris Banes
       skills are required only for Android/Kotlin/Compose/KMP fixes or React
       Native `android/` native code. If a required local skill is missing, do
-      not complete this artifact; report `missing local <group>: <skill>` and
-      do not use a host-global fallback.
+      not complete this artifact; report `missing local <group>: <skill>` with
+      the source URL.
       End with:
 
           ## Completion Gate

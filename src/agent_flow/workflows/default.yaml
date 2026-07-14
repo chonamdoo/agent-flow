@@ -155,11 +155,9 @@ phases:
         - `<prefix><slug>` where prefix and slug_style come from the profile.
         - slug is derived from the configured slug_source and converted to slug_style.
         - truncate to max_slug_length without breaking words.
-      The runner creates the git worktree when the run starts. Verify and reuse
-      that exact pinned worktree; do not create a second worktree in this phase.
-      Default directory naming is `.agent-flow/worktrees/feat-<slug>/`; default
-      branch naming is `feat/<slug>`. If no pinned worktree exists, stop instead
-      of continuing from the leader checkout.
+      Create a git worktree before implementation. Default directory naming is
+      `.agent-flow/worktrees/feat-<slug>/`; default branch naming is
+      `feat/<slug>`. Do not continue from the leader checkout.
       Output: worktree.md (branch name, base, worktree path).
 
   - id: implement
@@ -209,8 +207,8 @@ phases:
           skill union. Android/Chris Banes skills are required only for
           Android/Kotlin/Compose/KMP files or React Native `android/` native
           code. If required skills are missing, report
-          `missing local <group>: <skill>` and stop. Repair the indexed project
-          snapshot outside the active run; do not use a host-global fallback.
+          `missing local <group>: <skill>` with the source URL and do not claim
+          completion without user override.
       7. Honor SOLID principles from the design's SOLID section.
       8. For any data layer work, enforce the repository boundary from
          `skills/clean-architecture/SKILL.md`:
@@ -318,7 +316,7 @@ phases:
       - "required-profile-skills: checked"
       - "missing-required-profile-skills:"
       - "architecture-contract-check: pass|fail|n/a"
-      - "host-parity-check: pass|fail"
+      - "codex-claude-parity-check: pass|fail"
       - "hook-parity-check: pass|fail"
       - "clean-architecture: applied"
       - "project-local-skills: checked|n/a"
@@ -356,9 +354,7 @@ phases:
         - Plus angles declared in profile.review_angles
       Each reviewer section must include `reviewer-source: sub-agent`.
       After recording each sub-agent result, close that sub-agent session.
-      Under each reviewer, include `## Findings` and list each actionable
-      finding as one `- ` item, or `- none`. Aggregate findings into
-      final-review.md with severity (must-fix /
+      Aggregate findings into final-review.md with severity (must-fix /
       should-fix / note) and source angle. Cite paths as `path/to/file:line`.
       Apply agent-flow-concise-output: one finding per line, Korean concise
       prose, no emoji, and parser verdict markers unchanged.
@@ -371,11 +367,9 @@ phases:
       the overall verdict is `verdict: request-changes`.
       Android/Chris Banes skills are required only for Android/Kotlin/Compose/
       KMP changes or React Native `android/` native code. If required skills are
-      missing, report `missing local <group>: <skill>` and use `verdict:
-      request-changes`. Do not use a host-global fallback. Unrelated platform skill absence must not
+      missing, report `missing local <group>: <skill>` with the source URL and
+      use `verdict: request-changes`. Unrelated platform skill absence must not
       block.
-      Set `host-parity-check: pass` only after Claude, Codex, and OMP workflow
-      routing and hook behavior are all verified as equivalent for this change.
       End with `## Overall` followed by exactly one verdict line: `verdict: approve` or
       `verdict: request-changes`.
       Also include:
@@ -388,7 +382,7 @@ phases:
           required-profile-skills: checked
           missing-required-profile-skills: none|<list>
           architecture-contract-check: pass|fail|n/a
-          host-parity-check: pass|fail
+          codex-claude-parity-check: pass|fail
           hook-parity-check: pass|fail
           clean-architecture: applied
           project-local-skills: checked|n/a
@@ -473,7 +467,7 @@ phases:
       Android/Chris Banes skills are required only for Android/Kotlin/Compose/
       KMP fixes or React Native `android/` native code. If a required local
       skill is missing, do not complete this artifact; report
-      `missing local <group>: <skill>` and do not use a host-global fallback.
+      `missing local <group>: <skill>` with the source URL.
       End with:
 
           ## Completion Gate
@@ -532,15 +526,45 @@ phases:
       error: block
       skipped: cleanup
     prompt: |
-      Poll the active branch PR once with the public workflow command:
+      Use agent-flow's built-in PR watcher. Read push-pr.md to find the PR
+      number, then run:
 
-          ./.agent-flow/bin/agent-flow run push-watch-tick
+          agent-flow pr-watch <number>           # poll until actionable
+          agent-flow pr-watch <number> --once    # single fetch (debugging)
 
-      The command writes pr-watch.md with exactly one status line:
-      `status: green`, `status: comments`, `status: ci-failed`, or
-      `status: pending`, plus the PR URL. Follow the runner's printed
-      next_command so comments and CI failures enter their dedicated fix
-      phases. Do not add a second status or verdict line.
+      The watcher returns a JSON summary with `status` ∈ {green, comments,
+      has_comments, ci-failed, ci_failed, pending, merged, skipped, closed,
+      error}. `comments` aliases `has_comments`; `ci-failed` aliases
+      `ci_failed`.
+
+      Branch on status:
+
+      - **green** → write pr-watch.md noting "all checks green, ready to
+        merge". Workflow advances to the merge phase.
+
+      - **has_comments** → for each comment in `review_comments` /
+        `issue_comments`:
+          * code change requested → make the change in the worktree, commit,
+            push. Re-run `agent-flow pr-watch <number>` to confirm.
+          * discussion / question → reply in the PR thread without code change.
+          * decline (out of scope, conflicting opinion) → reply politely
+            explaining why, no code change.
+        After the loop, write pr-watch.md with the per-comment resolution.
+
+      - **ci_failed** → for each entry in `failed_checks`:
+          * reproduce the failure locally using the project gates
+            (profile.gates).
+          * fix in the worktree, commit, push.
+          * re-run `agent-flow pr-watch <number>`.
+        Write pr-watch.md with per-check fix log.
+
+      - **closed** (not merged) → ask the user before proceeding;
+        write pr-watch.md noting the closed status.
+
+      - **error** → surface the error message; do not retry until user input.
+
+      Output: pr-watch.md (status, actions taken, references to commits /
+      PR comment IDs).
 
   - id: pr-comment-fix
     description: Fix actionable PR comments. Runner routes back to pr-watch.

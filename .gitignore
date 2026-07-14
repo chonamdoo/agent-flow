@@ -14,7 +14,6 @@ AUDIT.md
 __pycache__/
 *.pyc
 .venv/
-node_modules/
 dist/
 uv.lock
 AGENTS.md

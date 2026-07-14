@@ -20,11 +20,6 @@ import os
 from pathlib import Path
 
 from agent_flow.adapters.base import Adapter
-from agent_flow.core.local_skills import (
-    APPLIED_MARKER,
-    applicable_code_review_skill_docs,
-)
-from agent_flow.core.skill_plan import runtime_changed_files
 
 
 class GenericAdapter(Adapter):
@@ -35,7 +30,7 @@ class GenericAdapter(Adapter):
             phase, run_dir, project_root,
             host_hint="No AI host detected. Paste the phase prompt into your "
                       "AI of choice; have it write the artifact at the path "
-                      "above; then run `agent-flow-python status` and follow "
+                      "above; then run `agent-flow status` and follow "
                       "`next_command`.",
         )
         print(prompt)
@@ -45,7 +40,7 @@ class GenericAdapter(Adapter):
             if not artifact.exists():
                 artifact.parent.mkdir(parents=True, exist_ok=True)
                 if getattr(phase, "multi_review", False):
-                    content = (
+                    artifact.write_text(
                         f"# {phase.id}\n\n"
                         "## Reviewer 1\n"
                         "reviewer-source: sub-agent\n"
@@ -54,10 +49,7 @@ class GenericAdapter(Adapter):
                         "reviewer-source: sub-agent\n"
                         "verdict: approve\n\n"
                         "## Overall\n"
-                        "verdict: approve\n"
-                    )
-                    artifact.write_text(
-                        content + self._stub_success_completion(phase, project_root),
+                        "verdict: approve\n",
                         encoding="utf-8",
                     )
                     return True
@@ -74,16 +66,13 @@ class GenericAdapter(Adapter):
                 if phase.id == "pr-watch":
                     artifact.write_text(
                         f"# {phase.id}\n\n"
-                        "status: green\n"
-                        + self._stub_success_completion(phase, project_root),
+                        "status: green\n",
                         encoding="utf-8",
                     )
                     return True
                 artifact.write_text(
                     f"# {phase.id}\n\n"
                     f"_stub artifact written by GenericAdapter (stub mode)._\n"
-                    + self._stub_success_completion(phase, project_root),
-                    encoding="utf-8",
                 )
             return True
         if getattr(phase, "multi_review", False):
@@ -101,47 +90,6 @@ class GenericAdapter(Adapter):
             )
             return True
         return False
-
-    def _stub_success_completion(self, phase, project_root: Path) -> str:
-        markers = tuple(getattr(phase, "required_markers", ()))
-        config_root = self._config_root or project_root
-        local_docs = applicable_code_review_skill_docs(
-            config_root,
-            phase.id,
-            self._task_scope,
-            runtime_changed_files(config_root, project_root, self._base_commit),
-        )
-        headings = [marker for marker in markers if marker.lstrip().startswith("#")]
-        gate_lines = [
-            self._stub_marker_value(marker, local_docs)
-            for marker in markers
-            if not marker.lstrip().startswith("#")
-        ]
-        if local_docs:
-            gate_lines.append(APPLIED_MARKER)
-        if not headings and not gate_lines:
-            return ""
-        parts = ["", *headings]
-        if gate_lines:
-            parts.extend(("", "## Completion Gate", *gate_lines))
-        return "\n".join(parts) + "\n"
-
-    def _stub_marker_value(self, marker: str, local_docs) -> str:
-        key, separator, raw_value = marker.partition(":")
-        if separator != ":":
-            return marker
-        if key == "active-profiles":
-            return f"{key}: {self._profile_id or 'generic'}"
-        if key == "missing-required-profile-skills":
-            return f"{key}: none"
-        if key == "project-local-skills-used":
-            names = ", ".join(doc.name for doc in local_docs) or "n/a"
-            return f"{key}: {names}"
-        if "|" in raw_value:
-            return f"{key}: {raw_value.split('|', 1)[0].strip()}"
-        if not raw_value.strip():
-            return f"{key}: stub-success"
-        return marker
 
     def _write_blocked_stub(self, phase, run_dir: Path, *, reason: str) -> None:
         artifact = self.artifact_path(phase, run_dir)

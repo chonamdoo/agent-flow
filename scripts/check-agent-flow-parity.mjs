@@ -6,13 +6,6 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import {
-  captureExecutionState,
-  executionStatePromptBlock,
-  initializeExecutionStateLedger,
-  observeExecutionStateInjection,
-  recordExecutionStateUsage,
-} from "../lib/execution-state-ledger.mjs";
 
 const SOURCE_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
@@ -30,7 +23,6 @@ const BUNDLED_HOST_SKILL_NAMES = new Set([
   "react-app-shell-error-handling",
   "react-native-app-shell-error-handling",
 ]);
-const WRITE_TOOL_MATCHER = "^(apply_patch|Write|Edit|MultiEdit|NotebookEdit|Eval|Python|Notebook|write|edit|multi_edit|multiedit|notebook_edit|notebookedit|eval|python|notebook)$";
 const failures = [];
 const missingFiles = new Set();
 const workflowExportCache = new Map();
@@ -204,21 +196,15 @@ function recursiveFiles(relDir) {
   return out.sort();
 }
 
-for (const installer of ["bin/agent-flow-kit.mjs"]) {
-  assertContains(installer, "function queryCodexProjectHooks(root)");
-  assertContains(installer, "function prepareCodexTrustState(root,");
-  assertContains(installer, "function applyCodexTrustState(");
-  assertContains(installer, "function managedHookVerifierDetails(command)");
+for (const installer of ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"]) {
+  assertContains(installer, "function installCodexTrustState(root)");
+  assertContains(installer, "function queryCodexProjectHookHashes(root)");
   assertContains(installer, "function trustedManagedHookScriptName(root, command)");
-  assertContains(installer, "source_ref=f'/dev/fd/{stage_fd}'");
-  assertContains(installer, "verifier.scriptPath.replaceAll");
+  assertContains(installer, "normalized === `${normalizedRoot}/.agent-flow/scripts/hooks/${scriptName}`");
   assertContains(installer, "[hooks.state.");
-  assertContains(installer, "function installOmpHooks(root, plan)");
-  assertContains(installer, 'candidate.relative === ".omp/extensions/agent-flow-hooks.ts"');
+  assertContains(installer, "function installOmpHooks(root)");
+  assertContains(installer, ".omp\", \"extensions\", \"agent-flow-hooks.ts");
 }
-assertContains("bin/agent-flow-install.mjs", '"agent-flow-kit.mjs"');
-assertContains("bin/agent-flow-install.mjs", "process.argv.slice(2)");
-assertContains("bin/agent-flow-install.mjs", 'stdio: "inherit"');
 
 const fullFeatureWorkflowCopies = [
   "workflows/full-feature.yaml",
@@ -259,8 +245,8 @@ if (exportedWorkflow) {
   if (exportedPhases["architecture-review"]?.routes?.["request-changes"] !== "refactor") {
     failures.push("workflow export architecture-review request-changes route mismatch");
   }
-  if (exportedPhases["architecture-review"]?.routes?.blocked !== "refactor") {
-    failures.push("workflow export architecture-review blocked route mismatch");
+  if (Object.prototype.hasOwnProperty.call(exportedPhases["architecture-review"]?.routes ?? {}, "blocked")) {
+    failures.push("workflow export architecture-review blocked route should be absent");
   }
   if (exportedPhases["merge-approval"]?.routes?.approve !== "merge") {
     failures.push("workflow export merge-approval approve route mismatch");
@@ -273,9 +259,6 @@ if (exportedWorkflow) {
   }
   if (exportedPhases["multi-review"]?.multi_review !== true) {
     failures.push("workflow export multi-review multi_review flag mismatch");
-  }
-  if (exportedPhases["domain-grill"]?.cite_lore !== true) {
-    failures.push("workflow export domain-grill cite_lore flag mismatch");
   }
   if (exportedPhases["pr-watch"]?.routes?.merged !== "handoff") {
     failures.push("workflow export pr-watch merged route mismatch");
@@ -316,12 +299,6 @@ if (exportedDefaultWorkflow) {
   if (exportedPhases["final-review"]?.multi_review !== true) {
     failures.push("workflow export default final-review multi_review flag mismatch");
   }
-  if (exportedPhases.design?.cite_lore !== true) {
-    failures.push("workflow export default design cite_lore flag mismatch");
-  }
-  if (exportedPhases["slice-plan"]?.pause_after !== true) {
-    failures.push("workflow export default slice-plan pause_after flag mismatch");
-  }
   if (exportedPhases["fix-loop"]?.routes?.default !== "comment-authoring") {
     failures.push("workflow export default fix-loop route mismatch");
   }
@@ -353,7 +330,7 @@ def require_before(ids, left, right):
         raise AssertionError(f"{left} must run before {right}: {ids}")
 
 typescript = gate_ids("typescript")
-for profile in ("android", "generic", "ios", "nextjs", "node", "python", "react", "react-native", "spring", "typescript"):
+for profile in ("android", "generic", "ios", "nextjs", "node", "python", "react-native", "spring", "typescript"):
     ids = gate_ids(profile)
     if "architecture-lint" not in ids:
         raise AssertionError(f"{profile} missing architecture-lint gate: {ids}")
@@ -531,8 +508,6 @@ assertContains("workflows/default.yaml", "verdict: request-changes");
 assertContains("workflows/default.yaml", "id: comment-authoring");
 assertContains("workflows/default.yaml", "`n/a` only when the changed diff has no");
 assertContains("workflows/default.yaml", "comment-scope: final-pass-only");
-assertContains("workflows/default.yaml", "agent-flow run push-watch-tick");
-assertNotContains("workflows/default.yaml", "agent-flow pr-watch <number>");
 assertContains("skills/code-generation-discipline/SKILL.md", "Write comments only when code alone cannot carry the reason or contract.");
 assertNotContains("skills/code-generation-discipline/SKILL.md", "Every new or modified code block must include Korean " + "comments");
 if (CHECK_INSTALLED_COPY) {
@@ -660,7 +635,6 @@ assertFile(".claude/agents/code-reviewer.md");
 assertSameBodyAfterOptionalFrontmatter(".Codex/agents/code-reviewer.md", ".claude/agents/code-reviewer.md");
 assertContains(".claude/agents/code-reviewer.md", "name: code-reviewer");
 assertContains(".claude/agents/code-reviewer.md", "description:");
-assertExecutionStateLedgerParity();
 
 if (CHECK_INSTALLED_COPY) {
   assertContains(".agent-flow/rules/workflow-contract.md", "Required review happens before completion QA");
@@ -748,199 +722,6 @@ function gitOutput(cwd, args) {
   }
   const output = result.stdout.trim();
   return output || null;
-}
-
-function initializeGitFixture(root, label) {
-  fs.writeFileSync(path.join(root, ".gitignore"), ".agent-flow/\n", "utf8");
-  const commands = [
-    ["init", "-b", "main"],
-    ["config", "user.name", "Agent Flow Parity"],
-    ["config", "user.email", "agent-flow-parity@example.invalid"],
-    ["add", ".gitignore"],
-    ["commit", "-m", "test: initialize parity fixture"],
-  ];
-  for (const args of commands) {
-    const result = spawnSync("git", args, {
-      cwd: root,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 30_000,
-    });
-    if (result.error || result.status !== 0) {
-      failures.push(`${label} git fixture failed: ${result.error?.message || result.stderr.trim() || result.status}`);
-      return false;
-    }
-  }
-  return true;
-}
-
-function isolatedHostFixtureEnv(root, overrides = {}) {
-  const home = path.join(root, ".agent-flow-fixture-home");
-  fs.mkdirSync(home, { recursive: true });
-  const env = { ...process.env };
-  for (const key of [
-    "AGENT_FLOW_HOST",
-    "CLAUDECODE",
-    "CLAUDE_CLI",
-    "CODEX_CLI",
-    "CODEX_SHELL",
-    "CODEX_THREAD_ID",
-    "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
-    "CODEX_HOME",
-    "CLAUDE_CONFIG_DIR",
-    "OMP_PROFILE",
-    "PI_CODING_AGENT_DIR",
-  ]) {
-    delete env[key];
-  }
-  return Object.assign(env, {
-    HOME: home,
-    USERPROFILE: home,
-    AGENT_FLOW_SKIP_CODEX_TRUST: "1",
-  }, overrides);
-}
-
-function parseShellCommandWords(command) {
-  if (typeof command !== "string") return null;
-  const words = [];
-  let current = "";
-  let quote = null;
-  let started = false;
-  for (let index = 0; index < command.length; index += 1) {
-    const char = command[index];
-    if (quote === "'") {
-      if (char === "'") quote = null;
-      else current += char;
-      continue;
-    }
-    if (quote === '"') {
-      if (char === '"') {
-        quote = null;
-      } else if (char === "\\") {
-        index += 1;
-        if (index >= command.length) return null;
-        current += command[index];
-      } else {
-        current += char;
-      }
-      continue;
-    }
-    if (/\s/u.test(char)) {
-      if (started) {
-        words.push(current);
-        current = "";
-        started = false;
-      }
-      continue;
-    }
-    if (char === "'" || char === '"') {
-      quote = char;
-      started = true;
-      continue;
-    }
-    if (char === "\\") {
-      index += 1;
-      if (index >= command.length) return null;
-      current += command[index];
-      started = true;
-      continue;
-    }
-    if (";|&<>()`$\n\r".includes(char)) return null;
-    current += char;
-    started = true;
-  }
-  if (quote !== null) return null;
-  if (started) words.push(current);
-  return words;
-}
-
-function managedHookCommandDetails(command) {
-  const words = parseShellCommandWords(command);
-  if (
-    !words
-    || words.length !== 6
-    || words[0] !== "/usr/bin/python3"
-    || words[1] !== "-I"
-    || words[2] !== "-c"
-    || !/^[A-Za-z0-9+/]+={0,2}$/u.test(words[4])
-    || !/^[0-9a-f]{64}$/u.test(words[5])
-  ) {
-    return null;
-  }
-  const verifierMarkers = [
-    "base64.b64decode(sys.argv[1],validate=True)",
-    "hashlib.sha256(content).hexdigest()==expected",
-    "tempfile.mkstemp(prefix='agent-flow-managed-hook-')",
-    "os.unlink(stage_path)",
-    "source_ref=f'/dev/fd/{stage_fd}'",
-    "os.execve('/usr/bin/python3',['/usr/bin/python3','-I',source_ref],env)",
-    "os.execve('/bin/bash',['/bin/bash',source_ref],env)",
-  ];
-  if (!verifierMarkers.every((marker) => words[3].includes(marker))) return null;
-  const decoded = Buffer.from(words[4], "base64");
-  if (decoded.toString("base64") !== words[4]) return null;
-  const scriptPath = decoded.toString("utf8");
-  if (!path.isAbsolute(scriptPath)) return null;
-  return { scriptPath, sha256: words[5] };
-}
-
-function managedHookCommandMatches(root, command, scriptName) {
-  const details = managedHookCommandDetails(command);
-  const expected = path.join(root, ".agent-flow", "scripts", "hooks", scriptName);
-  if (!details || !samePath(details.scriptPath, expected) || !fs.existsSync(expected)) return false;
-  const actualSha256 = createHash("sha256").update(fs.readFileSync(expected)).digest("hex");
-  return details.sha256 === actualSha256;
-}
-
-function hookCommands(settings, event = null) {
-  const eventEntries = event === null
-    ? Object.values(settings?.hooks ?? {})
-    : [settings?.hooks?.[event]];
-  return eventEntries
-    .filter(Array.isArray)
-    .flat()
-    .flatMap((entry) => Array.isArray(entry?.hooks) ? entry.hooks : [])
-    .map((hook) => hook?.command)
-    .filter((command) => typeof command === "string");
-}
-
-function managedHookProjection(root, settings) {
-  const rows = [];
-  for (const [event, entries] of Object.entries(settings?.hooks ?? {})) {
-    if (!Array.isArray(entries)) continue;
-    for (const entry of entries) {
-      if (!Array.isArray(entry?.hooks)) continue;
-      const matcher = typeof entry.matcher === "string" ? entry.matcher : "";
-      for (const hook of entry.hooks) {
-        const scriptName = [
-          "guard-worktree.sh",
-          "guard-worktree-write.py",
-          "guard-protected-branch.sh",
-          "comment-checker.py",
-          "show-phase-status.sh",
-        ].find((candidate) => managedHookCommandMatches(root, hook?.command, candidate));
-        if (scriptName) rows.push([event, matcher, hook?.type ?? "", scriptName]);
-      }
-    }
-  }
-  return rows.sort(compareProjectionRows);
-}
-
-function expectedManagedHookProjection() {
-  return [
-    ["PostToolUse", WRITE_TOOL_MATCHER, "command", "comment-checker.py"],
-    ["PreToolUse", "Bash", "command", "guard-protected-branch.sh"],
-    ["PreToolUse", "Bash", "command", "guard-worktree-write.py"],
-    ["PreToolUse", "Bash", "command", "guard-worktree.sh"],
-    ["PreToolUse", WRITE_TOOL_MATCHER, "command", "guard-worktree-write.py"],
-    ["Stop", "", "command", "show-phase-status.sh"],
-  ].sort(compareProjectionRows);
-}
-
-function compareProjectionRows(left, right) {
-  const leftKey = JSON.stringify(left);
-  const rightKey = JSON.stringify(right);
-  return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
 }
 
 function workflowExport(name) {
@@ -1062,11 +843,6 @@ function assertWorkflowArtifactContract(workflow) {
     phaseIds.add(phase.id);
   }
   for (const phase of workflow.phases) {
-    for (const field of ["pause_after", "optional", "multi_review", "cite_lore"]) {
-      if (typeof phase[field] !== "boolean") {
-        failures.push(`workflow ${workflow.id} phase ${phase.id} ${field} must be boolean`);
-      }
-    }
     if (typeof phase.artifact !== "string" || phase.artifact.length === 0) {
       failures.push(`workflow ${workflow.id} phase ${phase.id} missing artifact`);
       continue;
@@ -1108,7 +884,6 @@ function assertRouteParity(workflow) {
     ["pr-watch status has_comments", "pr-watch", "status: has_comments\n"],
     ["pr-watch status has-comments", "pr-watch", "status: has-comments\n"],
     ["pr-watch status ci_failed", "pr-watch", "status: ci_failed\n"],
-    ["generic route multiple fields", "fix-loop", "status: green\nverdict: approve\n"],
     ["gates passed without evidence", "gates", "{\"passed\": true}\n"],
     [
       "gates passed with evidence",
@@ -1143,19 +918,15 @@ function assertCompletionMarkerPrefixParity(workflow) {
   const prefixes = ["- [x] ", "* ", "+ ", "- ", ""];
   for (const phase of workflow.phases) {
     const markers = phase.required_markers ?? [];
-    if (markers.length === 0) {
+    if (markers.length === 0 || phase.multi_review) {
       continue;
     }
     const routeKeys = Object.keys(phase.routes ?? {});
-    if (!phase.multi_review && routeKeys.some((key) => key !== "default")) {
+    if (routeKeys.some((key) => key !== "default")) {
       continue;
     }
-    const headings = markers.filter((marker) => marker.trim().startsWith("#"));
-    const lines = markers
-      .filter((marker) => !marker.trim().startsWith("#"))
-      .map((marker, index) => `${prefixes[index % prefixes.length]}${renderCompletionMarker(marker)}`);
-    const review = phase.multi_review ? multiReviewArtifactContent("approve", phase.id) : "";
-    const content = [review, ...headings, "", "## Completion Gate", ...lines, ""].join("\n");
+    const lines = markers.map((marker, index) => `${prefixes[index % prefixes.length]}${renderCompletionMarker(marker)}`);
+    const content = ["## Completion Gate", ...lines, ""].join("\n");
     const pythonMissing = pythonMissingCompletionMarkers(content, markers);
     const node = nodePhaseOutcome(workflow, phase.id, content);
     if (pythonMissing === null || !node) {
@@ -1172,47 +943,26 @@ function assertCompletionMarkerPrefixParity(workflow) {
 }
 
 function assertFixLoopRoundParity(workflow) {
-  for (const phase of workflow.phases) {
-    const failureRoutes = Object.entries(phase.routes ?? {})
-      .filter(([, target]) => target === "fix-loop");
-    for (const [key] of failureRoutes) {
-      const content = routeArtifactContent(phase, key);
-      const pythonAllowed = pythonPhaseOutcome(workflow, phase.id, content, { fix_loop_rounds: 2 });
-      const nodeAllowed = nodePhaseOutcome(workflow, phase.id, content, { fix_loop_rounds: 2 });
-      if (pythonAllowed && nodeAllowed) {
-        if (pythonAllowed.outcome !== nodeAllowed.outcome || pythonAllowed.fix_loop_rounds !== nodeAllowed.fix_loop_rounds) {
-          failures.push(`python/node fix-loop round 3 mismatch (${workflow.id} ${phase.id} ${key})`);
-        }
-      }
-      const pythonBlocked = pythonPhaseOutcome(workflow, phase.id, content, { fix_loop_rounds: 3 });
-      const nodeBlocked = nodePhaseOutcome(workflow, phase.id, content, { fix_loop_rounds: 3 });
-      if (pythonBlocked && nodeBlocked && (pythonBlocked.outcome !== "blocked" || nodeBlocked.outcome !== "blocked")) {
-        failures.push(`python/node fix-loop round cap mismatch (${workflow.id} ${phase.id} ${key}): python=${pythonBlocked.outcome} node=${nodeBlocked.outcome}`);
-      }
-      if (pythonBlocked && nodeBlocked && pythonBlocked.fix_loop_rounds !== nodeBlocked.fix_loop_rounds) {
-        failures.push(`python/node blocked fix-loop round state mismatch (${workflow.id} ${phase.id} ${key}): python=${pythonBlocked.fix_loop_rounds} node=${nodeBlocked.fix_loop_rounds}`);
-      }
+  const phase = workflow.phases.find((candidate) => Object.values(candidate.routes ?? {}).includes("fix-loop"));
+  if (!phase) {
+    return;
+  }
+  const key = Object.entries(phase.routes).find(([, target]) => target === "fix-loop")?.[0];
+  const content = routeArtifactContent(phase, key);
+  const pythonAllowed = pythonPhaseOutcome(workflow, phase.id, content, { fix_loop_rounds: 2 });
+  const nodeAllowed = nodePhaseOutcome(workflow, phase.id, content, { fix_loop_rounds: 2 });
+  if (pythonAllowed && nodeAllowed) {
+    if (pythonAllowed.outcome !== nodeAllowed.outcome || pythonAllowed.fix_loop_rounds !== nodeAllowed.fix_loop_rounds) {
+      failures.push(`python/node fix-loop round 3 mismatch (${workflow.id} ${phase.id})`);
     }
-    if (phase.id === "gates" && failureRoutes.length > 0) {
-      const success = Object.entries(phase.routes ?? {})
-        .find(([key, target]) => target !== "fix-loop" && key !== "default");
-      if (!success) continue;
-      const [successKey] = success;
-      const successContent = routeArtifactContent(phase, successKey);
-      const pythonReset = pythonPhaseOutcome(workflow, phase.id, successContent, { fix_loop_rounds: 2 });
-      const nodeReset = nodePhaseOutcome(workflow, phase.id, successContent, { fix_loop_rounds: 2 });
-      if (
-        pythonReset
-        && nodeReset
-        && (
-          pythonReset.outcome !== nodeReset.outcome
-          || pythonReset.fix_loop_rounds !== 0
-          || nodeReset.fix_loop_rounds !== 0
-        )
-      ) {
-        failures.push(`python/node gates fix-loop reset mismatch (${workflow.id} ${successKey}): python=${pythonReset.outcome}/${pythonReset.fix_loop_rounds} node=${nodeReset.outcome}/${nodeReset.fix_loop_rounds}`);
-      }
-    }
+  }
+  const pythonBlocked = pythonPhaseOutcome(workflow, phase.id, content, { fix_loop_rounds: 3 });
+  const nodeBlocked = nodePhaseOutcome(workflow, phase.id, content, { fix_loop_rounds: 3 });
+  if (pythonBlocked && nodeBlocked && (pythonBlocked.outcome !== "blocked" || nodeBlocked.outcome !== "blocked")) {
+    failures.push(`python/node fix-loop round cap mismatch (${workflow.id} ${phase.id}): python=${pythonBlocked.outcome} node=${nodeBlocked.outcome}`);
+  }
+  if (pythonBlocked && nodeBlocked && pythonBlocked.fix_loop_rounds !== nodeBlocked.fix_loop_rounds) {
+    failures.push(`python/node blocked fix-loop round state mismatch (${workflow.id} ${phase.id}): python=${pythonBlocked.fix_loop_rounds} node=${nodeBlocked.fix_loop_rounds}`);
   }
 }
 
@@ -1286,7 +1036,7 @@ function routeArtifactContent(phase, key) {
 function multiReviewArtifactContent(key, phaseId = "") {
   const reviewerAVerdict = key === "request-changes" ? "request-changes" : "approve";
   const reviewerBVerdict = "approve";
-  const overall = key === "request-changes" || key === "blocked" ? key : "approve";
+  const overall = key === "request-changes" ? "request-changes" : "approve";
   return [
     "## Reviewer A",
     "reviewer-source: sub-agent",
@@ -1331,7 +1081,7 @@ function assertInstallerSelfInstallKeepsSourceScripts(installer) {
     }
     const result = spawnSync(process.execPath, [path.join(tempKitRoot, "bin", installer), "install", "--force-managed"], {
       cwd: tempKitRoot,
-      env: isolatedHostFixtureEnv(tempKitRoot),
+      env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1" },
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
@@ -1354,7 +1104,6 @@ function assertInstallerSelfInstallKeepsSourceScripts(installer) {
 function assertInstallerCleanInstallCopiesTemplates(installer) {
   const label = `bin/${installer}`;
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agent-flow-install-parity-"));
-  const fixtureEnv = isolatedHostFixtureEnv(tempRoot);
   try {
     const seededHooksPath = path.join(tempRoot, ".Codex", "hooks.json");
     fs.mkdirSync(path.dirname(seededHooksPath), { recursive: true });
@@ -1376,10 +1125,9 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
       )}\n`,
       "utf8",
     );
-    seedPreviousProjectSkillSource(tempRoot);
     const result = spawnSync(process.execPath, [path.join(SOURCE_ROOT, "bin", installer), "install", "--force-managed"], {
       cwd: tempRoot,
-      env: fixtureEnv,
+      env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1" },
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
@@ -1410,12 +1158,13 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
         continue;
       }
       const hooksText = fs.readFileSync(installedHooks, "utf8");
-      const hooks = JSON.parse(hooksText);
+      if (!hooksText.includes("comment-checker.py")) {
+        failures.push(`${label} clean install ${rel} missing comment-checker hook`);
+      }
       if (!hooksText.includes("custom-post-hook")) {
         failures.push(`${label} clean install ${rel} did not preserve existing custom hook`);
       }
-      if (!hookCommands(hooks, "PostToolUse").some((command) =>
-        managedHookCommandMatches(tempRoot, command, "comment-checker.py"))) {
+      if (!hooksText.includes(installedChecker)) {
         failures.push(`${label} clean install ${rel} does not use installed comment-checker`);
       }
       if (hooksText.includes(SOURCE_ROOT)) {
@@ -1439,9 +1188,10 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
       failures.push(`${label} clean install missing .claude/settings.json`);
     } else {
       const claudeSettingsText = fs.readFileSync(claudeSettingsPath, "utf8");
-      const claudeSettings = JSON.parse(claudeSettingsText);
-      if (!hookCommands(claudeSettings, "PostToolUse").some((command) =>
-        managedHookCommandMatches(tempRoot, command, "comment-checker.py"))) {
+      if (!claudeSettingsText.includes("PostToolUse") || !claudeSettingsText.includes("comment-checker.py")) {
+        failures.push(`${label} clean install .claude/settings.json missing comment-checker PostToolUse hook`);
+      }
+      if (!claudeSettingsText.includes(installedChecker)) {
         failures.push(`${label} clean install .claude/settings.json does not use installed comment-checker`);
       }
       if (claudeSettingsText.includes(SOURCE_ROOT)) {
@@ -1457,7 +1207,7 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
     const forceResult = spawnSync(process.execPath, [path.join(SOURCE_ROOT, "bin", installer), "install", "--force-managed"], {
       cwd: tempRoot,
       encoding: "utf8",
-      env: fixtureEnv,
+      env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1" },
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
     });
@@ -1520,8 +1270,7 @@ function assertInstalledHookParity(label, tempRoot) {
     failures.push(`${label} install missing claude, codex, or omp hook settings`);
     return;
   }
-  const managedScripts = ["guard-worktree.sh", "guard-worktree-write.py", "guard-protected-branch.sh", "comment-checker.py", "show-phase-status.sh"];
-  const expectedProjection = JSON.stringify(expectedManagedHookProjection());
+  const managedScripts = ["guard-worktree.sh", "guard-protected-branch.sh", "comment-checker.py", "show-phase-status.sh"];
   for (const [host, settings] of [["claude", claude], ["codex", codex], ["codex-lower", lowerCodex]]) {
     for (const event of ["PreToolUse", "PostToolUse", "Stop"]) {
       const entries = settings.hooks[event];
@@ -1529,20 +1278,11 @@ function assertInstalledHookParity(label, tempRoot) {
         failures.push(`${label} ${host} hooks missing ${event}`);
       }
     }
-    const actualProjection = JSON.stringify(managedHookProjection(tempRoot, settings));
-    if (actualProjection !== expectedProjection) {
-      failures.push(`${label} ${host} managed hook projection mismatch`);
-    }
-    const commands = hookCommands(settings);
+    const text = JSON.stringify(settings);
     for (const script of managedScripts) {
-      if (!commands.some((command) => managedHookCommandMatches(tempRoot, command, script))) {
+      if (!text.includes(script)) {
         failures.push(`${label} ${host} hooks missing ${script}`);
       }
-    }
-    const bashEntry = (settings.hooks.PreToolUse ?? []).find((entry) => entry.matcher === "Bash");
-    if (!(bashEntry?.hooks ?? []).some((hook) =>
-      managedHookCommandMatches(tempRoot, hook.command, "guard-worktree-write.py"))) {
-      failures.push(`${label} ${host} Bash hook must include guard-worktree-write.py`);
     }
     const stopEntries = settings.hooks.Stop;
     if (Array.isArray(stopEntries) && stopEntries.length !== 1) {
@@ -1553,8 +1293,7 @@ function assertInstalledHookParity(label, tempRoot) {
   // comment-checker.py를 가진 entry를 찾아 matcher를 검사한다.
   const managedPostToolUseMatcher = (settings) =>
     (settings.hooks.PostToolUse ?? []).find((entry) =>
-      (entry.hooks ?? []).some((hook) =>
-        managedHookCommandMatches(tempRoot, hook.command, "comment-checker.py")),
+      (entry.hooks ?? []).some((hook) => String(hook.command ?? "").includes("comment-checker.py")),
     )?.matcher ?? "";
   const claudeMatcher = managedPostToolUseMatcher(claude);
   if (!claudeMatcher.includes("apply_patch")) {
@@ -1574,17 +1313,8 @@ function assertInstalledHookParity(label, tempRoot) {
       failures.push(`${label} omp extension missing ${script}`);
     }
   }
-  if (!ompExtensionText.includes('["guard-worktree.sh", "guard-protected-branch.sh", "guard-worktree-write.py"]')) {
-    failures.push(`${label} omp Bash hook must include guard-worktree-write.py`);
-  }
-  if (!ompExtensionText.includes("tool_call") || !ompExtensionText.includes("tool_result") || !ompExtensionText.includes('pi.on("session_stop"')) {
-    failures.push(`${label} omp extension missing tool/session-stop hook events`);
-  }
-  if (ompExtensionText.includes('pi.on("agent_end"') || ompExtensionText.includes('pi.on("session_shutdown"')) {
-    failures.push(`${label} omp phase status must use main-session session_stop semantics`);
-  }
-  if (!ompExtensionText.includes('process.stderr.write(message + "\\n")')) {
-    failures.push(`${label} omp phase status must remain visible in headless mode`);
+  if (!ompExtensionText.includes("tool_call") || !ompExtensionText.includes("tool_result") || !ompExtensionText.includes("session_shutdown")) {
+    failures.push(`${label} omp extension missing tool/session hook events`);
   }
   if (!ompExtensionText.includes("pi.on(\"context\"") || !ompExtensionText.includes('message?.customType === "agent-flow-model-context"') || !ompExtensionText.includes('message?.details?.source === "agent-flow-omp-model-context"') || !ompExtensionText.includes('message?.role === "user"') || !ompExtensionText.includes('text.startsWith("<context>")') || !ompExtensionText.includes('/<file\\b[^>]*\\bsource="agent-flow-omp-model-context"/.test(text)')) {
     failures.push(`${label} omp extension must scrub stale hidden root context messages`);
@@ -1595,8 +1325,8 @@ function assertInstalledHookParity(label, tempRoot) {
   if (ompExtensionText.includes('role: "user"')) {
     failures.push(`${label} omp extension must not inject model context as a visible user message`);
   }
-  if (ompExtensionText.includes("syncRootContextFiles") || ompExtensionText.includes("modifiedRootContextFiles")) {
-    failures.push(`${label} omp extension must not add host-only root context synchronization`);
+  if (!ompExtensionText.includes("syncRootContextFiles") || !ompExtensionText.includes("modifiedRootContextFiles")) {
+    failures.push(`${label} omp extension missing root AGENTS.md/CLAUDE.md sync`);
   }
 }
 
@@ -1631,35 +1361,47 @@ function seedStaleForceManagedInstall(root) {
   const staleSkill = path.join(root, ".agent-flow", "skills", "stale-skill", "SKILL.md");
   fs.mkdirSync(path.dirname(staleSkill), { recursive: true });
   fs.writeFileSync(staleSkill, "---\nname: stale-skill\n---\n# Stale Skill\n", "utf8");
-  const canonicalAgentFlow = path.join(root, ".agent-flow", "skills", "agent-flow");
   for (const host of ["claude", "codex", "omp"]) {
     const skillDir = path.join(hostSkillRoot(root, host), "agent-flow");
     removePathOrSymlink(skillDir);
-    fs.cpSync(canonicalAgentFlow, skillDir, { recursive: true });
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, "SKILL.md"), `---\nname: agent-flow\n---\n# stale ${host}\n`, "utf8");
   }
-  stagePreviousProjectSkillForRemoval(root);
+  seedPreviousIndexStaleHostSkill(root);
 }
 
-function seedPreviousProjectSkillSource(root) {
+function seedPreviousIndexStaleHostSkill(root) {
   const staleName = "demo-stale";
   const previousSkillText = "---\nname: demo-stale\n---\n# Previous Demo Stale\n";
-  const source = path.join(root, "skills", staleName);
-  fs.mkdirSync(source, { recursive: true });
-  fs.writeFileSync(path.join(source, "SKILL.md"), previousSkillText, "utf8");
-}
-
-function stagePreviousProjectSkillForRemoval(root) {
-  const staleName = "demo-stale";
-  const source = path.join(root, "skills", staleName);
-  if (!fs.existsSync(path.join(source, "SKILL.md"))) {
-    throw new Error("force-install fixture is missing its previously installed project skill");
-  }
+  const currentHostText = "---\nname: demo-stale\n---\n# User Modified Demo Stale\n";
   for (const host of ["claude", "codex", "omp"]) {
     const skillDir = path.join(hostSkillRoot(root, host), staleName);
     removePathOrSymlink(skillDir);
-    fs.cpSync(source, skillDir, { recursive: true });
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, "SKILL.md"), currentHostText, "utf8");
   }
-  fs.rmSync(source, { recursive: true, force: true });
+  const indexPath = path.join(root, ".agent-flow", "skills", "index.json");
+  const index = JSON.parse(fs.readFileSync(indexPath, "utf8"));
+  const staleHash = createHash("sha256").update(previousSkillText).digest("hex");
+  index.skills = [
+    ...(index.skills ?? []),
+    {
+      name: staleName,
+      source: "project",
+      path: "skills/demo-stale/SKILL.md",
+      hosts: ["claude", "codex", "omp"],
+      priority: 50,
+      hash: staleHash,
+      warnings: [],
+    },
+  ];
+  index.links = [
+    ...(index.links ?? []),
+    { name: staleName, host: "claude", path: ".claude/skills/demo-stale", status: "copied" },
+    { name: staleName, host: "codex", path: ".Codex/skills/demo-stale", status: "copied" },
+    { name: staleName, host: "omp", path: ".omp/skills/demo-stale", status: "copied" },
+  ];
+  fs.writeFileSync(indexPath, `${JSON.stringify(index, null, 2)}\n`, "utf8");
 }
 
 function removePathOrSymlink(target) {
@@ -1736,15 +1478,11 @@ with tempfile.TemporaryDirectory() as temp_dir:
 
 function nodeBackwardFreshArtifactOutcome(workflow, testCase) {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agent-flow-backward-parity-"));
-  const fixtureEnv = isolatedHostFixtureEnv(tempRoot);
   try {
-    if (!initializeGitFixture(tempRoot, "node backward parity")) {
-      return null;
-    }
     const install = spawnSync(process.execPath, [path.join(SOURCE_ROOT, "bin/agent-flow-kit.mjs"), "install", "--force-managed"], {
       cwd: tempRoot,
       encoding: "utf8",
-      env: fixtureEnv,
+      env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1" },
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
     });
@@ -1764,7 +1502,6 @@ function nodeBackwardFreshArtifactOutcome(workflow, testCase) {
       "r1",
     ], {
       cwd: tempRoot,
-      env: fixtureEnv,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
@@ -1775,11 +1512,9 @@ function nodeBackwardFreshArtifactOutcome(workflow, testCase) {
     }
     const targetIndex = workflow.phases.findIndex((phase) => phase.id === testCase.target);
     const currentIndex = workflow.phases.findIndex((phase) => phase.id === testCase.source);
-    const { runDir, manifestPath, statePath, workspaceRoot } = nodeFixtureRunState(
-      tempRoot,
-      workflow.id,
-      "r1",
-    );
+    const runDir = path.join(tempRoot, ".agent-flow", "runs", workflow.id, "r1");
+    const manifestPath = path.join(runDir, "manifest.json");
+    const statePath = path.join(tempRoot, ".agent-flow", "state", "current-run.json");
     const state = {
       ...JSON.parse(fs.readFileSync(manifestPath, "utf8")),
       phase_index: currentIndex,
@@ -1799,8 +1534,7 @@ function nodeBackwardFreshArtifactOutcome(workflow, testCase) {
       );
     }
     const advance = spawnSync(process.execPath, [path.join(SOURCE_ROOT, "bin/agent-flow-kit.mjs"), "run", "advance"], {
-      cwd: workspaceRoot,
-      env: fixtureEnv,
+      cwd: tempRoot,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
@@ -1857,7 +1591,7 @@ function renderCompletionMarker(marker) {
 
 function hostSkillRoot(root, host) {
   if (host === "codex") {
-    return path.join(root, ".agents", "skills");
+    return path.join(root, ".Codex", "skills");
   }
   if (host === "omp") {
     return path.join(root, ".omp", "skills");
@@ -1873,22 +1607,13 @@ function assertHostSkillParity(root, index, label = "clean install") {
   const expectedHosts = ["claude", "codex", "omp"];
   const skills = new Map((index.skills ?? []).map((skill) => [skill.name, skill]));
   const links = index.links ?? [];
-  const externalExposure = new Set(
-    (index.selection?.external_exposure_skills ?? []).map((name) => String(name).toLowerCase()),
-  );
   for (const [name, skill] of skills) {
     const hosts = new Set(skill.hosts ?? []);
     if (!expectedHosts.every((host) => hosts.has(host))) {
       continue;
     }
     const hostSkillFiles = expectedHosts.map((host) => [host, hostSkillFile(root, host, name)]);
-    const externalExposed = ["host-bootstrap", "shared"].includes(skill.source)
-      && externalExposure.has(String(name).toLowerCase());
-    if (
-      (skill.discovery_source ?? skill.source) === "bundled"
-      && !externalExposed
-      && !BUNDLED_HOST_SKILL_NAMES.has(name)
-    ) {
+    if (skill.source === "bundled" && !BUNDLED_HOST_SKILL_NAMES.has(name)) {
       // 설치 계약: allowlist 밖 bundled skill은 host link를 만들지 않는다.
       for (const [host, skillFile] of hostSkillFiles) {
         if (fs.existsSync(skillFile)) {
@@ -2004,7 +1729,7 @@ with tempfile.TemporaryDirectory() as temp_dir:
     elif phases[index].id == "gates":
         route_key = _gates_route_key(content)
     else:
-        route_key = _route_key(content, phases[index].id)
+        route_key = _route_key(content)
     if route_key == "approve" and phases[index].routes and phases[index].routes.get("request-changes") and has_failure_markers(content):
         route_key = "request-changes"
     try:
@@ -2012,7 +1737,7 @@ with tempfile.TemporaryDirectory() as temp_dir:
         outcome = "blocked" if blocked else (phases[next_index].id if next_index < len(phases) else "complete")
     except Exception:
         outcome = "blocked"
-    print("OUTCOME:" + json.dumps({"outcome": outcome, "route_key": route_key, "fix_loop_rounds": read_meta(run_dir).get("fix_loop_rounds") or 0}, sort_keys=True))
+    print("OUTCOME:" + json.dumps({"outcome": outcome, "route_key": route_key, "fix_loop_rounds": read_meta(run_dir).get("fix_loop_rounds")}, sort_keys=True))
 `;
   const result = spawnSync(preferredPython(), ["-c", code], {
     cwd: SOURCE_ROOT,
@@ -2067,14 +1792,10 @@ print(json.dumps(missing_markers(payload["content"], tuple(payload["markers"])))
 
 function nodePhaseOutcome(workflow, phaseId, content, stateOverrides = {}) {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agent-flow-parity-"));
-  const fixtureEnv = isolatedHostFixtureEnv(tempRoot);
   try {
-    if (!initializeGitFixture(tempRoot, "node route parity")) {
-      return null;
-    }
     const install = spawnSync(process.execPath, [path.join(SOURCE_ROOT, "bin/agent-flow-kit.mjs"), "install", "--force-managed"], {
       cwd: tempRoot,
-      env: fixtureEnv,
+      env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1" },
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
@@ -2095,7 +1816,6 @@ function nodePhaseOutcome(workflow, phaseId, content, stateOverrides = {}) {
       "r1",
     ], {
       cwd: tempRoot,
-      env: fixtureEnv,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
@@ -2106,11 +1826,9 @@ function nodePhaseOutcome(workflow, phaseId, content, stateOverrides = {}) {
     }
     const phaseIndex = workflow.phases.findIndex((phase) => phase.id === phaseId);
     const phase = workflow.phases[phaseIndex];
-    const { runDir, manifestPath, statePath, workspaceRoot } = nodeFixtureRunState(
-      tempRoot,
-      workflow.id,
-      "r1",
-    );
+    const runDir = path.join(tempRoot, ".agent-flow", "runs", workflow.id, "r1");
+    const manifestPath = path.join(runDir, "manifest.json");
+    const statePath = path.join(tempRoot, ".agent-flow", "state", "current-run.json");
     const state = {
       ...JSON.parse(fs.readFileSync(manifestPath, "utf8")),
       ...stateOverrides,
@@ -2126,8 +1844,7 @@ function nodePhaseOutcome(workflow, phaseId, content, stateOverrides = {}) {
     fs.writeFileSync(artifact, content, "utf8");
     const routeKey = nodeRouteKeyFromKit(phase, content);
     const advance = spawnSync(process.execPath, [path.join(SOURCE_ROOT, "bin/agent-flow-kit.mjs"), "run", "advance"], {
-      cwd: workspaceRoot,
-      env: fixtureEnv,
+      cwd: tempRoot,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
@@ -2136,542 +1853,11 @@ function nodePhaseOutcome(workflow, phaseId, content, stateOverrides = {}) {
     return {
       outcome: advance.status === 0 ? nextState.phase : "blocked",
       route_key: routeKey,
-      fix_loop_rounds: nextState.fix_loop_rounds ?? 0,
+      fix_loop_rounds: nextState.fix_loop_rounds,
     };
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
-}
-
-function nodeFixtureRunState(root, workflowId, runId) {
-  const stateRoots = [root];
-  const commonDir = gitOutput(root, ["rev-parse", "--git-common-dir"]);
-  if (commonDir) {
-    const worktreeStates = path.join(path.resolve(root, commonDir), "agent-flow", "worktrees");
-    if (fs.existsSync(worktreeStates)) {
-      for (const entry of fs.readdirSync(worktreeStates, { withFileTypes: true })) {
-        if (entry.isDirectory() && !entry.isSymbolicLink()) {
-          stateRoots.push(path.join(worktreeStates, entry.name));
-        }
-      }
-    }
-  }
-  const matches = [];
-  for (const stateRoot of stateRoots) {
-    const statePath = path.join(stateRoot, ".agent-flow", "state", "current-run.json");
-    if (!fs.existsSync(statePath)) continue;
-    const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
-    if (state.workflow !== workflowId || state.run_id !== runId) continue;
-    const runDir = path.isAbsolute(state.run_dir)
-      ? path.resolve(state.run_dir)
-      : path.resolve(stateRoot, state.run_dir);
-    const expected = path.join(stateRoot, ".agent-flow", "runs", workflowId, runId);
-    if (!samePath(runDir, expected)) {
-      throw new Error(`node parity run identity mismatch: ${statePath}`);
-    }
-    const manifestPath = path.join(runDir, "manifest.json");
-    if (!fs.existsSync(manifestPath)) {
-      throw new Error(`node parity run manifest missing: ${manifestPath}`);
-    }
-    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-    if (
-      manifest.workflow !== workflowId
-      || manifest.run_id !== runId
-      || typeof manifest.run_dir !== "string"
-      || !samePath(manifest.run_dir, runDir)
-      || typeof state.workspace_root !== "string"
-      || !state.workspace_root
-      || typeof manifest.workspace_root !== "string"
-      || !manifest.workspace_root
-      || !samePath(state.workspace_root, manifest.workspace_root)
-    ) {
-      throw new Error(`node parity run manifest identity mismatch: ${manifestPath}`);
-    }
-    const workspaceRoot = path.resolve(state.workspace_root);
-    const workspaceTop = gitOutput(workspaceRoot, ["rev-parse", "--show-toplevel"]);
-    const rootCommon = gitOutput(root, ["rev-parse", "--git-common-dir"]);
-    const workspaceCommon = gitOutput(workspaceRoot, ["rev-parse", "--git-common-dir"]);
-    const registered = gitOutput(root, ["worktree", "list", "--porcelain"])
-      ?.split(/\r?\n/u)
-      .some((line) => line.startsWith("worktree ") && samePath(line.slice(9), workspaceRoot));
-    const branch = gitOutput(workspaceRoot, ["branch", "--show-current"]);
-    if (
-      !workspaceTop
-      || !samePath(workspaceTop, workspaceRoot)
-      || samePath(workspaceRoot, root)
-      || !rootCommon
-      || !workspaceCommon
-      || !samePath(path.resolve(root, rootCommon), path.resolve(workspaceRoot, workspaceCommon))
-      || !registered
-      || !branch
-      || ["main", "master", "develop"].includes(branch)
-    ) {
-      throw new Error(`node parity workspace identity mismatch: ${workspaceRoot}`);
-    }
-    matches.push({
-      statePath,
-      runDir,
-      manifestPath,
-      workspaceRoot,
-    });
-  }
-  if (matches.length !== 1) {
-    throw new Error(
-      `node parity expected one run ${workflowId}/${runId}, found ${matches.length}`,
-    );
-  }
-  return matches[0];
-}
-
-function assertExecutionStateLedgerParity() {
-  const fixtureDir = path.join(SOURCE_ROOT, "tests", "fixtures", "execution-ledger");
-  const required = [
-    "case.json",
-    "gate-results-failed.json",
-    "review-summary.json",
-    "expected-prompt-block.txt",
-  ];
-  for (const name of required) {
-    if (!fs.existsSync(path.join(fixtureDir, name))) {
-      failures.push(`execution ledger fixture missing ${name}`);
-      return;
-    }
-  }
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agent-flow-ledger-parity-"));
-  try {
-    const testCase = JSON.parse(fs.readFileSync(path.join(fixtureDir, "case.json"), "utf8"));
-    const sharedRunRoot = path.join(tempRoot, "shared");
-    const nodeResult = runNodeExecutionLedgerFixture({
-      runRoot: sharedRunRoot,
-      fixtureDir,
-      testCase,
-    });
-    fs.rmSync(sharedRunRoot, { recursive: true, force: true });
-    const pythonResult = runPythonExecutionLedgerFixture({
-      runRoot: sharedRunRoot,
-      fixtureDir,
-      testCase,
-    });
-    if (!nodeResult || !pythonResult) return;
-    for (const field of ["config", "ledger", "metrics", "captures", "usage", "prompt_block", "action_block", "tampered_block"]) {
-      if (nodeResult[field] !== pythonResult[field]) {
-        failures.push(`python/node execution ledger byte mismatch: ${field}`);
-      }
-    }
-    const expectedPrompt = fs.readFileSync(path.join(fixtureDir, "expected-prompt-block.txt"), "utf8");
-    if (`${nodeResult.prompt_block}\n` !== expectedPrompt) {
-      failures.push(
-        "execution ledger prompt block differs from shared expected bytes: "
-        + `expected=${JSON.stringify(expectedPrompt)} actual=${JSON.stringify(`${nodeResult.prompt_block}\n`)}`,
-      );
-    }
-    if (nodeResult.prompt_block.split("\n").length > 5 || nodeResult.prompt_block.length > 720) {
-      failures.push("execution ledger prompt block exceeds line or character cap");
-    }
-    if (nodeResult.prompt_block.split("\n").slice(1).some((line) => Array.from(line).length > 160)) {
-      failures.push("execution ledger prompt item exceeds 160 characters");
-    }
-    const expectedArtifactsOnlyFiles = [
-      "captures.jsonl",
-      "config.json",
-      "events.jsonl",
-      "injections.jsonl",
-      "metrics.json",
-      "usage.jsonl",
-      "workflow.json",
-    ];
-    if (nodeResult.disabled_sidecar_exists || pythonResult.disabled_sidecar_exists) {
-      failures.push("unset execution ledger experiment created a sidecar");
-    }
-    if (nodeResult.artifacts_only_files.join("|") !== expectedArtifactsOnlyFiles.join("|")) {
-      failures.push(`node artifacts-only sidecar mismatch: ${nodeResult.artifacts_only_files.join(",")}`);
-    }
-    if (pythonResult.artifacts_only_files.join("|") !== expectedArtifactsOnlyFiles.join("|")) {
-      failures.push(`python artifacts-only sidecar mismatch: ${pythonResult.artifacts_only_files.join(",")}`);
-    }
-    if (nodeResult.artifacts_only_injections !== pythonResult.artifacts_only_injections) {
-      failures.push("python/node artifacts-only prompt observation byte mismatch");
-    } else {
-      const observations = nodeResult.artifacts_only_injections.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
-      if (observations.length !== 1 || observations[0].injected !== false || observations[0].prompt_bytes !== 123) {
-        failures.push("artifacts-only prompt observation must be one injected:false event with prompt_bytes");
-      }
-    }
-    for (const [runtime, actionBlock] of [["node", nodeResult.action_block], ["python", pythonResult.action_block]]) {
-      if (!actionBlock.startsWith("## Action self-review (bounded verified artifact)\n")) {
-        failures.push(`${runtime} action-self-review header mismatch`);
-      }
-      if (/Execution ledger|fixture-run|round|\.agent-flow\/|Inspect `/.test(actionBlock)) {
-        failures.push(`${runtime} action-self-review leaked ledger identity or an unbounded artifact path`);
-      }
-      if (!/^- Raw: /m.test(actionBlock) || actionBlock.split("\n").length > 5 || Buffer.byteLength(actionBlock) > 720) {
-        failures.push(`${runtime} action-self-review bounded raw view mismatch`);
-      }
-    }
-    if (nodeResult.multi_review_block || pythonResult.multi_review_block) {
-      failures.push("execution ledger injected into an independent multi-review prompt");
-    }
-    if (nodeResult.corrupt_block || pythonResult.corrupt_block) {
-      failures.push("corrupt execution ledger produced a prompt block");
-    }
-    if (/Gate test|Before retrying/.test(nodeResult.tampered_block)) {
-      failures.push("tampered gate evidence was injected instead of being excluded");
-    }
-  } finally {
-    fs.rmSync(tempRoot, { recursive: true, force: true });
-  }
-}
-
-function runNodeExecutionLedgerFixture({ runRoot, fixtureDir, testCase }) {
-  try {
-    const runDir = path.join(runRoot, "run");
-    fs.mkdirSync(path.join(runDir, "artifacts"), { recursive: true });
-    const initialized = initializeExecutionStateLedger({
-      runDir,
-      runId: testCase.run_id,
-      mode: testCase.mode,
-      experimentEnabled: true,
-      task: testCase.task,
-      workflowId: testCase.workflow_id,
-      workflowPhases: testCase.workflow_phases,
-      baseCommit: testCase.base_commit,
-      experiment: testCase.experiment,
-      runSnapshot: testCase.run_snapshot,
-    });
-    if (!initialized.ok) throw new Error(initialized.error);
-    copyExecutionLedgerFixtureArtifacts(runDir, fixtureDir);
-    captureSharedExecutionLedgerHistory({
-      capture: (args) => captureExecutionState(args),
-      runDir,
-      testCase,
-    });
-    fs.writeFileSync(path.join(runDir, "manifest.json"), `${JSON.stringify({
-      run_id: testCase.run_id,
-      workflow: testCase.workflow_id,
-      status: "complete",
-      phase: "complete",
-      phase_index: testCase.workflow_phases.length,
-    })}\n`, "utf8");
-    const usage = recordExecutionStateUsage({
-      runDir, runId: testCase.run_id, mode: testCase.mode, experimentEnabled: true,
-      eventId: "usage-fixture", generatedAt: testCase.generated_at, scope: "run-total",
-      phaseId: null, round: null, inputTokens: 100, outputTokens: 20,
-      additionalTokens: 10, latencyMs: 250, estimatedCostUsd: "0.0004",
-      modelId: testCase.experiment.model_id,
-    });
-    if (!usage.ok) throw new Error(usage.error);
-    const promptArgs = {
-      runDir,
-      runId: testCase.run_id,
-      mode: testCase.mode,
-      experimentEnabled: true,
-      phase: { id: "fix-loop" },
-      projectRoot: runDir,
-      round: 2,
-    };
-    const result = {
-      config: fs.readFileSync(path.join(runDir, "artifacts", "execution-ledger", "config.json"), "utf8"),
-      ledger: fs.readFileSync(path.join(runDir, "artifacts", "execution-ledger", "ledger.json"), "utf8"),
-      metrics: fs.readFileSync(path.join(runDir, "artifacts", "execution-ledger", "metrics.json"), "utf8"),
-      captures: fs.readFileSync(path.join(runDir, "artifacts", "execution-ledger", "captures.jsonl"), "utf8"),
-      usage: fs.readFileSync(path.join(runDir, "artifacts", "execution-ledger", "usage.jsonl"), "utf8"),
-      prompt_block: executionStatePromptBlock(promptArgs),
-      multi_review_block: executionStatePromptBlock({ ...promptArgs, phase: { id: "multi-review", multi_review: true } }),
-    };
-    result.action_block = nodeActionSelfReviewBlock(path.join(runRoot, "action"), fixtureDir, testCase);
-    result.disabled_sidecar_exists = nodeDisabledSidecarExists(path.join(runRoot, "disabled"), testCase);
-    const artifactsOnly = nodeArtifactsOnlyResult(path.join(runRoot, "artifacts-only"), testCase);
-    result.artifacts_only_files = artifactsOnly.files;
-    result.artifacts_only_injections = artifactsOnly.injections;
-
-    const ledgerPath = path.join(runDir, "artifacts", "execution-ledger", "ledger.json");
-    const originalLedger = fs.readFileSync(ledgerPath);
-    fs.writeFileSync(ledgerPath, "{not-json\n", "utf8");
-    result.corrupt_block = executionStatePromptBlock(promptArgs);
-    fs.writeFileSync(ledgerPath, originalLedger);
-    const ledger = JSON.parse(originalLedger.toString("utf8"));
-    const archivePath = path.join(runDir, ledger.entries.status[0].provenance.archive_path);
-    fs.writeFileSync(archivePath, "tampered\n", "utf8");
-    result.tampered_block = executionStatePromptBlock(promptArgs);
-    return result;
-  } catch (error) {
-    failures.push(`node execution ledger parity failed: ${error.message}`);
-    return null;
-  }
-}
-
-function runPythonExecutionLedgerFixture({ runRoot, fixtureDir, testCase }) {
-  const code = String.raw`
-import json
-import pathlib
-import sys
-
-from agent_flow.core.execution_state_ledger import (
-    capture_execution_state,
-    execution_state_prompt_block,
-    initialize_execution_state_ledger,
-    observe_execution_state_injection,
-    record_execution_state_usage,
-)
-
-payload = json.loads(sys.stdin.read())
-root = pathlib.Path(payload["run_root"])
-fixtures = pathlib.Path(payload["fixture_dir"])
-case = payload["case"]
-
-def initialize(run, mode, enabled=True):
-    return initialize_execution_state_ledger(
-        run_dir=run, run_id=case["run_id"], mode=mode,
-        experiment_enabled=enabled, task=case["task"],
-        workflow_id=case["workflow_id"], workflow_phases=case["workflow_phases"],
-        base_commit=case["base_commit"], experiment=case["experiment"],
-        run_snapshot=case["run_snapshot"],
-    )
-
-def copy_artifacts(run):
-    (run / "artifacts").mkdir(parents=True, exist_ok=True)
-    (run / "artifacts" / "gate-results.json").write_bytes((fixtures / "gate-results-failed.json").read_bytes())
-    (run / "review-summary.json").write_bytes((fixtures / "review-summary.json").read_bytes())
-    (run / "final-review.md").write_text(
-        "# Review\n\n## Findings\n\n"
-        "- src/a.py:12 dependency boundary remains inverted\n\n"
-        "verdict: request-changes\n",
-        encoding="utf-8",
-    )
-
-def capture_history(run):
-    for round_number in (1, 2):
-        capture_execution_state(
-            run_dir=run, run_id=case["run_id"], mode=case["mode"], experiment_enabled=True,
-            phase={"id": "gates", "routes": {"request-changes": "fix-loop"}},
-            artifact_path=run / "artifacts" / "gate-results.json", project_root=run,
-            round=round_number, fix_loop_rounds=round_number, generated_at=case["generated_at"],
-            workflow_id=case["workflow_id"], route_key="request-changes", routed_to="fix-loop",
-        )
-    capture_execution_state(
-        run_dir=run, run_id=case["run_id"], mode=case["mode"], experiment_enabled=True,
-        phase={"id": "final-review", "multi_review": True, "routes": {"request-changes": "fix-loop"}},
-        artifact_path=run / "final-review.md", project_root=run, round=2, fix_loop_rounds=2,
-        generated_at=case["generated_at"], workflow_id=case["workflow_id"],
-        route_key="request-changes", routed_to="fix-loop",
-    )
-
-run = root / "run"
-copy_artifacts(run)
-initialized = initialize(run, case["mode"])
-if not initialized.get("ok"):
-    raise RuntimeError(initialized.get("error"))
-capture_history(run)
-(run / "meta.json").write_text(json.dumps({
-    "run_id": case["run_id"],
-    "workflow": case["workflow_id"],
-    "current_phase": None,
-    "phase_index": len(case["workflow_phases"]),
-}, separators=(",", ":")) + "\n", encoding="utf-8")
-usage = record_execution_state_usage(
-    run_dir=run, run_id=case["run_id"], mode=case["mode"], experiment_enabled=True,
-    event_id="usage-fixture", generated_at=case["generated_at"], scope="run-total",
-    phase_id=None, round=None, input_tokens=100, output_tokens=20, additional_tokens=10,
-    latency_ms=250, estimated_cost_usd="0.0004", model_id=case["experiment"]["model_id"],
-)
-if not usage.get("ok"):
-    raise RuntimeError(usage.get("error"))
-prompt_args = {
-    "run_dir": run, "run_id": case["run_id"], "mode": case["mode"],
-    "experiment_enabled": True, "phase": {"id": "fix-loop"},
-    "project_root": run, "round": 2,
-}
-sidecar = run / "artifacts" / "execution-ledger"
-result = {
-    "config": (sidecar / "config.json").read_text(encoding="utf-8"),
-    "ledger": (sidecar / "ledger.json").read_text(encoding="utf-8"),
-    "metrics": (sidecar / "metrics.json").read_text(encoding="utf-8"),
-    "captures": (sidecar / "captures.jsonl").read_text(encoding="utf-8"),
-    "usage": (sidecar / "usage.jsonl").read_text(encoding="utf-8"),
-    "prompt_block": execution_state_prompt_block(**prompt_args),
-    "multi_review_block": execution_state_prompt_block(**{**prompt_args, "phase": {"id": "multi-review", "multi_review": True}}),
-}
-
-action = root / "action"
-copy_artifacts(action)
-initialize(action, "action-self-review")
-capture_execution_state(
-    run_dir=action, run_id=case["run_id"], mode="action-self-review", experiment_enabled=True,
-    phase={"id": "gates", "routes": {"request-changes": "fix-loop"}},
-    artifact_path=action / "artifacts" / "gate-results.json", project_root=action,
-    round=1, fix_loop_rounds=1, generated_at=case["generated_at"],
-    workflow_id=case["workflow_id"], route_key="request-changes", routed_to="fix-loop",
-)
-result["action_block"] = execution_state_prompt_block(
-    run_dir=action, run_id=case["run_id"], mode="action-self-review", experiment_enabled=True,
-    phase={"id": "fix-loop"}, project_root=action, round=1,
-)
-
-disabled = root / "disabled"
-initialize(disabled, "artifacts-only", enabled=False)
-result["disabled_sidecar_exists"] = (disabled / "artifacts" / "execution-ledger").exists()
-artifacts_only = root / "artifacts-only"
-artifacts_only.mkdir(parents=True, exist_ok=True)
-initialize(artifacts_only, "artifacts-only")
-observe_execution_state_injection(
-    run_dir=artifacts_only, run_id=case["run_id"], mode="artifacts-only",
-    experiment_enabled=True, phase={"id": "fix-loop"}, project_root=artifacts_only,
-    round=1, generated_at=case["generated_at"], prompt_bytes=123,
-)
-artifacts_sidecar = artifacts_only / "artifacts" / "execution-ledger"
-result["artifacts_only_files"] = sorted(
-    item.relative_to(artifacts_sidecar).as_posix()
-    for item in artifacts_sidecar.rglob("*") if item.is_file()
-)
-result["artifacts_only_injections"] = (artifacts_sidecar / "injections.jsonl").read_text(encoding="utf-8")
-
-ledger_path = sidecar / "ledger.json"
-original = ledger_path.read_bytes()
-ledger_path.write_text("{not-json\n", encoding="utf-8")
-result["corrupt_block"] = execution_state_prompt_block(**prompt_args)
-ledger_path.write_bytes(original)
-tampered = json.loads(original)
-archive_path = run / tampered["entries"]["status"][0]["provenance"]["archive_path"]
-archive_path.write_text("tampered\n", encoding="utf-8")
-result["tampered_block"] = execution_state_prompt_block(**prompt_args)
-print(json.dumps(result))
-`;
-  const result = spawnSync(preferredPython(), ["-c", code], {
-    cwd: SOURCE_ROOT,
-    input: JSON.stringify({ run_root: runRoot, fixture_dir: fixtureDir, case: testCase }),
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      PYTHONPATH: [path.join(SOURCE_ROOT, "src"), process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
-    },
-    stdio: ["pipe", "pipe", "pipe"],
-    timeout: 30_000,
-  });
-  if (result.error || result.status !== 0) {
-    failures.push(`python execution ledger parity failed: ${result.error?.message || result.stderr.trim() || result.status}`);
-    return null;
-  }
-  try {
-    return JSON.parse(result.stdout);
-  } catch (error) {
-    failures.push(`python execution ledger parity returned invalid JSON: ${error.message}`);
-    return null;
-  }
-}
-
-function copyExecutionLedgerFixtureArtifacts(runDir, fixtureDir) {
-  fs.mkdirSync(path.join(runDir, "artifacts"), { recursive: true });
-  fs.copyFileSync(path.join(fixtureDir, "gate-results-failed.json"), path.join(runDir, "artifacts", "gate-results.json"));
-  fs.copyFileSync(path.join(fixtureDir, "review-summary.json"), path.join(runDir, "review-summary.json"));
-  fs.writeFileSync(
-    path.join(runDir, "final-review.md"),
-    "# Review\n\n## Findings\n\n"
-      + "- src/a.py:12 dependency boundary remains inverted\n\n"
-      + "verdict: request-changes\n",
-    "utf8",
-  );
-}
-
-function captureSharedExecutionLedgerHistory({ capture, runDir, testCase }) {
-  for (const round of [1, 2]) {
-    capture({
-      runDir,
-      runId: testCase.run_id,
-      mode: testCase.mode,
-      experimentEnabled: true,
-      phase: { id: "gates", routes: { "request-changes": "fix-loop" } },
-      artifactPath: path.join(runDir, "artifacts", "gate-results.json"),
-      projectRoot: runDir,
-      round,
-      fixLoopRounds: round,
-      generatedAt: testCase.generated_at,
-      workflowId: testCase.workflow_id,
-      routeKey: "request-changes",
-      routedTo: "fix-loop",
-    });
-  }
-  capture({
-    runDir,
-    runId: testCase.run_id,
-    mode: testCase.mode,
-    experimentEnabled: true,
-    phase: { id: "final-review", multi_review: true, routes: { "request-changes": "fix-loop" } },
-    artifactPath: path.join(runDir, "final-review.md"),
-    projectRoot: runDir,
-    round: 2,
-    fixLoopRounds: 2,
-    generatedAt: testCase.generated_at,
-    workflowId: testCase.workflow_id,
-    routeKey: "request-changes",
-    routedTo: "fix-loop",
-  });
-}
-
-function nodeActionSelfReviewBlock(runDir, fixtureDir, testCase) {
-  copyExecutionLedgerFixtureArtifacts(runDir, fixtureDir);
-  const initialized = initializeExecutionStateLedger({
-    runDir, runId: testCase.run_id, mode: "action-self-review", experimentEnabled: true,
-    task: testCase.task, workflowId: testCase.workflow_id, workflowPhases: testCase.workflow_phases,
-    baseCommit: testCase.base_commit, experiment: testCase.experiment,
-    runSnapshot: testCase.run_snapshot,
-  });
-  if (!initialized.ok) throw new Error(initialized.error);
-  captureExecutionState({
-    runDir, runId: testCase.run_id, mode: "action-self-review", experimentEnabled: true,
-    phase: { id: "gates", routes: { "request-changes": "fix-loop" } },
-    artifactPath: path.join(runDir, "artifacts", "gate-results.json"), projectRoot: runDir,
-    round: 1, fixLoopRounds: 1, generatedAt: testCase.generated_at,
-    workflowId: testCase.workflow_id, routeKey: "request-changes", routedTo: "fix-loop",
-  });
-  return executionStatePromptBlock({
-    runDir, runId: testCase.run_id, mode: "action-self-review", experimentEnabled: true,
-    phase: { id: "fix-loop" }, projectRoot: runDir, round: 1,
-  });
-}
-
-function nodeDisabledSidecarExists(runDir, testCase) {
-  initializeExecutionStateLedger({
-    runDir, runId: testCase.run_id, mode: "artifacts-only", experimentEnabled: false,
-    task: testCase.task, workflowId: testCase.workflow_id, workflowPhases: testCase.workflow_phases,
-    baseCommit: testCase.base_commit, experiment: testCase.experiment,
-    runSnapshot: testCase.run_snapshot,
-  });
-  return fs.existsSync(path.join(runDir, "artifacts", "execution-ledger"));
-}
-
-function nodeArtifactsOnlyResult(runDir, testCase) {
-  fs.mkdirSync(runDir, { recursive: true });
-  const initialized = initializeExecutionStateLedger({
-    runDir, runId: testCase.run_id, mode: "artifacts-only", experimentEnabled: true,
-    task: testCase.task, workflowId: testCase.workflow_id, workflowPhases: testCase.workflow_phases,
-    baseCommit: testCase.base_commit, experiment: testCase.experiment,
-    runSnapshot: testCase.run_snapshot,
-  });
-  if (!initialized.ok) throw new Error(initialized.error);
-  observeExecutionStateInjection({
-    runDir, runId: testCase.run_id, mode: "artifacts-only", experimentEnabled: true,
-    phase: { id: "fix-loop" }, projectRoot: runDir, round: 1,
-    generatedAt: testCase.generated_at, promptBytes: 123,
-  });
-  const sidecar = path.join(runDir, "artifacts", "execution-ledger");
-  return {
-    files: relativeFileNames(sidecar),
-    injections: fs.readFileSync(path.join(sidecar, "injections.jsonl"), "utf8"),
-  };
-}
-
-function relativeFileNames(root) {
-  if (!fs.existsSync(root)) return [];
-  const files = [];
-  const visit = (current) => {
-    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
-      const target = path.join(current, entry.name);
-      if (entry.isDirectory()) visit(target);
-      else if (entry.isFile()) files.push(path.relative(root, target).split(path.sep).join("/"));
-    }
-  };
-  visit(root);
-  return files.sort();
 }
 
 function preferredPython() {

@@ -7,7 +7,7 @@ specific hints live in the host-name parameterization.
 Return semantics:
   - True  → this call wrote the artifact; runner advances to the next phase.
   - False → this call emitted a prompt; the host AI must do the work, write
-            the artifact file, then follow `agent-flow-python status` / `next_command`.
+            the artifact file, then follow `agent-flow status` / `next_command`.
 The artifact path is `<run_dir>/<phase.artifact>` when the workflow declares
 one, otherwise `<run_dir>/<phase.id>.md`.
 
@@ -24,13 +24,7 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 import yaml
-from agent_flow.core.execution_state_ledger import execution_state_prompt_block
 from agent_flow.core.local_skills import local_skill_prompt_block
-from agent_flow.core.profiles import (
-    profile_prompt_projection,
-    render_profile_prompt_block,
-)
-from agent_flow.core.skill_plan import profile_skill_prompt_block, runtime_changed_files
 
 if TYPE_CHECKING:
     from agent_flow.runner import Phase
@@ -51,18 +45,9 @@ class Adapter(ABC):
     def __init__(self) -> None:
         self._profile_snapshot: dict[str, Any] = {}
         self._profile_id: str = "generic"
-        self._active_phase_id: str = ""
         self._architecture: str = "default"
         self._lore_citations: list[Any] = []  # list[Lore]; typed loose to avoid import cycle
         self._config_root: Path | None = None
-        self._task_scope: str = ""
-        self._base_commit: str | None = None
-        self._ledger_run_dir: Path | None = None
-        self._ledger_run_id: str = ""
-        self._ledger_mode: str = "artifacts-only"
-        self._ledger_experiment_enabled: bool = False
-        self._ledger_round: int = 1
-        self._ledger_prompt_block: str | None = None
 
     @abstractmethod
     def execute(self, phase: "Phase", run_dir: Path, project_root: Path) -> bool:
@@ -76,7 +61,6 @@ class Adapter(ABC):
                         project_root: Path, host_hint: str = "") -> str:
         """Render the prompt envelope shared by all AI adapters."""
         artifact = self.artifact_path(phase, run_dir)
-        self._active_phase_id = phase.id
         relative_artifact = (
             artifact.relative_to(project_root)
             if artifact.is_relative_to(project_root)
@@ -90,40 +74,8 @@ class Adapter(ABC):
         profile_block = self._render_profile_block(config_root)
         architecture_block = self._render_architecture_block(phase)
         completion_gate_block = self._render_completion_gate_block(phase)
-        changed_files = runtime_changed_files(
-            config_root,
-            project_root,
-            self._base_commit,
-        )
-        profile_skill_block = profile_skill_prompt_block(
-            config_root,
-            phase.id,
-            project_root,
-            self._task_scope,
-            self._base_commit,
-        )
-        local_skill_block = local_skill_prompt_block(
-            config_root,
-            phase.id,
-            self._task_scope,
-            changed_files,
-        )
+        local_skill_block = local_skill_prompt_block(config_root, phase.id)
         lore_block = self._render_lore_block(project_root, phase)
-        ledger_prompt = ""
-        if not getattr(phase, "multi_review", False) and self._ledger_run_dir is not None:
-            if self._ledger_prompt_block is not None:
-                ledger_prompt = self._ledger_prompt_block
-            else:
-                ledger_prompt = execution_state_prompt_block(
-                    run_dir=self._ledger_run_dir,
-                    run_id=self._ledger_run_id,
-                    mode=self._ledger_mode,
-                    experiment_enabled=self._ledger_experiment_enabled,
-                    phase=phase,
-                    project_root=project_root,
-                    round=self._ledger_round,
-                )
-        ledger_block = f"\n\n{ledger_prompt}" if ledger_prompt else ""
         return (
             f"# agent-flow phase: {phase.id}\n\n"
             f"**Description**: {phase.description}\n\n"
@@ -135,13 +87,11 @@ class Adapter(ABC):
             f"{profile_block}"
             f"{architecture_block}"
             f"{completion_gate_block}"
-            f"{profile_skill_block}"
             f"{local_skill_block}"
             f"{lore_block}"
-            f"{ledger_block}"
             f"{host_block}"
             f"\n## When complete\n"
-            f"After writing the artifact, run `agent-flow-python status` from "
+            f"After writing the artifact, run `agent-flow status` from "
             f"`{project_root}` and follow the printed `next_command`."
         )
 
@@ -234,18 +184,17 @@ class Adapter(ABC):
         if not self._profile_snapshot:
             return ""
         try:
-            return render_profile_prompt_block(
-                self._profile_id,
-                self._profile_snapshot,
-                self._active_phase_id,
-            )
+            yaml_dump = yaml.safe_dump(
+                self._profile_snapshot, sort_keys=False, allow_unicode=True
+            ).rstrip()
         except yaml.YAMLError:
             return ""
-
-
-def _profile_projection(profile: dict[str, Any], phase_id: str) -> dict[str, Any]:
-    """Keep phase prompts focused while preserving profile top-level contracts."""
-    return profile_prompt_projection(profile, phase_id)
+        return (
+            f"\n## Active profile: `{self._profile_id}`\n\n"
+            f"This is the parsed profile YAML — use these values directly, "
+            f"don't ask the user to look them up:\n\n"
+            f"```yaml\n{yaml_dump}\n```\n"
+        )
 
 
 def _oneline(text: str, max_len: int) -> str:

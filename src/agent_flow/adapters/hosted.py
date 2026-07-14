@@ -17,7 +17,6 @@ from pathlib import Path
 from types import MappingProxyType
 
 from agent_flow.adapters.base import Adapter
-from agent_flow.core.security import ensure_child_path, validate_safe_name
 from agent_flow.multi_review import (
     ReviewerJob,
     Distribution,
@@ -149,19 +148,16 @@ def _reviewer_jobs(
         angle_id = str(item.get("id") or "").strip()
         if not angle_id:
             continue
-        validate_safe_name(angle_id, "review angle")
         angle_prompt = (
             f"{base_prompt}\n\n"
             f"## Review angle\n\n"
             f"- id: {angle_id}\n"
             f"{_review_angle_prompt(project_root, item.get('prompt', ''))}\n"
         )
-        output_path = run_dir / f"{phase.id}-{angle_id}.md"
-        ensure_child_path(run_dir, output_path, "review output")
         jobs.append(ReviewerJob(
             angle_id=angle_id,
             prompt=angle_prompt,
-            output_path=output_path,
+            output_path=run_dir / f"{phase.id}-{angle_id}.md",
         ))
     return jobs
 
@@ -176,23 +172,14 @@ def _merge_review_angles(
         if item.get("id")
     }
     order = list(merged)
-    canonical_ids = {angle_id.casefold(): angle_id for angle_id in order}
     for item in profile_angles if isinstance(profile_angles, list) else []:
         if not isinstance(item, dict):
             continue
         angle_id = str(item.get("id") or "").strip()
         if not angle_id:
             continue
-        validate_safe_name(angle_id, "review angle")
-        existing_id = canonical_ids.get(angle_id.casefold())
-        if existing_id is not None and existing_id != angle_id:
-            raise ValueError(
-                "review angle ids collide on case-insensitive filesystems: "
-                f"{existing_id!r}, {angle_id!r}"
-            )
         if angle_id not in merged:
             order.append(angle_id)
-            canonical_ids[angle_id.casefold()] = angle_id
         merged[angle_id] = dict(item)
     return [merged[angle_id] for angle_id in order]
 

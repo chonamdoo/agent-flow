@@ -11,15 +11,15 @@ branching:
     max_slug_length: 60
 gates:
   - id: architecture-lint
-    command: ["./.agent-flow/bin/agent-flow", "architecture-lint", "--profile", "spring"]
+    command: ["agent-flow", "architecture-lint", "--profile", "spring"]
     required: true
     phase: pre-commit
   - id: build
-    command: ["sh", "-c", "if [ -x ./gradlew ]; then ./gradlew build -x test; elif [ -f pom.xml ]; then if [ -x ./mvnw ]; then ./mvnw -DskipTests package; else mvn -DskipTests package; fi; else gradle build -x test; fi"]
+    command: ["./gradlew", "build", "-x", "test"]
     required: true
     phase: pre-commit
   - id: test
-    command: ["sh", "-c", "if [ -x ./gradlew ]; then ./gradlew test; elif [ -f pom.xml ]; then if [ -x ./mvnw ]; then ./mvnw test; else mvn test; fi; else gradle test; fi"]
+    command: ["./gradlew", "test"]
     required: true
     phase: pre-push
 review_angles:
@@ -29,14 +29,6 @@ review_angles:
     prompt: templates/_shared/review/transactions.md
   - id: n-plus-one
     prompt: templates/_shared/review/n-plus-one.md
-skills:
-  install:
-    - spring-development-guide
-  required_review:
-    - group: profile
-      skills: [spring-development-guide]
-      when: Spring or Spring Boot files change
-      missing: "missing local profile: <skill>"
 artifacts:
   prd: optional
   adr: required        # Spring backends benefit from explicit decision logs

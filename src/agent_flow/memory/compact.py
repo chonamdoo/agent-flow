@@ -24,8 +24,8 @@ Weight decay (used after Tier 2/4):
     archived            → 0.0 (file moved out)
 
 Compaction is *conservative*: only Tier 2 dedup and Tier 4 stale-drop move
-files. Tier 3 reports candidates only. `apply=False` is a dry run; an explicit
-`apply=True` call commits the moves.
+files. Tier 3 reports candidates only. The user runs `agent-flow lore
+compact --apply` to commit; `--dry-run` (default) just reports.
 """
 from __future__ import annotations
 

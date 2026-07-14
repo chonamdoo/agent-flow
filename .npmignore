@@ -1,8 +1,0 @@
-.Codex/**/*.tmp
-.Codex/*.tmp
-.agent-flow/
-node_modules/
-__pycache__/
-*.pyc
-**/__pycache__/**
-**/*.pyc
