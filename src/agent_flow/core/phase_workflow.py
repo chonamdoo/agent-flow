@@ -41,35 +41,16 @@ class PhaseWorkflowDefinition:
 def find_kit_root() -> Path:
     """Locate the agent-flow kit root (contains workflows/ and profiles/)."""
     here = Path(__file__).resolve()
-    package_root = here.parent.parent
-
-    # Project installs copy this package under
-    # `.agent-flow/runtime/python/agent_flow` while the pinned workflow/profile
-    # snapshot lives at the enclosing `.agent-flow` root. Prefer that exact
-    # layout before considering anything owned by the host project.
-    if (
-        package_root.parent.name == "python"
-        and package_root.parent.parent.name == "runtime"
-        and package_root.parent.parent.parent.name == ".agent-flow"
-    ):
-        installed_root = package_root.parent.parent.parent
-        if (installed_root / "workflows").is_dir() and (installed_root / "profiles").is_dir():
-            return installed_root
-
-    # Source checkouts keep the canonical resources at the repository root.
-    if package_root.parent.name == "src":
-        source_root = package_root.parent.parent
-        source_module = source_root / "src" / "agent_flow" / "core" / "phase_workflow.py"
-        if (
-            source_module.resolve() == here
-            and (source_root / "workflows").is_dir()
-            and (source_root / "profiles").is_dir()
-        ):
-            return source_root
-
-    # Wheels include a self-contained resource snapshot inside `agent_flow`.
-    if (package_root / "workflows").is_dir() and (package_root / "profiles").is_dir():
-        return package_root
+    candidates = [
+        parent
+        for parent in here.parents
+        if (parent / "workflows").is_dir() and (parent / "profiles").is_dir()
+    ]
+    for candidate in candidates:
+        if (candidate / "pyproject.toml").is_file() or (candidate / "package.json").is_file():
+            return candidate
+    if candidates:
+        return candidates[0]
     raise RuntimeError("Could not locate agent-flow kit root from " + str(here))
 
 
@@ -127,15 +108,6 @@ def _normalize_phases(phases_raw: list[object], path: Path, workflow_id: str) ->
 def _validate_routes(phases: list[PhaseDefinition], path: Path) -> None:
     phase_ids = {phase.id for phase in phases}
     for phase in phases:
-        if phase.id == "multi-review" and not phase.multi_review:
-            raise ValueError(
-                f"workflow {path}: phase multi-review requires multi_review: true"
-            )
-        if (phase.multi_review or phase.id in {"multi-review", "gates"}) and not phase.routes:
-            route_kind = "multi_review" if phase.multi_review else "gates"
-            raise ValueError(
-                f"workflow {path}: phase {phase.id} ({route_kind}) requires non-empty routes"
-            )
         if not phase.routes:
             continue
         for key, target in phase.routes.items():

@@ -1,6 +1,0 @@
-{
-  "findings": [
-    "src/a.py:12 dependency boundary remains inverted"
-  ],
-  "verdict": "request-changes"
-}

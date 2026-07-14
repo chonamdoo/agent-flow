@@ -11,7 +11,7 @@ branching:
     max_slug_length: 60
 gates:
   - id: architecture-lint
-    command: ["./.agent-flow/bin/agent-flow", "architecture-lint", "--profile", "node"]
+    command: ["agent-flow", "architecture-lint", "--profile", "node"]
     required: true
     phase: pre-commit
   - id: test
@@ -25,26 +25,6 @@ review_angles:
     prompt: templates/_shared/review/types.md
   - id: io-safety
     prompt: templates/_shared/review/io-safety.md
-skills:
-  install:
-    - node-development-guide
-    - typescript-development-guide
-  required_review:
-    - group: profile
-      skills: [node-development-guide]
-      when: Node.js service, CLI, or tooling files change
-      missing: "missing local profile: <skill>"
-    - group: typescript_skills
-      skills_from: typescript_skills.review
-      when: Node.js TypeScript files, tsconfig, or TypeScript task scope changes
-      missing: "missing local typescript_skills: <skill>"
-typescript_skills:
-  implementation:
-    - skill: typescript-development-guide
-      when: Node.js TypeScript files, tsconfig, or TypeScript task scope changes
-  review:
-    - skill: typescript-development-guide
-      when: reviewing Node.js TypeScript files, tsconfig, or TypeScript task scope
 artifacts:
   prd: optional
   adr: optional
