@@ -1257,6 +1257,34 @@ def test_external_managed_output_replacement_is_preserved_on_rollback(tmp_path: 
     assert agents.read_bytes() == replacement
 
 
+def test_external_change_to_untouched_managed_path_is_rejected_before_seal(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    assert _install(project).returncode == 0
+    external = project / "scripts" / "external.txt"
+    env = dict(os.environ)
+    env["HOME"] = str(tmp_path / "home")
+    env["AGENT_FLOW_TEST_HOLD_BEFORE_MANAGED_INSTALL_SEAL_MS"] = "1500"
+    process = subprocess.Popen(
+        (_node(), str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"), "install"),
+        cwd=project,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    assert process.stderr is not None
+    marker = process.stderr.readline()
+    assert "agent-flow:test-managed-install-before-seal" in marker
+    external.parent.mkdir()
+    external.write_text("external\n", encoding="utf-8")
+    stdout, stderr = process.communicate(timeout=10)
+
+    assert process.returncode != 0, stdout
+    assert "changed outside transaction: scripts" in stderr
+    assert external.read_text(encoding="utf-8") == "external\n"
+
+
 def test_failed_install_does_not_mutate_codex_trust_config(tmp_path: Path) -> None:
     project = tmp_path / "project"
     home = tmp_path / "home"

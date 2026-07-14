@@ -357,6 +357,7 @@ function installProjectUnlocked(root, context) {
   payload.managed_hook_contract_commitment = managedHookContractCommitment(payload);
 
   writeManagedFile(path.join(agentFlowDir, "kit.json"), `${JSON.stringify(payload, null, 2)}\n`);
+  holdInstallForTest("AGENT_FLOW_TEST_HOLD_BEFORE_MANAGED_INSTALL_SEAL_MS", "managed-install-before-seal");
   sealManagedInstallMutations(context.transaction);
   holdInstallForTest("AGENT_FLOW_TEST_HOLD_AFTER_MANAGED_INSTALL_SEAL_MS", "managed-install-sealed");
   if (process.env.AGENT_FLOW_TEST_FAIL_AFTER_MANAGED_INSTALL === "1") {
@@ -2119,7 +2120,7 @@ function sameManagedPathState(left, right) {
 function managedInstallMutationOperation(transaction, requestedPath) {
   if (!transaction?.journal) return null;
   const requested = path.resolve(requestedPath);
-  const caseInsensitive = process.platform === "darwin" || process.platform === "win32";
+  const caseInsensitive = managedRootIsCaseInsensitive(transaction.root);
   const matches = (transaction.journal.managed_mutations || []).filter((operation) => {
     const target = path.resolve(transaction.root, operation.path);
     if (caseInsensitive) {
@@ -2132,6 +2133,16 @@ function managedInstallMutationOperation(transaction, requestedPath) {
   });
   matches.sort((left, right) => right.path.length - left.path.length);
   return matches[0] ?? null;
+}
+
+function managedRootIsCaseInsensitive(root) {
+  const canonical = path.join(root, ".agent-flow");
+  const alternate = path.join(root, ".AGENT-FLOW");
+  try {
+    return fs.realpathSync.native(canonical) === fs.realpathSync.native(alternate);
+  } catch {
+    return process.platform === "win32";
+  }
 }
 
 function withManagedInstallMutation(pathName, callback) {
@@ -2150,8 +2161,13 @@ function withManagedInstallMutation(pathName, callback) {
 }
 
 function snapshotManagedInstallPaths(transaction) {
+  const seen = new Set();
+  const caseInsensitive = managedRootIsCaseInsensitive(transaction.root);
   for (const target of managedInstallPaths(transaction.root)) {
     ensureChildPath(transaction.root, target);
+    const key = caseInsensitive ? path.resolve(target).toLowerCase() : path.resolve(target);
+    if (seen.has(key)) continue;
+    seen.add(key);
     const before = managedPathState(target);
     const operation = {
       path: path.relative(transaction.root, target),
@@ -2177,7 +2193,8 @@ function sealManagedInstallMutations(transaction) {
   if (!transaction || !transaction.journal || !fs.existsSync(transaction.transactionRoot)) return;
   for (const operation of transaction.journal.managed_mutations || []) {
     const current = managedPathState(hostMutationTarget(transaction.root, operation.path));
-    if (operation.after && !sameManagedPathState(operation.after, current)) {
+    const expected = operation.after ?? operation.before;
+    if (!sameManagedPathState(expected, current)) {
       throw new Error(`managed install path changed outside transaction: ${operation.path}`);
     }
     operation.after = current;
