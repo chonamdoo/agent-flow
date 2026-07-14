@@ -41,7 +41,6 @@ SHELL_MUTATORS = {
 READ_ONLY_SHELL_COMMANDS = {
     "basename",
     "cat",
-    "command",
     "cut",
     "dirname",
     "du",
@@ -278,8 +277,6 @@ def _shell_mutation_paths(command: str) -> tuple[bool, list[str]]:
             paths.append(arguments[-1])
     if dynamic_target:
         return True, []
-    if not paths:
-        paths.append(".")
     return True, list(dict.fromkeys(paths))
 
 

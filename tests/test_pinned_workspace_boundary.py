@@ -309,6 +309,28 @@ def test_dynamic_shell_mutations_cannot_escape_the_pinned_worktree(
 
 
 @pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_wrapped_and_computed_shell_targets_fail_closed(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    target_codes = ",".join(str(value) for value in str(leader / "shared.txt").encode())
+    commands = (
+        f"command cp shared.txt {leader / 'shared.txt'}",
+        f"node -e \"require('fs').writeFileSync(String.fromCharCode({target_codes}), 'changed')\"",
+        (
+            "python3 -c \"from pathlib import Path; "
+            f"Path(bytes([{target_codes}]).decode()).write_text('changed')\""
+        ),
+    )
+
+    for command in commands:
+        result = _bash_guard(leader, worktree, command, host=host)
+        assert result.returncode == 2, (command, result.stderr)
+    assert (leader / "shared.txt").read_text(encoding="utf-8") == "leader\n"
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
 def test_unclassified_shell_command_fails_closed_from_the_leader(
     pinned_run: tuple[Path, Path, Path, Path],
     host: str,
