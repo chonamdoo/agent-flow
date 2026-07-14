@@ -129,7 +129,7 @@ _SKILL_LINK_STATUSES = frozenset(
 
 
 class SkillPlanSnapshotError(RuntimeError):
-    """Raised when an installed or run-pinned skill snapshot is not trustworthy."""
+    """설치 또는 run 고정 skill snapshot을 신뢰할 수 없을 때 발생한다."""
 
 
 def indexed_external_exposure_skill_names(
@@ -137,7 +137,7 @@ def indexed_external_exposure_skill_names(
     *,
     legacy_fallback: bool = True,
 ) -> tuple[str, ...]:
-    """Return validated logical names exposed from an explicit external closure."""
+    """명시적 외부 closure에 노출된 검증 완료 논리 이름을 반환한다."""
     if not isinstance(selection, dict):
         selection = {}
     has_exposure = "external_exposure_skills" in selection
@@ -175,7 +175,7 @@ def compute_skill_plan_hash(
     *,
     verify_trees: bool = False,
 ) -> str:
-    """Return the Node v2 whole-plan hash for an installed skill index."""
+    """설치된 skill index의 Node v2 전체 plan hash를 반환한다."""
     return hashlib.sha256(
         canonical_skill_plan_bytes(index, index_root, verify_trees=verify_trees)
     ).hexdigest()
@@ -187,7 +187,7 @@ def canonical_skill_plan_bytes(
     *,
     verify_trees: bool = False,
 ) -> bytes:
-    """Serialize the same normalized payload as Node's JSON.stringify contract."""
+    """Node의 JSON.stringify 계약과 동일한 정규화 payload를 직렬화한다."""
     selection = index.get("selection")
     if not isinstance(selection, dict):
         selection = {}
@@ -299,7 +299,7 @@ def canonical_skill_plan_bytes(
 
 
 def hash_skill_tree(root: Path) -> str:
-    """Hash relative paths and binary contents exactly like Node hashSkillTree."""
+    """Node hashSkillTree와 동일하게 상대 경로와 binary 내용을 hash한다."""
     try:
         root_mode = root.lstat().st_mode
     except OSError as exc:
@@ -362,7 +362,7 @@ def hash_skill_tree(root: Path) -> str:
 
 
 def skill_links_commitment(skill_plan_hash: object, links: object) -> str:
-    """Return the Node-compatible commitment for installed host skill links."""
+    """설치된 host skill link의 Node 호환 commitment를 반환한다."""
     if (
         not isinstance(skill_plan_hash, str)
         or re.fullmatch(r"[0-9a-f]{64}", skill_plan_hash) is None
@@ -390,7 +390,7 @@ def validate_skill_host_links(
     kit: dict[str, Any],
     index: dict[str, Any],
 ) -> None:
-    """Validate authenticated host links against their live destinations."""
+    """인증된 host link와 현재 destination을 대조 검증한다."""
     has_version = "skill_links_commitment_version" in kit
     has_commitment = "skill_links_commitment" in kit
     if not has_version and not has_commitment:
@@ -420,7 +420,7 @@ def assert_committed_skill_host_links_applied(
     index: dict[str, Any],
     links: object,
 ) -> None:
-    """Fail when a committed host link, copy, or stale deletion is not applied."""
+    """기록된 host link, copy, stale 삭제가 반영되지 않았으면 실패한다."""
     normalized_links = _normalized_skill_link_objects(_owned_skill_links(links))
     skills = index.get("skills")
     if not isinstance(skills, list):
@@ -752,7 +752,7 @@ def _require_link_parent_directories(root: Path, parent: Path, relative: str) ->
 
 
 def installed_skill_plan_pin(index_root: Path) -> dict[str, Any]:
-    """Validate the installed index/tree and return metadata for a new run."""
+    """설치된 index와 tree를 검증하고 새 run용 metadata를 반환한다."""
     index_path = index_root / ".agent-flow" / "skills" / "index.json"
     kit_path = index_root / ".agent-flow" / "kit.json"
     index_present = index_path.exists() or index_path.is_symlink()
@@ -793,7 +793,7 @@ def installed_skill_plan_pin(index_root: Path) -> dict[str, Any]:
 
 
 def managed_host_files_commitment(kit: dict[str, Any]) -> str:
-    """Return the Node-compatible commitment for managed reviewer/hook provenance."""
+    """관리 reviewer와 hook provenance의 Node 호환 commitment를 반환한다."""
     skill_plan_hash = kit.get("skill_plan_hash")
     if not isinstance(skill_plan_hash, str) or re.fullmatch(r"[0-9a-f]{64}", skill_plan_hash) is None:
         raise SkillPlanSnapshotError(
@@ -819,7 +819,7 @@ def managed_host_files_commitment(kit: dict[str, Any]) -> str:
 
 
 def validate_managed_host_files(index_root: Path, kit: dict[str, Any]) -> None:
-    """Validate commitment, required paths, and live managed host bytes."""
+    """commitment, 필수 경로, 현재 관리 host bytes를 검증한다."""
     if (
         kit.get("managed_host_files_commitment_version")
         != MANAGED_HOST_FILES_COMMITMENT_VERSION
@@ -864,7 +864,7 @@ def validate_managed_host_files(index_root: Path, kit: dict[str, Any]) -> None:
 
 
 def managed_hook_contract_commitment(kit: dict[str, Any]) -> str:
-    """Return the Node-compatible commitment for normalized hooks and scripts."""
+    """정규화된 hook과 script의 Node 호환 commitment를 반환한다."""
     skill_plan_hash = kit.get("skill_plan_hash")
     if not isinstance(skill_plan_hash, str) or re.fullmatch(r"[0-9a-f]{64}", skill_plan_hash) is None:
         raise SkillPlanSnapshotError(
@@ -888,7 +888,7 @@ def managed_hook_contract_commitment(kit: dict[str, Any]) -> str:
 
 
 def validate_managed_hook_contract(index_root: Path, kit: dict[str, Any]) -> None:
-    """Validate managed hook entries separately from unrelated host settings."""
+    """관리 hook 항목을 관련 없는 host 설정과 분리해 검증한다."""
     if (
         kit.get("managed_hook_contract_commitment_version")
         != MANAGED_HOOK_CONTRACT_COMMITMENT_VERSION
@@ -1220,7 +1220,7 @@ def reconcile_skill_plan_pin(
     meta: dict[str, Any],
     index_root: Path,
 ) -> tuple[dict[str, Any], bool]:
-    """Verify a v2 run pin, or prepare a no-prompt legacy migration."""
+    """v2 run pin을 검증하거나 추가 입력 없는 legacy migration을 준비한다."""
     current_pin = installed_skill_plan_pin(index_root)
     pinned_hash = meta.get("skill_plan_hash")
     pinned_version = meta.get("skill_plan_hash_version")
@@ -1563,7 +1563,7 @@ def _routing_snapshot_strings(skill: dict[str, Any], key: str) -> list[str]:
 
 
 def _javascript_property_order(value: Any) -> Any:
-    """Mirror JSON.stringify's integer-index-first object enumeration order."""
+    """JSON.stringify의 정수 index 우선 object 열거 순서를 재현한다."""
     if isinstance(value, list):
         return [_javascript_property_order(item) for item in value]
     if not isinstance(value, dict):

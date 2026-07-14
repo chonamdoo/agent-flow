@@ -7,13 +7,15 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
+from agent_flow.artifact import find_active_run
+from agent_flow.cli import main
 from agent_flow.core.skill_plan import (
     SkillPlanSnapshotError,
     installed_skill_plan_pin,
-    reconcile_skill_plan_pin,
     resolve_runtime_skill_plan,
 )
 
@@ -1004,13 +1006,26 @@ def test_python_active_run_pin_reloads_at_the_next_command_boundary(tmp_path: Pa
     env = {"HOME": str(home), "AGENT_FLOW_HOST": "codex"}
     _skill(source, "alpha-v1")
     assert _install(project, env=env).returncode == 0
-    previous = installed_skill_plan_pin(project)
+    runtime_env = {
+        **os.environ,
+        **env,
+        "AGENT_FLOW_ADAPTER": "generic",
+        "AGENT_FLOW_AUTO_EXTERNAL_SKILLS": "1",
+        "AGENT_FLOW_GENERIC_MODE": "emit",
+        "PYTHONPATH": str(KIT_ROOT / "src"),
+    }
+    with mock.patch.dict(os.environ, runtime_env, clear=True):
+        assert main(["run", "active drift", "--root", str(project)]) == 0
+    active = find_active_run(project)
+    assert active is not None
+    previous = json.loads((active.path / "meta.json").read_text(encoding="utf-8"))
 
     _skill(source, "alpha-v2")
     assert _install(project, env=env).returncode == 0
-    reconciled, changed = reconcile_skill_plan_pin(previous, project)
+    with mock.patch.dict(os.environ, runtime_env, clear=True):
+        assert main(["continue", "--root", str(project)]) == 0
+    reconciled = json.loads((active.path / "meta.json").read_text(encoding="utf-8"))
 
-    assert changed is True
     assert reconciled["skill_plan_hash"] != previous["skill_plan_hash"]
     assert reconciled["skill_plan_repin_from"] == previous["skill_plan_hash"]
 
