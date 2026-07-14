@@ -36,7 +36,7 @@ let cachedProjectPythonPath = null;
 let cachedProjectGitPath = null;
 let activeManagedInstallTransaction = null;
 const PROJECT_SKILL_HOSTS = Object.freeze(["claude", "codex", "omp"]);
-const SKILL_LINKS_COMMITMENT_VERSION = 1;
+const SKILL_LINKS_COMMITMENT_VERSION = 2;
 const MANAGED_HOST_FILES_VERSION = 1;
 const MANAGED_HOST_FILES_COMMITMENT_VERSION = 1;
 const MANAGED_HOOK_CONTRACT_VERSION = 2;
@@ -162,8 +162,15 @@ function syncProject(rootOverride = null) {
     throw new Error("managed worktree sync blocked; run sync from the leader checkout");
   }
   const root = resolveInstallRoot(requestedRoot);
-  syncProjectAgentDocuments(root);
-  console.log(`agent-flow documents synced root=${root}`);
+  const agentFlowDir = path.join(root, ".agent-flow");
+  fs.mkdirSync(agentFlowDir, { recursive: true });
+  const lock = acquireProjectInstallLock(root, agentFlowDir);
+  try {
+    syncProjectAgentDocumentsTransactional(root, agentFlowDir);
+    console.log(`agent-flow documents synced root=${root}`);
+  } finally {
+    releaseProjectInstallLock(lock);
+  }
 }
 
 function installProjectNodeRuntime(root) {
@@ -237,10 +244,14 @@ function copyRuntimeTree(sourceRoot, runtimeRoot, destinationRelative) {
 }
 
 function projectLauncherSource(root) {
-  const nodePath = shellSingleQuote(fs.realpathSync(process.execPath));
+  const nodeContract = originalNodeAuthority();
   const pythonPath = shellSingleQuote(projectPythonPath());
   const gitPath = shellSingleQuote(projectGitPath());
   const launcherPath = shellSingleQuote(path.join(root, PROJECT_LAUNCHER_RELATIVE));
+  const authenticatedNode = authenticatedExecutableShellCommand(
+    nodeContract,
+    '"$launcher_dir/../runtime/node/bin/agent-flow-kit.mjs" "$@"',
+  );
   return `#!/bin/sh
 unset NODE_OPTIONS NODE_PATH BASH_ENV ENV LD_PRELOAD LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH PYTHONPATH PYTHONHOME PYTHONSTARTUP
 PYTHON=${pythonPath}
@@ -251,7 +262,7 @@ AGENT_FLOW_PROJECT_LAUNCHER=${launcherPath}
 export PYTHON PYTHON_EXECUTABLE AGENT_FLOW_PYTHON_EXECUTABLE AGENT_FLOW_GIT_EXECUTABLE AGENT_FLOW_PROJECT_LAUNCHER
 launcher_dir=\${0%/*}
 if [ "$launcher_dir" = "$0" ]; then launcher_dir=.; fi
-exec ${nodePath} "$launcher_dir/../runtime/node/bin/agent-flow-kit.mjs" "$@"
+exec ${authenticatedNode}
 `;
 }
 
@@ -342,7 +353,7 @@ function projectRuntimeContract(root) {
       path: PROJECT_LAUNCHER_RELATIVE.split(path.sep).join("/"),
       sha256: crypto.createHash("sha256").update(fs.readFileSync(launcher)).digest("hex"),
     },
-    node: executableContract(process.execPath),
+    node: originalNodeAuthority(),
     git: executableContract(projectGitPath()),
     python: {
       path: projectPythonPath(),
@@ -386,13 +397,37 @@ function executableContract(pathName) {
   };
 }
 
-function assertExecutableIdentity(pathName, expected) {
+function originalNodeAuthority() {
+  const encoded = process.env.AGENT_FLOW_ORIGINAL_NODE_AUTHORITY;
+  if (encoded) {
+    let expected = null;
+    try {
+      expected = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
+      const current = executableIdentity(expected.path);
+      if (
+        current.sha256 !== expected.sha256
+        || current.device !== expected.device
+        || current.inode !== expected.inode
+        || current.mode !== expected.mode
+        || Number.parseInt(current.links, 10) < Number.parseInt(expected.links, 10)
+      ) throw new Error("identity mismatch");
+    } catch {
+      throw new Error("project runtime original Node authority is invalid");
+    }
+    return expected;
+  }
+  return executableContract(process.execPath);
+}
+
+function assertExecutableIdentity(pathName, expected, allowAdditionalLinks = false) {
   const current = executableIdentity(pathName);
   if (
     current.sha256 !== expected.sha256
     || current.device !== expected.device
-    || current.links !== expected.links
-    || (current.links === "1" && current.inode !== expected.inode)
+    || (allowAdditionalLinks
+      ? Number.parseInt(current.links, 10) < Number.parseInt(expected.links, 10)
+      : current.links !== expected.links)
+    || ((allowAdditionalLinks || current.links === "1") && current.inode !== expected.inode)
     || current.mode !== expected.mode
   ) {
     throw new Error(`project runtime executable identity changed: ${pathName}`);
@@ -448,16 +483,198 @@ function assertProjectRuntimeContract(root) {
     crypto.createHash("sha256").update(fs.readFileSync(launcher)).digest("hex") !== contract.launcher.sha256
     || treeIntegrity(nodeRuntime) !== contract.runtime.integrity
     || treeIntegrity(pythonRuntime) !== contract.python_runtime.integrity
-    || fs.realpathSync(process.execPath) !== contract.node.path
     || fs.realpathSync(contract.git.path) !== contract.git.path
     || fs.realpathSync(contract.python.path) !== contract.python.resolved_path
   ) {
     throw new Error("project runtime contract no longer matches installed files");
   }
-  assertExecutableIdentity(contract.node.path, contract.node);
+  const runningNode = executableIdentity(process.execPath);
+  if (
+    runningNode.sha256 !== contract.node.sha256
+    || runningNode.device !== contract.node.device
+    || runningNode.inode !== contract.node.inode
+    || runningNode.mode !== contract.node.mode
+    || Number.parseInt(runningNode.links, 10) < Number.parseInt(contract.node.links, 10)
+  ) throw new Error("project runtime running Node identity changed");
+  assertExecutableIdentity(contract.node.path, contract.node, true);
   assertExecutableIdentity(contract.git.path, contract.git);
   assertExecutableIdentity(contract.python.resolved_path, contract.python);
   return contract;
+}
+
+const AUTHENTICATED_EXEC_VERIFIER = [
+  "import base64,errno,hashlib,json,os,stat,subprocess,sys,time",
+  "expected=json.loads(base64.b64decode(sys.argv[1],validate=True))",
+  "target=expected.get('resolved_path') or expected['path']; staging_root=expected['staging_root']; fd=None; stage=None; stage_dir=None; staged_dependencies=[]",
+  "try:",
+  " hold_name='AGENT_FLOW_TEST_HOLD_BEFORE_AUTHENTICATED_PYTHON_OPEN_MS' if expected.get('resolved_path') else 'AGENT_FLOW_TEST_HOLD_BEFORE_AUTHENTICATED_EXEC_OPEN_MS'",
+  " hold=int(os.environ.get(hold_name,'0'))",
+  " if 0<hold<=10000:",
+  "  marker='authenticated-python-ready' if expected.get('resolved_path') else 'authenticated-exec-ready'",
+  "  print('agent-flow:test-'+marker,file=sys.stderr,flush=True); time.sleep(hold/1000)",
+  " fd=os.open(target,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))",
+  " before=os.fstat(fd)",
+  " if not stat.S_ISREG(before.st_mode): raise OSError('not regular')",
+  " digest=hashlib.sha256()",
+  " while True:",
+  "  chunk=os.read(fd,1024*1024)",
+  "  if not chunk: break",
+  "  digest.update(chunk)",
+  " after=os.fstat(fd)",
+  " actual={'sha256':digest.hexdigest(),'device':str(before.st_dev),'inode':str(before.st_ino),'links':str(before.st_nlink),'mode':stat.S_IMODE(before.st_mode)}",
+  " stable=(before.st_dev,before.st_ino,before.st_mode,before.st_nlink,before.st_size)==(after.st_dev,after.st_ino,after.st_mode,after.st_nlink,after.st_size)",
+  " if not stable or any(actual[key]!=expected[key] for key in actual): raise OSError('identity mismatch')",
+  " os.makedirs(staging_root,mode=0o700,exist_ok=True); os.chmod(staging_root,0o700)",
+  " stage_dir=os.path.join(staging_root,os.urandom(24).hex()); os.mkdir(stage_dir,0o700); os.mkdir(os.path.join(stage_dir,'bin'),0o700); stage=os.path.join(stage_dir,'bin','executable')",
+  " cursor=target; trusted=True",
+  " while True:",
+  "  metadata=os.lstat(cursor); trusted=trusted and metadata.st_uid==0 and not (metadata.st_mode & 0o022)",
+  "  parent=os.path.dirname(cursor)",
+  "  if parent==cursor: break",
+  "  cursor=parent",
+  " if trusted: stage=target",
+  " else:",
+  "  os.link(target,stage,follow_symlinks=False)",
+  "  source_lib=os.path.abspath(os.path.join(os.path.dirname(target),'..','lib'))",
+  "  if os.path.isdir(source_lib):",
+  "   names=[name for name in os.listdir(source_lib) if (name.startswith('libpython') or name.startswith('libnode')) and name.endswith('.dylib')]",
+  "   if names: os.mkdir(os.path.join(stage_dir,'lib'),0o700)",
+  "   for name in names:",
+  "    dependency=os.path.join(stage_dir,'lib',name); os.link(os.path.join(source_lib,name),dependency,follow_symlinks=False); staged_dependencies.append(dependency)",
+  " if stage!=target:",
+  "  staged=os.lstat(stage)",
+  "  if (staged.st_dev,staged.st_ino)!=(before.st_dev,before.st_ino): raise OSError('staged identity mismatch')",
+  " env=dict(os.environ); env.pop('AGENT_FLOW_TEST_HOLD_BEFORE_AUTHENTICATED_EXEC_OPEN_MS',None); env.pop('AGENT_FLOW_TEST_HOLD_BEFORE_AUTHENTICATED_PYTHON_OPEN_MS',None)",
+  " if expected.get('python_home'): env['PYTHONHOME']=expected['python_home']",
+  " if expected.get('python_site_packages'): env['PYTHONPATH']=os.pathsep.join([*expected['python_site_packages'],env.get('PYTHONPATH','')]).rstrip(os.pathsep)",
+  " original=dict(expected); original.pop('staging_root',None); env['AGENT_FLOW_ORIGINAL_NODE_AUTHORITY']=base64.b64encode(json.dumps(original,separators=(',',':')).encode()).decode()",
+  " completed=subprocess.run([stage,*sys.argv[2:]],env=env,check=False)",
+  " raise SystemExit(completed.returncode)",
+  "except (KeyError,OSError,UnicodeError,ValueError,json.JSONDecodeError):",
+  " print('agent-flow: blocked because project runtime executable identity changed',file=sys.stderr)",
+  " raise SystemExit(126)",
+  "finally:",
+  " if fd is not None:",
+  "  try: os.close(fd)",
+  "  except OSError: pass",
+  " if stage is not None and stage!=target:",
+  "  try: os.unlink(stage)",
+  "  except OSError: pass",
+  " for dependency in staged_dependencies:",
+  "  try: os.unlink(dependency)",
+  "  except OSError: pass",
+  " if stage_dir is not None:",
+  "  for child in ('bin','lib'):",
+  "   try: os.rmdir(os.path.join(stage_dir,child))",
+  "   except OSError: pass",
+  "  try: os.rmdir(stage_dir)",
+  "  except OSError: pass",
+].join("\n");
+
+function executableAuthority(kind) {
+  const root = installedRuntimeRootWithoutGit(process.cwd());
+  const kit = root ? readJsonIfExists(path.join(root, ".agent-flow", "kit.json")) : null;
+  const contract = kit?.project_runtime_contract;
+  if (
+    contract
+    && contract.version === 3
+    && kit.project_runtime_contract_commitment_version === 1
+    && kit.project_runtime_contract_commitment === projectRuntimeContractCommitment(contract)
+    && contract[kind]
+  ) {
+    return contract[kind];
+  }
+  if (kind === "git") return executableContract(projectGitPath());
+  if (kind === "python") {
+    return {
+      path: projectPythonPath(),
+      resolved_path: fs.realpathSync(projectPythonPath()),
+      ...executableIdentity(projectPythonPath()),
+    };
+  }
+  throw new Error(`unsupported executable authority: ${kind}`);
+}
+
+function installedRuntimeRootWithoutGit(start) {
+  const managed = resolveManagedWorktreeRoot(path.resolve(start));
+  if (managed && fs.existsSync(path.join(managed, ".agent-flow", "kit.json"))) return managed;
+  let current = path.resolve(start);
+  while (true) {
+    if (fs.existsSync(path.join(current, ".agent-flow", "kit.json"))) return current;
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
+function authenticatedExecutableArgs(expected, args) {
+  const root = process.env.AGENT_FLOW_AUTH_EXEC_ROOT
+    || installedRuntimeRootWithoutGit(process.cwd())
+    || process.cwd();
+  const authority = {
+    ...expected,
+    staging_root: path.join(root, ".agent-flow", "exec-staging"),
+    ...pythonStagingMetadata(expected),
+  };
+  return [
+    "-I",
+    "-B",
+    "-c",
+    AUTHENTICATED_EXEC_VERIFIER,
+    Buffer.from(JSON.stringify(authority), "utf8").toString("base64"),
+    ...args,
+  ];
+}
+
+function safeSpawnAuthenticatedSync(expected, args, options = {}) {
+  return safeSpawnSync("/usr/bin/python3", authenticatedExecutableArgs(expected, args), options);
+}
+
+function authenticatedExecutableShellCommand(expected, trailingArguments) {
+  const root = process.env.AGENT_FLOW_AUTH_EXEC_ROOT
+    || installedRuntimeRootWithoutGit(process.cwd())
+    || process.cwd();
+  const authority = {
+    ...expected,
+    staging_root: path.join(root, ".agent-flow", "exec-staging"),
+    ...pythonStagingMetadata(expected),
+  };
+  return [
+    shellSingleQuote("/usr/bin/python3"),
+    "-I",
+    "-B",
+    "-c",
+    shellSingleQuote(AUTHENTICATED_EXEC_VERIFIER),
+    shellSingleQuote(Buffer.from(JSON.stringify(authority), "utf8").toString("base64")),
+    trailingArguments,
+  ].join(" ");
+}
+
+function pythonStagingMetadata(expected) {
+  if (!expected.resolved_path) return {};
+  const descriptor = fs.openSync(expected.resolved_path, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+  try {
+    const prefix = Buffer.alloc(2);
+    fs.readSync(descriptor, prefix, 0, prefix.length, 0);
+    if (prefix.toString("utf8") === "#!") return {};
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  return {
+    python_home: path.dirname(path.dirname(expected.resolved_path)),
+    python_site_packages: pythonVenvSitePackages(expected.path),
+  };
+}
+
+function pythonVenvSitePackages(configuredPath) {
+  const venvRoot = path.dirname(path.dirname(configuredPath));
+  if (!fs.existsSync(path.join(venvRoot, "pyvenv.cfg"))) return [];
+  const libraryRoot = path.join(venvRoot, "lib");
+  if (!fs.existsSync(libraryRoot)) return [];
+  return fs.readdirSync(libraryRoot)
+    .filter((name) => /^python[0-9.]+$/.test(name))
+    .map((name) => path.join(libraryRoot, name, "site-packages"))
+    .filter((candidate) => fs.existsSync(candidate));
 }
 
 function projectGuardVerifierSource(contract) {
@@ -1587,7 +1804,7 @@ function assertNodeSkillPlanPinned(state, root) {
       skill_plan_repin_at: new Date().toISOString(),
       skill_plan_repin_from: previousHash,
     });
-    writeJson(path.join(resolveRunDir(root, state.run_dir), "manifest.json"), state);
+    writeJson(path.join(authenticatedNodeRunDir(root, state), "manifest.json"), state);
     writeJson(currentRunPath(root), state);
   }
 }
@@ -1605,11 +1822,32 @@ function readCurrentRun(root) {
   if (!fs.existsSync(pathName)) {
     throw new Error('no active run. start one with: agent-flow run "<task>"');
   }
-  return normalizeRunState(root, JSON.parse(fs.readFileSync(pathName, "utf8")));
+  const state = JSON.parse(fs.readFileSync(pathName, "utf8"));
+  authenticatedNodeRunDir(root, state);
+  return normalizeRunState(root, state);
 }
 
 function resolveRunDir(root, runDir) {
   return path.isAbsolute(runDir) ? runDir : path.join(root, runDir);
+}
+
+function authenticatedNodeRunDir(root, state) {
+  const workflow = String(state?.workflow || "");
+  const runId = String(state?.run_id || "");
+  if (
+    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(workflow)
+    || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(runId)
+  ) {
+    throw new Error("blocked: active Node run identity is invalid");
+  }
+  const expected = path.join(root, ".agent-flow", "runs", workflow, runId);
+  const configured = resolveRunDir(root, String(state?.run_dir || ""));
+  if (path.resolve(configured) !== path.resolve(expected)) {
+    throw new Error("blocked: active Node run directory is outside its authenticated root");
+  }
+  ensureChildPath(root, expected);
+  assertNoSymlinkComponents(root, expected);
+  return expected;
 }
 
 function assertInstalled(root) {
@@ -1683,7 +1921,7 @@ function normalizeRunState(root, state) {
     ...state,
     phase_index: index,
   };
-  writeJson(path.join(resolveRunDir(root, state.run_dir), "manifest.json"), normalized);
+  writeJson(path.join(authenticatedNodeRunDir(root, normalized), "manifest.json"), normalized);
   writeJson(currentRunPath(root), normalized);
   return normalized;
 }
@@ -2194,6 +2432,10 @@ function refreshSkillCatalogAtBoundary(root) {
   if (!index?.catalog_fingerprint) return;
   const current = skillCatalogFingerprint(leaderRoot, HOME, detectActiveHost(process.env), process.env);
   if (current === index.catalog_fingerprint) return;
+  const invocationWorktree = resolveManagedWorktreeRoot(process.cwd());
+  if (invocationWorktree && samePath(invocationWorktree, leaderRoot)) {
+    throw new Error("blocked: skill catalog drift must be refreshed from the leader checkout");
+  }
   const status = runInstallSandbox(leaderRoot);
   if (status !== 0) throw new Error(`skill catalog refresh failed with exit ${status}`);
 }
@@ -2202,7 +2444,8 @@ function acquireProjectInstallLock(root, agentFlowDir) {
   const lockPath = path.join(agentFlowDir, "install.lock");
   let recoveryToken = null;
   if (fs.existsSync(lockPath)) {
-    if (fs.lstatSync(lockPath).isSymbolicLink()) {
+    const expectedLock = fs.lstatSync(lockPath);
+    if (!expectedLock.isDirectory() || expectedLock.isSymbolicLink()) {
       throw new Error(`project install lock is unsafe: ${lockPath}`);
     }
     const ownerPath = path.join(lockPath, "owner.json");
@@ -2215,9 +2458,23 @@ function acquireProjectInstallLock(root, agentFlowDir) {
       throw new Error(`project install lock is held: ${lockPath}`);
     }
     recoveryToken = owner.token;
-    fs.rmSync(lockPath, { recursive: true, force: true });
+    holdInstallForTest("AGENT_FLOW_TEST_HOLD_AFTER_STALE_LOCK_AUTH_MS", "stale-lock-authenticated");
+    const quarantine = path.join(agentFlowDir, `.agent-flow-stale-lock-${crypto.randomBytes(12).toString("hex")}`);
+    fs.renameSync(lockPath, quarantine);
+    const moved = fs.lstatSync(quarantine);
+    const movedOwner = readLockOwnerIfSafe(path.join(quarantine, "owner.json"));
+    if (
+      !sameDirectoryIdentity(expectedLock, moved)
+      || movedOwner?.token !== owner.token
+      || movedOwner?.pid !== owner.pid
+    ) {
+      if (!fs.existsSync(lockPath)) renameManagedNoReplace(quarantine, lockPath);
+      throw new Error(`project install lock changed during stale recovery: ${lockPath}`);
+    }
+    fs.rmSync(quarantine, { recursive: true, force: true });
   }
   fs.mkdirSync(lockPath);
+  const identity = fs.lstatSync(lockPath);
   const lock = {
     version: 1,
     root: fs.realpathSync(root),
@@ -2226,7 +2483,13 @@ function acquireProjectInstallLock(root, agentFlowDir) {
     acquired_at: new Date().toISOString(),
   };
   fs.writeFileSync(path.join(lockPath, "owner.json"), `${JSON.stringify(lock, null, 2)}\n`, { flag: "wx" });
-  return { ...lock, path: lockPath, recovery_token: recoveryToken };
+  return {
+    ...lock,
+    path: lockPath,
+    recovery_token: recoveryToken,
+    device: String(identity.dev),
+    inode: String(identity.ino),
+  };
 }
 
 function processIsAlive(pid) {
@@ -2235,6 +2498,14 @@ function processIsAlive(pid) {
     return true;
   } catch (error) {
     return error?.code !== "ESRCH";
+  }
+}
+
+function readLockOwnerIfSafe(pathName) {
+  try {
+    return readRegularJsonNoFollow(pathName);
+  } catch {
+    return null;
   }
 }
 
@@ -2247,11 +2518,32 @@ function holdInstallForTest(name, marker) {
 
 function releaseProjectInstallLock(lock) {
   if (!lock || !fs.existsSync(lock.path)) return;
+  const current = fs.lstatSync(lock.path);
   const owner = readJsonIfExists(path.join(lock.path, "owner.json"));
-  if (owner?.token !== lock.token || owner?.pid !== process.pid) {
+  if (
+    !current.isDirectory()
+    || String(current.dev) !== lock.device
+    || String(current.ino) !== lock.inode
+    || owner?.token !== lock.token
+    || owner?.pid !== process.pid
+  ) {
     throw new Error(`project install lock ownership changed: ${lock.path}`);
   }
-  fs.rmSync(lock.path, { recursive: true, force: true });
+  holdInstallForTest("AGENT_FLOW_TEST_HOLD_BEFORE_INSTALL_LOCK_RELEASE_MS", "install-lock-release-ready");
+  const quarantine = path.join(path.dirname(lock.path), `.agent-flow-release-lock-${crypto.randomBytes(12).toString("hex")}`);
+  fs.renameSync(lock.path, quarantine);
+  const moved = fs.lstatSync(quarantine);
+  const movedOwner = readLockOwnerIfSafe(path.join(quarantine, "owner.json"));
+  if (
+    String(moved.dev) !== lock.device
+    || String(moved.ino) !== lock.inode
+    || movedOwner?.token !== lock.token
+    || movedOwner?.pid !== process.pid
+  ) {
+    if (!fs.existsSync(lock.path)) renameManagedNoReplace(quarantine, lock.path);
+    throw new Error(`project install lock changed during release: ${lock.path}`);
+  }
+  fs.rmSync(quarantine, { recursive: true, force: true });
 }
 
 function readAuthenticatedSkillIndex(agentFlowDir, existingKit = null) {
@@ -2295,8 +2587,12 @@ function readAuthenticatedSkillIndex(agentFlowDir, existingKit = null) {
         throw new Error("previous skill plan does not match kit commitment");
       }
       if (
-        existingKit.skill_links_commitment_version !== SKILL_LINKS_COMMITMENT_VERSION
-        || skillLinksCommitment(existingKit.skill_plan_hash, payload.links)
+        ![1, SKILL_LINKS_COMMITMENT_VERSION].includes(existingKit.skill_links_commitment_version)
+        || skillLinksCommitment(
+          existingKit.skill_plan_hash,
+          payload.links,
+          existingKit.skill_links_commitment_version,
+        )
           !== existingKit.skill_links_commitment
       ) {
         throw new Error("previous skill links do not match kit commitment");
@@ -2395,6 +2691,33 @@ function hostPathState(pathName) {
     };
   }
   throw new Error(`unsupported host skill path kind: ${pathName}`);
+}
+
+function hostFilesystemIdentity(pathName) {
+  const stat = fs.lstatSync(pathName);
+  return {
+    device: String(stat.dev),
+    inode: String(stat.ino),
+    links: String(stat.nlink),
+    mode: stat.mode & 0o777,
+  };
+}
+
+function sameHostFilesystemIdentity(pathName, expected) {
+  if (
+    !expected
+    || typeof expected !== "object"
+    || Array.isArray(expected)
+    || !/^[0-9]+$/.test(String(expected.device || ""))
+    || !/^[0-9]+$/.test(String(expected.inode || ""))
+    || !/^[0-9]+$/.test(String(expected.links || ""))
+    || !Number.isInteger(expected.mode)
+  ) return false;
+  try {
+    return JSON.stringify(hostFilesystemIdentity(pathName)) === JSON.stringify(expected);
+  } catch {
+    return false;
+  }
 }
 
 function sameHostPathState(left, right) {
@@ -2798,7 +3121,7 @@ const MANAGED_NOREPLACE_RENAME = [
 
 function renameManagedNoReplace(sourceName, targetName) {
   const result = safeSpawnSync(
-    projectPythonPath(),
+    "/usr/bin/python3",
     ["-I", "-c", MANAGED_NOREPLACE_RENAME, sourceName, targetName],
     { stdio: ["ignore", "ignore", "pipe"], encoding: "utf8", timeout: 10_000 },
   );
@@ -3554,7 +3877,11 @@ function skillCatalogFingerprint(root, home, activeHost, env) {
   const manifest = { active_host: activeHost, roots: [] };
   for (const [source, catalogRoot] of roots) {
     if (!catalogRoot) continue;
-    manifest.roots.push({ source, root: path.resolve(catalogRoot), entries: catalogTreeManifest(catalogRoot) });
+    manifest.roots.push({
+      source,
+      root: source === "bundled" ? "<bundled>" : path.resolve(catalogRoot),
+      entries: catalogTreeManifest(catalogRoot),
+    });
   }
   return crypto.createHash("sha256").update(JSON.stringify(manifest)).digest("hex");
 }
@@ -3570,8 +3897,8 @@ function configuredCatalogRoot(value, home, fallback) {
 
 function catalogTreeManifest(root) {
   const stat = lstatIfExists(root);
-  if (!stat) return [{ path: "", kind: "missing" }];
-  return catalogTreeEntries(root, root);
+  if (!stat) return [];
+  return catalogTreeEntries(root, root).filter((entry) => entry.path !== "");
 }
 
 function catalogTreeEntries(root, current) {
@@ -3590,6 +3917,7 @@ function catalogTreeEntries(root, current) {
   if (!stat.isDirectory()) return [{ path: relative, kind: "other", mode: stat.mode }];
   const result = [{ path: relative, kind: "directory" }];
   for (const entry of fs.readdirSync(current).sort()) {
+    if (current === root && entry.startsWith(".")) continue;
     result.push(...catalogTreeEntries(root, path.join(current, entry)));
   }
   return result;
@@ -3808,7 +4136,7 @@ function treeIntegrity(root) {
     .digest("hex");
 }
 
-function skillLinksCommitment(skillPlanHash, links) {
+function skillLinksCommitment(skillPlanHash, links, version = SKILL_LINKS_COMMITMENT_VERSION) {
   if (typeof skillPlanHash !== "string" || !/^[0-9a-f]{64}$/.test(skillPlanHash)) {
     throw new Error("skill link commitment has an invalid skill plan hash");
   }
@@ -3824,9 +4152,10 @@ function skillLinksCommitment(skillPlanHash, links) {
     String(link.path).replaceAll("\\", "/"),
     link.status,
     link.tree_integrity ?? null,
+    ...(version >= 2 ? [link.filesystem_identity ?? null] : []),
   ]).sort((left, right) => compareCodePoints(JSON.stringify(left), JSON.stringify(right)));
   return crypto.createHash("sha256").update(JSON.stringify({
-    version: SKILL_LINKS_COMMITMENT_VERSION,
+    version,
     skill_plan_hash: skillPlanHash,
     links: rows,
   })).digest("hex");
@@ -4010,8 +4339,20 @@ function removeStaleProjectSkillLinks(root, skills, previousIndex, force = false
     if (!stat) {
       continue;
     }
+    if (link.status === "linked" && (!stat.isSymbolicLink() || link.filesystem_kind !== "symlink")) {
+      removed.push({ name: link.name, host: link.host, path: link.path, status: "preserved-kind-mismatch" });
+      continue;
+    }
+    if (link.status === "copied" && (!stat.isDirectory() || link.filesystem_kind !== "directory")) {
+      removed.push({ name: link.name, host: link.host, path: link.path, status: "preserved-unverified-ownership" });
+      continue;
+    }
+    if (!sameHostFilesystemIdentity(target, link.filesystem_identity)) {
+      removed.push({ name: link.name, host: link.host, path: link.path, status: "preserved-identity-mismatch" });
+      continue;
+    }
     if (link.status === "linked") {
-      if (!stat.isSymbolicLink() || link.filesystem_kind !== "symlink" || typeof link.target !== "string") {
+      if (typeof link.target !== "string") {
         removed.push({ name: link.name, host: link.host, path: link.path, status: "preserved-kind-mismatch" });
         continue;
       }
@@ -4028,11 +4369,16 @@ function removeStaleProjectSkillLinks(root, skills, previousIndex, force = false
       removed.push({ name: link.name, host: link.host, path: link.path, status: "removed-stale-linked" });
       continue;
     }
-    if (link.status !== "copied" || link.filesystem_kind !== "directory" || !stat.isDirectory()) {
+    if (link.status !== "copied") {
       removed.push({ name: link.name, host: link.host, path: link.path, status: "preserved-unverified-ownership" });
       continue;
     }
-    if (typeof link.tree_hash !== "string" || hashSkillTree(target) !== link.tree_hash) {
+    if (
+      typeof link.tree_hash !== "string"
+      || typeof link.tree_integrity !== "string"
+      || hashSkillTree(target) !== link.tree_hash
+      || treeIntegrity(target) !== link.tree_integrity
+    ) {
       removed.push({ name: link.name, host: link.host, path: link.path, status: "preserved-integrity-mismatch" });
       continue;
     }
@@ -4123,6 +4469,9 @@ function linkProjectSkill(root, skill, host, previousIndex, force = false, trans
       ) {
         return { name: skill.name, host, path: path.relative(root, destDir), status: "skipped-unverified-existing" };
       }
+      if (!sameHostFilesystemIdentity(destDir, previousLink.filesystem_identity)) {
+        return { name: skill.name, host, path: path.relative(root, destDir), status: "skipped-identity-mismatch" };
+      }
       replaceExisting = true;
     } else if (fs.existsSync(destSkill)) {
       if (previousLink?.status === "linked") {
@@ -4132,11 +4481,18 @@ function linkProjectSkill(root, skill, host, previousIndex, force = false, trans
         previousLink?.status !== "copied"
         || previousLink.filesystem_kind !== "directory"
         || typeof previousLink.tree_hash !== "string"
+        || typeof previousLink.tree_integrity !== "string"
       ) {
         return { name: skill.name, host, path: path.relative(root, destDir), status: "skipped-unverified-existing" };
       }
-      if (hashSkillTree(destDir) !== previousLink.tree_hash) {
+      if (
+        hashSkillTree(destDir) !== previousLink.tree_hash
+        || treeIntegrity(destDir) !== previousLink.tree_integrity
+      ) {
         return { name: skill.name, host, path: path.relative(root, destDir), status: "skipped-user-modified" };
+      }
+      if (!sameHostFilesystemIdentity(destDir, previousLink.filesystem_identity)) {
+        return { name: skill.name, host, path: path.relative(root, destDir), status: "skipped-identity-mismatch" };
       }
       replaceExisting = true;
     } else if (force) {
@@ -4147,7 +4503,7 @@ function linkProjectSkill(root, skill, host, previousIndex, force = false, trans
   }
   fs.mkdirSync(path.dirname(destDir), { recursive: true });
   const relTarget = path.relative(path.dirname(destDir), srcDir);
-  return withHostPathMutation(
+  const installed = withHostPathMutation(
     transaction,
     destDir,
     [
@@ -4186,6 +4542,11 @@ function linkProjectSkill(root, skill, host, previousIndex, force = false, trans
       }
     },
   );
+  if (["linked", "copied"].includes(installed?.status)) {
+    installed.filesystem_identity = hostFilesystemIdentity(destDir);
+    if (installed.status === "copied") installed.tree_integrity = treeIntegrity(destDir);
+  }
+  return installed;
 }
 
 function hostSkillRoot(root, host) {
@@ -5078,14 +5439,81 @@ function canonicalAgentFlowBlock() {
 }
 
 function syncProjectAgentDocuments(root, canonicalBlock = canonicalAgentFlowBlock()) {
-  const paths = [path.join(root, "AGENTS.md"), path.join(root, "CLAUDE.md")];
-  const planned = paths.map((pathName) => ({
-    pathName,
-    content: planBootstrapBlockUpsert(pathName, canonicalBlock),
-  }));
+  const planned = planProjectAgentDocuments(root, canonicalBlock);
   for (const entry of planned) {
     writeManagedFile(entry.pathName, entry.content, root);
   }
+}
+
+function planProjectAgentDocuments(root, canonicalBlock = canonicalAgentFlowBlock()) {
+  const paths = [path.join(root, "AGENTS.md"), path.join(root, "CLAUDE.md")];
+  return paths.map((pathName) => ({
+    pathName,
+    content: planBootstrapBlockUpsert(pathName, canonicalBlock),
+  }));
+}
+
+function syncProjectAgentDocumentsTransactional(root, agentFlowDir) {
+  const planned = planProjectAgentDocuments(root);
+  const token = crypto.randomBytes(24).toString("hex");
+  const transactionRoot = path.join(agentFlowDir, `document-sync-${token}`);
+  const transaction = {
+    root,
+    transactionRoot,
+    journalPath: path.join(transactionRoot, "journal.json"),
+    token,
+    journal: {
+      version: 1,
+      root: fs.realpathSync(root),
+      token,
+      stage: "prepared",
+      managed_mutations: [],
+      host_mutations: [],
+    },
+  };
+  try {
+    fs.mkdirSync(transactionRoot);
+    writeInstallJournal(transaction.journalPath, transaction.journal);
+    for (const entry of planned) snapshotDocumentSyncPath(transaction, entry.pathName);
+    activeManagedInstallTransaction = transaction;
+    for (const entry of planned) writeManagedFile(entry.pathName, entry.content, root);
+    sealManagedInstallMutations(transaction);
+    verifyCommittedManagedMutations(root, transaction.journal);
+    transaction.journal.stage = "committed";
+    writeInstallJournal(transaction.journalPath, transaction.journal);
+    fs.rmSync(transactionRoot, { recursive: true, force: true });
+  } catch (error) {
+    rollbackRecordedManagedMutations(root, transactionRoot, transaction.journal);
+    fs.rmSync(transactionRoot, { recursive: true, force: true });
+    throw error;
+  } finally {
+    if (activeManagedInstallTransaction === transaction) activeManagedInstallTransaction = null;
+  }
+}
+
+function snapshotDocumentSyncPath(transaction, target) {
+  ensureChildPath(transaction.root, target);
+  assertNoSymlinkComponents(transaction.root, target);
+  const before = managedPathState(target);
+  const operation = {
+    path: path.relative(transaction.root, target),
+    before,
+    after: null,
+    mutation_count: 0,
+    pending: null,
+  };
+  if (["directory", "file"].includes(before.kind)) {
+    const backupRelative = path.join("managed-backups", String(transaction.journal.managed_mutations.length));
+    const backupPath = path.join(transaction.transactionRoot, backupRelative);
+    fs.mkdirSync(path.dirname(backupPath), { recursive: true });
+    fs.cpSync(target, backupPath, { recursive: true, dereference: false, errorOnExist: true, force: false });
+    if (!sameManagedPathState(before, managedPathState(backupPath))) {
+      throw new Error(`document sync backup integrity mismatch: ${operation.path}`);
+    }
+    before.backup = backupRelative;
+  }
+  transaction.journal.managed_mutations.push(operation);
+  writeInstallJournal(transaction.journalPath, transaction.journal);
 }
 
 function planBootstrapBlockUpsert(pathName, canonicalBlock) {
@@ -5294,7 +5722,8 @@ const MANAGED_HOOK_VERIFIER = [
   " os.close(source_fd); source_fd=None",
   " source_ref=f'/dev/fd/{stage_fd}'",
   " if not os.path.exists(source_ref): raise OSError('descriptor execution unavailable')",
-  " env=dict(os.environ); env['AGENT_FLOW_MANAGED_HOOK_SOURCE_PATH']=p",
+  " env=dict(os.environ); env['AGENT_FLOW_MANAGED_HOOK_SOURCE_PATH']=p; env['PATH']='/usr/bin:/bin'",
+  " [env.pop(name,None) for name in ('BASH_ENV','ENV','PYTHONPATH','PYTHONHOME','PYTHONSTARTUP','LD_PRELOAD','LD_LIBRARY_PATH','DYLD_INSERT_LIBRARIES','DYLD_LIBRARY_PATH')]",
   " try: hold=int(env.get('AGENT_FLOW_TEST_HOLD_AFTER_MANAGED_HOOK_STAGE_MS','0'))",
   " except ValueError: hold=0",
   " if 0<hold<=10000:",
@@ -6189,9 +6618,12 @@ function readPythonGateRun(root) {
 
 function activeGateRun(root) {
   if (fs.existsSync(currentRunPath(root))) {
-    const state = assertNodeRunBoundary(readCurrentRun(root), root);
-    assertNodeSkillPlanPinned(state, root);
-    return state;
+    const current = readCurrentRun(root);
+    if (current.status !== "complete" && current.phase !== "complete") {
+      const state = assertNodeRunBoundary(current, root);
+      assertNodeSkillPlanPinned(state, root);
+      return state;
+    }
   }
   return readPythonGateRun(root);
 }
@@ -6262,15 +6694,17 @@ function runSandboxedGate(args, extraEnv = {}) {
 
 function runSandboxedPythonCliCommand(subcommand, args) {
   const root = resolveAgentFlowRoot(process.cwd());
-  assertProjectRuntimeContract(root);
-  const python = projectPythonPath();
+  const contract = assertProjectRuntimeContract(root);
   const pythonPathEntries = [
     path.join(KIT_ROOT, "src"),
     root ? installedPythonRuntimePath(root) : "",
     process.env.PYTHONPATH,
   ].filter(Boolean);
   runSandboxedGate(
-    ["--", python, "-m", "agent_flow.cli", subcommand, ...args],
+    ["--", "/usr/bin/python3", ...authenticatedExecutableArgs(
+      contract.python,
+      ["-m", "agent_flow.cli", subcommand, ...args],
+    )],
     {
       PYTHONDONTWRITEBYTECODE: "1",
       PYTHONNOUSERSITE: "1",
@@ -6283,11 +6717,13 @@ function runSandboxedPythonCliCommand(subcommand, args) {
 function runProjectPythonCli(args) {
   const root = resolveAgentFlowRoot(process.cwd());
   assertProjectRuntimeContract(root);
+  refreshSkillCatalogAtBoundary(root);
+  const contract = assertProjectRuntimeContract(root);
   const pythonPathEntries = [
     path.join(KIT_ROOT, "src"),
     installedPythonRuntimePath(root),
   ].filter(Boolean);
-  const result = safeSpawnSync(projectPythonPath(), ["-m", "agent_flow.cli", ...args], {
+  const result = safeSpawnAuthenticatedSync(contract.python, ["-m", "agent_flow.cli", ...args], {
     cwd: process.cwd(),
     env: {
       ...process.env,
@@ -6308,12 +6744,131 @@ function installedPythonRuntimePath(root) {
   return fs.existsSync(path.join(runtimePath, "agent_flow", "__init__.py")) ? runtimePath : "";
 }
 
-function verifyInstallSandboxAndRun(args) {
-  const [rootArgument, canaryPath, nonce, ...requestedInstallArgs] = args;
+const MAC_SANDBOX_POLICY_PROBE = [
+  "import ctypes,json,os,sys",
+  "target=sys.argv[1]; metadata=os.stat(target,follow_symlinks=False)",
+  "lib=ctypes.CDLL('/usr/lib/libSystem.B.dylib',use_errno=True)",
+  "check=lib.sandbox_check; check.restype=ctypes.c_int",
+  "check.argtypes=[ctypes.c_int,ctypes.c_char_p,ctypes.c_uint64]",
+  "denied=check(os.getpid(),b'file-write-data',ctypes.c_uint64(1),ctypes.c_char_p(os.fsencode(target)))",
+  "print(json.dumps({'denied':denied!=0,'flags':int(getattr(metadata,'st_flags',0))}))",
+].join("\n");
+
+const INSTALL_LOCK_EXEC_WRAPPER = [
+  "import base64,fcntl,hashlib,json,os,stat,subprocess,sys",
+  "root,nonce,encoded,original_encoded=sys.argv[1:5]; command=sys.argv[5:]",
+  "agent=os.path.join(root,'.agent-flow'); os.makedirs(agent,exist_ok=True)",
+  "agent_stat=os.lstat(agent)",
+  "if not stat.S_ISDIR(agent_stat.st_mode) or stat.S_ISLNK(agent_stat.st_mode): raise SystemExit('managed install root is unsafe')",
+  "lock_path=os.path.join(agent,'install.flock')",
+  "lock_fd=os.open(lock_path,os.O_RDWR|os.O_CREAT|getattr(os,'O_NOFOLLOW',0),0o600)",
+  "lock_stat=os.fstat(lock_fd)",
+  "if not stat.S_ISREG(lock_stat.st_mode) or lock_stat.st_nlink!=1: raise SystemExit('project install lock is unsafe')",
+  "try: fcntl.flock(lock_fd,fcntl.LOCK_EX|fcntl.LOCK_NB)",
+  "except BlockingIOError: raise SystemExit('project install lock is held: '+lock_path)",
+  "os.ftruncate(lock_fd,0); os.write(lock_fd,(nonce+'\\n').encode()); os.fsync(lock_fd); os.set_inheritable(lock_fd,True)",
+  "expected=json.loads(base64.b64decode(encoded,validate=True)); target=expected.get('resolved_path') or expected['path']",
+  "read_fd=os.open(target,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)); before=os.fstat(read_fd); digest=hashlib.sha256()",
+  "while True:",
+  " chunk=os.read(read_fd,1024*1024)",
+  " if not chunk: break",
+  " digest.update(chunk)",
+  "after=os.fstat(read_fd); actual={'sha256':digest.hexdigest(),'device':str(before.st_dev),'inode':str(before.st_ino),'links':str(before.st_nlink),'mode':stat.S_IMODE(before.st_mode)}",
+  "stable=(before.st_dev,before.st_ino,before.st_mode,before.st_nlink,before.st_size)==(after.st_dev,after.st_ino,after.st_mode,after.st_nlink,after.st_size)",
+  "if not stat.S_ISREG(before.st_mode) or not stable or any(actual[key]!=expected[key] for key in actual): raise SystemExit('project runtime executable identity changed')",
+  "env=dict(os.environ); env['AGENT_FLOW_INSTALL_FLOCK_FD']=str(lock_fd); env['AGENT_FLOW_INSTALL_FLOCK_NONCE']=nonce; env['AGENT_FLOW_AUTH_EXEC_ROOT']=root; env['AGENT_FLOW_ORIGINAL_NODE_AUTHORITY']=original_encoded",
+  "completed=subprocess.run([target,*command],env=env,pass_fds=(lock_fd,),check=False)",
+  "raise SystemExit(completed.returncode)",
+].join("\n");
+
+function stageExecutableCopy(source, directory, name, expected = null) {
+  const noFollow = fs.constants.O_NOFOLLOW || 0;
+  const descriptor = fs.openSync(source, fs.constants.O_RDONLY | noFollow);
+  try {
+    const before = fs.fstatSync(descriptor);
+    if (!before.isFile() || (before.mode & 0o022) !== 0) {
+      throw new Error(`project runtime executable is unsafe: ${source}`);
+    }
+    const bytes = fs.readFileSync(descriptor);
+    const after = fs.fstatSync(descriptor);
+    if (
+      before.dev !== after.dev
+      || before.ino !== after.ino
+      || before.mode !== after.mode
+      || before.nlink !== after.nlink
+      || before.size !== after.size
+    ) throw new Error(`project runtime executable changed while staging: ${source}`);
+    const digest = crypto.createHash("sha256").update(bytes).digest("hex");
+    if (
+      expected
+      && (
+        digest !== expected.sha256
+        || String(before.dev) !== expected.device
+        || String(before.ino) !== expected.inode
+        || (before.mode & 0o777) !== expected.mode
+        || before.nlink < Number.parseInt(expected.links, 10)
+      )
+    ) throw new Error(`project runtime executable identity changed while staging: ${source}`);
+    const staged = path.join(directory, name);
+    fs.writeFileSync(staged, bytes, { flag: "wx", mode: before.mode & 0o777 });
+    fs.chmodSync(staged, before.mode & 0o777);
+    return staged;
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function stageNodeLoaderDependencies(source, directory) {
+  if (process.platform !== "darwin") return;
+  const libraryRoot = path.resolve(path.dirname(source), "..", "lib");
+  if (!fs.existsSync(libraryRoot)) return;
+  for (const name of fs.readdirSync(libraryRoot).filter((entry) => /^libnode\..*\.dylib$/.test(entry))) {
+    stageExecutableCopy(path.join(libraryRoot, name), directory, name);
+  }
+}
+
+function verifyInstallFlock(root, nonce) {
+  const descriptor = Number.parseInt(process.env.AGENT_FLOW_INSTALL_FLOCK_FD || "", 10);
+  const lockPath = path.join(root, ".agent-flow", "install.flock");
+  if (!Number.isInteger(descriptor) || process.env.AGENT_FLOW_INSTALL_FLOCK_NONCE !== nonce) {
+    throw new Error("blocked: project mutation lock proof is missing");
+  }
+  const held = fs.fstatSync(descriptor);
+  const current = fs.lstatSync(lockPath);
+  if (
+    !held.isFile()
+    || held.nlink !== 1
+    || held.dev !== current.dev
+    || held.ino !== current.ino
+    || fs.readFileSync(lockPath, "utf8") !== `${nonce}\n`
+  ) throw new Error("blocked: project mutation lock proof is invalid");
+}
+
+function verifyMacSandboxPolicy(canary) {
+  if (process.platform !== "darwin") return;
+  const result = safeSpawnSync("/usr/bin/python3", ["-I", "-B", "-c", MAC_SANDBOX_POLICY_PROBE, canary], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let proof = null;
+  try {
+    proof = JSON.parse(result.stdout || "null");
+  } catch {
+    // 아래 공통 오류로 닫는다.
+  }
+  if (result.error || result.status !== 0 || proof?.denied !== true || proof?.flags !== 0) {
+    throw new Error("blocked: macOS install sandbox policy proof is invalid");
+  }
+}
+
+function verifyMutationSandboxAndRun(args) {
+  const [action, rootArgument, canaryPath, nonce, ...requestedInstallArgs] = args;
+  if (!new Set(["install", "sync"]).has(action)) throw new Error("blocked: invalid project mutation action");
   if (!rootArgument || !path.isAbsolute(rootArgument) || !canaryPath || !path.isAbsolute(canaryPath)) {
     throw new Error("blocked: invalid install sandbox proof");
   }
   const root = resolveInstallRoot(rootArgument);
+  verifyInstallFlock(root, nonce);
   const canary = path.resolve(canaryPath);
   if (samePath(canary, root) || canary.startsWith(`${root}${path.sep}`) || !/^[0-9a-f]{48}$/.test(nonce || "")) {
     throw new Error("blocked: invalid install sandbox proof");
@@ -6329,6 +6884,7 @@ function verifyInstallSandboxAndRun(args) {
   ) {
     throw new Error("blocked: install sandbox proof is unsafe");
   }
+  verifyMacSandboxPolicy(canary);
   let descriptor = null;
   try {
     descriptor = fs.openSync(canary, fs.constants.O_WRONLY | fs.constants.O_APPEND | (fs.constants.O_NOFOLLOW || 0));
@@ -6339,18 +6895,50 @@ function verifyInstallSandboxAndRun(args) {
     fs.closeSync(descriptor);
     throw new Error("blocked: install sandbox write boundary is not active");
   }
-  installArgs = requestedInstallArgs;
-  installProject(root);
+  if (action === "install") {
+    installArgs = requestedInstallArgs;
+    installProject(root);
+  } else {
+    syncProject(root);
+  }
 }
 
-function runInstallSandbox(rootOverride = null, requestedInstallArgs = []) {
-  const root = resolveInstallRoot(rootOverride || process.cwd());
+function runMutationSandbox(action, rootOverride = null, requestedInstallArgs = []) {
+  const requestedRoot = path.resolve(rootOverride || process.cwd());
+  const managedWorktreeRoot = resolveManagedWorktreeRoot(requestedRoot);
+  if (managedWorktreeRoot) {
+    if (action === "install" && fs.existsSync(path.join(managedWorktreeRoot, ".agent-flow", "kit.json"))) {
+      console.log(`agent-flow already installed root=${managedWorktreeRoot}`);
+      console.log("worktree install skipped; reinstall from the leader checkout if needed");
+      return 0;
+    }
+    throw new Error(`managed worktree ${action} blocked; run ${action} from the leader checkout`);
+  }
+  const root = resolveInstallRoot(requestedRoot);
   let executable = null;
   let args = [];
   const nonce = crypto.randomBytes(24).toString("hex");
   const canaryRoot = fs.mkdtempSync(path.join(nodeOs.tmpdir(), "agent-flow-install-proof-"));
   const canaryPath = path.join(canaryRoot, "outside-project");
   fs.writeFileSync(canaryPath, `${nonce}\n`, { flag: "wx", mode: 0o600 });
+  const originalNode = originalNodeAuthority();
+  const stagedNode = stageExecutableCopy(originalNode.path, canaryRoot, "node", originalNode);
+  stageNodeLoaderDependencies(originalNode.path, canaryRoot);
+  const nodeAuthority = executableContract(stagedNode);
+  const lockedCommand = [
+    "/usr/bin/python3", "-I", "-B", "-c", INSTALL_LOCK_EXEC_WRAPPER,
+    root,
+    nonce,
+    Buffer.from(JSON.stringify(nodeAuthority), "utf8").toString("base64"),
+    Buffer.from(JSON.stringify(originalNode), "utf8").toString("base64"),
+    fileURLToPath(import.meta.url),
+    "__sandboxed-mutation",
+    action,
+    root,
+    canaryPath,
+    nonce,
+    ...requestedInstallArgs,
+  ];
   if (process.platform === "darwin" && fs.existsSync("/usr/bin/sandbox-exec")) {
     executable = "/usr/bin/sandbox-exec";
     const profile = [
@@ -6362,13 +6950,7 @@ function runInstallSandbox(rootOverride = null, requestedInstallArgs = []) {
     ].join(" ");
     args = [
       "-p", profile,
-      fs.realpathSync(process.execPath),
-      fileURLToPath(import.meta.url),
-      "__sandboxed-install",
-      root,
-      canaryPath,
-      nonce,
-      ...requestedInstallArgs,
+      ...lockedCommand,
     ];
   } else if (process.platform === "linux") {
     executable = trustedLinuxBubblewrap();
@@ -6384,13 +6966,7 @@ function runInstallSandbox(rootOverride = null, requestedInstallArgs = []) {
       "--proc", "/proc",
       "--chdir", root,
       "--",
-      fs.realpathSync(process.execPath),
-      fileURLToPath(import.meta.url),
-      "__sandboxed-install",
-      root,
-      canaryPath,
-      nonce,
-      ...requestedInstallArgs,
+      ...lockedCommand,
     ];
   } else {
     fs.rmSync(canaryRoot, { recursive: true, force: true });
@@ -6412,7 +6988,7 @@ function runInstallSandbox(rootOverride = null, requestedInstallArgs = []) {
   }
   if (result.error) throw result.error;
   const status = result.status ?? 1;
-  if (status === 0) {
+  if (status === 0 && action === "install") {
     try {
       installCodexTrustState(root);
     } catch (error) {
@@ -6422,9 +6998,17 @@ function runInstallSandbox(rootOverride = null, requestedInstallArgs = []) {
   return status;
 }
 
+function runInstallSandbox(rootOverride = null, requestedInstallArgs = []) {
+  return runMutationSandbox("install", rootOverride, requestedInstallArgs);
+}
+
+function runSyncSandbox(rootOverride = null) {
+  return runMutationSandbox("sync", rootOverride, []);
+}
+
 try {
-  if (command === "__sandboxed-install") {
-    verifyInstallSandboxAndRun(process.argv.slice(3));
+  if (command === "__sandboxed-mutation") {
+    verifyMutationSandboxAndRun(process.argv.slice(3));
     process.exit(0);
   }
 
@@ -6433,8 +7017,7 @@ try {
   }
 
   if (command === "sync") {
-    syncProject();
-    process.exit(0);
+    process.exit(runSyncSandbox());
   }
 
   if (command === "run" && process.argv[3] === "install") {

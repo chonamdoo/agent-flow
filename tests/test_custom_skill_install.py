@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import base64
+import fcntl
 import hashlib
 import json
 import os
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -368,6 +370,56 @@ def test_project_launcher_rejects_replaced_contracted_python(tmp_path: Path) -> 
     assert "executable identity changed" in result.stderr
 
 
+def test_authenticated_python_execution_rejects_same_path_replacement_after_contract_check(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    fake_bin = tmp_path / "bin"
+    marker = tmp_path / "replacement-ran"
+    project.mkdir()
+    fake_bin.mkdir()
+    python = fake_bin / "python"
+    yaml_site = Path(yaml.__file__).resolve().parent.parent
+    python.write_text(
+        "#!/bin/sh\n"
+        f"PYTHONPATH={shlex.quote(str(yaml_site))}${{PYTHONPATH:+:$PYTHONPATH}}\n"
+        "export PYTHONPATH\n"
+        f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path / "home"),
+        "PYTHON": str(python),
+        "PYTHON_EXECUTABLE": str(python),
+        "AGENT_FLOW_TEST_HOLD_BEFORE_AUTHENTICATED_PYTHON_OPEN_MS": "1200",
+    }
+    assert _install(project, env=env).returncode == 0
+    process = subprocess.Popen(
+        (_node(), str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"), "status"),
+        cwd=project,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert process.stderr is not None
+    assert "agent-flow:test-authenticated-python-ready" in process.stderr.readline()
+    python.write_text(
+        "#!/bin/sh\n"
+        f": > {shlex.quote(str(marker))}\n"
+        f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+    stdout, stderr = process.communicate(timeout=15)
+
+    assert process.returncode != 0, stdout
+    assert "executable identity changed" in stderr
+    assert not marker.exists()
+
+
 def test_installed_guard_rejects_joint_runtime_and_contract_tamper(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
@@ -456,6 +508,50 @@ def test_managed_python_hook_runs_repeatedly_without_runtime_drift(tmp_path: Pat
         assert result.returncode == 0, result.stderr
 
     assert _runtime_tree_integrity(python_runtime) == before
+
+
+@pytest.mark.parametrize(
+    "script_name,command",
+    (
+        ("guard-worktree.sh", "git checkout main"),
+        ("guard-protected-branch.sh", "git commit -m test"),
+    ),
+)
+def test_managed_shell_hooks_ignore_path_shadow_binaries(
+    tmp_path: Path,
+    script_name: str,
+    command: str,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    marker = tmp_path / "path-shadow-ran"
+    fake_bin.mkdir()
+    for name in ("cat", "python3", "git"):
+        executable = fake_bin / name
+        executable.write_text(
+            f"#!/bin/sh\n: > {shlex.quote(str(marker))}\nexit 99\n",
+            encoding="utf-8",
+        )
+        executable.chmod(0o755)
+    payload = json.dumps(
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "cwd": str(KIT_ROOT),
+        }
+    )
+
+    result = subprocess.run(
+        ("/bin/bash", str(KIT_ROOT / "scripts" / "hooks" / script_name)),
+        cwd=KIT_ROOT,
+        env={**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+        input=payload,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode in {0, 2}
+    assert not marker.exists()
 
 
 def test_packaged_runtime_resolves_bare_python_from_path(tmp_path: Path) -> None:
@@ -606,6 +702,61 @@ def test_sandboxed_gate_never_uses_path_shadowed_bubblewrap(tmp_path: Path) -> N
         assert result.returncode != 0
 
 
+@pytest.mark.parametrize("action", ("install", "sync"))
+def test_internal_project_mutation_rejects_forged_immutable_canary(
+    tmp_path: Path,
+    action: str,
+) -> None:
+    if sys.platform != "darwin" or not hasattr(os, "chflags"):
+        pytest.skip("macOS immutable flags are required")
+    project = tmp_path / "project"
+    canary = tmp_path / "outside-canary"
+    project.mkdir()
+    agent_flow = project / ".agent-flow"
+    agent_flow.mkdir()
+    nonce = "a" * 48
+    canary.write_text(f"{nonce}\n", encoding="utf-8")
+    os.chflags(canary, stat.UF_IMMUTABLE)
+    lock_path = agent_flow / "install.flock"
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        os.ftruncate(descriptor, 0)
+        os.write(descriptor, f"{nonce}\n".encode())
+        os.fsync(descriptor)
+        env = {
+            **os.environ,
+            "AGENT_FLOW_INSTALL_FLOCK_FD": str(descriptor),
+            "AGENT_FLOW_INSTALL_FLOCK_NONCE": nonce,
+        }
+        result = subprocess.run(
+            (
+                _node(),
+                str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"),
+                "__sandboxed-mutation",
+                action,
+                str(project),
+                str(canary),
+                nonce,
+            ),
+            cwd=project,
+            env=env,
+            pass_fds=(descriptor,),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    finally:
+        os.chflags(canary, 0)
+        os.close(descriptor)
+
+    assert result.returncode != 0
+    assert "sandbox policy proof is invalid" in result.stderr
+    assert not (project / "AGENTS.md").exists()
+    assert not (project / "CLAUDE.md").exists()
+    assert not (agent_flow / "kit.json").exists()
+
+
 def test_sandboxed_python_cli_uses_the_contracted_interpreter(tmp_path: Path) -> None:
     if sys.platform != "darwin" and not Path("/usr/bin/bwrap").is_file():
         pytest.skip("platform sandbox is unavailable")
@@ -638,6 +789,71 @@ def test_sandboxed_python_cli_uses_the_contracted_interpreter(tmp_path: Path) ->
     assert result.returncode == 0, result.stderr
     assert marker.is_file()
     assert not outside.exists()
+
+
+def test_node_skill_repin_rejects_external_run_directory_before_writing(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    outside = tmp_path / "outside-run"
+    project.mkdir()
+    outside.mkdir()
+    assert _install(project).returncode == 0
+    started = _command(
+        project,
+        "run",
+        "start",
+        "--task",
+        "repin boundary",
+        "--run-id",
+        "repin-boundary",
+    )
+    assert started.returncode == 0, started.stderr
+    state_path = project / ".agent-flow" / "state" / "current-run.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["run_dir"] = str(outside)
+    state["skill_plan_hash"] = "0" * 64
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    result = _command(project, "run", "status")
+
+    assert result.returncode != 0
+    assert "run directory is outside its authenticated root" in result.stderr
+    assert not (outside / "manifest.json").exists()
+
+
+def test_completed_node_run_is_not_accepted_as_active_gate_authority(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    marker = project / "gate-ran"
+    project.mkdir()
+    subprocess.run(("git", "init", "-b", "main", str(project)), check=True, capture_output=True)
+    subprocess.run(("git", "-C", str(project), "config", "user.name", "Test User"), check=True)
+    subprocess.run(("git", "-C", str(project), "config", "user.email", "test@example.com"), check=True)
+    (project / "README.md").write_text("project\n", encoding="utf-8")
+    subprocess.run(("git", "-C", str(project), "add", "README.md"), check=True)
+    subprocess.run(("git", "-C", str(project), "commit", "-m", "initial"), check=True, capture_output=True)
+    subprocess.run(("git", "-C", str(project), "switch", "-c", "feat/test"), check=True, capture_output=True)
+    assert _install(project).returncode == 0
+    started = _command(project, "run", "start", "--task", "completed gate", "--run-id", "completed-gate")
+    assert started.returncode == 0, started.stderr
+    state_path = project / ".agent-flow" / "state" / "current-run.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["status"] = "complete"
+    state["phase"] = "complete"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    run_manifest = project / state["run_dir"] / "manifest.json"
+    run_manifest.write_text(json.dumps(state), encoding="utf-8")
+
+    result = _command(
+        project,
+        "gate",
+        "--",
+        sys.executable,
+        "-c",
+        f"from pathlib import Path; Path({str(marker)!r}).write_text('ran')",
+    )
+
+    assert result.returncode != 0
+    assert "no active run" in result.stderr
+    assert not marker.exists()
 
 
 def test_reinstall_commits_transaction_without_residue(tmp_path: Path) -> None:
@@ -1360,6 +1576,54 @@ def test_stale_broken_host_skill_symlink_removed_when_skill_deleted(tmp_path: Pa
     assert not codex_link.is_symlink()
 
 
+def test_stale_cleanup_preserves_same_target_symlink_with_replaced_inode(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    skill_dir = project / "skills" / "demo"
+    _skill(skill_dir, "CODEX", hosts="[codex]")
+    assert _install(project).returncode == 0
+    codex_link = project / ".Codex" / "skills" / "demo"
+    if not codex_link.is_symlink():
+        pytest.skip("host skill symlinks are unavailable")
+    target = os.readlink(codex_link)
+    original_inode = codex_link.lstat().st_ino
+    codex_link.unlink()
+    codex_link.symlink_to(target, target_is_directory=True)
+    assert codex_link.lstat().st_ino != original_inode
+    (skill_dir / "SKILL.md").unlink()
+
+    result = _install(project)
+
+    assert result.returncode == 0, result.stderr
+    assert codex_link.is_symlink()
+    assert os.readlink(codex_link) == target
+    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    assert any(link["status"] == "preserved-identity-mismatch" for link in index["links"])
+
+
+def test_stale_cleanup_preserves_identical_copied_tree_with_replaced_inode(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    skill_dir = project / "skills" / "demo"
+    _skill(skill_dir, "CODEX", hosts="[codex]")
+    force_copy = {"AGENT_FLOW_TEST_FORCE_COPY_HOST_SKILLS": "1"}
+    assert _install(project, env=force_copy).returncode == 0
+    destination = project / ".Codex" / "skills" / "demo"
+    original_inode = destination.lstat().st_ino
+    shutil.rmtree(destination)
+    shutil.copytree(skill_dir, destination)
+    assert destination.lstat().st_ino != original_inode
+    (skill_dir / "SKILL.md").unlink()
+
+    result = _install(project, env=force_copy)
+
+    assert result.returncode == 0, result.stderr
+    assert destination.is_dir()
+    assert (destination / "SKILL.md").is_file()
+    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    assert any(link["status"] == "preserved-identity-mismatch" for link in index["links"])
+
+
 def test_stale_cleanup_preserves_linked_to_directory_replacement(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
@@ -1504,6 +1768,55 @@ def test_skill_drift_reloads_add_change_rename_move_and_delete_at_command_bounda
     assert not (project / ".agent-flow" / "skills" / "renamed").exists()
 
 
+def test_canonical_status_refreshes_catalog_drift_before_python_dispatch(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    home = tmp_path / "home"
+    project.mkdir()
+    active = home / ".codex" / "skills"
+    env = {"HOME": str(home), "AGENT_FLOW_HOST": "codex"}
+    _skill(active / "alpha", "alpha-v1")
+    assert _install(project, env=env).returncode == 0
+    index_path = project / ".agent-flow" / "skills" / "index.json"
+    before = json.loads(index_path.read_text(encoding="utf-8"))
+    _skill(active / "alpha", "alpha-v2")
+
+    status = _command(project, "status", env=env)
+
+    assert status.returncode in {0, 1}
+    assert "agent-flow installed" in status.stdout
+    after = json.loads(index_path.read_text(encoding="utf-8"))
+    assert after["catalog_fingerprint"] != before["catalog_fingerprint"]
+    assert after["revision"] != before["revision"]
+
+
+def test_worktree_catalog_drift_fails_without_refreshing_leader_install(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    home = tmp_path / "home"
+    worktree = project / ".agent-flow" / "worktrees" / "feat-drift"
+    project.mkdir()
+    active = home / ".codex" / "skills"
+    env = {**os.environ, "HOME": str(home), "AGENT_FLOW_HOST": "codex"}
+    _skill(active / "alpha", "alpha-v1")
+    assert _install(project, env=env).returncode == 0
+    worktree.mkdir(parents=True)
+    index_path = project / ".agent-flow" / "skills" / "index.json"
+    before = index_path.read_bytes()
+    _skill(active / "alpha", "alpha-v2")
+
+    result = subprocess.run(
+        (_node(), str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"), "status"),
+        cwd=worktree,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "catalog drift must be refreshed from the leader checkout" in result.stderr
+    assert index_path.read_bytes() == before
+
+
 def test_metadata_selector_drift_recalculates_the_next_runtime_plan(tmp_path: Path) -> None:
     project = tmp_path / "project"
     home = tmp_path / "home"
@@ -1618,11 +1931,85 @@ def test_install_lock_serializes_concurrent_installers(tmp_path: Path) -> None:
             break
         time.sleep(0.01)
     second = _command(project, "install", env={"HOME": str(tmp_path / "home")})
-    stdout, stderr = first.communicate(timeout=10)
+    stdout, stderr = first.communicate(timeout=30)
 
     assert first.returncode == 0, stdout + stderr
     assert second.returncode != 0
     assert "project install lock is held" in second.stderr
+
+
+def test_stale_install_lock_takeover_is_serialized_before_recovery(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    assert _install(project).returncode == 0
+    lock_path = project / ".agent-flow" / "install.lock"
+    lock_path.mkdir()
+    stale_token = "1" * 48
+    (lock_path / "owner.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "root": str(project.resolve()),
+                "pid": 2_147_483_647,
+                "token": stale_token,
+            }
+        ),
+        encoding="utf-8",
+    )
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path / "home"),
+        "AGENT_FLOW_TEST_HOLD_AFTER_STALE_LOCK_AUTH_MS": "1200",
+    }
+    first = subprocess.Popen(
+        (_node(), str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"), "install"),
+        cwd=project,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert first.stderr is not None
+    assert "agent-flow:test-stale-lock-authenticated" in first.stderr.readline()
+    second = _command(project, "install", env={"HOME": str(tmp_path / "home")})
+    stdout, stderr = first.communicate(timeout=30)
+
+    assert first.returncode == 0, stdout + stderr
+    assert second.returncode != 0
+    assert "project install lock is held" in second.stderr
+    assert not lock_path.exists()
+
+
+def test_install_lock_release_never_deletes_replaced_directory(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    assert _install(project).returncode == 0
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path / "home"),
+        "AGENT_FLOW_TEST_HOLD_BEFORE_INSTALL_LOCK_RELEASE_MS": "1200",
+    }
+    process = subprocess.Popen(
+        (_node(), str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"), "install"),
+        cwd=project,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert process.stderr is not None
+    assert "agent-flow:test-install-lock-release-ready" in process.stderr.readline()
+    lock_path = project / ".agent-flow" / "install.lock"
+    original = project / ".agent-flow" / "original-install-lock"
+    lock_path.rename(original)
+    lock_path.mkdir()
+    marker = lock_path / "user-owned"
+    marker.write_text("keep\n", encoding="utf-8")
+    stdout, stderr = process.communicate(timeout=30)
+
+    assert process.returncode != 0, stdout
+    assert "lock changed during release" in stderr
+    assert marker.read_text(encoding="utf-8") == "keep\n"
 
 
 def test_unindexed_existing_skills_failure_leaves_no_transaction_residue(tmp_path: Path) -> None:

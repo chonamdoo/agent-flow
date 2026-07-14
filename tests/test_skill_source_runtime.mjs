@@ -89,6 +89,33 @@ test("explicit invalid active source must fail before fallback", () => {
   );
 });
 
+test("explicit invalid shared source must fail before bundled fallback without an active host", () => {
+  const root = tempRoot();
+  const home = path.join(root, "home");
+  const project = path.join(root, "project");
+  const shared = writeSkill(path.join(home, ".agents", "skills"), "agent-flow", "", "invalid shared");
+  fs.writeFileSync(
+    path.join(shared, "SKILL.md"),
+    "---\nname: different-name\ndescription: Invalid shared source.\n---\ninvalid\n",
+    "utf8",
+  );
+
+  assert.throws(
+    () => resolveProfileSkillSources({
+      skillNames: new Set(["agent-flow"]),
+      explicitSkillNames: ["agent-flow"],
+      kitRoot: KIT_ROOT,
+      projectRoot: project,
+      projectSkillsRoot: path.join(project, ".agent-flow", "skills"),
+      home,
+      activeHost: null,
+    }),
+    (error) => /explicit skill agent-flow rejected source/.test(error.message)
+      && error.message.includes(shared)
+      && error.message.includes("logical name mismatch"),
+  );
+});
+
 test("automatic invalid active source falls back with authenticated shared bytes", () => {
   const root = tempRoot();
   const home = path.join(root, "home");

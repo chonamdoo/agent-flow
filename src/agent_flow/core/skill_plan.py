@@ -42,7 +42,7 @@ EXPLICIT_ONLY_SKILLS = frozenset({"testing-localization"})
 REVIEW_SKILL_PHASES = frozenset({"final-review", "review", "multi-review", "architecture-review"})
 GENERIC_FILE_RULE_SCORE = 20
 SKILL_PLAN_HASH_VERSION = 2
-SKILL_LINKS_COMMITMENT_VERSION = 1
+SKILL_LINKS_COMMITMENT_VERSION = 2
 MANAGED_HOST_FILES_VERSION = 1
 MANAGED_HOST_FILES_COMMITMENT_VERSION = 1
 MANAGED_HOOK_CONTRACT_VERSION = 2
@@ -85,7 +85,8 @@ MANAGED_HOOK_VERIFIER = "\n".join(
         " os.close(source_fd); source_fd=None",
         " source_ref=f'/dev/fd/{stage_fd}'",
         " if not os.path.exists(source_ref): raise OSError('descriptor execution unavailable')",
-        " env=dict(os.environ); env['AGENT_FLOW_MANAGED_HOOK_SOURCE_PATH']=p",
+        " env=dict(os.environ); env['AGENT_FLOW_MANAGED_HOOK_SOURCE_PATH']=p; env['PATH']='/usr/bin:/bin'",
+        " [env.pop(name,None) for name in ('BASH_ENV','ENV','PYTHONPATH','PYTHONHOME','PYTHONSTARTUP','LD_PRELOAD','LD_LIBRARY_PATH','DYLD_INSERT_LIBRARIES','DYLD_LIBRARY_PATH')]",
         " try: hold=int(env.get('AGENT_FLOW_TEST_HOLD_AFTER_MANAGED_HOOK_STAGE_MS','0'))",
         " except ValueError: hold=0",
         " if 0<hold<=10000:",
@@ -469,6 +470,8 @@ def assert_committed_skill_host_links_applied(
             if (
                 snapshot["kind"] != "symlink"
                 or snapshot.get("target") != expected_target
+                or snapshot.get("filesystem_identity")
+                != link["filesystem_identity"]
             ):
                 raise SkillPlanSnapshotError(
                     "blocked: committed skill symlink is not applied: "
@@ -480,6 +483,8 @@ def assert_committed_skill_host_links_applied(
             or snapshot["kind"] != "directory"
             or snapshot.get("tree_hash") != source_tree_hash
             or snapshot.get("tree_integrity") != source_tree_integrity
+            or snapshot.get("filesystem_identity")
+            != link["filesystem_identity"]
         ):
             raise SkillPlanSnapshotError(
                 "blocked: committed skill copy is not applied: "
@@ -495,6 +500,7 @@ def _normalized_skill_links(links: object) -> list[list[Any]]:
             link["path"],
             link["status"],
             link["tree_integrity"],
+            link["filesystem_identity"],
         ]
         for link in _normalized_skill_link_objects(links)
     ]
@@ -542,6 +548,7 @@ def _normalized_skill_link_objects(links: object) -> list[dict[str, Any]]:
             else ""
         )
         integrity = raw_link.get("tree_integrity")
+        filesystem_identity = raw_link.get("filesystem_identity")
         parts = relative.split("/")
         if (
             not name
@@ -558,6 +565,23 @@ def _normalized_skill_link_objects(links: object) -> list[dict[str, Any]]:
                     not isinstance(integrity, str)
                     or re.fullmatch(r"[0-9a-f]{64}", integrity) is None
                 )
+            )
+            or (
+                filesystem_identity is not None
+                and (
+                    not isinstance(filesystem_identity, dict)
+                    or set(filesystem_identity) != {"device", "inode", "links", "mode"}
+                    or any(
+                        not isinstance(filesystem_identity.get(key), str)
+                        or re.fullmatch(r"[0-9]+", filesystem_identity[key]) is None
+                        for key in ("device", "inode", "links")
+                    )
+                    or not isinstance(filesystem_identity.get("mode"), int)
+                )
+            )
+            or (
+                status_value in {"linked", "copied"}
+                and filesystem_identity is None
             )
         ):
             raise SkillPlanSnapshotError(
@@ -581,6 +605,7 @@ def _normalized_skill_link_objects(links: object) -> list[dict[str, Any]]:
                 "path": relative,
                 "status": status_value,
                 "tree_integrity": integrity,
+                "filesystem_identity": filesystem_identity,
             }
         )
     return normalized
@@ -600,16 +625,27 @@ def _canonical_skill_link_paths(host: str, name: str) -> set[str]:
 
 def _skill_host_destination_snapshot(destination: Path) -> dict[str, Any]:
     try:
-        mode = destination.lstat().st_mode
+        metadata = destination.lstat()
+        mode = metadata.st_mode
     except FileNotFoundError:
         return {"kind": "absent"}
     except OSError as exc:
         raise SkillPlanSnapshotError(
             f"blocked: project skill host destination is unreadable: {destination}"
         ) from exc
+    filesystem_identity = {
+        "device": str(metadata.st_dev),
+        "inode": str(metadata.st_ino),
+        "links": str(metadata.st_nlink),
+        "mode": stat.S_IMODE(metadata.st_mode),
+    }
     if stat.S_ISLNK(mode):
         try:
-            return {"kind": "symlink", "target": os.readlink(destination)}
+            return {
+                "kind": "symlink",
+                "target": os.readlink(destination),
+                "filesystem_identity": filesystem_identity,
+            }
         except OSError as exc:
             raise SkillPlanSnapshotError(
                 f"blocked: project skill host symlink is unreadable: {destination}"
@@ -636,6 +672,7 @@ def _skill_host_destination_snapshot(destination: Path) -> dict[str, Any]:
         "kind": "directory",
         "tree_hash": hash_skill_tree(destination),
         "tree_integrity": _tree_integrity(destination),
+        "filesystem_identity": filesystem_identity,
     }
 
 
