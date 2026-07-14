@@ -45,7 +45,7 @@
           "file_rules": [
             { "extensions": [".kt", ".kts"], "path_terms": ["compose", "screen", "viewmodel", "state", "presentation", "ui/"] }
           ],
-          "skills": ["android-mvi-feature", "compose-state-authoring", "compose-state-hoisting", "compose-state-holder-ui-split", "kotlin-flow-state-event-modeling"]
+          "skills": ["compose-state-authoring", "compose-state-hoisting", "compose-state-holder-ui-split", "kotlin-flow-state-event-modeling"]
         },
         {
           "id": "compose-effects",

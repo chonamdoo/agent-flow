@@ -7,8 +7,8 @@ description: Shared Android reference bundle for other android-* skills, coverin
 
 This is a reference-only bundle for Android profile projects, not a standalone
 workflow skill. Pair it with a task-specific Android skill such as
-`android-code-review`, `android-debugging`, `android-module-creator`, or
-`android-mvi-feature`, and prefer the target project's own conventions when
+`android-code-review`, `android-debugging`, or `android-module-creator`, and
+prefer the target project's own conventions when
 they conflict with these defaults.
 
 ## Quick start
