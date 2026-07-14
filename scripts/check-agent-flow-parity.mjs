@@ -196,15 +196,17 @@ function recursiveFiles(relDir) {
   return out.sort();
 }
 
-for (const installer of ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"]) {
-  assertContains(installer, "function installCodexTrustState(root)");
-  assertContains(installer, "function queryCodexProjectHookHashes(root)");
-  assertContains(installer, "function trustedManagedHookScriptName(root, command)");
-  assertContains(installer, "normalized === `${normalizedRoot}/.agent-flow/scripts/hooks/${scriptName}`");
-  assertContains(installer, "[hooks.state.");
-  assertContains(installer, "function installOmpHooks(root)");
-  assertContains(installer, ".omp\", \"extensions\", \"agent-flow-hooks.ts");
-}
+const canonicalInstaller = "bin/agent-flow-kit.mjs";
+assertContains(canonicalInstaller, "function installCodexTrustState(root)");
+assertContains(canonicalInstaller, "function queryCodexProjectHookHashes(root)");
+assertContains(canonicalInstaller, "function trustedManagedHookScriptName(root, command)");
+assertContains(canonicalInstaller, "normalized === `${normalizedRoot}/.agent-flow/scripts/hooks/${scriptName}`");
+assertContains(canonicalInstaller, "[hooks.state.");
+assertContains(canonicalInstaller, "function installOmpHooks(root)");
+assertContains(canonicalInstaller, ".omp\", \"extensions\", \"agent-flow-hooks.ts");
+assertContains("bin/agent-flow-install.mjs", "agent-flow-kit.mjs");
+assertContains("bin/agent-flow-install.mjs", "spawnSync(process.execPath");
+assertNotContains("bin/agent-flow-install.mjs", "function installProjectSkills");
 
 const fullFeatureWorkflowCopies = [
   "workflows/full-feature.yaml",
