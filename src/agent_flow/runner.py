@@ -49,10 +49,14 @@ from agent_flow.core.phase_workflow import find_kit_root, load_phase_workflow_de
 from agent_flow.core.report import write_run_report
 from agent_flow.core.security import ensure_child_path, validate_safe_name
 from agent_flow.core.workspace_boundary import (
+    capture_git_mutation_snapshot,
     capture_workspace_identity,
+    leader_root_for_identity,
+    mutation_paths_since,
     validate_workspace_identity,
     workspace_identity_from_dict,
 )
+from agent_flow.core.skill_plan import installed_skill_plan_pin, reconcile_skill_plan_pin
 from agent_flow.core.markers import has_failure_markers, missing_markers
 from agent_flow.core.local_skills import missing_local_skill_markers
 from agent_flow.memory.index import LoreIndex
@@ -68,6 +72,20 @@ GIT_DEPENDENT_PHASES = {
     "pr-ci-fix",
     "merge",
     "merge-approval",
+}
+MUTATION_PHASES = {
+    "implement",
+    "implement-fix",
+    "red",
+    "green",
+    "refactor",
+    "fix-loop",
+    "review",
+    "final-review",
+    "multi-review",
+    "architecture-review",
+    "pr-comment-fix",
+    "pr-ci-fix",
 }
 FIX_LOOP_MAX_ROUNDS = 3
 DDD_REQUIRED_DESIGN_SECTIONS = (
@@ -146,6 +164,8 @@ class Runner:
             print(f"▶ task        : {meta.get('task', '')}")
 
         self._pin_workspace_identity()
+        self._pin_skill_plan()
+        self._verify_pending_mutation_boundary()
 
         adapter = detect_adapter()
         self._adapter_name = adapter.name
@@ -169,6 +189,7 @@ class Runner:
         # to the task description and inject them into the prompt envelope.
         # Empty list when memory dir is missing or no matches.
         meta_for_lore = read_meta(self.run_dir) if self.run_dir else {}
+        adapter._task_scope = str(meta_for_lore.get("task", ""))
         adapter._lore_citations = _search_lore(
             self.project_root, meta_for_lore.get("task", ""),
         )
@@ -263,9 +284,15 @@ class Runner:
                     return
                 continue
             print(f"  [run]  {phase.id} — {phase.description}")
-            completed = adapter.execute(
-                phase, run_dir=self.run_dir, project_root=self.project_root,
-            )
+            self._begin_mutation_boundary(phase)
+            try:
+                completed = adapter.execute(
+                    phase, run_dir=self.run_dir, project_root=self.project_root,
+                )
+            except Exception:
+                self._observe_mutation_boundary(clear=False)
+                raise
+            self._observe_mutation_boundary(clear=completed)
             meta = read_meta(self.run_dir)
             meta["current_phase"] = phase.id
             meta["phase_index"] = phase_index
@@ -367,8 +394,10 @@ class Runner:
         meta = read_meta(self.run_dir)
         payload = meta.get("workspace")
         if payload is None:
-            meta["workspace"] = capture_workspace_identity(self.project_root).to_dict()
+            identity = capture_workspace_identity(self.project_root)
+            meta["workspace"] = identity.to_dict()
             write_meta(self.run_dir, meta)
+            self._workspace_identity = identity
             return
         identity = workspace_identity_from_dict(payload)
         root = validate_workspace_identity(identity)
@@ -376,6 +405,84 @@ class Runner:
             raise RuntimeError(
                 f"run workspace differs from pinned workspace: current={self.project_root} pinned={root}"
             )
+        self._workspace_identity = identity
+
+    def _pin_skill_plan(self) -> None:
+        assert self.run_dir is not None
+        meta = read_meta(self.run_dir)
+        if "skill_plan_hash" not in meta and "skill_plan_hash_version" not in meta:
+            pin = installed_skill_plan_pin(self.config_root)
+            if pin:
+                meta.update(pin)
+                write_meta(self.run_dir, meta)
+            return
+        reconciled, changed = reconcile_skill_plan_pin(meta, self.config_root)
+        if changed:
+            write_meta(self.run_dir, reconciled)
+
+    def _begin_mutation_boundary(self, phase: Phase) -> None:
+        if phase.id not in MUTATION_PHASES or not hasattr(self, "_workspace_identity"):
+            return
+        identity = self._workspace_identity
+        leader = leader_root_for_identity(identity)
+        pinned = Path(identity.workspace_root)
+        if leader == pinned:
+            return
+        assert self.run_dir is not None
+        meta = read_meta(self.run_dir)
+        meta["mutation_boundary"] = {
+            "phase": phase.id,
+            "leader_root": str(leader),
+            "leader_before": capture_git_mutation_snapshot(leader),
+            "pinned_before": capture_git_mutation_snapshot(pinned),
+        }
+        write_meta(self.run_dir, meta)
+
+    def _verify_pending_mutation_boundary(self) -> None:
+        if self.run_dir is None:
+            return
+        meta = read_meta(self.run_dir)
+        if isinstance(meta.get("mutation_boundary"), dict):
+            self._observe_mutation_boundary(clear=True)
+
+    def _observe_mutation_boundary(self, *, clear: bool) -> None:
+        assert self.run_dir is not None
+        meta = read_meta(self.run_dir)
+        boundary = meta.get("mutation_boundary")
+        if not isinstance(boundary, dict):
+            return
+        identity = workspace_identity_from_dict(meta.get("workspace"))
+        pinned = validate_workspace_identity(identity)
+        leader = leader_root_for_identity(identity)
+        if str(leader) != boundary.get("leader_root"):
+            raise RuntimeError("mutation boundary leader checkout identity changed")
+        leader_before = boundary.get("leader_before")
+        pinned_before = boundary.get("pinned_before")
+        if not isinstance(leader_before, dict) or not isinstance(pinned_before, dict):
+            raise RuntimeError("mutation boundary snapshot is invalid")
+        leader_after = capture_git_mutation_snapshot(leader)
+        leader_changes = mutation_paths_since(leader_before, leader_after)
+        if leader_changes:
+            raise RuntimeError(
+                "leader checkout changed during pinned mutation phase; "
+                f"phase={boundary.get('phase', 'unknown')} paths={', '.join(leader_changes)}"
+            )
+        pinned_after = capture_git_mutation_snapshot(pinned)
+        pinned_changes = mutation_paths_since(pinned_before, pinned_after)
+        observed = sorted(
+            {
+                *(
+                    value
+                    for value in meta.get("pinned_mutation_paths", [])
+                    if isinstance(value, str)
+                ),
+                *pinned_changes,
+            }
+        )
+        meta["pinned_mutation_paths"] = observed
+        if clear:
+            meta.pop("mutation_boundary", None)
+        write_meta(self.run_dir, meta)
 
     def _next_index(self, current_index: int, phase: Phase) -> tuple[int, bool]:
         if not phase.routes:

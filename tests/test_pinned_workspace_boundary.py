@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from agent_flow.runner import Phase, Runner
+
 
 KIT_ROOT = Path(__file__).resolve().parent.parent
 GUARD = KIT_ROOT / "scripts" / "hooks" / "guard-worktree-write.py"
@@ -98,6 +100,34 @@ def _guard(
         "tool_input": {
             "patch": f"*** Begin Patch\n*** Update File: {target}\n@@\n-old\n+new\n*** End Patch"
         },
+    }
+    return subprocess.run(
+        (sys.executable, str(GUARD)),
+        cwd=leader,
+        env=env,
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def _bash_guard(
+    leader: Path,
+    cwd: Path,
+    command: str,
+    *,
+    host: str = "codex",
+    phase: str = "implement",
+) -> subprocess.CompletedProcess[str]:
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(KIT_ROOT / "src")
+    payload = {
+        "tool_name": "Bash",
+        "cwd": str(cwd),
+        "host": host,
+        "phase": phase,
+        "tool_input": {"command": command},
     }
     return subprocess.run(
         (sys.executable, str(GUARD)),
@@ -213,6 +243,86 @@ def test_codex_claude_and_omp_share_the_same_pinned_workspace_and_mutation_set(
     assert decisions == {"codex": (0, 2), "claude": (0, 2), "omp": (0, 2)}
 
 
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_shell_mutation_from_leader_is_rejected_for_every_host(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, _worktree, _runtime, _run_dir = pinned_run
+    command = "printf changed > shared.txt"
+
+    result = _bash_guard(leader, leader, command, host=host)
+
+    assert result.returncode == 2
+    assert "must run from pinned workspace" in result.stderr
+    assert (leader / "shared.txt").read_text(encoding="utf-8") == "leader\n"
+
+
+def test_shell_mutation_inside_pinned_worktree_is_allowed_and_leader_unchanged(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    command = "printf pinned > shared.txt"
+
+    accepted = _bash_guard(leader, worktree, command)
+    assert accepted.returncode == 0, accepted.stderr
+    subprocess.run(command, cwd=worktree, shell=True, check=True)
+
+    assert (leader / "shared.txt").read_text(encoding="utf-8") == "leader\n"
+    assert (worktree / "shared.txt").read_text(encoding="utf-8") == "pinned"
+
+
+def test_shell_absolute_leader_target_and_symlink_escape_are_rejected(
+    pinned_run: tuple[Path, Path, Path, Path],
+    tmp_path: Path,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (worktree / "escape").symlink_to(outside, target_is_directory=True)
+
+    absolute = _bash_guard(leader, worktree, f"printf changed > {leader / 'shared.txt'}")
+    escaped = _bash_guard(leader, worktree, "printf changed > escape/new.txt")
+
+    assert absolute.returncode == 2
+    assert escaped.returncode == 2
+    assert not (outside / "new.txt").exists()
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_dynamic_shell_mutations_cannot_escape_the_pinned_worktree(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    commands = (
+        f"TARGET={leader / 'shared.txt'} node -e \"require('fs').writeFileSync(process.env.TARGET, 'changed')\"",
+        f"dd if=/dev/null of={leader / 'shared.txt'}",
+        f"perl -pi -e 's/leader/changed/' {leader / 'shared.txt'}",
+        f"rsync shared.txt {leader / 'shared.txt'}",
+    )
+
+    for command in commands:
+        result = _bash_guard(leader, worktree, command, host=host)
+        assert result.returncode == 2, (command, result.stderr)
+    assert (leader / "shared.txt").read_text(encoding="utf-8") == "leader\n"
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_unclassified_shell_command_fails_closed_from_the_leader(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, _worktree, _runtime, _run_dir = pinned_run
+
+    result = _bash_guard(leader, leader, "custom-writer --output shared.txt", host=host)
+    read_only = _bash_guard(leader, leader, "git status --short", host=host)
+
+    assert result.returncode == 2
+    assert "must run from pinned workspace" in result.stderr
+    assert read_only.returncode == 0, read_only.stderr
+
+
 def test_leader_status_reuses_the_active_pinned_worktree(
     pinned_run: tuple[Path, Path, Path, Path],
 ) -> None:
@@ -276,3 +386,164 @@ def test_worktree_manifest_records_canonical_identity(tmp_path: Path) -> None:
     assert Path(identity["git_common_dir"]).samefile(leader / ".git")
     assert identity["branch"] == "feat/identity"
     assert identity["head"] == _git(leader, "rev-parse", "HEAD")
+
+
+def test_runner_fails_when_leader_changes_during_a_mutation_phase(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, runtime, run_dir = pinned_run
+    runner = Runner(
+        worktree,
+        state_root=runtime,
+        config_root=leader,
+        run_dir=run_dir,
+    )
+    runner._pin_workspace_identity()
+    runner._begin_mutation_boundary(Phase(id="implement", description="implement"))
+
+    (leader / "shared.txt").write_text("unexpected leader mutation\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="leader checkout changed.*shared.txt"):
+        runner._observe_mutation_boundary(clear=True)
+    assert (leader / "shared.txt").read_text(encoding="utf-8") == "unexpected leader mutation\n"
+
+
+def test_runner_records_only_pinned_changes_during_a_mutation_phase(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, runtime, run_dir = pinned_run
+    runner = Runner(
+        worktree,
+        state_root=runtime,
+        config_root=leader,
+        run_dir=run_dir,
+    )
+    runner._pin_workspace_identity()
+    runner._begin_mutation_boundary(Phase(id="fix-loop", description="fix"))
+
+    (worktree / "shared.txt").write_text("pinned mutation\n", encoding="utf-8")
+    runner._observe_mutation_boundary(clear=True)
+
+    meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
+    assert meta["pinned_mutation_paths"] == ["shared.txt"]
+    assert "mutation_boundary" not in meta
+    assert (leader / "shared.txt").read_text(encoding="utf-8") == "leader\n"
+
+
+def test_node_follow_up_from_leader_reuses_and_validates_registered_worktree(
+    tmp_path: Path,
+) -> None:
+    leader = tmp_path / "project"
+    leader.mkdir()
+    subprocess.run(("git", "init", "-b", "main", str(leader)), check=True, capture_output=True)
+    _git(leader, "config", "user.name", "Test User")
+    _git(leader, "config", "user.email", "test@example.com")
+    (leader / "shared.txt").write_text("leader\n", encoding="utf-8")
+    _git(leader, "add", "shared.txt")
+    _git(leader, "commit", "-m", "initial")
+    node = shutil.which("node")
+    assert node is not None
+    cli = KIT_ROOT / "bin" / "agent-flow-kit.mjs"
+    env = {**os.environ, "AGENT_FLOW_AUTO_EXTERNAL_SKILLS": "0"}
+    installed = subprocess.run(
+        (node, str(cli), "install"),
+        cwd=leader,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert installed.returncode == 0, installed.stderr
+
+    worktree = leader / ".agent-flow" / "worktrees" / "feat-node"
+    _git(leader, "worktree", "add", "-b", "feat/node", str(worktree), "main")
+    runtime = leader / ".git" / "agent-flow" / "worktrees" / "feat-node"
+    runtime.mkdir(parents=True)
+    identity = _identity(worktree)
+    (runtime / "manifest.json").write_text(
+        json.dumps(
+            {
+                "name": "feat-node",
+                "branch": "feat/node",
+                "path": ".agent-flow/worktrees/feat-node",
+                "identity": identity,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    started = subprocess.run(
+        (node, str(cli), "run", "start", "--task", "node pinned", "--run-id", "node-1"),
+        cwd=worktree,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert started.returncode == 0, started.stderr
+    state_path = leader / ".agent-flow" / "state" / "current-run.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert Path(state["workspace_root"]).samefile(worktree)
+    assert state["workspace"] == identity
+
+    follow_up = subprocess.run(
+        (node, str(cli), "run", "status"),
+        cwd=leader,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert follow_up.returncode == 0, follow_up.stderr
+    assert f"workspace_root: {worktree.resolve()}" in follow_up.stdout
+    assert _guard(leader, worktree / "shared.txt").returncode == 0
+    assert _guard(leader, leader / "shared.txt").returncode == 2
+
+    shutil.rmtree(worktree)
+    missing = subprocess.run(
+        (node, str(cli), "run", "status"),
+        cwd=leader,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert missing.returncode == 1
+    assert "pinned workspace is missing" in missing.stderr
+
+
+def test_node_run_start_rejects_the_leader_protected_branch(tmp_path: Path) -> None:
+    leader = tmp_path / "project"
+    leader.mkdir()
+    subprocess.run(("git", "init", "-b", "main", str(leader)), check=True, capture_output=True)
+    _git(leader, "config", "user.name", "Test User")
+    _git(leader, "config", "user.email", "test@example.com")
+    (leader / "shared.txt").write_text("leader\n", encoding="utf-8")
+    _git(leader, "add", "shared.txt")
+    _git(leader, "commit", "-m", "initial")
+    node = shutil.which("node")
+    assert node is not None
+    cli = KIT_ROOT / "bin" / "agent-flow-kit.mjs"
+    env = {**os.environ, "AGENT_FLOW_AUTO_EXTERNAL_SKILLS": "0"}
+    installed = subprocess.run(
+        (node, str(cli), "install"),
+        cwd=leader,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert installed.returncode == 0, installed.stderr
+
+    started = subprocess.run(
+        (node, str(cli), "run", "start", "--task", "blocked leader"),
+        cwd=leader,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert started.returncode == 1
+    assert "protected branch main" in started.stderr
+    assert not (leader / ".agent-flow" / "state" / "current-run.json").exists()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from dataclasses import asdict, dataclass
@@ -115,6 +116,98 @@ def validate_workspace_identity(identity: WorkspaceIdentity) -> Path:
     return root
 
 
+def leader_root_for_identity(identity: WorkspaceIdentity) -> Path:
+    common = Path(identity.git_common_dir).resolve(strict=True)
+    if common.name != ".git":
+        raise WorkspaceBoundaryError("pinned workspace git common directory is not a leader checkout")
+    return common.parent.resolve(strict=True)
+
+
+def capture_git_mutation_snapshot(root: Path) -> dict[str, object]:
+    resolved = root.resolve(strict=True)
+    try:
+        status = subprocess.run(
+            (
+                "git",
+                "-C",
+                str(resolved),
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+            ),
+            capture_output=True,
+            check=False,
+            timeout=GIT_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise WorkspaceBoundaryError(f"git mutation snapshot failed: {resolved}") from exc
+    if status.returncode != 0:
+        raise WorkspaceBoundaryError(f"git mutation snapshot failed: {resolved}")
+    records = status.stdout.split(b"\0")
+    paths: list[str] = []
+    index = 0
+    while index < len(records):
+        record = records[index]
+        index += 1
+        if not record:
+            continue
+        if len(record) < 4 or record[2:3] != b" ":
+            raise WorkspaceBoundaryError("git mutation snapshot returned invalid status data")
+        code = record[:2].decode("ascii", errors="strict")
+        paths.append(record[3:].decode("utf-8", errors="surrogateescape"))
+        if "R" in code or "C" in code:
+            if index >= len(records) or not records[index]:
+                raise WorkspaceBoundaryError("git mutation snapshot returned invalid rename data")
+            paths.append(records[index].decode("utf-8", errors="surrogateescape"))
+            index += 1
+    states = {
+        relative: _mutation_path_digest(resolved, relative)
+        for relative in sorted(set(paths))
+    }
+    return {
+        "head": _git(resolved, "rev-parse", "HEAD"),
+        "status_hash": hashlib.sha256(status.stdout).hexdigest(),
+        "paths": states,
+    }
+
+
+def mutation_paths_since(
+    before: dict[str, object],
+    after: dict[str, object],
+) -> tuple[str, ...]:
+    before_paths = before.get("paths") if isinstance(before.get("paths"), dict) else {}
+    after_paths = after.get("paths") if isinstance(after.get("paths"), dict) else {}
+    changed = [
+        path
+        for path in sorted(set(before_paths) | set(after_paths))
+        if before_paths.get(path) != after_paths.get(path)
+    ]
+    if before.get("head") != after.get("head"):
+        changed.insert(0, "<HEAD>")
+    return tuple(changed)
+
+
+def _mutation_path_digest(root: Path, relative: str) -> str:
+    target = root / relative
+    try:
+        metadata = target.lstat()
+    except FileNotFoundError:
+        return "missing"
+    digest = hashlib.sha256()
+    digest.update(str(metadata.st_mode).encode("ascii"))
+    digest.update(b"\0")
+    if target.is_symlink():
+        digest.update(target.readlink().as_posix().encode("utf-8", errors="surrogateescape"))
+    elif target.is_file():
+        digest.update(target.read_bytes())
+    elif target.is_dir():
+        digest.update(b"directory")
+    else:
+        digest.update(b"special")
+    return digest.hexdigest()
+
+
 def resolve_mutation_path(
     identity: WorkspaceIdentity,
     requested_path: str | Path,
@@ -188,6 +281,27 @@ def find_active_pinned_workspace(leader_root: Path) -> ActivePinnedWorkspace | N
             identity = workspace_identity_from_dict(workspace_payload)
             validate_workspace_identity(identity)
             active.append(ActivePinnedWorkspace(worktree_runtime.name, identity, run_dir))
+    node_state_path = leader / ".agent-flow" / "state" / "current-run.json"
+    if node_state_path.is_file():
+        node_state = _read_json(node_state_path)
+        if node_state.get("status") not in {"complete", "aborted"} and node_state.get("phase") != "complete":
+            workspace_payload = node_state.get("workspace")
+            if workspace_payload is not None:
+                identity = workspace_identity_from_dict(workspace_payload)
+                validate_workspace_identity(identity)
+                run_dir_value = node_state.get("run_dir")
+                if not isinstance(run_dir_value, str) or not run_dir_value:
+                    raise WorkspaceBoundaryError("pinned Node run directory is invalid")
+                run_dir = Path(run_dir_value)
+                if not run_dir.is_absolute():
+                    run_dir = leader / run_dir
+                active.append(
+                    ActivePinnedWorkspace(
+                        Path(identity.workspace_root).name,
+                        identity,
+                        run_dir.resolve(strict=False),
+                    )
+                )
     if len(active) > 1:
         names = ", ".join(item.name for item in active)
         raise WorkspaceBoundaryError(f"multiple active pinned workspaces: {names}")
