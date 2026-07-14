@@ -102,8 +102,8 @@ const GENERATED_PROJECT_SKILL_NAMES = new Set([
   "product-brief",
   "push-watch",
 ]);
-function installProject() {
-  const requestedRoot = process.cwd();
+function installProject(rootOverride = null) {
+  const requestedRoot = rootOverride ? path.resolve(rootOverride) : process.cwd();
   const managedWorktreeRoot = resolveManagedWorktreeRoot(requestedRoot);
   if (
     managedWorktreeRoot
@@ -118,14 +118,85 @@ function installProject() {
   }
   const root = resolveInstallRoot(requestedRoot);
   const agentFlowDir = path.join(root, ".agent-flow");
+  fs.mkdirSync(agentFlowDir, { recursive: true });
+  const lock = acquireProjectInstallLock(root, agentFlowDir);
+  const context = { transaction: null };
+  try {
+    recoverInterruptedSkillTransaction(root, agentFlowDir, lock.token);
+    installProjectUnlocked(root, context);
+    commitSkillInstallTransaction(context.transaction);
+    try {
+      installCodexTrustState(root);
+    } catch (error) {
+      console.error(`warning: Codex trust registration failed after install commit: ${error.message}`);
+    }
+  } catch (error) {
+    let rollbackError = null;
+    try {
+      sealManagedInstallMutations(context.transaction);
+      rollbackSkillInstallTransaction(context.transaction);
+    } catch (failure) {
+      rollbackError = failure;
+    }
+    if (rollbackError) {
+      throw new Error(`${error instanceof Error ? error.message : String(error)}; rollback failed: ${rollbackError.message}`);
+    }
+    throw error;
+  } finally {
+    releaseProjectInstallLock(lock);
+  }
+}
+
+function syncProject(rootOverride = null) {
+  const requestedRoot = rootOverride ? path.resolve(rootOverride) : process.cwd();
+  if (resolveManagedWorktreeRoot(requestedRoot)) {
+    throw new Error("managed worktree sync blocked; run sync from the leader checkout");
+  }
+  const root = resolveInstallRoot(requestedRoot);
+  syncProjectAgentDocuments(root);
+  console.log(`agent-flow documents synced root=${root}`);
+}
+
+function installProjectUnlocked(root, context) {
+  const agentFlowDir = path.join(root, ".agent-flow");
   const profile = detectProfile(root);
   let installSelection = resolveInstallSelection({ args: installArgs, detectedProfile: profile, kitRoot: KIT_ROOT, projectRoot: root });
   const existingPayload = readExistingKit(agentFlowDir);
-  const previousSkillIndex = readJsonIfExists(path.join(agentFlowDir, "skills", "index.json"));
+  const previousIndexRecord = readAuthenticatedSkillIndex(agentFlowDir, existingPayload);
+  holdInstallForTest("AGENT_FLOW_TEST_HOLD_AFTER_INDEX_AUTH_MS", "index-authenticated");
+  const previousSkillIndex = previousIndexRecord?.payload || null;
   installSelection = mergeInstallSelectionWithPrevious(installSelection, previousSkillIndex, KIT_ROOT, root);
+  const activeHost = detectActiveHost(process.env);
+  const automaticSkillNames = discoverAutomaticExternalSkillNames({
+    home: HOME,
+    activeHost,
+    env: process.env,
+    previousIndex: previousSkillIndex,
+  });
+  const sourceNames = new Set([
+    ...automaticSkillNames,
+    ...(installSelection.explicitSkills || []),
+  ]);
+  const skillSourcePlan = resolveProfileSkillSources({
+    skillNames: sourceNames,
+    kitRoot: KIT_ROOT,
+    projectRoot: root,
+    projectSkillsRoot: path.join(agentFlowDir, "skills"),
+    home: HOME,
+    activeHost,
+    env: process.env,
+    previousIndex: previousSkillIndex,
+    automaticSkillNames,
+    explicitSkillNames: installSelection.explicitSkills,
+  });
+  for (const name of installSelection.explicitSkills || []) {
+    if (skillSourcePlan.missing.includes(name)) throw new Error(`explicit skill not found: ${name}`);
+  }
+  installSelection = mergeResolvedSkillClosure(installSelection, skillSourcePlan);
+  context.transaction = beginSkillInstallTransaction(root, agentFlowDir, previousIndexRecord);
   const phases = fullFeaturePhases();
 
-  for (const name of ["runs", "state", "handoffs", "team", "worktrees", "workflows", "skills", "templates", "prompts", "rules", "bootstrap"]) {
+  for (const name of ["runs", "state", "handoffs", "team", "worktrees", "skills"]) {
     fs.mkdirSync(path.join(agentFlowDir, name), { recursive: true });
   }
   fs.mkdirSync(path.join(agentFlowDir, "local-skills"), { recursive: true });
@@ -137,6 +208,7 @@ function installProject() {
     install_scope: "project",
     profile,
     profiles: installSelection.profiles,
+    profile_selection: installSelection.profileSelection || "auto",
     selected_skills: installSelection.skillNames ? [...installSelection.skillNames].sort() : "all",
     root: ".",
     installed_at: existingPayload?.installed_at || new Date().toISOString(),
@@ -171,12 +243,29 @@ function installProject() {
     PROFILE_MANAGED_HOST_ONLY_SKILLS,
     true,
     forceManaged,
-    new Set(["index.json", ...GENERATED_PROJECT_SKILL_NAMES]),
+    new Set(["index.json", ".agent-flow-transaction-owner", ...GENERATED_PROJECT_SKILL_NAMES]),
     installSelection.copyRootNames,
   );
+  materializeResolvedSkillSources(agentFlowDir, skillSourcePlan, context.transaction);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "profiles"), path.join(agentFlowDir, "profiles"), forceManaged);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "templates"), path.join(agentFlowDir, "templates"), forceManaged, new Set(), true, forceManaged);
-  const skillIndex = installProjectSkills(root, agentFlowDir, previousSkillIndex, forceManaged, installSelection);
+  const skillIndex = installProjectSkills(
+    root,
+    agentFlowDir,
+    previousSkillIndex,
+    forceManaged,
+    installSelection,
+    skillSourcePlan,
+    context.transaction,
+  );
+  preserveUnmanagedSkillEntries(context.transaction, previousSkillIndex, skillIndex);
+  if (process.env.AGENT_FLOW_TEST_CRASH_AFTER_SKILL_INDEX === "1") {
+    sealManagedInstallMutations(context.transaction);
+    process.exit(87);
+  }
+  if (process.env.AGENT_FLOW_TEST_FAIL_AFTER_SKILL_INDEX === "1") {
+    throw new Error("injected failure after skill index");
+  }
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "scripts"), path.join(agentFlowDir, "scripts"), forceManaged);
   removeStaleContextDocsScripts(agentFlowDir, forceManaged);
   copyBundledDirIfMissingOrSame(
@@ -251,7 +340,26 @@ function installProject() {
     warnings: skillIndex.warnings.length,
   };
 
-  fs.writeFileSync(path.join(agentFlowDir, "kit.json"), `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  const indexBytes = fs.readFileSync(path.join(agentFlowDir, "skills", "index.json"));
+  payload.skill_index_hash_version = 1;
+  payload.skill_index_hash = crypto.createHash("sha256").update(indexBytes).digest("hex");
+  payload.skill_plan_hash_version = 2;
+  payload.skill_plan_hash = computeSkillPlanHash(skillIndex, root, true);
+  payload.skill_links_commitment_version = SKILL_LINKS_COMMITMENT_VERSION;
+  payload.skill_links_commitment = skillLinksCommitment(payload.skill_plan_hash, skillIndex.links);
+  payload.managed_host_files = managedHostFileManifest(root);
+  payload.managed_host_files_commitment_version = MANAGED_HOST_FILES_COMMITMENT_VERSION;
+  payload.managed_host_files_commitment = managedHostFilesCommitment(payload);
+  payload.managed_hook_contract = managedHookContract(root);
+  payload.managed_hook_contract_commitment_version = MANAGED_HOOK_CONTRACT_COMMITMENT_VERSION;
+  payload.managed_hook_contract_commitment = managedHookContractCommitment(payload);
+
+  writeManagedFile(path.join(agentFlowDir, "kit.json"), `${JSON.stringify(payload, null, 2)}\n`);
+  sealManagedInstallMutations(context.transaction);
+  holdInstallForTest("AGENT_FLOW_TEST_HOLD_AFTER_MANAGED_INSTALL_SEAL_MS", "managed-install-sealed");
+  if (process.env.AGENT_FLOW_TEST_FAIL_AFTER_MANAGED_INSTALL === "1") {
+    throw new Error("injected failure after managed install");
+  }
   console.log(`agent-flow installed profile=${profile}`);
 }
 
@@ -1395,25 +1503,30 @@ function writeFileIfMissing(pathName, content) {
 }
 
 function writeManagedFile(pathName, content) {
-  fs.mkdirSync(path.dirname(pathName), { recursive: true });
-  fs.writeFileSync(pathName, content, "utf8");
+  withManagedInstallMutation(pathName, () => {
+    fs.mkdirSync(path.dirname(pathName), { recursive: true });
+    fs.writeFileSync(pathName, content, "utf8");
+  });
 }
 
-function writeManagedFileIfMissingOrSame(pathName, content, force = false) {
-  fs.mkdirSync(path.dirname(pathName), { recursive: true });
-  if (fs.existsSync(pathName)) {
-    const current = fs.readFileSync(pathName, "utf8");
-    if (force) {
-      fs.writeFileSync(pathName, content, "utf8");
+function writeManagedFileIfMissingOrSame(pathName, content, force = false, track = true) {
+  const write = () => {
+    fs.mkdirSync(path.dirname(pathName), { recursive: true });
+    if (fs.existsSync(pathName)) {
+      const current = fs.readFileSync(pathName, "utf8");
+      if (force) {
+        fs.writeFileSync(pathName, content, "utf8");
+        return true;
+      }
+      if (current !== content) {
+        return false;
+      }
       return true;
     }
-    if (current !== content) {
-      return false;
-    }
+    fs.writeFileSync(pathName, content, "utf8");
     return true;
-  }
-  fs.writeFileSync(pathName, content, "utf8");
-  return true;
+  };
+  return track ? withManagedInstallMutation(pathName, write) : write();
 }
 
 function copyBundledDirIfMissingOrSame(
@@ -1429,37 +1542,41 @@ function copyBundledDirIfMissingOrSame(
   if (!fs.existsSync(src)) {
     return;
   }
-  fs.mkdirSync(dest, { recursive: true });
-  const sourceNames = new Set();
-  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
-    sourceNames.add(entry.name);
-    const srcPath = path.join(src, entry.name);
-    const destPath = path.join(dest, entry.name);
-    if (entry.isDirectory()) {
-      if (isRoot && allowedRootDirs && !allowedRootDirs.has(entry.name)) {
-        removeManagedDirIfSame(srcPath, destPath, force);
+  const copy = () => {
+    fs.mkdirSync(dest, { recursive: true });
+    const sourceNames = new Set();
+    for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+      sourceNames.add(entry.name);
+      const srcPath = path.join(src, entry.name);
+      const destPath = path.join(dest, entry.name);
+      if (entry.isDirectory()) {
+        if (isRoot && allowedRootDirs && !allowedRootDirs.has(entry.name)) {
+          removeManagedDirIfSame(srcPath, destPath, force);
+          continue;
+        }
+        if (isRoot && excludedRootDirs.has(entry.name)) {
+          removeManagedDirIfSame(srcPath, destPath, force);
+          continue;
+        }
+        copyBundledDirIfMissingOrSame(srcPath, destPath, force, excludedRootDirs, false, pruneExtraneous, preservedExtraneousRootNames, null);
         continue;
       }
-      if (isRoot && excludedRootDirs.has(entry.name)) {
-        removeManagedDirIfSame(srcPath, destPath, force);
+      if (!entry.isFile()) {
         continue;
       }
-      copyBundledDirIfMissingOrSame(srcPath, destPath, force, excludedRootDirs, false, pruneExtraneous, preservedExtraneousRootNames, null);
-      continue;
+      const content = fs.readFileSync(srcPath, "utf8");
+      writeManagedFileIfMissingOrSame(destPath, content, force, false);
     }
-    if (!entry.isFile()) {
-      continue;
-    }
-    const content = fs.readFileSync(srcPath, "utf8");
-    writeManagedFileIfMissingOrSame(destPath, content, force);
-  }
-  if (force && pruneExtraneous) {
-    for (const entry of fs.readdirSync(dest, { withFileTypes: true })) {
-      if (!sourceNames.has(entry.name) && !(isRoot && preservedExtraneousRootNames.has(entry.name))) {
-        fs.rmSync(path.join(dest, entry.name), { recursive: true, force: true });
+    if (force && pruneExtraneous) {
+      for (const entry of fs.readdirSync(dest, { withFileTypes: true })) {
+        if (!sourceNames.has(entry.name) && !(isRoot && preservedExtraneousRootNames.has(entry.name))) {
+          fs.rmSync(path.join(dest, entry.name), { recursive: true, force: true });
+        }
       }
     }
-  }
+  };
+  if (isRoot) withManagedInstallMutation(dest, copy);
+  else copy();
 }
 
 function removeManagedDirIfSame(src, dest, force = false) {
@@ -1476,9 +1593,11 @@ function removeStaleContextDocsScripts(agentFlowDir, force = false) {
   if (!force) {
     return;
   }
-  for (const filename of ["check-context-docs.mjs", "check-context-docs.ts"]) {
-    fs.rmSync(path.join(agentFlowDir, "scripts", filename), { force: true });
-  }
+  withManagedInstallMutation(path.join(agentFlowDir, "scripts"), () => {
+    for (const filename of ["check-context-docs.mjs", "check-context-docs.ts"]) {
+      fs.rmSync(path.join(agentFlowDir, "scripts", filename), { force: true });
+    }
+  });
 }
 
 function dirContentsMatch(src, dest) {
@@ -1511,8 +1630,47 @@ function dirContentsMatch(src, dest) {
   return true;
 }
 
-function installProjectSkills(root, agentFlowDir, previousIndex, force = false, installSelection = null) {
-  const selected = selectProjectSkills(root, agentFlowDir, installSelection);
+function materializeResolvedSkillSources(agentFlowDir, sourcePlan, transaction = null) {
+  for (const entry of sourcePlan?.entries || []) {
+    if (!["host-bootstrap", "shared"].includes(entry.source_kind)) continue;
+    const destination = path.join(agentFlowDir, "skills", entry.name);
+    let sourcePath = entry.source_path;
+    if (samePath(sourcePath, destination)) {
+      const backupSource = transaction ? path.join(transaction.backup, entry.name) : null;
+      if (!backupSource || !fs.existsSync(backupSource)) continue;
+      sourcePath = backupSource;
+    }
+    const stage = path.join(
+      agentFlowDir,
+      "skills",
+      `.agent-flow-stage-${entry.name}-${process.pid}-${crypto.randomBytes(6).toString("hex")}`,
+    );
+    try {
+      fs.cpSync(sourcePath, stage, { recursive: true, dereference: false, errorOnExist: true });
+      if (hashSkillTree(stage) !== entry.tree_hash) {
+        throw new Error(`skill source changed while copying: ${entry.name}`);
+      }
+      if (fs.existsSync(destination)) fs.rmSync(destination, { recursive: true, force: true });
+      fs.renameSync(stage, destination);
+      if (hashSkillTree(destination) !== entry.tree_hash) {
+        throw new Error(`installed skill snapshot integrity mismatch: ${entry.name}`);
+      }
+    } finally {
+      if (fs.existsSync(stage)) fs.rmSync(stage, { recursive: true, force: true });
+    }
+  }
+}
+
+function installProjectSkills(
+  root,
+  agentFlowDir,
+  previousIndex,
+  force = false,
+  installSelection = null,
+  sourcePlan = null,
+  transaction = null,
+) {
+  const selected = selectProjectSkills(root, agentFlowDir, installSelection, sourcePlan);
   const links = [];
   for (const skill of selected.skills) {
     // bundled skill 중 host 디렉토리 link 대상은 BUNDLED_HOST_SKILL_NAMES뿐이다.
@@ -1521,11 +1679,12 @@ function installProjectSkills(root, agentFlowDir, previousIndex, force = false, 
       continue;
     }
     for (const host of skill.hosts) {
-      links.push(linkProjectSkill(root, skill, host, previousIndex, force));
+      links.push(linkProjectSkill(root, skill, host, previousIndex, force, transaction));
     }
   }
-  links.push(...removeStaleProjectSkillLinks(root, selected.skills, previousIndex, force));
+  links.push(...removeStaleProjectSkillLinks(root, selected.skills, previousIndex, force, transaction));
   const index = { ...selected, links };
+  index.catalog_fingerprint = skillCatalogFingerprint(root, HOME, detectActiveHost(process.env), process.env);
   fs.writeFileSync(
     path.join(agentFlowDir, "skills", "index.json"),
     `${JSON.stringify(index, null, 2)}\n`,
@@ -1534,7 +1693,789 @@ function installProjectSkills(root, agentFlowDir, previousIndex, force = false, 
   return index;
 }
 
-function selectProjectSkills(root, agentFlowDir, installSelection = null) {
+function refreshSkillCatalogAtBoundary(root) {
+  if (!root) return;
+  const leaderRoot = resolveManagedWorktreeRoot(root) || root;
+  const indexPath = path.join(leaderRoot, ".agent-flow", "skills", "index.json");
+  const index = readJsonIfExists(indexPath);
+  if (!index?.catalog_fingerprint) return;
+  const current = skillCatalogFingerprint(leaderRoot, HOME, detectActiveHost(process.env), process.env);
+  if (current === index.catalog_fingerprint) return;
+  installProject(leaderRoot);
+}
+
+function acquireProjectInstallLock(root, agentFlowDir) {
+  const lockPath = path.join(agentFlowDir, "install.lock");
+  if (fs.existsSync(lockPath)) {
+    const ownerPath = path.join(lockPath, "owner.json");
+    const owner = readJsonIfExists(ownerPath);
+    const validOwner = owner?.version === 1
+      && owner.root === fs.realpathSync(root)
+      && Number.isInteger(owner.pid)
+      && typeof owner.token === "string";
+    if (!validOwner || processIsAlive(owner.pid)) {
+      throw new Error(`project install lock is held: ${lockPath}`);
+    }
+    fs.rmSync(lockPath, { recursive: true, force: true });
+  }
+  fs.mkdirSync(lockPath);
+  const lock = {
+    version: 1,
+    root: fs.realpathSync(root),
+    pid: process.pid,
+    token: crypto.randomBytes(24).toString("hex"),
+    acquired_at: new Date().toISOString(),
+  };
+  fs.writeFileSync(path.join(lockPath, "owner.json"), `${JSON.stringify(lock, null, 2)}\n`, { flag: "wx" });
+  return { ...lock, path: lockPath };
+}
+
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code !== "ESRCH";
+  }
+}
+
+function holdInstallForTest(name, marker) {
+  const milliseconds = Number.parseInt(process.env[name] || "0", 10);
+  if (!Number.isInteger(milliseconds) || milliseconds <= 0 || milliseconds > 10_000) return;
+  process.stderr.write(`agent-flow:test-${marker}\n`);
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+function releaseProjectInstallLock(lock) {
+  if (!lock || !fs.existsSync(lock.path)) return;
+  const owner = readJsonIfExists(path.join(lock.path, "owner.json"));
+  if (owner?.token !== lock.token || owner?.pid !== process.pid) {
+    throw new Error(`project install lock ownership changed: ${lock.path}`);
+  }
+  fs.rmSync(lock.path, { recursive: true, force: true });
+}
+
+function readAuthenticatedSkillIndex(agentFlowDir, existingKit = null) {
+  const indexPath = path.join(agentFlowDir, "skills", "index.json");
+  if (!fs.existsSync(indexPath)) return null;
+  const noFollow = fs.constants.O_NOFOLLOW || 0;
+  const descriptor = fs.openSync(indexPath, fs.constants.O_RDONLY | noFollow);
+  try {
+    const before = fs.fstatSync(descriptor);
+    if (!before.isFile() || before.nlink !== 1) throw new Error(`invalid previous skill index file: ${indexPath}`);
+    const bytes = fs.readFileSync(descriptor);
+    const after = fs.fstatSync(descriptor);
+    if (
+      before.dev !== after.dev
+      || before.ino !== after.ino
+      || before.size !== after.size
+      || before.mtimeMs !== after.mtimeMs
+    ) throw new Error(`previous skill index changed during authentication: ${indexPath}`);
+    let payload;
+    try {
+      payload = JSON.parse(bytes.toString("utf8"));
+    } catch {
+      throw new Error(`invalid previous skill index JSON: ${indexPath}`);
+    }
+    if (!Array.isArray(payload?.skills) || !Array.isArray(payload?.links)) {
+      throw new Error(`unsupported previous skill index: ${indexPath}`);
+    }
+    if (payload.version === undefined) payload = { version: 1, selection: {}, ...payload };
+    if (![1, 2].includes(payload.version)) throw new Error(`unsupported previous skill index: ${indexPath}`);
+    const hasIndexCommitment = existingKit?.skill_index_hash_version === 1
+      && typeof existingKit?.skill_index_hash === "string";
+    if (hasIndexCommitment) {
+      const indexHash = crypto.createHash("sha256").update(bytes).digest("hex");
+      if (indexHash !== existingKit.skill_index_hash) {
+        throw new Error("previous skill index does not match kit commitment");
+      }
+      if (
+        existingKit.skill_plan_hash_version !== 2
+        || computeSkillPlanHash(payload, path.dirname(agentFlowDir), false) !== existingKit.skill_plan_hash
+      ) {
+        throw new Error("previous skill plan does not match kit commitment");
+      }
+      if (
+        existingKit.skill_links_commitment_version !== SKILL_LINKS_COMMITMENT_VERSION
+        || skillLinksCommitment(existingKit.skill_plan_hash, payload.links)
+          !== existingKit.skill_links_commitment
+      ) {
+        throw new Error("previous skill links do not match kit commitment");
+      }
+    } else {
+      payload = { ...payload, links: [] };
+    }
+    return {
+      payload,
+      bytes,
+      hash: crypto.createHash("sha256").update(bytes).digest("hex"),
+      identity: { dev: before.dev, ino: before.ino, size: before.size, mtimeMs: before.mtimeMs },
+    };
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function beginSkillInstallTransaction(root, agentFlowDir, previousIndexRecord) {
+  const transactionRoot = path.join(agentFlowDir, "install-transaction");
+  if (fs.existsSync(transactionRoot)) throw new Error(`open skill install transaction: ${transactionRoot}`);
+  const live = path.join(agentFlowDir, "skills");
+  if (fs.existsSync(live) && !previousIndexRecord) {
+    throw new Error("existing skills directory has no authenticated index");
+  }
+  fs.mkdirSync(transactionRoot);
+  const backup = path.join(transactionRoot, "skills-backup");
+  const marker = path.join(live, ".agent-flow-transaction-owner");
+  const journalPath = path.join(transactionRoot, "journal.json");
+  const transaction = {
+    root,
+    transactionRoot,
+    live,
+    backup,
+    marker,
+    journalPath,
+    token: crypto.randomBytes(24).toString("hex"),
+    previous: previousIndexRecord,
+  };
+  const journal = {
+    version: 2,
+    root: fs.realpathSync(root),
+    token: transaction.token,
+    stage: "prepared",
+    previous_index_hash: previousIndexRecord?.hash || null,
+    previous_index_bytes: previousIndexRecord?.bytes.toString("base64") || null,
+    had_live_skills: fs.existsSync(live),
+    host_mutations: [],
+    managed_mutations: [],
+  };
+  writeInstallJournal(journalPath, journal);
+  if (journal.had_live_skills) {
+    if (!previousIndexRecord) {
+      throw new Error("existing skills directory has no authenticated index");
+    }
+    journal.stage = "moving-skills";
+    writeInstallJournal(journalPath, journal);
+    fs.renameSync(live, backup);
+    if (process.env.AGENT_FLOW_TEST_CRASH_AFTER_SKILLS_RENAME === "1") process.exit(88);
+    journal.stage = "skills-moved";
+    writeInstallJournal(journalPath, journal);
+    if (process.env.AGENT_FLOW_TEST_CRASH_AFTER_SKILLS_MOVE === "1") process.exit(86);
+    const backupIndex = fs.readFileSync(path.join(backup, "index.json"));
+    const backupHash = crypto.createHash("sha256").update(backupIndex).digest("hex");
+    if (backupHash !== previousIndexRecord.hash || !backupIndex.equals(previousIndexRecord.bytes)) {
+      throw new Error("previous skill index changed after authentication; backup was not adopted");
+    }
+  }
+  fs.mkdirSync(live, { recursive: true });
+  fs.writeFileSync(marker, `${transaction.token}\n`, { flag: "wx" });
+  journal.stage = "live-created";
+  writeInstallJournal(journalPath, journal);
+  holdInstallForTest("AGENT_FLOW_TEST_HOLD_INSTALL_LOCK_MS", "install-lock-held");
+  transaction.journal = journal;
+  snapshotManagedInstallPaths(transaction);
+  activeManagedInstallTransaction = transaction;
+  return transaction;
+}
+
+function writeInstallJournal(journalPath, journal) {
+  const temporary = `${journalPath}.tmp-${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
+  fs.writeFileSync(temporary, `${JSON.stringify(journal, null, 2)}\n`, { flag: "wx" });
+  fs.renameSync(temporary, journalPath);
+}
+
+function hostPathState(pathName) {
+  const stat = lstatIfExists(pathName);
+  if (!stat) return { kind: "absent" };
+  if (stat.isSymbolicLink()) return { kind: "symlink", target: fs.readlinkSync(pathName) };
+  if (stat.isDirectory()) return { kind: "directory", tree_hash: hashSkillTree(pathName) };
+  if (stat.isFile()) {
+    return {
+      kind: "file",
+      file_hash: crypto.createHash("sha256").update(fs.readFileSync(pathName)).digest("hex"),
+    };
+  }
+  throw new Error(`unsupported host skill path kind: ${pathName}`);
+}
+
+function sameHostPathState(left, right) {
+  if (!left || !right || left.kind !== right.kind) return false;
+  if (left.kind === "symlink") return left.target === right.target;
+  if (left.kind === "directory") return left.tree_hash === right.tree_hash;
+  if (left.kind === "file") return left.file_hash === right.file_hash;
+  return left.kind === "absent";
+}
+
+function withHostPathMutation(transaction, target, allowedAfter, callback) {
+  if (!transaction) return callback();
+  ensureChildPath(transaction.root, target);
+  const relative = path.relative(transaction.root, target);
+  const before = hostPathState(target);
+  const operationId = transaction.journal.host_mutations.length;
+  if (["directory", "file"].includes(before.kind)) {
+    const backupRelative = path.join("host-backups", String(operationId));
+    const backupPath = path.join(transaction.transactionRoot, backupRelative);
+    fs.mkdirSync(path.dirname(backupPath), { recursive: true });
+    fs.cpSync(target, backupPath, { recursive: true, dereference: false, errorOnExist: true });
+    if (!sameHostPathState(before, hostPathState(backupPath))) {
+      throw new Error(`host skill backup integrity mismatch: ${relative}`);
+    }
+    before.backup = backupRelative;
+  }
+  const operation = {
+    path: relative,
+    before,
+    allowed_after: allowedAfter,
+    after: null,
+  };
+  transaction.journal.host_mutations.push(operation);
+  writeInstallJournal(transaction.journalPath, transaction.journal);
+  let result;
+  let callbackError = null;
+  try {
+    result = callback();
+  } catch (error) {
+    callbackError = error;
+  }
+  operation.after = hostPathState(target);
+  writeInstallJournal(transaction.journalPath, transaction.journal);
+  if (callbackError) throw callbackError;
+  if (!allowedAfter.some((state) => sameHostPathState(state, operation.after))) {
+    throw new Error(`unexpected host skill mutation result: ${relative}`);
+  }
+  return result;
+}
+
+function hostMutationTarget(root, relative) {
+  if (typeof relative !== "string" || path.isAbsolute(relative)) {
+    throw new Error("invalid host skill mutation path");
+  }
+  const target = path.resolve(root, relative);
+  ensureChildPath(root, target);
+  return target;
+}
+
+function restoreHostPathState(target, state, transactionRoot) {
+  if (lstatIfExists(target)) fs.rmSync(target, { recursive: true, force: true });
+  if (state.kind === "absent") return;
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  if (state.kind === "symlink") {
+    fs.symlinkSync(state.target, target, "dir");
+    return;
+  }
+  if (!["directory", "file"].includes(state.kind) || typeof state.backup !== "string") {
+    throw new Error(`invalid host skill backup state: ${target}`);
+  }
+  const backupPath = path.resolve(transactionRoot, state.backup);
+  ensureChildPath(transactionRoot, backupPath);
+  if (!sameHostPathState(state, hostPathState(backupPath))) {
+    throw new Error(`host skill backup authentication failed: ${target}`);
+  }
+  fs.cpSync(backupPath, target, { recursive: true, dereference: false, errorOnExist: true });
+}
+
+function rollbackRecordedHostMutations(root, transactionRoot, journal) {
+  const operations = Array.isArray(journal?.host_mutations) ? journal.host_mutations : [];
+  for (let index = operations.length - 1; index >= 0; index -= 1) {
+    const operation = operations[index];
+    const target = hostMutationTarget(root, operation.path);
+    const current = hostPathState(target);
+    if (sameHostPathState(current, operation.before)) {
+      operation.rolled_back = true;
+      continue;
+    }
+    const committedByTransaction = operation.after
+      ? sameHostPathState(current, operation.after)
+      : (operation.allowed_after || []).some((state) => sameHostPathState(current, state));
+    if (!committedByTransaction) {
+      throw new Error(`host skill path changed outside install transaction: ${operation.path}`);
+    }
+    restoreHostPathState(target, operation.before, transactionRoot);
+    if (!sameHostPathState(hostPathState(target), operation.before)) {
+      throw new Error(`host skill rollback integrity mismatch: ${operation.path}`);
+    }
+    operation.rolled_back = true;
+  }
+  if (fs.existsSync(transactionRoot)) {
+    writeInstallJournal(path.join(transactionRoot, "journal.json"), journal);
+  }
+}
+
+function verifyCommittedHostMutations(root, journal) {
+  for (const operation of journal?.host_mutations || []) {
+    if (!operation.after) throw new Error(`incomplete host skill mutation: ${operation.path}`);
+    const target = hostMutationTarget(root, operation.path);
+    if (!sameHostPathState(hostPathState(target), operation.after)) {
+      throw new Error(`host skill mutation commitment changed: ${operation.path}`);
+    }
+  }
+}
+
+function managedInstallPaths(root) {
+  const agentFlowDir = path.join(root, ".agent-flow");
+  return [
+    ...["workflows", "profiles", "templates", "scripts", "prompts", "rules", "bootstrap"]
+      .map((name) => path.join(agentFlowDir, name)),
+    path.join(root, RUNTIME_PYTHON_RELATIVE, "agent_flow"),
+    path.join(agentFlowDir, "kit.json"),
+    path.join(root, "scripts"),
+    path.join(root, ".Codex", "agents"),
+    path.join(root, ".claude", "agents"),
+    path.join(root, ".omp", "agents"),
+    path.join(root, ".Codex", "rules", "context"),
+    path.join(root, ".Codex", "context"),
+    path.join(root, ".Codex", "rules", "codebase-rubric.md"),
+    path.join(root, ".Codex", "rules", "concise-output.md"),
+    path.join(root, ".Codex", "hooks.json"),
+    path.join(root, ".codex", "hooks.json"),
+    path.join(root, ".claude", "settings.json"),
+    path.join(root, ".omp", "extensions", "agent-flow-hooks.ts"),
+    path.join(root, ".gitignore"),
+    path.join(root, "AGENTS.md"),
+    path.join(root, "CLAUDE.md"),
+  ];
+}
+
+function managedPathState(pathName) {
+  const stat = lstatIfExists(pathName);
+  if (!stat) return { kind: "absent" };
+  if (stat.isSymbolicLink()) {
+    return { kind: "symlink", target: fs.readlinkSync(pathName) };
+  }
+  if (stat.isFile()) {
+    return {
+      kind: "file",
+      mode: stat.mode & 0o777,
+      hash: crypto.createHash("sha256").update(fs.readFileSync(pathName)).digest("hex"),
+    };
+  }
+  if (!stat.isDirectory()) throw new Error(`unsupported managed install path kind: ${pathName}`);
+  const entries = [];
+  const visit = (current, relative) => {
+    const currentStat = fs.lstatSync(current);
+    entries.push({ path: relative, kind: "directory", mode: currentStat.mode & 0o777 });
+    for (const name of fs.readdirSync(current).sort()) {
+      const child = path.join(current, name);
+      const childRelative = relative ? `${relative}/${name}` : name;
+      const childStat = fs.lstatSync(child);
+      if (childStat.isSymbolicLink()) {
+        entries.push({ path: childRelative, kind: "symlink", target: fs.readlinkSync(child) });
+      } else if (childStat.isDirectory()) {
+        visit(child, childRelative);
+      } else if (childStat.isFile()) {
+        entries.push({
+          path: childRelative,
+          kind: "file",
+          mode: childStat.mode & 0o777,
+          hash: crypto.createHash("sha256").update(fs.readFileSync(child)).digest("hex"),
+        });
+      } else {
+        throw new Error(`unsupported managed install tree entry: ${child}`);
+      }
+    }
+  };
+  visit(pathName, "");
+  return {
+    kind: "directory",
+    commitment: crypto.createHash("sha256").update(JSON.stringify(entries)).digest("hex"),
+  };
+}
+
+function sameManagedPathState(left, right) {
+  if (!left || !right || left.kind !== right.kind) return false;
+  if (left.kind === "symlink") return left.target === right.target;
+  if (left.kind === "file") return left.mode === right.mode && left.hash === right.hash;
+  if (left.kind === "directory") return left.commitment === right.commitment;
+  return left.kind === "absent";
+}
+
+function managedInstallMutationOperation(transaction, requestedPath) {
+  if (!transaction?.journal) return null;
+  const requested = path.resolve(requestedPath);
+  const caseInsensitive = process.platform === "darwin" || process.platform === "win32";
+  const matches = (transaction.journal.managed_mutations || []).filter((operation) => {
+    const target = path.resolve(transaction.root, operation.path);
+    if (caseInsensitive) {
+      const foldedTarget = target.toLowerCase();
+      const foldedRequested = requested.toLowerCase();
+      return foldedRequested === foldedTarget || foldedRequested.startsWith(`${foldedTarget}${path.sep}`);
+    }
+    const relative = path.relative(target, requested);
+    return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  });
+  matches.sort((left, right) => right.path.length - left.path.length);
+  return matches[0] ?? null;
+}
+
+function withManagedInstallMutation(pathName, callback) {
+  const transaction = activeManagedInstallTransaction;
+  const operation = managedInstallMutationOperation(transaction, pathName);
+  if (!operation) return callback();
+  const target = path.resolve(transaction.root, operation.path);
+  const expected = operation.after ?? operation.before;
+  if (!sameManagedPathState(managedPathState(target), expected)) {
+    throw new Error(`managed install path changed outside transaction: ${operation.path}`);
+  }
+  const result = callback();
+  operation.after = managedPathState(target);
+  writeInstallJournal(transaction.journalPath, transaction.journal);
+  return result;
+}
+
+function snapshotManagedInstallPaths(transaction) {
+  for (const target of managedInstallPaths(transaction.root)) {
+    ensureChildPath(transaction.root, target);
+    const before = managedPathState(target);
+    const operation = {
+      path: path.relative(transaction.root, target),
+      before,
+      after: null,
+    };
+    if (["directory", "file"].includes(before.kind)) {
+      const backupRelative = path.join("managed-backups", String(transaction.journal.managed_mutations.length));
+      const backupPath = path.join(transaction.transactionRoot, backupRelative);
+      fs.mkdirSync(path.dirname(backupPath), { recursive: true });
+      fs.cpSync(target, backupPath, { recursive: true, dereference: false, errorOnExist: true });
+      if (!sameManagedPathState(before, managedPathState(backupPath))) {
+        throw new Error(`managed install backup integrity mismatch: ${operation.path}`);
+      }
+      before.backup = backupRelative;
+    }
+    transaction.journal.managed_mutations.push(operation);
+  }
+  writeInstallJournal(transaction.journalPath, transaction.journal);
+}
+
+function sealManagedInstallMutations(transaction) {
+  if (!transaction || !transaction.journal || !fs.existsSync(transaction.transactionRoot)) return;
+  for (const operation of transaction.journal.managed_mutations || []) {
+    const current = managedPathState(hostMutationTarget(transaction.root, operation.path));
+    if (operation.after && !sameManagedPathState(operation.after, current)) {
+      throw new Error(`managed install path changed outside transaction: ${operation.path}`);
+    }
+    operation.after = current;
+  }
+  writeInstallJournal(transaction.journalPath, transaction.journal);
+}
+
+function restoreManagedPathState(target, state, transactionRoot) {
+  if (lstatIfExists(target)) fs.rmSync(target, { recursive: true, force: true });
+  if (state.kind === "absent") return;
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  if (state.kind === "symlink") {
+    fs.symlinkSync(state.target, target);
+    return;
+  }
+  if (!["directory", "file"].includes(state.kind) || typeof state.backup !== "string") {
+    throw new Error(`invalid managed install backup state: ${target}`);
+  }
+  const backupPath = path.resolve(transactionRoot, state.backup);
+  ensureChildPath(transactionRoot, backupPath);
+  if (!sameManagedPathState(state, managedPathState(backupPath))) {
+    throw new Error(`managed install backup authentication failed: ${target}`);
+  }
+  fs.cpSync(backupPath, target, { recursive: true, dereference: false, errorOnExist: true });
+}
+
+function rollbackRecordedManagedMutations(root, transactionRoot, journal) {
+  const operations = Array.isArray(journal?.managed_mutations) ? journal.managed_mutations : [];
+  for (let index = operations.length - 1; index >= 0; index -= 1) {
+    const operation = operations[index];
+    const target = hostMutationTarget(root, operation.path);
+    const current = managedPathState(target);
+    if (sameManagedPathState(current, operation.before)) continue;
+    if (!operation.after || !sameManagedPathState(current, operation.after)) {
+      throw new Error(`managed install path changed outside transaction: ${operation.path}`);
+    }
+    restoreManagedPathState(target, operation.before, transactionRoot);
+    if (!sameManagedPathState(managedPathState(target), operation.before)) {
+      throw new Error(`managed install rollback integrity mismatch: ${operation.path}`);
+    }
+  }
+  if (fs.existsSync(transactionRoot)) {
+    writeInstallJournal(path.join(transactionRoot, "journal.json"), journal);
+  }
+}
+
+function verifyCommittedManagedMutations(root, journal) {
+  for (const operation of journal?.managed_mutations || []) {
+    if (!operation.after) throw new Error(`incomplete managed install mutation: ${operation.path}`);
+    const target = hostMutationTarget(root, operation.path);
+    if (!sameManagedPathState(managedPathState(target), operation.after)) {
+      throw new Error(`managed install commitment changed: ${operation.path}`);
+    }
+  }
+}
+
+function commitSkillInstallTransaction(transaction) {
+  if (!transaction) return;
+  sealManagedInstallMutations(transaction);
+  const indexPath = path.join(transaction.live, "index.json");
+  if (!fs.existsSync(indexPath)) throw new Error("skill install transaction produced no index");
+  const marker = fs.readFileSync(transaction.marker, "utf8").trim();
+  if (marker !== transaction.token) throw new Error("skill install transaction ownership changed");
+  verifyCommittedHostMutations(transaction.root, transaction.journal);
+  verifyCommittedManagedMutations(transaction.root, transaction.journal);
+  transaction.journal.stage = "committed";
+  transaction.journal.committed_index_hash = crypto.createHash("sha256")
+    .update(fs.readFileSync(indexPath))
+    .digest("hex");
+  writeInstallJournal(transaction.journalPath, transaction.journal);
+  fs.unlinkSync(transaction.marker);
+  fs.rmSync(transaction.transactionRoot, { recursive: true, force: true });
+  if (activeManagedInstallTransaction === transaction) activeManagedInstallTransaction = null;
+}
+
+function rollbackSkillInstallTransaction(transaction) {
+  if (!transaction || !fs.existsSync(transaction.transactionRoot)) return;
+  let hostRollbackError = null;
+  let managedRollbackError = null;
+  try {
+    rollbackRecordedManagedMutations(transaction.root, transaction.transactionRoot, transaction.journal);
+  } catch (error) {
+    managedRollbackError = error;
+  }
+  try {
+    rollbackRecordedHostMutations(transaction.root, transaction.transactionRoot, transaction.journal);
+  } catch (error) {
+    hostRollbackError = error;
+  }
+  const liveMarker = fs.existsSync(transaction.marker)
+    ? fs.readFileSync(transaction.marker, "utf8").trim()
+    : null;
+  if (fs.existsSync(transaction.live)) {
+    if (liveMarker !== transaction.token) {
+      throw new Error(`cannot roll back unowned live skills directory: ${transaction.live}`);
+    }
+    fs.rmSync(transaction.live, { recursive: true, force: true });
+  }
+  if (fs.existsSync(transaction.backup)) {
+    const backupIndex = fs.readFileSync(path.join(transaction.backup, "index.json"));
+    const hash = crypto.createHash("sha256").update(backupIndex).digest("hex");
+    if (hash !== transaction.previous?.hash || !backupIndex.equals(transaction.previous.bytes)) {
+      throw new Error("cannot restore unauthenticated skill index backup");
+    }
+    fs.renameSync(transaction.backup, transaction.live);
+  }
+  if (hostRollbackError || managedRollbackError) {
+    transaction.journal.stage = "rollback-blocked";
+    writeInstallJournal(transaction.journalPath, transaction.journal);
+    throw hostRollbackError || managedRollbackError;
+  }
+  fs.rmSync(transaction.transactionRoot, { recursive: true, force: true });
+  if (activeManagedInstallTransaction === transaction) activeManagedInstallTransaction = null;
+}
+
+function preserveUnmanagedSkillEntries(transaction, previousIndex, currentIndex) {
+  if (!transaction || !fs.existsSync(transaction.backup)) return;
+  const managed = new Set(["index.json"]);
+  for (const entry of fs.readdirSync(path.join(KIT_ROOT, "skills"), { withFileTypes: true })) {
+    if (!entry.isDirectory()) managed.add(entry.name);
+  }
+  for (const skill of previousIndex?.skills || []) {
+    const relative = String(skill?.path || "").replaceAll("\\", "/");
+    const prefix = ".agent-flow/skills/";
+    if (!relative.startsWith(prefix)) continue;
+    const rootName = relative.slice(prefix.length).split("/")[0];
+    if (rootName) managed.add(rootName);
+  }
+  for (const entry of fs.readdirSync(transaction.backup)) {
+    if (managed.has(entry) || entry === ".agent-flow-transaction-owner") continue;
+    const source = path.join(transaction.backup, entry);
+    const destination = path.join(transaction.live, entry);
+    if (lstatIfExists(destination)) {
+      throw new Error(`unmanaged skill entry conflicts with installed skill: ${entry}`);
+    }
+    fs.cpSync(source, destination, { recursive: true, dereference: false, errorOnExist: true });
+  }
+  const indexed = new Set((currentIndex?.skills || []).map((skill) => skill.name));
+  for (const entry of fs.readdirSync(transaction.live, { withFileTypes: true })) {
+    if (managed.has(entry.name) || indexed.has(entry.name) || entry.name.startsWith(".")) continue;
+    if (entry.isDirectory() && fs.existsSync(path.join(transaction.live, entry.name, "SKILL.md"))) {
+      currentIndex.warnings.push(`${entry.name}: preserved unmanaged skill entry without adopting ownership`);
+    }
+  }
+  fs.writeFileSync(
+    path.join(transaction.live, "index.json"),
+    `${JSON.stringify(currentIndex, null, 2)}\n`,
+    "utf8",
+  );
+}
+
+function recoverInterruptedSkillTransaction(root, agentFlowDir) {
+  const transactionRoot = path.join(agentFlowDir, "install-transaction");
+  if (!fs.existsSync(transactionRoot)) return;
+  const journalPath = path.join(transactionRoot, "journal.json");
+  const journal = readJsonIfExists(journalPath);
+  if (
+    ![1, 2].includes(journal?.version)
+    || journal.root !== fs.realpathSync(root)
+    || typeof journal.token !== "string"
+    || !["prepared", "moving-skills", "skills-moved", "live-created", "committed", "recovered", "rollback-blocked"].includes(journal.stage)
+  ) throw new Error(`invalid interrupted skill transaction: ${transactionRoot}`);
+  const live = path.join(agentFlowDir, "skills");
+  const backup = path.join(transactionRoot, "skills-backup");
+  const marker = path.join(live, ".agent-flow-transaction-owner");
+  if (journal.stage === "rollback-blocked") {
+    rollbackRecordedManagedMutations(root, transactionRoot, journal);
+    rollbackRecordedHostMutations(root, transactionRoot, journal);
+    if (!journal.had_live_skills) {
+      if (fs.existsSync(live)) {
+        throw new Error("blocked initial skill transaction unexpectedly has a live directory");
+      }
+      fs.rmSync(transactionRoot, { recursive: true, force: true });
+      return;
+    }
+    const authenticatedBytes = Buffer.from(String(journal.previous_index_bytes || ""), "base64");
+    const liveIndex = fs.readFileSync(path.join(live, "index.json"));
+    if (!liveIndex.equals(authenticatedBytes)) {
+      throw new Error("blocked skill transaction live index is not authenticated");
+    }
+    fs.rmSync(transactionRoot, { recursive: true, force: true });
+    return;
+  }
+  if (journal.stage === "committed") {
+    if (!fs.existsSync(path.join(live, "index.json"))) {
+      throw new Error("committed skill transaction has no live index");
+    }
+    verifyCommittedHostMutations(root, journal);
+    verifyCommittedManagedMutations(root, journal);
+    if (fs.existsSync(marker)) {
+      if (fs.readFileSync(marker, "utf8").trim() !== journal.token) {
+        throw new Error("committed skill transaction marker is not owned");
+      }
+      fs.unlinkSync(marker);
+    }
+    fs.rmSync(transactionRoot, { recursive: true, force: true });
+    return;
+  }
+  if (journal.stage === "prepared") {
+    if (
+      journal.had_live_skills
+      && !fs.existsSync(path.join(live, "index.json"))
+      && fs.existsSync(path.join(backup, "index.json"))
+    ) {
+      journal.stage = "skills-moved";
+    } else {
+      if (journal.had_live_skills && !fs.existsSync(path.join(live, "index.json"))) {
+        throw new Error("prepared skill transaction lost its live index");
+      }
+      fs.rmSync(transactionRoot, { recursive: true, force: true });
+      return;
+    }
+  }
+  if (journal.stage === "moving-skills") {
+    const liveExists = fs.existsSync(path.join(live, "index.json"));
+    const backupExists = fs.existsSync(path.join(backup, "index.json"));
+    if (liveExists && !backupExists) {
+      fs.rmSync(transactionRoot, { recursive: true, force: true });
+      return;
+    }
+    if (!liveExists && backupExists) {
+      journal.stage = "skills-moved";
+    } else {
+      throw new Error("interrupted skill move has ambiguous live and backup state");
+    }
+  }
+  if (!journal.had_live_skills) {
+    rollbackRecordedManagedMutations(root, transactionRoot, journal);
+    rollbackRecordedHostMutations(root, transactionRoot, journal);
+    if (fs.existsSync(live)) {
+      const liveToken = fs.existsSync(marker) ? fs.readFileSync(marker, "utf8").trim() : null;
+      if (liveToken !== journal.token) {
+        throw new Error("interrupted initial skill transaction live directory is not owned");
+      }
+      fs.rmSync(live, { recursive: true, force: true });
+    }
+    journal.stage = "recovered";
+    writeInstallJournal(journalPath, journal);
+    fs.rmSync(transactionRoot, { recursive: true, force: true });
+    return;
+  }
+  if (!fs.existsSync(backup) || typeof journal.previous_index_hash !== "string") {
+    throw new Error("interrupted skill transaction backup is incomplete");
+  }
+  rollbackRecordedManagedMutations(root, transactionRoot, journal);
+  rollbackRecordedHostMutations(root, transactionRoot, journal);
+  const backupIndex = fs.readFileSync(path.join(backup, "index.json"));
+  const authenticatedBytes = Buffer.from(String(journal.previous_index_bytes || ""), "base64");
+  const backupHash = crypto.createHash("sha256").update(backupIndex).digest("hex");
+  if (backupHash !== journal.previous_index_hash || !backupIndex.equals(authenticatedBytes)) {
+    throw new Error("interrupted skill transaction backup is not authenticated");
+  }
+  if (fs.existsSync(live)) {
+    const liveToken = fs.existsSync(marker) ? fs.readFileSync(marker, "utf8").trim() : null;
+    if (liveToken !== journal.token) {
+      throw new Error("interrupted skill transaction live directory is not owned");
+    }
+    fs.rmSync(live, { recursive: true, force: true });
+  }
+  fs.renameSync(backup, live);
+  const restored = fs.readFileSync(path.join(live, "index.json"));
+  if (!restored.equals(authenticatedBytes)) throw new Error("interrupted skill transaction restore mismatch");
+  journal.stage = "recovered";
+  writeInstallJournal(journalPath, journal);
+  fs.rmSync(transactionRoot, { recursive: true, force: true });
+}
+
+function skillCatalogFingerprint(root, home, activeHost, env) {
+  const resolvedHome = path.resolve(home || ".");
+  const configured = {
+    codex: configuredCatalogRoot(env.CODEX_HOME, resolvedHome, ".codex"),
+    claude: configuredCatalogRoot(env.CLAUDE_CONFIG_DIR, resolvedHome, ".claude"),
+    omp: configuredCatalogRoot(env.PI_CODING_AGENT_DIR, resolvedHome, path.join(".omp", "agent")),
+  };
+  const roots = [
+    ["project-local", path.join(root, ".agent-flow", "local-skills")],
+    ["project", samePath(root, KIT_ROOT) ? null : path.join(root, "skills")],
+    ["active-host", activeHost ? path.join(configured[activeHost], "skills") : null],
+    ["shared", path.join(resolvedHome, ".agents", "skills")],
+    ["bundled", path.join(KIT_ROOT, "skills")],
+  ];
+  const manifest = { active_host: activeHost, roots: [] };
+  for (const [source, catalogRoot] of roots) {
+    if (!catalogRoot) continue;
+    manifest.roots.push({ source, root: path.resolve(catalogRoot), entries: catalogTreeManifest(catalogRoot) });
+  }
+  return crypto.createHash("sha256").update(JSON.stringify(manifest)).digest("hex");
+}
+
+function configuredCatalogRoot(value, home, fallback) {
+  if (typeof value !== "string" || !value.trim()) return path.join(home, fallback);
+  if (value.trim() === "~") return home;
+  if (value.trim().startsWith("~/") || value.trim().startsWith("~\\")) {
+    return path.resolve(home, value.trim().slice(2));
+  }
+  return path.resolve(value.trim());
+}
+
+function catalogTreeManifest(root) {
+  const stat = lstatIfExists(root);
+  if (!stat) return [{ path: "", kind: "missing" }];
+  return catalogTreeEntries(root, root);
+}
+
+function catalogTreeEntries(root, current) {
+  const stat = fs.lstatSync(current);
+  const relative = path.relative(root, current).split(path.sep).join("/");
+  if (stat.isSymbolicLink()) {
+    return [{ path: relative, kind: "symlink", target: fs.readlinkSync(current) }];
+  }
+  if (stat.isFile()) {
+    return [{
+      path: relative,
+      kind: "file",
+      hash: crypto.createHash("sha256").update(fs.readFileSync(current)).digest("hex"),
+    }];
+  }
+  if (!stat.isDirectory()) return [{ path: relative, kind: "other", mode: stat.mode }];
+  const result = [{ path: relative, kind: "directory" }];
+  for (const entry of fs.readdirSync(current).sort()) {
+    result.push(...catalogTreeEntries(root, path.join(current, entry)));
+  }
+  return result;
+}
+
+function selectProjectSkills(root, agentFlowDir, installSelection = null, sourcePlan = null) {
   const discovered = [
     ...discoverSkills(path.join(agentFlowDir, "local-skills"), "local", root, PROFILE_MANAGED_HOST_ONLY_SKILLS),
     ...discoverProjectSkills(root),
@@ -1555,8 +2496,20 @@ function selectProjectSkills(root, agentFlowDir, installSelection = null) {
     warnings.push(...skill.warnings);
   }
   const allowed = installSelection?.skillNames || null;
+  const sourceByName = new Map((sourcePlan?.entries || []).map((entry) => [entry.name, entry]));
   const skills = [...byName.values()]
     .filter((skill) => !allowed || allowed.has(skill.name))
+    .map((skill) => {
+      const resolved = sourceByName.get(skill.name);
+      if (!resolved) return { ...skill, tree_hash: hashSkillTree(path.dirname(path.join(root, skill.path))) };
+      return {
+        ...skill,
+        source: resolved.source_kind,
+        source_host: resolved.source_host,
+        tree_hash: resolved.tree_hash,
+        activation: resolved.automatic_on_demand && !skill.activationDeclared ? "on-demand" : skill.activation,
+      };
+    })
     .sort((a, b) => a.name.localeCompare(b.name));
   warnings.push(...validateSkillDependencies(skills));
   const conflicts = [];
@@ -1569,14 +2522,41 @@ function selectProjectSkills(root, agentFlowDir, installSelection = null) {
       conflicts.push({ name: skill.name, selected: skill.path, ignored });
     }
   }
-  return {
-    version: 1,
-    selection: {
+  const selection = {
       mode: allowed ? "filtered" : "all",
+      profile_selection: installSelection?.profileSelection || "auto",
       profiles: installSelection?.profiles || [],
+      skill_profiles: installSelection?.skillProfiles || installSelection?.profiles || [],
       explicit_skills: installSelection?.explicitSkills || [],
+      external_exposure_skills: (sourcePlan?.entries || [])
+        .filter((entry) => entry.automatic_on_demand)
+        .map((entry) => entry.name)
+        .sort(),
+      required_review: installSelection?.requiredReview || {},
+      conditional_skills: installSelection?.conditionalSkills || {},
+      profile_routing: installSelection?.profileRouting || { version: 1, profiles: {}, escalations: {} },
+  };
+  const indexedSkills = skills.map(({ priority, warnings: _warnings, ...skill }) => skill);
+  const revision = crypto.createHash("sha256").update(JSON.stringify({
+    selection,
+    skills: indexedSkills.map((skill) => ({
+      name: skill.name,
+      source: skill.source,
+      tree_hash: skill.tree_hash,
+      activation: skill.activation || "on-demand",
+      workflowPhases: skill.workflowPhases,
+      taskTerms: skill.taskTerms,
+      pathGlobs: skill.pathGlobs,
+      requires: skill.requires,
+    })),
+  })).digest("hex");
+  return {
+    version: 2,
+    revision,
+    selection: {
+      ...selection,
     },
-    skills: skills.map(({ priority, warnings: _warnings, ...skill }) => skill),
+    skills: indexedSkills,
     conflicts,
     warnings,
   };
@@ -1787,6 +2767,10 @@ function discoverSkills(baseDir, source, root, ignoredNames = new Set(), allowed
       description: metadata.description,
       trigger: metadata.trigger,
       triggers: metadata.triggers,
+      activation: metadata.activation,
+      activationDeclared: metadata.activationDeclared,
+      taskTerms: metadata.taskTerms,
+      pathGlobs: metadata.pathGlobs,
       hash: crypto.createHash("sha256").update(text).digest("hex"),
       priority,
       warnings: metadata.warnings.map((message) => `${relativePath}: ${message}`),
@@ -1826,6 +2810,12 @@ function parseSkillMetadata(text, fallbackName) {
     tags: Array.isArray(metadata.tags) ? metadata.tags.map(String) : [],
     trigger: String(metadata.trigger || metadata.description || useWhen || ""),
     triggers: arrayValue(metadata.triggers),
+    activation: ["always", "conditional", "on-demand"].includes(String(metadata.activation))
+      ? String(metadata.activation)
+      : "on-demand",
+    activationDeclared: typeof metadata.activation === "string" && metadata.activation.length > 0,
+    taskTerms: arrayValue(metadata.taskTerms),
+    pathGlobs: arrayValue(metadata.pathGlobs),
     platforms: arrayValue(metadata.platforms),
     stacks: arrayValue(metadata.stacks),
     dependencies: uniqueStrings([...arrayValue(metadata.dependencies), ...arrayValue(metadata.requires)]),
@@ -2942,7 +3932,7 @@ function upsertGitignore(pathName, entries) {
   }
   const prefix = current.trimEnd();
   const next = `${prefix}${prefix ? "\n" : ""}${missing.join("\n")}\n`;
-  fs.writeFileSync(pathName, next, "utf8");
+  writeManagedFile(pathName, next);
 }
 
 function removeGitignoreEntries(pathName, entries) {
@@ -2953,7 +3943,7 @@ function removeGitignoreEntries(pathName, entries) {
   const filtered = lines.filter((line) => !removals.has(line.trim()));
   if (filtered.length === lines.length) return;
   const next = `${filtered.join("\n").replace(/\n*$/, "")}\n`;
-  fs.writeFileSync(pathName, next, "utf8");
+  writeManagedFile(pathName, next);
 }
 
 function removeLegacyProjectSkillCopies(projectRoot, skillName) {

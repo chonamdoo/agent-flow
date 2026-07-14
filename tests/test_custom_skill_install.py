@@ -113,6 +113,19 @@ def test_node_run_rejects_skill_index_tamper(tmp_path: Path) -> None:
     assert "commitment" in result.stderr
 
 
+def test_reinstall_commits_transaction_without_residue(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    first = _install(project)
+    second = _install(project)
+
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert not (project / ".agent-flow" / "install-transaction").exists()
+    assert not (project / ".agent-flow" / "install.lock").exists()
+    assert (project / ".agent-flow" / "skills" / "index.json").is_file()
+
+
 def test_pinned_workspace_write_guard_is_installed_for_all_hosts(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
