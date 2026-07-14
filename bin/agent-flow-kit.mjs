@@ -2530,7 +2530,7 @@ function unquoteShellWord(value) {
 
 function managedHookScriptName(command) {
   const normalized = unquoteShellWord(command).replaceAll("\\", "/").replaceAll("'", "").replaceAll('"', "");
-  for (const scriptName of ["guard-worktree.sh", "guard-protected-branch.sh", "show-phase-status.sh", "comment-checker.py"]) {
+  for (const scriptName of ["guard-worktree.sh", "guard-worktree-write.py", "guard-protected-branch.sh", "show-phase-status.sh", "comment-checker.py"]) {
     if (
       normalized === `.agent-flow/scripts/hooks/${scriptName}` ||
       normalized === `scripts/hooks/${scriptName}` ||
@@ -2548,7 +2548,7 @@ function managedHookScriptName(command) {
 function trustedManagedHookScriptName(root, command) {
   const normalized = unquoteShellWord(command).replaceAll("\\", "/");
   const normalizedRoot = path.resolve(root).replaceAll("\\", "/");
-  for (const scriptName of ["guard-worktree.sh", "guard-protected-branch.sh", "show-phase-status.sh", "comment-checker.py"]) {
+  for (const scriptName of ["guard-worktree.sh", "guard-worktree-write.py", "guard-protected-branch.sh", "show-phase-status.sh", "comment-checker.py"]) {
     if (normalized === `${normalizedRoot}/.agent-flow/scripts/hooks/${scriptName}`) {
       return scriptName;
     }
@@ -2566,6 +2566,10 @@ function codexHooksSettings(root) {
             { type: "command", command: hookScriptCommand(root, "guard-worktree.sh") },
             { type: "command", command: hookScriptCommand(root, "guard-protected-branch.sh") },
           ],
+        },
+        {
+          matcher: "^(apply_patch|Write|Edit|MultiEdit|NotebookEdit|Eval|Python|Notebook|write|edit|multi_edit|multiedit|notebook_edit|notebookedit|eval|python|notebook)$",
+          hooks: [{ type: "command", command: hookScriptCommand(root, "guard-worktree-write.py") }],
         },
       ],
       PostToolUse: [
@@ -2845,6 +2849,10 @@ function claudeHooksSettings(root) {
             { type: "command", command: hookScriptCommand(root, "guard-protected-branch.sh") },
           ],
         },
+        {
+          matcher: "^(apply_patch|Write|Edit|MultiEdit|NotebookEdit|Eval|Python|Notebook|write|edit|multi_edit|multiedit|notebook_edit|notebookedit|eval|python|notebook)$",
+          hooks: [{ type: "command", command: hookScriptCommand(root, "guard-worktree-write.py") }],
+        },
       ],
       PostToolUse: [
         {
@@ -2902,6 +2910,12 @@ export default function agentFlowHooks(pi) {
     }
   });
   pi.on("tool_call", async (event, ctx) => {
+    if (WRITE_TOOL_RE.test(String(event?.toolName || ""))) {
+      const result = await runHook("guard-worktree-write.py", hookPayload(event, ctx), ctx);
+      if (result.block) {
+        return { block: true, reason: result.reason };
+      }
+    }
     if (!isBashTool(event?.toolName)) {
       return;
     }
@@ -3177,7 +3191,7 @@ function makeHooksExecutable(root) {
     return;
   }
   for (const entry of fs.readdirSync(hooksDir)) {
-    if (entry.endsWith(".sh") || entry === "comment-checker.py") {
+    if (entry.endsWith(".sh") || entry === "comment-checker.py" || entry === "guard-worktree-write.py") {
       fs.chmodSync(path.join(hooksDir, entry), 0o755);
     }
   }

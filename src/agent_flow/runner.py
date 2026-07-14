@@ -48,6 +48,11 @@ from agent_flow.core.commands import run_safe_command
 from agent_flow.core.phase_workflow import find_kit_root, load_phase_workflow_definition
 from agent_flow.core.report import write_run_report
 from agent_flow.core.security import ensure_child_path, validate_safe_name
+from agent_flow.core.workspace_boundary import (
+    capture_workspace_identity,
+    validate_workspace_identity,
+    workspace_identity_from_dict,
+)
 from agent_flow.core.markers import has_failure_markers, missing_markers
 from agent_flow.core.local_skills import missing_local_skill_markers
 from agent_flow.memory.index import LoreIndex
@@ -139,6 +144,8 @@ class Runner:
             meta = read_meta(self.run_dir)
             print(f"▶ resuming    : {self.run_dir.name}")
             print(f"▶ task        : {meta.get('task', '')}")
+
+        self._pin_workspace_identity()
 
         adapter = detect_adapter()
         self._adapter_name = adapter.name
@@ -352,6 +359,23 @@ class Runner:
             reason="workflow_complete",
             report=report_path,
         )
+
+    def _pin_workspace_identity(self) -> None:
+        assert self.run_dir is not None
+        if not (self.project_root / ".git").exists():
+            return
+        meta = read_meta(self.run_dir)
+        payload = meta.get("workspace")
+        if payload is None:
+            meta["workspace"] = capture_workspace_identity(self.project_root).to_dict()
+            write_meta(self.run_dir, meta)
+            return
+        identity = workspace_identity_from_dict(payload)
+        root = validate_workspace_identity(identity)
+        if root != self.project_root.resolve(strict=True):
+            raise RuntimeError(
+                f"run workspace differs from pinned workspace: current={self.project_root} pinned={root}"
+            )
 
     def _next_index(self, current_index: int, phase: Phase) -> tuple[int, bool]:
         if not phase.routes:

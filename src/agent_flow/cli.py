@@ -36,6 +36,10 @@ from agent_flow.core.review import summarize_reviews, write_review_summary
 from agent_flow.core.report import write_run_report
 from agent_flow.core.query import explain_run, query_run
 from agent_flow.core.security import resolve_project_path
+from agent_flow.core.workspace_boundary import (
+    WorkspaceBoundaryError,
+    find_active_pinned_workspace,
+)
 from agent_flow.core.tool_lint import lint_tools
 from agent_flow.core.watch import write_watch_snapshot
 from agent_flow.core.team import (
@@ -411,7 +415,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     requested_root = Path(getattr(args, "root", ".")).resolve()
     root = requested_root
-    root, inferred_worktree = _resolve_cli_root_context(root, getattr(args, "worktree", None))
+    try:
+        root, inferred_worktree = _resolve_cli_root_context(root, getattr(args, "worktree", None))
+    except WorkspaceBoundaryError as exc:
+        print(_format_cli_error(exc), file=sys.stderr)
+        return 2
     if inferred_worktree is not None and hasattr(args, "worktree") and args.worktree is None:
         args.worktree = inferred_worktree
 
@@ -1565,7 +1573,15 @@ def _resolve_cli_root_context(root: Path, worktree: str | None) -> tuple[Path, s
         return leader_root, worktree or inferred_worktree
     git_common_root = _git_common_worktree_root(root)
     if git_common_root is not None:
+        if worktree is None:
+            active = find_active_pinned_workspace(git_common_root)
+            if active is not None:
+                return git_common_root, active.name
         return git_common_root, worktree
+    if worktree is None and (root / ".git").exists():
+        active = find_active_pinned_workspace(root)
+        if active is not None:
+            return root, active.name
     return root, worktree
 
 

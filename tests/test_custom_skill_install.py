@@ -84,6 +84,25 @@ def test_overlong_skill_installs_and_validates_without_length_diagnostic(tmp_pat
         assert installed.read_text(encoding="utf-8").count("detail ") == 260
 
 
+def test_pinned_workspace_write_guard_is_installed_for_all_hosts(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+
+    result = _install(project)
+
+    assert result.returncode == 0, result.stderr
+    guard = project / ".agent-flow" / "scripts" / "hooks" / "guard-worktree-write.py"
+    assert guard.is_file()
+    assert guard.stat().st_mode & 0o111
+    assert (project / ".agent-flow" / "runtime" / "python" / "agent_flow" / "core" / "workspace_boundary.py").is_file()
+    codex = (project / ".Codex" / "hooks.json").read_text(encoding="utf-8")
+    claude = (project / ".claude" / "settings.json").read_text(encoding="utf-8")
+    omp = (project / ".omp" / "extensions" / "agent-flow-hooks.ts").read_text(encoding="utf-8")
+    assert "guard-worktree-write.py" in codex
+    assert "guard-worktree-write.py" in claude
+    assert 'runHook("guard-worktree-write.py"' in omp
+
+
 def test_project_skill_links_all_hosts_and_index_omits_body(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
