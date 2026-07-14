@@ -1539,8 +1539,18 @@ function managedWriteBoundary(pathName, boundaryRoot = null) {
     return path.resolve(boundaryRoot);
   }
   if (activeManagedInstallTransaction) {
-    ensureChildPath(activeManagedInstallTransaction.root, pathName);
-    return path.resolve(activeManagedInstallTransaction.root);
+    for (const candidate of [
+      activeManagedInstallTransaction.root,
+      activeManagedInstallTransaction.transactionRoot,
+    ]) {
+      try {
+        ensureChildPath(candidate, pathName);
+        return path.resolve(candidate);
+      } catch {
+        // 다음 인증된 transaction 경계를 확인한다.
+      }
+    }
+    throw new Error(`managed install write escapes transaction: ${pathName}`);
   }
   return path.dirname(path.resolve(pathName));
 }
@@ -1560,47 +1570,104 @@ function assertNoSymlinkComponents(boundaryRoot, pathName) {
   }
 }
 
-function ensureManagedDirectory(pathName, boundaryRoot = null) {
-  const boundary = managedWriteBoundary(pathName, boundaryRoot);
-  assertNoSymlinkComponents(boundary, pathName);
-  fs.mkdirSync(pathName, { recursive: true });
-  assertNoSymlinkComponents(boundary, pathName);
-  const stat = fs.lstatSync(pathName);
-  if (!stat.isDirectory()) throw new Error(`managed install path is not a directory: ${pathName}`);
+function sameDirectoryIdentity(left, right) {
+  return left?.isDirectory() && right?.isDirectory()
+    && left.dev === right.dev
+    && left.ino === right.ino;
 }
 
-function writeManagedRegularFile(pathName, content, boundaryRoot = null) {
-  const boundary = managedWriteBoundary(pathName, boundaryRoot);
-  ensureManagedDirectory(path.dirname(pathName), boundary);
-  assertNoSymlinkComponents(boundary, pathName);
-  const noFollow = fs.constants.O_NOFOLLOW || 0;
-  const descriptor = fs.openSync(pathName, fs.constants.O_WRONLY | fs.constants.O_CREAT | noFollow, 0o666);
+function withManagedDirectoryCwd(boundaryRoot, pathName, create, callback) {
+  const boundary = path.resolve(boundaryRoot);
+  const target = path.resolve(pathName);
+  ensureChildPath(boundary, target);
+  const savedCwd = process.cwd();
+  const savedIdentity = fs.statSync(".");
+  let callbackError = null;
+  let result;
   try {
-    const stat = fs.fstatSync(descriptor);
-    if (!stat.isFile() || stat.nlink !== 1) {
-      throw new Error(`managed install target is not an owned regular file: ${pathName}`);
+    const boundaryIdentity = fs.lstatSync(boundary);
+    if (!boundaryIdentity.isDirectory() || boundaryIdentity.isSymbolicLink()) {
+      throw new Error(`managed install boundary is unsafe: ${boundary}`);
     }
-    fs.ftruncateSync(descriptor, 0);
-    fs.writeFileSync(descriptor, content, "utf8");
-  } finally {
-    fs.closeSync(descriptor);
+    process.chdir(boundary);
+    if (!sameDirectoryIdentity(boundaryIdentity, fs.statSync("."))) {
+      throw new Error(`managed install boundary changed while entering: ${boundary}`);
+    }
+    for (const part of path.relative(boundary, target).split(path.sep).filter(Boolean)) {
+      let identity = lstatIfExists(part);
+      if (!identity && create) {
+        fs.mkdirSync(part);
+        identity = fs.lstatSync(part);
+      }
+      if (!identity?.isDirectory() || identity.isSymbolicLink()) {
+        throw new Error(`managed install path contains a symlink or non-directory: ${path.join(process.cwd(), part)}`);
+      }
+      process.chdir(part);
+      if (!sameDirectoryIdentity(identity, fs.statSync("."))) {
+        throw new Error(`managed install ancestor changed while entering: ${target}`);
+      }
+    }
+    const holdSuffix = process.env.AGENT_FLOW_TEST_HOLD_MANAGED_PARENT_SUFFIX;
+    if (holdSuffix && target.endsWith(holdSuffix)) {
+      holdInstallForTest("AGENT_FLOW_TEST_HOLD_MANAGED_PARENT_MS", "managed-parent-anchored");
+    }
+    result = callback();
+  } catch (error) {
+    callbackError = error;
   }
+  process.chdir(savedCwd);
+  if (!sameDirectoryIdentity(savedIdentity, fs.statSync("."))) {
+    throw new Error(`managed install working directory changed while restoring: ${savedCwd}`);
+  }
+  if (callbackError) throw callbackError;
+  return result;
+}
+
+function ensureManagedDirectory(pathName, boundaryRoot = null) {
+  const boundary = managedWriteBoundary(pathName, boundaryRoot);
+  withManagedDirectoryCwd(boundary, pathName, true, () => undefined);
+}
+
+function writeManagedRegularFile(pathName, content, boundaryRoot = null, mode = null) {
+  const boundary = managedWriteBoundary(pathName, boundaryRoot);
+  withManagedDirectoryCwd(boundary, path.dirname(pathName), true, () => {
+    const noFollow = fs.constants.O_NOFOLLOW || 0;
+    const filename = path.basename(pathName);
+    const descriptor = fs.openSync(filename, fs.constants.O_WRONLY | fs.constants.O_CREAT | noFollow, 0o666);
+    try {
+      const stat = fs.fstatSync(descriptor);
+      if (!stat.isFile() || stat.nlink !== 1) {
+        throw new Error(`managed install target is not an owned regular file: ${pathName}`);
+      }
+      fs.ftruncateSync(descriptor, 0);
+      fs.writeFileSync(descriptor, content, "utf8");
+      if (mode !== null) fs.fchmodSync(descriptor, mode);
+    } finally {
+      fs.closeSync(descriptor);
+    }
+  });
 }
 
 function writeManagedFile(pathName, content, boundaryRoot = null) {
-  withManagedInstallMutation(pathName, () => {
-    writeManagedRegularFile(pathName, content, boundaryRoot);
+  withManagedInstallMutation(pathName, (managedPath) => {
+    writeManagedRegularFile(managedPath, content, boundaryRoot);
+  });
+}
+
+function writeManagedExecutableFile(pathName, content) {
+  withManagedInstallMutation(pathName, (managedPath) => {
+    writeManagedRegularFile(managedPath, content, null, 0o755);
   });
 }
 
 function writeManagedFileIfMissingOrSame(pathName, content, force = false, track = true) {
-  const write = () => {
-    const boundary = managedWriteBoundary(pathName);
-    assertNoSymlinkComponents(boundary, pathName);
-    if (fs.existsSync(pathName)) {
-      const current = fs.readFileSync(pathName, "utf8");
+  const write = (managedPath = pathName) => {
+    const boundary = managedWriteBoundary(managedPath);
+    assertNoSymlinkComponents(boundary, managedPath);
+    if (fs.existsSync(managedPath)) {
+      const current = fs.readFileSync(managedPath, "utf8");
       if (force) {
-        writeManagedRegularFile(pathName, content, boundary);
+        writeManagedRegularFile(managedPath, content, boundary);
         return true;
       }
       if (current !== content) {
@@ -1608,7 +1675,7 @@ function writeManagedFileIfMissingOrSame(pathName, content, force = false, track
       }
       return true;
     }
-    writeManagedRegularFile(pathName, content, boundary);
+    writeManagedRegularFile(managedPath, content, boundary);
     return true;
   };
   return track ? withManagedInstallMutation(pathName, write) : write();
@@ -1627,13 +1694,13 @@ function copyBundledDirIfMissingOrSame(
   if (!fs.existsSync(src)) {
     return;
   }
-  const copy = () => {
-    ensureManagedDirectory(dest);
+  const copy = (managedDest = dest) => {
+    ensureManagedDirectory(managedDest);
     const sourceNames = new Set();
     for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
       sourceNames.add(entry.name);
       const srcPath = path.join(src, entry.name);
-      const destPath = path.join(dest, entry.name);
+      const destPath = path.join(managedDest, entry.name);
       if (entry.isDirectory()) {
         if (isRoot && allowedRootDirs && !allowedRootDirs.has(entry.name)) {
           removeManagedDirIfSame(srcPath, destPath, force, false);
@@ -1653,9 +1720,9 @@ function copyBundledDirIfMissingOrSame(
       writeManagedFileIfMissingOrSame(destPath, content, force, false);
     }
     if (force && pruneExtraneous) {
-      for (const entry of fs.readdirSync(dest, { withFileTypes: true })) {
+      for (const entry of fs.readdirSync(managedDest, { withFileTypes: true })) {
         if (!sourceNames.has(entry.name) && !(isRoot && preservedExtraneousRootNames.has(entry.name))) {
-          fs.rmSync(path.join(dest, entry.name), { recursive: true, force: true });
+          fs.rmSync(path.join(managedDest, entry.name), { recursive: true, force: true });
         }
       }
     }
@@ -1671,7 +1738,7 @@ function removeManagedDirIfSame(src, dest, force = false, track = true) {
   if (!force && !dirContentsMatch(src, dest)) {
     return;
   }
-  const remove = () => fs.rmSync(dest, { recursive: true, force: true });
+  const remove = (managedDest = dest) => fs.rmSync(managedDest, { recursive: true, force: true });
   if (track) withManagedInstallMutation(dest, remove);
   else remove();
 }
@@ -1680,9 +1747,9 @@ function removeStaleContextDocsScripts(agentFlowDir, force = false) {
   if (!force) {
     return;
   }
-  withManagedInstallMutation(path.join(agentFlowDir, "scripts"), () => {
+  withManagedInstallMutation(path.join(agentFlowDir, "scripts"), (managedScripts) => {
     for (const filename of ["check-context-docs.mjs", "check-context-docs.ts"]) {
-      fs.rmSync(path.join(agentFlowDir, "scripts", filename), { force: true });
+      fs.rmSync(path.join(managedScripts, filename), { force: true });
     }
   });
 }
@@ -2210,29 +2277,194 @@ function managedRootIsCaseInsensitive(root) {
   }
 }
 
+const MANAGED_NOREPLACE_RENAME = [
+  "import ctypes, errno, os, sys",
+  "source, target = sys.argv[1], sys.argv[2]",
+  "if os.name == 'nt':",
+  " kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)",
+  " ok = kernel32.MoveFileW(source, target)",
+  " code = 0 if ok else ctypes.get_last_error()",
+  " raise SystemExit(0 if ok else (73 if code in (80, 183) else 74))",
+  "libc = ctypes.CDLL(None, use_errno=True)",
+  "encoded_source, encoded_target = os.fsencode(source), os.fsencode(target)",
+  "if sys.platform == 'darwin':",
+  " result = libc.renamex_np(encoded_source, encoded_target, 4)",
+  "elif sys.platform.startswith('linux'):",
+  " try:",
+  "  renameat2 = libc.renameat2",
+  " except AttributeError:",
+  "  raise SystemExit(74)",
+  " result = renameat2(-100, encoded_source, -100, encoded_target, 1)",
+  "else:",
+  " raise SystemExit(74)",
+  "if result == 0:",
+  " raise SystemExit(0)",
+  "code = ctypes.get_errno()",
+  "raise SystemExit(73 if code in (errno.EEXIST, errno.ENOTEMPTY) else 74)",
+].join("\n");
+
+function renameManagedNoReplace(sourceName, targetName) {
+  const result = safeSpawnSync(
+    preferredPython(),
+    ["-I", "-c", MANAGED_NOREPLACE_RENAME, sourceName, targetName],
+    { stdio: ["ignore", "ignore", "pipe"], encoding: "utf8", timeout: 10_000 },
+  );
+  if (!result.error && result.status === 0) return;
+  if (result.status === 73) {
+    throw new Error(`managed install target appeared during swap: ${targetName}`);
+  }
+  const detail = result.error?.message || result.stderr?.trim() || `exit ${result.status}`;
+  throw new Error(`managed install no-replace rename failed: ${detail}`);
+}
+
+function swapManagedPath(
+  boundaryRoot,
+  target,
+  staged,
+  incoming,
+  displaced,
+  expectedBefore,
+  expectedAfter,
+  crashDuringSwap = false,
+) {
+  const targetParent = path.dirname(target);
+  if (path.dirname(incoming) !== targetParent || path.dirname(displaced) !== targetParent) {
+    throw new Error(`managed install swap endpoints are not co-located: ${target}`);
+  }
+  withManagedDirectoryCwd(
+    boundaryRoot,
+    path.dirname(target),
+    expectedBefore.kind === "absent",
+    () => {
+      const targetName = path.basename(target);
+      const incomingName = path.basename(incoming);
+      const displacedName = path.basename(displaced);
+      if (lstatIfExists(incomingName) || lstatIfExists(displacedName)) {
+        throw new Error(`managed install swap path already exists: ${target}`);
+      }
+      holdInstallForTest("AGENT_FLOW_TEST_HOLD_BEFORE_MANAGED_SWAP_MS", "managed-swap-ready");
+      if (expectedAfter.kind !== "absent") {
+        if (!sameManagedPathState(managedPathState(staged), expectedAfter)) {
+          throw new Error(`managed install staging integrity mismatch: ${target}`);
+        }
+        fs.cpSync(staged, incomingName, { recursive: true, dereference: false, errorOnExist: true });
+        if (!sameManagedPathState(managedPathState(incomingName), expectedAfter)) {
+          throw new Error(`managed install incoming integrity mismatch: ${target}`);
+        }
+      }
+      if (!sameManagedPathState(managedPathState(targetName), expectedBefore)) {
+        if (lstatIfExists(incomingName)) fs.rmSync(incomingName, { recursive: true, force: true });
+        throw new Error(`managed install path changed outside transaction: ${target}`);
+      }
+      if (expectedBefore.kind !== "absent") {
+        fs.renameSync(targetName, displacedName);
+        if (!sameManagedPathState(managedPathState(displacedName), expectedBefore)) {
+          if (!lstatIfExists(targetName)) fs.renameSync(displacedName, targetName);
+          throw new Error(`managed install path changed during swap: ${target}`);
+        }
+      }
+      holdInstallForTest("AGENT_FLOW_TEST_HOLD_AFTER_MANAGED_DISPLACE_MS", "managed-target-displaced");
+      if (crashDuringSwap && process.env.AGENT_FLOW_TEST_CRASH_DURING_MANAGED_SWAP === "1") {
+        process.exit(90);
+      }
+      if (expectedAfter.kind !== "absent") {
+        renameManagedNoReplace(incomingName, targetName);
+      }
+      if (!sameManagedPathState(managedPathState(targetName), expectedAfter)) {
+        throw new Error(`managed install staged mutation mismatch: ${target}`);
+      }
+    },
+  );
+}
+
+function managedSwapRelativePaths(transaction, operation, operationIndex, mutationId) {
+  const parent = path.dirname(operation.path);
+  const prefix = `.agent-flow-swap-${transaction.token}-${operationIndex}-${mutationId}`;
+  return {
+    incoming: path.join(parent, `${prefix}-next`),
+    displaced: path.join(parent, `${prefix}-previous`),
+  };
+}
+
 function withManagedInstallMutation(pathName, callback) {
   const transaction = activeManagedInstallTransaction;
   const operation = managedInstallMutationOperation(transaction, pathName);
-  if (!operation) return callback();
+  if (!operation) return callback(pathName);
   const target = path.resolve(transaction.root, operation.path);
   const expected = operation.after ?? operation.before;
   if (!sameManagedPathState(managedPathState(target), expected)) {
     throw new Error(`managed install path changed outside transaction: ${operation.path}`);
   }
-  operation.in_progress = true;
-  writeInstallJournal(transaction.journalPath, transaction.journal);
-  let result;
-  let callbackError = null;
-  try {
-    result = callback();
-  } catch (error) {
-    callbackError = error;
+  const operationIndex = transaction.journal.managed_mutations.indexOf(operation);
+  const mutationId = operation.mutation_count;
+  const stagingRelative = path.join("managed-staging", `${operationIndex}-${mutationId}`);
+  const stagingRoot = path.join(transaction.transactionRoot, stagingRelative);
+  const stagedTarget = path.join(stagingRoot, "next");
+  const swapPaths = managedSwapRelativePaths(transaction, operation, operationIndex, mutationId);
+  const incomingTarget = path.join(transaction.root, swapPaths.incoming);
+  const displacedTarget = path.join(transaction.root, swapPaths.displaced);
+  fs.mkdirSync(stagingRoot, { recursive: true });
+  if (lstatIfExists(target)) {
+    fs.cpSync(target, stagedTarget, { recursive: true, dereference: false, errorOnExist: true });
+    if (!sameManagedPathState(managedPathState(stagedTarget), expected)) {
+      throw new Error(`managed install staging integrity mismatch: ${operation.path}`);
+    }
   }
-  if (process.env.AGENT_FLOW_TEST_CRASH_AFTER_MANAGED_CALLBACK === "1") process.exit(89);
-  operation.after = managedPathState(target);
-  operation.in_progress = false;
+  const requested = path.resolve(pathName);
+  const requestedRelative = managedRootIsCaseInsensitive(transaction.root)
+    && requested.toLowerCase().startsWith(target.toLowerCase())
+      ? requested.slice(target.length).replace(new RegExp(`^${escapeRegex(path.sep)}+`), "")
+      : path.relative(target, requested);
+  const stagedRequested = path.resolve(stagedTarget, requestedRelative);
+  ensureChildPath(stagedTarget, stagedRequested);
+  let result;
+  try {
+    result = callback(stagedRequested);
+  } catch (error) {
+    fs.rmSync(stagingRoot, { recursive: true, force: true });
+    throw error;
+  }
+  if (!sameManagedPathState(managedPathState(target), expected)) {
+    fs.rmSync(stagingRoot, { recursive: true, force: true });
+    throw new Error(`managed install path changed outside transaction: ${operation.path}`);
+  }
+  const next = managedPathState(stagedTarget);
+  operation.mutation_count += 1;
+  operation.pending = {
+    mutation_id: mutationId,
+    before: managedPathState(target),
+    after: next,
+    staging: path.relative(transaction.transactionRoot, stagedTarget),
+    incoming: swapPaths.incoming,
+    displaced: swapPaths.displaced,
+  };
   writeInstallJournal(transaction.journalPath, transaction.journal);
-  if (callbackError) throw callbackError;
+  if (!sameManagedPathState(managedPathState(target), operation.pending.before)) {
+    throw new Error(`managed install path changed outside transaction: ${operation.path}`);
+  }
+  swapManagedPath(
+    transaction.root,
+    target,
+    stagedTarget,
+    incomingTarget,
+    displacedTarget,
+    operation.pending.before,
+    operation.pending.after,
+    true,
+  );
+  if (process.env.AGENT_FLOW_TEST_CRASH_AFTER_MANAGED_SWAP_BEFORE_COMMITMENT === "1") process.exit(91);
+  operation.pending.completed = true;
+  writeInstallJournal(transaction.journalPath, transaction.journal);
+  if (process.env.AGENT_FLOW_TEST_CRASH_AFTER_MANAGED_CALLBACK === "1") process.exit(89);
+  const current = managedPathState(target);
+  if (!sameManagedPathState(current, next)) {
+    throw new Error(`managed install staged mutation mismatch: ${operation.path}`);
+  }
+  removeManagedTemporaryPath(transaction.root, incomingTarget, operation.pending.after);
+  removeManagedTemporaryPath(transaction.root, displacedTarget, operation.pending.before);
+  operation.after = current;
+  operation.pending = null;
+  writeInstallJournal(transaction.journalPath, transaction.journal);
   return result;
 }
 
@@ -2250,7 +2482,8 @@ function snapshotManagedInstallPaths(transaction) {
       path: path.relative(transaction.root, target),
       before,
       after: null,
-      in_progress: false,
+      mutation_count: 0,
+      pending: null,
     };
     if (["directory", "file"].includes(before.kind)) {
       const backupRelative = path.join("managed-backups", String(transaction.journal.managed_mutations.length));
@@ -2270,8 +2503,8 @@ function snapshotManagedInstallPaths(transaction) {
 function sealManagedInstallMutations(transaction) {
   if (!transaction || !transaction.journal || !fs.existsSync(transaction.transactionRoot)) return;
   for (const operation of transaction.journal.managed_mutations || []) {
-    if (operation.in_progress) {
-      throw new Error(`incomplete managed install mutation: ${operation.path}`);
+    if (operation.pending) {
+      continue;
     }
     const current = managedPathState(hostMutationTarget(transaction.root, operation.path));
     const expected = operation.after ?? operation.before;
@@ -2283,24 +2516,47 @@ function sealManagedInstallMutations(transaction) {
   writeInstallJournal(transaction.journalPath, transaction.journal);
 }
 
-function restoreManagedPathState(target, state, transactionRoot) {
-  if (lstatIfExists(target)) fs.rmSync(target, { recursive: true, force: true });
-  if (state.kind === "absent") return;
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-  if (state.kind === "symlink") {
-    fs.symlinkSync(state.target, target);
-    return;
+function restoreManagedPathState(root, target, state, transactionRoot) {
+  let staged = target;
+  if (state.kind !== "absent") {
+    if (!["directory", "file"].includes(state.kind) || typeof state.backup !== "string") {
+      throw new Error(`invalid managed install backup state: ${target}`);
+    }
+    const backupPath = path.resolve(transactionRoot, state.backup);
+    ensureChildPath(transactionRoot, backupPath);
+    assertNoSymlinkComponents(transactionRoot, backupPath);
+    if (!sameManagedPathState(state, managedPathState(backupPath))) {
+      throw new Error(`managed install backup authentication failed: ${target}`);
+    }
+    staged = backupPath;
   }
-  if (!["directory", "file"].includes(state.kind) || typeof state.backup !== "string") {
-    throw new Error(`invalid managed install backup state: ${target}`);
-  }
-  const backupPath = path.resolve(transactionRoot, state.backup);
-  ensureChildPath(transactionRoot, backupPath);
-  assertNoSymlinkComponents(transactionRoot, backupPath);
-  if (!sameManagedPathState(state, managedPathState(backupPath))) {
-    throw new Error(`managed install backup authentication failed: ${target}`);
-  }
-  fs.cpSync(backupPath, target, { recursive: true, dereference: false, errorOnExist: true });
+  const token = crypto.randomBytes(24).toString("hex");
+  const incoming = path.join(path.dirname(target), `.agent-flow-restore-${token}-next`);
+  const displaced = path.join(path.dirname(target), `.agent-flow-restore-${token}-previous`);
+  const current = managedPathState(target);
+  swapManagedPath(
+    root,
+    target,
+    staged,
+    incoming,
+    displaced,
+    current,
+    state,
+  );
+  removeManagedTemporaryPath(root, incoming, state);
+  removeManagedTemporaryPath(root, displaced, current);
+}
+
+function removeManagedTemporaryPath(root, pathName, expected) {
+  withManagedDirectoryCwd(root, path.dirname(pathName), false, () => {
+    const name = path.basename(pathName);
+    const current = managedPathState(name);
+    if (current.kind === "absent") return;
+    if (!sameManagedPathState(current, expected)) {
+      throw new Error(`managed install temporary path changed: ${pathName}`);
+    }
+    fs.rmSync(name, { recursive: true, force: true });
+  });
 }
 
 function rollbackRecordedManagedMutations(root, transactionRoot, journal) {
@@ -2309,14 +2565,52 @@ function rollbackRecordedManagedMutations(root, transactionRoot, journal) {
     const operation = operations[index];
     const target = hostMutationTarget(root, operation.path);
     const current = managedPathState(target);
+    if (operation.pending) {
+      const staged = path.resolve(transactionRoot, operation.pending.staging);
+      const incoming = path.resolve(root, operation.pending.incoming);
+      const displaced = path.resolve(root, operation.pending.displaced);
+      ensureChildPath(transactionRoot, staged);
+      ensureChildPath(root, incoming);
+      ensureChildPath(root, displaced);
+      assertNoSymlinkComponents(transactionRoot, staged);
+      assertNoSymlinkComponents(root, path.dirname(incoming));
+      assertNoSymlinkComponents(root, path.dirname(displaced));
+      const swapCompleted = sameManagedPathState(current, operation.pending.after)
+        && (
+          operation.pending.completed === true
+          || (
+            managedPathState(incoming).kind === "absent"
+            && sameManagedPathState(managedPathState(displaced), operation.pending.before)
+          )
+        );
+      const swapInterrupted = current.kind === "absent"
+        && sameManagedPathState(managedPathState(displaced), operation.pending.before)
+        && sameManagedPathState(managedPathState(incoming), operation.pending.after);
+      const swapNotStarted = sameManagedPathState(current, operation.pending.before)
+        && managedPathState(displaced).kind === "absent"
+        && (
+          managedPathState(incoming).kind === "absent"
+          || sameManagedPathState(managedPathState(incoming), operation.pending.after)
+        );
+      if (!swapCompleted && !swapInterrupted && !swapNotStarted) {
+        throw new Error(`managed install path changed outside transaction: ${operation.path}`);
+      }
+      if (swapCompleted || swapInterrupted) {
+        restoreManagedPathState(root, target, operation.before, transactionRoot);
+        if (!sameManagedPathState(managedPathState(target), operation.before)) {
+          throw new Error(`managed install rollback integrity mismatch: ${operation.path}`);
+        }
+      }
+      removeManagedTemporaryPath(root, incoming, operation.pending.after);
+      removeManagedTemporaryPath(root, displaced, operation.pending.before);
+      operation.pending = null;
+      if (swapCompleted || swapInterrupted) continue;
+    }
     if (sameManagedPathState(current, operation.before)) continue;
-    if (
-      (!operation.after || !sameManagedPathState(current, operation.after))
-      && !operation.in_progress
-    ) {
+    if (!operation.after || !sameManagedPathState(current, operation.after)) {
       throw new Error(`managed install path changed outside transaction: ${operation.path}`);
     }
-    restoreManagedPathState(target, operation.before, transactionRoot);
+    restoreManagedPathState(root, target, operation.before, transactionRoot);
     if (!sameManagedPathState(managedPathState(target), operation.before)) {
       throw new Error(`managed install rollback integrity mismatch: ${operation.path}`);
     }
@@ -2328,7 +2622,7 @@ function rollbackRecordedManagedMutations(root, transactionRoot, journal) {
 
 function verifyCommittedManagedMutations(root, journal) {
   for (const operation of journal?.managed_mutations || []) {
-    if (!operation.after || operation.in_progress) {
+    if (!operation.after || operation.pending) {
       throw new Error(`incomplete managed install mutation: ${operation.path}`);
     }
     const target = hostMutationTarget(root, operation.path);
@@ -2469,9 +2763,10 @@ function validateInterruptedInstallJournal(root, agentFlowDir, transactionRoot, 
   if (
     journal?.version !== 3
     || journal.root !== fs.realpathSync(root)
-    || typeof journal.token !== "string"
-    || typeof recoveryLockToken !== "string"
+    || !/^[0-9a-f]{48}$/.test(String(journal.token || ""))
+    || !/^[0-9a-f]{48}$/.test(String(recoveryLockToken || ""))
     || journal.lock_token !== recoveryLockToken
+    || typeof journal.had_live_skills !== "boolean"
     || !["prepared", "moving-skills", "skills-moved", "live-created", "committed", "recovered", "rollback-blocked"].includes(journal.stage)
     || !Array.isArray(journal.managed_mutations)
     || !Array.isArray(journal.host_mutations)
@@ -2490,7 +2785,9 @@ function validateInterruptedInstallJournal(root, agentFlowDir, transactionRoot, 
       || typeof operation.path !== "string"
       || !allowedManagedPaths.has(operation.path)
       || seenManaged.has(operation.path)
-      || typeof operation.in_progress !== "boolean"
+      || !Number.isInteger(operation.mutation_count)
+      || operation.mutation_count < 0
+      || (operation.pending !== null && (typeof operation.pending !== "object" || Array.isArray(operation.pending)))
     ) {
       throw new Error(`invalid interrupted managed mutation: ${operation?.path ?? index}`);
     }
@@ -2505,6 +2802,31 @@ function validateInterruptedInstallJournal(root, agentFlowDir, transactionRoot, 
       || (operation.after !== null && !validateJournalManagedState(operation.after))
     ) {
       throw new Error(`invalid interrupted managed mutation state: ${operation.path}`);
+    }
+    if (operation.pending) {
+      const expectedPrefix = path.join("managed-staging", `${index}-${operation.pending.mutation_id}`);
+      const swapPrefix = `.agent-flow-swap-${journal.token}-${index}-${operation.pending.mutation_id}`;
+      const expectedIncoming = path.join(path.dirname(operation.path), `${swapPrefix}-next`);
+      const expectedDisplaced = path.join(path.dirname(operation.path), `${swapPrefix}-previous`);
+      if (
+        operation.pending.mutation_id !== operation.mutation_count - 1
+        || operation.pending.staging !== path.join(expectedPrefix, "next")
+        || operation.pending.incoming !== expectedIncoming
+        || operation.pending.displaced !== expectedDisplaced
+        || ![undefined, true].includes(operation.pending.completed)
+        || !validateJournalManagedState(operation.pending.before)
+        || !validateJournalManagedState(operation.pending.after)
+      ) {
+        throw new Error(`invalid interrupted managed mutation intent: ${operation.path}`);
+      }
+      const stagedPath = path.resolve(transactionRoot, operation.pending.staging);
+      ensureChildPath(transactionRoot, stagedPath);
+      assertNoSymlinkComponents(transactionRoot, stagedPath);
+      for (const relative of [operation.pending.incoming, operation.pending.displaced]) {
+        const pendingPath = path.resolve(root, relative);
+        ensureChildPath(root, pendingPath);
+        assertNoSymlinkComponents(root, path.dirname(pendingPath));
+      }
     }
     if (beforeBackup) {
       const backupPath = path.resolve(transactionRoot, beforeBackup);
@@ -5206,10 +5528,10 @@ function makeHooksExecutable(root) {
   if (!fs.existsSync(hooksDir)) {
     return;
   }
-  withManagedInstallMutation(hooksDir, () => {
-    for (const entry of fs.readdirSync(hooksDir)) {
+  withManagedInstallMutation(hooksDir, (managedHooksDir) => {
+    for (const entry of fs.readdirSync(managedHooksDir)) {
       if (entry.endsWith(".sh") || entry === "comment-checker.py" || entry === "guard-worktree-write.py") {
-        fs.chmodSync(path.join(hooksDir, entry), 0o755);
+        fs.chmodSync(path.join(managedHooksDir, entry), 0o755);
       }
     }
   });

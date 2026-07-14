@@ -1167,13 +1167,75 @@ def test_recovery_survives_crash_between_managed_callback_and_commitment(tmp_pat
     assert crashed.returncode == 89
     transaction = project / ".agent-flow" / "install-transaction"
     journal = json.loads((transaction / "journal.json").read_text(encoding="utf-8"))
-    assert any(operation["in_progress"] for operation in journal["managed_mutations"])
+    assert any(operation["pending"] is not None for operation in journal["managed_mutations"])
 
     recovered = _install(project)
 
     assert recovered.returncode == 0, recovered.stderr
     assert not transaction.exists()
     assert (project / ".agent-flow" / "kit.json").is_file()
+
+
+def test_recovery_survives_crash_during_managed_path_swap(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+
+    crashed = _install(
+        project,
+        env={"AGENT_FLOW_TEST_CRASH_DURING_MANAGED_SWAP": "1"},
+    )
+
+    assert crashed.returncode == 90
+    recovered = _install(project)
+    assert recovered.returncode == 0, recovered.stderr
+    assert not (project / ".agent-flow" / "install-transaction").exists()
+
+
+def test_recovery_survives_initial_swap_before_completion_journal(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+
+    crashed = _install(
+        project,
+        env={"AGENT_FLOW_TEST_CRASH_AFTER_MANAGED_SWAP_BEFORE_COMMITMENT": "1"},
+    )
+
+    assert crashed.returncode == 91
+    transaction = project / ".agent-flow" / "install-transaction"
+    journal = json.loads((transaction / "journal.json").read_text(encoding="utf-8"))
+    active = next(operation for operation in journal["managed_mutations"] if operation["pending"] is not None)
+    assert active["before"]["kind"] == "absent"
+    assert "completed" not in active["pending"]
+    assert (project / active["path"]).exists()
+
+    recovered = _install(project)
+
+    assert recovered.returncode == 0, recovered.stderr
+    assert not transaction.exists()
+
+
+def test_recovery_preserves_external_change_after_managed_swap_crash(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    crashed = _install(
+        project,
+        env={"AGENT_FLOW_TEST_CRASH_AFTER_MANAGED_CALLBACK": "1"},
+    )
+    assert crashed.returncode == 89
+    transaction = project / ".agent-flow" / "install-transaction"
+    journal = json.loads((transaction / "journal.json").read_text(encoding="utf-8"))
+    active = next(operation for operation in journal["managed_mutations"] if operation["pending"] is not None)
+    target = project / active["path"]
+    shutil.rmtree(target)
+    target.mkdir()
+    marker = target / "external.txt"
+    marker.write_text("external\n", encoding="utf-8")
+
+    retry = _install(project)
+
+    assert retry.returncode != 0
+    assert "changed outside transaction" in retry.stderr
+    assert marker.read_text(encoding="utf-8") == "external\n"
 
 
 @pytest.mark.parametrize("tamper", ("path", "lock", "symlink"))
@@ -1195,7 +1257,7 @@ def test_recovery_rejects_unauthenticated_journal_authority(
     transaction = project / ".agent-flow" / "install-transaction"
     journal_path = transaction / "journal.json"
     journal = json.loads(journal_path.read_text(encoding="utf-8"))
-    active = next(operation for operation in journal["managed_mutations"] if operation["in_progress"])
+    active = next(operation for operation in journal["managed_mutations"] if operation["pending"] is not None)
     if tamper == "path":
         active["path"] = "../outside"
         journal_path.write_text(json.dumps(journal, indent=2) + "\n", encoding="utf-8")
@@ -1317,6 +1379,130 @@ def test_managed_file_symlink_never_writes_outside_project(tmp_path: Path, relat
     assert result.returncode != 0
     assert "contains a symlink" in result.stderr
     assert outside.read_text(encoding="utf-8") == "outside\n"
+
+
+def test_managed_ancestor_swap_never_writes_outside_project(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    outside = tmp_path / "outside"
+    project.mkdir()
+    outside.mkdir()
+    (project / ".Codex").mkdir()
+    env = dict(os.environ)
+    env["HOME"] = str(tmp_path / "home")
+    env["AGENT_FLOW_TEST_HOLD_MANAGED_PARENT_SUFFIX"] = ".Codex"
+    env["AGENT_FLOW_TEST_HOLD_MANAGED_PARENT_MS"] = "1500"
+    process = subprocess.Popen(
+        (_node(), str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"), "install"),
+        cwd=project,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    assert process.stderr is not None
+    marker = process.stderr.readline()
+    assert "agent-flow:test-managed-parent-anchored" in marker
+    (project / ".Codex").rename(project / ".Codex-owned")
+    (project / ".Codex").symlink_to(outside, target_is_directory=True)
+    stdout, stderr = process.communicate(timeout=10)
+
+    assert process.returncode != 0, stdout
+    assert "staged mutation mismatch" in stderr or "changed outside transaction" in stderr
+    assert list(outside.iterdir()) == []
+
+
+def test_managed_leaf_replacement_is_preserved_at_swap_boundary(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    assert _install(project).returncode == 0
+    target = project / ".agent-flow" / "workflows"
+    preserved = project / ".agent-flow" / "workflows-owned"
+    env = dict(os.environ)
+    env["HOME"] = str(tmp_path / "home")
+    env["AGENT_FLOW_TEST_HOLD_BEFORE_MANAGED_SWAP_MS"] = "1500"
+    process = subprocess.Popen(
+        (_node(), str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"), "install"),
+        cwd=project,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    assert process.stderr is not None
+    assert "agent-flow:test-managed-swap-ready" in process.stderr.readline()
+    target.rename(preserved)
+    target.mkdir()
+    marker = target / "external.txt"
+    marker.write_text("external\n", encoding="utf-8")
+    stdout, stderr = process.communicate(timeout=10)
+
+    assert process.returncode != 0, stdout
+    assert "changed outside transaction" in stderr
+    assert marker.read_text(encoding="utf-8") == "external\n"
+    assert preserved.is_dir()
+
+
+def test_managed_target_created_after_displacement_is_preserved(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    assert _install(project).returncode == 0
+    target = project / ".agent-flow" / "workflows"
+    env = dict(os.environ)
+    env["HOME"] = str(tmp_path / "home")
+    env["AGENT_FLOW_TEST_HOLD_AFTER_MANAGED_DISPLACE_MS"] = "1500"
+    process = subprocess.Popen(
+        (_node(), str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"), "install"),
+        cwd=project,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    assert process.stderr is not None
+    assert "agent-flow:test-managed-target-displaced" in process.stderr.readline()
+    assert not target.exists()
+    target.mkdir()
+    marker = target / "external.txt"
+    marker.write_text("external\n", encoding="utf-8")
+    stdout, stderr = process.communicate(timeout=10)
+
+    assert process.returncode != 0, stdout
+    assert "target appeared during swap" in stderr
+    assert marker.read_text(encoding="utf-8") == "external\n"
+
+
+def test_managed_staging_swap_cannot_redirect_live_mutation(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    outside = tmp_path / "outside"
+    project.mkdir()
+    outside.mkdir()
+    assert _install(project).returncode == 0
+    outside_next = outside / "next"
+    outside_next.mkdir()
+    marker = outside_next / "external.txt"
+    marker.write_text("external\n", encoding="utf-8")
+    env = dict(os.environ)
+    env["HOME"] = str(tmp_path / "home")
+    env["AGENT_FLOW_TEST_HOLD_BEFORE_MANAGED_SWAP_MS"] = "1500"
+    process = subprocess.Popen(
+        (_node(), str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"), "install"),
+        cwd=project,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    assert process.stderr is not None
+    assert "agent-flow:test-managed-swap-ready" in process.stderr.readline()
+    staging = next((project / ".agent-flow" / "install-transaction" / "managed-staging").iterdir())
+    staging.rename(staging.with_name(f"{staging.name}-owned"))
+    staging.symlink_to(outside, target_is_directory=True)
+    stdout, stderr = process.communicate(timeout=10)
+
+    assert process.returncode != 0, stdout
+    assert "staging integrity mismatch" in stderr
+    assert marker.read_text(encoding="utf-8") == "external\n"
+    assert not (outside / "previous").exists()
 
 
 def test_reinstall_preserves_unowned_legacy_graphify_directories(tmp_path: Path) -> None:
