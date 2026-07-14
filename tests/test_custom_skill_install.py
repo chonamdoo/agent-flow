@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
+import shlex
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from unittest import mock
 
 import pytest
+import yaml
 
 from agent_flow.artifact import find_active_run
 from agent_flow.cli import main
@@ -101,6 +105,175 @@ def _command(
         check=False,
         env=process_env,
     )
+
+
+def test_install_materializes_authenticated_project_launcher(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+
+    install = _install(project)
+
+    assert install.returncode == 0, install.stderr
+    launcher = project / ".agent-flow" / "bin" / "agent-flow"
+    runtime = project / ".agent-flow" / "runtime" / "node"
+    kit = json.loads((project / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
+    contract = kit["project_runtime_contract"]
+    assert launcher.is_file()
+    assert os.access(launcher, os.X_OK)
+    assert (runtime / "bin" / "agent-flow-kit.mjs").is_file()
+    assert contract["version"] == 1
+    assert contract["launcher"]["sha256"] == hashlib.sha256(launcher.read_bytes()).hexdigest()
+    env = dict(os.environ)
+    env["HOME"] = str(project.parent / "test-home")
+    env["AGENT_FLOW_AUTO_EXTERNAL_SKILLS"] = "1"
+    started = subprocess.run(
+        (str(launcher), "run", "local runtime"),
+        cwd=project,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+    )
+    status = subprocess.run(
+        (str(launcher), "status"),
+        cwd=project,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+    )
+
+    assert started.returncode == 0, started.stderr
+    assert status.returncode == 0, status.stderr
+    assert "next_command:" in status.stdout
+
+
+def test_project_launcher_run_creates_and_pins_git_worktree(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    subprocess.run(("git", "init", "-b", "main", str(project)), check=True, capture_output=True)
+    subprocess.run(("git", "-C", str(project), "config", "user.name", "Test User"), check=True)
+    subprocess.run(("git", "-C", str(project), "config", "user.email", "test@example.com"), check=True)
+    (project / "README.md").write_text("project\n", encoding="utf-8")
+    subprocess.run(("git", "-C", str(project), "add", "README.md"), check=True)
+    subprocess.run(("git", "-C", str(project), "commit", "-m", "initial"), check=True, capture_output=True)
+    assert _install(project).returncode == 0
+    subprocess.run(("git", "-C", str(project), "add", ".gitignore"), check=True)
+    subprocess.run(("git", "-C", str(project), "commit", "-m", "install config"), check=True, capture_output=True)
+    launcher = project / ".agent-flow" / "bin" / "agent-flow"
+    env = dict(os.environ)
+    env["HOME"] = str(project.parent / "test-home")
+    env["AGENT_FLOW_AUTO_EXTERNAL_SKILLS"] = "1"
+
+    started = subprocess.run(
+        (str(launcher), "run", "Pinned Task"),
+        cwd=project,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+    )
+    worktree = project / ".agent-flow" / "worktrees" / "feat-pinned-task"
+    status = subprocess.run(
+        (str(launcher), "status"),
+        cwd=project,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+    )
+
+    assert started.returncode == 0, started.stderr
+    assert worktree.is_dir()
+    assert subprocess.run(
+        ("git", "-C", str(project), "branch", "--show-current"),
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip() == "main"
+    assert subprocess.run(
+        ("git", "-C", str(worktree), "branch", "--show-current"),
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip() == "feat/pinned-task"
+    assert status.returncode == 0, status.stderr
+    run_root = project / ".git" / "agent-flow" / "worktrees" / "feat-pinned-task"
+    meta_path = next(run_root.glob(".agent-flow/runs/*/meta.json"))
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert meta["workspace"]["workspace_root"] == str(worktree.resolve())
+    assert "next_command:" in status.stdout
+
+
+def test_project_launcher_clears_node_preload_environment(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    outside = tmp_path / "outside.txt"
+    preload = tmp_path / "preload.cjs"
+    project.mkdir()
+    preload.write_text(
+        f"require('node:fs').writeFileSync({str(outside)!r}, 'changed');\n",
+        encoding="utf-8",
+    )
+    assert _install(project).returncode == 0
+    launcher = project / ".agent-flow" / "bin" / "agent-flow"
+    env = dict(os.environ)
+    env["HOME"] = str(project.parent / "test-home")
+    env["AGENT_FLOW_AUTO_EXTERNAL_SKILLS"] = "1"
+    env["NODE_OPTIONS"] = f"--require={preload}"
+
+    result = subprocess.run(
+        (str(launcher), "status"),
+        cwd=project,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not outside.exists()
+
+
+def test_packaged_runtime_resolves_bare_python_from_path(tmp_path: Path) -> None:
+    seed = tmp_path / "seed"
+    project = tmp_path / "project"
+    package = tmp_path / "package"
+    fake_bin = tmp_path / "bin"
+    seed.mkdir()
+    project.mkdir()
+    fake_bin.mkdir()
+    assert _install(seed).returncode == 0
+    shutil.copytree(seed / ".agent-flow" / "runtime" / "node", package)
+    python = fake_bin / "python3.12"
+    yaml_site = Path(yaml.__file__).resolve().parent.parent
+    python.write_text(
+        "#!/bin/sh\n"
+        f"PYTHONPATH={shlex.quote(str(yaml_site))}${{PYTHONPATH:+:$PYTHONPATH}}\n"
+        "export PYTHONPATH\n"
+        f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+    env = dict(os.environ)
+    env["HOME"] = str(project.parent / "test-home")
+    env["AGENT_FLOW_AUTO_EXTERNAL_SKILLS"] = "1"
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"
+    for name in ("PYTHON", "PYTHON_EXECUTABLE", "VIRTUAL_ENV"):
+        env.pop(name, None)
+    runtime_entry = package / "bin" / "agent-flow-kit.mjs"
+
+    result = subprocess.run(
+        (_node(), str(runtime_entry), "install"),
+        cwd=project,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    kit = json.loads((project / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
+    assert kit["project_runtime_contract"]["python"]["path"] == str(python)
 
 
 def test_overlong_skill_installs_and_validates_without_length_diagnostic(tmp_path: Path) -> None:

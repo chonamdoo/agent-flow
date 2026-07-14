@@ -22,9 +22,13 @@ const AGENT_FLOW_COMMAND = "agent-flow";
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
 const KIT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const RUNTIME_PYTHON_RELATIVE = path.join(".agent-flow", "runtime", "python");
+const RUNTIME_NODE_RELATIVE = path.join(".agent-flow", "runtime", "node");
+const PROJECT_LAUNCHER_RELATIVE = path.join(".agent-flow", "bin", "agent-flow");
+const NODE_RUN_SUBCOMMANDS = new Set(["start", "status", "next", "advance", "push-watch", "push-watch-tick"]);
 const installArgs = process.argv.slice(3);
 const forceManaged = installArgs.includes("--force-managed");
 let cachedFullFeatureWorkflow = null;
+let cachedProjectPythonPath = null;
 let activeManagedInstallTransaction = null;
 const PROJECT_SKILL_HOSTS = Object.freeze(["claude", "codex", "omp"]);
 const SKILL_LINKS_COMMITMENT_VERSION = 1;
@@ -161,6 +165,168 @@ function syncProject(rootOverride = null) {
   console.log(`agent-flow documents synced root=${root}`);
 }
 
+function installProjectNodeRuntime(root) {
+  const runtimeRoot = path.join(root, RUNTIME_NODE_RELATIVE);
+  if (!samePath(runtimeRoot, KIT_ROOT)) {
+    const bundledDirectories = [
+      ["lib", "lib"],
+      ["workflows", "workflows"],
+      ["profiles", "profiles"],
+      ["skills", "skills"],
+      ["templates", "templates"],
+      ["scripts", "scripts"],
+      ["bootstrap", "bootstrap"],
+      [path.join("src", "agent_flow"), path.join("src", "agent_flow")],
+      [path.join(".Codex", "agents"), path.join(".Codex", "agents")],
+      [path.join(".Codex", "rules"), path.join(".Codex", "rules")],
+      [path.join(".Codex", "context"), path.join(".Codex", "context")],
+      [path.join(".claude", "agents"), path.join(".claude", "agents")],
+    ];
+    withManagedInstallMutation(runtimeRoot, (managedRuntime) => {
+      const boundary = managedWriteBoundary(managedRuntime);
+      withManagedDirectoryCwd(boundary, path.dirname(managedRuntime), true, () => {
+        const name = path.basename(managedRuntime);
+        if (lstatIfExists(name)) fs.rmSync(name, { recursive: true, force: true });
+        fs.mkdirSync(name);
+      });
+      for (const [source, destination] of bundledDirectories) {
+        copyRuntimeTree(path.join(KIT_ROOT, source), managedRuntime, destination);
+      }
+      copyRuntimeTree(path.join(KIT_ROOT, "bin"), managedRuntime, "bin");
+    });
+  }
+  writeManagedExecutableFile(
+    path.join(root, PROJECT_LAUNCHER_RELATIVE),
+    projectLauncherSource(),
+  );
+}
+
+function copyRuntimeTree(sourceRoot, runtimeRoot, destinationRelative) {
+  const source = fs.lstatSync(sourceRoot);
+  if (!source.isDirectory() || source.isSymbolicLink()) {
+    throw new Error(`project runtime source is unsafe: ${sourceRoot}`);
+  }
+  const destinationRoot = path.join(runtimeRoot, destinationRelative);
+  ensureManagedDirectory(destinationRoot, runtimeRoot);
+  const visit = (sourceDirectory, destinationDirectory) => {
+    for (const entry of fs.readdirSync(sourceDirectory, { withFileTypes: true })) {
+      if (entry.name === "__pycache__" || entry.name.endsWith(".pyc")) continue;
+      const sourcePath = path.join(sourceDirectory, entry.name);
+      const destinationPath = path.join(destinationDirectory, entry.name);
+      const stat = fs.lstatSync(sourcePath);
+      if (stat.isSymbolicLink()) {
+        throw new Error(`project runtime source contains a symlink: ${sourcePath}`);
+      }
+      if (entry.isDirectory()) {
+        ensureManagedDirectory(destinationPath, runtimeRoot);
+        visit(sourcePath, destinationPath);
+      } else if (entry.isFile()) {
+        writeManagedRegularFile(
+          destinationPath,
+          fs.readFileSync(sourcePath),
+          runtimeRoot,
+          stat.mode & 0o777,
+        );
+      } else {
+        throw new Error(`project runtime source contains a special file: ${sourcePath}`);
+      }
+    }
+  };
+  visit(sourceRoot, destinationRoot);
+}
+
+function projectLauncherSource() {
+  const nodePath = shellSingleQuote(fs.realpathSync(process.execPath));
+  const pythonPath = shellSingleQuote(projectPythonPath());
+  return `#!/bin/sh
+unset NODE_OPTIONS NODE_PATH BASH_ENV ENV LD_PRELOAD LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH PYTHONPATH PYTHONHOME PYTHONSTARTUP
+PYTHON=${pythonPath}
+PYTHON_EXECUTABLE=${pythonPath}
+export PYTHON PYTHON_EXECUTABLE
+launcher_dir=\${0%/*}
+if [ "$launcher_dir" = "$0" ]; then launcher_dir=.; fi
+exec ${nodePath} "$launcher_dir/../runtime/node/bin/agent-flow-kit.mjs" "$@"
+`;
+}
+
+function shellSingleQuote(value) {
+  return `'${String(value).replaceAll("'", `'"'"'`)}'`;
+}
+
+function projectPythonPath() {
+  if (cachedProjectPythonPath === null) {
+    const root = resolveAgentFlowRoot(process.cwd());
+    const contract = root
+      ? readJsonIfExists(path.join(root, ".agent-flow", "kit.json"))?.project_runtime_contract?.python
+      : null;
+    if (contract) {
+      const configured = String(contract.path || "");
+      const resolved = String(contract.resolved_path || "");
+      if (
+        !path.isAbsolute(configured)
+        || fs.realpathSync(configured) !== resolved
+        || !pythonSupportsWorkflowExport(configured)
+      ) {
+        throw new Error("project runtime Python contract is invalid");
+      }
+      cachedProjectPythonPath = configured;
+    } else {
+      cachedProjectPythonPath = resolveExecutablePath(preferredPython());
+    }
+  }
+  return cachedProjectPythonPath;
+}
+
+function resolveExecutablePath(candidate) {
+  const value = String(candidate);
+  const hasPathComponent = path.isAbsolute(value) || value.includes("/") || value.includes("\\");
+  const directories = hasPathComponent
+    ? [""]
+    : String(process.env.PATH || "").split(path.delimiter).filter(Boolean);
+  const extensions = process.platform === "win32" && path.extname(value) === ""
+    ? String(process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM").split(";").filter(Boolean)
+    : [""];
+  for (const directory of directories) {
+    for (const extension of extensions) {
+      const pathName = path.resolve(directory || ".", `${value}${extension}`);
+      try {
+        const stat = fs.statSync(pathName);
+        fs.accessSync(pathName, fs.constants.X_OK);
+        if (stat.isFile()) return pathName;
+      } catch {
+        // 다음 PATH 후보를 확인한다.
+      }
+    }
+  }
+  throw new Error(`validated Python executable cannot be resolved: ${candidate}`);
+}
+
+function projectRuntimeContract(root) {
+  const launcher = path.join(root, PROJECT_LAUNCHER_RELATIVE);
+  const runtime = path.join(root, RUNTIME_NODE_RELATIVE);
+  if (!fs.existsSync(launcher) || !fs.existsSync(runtime)) {
+    throw new Error("project runtime installation is incomplete");
+  }
+  return {
+    version: 1,
+    launcher: {
+      path: PROJECT_LAUNCHER_RELATIVE.split(path.sep).join("/"),
+      sha256: crypto.createHash("sha256").update(fs.readFileSync(launcher)).digest("hex"),
+    },
+    node: {
+      path: fs.realpathSync(process.execPath),
+    },
+    python: {
+      path: projectPythonPath(),
+      resolved_path: fs.realpathSync(projectPythonPath()),
+    },
+    runtime: {
+      path: RUNTIME_NODE_RELATIVE.split(path.sep).join("/"),
+      integrity: treeIntegrity(runtime),
+    },
+  };
+}
+
 function installProjectUnlocked(root, context, lock) {
   const agentFlowDir = path.join(root, ".agent-flow");
   const profile = detectProfile(root);
@@ -280,6 +446,7 @@ function installProjectUnlocked(root, context, lock) {
     true,
     true,
   );
+  installProjectNodeRuntime(root);
   if (!samePath(root, KIT_ROOT)) {
     removeManagedDirIfSame(path.join(KIT_ROOT, "scripts"), path.join(root, "scripts"), forceManaged);
   }
@@ -357,6 +524,7 @@ function installProjectUnlocked(root, context, lock) {
   payload.managed_hook_contract = managedHookContract(root);
   payload.managed_hook_contract_commitment_version = MANAGED_HOOK_CONTRACT_COMMITMENT_VERSION;
   payload.managed_hook_contract_commitment = managedHookContractCommitment(payload);
+  payload.project_runtime_contract = projectRuntimeContract(root);
 
   writeManagedFile(path.join(agentFlowDir, "kit.json"), `${JSON.stringify(payload, null, 2)}\n`);
   holdInstallForTest("AGENT_FLOW_TEST_HOLD_BEFORE_MANAGED_INSTALL_SEAL_MS", "managed-install-before-seal");
@@ -571,6 +739,7 @@ function exportWorkflowDefinition(name) {
     stdio: ["ignore", "pipe", "pipe"],
     env: {
       ...process.env,
+      PYTHONDONTWRITEBYTECODE: "1",
       PYTHONPATH: [path.join(KIT_ROOT, "src"), process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
     },
     timeout: 10_000,
@@ -2177,6 +2346,8 @@ function managedInstallPaths(root) {
     ...["workflows", "profiles", "templates", "scripts", "prompts", "rules", "bootstrap"]
       .map((name) => path.join(agentFlowDir, name)),
     path.join(root, RUNTIME_PYTHON_RELATIVE, "agent_flow"),
+    path.join(root, RUNTIME_NODE_RELATIVE),
+    path.join(root, PROJECT_LAUNCHER_RELATIVE),
     path.join(agentFlowDir, "kit.json"),
     path.join(root, "scripts"),
     path.join(root, ".Codex", "agents"),
@@ -2305,7 +2476,7 @@ const MANAGED_NOREPLACE_RENAME = [
 
 function renameManagedNoReplace(sourceName, targetName) {
   const result = safeSpawnSync(
-    preferredPython(),
+    projectPythonPath(),
     ["-I", "-c", MANAGED_NOREPLACE_RENAME, sourceName, targetName],
     { stdio: ["ignore", "ignore", "pipe"], encoding: "utf8", timeout: 10_000 },
   );
@@ -5601,9 +5772,27 @@ function runPythonCliCommand(subcommand, args) {
       stdio: ["ignore", "inherit", "inherit"],
     },
   );
-  if (result.error) {
-    throw result.error;
-  }
+}
+
+function runProjectPythonCli(args) {
+  const root = resolveAgentFlowRoot(process.cwd());
+  const pythonPathEntries = [
+    path.join(KIT_ROOT, "src"),
+    installedPythonRuntimePath(root),
+  ].filter(Boolean);
+  const result = safeSpawnSync(projectPythonPath(), ["-m", "agent_flow.cli", ...args], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PYTHONDONTWRITEBYTECODE: "1",
+      PYTHONNOUSERSITE: "1",
+      PYTHONSAFEPATH: "1",
+      PYTHONPATH: [...new Set(pythonPathEntries)].join(path.delimiter),
+    },
+    stdio: "inherit",
+    timeout: 30 * 60 * 1000,
+  });
+  if (result.error) throw result.error;
   process.exit(result.status ?? 1);
 }
 
@@ -5629,8 +5818,20 @@ try {
   }
 
   if (command === "run") {
-    runWorkflowCommand(process.argv.slice(3));
+    const runArgs = process.argv.slice(3);
+    if (!NODE_RUN_SUBCOMMANDS.has(runArgs[0])) {
+      runProjectPythonCli(["run", ...runArgs]);
+    }
+    runWorkflowCommand(runArgs);
     process.exit(0);
+  }
+
+  if (command === "status") {
+    runProjectPythonCli(["status"]);
+  }
+
+  if (command === "continue") {
+    runProjectPythonCli(["continue"]);
   }
 
   if (command === "architecture-lint") {
