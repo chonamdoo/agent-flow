@@ -366,6 +366,7 @@ function installProjectUnlocked(root, context) {
 function runWorkflowCommand(args) {
   const subcommand = args[0];
   const root = resolveAgentFlowRoot(process.cwd());
+  refreshSkillCatalogAtBoundary(root);
   if (subcommand === "start") {
     const task = optionValue(args, "--task");
     if (!task) {
@@ -380,6 +381,8 @@ function runWorkflowCommand(args) {
     if (fs.existsSync(runDir)) {
       throw new Error(`run already exists: ${runId}`);
     }
+    const workspace = captureNodeWorkspaceIdentity(process.cwd(), root);
+    const skillPlan = currentNodeSkillPlan(root);
     fs.mkdirSync(path.join(runDir, "artifacts"), { recursive: true });
     fs.mkdirSync(path.join(runDir, "logs"), { recursive: true });
     const startedAt = new Date().toISOString();
@@ -393,6 +396,9 @@ function runWorkflowCommand(args) {
       run_dir: runDirRel,
       started_at: startedAt,
       phase_entered_at: startedAt,
+      workspace_root: workspace.workspace_root,
+      ...(workspace.identity ? { workspace: workspace.identity } : {}),
+      ...skillPlan,
     };
     writeJson(path.join(runDir, "manifest.json"), state);
     writeJson(currentRunPath(root), state);
@@ -401,19 +407,34 @@ function runWorkflowCommand(args) {
   }
 
   if (subcommand === "status") {
-    const state = readCurrentRun(root);
+    const state = assertNodeRunBoundary(readCurrentRun(root), root);
+    assertNodeSkillPlanPinned(state, root);
     printStatus(state, root);
     return;
   }
 
   if (subcommand === "next") {
-    printNext(readCurrentRun(root), root);
+    const state = assertNodeRunBoundary(readCurrentRun(root), root);
+    assertNodeSkillPlanPinned(state, root);
+    printNext(state, root);
     return;
   }
 
   if (subcommand === "push-watch") {
     assertInstalled(root);
-    const branch = currentBranch(process.cwd());
+    let current;
+    try {
+      current = readCurrentRun(root);
+    } catch (error) {
+      const invocationBranch = currentBranch(process.cwd());
+      if (["main", "master", "develop"].includes(invocationBranch)) {
+        throw new Error(`blocked: protected branch ${invocationBranch}`);
+      }
+      throw error;
+    }
+    const active = assertNodeRunBoundary(current, root);
+    assertNodeSkillPlanPinned(active, root);
+    const branch = currentBranch(active.workspace_root ?? process.cwd());
     if (["main", "master", "develop"].includes(branch)) {
       throw new Error(`blocked: protected branch ${branch}`);
     }
@@ -430,12 +451,13 @@ function runWorkflowCommand(args) {
 
   if (subcommand === "push-watch-tick") {
     assertInstalled(root);
-    const state = readCurrentRun(root);
+    const state = assertNodeRunBoundary(readCurrentRun(root), root);
+    assertNodeSkillPlanPinned(state, root);
     if (state.phase !== "pr-watch") {
       throw new Error(`blocked: push-watch-tick requires current phase pr-watch, got ${state.phase}`);
     }
     const runDir = resolveRunDir(root, state.run_dir);
-    const pr = readPullRequestStatus(process.cwd());
+    const pr = readPullRequestStatus(state.workspace_root ?? process.cwd());
     const watchStatus = pullRequestWatchStatus(pr);
     const artifact = path.join(runDir, "artifacts", "pr-watch.md");
     writeManagedFile(
@@ -457,7 +479,8 @@ function runWorkflowCommand(args) {
   }
 
   if (subcommand === "advance") {
-    const state = readCurrentRun(root);
+    const state = assertNodeRunBoundary(readCurrentRun(root), root);
+    assertNodeSkillPlanPinned(state, root);
     const runDir = resolveRunDir(root, state.run_dir);
     if (state.status === "complete" || state.phase === "complete") {
       console.log(`workflow already complete: ${state.run_id}`);
@@ -1404,6 +1427,7 @@ function printNext(state, root = null) {
   const localSkillBlock = root ? localSkillPromptBlock(root, phase.id) : "";
   console.log(`Current phase: ${phase.id}`);
   console.log(`Run: ${state.run_id}`);
+  console.log(`Workspace root: ${state.workspace_root ?? root ?? process.cwd()}`);
   console.log(`Required artifact: ${path.join(state.run_dir, phase.artifact)}`);
   console.log(`Instruction: ${phase.instruction}${localSkillBlock}`);
 }
@@ -1449,6 +1473,7 @@ function printStatus(state, root) {
     run: `${state.workflow}/${state.run_id}`,
     task: state.task ?? "",
     current_phase: phase?.id ?? "-",
+    workspace_root: state.workspace_root ?? root,
     reason,
     required_artifact: requiredArtifact,
     next_command: nextCommand,
@@ -1458,6 +1483,7 @@ function printStatus(state, root) {
   console.log(`run: ${statusValue(payload.run)}`);
   console.log(`task: ${statusValue(payload.task)}`);
   console.log(`current_phase: ${statusValue(payload.current_phase)}`);
+  console.log(`workspace_root: ${statusValue(payload.workspace_root)}`);
   console.log(`reason: ${statusValue(reason)}`);
   if (requiredArtifact) {
     console.log(`required_artifact: ${statusValue(requiredArtifact)}`);
