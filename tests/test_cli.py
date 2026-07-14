@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import contextlib
 import io
 import os
@@ -1485,9 +1486,8 @@ class CliTest(unittest.TestCase):
                 (project_root / ".agent-flow" / "skills" / "comment-authoring-discipline" / "SKILL.md").is_file()
             )
             self.assertTrue((project_root / ".agent-flow" / "skills" / "comment-checker" / "SKILL.md").is_file())
-            expected_comment_checker = (
-                f"'{project_root.resolve() / '.agent-flow' / 'scripts' / 'hooks' / 'comment-checker.py'}'"
-            )
+            comment_checker = project_root.resolve() / ".agent-flow" / "scripts" / "hooks" / "comment-checker.py"
+            encoded_comment_checker = base64.b64encode(str(comment_checker).encode("utf-8")).decode("ascii")
             for hooks_path in (
                 project_root / ".Codex" / "hooks.json",
                 project_root / ".codex" / "hooks.json",
@@ -1499,7 +1499,13 @@ class CliTest(unittest.TestCase):
                     for entry in codex_hooks["hooks"]["PostToolUse"]
                     for hook in entry["hooks"]
                 ]
-                self.assertIn(expected_comment_checker, codex_hook_commands)
+                self.assertTrue(
+                    any(
+                        command.startswith("'/usr/bin/python3' -I -c ")
+                        and f"'{encoded_comment_checker}'" in command
+                        for command in codex_hook_commands
+                    )
+                )
                 self.assertNotIn(str(Path(__file__).resolve().parents[1]), "\n".join(codex_hook_commands))
             omp_extension = project_root / ".omp" / "extensions" / "agent-flow-hooks.ts"
             self.assertTrue(omp_extension.is_file())
@@ -1754,14 +1760,18 @@ class CliTest(unittest.TestCase):
             ]
             resolved_root = project_root.resolve()
             expected = [
-                f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-worktree.sh'}'",
-                f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-protected-branch.sh'}'",
-                f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-worktree-write.py'}'",
-                f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-worktree-write.py'}'",
-                f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'comment-checker.py'}'",
-                f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'show-phase-status.sh'}'",
+                resolved_root / ".agent-flow" / "scripts" / "hooks" / "guard-worktree.sh",
+                resolved_root / ".agent-flow" / "scripts" / "hooks" / "guard-protected-branch.sh",
+                resolved_root / ".agent-flow" / "scripts" / "hooks" / "guard-worktree-write.py",
+                resolved_root / ".agent-flow" / "scripts" / "hooks" / "guard-worktree-write.py",
+                resolved_root / ".agent-flow" / "scripts" / "hooks" / "comment-checker.py",
+                resolved_root / ".agent-flow" / "scripts" / "hooks" / "show-phase-status.sh",
             ]
-            self.assertEqual(commands, expected)
+            self.assertEqual(len(commands), len(expected))
+            for command, script_path in zip(commands, expected):
+                encoded_path = base64.b64encode(str(script_path).encode("utf-8")).decode("ascii")
+                self.assertTrue(command.startswith("'/usr/bin/python3' -I -c "))
+                self.assertIn(f"'{encoded_path}'", command)
             omp_extension = (project_root / ".omp" / "extensions" / "agent-flow-hooks.ts").read_text(
                 encoding="utf-8"
             )
@@ -1800,10 +1810,15 @@ class CliTest(unittest.TestCase):
                 for entry in settings["hooks"][event]
                 for hook in entry["hooks"]
             ]
-            expected_checker = (
-                f"'{project_root.resolve() / '.agent-flow' / 'scripts' / 'hooks' / 'comment-checker.py'}'"
+            checker_path = project_root.resolve() / ".agent-flow" / "scripts" / "hooks" / "comment-checker.py"
+            encoded_checker = base64.b64encode(str(checker_path).encode("utf-8")).decode("ascii")
+            self.assertTrue(
+                any(
+                    command.startswith("'/usr/bin/python3' -I -c ")
+                    and f"'{encoded_checker}'" in command
+                    for command in commands
+                )
             )
-            self.assertIn(expected_checker, commands)
             self.assertTrue(
                 os.access(project_root / ".agent-flow" / "scripts" / "hooks" / "comment-checker.py", os.X_OK)
             )
@@ -1906,9 +1921,10 @@ class CliTest(unittest.TestCase):
                             check=False,
                         )
                         self.assertEqual(result.returncode, 0, result.stderr)
-                        expected_checker = (
-                            f"'{project_root.resolve() / '.agent-flow' / 'scripts' / 'hooks' / 'comment-checker.py'}'"
+                        checker_path = (
+                            project_root.resolve() / ".agent-flow" / "scripts" / "hooks" / "comment-checker.py"
                         )
+                        encoded_checker = base64.b64encode(str(checker_path).encode("utf-8")).decode("ascii")
                         for installed_hooks_path in (
                             project_root / ".Codex" / "hooks.json",
                             project_root / ".codex" / "hooks.json",
@@ -1921,7 +1937,13 @@ class CliTest(unittest.TestCase):
                                 for hook in entry["hooks"]
                             ]
                             self.assertIn(custom_command, commands)
-                            self.assertIn(expected_checker, commands)
+                            self.assertTrue(
+                                any(
+                                    command.startswith("'/usr/bin/python3' -I -c ")
+                                    and f"'{encoded_checker}'" in command
+                                    for command in commands
+                                )
+                            )
 
     def test_node_installers_preserve_existing_claude_custom_hooks(self) -> None:
         for installer in ("agent-flow-kit.mjs", "agent-flow-install.mjs"):
@@ -1968,11 +1990,18 @@ class CliTest(unittest.TestCase):
                         for entry in entries
                         for hook in entry["hooks"]
                     ]
-                    expected_checker = (
-                        f"'{project_root.resolve() / '.agent-flow' / 'scripts' / 'hooks' / 'comment-checker.py'}'"
+                    checker_path = (
+                        project_root.resolve() / ".agent-flow" / "scripts" / "hooks" / "comment-checker.py"
                     )
+                    encoded_checker = base64.b64encode(str(checker_path).encode("utf-8")).decode("ascii")
                     self.assertIn("custom-post-hook", commands)
-                    self.assertIn(expected_checker, commands)
+                    self.assertTrue(
+                        any(
+                            command.startswith("'/usr/bin/python3' -I -c ")
+                            and f"'{encoded_checker}'" in command
+                            for command in commands
+                        )
+                    )
 
     def test_node_installers_dedupe_stop_hook_on_upgrade(self) -> None:
         # 과거 설치본은 Stop entry에 matcher: ""를 기록했다. 재설치 시 중복되면 안 된다.
@@ -1988,9 +2017,12 @@ class CliTest(unittest.TestCase):
                             f"cd '{project_root.resolve()}' && "
                             f"'{project_root.resolve() / '.agent-flow' / 'scripts' / 'hooks' / 'show-phase-status.sh'}'"
                         )
-                        expected_stop_command = (
-                            f"'{project_root.resolve() / '.agent-flow' / 'scripts' / 'hooks' / 'show-phase-status.sh'}'"
+                        expected_stop_path = (
+                            project_root.resolve() / ".agent-flow" / "scripts" / "hooks" / "show-phase-status.sh"
                         )
+                        encoded_stop_path = base64.b64encode(
+                            str(expected_stop_path).encode("utf-8")
+                        ).decode("ascii")
                         legacy_command = stop_command if scenario == "root-script" else cd_stop_command
                         seeded = {
                             "hooks": {
@@ -2034,9 +2066,13 @@ class CliTest(unittest.TestCase):
                                 for entry in settings["hooks"]["Stop"]
                                 for hook in entry["hooks"]
                             ]
-                            self.assertEqual(
-                                stop_commands.count(expected_stop_command), 1, f"{installer}: {settings_path}"
-                            )
+                            managed_stop_commands = [
+                                command
+                                for command in stop_commands
+                                if command.startswith("'/usr/bin/python3' -I -c ")
+                                and f"'{encoded_stop_path}'" in command
+                            ]
+                            self.assertEqual(len(managed_stop_commands), 1, f"{installer}: {settings_path}")
                             self.assertNotIn(stop_command, stop_commands)
                             self.assertNotIn(cd_stop_command, stop_commands)
 

@@ -1580,11 +1580,11 @@ function copyBundledDirIfMissingOrSame(
       const destPath = path.join(dest, entry.name);
       if (entry.isDirectory()) {
         if (isRoot && allowedRootDirs && !allowedRootDirs.has(entry.name)) {
-          removeManagedDirIfSame(srcPath, destPath, force);
+          removeManagedDirIfSame(srcPath, destPath, force, false);
           continue;
         }
         if (isRoot && excludedRootDirs.has(entry.name)) {
-          removeManagedDirIfSame(srcPath, destPath, force);
+          removeManagedDirIfSame(srcPath, destPath, force, false);
           continue;
         }
         copyBundledDirIfMissingOrSame(srcPath, destPath, force, excludedRootDirs, false, pruneExtraneous, preservedExtraneousRootNames, null);
@@ -1608,14 +1608,16 @@ function copyBundledDirIfMissingOrSame(
   else copy();
 }
 
-function removeManagedDirIfSame(src, dest, force = false) {
+function removeManagedDirIfSame(src, dest, force = false, track = true) {
   if (!fs.existsSync(dest)) {
     return;
   }
   if (!force && !dirContentsMatch(src, dest)) {
     return;
   }
-  fs.rmSync(dest, { recursive: true, force: true });
+  const remove = () => fs.rmSync(dest, { recursive: true, force: true });
+  if (track) withManagedInstallMutation(dest, remove);
+  else remove();
 }
 
 function removeStaleContextDocsScripts(agentFlowDir, force = false) {
