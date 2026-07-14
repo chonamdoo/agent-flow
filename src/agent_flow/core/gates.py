@@ -25,9 +25,10 @@ class GateResult:
 
 
 def run_gate(command: GateCommand, *, cwd: Path, timeout_s: int = 600) -> GateResult:
-    executable_command = _resolve_gate_command(command.command, cwd)
-    recorded_command = _recorded_gate_command(executable_command, cwd)
+    recorded_command = _recorded_gate_command(command.command, cwd)
     try:
+        executable_command = _resolve_gate_command(command.command, cwd)
+        recorded_command = _recorded_gate_command(executable_command, cwd)
         completed = subprocess.run(
             executable_command,
             cwd=cwd,
@@ -99,6 +100,11 @@ def _installed_python_runtime_path(cwd: Path) -> Path | None:
 
 
 def _resolve_gate_command(command: tuple[str, ...], cwd: Path) -> tuple[str, ...]:
+    if command and command[0] == "agent-flow":
+        launcher = os.environ.get("AGENT_FLOW_PROJECT_LAUNCHER")
+        if not launcher or not Path(launcher).is_absolute():
+            raise OSError("project-local agent-flow launcher is not pinned")
+        return (launcher, *command[1:])
     return command
 
 

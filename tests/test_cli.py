@@ -4,6 +4,7 @@ import base64
 import contextlib
 import io
 import os
+import shlex
 import site
 import shutil
 import sys
@@ -5849,6 +5850,31 @@ if (!missing?.block) {
             self.assertTrue(result.passed)
             self.assertEqual(result.exit_code, 0)
             self.assertEqual(result.stdout.strip(), "ok")
+
+    def test_run_gate_pins_agent_flow_to_project_launcher(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            launcher = root / "project-agent-flow"
+            fake_bin = root / "fake-bin"
+            marker = root / "fake-ran"
+            fake_bin.mkdir()
+            launcher.write_text("#!/bin/sh\nprintf 'project-launcher\\n'\n", encoding="utf-8")
+            launcher.chmod(0o755)
+            fake = fake_bin / "agent-flow"
+            fake.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(marker))}\n", encoding="utf-8")
+            fake.chmod(0o755)
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "AGENT_FLOW_PROJECT_LAUNCHER": str(launcher),
+                    "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+                },
+            ):
+                result = run_gate(GateCommand("pinned", ("agent-flow", "status")), cwd=root)
+
+            self.assertTrue(result.passed, result.stderr)
+            self.assertEqual(result.stdout.strip(), "project-launcher")
+            self.assertFalse(marker.exists())
 
     def test_gates_cli_writes_results_for_run_dir(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

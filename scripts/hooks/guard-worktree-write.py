@@ -7,6 +7,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -379,7 +380,7 @@ def _is_agent_flow_launcher(command: str, cwd: Path, leader_root: Path, pinned_r
             node_contract = contract["node"]
             python_contract = contract["python"]
             if (
-                contract["version"] != 2
+                contract["version"] != 3
                 or kit["project_runtime_contract_commitment_version"] != 1
                 or kit["project_runtime_contract_commitment"] != _project_runtime_contract_commitment(contract)
                 or launcher_contract["path"] != ".agent-flow/bin/agent-flow"
@@ -394,6 +395,9 @@ def _is_agent_flow_launcher(command: str, cwd: Path, leader_root: Path, pinned_r
             return (
                 hashlib.sha256(local_launcher.read_bytes()).hexdigest() == launcher_contract["sha256"]
                 and _runtime_tree_integrity(runtime) == runtime_contract["integrity"]
+                and _verify_executable_contract(node_contract)
+                and _verify_executable_contract(contract["git"])
+                and _verify_executable_contract(python_contract, "resolved_path")
             )
         except (KeyError, OSError, TypeError, ValueError):
             return False
@@ -419,14 +423,20 @@ def _is_agent_flow_launcher(command: str, cwd: Path, leader_root: Path, pinned_r
         kit = json.loads(kit_path.read_text(encoding="utf-8"))
         contract = kit["project_runtime_contract"]
         node_path = Path(contract["node"]["path"])
+        selected_node = shutil.which("node")
         return (
-            contract["version"] == 2
+            contract["version"] == 3
             and kit["project_runtime_contract_commitment_version"] == 1
             and kit["project_runtime_contract_commitment"] == _project_runtime_contract_commitment(contract)
             and contract["runtime"]["path"] == ".agent-flow/runtime/node"
             and _runtime_tree_integrity(runtime_root) == contract["runtime"]["integrity"]
             and node_path.is_absolute()
             and node_path.resolve(strict=True) == node_path
+            and selected_node is not None
+            and Path(selected_node).resolve(strict=True) == node_path
+            and _verify_executable_contract(contract["node"])
+            and _verify_executable_contract(contract["git"])
+            and _verify_executable_contract(contract["python"], "resolved_path")
             and hashlib.sha256(runtime.read_bytes()).digest() == hashlib.sha256(candidate.read_bytes()).digest()
             and _global_runtime_matches(candidate, runtime_root)
         )
@@ -486,9 +496,24 @@ def _project_runtime_contract_commitment(contract: dict[str, object]) -> str:
         contract["launcher"]["path"],
         contract["launcher"]["sha256"],
         contract["node"]["path"],
+        contract["node"]["sha256"],
+        contract["node"]["device"],
+        contract["node"]["inode"],
+        contract["node"]["links"],
+        contract["node"]["mode"],
         contract["git"]["path"],
+        contract["git"]["sha256"],
+        contract["git"]["device"],
+        contract["git"]["inode"],
+        contract["git"]["links"],
+        contract["git"]["mode"],
         contract["python"]["path"],
         contract["python"]["resolved_path"],
+        contract["python"]["sha256"],
+        contract["python"]["device"],
+        contract["python"]["inode"],
+        contract["python"]["links"],
+        contract["python"]["mode"],
         contract["runtime"]["path"],
         contract["runtime"]["integrity"],
         contract["python_runtime"]["path"],
@@ -497,6 +522,23 @@ def _project_runtime_contract_commitment(contract: dict[str, object]) -> str:
     return hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def _verify_executable_contract(contract: dict[str, object], path_key: str = "path") -> bool:
+    candidate = Path(str(contract[path_key]))
+    resolved = candidate.resolve(strict=True)
+    metadata = resolved.lstat()
+    return (
+        candidate.is_absolute()
+        and not resolved.is_symlink()
+        and resolved.is_file()
+        and metadata.st_mode & 0o022 == 0
+        and hashlib.sha256(resolved.read_bytes()).hexdigest() == contract["sha256"]
+        and str(metadata.st_dev) == contract["device"]
+        and str(metadata.st_nlink) == contract["links"]
+        and (str(metadata.st_nlink) != "1" or str(metadata.st_ino) == contract["inode"])
+        and stat.S_IMODE(metadata.st_mode) == contract["mode"]
+    )
 
 
 def _legacy_runtime_tree_hash(root: Path) -> str:
@@ -558,19 +600,22 @@ def _verify_boundary_runtime(leader_root: Path, runtime_root: Path) -> None:
     try:
         kit = json.loads(kit_path.read_text(encoding="utf-8"))
         contract = kit["project_runtime_contract"]
-        commitment = _project_runtime_contract_commitment(contract)
         embedded = EXPECTED_PROJECT_RUNTIME_CONTRACT_SHA256
         embedded_python = EXPECTED_PYTHON_RUNTIME_INTEGRITY
         embedded_authority = not embedded.startswith("__AGENT_FLOW_")
         if not embedded_authority and "node_runtime" in contract:
             _verify_legacy_boundary_runtime(leader_root, kit, contract)
             return
+        commitment = _project_runtime_contract_commitment(contract)
         if (
-            contract["version"] != 2
+            contract["version"] != 3
             or kit["project_runtime_contract_commitment_version"] != 1
             or kit["project_runtime_contract_commitment"] != commitment
             or contract["python_runtime"]["path"] != ".agent-flow/runtime/python"
             or _runtime_tree_integrity(runtime_root) != contract["python_runtime"]["integrity"]
+            or not _verify_executable_contract(contract["node"])
+            or not _verify_executable_contract(contract["git"])
+            or not _verify_executable_contract(contract["python"], "resolved_path")
         ):
             raise ValueError("project runtime contract is invalid")
         if embedded_authority and embedded != commitment:

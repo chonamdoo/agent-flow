@@ -54,9 +54,24 @@ def _runtime_contract_commitment(contract: dict[str, object]) -> str:
         contract["launcher"]["path"],
         contract["launcher"]["sha256"],
         contract["node"]["path"],
+        contract["node"]["sha256"],
+        contract["node"]["device"],
+        contract["node"]["inode"],
+        contract["node"]["links"],
+        contract["node"]["mode"],
         contract["git"]["path"],
+        contract["git"]["sha256"],
+        contract["git"]["device"],
+        contract["git"]["inode"],
+        contract["git"]["links"],
+        contract["git"]["mode"],
         contract["python"]["path"],
         contract["python"]["resolved_path"],
+        contract["python"]["sha256"],
+        contract["python"]["device"],
+        contract["python"]["inode"],
+        contract["python"]["links"],
+        contract["python"]["mode"],
         contract["runtime"]["path"],
         contract["runtime"]["integrity"],
         contract["python_runtime"]["path"],
@@ -73,6 +88,18 @@ def _git(root: Path, *args: str) -> str:
         check=True,
     )
     return result.stdout.strip()
+
+
+def _executable_identity(path: Path) -> dict[str, object]:
+    resolved = path.resolve()
+    metadata = resolved.lstat()
+    return {
+        "sha256": hashlib.sha256(resolved.read_bytes()).hexdigest(),
+        "device": str(metadata.st_dev),
+        "inode": str(metadata.st_ino),
+        "links": str(metadata.st_nlink),
+        "mode": metadata.st_mode & 0o777,
+    }
 
 
 def _identity(worktree: Path) -> dict[str, object]:
@@ -160,16 +187,23 @@ def pinned_run(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     )
     node = shutil.which("node")
     contract = {
-        "version": 2,
+        "version": 3,
         "launcher": {
             "path": ".agent-flow/bin/agent-flow",
             "sha256": hashlib.sha256(launcher.read_bytes()).hexdigest(),
         },
-        "node": {"path": str(Path(node or sys.executable).resolve())},
-        "git": {"path": str(Path("/usr/bin/git").resolve())},
+        "node": {
+            "path": str(Path(node or sys.executable).resolve()),
+            **_executable_identity(Path(node or sys.executable)),
+        },
+        "git": {
+            "path": str(Path("/usr/bin/git").resolve()),
+            **_executable_identity(Path("/usr/bin/git")),
+        },
         "python": {
             "path": str(Path(sys.executable).absolute()),
             "resolved_path": str(Path(sys.executable).resolve()),
+            **_executable_identity(Path(sys.executable)),
         },
         "runtime": {
             "path": ".agent-flow/runtime/node",
@@ -632,6 +666,38 @@ def test_global_launcher_dependency_tamper_is_rejected(
 
     assert accepted.returncode == 0, accepted.stderr
     assert rejected.returncode == 2
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_global_launcher_with_path_shadowed_node_is_rejected(
+    pinned_run: tuple[Path, Path, Path, Path],
+    tmp_path: Path,
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    package = tmp_path / "global-package"
+    shutil.copytree(leader / ".agent-flow" / "runtime" / "node", package)
+    global_bin = tmp_path / "global-bin"
+    global_bin.mkdir()
+    (global_bin / "agent-flow").symlink_to(package / "bin" / "agent-flow-kit.mjs")
+    fake_node = global_bin / "node"
+    fake_node.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_node.chmod(0o755)
+    clean_env: dict[str, str | None] = {
+        name: None
+        for name in ("PYTHON", "PYTHON_EXECUTABLE", "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP")
+    }
+    clean_env["PATH"] = f"{global_bin}{os.pathsep}/usr/bin:/bin"
+
+    result = _bash_guard(
+        leader,
+        worktree,
+        "agent-flow status",
+        host=host,
+        env_override=clean_env,
+    )
+
+    assert result.returncode == 2
 
 
 @pytest.mark.parametrize("host", ("codex", "claude", "omp"))

@@ -90,7 +90,7 @@ MANAGED_HOOK_VERIFIER = "\n".join(
         " except ValueError: hold=0",
         " if 0<hold<=10000:",
         "  print('agent-flow:test-hook-staged:'+os.path.basename(p),file=sys.stderr,flush=True); time.sleep(hold/1000)",
-        " if p.endswith('.py'): os.execve('/usr/bin/python3',['/usr/bin/python3','-I',source_ref],env)",
+        " if p.endswith('.py'): os.execve('/usr/bin/python3',['/usr/bin/python3','-I','-B',source_ref],env)",
         " if p.endswith('.sh'): os.execve('/bin/bash',['/bin/bash',source_ref],env)",
         " raise OSError('unsupported managed hook type')",
         "except (OSError,UnicodeError,ValueError):",

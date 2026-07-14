@@ -4,6 +4,7 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
 import process from "node:process";
+import nodeOs from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
@@ -19,7 +20,7 @@ import { detectActiveHost } from "../lib/host-detection.mjs";
 
 const command = process.argv[2];
 const configuredAgentFlowCommand = process.env.AGENT_FLOW_PROJECT_LAUNCHER;
-const AGENT_FLOW_COMMAND = configuredAgentFlowCommand && path.isAbsolute(configuredAgentFlowCommand)
+let AGENT_FLOW_COMMAND = configuredAgentFlowCommand && path.isAbsolute(configuredAgentFlowCommand)
   ? shellSingleQuote(configuredAgentFlowCommand)
   : "agent-flow";
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
@@ -28,7 +29,7 @@ const RUNTIME_PYTHON_RELATIVE = path.join(".agent-flow", "runtime", "python");
 const RUNTIME_NODE_RELATIVE = path.join(".agent-flow", "runtime", "node");
 const PROJECT_LAUNCHER_RELATIVE = path.join(".agent-flow", "bin", "agent-flow");
 const NODE_RUN_SUBCOMMANDS = new Set(["start", "status", "next", "advance", "push-watch", "push-watch-tick"]);
-const installArgs = process.argv.slice(3);
+let installArgs = process.argv.slice(3);
 const forceManaged = installArgs.includes("--force-managed");
 let cachedFullFeatureWorkflow = null;
 let cachedProjectPythonPath = null;
@@ -109,6 +110,7 @@ const GENERATED_PROJECT_SKILL_NAMES = new Set([
   "product-brief",
   "push-watch",
 ]);
+const PROJECT_COMMAND_SKILL_NAMES = new Set(["agent-flow", "full-feature-workflow", "push-watch"]);
 function installProject(rootOverride = null) {
   const requestedRoot = rootOverride ? path.resolve(rootOverride) : process.cwd();
   const managedWorktreeRoot = resolveManagedWorktreeRoot(requestedRoot);
@@ -135,11 +137,6 @@ function installProject(rootOverride = null) {
     recoverInterruptedSkillTransaction(root, agentFlowDir, lock.recovery_token);
     installProjectUnlocked(root, context, lock);
     commitSkillInstallTransaction(context.transaction);
-    try {
-      installCodexTrustState(root);
-    } catch (error) {
-      console.error(`warning: Codex trust registration failed after install commit: ${error.message}`);
-    }
   } catch (error) {
     let rollbackError = null;
     try {
@@ -340,20 +337,17 @@ function projectRuntimeContract(root) {
     throw new Error("project runtime installation is incomplete");
   }
   return {
-    version: 2,
+    version: 3,
     launcher: {
       path: PROJECT_LAUNCHER_RELATIVE.split(path.sep).join("/"),
       sha256: crypto.createHash("sha256").update(fs.readFileSync(launcher)).digest("hex"),
     },
-    node: {
-      path: fs.realpathSync(process.execPath),
-    },
-    git: {
-      path: projectGitPath(),
-    },
+    node: executableContract(process.execPath),
+    git: executableContract(projectGitPath()),
     python: {
       path: projectPythonPath(),
       resolved_path: fs.realpathSync(projectPythonPath()),
+      ...executableIdentity(projectPythonPath()),
     },
     runtime: {
       path: RUNTIME_NODE_RELATIVE.split(path.sep).join("/"),
@@ -366,15 +360,69 @@ function projectRuntimeContract(root) {
   };
 }
 
+function executableIdentity(pathName) {
+  const resolved = fs.realpathSync(pathName);
+  const stat = fs.lstatSync(resolved);
+  if (
+    !stat.isFile()
+    || stat.isSymbolicLink()
+    || (stat.mode & 0o022) !== 0
+  ) {
+    throw new Error(`project runtime executable is unsafe: ${pathName}`);
+  }
+  return {
+    sha256: crypto.createHash("sha256").update(fs.readFileSync(resolved)).digest("hex"),
+    device: String(stat.dev),
+    inode: String(stat.ino),
+    links: String(stat.nlink),
+    mode: stat.mode & 0o777,
+  };
+}
+
+function executableContract(pathName) {
+  return {
+    path: fs.realpathSync(pathName),
+    ...executableIdentity(pathName),
+  };
+}
+
+function assertExecutableIdentity(pathName, expected) {
+  const current = executableIdentity(pathName);
+  if (
+    current.sha256 !== expected.sha256
+    || current.device !== expected.device
+    || current.links !== expected.links
+    || (current.links === "1" && current.inode !== expected.inode)
+    || current.mode !== expected.mode
+  ) {
+    throw new Error(`project runtime executable identity changed: ${pathName}`);
+  }
+}
+
 function projectRuntimeContractCommitment(contract) {
   return crypto.createHash("sha256").update(JSON.stringify([
     contract.version,
     contract.launcher.path,
     contract.launcher.sha256,
     contract.node.path,
+    contract.node.sha256,
+    contract.node.device,
+    contract.node.inode,
+    contract.node.links,
+    contract.node.mode,
     contract.git.path,
+    contract.git.sha256,
+    contract.git.device,
+    contract.git.inode,
+    contract.git.links,
+    contract.git.mode,
     contract.python.path,
     contract.python.resolved_path,
+    contract.python.sha256,
+    contract.python.device,
+    contract.python.inode,
+    contract.python.links,
+    contract.python.mode,
     contract.runtime.path,
     contract.runtime.integrity,
     contract.python_runtime.path,
@@ -387,7 +435,7 @@ function assertProjectRuntimeContract(root) {
   const contract = kit?.project_runtime_contract;
   if (
     !contract
-    || contract.version !== 2
+    || contract.version !== 3
     || kit.project_runtime_contract_commitment_version !== 1
     || kit.project_runtime_contract_commitment !== projectRuntimeContractCommitment(contract)
   ) {
@@ -406,6 +454,9 @@ function assertProjectRuntimeContract(root) {
   ) {
     throw new Error("project runtime contract no longer matches installed files");
   }
+  assertExecutableIdentity(contract.node.path, contract.node);
+  assertExecutableIdentity(contract.git.path, contract.git);
+  assertExecutableIdentity(contract.python.resolved_path, contract.python);
   return contract;
 }
 
@@ -428,6 +479,7 @@ function installProjectGuardVerifier(root, contract) {
 }
 
 function installProjectUnlocked(root, context, lock) {
+  AGENT_FLOW_COMMAND = shellSingleQuote(path.join(root, PROJECT_LAUNCHER_RELATIVE));
   const agentFlowDir = path.join(root, ".agent-flow");
   const profile = detectProfile(root);
   let installSelection = resolveInstallSelection({ args: installArgs, detectedProfile: profile, kitRoot: KIT_ROOT, projectRoot: root });
@@ -2142,7 +2194,8 @@ function refreshSkillCatalogAtBoundary(root) {
   if (!index?.catalog_fingerprint) return;
   const current = skillCatalogFingerprint(leaderRoot, HOME, detectActiveHost(process.env), process.env);
   if (current === index.catalog_fingerprint) return;
-  installProject(leaderRoot);
+  const status = runInstallSandbox(leaderRoot);
+  if (status !== 0) throw new Error(`skill catalog refresh failed with exit ${status}`);
 }
 
 function acquireProjectInstallLock(root, agentFlowDir) {
@@ -2391,7 +2444,9 @@ function swapHostPath(root, target, staged, incoming, displaced, expectedBefore,
   });
 }
 
-function removeHostTemporaryPath(root, pathName, expected) {
+function removeHostTemporaryPath(root, transactionRoot, pathName, expected) {
+  const cleanupRoot = path.join(transactionRoot, "cleanup");
+  ensureManagedDirectory(cleanupRoot, transactionRoot);
   withManagedDirectoryCwd(root, path.dirname(pathName), false, () => {
     const name = path.basename(pathName);
     const current = hostPathState(name);
@@ -2399,13 +2454,12 @@ function removeHostTemporaryPath(root, pathName, expected) {
     if (!sameHostPathState(current, expected)) {
       throw new Error(`host skill temporary path changed: ${pathName}`);
     }
-    const quarantine = `${name}.cleanup-${crypto.randomBytes(12).toString("hex")}`;
+    const quarantine = path.join(cleanupRoot, `host-${crypto.randomBytes(12).toString("hex")}`);
     renameManagedNoReplace(name, quarantine);
     if (!sameHostPathState(hostPathState(quarantine), expected)) {
       if (hostPathState(name).kind === "absent") renameManagedNoReplace(quarantine, name);
       throw new Error(`host skill temporary path changed during cleanup: ${pathName}`);
     }
-    fs.rmSync(quarantine, { recursive: true, force: true });
   });
 }
 
@@ -2480,11 +2534,19 @@ function withHostPathMutation(transaction, target, allowedAfter, callback) {
   };
   writeInstallJournal(transaction.journalPath, transaction.journal);
   swapHostPath(transaction.root, target, stagedTarget, incoming, displaced, before, after);
+  const holdSuffix = process.env.AGENT_FLOW_TEST_HOLD_HOST_TARGET_SUFFIX;
+  if (!holdSuffix || target.endsWith(holdSuffix)) {
+    holdInstallForTest("AGENT_FLOW_TEST_HOLD_AFTER_HOST_SWAP_MS", "host-swap-complete");
+  }
   operation.pending.completed = true;
   writeInstallJournal(transaction.journalPath, transaction.journal);
-  removeHostTemporaryPath(transaction.root, incoming, after);
-  removeHostTemporaryPath(transaction.root, displaced, before);
-  operation.after = hostPathState(target);
+  removeHostTemporaryPath(transaction.root, transaction.transactionRoot, incoming, after);
+  removeHostTemporaryPath(transaction.root, transaction.transactionRoot, displaced, before);
+  const committed = hostPathState(target);
+  if (!sameHostPathState(committed, after)) {
+    throw new Error(`host skill path changed after swap: ${relative}`);
+  }
+  operation.after = after;
   operation.pending = null;
   writeInstallJournal(transaction.journalPath, transaction.journal);
   return result;
@@ -2527,8 +2589,8 @@ function restoreHostPathState(root, target, state, transactionRoot) {
   const incoming = path.join(path.dirname(target), `.agent-flow-host-restore-${token}-next`);
   const displaced = path.join(path.dirname(target), `.agent-flow-host-restore-${token}-previous`);
   swapHostPath(root, target, staged, incoming, displaced, current, state);
-  removeHostTemporaryPath(root, incoming, state);
-  removeHostTemporaryPath(root, displaced, current);
+  removeHostTemporaryPath(root, transactionRoot, incoming, state);
+  removeHostTemporaryPath(root, transactionRoot, displaced, current);
 }
 
 function rollbackRecordedHostMutations(root, transactionRoot, journal) {
@@ -2561,8 +2623,8 @@ function rollbackRecordedHostMutations(root, transactionRoot, journal) {
       if (completed || interrupted) {
         restoreHostPathState(root, target, operation.before, transactionRoot);
       }
-      removeHostTemporaryPath(root, incoming, operation.pending.after);
-      removeHostTemporaryPath(root, displaced, operation.before);
+      removeHostTemporaryPath(root, transactionRoot, incoming, operation.pending.after);
+      removeHostTemporaryPath(root, transactionRoot, displaced, operation.before);
       operation.pending = null;
       if (completed || interrupted) {
         operation.rolled_back = true;
@@ -2784,7 +2846,6 @@ function swapManagedPath(
         }
       }
       if (!sameManagedPathState(managedPathState(targetName), expectedBefore)) {
-        removeManagedTemporaryPath(boundaryRoot, incoming, expectedAfter);
         throw new Error(`managed install path changed outside transaction: ${target}`);
       }
       if (expectedBefore.kind !== "absent") {
@@ -2891,8 +2952,8 @@ function withManagedInstallMutation(pathName, callback) {
   if (!sameManagedPathState(current, next)) {
     throw new Error(`managed install staged mutation mismatch: ${operation.path}`);
   }
-  removeManagedTemporaryPath(transaction.root, incomingTarget, operation.pending.after);
-  removeManagedTemporaryPath(transaction.root, displacedTarget, operation.pending.before);
+  removeManagedTemporaryPath(transaction.root, transaction.transactionRoot, incomingTarget, operation.pending.after);
+  removeManagedTemporaryPath(transaction.root, transaction.transactionRoot, displacedTarget, operation.pending.before);
   operation.after = current;
   operation.pending = null;
   writeInstallJournal(transaction.journalPath, transaction.journal);
@@ -2974,11 +3035,13 @@ function restoreManagedPathState(root, target, state, transactionRoot) {
     current,
     state,
   );
-  removeManagedTemporaryPath(root, incoming, state);
-  removeManagedTemporaryPath(root, displaced, current);
+  removeManagedTemporaryPath(root, transactionRoot, incoming, state);
+  removeManagedTemporaryPath(root, transactionRoot, displaced, current);
 }
 
-function removeManagedTemporaryPath(root, pathName, expected) {
+function removeManagedTemporaryPath(root, transactionRoot, pathName, expected) {
+  const cleanupRoot = path.join(transactionRoot, "cleanup");
+  ensureManagedDirectory(cleanupRoot, transactionRoot);
   withManagedDirectoryCwd(root, path.dirname(pathName), false, () => {
     const name = path.basename(pathName);
     const current = managedPathState(name);
@@ -2986,13 +3049,12 @@ function removeManagedTemporaryPath(root, pathName, expected) {
     if (!sameManagedPathState(current, expected)) {
       throw new Error(`managed install temporary path changed: ${pathName}`);
     }
-    const quarantine = `${name}.cleanup-${crypto.randomBytes(12).toString("hex")}`;
+    const quarantine = path.join(cleanupRoot, `managed-${crypto.randomBytes(12).toString("hex")}`);
     renameManagedNoReplace(name, quarantine);
     if (!sameManagedPathState(managedPathState(quarantine), expected)) {
       if (managedPathState(name).kind === "absent") renameManagedNoReplace(quarantine, name);
       throw new Error(`managed install temporary path changed during cleanup: ${pathName}`);
     }
-    fs.rmSync(quarantine, { recursive: true, force: true });
   });
 }
 
@@ -3038,8 +3100,8 @@ function rollbackRecordedManagedMutations(root, transactionRoot, journal) {
           throw new Error(`managed install rollback integrity mismatch: ${operation.path}`);
         }
       }
-      removeManagedTemporaryPath(root, incoming, operation.pending.after);
-      removeManagedTemporaryPath(root, displaced, operation.pending.before);
+      removeManagedTemporaryPath(root, transactionRoot, incoming, operation.pending.after);
+      removeManagedTemporaryPath(root, transactionRoot, displaced, operation.pending.before);
       operation.pending = null;
       if (swapCompleted || swapInterrupted) continue;
     }
@@ -3600,7 +3662,7 @@ function selectProjectSkills(root, agentFlowDir, installSelection = null, source
     skills: indexedSkills.map((skill) => ({
       name: skill.name,
       source: skill.source,
-      tree_hash: skill.tree_hash,
+      tree_hash: revisionSkillTreeHash(root, skill),
       activation: skill.activation || "on-demand",
       workflowPhases: skill.workflowPhases,
       taskTerms: skill.taskTerms,
@@ -3618,6 +3680,16 @@ function selectProjectSkills(root, agentFlowDir, installSelection = null, source
     conflicts,
     warnings,
   };
+}
+
+function revisionSkillTreeHash(root, skill) {
+  if (!PROJECT_COMMAND_SKILL_NAMES.has(skill.name)) return skill.tree_hash;
+  const skillPath = path.join(root, skill.path);
+  const content = fs.readFileSync(skillPath, "utf8");
+  const launcher = path.join(root, PROJECT_LAUNCHER_RELATIVE);
+  return crypto.createHash("sha256")
+    .update(content.replaceAll(launcher, "<project-root>/.agent-flow/bin/agent-flow"))
+    .digest("hex");
 }
 
 function computeSkillPlanHash(index, root, verifyTrees = false) {
@@ -5227,7 +5299,7 @@ const MANAGED_HOOK_VERIFIER = [
   " except ValueError: hold=0",
   " if 0<hold<=10000:",
   "  print('agent-flow:test-hook-staged:'+os.path.basename(p),file=sys.stderr,flush=True); time.sleep(hold/1000)",
-  " if p.endswith('.py'): os.execve('/usr/bin/python3',['/usr/bin/python3','-I',source_ref],env)",
+  " if p.endswith('.py'): os.execve('/usr/bin/python3',['/usr/bin/python3','-I','-B',source_ref],env)",
   " if p.endswith('.sh'): os.execve('/bin/bash',['/bin/bash',source_ref],env)",
   " raise OSError('unsupported managed hook type')",
   "except (OSError,UnicodeError,ValueError):",
@@ -6057,6 +6129,8 @@ function sandboxProfilePath(pathName) {
 
 function readPythonGateRun(root) {
   assertProjectRuntimeContract(root);
+  const invocationRoot = gitOutput(process.cwd(), ["rev-parse", "--show-toplevel"])
+    ?? fs.realpathSync(process.cwd());
   const commonDir = gitOutput(root, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
   if (!commonDir) throw new Error("blocked: Python run context requires a git common directory");
   const runtimeRoot = path.join(fs.realpathSync(commonDir), "agent-flow", "worktrees");
@@ -6081,7 +6155,19 @@ function readPythonGateRun(root) {
       if (state.run_id !== runEntry.name) {
         throw new Error(`blocked: Python run metadata identity mismatch: ${metaPath}`);
       }
-      active.push({ ...state, run_dir: runDir, workspace_root: state.workspace?.workspace_root });
+      const workspaceRoot = state.workspace?.workspace_root;
+      if (typeof workspaceRoot !== "string") {
+        throw new Error(`blocked: Python run workspace is missing: ${metaPath}`);
+      }
+      let resolvedWorkspace;
+      try {
+        resolvedWorkspace = fs.realpathSync(workspaceRoot);
+      } catch {
+        continue;
+      }
+      if (samePath(resolvedWorkspace, invocationRoot)) {
+        active.push({ ...state, run_dir: runDir, workspace_root: workspaceRoot });
+      }
     }
   }
   if (active.length !== 1) {
@@ -6222,11 +6308,49 @@ function installedPythonRuntimePath(root) {
   return fs.existsSync(path.join(runtimePath, "agent_flow", "__init__.py")) ? runtimePath : "";
 }
 
-function runInstallSandbox() {
-  if (process.env.AGENT_FLOW_INSTALL_SANDBOXED === "1") return;
-  const root = resolveInstallRoot(process.cwd());
+function verifyInstallSandboxAndRun(args) {
+  const [rootArgument, canaryPath, nonce, ...requestedInstallArgs] = args;
+  if (!rootArgument || !path.isAbsolute(rootArgument) || !canaryPath || !path.isAbsolute(canaryPath)) {
+    throw new Error("blocked: invalid install sandbox proof");
+  }
+  const root = resolveInstallRoot(rootArgument);
+  const canary = path.resolve(canaryPath);
+  if (samePath(canary, root) || canary.startsWith(`${root}${path.sep}`) || !/^[0-9a-f]{48}$/.test(nonce || "")) {
+    throw new Error("blocked: invalid install sandbox proof");
+  }
+  const stat = fs.lstatSync(canary);
+  if (
+    !stat.isFile()
+    || stat.isSymbolicLink()
+    || stat.nlink !== 1
+    || (typeof process.getuid === "function" && stat.uid !== process.getuid())
+    || (stat.mode & 0o200) === 0
+    || fs.readFileSync(canary, "utf8") !== `${nonce}\n`
+  ) {
+    throw new Error("blocked: install sandbox proof is unsafe");
+  }
+  let descriptor = null;
+  try {
+    descriptor = fs.openSync(canary, fs.constants.O_WRONLY | fs.constants.O_APPEND | (fs.constants.O_NOFOLLOW || 0));
+  } catch (error) {
+    if (error?.code !== "EACCES" && error?.code !== "EPERM" && error?.code !== "EROFS") throw error;
+  }
+  if (descriptor !== null) {
+    fs.closeSync(descriptor);
+    throw new Error("blocked: install sandbox write boundary is not active");
+  }
+  installArgs = requestedInstallArgs;
+  installProject(root);
+}
+
+function runInstallSandbox(rootOverride = null, requestedInstallArgs = []) {
+  const root = resolveInstallRoot(rootOverride || process.cwd());
   let executable = null;
   let args = [];
+  const nonce = crypto.randomBytes(24).toString("hex");
+  const canaryRoot = fs.mkdtempSync(path.join(nodeOs.tmpdir(), "agent-flow-install-proof-"));
+  const canaryPath = path.join(canaryRoot, "outside-project");
+  fs.writeFileSync(canaryPath, `${nonce}\n`, { flag: "wx", mode: 0o600 });
   if (process.platform === "darwin" && fs.existsSync("/usr/bin/sandbox-exec")) {
     executable = "/usr/bin/sandbox-exec";
     const profile = [
@@ -6236,10 +6360,22 @@ function runInstallSandbox() {
       `(allow file-write* (subpath "${sandboxProfilePath(root)}"))`,
       "(allow file-write* (literal \"/dev/null\") (literal \"/dev/tty\"))",
     ].join(" ");
-    args = ["-p", profile, fs.realpathSync(process.execPath), fileURLToPath(import.meta.url), ...process.argv.slice(2)];
+    args = [
+      "-p", profile,
+      fs.realpathSync(process.execPath),
+      fileURLToPath(import.meta.url),
+      "__sandboxed-install",
+      root,
+      canaryPath,
+      nonce,
+      ...requestedInstallArgs,
+    ];
   } else if (process.platform === "linux") {
     executable = trustedLinuxBubblewrap();
-    if (!executable) return;
+    if (!executable) {
+      fs.rmSync(canaryRoot, { recursive: true, force: true });
+      throw new Error("blocked: agent-flow install requires trusted bwrap on Linux");
+    }
     args = [
       "--die-with-parent",
       "--ro-bind", "/", "/",
@@ -6250,30 +6386,50 @@ function runInstallSandbox() {
       "--",
       fs.realpathSync(process.execPath),
       fileURLToPath(import.meta.url),
-      ...process.argv.slice(2),
+      "__sandboxed-install",
+      root,
+      canaryPath,
+      nonce,
+      ...requestedInstallArgs,
     ];
   } else {
-    return;
+    fs.rmSync(canaryRoot, { recursive: true, force: true });
+    throw new Error(`blocked: agent-flow install sandbox is unsupported on ${process.platform}`);
   }
-  const result = safeSpawnSync(executable, args, {
-    cwd: root,
-    env: {
-      ...process.env,
-      AGENT_FLOW_INSTALL_SANDBOXED: "1",
-      PYTHONDONTWRITEBYTECODE: "1",
-    },
-    stdio: "inherit",
-    timeout: 30 * 60 * 1000,
-  });
+  let result;
+  try {
+    result = safeSpawnSync(executable, args, {
+      cwd: root,
+      env: {
+        ...process.env,
+        PYTHONDONTWRITEBYTECODE: "1",
+      },
+      stdio: "inherit",
+      timeout: 30 * 60 * 1000,
+    });
+  } finally {
+    fs.rmSync(canaryRoot, { recursive: true, force: true });
+  }
   if (result.error) throw result.error;
-  process.exit(result.status ?? 1);
+  const status = result.status ?? 1;
+  if (status === 0) {
+    try {
+      installCodexTrustState(root);
+    } catch (error) {
+      console.error(`warning: Codex trust registration failed after install commit: ${error.message}`);
+    }
+  }
+  return status;
 }
 
 try {
-  if (command === "install") {
-    runInstallSandbox();
-    installProject();
+  if (command === "__sandboxed-install") {
+    verifyInstallSandboxAndRun(process.argv.slice(3));
     process.exit(0);
+  }
+
+  if (command === "install") {
+    process.exit(runInstallSandbox(null, process.argv.slice(3)));
   }
 
   if (command === "sync") {
@@ -6282,9 +6438,7 @@ try {
   }
 
   if (command === "run" && process.argv[3] === "install") {
-    runInstallSandbox();
-    installProject();
-    process.exit(0);
+    process.exit(runInstallSandbox(null, process.argv.slice(4)));
   }
 
   if (command === "run") {

@@ -64,9 +64,24 @@ def _runtime_contract_commitment(contract: dict[str, object]) -> str:
         contract["launcher"]["path"],
         contract["launcher"]["sha256"],
         contract["node"]["path"],
+        contract["node"]["sha256"],
+        contract["node"]["device"],
+        contract["node"]["inode"],
+        contract["node"]["links"],
+        contract["node"]["mode"],
         contract["git"]["path"],
+        contract["git"]["sha256"],
+        contract["git"]["device"],
+        contract["git"]["inode"],
+        contract["git"]["links"],
+        contract["git"]["mode"],
         contract["python"]["path"],
         contract["python"]["resolved_path"],
+        contract["python"]["sha256"],
+        contract["python"]["device"],
+        contract["python"]["inode"],
+        contract["python"]["links"],
+        contract["python"]["mode"],
         contract["runtime"]["path"],
         contract["runtime"]["integrity"],
         contract["python_runtime"]["path"],
@@ -169,10 +184,11 @@ def test_install_materializes_authenticated_project_launcher(tmp_path: Path) -> 
     assert launcher.is_file()
     assert os.access(launcher, os.X_OK)
     assert (runtime / "bin" / "agent-flow-kit.mjs").is_file()
-    assert contract["version"] == 2
+    assert contract["version"] == 3
     assert contract["launcher"]["sha256"] == hashlib.sha256(launcher.read_bytes()).hexdigest()
     assert contract["python_runtime"]["path"] == ".agent-flow/runtime/python"
     assert kit["project_runtime_contract_commitment_version"] == 1
+    assert str(launcher) in (project / ".agent-flow" / "skills" / "agent-flow" / "SKILL.md").read_text(encoding="utf-8")
     env = dict(os.environ)
     env["HOME"] = str(project.parent / "test-home")
     env["AGENT_FLOW_AUTO_EXTERNAL_SKILLS"] = "1"
@@ -240,6 +256,24 @@ def test_project_launcher_run_creates_and_pins_git_worktree(tmp_path: Path) -> N
     fake_git.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(fake_git_marker))}\nexit 99\n", encoding="utf-8")
     fake_git.chmod(0o755)
     gate_env = {**env, "PATH": f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"}
+    run_root = project / ".git" / "agent-flow" / "worktrees" / "feat-pinned-task"
+    meta_path = next(run_root.glob(".agent-flow/runs/*/meta.json"))
+    preserved_dir = (
+        project
+        / ".git"
+        / "agent-flow"
+        / "worktrees"
+        / "preserved-blocked"
+        / ".agent-flow"
+        / "runs"
+        / "preserved-blocked"
+    )
+    preserved_dir.mkdir(parents=True)
+    preserved = json.loads(meta_path.read_text(encoding="utf-8"))
+    preserved["run_id"] = "preserved-blocked"
+    preserved["workspace"]["workspace_root"] = str(project.resolve())
+    (preserved_dir / "meta.json").write_text(json.dumps(preserved), encoding="utf-8")
+    (preserved_dir / "active").write_text("active\n", encoding="utf-8")
     gate = subprocess.run(
         (str(launcher), "gate", "--", sys.executable, "-c", "print('gate-ok')"),
         cwd=worktree,
@@ -267,8 +301,6 @@ def test_project_launcher_run_creates_and_pins_git_worktree(tmp_path: Path) -> N
     assert gate.returncode == 0, gate.stderr
     assert "gate-ok" in gate.stdout
     assert not fake_git_marker.exists()
-    run_root = project / ".git" / "agent-flow" / "worktrees" / "feat-pinned-task"
-    meta_path = next(run_root.glob(".agent-flow/runs/*/meta.json"))
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     assert meta["workspace"]["workspace_root"] == str(worktree.resolve())
     assert "next_command:" in status.stdout
@@ -302,6 +334,38 @@ def test_project_launcher_clears_node_preload_environment(tmp_path: Path) -> Non
 
     assert result.returncode == 0, result.stderr
     assert not outside.exists()
+
+
+def test_project_launcher_rejects_replaced_contracted_python(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    fake_bin = tmp_path / "bin"
+    project.mkdir()
+    fake_bin.mkdir()
+    python = fake_bin / "python"
+    yaml_site = Path(yaml.__file__).resolve().parent.parent
+    python.write_text(
+        "#!/bin/sh\n"
+        f"PYTHONPATH={shlex.quote(str(yaml_site))}${{PYTHONPATH:+:$PYTHONPATH}}\n"
+        "export PYTHONPATH\n"
+        f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+    env = {"PYTHON": str(python), "PYTHON_EXECUTABLE": str(python)}
+    assert _install(project, env=env).returncode == 0
+    contract = json.loads((project / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))[
+        "project_runtime_contract"
+    ]
+    assert contract["python"]["path"] == str(python)
+    python.write_text(
+        python.read_text(encoding="utf-8") + "# replaced\n",
+        encoding="utf-8",
+    )
+
+    result = _command(project, "status", env=env)
+
+    assert result.returncode != 0
+    assert "executable identity changed" in result.stderr
 
 
 def test_installed_guard_rejects_joint_runtime_and_contract_tamper(tmp_path: Path) -> None:
@@ -342,6 +406,56 @@ def test_installed_guard_rejects_joint_runtime_and_contract_tamper(tmp_path: Pat
     assert result.returncode == 2
     assert "runtime authentication failed" in result.stderr
     assert not executed.exists()
+
+
+def test_managed_python_hook_runs_repeatedly_without_runtime_drift(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    assert _install(project).returncode == 0
+    hooks = json.loads((project / ".Codex" / "hooks.json").read_text(encoding="utf-8"))
+    commands: list[str] = []
+    encoded_guard = base64.b64encode(
+        str(project / ".agent-flow" / "scripts" / "hooks" / "guard-worktree-write.py").encode()
+    ).decode()
+
+    def collect(value: object) -> None:
+        if isinstance(value, dict):
+            command = value.get("command")
+            if isinstance(command, str) and encoded_guard in command:
+                commands.append(command)
+            for child in value.values():
+                collect(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect(child)
+
+    collect(hooks)
+    assert commands
+    python_runtime = project / ".agent-flow" / "runtime" / "python"
+    before = _runtime_tree_integrity(python_runtime)
+    payload = json.dumps(
+        {
+            "tool_name": "apply_patch",
+            "cwd": str(project),
+            "tool_input": {"patch": "*** Begin Patch\n*** End Patch"},
+        }
+    )
+    env = dict(os.environ)
+    env.pop("PYTHONDONTWRITEBYTECODE", None)
+
+    for _ in range(2):
+        result = subprocess.run(
+            ("/bin/bash", "-c", commands[0]),
+            cwd=project,
+            input=payload,
+            text=True,
+            capture_output=True,
+            check=False,
+            env=env,
+        )
+        assert result.returncode == 0, result.stderr
+
+    assert _runtime_tree_integrity(python_runtime) == before
 
 
 def test_packaged_runtime_resolves_bare_python_from_path(tmp_path: Path) -> None:
@@ -1197,6 +1311,39 @@ def test_stale_host_skill_replacement_is_preserved_during_swap(tmp_path: Path) -
     assert marker.read_text(encoding="utf-8") == "external\n"
 
 
+def test_stale_host_skill_replacement_after_swap_is_not_adopted(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    skill_dir = project / "skills" / "demo"
+    _skill(skill_dir, "CODEX", hosts="[codex]")
+    assert _install(project).returncode == 0
+    target = project / ".Codex" / "skills" / "demo"
+    _skill(skill_dir, "CLAUDE", hosts="[claude]")
+    env = dict(os.environ)
+    env["HOME"] = str(tmp_path / "home")
+    env["AGENT_FLOW_TEST_HOLD_AFTER_HOST_SWAP_MS"] = "1500"
+    env["AGENT_FLOW_TEST_HOLD_HOST_TARGET_SUFFIX"] = ".Codex/skills/demo"
+    process = subprocess.Popen(
+        (_node(), str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"), "install"),
+        cwd=project,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    assert process.stderr is not None
+    assert "agent-flow:test-host-swap-complete" in process.stderr.readline()
+    assert not target.exists()
+    target.mkdir()
+    marker = target / "external.txt"
+    marker.write_text("external\n", encoding="utf-8")
+    stdout, stderr = process.communicate(timeout=15)
+
+    assert process.returncode != 0, stdout
+    assert "changed after swap" in stderr
+    assert marker.read_text(encoding="utf-8") == "external\n"
+
+
 def test_stale_broken_host_skill_symlink_removed_when_skill_deleted(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
@@ -1786,6 +1933,7 @@ def test_managed_ancestor_swap_never_writes_outside_project(tmp_path: Path) -> N
     (project / ".Codex").mkdir()
     env = dict(os.environ)
     env["HOME"] = str(tmp_path / "home")
+    env["AGENT_FLOW_INSTALL_SANDBOXED"] = "1"
     env["AGENT_FLOW_TEST_HOLD_MANAGED_PARENT_SUFFIX"] = ".Codex"
     env["AGENT_FLOW_TEST_HOLD_MANAGED_PARENT_MS"] = "1500"
     process = subprocess.Popen(
