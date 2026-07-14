@@ -80,7 +80,6 @@ function collectSkillFiles() {
 
 function validateSkill(file) {
   const content = readUtf8(file);
-  const lines = content.split(/\r?\n/);
   const dirName = path.basename(path.dirname(file));
   const frontmatter = parseFrontmatter(file, content);
   const name = frontmatter.name || '';
@@ -102,10 +101,6 @@ function validateSkill(file) {
     if (/^Use when\b/i.test(firstSentence(description))) {
       errors.push(`${rel(file)}: description should start with capability, not "Use when"`);
     }
-  }
-
-  if (lines.length > 100) {
-    warnings.push(`${rel(file)}: ${lines.length} lines; consider progressive disclosure`);
   }
 
   if (!/^##\s+Quick start\b/im.test(content) && !/^##\s+When loaded\b/im.test(content)) {

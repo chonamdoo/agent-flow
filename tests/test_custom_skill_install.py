@@ -33,19 +33,55 @@ def _install(
     )
 
 
-def _skill(path: Path, body: str, *, hosts: str | None = None) -> None:
+def _skill(
+    path: Path,
+    body: str,
+    *,
+    hosts: str | None = None,
+    description: str = "Use when testing custom skills.",
+) -> None:
     path.mkdir(parents=True, exist_ok=True)
     host_line = f"hosts: {hosts}\n" if hosts is not None else ""
     (path / "SKILL.md").write_text(
         "---\n"
         f"name: {path.name}\n"
-        "description: Use when testing custom skills.\n"
+        f"description: {description}\n"
         f"{host_line}"
         "tags: [test]\n"
         "---\n"
         f"Use when testing custom skills.\n\n{body}\n",
         encoding="utf-8",
     )
+
+
+def test_overlong_skill_installs_and_validates_without_length_diagnostic(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    body = "\n".join(f"detail {line}" for line in range(260))
+    _skill(
+        project / "skills" / "long-skill",
+        body,
+        description="Validates unrestricted skill documents. Use when testing long skills.",
+    )
+
+    install = _install(project)
+    validation = subprocess.run(
+        (_node(), str(KIT_ROOT / "scripts" / "validate-skills.mjs")),
+        cwd=project,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert install.returncode == 0, install.stderr
+    assert validation.returncode == 0, validation.stderr
+    assert "lines; consider progressive disclosure" not in validation.stdout
+    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    selected = next(skill for skill in index["skills"] if skill["name"] == "long-skill")
+    assert len(selected["hash"]) == 64
+    for host_dir in (".claude", ".Codex", ".omp"):
+        installed = project / host_dir / "skills" / "long-skill" / "SKILL.md"
+        assert installed.read_text(encoding="utf-8").count("detail ") == 260
 
 
 def test_project_skill_links_all_hosts_and_index_omits_body(tmp_path: Path) -> None:
