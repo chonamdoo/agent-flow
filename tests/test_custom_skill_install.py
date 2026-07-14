@@ -1155,6 +1155,65 @@ def test_recovery_survives_crash_between_skills_rename_and_journal_update(tmp_pa
     assert not transaction.exists()
 
 
+def test_recovery_survives_crash_between_managed_callback_and_commitment(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+
+    crashed = _install(
+        project,
+        env={"AGENT_FLOW_TEST_CRASH_AFTER_MANAGED_CALLBACK": "1"},
+    )
+
+    assert crashed.returncode == 89
+    transaction = project / ".agent-flow" / "install-transaction"
+    journal = json.loads((transaction / "journal.json").read_text(encoding="utf-8"))
+    assert any(operation["in_progress"] for operation in journal["managed_mutations"])
+
+    recovered = _install(project)
+
+    assert recovered.returncode == 0, recovered.stderr
+    assert not transaction.exists()
+    assert (project / ".agent-flow" / "kit.json").is_file()
+
+
+@pytest.mark.parametrize("tamper", ("path", "lock", "symlink"))
+def test_recovery_rejects_unauthenticated_journal_authority(
+    tmp_path: Path,
+    tamper: str,
+) -> None:
+    project = tmp_path / "project"
+    outside = tmp_path / "outside"
+    project.mkdir()
+    outside.mkdir()
+    marker = outside / "marker.txt"
+    marker.write_text("outside\n", encoding="utf-8")
+    crashed = _install(
+        project,
+        env={"AGENT_FLOW_TEST_CRASH_AFTER_MANAGED_CALLBACK": "1"},
+    )
+    assert crashed.returncode == 89
+    transaction = project / ".agent-flow" / "install-transaction"
+    journal_path = transaction / "journal.json"
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    active = next(operation for operation in journal["managed_mutations"] if operation["in_progress"])
+    if tamper == "path":
+        active["path"] = "../outside"
+        journal_path.write_text(json.dumps(journal, indent=2) + "\n", encoding="utf-8")
+    elif tamper == "lock":
+        journal["lock_token"] = "forged"
+        journal_path.write_text(json.dumps(journal, indent=2) + "\n", encoding="utf-8")
+    else:
+        managed_target = project / active["path"]
+        shutil.rmtree(managed_target)
+        managed_target.symlink_to(outside, target_is_directory=True)
+
+    retry = _install(project)
+
+    assert retry.returncode != 0
+    assert "invalid interrupted" in retry.stderr or "contains a symlink" in retry.stderr
+    assert marker.read_text(encoding="utf-8") == "outside\n"
+
+
 def test_recovery_rolls_back_initial_install_host_mutations_after_crash(tmp_path: Path) -> None:
     project = tmp_path / "project"
     home = tmp_path / "home"
@@ -1241,6 +1300,40 @@ def test_late_failure_restores_all_managed_install_outputs(tmp_path: Path) -> No
     assert "injected failure after managed install" in failed.stderr
     assert {path: path.read_bytes() for path in watched} == before
     assert not (project / ".agent-flow" / "install-transaction").exists()
+
+
+@pytest.mark.parametrize("relative", ("AGENTS.md", ".agent-flow/workflows/default.yaml"))
+def test_managed_file_symlink_never_writes_outside_project(tmp_path: Path, relative: str) -> None:
+    project = tmp_path / "project"
+    outside = tmp_path / "outside.md"
+    project.mkdir()
+    outside.write_text("outside\n", encoding="utf-8")
+    target = project / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.symlink_to(outside)
+
+    result = _install(project)
+
+    assert result.returncode != 0
+    assert "contains a symlink" in result.stderr
+    assert outside.read_text(encoding="utf-8") == "outside\n"
+
+
+def test_reinstall_preserves_unowned_legacy_graphify_directories(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    assert _install(project).returncode == 0
+    markers = []
+    for relative in (".Codex/skills", ".claude/skills", ".omp/skills"):
+        marker = project / relative / "graphify" / "user.txt"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("user-owned\n", encoding="utf-8")
+        markers.append(marker)
+
+    result = _install(project)
+
+    assert result.returncode == 0, result.stderr
+    assert all(marker.read_text(encoding="utf-8") == "user-owned\n" for marker in markers)
 
 
 def test_external_managed_output_replacement_is_preserved_on_rollback(tmp_path: Path) -> None:
@@ -1485,7 +1578,7 @@ def test_host_skill_root_symlink_fails_without_writing_outside_project(tmp_path:
     result = _install(project)
 
     assert result.returncode != 0
-    assert "managed host file is missing or unsafe" in result.stderr
+    assert "managed install path contains a symlink" in result.stderr
     assert not (outside / "skills" / "demo").exists()
     assert not (outside / "agents" / "code-reviewer.md").exists()
 
