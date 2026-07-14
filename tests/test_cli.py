@@ -1352,6 +1352,7 @@ class CliTest(unittest.TestCase):
             self.assertTrue((project_root / ".agent-flow" / "workflows" / "full-feature.yaml").is_file())
             self.assertTrue((project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "bootstrap" / "CLAUDE.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "bootstrap" / "agent-flow.md").is_file())
             runtime = project_root / ".agent-flow" / "runtime" / "python"
             self.assertTrue((runtime / "agent_flow" / "core" / "architecture_lint.py").is_file())
             self.assertFalse((project_root / ".agent-flow" / "scripts" / "check-context-docs.mjs").exists())
@@ -1539,14 +1540,12 @@ class CliTest(unittest.TestCase):
             self.assertTrue(
                 (project_root / ".agent-flow" / "skills" / "react-native-development-guide" / "SKILL.md").is_file()
             )
-            self.assertIn(
-                "code-generation-discipline",
-                (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8"),
+            installed_bootstrap = (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(
+                encoding="utf-8"
             )
-            self.assertIn(
-                "현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수",
-                (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8"),
-            )
+            self.assertIn("agent-flow status", installed_bootstrap)
+            self.assertNotIn("default.yaml", installed_bootstrap)
+            self.assertNotIn("reviewer-source: sub-agent", installed_bootstrap)
             self.assertIn(
                 "status: ci-failed",
                 (project_root / ".agent-flow" / "prompts" / "pr-watch.md").read_text(encoding="utf-8"),
@@ -1567,15 +1566,140 @@ class CliTest(unittest.TestCase):
                 'agent-flow run "<task>"',
                 (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8"),
             )
+            self.assertNotIn("default.yaml", (project_root / "AGENTS.md").read_text(encoding="utf-8"))
             self.assertIn(
-                "현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수",
-                (project_root / "AGENTS.md").read_text(encoding="utf-8"),
+                "reviewer-source: sub-agent",
+                (project_root / ".agent-flow" / "prompts" / "multi-review.md").read_text(encoding="utf-8"),
             )
             agent_flow_skill = (project_root / ".agent-flow" / "skills" / "agent-flow" / "SKILL.md").read_text(
                 encoding="utf-8"
             )
             self.assertIn("Treat the status command output as the only source of truth.", agent_flow_skill)
             self.assertIn("Do not run install just because a new session started.", agent_flow_skill)
+
+    def test_install_and_sync_upsert_canonical_agent_docs_idempotently(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            agents_path = project_root / "AGENTS.md"
+            agents_path.write_bytes(b"# User rules\r\n\r\nkeep this\r\n")
+            node = _node_executable()
+            cli = Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"
+            canonical = (Path(__file__).resolve().parents[1] / "bootstrap" / "agent-flow.md").read_text(
+                encoding="utf-8"
+            )
+
+            installed = subprocess.run(
+                (node, str(cli), "install"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            agents = agents_path.read_bytes().decode("utf-8")
+            claude = (project_root / "CLAUDE.md").read_text(encoding="utf-8")
+            self.assertTrue(agents.startswith("# User rules\r\n\r\nkeep this\r\n"))
+            self.assertIn(canonical.strip().replace("\n", "\r\n"), agents)
+            self.assertEqual(claude, canonical)
+            self.assertEqual(agents.count("<!-- agent-flow:start -->"), 1)
+            self.assertEqual(claude.count("<!-- agent-flow:start -->"), 1)
+            self.assertNotIn("default.yaml", agents)
+            self.assertNotIn("current_phase:", agents)
+
+            agents_path.write_bytes(
+                (
+                    "# User rules\r\n\r\n"
+                    "<!-- agent-flow:start -->\r\nstale\r\n<!-- agent-flow:end -->\r\n\r\n"
+                    "suffix without newline"
+                ).encode("utf-8")
+            )
+            first_sync = subprocess.run(
+                (node, str(cli), "sync"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(first_sync.returncode, 0, first_sync.stderr)
+            first = agents_path.read_bytes()
+            self.assertTrue(first.startswith(b"# User rules\r\n\r\n"))
+            self.assertTrue(first.endswith(b"suffix without newline"))
+            self.assertIn(canonical.strip().replace("\n", "\r\n").encode("utf-8"), first)
+
+            second_sync = subprocess.run(
+                (node, str(cli), "sync"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(second_sync.returncode, 0, second_sync.stderr)
+            self.assertEqual(agents_path.read_bytes(), first)
+            self.assertEqual((project_root / "CLAUDE.md").read_text(encoding="utf-8"), canonical)
+            reinstalled = subprocess.run(
+                (node, str(cli), "install"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(reinstalled.returncode, 0, reinstalled.stderr)
+            self.assertEqual(agents_path.read_bytes(), first)
+
+    def test_sync_and_install_reject_unbalanced_agent_doc_markers_without_partial_edit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            agents_path = project_root / "AGENTS.md"
+            claude_path = project_root / "CLAUDE.md"
+            agents_path.write_text("user\n<!-- agent-flow:start -->\nbroken\n", encoding="utf-8")
+            claude_path.write_text("claude user rule", encoding="utf-8")
+            before_agents = agents_path.read_bytes()
+            before_claude = claude_path.read_bytes()
+            node = _node_executable()
+            cli = Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"
+
+            for command in ("sync", "install"):
+                with self.subTest(command=command):
+                    result = subprocess.run(
+                        (node, str(cli), command),
+                        cwd=project_root,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 1)
+                    self.assertIn("invalid agent-flow markers", result.stderr)
+                    self.assertEqual(agents_path.read_bytes(), before_agents)
+                    self.assertEqual(claude_path.read_bytes(), before_claude)
+
+    def test_agent_doc_block_is_identical_across_profiles(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            node = _node_executable()
+            cli = Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"
+            blocks: list[str] = []
+            for name, marker in (("generic", None), ("python", "[project]\nname='demo'\nversion='0.1.0'\n")):
+                project = root / name
+                project.mkdir()
+                if marker is not None:
+                    (project / "pyproject.toml").write_text(marker, encoding="utf-8")
+                result = subprocess.run(
+                    (node, str(cli), "install"),
+                    cwd=project,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                blocks.append((project / "AGENTS.md").read_text(encoding="utf-8"))
+                self.assertEqual(
+                    (project / "AGENTS.md").read_text(encoding="utf-8"),
+                    (project / "CLAUDE.md").read_text(encoding="utf-8"),
+                )
+            self.assertEqual(blocks[0], blocks[1])
+
     def test_node_installer_writes_cwd_independent_hook_commands(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project with space"
@@ -2922,22 +3046,12 @@ if (codexContext !== undefined) {
             )
             self.assertIn('agent-flow run "<task>"', bootstrap.read_text(encoding="utf-8"))
             self.assertIn('agent-flow run "<task>"', claude_bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수", bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수", claude_bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("활성 host가 아닌 추가 provider는 optional", bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("활성 host가 아닌 추가 provider는 optional", claude_bootstrap.read_text(encoding="utf-8"))
-            self.assertNotIn("예: Claude/Gemini", bootstrap.read_text(encoding="utf-8"))
-            self.assertNotIn("예: Claude/Gemini", claude_bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("reviewer-source: sub-agent", bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("reviewer-source: sub-agent", claude_bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("sub-agent를 닫는다", bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("sub-agent를 닫는다", claude_bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("## Overall", bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("## Overall", claude_bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("verdict: approve", bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("verdict: approve", claude_bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("verdict: request-changes", bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("verdict: request-changes", claude_bootstrap.read_text(encoding="utf-8"))
+            self.assertIn("사용자 응답은 짧게 유지", bootstrap.read_text(encoding="utf-8"))
+            self.assertIn("사용자 응답은 짧게 유지", claude_bootstrap.read_text(encoding="utf-8"))
+            self.assertNotIn("default.yaml", bootstrap.read_text(encoding="utf-8"))
+            self.assertNotIn("default.yaml", claude_bootstrap.read_text(encoding="utf-8"))
+            self.assertNotIn("reviewer-source: sub-agent", bootstrap.read_text(encoding="utf-8"))
+            self.assertNotIn("reviewer-source: sub-agent", claude_bootstrap.read_text(encoding="utf-8"))
             self.assertIn("Full Feature Workflow", skill.read_text(encoding="utf-8"))
             self.assertIn("Workflow Contract", rules.read_text(encoding="utf-8"))
             self.assertIn("two active-host sub-agents", rules.read_text(encoding="utf-8"))

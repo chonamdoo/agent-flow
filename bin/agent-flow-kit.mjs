@@ -304,8 +304,10 @@ function installProjectUnlocked(root, context) {
     );
   }
   writeManagedFile(path.join(agentFlowDir, "rules", "workflow-contract.md"), workflowContract());
-  writeManagedFile(path.join(agentFlowDir, "bootstrap", "AGENTS.md"), bootstrapMarkdown("AGENTS.md"));
-  writeManagedFile(path.join(agentFlowDir, "bootstrap", "CLAUDE.md"), bootstrapMarkdown("CLAUDE.md"));
+  const agentFlowBlock = canonicalAgentFlowBlock();
+  writeManagedFile(path.join(agentFlowDir, "bootstrap", "agent-flow.md"), agentFlowBlock);
+  writeManagedFile(path.join(agentFlowDir, "bootstrap", "AGENTS.md"), bootstrapMarkdown("AGENTS.md", agentFlowBlock));
+  writeManagedFile(path.join(agentFlowDir, "bootstrap", "CLAUDE.md"), bootstrapMarkdown("CLAUDE.md", agentFlowBlock));
   const gitignorePath = path.join(root, ".gitignore");
   upsertGitignore(gitignorePath, [
     ".agent-flow/",
@@ -326,9 +328,10 @@ function installProjectUnlocked(root, context) {
     "graphify-out/manifest.json",
     "graphify-out/cost.json",
   ]);
-  removeLegacyProjectSkillCopies(root, "graphify");
-  upsertBootstrapBlock(path.join(root, "AGENTS.md"), "AGENTS.md");
-  upsertBootstrapBlock(path.join(root, "CLAUDE.md"), "CLAUDE.md");
+  if (!skillIndex.skills.some((skill) => skill.name === "graphify")) {
+    removeLegacyProjectSkillCopies(root, "graphify");
+  }
+  syncProjectAgentDocuments(root, agentFlowBlock);
   makeHooksExecutable(root);
   installClaudeHooks(root);
   installOmpHooks(root);
@@ -3958,52 +3961,63 @@ function hasGateEvidence(result) {
   return false;
 }
 
-function upsertBootstrapBlock(pathName, label) {
+function canonicalAgentFlowBlock() {
+  const sourcePath = path.join(KIT_ROOT, "bootstrap", "agent-flow.md");
+  const block = fs.readFileSync(sourcePath, "utf8");
   const start = "<!-- agent-flow:start -->";
   const end = "<!-- agent-flow:end -->";
-  const block = `${start}
-## Agent Flow
+  if (
+    countOccurrences(block, start) !== 1
+    || countOccurrences(block, end) !== 1
+    || block.indexOf(start) > block.indexOf(end)
+  ) {
+    throw new Error(`invalid canonical agent-flow block: ${sourcePath}`);
+  }
+  return block;
+}
 
-Before feature work, check status first:
+function syncProjectAgentDocuments(root, canonicalBlock = canonicalAgentFlowBlock()) {
+  const paths = [path.join(root, "AGENTS.md"), path.join(root, "CLAUDE.md")];
+  const planned = paths.map((pathName) => ({
+    pathName,
+    content: planBootstrapBlockUpsert(pathName, canonicalBlock),
+  }));
+  for (const entry of planned) {
+    writeManagedFile(entry.pathName, entry.content);
+  }
+}
 
-\`\`\`bash
-${AGENT_FLOW_COMMAND} status
-\`\`\`
-
-install은 프로젝트당 1회만 수행합니다. 새 세션이 시작됐다는 이유로 install을 다시 실행하지 않습니다.
-Follow the CLI output exactly. If no run is active, start with \`${AGENT_FLOW_COMMAND} run "<task>"\`. If a run is active, continue with the printed \`next_command\`.
-
-### Workflow Contract
-
-- 활성 workflow와 current phase는 항상 \`${AGENT_FLOW_COMMAND} status\` 출력 기준이다.
-- phase 이동은 status의 \`next_command\`를 그대로 따른다. \`${AGENT_FLOW_COMMAND} continue\`나 \`${AGENT_FLOW_COMMAND} run advance\`를 추측하지 않는다.
-- \`default.yaml\`: design → slice-plan → worktree → implement → comment-authoring → final-review → gates ↔ fix-loop → comment-authoring → final-review → gates → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge → cleanup
-- \`full-feature.yaml\`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → comment-authoring → multi-review → architecture-review → gates ↔ fix-loop → comment-authoring → multi-review → architecture-review → gates → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
-- \`multi-review\`는 현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수다. 두 sub-agent를 병렬 실행하고, \`reviewer-source: sub-agent\`를 기록한 뒤 sub-agent를 닫는다. 마지막에 \`## Overall\`과 \`verdict: approve\` 또는 \`verdict: request-changes\`만 기록한다. 활성 host가 아닌 추가 provider는 optional이다.
-
-### Context Economy
-
-- Claude/Codex/OMP user-facing 답변은 기본적으로 짧은 한글로 한다.
-- 코드/명령/식별자는 영어 그대로 유지한다.
-- 긴 설명, 긴 로그, 전체 파일 붙여넣기 금지.
-- 필요한 경우만 current phase, action, \`next_command\`, blocker를 요약한다.
-- 모든 guide를 항상 로드하지 말고 변경 파일에 필요한 guide만 읽는다.
-- 프로젝트 skill은 \`skills/<name>/SKILL.md\` 또는 private \`.agent-flow/local-skills/<name>/SKILL.md\`에 둔다.
-- install/bootstrap 후 \`.agent-flow/skills/index.json\` metadata를 보고 필요한 skill만 읽는다. 모든 SKILL.md 전문을 항상 읽지 않는다.
-- Claude/Codex/OMP 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.
-- Claude/Codex/OMP hook이 자동 차단하는 보호 브랜치 commit/push와 leader checkout/switch 금지는 모든 host에서 동일하게 지킨다.
-
-${end}
-`;
+function planBootstrapBlockUpsert(pathName, canonicalBlock) {
+  const start = "<!-- agent-flow:start -->";
+  const end = "<!-- agent-flow:end -->";
   const current = fs.existsSync(pathName) ? fs.readFileSync(pathName, "utf8") : "";
-  if (current.includes(start) && current.includes(end)) {
+  const startCount = countOccurrences(current, start);
+  const endCount = countOccurrences(current, end);
+  if (startCount !== endCount || startCount > 1) {
+    throw new Error(`invalid agent-flow markers: ${pathName}`);
+  }
+  if (startCount === 1 && current.indexOf(start) > current.indexOf(end)) {
+    throw new Error(`invalid agent-flow marker order: ${pathName}`);
+  }
+  const newline = current.includes("\r\n") ? "\r\n" : "\n";
+  const block = canonicalBlock.replace(/\r?\n/g, newline).replace(/(?:\r?\n)+$/, "");
+  if (startCount === 1) {
     const before = current.slice(0, current.indexOf(start));
     const after = current.slice(current.indexOf(end) + end.length);
-    fs.writeFileSync(pathName, `${before}${block}${after.replace(/^\n/, "")}`, "utf8");
-    return;
+    return `${before}${block}${after}`;
   }
-  const prefix = current.trim() ? `${current.trimEnd()}\n\n` : `# ${label}\n\n`;
-  fs.writeFileSync(pathName, `${prefix}${block}`, "utf8");
+  if (!current) {
+    return `${block}${newline}`;
+  }
+  const separator = current.endsWith(`${newline}${newline}`)
+    ? ""
+    : current.endsWith(newline) ? newline : `${newline}${newline}`;
+  const finalNewline = current.endsWith(newline) ? newline : "";
+  return `${current}${separator}${block}${finalNewline}`;
+}
+
+function countOccurrences(text, marker) {
+  return text.split(marker).length - 1;
 }
 
 function upsertGitignore(pathName, entries) {
@@ -4065,41 +4079,8 @@ function isGitignoreEntryCovered(entry, existing) {
   return false;
 }
 
-function bootstrapMarkdown(label) {
-  return `# ${label} Agent Flow Bootstrap
-
-Before feature work, run:
-
-\`\`\`bash
-${AGENT_FLOW_COMMAND} run "<task>"
-\`\`\`
-
-install은 프로젝트당 1회만 수행합니다. 새 세션이 시작됐다는 이유로 install을 다시 실행하지 않습니다.
-Follow the CLI output exactly. Git projects start inside \`.agent-flow/worktrees/feat-<slug>/\` without switching the leader branch; continue with the printed \`next_command\`.
-
-### Workflow Contract
-
-- 활성 workflow와 current phase는 항상 \`${AGENT_FLOW_COMMAND} status\` 출력 기준이다.
-- phase 이동은 status의 \`next_command\`를 그대로 따른다. \`${AGENT_FLOW_COMMAND} continue\`나 \`${AGENT_FLOW_COMMAND} run advance\`를 추측하지 않는다.
-- \`default.yaml\`: design → slice-plan → worktree → implement → comment-authoring → final-review → gates ↔ fix-loop → comment-authoring → final-review → gates → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge → cleanup
-- \`full-feature.yaml\`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → comment-authoring → multi-review → architecture-review → gates ↔ fix-loop → comment-authoring → multi-review → architecture-review → gates → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
-- \`multi-review\`는 현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수다. 두 sub-agent를 병렬 실행하고, \`reviewer-source: sub-agent\`를 기록한 뒤 sub-agent를 닫는다. 마지막에 \`## Overall\`과 \`verdict: approve\` 또는 \`verdict: request-changes\`만 기록한다. 활성 host가 아닌 추가 provider는 optional이다.
-
-### Context Economy
-
-- Claude/Codex/OMP user-facing 답변은 기본적으로 짧은 한글로 한다.
-- 코드/명령/식별자는 영어 그대로 유지한다.
-- 긴 설명, 긴 로그, 전체 파일 붙여넣기 금지.
-- 필요한 경우만 current phase, action, \`next_command\`, blocker를 요약한다.
-- 모든 guide를 항상 로드하지 말고 변경 파일에 필요한 guide만 읽는다.
-- 프로젝트 skill은 \`skills/<name>/SKILL.md\` 또는 private \`.agent-flow/local-skills/<name>/SKILL.md\`에 둔다.
-- install/bootstrap 후 \`.agent-flow/skills/index.json\` metadata를 보고 필요한 skill만 읽는다. 모든 SKILL.md 전문을 항상 읽지 않는다.
-- Claude/Codex/OMP 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.
-- Claude/Codex/OMP hook이 자동 차단하는 보호 브랜치 commit/push와 leader checkout/switch 금지는 모든 host에서 동일하게 지킨다.
-
-During code generation, modification, and code review phases, apply \`code-generation-discipline\`. Resolve required skills from active profile metadata, installed skill index, changed files, and task scope. Load only the touched profile skill union.
-For Android/Kotlin/Compose/KMP changes, read matching local skill files from the Android profile's \`android_skills\` and \`chrisbanes_skills\` for the active host. React Native \`android/\` native changes also apply the Android profile mapping. Do not require unrelated platform skills, and do not install, copy, link, or load duplicate skills from other host directories. If a required local skill is missing, report \`missing local <group>: <skill>\` with the profile source URL and ask the user to install it.
-`;
+function bootstrapMarkdown(label, canonicalBlock = canonicalAgentFlowBlock()) {
+  return `# ${label} Agent Flow Bootstrap\n\n${canonicalBlock}`;
 }
 
 function newRunId() {
@@ -4964,6 +4945,11 @@ try {
     process.exit(0);
   }
 
+  if (command === "sync") {
+    syncProject();
+    process.exit(0);
+  }
+
   if (command === "run" && process.argv[3] === "install") {
     installProject();
     process.exit(0);
@@ -4982,7 +4968,7 @@ try {
     runGates(process.argv.slice(3));
   }
 
-  console.error("usage: agent-flow-kit install [--force-managed] | gates [--profile <id>] [--worktree <name>] | architecture-lint [--profile <id>] [--files ...] | run <install|start|status|next|advance|push-watch|push-watch-tick>");
+  console.error("usage: agent-flow-kit install [--force-managed] | sync | gates [--profile <id>] [--worktree <name>] | architecture-lint [--profile <id>] [--files ...] | run <install|start|status|next|advance|push-watch|push-watch-tick>");
   process.exit(1);
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));
