@@ -199,8 +199,8 @@ function recursiveFiles(relDir) {
 const canonicalInstaller = "bin/agent-flow-kit.mjs";
 assertContains(canonicalInstaller, "function installCodexTrustState(root)");
 assertContains(canonicalInstaller, "function queryCodexProjectHookHashes(root)");
-assertContains(canonicalInstaller, "function trustedManagedHookScriptName(root, command)");
-assertContains(canonicalInstaller, "normalized === `${normalizedRoot}/.agent-flow/scripts/hooks/${scriptName}`");
+assertContains(canonicalInstaller, "function trustedManagedHookScriptName(root, command, expectedScriptHashes = null)");
+assertContains(canonicalInstaller, "verifier.scriptPath.replaceAll");
 assertContains(canonicalInstaller, "[hooks.state.");
 assertContains(canonicalInstaller, "function installOmpHooks(root)");
 assertContains(canonicalInstaller, ".omp\", \"extensions\", \"agent-flow-hooks.ts");
@@ -522,8 +522,6 @@ if (CHECK_INSTALLED_COPY) {
   assertContains(".agent-flow/prompts/multi-review.md", "verdict: approve");
   assertContains(".agent-flow/prompts/multi-review.md", "verdict: request-changes");
   assertNotContains("workflows/full-feature.yaml", "Gemini sub-agent");
-  assertNotContains("bootstrap/AGENTS.md.template", "Gemini sub-agent");
-  assertNotContains("bootstrap/CLAUDE.md.template", "Gemini sub-agent");
 }
 
 // skill source와 설치본이 달라지면 다른 프로젝트로 전파될 때 기준이 갈린다.
@@ -602,14 +600,14 @@ for (const entry of fs.readdirSync(path.join(SOURCE_ROOT, "profiles")).sort()) {
   }
 }
 
-// bootstrap은 반복 install 대신 기존 설치된 CLI로 worktree run을 시작해야 한다.
-assertSame("bootstrap/AGENTS.md.template", "bootstrap/CLAUDE.md.template");
+// 공통 문서는 상태 조회와 최소 운영 규칙만 포함하고 상세 계약은 workflow/skill에 둔다.
+assertFile("bootstrap/agent-flow.md");
 if (CHECK_INSTALLED_COPY) {
+  assertSame("bootstrap/agent-flow.md", ".agent-flow/bootstrap/agent-flow.md");
   assertSameBodyAfterTitle(".agent-flow/bootstrap/AGENTS.md", ".agent-flow/bootstrap/CLAUDE.md");
 }
 for (const rel of [
-  "bootstrap/AGENTS.md.template",
-  "bootstrap/CLAUDE.md.template",
+  "bootstrap/agent-flow.md",
   ...(CHECK_INSTALLED_COPY ? [
     ".agent-flow/bootstrap/AGENTS.md",
     ".agent-flow/bootstrap/CLAUDE.md",
@@ -618,18 +616,13 @@ for (const rel of [
   assertFile(rel);
   assertContains(rel, 'agent-flow run "<task>"');
   assertContains(rel, "agent-flow status");
-  assertContains(rel, "install은 프로젝트당 1회만");
+  assertContains(rel, "install은 프로젝트당 한 번만");
   assertContains(rel, "next_command");
-  assertContains(rel, "짧은 한글");
-  assertContains(rel, "현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수");
-  assertContains(rel, "활성 host가 아닌 추가 provider는 optional");
-  assertNotContains(rel, "예: Claude/Gemini");
-  assertContains(rel, "reviewer-source: sub-agent");
-  assertContains(rel, "sub-agent를 닫는다");
-  assertContains(rel, "## Overall");
-  assertContains(rel, "verdict: approve");
-  assertContains(rel, "verdict: request-changes");
-  assertContains(rel, "보호 브랜치 commit/push와 leader checkout/switch 금지는 모든 host에서 동일");
+  assertContains(rel, "사용자 응답은 짧게 유지");
+  assertContains(rel, "보호 브랜치와 leader checkout을 보호하는 hook을 우회하지 않는다");
+  assertNotContains(rel, "default.yaml");
+  assertNotContains(rel, "full-feature.yaml");
+  assertNotContains(rel, "reviewer-source: sub-agent");
 }
 
 assertFile(".Codex/agents/code-reviewer.md");
@@ -1083,7 +1076,7 @@ function assertInstallerSelfInstallKeepsSourceScripts(installer) {
     }
     const result = spawnSync(process.execPath, [path.join(tempKitRoot, "bin", installer), "install", "--force-managed"], {
       cwd: tempKitRoot,
-      env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1" },
+      env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1", AGENT_FLOW_AUTO_EXTERNAL_SKILLS: "0" },
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
@@ -1129,7 +1122,7 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
     );
     const result = spawnSync(process.execPath, [path.join(SOURCE_ROOT, "bin", installer), "install", "--force-managed"], {
       cwd: tempRoot,
-      env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1" },
+      env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1", AGENT_FLOW_AUTO_EXTERNAL_SKILLS: "0" },
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
@@ -1160,13 +1153,15 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
         continue;
       }
       const hooksText = fs.readFileSync(installedHooks, "utf8");
-      if (!hooksText.includes("comment-checker.py")) {
+      const hooks = JSON.parse(hooksText);
+      if (!settingsManagedScriptCommands(hooks, "comment-checker.py").length) {
         failures.push(`${label} clean install ${rel} missing comment-checker hook`);
       }
       if (!hooksText.includes("custom-post-hook")) {
         failures.push(`${label} clean install ${rel} did not preserve existing custom hook`);
       }
-      if (!hooksText.includes(installedChecker)) {
+      if (!settingsManagedScriptCommands(hooks, "comment-checker.py")
+        .some((entry) => sameInstalledPath(entry.path, installedChecker))) {
         failures.push(`${label} clean install ${rel} does not use installed comment-checker`);
       }
       if (hooksText.includes(SOURCE_ROOT)) {
@@ -1190,10 +1185,12 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
       failures.push(`${label} clean install missing .claude/settings.json`);
     } else {
       const claudeSettingsText = fs.readFileSync(claudeSettingsPath, "utf8");
-      if (!claudeSettingsText.includes("PostToolUse") || !claudeSettingsText.includes("comment-checker.py")) {
+      const claudeSettings = JSON.parse(claudeSettingsText);
+      if (!claudeSettingsText.includes("PostToolUse") || !settingsManagedScriptCommands(claudeSettings, "comment-checker.py").length) {
         failures.push(`${label} clean install .claude/settings.json missing comment-checker PostToolUse hook`);
       }
-      if (!claudeSettingsText.includes(installedChecker)) {
+      if (!settingsManagedScriptCommands(claudeSettings, "comment-checker.py")
+        .some((entry) => sameInstalledPath(entry.path, installedChecker))) {
         failures.push(`${label} clean install .claude/settings.json does not use installed comment-checker`);
       }
       if (claudeSettingsText.includes(SOURCE_ROOT)) {
@@ -1205,11 +1202,11 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
         failures.push(`${label} clean install missing ${skillName} skill`);
       }
     }
-    seedStaleForceManagedInstall(tempRoot);
+    seedStaleForceManagedInstall(tempRoot, installer);
     const forceResult = spawnSync(process.execPath, [path.join(SOURCE_ROOT, "bin", installer), "install", "--force-managed"], {
       cwd: tempRoot,
       encoding: "utf8",
-      env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1" },
+      env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1", AGENT_FLOW_AUTO_EXTERNAL_SKILLS: "0" },
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
     });
@@ -1223,8 +1220,8 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
     if (fs.existsSync(path.join(tempRoot, ".agent-flow", "workflows", "stale.yaml"))) {
       failures.push(`${label} force install left stale .agent-flow/workflows file`);
     }
-    if (fs.existsSync(path.join(tempRoot, ".agent-flow", "skills", "stale-skill", "SKILL.md"))) {
-      failures.push(`${label} force install left stale .agent-flow/skills file`);
+    if (!fs.existsSync(path.join(tempRoot, ".agent-flow", "skills", "stale-skill", "SKILL.md"))) {
+      failures.push(`${label} force install deleted an unowned .agent-flow/skills entry`);
     }
     for (const host of ["claude", "codex", "omp"]) {
       if (fs.existsSync(hostSkillFile(tempRoot, host, "demo-stale"))) {
@@ -1263,6 +1260,36 @@ function readJsonSafe(pathName) {
   }
 }
 
+function managedHookCommandDetails(command) {
+  if (typeof command !== "string") return null;
+  const match = command.match(/'([A-Za-z0-9+/=]+)' '([0-9a-f]{64})'$/);
+  if (!match) return null;
+  const decoded = Buffer.from(match[1], "base64");
+  if (decoded.toString("base64") !== match[1]) return null;
+  return { path: decoded.toString("utf8"), sha256: match[2] };
+}
+
+function sameInstalledPath(left, right) {
+  try {
+    return fs.realpathSync(left) === fs.realpathSync(right);
+  } catch {
+    return path.resolve(left) === path.resolve(right);
+  }
+}
+
+function settingsManagedScriptCommands(settings, scriptName) {
+  const found = [];
+  for (const entries of Object.values(settings?.hooks ?? {})) {
+    for (const entry of Array.isArray(entries) ? entries : []) {
+      for (const hook of Array.isArray(entry?.hooks) ? entry.hooks : []) {
+        const details = managedHookCommandDetails(hook?.command);
+        if (details && path.basename(details.path) === scriptName) found.push(details);
+      }
+    }
+  }
+  return found;
+}
+
 function assertInstalledHookParity(label, tempRoot) {
   const claude = readJsonSafe(path.join(tempRoot, ".claude", "settings.json"));
   const codex = readJsonSafe(path.join(tempRoot, ".Codex", "hooks.json"));
@@ -1280,9 +1307,8 @@ function assertInstalledHookParity(label, tempRoot) {
         failures.push(`${label} ${host} hooks missing ${event}`);
       }
     }
-    const text = JSON.stringify(settings);
     for (const script of managedScripts) {
-      if (!text.includes(script)) {
+      if (!settingsManagedScriptCommands(settings, script).length) {
         failures.push(`${label} ${host} hooks missing ${script}`);
       }
     }
@@ -1295,7 +1321,10 @@ function assertInstalledHookParity(label, tempRoot) {
   // comment-checker.py를 가진 entry를 찾아 matcher를 검사한다.
   const managedPostToolUseMatcher = (settings) =>
     (settings.hooks.PostToolUse ?? []).find((entry) =>
-      (entry.hooks ?? []).some((hook) => String(hook.command ?? "").includes("comment-checker.py")),
+      (entry.hooks ?? []).some((hook) => {
+        const details = managedHookCommandDetails(hook.command);
+        return details && path.basename(details.path) === "comment-checker.py";
+      }),
     )?.matcher ?? "";
   const claudeMatcher = managedPostToolUseMatcher(claude);
   if (!claudeMatcher.includes("apply_patch")) {
@@ -1339,21 +1368,39 @@ function assertSkillIndexComplete(label, tempRoot) {
     failures.push(`${label} skill index unreadable`);
     return;
   }
-  const indexed = new Set(index.skills.map((skill) => skill.name));
-  for (const entry of fs.readdirSync(skillsDir, { withFileTypes: true })) {
-    if (!entry.isDirectory()) {
-      continue;
-    }
-    if (!fs.existsSync(path.join(skillsDir, entry.name, "SKILL.md"))) {
-      continue;
-    }
-    if (!indexed.has(entry.name)) {
-      failures.push(`${label} installed skill missing from index.json: ${entry.name}`);
+  for (const skill of index.skills) {
+    const skillPath = typeof skill.path === "string"
+      ? path.resolve(tempRoot, skill.path)
+      : path.join(skillsDir, String(skill.name), "SKILL.md");
+    if (!fs.existsSync(skillPath)) {
+      failures.push(`${label} indexed skill is missing from disk: ${skill.name}`);
     }
   }
 }
 
-function seedStaleForceManagedInstall(root) {
+function seedStaleForceManagedInstall(root, installer) {
+  const staleSource = path.join(root, "skills", "demo-stale");
+  fs.mkdirSync(staleSource, { recursive: true });
+  fs.writeFileSync(
+    path.join(staleSource, "SKILL.md"),
+    "---\nname: demo-stale\nhosts: [claude, codex, omp]\n---\n# Previous Demo Stale\n",
+    "utf8",
+  );
+  const registered = spawnSync(
+    process.execPath,
+    [path.join(SOURCE_ROOT, "bin", installer), "install"],
+    {
+      cwd: root,
+      encoding: "utf8",
+      env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1", AGENT_FLOW_AUTO_EXTERNAL_SKILLS: "0" },
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 30_000,
+    },
+  );
+  if (registered.error || registered.status !== 0) {
+    throw new Error(`failed to authenticate stale parity fixture: ${registered.stderr || registered.status}`);
+  }
+  fs.rmSync(staleSource, { recursive: true, force: true });
   const staleTemplate = path.join(root, ".agent-flow", "templates", "_stale", "old.md");
   fs.mkdirSync(path.dirname(staleTemplate), { recursive: true });
   fs.writeFileSync(staleTemplate, "stale\n", "utf8");
@@ -1363,47 +1410,6 @@ function seedStaleForceManagedInstall(root) {
   const staleSkill = path.join(root, ".agent-flow", "skills", "stale-skill", "SKILL.md");
   fs.mkdirSync(path.dirname(staleSkill), { recursive: true });
   fs.writeFileSync(staleSkill, "---\nname: stale-skill\n---\n# Stale Skill\n", "utf8");
-  for (const host of ["claude", "codex", "omp"]) {
-    const skillDir = path.join(hostSkillRoot(root, host), "agent-flow");
-    removePathOrSymlink(skillDir);
-    fs.mkdirSync(skillDir, { recursive: true });
-    fs.writeFileSync(path.join(skillDir, "SKILL.md"), `---\nname: agent-flow\n---\n# stale ${host}\n`, "utf8");
-  }
-  seedPreviousIndexStaleHostSkill(root);
-}
-
-function seedPreviousIndexStaleHostSkill(root) {
-  const staleName = "demo-stale";
-  const previousSkillText = "---\nname: demo-stale\n---\n# Previous Demo Stale\n";
-  const currentHostText = "---\nname: demo-stale\n---\n# User Modified Demo Stale\n";
-  for (const host of ["claude", "codex", "omp"]) {
-    const skillDir = path.join(hostSkillRoot(root, host), staleName);
-    removePathOrSymlink(skillDir);
-    fs.mkdirSync(skillDir, { recursive: true });
-    fs.writeFileSync(path.join(skillDir, "SKILL.md"), currentHostText, "utf8");
-  }
-  const indexPath = path.join(root, ".agent-flow", "skills", "index.json");
-  const index = JSON.parse(fs.readFileSync(indexPath, "utf8"));
-  const staleHash = createHash("sha256").update(previousSkillText).digest("hex");
-  index.skills = [
-    ...(index.skills ?? []),
-    {
-      name: staleName,
-      source: "project",
-      path: "skills/demo-stale/SKILL.md",
-      hosts: ["claude", "codex", "omp"],
-      priority: 50,
-      hash: staleHash,
-      warnings: [],
-    },
-  ];
-  index.links = [
-    ...(index.links ?? []),
-    { name: staleName, host: "claude", path: ".claude/skills/demo-stale", status: "copied" },
-    { name: staleName, host: "codex", path: ".Codex/skills/demo-stale", status: "copied" },
-    { name: staleName, host: "omp", path: ".omp/skills/demo-stale", status: "copied" },
-  ];
-  fs.writeFileSync(indexPath, `${JSON.stringify(index, null, 2)}\n`, "utf8");
 }
 
 function removePathOrSymlink(target) {
@@ -1484,7 +1490,7 @@ function nodeBackwardFreshArtifactOutcome(workflow, testCase) {
     const install = spawnSync(process.execPath, [path.join(SOURCE_ROOT, "bin/agent-flow-kit.mjs"), "install", "--force-managed"], {
       cwd: tempRoot,
       encoding: "utf8",
-      env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1" },
+      env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1", AGENT_FLOW_AUTO_EXTERNAL_SKILLS: "0" },
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
     });
@@ -1671,7 +1677,7 @@ function nodeRouteKeyFromKit(phase, content) {
 function buildNodeRouteKeyEvaluator() {
   const source = read("bin/agent-flow-kit.mjs");
   const start = source.indexOf("function assertCompletionMarkers");
-  const end = source.indexOf("function upsertBootstrapBlock");
+  const end = source.indexOf("function canonicalAgentFlowBlock");
   if (start === -1 || end === -1 || end <= start) {
     failures.push("node route key evaluator source extraction failed");
     return () => "blocked:source-extraction";
@@ -1797,7 +1803,7 @@ function nodePhaseOutcome(workflow, phaseId, content, stateOverrides = {}) {
   try {
     const install = spawnSync(process.execPath, [path.join(SOURCE_ROOT, "bin/agent-flow-kit.mjs"), "install", "--force-managed"], {
       cwd: tempRoot,
-      env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1" },
+      env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1", AGENT_FLOW_AUTO_EXTERNAL_SKILLS: "0" },
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
