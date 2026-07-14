@@ -4181,8 +4181,76 @@ function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`;
 }
 
+const MANAGED_HOOK_VERIFIER = [
+  "import base64,hashlib,os,stat,sys,tempfile,time",
+  "p=base64.b64decode(sys.argv[1],validate=True).decode('utf-8'); expected=sys.argv[2]",
+  "source_fd=None; stage_fd=None; stage_path=None",
+  "try:",
+  " source_fd=os.open(p,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))",
+  " before=os.fstat(source_fd)",
+  " ok=stat.S_ISREG(before.st_mode) and before.st_nlink==1 and bool(before.st_mode & 0o111)",
+  " if ok:",
+  "  with os.fdopen(os.dup(source_fd),'rb') as f: content=f.read()",
+  "  after=os.fstat(source_fd)",
+  "  identity=(before.st_dev,before.st_ino,before.st_mode,before.st_nlink,before.st_size)",
+  "  ok=identity==(after.st_dev,after.st_ino,after.st_mode,after.st_nlink,after.st_size) and hashlib.sha256(content).hexdigest()==expected",
+  " if not ok: raise OSError('integrity mismatch')",
+  " stage_fd,stage_path=tempfile.mkstemp(prefix='agent-flow-managed-hook-')",
+  " view=memoryview(content)",
+  " while view:",
+  "  written=os.write(stage_fd,view)",
+  "  if written<=0: raise OSError('staging write failed')",
+  "  view=view[written:]",
+  " os.fsync(stage_fd); os.fchmod(stage_fd,0o400); os.lseek(stage_fd,0,os.SEEK_SET)",
+  " os.unlink(stage_path); stage_path=None; os.set_inheritable(stage_fd,True)",
+  " os.close(source_fd); source_fd=None",
+  " source_ref=f'/dev/fd/{stage_fd}'",
+  " if not os.path.exists(source_ref): raise OSError('descriptor execution unavailable')",
+  " env=dict(os.environ); env['AGENT_FLOW_MANAGED_HOOK_SOURCE_PATH']=p",
+  " try: hold=int(env.get('AGENT_FLOW_TEST_HOLD_AFTER_MANAGED_HOOK_STAGE_MS','0'))",
+  " except ValueError: hold=0",
+  " if 0<hold<=10000:",
+  "  print('agent-flow:test-hook-staged:'+os.path.basename(p),file=sys.stderr,flush=True); time.sleep(hold/1000)",
+  " if p.endswith('.py'): os.execve('/usr/bin/python3',['/usr/bin/python3','-I',source_ref],env)",
+  " if p.endswith('.sh'): os.execve('/bin/bash',['/bin/bash',source_ref],env)",
+  " raise OSError('unsupported managed hook type')",
+  "except (OSError,UnicodeError,ValueError):",
+  " print('agent-flow: blocked because managed hook integrity validation failed',file=sys.stderr)",
+  " raise SystemExit(2)",
+  "finally:",
+  " if source_fd is not None: os.close(source_fd)",
+  " if stage_path is not None:",
+  "  try: os.unlink(stage_path)",
+  "  except OSError: pass",
+  " if stage_fd is not None:",
+  "  try: os.close(stage_fd)",
+  "  except OSError: pass",
+].join("\n");
+
 function hookScriptCommand(root, scriptName) {
-  return shellQuote(path.join(root, ".agent-flow", "scripts", "hooks", scriptName));
+  const scriptPath = path.join(root, ".agent-flow", "scripts", "hooks", scriptName);
+  const digest = sha256Bytes(fs.readFileSync(scriptPath));
+  return [
+    shellQuote("/usr/bin/python3"),
+    "-I",
+    "-c",
+    shellQuote(MANAGED_HOOK_VERIFIER),
+    shellQuote(Buffer.from(scriptPath, "utf8").toString("base64")),
+    shellQuote(digest),
+  ].join(" ");
+}
+
+function managedHookVerifierDetails(command) {
+  if (typeof command !== "string") return null;
+  const prefix = `${shellQuote("/usr/bin/python3")} -I -c ${shellQuote(MANAGED_HOOK_VERIFIER)} `;
+  if (!command.startsWith(prefix)) return null;
+  const match = command.slice(prefix.length).match(/^'([A-Za-z0-9+/=]+)' '([0-9a-f]{64})'$/);
+  if (!match) return null;
+  const decoded = Buffer.from(match[1], "base64");
+  if (decoded.toString("base64") !== match[1]) return null;
+  const scriptPath = decoded.toString("utf8");
+  if (!Buffer.from(scriptPath, "utf8").equals(decoded)) return null;
+  return { scriptPath, sha256: match[2] };
 }
 
 function unquoteShellWord(value) {
@@ -4196,8 +4264,27 @@ function unquoteShellWord(value) {
 }
 
 function managedHookScriptName(command) {
+  if (typeof command !== "string") return null;
+  const verifier = managedHookVerifierDetails(command);
+  if (verifier && MANAGED_HOOK_SCRIPT_NAMES.includes(path.basename(verifier.scriptPath))) {
+    return path.basename(verifier.scriptPath);
+  }
+  for (const match of command.matchAll(/(?:^|[\s'"])([A-Za-z0-9+/]+={0,2})(?=$|[\s'"])/g)) {
+    const decoded = Buffer.from(match[1], "base64");
+    if (decoded.toString("base64") === match[1]) {
+      const decodedPath = decoded.toString("utf8");
+      if (Buffer.from(decodedPath, "utf8").equals(decoded) && MANAGED_HOOK_SCRIPT_NAMES.includes(path.basename(decodedPath))) {
+        return path.basename(decodedPath);
+      }
+    }
+  }
+  if (
+    command.includes("AGENT_FLOW_MANAGED_HOOK_SOURCE_PATH")
+    && command.includes("agent-flow-managed-hook-")
+    && command.includes("descriptor execution unavailable")
+  ) return "__managed-verifier__";
   const normalized = unquoteShellWord(command).replaceAll("\\", "/").replaceAll("'", "").replaceAll('"', "");
-  for (const scriptName of ["guard-worktree.sh", "guard-worktree-write.py", "guard-protected-branch.sh", "show-phase-status.sh", "comment-checker.py"]) {
+  for (const scriptName of MANAGED_HOOK_SCRIPT_NAMES) {
     if (
       normalized === `.agent-flow/scripts/hooks/${scriptName}` ||
       normalized === `scripts/hooks/${scriptName}` ||
@@ -4212,13 +4299,19 @@ function managedHookScriptName(command) {
   return null;
 }
 
-function trustedManagedHookScriptName(root, command) {
-  const normalized = unquoteShellWord(command).replaceAll("\\", "/");
+function trustedManagedHookScriptName(root, command, expectedScriptHashes = null) {
   const normalizedRoot = path.resolve(root).replaceAll("\\", "/");
-  for (const scriptName of ["guard-worktree.sh", "guard-worktree-write.py", "guard-protected-branch.sh", "show-phase-status.sh", "comment-checker.py"]) {
-    if (normalized === `${normalizedRoot}/.agent-flow/scripts/hooks/${scriptName}`) {
-      return scriptName;
-    }
+  const verifier = managedHookVerifierDetails(command);
+  for (const scriptName of MANAGED_HOOK_SCRIPT_NAMES) {
+    const expected = `${normalizedRoot}/.agent-flow/scripts/hooks/${scriptName}`;
+    const relative = `.agent-flow/scripts/hooks/${scriptName}`;
+    if (!verifier || verifier.scriptPath.replaceAll("\\", "/") !== expected) continue;
+    const metadata = lstatIfExists(verifier.scriptPath);
+    if (!metadata?.isFile() || metadata.isSymbolicLink()) continue;
+    const expectedSha = expectedScriptHashes instanceof Map
+      ? expectedScriptHashes.get(relative)
+      : sha256Bytes(fs.readFileSync(verifier.scriptPath));
+    if (typeof expectedSha === "string" && expectedSha === verifier.sha256) return scriptName;
   }
   return null;
 }
@@ -4232,16 +4325,17 @@ function codexHooksSettings(root) {
           hooks: [
             { type: "command", command: hookScriptCommand(root, "guard-worktree.sh") },
             { type: "command", command: hookScriptCommand(root, "guard-protected-branch.sh") },
+            { type: "command", command: hookScriptCommand(root, "guard-worktree-write.py") },
           ],
         },
         {
-          matcher: "^(apply_patch|Write|Edit|MultiEdit|NotebookEdit|Eval|Python|Notebook|write|edit|multi_edit|multiedit|notebook_edit|notebookedit|eval|python|notebook)$",
+          matcher: WRITE_TOOL_MATCHER,
           hooks: [{ type: "command", command: hookScriptCommand(root, "guard-worktree-write.py") }],
         },
       ],
       PostToolUse: [
         {
-          matcher: "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit)$",
+          matcher: WRITE_TOOL_MATCHER,
           hooks: [{ type: "command", command: hookScriptCommand(root, "comment-checker.py") }],
         },
       ],
@@ -4499,10 +4593,8 @@ function installCodexHooks(root) {
   }
   mergeHookSettings(settings, codexHooksSettings(root).hooks);
   for (const settingsPath of settingsPaths) {
-    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-    fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+    writeManagedFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
   }
-  installCodexTrustState(root);
 }
 
 function claudeHooksSettings(root) {
@@ -4514,16 +4606,17 @@ function claudeHooksSettings(root) {
           hooks: [
             { type: "command", command: hookScriptCommand(root, "guard-worktree.sh") },
             { type: "command", command: hookScriptCommand(root, "guard-protected-branch.sh") },
+            { type: "command", command: hookScriptCommand(root, "guard-worktree-write.py") },
           ],
         },
         {
-          matcher: "^(apply_patch|Write|Edit|MultiEdit|NotebookEdit|Eval|Python|Notebook|write|edit|multi_edit|multiedit|notebook_edit|notebookedit|eval|python|notebook)$",
+          matcher: WRITE_TOOL_MATCHER,
           hooks: [{ type: "command", command: hookScriptCommand(root, "guard-worktree-write.py") }],
         },
       ],
       PostToolUse: [
         {
-          matcher: "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit)$",
+          matcher: WRITE_TOOL_MATCHER,
           hooks: [{ type: "command", command: hookScriptCommand(root, "comment-checker.py") }],
         },
       ],
@@ -4540,8 +4633,7 @@ function installClaudeHooks(root) {
   const settingsPath = path.join(root, ".claude", "settings.json");
   const settings = readHookSettings(settingsPath);
   mergeHookSettings(settings, claudeHooksSettings(root).hooks);
-  fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-  fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+  writeManagedFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
 }
 
 function ompHooksExtensionSource() {
@@ -4552,7 +4644,7 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const HOOK_DIR = path.join(ROOT, ".agent-flow", "scripts", "hooks");
-const WRITE_TOOL_RE = /^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit)$/i;
+const WRITE_TOOL_RE = new RegExp(${JSON.stringify(WRITE_TOOL_MATCHER)}, "i");
 
 export default function agentFlowHooks(pi) {
   if (typeof pi.setLabel === "function") {
@@ -4577,7 +4669,7 @@ export default function agentFlowHooks(pi) {
     }
   });
   pi.on("tool_call", async (event, ctx) => {
-    if (WRITE_TOOL_RE.test(String(event?.toolName || ""))) {
+    if (WRITE_TOOL_RE.test(String(event?.toolName || "")) || isBashTool(event?.toolName)) {
       const result = await runHook("guard-worktree-write.py", hookPayload(event, ctx), ctx);
       if (result.block) {
         return { block: true, reason: result.reason };
@@ -4857,11 +4949,13 @@ function makeHooksExecutable(root) {
   if (!fs.existsSync(hooksDir)) {
     return;
   }
-  for (const entry of fs.readdirSync(hooksDir)) {
-    if (entry.endsWith(".sh") || entry === "comment-checker.py" || entry === "guard-worktree-write.py") {
-      fs.chmodSync(path.join(hooksDir, entry), 0o755);
+  withManagedInstallMutation(hooksDir, () => {
+    for (const entry of fs.readdirSync(hooksDir)) {
+      if (entry.endsWith(".sh") || entry === "comment-checker.py" || entry === "guard-worktree-write.py") {
+        fs.chmodSync(path.join(hooksDir, entry), 0o755);
+      }
     }
-  }
+  });
 }
 
 function workflowContract() {

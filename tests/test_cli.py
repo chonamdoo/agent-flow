@@ -1756,10 +1756,17 @@ class CliTest(unittest.TestCase):
             expected = [
                 f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-worktree.sh'}'",
                 f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-protected-branch.sh'}'",
+                f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-worktree-write.py'}'",
+                f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-worktree-write.py'}'",
                 f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'comment-checker.py'}'",
                 f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'show-phase-status.sh'}'",
             ]
             self.assertEqual(commands, expected)
+            omp_extension = (project_root / ".omp" / "extensions" / "agent-flow-hooks.ts").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("NotebookEdit|Eval|Python|Notebook", omp_extension)
+            self.assertIn('|| isBashTool(event?.toolName)', omp_extension)
             stop_hook = subprocess.run(
                 ("/bin/sh", "-c", commands[-1]),
                 cwd=temp_dir,
