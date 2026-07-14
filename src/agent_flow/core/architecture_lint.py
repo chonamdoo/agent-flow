@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -182,14 +183,14 @@ def changed_files(root: Path) -> list[str]:
     if not (root / ".git").exists():
         return []
     tracked = subprocess.run(
-        ["git", "diff", "--name-only", "--diff-filter=ACMRTUXB", "HEAD", "--"],
+        [_git_executable(), "diff", "--name-only", "--diff-filter=ACMRTUXB", "HEAD", "--"],
         cwd=root,
         text=True,
         capture_output=True,
         check=False,
     )
     untracked = subprocess.run(
-        ["git", "ls-files", "--others", "--exclude-standard"],
+        [_git_executable(), "ls-files", "--others", "--exclude-standard"],
         cwd=root,
         text=True,
         capture_output=True,
@@ -215,6 +216,11 @@ def normalized_candidate_files(files: list[str]) -> list[str]:
             continue
         normalized.append(rel_path)
     return normalized
+
+
+def _git_executable() -> str:
+    configured = os.environ.get("AGENT_FLOW_GIT_EXECUTABLE")
+    return configured if configured and Path(configured).is_absolute() else "git"
 
 
 def is_test_file(rel_path: str) -> bool:

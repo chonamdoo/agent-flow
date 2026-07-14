@@ -18,7 +18,10 @@ import {
 import { detectActiveHost } from "../lib/host-detection.mjs";
 
 const command = process.argv[2];
-const AGENT_FLOW_COMMAND = "agent-flow";
+const configuredAgentFlowCommand = process.env.AGENT_FLOW_PROJECT_LAUNCHER;
+const AGENT_FLOW_COMMAND = configuredAgentFlowCommand && path.isAbsolute(configuredAgentFlowCommand)
+  ? shellSingleQuote(configuredAgentFlowCommand)
+  : "agent-flow";
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
 const KIT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const RUNTIME_PYTHON_RELATIVE = path.join(".agent-flow", "runtime", "python");
@@ -29,6 +32,7 @@ const installArgs = process.argv.slice(3);
 const forceManaged = installArgs.includes("--force-managed");
 let cachedFullFeatureWorkflow = null;
 let cachedProjectPythonPath = null;
+let cachedProjectGitPath = null;
 let activeManagedInstallTransaction = null;
 const PROJECT_SKILL_HOSTS = Object.freeze(["claude", "codex", "omp"]);
 const SKILL_LINKS_COMMITMENT_VERSION = 1;
@@ -197,7 +201,7 @@ function installProjectNodeRuntime(root) {
   }
   writeManagedExecutableFile(
     path.join(root, PROJECT_LAUNCHER_RELATIVE),
-    projectLauncherSource(),
+    projectLauncherSource(root),
   );
 }
 
@@ -235,14 +239,19 @@ function copyRuntimeTree(sourceRoot, runtimeRoot, destinationRelative) {
   visit(sourceRoot, destinationRoot);
 }
 
-function projectLauncherSource() {
+function projectLauncherSource(root) {
   const nodePath = shellSingleQuote(fs.realpathSync(process.execPath));
   const pythonPath = shellSingleQuote(projectPythonPath());
+  const gitPath = shellSingleQuote(projectGitPath());
+  const launcherPath = shellSingleQuote(path.join(root, PROJECT_LAUNCHER_RELATIVE));
   return `#!/bin/sh
 unset NODE_OPTIONS NODE_PATH BASH_ENV ENV LD_PRELOAD LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH PYTHONPATH PYTHONHOME PYTHONSTARTUP
 PYTHON=${pythonPath}
 PYTHON_EXECUTABLE=${pythonPath}
-export PYTHON PYTHON_EXECUTABLE
+AGENT_FLOW_PYTHON_EXECUTABLE=${pythonPath}
+AGENT_FLOW_GIT_EXECUTABLE=${gitPath}
+AGENT_FLOW_PROJECT_LAUNCHER=${launcherPath}
+export PYTHON PYTHON_EXECUTABLE AGENT_FLOW_PYTHON_EXECUTABLE AGENT_FLOW_GIT_EXECUTABLE AGENT_FLOW_PROJECT_LAUNCHER
 launcher_dir=\${0%/*}
 if [ "$launcher_dir" = "$0" ]; then launcher_dir=.; fi
 exec ${nodePath} "$launcher_dir/../runtime/node/bin/agent-flow-kit.mjs" "$@"
@@ -262,10 +271,11 @@ function projectPythonPath() {
     if (contract) {
       const configured = String(contract.path || "");
       const resolved = String(contract.resolved_path || "");
+      const launcherConfigured = process.env.AGENT_FLOW_PYTHON_EXECUTABLE;
       if (
         !path.isAbsolute(configured)
         || fs.realpathSync(configured) !== resolved
-        || !pythonSupportsWorkflowExport(configured)
+        || (launcherConfigured && launcherConfigured !== configured)
       ) {
         throw new Error("project runtime Python contract is invalid");
       }
@@ -275,6 +285,27 @@ function projectPythonPath() {
     }
   }
   return cachedProjectPythonPath;
+}
+
+function projectGitPath() {
+  if (cachedProjectGitPath === null) {
+    const configured = process.env.AGENT_FLOW_GIT_EXECUTABLE
+      || (fs.existsSync("/usr/bin/git") ? "/usr/bin/git" : resolveExecutablePath("git"));
+    const resolved = fs.realpathSync(configured);
+    const stat = fs.lstatSync(resolved);
+    if (
+      !path.isAbsolute(configured)
+      || !stat.isFile()
+      || stat.isSymbolicLink()
+      || (process.platform !== "win32" && stat.uid !== 0)
+      || (stat.mode & 0o022) !== 0
+    ) {
+      throw new Error("trusted git executable is invalid");
+    }
+    fs.accessSync(resolved, fs.constants.X_OK);
+    cachedProjectGitPath = resolved;
+  }
+  return cachedProjectGitPath;
 }
 
 function resolveExecutablePath(candidate) {
@@ -304,17 +335,21 @@ function resolveExecutablePath(candidate) {
 function projectRuntimeContract(root) {
   const launcher = path.join(root, PROJECT_LAUNCHER_RELATIVE);
   const runtime = path.join(root, RUNTIME_NODE_RELATIVE);
-  if (!fs.existsSync(launcher) || !fs.existsSync(runtime)) {
+  const pythonRuntime = path.join(root, RUNTIME_PYTHON_RELATIVE);
+  if (!fs.existsSync(launcher) || !fs.existsSync(runtime) || !fs.existsSync(pythonRuntime)) {
     throw new Error("project runtime installation is incomplete");
   }
   return {
-    version: 1,
+    version: 2,
     launcher: {
       path: PROJECT_LAUNCHER_RELATIVE.split(path.sep).join("/"),
       sha256: crypto.createHash("sha256").update(fs.readFileSync(launcher)).digest("hex"),
     },
     node: {
       path: fs.realpathSync(process.execPath),
+    },
+    git: {
+      path: projectGitPath(),
     },
     python: {
       path: projectPythonPath(),
@@ -324,7 +359,72 @@ function projectRuntimeContract(root) {
       path: RUNTIME_NODE_RELATIVE.split(path.sep).join("/"),
       integrity: treeIntegrity(runtime),
     },
+    python_runtime: {
+      path: RUNTIME_PYTHON_RELATIVE.split(path.sep).join("/"),
+      integrity: treeIntegrity(pythonRuntime),
+    },
   };
+}
+
+function projectRuntimeContractCommitment(contract) {
+  return crypto.createHash("sha256").update(JSON.stringify([
+    contract.version,
+    contract.launcher.path,
+    contract.launcher.sha256,
+    contract.node.path,
+    contract.git.path,
+    contract.python.path,
+    contract.python.resolved_path,
+    contract.runtime.path,
+    contract.runtime.integrity,
+    contract.python_runtime.path,
+    contract.python_runtime.integrity,
+  ])).digest("hex");
+}
+
+function assertProjectRuntimeContract(root) {
+  const kit = readJsonIfExists(path.join(root, ".agent-flow", "kit.json"));
+  const contract = kit?.project_runtime_contract;
+  if (
+    !contract
+    || contract.version !== 2
+    || kit.project_runtime_contract_commitment_version !== 1
+    || kit.project_runtime_contract_commitment !== projectRuntimeContractCommitment(contract)
+  ) {
+    throw new Error("project runtime contract commitment is invalid");
+  }
+  const launcher = path.join(root, PROJECT_LAUNCHER_RELATIVE);
+  const nodeRuntime = path.join(root, RUNTIME_NODE_RELATIVE);
+  const pythonRuntime = path.join(root, RUNTIME_PYTHON_RELATIVE);
+  if (
+    crypto.createHash("sha256").update(fs.readFileSync(launcher)).digest("hex") !== contract.launcher.sha256
+    || treeIntegrity(nodeRuntime) !== contract.runtime.integrity
+    || treeIntegrity(pythonRuntime) !== contract.python_runtime.integrity
+    || fs.realpathSync(process.execPath) !== contract.node.path
+    || fs.realpathSync(contract.git.path) !== contract.git.path
+    || fs.realpathSync(contract.python.path) !== contract.python.resolved_path
+  ) {
+    throw new Error("project runtime contract no longer matches installed files");
+  }
+  return contract;
+}
+
+function projectGuardVerifierSource(contract) {
+  const source = fs.readFileSync(path.join(KIT_ROOT, "scripts", "hooks", "guard-worktree-write.py"), "utf8");
+  const commitment = projectRuntimeContractCommitment(contract);
+  const rendered = source
+    .replace("__AGENT_FLOW_PROJECT_RUNTIME_CONTRACT_SHA256__", commitment)
+    .replace("__AGENT_FLOW_PYTHON_RUNTIME_INTEGRITY__", contract.python_runtime.integrity);
+  if (rendered === source) {
+    throw new Error("project guard verifier placeholders are missing");
+  }
+  return rendered;
+}
+
+function installProjectGuardVerifier(root, contract) {
+  const guardPath = path.join(root, ".agent-flow", "scripts", "hooks", "guard-worktree-write.py");
+  const rendered = projectGuardVerifierSource(contract);
+  writeManagedFile(guardPath, rendered);
 }
 
 function installProjectUnlocked(root, context, lock) {
@@ -447,6 +547,8 @@ function installProjectUnlocked(root, context, lock) {
     true,
   );
   installProjectNodeRuntime(root);
+  const runtimeContract = projectRuntimeContract(root);
+  installProjectGuardVerifier(root, runtimeContract);
   if (!samePath(root, KIT_ROOT)) {
     removeManagedDirIfSame(path.join(KIT_ROOT, "scripts"), path.join(root, "scripts"), forceManaged);
   }
@@ -521,10 +623,12 @@ function installProjectUnlocked(root, context, lock) {
   payload.managed_host_files = managedHostFileManifest(root);
   payload.managed_host_files_commitment_version = MANAGED_HOST_FILES_COMMITMENT_VERSION;
   payload.managed_host_files_commitment = managedHostFilesCommitment(payload);
-  payload.managed_hook_contract = managedHookContract(root);
+  payload.managed_hook_contract = managedHookContract(root, runtimeContract);
   payload.managed_hook_contract_commitment_version = MANAGED_HOOK_CONTRACT_COMMITMENT_VERSION;
   payload.managed_hook_contract_commitment = managedHookContractCommitment(payload);
-  payload.project_runtime_contract = projectRuntimeContract(root);
+  payload.project_runtime_contract = runtimeContract;
+  payload.project_runtime_contract_commitment_version = 1;
+  payload.project_runtime_contract_commitment = projectRuntimeContractCommitment(runtimeContract);
 
   writeManagedFile(path.join(agentFlowDir, "kit.json"), `${JSON.stringify(payload, null, 2)}\n`);
   holdInstallForTest("AGENT_FLOW_TEST_HOLD_BEFORE_MANAGED_INSTALL_SEAL_MS", "managed-install-before-seal");
@@ -988,7 +1092,7 @@ function resolveGitCommonWorktreeRoot(start) {
 }
 
 function gitOutput(cwd, args) {
-  const result = safeSpawnSync("git", args, {
+  const result = safeSpawnSync(projectGitPath(), args, {
     cwd,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "ignore"],
@@ -1072,7 +1176,7 @@ function validateNodeWorkspaceIdentity(identity, root, requireRegistration = tru
     throw new Error(`blocked: pinned workspace branch changed: ${workspaceRoot}`);
   }
   const ancestor = safeSpawnSync(
-    "git",
+    projectGitPath(),
     ["merge-base", "--is-ancestor", String(identity.head), head],
     { cwd: workspaceRoot, stdio: "ignore" },
   );
@@ -1299,12 +1403,16 @@ function managedHookProjection(root, settings, label, expectedScriptHashes) {
   return rows.sort(compareHookProjectionRows);
 }
 
-function managedHookContract(root) {
+function managedHookContract(root, runtimeContract = null) {
   const scripts = {};
   for (const scriptName of MANAGED_HOOK_SCRIPT_NAMES) {
     const relative = `.agent-flow/scripts/hooks/${scriptName}`;
     const content = requireManagedRegularFile(root, relative);
-    const source = fs.readFileSync(path.join(KIT_ROOT, "scripts", "hooks", scriptName));
+    const source = scriptName === "guard-worktree-write.py"
+      ? Buffer.from(projectGuardVerifierSource(
+        runtimeContract ?? readExistingKit(path.join(root, ".agent-flow"))?.project_runtime_contract,
+      ), "utf8")
+      : fs.readFileSync(path.join(KIT_ROOT, "scripts", "hooks", scriptName));
     if (!content.equals(source)) throw new Error(`blocked: managed hook script differs from authenticated source: ${relative}`);
     if (process.platform !== "win32" && !(fs.statSync(path.join(root, ...relative.split("/"))).mode & 0o111)) {
       throw new Error(`blocked: managed hook script is not executable: ${relative}`);
@@ -1537,7 +1645,7 @@ function pushWatchStatePath(root) {
 }
 
 function currentBranch(root) {
-  const result = safeSpawnSync("git", ["branch", "--show-current"], {
+  const result = safeSpawnSync(projectGitPath(), ["branch", "--show-current"], {
     cwd: root,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
@@ -1780,7 +1888,17 @@ function withManagedDirectoryCwd(boundaryRoot, pathName, create, callback) {
     if (holdSuffix && target.endsWith(holdSuffix)) {
       holdInstallForTest("AGENT_FLOW_TEST_HOLD_MANAGED_PARENT_MS", "managed-parent-anchored");
     }
+    const anchoredPath = fs.realpathSync(".");
+    ensureChildPath(boundary, anchoredPath);
+    if (!samePath(anchoredPath, target)) {
+      throw new Error(`managed install ancestor moved outside boundary: ${target}`);
+    }
     result = callback();
+    const completedPath = fs.realpathSync(".");
+    ensureChildPath(boundary, completedPath);
+    if (!samePath(completedPath, target)) {
+      throw new Error(`managed install ancestor moved during mutation: ${target}`);
+    }
   } catch (error) {
     callbackError = error;
   }
@@ -1969,7 +2087,7 @@ function materializeResolvedSkillSources(agentFlowDir, sourcePlan, transaction =
       `.agent-flow-stage-${entry.name}-${process.pid}-${crypto.randomBytes(6).toString("hex")}`,
     );
     try {
-      fs.cpSync(sourcePath, stage, { recursive: true, dereference: false, errorOnExist: true });
+      fs.cpSync(sourcePath, stage, { recursive: true, dereference: false, errorOnExist: true, force: false });
       if (hashSkillTree(stage) !== entry.tree_hash) {
         throw new Error(`skill source changed while copying: ${entry.name}`);
       }
@@ -2234,8 +2352,65 @@ function sameHostPathState(left, right) {
   return left.kind === "absent";
 }
 
+function swapHostPath(root, target, staged, incoming, displaced, expectedBefore, expectedAfter) {
+  withManagedDirectoryCwd(root, path.dirname(target), expectedBefore.kind === "absent", () => {
+    const targetName = path.basename(target);
+    const incomingName = path.basename(incoming);
+    const displacedName = path.basename(displaced);
+    if (lstatIfExists(incomingName) || lstatIfExists(displacedName)) {
+      throw new Error(`host skill swap path already exists: ${target}`);
+    }
+    const holdSuffix = process.env.AGENT_FLOW_TEST_HOLD_HOST_TARGET_SUFFIX;
+    if (!holdSuffix || target.endsWith(holdSuffix)) {
+      holdInstallForTest("AGENT_FLOW_TEST_HOLD_BEFORE_HOST_SWAP_MS", "host-swap-ready");
+    }
+    if (expectedAfter.kind !== "absent") {
+      if (!sameHostPathState(hostPathState(staged), expectedAfter)) {
+        throw new Error(`host skill staging integrity mismatch: ${target}`);
+      }
+      renameManagedNoReplace(staged, incomingName);
+      if (!sameHostPathState(hostPathState(incomingName), expectedAfter)) {
+        throw new Error(`host skill incoming integrity mismatch: ${target}`);
+      }
+    }
+    if (!sameHostPathState(hostPathState(targetName), expectedBefore)) {
+      throw new Error(`host skill path changed outside install transaction: ${target}`);
+    }
+    if (expectedBefore.kind !== "absent") {
+      fs.renameSync(targetName, displacedName);
+      if (!sameHostPathState(hostPathState(displacedName), expectedBefore)) {
+        if (!lstatIfExists(targetName)) renameManagedNoReplace(displacedName, targetName);
+        throw new Error(`host skill path changed during swap: ${target}`);
+      }
+    }
+    holdInstallForTest("AGENT_FLOW_TEST_HOLD_AFTER_HOST_DISPLACE_MS", "host-target-displaced");
+    if (expectedAfter.kind !== "absent") renameManagedNoReplace(incomingName, targetName);
+    if (!sameHostPathState(hostPathState(targetName), expectedAfter)) {
+      throw new Error(`host skill staged mutation mismatch: ${target}`);
+    }
+  });
+}
+
+function removeHostTemporaryPath(root, pathName, expected) {
+  withManagedDirectoryCwd(root, path.dirname(pathName), false, () => {
+    const name = path.basename(pathName);
+    const current = hostPathState(name);
+    if (current.kind === "absent") return;
+    if (!sameHostPathState(current, expected)) {
+      throw new Error(`host skill temporary path changed: ${pathName}`);
+    }
+    const quarantine = `${name}.cleanup-${crypto.randomBytes(12).toString("hex")}`;
+    renameManagedNoReplace(name, quarantine);
+    if (!sameHostPathState(hostPathState(quarantine), expected)) {
+      if (hostPathState(name).kind === "absent") renameManagedNoReplace(quarantine, name);
+      throw new Error(`host skill temporary path changed during cleanup: ${pathName}`);
+    }
+    fs.rmSync(quarantine, { recursive: true, force: true });
+  });
+}
+
 function withHostPathMutation(transaction, target, allowedAfter, callback) {
-  if (!transaction) return callback();
+  if (!transaction) return callback(target);
   ensureChildPath(transaction.root, target);
   const relative = path.relative(transaction.root, target);
   const before = hostPathState(target);
@@ -2244,7 +2419,13 @@ function withHostPathMutation(transaction, target, allowedAfter, callback) {
     const backupRelative = path.join("host-backups", String(operationId));
     const backupPath = path.join(transaction.transactionRoot, backupRelative);
     fs.mkdirSync(path.dirname(backupPath), { recursive: true });
-    fs.cpSync(target, backupPath, { recursive: true, dereference: false, errorOnExist: true });
+    fs.cpSync(target, backupPath, {
+      recursive: true,
+      dereference: false,
+      verbatimSymlinks: true,
+      errorOnExist: true,
+      force: false,
+    });
     if (!sameHostPathState(before, hostPathState(backupPath))) {
       throw new Error(`host skill backup integrity mismatch: ${relative}`);
     }
@@ -2255,22 +2436,57 @@ function withHostPathMutation(transaction, target, allowedAfter, callback) {
     before,
     allowed_after: allowedAfter,
     after: null,
+    pending: null,
   };
   transaction.journal.host_mutations.push(operation);
   writeInstallJournal(transaction.journalPath, transaction.journal);
+  const stagingRoot = path.join(transaction.transactionRoot, "host-staging", String(operationId));
+  const stagedTarget = path.join(stagingRoot, "next");
+  fs.mkdirSync(stagingRoot, { recursive: true });
+  if (before.kind === "symlink") {
+    fs.symlinkSync(before.target, stagedTarget, "dir");
+  } else if (before.kind !== "absent") {
+    fs.cpSync(target, stagedTarget, {
+      recursive: true,
+      dereference: false,
+      verbatimSymlinks: true,
+      errorOnExist: true,
+      force: false,
+    });
+    if (!sameHostPathState(before, hostPathState(stagedTarget))) {
+      throw new Error(`host skill staging integrity mismatch: ${relative}`);
+    }
+  }
   let result;
   let callbackError = null;
   try {
-    result = callback();
+    result = callback(stagedTarget);
   } catch (error) {
     callbackError = error;
   }
-  operation.after = hostPathState(target);
-  writeInstallJournal(transaction.journalPath, transaction.journal);
   if (callbackError) throw callbackError;
-  if (!allowedAfter.some((state) => sameHostPathState(state, operation.after))) {
+  const after = hostPathState(stagedTarget);
+  if (!allowedAfter.some((state) => sameHostPathState(state, after))) {
     throw new Error(`unexpected host skill mutation result: ${relative}`);
   }
+  const prefix = `.agent-flow-host-swap-${transaction.token}-${operationId}`;
+  const incoming = path.join(path.dirname(target), `${prefix}-next`);
+  const displaced = path.join(path.dirname(target), `${prefix}-previous`);
+  operation.pending = {
+    after,
+    staging: path.relative(transaction.transactionRoot, stagedTarget),
+    incoming: path.relative(transaction.root, incoming),
+    displaced: path.relative(transaction.root, displaced),
+  };
+  writeInstallJournal(transaction.journalPath, transaction.journal);
+  swapHostPath(transaction.root, target, stagedTarget, incoming, displaced, before, after);
+  operation.pending.completed = true;
+  writeInstallJournal(transaction.journalPath, transaction.journal);
+  removeHostTemporaryPath(transaction.root, incoming, after);
+  removeHostTemporaryPath(transaction.root, displaced, before);
+  operation.after = hostPathState(target);
+  operation.pending = null;
+  writeInstallJournal(transaction.journalPath, transaction.journal);
   return result;
 }
 
@@ -2283,24 +2499,36 @@ function hostMutationTarget(root, relative) {
   return target;
 }
 
-function restoreHostPathState(target, state, transactionRoot) {
-  if (lstatIfExists(target)) fs.rmSync(target, { recursive: true, force: true });
-  if (state.kind === "absent") return;
-  fs.mkdirSync(path.dirname(target), { recursive: true });
+function restoreHostPathState(root, target, state, transactionRoot) {
+  const token = crypto.randomBytes(24).toString("hex");
+  const stagingRoot = path.join(transactionRoot, "host-restore", token);
+  const staged = path.join(stagingRoot, "next");
+  fs.mkdirSync(stagingRoot, { recursive: true });
   if (state.kind === "symlink") {
-    fs.symlinkSync(state.target, target, "dir");
-    return;
-  }
-  if (!["directory", "file"].includes(state.kind) || typeof state.backup !== "string") {
+    fs.symlinkSync(state.target, staged, "dir");
+  } else if (["directory", "file"].includes(state.kind) && typeof state.backup === "string") {
+    const backupPath = path.resolve(transactionRoot, state.backup);
+    ensureChildPath(transactionRoot, backupPath);
+    assertNoSymlinkComponents(transactionRoot, backupPath);
+    if (!sameHostPathState(state, hostPathState(backupPath))) {
+      throw new Error(`host skill backup authentication failed: ${target}`);
+    }
+    fs.cpSync(backupPath, staged, {
+      recursive: true,
+      dereference: false,
+      verbatimSymlinks: true,
+      errorOnExist: true,
+      force: false,
+    });
+  } else if (state.kind !== "absent") {
     throw new Error(`invalid host skill backup state: ${target}`);
   }
-  const backupPath = path.resolve(transactionRoot, state.backup);
-  ensureChildPath(transactionRoot, backupPath);
-  assertNoSymlinkComponents(transactionRoot, backupPath);
-  if (!sameHostPathState(state, hostPathState(backupPath))) {
-    throw new Error(`host skill backup authentication failed: ${target}`);
-  }
-  fs.cpSync(backupPath, target, { recursive: true, dereference: false, errorOnExist: true });
+  const current = hostPathState(target);
+  const incoming = path.join(path.dirname(target), `.agent-flow-host-restore-${token}-next`);
+  const displaced = path.join(path.dirname(target), `.agent-flow-host-restore-${token}-previous`);
+  swapHostPath(root, target, staged, incoming, displaced, current, state);
+  removeHostTemporaryPath(root, incoming, state);
+  removeHostTemporaryPath(root, displaced, current);
 }
 
 function rollbackRecordedHostMutations(root, transactionRoot, journal) {
@@ -2309,6 +2537,38 @@ function rollbackRecordedHostMutations(root, transactionRoot, journal) {
     const operation = operations[index];
     const target = hostMutationTarget(root, operation.path);
     const current = hostPathState(target);
+    if (operation.pending) {
+      const incoming = path.resolve(root, operation.pending.incoming);
+      const displaced = path.resolve(root, operation.pending.displaced);
+      ensureChildPath(root, incoming);
+      ensureChildPath(root, displaced);
+      const completed = sameHostPathState(current, operation.pending.after)
+        && (
+          operation.pending.completed === true
+          || (
+            hostPathState(incoming).kind === "absent"
+            && sameHostPathState(hostPathState(displaced), operation.before)
+          )
+        );
+      const interrupted = current.kind === "absent"
+        && sameHostPathState(hostPathState(incoming), operation.pending.after)
+        && sameHostPathState(hostPathState(displaced), operation.before);
+      const notStarted = sameHostPathState(current, operation.before)
+        && hostPathState(displaced).kind === "absent";
+      if (!completed && !interrupted && !notStarted) {
+        throw new Error(`host skill path changed outside install transaction: ${operation.path}`);
+      }
+      if (completed || interrupted) {
+        restoreHostPathState(root, target, operation.before, transactionRoot);
+      }
+      removeHostTemporaryPath(root, incoming, operation.pending.after);
+      removeHostTemporaryPath(root, displaced, operation.before);
+      operation.pending = null;
+      if (completed || interrupted) {
+        operation.rolled_back = true;
+        continue;
+      }
+    }
     if (sameHostPathState(current, operation.before)) {
       operation.rolled_back = true;
       continue;
@@ -2319,7 +2579,7 @@ function rollbackRecordedHostMutations(root, transactionRoot, journal) {
     if (!committedByTransaction) {
       throw new Error(`host skill path changed outside install transaction: ${operation.path}`);
     }
-    restoreHostPathState(target, operation.before, transactionRoot);
+    restoreHostPathState(root, target, operation.before, transactionRoot);
     if (!sameHostPathState(hostPathState(target), operation.before)) {
       throw new Error(`host skill rollback integrity mismatch: ${operation.path}`);
     }
@@ -2332,7 +2592,7 @@ function rollbackRecordedHostMutations(root, transactionRoot, journal) {
 
 function verifyCommittedHostMutations(root, journal) {
   for (const operation of journal?.host_mutations || []) {
-    if (!operation.after) throw new Error(`incomplete host skill mutation: ${operation.path}`);
+    if (!operation.after || operation.pending) throw new Error(`incomplete host skill mutation: ${operation.path}`);
     const target = hostMutationTarget(root, operation.path);
     if (!sameHostPathState(hostPathState(target), operation.after)) {
       throw new Error(`host skill mutation commitment changed: ${operation.path}`);
@@ -2518,13 +2778,13 @@ function swapManagedPath(
         if (!sameManagedPathState(managedPathState(staged), expectedAfter)) {
           throw new Error(`managed install staging integrity mismatch: ${target}`);
         }
-        fs.cpSync(staged, incomingName, { recursive: true, dereference: false, errorOnExist: true });
+        renameManagedNoReplace(staged, incomingName);
         if (!sameManagedPathState(managedPathState(incomingName), expectedAfter)) {
           throw new Error(`managed install incoming integrity mismatch: ${target}`);
         }
       }
       if (!sameManagedPathState(managedPathState(targetName), expectedBefore)) {
-        if (lstatIfExists(incomingName)) fs.rmSync(incomingName, { recursive: true, force: true });
+        removeManagedTemporaryPath(boundaryRoot, incoming, expectedAfter);
         throw new Error(`managed install path changed outside transaction: ${target}`);
       }
       if (expectedBefore.kind !== "absent") {
@@ -2576,7 +2836,7 @@ function withManagedInstallMutation(pathName, callback) {
   const displacedTarget = path.join(transaction.root, swapPaths.displaced);
   fs.mkdirSync(stagingRoot, { recursive: true });
   if (lstatIfExists(target)) {
-    fs.cpSync(target, stagedTarget, { recursive: true, dereference: false, errorOnExist: true });
+    fs.cpSync(target, stagedTarget, { recursive: true, dereference: false, errorOnExist: true, force: false });
     if (!sameManagedPathState(managedPathState(stagedTarget), expected)) {
       throw new Error(`managed install staging integrity mismatch: ${operation.path}`);
     }
@@ -2660,7 +2920,7 @@ function snapshotManagedInstallPaths(transaction) {
       const backupRelative = path.join("managed-backups", String(transaction.journal.managed_mutations.length));
       const backupPath = path.join(transaction.transactionRoot, backupRelative);
       fs.mkdirSync(path.dirname(backupPath), { recursive: true });
-      fs.cpSync(target, backupPath, { recursive: true, dereference: false, errorOnExist: true });
+      fs.cpSync(target, backupPath, { recursive: true, dereference: false, errorOnExist: true, force: false });
       if (!sameManagedPathState(before, managedPathState(backupPath))) {
         throw new Error(`managed install backup integrity mismatch: ${operation.path}`);
       }
@@ -2726,7 +2986,13 @@ function removeManagedTemporaryPath(root, pathName, expected) {
     if (!sameManagedPathState(current, expected)) {
       throw new Error(`managed install temporary path changed: ${pathName}`);
     }
-    fs.rmSync(name, { recursive: true, force: true });
+    const quarantine = `${name}.cleanup-${crypto.randomBytes(12).toString("hex")}`;
+    renameManagedNoReplace(name, quarantine);
+    if (!sameManagedPathState(managedPathState(quarantine), expected)) {
+      if (managedPathState(name).kind === "absent") renameManagedNoReplace(quarantine, name);
+      throw new Error(`managed install temporary path changed during cleanup: ${pathName}`);
+    }
+    fs.rmSync(quarantine, { recursive: true, force: true });
   });
 }
 
@@ -2882,7 +3148,7 @@ function preserveUnmanagedSkillEntries(transaction, previousIndex, currentIndex)
     if (lstatIfExists(destination)) {
       throw new Error(`unmanaged skill entry conflicts with installed skill: ${entry}`);
     }
-    fs.cpSync(source, destination, { recursive: true, dereference: false, errorOnExist: true });
+    fs.cpSync(source, destination, { recursive: true, dereference: false, errorOnExist: true, force: false });
   }
   const indexed = new Set((currentIndex?.skills || []).map((skill) => skill.name));
   for (const entry of fs.readdirSync(transaction.live, { withFileTypes: true })) {
@@ -2958,7 +3224,7 @@ function validateInterruptedInstallJournal(root, agentFlowDir, transactionRoot, 
       || seenManaged.has(operation.path)
       || !Number.isInteger(operation.mutation_count)
       || operation.mutation_count < 0
-      || (operation.pending !== null && (typeof operation.pending !== "object" || Array.isArray(operation.pending)))
+      || (operation.pending != null && (typeof operation.pending !== "object" || Array.isArray(operation.pending)))
     ) {
       throw new Error(`invalid interrupted managed mutation: ${operation?.path ?? index}`);
     }
@@ -3035,8 +3301,23 @@ function validateInterruptedInstallJournal(root, agentFlowDir, transactionRoot, 
       !validateJournalHostState(operation.before, beforeBackup)
       || (operation.after !== null && !validateJournalHostState(operation.after))
       || !operation.allowed_after.every((state) => validateJournalHostState(state))
+      || (operation.pending !== null && (typeof operation.pending !== "object" || Array.isArray(operation.pending)))
     ) {
       throw new Error(`invalid interrupted host mutation state: ${normalized}`);
+    }
+    if (operation.pending) {
+      const prefix = `.agent-flow-host-swap-${journal.token}-${index}`;
+      const expectedIncoming = path.join(path.dirname(operation.path), `${prefix}-next`);
+      const expectedDisplaced = path.join(path.dirname(operation.path), `${prefix}-previous`);
+      if (
+        operation.pending.staging !== path.join("host-staging", String(index), "next")
+        || operation.pending.incoming !== expectedIncoming
+        || operation.pending.displaced !== expectedDisplaced
+        || ![undefined, true].includes(operation.pending.completed)
+        || !validateJournalHostState(operation.pending.after)
+      ) {
+        throw new Error(`invalid interrupted host mutation intent: ${normalized}`);
+      }
     }
     if (beforeBackup) {
       const backupPath = path.resolve(transactionRoot, beforeBackup);
@@ -3670,7 +3951,7 @@ function removeStaleProjectSkillLinks(root, skills, previousIndex, force = false
         transaction,
         target,
         [{ kind: "absent" }],
-        () => fs.unlinkSync(target),
+        (stagedTarget) => fs.unlinkSync(stagedTarget),
       );
       removed.push({ name: link.name, host: link.host, path: link.path, status: "removed-stale-linked" });
       continue;
@@ -3687,7 +3968,7 @@ function removeStaleProjectSkillLinks(root, skills, previousIndex, force = false
       transaction,
       target,
       [{ kind: "absent" }],
-      () => fs.rmSync(target, { recursive: true, force: true }),
+      (stagedTarget) => fs.rmSync(stagedTarget, { recursive: true, force: true }),
     );
     removed.push({ name: link.name, host: link.host, path: link.path, status: "removed-stale-copied" });
   }
@@ -3802,13 +4083,13 @@ function linkProjectSkill(root, skill, host, previousIndex, force = false, trans
       { kind: "symlink", target: relTarget },
       { kind: "directory", tree_hash: skill.tree_hash },
     ],
-    () => {
-      if (replaceExisting) fs.rmSync(destDir, { recursive: true, force: true });
+    (stagedDest) => {
+      if (replaceExisting) fs.rmSync(stagedDest, { recursive: true, force: true });
       try {
         if (process.env.AGENT_FLOW_TEST_FORCE_COPY_HOST_SKILLS === "1") {
           throw new Error("injected host skill copy fallback");
         }
-        fs.symlinkSync(relTarget, destDir, "dir");
+        fs.symlinkSync(relTarget, stagedDest, "dir");
         return {
           name: skill.name,
           host,
@@ -3820,7 +4101,7 @@ function linkProjectSkill(root, skill, host, previousIndex, force = false, trans
           tree_integrity: treeIntegrity(srcDir),
         };
       } catch {
-        copyBundledDirIfMissingOrSame(srcDir, destDir, true);
+        copyBundledDirIfMissingOrSame(srcDir, stagedDest, true);
         return {
           name: skill.name,
           host,
@@ -5774,14 +6055,68 @@ function sandboxProfilePath(pathName) {
   return String(pathName).replaceAll("\\", "\\\\").replaceAll('"', '\\"');
 }
 
+function readPythonGateRun(root) {
+  assertProjectRuntimeContract(root);
+  const commonDir = gitOutput(root, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  if (!commonDir) throw new Error("blocked: Python run context requires a git common directory");
+  const runtimeRoot = path.join(fs.realpathSync(commonDir), "agent-flow", "worktrees");
+  if (!fs.existsSync(runtimeRoot)) throw new Error("no active run. start one with the project launcher");
+  const active = [];
+  for (const worktreeEntry of fs.readdirSync(runtimeRoot, { withFileTypes: true })) {
+    if (!worktreeEntry.isDirectory() || worktreeEntry.isSymbolicLink()) continue;
+    const runsRoot = path.join(runtimeRoot, worktreeEntry.name, ".agent-flow", "runs");
+    const runsStat = lstatIfExists(runsRoot);
+    if (!runsStat?.isDirectory() || runsStat.isSymbolicLink()) continue;
+    for (const runEntry of fs.readdirSync(runsRoot, { withFileTypes: true })) {
+      if (!runEntry.isDirectory() || runEntry.isSymbolicLink()) continue;
+      const runDir = path.join(runsRoot, runEntry.name);
+      const marker = lstatIfExists(path.join(runDir, "active"));
+      const metaPath = path.join(runDir, "meta.json");
+      const metaStat = lstatIfExists(metaPath);
+      if (!marker?.isFile() || marker.isSymbolicLink() || marker.nlink !== 1) continue;
+      if (!metaStat?.isFile() || metaStat.isSymbolicLink() || metaStat.nlink !== 1) {
+        throw new Error(`blocked: Python run metadata is unsafe: ${metaPath}`);
+      }
+      const state = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+      if (state.run_id !== runEntry.name) {
+        throw new Error(`blocked: Python run metadata identity mismatch: ${metaPath}`);
+      }
+      active.push({ ...state, run_dir: runDir, workspace_root: state.workspace?.workspace_root });
+    }
+  }
+  if (active.length !== 1) {
+    throw new Error(active.length === 0
+      ? "no active run. start one with the project launcher"
+      : "blocked: multiple active Python runs detected");
+  }
+  const [state] = active;
+  const current = currentNodeSkillPlan(root);
+  if (
+    state.skill_plan_hash_version !== current.skill_plan_hash_version
+    || state.skill_plan_hash !== current.skill_plan_hash
+  ) {
+    throw new Error("blocked: Python run skill plan differs from installed commitment");
+  }
+  validateNodeWorkspaceIdentity(state.workspace, root);
+  return state;
+}
+
+function activeGateRun(root) {
+  if (fs.existsSync(currentRunPath(root))) {
+    const state = assertNodeRunBoundary(readCurrentRun(root), root);
+    assertNodeSkillPlanPinned(state, root);
+    return state;
+  }
+  return readPythonGateRun(root);
+}
+
 function runSandboxedGate(args, extraEnv = {}) {
   const separator = args.indexOf("--");
   const gateArgs = separator === -1 ? args : args.slice(separator + 1);
   if (gateArgs.length === 0) throw new Error("gate requires a command after --");
   const root = resolveAgentFlowRoot(process.cwd());
-  assertInstalled(root);
-  const state = assertNodeRunBoundary(readCurrentRun(root), root);
-  assertNodeSkillPlanPinned(state, root);
+  assertProjectRuntimeContract(root);
+  const state = activeGateRun(root);
   const pinned = fs.realpathSync(state.workspace_root ?? root);
   const invocation = gitOutput(process.cwd(), ["rev-parse", "--show-toplevel"])
     ?? fs.realpathSync(process.cwd());
@@ -5841,6 +6176,7 @@ function runSandboxedGate(args, extraEnv = {}) {
 
 function runSandboxedPythonCliCommand(subcommand, args) {
   const root = resolveAgentFlowRoot(process.cwd());
+  assertProjectRuntimeContract(root);
   const python = projectPythonPath();
   const pythonPathEntries = [
     path.join(KIT_ROOT, "src"),
@@ -5860,6 +6196,7 @@ function runSandboxedPythonCliCommand(subcommand, args) {
 
 function runProjectPythonCli(args) {
   const root = resolveAgentFlowRoot(process.cwd());
+  assertProjectRuntimeContract(root);
   const pythonPathEntries = [
     path.join(KIT_ROOT, "src"),
     installedPythonRuntimePath(root),
@@ -5885,8 +6222,56 @@ function installedPythonRuntimePath(root) {
   return fs.existsSync(path.join(runtimePath, "agent_flow", "__init__.py")) ? runtimePath : "";
 }
 
+function runInstallSandbox() {
+  if (process.env.AGENT_FLOW_INSTALL_SANDBOXED === "1") return;
+  const root = resolveInstallRoot(process.cwd());
+  let executable = null;
+  let args = [];
+  if (process.platform === "darwin" && fs.existsSync("/usr/bin/sandbox-exec")) {
+    executable = "/usr/bin/sandbox-exec";
+    const profile = [
+      "(version 1)",
+      "(allow default)",
+      "(deny file-write*)",
+      `(allow file-write* (subpath "${sandboxProfilePath(root)}"))`,
+      "(allow file-write* (literal \"/dev/null\") (literal \"/dev/tty\"))",
+    ].join(" ");
+    args = ["-p", profile, fs.realpathSync(process.execPath), fileURLToPath(import.meta.url), ...process.argv.slice(2)];
+  } else if (process.platform === "linux") {
+    executable = trustedLinuxBubblewrap();
+    if (!executable) return;
+    args = [
+      "--die-with-parent",
+      "--ro-bind", "/", "/",
+      "--bind", root, root,
+      "--dev-bind", "/dev", "/dev",
+      "--proc", "/proc",
+      "--chdir", root,
+      "--",
+      fs.realpathSync(process.execPath),
+      fileURLToPath(import.meta.url),
+      ...process.argv.slice(2),
+    ];
+  } else {
+    return;
+  }
+  const result = safeSpawnSync(executable, args, {
+    cwd: root,
+    env: {
+      ...process.env,
+      AGENT_FLOW_INSTALL_SANDBOXED: "1",
+      PYTHONDONTWRITEBYTECODE: "1",
+    },
+    stdio: "inherit",
+    timeout: 30 * 60 * 1000,
+  });
+  if (result.error) throw result.error;
+  process.exit(result.status ?? 1);
+}
+
 try {
   if (command === "install") {
+    runInstallSandbox();
     installProject();
     process.exit(0);
   }
@@ -5897,6 +6282,7 @@ try {
   }
 
   if (command === "run" && process.argv[3] === "install") {
+    runInstallSandbox();
     installProject();
     process.exit(0);
   }

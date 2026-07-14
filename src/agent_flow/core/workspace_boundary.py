@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -102,7 +103,7 @@ def validate_workspace_identity(identity: WorkspaceIdentity) -> Path:
         raise WorkspaceBoundaryError("pinned workspace branch changed")
     current_head = _git(root, "rev-parse", "HEAD")
     ancestor = subprocess.run(
-        ("git", "-C", str(root), "merge-base", "--is-ancestor", identity.head, current_head),
+        (_git_executable(), "-C", str(root), "merge-base", "--is-ancestor", identity.head, current_head),
         text=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -128,7 +129,7 @@ def capture_git_mutation_snapshot(root: Path) -> dict[str, object]:
     try:
         status = subprocess.run(
             (
-                "git",
+                _git_executable(),
                 "-C",
                 str(resolved),
                 "status",
@@ -334,9 +335,10 @@ def _read_json(path: Path) -> dict[str, object]:
 
 
 def _git(root: Path, *args: str) -> str:
+    command = _git_executable()
     try:
         result = subprocess.run(
-            ("git", "-C", str(root), *args),
+            (command, "-C", str(root), *args),
             text=True,
             capture_output=True,
             check=False,
@@ -346,5 +348,10 @@ def _git(root: Path, *args: str) -> str:
         raise WorkspaceBoundaryError(f"git workspace identity check failed: {root}") from exc
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or "unknown git error"
-        raise WorkspaceBoundaryError(f"git workspace identity check failed: {detail}")
+        raise WorkspaceBoundaryError(f"git workspace identity check failed at {root}: {detail}")
     return result.stdout.strip()
+
+
+def _git_executable() -> str:
+    configured = os.environ.get("AGENT_FLOW_GIT_EXECUTABLE")
+    return configured if configured and Path(configured).is_absolute() else "git"

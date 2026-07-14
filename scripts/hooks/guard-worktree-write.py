@@ -55,6 +55,8 @@ RUNTIME_SOURCE_DIRECTORIES = (
     ".Codex/context",
     ".claude/agents",
 )
+EXPECTED_PROJECT_RUNTIME_CONTRACT_SHA256 = "__AGENT_FLOW_PROJECT_RUNTIME_CONTRACT_SHA256__"
+EXPECTED_PYTHON_RUNTIME_INTEGRITY = "__AGENT_FLOW_PYTHON_RUNTIME_INTEGRITY__"
 READ_ONLY_SHELL_COMMANDS = {
     "basename",
     "cat",
@@ -91,9 +93,9 @@ READ_ONLY_GIT_SUBCOMMANDS = {
 }
 
 
-def _load_boundary_module() -> tuple[type[Exception], object, object]:
-    cwd = Path.cwd()
-    runtime_root = _leader_root(cwd) / ".agent-flow" / "runtime" / "python"
+def _load_boundary_module(leader_root: Path) -> tuple[type[Exception], object, object]:
+    runtime_root = leader_root / ".agent-flow" / "runtime" / "python"
+    _verify_boundary_runtime(leader_root, runtime_root)
     if runtime_root.is_dir():
         sys.path.insert(0, str(runtime_root))
     try:
@@ -108,17 +110,26 @@ def _load_boundary_module() -> tuple[type[Exception], object, object]:
 
 
 def _leader_root(cwd: Path) -> Path:
-    result = subprocess.run(
-        ("git", "-C", str(cwd), "rev-parse", "--path-format=absolute", "--git-common-dir"),
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=10,
-    )
-    if result.returncode != 0:
-        return cwd.resolve()
-    common = Path(result.stdout.strip()).resolve(strict=False)
-    return common.parent if common.name == ".git" else cwd.resolve()
+    resolved = cwd.resolve(strict=True)
+    for candidate in (resolved, *resolved.parents):
+        marker = candidate / ".git"
+        if marker.is_dir():
+            return candidate
+        if marker.is_file():
+            try:
+                value = marker.read_text(encoding="utf-8").strip()
+            except OSError:
+                continue
+            if value.startswith("gitdir:"):
+                git_dir = Path(value.split(":", 1)[1].strip())
+                if not git_dir.is_absolute():
+                    git_dir = candidate / git_dir
+                common = git_dir.resolve(strict=False)
+                while common.name != ".git" and common != common.parent:
+                    common = common.parent
+                if common.name == ".git":
+                    return common.parent
+    return resolved
 
 
 def _tool_name(payload: dict[str, object]) -> str:
@@ -368,7 +379,9 @@ def _is_agent_flow_launcher(command: str, cwd: Path, leader_root: Path, pinned_r
             node_contract = contract["node"]
             python_contract = contract["python"]
             if (
-                contract["version"] != 1
+                contract["version"] != 2
+                or kit["project_runtime_contract_commitment_version"] != 1
+                or kit["project_runtime_contract_commitment"] != _project_runtime_contract_commitment(contract)
                 or launcher_contract["path"] != ".agent-flow/bin/agent-flow"
                 or runtime_contract["path"] != ".agent-flow/runtime/node"
                 or Path(node_contract["path"]).resolve(strict=True) != Path(node_contract["path"])
@@ -403,15 +416,17 @@ def _is_agent_flow_launcher(command: str, cwd: Path, leader_root: Path, pinned_r
     if not runtime.is_file() or runtime.stat().st_nlink != 1 or not candidate.is_file() or candidate.is_symlink():
         return False
     try:
-        contract = json.loads(kit_path.read_text(encoding="utf-8"))["project_runtime_contract"]
+        kit = json.loads(kit_path.read_text(encoding="utf-8"))
+        contract = kit["project_runtime_contract"]
         node_path = Path(contract["node"]["path"])
-        selected_node = shutil.which("node")
         return (
-            contract["version"] == 1
+            contract["version"] == 2
+            and kit["project_runtime_contract_commitment_version"] == 1
+            and kit["project_runtime_contract_commitment"] == _project_runtime_contract_commitment(contract)
             and contract["runtime"]["path"] == ".agent-flow/runtime/node"
             and _runtime_tree_integrity(runtime_root) == contract["runtime"]["integrity"]
-            and selected_node is not None
-            and Path(selected_node).resolve(strict=True) == node_path.resolve(strict=True)
+            and node_path.is_absolute()
+            and node_path.resolve(strict=True) == node_path
             and hashlib.sha256(runtime.read_bytes()).digest() == hashlib.sha256(candidate.read_bytes()).digest()
             and _global_runtime_matches(candidate, runtime_root)
         )
@@ -465,6 +480,111 @@ def _global_runtime_matches(candidate: Path, installed_runtime: Path) -> bool:
     )
 
 
+def _project_runtime_contract_commitment(contract: dict[str, object]) -> str:
+    payload = [
+        contract["version"],
+        contract["launcher"]["path"],
+        contract["launcher"]["sha256"],
+        contract["node"]["path"],
+        contract["git"]["path"],
+        contract["python"]["path"],
+        contract["python"]["resolved_path"],
+        contract["runtime"]["path"],
+        contract["runtime"]["integrity"],
+        contract["python_runtime"]["path"],
+        contract["python_runtime"]["integrity"],
+    ]
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _legacy_runtime_tree_hash(root: Path) -> str:
+    digest = hashlib.sha256()
+
+    def visit(directory: Path) -> None:
+        for child in sorted(directory.iterdir(), key=lambda item: item.name):
+            metadata = child.lstat()
+            if child.is_symlink():
+                raise ValueError("legacy runtime contains a symlink")
+            if child.is_dir():
+                visit(child)
+            elif child.is_file() and metadata.st_nlink == 1:
+                digest.update(child.relative_to(root).as_posix().encode())
+                digest.update(b"\0")
+                digest.update(child.read_bytes())
+                digest.update(b"\0")
+            else:
+                raise ValueError("legacy runtime contains an unsafe entry")
+
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("legacy runtime root is unsafe")
+    visit(root)
+    return digest.hexdigest()
+
+
+def _verify_legacy_boundary_runtime(leader_root: Path, kit: dict[str, object], contract: dict[str, object]) -> None:
+    normalized = {
+        "version": contract["version"],
+        "launcher": contract["launcher"],
+        "node_runtime": contract["node_runtime"],
+        "python_runtime": contract["python_runtime"],
+    }
+    commitment = hashlib.sha256(
+        json.dumps(
+            {"version": 2, "contract": normalized},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    launcher = leader_root / str(contract["launcher"]["path"])
+    node_runtime = leader_root / str(contract["node_runtime"]["root"])
+    python_runtime = leader_root / str(contract["python_runtime"]["root"])
+    if (
+        contract["version"] != 2
+        or kit["project_runtime_contract_commitment_version"] != 2
+        or kit["project_runtime_contract_commitment"] != commitment
+        or hashlib.sha256(launcher.read_bytes()).hexdigest() != contract["launcher"]["sha256"]
+        or _legacy_runtime_tree_hash(node_runtime) != contract["node_runtime"]["tree_hash"]
+        or _legacy_runtime_tree_hash(python_runtime) != contract["python_runtime"]["tree_hash"]
+    ):
+        raise ValueError("legacy project runtime contract is invalid")
+    if Path("/usr/bin/git").is_file():
+        os.environ["AGENT_FLOW_GIT_EXECUTABLE"] = "/usr/bin/git"
+
+
+def _verify_boundary_runtime(leader_root: Path, runtime_root: Path) -> None:
+    kit_path = leader_root / ".agent-flow" / "kit.json"
+    try:
+        kit = json.loads(kit_path.read_text(encoding="utf-8"))
+        contract = kit["project_runtime_contract"]
+        commitment = _project_runtime_contract_commitment(contract)
+        embedded = EXPECTED_PROJECT_RUNTIME_CONTRACT_SHA256
+        embedded_python = EXPECTED_PYTHON_RUNTIME_INTEGRITY
+        embedded_authority = not embedded.startswith("__AGENT_FLOW_")
+        if not embedded_authority and "node_runtime" in contract:
+            _verify_legacy_boundary_runtime(leader_root, kit, contract)
+            return
+        if (
+            contract["version"] != 2
+            or kit["project_runtime_contract_commitment_version"] != 1
+            or kit["project_runtime_contract_commitment"] != commitment
+            or contract["python_runtime"]["path"] != ".agent-flow/runtime/python"
+            or _runtime_tree_integrity(runtime_root) != contract["python_runtime"]["integrity"]
+        ):
+            raise ValueError("project runtime contract is invalid")
+        if embedded_authority and embedded != commitment:
+            raise ValueError("project runtime contract differs from verifier authority")
+        if not embedded_python.startswith("__AGENT_FLOW_") and embedded_python != contract["python_runtime"]["integrity"]:
+            raise ValueError("Python runtime differs from verifier authority")
+        git_path = Path(contract["git"]["path"])
+        if not git_path.is_absolute() or git_path.resolve(strict=True) != git_path:
+            raise ValueError("project git runtime is invalid")
+        os.environ["AGENT_FLOW_GIT_EXECUTABLE"] = str(git_path)
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("pinned workspace guard runtime authentication failed") from exc
+
+
 def main() -> int:
     try:
         payload = json.load(sys.stdin)
@@ -473,10 +593,11 @@ def main() -> int:
         tool_name = _tool_name(payload)
         if tool_name not in WRITE_TOOLS and tool_name not in SHELL_TOOLS:
             return 0
-        boundary_error, find_active, resolve_path = _load_boundary_module()
         cwd_value = payload.get("cwd")
         cwd = Path(cwd_value) if isinstance(cwd_value, str) and cwd_value else Path.cwd()
-        active = find_active(_leader_root(cwd))
+        leader_root = _leader_root(cwd)
+        boundary_error, find_active, resolve_path = _load_boundary_module(leader_root)
+        active = find_active(leader_root)
         if active is None:
             return 0
         tool_input = _tool_input(payload)

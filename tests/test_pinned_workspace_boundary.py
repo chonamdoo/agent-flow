@@ -48,6 +48,23 @@ def _tree_integrity(root: Path) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _runtime_contract_commitment(contract: dict[str, object]) -> str:
+    payload = [
+        contract["version"],
+        contract["launcher"]["path"],
+        contract["launcher"]["sha256"],
+        contract["node"]["path"],
+        contract["git"]["path"],
+        contract["python"]["path"],
+        contract["python"]["resolved_path"],
+        contract["runtime"]["path"],
+        contract["runtime"]["integrity"],
+        contract["python_runtime"]["path"],
+        contract["python_runtime"]["integrity"],
+    ]
+    return hashlib.sha256(json.dumps(payload, separators=(",", ":")).encode()).hexdigest()
+
+
 def _git(root: Path, *args: str) -> str:
     result = subprocess.run(
         ("git", "-C", str(root), *args),
@@ -135,26 +152,40 @@ def pinned_run(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     ):
         (node_runtime / relative).mkdir(parents=True, exist_ok=True)
     (node_runtime / "lib" / "skill-selection.mjs").write_text("export {};\n", encoding="utf-8")
+    python_runtime = leader / ".agent-flow" / "runtime" / "python"
+    shutil.copytree(
+        KIT_ROOT / "src" / "agent_flow",
+        python_runtime / "agent_flow",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
     node = shutil.which("node")
+    contract = {
+        "version": 2,
+        "launcher": {
+            "path": ".agent-flow/bin/agent-flow",
+            "sha256": hashlib.sha256(launcher.read_bytes()).hexdigest(),
+        },
+        "node": {"path": str(Path(node or sys.executable).resolve())},
+        "git": {"path": str(Path("/usr/bin/git").resolve())},
+        "python": {
+            "path": str(Path(sys.executable).absolute()),
+            "resolved_path": str(Path(sys.executable).resolve()),
+        },
+        "runtime": {
+            "path": ".agent-flow/runtime/node",
+            "integrity": _tree_integrity(node_runtime),
+        },
+        "python_runtime": {
+            "path": ".agent-flow/runtime/python",
+            "integrity": _tree_integrity(python_runtime),
+        },
+    }
     (leader / ".agent-flow" / "kit.json").write_text(
         json.dumps(
             {
-                "project_runtime_contract": {
-                    "version": 1,
-                    "launcher": {
-                        "path": ".agent-flow/bin/agent-flow",
-                        "sha256": hashlib.sha256(launcher.read_bytes()).hexdigest(),
-                    },
-                    "node": {"path": str(Path(node or sys.executable).resolve())},
-                    "python": {
-                        "path": str(Path(sys.executable).absolute()),
-                        "resolved_path": str(Path(sys.executable).resolve()),
-                    },
-                    "runtime": {
-                        "path": ".agent-flow/runtime/node",
-                        "integrity": _tree_integrity(node_runtime),
-                    },
-                }
+                "project_runtime_contract": contract,
+                "project_runtime_contract_commitment_version": 1,
+                "project_runtime_contract_commitment": _runtime_contract_commitment(contract),
             }
         ),
         encoding="utf-8",
@@ -171,6 +202,7 @@ def _guard(
 ) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
     env["PYTHONPATH"] = str(KIT_ROOT / "src")
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     payload = {
         "tool_name": "apply_patch",
         "cwd": str(leader),
@@ -202,6 +234,7 @@ def _bash_guard(
 ) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
     env["PYTHONPATH"] = str(KIT_ROOT / "src")
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     for name, value in (env_override or {}).items():
         if value is None:
             env.pop(name, None)
@@ -569,14 +602,6 @@ def test_global_launcher_dependency_tamper_is_rejected(
     host: str,
 ) -> None:
     leader, worktree, _runtime, _run_dir = pinned_run
-    python_runtime = leader / ".agent-flow" / "runtime" / "python" / "agent_flow"
-    (python_runtime / "core").mkdir(parents=True)
-    shutil.copy2(KIT_ROOT / "src" / "agent_flow" / "__init__.py", python_runtime / "__init__.py")
-    shutil.copy2(KIT_ROOT / "src" / "agent_flow" / "core" / "__init__.py", python_runtime / "core" / "__init__.py")
-    shutil.copy2(
-        KIT_ROOT / "src" / "agent_flow" / "core" / "workspace_boundary.py",
-        python_runtime / "core" / "workspace_boundary.py",
-    )
     package = tmp_path / "global-package"
     shutil.copytree(leader / ".agent-flow" / "runtime" / "node", package)
     global_bin = tmp_path / "global-bin"

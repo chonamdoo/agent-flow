@@ -1473,7 +1473,9 @@ def _profile_source_root(config_root: Path, requested_root: Path, worktree: str 
 
 
 def _continue_command(root: Path, worktree: str | None) -> str:
-    command = f"agent-flow continue --root {shlex.quote(str(root))}"
+    configured = os.environ.get("AGENT_FLOW_PROJECT_LAUNCHER")
+    launcher = configured if configured and Path(configured).is_absolute() else "agent-flow"
+    command = f"{shlex.quote(launcher)} continue --root {shlex.quote(str(root))}"
     if worktree is None:
         return command
     return command + f" --worktree {shlex.quote(_slug_for_hint(root, worktree))}"
@@ -1602,7 +1604,10 @@ def _managed_worktree_context(path: Path) -> tuple[Path, str] | None:
 def _git_common_worktree_root(root: Path) -> Path | None:
     # worktree root 탐지는 relay 진입점이므로 git hang을 짧게 실패 처리한다.
     top_level = run_safe_command(("git", "rev-parse", "--show-toplevel"), cwd=root)
-    common_dir = run_safe_command(("git", "rev-parse", "--git-common-dir"), cwd=root)
+    common_dir = run_safe_command(
+        ("git", "rev-parse", "--path-format=absolute", "--git-common-dir"),
+        cwd=root,
+    )
     if not top_level.ok or not common_dir.ok:
         return None
     common_path = Path(common_dir.stdout.strip())

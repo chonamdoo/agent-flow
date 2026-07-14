@@ -2131,7 +2131,7 @@ def _changed_files(root: Path, base_commit: str | None = None) -> tuple[str, ...
         _validate_git_revision(base_commit, "base commit")
     try:
         probe = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
+            [_git_executable(), "rev-parse", "--show-toplevel"],
             cwd=root,
             text=True,
             capture_output=True,
@@ -2159,7 +2159,7 @@ def _changed_files(root: Path, base_commit: str | None = None) -> tuple[str, ...
     def collect(args: list[str]) -> None:
         try:
             result = subprocess.run(
-                ["git", *args],
+                [_git_executable(), *args],
                 cwd=git_root,
                 text=True,
                 capture_output=True,
@@ -2201,7 +2201,8 @@ def _configured_base_commit(index_root: Path, worktree_root: Path) -> str | None
         configured = branching.get("base") if isinstance(branching, dict) else None
         if isinstance(configured, str) and configured:
             base_ref = _validate_git_revision(configured, "profile base ref")
-    command = ["git", "rev-parse", "HEAD"] if base_ref == "HEAD" else ["git", "merge-base", "HEAD", base_ref]
+    git = _git_executable()
+    command = [git, "rev-parse", "HEAD"] if base_ref == "HEAD" else [git, "merge-base", "HEAD", base_ref]
     result = subprocess.run(
         command,
         cwd=worktree_root,
@@ -2212,7 +2213,7 @@ def _configured_base_commit(index_root: Path, worktree_root: Path) -> str | None
     if result.returncode == 0 and result.stdout.strip():
         return result.stdout.strip()
     fallback = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
+        [git, "rev-parse", "HEAD"],
         cwd=worktree_root,
         text=True,
         capture_output=True,
@@ -2225,6 +2226,11 @@ def _configured_task_scope(index_root: Path) -> str:
     state = _read_json(index_root / ".agent-flow" / "state" / "current-run.json")
     task = state.get("task") if isinstance(state, dict) else None
     return task if isinstance(task, str) else ""
+
+
+def _git_executable() -> str:
+    configured = os.environ.get("AGENT_FLOW_GIT_EXECUTABLE")
+    return configured if configured and Path(configured).is_absolute() else "git"
 
 
 def _read_json(path: Path) -> dict[str, Any]:

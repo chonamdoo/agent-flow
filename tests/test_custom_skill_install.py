@@ -27,6 +27,54 @@ from agent_flow.core.skill_plan import (
 KIT_ROOT = Path(__file__).resolve().parent.parent
 
 
+def _runtime_tree_integrity(root: Path) -> str:
+    entries: list[dict[str, object]] = []
+
+    def visit(current: Path, relative: str) -> None:
+        stat = current.lstat()
+        entries.append({"path": relative, "type": "directory", "mode": stat.st_mode & 0o777})
+        for child in sorted(current.iterdir(), key=lambda path: path.name):
+            child_relative = f"{relative}/{child.name}" if relative else child.name
+            child_stat = child.lstat()
+            if child.is_dir():
+                visit(child, child_relative)
+            else:
+                entries.append(
+                    {
+                        "path": child_relative,
+                        "type": "file",
+                        "mode": child_stat.st_mode & 0o777,
+                        "sha256": hashlib.sha256(child.read_bytes()).hexdigest(),
+                    }
+                )
+
+    visit(root, "")
+    entries.sort(key=lambda entry: str(entry["path"]))
+    payload = json.dumps(
+        {"version": 1, "entries": entries},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _runtime_contract_commitment(contract: dict[str, object]) -> str:
+    payload = [
+        contract["version"],
+        contract["launcher"]["path"],
+        contract["launcher"]["sha256"],
+        contract["node"]["path"],
+        contract["git"]["path"],
+        contract["python"]["path"],
+        contract["python"]["resolved_path"],
+        contract["runtime"]["path"],
+        contract["runtime"]["integrity"],
+        contract["python_runtime"]["path"],
+        contract["python_runtime"]["integrity"],
+    ]
+    return hashlib.sha256(json.dumps(payload, separators=(",", ":")).encode()).hexdigest()
+
+
 def _node() -> str:
     node = shutil.which("node")
     if node is None:
@@ -121,8 +169,10 @@ def test_install_materializes_authenticated_project_launcher(tmp_path: Path) -> 
     assert launcher.is_file()
     assert os.access(launcher, os.X_OK)
     assert (runtime / "bin" / "agent-flow-kit.mjs").is_file()
-    assert contract["version"] == 1
+    assert contract["version"] == 2
     assert contract["launcher"]["sha256"] == hashlib.sha256(launcher.read_bytes()).hexdigest()
+    assert contract["python_runtime"]["path"] == ".agent-flow/runtime/python"
+    assert kit["project_runtime_contract_commitment_version"] == 1
     env = dict(os.environ)
     env["HOME"] = str(project.parent / "test-home")
     env["AGENT_FLOW_AUTO_EXTERNAL_SKILLS"] = "1"
@@ -146,6 +196,7 @@ def test_install_materializes_authenticated_project_launcher(tmp_path: Path) -> 
     assert started.returncode == 0, started.stderr
     assert status.returncode == 0, status.stderr
     assert "next_command:" in status.stdout
+    assert str(launcher) in status.stdout
 
 
 def test_project_launcher_run_creates_and_pins_git_worktree(tmp_path: Path) -> None:
@@ -182,6 +233,21 @@ def test_project_launcher_run_creates_and_pins_git_worktree(tmp_path: Path) -> N
         check=False,
         env=env,
     )
+    fake_bin = project.parent / "fake-bin"
+    fake_bin.mkdir()
+    fake_git_marker = project.parent / "fake-git-ran"
+    fake_git = fake_bin / "git"
+    fake_git.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(fake_git_marker))}\nexit 99\n", encoding="utf-8")
+    fake_git.chmod(0o755)
+    gate_env = {**env, "PATH": f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"}
+    gate = subprocess.run(
+        (str(launcher), "gate", "--", sys.executable, "-c", "print('gate-ok')"),
+        cwd=worktree,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=gate_env,
+    )
 
     assert started.returncode == 0, started.stderr
     assert worktree.is_dir()
@@ -198,11 +264,15 @@ def test_project_launcher_run_creates_and_pins_git_worktree(tmp_path: Path) -> N
         check=True,
     ).stdout.strip() == "feat/pinned-task"
     assert status.returncode == 0, status.stderr
+    assert gate.returncode == 0, gate.stderr
+    assert "gate-ok" in gate.stdout
+    assert not fake_git_marker.exists()
     run_root = project / ".git" / "agent-flow" / "worktrees" / "feat-pinned-task"
     meta_path = next(run_root.glob(".agent-flow/runs/*/meta.json"))
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     assert meta["workspace"]["workspace_root"] == str(worktree.resolve())
     assert "next_command:" in status.stdout
+    assert str(launcher) in status.stdout
 
 
 def test_project_launcher_clears_node_preload_environment(tmp_path: Path) -> None:
@@ -232,6 +302,46 @@ def test_project_launcher_clears_node_preload_environment(tmp_path: Path) -> Non
 
     assert result.returncode == 0, result.stderr
     assert not outside.exists()
+
+
+def test_installed_guard_rejects_joint_runtime_and_contract_tamper(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    assert _install(project).returncode == 0
+    python_runtime = project / ".agent-flow" / "runtime" / "python"
+    executed = tmp_path / "tampered-runtime-executed"
+    tampered = python_runtime / "agent_flow" / "__init__.py"
+    tampered.write_text(
+        tampered.read_text(encoding="utf-8")
+        + f"\nfrom pathlib import Path\nPath({str(executed)!r}).write_text('executed')\n",
+        encoding="utf-8",
+    )
+    kit_path = project / ".agent-flow" / "kit.json"
+    kit = json.loads(kit_path.read_text(encoding="utf-8"))
+    contract = kit["project_runtime_contract"]
+    contract["python_runtime"]["integrity"] = _runtime_tree_integrity(python_runtime)
+    kit["project_runtime_contract_commitment"] = _runtime_contract_commitment(contract)
+    kit_path.write_text(json.dumps(kit, indent=2) + "\n", encoding="utf-8")
+    guard = project / ".agent-flow" / "scripts" / "hooks" / "guard-worktree-write.py"
+    payload = {
+        "tool_name": "apply_patch",
+        "cwd": str(project),
+        "tool_input": {"patch": "*** Begin Patch\n*** End Patch"},
+    }
+
+    result = subprocess.run(
+        (sys.executable, str(guard)),
+        cwd=project,
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        check=False,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+
+    assert result.returncode == 2
+    assert "runtime authentication failed" in result.stderr
+    assert not executed.exists()
 
 
 def test_packaged_runtime_resolves_bare_python_from_path(tmp_path: Path) -> None:
@@ -387,6 +497,7 @@ def test_sandboxed_python_cli_uses_the_contracted_interpreter(tmp_path: Path) ->
         pytest.skip("platform sandbox is unavailable")
     project = tmp_path / "project"
     marker = project / "contracted-python-ran"
+    outside = tmp_path / "outside-python-ran"
     python = project / "python-with-yaml"
     project.mkdir()
     yaml_site = Path(yaml.__file__).resolve().parent.parent
@@ -395,7 +506,9 @@ def test_sandboxed_python_cli_uses_the_contracted_interpreter(tmp_path: Path) ->
         f"PYTHONPATH={shlex.quote(str(yaml_site))}${{PYTHONPATH:+:$PYTHONPATH}}\n"
         "export PYTHONPATH\n"
         f"if [ \"$1\" = \"-m\" ] && [ \"$2\" = \"agent_flow.cli\" ] "
-        f"&& [ \"$3\" = \"architecture-lint\" ]; then : > {shlex.quote(str(marker))}; fi\n"
+        f"&& [ \"$3\" = \"architecture-lint\" ]; then "
+        f"/usr/bin/touch {shlex.quote(str(outside))} 2>/dev/null || true; "
+        f": > {shlex.quote(str(marker))}; fi\n"
         f"exec {shlex.quote(sys.executable)} \"$@\"\n",
         encoding="utf-8",
     )
@@ -410,6 +523,7 @@ def test_sandboxed_python_cli_uses_the_contracted_interpreter(tmp_path: Path) ->
 
     assert result.returncode == 0, result.stderr
     assert marker.is_file()
+    assert not outside.exists()
 
 
 def test_reinstall_commits_transaction_without_residue(tmp_path: Path) -> None:
@@ -1050,6 +1164,39 @@ def test_stale_host_skill_link_removed_when_hosts_change(tmp_path: Path) -> None
     assert not (project / ".Codex" / "skills" / "demo").exists()
 
 
+def test_stale_host_skill_replacement_is_preserved_during_swap(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    skill_dir = project / "skills" / "demo"
+    _skill(skill_dir, "CODEX", hosts="[codex]")
+    assert _install(project).returncode == 0
+    target = project / ".Codex" / "skills" / "demo"
+    _skill(skill_dir, "CLAUDE", hosts="[claude]")
+    env = dict(os.environ)
+    env["HOME"] = str(tmp_path / "home")
+    env["AGENT_FLOW_TEST_HOLD_BEFORE_HOST_SWAP_MS"] = "1500"
+    env["AGENT_FLOW_TEST_HOLD_HOST_TARGET_SUFFIX"] = ".Codex/skills/demo"
+    process = subprocess.Popen(
+        (_node(), str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"), "install"),
+        cwd=project,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    assert process.stderr is not None
+    assert "agent-flow:test-host-swap-ready" in process.stderr.readline()
+    target.unlink()
+    target.mkdir()
+    marker = target / "external.txt"
+    marker.write_text("external\n", encoding="utf-8")
+    stdout, stderr = process.communicate(timeout=15)
+
+    assert process.returncode != 0, stdout
+    assert "changed outside install transaction" in stderr
+    assert marker.read_text(encoding="utf-8") == "external\n"
+
+
 def test_stale_broken_host_skill_symlink_removed_when_skill_deleted(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
@@ -1652,13 +1799,21 @@ def test_managed_ancestor_swap_never_writes_outside_project(tmp_path: Path) -> N
     assert process.stderr is not None
     marker = process.stderr.readline()
     assert "agent-flow:test-managed-parent-anchored" in marker
-    (project / ".Codex").rename(project / ".Codex-owned")
+    outside_owned = outside / ".Codex-owned"
+    (project / ".Codex").rename(outside_owned)
+    before = sorted(path.relative_to(outside_owned) for path in outside_owned.rglob("*"))
     (project / ".Codex").symlink_to(outside, target_is_directory=True)
     stdout, stderr = process.communicate(timeout=10)
 
     assert process.returncode != 0, stdout
-    assert "staged mutation mismatch" in stderr or "changed outside transaction" in stderr
-    assert list(outside.iterdir()) == []
+    assert (
+        "outside boundary" in stderr
+        or "path escapes parent" in stderr
+        or "staged mutation mismatch" in stderr
+        or "changed outside transaction" in stderr
+        or "Operation not permitted" in stderr
+    )
+    assert sorted(path.relative_to(outside_owned) for path in outside_owned.rglob("*")) == before
 
 
 def test_managed_leaf_replacement_is_preserved_at_swap_boundary(tmp_path: Path) -> None:
@@ -1753,6 +1908,37 @@ def test_managed_staging_swap_cannot_redirect_live_mutation(tmp_path: Path) -> N
     assert "staging integrity mismatch" in stderr
     assert marker.read_text(encoding="utf-8") == "external\n"
     assert not (outside / "previous").exists()
+
+
+def test_managed_incoming_replacement_is_preserved(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    assert _install(project).returncode == 0
+    env = dict(os.environ)
+    env["HOME"] = str(tmp_path / "home")
+    env["AGENT_FLOW_TEST_HOLD_BEFORE_MANAGED_SWAP_MS"] = "1500"
+    process = subprocess.Popen(
+        (_node(), str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"), "install"),
+        cwd=project,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    assert process.stderr is not None
+    assert "agent-flow:test-managed-swap-ready" in process.stderr.readline()
+    transaction = project / ".agent-flow" / "install-transaction"
+    journal = json.loads((transaction / "journal.json").read_text(encoding="utf-8"))
+    pending = next(operation["pending"] for operation in journal["managed_mutations"] if operation["pending"])
+    incoming = project / pending["incoming"]
+    incoming.mkdir()
+    marker = incoming / "external.txt"
+    marker.write_text("external\n", encoding="utf-8")
+    stdout, stderr = process.communicate(timeout=10)
+
+    assert process.returncode != 0, stdout
+    assert "target appeared during swap" in stderr or "temporary path changed" in stderr
+    assert marker.read_text(encoding="utf-8") == "external\n"
 
 
 def test_reinstall_preserves_unowned_legacy_graphify_directories(tmp_path: Path) -> None:
