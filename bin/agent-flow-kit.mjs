@@ -986,7 +986,7 @@ function managedHostSourceSpecs(root) {
     [".Codex/agents/code-reviewer.md", ".Codex/agents/code-reviewer.md", path.join(KIT_ROOT, ".Codex", "agents", "code-reviewer.md")],
     [".claude/agents/code-reviewer.md", ".claude/agents/code-reviewer.md", path.join(KIT_ROOT, ".claude", "agents", "code-reviewer.md")],
     [".omp/agents/code-reviewer.md", ".claude/agents/code-reviewer.md", path.join(KIT_ROOT, ".claude", "agents", "code-reviewer.md")],
-    [".omp/extensions/agent-flow-hooks.ts", "generated:omp-hooks-extension", Buffer.from(ompHooksExtensionSource(), "utf8")],
+    [".omp/extensions/agent-flow-hooks.ts", "generated:omp-hooks-extension", Buffer.from(ompHooksExtensionSource(root), "utf8")],
   ].map(([relative, source, sourceValue]) => ({
     relative,
     source,
@@ -4652,7 +4652,13 @@ function installClaudeHooks(root) {
   writeManagedFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
 }
 
-function ompHooksExtensionSource() {
+function ompHooksExtensionSource(root) {
+  const hookHashes = Object.fromEntries(
+    MANAGED_HOOK_SCRIPT_NAMES.map((scriptName) => [
+      scriptName,
+      sha256Bytes(fs.readFileSync(path.join(root, ".agent-flow", "scripts", "hooks", scriptName))),
+    ]),
+  );
   return String.raw`import fs from "node:fs";
 import { spawn } from "node:child_process";
 import path from "node:path";
@@ -4661,6 +4667,8 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const HOOK_DIR = path.join(ROOT, ".agent-flow", "scripts", "hooks");
 const WRITE_TOOL_RE = new RegExp(${JSON.stringify(WRITE_TOOL_MATCHER)}, "i");
+const MANAGED_HOOK_VERIFIER = ${JSON.stringify(MANAGED_HOOK_VERIFIER)};
+const MANAGED_HOOK_HASHES = Object.freeze(${JSON.stringify(hookHashes)});
 
 export default function agentFlowHooks(pi) {
   if (typeof pi.setLabel === "function") {
@@ -4893,7 +4901,11 @@ function isBashTool(toolName) {
 
 async function runHook(scriptName, payload, ctx) {
   const scriptPath = path.join(HOOK_DIR, scriptName);
-  const result = await spawnHook(scriptPath, JSON.stringify(payload), ctx?.cwd || ROOT);
+  const expectedHash = MANAGED_HOOK_HASHES[scriptName];
+  if (typeof expectedHash !== "string") {
+    return { block: true, reason: "agent-flow hook integrity metadata is missing: " + scriptName };
+  }
+  const result = await spawnHook(scriptPath, expectedHash, JSON.stringify(payload), ctx?.cwd || ROOT);
   const reason = (result.stderr || result.stdout || "").trim();
   if (result.status === 0) {
     return { block: false, reason };
@@ -4901,9 +4913,13 @@ async function runHook(scriptName, payload, ctx) {
   return { block: true, reason: reason || "agent-flow hook blocked: " + scriptName };
 }
 
-function spawnHook(scriptPath, input, cwd) {
+function spawnHook(scriptPath, expectedHash, input, cwd) {
   return new Promise((resolve) => {
-    const proc = spawn(scriptPath, [], { cwd, stdio: ["pipe", "pipe", "pipe"] });
+    const proc = spawn(
+      "/usr/bin/python3",
+      ["-I", "-c", MANAGED_HOOK_VERIFIER, Buffer.from(scriptPath, "utf8").toString("base64"), expectedHash],
+      { cwd, stdio: ["pipe", "pipe", "pipe"] },
+    );
     let stdout = "";
     let stderr = "";
     let settled = false;
@@ -4928,11 +4944,11 @@ function spawnHook(scriptPath, input, cwd) {
     proc.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
     });
-    proc.on("error", () => {
-      finish({ status: 0, stdout: "", stderr: "" });
+    proc.on("error", (error) => {
+      finish({ status: 2, stdout: "", stderr: "agent-flow hook failed to start: " + String(error?.message || error) });
     });
     proc.on("close", (status) => {
-      finish({ status: status ?? 0, stdout, stderr });
+      finish({ status: status ?? 2, stdout, stderr });
     });
     proc.stdin.end(input);
   });
@@ -4955,7 +4971,7 @@ function parseSystemMessage(text) {
 function installOmpHooks(root) {
   return writeManagedFileIfMissingOrSame(
     path.join(root, ".omp", "extensions", "agent-flow-hooks.ts"),
-    ompHooksExtensionSource(),
+    ompHooksExtensionSource(root),
     forceManaged,
   );
 }

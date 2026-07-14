@@ -2886,6 +2886,70 @@ if (codexContext !== undefined) {
                     )
                     self.assertEqual(exercise_result.returncode, 0, exercise_result.stderr)
 
+    def test_node_installers_omp_hook_fails_closed_for_tampered_or_missing_script(self) -> None:
+        installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            node = _node_executable()
+            for installer_name in installers:
+                with self.subTest(installer=installer_name):
+                    project_root = root / f"{installer_name}-omp-hook-integrity"
+                    project_root.mkdir()
+                    installed = subprocess.run(
+                        (
+                            node,
+                            str(Path(__file__).resolve().parents[1] / "bin" / installer_name),
+                            "install",
+                        ),
+                        cwd=project_root,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(installed.returncode, 0, installed.stderr)
+                    extension_ts = project_root / ".omp" / "extensions" / "agent-flow-hooks.ts"
+                    extension_mjs = project_root / ".omp" / "extensions" / "agent-flow-hooks.mjs"
+                    extension_mjs.write_text(extension_ts.read_text(encoding="utf-8"), encoding="utf-8")
+                    guard = project_root / ".agent-flow" / "scripts" / "hooks" / "guard-worktree-write.py"
+                    guard.write_text("#!/usr/bin/env python3\nraise SystemExit(0)\n", encoding="utf-8")
+                    exercise = project_root / "exercise-omp-hook-integrity.mjs"
+                    exercise.write_text(
+                        """
+import fs from "node:fs";
+import agentFlowHooks from "./.omp/extensions/agent-flow-hooks.mjs";
+
+const handlers = new Map();
+agentFlowHooks({
+  setLabel() {},
+  on(name, handler) {
+    handlers.set(name, handler);
+  },
+});
+const call = () => handlers.get("tool_call")(
+  { toolName: "Write", input: { file_path: "demo.txt" } },
+  { cwd: process.cwd() },
+);
+const tampered = await call();
+if (!tampered?.block) {
+  throw new Error("tampered OMP hook script did not fail closed");
+}
+fs.unlinkSync(".agent-flow/scripts/hooks/guard-worktree-write.py");
+const missing = await call();
+if (!missing?.block) {
+  throw new Error("missing OMP hook script did not fail closed");
+}
+""",
+                        encoding="utf-8",
+                    )
+                    exercised = subprocess.run(
+                        (node, str(exercise)),
+                        cwd=project_root,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(exercised.returncode, 0, exercised.stderr)
+
     def test_node_installers_link_default_host_skills_to_claude_codex_and_omp(self) -> None:
         installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
         with tempfile.TemporaryDirectory() as temp_dir:
