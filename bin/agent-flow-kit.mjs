@@ -6,7 +6,16 @@ import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { SKILL_DEPENDENCIES, mergeInstallSelectionWithPrevious, resolveInstallSelection } from "../lib/skill-selection.mjs";
+import {
+  SKILL_DEPENDENCIES,
+  discoverAutomaticExternalSkillNames,
+  hashSkillTree,
+  mergeInstallSelectionWithPrevious,
+  mergeResolvedSkillClosure,
+  resolveInstallSelection,
+  resolveProfileSkillSources,
+} from "../lib/skill-selection.mjs";
+import { detectActiveHost } from "../lib/host-detection.mjs";
 
 const command = process.argv[2];
 const AGENT_FLOW_COMMAND = "agent-flow";
@@ -16,7 +25,32 @@ const RUNTIME_PYTHON_RELATIVE = path.join(".agent-flow", "runtime", "python");
 const installArgs = process.argv.slice(3);
 const forceManaged = installArgs.includes("--force-managed");
 let cachedFullFeatureWorkflow = null;
+let activeManagedInstallTransaction = null;
 const PROJECT_SKILL_HOSTS = Object.freeze(["claude", "codex", "omp"]);
+const SKILL_LINKS_COMMITMENT_VERSION = 1;
+const MANAGED_HOST_FILES_VERSION = 1;
+const MANAGED_HOST_FILES_COMMITMENT_VERSION = 1;
+const MANAGED_HOOK_CONTRACT_VERSION = 2;
+const MANAGED_HOOK_CONTRACT_COMMITMENT_VERSION = 2;
+const MANAGED_HOOK_SCRIPT_NAMES = Object.freeze([
+  "guard-worktree.sh",
+  "guard-worktree-write.py",
+  "guard-protected-branch.sh",
+  "show-phase-status.sh",
+  "comment-checker.py",
+]);
+const MANAGED_HOOK_CONFIG_PATHS = Object.freeze([
+  ".Codex/hooks.json",
+  ".codex/hooks.json",
+  ".claude/settings.json",
+]);
+const REQUIRED_MANAGED_HOST_FILES = Object.freeze([
+  ".Codex/agents/code-reviewer.md",
+  ".claude/agents/code-reviewer.md",
+  ".omp/agents/code-reviewer.md",
+  ".omp/extensions/agent-flow-hooks.ts",
+]);
+const WRITE_TOOL_MATCHER = "^(apply_patch|Write|Edit|MultiEdit|NotebookEdit|Eval|Python|Notebook|write|edit|multi_edit|multiedit|notebook_edit|notebookedit|eval|python|notebook)$";
 const BUNDLED_HOST_SKILL_NAMES = new Set([
   "agent-flow",
   "android-appshell-error-handling",
@@ -158,6 +192,7 @@ function installProject() {
   }
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "agents"), path.join(root, ".Codex", "agents"), forceManaged);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".claude", "agents"), path.join(root, ".claude", "agents"), forceManaged);
+  copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".claude", "agents"), path.join(root, ".omp", "agents"), forceManaged);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "rules", "context"), path.join(root, ".Codex", "rules", "context"), forceManaged);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "context"), path.join(root, ".Codex", "context"), forceManaged);
   installCodexHooks(root);
@@ -660,6 +695,438 @@ function gitOutput(cwd, args) {
   return output || null;
 }
 
+function captureNodeWorkspaceIdentity(cwd, root) {
+  const topLevel = gitOutput(cwd, ["rev-parse", "--show-toplevel"]);
+  if (!topLevel) {
+    return { workspace_root: path.resolve(root), identity: null };
+  }
+  const workspaceRoot = fs.realpathSync(topLevel);
+  const commonDir = gitOutput(workspaceRoot, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  const gitDir = gitOutput(workspaceRoot, ["rev-parse", "--path-format=absolute", "--git-dir"]);
+  const branch = gitOutput(workspaceRoot, ["branch", "--show-current"]);
+  const head = gitOutput(workspaceRoot, ["rev-parse", "HEAD"]);
+  if (!commonDir || !gitDir || !branch || !head) {
+    throw new Error(`blocked: cannot capture pinned workspace identity: ${workspaceRoot}`);
+  }
+  const canonicalCommon = fs.realpathSync(commonDir);
+  if (path.basename(canonicalCommon) !== ".git" || !samePath(path.dirname(canonicalCommon), root)) {
+    throw new Error(`blocked: pinned workspace belongs to a different repository: ${workspaceRoot}`);
+  }
+  if (["main", "master", "develop"].includes(branch)) {
+    throw new Error(`blocked: pinned workspace uses protected branch ${branch}`);
+  }
+  const metadata = fs.statSync(workspaceRoot);
+  const identity = {
+    workspace_root: workspaceRoot,
+    git_common_dir: canonicalCommon,
+    git_dir: fs.realpathSync(gitDir),
+    branch,
+    head,
+    device: metadata.dev,
+    inode: metadata.ino,
+  };
+  if (!samePath(workspaceRoot, root) && !registeredNodeWorkspaceIdentity(root, workspaceRoot)) {
+    registerNodeWorkspaceIdentity(root, identity);
+  }
+  validateNodeWorkspaceIdentity(identity, root);
+  return { workspace_root: workspaceRoot, identity };
+}
+
+function validateNodeWorkspaceIdentity(identity, root, requireRegistration = true) {
+  if (!identity || typeof identity !== "object") {
+    throw new Error("blocked: pinned workspace identity is missing");
+  }
+  const configured = path.resolve(String(identity.workspace_root ?? ""));
+  let workspaceRoot;
+  try {
+    workspaceRoot = fs.realpathSync(configured);
+  } catch {
+    throw new Error(`blocked: pinned workspace is missing: ${configured}`);
+  }
+  if (workspaceRoot !== String(identity.workspace_root)) {
+    throw new Error(`blocked: pinned workspace canonical path changed: ${configured}`);
+  }
+  const metadata = fs.statSync(workspaceRoot);
+  if (metadata.dev !== identity.device || metadata.ino !== identity.inode) {
+    throw new Error(`blocked: pinned workspace filesystem identity changed: ${workspaceRoot}`);
+  }
+  const commonDir = gitOutput(workspaceRoot, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  const gitDir = gitOutput(workspaceRoot, ["rev-parse", "--path-format=absolute", "--git-dir"]);
+  const branch = gitOutput(workspaceRoot, ["branch", "--show-current"]);
+  const head = gitOutput(workspaceRoot, ["rev-parse", "HEAD"]);
+  if (
+    !commonDir
+    || !gitDir
+    || !head
+    || !samePath(commonDir, identity.git_common_dir)
+    || !samePath(gitDir, identity.git_dir)
+  ) {
+    throw new Error(`blocked: pinned workspace git identity changed: ${workspaceRoot}`);
+  }
+  if (branch !== identity.branch) {
+    throw new Error(`blocked: pinned workspace branch changed: ${workspaceRoot}`);
+  }
+  const ancestor = safeSpawnSync(
+    "git",
+    ["merge-base", "--is-ancestor", String(identity.head), head],
+    { cwd: workspaceRoot, stdio: "ignore" },
+  );
+  if (ancestor.error || ancestor.status !== 0) {
+    throw new Error(`blocked: pinned workspace HEAD diverged: ${workspaceRoot}`);
+  }
+  const canonicalCommon = fs.realpathSync(commonDir);
+  if (path.basename(canonicalCommon) !== ".git" || !samePath(path.dirname(canonicalCommon), root)) {
+    throw new Error(`blocked: pinned workspace repository identity changed: ${workspaceRoot}`);
+  }
+  if (!samePath(workspaceRoot, root) && requireRegistration) {
+    const registered = registeredNodeWorkspaceIdentity(root, workspaceRoot);
+    if (!registered) {
+      throw new Error(`blocked: pinned workspace is not registered: ${workspaceRoot}`);
+    }
+    validateNodeWorkspaceIdentity(registered, root, false);
+  }
+  return workspaceRoot;
+}
+
+function registeredNodeWorkspaceIdentity(root, workspaceRoot) {
+  const commonDir = gitOutput(root, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  if (!commonDir) return null;
+  const registrations = path.join(commonDir, "agent-flow", "worktrees");
+  if (!fs.existsSync(registrations)) return null;
+  for (const entry of fs.readdirSync(registrations, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+    const manifest = readJsonIfExists(path.join(registrations, entry.name, "manifest.json"));
+    const identity = manifest?.identity;
+    if (identity?.workspace_root && samePath(identity.workspace_root, workspaceRoot)) {
+      return identity;
+    }
+  }
+  return null;
+}
+
+function registerNodeWorkspaceIdentity(root, identity) {
+  const commonDir = gitOutput(root, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  if (!commonDir) {
+    throw new Error("blocked: cannot register pinned workspace without a git common directory");
+  }
+  const digest = crypto.createHash("sha256").update(identity.workspace_root).digest("hex").slice(0, 12);
+  const name = `node-${digest}`;
+  const runtime = path.join(commonDir, "agent-flow", "worktrees", name);
+  const manifestPath = path.join(runtime, "manifest.json");
+  const existing = readJsonIfExists(manifestPath);
+  if (existing?.identity?.workspace_root && !samePath(existing.identity.workspace_root, identity.workspace_root)) {
+    throw new Error(`blocked: pinned workspace registration collision: ${identity.workspace_root}`);
+  }
+  writeJson(manifestPath, {
+    name,
+    branch: identity.branch,
+    path: identity.workspace_root,
+    identity,
+  });
+}
+
+function assertNodeRunBoundary(state, root) {
+  const workspaceRoot = path.resolve(state.workspace_root ?? root);
+  if (state.workspace) {
+    const pinned = validateNodeWorkspaceIdentity(state.workspace, root);
+    if (!samePath(pinned, workspaceRoot)) {
+      throw new Error("blocked: run workspace_root differs from its pinned identity");
+    }
+    const invocation = gitOutput(process.cwd(), ["rev-parse", "--show-toplevel"])
+      ?? path.resolve(process.cwd());
+    if (!samePath(invocation, root) && !samePath(invocation, pinned)) {
+      throw new Error(
+        `blocked: active run ${state.run_id} is pinned to ${pinned}; current workspace is ${invocation}`,
+      );
+    }
+    return state;
+  }
+  if (gitOutput(root, ["rev-parse", "--show-toplevel"])) {
+    throw new Error("blocked: active run is missing its pinned workspace identity");
+  }
+  return state;
+}
+
+function managedHostSourceSpecs(root) {
+  return [
+    [".Codex/agents/code-reviewer.md", ".Codex/agents/code-reviewer.md", path.join(KIT_ROOT, ".Codex", "agents", "code-reviewer.md")],
+    [".claude/agents/code-reviewer.md", ".claude/agents/code-reviewer.md", path.join(KIT_ROOT, ".claude", "agents", "code-reviewer.md")],
+    [".omp/agents/code-reviewer.md", ".claude/agents/code-reviewer.md", path.join(KIT_ROOT, ".claude", "agents", "code-reviewer.md")],
+    [".omp/extensions/agent-flow-hooks.ts", "generated:omp-hooks-extension", Buffer.from(ompHooksExtensionSource(), "utf8")],
+  ].map(([relative, source, sourceValue]) => ({
+    relative,
+    source,
+    sourceBytes: Buffer.isBuffer(sourceValue) ? sourceValue : fs.readFileSync(sourceValue),
+    destination: path.join(root, ...relative.split("/")),
+  }));
+}
+
+function requireManagedRegularFile(root, relative) {
+  let cursor = path.resolve(root);
+  for (const [index, part] of relative.split("/").entries()) {
+    cursor = path.join(cursor, part);
+    const metadata = lstatIfExists(cursor);
+    if (!metadata || metadata.isSymbolicLink()) {
+      throw new Error(`blocked: managed host file is missing or unsafe: ${relative}`);
+    }
+    const final = index === relative.split("/").length - 1;
+    if ((final && !metadata.isFile()) || (!final && !metadata.isDirectory())) {
+      throw new Error(`blocked: managed host file has an invalid path: ${relative}`);
+    }
+    if (final && metadata.nlink !== 1) {
+      throw new Error(`blocked: managed host file may not be hard-linked: ${relative}`);
+    }
+  }
+  ensureChildPath(root, cursor);
+  return fs.readFileSync(cursor);
+}
+
+function managedReviewerBody(content) {
+  const text = content.toString("utf8");
+  if (!text.startsWith("---\n")) return text;
+  const end = text.indexOf("\n---\n", 4);
+  return end === -1 ? text : text.slice(end + 5).replace(/^\n/, "");
+}
+
+function managedHostFileManifest(root) {
+  const specs = managedHostSourceSpecs(root);
+  const codex = specs.find((spec) => spec.relative.startsWith(".Codex/"));
+  const claude = specs.find((spec) => spec.relative.startsWith(".claude/"));
+  const omp = specs.find((spec) => spec.relative.startsWith(".omp/agents/"));
+  if (
+    !codex
+    || !claude
+    || !omp
+    || managedReviewerBody(codex.sourceBytes) !== managedReviewerBody(claude.sourceBytes)
+    || !omp.sourceBytes.equals(claude.sourceBytes)
+  ) {
+    throw new Error("blocked: Claude, Codex, and OMP managed reviewers are not equivalent");
+  }
+  const files = {};
+  for (const spec of specs.sort((left, right) => compareCodePoints(left.relative, right.relative))) {
+    const installed = requireManagedRegularFile(root, spec.relative);
+    if (!installed.equals(spec.sourceBytes)) {
+      throw new Error(`blocked: managed host file differs from authenticated source: ${spec.relative}`);
+    }
+    files[spec.relative] = { source: spec.source, sha256: sha256Bytes(installed) };
+  }
+  return { version: MANAGED_HOST_FILES_VERSION, files };
+}
+
+function normalizedManagedHostFiles(manifest) {
+  if (
+    !manifest
+    || typeof manifest !== "object"
+    || Array.isArray(manifest)
+    || manifest.version !== MANAGED_HOST_FILES_VERSION
+    || !manifest.files
+    || typeof manifest.files !== "object"
+    || Array.isArray(manifest.files)
+  ) throw new Error("blocked: installed managed host file provenance is invalid");
+  const rows = [];
+  for (const relative of Object.keys(manifest.files).sort(compareCodePoints)) {
+    const entry = manifest.files[relative];
+    if (
+      !REQUIRED_MANAGED_HOST_FILES.includes(relative)
+      || !entry
+      || typeof entry.source !== "string"
+      || !entry.source.trim()
+      || typeof entry.sha256 !== "string"
+      || !/^[0-9a-f]{64}$/.test(entry.sha256)
+    ) throw new Error(`blocked: installed managed host file provenance is invalid: ${relative}`);
+    rows.push([relative, entry.source, entry.sha256]);
+  }
+  for (const relative of REQUIRED_MANAGED_HOST_FILES) {
+    if (!manifest.files[relative]) {
+      throw new Error(`blocked: installed managed host file provenance is missing: ${relative}`);
+    }
+  }
+  return rows;
+}
+
+function managedHostFilesCommitment(payload) {
+  const body = {
+    version: MANAGED_HOST_FILES_COMMITMENT_VERSION,
+    skill_plan_hash: payload.skill_plan_hash,
+    files: normalizedManagedHostFiles(payload.managed_host_files),
+  };
+  return sha256Bytes(Buffer.from(JSON.stringify(body), "utf8"));
+}
+
+function expectedManagedHookProjection() {
+  return [
+    ["PostToolUse", WRITE_TOOL_MATCHER, "command", "comment-checker.py"],
+    ["PreToolUse", "Bash", "command", "guard-protected-branch.sh"],
+    ["PreToolUse", "Bash", "command", "guard-worktree-write.py"],
+    ["PreToolUse", "Bash", "command", "guard-worktree.sh"],
+    ["PreToolUse", WRITE_TOOL_MATCHER, "command", "guard-worktree-write.py"],
+    ["Stop", "", "command", "show-phase-status.sh"],
+  ].sort(compareHookProjectionRows);
+}
+
+function compareHookProjectionRows(left, right) {
+  for (let index = 0; index < Math.min(left.length, right.length); index += 1) {
+    const compared = compareCodePoints(left[index], right[index]);
+    if (compared !== 0) return compared;
+  }
+  return left.length - right.length;
+}
+
+function managedHookProjection(root, settings, label, expectedScriptHashes) {
+  if (!settings?.hooks || typeof settings.hooks !== "object" || Array.isArray(settings.hooks)) {
+    throw new Error(`blocked: managed hook settings are missing: ${label}`);
+  }
+  const rows = [];
+  for (const [event, entries] of Object.entries(settings.hooks)) {
+    if (!Array.isArray(entries)) throw new Error(`blocked: invalid managed hook settings: ${label}`);
+    for (const entry of entries) {
+      if (!entry || !Array.isArray(entry.hooks)) throw new Error(`blocked: invalid managed hook settings: ${label}`);
+      const matcher = typeof entry.matcher === "string" ? entry.matcher : "";
+      for (const hook of entry.hooks) {
+        const scriptName = trustedManagedHookScriptName(root, hook?.command, expectedScriptHashes);
+        if (scriptName) rows.push([event, matcher, hook.type ?? "", scriptName]);
+        else if (managedHookScriptName(hook?.command)) {
+          throw new Error(`blocked: managed hook command is not immutable: ${label}`);
+        }
+      }
+    }
+  }
+  return rows.sort(compareHookProjectionRows);
+}
+
+function managedHookContract(root) {
+  const scripts = {};
+  for (const scriptName of MANAGED_HOOK_SCRIPT_NAMES) {
+    const relative = `.agent-flow/scripts/hooks/${scriptName}`;
+    const content = requireManagedRegularFile(root, relative);
+    const source = fs.readFileSync(path.join(KIT_ROOT, "scripts", "hooks", scriptName));
+    if (!content.equals(source)) throw new Error(`blocked: managed hook script differs from authenticated source: ${relative}`);
+    if (process.platform !== "win32" && !(fs.statSync(path.join(root, ...relative.split("/"))).mode & 0o111)) {
+      throw new Error(`blocked: managed hook script is not executable: ${relative}`);
+    }
+    scripts[relative] = { sha256: sha256Bytes(content), mode: "executable" };
+  }
+  const scriptHashes = new Map(Object.entries(scripts).map(([relative, entry]) => [relative, entry.sha256]));
+  const expected = expectedManagedHookProjection();
+  const configs = {};
+  for (const relative of MANAGED_HOOK_CONFIG_PATHS) {
+    let settings;
+    try {
+      settings = JSON.parse(requireManagedRegularFile(root, relative).toString("utf8"));
+    } catch (error) {
+      throw new Error(`blocked: managed hook settings are unreadable: ${relative}: ${error.message}`);
+    }
+    const projection = managedHookProjection(root, settings, relative, scriptHashes);
+    if (JSON.stringify(projection) !== JSON.stringify(expected)) {
+      throw new Error(
+        `blocked: managed hook settings do not match required contract: ${relative}; `
+        + `actual=${JSON.stringify(projection)} expected=${JSON.stringify(expected)}`,
+      );
+    }
+    configs[relative] = { sha256: sha256Bytes(Buffer.from(JSON.stringify(projection), "utf8")) };
+  }
+  return { version: MANAGED_HOOK_CONTRACT_VERSION, configs, scripts };
+}
+
+function normalizedManagedHookContract(contract) {
+  if (!contract || contract.version !== MANAGED_HOOK_CONTRACT_VERSION) {
+    throw new Error("blocked: installed managed hook contract is invalid");
+  }
+  const normalize = (entries, expectedPaths, label, requiredMode = null) => {
+    if (!entries || typeof entries !== "object" || Array.isArray(entries)) {
+      throw new Error(`blocked: installed managed hook ${label} provenance is invalid`);
+    }
+    const actual = Object.keys(entries).sort(compareCodePoints);
+    const expected = [...expectedPaths].sort(compareCodePoints);
+    if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+      throw new Error(`blocked: installed managed hook ${label} provenance is incomplete`);
+    }
+    return actual.map((relative) => {
+      const entry = entries[relative];
+      if (!entry || !/^[0-9a-f]{64}$/.test(entry.sha256) || (requiredMode && entry.mode !== requiredMode)) {
+        throw new Error(`blocked: installed managed hook ${label} provenance is invalid: ${relative}`);
+      }
+      return requiredMode ? [relative, entry.sha256, requiredMode] : [relative, entry.sha256];
+    });
+  };
+  return {
+    configs: normalize(contract.configs, MANAGED_HOOK_CONFIG_PATHS, "config"),
+    scripts: normalize(
+      contract.scripts,
+      MANAGED_HOOK_SCRIPT_NAMES.map((name) => `.agent-flow/scripts/hooks/${name}`),
+      "script",
+      "executable",
+    ),
+  };
+}
+
+function managedHookContractCommitment(payload) {
+  const normalized = normalizedManagedHookContract(payload.managed_hook_contract);
+  return sha256Bytes(Buffer.from(JSON.stringify({
+    version: MANAGED_HOOK_CONTRACT_COMMITMENT_VERSION,
+    skill_plan_hash: payload.skill_plan_hash,
+    configs: normalized.configs,
+    scripts: normalized.scripts,
+  }), "utf8"));
+}
+
+function assertManagedHostFilesInstalled(root, kit) {
+  if (
+    kit.managed_host_files_commitment_version !== MANAGED_HOST_FILES_COMMITMENT_VERSION
+    || kit.managed_host_files_commitment !== managedHostFilesCommitment(kit)
+  ) throw new Error("blocked: installed managed host file commitment is invalid");
+  for (const [relative, _source, expectedHash] of normalizedManagedHostFiles(kit.managed_host_files)) {
+    if (sha256Bytes(requireManagedRegularFile(root, relative)) !== expectedHash) {
+      throw new Error(`blocked: installed managed host file changed: ${relative}`);
+    }
+  }
+  if (
+    kit.managed_hook_contract_commitment_version !== MANAGED_HOOK_CONTRACT_COMMITMENT_VERSION
+    || kit.managed_hook_contract_commitment !== managedHookContractCommitment(kit)
+  ) throw new Error("blocked: installed managed hook commitment is invalid");
+  const live = managedHookContract(root);
+  if (JSON.stringify(live) !== JSON.stringify(kit.managed_hook_contract)) {
+    throw new Error("blocked: installed managed hook contract changed");
+  }
+}
+
+function currentNodeSkillPlan(root) {
+  const agentFlowDir = path.join(root, ".agent-flow");
+  const kit = readExistingKit(agentFlowDir);
+  const authenticated = readAuthenticatedSkillIndex(agentFlowDir, kit);
+  if (
+    !authenticated
+    || kit?.skill_plan_hash_version !== 2
+    || typeof kit.skill_plan_hash !== "string"
+  ) {
+    throw new Error("blocked: installed skill plan commitment is missing");
+  }
+  if (computeSkillPlanHash(authenticated.payload, root, true) !== kit.skill_plan_hash) {
+    throw new Error("blocked: installed skill snapshot no longer matches kit commitment");
+  }
+  assertManagedHostFilesInstalled(root, kit);
+  return {
+    skill_plan_hash_version: 2,
+    skill_plan_hash: kit.skill_plan_hash,
+  };
+}
+
+function assertNodeSkillPlanPinned(state, root) {
+  const current = currentNodeSkillPlan(root);
+  if (
+    state.skill_plan_hash_version !== current.skill_plan_hash_version
+    || state.skill_plan_hash !== current.skill_plan_hash
+  ) {
+    const previousHash = state.skill_plan_hash ?? null;
+    Object.assign(state, current, {
+      skill_plan_repin_at: new Date().toISOString(),
+      skill_plan_repin_from: previousHash,
+    });
+    writeJson(path.join(resolveRunDir(root, state.run_dir), "manifest.json"), state);
+    writeJson(currentRunPath(root), state);
+  }
+}
+
 function safeSpawnSync(commandName, args, options = {}) {
   // 외부 CLI는 자동 relay를 멈추지 않도록 기본 timeout을 둔다.
   return spawnSync(commandName, args, {
@@ -706,14 +1173,19 @@ function assertInstalled(root) {
     path.join(root, ".agent-flow", "bootstrap", "CLAUDE.md"),
     path.join(root, ".Codex", "agents", "code-reviewer.md"),
     path.join(root, ".claude", "agents", "code-reviewer.md"),
+    path.join(root, ".omp", "agents", "code-reviewer.md"),
   ];
   const missing = required.filter((pathName) => !fs.existsSync(pathName));
   if (missing.length > 0) {
-    throw new Error(`agent-flow is not installed. run: agent-flow-kit install`);
+    throw new Error(
+      `agent-flow is not installed. run: agent-flow-kit install; missing: `
+      + missing.map((pathName) => path.relative(root, pathName)).join(", "),
+    );
   }
   for (const codeReviewer of [
     path.join(root, ".Codex", "agents", "code-reviewer.md"),
     path.join(root, ".claude", "agents", "code-reviewer.md"),
+    path.join(root, ".omp", "agents", "code-reviewer.md"),
   ]) {
     if (!fs.readFileSync(codeReviewer, "utf8").trim()) {
       throw new Error(`agent-flow is not installed correctly: ${path.relative(root, codeReviewer)} is empty`);
@@ -1108,6 +1580,146 @@ function selectProjectSkills(root, agentFlowDir, installSelection = null) {
     conflicts,
     warnings,
   };
+}
+
+function computeSkillPlanHash(index, root, verifyTrees = false) {
+  const skills = (index?.skills || []).map((skill) => {
+    const skillPath = path.resolve(root, String(skill.path || ""));
+    const relative = path.relative(root, skillPath);
+    if (path.basename(skillPath) !== "SKILL.md" || relative.startsWith("..") || path.isAbsolute(relative)) {
+      throw new Error(`invalid installed skill path: ${skill.name}`);
+    }
+    if (typeof skill.tree_hash !== "string" || !/^[0-9a-f]{64}$/.test(skill.tree_hash)) {
+      throw new Error(`installed skill has no whole-tree hash: ${skill.name}`);
+    }
+    const liveHash = verifyTrees ? hashSkillTree(path.dirname(skillPath)) : skill.tree_hash;
+    if (verifyTrees && skill.tree_hash !== liveHash) {
+      throw new Error(`installed skill snapshot changed: ${skill.name}`);
+    }
+    const record = [
+      skill.name,
+      relative.split(path.sep).join("/"),
+      skill.source,
+      skill.source_host ?? null,
+      liveHash,
+      [...(skill.profiles || [])].sort(compareCodePoints),
+    ];
+    if (
+      Object.hasOwn(skill, "activation")
+      || Object.hasOwn(skill, "taskTerms")
+      || Object.hasOwn(skill, "pathGlobs")
+    ) {
+      record.push({
+        activation: skill.activation ?? null,
+        workflowPhases: normalizedRoutingHashStrings(skill, "workflowPhases"),
+        taskTerms: normalizedRoutingHashStrings(skill, "taskTerms"),
+        pathGlobs: normalizedRoutingHashStrings(skill, "pathGlobs"),
+      });
+    }
+    return record;
+  }).sort((left, right) => compareCodePoints(left[0], right[0]));
+  const selection = index?.selection || {};
+  const normalized = {
+    profiles: [...(selection.profiles || [])].sort(compareCodePoints),
+    skill_profiles: [...(selection.skill_profiles || [])].sort(compareCodePoints),
+    explicit_skills: [...(selection.explicit_skills || [])].sort(compareCodePoints),
+    ...(Object.hasOwn(selection, "external_exposure_skills")
+      ? { external_exposure_skills: [...selection.external_exposure_skills].sort(compareCodePoints) }
+      : {}),
+    ...(Object.hasOwn(selection, "profile_selection")
+      ? { profile_selection: selection.profile_selection }
+      : {}),
+    required_review: Object.fromEntries(
+      Object.entries(selection.required_review || {})
+        .sort(([left], [right]) => compareCodePoints(left, right))
+        .map(([profile, names]) => [profile, [...names].sort(compareCodePoints)]),
+    ),
+    conditional_skills: selection.conditional_skills || {},
+    profile_routing: selection.profile_routing || {},
+    skills,
+  };
+  return crypto.createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
+}
+
+function normalizedRoutingHashStrings(skill, key) {
+  const value = skill[key] ?? [];
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
+    throw new Error(`installed skill has invalid ${key}: ${skill.name}`);
+  }
+  return [...value].sort(compareCodePoints);
+}
+
+function sha256Bytes(content) {
+  return crypto.createHash("sha256").update(content).digest("hex");
+}
+
+function compareCodePoints(left, right) {
+  const first = Array.from(String(left), (character) => character.codePointAt(0));
+  const second = Array.from(String(right), (character) => character.codePointAt(0));
+  for (let index = 0; index < Math.min(first.length, second.length); index += 1) {
+    if (first[index] !== second[index]) return first[index] - second[index];
+  }
+  return first.length - second.length;
+}
+
+function treeIntegrity(root) {
+  const entries = [];
+  const visit = (current, relative) => {
+    const stat = fs.lstatSync(current);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new Error(`skill tree integrity root is unsafe: ${current}`);
+    }
+    entries.push({ path: relative, type: "directory", mode: stat.mode & 0o777 });
+    for (const name of fs.readdirSync(current).sort()) {
+      const child = path.join(current, name);
+      const childRelative = relative ? `${relative}/${name}` : name;
+      const childStat = fs.lstatSync(child);
+      if (childStat.isSymbolicLink()) {
+        throw new Error(`skill tree integrity contains a symlink: ${child}`);
+      }
+      if (childStat.isDirectory()) {
+        visit(child, childRelative);
+      } else if (childStat.isFile()) {
+        entries.push({
+          path: childRelative,
+          type: "file",
+          mode: childStat.mode & 0o777,
+          sha256: crypto.createHash("sha256").update(fs.readFileSync(child)).digest("hex"),
+        });
+      } else {
+        throw new Error(`skill tree integrity contains a special file: ${child}`);
+      }
+    }
+  };
+  visit(root, "");
+  entries.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+  return crypto.createHash("sha256")
+    .update(JSON.stringify({ version: 1, entries }))
+    .digest("hex");
+}
+
+function skillLinksCommitment(skillPlanHash, links) {
+  if (typeof skillPlanHash !== "string" || !/^[0-9a-f]{64}$/.test(skillPlanHash)) {
+    throw new Error("skill link commitment has an invalid skill plan hash");
+  }
+  const owned = (links || []).filter((link) => [
+    "linked",
+    "copied",
+    "removed-stale-linked",
+    "removed-stale-copied",
+  ].includes(link?.status));
+  const rows = owned.map((link) => [
+    link.name,
+    link.host,
+    String(link.path).replaceAll("\\", "/"),
+    link.status,
+    link.tree_integrity ?? null,
+  ]).sort((left, right) => compareCodePoints(JSON.stringify(left), JSON.stringify(right)));
+  return crypto.createHash("sha256").update(JSON.stringify({
+    version: SKILL_LINKS_COMMITMENT_VERSION,
+    skill_plan_hash: skillPlanHash,
+    links: rows,
+  })).digest("hex");
 }
 
 function validateSkillDependencies(skills) {

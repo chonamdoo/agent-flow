@@ -84,6 +84,35 @@ def test_overlong_skill_installs_and_validates_without_length_diagnostic(tmp_pat
         assert installed.read_text(encoding="utf-8").count("detail ") == 260
 
 
+def test_node_run_rejects_skill_index_tamper(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    assert _install(project).returncode == 0
+    started = subprocess.run(
+        (_node(), str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"), "run", "start", "--task", "pin"),
+        cwd=project,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert started.returncode == 0, started.stderr
+    index_path = project / ".agent-flow" / "skills" / "index.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    index["warnings"].append("tampered")
+    index_path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
+
+    result = subprocess.run(
+        (_node(), str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"), "run", "status"),
+        cwd=project,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "commitment" in result.stderr
+
+
 def test_pinned_workspace_write_guard_is_installed_for_all_hosts(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
