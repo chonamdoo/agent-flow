@@ -2853,7 +2853,7 @@ function safeSkillName(value) {
         .replace(/^-+|-+$/g, "") || "skill";
 }
 
-function removeStaleProjectSkillLinks(root, skills, previousIndex, force = false) {
+function removeStaleProjectSkillLinks(root, skills, previousIndex, force = false, transaction = null) {
   if (!previousIndex || !Array.isArray(previousIndex.links)) {
     return [];
   }
@@ -2880,25 +2880,39 @@ function removeStaleProjectSkillLinks(root, skills, previousIndex, force = false
     if (!stat) {
       continue;
     }
-    if (stat.isSymbolicLink()) {
-      fs.unlinkSync(target);
-      removed.push({ name: link.name, host: link.host, path: link.path, status: "removed-stale" });
-      continue;
-    }
-    if (force) {
-      fs.rmSync(target, { recursive: true, force: true });
-      removed.push({ name: link.name, host: link.host, path: link.path, status: "removed-stale-forced" });
-      continue;
-    }
-    const previousHash = previousSkillHash(previousIndex, link.name);
-    const skillFile = path.join(target, "SKILL.md");
-    if (stat.isDirectory() && previousHash && fs.existsSync(skillFile)) {
-      const currentHash = crypto.createHash("sha256").update(fs.readFileSync(skillFile, "utf8")).digest("hex");
-      if (currentHash === previousHash) {
-        fs.rmSync(target, { recursive: true, force: true });
-        removed.push({ name: link.name, host: link.host, path: link.path, status: "removed-stale-copied" });
+    if (link.status === "linked") {
+      if (!stat.isSymbolicLink() || link.filesystem_kind !== "symlink" || typeof link.target !== "string") {
+        removed.push({ name: link.name, host: link.host, path: link.path, status: "preserved-kind-mismatch" });
+        continue;
       }
+      if (fs.readlinkSync(target) !== link.target) {
+        removed.push({ name: link.name, host: link.host, path: link.path, status: "preserved-target-mismatch" });
+        continue;
+      }
+      withHostPathMutation(
+        transaction,
+        target,
+        [{ kind: "absent" }],
+        () => fs.unlinkSync(target),
+      );
+      removed.push({ name: link.name, host: link.host, path: link.path, status: "removed-stale-linked" });
+      continue;
     }
+    if (link.status !== "copied" || link.filesystem_kind !== "directory" || !stat.isDirectory()) {
+      removed.push({ name: link.name, host: link.host, path: link.path, status: "preserved-unverified-ownership" });
+      continue;
+    }
+    if (typeof link.tree_hash !== "string" || hashSkillTree(target) !== link.tree_hash) {
+      removed.push({ name: link.name, host: link.host, path: link.path, status: "preserved-integrity-mismatch" });
+      continue;
+    }
+    withHostPathMutation(
+      transaction,
+      target,
+      [{ kind: "absent" }],
+      () => fs.rmSync(target, { recursive: true, force: true }),
+    );
+    removed.push({ name: link.name, host: link.host, path: link.path, status: "removed-stale-copied" });
   }
   return removed;
 }
@@ -2955,7 +2969,7 @@ function parseSimpleYaml(text) {
   return metadata;
 }
 
-function linkProjectSkill(root, skill, host, previousIndex, force = false) {
+function linkProjectSkill(root, skill, host, previousIndex, force = false, transaction = null) {
   const srcDir = path.dirname(path.join(root, skill.path));
   const hostRoot = hostSkillRoot(root, host);
   if (pathHasSymlink(root, hostRoot)) {
@@ -2964,32 +2978,84 @@ function linkProjectSkill(root, skill, host, previousIndex, force = false) {
   const destDir = path.join(hostRoot, skill.name);
   ensureChildPath(hostRoot, destDir);
   const destSkill = path.join(destDir, "SKILL.md");
-  const previousHash = previousSkillHash(previousIndex, skill.name);
+  const previousLink = previousIndex?.links?.find((link) => (
+    link?.name === skill.name && link?.host === host && path.resolve(root, link.path) === destDir
+  ));
+  let replaceExisting = false;
   if (fs.existsSync(destDir)) {
     const stat = fs.lstatSync(destDir);
     if (stat.isSymbolicLink()) {
-      fs.unlinkSync(destDir);
+      if (
+        previousLink?.status !== "linked"
+        || previousLink.filesystem_kind !== "symlink"
+        || typeof previousLink.target !== "string"
+        || fs.readlinkSync(destDir) !== previousLink.target
+      ) {
+        return { name: skill.name, host, path: path.relative(root, destDir), status: "skipped-unverified-existing" };
+      }
+      replaceExisting = true;
     } else if (fs.existsSync(destSkill)) {
-      const currentHash = crypto.createHash("sha256").update(fs.readFileSync(destSkill, "utf8")).digest("hex");
-      if (!force && currentHash !== skill.hash && currentHash !== previousHash) {
+      if (previousLink?.status === "linked") {
+        return { name: skill.name, host, path: path.relative(root, destDir), status: "skipped-kind-mismatch" };
+      }
+      if (
+        previousLink?.status !== "copied"
+        || previousLink.filesystem_kind !== "directory"
+        || typeof previousLink.tree_hash !== "string"
+      ) {
+        return { name: skill.name, host, path: path.relative(root, destDir), status: "skipped-unverified-existing" };
+      }
+      if (hashSkillTree(destDir) !== previousLink.tree_hash) {
         return { name: skill.name, host, path: path.relative(root, destDir), status: "skipped-user-modified" };
       }
-      fs.rmSync(destDir, { recursive: true, force: true });
+      replaceExisting = true;
     } else if (force) {
-      fs.rmSync(destDir, { recursive: true, force: true });
+      replaceExisting = true;
     } else {
       return { name: skill.name, host, path: path.relative(root, destDir), status: "skipped-existing" };
     }
   }
   fs.mkdirSync(path.dirname(destDir), { recursive: true });
   const relTarget = path.relative(path.dirname(destDir), srcDir);
-  try {
-    fs.symlinkSync(relTarget, destDir, "dir");
-    return { name: skill.name, host, path: path.relative(root, destDir), status: "linked" };
-  } catch {
-    copyBundledDirIfMissingOrSame(srcDir, destDir, true);
-    return { name: skill.name, host, path: path.relative(root, destDir), status: "copied" };
-  }
+  return withHostPathMutation(
+    transaction,
+    destDir,
+    [
+      { kind: "absent" },
+      { kind: "symlink", target: relTarget },
+      { kind: "directory", tree_hash: skill.tree_hash },
+    ],
+    () => {
+      if (replaceExisting) fs.rmSync(destDir, { recursive: true, force: true });
+      try {
+        if (process.env.AGENT_FLOW_TEST_FORCE_COPY_HOST_SKILLS === "1") {
+          throw new Error("injected host skill copy fallback");
+        }
+        fs.symlinkSync(relTarget, destDir, "dir");
+        return {
+          name: skill.name,
+          host,
+          path: path.relative(root, destDir),
+          status: "linked",
+          filesystem_kind: "symlink",
+          target: relTarget,
+          tree_hash: skill.tree_hash,
+          tree_integrity: treeIntegrity(srcDir),
+        };
+      } catch {
+        copyBundledDirIfMissingOrSame(srcDir, destDir, true);
+        return {
+          name: skill.name,
+          host,
+          path: path.relative(root, destDir),
+          status: "copied",
+          filesystem_kind: "directory",
+          tree_hash: skill.tree_hash,
+          tree_integrity: treeIntegrity(srcDir),
+        };
+      }
+    },
+  );
 }
 
 function hostSkillRoot(root, host) {
@@ -3018,14 +3084,6 @@ function legacyHostSkillRoot(root, linkPath) {
     return path.join(root, ".gemini", "skills");
   }
   return null;
-}
-
-function previousSkillHash(previousIndex, name) {
-  if (!previousIndex || !Array.isArray(previousIndex.skills)) {
-    return "";
-  }
-  const previous = previousIndex.skills.find((skill) => skill && skill.name === name);
-  return previous?.hash || "";
 }
 
 function readJsonIfExists(pathName) {

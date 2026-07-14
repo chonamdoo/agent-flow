@@ -126,6 +126,23 @@ def test_reinstall_commits_transaction_without_residue(tmp_path: Path) -> None:
     assert (project / ".agent-flow" / "skills" / "index.json").is_file()
 
 
+def test_unverified_existing_host_skill_is_preserved(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    _skill(project / "skills" / "demo", "managed", hosts="[codex]")
+    destination = project / ".Codex" / "skills" / "demo"
+    destination.mkdir(parents=True)
+    marker = destination / "SKILL.md"
+    marker.write_text("user-owned\n", encoding="utf-8")
+
+    result = _install(project)
+
+    assert result.returncode == 0, result.stderr
+    assert marker.read_text(encoding="utf-8") == "user-owned\n"
+    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    assert any(link["status"] == "skipped-unverified-existing" for link in index["links"])
+
+
 def test_pinned_workspace_write_guard_is_installed_for_all_hosts(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
