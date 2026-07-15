@@ -6805,20 +6805,41 @@ function runSandboxedGate(args, extraEnv = {}) {
 }
 
 function runSandboxedPythonCliCommand(subcommand, args) {
-  const rootArgumentIndex = args.indexOf("--root");
-  const requestedRoot = rootArgumentIndex >= 0 && args[rootArgumentIndex + 1]
-    ? path.resolve(args[rootArgumentIndex + 1])
-    : null;
+  const normalizedArgs = [];
+  let requestedRoot = null;
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    let rootValue = null;
+    if (argument === "--root") {
+      if (index + 1 >= args.length || !args[index + 1]) {
+        throw new Error("--root requires a path");
+      }
+      rootValue = args[++index];
+    } else if (argument.startsWith("--root=")) {
+      rootValue = argument.slice("--root=".length);
+      if (!rootValue) throw new Error("--root requires a path");
+    } else {
+      normalizedArgs.push(argument);
+      continue;
+    }
+    const canonicalRoot = path.resolve(rootValue);
+    if (requestedRoot && requestedRoot !== canonicalRoot) {
+      throw new Error("conflicting --root arguments");
+    }
+    requestedRoot = canonicalRoot;
+  }
   const root = requestedRoot || resolveAgentFlowRoot(process.cwd());
-  const installedKit = root ? readJsonIfExists(path.join(root, ".agent-flow", "kit.json")) : null;
-  if (!installedKit?.project_runtime_contract) {
+  const rootArgument = ["--root", root];
+  const pythonArgs = [...rootArgument, ...normalizedArgs];
+  const kitPath = path.join(root, ".agent-flow", "kit.json");
+  if (!fs.existsSync(kitPath)) {
     const python = projectPythonPath();
     const pythonPathEntries = [
       path.join(KIT_ROOT, "src"),
       root ? installedPythonRuntimePath(root) : "",
       process.env.PYTHONPATH,
     ].filter(Boolean);
-    const result = safeSpawnSync(python, ["-m", "agent_flow.cli", subcommand, ...args], {
+    const result = safeSpawnSync(python, ["-m", "agent_flow.cli", subcommand, ...pythonArgs], {
       cwd: process.cwd(),
       env: {
         ...process.env,
@@ -6842,7 +6863,7 @@ function runSandboxedPythonCliCommand(subcommand, args) {
   runSandboxedGate(
     ["--", "/usr/bin/python3", ...authenticatedExecutableArgs(
       contract.python,
-      ["-m", "agent_flow.cli", subcommand, ...args],
+      ["-m", "agent_flow.cli", subcommand, ...pythonArgs],
     )],
     {
       PYTHONDONTWRITEBYTECODE: "1",

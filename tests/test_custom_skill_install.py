@@ -929,6 +929,41 @@ def test_sandboxed_python_cli_uses_the_contracted_interpreter(tmp_path: Path) ->
     assert not outside.exists()
 
 
+@pytest.mark.parametrize("kit_content", ["{}", "{not json"])
+def test_sandboxed_python_cli_rejects_invalid_existing_kit(
+    tmp_path: Path,
+    kit_content: str,
+) -> None:
+    project = tmp_path / "project"
+    agent_flow = project / ".agent-flow"
+    project.mkdir()
+    agent_flow.mkdir()
+    (agent_flow / "kit.json").write_text(kit_content, encoding="utf-8")
+
+    result = _command(project, "architecture-lint", "--root", str(project))
+
+    assert result.returncode != 0
+    assert "project runtime contract commitment is invalid" in result.stderr
+
+
+def test_sandboxed_python_cli_rejects_conflicting_root_forms(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    other = tmp_path / "other"
+    project.mkdir()
+    other.mkdir()
+
+    result = _command(
+        project,
+        "architecture-lint",
+        "--root",
+        str(other),
+        f"--root={project}",
+    )
+
+    assert result.returncode != 0
+    assert "conflicting --root arguments" in result.stderr
+
+
 def test_node_skill_repin_rejects_external_run_directory_before_writing(tmp_path: Path) -> None:
     project = tmp_path / "project"
     outside = tmp_path / "outside-run"
