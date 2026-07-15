@@ -420,6 +420,109 @@ def test_authenticated_python_execution_rejects_same_path_replacement_after_cont
     assert not marker.exists()
 
 
+def test_authenticated_execution_rejects_staging_path_replacement_without_hardlinking_source(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    marker = tmp_path / "replacement-ran"
+    project.mkdir()
+    assert _install(project).returncode == 0
+    contract = json.loads((project / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))[
+        "project_runtime_contract"
+    ]
+    source = Path(contract["python"]["resolved_path"])
+    source_links = source.stat().st_nlink
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path / "home"),
+        "AGENT_FLOW_TEST_HOLD_AFTER_AUTHENTICATED_STAGE_MS": "1500",
+    }
+    process = subprocess.Popen(
+        (_node(), str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"), "status"),
+        cwd=project,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert process.stderr is not None
+    prefix = "agent-flow:test-authenticated-stage-ready:"
+    line = process.stderr.readline().strip()
+    assert line.startswith(prefix), line
+    staged = Path(line.removeprefix(prefix))
+    assert staged.stat().st_ino != source.stat().st_ino
+    assert source.stat().st_nlink == source_links
+    staged.unlink()
+    staged.write_text(
+        "#!/bin/sh\n"
+        f": > {shlex.quote(str(marker))}\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    staged.chmod(0o755)
+    stdout, stderr = process.communicate(timeout=20)
+
+    assert process.returncode != 0, stdout
+    assert "executable identity changed" in stderr
+    assert not marker.exists()
+
+
+def test_authenticated_execution_rejects_symlinked_staging_root_without_external_write(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    outside = tmp_path / "outside"
+    project.mkdir()
+    outside.mkdir(mode=0o755)
+    assert _install(project).returncode == 0
+    staging_root = project / ".agent-flow" / "exec-staging"
+    if staging_root.exists():
+        shutil.rmtree(staging_root)
+    staging_root.symlink_to(outside, target_is_directory=True)
+    before_mode = outside.stat().st_mode & 0o777
+
+    result = _command(project, "status")
+
+    assert result.returncode != 0
+    assert "executable identity changed" in result.stderr
+    assert list(outside.iterdir()) == []
+    assert outside.stat().st_mode & 0o777 == before_mode
+
+
+def test_concurrent_authenticated_launchers_do_not_change_executable_link_count(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    assert _install(project, env={"AGENT_FLOW_AUTO_EXTERNAL_SKILLS": "0"}).returncode == 0
+    launcher = project / ".agent-flow" / "bin" / "agent-flow"
+    contract = json.loads((project / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))[
+        "project_runtime_contract"
+    ]
+    node = Path(contract["node"]["path"])
+    before_links = node.stat().st_nlink
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path / "test-home"),
+        "AGENT_FLOW_AUTO_EXTERNAL_SKILLS": "0",
+        "AGENT_FLOW_TEST_HOLD_AFTER_AUTHENTICATED_STAGE_MS": "500",
+    }
+    processes = [
+        subprocess.Popen(
+            (str(launcher), "status"),
+            cwd=project,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        for _ in range(2)
+    ]
+    results = [process.communicate(timeout=30) for process in processes]
+
+    for process, (stdout, stderr) in zip(processes, results):
+        assert process.returncode == 0, f"{stdout}\n{stderr}"
+    assert node.stat().st_nlink == before_links
+
+
 def test_installed_guard_rejects_joint_runtime_and_contract_tamper(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
@@ -1525,6 +1628,45 @@ def test_stale_host_skill_replacement_is_preserved_during_swap(tmp_path: Path) -
     assert process.returncode != 0, stdout
     assert "changed outside install transaction" in stderr
     assert marker.read_text(encoding="utf-8") == "external\n"
+
+
+def test_stale_host_skill_same_target_replacement_is_preserved_during_swap(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    skill_dir = project / "skills" / "demo"
+    _skill(skill_dir, "CODEX", hosts="[codex]")
+    assert _install(project).returncode == 0
+    target = project / ".Codex" / "skills" / "demo"
+    original_target = os.readlink(target)
+    original_inode = target.lstat().st_ino
+    _skill(skill_dir, "CLAUDE", hosts="[claude]")
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path / "home"),
+        "AGENT_FLOW_TEST_HOLD_BEFORE_HOST_SWAP_MS": "1500",
+        "AGENT_FLOW_TEST_HOLD_HOST_TARGET_SUFFIX": ".Codex/skills/demo",
+    }
+    process = subprocess.Popen(
+        (_node(), str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"), "install"),
+        cwd=project,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    assert process.stderr is not None
+    assert "agent-flow:test-host-swap-ready" in process.stderr.readline()
+    target.unlink()
+    target.symlink_to(original_target, target_is_directory=True)
+    replacement_inode = target.lstat().st_ino
+    stdout, stderr = process.communicate(timeout=30)
+
+    assert replacement_inode != original_inode
+    assert process.returncode != 0, stdout
+    assert "changed outside install transaction" in stderr
+    assert target.is_symlink()
+    assert target.lstat().st_ino == replacement_inode
+    assert os.readlink(target) == original_target
 
 
 def test_stale_host_skill_replacement_after_swap_is_not_adopted(tmp_path: Path) -> None:

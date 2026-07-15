@@ -489,12 +489,16 @@ function assertProjectRuntimeContract(root) {
     throw new Error("project runtime contract no longer matches installed files");
   }
   const runningNode = executableIdentity(process.execPath);
+  const originalNode = originalNodeAuthority();
   if (
     runningNode.sha256 !== contract.node.sha256
-    || runningNode.device !== contract.node.device
-    || runningNode.inode !== contract.node.inode
     || runningNode.mode !== contract.node.mode
-    || Number.parseInt(runningNode.links, 10) < Number.parseInt(contract.node.links, 10)
+    || originalNode.path !== contract.node.path
+    || originalNode.sha256 !== contract.node.sha256
+    || originalNode.device !== contract.node.device
+    || originalNode.inode !== contract.node.inode
+    || originalNode.mode !== contract.node.mode
+    || Number.parseInt(originalNode.links, 10) < Number.parseInt(contract.node.links, 10)
   ) throw new Error("project runtime running Node identity changed");
   assertExecutableIdentity(contract.node.path, contract.node, true);
   assertExecutableIdentity(contract.git.path, contract.git);
@@ -503,71 +507,131 @@ function assertProjectRuntimeContract(root) {
 }
 
 const AUTHENTICATED_EXEC_VERIFIER = [
-  "import base64,errno,hashlib,json,os,stat,subprocess,sys,time",
+  "import base64,hashlib,json,os,stat,subprocess,sys,time",
   "expected=json.loads(base64.b64decode(sys.argv[1],validate=True))",
-  "target=expected.get('resolved_path') or expected['path']; staging_root=expected['staging_root']; fd=None; stage=None; stage_dir=None; staged_dependencies=[]",
+  "target=expected.get('resolved_path') or expected['path']; staging_root=expected['staging_root']",
+  "source_fd=stage_fd=staging_fd=stage_dir_fd=bin_fd=lib_fd=None; stage_dir=stage_path=None; created_files=[]; frozen_paths=[]",
+  "def digest_fd(descriptor):",
+  " os.lseek(descriptor,0,os.SEEK_SET); digest=hashlib.sha256()",
+  " while True:",
+  "  chunk=os.read(descriptor,1024*1024)",
+  "  if not chunk: break",
+  "  digest.update(chunk)",
+  " os.lseek(descriptor,0,os.SEEK_SET); return digest.hexdigest()",
+  "def same_object(left,right): return (left.st_dev,left.st_ino,left.st_mode,left.st_nlink,left.st_size)==(right.st_dev,right.st_ino,right.st_mode,right.st_nlink,right.st_size)",
+  "def secure_staging_descriptor():",
+  " project=expected['project_root']",
+  " if not os.path.isabs(project) or os.path.realpath(project)!=project: raise OSError('invalid project root')",
+  " if os.path.normpath(staging_root)!=os.path.join(project,'.agent-flow','exec-staging'): raise OSError('invalid staging root')",
+  " cursor=project",
+  " for component in ('.agent-flow','exec-staging'):",
+  "  candidate=os.path.join(cursor,component)",
+  "  try: metadata=os.lstat(candidate)",
+  "  except FileNotFoundError: os.mkdir(candidate,0o700); metadata=os.lstat(candidate)",
+  "  if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode) or metadata.st_uid!=os.getuid() or metadata.st_mode&0o022: raise OSError('unsafe staging root')",
+  "  cursor=candidate",
+  " descriptor=os.open(staging_root,os.O_RDONLY|getattr(os,'O_DIRECTORY',0)|getattr(os,'O_NOFOLLOW',0))",
+  " opened=os.fstat(descriptor); named=os.lstat(staging_root)",
+  " if (opened.st_dev,opened.st_ino)!=(named.st_dev,named.st_ino): raise OSError('staging root changed')",
+  " return descriptor",
+  "def copy_descriptor(source,parent_descriptor,name,mode):",
+  " destination=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0),mode,dir_fd=parent_descriptor)",
+  " try:",
+  "  os.fchmod(destination,mode); os.lseek(source,0,os.SEEK_SET)",
+  "  while True:",
+  "   chunk=os.read(source,1024*1024)",
+  "   if not chunk: break",
+  "   view=memoryview(chunk)",
+  "   while view: view=view[os.write(destination,view):]",
+  "  os.fsync(destination)",
+  " finally: os.close(destination)",
+  " return os.open(name,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0),dir_fd=parent_descriptor)",
+  "def copy_dependency(source,parent_descriptor,name):",
+  " dependency_source=os.open(os.path.realpath(source),os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))",
+  " try:",
+  "  before=os.fstat(dependency_source)",
+  "  if not stat.S_ISREG(before.st_mode) or before.st_mode&0o022: raise OSError('unsafe dependency')",
+  "  digest=digest_fd(dependency_source); copied=copy_descriptor(dependency_source,parent_descriptor,name,stat.S_IMODE(before.st_mode)); after=os.fstat(dependency_source)",
+  "  if not same_object(before,after) or digest_fd(dependency_source)!=digest or digest_fd(copied)!=digest: os.close(copied); raise OSError('dependency changed')",
+  "  return copied",
+  " finally: os.close(dependency_source)",
+  "def freeze(path):",
+  " flags=getattr(stat,'UF_IMMUTABLE',0); chflags=getattr(os,'chflags',None)",
+  " if sys.platform=='darwin':",
+  "  if not flags or chflags is None: raise OSError('immutable staging is unavailable')",
+  "  chflags(path,flags)",
+  "  metadata=os.lstat(path); frozen_paths.append((path,metadata.st_dev,metadata.st_ino))",
   "try:",
   " hold_name='AGENT_FLOW_TEST_HOLD_BEFORE_AUTHENTICATED_PYTHON_OPEN_MS' if expected.get('resolved_path') else 'AGENT_FLOW_TEST_HOLD_BEFORE_AUTHENTICATED_EXEC_OPEN_MS'",
   " hold=int(os.environ.get(hold_name,'0'))",
   " if 0<hold<=10000:",
   "  marker='authenticated-python-ready' if expected.get('resolved_path') else 'authenticated-exec-ready'",
   "  print('agent-flow:test-'+marker,file=sys.stderr,flush=True); time.sleep(hold/1000)",
-  " fd=os.open(target,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))",
-  " before=os.fstat(fd)",
+  " source_fd=os.open(target,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))",
+  " before=os.fstat(source_fd)",
   " if not stat.S_ISREG(before.st_mode): raise OSError('not regular')",
-  " digest=hashlib.sha256()",
-  " while True:",
-  "  chunk=os.read(fd,1024*1024)",
-  "  if not chunk: break",
-  "  digest.update(chunk)",
-  " after=os.fstat(fd)",
-  " actual={'sha256':digest.hexdigest(),'device':str(before.st_dev),'inode':str(before.st_ino),'links':str(before.st_nlink),'mode':stat.S_IMODE(before.st_mode)}",
-  " stable=(before.st_dev,before.st_ino,before.st_mode,before.st_nlink,before.st_size)==(after.st_dev,after.st_ino,after.st_mode,after.st_nlink,after.st_size)",
-  " if not stable or any(actual[key]!=expected[key] for key in actual): raise OSError('identity mismatch')",
-  " os.makedirs(staging_root,mode=0o700,exist_ok=True); os.chmod(staging_root,0o700)",
-  " stage_dir=os.path.join(staging_root,os.urandom(24).hex()); os.mkdir(stage_dir,0o700); os.mkdir(os.path.join(stage_dir,'bin'),0o700); stage=os.path.join(stage_dir,'bin','executable')",
-  " cursor=target; trusted=True",
-  " while True:",
-  "  metadata=os.lstat(cursor); trusted=trusted and metadata.st_uid==0 and not (metadata.st_mode & 0o022)",
-  "  parent=os.path.dirname(cursor)",
-  "  if parent==cursor: break",
-  "  cursor=parent",
-  " if trusted: stage=target",
-  " else:",
-  "  os.link(target,stage,follow_symlinks=False)",
-  "  source_lib=os.path.abspath(os.path.join(os.path.dirname(target),'..','lib'))",
-  "  if os.path.isdir(source_lib):",
-  "   names=[name for name in os.listdir(source_lib) if (name.startswith('libpython') or name.startswith('libnode')) and name.endswith('.dylib')]",
-  "   if names: os.mkdir(os.path.join(stage_dir,'lib'),0o700)",
-  "   for name in names:",
-  "    dependency=os.path.join(stage_dir,'lib',name); os.link(os.path.join(source_lib,name),dependency,follow_symlinks=False); staged_dependencies.append(dependency)",
-  " if stage!=target:",
-  "  staged=os.lstat(stage)",
-  "  if (staged.st_dev,staged.st_ino)!=(before.st_dev,before.st_ino): raise OSError('staged identity mismatch')",
+  " source_digest=digest_fd(source_fd); after=os.fstat(source_fd)",
+  " actual={'sha256':source_digest,'device':str(before.st_dev),'inode':str(before.st_ino),'links':str(before.st_nlink),'mode':stat.S_IMODE(before.st_mode)}",
+  " if not same_object(before,after) or any(actual[key]!=expected[key] for key in actual): raise OSError('identity mismatch')",
+  " staging_fd=secure_staging_descriptor(); stage_name=os.urandom(24).hex(); os.mkdir(stage_name,0o700,dir_fd=staging_fd)",
+  " stage_dir=os.path.join(staging_root,stage_name); stage_dir_fd=os.open(stage_name,os.O_RDONLY|getattr(os,'O_DIRECTORY',0)|getattr(os,'O_NOFOLLOW',0),dir_fd=staging_fd)",
+  " os.mkdir('bin',0o700,dir_fd=stage_dir_fd); bin_fd=os.open('bin',os.O_RDONLY|getattr(os,'O_DIRECTORY',0)|getattr(os,'O_NOFOLLOW',0),dir_fd=stage_dir_fd)",
+  " stage_fd=copy_descriptor(source_fd,bin_fd,'executable',expected['mode']); stage_metadata=os.fstat(stage_fd); created_files.append((bin_fd,'executable',stage_metadata.st_dev,stage_metadata.st_ino))",
+  " if not stat.S_ISREG(stage_metadata.st_mode) or stage_metadata.st_nlink!=1 or stat.S_IMODE(stage_metadata.st_mode)!=expected['mode'] or digest_fd(stage_fd)!=expected['sha256']: raise OSError('staged identity mismatch')",
+  " if not same_object(before,os.fstat(source_fd)) or digest_fd(source_fd)!=source_digest: raise OSError('source changed while staging')",
+  " source_lib=os.path.abspath(os.path.join(os.path.dirname(target),'..','lib'))",
+  " if os.path.isdir(source_lib):",
+  "  names=[name for name in os.listdir(source_lib) if (name.startswith('libpython') or name.startswith('libnode')) and name.endswith('.dylib')]",
+  "  if names: os.mkdir('lib',0o700,dir_fd=stage_dir_fd); lib_fd=os.open('lib',os.O_RDONLY|getattr(os,'O_DIRECTORY',0)|getattr(os,'O_NOFOLLOW',0),dir_fd=stage_dir_fd)",
+  "  for name in names:",
+  "   dependency_fd=copy_dependency(os.path.join(source_lib,name),lib_fd,name); dependency_metadata=os.fstat(dependency_fd); created_files.append((lib_fd,name,dependency_metadata.st_dev,dependency_metadata.st_ino)); os.close(dependency_fd)",
+  " stage_path=os.path.join(stage_dir,'bin','executable')",
+  " hold=int(os.environ.get('AGENT_FLOW_TEST_HOLD_AFTER_AUTHENTICATED_STAGE_MS','0'))",
+  " if 0<hold<=10000: print('agent-flow:test-authenticated-stage-ready:'+stage_path,file=sys.stderr,flush=True); time.sleep(hold/1000)",
+  " named_root=os.lstat(staging_root); named_dir=os.lstat(stage_dir); named_stage=os.lstat(stage_path)",
+  " if (named_root.st_dev,named_root.st_ino)!=(os.fstat(staging_fd).st_dev,os.fstat(staging_fd).st_ino) or (named_dir.st_dev,named_dir.st_ino)!=(os.fstat(stage_dir_fd).st_dev,os.fstat(stage_dir_fd).st_ino) or (named_stage.st_dev,named_stage.st_ino)!=(stage_metadata.st_dev,stage_metadata.st_ino) or digest_fd(stage_fd)!=expected['sha256']: raise OSError('staging path changed')",
+  " freeze(stage_path); freeze(os.path.join(stage_dir,'bin')); freeze(stage_dir);",
+  " if lib_fd is not None: freeze(os.path.join(stage_dir,'lib'))",
   " env=dict(os.environ); env.pop('AGENT_FLOW_TEST_HOLD_BEFORE_AUTHENTICATED_EXEC_OPEN_MS',None); env.pop('AGENT_FLOW_TEST_HOLD_BEFORE_AUTHENTICATED_PYTHON_OPEN_MS',None)",
+  " env.pop('AGENT_FLOW_TEST_HOLD_AFTER_AUTHENTICATED_STAGE_MS',None)",
+  " [env.pop(name,None) for name in ('DYLD_INSERT_LIBRARIES','DYLD_LIBRARY_PATH','LD_PRELOAD','LD_LIBRARY_PATH')]",
+  " if lib_fd is not None:",
+  "  library_path=os.path.join(stage_dir,'lib'); env['DYLD_LIBRARY_PATH']=library_path+os.pathsep+env.get('DYLD_LIBRARY_PATH','') if sys.platform=='darwin' else env.get('DYLD_LIBRARY_PATH',''); env['LD_LIBRARY_PATH']=library_path+os.pathsep+env.get('LD_LIBRARY_PATH','') if sys.platform!='darwin' else env.get('LD_LIBRARY_PATH','')",
   " if expected.get('python_home'): env['PYTHONHOME']=expected['python_home']",
   " if expected.get('python_site_packages'): env['PYTHONPATH']=os.pathsep.join([*expected['python_site_packages'],env.get('PYTHONPATH','')]).rstrip(os.pathsep)",
-  " original=dict(expected); original.pop('staging_root',None); env['AGENT_FLOW_ORIGINAL_NODE_AUTHORITY']=base64.b64encode(json.dumps(original,separators=(',',':')).encode()).decode()",
-  " completed=subprocess.run([stage,*sys.argv[2:]],env=env,check=False)",
+  " original=dict(expected); [original.pop(key,None) for key in ('staging_root','project_root','python_home','python_site_packages')]; env['AGENT_FLOW_ORIGINAL_NODE_AUTHORITY']=base64.b64encode(json.dumps(original,separators=(',',':')).encode()).decode()",
+  " inherited=env.get('AGENT_FLOW_INSTALL_FLOCK_FD',''); pass_descriptors=(int(inherited),) if inherited.isdigit() else ()",
+  " completed=subprocess.run([stage_path,*sys.argv[2:]],env=env,pass_fds=pass_descriptors,check=False)",
   " raise SystemExit(completed.returncode)",
   "except (KeyError,OSError,UnicodeError,ValueError,json.JSONDecodeError):",
   " print('agent-flow: blocked because project runtime executable identity changed',file=sys.stderr)",
   " raise SystemExit(126)",
   "finally:",
-  " if fd is not None:",
-  "  try: os.close(fd)",
+  " for path,device,inode in reversed(frozen_paths):",
+  "  try:",
+  "   metadata=os.lstat(path)",
+  "   if (metadata.st_dev,metadata.st_ino)==(device,inode): os.chflags(path,0)",
   "  except OSError: pass",
-  " if stage is not None and stage!=target:",
-  "  try: os.unlink(stage)",
+  " for parent,name,device,inode in reversed(created_files):",
+  "  try:",
+  "   current=os.stat(name,dir_fd=parent,follow_symlinks=False)",
+  "   if (current.st_dev,current.st_ino)==(device,inode): os.unlink(name,dir_fd=parent)",
   "  except OSError: pass",
-  " for dependency in staged_dependencies:",
-  "  try: os.unlink(dependency)",
-  "  except OSError: pass",
-  " if stage_dir is not None:",
-  "  for child in ('bin','lib'):",
-  "   try: os.rmdir(os.path.join(stage_dir,child))",
+  " for descriptor in (source_fd,stage_fd,bin_fd,lib_fd):",
+  "  if descriptor is not None:",
+  "   try: os.close(descriptor)",
   "   except OSError: pass",
-  "  try: os.rmdir(stage_dir)",
+  " if stage_dir_fd is not None:",
+  "  for child in ('bin','lib'):",
+  "   try: os.rmdir(child,dir_fd=stage_dir_fd)",
+  "   except OSError: pass",
+  "  try: os.close(stage_dir_fd)",
+  "  except OSError: pass",
+  " if staging_fd is not None and stage_dir is not None:",
+  "  try: os.rmdir(os.path.basename(stage_dir),dir_fd=staging_fd)",
+  "  except OSError: pass",
+  " if staging_fd is not None:",
+  "  try: os.close(staging_fd)",
   "  except OSError: pass",
 ].join("\n");
 
@@ -614,6 +678,7 @@ function authenticatedExecutableArgs(expected, args) {
   const authority = {
     ...expected,
     staging_root: path.join(root, ".agent-flow", "exec-staging"),
+    project_root: fs.realpathSync(root),
     ...pythonStagingMetadata(expected),
   };
   return [
@@ -637,6 +702,7 @@ function authenticatedExecutableShellCommand(expected, trailingArguments) {
   const authority = {
     ...expected,
     staging_root: path.join(root, ".agent-flow", "exec-staging"),
+    project_root: fs.realpathSync(root),
     ...pythonStagingMetadata(expected),
   };
   return [
@@ -2633,7 +2699,7 @@ function beginSkillInstallTransaction(root, agentFlowDir, previousIndexRecord, l
     previous: previousIndexRecord,
   };
   const journal = {
-    version: 3,
+    version: 4,
     root: fs.realpathSync(root),
     token: transaction.token,
     lock_token: lockToken,
@@ -2682,12 +2748,23 @@ function writeInstallJournal(journalPath, journal) {
 function hostPathState(pathName) {
   const stat = lstatIfExists(pathName);
   if (!stat) return { kind: "absent" };
-  if (stat.isSymbolicLink()) return { kind: "symlink", target: fs.readlinkSync(pathName) };
-  if (stat.isDirectory()) return { kind: "directory", tree_hash: hashSkillTree(pathName) };
+  const filesystemIdentity = {
+    device: String(stat.dev),
+    inode: String(stat.ino),
+    links: String(stat.nlink),
+    mode: stat.mode & 0o777,
+  };
+  if (stat.isSymbolicLink()) {
+    return { kind: "symlink", target: fs.readlinkSync(pathName), filesystem_identity: filesystemIdentity };
+  }
+  if (stat.isDirectory()) {
+    return { kind: "directory", tree_hash: hashSkillTree(pathName), filesystem_identity: filesystemIdentity };
+  }
   if (stat.isFile()) {
     return {
       kind: "file",
       file_hash: crypto.createHash("sha256").update(fs.readFileSync(pathName)).digest("hex"),
+      filesystem_identity: filesystemIdentity,
     };
   }
   throw new Error(`unsupported host skill path kind: ${pathName}`);
@@ -2720,12 +2797,14 @@ function sameHostFilesystemIdentity(pathName, expected) {
   }
 }
 
-function sameHostPathState(left, right) {
+function sameHostPathState(left, right, requireIdentity = false) {
   if (!left || !right || left.kind !== right.kind) return false;
-  if (left.kind === "symlink") return left.target === right.target;
-  if (left.kind === "directory") return left.tree_hash === right.tree_hash;
-  if (left.kind === "file") return left.file_hash === right.file_hash;
-  return left.kind === "absent";
+  let contentMatches = left.kind === "absent";
+  if (left.kind === "symlink") contentMatches = left.target === right.target;
+  if (left.kind === "directory") contentMatches = left.tree_hash === right.tree_hash;
+  if (left.kind === "file") contentMatches = left.file_hash === right.file_hash;
+  if (!contentMatches || !requireIdentity || !right.filesystem_identity) return contentMatches;
+  return JSON.stringify(left.filesystem_identity) === JSON.stringify(right.filesystem_identity);
 }
 
 function swapHostPath(root, target, staged, incoming, displaced, expectedBefore, expectedAfter) {
@@ -2741,27 +2820,27 @@ function swapHostPath(root, target, staged, incoming, displaced, expectedBefore,
       holdInstallForTest("AGENT_FLOW_TEST_HOLD_BEFORE_HOST_SWAP_MS", "host-swap-ready");
     }
     if (expectedAfter.kind !== "absent") {
-      if (!sameHostPathState(hostPathState(staged), expectedAfter)) {
+      if (!sameHostPathState(hostPathState(staged), expectedAfter, true)) {
         throw new Error(`host skill staging integrity mismatch: ${target}`);
       }
       renameManagedNoReplace(staged, incomingName);
-      if (!sameHostPathState(hostPathState(incomingName), expectedAfter)) {
+      if (!sameHostPathState(hostPathState(incomingName), expectedAfter, true)) {
         throw new Error(`host skill incoming integrity mismatch: ${target}`);
       }
     }
-    if (!sameHostPathState(hostPathState(targetName), expectedBefore)) {
+    if (!sameHostPathState(hostPathState(targetName), expectedBefore, true)) {
       throw new Error(`host skill path changed outside install transaction: ${target}`);
     }
     if (expectedBefore.kind !== "absent") {
       fs.renameSync(targetName, displacedName);
-      if (!sameHostPathState(hostPathState(displacedName), expectedBefore)) {
+      if (!sameHostPathState(hostPathState(displacedName), expectedBefore, true)) {
         if (!lstatIfExists(targetName)) renameManagedNoReplace(displacedName, targetName);
         throw new Error(`host skill path changed during swap: ${target}`);
       }
     }
     holdInstallForTest("AGENT_FLOW_TEST_HOLD_AFTER_HOST_DISPLACE_MS", "host-target-displaced");
     if (expectedAfter.kind !== "absent") renameManagedNoReplace(incomingName, targetName);
-    if (!sameHostPathState(hostPathState(targetName), expectedAfter)) {
+    if (!sameHostPathState(hostPathState(targetName), expectedAfter, true)) {
       throw new Error(`host skill staged mutation mismatch: ${target}`);
     }
   });
@@ -2774,12 +2853,12 @@ function removeHostTemporaryPath(root, transactionRoot, pathName, expected) {
     const name = path.basename(pathName);
     const current = hostPathState(name);
     if (current.kind === "absent") return;
-    if (!sameHostPathState(current, expected)) {
+    if (!sameHostPathState(current, expected, true)) {
       throw new Error(`host skill temporary path changed: ${pathName}`);
     }
     const quarantine = path.join(cleanupRoot, `host-${crypto.randomBytes(12).toString("hex")}`);
     renameManagedNoReplace(name, quarantine);
-    if (!sameHostPathState(hostPathState(quarantine), expected)) {
+    if (!sameHostPathState(hostPathState(quarantine), expected, true)) {
       if (hostPathState(name).kind === "absent") renameManagedNoReplace(quarantine, name);
       throw new Error(`host skill temporary path changed during cleanup: ${pathName}`);
     }
@@ -2866,7 +2945,7 @@ function withHostPathMutation(transaction, target, allowedAfter, callback) {
   removeHostTemporaryPath(transaction.root, transaction.transactionRoot, incoming, after);
   removeHostTemporaryPath(transaction.root, transaction.transactionRoot, displaced, before);
   const committed = hostPathState(target);
-  if (!sameHostPathState(committed, after)) {
+  if (!sameHostPathState(committed, after, true)) {
     throw new Error(`host skill path changed after swap: ${relative}`);
   }
   operation.after = after;
@@ -2909,10 +2988,14 @@ function restoreHostPathState(root, target, state, transactionRoot) {
     throw new Error(`invalid host skill backup state: ${target}`);
   }
   const current = hostPathState(target);
+  const restored = hostPathState(staged);
+  if (!sameHostPathState(restored, state)) {
+    throw new Error(`host skill restore staging integrity mismatch: ${target}`);
+  }
   const incoming = path.join(path.dirname(target), `.agent-flow-host-restore-${token}-next`);
   const displaced = path.join(path.dirname(target), `.agent-flow-host-restore-${token}-previous`);
-  swapHostPath(root, target, staged, incoming, displaced, current, state);
-  removeHostTemporaryPath(root, transactionRoot, incoming, state);
+  swapHostPath(root, target, staged, incoming, displaced, current, restored);
+  removeHostTemporaryPath(root, transactionRoot, incoming, restored);
   removeHostTemporaryPath(root, transactionRoot, displaced, current);
 }
 
@@ -2927,18 +3010,18 @@ function rollbackRecordedHostMutations(root, transactionRoot, journal) {
       const displaced = path.resolve(root, operation.pending.displaced);
       ensureChildPath(root, incoming);
       ensureChildPath(root, displaced);
-      const completed = sameHostPathState(current, operation.pending.after)
+      const completed = sameHostPathState(current, operation.pending.after, true)
         && (
           operation.pending.completed === true
           || (
             hostPathState(incoming).kind === "absent"
-            && sameHostPathState(hostPathState(displaced), operation.before)
+            && sameHostPathState(hostPathState(displaced), operation.before, true)
           )
         );
       const interrupted = current.kind === "absent"
-        && sameHostPathState(hostPathState(incoming), operation.pending.after)
-        && sameHostPathState(hostPathState(displaced), operation.before);
-      const notStarted = sameHostPathState(current, operation.before)
+        && sameHostPathState(hostPathState(incoming), operation.pending.after, true)
+        && sameHostPathState(hostPathState(displaced), operation.before, true);
+      const notStarted = sameHostPathState(current, operation.before, true)
         && hostPathState(displaced).kind === "absent";
       if (!completed && !interrupted && !notStarted) {
         throw new Error(`host skill path changed outside install transaction: ${operation.path}`);
@@ -2954,13 +3037,13 @@ function rollbackRecordedHostMutations(root, transactionRoot, journal) {
         continue;
       }
     }
-    if (sameHostPathState(current, operation.before)) {
+    if (sameHostPathState(current, operation.before, true)) {
       operation.rolled_back = true;
       continue;
     }
     const committedByTransaction = operation.after
-      ? sameHostPathState(current, operation.after)
-      : (operation.allowed_after || []).some((state) => sameHostPathState(current, state));
+      ? sameHostPathState(current, operation.after, true)
+      : false;
     if (!committedByTransaction) {
       throw new Error(`host skill path changed outside install transaction: ${operation.path}`);
     }
@@ -2979,7 +3062,7 @@ function verifyCommittedHostMutations(root, journal) {
   for (const operation of journal?.host_mutations || []) {
     if (!operation.after || operation.pending) throw new Error(`incomplete host skill mutation: ${operation.path}`);
     const target = hostMutationTarget(root, operation.path);
-    if (!sameHostPathState(hostPathState(target), operation.after)) {
+    if (!sameHostPathState(hostPathState(target), operation.after, true)) {
       throw new Error(`host skill mutation commitment changed: ${operation.path}`);
     }
   }
@@ -3564,9 +3647,19 @@ function validateJournalManagedState(state, backup = null) {
   return false;
 }
 
-function validateJournalHostState(state, backup = null) {
+function validateJournalHostState(state, backup = null, requireIdentity = false) {
   if (!state || typeof state !== "object" || Array.isArray(state)) return false;
   if (state.kind === "absent") return state.backup === undefined;
+  const identity = state.filesystem_identity;
+  const validIdentity = identity
+    && typeof identity === "object"
+    && !Array.isArray(identity)
+    && /^[0-9]+$/.test(String(identity.device || ""))
+    && /^[0-9]+$/.test(String(identity.inode || ""))
+    && /^[0-9]+$/.test(String(identity.links || ""))
+    && Number.isInteger(identity.mode);
+  if (requireIdentity && !validIdentity) return false;
+  if (identity !== undefined && !validIdentity) return false;
   if (state.kind === "symlink") {
     return typeof state.target === "string" && state.backup === undefined;
   }
@@ -3583,7 +3676,7 @@ function validateJournalHostState(state, backup = null) {
 
 function validateInterruptedInstallJournal(root, agentFlowDir, transactionRoot, journal, recoveryLockToken) {
   if (
-    journal?.version !== 3
+    ![3, 4].includes(journal?.version)
     || journal.root !== fs.realpathSync(root)
     || !/^[0-9a-f]{48}$/.test(String(journal.token || ""))
     || !/^[0-9a-f]{48}$/.test(String(recoveryLockToken || ""))
@@ -3683,8 +3776,8 @@ function validateInterruptedInstallJournal(root, agentFlowDir, transactionRoot, 
       ? path.join("host-backups", String(index))
       : null;
     if (
-      !validateJournalHostState(operation.before, beforeBackup)
-      || (operation.after !== null && !validateJournalHostState(operation.after))
+      !validateJournalHostState(operation.before, beforeBackup, journal.version >= 4)
+      || (operation.after !== null && !validateJournalHostState(operation.after, null, journal.version >= 4))
       || !operation.allowed_after.every((state) => validateJournalHostState(state))
       || (operation.pending !== null && (typeof operation.pending !== "object" || Array.isArray(operation.pending)))
     ) {
@@ -3699,7 +3792,7 @@ function validateInterruptedInstallJournal(root, agentFlowDir, transactionRoot, 
         || operation.pending.incoming !== expectedIncoming
         || operation.pending.displaced !== expectedDisplaced
         || ![undefined, true].includes(operation.pending.completed)
-        || !validateJournalHostState(operation.pending.after)
+        || !validateJournalHostState(operation.pending.after, null, journal.version >= 4)
       ) {
         throw new Error(`invalid interrupted host mutation intent: ${normalized}`);
       }
@@ -6755,8 +6848,8 @@ const MAC_SANDBOX_POLICY_PROBE = [
 ].join("\n");
 
 const INSTALL_LOCK_EXEC_WRAPPER = [
-  "import base64,fcntl,hashlib,json,os,stat,subprocess,sys",
-  "root,nonce,encoded,original_encoded=sys.argv[1:5]; command=sys.argv[5:]",
+  "import base64,fcntl,os,stat,subprocess,sys",
+  "root,nonce,encoded,original_encoded,verifier_encoded=sys.argv[1:6]; command=sys.argv[6:]",
   "agent=os.path.join(root,'.agent-flow'); os.makedirs(agent,exist_ok=True)",
   "agent_stat=os.lstat(agent)",
   "if not stat.S_ISDIR(agent_stat.st_mode) or stat.S_ISLNK(agent_stat.st_mode): raise SystemExit('managed install root is unsafe')",
@@ -6767,65 +6860,11 @@ const INSTALL_LOCK_EXEC_WRAPPER = [
   "try: fcntl.flock(lock_fd,fcntl.LOCK_EX|fcntl.LOCK_NB)",
   "except BlockingIOError: raise SystemExit('project install lock is held: '+lock_path)",
   "os.ftruncate(lock_fd,0); os.write(lock_fd,(nonce+'\\n').encode()); os.fsync(lock_fd); os.set_inheritable(lock_fd,True)",
-  "expected=json.loads(base64.b64decode(encoded,validate=True)); target=expected.get('resolved_path') or expected['path']",
-  "read_fd=os.open(target,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)); before=os.fstat(read_fd); digest=hashlib.sha256()",
-  "while True:",
-  " chunk=os.read(read_fd,1024*1024)",
-  " if not chunk: break",
-  " digest.update(chunk)",
-  "after=os.fstat(read_fd); actual={'sha256':digest.hexdigest(),'device':str(before.st_dev),'inode':str(before.st_ino),'links':str(before.st_nlink),'mode':stat.S_IMODE(before.st_mode)}",
-  "stable=(before.st_dev,before.st_ino,before.st_mode,before.st_nlink,before.st_size)==(after.st_dev,after.st_ino,after.st_mode,after.st_nlink,after.st_size)",
-  "if not stat.S_ISREG(before.st_mode) or not stable or any(actual[key]!=expected[key] for key in actual): raise SystemExit('project runtime executable identity changed')",
   "env=dict(os.environ); env['AGENT_FLOW_INSTALL_FLOCK_FD']=str(lock_fd); env['AGENT_FLOW_INSTALL_FLOCK_NONCE']=nonce; env['AGENT_FLOW_AUTH_EXEC_ROOT']=root; env['AGENT_FLOW_ORIGINAL_NODE_AUTHORITY']=original_encoded",
-  "completed=subprocess.run([target,*command],env=env,pass_fds=(lock_fd,),check=False)",
+  "verifier=base64.b64decode(verifier_encoded,validate=True).decode()",
+  "completed=subprocess.run(['/usr/bin/python3','-I','-B','-c',verifier,encoded,*command],env=env,pass_fds=(lock_fd,),check=False)",
   "raise SystemExit(completed.returncode)",
 ].join("\n");
-
-function stageExecutableCopy(source, directory, name, expected = null) {
-  const noFollow = fs.constants.O_NOFOLLOW || 0;
-  const descriptor = fs.openSync(source, fs.constants.O_RDONLY | noFollow);
-  try {
-    const before = fs.fstatSync(descriptor);
-    if (!before.isFile() || (before.mode & 0o022) !== 0) {
-      throw new Error(`project runtime executable is unsafe: ${source}`);
-    }
-    const bytes = fs.readFileSync(descriptor);
-    const after = fs.fstatSync(descriptor);
-    if (
-      before.dev !== after.dev
-      || before.ino !== after.ino
-      || before.mode !== after.mode
-      || before.nlink !== after.nlink
-      || before.size !== after.size
-    ) throw new Error(`project runtime executable changed while staging: ${source}`);
-    const digest = crypto.createHash("sha256").update(bytes).digest("hex");
-    if (
-      expected
-      && (
-        digest !== expected.sha256
-        || String(before.dev) !== expected.device
-        || String(before.ino) !== expected.inode
-        || (before.mode & 0o777) !== expected.mode
-        || before.nlink < Number.parseInt(expected.links, 10)
-      )
-    ) throw new Error(`project runtime executable identity changed while staging: ${source}`);
-    const staged = path.join(directory, name);
-    fs.writeFileSync(staged, bytes, { flag: "wx", mode: before.mode & 0o777 });
-    fs.chmodSync(staged, before.mode & 0o777);
-    return staged;
-  } finally {
-    fs.closeSync(descriptor);
-  }
-}
-
-function stageNodeLoaderDependencies(source, directory) {
-  if (process.platform !== "darwin") return;
-  const libraryRoot = path.resolve(path.dirname(source), "..", "lib");
-  if (!fs.existsSync(libraryRoot)) return;
-  for (const name of fs.readdirSync(libraryRoot).filter((entry) => /^libnode\..*\.dylib$/.test(entry))) {
-    stageExecutableCopy(path.join(libraryRoot, name), directory, name);
-  }
-}
 
 function verifyInstallFlock(root, nonce) {
   const descriptor = Number.parseInt(process.env.AGENT_FLOW_INSTALL_FLOCK_FD || "", 10);
@@ -6922,15 +6961,18 @@ function runMutationSandbox(action, rootOverride = null, requestedInstallArgs = 
   const canaryPath = path.join(canaryRoot, "outside-project");
   fs.writeFileSync(canaryPath, `${nonce}\n`, { flag: "wx", mode: 0o600 });
   const originalNode = originalNodeAuthority();
-  const stagedNode = stageExecutableCopy(originalNode.path, canaryRoot, "node", originalNode);
-  stageNodeLoaderDependencies(originalNode.path, canaryRoot);
-  const nodeAuthority = executableContract(stagedNode);
+  const nodeAuthority = {
+    ...originalNode,
+    staging_root: path.join(root, ".agent-flow", "exec-staging"),
+    project_root: fs.realpathSync(root),
+  };
   const lockedCommand = [
     "/usr/bin/python3", "-I", "-B", "-c", INSTALL_LOCK_EXEC_WRAPPER,
     root,
     nonce,
     Buffer.from(JSON.stringify(nodeAuthority), "utf8").toString("base64"),
     Buffer.from(JSON.stringify(originalNode), "utf8").toString("base64"),
+    Buffer.from(AUTHENTICATED_EXEC_VERIFIER, "utf8").toString("base64"),
     fileURLToPath(import.meta.url),
     "__sandboxed-mutation",
     action,
