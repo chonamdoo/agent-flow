@@ -842,6 +842,8 @@ function installProjectUnlocked(root, context, lock) {
   );
   const agentFlowSkill = agentFlowSkillMarkdown();
   writeManagedFile(path.join(agentFlowDir, "skills", "agent-flow", "SKILL.md"), agentFlowSkill);
+  // Generated workflow skills are shared content; keep them independent of the installer's absolute project path.
+  AGENT_FLOW_COMMAND = "agent-flow";
   writeManagedFile(
     path.join(agentFlowDir, "skills", "full-feature-workflow", "SKILL.md"),
     fullFeatureSkillMarkdown(),
@@ -6803,7 +6805,34 @@ function runSandboxedGate(args, extraEnv = {}) {
 }
 
 function runSandboxedPythonCliCommand(subcommand, args) {
-  const root = resolveAgentFlowRoot(process.cwd());
+  const rootArgumentIndex = args.indexOf("--root");
+  const requestedRoot = rootArgumentIndex >= 0 && args[rootArgumentIndex + 1]
+    ? path.resolve(args[rootArgumentIndex + 1])
+    : null;
+  const root = requestedRoot || resolveAgentFlowRoot(process.cwd());
+  const installedKit = root ? readJsonIfExists(path.join(root, ".agent-flow", "kit.json")) : null;
+  if (!installedKit?.project_runtime_contract) {
+    const python = projectPythonPath();
+    const pythonPathEntries = [
+      path.join(KIT_ROOT, "src"),
+      root ? installedPythonRuntimePath(root) : "",
+      process.env.PYTHONPATH,
+    ].filter(Boolean);
+    const result = safeSpawnSync(python, ["-m", "agent_flow.cli", subcommand, ...args], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        PYTHONDONTWRITEBYTECODE: "1",
+        PYTHONNOUSERSITE: "1",
+        PYTHONSAFEPATH: "1",
+        PYTHONPATH: [...new Set(pythonPathEntries)].join(path.delimiter),
+      },
+      stdio: "inherit",
+      timeout: 30 * 60 * 1000,
+    });
+    if (result.error) throw result.error;
+    process.exit(result.status ?? 1);
+  }
   const contract = assertProjectRuntimeContract(root);
   const pythonPathEntries = [
     path.join(KIT_ROOT, "src"),
