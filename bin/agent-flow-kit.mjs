@@ -2163,7 +2163,7 @@ function writeJson(pathName, payload) {
 
 function readExistingKit(agentFlowDir) {
   const kitPath = path.join(agentFlowDir, "kit.json");
-  if (!lstatIfExists(kitPath)) {
+  if (!fs.existsSync(kitPath)) {
     return undefined;
   }
   try {
@@ -6832,7 +6832,7 @@ function runSandboxedPythonCliCommand(subcommand, args) {
   const rootArgument = ["--root", root];
   const pythonArgs = [...rootArgument, ...normalizedArgs];
   const kitPath = path.join(root, ".agent-flow", "kit.json");
-  if (!fs.existsSync(kitPath)) {
+  if (!lstatIfExists(kitPath)) {
     const python = projectPythonPath();
     const pythonPathEntries = [
       path.join(KIT_ROOT, "src"),
