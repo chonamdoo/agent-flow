@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -49,7 +50,8 @@ class GenericAdapter(Adapter):
                         "reviewer-source: sub-agent\n"
                         "verdict: approve\n\n"
                         "## Overall\n"
-                        "verdict: approve\n",
+                        "verdict: approve\n"
+                        f"{_phase_contract_line(phase)}",
                         encoding="utf-8",
                     )
                     return True
@@ -73,6 +75,7 @@ class GenericAdapter(Adapter):
                 artifact.write_text(
                     f"# {phase.id}\n\n"
                     f"_stub artifact written by GenericAdapter (stub mode)._\n"
+                    f"{_phase_contract_line(phase)}"
                 )
             return True
         if getattr(phase, "multi_review", False):
@@ -103,3 +106,19 @@ class GenericAdapter(Adapter):
             "_stub artifact written by GenericAdapter (stub mode)._\n",
             encoding="utf-8",
         )
+
+
+def _phase_contract_line(phase) -> str:
+    required_skills = list(getattr(phase, "required_skills", ()))
+    requirements = list(getattr(phase, "requirements", ()))
+    if not required_skills and not requirements:
+        return ""
+    payload = json.dumps(
+        {
+            "applied_skills": required_skills,
+            "requirements": {requirement: "pass" for requirement in requirements},
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return f"\nphase-contract: {payload}\n"

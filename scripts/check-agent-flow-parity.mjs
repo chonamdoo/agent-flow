@@ -6,6 +6,8 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { evaluatePhaseContract } from "../lib/phase-contract.mjs";
+import { CODE_SKILL_PHASES } from "../lib/skill-selection.mjs";
 
 const SOURCE_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
@@ -200,7 +202,8 @@ const canonicalInstaller = "bin/agent-flow-kit.mjs";
 assertContains(canonicalInstaller, "function installCodexTrustState(root)");
 assertContains(canonicalInstaller, "function queryCodexProjectHookHashes(root)");
 assertContains(canonicalInstaller, "function trustedManagedHookScriptName(root, command, expectedScriptHashes = null)");
-assertContains(canonicalInstaller, "verifier.scriptPath.replaceAll");
+assertContains(canonicalInstaller, "function hookScriptCommand(root, scriptName, host)");
+assertNotContains(canonicalInstaller, "const MANAGED_HOOK_VERIFIER");
 assertContains(canonicalInstaller, "[hooks.state.");
 assertContains(canonicalInstaller, "function installOmpHooks(root)");
 assertContains(canonicalInstaller, ".omp\", \"extensions\", \"agent-flow-hooks.ts");
@@ -247,8 +250,8 @@ if (exportedWorkflow) {
   if (exportedPhases["architecture-review"]?.routes?.["request-changes"] !== "refactor") {
     failures.push("workflow export architecture-review request-changes route mismatch");
   }
-  if (Object.prototype.hasOwnProperty.call(exportedPhases["architecture-review"]?.routes ?? {}, "blocked")) {
-    failures.push("workflow export architecture-review blocked route should be absent");
+  if (exportedPhases["architecture-review"]?.routes?.blocked !== "refactor") {
+    failures.push("workflow export architecture-review blocked route mismatch");
   }
   if (exportedPhases["merge-approval"]?.routes?.approve !== "merge") {
     failures.push("workflow export merge-approval approve route mismatch");
@@ -256,7 +259,7 @@ if (exportedWorkflow) {
   if (exportedPhases["merge-approval"]?.routes?.default !== "block") {
     failures.push("workflow export merge-approval default route mismatch");
   }
-  if (exportedPhases["fix-loop"]?.routes?.default !== "comment-authoring") {
+  if (exportedPhases["fix-loop"]?.routes?.success !== "comment-authoring") {
     failures.push("workflow export fix-loop route mismatch");
   }
   if (exportedPhases["multi-review"]?.multi_review !== true) {
@@ -283,10 +286,10 @@ if (exportedDefaultWorkflow) {
   if (exportedPhases["pr-watch"]?.routes?.ci_failed !== "pr-ci-fix") {
     failures.push("workflow export default pr-watch ci_failed route mismatch");
   }
-  if (exportedPhases["pr-comment-fix"]?.routes?.default !== "pr-watch") {
+  if (exportedPhases["pr-comment-fix"]?.routes?.success !== "pr-watch") {
     failures.push("workflow export default pr-comment-fix route mismatch");
   }
-  if (exportedPhases["pr-ci-fix"]?.routes?.default !== "pr-watch") {
+  if (exportedPhases["pr-ci-fix"]?.routes?.success !== "pr-watch") {
     failures.push("workflow export default pr-ci-fix route mismatch");
   }
   if (exportedPhases["comment-authoring"]?.routes?.default !== "final-review") {
@@ -301,7 +304,7 @@ if (exportedDefaultWorkflow) {
   if (exportedPhases["final-review"]?.multi_review !== true) {
     failures.push("workflow export default final-review multi_review flag mismatch");
   }
-  if (exportedPhases["fix-loop"]?.routes?.default !== "comment-authoring") {
+  if (exportedPhases["fix-loop"]?.routes?.success !== "comment-authoring") {
     failures.push("workflow export default fix-loop route mismatch");
   }
   if (exportedPhases["pr-watch"]?.routes?.merged !== "cleanup") {
@@ -1014,21 +1017,24 @@ function routeArtifactContent(phase, key) {
     return JSON.stringify({ passed: true }) + "\n";
   }
   if (phase.multi_review) {
-    return phaseArtifactWithMarkers(phase, multiReviewArtifactContent(key, phase.id));
+    return phaseArtifactWithMarkers(phase, multiReviewArtifactContent(key, phase.id), key);
   }
   if (phase.id === "plan-review" || phase.id === "architecture-review" || phase.id === "merge-approval") {
-    return phaseArtifactWithMarkers(phase, `verdict: ${key}`);
+    return phaseArtifactWithMarkers(phase, `verdict: ${key}`, key);
   }
   if (phase.id === "pr-watch") {
-    return phaseArtifactWithMarkers(phase, `status: ${key}`);
+    return phaseArtifactWithMarkers(phase, `status: ${key}`, key);
   }
   if (key === "default") {
-    return phaseArtifactWithMarkers(phase, "");
+    return phaseArtifactWithMarkers(phase, "", key);
   }
-  return phaseArtifactWithMarkers(phase, `status: ${key}`);
+  return phaseArtifactWithMarkers(phase, `status: ${key}`, key);
 }
 
 function multiReviewArtifactContent(key, phaseId = "") {
+  if (key === "blocked") {
+    return "verdict: blocked\n";
+  }
   const reviewerAVerdict = key === "request-changes" ? "request-changes" : "approve";
   const reviewerBVerdict = "approve";
   const overall = key === "request-changes" ? "request-changes" : "approve";
@@ -1262,11 +1268,14 @@ function readJsonSafe(pathName) {
 
 function managedHookCommandDetails(command) {
   if (typeof command !== "string") return null;
-  const match = command.match(/'([A-Za-z0-9+/=]+)' '([0-9a-f]{64})'$/);
+  const match = command.match(/ --host '(codex|claude)'$/);
   if (!match) return null;
-  const decoded = Buffer.from(match[1], "base64");
-  if (decoded.toString("base64") !== match[1]) return null;
-  return { path: decoded.toString("utf8"), sha256: match[2] };
+  const pathWord = command.slice(0, match.index);
+  if (!pathWord.startsWith("'") || !pathWord.endsWith("'")) return null;
+  return {
+    path: pathWord.slice(1, -1).replaceAll("'\\''", "'"),
+    host: match[1],
+  };
 }
 
 function sameInstalledPath(left, right) {
@@ -1449,6 +1458,9 @@ with tempfile.TemporaryDirectory() as temp_dir:
             artifact=item.get("artifact", f"{item['id']}.md"),
             multi_review=bool(item.get("multi_review", False)),
             routes=item.get("routes"),
+            required_skills=tuple(item.get("required_skills", [])),
+            requirements=tuple(item.get("requirements", [])),
+            artifacts=tuple(item.get("artifacts", [])),
         ))
     target_index = next(i for i, phase in enumerate(phases) if phase.id == test_case["target"])
     current_index = next(i for i, phase in enumerate(phases) if phase.id == test_case["source"])
@@ -1498,6 +1510,17 @@ function nodeBackwardFreshArtifactOutcome(workflow, testCase) {
       failures.push(`node backward parity install failed: ${install.error?.message || install.stderr.trim() || install.status}`);
       return null;
     }
+    const executionNeutralEnv = { ...process.env };
+    for (const name of [
+      "AGENT_FLOW_EXECUTION_ID",
+      "AGENT_FLOW_SESSION_ID",
+      "CODEX_THREAD_ID",
+      "CODEX_SESSION_ID",
+      "CLAUDE_SESSION_ID",
+      "OMP_SESSION_ID",
+    ]) {
+      delete executionNeutralEnv[name];
+    }
     const start = spawnSync(process.execPath, [
       path.join(SOURCE_ROOT, "bin/agent-flow-kit.mjs"),
       "run",
@@ -1511,6 +1534,7 @@ function nodeBackwardFreshArtifactOutcome(workflow, testCase) {
     ], {
       cwd: tempRoot,
       encoding: "utf8",
+      env: executionNeutralEnv,
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
     });
@@ -1544,6 +1568,7 @@ function nodeBackwardFreshArtifactOutcome(workflow, testCase) {
     const advance = spawnSync(process.execPath, [path.join(SOURCE_ROOT, "bin/agent-flow-kit.mjs"), "run", "advance"], {
       cwd: tempRoot,
       encoding: "utf8",
+      env: executionNeutralEnv,
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
     });
@@ -1562,14 +1587,29 @@ function nodeBackwardFreshArtifactOutcome(workflow, testCase) {
   }
 }
 
-function phaseArtifactWithMarkers(phase, routeLine) {
+function phaseArtifactWithMarkers(phase, routeLine, routeKey = "success") {
   const markers = phase.required_markers ?? [];
   const headings = markers.filter((marker) => marker.trim().startsWith("#"));
   const lines = markers
     .filter((marker) => !marker.trim().startsWith("#"))
     .map(renderCompletionMarker);
+  const requiredSkills = [...new Set([
+    ...(phase.required_skills ?? []),
+    ...(CODE_SKILL_PHASES.has(phase.id) ? ["code-generation-discipline"] : []),
+  ])];
+  const requirements = phase.requirements ?? [];
+  const contract = requiredSkills.length || requirements.length
+    ? `phase-contract: ${JSON.stringify({
+      applied_skills: requiredSkills,
+      requirements: Object.fromEntries(requirements.map((requirement, index) => [
+        requirement,
+        routeKey === "failure" && index === 0 ? "fail" : "pass",
+      ])),
+    })}`
+    : "";
   return [
     routeLine,
+    contract,
     "",
     ...headings,
     "",
@@ -1685,10 +1725,12 @@ function buildNodeRouteKeyEvaluator() {
   const routeKeySource = source.slice(start, end);
   return new Function(
     "fs",
+    "evaluatePhaseContract",
+    "CODE_SKILL_PHASES",
     "phase",
     "artifact",
     `${routeKeySource}\nreturn nodeRouteKey(phase, artifact);`,
-  ).bind(null, fs);
+  ).bind(null, fs, evaluatePhaseContract, CODE_SKILL_PHASES);
 }
 
 function pythonPhaseOutcome(workflow, phaseId, content, meta = {}) {
@@ -1700,12 +1742,14 @@ from pathlib import Path
 
 from agent_flow.artifact import read_meta, write_meta
 from agent_flow.core.markers import has_failure_markers
+from agent_flow.core.skill_plan import CODE_SKILL_PHASES
 from agent_flow.runner import (
     Phase,
     Runner,
     _gates_route_key,
     _multi_review_route_key,
     _route_key,
+    phase_contract_route_key,
 )
 
 payload = json.loads(sys.stdin.read())
@@ -1718,12 +1762,18 @@ with tempfile.TemporaryDirectory() as temp_dir:
     write_meta(run_dir, payload.get("meta", {}))
     phases = []
     for item in workflow["phases"]:
+        required_skills = list(item.get("required_skills", []))
+        if item["id"] in CODE_SKILL_PHASES and "code-generation-discipline" not in required_skills:
+            required_skills.append("code-generation-discipline")
         phases.append(Phase(
             id=item["id"],
             description=item.get("description", ""),
             artifact=item.get("artifact", f"{item['id']}.md"),
             multi_review=bool(item.get("multi_review", False)),
             routes=item.get("routes"),
+            required_skills=tuple(required_skills),
+            requirements=tuple(item.get("requirements", [])),
+            artifacts=tuple(item.get("artifacts", [])),
         ))
     index = next(i for i, phase in enumerate(phases) if phase.id == phase_id)
     artifact = run_dir / phases[index].artifact
@@ -1732,7 +1782,10 @@ with tempfile.TemporaryDirectory() as temp_dir:
     runner = Runner.__new__(Runner)
     runner.run_dir = run_dir
     runner.phases = phases
-    if phases[index].multi_review:
+    contract_key = phase_contract_route_key(phases[index], content)
+    if contract_key and phases[index].routes and contract_key in phases[index].routes:
+        route_key = contract_key
+    elif phases[index].multi_review:
         route_key = _multi_review_route_key(content, phases[index].id)
     elif phases[index].id == "gates":
         route_key = _gates_route_key(content)
@@ -1801,9 +1854,20 @@ print(json.dumps(missing_markers(payload["content"], tuple(payload["markers"])))
 function nodePhaseOutcome(workflow, phaseId, content, stateOverrides = {}) {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agent-flow-parity-"));
   try {
+    const executionNeutralEnv = { ...process.env };
+    for (const name of [
+      "AGENT_FLOW_EXECUTION_ID",
+      "AGENT_FLOW_SESSION_ID",
+      "CODEX_THREAD_ID",
+      "CODEX_SESSION_ID",
+      "CLAUDE_SESSION_ID",
+      "OMP_SESSION_ID",
+    ]) {
+      delete executionNeutralEnv[name];
+    }
     const install = spawnSync(process.execPath, [path.join(SOURCE_ROOT, "bin/agent-flow-kit.mjs"), "install", "--force-managed"], {
       cwd: tempRoot,
-      env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1", AGENT_FLOW_AUTO_EXTERNAL_SKILLS: "0" },
+      env: { ...executionNeutralEnv, AGENT_FLOW_SKIP_CODEX_TRUST: "1", AGENT_FLOW_AUTO_EXTERNAL_SKILLS: "0" },
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
@@ -1825,6 +1889,7 @@ function nodePhaseOutcome(workflow, phaseId, content, stateOverrides = {}) {
     ], {
       cwd: tempRoot,
       encoding: "utf8",
+      env: executionNeutralEnv,
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
     });
@@ -1854,6 +1919,7 @@ function nodePhaseOutcome(workflow, phaseId, content, stateOverrides = {}) {
     const advance = spawnSync(process.execPath, [path.join(SOURCE_ROOT, "bin/agent-flow-kit.mjs"), "run", "advance"], {
       cwd: tempRoot,
       encoding: "utf8",
+      env: executionNeutralEnv,
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
     });

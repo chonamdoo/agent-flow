@@ -141,6 +141,61 @@ def test_runner_injects_installed_profile_union_into_prompt(tmp_path: Path):
     assert "- react-native" in prompt
 
 
+def test_phase_profile_projection_and_completion_markers_have_bounded_context(tmp_path: Path):
+    from agent_flow.adapters.generic import GenericAdapter
+    from agent_flow.core.profiles import load_profile_payload
+    from agent_flow.runner import Phase
+
+    project = tmp_path / "context-budget"
+    project.mkdir()
+    adapter = GenericAdapter()
+    adapter._profile_id = "android"
+    adapter._profile_snapshot = load_profile_payload("android")
+    marker = "architecture-contract-check: pass|fail|n/a"
+    body = f"Use the architecture contract.\n{marker}\n"
+    prompt = adapter.render_envelope(
+        Phase(
+            id="architecture-review",
+            description="Review",
+            prompt=body,
+            required_markers=(marker,),
+        ),
+        project / ".agent-flow" / "runs" / "r1",
+        project,
+    )
+
+    assert "android_skills:" not in prompt
+    assert "chrisbanes_skills:" not in prompt
+    assert "review_angles:" in prompt
+    assert prompt.count(marker) == 1
+    assert len(prompt) < 5_000
+
+
+def test_reviewer_jobs_use_compact_packets_instead_of_repeating_phase_envelope(tmp_path: Path):
+    from agent_flow.adapters.hosted import HostedAdapter, _reviewer_jobs
+    from agent_flow.core.profiles import load_profile_payload
+    from agent_flow.runner import Phase
+
+    project = tmp_path / "review-budget"
+    project.mkdir()
+    adapter = HostedAdapter("codex")
+    adapter._profile_id = "android"
+    adapter._profile_snapshot = load_profile_payload("android")
+    adapter._task_scope = "x" * 20_000
+    unique_body = "FULL_PHASE_BODY_MUST_NOT_REPEAT " * 500
+    phase = Phase(id="final-review", description="Review", prompt=unique_body, multi_review=True)
+    run_dir = project / ".agent-flow" / "runs" / "r1"
+
+    jobs = _reviewer_jobs(phase, run_dir, project, adapter)
+    full_envelope = adapter.render_envelope(phase, run_dir, project)
+
+    assert len(jobs) >= 3
+    assert all("FULL_PHASE_BODY_MUST_NOT_REPEAT" not in job.prompt for job in jobs)
+    assert max(len(job.prompt) for job in jobs) < 8_000
+    assert all("x" * 1_000 not in job.prompt for job in jobs)
+    assert sum(len(job.prompt) for job in jobs) < len(full_envelope) * len(jobs) // 2
+
+
 def test_generic_stub_mode_blocks_instead_of_completing(tmp_path: Path):
     project = tmp_path / "stub-blocked"
     project.mkdir()
@@ -1359,6 +1414,33 @@ def test_backward_route_invalidates_intermediate_fresh_artifacts(tmp_path: Path)
         assert not (run_dir / f"{phase.id}.md").exists()
 
 
+def test_multi_review_architecture_blocked_routes_to_refactor(tmp_path: Path):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.runner import Phase, Runner
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    phases = [
+        Phase(id="refactor", description=""),
+        Phase(
+            id="architecture-review",
+            description="",
+            multi_review=True,
+            routes={"approve": "done", "request-changes": "refactor", "blocked": "refactor"},
+        ),
+        Phase(id="done", description=""),
+    ]
+    (run_dir / "architecture-review.md").write_text(
+        "verdict: blocked\n",
+        encoding="utf-8",
+    )
+    runner = Runner.__new__(Runner)
+    runner.run_dir = run_dir
+    runner.phases = phases
+
+    assert runner._next_index(1, phases[1]) == (0, False)
+
+
 def test_non_git_pr_phases_are_skipped(tmp_path: Path):
     sys.path.insert(0, str(KIT_ROOT / "src"))
     from agent_flow.runner import Phase, Runner
@@ -1570,7 +1652,7 @@ def test_cli_detection_runs():
     clis = detect_available_clis()
     assert isinstance(clis, list)
     for c in clis:
-        assert c.name in {"claude", "codex"}
+        assert c.name in {"claude", "codex", "omp"}
 
 
 def test_multi_review_jobs_include_mandatory_baseline(tmp_path: Path):
@@ -1589,6 +1671,47 @@ def test_multi_review_jobs_include_mandatory_baseline(tmp_path: Path):
     assert "Review Angle" in jobs[0].prompt
     assert "Architecture Design" in jobs[1].prompt
     assert "Clean Architecture" in jobs[2].prompt
+
+
+def test_multi_review_packets_include_only_compact_architecture_profile_contract(
+    tmp_path: Path,
+):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.adapters.hosted import HostedAdapter, _reviewer_jobs
+    from agent_flow.runner import Phase
+
+    adapter = HostedAdapter("codex")
+    adapter._profile_snapshot = {
+        "id": "node",
+        "review_angles": [],
+        "architecture": {
+            "contract": "clean-architecture-core",
+            "platform": "node",
+            "strict_when_roots_present": True,
+            "activation_roots": ["src", "lib"],
+            "roles": {"domain": ["src/domain/**"]},
+        },
+        "gates": [{"id": "test", "command": ["npm", "test"]}],
+    }
+    phase = Phase(id="architecture-review", description="", multi_review=True)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    jobs = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
+
+    assert [job.angle_id for job in jobs] == [
+        "generalist",
+        "architecture-design",
+        "clean-architecture",
+    ]
+    for job in jobs:
+        assert "Profile contract:" in job.prompt
+        assert "architecture:" in job.prompt
+        assert "contract: clean-architecture-core" in job.prompt
+        assert "platform: node" in job.prompt
+        assert "roles:" not in job.prompt
+        assert "gates:" not in job.prompt
+        assert len(job.prompt) < 8_000
 
 
 def test_multi_review_jobs_dedupe_profile_baseline(tmp_path: Path):

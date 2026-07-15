@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -11,6 +12,16 @@ from pathlib import Path
 import pytest
 
 from agent_flow.runner import Phase, Runner
+from agent_flow.core.workspace_boundary import (
+    ExecutionIdentity,
+    bind_execution_to_workspace,
+    capture_workspace_identity,
+    execution_identity_from_context,
+    find_active_pinned_workspaces,
+    resolve_execution_workspace,
+    resolve_mutation_path,
+    select_execution_workspace,
+)
 
 
 KIT_ROOT = Path(__file__).resolve().parent.parent
@@ -155,6 +166,13 @@ def pinned_run(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
         "workspace": identity,
     }
     (run_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    for host in ("codex", "claude", "omp"):
+        bind_execution_to_workspace(
+            ExecutionIdentity(host=host, session_id="session-1", agent_id=""),
+            capture_workspace_identity(worktree),
+            run_dir,
+            run_id="run-1",
+        )
     launcher = leader / ".agent-flow" / "bin" / "agent-flow"
     launcher.parent.mkdir(parents=True, exist_ok=True)
     launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -234,6 +252,8 @@ def _guard(
     host: str = "codex",
     phase: str = "implement",
     move_to: Path | None = None,
+    session_id: str = "session-1",
+    cwd: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
     env["PYTHONPATH"] = str(KIT_ROOT / "src")
@@ -241,8 +261,9 @@ def _guard(
     move_line = f"\n*** Move to: {move_to}" if move_to is not None else ""
     payload = {
         "tool_name": "apply_patch",
-        "cwd": str(leader),
+        "cwd": str(cwd or leader),
         "host": host,
+        "session_id": session_id,
         "phase": phase,
         "tool_input": {
             "patch": f"*** Begin Patch\n*** Update File: {target}{move_line}\n@@\n-old\n+new\n*** End Patch"
@@ -266,6 +287,8 @@ def _bash_guard(
     *,
     host: str = "codex",
     phase: str = "implement",
+    session_id: str = "session-1",
+    agent_id: str = "",
     env_override: dict[str, str | None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
@@ -280,6 +303,8 @@ def _bash_guard(
         "tool_name": "Bash",
         "cwd": str(cwd),
         "host": host,
+        "session_id": session_id,
+        "agent_id": agent_id,
         "phase": phase,
         "tool_input": {"command": command},
     }
@@ -292,6 +317,197 @@ def _bash_guard(
         capture_output=True,
         check=False,
     )
+
+
+def test_ten_parallel_executions_resolve_only_their_bound_worktree(tmp_path: Path) -> None:
+    leader = tmp_path / "project"
+    leader.mkdir()
+    subprocess.run(("git", "init", "-b", "main", str(leader)), check=True, capture_output=True)
+    _git(leader, "config", "user.name", "Test User")
+    _git(leader, "config", "user.email", "test@example.com")
+    (leader / "shared.txt").write_text("leader\n", encoding="utf-8")
+    _git(leader, "add", "shared.txt")
+    _git(leader, "commit", "-m", "initial")
+
+    worktrees: list[Path] = []
+    executions: list[ExecutionIdentity] = []
+    for index in range(10):
+        worktree = leader / ".agent-flow" / "worktrees" / f"task-{index}"
+        _git(leader, "worktree", "add", "-b", f"feat/task-{index}", str(worktree), "main")
+        run_dir = leader / ".git" / "agent-flow" / "worktrees" / f"task-{index}" / ".agent-flow" / "runs" / f"run-{index}"
+        run_dir.mkdir(parents=True)
+        (run_dir / "active").write_text("", encoding="utf-8")
+        identity = capture_workspace_identity(worktree)
+        (run_dir / "meta.json").write_text(
+            json.dumps({"run_id": f"run-{index}", "workspace": identity.to_dict()}),
+            encoding="utf-8",
+        )
+        execution = ExecutionIdentity("codex", f"session-{index}", "")
+        bind_execution_to_workspace(execution, identity, run_dir, run_id=f"run-{index}")
+        worktrees.append(worktree)
+        executions.append(execution)
+
+    for index, execution in enumerate(executions):
+        active = resolve_execution_workspace(leader, execution)
+        assert Path(active.identity.workspace_root) == worktrees[index].resolve()
+        assert resolve_mutation_path(
+            active.identity,
+            "shared.txt",
+            base_dir=worktrees[index],
+            host="codex",
+            phase="implement",
+        ) == (worktrees[index] / "shared.txt").resolve()
+        with pytest.raises(Exception, match="escapes pinned workspace"):
+            resolve_mutation_path(
+                active.identity,
+                "shared.txt",
+                base_dir=leader,
+                host="codex",
+                phase="implement",
+            )
+        for sibling_index, sibling in enumerate(worktrees):
+            if sibling_index == index:
+                continue
+            with pytest.raises(Exception, match="target_outside_pinned_workspace"):
+                resolve_mutation_path(
+                    active.identity,
+                    sibling / "shared.txt",
+                    base_dir=worktrees[index],
+                    host="codex",
+                    phase="implement",
+                )
+
+    with pytest.raises(Exception, match="execution_identity_ambiguous"):
+        select_execution_workspace(leader, None)
+    second_identity = capture_workspace_identity(worktrees[1])
+    second_run = (
+        leader
+        / ".git"
+        / "agent-flow"
+        / "worktrees"
+        / "task-1"
+        / ".agent-flow"
+        / "runs"
+        / "run-1"
+    )
+    with pytest.raises(Exception, match="execution_binding_conflict"):
+        bind_execution_to_workspace(
+            executions[0],
+            second_identity,
+            second_run,
+            run_id="run-1",
+        )
+
+
+def test_unbound_execution_and_relative_leader_write_fail_closed(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, _worktree, _runtime, _run_dir = pinned_run
+
+    unbound = _guard(leader, Path("shared.txt"), session_id="unknown", cwd=leader)
+    wrong_cwd = _guard(leader, Path("shared.txt"), cwd=leader)
+
+    assert unbound.returncode == 2
+    assert "execution_binding_missing" in unbound.stderr
+    assert wrong_cwd.returncode == 2
+    assert "escapes pinned workspace" in wrong_cwd.stderr
+
+
+def test_unbound_execution_can_read_and_enter_authenticated_launcher(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, _worktree, _runtime, _run_dir = pinned_run
+    launcher = leader / ".agent-flow" / "bin" / "agent-flow"
+
+    read_only = _bash_guard(
+        leader,
+        leader,
+        "git status --short",
+        session_id="unbound-session",
+    )
+    status = _bash_guard(
+        leader,
+        leader,
+        f"{launcher} status",
+        session_id="unbound-session",
+    )
+
+    assert read_only.returncode == 0, read_only.stderr
+    assert status.returncode == 0, status.stderr
+
+
+def test_host_execution_fields_normalize_to_the_canonical_identity() -> None:
+    codex = execution_identity_from_context(
+        {"host": "codex", "thread_id": "shared-session"},
+        {},
+    )
+    claude = execution_identity_from_context(
+        {"host": "claude", "session_id": "shared-session", "agent_id": "worker-1"},
+        {},
+    )
+    omp = execution_identity_from_context(
+        {"host": "omp", "session_id": "shared-session"},
+        {},
+    )
+    override = execution_identity_from_context(
+        {"host": "codex", "thread_id": "ignored"},
+        {"AGENT_FLOW_EXECUTION_ID": "explicit-session"},
+    )
+    environment_host = execution_identity_from_context(
+        {},
+        {
+            "AGENT_FLOW_HOST": "codex",
+            "AGENT_FLOW_EXECUTION_ID": "environment-session",
+        },
+    )
+
+    assert codex == ExecutionIdentity("codex", "shared-session", "")
+    assert claude == ExecutionIdentity("claude", "shared-session", "worker-1")
+    assert omp == ExecutionIdentity("omp", "shared-session", "")
+    assert override == ExecutionIdentity("codex", "explicit-session", "")
+    assert environment_host == ExecutionIdentity("codex", "environment-session", "")
+
+
+def test_unicode_execution_identity_digest_matches_node() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is unavailable")
+    execution = ExecutionIdentity("claude", "세션-十", "작업자-ß")
+    payload = json.dumps(execution.to_dict(), ensure_ascii=False)
+    result = subprocess.run(
+        (
+            node,
+            "-e",
+            (
+                "const crypto=require('node:crypto');"
+                "const e=JSON.parse(process.argv[1]);"
+                "const canonical=JSON.stringify({agent_id:e.agent_id,host:e.host,session_id:e.session_id});"
+                "process.stdout.write(crypto.createHash('sha256').update(canonical).digest('hex'));"
+            ),
+            payload,
+        ),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    assert execution.digest == result.stdout
+
+
+def test_no_active_run_allows_local_write_and_stale_binding_is_blocked(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, _worktree, _runtime, run_dir = pinned_run
+    (run_dir / "active").unlink()
+
+    local = _guard(leader, Path("shared.txt"), cwd=leader)
+
+    assert local.returncode == 0, local.stderr
+    with pytest.raises(Exception, match="execution_binding_stale"):
+        resolve_execution_workspace(
+            leader,
+            ExecutionIdentity("codex", "session-1", ""),
+        )
 
 
 def test_follow_up_launched_from_leader_mutates_only_the_pinned_worktree(
@@ -407,15 +623,16 @@ def test_codex_claude_and_omp_share_the_same_pinned_workspace_and_mutation_set(
     pinned_run: tuple[Path, Path, Path, Path],
 ) -> None:
     leader, worktree, _runtime, _run_dir = pinned_run
-    decisions = {
-        host: (
-            _guard(leader, worktree / "shared.txt", host=host).returncode,
-            _guard(leader, leader / "shared.txt", host=host).returncode,
-        )
-        for host in ("codex", "claude", "omp")
-    }
+    decisions = {}
+    blocked_reasons = {}
+    for host in ("codex", "claude", "omp"):
+        allowed = _guard(leader, worktree / "shared.txt", host=host)
+        blocked = _guard(leader, leader / "shared.txt", host=host)
+        decisions[host] = (allowed.returncode, blocked.returncode)
+        blocked_reasons[host] = "target_outside_pinned_workspace" in blocked.stderr
 
     assert decisions == {"codex": (0, 2), "claude": (0, 2), "omp": (0, 2)}
+    assert blocked_reasons == {"codex": True, "claude": True, "omp": True}
 
 
 @pytest.mark.parametrize("host", ("codex", "claude", "omp"))
@@ -447,6 +664,326 @@ def test_shell_mutation_inside_pinned_worktree_is_allowed_and_leader_unchanged(
     assert (worktree / "shared.txt").read_text(encoding="utf-8") == "pinned"
 
 
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_shell_mutation_inside_pinned_worktree_subdirectory_is_allowed(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    nested = worktree / "packages" / "app"
+    nested.mkdir(parents=True)
+
+    result = _bash_guard(leader, nested, "touch generated.txt", host=host)
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_shell_cwd_transition_cannot_escape_the_pinned_worktree(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    commands = (
+        "cd .. && touch leaked",
+        "cd>log .. && touch leaked",
+        "cd ..>log && touch leaked",
+        "command cd .. && printf changed > leaked",
+        "command -p cd .. && touch leaked",
+        "builtin cd .. && git add leaked",
+        "builtin -- cd .. && touch leaked",
+    )
+
+    for command in commands:
+        result = _bash_guard(leader, worktree, command, host=host)
+        assert result.returncode == 2, (command, result.stderr)
+        assert "target_outside_pinned_workspace" in result.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_shell_cwd_transition_inside_the_pinned_worktree_is_allowed(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    (worktree / "packages" / "app").mkdir(parents=True)
+    commands = (
+        "cd packages && touch generated.txt",
+        "cd packages && cd app && touch generated.txt",
+        "cd packages; touch generated.txt",
+        "true || cd .. && touch generated.txt",
+        "false && cd .. || touch generated.txt",
+    )
+
+    for command in commands:
+        result = _bash_guard(leader, worktree, command, host=host)
+        assert result.returncode == 0, (command, result.stderr)
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_conditional_shell_cwd_states_cannot_hide_an_escape(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    pinned = shlex.quote(str(worktree))
+    commands = (
+        f"cd .. || cd {pinned} && touch leaked",
+        f"builtin cd .. || cd {pinned} && printf changed > leaked",
+        f"command cd .. || cd {pinned} && git add leaked",
+    )
+
+    for command in commands:
+        result = _bash_guard(leader, worktree, command, host=host)
+        assert result.returncode == 2, (command, result.stderr)
+        assert "target_outside_pinned_workspace" in result.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_compound_nested_and_directory_stack_shell_escapes_are_rejected(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    (leader / "packages").mkdir()
+    leader_cdpath = shlex.quote(str(leader))
+    fake_true = worktree / "true"
+    fake_true.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    fake_true.chmod(0o755)
+    commands = (
+        "{ cd ..; touch leaked; }",
+        "(cd ..; touch leaked)",
+        "if cd ..; then touch leaked; fi",
+        "if cd ..; then sed -i '' -e 's/a/b/' shared.txt; fi",
+        "if cd ..; then git diff --output=leaked; fi",
+        f"if true; then git diff --output={leader / 'leaked'}; fi",
+        f"if true; then git -C{leader} add shared.txt; fi",
+        "case x in x) cd ..;; esac; touch leaked",
+        "case x in x) cd>log ..;; esac; touch leaked",
+        "case x in x) env -C .. touch leaked;; esac",
+        "case x in x) sh -c 'cd ..; touch leaked';; esac",
+        f"case x in x) git diff --output={leader / 'leaked'};; esac",
+        "f() { cd ..; }; f; touch leaked",
+        "f() { env -C .. touch leaked; }; f",
+        "f() { sh -c 'cd ..; touch leaked'; }; f",
+        "function f { cd ..; }; f; touch leaked",
+        "sh -c 'cd .. && touch leaked'",
+        "bash -c 'cd .. && touch leaked'",
+        "bash -O extglob -c 'cd .. && touch leaked'",
+        "bash -o posix -c 'cd .. && touch leaked'",
+        "bash +o posix -c 'cd .. && touch leaked'",
+        "exec sh -c 'cd .. && touch leaked'",
+        "exec -- sh -c 'cd .. && touch leaked'",
+        "exec -a worker sh -c 'cd .. && touch leaked'",
+        "eval 'cd ..; touch leaked'",
+        "eval -- 'cd ..; touch leaked'",
+        f"env CDPATH={leader_cdpath} sh -c 'cd packages && touch leaked'",
+        f"sh -c 'CDPATH={leader_cdpath} :; cd packages && touch leaked'",
+        (
+            f"bash --posix -c 'CDPATH={leader_cdpath} :; "
+            "cd packages && touch leaked'"
+        ),
+        (
+            f"sh -c 'CDPATH={leader_cdpath} export FOO=1; "
+            "cd packages && touch leaked'"
+        ),
+        (
+            f"sh -c 'CDPATH={leader_cdpath} readonly FOO=1; "
+            "cd packages && touch leaked'"
+        ),
+        (
+            f"sh -c \"CDPATH={leader_cdpath} set -- value; "
+            "cd packages && touch leaked\""
+        ),
+        (
+            f"sh -c \"CDPATH={leader_cdpath} eval ':'; "
+            "cd packages && touch leaked\""
+        ),
+        "env -C .. touch leaked",
+        "env -P /bin sh -c 'cd .. && touch leaked'",
+        "env -S \"sh -c 'cd .. && touch leaked'\"",
+        "env -S 'FOO=bar' sh -c 'cd .. && touch leaked'",
+        "env -S '-i' sh -c 'cd .. && touch leaked'",
+        (
+            f"env -S \"CDPATH={leader_cdpath} "
+            "sh -c 'cd packages && touch leaked'\""
+        ),
+        f"readonly CDPATH={leader_cdpath}; cd packages && touch leaked",
+        f"declare CDPATH={leader_cdpath}; cd packages && touch leaked",
+        f"CDPATH={leader_cdpath} pushd packages && touch leaked",
+        f"CDPATH={leader_cdpath}; pushd packages && touch leaked",
+        f"CDPATH={leader_cdpath}; unset -f CDPATH; cd packages && touch leaked",
+        "export 1BAD || cd ..; touch leaked",
+        "unset -z CDPATH || cd ..; touch leaked",
+        (
+            f"CDPATH={leader_cdpath}; readonly CDPATH; unset CDPATH; "
+            "cd packages && touch leaked"
+        ),
+        "! cd .. || touch leaked",
+        f"! false && touch {leader / 'leaked'}",
+        f"! true || touch {leader / 'leaked'}",
+        f"! false && git -C{leader} add shared.txt",
+        f"set -o pipefail; false | true || touch {leader / 'leaked'}",
+        (
+            "set -euo pipefail; false | true || "
+            f"/usr/bin/touch {leader / 'leaked'}"
+        ),
+        (
+            "set -o pipefail; false | true || "
+            f"custom-writer {leader / 'leaked'}"
+        ),
+        (
+            "bash -o pipefail -c 'false | true || "
+            f"touch {leader / 'leaked'}'"
+        ),
+        (
+            "bash -eo pipefail -c 'false | true || "
+            f"touch {leader / 'leaked'}'"
+        ),
+        "time cd .. && touch leaked",
+        "true > . || cd ..; touch leaked",
+        "./true || cd ..; touch leaked",
+        "TRUE || cd ..; touch leaked",
+        "chdir .. && touch leaked",
+        "pushd .. && touch leaked",
+        "command pushd .. && printf changed > leaked",
+        "builtin pushd .. && git add leaked",
+        "source ./move-out.sh && touch leaked",
+        ". ./move-out.sh && touch leaked",
+    )
+
+    for command in commands:
+        result = _bash_guard(leader, worktree, command, host=host)
+        assert result.returncode == 2, (command, result.stderr)
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_cd_redirection_and_cdpath_cannot_escape_the_pinned_worktree(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    (leader / "packages").mkdir()
+    (worktree / "packages").mkdir()
+    leader_target = shlex.quote(str(leader / "leaked"))
+    leader_cdpath = shlex.quote(str(leader))
+    commands = (
+        f"cd packages > {leader_target}",
+        f"printf changed >|{leader_target}",
+        f"CDPATH={leader_cdpath} cd packages && touch leaked",
+        f"CDPATH={leader_cdpath}; cd packages && touch leaked",
+    )
+
+    for command in commands:
+        result = _bash_guard(leader, worktree, command, host=host)
+        assert result.returncode == 2, (command, result.stderr)
+
+
+def test_shell_cwd_state_space_is_bounded(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    transitions = "; ".join(f"cd d{index}" for index in range(20))
+
+    read_only = _bash_guard(leader, worktree, transitions)
+    mutating = _bash_guard(leader, worktree, f"{transitions}; touch generated.txt")
+
+    assert read_only.returncode == 0, read_only.stderr
+    assert mutating.returncode == 2
+    assert "unresolved mutation target" in mutating.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_nested_shell_mutation_inside_the_pinned_worktree_is_allowed(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    (worktree / "packages").mkdir()
+
+    commands = (
+        "sh -c 'cd packages && touch generated.txt'",
+        "{ cd packages; touch generated.txt; }",
+        "(cd packages; touch generated.txt)",
+        "if true; then touch generated.txt; fi",
+        "if true; then git diff --output=generated.diff; fi",
+        "set -o pipefail; false | true || git status",
+        "bash -o pipefail -c 'false | true || pwd'",
+        "case x in x) true;; esac",
+        "f() { true; }; f",
+        "function f { git status; }; f",
+    )
+
+    for command in commands:
+        result = _bash_guard(leader, worktree, command, host=host)
+        assert result.returncode == 0, (command, result.stderr)
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+@pytest.mark.parametrize(
+    "command",
+    (
+        "sed -i.bak '/leader/d' shared.txt",
+        "sed -Ei 's/leader/changed/' shared.txt",
+        "sed -ni 's/leader/changed/' shared.txt",
+        "perl -pi -e '/leader/ && s/leader/changed/' shared.txt",
+        "perl -pi -e 's/a > /leader/a/' shared.txt",
+    ),
+)
+def test_in_place_program_text_is_not_treated_as_a_mutation_path(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+    command: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+
+    result = _bash_guard(leader, worktree, command, host=host)
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+@pytest.mark.parametrize(
+    "command",
+    (
+        "sed -Ei 's/leader/changed/' shared.txt",
+        "sed -ni 's/leader/changed/' shared.txt",
+    ),
+)
+def test_combined_sed_in_place_options_cannot_mutate_the_leader(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+    command: str,
+) -> None:
+    leader, _worktree, _runtime, _run_dir = pinned_run
+
+    result = _bash_guard(leader, leader, command, host=host)
+
+    assert result.returncode == 2
+    assert "must run from pinned workspace" in result.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_newline_shell_chain_cannot_hide_leader_mutation(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, _worktree, _runtime, _run_dir = pinned_run
+    launcher = leader / ".agent-flow" / "bin" / "agent-flow"
+
+    chained = _bash_guard(leader, leader, "true\ntouch shared.txt", host=host)
+    launcher_suffix = _bash_guard(
+        leader,
+        leader,
+        f"{launcher} status\ntouch shared.txt",
+        host=host,
+    )
+
+    assert chained.returncode == 2
+    assert launcher_suffix.returncode == 2
+    assert (leader / "shared.txt").read_text(encoding="utf-8") == "leader\n"
+
+
 def test_shell_absolute_leader_target_and_symlink_escape_are_rejected(
     pinned_run: tuple[Path, Path, Path, Path],
     tmp_path: Path,
@@ -458,9 +995,11 @@ def test_shell_absolute_leader_target_and_symlink_escape_are_rejected(
 
     absolute = _bash_guard(leader, worktree, f"printf changed > {leader / 'shared.txt'}")
     escaped = _bash_guard(leader, worktree, "printf changed > escape/new.txt")
+    escaped_cwd = _bash_guard(leader, worktree, "cd escape && touch new.txt")
 
     assert absolute.returncode == 2
     assert escaped.returncode == 2
+    assert escaped_cwd.returncode == 2
     assert not (outside / "new.txt").exists()
 
 
@@ -472,6 +1011,7 @@ def test_dynamic_shell_mutations_cannot_escape_the_pinned_worktree(
     leader, worktree, _runtime, _run_dir = pinned_run
     commands = (
         f"TARGET={leader / 'shared.txt'} node -e \"require('fs').writeFileSync(process.env.TARGET, 'changed')\"",
+        "printf changed > \"$TARGET\"",
         f"dd if=/dev/null of={leader / 'shared.txt'}",
         f"perl -pi -e 's/leader/changed/' {leader / 'shared.txt'}",
         f"rsync shared.txt {leader / 'shared.txt'}",
@@ -529,10 +1069,15 @@ def test_shell_substitutions_and_git_output_fail_closed(
     (
         "npm test",
         "python3 -m pytest -q",
+        f"{shlex.quote(sys.executable)} -m pytest -q",
+        f'"{sys.executable}" -m pytest -q',
         "node --test tests/test_skill_source_runtime.mjs",
+        "git add shared.txt",
+        "git commit -m change",
+        "git push origin HEAD",
     ),
 )
-def test_unsandboxed_gate_launchers_are_rejected(
+def test_pathless_gate_and_git_commands_are_allowed_inside_pinned_worktree(
     pinned_run: tuple[Path, Path, Path, Path],
     host: str,
     command: str,
@@ -541,8 +1086,69 @@ def test_unsandboxed_gate_launchers_are_rejected(
 
     result = _bash_guard(leader, worktree, command, host=host)
 
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_chained_read_paths_do_not_become_mutation_targets(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    leader_file = shlex.quote(str(leader / "shared.txt"))
+    commands = (
+        f"cp shared.txt local-copy.txt && cat {leader_file}",
+        f"cat {leader_file} && cp shared.txt local-copy.txt",
+        f"touch local.txt && git -C {shlex.quote(str(leader))} status --short",
+    )
+
+    for command in commands:
+        result = _bash_guard(leader, worktree, command, host=host)
+        assert result.returncode == 0, (command, result.stderr)
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_read_only_git_may_target_leader_from_pinned_worktree(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+
+    result = _bash_guard(
+        leader,
+        worktree,
+        f"git -C {shlex.quote(str(leader))} status --short",
+        host=host,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_git_command_targeting_leader_from_pinned_worktree_is_rejected(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+
+    result = _bash_guard(leader, worktree, f"git -C {leader} add shared.txt")
+
     assert result.returncode == 2
-    assert "did not declare a target path" in result.stderr
+    assert "target_outside_pinned_workspace" in result.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_chained_git_mutation_is_not_hidden_by_a_read_only_first_command(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    command = "git status --short && git add shared.txt"
+
+    allowed = _bash_guard(leader, worktree, command, host=host)
+    blocked = _bash_guard(leader, leader, command, host=host)
+
+    assert allowed.returncode == 0, allowed.stderr
+    assert blocked.returncode == 2
+    assert "mutation_cwd_not_pinned" in blocked.stderr
 
 
 @pytest.mark.parametrize("host", ("codex", "claude", "omp"))
@@ -558,6 +1164,52 @@ def test_agent_flow_launcher_is_allowed_from_leader(
     result = _bash_guard(leader, leader, command, host=host)
 
     assert result.returncode == 0, result.stderr
+
+
+def test_claude_launcher_forwards_hook_identity_to_the_runner(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, _worktree, _runtime, _run_dir = pinned_run
+    command = f"{leader / '.agent-flow' / 'bin' / 'agent-flow'} status"
+
+    result = _bash_guard(
+        leader,
+        leader,
+        command,
+        host="claude",
+        session_id="claude-session-'42",
+        agent_id="subagent-7",
+    )
+
+    assert result.returncode == 0, result.stderr
+    output = json.loads(result.stdout)
+    updated = output["hookSpecificOutput"]["updatedInput"]
+    assert output["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+    assert updated["command"].endswith(command)
+    assert "AGENT_FLOW_ACTIVE_HOST=claude" in updated["command"]
+    assert "AGENT_FLOW_EXECUTION_ID='claude-session-'\"'\"'42'" in updated["command"]
+    assert "AGENT_FLOW_AGENT_ID=subagent-7" in updated["command"]
+
+
+@pytest.mark.parametrize("host", ("claude", "omp"))
+def test_host_launcher_blocks_when_stable_session_identity_is_missing(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, _worktree, _runtime, _run_dir = pinned_run
+    command = f"{leader / '.agent-flow' / 'bin' / 'agent-flow'} status"
+
+    result = _bash_guard(
+        leader,
+        leader,
+        command,
+        host=host,
+        session_id="",
+        env_override={"AGENT_FLOW_EXECUTION_ID": None},
+    )
+
+    assert result.returncode == 2
+    assert "execution_identity_missing" in result.stderr
 
 
 @pytest.mark.parametrize("host", ("codex", "claude", "omp"))
@@ -751,12 +1403,21 @@ def test_unclassified_shell_command_fails_closed_from_the_leader(
     assert read_only.returncode == 0, read_only.stderr
 
 
-def test_leader_status_reuses_the_active_pinned_worktree(
+def test_leader_status_without_execution_identity_is_rejected(
     pinned_run: tuple[Path, Path, Path, Path],
 ) -> None:
     leader, _worktree, _runtime, _run_dir = pinned_run
     env = dict(os.environ)
     env["PYTHONPATH"] = str(KIT_ROOT / "src")
+    for name in (
+        "AGENT_FLOW_EXECUTION_ID",
+        "AGENT_FLOW_SESSION_ID",
+        "CODEX_THREAD_ID",
+        "CODEX_SESSION_ID",
+        "CLAUDE_SESSION_ID",
+        "OMP_SESSION_ID",
+    ):
+        env.pop(name, None)
 
     result = subprocess.run(
         (sys.executable, "-m", "agent_flow.cli", "status", "--root", str(leader)),
@@ -767,8 +1428,8 @@ def test_leader_status_reuses_the_active_pinned_worktree(
         check=False,
     )
 
-    assert result.returncode == 0, result.stderr
-    assert "--worktree feat-test" in result.stdout
+    assert result.returncode == 2
+    assert "execution_identity_missing" in result.stderr
 
 
 def test_worktree_manifest_records_canonical_identity(tmp_path: Path) -> None:
@@ -872,7 +1533,12 @@ def test_node_follow_up_from_leader_reuses_and_validates_registered_worktree(
     node = shutil.which("node")
     assert node is not None
     cli = KIT_ROOT / "bin" / "agent-flow-kit.mjs"
-    env = {**os.environ, "AGENT_FLOW_AUTO_EXTERNAL_SKILLS": "0"}
+    env = {
+        **os.environ,
+        "AGENT_FLOW_AUTO_EXTERNAL_SKILLS": "0",
+        "AGENT_FLOW_ACTIVE_HOST": "codex",
+        "AGENT_FLOW_EXECUTION_ID": "session-1",
+    }
     installed = subprocess.run(
         (node, str(cli), "install"),
         cwd=leader,
@@ -909,10 +1575,15 @@ def test_node_follow_up_from_leader_reuses_and_validates_registered_worktree(
         check=False,
     )
     assert started.returncode == 0, started.stderr
-    state_path = leader / ".agent-flow" / "state" / "current-run.json"
+    state_paths = list((leader / ".git" / "agent-flow" / "current-runs").glob("*.json"))
+    assert len(state_paths) == 1
+    state_path = state_paths[0]
     state = json.loads(state_path.read_text(encoding="utf-8"))
     assert Path(state["workspace_root"]).samefile(worktree)
     assert state["workspace"] == identity
+    active = find_active_pinned_workspaces(leader)
+    assert len(active) == 1
+    assert active[0].run_dir.samefile(leader / state["run_dir"])
 
     follow_up = subprocess.run(
         (node, str(cli), "run", "status"),
@@ -926,6 +1597,24 @@ def test_node_follow_up_from_leader_reuses_and_validates_registered_worktree(
     assert f"workspace_root: {worktree.resolve()}" in follow_up.stdout
     assert _guard(leader, worktree / "shared.txt").returncode == 0
     assert _guard(leader, leader / "shared.txt").returncode == 2
+
+    binding_path = next((leader / ".git" / "agent-flow" / "executions").glob("*.json"))
+    binding_path.unlink()
+    lost_binding_write = _bash_guard(leader, leader, "touch shared.txt")
+    assert lost_binding_write.returncode == 2
+    assert "execution_binding_missing" in lost_binding_write.stderr
+    replacement = subprocess.run(
+        (node, str(cli), "run", "start", "--task", "replacement", "--run-id", "node-2"),
+        cwd=worktree,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert replacement.returncode == 1
+    assert "execution_binding_missing" in replacement.stderr
+    assert json.loads(state_path.read_text(encoding="utf-8"))["run_id"] == "node-1"
+    assert not (leader / ".agent-flow" / "runs" / "full-feature" / "node-2").exists()
 
     shutil.rmtree(worktree)
     missing = subprocess.run(

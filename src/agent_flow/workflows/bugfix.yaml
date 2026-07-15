@@ -12,6 +12,10 @@ phases:
   - id: implement-fix
     role: fixer
     description: Fix the reproduced defect.
+    requirements: [defect-fixed, regression-test]
+    routes:
+      success: review
+      failure: implement-fix
     prompt: |
       Fix only the reproduced defect. Keep the change scoped to the failing behavior
       and update or add the narrowest regression test that proves the fix.
@@ -23,9 +27,13 @@ phases:
     replicas: 3
     description: Review the bug fix.
     multi_review: true
+    skills:
+      required: [code-generation-discipline, code-review, architecture-reviewer, clean-architecture-core]
+    requirements: [independent-reviewers, architecture-contract]
     routes:
       approve: qa
       request-changes: implement-fix
+      failure: implement-fix
     prompt: |
       Run at least two independent sub-agent reviewers in parallel. Each reviewer
       checks the reproduced failure, the fix scope, regression coverage, and

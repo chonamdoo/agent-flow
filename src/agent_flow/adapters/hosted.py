@@ -141,7 +141,7 @@ def _reviewer_jobs(
     profile_angles = adapter._profile_snapshot.get("review_angles") or []
     angles = _merge_review_angles(_BASE_REVIEW_ANGLES, profile_angles)
     jobs: list[ReviewerJob] = []
-    base_prompt = adapter.render_envelope(phase, run_dir, project_root)
+    base_prompt = adapter.render_review_packet(phase, run_dir, project_root)
     for item in angles:
         if not isinstance(item, dict):
             continue
