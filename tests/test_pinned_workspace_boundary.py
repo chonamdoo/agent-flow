@@ -679,6 +679,247 @@ def test_shell_mutation_inside_pinned_worktree_subdirectory_is_allowed(
 
 
 @pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_shell_cwd_transition_cannot_escape_the_pinned_worktree(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    commands = (
+        "cd .. && touch leaked",
+        "cd>log .. && touch leaked",
+        "cd ..>log && touch leaked",
+        "command cd .. && printf changed > leaked",
+        "command -p cd .. && touch leaked",
+        "builtin cd .. && git add leaked",
+        "builtin -- cd .. && touch leaked",
+    )
+
+    for command in commands:
+        result = _bash_guard(leader, worktree, command, host=host)
+        assert result.returncode == 2, (command, result.stderr)
+        assert "target_outside_pinned_workspace" in result.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_shell_cwd_transition_inside_the_pinned_worktree_is_allowed(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    (worktree / "packages" / "app").mkdir(parents=True)
+    commands = (
+        "cd packages && touch generated.txt",
+        "cd packages && cd app && touch generated.txt",
+        "cd packages; touch generated.txt",
+        "true || cd .. && touch generated.txt",
+        "false && cd .. || touch generated.txt",
+    )
+
+    for command in commands:
+        result = _bash_guard(leader, worktree, command, host=host)
+        assert result.returncode == 0, (command, result.stderr)
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_conditional_shell_cwd_states_cannot_hide_an_escape(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    pinned = shlex.quote(str(worktree))
+    commands = (
+        f"cd .. || cd {pinned} && touch leaked",
+        f"builtin cd .. || cd {pinned} && printf changed > leaked",
+        f"command cd .. || cd {pinned} && git add leaked",
+    )
+
+    for command in commands:
+        result = _bash_guard(leader, worktree, command, host=host)
+        assert result.returncode == 2, (command, result.stderr)
+        assert "target_outside_pinned_workspace" in result.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_compound_nested_and_directory_stack_shell_escapes_are_rejected(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    (leader / "packages").mkdir()
+    leader_cdpath = shlex.quote(str(leader))
+    fake_true = worktree / "true"
+    fake_true.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    fake_true.chmod(0o755)
+    commands = (
+        "{ cd ..; touch leaked; }",
+        "(cd ..; touch leaked)",
+        "if cd ..; then touch leaked; fi",
+        "if cd ..; then sed -i '' -e 's/a/b/' shared.txt; fi",
+        "if cd ..; then git diff --output=leaked; fi",
+        f"if true; then git diff --output={leader / 'leaked'}; fi",
+        f"if true; then git -C{leader} add shared.txt; fi",
+        "case x in x) cd ..;; esac; touch leaked",
+        "case x in x) cd>log ..;; esac; touch leaked",
+        "case x in x) env -C .. touch leaked;; esac",
+        "case x in x) sh -c 'cd ..; touch leaked';; esac",
+        f"case x in x) git diff --output={leader / 'leaked'};; esac",
+        "f() { cd ..; }; f; touch leaked",
+        "f() { env -C .. touch leaked; }; f",
+        "f() { sh -c 'cd ..; touch leaked'; }; f",
+        "function f { cd ..; }; f; touch leaked",
+        "sh -c 'cd .. && touch leaked'",
+        "bash -c 'cd .. && touch leaked'",
+        "bash -O extglob -c 'cd .. && touch leaked'",
+        "bash -o posix -c 'cd .. && touch leaked'",
+        "bash +o posix -c 'cd .. && touch leaked'",
+        "exec sh -c 'cd .. && touch leaked'",
+        "exec -- sh -c 'cd .. && touch leaked'",
+        "exec -a worker sh -c 'cd .. && touch leaked'",
+        "eval 'cd ..; touch leaked'",
+        "eval -- 'cd ..; touch leaked'",
+        f"env CDPATH={leader_cdpath} sh -c 'cd packages && touch leaked'",
+        f"sh -c 'CDPATH={leader_cdpath} :; cd packages && touch leaked'",
+        (
+            f"bash --posix -c 'CDPATH={leader_cdpath} :; "
+            "cd packages && touch leaked'"
+        ),
+        (
+            f"sh -c 'CDPATH={leader_cdpath} export FOO=1; "
+            "cd packages && touch leaked'"
+        ),
+        (
+            f"sh -c 'CDPATH={leader_cdpath} readonly FOO=1; "
+            "cd packages && touch leaked'"
+        ),
+        (
+            f"sh -c \"CDPATH={leader_cdpath} set -- value; "
+            "cd packages && touch leaked\""
+        ),
+        (
+            f"sh -c \"CDPATH={leader_cdpath} eval ':'; "
+            "cd packages && touch leaked\""
+        ),
+        "env -C .. touch leaked",
+        "env -P /bin sh -c 'cd .. && touch leaked'",
+        "env -S \"sh -c 'cd .. && touch leaked'\"",
+        "env -S 'FOO=bar' sh -c 'cd .. && touch leaked'",
+        "env -S '-i' sh -c 'cd .. && touch leaked'",
+        (
+            f"env -S \"CDPATH={leader_cdpath} "
+            "sh -c 'cd packages && touch leaked'\""
+        ),
+        f"readonly CDPATH={leader_cdpath}; cd packages && touch leaked",
+        f"declare CDPATH={leader_cdpath}; cd packages && touch leaked",
+        f"CDPATH={leader_cdpath} pushd packages && touch leaked",
+        f"CDPATH={leader_cdpath}; pushd packages && touch leaked",
+        f"CDPATH={leader_cdpath}; unset -f CDPATH; cd packages && touch leaked",
+        "export 1BAD || cd ..; touch leaked",
+        "unset -z CDPATH || cd ..; touch leaked",
+        (
+            f"CDPATH={leader_cdpath}; readonly CDPATH; unset CDPATH; "
+            "cd packages && touch leaked"
+        ),
+        "! cd .. || touch leaked",
+        f"! false && touch {leader / 'leaked'}",
+        f"! true || touch {leader / 'leaked'}",
+        f"! false && git -C{leader} add shared.txt",
+        f"set -o pipefail; false | true || touch {leader / 'leaked'}",
+        (
+            "set -euo pipefail; false | true || "
+            f"/usr/bin/touch {leader / 'leaked'}"
+        ),
+        (
+            "set -o pipefail; false | true || "
+            f"custom-writer {leader / 'leaked'}"
+        ),
+        (
+            "bash -o pipefail -c 'false | true || "
+            f"touch {leader / 'leaked'}'"
+        ),
+        (
+            "bash -eo pipefail -c 'false | true || "
+            f"touch {leader / 'leaked'}'"
+        ),
+        "time cd .. && touch leaked",
+        "true > . || cd ..; touch leaked",
+        "./true || cd ..; touch leaked",
+        "TRUE || cd ..; touch leaked",
+        "chdir .. && touch leaked",
+        "pushd .. && touch leaked",
+        "command pushd .. && printf changed > leaked",
+        "builtin pushd .. && git add leaked",
+        "source ./move-out.sh && touch leaked",
+        ". ./move-out.sh && touch leaked",
+    )
+
+    for command in commands:
+        result = _bash_guard(leader, worktree, command, host=host)
+        assert result.returncode == 2, (command, result.stderr)
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_cd_redirection_and_cdpath_cannot_escape_the_pinned_worktree(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    (leader / "packages").mkdir()
+    (worktree / "packages").mkdir()
+    leader_target = shlex.quote(str(leader / "leaked"))
+    leader_cdpath = shlex.quote(str(leader))
+    commands = (
+        f"cd packages > {leader_target}",
+        f"printf changed >|{leader_target}",
+        f"CDPATH={leader_cdpath} cd packages && touch leaked",
+        f"CDPATH={leader_cdpath}; cd packages && touch leaked",
+    )
+
+    for command in commands:
+        result = _bash_guard(leader, worktree, command, host=host)
+        assert result.returncode == 2, (command, result.stderr)
+
+
+def test_shell_cwd_state_space_is_bounded(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    transitions = "; ".join(f"cd d{index}" for index in range(20))
+
+    read_only = _bash_guard(leader, worktree, transitions)
+    mutating = _bash_guard(leader, worktree, f"{transitions}; touch generated.txt")
+
+    assert read_only.returncode == 0, read_only.stderr
+    assert mutating.returncode == 2
+    assert "unresolved mutation target" in mutating.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_nested_shell_mutation_inside_the_pinned_worktree_is_allowed(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    (worktree / "packages").mkdir()
+
+    commands = (
+        "sh -c 'cd packages && touch generated.txt'",
+        "{ cd packages; touch generated.txt; }",
+        "(cd packages; touch generated.txt)",
+        "if true; then touch generated.txt; fi",
+        "if true; then git diff --output=generated.diff; fi",
+        "set -o pipefail; false | true || git status",
+        "bash -o pipefail -c 'false | true || pwd'",
+        "case x in x) true;; esac",
+        "f() { true; }; f",
+        "function f { git status; }; f",
+    )
+
+    for command in commands:
+        result = _bash_guard(leader, worktree, command, host=host)
+        assert result.returncode == 0, (command, result.stderr)
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
 @pytest.mark.parametrize(
     "command",
     (
@@ -754,9 +995,11 @@ def test_shell_absolute_leader_target_and_symlink_escape_are_rejected(
 
     absolute = _bash_guard(leader, worktree, f"printf changed > {leader / 'shared.txt'}")
     escaped = _bash_guard(leader, worktree, "printf changed > escape/new.txt")
+    escaped_cwd = _bash_guard(leader, worktree, "cd escape && touch new.txt")
 
     assert absolute.returncode == 2
     assert escaped.returncode == 2
+    assert escaped_cwd.returncode == 2
     assert not (outside / "new.txt").exists()
 
 
@@ -768,6 +1011,7 @@ def test_dynamic_shell_mutations_cannot_escape_the_pinned_worktree(
     leader, worktree, _runtime, _run_dir = pinned_run
     commands = (
         f"TARGET={leader / 'shared.txt'} node -e \"require('fs').writeFileSync(process.env.TARGET, 'changed')\"",
+        "printf changed > \"$TARGET\"",
         f"dd if=/dev/null of={leader / 'shared.txt'}",
         f"perl -pi -e 's/leader/changed/' {leader / 'shared.txt'}",
         f"rsync shared.txt {leader / 'shared.txt'}",
