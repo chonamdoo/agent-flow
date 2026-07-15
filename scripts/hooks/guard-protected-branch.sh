@@ -50,11 +50,14 @@ def git_parts(tokens):
         if tokens[0] == 'command':
             tokens = tokens[1:]
             continue
+        if re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', tokens[0]):
+            tokens = tokens[1:]
+            continue
         if tokens[0] == 'env':
             tokens = skip_env(tokens)
             continue
         break
-    if not tokens or tokens[0] != 'git':
+    if not tokens or os.path.basename(tokens[0]) != 'git':
         return [], []
     index = 1
     global_args = []
@@ -94,13 +97,14 @@ def shell_tokens(command):
     # shlex는 ValueError 전에 일부 토큰을 이미 내보내므로, 부분 토큰으로
     # 오판하지 않도록 전체 파싱이 성공한 경우에만 토큰을 반환한다.
     try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=';&|()')
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=';&|()\r\n')
+        lexer.whitespace = ' \t'
         lexer.whitespace_split = True
         tokens = list(lexer)
     except ValueError:
         return
     for token in tokens:
-        if token and all(char in ';&|()' for char in token):
+        if token and all(char in ';&|()\r\n' for char in token):
             for char in token:
                 yield char
         else:
@@ -124,7 +128,7 @@ def classify(command):
     cwd_stack = [os.getcwd()]
     current = []
     for token in shell_tokens(command):
-        if token in ';&|':
+        if token in ';&|\r\n':
             branch, cwd_stack[-1] = inspect_tokens(current, cwd_stack[-1])
             if branch:
                 return branch

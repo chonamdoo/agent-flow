@@ -3,6 +3,7 @@
 INPUT=$(/bin/cat)
 ACTION=$(/usr/bin/python3 -I -B -c "
 import sys, json
+import os
 import re
 import shlex
 import subprocess
@@ -29,7 +30,7 @@ def command_from(value):
     return ''
 
 def split_segments(command):
-    return [part for part in re.split(r'[;&|()]+', command) if part.strip()]
+    return [part for part in re.split(r'[;&|()\r\n]+', command) if part.strip()]
 
 def skip_env(tokens):
     index = 1
@@ -52,11 +53,14 @@ def git_args(tokens):
         if tokens[0] == 'command':
             tokens = tokens[1:]
             continue
+        if re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', tokens[0]):
+            tokens = tokens[1:]
+            continue
         if tokens[0] == 'env':
             tokens = skip_env(tokens)
             continue
         break
-    if not tokens or tokens[0] != 'git':
+    if not tokens or os.path.basename(tokens[0]) != 'git':
         return []
     index = 1
     options_with_value = {

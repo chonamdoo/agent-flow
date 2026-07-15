@@ -12,6 +12,8 @@ import {
   resolveProfileSkillSources,
   resolveRuntimeSkillPlan,
 } from "../lib/skill-selection.mjs";
+import { detectActiveHost } from "../lib/host-detection.mjs";
+import { evaluateDeclaredArtifacts } from "../lib/phase-contract.mjs";
 
 const KIT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
@@ -34,6 +36,81 @@ function hostSkills(home, host) {
   if (host === "omp") return path.join(home, ".omp", "agent", "skills");
   return path.join(home, `.${host}`, "skills");
 }
+
+test("generic installs stay filtered and automatic external skills are opt in", () => {
+  const root = tempRoot();
+  const home = path.join(root, "home");
+  const project = path.join(root, "project");
+  fs.mkdirSync(project, { recursive: true });
+  writeSkill(hostSkills(home, "codex"), "auto-demo");
+
+  const selection = resolveInstallSelection({
+    args: [],
+    detectedProfile: "generic",
+    kitRoot: KIT_ROOT,
+    projectRoot: project,
+  });
+
+  assert.equal(selection.filtered, true);
+  assert.deepEqual(selection.profiles, ["generic"]);
+  assert.deepEqual(
+    [...discoverAutomaticExternalSkillNames({ home, activeHost: "codex" })],
+    [],
+  );
+  assert.deepEqual(
+    [...discoverAutomaticExternalSkillNames({
+      home,
+      activeHost: "codex",
+      env: { AGENT_FLOW_AUTO_EXTERNAL_SKILLS: "1" },
+    })],
+    ["auto-demo"],
+  );
+});
+
+test("platform install selection covers node android react native python generic and explicit skills", () => {
+  const cases = [
+    ["node", ["typescript-development-guide"], ["android-code-review"]],
+    ["android", ["android-code-review", "android-clean-architecture"], ["react-native-development-guide"]],
+    ["react-native", ["react-native-development-guide", "typescript-development-guide"], ["android-code-review"]],
+    ["python", ["python-development-guide", "python-api-clean-architecture"], ["android-code-review"]],
+    ["generic", ["ddd-architecture", "clean-architecture-core"], ["android-code-review", "react-native-development-guide"]],
+  ];
+  for (const [profile, included, excluded] of cases) {
+    const project = tempRoot();
+    const selection = resolveInstallSelection({
+      args: [],
+      detectedProfile: profile,
+      kitRoot: KIT_ROOT,
+      projectRoot: project,
+    });
+    assert.deepEqual(selection.profiles, [profile]);
+    for (const name of included) assert.equal(selection.skillNames.has(name), true, `${profile}:${name}`);
+    for (const name of excluded) assert.equal(selection.skillNames.has(name), false, `${profile}:${name}`);
+  }
+
+  const nativeProject = tempRoot();
+  fs.mkdirSync(path.join(nativeProject, "android"));
+  fs.mkdirSync(path.join(nativeProject, "ios"));
+  const composite = resolveInstallSelection({
+    args: [],
+    detectedProfile: "react-native",
+    kitRoot: KIT_ROOT,
+    projectRoot: nativeProject,
+  });
+  assert.deepEqual(composite.profiles, ["react-native"]);
+  assert.deepEqual(composite.skillProfiles, ["android", "ios", "react-native"]);
+  assert.equal(composite.skillNames.has("android-code-review"), true);
+  assert.equal(composite.skillNames.has("ios-clean-architecture"), true);
+
+  const explicit = resolveInstallSelection({
+    args: ["--skills", "react-development-guide"],
+    detectedProfile: "generic",
+    kitRoot: KIT_ROOT,
+    projectRoot: tempRoot(),
+  });
+  assert.deepEqual(explicit.profiles, []);
+  assert.equal(explicit.skillNames.has("react-development-guide"), true);
+});
 
 test("active host wins deterministically for Claude Codex and OMP", () => {
   for (const host of ["claude", "codex", "omp"]) {
@@ -59,6 +136,17 @@ test("active host wins deterministically for Claude Codex and OMP", () => {
     assert.equal(plan.entries[0].source_host, host);
     assert.equal(plan.entries[0].automatic_on_demand, true);
   }
+});
+
+test("explicit active host overrides ambient host markers", () => {
+  assert.equal(
+    detectActiveHost({
+      AGENT_FLOW_ACTIVE_HOST: "omp",
+      CLAUDECODE: "1",
+      CODEX_THREAD_ID: "thread-1",
+    }),
+    "omp",
+  );
 });
 
 test("explicit invalid active source must fail before fallback", () => {
@@ -226,4 +314,32 @@ test("runtime activation honors phase and both task and path selectors", () => {
     ["always-code", "code-generation-discipline", "conditional"],
   );
   assert.deepEqual(resolveRuntimeSkillPlan(index, { phaseId: "design" }).skills, []);
+});
+
+test("secondary declared artifacts must exist and be fresh", () => {
+  const phase = {
+    artifacts: ["artifacts/result.md", "artifacts/evidence.json", "artifacts/log.txt"],
+  };
+  const issues = evaluateDeclaredArtifacts(
+    phase,
+    [
+      {
+        path: "artifacts/evidence.json",
+        exists: true,
+        is_file: true,
+        mtime_ms: Date.parse("2026-07-14T23:59:00Z"),
+      },
+      {
+        path: "artifacts/log.txt",
+        exists: false,
+        is_file: false,
+      },
+    ],
+    "2026-07-15T00:00:00Z",
+  );
+
+  assert.deepEqual(issues, [
+    "stale declared artifact artifacts/evidence.json",
+    "missing declared artifact artifacts/log.txt",
+  ]);
 });

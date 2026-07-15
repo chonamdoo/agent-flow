@@ -45,7 +45,7 @@ SKILL_PLAN_HASH_VERSION = 2
 SKILL_LINKS_COMMITMENT_VERSION = 2
 MANAGED_HOST_FILES_VERSION = 1
 MANAGED_HOST_FILES_COMMITMENT_VERSION = 1
-MANAGED_HOOK_CONTRACT_VERSION = 2
+MANAGED_HOOK_CONTRACT_VERSION = 3
 MANAGED_HOOK_CONTRACT_COMMITMENT_VERSION = 2
 MANAGED_HOOK_SCRIPT_NAMES = (
     "guard-worktree.sh",
@@ -58,54 +58,6 @@ MANAGED_HOOK_CONFIG_PATHS = (
     ".Codex/hooks.json",
     ".codex/hooks.json",
     ".claude/settings.json",
-)
-MANAGED_HOOK_VERIFIER = "\n".join(
-    (
-        "import base64,hashlib,os,stat,sys,tempfile,time",
-        "p=base64.b64decode(sys.argv[1],validate=True).decode('utf-8'); expected=sys.argv[2]",
-        "source_fd=None; stage_fd=None; stage_path=None",
-        "try:",
-        " source_fd=os.open(p,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))",
-        " before=os.fstat(source_fd)",
-        " ok=stat.S_ISREG(before.st_mode) and before.st_nlink==1 and bool(before.st_mode & 0o111)",
-        " if ok:",
-        "  with os.fdopen(os.dup(source_fd),'rb') as f: content=f.read()",
-        "  after=os.fstat(source_fd)",
-        "  identity=(before.st_dev,before.st_ino,before.st_mode,before.st_nlink,before.st_size)",
-        "  ok=identity==(after.st_dev,after.st_ino,after.st_mode,after.st_nlink,after.st_size) and hashlib.sha256(content).hexdigest()==expected",
-        " if not ok: raise OSError('integrity mismatch')",
-        " stage_fd,stage_path=tempfile.mkstemp(prefix='agent-flow-managed-hook-')",
-        " view=memoryview(content)",
-        " while view:",
-        "  written=os.write(stage_fd,view)",
-        "  if written<=0: raise OSError('staging write failed')",
-        "  view=view[written:]",
-        " os.fsync(stage_fd); os.fchmod(stage_fd,0o400); os.lseek(stage_fd,0,os.SEEK_SET)",
-        " os.unlink(stage_path); stage_path=None; os.set_inheritable(stage_fd,True)",
-        " os.close(source_fd); source_fd=None",
-        " source_ref=f'/dev/fd/{stage_fd}'",
-        " if not os.path.exists(source_ref): raise OSError('descriptor execution unavailable')",
-        " env=dict(os.environ); env['AGENT_FLOW_MANAGED_HOOK_SOURCE_PATH']=p; env['PATH']='/usr/bin:/bin'",
-        " [env.pop(name,None) for name in ('BASH_ENV','ENV','PYTHONPATH','PYTHONHOME','PYTHONSTARTUP','LD_PRELOAD','LD_LIBRARY_PATH','DYLD_INSERT_LIBRARIES','DYLD_LIBRARY_PATH')]",
-        " try: hold=int(env.get('AGENT_FLOW_TEST_HOLD_AFTER_MANAGED_HOOK_STAGE_MS','0'))",
-        " except ValueError: hold=0",
-        " if 0<hold<=10000:",
-        "  print('agent-flow:test-hook-staged:'+os.path.basename(p),file=sys.stderr,flush=True); time.sleep(hold/1000)",
-        " if p.endswith('.py'): os.execve('/usr/bin/python3',['/usr/bin/python3','-I','-B',source_ref],env)",
-        " if p.endswith('.sh'): os.execve('/bin/bash',['/bin/bash',source_ref],env)",
-        " raise OSError('unsupported managed hook type')",
-        "except (OSError,UnicodeError,ValueError):",
-        " print('agent-flow: blocked because managed hook integrity validation failed',file=sys.stderr)",
-        " raise SystemExit(2)",
-        "finally:",
-        " if source_fd is not None: os.close(source_fd)",
-        " if stage_path is not None:",
-        "  try: os.unlink(stage_path)",
-        "  except OSError: pass",
-        " if stage_fd is not None:",
-        "  try: os.close(stage_fd)",
-        "  except OSError: pass",
-    )
 )
 WRITE_TOOL_MATCHER = (
     "^(apply_patch|Write|Edit|MultiEdit|NotebookEdit|Eval|Python|Notebook|"
@@ -1126,6 +1078,11 @@ def _trusted_managed_hook_script_name(
     for script_name in MANAGED_HOOK_SCRIPT_NAMES:
         relative = f".agent-flow/scripts/hooks/{script_name}"
         script_path = normalized_root.joinpath(*relative.split("/"))
+        if command not in {
+            _managed_hook_command(normalized_root, script_name, "codex"),
+            _managed_hook_command(normalized_root, script_name, "claude"),
+        }:
+            continue
         try:
             metadata = script_path.lstat()
             if not (
@@ -1139,26 +1096,18 @@ def _trusted_managed_hook_script_name(
                 digest = expected_script_hashes.get(relative, "")
         except OSError:
             continue
-        encoded_path = base64.b64encode(script_path.as_posix().encode("utf-8")).decode(
-            "ascii"
-        )
-        expected = " ".join(
-            (
-                _shell_quote("/usr/bin/python3"),
-                "-I",
-                "-c",
-                _shell_quote(MANAGED_HOOK_VERIFIER),
-                _shell_quote(encoded_path),
-                _shell_quote(digest),
-            )
-        )
-        if command == expected:
+        if hashlib.sha256(script_path.read_bytes()).hexdigest() == digest:
             return script_name
     return ""
 
 
 def _shell_quote(value: object) -> str:
     return "'" + str(value).replace("'", "'\\''") + "'"
+
+
+def _managed_hook_command(root: Path, script_name: str, host: str) -> str:
+    script_path = root / ".agent-flow" / "scripts" / "hooks" / script_name
+    return f"{_shell_quote(script_path.as_posix())} --host {_shell_quote(host)}"
 
 
 def _managed_hook_candidate_script_name(command: object) -> str:
@@ -1634,9 +1583,11 @@ def resolve_runtime_skill_plan(
     phase_id: str,
     changed_files: Iterable[str] = (),
     task_scope: str = "",
+    required_skills: Iterable[str] = (),
 ) -> dict[str, Any]:
     normalized_task_scope = _normalize_task_scope(task_scope)
-    if phase_id not in CODE_SKILL_PHASES:
+    phase_required = set(_logical_strings(list(required_skills)))
+    if phase_id not in CODE_SKILL_PHASES and not phase_required:
         return {
             "phase": phase_id,
             "active_profiles": [],
@@ -1677,7 +1628,9 @@ def resolve_runtime_skill_plan(
         routing,
     )
     missing_profiles = sorted(touched_profiles - installed_profiles)
-    required = {"code-generation-discipline"}
+    required = set(phase_required)
+    if phase_id in CODE_SKILL_PHASES:
+        required.add("code-generation-discipline")
     required_review = selection.get("required_review")
     if not isinstance(required_review, dict):
         required_review = {}
@@ -2066,8 +2019,10 @@ def profile_skill_prompt_block(
     worktree_root: Path,
     task_scope: str | None = None,
     base_commit: str | None = None,
+    required_skills: Iterable[str] = (),
 ) -> str:
-    if phase_id not in CODE_SKILL_PHASES:
+    phase_required = tuple(required_skills)
+    if phase_id not in CODE_SKILL_PHASES and not phase_required:
         return ""
     index_path = index_root / ".agent-flow" / "skills" / "index.json"
     kit_path = index_root / ".agent-flow" / "kit.json"
@@ -2089,6 +2044,7 @@ def profile_skill_prompt_block(
             base_commit,
         ),
         _configured_task_scope(index_root) if task_scope is None else task_scope,
+        phase_required,
     )
     if plan["missing_profiles"]:
         raise RuntimeError(

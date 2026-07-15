@@ -55,6 +55,11 @@ def _strip_markdown_frontmatter(text: str) -> str:
     return text if end == -1 else text[end + len("\n---\n") :].lstrip("\n")
 
 
+def _managed_hook_command(script_path: Path, host: str) -> str:
+    quote = lambda value: "'" + str(value).replace("'", "'\\''") + "'"
+    return f"{quote(script_path)} --host {quote(host)}"
+
+
 class CliTest(unittest.TestCase):
     def test_init_creates_agent_flow_dirs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -241,13 +246,13 @@ class CliTest(unittest.TestCase):
         self.assertIn("## Overall", phases["multi-review"]["prompt"])
         self.assertIn("verdict: approve", phases["multi-review"]["prompt"])
         self.assertIn("verdict: request-changes", phases["multi-review"]["prompt"])
-        self.assertEqual(phases["fix-loop"]["routes"]["default"], "comment-authoring")
+        self.assertEqual(phases["fix-loop"]["routes"]["success"], "comment-authoring")
         self.assertEqual(phases["architecture-review"]["routes"]["approve"], "gates")
-        self.assertNotIn("blocked", phases["architecture-review"]["routes"])
+        self.assertEqual(phases["architecture-review"]["routes"]["blocked"], "refactor")
         self.assertEqual(phases["pr-watch"]["routes"]["comments"], "pr-comment-fix")
         self.assertEqual(phases["pr-watch"]["routes"]["ci-failed"], "pr-ci-fix")
-        self.assertEqual(phases["pr-comment-fix"]["routes"]["default"], "pr-watch")
-        self.assertEqual(phases["pr-ci-fix"]["routes"]["default"], "pr-watch")
+        self.assertEqual(phases["pr-comment-fix"]["routes"]["success"], "pr-watch")
+        self.assertEqual(phases["pr-ci-fix"]["routes"]["success"], "pr-watch")
         self.assertEqual(phases["merge-approval"]["routes"]["default"], "block")
         self.assertIn("Output: artifacts/red.log.", phases["red"]["prompt"])
         self.assertIn("Output: artifacts/green.log.", phases["green"]["prompt"])
@@ -286,7 +291,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(default_phases["final-review"]["routes"]["approve"], "gates")
         self.assertEqual(default_phases["gates"]["routes"]["green"], "commit")
         self.assertEqual(default_phases["gates"]["routes"]["request-changes"], "fix-loop")
-        self.assertEqual(default_phases["fix-loop"]["routes"]["default"], "comment-authoring")
+        self.assertEqual(default_phases["fix-loop"]["routes"]["success"], "comment-authoring")
         self.assertEqual(default_phases["comment-authoring"]["routes"]["default"], "final-review")
         self.assertIn("comment-authoring: applied", default_phases["comment-authoring"]["required_markers"])
         self.assertIn("comment-checker: checked|unavailable|n/a", default_phases["comment-authoring"]["required_markers"])
@@ -310,8 +315,8 @@ class CliTest(unittest.TestCase):
         self.assertEqual(default_phases["pr-watch"]["routes"]["has_comments"], "pr-comment-fix")
         self.assertEqual(default_phases["pr-watch"]["routes"]["ci_failed"], "pr-ci-fix")
         self.assertEqual(default_phases["pr-watch"]["routes"]["pending"], "block")
-        self.assertEqual(default_phases["pr-comment-fix"]["routes"]["default"], "pr-watch")
-        self.assertEqual(default_phases["pr-ci-fix"]["routes"]["default"], "pr-watch")
+        self.assertEqual(default_phases["pr-comment-fix"]["routes"]["success"], "pr-watch")
+        self.assertEqual(default_phases["pr-ci-fix"]["routes"]["success"], "pr-watch")
 
     def test_workflow_export_outputs_normalized_phase_contract(self) -> None:
         output = io.StringIO()
@@ -1429,26 +1434,20 @@ class CliTest(unittest.TestCase):
             self.assertTrue((project_root / ".agent-flow" / "skills" / "plan-reviewer" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "clean-architecture-core" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "clean-architecture" / "SKILL.md").is_file())
-            self.assertTrue((project_root / ".agent-flow" / "skills" / "android-clean-architecture" / "SKILL.md").is_file())
-            self.assertTrue((project_root / ".agent-flow" / "skills" / "ios-clean-architecture" / "SKILL.md").is_file())
-            self.assertTrue((project_root / ".agent-flow" / "skills" / "react-clean-architecture" / "SKILL.md").is_file())
-            self.assertTrue((project_root / ".agent-flow" / "skills" / "react-native-clean-architecture" / "SKILL.md").is_file())
-            self.assertTrue((project_root / ".agent-flow" / "skills" / "python-api-clean-architecture" / "SKILL.md").is_file())
+            for platform_skill in (
+                "android-clean-architecture",
+                "ios-clean-architecture",
+                "react-clean-architecture",
+                "react-native-clean-architecture",
+                "python-api-clean-architecture",
+                "android-code-review",
+            ):
+                self.assertFalse((project_root / ".agent-flow" / "skills" / platform_skill).exists())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "architecture-reviewer" / "SKILL.md").is_file())
-            self.assertTrue((project_root / ".agent-flow" / "skills" / "android-code-review" / "SKILL.md").is_file())
             self.assertFalse((project_root / ".agent-flow" / "skills" / "android-module-creator").exists())
             self.assertFalse((project_root / ".agent-flow" / "skills" / "android-debugging").exists())
             self.assertFalse((project_root / ".agent-flow" / "skills" / "graphify").exists())
-            self.assertTrue(
-                (
-                    project_root
-                    / ".agent-flow"
-                    / "skills"
-                    / "android-guides"
-                    / "references"
-                    / "architecture-rules-guide.md"
-                ).is_file()
-            )
+            self.assertFalse((project_root / ".agent-flow" / "skills" / "android-guides").exists())
             self.assertTrue((project_root / ".agent-flow" / "prompts" / "push-watch.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "prompts" / "push-watch-tick.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "push-watch" / "SKILL.md").is_file())
@@ -1488,7 +1487,6 @@ class CliTest(unittest.TestCase):
             )
             self.assertTrue((project_root / ".agent-flow" / "skills" / "comment-checker" / "SKILL.md").is_file())
             comment_checker = project_root.resolve() / ".agent-flow" / "scripts" / "hooks" / "comment-checker.py"
-            encoded_comment_checker = base64.b64encode(str(comment_checker).encode("utf-8")).decode("ascii")
             for hooks_path in (
                 project_root / ".Codex" / "hooks.json",
                 project_root / ".codex" / "hooks.json",
@@ -1500,12 +1498,9 @@ class CliTest(unittest.TestCase):
                     for entry in codex_hooks["hooks"]["PostToolUse"]
                     for hook in entry["hooks"]
                 ]
-                self.assertTrue(
-                    any(
-                        command.startswith("'/usr/bin/python3' -I -c ")
-                        and f"'{encoded_comment_checker}'" in command
-                        for command in codex_hook_commands
-                    )
+                self.assertIn(
+                    _managed_hook_command(comment_checker, "codex"),
+                    codex_hook_commands,
                 )
                 self.assertNotIn(str(Path(__file__).resolve().parents[1]), "\n".join(codex_hook_commands))
             omp_extension = project_root / ".omp" / "extensions" / "agent-flow-hooks.ts"
@@ -1541,11 +1536,9 @@ class CliTest(unittest.TestCase):
             self.assertIn("verdict: approve", concise_rule.read_text(encoding="utf-8"))
             self.assertIn("verdict: request-changes", concise_rule.read_text(encoding="utf-8"))
             self.assertIn("next_command", concise_rule.read_text(encoding="utf-8"))
-            self.assertTrue(
-                (project_root / ".agent-flow" / "skills" / "react-development-guide" / "SKILL.md").is_file()
-            )
-            self.assertTrue(
-                (project_root / ".agent-flow" / "skills" / "react-native-development-guide" / "SKILL.md").is_file()
+            self.assertFalse((project_root / ".agent-flow" / "skills" / "react-development-guide").exists())
+            self.assertFalse(
+                (project_root / ".agent-flow" / "skills" / "react-native-development-guide").exists()
             )
             installed_bootstrap = (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(
                 encoding="utf-8"
@@ -1770,14 +1763,19 @@ class CliTest(unittest.TestCase):
             ]
             self.assertEqual(len(commands), len(expected))
             for command, script_path in zip(commands, expected):
-                encoded_path = base64.b64encode(str(script_path).encode("utf-8")).decode("ascii")
-                self.assertTrue(command.startswith("'/usr/bin/python3' -I -c "))
-                self.assertIn(f"'{encoded_path}'", command)
+                self.assertEqual(command, _managed_hook_command(script_path, "claude"))
             omp_extension = (project_root / ".omp" / "extensions" / "agent-flow-hooks.ts").read_text(
                 encoding="utf-8"
             )
             self.assertIn("NotebookEdit|Eval|Python|Notebook", omp_extension)
-            self.assertIn('|| isBashTool(event?.toolName)', omp_extension)
+            self.assertIn(
+                'const BASH_PRE_HOOKS = Object.freeze(["guard-worktree.sh","guard-protected-branch.sh","guard-worktree-write.py"]);',
+                omp_extension,
+            )
+            self.assertIn(
+                'const WRITE_PRE_HOOKS = Object.freeze(["guard-worktree-write.py"]);',
+                omp_extension,
+            )
             stop_hook = subprocess.run(
                 ("/bin/sh", "-c", commands[-1]),
                 cwd=temp_dir,
@@ -1812,14 +1810,7 @@ class CliTest(unittest.TestCase):
                 for hook in entry["hooks"]
             ]
             checker_path = project_root.resolve() / ".agent-flow" / "scripts" / "hooks" / "comment-checker.py"
-            encoded_checker = base64.b64encode(str(checker_path).encode("utf-8")).decode("ascii")
-            self.assertTrue(
-                any(
-                    command.startswith("'/usr/bin/python3' -I -c ")
-                    and f"'{encoded_checker}'" in command
-                    for command in commands
-                )
-            )
+            self.assertIn(_managed_hook_command(checker_path, "claude"), commands)
             self.assertTrue(
                 os.access(project_root / ".agent-flow" / "scripts" / "hooks" / "comment-checker.py", os.X_OK)
             )
@@ -1925,7 +1916,6 @@ class CliTest(unittest.TestCase):
                         checker_path = (
                             project_root.resolve() / ".agent-flow" / "scripts" / "hooks" / "comment-checker.py"
                         )
-                        encoded_checker = base64.b64encode(str(checker_path).encode("utf-8")).decode("ascii")
                         for installed_hooks_path in (
                             project_root / ".Codex" / "hooks.json",
                             project_root / ".codex" / "hooks.json",
@@ -1938,12 +1928,9 @@ class CliTest(unittest.TestCase):
                                 for hook in entry["hooks"]
                             ]
                             self.assertIn(custom_command, commands)
-                            self.assertTrue(
-                                any(
-                                    command.startswith("'/usr/bin/python3' -I -c ")
-                                    and f"'{encoded_checker}'" in command
-                                    for command in commands
-                                )
+                            self.assertIn(
+                                _managed_hook_command(checker_path, "codex"),
+                                commands,
                             )
 
     def test_node_installers_preserve_existing_claude_custom_hooks(self) -> None:
@@ -1994,14 +1981,10 @@ class CliTest(unittest.TestCase):
                     checker_path = (
                         project_root.resolve() / ".agent-flow" / "scripts" / "hooks" / "comment-checker.py"
                     )
-                    encoded_checker = base64.b64encode(str(checker_path).encode("utf-8")).decode("ascii")
                     self.assertIn("custom-post-hook", commands)
-                    self.assertTrue(
-                        any(
-                            command.startswith("'/usr/bin/python3' -I -c ")
-                            and f"'{encoded_checker}'" in command
-                            for command in commands
-                        )
+                    self.assertIn(
+                        _managed_hook_command(checker_path, "claude"),
+                        commands,
                     )
 
     def test_node_installers_dedupe_stop_hook_on_upgrade(self) -> None:
@@ -2021,9 +2004,6 @@ class CliTest(unittest.TestCase):
                         expected_stop_path = (
                             project_root.resolve() / ".agent-flow" / "scripts" / "hooks" / "show-phase-status.sh"
                         )
-                        encoded_stop_path = base64.b64encode(
-                            str(expected_stop_path).encode("utf-8")
-                        ).decode("ascii")
                         legacy_command = stop_command if scenario == "root-script" else cd_stop_command
                         seeded = {
                             "hooks": {
@@ -2070,8 +2050,11 @@ class CliTest(unittest.TestCase):
                             managed_stop_commands = [
                                 command
                                 for command in stop_commands
-                                if command.startswith("'/usr/bin/python3' -I -c ")
-                                and f"'{encoded_stop_path}'" in command
+                                if command
+                                == _managed_hook_command(
+                                    expected_stop_path,
+                                    "claude" if settings_path.parent.name == ".claude" else "codex",
+                                )
                             ]
                             self.assertEqual(len(managed_stop_commands), 1, f"{installer}: {settings_path}")
                             self.assertNotIn(stop_command, stop_commands)
@@ -2087,25 +2070,47 @@ class CliTest(unittest.TestCase):
             fake_bin = Path(temp_dir) / "bin"
             fake_bin.mkdir()
             fake_cli = fake_bin / "agent-flow"
+            long_task = "x" * 2_000
             fake_cli.write_text(
-                "#!/bin/sh\nprintf 'status: running\\nnext_command: agent-flow run advance\\n'\n",
+                "#!/bin/sh\n"
+                'test "$AGENT_FLOW_ACTIVE_HOST" = "omp" || exit 11\n'
+                'test "$AGENT_FLOW_EXECUTION_ID" = "session-42" || exit 12\n'
+                'test "$AGENT_FLOW_AGENT_ID" = "agent-7" || exit 13\n'
+                f"printf '%s\\n' 'Task: {long_task}' 'Artifacts: 42 written' "
+                "'status: stale-noise' "
+                "'status_json: {\"status\":\"running\",\"current_phase\":\"implement\","
+                "\"reason\":\"in_progress\",\"next_command\":\"agent-flow run advance\"}'\n",
                 encoding="utf-8",
             )
             fake_cli.chmod(0o755)
             env = {**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}"}
             result = subprocess.run(
-                ("/bin/bash", str(hook)),
+                ("/bin/bash", str(hook), "--host", "codex"),
                 cwd=project_root,
                 env=env,
+                input=json.dumps(
+                    {
+                        "host": "omp",
+                        "session_id": "session-42",
+                        "agent_id": "agent-7",
+                    }
+                ),
                 text=True,
                 capture_output=True,
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             payload = json.loads(result.stdout)
-            self.assertIn("[agent-flow]", payload["systemMessage"])
-            self.assertIn("status: running", payload["systemMessage"])
-            self.assertIn("next_command", payload["systemMessage"])
+            message = payload["systemMessage"]
+            self.assertIn("[agent-flow]", message)
+            self.assertIn("status: running", message)
+            self.assertIn("current_phase: implement", message)
+            self.assertIn("reason: in_progress", message)
+            self.assertIn("next_command: agent-flow run advance", message)
+            self.assertNotIn("Task:", message)
+            self.assertNotIn("Artifacts:", message)
+            self.assertNotIn("stale-noise", message)
+            self.assertLess(len(message), 1_000)
 
     def test_guard_hooks_report_block_reason_on_stderr(self) -> None:
         # exit 2일 때 Claude/Codex/OMP는 stderr만 모델에 전달한다. stdout은 무시된다.
@@ -2134,6 +2139,22 @@ class CliTest(unittest.TestCase):
                 (
                     hooks_dir / "guard-protected-branch.sh",
                     {"tool_name": "Bash", "tool_input": {"command": "git commit -m x"}},
+                ),
+                (
+                    hooks_dir / "guard-worktree.sh",
+                    {"tool_name": "Bash", "tool_input": {"command": "true\ngit switch main"}},
+                ),
+                (
+                    hooks_dir / "guard-worktree.sh",
+                    {"tool_name": "Bash", "tool_input": {"command": "true\r\ngit checkout main"}},
+                ),
+                (
+                    hooks_dir / "guard-protected-branch.sh",
+                    {"tool_name": "Bash", "tool_input": {"command": "true\ngit commit -m x"}},
+                ),
+                (
+                    hooks_dir / "guard-protected-branch.sh",
+                    {"tool_name": "Bash", "tool_input": {"command": "true\r\ngit push origin main"}},
                 ),
             )
             for hook, payload in cases:
@@ -2507,6 +2528,7 @@ class CliTest(unittest.TestCase):
                             run_id,
                         ),
                         cwd=worktree,
+                        env=_node_test_env(AGENT_FLOW_EXECUTION_ID=f"parent-worktree-{index}"),
                         text=True,
                         capture_output=True,
                         check=False,
@@ -2524,6 +2546,7 @@ class CliTest(unittest.TestCase):
             with mock.patch.dict(os.environ, {
                 "AGENT_FLOW_ADAPTER": "generic",
                 "AGENT_FLOW_GENERIC_MODE": "stub-success",
+                "AGENT_FLOW_EXECUTION_ID": "managed-status",
             }):
                 self.assertEqual(main(["run", "slice", "--root", str(root)]), 0)
             worktree = root / ".agent-flow" / "worktrees" / "feat-slice"
@@ -2533,8 +2556,9 @@ class CliTest(unittest.TestCase):
             try:
                 os.chdir(worktree)
                 output = io.StringIO()
-                with contextlib.redirect_stdout(output):
-                    self.assertEqual(main(["status"]), 0)
+                with mock.patch.dict(os.environ, {"AGENT_FLOW_EXECUTION_ID": "managed-status"}):
+                    with contextlib.redirect_stdout(output):
+                        self.assertEqual(main(["status"]), 0)
             finally:
                 os.chdir(old_cwd)
 
@@ -2543,6 +2567,120 @@ class CliTest(unittest.TestCase):
             self.assertIn("current_phase: slice-plan", status)
             self.assertIn(f"next_command: agent-flow continue --root {root.resolve()} --worktree feat-slice", status)
             self.assertFalse((worktree / ".agent-flow" / "runs").exists())
+
+    def test_python_cli_new_execution_creates_a_parallel_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "project"
+            root.mkdir()
+            _init_git_repo(root)
+
+            with mock.patch.dict(os.environ, {"AGENT_FLOW_EXECUTION_ID": "session-a"}):
+                self.assertEqual(main(["run", "slice", "--root", str(root)]), 0)
+            with mock.patch.dict(os.environ, {"AGENT_FLOW_EXECUTION_ID": "session-b"}):
+                self.assertEqual(main(["run", "other", "--root", str(root)]), 0)
+
+            self.assertTrue((root / ".agent-flow" / "worktrees" / "feat-slice").is_dir())
+            self.assertTrue((root / ".agent-flow" / "worktrees" / "feat-other").is_dir())
+            bindings = list((root / ".git" / "agent-flow" / "executions").glob("*.json"))
+            self.assertEqual(len(bindings), 2)
+
+    def test_python_cli_execution_cannot_abort_explicit_sibling_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "project"
+            root.mkdir()
+            _init_git_repo(root)
+
+            with mock.patch.dict(os.environ, {"AGENT_FLOW_EXECUTION_ID": "session-a"}):
+                self.assertEqual(main(["run", "slice", "--root", str(root)]), 0)
+            with mock.patch.dict(os.environ, {"AGENT_FLOW_EXECUTION_ID": "session-b"}):
+                self.assertEqual(main(["run", "other", "--root", str(root)]), 0)
+
+            error = io.StringIO()
+            with mock.patch.dict(os.environ, {"AGENT_FLOW_EXECUTION_ID": "session-a"}):
+                with contextlib.redirect_stderr(error):
+                    result = main(
+                        [
+                            "abort",
+                            "--root",
+                            str(root),
+                            "--worktree",
+                            "feat-other",
+                            "--yes",
+                        ]
+                    )
+
+            self.assertEqual(result, 2)
+            self.assertIn("execution_binding_conflict", error.getvalue())
+            sibling_runtime = worktree_runtime_root(root=root, name="feat-other")
+            self.assertEqual(
+                len(list((sibling_runtime / ".agent-flow" / "runs").glob("*/active"))),
+                1,
+            )
+
+    def test_python_cli_unbound_execution_cannot_inspect_or_abort_explicit_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "project"
+            root.mkdir()
+            _init_git_repo(root)
+
+            with mock.patch.dict(os.environ, {"AGENT_FLOW_EXECUTION_ID": "session-a"}):
+                self.assertEqual(main(["run", "slice", "--root", str(root)]), 0)
+
+            unbound_env = {
+                "AGENT_FLOW_EXECUTION_ID": "",
+                "AGENT_FLOW_SESSION_ID": "",
+                "CODEX_THREAD_ID": "",
+                "CODEX_SESSION_ID": "",
+                "CLAUDE_SESSION_ID": "",
+                "OMP_SESSION_ID": "",
+            }
+            status_error = io.StringIO()
+            abort_error = io.StringIO()
+            with mock.patch.dict(os.environ, unbound_env):
+                with contextlib.redirect_stderr(status_error):
+                    status_result = main(
+                        ["status", "--root", str(root), "--worktree", "feat-slice"]
+                    )
+                with contextlib.redirect_stderr(abort_error):
+                    abort_result = main(
+                        [
+                            "abort",
+                            "--root",
+                            str(root),
+                            "--worktree",
+                            "feat-slice",
+                            "--yes",
+                        ]
+                    )
+
+            self.assertEqual(status_result, 2)
+            self.assertEqual(abort_result, 2)
+            self.assertIn("execution_identity_missing", status_error.getvalue())
+            self.assertIn("execution_identity_missing", abort_error.getvalue())
+            runtime = worktree_runtime_root(root=root, name="feat-slice")
+            self.assertEqual(
+                len(list((runtime / ".agent-flow" / "runs").glob("*/active"))),
+                1,
+            )
+
+    def test_python_cli_same_execution_does_not_replace_a_missing_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "project"
+            root.mkdir()
+            _init_git_repo(root)
+
+            with mock.patch.dict(os.environ, {"AGENT_FLOW_EXECUTION_ID": "session-a"}):
+                self.assertEqual(main(["run", "slice", "--root", str(root)]), 0)
+            binding = next((root / ".git" / "agent-flow" / "executions").glob("*.json"))
+            binding.unlink()
+
+            error = io.StringIO()
+            with mock.patch.dict(os.environ, {"AGENT_FLOW_EXECUTION_ID": "session-a"}):
+                with contextlib.redirect_stderr(error):
+                    self.assertEqual(main(["run", "other", "--root", str(root)]), 2)
+
+            self.assertIn("execution_binding_missing", error.getvalue())
+            self.assertFalse((root / ".agent-flow" / "worktrees" / "feat-other").exists())
 
     def test_python_cli_run_from_managed_worktree_reuses_parent_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2923,7 +3061,7 @@ if (codexContext !== undefined) {
                     )
                     self.assertEqual(exercise_result.returncode, 0, exercise_result.stderr)
 
-    def test_node_installers_omp_hook_fails_closed_for_tampered_or_missing_script(self) -> None:
+    def test_node_installers_omp_hook_invokes_direct_script_and_blocks_missing_script(self) -> None:
         installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -2966,9 +3104,24 @@ const call = () => handlers.get("tool_call")(
   { toolName: "Write", input: { file_path: "demo.txt" } },
   { cwd: process.cwd() },
 );
-const tampered = await call();
-if (!tampered?.block) {
-  throw new Error("tampered OMP hook script did not fail closed");
+const bashEvent = { toolName: "Bash", input: { command: "agent-flow status" } };
+const bashResult = await handlers.get("tool_call")(
+  bashEvent,
+  {
+    cwd: process.cwd(),
+    agentId: "omp-agent-3",
+    sessionManager: { getSessionId() { return "omp-session-9"; } },
+  },
+);
+if (bashResult !== undefined) {
+  throw new Error("OMP Bash hooks unexpectedly blocked execution identity forwarding");
+}
+if (!bashEvent.input.command.startsWith("export AGENT_FLOW_ACTIVE_HOST='omp' AGENT_FLOW_EXECUTION_ID='omp-session-9' AGENT_FLOW_AGENT_ID='omp-agent-3'; ")) {
+  throw new Error("OMP stable execution identity was not forwarded to the Bash process");
+}
+const direct = await call();
+if (direct !== undefined) {
+  throw new Error("direct OMP hook invocation did not preserve script exit status");
 }
 fs.unlinkSync(".agent-flow/scripts/hooks/guard-worktree-write.py");
 const missing = await call();
@@ -3442,7 +3595,7 @@ if (!missing?.block) {
             )
             self.assertEqual(advanced.returncode, 0, advanced.stderr)
             self.assertIn("Current phase: product-brief", advanced.stdout)
-            state = json.loads((project_root / ".agent-flow" / "state" / "current-run.json").read_text(encoding="utf-8"))
+            state = json.loads(_node_authoritative_current_run_state_path(project_root).read_text(encoding="utf-8"))
             self.assertEqual(state["phase"], "product-brief")
 
     def test_node_heading_required_markers_ignore_fenced_examples(self) -> None:
@@ -3536,7 +3689,7 @@ if (!missing?.block) {
                 ).returncode,
                 0,
             )
-            state_path = project_root / ".agent-flow" / "state" / "current-run.json"
+            state_path = _node_authoritative_current_run_state_path(project_root)
             state = json.loads(state_path.read_text(encoding="utf-8"))
             state.update({"workflow": "default", "phase_index": 3, "phase": "implement", "status": "running"})
             state_path.write_text(json.dumps(state), encoding="utf-8")
@@ -3608,7 +3761,7 @@ if (!missing?.block) {
                 ).returncode,
                 0,
             )
-            state_path = project_root / ".agent-flow" / "state" / "current-run.json"
+            state_path = _node_authoritative_current_run_state_path(project_root)
             state = json.loads(state_path.read_text(encoding="utf-8"))
             state.update({"workflow": "bugfix", "phase_index": 1, "phase": "implement-fix", "status": "running"})
             state_path.write_text(json.dumps(state), encoding="utf-8")
@@ -3786,7 +3939,7 @@ if (!missing?.block) {
             ]
             run_dir = project_root / ".agent-flow" / "runs" / "full-feature" / "r1"
             for index, phase in enumerate(expected_phases):
-                state = json.loads((project_root / ".agent-flow" / "state" / "current-run.json").read_text(encoding="utf-8"))
+                state = json.loads(_node_authoritative_current_run_state_path(project_root).read_text(encoding="utf-8"))
                 self.assertEqual(state["phase"], phase)
                 artifact = run_dir / _node_phase_artifact(phase)
                 artifact.parent.mkdir(parents=True, exist_ok=True)
@@ -3835,7 +3988,7 @@ if (!missing?.block) {
                 ).returncode,
                 0,
             )
-            current_run = project_root / ".agent-flow" / "state" / "current-run.json"
+            current_run = _node_authoritative_current_run_state_path(project_root)
             state = json.loads(current_run.read_text(encoding="utf-8"))
             state["phase"] = "red"
             state["phase_index"] = 0
@@ -3955,8 +4108,8 @@ if (!missing?.block) {
             self.assertEqual(stale_comment_status.returncode, 0, stale_comment_status.stderr)
             self.assertIn("reason: stale_artifact", stale_comment_status.stdout)
             self.assertIn("next_command: agent-flow run advance", stale_comment_status.stdout)
-            comment_fix.write_text("pushed comment fixes\n", encoding="utf-8")
-            same_ms = json.loads((project_root / ".agent-flow" / "state" / "current-run.json").read_text(encoding="utf-8"))
+            comment_fix.write_text(_node_phase_content("pr-comment-fix"), encoding="utf-8")
+            same_ms = json.loads(_node_authoritative_current_run_state_path(project_root).read_text(encoding="utf-8"))
             entered_ts = _node_epoch_seconds(same_ms["phase_entered_at"])
             os.utime(comment_fix, (entered_ts, entered_ts))
             back_to_watch = subprocess.run(
@@ -3988,7 +4141,7 @@ if (!missing?.block) {
             )
             self.assertEqual(reused_comment_fix.returncode, 1)
             self.assertIn("blocked: missing artifact", reused_comment_fix.stderr)
-            comment_fix.write_text("pushed second comment fixes\n", encoding="utf-8")
+            comment_fix.write_text(_node_phase_content("pr-comment-fix"), encoding="utf-8")
             self.assertEqual(
                 subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode,
                 0,
@@ -4016,7 +4169,7 @@ if (!missing?.block) {
             )
             self.assertEqual(stale_ci_fix.returncode, 1)
             self.assertIn("blocked: stale artifact", stale_ci_fix.stderr)
-            ci_fix.write_text("pushed ci fixes\n", encoding="utf-8")
+            ci_fix.write_text(_node_phase_content("pr-ci-fix"), encoding="utf-8")
             back_to_watch_again = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=project_root,
@@ -4037,6 +4190,73 @@ if (!missing?.block) {
             )
             self.assertEqual(ready.returncode, 0, ready.stderr)
             self.assertIn("Current phase: merge", ready.stdout)
+
+    def test_node_code_phase_requires_runtime_selected_skill_contract(self) -> None:
+        import yaml
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            self.assertEqual(
+                subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode,
+                0,
+            )
+            self.assertEqual(
+                subprocess.run(
+                    (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
+                    cwd=project_root,
+                    check=False,
+                ).returncode,
+                0,
+            )
+            workflow = yaml.safe_load(
+                (project_root / ".agent-flow" / "workflows" / "full-feature.yaml").read_text(
+                    encoding="utf-8"
+                )
+            )
+            phase_index = next(
+                index
+                for index, phase in enumerate(workflow["phases"])
+                if phase["id"] == "red"
+            )
+            run_dir = project_root / ".agent-flow" / "runs" / "full-feature" / "r1"
+            state_path = _node_authoritative_current_run_state_path(project_root)
+            manifest_path = run_dir / "manifest.json"
+            state = json.loads(manifest_path.read_text(encoding="utf-8"))
+            state.update(
+                {
+                    "phase_index": phase_index,
+                    "phase": "red",
+                    "status": "running",
+                    "phase_entered_at": "2000-01-01T00:00:00.000Z",
+                }
+            )
+            serialized = json.dumps(state, indent=2) + "\n"
+            manifest_path.write_text(serialized, encoding="utf-8")
+            state_path.write_text(serialized, encoding="utf-8")
+            artifact = run_dir / _node_phase_artifact("red")
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            missing_skill = _node_phase_content("red").replace(
+                '"applied_skills":["code-generation-discipline"]',
+                '"applied_skills":[]',
+            )
+            artifact.write_text(missing_skill, encoding="utf-8")
+
+            blocked = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(blocked.returncode, 1)
+            self.assertIn(
+                "phase-contract missing required skills: code-generation-discipline",
+                blocked.stderr,
+            )
 
     def test_node_plan_review_and_architecture_review_route_request_changes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -4222,7 +4442,7 @@ if (!missing?.block) {
                 artifact.write_text(content, encoding="utf-8")
                 self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
 
-            state = json.loads((project_root / ".agent-flow" / "state" / "current-run.json").read_text(encoding="utf-8"))
+            state = json.loads(_node_authoritative_current_run_state_path(project_root).read_text(encoding="utf-8"))
             self.assertEqual(state["phase"], "gates")
 
             gates_artifact = run_dir / _node_phase_artifact("gates")
@@ -4328,7 +4548,7 @@ if (!missing?.block) {
                 artifact.write_text(content, encoding="utf-8")
                 self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
 
-            state = json.loads((project_root / ".agent-flow" / "state" / "current-run.json").read_text(encoding="utf-8"))
+            state = json.loads(_node_authoritative_current_run_state_path(project_root).read_text(encoding="utf-8"))
             self.assertEqual(state["phase"], "multi-review")
 
             mr_artifact = run_dir / _node_phase_artifact("multi-review")
@@ -4541,7 +4761,7 @@ if (!missing?.block) {
             self.assertEqual(result.returncode, 1)
             self.assertIn("fix-loop exceeded", result.stderr)
             current_state = json.loads(
-                (project_root / ".agent-flow" / "state" / "current-run.json").read_text(encoding="utf-8")
+                _node_authoritative_current_run_state_path(project_root).read_text(encoding="utf-8")
             )
             self.assertEqual(current_state["fix_loop_rounds"], 3)
 
@@ -6630,6 +6850,9 @@ if (!missing?.block) {
             "git -C . checkout -b feat/test",
             "command git checkout -b feat/test",
             "env TEST=1 git checkout -B feat/test",
+            "/usr/bin/git checkout -b feat/absolute",
+            "command /usr/bin/git checkout -B feat/absolute-command",
+            "TEST=1 git checkout -b feat/assignment",
         ):
             blocked_create = subprocess.run(
                 ("bash", str(script)),
@@ -6640,6 +6863,20 @@ if (!missing?.block) {
             )
             self.assertEqual(blocked_create.returncode, 2, command)
             self.assertIn("브랜치만 만들지", blocked_create.stderr)
+
+        for command in (
+            "/usr/bin/git switch codex/current",
+            "TEST=1 git switch codex/current",
+        ):
+            blocked_switch = subprocess.run(
+                ("bash", str(script)),
+                input=json.dumps({"tool_input": {"command": command}}),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(blocked_switch.returncode, 2, command)
+            self.assertIn("기준 worktree", blocked_switch.stderr)
 
         blocked_detach = subprocess.run(
             ("bash", str(script)),
@@ -6676,6 +6913,9 @@ if (!missing?.block) {
                 "git -C . commit -m test",
                 "command git commit -m test",
                 "env TEST=1 git push origin main",
+                "/usr/bin/git commit -m test",
+                "command /usr/bin/git push origin main",
+                "TEST=1 git commit -m test",
             ):
                 result = subprocess.run(
                     ("bash", str(script)),
@@ -9103,6 +9343,16 @@ def _node_phase_artifact(phase: str) -> Path:
     return artifacts[phase]
 
 
+def _node_authoritative_current_run_state_path(project_root: Path) -> Path:
+    scoped = [
+        *project_root.glob(".git/agent-flow/current-runs/*.json"),
+        *project_root.glob(".agent-flow/state/current-runs/*.json"),
+    ]
+    if len(scoped) > 1:
+        raise AssertionError(f"expected at most one execution-scoped state file, found {scoped}")
+    return scoped[0] if scoped else project_root / ".agent-flow" / "state" / "current-run.json"
+
+
 def _node_presentation_gate() -> str:
     # n/a 허용 marker는 optional alias도 통과해야 한다.
     return (
@@ -9135,6 +9385,7 @@ def _node_implement_gate(*, local_skill: bool) -> str:
         + "clean-architecture: applied\n"
         + (_node_project_local_applied_gate() if local_skill else _node_project_local_gate())
         + _node_presentation_gate()
+        + _node_phase_contract("implement")
     )
 
 
@@ -9155,6 +9406,77 @@ def _node_review_parity_gate() -> str:
         "codex-claude-parity-check: pass\n"
         "hook-parity-check: pass\n"
     )
+
+
+def _node_phase_contract(phase: str, *, failed_requirement: str | None = None) -> str:
+    contracts = {
+        "design": (
+            [
+                "grill-with-docs",
+                "grilling",
+                "domain-modeling",
+                "ddd-architecture",
+                "clean-architecture",
+                "clean-architecture-core",
+            ],
+            ["domain-model", "architecture-boundaries"],
+        ),
+        "ddd-design": (
+            ["ddd-architecture", "clean-architecture", "clean-architecture-core"],
+            ["domain-model", "architecture-boundaries"],
+        ),
+        "multi-review": (
+            ["code-generation-discipline", "code-review", "architecture-reviewer", "clean-architecture-core"],
+            ["independent-reviewers", "architecture-contract"],
+        ),
+        "architecture-review": (
+            ["code-generation-discipline", "ddd-architecture", "architecture-reviewer", "clean-architecture-core"],
+            ["independent-reviewers", "architecture-contract"],
+        ),
+        "final-review": (
+            ["code-generation-discipline", "code-review", "architecture-reviewer", "clean-architecture-core"],
+            ["independent-reviewers", "architecture-contract"],
+        ),
+        "implement": (
+            ["code-generation-discipline"],
+            ["tdd-cycle-complete", "tests-pass"],
+        ),
+        "red": (
+            ["code-generation-discipline"],
+            ["expected-test-failure"],
+        ),
+        "green": (
+            ["code-generation-discipline"],
+            ["tests-pass"],
+        ),
+        "refactor": (
+            ["code-generation-discipline"],
+            ["tests-pass", "behavior-preserved"],
+        ),
+        "fix-loop": (
+            ["code-generation-discipline"],
+            ["findings-resolved", "tests-pass"],
+        ),
+        "pr-comment-fix": (
+            ["code-generation-discipline"],
+            ["comments-resolved"],
+        ),
+        "pr-ci-fix": (
+            ["code-generation-discipline"],
+            ["ci-pass"],
+        ),
+    }
+    if phase not in contracts:
+        return ""
+    skills, requirements = contracts[phase]
+    payload = {
+        "applied_skills": skills,
+        "requirements": {
+            requirement: "fail" if requirement == failed_requirement else "pass"
+            for requirement in requirements
+        },
+    }
+    return f"phase-contract: {json.dumps(payload, separators=(',', ':'), sort_keys=True)}\n"
 
 
 def _node_phase_content(phase: str, prefix: str = "") -> str:
@@ -9235,7 +9557,7 @@ def _node_phase_content(phase: str, prefix: str = "") -> str:
             + "module-split: none\n"
         )
     if phase in {"design", "ddd-design"}:
-        return content + clean_design_gate
+        return content + clean_design_gate + _node_phase_contract(phase)
     if phase == "multi-review":
         return (
             "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
@@ -9249,6 +9571,7 @@ def _node_phase_content(phase: str, prefix: str = "") -> str:
             + clean_code_review_gate
             + _node_project_local_gate()
             + _node_presentation_gate()
+            + _node_phase_contract("multi-review")
         )
     if phase == "architecture-review":
         return (
@@ -9258,6 +9581,7 @@ def _node_phase_content(phase: str, prefix: str = "") -> str:
             + skills_gate
             + _node_review_parity_gate()
             + clean_review_gate
+            + _node_phase_contract("architecture-review")
         )
     if phase == "implement":
         return (
@@ -9268,11 +9592,19 @@ def _node_phase_content(phase: str, prefix: str = "") -> str:
             + "clean-architecture: applied\n"
             + _node_project_local_gate()
             + _node_presentation_gate()
+            + _node_phase_contract("implement")
         )
     if phase in {"green", "refactor", "fix-loop"}:
-        return content + skills_gate + "clean-architecture: applied\n"
-    if phase in {"red", "green", "refactor", "fix-loop"}:
-        return content + skills_gate
+        return (
+            content
+            + skills_gate
+            + "clean-architecture: applied\n"
+            + _node_phase_contract(phase)
+        )
+    if phase == "red":
+        return content + skills_gate + _node_phase_contract("red")
+    if phase in {"pr-comment-fix", "pr-ci-fix"}:
+        return content + _node_phase_contract(phase)
     return content
 
 
@@ -9290,6 +9622,7 @@ def _with_skills_gate(content: str) -> str:
         "mapping-boundary-check: applied\n"
         "solid-clean-architecture-check: applied\n"
         + _node_presentation_gate()
+        + _node_phase_contract("multi-review")
     )
 
 
@@ -9317,6 +9650,10 @@ def _with_final_review_gate(content: str, dependency_rule: str = "pass") -> str:
         "mapping-boundary-check: applied\n"
         "solid-clean-architecture-check: applied\n"
         + _node_presentation_gate()
+        + _node_phase_contract(
+            "final-review",
+            failed_requirement="architecture-contract" if dependency_rule == "fail" else None,
+        )
     )
 
 

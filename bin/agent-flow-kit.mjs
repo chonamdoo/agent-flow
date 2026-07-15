@@ -8,6 +8,7 @@ import nodeOs from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
+  CODE_SKILL_PHASES,
   SKILL_DEPENDENCIES,
   discoverAutomaticExternalSkillNames,
   hashSkillTree,
@@ -15,8 +16,10 @@ import {
   mergeResolvedSkillClosure,
   resolveInstallSelection,
   resolveProfileSkillSources,
+  resolveRuntimeSkillPlan,
 } from "../lib/skill-selection.mjs";
 import { detectActiveHost } from "../lib/host-detection.mjs";
+import { evaluateDeclaredArtifacts, evaluatePhaseContract } from "../lib/phase-contract.mjs";
 
 const command = process.argv[2];
 const configuredAgentFlowCommand = process.env.AGENT_FLOW_PROJECT_LAUNCHER;
@@ -39,7 +42,7 @@ const PROJECT_SKILL_HOSTS = Object.freeze(["claude", "codex", "omp"]);
 const SKILL_LINKS_COMMITMENT_VERSION = 2;
 const MANAGED_HOST_FILES_VERSION = 1;
 const MANAGED_HOST_FILES_COMMITMENT_VERSION = 1;
-const MANAGED_HOOK_CONTRACT_VERSION = 2;
+const MANAGED_HOOK_CONTRACT_VERSION = 3;
 const MANAGED_HOOK_CONTRACT_COMMITMENT_VERSION = 2;
 const MANAGED_HOOK_SCRIPT_NAMES = Object.freeze([
   "guard-worktree.sh",
@@ -53,6 +56,16 @@ const MANAGED_HOOK_CONFIG_PATHS = Object.freeze([
   ".codex/hooks.json",
   ".claude/settings.json",
 ]);
+const CANONICAL_HOOK_POLICY = Object.freeze({
+  bashPre: Object.freeze([
+    "guard-worktree.sh",
+    "guard-protected-branch.sh",
+    "guard-worktree-write.py",
+  ]),
+  writePre: Object.freeze(["guard-worktree-write.py"]),
+  writePost: Object.freeze(["comment-checker.py"]),
+  stop: Object.freeze(["show-phase-status.sh"]),
+});
 const REQUIRED_MANAGED_HOST_FILES = Object.freeze([
   ".Codex/agents/code-reviewer.md",
   ".claude/agents/code-reviewer.md",
@@ -1006,9 +1019,8 @@ function runWorkflowCommand(args) {
       throw new Error(`run already exists: ${runId}`);
     }
     const workspace = captureNodeWorkspaceIdentity(process.cwd(), root);
+    const execution = currentExecutionIdentity();
     const skillPlan = currentNodeSkillPlan(root);
-    fs.mkdirSync(path.join(runDir, "artifacts"), { recursive: true });
-    fs.mkdirSync(path.join(runDir, "logs"), { recursive: true });
     const startedAt = new Date().toISOString();
     const state = {
       run_id: runId,
@@ -1022,10 +1034,34 @@ function runWorkflowCommand(args) {
       phase_entered_at: startedAt,
       workspace_root: workspace.workspace_root,
       ...(workspace.identity ? { workspace: workspace.identity } : {}),
+      ...(execution ? { execution } : {}),
       ...skillPlan,
     };
-    writeJson(path.join(runDir, "manifest.json"), state);
-    writeJson(currentRunPath(root), state);
+    let bound = false;
+    const workspaceClaim = acquireNodeWorkspaceStartClaim(root, workspace.identity);
+    try {
+      assertNodeExecutionStartAvailable(root, execution, workspace);
+      fs.mkdirSync(path.join(runDir, "artifacts"), { recursive: true });
+      fs.mkdirSync(path.join(runDir, "logs"), { recursive: true });
+      writeJson(path.join(runDir, "manifest.json"), state);
+      if (execution && workspace.identity) {
+        bindNodeExecution(root, execution, state);
+        bound = true;
+      }
+      writeCurrentRun(root, state);
+    } catch (error) {
+      if (bound) {
+        try {
+          releaseNodeExecution(root, execution, state.run_dir);
+        } catch {
+          // 원래 start 실패를 유지한다.
+        }
+      }
+      fs.rmSync(runDir, { recursive: true, force: true });
+      throw error;
+    } finally {
+      releaseNodeWorkspaceStartClaim(workspaceClaim);
+    }
     printNext(state, root);
     return;
   }
@@ -1111,11 +1147,12 @@ function runWorkflowCommand(args) {
       return;
     }
     const phases = workflowPhases(state.workflow);
-    const phase = phases[state.phase_index];
+    const phase = nodeContractPhase(root, state, phases[state.phase_index]);
     const artifact = path.join(runDir, phase.artifact);
     if (!fs.existsSync(artifact)) {
       throw new Error(`blocked: missing artifact ${artifact}`);
     }
+    assertDeclaredArtifacts(state, phase, runDir);
     assertFreshArtifact(state, phase, artifact);
     assertCompletionMarkers(phase, artifact, root);
     const nextIndex = nextPhaseIndex(state, phases, phase, artifact);
@@ -1133,7 +1170,10 @@ function runWorkflowCommand(args) {
       fix_loop_rounds: fixLoopRounds,
     };
     writeJson(path.join(runDir, "manifest.json"), nextState);
-    writeJson(currentRunPath(root), nextState);
+    writeCurrentRun(root, nextState);
+    if (!nextPhase && nextState.execution && nextState.workspace) {
+      releaseNodeExecution(root, nextState.execution, nextState.run_dir);
+    }
     if (nextPhase) {
       printNext(nextState, root);
     } else {
@@ -1231,12 +1271,21 @@ function normalizeExportedPhase(phase, name, index) {
     : optionalExportedString(phase.prompt, name, index, "prompt", "");
   const artifact = requireExportedString(phase.artifact, name, index, "artifact");
   const requiredMarkers = normalizeExportedStringList(phase.required_markers, name, index, "required_markers");
+  const requiredSkills = normalizeExportedStringList(phase.required_skills, name, index, "required_skills");
+  const requirements = normalizeExportedStringList(phase.requirements, name, index, "requirements");
+  const artifacts = normalizeExportedStringList(phase.artifacts, name, index, "artifacts");
+  if (artifacts.length === 0 || artifacts[0] !== artifact) {
+    throw new Error(`workflow export ${name}: phase ${index} artifacts must begin with artifact`);
+  }
   return {
     id,
     artifact,
     description,
     instruction: prompt || description,
     required_markers: requiredMarkers,
+    required_skills: requiredSkills,
+    requirements,
+    artifacts,
     multi_review: normalizeExportedBoolean(phase.multi_review, name, index, "multi_review"),
     routes: normalizeExportedRoutes(phase.routes, name, index),
   };
@@ -1711,12 +1760,10 @@ function managedHostFilesCommitment(payload) {
 
 function expectedManagedHookProjection() {
   return [
-    ["PostToolUse", WRITE_TOOL_MATCHER, "command", "comment-checker.py"],
-    ["PreToolUse", "Bash", "command", "guard-protected-branch.sh"],
-    ["PreToolUse", "Bash", "command", "guard-worktree-write.py"],
-    ["PreToolUse", "Bash", "command", "guard-worktree.sh"],
-    ["PreToolUse", WRITE_TOOL_MATCHER, "command", "guard-worktree-write.py"],
-    ["Stop", "", "command", "show-phase-status.sh"],
+    ...CANONICAL_HOOK_POLICY.bashPre.map((script) => ["PreToolUse", "Bash", "command", script]),
+    ...CANONICAL_HOOK_POLICY.writePre.map((script) => ["PreToolUse", WRITE_TOOL_MATCHER, "command", script]),
+    ...CANONICAL_HOOK_POLICY.writePost.map((script) => ["PostToolUse", WRITE_TOOL_MATCHER, "command", script]),
+    ...CANONICAL_HOOK_POLICY.stop.map((script) => ["Stop", "", "command", script]),
   ].sort(compareHookProjectionRows);
 }
 
@@ -1883,7 +1930,7 @@ function assertNodeSkillPlanPinned(state, root) {
       skill_plan_repin_from: previousHash,
     });
     writeJson(path.join(authenticatedNodeRunDir(root, state), "manifest.json"), state);
-    writeJson(currentRunPath(root), state);
+    writeCurrentRun(root, state);
   }
 }
 
@@ -1896,11 +1943,47 @@ function safeSpawnSync(commandName, args, options = {}) {
 }
 
 function readCurrentRun(root) {
-  const pathName = currentRunPath(root);
+  const execution = currentExecutionIdentity();
+  const scopedPath = execution ? executionRunStatePath(root, execution) : null;
+  const legacyPath = currentRunPath(root);
+  let pathName = legacyPath;
+  if (execution) {
+    if (scopedPath && fs.existsSync(scopedPath)) {
+      pathName = scopedPath;
+    } else if (fs.existsSync(legacyPath)) {
+      const legacy = JSON.parse(fs.readFileSync(legacyPath, "utf8"));
+      if (
+        legacy.execution
+        && executionIdentityDigest(legacy.execution) === executionIdentityDigest(execution)
+      ) {
+        writeJson(scopedPath, legacy);
+        pathName = scopedPath;
+      } else {
+        throw new Error("no active run is bound to this execution");
+      }
+    } else {
+      throw new Error("no active run is bound to this execution");
+    }
+  } else {
+    const activeExecutions = activeNodeExecutionRunStates(root);
+    if (activeExecutions.length > 0) {
+      const reason = activeExecutions.length > 1
+        ? "multiple active runs require an execution identity"
+        : "active run requires an execution identity";
+      throw new Error(`blocked: ${reason}`);
+    }
+  }
   if (!fs.existsSync(pathName)) {
     throw new Error('no active run. start one with: agent-flow run "<task>"');
   }
   const state = JSON.parse(fs.readFileSync(pathName, "utf8"));
+  if (
+    execution
+    && state.execution
+    && executionIdentityDigest(state.execution) !== executionIdentityDigest(execution)
+  ) {
+    throw new Error("no active run is bound to this execution");
+  }
   authenticatedNodeRunDir(root, state);
   return normalizeRunState(root, state);
 }
@@ -2000,12 +2083,343 @@ function normalizeRunState(root, state) {
     phase_index: index,
   };
   writeJson(path.join(authenticatedNodeRunDir(root, normalized), "manifest.json"), normalized);
-  writeJson(currentRunPath(root), normalized);
+  writeCurrentRun(root, normalized);
   return normalized;
 }
 
 function currentRunPath(root) {
   return path.join(root, ".agent-flow", "state", "current-run.json");
+}
+
+function executionRunStatePath(root, execution) {
+  return path.join(gitCommonAgentFlowRoot(root), "current-runs", `${executionIdentityDigest(execution)}.json`);
+}
+
+function executionBindingPath(root, execution) {
+  return path.join(gitCommonAgentFlowRoot(root), "executions", `${executionIdentityDigest(execution)}.json`);
+}
+
+function activeNodeExecutionRunStates(root) {
+  const statesRoot = path.join(gitCommonAgentFlowRoot(root), "current-runs");
+  if (!fs.existsSync(statesRoot)) return [];
+  return fs.readdirSync(statesRoot, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+    .map((entry) => JSON.parse(fs.readFileSync(path.join(statesRoot, entry.name), "utf8")))
+    .filter((state) => nodeRunStateIsActive(state));
+}
+
+function activeExecutionBindings(root) {
+  const bindingsRoot = path.join(gitCommonAgentFlowRoot(root), "executions");
+  if (!fs.existsSync(bindingsRoot)) return [];
+  return fs.readdirSync(bindingsRoot, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+    .map((entry) => JSON.parse(fs.readFileSync(path.join(bindingsRoot, entry.name), "utf8")))
+    .filter((binding) => nodeBindingIsActive(binding));
+}
+
+function activePythonWorkspaceRuns(root) {
+  const runtimeRoot = path.join(gitCommonAgentFlowRoot(root), "worktrees");
+  if (!fs.existsSync(runtimeRoot)) return [];
+  const active = [];
+  for (const worktreeEntry of fs.readdirSync(runtimeRoot, { withFileTypes: true })) {
+    if (!worktreeEntry.isDirectory() || worktreeEntry.isSymbolicLink()) continue;
+    const runsRoot = path.join(runtimeRoot, worktreeEntry.name, ".agent-flow", "runs");
+    if (!fs.existsSync(runsRoot)) continue;
+    for (const runEntry of fs.readdirSync(runsRoot, { withFileTypes: true })) {
+      if (!runEntry.isDirectory() || runEntry.isSymbolicLink()) continue;
+      const runDir = path.join(runsRoot, runEntry.name);
+      if (!fs.existsSync(path.join(runDir, "active"))) continue;
+      const state = readJsonIfExists(path.join(runDir, "meta.json"));
+      if (state?.workspace?.workspace_root) {
+        active.push({ ...state, run_id: state.run_id ?? runEntry.name, run_dir: runDir });
+      }
+    }
+  }
+  return active;
+}
+
+function nodeRunStateIsActive(state) {
+  return Boolean(
+    state
+    && typeof state === "object"
+    && state.status !== "complete"
+    && state.status !== "aborted"
+    && state.phase !== "complete",
+  );
+}
+
+function gitCommonAgentFlowRoot(root) {
+  const common = gitOutput(root, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  if (!common) return path.join(root, ".agent-flow", "state");
+  return path.join(fs.realpathSync(common), "agent-flow");
+}
+
+function acquireNodeWorkspaceStartClaim(root, identity) {
+  if (!identity?.workspace_root) return null;
+  const claimsRoot = path.join(gitCommonAgentFlowRoot(root), "workspace-start-claims");
+  fs.mkdirSync(claimsRoot, { recursive: true });
+  const digest = crypto.createHash("sha256").update(identity.workspace_root).digest("hex");
+  const claimPath = path.join(claimsRoot, `${digest}.lock`);
+  const token = crypto.randomBytes(16).toString("hex");
+  let acquired = false;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      fs.writeFileSync(
+        claimPath,
+        JSON.stringify({
+          version: 1,
+          pid: process.pid,
+          token,
+          workspace_root: identity.workspace_root,
+        }),
+        { flag: "wx", mode: 0o600 },
+      );
+      acquired = true;
+      break;
+    } catch (error) {
+      if (
+        error?.code === "EEXIST"
+        && attempt === 0
+        && recoverStaleNodeWorkspaceStartClaim(claimPath, identity)
+      ) {
+        continue;
+      }
+      if (error?.code === "EEXIST") {
+        throw new Error("blocked: execution_binding_conflict: workspace start is already in progress");
+      }
+      throw error;
+    }
+  }
+  if (!acquired) throw new Error("blocked: execution_binding_conflict: workspace start claim is unavailable");
+  const metadata = fs.lstatSync(claimPath);
+  return { path: claimPath, dev: metadata.dev, ino: metadata.ino };
+}
+
+function recoverStaleNodeWorkspaceStartClaim(claimPath, identity) {
+  let metadata;
+  try {
+    metadata = fs.lstatSync(claimPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return true;
+    throw error;
+  }
+  if (!metadata.isFile() || metadata.isSymbolicLink()) return false;
+  const claim = readJsonIfExists(claimPath);
+  if (
+    claim?.version !== 1
+    || !Number.isInteger(claim.pid)
+    || claim.pid <= 0
+    || typeof claim.token !== "string"
+    || !claim.token
+    || claim.workspace_root !== identity.workspace_root
+    || processIsAlive(claim.pid)
+  ) {
+    return false;
+  }
+  const quarantine = path.join(
+    path.dirname(claimPath),
+    `.${path.basename(claimPath)}.stale-${process.pid}-${crypto.randomBytes(8).toString("hex")}`,
+  );
+  try {
+    fs.renameSync(claimPath, quarantine);
+  } catch (error) {
+    if (error?.code === "ENOENT") return true;
+    throw error;
+  }
+  const moved = fs.lstatSync(quarantine);
+  const movedClaim = readJsonIfExists(quarantine);
+  if (
+    moved.dev !== metadata.dev
+    || moved.ino !== metadata.ino
+    || movedClaim?.token !== claim.token
+  ) {
+    if (!fs.existsSync(claimPath)) fs.renameSync(quarantine, claimPath);
+    throw new Error("blocked: workspace start claim changed during stale recovery");
+  }
+  fs.unlinkSync(quarantine);
+  return true;
+}
+
+function releaseNodeWorkspaceStartClaim(claim) {
+  if (!claim) return;
+  const metadata = fs.lstatSync(claim.path);
+  if (
+    !metadata.isFile()
+    || metadata.isSymbolicLink()
+    || metadata.dev !== claim.dev
+    || metadata.ino !== claim.ino
+  ) {
+    throw new Error("blocked: workspace start claim identity changed");
+  }
+  fs.unlinkSync(claim.path);
+}
+
+function currentExecutionIdentity(env = process.env) {
+  const host = String(
+    env.AGENT_FLOW_ACTIVE_HOST
+    || env.AGENT_FLOW_HOST
+    || detectActiveHost(env)
+    || "unknown",
+  ).trim().toLowerCase();
+  const hostSession = host === "codex"
+    ? env.CODEX_THREAD_ID || env.CODEX_SESSION_ID
+    : host === "claude"
+      ? env.CLAUDE_SESSION_ID
+      : host === "omp"
+        ? env.OMP_SESSION_ID
+        : "";
+  const sessionId = String(
+    env.AGENT_FLOW_EXECUTION_ID
+    || env.AGENT_FLOW_SESSION_ID
+    || hostSession
+    || "",
+  ).trim();
+  if (!sessionId) return null;
+  const hostAgent = host === "codex"
+    ? env.CODEX_AGENT_ID
+    : host === "claude"
+      ? env.CLAUDE_AGENT_ID
+      : host === "omp"
+        ? env.OMP_AGENT_ID
+        : "";
+  const agentId = String(env.AGENT_FLOW_AGENT_ID || hostAgent || "").trim();
+  if (!/^[a-z0-9_-]{1,32}$/.test(host) || sessionId.length > 512 || agentId.length > 512) {
+    throw new Error("blocked: execution identity is invalid");
+  }
+  return { host, session_id: sessionId, agent_id: agentId };
+}
+
+function executionIdentityDigest(execution) {
+  const canonical = JSON.stringify({
+    agent_id: String(execution.agent_id || ""),
+    host: String(execution.host || ""),
+    session_id: String(execution.session_id || ""),
+  });
+  return crypto.createHash("sha256").update(canonical).digest("hex");
+}
+
+function writeCurrentRun(root, state) {
+  if (state.execution) {
+    writeJson(executionRunStatePath(root, state.execution), state);
+  } else {
+    writeJson(currentRunPath(root), state);
+  }
+}
+
+function assertNodeExecutionStartAvailable(root, execution, workspace) {
+  const activeStates = activeNodeExecutionRunStates(root);
+  const activeBindings = activeExecutionBindings(root);
+  const activePythonRuns = activePythonWorkspaceRuns(root);
+  const legacy = readJsonIfExists(currentRunPath(root));
+  if (!execution) {
+    if (
+      activeStates.length > 0
+      || activeBindings.length > 0
+      || activePythonRuns.length > 0
+      || nodeRunStateIsActive(legacy)
+    ) {
+      throw new Error("blocked: execution_identity_missing: active runs require a stable execution identity");
+    }
+    return;
+  }
+  if (nodeRunStateIsActive(legacy)) {
+    throw new Error(`blocked: execution_binding_conflict: legacy active run ${legacy.run_id} already exists`);
+  }
+  const statePath = executionRunStatePath(root, execution);
+  if (fs.existsSync(statePath)) {
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    if (nodeRunStateIsActive(state)) {
+      const bindingPath = executionBindingPath(root, execution);
+      if (state.workspace && !fs.existsSync(bindingPath)) {
+        throw new Error("blocked: execution_binding_missing: active execution lost its worktree binding");
+      }
+      if (state.workspace && !nodeBindingIsActive(JSON.parse(fs.readFileSync(bindingPath, "utf8")))) {
+        throw new Error("blocked: execution_binding_stale: active execution binding is not usable");
+      }
+      throw new Error(`blocked: execution_binding_conflict: execution already owns active run ${state.run_id}`);
+    }
+  }
+  const bindingPath = executionBindingPath(root, execution);
+  if (fs.existsSync(bindingPath)) {
+    const binding = JSON.parse(fs.readFileSync(bindingPath, "utf8"));
+    if (nodeBindingIsActive(binding)) {
+      throw new Error(`blocked: execution_binding_conflict: execution already owns active run ${binding.run_id}`);
+    }
+  }
+  if (!workspace.identity) return;
+  const executionDigest = executionIdentityDigest(execution);
+  const stateOwner = activeStates.find((state) => (
+    state.workspace?.workspace_root
+    && samePath(state.workspace.workspace_root, workspace.identity.workspace_root)
+    && (!state.execution || executionIdentityDigest(state.execution) !== executionDigest)
+  ));
+  if (stateOwner) {
+    throw new Error(
+      `blocked: execution_binding_conflict: workspace already owns active run ${stateOwner.run_id}`,
+    );
+  }
+  const bindingOwner = activeBindings.find((binding) => (
+    binding.workspace?.workspace_root
+    && samePath(binding.workspace.workspace_root, workspace.identity.workspace_root)
+    && (!binding.execution || executionIdentityDigest(binding.execution) !== executionDigest)
+  ));
+  if (bindingOwner) {
+    throw new Error(
+      `blocked: execution_binding_conflict: workspace already owns active run ${bindingOwner.run_id}`,
+    );
+  }
+  const pythonOwner = activePythonRuns.find((state) => (
+    state.workspace?.workspace_root
+    && samePath(state.workspace.workspace_root, workspace.identity.workspace_root)
+  ));
+  if (pythonOwner) {
+    throw new Error(
+      `blocked: execution_binding_conflict: workspace already owns active run ${pythonOwner.run_id}`,
+    );
+  }
+}
+
+function bindNodeExecution(root, execution, state) {
+  const bindingPath = executionBindingPath(root, execution);
+  const runDir = resolveRunDir(root, state.run_dir);
+  const payload = {
+    version: 1,
+    execution,
+    workspace: state.workspace,
+    workspace_name: path.basename(state.workspace.workspace_root),
+    run_id: state.run_id,
+    run_dir: fs.realpathSync(runDir),
+    bound_at: new Date().toISOString(),
+  };
+  if (fs.existsSync(bindingPath)) {
+    const existing = JSON.parse(fs.readFileSync(bindingPath, "utf8"));
+    if (nodeBindingIsActive(existing)
+      && (existing.run_dir !== payload.run_dir
+        || JSON.stringify(existing.workspace) !== JSON.stringify(payload.workspace))) {
+      throw new Error("blocked: execution is already bound to an active worktree");
+    }
+  }
+  writeJson(bindingPath, payload);
+}
+
+function releaseNodeExecution(root, execution, runDir) {
+  const bindingPath = executionBindingPath(root, execution);
+  if (!fs.existsSync(bindingPath)) return;
+  const binding = JSON.parse(fs.readFileSync(bindingPath, "utf8"));
+  const expectedRunDir = fs.realpathSync(resolveRunDir(root, runDir));
+  if (binding.run_dir !== expectedRunDir) {
+    throw new Error("blocked: execution binding run identity changed");
+  }
+  fs.unlinkSync(bindingPath);
+}
+
+function nodeBindingIsActive(binding) {
+  if (typeof binding?.run_dir !== "string") return false;
+  if (fs.existsSync(path.join(binding.run_dir, "active"))) return true;
+  const manifest = path.join(binding.run_dir, "manifest.json");
+  if (!fs.existsSync(manifest)) return false;
+  const state = JSON.parse(fs.readFileSync(manifest, "utf8"));
+  return nodeRunStateIsActive(state);
 }
 
 function pushWatchStatePath(root) {
@@ -2075,15 +2489,98 @@ function printNext(state, root = null) {
     return;
   }
   const localSkillBlock = root ? localSkillPromptBlock(root, phase.id) : "";
+  const phaseSkillBlock = root ? nodePhaseSkillBlock(root, state, phase) : "";
   console.log(`Current phase: ${phase.id}`);
   console.log(`Run: ${state.run_id}`);
   console.log(`Workspace root: ${state.workspace_root ?? root ?? process.cwd()}`);
   console.log(`Required artifact: ${path.join(state.run_dir, phase.artifact)}`);
-  console.log(`Instruction: ${phase.instruction}${localSkillBlock}`);
+  console.log(`Instruction: ${phase.instruction}${phaseSkillBlock}${localSkillBlock}`);
+}
+
+function nodePhaseSkillBlock(root, state, phase) {
+  const requiredSkills = phase.required_skills ?? [];
+  const codePhase = CODE_SKILL_PHASES.has(phase.id);
+  if (!codePhase && requiredSkills.length === 0) return "";
+  const plan = nodePhaseSkillPlan(root, state, phase);
+  const contractEnabled = codePhase || requiredSkills.length > 0 || (phase.requirements ?? []).length > 0;
+  const contract = contractEnabled
+    ? [
+      "",
+      "## Runtime phase contract",
+      "",
+      "Record this exact machine-readable contract line in the artifact, changing only requirement values to `fail` when necessary:",
+      "",
+      `\`phase-contract: ${JSON.stringify({
+        applied_skills: plan.skills.map((skill) => skill.name),
+        requirements: Object.fromEntries((phase.requirements ?? []).map((requirement) => [requirement, "pass"])),
+      })}\``,
+      "",
+    ]
+    : [];
+  if (plan.skills.length === 0) return contract.join("\n");
+  return [
+    "",
+    "",
+    "## Selected canonical skills",
+    "",
+    ...plan.skills.map((skill) => `- \`${skill.name}\`: \`${skill.path}\` (tree \`${skill.tree_hash ?? "unavailable"}\`)`),
+    ...contract,
+  ].join("\n");
+}
+
+function nodePhaseSkillPlan(root, state, phase) {
+  const requiredSkills = phase.required_skills ?? [];
+  const agentFlowDir = path.join(root, ".agent-flow");
+  const kit = readExistingKit(agentFlowDir);
+  const authenticated = readAuthenticatedSkillIndex(agentFlowDir, kit);
+  if (!authenticated) throw new Error("blocked: installed skill index is missing");
+  const plan = resolveRuntimeSkillPlan(authenticated.payload, {
+    phaseId: phase.id,
+    changedFiles: nodeRuntimeChangedFiles(state),
+    taskScope: state.task ?? "",
+    requiredSkills,
+  });
+  if (plan.missing_profiles.length > 0) {
+    throw new Error(`missing required skill profiles in project snapshot: ${plan.missing_profiles.join(", ")}`);
+  }
+  if (plan.missing.length > 0) {
+    throw new Error(`missing required profile skills in project snapshot: ${plan.missing.join(", ")}`);
+  }
+  return plan;
+}
+
+function nodeContractPhase(root, state, phase) {
+  if (!phase || (
+    !CODE_SKILL_PHASES.has(phase.id)
+    && (phase.required_skills ?? []).length === 0
+    && (phase.requirements ?? []).length === 0
+  )) {
+    return phase;
+  }
+  const plan = nodePhaseSkillPlan(root, state, phase);
+  return {
+    ...phase,
+    required_skills: plan.skills.map((skill) => skill.name),
+  };
+}
+
+function nodeRuntimeChangedFiles(state) {
+  const workspace = state.workspace_root;
+  if (typeof workspace !== "string" || !fs.existsSync(workspace)) return [];
+  const base = state.workspace?.head;
+  const tracked = base
+    ? gitOutput(workspace, ["diff", "--name-only", base]) ?? ""
+    : gitOutput(workspace, ["diff", "--name-only", "HEAD"]) ?? "";
+  const untracked = gitOutput(workspace, ["ls-files", "--others", "--exclude-standard"]) ?? "";
+  return [...new Set(`${tracked}\n${untracked}`.split(/\r?\n/).filter(Boolean))].sort();
 }
 
 function printStatus(state, root) {
-  const phase = workflowPhases(state.workflow)[state.phase_index];
+  const phase = nodeContractPhase(
+    root,
+    state,
+    workflowPhases(state.workflow)[state.phase_index],
+  );
   const resolvedRunDir = resolveRunDir(root, state.run_dir);
   const complete = state.status === "complete" || state.phase === "complete" || !phase;
   const requiredArtifact = phase ? path.join(state.run_dir, phase.artifact) : null;
@@ -2098,6 +2595,8 @@ function printStatus(state, root) {
       fs.readFileSync(resolvedRequiredArtifact, "utf8"),
       phase,
       root,
+      resolvedRunDir,
+      state,
     );
     status = "blocked";
     if (artifactIsStale(state, resolvedRequiredArtifact)) {
@@ -2493,7 +2992,20 @@ function installProjectSkills(
   }
   links.push(...removeStaleProjectSkillLinks(root, selected.skills, previousIndex, force, transaction));
   const index = { ...selected, links };
-  index.catalog_fingerprint = skillCatalogFingerprint(root, HOME, detectActiveHost(process.env), process.env);
+  const activeHost = detectActiveHost(process.env);
+  const catalogHosts = new Set(
+    (sourcePlan?.entries || [])
+      .map((entry) => entry.source_host)
+      .filter((host) => PROJECT_SKILL_HOSTS.includes(host)),
+  );
+  if (process.env.AGENT_FLOW_AUTO_EXTERNAL_SKILLS === "1" && activeHost) {
+    catalogHosts.add(activeHost);
+  }
+  index.catalog_hosts = [...catalogHosts].sort(compareCodePoints);
+  index.catalog_active_host = index.catalog_hosts.includes(activeHost)
+    ? activeHost
+    : index.catalog_hosts[0] ?? null;
+  index.catalog_fingerprint = skillCatalogFingerprint(root, HOME, index.catalog_hosts, process.env);
   fs.writeFileSync(
     path.join(agentFlowDir, "skills", "index.json"),
     `${JSON.stringify(index, null, 2)}\n`,
@@ -2508,13 +3020,26 @@ function refreshSkillCatalogAtBoundary(root) {
   const indexPath = path.join(leaderRoot, ".agent-flow", "skills", "index.json");
   const index = readJsonIfExists(indexPath);
   if (!index?.catalog_fingerprint) return;
-  const current = skillCatalogFingerprint(leaderRoot, HOME, detectActiveHost(process.env), process.env);
+  const catalogHosts = Array.isArray(index.catalog_hosts)
+    ? index.catalog_hosts.filter((host) => PROJECT_SKILL_HOSTS.includes(host))
+    : [detectActiveHost(process.env)].filter(Boolean);
+  const current = skillCatalogFingerprint(leaderRoot, HOME, catalogHosts, process.env);
   if (current === index.catalog_fingerprint) return;
   const invocationWorktree = resolveManagedWorktreeRoot(process.cwd());
   if (invocationWorktree && samePath(invocationWorktree, leaderRoot)) {
     throw new Error("blocked: skill catalog drift must be refreshed from the leader checkout");
   }
-  const status = runInstallSandbox(leaderRoot);
+  const previousHost = process.env.AGENT_FLOW_HOST;
+  if (PROJECT_SKILL_HOSTS.includes(index.catalog_active_host)) {
+    process.env.AGENT_FLOW_HOST = index.catalog_active_host;
+  }
+  let status;
+  try {
+    status = runInstallSandbox(leaderRoot);
+  } finally {
+    if (previousHost === undefined) delete process.env.AGENT_FLOW_HOST;
+    else process.env.AGENT_FLOW_HOST = previousHost;
+  }
   if (status !== 0) throw new Error(`skill catalog refresh failed with exit ${status}`);
 }
 
@@ -3970,7 +4495,7 @@ function recoverInterruptedSkillTransaction(root, agentFlowDir, recoveryLockToke
   fs.rmSync(transactionRoot, { recursive: true, force: true });
 }
 
-function skillCatalogFingerprint(root, home, activeHost, env) {
+function skillCatalogFingerprint(root, home, catalogHosts, env) {
   const resolvedHome = path.resolve(home || ".");
   const configured = {
     codex: configuredCatalogRoot(env.CODEX_HOME, resolvedHome, ".codex"),
@@ -3980,11 +4505,19 @@ function skillCatalogFingerprint(root, home, activeHost, env) {
   const roots = [
     ["project-local", path.join(root, ".agent-flow", "local-skills")],
     ["project", samePath(root, KIT_ROOT) ? null : path.join(root, "skills")],
-    ["active-host", activeHost ? path.join(configured[activeHost], "skills") : null],
+    ...[...new Set(catalogHosts || [])]
+      .filter((host) => PROJECT_SKILL_HOSTS.includes(host))
+      .sort(compareCodePoints)
+      .map((host) => [`host:${host}`, path.join(configured[host], "skills")]),
     ["shared", path.join(resolvedHome, ".agents", "skills")],
     ["bundled", path.join(KIT_ROOT, "skills")],
   ];
-  const manifest = { active_host: activeHost, roots: [] };
+  const manifest = {
+    catalog_hosts: [...new Set(catalogHosts || [])]
+      .filter((host) => PROJECT_SKILL_HOSTS.includes(host))
+      .sort(compareCodePoints),
+    roots: [],
+  };
   for (const [source, catalogRoot] of roots) {
     if (!catalogRoot) continue;
     manifest.roots.push({
@@ -4784,6 +5317,32 @@ function assertCompletionMarkers(phase, artifact, root) {
   }
 }
 
+function assertDeclaredArtifacts(state, phase, runDir) {
+  const issues = declaredArtifactIssues(state, phase, runDir);
+  if (issues.length > 0) {
+    throw new Error(`blocked: ${issues[0]}`);
+  }
+}
+
+function declaredArtifactIssues(state, phase, runDir) {
+  const records = (phase.artifacts ?? []).slice(1).map((relative) => {
+    const artifact = path.join(runDir, relative);
+    const exists = fs.existsSync(artifact);
+    const metadata = exists ? fs.statSync(artifact) : null;
+    return {
+      path: relative,
+      exists,
+      is_file: metadata?.isFile() ?? false,
+      mtime_ms: metadata?.mtimeMs,
+    };
+  });
+  return evaluateDeclaredArtifacts(
+    phase,
+    records,
+    state.phase_entered_at ?? state.updated_at ?? state.started_at,
+  );
+}
+
 function missingMarkers(content, markers) {
   const lines = completionGateLines(content);
   return markers.filter((marker) => {
@@ -4792,20 +5351,7 @@ function missingMarkers(content, markers) {
   });
 }
 
-const CODE_REVIEW_LOCAL_SKILL_PHASES = new Set([
-  "implement",
-  "implement-fix",
-  "red",
-  "green",
-  "refactor",
-  "fix-loop",
-  "final-review",
-  "review",
-  "pr-comment-fix",
-  "pr-ci-fix",
-  "multi-review",
-  "architecture-review",
-]);
+const CODE_REVIEW_LOCAL_SKILL_PHASES = CODE_SKILL_PHASES;
 const PROJECT_LOCAL_SKILL_APPLIED_MARKER = "project-local-skill-docs: applied";
 const PROJECT_LOCAL_SKILL_INCLUDE_TERMS = [
   "code development",
@@ -4863,9 +5409,13 @@ const PROJECT_LOCAL_SKILL_EXCLUDE_TERMS = [
 ];
 const PROJECT_LOCAL_SKILL_EXCLUDE_TOKEN_PATTERN = /(^|[^a-z0-9])(pr|branch|merge)([^a-z0-9]|$)/;
 
-function missingMarkersForPhase(content, phase, root) {
+function missingMarkersForPhase(content, phase, root, runDir = null, state = null) {
   const missing = missingMarkers(content, phase.required_markers ?? []);
   missing.push(...missingProjectLocalSkillMarkers(content, root, phase.id));
+  missing.push(...evaluatePhaseContract(phase, content).issues);
+  if (runDir && state) {
+    missing.push(...declaredArtifactIssues(state, phase, runDir));
+  }
   return missing;
 }
 
@@ -5202,9 +5752,11 @@ function nextPhaseIndex(state, phases, phase, artifact) {
 function syncRouteArtifacts(runDir, phases, currentIndex, nextIndex) {
   if (nextIndex <= currentIndex) {
     for (const phase of phases.slice(nextIndex, currentIndex + 1)) {
-      const artifact = path.join(runDir, phase.artifact);
-      if (fs.existsSync(artifact)) {
-        fs.unlinkSync(artifact);
+      for (const relative of phase.artifacts?.length ? phase.artifacts : [phase.artifact]) {
+        const artifact = path.join(runDir, relative);
+        if (fs.existsSync(artifact) && fs.statSync(artifact).isFile()) {
+          fs.unlinkSync(artifact);
+        }
       }
     }
     return;
@@ -5238,10 +5790,20 @@ function nextFixLoopRounds(state, phase, nextPhase) {
 }
 
 function nodeRouteKey(phase, artifact) {
+  const contract = evaluatePhaseContract(phase, fs.readFileSync(artifact, "utf8"));
+  if (contract.route === "failure" && phase.routes?.failure) {
+    return contract.route;
+  }
+  if (contract.route === "success" && phase.routes?.success) {
+    return contract.route;
+  }
   if (phase.id === "gates") {
     return readGatesRouteKey(artifact);
   }
   if (phase.multi_review) {
+    if (readArtifactVerdict(artifact) === "blocked" && phase.routes?.blocked) {
+      return "blocked";
+    }
     const verdict = readMultiReviewVerdict(artifact, phase.id);
     if (verdict === "approve" || verdict === "request-changes") {
       if (verdict === "approve" && phase.routes?.["request-changes"] && artifactHasFailureMarkers(artifact)) {
@@ -5796,88 +6358,26 @@ function pushWatchTickPromptMarkdown() {
 }
 
 function phasePrompt(phase, root = null) {
-  const markers = phase.required_markers?.length
-    ? `\n\n## Completion markers\n\nThe runner blocks this phase until the artifact includes a \`## Completion Gate\` section with these marker lines:\n\n${phase.required_markers.map((marker) => `- \`${marker}\``).join("\n")}\n`
+  const renderedMarkers = (phase.required_markers ?? []).filter(
+    (marker) => !phase.instruction.includes(marker),
+  );
+  const markers = renderedMarkers.length
+    ? `\n\n## Completion markers\n\nThe runner blocks this phase until the artifact includes a \`## Completion Gate\` section with these marker lines:\n\n${renderedMarkers.map((marker) => `- \`${marker}\``).join("\n")}\n`
     : "";
   const localSkillBlock = root ? localSkillPromptBlock(root, phase.id) : "";
-  return `# ${phase.id}\n\n${phase.instruction}${markers}${localSkillBlock}\n\nSave the required artifact before running:\n\n\`\`\`bash\n${AGENT_FLOW_COMMAND} run advance\n\`\`\`\n`;
+  const contract = phase.required_skills?.length || phase.requirements?.length
+    ? "\n\n## Phase contract\n\nThe runtime phase packet supplies the exact machine-readable contract after resolving profile skills and dependency closure. Use that single runtime contract line; each requirement value must be `pass` or `fail`.\n"
+    : "";
+  return `# ${phase.id}\n\n${phase.instruction}${markers}${contract}${localSkillBlock}\n\nSave the required artifact before running:\n\n\`\`\`bash\n${AGENT_FLOW_COMMAND} run advance\n\`\`\`\n`;
 }
 
 function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`;
 }
 
-const MANAGED_HOOK_VERIFIER = [
-  "import base64,hashlib,os,stat,sys,tempfile,time",
-  "p=base64.b64decode(sys.argv[1],validate=True).decode('utf-8'); expected=sys.argv[2]",
-  "source_fd=None; stage_fd=None; stage_path=None",
-  "try:",
-  " source_fd=os.open(p,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))",
-  " before=os.fstat(source_fd)",
-  " ok=stat.S_ISREG(before.st_mode) and before.st_nlink==1 and bool(before.st_mode & 0o111)",
-  " if ok:",
-  "  with os.fdopen(os.dup(source_fd),'rb') as f: content=f.read()",
-  "  after=os.fstat(source_fd)",
-  "  identity=(before.st_dev,before.st_ino,before.st_mode,before.st_nlink,before.st_size)",
-  "  ok=identity==(after.st_dev,after.st_ino,after.st_mode,after.st_nlink,after.st_size) and hashlib.sha256(content).hexdigest()==expected",
-  " if not ok: raise OSError('integrity mismatch')",
-  " stage_fd,stage_path=tempfile.mkstemp(prefix='agent-flow-managed-hook-')",
-  " view=memoryview(content)",
-  " while view:",
-  "  written=os.write(stage_fd,view)",
-  "  if written<=0: raise OSError('staging write failed')",
-  "  view=view[written:]",
-  " os.fsync(stage_fd); os.fchmod(stage_fd,0o400); os.lseek(stage_fd,0,os.SEEK_SET)",
-  " os.unlink(stage_path); stage_path=None; os.set_inheritable(stage_fd,True)",
-  " os.close(source_fd); source_fd=None",
-  " source_ref=f'/dev/fd/{stage_fd}'",
-  " if not os.path.exists(source_ref): raise OSError('descriptor execution unavailable')",
-  " env=dict(os.environ); env['AGENT_FLOW_MANAGED_HOOK_SOURCE_PATH']=p; env['PATH']='/usr/bin:/bin'",
-  " [env.pop(name,None) for name in ('BASH_ENV','ENV','PYTHONPATH','PYTHONHOME','PYTHONSTARTUP','LD_PRELOAD','LD_LIBRARY_PATH','DYLD_INSERT_LIBRARIES','DYLD_LIBRARY_PATH')]",
-  " try: hold=int(env.get('AGENT_FLOW_TEST_HOLD_AFTER_MANAGED_HOOK_STAGE_MS','0'))",
-  " except ValueError: hold=0",
-  " if 0<hold<=10000:",
-  "  print('agent-flow:test-hook-staged:'+os.path.basename(p),file=sys.stderr,flush=True); time.sleep(hold/1000)",
-  " if p.endswith('.py'): os.execve('/usr/bin/python3',['/usr/bin/python3','-I','-B',source_ref],env)",
-  " if p.endswith('.sh'): os.execve('/bin/bash',['/bin/bash',source_ref],env)",
-  " raise OSError('unsupported managed hook type')",
-  "except (OSError,UnicodeError,ValueError):",
-  " print('agent-flow: blocked because managed hook integrity validation failed',file=sys.stderr)",
-  " raise SystemExit(2)",
-  "finally:",
-  " if source_fd is not None: os.close(source_fd)",
-  " if stage_path is not None:",
-  "  try: os.unlink(stage_path)",
-  "  except OSError: pass",
-  " if stage_fd is not None:",
-  "  try: os.close(stage_fd)",
-  "  except OSError: pass",
-].join("\n");
-
-function hookScriptCommand(root, scriptName) {
+function hookScriptCommand(root, scriptName, host) {
   const scriptPath = path.join(root, ".agent-flow", "scripts", "hooks", scriptName);
-  const digest = sha256Bytes(fs.readFileSync(scriptPath));
-  return [
-    shellQuote("/usr/bin/python3"),
-    "-I",
-    "-c",
-    shellQuote(MANAGED_HOOK_VERIFIER),
-    shellQuote(Buffer.from(scriptPath, "utf8").toString("base64")),
-    shellQuote(digest),
-  ].join(" ");
-}
-
-function managedHookVerifierDetails(command) {
-  if (typeof command !== "string") return null;
-  const prefix = `${shellQuote("/usr/bin/python3")} -I -c ${shellQuote(MANAGED_HOOK_VERIFIER)} `;
-  if (!command.startsWith(prefix)) return null;
-  const match = command.slice(prefix.length).match(/^'([A-Za-z0-9+/=]+)' '([0-9a-f]{64})'$/);
-  if (!match) return null;
-  const decoded = Buffer.from(match[1], "base64");
-  if (decoded.toString("base64") !== match[1]) return null;
-  const scriptPath = decoded.toString("utf8");
-  if (!Buffer.from(scriptPath, "utf8").equals(decoded)) return null;
-  return { scriptPath, sha256: match[2] };
+  return `${shellQuote(scriptPath)} --host ${shellQuote(host)}`;
 }
 
 function unquoteShellWord(value) {
@@ -5892,10 +6392,6 @@ function unquoteShellWord(value) {
 
 function managedHookScriptName(command) {
   if (typeof command !== "string") return null;
-  const verifier = managedHookVerifierDetails(command);
-  if (verifier && MANAGED_HOOK_SCRIPT_NAMES.includes(path.basename(verifier.scriptPath))) {
-    return path.basename(verifier.scriptPath);
-  }
   for (const match of command.matchAll(/(?:^|[\s'"])([A-Za-z0-9+/]+={0,2})(?=$|[\s'"])/g)) {
     const decoded = Buffer.from(match[1], "base64");
     if (decoded.toString("base64") === match[1]) {
@@ -5928,51 +6424,54 @@ function managedHookScriptName(command) {
 
 function trustedManagedHookScriptName(root, command, expectedScriptHashes = null) {
   const normalizedRoot = path.resolve(root).replaceAll("\\", "/");
-  const verifier = managedHookVerifierDetails(command);
   for (const scriptName of MANAGED_HOOK_SCRIPT_NAMES) {
     const expected = `${normalizedRoot}/.agent-flow/scripts/hooks/${scriptName}`;
     const relative = `.agent-flow/scripts/hooks/${scriptName}`;
-    if (!verifier || verifier.scriptPath.replaceAll("\\", "/") !== expected) continue;
-    const metadata = lstatIfExists(verifier.scriptPath);
+    if (!["codex", "claude"].some((host) => command === hookScriptCommand(normalizedRoot, scriptName, host))) continue;
+    const metadata = lstatIfExists(expected);
     if (!metadata?.isFile() || metadata.isSymbolicLink()) continue;
     const expectedSha = expectedScriptHashes instanceof Map
       ? expectedScriptHashes.get(relative)
-      : sha256Bytes(fs.readFileSync(verifier.scriptPath));
-    if (typeof expectedSha === "string" && expectedSha === verifier.sha256) return scriptName;
+      : sha256Bytes(fs.readFileSync(expected));
+    if (typeof expectedSha === "string" && expectedSha === sha256Bytes(fs.readFileSync(expected))) return scriptName;
   }
   return null;
 }
 
-function codexHooksSettings(root) {
+function managedHostHookSettings(root, host) {
+  const commands = (scripts) => scripts.map((scriptName) => ({
+    type: "command",
+    command: hookScriptCommand(root, scriptName, host),
+  }));
   return {
     hooks: {
       PreToolUse: [
         {
           matcher: "Bash",
-          hooks: [
-            { type: "command", command: hookScriptCommand(root, "guard-worktree.sh") },
-            { type: "command", command: hookScriptCommand(root, "guard-protected-branch.sh") },
-            { type: "command", command: hookScriptCommand(root, "guard-worktree-write.py") },
-          ],
+          hooks: commands(CANONICAL_HOOK_POLICY.bashPre),
         },
         {
           matcher: WRITE_TOOL_MATCHER,
-          hooks: [{ type: "command", command: hookScriptCommand(root, "guard-worktree-write.py") }],
+          hooks: commands(CANONICAL_HOOK_POLICY.writePre),
         },
       ],
       PostToolUse: [
         {
           matcher: WRITE_TOOL_MATCHER,
-          hooks: [{ type: "command", command: hookScriptCommand(root, "comment-checker.py") }],
+          hooks: commands(CANONICAL_HOOK_POLICY.writePost),
         },
       ],
       Stop: [
         {
-          hooks: [{ type: "command", command: hookScriptCommand(root, "show-phase-status.sh") }],
+          hooks: commands(CANONICAL_HOOK_POLICY.stop),
         },
       ],
     },
   };
+}
+
+function codexHooksSettings(root) {
+  return managedHostHookSettings(root, "codex");
 }
 
 function mergeHookSettings(settings, desired) {
@@ -6225,35 +6724,7 @@ function installCodexHooks(root) {
 }
 
 function claudeHooksSettings(root) {
-  return {
-    hooks: {
-      PreToolUse: [
-        {
-          matcher: "Bash",
-          hooks: [
-            { type: "command", command: hookScriptCommand(root, "guard-worktree.sh") },
-            { type: "command", command: hookScriptCommand(root, "guard-protected-branch.sh") },
-            { type: "command", command: hookScriptCommand(root, "guard-worktree-write.py") },
-          ],
-        },
-        {
-          matcher: WRITE_TOOL_MATCHER,
-          hooks: [{ type: "command", command: hookScriptCommand(root, "guard-worktree-write.py") }],
-        },
-      ],
-      PostToolUse: [
-        {
-          matcher: WRITE_TOOL_MATCHER,
-          hooks: [{ type: "command", command: hookScriptCommand(root, "comment-checker.py") }],
-        },
-      ],
-      Stop: [
-        {
-          hooks: [{ type: "command", command: hookScriptCommand(root, "show-phase-status.sh") }],
-        },
-      ],
-    },
-  };
+  return managedHostHookSettings(root, "claude");
 }
 
 function installClaudeHooks(root) {
@@ -6264,12 +6735,6 @@ function installClaudeHooks(root) {
 }
 
 function ompHooksExtensionSource(root) {
-  const hookHashes = Object.fromEntries(
-    MANAGED_HOOK_SCRIPT_NAMES.map((scriptName) => [
-      scriptName,
-      sha256Bytes(fs.readFileSync(path.join(root, ".agent-flow", "scripts", "hooks", scriptName))),
-    ]),
-  );
   return String.raw`import fs from "node:fs";
 import { spawn } from "node:child_process";
 import path from "node:path";
@@ -6278,8 +6743,10 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const HOOK_DIR = path.join(ROOT, ".agent-flow", "scripts", "hooks");
 const WRITE_TOOL_RE = new RegExp(${JSON.stringify(WRITE_TOOL_MATCHER)}, "i");
-const MANAGED_HOOK_VERIFIER = ${JSON.stringify(MANAGED_HOOK_VERIFIER)};
-const MANAGED_HOOK_HASHES = Object.freeze(${JSON.stringify(hookHashes)});
+const BASH_PRE_HOOKS = Object.freeze(${JSON.stringify(CANONICAL_HOOK_POLICY.bashPre)});
+const WRITE_PRE_HOOKS = Object.freeze(${JSON.stringify(CANONICAL_HOOK_POLICY.writePre)});
+const WRITE_POST_HOOKS = Object.freeze(${JSON.stringify(CANONICAL_HOOK_POLICY.writePost)});
+const STOP_HOOKS = Object.freeze(${JSON.stringify(CANONICAL_HOOK_POLICY.stop)});
 
 export default function agentFlowHooks(pi) {
   if (typeof pi.setLabel === "function") {
@@ -6304,20 +6771,24 @@ export default function agentFlowHooks(pi) {
     }
   });
   pi.on("tool_call", async (event, ctx) => {
-    if (WRITE_TOOL_RE.test(String(event?.toolName || "")) || isBashTool(event?.toolName)) {
-      const result = await runHook("guard-worktree-write.py", hookPayload(event, ctx), ctx);
-      if (result.block) {
-        return { block: true, reason: result.reason };
+    const bashTool = isBashTool(event?.toolName);
+    if (bashTool) {
+      const payload = hookPayload(event, ctx);
+      for (const scriptName of BASH_PRE_HOOKS) {
+        const result = await runHook(scriptName, payload, ctx);
+        if (result.block) {
+          return { block: true, reason: result.reason };
+        }
       }
+      forwardOmpExecutionIdentity(event, ctx);
     }
-    if (!isBashTool(event?.toolName)) {
-      return;
-    }
-    const payload = hookPayload(event, ctx);
-    for (const scriptName of ["guard-worktree.sh", "guard-protected-branch.sh"]) {
-      const result = await runHook(scriptName, payload, ctx);
-      if (result.block) {
-        return { block: true, reason: result.reason };
+    if (WRITE_TOOL_RE.test(String(event?.toolName || "")) && !bashTool) {
+      const payload = hookPayload(event, ctx);
+      for (const scriptName of WRITE_PRE_HOOKS) {
+        const result = await runHook(scriptName, payload, ctx);
+        if (result.block) {
+          return { block: true, reason: result.reason };
+        }
       }
     }
   });
@@ -6334,18 +6805,21 @@ export default function agentFlowHooks(pi) {
         isError: true,
       };
     }
-    const result = await runHook("comment-checker.py", hookPayload(event, ctx), ctx);
-    if (result.block) {
-      return {
-        content: [{ type: "text", text: result.reason }],
-        details: { agentFlowHook: "comment-checker.py" },
-        isError: true,
-      };
+    const payload = hookPayload(event, ctx);
+    for (const scriptName of WRITE_POST_HOOKS) {
+      const result = await runHook(scriptName, payload, ctx);
+      if (result.block) {
+        return {
+          content: [{ type: "text", text: result.reason }],
+          details: { agentFlowHook: scriptName },
+          isError: true,
+        };
+      }
     }
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
-    const result = await runHook("show-phase-status.sh", { hook_event_name: "session_shutdown" }, ctx);
+    const result = await runHook(STOP_HOOKS[0], hookPayload({ type: "session_shutdown" }, ctx), ctx);
     const message = parseSystemMessage(result.reason);
     if (message && ctx?.hasUI && typeof ctx.ui?.notify === "function") {
       await ctx.ui.notify(message, "info");
@@ -6358,6 +6832,9 @@ function hookPayload(event, ctx) {
   const input = event?.input || {};
   const toolName = String(event?.toolName || "");
   return {
+    host: "omp",
+    session_id: String(ctx?.sessionManager?.getSessionId?.() || ctx?.sessionId || ""),
+    agent_id: String(ctx?.agentId || ""),
     tool_name: toolName,
     tool: toolName,
     hook_event_name: String(event?.type || ""),
@@ -6366,6 +6843,28 @@ function hookPayload(event, ctx) {
     parameters: input,
     cwd: ctx?.cwd || ROOT,
   };
+}
+
+function forwardOmpExecutionIdentity(event, ctx) {
+  const input = event?.input;
+  if (!input || typeof input.command !== "string" || !input.command.trim()) {
+    return;
+  }
+  const sessionId = String(ctx?.sessionManager?.getSessionId?.() || ctx?.sessionId || "").trim();
+  if (!sessionId) {
+    return;
+  }
+  const agentId = String(ctx?.agentId || "").trim();
+  const assignments = [
+    "AGENT_FLOW_ACTIVE_HOST=" + shellQuote("omp"),
+    "AGENT_FLOW_EXECUTION_ID=" + shellQuote(sessionId),
+    "AGENT_FLOW_AGENT_ID=" + shellQuote(agentId),
+  ].join(" ");
+  input.command = "export " + assignments + "; " + input.command;
+}
+
+function shellQuote(value) {
+  return "'" + String(value).replaceAll("'", "'\\''") + "'";
 }
 
 function messageText(message) {
@@ -6512,11 +7011,7 @@ function isBashTool(toolName) {
 
 async function runHook(scriptName, payload, ctx) {
   const scriptPath = path.join(HOOK_DIR, scriptName);
-  const expectedHash = MANAGED_HOOK_HASHES[scriptName];
-  if (typeof expectedHash !== "string") {
-    return { block: true, reason: "agent-flow hook integrity metadata is missing: " + scriptName };
-  }
-  const result = await spawnHook(scriptPath, expectedHash, JSON.stringify(payload), ctx?.cwd || ROOT);
+  const result = await spawnHook(scriptPath, JSON.stringify(payload), ctx?.cwd || ROOT);
   const reason = (result.stderr || result.stdout || "").trim();
   if (result.status === 0) {
     return { block: false, reason };
@@ -6524,11 +7019,11 @@ async function runHook(scriptName, payload, ctx) {
   return { block: true, reason: reason || "agent-flow hook blocked: " + scriptName };
 }
 
-function spawnHook(scriptPath, expectedHash, input, cwd) {
+function spawnHook(scriptPath, input, cwd) {
   return new Promise((resolve) => {
     const proc = spawn(
-      "/usr/bin/python3",
-      ["-I", "-c", MANAGED_HOOK_VERIFIER, Buffer.from(scriptPath, "utf8").toString("base64"), expectedHash],
+      scriptPath,
+      [],
       { cwd, stdio: ["pipe", "pipe", "pipe"] },
     );
     let stdout = "";
@@ -6727,12 +7222,20 @@ function readPythonGateRun(root) {
 }
 
 function activeGateRun(root) {
-  if (fs.existsSync(currentRunPath(root))) {
+  try {
     const current = readCurrentRun(root);
     if (current.status !== "complete" && current.phase !== "complete") {
       const state = assertNodeRunBoundary(current, root);
       assertNodeSkillPlanPinned(state, root);
       return state;
+    }
+  } catch (error) {
+    const message = String(error?.message || error);
+    if (
+      !message.startsWith("no active run. start one with:")
+      && message !== "no active run is bound to this execution"
+    ) {
+      throw error;
     }
   }
   return readPythonGateRun(root);

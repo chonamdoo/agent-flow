@@ -20,6 +20,13 @@ phases:
       shared understanding plus the architectural blueprint. Mandatory for
       every project.
     cite_lore: true
+    skills:
+      required: [grill-with-docs, grilling, domain-modeling, ddd-architecture, clean-architecture, clean-architecture-core]
+    requirements: [domain-model, architecture-boundaries]
+    artifacts: [design.md]
+    routes:
+      success: slice-plan
+      failure: design
     required_markers:
       - "## Clean Architecture Boundary Map"
       - "## Dependency Rule"
@@ -182,6 +189,10 @@ phases:
       - "ui-state-modeling: explicit|n/a"
       - "presentation-mapping-boundary: domain-to-uimodel|n/a"
       - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a"
+    requirements: [tdd-cycle-complete, tests-pass]
+    routes:
+      success: comment-authoring
+      failure: implement
     prompt: |
       For each slice in slice-plan.md, in order, run the TDD cycle:
 
@@ -308,6 +319,10 @@ phases:
       Final review. Requires at least two independent active-host reviewer
       sub-agents before approve. Profiles add stack-specific specialists on top.
     multi_review: true
+    skills:
+      required: [code-generation-discipline, code-review, architecture-reviewer, clean-architecture-core]
+    requirements: [independent-reviewers, architecture-contract]
+    artifacts: [final-review.md]
     required_markers:
       - "skills_checked: true"
       - "profile-skill-selection: applied"
@@ -344,6 +359,7 @@ phases:
     routes:
       approve: gates
       request-changes: fix-loop
+      failure: fix-loop
     prompt: |
       Spawn at least two active-host reviewer sub-agents (Codex sub-agent in
       Codex, Claude sub-agent in Claude, OMP sub-agent in OMP). Additional
@@ -455,8 +471,10 @@ phases:
       - "ui-state-modeling: explicit|n/a"
       - "presentation-mapping-boundary: domain-to-uimodel|n/a"
       - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a"
+    requirements: [findings-resolved, tests-pass]
     routes:
-      default: comment-authoring
+      success: comment-authoring
+      failure: fix-loop
     prompt: |
       For each must-fix finding in final-review.md or gate-results.json, apply
       the change. After QA failures, return through review before running gates
@@ -568,8 +586,10 @@ phases:
 
   - id: pr-comment-fix
     description: Fix actionable PR comments. Runner routes back to pr-watch.
+    requirements: [comments-resolved]
     routes:
-      default: pr-watch
+      success: pr-watch
+      failure: pr-comment-fix
     prompt: |
       Address actionable PR review comments, commit, push, resolve the
       corresponding GitHub review threads, and summarize comment/thread IDs,
@@ -577,8 +597,10 @@ phases:
 
   - id: pr-ci-fix
     description: Fix failing PR CI. Runner routes back to pr-watch.
+    requirements: [ci-pass]
     routes:
-      default: pr-watch
+      success: pr-watch
+      failure: pr-ci-fix
     prompt: |
       Reproduce failing PR checks locally, fix them, commit, push, and summarize
       failed check names, commands, fixes, and commits. Output: pr-ci-fix.md.

@@ -38,7 +38,12 @@ from agent_flow.core.query import explain_run, query_run
 from agent_flow.core.security import resolve_project_path
 from agent_flow.core.workspace_boundary import (
     WorkspaceBoundaryError,
-    find_active_pinned_workspace,
+    execution_identity_from_context,
+    execution_identity_from_dict,
+    find_active_pinned_workspaces,
+    release_execution_binding,
+    select_execution_workspace,
+    workspace_identity_from_dict,
 )
 from agent_flow.core.tool_lint import lint_tools
 from agent_flow.core.watch import write_watch_snapshot
@@ -86,7 +91,7 @@ from agent_flow.core.state import RunRequest, RunState, start_run, status_summar
 from agent_flow.core.workflow import load_workflow
 from agent_flow.eval import run_eval
 from agent_flow.memory.entities import EntityMemoryIndex
-from agent_flow.artifact import find_active_run, mark_inactive
+from agent_flow.artifact import find_active_run, mark_inactive, read_meta
 from agent_flow.runner import Runner, ResumeMode, _find_kit_root
 from agent_flow.providers.host import list_host_providers
 from agent_flow.providers.subprocess import ProviderCommand, run_provider
@@ -416,7 +421,11 @@ def main(argv: list[str] | None = None) -> int:
     requested_root = Path(getattr(args, "root", ".")).resolve()
     root = requested_root
     try:
-        root, inferred_worktree = _resolve_cli_root_context(root, getattr(args, "worktree", None))
+        root, inferred_worktree = _resolve_cli_root_context(
+            root,
+            getattr(args, "worktree", None),
+            allow_unbound_execution=args.command == "run",
+        )
     except WorkspaceBoundaryError as exc:
         print(_format_cli_error(exc), file=sys.stderr)
         return 2
@@ -522,6 +531,15 @@ def main(argv: list[str] | None = None) -> int:
         if active is None:
             print("진행 중인 run 없음 — abort할 대상이 없습니다.")
             return 0
+        meta = read_meta(active.path)
+        if meta.get("execution") is not None and meta.get("workspace") is not None:
+            execution = execution_identity_from_dict(meta["execution"])
+            workspace = workspace_identity_from_dict(meta["workspace"])
+            release_execution_binding(
+                execution,
+                git_common_dir=Path(workspace.git_common_dir),
+                run_dir=active.path,
+            )
         mark_inactive(active.path)
         print(f"aborted: {active.run_id} (artifacts preserved at {active.path})")
         return 0
@@ -1564,27 +1582,93 @@ def _slug_for_hint(root: Path, value: str) -> str:
         return value
 
 
-def _resolve_cli_root_context(root: Path, worktree: str | None) -> tuple[Path, str | None]:
+def _resolve_cli_root_context(
+    root: Path,
+    worktree: str | None,
+    *,
+    allow_unbound_execution: bool = False,
+) -> tuple[Path, str | None]:
     managed = _managed_worktree_context(root)
     if managed is not None:
         leader_root, inferred_worktree = managed
-        return leader_root, worktree or inferred_worktree
+        requested_worktree = worktree or inferred_worktree
+        active = _active_workspace_for_cli(
+            leader_root,
+            requested_worktree=requested_worktree,
+            allow_unbound_execution=allow_unbound_execution,
+        )
+        return leader_root, active.name if active is not None else requested_worktree
     cwd_managed = _managed_worktree_context(Path.cwd())
     if cwd_managed is not None and (_same_path(root, Path.cwd()) or _same_path(root, cwd_managed[0])):
         leader_root, inferred_worktree = cwd_managed
-        return leader_root, worktree or inferred_worktree
+        requested_worktree = worktree or inferred_worktree
+        active = _active_workspace_for_cli(
+            leader_root,
+            requested_worktree=requested_worktree,
+            allow_unbound_execution=allow_unbound_execution,
+        )
+        return leader_root, active.name if active is not None else requested_worktree
     git_common_root = _git_common_worktree_root(root)
     if git_common_root is not None:
-        if worktree is None:
-            active = find_active_pinned_workspace(git_common_root)
-            if active is not None:
-                return git_common_root, active.name
+        active = _active_workspace_for_cli(
+            git_common_root,
+            requested_worktree=worktree,
+            allow_unbound_execution=allow_unbound_execution,
+        )
+        if active is not None:
+            return git_common_root, active.name
         return git_common_root, worktree
-    if worktree is None and (root / ".git").exists():
-        active = find_active_pinned_workspace(root)
+    if (root / ".git").exists():
+        active = _active_workspace_for_cli(
+            root,
+            requested_worktree=worktree,
+            allow_unbound_execution=allow_unbound_execution,
+        )
         if active is not None:
             return root, active.name
     return root, worktree
+
+
+def _active_workspace_for_cli(
+    root: Path,
+    *,
+    requested_worktree: str | None = None,
+    allow_unbound_execution: bool = False,
+):
+    active = find_active_pinned_workspaces(root)
+    if not active:
+        return None
+    requested_name = (
+        _slug_for_hint(root, requested_worktree)
+        if requested_worktree is not None
+        else None
+    )
+    execution = execution_identity_from_context(env=os.environ)
+    if execution is not None:
+        try:
+            selected = select_execution_workspace(root, execution)
+        except WorkspaceBoundaryError as exc:
+            if allow_unbound_execution and str(exc).startswith("execution_binding_missing:"):
+                for workspace in active:
+                    payload = read_meta(workspace.run_dir).get("execution")
+                    if payload is not None and execution_identity_from_dict(payload) == execution:
+                        raise
+                if requested_name is not None and any(
+                    workspace.name == requested_name for workspace in active
+                ):
+                    raise WorkspaceBoundaryError(
+                        "execution_binding_conflict: requested worktree "
+                        f"{requested_name} belongs to another active execution"
+                    ) from exc
+                return None
+            raise
+        if requested_name is not None and selected.name != requested_name:
+            raise WorkspaceBoundaryError(
+                "execution_binding_conflict: requested worktree "
+                f"{requested_name} differs from bound worktree {selected.name}"
+            )
+        return selected
+    return select_execution_workspace(root, None)
 
 
 def _managed_worktree_context(path: Path) -> tuple[Path, str] | None:

@@ -25,6 +25,19 @@ review_angles:
     prompt: templates/_shared/review/types.md
   - id: io-safety
     prompt: templates/_shared/review/io-safety.md
+skills:
+  install:
+    - typescript-development-guide
+  required_review:
+    - group: profile
+      skills: [typescript-development-guide]
+      when: Node/JavaScript/TypeScript files change
+      missing: "missing local profile: <skill>"
+architecture:
+  contract: clean-architecture-core
+  platform: node
+  strict_when_roots_present: true
+  activation_roots: ["src", "lib", "app"]
 artifacts:
   prd: optional
   adr: optional

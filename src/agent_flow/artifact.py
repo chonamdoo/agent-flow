@@ -27,7 +27,18 @@ import yaml
 
 from agent_flow.core.markers import missing_markers, normalize_required_markers
 from agent_flow.core.local_skills import missing_local_skill_markers
-from agent_flow.core.phase_workflow import find_kit_root, load_phase_workflow_definition
+from agent_flow.core.phase_contract import (
+    artifact_is_stale,
+    declared_artifact_issues,
+    phase_contract_issues,
+    phase_entry_time,
+    resolve_runtime_phase_contract,
+)
+from agent_flow.core.phase_workflow import (
+    PhaseDefinition,
+    find_kit_root,
+    load_phase_workflow_definition,
+)
 
 
 RUNS_DIRNAME = ".agent-flow/runs"
@@ -52,7 +63,23 @@ class ActiveRun:
         artifacts = sorted(str(p.relative_to(self.path)) for p in self.path.rglob("*") if p.is_file())
         meta = read_meta(self.path)
         current_phase = meta.get("current_phase") or "-"
-        artifact_rel, _markers = _phase_contract(self.path, self.workflow, current_phase)
+        phase = _phase_definition(
+            self.path,
+            self.workflow,
+            current_phase,
+            config_root=config_root,
+        )
+        if phase is not None:
+            project_root = _status_project_root(self.path, meta, config_root)
+            phase = resolve_runtime_phase_contract(
+                phase,
+                config_root=config_root or project_root,
+                project_root=project_root,
+                meta=meta,
+            )
+            artifact_rel = Path(phase.artifact)
+        else:
+            artifact_rel, _markers = _phase_contract(self.path, self.workflow, current_phase)
         required_artifact = (
             _existing_phase_artifact(self.path, current_phase, artifact_rel)
             if current_phase != "-" and artifact_rel is not None
@@ -65,15 +92,21 @@ class ActiveRun:
             reason = "missing_phase_artifact"
         elif required_artifact is not None:
             structured_status = "blocked"
-            stub_reason = _artifact_block_reason(required_artifact)
-            if stub_reason:
-                reason = stub_reason
+            block_reason = (
+                "stale_artifact"
+                if artifact_is_stale(required_artifact, phase_entry_time(meta))
+                else _artifact_block_reason(required_artifact)
+            )
+            if block_reason:
+                reason = block_reason
             else:
                 missing_markers = _missing_completion_markers(
                     self.path,
                     self.workflow,
                     current_phase,
                     config_root=config_root,
+                    phase=phase,
+                    meta=meta,
                 )
                 reason = (
                     "missing_completion_markers"
@@ -248,14 +281,29 @@ def _missing_completion_markers(
     phase_id: str,
     *,
     config_root: Path | None = None,
+    phase: PhaseDefinition | None = None,
+    meta: dict | None = None,
 ) -> list[str]:
-    artifact_rel, markers = _phase_contract(run_path, workflow, phase_id)
+    if phase is None:
+        artifact_rel, markers = _phase_contract(run_path, workflow, phase_id)
+    else:
+        artifact_rel, markers = Path(phase.artifact), phase.required_markers
     artifact = _existing_phase_artifact(run_path, phase_id, artifact_rel)
     if not artifact.exists():
         return []
     text = artifact.read_text(encoding="utf-8")
     missing = _missing_markers(text, markers) if markers else []
     missing.extend(missing_local_skill_markers(text, config_root or run_path, phase_id))
+    if phase is not None:
+        missing.extend(phase_contract_issues(phase, text))
+        effective_meta = meta if meta is not None else read_meta(run_path)
+        missing.extend(
+            declared_artifact_issues(
+                run_path,
+                phase,
+                phase_entry_time(effective_meta),
+            )
+        )
     return missing
 
 
@@ -265,6 +313,9 @@ def _required_markers(run_path: Path, workflow: str, phase_id: str) -> tuple[str
 
 
 def _phase_contract(run_path: Path, workflow: str, phase_id: str) -> tuple[Path | None, tuple[str, ...]]:
+    definition = _phase_definition(run_path, workflow, phase_id)
+    if definition is not None:
+        return Path(definition.artifact), definition.required_markers
     project_root = run_path.parents[2] if len(run_path.parents) >= 3 else None
     candidates: list[Path] = []
     if project_root is not None:
@@ -280,14 +331,6 @@ def _phase_contract(run_path: Path, workflow: str, phase_id: str) -> tuple[Path 
         if not path.exists():
             continue
         try:
-            definition = load_phase_workflow_definition(path.parent.parent, workflow)
-        except (OSError, ValueError):
-            definition = None
-        if definition is not None:
-            for phase in definition.phases:
-                if phase.id == phase_id:
-                    return Path(phase.artifact), phase.required_markers
-        try:
             raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         except (OSError, yaml.YAMLError):
             continue
@@ -299,6 +342,52 @@ def _phase_contract(run_path: Path, workflow: str, phase_id: str) -> tuple[Path 
                 continue
             return Path(f"{phase_id}.md"), normalize_required_markers(phase.get("required_markers"))
     return (Path(f"{phase_id}.md") if phase_id != "-" else None, ())
+
+
+def _phase_definition(
+    run_path: Path,
+    workflow: str,
+    phase_id: str,
+    *,
+    config_root: Path | None = None,
+) -> PhaseDefinition | None:
+    project_root = run_path.parents[2] if len(run_path.parents) >= 3 else None
+    candidates: list[Path] = []
+    if config_root is not None:
+        candidates.append(config_root / ".agent-flow" / "workflows" / f"{workflow}.yaml")
+    if project_root is not None:
+        candidates.append(project_root / ".agent-flow" / "workflows" / f"{workflow}.yaml")
+    try:
+        candidates.append(find_kit_root() / "workflows" / f"{workflow}.yaml")
+    except RuntimeError:
+        pass
+    candidates.append(Path(__file__).resolve().parent / "workflows" / f"{workflow}.yaml")
+    candidates.append(Path(__file__).resolve().parents[2] / "workflows" / f"{workflow}.yaml")
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            definition = load_phase_workflow_definition(path.parent.parent, workflow)
+        except (OSError, ValueError):
+            continue
+        for phase in definition.phases:
+            if phase.id == phase_id:
+                return phase
+    return None
+
+
+def _status_project_root(
+    run_path: Path,
+    meta: dict,
+    config_root: Path | None,
+) -> Path:
+    workspace = meta.get("workspace")
+    workspace_root = workspace.get("workspace_root") if isinstance(workspace, dict) else None
+    if isinstance(workspace_root, str) and workspace_root:
+        return Path(workspace_root)
+    if config_root is not None:
+        return config_root
+    return run_path.parents[2] if len(run_path.parents) >= 3 else run_path
 
 
 def _existing_phase_artifact(run_path: Path, phase_id: str, artifact_rel: Path | None) -> Path:

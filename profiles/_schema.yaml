@@ -58,7 +58,7 @@ optional:
     # Canonical clean architecture role mapping. Paths are platform-native,
     # but role ids remain semantic and cross-platform.
     contract: "clean-architecture-core"
-    platform: "android | react-native | react | ios | python"
+    platform: "android | react-native | react | ios | node | python"
     strict_when_roots_present: "optional bool; if true, deterministic lint is n/a until activation_roots exist or are changed"
     activation_roots: ["optional path roots that indicate the architecture contract is adopted"]
     roles:

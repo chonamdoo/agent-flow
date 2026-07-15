@@ -73,6 +73,7 @@ READ_ONLY_SHELL_COMMANDS = {
     "pwd",
     "readlink",
     "rg",
+    "sed",
     "sort",
     "stat",
     "tail",
@@ -94,7 +95,7 @@ READ_ONLY_GIT_SUBCOMMANDS = {
 }
 
 
-def _load_boundary_module(leader_root: Path) -> tuple[type[Exception], object, object]:
+def _load_boundary_module(leader_root: Path) -> tuple[type[Exception], object, object, object]:
     runtime_root = leader_root / ".agent-flow" / "runtime" / "python"
     _verify_boundary_runtime(leader_root, runtime_root)
     if runtime_root.is_dir():
@@ -102,12 +103,26 @@ def _load_boundary_module(leader_root: Path) -> tuple[type[Exception], object, o
     try:
         from agent_flow.core.workspace_boundary import (
             WorkspaceBoundaryError,
-            find_active_pinned_workspace,
+            execution_identity_from_context,
             resolve_mutation_path,
+            select_execution_workspace,
         )
     except ImportError as exc:
         raise RuntimeError("pinned workspace guard runtime is unavailable") from exc
-    return WorkspaceBoundaryError, find_active_pinned_workspace, resolve_mutation_path
+    return (
+        WorkspaceBoundaryError,
+        execution_identity_from_context,
+        select_execution_workspace,
+        resolve_mutation_path,
+    )
+
+
+def _host_argument() -> str:
+    try:
+        index = sys.argv.index("--host")
+    except ValueError:
+        return ""
+    return sys.argv[index + 1] if index + 1 < len(sys.argv) else ""
 
 
 def _leader_root(cwd: Path) -> Path:
@@ -148,6 +163,56 @@ def _tool_input(payload: dict[str, object]) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
 
 
+def _context_value(payload: dict[str, object], *keys: str) -> str:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _required_hook_execution_id(payload: dict[str, object]) -> str:
+    execution_id = (
+        os.environ.get("AGENT_FLOW_EXECUTION_ID", "").strip()
+        or _context_value(payload, "execution_id", "thread_id", "session_id")
+    )
+    if not execution_id:
+        raise ValueError(
+            "execution_identity_missing: host hook did not declare a stable session identity"
+        )
+    return execution_id
+
+
+def _forward_claude_execution_identity(
+    payload: dict[str, object],
+    tool_input: dict[str, object],
+    command: str,
+) -> None:
+    session_id = _required_hook_execution_id(payload)
+    agent_id = _context_value(payload, "agent_id")
+    assignments = " ".join(
+        (
+            f"AGENT_FLOW_ACTIVE_HOST={shlex.quote('claude')}",
+            f"AGENT_FLOW_EXECUTION_ID={shlex.quote(session_id)}",
+            f"AGENT_FLOW_AGENT_ID={shlex.quote(agent_id)}",
+        )
+    )
+    updated_input = dict(tool_input)
+    updated_input["command"] = f"export {assignments}; {command}"
+    print(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "updatedInput": updated_input,
+                }
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    )
+
+
 def _requested_paths(tool_input: dict[str, object]) -> list[str]:
     paths: list[str] = []
 
@@ -180,151 +245,370 @@ def _requested_paths(tool_input: dict[str, object]) -> list[str]:
     return list(dict.fromkeys(paths))
 
 
-def _shell_mutation_paths(command: str) -> tuple[bool, list[str]]:
-    unsafe_substitution = re.search(r"(?<!\\)(?:\$\(|`|<\(|>\()", command) is not None
-    paths = [
-        match.group(2)
-        for match in re.finditer(
-            r"(?:^|[\s;&|])(?:\d*>>?|&>)\s*(['\"]?)([^\s;'\"|&]+)\1",
-            command,
-        )
-    ]
-    try:
-        words = shlex.split(command.replace(";", " ").replace("&&", " ").replace("||", " "))
-    except ValueError:
-        return True, paths
-    command_names: list[str] = []
-    for segment in re.split(r"(?:&&|\|\||[;|])", command):
+def _split_shell_segments(command: str) -> list[str]:
+    segments: list[str] = []
+    start = 0
+    quote = ""
+    escaped = False
+    index = 0
+    while index < len(command):
+        character = command[index]
+        if escaped:
+            escaped = False
+        elif quote == "'":
+            if character == "'":
+                quote = ""
+        elif quote == '"':
+            if character == "\\":
+                escaped = True
+            elif character == '"':
+                quote = ""
+        elif character == "\\":
+            escaped = True
+        elif character in {"'", '"'}:
+            quote = character
+        else:
+            operator_length = 0
+            if character in {";", "\r", "\n", "|"}:
+                operator_length = 2 if command[index : index + 2] in {"||"} else 1
+            elif character == "&":
+                if command[index : index + 2] == "&&":
+                    operator_length = 2
+                elif command[index : index + 2] != "&>" and (
+                    index == 0 or command[index - 1] != ">"
+                ):
+                    operator_length = 1
+            if operator_length:
+                segment = command[start:index].strip()
+                if segment:
+                    segments.append(segment)
+                index += operator_length
+                start = index
+                continue
+        index += 1
+    segment = command[start:].strip()
+    if segment:
+        segments.append(segment)
+    return segments
+
+
+def _shell_redirection_paths(segment: str) -> list[str]:
+    lexer = shlex.shlex(segment, posix=True, punctuation_chars=";&|<>\r\n")
+    lexer.whitespace = " \t"
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    tokens = list(lexer)
+    paths: list[str] = []
+    punctuation = set(";&|<>")
+    for index, token in enumerate(tokens[:-1]):
+        if not token or not set(token) <= punctuation or ">" not in token:
+            continue
+        target = tokens[index + 1]
+        if token == ">&" and target.isdigit():
+            continue
+        paths.append(target)
+    return paths
+
+
+def _sed_option_enables_in_place(argument: str) -> bool:
+    if not argument.startswith("-") or argument.startswith("--"):
+        return False
+    for character in argument[1:]:
+        if character == "i":
+            return True
+        if character in {"e", "f"} or not character.isalpha():
+            return False
+    return False
+
+
+def _sed_in_place_paths(arguments: list[str]) -> tuple[bool, list[str]]:
+    in_place = False
+    explicit_script = False
+    positional: list[str] = []
+    index = 0
+    options_finished = False
+    while index < len(arguments):
+        argument = arguments[index]
+        if not options_finished and argument == "--":
+            options_finished = True
+        elif not options_finished and argument in {"-e", "--expression", "-f", "--file"}:
+            explicit_script = True
+            index += 1
+        elif not options_finished and (
+            argument.startswith(("--expression=", "--file="))
+            or (argument.startswith(("-e", "-f")) and len(argument) > 2)
+        ):
+            explicit_script = True
+        elif not options_finished and argument in {"-i", "--in-place"}:
+            in_place = True
+            if argument == "-i" and index + 1 < len(arguments) and arguments[index + 1] == "":
+                index += 1
+        elif not options_finished and argument.startswith(("-i", "--in-place=")):
+            in_place = True
+        elif not options_finished and argument.startswith("-"):
+            in_place = in_place or _sed_option_enables_in_place(argument)
+        else:
+            positional.append(argument)
+        index += 1
+    if not in_place:
+        return False, []
+    if not explicit_script and positional:
+        positional = positional[1:]
+    return True, positional
+
+
+def _perl_option_enables_in_place(argument: str) -> bool:
+    if not argument.startswith("-") or argument.startswith("--"):
+        return False
+    for character in argument[1:]:
+        if character == "i":
+            return True
+        if character in {"e", "E", "F", "I", "M", "m", "x"} or not character.isalpha():
+            return False
+    return False
+
+
+def _perl_in_place_paths(arguments: list[str]) -> tuple[bool, list[str]]:
+    in_place = False
+    explicit_program = False
+    positional: list[str] = []
+    index = 0
+    options_finished = False
+    while index < len(arguments):
+        argument = arguments[index]
+        if not options_finished and argument == "--":
+            options_finished = True
+        elif not options_finished and argument in {"-e", "-E"}:
+            explicit_program = True
+            index += 1
+        elif not options_finished and (
+            (argument.startswith("-e") or argument.startswith("-E"))
+            and len(argument) > 2
+        ):
+            explicit_program = True
+        elif not options_finished and argument.startswith("-"):
+            in_place = in_place or _perl_option_enables_in_place(argument)
+            if argument in {"-F", "-I", "-M", "-m", "-x"}:
+                index += 1
+        else:
+            positional.append(argument)
+        index += 1
+    if not in_place:
+        return False, []
+    if not explicit_program and positional:
+        positional = positional[1:]
+    return True, positional
+
+
+def _shell_mutation_paths(command: str) -> tuple[bool, list[str], bool]:
+    paths: list[str] = []
+    dynamic_target = False
+    mutating_segment = False
+    for segment in _split_shell_segments(command):
         try:
             segment_words = shlex.split(segment)
+            segment_redirections = _shell_redirection_paths(segment)
         except ValueError:
-            return True, paths
-        skip_env = False
-        for word in segment_words:
-            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", word):
-                continue
-            if Path(word).name.lower() == "env":
-                skip_env = True
-                continue
-            if skip_env and word.startswith("-"):
-                continue
-            command_names.append(Path(word).name.lower())
-            break
-    commands = set(command_names)
-    git_mutation = "git" in commands and any(
-        word in {
-            "am",
-            "apply",
-            "checkout",
-            "cherry-pick",
-            "clean",
-            "merge",
-            "rebase",
-            "reset",
-            "restore",
-            "switch",
-        }
-        for word in words
-    )
-    inline_mutation = re.search(
+            return True, paths, True
+        unwrapped = _unwrap_shell_command(segment_words)
+        if not unwrapped:
+            continue
+        command_name = Path(unwrapped[0]).name.lower()
+        arguments = unwrapped[1:]
+        sed_mutating, sed_paths = _sed_in_place_paths(arguments) if command_name == "sed" else (False, [])
+        perl_mutating, perl_paths = _perl_in_place_paths(arguments) if command_name == "perl" else (False, [])
+        segment_unsafe = re.search(r"(?<!\\)(?:\$\(|`|<\(|>\()", segment) is not None
+        segment_inline = _has_inline_mutation(segment)
+        segment_mutating_options = (
+            sed_mutating
+            or perl_mutating
+            or (
+                command_name == "find"
+                and bool(re.search(r"(?:^|\s)-(?:delete|exec|execdir)\b", segment))
+            )
+            or command_name in {"dd", "rsync"}
+            or bool(segment_redirections)
+        )
+        git_command: tuple[str, str, tuple[str, ...]] | None = None
+        if command_name == "git":
+            git_command = _git_command(unwrapped)
+            for index, word in enumerate(unwrapped[1:], start=1):
+                if word.startswith("--output="):
+                    paths.append(word.split("=", 1)[1])
+                    segment_mutating_options = True
+                elif word == "--output":
+                    segment_mutating_options = True
+                    if index + 1 < len(unwrapped):
+                        paths.append(unwrapped[index + 1])
+        segment_read_only = (
+            command_name in READ_ONLY_SHELL_COMMANDS
+            and (git_command is None or _git_command_is_read_only(git_command))
+            and not segment_mutating_options
+            and not segment_unsafe
+            and not segment_inline
+        )
+        if segment_read_only:
+            continue
+        mutating_segment = True
+        dynamic_target = dynamic_target or segment_unsafe
+        segment_paths: list[str] = list(segment_redirections)
+        positional = [argument for argument in arguments if not argument.startswith("-")]
+        if git_command is not None:
+            segment_paths.extend(git_command[2])
+        elif sed_mutating:
+            segment_paths.extend(sed_paths)
+        elif perl_mutating:
+            segment_paths.extend(perl_paths)
+        elif command_name in {"cp", "install", "rsync"}:
+            if positional:
+                segment_paths.append(positional[-1])
+        elif command_name in {"ln", "mv"}:
+            segment_paths.extend(positional)
+        elif command_name in SHELL_MUTATORS or segment_mutating_options:
+            if command_name == "dd":
+                segment_paths.extend(
+                    argument.split("=", 1)[1]
+                    for argument in arguments
+                    if argument.startswith("of=") and len(argument.split("=", 1)) == 2
+                )
+            else:
+                segment_paths.extend(positional)
+        else:
+            segment_paths.extend(
+                argument
+                for argument in arguments
+                if _looks_like_path(argument.strip("'\""))
+            )
+        if segment_inline:
+            segment_paths.extend(
+                match.group(1)
+                for match in re.finditer(r"['\"]((?:/|\.\.?/)[^'\"]+)['\"]", segment)
+            )
+            if re.search(
+                r"\b(?:process\.env|os\.environ|getenv|ENV\[)|\$[{A-Za-z_(]",
+                segment,
+            ):
+                dynamic_target = True
+            if not segment_paths:
+                dynamic_target = True
+        for candidate in segment_paths:
+            normalized = candidate.strip("'\"")
+            if "$" in normalized or "`" in normalized or normalized.startswith("~"):
+                dynamic_target = True
+            paths.append(normalized)
+    if not paths and not mutating_segment:
+        return False, [], False
+    if dynamic_target:
+        return True, [], True
+    return True, list(dict.fromkeys(paths)), False
+
+
+def _has_inline_mutation(command: str) -> bool:
+    return re.search(
         r"\b(write_text|write_bytes|unlink|mkdir|makedirs|remove|rename|replace)\b|"
         r"\b(writeFileSync|appendFileSync|createWriteStream|rmSync|unlinkSync|mkdirSync|renameSync)\b|"
         r"\b(File\.(?:write|delete|rename)|open)\s*\([^)]*,?\s*['\"][wax+]",
         command,
         re.IGNORECASE,
     ) is not None
-    mutating_options = (
-        ("sed" in commands and bool(re.search(r"(?:^|\s)-[^\s]*i", command)))
-        or ("perl" in commands and bool(re.search(r"(?:^|\s)-[^\s]*[pi]", command)))
-        or ("find" in commands and bool(re.search(r"(?:^|\s)-(?:delete|exec|execdir)\b", command)))
-        or "dd" in commands
-        or "rsync" in commands
+
+
+def _looks_like_path(candidate: str) -> bool:
+    return (
+        candidate.startswith(("/", "./", "../"))
+        or "/../" in candidate
+        or candidate.endswith("/..")
     )
-    git_read_only = "git" not in commands
-    if "git" in commands:
-        git_index = next(
-            (index for index, word in enumerate(words) if Path(word).name.lower() == "git"),
-            -1,
-        )
-        git_arguments = [word for word in words[git_index + 1 :] if not word.startswith("-")]
-        git_subcommand = git_arguments[0] if git_arguments else ""
-        git_read_only = git_subcommand in READ_ONLY_GIT_SUBCOMMANDS or (
-            git_subcommand == "worktree"
-            and len(git_arguments) > 1
-            and git_arguments[1] == "list"
-        )
-        for index, word in enumerate(words):
-            if word.startswith("--output="):
-                paths.append(word.split("=", 1)[1])
-                mutating_options = True
-            elif word == "--output":
-                mutating_options = True
-                if index + 1 < len(words):
-                    paths.append(words[index + 1])
-    proven_read_only = (
-        bool(command_names)
-        and all(name in READ_ONLY_SHELL_COMMANDS for name in command_names)
-        and git_read_only
-        and not mutating_options
-        and not unsafe_substitution
-    )
-    mutating = (
-        bool(paths)
-        or bool(commands & SHELL_MUTATORS)
-        or git_mutation
-        or inline_mutation
-        or mutating_options
-        or not proven_read_only
-    )
-    if not mutating:
-        return False, []
-    dynamic_target = unsafe_substitution
-    for match in re.finditer(r"(?:^|\s)(?:[A-Za-z_][A-Za-z0-9_]*|of|dest|destination)=([^\s;&|]+)", command):
-        candidate = match.group(1).strip("'\"")
-        if candidate.startswith(("/", "./", "../")):
-            paths.append(candidate)
-        if "$" in candidate or "`" in candidate or candidate.startswith("~"):
-            dynamic_target = True
-    for quoted in re.finditer(r"['\"]((?:/|\.\.?/)[^'\"]+)['\"]", command):
-        paths.append(quoted.group(1))
-    if inline_mutation and re.search(r"\b(?:process\.env|os\.environ|getenv|ENV\[)|\$[{A-Za-z_(]", command):
-        dynamic_target = True
-    for word in words:
-        candidate = word.strip("'\"")
-        if "$" in candidate or "`" in candidate or candidate.startswith("~"):
-            dynamic_target = True
-        if (
-            candidate.startswith(("/", "./", "../"))
-            or "/../" in candidate
-            or candidate.endswith("/..")
-        ):
-            paths.append(candidate)
-    for index, word in enumerate(words):
-        command_name = Path(word).name.lower()
-        if command_name not in SHELL_MUTATORS:
+
+
+def _unwrap_shell_command(words: list[str]) -> list[str]:
+    index = 0
+    while index < len(words):
+        word = words[index]
+        if word == "command" or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", word):
+            index += 1
             continue
-        arguments: list[str] = []
-        for candidate in words[index + 1 :]:
-            if candidate in {"|", "&&", "||"}:
+        if Path(word).name.lower() != "env":
+            break
+        index += 1
+        while index < len(words):
+            option = words[index]
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", option):
+                index += 1
+            elif option in {"-i", "--ignore-environment"}:
+                index += 1
+            elif option in {"-u", "--unset"} and index + 1 < len(words):
+                index += 2
+            elif option.startswith("-"):
+                index += 1
+            else:
                 break
-            if not candidate.startswith("-"):
-                arguments.append(candidate)
-        if command_name in {"cp", "install", "ln", "mv"}:
-            if arguments:
-                paths.append(arguments[-1])
+    return words[index:]
+
+
+def _git_command(words: list[str]) -> tuple[str, str, tuple[str, ...]]:
+    index = 1
+    targets: list[str] = []
+    options_with_value = {
+        "-C",
+        "-c",
+        "--git-dir",
+        "--work-tree",
+        "--namespace",
+        "--config-env",
+        "--exec-path",
+    }
+    while index < len(words) and words[index].startswith("-") and words[index] != "--":
+        option = words[index]
+        index += 1
+        if option in options_with_value and index < len(words):
+            if option in {"-C", "--git-dir", "--work-tree"}:
+                targets.append(words[index])
+            index += 1
         else:
-            paths.extend(arguments)
-    if "rsync" in commands:
-        arguments = [word for word in words[1:] if not word.startswith("-")]
-        if arguments:
-            paths.append(arguments[-1])
-    if dynamic_target:
-        return True, []
-    return True, list(dict.fromkeys(paths))
+            for prefix in ("--git-dir=", "--work-tree=", "-C"):
+                if option.startswith(prefix) and option != prefix:
+                    targets.append(option[len(prefix) :])
+                    break
+    if index < len(words) and words[index] == "--":
+        index += 1
+    subcommand = words[index].lower() if index < len(words) else ""
+    next_argument = words[index + 1].lower() if index + 1 < len(words) else ""
+    return subcommand, next_argument, tuple(targets)
+
+
+def _git_command_is_read_only(command: tuple[str, str, tuple[str, ...]]) -> bool:
+    subcommand, next_argument, _targets = command
+    return subcommand in READ_ONLY_GIT_SUBCOMMANDS or (
+        subcommand == "worktree" and next_argument == "list"
+    )
+
+
+def _requests_agent_flow_launcher(command: str) -> bool:
+    for segment in _split_shell_segments(command):
+        try:
+            words = shlex.split(segment)
+        except ValueError:
+            return True
+        while words and (
+            words[0] == "command"
+            or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0])
+        ):
+            words = words[1:]
+        if words and Path(words[0]).name.lower() == "env":
+            words = words[1:]
+            while words and (
+                words[0].startswith("-")
+                or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0])
+            ):
+                words = words[1:]
+        if words and Path(words[0]).name.lower() in {"agent-flow", "agent-flow-kit"}:
+            return True
+    return False
 
 
 def _is_agent_flow_launcher(command: str, cwd: Path, leader_root: Path, pinned_root: Path) -> bool:
-    if re.search(r"(?<!\\)(?:\$\(|`|<\(|>\(|[;&|]|\d*>>?|&>)", command):
+    if re.search(r"(?<!\\)(?:\$\(|`|<\(|>\(|[\r\n;&|]|\d*>>?|&>)", command):
         return False
     if any(
         os.environ.get(name)
@@ -645,40 +929,72 @@ def main() -> int:
         cwd_value = payload.get("cwd")
         cwd = Path(cwd_value) if isinstance(cwd_value, str) and cwd_value else Path.cwd()
         leader_root = _leader_root(cwd)
-        boundary_error, find_active, resolve_path = _load_boundary_module(leader_root)
-        active = find_active(leader_root)
-        if active is None:
+        if not (leader_root / ".git").exists():
             return 0
+        host = str(
+            payload.get("host")
+            or _host_argument()
+            or os.environ.get("AGENT_FLOW_ACTIVE_HOST")
+            or "unknown"
+        ).strip().lower()
         tool_input = _tool_input(payload)
+        command = ""
+        paths: list[str] = []
+        unresolved_shell_target = False
         if tool_name in SHELL_TOOLS:
-            command = tool_input.get("command")
-            if not isinstance(command, str) or not command.strip():
-                raise boundary_error("write boundary rejected: shell tool did not declare a command")
-            mutating, paths = _shell_mutation_paths(command)
+            command_value = tool_input.get("command")
+            if not isinstance(command_value, str) or not command_value.strip():
+                raise ValueError("write boundary rejected: shell tool did not declare a command")
+            command = command_value
+            mutating, paths, unresolved_shell_target = _shell_mutation_paths(command)
             if not mutating:
                 return 0
+            if _is_agent_flow_launcher(command, cwd, leader_root, leader_root):
+                if host == "claude":
+                    _forward_claude_execution_identity(payload, tool_input, command)
+                elif host == "omp":
+                    _required_hook_execution_id(payload)
+                return 0
+            if _requests_agent_flow_launcher(command):
+                raise ValueError("write boundary rejected: agent-flow launcher is not trusted")
+        boundary_error, resolve_execution, select_workspace, resolve_path = _load_boundary_module(leader_root)
+        execution = resolve_execution(payload, os.environ, host_hint=host)
+        active = select_workspace(leader_root, execution)
+        if active is None:
+            return 0
+        if tool_name in SHELL_TOOLS:
             pinned_root = Path(active.identity.workspace_root).resolve(strict=True)
             leader_root = _leader_root(cwd).resolve(strict=True)
             if _is_agent_flow_launcher(command, cwd, leader_root, pinned_root):
+                if host == "claude":
+                    _forward_claude_execution_identity(payload, tool_input, command)
+                elif host == "omp":
+                    _required_hook_execution_id(payload)
                 return 0
             current_root = cwd.resolve(strict=True)
-            if current_root != pinned_root:
+            if current_root != pinned_root and pinned_root not in current_root.parents:
                 raise boundary_error(
                     "write boundary rejected: "
                     f"requested_path={command} resolved_path={current_root} "
                     f"pinned_workspace_root={pinned_root} "
-                    f"host={payload.get('host') or 'unknown'} "
+                    f"host={host} "
                     f"phase={payload.get('phase') or 'unknown'} "
+                    "reason_code=mutation_cwd_not_pinned "
                     "reason=mutating shell command must run from pinned workspace"
                 )
         else:
             paths = _requested_paths(tool_input)
+        if unresolved_shell_target:
+            raise boundary_error(
+                "write boundary rejected: shell command has an unresolved mutation target"
+            )
+        if tool_name in SHELL_TOOLS and not paths:
+            return 0
         if not paths:
             raise boundary_error("write boundary rejected: write tool did not declare a target path")
-        host = str(payload.get("host") or os.environ.get("AGENT_FLOW_ACTIVE_HOST") or "unknown")
         phase = str(payload.get("phase") or "unknown")
         for requested in paths:
-            resolve_path(active.identity, requested, host=host, phase=phase)
+            resolve_path(active.identity, requested, base_dir=cwd, host=host, phase=phase)
         return 0
     except Exception as exc:
         print(f"BLOCKED: {exc}", file=sys.stderr)
