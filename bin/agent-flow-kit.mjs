@@ -2163,7 +2163,7 @@ function writeJson(pathName, payload) {
 
 function readExistingKit(agentFlowDir) {
   const kitPath = path.join(agentFlowDir, "kit.json");
-  if (!fs.existsSync(kitPath)) {
+  if (!lstatIfExists(kitPath)) {
     return undefined;
   }
   try {

@@ -946,6 +946,19 @@ def test_sandboxed_python_cli_rejects_invalid_existing_kit(
     assert "project runtime contract commitment is invalid" in result.stderr
 
 
+def test_sandboxed_python_cli_rejects_broken_kit_symlink(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    agent_flow = project / ".agent-flow"
+    project.mkdir()
+    agent_flow.mkdir()
+    (agent_flow / "kit.json").symlink_to(agent_flow / "missing-kit.json")
+
+    result = _command(project, "architecture-lint", "--root", str(project))
+
+    assert result.returncode != 0
+    assert "project runtime contract commitment is invalid" in result.stderr
+
+
 def test_sandboxed_python_cli_rejects_conflicting_root_forms(tmp_path: Path) -> None:
     project = tmp_path / "project"
     other = tmp_path / "other"
