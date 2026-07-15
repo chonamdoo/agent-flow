@@ -467,6 +467,41 @@ def test_authenticated_execution_rejects_staging_path_replacement_without_hardli
     assert not marker.exists()
 
 
+def test_authenticated_execution_rejects_staging_ancestor_replacement(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    assert _install(project).returncode == 0
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path / "home"),
+        "AGENT_FLOW_TEST_HOLD_AFTER_AUTHENTICATED_STAGE_MS": "1500",
+    }
+    process = subprocess.Popen(
+        (_node(), str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"), "status"),
+        cwd=project,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert process.stderr is not None
+    line = process.stderr.readline().strip()
+    assert line.startswith("agent-flow:test-authenticated-stage-ready:"), line
+    managed_root = project / ".agent-flow"
+    displaced_root = project / ".agent-flow-displaced"
+    managed_root.rename(displaced_root)
+    managed_root.mkdir()
+    (managed_root / "exec-staging").mkdir()
+    stdout, stderr = process.communicate(timeout=20)
+    shutil.rmtree(managed_root)
+    displaced_root.rename(managed_root)
+
+    assert process.returncode != 0, stdout
+    assert "executable identity changed" in stderr
+
+
 def test_authenticated_execution_rejects_symlinked_staging_root_without_external_write(
     tmp_path: Path,
 ) -> None:
@@ -2374,6 +2409,39 @@ def test_recovery_rolls_back_initial_install_host_mutations_after_crash(tmp_path
     assert recovered.returncode == 0, recovered.stderr
     assert not host_link.exists() and not host_link.is_symlink()
     assert not (project / ".agent-flow" / "install-transaction").exists()
+
+
+def test_recovery_rejects_legacy_v3_host_journal_without_filesystem_identity(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    home = tmp_path / "home"
+    project.mkdir()
+    env = {"HOME": str(home), "AGENT_FLOW_HOST": "codex"}
+    _skill(home / ".codex" / "skills" / "external", "v1")
+
+    crashed = _command(
+        project,
+        "install",
+        env={**env, "AGENT_FLOW_TEST_CRASH_AFTER_SKILL_INDEX": "1"},
+    )
+    assert crashed.returncode == 87
+    journal_path = project / ".agent-flow" / "install-transaction" / "journal.json"
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    journal["version"] = 3
+    for operation in journal["host_mutations"]:
+        for state in (
+            operation.get("before"),
+            operation.get("after"),
+            (operation.get("pending") or {}).get("after"),
+        ):
+            if isinstance(state, dict):
+                state.pop("filesystem_identity", None)
+    journal_path.write_text(json.dumps(journal, indent=2) + "\n", encoding="utf-8")
+
+    recovered = _install(project, env=env)
+
+    assert recovered.returncode != 0
+    assert "legacy host identity is unauthenticated" in recovered.stderr
+    assert (project / ".agent-flow" / "install-transaction").exists()
 
 
 def test_late_failure_restores_only_authenticated_previous_skill_index(tmp_path: Path) -> None:

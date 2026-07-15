@@ -510,7 +510,7 @@ const AUTHENTICATED_EXEC_VERIFIER = [
   "import base64,hashlib,json,os,stat,subprocess,sys,time",
   "expected=json.loads(base64.b64decode(sys.argv[1],validate=True))",
   "target=expected.get('resolved_path') or expected['path']; staging_root=expected['staging_root']",
-  "source_fd=stage_fd=staging_fd=stage_dir_fd=bin_fd=lib_fd=None; stage_dir=stage_path=None; created_files=[]; frozen_paths=[]",
+  "source_fd=stage_fd=staging_fd=stage_dir_fd=bin_fd=lib_fd=None; stage_dir=stage_path=None; created_files=[]; frozen_paths=[]; dependency_records=[]",
   "def digest_fd(descriptor):",
   " os.lseek(descriptor,0,os.SEEK_SET); digest=hashlib.sha256()",
   " while True:",
@@ -523,17 +523,25 @@ const AUTHENTICATED_EXEC_VERIFIER = [
   " project=expected['project_root']",
   " if not os.path.isabs(project) or os.path.realpath(project)!=project: raise OSError('invalid project root')",
   " if os.path.normpath(staging_root)!=os.path.join(project,'.agent-flow','exec-staging'): raise OSError('invalid staging root')",
-  " cursor=project",
+  " project_fd=os.open(project,os.O_RDONLY|getattr(os,'O_DIRECTORY',0)|getattr(os,'O_NOFOLLOW',0)); parent_fd=project_fd",
+  " opened_fds=[project_fd]",
+  " project_metadata=os.fstat(project_fd); named_project=os.lstat(project)",
+  " if (project_metadata.st_dev,project_metadata.st_ino)!=(named_project.st_dev,named_project.st_ino) or not stat.S_ISDIR(project_metadata.st_mode): raise OSError('project root changed')",
   " for component in ('.agent-flow','exec-staging'):",
-  "  candidate=os.path.join(cursor,component)",
-  "  try: metadata=os.lstat(candidate)",
-  "  except FileNotFoundError: os.mkdir(candidate,0o700); metadata=os.lstat(candidate)",
-  "  if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode) or metadata.st_uid!=os.getuid() or metadata.st_mode&0o022: raise OSError('unsafe staging root')",
-  "  cursor=candidate",
-  " descriptor=os.open(staging_root,os.O_RDONLY|getattr(os,'O_DIRECTORY',0)|getattr(os,'O_NOFOLLOW',0))",
-  " opened=os.fstat(descriptor); named=os.lstat(staging_root)",
-  " if (opened.st_dev,opened.st_ino)!=(named.st_dev,named.st_ino): raise OSError('staging root changed')",
-  " return descriptor",
+  "  try: next_fd=os.open(component,os.O_RDONLY|getattr(os,'O_DIRECTORY',0)|getattr(os,'O_NOFOLLOW',0),dir_fd=parent_fd)",
+  "  except FileNotFoundError:",
+  "   os.mkdir(component,0o700,dir_fd=parent_fd); next_fd=os.open(component,os.O_RDONLY|getattr(os,'O_DIRECTORY',0)|getattr(os,'O_NOFOLLOW',0),dir_fd=parent_fd)",
+  "  metadata=os.fstat(next_fd)",
+  "  if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid!=os.getuid() or metadata.st_mode&0o022: os.close(next_fd); raise OSError('unsafe staging root')",
+  "  opened_fds.append(next_fd)",
+  "  if parent_fd!=project_fd: os.close(parent_fd)",
+  "  parent_fd=next_fd",
+  " for descriptor in opened_fds[:-1]:",
+  "  if descriptor!=parent_fd and descriptor!=project_fd:",
+  "   try: os.close(descriptor)",
+  "   except OSError: pass",
+  " if project_fd!=parent_fd: os.close(project_fd)",
+  " return parent_fd",
   "def copy_descriptor(source,parent_descriptor,name,mode):",
   " destination=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0),mode,dir_fd=parent_descriptor)",
   " try:",
@@ -584,12 +592,16 @@ const AUTHENTICATED_EXEC_VERIFIER = [
   "  names=[name for name in os.listdir(source_lib) if (name.startswith('libpython') or name.startswith('libnode')) and name.endswith('.dylib')]",
   "  if names: os.mkdir('lib',0o700,dir_fd=stage_dir_fd); lib_fd=os.open('lib',os.O_RDONLY|getattr(os,'O_DIRECTORY',0)|getattr(os,'O_NOFOLLOW',0),dir_fd=stage_dir_fd)",
   "  for name in names:",
-  "   dependency_fd=copy_dependency(os.path.join(source_lib,name),lib_fd,name); dependency_metadata=os.fstat(dependency_fd); created_files.append((lib_fd,name,dependency_metadata.st_dev,dependency_metadata.st_ino)); os.close(dependency_fd)",
+  "   dependency_fd=copy_dependency(os.path.join(source_lib,name),lib_fd,name); dependency_metadata=os.fstat(dependency_fd); dependency_records.append((os.path.join(stage_dir,'lib',name),dependency_fd,dependency_metadata.st_dev,dependency_metadata.st_ino,digest_fd(dependency_fd))); created_files.append((lib_fd,name,dependency_metadata.st_dev,dependency_metadata.st_ino))",
   " stage_path=os.path.join(stage_dir,'bin','executable')",
   " hold=int(os.environ.get('AGENT_FLOW_TEST_HOLD_AFTER_AUTHENTICATED_STAGE_MS','0'))",
   " if 0<hold<=10000: print('agent-flow:test-authenticated-stage-ready:'+stage_path,file=sys.stderr,flush=True); time.sleep(hold/1000)",
   " named_root=os.lstat(staging_root); named_dir=os.lstat(stage_dir); named_stage=os.lstat(stage_path)",
   " if (named_root.st_dev,named_root.st_ino)!=(os.fstat(staging_fd).st_dev,os.fstat(staging_fd).st_ino) or (named_dir.st_dev,named_dir.st_ino)!=(os.fstat(stage_dir_fd).st_dev,os.fstat(stage_dir_fd).st_ino) or (named_stage.st_dev,named_stage.st_ino)!=(stage_metadata.st_dev,stage_metadata.st_ino) or digest_fd(stage_fd)!=expected['sha256']: raise OSError('staging path changed')",
+  " for dependency_path,dependency_fd,dependency_device,dependency_inode,dependency_digest in dependency_records:",
+  "  dependency_named=os.lstat(dependency_path); dependency_current=os.fstat(dependency_fd)",
+  "  if (dependency_named.st_dev,dependency_named.st_ino)!=(dependency_device,dependency_inode) or (dependency_current.st_dev,dependency_current.st_ino)!=(dependency_device,dependency_inode) or digest_fd(dependency_fd)!=dependency_digest: raise OSError('staging dependency changed')",
+  "  freeze(dependency_path)",
   " freeze(stage_path); freeze(os.path.join(stage_dir,'bin')); freeze(stage_dir);",
   " if lib_fd is not None: freeze(os.path.join(stage_dir,'lib'))",
   " env=dict(os.environ); env.pop('AGENT_FLOW_TEST_HOLD_BEFORE_AUTHENTICATED_EXEC_OPEN_MS',None); env.pop('AGENT_FLOW_TEST_HOLD_BEFORE_AUTHENTICATED_PYTHON_OPEN_MS',None)",
@@ -617,7 +629,7 @@ const AUTHENTICATED_EXEC_VERIFIER = [
   "   current=os.stat(name,dir_fd=parent,follow_symlinks=False)",
   "   if (current.st_dev,current.st_ino)==(device,inode): os.unlink(name,dir_fd=parent)",
   "  except OSError: pass",
-  " for descriptor in (source_fd,stage_fd,bin_fd,lib_fd):",
+  " for descriptor in (source_fd,stage_fd,bin_fd,lib_fd,*[record[1] for record in dependency_records]):",
   "  if descriptor is not None:",
   "   try: os.close(descriptor)",
   "   except OSError: pass",
@@ -2799,11 +2811,13 @@ function sameHostFilesystemIdentity(pathName, expected) {
 
 function sameHostPathState(left, right, requireIdentity = false) {
   if (!left || !right || left.kind !== right.kind) return false;
+  if (left.kind === "absent") return true;
   let contentMatches = left.kind === "absent";
   if (left.kind === "symlink") contentMatches = left.target === right.target;
   if (left.kind === "directory") contentMatches = left.tree_hash === right.tree_hash;
   if (left.kind === "file") contentMatches = left.file_hash === right.file_hash;
-  if (!contentMatches || !requireIdentity || !right.filesystem_identity) return contentMatches;
+  if (!contentMatches || !requireIdentity) return contentMatches;
+  if (!right.filesystem_identity) return false;
   return JSON.stringify(left.filesystem_identity) === JSON.stringify(right.filesystem_identity);
 }
 
@@ -3688,6 +3702,9 @@ function validateInterruptedInstallJournal(root, agentFlowDir, transactionRoot, 
     || pathHasSymlink(root, transactionRoot)
   ) {
     throw new Error(`invalid interrupted skill transaction: ${transactionRoot}`);
+  }
+  if (journal.version < 4 && journal.host_mutations.length > 0) {
+    throw new Error(`invalid interrupted skill transaction: legacy host identity is unauthenticated: ${transactionRoot}`);
   }
   const allowedManagedPaths = new Set(
     managedInstallPaths(root).map((target) => path.relative(root, target)),
