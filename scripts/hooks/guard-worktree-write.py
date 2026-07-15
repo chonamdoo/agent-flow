@@ -166,7 +166,11 @@ def _requested_paths(tool_input: dict[str, object]) -> list[str]:
         if isinstance(patch, str):
             paths.extend(
                 match.group(1).strip()
-                for match in re.finditer(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", patch, re.MULTILINE)
+                for match in re.finditer(
+                    r"^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+)$",
+                    patch,
+                    re.MULTILINE,
+                )
             )
         edits = value.get("edits")
         if isinstance(edits, list):

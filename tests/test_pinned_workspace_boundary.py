@@ -233,17 +233,19 @@ def _guard(
     *,
     host: str = "codex",
     phase: str = "implement",
+    move_to: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
     env["PYTHONPATH"] = str(KIT_ROOT / "src")
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    move_line = f"\n*** Move to: {move_to}" if move_to is not None else ""
     payload = {
         "tool_name": "apply_patch",
         "cwd": str(leader),
         "host": host,
         "phase": phase,
         "tool_input": {
-            "patch": f"*** Begin Patch\n*** Update File: {target}\n@@\n-old\n+new\n*** End Patch"
+            "patch": f"*** Begin Patch\n*** Update File: {target}{move_line}\n@@\n-old\n+new\n*** End Patch"
         },
     }
     return subprocess.run(
@@ -305,6 +307,27 @@ def test_follow_up_launched_from_leader_mutates_only_the_pinned_worktree(
     (worktree / "shared.txt").write_text("pinned\n", encoding="utf-8")
     assert hashlib.sha256((leader / "shared.txt").read_bytes()).hexdigest() == leader_hash
     assert (worktree / "shared.txt").read_text(encoding="utf-8") == "pinned\n"
+
+
+def test_apply_patch_move_target_must_remain_in_pinned_worktree(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+
+    accepted = _guard(
+        leader,
+        worktree / "shared.txt",
+        move_to=worktree / "moved.txt",
+    )
+    rejected = _guard(
+        leader,
+        worktree / "shared.txt",
+        move_to=leader / "moved.txt",
+    )
+
+    assert accepted.returncode == 0, accepted.stderr
+    assert rejected.returncode == 2
+    assert str(leader / "moved.txt") in rejected.stderr
 
 
 def test_sub_agent_absolute_leader_path_is_rejected(

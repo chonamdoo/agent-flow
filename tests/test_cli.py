@@ -3075,9 +3075,17 @@ if (!missing?.block) {
             kit_root = installed_roots["agent-flow-kit.mjs"]
             legacy_root = installed_roots["agent-flow-install.mjs"]
             for rel in rels:
+                kit_text = (kit_root / rel).read_text(encoding="utf-8").replace(
+                    str(kit_root / ".agent-flow" / "bin" / "agent-flow"),
+                    "<project-launcher>",
+                )
+                legacy_text = (legacy_root / rel).read_text(encoding="utf-8").replace(
+                    str(legacy_root / ".agent-flow" / "bin" / "agent-flow"),
+                    "<project-launcher>",
+                )
                 self.assertEqual(
-                    (kit_root / rel).read_text(encoding="utf-8"),
-                    (legacy_root / rel).read_text(encoding="utf-8"),
+                    kit_text,
+                    legacy_text,
                     rel,
                 )
 

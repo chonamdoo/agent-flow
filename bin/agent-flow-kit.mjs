@@ -842,8 +842,6 @@ function installProjectUnlocked(root, context, lock) {
   );
   const agentFlowSkill = agentFlowSkillMarkdown();
   writeManagedFile(path.join(agentFlowDir, "skills", "agent-flow", "SKILL.md"), agentFlowSkill);
-  // Generated workflow skills are shared content; keep them independent of the installer's absolute project path.
-  AGENT_FLOW_COMMAND = "agent-flow";
   writeManagedFile(
     path.join(agentFlowDir, "skills", "full-feature-workflow", "SKILL.md"),
     fullFeatureSkillMarkdown(),

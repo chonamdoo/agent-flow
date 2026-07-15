@@ -191,6 +191,10 @@ def test_install_materializes_authenticated_project_launcher(tmp_path: Path) -> 
     assert contract["python_runtime"]["path"] == ".agent-flow/runtime/python"
     assert kit["project_runtime_contract_commitment_version"] == 1
     assert str(launcher) in (project / ".agent-flow" / "skills" / "agent-flow" / "SKILL.md").read_text(encoding="utf-8")
+    assert str(launcher) in (
+        project / ".agent-flow" / "skills" / "full-feature-workflow" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    assert str(launcher) in (project / ".agent-flow" / "prompts" / "pr-watch.md").read_text(encoding="utf-8")
     env = dict(os.environ)
     env["HOME"] = str(project.parent / "test-home")
     env["AGENT_FLOW_AUTO_EXTERNAL_SKILLS"] = "1"
