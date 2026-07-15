@@ -10,6 +10,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from agent_flow.core.commands import run_safe_command
+from agent_flow.core.workspace_boundary import (
+    capture_workspace_identity,
+    workspace_identity_from_dict,
+)
 
 
 PROTECTED_WORKTREE_BRANCHES = {"main", "master", "develop"}
@@ -34,6 +38,7 @@ class WorktreeStatus:
     exists: bool
     branch_created_by_agent_flow: bool = False
     requested_name: str = ""
+    identity: dict[str, object] | None = None
 
 
 def plan_worktree(*, root: Path, name: str, branch: str | None = None) -> WorktreePlan:
@@ -86,6 +91,7 @@ def create_worktree(*, root: Path, plan: WorktreePlan, allow_dirty: bool = False
         exists=True,
         branch_created_by_agent_flow=branch_created,
         requested_name=plan.requested_name,
+        identity=capture_workspace_identity(plan.path).to_dict(),
     )
     try:
         write_worktree_manifest(root=root, status=status)
@@ -197,6 +203,7 @@ def get_worktree_status(*, root: Path, name: str) -> WorktreeStatus:
             path=plan.path,
             exists=plan.path.exists(),
             branch_created_by_agent_flow=branch_created,
+            identity=_validated_manifest_identity(payload.get("identity")),
         )
     return WorktreeStatus(
         name=plan.name,
@@ -213,8 +220,16 @@ def write_worktree_manifest(*, root: Path, status: WorktreeStatus) -> Path:
     payload = asdict(status)
     payload["path"] = str(status.path.relative_to(root))
     payload["leader_root"] = str(root)
+    payload["identity"] = status.identity or capture_workspace_identity(status.path).to_dict()
     path.write_text(f"{json.dumps(payload, indent=2, sort_keys=True)}\n", encoding="utf-8")
     return path
+
+
+def _validated_manifest_identity(payload: object) -> dict[str, object] | None:
+    if payload is None:
+        return None
+    identity = workspace_identity_from_dict(payload)
+    return identity.to_dict()
 
 
 def worktree_runtime_root(*, root: Path, name: str) -> Path:

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import base64
 import contextlib
 import io
 import os
+import shlex
 import site
 import shutil
 import sys
@@ -33,6 +35,7 @@ from agent_flow.core.worktrees import plan_worktree, worktree_runtime_root
 
 
 os.environ.setdefault("AGENT_FLOW_SKIP_CODEX_TRUST", "1")
+os.environ.setdefault("AGENT_FLOW_AUTO_EXTERNAL_SKILLS", "0")
 
 
 def _node_test_env(**overrides: str) -> dict[str, str]:
@@ -1352,6 +1355,7 @@ class CliTest(unittest.TestCase):
             self.assertTrue((project_root / ".agent-flow" / "workflows" / "full-feature.yaml").is_file())
             self.assertTrue((project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "bootstrap" / "CLAUDE.md").is_file())
+            self.assertTrue((project_root / ".agent-flow" / "bootstrap" / "agent-flow.md").is_file())
             runtime = project_root / ".agent-flow" / "runtime" / "python"
             self.assertTrue((runtime / "agent_flow" / "core" / "architecture_lint.py").is_file())
             self.assertFalse((project_root / ".agent-flow" / "scripts" / "check-context-docs.mjs").exists())
@@ -1432,7 +1436,6 @@ class CliTest(unittest.TestCase):
             self.assertTrue((project_root / ".agent-flow" / "skills" / "python-api-clean-architecture" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "architecture-reviewer" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "android-code-review" / "SKILL.md").is_file())
-            self.assertFalse((project_root / ".agent-flow" / "skills" / "android-mvi-feature").exists())
             self.assertFalse((project_root / ".agent-flow" / "skills" / "android-module-creator").exists())
             self.assertFalse((project_root / ".agent-flow" / "skills" / "android-debugging").exists())
             self.assertFalse((project_root / ".agent-flow" / "skills" / "graphify").exists())
@@ -1484,9 +1487,8 @@ class CliTest(unittest.TestCase):
                 (project_root / ".agent-flow" / "skills" / "comment-authoring-discipline" / "SKILL.md").is_file()
             )
             self.assertTrue((project_root / ".agent-flow" / "skills" / "comment-checker" / "SKILL.md").is_file())
-            expected_comment_checker = (
-                f"'{project_root.resolve() / '.agent-flow' / 'scripts' / 'hooks' / 'comment-checker.py'}'"
-            )
+            comment_checker = project_root.resolve() / ".agent-flow" / "scripts" / "hooks" / "comment-checker.py"
+            encoded_comment_checker = base64.b64encode(str(comment_checker).encode("utf-8")).decode("ascii")
             for hooks_path in (
                 project_root / ".Codex" / "hooks.json",
                 project_root / ".codex" / "hooks.json",
@@ -1498,7 +1500,13 @@ class CliTest(unittest.TestCase):
                     for entry in codex_hooks["hooks"]["PostToolUse"]
                     for hook in entry["hooks"]
                 ]
-                self.assertIn(expected_comment_checker, codex_hook_commands)
+                self.assertTrue(
+                    any(
+                        command.startswith("'/usr/bin/python3' -I -c ")
+                        and f"'{encoded_comment_checker}'" in command
+                        for command in codex_hook_commands
+                    )
+                )
                 self.assertNotIn(str(Path(__file__).resolve().parents[1]), "\n".join(codex_hook_commands))
             omp_extension = project_root / ".omp" / "extensions" / "agent-flow-hooks.ts"
             self.assertTrue(omp_extension.is_file())
@@ -1539,14 +1547,12 @@ class CliTest(unittest.TestCase):
             self.assertTrue(
                 (project_root / ".agent-flow" / "skills" / "react-native-development-guide" / "SKILL.md").is_file()
             )
-            self.assertIn(
-                "code-generation-discipline",
-                (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8"),
+            installed_bootstrap = (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(
+                encoding="utf-8"
             )
-            self.assertIn(
-                "현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수",
-                (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8"),
-            )
+            self.assertIn("agent-flow status", installed_bootstrap)
+            self.assertNotIn("default.yaml", installed_bootstrap)
+            self.assertNotIn("reviewer-source: sub-agent", installed_bootstrap)
             self.assertIn(
                 "status: ci-failed",
                 (project_root / ".agent-flow" / "prompts" / "pr-watch.md").read_text(encoding="utf-8"),
@@ -1567,15 +1573,140 @@ class CliTest(unittest.TestCase):
                 'agent-flow run "<task>"',
                 (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8"),
             )
+            self.assertNotIn("default.yaml", (project_root / "AGENTS.md").read_text(encoding="utf-8"))
             self.assertIn(
-                "현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수",
-                (project_root / "AGENTS.md").read_text(encoding="utf-8"),
+                "reviewer-source: sub-agent",
+                (project_root / ".agent-flow" / "prompts" / "multi-review.md").read_text(encoding="utf-8"),
             )
             agent_flow_skill = (project_root / ".agent-flow" / "skills" / "agent-flow" / "SKILL.md").read_text(
                 encoding="utf-8"
             )
             self.assertIn("Treat the status command output as the only source of truth.", agent_flow_skill)
             self.assertIn("Do not run install just because a new session started.", agent_flow_skill)
+
+    def test_install_and_sync_upsert_canonical_agent_docs_idempotently(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            agents_path = project_root / "AGENTS.md"
+            agents_path.write_bytes(b"# User rules\r\n\r\nkeep this\r\n")
+            node = _node_executable()
+            cli = Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"
+            canonical = (Path(__file__).resolve().parents[1] / "bootstrap" / "agent-flow.md").read_text(
+                encoding="utf-8"
+            )
+
+            installed = subprocess.run(
+                (node, str(cli), "install"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            agents = agents_path.read_bytes().decode("utf-8")
+            claude = (project_root / "CLAUDE.md").read_text(encoding="utf-8")
+            self.assertTrue(agents.startswith("# User rules\r\n\r\nkeep this\r\n"))
+            self.assertIn(canonical.strip().replace("\n", "\r\n"), agents)
+            self.assertEqual(claude, canonical)
+            self.assertEqual(agents.count("<!-- agent-flow:start -->"), 1)
+            self.assertEqual(claude.count("<!-- agent-flow:start -->"), 1)
+            self.assertNotIn("default.yaml", agents)
+            self.assertNotIn("current_phase:", agents)
+
+            agents_path.write_bytes(
+                (
+                    "# User rules\r\n\r\n"
+                    "<!-- agent-flow:start -->\r\nstale\r\n<!-- agent-flow:end -->\r\n\r\n"
+                    "suffix without newline"
+                ).encode("utf-8")
+            )
+            first_sync = subprocess.run(
+                (node, str(cli), "sync"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(first_sync.returncode, 0, first_sync.stderr)
+            first = agents_path.read_bytes()
+            self.assertTrue(first.startswith(b"# User rules\r\n\r\n"))
+            self.assertTrue(first.endswith(b"suffix without newline"))
+            self.assertIn(canonical.strip().replace("\n", "\r\n").encode("utf-8"), first)
+
+            second_sync = subprocess.run(
+                (node, str(cli), "sync"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(second_sync.returncode, 0, second_sync.stderr)
+            self.assertEqual(agents_path.read_bytes(), first)
+            self.assertEqual((project_root / "CLAUDE.md").read_text(encoding="utf-8"), canonical)
+            reinstalled = subprocess.run(
+                (node, str(cli), "install"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(reinstalled.returncode, 0, reinstalled.stderr)
+            self.assertEqual(agents_path.read_bytes(), first)
+
+    def test_sync_and_install_reject_unbalanced_agent_doc_markers_without_partial_edit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            agents_path = project_root / "AGENTS.md"
+            claude_path = project_root / "CLAUDE.md"
+            agents_path.write_text("user\n<!-- agent-flow:start -->\nbroken\n", encoding="utf-8")
+            claude_path.write_text("claude user rule", encoding="utf-8")
+            before_agents = agents_path.read_bytes()
+            before_claude = claude_path.read_bytes()
+            node = _node_executable()
+            cli = Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"
+
+            for command in ("sync", "install"):
+                with self.subTest(command=command):
+                    result = subprocess.run(
+                        (node, str(cli), command),
+                        cwd=project_root,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 1)
+                    self.assertIn("invalid agent-flow markers", result.stderr)
+                    self.assertEqual(agents_path.read_bytes(), before_agents)
+                    self.assertEqual(claude_path.read_bytes(), before_claude)
+
+    def test_agent_doc_block_is_identical_across_profiles(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            node = _node_executable()
+            cli = Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"
+            blocks: list[str] = []
+            for name, marker in (("generic", None), ("python", "[project]\nname='demo'\nversion='0.1.0'\n")):
+                project = root / name
+                project.mkdir()
+                if marker is not None:
+                    (project / "pyproject.toml").write_text(marker, encoding="utf-8")
+                result = subprocess.run(
+                    (node, str(cli), "install"),
+                    cwd=project,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                blocks.append((project / "AGENTS.md").read_text(encoding="utf-8"))
+                self.assertEqual(
+                    (project / "AGENTS.md").read_text(encoding="utf-8"),
+                    (project / "CLAUDE.md").read_text(encoding="utf-8"),
+                )
+            self.assertEqual(blocks[0], blocks[1])
+
     def test_node_installer_writes_cwd_independent_hook_commands(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project with space"
@@ -1630,12 +1761,23 @@ class CliTest(unittest.TestCase):
             ]
             resolved_root = project_root.resolve()
             expected = [
-                f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-worktree.sh'}'",
-                f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-protected-branch.sh'}'",
-                f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'comment-checker.py'}'",
-                f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'show-phase-status.sh'}'",
+                resolved_root / ".agent-flow" / "scripts" / "hooks" / "guard-worktree.sh",
+                resolved_root / ".agent-flow" / "scripts" / "hooks" / "guard-protected-branch.sh",
+                resolved_root / ".agent-flow" / "scripts" / "hooks" / "guard-worktree-write.py",
+                resolved_root / ".agent-flow" / "scripts" / "hooks" / "guard-worktree-write.py",
+                resolved_root / ".agent-flow" / "scripts" / "hooks" / "comment-checker.py",
+                resolved_root / ".agent-flow" / "scripts" / "hooks" / "show-phase-status.sh",
             ]
-            self.assertEqual(commands, expected)
+            self.assertEqual(len(commands), len(expected))
+            for command, script_path in zip(commands, expected):
+                encoded_path = base64.b64encode(str(script_path).encode("utf-8")).decode("ascii")
+                self.assertTrue(command.startswith("'/usr/bin/python3' -I -c "))
+                self.assertIn(f"'{encoded_path}'", command)
+            omp_extension = (project_root / ".omp" / "extensions" / "agent-flow-hooks.ts").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("NotebookEdit|Eval|Python|Notebook", omp_extension)
+            self.assertIn('|| isBashTool(event?.toolName)', omp_extension)
             stop_hook = subprocess.run(
                 ("/bin/sh", "-c", commands[-1]),
                 cwd=temp_dir,
@@ -1669,10 +1811,15 @@ class CliTest(unittest.TestCase):
                 for entry in settings["hooks"][event]
                 for hook in entry["hooks"]
             ]
-            expected_checker = (
-                f"'{project_root.resolve() / '.agent-flow' / 'scripts' / 'hooks' / 'comment-checker.py'}'"
+            checker_path = project_root.resolve() / ".agent-flow" / "scripts" / "hooks" / "comment-checker.py"
+            encoded_checker = base64.b64encode(str(checker_path).encode("utf-8")).decode("ascii")
+            self.assertTrue(
+                any(
+                    command.startswith("'/usr/bin/python3' -I -c ")
+                    and f"'{encoded_checker}'" in command
+                    for command in commands
+                )
             )
-            self.assertIn(expected_checker, commands)
             self.assertTrue(
                 os.access(project_root / ".agent-flow" / "scripts" / "hooks" / "comment-checker.py", os.X_OK)
             )
@@ -1775,9 +1922,10 @@ class CliTest(unittest.TestCase):
                             check=False,
                         )
                         self.assertEqual(result.returncode, 0, result.stderr)
-                        expected_checker = (
-                            f"'{project_root.resolve() / '.agent-flow' / 'scripts' / 'hooks' / 'comment-checker.py'}'"
+                        checker_path = (
+                            project_root.resolve() / ".agent-flow" / "scripts" / "hooks" / "comment-checker.py"
                         )
+                        encoded_checker = base64.b64encode(str(checker_path).encode("utf-8")).decode("ascii")
                         for installed_hooks_path in (
                             project_root / ".Codex" / "hooks.json",
                             project_root / ".codex" / "hooks.json",
@@ -1790,7 +1938,13 @@ class CliTest(unittest.TestCase):
                                 for hook in entry["hooks"]
                             ]
                             self.assertIn(custom_command, commands)
-                            self.assertIn(expected_checker, commands)
+                            self.assertTrue(
+                                any(
+                                    command.startswith("'/usr/bin/python3' -I -c ")
+                                    and f"'{encoded_checker}'" in command
+                                    for command in commands
+                                )
+                            )
 
     def test_node_installers_preserve_existing_claude_custom_hooks(self) -> None:
         for installer in ("agent-flow-kit.mjs", "agent-flow-install.mjs"):
@@ -1837,11 +1991,18 @@ class CliTest(unittest.TestCase):
                         for entry in entries
                         for hook in entry["hooks"]
                     ]
-                    expected_checker = (
-                        f"'{project_root.resolve() / '.agent-flow' / 'scripts' / 'hooks' / 'comment-checker.py'}'"
+                    checker_path = (
+                        project_root.resolve() / ".agent-flow" / "scripts" / "hooks" / "comment-checker.py"
                     )
+                    encoded_checker = base64.b64encode(str(checker_path).encode("utf-8")).decode("ascii")
                     self.assertIn("custom-post-hook", commands)
-                    self.assertIn(expected_checker, commands)
+                    self.assertTrue(
+                        any(
+                            command.startswith("'/usr/bin/python3' -I -c ")
+                            and f"'{encoded_checker}'" in command
+                            for command in commands
+                        )
+                    )
 
     def test_node_installers_dedupe_stop_hook_on_upgrade(self) -> None:
         # 과거 설치본은 Stop entry에 matcher: ""를 기록했다. 재설치 시 중복되면 안 된다.
@@ -1857,9 +2018,12 @@ class CliTest(unittest.TestCase):
                             f"cd '{project_root.resolve()}' && "
                             f"'{project_root.resolve() / '.agent-flow' / 'scripts' / 'hooks' / 'show-phase-status.sh'}'"
                         )
-                        expected_stop_command = (
-                            f"'{project_root.resolve() / '.agent-flow' / 'scripts' / 'hooks' / 'show-phase-status.sh'}'"
+                        expected_stop_path = (
+                            project_root.resolve() / ".agent-flow" / "scripts" / "hooks" / "show-phase-status.sh"
                         )
+                        encoded_stop_path = base64.b64encode(
+                            str(expected_stop_path).encode("utf-8")
+                        ).decode("ascii")
                         legacy_command = stop_command if scenario == "root-script" else cd_stop_command
                         seeded = {
                             "hooks": {
@@ -1903,9 +2067,13 @@ class CliTest(unittest.TestCase):
                                 for entry in settings["hooks"]["Stop"]
                                 for hook in entry["hooks"]
                             ]
-                            self.assertEqual(
-                                stop_commands.count(expected_stop_command), 1, f"{installer}: {settings_path}"
-                            )
+                            managed_stop_commands = [
+                                command
+                                for command in stop_commands
+                                if command.startswith("'/usr/bin/python3' -I -c ")
+                                and f"'{encoded_stop_path}'" in command
+                            ]
+                            self.assertEqual(len(managed_stop_commands), 1, f"{installer}: {settings_path}")
                             self.assertNotIn(stop_command, stop_commands)
                             self.assertNotIn(cd_stop_command, stop_commands)
 
@@ -2102,15 +2270,14 @@ class CliTest(unittest.TestCase):
                         check=False,
                     )
 
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    kit = json.loads((project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
-                    self.assertNotIn("graphify", kit)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("no authenticated index", result.stderr)
                     gitignore = (project_root / ".gitignore").read_text(encoding="utf-8")
-                    self.assertNotIn("graphify/", gitignore)
-                    self.assertNotIn("graphify-out/manifest.json", gitignore)
-                    self.assertNotIn("graphify-out/cost.json", gitignore)
+                    self.assertIn("graphify/", gitignore)
+                    self.assertIn("graphify-out/manifest.json", gitignore)
+                    self.assertIn("graphify-out/cost.json", gitignore)
                     for skill_root in managed_skill_roots:
-                        self.assertFalse((project_root / skill_root / "graphify").exists(), skill_root)
+                        self.assertTrue((project_root / skill_root / "graphify").exists(), skill_root)
 
     def test_node_installers_remove_legacy_antigravity_skill_links(self) -> None:
         installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
@@ -2162,12 +2329,10 @@ class CliTest(unittest.TestCase):
                         check=False,
                     )
 
-                    # 제거된 host의 legacy symlink가 ensureChildPath에서 throw하면
-                    # install 전체가 중단된다. 정리는 성공하고 link만 사라져야 한다.
+                    # 레거시 기록에는 filesystem kind와 target commitment가 없다.
                     self.assertEqual(result.returncode, 0, result.stderr)
                     for link_path in legacy_link_paths.values():
-                        self.assertFalse((project_root / link_path).is_symlink(), link_path)
-                        self.assertFalse((project_root / link_path).exists(), link_path)
+                        self.assertTrue((project_root / link_path).is_symlink(), link_path)
 
     def test_node_installer_accepts_run_install_alias(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2522,7 +2687,11 @@ class CliTest(unittest.TestCase):
             home = Path(temp_dir) / "home"
             worktree = home / ".codex" / "worktrees" / "slice" / "project"
             worktree.parent.mkdir(parents=True)
-            subprocess.run(("git", "worktree", "add", "-q", "--detach", str(worktree), "HEAD"), cwd=project_root, check=True)
+            subprocess.run(
+                ("git", "worktree", "add", "-q", "-b", "feat/node-external", str(worktree), "HEAD"),
+                cwd=project_root,
+                check=True,
+            )
             env = _node_test_env(HOME=str(home))
 
             start = subprocess.run(
@@ -2555,16 +2724,6 @@ class CliTest(unittest.TestCase):
             for installer_name in installers:
                 project_root = root / installer_name
                 project_root.mkdir()
-                skill_dir = project_root / "skills" / "android-mvi-feature"
-                skill_dir.mkdir(parents=True)
-                (skill_dir / "SKILL.md").write_text(
-                    "---\n"
-                    "name: android-mvi-feature\n"
-                    "hosts: [codex]\n"
-                    "---\n"
-                    "# Android MVI Feature\n",
-                    encoding="utf-8",
-                )
                 alias_dir = project_root / ".agent-flow" / "local-skills" / "aliased-compose"
                 alias_dir.mkdir(parents=True)
                 (alias_dir / "SKILL.md").write_text(
@@ -2599,11 +2758,9 @@ class CliTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 index = json.loads((project_root / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
                 skill_names = {skill["name"] for skill in index["skills"]}
-                self.assertNotIn("android-mvi-feature", skill_names)
                 self.assertNotIn("compose-state-authoring", skill_names)
                 self.assertNotIn("edge-to-edge", skill_names)
                 for host_root in (project_root / ".Codex" / "skills", project_root / ".codex" / "skills", project_root / ".omp" / "skills"):
-                    self.assertFalse((host_root / "android-mvi-feature").exists())
                     self.assertFalse((host_root / "compose-state-authoring").exists())
                     self.assertFalse((host_root / "edge-to-edge").exists())
 
@@ -2766,6 +2923,70 @@ if (codexContext !== undefined) {
                     )
                     self.assertEqual(exercise_result.returncode, 0, exercise_result.stderr)
 
+    def test_node_installers_omp_hook_fails_closed_for_tampered_or_missing_script(self) -> None:
+        installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            node = _node_executable()
+            for installer_name in installers:
+                with self.subTest(installer=installer_name):
+                    project_root = root / f"{installer_name}-omp-hook-integrity"
+                    project_root.mkdir()
+                    installed = subprocess.run(
+                        (
+                            node,
+                            str(Path(__file__).resolve().parents[1] / "bin" / installer_name),
+                            "install",
+                        ),
+                        cwd=project_root,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(installed.returncode, 0, installed.stderr)
+                    extension_ts = project_root / ".omp" / "extensions" / "agent-flow-hooks.ts"
+                    extension_mjs = project_root / ".omp" / "extensions" / "agent-flow-hooks.mjs"
+                    extension_mjs.write_text(extension_ts.read_text(encoding="utf-8"), encoding="utf-8")
+                    guard = project_root / ".agent-flow" / "scripts" / "hooks" / "guard-worktree-write.py"
+                    guard.write_text("#!/usr/bin/env python3\nraise SystemExit(0)\n", encoding="utf-8")
+                    exercise = project_root / "exercise-omp-hook-integrity.mjs"
+                    exercise.write_text(
+                        """
+import fs from "node:fs";
+import agentFlowHooks from "./.omp/extensions/agent-flow-hooks.mjs";
+
+const handlers = new Map();
+agentFlowHooks({
+  setLabel() {},
+  on(name, handler) {
+    handlers.set(name, handler);
+  },
+});
+const call = () => handlers.get("tool_call")(
+  { toolName: "Write", input: { file_path: "demo.txt" } },
+  { cwd: process.cwd() },
+);
+const tampered = await call();
+if (!tampered?.block) {
+  throw new Error("tampered OMP hook script did not fail closed");
+}
+fs.unlinkSync(".agent-flow/scripts/hooks/guard-worktree-write.py");
+const missing = await call();
+if (!missing?.block) {
+  throw new Error("missing OMP hook script did not fail closed");
+}
+""",
+                        encoding="utf-8",
+                    )
+                    exercised = subprocess.run(
+                        (node, str(exercise)),
+                        cwd=project_root,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(exercised.returncode, 0, exercised.stderr)
+
     def test_node_installers_link_default_host_skills_to_claude_codex_and_omp(self) -> None:
         installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2854,9 +3075,17 @@ if (codexContext !== undefined) {
             kit_root = installed_roots["agent-flow-kit.mjs"]
             legacy_root = installed_roots["agent-flow-install.mjs"]
             for rel in rels:
+                kit_text = (kit_root / rel).read_text(encoding="utf-8").replace(
+                    str(kit_root / ".agent-flow" / "bin" / "agent-flow"),
+                    "<project-launcher>",
+                )
+                legacy_text = (legacy_root / rel).read_text(encoding="utf-8").replace(
+                    str(legacy_root / ".agent-flow" / "bin" / "agent-flow"),
+                    "<project-launcher>",
+                )
                 self.assertEqual(
-                    (kit_root / rel).read_text(encoding="utf-8"),
-                    (legacy_root / rel).read_text(encoding="utf-8"),
+                    kit_text,
+                    legacy_text,
                     rel,
                 )
 
@@ -2922,22 +3151,12 @@ if (codexContext !== undefined) {
             )
             self.assertIn('agent-flow run "<task>"', bootstrap.read_text(encoding="utf-8"))
             self.assertIn('agent-flow run "<task>"', claude_bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수", bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수", claude_bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("활성 host가 아닌 추가 provider는 optional", bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("활성 host가 아닌 추가 provider는 optional", claude_bootstrap.read_text(encoding="utf-8"))
-            self.assertNotIn("예: Claude/Gemini", bootstrap.read_text(encoding="utf-8"))
-            self.assertNotIn("예: Claude/Gemini", claude_bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("reviewer-source: sub-agent", bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("reviewer-source: sub-agent", claude_bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("sub-agent를 닫는다", bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("sub-agent를 닫는다", claude_bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("## Overall", bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("## Overall", claude_bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("verdict: approve", bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("verdict: approve", claude_bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("verdict: request-changes", bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("verdict: request-changes", claude_bootstrap.read_text(encoding="utf-8"))
+            self.assertIn("사용자 응답은 짧게 유지", bootstrap.read_text(encoding="utf-8"))
+            self.assertIn("사용자 응답은 짧게 유지", claude_bootstrap.read_text(encoding="utf-8"))
+            self.assertNotIn("default.yaml", bootstrap.read_text(encoding="utf-8"))
+            self.assertNotIn("default.yaml", claude_bootstrap.read_text(encoding="utf-8"))
+            self.assertNotIn("reviewer-source: sub-agent", bootstrap.read_text(encoding="utf-8"))
+            self.assertNotIn("reviewer-source: sub-agent", claude_bootstrap.read_text(encoding="utf-8"))
             self.assertIn("Full Feature Workflow", skill.read_text(encoding="utf-8"))
             self.assertIn("Workflow Contract", rules.read_text(encoding="utf-8"))
             self.assertIn("two active-host sub-agents", rules.read_text(encoding="utf-8"))
@@ -5639,6 +5858,31 @@ if (codexContext !== undefined) {
             self.assertTrue(result.passed)
             self.assertEqual(result.exit_code, 0)
             self.assertEqual(result.stdout.strip(), "ok")
+
+    def test_run_gate_pins_agent_flow_to_project_launcher(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            launcher = root / "project-agent-flow"
+            fake_bin = root / "fake-bin"
+            marker = root / "fake-ran"
+            fake_bin.mkdir()
+            launcher.write_text("#!/bin/sh\nprintf 'project-launcher\\n'\n", encoding="utf-8")
+            launcher.chmod(0o755)
+            fake = fake_bin / "agent-flow"
+            fake.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(marker))}\n", encoding="utf-8")
+            fake.chmod(0o755)
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "AGENT_FLOW_PROJECT_LAUNCHER": str(launcher),
+                    "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+                },
+            ):
+                result = run_gate(GateCommand("pinned", ("agent-flow", "status")), cwd=root)
+
+            self.assertTrue(result.passed, result.stderr)
+            self.assertEqual(result.stdout.strip(), "project-launcher")
+            self.assertFalse(marker.exists())
 
     def test_gates_cli_writes_results_for_run_dir(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

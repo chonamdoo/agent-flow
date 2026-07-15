@@ -25,6 +25,7 @@ from typing import Any, TYPE_CHECKING
 
 import yaml
 from agent_flow.core.local_skills import local_skill_prompt_block
+from agent_flow.core.skill_plan import profile_skill_prompt_block
 
 if TYPE_CHECKING:
     from agent_flow.runner import Phase
@@ -48,6 +49,7 @@ class Adapter(ABC):
         self._architecture: str = "default"
         self._lore_citations: list[Any] = []  # list[Lore]; typed loose to avoid import cycle
         self._config_root: Path | None = None
+        self._task_scope: str = ""
 
     @abstractmethod
     def execute(self, phase: "Phase", run_dir: Path, project_root: Path) -> bool:
@@ -74,6 +76,12 @@ class Adapter(ABC):
         profile_block = self._render_profile_block(config_root)
         architecture_block = self._render_architecture_block(phase)
         completion_gate_block = self._render_completion_gate_block(phase)
+        profile_skill_block = profile_skill_prompt_block(
+            config_root,
+            phase.id,
+            project_root,
+            self._task_scope,
+        )
         local_skill_block = local_skill_prompt_block(config_root, phase.id)
         lore_block = self._render_lore_block(project_root, phase)
         return (
@@ -87,6 +95,7 @@ class Adapter(ABC):
             f"{profile_block}"
             f"{architecture_block}"
             f"{completion_gate_block}"
+            f"{profile_skill_block}"
             f"{local_skill_block}"
             f"{lore_block}"
             f"{host_block}"

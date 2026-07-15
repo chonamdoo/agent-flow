@@ -36,6 +36,10 @@ from agent_flow.core.review import summarize_reviews, write_review_summary
 from agent_flow.core.report import write_run_report
 from agent_flow.core.query import explain_run, query_run
 from agent_flow.core.security import resolve_project_path
+from agent_flow.core.workspace_boundary import (
+    WorkspaceBoundaryError,
+    find_active_pinned_workspace,
+)
 from agent_flow.core.tool_lint import lint_tools
 from agent_flow.core.watch import write_watch_snapshot
 from agent_flow.core.team import (
@@ -411,7 +415,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     requested_root = Path(getattr(args, "root", ".")).resolve()
     root = requested_root
-    root, inferred_worktree = _resolve_cli_root_context(root, getattr(args, "worktree", None))
+    try:
+        root, inferred_worktree = _resolve_cli_root_context(root, getattr(args, "worktree", None))
+    except WorkspaceBoundaryError as exc:
+        print(_format_cli_error(exc), file=sys.stderr)
+        return 2
     if inferred_worktree is not None and hasattr(args, "worktree") and args.worktree is None:
         args.worktree = inferred_worktree
 
@@ -1465,7 +1473,9 @@ def _profile_source_root(config_root: Path, requested_root: Path, worktree: str 
 
 
 def _continue_command(root: Path, worktree: str | None) -> str:
-    command = f"agent-flow continue --root {shlex.quote(str(root))}"
+    configured = os.environ.get("AGENT_FLOW_PROJECT_LAUNCHER")
+    launcher = configured if configured and Path(configured).is_absolute() else "agent-flow"
+    command = f"{shlex.quote(launcher)} continue --root {shlex.quote(str(root))}"
     if worktree is None:
         return command
     return command + f" --worktree {shlex.quote(_slug_for_hint(root, worktree))}"
@@ -1565,7 +1575,15 @@ def _resolve_cli_root_context(root: Path, worktree: str | None) -> tuple[Path, s
         return leader_root, worktree or inferred_worktree
     git_common_root = _git_common_worktree_root(root)
     if git_common_root is not None:
+        if worktree is None:
+            active = find_active_pinned_workspace(git_common_root)
+            if active is not None:
+                return git_common_root, active.name
         return git_common_root, worktree
+    if worktree is None and (root / ".git").exists():
+        active = find_active_pinned_workspace(root)
+        if active is not None:
+            return root, active.name
     return root, worktree
 
 
@@ -1586,7 +1604,10 @@ def _managed_worktree_context(path: Path) -> tuple[Path, str] | None:
 def _git_common_worktree_root(root: Path) -> Path | None:
     # worktree root 탐지는 relay 진입점이므로 git hang을 짧게 실패 처리한다.
     top_level = run_safe_command(("git", "rev-parse", "--show-toplevel"), cwd=root)
-    common_dir = run_safe_command(("git", "rev-parse", "--git-common-dir"), cwd=root)
+    common_dir = run_safe_command(
+        ("git", "rev-parse", "--path-format=absolute", "--git-common-dir"),
+        cwd=root,
+    )
     if not top_level.ok or not common_dir.ok:
         return None
     common_path = Path(common_dir.stdout.strip())

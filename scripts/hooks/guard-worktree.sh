@@ -1,7 +1,7 @@
 #!/bin/bash
 # agent-flow PreToolUse hook: leader worktree 브랜치 변경 차단 → git worktree add 안내
-INPUT=$(cat)
-ACTION=$(python3 -c "
+INPUT=$(/bin/cat)
+ACTION=$(/usr/bin/python3 -I -B -c "
 import sys, json
 import re
 import shlex
@@ -75,7 +75,7 @@ def is_local_branch(name):
     # git이 멈추거나 없을 때 hook이 도구 호출을 무기한 막지 않도록 방어한다.
     try:
         result = subprocess.run(
-            ['git', 'show-ref', '--verify', '--quiet', 'refs/heads/' + name],
+            ['/usr/bin/git', 'show-ref', '--verify', '--quiet', 'refs/heads/' + name],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,

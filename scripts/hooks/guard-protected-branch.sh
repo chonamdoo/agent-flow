@@ -1,7 +1,7 @@
 #!/bin/bash
 # agent-flow PreToolUse hook: main/master/develop 브랜치에서 커밋·푸시 차단
-INPUT=$(cat)
-PROTECTED_BRANCH=$(python3 -c "
+INPUT=$(/bin/cat)
+PROTECTED_BRANCH=$(/usr/bin/python3 -I -B -c "
 import sys, json
 import os
 import re
@@ -76,7 +76,7 @@ def current_branch(global_args, cwd):
     # git이 멈추거나 없을 때 hook이 도구 호출을 무기한 막지 않도록 방어한다.
     try:
         result = subprocess.run(
-            ['git', *global_args, 'branch', '--show-current'],
+            ['/usr/bin/git', *global_args, 'branch', '--show-current'],
             cwd=cwd,
             text=True,
             stdout=subprocess.PIPE,

@@ -103,6 +103,23 @@ def load_profile_payload(profile_id: str) -> dict[str, Any]:
     return payload
 
 
+def primary_profile_id(root: Path, requested: str = "auto") -> str:
+    profiles = active_profile_ids(root, requested)
+    return profiles[0] if profiles else detect_profile(root)
+
+
+def load_project_profile_payload(root: Path, profile_id: str) -> dict[str, Any]:
+    if not profile_id or not profile_id.replace("-", "_").isalnum():
+        raise ValueError(f"unsafe profile: {profile_id}")
+    installed = root / ".agent-flow" / "profiles" / f"{profile_id}.yaml"
+    if installed.is_file() and not installed.is_symlink():
+        payload = yaml.safe_load(installed.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or payload.get("id") != profile_id:
+            raise ValueError(f"installed profile id mismatch: {profile_id}")
+        return payload
+    return load_profile_payload(profile_id)
+
+
 def _gate_from_payload(item: object, *, profile_id: str) -> ProfileGate:
     if not isinstance(item, dict):
         raise ValueError(f"profile gate must be a mapping: {profile_id}")
