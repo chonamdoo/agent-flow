@@ -26,9 +26,11 @@ from agent_flow.core.skill_plan import (
     resolve_runtime_skill_plan,
 )
 from agent_flow.core.workspace_boundary import (
+    ExecutionIdentity,
     acquire_workspace_start_claim,
     capture_workspace_identity,
     release_workspace_start_claim,
+    resolve_execution_finalizer_workspace,
 )
 
 
@@ -77,12 +79,14 @@ def _runtime_contract_commitment(contract: dict[str, object]) -> str:
         contract["node"]["inode"],
         contract["node"]["links"],
         contract["node"]["mode"],
+        json.dumps(contract["node"].get("dependencies", []), separators=(",", ":"), sort_keys=True),
         contract["git"]["path"],
         contract["git"]["sha256"],
         contract["git"]["device"],
         contract["git"]["inode"],
         contract["git"]["links"],
         contract["git"]["mode"],
+        json.dumps(contract["git"].get("dependencies", []), separators=(",", ":"), sort_keys=True),
         contract["python"]["path"],
         contract["python"]["resolved_path"],
         contract["python"]["sha256"],
@@ -90,6 +94,7 @@ def _runtime_contract_commitment(contract: dict[str, object]) -> str:
         contract["python"]["inode"],
         contract["python"]["links"],
         contract["python"]["mode"],
+        json.dumps(contract["python"].get("dependencies", []), separators=(",", ":"), sort_keys=True),
         contract["runtime"]["path"],
         contract["runtime"]["integrity"],
         contract["python_runtime"]["path"],
@@ -236,6 +241,74 @@ def test_install_materializes_authenticated_project_launcher(tmp_path: Path) -> 
     assert str(launcher) in status.stdout
 
 
+def test_project_launcher_install_repairs_python_runtime_drift(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    assert _install(project).returncode == 0
+    launcher = project / ".agent-flow" / "bin" / "agent-flow"
+    python_runtime = project / ".agent-flow" / "runtime" / "python"
+    python_package = python_runtime / "agent_flow"
+    assert not list(python_runtime.rglob("__pycache__"))
+    assert not list(python_runtime.rglob("*.pyc"))
+    cache = python_package / "__pycache__"
+    cache.mkdir(exist_ok=True)
+    (cache / "cli.cpython-314.pyc").write_bytes(b"generated cache")
+    unexpected = python_runtime / "agent_flow" / "unexpected.py"
+    unexpected.write_text("tampered = True\n", encoding="utf-8")
+    unexpected_root = python_runtime / "unexpected-root.txt"
+    unexpected_root.write_text("drift\n", encoding="utf-8")
+    removed = python_package / "__init__.py"
+    removed.unlink()
+    tampered = python_package / "cli.py"
+    expected_cli = (KIT_ROOT / "src" / "agent_flow" / "cli.py").read_bytes()
+    tampered.write_bytes(b"tampered runtime\n")
+    env = {
+        **os.environ,
+        "HOME": str(project.parent / "test-home"),
+        "AGENT_FLOW_AUTO_EXTERNAL_SKILLS": "1",
+    }
+    rejected = subprocess.run(
+        (str(launcher), "status"),
+        cwd=project,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+    )
+
+    repaired = subprocess.run(
+        (str(launcher), "install"),
+        cwd=project,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+    )
+    status = subprocess.run(
+        (str(launcher), "status"),
+        cwd=project,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+    )
+
+    assert rejected.returncode == 1
+    assert "project runtime contract no longer matches installed files" in rejected.stderr
+    assert repaired.returncode == 0, repaired.stderr
+    assert not cache.exists()
+    assert not unexpected.exists()
+    assert not unexpected_root.exists()
+    assert removed.is_file()
+    assert tampered.read_bytes() == expected_cli
+    assert status.returncode == 0, status.stderr
+    assert status.stdout.strip() == "no runs"
+    kit = json.loads((project / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
+    assert kit["project_runtime_contract"]["python_runtime"]["integrity"] == _runtime_tree_integrity(
+        python_runtime
+    )
+
+
 def test_project_launcher_run_creates_and_pins_git_worktree(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
@@ -367,6 +440,31 @@ def test_project_launcher_clears_node_preload_environment(tmp_path: Path) -> Non
 
     assert result.returncode == 0, result.stderr
     assert not outside.exists()
+
+
+def test_project_launcher_clears_all_loader_environment_families(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    assert _install(project).returncode == 0
+
+    launcher = (project / ".agent-flow" / "bin" / "agent-flow").read_text(encoding="utf-8")
+    runtime = (project / ".agent-flow" / "runtime" / "node" / "bin" / "agent-flow-kit.mjs").read_text(
+        encoding="utf-8"
+    )
+
+    for name in (
+        "LD_AUDIT",
+        "LD_DEBUG",
+        "DYLD_FRAMEWORK_PATH",
+        "DYLD_FALLBACK_FRAMEWORK_PATH",
+        "DYLD_FALLBACK_LIBRARY_PATH",
+        "DYLD_ROOT_PATH",
+        "DYLD_IMAGE_SUFFIX",
+        "DYLD_SHARED_REGION",
+    ):
+        assert name in launcher
+    assert "name.startswith(('DYLD_','LD_'))" in runtime
+    assert "DYLD_FRAMEWORK_PATH" in runtime
 
 
 def test_project_launcher_rejects_replaced_contracted_python(tmp_path: Path) -> None:
@@ -760,6 +858,174 @@ def test_packaged_runtime_resolves_bare_python_from_path(tmp_path: Path) -> None
     assert result.returncode == 0, result.stderr
     kit = json.loads((project / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
     assert kit["project_runtime_contract"]["python"]["path"] == str(python)
+
+
+def test_runtime_contract_rejects_adjacent_python_dylib_drift(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    runtime = tmp_path / "python-runtime"
+    python = runtime / "bin" / "python3"
+    dependency = runtime / "lib" / "libpython-agent-flow.dylib"
+    project.mkdir()
+    python.parent.mkdir(parents=True)
+    dependency.parent.mkdir(parents=True)
+    yaml_site = Path(yaml.__file__).resolve().parent.parent
+    python.write_text(
+        "#!/bin/sh\n"
+        f"PYTHONPATH={shlex.quote(str(yaml_site))}${{PYTHONPATH:+:$PYTHONPATH}}\n"
+        "export PYTHONPATH\n"
+        f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+    dependency.write_bytes(b"contracted dependency\n")
+    env = {"PYTHON": str(python), "PYTHON_EXECUTABLE": str(python)}
+    installed = _install(project, env=env)
+    assert installed.returncode == 0, installed.stderr
+    kit = json.loads((project / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
+    dependencies = kit["project_runtime_contract"]["python"]["dependencies"]
+    assert [entry["name"] for entry in dependencies] == [dependency.name]
+
+    dependency.write_bytes(b"changed dependency\n")
+    result = _command(project, "status", env=env)
+
+    assert result.returncode != 0
+    assert "executable dependencies changed" in result.stderr
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Mach-O dependency graph is macOS-only")
+def test_runtime_contract_pins_non_system_macho_dependencies(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    installed = _install(project)
+    assert installed.returncode == 0, installed.stderr
+    kit = json.loads((project / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
+    contracted = {
+        entry["path"]
+        for entry in kit["project_runtime_contract"]["node"]["dependencies"]
+    }
+    for executable in ("node", "git", "python"):
+        for entry in kit["project_runtime_contract"][executable]["dependencies"]:
+            assert entry["load_commands"]
+            assert entry["stage_kind"] in {"library", "framework"}
+            if entry["stage_kind"] == "framework":
+                assert ".framework/Versions/" in entry["stage_relative"]
+    otool = subprocess.run(
+        ("/usr/bin/otool", "-L", str(Path(_node()).resolve())),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    direct_non_system = {
+        str(Path(line.strip().split(" (", 1)[0]).resolve())
+        for line in otool.stdout.splitlines()[1:]
+        if line.strip().startswith("/")
+        and not line.strip().startswith(("/usr/lib/", "/System/Library/"))
+    }
+    if not direct_non_system:
+        pytest.skip("Node has no non-system Mach-O dependencies")
+
+    assert direct_non_system <= contracted
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="otool is a macOS runtime dependency")
+def test_runtime_install_fails_closed_when_otool_inspection_fails(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+
+    result = _install(
+        project,
+        env={**os.environ, "AGENT_FLOW_TEST_OTOOL_FAILURE": "1"},
+    )
+
+    assert result.returncode != 0
+    assert "Mach-O dependency inspection failed" in result.stderr
+
+
+def test_same_execution_concurrent_node_start_preserves_starting_binding(
+    tmp_path: Path,
+) -> None:
+    from agent_flow.core.worktrees import create_worktree, plan_worktree
+
+    project = tmp_path / "project"
+    project.mkdir()
+    subprocess.run(("git", "init", "-b", "main", str(project)), check=True, capture_output=True)
+    subprocess.run(("git", "-C", str(project), "config", "user.name", "Test User"), check=True)
+    subprocess.run(("git", "-C", str(project), "config", "user.email", "test@example.com"), check=True)
+    (project / "README.md").write_text("project\n", encoding="utf-8")
+    subprocess.run(("git", "-C", str(project), "add", "README.md"), check=True)
+    subprocess.run(("git", "-C", str(project), "commit", "-m", "initial"), check=True, capture_output=True)
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path / "home"),
+        "AGENT_FLOW_AUTO_EXTERNAL_SKILLS": "0",
+        "AGENT_FLOW_EXECUTION_ID": "same-node-execution",
+        "AGENT_FLOW_TEST_HOLD_AFTER_NODE_START_BINDING_MS": "1500",
+    }
+    assert _install(project, env=env).returncode == 0
+    first = create_worktree(root=project, plan=plan_worktree(root=project, name="first"), allow_dirty=True)
+    second = create_worktree(root=project, plan=plan_worktree(root=project, name="second"), allow_dirty=True)
+    process = subprocess.Popen(
+        (
+            _node(),
+            str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"),
+            "run",
+            "start",
+            "--task",
+            "first",
+            "--run-id",
+            "first",
+        ),
+        cwd=first.path,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert process.stderr is not None
+    assert "agent-flow:test-node-start-binding-published" in process.stderr.readline()
+
+    kit = json.loads((project / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
+    python = kit["project_runtime_contract"]["python"]["path"]
+    python_env = {
+        **{key: value for key, value in env.items() if key != "AGENT_FLOW_TEST_HOLD_AFTER_NODE_START_BINDING_MS"},
+        "PYTHONPATH": str(project / ".agent-flow" / "runtime" / "python"),
+    }
+    python_raced = subprocess.run(
+        (
+            python,
+            "-m",
+            "agent_flow.cli",
+            "run",
+            "second",
+            "--root",
+            str(project),
+            "--worktree",
+            "second",
+        ),
+        cwd=project,
+        env=python_env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    raced = _command(
+        second.path,
+        "run",
+        "start",
+        "--task",
+        "second",
+        "--run-id",
+        "second",
+        env={key: value for key, value in env.items() if key != "AGENT_FLOW_TEST_HOLD_AFTER_NODE_START_BINDING_MS"},
+    )
+    stdout, stderr = process.communicate(timeout=10)
+
+    assert python_raced.returncode == 2
+    assert "differs from bound worktree feat-first" in python_raced.stderr
+    assert raced.returncode != 0
+    assert "execution already owns active run first" in raced.stderr
+    assert process.returncode == 0, stderr or stdout
 
 
 def test_overlong_skill_installs_and_validates_without_length_diagnostic(tmp_path: Path) -> None:
@@ -1281,20 +1547,12 @@ def test_node_different_execution_cannot_share_active_git_worktree(
     identity = capture_workspace_identity(worktree)
     claims_root = project / ".git" / "agent-flow" / "workspace-start-claims"
     claims_root.mkdir(parents=True)
-    claim_path = claims_root / (
-        hashlib.sha256(identity.workspace_root.encode("utf-8")).hexdigest() + ".lock"
-    )
-    claim_path.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "pid": 99_999_999,
-                "token": "stale-node-claim",
-                "workspace_root": identity.workspace_root,
-            }
-        ),
-        encoding="utf-8",
-    )
+    stale_claim = acquire_workspace_start_claim(identity, run_id="stale-node-run")
+    claim_path = stale_claim.path
+    stale_payload = json.loads(claim_path.read_text(encoding="utf-8"))
+    release_workspace_start_claim(stale_claim)
+    stale_payload["process_start_id"] = "reused-pid-start-identity"
+    claim_path.write_text(json.dumps(stale_payload), encoding="utf-8")
     starts = (
         ("first", "session-1"),
         ("second", "session-2"),
@@ -1392,9 +1650,13 @@ def test_node_start_honors_python_claim_and_bindingless_active_run(
         / "python-1"
     )
     python_run.mkdir(parents=True)
+    (python_run.parents[2] / "manifest.json").write_text(
+        json.dumps({"identity": identity.to_dict()}),
+        encoding="utf-8",
+    )
     (python_run / "active").write_text("", encoding="utf-8")
     (python_run / "meta.json").write_text(
-        json.dumps({"run_id": "python-1", "workspace": identity.to_dict()}),
+        json.dumps({"run_id": "python-1"}),
         encoding="utf-8",
     )
     active_blocked = _command(
@@ -1414,6 +1676,367 @@ def test_node_start_honors_python_claim_and_bindingless_active_run(
     assert "workspace already owns active run python-1" in active_blocked.stderr
     assert not (project / ".agent-flow" / "runs" / "full-feature" / "claim-blocked").exists()
     assert not (project / ".agent-flow" / "runs" / "full-feature" / "active-blocked").exists()
+
+
+@pytest.mark.parametrize(
+    ("failure_environment", "failure_code"),
+    (
+        ({"AGENT_FLOW_TEST_CRASH_AFTER_NODE_START_MANIFEST": "1"}, 86),
+        ({"AGENT_FLOW_TEST_CRASH_AFTER_NODE_START_CURRENT": "1"}, 87),
+        ({"AGENT_FLOW_TEST_FAIL_AFTER_NODE_START_CURRENT": "1"}, 1),
+    ),
+)
+def test_node_start_recovers_incomplete_publication(
+    tmp_path: Path,
+    failure_environment: dict[str, str],
+    failure_code: int,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    subprocess.run(("git", "init", "-b", "main", str(project)), check=True, capture_output=True)
+    subprocess.run(("git", "-C", str(project), "config", "user.name", "Test User"), check=True)
+    subprocess.run(("git", "-C", str(project), "config", "user.email", "test@example.com"), check=True)
+    (project / "README.md").write_text("project\n", encoding="utf-8")
+    subprocess.run(("git", "-C", str(project), "add", "README.md"), check=True)
+    subprocess.run(("git", "-C", str(project), "commit", "-m", "initial"), check=True, capture_output=True)
+    shared_env = {
+        "HOME": str(project.parent / "test-home"),
+        "AGENT_FLOW_AUTO_EXTERNAL_SKILLS": "0",
+        "AGENT_FLOW_ACTIVE_HOST": "codex",
+    }
+    assert _install(project, env=shared_env).returncode == 0
+    worktree = project / ".agent-flow" / "worktrees" / "feat-crash"
+    subprocess.run(
+        ("git", "-C", str(project), "worktree", "add", "-b", "feat/crash", str(worktree), "main"),
+        check=True,
+        capture_output=True,
+    )
+    crashed = _command(
+        worktree,
+        "run",
+        "start",
+        "--task",
+        "crashed",
+        "--run-id",
+        "crashed",
+        env={
+            **shared_env,
+            "AGENT_FLOW_EXECUTION_ID": "crashed-session",
+            **failure_environment,
+        },
+    )
+    recovered = _command(
+        worktree,
+        "run",
+        "start",
+        "--task",
+        "recovered",
+        "--run-id",
+        "recovered",
+        env={**shared_env, "AGENT_FLOW_EXECUTION_ID": "recovered-session"},
+    )
+
+    assert crashed.returncode == failure_code
+    assert recovered.returncode == 0, recovered.stderr
+    assert not (project / ".agent-flow" / "runs" / "full-feature" / "crashed").exists()
+    assert (project / ".agent-flow" / "runs" / "full-feature" / "recovered").is_dir()
+
+
+def test_node_completion_records_current_worktree_finalizer_generation(
+    tmp_path: Path,
+) -> None:
+    from agent_flow.core.worktrees import create_worktree, plan_worktree
+
+    project = tmp_path / "project"
+    project.mkdir()
+    subprocess.run(("git", "init", "-b", "main", str(project)), check=True, capture_output=True)
+    subprocess.run(("git", "-C", str(project), "config", "user.name", "Test User"), check=True)
+    subprocess.run(("git", "-C", str(project), "config", "user.email", "test@example.com"), check=True)
+    (project / "README.md").write_text("project\n", encoding="utf-8")
+    subprocess.run(("git", "-C", str(project), "add", "README.md"), check=True)
+    subprocess.run(("git", "-C", str(project), "commit", "-m", "initial"), check=True, capture_output=True)
+    env = {
+        "HOME": str(project.parent / "test-home"),
+        "AGENT_FLOW_AUTO_EXTERNAL_SKILLS": "0",
+        "AGENT_FLOW_ACTIVE_HOST": "codex",
+        "AGENT_FLOW_EXECUTION_ID": "node-finalizer",
+    }
+    assert _install(project, env=env).returncode == 0
+    plan = plan_worktree(root=project, name="node-finalizer")
+    created = create_worktree(
+        root=project,
+        plan=plan,
+        allow_dirty=True,
+    )
+    worktree = created.path
+    started = _command(
+        worktree,
+        "run",
+        "start",
+        "--task",
+        "node finalizer",
+        "--run-id",
+        "node-finalizer",
+        env=env,
+    )
+    assert started.returncode == 0, started.stderr
+    state_path = _authoritative_current_run_state_path(project)
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    workflow = yaml.safe_load(
+        (project / ".agent-flow" / "workflows" / "full-feature.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    final_index = len(workflow["phases"]) - 1
+    final_phase = workflow["phases"][final_index]
+    state.update(
+        {
+            "phase_index": final_index,
+            "phase": final_phase["id"],
+            "status": "running",
+            "phase_entered_at": "2020-01-01T00:00:00.000Z",
+        }
+    )
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    run_dir = project / state["run_dir"]
+    (run_dir / "manifest.json").write_text(json.dumps(state), encoding="utf-8")
+    artifact_path = run_dir / "artifacts" / f"{final_phase['id']}.md"
+    artifact_path.write_text("done\n", encoding="utf-8")
+
+    completed = _command(worktree, "run", "advance", env=env)
+
+    assert completed.returncode == 0, completed.stderr
+    finalizer = json.loads(
+        (
+            project
+            / ".git"
+            / "agent-flow"
+            / "worktrees"
+            / worktree.name
+            / "finalizer.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert finalizer["generation"] == 1
+    assert finalizer["execution"]["session_id"] == "node-finalizer"
+    assert finalizer["run_id"] == "node-finalizer"
+
+    completed_state = json.loads(state_path.read_text(encoding="utf-8"))
+    execution = ExecutionIdentity("codex", "node-finalizer", "")
+    binding_path = (
+        project
+        / ".git"
+        / "agent-flow"
+        / "executions"
+        / f"{execution.digest}.json"
+    )
+    binding_path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "execution": execution.to_dict(),
+                "workspace": completed_state["workspace"],
+                "workspace_name": worktree.name,
+                "run_id": completed_state["run_id"],
+                "run_dir": str(run_dir.resolve()),
+                "bound_at": "2020-01-01T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    workspace = completed_state["workspace"]
+    claim_digest = hashlib.sha256(workspace["workspace_root"].encode()).hexdigest()
+    claim_path = (
+        project
+        / ".git"
+        / "agent-flow"
+        / "workspace-start-claims"
+        / f"{claim_digest}.lock"
+    )
+    leader_metadata = project.stat()
+    claim_path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "pid": 999_999_999,
+                "process_start_id": "stale-process",
+                "token": "stale-token",
+                "run_id": "finalize:node-finalizer",
+                "leader_root": str(project.resolve()),
+                "leader_device": leader_metadata.st_dev,
+                "leader_inode": leader_metadata.st_ino,
+                "workspace_root": workspace["workspace_root"],
+                "workspace_git_dir": workspace["git_dir"],
+                "workspace_branch": workspace["branch"],
+                "workspace_head": workspace["head"],
+                "workspace_device": workspace["device"],
+                "workspace_inode": workspace["inode"],
+                "acquired_at": "2020-01-01T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    recovered = _command(worktree, "run", "advance", env=env)
+
+    assert recovered.returncode == 0, recovered.stderr
+    assert not binding_path.exists()
+    assert not claim_path.exists()
+    recovered_finalizer = json.loads(
+        (
+            project
+            / ".git"
+            / "agent-flow"
+            / "worktrees"
+            / worktree.name
+            / "finalizer.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert recovered_finalizer["generation"] == 1
+
+    next_env = {**env, "AGENT_FLOW_EXECUTION_ID": "node-finalizer-next"}
+    next_started = _command(
+        worktree,
+        "run",
+        "start",
+        "--task",
+        "next node finalizer",
+        "--run-id",
+        "node-finalizer-next",
+        env=next_env,
+    )
+    assert next_started.returncode == 0, next_started.stderr
+
+    next_execution = ExecutionIdentity("codex", "node-finalizer-next", "")
+    next_state_path = (
+        project / ".git" / "agent-flow" / "current-runs" / f"{next_execution.digest}.json"
+    )
+    next_state = json.loads(next_state_path.read_text(encoding="utf-8"))
+    next_state.update(
+        {
+            "phase_index": final_index,
+            "phase": final_phase["id"],
+            "status": "running",
+            "phase_entered_at": "2020-01-02T00:00:00.000Z",
+        }
+    )
+    next_state_path.write_text(json.dumps(next_state), encoding="utf-8")
+    next_run_dir = project / next_state["run_dir"]
+    (next_run_dir / "manifest.json").write_text(json.dumps(next_state), encoding="utf-8")
+    (next_run_dir / "artifacts" / f"{final_phase['id']}.md").write_text(
+        "done\n", encoding="utf-8"
+    )
+    next_crashed = _command(
+        worktree,
+        "run",
+        "advance",
+        env={**next_env, "AGENT_FLOW_TEST_CRASH_AFTER_NODE_FINALIZER": "1"},
+    )
+    assert next_crashed.returncode == 92
+    next_completed = _command(worktree, "run", "advance", env=next_env)
+    assert next_completed.returncode == 0, next_completed.stderr
+
+    latest_finalizer_path = (
+        project / ".git" / "agent-flow" / "worktrees" / worktree.name / "finalizer.json"
+    )
+    latest_finalizer = json.loads(latest_finalizer_path.read_text(encoding="utf-8"))
+    assert latest_finalizer["generation"] == 2
+    assert latest_finalizer["run_id"] == "node-finalizer-next"
+
+    stale_retry = _command(worktree, "run", "advance", env=env)
+    assert stale_retry.returncode != 0
+    assert "execution_finalizer_stale" in stale_retry.stderr
+    assert json.loads(latest_finalizer_path.read_text(encoding="utf-8")) == latest_finalizer
+
+    resolved = resolve_execution_finalizer_workspace(
+        project,
+        next_execution,
+        worktree.name,
+    )
+    assert resolved.identity.workspace_root == str(worktree.resolve())
+
+
+def test_node_runtime_rejects_symlinked_git_common_root(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    subprocess.run(("git", "init", "-b", "main", str(project)), check=True, capture_output=True)
+    subprocess.run(("git", "-C", str(project), "config", "user.name", "Test User"), check=True)
+    subprocess.run(("git", "-C", str(project), "config", "user.email", "test@example.com"), check=True)
+    (project / "README.md").write_text("project\n", encoding="utf-8")
+    subprocess.run(("git", "-C", str(project), "add", "README.md"), check=True)
+    subprocess.run(("git", "-C", str(project), "commit", "-m", "initial"), check=True, capture_output=True)
+    env = {
+        "HOME": str(tmp_path / "home"),
+        "AGENT_FLOW_AUTO_EXTERNAL_SKILLS": "0",
+        "AGENT_FLOW_ACTIVE_HOST": "codex",
+        "AGENT_FLOW_EXECUTION_ID": "symlinked-common",
+    }
+    installed = _install(project, env=env)
+    assert installed.returncode == 0, installed.stderr
+    real_git = tmp_path / "real-git"
+    (project / ".git").rename(real_git)
+    (project / ".git").symlink_to(real_git, target_is_directory=True)
+
+    result = _command(
+        project,
+        "run",
+        "start",
+        "--task",
+        "symlinked git common",
+        "--run-id",
+        "symlinked-common",
+        env=env,
+    )
+
+    assert result.returncode != 0
+    assert (
+        "git-private metadata root is not an owned directory" in result.stderr
+        or "pinned workspace belongs to a different repository" in result.stderr
+    )
+
+
+def test_node_runtime_rejects_symlinked_git_private_agent_flow_root(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    subprocess.run(("git", "init", "-b", "main", str(project)), check=True, capture_output=True)
+    subprocess.run(("git", "-C", str(project), "config", "user.name", "Test User"), check=True)
+    subprocess.run(("git", "-C", str(project), "config", "user.email", "test@example.com"), check=True)
+    (project / "README.md").write_text("project\n", encoding="utf-8")
+    subprocess.run(("git", "-C", str(project), "add", "README.md"), check=True)
+    subprocess.run(("git", "-C", str(project), "commit", "-m", "initial"), check=True, capture_output=True)
+    env = {
+        "HOME": str(tmp_path / "home"),
+        "AGENT_FLOW_AUTO_EXTERNAL_SKILLS": "0",
+        "AGENT_FLOW_ACTIVE_HOST": "codex",
+        "AGENT_FLOW_EXECUTION_ID": "symlinked-private-root",
+    }
+    assert _install(project, env=env).returncode == 0
+    worktree = project / ".agent-flow" / "worktrees" / "feat-private-root"
+    subprocess.run(
+        ("git", "-C", str(project), "worktree", "add", "-b", "feat/private-root", str(worktree), "main"),
+        check=True,
+        capture_output=True,
+    )
+    private_root = project / ".git" / "agent-flow"
+    outside = tmp_path / "outside-agent-flow"
+    outside.mkdir()
+    if private_root.exists():
+        shutil.rmtree(private_root)
+    private_root.symlink_to(outside, target_is_directory=True)
+
+    result = _command(
+        worktree,
+        "run",
+        "start",
+        "--task",
+        "symlinked private root",
+        "--run-id",
+        "symlinked-private-root",
+        env=env,
+    )
+
+    assert result.returncode != 0
+    assert "git-private metadata path is not an owned directory" in result.stderr
+    assert not any(outside.iterdir())
 
 
 def test_reinstall_commits_transaction_without_residue(tmp_path: Path) -> None:
@@ -1503,6 +2126,170 @@ def test_pinned_workspace_write_guard_is_installed_for_all_hosts(tmp_path: Path)
     assert "managed host file differs" not in status.stderr
 
 
+def test_node_launcher_dispatches_worktree_commands_to_python_cli(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    installed = _install(
+        project,
+        env={"AGENT_FLOW_AUTO_EXTERNAL_SKILLS": "0"},
+    )
+    assert installed.returncode == 0, installed.stderr
+
+    result = _command(
+        project,
+        "worktree",
+        "list",
+        env={"AGENT_FLOW_AUTO_EXTERNAL_SKILLS": "0"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines()[-1] == "no worktrees"
+
+
+def test_parity_checker_validates_external_installed_copy_from_managed_source_worktree(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    env = dict(os.environ)
+    env.update(
+        {
+            "HOME": str(tmp_path / "home"),
+            "AGENT_FLOW_AUTO_EXTERNAL_SKILLS": "0",
+        }
+    )
+    installed = _install(project, env=env)
+    assert installed.returncode == 0, installed.stderr
+    installed_workflow = project / ".agent-flow" / "workflows" / "default.yaml"
+    installed_workflow.write_text("id: corrupted\nphases: []\n", encoding="utf-8")
+    installed_runtime = (
+        project
+        / ".agent-flow"
+        / "runtime"
+        / "python"
+        / "agent_flow"
+        / "cli.py"
+    )
+    installed_runtime.write_text("# corrupted runtime\n", encoding="utf-8")
+    installed_node_launcher = (
+        project
+        / ".agent-flow"
+        / "runtime"
+        / "node"
+        / "bin"
+        / "agent-flow-kit.mjs"
+    )
+    installed_node_launcher.write_text("// stale launcher\n", encoding="utf-8")
+    installed_skill_selection = (
+        project
+        / ".agent-flow"
+        / "runtime"
+        / "node"
+        / "lib"
+        / "skill-selection.mjs"
+    )
+    installed_skill_selection.write_text("// stale skill selection\n", encoding="utf-8")
+    unexpected_cache = installed_runtime.parent / "__pycache__" / "unexpected.pyc"
+    unexpected_cache.parent.mkdir()
+    unexpected_cache.write_bytes(b"unexpected bytecode")
+    node_runtime_root = project / ".agent-flow" / "runtime" / "node"
+    python_runtime_root = project / ".agent-flow" / "runtime" / "python"
+    (node_runtime_root / "rogue.mjs").write_text("// rogue\n", encoding="utf-8")
+    (python_runtime_root / "unexpected.pyc").write_bytes(b"root bytecode")
+    mode_drift = node_runtime_root / "bin" / "agent-flow-install.mjs"
+    mode_drift.chmod(0o600)
+    (node_runtime_root / "bin").chmod(0o700)
+    node_runtime_root.chmod(0o700)
+    linked_python_runtime = tmp_path / "linked-python-runtime"
+    shutil.copytree(python_runtime_root / "agent_flow", linked_python_runtime)
+    shutil.rmtree(python_runtime_root / "agent_flow")
+    (python_runtime_root / "agent_flow").symlink_to(
+        linked_python_runtime,
+        target_is_directory=True,
+    )
+
+    result = subprocess.run(
+        (_node(), str(KIT_ROOT / "scripts" / "check-agent-flow-parity.mjs")),
+        cwd=project,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+        timeout=300,
+    )
+
+    assert result.returncode == 1
+    assert ".agent-flow/workflows/default.yaml" in result.stderr
+    assert "current installed runtime .agent-flow/runtime/python/agent_flow differs at cli.py" in result.stderr
+    assert "current installed runtime .agent-flow/runtime/node/bin differs at agent-flow-kit.mjs" in result.stderr
+    assert "current installed runtime .agent-flow/runtime/node/lib differs at skill-selection.mjs" in result.stderr
+    assert "__pycache__/unexpected.pyc" in result.stderr
+    assert "Node unexpected runtime entry rogue.mjs" in result.stderr
+    assert "unexpected runtime entry unexpected.pyc" in result.stderr
+    assert "runtime/node/bin differs at agent-flow-install.mjs" in result.stderr
+    assert "runtime/node/bin root type or mode differs" in result.stderr
+    assert "Node runtime root type or mode differs" in result.stderr
+    assert "runtime/python/agent_flow root type or mode differs" in result.stderr
+
+
+def test_runtime_install_uses_canonical_directory_modes_under_restrictive_umask(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path / "home"),
+        "AGENT_FLOW_AUTO_EXTERNAL_SKILLS": "0",
+    }
+    command = (
+        "umask 077; exec "
+        f"{shlex.quote(_node())} "
+        f"{shlex.quote(str(KIT_ROOT / 'bin' / 'agent-flow-kit.mjs'))} install"
+    )
+    installed = subprocess.run(
+        ("/bin/sh", "-c", command),
+        cwd=project,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert installed.returncode == 0, installed.stderr
+    for directory in (
+        project / ".agent-flow" / "runtime" / "node",
+        project / ".agent-flow" / "runtime" / "node" / "bin",
+        project / ".agent-flow" / "runtime" / "python",
+        project / ".agent-flow" / "runtime" / "python" / "agent_flow",
+    ):
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o755
+
+    parity = subprocess.run(
+        (_node(), str(KIT_ROOT / "scripts" / "check-agent-flow-parity.mjs")),
+        cwd=project,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=300,
+    )
+    assert parity.returncode == 0, parity.stderr
+
+
+def test_normal_install_preserves_existing_unmanaged_directory_mode(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    agents = project / ".Codex" / "agents"
+    agents.mkdir(parents=True, mode=0o700)
+    (agents / "custom.md").write_text("custom\n", encoding="utf-8")
+    agents.chmod(0o700)
+
+    installed = _install(project)
+
+    assert installed.returncode == 0, installed.stderr
+    assert stat.S_IMODE(agents.stat().st_mode) == 0o700
+    assert (agents / "custom.md").read_text(encoding="utf-8") == "custom\n"
+
+
 def test_project_skill_links_all_hosts_and_index_omits_body(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
@@ -1573,7 +2360,15 @@ def test_bundled_workflow_skills_are_internal_and_host_skills_are_registered(tmp
     assert matt_skill_closure <= indexed
     # generic profile은 공통 host skill만 host별로 link한다.
     assert {link["name"] for link in index["links"]} == host_skills
-    assert len(index["links"]) == 9
+    codex_roots_are_distinct = not os.path.samefile(
+        project / ".Codex" / "skills",
+        project / ".codex" / "skills",
+    )
+    assert len(index["links"]) == (12 if codex_roots_are_distinct else 9)
+    if codex_roots_are_distinct:
+        assert (
+            project / ".codex" / "skills" / "agent-flow" / "SKILL.md"
+        ).is_file()
     assert (project / ".agent-flow" / "skills" / "domain-modeling" / "SKILL.md").exists()
     assert (project / ".agent-flow" / "skills" / "full-feature-workflow" / "SKILL.md").exists()
     for host_dir in (".Codex", ".claude"):
@@ -1960,6 +2755,85 @@ def test_unmanaged_snapshot_matching_bundled_catalog_name_is_preserved(tmp_path:
     assert any("adaptive: preserved unmanaged skill entry" in warning for warning in index["warnings"])
 
 
+@pytest.mark.parametrize(
+    ("host", "host_skill_root"),
+    (
+        ("codex", Path(".codex/skills")),
+        ("claude", Path(".claude/skills")),
+        ("omp", Path(".omp/agent/skills")),
+    ),
+)
+def test_status_refresh_preserves_unmanaged_snapshot_when_external_name_collides_for_each_host(
+    tmp_path: Path,
+    host: str,
+    host_skill_root: Path,
+) -> None:
+    project = tmp_path / "project"
+    home = tmp_path / "home"
+    project.mkdir()
+    host_env = {
+        "HOME": str(home),
+        "AGENT_FLOW_ACTIVE_HOST": host,
+        "AGENT_FLOW_HOST": host,
+    }
+    assert _install(project, env=host_env).returncode == 0
+    unmanaged = project / ".agent-flow" / "skills" / "adaptive"
+    unmanaged.mkdir()
+    (unmanaged / "SKILL.md").write_text(
+        "---\nname: adaptive\ndescription: user snapshot\n---\nuser-owned\n",
+        encoding="utf-8",
+    )
+    _skill(home / host_skill_root / "adaptive", "external snapshot")
+    env = {
+        **host_env,
+        "AGENT_FLOW_AUTO_EXTERNAL_SKILLS": "1",
+    }
+
+    result = _command(project, "status", env=env)
+
+    assert result.returncode == 0, result.stderr
+    assert "user-owned" in (unmanaged / "SKILL.md").read_text(encoding="utf-8")
+    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    assert "adaptive" not in {skill["name"] for skill in index["skills"]}
+    assert any("adaptive: preserved unmanaged skill entry" in warning for warning in index["warnings"])
+
+
+def test_regular_skill_dependency_cannot_be_skipped_as_automatic_collision(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    home = tmp_path / "home"
+    project.mkdir()
+    env = {
+        "HOME": str(home),
+        "AGENT_FLOW_ACTIVE_HOST": "codex",
+        "AGENT_FLOW_HOST": "codex",
+        "AGENT_FLOW_AUTO_EXTERNAL_SKILLS": "1",
+    }
+    assert _install(project, env=env).returncode == 0
+    dependency = project / ".agent-flow" / "skills" / "collision-dependency"
+    dependency.mkdir()
+    (dependency / "SKILL.md").write_text(
+        "---\nname: collision-dependency\ndescription: user snapshot\n---\nuser-owned\n",
+        encoding="utf-8",
+    )
+    _skill(
+        home / ".codex" / "skills" / "collision-dependency",
+        "authenticated external dependency",
+    )
+    _skill_with_metadata(
+        project / "skills" / "consumer",
+        "dependencies: [collision-dependency]\n",
+        "regular consumer",
+    )
+
+    result = _install(project, "--skills", "consumer", env=env)
+
+    assert result.returncode != 0
+    assert "untrusted existing skill snapshot differs: collision-dependency" in result.stderr
+    assert "user-owned" in (dependency / "SKILL.md").read_text(encoding="utf-8")
+
+
 def test_skill_hash_updates_and_local_skills_are_gitignored(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
@@ -2208,6 +3082,36 @@ def test_stale_broken_host_skill_symlink_removed_when_skill_deleted(tmp_path: Pa
 
     assert result.returncode == 0, result.stderr
     assert not codex_link.is_symlink()
+
+
+def test_status_repairs_missing_codex_skill_link_before_phase_output(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    home = tmp_path / "home"
+    project.mkdir()
+    skill_dir = project / "skills" / "samantha-architecture-guide"
+    _skill(skill_dir, "CODEX", hosts="[codex]")
+    env = {"HOME": str(home)}
+    assert _install(project, env=env).returncode == 0
+    codex_link = project / ".Codex" / "skills" / "samantha-architecture-guide"
+    lowercase_codex_link = project / ".codex" / "skills" / "samantha-architecture-guide"
+    assert (codex_link / "SKILL.md").is_file()
+    assert (lowercase_codex_link / "SKILL.md").is_file()
+    removed_link = (
+        lowercase_codex_link
+        if lowercase_codex_link.lstat().st_ino != codex_link.lstat().st_ino
+        else codex_link
+    )
+    if removed_link.is_symlink():
+        removed_link.unlink()
+    else:
+        shutil.rmtree(removed_link)
+
+    status = _command(project, "status", env=env)
+
+    assert status.returncode == 0, status.stderr
+    assert (codex_link / "SKILL.md").is_file()
+    assert (lowercase_codex_link / "SKILL.md").is_file()
+    assert "FileNotFoundError" not in status.stderr
 
 
 def test_stale_cleanup_preserves_same_target_symlink_with_replaced_inode(tmp_path: Path) -> None:
@@ -3258,6 +4162,7 @@ def test_late_failure_restores_stale_host_link_removed_by_transaction(tmp_path: 
     assert _install(project, env=env).returncode == 0
     host_link = project / ".Codex" / "skills" / "external"
     assert host_link.is_symlink()
+    original_inode = host_link.lstat().st_ino
     shutil.rmtree(source)
 
     failed = _command(
@@ -3268,7 +4173,13 @@ def test_late_failure_restores_stale_host_link_removed_by_transaction(tmp_path: 
 
     assert failed.returncode != 0
     assert host_link.is_symlink()
+    assert host_link.lstat().st_ino == original_inode
     assert (host_link / "SKILL.md").exists()
+
+    reinstalled = _install(project, env=env)
+
+    assert reinstalled.returncode == 0, reinstalled.stderr
+    assert not host_link.exists() and not host_link.is_symlink()
 
 
 def test_index_replacement_after_auth_is_not_backed_up_or_restored_as_trusted(tmp_path: Path) -> None:

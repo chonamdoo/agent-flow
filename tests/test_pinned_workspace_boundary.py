@@ -3,29 +3,75 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import py_compile
 import shlex
 import shutil
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
+import agent_flow.core.workspace_boundary as workspace_boundary
 from agent_flow.runner import Phase, Runner
 from agent_flow.core.workspace_boundary import (
     ExecutionIdentity,
+    acquire_workspace_start_claim,
+    authenticated_git_private_directory,
     bind_execution_to_workspace,
     capture_workspace_identity,
     execution_identity_from_context,
     find_active_pinned_workspaces,
     resolve_execution_workspace,
     resolve_mutation_path,
+    release_workspace_start_claim,
+    record_workspace_finalizer,
     select_execution_workspace,
 )
 
 
 KIT_ROOT = Path(__file__).resolve().parent.parent
 GUARD = KIT_ROOT / "scripts" / "hooks" / "guard-worktree-write.py"
+
+
+def test_git_private_metadata_rejects_symlinked_common_root(tmp_path: Path) -> None:
+    real_common = tmp_path / "real-common"
+    real_common.mkdir()
+    linked_common = tmp_path / "linked-common"
+    linked_common.symlink_to(real_common, target_is_directory=True)
+
+    with pytest.raises(workspace_boundary.WorkspaceBoundaryError):
+        authenticated_git_private_directory(
+            linked_common,
+            "agent-flow",
+            create=True,
+        )
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS system alias")
+def test_git_private_metadata_accepts_macos_var_alias(tmp_path: Path) -> None:
+    canonical = tmp_path.resolve()
+    private_var = Path("/private/var")
+    try:
+        relative = canonical.relative_to(private_var)
+    except ValueError:
+        pytest.skip("temporary directory is not under /private/var")
+    common = canonical / "common"
+    common.mkdir()
+    alias = Path("/var") / relative / "common"
+
+    private = authenticated_git_private_directory(alias, "agent-flow", create=True)
+
+    assert private == common / "agent-flow"
+
+
+def test_git_private_metadata_rejects_dangling_common_root(tmp_path: Path) -> None:
+    linked_common = tmp_path / "linked-common"
+    linked_common.symlink_to(tmp_path / "missing-common", target_is_directory=True)
+
+    with pytest.raises(workspace_boundary.WorkspaceBoundaryError):
+        authenticated_git_private_directory(linked_common, "agent-flow", create=True)
 
 
 def _tree_integrity(root: Path) -> str:
@@ -70,12 +116,14 @@ def _runtime_contract_commitment(contract: dict[str, object]) -> str:
         contract["node"]["inode"],
         contract["node"]["links"],
         contract["node"]["mode"],
+        json.dumps(contract["node"].get("dependencies", []), separators=(",", ":"), sort_keys=True),
         contract["git"]["path"],
         contract["git"]["sha256"],
         contract["git"]["device"],
         contract["git"]["inode"],
         contract["git"]["links"],
         contract["git"]["mode"],
+        json.dumps(contract["git"].get("dependencies", []), separators=(",", ":"), sort_keys=True),
         contract["python"]["path"],
         contract["python"]["resolved_path"],
         contract["python"]["sha256"],
@@ -83,6 +131,7 @@ def _runtime_contract_commitment(contract: dict[str, object]) -> str:
         contract["python"]["inode"],
         contract["python"]["links"],
         contract["python"]["mode"],
+        json.dumps(contract["python"].get("dependencies", []), separators=(",", ":"), sort_keys=True),
         contract["runtime"]["path"],
         contract["runtime"]["integrity"],
         contract["python_runtime"]["path"],
@@ -113,6 +162,25 @@ def _executable_identity(path: Path) -> dict[str, object]:
     }
 
 
+def _executable_dependencies(path: Path) -> list[dict[str, object]]:
+    resolved = path.resolve()
+    library_root = resolved.parent.parent / "lib"
+    if not library_root.is_dir():
+        return []
+    return [
+        {
+            "name": dependency.name,
+            "path": str(dependency.resolve()),
+            **_executable_identity(dependency),
+        }
+        for dependency in sorted(library_root.iterdir(), key=lambda item: item.name)
+        if (
+            (dependency.name.startswith("libpython") or dependency.name.startswith("libnode"))
+            and dependency.name.endswith(".dylib")
+        )
+    ]
+
+
 def _identity(worktree: Path) -> dict[str, object]:
     resolved = worktree.resolve(strict=True)
     metadata = resolved.stat()
@@ -129,7 +197,7 @@ def _identity(worktree: Path) -> dict[str, object]:
 
 @pytest.fixture
 def pinned_run(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
-    leader = tmp_path / "project"
+    leader = tmp_path / "feat-project"
     leader.mkdir()
     subprocess.run(("git", "init", "-b", "main", str(leader)), check=True, capture_output=True)
     _git(leader, "config", "user.name", "Test User")
@@ -213,15 +281,18 @@ def pinned_run(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
         "node": {
             "path": str(Path(node or sys.executable).resolve()),
             **_executable_identity(Path(node or sys.executable)),
+            "dependencies": _executable_dependencies(Path(node or sys.executable)),
         },
         "git": {
             "path": str(Path("/usr/bin/git").resolve()),
             **_executable_identity(Path("/usr/bin/git")),
+            "dependencies": _executable_dependencies(Path("/usr/bin/git")),
         },
         "python": {
             "path": str(Path(sys.executable).absolute()),
             "resolved_path": str(Path(sys.executable).resolve()),
             **_executable_identity(Path(sys.executable)),
+            "dependencies": _executable_dependencies(Path(sys.executable)),
         },
         "runtime": {
             "path": ".agent-flow/runtime/node",
@@ -254,20 +325,30 @@ def _guard(
     move_to: Path | None = None,
     session_id: str = "session-1",
     cwd: Path | None = None,
+    patch: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
     env["PYTHONPATH"] = str(KIT_ROOT / "src")
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    for name in (
+        "GRADLE_USER_HOME",
+        "GRADLE_OPTS",
+        "JAVA_TOOL_OPTIONS",
+        "_JAVA_OPTIONS",
+        "JAVA_OPTS",
+    ):
+        env.pop(name, None)
     move_line = f"\n*** Move to: {move_to}" if move_to is not None else ""
+    rendered_patch = patch or (
+        f"*** Begin Patch\n*** Update File: {target}{move_line}\n@@\n-old\n+new\n*** End Patch"
+    )
     payload = {
         "tool_name": "apply_patch",
         "cwd": str(cwd or leader),
         "host": host,
         "session_id": session_id,
         "phase": phase,
-        "tool_input": {
-            "patch": f"*** Begin Patch\n*** Update File: {target}{move_line}\n@@\n-old\n+new\n*** End Patch"
-        },
+        "tool_input": {"patch": rendered_patch},
     }
     return subprocess.run(
         (sys.executable, str(GUARD)),
@@ -290,10 +371,19 @@ def _bash_guard(
     session_id: str = "session-1",
     agent_id: str = "",
     env_override: dict[str, str | None] | None = None,
+    guard: Path = GUARD,
 ) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
     env["PYTHONPATH"] = str(KIT_ROOT / "src")
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    for name in (
+        "GRADLE_USER_HOME",
+        "GRADLE_OPTS",
+        "JAVA_TOOL_OPTIONS",
+        "_JAVA_OPTIONS",
+        "JAVA_OPTS",
+    ):
+        env.pop(name, None)
     for name, value in (env_override or {}).items():
         if value is None:
             env.pop(name, None)
@@ -309,6 +399,36 @@ def _bash_guard(
         "tool_input": {"command": command},
     }
     return subprocess.run(
+        (sys.executable, str(guard)),
+        cwd=leader,
+        env=env,
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def _structured_guard(
+    leader: Path,
+    worktree: Path,
+    tool_name: str,
+    tool_input: dict[str, object],
+    *,
+    host: str,
+) -> subprocess.CompletedProcess[str]:
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(KIT_ROOT / "src")
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    payload = {
+        "tool_name": tool_name,
+        "cwd": str(worktree),
+        "host": host,
+        "session_id": "session-1",
+        "phase": "implement",
+        "tool_input": tool_input,
+    }
+    return subprocess.run(
         (sys.executable, str(GUARD)),
         cwd=leader,
         env=env,
@@ -319,7 +439,11 @@ def _bash_guard(
     )
 
 
-def test_ten_parallel_executions_resolve_only_their_bound_worktree(tmp_path: Path) -> None:
+@pytest.mark.parametrize("active_count", (9, 10, 11))
+def test_parallel_execution_threshold_resolves_only_owned_worktrees(
+    tmp_path: Path,
+    active_count: int,
+) -> None:
     leader = tmp_path / "project"
     leader.mkdir()
     subprocess.run(("git", "init", "-b", "main", str(leader)), check=True, capture_output=True)
@@ -331,7 +455,7 @@ def test_ten_parallel_executions_resolve_only_their_bound_worktree(tmp_path: Pat
 
     worktrees: list[Path] = []
     executions: list[ExecutionIdentity] = []
-    for index in range(10):
+    for index in range(active_count):
         worktree = leader / ".agent-flow" / "worktrees" / f"task-{index}"
         _git(leader, "worktree", "add", "-b", f"feat/task-{index}", str(worktree), "main")
         run_dir = leader / ".git" / "agent-flow" / "worktrees" / f"task-{index}" / ".agent-flow" / "runs" / f"run-{index}"
@@ -397,6 +521,100 @@ def test_ten_parallel_executions_resolve_only_their_bound_worktree(tmp_path: Pat
             second_run,
             run_id="run-1",
         )
+
+
+def test_workspace_start_claim_recovers_reused_pid_but_not_live_owner(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    _leader, worktree, _runtime, _run_dir = pinned_run
+    identity = capture_workspace_identity(worktree)
+    original = acquire_workspace_start_claim(identity, run_id="old-run")
+    payload = json.loads(original.path.read_text(encoding="utf-8"))
+    release_workspace_start_claim(original)
+    payload["process_start_id"] = "reused-pid-start-identity"
+    original.path.write_text(json.dumps(payload), encoding="utf-8")
+
+    recovered = acquire_workspace_start_claim(identity, run_id="new-run")
+    owner = json.loads(recovered.path.read_text(encoding="utf-8"))
+
+    assert owner["version"] == 2
+    assert owner["run_id"] == "new-run"
+    assert owner["leader_root"] == str(Path(identity.git_common_dir).resolve().parent)
+    assert owner["workspace_root"] == identity.workspace_root
+    with pytest.raises(Exception, match="already in progress"):
+        acquire_workspace_start_claim(identity, run_id="blocked-run")
+    release_workspace_start_claim(recovered)
+
+
+def test_workspace_start_claim_authenticates_process_before_publication(
+    pinned_run: tuple[Path, Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _leader, worktree, _runtime, _run_dir = pinned_run
+    identity = capture_workspace_identity(worktree)
+    digest = hashlib.sha256(identity.workspace_root.encode("utf-8")).hexdigest()
+    claim_path = (
+        Path(identity.git_common_dir)
+        / "agent-flow"
+        / "workspace-start-claims"
+        / f"{digest}.lock"
+    )
+
+    def process_start_identity(_pid: int) -> str:
+        assert not claim_path.exists()
+        return "authenticated-process-start"
+
+    monkeypatch.setattr(
+        workspace_boundary,
+        "_process_start_identity",
+        process_start_identity,
+    )
+
+    claim = acquire_workspace_start_claim(identity, run_id="ordered-run")
+
+    release_workspace_start_claim(claim)
+
+
+def test_execution_binding_publication_is_atomic_across_worktrees(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, _runtime, run_dir = pinned_run
+    second = leader / ".agent-flow" / "worktrees" / "feat-second"
+    _git(leader, "worktree", "add", "-b", "feat/second", str(second), "main")
+    second_runtime = leader / ".git" / "agent-flow" / "worktrees" / "feat-second"
+    second_run = second_runtime / ".agent-flow" / "runs" / "run-2"
+    second_run.mkdir(parents=True)
+    (second_run / "active").write_text("", encoding="utf-8")
+    first_identity = capture_workspace_identity(worktree)
+    second_identity = capture_workspace_identity(second)
+    execution = ExecutionIdentity("codex", "atomic-execution", "")
+
+    def bind(candidate: tuple[object, Path, str]) -> str:
+        identity, candidate_run, run_id = candidate
+        try:
+            bind_execution_to_workspace(
+                execution,
+                identity,
+                candidate_run,
+                run_id=run_id,
+            )
+        except Exception as exc:
+            return str(exc)
+        return "bound"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(
+            executor.map(
+                bind,
+                (
+                    (first_identity, run_dir, "run-1"),
+                    (second_identity, second_run, "run-2"),
+                ),
+            )
+        )
+
+    assert results.count("bound") == 1
+    assert sum("execution_binding_conflict" in result for result in results) == 1
 
 
 def test_unbound_execution_and_relative_leader_write_fail_closed(
@@ -636,6 +854,158 @@ def test_codex_claude_and_omp_share_the_same_pinned_workspace_and_mutation_set(
 
 
 @pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+@pytest.mark.parametrize("relative", ("AGENTS.md", "CLAUDE.md", ".gitignore", "docs/AGENTS.md"))
+def test_context_and_ignore_files_are_editable_inside_pinned_worktree(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+    relative: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    target = worktree / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("old\n", encoding="utf-8")
+
+    result = _guard(leader, target, host=host, cwd=worktree)
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+@pytest.mark.parametrize(
+    "relative",
+    ("AGENTS.md", "agents.md", "Claude.MD", ".gitignore", ".GITIGNORE"),
+)
+def test_context_file_marker_block_is_immutable_but_user_region_is_editable(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+    relative: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    target = worktree / relative
+    target.write_text(
+        "old\n<!-- agent-flow:start -->\nmanaged\n<!-- agent-flow:end -->\nuser tail\n",
+        encoding="utf-8",
+    )
+    outside_patch = (
+        f"*** Begin Patch\n*** Update File: {target}\n@@\n-old\n+new\n*** End Patch"
+    )
+    managed_patch = (
+        f"*** Begin Patch\n*** Update File: {target}\n@@\n-managed\n+changed\n*** End Patch"
+    )
+
+    allowed = _guard(leader, target, host=host, cwd=worktree, patch=outside_patch)
+    blocked = _guard(leader, target, host=host, cwd=worktree, patch=managed_patch)
+
+    assert allowed.returncode == 0, allowed.stderr
+    assert blocked.returncode == 2
+    assert "managed marker block" in blocked.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+@pytest.mark.parametrize("tool_name", ("Write", "Edit", "MultiEdit"))
+def test_structured_context_edits_preserve_managed_marker_block(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+    tool_name: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    target = worktree / "docs" / "CLAUDE.md"
+    target.parent.mkdir()
+    current = (
+        "old\n<!-- agent-flow:start -->\nmanaged\n<!-- agent-flow:end -->\nuser tail\n"
+    )
+    target.write_text(current, encoding="utf-8")
+    allowed_inputs: dict[str, dict[str, object]] = {
+        "Write": {"file_path": str(target), "content": current.replace("old", "new", 1)},
+        "Edit": {
+            "file_path": str(target),
+            "old_string": "old\n",
+            "new_string": "new\n",
+        },
+        "MultiEdit": {
+            "file_path": str(target),
+            "edits": [
+                {"old_string": "old\n", "new_string": "new\n"},
+                {"old_string": "user tail\n", "new_string": "updated tail\n"},
+            ],
+        },
+    }
+    blocked_inputs: dict[str, dict[str, object]] = {
+        "Write": {"file_path": str(target), "content": current.replace("managed", "changed")},
+        "Edit": {
+            "file_path": str(target),
+            "old_string": "managed\n",
+            "new_string": "changed\n",
+        },
+        "MultiEdit": {
+            "file_path": str(target),
+            "edits": [
+                {"old_string": "old\n", "new_string": "new\n"},
+                {"old_string": "managed\n", "new_string": "changed\n"},
+            ],
+        },
+    }
+
+    allowed = _structured_guard(
+        leader,
+        worktree,
+        tool_name,
+        allowed_inputs[tool_name],
+        host=host,
+    )
+    blocked = _structured_guard(
+        leader,
+        worktree,
+        tool_name,
+        blocked_inputs[tool_name],
+        host=host,
+    )
+
+    assert allowed.returncode == 0, allowed.stderr
+    assert blocked.returncode == 2
+    assert "managed marker block" in blocked.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_multi_file_edit_checks_only_edits_for_each_managed_context_file(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    target = worktree / "docs" / "CLAUDE.md"
+    other = worktree / "docs" / "notes.txt"
+    target.parent.mkdir()
+    target.write_text(
+        "old\n<!-- agent-flow:start -->\nmanaged\n<!-- agent-flow:end -->\n",
+        encoding="utf-8",
+    )
+    other.write_text("other\n", encoding="utf-8")
+
+    result = _structured_guard(
+        leader,
+        worktree,
+        "MultiEdit",
+        {
+            "edits": [
+                {
+                    "file_path": str(target),
+                    "old_string": "old\n",
+                    "new_string": "new\n",
+                },
+                {
+                    "file_path": str(other),
+                    "old_string": "other\n",
+                    "new_string": "updated\n",
+                },
+            ]
+        },
+        host=host,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
 def test_shell_mutation_from_leader_is_rejected_for_every_host(
     pinned_run: tuple[Path, Path, Path, Path],
     host: str,
@@ -676,6 +1046,53 @@ def test_shell_mutation_inside_pinned_worktree_subdirectory_is_allowed(
     result = _bash_guard(leader, nested, "touch generated.txt", host=host)
 
     assert result.returncode == 0, result.stderr
+
+
+def test_xargs_stdin_mutation_target_fails_closed(
+    pinned_run: tuple[Path, Path, Path, Path],
+    tmp_path: Path,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep\n", encoding="utf-8")
+
+    result = _bash_guard(
+        leader,
+        worktree,
+        f"printf '%s\\0' {shlex.quote(str(outside))} | xargs -0 rm -f",
+    )
+
+    assert result.returncode == 2
+    assert "unresolved mutation target" in result.stderr
+    assert outside.read_text(encoding="utf-8") == "keep\n"
+
+
+def test_python_finalizer_retry_reuses_same_generation(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    _leader, worktree, runtime, run_dir = pinned_run
+    identity = capture_workspace_identity(worktree)
+    execution = ExecutionIdentity("codex", "python-finalizer", "")
+
+    first = record_workspace_finalizer(
+        identity,
+        execution,
+        run_dir,
+        run_id="run-1",
+        completed_at="2026-07-16T00:00:00+00:00",
+    )
+    second = record_workspace_finalizer(
+        identity,
+        execution,
+        run_dir,
+        run_id="run-1",
+        completed_at="2026-07-16T00:00:01+00:00",
+    )
+
+    assert first == second == runtime / "finalizer.json"
+    finalizer = json.loads(second.read_text(encoding="utf-8"))
+    assert finalizer["generation"] == 1
+    assert finalizer["completed_at"] == "2026-07-16T00:00:00+00:00"
 
 
 @pytest.mark.parametrize("host", ("codex", "claude", "omp"))
@@ -1051,9 +1468,15 @@ def test_shell_substitutions_and_git_output_fail_closed(
     host: str,
 ) -> None:
     leader, worktree, _runtime, _run_dir = pinned_run
+    line_continuation = "\\" + "\n"
     commands = (
         f"cat <(cp shared.txt {leader / 'shared.txt'})",
         f"cat $(touch {leader / 'shared.txt'})",
+        f"cat `touch {leader / 'shared.txt'}`",
+        f"cat \\\\$(cp shared.txt {leader / 'shared.txt'})",
+        f"cat ${line_continuation}(touch {leader / 'shared.txt'})",
+        f"cat <{line_continuation}(touch {leader / 'shared.txt'})",
+        f"cat =(touch {leader / 'shared.txt'})",
         f"git diff --output={leader / 'shared.txt'}",
     )
 
@@ -1061,6 +1484,187 @@ def test_shell_substitutions_and_git_output_fail_closed(
         result = _bash_guard(leader, worktree, command, host=host)
         assert result.returncode == 2, (command, result.stderr)
     assert (leader / "shared.txt").read_text(encoding="utf-8") == "leader\n"
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_shell_quoted_substitution_literals_are_allowed(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    commands = (
+        "VALUE='$(literal)'",
+        "printf '%s\\n' '<(literal)'",
+        'printf \'%s\\n\' ">(literal)"',
+        "printf '%s\\n' '`literal`'",
+        'printf \'%s\\n\' "*(e:\'literal\':)"',
+    )
+
+    for command in commands:
+        result = _bash_guard(leader, worktree, command, host=host)
+        assert result.returncode == 0, (command, result.stderr)
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_gradle_wrapper_tasks_and_local_outputs_are_allowed(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    wrapper = worktree / "gradlew"
+    wrapper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    wrapper.chmod(0o755)
+    commands = (
+        "./gradlew assembleSandbox",
+        "./gradlew bundleRelease",
+        "./gradlew testDebugUnitTest",
+        "./gradlew lint check",
+        "./gradlew connectedDebugAndroidTest",
+        "./gradlew --gradle-user-home .gradle-local assembleDebug",
+        "GRADLE_USER_HOME=.gradle-local ./gradlew check",
+    )
+
+    for command in commands:
+        result = _bash_guard(leader, worktree, command, host=host)
+        assert result.returncode == 0, (command, result.stderr)
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_gradle_wrapper_external_paths_and_symlink_escape_are_rejected(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    wrapper = worktree / "gradlew"
+    wrapper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    wrapper.chmod(0o755)
+    outside_wrapper = leader / "external-tools" / "gradlew"
+    outside_wrapper.parent.mkdir()
+    outside_wrapper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    outside_wrapper.chmod(0o755)
+    linked_wrapper = worktree / "tools" / "gradlew"
+    linked_wrapper.parent.mkdir()
+    linked_wrapper.symlink_to(outside_wrapper)
+    commands = (
+        f"./gradlew -p {shlex.quote(str(leader))} assembleDebug",
+        f"./gradlew --project-dir={shlex.quote(str(leader))} check",
+        f"./gradlew -g {shlex.quote(str(leader / '.gradle'))} test",
+        f"./gradlew --gradle-user-home={shlex.quote(str(leader / '.gradle'))} lint",
+        f"./gradlew --init-script={shlex.quote(str(leader / 'init.gradle'))} check",
+        f"./gradlew --build-file={shlex.quote(str(leader / 'build.gradle'))} check",
+        f"./gradlew --settings-file={shlex.quote(str(leader / 'settings.gradle'))} check",
+        f"./gradlew -PbuildDir={shlex.quote(str(leader / 'build'))} assembleDebug",
+        f"GRADLE_USER_HOME={shlex.quote(str(leader / '.gradle-env'))} ./gradlew check",
+        f"GRADLE_OPTS='-Dgradle.user.home={leader / '.gradle-opts'}' ./gradlew check",
+        f"JAVA_TOOL_OPTIONS='-Dagent.output={leader / 'java-tool-output'}' ./gradlew check",
+        f"JDK_JAVA_OPTIONS='-Dagent.output={leader / 'jdk-java-output'}' ./gradlew check",
+        f"_JAVA_OPTIONS='-Dagent.output={leader / 'java-output'}' ./gradlew check",
+        f"JAVA_OPTS='-Dagent.output={leader / 'java-opts-output'}' ./gradlew check",
+        f"{shlex.quote(str(outside_wrapper))} assembleDebug",
+        "./tools/gradlew assembleDebug",
+        "gradlew assembleDebug",
+    )
+
+    for command in commands:
+        result = _bash_guard(leader, worktree, command, host=host)
+        assert result.returncode == 2, (command, result.stderr)
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_exported_and_appended_gradle_environment_cannot_escape_worktree(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    wrapper = worktree / "gradlew"
+    wrapper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    wrapper.chmod(0o755)
+    commands = (
+        f"export GRADLE_USER_HOME={shlex.quote(str(leader / '.gradle-export'))}; ./gradlew check",
+        f"export GRADLE_OPTS='-p {leader}'; ./gradlew assembleDebug",
+        f"GRADLE_OPTS+=' -p {leader}' ./gradlew lint",
+        f"JAVA_TOOL_OPTIONS='-javaagent:{leader / 'evil-agent.jar'}' ./gradlew test",
+        f"printf -v GRADLE_USER_HOME %s {shlex.quote(str(leader / '.gradle-printf'))}; export GRADLE_USER_HOME; ./gradlew check",
+        f"read JAVA_TOOL_OPTIONS <<< '-javaagent:{leader / 'read-agent.jar'}'; export JAVA_TOOL_OPTIONS; ./gradlew check",
+    )
+
+    for command in commands:
+        result = _bash_guard(leader, worktree, command, host=host)
+        assert result.returncode == 2, (command, result.stderr)
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_dynamic_shell_variables_and_zsh_executable_globs_fail_closed(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    commands = (
+        f"writer=touch; target={shlex.quote(str(leader / 'variable-write'))}; \"$writer\" \"$target\"",
+        f"echo *(e:'touch {leader / 'zsh-write'}':)",
+        "touch {safe,../feat-other/owned}",
+    )
+
+    for command in commands:
+        result = _bash_guard(leader, worktree, command, host=host)
+        assert result.returncode == 2, (command, result.stderr)
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_interpreter_wrapped_agent_flow_runtime_is_not_a_trusted_launcher(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, _worktree, _runtime, run_dir = pinned_run
+    (run_dir / "active").unlink()
+    node = shutil.which("node")
+    assert node is not None
+    node_alias = leader / "node-alias"
+    node_alias.symlink_to(node)
+    launcher_alias = leader / "af"
+    launcher_alias.symlink_to(leader / ".agent-flow" / "bin" / "agent-flow")
+    commands = (
+        f"NODE_OPTIONS=--require=/tmp/payload.js node {leader / '.agent-flow/runtime/node/bin/agent-flow-kit.mjs'} install",
+        f"BASH_ENV=/tmp/payload.sh bash {leader / '.agent-flow/bin/agent-flow'} install",
+        f"{node_alias} {leader / '.agent-flow/runtime/node/bin/agent-flow-kit.mjs'} install",
+        f"PATH={shlex.quote(str(leader))} node-alias {leader / '.agent-flow/runtime/node/bin/agent-flow-kit.mjs'} install",
+        f"env PATH={shlex.quote(str(leader))} node-alias {leader / '.agent-flow/runtime/node/bin/agent-flow-kit.mjs'} install",
+        f"PATH={shlex.quote(str(leader))} af install",
+        f"env -P {shlex.quote(str(leader))} af install",
+        f"env -C {shlex.quote(str(leader))} -P {shlex.quote(str(leader))} af install",
+        "PATH='$ALIAS_DIR:$PATH' af install",
+    )
+
+    for command in commands:
+        result = _bash_guard(leader, leader, command, host=host)
+        assert result.returncode == 2, (command, result.stderr)
+        assert "launcher is not trusted" in result.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+@pytest.mark.parametrize(
+    "variable",
+    ("GRADLE_OPTS", "JDK_JAVA_OPTIONS", "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JAVA_OPTS"),
+)
+def test_inherited_gradle_option_paths_outside_worktree_are_rejected(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+    variable: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    wrapper = worktree / "gradlew"
+    wrapper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    wrapper.chmod(0o755)
+
+    result = _bash_guard(
+        leader,
+        worktree,
+        "./gradlew check",
+        host=host,
+        env_override={variable: f"-Dagent.output={leader / 'outside'}"},
+    )
+
+    assert result.returncode == 2, result.stderr
 
 
 @pytest.mark.parametrize("host", ("codex", "claude", "omp"))
@@ -1166,6 +1770,28 @@ def test_agent_flow_launcher_is_allowed_from_leader(
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_guard_import_does_not_create_python_bytecode_cache(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    python_runtime = leader / ".agent-flow" / "runtime" / "python"
+    before = _tree_integrity(python_runtime)
+
+    for _ in range(2):
+        result = _bash_guard(
+            leader,
+            worktree,
+            "touch generated.txt",
+            host=host,
+            env_override={"PYTHONDONTWRITEBYTECODE": None},
+        )
+        assert result.returncode == 0, result.stderr
+
+    assert _tree_integrity(python_runtime) == before
+
+
 def test_claude_launcher_forwards_hook_identity_to_the_runner(
     pinned_run: tuple[Path, Path, Path, Path],
 ) -> None:
@@ -1241,7 +1867,7 @@ def test_path_shadowed_agent_flow_launcher_is_rejected(
 
 
 @pytest.mark.parametrize("host", ("codex", "claude", "omp"))
-@pytest.mark.parametrize("variable", ("NODE_OPTIONS", "LD_PRELOAD"))
+@pytest.mark.parametrize("variable", ("NODE_OPTIONS", "LD_PRELOAD", "LD_AUDIT"))
 def test_environment_prefixed_agent_flow_launcher_is_rejected(
     pinned_run: tuple[Path, Path, Path, Path],
     host: str,
@@ -1256,9 +1882,36 @@ def test_environment_prefixed_agent_flow_launcher_is_rejected(
 
 
 @pytest.mark.parametrize("host", ("codex", "claude", "omp"))
-def test_inherited_node_options_rejects_agent_flow_launcher(
+def test_nested_agent_flow_launchers_are_rejected(
     pinned_run: tuple[Path, Path, Path, Path],
     host: str,
+) -> None:
+    leader, _worktree, _runtime, _run_dir = pinned_run
+    launcher_command = f"{leader / '.agent-flow' / 'bin' / 'agent-flow'} status"
+    nested = shlex.quote(launcher_command)
+    commands = (
+        f"bash -lc {nested}",
+        f"sh -c {nested}",
+        f"eval {nested}",
+        f"env -S {nested}",
+    )
+
+    for command in commands:
+        result = _bash_guard(leader, leader, command, host=host)
+        assert result.returncode == 2, (command, result.stderr)
+        assert "launcher is not trusted" in result.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    (("NODE_OPTIONS", "--require=/tmp/payload.js"), ("LD_AUDIT", "/tmp/payload.so")),
+)
+def test_inherited_loader_environment_rejects_agent_flow_launcher(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+    variable: str,
+    value: str,
 ) -> None:
     leader, worktree, _runtime, _run_dir = pinned_run
     launcher = leader / ".agent-flow" / "bin" / "agent-flow"
@@ -1268,7 +1921,7 @@ def test_inherited_node_options_rejects_agent_flow_launcher(
         worktree,
         f"{launcher} status",
         host=host,
-        env_override={"NODE_OPTIONS": "--require=/tmp/payload.js"},
+        env_override={variable: value},
     )
 
     assert result.returncode == 2
@@ -1376,6 +2029,550 @@ def test_global_launcher_with_path_shadowed_node_is_rejected(
 
 
 @pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+@pytest.mark.parametrize("install_args", ("", " --force-managed"))
+def test_authenticated_install_is_allowed_when_python_runtime_drift_blocks_writes(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+    install_args: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    launcher = leader / ".agent-flow" / "bin" / "agent-flow"
+    python_runtime = leader / ".agent-flow" / "runtime" / "python" / "agent_flow"
+    source = python_runtime / "payload.py"
+    bytecode = python_runtime / "payload.pyc"
+    source.write_text("tampered = True\n", encoding="utf-8")
+    py_compile.compile(str(source), cfile=str(bytecode), doraise=True)
+    source.unlink()
+
+    blocked = _bash_guard(leader, worktree, "touch generated.txt", host=host)
+    result = _bash_guard(leader, leader, f"{launcher} install{install_args}", host=host)
+
+    assert blocked.returncode == 2
+    assert "runtime authentication failed" in blocked.stderr
+    assert result.returncode == 0, result.stderr
+
+
+def test_install_recovery_rejects_self_consistent_launcher_and_contract_tamper(
+    pinned_run: tuple[Path, Path, Path, Path],
+    tmp_path: Path,
+) -> None:
+    leader, _worktree, _runtime, _run_dir = pinned_run
+    kit_path = leader / ".agent-flow" / "kit.json"
+    kit = json.loads(kit_path.read_text(encoding="utf-8"))
+    original_commitment = kit["project_runtime_contract_commitment"]
+    original_python_integrity = kit["project_runtime_contract"]["python_runtime"][
+        "integrity"
+    ]
+    rendered_guard = tmp_path / "rendered-guard.py"
+    rendered_guard.write_text(
+        GUARD.read_text(encoding="utf-8")
+        .replace(
+            "__AGENT_FLOW_PROJECT_RUNTIME_CONTRACT_SHA256__",
+            original_commitment,
+        )
+        .replace(
+            "__AGENT_FLOW_PYTHON_RUNTIME_INTEGRITY__",
+            original_python_integrity,
+        ),
+        encoding="utf-8",
+    )
+    launcher = leader / ".agent-flow" / "bin" / "agent-flow"
+    launcher.write_text("#!/bin/sh\nexit 7\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    contract = kit["project_runtime_contract"]
+    contract["launcher"]["sha256"] = hashlib.sha256(launcher.read_bytes()).hexdigest()
+    kit["project_runtime_contract_commitment"] = _runtime_contract_commitment(contract)
+    kit_path.write_text(json.dumps(kit), encoding="utf-8")
+
+    result = _bash_guard(
+        leader,
+        leader,
+        f"{launcher} install",
+        guard=rendered_guard,
+    )
+
+    assert result.returncode == 2
+    assert "launcher is not trusted" in result.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+@pytest.mark.parametrize(
+    "cwd_name,install_args",
+    (
+        ("worktree", ""),
+        ("worktree", " --force-managed"),
+        ("leader", " --profile node"),
+        ("leader", " --force-managed extra"),
+    ),
+)
+def test_authenticated_install_recovery_rejects_non_leader_or_extra_arguments(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+    cwd_name: str,
+    install_args: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    launcher = leader / ".agent-flow" / "bin" / "agent-flow"
+    cwd = leader if cwd_name == "leader" else worktree
+
+    result = _bash_guard(leader, cwd, f"{launcher} install{install_args}", host=host)
+
+    assert result.returncode == 2
+    assert "launcher is not trusted" in result.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_authenticated_worktree_finalizer_only_targets_completed_worktree_from_leader(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, run_dir = pinned_run
+    launcher = leader / ".agent-flow" / "bin" / "agent-flow"
+    command = f"{launcher} worktree remove --name test"
+    meta_path = run_dir / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["status"] = "complete"
+    meta["execution"] = ExecutionIdentity(host, "session-1", "").to_dict()
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    (run_dir / "active").unlink()
+
+    allowed = _bash_guard(leader, leader, command, host=host)
+    wrong_worktree = _bash_guard(
+        leader,
+        leader,
+        f"{launcher} worktree remove --name another-run",
+        host=host,
+    )
+    wrong_cwd = _bash_guard(leader, worktree, command, host=host)
+    keep_branch = _bash_guard(leader, leader, f"{command} --keep-branch", host=host)
+    assert allowed.returncode == 0, allowed.stderr
+    for result in (wrong_worktree, wrong_cwd, keep_branch):
+        assert result.returncode == 2, result.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_authenticated_worktree_finalizer_requires_completed_run_ownership(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, _worktree, _runtime, run_dir = pinned_run
+    launcher = leader / ".agent-flow" / "bin" / "agent-flow"
+    (run_dir / "active").unlink()
+
+    result = _bash_guard(
+        leader,
+        leader,
+        f"{launcher} worktree remove --name test",
+        host=host,
+    )
+
+    assert result.returncode == 2
+    assert "completed run ownership" in result.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_active_run_cannot_authorize_worktree_finalizer_or_leader_name_collision(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, _worktree, _runtime, _run_dir = pinned_run
+    launcher = leader / ".agent-flow" / "bin" / "agent-flow"
+
+    for requested_name in ("test", "project"):
+        result = _bash_guard(
+            leader,
+            leader,
+            f"{launcher} worktree remove --name {requested_name}",
+            host=host,
+        )
+        assert result.returncode == 2, result.stderr
+        assert "completed run ownership" in result.stderr
+    direct_git = _bash_guard(
+        leader,
+        leader,
+        f"git worktree remove {leader / '.agent-flow' / 'worktrees' / 'feat-test'}",
+        host=host,
+    )
+    assert direct_git.returncode == 2, direct_git.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_authenticated_finalizer_accepts_completed_python_run_ownership(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, _worktree, _runtime, run_dir = pinned_run
+    launcher = leader / ".agent-flow" / "bin" / "agent-flow"
+    meta_path = run_dir / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["status"] = "complete"
+    meta["execution"] = ExecutionIdentity(host, "session-1", "").to_dict()
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    (run_dir / "active").unlink()
+
+    allowed = _bash_guard(
+        leader,
+        leader,
+        f"{launcher} worktree remove --name test",
+        host=host,
+    )
+    wrong_execution = _bash_guard(
+        leader,
+        leader,
+        f"{launcher} worktree remove --name test",
+        host=host,
+        session_id="different-session",
+    )
+
+    assert allowed.returncode == 0, allowed.stderr
+    assert wrong_execution.returncode == 2
+    assert "completed run ownership" in wrong_execution.stderr
+
+
+def test_completed_finalizer_accepts_authenticated_stale_checkout_identity(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, _runtime, run_dir = pinned_run
+    launcher = leader / ".agent-flow" / "bin" / "agent-flow"
+    meta_path = run_dir / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["status"] = "complete"
+    meta["execution"] = ExecutionIdentity("codex", "session-1", "").to_dict()
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    (run_dir / "active").unlink()
+    _git(leader, "worktree", "remove", str(worktree))
+
+    result = _bash_guard(
+        leader,
+        leader,
+        f"{launcher} worktree remove --name test",
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_completed_finalizer_rejects_workspace_reused_by_active_run(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, runtime, run_dir = pinned_run
+    launcher = leader / ".agent-flow" / "bin" / "agent-flow"
+    meta_path = run_dir / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["status"] = "complete"
+    meta["execution"] = ExecutionIdentity("codex", "session-1", "").to_dict()
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    (run_dir / "active").unlink()
+    reused_run = runtime / ".agent-flow" / "runs" / "reused-run"
+    reused_run.mkdir()
+    (reused_run / "active").write_text("", encoding="utf-8")
+    (reused_run / "meta.json").write_text(
+        json.dumps(
+            {
+                "run_id": "reused-run",
+                "workspace": _identity(worktree),
+                "execution": ExecutionIdentity(
+                    "codex", "replacement-session", ""
+                ).to_dict(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _bash_guard(
+        leader,
+        leader,
+        f"{launcher} worktree remove --name test",
+    )
+
+    assert result.returncode == 2
+    assert "completed run ownership" in result.stderr
+
+
+def test_completed_finalizer_only_authorizes_latest_execution_owner(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, runtime, run_dir = pinned_run
+    launcher = leader / ".agent-flow" / "bin" / "agent-flow"
+    first_meta_path = run_dir / "meta.json"
+    first_meta = json.loads(first_meta_path.read_text(encoding="utf-8"))
+    first_meta.update(
+        {
+            "status": "complete",
+            "completed_at": "2026-07-14T01:00:00+00:00",
+            "execution": ExecutionIdentity("codex", "session-1", "").to_dict(),
+        }
+    )
+    first_meta_path.write_text(json.dumps(first_meta), encoding="utf-8")
+    (run_dir / "active").unlink()
+    second_run = runtime / ".agent-flow" / "runs" / "run-2"
+    second_run.mkdir()
+    (second_run / "meta.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run-2",
+                "status": "complete",
+                "completed_at": "2026-07-14T02:00:00+00:00",
+                "workspace": _identity(worktree),
+                "execution": ExecutionIdentity(
+                    "codex", "replacement-session", ""
+                ).to_dict(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    old_owner = _bash_guard(
+        leader,
+        leader,
+        f"{launcher} worktree remove --name test",
+    )
+    current_owner = _bash_guard(
+        leader,
+        leader,
+        f"{launcher} worktree remove --name test",
+        session_id="replacement-session",
+    )
+
+    assert old_owner.returncode == 2
+    assert current_owner.returncode == 0, current_owner.stderr
+
+
+def test_completed_finalizer_rejects_symlinked_git_private_runtime_parent(
+    pinned_run: tuple[Path, Path, Path, Path],
+    tmp_path: Path,
+) -> None:
+    leader, _worktree, runtime, run_dir = pinned_run
+    launcher = leader / ".agent-flow" / "bin" / "agent-flow"
+    meta_path = run_dir / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta.update(
+        {
+            "status": "complete",
+            "execution": ExecutionIdentity("codex", "session-1", "").to_dict(),
+        }
+    )
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    (run_dir / "active").unlink()
+    outside = tmp_path / "outside-runtime"
+    runtime.rename(outside)
+    runtime.symlink_to(outside, target_is_directory=True)
+
+    result = _bash_guard(
+        leader,
+        leader,
+        f"{launcher} worktree remove --name test",
+    )
+
+    assert result.returncode == 2
+    assert "completed run ownership" in result.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_authenticated_finalizer_accepts_completed_node_run_ownership(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, run_dir = pinned_run
+    launcher = leader / ".agent-flow" / "bin" / "agent-flow"
+    (run_dir / "active").unlink()
+    execution = ExecutionIdentity(host, "session-1", "")
+    state_root = leader / ".git" / "agent-flow" / "current-runs"
+    state_root.mkdir(parents=True, exist_ok=True)
+    (state_root / f"{execution.digest}.json").write_text(
+        json.dumps(
+            {
+                "run_id": "node-complete",
+                "run_dir": ".agent-flow/runs/full-feature/node-complete",
+                "status": "complete",
+                "phase": "complete",
+                "execution": execution.to_dict(),
+                "workspace": _identity(worktree),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _bash_guard(
+        leader,
+        leader,
+        f"{launcher} worktree remove --name test",
+        host=host,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_incomplete_node_publication_cannot_authorize_worktree_write(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    from agent_flow.core.workspace_boundary import (
+        WorkspaceBoundaryError,
+        find_active_pinned_workspaces,
+        resolve_execution_workspace,
+    )
+
+    leader, worktree, _runtime, python_run_dir = pinned_run
+    (python_run_dir / "active").unlink()
+    execution = ExecutionIdentity("codex", "session-1", "")
+    identity = _identity(worktree)
+    node_run_dir = leader / ".agent-flow" / "runs" / "full-feature" / "node-starting"
+    node_run_dir.mkdir(parents=True)
+    state = {
+        "run_id": "node-starting",
+        "workflow": "full-feature",
+        "run_dir": ".agent-flow/runs/full-feature/node-starting",
+        "status": "running",
+        "phase": "implement",
+        "publication_status": "starting",
+        "start_claim_token": "starting-token",
+        "execution": execution.to_dict(),
+        "workspace": identity,
+    }
+    (node_run_dir / "manifest.json").write_text(json.dumps(state), encoding="utf-8")
+    current_root = leader / ".git" / "agent-flow" / "current-runs"
+    current_root.mkdir(parents=True, exist_ok=True)
+    (current_root / f"{execution.digest}.json").write_text(
+        json.dumps(state), encoding="utf-8"
+    )
+    binding_root = leader / ".git" / "agent-flow" / "executions"
+    binding_root.mkdir(parents=True, exist_ok=True)
+    (binding_root / f"{execution.digest}.json").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "execution": execution.to_dict(),
+                "workspace": identity,
+                "workspace_name": worktree.name,
+                "run_id": state["run_id"],
+                "run_dir": str(node_run_dir.resolve()),
+                "start_claim_token": state["start_claim_token"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(WorkspaceBoundaryError, match="execution_binding_incomplete"):
+        find_active_pinned_workspaces(leader)
+    with pytest.raises(WorkspaceBoundaryError, match="execution_binding_stale"):
+        resolve_execution_workspace(leader, execution)
+    assert _bash_guard(leader, leader, "touch shared.txt").returncode == 2
+
+
+def test_python_preserves_starting_binding_while_workspace_claim_is_live(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    from agent_flow.core.workspace_boundary import (
+        _binding_is_active,
+        acquire_workspace_start_claim,
+        release_workspace_start_claim,
+        workspace_identity_from_dict,
+    )
+
+    leader, worktree, _runtime, _python_run_dir = pinned_run
+    identity_payload = _identity(worktree)
+    identity = workspace_identity_from_dict(identity_payload)
+    run_dir = leader / ".agent-flow" / "runs" / "full-feature" / "node-starting-live"
+    run_dir.mkdir(parents=True)
+    claim = acquire_workspace_start_claim(identity, run_id="node-starting-live")
+    binding = {
+        "execution": ExecutionIdentity("codex", "same-execution", "").to_dict(),
+        "workspace": identity_payload,
+        "run_id": "node-starting-live",
+        "run_dir": str(run_dir.resolve()),
+        "start_claim_token": claim.token,
+    }
+    (run_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                **binding,
+                "status": "running",
+                "phase": "implement",
+                "publication_status": "starting",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    try:
+        assert _binding_is_active(binding)
+    finally:
+        release_workspace_start_claim(claim)
+
+    assert not _binding_is_active(binding)
+
+
+def test_completed_finalizer_remains_available_while_other_runs_are_active(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, _worktree, _runtime, run_dir = pinned_run
+    launcher = leader / ".agent-flow" / "bin" / "agent-flow"
+    meta_path = run_dir / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["status"] = "complete"
+    meta["execution"] = ExecutionIdentity("codex", "session-1", "").to_dict()
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    (run_dir / "active").unlink()
+
+    other = leader / ".agent-flow" / "worktrees" / "feat-other"
+    _git(leader, "worktree", "add", "-b", "feat/other", str(other), "main")
+    other_runtime = leader / ".git" / "agent-flow" / "worktrees" / "feat-other"
+    other_run = other_runtime / ".agent-flow" / "runs" / "other-run"
+    other_run.mkdir(parents=True)
+    (other_run / "active").write_text("", encoding="utf-8")
+    other_identity = capture_workspace_identity(other)
+    (other_run / "meta.json").write_text(
+        json.dumps(
+            {
+                "run_id": "other-run",
+                "workspace": other_identity.to_dict(),
+                "execution": ExecutionIdentity(
+                    "codex", "other-session", ""
+                ).to_dict(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    bind_execution_to_workspace(
+        ExecutionIdentity("codex", "other-session", ""),
+        other_identity,
+        other_run,
+        run_id="other-run",
+    )
+
+    result = _bash_guard(
+        leader,
+        leader,
+        f"{launcher} worktree remove --name test",
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("status", ("aborted", "running"))
+def test_authenticated_finalizer_rejects_non_completed_inactive_run(
+    pinned_run: tuple[Path, Path, Path, Path],
+    status: str,
+) -> None:
+    leader, _worktree, _runtime, run_dir = pinned_run
+    launcher = leader / ".agent-flow" / "bin" / "agent-flow"
+    meta_path = run_dir / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["status"] = status
+    meta["execution"] = ExecutionIdentity("codex", "session-1", "").to_dict()
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    (run_dir / "active").unlink()
+
+    result = _bash_guard(
+        leader,
+        leader,
+        f"{launcher} worktree remove --name test",
+    )
+
+    assert result.returncode == 2
+    assert "completed run ownership" in result.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
 def test_agent_flow_install_alias_is_not_a_runtime_launcher(
     pinned_run: tuple[Path, Path, Path, Path],
     host: str,
@@ -1386,6 +2583,27 @@ def test_agent_flow_install_alias_is_not_a_runtime_launcher(
     result = _bash_guard(leader, worktree, f"{launcher} run install", host=host)
 
     assert result.returncode == 2
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_authenticated_install_rejects_bare_local_path_alias(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, _worktree, _runtime, _run_dir = pinned_run
+    local_bin = leader / ".agent-flow" / "bin"
+    env = {"PATH": f"{local_bin}{os.pathsep}{os.environ.get('PATH', '')}"}
+
+    result = _bash_guard(
+        leader,
+        leader,
+        "agent-flow install",
+        host=host,
+        env_override=env,
+    )
+
+    assert result.returncode == 2
+    assert "launcher is not trusted" in result.stderr
 
 
 @pytest.mark.parametrize("host", ("codex", "claude", "omp"))

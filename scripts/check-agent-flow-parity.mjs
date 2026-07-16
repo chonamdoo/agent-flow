@@ -11,9 +11,11 @@ import { CODE_SKILL_PHASES } from "../lib/skill-selection.mjs";
 
 const SOURCE_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
-const SOURCE_IS_MANAGED_WORKTREE = resolveManagedWorktreeRoot(SOURCE_ROOT) !== null;
-const CHECK_INSTALLED_COPY = !SOURCE_IS_MANAGED_WORKTREE;
+const MANAGED_LEADER_ROOT = resolveManagedWorktreeRoot(SOURCE_ROOT);
+const SOURCE_IS_MANAGED_WORKTREE = MANAGED_LEADER_ROOT !== null;
 const INSTALL_ROOT = resolveInstalledRoot(process.cwd()) ?? SOURCE_ROOT;
+const CHECK_INSTALLED_COPY = !SOURCE_IS_MANAGED_WORKTREE
+  || (MANAGED_LEADER_ROOT !== null && !samePath(INSTALL_ROOT, MANAGED_LEADER_ROOT));
 // bin/agent-flow-install.mjs / bin/agent-flow-kit.mjs의 BUNDLED_HOST_SKILL_NAMES와
 // 동일해야 한다. allowlist 밖 bundled skill은 host link 없이 index에만 노출된다.
 const BUNDLED_HOST_SKILL_NAMES = new Set([
@@ -28,6 +30,43 @@ const BUNDLED_HOST_SKILL_NAMES = new Set([
 const failures = [];
 const missingFiles = new Set();
 const workflowExportCache = new Map();
+let nodeRouteParityRoot = null;
+
+function resetNodeRouteParityRoot() {
+  if (nodeRouteParityRoot === null) {
+    nodeRouteParityRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agent-flow-route-parity-"));
+    const install = spawnSync(
+      process.execPath,
+      [path.join(SOURCE_ROOT, "bin/agent-flow-kit.mjs"), "install", "--force-managed"],
+      {
+        cwd: nodeRouteParityRoot,
+        encoding: "utf8",
+        env: parityInstallEnv(),
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 30_000,
+      },
+    );
+    if (install.error || install.status !== 0) {
+      throw new Error(
+        `node route parity install failed: ${install.error?.message || install.stderr.trim() || install.status}`,
+      );
+    }
+  }
+  for (const relative of [
+    path.join(".agent-flow", "runs"),
+    path.join(".agent-flow", "state"),
+  ]) {
+    fs.rmSync(path.join(nodeRouteParityRoot, relative), { recursive: true, force: true });
+    fs.mkdirSync(path.join(nodeRouteParityRoot, relative), { recursive: true });
+  }
+  return nodeRouteParityRoot;
+}
+
+process.on("exit", () => {
+  if (nodeRouteParityRoot !== null) {
+    fs.rmSync(nodeRouteParityRoot, { recursive: true, force: true });
+  }
+});
 
 function read(rel) {
   return fs.readFileSync(absPath(rel), "utf8");
@@ -196,6 +235,96 @@ function recursiveFiles(relDir) {
   };
   visit(dir);
   return out.sort();
+}
+
+function exactTreeEntries(
+  root,
+  { ignorePythonCaches = false, canonicalDirectoryMode = false, ignoreModes = false } = {},
+) {
+  const entries = new Map();
+  const visit = (current, relative) => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      if (
+        ignorePythonCaches
+        && (entry.name === "__pycache__" || entry.name.endsWith(".pyc"))
+      ) continue;
+      const entryPath = path.join(current, entry.name);
+      const entryRelative = relative ? path.join(relative, entry.name) : entry.name;
+      const mode = fs.lstatSync(entryPath).mode & 0o777;
+      if (entry.isDirectory()) {
+        entries.set(
+          entryRelative,
+          `directory:${ignoreModes ? '*' : (canonicalDirectoryMode ? 0o755 : mode).toString(8)}`,
+        );
+        visit(entryPath, entryRelative);
+      } else if (entry.isFile()) {
+        entries.set(
+          entryRelative,
+          `file:${ignoreModes ? '*' : mode.toString(8)}:${createHash("sha256").update(fs.readFileSync(entryPath)).digest("hex")}`,
+        );
+      } else if (entry.isSymbolicLink()) {
+        entries.set(entryRelative, `symlink:${fs.readlinkSync(entryPath)}`);
+      } else {
+        entries.set(entryRelative, "unsupported");
+      }
+    }
+  };
+  visit(root, "");
+  return entries;
+}
+
+function assertExactRuntimeRootLayout(label, runtimeRoot, copiedDestinations) {
+  if (!fs.existsSync(runtimeRoot)) {
+    failures.push(`${label} runtime root is missing`);
+    return;
+  }
+  const rootMetadata = fs.lstatSync(runtimeRoot);
+  if (rootMetadata.isSymbolicLink() || !rootMetadata.isDirectory()) {
+    failures.push(`${label} runtime root type or mode differs`);
+    return;
+  }
+  if ((rootMetadata.mode & 0o777) !== 0o755) {
+    failures.push(`${label} runtime root type or mode differs`);
+  }
+  const entries = exactTreeEntries(runtimeRoot);
+  for (const name of entries.keys()) {
+    const covered = copiedDestinations.some((destination) => (
+      name === destination
+      || name.startsWith(`${destination}${path.sep}`)
+      || destination.startsWith(`${name}${path.sep}`)
+    ));
+    if (!covered) failures.push(`${label} unexpected runtime entry ${name}`);
+  }
+}
+
+function assertExactDirectoryCopy(label, source, target, canonicalModes = true) {
+  if (!fs.existsSync(source) || !fs.existsSync(target)) {
+    failures.push(`${label} exact copy path is missing`);
+    return;
+  }
+  const sourceRoot = fs.lstatSync(source);
+  const targetRoot = fs.lstatSync(target);
+  if (
+    sourceRoot.isSymbolicLink()
+    || targetRoot.isSymbolicLink()
+    || !sourceRoot.isDirectory()
+    || !targetRoot.isDirectory()
+    || (canonicalModes && (targetRoot.mode & 0o777) !== 0o755)
+  ) {
+    failures.push(`${label} root type or mode differs`);
+  }
+  const sourceEntries = exactTreeEntries(source, {
+    ignorePythonCaches: true,
+    canonicalDirectoryMode: canonicalModes,
+    ignoreModes: !canonicalModes,
+  });
+  const targetEntries = exactTreeEntries(target, { ignoreModes: !canonicalModes });
+  const names = [...new Set([...sourceEntries.keys(), ...targetEntries.keys()])].sort();
+  for (const name of names) {
+    if (sourceEntries.get(name) !== targetEntries.get(name)) {
+      failures.push(`${label} differs at ${name}`);
+    }
+  }
 }
 
 const canonicalInstaller = "bin/agent-flow-kit.mjs";
@@ -549,7 +678,16 @@ if (CHECK_INSTALLED_COPY) {
       assertSame(rel, `.agent-flow/${rel}`);
     }
   }
-  assertSame("skills/agent-flow/SKILL.md", ".agent-flow/skills/agent-flow/SKILL.md");
+  const installedAgentFlowSkill = readIfExists(".agent-flow/skills/agent-flow/SKILL.md");
+  if (installedAgentFlowSkill !== null) {
+    const normalizedAgentFlowSkill = installedAgentFlowSkill.replace(
+      /'[^'\n]*(?:\/|\\)\.agent-flow(?:\/|\\)bin(?:\/|\\)agent-flow'/g,
+      "agent-flow",
+    );
+    if (read("skills/agent-flow/SKILL.md") !== normalizedAgentFlowSkill) {
+      failures.push("skills/agent-flow/SKILL.md differs from normalized installed agent-flow skill");
+    }
+  }
   assertSame("skills/code-generation-discipline/SKILL.md", ".agent-flow/skills/code-generation-discipline/SKILL.md");
 }
 
@@ -888,6 +1026,16 @@ function assertRouteParity(workflow) {
       "gates",
       "{\"passed\": true, \"results\": [{\"command\": \"npm test\", \"passed\": true, \"output\": \"ok\"}]}\n",
     ],
+    [
+      "gates top-level green with evidence",
+      "gates",
+      "{\"status\": \"green\", \"results\": [{\"command\": \"npm test\", \"passed\": true, \"exit_code\": 0}]}\n",
+    ],
+    [
+      "gates targeted green remains non-terminal",
+      "gates",
+      "{\"passed\": true, \"status\": \"targeted-green\", \"verification_mode\": \"targeted\", \"results\": [{\"command\": \"./gradlew :app:test\", \"passed\": true, \"exit_code\": 0}]}\n",
+    ],
   ];
   for (const phase of workflow.phases) {
     for (const key of Object.keys(phase.routes ?? {})) {
@@ -1082,7 +1230,7 @@ function assertInstallerSelfInstallKeepsSourceScripts(installer) {
     }
     const result = spawnSync(process.execPath, [path.join(tempKitRoot, "bin", installer), "install", "--force-managed"], {
       cwd: tempKitRoot,
-      env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1", AGENT_FLOW_AUTO_EXTERNAL_SKILLS: "0" },
+      env: parityInstallEnv(),
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
@@ -1100,6 +1248,61 @@ function assertInstallerSelfInstallKeepsSourceScripts(installer) {
   } finally {
     fs.rmSync(tempParent, { recursive: true, force: true });
   }
+}
+
+function assertFreshRuntimeCopies(label, installRoot) {
+  const copies = [
+    ["workflows", path.join(".agent-flow", "workflows")],
+    ["profiles", path.join(".agent-flow", "profiles")],
+    [path.join("src", "agent_flow"), path.join(".agent-flow", "runtime", "python", "agent_flow")],
+    ...[
+      "bin",
+      "lib",
+      "workflows",
+      "profiles",
+      "skills",
+      "templates",
+      "scripts",
+      "bootstrap",
+      path.join("src", "agent_flow"),
+      path.join(".Codex", "agents"),
+      path.join(".Codex", "rules"),
+      path.join(".Codex", "context"),
+      path.join(".claude", "agents"),
+    ].map((source) => [
+      source,
+      path.join(".agent-flow", "runtime", "node", source),
+    ]),
+  ];
+  for (const [source, target] of copies) {
+    const canonicalModes = target.startsWith(`${path.join('.agent-flow', 'runtime')}${path.sep}`);
+    assertExactDirectoryCopy(
+      `${label} ${target}`,
+      path.join(SOURCE_ROOT, source),
+      path.join(installRoot, target),
+      canonicalModes,
+    );
+  }
+  const nodeRoot = path.join(".agent-flow", "runtime", "node");
+  assertExactRuntimeRootLayout(
+    `${label} Node`,
+    path.join(installRoot, nodeRoot),
+    copies
+      .filter(([_source, target]) => target.startsWith(`${nodeRoot}${path.sep}`))
+      .map(([_source, target]) => path.relative(nodeRoot, target)),
+  );
+  const pythonRoot = path.join(".agent-flow", "runtime", "python");
+  assertExactRuntimeRootLayout(
+    `${label} Python`,
+    path.join(installRoot, pythonRoot),
+    copies
+      .filter(([_source, target]) => target.startsWith(`${pythonRoot}${path.sep}`))
+      .map(([_source, target]) => path.relative(pythonRoot, target)),
+  );
+}
+
+if (CHECK_INSTALLED_COPY) {
+  assertFreshRuntimeCopies("current installed runtime", INSTALL_ROOT);
 }
 
 function assertInstallerCleanInstallCopiesTemplates(installer) {
@@ -1128,7 +1331,7 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
     );
     const result = spawnSync(process.execPath, [path.join(SOURCE_ROOT, "bin", installer), "install", "--force-managed"], {
       cwd: tempRoot,
-      env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1", AGENT_FLOW_AUTO_EXTERNAL_SKILLS: "0" },
+      env: parityInstallEnv(),
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
@@ -1137,6 +1340,7 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
       failures.push(`${label} clean install parity failed: ${result.error?.message || result.stderr.trim() || result.status}`);
       return;
     }
+    assertFreshRuntimeCopies(label, tempRoot);
     for (const rel of recursiveFiles("templates")) {
       const installedRel = `.agent-flow/${rel}`;
       const sourceText = fs.readFileSync(path.join(SOURCE_ROOT, rel), "utf8");
@@ -1212,7 +1416,7 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
     const forceResult = spawnSync(process.execPath, [path.join(SOURCE_ROOT, "bin", installer), "install", "--force-managed"], {
       cwd: tempRoot,
       encoding: "utf8",
-      env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1", AGENT_FLOW_AUTO_EXTERNAL_SKILLS: "0" },
+      env: parityInstallEnv(),
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
     });
@@ -1220,6 +1424,7 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
       failures.push(`${label} force install parity failed: ${forceResult.error?.message || forceResult.stderr.trim() || forceResult.status}`);
       return;
     }
+    assertFreshRuntimeCopies(`${label} force install`, tempRoot);
     if (fs.existsSync(path.join(tempRoot, ".agent-flow", "templates", "_stale", "old.md"))) {
       failures.push(`${label} force install left stale .agent-flow/templates file`);
     }
@@ -1401,7 +1606,7 @@ function seedStaleForceManagedInstall(root, installer) {
     {
       cwd: root,
       encoding: "utf8",
-      env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1", AGENT_FLOW_AUTO_EXTERNAL_SKILLS: "0" },
+      env: parityInstallEnv(),
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
     },
@@ -1497,20 +1702,8 @@ with tempfile.TemporaryDirectory() as temp_dir:
 }
 
 function nodeBackwardFreshArtifactOutcome(workflow, testCase) {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agent-flow-backward-parity-"));
-  try {
-    const install = spawnSync(process.execPath, [path.join(SOURCE_ROOT, "bin/agent-flow-kit.mjs"), "install", "--force-managed"], {
-      cwd: tempRoot,
-      encoding: "utf8",
-      env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1", AGENT_FLOW_AUTO_EXTERNAL_SKILLS: "0" },
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 30_000,
-    });
-    if (install.error || install.status !== 0) {
-      failures.push(`node backward parity install failed: ${install.error?.message || install.stderr.trim() || install.status}`);
-      return null;
-    }
-    const executionNeutralEnv = { ...process.env };
+  const tempRoot = resetNodeRouteParityRoot();
+  const executionNeutralEnv = { ...process.env };
     for (const name of [
       "AGENT_FLOW_EXECUTION_ID",
       "AGENT_FLOW_SESSION_ID",
@@ -1581,10 +1774,7 @@ function nodeBackwardFreshArtifactOutcome(workflow, testCase) {
         remaining.push(stalePhase.id);
       }
     }
-    return { remaining };
-  } finally {
-    fs.rmSync(tempRoot, { recursive: true, force: true });
-  }
+  return { remaining };
 }
 
 function phaseArtifactWithMarkers(phase, routeLine, routeKey = "success") {
@@ -1852,9 +2042,8 @@ print(json.dumps(missing_markers(payload["content"], tuple(payload["markers"])))
 }
 
 function nodePhaseOutcome(workflow, phaseId, content, stateOverrides = {}) {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agent-flow-parity-"));
-  try {
-    const executionNeutralEnv = { ...process.env };
+  const tempRoot = resetNodeRouteParityRoot();
+  const executionNeutralEnv = { ...process.env };
     for (const name of [
       "AGENT_FLOW_EXECUTION_ID",
       "AGENT_FLOW_SESSION_ID",
@@ -1864,17 +2053,6 @@ function nodePhaseOutcome(workflow, phaseId, content, stateOverrides = {}) {
       "OMP_SESSION_ID",
     ]) {
       delete executionNeutralEnv[name];
-    }
-    const install = spawnSync(process.execPath, [path.join(SOURCE_ROOT, "bin/agent-flow-kit.mjs"), "install", "--force-managed"], {
-      cwd: tempRoot,
-      env: { ...executionNeutralEnv, AGENT_FLOW_SKIP_CODEX_TRUST: "1", AGENT_FLOW_AUTO_EXTERNAL_SKILLS: "0" },
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 30_000,
-    });
-    if (install.error || install.status !== 0) {
-      failures.push(`node route parity install failed: ${install.error?.message || install.stderr.trim() || install.status}`);
-      return null;
     }
     const start = spawnSync(process.execPath, [
       path.join(SOURCE_ROOT, "bin/agent-flow-kit.mjs"),
@@ -1924,14 +2102,11 @@ function nodePhaseOutcome(workflow, phaseId, content, stateOverrides = {}) {
       timeout: 30_000,
     });
     const nextState = JSON.parse(fs.readFileSync(statePath, "utf8"));
-    return {
+  return {
       outcome: advance.status === 0 ? nextState.phase : "blocked",
       route_key: routeKey,
       fix_loop_rounds: nextState.fix_loop_rounds,
-    };
-  } finally {
-    fs.rmSync(tempRoot, { recursive: true, force: true });
-  }
+  };
 }
 
 function preferredPython() {
@@ -1939,12 +2114,17 @@ function preferredPython() {
     ? path.join(process.env.VIRTUAL_ENV, process.platform === "win32" ? "Scripts/python.exe" : "bin/python")
     : null;
   // HOME이 바뀌면 user-site의 yaml을 잃는 시스템 python 대신 kit 자체 venv를 우선한다.
-  const kitVenvPython = path.join(SOURCE_ROOT, ".venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
+  const venvRelative = process.platform === "win32" ? "Scripts/python.exe" : "bin/python";
+  const kitVenvPython = path.join(SOURCE_ROOT, ".venv", venvRelative);
+  const leaderVenvPython = MANAGED_LEADER_ROOT
+    ? path.join(MANAGED_LEADER_ROOT, ".venv", venvRelative)
+    : null;
   const candidates = [
     process.env.PYTHON,
     process.env.PYTHON_EXECUTABLE,
     virtualEnvPython,
     fs.existsSync(kitVenvPython) ? kitVenvPython : null,
+    leaderVenvPython && fs.existsSync(leaderVenvPython) ? leaderVenvPython : null,
     "python3.12",
     "python3.11",
     "python3.10",
@@ -1961,6 +2141,17 @@ function preferredPython() {
     }
   }
   return "python3";
+}
+
+function parityInstallEnv() {
+  const python = preferredPython();
+  return {
+    ...process.env,
+    PYTHON: python,
+    PYTHON_EXECUTABLE: python,
+    AGENT_FLOW_SKIP_CODEX_TRUST: "1",
+    AGENT_FLOW_AUTO_EXTERNAL_SKILLS: "0",
+  };
 }
 
 function pythonSupportsWorkflowExport(candidate) {

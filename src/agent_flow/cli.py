@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -13,7 +15,10 @@ from pathlib import Path
 from agent_flow.adapters.registry import detect_adapter
 from agent_flow.adapters.templates import PromptContext, render_stage_prompt
 from agent_flow.core.artifacts import (
+    gate_execution_fingerprint,
     init_project,
+    reusable_gate_results,
+    write_gate_cache,
     write_gate_results,
     write_handoff,
     write_prompt,
@@ -29,7 +34,7 @@ from agent_flow.core.context_contract import (
     write_system_invariants,
 )
 from agent_flow.core.commands import run_safe_command
-from agent_flow.core.gates import GateCommand, run_gates
+from agent_flow.core.gates import GateCommand, GateResult, run_gates
 from agent_flow.core.phase_workflow import load_phase_workflow_definition
 from agent_flow.core.profiles import active_profile_ids, detect_profile, load_profile
 from agent_flow.core.review import summarize_reviews, write_review_summary
@@ -38,10 +43,13 @@ from agent_flow.core.query import explain_run, query_run
 from agent_flow.core.security import resolve_project_path
 from agent_flow.core.workspace_boundary import (
     WorkspaceBoundaryError,
+    acquire_workspace_start_claim,
     execution_identity_from_context,
     execution_identity_from_dict,
     find_active_pinned_workspaces,
     release_execution_binding,
+    release_workspace_start_claim,
+    resolve_execution_finalizer_workspace,
     select_execution_workspace,
     workspace_identity_from_dict,
 )
@@ -79,19 +87,23 @@ from agent_flow.core.team import (
 )
 from agent_flow.core.worktrees import (
     create_worktree,
+    delete_worktree_branch_at_tip,
     get_worktree_status,
     known_worktree_names,
     plan_worktree,
+    preserved_worktree_branch_tip,
     remove_worktree_metadata,
     remove_worktree,
     worktree_branch_exists,
+    worktree_branch_is_preserved,
     worktree_runtime_root,
+    validate_worktree_removal,
 )
 from agent_flow.core.state import RunRequest, RunState, start_run, status_summary
 from agent_flow.core.workflow import load_workflow
 from agent_flow.eval import run_eval
 from agent_flow.memory.entities import EntityMemoryIndex
-from agent_flow.artifact import find_active_run, mark_inactive, read_meta
+from agent_flow.artifact import find_active_run, mark_inactive, read_meta, write_meta
 from agent_flow.runner import Runner, ResumeMode, _find_kit_root
 from agent_flow.providers.host import list_host_providers
 from agent_flow.providers.subprocess import ProviderCommand, run_provider
@@ -186,6 +198,8 @@ def main(argv: list[str] | None = None) -> int:
     gates_parser.add_argument("--run-dir")
     gates_parser.add_argument("--timeout", type=int, default=600)
     gates_parser.add_argument("--worktree")
+    gates_parser.add_argument("--files", nargs="*")
+    gates_parser.add_argument("--full", action="store_true")
 
     architecture_lint_parser = subparsers.add_parser("architecture-lint")
     architecture_lint_parser.add_argument("--root", default=".")
@@ -540,6 +554,8 @@ def main(argv: list[str] | None = None) -> int:
                 git_common_dir=Path(workspace.git_common_dir),
                 run_dir=active.path,
             )
+        meta["status"] = "aborted"
+        write_meta(active.path, meta)
         mark_inactive(active.path)
         print(f"aborted: {active.run_id} (artifacts preserved at {active.path})")
         return 0
@@ -624,18 +640,128 @@ def main(argv: list[str] | None = None) -> int:
         command_root = _command_project_root(root, requested_root, getattr(args, "worktree", None))
         if command_root is None:
             return 1
+        if args.full and args.files is not None:
+            print("--full cannot be combined with --files", file=sys.stderr)
+            return 2
         try:
             profile_ids = active_profile_ids(
                 _profile_source_root(root, requested_root, getattr(args, "worktree", None)),
                 args.profile,
             )
-            commands = _profile_gate_commands(profile_ids)
+            changed_files = (
+                _normalize_changed_files(command_root, args.files)
+                if args.files is not None
+                else _git_changed_files(command_root)
+            )
+            command_changed_files = None if args.full else changed_files
+            commands = _profile_gate_commands(
+                profile_ids,
+                project_root=command_root,
+                changed_files=command_changed_files,
+            )
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 1
-        results = run_gates(commands, cwd=command_root, timeout_s=args.timeout)
-        if args.run_dir is not None:
-            write_gate_results(run_dir=_resolve_project_path(command_root, args.run_dir), results=results)
+        android_modules = (
+            _android_changed_modules(command_root, changed_files)
+            if "android" in profile_ids and changed_files
+            else None
+        )
+        verification_mode = (
+            "targeted"
+            if not args.full and changed_files and android_modules is not None
+            else "full"
+        )
+        run_dir = (
+            _resolve_project_path(command_root, args.run_dir)
+            if args.run_dir is not None
+            else None
+        )
+        fingerprint = gate_execution_fingerprint(
+            root=command_root,
+            profile_ids=profile_ids,
+            verification_mode=verification_mode,
+            changed_files=changed_files,
+            commands=commands,
+        )
+        reusable = (
+            reusable_gate_results(
+                run_dir=run_dir,
+                root=command_root,
+                commands=commands,
+                fingerprint=fingerprint,
+            )
+            if run_dir is not None
+            else {}
+        )
+        pending = [command for index, command in enumerate(commands) if index not in reusable]
+        fresh = iter(run_gates(pending, cwd=command_root, timeout_s=args.timeout))
+        results = [
+            reusable[index] if index in reusable else next(fresh)
+            for index in range(len(commands))
+        ]
+        post_changed_files = (
+            _normalize_changed_files(command_root, args.files)
+            if args.files is not None
+            else _git_changed_files(command_root)
+        )
+        post_fingerprint = gate_execution_fingerprint(
+            root=command_root,
+            profile_ids=profile_ids,
+            verification_mode=verification_mode,
+            changed_files=post_changed_files,
+            commands=commands,
+        )
+        if post_fingerprint.get("fingerprint_id") != fingerprint.get("fingerprint_id"):
+            stability_command = GateCommand(
+                "workspace-stability",
+                ("agent-flow", "workspace-stability"),
+            )
+            stability_result = GateResult(
+                gate_id=stability_command.gate_id,
+                command=stability_command.command,
+                passed=False,
+                exit_code=1,
+                stdout="",
+                stderr="workspace inputs changed while gates were running",
+                executed_at=datetime.now(timezone.utc).isoformat(),
+            )
+            unstable_commands = [*commands, stability_command]
+            unstable_results = [*results, stability_result]
+            unstable_fingerprint = gate_execution_fingerprint(
+                root=command_root,
+                profile_ids=profile_ids,
+                verification_mode=verification_mode,
+                changed_files=post_changed_files,
+                commands=unstable_commands,
+            )
+            if run_dir is not None:
+                write_gate_results(
+                    run_dir=run_dir,
+                    results=unstable_results,
+                    commands=unstable_commands,
+                    fingerprint=unstable_fingerprint,
+                    verification_mode=verification_mode,
+                )
+            print("gate inputs changed while gates were running", file=sys.stderr)
+            return 1
+        fingerprint = post_fingerprint
+        if run_dir is not None:
+            write_gate_cache(
+                run_dir=run_dir,
+                root=command_root,
+                commands=commands,
+                results=results,
+                fingerprint=fingerprint,
+                reused_indices=set(reusable),
+            )
+            write_gate_results(
+                run_dir=run_dir,
+                results=results,
+                commands=commands,
+                fingerprint=fingerprint,
+                verification_mode=verification_mode,
+            )
         failed = [result for result in results if not result.passed]
         required_results = [result for result in results if result.required]
         failed_required = [result for result in required_results if not result.passed]
@@ -855,31 +981,126 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             if not _worktree_checkout_exists(status):
                 stale_dir = root / ".agent-flow" / "worktrees" / status.name
-                if stale_dir.exists() or status.name in _known_worktree_names(root):
-                    if not args.keep_branch and status.branch_created_by_agent_flow:
+                if (
+                    stale_dir.exists()
+                    or stale_dir.is_symlink()
+                    or status.name in _known_worktree_names(root)
+                ):
+                    stale_issue = _stale_worktree_removal_issue(
+                        root,
+                        stale_dir,
+                        status.name,
+                    )
+                    if stale_issue is not None:
+                        print(stale_issue, file=sys.stderr)
+                        return 2
+                    if (
+                        not args.keep_branch
+                        and status.branch_created_by_agent_flow
+                        and worktree_branch_exists(root=root, branch=status.branch)
+                        and preserved_worktree_branch_tip(
+                            root=root,
+                            branch=status.branch,
+                        )
+                        is None
+                    ):
+                        print(
+                            "refusing to delete worktree branch with unpreserved commits: "
+                            f"{status.branch}",
+                            file=sys.stderr,
+                        )
+                        return 2
+                    claim = None
+                    quarantine: Path | None = None
+                    try:
+                        claim = _acquire_authenticated_cleanup_claim(
+                            root,
+                            status.name,
+                        )
+                        status = get_worktree_status(root=root, name=args.name)
                         prune = run_safe_command(("git", "worktree", "prune"), cwd=root)
                         if not prune.ok:
-                            print(_format_safe_command_error(prune), file=sys.stderr)
-                            return 2
-                        if worktree_branch_exists(root=root, branch=status.branch):
-                            delete = run_safe_command(("git", "branch", "-D", status.branch), cwd=root)
-                            if not delete.ok:
-                                print(_format_safe_command_error(delete), file=sys.stderr)
-                                return 2
-                    if stale_dir.is_dir():
-                        shutil.rmtree(stale_dir)
-                    elif stale_dir.exists():
-                        stale_dir.unlink()
-                    remove_worktree_metadata(root=root, name=status.name)
+                            raise RuntimeError(_format_safe_command_error(prune))
+                        branch_tip = None
+                        if (
+                            not args.keep_branch
+                            and status.branch_created_by_agent_flow
+                            and worktree_branch_exists(root=root, branch=status.branch)
+                        ):
+                            branch_tip = preserved_worktree_branch_tip(
+                                root=root,
+                                branch=status.branch,
+                            )
+                            if branch_tip is None:
+                                raise RuntimeError(
+                                    "refusing to delete worktree branch with unpreserved commits: "
+                                    f"{status.branch}"
+                                )
+                        quarantine = _quarantine_stale_worktree_checkout(
+                            root,
+                            stale_dir,
+                            status.name,
+                        )
+                        if quarantine is not None:
+                            _remove_quarantined_stale_worktree_checkout(
+                                root,
+                                quarantine,
+                                status.name,
+                            )
+                            quarantine = None
+                        if branch_tip is not None:
+                            delete_worktree_branch_at_tip(
+                                root=root,
+                                branch=status.branch,
+                                expected_tip=branch_tip,
+                            )
+                        remove_worktree_metadata(root=root, name=status.name)
+                    except (OSError, RuntimeError, ValueError, WorkspaceBoundaryError) as exc:
+                        if (
+                            quarantine is not None
+                            and quarantine.exists()
+                            and not stale_dir.exists()
+                        ):
+                            quarantine.rename(stale_dir)
+                        print(_format_cli_error(exc), file=sys.stderr)
+                        return 2
+                    finally:
+                        if claim is not None:
+                            release_workspace_start_claim(claim)
                     print(f"removed stale worktree manifest {status.name}")
                     return 0
                 print(f"worktree not found or missing path: {status.name}", file=sys.stderr)
                 return 1
             try:
-                remove_worktree(root=root, status=status, delete_branch=not args.keep_branch)
-            except subprocess.CalledProcessError as exc:
+                validate_worktree_removal(
+                    root=root,
+                    status=status,
+                    delete_branch=not args.keep_branch,
+                )
+            except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as exc:
                 print(_format_cli_error(exc), file=sys.stderr)
                 return 2
+            claim = None
+            try:
+                claim = _acquire_authenticated_cleanup_claim(root, status.name)
+                status = get_worktree_status(root=root, name=args.name)
+                remove_worktree(
+                    root=root,
+                    status=status,
+                    delete_branch=not args.keep_branch,
+                )
+            except (
+                OSError,
+                RuntimeError,
+                ValueError,
+                WorkspaceBoundaryError,
+                subprocess.CalledProcessError,
+            ) as exc:
+                print(_format_cli_error(exc), file=sys.stderr)
+                return 2
+            finally:
+                if claim is not None:
+                    release_workspace_start_claim(claim)
             print(f"removed {status.name} {status.path}")
             return 0
 
@@ -1362,7 +1583,12 @@ def _resolve_project_path(root: Path, value: str) -> Path:
     return resolve_project_path(root, value)
 
 
-def _profile_gate_commands(profile_ids: list[str]) -> list[GateCommand]:
+def _profile_gate_commands(
+    profile_ids: list[str],
+    *,
+    project_root: Path | None = None,
+    changed_files: list[str] | None = None,
+) -> list[GateCommand]:
     commands: list[tuple[int, GateCommand]] = []
     seen: set[tuple[str, ...]] = set()
     multi_profile = len(profile_ids) > 1
@@ -1373,20 +1599,43 @@ def _profile_gate_commands(profile_ids: list[str]) -> list[GateCommand]:
         profile = load_profile(profile_id)
         for gate in profile.gates:
             command = _normalize_profile_gate_command(profile.profile_id, gate.gate_id, gate.command)
+            candidate_commands = (command,)
+            if project_root is not None and changed_files is not None:
+                candidate_commands = _incremental_profile_gate_commands(
+                    profile.profile_id,
+                    gate.gate_id,
+                    command,
+                    project_root,
+                    changed_files,
+                )
+                if not candidate_commands:
+                    continue
             required = gate.required
             gate_id = f"{profile.profile_id}:{gate.gate_id}" if multi_profile else gate.gate_id
             if multi_profile and _is_architecture_lint_gate(gate.gate_id, gate.command):
                 if architecture_lint_added:
                     continue
                 command = _architecture_lint_command(architecture_lint_profile)
+                if project_root is not None and changed_files:
+                    command = (*command, "--files", *changed_files)
+                candidate_commands = (command,)
                 gate_id = "architecture-lint"
                 required = True
                 architecture_lint_added = True
-            if command in seen:
-                continue
-            seen.add(command)
-            commands.append((order, GateCommand(gate_id, command, required=required)))
-            order += 1
+            multiple = len(candidate_commands) > 1
+            for candidate in candidate_commands:
+                if candidate in seen:
+                    continue
+                seen.add(candidate)
+                candidate_gate_id = (
+                    f"{gate_id}[{_incremental_gate_scope_label(candidate)}]"
+                    if multiple
+                    else gate_id
+                )
+                commands.append(
+                    (order, GateCommand(candidate_gate_id, candidate, required=required))
+                )
+                order += 1
     return [
         command
         for _, command in sorted(
@@ -1394,6 +1643,277 @@ def _profile_gate_commands(profile_ids: list[str]) -> list[GateCommand]:
             key=lambda item: (*_gate_order_key(item[1]), item[0]),
         )
     ]
+
+
+def _incremental_profile_gate_commands(
+    profile_id: str,
+    gate_id: str,
+    command: tuple[str, ...],
+    project_root: Path,
+    changed_files: list[str],
+) -> tuple[tuple[str, ...], ...]:
+    if profile_id != "android" or not changed_files:
+        return (command,)
+    modules = _android_changed_modules(project_root, changed_files)
+    if _is_architecture_lint_gate(gate_id, command):
+        return ((*command, "--files", *changed_files),)
+    if modules is None:
+        return (command,)
+    if not modules:
+        return ()
+    if not command or Path(command[0]).name not in {"gradle", "gradlew"}:
+        return (command,)
+    tasks = command[1:]
+    if not tasks or any(task.startswith("-") or ":" in task for task in tasks):
+        return (command,)
+    test_scope = _android_test_scope(project_root, changed_files)
+    if gate_id == "build" and not test_scope["production"]:
+        return ()
+    if gate_id == "test":
+        selected_commands: list[tuple[str, ...]] = []
+        filters = _android_unit_test_filters(project_root, changed_files)
+        for module in modules:
+            if module in test_scope["production"] or module in test_scope["unit"]:
+                if (
+                    len(modules) == 1
+                    and not test_scope["production"]
+                    and not test_scope["instrumented"]
+                    and filters
+                ):
+                    test_task = _android_unit_test_task(project_root, module)
+                    if test_task is not None:
+                        selected_commands.append(
+                            (
+                                command[0],
+                                f"{module}:{test_task}",
+                                *(value for pattern in filters for value in ("--tests", pattern)),
+                            )
+                        )
+                    else:
+                        selected_commands.append((command[0], f"{module}:{tasks[0]}"))
+                else:
+                    selected_commands.append((command[0], f"{module}:{tasks[0]}"))
+            if module in test_scope["instrumented"]:
+                selected_commands.append((command[0], f"{module}:connectedDevDebugAndroidTest"))
+        return tuple(selected_commands)
+    return tuple(
+        (command[0], *(f"{module}:{task}" for task in tasks))
+        for module in modules
+    )
+
+
+def _incremental_gate_scope_label(command: tuple[str, ...]) -> str:
+    task = next((value for value in command[1:] if value.startswith(":")), "gate")
+    return task.strip(":").replace(":", "/")
+
+
+def _android_unit_test_task(project_root: Path, module: str) -> str | None:
+    module_root = project_root.joinpath(*module.strip(":").split(":"))
+    build_file = next(
+        (
+            candidate
+            for candidate in (module_root / "build.gradle.kts", module_root / "build.gradle")
+            if candidate.is_file()
+        ),
+        None,
+    )
+    if build_file is None:
+        return None
+    try:
+        content = build_file.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+    android_plugin = re.search(
+        r"(?:com\.android\.(?:application|library|test|dynamic-feature)|"
+        r"libs\.plugins\.android(?:[.\w-]*))",
+        content,
+    )
+    if android_plugin:
+        return "testDevDebugUnitTest"
+    jvm_plugin = re.search(
+        r"(?:org\.jetbrains\.kotlin\.jvm|kotlin\s*\(\s*['\"]jvm['\"]\s*\)|"
+        r"libs\.plugins\.kotlin\.jvm|\bid\s*\(\s*['\"]java(?:-library)?['\"]\s*\))",
+        content,
+    )
+    return "test" if jvm_plugin else None
+
+
+def _android_changed_modules(
+    project_root: Path,
+    changed_files: list[str],
+) -> tuple[str, ...] | None:
+    if _has_gradle_project_dir_mapping(project_root):
+        return None
+    high_risk_roots = {
+        "build.gradle",
+        "build.gradle.kts",
+        "settings.gradle",
+        "settings.gradle.kts",
+        "gradle.properties",
+        "gradlew",
+        "gradlew.bat",
+    }
+    high_risk_prefixes = ("buildSrc/", "build-logic/", "gradle/")
+    documentation_suffixes = {".md", ".adoc", ".rst"}
+    modules: set[str] = set()
+    for relative in changed_files:
+        normalized = relative.replace("\\", "/")
+        while normalized.startswith("./"):
+            normalized = normalized[2:]
+        if not normalized:
+            continue
+        if normalized in high_risk_roots or normalized.startswith(high_risk_prefixes):
+            return None
+        if Path(normalized).suffix.lower() in documentation_suffixes:
+            continue
+        module_root = _android_module_root(project_root, normalized)
+        if module_root is None:
+            return None
+        module_relative = module_root.relative_to(project_root)
+        modules.add(":" + ":".join(module_relative.parts))
+    return tuple(sorted(modules))
+
+
+def _has_gradle_project_dir_mapping(project_root: Path) -> bool:
+    for settings in (project_root / "settings.gradle.kts", project_root / "settings.gradle"):
+        if not settings.is_file():
+            continue
+        try:
+            content = settings.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            return True
+        if re.search(
+            r"\b(?:projectDir|setProjectDir|includeFlat|includeBuild)\b",
+            content,
+        ):
+            return True
+    return False
+
+
+def _android_module_root(project_root: Path, relative: str) -> Path | None:
+    candidate = project_root / relative
+    parent = candidate if candidate.is_dir() else candidate.parent
+    while parent != project_root and project_root in parent.parents:
+        if (parent / "build.gradle").is_file() or (parent / "build.gradle.kts").is_file():
+            return parent
+        parent = parent.parent
+    return None
+
+
+def _android_test_scope(
+    project_root: Path,
+    changed_files: list[str],
+) -> dict[str, set[str]]:
+    scope = {
+        "production": set(),
+        "unit": set(),
+        "instrumented": set(),
+    }
+    for relative in changed_files:
+        if Path(relative).suffix.lower() in {".md", ".adoc", ".rst"}:
+            continue
+        module_root = _android_module_root(project_root, relative)
+        if module_root is None:
+            continue
+        module = ":" + ":".join(module_root.relative_to(project_root).parts)
+        normalized = f"/{relative.replace(os.sep, '/').lower()}/"
+        if "/src/androidtest/" in normalized:
+            scope["instrumented"].add(module)
+        elif "/src/test/" in normalized:
+            scope["unit"].add(module)
+        else:
+            scope["production"].add(module)
+    return scope
+
+
+def _android_unit_test_filters(
+    project_root: Path,
+    changed_files: list[str],
+) -> tuple[str, ...]:
+    filters: set[str] = set()
+    for relative in changed_files:
+        if Path(relative).suffix.lower() in {".md", ".adoc", ".rst"}:
+            continue
+        normalized = relative.replace("\\", "/")
+        match = re.search(r"/src/test/(?:java|kotlin)/(.+)\.(?:java|kt)$", f"/{normalized}", re.IGNORECASE)
+        path = project_root / relative
+        if not match or not path.is_file():
+            return ()
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            return ()
+        package_match = re.search(
+            r"(?m)^\s*package\s+([A-Za-z_][\w.]*)\s*;?\s*$",
+            content,
+        )
+        declarations = re.findall(
+            r"\b(?:class|object|interface|enum\s+class|record)\s+([A-Za-z_][A-Za-z0-9_]*)\b",
+            content,
+        )
+        class_name = path.stem
+        if declarations != [class_name]:
+            return ()
+        package_name = package_match.group(1) if package_match else ""
+        filters.add(f"{package_name + '.' if package_name else ''}{class_name}*")
+    return tuple(sorted(filters))
+
+
+def _normalize_changed_files(root: Path, values: list[str]) -> list[str]:
+    normalized: set[str] = set()
+    for value in values:
+        candidate = Path(value)
+        absolute = candidate if candidate.is_absolute() else root / candidate
+        try:
+            relative = absolute.resolve(strict=False).relative_to(root.resolve(strict=True))
+        except ValueError as exc:
+            raise ValueError(f"gate file is outside project root: {value}") from exc
+        normalized.add(relative.as_posix())
+    return sorted(normalized)
+
+
+def _git_changed_files(root: Path) -> list[str] | None:
+    probe = subprocess.run(
+        ("git", "-C", str(root), "rev-parse", "--is-inside-work-tree"),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if probe.returncode != 0 or probe.stdout.strip() != "true":
+        return None
+    commands: list[tuple[str, ...]] = [
+        ("git", "-C", str(root), "diff", "--no-renames", "--name-only", "--diff-filter=ACMRD"),
+        ("git", "-C", str(root), "diff", "--cached", "--no-renames", "--name-only", "--diff-filter=ACMRD"),
+        ("git", "-C", str(root), "ls-files", "--others", "--exclude-standard"),
+    ]
+    for base in ("origin/main", "main"):
+        merge_base = subprocess.run(
+            ("git", "-C", str(root), "merge-base", "HEAD", base),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if merge_base.returncode == 0 and merge_base.stdout.strip():
+            commands.append(
+                (
+                    "git",
+                    "-C",
+                    str(root),
+                    "diff",
+                    "--no-renames",
+                    "--name-only",
+                    "--diff-filter=ACMRD",
+                    f"{merge_base.stdout.strip()}..HEAD",
+                )
+            )
+            break
+    changed: set[str] = set()
+    for command in commands:
+        result = subprocess.run(command, text=True, capture_output=True, check=False)
+        if result.returncode != 0:
+            return None
+        changed.update(line.strip() for line in result.stdout.splitlines() if line.strip())
+    return _normalize_changed_files(root, sorted(changed))
 
 
 def _is_architecture_lint_gate(gate_id: str, command: tuple[str, ...]) -> bool:
@@ -1505,6 +2025,162 @@ def _known_worktree_names(root: Path) -> list[str]:
 
 def _worktree_checkout_exists(status) -> bool:
     return status.exists and (status.path / ".git").exists()
+
+
+def _acquire_authenticated_cleanup_claim(root: Path, name: str):
+    execution = execution_identity_from_context(env=os.environ)
+    finalizer = resolve_execution_finalizer_workspace(root, execution, name)
+    claim = acquire_workspace_start_claim(
+        finalizer.identity,
+        run_id=f"cleanup:{name}",
+    )
+    try:
+        current = resolve_execution_finalizer_workspace(root, execution, name)
+        if current.identity != finalizer.identity or current.run_dir != finalizer.run_dir:
+            raise WorkspaceBoundaryError(
+                "execution_finalizer_stale: cleanup ownership changed while acquiring the workspace lease"
+            )
+    except Exception:
+        release_workspace_start_claim(claim)
+        raise
+    return claim
+
+
+def _stale_worktree_removal_issue(
+    root: Path,
+    stale_path: Path,
+    name: str,
+) -> str | None:
+    if not stale_path.exists() and not stale_path.is_symlink():
+        return None
+    if stale_path.is_symlink() or not stale_path.is_dir():
+        return f"refusing to delete unowned stale worktree path: {stale_path}"
+    runtime_manifest = worktree_runtime_root(root=root, name=name) / "manifest.json"
+    if not runtime_manifest.is_file() or runtime_manifest.is_symlink():
+        return f"refusing to delete stale worktree without ownership metadata: {stale_path}"
+    stale_manifest = stale_path / "manifest.json"
+    if not stale_manifest.is_file() or stale_manifest.is_symlink():
+        return f"refusing to delete stale worktree without an owned manifest file: {stale_path}"
+    unexpected = sorted(
+        entry.name
+        for entry in stale_path.iterdir()
+        if entry.name != "manifest.json"
+    )
+    if unexpected:
+        return (
+            "refusing to delete stale worktree with unowned files: "
+            f"{stale_path} ({', '.join(unexpected)})"
+        )
+    try:
+        if stale_manifest.read_bytes() != runtime_manifest.read_bytes():
+            return f"refusing to delete stale worktree with unauthenticated manifest content: {stale_path}"
+    except OSError:
+        return f"refusing to delete stale worktree with unreadable ownership metadata: {stale_path}"
+    return None
+
+
+def _quarantine_stale_worktree_checkout(
+    root: Path,
+    stale_path: Path,
+    name: str,
+) -> Path | None:
+    if not stale_path.exists() and not stale_path.is_symlink():
+        return None
+    issue = _stale_worktree_removal_issue(root, stale_path, name)
+    if issue is not None:
+        raise RuntimeError(issue)
+    metadata = stale_path.lstat()
+    stale_manifest = stale_path / "manifest.json"
+    manifest_metadata = stale_manifest.lstat()
+    manifest_bytes = stale_manifest.read_bytes()
+    quarantine = stale_path.with_name(
+        f".{stale_path.name}.cleanup-{os.getpid()}-{os.urandom(8).hex()}"
+    )
+    stale_path.rename(quarantine)
+    moved = quarantine.lstat()
+    moved_manifest = quarantine / "manifest.json"
+    moved_manifest_metadata = moved_manifest.lstat()
+    if (
+        moved.st_dev != metadata.st_dev
+        or moved.st_ino != metadata.st_ino
+        or moved_manifest_metadata.st_dev != manifest_metadata.st_dev
+        or moved_manifest_metadata.st_ino != manifest_metadata.st_ino
+        or moved_manifest.read_bytes() != manifest_bytes
+    ):
+        if not stale_path.exists():
+            quarantine.rename(stale_path)
+        raise RuntimeError("stale worktree changed during cleanup quarantine")
+    return quarantine
+
+
+def _remove_quarantined_stale_worktree_checkout(
+    root: Path,
+    quarantine: Path,
+    name: str,
+) -> None:
+    issue = _stale_worktree_removal_issue(root, quarantine, name)
+    if issue is not None:
+        raise RuntimeError(issue)
+    manifest = quarantine / "manifest.json"
+    metadata = manifest.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise RuntimeError("stale worktree manifest is not an owned regular file")
+    runtime_manifest = worktree_runtime_root(root=root, name=name) / "manifest.json"
+    runtime_metadata = runtime_manifest.lstat()
+    payload = runtime_manifest.read_bytes()
+    removal = quarantine.with_name(
+        f".{quarantine.name}.manifest.remove-{os.getpid()}-{os.urandom(8).hex()}"
+    )
+    manifest.rename(removal)
+    moved_owned = False
+    try:
+        moved = removal.lstat()
+        moved_owned = not (
+            stat.S_ISLNK(moved.st_mode)
+            or not stat.S_ISREG(moved.st_mode)
+            or moved.st_dev != metadata.st_dev
+            or moved.st_ino != metadata.st_ino
+        )
+        if (
+            runtime_manifest.is_symlink()
+            or not runtime_manifest.is_file()
+            or runtime_manifest.lstat().st_dev != runtime_metadata.st_dev
+            or runtime_manifest.lstat().st_ino != runtime_metadata.st_ino
+            or not moved_owned
+            or removal.read_bytes() != payload
+        ):
+            raise RuntimeError("stale worktree manifest changed before removal")
+        quarantine.rmdir()
+    except (OSError, RuntimeError):
+        if removal.exists() or removal.is_symlink():
+            if manifest.exists() or manifest.is_symlink():
+                raced = quarantine / (
+                    f".manifest.json.raced-{os.getpid()}-{os.urandom(8).hex()}"
+                )
+                manifest.rename(raced)
+            if moved_owned:
+                removal.rename(manifest)
+            else:
+                raced = quarantine / (
+                    f".manifest.json.raced-{os.getpid()}-{os.urandom(8).hex()}"
+                )
+                removal.rename(raced)
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                if hasattr(os, "O_NOFOLLOW"):
+                    flags |= os.O_NOFOLLOW
+                descriptor = os.open(manifest, flags, metadata.st_mode & 0o777)
+                try:
+                    view = memoryview(payload)
+                    while view:
+                        written = os.write(descriptor, view)
+                        if written <= 0:
+                            raise OSError("stale worktree manifest restore failed")
+                        view = view[written:]
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+        raise
+    removal.unlink()
 
 
 def _format_cli_error(exc: BaseException) -> str:

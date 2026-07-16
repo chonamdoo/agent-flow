@@ -13,6 +13,9 @@ import sys
 from pathlib import Path
 
 
+sys.dont_write_bytecode = True
+
+
 WRITE_TOOLS = {
     "apply_patch",
     "edit",
@@ -97,6 +100,15 @@ READ_ONLY_GIT_SUBCOMMANDS = {
 }
 SHELL_CWD_COMMANDS = {".", "cd", "chdir", "popd", "pushd", "source"}
 NESTED_SHELL_COMMANDS = {"bash", "dash", "ksh", "sh", "zsh"}
+SCRIPT_INTERPRETERS = {
+    "node",
+    "nodejs",
+    "python",
+    "python3",
+    "python3.12",
+    "python3.13",
+    "python3.14",
+}
 SHELL_CONTROL_WORDS = {
     "!",
     "case",
@@ -135,9 +147,34 @@ POSIX_SPECIAL_BUILTINS = {
     "trap",
     "unset",
 }
+GRADLE_PATH_OPTIONS = {
+    "-I",
+    "-b",
+    "-c",
+    "-g",
+    "-p",
+    "--build-file",
+    "--gradle-user-home",
+    "--include-build",
+    "--init-script",
+    "--project-cache-dir",
+    "--project-dir",
+    "--settings-file",
+}
+GRADLE_COMPACT_PATH_OPTIONS = ("-I", "-b", "-c", "-g", "-p")
+MANAGED_CONTEXT_FILENAMES = {"agents.md", "claude.md", ".gitignore"}
+GRADLE_OPTION_ENVIRONMENT = (
+    "GRADLE_OPTS",
+    "JDK_JAVA_OPTIONS",
+    "JAVA_TOOL_OPTIONS",
+    "_JAVA_OPTIONS",
+    "JAVA_OPTS",
+)
+MANAGED_MARKER_START = "<!-- agent-flow:start -->"
+MANAGED_MARKER_END = "<!-- agent-flow:end -->"
 
 
-def _load_boundary_module(leader_root: Path) -> tuple[type[Exception], object, object, object]:
+def _load_boundary_module(leader_root: Path) -> tuple[type[Exception], object, object, object, object]:
     runtime_root = leader_root / ".agent-flow" / "runtime" / "python"
     _verify_boundary_runtime(leader_root, runtime_root)
     if runtime_root.is_dir():
@@ -147,6 +184,7 @@ def _load_boundary_module(leader_root: Path) -> tuple[type[Exception], object, o
             WorkspaceBoundaryError,
             execution_identity_from_context,
             resolve_mutation_path,
+            resolve_execution_finalizer_workspace,
             select_execution_workspace,
         )
     except ImportError as exc:
@@ -156,6 +194,7 @@ def _load_boundary_module(leader_root: Path) -> tuple[type[Exception], object, o
         execution_identity_from_context,
         select_execution_workspace,
         resolve_mutation_path,
+        resolve_execution_finalizer_workspace,
     )
 
 
@@ -287,6 +326,246 @@ def _requested_paths(tool_input: dict[str, object]) -> list[str]:
     return list(dict.fromkeys(paths))
 
 
+def _managed_marker_block(content: str) -> str | None:
+    lines = content.splitlines(keepends=True)
+    starts = [
+        index
+        for index, line in enumerate(lines)
+        if line.rstrip("\r\n") == MANAGED_MARKER_START
+    ]
+    ends = [
+        index
+        for index, line in enumerate(lines)
+        if line.rstrip("\r\n") == MANAGED_MARKER_END
+    ]
+    if not starts and not ends:
+        return None
+    if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
+        raise ValueError("write boundary rejected: managed marker block is malformed")
+    return "".join(lines[starts[0] : ends[0] + 1])
+
+
+def _string_value(mapping: dict[str, object], *keys: str) -> str | None:
+    for key in keys:
+        value = mapping.get(key)
+        if isinstance(value, str):
+            return value
+    return None
+
+
+def _apply_declared_edit(content: str, edit: dict[str, object]) -> str:
+    old = _string_value(edit, "old_string", "oldStr")
+    new = _string_value(edit, "new_string", "newStr")
+    if old is None or new is None or not old:
+        raise ValueError(
+            "write boundary rejected: managed marker block edit cannot be verified"
+        )
+    occurrences = content.count(old)
+    replace_all = edit.get("replace_all") is True or edit.get("replaceAll") is True
+    if occurrences == 0 or (not replace_all and occurrences != 1):
+        raise ValueError(
+            "write boundary rejected: managed marker block edit is ambiguous"
+        )
+    return content.replace(old, new) if replace_all else content.replace(old, new, 1)
+
+
+def _resolve_declared_path(value: str, cwd: Path) -> Path:
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        candidate = cwd / candidate
+    return candidate.resolve(strict=False)
+
+
+def _apply_patch_hunks(content: str, body: list[str]) -> str:
+    index = 0
+    applied = False
+    while index < len(body):
+        line = body[index]
+        if line.startswith("*** Move to:"):
+            raise ValueError(
+                "write boundary rejected: managed marker block file cannot be moved"
+            )
+        if not line.startswith("@@"):
+            if line.strip() and line.strip() != "*** End of File":
+                raise ValueError(
+                    "write boundary rejected: managed marker block patch cannot be verified"
+                )
+            index += 1
+            continue
+        index += 1
+        old_lines: list[str] = []
+        new_lines: list[str] = []
+        while index < len(body) and not body[index].startswith("@@"):
+            patch_line = body[index]
+            if patch_line.strip() == "*** End of File":
+                index += 1
+                break
+            if patch_line.startswith("*** "):
+                raise ValueError(
+                    "write boundary rejected: managed marker block patch cannot be verified"
+                )
+            if patch_line in {"\n", "\r\n"}:
+                old_lines.append(patch_line)
+                new_lines.append(patch_line)
+                index += 1
+                continue
+            if not patch_line or patch_line[0] not in {" ", "+", "-"}:
+                raise ValueError(
+                    "write boundary rejected: managed marker block patch cannot be verified"
+                )
+            value = patch_line[1:]
+            if patch_line[0] in {" ", "-"}:
+                old_lines.append(value)
+            if patch_line[0] in {" ", "+"}:
+                new_lines.append(value)
+            index += 1
+        old = "".join(old_lines)
+        new = "".join(new_lines)
+        if not old or content.count(old) != 1:
+            raise ValueError(
+                "write boundary rejected: managed marker block patch is ambiguous"
+            )
+        content = content.replace(old, new, 1)
+        applied = True
+    if not applied:
+        raise ValueError(
+            "write boundary rejected: managed marker block patch cannot be verified"
+        )
+    return content
+
+
+def _content_after_patch(
+    content: str,
+    patch: str,
+    target: Path,
+    cwd: Path,
+) -> str:
+    lines = patch.splitlines(keepends=True)
+    header = re.compile(r"^\*\*\* (Add|Update|Delete) File: (.+?)\r?\n?$")
+    index = 0
+    matched = False
+    while index < len(lines):
+        match = header.match(lines[index])
+        if match is None:
+            index += 1
+            continue
+        operation, declared = match.groups()
+        index += 1
+        body_start = index
+        while index < len(lines) and header.match(lines[index]) is None and not lines[index].startswith("*** End Patch"):
+            index += 1
+        body = lines[body_start:index]
+        declared_target = _resolve_declared_path(declared.strip(), cwd)
+        move_targets = [
+            _resolve_declared_path(line.split(":", 1)[1].strip(), cwd)
+            for line in body
+            if line.startswith("*** Move to:")
+        ]
+        if declared_target != target and target not in move_targets:
+            continue
+        matched = True
+        if operation != "Update" or move_targets:
+            raise ValueError(
+                "write boundary rejected: managed marker block file cannot be replaced, deleted, or moved"
+            )
+        content = _apply_patch_hunks(content, body)
+    if not matched:
+        raise ValueError(
+            "write boundary rejected: managed marker block patch target cannot be verified"
+        )
+    return content
+
+
+def _verify_managed_marker_integrity(
+    tool_name: str,
+    tool_input: dict[str, object],
+    requested_path: str,
+    target: Path,
+    cwd: Path,
+) -> None:
+    if (
+        Path(requested_path).name.casefold() not in MANAGED_CONTEXT_FILENAMES
+        and target.name.casefold() not in MANAGED_CONTEXT_FILENAMES
+    ):
+        return
+    try:
+        current = target.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return
+    except (OSError, UnicodeError) as exc:
+        raise ValueError(
+            "write boundary rejected: managed marker block file cannot be read"
+        ) from exc
+    original_block = _managed_marker_block(current)
+    if original_block is None:
+        return
+    if tool_name == "apply_patch":
+        patch = _string_value(tool_input, "patch", "command")
+        if patch is None:
+            raise ValueError(
+                "write boundary rejected: managed marker block patch is missing"
+            )
+        proposed = _content_after_patch(current, patch, target, cwd)
+    elif tool_name == "write":
+        proposed = _string_value(tool_input, "content")
+        if proposed is None:
+            raise ValueError(
+                "write boundary rejected: managed marker block write cannot be verified"
+            )
+    elif tool_name in {"edit", "multiedit", "multi_edit"}:
+        edits = tool_input.get("edits")
+        if isinstance(edits, list):
+            proposed = current
+            outer_path = _string_value(
+                tool_input,
+                "file_path",
+                "filePath",
+                "filename",
+                "path",
+            )
+            outer_target = (
+                _resolve_declared_path(outer_path, cwd)
+                if outer_path is not None
+                else None
+            )
+            applied = False
+            for edit in edits:
+                if not isinstance(edit, dict):
+                    raise ValueError(
+                        "write boundary rejected: managed marker block edit cannot be verified"
+                    )
+                edit_path = _string_value(
+                    edit,
+                    "file_path",
+                    "filePath",
+                    "filename",
+                    "path",
+                )
+                if edit_path is not None:
+                    if _resolve_declared_path(edit_path, cwd) != target:
+                        continue
+                elif outer_target != target:
+                    raise ValueError(
+                        "write boundary rejected: managed marker block edit target cannot be verified"
+                    )
+                proposed = _apply_declared_edit(proposed, edit)
+                applied = True
+            if not applied:
+                raise ValueError(
+                    "write boundary rejected: managed marker block edit target cannot be verified"
+                )
+        else:
+            proposed = _apply_declared_edit(current, tool_input)
+    else:
+        raise ValueError(
+            "write boundary rejected: managed marker block mutation cannot be verified"
+        )
+    if _managed_marker_block(proposed) != original_block:
+        raise ValueError(
+            "write boundary rejected: managed marker block is immutable"
+        )
+
+
 def _split_shell_commands(command: str) -> list[tuple[str, str]]:
     commands: list[tuple[str, str]] = []
     start = 0
@@ -342,6 +621,132 @@ def _split_shell_segments(command: str) -> list[str]:
     return [segment for segment, _operator in _split_shell_commands(command)]
 
 
+def _has_active_shell_substitution(command: str) -> bool:
+    command = re.sub(r"\\\r?\n", "", command)
+    if _has_executable_zsh_glob(command) or _has_active_brace_expansion(command):
+        return True
+    quote = ""
+    escaped = False
+    index = 0
+    while index < len(command):
+        character = command[index]
+        if quote == "'":
+            if character == "'":
+                quote = ""
+            index += 1
+            continue
+        if escaped:
+            escaped = False
+            index += 1
+            continue
+        if character == "\\":
+            escaped = True
+            index += 1
+            continue
+        if character == "'" and not quote:
+            quote = "'"
+        elif character == '"':
+            quote = "" if quote == '"' else '"'
+        elif character == "`":
+            return True
+        elif character == "$" and command[index : index + 2] == "$(":
+            return True
+        elif (
+            not quote
+            and character in {"<", ">", "="}
+            and command[index : index + 2].endswith("(")
+        ):
+            return True
+        index += 1
+    return False
+
+
+def _has_executable_zsh_glob(command: str) -> bool:
+    masked: list[str] = []
+    quote = ""
+    escaped = False
+    for character in command:
+        if escaped:
+            masked.append(" ")
+            escaped = False
+            continue
+        if character == "\\" and quote != "'":
+            masked.append(" ")
+            escaped = True
+            continue
+        if quote:
+            masked.append(" ")
+            if character == quote:
+                quote = ""
+            continue
+        if character in {"'", '"'}:
+            masked.append(" ")
+            quote = character
+            continue
+        masked.append(character)
+    return re.search(
+        r"(?:[*?+@!]|\[[^\]\n]*\])\([^\n)]*?e(?:[:{])",
+        "".join(masked),
+    ) is not None
+
+
+def _has_active_brace_expansion(command: str) -> bool:
+    masked: list[str] = []
+    quote = ""
+    escaped = False
+    for character in command:
+        if escaped:
+            masked.append(" ")
+            escaped = False
+            continue
+        if character == "\\" and quote != "'":
+            masked.append(" ")
+            escaped = True
+            continue
+        if quote:
+            masked.append(" ")
+            if character == quote:
+                quote = ""
+            continue
+        if character in {"'", '"'}:
+            masked.append(" ")
+            quote = character
+            continue
+        masked.append(character)
+    return re.search(
+        r"(?<!\$)\{[^{}\n]*(?:,|\.\.)[^{}\n]*\}",
+        "".join(masked),
+    ) is not None
+
+
+def _has_shell_parameter_expansion(command: str) -> bool:
+    quote = ""
+    escaped = False
+    for index, character in enumerate(command):
+        if quote == "'":
+            if character == "'":
+                quote = ""
+            continue
+        if escaped:
+            escaped = False
+            continue
+        if character == "\\":
+            escaped = True
+            continue
+        if character == "'" and not quote:
+            quote = "'"
+            continue
+        if character == '"':
+            quote = "" if quote == '"' else '"'
+            continue
+        if character != "$":
+            continue
+        following = command[index + 1 : index + 2]
+        if following == "{" or re.match(r"[A-Za-z_0-9*@#?$!_-]", following):
+            return True
+    return False
+
+
 def _shell_redirection_paths(segment: str) -> list[str]:
     lexer = shlex.shlex(segment, posix=True, punctuation_chars=";&|<>\r\n")
     lexer.whitespace = " \t"
@@ -392,8 +797,6 @@ def _strip_shell_control_prefix(words: list[str]) -> list[str]:
         return words[words.index("{") + 1 :]
     if words and words[0] == "function" and "{" in words:
         return words[words.index("{") + 1 :]
-    if ")" in words:
-        words = words[words.index(")") + 1 :]
     while words and (
         words[0] in {"(", ")", "{", "}"} or words[0] in SHELL_CONTROL_WORDS
     ):
@@ -408,10 +811,42 @@ def _shell_assignments(
     assignments: dict[str, str] = {}
     prefix_length = len(words) - len(unwrapped)
     for word in words[:prefix_length]:
-        match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)=(.*)", word)
+        match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)(\+?=)(.*)", word)
         if match is not None:
-            assignments[match.group(1)] = match.group(2)
+            name, operator, value = match.groups()
+            assignments[name] = (
+                f"{os.environ.get(name, '')}{value}" if operator == "+=" else value
+            )
     return assignments
+
+
+def _assignment_operations(words: list[str]) -> list[tuple[str, str, str]]:
+    operations: list[tuple[str, str, str]] = []
+    for word in words:
+        match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)(\+?=)(.*)", word)
+        if match is not None:
+            operations.append(match.groups())
+    return operations
+
+
+def _updated_environment_values(
+    current: dict[str, set[str]],
+    operations: list[tuple[str, str, str]],
+    *,
+    retain_previous: bool,
+) -> dict[str, set[str]]:
+    updated = {name: set(values) for name, values in current.items()}
+    for name, operator, value in operations:
+        if name not in updated:
+            continue
+        previous = updated[name] or {""}
+        values = (
+            {f"{prefix}{value}" for prefix in previous}
+            if operator == "+="
+            else {value}
+        )
+        updated[name] = previous | values if retain_previous else values
+    return updated
 
 
 def _env_chdir_target(words: list[str], unwrapped: list[str]) -> tuple[bool, str | None]:
@@ -895,6 +1330,77 @@ def _resolve_shell_path(candidate: str, base_dir: Path) -> Path:
     return requested.resolve(strict=False)
 
 
+def _gradle_command_paths(
+    command_token: str,
+    arguments: list[str],
+    environment_values: dict[str, set[str]],
+) -> tuple[list[str], bool]:
+    paths = [command_token]
+    unresolved = "/" not in command_token and "\\" not in command_token
+    option_groups = [(arguments, False)]
+    for variable in GRADLE_OPTION_ENVIRONMENT:
+        for value in environment_values.get(variable, set()):
+            if not value:
+                continue
+            if re.search(r"(?<!\\)[$`]", value):
+                unresolved = True
+                continue
+            try:
+                option_groups.append((shlex.split(value), variable != "GRADLE_OPTS"))
+            except ValueError:
+                unresolved = True
+    for options, java_options in option_groups:
+        index = 0
+        while index < len(options):
+            argument = options[index]
+            if java_options:
+                for prefix in ("-javaagent:", "-agentpath:"):
+                    if argument.startswith(prefix):
+                        agent_path = argument[len(prefix) :].split("=", 1)[0]
+                        if agent_path:
+                            paths.append(agent_path)
+                        else:
+                            unresolved = True
+                        break
+            if argument in GRADLE_PATH_OPTIONS:
+                if index + 1 >= len(options) or not options[index + 1]:
+                    unresolved = True
+                else:
+                    paths.append(options[index + 1])
+                    index += 1
+            else:
+                matched = False
+                for option in sorted(GRADLE_PATH_OPTIONS, key=len, reverse=True):
+                    prefix = f"{option}="
+                    if argument.startswith(prefix):
+                        value = argument[len(prefix) :]
+                        if value:
+                            paths.append(value)
+                        else:
+                            unresolved = True
+                        matched = True
+                        break
+                if not matched:
+                    for option in GRADLE_COMPACT_PATH_OPTIONS:
+                        if argument.startswith(option) and argument != option:
+                            paths.append(argument[len(option) :])
+                            matched = True
+                            break
+                if not matched and argument.startswith(("-P", "-D")) and "=" in argument:
+                    value = argument.split("=", 1)[1]
+                    if _looks_like_path(value):
+                        paths.append(value)
+            index += 1
+    for gradle_home in environment_values.get("GRADLE_USER_HOME", set()):
+        if not gradle_home:
+            continue
+        if re.search(r"(?<!\\)[$`]", gradle_home):
+            unresolved = True
+        else:
+            paths.append(gradle_home)
+    return paths, unresolved
+
+
 def _shell_mutation_paths(
     command: str,
     *,
@@ -914,6 +1420,10 @@ def _shell_mutation_paths(
     initial_cwd = base_dir.resolve(strict=False) if base_dir is not None else None
     states: set[tuple[Path | None, bool, bool]] = {
         (initial_cwd, True, bool(os.environ.get("CDPATH")))
+    }
+    gradle_environment = {
+        name: {os.environ.get(name, "")}
+        for name in (*GRADLE_OPTION_ENVIRONMENT, "GRADLE_USER_HOME")
     }
     incoming_operator = ""
     for segment, outgoing_operator in _split_shell_commands(command):
@@ -936,6 +1446,11 @@ def _shell_mutation_paths(
         command_words = _strip_shell_control_prefix(
             _without_shell_redirections(segment_words)
         )
+        segment_unsafe = _has_active_shell_substitution(segment)
+        segment_parameter_expansion = _has_shell_parameter_expansion(segment)
+        if segment_unsafe:
+            mutating_segment = True
+            dynamic_target = True
         wrapper_unwrapped = _unwrap_shell_command(command_words)
         assignments = _shell_assignments(command_words, wrapper_unwrapped)
         has_env_chdir, env_chdir_target = _env_chdir_target(
@@ -993,6 +1508,11 @@ def _shell_mutation_paths(
                 }
             mutating_segment = True
         if not unwrapped:
+            gradle_environment = _updated_environment_values(
+                gradle_environment,
+                _assignment_operations(command_words),
+                retain_previous=True,
+            )
             cdpath_value = assignments.get("CDPATH")
             assignment_outcomes = {
                 (
@@ -1086,11 +1606,11 @@ def _shell_mutation_paths(
         )
         sed_mutating, sed_paths = _sed_in_place_paths(arguments) if command_name == "sed" else (False, [])
         perl_mutating, perl_paths = _perl_in_place_paths(arguments) if command_name == "perl" else (False, [])
-        segment_unsafe = re.search(r"(?<!\\)(?:\$\(|`|<\(|>\()", segment) is not None
         segment_inline = _has_inline_mutation(segment)
         segment_mutating_options = (
             sed_mutating
             or perl_mutating
+            or command_name == "xargs"
             or (
                 command_name == "find"
                 and bool(re.search(r"(?:^|\s)-(?:delete|exec|execdir)\b", segment))
@@ -1121,7 +1641,7 @@ def _shell_mutation_paths(
         )
         if not segment_read_only:
             mutating_segment = True
-            dynamic_target = dynamic_target or segment_unsafe
+            dynamic_target = dynamic_target or segment_unsafe or command_name == "xargs"
             segment_paths: list[str] = list(declared_paths)
             positional = [argument for argument in arguments if not argument.startswith("-")]
             if git_command is not None:
@@ -1135,6 +1655,22 @@ def _shell_mutation_paths(
                     segment_paths.append(positional[-1])
             elif command_name in {"ln", "mv"}:
                 segment_paths.extend(positional)
+            elif command_name in {"gradle", "gradlew"}:
+                prefix_operations = _assignment_operations(
+                    command_words[: len(command_words) - len(wrapper_unwrapped)]
+                )
+                effective_gradle_environment = _updated_environment_values(
+                    gradle_environment,
+                    prefix_operations,
+                    retain_previous=False,
+                )
+                gradle_paths, gradle_unresolved = _gradle_command_paths(
+                    unwrapped[0],
+                    arguments,
+                    effective_gradle_environment,
+                )
+                segment_paths.extend(gradle_paths)
+                dynamic_target = dynamic_target or gradle_unresolved
             elif command_name in SHELL_MUTATORS or segment_mutating_options:
                 if command_name == "dd":
                     segment_paths.extend(
@@ -1169,11 +1705,49 @@ def _shell_mutation_paths(
             )
             dynamic_target = (
                 dynamic_target
+                or segment_parameter_expansion
                 or unresolved
                 or _extend_shell_paths(paths, materialized)
             )
 
         persists = outgoing_operator not in {"|", "|&", "&"}
+        if persists and (
+            not unwrapped
+            or (
+                shell_builtin_token
+                and command_name in {
+                    "declare",
+                    "export",
+                    "readonly",
+                    "typeset",
+                }
+            )
+        ):
+            operation_words = (
+                command_words[: len(command_words) - len(wrapper_unwrapped)]
+                if not unwrapped
+                else arguments
+            )
+            gradle_environment = _updated_environment_values(
+                gradle_environment,
+                _assignment_operations(operation_words),
+                retain_previous=True,
+            )
+        if persists and shell_builtin_token and command_name == "unset":
+            for name in arguments:
+                if name in gradle_environment:
+                    gradle_environment[name].add("")
+        if persists and shell_builtin_token and command_name == "printf":
+            for index, argument in enumerate(arguments):
+                if argument == "-v" and index + 1 < len(arguments):
+                    name = arguments[index + 1]
+                    if name in gradle_environment:
+                        gradle_environment[name].add("$AGENT_FLOW_UNRESOLVED")
+        if persists and shell_builtin_token and command_name == "read":
+            for argument in arguments:
+                name = argument.rsplit("?", 1)[0]
+                if name in gradle_environment:
+                    gradle_environment[name].add("$AGENT_FLOW_UNRESOLVED")
         outcomes = set()
         if shell_builtin_token and command_name in {"cd", "chdir"}:
             local_cdpath = assignments.get("CDPATH")
@@ -1318,7 +1892,7 @@ def _unwrap_shell_command(words: list[str]) -> list[str]:
     index = 0
     while index < len(words):
         word = words[index]
-        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", word):
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*\+?=.*", word):
             index += 1
             continue
         if word == "command":
@@ -1349,7 +1923,7 @@ def _unwrap_shell_command(words: list[str]) -> list[str]:
         index += 1
         while index < len(words):
             option = words[index]
-            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", option):
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*\+?=.*", option):
                 index += 1
             elif option in {"-i", "--ignore-environment"}:
                 index += 1
@@ -1411,44 +1985,275 @@ def _git_command_is_read_only(command: tuple[str, str, tuple[str, ...]]) -> bool
     )
 
 
-def _requests_agent_flow_launcher(command: str) -> bool:
-    for segment in _split_shell_segments(command):
+def _requests_agent_flow_launcher(
+    command: str,
+    cwd: Path,
+    *,
+    _depth: int = 0,
+    _search_path: str | None = None,
+) -> bool:
+    if _depth > 8:
+        return True
+    normalized = re.sub(r"\\\r?\n", "", command)
+    for segment in _split_shell_segments(normalized):
         try:
             words = shlex.split(segment)
         except ValueError:
             return True
-        while words and (
-            words[0] == "command"
-            or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0])
+        if _launcher_words_request_agent_flow(
+            words,
+            cwd=cwd,
+            _depth=_depth,
+            _search_path=_search_path,
         ):
-            words = words[1:]
-        if words and Path(words[0]).name.lower() == "env":
-            words = words[1:]
-            while words and (
-                words[0].startswith("-")
-                or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0])
-            ):
-                words = words[1:]
-        if words and Path(words[0]).name.lower() in {"agent-flow", "agent-flow-kit"}:
             return True
     return False
 
 
+def _launcher_words_request_agent_flow(
+    words: list[str],
+    *,
+    cwd: Path,
+    _depth: int,
+    _search_path: str | None = None,
+) -> bool:
+    search_path = os.environ.get("PATH", os.defpath) if _search_path is None else _search_path
+    index = 0
+    while index < len(words) and (
+        words[index] in {"command", "builtin", "exec"}
+        or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*\+?=.*", words[index])
+    ):
+        wrapper = words[index]
+        index += 1
+        assignment = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)(\+?)=(.*)", wrapper)
+        if assignment and assignment.group(1) == "PATH":
+            if re.search(r"(?<!\\)[$`]", assignment.group(3)):
+                return True
+            search_path = (
+                f"{search_path}{assignment.group(3)}"
+                if assignment.group(2)
+                else assignment.group(3)
+            )
+            continue
+        if wrapper in {"command", "builtin", "exec"}:
+            while index < len(words) and words[index].startswith("-"):
+                option = words[index]
+                index += 1
+                if option == "--":
+                    break
+                if wrapper == "exec" and option == "-a" and index < len(words):
+                    index += 1
+    words = words[index:]
+    if not words:
+        return False
+    command_name = Path(words[0]).name.lower()
+    resolved_interpreter = _resolved_script_interpreter_name(words[0], cwd, search_path)
+    if command_name in {"agent-flow", "agent-flow-kit"} or resolved_interpreter in {
+        "agent-flow",
+        "agent-flow-kit",
+        "agent-flow-kit.mjs",
+    }:
+        return True
+    if command_name == "env":
+        index = 1
+        command_cwd = cwd
+        while index < len(words):
+            word = words[index]
+            assignment = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)(\+?)=(.*)", word)
+            if assignment:
+                if assignment.group(1) == "PATH":
+                    if re.search(r"(?<!\\)[$`]", assignment.group(3)):
+                        return True
+                    search_path = (
+                        f"{search_path}{assignment.group(3)}"
+                        if assignment.group(2)
+                        else assignment.group(3)
+                    )
+                index += 1
+                continue
+            if word in {"-S", "--split-string"}:
+                if index + 1 >= len(words):
+                    return True
+                try:
+                    split_words = shlex.split(words[index + 1])
+                except ValueError:
+                    return True
+                return _launcher_words_request_agent_flow(
+                    [*split_words, *words[index + 2 :]],
+                    cwd=command_cwd,
+                    _depth=_depth + 1,
+                    _search_path=search_path,
+                )
+            if word.startswith("--split-string="):
+                try:
+                    split_words = shlex.split(word.split("=", 1)[1])
+                except ValueError:
+                    return True
+                return _launcher_words_request_agent_flow(
+                    [*split_words, *words[index + 1 :]],
+                    cwd=command_cwd,
+                    _depth=_depth + 1,
+                    _search_path=search_path,
+                )
+            if word in {
+                "-C",
+                "-P",
+                "-u",
+                "--argv0",
+                "--chdir",
+                "--unset",
+            }:
+                if index + 1 >= len(words):
+                    return True
+                value = words[index + 1]
+                if word == "-P":
+                    if re.search(r"(?<!\\)[$`]", value):
+                        return True
+                    search_path = value
+                if word in {"-C", "--chdir"}:
+                    if value.startswith("~") or re.search(r"(?<!\\)[$`]", value):
+                        return True
+                    command_cwd = _resolve_shell_path(value, command_cwd)
+                if word in {"-u", "--unset"} and value == "PATH":
+                    search_path = os.defpath
+                index += 2
+                continue
+            if word in {"-i", "--ignore-environment"}:
+                search_path = os.defpath
+                index += 1
+                continue
+            if word.startswith("--unset="):
+                if word.split("=", 1)[1] == "PATH":
+                    search_path = os.defpath
+                index += 1
+                continue
+            if word.startswith("--chdir="):
+                value = word.split("=", 1)[1]
+                if not value or value.startswith("~") or re.search(r"(?<!\\)[$`]", value):
+                    return True
+                command_cwd = _resolve_shell_path(value, command_cwd)
+                index += 1
+                continue
+            if word.startswith("-C") and word != "-C":
+                value = word[2:]
+                if not value or value.startswith("~") or re.search(r"(?<!\\)[$`]", value):
+                    return True
+                command_cwd = _resolve_shell_path(value, command_cwd)
+                index += 1
+                continue
+            if word == "--":
+                index += 1
+                break
+            if word.startswith("-"):
+                index += 1
+                continue
+            break
+        return _launcher_words_request_agent_flow(
+            words[index:],
+            cwd=command_cwd,
+            _depth=_depth + 1,
+            _search_path=search_path,
+        )
+    effective_interpreter = resolved_interpreter or command_name
+    if effective_interpreter in NESTED_SHELL_COMMANDS:
+        nested = _shell_c_command(words[1:])
+        if nested is not None:
+            return _requests_agent_flow_launcher(
+                nested,
+                cwd,
+                _depth=_depth + 1,
+                _search_path=search_path,
+            )
+        return any(_word_requests_agent_flow_runtime(word) for word in words[1:])
+    if effective_interpreter in SCRIPT_INTERPRETERS or re.fullmatch(
+        r"python(?:3(?:\.\d+)?)?",
+        effective_interpreter,
+    ):
+        return any(_word_requests_agent_flow_runtime(word) for word in words[1:])
+    if command_name == "eval":
+        arguments = words[1:]
+        if arguments[:1] == ["--"]:
+            arguments = arguments[1:]
+        return bool(arguments) and _requests_agent_flow_launcher(
+            " ".join(arguments),
+            cwd,
+            _depth=_depth + 1,
+            _search_path=search_path,
+        )
+    return False
+
+
+def _resolved_script_interpreter_name(
+    command_token: str,
+    cwd: Path,
+    search_path: str,
+) -> str | None:
+    try:
+        if "/" in command_token or "\\" in command_token:
+            candidate = Path(command_token)
+            if not candidate.is_absolute():
+                candidate = cwd / candidate
+            resolved = candidate.resolve(strict=True)
+        else:
+            found = shutil.which(command_token, path=search_path)
+            if not found:
+                return None
+            resolved = Path(found).resolve(strict=True)
+    except OSError:
+        return None
+    name = resolved.name.lower()
+    if name in {
+        "agent-flow",
+        "agent-flow-kit",
+        "agent-flow-kit.mjs",
+    }:
+        return name
+    if name in NESTED_SHELL_COMMANDS or name in SCRIPT_INTERPRETERS:
+        return name
+    if re.fullmatch(r"python(?:3(?:\.\d+)?)?", name):
+        return name
+    return None
+
+
+def _word_requests_agent_flow_runtime(word: str) -> bool:
+    normalized = word.replace("\\", "/").rstrip("/")
+    basename = Path(normalized).name.lower()
+    return basename in {"agent-flow", "agent-flow-kit", "agent-flow-kit.mjs"} or (
+        "/.agent-flow/runtime/" in f"/{normalized.lstrip('/')}"
+        and basename in {"agent-flow", "agent-flow-kit", "agent-flow-kit.mjs"}
+    )
+
+
+def _normalized_worktree_name(value: str) -> str | None:
+    lowered = value.strip().lower()
+    safe = re.sub(r"[^a-z0-9._-]+", "-", lowered).strip("-")
+    if not safe or safe.startswith(".") or ".." in safe:
+        if not any(character.isalnum() for character in lowered):
+            return None
+        safe = f"task-{hashlib.sha1(lowered.encode('utf-8')).hexdigest()[:8]}"
+    return safe if safe.startswith("feat-") else f"feat-{safe}"
+
+
+def _requested_worktree_removal(command: str) -> str | None:
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return None
+    if len(words) != 5 or Path(words[0]).name.lower() not in {"agent-flow", "agent-flow-kit"}:
+        return None
+    if words[1:4] != ["worktree", "remove", "--name"]:
+        return None
+    return _normalized_worktree_name(words[4])
+
+
 def _is_agent_flow_launcher(command: str, cwd: Path, leader_root: Path, pinned_root: Path) -> bool:
-    if re.search(r"(?<!\\)(?:\$\(|`|<\(|>\(|[\r\n;&|]|\d*>>?|&>)", command):
+    if _has_active_shell_substitution(command) or re.search(r"[\r\n;&|]|\d*>>?|&>", command):
         return False
     if any(
-        os.environ.get(name)
-        for name in (
-            "NODE_OPTIONS",
-            "NODE_PATH",
-            "BASH_ENV",
-            "ENV",
-            "LD_PRELOAD",
-            "LD_LIBRARY_PATH",
-            "DYLD_INSERT_LIBRARIES",
-            "DYLD_LIBRARY_PATH",
-        )
+        value
+        for name, value in os.environ.items()
+        if name in {"NODE_OPTIONS", "NODE_PATH", "BASH_ENV", "ENV"}
+        or name.startswith(("LD_", "DYLD_"))
     ):
         return False
     try:
@@ -1457,7 +2262,7 @@ def _is_agent_flow_launcher(command: str, cwd: Path, leader_root: Path, pinned_r
         return False
     if (
         not words
-        or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0])
+        or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*\+?=.*", words[0])
         or Path(words[0]).name.lower() == "env"
     ):
         return False
@@ -1466,10 +2271,38 @@ def _is_agent_flow_launcher(command: str, cwd: Path, leader_root: Path, pinned_r
     arguments = words[1:]
     if command_name not in {"agent-flow", "agent-flow-kit"} or not arguments:
         return False
-    if arguments[0] not in {"status", "continue", "run", "gate", "gates", "architecture-lint"}:
+    trusted_subcommands = {
+        "status",
+        "continue",
+        "run",
+        "gate",
+        "gates",
+        "architecture-lint",
+        "install",
+        "worktree",
+    }
+    if arguments[0] not in trusted_subcommands:
         return False
     if arguments[:2] == ["run", "install"]:
         return False
+    if arguments[0] == "install":
+        try:
+            if cwd.resolve(strict=True) != leader_root.resolve(strict=True):
+                return False
+        except OSError:
+            return False
+        if arguments[1:] not in ([], ["--force-managed"]):
+            return False
+    if arguments[0] == "worktree":
+        requested_name = _requested_worktree_removal(command)
+        try:
+            leader = leader_root.resolve(strict=True)
+            current = cwd.resolve(strict=True)
+            pinned_name = pinned_root.name
+        except OSError:
+            return False
+        if requested_name is None or current != leader or requested_name != pinned_name:
+            return False
     if "/" in command_token or "\\" in command_token:
         candidate = (cwd / command_token).resolve(strict=True) if not Path(command_token).is_absolute() else Path(command_token).resolve(strict=True)
     else:
@@ -1478,6 +2311,12 @@ def _is_agent_flow_launcher(command: str, cwd: Path, leader_root: Path, pinned_r
             return False
         candidate = Path(found).resolve(strict=True)
     local_launcher = leader_root / ".agent-flow" / "bin" / "agent-flow"
+    if arguments[0] == "install":
+        requested_launcher = Path(command_token)
+        if not requested_launcher.is_absolute():
+            requested_launcher = cwd / requested_launcher
+        if Path(os.path.abspath(requested_launcher)) != Path(os.path.abspath(local_launcher)):
+            return False
     if local_launcher.exists() and candidate == local_launcher.resolve(strict=True):
         kit_path = leader_root / ".agent-flow" / "kit.json"
         try:
@@ -1490,19 +2329,28 @@ def _is_agent_flow_launcher(command: str, cwd: Path, leader_root: Path, pinned_r
                         return False
             kit = json.loads(kit_path.read_text(encoding="utf-8"))
             contract = kit["project_runtime_contract"]
+            commitment = _project_runtime_contract_commitment(contract)
             launcher_contract = contract["launcher"]
             runtime_contract = contract["runtime"]
             node_contract = contract["node"]
             python_contract = contract["python"]
+            embedded = EXPECTED_PROJECT_RUNTIME_CONTRACT_SHA256
+            embedded_python = EXPECTED_PYTHON_RUNTIME_INTEGRITY
+            embedded_authority = not embedded.startswith("__AGENT_FLOW_")
             if (
                 contract["version"] != 3
                 or kit["project_runtime_contract_commitment_version"] != 1
-                or kit["project_runtime_contract_commitment"] != _project_runtime_contract_commitment(contract)
+                or kit["project_runtime_contract_commitment"] != commitment
                 or launcher_contract["path"] != ".agent-flow/bin/agent-flow"
                 or runtime_contract["path"] != ".agent-flow/runtime/node"
                 or Path(node_contract["path"]).resolve(strict=True) != Path(node_contract["path"])
                 or not Path(python_contract["path"]).is_absolute()
                 or Path(python_contract["path"]).resolve(strict=True) != Path(python_contract["resolved_path"])
+                or (embedded_authority and embedded != commitment)
+                or (
+                    not embedded_python.startswith("__AGENT_FLOW_")
+                    and embedded_python != contract["python_runtime"]["integrity"]
+                )
             ):
                 return False
             if local_launcher.is_symlink() or local_launcher.stat().st_nlink != 1:
@@ -1616,12 +2464,14 @@ def _project_runtime_contract_commitment(contract: dict[str, object]) -> str:
         contract["node"]["inode"],
         contract["node"]["links"],
         contract["node"]["mode"],
+        json.dumps(contract["node"].get("dependencies", []), ensure_ascii=False, separators=(",", ":"), sort_keys=True),
         contract["git"]["path"],
         contract["git"]["sha256"],
         contract["git"]["device"],
         contract["git"]["inode"],
         contract["git"]["links"],
         contract["git"]["mode"],
+        json.dumps(contract["git"].get("dependencies", []), ensure_ascii=False, separators=(",", ":"), sort_keys=True),
         contract["python"]["path"],
         contract["python"]["resolved_path"],
         contract["python"]["sha256"],
@@ -1629,6 +2479,7 @@ def _project_runtime_contract_commitment(contract: dict[str, object]) -> str:
         contract["python"]["inode"],
         contract["python"]["links"],
         contract["python"]["mode"],
+        json.dumps(contract["python"].get("dependencies", []), ensure_ascii=False, separators=(",", ":"), sort_keys=True),
         contract["runtime"]["path"],
         contract["runtime"]["integrity"],
         contract["python_runtime"]["path"],
@@ -1643,7 +2494,7 @@ def _verify_executable_contract(contract: dict[str, object], path_key: str = "pa
     candidate = Path(str(contract[path_key]))
     resolved = candidate.resolve(strict=True)
     metadata = resolved.lstat()
-    return (
+    executable_matches = (
         candidate.is_absolute()
         and not resolved.is_symlink()
         and resolved.is_file()
@@ -1654,6 +2505,48 @@ def _verify_executable_contract(contract: dict[str, object], path_key: str = "pa
         and (str(metadata.st_nlink) != "1" or str(metadata.st_ino) == contract["inode"])
         and stat.S_IMODE(metadata.st_mode) == contract["mode"]
     )
+    if not executable_matches:
+        return False
+    dependency_entries = contract.get("dependencies", [])
+    if not isinstance(dependency_entries, list):
+        return False
+    expected_dependencies = {
+        str(entry.get("name")): entry
+        for entry in dependency_entries
+        if isinstance(entry, dict)
+    }
+    if len(expected_dependencies) != len(dependency_entries):
+        return False
+    for name, expected in expected_dependencies.items():
+        if Path(str(expected.get("path", ""))).name != name:
+            return False
+        load_paths = expected.get("load_paths", [expected.get("path")])
+        if (
+            not isinstance(load_paths, list)
+            or not load_paths
+            or any(
+                not isinstance(load_path, str)
+                or not Path(load_path).is_absolute()
+                or str(Path(load_path).resolve(strict=True)) != expected.get("path")
+                for load_path in load_paths
+            )
+        ):
+            return False
+        dependency = Path(str(expected["path"])).resolve(strict=True)
+        dependency_metadata = dependency.lstat()
+        if not (
+            str(dependency) == expected["path"]
+            and dependency.is_file()
+            and not dependency.is_symlink()
+            and dependency_metadata.st_mode & 0o022 == 0
+            and hashlib.sha256(dependency.read_bytes()).hexdigest() == expected["sha256"]
+            and str(dependency_metadata.st_dev) == expected["device"]
+            and str(dependency_metadata.st_ino) == expected["inode"]
+            and str(dependency_metadata.st_nlink) == expected["links"]
+            and stat.S_IMODE(dependency_metadata.st_mode) == expected["mode"]
+        ):
+            return False
+    return True
 
 
 def _legacy_runtime_tree_hash(root: Path) -> str:
@@ -1768,6 +2661,8 @@ def main() -> int:
         command = ""
         paths: list[str] = []
         unresolved_shell_target = False
+        requested_launcher = False
+        requested_worktree_removal: str | None = None
         if tool_name in SHELL_TOOLS:
             command_value = tool_input.get("command")
             if not isinstance(command_value, str) or not command_value.strip():
@@ -1779,21 +2674,46 @@ def main() -> int:
             )
             if not mutating:
                 return 0
-            if _is_agent_flow_launcher(command, cwd, leader_root, leader_root):
+            requested_launcher = _requests_agent_flow_launcher(command, cwd)
+            requested_worktree_removal = _requested_worktree_removal(command)
+            if (
+                requested_worktree_removal is None
+                and _is_agent_flow_launcher(command, cwd, leader_root, leader_root)
+            ):
                 if host == "claude":
                     _forward_claude_execution_identity(payload, tool_input, command)
                 elif host == "omp":
                     _required_hook_execution_id(payload)
                 return 0
-            if _requests_agent_flow_launcher(command):
+            if requested_launcher and requested_worktree_removal is None:
                 raise ValueError("write boundary rejected: agent-flow launcher is not trusted")
-        boundary_error, resolve_execution, select_workspace, resolve_path = _load_boundary_module(leader_root)
+        (
+            boundary_error,
+            resolve_execution,
+            select_workspace,
+            resolve_path,
+            resolve_finalizer_workspace,
+        ) = _load_boundary_module(leader_root)
         execution = resolve_execution(payload, os.environ, host_hint=host)
-        active = select_workspace(leader_root, execution)
-        if active is None:
-            return 0
+        if requested_worktree_removal is not None:
+            try:
+                active = resolve_finalizer_workspace(
+                    leader_root,
+                    execution,
+                    requested_worktree_removal,
+                )
+            except boundary_error as exc:
+                raise ValueError(
+                    "write boundary rejected: worktree cleanup requires authenticated completed run ownership"
+                ) from exc
+        else:
+            active = select_workspace(leader_root, execution)
+            if active is None:
+                return 0
         if tool_name in SHELL_TOOLS:
-            pinned_root = Path(active.identity.workspace_root).resolve(strict=True)
+            pinned_root = Path(active.identity.workspace_root)
+            if requested_worktree_removal is None:
+                pinned_root = pinned_root.resolve(strict=True)
             leader_root = _leader_root(cwd).resolve(strict=True)
             if _is_agent_flow_launcher(command, cwd, leader_root, pinned_root):
                 if host == "claude":
@@ -1801,6 +2721,8 @@ def main() -> int:
                 elif host == "omp":
                     _required_hook_execution_id(payload)
                 return 0
+            if requested_launcher:
+                raise ValueError("write boundary rejected: agent-flow launcher is not trusted")
             current_root = cwd.resolve(strict=True)
             if current_root != pinned_root and pinned_root not in current_root.parents:
                 raise boundary_error(
@@ -1824,7 +2746,20 @@ def main() -> int:
             raise boundary_error("write boundary rejected: write tool did not declare a target path")
         phase = str(payload.get("phase") or "unknown")
         for requested in paths:
-            resolve_path(active.identity, requested, base_dir=cwd, host=host, phase=phase)
+            target = resolve_path(
+                active.identity,
+                requested,
+                base_dir=cwd,
+                host=host,
+                phase=phase,
+            )
+            _verify_managed_marker_integrity(
+                tool_name,
+                tool_input,
+                requested,
+                target,
+                cwd,
+            )
         return 0
     except Exception as exc:
         print(f"BLOCKED: {exc}", file=sys.stderr)

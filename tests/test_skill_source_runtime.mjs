@@ -70,6 +70,7 @@ test("generic installs stay filtered and automatic external skills are opt in", 
 test("platform install selection covers node android react native python generic and explicit skills", () => {
   const cases = [
     ["node", ["typescript-development-guide"], ["android-code-review"]],
+    ["nextjs", ["react-development-guide", "typescript-development-guide", "react-clean-architecture"], ["android-code-review"]],
     ["android", ["android-code-review", "android-clean-architecture"], ["react-native-development-guide"]],
     ["react-native", ["react-native-development-guide", "typescript-development-guide"], ["android-code-review"]],
     ["python", ["python-development-guide", "python-api-clean-architecture"], ["android-code-review"]],
@@ -228,6 +229,38 @@ test("automatic invalid active source falls back with authenticated shared bytes
 
   assert.equal(plan.entries[0].source_kind, "shared");
   assert.equal(plan.entries[0].source_path, shared);
+});
+
+test("regular dependency promotion propagates through an already resolved automatic skill", () => {
+  const root = tempRoot();
+  const home = path.join(root, "home");
+  const project = path.join(root, "project");
+  const snapshots = path.join(project, ".agent-flow", "skills");
+  writeSkill(
+    hostSkills(home, "codex"),
+    "automatic-a",
+    "dependencies: [collision-c]\n",
+  );
+  writeSkill(
+    path.join(project, "skills"),
+    "explicit-z",
+    "dependencies: [automatic-a]\n",
+  );
+  writeSkill(snapshots, "collision-c", "", "unmanaged user bytes");
+
+  assert.throws(
+    () => resolveProfileSkillSources({
+      skillNames: new Set(["automatic-a", "collision-c", "explicit-z"]),
+      automaticSkillNames: ["automatic-a", "collision-c"],
+      explicitSkillNames: ["explicit-z"],
+      kitRoot: KIT_ROOT,
+      projectRoot: project,
+      projectSkillsRoot: snapshots,
+      home,
+      activeHost: "codex",
+    }),
+    /untrusted existing skill snapshot has no authenticated source: collision-c/,
+  );
 });
 
 test("testing localization remains explicit only after merge discovery dependency and runtime closure", () => {

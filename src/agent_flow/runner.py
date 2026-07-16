@@ -40,9 +40,11 @@ from agent_flow.adapters.auto import detect_adapter
 from agent_flow.artifact import (
     create_run,
     mark_inactive,
+    next_run_id,
     read_meta,
     write_meta,
 )
+from agent_flow.core.artifacts import gate_fingerprint_matches_current
 from agent_flow.cli_detect import detect_available_clis
 from agent_flow.core.commands import run_safe_command
 from agent_flow.core.phase_contract import (
@@ -67,6 +69,7 @@ from agent_flow.core.workspace_boundary import (
     execution_identity_from_dict,
     leader_root_for_identity,
     mutation_paths_since,
+    record_workspace_finalizer,
     release_workspace_start_claim,
     release_execution_binding,
     validate_workspace_identity,
@@ -171,13 +174,17 @@ class Runner:
 
     def run(self, mode: ResumeMode, task: str = "") -> None:
         if mode == ResumeMode.START:
+            pending_run_id = next_run_id(self.state_root)
             captured_identity = (
                 capture_workspace_identity(self.project_root)
                 if (self.project_root / ".git").exists()
                 else None
             )
             claim = (
-                acquire_workspace_start_claim(captured_identity)
+                acquire_workspace_start_claim(
+                    captured_identity,
+                    run_id=pending_run_id,
+                )
                 if captured_identity is not None
                 else None
             )
@@ -189,6 +196,7 @@ class Runner:
                     self.workflow_name,
                     task,
                     architecture=self.architecture,
+                    run_id=pending_run_id,
                 )
                 self._pin_workspace_identity(captured_identity)
             except Exception:
@@ -409,8 +417,34 @@ class Runner:
                 return
 
         report_path = write_run_report(self.run_dir)
-        self._release_execution_binding()
-        mark_inactive(self.run_dir)
+        meta = read_meta(self.run_dir)
+        completed_at = datetime.now(timezone.utc).isoformat()
+        completion_claim = (
+            acquire_workspace_start_claim(
+                self._workspace_identity,
+                run_id=f"finalize:{self.run_dir.name}",
+            )
+            if hasattr(self, "_execution_identity")
+            and hasattr(self, "_workspace_identity")
+            else None
+        )
+        try:
+            if completion_claim is not None:
+                record_workspace_finalizer(
+                    self._workspace_identity,
+                    self._execution_identity,
+                    self.run_dir,
+                    run_id=str(meta.get("run_id") or self.run_dir.name),
+                    completed_at=completed_at,
+                )
+            meta["status"] = "complete"
+            meta["completed_at"] = completed_at
+            write_meta(self.run_dir, meta)
+            self._release_execution_binding()
+            mark_inactive(self.run_dir)
+        finally:
+            if completion_claim is not None:
+                release_workspace_start_claim(completion_claim)
         print("\n✓ run complete.")
         self._print_structured_status(
             status="complete",
@@ -578,6 +612,14 @@ class Runner:
             key = _multi_review_route_key(text, phase.id)
         elif phase.id == "gates":
             key = _gates_route_key(text)
+            if key in {"green", "approve"}:
+                try:
+                    payload = json.loads(text)
+                except json.JSONDecodeError:
+                    payload = None
+                project_root = getattr(self, "project_root", None)
+                if project_root is None or not gate_fingerprint_matches_current(project_root, payload):
+                    key = "default"
         else:
             key = _route_key(text)
         if key == "approve" and phase.routes.get("request-changes") and has_failure_markers(text):
@@ -869,7 +911,6 @@ def _fix_loop_rounds(meta: dict[str, Any]) -> int:
 
 def _route_key(text: str) -> str:
     lowered = text.lower()
-    # gates 결과 JSON은 nested result가 아니라 top-level passed만 route source로 본다.
     try:
         payload = json.loads(text)
     except json.JSONDecodeError:
@@ -911,17 +952,25 @@ def _gates_route_key(text: str) -> str:
         payload = json.loads(text)
     except json.JSONDecodeError:
         return "default"
-    if not isinstance(payload, dict) or not isinstance(payload.get("passed"), bool):
+    if not isinstance(payload, dict):
         return "default"
+    if payload.get("verification_mode") not in {None, "full"}:
+        return "request-changes" if payload.get("passed") is False else "default"
+    passed = payload.get("passed")
+    if passed is not None and not isinstance(passed, bool):
+        return "default"
+    results_pass = _gate_results_prove_pass(payload.get("results"))
     status = payload.get("status")
     if isinstance(status, str):
         normalized_status = status.strip().lower().replace("_", "-")
-        if payload["passed"] is True and normalized_status in {"green", "approve"}:
-            return normalized_status if _gate_results_prove_pass(payload.get("results")) else "default"
-        if payload["passed"] is False and normalized_status in {"request-changes", "blocked", "error", "pending"}:
+        if passed is not False and normalized_status in {"green", "approve"}:
+            return normalized_status if results_pass else "default"
+        if passed is False and normalized_status in {"request-changes", "blocked", "error", "pending"}:
             return normalized_status
-    if payload["passed"] is True:
-        return "green" if _gate_results_prove_pass(payload.get("results")) else "default"
+    if passed is True:
+        return "green" if results_pass else "default"
+    if passed is None:
+        return "default"
     return "request-changes"
 
 
@@ -1155,9 +1204,11 @@ def _normalized_reviewer_id(value: str) -> str:
 
 
 def _normalized_reviewer_heading_id(value: str) -> str:
+    # 명시적 구분자 뒤의 전문 분야 설명은 reviewer identity에 포함하지 않는다.
+    identity = re.split(r"\s+[—–-]\s+|\s*:\s+", value.strip(), maxsplit=1)[0]
     # Reviewer heading은 1-2 단어 id(claude, agent 1 등)만 독립 id로 인정한다.
-    # 긴 서술형 heading은 reviewer가 아니라 prose일 가능성이 높아 제외한다.
-    key = _normalized_reviewer_id(value)
+    # 구분자 없는 긴 서술형 heading은 reviewer가 아니라 prose일 가능성이 높아 제외한다.
+    key = _normalized_reviewer_id(identity)
     if re.fullmatch(r"[a-z0-9]+(?: [a-z0-9]+)?", key):
         return key
     return ""

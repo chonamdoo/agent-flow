@@ -20,6 +20,7 @@ Profile injection:
 from __future__ import annotations
 
 import json
+import shlex
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
@@ -74,6 +75,12 @@ class Adapter(ABC):
             f"\n\n## Host-specific guidance\n{host_hint}\n" if host_hint else ""
         )
         config_root = self._config_root or project_root
+        gate_execution_block = self._render_gate_execution_block(
+            phase,
+            config_root,
+            project_root,
+            run_dir,
+        )
         profile_block = self._render_profile_block(config_root, phase)
         architecture_block = self._render_architecture_block(phase)
         completion_gate_block = self._render_completion_gate_block(phase, body)
@@ -94,6 +101,7 @@ class Adapter(ABC):
             f"**Artifact target** (write this when the phase is complete):\n"
             f"  `{relative_artifact}`\n"
             f"\n## Phase prompt\n\n{body}\n"
+            f"{gate_execution_block}"
             f"{profile_block}"
             f"{architecture_block}"
             f"{completion_gate_block}"
@@ -104,6 +112,39 @@ class Adapter(ABC):
             f"\n## When complete\n"
             f"After writing the artifact, run `agent-flow status` from "
             f"`{project_root}` and follow the printed `next_command`."
+        )
+
+    def _render_gate_execution_block(
+        self,
+        phase: "Phase",
+        config_root: Path,
+        project_root: Path,
+        run_dir: Path,
+    ) -> str:
+        if phase.id != "gates" or not _profile_contains_android(self._profile_snapshot):
+            return ""
+        launcher = config_root / ".agent-flow" / "bin" / "agent-flow"
+        prefix = " ".join(
+            shlex.quote(str(value))
+            for value in (
+                launcher,
+                "gates",
+                "--root",
+                project_root,
+                "--run-dir",
+                run_dir,
+            )
+        )
+        return (
+            "\n## Android incremental verification\n\n"
+            "Do not execute the static Gradle gate list directly. Run the "
+            "project launcher so changed Android modules are selected from the "
+            "branch, staged, unstaged, and untracked file set:\n\n"
+            f"`{prefix}`\n\n"
+            "If that targeted run fails, stop and enter fix-loop without running "
+            "the full suite. Once it passes on the frozen final code, run the "
+            "full Android gates exactly once before advancing:\n\n"
+            f"`{prefix} --full`\n"
         )
 
     def _render_architecture_block(self, phase: "Phase") -> str:
@@ -264,6 +305,9 @@ class Adapter(ABC):
             f"Run: {run_dir.name}\n"
             f"Task: {task_summary}\n"
             f"Review source: current git diff and referenced run artifacts\n"
+            f"Verification policy: do not rerun test suites; inspect existing "
+            f"gate-results/fingerprint evidence and request only a targeted "
+            f"test when a new finding needs it\n"
             f"Contract: {json.dumps(contract, separators=(',', ':'), sort_keys=True)}\n"
             f"{profile_block}"
             f"{skill_block}"
@@ -291,6 +335,15 @@ def _phase_profile_projection(profile: dict[str, Any], phase_id: str) -> dict[st
             ],
         }
     return _single_profile_projection(profile, phase_id)
+
+
+def _profile_contains_android(profile: dict[str, Any]) -> bool:
+    if profile.get("id") == "android":
+        return True
+    return any(
+        isinstance(item, dict) and item.get("id") == "android"
+        for item in profile.get("profiles", [])
+    ) if isinstance(profile.get("profiles"), list) else False
 
 
 def _single_profile_projection(profile: dict[str, Any], phase_id: str) -> dict[str, Any]:
