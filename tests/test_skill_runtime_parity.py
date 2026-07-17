@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -176,33 +177,47 @@ def test_architecture_phase_includes_declared_cross_platform_skills_in_both_runt
 
 
 @pytest.mark.parametrize(
-    ("files", "touched_profiles", "included", "excluded"),
+    ("files", "touched_profiles", "expected"),
     [
         (
             ["src/App.tsx"],
             ["react-native"],
-            {"react-native-clean-architecture", "react-native-development-guide"},
-            {"android-clean-architecture", "ios-clean-architecture"},
+            {
+                "code-generation-discipline",
+                "clean-architecture-core",
+                "react-native-clean-architecture",
+                "react-native-development-guide",
+            },
         ),
         (
             ["android/app/src/main/java/demo/Main.kt"],
             ["android", "react-native"],
-            {"android-clean-architecture", "android-code-review", "react-native-clean-architecture"},
-            {"ios-clean-architecture"},
+            {
+                "code-generation-discipline",
+                "clean-architecture-core",
+                "android-clean-architecture",
+                "android-code-review",
+                "react-native-clean-architecture",
+                "react-native-development-guide",
+            },
         ),
         (
             ["ios/App/App.swift"],
             ["ios", "react-native"],
-            {"ios-clean-architecture", "react-native-clean-architecture"},
-            {"android-clean-architecture"},
+            {
+                "code-generation-discipline",
+                "clean-architecture-core",
+                "ios-clean-architecture",
+                "react-native-clean-architecture",
+                "react-native-development-guide",
+            },
         ),
     ],
 )
 def test_react_native_native_roots_inject_only_touched_platform_skills_in_both_runtimes(
     files: list[str],
     touched_profiles: list[str],
-    included: set[str],
-    excluded: set[str],
+    expected: set[str],
 ) -> None:
     routing = json.loads((KIT_ROOT / "skills" / "profile-routing.json").read_text(encoding="utf-8"))
     skills = [
@@ -252,5 +267,192 @@ def test_react_native_native_roots_inject_only_touched_platform_skills_in_both_r
     assert python == node
     assert python["touched_profiles"] == touched_profiles
     selected = {skill["name"] for skill in python["skills"]}
-    assert included <= selected
-    assert excluded.isdisjoint(selected)
+    assert selected == expected
+
+
+def _profile_matrix_index() -> dict[str, object]:
+    routing = json.loads(
+        (KIT_ROOT / "skills" / "profile-routing.json").read_text(encoding="utf-8")
+    )
+    required_review = {
+        "android": ["android-code-review", "android-clean-architecture"],
+        "nextjs": [
+            "react-development-guide",
+            "typescript-development-guide",
+            "react-clean-architecture",
+        ],
+        "python": ["python-development-guide", "python-api-clean-architecture"],
+    }
+    android_conditional = {
+        skill
+        for route in routing["profiles"]["android"]["skill_routes"]
+        for skill in route.get("skills", [])
+    }
+    names = {
+        "code-generation-discipline",
+        "clean-architecture-core",
+        *required_review["android"],
+        *required_review["nextjs"],
+        *required_review["python"],
+        *android_conditional,
+    }
+    skills = [
+        {
+            "name": name,
+            "path": f"skills/{name}",
+            "tree_hash": hashlib.sha256(name.encode()).hexdigest(),
+            "requires": (
+                ["clean-architecture-core"]
+                if name
+                in {
+                    "android-clean-architecture",
+                    "react-clean-architecture",
+                    "python-api-clean-architecture",
+                }
+                else []
+            ),
+        }
+        for name in sorted(names)
+    ]
+    return {
+        "selection": {
+            "profiles": ["android", "nextjs", "python"],
+            "skill_profiles": ["android", "nextjs", "python"],
+            "explicit_skills": [],
+            "required_review": required_review,
+            "conditional_skills": {
+                "android": {
+                    "implementation": sorted(android_conditional),
+                    "review": sorted(android_conditional),
+                }
+            },
+            "profile_routing": routing,
+        },
+        "skills": skills,
+    }
+
+
+@pytest.mark.parametrize(
+    ("files", "touched", "expected"),
+    [
+        (
+            ["app/src/main/java/demo/MainActivity.kt"],
+            ["android"],
+            {
+                "code-generation-discipline",
+                "android-code-review",
+                "android-clean-architecture",
+                "clean-architecture-core",
+            },
+        ),
+        (
+            ["feature/home/presentation/HomeScreen.kt"],
+            ["android"],
+            {
+                "code-generation-discipline",
+                "android-code-review",
+                "android-clean-architecture",
+                "clean-architecture-core",
+                "compose-state-authoring",
+                "compose-state-hoisting",
+                "compose-state-holder-ui-split",
+                "kotlin-flow-state-event-modeling",
+            },
+        ),
+        (
+            ["core/data/user/UserFlow.kt"],
+            ["android"],
+            {
+                "code-generation-discipline",
+                "android-code-review",
+                "android-clean-architecture",
+                "clean-architecture-core",
+                "kotlin-coroutines-structured-concurrency",
+                "kotlin-flow-state-event-modeling",
+            },
+        ),
+        (
+            ["src/app/agreements/page.tsx"],
+            ["nextjs"],
+            {
+                "code-generation-discipline",
+                "react-development-guide",
+                "typescript-development-guide",
+                "react-clean-architecture",
+                "clean-architecture-core",
+            },
+        ),
+        (
+            ["src/app/agreements/api.py"],
+            ["python"],
+            {
+                "code-generation-discipline",
+                "python-development-guide",
+                "python-api-clean-architecture",
+                "clean-architecture-core",
+            },
+        ),
+        (
+            ["app/src/main/java/demo/Main.kt", "src/app/api.py"],
+            ["android", "python"],
+            {
+                "code-generation-discipline",
+                "android-code-review",
+                "android-clean-architecture",
+                "python-development-guide",
+                "python-api-clean-architecture",
+                "clean-architecture-core",
+            },
+        ),
+        (
+            ["docs/agent-flow.md"],
+            [],
+            {"code-generation-discipline"},
+        ),
+        (
+            ["assets/unknown.payload"],
+            [],
+            {"code-generation-discipline"},
+        ),
+    ],
+)
+def test_changed_scope_selects_only_relevant_profile_skills_in_both_runtimes(
+    files: list[str],
+    touched: list[str],
+    expected: set[str],
+) -> None:
+    index = _profile_matrix_index()
+
+    node = _node_plan(index, phase="implement", files=files, task="")
+    python = resolve_runtime_skill_plan(
+        index,
+        phase_id="implement",
+        changed_files=files,
+    )
+
+    assert python == node
+    assert python["touched_profiles"] == touched
+    selected = {skill["name"] for skill in python["skills"]}
+    assert selected == expected
+
+
+def test_required_skill_missing_is_identical_and_explicit_in_both_runtimes() -> None:
+    index = _profile_matrix_index()
+    required = ["missing-required-skill"]
+
+    node = _node_plan(
+        index,
+        phase="implement",
+        files=["src/app/page.tsx"],
+        task="",
+        required_skills=required,
+    )
+    python = resolve_runtime_skill_plan(
+        index,
+        phase_id="implement",
+        changed_files=["src/app/page.tsx"],
+        required_skills=required,
+    )
+
+    assert python == node
+    assert python["missing"] == required

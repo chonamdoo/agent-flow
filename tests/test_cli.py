@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import hashlib
 import io
 import os
 import shlex
@@ -37,6 +38,9 @@ from agent_flow.core.worktrees import plan_worktree, worktree_runtime_root
 os.environ.setdefault("AGENT_FLOW_SKIP_CODEX_TRUST", "1")
 os.environ.setdefault("AGENT_FLOW_AUTO_EXTERNAL_SKILLS", "0")
 
+_NODE_PROJECT_TEMPLATE: tempfile.TemporaryDirectory[str] | None = None
+_NODE_PROJECT_TEMPLATE_ROOT: Path | None = None
+
 
 def _node_test_env(**overrides: str) -> dict[str, str]:
     env = {**os.environ, **overrides}
@@ -46,6 +50,34 @@ def _node_test_env(**overrides: str) -> dict[str, str]:
     ]
     env["PYTHONPATH"] = os.pathsep.join(path for path in python_paths if path)
     return env
+
+
+def _install_node_project(project_root: Path, node: str, cli: str) -> None:
+    installed = subprocess.run(
+        (node, cli, "install"),
+        cwd=project_root,
+        env=_node_test_env(AGENT_FLOW_AUTO_EXTERNAL_SKILLS="0"),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if installed.returncode != 0:
+        raise RuntimeError(installed.stderr or "node project install failed")
+
+
+def _materialize_installed_node_project(project_root: Path, node: str, cli: str) -> None:
+    global _NODE_PROJECT_TEMPLATE, _NODE_PROJECT_TEMPLATE_ROOT
+    if _NODE_PROJECT_TEMPLATE_ROOT is None:
+        _NODE_PROJECT_TEMPLATE = tempfile.TemporaryDirectory(prefix="agent-flow-node-routing-")
+        _NODE_PROJECT_TEMPLATE_ROOT = Path(_NODE_PROJECT_TEMPLATE.name) / "project"
+        _NODE_PROJECT_TEMPLATE_ROOT.mkdir()
+        _install_node_project(_NODE_PROJECT_TEMPLATE_ROOT, node, cli)
+    shutil.copytree(
+        _NODE_PROJECT_TEMPLATE_ROOT,
+        project_root,
+        dirs_exist_ok=True,
+        symlinks=True,
+    )
 
 
 def _strip_markdown_frontmatter(text: str) -> str:
@@ -61,6 +93,35 @@ def _managed_hook_command(script_path: Path, host: str) -> str:
 
 
 class CliTest(unittest.TestCase):
+    def test_node_routing_template_clones_are_isolated(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first = root / "first"
+            second = root / "second"
+            first.mkdir()
+            second.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+
+            _materialize_installed_node_project(first, node, cli)
+            _materialize_installed_node_project(second, node, cli)
+            second_workflow = second / ".agent-flow" / "workflows" / "default.yaml"
+            expected = second_workflow.read_bytes()
+            (first / ".agent-flow" / "workflows" / "default.yaml").write_text(
+                "id: mutated\nphases: []\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(second_workflow.read_bytes(), expected)
+            status = subprocess.run(
+                (node, cli, "status"),
+                cwd=second,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(status.returncode, 0, status.stderr)
+
     def test_init_creates_agent_flow_dirs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir).resolve()
@@ -217,6 +278,30 @@ class CliTest(unittest.TestCase):
                     for target in (phase.get("routes") or {}).values():
                         if target != "block":
                             self.assertIn(target, phase_set)
+
+    def test_workflow_export_does_not_resolve_active_workspace(self) -> None:
+        output = io.StringIO()
+        with mock.patch(
+            "agent_flow.cli._resolve_cli_root_context",
+            side_effect=AssertionError("workflow export must not resolve a mutable workspace"),
+        ):
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["workflow", "export", "--workflow", "default"]), 0)
+
+        self.assertEqual(json.loads(output.getvalue())["id"], "default")
+
+    def test_architecture_lint_uses_explicit_managed_worktree_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worktree = Path(temp_dir) / "leader" / ".agent-flow" / "worktrees" / "review"
+            worktree.mkdir(parents=True)
+            with mock.patch(
+                "agent_flow.cli._resolve_cli_root_context",
+                side_effect=AssertionError("explicit managed worktree root must not be rebound"),
+            ):
+                self.assertEqual(
+                    main(["architecture-lint", "--root", str(worktree), "--profile", "python"]),
+                    0,
+                )
 
     def test_full_feature_workflow_keeps_python_runner_routes(self) -> None:
         import yaml
@@ -713,6 +798,10 @@ class CliTest(unittest.TestCase):
                 self.assertIn("- architecture-lint", prompt)
                 self.assertNotIn("context-lint", prompt)
                 self.assertNotIn("check-context-docs.mjs", prompt)
+                self.assertIn("## Android incremental verification", prompt)
+                self.assertIn("gates --root", prompt)
+                self.assertIn("--run-dir", prompt)
+                self.assertIn("--full", prompt)
 
     def test_python_multi_review_approve_requires_subagent_reviewer(self) -> None:
         from agent_flow.runner import Phase, Runner
@@ -889,6 +978,16 @@ class CliTest(unittest.TestCase):
             (run_dir / "multi-review.md").write_text(
                 "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
                 "## Reviewer 2\nreviewer-source: sub-agent\nreviewer-2 verdict: approve\n\n## Overall\nverdict: approve\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(runner._next_index(0, phase), (2, False))
+
+            (run_dir / "multi-review.md").write_text(
+                "## Reviewer 1 — Architecture-design specialist\n"
+                "reviewer-source: sub-agent\nverdict: approve\n\n"
+                "## Reviewer 2 — Clean Architecture and test-edge specialist\n"
+                "reviewer-source: sub-agent\nverdict: approve\n\n"
+                "## Overall\nverdict: approve\n",
                 encoding="utf-8",
             )
             self.assertEqual(runner._next_index(0, phase), (2, False))
@@ -1273,6 +1372,7 @@ class CliTest(unittest.TestCase):
             write_meta(run_dir, {})
             runner = Runner.__new__(Runner)
             runner.run_dir = run_dir
+            runner.project_root = run_dir
             runner.phases = [
                 Phase(id="gates", description="", routes={"request-changes": "fix-loop", "green": "multi-review"}),
                 Phase(id="fix-loop", description="", routes={"default": "gates"}),
@@ -1300,7 +1400,8 @@ class CliTest(unittest.TestCase):
                 '{"passed": true, "results": [{"command": "npm test", "passed": true, "output": "ok"}]}',
                 encoding="utf-8",
             )
-            self.assertEqual(runner._next_index(0, gates), (2, False))
+            with mock.patch("agent_flow.runner.gate_fingerprint_matches_current", return_value=True):
+                self.assertEqual(runner._next_index(0, gates), (2, False))
             self.assertNotIn("fix_loop_rounds", read_meta(run_dir))
 
     def test_python_runner_uses_default_route_like_node_runner(self) -> None:
@@ -3409,14 +3510,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            install = subprocess.run(
-                (node, cli, "install"),
-                cwd=project_root,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(install.returncode, 0, install.stderr)
+            _materialize_installed_node_project(project_root, node, cli)
 
             start = subprocess.run(
                 (node, cli, "run", "start", "--task", "demo feature", "--run-id", "r1"),
@@ -3604,7 +3698,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -3668,7 +3762,7 @@ if (!missing?.block) {
             _write_local_skill_files(project_root)
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _install_node_project(project_root, node, cli)
             green_prompt = (project_root / ".agent-flow" / "prompts" / "green.md").read_text(
                 encoding="utf-8"
             )
@@ -3752,7 +3846,7 @@ if (!missing?.block) {
             _write_local_skill_files(project_root)
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _install_node_project(project_root, node, cli)
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--workflow", "bugfix", "--task", "demo", "--run-id", "r1"),
@@ -3902,10 +3996,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(
-                subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode,
-                0,
-            )
+            _materialize_installed_node_project(project_root, node, cli)
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -3938,6 +4029,13 @@ if (!missing?.block) {
                 "handoff",
             ]
             run_dir = project_root / ".agent-flow" / "runs" / "full-feature" / "r1"
+            run_metadata = run_dir.stat()
+            cache_key = hashlib.sha256(
+                f"{run_dir.resolve()}\0{run_metadata.st_dev}\0{run_metadata.st_ino}".encode("utf-8")
+            ).hexdigest()
+            gate_cache = project_root / ".agent-flow" / "state" / "gate-cache" / f"{cache_key}.json"
+            gate_cache.parent.mkdir(parents=True)
+            gate_cache.write_text('{"version": 1}\n', encoding="utf-8")
             for index, phase in enumerate(expected_phases):
                 state = json.loads(_node_authoritative_current_run_state_path(project_root).read_text(encoding="utf-8"))
                 self.assertEqual(state["phase"], phase)
@@ -3949,7 +4047,25 @@ if (!missing?.block) {
                     content = "verdict: approve\n"
                 else:
                     content = _node_phase_content(phase)
-                artifact.write_text(content, encoding="utf-8")
+                if phase == "gates":
+                    gate_result = subprocess.run(
+                        (
+                            project_root / ".agent-flow" / "bin" / "agent-flow",
+                            "gates",
+                            "--profile",
+                            "generic",
+                            "--run-dir",
+                            str(run_dir),
+                            "--full",
+                        ),
+                        cwd=project_root,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(gate_result.returncode, 0, gate_result.stderr)
+                else:
+                    artifact.write_text(content, encoding="utf-8")
                 advance = subprocess.run(
                     (node, cli, "run", "advance"),
                     cwd=project_root,
@@ -3962,6 +4078,8 @@ if (!missing?.block) {
                     self.assertIn(f"Current phase: {expected_phases[index + 1]}", advance.stdout)
                 else:
                     self.assertIn("workflow complete: r1", advance.stdout)
+
+            self.assertFalse(gate_cache.exists())
 
             complete = subprocess.run(
                 (node, cli, "run", "advance"),
@@ -3979,7 +4097,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -4019,7 +4137,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -4051,7 +4169,10 @@ if (!missing?.block) {
                 artifact = run_dir / _node_phase_artifact(phase)
                 artifact.parent.mkdir(parents=True, exist_ok=True)
                 content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase)
-                artifact.write_text(content, encoding="utf-8")
+                if phase == "gates":
+                    _write_node_green_gate_artifact(project_root, run_dir)
+                else:
+                    artifact.write_text(content, encoding="utf-8")
                 self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
 
             watch = run_dir / _node_phase_artifact("pr-watch")
@@ -4199,10 +4320,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(
-                subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode,
-                0,
-            )
+            _materialize_installed_node_project(project_root, node, cli)
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -4264,7 +4382,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -4398,11 +4516,7 @@ if (!missing?.block) {
             self.assertEqual(approved.returncode, 0, approved.stderr)
             self.assertIn("Current phase: gates", approved.stdout)
 
-            gates = run_dir / _node_phase_artifact("gates")
-            gates.write_text(
-                '{"passed": true, "results": [{"id": "lint", "command": "npm run lint", "passed": true, "exit_code": 0}]}\n',
-                encoding="utf-8",
-            )
+            _write_node_green_gate_artifact(project_root, run_dir)
             committed = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=project_root,
@@ -4420,7 +4534,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -4439,7 +4553,10 @@ if (!missing?.block) {
                 artifact = run_dir / _node_phase_artifact(phase)
                 artifact.parent.mkdir(parents=True, exist_ok=True)
                 content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase)
-                artifact.write_text(content, encoding="utf-8")
+                if phase == "gates":
+                    _write_node_green_gate_artifact(project_root, run_dir)
+                else:
+                    artifact.write_text(content, encoding="utf-8")
                 self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
 
             state = json.loads(_node_authoritative_current_run_state_path(project_root).read_text(encoding="utf-8"))
@@ -4506,9 +4623,26 @@ if (!missing?.block) {
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("Current phase: gates", result.stdout)
 
-            gates_artifact.write_text(
-                '{"passed": true, "results": [{"id": "lint", "command": "npm run lint", "passed": true, "output": "ok"}]}\n',
-                encoding="utf-8",
+            gate_result = subprocess.run(
+                (
+                    project_root / ".agent-flow" / "bin" / "agent-flow",
+                    "gates",
+                    "--profile",
+                    "generic",
+                    "--run-dir",
+                    str(run_dir),
+                    "--full",
+                ),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            gate_payload = json.loads(gates_artifact.read_text(encoding="utf-8"))
+            self.assertEqual(
+                gate_result.returncode,
+                0,
+                f"stdout={gate_result.stdout}\nstderr={gate_result.stderr}\nartifact={gate_payload}",
             )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
@@ -4527,7 +4661,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -4652,7 +4786,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--workflow", "default", "--task", "demo", "--run-id", "r1"),
@@ -4710,7 +4844,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -4772,7 +4906,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -4815,7 +4949,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -5092,8 +5226,10 @@ if (!missing?.block) {
             self.assertIn("at least 1 independent sub-agent reviewer verdict", result.stderr)
 
             mr_artifact.write_text(_with_skills_gate(
-                "## Reviewer 1\nreviewer-source: active-host sub-agent\nreviewer-1 verdict: approve\n\n"
-                "## Reviewer 2\nreviewer-source: sub-agent\nreviewer-2 verdict: approve\n\n"
+                "## Reviewer 1 — Architecture-design specialist\n"
+                "reviewer-source: active-host sub-agent\nverdict: approve\n\n"
+                "## Reviewer 2 — Clean Architecture and test-edge specialist\n"
+                "reviewer-source: sub-agent\nverdict: approve\n\n"
                 "## Overall\nverdict: approve\n",
             ),
                 encoding="utf-8",
@@ -5114,7 +5250,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -5158,7 +5294,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             subprocess.run(("git", "init", "-q"), cwd=project_root, check=True)
             subprocess.run(("git", "checkout", "-q", "-b", "main"), cwd=project_root, check=True)
 
@@ -5179,7 +5315,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             _init_git_repo(project_root)
             subprocess.run(("git", "checkout", "-q", "--detach", "HEAD"), cwd=project_root, check=True)
 
@@ -5200,7 +5336,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             run_dir = _node_start_full_feature_at_pr_watch(project_root, node, cli)
             bin_dir = Path(temp_dir) / "bin"
             bin_dir.mkdir()
@@ -5240,7 +5376,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             subprocess.run(
                 (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
                 cwd=project_root,
@@ -5264,7 +5400,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             run_dir = _node_start_full_feature_at_pr_watch(project_root, node, cli)
             bin_dir = Path(temp_dir) / "bin"
             bin_dir.mkdir()
@@ -5301,7 +5437,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             run_dir = _node_start_full_feature_at_pr_watch(project_root, node, cli)
             bin_dir = Path(temp_dir) / "bin"
             bin_dir.mkdir()
@@ -5338,7 +5474,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             run_dir = _node_start_full_feature_at_pr_watch(project_root, node, cli)
             bin_dir = Path(temp_dir) / "bin"
             bin_dir.mkdir()
@@ -5908,7 +6044,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             task = "demo\nstatus: complete\nreason: injected"
             start = subprocess.run(
                 (node, cli, "run", "start", "--task", task, "--run-id", "r1"),
@@ -6104,6 +6240,29 @@ if (!missing?.block) {
             self.assertEqual(result.stdout.strip(), "project-launcher")
             self.assertFalse(marker.exists())
 
+    def test_run_gate_pins_python_architecture_lint_to_project_launcher(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            launcher = root / "project-agent-flow"
+            launcher.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\"\n", encoding="utf-8")
+            launcher.chmod(0o755)
+            command = GateCommand(
+                "architecture-lint",
+                (sys.executable, "-m", "agent_flow.core.architecture_lint", "--profile", "generic"),
+            )
+            with mock.patch.dict(
+                os.environ,
+                {"AGENT_FLOW_PROJECT_LAUNCHER": str(launcher)},
+            ):
+                result = run_gate(command, cwd=root)
+
+            self.assertTrue(result.passed, result.stderr)
+            self.assertEqual(result.stdout.strip(), "architecture-lint --profile generic")
+            self.assertEqual(
+                result.command[1:],
+                ("architecture-lint", "--profile", "generic"),
+            )
+
     def test_gates_cli_writes_results_for_run_dir(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -6150,6 +6309,32 @@ if (!missing?.block) {
             self.assertTrue(payload["passed"])
             self.assertEqual(payload["status"], "green")
             self.assertFalse(payload["results"][1]["required"])
+
+    def test_targeted_gate_pass_clears_stale_canonical_failure(self) -> None:
+        from agent_flow.core.artifacts import write_gate_results
+        from agent_flow.core.gates import GateResult
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir)
+            write_gate_results(
+                run_dir=run_dir,
+                results=[GateResult("test", ("./gradlew", ":app:test"), False, 1, "", "failed")],
+                verification_mode="targeted",
+            )
+            canonical = run_dir / "artifacts" / "gate-results.json"
+            self.assertTrue(canonical.is_file())
+
+            write_gate_results(
+                run_dir=run_dir,
+                results=[GateResult("test", ("./gradlew", ":app:test"), True, 0, "ok", "")],
+                verification_mode="targeted",
+            )
+
+            self.assertFalse(canonical.exists())
+            targeted = json.loads(
+                (run_dir / "artifacts" / "gate-results-targeted.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(targeted["status"], "targeted-green")
 
     def test_gates_cli_uses_installed_profile_union_when_auto(self) -> None:
         from agent_flow.core.gates import GateResult
@@ -6201,6 +6386,1205 @@ if (!missing?.block) {
         self.assertNotIn("lint", react_native_ids)
         self.assertIn("android-build", react_native_ids)
         self.assertIn("ios-build", react_native_ids)
+
+    def test_gate_order_ignores_changed_file_kind_tokens(self) -> None:
+        from agent_flow.cli import _gate_order_key
+
+        build = GateCommand("android:build", ("./gradlew", "assembleDebug"))
+        architecture = GateCommand(
+            "architecture-lint",
+            (
+                sys.executable,
+                "-m",
+                "agent_flow.core.architecture_lint",
+                "--files",
+                "build.gradle.kts",
+            ),
+        )
+
+        self.assertLess(_gate_order_key(build), _gate_order_key(architecture))
+
+    def test_android_profile_gates_target_only_changed_modules(self) -> None:
+        from agent_flow.cli import _profile_gate_commands
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for module in (root / "app", root / "feature" / "chat"):
+                module.mkdir(parents=True)
+                (module / "build.gradle.kts").write_text("plugins {}\n", encoding="utf-8")
+
+            commands = _profile_gate_commands(
+                ["android"],
+                project_root=root,
+                changed_files=[
+                    "feature/chat/src/main/kotlin/Chat.kt",
+                    "feature/chat/src/test/kotlin/ChatTest.kt",
+                ],
+            )
+
+            by_id = {command.gate_id: command.command for command in commands}
+            self.assertEqual(by_id["build"], ("./gradlew", ":feature:chat:assembleDevDebug"))
+            self.assertEqual(by_id["test"], ("./gradlew", ":feature:chat:test"))
+            self.assertEqual(
+                by_id["architecture-lint"],
+                (
+                    sys.executable,
+                    "-m",
+                    "agent_flow.core.architecture_lint",
+                    "--profile",
+                    "android",
+                    "--files",
+                    "feature/chat/src/main/kotlin/Chat.kt",
+                    "feature/chat/src/test/kotlin/ChatTest.kt",
+                ),
+            )
+
+    def test_android_profile_gates_skip_build_and_test_for_docs_only(self) -> None:
+        from agent_flow.cli import _profile_gate_commands
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            commands = _profile_gate_commands(
+                ["android"],
+                project_root=root,
+                changed_files=["docs/testing.md"],
+            )
+
+            self.assertEqual([command.gate_id for command in commands], ["architecture-lint"])
+            self.assertEqual(commands[0].command[-2:], ("--files", "docs/testing.md"))
+
+    def test_android_unit_test_only_change_runs_only_the_changed_test_class(self) -> None:
+        from agent_flow.cli import _profile_gate_commands
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            module = root / "feature" / "chat"
+            test = module / "src" / "test" / "kotlin" / "com" / "example" / "ChatTest.kt"
+            test.parent.mkdir(parents=True)
+            (module / "build.gradle.kts").write_text(
+                'plugins { id("com.android.library") }\n',
+                encoding="utf-8",
+            )
+            test.write_text("package com.example\nclass ChatTest\n", encoding="utf-8")
+
+            commands = _profile_gate_commands(
+                ["android"],
+                project_root=root,
+                changed_files=[str(test.relative_to(root))],
+            )
+            by_id = {command.gate_id: command.command for command in commands}
+
+            self.assertNotIn("build", by_id)
+            self.assertEqual(
+                by_id["test"],
+                (
+                    "./gradlew",
+                    ":feature:chat:testDevDebugUnitTest",
+                    "--tests",
+                    "com.example.ChatTest*",
+                ),
+            )
+
+    def test_android_unit_test_filter_uses_declared_package_and_falls_back_when_ambiguous(self) -> None:
+        from agent_flow.cli import _profile_gate_commands
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            module = root / "app"
+            test = module / "src" / "test" / "kotlin" / "path" / "does" / "not" / "match" / "LoginTest.kt"
+            test.parent.mkdir(parents=True)
+            (module / "build.gradle.kts").write_text(
+                'plugins { id("com.android.library") }\n',
+                encoding="utf-8",
+            )
+            test.write_text("package com.example.auth\nclass LoginTest\n", encoding="utf-8")
+
+            commands = _profile_gate_commands(
+                ["android"],
+                project_root=root,
+                changed_files=[str(test.relative_to(root))],
+            )
+            by_id = {command.gate_id: command.command for command in commands}
+            self.assertEqual(
+                by_id["test"],
+                (
+                    "./gradlew",
+                    ":app:testDevDebugUnitTest",
+                    "--tests",
+                    "com.example.auth.LoginTest*",
+                ),
+            )
+
+            test.write_text("package com.example.auth\nclass DifferentName\n", encoding="utf-8")
+            commands = _profile_gate_commands(
+                ["android"],
+                project_root=root,
+                changed_files=[str(test.relative_to(root))],
+            )
+            by_id = {command.gate_id: command.command for command in commands}
+            self.assertEqual(by_id["test"], ("./gradlew", ":app:test"))
+
+    def test_kotlin_jvm_unit_test_filter_uses_concrete_test_task(self) -> None:
+        from agent_flow.cli import _profile_gate_commands
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            module = root / "library"
+            test = module / "src" / "test" / "kotlin" / "com" / "example" / "LibraryTest.kt"
+            test.parent.mkdir(parents=True)
+            (module / "build.gradle.kts").write_text(
+                'plugins { kotlin("jvm") }\n',
+                encoding="utf-8",
+            )
+            test.write_text("package com.example\nclass LibraryTest\n", encoding="utf-8")
+
+            commands = _profile_gate_commands(
+                ["android"],
+                project_root=root,
+                changed_files=[str(test.relative_to(root))],
+            )
+            by_id = {command.gate_id: command.command for command in commands}
+            self.assertEqual(
+                by_id["test"],
+                ("./gradlew", ":library:test", "--tests", "com.example.LibraryTest*"),
+            )
+
+    def test_android_unit_test_filter_falls_back_for_convention_plugin_or_multiple_classes(self) -> None:
+        from agent_flow.cli import _profile_gate_commands
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            module = root / "feature" / "chat"
+            test = module / "src" / "test" / "kotlin" / "com" / "example" / "ChatTest.kt"
+            test.parent.mkdir(parents=True)
+            (module / "build.gradle.kts").write_text(
+                'plugins { id("company.android.library") }\n',
+                encoding="utf-8",
+            )
+            test.write_text(
+                "package com.example\nclass ChatTest\nclass AnotherTest\n",
+                encoding="utf-8",
+            )
+
+            commands = _profile_gate_commands(
+                ["android"],
+                project_root=root,
+                changed_files=[str(test.relative_to(root))],
+            )
+            by_id = {command.gate_id: command.command for command in commands}
+            self.assertEqual(by_id["test"], ("./gradlew", ":feature:chat:test"))
+
+    def test_android_project_dir_mapping_uses_full_safe_fallback(self) -> None:
+        from agent_flow.cli import _profile_gate_commands
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            module = root / "modules" / "chat"
+            source = module / "src" / "main" / "kotlin" / "Chat.kt"
+            source.parent.mkdir(parents=True)
+            (module / "build.gradle.kts").write_text("plugins {}\n", encoding="utf-8")
+            settings = root / "settings.gradle.kts"
+            for mapping in (
+                'project(":chat").projectDir = file("modules/chat")',
+                'project(":chat").setProjectDir(file("modules/chat"))',
+                'includeFlat("chat")',
+                'includeBuild("modules/chat")',
+            ):
+                with self.subTest(mapping=mapping):
+                    settings.write_text(f'include(":chat")\n{mapping}\n', encoding="utf-8")
+                    commands = _profile_gate_commands(
+                        ["android"],
+                        project_root=root,
+                        changed_files=[str(source.relative_to(root))],
+                    )
+                    by_id = {command.gate_id: command.command for command in commands}
+                    self.assertEqual(by_id["build"], ("./gradlew", "assembleDevDebug"))
+                    self.assertEqual(by_id["test"], ("./gradlew", "test"))
+
+    def test_android_instrumented_test_change_runs_only_module_instrumentation(self) -> None:
+        from agent_flow.cli import _profile_gate_commands
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            module = root / "app"
+            test = module / "src" / "androidTest" / "kotlin" / "com" / "example" / "AppTest.kt"
+            test.parent.mkdir(parents=True)
+            (module / "build.gradle.kts").write_text("plugins {}\n", encoding="utf-8")
+            test.write_text("package com.example\nclass AppTest\n", encoding="utf-8")
+
+            commands = _profile_gate_commands(
+                ["android"],
+                project_root=root,
+                changed_files=[str(test.relative_to(root))],
+            )
+            by_id = {command.gate_id: command.command for command in commands}
+
+            self.assertNotIn("build", by_id)
+            self.assertEqual(by_id["test"], ("./gradlew", ":app:connectedDevDebugAndroidTest"))
+
+    def test_android_root_gradle_change_keeps_full_gate_commands(self) -> None:
+        from agent_flow.cli import _profile_gate_commands
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            commands = _profile_gate_commands(
+                ["android"],
+                project_root=root,
+                changed_files=["gradle/libs.versions.toml"],
+            )
+            by_id = {command.gate_id: command.command for command in commands}
+
+            self.assertEqual(by_id["build"], ("./gradlew", "assembleDevDebug"))
+            self.assertEqual(by_id["test"], ("./gradlew", "test"))
+
+    def test_android_gates_cli_targets_files_and_full_restores_all_tasks(self) -> None:
+        from agent_flow.core.gates import GateResult
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            module = root / "feature" / "chat"
+            module.mkdir(parents=True)
+            (module / "build.gradle.kts").write_text("plugins {}\n", encoding="utf-8")
+            source = "feature/chat/src/main/kotlin/Chat.kt"
+            captures: list[list[GateCommand]] = []
+
+            def fake_run_gates(
+                commands: list[GateCommand],
+                *,
+                cwd: Path,
+                timeout_s: int = 600,
+            ) -> list[GateResult]:
+                captures.append(commands)
+                return [
+                    GateResult(command.gate_id, command.command, True, 0, "", "")
+                    for command in commands
+                ]
+
+            with mock.patch("agent_flow.cli.run_gates", side_effect=fake_run_gates):
+                self.assertEqual(
+                    main(
+                        [
+                            "gates",
+                            "--root",
+                            str(root),
+                            "--profile",
+                            "android",
+                            "--files",
+                            source,
+                        ]
+                    ),
+                    0,
+                )
+                self.assertEqual(
+                    main(
+                        [
+                            "gates",
+                            "--root",
+                            str(root),
+                            "--profile",
+                            "android",
+                            "--full",
+                        ]
+                    ),
+                    0,
+                )
+
+            targeted = {command.gate_id: command.command for command in captures[0]}
+            full = {command.gate_id: command.command for command in captures[1]}
+            self.assertEqual(targeted["build"], ("./gradlew", ":feature:chat:assembleDevDebug"))
+            self.assertEqual(targeted["test"], ("./gradlew", ":feature:chat:test"))
+            self.assertEqual(full["build"], ("./gradlew", "assembleDevDebug"))
+            self.assertEqual(full["test"], ("./gradlew", "test"))
+
+    def test_android_full_gates_reject_explicit_file_subset(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                result = main(
+                    [
+                        "gates",
+                        "--root",
+                        str(root),
+                        "--profile",
+                        "android",
+                        "--full",
+                        "--files",
+                        "app/src/main/kotlin/App.kt",
+                    ]
+                )
+            self.assertEqual(result, 2)
+            self.assertIn("--full cannot be combined with --files", err.getvalue())
+
+    def test_android_targeted_gate_reuses_fingerprint_and_full_only_records_green(self) -> None:
+        from agent_flow.core.gates import GateResult
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            module = root / "feature" / "chat"
+            source = module / "src" / "main" / "kotlin" / "Chat.kt"
+            source.parent.mkdir(parents=True)
+            (module / "build.gradle.kts").write_text("plugins {}\n", encoding="utf-8")
+            source.write_text("class Chat\n", encoding="utf-8")
+            (root / ".gitignore").write_text(".agent-flow/\n", encoding="utf-8")
+            subprocess.run(("git", "init", "-b", "main", str(root)), check=True, capture_output=True)
+            subprocess.run(("git", "-C", str(root), "config", "user.name", "Test User"), check=True)
+            subprocess.run(("git", "-C", str(root), "config", "user.email", "test@example.com"), check=True)
+            subprocess.run(("git", "-C", str(root), "add", "."), check=True)
+            subprocess.run(("git", "-C", str(root), "commit", "-m", "initial"), check=True, capture_output=True)
+            run_dir = root / ".agent-flow" / "runs" / "android"
+            captures: list[list[GateCommand]] = []
+
+            def fake_run_gates(
+                commands: list[GateCommand],
+                *,
+                cwd: Path,
+                timeout_s: int = 600,
+            ) -> list[GateResult]:
+                captures.append(commands)
+                return [
+                    GateResult(command.gate_id, command.command, True, 0, "ok", "")
+                    for command in commands
+                ]
+
+            targeted = [
+                "gates",
+                "--root",
+                str(root),
+                "--profile",
+                "android",
+                "--run-dir",
+                str(run_dir),
+                "--files",
+                str(source.relative_to(root)),
+            ]
+            with mock.patch("agent_flow.cli.run_gates", side_effect=fake_run_gates):
+                self.assertEqual(main(targeted), 0)
+                self.assertEqual(main(targeted), 0)
+                source.write_text("class ChangedChat\n", encoding="utf-8")
+                self.assertEqual(main(targeted), 0)
+                self.assertEqual(
+                    main(
+                        [
+                            "gates",
+                            "--root",
+                            str(root),
+                            "--profile",
+                            "android",
+                            "--run-dir",
+                            str(run_dir),
+                            "--full",
+                        ]
+                    ),
+                    0,
+                )
+                self.assertEqual(main(targeted), 0)
+
+            self.assertTrue(captures[0])
+            self.assertEqual(captures[1], [])
+            self.assertTrue(captures[2])
+            self.assertTrue(captures[3])
+            self.assertEqual(captures[4], [])
+            targeted_payload = json.loads(
+                (run_dir / "artifacts" / "gate-results-targeted.json").read_text(encoding="utf-8")
+            )
+            full_payload = json.loads(
+                (run_dir / "artifacts" / "gate-results.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(targeted_payload["status"], "targeted-green")
+            self.assertEqual(targeted_payload["verification_mode"], "targeted")
+            self.assertEqual(full_payload["status"], "green")
+            self.assertEqual(full_payload["verification_mode"], "full")
+            self.assertIn("fingerprint_id", full_payload["fingerprint"])
+            self.assertIn("toolchain", full_payload["fingerprint"])
+
+    def test_android_targeted_gate_reuses_unchanged_module_only(self) -> None:
+        from agent_flow.core.gates import GateResult
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sources: list[Path] = []
+            for relative in ("app", "feature/chat"):
+                module = root / relative
+                source = module / "src" / "main" / "kotlin" / "Feature.kt"
+                source.parent.mkdir(parents=True)
+                (module / "build.gradle.kts").write_text("plugins {}\n", encoding="utf-8")
+                source.write_text(f"class {relative.replace('/', '')}\n", encoding="utf-8")
+                sources.append(source)
+            (root / ".gitignore").write_text(".agent-flow/\n", encoding="utf-8")
+            subprocess.run(("git", "init", "-b", "main", str(root)), check=True, capture_output=True)
+            subprocess.run(("git", "-C", str(root), "config", "user.name", "Test User"), check=True)
+            subprocess.run(("git", "-C", str(root), "config", "user.email", "test@example.com"), check=True)
+            subprocess.run(("git", "-C", str(root), "add", "."), check=True)
+            subprocess.run(("git", "-C", str(root), "commit", "-m", "initial"), check=True, capture_output=True)
+            run_dir = root / ".agent-flow" / "runs" / "android"
+            captures: list[list[GateCommand]] = []
+
+            def fake_run_gates(
+                commands: list[GateCommand],
+                *,
+                cwd: Path,
+                timeout_s: int = 600,
+            ) -> list[GateResult]:
+                captures.append(commands)
+                return [
+                    GateResult(command.gate_id, command.command, True, 0, "ok", "")
+                    for command in commands
+                ]
+
+            command = [
+                "gates",
+                "--root",
+                str(root),
+                "--profile",
+                "android",
+                "--run-dir",
+                str(run_dir),
+                "--files",
+                *(str(source.relative_to(root)) for source in sources),
+            ]
+            with mock.patch("agent_flow.cli.run_gates", side_effect=fake_run_gates):
+                self.assertEqual(main(command), 0)
+                self.assertEqual(main(command), 0)
+                sources[0].write_text("class AppChanged\n", encoding="utf-8")
+                self.assertEqual(main(command), 0)
+
+            self.assertEqual(len(captures[0]), 5)
+            self.assertEqual(captures[1], [])
+            rerun_commands = [item.command for item in captures[2]]
+            self.assertEqual(len(rerun_commands), 3)
+            self.assertTrue(any(":app:assembleDevDebug" in item for item in rerun_commands))
+            self.assertTrue(any(":app:test" in item for item in rerun_commands))
+            self.assertFalse(any(":feature:chat:" in " ".join(item) for item in rerun_commands))
+
+    def test_android_gate_fingerprint_includes_gradle_project_dependency_closure(self) -> None:
+        from agent_flow.core.artifacts import gate_execution_fingerprint
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app = root / "app"
+            feature = root / "feature" / "chat"
+            app_source = app / "src" / "main" / "kotlin" / "App.kt"
+            feature_source = feature / "src" / "main" / "kotlin" / "Chat.kt"
+            app_source.parent.mkdir(parents=True)
+            feature_source.parent.mkdir(parents=True)
+            (app / "build.gradle.kts").write_text(
+                'plugins { id("com.android.application") }\n'
+                'dependencies { implementation(project(":feature:chat")) }\n',
+                encoding="utf-8",
+            )
+            (feature / "build.gradle.kts").write_text(
+                'plugins { id("com.android.library") }\n',
+                encoding="utf-8",
+            )
+            app_source.write_text("class App\n", encoding="utf-8")
+            feature_source.write_text("class Chat\n", encoding="utf-8")
+            (root / ".gitignore").write_text(".agent-flow/\n", encoding="utf-8")
+            subprocess.run(("git", "init", "-b", "main", str(root)), check=True, capture_output=True)
+            subprocess.run(("git", "-C", str(root), "config", "user.name", "Test User"), check=True)
+            subprocess.run(("git", "-C", str(root), "config", "user.email", "test@example.com"), check=True)
+            subprocess.run(("git", "-C", str(root), "add", "."), check=True)
+            subprocess.run(("git", "-C", str(root), "commit", "-m", "initial"), check=True, capture_output=True)
+            commands = [
+                GateCommand("build", ("./gradlew", ":app:assembleDevDebug")),
+                GateCommand("test", ("./gradlew", ":app:test")),
+            ]
+            first = gate_execution_fingerprint(
+                root=root,
+                profile_ids=["android"],
+                verification_mode="targeted",
+                changed_files=[str(app_source.relative_to(root))],
+                commands=commands,
+            )
+            feature_source.write_text("class ChangedChat\n", encoding="utf-8")
+            second = gate_execution_fingerprint(
+                root=root,
+                profile_ids=["android"],
+                verification_mode="targeted",
+                changed_files=[str(app_source.relative_to(root))],
+                commands=commands,
+            )
+
+            self.assertNotEqual(
+                [item["fingerprint_id"] for item in first["gate_inputs"]],
+                [item["fingerprint_id"] for item in second["gate_inputs"]],
+            )
+
+    def test_android_gate_fingerprint_falls_back_for_unproven_convention_dependency(self) -> None:
+        from agent_flow.core.artifacts import gate_execution_fingerprint
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app = root / "app"
+            unrelated = root / "feature" / "hidden" / "src" / "main" / "Hidden.kt"
+            app.mkdir(parents=True)
+            unrelated.parent.mkdir(parents=True)
+            (app / "build.gradle.kts").write_text(
+                'plugins { id("company.android.application") }\n',
+                encoding="utf-8",
+            )
+            unrelated.write_text("class Hidden\n", encoding="utf-8")
+            command = GateCommand("test", ("./gradlew", ":app:test"))
+            fingerprint = gate_execution_fingerprint(
+                root=root,
+                profile_ids=["android"],
+                verification_mode="targeted",
+                changed_files=["app/src/main/App.kt"],
+                commands=[command],
+            )
+            self.assertEqual(
+                fingerprint["gate_inputs"][0]["scope"],
+                "android-repository-fallback",
+            )
+
+            (app / "build.gradle.kts").write_text(
+                'plugins { id("com.android.application") }\n',
+                encoding="utf-8",
+            )
+            (root / "build.gradle.kts").write_text(
+                'plugins { id("company.root-convention") }\n',
+                encoding="utf-8",
+            )
+            root_plugin = gate_execution_fingerprint(
+                root=root,
+                profile_ids=["android"],
+                verification_mode="targeted",
+                changed_files=["app/src/main/App.kt"],
+                commands=[command],
+            )
+            self.assertEqual(
+                root_plugin["gate_inputs"][0]["scope"],
+                "android-repository-fallback",
+            )
+
+            (root / "build.gradle.kts").unlink()
+            (root / "settings.gradle.kts").write_text(
+                'plugins { id("company.settings-convention") }\n',
+                encoding="utf-8",
+            )
+            settings_plugin = gate_execution_fingerprint(
+                root=root,
+                profile_ids=["android"],
+                verification_mode="targeted",
+                changed_files=["app/src/main/App.kt"],
+                commands=[command],
+            )
+            self.assertEqual(
+                settings_plugin["gate_inputs"][0]["scope"],
+                "android-repository-fallback",
+            )
+
+    def test_gate_planner_hash_includes_profile_loader_source(self) -> None:
+        from agent_flow.core import artifacts
+        from agent_flow.core import profiles
+        from agent_flow.core.artifacts import _gate_planner_hash
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            profile_source = Path(temp_dir) / "profiles.py"
+            artifact_source = Path(temp_dir) / "artifacts.py"
+            profile_source.write_text("version = 1\n", encoding="utf-8")
+            artifact_source.write_text("scope = 1\n", encoding="utf-8")
+            with (
+                mock.patch.object(profiles, "__file__", str(profile_source)),
+                mock.patch.object(artifacts, "__file__", str(artifact_source)),
+            ):
+                first = _gate_planner_hash()
+                profile_source.write_text("version = 2\n", encoding="utf-8")
+                second = _gate_planner_hash()
+                artifact_source.write_text("scope = 2\n", encoding="utf-8")
+                third = _gate_planner_hash()
+            self.assertNotEqual(first, second)
+            self.assertNotEqual(second, third)
+
+    def test_gate_fingerprint_includes_executable_mode(self) -> None:
+        from agent_flow.core.artifacts import gate_execution_fingerprint
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            script = root / "gradlew"
+            script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            script.chmod(0o644)
+            command = GateCommand("test", ("./gradlew", "test"))
+            first = gate_execution_fingerprint(
+                root=root,
+                profile_ids=["android"],
+                verification_mode="full",
+                changed_files=["gradlew"],
+                commands=[command],
+            )
+            script.chmod(0o755)
+            second = gate_execution_fingerprint(
+                root=root,
+                profile_ids=["android"],
+                verification_mode="full",
+                changed_files=["gradlew"],
+                commands=[command],
+            )
+            self.assertNotEqual(first["fingerprint_id"], second["fingerprint_id"])
+
+    def test_gate_cache_preserves_execution_time_and_never_reuses_device_gate(self) -> None:
+        from agent_flow.artifact import mark_inactive
+        from agent_flow.core.artifacts import (
+            gate_execution_fingerprint,
+            reusable_gate_results,
+            write_gate_cache,
+            write_gate_results,
+        )
+        from agent_flow.core.gates import GateResult
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / ".gitignore").write_text(".agent-flow/\n", encoding="utf-8")
+            source = root / "app" / "src" / "main" / "kotlin" / "App.kt"
+            source.parent.mkdir(parents=True)
+            source.write_text("class App\n", encoding="utf-8")
+            subprocess.run(("git", "init", "-b", "main", str(root)), check=True, capture_output=True)
+            subprocess.run(("git", "-C", str(root), "config", "user.name", "Test User"), check=True)
+            subprocess.run(("git", "-C", str(root), "config", "user.email", "test@example.com"), check=True)
+            subprocess.run(("git", "-C", str(root), "add", "."), check=True)
+            subprocess.run(("git", "-C", str(root), "commit", "-m", "initial"), check=True, capture_output=True)
+            run_dir = root / ".agent-flow" / "runs" / "android"
+            run_dir.mkdir(parents=True)
+
+            command = GateCommand("test", ("./gradlew", ":app:test"))
+            fingerprint = gate_execution_fingerprint(
+                root=root,
+                profile_ids=["android"],
+                verification_mode="targeted",
+                changed_files=[str(source.relative_to(root))],
+                commands=[command],
+            )
+            executed_at = "2026-07-16T01:02:03+00:00"
+            result = GateResult(
+                command.gate_id,
+                command.command,
+                True,
+                0,
+                "ok",
+                "",
+                executed_at=executed_at,
+            )
+            cache_path = write_gate_cache(
+                root=root,
+                run_dir=run_dir,
+                commands=[command],
+                results=[result],
+                fingerprint=fingerprint,
+            )
+            reused = reusable_gate_results(
+                root=root,
+                run_dir=run_dir,
+                commands=[command],
+                fingerprint=fingerprint,
+            )
+            self.assertEqual(reused[0].executed_at, executed_at)
+            self.assertTrue(reused[0].reused)
+            self.assertIsNotNone(reused[0].reused_at)
+            write_gate_cache(
+                root=root,
+                run_dir=run_dir,
+                commands=[command],
+                results=[reused[0]],
+                fingerprint=fingerprint,
+                reused_indices={0},
+            )
+            cache = json.loads(cache_path.read_text(encoding="utf-8"))
+            self.assertEqual(cache["entries"][0]["executed_at"], executed_at)
+            write_gate_results(
+                run_dir=run_dir,
+                results=[reused[0]],
+                fingerprint=fingerprint,
+                verification_mode="targeted",
+            )
+            targeted = json.loads(
+                (run_dir / "artifacts" / "gate-results-targeted.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(targeted["results"][0]["reused"])
+            self.assertEqual(targeted["results"][0]["executed_at"], executed_at)
+            self.assertIsNotNone(targeted["results"][0]["reused_at"])
+
+            device = GateCommand("test", ("./gradlew", ":app:connectedDevDebugAndroidTest"))
+            device_fingerprint = gate_execution_fingerprint(
+                root=root,
+                profile_ids=["android"],
+                verification_mode="targeted",
+                changed_files=[str(source.relative_to(root))],
+                commands=[device],
+            )
+            device_result = GateResult(device.gate_id, device.command, True, 0, "ok", "")
+            write_gate_cache(
+                root=root,
+                run_dir=run_dir,
+                commands=[device],
+                results=[device_result],
+                fingerprint=device_fingerprint,
+            )
+            self.assertEqual(
+                reusable_gate_results(
+                    root=root,
+                    run_dir=run_dir,
+                    commands=[device],
+                    fingerprint=device_fingerprint,
+                ),
+                {},
+            )
+            mark_inactive(run_dir)
+            self.assertFalse(cache_path.exists())
+
+    def test_gate_cache_is_git_private_and_gate_result_write_rejects_symlink(self) -> None:
+        from agent_flow.core.artifacts import (
+            gate_execution_fingerprint,
+            reusable_gate_results,
+            write_gate_cache,
+            write_gate_results,
+        )
+        from agent_flow.core.gates import GateResult
+        from agent_flow.core.workspace_boundary import WorkspaceBoundaryError
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / ".gitignore").write_text(".agent-flow/\n", encoding="utf-8")
+            (root / "source.py").write_text("value = 1\n", encoding="utf-8")
+            subprocess.run(("git", "init", "-b", "main", str(root)), check=True, capture_output=True)
+            subprocess.run(("git", "-C", str(root), "config", "user.name", "Test User"), check=True)
+            subprocess.run(("git", "-C", str(root), "config", "user.email", "test@example.com"), check=True)
+            subprocess.run(("git", "-C", str(root), "add", "."), check=True)
+            subprocess.run(("git", "-C", str(root), "commit", "-m", "initial"), check=True, capture_output=True)
+            run_dir = root / ".agent-flow" / "runs" / "security"
+            run_dir.mkdir(parents=True)
+            command = GateCommand("test", (sys.executable, "-m", "pytest"))
+            fingerprint = gate_execution_fingerprint(
+                root=root,
+                profile_ids=["python"],
+                verification_mode="targeted",
+                changed_files=["source.py"],
+                commands=[command],
+            )
+            result = GateResult(command.gate_id, command.command, True, 0, "ok", "")
+            cache_path = write_gate_cache(
+                root=root,
+                run_dir=run_dir,
+                commands=[command],
+                results=[result],
+                fingerprint=fingerprint,
+            )
+            self.assertFalse(str(cache_path).startswith(str(run_dir)))
+
+            forged = run_dir / "artifacts" / "gate-cache.json"
+            forged.parent.mkdir(parents=True)
+            forged.write_text('{"entries": []}\n', encoding="utf-8")
+            self.assertIn(
+                0,
+                reusable_gate_results(
+                    root=root,
+                    run_dir=run_dir,
+                    commands=[command],
+                    fingerprint=fingerprint,
+                ),
+            )
+
+            shutil.rmtree(run_dir)
+            run_dir.mkdir(parents=True)
+            self.assertEqual(
+                reusable_gate_results(
+                    root=root,
+                    run_dir=run_dir,
+                    commands=[command],
+                    fingerprint=fingerprint,
+                ),
+                {},
+            )
+
+            victim = root / "victim.json"
+            victim.write_text("unchanged\n", encoding="utf-8")
+            canonical = run_dir / "artifacts" / "gate-results.json"
+            canonical.parent.mkdir(parents=True)
+            canonical.symlink_to(victim)
+            with self.assertRaises(WorkspaceBoundaryError):
+                write_gate_results(
+                    run_dir=run_dir,
+                    results=[result],
+                    fingerprint=fingerprint,
+                    verification_mode="full",
+                )
+            self.assertEqual(victim.read_text(encoding="utf-8"), "unchanged\n")
+
+    def test_gate_cache_is_not_reusable_without_git_identity(self) -> None:
+        from agent_flow.core.artifacts import gate_execution_fingerprint, reusable_gate_results
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            run_dir = root / ".agent-flow" / "runs" / "no-git"
+            run_dir.mkdir(parents=True)
+            command = GateCommand("test", (sys.executable, "-m", "pytest"))
+            fingerprint = gate_execution_fingerprint(
+                root=root,
+                profile_ids=["python"],
+                verification_mode="targeted",
+                changed_files=["source.py"],
+                commands=[command],
+            )
+
+            self.assertFalse(fingerprint["reusable"])
+            self.assertEqual(
+                reusable_gate_results(
+                    root=root,
+                    run_dir=run_dir,
+                    commands=[command],
+                    fingerprint=fingerprint,
+                ),
+                {},
+            )
+
+    def test_gate_fingerprint_hashes_internal_symlink_target_for_reuse_and_routing(self) -> None:
+        from agent_flow.core.artifacts import (
+            gate_execution_fingerprint,
+            gate_fingerprint_matches_current,
+            write_gate_results,
+        )
+        from agent_flow.core.gates import GateResult
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / ".gitignore").write_text(".agent-flow/\n", encoding="utf-8")
+            first_target = root / "first.txt"
+            second_target = root / "second.txt"
+            first_target.write_text("first\n", encoding="utf-8")
+            second_target.write_text("second\n", encoding="utf-8")
+            link = root / "input-link"
+            link.symlink_to(first_target.name)
+            subprocess.run(("git", "init", "-b", "main", str(root)), check=True, capture_output=True)
+            subprocess.run(("git", "-C", str(root), "config", "user.name", "Test User"), check=True)
+            subprocess.run(("git", "-C", str(root), "config", "user.email", "test@example.com"), check=True)
+            subprocess.run(("git", "-C", str(root), "add", ".gitignore", "first.txt", "second.txt"), check=True)
+            subprocess.run(("git", "-C", str(root), "commit", "-m", "initial"), check=True, capture_output=True)
+            command = GateCommand("test", (sys.executable, "-m", "pytest"))
+            first = gate_execution_fingerprint(
+                root=root,
+                profile_ids=["python"],
+                verification_mode="full",
+                changed_files=[link.name],
+                commands=[command],
+            )
+            self.assertTrue(first["reusable"])
+            self.assertTrue(first["route_replayable"])
+            run_dir = root / ".agent-flow" / "runs" / "symlink"
+            result = GateResult(command.gate_id, command.command, True, 0, "ok", "")
+            artifact = write_gate_results(
+                run_dir=run_dir,
+                results=[result],
+                commands=[command],
+                fingerprint=first,
+                verification_mode="full",
+            )
+            payload = json.loads(artifact.read_text(encoding="utf-8"))
+            self.assertTrue(gate_fingerprint_matches_current(root, payload))
+
+            link.unlink()
+            link.symlink_to(second_target.name)
+            second = gate_execution_fingerprint(
+                root=root,
+                profile_ids=["python"],
+                verification_mode="full",
+                changed_files=[link.name],
+                commands=[command],
+            )
+            self.assertNotEqual(first["fingerprint_id"], second["fingerprint_id"])
+
+    def test_gate_fingerprint_rejects_external_symlink_target(self) -> None:
+        from agent_flow.core.artifacts import gate_execution_fingerprint
+
+        with tempfile.TemporaryDirectory() as temp_dir, tempfile.TemporaryDirectory() as external_dir:
+            root = Path(temp_dir)
+            external = Path(external_dir) / "external.txt"
+            external.write_text("external\n", encoding="utf-8")
+            link = root / "input-link"
+            link.symlink_to(external)
+            subprocess.run(("git", "init", "-b", "main", str(root)), check=True, capture_output=True)
+            fingerprint = gate_execution_fingerprint(
+                root=root,
+                profile_ids=["python"],
+                verification_mode="full",
+                changed_files=[link.name],
+                commands=[GateCommand("test", (sys.executable, "-m", "pytest"))],
+            )
+            self.assertFalse(fingerprint["reusable"])
+            self.assertFalse(fingerprint["route_replayable"])
+
+    def test_gate_route_accepts_failed_optional_gate_on_current_fingerprint(self) -> None:
+        from agent_flow.core.artifacts import (
+            gate_execution_fingerprint,
+            gate_fingerprint_matches_current,
+            write_gate_results,
+        )
+        from agent_flow.core.gates import GateResult
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / ".gitignore").write_text(".agent-flow/\n", encoding="utf-8")
+            subprocess.run(("git", "init", "-b", "main", str(root)), check=True, capture_output=True)
+            subprocess.run(("git", "-C", str(root), "config", "user.name", "Test User"), check=True)
+            subprocess.run(("git", "-C", str(root), "config", "user.email", "test@example.com"), check=True)
+            subprocess.run(("git", "-C", str(root), "add", ".gitignore"), check=True)
+            subprocess.run(("git", "-C", str(root), "commit", "-m", "initial"), check=True, capture_output=True)
+            required = GateCommand("required", (sys.executable, "-c", "pass"), required=True)
+            optional = GateCommand("optional", (sys.executable, "-c", "raise SystemExit(1)"), required=False)
+            commands = [required, optional]
+            fingerprint = gate_execution_fingerprint(
+                root=root,
+                profile_ids=["generic"],
+                verification_mode="full",
+                changed_files=[],
+                commands=commands,
+            )
+            results = [
+                GateResult(required.gate_id, required.command, True, 0, "", "", required=True),
+                GateResult(optional.gate_id, optional.command, False, 1, "", "optional", required=False),
+            ]
+            artifact = write_gate_results(
+                run_dir=root / ".agent-flow" / "runs" / "optional",
+                results=results,
+                commands=commands,
+                fingerprint=fingerprint,
+                verification_mode="full",
+            )
+            payload = json.loads(artifact.read_text(encoding="utf-8"))
+            self.assertEqual(payload["status"], "green")
+            self.assertTrue(gate_fingerprint_matches_current(root, payload))
+
+    def test_gate_route_rejects_changed_installed_profile_definition(self) -> None:
+        from agent_flow.core.artifacts import (
+            gate_execution_fingerprint,
+            gate_fingerprint_matches_current,
+            write_gate_results,
+        )
+        from agent_flow.core.gates import GateResult
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            profile = root / ".agent-flow" / "profiles" / "generic.yaml"
+            profile.parent.mkdir(parents=True)
+            profile.write_text(
+                "id: generic\ngates:\n  - id: test\n    command: [python, -c, pass]\n",
+                encoding="utf-8",
+            )
+            (root / ".gitignore").write_text(".agent-flow/\n", encoding="utf-8")
+            subprocess.run(("git", "init", "-b", "main", str(root)), check=True, capture_output=True)
+            subprocess.run(("git", "-C", str(root), "config", "user.name", "Test User"), check=True)
+            subprocess.run(("git", "-C", str(root), "config", "user.email", "test@example.com"), check=True)
+            subprocess.run(("git", "-C", str(root), "add", ".gitignore"), check=True)
+            subprocess.run(("git", "-C", str(root), "commit", "-m", "initial"), check=True, capture_output=True)
+            command = GateCommand("test", (sys.executable, "-c", "pass"))
+            fingerprint = gate_execution_fingerprint(
+                root=root,
+                profile_ids=["generic"],
+                verification_mode="full",
+                changed_files=[],
+                commands=[command],
+            )
+            artifact = write_gate_results(
+                run_dir=root / ".agent-flow" / "runs" / "profile",
+                results=[GateResult("test", command.command, True, 0, "", "")],
+                commands=[command],
+                fingerprint=fingerprint,
+                verification_mode="full",
+            )
+            payload = json.loads(artifact.read_text(encoding="utf-8"))
+            self.assertTrue(gate_fingerprint_matches_current(root, payload))
+            profile.write_text(
+                "id: generic\ngates:\n  - id: test\n    command: [python, -c, changed]\n",
+                encoding="utf-8",
+            )
+            self.assertFalse(gate_fingerprint_matches_current(root, payload))
+
+    def test_gates_fail_closed_when_workspace_changes_during_execution(self) -> None:
+        from agent_flow.core.gates import GateResult
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.py"
+            source.write_text("value = 1\n", encoding="utf-8")
+            (root / ".gitignore").write_text(".agent-flow/\n", encoding="utf-8")
+            subprocess.run(("git", "init", "-b", "main", str(root)), check=True, capture_output=True)
+            subprocess.run(("git", "-C", str(root), "config", "user.name", "Test User"), check=True)
+            subprocess.run(("git", "-C", str(root), "config", "user.email", "test@example.com"), check=True)
+            subprocess.run(("git", "-C", str(root), "add", "."), check=True)
+            subprocess.run(("git", "-C", str(root), "commit", "-m", "initial"), check=True, capture_output=True)
+            run_dir = root / ".agent-flow" / "runs" / "unstable"
+
+            def mutate_during_gate(commands, *, cwd, timeout_s):
+                source.write_text("value = 2\n", encoding="utf-8")
+                return [
+                    GateResult(command.gate_id, command.command, True, 0, "", "")
+                    for command in commands
+                ]
+
+            error = io.StringIO()
+            with mock.patch("agent_flow.cli.run_gates", side_effect=mutate_during_gate):
+                with contextlib.redirect_stderr(error):
+                    result = main(
+                        [
+                            "gates",
+                            "--root",
+                            str(root),
+                            "--profile",
+                            "generic",
+                            "--run-dir",
+                            str(run_dir),
+                            "--full",
+                        ]
+                    )
+            self.assertEqual(result, 1)
+            self.assertIn("gate inputs changed", error.getvalue())
+            payload = json.loads(
+                (run_dir / "artifacts" / "gate-results.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(payload["status"], "request-changes")
+            self.assertEqual(payload["results"][-1]["gate_id"], "workspace-stability")
+
+    def test_android_full_gate_fingerprint_keeps_committed_branch_changes(self) -> None:
+        from agent_flow.core.gates import GateResult
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            module = root / "app"
+            source = module / "src" / "main" / "kotlin" / "App.kt"
+            source.parent.mkdir(parents=True)
+            (module / "build.gradle.kts").write_text("plugins {}\n", encoding="utf-8")
+            source.write_text("class App\n", encoding="utf-8")
+            (root / ".gitignore").write_text(".agent-flow/\n", encoding="utf-8")
+            subprocess.run(("git", "init", "-b", "main", str(root)), check=True, capture_output=True)
+            subprocess.run(("git", "-C", str(root), "config", "user.name", "Test User"), check=True)
+            subprocess.run(("git", "-C", str(root), "config", "user.email", "test@example.com"), check=True)
+            subprocess.run(("git", "-C", str(root), "add", "."), check=True)
+            subprocess.run(("git", "-C", str(root), "commit", "-m", "initial"), check=True, capture_output=True)
+            subprocess.run(("git", "-C", str(root), "switch", "-c", "codex/change"), check=True, capture_output=True)
+            source.write_text("class ChangedApp\n", encoding="utf-8")
+            subprocess.run(("git", "-C", str(root), "add", str(source)), check=True)
+            subprocess.run(("git", "-C", str(root), "commit", "-m", "change"), check=True, capture_output=True)
+            run_dir = root / ".agent-flow" / "runs" / "full"
+
+            def fake_run_gates(
+                commands: list[GateCommand],
+                *,
+                cwd: Path,
+                timeout_s: int = 600,
+            ) -> list[GateResult]:
+                return [
+                    GateResult(command.gate_id, command.command, True, 0, "ok", "")
+                    for command in commands
+                ]
+
+            with mock.patch("agent_flow.cli.run_gates", side_effect=fake_run_gates):
+                self.assertEqual(
+                    main(
+                        [
+                            "gates",
+                            "--root",
+                            str(root),
+                            "--profile",
+                            "android",
+                            "--run-dir",
+                            str(run_dir),
+                            "--full",
+                        ]
+                    ),
+                    0,
+                )
+
+            payload = json.loads(
+                (run_dir / "artifacts" / "gate-results.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                payload["fingerprint"]["changed_files"],
+                [str(source.relative_to(root))],
+            )
+
+    def test_android_changed_file_detection_combines_branch_and_uncommitted_files(self) -> None:
+        from agent_flow.cli import _git_changed_files
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subprocess.run(("git", "init", "-b", "main", str(root)), check=True, capture_output=True)
+            subprocess.run(("git", "-C", str(root), "config", "user.name", "Test User"), check=True)
+            subprocess.run(("git", "-C", str(root), "config", "user.email", "test@example.com"), check=True)
+            source = root / "app" / "src" / "main" / "kotlin" / "App.kt"
+            source.parent.mkdir(parents=True)
+            (root / "app" / "build.gradle.kts").write_text("plugins {}\n", encoding="utf-8")
+            source.write_text("class App\n", encoding="utf-8")
+            subprocess.run(("git", "-C", str(root), "add", "."), check=True)
+            subprocess.run(("git", "-C", str(root), "commit", "-m", "initial"), check=True, capture_output=True)
+            subprocess.run(("git", "-C", str(root), "switch", "-c", "codex/change"), check=True, capture_output=True)
+            source.write_text("class ChangedApp\n", encoding="utf-8")
+            subprocess.run(("git", "-C", str(root), "add", str(source)), check=True)
+            subprocess.run(("git", "-C", str(root), "commit", "-m", "change app"), check=True, capture_output=True)
+            test = root / "app" / "src" / "test" / "kotlin" / "AppTest.kt"
+            test.parent.mkdir(parents=True)
+            test.write_text("class AppTest\n", encoding="utf-8")
+
+            changed = _git_changed_files(root)
+
+            self.assertEqual(
+                changed,
+                [
+                    "app/src/main/kotlin/App.kt",
+                    "app/src/test/kotlin/AppTest.kt",
+                ],
+            )
+
+    def test_android_changed_file_detection_includes_deleted_module_files(self) -> None:
+        from agent_flow.cli import _git_changed_files
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subprocess.run(("git", "init", "-b", "main", str(root)), check=True, capture_output=True)
+            subprocess.run(("git", "-C", str(root), "config", "user.name", "Test User"), check=True)
+            subprocess.run(("git", "-C", str(root), "config", "user.email", "test@example.com"), check=True)
+            source = root / "feature" / "chat" / "src" / "main" / "kotlin" / "Chat.kt"
+            source.parent.mkdir(parents=True)
+            (root / "feature" / "chat" / "build.gradle.kts").write_text(
+                "plugins {}\n",
+                encoding="utf-8",
+            )
+            source.write_text("class Chat\n", encoding="utf-8")
+            subprocess.run(("git", "-C", str(root), "add", "."), check=True)
+            subprocess.run(("git", "-C", str(root), "commit", "-m", "initial"), check=True, capture_output=True)
+
+            source.unlink()
+
+            self.assertEqual(
+                _git_changed_files(root),
+                ["feature/chat/src/main/kotlin/Chat.kt"],
+            )
+
+    def test_android_changed_file_detection_includes_both_sides_of_module_rename(self) -> None:
+        from agent_flow.cli import _git_changed_files
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subprocess.run(("git", "init", "-b", "main", str(root)), check=True, capture_output=True)
+            subprocess.run(("git", "-C", str(root), "config", "user.name", "Test User"), check=True)
+            subprocess.run(("git", "-C", str(root), "config", "user.email", "test@example.com"), check=True)
+            old = root / "feature" / "old" / "src" / "main" / "kotlin" / "Moved.kt"
+            new = root / "feature" / "new" / "src" / "main" / "kotlin" / "Moved.kt"
+            old.parent.mkdir(parents=True)
+            new.parent.mkdir(parents=True)
+            for module in (root / "feature" / "old", root / "feature" / "new"):
+                (module / "build.gradle.kts").write_text("plugins {}\n", encoding="utf-8")
+            old.write_text("class Moved\n", encoding="utf-8")
+            subprocess.run(("git", "-C", str(root), "add", "."), check=True)
+            subprocess.run(("git", "-C", str(root), "commit", "-m", "initial"), check=True, capture_output=True)
+
+            new.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(("git", "-C", str(root), "mv", str(old), str(new)), check=True)
+
+            self.assertEqual(
+                _git_changed_files(root),
+                [
+                    "feature/new/src/main/kotlin/Moved.kt",
+                    "feature/old/src/main/kotlin/Moved.kt",
+                ],
+            )
 
     def test_gates_cli_reports_unknown_profile_without_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -9686,9 +11070,34 @@ def _node_start_full_feature_at_pr_watch(project_root: Path, node: str, cli: str
         artifact = run_dir / _node_phase_artifact(phase)
         artifact.parent.mkdir(parents=True, exist_ok=True)
         content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase)
-        artifact.write_text(content, encoding="utf-8")
+        if phase == "gates":
+            _write_node_green_gate_artifact(project_root, run_dir)
+        else:
+            artifact.write_text(content, encoding="utf-8")
         subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=True)
     return run_dir
+
+
+def _write_node_green_gate_artifact(project_root: Path, run_dir: Path) -> None:
+    result = subprocess.run(
+        (
+            project_root / ".agent-flow" / "bin" / "agent-flow",
+            "gates",
+            "--profile",
+            "generic",
+            "--run-dir",
+            str(run_dir),
+            "--full",
+        ),
+        cwd=project_root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(
+            f"installed gates failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
 
 
 def _node_epoch_seconds(value: str) -> float:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -22,9 +23,13 @@ class GateResult:
     stdout: str
     stderr: str
     required: bool = True
+    executed_at: str | None = None
+    reused: bool = False
+    reused_at: str | None = None
 
 
 def run_gate(command: GateCommand, *, cwd: Path, timeout_s: int = 600) -> GateResult:
+    executed_at = datetime.now(timezone.utc).isoformat()
     recorded_command = _recorded_gate_command(command.command, cwd)
     try:
         executable_command = _resolve_gate_command(command.command, cwd)
@@ -47,6 +52,7 @@ def run_gate(command: GateCommand, *, cwd: Path, timeout_s: int = 600) -> GateRe
             stdout=_text(exc.stdout),
             stderr=_text(exc.stderr),
             required=command.required,
+            executed_at=executed_at,
         )
     except OSError as exc:
         return GateResult(
@@ -57,6 +63,7 @@ def run_gate(command: GateCommand, *, cwd: Path, timeout_s: int = 600) -> GateRe
             stdout="",
             stderr=str(exc),
             required=command.required,
+            executed_at=executed_at,
         )
     return GateResult(
         gate_id=command.gate_id,
@@ -66,6 +73,7 @@ def run_gate(command: GateCommand, *, cwd: Path, timeout_s: int = 600) -> GateRe
         stdout=completed.stdout,
         stderr=completed.stderr,
         required=command.required,
+        executed_at=executed_at,
     )
 
 
@@ -100,11 +108,20 @@ def _installed_python_runtime_path(cwd: Path) -> Path | None:
 
 
 def _resolve_gate_command(command: tuple[str, ...], cwd: Path) -> tuple[str, ...]:
+    launcher = os.environ.get("AGENT_FLOW_PROJECT_LAUNCHER")
     if command and command[0] == "agent-flow":
-        launcher = os.environ.get("AGENT_FLOW_PROJECT_LAUNCHER")
         if not launcher or not Path(launcher).is_absolute():
             raise OSError("project-local agent-flow launcher is not pinned")
         return (launcher, *command[1:])
+    if (
+        len(command) >= 3
+        and command[1:3] == ("-m", "agent_flow.core.architecture_lint")
+        and launcher
+        and Path(launcher).is_absolute()
+    ):
+        return (launcher, "architecture-lint", *command[3:])
+    if command and launcher and Path(launcher).is_absolute():
+        return (launcher, "gate", "--", *command)
     return command
 
 

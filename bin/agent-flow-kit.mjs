@@ -117,6 +117,7 @@ const PROFILE_MANAGED_HOST_ONLY_SKILLS = new Set([
   "verified-email",
 ]);
 const GENERATED_PROJECT_SKILL_NAMES = new Set([
+  "agent-flow",
   "architecture-reviewer",
   "full-feature-workflow",
   "plan-reviewer",
@@ -186,6 +187,24 @@ function syncProject(rootOverride = null) {
   }
 }
 
+function installProjectPythonRuntime(root) {
+  const runtimeRoot = path.join(root, RUNTIME_PYTHON_RELATIVE);
+  withManagedInstallMutation(runtimeRoot, (managedRuntime) => {
+    const boundary = managedWriteBoundary(managedRuntime);
+    withManagedDirectoryCwd(boundary, path.dirname(managedRuntime), true, () => {
+      const name = path.basename(managedRuntime);
+      if (lstatIfExists(name)) fs.rmSync(name, { recursive: true, force: true });
+      fs.mkdirSync(name, { mode: 0o755 });
+      fs.chmodSync(name, 0o755);
+    });
+    copyRuntimeTree(
+      path.join(KIT_ROOT, "src", "agent_flow"),
+      managedRuntime,
+      "agent_flow",
+    );
+  });
+}
+
 function installProjectNodeRuntime(root) {
   const runtimeRoot = path.join(root, RUNTIME_NODE_RELATIVE);
   if (!samePath(runtimeRoot, KIT_ROOT)) {
@@ -208,7 +227,8 @@ function installProjectNodeRuntime(root) {
       withManagedDirectoryCwd(boundary, path.dirname(managedRuntime), true, () => {
         const name = path.basename(managedRuntime);
         if (lstatIfExists(name)) fs.rmSync(name, { recursive: true, force: true });
-        fs.mkdirSync(name);
+        fs.mkdirSync(name, { mode: 0o755 });
+        fs.chmodSync(name, 0o755);
       });
       for (const [source, destination] of bundledDirectories) {
         copyRuntimeTree(path.join(KIT_ROOT, source), managedRuntime, destination);
@@ -228,7 +248,7 @@ function copyRuntimeTree(sourceRoot, runtimeRoot, destinationRelative) {
     throw new Error(`project runtime source is unsafe: ${sourceRoot}`);
   }
   const destinationRoot = path.join(runtimeRoot, destinationRelative);
-  ensureManagedDirectory(destinationRoot, runtimeRoot);
+  ensureManagedDirectory(destinationRoot, runtimeRoot, 0o755);
   const visit = (sourceDirectory, destinationDirectory) => {
     for (const entry of fs.readdirSync(sourceDirectory, { withFileTypes: true })) {
       if (entry.name === "__pycache__" || entry.name.endsWith(".pyc")) continue;
@@ -239,7 +259,7 @@ function copyRuntimeTree(sourceRoot, runtimeRoot, destinationRelative) {
         throw new Error(`project runtime source contains a symlink: ${sourcePath}`);
       }
       if (entry.isDirectory()) {
-        ensureManagedDirectory(destinationPath, runtimeRoot);
+        ensureManagedDirectory(destinationPath, runtimeRoot, 0o755);
         visit(sourcePath, destinationPath);
       } else if (entry.isFile()) {
         writeManagedRegularFile(
@@ -266,7 +286,7 @@ function projectLauncherSource(root) {
     '"$launcher_dir/../runtime/node/bin/agent-flow-kit.mjs" "$@"',
   );
   return `#!/bin/sh
-unset NODE_OPTIONS NODE_PATH BASH_ENV ENV LD_PRELOAD LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH PYTHONPATH PYTHONHOME PYTHONSTARTUP
+unset NODE_OPTIONS NODE_PATH BASH_ENV ENV LD_AUDIT LD_BIND_NOW LD_DEBUG LD_DEBUG_OUTPUT LD_DYNAMIC_WEAK LD_HWCAP_MASK LD_LIBRARY_PATH LD_ORIGIN_PATH LD_PRELOAD LD_PROFILE LD_SHOW_AUXV LD_TRACE_LOADED_OBJECTS LD_USE_LOAD_BIAS LD_VERBOSE LD_WARN DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH DYLD_FRAMEWORK_PATH DYLD_FALLBACK_FRAMEWORK_PATH DYLD_FALLBACK_LIBRARY_PATH DYLD_ROOT_PATH DYLD_IMAGE_SUFFIX DYLD_SHARED_REGION PYTHONPATH PYTHONHOME PYTHONSTARTUP
 PYTHON=${pythonPath}
 PYTHON_EXECUTABLE=${pythonPath}
 AGENT_FLOW_PYTHON_EXECUTABLE=${pythonPath}
@@ -372,6 +392,7 @@ function projectRuntimeContract(root) {
       path: projectPythonPath(),
       resolved_path: fs.realpathSync(projectPythonPath()),
       ...executableIdentity(projectPythonPath()),
+      dependencies: executableDependencyContracts(projectPythonPath()),
     },
     runtime: {
       path: RUNTIME_NODE_RELATIVE.split(path.sep).join("/"),
@@ -407,7 +428,154 @@ function executableContract(pathName) {
   return {
     path: fs.realpathSync(pathName),
     ...executableIdentity(pathName),
+    dependencies: executableDependencyContracts(pathName),
   };
+}
+
+function executableDependencyContracts(pathName) {
+  const resolved = fs.realpathSync(pathName);
+  const libraryRoot = path.resolve(path.dirname(resolved), "..", "lib");
+  const dependencies = machoDependencyClosure(resolved);
+  if (fs.existsSync(libraryRoot)) {
+    for (const name of fs.readdirSync(libraryRoot)) {
+      if (
+        (name.startsWith("libpython") || name.startsWith("libnode"))
+        && name.endsWith(".dylib")
+      ) {
+        const loadPath = path.join(libraryRoot, name);
+        const dependency = fs.realpathSync(loadPath);
+        if (!dependencies.has(dependency)) {
+          dependencies.set(dependency, { loadPaths: new Set(), loadCommands: new Set() });
+        }
+        dependencies.get(dependency).loadPaths.add(loadPath);
+        dependencies.get(dependency).loadCommands.add(loadPath);
+      }
+    }
+  }
+  const paths = [...dependencies.keys()].sort(compareCodePoints);
+  const names = paths.map((dependency) => path.basename(dependency));
+  if (new Set(names).size !== names.length) {
+    throw new Error(`project runtime executable dependency names collide: ${pathName}`);
+  }
+  return paths.map((dependency) => {
+    const metadata = dependencies.get(dependency);
+    const loadPaths = [...metadata.loadPaths].sort(compareCodePoints);
+    const loadCommands = [...metadata.loadCommands].sort(compareCodePoints);
+    const frameworkRelative = machoFrameworkRelativePath(dependency, loadPaths, loadCommands);
+    return {
+      name: path.basename(dependency),
+      path: dependency,
+      load_paths: loadPaths,
+      load_commands: loadCommands,
+      stage_kind: frameworkRelative ? "framework" : "library",
+      stage_relative: frameworkRelative || path.basename(dependency),
+      ...executableIdentity(dependency),
+    };
+  });
+}
+
+function machoDependencyClosure(pathName) {
+  if (process.platform !== "darwin") return new Map();
+  const executable = fs.realpathSync(pathName);
+  const discovered = new Map();
+  const queue = [{ dependency: executable, inheritedRpaths: [] }];
+  while (queue.length) {
+    const { dependency, inheritedRpaths } = queue.shift();
+    const rpaths = [...machoRpaths(dependency, executable), ...inheritedRpaths];
+    for (const loadPath of machoLoadPaths(dependency)) {
+      if (machoSystemPath(loadPath)) continue;
+      const candidate = resolveMachoLoadPath(loadPath, dependency, executable, rpaths);
+      if (!candidate) {
+        throw new Error(`project runtime Mach-O dependency is unresolved: ${loadPath}`);
+      }
+      const resolved = fs.realpathSync(candidate);
+      if (machoSystemPath(resolved)) continue;
+      if (!discovered.has(resolved)) {
+        discovered.set(resolved, { loadPaths: new Set(), loadCommands: new Set() });
+        queue.push({ dependency: resolved, inheritedRpaths: rpaths });
+      }
+      discovered.get(resolved).loadPaths.add(candidate);
+      discovered.get(resolved).loadCommands.add(loadPath);
+    }
+  }
+  return discovered;
+}
+
+function machoLoadPaths(pathName) {
+  if (process.env.AGENT_FLOW_TEST_OTOOL_FAILURE === "1") {
+    throw new Error(`project runtime Mach-O dependency inspection failed: ${pathName}`);
+  }
+  const result = safeSpawnSync("/usr/bin/otool", ["-L", pathName], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (result.error || result.status !== 0) {
+    throw new Error(`project runtime Mach-O dependency inspection failed: ${pathName}`);
+  }
+  return String(result.stdout || "")
+    .split(/\r?\n/)
+    .slice(1)
+    .map((line) => line.match(/^\s+(.+?)\s+\(compatibility version/)?.[1])
+    .filter(Boolean);
+}
+
+function machoRpaths(pathName, executable) {
+  const result = safeSpawnSync("/usr/bin/otool", ["-l", pathName], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (result.error || result.status !== 0) {
+    throw new Error(`project runtime Mach-O rpath inspection failed: ${pathName}`);
+  }
+  const lines = String(result.stdout || "").split(/\r?\n/);
+  const rpaths = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (lines[index].trim() !== "cmd LC_RPATH") continue;
+    for (let cursor = index + 1; cursor < Math.min(lines.length, index + 5); cursor += 1) {
+      const match = lines[cursor].match(/^\s*path\s+(.+?)\s+\(offset\s+\d+\)$/);
+      if (match) {
+        const expanded = expandMachoPath(match[1], pathName, executable);
+        if (expanded) rpaths.push(expanded);
+        break;
+      }
+    }
+  }
+  return rpaths;
+}
+
+function expandMachoPath(value, loader, executable) {
+  if (value === "@loader_path") return path.dirname(loader);
+  if (value.startsWith("@loader_path/")) return path.resolve(path.dirname(loader), value.slice(13));
+  if (value === "@executable_path") return path.dirname(executable);
+  if (value.startsWith("@executable_path/")) return path.resolve(path.dirname(executable), value.slice(17));
+  return path.isAbsolute(value) ? path.resolve(value) : null;
+}
+
+function resolveMachoLoadPath(value, loader, executable, rpaths) {
+  if (value.startsWith("@rpath/")) {
+    const suffix = value.slice(7);
+    return rpaths.map((root) => path.join(root, suffix)).find((candidate) => fs.existsSync(candidate)) || null;
+  }
+  const expanded = expandMachoPath(value, loader, executable);
+  return expanded && fs.existsSync(expanded) ? expanded : null;
+}
+
+function machoSystemPath(value) {
+  return value.startsWith("/usr/lib/") || value.startsWith("/System/Library/");
+}
+
+function machoFrameworkRelativePath(dependency, loadPaths, loadCommands) {
+  for (const value of [dependency, ...loadPaths, ...loadCommands]) {
+    const match = String(value).replaceAll("\\", "/").match(/(?:^|\/)([^/]+\.framework\/(?:Versions\/[^/]+\/)?[^/]+)$/);
+    if (match) return match[1];
+  }
+  return null;
+}
+
+function assertExecutableDependencies(pathName, expected) {
+  if (canonicalJson(executableDependencyContracts(pathName)) !== canonicalJson(expected || [])) {
+    throw new Error(`project runtime executable dependencies changed: ${pathName}`);
+  }
 }
 
 function originalNodeAuthority() {
@@ -424,6 +592,7 @@ function originalNodeAuthority() {
         || current.mode !== expected.mode
         || Number.parseInt(current.links, 10) < Number.parseInt(expected.links, 10)
       ) throw new Error("identity mismatch");
+      assertExecutableDependencies(expected.path, expected.dependencies);
     } catch {
       throw new Error("project runtime original Node authority is invalid");
     }
@@ -458,12 +627,14 @@ function projectRuntimeContractCommitment(contract) {
     contract.node.inode,
     contract.node.links,
     contract.node.mode,
+    canonicalJson(contract.node.dependencies || []),
     contract.git.path,
     contract.git.sha256,
     contract.git.device,
     contract.git.inode,
     contract.git.links,
     contract.git.mode,
+    canonicalJson(contract.git.dependencies || []),
     contract.python.path,
     contract.python.resolved_path,
     contract.python.sha256,
@@ -471,6 +642,7 @@ function projectRuntimeContractCommitment(contract) {
     contract.python.inode,
     contract.python.links,
     contract.python.mode,
+    canonicalJson(contract.python.dependencies || []),
     contract.runtime.path,
     contract.runtime.integrity,
     contract.python_runtime.path,
@@ -516,6 +688,9 @@ function assertProjectRuntimeContract(root) {
   assertExecutableIdentity(contract.node.path, contract.node, true);
   assertExecutableIdentity(contract.git.path, contract.git);
   assertExecutableIdentity(contract.python.resolved_path, contract.python);
+  assertExecutableDependencies(contract.node.path, contract.node.dependencies);
+  assertExecutableDependencies(contract.git.path, contract.git.dependencies);
+  assertExecutableDependencies(contract.python.resolved_path, contract.python.dependencies);
   return contract;
 }
 
@@ -523,7 +698,9 @@ const AUTHENTICATED_EXEC_VERIFIER = [
   "import base64,hashlib,json,os,stat,subprocess,sys,time",
   "expected=json.loads(base64.b64decode(sys.argv[1],validate=True))",
   "target=expected.get('resolved_path') or expected['path']; staging_root=expected['staging_root']",
-  "source_fd=stage_fd=staging_fd=stage_dir_fd=bin_fd=lib_fd=None; stage_dir=stage_path=None; created_files=[]; frozen_paths=[]; dependency_records=[]",
+  "expected_dependencies={entry['name']:entry for entry in expected.get('dependencies',[])}",
+  "if len(expected_dependencies)!=len(expected.get('dependencies',[])): raise OSError('dependency name collision')",
+  "source_fd=stage_fd=staging_fd=stage_dir_fd=bin_fd=lib_fd=frameworks_fd=None; stage_dir=stage_path=None; created_files=[]; created_directories=[]; parent_fds=[]; frozen_paths=[]; dependency_records=[]",
   "def digest_fd(descriptor):",
   " os.lseek(descriptor,0,os.SEEK_SET); digest=hashlib.sha256()",
   " while True:",
@@ -567,15 +744,31 @@ const AUTHENTICATED_EXEC_VERIFIER = [
   "  os.fsync(destination)",
   " finally: os.close(destination)",
   " return os.open(name,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0),dir_fd=parent_descriptor)",
-  "def copy_dependency(source,parent_descriptor,name):",
+  "def copy_dependency(source,parent_descriptor,name,dependency_expected):",
+  " load_paths=dependency_expected.get('load_paths',[dependency_expected.get('path')])",
+  " if not isinstance(load_paths,list) or not load_paths or any(not os.path.isabs(item) or os.path.realpath(item)!=dependency_expected.get('path') for item in load_paths): raise OSError('dependency load path mismatch')",
   " dependency_source=os.open(os.path.realpath(source),os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))",
   " try:",
   "  before=os.fstat(dependency_source)",
   "  if not stat.S_ISREG(before.st_mode) or before.st_mode&0o022: raise OSError('unsafe dependency')",
+  "  actual={'sha256':digest_fd(dependency_source),'device':str(before.st_dev),'inode':str(before.st_ino),'links':str(before.st_nlink),'mode':stat.S_IMODE(before.st_mode)}",
+  "  if os.path.realpath(source)!=dependency_expected.get('path') or any(actual[key]!=dependency_expected[key] for key in actual): raise OSError('dependency identity mismatch')",
   "  digest=digest_fd(dependency_source); copied=copy_descriptor(dependency_source,parent_descriptor,name,stat.S_IMODE(before.st_mode)); after=os.fstat(dependency_source)",
   "  if not same_object(before,after) or digest_fd(dependency_source)!=digest or digest_fd(copied)!=digest: os.close(copied); raise OSError('dependency changed')",
   "  return copied",
   " finally: os.close(dependency_source)",
+  "def nested_parent(root_descriptor,root_path,components):",
+  " if any(not item or item in ('.','..') or '/' in item or '\\\\' in item for item in components): raise OSError('invalid dependency stage path')",
+  " parent=os.dup(root_descriptor); parent_fds.append(parent); current_path=root_path",
+  " for component in components:",
+  "  current_path=os.path.join(current_path,component)",
+  "  try: os.mkdir(component,0o700,dir_fd=parent); created_directories.append(current_path)",
+  "  except FileExistsError: pass",
+  "  child=os.open(component,os.O_RDONLY|getattr(os,'O_DIRECTORY',0)|getattr(os,'O_NOFOLLOW',0),dir_fd=parent)",
+  "  metadata=os.fstat(child)",
+  "  if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid!=os.getuid() or metadata.st_mode&0o077: os.close(child); raise OSError('unsafe dependency stage directory')",
+  "  parent=child; parent_fds.append(parent)",
+  " return parent,current_path",
   "def freeze(path):",
   " flags=getattr(stat,'UF_IMMUTABLE',0); chflags=getattr(os,'chflags',None)",
   " if sys.platform=='darwin':",
@@ -596,16 +789,28 @@ const AUTHENTICATED_EXEC_VERIFIER = [
   " if not same_object(before,after) or any(actual[key]!=expected[key] for key in actual): raise OSError('identity mismatch')",
   " staging_fd=secure_staging_descriptor(); stage_name=os.urandom(24).hex(); os.mkdir(stage_name,0o700,dir_fd=staging_fd)",
   " stage_dir=os.path.join(staging_root,stage_name); stage_dir_fd=os.open(stage_name,os.O_RDONLY|getattr(os,'O_DIRECTORY',0)|getattr(os,'O_NOFOLLOW',0),dir_fd=staging_fd)",
-  " os.mkdir('bin',0o700,dir_fd=stage_dir_fd); bin_fd=os.open('bin',os.O_RDONLY|getattr(os,'O_DIRECTORY',0)|getattr(os,'O_NOFOLLOW',0),dir_fd=stage_dir_fd)",
+  " os.mkdir('bin',0o700,dir_fd=stage_dir_fd); created_directories.append(os.path.join(stage_dir,'bin')); bin_fd=os.open('bin',os.O_RDONLY|getattr(os,'O_DIRECTORY',0)|getattr(os,'O_NOFOLLOW',0),dir_fd=stage_dir_fd)",
   " stage_fd=copy_descriptor(source_fd,bin_fd,'executable',expected['mode']); stage_metadata=os.fstat(stage_fd); created_files.append((bin_fd,'executable',stage_metadata.st_dev,stage_metadata.st_ino))",
   " if not stat.S_ISREG(stage_metadata.st_mode) or stage_metadata.st_nlink!=1 or stat.S_IMODE(stage_metadata.st_mode)!=expected['mode'] or digest_fd(stage_fd)!=expected['sha256']: raise OSError('staged identity mismatch')",
   " if not same_object(before,os.fstat(source_fd)) or digest_fd(source_fd)!=source_digest: raise OSError('source changed while staging')",
-  " source_lib=os.path.abspath(os.path.join(os.path.dirname(target),'..','lib'))",
-  " if os.path.isdir(source_lib):",
-  "  names=[name for name in os.listdir(source_lib) if (name.startswith('libpython') or name.startswith('libnode')) and name.endswith('.dylib')]",
-  "  if names: os.mkdir('lib',0o700,dir_fd=stage_dir_fd); lib_fd=os.open('lib',os.O_RDONLY|getattr(os,'O_DIRECTORY',0)|getattr(os,'O_NOFOLLOW',0),dir_fd=stage_dir_fd)",
-  "  for name in names:",
-  "   dependency_fd=copy_dependency(os.path.join(source_lib,name),lib_fd,name); dependency_metadata=os.fstat(dependency_fd); dependency_records.append((os.path.join(stage_dir,'lib',name),dependency_fd,dependency_metadata.st_dev,dependency_metadata.st_ino,digest_fd(dependency_fd))); created_files.append((lib_fd,name,dependency_metadata.st_dev,dependency_metadata.st_ino))",
+  " names=sorted(expected_dependencies)",
+  " library_names=[name for name in names if expected_dependencies[name].get('stage_kind','library')=='library']",
+  " framework_names=[name for name in names if expected_dependencies[name].get('stage_kind')=='framework']",
+  " if len(library_names)+len(framework_names)!=len(names): raise OSError('invalid dependency stage kind')",
+  " if library_names:",
+  "  os.mkdir('lib',0o700,dir_fd=stage_dir_fd); created_directories.append(os.path.join(stage_dir,'lib')); lib_fd=os.open('lib',os.O_RDONLY|getattr(os,'O_DIRECTORY',0)|getattr(os,'O_NOFOLLOW',0),dir_fd=stage_dir_fd)",
+  " if framework_names:",
+  "  os.mkdir('frameworks',0o700,dir_fd=stage_dir_fd); created_directories.append(os.path.join(stage_dir,'frameworks')); frameworks_fd=os.open('frameworks',os.O_RDONLY|getattr(os,'O_DIRECTORY',0)|getattr(os,'O_NOFOLLOW',0),dir_fd=stage_dir_fd)",
+  " for name in names:",
+  "  dependency_expected=expected_dependencies[name]; stage_kind=dependency_expected.get('stage_kind','library'); stage_relative=dependency_expected.get('stage_relative',name)",
+  "  if stage_kind=='framework':",
+  "   components=stage_relative.split('/')",
+  "   if not components[0].endswith('.framework') or components[-1]!=name or not (len(components)==2 or (len(components)>=4 and components[1]=='Versions')): raise OSError('invalid framework dependency path')",
+  "   dependency_parent,parent_path=nested_parent(frameworks_fd,os.path.join(stage_dir,'frameworks'),components[:-1]); dependency_path=os.path.join(parent_path,components[-1])",
+  "  else:",
+  "   if stage_relative!=name: raise OSError('invalid library dependency path')",
+  "   dependency_parent=lib_fd; dependency_path=os.path.join(stage_dir,'lib',name)",
+  "  dependency_fd=copy_dependency(dependency_expected['path'],dependency_parent,components[-1] if stage_kind=='framework' else name,dependency_expected); dependency_metadata=os.fstat(dependency_fd); dependency_records.append((dependency_path,dependency_fd,dependency_metadata.st_dev,dependency_metadata.st_ino,digest_fd(dependency_fd))); created_files.append((dependency_parent,components[-1] if stage_kind=='framework' else name,dependency_metadata.st_dev,dependency_metadata.st_ino))",
   " stage_path=os.path.join(stage_dir,'bin','executable')",
   " hold=int(os.environ.get('AGENT_FLOW_TEST_HOLD_AFTER_AUTHENTICATED_STAGE_MS','0'))",
   " if 0<hold<=10000: print('agent-flow:test-authenticated-stage-ready:'+stage_path,file=sys.stderr,flush=True); time.sleep(hold/1000)",
@@ -615,13 +820,15 @@ const AUTHENTICATED_EXEC_VERIFIER = [
   "  dependency_named=os.lstat(dependency_path); dependency_current=os.fstat(dependency_fd)",
   "  if (dependency_named.st_dev,dependency_named.st_ino)!=(dependency_device,dependency_inode) or (dependency_current.st_dev,dependency_current.st_ino)!=(dependency_device,dependency_inode) or digest_fd(dependency_fd)!=dependency_digest: raise OSError('staging dependency changed')",
   "  freeze(dependency_path)",
-  " freeze(stage_path); freeze(os.path.join(stage_dir,'bin')); freeze(stage_dir);",
-  " if lib_fd is not None: freeze(os.path.join(stage_dir,'lib'))",
+  " freeze(stage_path)",
+  " for directory in sorted(set(created_directories),key=lambda item:item.count(os.sep),reverse=True): freeze(directory)",
+  " freeze(stage_dir)",
   " env=dict(os.environ); env.pop('AGENT_FLOW_TEST_HOLD_BEFORE_AUTHENTICATED_EXEC_OPEN_MS',None); env.pop('AGENT_FLOW_TEST_HOLD_BEFORE_AUTHENTICATED_PYTHON_OPEN_MS',None)",
   " env.pop('AGENT_FLOW_TEST_HOLD_AFTER_AUTHENTICATED_STAGE_MS',None)",
-  " [env.pop(name,None) for name in ('DYLD_INSERT_LIBRARIES','DYLD_LIBRARY_PATH','LD_PRELOAD','LD_LIBRARY_PATH')]",
+  " [env.pop(name,None) for name in tuple(env) if name.startswith(('DYLD_','LD_'))]",
   " if lib_fd is not None:",
-  "  library_path=os.path.join(stage_dir,'lib'); env['DYLD_LIBRARY_PATH']=library_path+os.pathsep+env.get('DYLD_LIBRARY_PATH','') if sys.platform=='darwin' else env.get('DYLD_LIBRARY_PATH',''); env['LD_LIBRARY_PATH']=library_path+os.pathsep+env.get('LD_LIBRARY_PATH','') if sys.platform!='darwin' else env.get('LD_LIBRARY_PATH','')",
+  "  library_path=os.path.join(stage_dir,'lib'); env['DYLD_LIBRARY_PATH']=library_path if sys.platform=='darwin' else env.get('DYLD_LIBRARY_PATH',''); env['LD_LIBRARY_PATH']=library_path if sys.platform!='darwin' else env.get('LD_LIBRARY_PATH','')",
+  " if frameworks_fd is not None and sys.platform=='darwin': env['DYLD_FRAMEWORK_PATH']=os.path.join(stage_dir,'frameworks')",
   " if expected.get('python_home'): env['PYTHONHOME']=expected['python_home']",
   " if expected.get('python_site_packages'): env['PYTHONPATH']=os.pathsep.join([*expected['python_site_packages'],env.get('PYTHONPATH','')]).rstrip(os.pathsep)",
   " original=dict(expected); [original.pop(key,None) for key in ('staging_root','project_root','python_home','python_site_packages')]; env['AGENT_FLOW_ORIGINAL_NODE_AUTHORITY']=base64.b64encode(json.dumps(original,separators=(',',':')).encode()).decode()",
@@ -642,14 +849,14 @@ const AUTHENTICATED_EXEC_VERIFIER = [
   "   current=os.stat(name,dir_fd=parent,follow_symlinks=False)",
   "   if (current.st_dev,current.st_ino)==(device,inode): os.unlink(name,dir_fd=parent)",
   "  except OSError: pass",
-  " for descriptor in (source_fd,stage_fd,bin_fd,lib_fd,*[record[1] for record in dependency_records]):",
+  " for descriptor in (source_fd,stage_fd,bin_fd,lib_fd,frameworks_fd,*[record[1] for record in dependency_records],*parent_fds):",
   "  if descriptor is not None:",
   "   try: os.close(descriptor)",
   "   except OSError: pass",
+  " for directory in sorted(set(created_directories),key=lambda item:item.count(os.sep),reverse=True):",
+  "  try: os.rmdir(directory)",
+  "  except OSError: pass",
   " if stage_dir_fd is not None:",
-  "  for child in ('bin','lib'):",
-  "   try: os.rmdir(child,dir_fd=stage_dir_fd)",
-  "   except OSError: pass",
   "  try: os.close(stage_dir_fd)",
   "  except OSError: pass",
   " if staging_fd is not None and stage_dir is not None:",
@@ -679,6 +886,7 @@ function executableAuthority(kind) {
       path: projectPythonPath(),
       resolved_path: fs.realpathSync(projectPythonPath()),
       ...executableIdentity(projectPythonPath()),
+      dependencies: executableDependencyContracts(projectPythonPath()),
     };
   }
   throw new Error(`unsupported executable authority: ${kind}`);
@@ -898,14 +1106,7 @@ function installProjectUnlocked(root, context, lock) {
   }
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "scripts"), path.join(agentFlowDir, "scripts"), forceManaged);
   removeStaleContextDocsScripts(agentFlowDir, forceManaged);
-  copyBundledDirIfMissingOrSame(
-    path.join(KIT_ROOT, "src", "agent_flow"),
-    path.join(root, RUNTIME_PYTHON_RELATIVE, "agent_flow"),
-    true,
-    new Set(),
-    true,
-    true,
-  );
+  installProjectPythonRuntime(root);
   installProjectNodeRuntime(root);
   const runtimeContract = projectRuntimeContract(root);
   installProjectGuardVerifier(root, runtimeContract);
@@ -1029,6 +1230,7 @@ function runWorkflowCommand(args) {
       phase_index: 0,
       phase: phases[0].id,
       status: "running",
+      publication_status: "starting",
       run_dir: runDirRel,
       started_at: startedAt,
       phase_entered_at: startedAt,
@@ -1037,27 +1239,49 @@ function runWorkflowCommand(args) {
       ...(execution ? { execution } : {}),
       ...skillPlan,
     };
-    let bound = false;
-    const workspaceClaim = acquireNodeWorkspaceStartClaim(root, workspace.identity);
+    const workspaceClaim = acquireNodeWorkspaceStartClaim(
+      root,
+      workspace.identity,
+      runId,
+      { runDir, execution },
+    );
     try {
+      if (workspaceClaim) state.start_claim_token = workspaceClaim.token;
+      if (workspace.identity && !samePath(workspace.identity.workspace_root, root)) {
+        state.workspace_generation = nextNodeWorkspaceGeneration(root, workspace.identity);
+      }
       assertNodeExecutionStartAvailable(root, execution, workspace);
       fs.mkdirSync(path.join(runDir, "artifacts"), { recursive: true });
       fs.mkdirSync(path.join(runDir, "logs"), { recursive: true });
-      writeJson(path.join(runDir, "manifest.json"), state);
+      writeOwnedJson(path.join(runDir, "manifest.json"), state);
+      if (process.env.AGENT_FLOW_TEST_CRASH_AFTER_NODE_START_MANIFEST === "1") {
+        process.exit(86);
+      }
       if (execution && workspace.identity) {
         bindNodeExecution(root, execution, state);
-        bound = true;
+        holdInstallForTest(
+          "AGENT_FLOW_TEST_HOLD_AFTER_NODE_START_BINDING_MS",
+          "node-start-binding-published",
+        );
       }
       writeCurrentRun(root, state);
-    } catch (error) {
-      if (bound) {
-        try {
-          releaseNodeExecution(root, execution, state.run_dir);
-        } catch {
-          // 원래 start 실패를 유지한다.
-        }
+      if (process.env.AGENT_FLOW_TEST_CRASH_AFTER_NODE_START_CURRENT === "1") {
+        process.exit(87);
       }
-      fs.rmSync(runDir, { recursive: true, force: true });
+      if (process.env.AGENT_FLOW_TEST_FAIL_AFTER_NODE_START_CURRENT === "1") {
+        throw new Error("injected failure after Node start current state");
+      }
+      const activeState = { ...state, publication_status: "active" };
+      writeOwnedJson(path.join(runDir, "manifest.json"), activeState);
+      writeCurrentRun(root, activeState);
+    } catch (error) {
+      if (workspaceClaim?.payload) recoverIncompleteNodeStart(root, workspaceClaim.payload);
+      else recoverIncompleteNodeStart(root, {
+        run_id: runId,
+        run_dir: runDir,
+        token: undefined,
+        execution,
+      });
       throw error;
     } finally {
       releaseNodeWorkspaceStartClaim(workspaceClaim);
@@ -1143,6 +1367,7 @@ function runWorkflowCommand(args) {
     assertNodeSkillPlanPinned(state, root);
     const runDir = resolveRunDir(root, state.run_dir);
     if (state.status === "complete" || state.phase === "complete") {
+      finalizeCompletedNodeRun(root, state, runDir, { persistState: false });
       console.log(`workflow already complete: ${state.run_id}`);
       return;
     }
@@ -1168,15 +1393,14 @@ function runWorkflowCommand(args) {
       updated_at: transitionedAt,
       phase_entered_at: transitionedAt,
       fix_loop_rounds: fixLoopRounds,
+      ...(!nextPhase ? { completed_at: transitionedAt } : {}),
     };
-    writeJson(path.join(runDir, "manifest.json"), nextState);
-    writeCurrentRun(root, nextState);
-    if (!nextPhase && nextState.execution && nextState.workspace) {
-      releaseNodeExecution(root, nextState.execution, nextState.run_dir);
-    }
     if (nextPhase) {
+      writeJson(path.join(runDir, "manifest.json"), nextState);
+      writeCurrentRun(root, nextState);
       printNext(nextState, root);
     } else {
+      finalizeCompletedNodeRun(root, nextState, runDir);
       console.log(`workflow complete: ${state.run_id}`);
     }
     return;
@@ -1513,7 +1737,7 @@ function captureNodeWorkspaceIdentity(cwd, root) {
   if (!commonDir || !gitDir || !branch || !head) {
     throw new Error(`blocked: cannot capture pinned workspace identity: ${workspaceRoot}`);
   }
-  const canonicalCommon = fs.realpathSync(commonDir);
+  const canonicalCommon = authenticatedDirectoryRoot(commonDir);
   if (path.basename(canonicalCommon) !== ".git" || !samePath(path.dirname(canonicalCommon), root)) {
     throw new Error(`blocked: pinned workspace belongs to a different repository: ${workspaceRoot}`);
   }
@@ -1524,7 +1748,7 @@ function captureNodeWorkspaceIdentity(cwd, root) {
   const identity = {
     workspace_root: workspaceRoot,
     git_common_dir: canonicalCommon,
-    git_dir: fs.realpathSync(gitDir),
+    git_dir: authenticatedDirectoryRoot(gitDir),
     branch,
     head,
     device: metadata.dev,
@@ -1579,7 +1803,7 @@ function validateNodeWorkspaceIdentity(identity, root, requireRegistration = tru
   if (ancestor.error || ancestor.status !== 0) {
     throw new Error(`blocked: pinned workspace HEAD diverged: ${workspaceRoot}`);
   }
-  const canonicalCommon = fs.realpathSync(commonDir);
+  const canonicalCommon = authenticatedDirectoryRoot(commonDir);
   if (path.basename(canonicalCommon) !== ".git" || !samePath(path.dirname(canonicalCommon), root)) {
     throw new Error(`blocked: pinned workspace repository identity changed: ${workspaceRoot}`);
   }
@@ -1594,13 +1818,20 @@ function validateNodeWorkspaceIdentity(identity, root, requireRegistration = tru
 }
 
 function registeredNodeWorkspaceIdentity(root, workspaceRoot) {
-  const commonDir = gitOutput(root, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
-  if (!commonDir) return null;
-  const registrations = path.join(commonDir, "agent-flow", "worktrees");
+  const registrations = nodeGitPrivateDirectory(root, ["agent-flow", "worktrees"]);
   if (!fs.existsSync(registrations)) return null;
   for (const entry of fs.readdirSync(registrations, { withFileTypes: true })) {
-    if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
-    const manifest = readJsonIfExists(path.join(registrations, entry.name, "manifest.json"));
+    if (entry.isSymbolicLink()) {
+      throw new Error("blocked: worktree registration is a symbolic link");
+    }
+    if (!entry.isDirectory()) continue;
+    const registration = nodeGitPrivateDirectory(
+      root,
+      ["agent-flow", "worktrees", entry.name],
+    );
+    const manifestPath = path.join(registration, "manifest.json");
+    if (!fs.existsSync(manifestPath)) continue;
+    const manifest = readOwnedJson(manifestPath);
     const identity = manifest?.identity;
     if (identity?.workspace_root && samePath(identity.workspace_root, workspaceRoot)) {
       return identity;
@@ -1610,19 +1841,19 @@ function registeredNodeWorkspaceIdentity(root, workspaceRoot) {
 }
 
 function registerNodeWorkspaceIdentity(root, identity) {
-  const commonDir = gitOutput(root, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
-  if (!commonDir) {
-    throw new Error("blocked: cannot register pinned workspace without a git common directory");
-  }
   const digest = crypto.createHash("sha256").update(identity.workspace_root).digest("hex").slice(0, 12);
   const name = `node-${digest}`;
-  const runtime = path.join(commonDir, "agent-flow", "worktrees", name);
+  const runtime = nodeGitPrivateDirectory(
+    root,
+    ["agent-flow", "worktrees", name],
+    true,
+  );
   const manifestPath = path.join(runtime, "manifest.json");
-  const existing = readJsonIfExists(manifestPath);
+  const existing = fs.existsSync(manifestPath) ? readOwnedJson(manifestPath) : null;
   if (existing?.identity?.workspace_root && !samePath(existing.identity.workspace_root, identity.workspace_root)) {
     throw new Error(`blocked: pinned workspace registration collision: ${identity.workspace_root}`);
   }
-  writeJson(manifestPath, {
+  writeOwnedJson(manifestPath, {
     name,
     branch: identity.branch,
     path: identity.workspace_root,
@@ -1951,12 +2182,12 @@ function readCurrentRun(root) {
     if (scopedPath && fs.existsSync(scopedPath)) {
       pathName = scopedPath;
     } else if (fs.existsSync(legacyPath)) {
-      const legacy = JSON.parse(fs.readFileSync(legacyPath, "utf8"));
+      const legacy = readOwnedJson(legacyPath);
       if (
         legacy.execution
         && executionIdentityDigest(legacy.execution) === executionIdentityDigest(execution)
       ) {
-        writeJson(scopedPath, legacy);
+        writeOwnedJson(scopedPath, legacy);
         pathName = scopedPath;
       } else {
         throw new Error("no active run is bound to this execution");
@@ -1976,7 +2207,17 @@ function readCurrentRun(root) {
   if (!fs.existsSync(pathName)) {
     throw new Error('no active run. start one with: agent-flow run "<task>"');
   }
-  const state = JSON.parse(fs.readFileSync(pathName, "utf8"));
+  const state = execution
+    ? readOwnedJson(pathName)
+    : readOwnedJson(pathName);
+  authenticatedNodeRunDir(root, state);
+  if (
+    nodeRunStateIsActive(state)
+    && state.publication_status !== undefined
+    && !nodeStatePublicationIsActive(root, state)
+  ) {
+    throw new Error(`blocked: ${nodeStatePublicationError(root, state)}`);
+  }
   if (
     execution
     && state.execution
@@ -1984,7 +2225,6 @@ function readCurrentRun(root) {
   ) {
     throw new Error("no active run is bound to this execution");
   }
-  authenticatedNodeRunDir(root, state);
   return normalizeRunState(root, state);
 }
 
@@ -2082,7 +2322,7 @@ function normalizeRunState(root, state) {
     ...state,
     phase_index: index,
   };
-  writeJson(path.join(authenticatedNodeRunDir(root, normalized), "manifest.json"), normalized);
+  writeOwnedJson(path.join(authenticatedNodeRunDir(root, normalized), "manifest.json"), normalized);
   writeCurrentRun(root, normalized);
   return normalized;
 }
@@ -2092,47 +2332,87 @@ function currentRunPath(root) {
 }
 
 function executionRunStatePath(root, execution) {
-  return path.join(gitCommonAgentFlowRoot(root), "current-runs", `${executionIdentityDigest(execution)}.json`);
+  return path.join(
+    nodeGitPrivateDirectory(root, ["agent-flow", "current-runs"], true),
+    `${executionIdentityDigest(execution)}.json`,
+  );
 }
 
 function executionBindingPath(root, execution) {
-  return path.join(gitCommonAgentFlowRoot(root), "executions", `${executionIdentityDigest(execution)}.json`);
+  return path.join(
+    nodeGitPrivateDirectory(root, ["agent-flow", "executions"], true),
+    `${executionIdentityDigest(execution)}.json`,
+  );
 }
 
 function activeNodeExecutionRunStates(root) {
-  const statesRoot = path.join(gitCommonAgentFlowRoot(root), "current-runs");
+  const statesRoot = nodeGitPrivateDirectory(root, ["agent-flow", "current-runs"]);
   if (!fs.existsSync(statesRoot)) return [];
-  return fs.readdirSync(statesRoot, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
-    .map((entry) => JSON.parse(fs.readFileSync(path.join(statesRoot, entry.name), "utf8")))
-    .filter((state) => nodeRunStateIsActive(state));
+  const states = [];
+  for (const entry of fs.readdirSync(statesRoot, { withFileTypes: true })) {
+    if (!entry.name.endsWith(".json")) continue;
+    if (entry.isSymbolicLink()) {
+      throw new Error("blocked: Node run state is a symbolic link");
+    }
+    if (entry.isFile()) states.push(readOwnedJson(path.join(statesRoot, entry.name)));
+  }
+  return states.filter((state) => nodeStatePublicationIsActive(root, state));
 }
 
 function activeExecutionBindings(root) {
-  const bindingsRoot = path.join(gitCommonAgentFlowRoot(root), "executions");
+  const bindingsRoot = nodeGitPrivateDirectory(root, ["agent-flow", "executions"]);
   if (!fs.existsSync(bindingsRoot)) return [];
-  return fs.readdirSync(bindingsRoot, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
-    .map((entry) => JSON.parse(fs.readFileSync(path.join(bindingsRoot, entry.name), "utf8")))
-    .filter((binding) => nodeBindingIsActive(binding));
+  const bindings = [];
+  for (const entry of fs.readdirSync(bindingsRoot, { withFileTypes: true })) {
+    if (!entry.name.endsWith(".json")) continue;
+    if (entry.isSymbolicLink()) {
+      throw new Error("blocked: execution binding is a symbolic link");
+    }
+    if (entry.isFile()) bindings.push(readOwnedJson(path.join(bindingsRoot, entry.name)));
+  }
+  return bindings.filter((binding) => nodeBindingIsActive(binding, root));
 }
 
 function activePythonWorkspaceRuns(root) {
-  const runtimeRoot = path.join(gitCommonAgentFlowRoot(root), "worktrees");
+  const runtimeRoot = nodeGitPrivateDirectory(root, ["agent-flow", "worktrees"]);
   if (!fs.existsSync(runtimeRoot)) return [];
   const active = [];
   for (const worktreeEntry of fs.readdirSync(runtimeRoot, { withFileTypes: true })) {
-    if (!worktreeEntry.isDirectory() || worktreeEntry.isSymbolicLink()) continue;
+    if (worktreeEntry.isSymbolicLink()) {
+      throw new Error("blocked: Python worktree runtime metadata is a symbolic link");
+    }
+    if (!worktreeEntry.isDirectory()) continue;
     const runsRoot = path.join(runtimeRoot, worktreeEntry.name, ".agent-flow", "runs");
+    assertNoSymlinkComponents(runtimeRoot, runsRoot);
     if (!fs.existsSync(runsRoot)) continue;
     for (const runEntry of fs.readdirSync(runsRoot, { withFileTypes: true })) {
-      if (!runEntry.isDirectory() || runEntry.isSymbolicLink()) continue;
-      const runDir = path.join(runsRoot, runEntry.name);
-      if (!fs.existsSync(path.join(runDir, "active"))) continue;
-      const state = readJsonIfExists(path.join(runDir, "meta.json"));
-      if (state?.workspace?.workspace_root) {
-        active.push({ ...state, run_id: state.run_id ?? runEntry.name, run_dir: runDir });
+      if (runEntry.isSymbolicLink()) {
+        throw new Error("blocked: Python run metadata is a symbolic link");
       }
+      if (!runEntry.isDirectory()) continue;
+      const runDir = path.join(runsRoot, runEntry.name);
+      const activePath = path.join(runDir, "active");
+      if (!fs.existsSync(activePath)) continue;
+      const activeMetadata = fs.lstatSync(activePath);
+      if (!activeMetadata.isFile() || activeMetadata.isSymbolicLink()) {
+        throw new Error("blocked: Python active marker is not regular");
+      }
+      const state = readJsonIfExists(path.join(runDir, "meta.json"));
+      const runtimeManifest = readJsonIfExists(
+        path.join(runtimeRoot, worktreeEntry.name, "manifest.json"),
+      );
+      const workspace = state?.workspace ?? runtimeManifest?.identity;
+      if (!workspace?.workspace_root) {
+        throw new Error(
+          `blocked: incomplete active Python run has no pinned workspace: ${runDir}`,
+        );
+      }
+      active.push({
+        ...state,
+        workspace,
+        run_id: state?.run_id ?? runEntry.name,
+        run_dir: runDir,
+      });
     }
   }
   return active;
@@ -2148,54 +2428,241 @@ function nodeRunStateIsActive(state) {
   );
 }
 
+function nodeStatePublicationIsActive(root, state) {
+  if (!nodeRunStateIsActive(state)) return false;
+  if (state.publication_status === undefined) return true;
+  if (state.publication_status !== "active") return false;
+  const manifestPath = path.join(resolveRunDir(root, state.run_dir), "manifest.json");
+  if (!fs.existsSync(manifestPath)) return false;
+  const manifest = readOwnedJson(manifestPath);
+  if (state.start_claim_token === undefined) {
+    return !state.workspace
+      && manifest.publication_status === "active"
+      && manifest.run_id === state.run_id
+      && manifest.start_claim_token === undefined;
+  }
+  if (
+    typeof state.start_claim_token !== "string"
+    || !state.start_claim_token
+    || manifest.publication_status !== "active"
+    || manifest.run_id !== state.run_id
+    || manifest.start_claim_token !== state.start_claim_token
+  ) return false;
+  if (!state.execution || !state.workspace) return true;
+  const bindingPath = executionBindingPath(root, state.execution);
+  if (!fs.existsSync(bindingPath)) return false;
+  const binding = readOwnedJson(bindingPath);
+  return binding.run_id === state.run_id
+    && binding.start_claim_token === state.start_claim_token
+    && binding.run_dir === fs.realpathSync(resolveRunDir(root, state.run_dir));
+}
+
+function nodeStatePublicationError(root, state) {
+  if (state?.publication_status === "active" && state?.execution && state?.workspace) {
+    if (
+      typeof state.workspace.workspace_root === "string"
+      && !fs.existsSync(state.workspace.workspace_root)
+    ) {
+      return `pinned workspace is missing: ${state.workspace.workspace_root}`;
+    }
+    const bindingPath = executionBindingPath(root, state.execution);
+    if (!fs.existsSync(bindingPath)) {
+      return "execution_binding_missing: active execution lost its worktree binding";
+    }
+  }
+  return "execution_binding_incomplete: execution run publication is incomplete";
+}
+
 function gitCommonAgentFlowRoot(root) {
   const common = gitOutput(root, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
   if (!common) return path.join(root, ".agent-flow", "state");
-  return path.join(fs.realpathSync(common), "agent-flow");
+  return path.join(authenticatedDirectoryRoot(common), "agent-flow");
 }
 
-function acquireNodeWorkspaceStartClaim(root, identity) {
+function nodeGitPrivateDirectory(root, components, create = false) {
+  const common = gitOutput(root, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  const boundary = authenticatedDirectoryRoot(common || path.resolve(root));
+  const normalizedComponents = (
+    !common && components[0] === "agent-flow"
+      ? [".agent-flow", "state", ...components.slice(1)]
+      : components
+  );
+  let cursor = boundary;
+  for (const component of normalizedComponents) {
+    if (!component || path.basename(component) !== component || [".", ".."].includes(component)) {
+      throw new Error("blocked: git-private metadata path is invalid");
+    }
+    cursor = path.join(cursor, component);
+    let metadata = lstatIfExists(cursor);
+    if (!metadata && create) {
+      try {
+        fs.mkdirSync(cursor, { mode: 0o700 });
+      } catch (error) {
+        if (error?.code !== "EEXIST") throw error;
+      }
+      metadata = fs.lstatSync(cursor);
+    }
+    if (!metadata) return cursor;
+    if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+      throw new Error(`blocked: git-private metadata path is not an owned directory: ${cursor}`);
+    }
+  }
+  return cursor;
+}
+
+function authenticatedDirectoryRoot(directory) {
+  const absolute = path.resolve(directory);
+  const parsed = path.parse(absolute);
+  let cursor = parsed.root;
+  const relative = path.relative(parsed.root, absolute);
+  for (const component of relative.split(path.sep).filter(Boolean)) {
+    cursor = path.join(cursor, component);
+    const metadata = fs.lstatSync(cursor);
+    if (metadata.isSymbolicLink()) {
+      const trustedAliases = process.platform === "darwin"
+        ? new Map([
+            ["/tmp", "/private/tmp"],
+            ["/var", "/private/var"],
+          ])
+        : new Map();
+      const expectedAlias = trustedAliases.get(cursor);
+      if (expectedAlias) {
+        try {
+          const resolvedAlias = fs.realpathSync(cursor);
+          const privateMetadata = fs.lstatSync("/private");
+          const targetMetadata = fs.lstatSync(expectedAlias);
+          const followedMetadata = fs.statSync(cursor);
+          if (
+            metadata.uid === 0
+            && resolvedAlias === expectedAlias
+            && privateMetadata.uid === 0
+            && privateMetadata.isDirectory()
+            && targetMetadata.uid === 0
+            && targetMetadata.isDirectory()
+            && followedMetadata.dev === targetMetadata.dev
+            && followedMetadata.ino === targetMetadata.ino
+          ) {
+            cursor = resolvedAlias;
+            continue;
+          }
+        } catch {}
+      }
+      throw new Error(`blocked: git-private metadata root is not an owned directory: ${cursor}`);
+    }
+    if (!metadata.isDirectory()) {
+      throw new Error(`blocked: git-private metadata root is not an owned directory: ${cursor}`);
+    }
+  }
+  return cursor;
+}
+
+function acquireNodeWorkspaceStartClaim(
+  root,
+  identity,
+  runId = "pending",
+  startDetails = null,
+) {
   if (!identity?.workspace_root) return null;
-  const claimsRoot = path.join(gitCommonAgentFlowRoot(root), "workspace-start-claims");
-  fs.mkdirSync(claimsRoot, { recursive: true });
+  const claimsRoot = nodeGitPrivateDirectory(
+    root,
+    ["agent-flow", "workspace-start-claims"],
+    true,
+  );
   const digest = crypto.createHash("sha256").update(identity.workspace_root).digest("hex");
   const claimPath = path.join(claimsRoot, `${digest}.lock`);
   const token = crypto.randomBytes(16).toString("hex");
+  const processStartId = processStartIdentity(process.pid);
+  if (!processStartId) {
+    throw new Error("blocked: execution_binding_conflict: process start identity is unavailable");
+  }
+  const claimPayload = {
+    version: 2,
+    pid: process.pid,
+    process_start_id: processStartId,
+    token,
+    run_id: runId,
+    ...(startDetails?.runDir ? {
+      start_kind: "node-run",
+      run_dir: path.resolve(startDetails.runDir),
+      execution: startDetails.execution || null,
+    } : {}),
+    ...nodeWorkspaceClaimIdentity(identity),
+    acquired_at: new Date().toISOString(),
+  };
+  const temporary = path.join(
+    claimsRoot,
+    `.${digest}.${process.pid}.${token}.tmp`,
+  );
+  fs.writeFileSync(temporary, JSON.stringify(claimPayload), { flag: "wx", mode: 0o600 });
+  const temporaryMetadata = fs.lstatSync(temporary);
   let acquired = false;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      fs.writeFileSync(
-        claimPath,
-        JSON.stringify({
-          version: 1,
-          pid: process.pid,
-          token,
-          workspace_root: identity.workspace_root,
-        }),
-        { flag: "wx", mode: 0o600 },
-      );
-      acquired = true;
-      break;
-    } catch (error) {
-      if (
-        error?.code === "EEXIST"
-        && attempt === 0
-        && recoverStaleNodeWorkspaceStartClaim(claimPath, identity)
-      ) {
-        continue;
+  try {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        fs.linkSync(temporary, claimPath);
+        acquired = true;
+        break;
+      } catch (error) {
+        if (
+          error?.code === "EEXIST"
+          && attempt === 0
+          && recoverStaleNodeWorkspaceStartClaim(root, claimPath, identity)
+        ) {
+          continue;
+        }
+        if (error?.code === "EEXIST") {
+          throw new Error("blocked: execution_binding_conflict: workspace start is already in progress");
+        }
+        throw error;
       }
-      if (error?.code === "EEXIST") {
-        throw new Error("blocked: execution_binding_conflict: workspace start is already in progress");
-      }
-      throw error;
     }
+  } finally {
+    if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
   }
   if (!acquired) throw new Error("blocked: execution_binding_conflict: workspace start claim is unavailable");
   const metadata = fs.lstatSync(claimPath);
-  return { path: claimPath, dev: metadata.dev, ino: metadata.ino };
+  if (
+    !metadata.isFile()
+    || metadata.isSymbolicLink()
+    || metadata.dev !== temporaryMetadata.dev
+    || metadata.ino !== temporaryMetadata.ino
+  ) {
+    throw new Error("blocked: workspace start claim publication changed");
+  }
+  return {
+    path: claimPath,
+    dev: metadata.dev,
+    ino: metadata.ino,
+    token,
+    pid: process.pid,
+    processStartId,
+    runId,
+    payload: claimPayload,
+  };
 }
 
-function recoverStaleNodeWorkspaceStartClaim(claimPath, identity) {
+function nodeWorkspaceClaimIdentity(identity) {
+  const leaderRoot = fs.realpathSync(path.dirname(fs.realpathSync(identity.git_common_dir)));
+  const leaderMetadata = fs.statSync(leaderRoot);
+  return {
+    leader_root: leaderRoot,
+    leader_device: leaderMetadata.dev,
+    leader_inode: leaderMetadata.ino,
+    workspace_root: identity.workspace_root,
+    workspace_git_dir: identity.git_dir,
+    workspace_branch: identity.branch,
+    workspace_head: identity.head,
+    workspace_device: identity.device,
+    workspace_inode: identity.inode,
+  };
+}
+
+function nodeWorkspaceClaimMatchesIdentity(claim, identity) {
+  const expected = nodeWorkspaceClaimIdentity(identity);
+  return Object.entries(expected).every(([key, value]) => claim?.[key] === value);
+}
+
+function recoverStaleNodeWorkspaceStartClaim(root, claimPath, identity) {
   let metadata;
   try {
     metadata = fs.lstatSync(claimPath);
@@ -2206,14 +2673,30 @@ function recoverStaleNodeWorkspaceStartClaim(claimPath, identity) {
   if (!metadata.isFile() || metadata.isSymbolicLink()) return false;
   const claim = readJsonIfExists(claimPath);
   if (
-    claim?.version !== 1
+    ![1, 2].includes(claim?.version)
     || !Number.isInteger(claim.pid)
     || claim.pid <= 0
     || typeof claim.token !== "string"
     || !claim.token
     || claim.workspace_root !== identity.workspace_root
-    || processIsAlive(claim.pid)
   ) {
+    return false;
+  }
+  if (claim.version === 2) {
+    if (
+      typeof claim.process_start_id !== "string"
+      || !claim.process_start_id
+      || typeof claim.run_id !== "string"
+      || !claim.run_id
+      || !nodeWorkspaceClaimMatchesIdentity(claim, identity)
+    ) {
+      return false;
+    }
+    if (processIsAlive(claim.pid)) {
+      const currentStartId = processStartIdentity(claim.pid);
+      if (!currentStartId || currentStartId === claim.process_start_id) return false;
+    }
+  } else if (processIsAlive(claim.pid)) {
     return false;
   }
   const quarantine = path.join(
@@ -2231,13 +2714,88 @@ function recoverStaleNodeWorkspaceStartClaim(claimPath, identity) {
   if (
     moved.dev !== metadata.dev
     || moved.ino !== metadata.ino
-    || movedClaim?.token !== claim.token
+    || JSON.stringify(movedClaim) !== JSON.stringify(claim)
   ) {
     if (!fs.existsSync(claimPath)) fs.renameSync(quarantine, claimPath);
     throw new Error("blocked: workspace start claim changed during stale recovery");
   }
+  try {
+    if (movedClaim.start_kind === "node-run") {
+      recoverIncompleteNodeStart(root, movedClaim);
+    }
+  } catch (error) {
+    if (!fs.existsSync(claimPath)) fs.renameSync(quarantine, claimPath);
+    throw error;
+  }
   fs.unlinkSync(quarantine);
   return true;
+}
+
+function recoverIncompleteNodeStart(root, claim) {
+  const runsRoot = path.resolve(root, ".agent-flow", "runs");
+  const runDir = path.resolve(String(claim.run_dir || ""));
+  const relative = path.relative(runsRoot, runDir);
+  if (
+    !relative
+    || relative.startsWith(`..${path.sep}`)
+    || path.isAbsolute(relative)
+    || path.basename(runDir) !== claim.run_id
+  ) {
+    throw new Error("blocked: stale Node start claim has an invalid run directory");
+  }
+  const manifestPath = path.join(runDir, "manifest.json");
+  const manifest = fs.existsSync(manifestPath) ? readOwnedJson(manifestPath) : null;
+  if (manifest && (
+    manifest.run_id !== claim.run_id
+    || manifest.start_claim_token !== claim.token
+  )) {
+    throw new Error("blocked: stale Node start manifest ownership changed");
+  }
+  const execution = claim.execution;
+  const statePath = execution ? executionRunStatePath(root, execution) : currentRunPath(root);
+  const state = fs.existsSync(statePath)
+    ? (execution ? readOwnedJson(statePath) : readJsonIfExists(statePath))
+    : null;
+  const bindingPath = execution ? executionBindingPath(root, execution) : null;
+  const binding = bindingPath && fs.existsSync(bindingPath) ? readOwnedJson(bindingPath) : null;
+  const fullyPublished = Boolean(
+    manifest?.publication_status === "active"
+    && state?.publication_status === "active"
+    && state.run_id === claim.run_id
+    && state.start_claim_token === claim.token
+    && (!execution || (
+      binding?.run_id === claim.run_id
+      && binding.start_claim_token === claim.token
+    )),
+  );
+  if (fullyPublished) return;
+  if (state?.run_id === claim.run_id && state.start_claim_token === claim.token) {
+    if (execution) removeOwnedJsonAtomic(statePath, state);
+    else fs.unlinkSync(statePath);
+  }
+  if (
+    bindingPath
+    && binding?.run_id === claim.run_id
+    && binding.start_claim_token === claim.token
+  ) {
+    removeOwnedJsonAtomic(bindingPath, binding);
+  }
+  if (!fs.existsSync(runDir)) return;
+  const entries = fs.readdirSync(runDir, { withFileTypes: true });
+  if (entries.some((entry) => !["artifacts", "logs", "manifest.json"].includes(entry.name))) {
+    throw new Error("blocked: incomplete Node run contains unowned files");
+  }
+  for (const directoryName of ["artifacts", "logs"]) {
+    const directory = path.join(runDir, directoryName);
+    if (!fs.existsSync(directory)) continue;
+    const metadata = fs.lstatSync(directory);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink() || fs.readdirSync(directory).length) {
+      throw new Error("blocked: incomplete Node run directory is not empty and owned");
+    }
+    fs.rmdirSync(directory);
+  }
+  if (fs.existsSync(manifestPath)) removeOwnedJsonAtomic(manifestPath, manifest);
+  fs.rmdirSync(runDir);
 }
 
 function releaseNodeWorkspaceStartClaim(claim) {
@@ -2251,7 +2809,37 @@ function releaseNodeWorkspaceStartClaim(claim) {
   ) {
     throw new Error("blocked: workspace start claim identity changed");
   }
+  const owner = readJsonIfExists(claim.path);
+  if (
+    owner?.version !== 2
+    || owner.token !== claim.token
+    || owner.pid !== claim.pid
+    || owner.process_start_id !== claim.processStartId
+    || owner.run_id !== claim.runId
+  ) {
+    throw new Error("blocked: workspace start claim ownership changed");
+  }
   fs.unlinkSync(claim.path);
+}
+
+function processStartIdentity(pid) {
+  if (process.platform === "linux") {
+    try {
+      const statText = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+      const fields = statText.slice(statText.lastIndexOf(")") + 2).trim().split(/\s+/);
+      const bootId = fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+      if (fields.length > 19 && bootId) return `linux:${bootId}:${fields[19]}`;
+    } catch {
+      // procfs를 사용할 수 없는 Linux host에서는 ps fallback을 사용한다.
+    }
+  }
+  const result = spawnSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+    env: { LC_ALL: "C", LANG: "C", TZ: "UTC0", PATH: "/usr/bin:/bin" },
+  });
+  if (result.error || result.status !== 0) return null;
+  return String(result.stdout || "").trim() || null;
 }
 
 function currentExecutionIdentity(env = process.env) {
@@ -2300,9 +2888,9 @@ function executionIdentityDigest(execution) {
 
 function writeCurrentRun(root, state) {
   if (state.execution) {
-    writeJson(executionRunStatePath(root, state.execution), state);
+    writeOwnedJson(executionRunStatePath(root, state.execution), state);
   } else {
-    writeJson(currentRunPath(root), state);
+    writeOwnedJson(currentRunPath(root), state);
   }
 }
 
@@ -2327,13 +2915,16 @@ function assertNodeExecutionStartAvailable(root, execution, workspace) {
   }
   const statePath = executionRunStatePath(root, execution);
   if (fs.existsSync(statePath)) {
-    const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    const state = readOwnedJson(statePath);
     if (nodeRunStateIsActive(state)) {
+      if (!nodeStatePublicationIsActive(root, state)) {
+        throw new Error(`blocked: ${nodeStatePublicationError(root, state)}`);
+      }
       const bindingPath = executionBindingPath(root, execution);
       if (state.workspace && !fs.existsSync(bindingPath)) {
         throw new Error("blocked: execution_binding_missing: active execution lost its worktree binding");
       }
-      if (state.workspace && !nodeBindingIsActive(JSON.parse(fs.readFileSync(bindingPath, "utf8")))) {
+      if (state.workspace && !nodeBindingIsActive(readOwnedJson(bindingPath), root)) {
         throw new Error("blocked: execution_binding_stale: active execution binding is not usable");
       }
       throw new Error(`blocked: execution_binding_conflict: execution already owns active run ${state.run_id}`);
@@ -2341,8 +2932,8 @@ function assertNodeExecutionStartAvailable(root, execution, workspace) {
   }
   const bindingPath = executionBindingPath(root, execution);
   if (fs.existsSync(bindingPath)) {
-    const binding = JSON.parse(fs.readFileSync(bindingPath, "utf8"));
-    if (nodeBindingIsActive(binding)) {
+    const binding = readOwnedJson(bindingPath);
+    if (nodeBindingIsActive(binding, root)) {
       throw new Error(`blocked: execution_binding_conflict: execution already owns active run ${binding.run_id}`);
     }
   }
@@ -2383,43 +2974,342 @@ function bindNodeExecution(root, execution, state) {
   const bindingPath = executionBindingPath(root, execution);
   const runDir = resolveRunDir(root, state.run_dir);
   const payload = {
-    version: 1,
+    version: 2,
     execution,
     workspace: state.workspace,
     workspace_name: path.basename(state.workspace.workspace_root),
     run_id: state.run_id,
     run_dir: fs.realpathSync(runDir),
+    ...(state.start_claim_token ? { start_claim_token: state.start_claim_token } : {}),
     bound_at: new Date().toISOString(),
   };
-  if (fs.existsSync(bindingPath)) {
-    const existing = JSON.parse(fs.readFileSync(bindingPath, "utf8"));
-    if (nodeBindingIsActive(existing)
-      && (existing.run_dir !== payload.run_dir
-        || JSON.stringify(existing.workspace) !== JSON.stringify(payload.workspace))) {
-      throw new Error("blocked: execution is already bound to an active worktree");
+  const temporary = path.join(
+    path.dirname(bindingPath),
+    `.${path.basename(bindingPath)}.${process.pid}.${crypto.randomBytes(8).toString("hex")}.tmp`,
+  );
+  fs.writeFileSync(temporary, `${JSON.stringify(payload, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+  const temporaryMetadata = fs.lstatSync(temporary);
+  try {
+    let published = false;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        fs.linkSync(temporary, bindingPath);
+        published = true;
+        break;
+      } catch (error) {
+        if (error?.code !== "EEXIST") throw error;
+        const existing = readOwnedJson(bindingPath);
+        if (nodeBindingIsActive(existing, root)) {
+          if (sameNodeExecutionBinding(existing, payload)) return;
+          throw new Error("blocked: execution is already bound to an active worktree");
+        }
+        if (attempt === 0) {
+          removeOwnedJsonAtomic(bindingPath, existing);
+          continue;
+        }
+        throw new Error("blocked: execution binding publication raced");
+      }
+    }
+    if (!published) throw new Error("blocked: execution binding is unavailable");
+    const metadata = fs.lstatSync(bindingPath);
+    if (
+      !metadata.isFile()
+      || metadata.isSymbolicLink()
+      || metadata.dev !== temporaryMetadata.dev
+      || metadata.ino !== temporaryMetadata.ino
+    ) {
+      throw new Error("blocked: execution binding publication changed");
+    }
+  } finally {
+    if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+  }
+}
+
+function readOwnedJson(pathName) {
+  const metadata = fs.lstatSync(pathName);
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new Error(`blocked: git-private metadata file is not regular: ${pathName}`);
+  }
+  const payload = JSON.parse(fs.readFileSync(pathName, "utf8"));
+  const repeated = fs.lstatSync(pathName);
+  if (repeated.dev !== metadata.dev || repeated.ino !== metadata.ino) {
+    throw new Error(`blocked: git-private metadata changed while reading: ${pathName}`);
+  }
+  return payload;
+}
+
+function writeOwnedJson(pathName, payload) {
+  if (fs.existsSync(pathName)) {
+    const metadata = fs.lstatSync(pathName);
+    if (!metadata.isFile() || metadata.isSymbolicLink()) {
+      throw new Error(`blocked: git-private metadata file is not regular: ${pathName}`);
     }
   }
-  writeJson(bindingPath, payload);
+  const temporary = path.join(
+    path.dirname(pathName),
+    `.${path.basename(pathName)}.write-${process.pid}-${crypto.randomBytes(8).toString("hex")}`,
+  );
+  fs.writeFileSync(temporary, `${JSON.stringify(payload, null, 2)}\n`, {
+    flag: "wx",
+    mode: 0o600,
+  });
+  try {
+    fs.renameSync(temporary, pathName);
+  } finally {
+    if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+  }
 }
 
-function releaseNodeExecution(root, execution, runDir) {
+function removeOwnedJsonAtomic(pathName, payload) {
+  const metadata = fs.lstatSync(pathName);
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new Error(`blocked: git-private metadata file is not regular: ${pathName}`);
+  }
+  const quarantine = path.join(
+    path.dirname(pathName),
+    `.${path.basename(pathName)}.remove-${process.pid}-${crypto.randomBytes(8).toString("hex")}`,
+  );
+  fs.renameSync(pathName, quarantine);
+  const moved = fs.lstatSync(quarantine);
+  const movedPayload = readOwnedJson(quarantine);
+  if (
+    moved.dev !== metadata.dev
+    || moved.ino !== metadata.ino
+    || JSON.stringify(movedPayload) !== JSON.stringify(payload)
+  ) {
+    if (!fs.existsSync(pathName)) fs.renameSync(quarantine, pathName);
+    throw new Error(`blocked: git-private metadata changed before removal: ${pathName}`);
+  }
+  fs.unlinkSync(quarantine);
+}
+
+function sameNodeExecutionBinding(existing, expected) {
+  return ["execution", "workspace", "run_id", "run_dir"].every(
+    (key) => canonicalJson(existing[key]) === canonicalJson(expected[key]),
+  );
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map(
+      (key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`,
+    ).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function nextNodeWorkspaceGeneration(root, workspace) {
+  const workspaceName = path.basename(workspace.workspace_root);
+  const runtimeRoot = nodeGitPrivateDirectory(
+    root,
+    ["agent-flow", "worktrees", workspaceName],
+  );
+  if (!fs.existsSync(runtimeRoot)) return 1;
+  const finalizerPath = path.join(runtimeRoot, "finalizer.json");
+  if (!fs.existsSync(finalizerPath)) return 1;
+  const existing = readOwnedJson(finalizerPath);
+  if (!Number.isInteger(existing.generation) || existing.generation < 1) {
+    throw new Error("blocked: worktree finalizer generation is invalid");
+  }
+  return existing.generation + 1;
+}
+
+function recordNodeWorkspaceFinalizer(root, state, completedAt) {
+  const workspaceName = path.basename(state.workspace.workspace_root);
+  const runtimeRoot = nodeGitPrivateDirectory(
+    root,
+    ["agent-flow", "worktrees", workspaceName],
+  );
+  if (!fs.existsSync(runtimeRoot)) {
+    throw new Error("blocked: completed worktree runtime metadata is missing");
+  }
+  const finalizerPath = path.join(runtimeRoot, "finalizer.json");
+  const generation = state.workspace_generation;
+  if (!Number.isInteger(generation) || generation < 1) {
+    throw new Error("blocked: completed run workspace generation is invalid");
+  }
+  if (fs.existsSync(finalizerPath)) {
+    const existing = readOwnedJson(finalizerPath);
+    if (!Number.isInteger(existing.generation) || existing.generation < 1) {
+      throw new Error("blocked: completed worktree finalizer generation is invalid");
+    }
+    const sameCompletion = (
+      canonicalJson(existing.execution) === canonicalJson(state.execution)
+      && canonicalJson(existing.workspace) === canonicalJson(state.workspace)
+      && existing.run_id === state.run_id
+      && existing.run_dir === fs.realpathSync(resolveRunDir(root, state.run_dir))
+      && existing.generation === generation
+    );
+    if (sameCompletion) return finalizerPath;
+    if (generation !== existing.generation + 1) {
+      throw new Error("blocked: execution_finalizer_stale: a newer worktree completion already exists");
+    }
+  } else if (generation !== 1) {
+    throw new Error("blocked: execution_finalizer_stale: worktree completion history is missing");
+  }
+  const payload = {
+    version: 1,
+    generation,
+    execution: state.execution,
+    workspace: state.workspace,
+    workspace_name: workspaceName,
+    run_id: state.run_id,
+    run_dir: fs.realpathSync(resolveRunDir(root, state.run_dir)),
+    completed_at: completedAt,
+  };
+  const temporary = path.join(
+    runtimeRoot,
+    `.finalizer.json.${process.pid}.${crypto.randomBytes(8).toString("hex")}.tmp`,
+  );
+  fs.writeFileSync(temporary, `${JSON.stringify(payload, null, 2)}\n`, {
+    flag: "wx",
+    mode: 0o600,
+  });
+  try {
+    fs.renameSync(temporary, finalizerPath);
+  } finally {
+    if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+  }
+  return finalizerPath;
+}
+
+function finalizeCompletedNodeRun(root, state, runDir, { persistState = true } = {}) {
+  const completedAt = String(state.completed_at || state.updated_at || "");
+  if (!completedAt) throw new Error("blocked: completed Node run timestamp is missing");
+  const completionClaim = (
+    state.execution
+    && state.workspace
+    && !samePath(state.workspace.workspace_root, root)
+      ? acquireNodeWorkspaceStartClaim(
+          root,
+          state.workspace,
+          `finalize:${state.run_id}`,
+        )
+      : null
+  );
+  try {
+    if (completionClaim) {
+      recordNodeWorkspaceFinalizer(root, state, completedAt);
+      if (process.env.AGENT_FLOW_TEST_CRASH_AFTER_NODE_FINALIZER === "1") {
+        process.exit(92);
+      }
+    }
+    if (persistState) {
+      writeOwnedJson(path.join(runDir, "manifest.json"), state);
+      writeCurrentRun(root, state);
+    }
+    removeNodeGateCache(root, runDir);
+    if (state.execution && state.workspace) {
+      releaseNodeExecution(root, state.execution, state.run_dir, {
+        allowReusedExecution: !persistState,
+      });
+    }
+  } finally {
+    releaseNodeWorkspaceStartClaim(completionClaim);
+  }
+}
+
+function removeNodeGateCache(root, runDir) {
+  const cacheRoot = nodeGitPrivateDirectory(root, ["agent-flow", "gate-cache"]);
+  if (!fs.existsSync(cacheRoot)) return;
+  const resolvedRun = fs.realpathSync(runDir);
+  const metadata = fs.lstatSync(resolvedRun);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw new Error("blocked: gate cache run directory is not regular");
+  }
+  const digest = crypto.createHash("sha256")
+    .update(`${resolvedRun}\0${metadata.dev}\0${metadata.ino}`)
+    .digest("hex");
+  const cachePath = path.join(cacheRoot, `${digest}.json`);
+  if (!fs.existsSync(cachePath)) return;
+  removeOwnedJsonAtomic(cachePath, readOwnedJson(cachePath));
+}
+
+function releaseNodeExecution(
+  root,
+  execution,
+  runDir,
+  { allowReusedExecution = false } = {},
+) {
   const bindingPath = executionBindingPath(root, execution);
   if (!fs.existsSync(bindingPath)) return;
-  const binding = JSON.parse(fs.readFileSync(bindingPath, "utf8"));
+  const binding = readOwnedJson(bindingPath);
   const expectedRunDir = fs.realpathSync(resolveRunDir(root, runDir));
   if (binding.run_dir !== expectedRunDir) {
+    if (allowReusedExecution) {
+      const statePath = executionRunStatePath(root, execution);
+      if (fs.existsSync(statePath)) {
+        const current = readOwnedJson(statePath);
+        const currentRunDir = fs.realpathSync(resolveRunDir(root, current.run_dir));
+        if (
+          nodeStatePublicationIsActive(root, current)
+          && executionIdentityDigest(current.execution) === executionIdentityDigest(execution)
+          && currentRunDir === binding.run_dir
+        ) return;
+      }
+    }
     throw new Error("blocked: execution binding run identity changed");
   }
-  fs.unlinkSync(bindingPath);
+  if (executionIdentityDigest(binding.execution) !== executionIdentityDigest(execution)) {
+    throw new Error("blocked: execution binding identity changed");
+  }
+  removeOwnedJsonAtomic(bindingPath, binding);
 }
 
-function nodeBindingIsActive(binding) {
+function nodeBindingIsActive(binding, root) {
   if (typeof binding?.run_dir !== "string") return false;
-  if (fs.existsSync(path.join(binding.run_dir, "active"))) return true;
+  const activePath = path.join(binding.run_dir, "active");
+  if (fs.existsSync(activePath)) {
+    const active = fs.lstatSync(activePath);
+    if (active.isSymbolicLink() || !active.isFile()) return false;
+    if (binding.start_claim_token === undefined) return true;
+  }
   const manifest = path.join(binding.run_dir, "manifest.json");
   if (!fs.existsSync(manifest)) return false;
-  const state = JSON.parse(fs.readFileSync(manifest, "utf8"));
-  return nodeRunStateIsActive(state);
+  const state = readOwnedJson(manifest);
+  if (!nodeRunStateIsActive(state)) return false;
+  if (binding.start_claim_token === undefined) return true;
+  if (
+    typeof binding.start_claim_token !== "string"
+    || !binding.start_claim_token
+    || state.start_claim_token !== binding.start_claim_token
+    || state.run_id !== binding.run_id
+  ) return false;
+  if (state.publication_status === "starting") {
+    return nodeStartingBindingClaimIsLive(binding, root);
+  }
+  if (state.publication_status !== "active") return false;
+  const currentPath = executionRunStatePath(root, binding.execution);
+  if (!fs.existsSync(currentPath)) return false;
+  const current = readOwnedJson(currentPath);
+  return current.publication_status === "active"
+    && current.start_claim_token === binding.start_claim_token
+    && current.run_id === binding.run_id;
+}
+
+function nodeStartingBindingClaimIsLive(binding, root) {
+  const workspace = binding?.workspace;
+  if (typeof workspace?.workspace_root !== "string" || !workspace.workspace_root) return false;
+  const claimsRoot = nodeGitPrivateDirectory(root, ["agent-flow", "workspace-start-claims"]);
+  const digest = crypto.createHash("sha256").update(workspace.workspace_root).digest("hex");
+  const claimPath = path.join(claimsRoot, `${digest}.lock`);
+  const metadata = lstatIfExists(claimPath);
+  if (!metadata?.isFile() || metadata.isSymbolicLink()) return false;
+  const claim = readJsonIfExists(claimPath);
+  if (
+    claim?.version !== 2
+    || claim.token !== binding.start_claim_token
+    || claim.run_id !== binding.run_id
+    || !nodeWorkspaceClaimMatchesIdentity(claim, workspace)
+    || !Number.isInteger(claim.pid)
+    || claim.pid <= 0
+    || typeof claim.process_start_id !== "string"
+    || !claim.process_start_id
+    || !processIsAlive(claim.pid)
+  ) return false;
+  const currentStartId = processStartIdentity(claim.pid);
+  return !currentStartId || currentStartId === claim.process_start_id;
 }
 
 function pushWatchStatePath(root) {
@@ -2777,9 +3667,11 @@ function withManagedDirectoryCwd(boundaryRoot, pathName, create, callback) {
   return result;
 }
 
-function ensureManagedDirectory(pathName, boundaryRoot = null) {
+function ensureManagedDirectory(pathName, boundaryRoot = null, mode = null) {
   const boundary = managedWriteBoundary(pathName, boundaryRoot);
-  withManagedDirectoryCwd(boundary, pathName, true, () => undefined);
+  withManagedDirectoryCwd(boundary, pathName, true, () => {
+    if (mode !== null) fs.chmodSync(".", mode);
+  });
 }
 
 function writeManagedRegularFile(pathName, content, boundaryRoot = null, mode = null) {
@@ -2814,22 +3706,25 @@ function writeManagedExecutableFile(pathName, content) {
   });
 }
 
-function writeManagedFileIfMissingOrSame(pathName, content, force = false, track = true) {
+function writeManagedFileIfMissingOrSame(pathName, content, force = false, track = true, mode = null) {
   const write = (managedPath = pathName) => {
     const boundary = managedWriteBoundary(managedPath);
     assertNoSymlinkComponents(boundary, managedPath);
     if (fs.existsSync(managedPath)) {
       const current = fs.readFileSync(managedPath, "utf8");
       if (force) {
-        writeManagedRegularFile(managedPath, content, boundary);
+        writeManagedRegularFile(managedPath, content, boundary, mode);
         return true;
       }
       if (current !== content) {
         return false;
       }
+      if (mode !== null && (fs.lstatSync(managedPath).mode & 0o777) !== mode) {
+        return false;
+      }
       return true;
     }
-    writeManagedRegularFile(managedPath, content, boundary);
+    writeManagedRegularFile(managedPath, content, boundary, mode);
     return true;
   };
   return track ? withManagedInstallMutation(pathName, write) : write();
@@ -2849,7 +3744,11 @@ function copyBundledDirIfMissingOrSame(
     return;
   }
   const copy = (managedDest = dest) => {
-    ensureManagedDirectory(managedDest);
+    const sourceDirectory = fs.lstatSync(src);
+    if (!sourceDirectory.isDirectory() || sourceDirectory.isSymbolicLink()) {
+      throw new Error(`managed install source is not a regular directory: ${src}`);
+    }
+    ensureManagedDirectory(managedDest, null);
     const sourceNames = new Set();
     for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
       sourceNames.add(entry.name);
@@ -2871,7 +3770,12 @@ function copyBundledDirIfMissingOrSame(
         continue;
       }
       const content = fs.readFileSync(srcPath, "utf8");
-      writeManagedFileIfMissingOrSame(destPath, content, force, false);
+      writeManagedFileIfMissingOrSame(
+        destPath,
+        content,
+        force,
+        false,
+      );
     }
     if (force && pruneExtraneous) {
       for (const entry of fs.readdirSync(managedDest, { withFileTypes: true })) {
@@ -2988,6 +3892,21 @@ function installProjectSkills(
     }
     for (const host of skill.hosts) {
       links.push(linkProjectSkill(root, skill, host, previousIndex, force, transaction));
+      if (host === "codex") {
+        const canonicalRoot = hostSkillRoot(root, host);
+        const compatibilityRoot = path.join(root, ".codex", "skills");
+        if (!samePath(canonicalRoot, compatibilityRoot)) {
+          links.push(linkProjectSkill(
+            root,
+            skill,
+            host,
+            previousIndex,
+            force,
+            transaction,
+            compatibilityRoot,
+          ));
+        }
+      }
     }
   }
   links.push(...removeStaleProjectSkillLinks(root, selected.skills, previousIndex, force, transaction));
@@ -3024,7 +3943,7 @@ function refreshSkillCatalogAtBoundary(root) {
     ? index.catalog_hosts.filter((host) => PROJECT_SKILL_HOSTS.includes(host))
     : [detectActiveHost(process.env)].filter(Boolean);
   const current = skillCatalogFingerprint(leaderRoot, HOME, catalogHosts, process.env);
-  if (current === index.catalog_fingerprint) return;
+  if (current === index.catalog_fingerprint && installedSkillLinksMatchIndex(leaderRoot, index)) return;
   const invocationWorktree = resolveManagedWorktreeRoot(process.cwd());
   if (invocationWorktree && samePath(invocationWorktree, leaderRoot)) {
     throw new Error("blocked: skill catalog drift must be refreshed from the leader checkout");
@@ -3041,6 +3960,38 @@ function refreshSkillCatalogAtBoundary(root) {
     else process.env.AGENT_FLOW_HOST = previousHost;
   }
   if (status !== 0) throw new Error(`skill catalog refresh failed with exit ${status}`);
+}
+
+function installedSkillLinksMatchIndex(root, index) {
+  try {
+    for (const link of index?.links || []) {
+      if (!["linked", "copied"].includes(link?.status)) continue;
+      const target = path.resolve(root, String(link.path || ""));
+      ensureChildPath(root, target);
+      const metadata = lstatIfExists(target);
+      if (!metadata || !sameHostFilesystemIdentity(target, link.filesystem_identity)) return false;
+      if (link.status === "linked") {
+        if (
+          !metadata.isSymbolicLink()
+          || typeof link.target !== "string"
+          || fs.readlinkSync(target) !== link.target
+          || !fs.existsSync(path.join(target, "SKILL.md"))
+        ) return false;
+        continue;
+      }
+      if (
+        metadata.isSymbolicLink()
+        || !metadata.isDirectory()
+        || typeof link.tree_hash !== "string"
+        || typeof link.tree_integrity !== "string"
+        || hashSkillTree(target) !== link.tree_hash
+        || treeIntegrity(target) !== link.tree_integrity
+      ) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function acquireProjectInstallLock(root, agentFlowDir) {
@@ -3236,7 +4187,7 @@ function beginSkillInstallTransaction(root, agentFlowDir, previousIndexRecord, l
     previous: previousIndexRecord,
   };
   const journal = {
-    version: 4,
+    version: 5,
     root: fs.realpathSync(root),
     token: transaction.token,
     lock_token: lockToken,
@@ -3431,6 +4382,7 @@ function withHostPathMutation(transaction, target, allowedAfter, callback) {
     before,
     allowed_after: allowedAfter,
     after: null,
+    original: null,
     pending: null,
   };
   transaction.journal.host_mutations.push(operation);
@@ -3482,12 +4434,20 @@ function withHostPathMutation(transaction, target, allowedAfter, callback) {
   operation.pending.completed = true;
   writeInstallJournal(transaction.journalPath, transaction.journal);
   removeHostTemporaryPath(transaction.root, transaction.transactionRoot, incoming, after);
-  removeHostTemporaryPath(transaction.root, transaction.transactionRoot, displaced, before);
+  if (
+    before.kind !== "absent"
+    && !sameHostPathState(hostPathState(displaced), before, true)
+  ) {
+    throw new Error(`host skill original path changed after swap: ${relative}`);
+  }
   const committed = hostPathState(target);
   if (!sameHostPathState(committed, after, true)) {
     throw new Error(`host skill path changed after swap: ${relative}`);
   }
   operation.after = after;
+  operation.original = before.kind === "absent"
+    ? null
+    : path.relative(transaction.root, displaced);
   operation.pending = null;
   writeInstallJournal(transaction.journalPath, transaction.journal);
   return result;
@@ -3502,12 +4462,19 @@ function hostMutationTarget(root, relative) {
   return target;
 }
 
-function restoreHostPathState(root, target, state, transactionRoot) {
+function restoreHostPathState(root, target, state, transactionRoot, originalPath = null) {
   const token = crypto.randomBytes(24).toString("hex");
   const stagingRoot = path.join(transactionRoot, "host-restore", token);
-  const staged = path.join(stagingRoot, "next");
+  let staged = path.join(stagingRoot, "next");
   fs.mkdirSync(stagingRoot, { recursive: true });
-  if (state.kind === "symlink") {
+  if (originalPath !== null) {
+    ensureChildPath(root, originalPath);
+    assertNoSymlinkComponents(root, path.dirname(originalPath));
+    if (!sameHostPathState(state, hostPathState(originalPath), true)) {
+      throw new Error(`host skill original authentication failed: ${target}`);
+    }
+    staged = originalPath;
+  } else if (state.kind === "symlink") {
     fs.symlinkSync(state.target, staged, "dir");
   } else if (["directory", "file"].includes(state.kind) && typeof state.backup === "string") {
     const backupPath = path.resolve(transactionRoot, state.backup);
@@ -3528,7 +4495,7 @@ function restoreHostPathState(root, target, state, transactionRoot) {
   }
   const current = hostPathState(target);
   const restored = hostPathState(staged);
-  if (!sameHostPathState(restored, state)) {
+  if (!sameHostPathState(restored, state, originalPath !== null)) {
     throw new Error(`host skill restore staging integrity mismatch: ${target}`);
   }
   const incoming = path.join(path.dirname(target), `.agent-flow-host-restore-${token}-next`);
@@ -3566,7 +4533,10 @@ function rollbackRecordedHostMutations(root, transactionRoot, journal) {
         throw new Error(`host skill path changed outside install transaction: ${operation.path}`);
       }
       if (completed || interrupted) {
-        restoreHostPathState(root, target, operation.before, transactionRoot);
+        const original = sameHostPathState(hostPathState(displaced), operation.before, true)
+          ? displaced
+          : null;
+        restoreHostPathState(root, target, operation.before, transactionRoot, original);
       }
       removeHostTemporaryPath(root, transactionRoot, incoming, operation.pending.after);
       removeHostTemporaryPath(root, transactionRoot, displaced, operation.before);
@@ -3586,7 +4556,10 @@ function rollbackRecordedHostMutations(root, transactionRoot, journal) {
     if (!committedByTransaction) {
       throw new Error(`host skill path changed outside install transaction: ${operation.path}`);
     }
-    restoreHostPathState(root, target, operation.before, transactionRoot);
+    const original = operation.original
+      ? path.resolve(root, operation.original)
+      : null;
+    restoreHostPathState(root, target, operation.before, transactionRoot, original);
     if (!sameHostPathState(hostPathState(target), operation.before)) {
       throw new Error(`host skill rollback integrity mismatch: ${operation.path}`);
     }
@@ -3597,13 +4570,36 @@ function rollbackRecordedHostMutations(root, transactionRoot, journal) {
   }
 }
 
-function verifyCommittedHostMutations(root, journal) {
+function verifyCommittedHostMutations(root, journal, requireOriginal = true) {
   for (const operation of journal?.host_mutations || []) {
     if (!operation.after || operation.pending) throw new Error(`incomplete host skill mutation: ${operation.path}`);
     const target = hostMutationTarget(root, operation.path);
     if (!sameHostPathState(hostPathState(target), operation.after, true)) {
       throw new Error(`host skill mutation commitment changed: ${operation.path}`);
     }
+    if (
+      requireOriginal
+      && operation.before.kind !== "absent"
+      && (
+        typeof operation.original !== "string"
+        || !sameHostPathState(
+          hostPathState(path.resolve(root, operation.original)),
+          operation.before,
+          true,
+        )
+      )
+    ) {
+      throw new Error(`host skill original commitment changed: ${operation.path}`);
+    }
+  }
+}
+
+function cleanupCommittedHostOriginals(root, transactionRoot, journal) {
+  for (const operation of journal?.host_mutations || []) {
+    if (typeof operation.original !== "string") continue;
+    const original = path.resolve(root, operation.original);
+    ensureChildPath(root, original);
+    removeHostTemporaryPath(root, transactionRoot, original, operation.before);
   }
 }
 
@@ -3612,7 +4608,7 @@ function managedInstallPaths(root) {
   return [
     ...["workflows", "profiles", "templates", "scripts", "prompts", "rules", "bootstrap"]
       .map((name) => path.join(agentFlowDir, name)),
-    path.join(root, RUNTIME_PYTHON_RELATIVE, "agent_flow"),
+    path.join(root, RUNTIME_PYTHON_RELATIVE),
     path.join(root, RUNTIME_NODE_RELATIVE),
     path.join(root, PROJECT_LAUNCHER_RELATIVE),
     path.join(agentFlowDir, "kit.json"),
@@ -3843,7 +4839,13 @@ function withManagedInstallMutation(pathName, callback) {
   fs.mkdirSync(stagingRoot, { recursive: true });
   if (lstatIfExists(target)) {
     fs.cpSync(target, stagedTarget, { recursive: true, dereference: false, errorOnExist: true, force: false });
-    if (!sameManagedPathState(managedPathState(stagedTarget), expected)) {
+    restoreManagedCopyRootMode(target, stagedTarget);
+    let stagedState = managedPathState(stagedTarget);
+    if (!sameManagedPathState(stagedState, expected)) {
+      restoreManagedCopyModes(target, stagedTarget);
+      stagedState = managedPathState(stagedTarget);
+    }
+    if (!sameManagedPathState(stagedState, expected)) {
       throw new Error(`managed install staging integrity mismatch: ${operation.path}`);
     }
   }
@@ -3927,7 +4929,13 @@ function snapshotManagedInstallPaths(transaction) {
       const backupPath = path.join(transaction.transactionRoot, backupRelative);
       fs.mkdirSync(path.dirname(backupPath), { recursive: true });
       fs.cpSync(target, backupPath, { recursive: true, dereference: false, errorOnExist: true, force: false });
-      if (!sameManagedPathState(before, managedPathState(backupPath))) {
+      restoreManagedCopyRootMode(target, backupPath);
+      let backupState = managedPathState(backupPath);
+      if (!sameManagedPathState(before, backupState)) {
+        restoreManagedCopyModes(target, backupPath);
+        backupState = managedPathState(backupPath);
+      }
+      if (!sameManagedPathState(before, backupState)) {
         throw new Error(`managed install backup integrity mismatch: ${operation.path}`);
       }
       before.backup = backupRelative;
@@ -3935,6 +4943,28 @@ function snapshotManagedInstallPaths(transaction) {
     transaction.journal.managed_mutations.push(operation);
   }
   writeInstallJournal(transaction.journalPath, transaction.journal);
+}
+
+function restoreManagedCopyRootMode(source, destination) {
+  const sourceMode = fs.lstatSync(source).mode & 0o777;
+  const destinationMode = fs.lstatSync(destination).mode & 0o777;
+  if (sourceMode !== destinationMode) fs.chmodSync(destination, sourceMode);
+}
+
+function restoreManagedCopyModes(source, destination) {
+  const sourceMetadata = fs.lstatSync(source);
+  if (sourceMetadata.isSymbolicLink()) return;
+  const sourceMode = sourceMetadata.mode & 0o777;
+  if ((fs.lstatSync(destination).mode & 0o777) !== sourceMode) {
+    fs.chmodSync(destination, sourceMode);
+  }
+  if (!sourceMetadata.isDirectory()) return;
+  for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+    restoreManagedCopyModes(
+      path.join(source, entry.name),
+      path.join(destination, entry.name),
+    );
+  }
 }
 
 function sealManagedInstallMutations(transaction) {
@@ -4090,6 +5120,11 @@ function commitSkillInstallTransaction(transaction) {
     .update(fs.readFileSync(indexPath))
     .digest("hex");
   writeInstallJournal(transaction.journalPath, transaction.journal);
+  cleanupCommittedHostOriginals(
+    transaction.root,
+    transaction.transactionRoot,
+    transaction.journal,
+  );
   fs.unlinkSync(transaction.marker);
   fs.rmSync(transaction.transactionRoot, { recursive: true, force: true });
   if (activeManagedInstallTransaction === transaction) activeManagedInstallTransaction = null;
@@ -4137,7 +5172,8 @@ function rollbackSkillInstallTransaction(transaction) {
 
 function preserveUnmanagedSkillEntries(transaction, previousIndex, currentIndex) {
   if (!transaction || !fs.existsSync(transaction.backup)) return;
-  const managed = new Set(["index.json"]);
+  const managed = new Set(["index.json", ...GENERATED_PROJECT_SKILL_NAMES]);
+  const preservedUnmanaged = new Set();
   for (const entry of fs.readdirSync(path.join(KIT_ROOT, "skills"), { withFileTypes: true })) {
     if (!entry.isDirectory()) managed.add(entry.name);
   }
@@ -4148,6 +5184,13 @@ function preserveUnmanagedSkillEntries(transaction, previousIndex, currentIndex)
     const rootName = relative.slice(prefix.length).split("/")[0];
     if (rootName) managed.add(rootName);
   }
+  for (const conflict of previousIndex?.conflicts || []) {
+    for (const ignored of conflict?.ignored || []) {
+      const match = String(ignored).replaceAll("\\", "/")
+        .match(/^\.agent-flow\/skills\/([^/]+)\/SKILL\.md$/);
+      if (match) managed.add(match[1]);
+    }
+  }
   for (const entry of fs.readdirSync(transaction.backup)) {
     if (managed.has(entry) || entry === ".agent-flow-transaction-owner") continue;
     const source = path.join(transaction.backup, entry);
@@ -4156,11 +5199,16 @@ function preserveUnmanagedSkillEntries(transaction, previousIndex, currentIndex)
       throw new Error(`unmanaged skill entry conflicts with installed skill: ${entry}`);
     }
     fs.cpSync(source, destination, { recursive: true, dereference: false, errorOnExist: true, force: false });
+    preservedUnmanaged.add(entry);
   }
   const indexed = new Set((currentIndex?.skills || []).map((skill) => skill.name));
   for (const entry of fs.readdirSync(transaction.live, { withFileTypes: true })) {
-    if (managed.has(entry.name) || indexed.has(entry.name) || entry.name.startsWith(".")) continue;
-    if (entry.isDirectory() && fs.existsSync(path.join(transaction.live, entry.name, "SKILL.md"))) {
+    if (managed.has(entry.name) || entry.name.startsWith(".")) continue;
+    if (
+      entry.isDirectory()
+      && fs.existsSync(path.join(transaction.live, entry.name, "SKILL.md"))
+      && (preservedUnmanaged.has(entry.name) || !indexed.has(entry.name))
+    ) {
       currentIndex.warnings.push(`${entry.name}: preserved unmanaged skill entry without adopting ownership`);
     }
   }
@@ -4215,7 +5263,7 @@ function validateJournalHostState(state, backup = null, requireIdentity = false)
 
 function validateInterruptedInstallJournal(root, agentFlowDir, transactionRoot, journal, recoveryLockToken) {
   if (
-    ![3, 4].includes(journal?.version)
+    ![3, 4, 5].includes(journal?.version)
     || journal.root !== fs.realpathSync(root)
     || !/^[0-9a-f]{48}$/.test(String(journal.token || ""))
     || !/^[0-9a-f]{48}$/.test(String(recoveryLockToken || ""))
@@ -4325,8 +5373,15 @@ function validateInterruptedInstallJournal(root, agentFlowDir, transactionRoot, 
     ) {
       throw new Error(`invalid interrupted host mutation state: ${normalized}`);
     }
+    const prefix = `.agent-flow-host-swap-${journal.token}-${index}`;
+    const expectedOriginal = path.join(path.dirname(operation.path), `${prefix}-previous`);
+    if (
+      journal.version >= 5
+      && ![null, expectedOriginal].includes(operation.original)
+    ) {
+      throw new Error(`invalid interrupted host original: ${normalized}`);
+    }
     if (operation.pending) {
-      const prefix = `.agent-flow-host-swap-${journal.token}-${index}`;
       const expectedIncoming = path.join(path.dirname(operation.path), `${prefix}-next`);
       const expectedDisplaced = path.join(path.dirname(operation.path), `${prefix}-previous`);
       if (
@@ -4338,6 +5393,13 @@ function validateInterruptedInstallJournal(root, agentFlowDir, transactionRoot, 
       ) {
         throw new Error(`invalid interrupted host mutation intent: ${normalized}`);
       }
+    } else if (
+      journal.version >= 5
+      && operation.after !== null
+      && operation.before.kind !== "absent"
+      && operation.original !== expectedOriginal
+    ) {
+      throw new Error(`invalid interrupted host original commitment: ${normalized}`);
     }
     if (beforeBackup) {
       const backupPath = path.resolve(transactionRoot, beforeBackup);
@@ -4415,8 +5477,9 @@ function recoverInterruptedSkillTransaction(root, agentFlowDir, recoveryLockToke
     if (!fs.existsSync(path.join(live, "index.json"))) {
       throw new Error("committed skill transaction has no live index");
     }
-    verifyCommittedHostMutations(root, journal);
+    verifyCommittedHostMutations(root, journal, false);
     verifyCommittedManagedMutations(root, journal);
+    cleanupCommittedHostOriginals(root, transactionRoot, journal);
     if (fs.existsSync(marker)) {
       if (fs.readFileSync(marker, "utf8").trim() !== journal.token) {
         throw new Error("committed skill transaction marker is not owned");
@@ -5088,9 +6151,17 @@ function parseSimpleYaml(text) {
   return metadata;
 }
 
-function linkProjectSkill(root, skill, host, previousIndex, force = false, transaction = null) {
+function linkProjectSkill(
+  root,
+  skill,
+  host,
+  previousIndex,
+  force = false,
+  transaction = null,
+  hostRootOverride = null,
+) {
   const srcDir = path.dirname(path.join(root, skill.path));
-  const hostRoot = hostSkillRoot(root, host);
+  const hostRoot = hostRootOverride ?? hostSkillRoot(root, host);
   if (pathHasSymlink(root, hostRoot)) {
     return { name: skill.name, host, path: path.relative(root, hostRoot), status: "skipped-host-root-symlink" };
   }
@@ -5728,7 +6799,7 @@ function nextPhaseIndex(state, phases, phase, artifact) {
   if (!phase.routes) {
     return state.phase_index + 1;
   }
-  const key = nodeRouteKey(phase, artifact);
+  const key = nodeRouteKey(phase, artifact, state);
   const target = phase.routes[key] ?? phase.routes.default;
   if (!target) {
     throw new Error(`blocked: ${phase.id} artifact has no route for ${key}`);
@@ -5789,7 +6860,7 @@ function nextFixLoopRounds(state, phase, nextPhase) {
   return state.fix_loop_rounds;
 }
 
-function nodeRouteKey(phase, artifact) {
+function nodeRouteKey(phase, artifact, state = {}) {
   const contract = evaluatePhaseContract(phase, fs.readFileSync(artifact, "utf8"));
   if (contract.route === "failure" && phase.routes?.failure) {
     return contract.route;
@@ -5798,7 +6869,10 @@ function nodeRouteKey(phase, artifact) {
     return contract.route;
   }
   if (phase.id === "gates") {
-    return readGatesRouteKey(artifact);
+    return readGatesRouteKey(
+      artifact,
+      state.workspace_root ?? state.workspace?.workspace_root ?? null,
+    );
   }
   if (phase.multi_review) {
     if (readArtifactVerdict(artifact) === "blocked" && phase.routes?.blocked) {
@@ -6029,28 +7103,37 @@ function normalizeReviewerId(value) {
 }
 
 function normalizeReviewerHeadingId(value) {
+  // 명시적 구분자 뒤의 전문 분야 설명은 reviewer identity에 포함하지 않는다.
+  const identity = String(value ?? "").split(/\s+[—–-]\s+|\s*:\s+/, 1)[0];
   // Reviewer heading은 1-2 단어 id(claude, agent 1 등)만 독립 id로 인정한다.
-  // 긴 서술형 heading은 reviewer가 아니라 prose일 가능성이 높아 제외한다.
-  const key = normalizeReviewerId(value);
+  // 구분자 없는 긴 서술형 heading은 reviewer가 아니라 prose일 가능성이 높아 제외한다.
+  const key = normalizeReviewerId(identity);
   return /^[a-z0-9]+(?: [a-z0-9]+)?$/.test(key) ? key : "";
 }
 
-function readGatesPassed(pathName) {
-  return readGatesRouteKey(pathName) === "green";
+function readGatesPassed(pathName, projectRoot = null) {
+  return readGatesRouteKey(pathName, projectRoot) === "green";
 }
 
-function readGatesRouteKey(pathName) {
+function readGatesRouteKey(pathName, projectRoot = null) {
   try {
     const content = fs.readFileSync(pathName, "utf8");
     const data = JSON.parse(content);
-    if (typeof data.passed !== "boolean" || !Array.isArray(data.results) || data.results.length === 0) {
+    if (data.verification_mode !== undefined && data.verification_mode !== "full") {
+      return data.passed === false ? "request-changes" : "default";
+    }
+    if (
+      data.passed !== undefined
+      && typeof data.passed !== "boolean"
+    ) return "default";
+    if (!Array.isArray(data.results) || data.results.length === 0) {
       if (typeof data.passed === "boolean" && typeof data.status === "string") {
         const status = data.status.trim().toLowerCase().replace(/_/g, "-");
         if (data.passed === false && ["request-changes", "blocked", "error", "pending"].includes(status)) {
           return status;
         }
       }
-      return typeof data.passed === "boolean" && data.passed === false ? "request-changes" : "default";
+      return data.passed === false ? "request-changes" : "default";
     }
     // 완료 보고는 실제 실행한 gate command와 결과 evidence가 함께 있을 때만 허용한다.
     const requiredResults = data.results.filter((r) => r && r.required !== false);
@@ -6065,20 +7148,56 @@ function readGatesRouteKey(pathName) {
       );
     if (typeof data.status === "string") {
       const status = data.status.trim().toLowerCase().replace(/_/g, "-");
-      if (data.passed === true && ["green", "approve"].includes(status)) {
-        return resultsPass ? status : "default";
+      if (data.passed !== false && ["green", "approve"].includes(status)) {
+        return resultsPass && gateArtifactFingerprintMatchesCurrent(pathName, projectRoot)
+          ? status
+          : "default";
       }
       if (data.passed === false && ["request-changes", "blocked", "error", "pending"].includes(status)) {
         return status;
       }
     }
     if (data.passed === true) {
-      return resultsPass ? "green" : "default";
+      return resultsPass && gateArtifactFingerprintMatchesCurrent(pathName, projectRoot)
+        ? "green"
+        : "default";
     }
+    if (data.passed === undefined) return "default";
     return "request-changes";
   } catch {
     return "default";
   }
+}
+
+function gateArtifactFingerprintMatchesCurrent(pathName, projectRoot) {
+  // Parser-only parity calls omit projectRoot; real workflow routing always supplies it.
+  if (projectRoot === null) return true;
+  if (typeof projectRoot !== "string" || projectRoot.length === 0) return false;
+  const script = [
+    "import json,sys",
+    "from pathlib import Path",
+    "from agent_flow.core.artifacts import gate_fingerprint_matches_current",
+    "payload=json.loads(Path(sys.argv[2]).read_text(encoding='utf-8'))",
+    "raise SystemExit(0 if gate_fingerprint_matches_current(Path(sys.argv[1]), payload) else 1)",
+  ].join("; ");
+  const result = spawnSync(projectPythonPath(), ["-c", script, projectRoot, pathName], {
+    cwd: projectRoot,
+    encoding: "utf8",
+    env: gateFingerprintPythonEnvironment(projectRoot),
+    timeout: 30000,
+  });
+  return result.status === 0;
+}
+
+function gateFingerprintPythonEnvironment(projectRoot) {
+  const env = { ...process.env };
+  const candidates = [
+    path.join(projectRoot, ".agent-flow", "runtime", "python"),
+    path.join(KIT_ROOT, "src"),
+  ].filter((candidate) => fs.existsSync(candidate));
+  if (env.PYTHONPATH) candidates.push(env.PYTHONPATH);
+  env.PYTHONPATH = candidates.join(path.delimiter);
+  return env;
 }
 
 function hasGateEvidence(result) {
@@ -6282,12 +7401,18 @@ function fullFeatureWorkflowYaml() {
 function agentFlowSkillMarkdown() {
   return `---
 name: agent-flow
-description: Use when the user types /agent-flow, asks to start or continue the project workflow, or wants Claude, Codex, or OMP to drive the agent-flow lifecycle.
+description: Runs the project-local agent-flow lifecycle from slash-triggered tasks, status checks, and phase next commands. Use when the user types /agent-flow, asks to start or continue the project workflow, or wants Claude, Codex, or OMP to drive the agent-flow lifecycle.
 ---
 
 # Agent Flow
 
 Use this skill as the common entry point for the project-local agent-flow workflow.
+
+## Quick start
+
+1. From the project root, run \`${AGENT_FLOW_COMMAND} status\` for \`/agent-flow\` with no task, or \`${AGENT_FLOW_COMMAND} run "<task>"\` for \`/agent-flow <task>\`.
+2. Treat the command output as the source of truth and follow its \`next_command\`.
+3. Do not reinstall agent-flow or infer missing setup unless an agent-flow command exits non-zero with that setup error.
 
 ## Slash Trigger
 
@@ -6322,6 +7447,9 @@ ${AGENT_FLOW_COMMAND} status
 - On a new session, always check \`${AGENT_FLOW_COMMAND} status\` first and continue from that result.
 - After a phase writes its artifact, run the \`next_command\` printed by status or the current phase output.
 - Run direct build, test, typecheck, and lint commands from the pinned worktree through \`${AGENT_FLOW_COMMAND} gate -- <command ...>\`; do not run unsandboxed gate launchers.
+- For Android gates, run \`${AGENT_FLOW_COMMAND} gates --run-dir <run-dir>\` first so changed production modules, unit tests, and instrumented tests are selected independently. A targeted pass is recorded separately and cannot advance the workflow; after targeted success on frozen final code, run the same command with \`--full\` exactly once.
+- Reuse a successful run-scoped gate result only when its command, Git scope, production/test/dependency/config hashes, toolchain, profile, host, and relevant environment fingerprint match exactly.
+- Reviewer sub-agents inspect the existing gate result and fingerprint evidence instead of rerunning test suites. Request only the targeted test needed for a new finding.
 - If the workflow pauses for design or slice review, summarize the relevant artifact and wait for user approval before continuing.
 - During code generation, modification, and code review phases, apply \`code-generation-discipline\`. Resolve required skills from active profile metadata, installed skill index, changed files, and task scope. Load only the touched profile skill union. If a required local skill is missing, report it and wait for install or explicit override.
 - Keep user-facing replies short Korean by default. Keep code, commands, paths, and identifiers in English.
@@ -7109,6 +8237,9 @@ Implementation rules:
 - Apply \`code-generation-discipline\` during red, green, refactor, fix-loop, and review phases. Resolve required skills from active profile metadata, installed skill index, changed files, and task scope before writing or judging code.
 - If review or QA fails, return to the fix phase before continuing.
 - Required review happens before completion QA. After reviewer approve, gates run the configured profile checks. CI/CD owns lint/static/check commands; managed local profile gates keep agent-flow architecture checks and build/test checks only. If review or QA fails, fix-loop routes back through comment-authoring and review before gates run again.
+- Reviewer sub-agents inspect existing gate-result and fingerprint evidence instead of rerunning test suites. A new finding may request only its targeted regression test.
+- Android gates separate changed production modules, unit tests, and instrumented tests. Targeted success is non-terminal; only full Android success on frozen final code may advance the workflow.
+- Reuse successful run-scoped gates only when command, Git scope, code/test/dependency/config hashes, toolchain, profile, host, and relevant environment fingerprints match exactly.
 - Code review requires at least two active-host sub-agents (Codex sub-agent in Codex, Claude sub-agent in Claude, OMP sub-agent in OMP). If the changed scope spans multiple areas, run one additional active-host sub-agent in parallel. Additional non-host providers are optional, and every multi-review verdict requires 2+ independent sub-agent reviewer verdicts with reviewer-source: sub-agent. After recording each sub-agent result, close that sub-agent session. End multi-review artifacts with ## Overall followed by exactly one verdict line: verdict: approve or verdict: request-changes.
 - In the default workflow, gates run as their own phase after final-review approve.
 
@@ -7361,6 +8492,26 @@ function runSandboxedPythonCliCommand(subcommand, args) {
     root ? installedPythonRuntimePath(root) : "",
     process.env.PYTHONPATH,
   ].filter(Boolean);
+  if (subcommand === "gates") {
+    const result = safeSpawnAuthenticatedSync(
+      contract.python,
+      ["-m", "agent_flow.cli", subcommand, ...pythonArgs],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          PYTHONDONTWRITEBYTECODE: "1",
+          PYTHONNOUSERSITE: "1",
+          PYTHONSAFEPATH: "1",
+          PYTHONPATH: [...new Set(pythonPathEntries)].join(path.delimiter),
+        },
+        stdio: "inherit",
+        timeout: 30 * 60 * 1000,
+      },
+    );
+    if (result.error) throw result.error;
+    process.exit(result.status ?? 1);
+  }
   runSandboxedGate(
     ["--", "/usr/bin/python3", ...authenticatedExecutableArgs(
       contract.python,
@@ -7651,6 +8802,10 @@ try {
     runProjectPythonCli(["continue"]);
   }
 
+  if (command === "worktree") {
+    runProjectPythonCli(["worktree", ...process.argv.slice(3)]);
+  }
+
   if (command === "architecture-lint") {
     runArchitectureLint(process.argv.slice(3));
   }
@@ -7663,7 +8818,7 @@ try {
     runSandboxedGate(process.argv.slice(3));
   }
 
-  console.error("usage: agent-flow-kit install [--force-managed] | sync | status | continue | gate -- <command ...> | gates [--profile <id>] [--worktree <name>] | architecture-lint [--profile <id>] [--files ...] | run <task|install|start|status|next|advance|push-watch|push-watch-tick>");
+  console.error("usage: agent-flow-kit install [--force-managed] | sync | status | continue | worktree <create|status|list|remove> | gate -- <command ...> | gates [--profile <id>] [--worktree <name>] | architecture-lint [--profile <id>] [--files ...] | run <task|install|start|status|next|advance|push-watch|push-watch-tick>");
   process.exit(1);
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));

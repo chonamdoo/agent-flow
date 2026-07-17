@@ -327,10 +327,50 @@ def validate_forbidden_tokens(rel_path: str, text: str, role: dict[str, Any]) ->
     for token in forbidden:
         if not isinstance(token, str) or not token:
             continue
-        lowered_token = token.lower()
-        if any(lowered_token in haystack.lower() for haystack in haystacks):
+        if any(contains_forbidden_token(haystack, token) for haystack in haystacks):
             findings.append(Finding(rel_path, f"{role.get('id', 'role')} contains forbidden token {token}"))
     return findings
+
+
+def contains_forbidden_token(haystack: str, token: str) -> bool:
+    if not haystack or not token:
+        return False
+    for match in re.finditer(re.escape(token), haystack, re.IGNORECASE):
+        start, end = match.span()
+        actual = match.group(0)
+        previous = haystack[start - 1] if start else ""
+        following = haystack[end] if end < len(haystack) else ""
+        following_next = haystack[end + 1] if end + 1 < len(haystack) else ""
+        left_boundary = (
+            start == 0
+            or not previous.isalnum()
+            or (
+                actual[0].isupper()
+                and (
+                    previous.islower()
+                    or previous.isdigit()
+                    or (
+                        previous.isupper()
+                        and len(actual) > 1
+                        and actual[1].islower()
+                    )
+                )
+            )
+        )
+        right_boundary = (
+            end == len(haystack)
+            or not following.isalnum()
+            or following.isdigit()
+            or (actual[-1].islower() and following.isupper())
+            or (
+                actual.isupper()
+                and following.isupper()
+                and following_next.islower()
+            )
+        )
+        if left_boundary and right_boundary:
+            return True
+    return False
 
 
 def validate_package_suffix(rel_path: str, text: str, role: dict[str, Any], captures: dict[str, str]) -> list[Finding]:
