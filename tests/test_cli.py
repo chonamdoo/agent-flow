@@ -279,6 +279,30 @@ class CliTest(unittest.TestCase):
                         if target != "block":
                             self.assertIn(target, phase_set)
 
+    def test_workflow_export_does_not_resolve_active_workspace(self) -> None:
+        output = io.StringIO()
+        with mock.patch(
+            "agent_flow.cli._resolve_cli_root_context",
+            side_effect=AssertionError("workflow export must not resolve a mutable workspace"),
+        ):
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["workflow", "export", "--workflow", "default"]), 0)
+
+        self.assertEqual(json.loads(output.getvalue())["id"], "default")
+
+    def test_architecture_lint_uses_explicit_managed_worktree_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worktree = Path(temp_dir) / "leader" / ".agent-flow" / "worktrees" / "review"
+            worktree.mkdir(parents=True)
+            with mock.patch(
+                "agent_flow.cli._resolve_cli_root_context",
+                side_effect=AssertionError("explicit managed worktree root must not be rebound"),
+            ):
+                self.assertEqual(
+                    main(["architecture-lint", "--root", str(worktree), "--profile", "python"]),
+                    0,
+                )
+
     def test_full_feature_workflow_keeps_python_runner_routes(self) -> None:
         import yaml
 

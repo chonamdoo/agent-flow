@@ -435,15 +435,23 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     requested_root = Path(getattr(args, "root", ".")).resolve()
     root = requested_root
-    try:
-        root, inferred_worktree = _resolve_cli_root_context(
-            root,
-            getattr(args, "worktree", None),
-            allow_unbound_execution=args.command == "run",
-        )
-    except WorkspaceBoundaryError as exc:
-        print(_format_cli_error(exc), file=sys.stderr)
-        return 2
+    inferred_worktree = None
+    direct_managed_read = (
+        args.command == "architecture-lint"
+        and getattr(args, "worktree", None) is None
+        and _managed_worktree_context(requested_root) is not None
+    )
+    pure_control_command = args.command == "review" and args.review_command == "retry"
+    if hasattr(args, "root") and not direct_managed_read and not pure_control_command:
+        try:
+            root, inferred_worktree = _resolve_cli_root_context(
+                root,
+                getattr(args, "worktree", None),
+                allow_unbound_execution=args.command == "run",
+            )
+        except WorkspaceBoundaryError as exc:
+            print(_format_cli_error(exc), file=sys.stderr)
+            return 2
     if inferred_worktree is not None and hasattr(args, "worktree") and args.worktree is None:
         args.worktree = inferred_worktree
 

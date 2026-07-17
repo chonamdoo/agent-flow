@@ -117,6 +117,7 @@ const PROFILE_MANAGED_HOST_ONLY_SKILLS = new Set([
   "verified-email",
 ]);
 const GENERATED_PROJECT_SKILL_NAMES = new Set([
+  "agent-flow",
   "architecture-reviewer",
   "full-feature-workflow",
   "plan-reviewer",
@@ -5171,7 +5172,8 @@ function rollbackSkillInstallTransaction(transaction) {
 
 function preserveUnmanagedSkillEntries(transaction, previousIndex, currentIndex) {
   if (!transaction || !fs.existsSync(transaction.backup)) return;
-  const managed = new Set(["index.json"]);
+  const managed = new Set(["index.json", ...GENERATED_PROJECT_SKILL_NAMES]);
+  const preservedUnmanaged = new Set();
   for (const entry of fs.readdirSync(path.join(KIT_ROOT, "skills"), { withFileTypes: true })) {
     if (!entry.isDirectory()) managed.add(entry.name);
   }
@@ -5182,6 +5184,13 @@ function preserveUnmanagedSkillEntries(transaction, previousIndex, currentIndex)
     const rootName = relative.slice(prefix.length).split("/")[0];
     if (rootName) managed.add(rootName);
   }
+  for (const conflict of previousIndex?.conflicts || []) {
+    for (const ignored of conflict?.ignored || []) {
+      const match = String(ignored).replaceAll("\\", "/")
+        .match(/^\.agent-flow\/skills\/([^/]+)\/SKILL\.md$/);
+      if (match) managed.add(match[1]);
+    }
+  }
   for (const entry of fs.readdirSync(transaction.backup)) {
     if (managed.has(entry) || entry === ".agent-flow-transaction-owner") continue;
     const source = path.join(transaction.backup, entry);
@@ -5190,11 +5199,16 @@ function preserveUnmanagedSkillEntries(transaction, previousIndex, currentIndex)
       throw new Error(`unmanaged skill entry conflicts with installed skill: ${entry}`);
     }
     fs.cpSync(source, destination, { recursive: true, dereference: false, errorOnExist: true, force: false });
+    preservedUnmanaged.add(entry);
   }
   const indexed = new Set((currentIndex?.skills || []).map((skill) => skill.name));
   for (const entry of fs.readdirSync(transaction.live, { withFileTypes: true })) {
-    if (managed.has(entry.name) || indexed.has(entry.name) || entry.name.startsWith(".")) continue;
-    if (entry.isDirectory() && fs.existsSync(path.join(transaction.live, entry.name, "SKILL.md"))) {
+    if (managed.has(entry.name) || entry.name.startsWith(".")) continue;
+    if (
+      entry.isDirectory()
+      && fs.existsSync(path.join(transaction.live, entry.name, "SKILL.md"))
+      && (preservedUnmanaged.has(entry.name) || !indexed.has(entry.name))
+    ) {
       currentIndex.warnings.push(`${entry.name}: preserved unmanaged skill entry without adopting ownership`);
     }
   }

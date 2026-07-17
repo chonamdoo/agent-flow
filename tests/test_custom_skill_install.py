@@ -2052,6 +2052,74 @@ def test_reinstall_commits_transaction_without_residue(tmp_path: Path) -> None:
     assert (project / ".agent-flow" / "skills" / "index.json").is_file()
 
 
+def test_self_install_reinstall_treats_generated_agent_flow_skill_as_managed(tmp_path: Path) -> None:
+    kit = tmp_path / "kit"
+    kit.mkdir()
+    for relative in (
+        "bin",
+        "lib",
+        "workflows",
+        "profiles",
+        "skills",
+        "templates",
+        "bootstrap",
+        "scripts",
+        "src",
+        ".Codex/agents",
+        ".Codex/rules",
+        ".Codex/context",
+        ".claude/agents",
+        ".omp/agents",
+    ):
+        source = KIT_ROOT / relative
+        if source.is_dir():
+            shutil.copytree(source, kit / relative)
+
+    process_env = dict(os.environ)
+    process_env.update(
+        {
+            "HOME": str(tmp_path / "test-home"),
+            "AGENT_FLOW_AUTO_EXTERNAL_SKILLS": "0",
+            "PYTHON": sys.executable,
+            "CODEX_THREAD_ID": "",
+            "CODEX_CLI": "",
+        }
+    )
+    command = (_node(), str(kit / "bin" / "agent-flow-kit.mjs"), "install", "--force-managed")
+    first = subprocess.run(
+        (*command, "--skill", "agent-flow"),
+        cwd=kit,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=process_env,
+    )
+    launcher_command = (str(kit / ".agent-flow" / "bin" / "agent-flow"), "install", "--force-managed")
+    second = subprocess.run(
+        launcher_command,
+        cwd=kit,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=process_env,
+    )
+    third = subprocess.run(
+        launcher_command,
+        cwd=kit,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=process_env,
+    )
+
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert third.returncode == 0, third.stderr
+    assert "unmanaged skill entry conflicts" not in third.stderr
+    assert not (kit / ".agent-flow" / "install-transaction").exists()
+    assert (kit / ".agent-flow" / "skills" / "agent-flow" / "SKILL.md").is_file()
+
+
 def test_unverified_existing_host_skill_is_preserved(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
@@ -2741,6 +2809,30 @@ def test_unmanaged_snapshot_matching_bundled_catalog_name_is_preserved(tmp_path:
     index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
     assert "adaptive" not in {skill["name"] for skill in index["skills"]}
     assert any("adaptive: preserved unmanaged skill entry" in warning for warning in index["warnings"])
+
+
+def test_reinstall_preserves_unmanaged_snapshot_matching_indexed_project_skill_name(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    source = project / "skills" / "source-directory"
+    source.mkdir(parents=True)
+    (source / "SKILL.md").write_text(
+        "---\nname: indexed-name\ndescription: Project source.\n---\nproject-owned\n",
+        encoding="utf-8",
+    )
+    assert _install(project).returncode == 0
+    unmanaged = project / ".agent-flow" / "skills" / "indexed-name"
+    unmanaged.mkdir()
+    (unmanaged / "SKILL.md").write_text(
+        "---\nname: indexed-name\ndescription: User snapshot.\n---\nuser-owned\n",
+        encoding="utf-8",
+    )
+
+    result = _install(project)
+
+    assert result.returncode == 0, result.stderr
+    assert "user-owned" in (unmanaged / "SKILL.md").read_text(encoding="utf-8")
+    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    assert any("indexed-name: preserved unmanaged skill entry" in warning for warning in index["warnings"])
 
 
 @pytest.mark.parametrize(
