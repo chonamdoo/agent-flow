@@ -6,8 +6,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypeVar
 
+from agent_flow.core.skill_compatibility import (
+    SkillCompatibilityError,
+    SkillResolutionError,
+    compatible_reference_set,
+    normalize_skill_compatibility,
+)
 from agent_flow.core.skill_plan import (
     CODE_SKILL_PHASES,
+    authenticated_installed_skill_index,
     resolve_runtime_skill_plan,
     runtime_changed_files,
 )
@@ -28,15 +35,9 @@ def resolve_runtime_phase_contract(
     requirements = tuple(getattr(phase, "requirements", ()))
     if phase_id not in CODE_SKILL_PHASES and not required_skills and not requirements:
         return phase
-    index_path = config_root / ".agent-flow" / "skills" / "index.json"
-    if not index_path.is_file():
+    index = authenticated_installed_skill_index(config_root)
+    if index is None:
         return phase
-    try:
-        index = json.loads(index_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError("installed skill index is unreadable") from exc
-    if not isinstance(index, dict):
-        raise RuntimeError("installed skill index is invalid")
     workspace = meta.get("workspace")
     base_commit = workspace.get("head") if isinstance(workspace, dict) else None
     plan = resolve_runtime_skill_plan(
@@ -50,6 +51,15 @@ def resolve_runtime_phase_contract(
         str(meta.get("task") or ""),
         required_skills,
     )
+    resolution_errors = plan.get("resolution_errors")
+    if isinstance(resolution_errors, list) and resolution_errors:
+        diagnostics = [
+            diagnostic
+            for diagnostic in resolution_errors
+            if isinstance(diagnostic, dict)
+        ]
+        if diagnostics:
+            raise SkillResolutionError(diagnostics)
     missing_profiles = plan.get("missing_profiles")
     if isinstance(missing_profiles, list) and missing_profiles:
         raise RuntimeError(
@@ -72,7 +82,11 @@ def resolve_runtime_phase_contract(
         if isinstance(skills, list)
         else ()
     )
-    return replace(phase, required_skills=resolved or required_skills)
+    return replace(
+        phase,
+        required_skills=resolved or required_skills,
+        skill_compatibility=normalize_skill_compatibility(index.get("compatibility")),
+    )
 
 
 def phase_contract_issues(phase: object, text: str) -> list[str]:
@@ -91,7 +105,20 @@ def phase_contract_issues(phase: object, text: str) -> list[str]:
         or not isinstance(requirements, dict)
     ):
         return ["phase-contract payload is invalid"]
-    missing_skills = sorted(set(required_skills) - set(applied))
+    try:
+        required_references = compatible_reference_set(
+            getattr(phase, "skill_compatibility", None),
+            required_skills,
+        )
+        applied_references = compatible_reference_set(
+            getattr(phase, "skill_compatibility", None),
+            applied,
+        )
+    except SkillCompatibilityError:
+        return ["phase-contract skill compatibility is invalid"]
+    except SkillResolutionError as exc:
+        return [str(exc)]
+    missing_skills = sorted(required_references - applied_references)
     issues: list[str] = []
     if missing_skills:
         issues.append(

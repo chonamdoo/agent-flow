@@ -2788,15 +2788,17 @@ class CliTest(unittest.TestCase):
             root = Path(temp_dir) / "project"
             root.mkdir()
             _init_git_repo(root)
-            self.assertEqual(main(["run", "slice", "--root", str(root)]), 0)
+            with mock.patch.dict(os.environ, {"AGENT_FLOW_EXECUTION_ID": "managed-reuse"}):
+                self.assertEqual(main(["run", "slice", "--root", str(root)]), 0)
             worktree = root / ".agent-flow" / "worktrees" / "feat-slice"
 
             old_cwd = Path.cwd()
             try:
                 os.chdir(worktree)
                 output = io.StringIO()
-                with contextlib.redirect_stdout(output):
-                    self.assertEqual(main(["run", "other"]), 2)
+                with mock.patch.dict(os.environ, {"AGENT_FLOW_EXECUTION_ID": "managed-reuse"}):
+                    with contextlib.redirect_stdout(output):
+                        self.assertEqual(main(["run", "other"]), 2)
             finally:
                 os.chdir(old_cwd)
 

@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "skills": [
+    {
+      "canonical": "clean-architecture",
+      "capabilities": [
+        "architecture.clean.compatibility"
+      ]
+    },
+    {
+      "canonical": "clean-architecture-core",
+      "capabilities": [
+        "architecture.clean.boundary"
+      ]
+    },
+    {
+      "canonical": "code-generation-discipline",
+      "capabilities": [
+        "implementation.code-generation"
+      ],
+      "renamed_from": [
+        "code-generation"
+      ]
+    }
+  ]
+}

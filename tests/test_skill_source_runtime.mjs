@@ -376,3 +376,43 @@ test("secondary declared artifacts must exist and be fresh", () => {
     "missing declared artifact artifacts/log.txt",
   ]);
 });
+
+test("dependency closure uses metadata from the selected skill snapshot", () => {
+  const root = tempRoot();
+  const project = path.join(root, "project");
+  const home = path.join(root, "home");
+  const localSkills = path.join(project, ".agent-flow", "local-skills");
+  const snapshots = path.join(project, ".agent-flow", "skills");
+  fs.mkdirSync(snapshots, { recursive: true });
+  writeSkill(localSkills, "dependency-skill");
+  const selectedRoot = writeSkill(
+    localSkills,
+    "selected-skill",
+    "dependencies:\n  - dependency-skill\n",
+  );
+  const selectedDocument = path.join(selectedRoot, "SKILL.md");
+  const originalReadFileSync = fs.readFileSync;
+  fs.readFileSync = function guardedReadFileSync(file, ...args) {
+    if (typeof file === "string" && path.resolve(file) === selectedDocument) {
+      throw new Error("selected SKILL.md was reopened by path");
+    }
+    return originalReadFileSync.call(this, file, ...args);
+  };
+  try {
+    const plan = resolveProfileSkillSources({
+      skillNames: new Set(["selected-skill"]),
+      explicitSkillNames: ["selected-skill"],
+      kitRoot: KIT_ROOT,
+      projectRoot: project,
+      projectSkillsRoot: snapshots,
+      home,
+      activeHost: "codex",
+    });
+    assert.deepEqual(
+      plan.entries.map((entry) => entry.name),
+      ["dependency-skill", "selected-skill"],
+    );
+  } finally {
+    fs.readFileSync = originalReadFileSync;
+  }
+});

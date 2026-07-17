@@ -29,6 +29,7 @@ class PhaseDefinition:
     required_skills: tuple[str, ...]
     requirements: tuple[str, ...]
     artifacts: tuple[str, ...]
+    skill_compatibility: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
