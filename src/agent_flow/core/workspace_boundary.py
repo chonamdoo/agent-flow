@@ -351,6 +351,8 @@ def _workspace_start_claim_payload(
 def _workspace_claim_matches_identity(
     payload: Mapping[str, object],
     identity: WorkspaceIdentity,
+    *,
+    include_revision: bool = True,
 ) -> bool:
     common = _authenticated_directory_root(Path(identity.git_common_dir))
     leader = common.parent.resolve(strict=True)
@@ -361,8 +363,13 @@ def _workspace_claim_matches_identity(
         and payload.get("leader_inode") == leader_metadata.st_ino
         and payload.get("workspace_root") == identity.workspace_root
         and payload.get("workspace_git_dir") == identity.git_dir
-        and payload.get("workspace_branch") == identity.branch
-        and payload.get("workspace_head") == identity.head
+        and (
+            not include_revision
+            or (
+                payload.get("workspace_branch") == identity.branch
+                and payload.get("workspace_head") == identity.head
+            )
+        )
         and payload.get("workspace_device") == identity.device
         and payload.get("workspace_inode") == identity.inode
     )
@@ -399,7 +406,11 @@ def _recover_stale_workspace_start_claim(
             or not process_start_id
             or not isinstance(run_id, str)
             or not run_id
-            or not _workspace_claim_matches_identity(payload, identity)
+            or not _workspace_claim_matches_identity(
+                payload,
+                identity,
+                include_revision=run_id != "worktree-lifecycle",
+            )
         ):
             return False
         if _process_is_alive(pid):

@@ -8,21 +8,66 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
+import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from agent_flow.core.commands import run_safe_command
 from agent_flow.core.workspace_boundary import (
     WorkspaceBoundaryError,
+    acquire_workspace_start_claim,
     authenticated_git_private_directory,
     authenticated_worktree_runtime_root,
     capture_workspace_identity,
+    leader_root_for_identity,
+    release_workspace_start_claim,
     workspace_identity_from_dict,
 )
 
 
 PROTECTED_WORKTREE_BRANCHES = {"main", "master", "develop"}
 GIT_WORKTREE_TIMEOUT_S = 300
+_EXPECTED_DELETE_HOOK = """#!/bin/sh
+state=$1
+payload=$(cat) || exit 1
+if [ -n "$AGENT_FLOW_ORIGINAL_REFERENCE_TRANSACTION_HOOK" ]; then
+    printf '%s\n' "$payload" | "$AGENT_FLOW_ORIGINAL_REFERENCE_TRANSACTION_HOOK" "$state" || exit $?
+fi
+if [ "$state" != "prepared" ]; then
+    exit 0
+fi
+case "$payload" in
+*'
+'*) exit 1 ;;
+esac
+set -f
+IFS=' ' read -r old_oid new_oid ref_name extra <<EOF
+$payload
+EOF
+if [ -n "$extra" ] || [ "$old_oid" != "$AGENT_FLOW_EXPECTED_OLD_OID" ] || [ "$ref_name" != "$AGENT_FLOW_EXPECTED_REF" ]; then
+    exit 1
+fi
+case "$new_oid" in
+0000000000000000000000000000000000000000|0000000000000000000000000000000000000000000000000000000000000000) ;;
+*) exit 1 ;;
+esac
+worktrees=$("$AGENT_FLOW_GIT_EXECUTABLE" worktree list --porcelain) || exit 1
+while IFS= read -r line; do
+    if [ "$line" = "branch $AGENT_FLOW_EXPECTED_REF" ]; then
+        exit 1
+    fi
+done <<EOF
+$worktrees
+EOF
+exit 0
+"""
+_HELD_WORKTREE_LIFECYCLE_LOCKS: ContextVar[frozenset[str]] = ContextVar(
+    "held_worktree_lifecycle_locks",
+    default=frozenset(),
+)
 
 
 @dataclass(frozen=True)
@@ -66,6 +111,11 @@ def plan_worktree(*, root: Path, name: str, branch: str | None = None) -> Worktr
 
 
 def create_worktree(*, root: Path, plan: WorktreePlan, allow_dirty: bool = False) -> WorktreeStatus:
+    with worktree_lifecycle_lock(root=root):
+        return _create_worktree(root=root, plan=plan, allow_dirty=allow_dirty)
+
+
+def _create_worktree(*, root: Path, plan: WorktreePlan, allow_dirty: bool) -> WorktreeStatus:
     if not allow_dirty and _git_dirty(root):
         raise RuntimeError("leader workspace is dirty; pass --allow-dirty to create a worktree anyway")
     if plan.path.exists():
@@ -102,7 +152,7 @@ def create_worktree(*, root: Path, plan: WorktreePlan, allow_dirty: bool = False
         write_worktree_manifest(root=root, status=status)
     except Exception:
         try:
-            remove_worktree(root=root, status=status)
+            _remove_worktree(root=root, status=status)
         except Exception:
             pass
         raise
@@ -110,6 +160,11 @@ def create_worktree(*, root: Path, plan: WorktreePlan, allow_dirty: bool = False
 
 
 def remove_worktree(*, root: Path, status: WorktreeStatus, delete_branch: bool = True) -> None:
+    with worktree_lifecycle_lock(root=root):
+        _remove_worktree(root=root, status=status, delete_branch=delete_branch)
+
+
+def _remove_worktree(*, root: Path, status: WorktreeStatus, delete_branch: bool = True) -> None:
     branch_to_delete, preserved_tip = validate_worktree_removal(
         root=root,
         status=status,
@@ -120,7 +175,7 @@ def remove_worktree(*, root: Path, status: WorktreeStatus, delete_branch: bool =
         _run_git(root, "worktree", "remove", str(status.path))
     if branch_to_delete is not None:
         assert preserved_tip is not None
-        delete_worktree_branch_at_tip(
+        _delete_worktree_branch_at_tip(
             root=root,
             branch=branch_to_delete,
             expected_tip=preserved_tip,
@@ -218,10 +273,49 @@ def delete_worktree_branch_at_tip(
     branch: str,
     expected_tip: str,
 ) -> None:
+    with worktree_lifecycle_lock(root=root):
+        _delete_worktree_branch_at_tip(
+            root=root,
+            branch=branch,
+            expected_tip=expected_tip,
+        )
+
+
+def _delete_worktree_branch_at_tip(
+    *,
+    root: Path,
+    branch: str,
+    expected_tip: str,
+) -> None:
     _validate_branch(branch)
     if not re.fullmatch(r"[0-9a-fA-F]{40,64}", expected_tip):
         raise RuntimeError("refusing to delete worktree branch with an invalid pinned tip")
-    _run_git(root, "update-ref", "-d", f"refs/heads/{branch}", expected_tip)
+    if _worktree_branch_is_checked_out(root=root, branch=branch):
+        raise RuntimeError(
+            f"refusing to delete worktree branch checked out in another worktree: {branch}"
+        )
+    branch_ref = f"refs/heads/{branch}"
+    with _expected_delete_reference_transaction_hook(
+        root=root,
+        branch_ref=branch_ref,
+        expected_tip=expected_tip,
+    ) as (hook_dir, hook_env):
+        _run_git(
+            root,
+            "-c",
+            f"core.hooksPath={hook_dir}",
+            "update-ref",
+            "-d",
+            branch_ref,
+            expected_tip,
+            env_extra=hook_env,
+        )
+
+
+def _worktree_branch_is_checked_out(*, root: Path, branch: str) -> bool:
+    listed = _run_git(root, "worktree", "list", "--porcelain", "-z")
+    branch_ref = f"branch refs/heads/{branch}"
+    return branch_ref in listed.stdout.split("\0")
 
 
 def _default_base_ref(root: Path) -> str:
@@ -632,9 +726,25 @@ def _is_agent_flow_status_line(line: str) -> bool:
     return path == ".agent-flow" or path.startswith(".agent-flow/")
 
 
-def _run_git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def _run_git(
+    root: Path,
+    *args: str,
+    env_extra: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     # worktree add/remove는 큰 저장소나 느린 디스크에서 30초를 넘을 수 있어 별도 여유를 둔다.
-    result = run_safe_command(("git", *args), cwd=root, timeout_s=GIT_WORKTREE_TIMEOUT_S)
+    if env_extra is None:
+        result = run_safe_command(
+            ("git", *args),
+            cwd=root,
+            timeout_s=GIT_WORKTREE_TIMEOUT_S,
+        )
+    else:
+        result = run_safe_command(
+            ("git", *args),
+            cwd=root,
+            env_extra=env_extra,
+            timeout_s=GIT_WORKTREE_TIMEOUT_S,
+        )
     if not result.ok:
         # 호출자는 기존 subprocess 예외 경로로 처리하므로 형태를 유지한다.
         raise subprocess.CalledProcessError(
@@ -644,6 +754,106 @@ def _run_git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
             stderr=result.stderr,
         )
     return subprocess.CompletedProcess(result.args, result.returncode or 0, result.stdout, result.stderr)
+
+
+@contextmanager
+def _expected_delete_reference_transaction_hook(
+    *,
+    root: Path,
+    branch_ref: str,
+    expected_tip: str,
+):
+    original_hook = _reference_transaction_hook(root)
+    with tempfile.TemporaryDirectory(prefix="agent-flow-ref-delete-") as temporary:
+        hook_dir = Path(temporary)
+        hook_path = hook_dir / "reference-transaction"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(hook_path, flags, 0o700)
+        try:
+            payload = _EXPECTED_DELETE_HOOK.encode("utf-8")
+            view = memoryview(payload)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise OSError("reference transaction hook write failed")
+                view = view[written:]
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        yield hook_dir, {
+            "AGENT_FLOW_GIT_EXECUTABLE": _git_executable_for_hook(),
+            "AGENT_FLOW_EXPECTED_OLD_OID": expected_tip,
+            "AGENT_FLOW_EXPECTED_REF": branch_ref,
+            "AGENT_FLOW_ORIGINAL_REFERENCE_TRANSACTION_HOOK": (
+                str(original_hook) if original_hook is not None else ""
+            ),
+        }
+
+
+def _git_executable_for_hook() -> str:
+    configured = os.environ.get("AGENT_FLOW_GIT_EXECUTABLE")
+    if configured and Path(configured).is_absolute():
+        return configured
+    return shutil.which("git") or "/usr/bin/git"
+
+
+def _reference_transaction_hook(root: Path) -> Path | None:
+    configured = run_safe_command(
+        ("git", "config", "--path", "--get", "core.hooksPath"),
+        cwd=root,
+    )
+    if configured.returncode not in {0, 1} or configured.error is not None:
+        raise RuntimeError("failed to resolve Git hooks path")
+    if configured.stdout.strip():
+        hooks_dir = Path(configured.stdout.strip())
+        if not hooks_dir.is_absolute():
+            hooks_dir = root / hooks_dir
+        hook = hooks_dir / "reference-transaction"
+    else:
+        hook_path = _run_git(root, "rev-parse", "--git-path", "hooks/reference-transaction")
+        hook = Path(hook_path.stdout.strip())
+        if not hook.is_absolute():
+            hook = root / hook
+    if not hook.exists():
+        return None
+    if hook.is_symlink() or not hook.is_file() or not os.access(hook, os.X_OK):
+        raise RuntimeError(f"Git reference transaction hook is not executable: {hook}")
+    return hook.resolve(strict=True)
+
+
+@contextmanager
+def worktree_lifecycle_lock(*, root: Path):
+    workspace_identity = capture_workspace_identity(root)
+    leader_root = leader_root_for_identity(workspace_identity)
+    leader_identity = capture_workspace_identity(leader_root)
+    lock_key = leader_identity.git_common_dir
+    held = _HELD_WORKTREE_LIFECYCLE_LOCKS.get()
+    if lock_key in held:
+        yield
+        return
+    deadline = time.monotonic() + GIT_WORKTREE_TIMEOUT_S
+    while True:
+        try:
+            claim = acquire_workspace_start_claim(
+                leader_identity,
+                run_id="worktree-lifecycle",
+            )
+        except WorkspaceBoundaryError as exc:
+            if "workspace start is already in progress" not in str(exc):
+                raise
+            if time.monotonic() >= deadline:
+                raise TimeoutError("timed out waiting for worktree lifecycle lock")
+            time.sleep(0.01)
+            continue
+        break
+    context_token = _HELD_WORKTREE_LIFECYCLE_LOCKS.set(held | {lock_key})
+    try:
+        yield
+    finally:
+        _HELD_WORKTREE_LIFECYCLE_LOCKS.reset(context_token)
+        release_workspace_start_claim(claim)
 
 
 def _owned_branch_for_live_worktree(*, root: Path, status: WorktreeStatus) -> str | None:

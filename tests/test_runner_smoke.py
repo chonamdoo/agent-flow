@@ -1075,6 +1075,36 @@ def test_worktree_remove_prunes_real_stale_owned_worktree_and_deletes_auto_branc
     assert not _branch_exists(project, "feat/ghost")
 
 
+def test_stale_worktree_remove_handles_reference_hook_rejection(tmp_path: Path):
+    project = tmp_path / "stale-hook-rejection"
+    project.mkdir()
+    _init_git_project(project)
+    created = _run_cli(["worktree", "create", "--name", "ghost"], project)
+    assert created.returncode == 0, created.stderr
+    stale_dir = project / ".agent-flow" / "worktrees" / "feat-ghost"
+    shutil.rmtree(stale_dir)
+    stale_dir.mkdir(parents=True)
+    _write_authenticated_stale_manifest(project, "feat-ghost")
+    hook = project / ".git" / "hooks" / "reference-transaction"
+    hook.write_text(
+        "#!/bin/sh\n[ \"$1\" != prepared ]\n",
+        encoding="utf-8",
+    )
+    hook.chmod(0o700)
+    cleanup_env = _authorize_worktree_cleanup(project, "feat-ghost")
+
+    result = _run_cli(
+        ["worktree", "remove", "--name", "ghost"],
+        project,
+        cleanup_env,
+    )
+
+    assert result.returncode == 2
+    assert "Traceback" not in result.stderr
+    assert "ref updates aborted by hook" in result.stderr
+    assert _branch_exists(project, "feat/ghost")
+
+
 def test_stale_worktree_remove_preserves_unpushed_unique_branch_commit(tmp_path: Path):
     project = tmp_path / "stale-unique-commit"
     project.mkdir()
@@ -1471,6 +1501,193 @@ def test_compare_and_delete_preserves_branch_that_moves_after_validation(tmp_pat
         text=True,
         check=True,
     ).stdout.strip() == moved
+
+
+def test_compare_and_delete_preserves_branch_that_moves_during_deletion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import agent_flow.core.worktrees as worktrees
+
+    project = tmp_path / "branch-cas-race"
+    project.mkdir()
+    _init_git_project(project)
+    subprocess.run(["git", "branch", "feat/task"], cwd=project, check=True)
+    tip = subprocess.run(
+        ["git", "rev-parse", "feat/task"],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    tree = subprocess.run(
+        ["git", "rev-parse", f"{tip}^{{tree}}"],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    moved = subprocess.run(
+        ["git", "commit-tree", tree, "-p", tip, "-m", "moved during deletion"],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    original_run_git = worktrees._run_git
+    raced = False
+
+    def run_git_after_move(root: Path, *args: str, **kwargs):
+        nonlocal raced
+        if args[2:4] == ("update-ref", "-d"):
+            subprocess.run(
+                ["git", "update-ref", "refs/heads/feat/task", moved, tip],
+                cwd=project,
+                check=True,
+            )
+            raced = True
+        return original_run_git(root, *args, **kwargs)
+
+    monkeypatch.setattr(worktrees, "_run_git", run_git_after_move)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        worktrees.delete_worktree_branch_at_tip(
+            root=project,
+            branch="feat/task",
+            expected_tip=tip,
+        )
+
+    assert raced
+    assert subprocess.run(
+        ["git", "rev-parse", "feat/task"],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip() == moved
+
+
+def test_compare_and_delete_preserves_branch_checked_out_in_another_worktree(tmp_path: Path):
+    from agent_flow.core.worktrees import delete_worktree_branch_at_tip
+
+    project = tmp_path / "branch-checked-out"
+    project.mkdir()
+    _init_git_project(project)
+    subprocess.run(["git", "branch", "feat/task"], cwd=project, check=True)
+    tip = subprocess.run(
+        ["git", "rev-parse", "feat/task"],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    other_worktree = tmp_path / "other-worktree"
+    subprocess.run(
+        ["git", "worktree", "add", str(other_worktree), "feat/task"],
+        cwd=project,
+        check=True,
+    )
+
+    with pytest.raises(RuntimeError, match="checked out in another worktree"):
+        delete_worktree_branch_at_tip(
+            root=project,
+            branch="feat/task",
+            expected_tip=tip,
+        )
+
+    assert _branch_exists(project, "feat/task")
+    assert subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=other_worktree,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip() == "feat/task"
+
+
+def test_compare_and_delete_preserves_branch_checked_out_during_deletion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import agent_flow.core.worktrees as worktrees
+
+    project = tmp_path / "branch-checkout-race"
+    project.mkdir()
+    _init_git_project(project)
+    subprocess.run(["git", "branch", "feat/task"], cwd=project, check=True)
+    tip = subprocess.run(
+        ["git", "rev-parse", "feat/task"],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    other_worktree = tmp_path / "racing-worktree"
+    original_run_git = worktrees._run_git
+    raced = False
+
+    def run_git_after_checkout(root: Path, *args: str, **kwargs):
+        nonlocal raced
+        if args[2:4] == ("update-ref", "-d"):
+            subprocess.run(
+                ["git", "worktree", "add", str(other_worktree), "feat/task"],
+                cwd=project,
+                check=True,
+            )
+            raced = True
+        return original_run_git(root, *args, **kwargs)
+
+    monkeypatch.setattr(worktrees, "_run_git", run_git_after_checkout)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        worktrees.delete_worktree_branch_at_tip(
+            root=project,
+            branch="feat/task",
+            expected_tip=tip,
+        )
+
+    assert raced
+    assert _branch_exists(project, "feat/task")
+    assert subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=other_worktree,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip() == "feat/task"
+
+
+def test_compare_and_delete_preserves_branch_when_existing_reference_hook_rejects(
+    tmp_path: Path,
+):
+    from agent_flow.core.worktrees import delete_worktree_branch_at_tip
+
+    project = tmp_path / "branch-existing-hook"
+    project.mkdir()
+    _init_git_project(project)
+    subprocess.run(["git", "branch", "feat/task"], cwd=project, check=True)
+    tip = subprocess.run(
+        ["git", "rev-parse", "feat/task"],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    hook = project / ".git" / "hooks" / "reference-transaction"
+    hook.write_text(
+        "#!/bin/sh\n[ \"$1\" != prepared ]\n",
+        encoding="utf-8",
+    )
+    hook.chmod(0o700)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        delete_worktree_branch_at_tip(
+            root=project,
+            branch="feat/task",
+            expected_tip=tip,
+        )
+
+    assert _branch_exists(project, "feat/task")
 
 
 def test_two_owned_worktrees_can_finish_cleanup_concurrently(tmp_path: Path):

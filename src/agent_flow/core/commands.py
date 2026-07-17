@@ -4,7 +4,7 @@ import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 
 DEFAULT_COMMAND_TIMEOUT_S = 30
@@ -28,6 +28,7 @@ def run_safe_command(
     args: Sequence[str],
     *,
     cwd: Path | None = None,
+    env_extra: Mapping[str, str] | None = None,
     input_text: str | None = None,
     timeout_s: int = DEFAULT_COMMAND_TIMEOUT_S,
 ) -> SafeCommandResult:
@@ -40,6 +41,7 @@ def run_safe_command(
         completed = subprocess.run(
             command,
             cwd=cwd,
+            env={**os.environ, **env_extra} if env_extra is not None else None,
             input=input_text,
             text=True,
             capture_output=True,

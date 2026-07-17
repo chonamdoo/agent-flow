@@ -8,6 +8,7 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { evaluatePhaseContract } from "../lib/phase-contract.mjs";
 import { CODE_SKILL_PHASES } from "../lib/skill-selection.mjs";
+import { runtimeParityFailures } from "../lib/runtime-parity.mjs";
 
 const SOURCE_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
@@ -31,6 +32,10 @@ const failures = [];
 const missingFiles = new Set();
 const workflowExportCache = new Map();
 let nodeRouteParityRoot = null;
+
+function assertFreshRuntimeCopies(label, installRoot) {
+  failures.push(...runtimeParityFailures(SOURCE_ROOT, installRoot, label));
+}
 
 function resetNodeRouteParityRoot() {
   if (nodeRouteParityRoot === null) {
@@ -235,96 +240,6 @@ function recursiveFiles(relDir) {
   };
   visit(dir);
   return out.sort();
-}
-
-function exactTreeEntries(
-  root,
-  { ignorePythonCaches = false, canonicalDirectoryMode = false, ignoreModes = false } = {},
-) {
-  const entries = new Map();
-  const visit = (current, relative) => {
-    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
-      if (
-        ignorePythonCaches
-        && (entry.name === "__pycache__" || entry.name.endsWith(".pyc"))
-      ) continue;
-      const entryPath = path.join(current, entry.name);
-      const entryRelative = relative ? path.join(relative, entry.name) : entry.name;
-      const mode = fs.lstatSync(entryPath).mode & 0o777;
-      if (entry.isDirectory()) {
-        entries.set(
-          entryRelative,
-          `directory:${ignoreModes ? '*' : (canonicalDirectoryMode ? 0o755 : mode).toString(8)}`,
-        );
-        visit(entryPath, entryRelative);
-      } else if (entry.isFile()) {
-        entries.set(
-          entryRelative,
-          `file:${ignoreModes ? '*' : mode.toString(8)}:${createHash("sha256").update(fs.readFileSync(entryPath)).digest("hex")}`,
-        );
-      } else if (entry.isSymbolicLink()) {
-        entries.set(entryRelative, `symlink:${fs.readlinkSync(entryPath)}`);
-      } else {
-        entries.set(entryRelative, "unsupported");
-      }
-    }
-  };
-  visit(root, "");
-  return entries;
-}
-
-function assertExactRuntimeRootLayout(label, runtimeRoot, copiedDestinations) {
-  if (!fs.existsSync(runtimeRoot)) {
-    failures.push(`${label} runtime root is missing`);
-    return;
-  }
-  const rootMetadata = fs.lstatSync(runtimeRoot);
-  if (rootMetadata.isSymbolicLink() || !rootMetadata.isDirectory()) {
-    failures.push(`${label} runtime root type or mode differs`);
-    return;
-  }
-  if ((rootMetadata.mode & 0o777) !== 0o755) {
-    failures.push(`${label} runtime root type or mode differs`);
-  }
-  const entries = exactTreeEntries(runtimeRoot);
-  for (const name of entries.keys()) {
-    const covered = copiedDestinations.some((destination) => (
-      name === destination
-      || name.startsWith(`${destination}${path.sep}`)
-      || destination.startsWith(`${name}${path.sep}`)
-    ));
-    if (!covered) failures.push(`${label} unexpected runtime entry ${name}`);
-  }
-}
-
-function assertExactDirectoryCopy(label, source, target, canonicalModes = true) {
-  if (!fs.existsSync(source) || !fs.existsSync(target)) {
-    failures.push(`${label} exact copy path is missing`);
-    return;
-  }
-  const sourceRoot = fs.lstatSync(source);
-  const targetRoot = fs.lstatSync(target);
-  if (
-    sourceRoot.isSymbolicLink()
-    || targetRoot.isSymbolicLink()
-    || !sourceRoot.isDirectory()
-    || !targetRoot.isDirectory()
-    || (canonicalModes && (targetRoot.mode & 0o777) !== 0o755)
-  ) {
-    failures.push(`${label} root type or mode differs`);
-  }
-  const sourceEntries = exactTreeEntries(source, {
-    ignorePythonCaches: true,
-    canonicalDirectoryMode: canonicalModes,
-    ignoreModes: !canonicalModes,
-  });
-  const targetEntries = exactTreeEntries(target, { ignoreModes: !canonicalModes });
-  const names = [...new Set([...sourceEntries.keys(), ...targetEntries.keys()])].sort();
-  for (const name of names) {
-    if (sourceEntries.get(name) !== targetEntries.get(name)) {
-      failures.push(`${label} differs at ${name}`);
-    }
-  }
 }
 
 const canonicalInstaller = "bin/agent-flow-kit.mjs";
@@ -1250,59 +1165,8 @@ function assertInstallerSelfInstallKeepsSourceScripts(installer) {
   }
 }
 
-function assertFreshRuntimeCopies(label, installRoot) {
-  const copies = [
-    ["workflows", path.join(".agent-flow", "workflows")],
-    ["profiles", path.join(".agent-flow", "profiles")],
-    [path.join("src", "agent_flow"), path.join(".agent-flow", "runtime", "python", "agent_flow")],
-    ...[
-      "bin",
-      "lib",
-      "workflows",
-      "profiles",
-      "skills",
-      "templates",
-      "scripts",
-      "bootstrap",
-      path.join("src", "agent_flow"),
-      path.join(".Codex", "agents"),
-      path.join(".Codex", "rules"),
-      path.join(".Codex", "context"),
-      path.join(".claude", "agents"),
-    ].map((source) => [
-      source,
-      path.join(".agent-flow", "runtime", "node", source),
-    ]),
-  ];
-  for (const [source, target] of copies) {
-    const canonicalModes = target.startsWith(`${path.join('.agent-flow', 'runtime')}${path.sep}`);
-    assertExactDirectoryCopy(
-      `${label} ${target}`,
-      path.join(SOURCE_ROOT, source),
-      path.join(installRoot, target),
-      canonicalModes,
-    );
-  }
-  const nodeRoot = path.join(".agent-flow", "runtime", "node");
-  assertExactRuntimeRootLayout(
-    `${label} Node`,
-    path.join(installRoot, nodeRoot),
-    copies
-      .filter(([_source, target]) => target.startsWith(`${nodeRoot}${path.sep}`))
-      .map(([_source, target]) => path.relative(nodeRoot, target)),
-  );
-  const pythonRoot = path.join(".agent-flow", "runtime", "python");
-  assertExactRuntimeRootLayout(
-    `${label} Python`,
-    path.join(installRoot, pythonRoot),
-    copies
-      .filter(([_source, target]) => target.startsWith(`${pythonRoot}${path.sep}`))
-      .map(([_source, target]) => path.relative(pythonRoot, target)),
-  );
-}
-
 if (CHECK_INSTALLED_COPY) {
-  assertFreshRuntimeCopies("current installed runtime", INSTALL_ROOT);
+  failures.push(...runtimeParityFailures(SOURCE_ROOT, INSTALL_ROOT));
 }
 
 function assertInstallerCleanInstallCopiesTemplates(installer) {

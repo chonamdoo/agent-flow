@@ -98,6 +98,7 @@ from agent_flow.core.worktrees import (
     worktree_branch_is_preserved,
     worktree_runtime_root,
     validate_worktree_removal,
+    worktree_lifecycle_lock,
 )
 from agent_flow.core.state import RunRequest, RunState, start_run, status_summary
 from agent_flow.core.workflow import load_workflow
@@ -1013,60 +1014,76 @@ def main(argv: list[str] | None = None) -> int:
                     claim = None
                     quarantine: Path | None = None
                     try:
-                        claim = _acquire_authenticated_cleanup_claim(
-                            root,
-                            status.name,
-                        )
-                        status = get_worktree_status(root=root, name=args.name)
-                        prune = run_safe_command(("git", "worktree", "prune"), cwd=root)
-                        if not prune.ok:
-                            raise RuntimeError(_format_safe_command_error(prune))
-                        branch_tip = None
-                        if (
-                            not args.keep_branch
-                            and status.branch_created_by_agent_flow
-                            and worktree_branch_exists(root=root, branch=status.branch)
-                        ):
-                            branch_tip = preserved_worktree_branch_tip(
-                                root=root,
-                                branch=status.branch,
-                            )
-                            if branch_tip is None:
-                                raise RuntimeError(
-                                    "refusing to delete worktree branch with unpreserved commits: "
-                                    f"{status.branch}"
-                                )
-                        quarantine = _quarantine_stale_worktree_checkout(
-                            root,
-                            stale_dir,
-                            status.name,
-                        )
-                        if quarantine is not None:
-                            _remove_quarantined_stale_worktree_checkout(
+                        with worktree_lifecycle_lock(root=root):
+                            claim = _acquire_authenticated_cleanup_claim(
                                 root,
-                                quarantine,
                                 status.name,
                             )
-                            quarantine = None
-                        if branch_tip is not None:
-                            delete_worktree_branch_at_tip(
-                                root=root,
-                                branch=status.branch,
-                                expected_tip=branch_tip,
-                            )
-                        remove_worktree_metadata(root=root, name=status.name)
-                    except (OSError, RuntimeError, ValueError, WorkspaceBoundaryError) as exc:
-                        if (
-                            quarantine is not None
-                            and quarantine.exists()
-                            and not stale_dir.exists()
-                        ):
-                            quarantine.rename(stale_dir)
+                            try:
+                                status = get_worktree_status(root=root, name=args.name)
+                                if _worktree_checkout_exists(status):
+                                    raise RuntimeError(
+                                        "worktree became active during stale cleanup: "
+                                        f"{status.path}"
+                                    )
+                                prune = run_safe_command(("git", "worktree", "prune"), cwd=root)
+                                if not prune.ok:
+                                    raise RuntimeError(_format_safe_command_error(prune))
+                                branch_tip = None
+                                if (
+                                    not args.keep_branch
+                                    and status.branch_created_by_agent_flow
+                                    and worktree_branch_exists(root=root, branch=status.branch)
+                                ):
+                                    branch_tip = preserved_worktree_branch_tip(
+                                        root=root,
+                                        branch=status.branch,
+                                    )
+                                    if branch_tip is None:
+                                        raise RuntimeError(
+                                            "refusing to delete worktree branch with unpreserved commits: "
+                                            f"{status.branch}"
+                                        )
+                                quarantine = _quarantine_stale_worktree_checkout(
+                                    root,
+                                    stale_dir,
+                                    status.name,
+                                )
+                                if quarantine is not None:
+                                    _remove_quarantined_stale_worktree_checkout(
+                                        root,
+                                        quarantine,
+                                        status.name,
+                                    )
+                                    quarantine = None
+                                if branch_tip is not None:
+                                    delete_worktree_branch_at_tip(
+                                        root=root,
+                                        branch=status.branch,
+                                        expected_tip=branch_tip,
+                                    )
+                                remove_worktree_metadata(root=root, name=status.name)
+                            except Exception:
+                                if (
+                                    quarantine is not None
+                                    and quarantine.exists()
+                                    and not stale_dir.exists()
+                                ):
+                                    quarantine.rename(stale_dir)
+                                raise
+                            finally:
+                                if claim is not None:
+                                    release_workspace_start_claim(claim)
+                                    claim = None
+                    except (
+                        OSError,
+                        RuntimeError,
+                        ValueError,
+                        WorkspaceBoundaryError,
+                        subprocess.CalledProcessError,
+                    ) as exc:
                         print(_format_cli_error(exc), file=sys.stderr)
                         return 2
-                    finally:
-                        if claim is not None:
-                            release_workspace_start_claim(claim)
                     print(f"removed stale worktree manifest {status.name}")
                     return 0
                 print(f"worktree not found or missing path: {status.name}", file=sys.stderr)
@@ -1937,7 +1954,20 @@ def _architecture_lint_command(profile_ids: str) -> tuple[str, ...]:
 
 def _gate_order_key(gate: GateCommand) -> tuple[int, int, str]:
     gate_id = gate.gate_id
-    command = " ".join(gate.command).lower()
+    stable_gate_id = gate_id.split("[", 1)[0].rsplit(":", 1)[-1].lower()
+    if stable_gate_id in {"build", "android-build", "ios-build"}:
+        return (0, _profile_gate_kind_tiebreaker(gate_id), gate_id)
+    if stable_gate_id == "typecheck":
+        return (1, _profile_gate_kind_tiebreaker(gate_id), gate_id)
+    if stable_gate_id in {"lint", "architecture-lint"}:
+        return (2, _profile_gate_kind_tiebreaker(gate_id), gate_id)
+    if stable_gate_id == "test" or stable_gate_id.endswith("-test"):
+        return (3, _profile_gate_kind_tiebreaker(gate_id), gate_id)
+    command = " ".join(
+        (Path(gate.command[0]).name, *gate.command[1:])
+        if gate.command
+        else ()
+    ).lower()
     lowered = f"{gate_id} {command}".lower()
     if any(token in lowered for token in ("build", "assemble", "xcodebuild")):
         return (0, _profile_gate_kind_tiebreaker(lowered), gate_id)

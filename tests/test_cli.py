@@ -38,6 +38,9 @@ from agent_flow.core.worktrees import plan_worktree, worktree_runtime_root
 os.environ.setdefault("AGENT_FLOW_SKIP_CODEX_TRUST", "1")
 os.environ.setdefault("AGENT_FLOW_AUTO_EXTERNAL_SKILLS", "0")
 
+_NODE_PROJECT_TEMPLATE: tempfile.TemporaryDirectory[str] | None = None
+_NODE_PROJECT_TEMPLATE_ROOT: Path | None = None
+
 
 def _node_test_env(**overrides: str) -> dict[str, str]:
     env = {**os.environ, **overrides}
@@ -47,6 +50,34 @@ def _node_test_env(**overrides: str) -> dict[str, str]:
     ]
     env["PYTHONPATH"] = os.pathsep.join(path for path in python_paths if path)
     return env
+
+
+def _install_node_project(project_root: Path, node: str, cli: str) -> None:
+    installed = subprocess.run(
+        (node, cli, "install"),
+        cwd=project_root,
+        env=_node_test_env(AGENT_FLOW_AUTO_EXTERNAL_SKILLS="0"),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if installed.returncode != 0:
+        raise RuntimeError(installed.stderr or "node project install failed")
+
+
+def _materialize_installed_node_project(project_root: Path, node: str, cli: str) -> None:
+    global _NODE_PROJECT_TEMPLATE, _NODE_PROJECT_TEMPLATE_ROOT
+    if _NODE_PROJECT_TEMPLATE_ROOT is None:
+        _NODE_PROJECT_TEMPLATE = tempfile.TemporaryDirectory(prefix="agent-flow-node-routing-")
+        _NODE_PROJECT_TEMPLATE_ROOT = Path(_NODE_PROJECT_TEMPLATE.name) / "project"
+        _NODE_PROJECT_TEMPLATE_ROOT.mkdir()
+        _install_node_project(_NODE_PROJECT_TEMPLATE_ROOT, node, cli)
+    shutil.copytree(
+        _NODE_PROJECT_TEMPLATE_ROOT,
+        project_root,
+        dirs_exist_ok=True,
+        symlinks=True,
+    )
 
 
 def _strip_markdown_frontmatter(text: str) -> str:
@@ -62,6 +93,35 @@ def _managed_hook_command(script_path: Path, host: str) -> str:
 
 
 class CliTest(unittest.TestCase):
+    def test_node_routing_template_clones_are_isolated(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first = root / "first"
+            second = root / "second"
+            first.mkdir()
+            second.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+
+            _materialize_installed_node_project(first, node, cli)
+            _materialize_installed_node_project(second, node, cli)
+            second_workflow = second / ".agent-flow" / "workflows" / "default.yaml"
+            expected = second_workflow.read_bytes()
+            (first / ".agent-flow" / "workflows" / "default.yaml").write_text(
+                "id: mutated\nphases: []\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(second_workflow.read_bytes(), expected)
+            status = subprocess.run(
+                (node, cli, "status"),
+                cwd=second,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(status.returncode, 0, status.stderr)
+
     def test_init_creates_agent_flow_dirs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir).resolve()
@@ -3426,14 +3486,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            install = subprocess.run(
-                (node, cli, "install"),
-                cwd=project_root,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(install.returncode, 0, install.stderr)
+            _materialize_installed_node_project(project_root, node, cli)
 
             start = subprocess.run(
                 (node, cli, "run", "start", "--task", "demo feature", "--run-id", "r1"),
@@ -3621,7 +3674,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -3685,7 +3738,7 @@ if (!missing?.block) {
             _write_local_skill_files(project_root)
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _install_node_project(project_root, node, cli)
             green_prompt = (project_root / ".agent-flow" / "prompts" / "green.md").read_text(
                 encoding="utf-8"
             )
@@ -3769,7 +3822,7 @@ if (!missing?.block) {
             _write_local_skill_files(project_root)
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _install_node_project(project_root, node, cli)
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--workflow", "bugfix", "--task", "demo", "--run-id", "r1"),
@@ -3919,10 +3972,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(
-                subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode,
-                0,
-            )
+            _materialize_installed_node_project(project_root, node, cli)
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -4023,7 +4073,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -4063,7 +4113,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -4246,10 +4296,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(
-                subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode,
-                0,
-            )
+            _materialize_installed_node_project(project_root, node, cli)
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -4311,7 +4358,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -4463,7 +4510,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -4590,7 +4637,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -4715,7 +4762,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--workflow", "default", "--task", "demo", "--run-id", "r1"),
@@ -4773,7 +4820,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -4835,7 +4882,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -4878,7 +4925,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -5179,7 +5226,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -5223,7 +5270,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             subprocess.run(("git", "init", "-q"), cwd=project_root, check=True)
             subprocess.run(("git", "checkout", "-q", "-b", "main"), cwd=project_root, check=True)
 
@@ -5244,7 +5291,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             _init_git_repo(project_root)
             subprocess.run(("git", "checkout", "-q", "--detach", "HEAD"), cwd=project_root, check=True)
 
@@ -5265,7 +5312,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             run_dir = _node_start_full_feature_at_pr_watch(project_root, node, cli)
             bin_dir = Path(temp_dir) / "bin"
             bin_dir.mkdir()
@@ -5305,7 +5352,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             subprocess.run(
                 (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
                 cwd=project_root,
@@ -5329,7 +5376,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             run_dir = _node_start_full_feature_at_pr_watch(project_root, node, cli)
             bin_dir = Path(temp_dir) / "bin"
             bin_dir.mkdir()
@@ -5366,7 +5413,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             run_dir = _node_start_full_feature_at_pr_watch(project_root, node, cli)
             bin_dir = Path(temp_dir) / "bin"
             bin_dir.mkdir()
@@ -5403,7 +5450,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             run_dir = _node_start_full_feature_at_pr_watch(project_root, node, cli)
             bin_dir = Path(temp_dir) / "bin"
             bin_dir.mkdir()
@@ -5973,7 +6020,7 @@ if (!missing?.block) {
             project_root.mkdir()
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _materialize_installed_node_project(project_root, node, cli)
             task = "demo\nstatus: complete\nreason: injected"
             start = subprocess.run(
                 (node, cli, "run", "start", "--task", task, "--run-id", "r1"),
@@ -6315,6 +6362,23 @@ if (!missing?.block) {
         self.assertNotIn("lint", react_native_ids)
         self.assertIn("android-build", react_native_ids)
         self.assertIn("ios-build", react_native_ids)
+
+    def test_gate_order_ignores_changed_file_kind_tokens(self) -> None:
+        from agent_flow.cli import _gate_order_key
+
+        build = GateCommand("android:build", ("./gradlew", "assembleDebug"))
+        architecture = GateCommand(
+            "architecture-lint",
+            (
+                sys.executable,
+                "-m",
+                "agent_flow.core.architecture_lint",
+                "--files",
+                "build.gradle.kts",
+            ),
+        )
+
+        self.assertLess(_gate_order_key(build), _gate_order_key(architecture))
 
     def test_android_profile_gates_target_only_changed_modules(self) -> None:
         from agent_flow.cli import _profile_gate_commands

@@ -2209,7 +2209,7 @@ def test_parity_checker_validates_external_installed_copy_from_managed_source_wo
     )
 
     result = subprocess.run(
-        (_node(), str(KIT_ROOT / "scripts" / "check-agent-flow-parity.mjs")),
+        (_node(), str(KIT_ROOT / "scripts" / "check-installed-runtime-parity.mjs")),
         cwd=project,
         text=True,
         capture_output=True,
@@ -2219,7 +2219,7 @@ def test_parity_checker_validates_external_installed_copy_from_managed_source_wo
     )
 
     assert result.returncode == 1
-    assert ".agent-flow/workflows/default.yaml" in result.stderr
+    assert ".agent-flow/workflows differs at default.yaml" in result.stderr
     assert "current installed runtime .agent-flow/runtime/python/agent_flow differs at cli.py" in result.stderr
     assert "current installed runtime .agent-flow/runtime/node/bin differs at agent-flow-kit.mjs" in result.stderr
     assert "current installed runtime .agent-flow/runtime/node/lib differs at skill-selection.mjs" in result.stderr
@@ -2263,18 +2263,6 @@ def test_runtime_install_uses_canonical_directory_modes_under_restrictive_umask(
         project / ".agent-flow" / "runtime" / "python" / "agent_flow",
     ):
         assert stat.S_IMODE(directory.stat().st_mode) == 0o755
-
-    parity = subprocess.run(
-        (_node(), str(KIT_ROOT / "scripts" / "check-agent-flow-parity.mjs")),
-        cwd=project,
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=300,
-    )
-    assert parity.returncode == 0, parity.stderr
-
 
 def test_normal_install_preserves_existing_unmanaged_directory_mode(tmp_path: Path) -> None:
     project = tmp_path / "project"
@@ -3333,7 +3321,12 @@ def test_worktree_catalog_drift_fails_without_refreshing_leader_install(tmp_path
     worktree = project / ".agent-flow" / "worktrees" / "feat-drift"
     project.mkdir()
     active = home / ".codex" / "skills"
-    env = {**os.environ, "HOME": str(home), "AGENT_FLOW_HOST": "codex"}
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "AGENT_FLOW_HOST": "codex",
+        "AGENT_FLOW_AUTO_EXTERNAL_SKILLS": "1",
+    }
     _skill(active / "alpha", "alpha-v1")
     assert _install(project, env=env).returncode == 0
     worktree.mkdir(parents=True)

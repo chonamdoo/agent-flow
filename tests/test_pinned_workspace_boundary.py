@@ -169,7 +169,7 @@ def _executable_dependencies(path: Path) -> list[dict[str, object]]:
         return []
     return [
         {
-            "name": dependency.name,
+            "name": dependency.resolve().name,
             "path": str(dependency.resolve()),
             **_executable_identity(dependency),
         }
@@ -543,6 +543,34 @@ def test_workspace_start_claim_recovers_reused_pid_but_not_live_owner(
     assert owner["workspace_root"] == identity.workspace_root
     with pytest.raises(Exception, match="already in progress"):
         acquire_workspace_start_claim(identity, run_id="blocked-run")
+    release_workspace_start_claim(recovered)
+
+
+def test_worktree_lifecycle_claim_recovers_after_leader_head_changes(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, _worktree, _runtime, _run_dir = pinned_run
+    identity = capture_workspace_identity(leader)
+    original = acquire_workspace_start_claim(
+        identity,
+        run_id="worktree-lifecycle",
+    )
+    payload = json.loads(original.path.read_text(encoding="utf-8"))
+    release_workspace_start_claim(original)
+    payload["process_start_id"] = "crashed-process-start"
+    original.path.write_text(json.dumps(payload), encoding="utf-8")
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "leader moved"],
+        cwd=leader,
+        check=True,
+        capture_output=True,
+    )
+
+    recovered = acquire_workspace_start_claim(
+        capture_workspace_identity(leader),
+        run_id="worktree-lifecycle",
+    )
+
     release_workspace_start_claim(recovered)
 
 
