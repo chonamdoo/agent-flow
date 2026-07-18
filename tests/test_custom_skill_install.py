@@ -7,6 +7,7 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -114,18 +115,33 @@ def _install(
     project: Path,
     *args: str,
     env: dict[str, str] | None = None,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     process_env = dict(os.environ)
-    process_env["HOME"] = str(project.parent / "test-home")
+    provided_env = env or {}
+    test_home = Path(provided_env.get("HOME", project.parent / "test-home"))
+    process_env["HOME"] = str(test_home)
+    process_env["CODEX_HOME"] = provided_env.get(
+        "CODEX_HOME",
+        str(test_home / ".codex"),
+    )
+    process_env["CLAUDE_CONFIG_DIR"] = provided_env.get(
+        "CLAUDE_CONFIG_DIR",
+        str(test_home / ".claude"),
+    )
+    process_env["PI_CODING_AGENT_DIR"] = provided_env.get(
+        "PI_CODING_AGENT_DIR",
+        str(test_home / ".omp" / "agent"),
+    )
     process_env["AGENT_FLOW_AUTO_EXTERNAL_SKILLS"] = "1"
-    if env is not None:
-        process_env.update(env)
+    process_env.update(provided_env)
     return subprocess.run(
         (_node(), str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"), "install", *args),
         cwd=project,
         text=True,
         capture_output=True,
         check=False,
+        timeout=timeout,
         env=process_env,
     )
 
@@ -2469,6 +2485,15 @@ def test_clean_architecture_skills_install_core_and_platform_dependency_graph(tm
     for name in platform_skills:
         assert skills[name]["requires"] == ["clean-architecture-core"]
     assert not any("missing required skill" in warning for warning in index["warnings"])
+    compatibility = {
+        record["canonical"]: record for record in index["compatibility"]["skills"]
+    }
+    assert compatibility["clean-architecture-core"]["capabilities"] == [
+        "architecture.clean.boundary"
+    ]
+    assert compatibility["code-generation-discipline"]["capabilities"] == [
+        "implementation.code-generation"
+    ]
 
     core = (
         project / ".agent-flow" / "skills" / "clean-architecture-core" / "SKILL.md"
@@ -2485,6 +2510,152 @@ def test_clean_architecture_skills_install_core_and_platform_dependency_graph(tm
     assert "Samantha" not in core + android + alias
     assert "http://" not in core + android + alias
     assert "https://" not in core + android + alias
+
+
+def test_renamed_skill_reference_installs_canonical_skill(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+
+    result = _install(project, "--skills", "code-generation")
+
+    assert result.returncode == 0, result.stderr
+    index = json.loads(
+        (project / ".agent-flow" / "skills" / "index.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    names = {skill["name"] for skill in index["skills"]}
+    assert "code-generation-discipline" in names
+    assert "code-generation" not in names
+
+
+def test_replaced_skill_reference_selects_active_concrete_replacement(
+    tmp_path: Path,
+) -> None:
+    kit = tmp_path / "kit"
+    _skill(kit / "skills" / "legacy-skill", "legacy")
+    _skill(kit / "skills" / "active-skill", "active")
+    script = """
+import { canonicalizeInstallSelectionCompatibility } from './lib/skill-selection.mjs';
+const kitRoot = process.argv[1];
+const result = canonicalizeInstallSelectionCompatibility(
+  {
+    explicitSkills: ['legacy-skill'],
+    skillNames: ['legacy-skill'],
+  },
+  {
+    version: 1,
+    skills: [
+      {
+        canonical: 'legacy-skill',
+        status: 'deprecated',
+        replaced_by: ['active-skill'],
+      },
+      {
+        canonical: 'active-skill',
+        status: 'active',
+      },
+    ],
+  },
+  kitRoot,
+);
+process.stdout.write(JSON.stringify({
+  explicitSkills: result.explicitSkills,
+  skillNames: [...result.skillNames],
+}));
+"""
+    result = subprocess.run(
+        (_node(), "--input-type=module", "-e", script, str(kit)),
+        cwd=KIT_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "explicitSkills": ["active-skill"],
+        "skillNames": ["active-skill"],
+    }
+
+
+def test_filtered_install_rejects_alias_shadowing_unselected_concrete_skill(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    shadow = project / "skills" / "code-generation"
+    shadow.mkdir(parents=True)
+    (shadow / "SKILL.md").write_text(
+        "---\nname: code-generation\n---\n",
+        encoding="utf-8",
+    )
+
+    result = _install(project, "--skills", "code-generation-discipline")
+
+    assert result.returncode != 0
+    assert "compatibility reference shadows concrete skill: code-generation" in result.stderr
+
+
+def test_explicit_external_concrete_skill_cannot_be_claimed_by_alias(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    home = tmp_path / "home"
+    project.mkdir()
+    _skill(home / ".codex" / "skills" / "code-generation", "external concrete")
+
+    result = _install(
+        project,
+        "--skills",
+        "code-generation",
+        env={
+            "HOME": str(home),
+            "CODEX_HOME": str(home / ".codex"),
+            "AGENT_FLOW_HOST": "codex",
+        },
+    )
+
+    assert result.returncode != 0
+    assert "compatibility reference shadows concrete skill: code-generation" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("state", "setup"),
+    [
+        ("missing", "missing"),
+        ("symlink", "symlink"),
+        ("dangling_symlink", "dangling"),
+        ("non_regular", "directory"),
+        ("non_regular", "fifo"),
+    ],
+)
+def test_project_skill_catalog_document_failures_are_structured(
+    tmp_path: Path,
+    state: str,
+    setup: str,
+) -> None:
+    project = tmp_path / "project"
+    skill_root = project / "skills" / "broken"
+    skill_root.mkdir(parents=True)
+    document = skill_root / "SKILL.md"
+    if setup == "symlink":
+        target = tmp_path / "target.md"
+        target.write_text("---\nname: broken\n---\n", encoding="utf-8")
+        document.symlink_to(target)
+    elif setup == "dangling":
+        document.symlink_to(tmp_path / "missing-target.md")
+    elif setup == "directory":
+        document.mkdir()
+    elif setup == "fifo":
+        os.mkfifo(document)
+
+    result = _install(project)
+
+    assert result.returncode != 0
+    assert "skill_resolution_error" in result.stderr
+    assert f'"state":"{state}"' in result.stderr
+    assert "ENOENT" not in result.stderr
 
 
 def test_android_profile_installs_android_skills_and_common_dependencies_only(tmp_path: Path) -> None:
@@ -2963,6 +3134,33 @@ def test_previous_explicit_selection_stays_fail_closed_after_drift(tmp_path: Pat
     assert installed.read_bytes() == original
 
 
+def test_explicit_external_skill_root_symlink_is_rejected(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    home = tmp_path / "home"
+    outside = tmp_path / "outside"
+    project.mkdir()
+    _skill(outside, "outside")
+    host_skills = home / ".codex" / "skills"
+    host_skills.mkdir(parents=True)
+    (host_skills / "external").symlink_to(outside, target_is_directory=True)
+
+    result = _command(
+        project,
+        "install",
+        "--skills",
+        "external",
+        env={
+            "HOME": str(home),
+            "CODEX_HOME": str(home / ".codex"),
+            "AGENT_FLOW_HOST": "codex",
+        },
+    )
+
+    assert result.returncode != 0
+    assert "skill source may not use symlink ancestors" in result.stderr
+    assert "outside" in (outside / "SKILL.md").read_text(encoding="utf-8")
+
+
 def test_filtered_install_exposes_new_project_catalog_skills_on_demand(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
@@ -3157,7 +3355,7 @@ def test_stale_broken_host_skill_symlink_removed_when_skill_deleted(tmp_path: Pa
     codex_link = project / ".Codex" / "skills" / "demo"
     assert codex_link.exists() or codex_link.is_symlink()
 
-    (skill_dir / "SKILL.md").unlink()
+    shutil.rmtree(skill_dir)
     result = _install(project)
 
     assert result.returncode == 0, result.stderr
@@ -3208,7 +3406,7 @@ def test_stale_cleanup_preserves_same_target_symlink_with_replaced_inode(tmp_pat
     codex_link.unlink()
     codex_link.symlink_to(target, target_is_directory=True)
     assert codex_link.lstat().st_ino != original_inode
-    (skill_dir / "SKILL.md").unlink()
+    shutil.rmtree(skill_dir)
 
     result = _install(project)
 
@@ -3231,7 +3429,7 @@ def test_stale_cleanup_preserves_identical_copied_tree_with_replaced_inode(tmp_p
     shutil.rmtree(destination)
     shutil.copytree(skill_dir, destination)
     assert destination.lstat().st_ino != original_inode
-    (skill_dir / "SKILL.md").unlink()
+    shutil.rmtree(skill_dir)
 
     result = _install(project, env=force_copy)
 
@@ -3254,7 +3452,7 @@ def test_stale_cleanup_preserves_linked_to_directory_replacement(tmp_path: Path)
         codex_link.mkdir(parents=True)
         (codex_link / "SKILL.md").write_text((skill_dir / "SKILL.md").read_text(encoding="utf-8"), encoding="utf-8")
 
-    (skill_dir / "SKILL.md").unlink()
+    shutil.rmtree(skill_dir)
     result = _install(project)
 
     assert result.returncode == 0, result.stderr
@@ -3276,7 +3474,7 @@ def test_stale_cleanup_preserves_directory_to_symlink_replacement(tmp_path: Path
     assert codex_link.is_dir() and not codex_link.is_symlink()
     shutil.rmtree(codex_link)
     codex_link.symlink_to(outside, target_is_directory=True)
-    (skill_dir / "SKILL.md").unlink()
+    shutil.rmtree(skill_dir)
 
     result = _install(project)
 
@@ -3709,6 +3907,115 @@ def test_recovery_survives_crash_between_skills_rename_and_journal_update(tmp_pa
     assert not transaction.exists()
 
 
+@pytest.mark.skipif(
+    not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_NONBLOCK"),
+    reason="secure descriptor flags are required",
+)
+def test_recovery_rejects_fifo_backup_index_without_blocking(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    assert _install(project).returncode == 0
+
+    crashed = _install(
+        project,
+        env={"AGENT_FLOW_TEST_CRASH_AFTER_SKILLS_MOVE": "1"},
+    )
+    assert crashed.returncode == 86
+    backup_index = (
+        project
+        / ".agent-flow"
+        / "install-transaction"
+        / "skills-backup"
+        / "index.json"
+    )
+    backup_index.unlink()
+    os.mkfifo(backup_index)
+
+    recovered = _install(project, timeout=10)
+
+    assert recovered.returncode != 0
+    assert "unsafe backup skill index file" in recovered.stderr
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_NONBLOCK"),
+    reason="secure descriptor flags are required",
+)
+def test_recovery_rejects_fifo_transaction_marker_without_blocking(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    assert _install(project).returncode == 0
+
+    crashed = _install(
+        project,
+        env={"AGENT_FLOW_TEST_CRASH_AFTER_SKILL_INDEX": "1"},
+    )
+    assert crashed.returncode == 87
+    marker = (
+        project
+        / ".agent-flow"
+        / "skills"
+        / ".agent-flow-transaction-owner"
+    )
+    marker.unlink()
+    os.mkfifo(marker)
+
+    recovered = _install(project, timeout=10)
+
+    assert recovered.returncode != 0
+    assert "unsafe skill transaction marker file" in recovered.stderr
+
+
+def test_recovery_rolls_back_interrupted_upgrade_after_managed_install_seal(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    assert _install(project).returncode == 0
+    _skill(project / "skills" / "upgrade-skill", "upgrade")
+    test_home = tmp_path / "test-home"
+    process_env = {
+        **os.environ,
+        "HOME": str(test_home),
+        "CODEX_HOME": str(test_home / ".codex"),
+        "CLAUDE_CONFIG_DIR": str(test_home / ".claude"),
+        "PI_CODING_AGENT_DIR": str(test_home / ".omp" / "agent"),
+        "AGENT_FLOW_AUTO_EXTERNAL_SKILLS": "1",
+        "AGENT_FLOW_TEST_HOLD_AFTER_MANAGED_INSTALL_SEAL_MS": "10000",
+    }
+    process = subprocess.Popen(
+        (_node(), str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"), "install"),
+        cwd=project,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+        env=process_env,
+    )
+    assert process.stderr is not None
+    marker = process.stderr.readline()
+    assert "agent-flow:test-managed-install-sealed" in marker
+    os.killpg(process.pid, signal.SIGKILL)
+    process.communicate(timeout=10)
+    assert process.returncode != 0
+
+    recovered = _install(project, timeout=30)
+
+    assert recovered.returncode == 0, recovered.stderr
+    transaction = project / ".agent-flow" / "install-transaction"
+    assert not transaction.exists()
+    index_path = project / ".agent-flow" / "skills" / "index.json"
+    index_bytes = index_path.read_bytes()
+    index = json.loads(index_bytes)
+    kit = json.loads(
+        (project / ".agent-flow" / "kit.json").read_text(encoding="utf-8")
+    )
+    assert any(skill["name"] == "upgrade-skill" for skill in index["skills"])
+    assert hashlib.sha256(index_bytes).hexdigest() == kit["skill_index_hash"]
+
+
 def test_recovery_survives_crash_between_managed_callback_and_commitment(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
@@ -3966,6 +4273,224 @@ def test_managed_file_symlink_never_writes_outside_project(tmp_path: Path, relat
     assert result.returncode != 0
     assert "contains a symlink" in result.stderr
     assert outside.read_text(encoding="utf-8") == "outside\n"
+
+
+@pytest.mark.parametrize("replacement_kind", ("symlink", "fifo", "authority"))
+def test_json_authority_entry_swap_is_rejected_without_fifo_blocking(
+    tmp_path: Path,
+    replacement_kind: str,
+) -> None:
+    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_NONBLOCK"):
+        pytest.skip("secure descriptor flags are required")
+    project = tmp_path / "project"
+    project.mkdir()
+    target = project / ".agent-flow" / "skills" / "compatibility.json"
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"version": 999}\n', encoding="utf-8")
+    env = dict(os.environ)
+    test_home = tmp_path / "test-home"
+    env["HOME"] = str(test_home)
+    env["CODEX_HOME"] = str(test_home / ".codex")
+    env["CLAUDE_CONFIG_DIR"] = str(test_home / ".claude")
+    env["PI_CODING_AGENT_DIR"] = str(test_home / ".omp" / "agent")
+    env["AGENT_FLOW_AUTO_EXTERNAL_SKILLS"] = "1"
+    env["AGENT_FLOW_INSTALL_SANDBOXED"] = "1"
+    env["AGENT_FLOW_TEST_HOLD_JSON_AUTH_PATH"] = str(target)
+    env["AGENT_FLOW_TEST_HOLD_AFTER_JSON_AUTH_OPEN_MS"] = "1500"
+    process = subprocess.Popen(
+        (_node(), str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"), "install"),
+        cwd=project,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    assert process.stderr is not None
+    marker = ""
+    while line := process.stderr.readline():
+        marker += line
+        if "agent-flow:test-json-authority-opened" in line:
+            break
+    assert "agent-flow:test-json-authority-opened" in marker
+    if replacement_kind == "authority":
+        authority = target.parent
+        authority.rename(authority.with_name("skills.original"))
+        authority.mkdir()
+        target.write_text('{"version": 999}\n', encoding="utf-8")
+    else:
+        target.rename(target.with_suffix(".original"))
+        if replacement_kind == "symlink":
+            target.symlink_to(outside)
+        else:
+            os.mkfifo(target)
+    stdout, stderr = process.communicate(timeout=10)
+
+    assert process.returncode != 0, stdout
+    assert "invalid skill compatibility metadata" in stderr
+    assert outside.read_text(encoding="utf-8") == '{"version": 999}\n'
+
+
+def test_corrupt_existing_kit_cannot_downgrade_index_authentication(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    assert _install(project).returncode == 0
+    kit_path = project / ".agent-flow" / "kit.json"
+    index_path = project / ".agent-flow" / "skills" / "index.json"
+    previous_index = index_path.read_bytes()
+    kit_path.write_text("{", encoding="utf-8")
+
+    result = _install(project)
+
+    assert result.returncode != 0
+    assert "invalid existing kit metadata" in result.stderr
+    assert index_path.read_bytes() == previous_index
+
+
+@pytest.mark.parametrize(
+    ("relative", "expected"),
+    (
+        (Path("kit.json"), "invalid existing kit metadata"),
+        (Path("skills/index.json"), "unsafe previous skill index file"),
+    ),
+)
+def test_installed_authority_fifo_is_rejected_without_blocking(
+    tmp_path: Path,
+    relative: Path,
+    expected: str,
+) -> None:
+    if not hasattr(os, "O_NONBLOCK"):
+        pytest.skip("nonblocking descriptor reads are required")
+    project = tmp_path / "project"
+    project.mkdir()
+    assert _install(project).returncode == 0
+    target = project / ".agent-flow" / relative
+    target.unlink()
+    os.mkfifo(target)
+    test_home = tmp_path / "test-home"
+    env = {
+        **os.environ,
+        "HOME": str(test_home),
+        "CODEX_HOME": str(test_home / ".codex"),
+        "CLAUDE_CONFIG_DIR": str(test_home / ".claude"),
+        "PI_CODING_AGENT_DIR": str(test_home / ".omp" / "agent"),
+        "AGENT_FLOW_AUTO_EXTERNAL_SKILLS": "1",
+        "AGENT_FLOW_INSTALL_SANDBOXED": "1",
+    }
+
+    result = subprocess.run(
+        (_node(), str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"), "install"),
+        cwd=project,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+        timeout=10,
+    )
+
+    assert result.returncode != 0
+    assert expected in result.stderr
+
+
+def test_authenticated_index_rejects_authority_swap_after_open(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    assert _install(project).returncode == 0
+    target = project / ".agent-flow" / "skills" / "index.json"
+    test_home = tmp_path / "test-home"
+    env = {
+        **os.environ,
+        "HOME": str(test_home),
+        "CODEX_HOME": str(test_home / ".codex"),
+        "CLAUDE_CONFIG_DIR": str(test_home / ".claude"),
+        "PI_CODING_AGENT_DIR": str(test_home / ".omp" / "agent"),
+        "AGENT_FLOW_AUTO_EXTERNAL_SKILLS": "1",
+        "AGENT_FLOW_INSTALL_SANDBOXED": "1",
+        "AGENT_FLOW_TEST_HOLD_JSON_AUTH_PATH": str(target),
+        "AGENT_FLOW_TEST_HOLD_AFTER_JSON_AUTH_OPEN_MS": "1500",
+    }
+    process = subprocess.Popen(
+        (_node(), str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"), "install"),
+        cwd=project,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    assert process.stderr is not None
+    marker = ""
+    while line := process.stderr.readline():
+        marker += line
+        if "agent-flow:test-json-authority-opened" in line:
+            break
+    assert "agent-flow:test-json-authority-opened" in marker
+    authority = target.parent
+    preserved = authority.with_name("skills.original")
+    authority.rename(preserved)
+    authority.mkdir()
+    shutil.copy2(preserved / "index.json", target)
+    stdout, stderr = process.communicate(timeout=10)
+
+    assert process.returncode != 0, stdout
+    assert "previous skill index directory changed while reading" in stderr
+
+
+def test_external_materialization_parent_swap_preserves_outside_content(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    home = tmp_path / "home"
+    outside = tmp_path / "outside"
+    project.mkdir()
+    outside_skill = outside / "alpha"
+    outside_skill.mkdir(parents=True)
+    marker = outside_skill / "user.txt"
+    marker.write_text("outside\n", encoding="utf-8")
+    _skill(home / ".codex" / "skills" / "alpha", "external alpha")
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "CODEX_HOME": str(home / ".codex"),
+        "CLAUDE_CONFIG_DIR": str(home / ".claude"),
+        "PI_CODING_AGENT_DIR": str(home / ".omp" / "agent"),
+        "AGENT_FLOW_ACTIVE_HOST": "codex",
+        "AGENT_FLOW_HOST": "codex",
+        "AGENT_FLOW_AUTO_EXTERNAL_SKILLS": "1",
+        "AGENT_FLOW_INSTALL_SANDBOXED": "1",
+        "AGENT_FLOW_TEST_HOLD_AFTER_MATERIALIZE_STAGE_HASH_MS": "1500",
+    }
+    process = subprocess.Popen(
+        (
+            _node(),
+            str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"),
+            "install",
+            "--skills",
+            "alpha",
+        ),
+        cwd=project,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    assert process.stderr is not None
+    output = ""
+    while line := process.stderr.readline():
+        output += line
+        if "agent-flow:test-materialize-stage-hashed" in line:
+            break
+    assert "agent-flow:test-materialize-stage-hashed" in output
+    skills = project / ".agent-flow" / "skills"
+    preserved = project / ".agent-flow" / "skills.original"
+    skills.rename(preserved)
+    skills.symlink_to(outside, target_is_directory=True)
+    stdout, stderr = process.communicate(timeout=10)
+
+    assert process.returncode != 0, stdout
+    assert marker.read_text(encoding="utf-8") == "outside\n"
 
 
 def test_managed_ancestor_swap_never_writes_outside_project(tmp_path: Path) -> None:

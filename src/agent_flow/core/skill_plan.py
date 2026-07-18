@@ -13,6 +13,12 @@ from typing import Any, Iterable
 
 import yaml
 
+from agent_flow.core.skill_compatibility import (
+    SkillCompatibilityCatalog,
+    SkillCompatibilityError,
+    SkillResolutionError,
+    normalize_skill_compatibility,
+)
 from agent_flow.core.profiles import load_project_profile_payload, primary_profile_id
 from agent_flow.core.security import (
     ensure_child_path,
@@ -85,6 +91,26 @@ class SkillPlanSnapshotError(RuntimeError):
     """설치 또는 run 고정 skill snapshot을 신뢰할 수 없을 때 발생한다."""
 
 
+class SkillDocumentResolutionError(SkillPlanSnapshotError, SkillResolutionError):
+    def __init__(self, skill_name: str, path: Path, state: str) -> None:
+        SkillResolutionError.__init__(
+            self,
+            (
+                {
+                    "reason": "skill_document_unavailable",
+                    "requested": skill_name,
+                    "canonical": skill_name,
+                    "capabilities": [],
+                    "state": state,
+                    "path": str(path),
+                    "repairable": False,
+                },
+            ),
+        )
+
+
+
+
 def indexed_external_exposure_skill_names(
     selection: object,
     *,
@@ -141,6 +167,18 @@ def canonical_skill_plan_bytes(
     verify_trees: bool = False,
 ) -> bytes:
     """Node의 JSON.stringify 계약과 동일한 정규화 payload를 직렬화한다."""
+    compatibility_catalog: SkillCompatibilityCatalog | None = None
+    compatibility: dict[str, Any] | None = None
+    if "compatibility" in index:
+        try:
+            compatibility_catalog = SkillCompatibilityCatalog.from_value(
+                index.get("compatibility")
+            )
+            compatibility = compatibility_catalog.projection
+        except SkillCompatibilityError as exc:
+            raise SkillPlanSnapshotError(
+                f"blocked: invalid skill compatibility metadata: {exc}"
+            ) from exc
     selection = index.get("selection")
     if not isinstance(selection, dict):
         selection = {}
@@ -149,7 +187,14 @@ def canonical_skill_plan_bytes(
         raw_skills = []
     if not isinstance(raw_skills, list):
         raise SkillPlanSnapshotError("blocked: installed skill index has invalid skills")
-    _index_skills_by_logical_name(raw_skills)
+    indexed_skills = _index_skills_by_logical_name(raw_skills)
+    if compatibility_catalog is not None:
+        try:
+            compatibility_catalog.validate_concrete_ids(indexed_skills)
+        except SkillCompatibilityError as exc:
+            raise SkillPlanSnapshotError(
+                f"blocked: invalid skill compatibility metadata: {exc}"
+            ) from exc
 
     skills: list[list[Any]] = []
     for raw_skill in raw_skills:
@@ -161,7 +206,7 @@ def canonical_skill_plan_bytes(
             Path(os.path.abspath(index_root))
         ).as_posix()
         live_hash = (
-            hash_skill_tree(skill_path.parent)
+            hash_skill_tree(skill_path.parent, authority_root=index_root)
             if verify_trees
             else raw_skill.get("tree_hash")
         )
@@ -235,6 +280,11 @@ def canonical_skill_plan_bytes(
         "required_review": required_review,
         "conditional_skills": selection.get("conditional_skills") or {},
         "profile_routing": selection.get("profile_routing") or {},
+        **(
+            {"compatibility": compatibility}
+            if compatibility is not None
+            else {}
+        ),
         "skills": skills,
     }
     try:
@@ -251,66 +301,226 @@ def canonical_skill_plan_bytes(
     return text.encode("utf-8")
 
 
-def hash_skill_tree(root: Path) -> str:
-    """Node hashSkillTree와 동일하게 상대 경로와 binary 내용을 hash한다."""
-    try:
-        root_mode = root.lstat().st_mode
-    except OSError as exc:
-        raise SkillPlanSnapshotError(
-            f"blocked: installed skill snapshot is unreadable: {root}"
-        ) from exc
-    if stat.S_ISLNK(root_mode):
-        raise SkillPlanSnapshotError(
-            f"blocked: skill source may not be a symlink: {root}"
-        )
-    if not stat.S_ISDIR(root_mode):
-        raise SkillPlanSnapshotError(
-            f"blocked: installed skill snapshot is not a directory: {root}"
-        )
+def _filesystem_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
 
-    files: list[Path] = []
-    pending = [root]
-    while pending:
-        directory = pending.pop()
+
+def _assert_pinned_skill_directories(
+    directories: tuple[tuple[Path, os.stat_result], ...],
+) -> None:
+    for path, expected in directories:
         try:
-            entries = list(directory.iterdir())
+            current = path.lstat()
         except OSError as exc:
             raise SkillPlanSnapshotError(
-                f"blocked: installed skill snapshot is unreadable: {directory}"
+                f"blocked: skill source directory changed while hashing: {path}"
             ) from exc
+        if (
+            not stat.S_ISDIR(current.st_mode)
+            or _filesystem_identity(current) != _filesystem_identity(expected)
+        ):
+            raise SkillPlanSnapshotError(
+                f"blocked: skill source directory changed while hashing: {path}"
+            )
+
+
+def _stable_skill_tree_file_bytes(
+    path: Path,
+    expected: os.stat_result,
+    directories: tuple[tuple[Path, os.stat_result], ...],
+) -> bytes:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
+    failure = f"blocked: skill source changed or is unreadable while hashing: {path}"
+    _assert_pinned_skill_directories(directories)
+    try:
+        initial = path.lstat()
+    except OSError as exc:
+        raise SkillPlanSnapshotError(failure) from exc
+    if (
+        not stat.S_ISREG(initial.st_mode)
+        or initial.st_nlink != 1
+        or _filesystem_identity(initial) != _filesystem_identity(expected)
+    ):
+        raise SkillPlanSnapshotError(failure)
+    descriptor = -1
+    try:
+        descriptor = os.open(path, flags)
+        before = os.fstat(descriptor)
+        _assert_pinned_skill_directories(directories)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or _filesystem_identity(before) != _filesystem_identity(expected)
+        ):
+            raise SkillPlanSnapshotError(failure)
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 1024 * 1024):
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        current = path.lstat()
+        _assert_pinned_skill_directories(directories)
+        if (
+            not stat.S_ISREG(after.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or after.st_nlink != 1
+            or current.st_nlink != 1
+            or _filesystem_identity(before) != _filesystem_identity(after)
+            or _filesystem_identity(after) != _filesystem_identity(current)
+        ):
+            raise SkillPlanSnapshotError(failure)
+        return b"".join(chunks)
+    except SkillPlanSnapshotError:
+        raise
+    except OSError as exc:
+        raise SkillPlanSnapshotError(failure) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _pin_skill_tree_authority(
+    authority_root: Path,
+    root: Path,
+) -> tuple[tuple[Path, os.stat_result], ...]:
+    lexical_authority = Path(os.path.abspath(authority_root))
+    lexical_root = Path(os.path.abspath(root))
+    try:
+        relative = lexical_root.relative_to(lexical_authority)
+    except ValueError as exc:
+        raise SkillPlanSnapshotError(
+            f"blocked: skill source escapes authority root: {root}"
+        ) from exc
+    paths: list[Path] = [lexical_authority]
+    cursor = lexical_authority
+    for part in relative.parts:
+        cursor /= part
+        paths.append(cursor)
+    directories: list[tuple[Path, os.stat_result]] = []
+    for path in paths:
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            raise SkillPlanSnapshotError(
+                f"blocked: installed skill snapshot is unreadable: {path}"
+            ) from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            raise SkillPlanSnapshotError(
+                f"blocked: skill source may not use symlink ancestors: {path}"
+            )
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise SkillPlanSnapshotError(
+                f"blocked: skill source ancestor is not a directory: {path}"
+            )
+        directories.append((path, metadata))
+    try:
+        lexical_root.resolve(strict=True).relative_to(
+            lexical_authority.resolve(strict=True)
+        )
+    except (OSError, ValueError) as exc:
+        raise SkillPlanSnapshotError(
+            f"blocked: skill source escapes authority root: {root}"
+        ) from exc
+    pinned = tuple(directories)
+    _assert_pinned_skill_directories(pinned)
+    return pinned
+
+
+def hash_skill_tree(root: Path, authority_root: Path | None = None) -> str:
+    """Node hashSkillTree와 동일하게 상대 경로와 binary 내용을 hash한다."""
+    files: list[
+        tuple[Path, os.stat_result, tuple[tuple[Path, os.stat_result], ...]]
+    ] = []
+    directories: list[tuple[Path, os.stat_result]] = []
+
+    def visit(
+        directory_path: Path,
+        expected: os.stat_result | None,
+        ancestors: tuple[tuple[Path, os.stat_result], ...],
+    ) -> None:
+        try:
+            metadata = directory_path.lstat()
+        except OSError as exc:
+            raise SkillPlanSnapshotError(
+                f"blocked: installed skill snapshot is unreadable: {directory_path}"
+            ) from exc
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISDIR(metadata.st_mode)
+            or (
+                expected is not None
+                and _filesystem_identity(metadata) != _filesystem_identity(expected)
+            )
+        ):
+            raise SkillPlanSnapshotError(
+                f"blocked: skill source directory changed while hashing: {directory_path}"
+            )
+        directory = (directory_path, metadata)
+        current_ancestors = (*ancestors, directory)
+        directories.append(directory)
+        _assert_pinned_skill_directories(current_ancestors)
+        try:
+            entries = sorted(
+                directory_path.iterdir(),
+                key=lambda candidate: candidate.name,
+            )
+        except OSError as exc:
+            raise SkillPlanSnapshotError(
+                f"blocked: installed skill snapshot is unreadable: {directory_path}"
+            ) from exc
+        _assert_pinned_skill_directories(current_ancestors)
         for entry in entries:
             try:
-                mode = entry.lstat().st_mode
+                entry_metadata = entry.lstat()
             except OSError as exc:
                 raise SkillPlanSnapshotError(
                     f"blocked: installed skill snapshot is unreadable: {entry}"
                 ) from exc
-            if stat.S_ISLNK(mode):
+            if stat.S_ISLNK(entry_metadata.st_mode):
                 raise SkillPlanSnapshotError(
                     f"blocked: skill source may not contain symlinks: {entry}"
                 )
-            if stat.S_ISDIR(mode):
-                pending.append(entry)
-            elif stat.S_ISREG(mode):
-                files.append(entry)
+            if stat.S_ISDIR(entry_metadata.st_mode):
+                visit(entry, entry_metadata, current_ancestors)
+            elif stat.S_ISREG(entry_metadata.st_mode):
+                files.append((entry, entry_metadata, current_ancestors))
             else:
                 raise SkillPlanSnapshotError(
                     "blocked: skill source must contain only regular files and "
                     f"directories: {entry}"
                 )
+            _assert_pinned_skill_directories(current_ancestors)
+        _assert_pinned_skill_directories(current_ancestors)
 
+    if authority_root is None:
+        visit(root, None, ())
+    else:
+        pinned_authority = _pin_skill_tree_authority(authority_root, root)
+        directories.extend(pinned_authority[:-1])
+        visit(root, pinned_authority[-1][1], pinned_authority[:-1])
     digest = hashlib.sha256()
-    for file in sorted(files, key=lambda candidate: candidate.as_posix()):
+    for file, metadata, ancestors in sorted(
+        files,
+        key=lambda candidate: candidate[0].as_posix(),
+    ):
         relative = file.relative_to(root).as_posix()
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
-        try:
-            digest.update(file.read_bytes())
-        except OSError as exc:
-            raise SkillPlanSnapshotError(
-                f"blocked: installed skill snapshot is unreadable: {file}"
-            ) from exc
+        digest.update(_stable_skill_tree_file_bytes(file, metadata, ancestors))
         digest.update(b"\0")
+    _assert_pinned_skill_directories(tuple(directories))
     return digest.hexdigest()
 
 
@@ -410,7 +620,7 @@ def assert_committed_skill_host_links_applied(
             link["tree_integrity"], link["name"]
         )
         if (
-            hash_skill_tree(source) != source_tree_hash
+            hash_skill_tree(source, authority_root=root) != source_tree_hash
             or _tree_integrity(source) != source_tree_integrity
         ):
             raise SkillPlanSnapshotError(
@@ -740,8 +950,15 @@ def _require_link_parent_directories(root: Path, parent: Path, relative: str) ->
             )
 
 
-def installed_skill_plan_pin(index_root: Path) -> dict[str, Any]:
-    """설치된 index와 tree를 검증하고 새 run용 metadata를 반환한다."""
+def authenticated_installed_skill_index(index_root: Path) -> dict[str, Any] | None:
+    """인증된 설치 index projection을 반환한다."""
+    snapshot = _authenticated_installed_skill_snapshot(index_root)
+    return snapshot[0] if snapshot is not None else None
+
+
+def _authenticated_installed_skill_snapshot(
+    index_root: Path,
+) -> tuple[dict[str, Any], str] | None:
     index_path = index_root / ".agent-flow" / "skills" / "index.json"
     kit_path = index_root / ".agent-flow" / "kit.json"
     index_present = index_path.exists() or index_path.is_symlink()
@@ -751,7 +968,7 @@ def installed_skill_plan_pin(index_root: Path) -> dict[str, Any]:
             raise SkillPlanSnapshotError(
                 "blocked: installed skill index is missing while kit metadata exists"
             )
-        return {}
+        return None
     if not kit_present:
         raise SkillPlanSnapshotError(
             "blocked: installed kit metadata is missing while skill index exists"
@@ -768,6 +985,15 @@ def installed_skill_plan_pin(index_root: Path) -> dict[str, Any]:
                 "blocked: installed skill index or snapshot no longer matches kit.json"
             )
     validate_skill_host_links(index_root, kit, index)
+    return index, current_hash
+
+
+def installed_skill_plan_pin(index_root: Path) -> dict[str, Any]:
+    """설치된 index와 tree를 검증하고 새 run용 metadata를 반환한다."""
+    snapshot = _authenticated_installed_skill_snapshot(index_root)
+    if snapshot is None:
+        return {}
+    _, current_hash = snapshot
     from agent_flow.core.local_skills import (
         LOCAL_SKILL_PLAN_HASH_VERSION,
         project_local_skill_plan_hash,
@@ -1266,31 +1492,60 @@ def reconcile_skill_plan_pin(
 
 def _installed_skill_path(index_root: Path, skill: dict[str, Any]) -> Path:
     raw_path = str(skill.get("path") or "")
+    skill_name = str(skill.get("name") or "")
     root = Path(os.path.abspath(index_root))
     skill_path = Path(os.path.abspath(root / raw_path))
     try:
         skill_path.relative_to(root)
-    except ValueError as exc:
-        raise SkillPlanSnapshotError(
-            f"blocked: invalid installed skill path: {skill.get('name')}"
-        ) from exc
+    except ValueError:
+        raise SkillDocumentResolutionError(
+            skill_name,
+            skill_path,
+            "invalid_path",
+        ) from None
     if skill_path.name != "SKILL.md":
-        raise SkillPlanSnapshotError(
-            f"blocked: invalid installed skill path: {skill.get('name')}"
+        raise SkillDocumentResolutionError(skill_name, skill_path, "invalid_path")
+    try:
+        _require_installed_regular_file(
+            root,
+            skill_path,
+            f"installed skill snapshot {skill_name}",
         )
-    _require_installed_regular_file(
-        root,
-        skill_path,
-        f"installed skill snapshot {skill.get('name')}",
-    )
+    except SkillPlanSnapshotError:
+        raise SkillDocumentResolutionError(
+            skill_name,
+            skill_path,
+            _installed_skill_document_state(skill_path),
+        ) from None
     return skill_path
 
 
-def _read_snapshot_json(root: Path, path: Path, label: str) -> dict[str, Any]:
-    _require_installed_regular_file(root, path, label)
+def _installed_skill_document_state(skill_path: Path) -> str:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        metadata = skill_path.lstat()
+    except FileNotFoundError:
+        return "missing"
+    except OSError:
+        return "unreadable"
+    if stat.S_ISLNK(metadata.st_mode):
+        try:
+            skill_path.stat()
+        except FileNotFoundError:
+            return "dangling_symlink"
+        except OSError:
+            pass
+        return "symlink"
+    if not stat.S_ISREG(metadata.st_mode):
+        return "non_regular"
+    return "unsafe_path"
+
+
+def _read_snapshot_json(root: Path, path: Path, label: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(
+            _read_installed_regular_bytes(root, path, label).decode("utf-8")
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise SkillPlanSnapshotError(f"blocked: {label} is unreadable: {path}") from exc
     if not isinstance(payload, dict):
         raise SkillPlanSnapshotError(f"blocked: {label} must be a JSON object: {path}")
@@ -1388,12 +1643,16 @@ def _validate_installed_android_official_provenance(
             "blocked: installed Android official license provenance is invalid"
         )
     license_path = skills_root / license_reference
-    _require_installed_regular_file(root, license_path, "installed Android official license")
+    license_bytes = _read_installed_regular_bytes(
+        root,
+        license_path,
+        "installed Android official license",
+    )
     expected_license_hash = official.get("license_sha256")
     if (
         not isinstance(expected_license_hash, str)
         or re.fullmatch(r"[0-9a-f]{64}", expected_license_hash) is None
-        or hashlib.sha256(license_path.read_bytes()).hexdigest() != expected_license_hash
+        or hashlib.sha256(license_bytes).hexdigest() != expected_license_hash
     ):
         raise SkillPlanSnapshotError(
             "blocked: installed Android official license provenance changed"
@@ -1433,10 +1692,11 @@ def _validate_installed_android_official_provenance(
 
 
 def _read_snapshot_yaml(root: Path, path: Path, label: str) -> dict[str, Any]:
-    _require_installed_regular_file(root, path, label)
     try:
-        payload = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
+        payload = yaml.safe_load(
+            _read_installed_regular_bytes(root, path, label).decode("utf-8")
+        )
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
         raise SkillPlanSnapshotError(f"blocked: {label} is unreadable: {path}") from exc
     if not isinstance(payload, dict):
         raise SkillPlanSnapshotError(f"blocked: {label} must be a mapping: {path}")
@@ -1528,6 +1788,133 @@ def _require_installed_regular_file(root: Path, path: Path, label: str) -> None:
             f"blocked: {label} escapes the project: {path}"
         ) from exc
 
+def _read_installed_regular_bytes(root: Path, path: Path, label: str) -> bytes:
+    lexical_root = Path(os.path.abspath(root))
+    lexical_path = Path(os.path.abspath(path))
+    try:
+        relative = lexical_path.relative_to(lexical_root)
+    except ValueError as exc:
+        raise SkillPlanSnapshotError(
+            f"blocked: {label} escapes the project: {path}"
+        ) from exc
+    directories: list[tuple[Path, os.stat_result]] = []
+    try:
+        root_metadata = lexical_root.lstat()
+    except OSError as exc:
+        raise SkillPlanSnapshotError(
+            f"blocked: {label} is unreadable: {lexical_root}"
+        ) from exc
+    if stat.S_ISLNK(root_metadata.st_mode) or not stat.S_ISDIR(root_metadata.st_mode):
+        raise SkillPlanSnapshotError(
+            f"blocked: {label} has an invalid authority root: {lexical_root}"
+        )
+    directories.append((lexical_root, root_metadata))
+    cursor = lexical_root
+    initial: os.stat_result | None = None
+    for index, part in enumerate(relative.parts):
+        cursor /= part
+        try:
+            metadata = cursor.lstat()
+        except OSError as exc:
+            raise SkillPlanSnapshotError(
+                f"blocked: {label} is unreadable: {cursor}"
+            ) from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            raise SkillPlanSnapshotError(
+                f"blocked: {label} may not use symlinks: {cursor}"
+            )
+        final = index == len(relative.parts) - 1
+        if final:
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                raise SkillPlanSnapshotError(
+                    f"blocked: {label} has an invalid path component: {cursor}"
+                )
+            initial = metadata
+        elif stat.S_ISDIR(metadata.st_mode):
+            directories.append((cursor, metadata))
+        else:
+            raise SkillPlanSnapshotError(
+                f"blocked: {label} has an invalid path component: {cursor}"
+            )
+    if initial is None:
+        raise SkillPlanSnapshotError(
+            f"blocked: {label} has an invalid path component: {lexical_path}"
+        )
+    try:
+        lexical_path.resolve(strict=True).relative_to(
+            lexical_root.resolve(strict=True)
+        )
+    except (OSError, ValueError) as exc:
+        raise SkillPlanSnapshotError(
+            f"blocked: {label} escapes the project: {path}"
+        ) from exc
+
+    def assert_directories() -> None:
+        for directory, expected in directories:
+            try:
+                current = directory.lstat()
+            except OSError as exc:
+                raise SkillPlanSnapshotError(
+                    f"blocked: {label} authority changed while reading: {directory}"
+                ) from exc
+            if (
+                not stat.S_ISDIR(current.st_mode)
+                or _filesystem_identity(current) != _filesystem_identity(expected)
+            ):
+                raise SkillPlanSnapshotError(
+                    f"blocked: {label} authority changed while reading: {directory}"
+                )
+
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
+    descriptor = -1
+    try:
+        assert_directories()
+        descriptor = os.open(lexical_path, flags)
+        before = os.fstat(descriptor)
+        assert_directories()
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or _filesystem_identity(before) != _filesystem_identity(initial)
+        ):
+            raise SkillPlanSnapshotError(
+                f"blocked: {label} changed while reading: {lexical_path}"
+            )
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 1024 * 1024):
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        current = lexical_path.lstat()
+        assert_directories()
+        if (
+            not stat.S_ISREG(after.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or after.st_nlink != 1
+            or current.st_nlink != 1
+            or _filesystem_identity(before) != _filesystem_identity(after)
+            or _filesystem_identity(after) != _filesystem_identity(current)
+        ):
+            raise SkillPlanSnapshotError(
+                f"blocked: {label} changed while reading: {lexical_path}"
+            )
+        return b"".join(chunks)
+    except SkillPlanSnapshotError:
+        raise
+    except OSError as exc:
+        raise SkillPlanSnapshotError(
+            f"blocked: {label} is unreadable: {lexical_path}"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+
 
 def _snapshot_strings(value: object) -> list[str]:
     if value is None:
@@ -1587,28 +1974,29 @@ def resolve_runtime_skill_plan(
 ) -> dict[str, Any]:
     normalized_task_scope = _normalize_task_scope(task_scope)
     phase_required = set(_logical_strings(list(required_skills)))
+    empty_plan = {
+        "phase": phase_id,
+        "active_profiles": [],
+        "touched_profiles": [],
+        "changed_files": [],
+        "task_scope": normalized_task_scope,
+        "skills": [],
+        "missing": [],
+        "missing_profiles": [],
+        "resolution_errors": [],
+    }
     if phase_id not in CODE_SKILL_PHASES and not phase_required:
-        return {
-            "phase": phase_id,
-            "active_profiles": [],
-            "touched_profiles": [],
-            "changed_files": [],
-            "task_scope": normalized_task_scope,
-            "skills": [],
-            "missing": [],
-            "missing_profiles": [],
-        }
+        return empty_plan
     if not isinstance(index.get("selection"), dict):
-        return {
-            "phase": phase_id,
-            "active_profiles": [],
-            "touched_profiles": [],
-            "changed_files": [],
-            "task_scope": normalized_task_scope,
-            "skills": [],
-            "missing": [],
-            "missing_profiles": [],
-        }
+        return empty_plan
+    try:
+        compatibility = SkillCompatibilityCatalog.from_value(
+            index.get("compatibility")
+        )
+    except SkillCompatibilityError as exc:
+        raise SkillPlanSnapshotError(
+            f"blocked: invalid skill compatibility metadata: {exc}"
+        ) from exc
     selection = index.get("selection") if isinstance(index.get("selection"), dict) else {}
     active_profiles = sorted(_logical_strings(selection.get("profiles")))
     raw_skill_profiles = selection.get("skill_profiles")
@@ -1628,14 +2016,14 @@ def resolve_runtime_skill_plan(
         routing,
     )
     missing_profiles = sorted(touched_profiles - installed_profiles)
-    required = set(phase_required)
+    raw_required = set(phase_required)
     if phase_id in CODE_SKILL_PHASES:
-        required.add("code-generation-discipline")
+        raw_required.add("code-generation-discipline")
     required_review = selection.get("required_review")
     if not isinstance(required_review, dict):
         required_review = {}
     for profile in touched_profiles:
-        required.update(_logical_strings(required_review.get(profile)))
+        raw_required.update(_logical_strings(required_review.get(profile)))
         conditional_skills = selection.get("conditional_skills")
         if not isinstance(conditional_skills, dict):
             conditional_skills = {}
@@ -1659,21 +2047,32 @@ def resolve_runtime_skill_plan(
                 and not _task_matches_terms(normalized_task_scope, route.get("task_terms"))
             ):
                 continue
-            required.update(
+            raw_required.update(
                 name
                 for name in _logical_strings(route.get("skills"))
                 if name in catalog
             )
     by_name = _index_skills_by_logical_name(index.get("skills"))
-    explicit = set(_logical_strings(selection.get("explicit_skills")))
+    try:
+        compatibility.validate_concrete_ids(by_name)
+    except SkillCompatibilityError as exc:
+        raise SkillPlanSnapshotError(
+            f"blocked: invalid skill compatibility metadata: {exc}"
+        ) from exc
+    raw_explicit = set(_logical_strings(selection.get("explicit_skills")))
+    explicit = {
+        resolution.canonical
+        for name in raw_explicit
+        if (resolution := compatibility.resolve(name)).resolved
+    }
     for name, skill in by_name.items():
         phases = _strings(skill.get("workflowPhases"))
         phase_matches = not phases or phase_id in phases
         activation = str(skill.get("activation") or "on-demand")
         if name in explicit:
-            required.add(name)
+            raw_required.add(name)
         elif activation == "always" and phase_matches:
-            required.add(name)
+            raw_required.add(name)
         elif activation == "conditional" and phase_matches and (
             _task_matches_terms(normalized_task_scope, skill.get("taskTerms"))
             or any(
@@ -1682,7 +2081,31 @@ def resolve_runtime_skill_plan(
                 for glob in _strings(skill.get("pathGlobs"))
             )
         ):
-            required.add(name)
+            raw_required.add(name)
+
+    required: set[str] = set()
+    requests_by_canonical: dict[str, set[str]] = {}
+    unresolved_names: set[str] = set()
+    resolution_errors: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def add_required(reference: str) -> bool:
+        resolution = compatibility.resolve(reference)
+        if not resolution.resolved:
+            unresolved_names.add(resolution.requested)
+            diagnostic = resolution.diagnostic()
+            resolution_errors[(resolution.requested, str(resolution.reason))] = diagnostic
+            return False
+        requests_by_canonical.setdefault(resolution.canonical, set()).add(
+            resolution.requested
+        )
+        if resolution.canonical in required:
+            return False
+        required.add(resolution.canonical)
+        return True
+
+    for name in sorted(raw_required):
+        add_required(name)
+
     changed = True
     while changed:
         changed = False
@@ -1691,24 +2114,33 @@ def resolve_runtime_skill_plan(
             if skill is None:
                 continue
             for dependency in _logical_strings(skill.get("requires")):
-                if dependency not in required:
-                    required.add(dependency)
-                    changed = True
+                changed = add_required(dependency) or changed
     required.difference_update(EXPLICIT_ONLY_SKILLS - explicit)
     skills: list[dict[str, Any]] = []
-    missing: list[str] = []
+    missing = set(unresolved_names)
     for name in sorted(required):
         skill = by_name.get(name)
+        resolution = compatibility.resolve(name)
         if skill is None:
-            missing.append(name)
+            missing.add(name)
+            for requested in requests_by_canonical.get(name, {name}):
+                diagnostic = {
+                    "reason": "canonical_not_installed",
+                    "requested": requested,
+                    "canonical": name,
+                    "capabilities": list(resolution.capabilities),
+                    "repairable": False,
+                }
+                resolution_errors[(requested, "canonical_not_installed")] = diagnostic
             continue
-        skills.append(
-            {
-                "name": name,
-                "path": str(skill.get("path") or ""),
-                "tree_hash": skill.get("tree_hash"),
-            }
-        )
+        record = {
+            "name": name,
+            "path": str(skill.get("path") or ""),
+            "tree_hash": skill.get("tree_hash"),
+        }
+        if resolution.capabilities:
+            record["capabilities"] = list(resolution.capabilities)
+        skills.append(record)
     return {
         "phase": phase_id,
         "active_profiles": active_profiles,
@@ -1716,8 +2148,11 @@ def resolve_runtime_skill_plan(
         "changed_files": normalized_files,
         "task_scope": normalized_task_scope,
         "skills": skills,
-        "missing": missing,
+        "missing": sorted(missing),
         "missing_profiles": missing_profiles,
+        "resolution_errors": [
+            resolution_errors[key] for key in sorted(resolution_errors)
+        ],
     }
 
 
@@ -2101,7 +2536,7 @@ def _verified_profile_skill_prompt_path(
         raise SkillPlanSnapshotError(
             f"blocked: installed skill snapshot has no tree hash: {skill.get('name')}"
         )
-    if hash_skill_tree(skill_path.parent) != expected_hash:
+    if hash_skill_tree(skill_path.parent, authority_root=index_root) != expected_hash:
         raise SkillPlanSnapshotError(
             f"blocked: installed skill snapshot changed: {skill.get('name')}"
         )

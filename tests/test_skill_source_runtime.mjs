@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   discoverAutomaticExternalSkillNames,
+  loadSkillSourcePolicy,
   mergeInstallSelectionWithPrevious,
   resolveInstallSelection,
   resolveProfileSkillSources,
@@ -137,6 +138,33 @@ test("active host wins deterministically for Claude Codex and OMP", () => {
     assert.equal(plan.entries[0].source_host, host);
     assert.equal(plan.entries[0].automatic_on_demand, true);
   }
+});
+
+test("bundled hardlinked skill documents remain readable", () => {
+  const root = tempRoot();
+  const kitRoot = path.join(root, "kit");
+  const project = path.join(root, "project");
+  const home = path.join(root, "home");
+  const sourceRoot = writeSkill(path.join(root, "package-store"), "bundled-hardlink");
+  const bundledRoot = path.join(kitRoot, "skills", "bundled-hardlink");
+  fs.mkdirSync(bundledRoot, { recursive: true });
+  fs.linkSync(
+    path.join(sourceRoot, "SKILL.md"),
+    path.join(bundledRoot, "SKILL.md"),
+  );
+  fs.mkdirSync(project, { recursive: true });
+
+  const plan = resolveProfileSkillSources({
+    skillNames: new Set(["bundled-hardlink"]),
+    explicitSkillNames: ["bundled-hardlink"],
+    kitRoot,
+    projectRoot: project,
+    projectSkillsRoot: path.join(project, ".agent-flow", "skills"),
+    home,
+    policy: loadSkillSourcePolicy(path.join(KIT_ROOT, "skills", "source-policy.yaml")),
+  });
+
+  assert.deepEqual(plan.entries.map((entry) => entry.source_kind), ["bundled"]);
 });
 
 test("explicit active host overrides ambient host markers", () => {
@@ -375,4 +403,44 @@ test("secondary declared artifacts must exist and be fresh", () => {
     "stale declared artifact artifacts/evidence.json",
     "missing declared artifact artifacts/log.txt",
   ]);
+});
+
+test("dependency closure uses metadata from the selected skill snapshot", () => {
+  const root = tempRoot();
+  const project = path.join(root, "project");
+  const home = path.join(root, "home");
+  const localSkills = path.join(project, ".agent-flow", "local-skills");
+  const snapshots = path.join(project, ".agent-flow", "skills");
+  fs.mkdirSync(snapshots, { recursive: true });
+  writeSkill(localSkills, "dependency-skill");
+  const selectedRoot = writeSkill(
+    localSkills,
+    "selected-skill",
+    "dependencies:\n  - dependency-skill\n",
+  );
+  const selectedDocument = path.join(selectedRoot, "SKILL.md");
+  const originalReadFileSync = fs.readFileSync;
+  fs.readFileSync = function guardedReadFileSync(file, ...args) {
+    if (typeof file === "string" && path.resolve(file) === selectedDocument) {
+      throw new Error("selected SKILL.md was reopened by path");
+    }
+    return originalReadFileSync.call(this, file, ...args);
+  };
+  try {
+    const plan = resolveProfileSkillSources({
+      skillNames: new Set(["selected-skill"]),
+      explicitSkillNames: ["selected-skill"],
+      kitRoot: KIT_ROOT,
+      projectRoot: project,
+      projectSkillsRoot: snapshots,
+      home,
+      activeHost: "codex",
+    });
+    assert.deepEqual(
+      plan.entries.map((entry) => entry.name),
+      ["dependency-skill", "selected-skill"],
+    );
+  } finally {
+    fs.readFileSync = originalReadFileSync;
+  }
 });

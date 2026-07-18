@@ -8,6 +8,10 @@ from pathlib import Path
 
 import pytest
 
+from agent_flow.core.skill_compatibility import (
+    SkillCompatibilityError,
+    normalize_skill_compatibility,
+)
 from agent_flow.core.skill_plan import resolve_runtime_skill_plan
 
 
@@ -48,6 +52,32 @@ process.stdout.write(JSON.stringify(resolveRuntimeSkillPlan(input.index, {
                 "required_skills": required_skills or [],
             }
         ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def _node_compatibility_normalization(value: object) -> dict[str, object]:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required")
+    script = """
+import fs from 'node:fs';
+import { normalizeSkillCompatibility } from './lib/skill-compatibility.mjs';
+const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+try {
+  process.stdout.write(JSON.stringify({ ok: true, value: normalizeSkillCompatibility(input) }));
+} catch (error) {
+  process.stdout.write(JSON.stringify({ ok: false, error: error.message }));
+}
+"""
+    result = subprocess.run(
+        (node, "--input-type=module", "-e", script),
+        cwd=KIT_ROOT,
+        input=json.dumps(value),
         text=True,
         capture_output=True,
         check=False,
@@ -456,3 +486,118 @@ def test_required_skill_missing_is_identical_and_explicit_in_both_runtimes() -> 
 
     assert python == node
     assert python["missing"] == required
+
+
+def test_compatibility_resolution_is_identical_in_both_runtimes() -> None:
+    index = _index("codex")
+    index["compatibility"] = {
+        "skills": [
+            {
+                "canonical": "code-generation-discipline",
+                "aliases": ["code-gen"],
+                "renamed_from": ["old-code-gen"],
+                "capabilities": ["implementation.code-generation"],
+            }
+        ]
+    }
+    required = ["code-gen", "old-code-gen"]
+
+    node = _node_plan(
+        index,
+        phase="ddd-design",
+        files=[],
+        task="architecture",
+        required_skills=required,
+    )
+    python = resolve_runtime_skill_plan(
+        index,
+        phase_id="ddd-design",
+        task_scope="architecture",
+        required_skills=required,
+    )
+
+    assert python == node
+    assert node["missing"] == []
+    assert [skill["name"] for skill in node["skills"]] == [
+        "always-code",
+        "code-generation-discipline",
+    ]
+    assert node["skills"][1]["capabilities"] == ["implementation.code-generation"]
+
+
+@pytest.mark.parametrize(
+    "compatibility",
+    [
+        {"version": True},
+        {"version": None},
+        {"version": 1.0},
+        {"skills": None},
+        {"skills": [{"canonical": None}]},
+        {"skills": [{"canonical": "bad/name"}]},
+        {"skills": [{"canonical": "one", "status": []}]},
+        {"skills": [{"canonical": "one", "capabilities": "capability"}]},
+        {"skills": [{"canonical": "one", "aliases": ["same", "SAME"]}]},
+        {
+            "skills": [
+                {
+                    "canonical": "one",
+                    "aliases": ["same"],
+                    "renamed_from": ["SAME"],
+                }
+            ]
+        },
+        {
+            "skills": [
+                {
+                    "canonical": "one",
+                    "status": "deprecated",
+                    "replaced_by": ["two", "TWO"],
+                }
+            ]
+        },
+        {
+            "skills": [
+                {
+                    "canonical": "one",
+                    "status": "active",
+                    "replaced_by": "two",
+                }
+            ]
+        },
+        {
+            "skills": [
+                {
+                    "canonical": "one",
+                    "status": "deprecated",
+                    "replaced_by": "two",
+                },
+                {
+                    "canonical": "two",
+                    "status": "renamed",
+                    "replaced_by": "one",
+                },
+            ]
+        },
+        {
+            "skills": [
+                {
+                    "canonical": "one",
+                    "status": "deprecated",
+                    "aliases": ["legacy-one"],
+                    "replaced_by": "legacy-one",
+                }
+            ]
+        },
+    ],
+)
+def test_compatibility_metadata_validation_is_identical_in_both_runtimes(
+    compatibility: dict[str, object],
+) -> None:
+    try:
+        normalized = normalize_skill_compatibility(compatibility)
+    except SkillCompatibilityError as exc:
+        python = {"ok": False, "error": str(exc)}
+    else:
+        python = {"ok": True, "value": normalized}
+
+    assert _node_compatibility_normalization(compatibility) == python

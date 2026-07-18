@@ -167,7 +167,10 @@ def test_full_cycle(tmp_path: Path):
     assert not (run_dir / "active").exists()
 
 
-def test_runner_injects_installed_profile_union_into_prompt(tmp_path: Path):
+def test_runner_injects_installed_profile_union_into_prompt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
     from agent_flow.adapters.generic import GenericAdapter
     from agent_flow.runner import Phase, Runner
 
@@ -179,6 +182,8 @@ def test_runner_injects_installed_profile_union_into_prompt(tmp_path: Path):
         json.dumps({"profile": "android", "profiles": ["android", "react-native"]}),
         encoding="utf-8",
     )
+
+    monkeypatch.delenv("AGENT_FLOW_PROFILE", raising=False)
 
     runner = Runner(project_root=project)
     assert runner.profile_id == "android,react-native"
@@ -1269,13 +1274,21 @@ def test_worktree_run_rejects_existing_branch_mismatch(tmp_path: Path):
     project = tmp_path / "branch-mismatch"
     project.mkdir()
     _init_git_project(project)
+    execution_env = {
+        "AGENT_FLOW_ACTIVE_HOST": "codex",
+        "AGENT_FLOW_EXECUTION_ID": "branch-mismatch",
+    }
 
-    r1 = _run_cli(["run", "task", "--worktree", "task"], project)
+    r1 = _run_cli(["run", "task", "--worktree", "task"], project, execution_env)
     assert r1.returncode == 0, r1.stderr
-    r_continue = _run_cli(["continue", "--worktree", "task"], project)
+    r_continue = _run_cli(["continue", "--worktree", "task"], project, execution_env)
     assert r_continue.returncode == 0, r_continue.stderr
 
-    r2 = _run_cli(["run", "other", "--worktree", "task", "--worktree-branch", "feat/other"], project)
+    r2 = _run_cli(
+        ["run", "other", "--worktree", "task", "--worktree-branch", "feat/other"],
+        project,
+        execution_env,
+    )
     assert r2.returncode == 2
     assert "already uses branch" in r2.stderr
 

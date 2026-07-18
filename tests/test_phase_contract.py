@@ -43,6 +43,7 @@ process.stdout.write(JSON.stringify(evaluatePhaseContract(input.phase, input.art
                 "phase": {
                     "required_skills": list(phase.required_skills),
                     "requirements": list(phase.requirements),
+                    "skill_compatibility": getattr(phase, "skill_compatibility", None),
                 },
                 "artifact": artifact,
             }
@@ -153,6 +154,103 @@ def test_missing_required_skill_and_invalid_artifact_block_in_both_runtimes() ->
     }
 
 
+
+def test_phase_contract_accepts_declared_compatible_applied_skill_alias_in_both_runtimes() -> None:
+    phase = Phase(
+        id="architecture",
+        description="",
+        required_skills=("clean-architecture-core",),
+        requirements=("domain-modeled",),
+    )
+    phase.skill_compatibility = {
+        "skills": [
+            {
+                "canonical": "clean-architecture-core",
+                "aliases": ["clean-architecture-boundaries"],
+                "capabilities": ["architecture.clean.boundary"],
+            }
+        ]
+    }
+    artifact = _artifact(
+        skills=["clean-architecture-boundaries"],
+        requirements={"domain-modeled": "pass"},
+    )
+
+    assert phase_contract_issues(phase, artifact) == []
+    assert _node_evaluation(phase, artifact) == {
+        "valid": True,
+        "issues": [],
+        "route": "success",
+    }
+
+
+def test_invalid_phase_compatibility_metadata_is_rejected_identically_in_both_runtimes() -> None:
+    phase = Phase(
+        id="architecture",
+        description="",
+        required_skills=("clean-architecture-core",),
+    )
+    phase.skill_compatibility = {
+        "skills": [
+            {
+                "canonical": "clean-architecture-core",
+                "aliases": ["legacy-clean", "LEGACY-CLEAN"],
+            }
+        ]
+    }
+    artifact = _artifact(skills=["clean-architecture-core"], requirements={})
+    expected = ["phase-contract skill compatibility is invalid"]
+
+    assert phase_contract_issues(phase, artifact) == expected
+    assert _node_evaluation(phase, artifact) == {
+        "valid": False,
+        "issues": expected,
+        "route": None,
+    }
+
+
+def test_unresolved_phase_skills_report_all_structured_diagnostics_in_both_runtimes() -> None:
+    phase = Phase(
+        id="architecture",
+        description="",
+        required_skills=("removed-skill", "deprecated-skill"),
+    )
+    phase.skill_compatibility = {
+        "skills": [
+            {
+                "canonical": "removed-skill",
+                "status": "removed",
+                "capabilities": ["obsolete.capability"],
+            },
+            {
+                "canonical": "deprecated-skill",
+                "status": "deprecated",
+                "capabilities": ["legacy.capability"],
+            },
+        ]
+    }
+    artifact = _artifact(
+        skills=["removed-skill", "deprecated-skill"],
+        requirements={},
+    )
+
+    python_issues = phase_contract_issues(phase, artifact)
+    node = _node_evaluation(phase, artifact)
+
+    assert len(python_issues) == 1
+    assert node["valid"] is False
+    assert node["route"] is None
+    node_issues = node["issues"]
+    assert isinstance(node_issues, list)
+    assert len(node_issues) == 1
+    python_diagnostics = json.loads(python_issues[0].split(": ", 1)[1])
+    node_diagnostics = json.loads(str(node_issues[0]).split(": ", 1)[1])
+    assert python_diagnostics == node_diagnostics
+    assert [diagnostic["reason"] for diagnostic in python_diagnostics] == [
+        "removed_without_replacement",
+        "deprecated_without_replacement",
+    ]
+
 def test_runner_blocks_missing_skill_and_repeats_declared_phase_on_requirement_failure(
     tmp_path: Path,
 ) -> None:
@@ -205,31 +303,28 @@ def test_runner_contract_expands_runtime_skill_dependency_closure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = tmp_path / "project"
-    index_path = project / ".agent-flow" / "skills" / "index.json"
-    index_path.parent.mkdir(parents=True)
-    index_path.write_text(
-        json.dumps(
+    index = {
+        "selection": {},
+        "skills": [
             {
-                "selection": {},
-                "skills": [
-                    {
-                        "name": "ddd-architecture",
-                        "path": ".agent-flow/skills/ddd-architecture/SKILL.md",
-                        "requires": ["clean-architecture-core"],
-                    },
-                    {
-                        "name": "clean-architecture-core",
-                        "path": ".agent-flow/skills/clean-architecture-core/SKILL.md",
-                    },
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
+                "name": "ddd-architecture",
+                "path": ".agent-flow/skills/ddd-architecture/SKILL.md",
+                "requires": ["clean-architecture-core"],
+            },
+            {
+                "name": "clean-architecture-core",
+                "path": ".agent-flow/skills/clean-architecture-core/SKILL.md",
+            },
+        ],
+    }
     run_dir = project / ".agent-flow" / "runs" / "r1"
     run_dir.mkdir(parents=True)
     (run_dir / "meta.json").write_text('{"task":""}\n', encoding="utf-8")
     monkeypatch.setattr("agent_flow.core.phase_contract.runtime_changed_files", lambda *_args: ())
+    monkeypatch.setattr(
+        "agent_flow.core.phase_contract.authenticated_installed_skill_index",
+        lambda _root: index,
+    )
     runner = Runner.__new__(Runner)
     runner.config_root = project
     runner.project_root = project
@@ -262,43 +357,41 @@ def test_code_phase_without_static_skills_enforces_runtime_platform_skill_union(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = tmp_path / "project"
-    index_path = project / ".agent-flow" / "skills" / "index.json"
-    index_path.parent.mkdir(parents=True)
+    index: dict[str, object]
     routing = json.loads(
         (KIT_ROOT / "skills" / "profile-routing.json").read_text(encoding="utf-8")
     )
-    index_path.write_text(
-        json.dumps(
+    index = {
+        "selection": {
+            "profiles": ["node"],
+            "skill_profiles": ["node"],
+            "explicit_skills": [],
+            "required_review": {
+                "node": ["typescript-development-guide"],
+            },
+            "profile_routing": routing,
+        },
+        "skills": [
             {
-                "selection": {
-                    "profiles": ["node"],
-                    "skill_profiles": ["node"],
-                    "explicit_skills": [],
-                    "required_review": {
-                        "node": ["typescript-development-guide"],
-                    },
-                    "profile_routing": routing,
-                },
-                "skills": [
-                    {
-                        "name": "code-generation-discipline",
-                        "path": "code-generation-discipline/SKILL.md",
-                    },
-                    {
-                        "name": "typescript-development-guide",
-                        "path": "typescript-development-guide/SKILL.md",
-                    },
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
+                "name": "code-generation-discipline",
+                "path": "code-generation-discipline/SKILL.md",
+            },
+            {
+                "name": "typescript-development-guide",
+                "path": "typescript-development-guide/SKILL.md",
+            },
+        ],
+    }
     run_dir = project / ".agent-flow" / "runs" / "r1"
     run_dir.mkdir(parents=True)
     (run_dir / "meta.json").write_text('{"task":""}\n', encoding="utf-8")
     monkeypatch.setattr(
         "agent_flow.core.phase_contract.runtime_changed_files",
         lambda *_args: ("src/index.ts",),
+    )
+    monkeypatch.setattr(
+        "agent_flow.core.phase_contract.authenticated_installed_skill_index",
+        lambda _root: index,
     )
     runner = Runner.__new__(Runner)
     runner.config_root = project

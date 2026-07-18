@@ -10,14 +10,23 @@ import { fileURLToPath } from "node:url";
 import {
   CODE_SKILL_PHASES,
   SKILL_DEPENDENCIES,
+  canonicalizeInstallSelectionCompatibility,
   discoverAutomaticExternalSkillNames,
+  hashDirectoryTree,
   hashSkillTree,
+  readSkillDocument,
   mergeInstallSelectionWithPrevious,
   mergeResolvedSkillClosure,
   resolveInstallSelection,
   resolveProfileSkillSources,
   resolveRuntimeSkillPlan,
 } from "../lib/skill-selection.mjs";
+import {
+  canonicalizeSkillCompatibilitySelection,
+  normalizeSkillCompatibility,
+  SkillResolutionError,
+  validateConcreteSkillCompatibility,
+} from "../lib/skill-compatibility.mjs";
 import { detectActiveHost } from "../lib/host-detection.mjs";
 import { evaluateDeclaredArtifacts, evaluatePhaseContract } from "../lib/phase-contract.mjs";
 
@@ -1011,6 +1020,19 @@ function installProjectUnlocked(root, context, lock) {
     env: process.env,
     previousIndex: previousSkillIndex,
   });
+  installSelection = canonicalizeInstallSelectionCompatibility(
+    installSelection,
+    readBundledSkillCompatibility(KIT_ROOT),
+    KIT_ROOT,
+    root,
+    {
+      home: HOME,
+      activeHost,
+      env: process.env,
+      previousIndex: previousSkillIndex,
+      automaticSkillNames,
+    },
+  );
   const sourceNames = new Set([
     ...automaticSkillNames,
     ...(installSelection.explicitSkills || []),
@@ -1174,7 +1196,11 @@ function installProjectUnlocked(root, context, lock) {
     warnings: skillIndex.warnings.length,
   };
 
-  const indexBytes = fs.readFileSync(path.join(agentFlowDir, "skills", "index.json"));
+  const indexBytes = readRegularFileSnapshotNoFollow(
+    path.join(agentFlowDir, "skills", "index.json"),
+    agentFlowDir,
+    "installed skill index",
+  ).bytes;
   payload.skill_index_hash_version = 1;
   payload.skill_index_hash = crypto.createHash("sha256").update(indexBytes).digest("hex");
   payload.skill_plan_hash_version = 2;
@@ -3430,13 +3456,19 @@ function nodePhaseSkillPlan(root, state, phase) {
     taskScope: state.task ?? "",
     requiredSkills,
   });
+  if (plan.resolution_errors.length > 0) {
+    throw new SkillResolutionError(plan.resolution_errors);
+  }
   if (plan.missing_profiles.length > 0) {
     throw new Error(`missing required skill profiles in project snapshot: ${plan.missing_profiles.join(", ")}`);
   }
   if (plan.missing.length > 0) {
     throw new Error(`missing required profile skills in project snapshot: ${plan.missing.join(", ")}`);
   }
-  return plan;
+  return {
+    ...plan,
+    skill_compatibility: normalizeSkillCompatibility(authenticated.payload.compatibility),
+  };
 }
 
 function nodeContractPhase(root, state, phase) {
@@ -3451,6 +3483,7 @@ function nodeContractPhase(root, state, phase) {
   return {
     ...phase,
     required_skills: plan.skills.map((skill) => skill.name),
+    skill_compatibility: plan.skill_compatibility,
   };
 }
 
@@ -3550,13 +3583,24 @@ function writeJson(pathName, payload) {
 
 function readExistingKit(agentFlowDir) {
   const kitPath = path.join(agentFlowDir, "kit.json");
-  if (!fs.existsSync(kitPath)) {
-    return undefined;
+  try {
+    fs.lstatSync(kitPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return undefined;
+    throw error;
   }
   try {
-    return JSON.parse(fs.readFileSync(kitPath, "utf8"));
-  } catch {
-    return undefined;
+    const payload = readRegularJsonNoFollow(
+      kitPath,
+      agentFlowDir,
+      "existing kit metadata",
+    );
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw new Error("kit metadata must be an object");
+    }
+    return payload;
+  } catch (error) {
+    throw new Error(`invalid existing kit metadata: ${kitPath}`, { cause: error });
   }
 }
 
@@ -3843,33 +3887,93 @@ function dirContentsMatch(src, dest) {
 }
 
 function materializeResolvedSkillSources(agentFlowDir, sourcePlan, transaction = null) {
+  const skillsRoot = path.join(agentFlowDir, "skills");
   for (const entry of sourcePlan?.entries || []) {
     if (!["host-bootstrap", "shared"].includes(entry.source_kind)) continue;
-    const destination = path.join(agentFlowDir, "skills", entry.name);
+    const absoluteDestination = path.join(skillsRoot, entry.name);
     let sourcePath = entry.source_path;
-    if (samePath(sourcePath, destination)) {
+    if (samePath(sourcePath, absoluteDestination)) {
       const backupSource = transaction ? path.join(transaction.backup, entry.name) : null;
       if (!backupSource || !fs.existsSync(backupSource)) continue;
       sourcePath = backupSource;
     }
-    const stage = path.join(
-      agentFlowDir,
-      "skills",
-      `.agent-flow-stage-${entry.name}-${process.pid}-${crypto.randomBytes(6).toString("hex")}`,
-    );
-    try {
-      fs.cpSync(sourcePath, stage, { recursive: true, dereference: false, errorOnExist: true, force: false });
-      if (hashSkillTree(stage) !== entry.tree_hash) {
-        throw new Error(`skill source changed while copying: ${entry.name}`);
+    withManagedDirectoryCwd(agentFlowDir, skillsRoot, true, () => {
+      const destination = entry.name;
+      const stage = `.agent-flow-stage-${entry.name}-${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
+      const displaced = `.agent-flow-displaced-${entry.name}-${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
+      const before = lstatIfExists(destination);
+      if (before && (!before.isDirectory() || before.isSymbolicLink())) {
+        throw new Error(`installed skill destination is unsafe: ${entry.name}`);
       }
-      if (fs.existsSync(destination)) fs.rmSync(destination, { recursive: true, force: true });
-      fs.renameSync(stage, destination);
-      if (hashSkillTree(destination) !== entry.tree_hash) {
-        throw new Error(`installed skill snapshot integrity mismatch: ${entry.name}`);
+      const beforeState = before ? managedPathState(destination) : { kind: "absent" };
+      let displacedExisting = false;
+      let installed = false;
+      try {
+        fs.cpSync(sourcePath, stage, {
+          recursive: true,
+          dereference: false,
+          errorOnExist: true,
+          force: false,
+        });
+        if (
+          hashSkillTree(stage, { authorityRoot: ".", skillName: entry.name })
+          !== entry.tree_hash
+        ) {
+          throw new Error(`skill source changed while copying: ${entry.name}`);
+        }
+        holdInstallForTest(
+          "AGENT_FLOW_TEST_HOLD_AFTER_MATERIALIZE_STAGE_HASH_MS",
+          "materialize-stage-hashed",
+        );
+        const current = lstatIfExists(destination);
+        if (
+          Boolean(before) !== Boolean(current)
+          || (
+            before
+            && (
+              !sameDirectoryIdentity(before, current)
+              || !sameManagedPathState(beforeState, managedPathState(destination))
+            )
+          )
+        ) {
+          throw new Error(`installed skill destination changed before replacement: ${entry.name}`);
+        }
+        if (before) {
+          renameManagedNoReplace(destination, displaced);
+          displacedExisting = true;
+          if (!sameDirectoryIdentity(before, fs.lstatSync(displaced))) {
+            throw new Error(`installed skill destination changed during replacement: ${entry.name}`);
+          }
+        }
+        renameManagedNoReplace(stage, destination);
+        installed = true;
+        if (
+          hashSkillTree(destination, { authorityRoot: ".", skillName: entry.name })
+          !== entry.tree_hash
+        ) {
+          throw new Error(`installed skill snapshot integrity mismatch: ${entry.name}`);
+        }
+        if (displacedExisting) {
+          fs.rmSync(displaced, { recursive: true, force: true });
+          displacedExisting = false;
+        }
+      } catch (error) {
+        if (installed && lstatIfExists(destination)) {
+          fs.rmSync(destination, { recursive: true, force: true });
+          installed = false;
+        }
+        if (displacedExisting && !lstatIfExists(destination)) {
+          renameManagedNoReplace(displaced, destination);
+          displacedExisting = false;
+        }
+        throw error;
+      } finally {
+        if (lstatIfExists(stage)) fs.rmSync(stage, { recursive: true, force: true });
+        if (lstatIfExists(displaced)) {
+          throw new Error(`displaced skill destination was not restored: ${entry.name}`);
+        }
       }
-    } finally {
-      if (fs.existsSync(stage)) fs.rmSync(stage, { recursive: true, force: true });
-    }
+    });
   }
 }
 
@@ -4003,7 +4107,7 @@ function acquireProjectInstallLock(root, agentFlowDir) {
       throw new Error(`project install lock is unsafe: ${lockPath}`);
     }
     const ownerPath = path.join(lockPath, "owner.json");
-    const owner = readRegularJsonNoFollow(ownerPath);
+    const owner = readRegularJsonNoFollow(ownerPath, agentFlowDir);
     const validOwner = owner?.version === 1
       && owner.root === fs.realpathSync(root)
       && Number.isInteger(owner.pid)
@@ -4016,7 +4120,10 @@ function acquireProjectInstallLock(root, agentFlowDir) {
     const quarantine = path.join(agentFlowDir, `.agent-flow-stale-lock-${crypto.randomBytes(12).toString("hex")}`);
     fs.renameSync(lockPath, quarantine);
     const moved = fs.lstatSync(quarantine);
-    const movedOwner = readLockOwnerIfSafe(path.join(quarantine, "owner.json"));
+    const movedOwner = readLockOwnerIfSafe(
+      path.join(quarantine, "owner.json"),
+      agentFlowDir,
+    );
     if (
       !sameDirectoryIdentity(expectedLock, moved)
       || movedOwner?.token !== owner.token
@@ -4055,9 +4162,9 @@ function processIsAlive(pid) {
   }
 }
 
-function readLockOwnerIfSafe(pathName) {
+function readLockOwnerIfSafe(pathName, authorityRoot) {
   try {
-    return readRegularJsonNoFollow(pathName);
+    return readRegularJsonNoFollow(pathName, authorityRoot);
   } catch {
     return null;
   }
@@ -4087,7 +4194,10 @@ function releaseProjectInstallLock(lock) {
   const quarantine = path.join(path.dirname(lock.path), `.agent-flow-release-lock-${crypto.randomBytes(12).toString("hex")}`);
   fs.renameSync(lock.path, quarantine);
   const moved = fs.lstatSync(quarantine);
-  const movedOwner = readLockOwnerIfSafe(path.join(quarantine, "owner.json"));
+  const movedOwner = readLockOwnerIfSafe(
+    path.join(quarantine, "owner.json"),
+    path.dirname(lock.path),
+  );
   if (
     String(moved.dev) !== lock.device
     || String(moved.ino) !== lock.inode
@@ -4102,67 +4212,62 @@ function releaseProjectInstallLock(lock) {
 
 function readAuthenticatedSkillIndex(agentFlowDir, existingKit = null) {
   const indexPath = path.join(agentFlowDir, "skills", "index.json");
-  if (!fs.existsSync(indexPath)) return null;
-  const noFollow = fs.constants.O_NOFOLLOW || 0;
-  const descriptor = fs.openSync(indexPath, fs.constants.O_RDONLY | noFollow);
   try {
-    const before = fs.fstatSync(descriptor);
-    if (!before.isFile() || before.nlink !== 1) throw new Error(`invalid previous skill index file: ${indexPath}`);
-    const bytes = fs.readFileSync(descriptor);
-    const after = fs.fstatSync(descriptor);
-    if (
-      before.dev !== after.dev
-      || before.ino !== after.ino
-      || before.size !== after.size
-      || before.mtimeMs !== after.mtimeMs
-    ) throw new Error(`previous skill index changed during authentication: ${indexPath}`);
-    let payload;
-    try {
-      payload = JSON.parse(bytes.toString("utf8"));
-    } catch {
-      throw new Error(`invalid previous skill index JSON: ${indexPath}`);
-    }
-    if (!Array.isArray(payload?.skills) || !Array.isArray(payload?.links)) {
-      throw new Error(`unsupported previous skill index: ${indexPath}`);
-    }
-    if (payload.version === undefined) payload = { version: 1, selection: {}, ...payload };
-    if (![1, 2].includes(payload.version)) throw new Error(`unsupported previous skill index: ${indexPath}`);
-    const hasIndexCommitment = existingKit?.skill_index_hash_version === 1
-      && typeof existingKit?.skill_index_hash === "string";
-    if (hasIndexCommitment) {
-      const indexHash = crypto.createHash("sha256").update(bytes).digest("hex");
-      if (indexHash !== existingKit.skill_index_hash) {
-        throw new Error("previous skill index does not match kit commitment");
-      }
-      if (
-        existingKit.skill_plan_hash_version !== 2
-        || computeSkillPlanHash(payload, path.dirname(agentFlowDir), false) !== existingKit.skill_plan_hash
-      ) {
-        throw new Error("previous skill plan does not match kit commitment");
-      }
-      if (
-        ![1, SKILL_LINKS_COMMITMENT_VERSION].includes(existingKit.skill_links_commitment_version)
-        || skillLinksCommitment(
-          existingKit.skill_plan_hash,
-          payload.links,
-          existingKit.skill_links_commitment_version,
-        )
-          !== existingKit.skill_links_commitment
-      ) {
-        throw new Error("previous skill links do not match kit commitment");
-      }
-    } else {
-      payload = { ...payload, links: [] };
-    }
-    return {
-      payload,
-      bytes,
-      hash: crypto.createHash("sha256").update(bytes).digest("hex"),
-      identity: { dev: before.dev, ino: before.ino, size: before.size, mtimeMs: before.mtimeMs },
-    };
-  } finally {
-    fs.closeSync(descriptor);
+    fs.lstatSync(indexPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
   }
+  const snapshot = readRegularFileSnapshotNoFollow(
+    indexPath,
+    agentFlowDir,
+    "previous skill index",
+  );
+  const { bytes } = snapshot;
+  let payload;
+  try {
+    payload = JSON.parse(bytes.toString("utf8"));
+  } catch {
+    throw new Error(`invalid previous skill index JSON: ${indexPath}`);
+  }
+  if (!Array.isArray(payload?.skills) || !Array.isArray(payload?.links)) {
+    throw new Error(`unsupported previous skill index: ${indexPath}`);
+  }
+  if (payload.version === undefined) payload = { version: 1, selection: {}, ...payload };
+  if (![1, 2].includes(payload.version)) throw new Error(`unsupported previous skill index: ${indexPath}`);
+  const hasIndexCommitment = existingKit?.skill_index_hash_version === 1
+    && typeof existingKit?.skill_index_hash === "string";
+  if (hasIndexCommitment) {
+    const indexHash = crypto.createHash("sha256").update(bytes).digest("hex");
+    if (indexHash !== existingKit.skill_index_hash) {
+      throw new Error("previous skill index does not match kit commitment");
+    }
+    if (
+      existingKit.skill_plan_hash_version !== 2
+      || computeSkillPlanHash(payload, path.dirname(agentFlowDir), false) !== existingKit.skill_plan_hash
+    ) {
+      throw new Error("previous skill plan does not match kit commitment");
+    }
+    if (
+      ![1, SKILL_LINKS_COMMITMENT_VERSION].includes(existingKit.skill_links_commitment_version)
+      || skillLinksCommitment(
+        existingKit.skill_plan_hash,
+        payload.links,
+        existingKit.skill_links_commitment_version,
+      )
+        !== existingKit.skill_links_commitment
+    ) {
+      throw new Error("previous skill links do not match kit commitment");
+    }
+  } else {
+    payload = { ...payload, links: [] };
+  }
+  return {
+    payload,
+    bytes,
+    hash: crypto.createHash("sha256").update(bytes).digest("hex"),
+    identity: snapshot.metadata,
+  };
 }
 
 function beginSkillInstallTransaction(root, agentFlowDir, previousIndexRecord, lockToken) {
@@ -4210,7 +4315,11 @@ function beginSkillInstallTransaction(root, agentFlowDir, previousIndexRecord, l
     journal.stage = "skills-moved";
     writeInstallJournal(journalPath, journal);
     if (process.env.AGENT_FLOW_TEST_CRASH_AFTER_SKILLS_MOVE === "1") process.exit(86);
-    const backupIndex = fs.readFileSync(path.join(backup, "index.json"));
+    const backupIndex = readRegularFileSnapshotNoFollow(
+      path.join(backup, "index.json"),
+      agentFlowDir,
+      "backup skill index",
+    ).bytes;
     const backupHash = crypto.createHash("sha256").update(backupIndex).digest("hex");
     if (backupHash !== previousIndexRecord.hash || !backupIndex.equals(previousIndexRecord.bytes)) {
       throw new Error("previous skill index changed after authentication; backup was not adopted");
@@ -4246,7 +4355,7 @@ function hostPathState(pathName) {
     return { kind: "symlink", target: fs.readlinkSync(pathName), filesystem_identity: filesystemIdentity };
   }
   if (stat.isDirectory()) {
-    return { kind: "directory", tree_hash: hashSkillTree(pathName), filesystem_identity: filesystemIdentity };
+    return { kind: "directory", tree_hash: hashDirectoryTree(pathName), filesystem_identity: filesystemIdentity };
   }
   if (stat.isFile()) {
     return {
@@ -5111,13 +5220,22 @@ function commitSkillInstallTransaction(transaction) {
   sealManagedInstallMutations(transaction);
   const indexPath = path.join(transaction.live, "index.json");
   if (!fs.existsSync(indexPath)) throw new Error("skill install transaction produced no index");
-  const marker = fs.readFileSync(transaction.marker, "utf8").trim();
+  const marker = readRegularFileSnapshotNoFollow(
+    transaction.marker,
+    path.dirname(transaction.transactionRoot),
+    "skill transaction marker",
+  ).bytes.toString("utf8").trim();
   if (marker !== transaction.token) throw new Error("skill install transaction ownership changed");
   verifyCommittedHostMutations(transaction.root, transaction.journal);
   verifyCommittedManagedMutations(transaction.root, transaction.journal);
   transaction.journal.stage = "committed";
+  const committedIndex = readRegularFileSnapshotNoFollow(
+    indexPath,
+    path.dirname(transaction.transactionRoot),
+    "committed skill index",
+  ).bytes;
   transaction.journal.committed_index_hash = crypto.createHash("sha256")
-    .update(fs.readFileSync(indexPath))
+    .update(committedIndex)
     .digest("hex");
   writeInstallJournal(transaction.journalPath, transaction.journal);
   cleanupCommittedHostOriginals(
@@ -5145,7 +5263,11 @@ function rollbackSkillInstallTransaction(transaction) {
     hostRollbackError = error;
   }
   const liveMarker = fs.existsSync(transaction.marker)
-    ? fs.readFileSync(transaction.marker, "utf8").trim()
+    ? readRegularFileSnapshotNoFollow(
+      transaction.marker,
+      path.dirname(transaction.transactionRoot),
+      "skill transaction marker",
+    ).bytes.toString("utf8").trim()
     : null;
   if (fs.existsSync(transaction.live)) {
     if (liveMarker !== transaction.token) {
@@ -5154,12 +5276,30 @@ function rollbackSkillInstallTransaction(transaction) {
     fs.rmSync(transaction.live, { recursive: true, force: true });
   }
   if (fs.existsSync(transaction.backup)) {
-    const backupIndex = fs.readFileSync(path.join(transaction.backup, "index.json"));
+    const backupIndex = readRegularFileSnapshotNoFollow(
+      path.join(transaction.backup, "index.json"),
+      path.dirname(transaction.transactionRoot),
+      "backup skill index",
+    ).bytes;
     const hash = crypto.createHash("sha256").update(backupIndex).digest("hex");
     if (hash !== transaction.previous?.hash || !backupIndex.equals(transaction.previous.bytes)) {
       throw new Error("cannot restore unauthenticated skill index backup");
     }
     fs.renameSync(transaction.backup, transaction.live);
+    const restoredIndex = readRegularFileSnapshotNoFollow(
+      path.join(transaction.live, "index.json"),
+      path.dirname(transaction.transactionRoot),
+      "restored skill index",
+    ).bytes;
+    if (!restoredIndex.equals(transaction.previous.bytes)) {
+      throw new Error("skill transaction restore mismatch");
+    }
+  }
+  if (!managedRollbackError) {
+    assertInterruptedSkillIndexCommitment(
+      path.dirname(transaction.transactionRoot),
+      transaction.previous?.hash,
+    );
   }
   if (hostRollbackError || managedRollbackError) {
     transaction.journal.stage = "rollback-blocked";
@@ -5261,6 +5401,50 @@ function validateJournalHostState(state, backup = null, requireIdentity = false)
   return false;
 }
 
+function interruptedManagedKitUpgradeIsAuthenticated(
+  root,
+  agentFlowDir,
+  journal,
+  kit,
+) {
+  if (
+    journal.stage === "committed"
+    || kit?.skill_index_hash_version !== 1
+  ) {
+    return false;
+  }
+  const kitPath = path.join(agentFlowDir, "kit.json");
+  const kitRelative = path.relative(root, kitPath);
+  const operation = journal.managed_mutations.find((candidate) => (
+    candidate.path === kitRelative
+  ));
+  if (
+    !operation?.after
+    || operation.pending
+    || !sameManagedPathState(managedPathState(kitPath), operation.after)
+  ) {
+    return false;
+  }
+  const indexBytes = readRegularFileSnapshotNoFollow(
+    path.join(agentFlowDir, "skills", "index.json"),
+    agentFlowDir,
+    "interrupted upgraded skill index",
+  ).bytes;
+  return crypto.createHash("sha256").update(indexBytes).digest("hex")
+    === kit.skill_index_hash;
+}
+
+function assertInterruptedSkillIndexCommitment(agentFlowDir, expectedHash) {
+  const kit = readExistingKit(agentFlowDir);
+  if (
+    kit?.skill_index_hash_version === 1
+    && kit.skill_index_hash !== expectedHash
+  ) {
+    throw new Error("interrupted skill transaction index commitment changed");
+  }
+}
+
+
 function validateInterruptedInstallJournal(root, agentFlowDir, transactionRoot, journal, recoveryLockToken) {
   if (
     ![3, 4, 5].includes(journal?.version)
@@ -5273,6 +5457,10 @@ function validateInterruptedInstallJournal(root, agentFlowDir, transactionRoot, 
     || !Array.isArray(journal.managed_mutations)
     || !Array.isArray(journal.host_mutations)
     || pathHasSymlink(root, transactionRoot)
+    || (
+      journal.stage === "committed"
+      && !/^[0-9a-f]{64}$/.test(String(journal.committed_index_hash || ""))
+    )
   ) {
     throw new Error(`invalid interrupted skill transaction: ${transactionRoot}`);
   }
@@ -5409,37 +5597,139 @@ function validateInterruptedInstallJournal(root, agentFlowDir, transactionRoot, 
   }
   if (journal.had_live_skills) {
     const kit = readExistingKit(agentFlowDir);
+    const expectedIndexHash = journal.stage === "committed"
+      ? journal.committed_index_hash
+      : journal.previous_index_hash;
     if (
       kit?.skill_index_hash_version === 1
-      && kit.skill_index_hash !== journal.previous_index_hash
+      && kit.skill_index_hash !== expectedIndexHash
+      && !interruptedManagedKitUpgradeIsAuthenticated(
+        root,
+        agentFlowDir,
+        journal,
+        kit,
+      )
     ) {
       throw new Error("interrupted skill transaction index commitment changed");
     }
   }
 }
 
-function readRegularJsonNoFollow(pathName) {
+function sameJsonAuthorityIdentity(left, right) {
+  return left.dev === right.dev
+    && left.ino === right.ino
+    && left.mode === right.mode
+    && left.nlink === right.nlink
+    && left.size === right.size
+    && left.mtimeNs === right.mtimeNs
+    && left.ctimeNs === right.ctimeNs;
+}
+
+function pinJsonAuthorityDirectories(authorityRoot, pathName) {
+  const authority = path.resolve(authorityRoot);
+  const target = path.resolve(pathName);
+  ensureChildPath(authority, target);
+  const parts = path.relative(authority, target).split(path.sep).filter(Boolean);
+  const directoryParts = parts.slice(0, -1);
+  const paths = [authority];
+  let cursor = authority;
+  for (const part of directoryParts) {
+    cursor = path.join(cursor, part);
+    paths.push(cursor);
+  }
+  return paths.map((directoryPath) => {
+    const metadata = fs.lstatSync(directoryPath, { bigint: true });
+    if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+      throw new Error(`unsafe JSON authority directory: ${directoryPath}`);
+    }
+    return { path: directoryPath, metadata };
+  });
+}
+
+function assertJsonAuthorityDirectories(directories, label = "JSON authority") {
+  for (const directory of directories) {
+    const current = fs.lstatSync(directory.path, { bigint: true });
+    if (
+      !current.isDirectory()
+      || !sameJsonAuthorityIdentity(directory.metadata, current)
+    ) {
+      throw new Error(`${label} directory changed while reading: ${directory.path}`);
+    }
+  }
+}
+
+function readRegularFileSnapshotNoFollow(
+  pathName,
+  authorityRoot,
+  label = "JSON authority",
+) {
+  const directories = pinJsonAuthorityDirectories(authorityRoot, pathName);
+  assertJsonAuthorityDirectories(directories, label);
+  const initial = fs.lstatSync(pathName, { bigint: true });
+  if (
+    initial.isSymbolicLink()
+    || !initial.isFile()
+    || initial.nlink !== 1n
+  ) {
+    throw new Error(`unsafe ${label} file: ${pathName}`);
+  }
   const noFollow = fs.constants.O_NOFOLLOW || 0;
-  const descriptor = fs.openSync(pathName, fs.constants.O_RDONLY | noFollow);
+  const nonBlocking = fs.constants.O_NONBLOCK || 0;
+  const descriptor = fs.openSync(
+    pathName,
+    fs.constants.O_RDONLY | noFollow | nonBlocking,
+  );
   try {
-    const before = fs.fstatSync(descriptor);
-    if (!before.isFile() || before.nlink !== 1) {
-      throw new Error(`unsafe JSON authority file: ${pathName}`);
+    const heldAuthorityPath = process.env.AGENT_FLOW_TEST_HOLD_JSON_AUTH_PATH;
+    if (
+      !heldAuthorityPath
+      || path.resolve(pathName) === path.resolve(heldAuthorityPath)
+    ) {
+      holdInstallForTest(
+        "AGENT_FLOW_TEST_HOLD_AFTER_JSON_AUTH_OPEN_MS",
+        "json-authority-opened",
+      );
+    }
+    const before = fs.fstatSync(descriptor, { bigint: true });
+    assertJsonAuthorityDirectories(directories, label);
+    if (
+      !before.isFile()
+      || before.nlink !== 1n
+      || !sameJsonAuthorityIdentity(initial, before)
+    ) {
+      throw new Error(`${label} file changed while reading: ${pathName}`);
     }
     const bytes = fs.readFileSync(descriptor);
-    const after = fs.fstatSync(descriptor);
+    const after = fs.fstatSync(descriptor, { bigint: true });
+    const current = fs.lstatSync(pathName, { bigint: true });
+    assertJsonAuthorityDirectories(directories, label);
     if (
-      before.dev !== after.dev
-      || before.ino !== after.ino
-      || before.size !== after.size
-      || before.mtimeMs !== after.mtimeMs
+      !after.isFile()
+      || !current.isFile()
+      || after.nlink !== 1n
+      || current.nlink !== 1n
+      || !sameJsonAuthorityIdentity(before, after)
+      || !sameJsonAuthorityIdentity(after, current)
     ) {
-      throw new Error(`JSON authority file changed while reading: ${pathName}`);
+      throw new Error(`${label} file changed while reading: ${pathName}`);
     }
-    return JSON.parse(bytes.toString("utf8"));
+    return { bytes, metadata: before };
   } finally {
     fs.closeSync(descriptor);
   }
+}
+
+function readRegularJsonNoFollow(
+  pathName,
+  authorityRoot,
+  label = "JSON authority",
+) {
+  const snapshot = readRegularFileSnapshotNoFollow(
+    pathName,
+    authorityRoot,
+    label,
+  );
+  return JSON.parse(snapshot.bytes.toString("utf8"));
 }
 
 function recoverInterruptedSkillTransaction(root, agentFlowDir, recoveryLockToken) {
@@ -5450,7 +5740,7 @@ function recoverInterruptedSkillTransaction(root, agentFlowDir, recoveryLockToke
     throw new Error(`invalid interrupted skill transaction: ${transactionRoot}`);
   }
   assertNoSymlinkComponents(transactionRoot, journalPath);
-  const journal = readRegularJsonNoFollow(journalPath);
+  const journal = readRegularJsonNoFollow(journalPath, agentFlowDir);
   validateInterruptedInstallJournal(root, agentFlowDir, transactionRoot, journal, recoveryLockToken);
   const live = path.join(agentFlowDir, "skills");
   const backup = path.join(transactionRoot, "skills-backup");
@@ -5458,6 +5748,12 @@ function recoverInterruptedSkillTransaction(root, agentFlowDir, recoveryLockToke
   if (journal.stage === "rollback-blocked") {
     rollbackRecordedManagedMutations(root, transactionRoot, journal);
     rollbackRecordedHostMutations(root, transactionRoot, journal);
+    if (journal.had_live_skills) {
+      assertInterruptedSkillIndexCommitment(
+        agentFlowDir,
+        journal.previous_index_hash,
+      );
+    }
     if (!journal.had_live_skills) {
       if (fs.existsSync(live)) {
         throw new Error("blocked initial skill transaction unexpectedly has a live directory");
@@ -5466,7 +5762,11 @@ function recoverInterruptedSkillTransaction(root, agentFlowDir, recoveryLockToke
       return;
     }
     const authenticatedBytes = Buffer.from(String(journal.previous_index_bytes || ""), "base64");
-    const liveIndex = fs.readFileSync(path.join(live, "index.json"));
+    const liveIndex = readRegularFileSnapshotNoFollow(
+      path.join(live, "index.json"),
+      agentFlowDir,
+      "live skill index",
+    ).bytes;
     if (!liveIndex.equals(authenticatedBytes)) {
       throw new Error("blocked skill transaction live index is not authenticated");
     }
@@ -5474,14 +5774,26 @@ function recoverInterruptedSkillTransaction(root, agentFlowDir, recoveryLockToke
     return;
   }
   if (journal.stage === "committed") {
-    if (!fs.existsSync(path.join(live, "index.json"))) {
-      throw new Error("committed skill transaction has no live index");
+    const committedIndex = readRegularFileSnapshotNoFollow(
+      path.join(live, "index.json"),
+      agentFlowDir,
+      "committed skill index",
+    ).bytes;
+    const committedHash = crypto.createHash("sha256").update(committedIndex).digest("hex");
+    if (committedHash !== journal.committed_index_hash) {
+      throw new Error("committed skill transaction index is not authenticated");
     }
     verifyCommittedHostMutations(root, journal, false);
     verifyCommittedManagedMutations(root, journal);
     cleanupCommittedHostOriginals(root, transactionRoot, journal);
     if (fs.existsSync(marker)) {
-      if (fs.readFileSync(marker, "utf8").trim() !== journal.token) {
+      if (
+        readRegularFileSnapshotNoFollow(
+          marker,
+          agentFlowDir,
+          "skill transaction marker",
+        ).bytes.toString("utf8").trim() !== journal.token
+      ) {
         throw new Error("committed skill transaction marker is not owned");
       }
       fs.unlinkSync(marker);
@@ -5521,7 +5833,13 @@ function recoverInterruptedSkillTransaction(root, agentFlowDir, recoveryLockToke
     rollbackRecordedManagedMutations(root, transactionRoot, journal);
     rollbackRecordedHostMutations(root, transactionRoot, journal);
     if (fs.existsSync(live)) {
-      const liveToken = fs.existsSync(marker) ? fs.readFileSync(marker, "utf8").trim() : null;
+      const liveToken = fs.existsSync(marker)
+        ? readRegularFileSnapshotNoFollow(
+          marker,
+          agentFlowDir,
+          "skill transaction marker",
+        ).bytes.toString("utf8").trim()
+        : null;
       if (liveToken !== journal.token) {
         throw new Error("interrupted initial skill transaction live directory is not owned");
       }
@@ -5537,21 +5855,39 @@ function recoverInterruptedSkillTransaction(root, agentFlowDir, recoveryLockToke
   }
   rollbackRecordedManagedMutations(root, transactionRoot, journal);
   rollbackRecordedHostMutations(root, transactionRoot, journal);
-  const backupIndex = fs.readFileSync(path.join(backup, "index.json"));
+  assertInterruptedSkillIndexCommitment(
+    agentFlowDir,
+    journal.previous_index_hash,
+  );
+  const backupIndex = readRegularFileSnapshotNoFollow(
+    path.join(backup, "index.json"),
+    agentFlowDir,
+    "backup skill index",
+  ).bytes;
   const authenticatedBytes = Buffer.from(String(journal.previous_index_bytes || ""), "base64");
   const backupHash = crypto.createHash("sha256").update(backupIndex).digest("hex");
   if (backupHash !== journal.previous_index_hash || !backupIndex.equals(authenticatedBytes)) {
     throw new Error("interrupted skill transaction backup is not authenticated");
   }
   if (fs.existsSync(live)) {
-    const liveToken = fs.existsSync(marker) ? fs.readFileSync(marker, "utf8").trim() : null;
+    const liveToken = fs.existsSync(marker)
+      ? readRegularFileSnapshotNoFollow(
+        marker,
+        agentFlowDir,
+        "skill transaction marker",
+      ).bytes.toString("utf8").trim()
+      : null;
     if (liveToken !== journal.token) {
       throw new Error("interrupted skill transaction live directory is not owned");
     }
     fs.rmSync(live, { recursive: true, force: true });
   }
   fs.renameSync(backup, live);
-  const restored = fs.readFileSync(path.join(live, "index.json"));
+  const restored = readRegularFileSnapshotNoFollow(
+    path.join(live, "index.json"),
+    agentFlowDir,
+    "restored skill index",
+  ).bytes;
   if (!restored.equals(authenticatedBytes)) throw new Error("interrupted skill transaction restore mismatch");
   journal.stage = "recovered";
   writeInstallJournal(journalPath, journal);
@@ -5629,7 +5965,24 @@ function catalogTreeEntries(root, current) {
   return result;
 }
 
+function readBundledSkillCompatibility(agentFlowDir) {
+  const metadataPath = path.join(agentFlowDir, "skills", "compatibility.json");
+  let payload;
+  try {
+    payload = readRegularJsonNoFollow(metadataPath, agentFlowDir);
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw new Error(`invalid skill compatibility metadata: ${metadataPath}`, { cause: error });
+  }
+  try {
+    return normalizeSkillCompatibility(payload);
+  } catch (error) {
+    throw new Error(`invalid skill compatibility metadata: ${error.message}`, { cause: error });
+  }
+}
+
 function selectProjectSkills(root, agentFlowDir, installSelection = null, sourcePlan = null) {
+  const compatibility = readBundledSkillCompatibility(agentFlowDir);
   const discovered = [
     ...discoverSkills(path.join(agentFlowDir, "local-skills"), "local", root, PROFILE_MANAGED_HOST_ONLY_SKILLS),
     ...discoverProjectSkills(root),
@@ -5637,7 +5990,7 @@ function selectProjectSkills(root, agentFlowDir, installSelection = null, source
       path.join(agentFlowDir, "skills"),
       "bundled",
       root,
-      new Set(["index.json", ...PROFILE_MANAGED_HOST_ONLY_SKILLS]),
+      new Set(["compatibility.json", "index.json", ...PROFILE_MANAGED_HOST_ONLY_SKILLS]),
     ),
   ];
   const byName = new Map();
@@ -5649,13 +6002,28 @@ function selectProjectSkills(root, agentFlowDir, installSelection = null, source
     }
     warnings.push(...skill.warnings);
   }
-  const allowed = installSelection?.skillNames || null;
+  const requestedAllowed = installSelection?.skillNames || null;
+  const allowed = requestedAllowed && compatibility
+    ? canonicalizeSkillCompatibilitySelection(compatibility, requestedAllowed)
+    : requestedAllowed;
   const sourceByName = new Map((sourcePlan?.entries || []).map((entry) => [entry.name, entry]));
+  if (compatibility) {
+    validateConcreteSkillCompatibility(compatibility, [...byName.keys()]);
+  }
   const skills = [...byName.values()]
     .filter((skill) => !allowed || allowed.has(skill.name))
     .map((skill) => {
       const resolved = sourceByName.get(skill.name);
-      if (!resolved) return { ...skill, tree_hash: hashSkillTree(path.dirname(path.join(root, skill.path))) };
+      if (!resolved) {
+        return {
+          ...skill,
+          tree_hash: hashSkillTree(path.dirname(path.join(root, skill.path)), {
+            authorityRoot: root,
+            expectedDocumentHash: skill._document_hash,
+            skillName: skill.name,
+          }),
+        };
+      }
       return {
         ...skill,
         source: resolved.source_kind,
@@ -5690,9 +6058,15 @@ function selectProjectSkills(root, agentFlowDir, installSelection = null, source
       conditional_skills: installSelection?.conditionalSkills || {},
       profile_routing: installSelection?.profileRouting || { version: 1, profiles: {}, escalations: {} },
   };
-  const indexedSkills = skills.map(({ priority, warnings: _warnings, ...skill }) => skill);
+  const indexedSkills = skills.map(({
+    priority,
+    warnings: _warnings,
+    _document_hash: _documentHash,
+    ...skill
+  }) => skill);
   const revision = crypto.createHash("sha256").update(JSON.stringify({
     selection,
+    ...(compatibility ? { compatibility } : {}),
     skills: indexedSkills.map((skill) => ({
       name: skill.name,
       source: skill.source,
@@ -5710,6 +6084,7 @@ function selectProjectSkills(root, agentFlowDir, installSelection = null, source
     selection: {
       ...selection,
     },
+    ...(compatibility ? { compatibility } : {}),
     skills: indexedSkills,
     conflicts,
     warnings,
@@ -5736,7 +6111,12 @@ function computeSkillPlanHash(index, root, verifyTrees = false) {
     if (typeof skill.tree_hash !== "string" || !/^[0-9a-f]{64}$/.test(skill.tree_hash)) {
       throw new Error(`installed skill has no whole-tree hash: ${skill.name}`);
     }
-    const liveHash = verifyTrees ? hashSkillTree(path.dirname(skillPath)) : skill.tree_hash;
+    const liveHash = verifyTrees
+      ? hashSkillTree(path.dirname(skillPath), {
+          authorityRoot: root,
+          skillName: skill.name,
+        })
+      : skill.tree_hash;
     if (verifyTrees && skill.tree_hash !== liveHash) {
       throw new Error(`installed skill snapshot changed: ${skill.name}`);
     }
@@ -5762,6 +6142,12 @@ function computeSkillPlanHash(index, root, verifyTrees = false) {
     }
     return record;
   }).sort((left, right) => compareCodePoints(left[0], right[0]));
+  const compatibility = Object.hasOwn(index || {}, "compatibility")
+    ? validateConcreteSkillCompatibility(
+      index.compatibility,
+      skills.map((skill) => skill[0]),
+    )
+    : null;
   const selection = index?.selection || {};
   const normalized = {
     profiles: [...(selection.profiles || [])].sort(compareCodePoints),
@@ -5780,6 +6166,7 @@ function computeSkillPlanHash(index, root, verifyTrees = false) {
     ),
     conditional_skills: selection.conditional_skills || {},
     profile_routing: selection.profile_routing || {},
+    ...(compatibility ? { compatibility } : {}),
     skills,
   };
   return crypto.createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
@@ -5900,11 +6287,10 @@ function discoverSkills(baseDir, source, root, ignoredNames = new Set(), allowed
     if (allowedNames && !allowedNames.has(entry.name)) {
       continue;
     }
-    const skillPath = path.join(baseDir, entry.name, "SKILL.md");
-    if (!fs.existsSync(skillPath)) {
-      continue;
-    }
-    const text = fs.readFileSync(skillPath, "utf8");
+    const skillRoot = path.join(baseDir, entry.name);
+    const document = readSkillDocument(skillRoot, entry.name);
+    const skillPath = document.path;
+    const text = document.text;
     const metadata = parseSkillMetadata(text, entry.name);
     if (ignoredNames.has(metadata.name)) {
       continue;
@@ -5937,6 +6323,7 @@ function discoverSkills(baseDir, source, root, ignoredNames = new Set(), allowed
       taskTerms: metadata.taskTerms,
       pathGlobs: metadata.pathGlobs,
       hash: crypto.createHash("sha256").update(text).digest("hex"),
+      _document_hash: document.sha256,
       priority,
       warnings: metadata.warnings.map((message) => `${relativePath}: ${message}`),
     });
@@ -6579,7 +6966,13 @@ function localSkillDocsFromIndex(root) {
   }
   let payload;
   try {
-    payload = JSON.parse(fs.readFileSync(indexPath, "utf8"));
+    payload = JSON.parse(
+      readRegularFileSnapshotNoFollow(
+        indexPath,
+        path.join(root, ".agent-flow"),
+        "project-local skill index",
+      ).bytes.toString("utf8"),
+    );
   } catch (_error) {
     return [];
   }
