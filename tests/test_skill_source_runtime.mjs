@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   discoverAutomaticExternalSkillNames,
+  loadSkillSourcePolicy,
   mergeInstallSelectionWithPrevious,
   resolveInstallSelection,
   resolveProfileSkillSources,
@@ -137,6 +138,33 @@ test("active host wins deterministically for Claude Codex and OMP", () => {
     assert.equal(plan.entries[0].source_host, host);
     assert.equal(plan.entries[0].automatic_on_demand, true);
   }
+});
+
+test("bundled hardlinked skill documents remain readable", () => {
+  const root = tempRoot();
+  const kitRoot = path.join(root, "kit");
+  const project = path.join(root, "project");
+  const home = path.join(root, "home");
+  const sourceRoot = writeSkill(path.join(root, "package-store"), "bundled-hardlink");
+  const bundledRoot = path.join(kitRoot, "skills", "bundled-hardlink");
+  fs.mkdirSync(bundledRoot, { recursive: true });
+  fs.linkSync(
+    path.join(sourceRoot, "SKILL.md"),
+    path.join(bundledRoot, "SKILL.md"),
+  );
+  fs.mkdirSync(project, { recursive: true });
+
+  const plan = resolveProfileSkillSources({
+    skillNames: new Set(["bundled-hardlink"]),
+    explicitSkillNames: ["bundled-hardlink"],
+    kitRoot,
+    projectRoot: project,
+    projectSkillsRoot: path.join(project, ".agent-flow", "skills"),
+    home,
+    policy: loadSkillSourcePolicy(path.join(KIT_ROOT, "skills", "source-policy.yaml")),
+  });
+
+  assert.deepEqual(plan.entries.map((entry) => entry.source_kind), ["bundled"]);
 });
 
 test("explicit active host overrides ambient host markers", () => {
