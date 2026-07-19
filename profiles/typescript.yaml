@@ -30,8 +30,8 @@ review_angles:
   - id: io-safety
     prompt: templates/_shared/review/io-safety.md
 skills:
-  install:
-    - typescript-development-guide
+  capabilities:
+    - lang.typescript
   required_review:
     - group: profile
       skills: [typescript-development-guide]

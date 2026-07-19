@@ -30,10 +30,10 @@ review_angles:
   - id: main-thread
     prompt: templates/_shared/review/main-thread.md
 skills:
-  install:
-    - ios-app-shell-error-handling
-    - ios-clean-architecture
-    - ios-clean-presentation-architecture
+  capabilities:
+    - ios.app-shell-error-handling
+    - ios.architecture.clean
+    - ios.presentation.clean
   required_review:
     - group: profile
       skills: [ios-clean-architecture, ios-clean-presentation-architecture]

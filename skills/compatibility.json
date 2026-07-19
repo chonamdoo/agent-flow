@@ -135,6 +135,24 @@
       "capabilities": [
         "lang.python"
       ]
+    },
+    {
+      "canonical": "ios-app-shell-error-handling",
+      "capabilities": [
+        "ios.app-shell-error-handling"
+      ]
+    },
+    {
+      "canonical": "ios-clean-architecture",
+      "capabilities": [
+        "ios.architecture.clean"
+      ]
+    },
+    {
+      "canonical": "ios-clean-presentation-architecture",
+      "capabilities": [
+        "ios.presentation.clean"
+      ]
     }
   ]
 }
