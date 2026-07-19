@@ -110,6 +110,36 @@ class SkillDocumentResolutionError(SkillPlanSnapshotError, SkillResolutionError)
         )
 
 
+class HostExposureError(SkillPlanSnapshotError):
+    """host skill 노출을 신뢰할 수 없을 때 구조화된 reason과 함께 발생한다."""
+
+    def __init__(self, reason: str, message: str, **details: object) -> None:
+        super().__init__(f"host_exposure_error: {reason}: {message}")
+        self.reason = reason
+        self.details = dict(details)
+
+
+def assert_active_host_matches_catalog(
+    index: dict[str, Any], active_host: str | None
+) -> None:
+    """현재 active host가 설치된 catalog host와 다르면 구조화 오류를 낸다.
+
+    catalog가 host-neutral이거나 active host를 알 수 없으면 no-op이다(과차단 방지).
+    """
+    catalog_active_host = index.get("catalog_active_host") if isinstance(index, dict) else None
+    if not isinstance(catalog_active_host, str) or not catalog_active_host:
+        return
+    if not isinstance(active_host, str) or not active_host:
+        return
+    if active_host != catalog_active_host:
+        raise HostExposureError(
+            "active_host_mismatch",
+            f"active host {active_host!r} does not match installed catalog host "
+            f"{catalog_active_host!r}",
+            active_host=active_host,
+            catalog_active_host=catalog_active_host,
+        )
+
 
 
 def indexed_external_exposure_skill_names(
@@ -602,9 +632,11 @@ def assert_committed_skill_host_links_applied(
         snapshot = _skill_host_destination_snapshot(destination)
         if link["status"] in {"removed-stale-linked", "removed-stale-copied"}:
             if snapshot["kind"] != "absent":
-                raise SkillPlanSnapshotError(
-                    "blocked: committed stale skill link still exists: "
-                    f"{link['path']}"
+                raise HostExposureError(
+                    "dangling_stale_link",
+                    f"committed stale skill link still exists: {link['path']}",
+                    path=link["path"],
+                    host=link["host"],
                 )
             continue
 
@@ -617,9 +649,11 @@ def assert_committed_skill_host_links_applied(
             None,
         )
         if not isinstance(skill, dict) or not isinstance(skill.get("path"), str):
-            raise SkillPlanSnapshotError(
-                "blocked: committed skill link has no indexed source: "
-                f"{link['name']}"
+            raise HostExposureError(
+                "canonical_source_missing",
+                f"committed skill link has no indexed source: {link['name']}",
+                name=link["name"],
+                host=link["host"],
             )
         source = _installed_skill_path(root, skill).parent
         source_tree_hash = _require_tree_hash(skill.get("tree_hash"), link["name"])
@@ -642,9 +676,12 @@ def assert_committed_skill_host_links_applied(
                 or snapshot.get("filesystem_identity")
                 != link["filesystem_identity"]
             ):
-                raise SkillPlanSnapshotError(
-                    "blocked: committed skill symlink is not applied: "
-                    f"{link['path']}"
+                raise HostExposureError(
+                    "exposure_missing" if snapshot["kind"] == "absent" else "unmanaged_conflict",
+                    f"committed skill symlink is not applied: {link['path']}",
+                    path=link["path"],
+                    host=link["host"],
+                    kind=snapshot["kind"],
                 )
             continue
         if (
@@ -655,9 +692,12 @@ def assert_committed_skill_host_links_applied(
             or snapshot.get("filesystem_identity")
             != link["filesystem_identity"]
         ):
-            raise SkillPlanSnapshotError(
-                "blocked: committed skill copy is not applied: "
-                f"{link['path']}"
+            raise HostExposureError(
+                "exposure_missing" if snapshot["kind"] == "absent" else "unmanaged_conflict",
+                f"committed skill copy is not applied: {link['path']}",
+                path=link["path"],
+                host=link["host"],
+                kind=snapshot["kind"],
             )
 
 
@@ -972,13 +1012,15 @@ def _authenticated_installed_skill_snapshot(
     kit_present = kit_path.exists() or kit_path.is_symlink()
     if not index_present:
         if kit_present:
-            raise SkillPlanSnapshotError(
-                "blocked: installed skill index is missing while kit metadata exists"
+            raise HostExposureError(
+                "install_missing",
+                "installed skill index is missing while kit metadata exists",
             )
         return None
     if not kit_present:
-        raise SkillPlanSnapshotError(
-            "blocked: installed kit metadata is missing while skill index exists"
+        raise HostExposureError(
+            "install_missing",
+            "installed kit metadata is missing while skill index exists",
         )
     index = _read_snapshot_json(index_root, index_path, "installed skill index")
     current_hash = compute_skill_plan_hash(index, index_root, verify_trees=True)
