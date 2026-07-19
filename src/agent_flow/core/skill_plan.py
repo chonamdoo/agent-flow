@@ -256,6 +256,11 @@ def canonical_skill_plan_bytes(
             raw_required_review.items(), key=lambda item: str(item[0])
         )
     }
+    provider_metadata = (
+        _canonical_runtime_skill_provider_metadata(index)
+        if "provider_registry" in index or "skill_providers" in index
+        else None
+    )
     normalized = {
         "profiles": sorted(_snapshot_strings(selection.get("profiles"))),
         "skill_profiles": sorted(_snapshot_strings(selection.get("skill_profiles"))),
@@ -285,6 +290,7 @@ def canonical_skill_plan_bytes(
             if compatibility is not None
             else {}
         ),
+        **(provider_metadata or {}),
         "skills": skills,
     }
     try:
@@ -1965,6 +1971,337 @@ def _javascript_array_index(key: str) -> int | None:
     return value
 
 
+_RUNTIME_PROVIDER_SOURCE_KINDS = frozenset(
+    {
+        "bundled",
+        "host-bootstrap",
+        "local",
+        "project",
+        "project-snapshot",
+        "shared",
+    }
+)
+
+
+def _runtime_provider_compatibility(value: object) -> dict[str, Any] | None:
+    if not _has_exact_keys(value, {"hosts", "profiles", "registry", "source_kinds"}):
+        return None
+    assert isinstance(value, dict)
+    registry_version = value["registry"]
+    if (
+        not isinstance(registry_version, (int, float))
+        or isinstance(registry_version, bool)
+        or registry_version != 1
+    ):
+        return None
+
+    def valid_selectors(entries: object) -> bool:
+        return (
+            isinstance(entries, list)
+            and bool(entries)
+            and all(
+                isinstance(entry, str)
+                and (
+                    entry == "*"
+                    or (
+                        is_portable_skill_name(entry)
+                        and _portable_casefold(entry) == entry
+                    )
+                )
+                for entry in entries
+            )
+            and len(set(entries)) == len(entries)
+        )
+
+    profiles = value["profiles"]
+    hosts = value["hosts"]
+    source_kinds = value["source_kinds"]
+    if not valid_selectors(profiles) or not valid_selectors(hosts):
+        return None
+    if (
+        not isinstance(source_kinds, list)
+        or not source_kinds
+        or any(
+            not isinstance(source_kind, str)
+            or source_kind not in _RUNTIME_PROVIDER_SOURCE_KINDS
+            for source_kind in source_kinds
+        )
+        or len(set(source_kinds)) != len(source_kinds)
+    ):
+        return None
+    return {
+        "registry": 1,
+        "profiles": list(profiles),
+        "hosts": list(hosts),
+        "source_kinds": list(source_kinds),
+    }
+
+
+def _is_runtime_provider_evidence(claim: dict[str, Any]) -> bool:
+    def safe_locator(value: object) -> bool:
+        return (
+            isinstance(value, str)
+            and bool(value)
+            and not any(
+                character.isspace()
+                or unicodedata.category(character) in {"Cc", "Cf", "Cs"}
+                for character in value
+            )
+        )
+
+    catalog_ref = claim["catalog_ref"]
+    catalog_hash = claim["catalog_hash"]
+    catalog_valid = (
+        catalog_ref is None
+        and catalog_hash is None
+    ) or (
+        safe_locator(catalog_ref)
+        and isinstance(catalog_hash, str)
+        and re.fullmatch(r"[0-9a-f]{64}", catalog_hash) is not None
+    )
+    source_host = claim["source_host"]
+    return (
+        catalog_valid
+        and isinstance(claim["content_hash_mode"], str)
+        and claim["content_hash_mode"] in {"observed", "pinned", "verified"}
+        and isinstance(claim["source_kind"], str)
+        and claim["source_kind"] in _RUNTIME_PROVIDER_SOURCE_KINDS
+        and (
+            source_host is None
+            or (
+                is_portable_skill_name(source_host)
+                and _portable_casefold(source_host) == source_host
+            )
+        )
+        and safe_locator(claim["source_locator"])
+    )
+
+
+def _runtime_skill_provider_index(
+    index: dict[str, Any],
+) -> dict[str, dict[str, Any]] | None:
+    registry_present = "provider_registry" in index
+    claims_present = "skill_providers" in index
+    if not registry_present and not claims_present:
+        return None
+    registry = index.get("provider_registry")
+    claims = index.get("skill_providers")
+    if (
+        not registry_present
+        or not claims_present
+        or not _has_exact_keys(registry, {"fingerprint", "quarantined", "version"})
+        or isinstance(registry["version"], bool)
+        or not isinstance(registry["version"], (int, float))
+        or registry["version"] != 1
+        or not isinstance(registry["fingerprint"], str)
+        or re.fullmatch(r"[0-9a-f]{64}", registry["fingerprint"]) is None
+        or not isinstance(registry["quarantined"], list)
+        or any(
+            not _is_runtime_provider_diagnostic(diagnostic)
+            for diagnostic in registry["quarantined"]
+        )
+        or not isinstance(claims, list)
+    ):
+        raise SkillPlanSnapshotError("blocked: invalid skill provider index")
+    fingerprint = registry["fingerprint"]
+    by_concrete_id: dict[str, dict[str, Any]] = {}
+    claim_fields = {
+        "adapter",
+        "aliases",
+        "compatibility",
+        "catalog_hash",
+        "catalog_ref",
+        "concrete_id",
+        "ownership",
+        "provenance_revision",
+        "content_hash_mode",
+        "provider_id",
+        "provider_version",
+        "registry_fingerprint",
+        "source",
+        "source_hash",
+        "source_host",
+        "source_kind",
+        "source_locator",
+        "status",
+        "trust_tier",
+    }
+    for claim in claims:
+        if not _has_exact_keys(claim, claim_fields):
+            raise SkillPlanSnapshotError("blocked: invalid skill provider claim")
+        aliases = claim["aliases"]
+        compatibility = _runtime_provider_compatibility(claim["compatibility"])
+        concrete_id_value = claim["concrete_id"]
+        provider_id_value = claim["provider_id"]
+        adapter_value = claim["adapter"]
+        source = claim["source"]
+        valid = (
+            is_portable_skill_name(concrete_id_value)
+            and _portable_casefold(concrete_id_value) == concrete_id_value
+            and is_portable_skill_name(provider_id_value)
+            and _portable_casefold(provider_id_value) == provider_id_value
+            and is_portable_skill_name(adapter_value)
+            and _portable_casefold(adapter_value) == adapter_value
+            and isinstance(claim["provider_version"], str)
+            and re.fullmatch(
+                r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?",
+                claim["provider_version"],
+            )
+            is not None
+            and isinstance(claim["trust_tier"], str)
+            and claim["trust_tier"]
+            in {"user", "project", "organization", "official"}
+            and isinstance(claim["ownership"], str)
+            and claim["ownership"]
+            in {"user", "project", "organization", "upstream"}
+            and (
+                claim["provenance_revision"] is None
+                or (
+                    isinstance(claim["provenance_revision"], str)
+                    and re.fullmatch(
+                        r"[0-9a-f]{40}",
+                        claim["provenance_revision"],
+                    )
+                    is not None
+                )
+            )
+            and isinstance(source, str)
+            and bool(source)
+            and not any(
+                character.isspace()
+                or unicodedata.category(character) in {"Cc", "Cf", "Cs"}
+                for character in source
+            )
+            and isinstance(claim["source_hash"], str)
+            and re.fullmatch(r"[0-9a-f]{64}", claim["source_hash"]) is not None
+            and _is_runtime_provider_evidence(claim)
+            and claim["status"]
+            == ("observed" if claim["content_hash_mode"] == "observed" else "verified")
+            and claim["registry_fingerprint"] == fingerprint
+            and compatibility is not None
+            and isinstance(aliases, list)
+            and all(
+                is_portable_skill_name(alias)
+                and _portable_casefold(alias) == alias
+                for alias in aliases
+            )
+            and len(set(aliases)) == len(aliases)
+            and concrete_id_value not in aliases
+        )
+        if not valid:
+            raise SkillPlanSnapshotError("blocked: invalid skill provider claim")
+        concrete_id = concrete_id_value
+        if concrete_id in by_concrete_id:
+            raise SkillPlanSnapshotError(
+                f"blocked: duplicate skill provider claim: {concrete_id}"
+            )
+        by_concrete_id[concrete_id] = {
+            "id": provider_id_value,
+            "version": claim["provider_version"],
+            "trust_tier": claim["trust_tier"],
+            "ownership": claim["ownership"],
+            "provenance_revision": claim["provenance_revision"],
+            "source": source,
+            "adapter": adapter_value,
+            "source_hash": claim["source_hash"],
+            "source_host": claim["source_host"],
+            "source_kind": claim["source_kind"],
+            "source_locator": claim["source_locator"],
+            "content_hash_mode": claim["content_hash_mode"],
+            "catalog_ref": claim["catalog_ref"],
+            "catalog_hash": claim["catalog_hash"],
+            "status": claim["status"],
+            "registry_fingerprint": fingerprint,
+            "compatibility": compatibility,
+        }
+    return by_concrete_id
+def _canonical_runtime_skill_provider_metadata(
+    index: dict[str, Any],
+) -> dict[str, Any] | None:
+    if _runtime_skill_provider_index(index) is None:
+        return None
+    registry = index["provider_registry"]
+    claims = index["skill_providers"]
+    assert isinstance(registry, dict)
+    assert isinstance(claims, list)
+    normalized_claims = []
+    for claim in claims:
+        compatibility = _runtime_provider_compatibility(claim["compatibility"])
+        assert compatibility is not None
+        normalized_claims.append(
+            {
+                **claim,
+                "aliases": list(claim["aliases"]),
+                "compatibility": compatibility,
+            }
+        )
+    normalized_claims.sort(
+        key=lambda claim: (claim["concrete_id"], claim["provider_id"])
+    )
+    return {
+        "provider_registry": {
+            "version": 1,
+            "fingerprint": registry["fingerprint"],
+            "quarantined": registry["quarantined"],
+        },
+        "skill_providers": normalized_claims,
+    }
+
+
+
+
+def _has_exact_keys(value: object, expected: set[str]) -> bool:
+    return isinstance(value, dict) and set(value) == expected
+
+
+def _is_runtime_provider_diagnostic(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    expected = {
+        "detail",
+        "metadata_path",
+        "provider_id",
+        "reason",
+        "repairable",
+    }
+    if "concrete_id" in value:
+        expected.add("concrete_id")
+    if set(value) != expected:
+        return False
+
+    def valid_name(name: object) -> bool:
+        return (
+            name is None
+            or (
+                is_portable_skill_name(name)
+                and _portable_casefold(name) == name
+            )
+        )
+
+    def safe_text(text: object) -> bool:
+        return (
+            isinstance(text, str)
+            and bool(text)
+            and not any(
+                unicodedata.category(character) in {"Cc", "Cf", "Cs"}
+                for character in text
+            )
+        )
+
+    return (
+        is_portable_skill_name(value["reason"])
+        and _portable_casefold(value["reason"]) == value["reason"]
+        and valid_name(value["provider_id"])
+        and (
+            "concrete_id" not in value
+            or valid_name(value["concrete_id"])
+        )
+        and safe_text(value["detail"])
+        and safe_text(value["metadata_path"])
+        and isinstance(value["repairable"], bool)
+    )
+
+
 def resolve_runtime_skill_plan(
     index: dict[str, Any],
     phase_id: str,
@@ -1997,6 +2334,7 @@ def resolve_runtime_skill_plan(
         raise SkillPlanSnapshotError(
             f"blocked: invalid skill compatibility metadata: {exc}"
         ) from exc
+    providers_by_name = _runtime_skill_provider_index(index)
     selection = index.get("selection") if isinstance(index.get("selection"), dict) else {}
     active_profiles = sorted(_logical_strings(selection.get("profiles")))
     raw_skill_profiles = selection.get("skill_profiles")
@@ -2138,6 +2476,17 @@ def resolve_runtime_skill_plan(
             "path": str(skill.get("path") or ""),
             "tree_hash": skill.get("tree_hash"),
         }
+        if providers_by_name is not None:
+            provider = providers_by_name.get(name)
+            if provider is None:
+                raise SkillPlanSnapshotError(
+                    f"blocked: missing skill provider claim: {name}"
+                )
+            if provider["source_hash"] != skill.get("tree_hash"):
+                raise SkillPlanSnapshotError(
+                    f"blocked: skill provider source hash mismatch: {name}"
+                )
+            record["provider"] = provider
         if resolution.capabilities:
             record["capabilities"] = list(resolution.capabilities)
         skills.append(record)

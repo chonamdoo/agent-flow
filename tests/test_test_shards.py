@@ -129,6 +129,12 @@ def test_final_plan_runs_canonical_parity_once(tmp_path: Path) -> None:
     assert not any("check-agent-flow-parity.mjs" in command for command in plan["shards"]["integration"])
     pytest_commands = [command for command in commands if "pytest" in command]
     assert pytest_commands and all("--maxfail=1" in command for command in pytest_commands)
+    provider_registry = [
+        command
+        for command in commands
+        if command[-2:] == ["--test", "tests/test_skill_provider_registry.mjs"]
+    ]
+    assert len(provider_registry) == 1
 
 
 def test_canonical_parity_has_a_runtime_copy_wrapper() -> None:
@@ -202,6 +208,33 @@ def test_related_python_and_android_changes_are_scoped() -> None:
     targeted = runner._targeted_commands(ROOT / ".git" / "test", (), exact)
     pytest_command = next(command for command in targeted if command.pytest_report)
     assert pytest_command.argv[-1:] == exact
+    for provider_path in (
+        "lib/skill-provider-registry.mjs",
+        "lib/skill-provider-registry-loader.mjs",
+        "lib/portable-skill-name.mjs",
+    ):
+        provider_targeted = runner._targeted_commands(
+            ROOT / ".git" / "test",
+            (provider_path,),
+            exact,
+        )
+        assert sum(
+            command.argv == ("node", "--test", "tests/test_skill_provider_registry.mjs")
+            for command in provider_targeted
+        ) == 1
+    for source_runtime_path in (
+        "lib/skill-selection.mjs",
+        "tests/test_skill_source_runtime.mjs",
+    ):
+        source_runtime_targeted = runner._targeted_commands(
+            ROOT / ".git" / "test",
+            (source_runtime_path,),
+        )
+        assert sum(
+            command.argv == ("node", "--test", "tests/test_skill_source_runtime.mjs")
+            for command in source_runtime_targeted
+        ) == 1
+        assert not any(command.pytest_report for command in source_runtime_targeted)
 
 
 def test_javascript_targeted_plan_uses_related_tests_and_package_gates(

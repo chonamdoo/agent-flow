@@ -215,7 +215,7 @@ def _commands_for_shard(
         return tuple(commands)
     if shard in {"fast", "integration", "worktree-lifecycle"}:
         report = run_dir / f"{shard}.pytest.json"
-        return (
+        commands = [
             CommandSpec(
                 shard,
                 (
@@ -230,7 +230,15 @@ def _commands_for_shard(
                 {"PYTHONPATH": "src", "PYTHONDONTWRITEBYTECODE": "1"},
                 pytest_report=True,
             ),
-        )
+        ]
+        if shard == "fast":
+            commands.append(
+                CommandSpec(
+                    "provider-registry-node",
+                    ("node", "--test", "tests/test_skill_provider_registry.mjs"),
+                )
+            )
+        return tuple(commands)
     if shard == "parity":
         report = run_dir / "parity.pytest.json"
         return (
@@ -282,8 +290,37 @@ def _targeted_commands(
                 )
             )
     commands.extend(_javascript_targeted_commands(changed_files))
-    if "lib/runtime-parity.mjs" in changed_files:
-        commands.append(CommandSpec("runtime-parity-node", ("node", "--test", "tests/test_skill_source_runtime.mjs")))
+    if any(
+        path in changed_files
+        for path in (
+            "lib/skill-provider-registry.mjs",
+            "lib/skill-provider-registry-loader.mjs",
+            "lib/portable-skill-name.mjs",
+            "lib/skill-selection.mjs",
+            "skills/provider-registry.json",
+            "tests/test_skill_provider_registry.mjs",
+        )
+    ):
+        commands.append(
+            CommandSpec(
+                "provider-registry-node",
+                ("node", "--test", "tests/test_skill_provider_registry.mjs"),
+            )
+        )
+    if any(
+        path in changed_files
+        for path in (
+            "lib/runtime-parity.mjs",
+            "lib/skill-selection.mjs",
+            "tests/test_skill_source_runtime.mjs",
+        )
+    ):
+        commands.append(
+            CommandSpec(
+                "source-runtime-node",
+                ("node", "--test", "tests/test_skill_source_runtime.mjs"),
+            )
+        )
     if "scripts/check-agent-flow-parity.mjs" in changed_files:
         commands.append(CommandSpec("parity-syntax", ("node", "--check", "scripts/check-agent-flow-parity.mjs")))
     python_tests = tuple(test_nodeids) or _related_python_tests(changed_files)
