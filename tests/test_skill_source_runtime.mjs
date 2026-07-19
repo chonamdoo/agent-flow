@@ -356,6 +356,43 @@ test("testing localization remains explicit only after merge discovery dependenc
   );
 });
 
+test("previously exposed external skills are re-exposed and name-validated on discovery", () => {
+  const root = tempRoot();
+  const home = path.join(root, "home");
+  fs.mkdirSync(home, { recursive: true });
+  const env = { AGENT_FLOW_AUTO_EXTERNAL_SKILLS: "1" };
+
+  assert.deepEqual(
+    [...discoverAutomaticExternalSkillNames({
+      home,
+      activeHost: "codex",
+      env,
+      previousIndex: { selection: { external_exposure_skills: ["compose-state-authoring"] } },
+    })],
+    ["compose-state-authoring"],
+  );
+
+  assert.throws(
+    () => discoverAutomaticExternalSkillNames({
+      home,
+      activeHost: "codex",
+      env,
+      previousIndex: { selection: { external_exposure_skills: ["../evil"] } },
+    }),
+    /invalid previous external skill exposure name/,
+  );
+
+  assert.throws(
+    () => discoverAutomaticExternalSkillNames({
+      home,
+      activeHost: "codex",
+      env,
+      previousIndex: { selection: { external_exposure_skills: "nope" } },
+    }),
+    /invalid previous external skill exposure list/,
+  );
+});
+
 test("runtime activation honors phase and both task and path selectors", () => {
   const index = {
     selection: { profiles: [], explicit_skills: [], profile_routing: { profiles: {}, escalations: {} } },
