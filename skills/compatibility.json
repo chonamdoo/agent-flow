@@ -89,6 +89,36 @@
       ]
     },
     {
+      "canonical": "react-native-app-shell-error-handling",
+      "capabilities": [
+        "react-native.app-shell-error-handling"
+      ]
+    },
+    {
+      "canonical": "react-native-clean-architecture",
+      "capabilities": [
+        "react-native.architecture.clean"
+      ]
+    },
+    {
+      "canonical": "react-native-clean-presentation-architecture",
+      "capabilities": [
+        "react-native.presentation.clean"
+      ]
+    },
+    {
+      "canonical": "react-native-development-guide",
+      "capabilities": [
+        "react-native.development-guide"
+      ]
+    },
+    {
+      "canonical": "react-native-operational-adoption",
+      "capabilities": [
+        "react-native.operational-adoption"
+      ]
+    },
+    {
       "canonical": "typescript-development-guide",
       "capabilities": [
         "lang.typescript"

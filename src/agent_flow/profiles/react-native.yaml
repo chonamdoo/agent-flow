@@ -34,13 +34,13 @@ review_angles:
   - id: native-bridge
     prompt: templates/_shared/review/native-bridge.md
 skills:
-  install:
-    - react-native-app-shell-error-handling
-    - react-native-clean-architecture
-    - react-native-clean-presentation-architecture
-    - react-native-development-guide
-    - react-native-operational-adoption
-    - typescript-development-guide
+  capabilities:
+    - react-native.app-shell-error-handling
+    - react-native.architecture.clean
+    - react-native.presentation.clean
+    - react-native.development-guide
+    - react-native.operational-adoption
+    - lang.typescript
   required_review:
     - group: profile
       skills: [react-native-development-guide, react-native-clean-architecture]
