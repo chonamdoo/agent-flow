@@ -10,15 +10,20 @@ import { fileURLToPath } from "node:url";
 import {
   CODE_SKILL_PHASES,
   SKILL_DEPENDENCIES,
+  canonicalizeRuntimeSkillProviderMetadata,
   canonicalizeInstallSelectionCompatibility,
   discoverAutomaticExternalSkillNames,
   hashDirectoryTree,
   hashSkillTree,
   readSkillDocument,
   mergeInstallSelectionWithPrevious,
+  profileManagedHostOnlySkillNames,
+  isPortableSkillName,
+  portableSkillCasefold,
   mergeResolvedSkillClosure,
   resolveInstallSelection,
   resolveProfileSkillSources,
+  resolveSkillProviderIndex,
   resolveRuntimeSkillPlan,
 } from "../lib/skill-selection.mjs";
 import {
@@ -27,6 +32,10 @@ import {
   SkillResolutionError,
   validateConcreteSkillCompatibility,
 } from "../lib/skill-compatibility.mjs";
+import {
+  canonicalizeHostNeutralSkillProviderClaim,
+  createSkillProviderAdapterRegistry,
+} from "../lib/skill-provider-registry.mjs";
 import { detectActiveHost } from "../lib/host-detection.mjs";
 import { evaluateDeclaredArtifacts, evaluatePhaseContract } from "../lib/phase-contract.mjs";
 
@@ -48,6 +57,7 @@ let cachedProjectPythonPath = null;
 let cachedProjectGitPath = null;
 let activeManagedInstallTransaction = null;
 const PROJECT_SKILL_HOSTS = Object.freeze(["claude", "codex", "omp"]);
+const SKILL_PROVIDER_ADAPTER_REGISTRY = createSkillProviderAdapterRegistry();
 const SKILL_LINKS_COMMITMENT_VERSION = 2;
 const MANAGED_HOST_FILES_VERSION = 1;
 const MANAGED_HOST_FILES_COMMITMENT_VERSION = 1;
@@ -91,40 +101,9 @@ const BUNDLED_HOST_SKILL_NAMES = new Set([
   "react-app-shell-error-handling",
   "react-native-app-shell-error-handling",
 ]);
-const PROFILE_MANAGED_HOST_ONLY_SKILLS = new Set([
-  "adaptive",
-  "android-cli",
-  "android-debugging",
-  "android-module-creator",
-  "appfunctions",
-  "camera1-to-camerax",
-  "compose-animations",
-  "compose-focus-navigation",
-  "compose-modifier-and-layout-style",
-  "compose-recomposition-performance",
-  "compose-side-effects",
-  "compose-slot-api-pattern",
-  "compose-stability-diagnostics",
-  "compose-state-authoring",
-  "compose-state-deferred-reads",
-  "compose-state-hoisting",
-  "compose-state-holder-ui-split",
-  "compose-ui-testing-patterns",
-  "display-glasses-with-jetpack-compose-glimmer",
-  "edge-to-edge",
-  "engage-sdk-integration",
-  "kotlin-coroutines-structured-concurrency",
-  "kotlin-flow-state-event-modeling",
-  "kotlin-multiplatform-expect-actual",
-  "kotlin-types-value-class",
-  "navigation-3",
-  "perfetto-sql",
-  "perfetto-trace-analysis",
-  "play-billing-library-version-upgrade",
-  "r8-analyzer",
-  "testing-setup",
-  "verified-email",
-]);
+const PROFILE_MANAGED_HOST_ONLY_SKILLS = profileManagedHostOnlySkillNames(
+  path.join(KIT_ROOT, "profiles"),
+);
 const GENERATED_PROJECT_SKILL_NAMES = new Set([
   "agent-flow",
   "architecture-reviewer",
@@ -133,7 +112,15 @@ const GENERATED_PROJECT_SKILL_NAMES = new Set([
   "product-brief",
   "push-watch",
 ]);
+const BUNDLED_SKILL_ROOT_FILE_NAMES = new Set(
+  fs.readdirSync(path.join(KIT_ROOT, "skills"), { withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => entry.name),
+);
 const PROJECT_COMMAND_SKILL_NAMES = new Set(["agent-flow", "full-feature-workflow", "push-watch"]);
+const PROJECT_SKILL_DISCOVERY_IGNORED_NAMES = new Set([
+  ...PROFILE_MANAGED_HOST_ONLY_SKILLS,
+]);
 function installProject(rootOverride = null) {
   const requestedRoot = rootOverride ? path.resolve(rootOverride) : process.cwd();
   const managedWorktreeRoot = resolveManagedWorktreeRoot(requestedRoot);
@@ -149,6 +136,7 @@ function installProject(rootOverride = null) {
     return;
   }
   const root = resolveInstallRoot(requestedRoot);
+  assertLeaderMutationSource(root, "install");
   const agentFlowDir = path.join(root, ".agent-flow");
   if (pathHasSymlink(root, agentFlowDir)) {
     throw new Error(`managed install root contains a symlink: ${agentFlowDir}`);
@@ -1033,9 +1021,11 @@ function installProjectUnlocked(root, context, lock) {
       automaticSkillNames,
     },
   );
+  const externallyResolvedExplicitSkillNames = (installSelection.explicitSkills || [])
+    .filter((name) => !GENERATED_PROJECT_SKILL_NAMES.has(name));
   const sourceNames = new Set([
-    ...automaticSkillNames,
-    ...(installSelection.explicitSkills || []),
+    ...[...automaticSkillNames].filter((name) => !GENERATED_PROJECT_SKILL_NAMES.has(name)),
+    ...externallyResolvedExplicitSkillNames,
   ]);
   const skillSourcePlan = resolveProfileSkillSources({
     skillNames: sourceNames,
@@ -1047,13 +1037,25 @@ function installProjectUnlocked(root, context, lock) {
     env: process.env,
     previousIndex: previousSkillIndex,
     automaticSkillNames,
-    explicitSkillNames: installSelection.explicitSkills,
+    explicitSkillNames: externallyResolvedExplicitSkillNames,
   });
   for (const name of installSelection.explicitSkills || []) {
     if (skillSourcePlan.missing.includes(name)) throw new Error(`explicit skill not found: ${name}`);
   }
   installSelection = mergeResolvedSkillClosure(installSelection, skillSourcePlan);
+  const plannedSkillEntries = new Set([
+    ...GENERATED_PROJECT_SKILL_NAMES,
+    ...BUNDLED_SKILL_ROOT_FILE_NAMES,
+    ...(installSelection.copyRootNames || []),
+    ...(installSelection.skillNames || []),
+  ]);
+  rejectReplacedManagedSkillEntries(
+    agentFlowDir,
+    previousSkillIndex,
+    plannedSkillEntries,
+  );
   context.transaction = beginSkillInstallTransaction(root, agentFlowDir, previousIndexRecord, lock.token);
+  setSkillTransactionPlannedEntries(context.transaction, plannedSkillEntries);
   const phases = fullFeaturePhases();
 
   for (const name of ["runs", "state", "handoffs", "team", "worktrees", "skills"]) {
@@ -1061,8 +1063,6 @@ function installProjectUnlocked(root, context, lock) {
   }
   fs.mkdirSync(path.join(agentFlowDir, "local-skills"), { recursive: true });
 
-  fs.mkdirSync(path.join(agentFlowDir, "skills", "agent-flow"), { recursive: true });
-  fs.mkdirSync(path.join(agentFlowDir, "skills", "full-feature-workflow"), { recursive: true });
 
   const payload = {
     install_scope: "project",
@@ -1083,30 +1083,44 @@ function installProjectUnlocked(root, context, lock) {
     true,
     true,
   );
-  const agentFlowSkill = agentFlowSkillMarkdown();
-  writeManagedFile(path.join(agentFlowDir, "skills", "agent-flow", "SKILL.md"), agentFlowSkill);
-  writeManagedFile(
-    path.join(agentFlowDir, "skills", "full-feature-workflow", "SKILL.md"),
+  materializeGeneratedSkillEntry(
+    context.transaction,
+    "agent-flow",
+    agentFlowSkillMarkdown(),
+  );
+  materializeGeneratedSkillEntry(
+    context.transaction,
+    "full-feature-workflow",
     fullFeatureSkillMarkdown(),
   );
-  writeManagedFile(path.join(agentFlowDir, "skills", "product-brief", "SKILL.md"), productBriefSkillMarkdown());
-  writeManagedFile(path.join(agentFlowDir, "skills", "plan-reviewer", "SKILL.md"), planReviewerSkillMarkdown());
-  writeManagedFile(
-    path.join(agentFlowDir, "skills", "architecture-reviewer", "SKILL.md"),
+  materializeGeneratedSkillEntry(
+    context.transaction,
+    "product-brief",
+    productBriefSkillMarkdown(),
+  );
+  materializeGeneratedSkillEntry(
+    context.transaction,
+    "plan-reviewer",
+    planReviewerSkillMarkdown(),
+  );
+  materializeGeneratedSkillEntry(
+    context.transaction,
+    "architecture-reviewer",
     architectureReviewerSkillMarkdown(),
   );
-  writeManagedFile(path.join(agentFlowDir, "skills", "push-watch", "SKILL.md"), pushWatchSkillMarkdown());
-  copyBundledDirIfMissingOrSame(
-    path.join(KIT_ROOT, "skills"),
-    path.join(agentFlowDir, "skills"),
-    forceManaged,
-    PROFILE_MANAGED_HOST_ONLY_SKILLS,
-    true,
-    forceManaged,
-    new Set(["index.json", ".agent-flow-transaction-owner", ...GENERATED_PROJECT_SKILL_NAMES]),
+  materializeGeneratedSkillEntry(
+    context.transaction,
+    "push-watch",
+    pushWatchSkillMarkdown(),
+  );
+  materializeBundledSkillEntries(
+    context.transaction,
     installSelection.copyRootNames,
   );
   materializeResolvedSkillSources(agentFlowDir, skillSourcePlan, context.transaction);
+  if (process.env.AGENT_FLOW_TEST_FAIL_AFTER_SKILL_MATERIALIZATION === "1") {
+    throw new Error("injected failure after skill materialization");
+  }
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "profiles"), path.join(agentFlowDir, "profiles"), forceManaged);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "templates"), path.join(agentFlowDir, "templates"), forceManaged, new Set(), true, forceManaged);
   const skillIndex = installProjectSkills(
@@ -1118,6 +1132,7 @@ function installProjectUnlocked(root, context, lock) {
     skillSourcePlan,
     context.transaction,
   );
+  updateSkillTransactionPlannedStates(context.transaction, ["index.json"]);
   preserveUnmanagedSkillEntries(context.transaction, previousSkillIndex, skillIndex);
   if (process.env.AGENT_FLOW_TEST_CRASH_AFTER_SKILL_INDEX === "1") {
     sealManagedInstallMutations(context.transaction);
@@ -1713,6 +1728,15 @@ function resolveManagedWorktreeRoot(start) {
     return root;
   }
   return null;
+}
+
+function assertLeaderMutationSource(root, action) {
+  const sourceLeaderRoot = resolveManagedWorktreeRoot(KIT_ROOT);
+  if (sourceLeaderRoot && samePath(root, sourceLeaderRoot)) {
+    throw new Error(
+      `managed worktree source ${action} blocked; run ${action} from the leader checkout`,
+    );
+  }
 }
 
 function samePath(left, right) {
@@ -3886,94 +3910,271 @@ function dirContentsMatch(src, dest) {
   return true;
 }
 
+function materializePlannedSkillEntry(
+  transaction,
+  name,
+  kind,
+  populateStage,
+  hooks = {},
+) {
+  if (!transaction?.journal) {
+    throw new Error("skill materialization requires an install transaction");
+  }
+  if (!["directory", "file"].includes(kind)) {
+    throw new Error(`unsupported planned skill entry kind: ${name}`);
+  }
+  const stagingRoot = path.join(transaction.transactionRoot, "materialized-staging");
+  ensureManagedDirectory(stagingRoot, transaction.transactionRoot);
+  const operationId = crypto.randomBytes(12).toString("hex");
+  const stageRelative = path.join("materialized-staging", `${name}-${operationId}`);
+  const stage = path.join(transaction.transactionRoot, stageRelative);
+  const displacedName = `.agent-flow-displaced-${name}-${operationId}`;
+  const displaced = path.join(transaction.live, displacedName);
+  const destination = path.join(transaction.live, name);
+  const before = managedPathStateWithIdentity(destination);
+  if (
+    !["absent", kind].includes(before.kind)
+    || !sameManagedPathStateWithIdentity(
+      before,
+      transaction.journal.planned_live_states?.[name],
+    )
+  ) {
+    throw new Error(`installed skill destination changed before materialization: ${name}`);
+  }
+  if (kind === "directory") {
+    fs.mkdirSync(stage);
+  } else {
+    fs.writeFileSync(stage, "", { flag: "wx" });
+  }
+  transaction.journal.pending_skill_materialization = {
+    name,
+    phase: "copying",
+    before,
+    stage: stageRelative,
+    stage_filesystem_identity: hostFilesystemIdentity(stage),
+    displaced: displacedName,
+  };
+  writeInstallJournal(transaction.journalPath, transaction.journal);
+  hooks.beforePopulate?.();
+  populateStage(stage, stagingRoot);
+  const after = managedPathStateWithIdentity(stage);
+  if (after.kind !== kind) {
+    throw new Error(`materialized skill stage kind changed: ${name}`);
+  }
+  transaction.journal.pending_skill_materialization.after = after;
+  transaction.journal.pending_skill_materialization.phase = "ready";
+  writeInstallJournal(transaction.journalPath, transaction.journal);
+  hooks.afterReady?.();
+  withManagedDirectoryCwd(transaction.root, transaction.live, true, () => {
+    if (
+      !sameManagedPathStateWithIdentity(
+        managedPathStateWithIdentity(name),
+        before,
+      )
+    ) {
+      throw new Error(`installed skill destination changed before replacement: ${name}`);
+    }
+    if (managedPathStateWithIdentity(displacedName).kind !== "absent") {
+      throw new Error(`installed skill displaced path already exists: ${name}`);
+    }
+    if (before.kind !== "absent") {
+      renameManagedNoReplace(name, displacedName);
+      if (
+        !sameManagedPathStateWithIdentity(
+          managedPathStateWithIdentity(displacedName),
+          before,
+        )
+      ) {
+        throw new Error(`installed skill destination changed during replacement: ${name}`);
+      }
+    }
+    hooks.afterDisplace?.();
+    renameManagedNoReplace(stage, name);
+    hooks.afterRename?.();
+    if (
+      !sameManagedPathStateWithIdentity(
+        after,
+        managedPathStateWithIdentity(name),
+      )
+    ) {
+      throw new Error(`installed skill destination changed after replacement: ${name}`);
+    }
+  });
+  checkpointSkillTransactionPlannedState(transaction, name, after);
+  hooks.afterCheckpoint?.();
+  if (before.kind !== "absent") {
+    quarantineMaterializationPath(
+      transaction,
+      displaced,
+      before,
+      `materialized displaced skill ${name}`,
+    );
+  }
+  delete transaction.journal.pending_skill_materialization;
+  writeInstallJournal(transaction.journalPath, transaction.journal);
+}
+
+function materializeGeneratedSkillEntry(transaction, name, content) {
+  materializePlannedSkillEntry(
+    transaction,
+    name,
+    "directory",
+    (stage) => {
+      fs.writeFileSync(path.join(stage, "SKILL.md"), content);
+    },
+    {
+      afterRename: () => {
+        if (process.env.AGENT_FLOW_TEST_PLANNED_SKILL_NAME === name) {
+          holdInstallForTest(
+            "AGENT_FLOW_TEST_HOLD_AFTER_PLANNED_SKILL_RENAME_MS",
+            "planned-skill-renamed",
+          );
+        }
+      },
+    },
+  );
+}
+
+function materializeBundledSkillEntries(transaction, allowedDirectoryNames) {
+  const sourceRoot = path.join(KIT_ROOT, "skills");
+  for (
+    const entry of fs.readdirSync(sourceRoot, { withFileTypes: true })
+      .sort((left, right) => compareCodePoints(left.name, right.name))
+  ) {
+    if (GENERATED_PROJECT_SKILL_NAMES.has(entry.name)) continue;
+    if (entry.isDirectory() && !allowedDirectoryNames?.has(entry.name)) continue;
+    if (!entry.isDirectory() && !entry.isFile()) continue;
+    const source = path.join(sourceRoot, entry.name);
+    const kind = entry.isDirectory() ? "directory" : "file";
+    materializePlannedSkillEntry(
+      transaction,
+      entry.name,
+      kind,
+      (stage) => {
+        if (kind === "directory") {
+          fs.cpSync(source, stage, {
+            recursive: true,
+            dereference: false,
+            errorOnExist: true,
+            force: false,
+          });
+        } else {
+          fs.copyFileSync(source, stage);
+        }
+        fs.chmodSync(stage, fs.lstatSync(source).mode & 0o777);
+      },
+      {
+        afterRename: () => {
+          if (process.env.AGENT_FLOW_TEST_PLANNED_SKILL_NAME === entry.name) {
+            holdInstallForTest(
+              "AGENT_FLOW_TEST_HOLD_AFTER_PLANNED_SKILL_RENAME_MS",
+              "planned-skill-renamed",
+            );
+          }
+        },
+      },
+    );
+  }
+}
+
 function materializeResolvedSkillSources(agentFlowDir, sourcePlan, transaction = null) {
-  const skillsRoot = path.join(agentFlowDir, "skills");
+  if (!transaction?.journal) {
+    throw new Error("skill materialization requires an install transaction");
+  }
+  const stagingRoot = path.join(transaction.transactionRoot, "materialized-staging");
   for (const entry of sourcePlan?.entries || []) {
     if (!["host-bootstrap", "shared"].includes(entry.source_kind)) continue;
-    const absoluteDestination = path.join(skillsRoot, entry.name);
+    const absoluteDestination = path.join(agentFlowDir, "skills", entry.name);
     let sourcePath = entry.source_path;
     if (samePath(sourcePath, absoluteDestination)) {
-      const backupSource = transaction ? path.join(transaction.backup, entry.name) : null;
-      if (!backupSource || !fs.existsSync(backupSource)) continue;
+      const backupSource = path.join(transaction.backup, entry.name);
+      if (!fs.existsSync(backupSource)) continue;
       sourcePath = backupSource;
     }
-    withManagedDirectoryCwd(agentFlowDir, skillsRoot, true, () => {
-      const destination = entry.name;
-      const stage = `.agent-flow-stage-${entry.name}-${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
-      const displaced = `.agent-flow-displaced-${entry.name}-${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
-      const before = lstatIfExists(destination);
-      if (before && (!before.isDirectory() || before.isSymbolicLink())) {
-        throw new Error(`installed skill destination is unsafe: ${entry.name}`);
-      }
-      const beforeState = before ? managedPathState(destination) : { kind: "absent" };
-      let displacedExisting = false;
-      let installed = false;
-      try {
-        fs.cpSync(sourcePath, stage, {
-          recursive: true,
-          dereference: false,
-          errorOnExist: true,
-          force: false,
-        });
-        if (
-          hashSkillTree(stage, { authorityRoot: ".", skillName: entry.name })
-          !== entry.tree_hash
-        ) {
-          throw new Error(`skill source changed while copying: ${entry.name}`);
-        }
-        holdInstallForTest(
-          "AGENT_FLOW_TEST_HOLD_AFTER_MATERIALIZE_STAGE_HASH_MS",
-          "materialize-stage-hashed",
-        );
-        const current = lstatIfExists(destination);
-        if (
-          Boolean(before) !== Boolean(current)
-          || (
-            before
-            && (
-              !sameDirectoryIdentity(before, current)
-              || !sameManagedPathState(beforeState, managedPathState(destination))
-            )
-          )
-        ) {
-          throw new Error(`installed skill destination changed before replacement: ${entry.name}`);
-        }
-        if (before) {
-          renameManagedNoReplace(destination, displaced);
-          displacedExisting = true;
-          if (!sameDirectoryIdentity(before, fs.lstatSync(displaced))) {
-            throw new Error(`installed skill destination changed during replacement: ${entry.name}`);
+    if (
+      process.env.AGENT_FLOW_TEST_PREPOPULATE_MATERIALIZE_SKILL === entry.name
+      && managedPathStateWithIdentity(absoluteDestination).kind === "absent"
+    ) {
+      materializePlannedSkillEntry(
+        transaction,
+        entry.name,
+        "directory",
+        (stage) => {
+          fs.cpSync(sourcePath, stage, {
+            recursive: true,
+            dereference: false,
+            errorOnExist: true,
+            force: false,
+          });
+          if (
+            hashSkillTree(stage, {
+              authorityRoot: stagingRoot,
+              skillName: path.basename(stage),
+            }) !== entry.tree_hash
+          ) {
+            throw new Error(`skill source changed while copying: ${entry.name}`);
           }
-        }
-        renameManagedNoReplace(stage, destination);
-        installed = true;
-        if (
-          hashSkillTree(destination, { authorityRoot: ".", skillName: entry.name })
-          !== entry.tree_hash
-        ) {
-          throw new Error(`installed skill snapshot integrity mismatch: ${entry.name}`);
-        }
-        if (displacedExisting) {
-          fs.rmSync(displaced, { recursive: true, force: true });
-          displacedExisting = false;
-        }
-      } catch (error) {
-        if (installed && lstatIfExists(destination)) {
-          fs.rmSync(destination, { recursive: true, force: true });
-          installed = false;
-        }
-        if (displacedExisting && !lstatIfExists(destination)) {
-          renameManagedNoReplace(displaced, destination);
-          displacedExisting = false;
-        }
-        throw error;
-      } finally {
-        if (lstatIfExists(stage)) fs.rmSync(stage, { recursive: true, force: true });
-        if (lstatIfExists(displaced)) {
-          throw new Error(`displaced skill destination was not restored: ${entry.name}`);
-        }
+        },
+      );
+    }
+    try {
+      materializePlannedSkillEntry(
+        transaction,
+        entry.name,
+        "directory",
+        (stage) => {
+          fs.cpSync(sourcePath, stage, {
+            recursive: true,
+            dereference: false,
+            errorOnExist: true,
+            force: false,
+          });
+          if (
+            hashSkillTree(stage, {
+              authorityRoot: stagingRoot,
+              skillName: path.basename(stage),
+            }) !== entry.tree_hash
+          ) {
+            throw new Error(`skill source changed while copying: ${entry.name}`);
+          }
+        },
+        {
+          beforePopulate: () => holdInstallForTest(
+            "AGENT_FLOW_TEST_HOLD_BEFORE_MATERIALIZE_SOURCE_COPY_MS",
+            "materialize-source-copy-ready",
+          ),
+          afterReady: () => holdInstallForTest(
+            "AGENT_FLOW_TEST_HOLD_AFTER_MATERIALIZE_STAGE_HASH_MS",
+            "materialize-stage-hashed",
+          ),
+          afterDisplace: () => holdInstallForTest(
+            "AGENT_FLOW_TEST_HOLD_AFTER_MATERIALIZE_DISPLACE_MS",
+            "materialize-source-displaced",
+          ),
+          afterRename: () => {
+            holdInstallForTest(
+              "AGENT_FLOW_TEST_HOLD_AFTER_MATERIALIZE_RENAME_MS",
+              "materialize-source-renamed",
+            );
+            if (
+              process.env.AGENT_FLOW_TEST_FAIL_AFTER_MATERIALIZE_RENAME
+              === entry.name
+            ) {
+              throw new Error(`injected failure after materialization rename: ${entry.name}`);
+            }
+          },
+          afterCheckpoint: () => holdInstallForTest(
+            "AGENT_FLOW_TEST_HOLD_AFTER_MATERIALIZE_CHECKPOINT_MS",
+            "materialize-source-checkpointed",
+          ),
+        },
+      );
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        throw new Error(`skill source disappeared while copying: ${entry.name}`);
       }
-    });
+      throw error;
+    }
   }
 }
 
@@ -4015,6 +4216,11 @@ function installProjectSkills(
   }
   links.push(...removeStaleProjectSkillLinks(root, selected.skills, previousIndex, force, transaction));
   const index = { ...selected, links };
+  index.managed_ownership = managedSkillOwnership(
+    root,
+    selected.skills,
+    transaction?.journal?.planned_live_entries || [],
+  );
   const activeHost = detectActiveHost(process.env);
   const catalogHosts = new Set(
     (sourcePlan?.entries || [])
@@ -4029,10 +4235,20 @@ function installProjectSkills(
     ? activeHost
     : index.catalog_hosts[0] ?? null;
   index.catalog_fingerprint = skillCatalogFingerprint(root, HOME, index.catalog_hosts, process.env);
-  fs.writeFileSync(
-    path.join(agentFlowDir, "skills", "index.json"),
+  if (!transaction?.liveIdentity) {
+    throw new Error("pinned skill index directory identity is missing");
+  }
+  holdInstallForTest(
+    "AGENT_FLOW_TEST_HOLD_BEFORE_SKILL_INDEX_WRITE_MS",
+    "skill-index-write-ready",
+  );
+  transaction.liveIndexIdentity = writePinnedDirectoryFile(
+    transaction.live,
+    transaction.liveIdentity,
+    "index.json",
     `${JSON.stringify(index, null, 2)}\n`,
-    "utf8",
+    transaction.liveIndexIdentity,
+    "skill index",
   );
   return index;
 }
@@ -4118,7 +4334,7 @@ function acquireProjectInstallLock(root, agentFlowDir) {
     recoveryToken = owner.token;
     holdInstallForTest("AGENT_FLOW_TEST_HOLD_AFTER_STALE_LOCK_AUTH_MS", "stale-lock-authenticated");
     const quarantine = path.join(agentFlowDir, `.agent-flow-stale-lock-${crypto.randomBytes(12).toString("hex")}`);
-    fs.renameSync(lockPath, quarantine);
+    renameManagedNoReplace(lockPath, quarantine);
     const moved = fs.lstatSync(quarantine);
     const movedOwner = readLockOwnerIfSafe(
       path.join(quarantine, "owner.json"),
@@ -4128,6 +4344,7 @@ function acquireProjectInstallLock(root, agentFlowDir) {
       !sameDirectoryIdentity(expectedLock, moved)
       || movedOwner?.token !== owner.token
       || movedOwner?.pid !== owner.pid
+      || lstatIfExists(lockPath)
     ) {
       if (!fs.existsSync(lockPath)) renameManagedNoReplace(quarantine, lockPath);
       throw new Error(`project install lock changed during stale recovery: ${lockPath}`);
@@ -4281,6 +4498,7 @@ function beginSkillInstallTransaction(root, agentFlowDir, previousIndexRecord, l
   const backup = path.join(transactionRoot, "skills-backup");
   const marker = path.join(live, ".agent-flow-transaction-owner");
   const journalPath = path.join(transactionRoot, "journal.json");
+  const transactionRootIdentity = hostFilesystemIdentity(transactionRoot);
   const transaction = {
     root,
     transactionRoot,
@@ -4290,9 +4508,12 @@ function beginSkillInstallTransaction(root, agentFlowDir, previousIndexRecord, l
     journalPath,
     token: crypto.randomBytes(24).toString("hex"),
     previous: previousIndexRecord,
+    transactionRootIdentity,
+    liveIdentity: null,
+    liveIndexIdentity: null,
   };
   const journal = {
-    version: 5,
+    version: 9,
     root: fs.realpathSync(root),
     token: transaction.token,
     lock_token: lockToken,
@@ -4303,14 +4524,28 @@ function beginSkillInstallTransaction(root, agentFlowDir, previousIndexRecord, l
     host_mutations: [],
     managed_mutations: [],
   };
+  bindInstallJournalAuthority(journal, transactionRootIdentity);
+  holdInstallForTest(
+    "AGENT_FLOW_TEST_HOLD_BEFORE_INSTALL_JOURNAL_WRITE_MS",
+    "install-journal-write-ready",
+  );
   writeInstallJournal(journalPath, journal);
   if (journal.had_live_skills) {
     if (!previousIndexRecord) {
       throw new Error("existing skills directory has no authenticated index");
     }
     journal.stage = "moving-skills";
+    journal.backup_state = managedPathStateWithIdentity(live);
     writeInstallJournal(journalPath, journal);
     fs.renameSync(live, backup);
+    if (
+      !sameManagedPathStateWithIdentity(
+        managedPathStateWithIdentity(backup),
+        journal.backup_state,
+      )
+    ) {
+      throw new Error("skill backup changed while moving");
+    }
     if (process.env.AGENT_FLOW_TEST_CRASH_AFTER_SKILLS_RENAME === "1") process.exit(88);
     journal.stage = "skills-moved";
     writeInstallJournal(journalPath, journal);
@@ -4327,8 +4562,18 @@ function beginSkillInstallTransaction(root, agentFlowDir, previousIndexRecord, l
   }
   fs.mkdirSync(live, { recursive: true });
   fs.writeFileSync(marker, `${transaction.token}\n`, { flag: "wx" });
+  transaction.liveIdentity = hostFilesystemIdentity(live);
+  journal.initial_live_state = managedPathStateWithIdentity(live);
+  journal.planned_live_entries = [];
+  journal.planned_live_states = Object.fromEntries(
+    [".agent-flow-transaction-owner", "index.json"].map((name) => [
+      name,
+      managedPathStateWithIdentity(path.join(live, name)),
+    ]),
+  );
   journal.stage = "live-created";
   writeInstallJournal(journalPath, journal);
+  if (process.env.AGENT_FLOW_TEST_CRASH_AFTER_SKILL_LIVE_CREATE === "1") process.exit(85);
   holdInstallForTest("AGENT_FLOW_TEST_HOLD_INSTALL_LOCK_MS", "install-lock-held");
   transaction.journal = journal;
   snapshotManagedInstallPaths(transaction);
@@ -4336,10 +4581,351 @@ function beginSkillInstallTransaction(root, agentFlowDir, previousIndexRecord, l
   return transaction;
 }
 
+const INSTALL_JOURNAL_DIRECTORY_IDENTITY = Symbol("install journal directory identity");
+const INSTALL_JOURNAL_FILE_IDENTITY = Symbol("install journal file identity");
+
+function bindInstallJournalAuthority(journal, directoryIdentity, fileIdentity = null) {
+  Object.defineProperty(journal, INSTALL_JOURNAL_DIRECTORY_IDENTITY, {
+    configurable: true,
+    value: directoryIdentity,
+    writable: true,
+  });
+  Object.defineProperty(journal, INSTALL_JOURNAL_FILE_IDENTITY, {
+    configurable: true,
+    value: fileIdentity,
+    writable: true,
+  });
+}
+
+function pinnedSkillLiveEntryNames(journal) {
+  return [...new Set([
+    ".agent-flow-transaction-owner",
+    "index.json",
+    ...(journal?.planned_live_entries || []),
+  ])].sort(compareCodePoints);
+}
+function updateSkillTransactionPlannedStates(transaction, names = null) {
+  const expectedNames = new Set(pinnedSkillLiveEntryNames(transaction.journal));
+  const selectedNames = names === null ? [...expectedNames] : [...new Set(names)];
+  if (selectedNames.length === 0) return;
+  const states = {
+    ...(transaction.journal.planned_live_states || {}),
+  };
+  for (const name of selectedNames) {
+    if (!expectedNames.has(name)) {
+      throw new Error(`invalid planned skill live entry: ${name}`);
+    }
+    states[name] = managedPathStateWithIdentity(path.join(transaction.live, name));
+  }
+  transaction.journal.planned_live_states = Object.fromEntries(
+    [...expectedNames]
+      .sort(compareCodePoints)
+      .map((name) => [name, states[name]]),
+  );
+  writeInstallJournal(transaction.journalPath, transaction.journal);
+}
+function checkpointSkillTransactionPlannedState(transaction, name, state) {
+  if (!transaction?.journal) return;
+  const expectedNames = new Set(pinnedSkillLiveEntryNames(transaction.journal));
+  if (!expectedNames.has(name)) {
+    throw new Error(`invalid planned skill live entry: ${name}`);
+  }
+  if (
+    !sameManagedPathStateWithIdentity(
+      state,
+      managedPathStateWithIdentity(path.join(transaction.live, name)),
+    )
+  ) {
+    throw new Error(`planned skill live entry changed before checkpoint: ${name}`);
+  }
+  const pending = transaction.journal.pending_skill_materialization;
+  if (
+    !pending
+    || pending.name !== name
+    || pending.phase !== "ready"
+    || !sameManagedPathStateWithIdentity(pending.after, state)
+  ) {
+    throw new Error(`invalid pending skill materialization checkpoint: ${name}`);
+  }
+  pending.phase = "completed";
+  const states = {
+    ...(transaction.journal.planned_live_states || {}),
+    [name]: state,
+  };
+  transaction.journal.planned_live_states = Object.fromEntries(
+    [...expectedNames]
+      .sort(compareCodePoints)
+      .map((entry) => [entry, states[entry]]),
+  );
+  writeInstallJournal(transaction.journalPath, transaction.journal);
+}
+function quarantineMaterializationPath(transaction, pathName, expected, label) {
+  const pending = transaction.journal?.pending_skill_materialization;
+  if (!pending) {
+    throw new Error(`${label} cleanup is not journaled`);
+  }
+  const target = path.join(transaction.live, pending.name);
+  const displaced = path.join(transaction.live, pending.displaced);
+  const cleanupSource = samePath(pathName, target)
+    ? "target"
+    : samePath(pathName, displaced)
+      ? "displaced"
+      : null;
+  if (!cleanupSource) {
+    throw new Error(`${label} cleanup path is not registered`);
+  }
+  const cleanupRoot = path.join(transaction.transactionRoot, "materialized-cleanup");
+  ensureManagedDirectory(cleanupRoot, transaction.transactionRoot);
+  if (pending.phase !== "cleaning") {
+    pending.phase = "cleaning";
+    pending.cleanup_source = cleanupSource;
+    pending.cleanup = path.join(
+      "materialized-cleanup",
+      `materialized-${crypto.randomBytes(12).toString("hex")}`,
+    );
+    writeInstallJournal(transaction.journalPath, transaction.journal);
+  } else if (pending.cleanup_source !== cleanupSource) {
+    throw new Error(`${label} cleanup phase changed`);
+  }
+  const quarantine = path.resolve(transaction.transactionRoot, pending.cleanup);
+  ensureChildPath(transaction.transactionRoot, quarantine);
+  assertNoSymlinkComponents(transaction.transactionRoot, path.dirname(quarantine));
+  withManagedDirectoryCwd(transaction.root, path.dirname(pathName), false, () => {
+    const name = path.basename(pathName);
+    const current = managedPathStateWithIdentity(name);
+    const quarantined = managedPathStateWithIdentity(quarantine);
+    if (
+      sameManagedPathStateWithIdentity(current, expected)
+      && quarantined.kind === "absent"
+    ) {
+      holdInstallForTest(
+        "AGENT_FLOW_TEST_HOLD_BEFORE_MATERIALIZE_CLEANUP_RENAME_MS",
+        "materialize-cleanup-ready",
+      );
+      renameManagedNoReplace(name, quarantine);
+      if (
+        !sameManagedPathStateWithIdentity(
+          managedPathStateWithIdentity(quarantine),
+          expected,
+        )
+        || managedPathStateWithIdentity(name).kind !== "absent"
+      ) {
+        if (
+          managedPathStateWithIdentity(name).kind === "absent"
+          && managedPathStateWithIdentity(quarantine).kind !== "absent"
+        ) {
+          renameManagedNoReplace(quarantine, name);
+        }
+        throw new Error(`${label} changed during cleanup`);
+      }
+      holdInstallForTest(
+        "AGENT_FLOW_TEST_HOLD_AFTER_MATERIALIZE_CLEANUP_RENAME_MS",
+        "materialize-cleanup-renamed",
+      );
+      return;
+    }
+    if (
+      current.kind === "absent"
+      && sameManagedPathStateWithIdentity(quarantined, expected)
+    ) {
+      return;
+    }
+    throw new Error(`${label} changed before cleanup`);
+  });
+}
+
+function restoreMaterializationDisplaced(transaction, pending, displaced) {
+  const target = path.join(transaction.live, pending.name);
+  withManagedDirectoryCwd(transaction.root, transaction.live, false, () => {
+    if (managedPathStateWithIdentity(pending.name).kind !== "absent") {
+      throw new Error(`materialized skill target changed before restore: ${pending.name}`);
+    }
+    if (
+      !sameManagedPathStateWithIdentity(
+        managedPathStateWithIdentity(path.basename(displaced)),
+        pending.before,
+      )
+    ) {
+      throw new Error(`materialized skill displaced path changed: ${pending.name}`);
+    }
+    renameManagedNoReplace(path.basename(displaced), pending.name);
+    if (
+      !sameManagedPathStateWithIdentity(
+        managedPathStateWithIdentity(pending.name),
+        pending.before,
+      )
+    ) {
+      throw new Error(`materialized skill restore identity changed: ${pending.name}`);
+    }
+  });
+  if (!sameManagedPathStateWithIdentity(managedPathStateWithIdentity(target), pending.before)) {
+    throw new Error(`materialized skill restore changed: ${pending.name}`);
+  }
+  holdInstallForTest(
+    "AGENT_FLOW_TEST_HOLD_AFTER_MATERIALIZE_RESTORE_MS",
+    "materialize-displaced-restored",
+  );
+}
+
+function reconcilePendingSkillMaterialization(transaction) {
+  const pending = transaction.journal?.pending_skill_materialization;
+  if (!pending) return;
+  const stage = path.resolve(transaction.transactionRoot, pending.stage);
+  ensureChildPath(transaction.transactionRoot, stage);
+  assertNoSymlinkComponents(transaction.transactionRoot, path.dirname(stage));
+  const displaced = path.join(transaction.live, pending.displaced);
+  ensureChildPath(transaction.live, displaced);
+  assertNoSymlinkComponents(transaction.root, path.dirname(displaced));
+  const target = path.join(transaction.live, pending.name);
+  const targetState = managedPathStateWithIdentity(target);
+  const displacedState = managedPathStateWithIdentity(displaced);
+  const stageState = managedPathStateWithIdentity(stage);
+  if (pending.phase === "copying") {
+    const validStage = ["directory", "file"].includes(stageState.kind)
+      && sameHostFilesystemIdentity(stage, pending.stage_filesystem_identity);
+    if (
+      !validStage
+      || !sameManagedPathStateWithIdentity(targetState, pending.before)
+      || displacedState.kind !== "absent"
+    ) {
+      throw new Error(`materialized skill copy state changed: ${pending.name}`);
+    }
+  } else if (pending.phase === "ready") {
+    const notStarted = sameManagedPathStateWithIdentity(targetState, pending.before)
+      && displacedState.kind === "absent"
+      && sameManagedPathStateWithIdentity(stageState, pending.after);
+    const interrupted = pending.before.kind !== "absent"
+      && targetState.kind === "absent"
+      && sameManagedPathStateWithIdentity(displacedState, pending.before)
+      && sameManagedPathStateWithIdentity(stageState, pending.after);
+    const completed = sameManagedPathStateWithIdentity(targetState, pending.after)
+      && sameManagedPathStateWithIdentity(displacedState, pending.before)
+      && stageState.kind === "absent";
+    if (!notStarted && !interrupted && !completed) {
+      throw new Error(`materialized skill swap state changed: ${pending.name}`);
+    }
+    if (completed) {
+      quarantineMaterializationPath(
+        transaction,
+        target,
+        pending.after,
+        `materialized skill ${pending.name}`,
+      );
+      if (pending.before.kind !== "absent") {
+        restoreMaterializationDisplaced(transaction, pending, displaced);
+      }
+    } else if (interrupted) {
+      restoreMaterializationDisplaced(transaction, pending, displaced);
+    }
+  } else if (pending.phase === "completed") {
+    if (
+      !sameManagedPathStateWithIdentity(targetState, pending.after)
+      || stageState.kind !== "absent"
+    ) {
+      throw new Error(`completed materialized skill changed: ${pending.name}`);
+    }
+    if (displacedState.kind !== "absent") {
+      if (!sameManagedPathStateWithIdentity(displacedState, pending.before)) {
+        throw new Error(`completed materialized displaced skill changed: ${pending.name}`);
+      }
+      quarantineMaterializationPath(
+        transaction,
+        displaced,
+        pending.before,
+        `materialized displaced skill ${pending.name}`,
+      );
+    }
+  } else if (pending.phase === "cleaning") {
+    if (pending.cleanup_source === "target") {
+      const cleanup = path.resolve(transaction.transactionRoot, pending.cleanup);
+      ensureChildPath(transaction.transactionRoot, cleanup);
+      assertNoSymlinkComponents(transaction.transactionRoot, path.dirname(cleanup));
+      const alreadyRestored = (
+        stageState.kind === "absent"
+        && sameManagedPathStateWithIdentity(
+          managedPathStateWithIdentity(cleanup),
+          pending.after,
+        )
+        && displacedState.kind === "absent"
+        && sameManagedPathStateWithIdentity(
+          targetState,
+          pending.before,
+        )
+      );
+      if (!alreadyRestored) {
+        quarantineMaterializationPath(
+          transaction,
+          target,
+          pending.after,
+          `materialized skill ${pending.name}`,
+        );
+        if (pending.before.kind !== "absent") {
+          restoreMaterializationDisplaced(transaction, pending, displaced);
+        }
+      }
+    } else if (pending.cleanup_source === "displaced") {
+      if (
+        !sameManagedPathStateWithIdentity(
+          managedPathStateWithIdentity(target),
+          pending.after,
+        )
+        || managedPathStateWithIdentity(stage).kind !== "absent"
+      ) {
+        throw new Error(`completed materialized skill changed: ${pending.name}`);
+      }
+      quarantineMaterializationPath(
+        transaction,
+        displaced,
+        pending.before,
+        `materialized displaced skill ${pending.name}`,
+      );
+    } else {
+      throw new Error(`invalid materialized skill cleanup: ${pending.name}`);
+    }
+  } else {
+    throw new Error(`invalid materialized skill phase: ${pending.name}`);
+  }
+  delete transaction.journal.pending_skill_materialization;
+  writeInstallJournal(transaction.journalPath, transaction.journal);
+}
+
+function verifyPinnedSkillLiveStates(live, journal) {
+  const expectedNames = pinnedSkillLiveEntryNames(journal);
+  const states = journal?.planned_live_states;
+  if (!states || typeof states !== "object" || Array.isArray(states)) {
+    throw new Error("planned skill live entries are unauthenticated");
+  }
+  for (const name of expectedNames) {
+    if (
+      !sameManagedPathStateWithIdentity(
+        managedPathStateWithIdentity(path.join(live, name)),
+        states[name],
+      )
+    ) {
+      throw new Error(`planned skill live entry changed outside transaction: ${name}`);
+    }
+  }
+}
+function setSkillTransactionPlannedEntries(transaction, entries) {
+  transaction.journal.planned_live_entries = [...entries]
+    .filter((entry) => isPortableSkillName(entry))
+    .sort(compareCodePoints);
+  updateSkillTransactionPlannedStates(transaction);
+}
+
 function writeInstallJournal(journalPath, journal) {
-  const temporary = `${journalPath}.tmp-${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
-  fs.writeFileSync(temporary, `${JSON.stringify(journal, null, 2)}\n`, { flag: "wx" });
-  fs.renameSync(temporary, journalPath);
+  const directoryIdentity = journal?.[INSTALL_JOURNAL_DIRECTORY_IDENTITY];
+  if (!directoryIdentity) {
+    throw new Error("pinned install journal directory identity is missing");
+  }
+  journal[INSTALL_JOURNAL_FILE_IDENTITY] = writePinnedDirectoryFile(
+    path.dirname(journalPath),
+    directoryIdentity,
+    path.basename(journalPath),
+    `${JSON.stringify(journal, null, 2)}\n`,
+    journal[INSTALL_JOURNAL_FILE_IDENTITY],
+    "install journal",
+  );
 }
 
 function hostPathState(pathName) {
@@ -4676,6 +5262,12 @@ function rollbackRecordedHostMutations(root, transactionRoot, journal) {
   }
   if (fs.existsSync(transactionRoot)) {
     writeInstallJournal(path.join(transactionRoot, "journal.json"), journal);
+    if (
+      operations.length > 0
+      && process.env.AGENT_FLOW_TEST_CRASH_AFTER_HOST_ROLLBACK === "1"
+    ) {
+      process.exit(93);
+    }
   }
 }
 
@@ -4792,6 +5384,23 @@ function sameManagedPathState(left, right) {
   return left.kind === "absent";
 }
 
+function managedPathStateWithIdentity(pathName) {
+  const state = managedPathState(pathName);
+  if (state.kind === "absent") return state;
+  return {
+    ...state,
+    filesystem_identity: hostFilesystemIdentity(pathName),
+  };
+}
+
+function sameManagedPathStateWithIdentity(left, right) {
+  return sameManagedPathState(left, right)
+    && (
+      left.kind === "absent"
+      || JSON.stringify(left.filesystem_identity) === JSON.stringify(right.filesystem_identity)
+    );
+}
+
 function managedInstallMutationOperation(transaction, requestedPath) {
   if (!transaction?.journal) return null;
   const requested = path.resolve(requestedPath);
@@ -4818,6 +5427,116 @@ function managedRootIsCaseInsensitive(root) {
   } catch {
     return process.platform === "win32";
   }
+}
+
+const PINNED_DIRECTORY_ATOMIC_WRITE = [
+  "import json, os, stat, sys",
+  "directory, expected_dev, expected_ino, target, expected_kind, target_dev, target_ino, payload_size_text = sys.argv[1:]",
+  "if os.path.basename(target) != target or target in ('', '.', '..'): raise SystemExit(70)",
+  "if not payload_size_text.isdigit(): raise SystemExit(70)",
+  "payload_size = int(payload_size_text)",
+  "flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_NOFOLLOW', 0)",
+  "try:",
+  " directory_fd = os.open(directory, flags)",
+  "except OSError:",
+  " raise SystemExit(75)",
+  "temporary = f'.agent-flow-write-{os.getpid()}-{os.urandom(12).hex()}'",
+  "try:",
+  " directory_stat = os.fstat(directory_fd)",
+  " if str(directory_stat.st_dev) != expected_dev or str(directory_stat.st_ino) != expected_ino:",
+  "  raise SystemExit(75)",
+  " try:",
+  "  target_stat = os.stat(target, dir_fd=directory_fd, follow_symlinks=False)",
+  " except FileNotFoundError:",
+  "  target_stat = None",
+  " if expected_kind == 'absent':",
+  "  if target_stat is not None: raise SystemExit(76)",
+  " elif expected_kind == 'file':",
+  "  if target_stat is None or not stat.S_ISREG(target_stat.st_mode) or target_stat.st_nlink != 1:",
+  "   raise SystemExit(76)",
+  "  if str(target_stat.st_dev) != target_dev or str(target_stat.st_ino) != target_ino:",
+  "   raise SystemExit(76)",
+  " else:",
+  "  raise SystemExit(70)",
+  " descriptor = os.open(",
+  "  temporary,",
+  "  os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0),",
+  "  0o600,",
+  "  dir_fd=directory_fd,",
+  " )",
+  " try:",
+  "  payload = sys.stdin.buffer.read(payload_size)",
+  "  if len(payload) != payload_size: raise SystemExit(78)",
+  "  with os.fdopen(descriptor, 'wb', closefd=False) as stream:",
+  "   stream.write(payload)",
+  "   stream.flush()",
+  "   os.fsync(descriptor)",
+  "  os.fchmod(descriptor, 0o644)",
+  "  temporary_stat = os.fstat(descriptor)",
+  " finally:",
+  "  os.close(descriptor)",
+  " os.rename(temporary, target, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)",
+  " current = os.stat(target, dir_fd=directory_fd, follow_symlinks=False)",
+  " if not stat.S_ISREG(current.st_mode) or current.st_nlink != 1:",
+  "  raise SystemExit(77)",
+  " if current.st_dev != temporary_stat.st_dev or current.st_ino != temporary_stat.st_ino:",
+  "  raise SystemExit(77)",
+  " os.fsync(directory_fd)",
+  " print(json.dumps({'device': str(current.st_dev), 'inode': str(current.st_ino), 'links': str(current.st_nlink), 'mode': current.st_mode & 0o777}))",
+  "finally:",
+  " try:",
+  "  os.unlink(temporary, dir_fd=directory_fd)",
+  " except FileNotFoundError:",
+  "  pass",
+  " os.close(directory_fd)",
+].join("\n");
+
+function writePinnedDirectoryFile(
+  directory,
+  directoryIdentity,
+  target,
+  content,
+  expectedTargetIdentity,
+  label,
+) {
+  const expectedKind = expectedTargetIdentity ? "file" : "absent";
+  const result = safeSpawnSync(
+    "/usr/bin/python3",
+    [
+      "-I",
+      "-c",
+      PINNED_DIRECTORY_ATOMIC_WRITE,
+      directory,
+      String(directoryIdentity.device),
+      String(directoryIdentity.inode),
+      target,
+      expectedKind,
+      String(expectedTargetIdentity?.device ?? ""),
+      String(expectedTargetIdentity?.inode ?? ""),
+      String(Buffer.byteLength(content, "utf8")),
+    ],
+    {
+      encoding: "utf8",
+      input: Buffer.from(content, "utf8"),
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 120_000,
+    },
+  );
+  if (!result.error && result.status === 0) {
+    try {
+      return JSON.parse(result.stdout);
+    } catch {
+      throw new Error(`pinned ${label} writer returned invalid identity`);
+    }
+  }
+  if (result.status === 75) {
+    throw new Error(`pinned ${label} directory changed`);
+  }
+  if (result.status === 76) {
+    throw new Error(`pinned ${label} target changed`);
+  }
+  const detail = result.error?.message || result.stderr?.trim() || `exit ${result.status}`;
+  throw new Error(`pinned ${label} write failed: ${detail}`);
 }
 
 const MANAGED_NOREPLACE_RENAME = [
@@ -5048,6 +5767,7 @@ function snapshotManagedInstallPaths(transaction) {
         throw new Error(`managed install backup integrity mismatch: ${operation.path}`);
       }
       before.backup = backupRelative;
+      before.backup_filesystem_identity = hostFilesystemIdentity(backupPath);
     }
     transaction.journal.managed_mutations.push(operation);
   }
@@ -5094,33 +5814,74 @@ function sealManagedInstallMutations(transaction) {
 
 function restoreManagedPathState(root, target, state, transactionRoot) {
   let staged = target;
+  let stagingRoot = null;
   if (state.kind !== "absent") {
-    if (!["directory", "file"].includes(state.kind) || typeof state.backup !== "string") {
+    if (
+      !["directory", "file"].includes(state.kind)
+      || typeof state.backup !== "string"
+      || !validateFilesystemIdentity(state.backup_filesystem_identity)
+    ) {
       throw new Error(`invalid managed install backup state: ${target}`);
     }
     const backupPath = path.resolve(transactionRoot, state.backup);
     ensureChildPath(transactionRoot, backupPath);
     assertNoSymlinkComponents(transactionRoot, backupPath);
-    if (!sameManagedPathState(state, managedPathState(backupPath))) {
+    if (
+      !sameManagedPathState(state, managedPathState(backupPath))
+      || !sameHostFilesystemIdentity(
+        backupPath,
+        state.backup_filesystem_identity,
+      )
+    ) {
       throw new Error(`managed install backup authentication failed: ${target}`);
     }
-    staged = backupPath;
+    const token = crypto.randomBytes(24).toString("hex");
+    stagingRoot = path.join(transactionRoot, "managed-restore-staging", token);
+    staged = path.join(stagingRoot, "next");
+    fs.mkdirSync(stagingRoot, { recursive: true });
+    fs.cpSync(backupPath, staged, {
+      recursive: true,
+      dereference: false,
+      errorOnExist: true,
+      force: false,
+    });
+    restoreManagedCopyRootMode(backupPath, staged);
+    let stagedState = managedPathState(staged);
+    if (!sameManagedPathState(state, stagedState)) {
+      restoreManagedCopyModes(backupPath, staged);
+      stagedState = managedPathState(staged);
+    }
+    if (
+      !sameManagedPathState(state, stagedState)
+      || !sameHostFilesystemIdentity(
+        backupPath,
+        state.backup_filesystem_identity,
+      )
+    ) {
+      throw new Error(`managed install backup authentication failed: ${target}`);
+    }
   }
-  const token = crypto.randomBytes(24).toString("hex");
-  const incoming = path.join(path.dirname(target), `.agent-flow-restore-${token}-next`);
-  const displaced = path.join(path.dirname(target), `.agent-flow-restore-${token}-previous`);
-  const current = managedPathState(target);
-  swapManagedPath(
-    root,
-    target,
-    staged,
-    incoming,
-    displaced,
-    current,
-    state,
-  );
-  removeManagedTemporaryPath(root, transactionRoot, incoming, state);
-  removeManagedTemporaryPath(root, transactionRoot, displaced, current);
+  try {
+    const token = crypto.randomBytes(24).toString("hex");
+    const incoming = path.join(path.dirname(target), `.agent-flow-restore-${token}-next`);
+    const displaced = path.join(path.dirname(target), `.agent-flow-restore-${token}-previous`);
+    const current = managedPathState(target);
+    swapManagedPath(
+      root,
+      target,
+      staged,
+      incoming,
+      displaced,
+      current,
+      state,
+    );
+    removeManagedTemporaryPath(root, transactionRoot, incoming, state);
+    removeManagedTemporaryPath(root, transactionRoot, displaced, current);
+  } finally {
+    if (stagingRoot && lstatIfExists(stagingRoot)) {
+      fs.rmSync(stagingRoot, { recursive: true, force: true });
+    }
+  }
 }
 
 function removeManagedTemporaryPath(root, transactionRoot, pathName, expected) {
@@ -5144,6 +5905,16 @@ function removeManagedTemporaryPath(root, transactionRoot, pathName, expected) {
 
 function rollbackRecordedManagedMutations(root, transactionRoot, journal) {
   const operations = Array.isArray(journal?.managed_mutations) ? journal.managed_mutations : [];
+  let restoredCount = 0;
+  const recordRestoredMutation = () => {
+    restoredCount += 1;
+    if (
+      process.env.AGENT_FLOW_TEST_CRASH_AFTER_MANAGED_ROLLBACK_COUNT
+      === String(restoredCount)
+    ) {
+      process.exit(92);
+    }
+  };
   for (let index = operations.length - 1; index >= 0; index -= 1) {
     const operation = operations[index];
     const target = hostMutationTarget(root, operation.path);
@@ -5183,6 +5954,7 @@ function rollbackRecordedManagedMutations(root, transactionRoot, journal) {
         if (!sameManagedPathState(managedPathState(target), operation.before)) {
           throw new Error(`managed install rollback integrity mismatch: ${operation.path}`);
         }
+        recordRestoredMutation();
       }
       removeManagedTemporaryPath(root, transactionRoot, incoming, operation.pending.after);
       removeManagedTemporaryPath(root, transactionRoot, displaced, operation.pending.before);
@@ -5197,6 +5969,7 @@ function rollbackRecordedManagedMutations(root, transactionRoot, journal) {
     if (!sameManagedPathState(managedPathState(target), operation.before)) {
       throw new Error(`managed install rollback integrity mismatch: ${operation.path}`);
     }
+    recordRestoredMutation();
   }
   if (fs.existsSync(transactionRoot)) {
     writeInstallJournal(path.join(transactionRoot, "journal.json"), journal);
@@ -5218,6 +5991,7 @@ function verifyCommittedManagedMutations(root, journal) {
 function commitSkillInstallTransaction(transaction) {
   if (!transaction) return;
   sealManagedInstallMutations(transaction);
+  verifySkillTransactionLiveState(transaction);
   const indexPath = path.join(transaction.live, "index.json");
   if (!fs.existsSync(indexPath)) throw new Error("skill install transaction produced no index");
   const marker = readRegularFileSnapshotNoFollow(
@@ -5226,6 +6000,23 @@ function commitSkillInstallTransaction(transaction) {
     "skill transaction marker",
   ).bytes.toString("utf8").trim();
   if (marker !== transaction.token) throw new Error("skill install transaction ownership changed");
+  verifyCommittedHostMutations(transaction.root, transaction.journal);
+  verifyCommittedManagedMutations(transaction.root, transaction.journal);
+  transaction.journal.stage = "sealed";
+  writeInstallJournal(transaction.journalPath, transaction.journal);
+  holdInstallForTest(
+    "AGENT_FLOW_TEST_HOLD_BEFORE_COMMIT_FINAL_VERIFY_MS",
+    "commit-final-verify-ready",
+  );
+  verifySkillTransactionLiveState(transaction);
+  const finalMarker = readRegularFileSnapshotNoFollow(
+    transaction.marker,
+    path.dirname(transaction.transactionRoot),
+    "skill transaction marker",
+  ).bytes.toString("utf8").trim();
+  if (finalMarker !== transaction.token) {
+    throw new Error("skill install transaction ownership changed before commit");
+  }
   verifyCommittedHostMutations(transaction.root, transaction.journal);
   verifyCommittedManagedMutations(transaction.root, transaction.journal);
   transaction.journal.stage = "committed";
@@ -5244,12 +6035,265 @@ function commitSkillInstallTransaction(transaction) {
     transaction.journal,
   );
   fs.unlinkSync(transaction.marker);
-  fs.rmSync(transaction.transactionRoot, { recursive: true, force: true });
+  removeAuthenticatedTransactionRoot(
+    transaction.transactionRoot,
+    transaction.transactionRootIdentity,
+  );
   if (activeManagedInstallTransaction === transaction) activeManagedInstallTransaction = null;
 }
 
+function authenticateSkillBackup(
+  backup,
+  authorityRoot,
+  previous,
+  expectedState = null,
+  failureMessage = "cannot restore unauthenticated skill index backup",
+  allowPinnedDrift = false,
+) {
+  if (!fs.existsSync(backup)) return null;
+  if (!previous) throw new Error(failureMessage);
+  const state = managedPathStateWithIdentity(backup);
+  if (
+    state.kind !== "directory"
+    || (allowPinnedDrift && !expectedState)
+    || (
+      expectedState
+      && !sameManagedPathStateWithIdentity(state, expectedState)
+    )
+  ) {
+    throw new Error(failureMessage);
+  }
+  const index = readRegularFileSnapshotNoFollow(
+    path.join(backup, "index.json"),
+    authorityRoot,
+    "backup skill index",
+  ).bytes;
+  const hash = crypto.createHash("sha256").update(index).digest("hex");
+  if (hash !== previous.hash || !index.equals(previous.bytes)) {
+    throw new Error(failureMessage);
+  }
+  const payload = previous.payload ?? JSON.parse(index.toString("utf8"));
+  const ownershipEntries = payload?.managed_ownership?.version === 1
+    && payload.managed_ownership.entries
+    && typeof payload.managed_ownership.entries === "object"
+    && !Array.isArray(payload.managed_ownership.entries)
+    ? payload.managed_ownership.entries
+    : null;
+  const indexedEntries = new Set();
+  for (const skill of payload?.skills || []) {
+    const relative = String(skill?.path || "").replaceAll("\\", "/");
+    const prefix = ".agent-flow/skills/";
+    if (!relative.startsWith(prefix) || typeof skill.tree_hash !== "string") continue;
+    const entry = relative.slice(prefix.length).split("/")[0];
+    if (!isPortableSkillName(entry)) continue;
+    indexedEntries.add(entry);
+    const current = hostPathState(path.join(backup, entry));
+    const ownership = ownershipEntries?.[entry];
+    if (
+      ownershipEntries !== null
+      && (
+        !ownership
+        || typeof ownership !== "object"
+        || Array.isArray(ownership)
+        || ownership.tree_hash !== skill.tree_hash
+        || !ownership.filesystem_identity
+      )
+    ) {
+      throw new Error(failureMessage);
+    }
+    if (
+      current.kind !== "directory"
+      || (!allowPinnedDrift && current.tree_hash !== skill.tree_hash)
+    ) {
+      throw new Error(failureMessage);
+    }
+  }
+  if (ownershipEntries !== null) {
+    for (const [entry, ownership] of Object.entries(ownershipEntries)) {
+      if (
+        !isPortableSkillName(entry)
+        || !ownership
+        || typeof ownership !== "object"
+        || Array.isArray(ownership)
+        || typeof ownership.tree_hash !== "string"
+        || !ownership.filesystem_identity
+      ) {
+        throw new Error(failureMessage);
+      }
+      const target = path.join(backup, entry);
+      const current = hostPathState(target);
+      if (
+        current.kind !== "directory"
+        || !sameHostFilesystemIdentity(target, ownership.filesystem_identity)
+        || (
+          !indexedEntries.has(entry)
+          && current.tree_hash !== ownership.tree_hash
+        )
+      ) {
+        throw new Error(failureMessage);
+      }
+    }
+  }
+  return { index, state };
+}
+
+function removeAuthenticatedSkillLive(live, expected, label) {
+  if (
+    expected?.kind !== "directory"
+    || !sameManagedPathStateWithIdentity(
+      managedPathStateWithIdentity(live),
+      expected,
+    )
+  ) {
+    throw new Error(`${label} changed before delete`);
+  }
+  holdInstallForTest(
+    "AGENT_FLOW_TEST_HOLD_BEFORE_SKILL_LIVE_DELETE_MS",
+    "skill-live-delete-ready",
+  );
+
+  const quarantine = path.join(
+    path.dirname(live),
+    `.skills-live-quarantine-${crypto.randomBytes(24).toString("hex")}`,
+  );
+  renameManagedNoReplace(live, quarantine);
+  const quarantinedState = managedPathStateWithIdentity(quarantine);
+  if (
+    !sameManagedPathStateWithIdentity(quarantinedState, expected)
+    || lstatIfExists(live)
+  ) {
+    if (!lstatIfExists(live) && lstatIfExists(quarantine)) {
+      renameManagedNoReplace(quarantine, live);
+    }
+    throw new Error(`${label} changed during delete`);
+  }
+  if (
+    !sameManagedPathStateWithIdentity(
+      managedPathStateWithIdentity(quarantine),
+      expected,
+    )
+  ) {
+    if (!lstatIfExists(live) && lstatIfExists(quarantine)) {
+      renameManagedNoReplace(quarantine, live);
+    }
+    throw new Error(`${label} changed in quarantine`);
+  }
+  fs.rmSync(quarantine, { recursive: true });
+}
+function sameDirectoryFilesystemIdentity(pathName, expected) {
+  try {
+    const current = fs.lstatSync(pathName);
+    return current.isDirectory()
+      && !current.isSymbolicLink()
+      && String(current.dev) === expected?.device
+      && String(current.ino) === expected?.inode;
+  } catch {
+    return false;
+  }
+}
+
+function removeAuthenticatedTransactionRoot(transactionRoot, expectedIdentity) {
+  if (!lstatIfExists(transactionRoot)) return;
+  if (!sameDirectoryFilesystemIdentity(transactionRoot, expectedIdentity)) {
+    throw new Error(`install transaction root changed before cleanup: ${transactionRoot}`);
+  }
+  holdInstallForTest(
+    "AGENT_FLOW_TEST_HOLD_BEFORE_TRANSACTION_CLEANUP_MS",
+    "transaction-cleanup-ready",
+  );
+  const quarantine = path.join(
+    path.dirname(transactionRoot),
+    `.install-transaction-quarantine-${crypto.randomBytes(24).toString("hex")}`,
+  );
+  renameManagedNoReplace(transactionRoot, quarantine);
+  if (
+    !sameDirectoryFilesystemIdentity(quarantine, expectedIdentity)
+    || lstatIfExists(transactionRoot)
+  ) {
+    if (!lstatIfExists(transactionRoot) && lstatIfExists(quarantine)) {
+      renameManagedNoReplace(quarantine, transactionRoot);
+    }
+    throw new Error(`install transaction root changed during cleanup: ${transactionRoot}`);
+  }
+  fs.rmSync(quarantine, { recursive: true });
+}
+
+
+function preflightRecordedRollbackAuthorities(root, transactionRoot, journal) {
+  for (const operation of journal?.managed_mutations || []) {
+    const target = hostMutationTarget(root, operation.path);
+    if (["directory", "file"].includes(operation.before?.kind)) {
+      const backupPath = path.resolve(transactionRoot, String(operation.before.backup || ""));
+      ensureChildPath(transactionRoot, backupPath);
+      assertNoSymlinkComponents(transactionRoot, backupPath);
+      if (
+        !sameManagedPathState(operation.before, managedPathState(backupPath))
+        || !sameHostFilesystemIdentity(
+          backupPath,
+          operation.before.backup_filesystem_identity,
+        )
+      ) {
+        throw new Error(`managed install backup authentication failed: ${target}`);
+      }
+    }
+  }
+  for (const operation of journal?.host_mutations || []) {
+    const target = hostMutationTarget(root, operation.path);
+    if (["directory", "file"].includes(operation.before?.kind)) {
+      const backupPath = path.resolve(transactionRoot, String(operation.before.backup || ""));
+      ensureChildPath(transactionRoot, backupPath);
+      assertNoSymlinkComponents(transactionRoot, backupPath);
+      if (!sameHostPathState(operation.before, hostPathState(backupPath))) {
+        throw new Error(`host skill backup authentication failed: ${target}`);
+      }
+    }
+    if (operation.rolled_back === true) {
+      if (!sameHostPathState(operation.before, hostPathState(target), true)) {
+        throw new Error(`rolled back host skill path changed: ${target}`);
+      }
+    } else if (operation.original) {
+      const original = path.resolve(root, operation.original);
+      ensureChildPath(root, original);
+      assertNoSymlinkComponents(root, path.dirname(original));
+      if (!sameHostPathState(operation.before, hostPathState(original), true)) {
+        throw new Error(`host skill original authentication failed: ${target}`);
+      }
+    }
+    if (operation.pending?.displaced) {
+      const displaced = path.resolve(root, operation.pending.displaced);
+      ensureChildPath(root, displaced);
+      assertNoSymlinkComponents(root, path.dirname(displaced));
+      const displacedState = hostPathState(displaced);
+      if (
+        displacedState.kind !== "absent"
+        && !sameHostPathState(operation.before, displacedState, true)
+      ) {
+        throw new Error(`host skill original authentication failed: ${target}`);
+      }
+    }
+  }
+}
 function rollbackSkillInstallTransaction(transaction) {
+
   if (!transaction || !fs.existsSync(transaction.transactionRoot)) return;
+  if (transaction.journal.unmanaged_conflict) {
+    throw new Error(transaction.journal.unmanaged_conflict);
+  }
+  reconcilePendingSkillMaterialization(transaction);
+  verifySkillTransactionLiveState(transaction);
+  const authenticatedBackup = authenticateSkillBackup(
+    transaction.backup,
+    path.dirname(transaction.transactionRoot),
+    transaction.previous,
+    transaction.journal.backup_state,
+    "cannot restore unauthenticated skill index backup",
+    transaction.journal.version >= 9,
+  );
+  preflightRecordedRollbackAuthorities(
+    transaction.root,
+    transaction.transactionRoot,
+    transaction.journal,
+  );
   let hostRollbackError = null;
   let managedRollbackError = null;
   try {
@@ -5262,6 +6306,7 @@ function rollbackSkillInstallTransaction(transaction) {
   } catch (error) {
     hostRollbackError = error;
   }
+  verifySkillTransactionLiveState(transaction);
   const liveMarker = fs.existsSync(transaction.marker)
     ? readRegularFileSnapshotNoFollow(
       transaction.marker,
@@ -5273,25 +6318,34 @@ function rollbackSkillInstallTransaction(transaction) {
     if (liveMarker !== transaction.token) {
       throw new Error(`cannot roll back unowned live skills directory: ${transaction.live}`);
     }
-    fs.rmSync(transaction.live, { recursive: true, force: true });
+    removeAuthenticatedSkillLive(
+      transaction.live,
+      transaction.journal.live_state
+        ?? transaction.journal.pending_live_state
+        ?? transaction.journal.initial_live_state,
+      "skill transaction live tree",
+    );
   }
-  if (fs.existsSync(transaction.backup)) {
-    const backupIndex = readRegularFileSnapshotNoFollow(
-      path.join(transaction.backup, "index.json"),
-      path.dirname(transaction.transactionRoot),
-      "backup skill index",
-    ).bytes;
-    const hash = crypto.createHash("sha256").update(backupIndex).digest("hex");
-    if (hash !== transaction.previous?.hash || !backupIndex.equals(transaction.previous.bytes)) {
-      throw new Error("cannot restore unauthenticated skill index backup");
+  if (authenticatedBackup) {
+    if (
+      !sameManagedPathStateWithIdentity(
+        managedPathStateWithIdentity(transaction.backup),
+        authenticatedBackup.state,
+      )
+    ) {
+      throw new Error("cannot restore changed skill index backup");
     }
     fs.renameSync(transaction.backup, transaction.live);
+    const restoredState = managedPathStateWithIdentity(transaction.live);
     const restoredIndex = readRegularFileSnapshotNoFollow(
       path.join(transaction.live, "index.json"),
       path.dirname(transaction.transactionRoot),
       "restored skill index",
     ).bytes;
-    if (!restoredIndex.equals(transaction.previous.bytes)) {
+    if (
+      !sameManagedPathStateWithIdentity(restoredState, authenticatedBackup.state)
+      || !restoredIndex.equals(authenticatedBackup.index)
+    ) {
       throw new Error("skill transaction restore mismatch");
     }
   }
@@ -5302,44 +6356,469 @@ function rollbackSkillInstallTransaction(transaction) {
     );
   }
   if (hostRollbackError || managedRollbackError) {
+    delete transaction.journal.live_state;
     transaction.journal.stage = "rollback-blocked";
     writeInstallJournal(transaction.journalPath, transaction.journal);
     throw hostRollbackError || managedRollbackError;
   }
-  fs.rmSync(transaction.transactionRoot, { recursive: true, force: true });
+  removeAuthenticatedTransactionRoot(
+    transaction.transactionRoot,
+    transaction.transactionRootIdentity,
+  );
   if (activeManagedInstallTransaction === transaction) activeManagedInstallTransaction = null;
 }
-
-function preserveUnmanagedSkillEntries(transaction, previousIndex, currentIndex) {
-  if (!transaction || !fs.existsSync(transaction.backup)) return;
-  const managed = new Set(["index.json", ...GENERATED_PROJECT_SKILL_NAMES]);
-  const preservedUnmanaged = new Set();
-  for (const entry of fs.readdirSync(path.join(KIT_ROOT, "skills"), { withFileTypes: true })) {
-    if (!entry.isDirectory()) managed.add(entry.name);
-  }
+function rejectReplacedManagedSkillEntries(
+  agentFlowDir,
+  previousIndex,
+  plannedEntries,
+) {
+  const entries = previousIndex?.managed_ownership?.version === 1
+    && previousIndex.managed_ownership.entries
+    && typeof previousIndex.managed_ownership.entries === "object"
+    && !Array.isArray(previousIndex.managed_ownership.entries)
+    ? previousIndex.managed_ownership.entries
+    : null;
+  if (!entries) return;
+  const indexedTreeHashes = new Map();
   for (const skill of previousIndex?.skills || []) {
     const relative = String(skill?.path || "").replaceAll("\\", "/");
     const prefix = ".agent-flow/skills/";
     if (!relative.startsWith(prefix)) continue;
     const rootName = relative.slice(prefix.length).split("/")[0];
-    if (rootName) managed.add(rootName);
-  }
-  for (const conflict of previousIndex?.conflicts || []) {
-    for (const ignored of conflict?.ignored || []) {
-      const match = String(ignored).replaceAll("\\", "/")
-        .match(/^\.agent-flow\/skills\/([^/]+)\/SKILL\.md$/);
-      if (match) managed.add(match[1]);
+    if (!isPortableSkillName(rootName) || typeof skill.tree_hash !== "string") continue;
+    if (
+      indexedTreeHashes.has(rootName)
+      && indexedTreeHashes.get(rootName) !== skill.tree_hash
+    ) {
+      indexedTreeHashes.set(rootName, null);
+    } else {
+      indexedTreeHashes.set(rootName, skill.tree_hash);
     }
   }
-  for (const entry of fs.readdirSync(transaction.backup)) {
-    if (managed.has(entry) || entry === ".agent-flow-transaction-owner") continue;
-    const source = path.join(transaction.backup, entry);
-    const destination = path.join(transaction.live, entry);
-    if (lstatIfExists(destination)) {
+  for (const [entry, ownership] of Object.entries(entries)) {
+    if (!plannedEntries.has(entry)) continue;
+    const target = path.join(agentFlowDir, "skills", entry);
+    const current = hostPathState(target);
+    if (current.kind === "absent") continue;
+    if (
+      current.kind !== "directory"
+      || (
+        indexedTreeHashes.has(entry)
+          ? indexedTreeHashes.get(entry) !== ownership?.tree_hash
+          : current.tree_hash !== ownership?.tree_hash
+      )
+      || !sameHostFilesystemIdentity(target, ownership?.filesystem_identity)
+    ) {
       throw new Error(`unmanaged skill entry conflicts with installed skill: ${entry}`);
     }
-    fs.cpSync(source, destination, { recursive: true, dereference: false, errorOnExist: true, force: false });
-    preservedUnmanaged.add(entry);
+  }
+}
+
+
+function managedSkillOwnership(root, skills, plannedEntries = []) {
+  const entries = Object.create(null);
+  for (const skill of skills) {
+    const relative = String(skill?.path || "").replaceAll("\\", "/");
+    const prefix = ".agent-flow/skills/";
+    if (!relative.startsWith(prefix)) continue;
+    const rootName = relative.slice(prefix.length).split("/")[0];
+    if (!isPortableSkillName(rootName)) continue;
+    const state = hostPathState(path.join(root, ".agent-flow", "skills", rootName));
+    if (state.kind !== "directory" || state.tree_hash !== skill.tree_hash) continue;
+    entries[rootName] = {
+      tree_hash: state.tree_hash,
+      filesystem_identity: state.filesystem_identity,
+    };
+  }
+  for (const rootName of plannedEntries) {
+    if (!isPortableSkillName(rootName) || entries[rootName]) continue;
+    const state = hostPathState(path.join(root, ".agent-flow", "skills", rootName));
+    if (state.kind !== "directory") continue;
+    entries[rootName] = {
+      tree_hash: state.tree_hash,
+      filesystem_identity: state.filesystem_identity,
+    };
+  }
+  return { version: 1, entries };
+}
+
+function blockSkillInstallRollback(transaction, message) {
+  transaction.journal.stage = "rollback-blocked";
+  transaction.journal.unmanaged_conflict = message;
+  writeInstallJournal(transaction.journalPath, transaction.journal);
+  throw new Error(message);
+}
+
+function copyUnmanagedSkillEntry(transaction, entry, source, destination) {
+  const sourceState = managedPathStateWithIdentity(source);
+  const stagingRoot = path.join(transaction.transactionRoot, "unmanaged-staging");
+  const staged = path.join(stagingRoot, entry);
+  fs.mkdirSync(stagingRoot, { recursive: true });
+  if (lstatIfExists(staged)) {
+    blockSkillInstallRollback(
+      transaction,
+      `unmanaged skill staging already exists: ${entry}`,
+    );
+  }
+  fs.cpSync(source, staged, {
+    recursive: true,
+    dereference: false,
+    errorOnExist: true,
+    force: false,
+  });
+  const stagedState = managedPathStateWithIdentity(staged);
+  if (
+    !sameManagedPathStateWithIdentity(
+      managedPathStateWithIdentity(source),
+      sourceState,
+    )
+    || !sameManagedPathState(stagedState, sourceState)
+  ) {
+    blockSkillInstallRollback(
+      transaction,
+      `unmanaged skill source changed while copying: ${entry}`,
+    );
+  }
+  holdInstallForTest(
+    "AGENT_FLOW_TEST_HOLD_AFTER_UNMANAGED_SKILL_COPY_MS",
+    `unmanaged-skill-copy-ready:${entry}`,
+  );
+  if (!sameManagedPathStateWithIdentity(managedPathStateWithIdentity(source), sourceState)) {
+    blockSkillInstallRollback(
+      transaction,
+      `unmanaged skill source changed while copying: ${entry}`,
+    );
+  }
+  if (!sameManagedPathStateWithIdentity(managedPathStateWithIdentity(staged), stagedState)) {
+    blockSkillInstallRollback(
+      transaction,
+      `unmanaged skill staging changed while copying: ${entry}`,
+    );
+  }
+  if (lstatIfExists(destination)) {
+    blockSkillInstallRollback(
+      transaction,
+      `unmanaged skill destination changed while copying: ${entry}`,
+    );
+  }
+  try {
+    renameManagedNoReplace(staged, destination);
+  } catch (error) {
+    if (lstatIfExists(destination)) {
+      blockSkillInstallRollback(
+        transaction,
+        `unmanaged skill destination changed while copying: ${entry}`,
+      );
+    }
+    throw error;
+  }
+  if (!sameManagedPathStateWithIdentity(managedPathStateWithIdentity(destination), stagedState)) {
+    blockSkillInstallRollback(
+      transaction,
+      `unmanaged skill destination changed while copying: ${entry}`,
+    );
+  }
+  return stagedState;
+}
+
+function snapshotSkillLiveEntries(live, allowed = null) {
+  const entries = new Map();
+  for (const entry of fs.readdirSync(live)) {
+    if (
+      entry === "index.json"
+      || (
+        allowed
+        && entry !== ".agent-flow-transaction-owner"
+        && !allowed.has(entry)
+      )
+    ) continue;
+    entries.set(entry, managedPathStateWithIdentity(path.join(live, entry)));
+  }
+  return entries;
+}
+
+function verifySkillLiveEntries(transaction, initialEntries, preservedEntries, currentIndex) {
+  const expectedNames = new Set([
+    "index.json",
+    ...initialEntries.keys(),
+    ...preservedEntries.keys(),
+  ]);
+  for (const entry of fs.readdirSync(transaction.live)) {
+    if (!expectedNames.has(entry)) {
+      blockSkillInstallRollback(
+        transaction,
+        `skill transaction live tree changed outside transaction: ${entry}`,
+      );
+    }
+  }
+  for (const [entry, expected] of [...initialEntries, ...preservedEntries]) {
+    if (
+      !sameManagedPathStateWithIdentity(
+        managedPathStateWithIdentity(path.join(transaction.live, entry)),
+        expected,
+      )
+    ) {
+      blockSkillInstallRollback(
+        transaction,
+        `skill transaction live tree changed outside transaction: ${entry}`,
+      );
+    }
+  }
+  for (const [entry, ownership] of Object.entries(
+    currentIndex?.managed_ownership?.entries || {},
+  )) {
+    if (!sameHostPathState(hostPathState(path.join(transaction.live, entry)), {
+      kind: "directory",
+      tree_hash: ownership.tree_hash,
+      filesystem_identity: ownership.filesystem_identity,
+    }, true)) {
+      blockSkillInstallRollback(
+        transaction,
+        `managed skill ownership changed before commit: ${entry}`,
+      );
+    }
+  }
+}
+
+function sealSkillTransactionLiveState(transaction, expected) {
+  if (
+    expected?.kind !== "directory"
+    || !sameManagedPathStateWithIdentity(
+      managedPathStateWithIdentity(transaction.live),
+      expected,
+    )
+  ) {
+    blockSkillInstallRollback(
+      transaction,
+      "skill transaction live tree changed while sealing",
+    );
+  }
+  transaction.journal.live_state = expected;
+  delete transaction.journal.pending_live_state;
+  writeInstallJournal(transaction.journalPath, transaction.journal);
+}
+
+function unsealedSkillTransactionLiveState(live, journal) {
+  if (!lstatIfExists(live)) return null;
+  const initial = journal?.initial_live_state;
+  if (
+    initial?.kind !== "directory"
+    || !sameDirectoryFilesystemIdentity(live, initial.filesystem_identity)
+  ) {
+    throw new Error("skill transaction live directory identity changed");
+  }
+  verifyPinnedSkillLiveStates(live, journal);
+  const allowed = new Set([
+    ".agent-flow-transaction-owner",
+    "index.json",
+    ...(journal.planned_live_entries || []),
+  ]);
+  for (const entry of fs.readdirSync(live)) {
+    if (!allowed.has(entry)) {
+      throw new Error(`skill transaction live tree changed outside transaction: ${entry}`);
+    }
+  }
+  const marker = path.join(live, ".agent-flow-transaction-owner");
+  if (
+    !lstatIfExists(marker)
+    || readRegularFileSnapshotNoFollow(
+      marker,
+      path.dirname(live),
+      "skill transaction marker",
+    ).bytes.toString("utf8").trim() !== journal.token
+  ) {
+    throw new Error("skill transaction live marker is not owned");
+  }
+  const state = managedPathStateWithIdentity(live);
+  if (
+    !sameManagedPathStateWithIdentity(
+      managedPathStateWithIdentity(live),
+      state,
+    )
+  ) {
+    throw new Error("skill transaction live tree changed while authenticating");
+  }
+  return state;
+}
+
+function verifySkillTransactionLiveState(transaction) {
+  const expected = transaction?.journal?.live_state
+    ?? transaction?.journal?.pending_live_state;
+  if (!expected) {
+    let pending;
+    try {
+      pending = unsealedSkillTransactionLiveState(
+        transaction.live,
+        transaction.journal,
+      );
+    } catch (error) {
+      blockSkillInstallRollback(transaction, String(error?.message || error));
+    }
+    if (!pending) return null;
+    transaction.journal.pending_live_state = pending;
+    writeInstallJournal(transaction.journalPath, transaction.journal);
+    return pending;
+  }
+  if (
+    !sameManagedPathStateWithIdentity(
+      managedPathStateWithIdentity(transaction.live),
+      expected,
+    )
+  ) {
+    blockSkillInstallRollback(
+      transaction,
+      "skill transaction live tree changed outside transaction",
+    );
+  }
+  return expected;
+}
+
+function verifyInterruptedSkillLiveState(live, journal) {
+  if (journal.stage === "committed" || !lstatIfExists(live)) return null;
+  const expected = journal.live_state ?? journal.pending_live_state;
+  if (!expected) {
+    if (!journal.initial_live_state) {
+      if (["prepared", "moving-skills", "skills-moved", "rollback-blocked"].includes(journal.stage)) {
+        return null;
+      }
+      throw new Error("legacy live tree is unauthenticated");
+    }
+    return unsealedSkillTransactionLiveState(live, journal);
+  }
+  if (
+    !sameManagedPathStateWithIdentity(
+      managedPathStateWithIdentity(live),
+      expected,
+    )
+  ) {
+    throw new Error("skill transaction live tree changed outside transaction");
+  }
+  return expected;
+}
+function preserveUnmanagedSkillEntries(transaction, previousIndex, currentIndex) {
+  if (!transaction) return;
+  const managed = new Set(["index.json"]);
+  for (const entry of fs.readdirSync(path.join(KIT_ROOT, "skills"), { withFileTypes: true })) {
+    if (!entry.isDirectory()) managed.add(entry.name);
+  }
+  holdInstallForTest(
+    "AGENT_FLOW_TEST_HOLD_BEFORE_SKILL_LIVE_SNAPSHOT_MS",
+    "skill-live-snapshot-ready",
+  );
+  verifyPinnedSkillLiveStates(transaction.live, transaction.journal);
+  const plannedEntries = new Set(transaction.journal.planned_live_entries || []);
+  const snapshotEntries = new Set([...managed, ...plannedEntries]);
+  const liveEntriesBefore = snapshotSkillLiveEntries(transaction.live, snapshotEntries);
+  const preservedUnmanaged = new Map();
+  const previouslyManaged = new Map();
+  const ownershipEntries = previousIndex?.managed_ownership?.version === 1
+    && previousIndex.managed_ownership.entries
+    && typeof previousIndex.managed_ownership.entries === "object"
+    && !Array.isArray(previousIndex.managed_ownership.entries)
+    ? previousIndex.managed_ownership.entries
+    : null;
+  for (const skill of previousIndex?.skills || []) {
+    const relative = String(skill?.path || "").replaceAll("\\", "/");
+    const prefix = ".agent-flow/skills/";
+    if (!relative.startsWith(prefix)) continue;
+    const rootName = relative.slice(prefix.length).split("/")[0];
+    if (!isPortableSkillName(rootName)) continue;
+    if (
+      ownershipEntries === null
+      && GENERATED_PROJECT_SKILL_NAMES.has(rootName)
+      && relative === `.agent-flow/skills/${rootName}`
+      && skill?.name === rootName
+    ) {
+      const source = path.join(transaction.backup, rootName);
+      try {
+        const state = hostPathState(source);
+        if (state.kind === "directory") previouslyManaged.set(rootName, state);
+      } catch {
+        continue;
+      }
+      continue;
+    }
+    if (typeof skill.tree_hash !== "string") continue;
+    const ownership = ownershipEntries
+      && Object.prototype.hasOwnProperty.call(ownershipEntries, rootName)
+      ? ownershipEntries[rootName]
+      : null;
+    const validOwnership = ownership
+      && typeof ownership === "object"
+      && !Array.isArray(ownership)
+      && ownership.tree_hash === skill.tree_hash
+      && ownership.filesystem_identity;
+    const source = path.join(transaction.backup, rootName);
+    try {
+      const state = hostPathState(source);
+      if (
+        validOwnership
+        && state.kind === "directory"
+        && sameHostFilesystemIdentity(source, ownership.filesystem_identity)
+        && (state.tree_hash === ownership.tree_hash || plannedEntries.has(rootName))
+      ) {
+        previouslyManaged.set(rootName, state);
+      }
+    } catch {
+      continue;
+    }
+  }
+  if (ownershipEntries !== null) {
+    for (const [rootName, ownership] of Object.entries(ownershipEntries)) {
+      if (
+        previouslyManaged.has(rootName)
+        || !isPortableSkillName(rootName)
+        || !ownership
+        || typeof ownership !== "object"
+        || Array.isArray(ownership)
+        || typeof ownership.tree_hash !== "string"
+        || !ownership.filesystem_identity
+      ) continue;
+      const source = path.join(transaction.backup, rootName);
+      try {
+        const state = hostPathState(source);
+        if (
+          state.kind === "directory"
+          && state.tree_hash === ownership.tree_hash
+          && sameHostFilesystemIdentity(source, ownership.filesystem_identity)
+        ) {
+          previouslyManaged.set(rootName, state);
+        }
+      } catch {
+        continue;
+      }
+    }
+  }
+  for (const entry of (
+    fs.existsSync(transaction.backup)
+      ? fs.readdirSync(transaction.backup)
+      : []
+  )) {
+    if (managed.has(entry) || entry === ".agent-flow-transaction-owner") continue;
+    const source = path.join(transaction.backup, entry);
+    const previousState = previouslyManaged.get(entry);
+    if (
+      previousState
+      && sameHostPathState(hostPathState(source), previousState, true)
+    ) continue;
+    const destination = path.join(transaction.live, entry);
+    if (lstatIfExists(destination)) {
+      const sourceState = hostPathState(source);
+      const destinationState = hostPathState(destination);
+      if (
+        ownershipEntries === null
+        && sourceState.kind === "directory"
+        && destinationState.kind === "directory"
+        && sourceState.tree_hash === destinationState.tree_hash
+      ) {
+        continue;
+      }
+      throw new Error(`unmanaged skill entry conflicts with installed skill: ${entry}`);
+    }
+    preservedUnmanaged.set(
+      entry,
+      copyUnmanagedSkillEntry(transaction, entry, source, destination),
+    );
   }
   const indexed = new Set((currentIndex?.skills || []).map((skill) => skill.name));
   for (const entry of fs.readdirSync(transaction.live, { withFileTypes: true })) {
@@ -5352,10 +6831,54 @@ function preserveUnmanagedSkillEntries(transaction, previousIndex, currentIndex)
       currentIndex.warnings.push(`${entry.name}: preserved unmanaged skill entry without adopting ownership`);
     }
   }
-  fs.writeFileSync(
-    path.join(transaction.live, "index.json"),
+  transaction.liveIndexIdentity = writePinnedDirectoryFile(
+    transaction.live,
+    transaction.liveIdentity,
+    "index.json",
     `${JSON.stringify(currentIndex, null, 2)}\n`,
-    "utf8",
+    transaction.liveIndexIdentity,
+    "skill index",
+  );
+  verifySkillLiveEntries(
+    transaction,
+    liveEntriesBefore,
+    preservedUnmanaged,
+    currentIndex,
+  );
+  const pendingLiveState = managedPathStateWithIdentity(transaction.live);
+  verifySkillLiveEntries(
+    transaction,
+    liveEntriesBefore,
+    preservedUnmanaged,
+    currentIndex,
+  );
+  if (
+    !sameManagedPathStateWithIdentity(
+      managedPathStateWithIdentity(transaction.live),
+      pendingLiveState,
+    )
+  ) {
+    blockSkillInstallRollback(
+      transaction,
+      "skill transaction live tree changed while preparing seal",
+    );
+  }
+  transaction.journal.pending_live_state = pendingLiveState;
+  writeInstallJournal(transaction.journalPath, transaction.journal);
+  holdInstallForTest(
+    "AGENT_FLOW_TEST_HOLD_AFTER_SKILL_LIVE_VERIFY_MS",
+    "skill-live-verified",
+  );
+  verifySkillLiveEntries(
+    transaction,
+    liveEntriesBefore,
+    preservedUnmanaged,
+    currentIndex,
+  );
+  sealSkillTransactionLiveState(transaction, pendingLiveState);
+  holdInstallForTest(
+    "AGENT_FLOW_TEST_HOLD_AFTER_SKILL_LIVE_SEAL_MS",
+    "skill-live-sealed",
   );
 }
 
@@ -5374,19 +6897,24 @@ function validateJournalManagedState(state, backup = null) {
   return false;
 }
 
-function validateJournalHostState(state, backup = null, requireIdentity = false) {
-  if (!state || typeof state !== "object" || Array.isArray(state)) return false;
-  if (state.kind === "absent") return state.backup === undefined;
-  const identity = state.filesystem_identity;
-  const validIdentity = identity
+function validateFilesystemIdentity(identity) {
+  return Boolean(
+    identity
     && typeof identity === "object"
     && !Array.isArray(identity)
     && /^[0-9]+$/.test(String(identity.device || ""))
     && /^[0-9]+$/.test(String(identity.inode || ""))
     && /^[0-9]+$/.test(String(identity.links || ""))
-    && Number.isInteger(identity.mode);
+    && Number.isInteger(identity.mode),
+  );
+}
+
+function validateJournalHostState(state, backup = null, requireIdentity = false) {
+  if (!state || typeof state !== "object" || Array.isArray(state)) return false;
+  if (state.kind === "absent") return state.backup === undefined;
+  const validIdentity = validateFilesystemIdentity(state.filesystem_identity);
   if (requireIdentity && !validIdentity) return false;
-  if (identity !== undefined && !validIdentity) return false;
+  if (state.filesystem_identity !== undefined && !validIdentity) return false;
   if (state.kind === "symlink") {
     return typeof state.target === "string" && state.backup === undefined;
   }
@@ -5446,17 +6974,176 @@ function assertInterruptedSkillIndexCommitment(agentFlowDir, expectedHash) {
 
 
 function validateInterruptedInstallJournal(root, agentFlowDir, transactionRoot, journal, recoveryLockToken) {
+  const validLiveState = journal?.live_state === undefined || (
+    journal.live_state?.kind === "directory"
+    && validateJournalManagedState(journal.live_state)
+    && validateFilesystemIdentity(journal.live_state.filesystem_identity)
+  );
+  const validInitialLiveState = journal?.initial_live_state === undefined || (
+    journal.initial_live_state?.kind === "directory"
+    && validateJournalManagedState(journal.initial_live_state)
+    && validateFilesystemIdentity(journal.initial_live_state.filesystem_identity)
+  );
+  const validBackupState = journal?.backup_state === undefined || (
+    journal.backup_state?.kind === "directory"
+    && validateJournalManagedState(journal.backup_state)
+    && validateFilesystemIdentity(journal.backup_state.filesystem_identity)
+  );
+  const validPendingLiveState = journal?.pending_live_state === undefined || (
+    journal.pending_live_state?.kind === "directory"
+    && validateJournalManagedState(journal.pending_live_state)
+    && validateFilesystemIdentity(journal.pending_live_state.filesystem_identity)
+  );
+  const validUnmanagedConflict = journal?.unmanaged_conflict === undefined || (
+    typeof journal.unmanaged_conflict === "string"
+    && journal.unmanaged_conflict.length > 0
+    && journal.unmanaged_conflict.length <= 512
+    && journal.stage === "rollback-blocked"
+  );
+  const plannedLiveEntries = journal?.planned_live_entries;
+  const validPlannedLiveEntries = plannedLiveEntries === undefined || (
+    Array.isArray(plannedLiveEntries)
+    && plannedLiveEntries.every((entry) => isPortableSkillName(entry))
+    && new Set(plannedLiveEntries).size === plannedLiveEntries.length
+    && plannedLiveEntries.every(
+      (entry, index) => index === 0
+        || compareCodePoints(plannedLiveEntries[index - 1], entry) < 0,
+    )
+  );
+  const plannedLiveStates = journal?.planned_live_states;
+  const pinnedLiveEntryNames = pinnedSkillLiveEntryNames(journal);
+  const validPlannedLiveStates = plannedLiveStates === undefined || (
+    plannedLiveStates
+    && typeof plannedLiveStates === "object"
+    && !Array.isArray(plannedLiveStates)
+    && Object.keys(plannedLiveStates).length === pinnedLiveEntryNames.length
+    && pinnedLiveEntryNames.every((name) => {
+      const state = plannedLiveStates[name];
+      return validateJournalManagedState(state)
+        && (
+          state.kind === "absent"
+          || validateFilesystemIdentity(state.filesystem_identity)
+        );
+    })
+  );
+  const pendingSkillMaterialization = journal?.pending_skill_materialization;
+  const validPendingSkillMaterialization = pendingSkillMaterialization === undefined || (
+    pendingSkillMaterialization
+    && typeof pendingSkillMaterialization === "object"
+    && !Array.isArray(pendingSkillMaterialization)
+    && isPortableSkillName(pendingSkillMaterialization.name)
+    && pinnedLiveEntryNames.includes(pendingSkillMaterialization.name)
+    && ["copying", "ready", "completed", "cleaning"].includes(
+      pendingSkillMaterialization.phase,
+    )
+    && ["absent", "directory", "file"].includes(
+      pendingSkillMaterialization.before?.kind,
+    )
+    && validateJournalManagedState(pendingSkillMaterialization.before)
+    && (
+      pendingSkillMaterialization.before.kind === "absent"
+      || validateFilesystemIdentity(
+        pendingSkillMaterialization.before.filesystem_identity,
+      )
+    )
+    && typeof pendingSkillMaterialization.stage === "string"
+    && /^materialized-staging\/[A-Za-z0-9._-]+$/.test(
+      pendingSkillMaterialization.stage.replaceAll("\\", "/"),
+    )
+    && validateFilesystemIdentity(
+      pendingSkillMaterialization.stage_filesystem_identity,
+    )
+    && typeof pendingSkillMaterialization.displaced === "string"
+    && /^\.agent-flow-displaced-[A-Za-z0-9._-]+-[0-9a-f]{24}$/.test(
+      pendingSkillMaterialization.displaced,
+    )
+    && (
+      pendingSkillMaterialization.phase === "cleaning"
+        ? ["target", "displaced"].includes(
+            pendingSkillMaterialization.cleanup_source,
+          )
+          && typeof pendingSkillMaterialization.cleanup === "string"
+          && /^materialized-cleanup\/materialized-[0-9a-f]{24}$/.test(
+            pendingSkillMaterialization.cleanup.replaceAll("\\", "/"),
+          )
+        : pendingSkillMaterialization.cleanup_source === undefined
+          && pendingSkillMaterialization.cleanup === undefined
+    )
+    && (
+      pendingSkillMaterialization.phase === "copying"
+        ? pendingSkillMaterialization.after === undefined
+          && plannedLiveStates?.[pendingSkillMaterialization.name]
+          && sameManagedPathStateWithIdentity(
+            plannedLiveStates?.[pendingSkillMaterialization.name],
+            pendingSkillMaterialization.before,
+          )
+        : ["directory", "file"].includes(pendingSkillMaterialization.after?.kind)
+          && validateJournalManagedState(pendingSkillMaterialization.after)
+          && validateFilesystemIdentity(
+            pendingSkillMaterialization.after.filesystem_identity,
+          )
+          && plannedLiveStates?.[pendingSkillMaterialization.name]
+          && sameManagedPathStateWithIdentity(
+            plannedLiveStates?.[pendingSkillMaterialization.name],
+            pendingSkillMaterialization.phase === "completed"
+              || (
+                pendingSkillMaterialization.phase === "cleaning"
+                && pendingSkillMaterialization.cleanup_source === "displaced"
+              )
+              ? pendingSkillMaterialization.after
+              : pendingSkillMaterialization.before,
+          )
+    )
+  );
   if (
-    ![3, 4, 5].includes(journal?.version)
+    ![3, 4, 5, 6, 7, 8, 9].includes(journal?.version)
     || journal.root !== fs.realpathSync(root)
     || !/^[0-9a-f]{48}$/.test(String(journal.token || ""))
     || !/^[0-9a-f]{48}$/.test(String(recoveryLockToken || ""))
     || journal.lock_token !== recoveryLockToken
     || typeof journal.had_live_skills !== "boolean"
-    || !["prepared", "moving-skills", "skills-moved", "live-created", "committed", "recovered", "rollback-blocked"].includes(journal.stage)
+    || !["prepared", "moving-skills", "skills-moved", "live-created", "sealed", "committed", "recovered", "rollback-blocked"].includes(journal.stage)
     || !Array.isArray(journal.managed_mutations)
     || !Array.isArray(journal.host_mutations)
     || pathHasSymlink(root, transactionRoot)
+    || !validLiveState
+    || !validInitialLiveState
+    || !validPendingLiveState
+    || !validBackupState
+    || !validUnmanagedConflict
+    || !validPlannedLiveEntries
+    || !validPlannedLiveStates
+    || !validPendingSkillMaterialization
+    || (
+      journal.version >= 9
+      && ["live-created", "sealed", "committed", "recovered", "rollback-blocked"].includes(journal.stage)
+      && plannedLiveStates === undefined
+    )
+    || (
+      journal.version >= 9
+      && journal.had_live_skills
+      && ["moving-skills", "skills-moved", "live-created", "sealed", "committed", "recovered", "rollback-blocked"].includes(journal.stage)
+      && journal.backup_state === undefined
+    )
+    || (
+      journal.version < 6
+      && (
+        journal.live_state !== undefined
+        || journal.unmanaged_conflict !== undefined
+      )
+    )
+    || (
+      journal.version < 7
+      && (
+        journal.initial_live_state !== undefined
+        || journal.pending_live_state !== undefined
+      )
+    )
+    || (
+      journal.version >= 7
+      && ["live-created", "committed", "recovered"].includes(journal.stage)
+      && journal.initial_live_state === undefined
+    )
     || (
       journal.stage === "committed"
       && !/^[0-9a-f]{64}$/.test(String(journal.committed_index_hash || ""))
@@ -5495,6 +7182,13 @@ function validateInterruptedInstallJournal(root, agentFlowDir, transactionRoot, 
       || (operation.after !== null && !validateJournalManagedState(operation.after))
     ) {
       throw new Error(`invalid interrupted managed mutation state: ${operation.path}`);
+    }
+    if (
+      journal.version >= 8
+      && beforeBackup
+      && !validateFilesystemIdentity(operation.before.backup_filesystem_identity)
+    ) {
+      throw new Error(`invalid interrupted managed backup identity: ${operation.path}`);
     }
     if (operation.pending) {
       const expectedPrefix = path.join("managed-staging", `${index}-${operation.pending.mutation_id}`);
@@ -5558,6 +7252,7 @@ function validateInterruptedInstallJournal(root, agentFlowDir, transactionRoot, 
       || (operation.after !== null && !validateJournalHostState(operation.after, null, journal.version >= 4))
       || !operation.allowed_after.every((state) => validateJournalHostState(state))
       || (operation.pending !== null && (typeof operation.pending !== "object" || Array.isArray(operation.pending)))
+      || ![undefined, true].includes(operation.rolled_back)
     ) {
       throw new Error(`invalid interrupted host mutation state: ${normalized}`);
     }
@@ -5713,7 +7408,7 @@ function readRegularFileSnapshotNoFollow(
     ) {
       throw new Error(`${label} file changed while reading: ${pathName}`);
     }
-    return { bytes, metadata: before };
+    return { bytes, metadata: before, directories };
   } finally {
     fs.closeSync(descriptor);
   }
@@ -5740,12 +7435,53 @@ function recoverInterruptedSkillTransaction(root, agentFlowDir, recoveryLockToke
     throw new Error(`invalid interrupted skill transaction: ${transactionRoot}`);
   }
   assertNoSymlinkComponents(transactionRoot, journalPath);
-  const journal = readRegularJsonNoFollow(journalPath, agentFlowDir);
+  const journalSnapshot = readRegularFileSnapshotNoFollow(
+    journalPath,
+    agentFlowDir,
+    "install journal",
+  );
+  const journal = JSON.parse(journalSnapshot.bytes.toString("utf8"));
+  const transactionMetadata = journalSnapshot.directories.at(-1).metadata;
+  bindInstallJournalAuthority(
+    journal,
+    {
+      device: String(transactionMetadata.dev),
+      inode: String(transactionMetadata.ino),
+      links: String(transactionMetadata.nlink),
+      mode: Number(transactionMetadata.mode & 0o777n),
+    },
+    {
+      device: String(journalSnapshot.metadata.dev),
+      inode: String(journalSnapshot.metadata.ino),
+      links: String(journalSnapshot.metadata.nlink),
+      mode: Number(journalSnapshot.metadata.mode & 0o777n),
+    },
+  );
   validateInterruptedInstallJournal(root, agentFlowDir, transactionRoot, journal, recoveryLockToken);
   const live = path.join(agentFlowDir, "skills");
   const backup = path.join(transactionRoot, "skills-backup");
   const marker = path.join(live, ".agent-flow-transaction-owner");
+  if (journal.unmanaged_conflict) {
+    throw new Error(journal.unmanaged_conflict);
+  }
+  reconcilePendingSkillMaterialization({
+    root,
+    transactionRoot,
+    live,
+    journal,
+    journalPath,
+  });
+  const interruptedLiveState = verifyInterruptedSkillLiveState(live, journal);
+  if (
+    interruptedLiveState
+    && !journal.live_state
+    && !journal.pending_live_state
+  ) {
+    journal.pending_live_state = interruptedLiveState;
+    writeInstallJournal(journalPath, journal);
+  }
   if (journal.stage === "rollback-blocked") {
+    preflightRecordedRollbackAuthorities(root, transactionRoot, journal);
     rollbackRecordedManagedMutations(root, transactionRoot, journal);
     rollbackRecordedHostMutations(root, transactionRoot, journal);
     if (journal.had_live_skills) {
@@ -5758,7 +7494,10 @@ function recoverInterruptedSkillTransaction(root, agentFlowDir, recoveryLockToke
       if (fs.existsSync(live)) {
         throw new Error("blocked initial skill transaction unexpectedly has a live directory");
       }
-      fs.rmSync(transactionRoot, { recursive: true, force: true });
+      removeAuthenticatedTransactionRoot(
+        transactionRoot,
+        journal[INSTALL_JOURNAL_DIRECTORY_IDENTITY],
+      );
       return;
     }
     const authenticatedBytes = Buffer.from(String(journal.previous_index_bytes || ""), "base64");
@@ -5770,7 +7509,10 @@ function recoverInterruptedSkillTransaction(root, agentFlowDir, recoveryLockToke
     if (!liveIndex.equals(authenticatedBytes)) {
       throw new Error("blocked skill transaction live index is not authenticated");
     }
-    fs.rmSync(transactionRoot, { recursive: true, force: true });
+    removeAuthenticatedTransactionRoot(
+      transactionRoot,
+      journal[INSTALL_JOURNAL_DIRECTORY_IDENTITY],
+    );
     return;
   }
   if (journal.stage === "committed") {
@@ -5798,7 +7540,10 @@ function recoverInterruptedSkillTransaction(root, agentFlowDir, recoveryLockToke
       }
       fs.unlinkSync(marker);
     }
-    fs.rmSync(transactionRoot, { recursive: true, force: true });
+    removeAuthenticatedTransactionRoot(
+      transactionRoot,
+      journal[INSTALL_JOURNAL_DIRECTORY_IDENTITY],
+    );
     return;
   }
   if (journal.stage === "prepared") {
@@ -5812,26 +7557,57 @@ function recoverInterruptedSkillTransaction(root, agentFlowDir, recoveryLockToke
       if (journal.had_live_skills && !fs.existsSync(path.join(live, "index.json"))) {
         throw new Error("prepared skill transaction lost its live index");
       }
-      fs.rmSync(transactionRoot, { recursive: true, force: true });
+      removeAuthenticatedTransactionRoot(
+        transactionRoot,
+        journal[INSTALL_JOURNAL_DIRECTORY_IDENTITY],
+      );
       return;
     }
   }
   if (journal.stage === "moving-skills") {
-    const liveExists = fs.existsSync(path.join(live, "index.json"));
-    const backupExists = fs.existsSync(path.join(backup, "index.json"));
-    if (liveExists && !backupExists) {
-      fs.rmSync(transactionRoot, { recursive: true, force: true });
-      return;
-    }
-    if (!liveExists && backupExists) {
-      journal.stage = "skills-moved";
+    if (journal.version >= 9) {
+      const liveState = managedPathStateWithIdentity(live);
+      const backupState = managedPathStateWithIdentity(backup);
+      if (
+        sameManagedPathStateWithIdentity(liveState, journal.backup_state)
+        && backupState.kind === "absent"
+      ) {
+        removeAuthenticatedTransactionRoot(
+          transactionRoot,
+          journal[INSTALL_JOURNAL_DIRECTORY_IDENTITY],
+        );
+        return;
+      }
+      if (
+        liveState.kind === "absent"
+        && sameManagedPathStateWithIdentity(backupState, journal.backup_state)
+      ) {
+        journal.stage = "skills-moved";
+      } else {
+        throw new Error("interrupted skill move has ambiguous live and backup state");
+      }
     } else {
-      throw new Error("interrupted skill move has ambiguous live and backup state");
+      const liveExists = fs.existsSync(path.join(live, "index.json"));
+      const backupExists = fs.existsSync(path.join(backup, "index.json"));
+      if (liveExists && !backupExists) {
+        removeAuthenticatedTransactionRoot(
+          transactionRoot,
+          journal[INSTALL_JOURNAL_DIRECTORY_IDENTITY],
+        );
+        return;
+      }
+      if (!liveExists && backupExists) {
+        journal.stage = "skills-moved";
+      } else {
+        throw new Error("interrupted skill move has ambiguous live and backup state");
+      }
     }
   }
   if (!journal.had_live_skills) {
+    preflightRecordedRollbackAuthorities(root, transactionRoot, journal);
     rollbackRecordedManagedMutations(root, transactionRoot, journal);
     rollbackRecordedHostMutations(root, transactionRoot, journal);
+    verifyInterruptedSkillLiveState(live, journal);
     if (fs.existsSync(live)) {
       const liveToken = fs.existsSync(marker)
         ? readRegularFileSnapshotNoFollow(
@@ -5843,32 +7619,51 @@ function recoverInterruptedSkillTransaction(root, agentFlowDir, recoveryLockToke
       if (liveToken !== journal.token) {
         throw new Error("interrupted initial skill transaction live directory is not owned");
       }
-      fs.rmSync(live, { recursive: true, force: true });
+      removeAuthenticatedSkillLive(
+        live,
+        journal.live_state ?? journal.pending_live_state ?? journal.initial_live_state,
+        "interrupted initial skill transaction live tree",
+      );
     }
     journal.stage = "recovered";
     writeInstallJournal(journalPath, journal);
-    fs.rmSync(transactionRoot, { recursive: true, force: true });
+    removeAuthenticatedTransactionRoot(
+      transactionRoot,
+      journal[INSTALL_JOURNAL_DIRECTORY_IDENTITY],
+    );
     return;
   }
   if (!fs.existsSync(backup) || typeof journal.previous_index_hash !== "string") {
     throw new Error("interrupted skill transaction backup is incomplete");
   }
+  const authenticatedBytes = Buffer.from(String(journal.previous_index_bytes || ""), "base64");
+  const authenticatedBackup = authenticateSkillBackup(
+    backup,
+    agentFlowDir,
+    {
+      hash: journal.previous_index_hash,
+      bytes: authenticatedBytes,
+    },
+    journal.backup_state,
+    "interrupted skill transaction backup is not authenticated",
+    journal.version >= 9,
+  );
+  preflightRecordedRollbackAuthorities(root, transactionRoot, journal);
   rollbackRecordedManagedMutations(root, transactionRoot, journal);
   rollbackRecordedHostMutations(root, transactionRoot, journal);
   assertInterruptedSkillIndexCommitment(
     agentFlowDir,
     journal.previous_index_hash,
   );
-  const backupIndex = readRegularFileSnapshotNoFollow(
-    path.join(backup, "index.json"),
-    agentFlowDir,
-    "backup skill index",
-  ).bytes;
-  const authenticatedBytes = Buffer.from(String(journal.previous_index_bytes || ""), "base64");
-  const backupHash = crypto.createHash("sha256").update(backupIndex).digest("hex");
-  if (backupHash !== journal.previous_index_hash || !backupIndex.equals(authenticatedBytes)) {
-    throw new Error("interrupted skill transaction backup is not authenticated");
+  if (
+    !sameManagedPathStateWithIdentity(
+      managedPathStateWithIdentity(backup),
+      authenticatedBackup.state,
+    )
+  ) {
+    throw new Error("interrupted skill transaction backup changed before restore");
   }
+  verifyInterruptedSkillLiveState(live, journal);
   if (fs.existsSync(live)) {
     const liveToken = fs.existsSync(marker)
       ? readRegularFileSnapshotNoFollow(
@@ -5880,18 +7675,31 @@ function recoverInterruptedSkillTransaction(root, agentFlowDir, recoveryLockToke
     if (liveToken !== journal.token) {
       throw new Error("interrupted skill transaction live directory is not owned");
     }
-    fs.rmSync(live, { recursive: true, force: true });
+    removeAuthenticatedSkillLive(
+      live,
+      journal.live_state ?? journal.pending_live_state ?? journal.initial_live_state,
+      "interrupted skill transaction live tree",
+    );
   }
   fs.renameSync(backup, live);
+  const restoredState = managedPathStateWithIdentity(live);
   const restored = readRegularFileSnapshotNoFollow(
     path.join(live, "index.json"),
     agentFlowDir,
     "restored skill index",
   ).bytes;
-  if (!restored.equals(authenticatedBytes)) throw new Error("interrupted skill transaction restore mismatch");
+  if (
+    !sameManagedPathStateWithIdentity(restoredState, authenticatedBackup.state)
+    || !restored.equals(authenticatedBytes)
+  ) {
+    throw new Error("interrupted skill transaction restore mismatch");
+  }
   journal.stage = "recovered";
   writeInstallJournal(journalPath, journal);
-  fs.rmSync(transactionRoot, { recursive: true, force: true });
+  removeAuthenticatedTransactionRoot(
+    transactionRoot,
+    journal[INSTALL_JOURNAL_DIRECTORY_IDENTITY],
+  );
 }
 
 function skillCatalogFingerprint(root, home, catalogHosts, env) {
@@ -5983,6 +7791,13 @@ function readBundledSkillCompatibility(agentFlowDir) {
 
 function selectProjectSkills(root, agentFlowDir, installSelection = null, sourcePlan = null) {
   const compatibility = readBundledSkillCompatibility(agentFlowDir);
+  const resolvedExternalNames = new Set(
+    (sourcePlan?.entries || []).map((entry) => entry.name),
+  );
+  const ignoredInstalledNames = new Set(
+    [...PROFILE_MANAGED_HOST_ONLY_SKILLS]
+      .filter((name) => !resolvedExternalNames.has(name)),
+  );
   const discovered = [
     ...discoverSkills(path.join(agentFlowDir, "local-skills"), "local", root, PROFILE_MANAGED_HOST_ONLY_SKILLS),
     ...discoverProjectSkills(root),
@@ -5990,7 +7805,7 @@ function selectProjectSkills(root, agentFlowDir, installSelection = null, source
       path.join(agentFlowDir, "skills"),
       "bundled",
       root,
-      new Set(["compatibility.json", "index.json", ...PROFILE_MANAGED_HOST_ONLY_SKILLS]),
+      new Set(["compatibility.json", "provider-registry.json", "index.json", ...ignoredInstalledNames]),
     ),
   ];
   const byName = new Map();
@@ -6014,21 +7829,24 @@ function selectProjectSkills(root, agentFlowDir, installSelection = null, source
     .filter((skill) => !allowed || allowed.has(skill.name))
     .map((skill) => {
       const resolved = sourceByName.get(skill.name);
-      if (!resolved) {
-        return {
-          ...skill,
-          tree_hash: hashSkillTree(path.dirname(path.join(root, skill.path)), {
+      const materializedTreeHash = !resolved || PROJECT_COMMAND_SKILL_NAMES.has(skill.name)
+        ? hashSkillTree(path.dirname(path.join(root, skill.path)), {
             authorityRoot: root,
             expectedDocumentHash: skill._document_hash,
             skillName: skill.name,
-          }),
+          })
+        : null;
+      if (!resolved) {
+        return {
+          ...skill,
+          tree_hash: materializedTreeHash,
         };
       }
       return {
         ...skill,
         source: resolved.source_kind,
         source_host: resolved.source_host,
-        tree_hash: resolved.tree_hash,
+        tree_hash: materializedTreeHash ?? resolved.tree_hash,
         activation: resolved.automatic_on_demand && !skill.activationDeclared ? "on-demand" : skill.activation,
       };
     })
@@ -6064,9 +7882,36 @@ function selectProjectSkills(root, agentFlowDir, installSelection = null, source
     _document_hash: _documentHash,
     ...skill
   }) => skill);
+  const providerIndex = resolveSkillProviderIndex({
+    skills: indexedSkills,
+    activeProfiles: selection.profiles,
+    activeHost: detectActiveHost(process.env),
+    profilesRoot: path.join(agentFlowDir, "profiles"),
+    registryPath: path.join(agentFlowDir, "skills", "provider-registry.json"),
+    authorityRoot: agentFlowDir,
+    compatibility,
+    adapterRegistry: SKILL_PROVIDER_ADAPTER_REGISTRY,
+    authenticateCandidate: (skill) => authenticateIndexedProviderCandidate(
+      root,
+      agentFlowDir,
+      skill,
+      sourceByName.get(skill.name) ?? null,
+    ),
+  });
+  const revisionProviderIndex = projectNeutralRevisionProviderIndex(
+    root,
+    indexedSkills,
+    providerIndex,
+  );
   const revision = crypto.createHash("sha256").update(JSON.stringify({
     selection,
     ...(compatibility ? { compatibility } : {}),
+    provider_registry: {
+      version: revisionProviderIndex.version,
+      fingerprint: revisionProviderIndex.fingerprint,
+      quarantined: revisionProviderIndex.quarantined,
+    },
+    skill_providers: revisionProviderIndex.claims,
     skills: indexedSkills.map((skill) => ({
       name: skill.name,
       source: skill.source,
@@ -6085,6 +7930,12 @@ function selectProjectSkills(root, agentFlowDir, installSelection = null, source
       ...selection,
     },
     ...(compatibility ? { compatibility } : {}),
+    provider_registry: {
+      version: providerIndex.version,
+      fingerprint: providerIndex.fingerprint,
+      quarantined: providerIndex.quarantined,
+    },
+    skill_providers: providerIndex.claims,
     skills: indexedSkills,
     conflicts,
     warnings,
@@ -6092,7 +7943,10 @@ function selectProjectSkills(root, agentFlowDir, installSelection = null, source
 }
 
 function revisionSkillTreeHash(root, skill) {
-  if (!PROJECT_COMMAND_SKILL_NAMES.has(skill.name)) return skill.tree_hash;
+  if (
+    !PROJECT_COMMAND_SKILL_NAMES.has(skill.name)
+    || skill.source !== "bundled"
+  ) return skill.tree_hash;
   const skillPath = path.join(root, skill.path);
   const content = fs.readFileSync(skillPath, "utf8");
   const launcher = path.join(root, PROJECT_LAUNCHER_RELATIVE);
@@ -6100,6 +7954,123 @@ function revisionSkillTreeHash(root, skill) {
     .update(content.replaceAll(launcher, "<project-root>/.agent-flow/bin/agent-flow"))
     .digest("hex");
 }
+function projectCommandSkillMarkdown(name) {
+  if (name === "agent-flow") return agentFlowSkillMarkdown();
+  if (name === "full-feature-workflow") return fullFeatureSkillMarkdown();
+  if (name === "push-watch") return pushWatchSkillMarkdown();
+  throw new Error(`unsupported project command skill: ${name}`);
+}
+
+function authenticateIndexedProviderCandidate(root, agentFlowDir, skill, sourceEntry) {
+  if (
+    !skill
+    || typeof skill.path !== "string"
+    || typeof skill.hash !== "string"
+    || typeof skill.tree_hash !== "string"
+  ) {
+    throw new Error("invalid installed provider candidate");
+  }
+  const concreteId = portableSkillCasefold(skill.name);
+  const skillRoot = path.dirname(path.resolve(root, skill.path));
+  const projectCommandSkill = (
+    PROJECT_COMMAND_SKILL_NAMES.has(concreteId)
+    && skill.source === "bundled"
+    && sourceEntry === null
+  );
+  let expectedCollectionRoot;
+  if (sourceEntry !== null) {
+    if (
+      skill.source !== sourceEntry.source_kind
+      || (skill.source_host ?? null) !== (sourceEntry.source_host ?? null)
+      || (!projectCommandSkill && skill.tree_hash !== sourceEntry.tree_hash)
+    ) {
+      throw new Error("installed provider candidate source metadata changed");
+    }
+  }
+  const sourceHost = skill.source_host ?? null;
+  if (skill.source === "project" && sourceHost === null) {
+    expectedCollectionRoot = path.resolve(root, "skills");
+  } else if (skill.source === "local" && sourceHost === null) {
+    expectedCollectionRoot = path.resolve(agentFlowDir, "local-skills");
+  } else if (
+    ["bundled", "project-snapshot", "shared"].includes(skill.source)
+    && sourceHost === null
+  ) {
+    expectedCollectionRoot = path.resolve(agentFlowDir, "skills");
+  } else if (skill.source === "host-bootstrap" && typeof sourceHost === "string") {
+    expectedCollectionRoot = path.resolve(agentFlowDir, "skills");
+  } else {
+    throw new Error("installed provider candidate source is not registered");
+  }
+  const requiresCanonicalDirectory = skill.source !== "project" && skill.source !== "local";
+  if (
+    !samePath(path.dirname(skillRoot), expectedCollectionRoot)
+    || (requiresCanonicalDirectory && portableSkillCasefold(path.basename(skillRoot)) !== concreteId)
+  ) {
+    throw new Error("installed provider candidate source path changed");
+  }
+  if (projectCommandSkill) {
+    const entries = fs.readdirSync(skillRoot, { withFileTypes: true });
+    const expectedHash = crypto.createHash("sha256")
+      .update(projectCommandSkillMarkdown(concreteId))
+      .digest("hex");
+    if (
+      skill.hash !== expectedHash
+      || entries.length !== 1
+      || entries[0].name !== "SKILL.md"
+      || !entries[0].isFile()
+    ) {
+      throw new Error("generated project command skill changed");
+    }
+  }
+  const sourceHash = hashSkillTree(skillRoot, {
+    authorityRoot: expectedCollectionRoot,
+    expectedDocumentHash: skill.hash,
+    skillName: concreteId,
+  });
+  if (sourceHash !== skill.tree_hash) {
+    throw new Error("installed provider candidate source hash changed");
+  }
+  return {
+    concrete_id: concreteId,
+    source_kind: skill.source,
+    source_hash: sourceHash,
+    source_host: sourceHost,
+    source_locator: sourceHost === null
+      ? `project://${skill.path.split(path.sep).join("/")}`
+      : `host://${sourceHost}/skills/${concreteId}`,
+  };
+}
+
+function projectNeutralRevisionProviderIndex(root, skills, providerIndex) {
+  const sourceHashes = new Map(
+    skills.map((skill) => [skill.name, revisionSkillTreeHash(root, skill)]),
+  );
+  const claims = providerIndex.claims.map(({
+    registry_fingerprint: _registryFingerprint,
+    ...claim
+  }) => canonicalizeHostNeutralSkillProviderClaim({
+    ...claim,
+    source_hash: sourceHashes.get(claim.concrete_id) ?? claim.source_hash,
+  }));
+  const fingerprint = crypto.createHash("sha256")
+    .update(canonicalJson({
+      claims,
+      quarantined: providerIndex.quarantined,
+      registry_fingerprint: providerIndex.source_registry_fingerprint,
+    }))
+    .digest("hex");
+  return {
+    version: providerIndex.version,
+    fingerprint,
+    quarantined: providerIndex.quarantined,
+    claims: claims.map((claim) => ({
+      ...claim,
+      registry_fingerprint: fingerprint,
+    })),
+  };
+}
+
 
 function computeSkillPlanHash(index, root, verifyTrees = false) {
   const skills = (index?.skills || []).map((skill) => {
@@ -6148,6 +8119,12 @@ function computeSkillPlanHash(index, root, verifyTrees = false) {
       skills.map((skill) => skill[0]),
     )
     : null;
+  const providerMetadata = (
+    Object.hasOwn(index || {}, "provider_registry")
+    || Object.hasOwn(index || {}, "skill_providers")
+  )
+    ? canonicalizeRuntimeSkillProviderMetadata(index)
+    : {};
   const selection = index?.selection || {};
   const normalized = {
     profiles: [...(selection.profiles || [])].sort(compareCodePoints),
@@ -6167,6 +8144,7 @@ function computeSkillPlanHash(index, root, verifyTrees = false) {
     conditional_skills: selection.conditional_skills || {},
     profile_routing: selection.profile_routing || {},
     ...(compatibility ? { compatibility } : {}),
+    ...providerMetadata,
     skills,
   };
   return crypto.createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
@@ -6267,11 +8245,33 @@ function validateSkillDependencies(skills) {
   return warnings;
 }
 
+function isProjectKitSourceRoot(root) {
+  if (samePath(root, KIT_ROOT)) return true;
+  return [
+    path.join(root, "bin", "agent-flow-kit.mjs"),
+    path.join(root, "lib", "skill-selection.mjs"),
+    path.join(root, "profiles", "_schema.yaml"),
+    path.join(root, "bootstrap", "agent-flow.md"),
+    path.join(root, "src", "agent_flow", "cli.py"),
+  ].every((candidate) => {
+    try {
+      return fs.lstatSync(candidate).isFile();
+    } catch {
+      return false;
+    }
+  });
+}
+
 function discoverProjectSkills(root) {
-  if (samePath(root, KIT_ROOT)) {
+  if (isProjectKitSourceRoot(root)) {
     return [];
   }
-  return discoverSkills(path.join(root, "skills"), "project", root, PROFILE_MANAGED_HOST_ONLY_SKILLS);
+  return discoverSkills(
+    path.join(root, "skills"),
+    "project",
+    root,
+    PROJECT_SKILL_DISCOVERY_IGNORED_NAMES,
+  );
 }
 
 function discoverSkills(baseDir, source, root, ignoredNames = new Set(), allowedNames = null) {
@@ -6299,6 +8299,8 @@ function discoverSkills(baseDir, source, root, ignoredNames = new Set(), allowed
     skills.push({
       id: metadata.id,
       name: metadata.name,
+      provider: metadata.provider,
+      provider_id: metadata.provider_id,
       title: metadata.title,
       path: relativePath,
       source,
@@ -6356,6 +8358,8 @@ function parseSkillMetadata(text, fallbackName) {
   return {
     id: String(metadata.id || name),
     name,
+    provider: metadata.provider,
+    provider_id: metadata.provider_id,
     title: String(metadata.title || ""),
     description: String(metadata.description || useWhen || ""),
     hosts: hostValues.length > 0 ? [...new Set(hosts)] : [...PROJECT_SKILL_HOSTS],
@@ -7657,6 +9661,11 @@ function syncProjectAgentDocumentsTransactional(root, agentFlowDir) {
   };
   try {
     fs.mkdirSync(transactionRoot);
+    transaction.transactionRootIdentity = hostFilesystemIdentity(transactionRoot);
+    bindInstallJournalAuthority(
+      transaction.journal,
+      transaction.transactionRootIdentity,
+    );
     writeInstallJournal(transaction.journalPath, transaction.journal);
     for (const entry of planned) snapshotDocumentSyncPath(transaction, entry.pathName);
     activeManagedInstallTransaction = transaction;
@@ -7665,10 +9674,17 @@ function syncProjectAgentDocumentsTransactional(root, agentFlowDir) {
     verifyCommittedManagedMutations(root, transaction.journal);
     transaction.journal.stage = "committed";
     writeInstallJournal(transaction.journalPath, transaction.journal);
-    fs.rmSync(transactionRoot, { recursive: true, force: true });
+    removeAuthenticatedTransactionRoot(
+      transactionRoot,
+      transaction.transactionRootIdentity,
+    );
   } catch (error) {
+    preflightRecordedRollbackAuthorities(root, transactionRoot, transaction.journal);
     rollbackRecordedManagedMutations(root, transactionRoot, transaction.journal);
-    fs.rmSync(transactionRoot, { recursive: true, force: true });
+    removeAuthenticatedTransactionRoot(
+      transactionRoot,
+      transaction.transactionRootIdentity,
+    );
     throw error;
   } finally {
     if (activeManagedInstallTransaction === transaction) activeManagedInstallTransaction = null;
@@ -9019,6 +11035,7 @@ function verifyMutationSandboxAndRun(args) {
     throw new Error("blocked: invalid install sandbox proof");
   }
   const root = resolveInstallRoot(rootArgument);
+  assertLeaderMutationSource(root, action);
   verifyInstallFlock(root, nonce);
   const canary = path.resolve(canaryPath);
   if (samePath(canary, root) || canary.startsWith(`${root}${path.sep}`) || !/^[0-9a-f]{48}$/.test(nonce || "")) {
@@ -9066,6 +11083,7 @@ function runMutationSandbox(action, rootOverride = null, requestedInstallArgs = 
     throw new Error(`managed worktree ${action} blocked; run ${action} from the leader checkout`);
   }
   const root = resolveInstallRoot(requestedRoot);
+  assertLeaderMutationSource(root, action);
   let executable = null;
   let args = [];
   const nonce = crypto.randomBytes(24).toString("hex");

@@ -12,7 +12,11 @@ from agent_flow.core.skill_compatibility import (
     SkillCompatibilityError,
     normalize_skill_compatibility,
 )
-from agent_flow.core.skill_plan import resolve_runtime_skill_plan
+from agent_flow.core.skill_plan import (
+    SkillPlanSnapshotError,
+    canonical_skill_plan_bytes,
+    resolve_runtime_skill_plan,
+)
 
 
 KIT_ROOT = Path(__file__).resolve().parent.parent
@@ -59,6 +63,49 @@ process.stdout.write(JSON.stringify(resolveRuntimeSkillPlan(input.index, {
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
 
+def _node_plan_outcome(
+    index: dict[str, object],
+    *,
+    phase: str,
+    required_skills: list[str],
+) -> dict[str, object]:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required")
+    script = """
+import fs from 'node:fs';
+import { resolveRuntimeSkillPlan } from './lib/skill-selection.mjs';
+const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+try {
+  const value = resolveRuntimeSkillPlan(input.index, {
+    phaseId: input.phase,
+    requiredSkills: input.required_skills,
+  });
+  process.stdout.write(JSON.stringify({ ok: true, value }));
+} catch (error) {
+  process.stdout.write(JSON.stringify({
+    ok: false,
+    error: String(error.message || error).replace(/^blocked: /, ''),
+  }));
+}
+"""
+    result = subprocess.run(
+        (node, "--input-type=module", "-e", script),
+        cwd=KIT_ROOT,
+        input=json.dumps(
+            {
+                "index": index,
+                "phase": phase,
+                "required_skills": required_skills,
+            }
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
 
 def _node_compatibility_normalization(value: object) -> dict[str, object]:
     node = shutil.which("node")
@@ -78,6 +125,28 @@ try {
         (node, "--input-type=module", "-e", script),
         cwd=KIT_ROOT,
         input=json.dumps(value),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def _node_provider_metadata(index: dict[str, object]) -> dict[str, object]:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required")
+    script = """
+import fs from 'node:fs';
+import { canonicalizeRuntimeSkillProviderMetadata } from './lib/skill-selection.mjs';
+const index = JSON.parse(fs.readFileSync(0, 'utf8'));
+process.stdout.write(JSON.stringify(canonicalizeRuntimeSkillProviderMetadata(index)));
+"""
+    result = subprocess.run(
+        (node, "--input-type=module", "-e", script),
+        cwd=KIT_ROOT,
+        input=json.dumps(index),
         text=True,
         capture_output=True,
         check=False,
@@ -523,6 +592,361 @@ def test_compatibility_resolution_is_identical_in_both_runtimes() -> None:
         "code-generation-discipline",
     ]
     assert node["skills"][1]["capabilities"] == ["implementation.code-generation"]
+
+
+def _index_with_provider_claims() -> dict[str, object]:
+    index = _index("codex")
+    fingerprint = "9" * 64
+    index["provider_registry"] = {
+        "version": 1,
+        "fingerprint": fingerprint,
+        "quarantined": [],
+    }
+    index["skill_providers"] = [
+        {
+            "concrete_id": skill["name"],
+            "aliases": (
+                ["code-generation"]
+                if skill["name"] == "code-generation-discipline"
+                else []
+            ),
+            "provider_id": "organization",
+            "provider_version": "1.0.0",
+            "trust_tier": "organization",
+            "ownership": "organization",
+            "provenance_revision": None,
+            "source": "project://skills",
+            "source_hash": skill["tree_hash"],
+            "source_host": skill.get("source_host"),
+            "source_kind": skill.get("source", "bundled"),
+            "source_locator": (
+                f"host://{skill['source_host']}/skills/{skill['name']}"
+                if skill.get("source_host")
+                else f"project://skills/{skill['name']}"
+            ),
+            "content_hash_mode": "verified",
+            "catalog_ref": None,
+            "catalog_hash": None,
+            "adapter": "source-kind",
+            "registry_fingerprint": fingerprint,
+            "status": "verified",
+            "compatibility": {
+                "registry": 1,
+                "profiles": ["*"],
+                "hosts": ["*"],
+                "source_kinds": ["bundled"],
+            },
+        }
+        for skill in index["skills"]
+    ]
+    return index
+
+
+def test_provider_identity_propagates_identically_in_both_runtimes() -> None:
+    index = _index_with_provider_claims()
+    fingerprint = "9" * 64
+
+    node = _node_plan(
+        index,
+        phase="ddd-design",
+        files=[],
+        task="architecture",
+        required_skills=["code-generation-discipline"],
+    )
+    python = resolve_runtime_skill_plan(
+        index,
+        phase_id="ddd-design",
+        task_scope="architecture",
+        required_skills=["code-generation-discipline"],
+    )
+
+    assert python == node
+    selected = next(
+        skill for skill in node["skills"]
+        if skill["name"] == "code-generation-discipline"
+    )
+    assert selected["provider"] == {
+        "id": "organization",
+        "version": "1.0.0",
+        "trust_tier": "organization",
+        "ownership": "organization",
+        "provenance_revision": None,
+        "source": "project://skills",
+        "adapter": "source-kind",
+        "source_hash": "a" * 64,
+        "source_host": None,
+        "source_kind": "bundled",
+        "source_locator": "project://skills/code-generation-discipline",
+        "content_hash_mode": "verified",
+        "catalog_ref": None,
+        "catalog_hash": None,
+        "status": "verified",
+        "registry_fingerprint": fingerprint,
+        "compatibility": {
+            "registry": 1,
+            "profiles": ["*"],
+            "hosts": ["*"],
+            "source_kinds": ["bundled"],
+        },
+    }
+
+
+def test_numeric_integer_provider_registry_version_matches_both_runtimes() -> None:
+    index = _index_with_provider_claims()
+    registry = index["provider_registry"]
+    assert isinstance(registry, dict)
+    registry["version"] = 1.0
+
+    node = _node_plan(
+        index,
+        phase="ddd-design",
+        files=[],
+        task="",
+        required_skills=["code-generation-discipline"],
+    )
+    python = resolve_runtime_skill_plan(
+        index,
+        phase_id="ddd-design",
+        required_skills=["code-generation-discipline"],
+    )
+
+    assert python == node
+
+def test_numeric_integer_provider_version_has_one_canonical_hash_projection(
+    tmp_path: Path,
+) -> None:
+    index = _index_with_provider_claims()
+    for skill in index["skills"]:
+        assert isinstance(skill, dict)
+        skill_root = tmp_path / str(skill["name"])
+        skill_root.mkdir()
+        document = skill_root / "SKILL.md"
+        document.write_text("---\nname: fixture\n---\n", encoding="utf-8")
+        skill["path"] = document.relative_to(tmp_path).as_posix()
+    integer = json.loads(json.dumps(index))
+    floating = json.loads(json.dumps(index))
+    floating["provider_registry"]["version"] = 1.0
+
+    assert canonical_skill_plan_bytes(integer, tmp_path) == canonical_skill_plan_bytes(
+        floating,
+        tmp_path,
+    )
+    assert _node_provider_metadata(floating)["provider_registry"]["version"] == 1
+
+def _malformed_provider_index(case: str) -> dict[str, object]:
+    index = json.loads(json.dumps(_index_with_provider_claims()))
+    if case == "provider-metadata-explicit-null":
+        index["provider_registry"] = None
+        index["skill_providers"] = None
+        return index
+    registry = index["provider_registry"]
+    claims = index["skill_providers"]
+    assert isinstance(registry, dict)
+    assert isinstance(claims, list)
+    assert isinstance(claims[0], dict)
+    claim = claims[0]
+    if case == "registry-version-bool":
+        registry["version"] = True
+    elif case == "registry-extra":
+        registry["ignored"] = True
+    elif case == "registry-missing-quarantined":
+        del registry["quarantined"]
+    elif case == "registry-fingerprint-list":
+        registry["fingerprint"] = ["9" * 64]
+    elif case == "registry-fingerprint-newline":
+        registry["fingerprint"] = f"{'9' * 64}\n"
+        claim["registry_fingerprint"] = registry["fingerprint"]
+    elif case == "registry-version-fraction":
+        registry["version"] = 1.5
+    elif case == "registry-quarantined-surrogate":
+        registry["quarantined"] = [{
+            "reason": "provider_metadata_invalid",
+            "provider_id": None,
+            "detail": "\ud800",
+            "metadata_path": "skill-provider-registry.json#provider:unknown",
+            "repairable": False,
+        }]
+    elif case == "registry-quarantined-object":
+        registry["quarantined"] = {}
+    elif case == "claims-missing":
+        del index["skill_providers"]
+    elif case == "claims-object":
+        index["skill_providers"] = {}
+    elif case == "claim-extra":
+        claim["ignored"] = True
+    elif case == "claim-missing-status":
+        del claim["status"]
+    elif case == "claim-missing-adapter":
+        del claim["adapter"]
+    elif case == "claim-missing-compatibility":
+        del claim["compatibility"]
+    elif case == "claim-missing-provenance-revision":
+        del claim["provenance_revision"]
+    elif case == "claim-compatibility-extra":
+        claim["compatibility"]["ignored"] = True
+    elif case == "claim-compatibility-registry-bool":
+        claim["compatibility"]["registry"] = True
+    elif case == "claim-compatibility-source-kinds-string":
+        claim["compatibility"]["source_kinds"] = "bundled"
+    elif case == "claim-adapter-bool":
+        claim["adapter"] = True
+    elif case == "claim-adapter-newline":
+        claim["adapter"] = "source-kind\n"
+    elif case == "claim-aliases-non-list":
+        claim["aliases"] = "legacy"
+    elif case == "claim-alias-object":
+        claim["aliases"] = [{"name": "legacy"}]
+    elif case == "claim-duplicate-alias":
+        claim["aliases"] = ["legacy", "LEGACY"]
+    elif case == "claim-concrete-alias":
+        claim["aliases"] = [claim["concrete_id"]]
+    elif case == "claim-concrete-id-list":
+        claim["concrete_id"] = ["code-generation-discipline"]
+    elif case == "claim-concrete-id-newline":
+        claim["concrete_id"] = "code-generation-discipline\n"
+    elif case == "claim-provider-id-list":
+        claim["provider_id"] = ["organization"]
+    elif case == "claim-provider-id-newline":
+        claim["provider_id"] = "organization\n"
+    elif case == "claim-source-hash-list":
+        claim["source_hash"] = ["a" * 64]
+    elif case == "claim-source-hash-newline":
+        claim["source_hash"] = f"{'a' * 64}\n"
+    elif case == "claim-trust-list":
+        claim["trust_tier"] = ["organization"]
+    elif case == "claim-ownership-object":
+        claim["ownership"] = {"name": "organization"}
+    elif case == "claim-provenance-revision-object":
+        claim["provenance_revision"] = {"revision": "a" * 40}
+    elif case == "claim-provenance-revision-newline":
+        claim["provenance_revision"] = f"{'a' * 40}\n"
+    elif case == "claim-registry-fingerprint-list":
+        claim["registry_fingerprint"] = ["9" * 64]
+    elif case == "claim-status-list":
+        claim["status"] = ["verified"]
+    elif case == "claim-version-float":
+        claim["provider_version"] = 1.0
+    elif case == "claim-version-newline":
+        claim["provider_version"] = "1.0.0\n"
+    elif case == "claim-version-unicode":
+        claim["provider_version"] = "١.٢.٣"
+    elif case == "claim-source-object":
+        claim["source"] = {"path": "project://skills"}
+    elif case == "claim-source-control":
+        claim["source"] = "project://skills\u001c"
+    elif case == "claim-source-next-line":
+        claim["source"] = "project://skills\u0085"
+    elif case == "claim-source-bom":
+        claim["source"] = "project://skills\ufeff"
+    elif case == "claim-source-surrogate":
+        claim["source"] = "project://skills\ud800"
+    elif case == "claim-source-host-list":
+        claim["source_host"] = ["codex"]
+    elif case == "claim-source-kind-list":
+        claim["source_kind"] = ["bundled"]
+    elif case == "claim-source-locator-control":
+        claim["source_locator"] = "project://skills\u001c"
+    elif case == "claim-content-hash-mode-list":
+        claim["content_hash_mode"] = ["verified"]
+    elif case == "claim-catalog-pair-mismatch":
+        claim["catalog_ref"] = "profile://android/android_skills"
+    elif case == "claim-observed-status-mismatch":
+        claim["content_hash_mode"] = "observed"
+    else:
+        raise AssertionError(f"unknown malformed provider case: {case}")
+    return index
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "provider-metadata-explicit-null",
+        "registry-version-bool",
+        "registry-extra",
+        "registry-missing-quarantined",
+        "registry-fingerprint-list",
+        "registry-quarantined-object",
+        "registry-fingerprint-newline",
+        "registry-version-fraction",
+        "registry-quarantined-surrogate",
+        "claims-missing",
+        "claims-object",
+        "claim-extra",
+        "claim-missing-adapter",
+        "claim-missing-status",
+        "claim-missing-compatibility",
+        "claim-missing-provenance-revision",
+        "claim-compatibility-extra",
+        "claim-compatibility-registry-bool",
+        "claim-compatibility-source-kinds-string",
+        "claim-adapter-bool",
+        "claim-adapter-newline",
+        "claim-aliases-non-list",
+        "claim-alias-object",
+        "claim-duplicate-alias",
+        "claim-concrete-alias",
+        "claim-concrete-id-list",
+        "claim-provider-id-list",
+        "claim-concrete-id-newline",
+        "claim-source-hash-list",
+        "claim-provider-id-newline",
+        "claim-trust-list",
+        "claim-ownership-object",
+        "claim-source-hash-newline",
+        "claim-provenance-revision-object",
+        "claim-provenance-revision-newline",
+        "claim-registry-fingerprint-list",
+        "claim-status-list",
+        "claim-version-float",
+        "claim-version-unicode",
+        "claim-version-newline",
+        "claim-source-object",
+        "claim-source-control",
+        "claim-source-next-line",
+        "claim-source-bom",
+        "claim-source-surrogate",
+        "claim-source-host-list",
+        "claim-source-kind-list",
+        "claim-source-locator-control",
+        "claim-content-hash-mode-list",
+        "claim-catalog-pair-mismatch",
+        "claim-observed-status-mismatch",
+    ],
+)
+def test_malformed_provider_metadata_is_rejected_identically_in_both_runtimes(
+    case: str,
+) -> None:
+    index = _malformed_provider_index(case)
+    node = _node_plan_outcome(
+        index,
+        phase="ddd-design",
+        required_skills=["code-generation-discipline"],
+    )
+    try:
+        resolve_runtime_skill_plan(
+            index,
+            phase_id="ddd-design",
+            required_skills=["code-generation-discipline"],
+        )
+    except SkillPlanSnapshotError as exc:
+        python = {"ok": False, "error": str(exc).removeprefix("blocked: ")}
+    else:
+        python = {"ok": True}
+
+    assert node == python
+    assert node == {
+        "ok": False,
+        "error": (
+            "invalid skill provider index"
+            if case.startswith("registry-")
+            or case in {
+                "claims-missing",
+                "claims-object",
+                "provider-metadata-explicit-null",
+            }
+            else "invalid skill provider claim"
+        ),
+    }
 
 
 @pytest.mark.parametrize(
