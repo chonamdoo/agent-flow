@@ -52,6 +52,15 @@ class CompatibilityResolution:
 
 
 @dataclass(frozen=True)
+class CapabilityResolution:
+    capability: str
+    resolved: bool
+    canonical: str | None
+    providers: tuple[str, ...]
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
 class SkillCompatibilityCatalog:
     projection: dict[str, Any]
     by_canonical: dict[str, dict[str, Any]]
@@ -114,6 +123,33 @@ class SkillCompatibilityCatalog:
                 raise SkillCompatibilityError(
                     f"compatibility reference shadows concrete skill: {concrete}"
                 )
+
+    def capability_providers(self) -> dict[str, tuple[str, ...]]:
+        """active record가 선언한 capability -> 정렬된 canonical skill 목록(역방향 index)."""
+        providers: dict[str, list[str]] = {}
+        for canonical, record in self.by_canonical.items():
+            if record["status"] != "active":
+                continue
+            for capability in record["capabilities"]:
+                providers.setdefault(capability, []).append(canonical)
+        return {cap: tuple(sorted(names)) for cap, names in providers.items()}
+
+    def resolve_capability(
+        self, capability: object, available: Iterable[object]
+    ) -> CapabilityResolution:
+        """capability를 available skill 안에서 결정적 concrete로 해소한다.
+
+        provider 0개 -> capability_unresolved, 2개 이상 -> stack_ambiguity(추측 금지).
+        """
+        cap = _logical_name(capability, "capability")
+        available_set = {_logical_name(name, "available skill") for name in available}
+        providers = self.capability_providers().get(cap, ())
+        eligible = tuple(name for name in providers if name in available_set)
+        if not eligible:
+            return CapabilityResolution(cap, False, None, providers, "capability_unresolved")
+        if len(eligible) > 1:
+            return CapabilityResolution(cap, False, None, eligible, "stack_ambiguity")
+        return CapabilityResolution(cap, True, eligible[0], eligible, None)
 
 
 

@@ -45,6 +45,13 @@ optional:
     # The installer auto-includes declared dependencies such as clean-architecture-core.
     install:
       - "skill-name"
+    # Stable capability references (optional). Each capability resolves to a concrete
+    # provider via skills/compatibility.json at install time and is merged with install.
+    # A capability with no active provider blocks (capability_unresolved); more than one
+    # active provider blocks (stack_ambiguity) instead of guessing. Profiles without
+    # capabilities behave exactly as before.
+    capabilities:
+      - "capability-id"
     # Review-time required skills are resolved from active profile + changed files.
     # Missing required skills block only the touched platform/profile.
     required_review:
