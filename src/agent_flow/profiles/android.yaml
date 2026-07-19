@@ -37,7 +37,9 @@ skills:
     - android-clean-architecture
     - android-clean-presentation-architecture
     - android-code-review
+    - android-debugging
     - android-guides
+    - android-module-creator
   required_review:
     - group: profile
       skills: [android-code-review, android-clean-architecture]
@@ -143,7 +145,7 @@ android_skills:
       when: Jetpack Navigation 3, back stack, or navigation migration work
     - skill: testing-setup
       when: Android test setup, Gradle test dependencies, instrumentation, Robolectric, or missing test scaffolding changes
-    - skill: camera1-to-camerax
+    - skill: camerax
       when: Camera1, Camera2, or CameraX migration work
     - skill: r8-analyzer
       when: R8, shrinker, minification, obfuscation, mapping, or release size work
@@ -192,10 +194,6 @@ chrisbanes_skills:
     - agent-flow install은 이 skill들을 설치, 복사, 링크, vendor 처리하지 않는다.
     - 현재 host 경로에 필요한 skill이 없으면 작업을 멈추고 `missing local chrisbanes_skills: <skill>`와 source URL을 사용자에게 알려 설치를 요청한다.
   implementation:
-    - skill: android-module-creator
-      when: Android module or Gradle boundary work
-    - skill: android-debugging
-      when: crash, race, recomposition, or failing test diagnosis
     - skill: compose-state-authoring
       when: local Compose state, remember, or state accessors change
     - skill: compose-state-hoisting

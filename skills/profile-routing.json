@@ -93,7 +93,7 @@
           "file_rules": [
             { "path_terms": ["test/", "androidtest/", "screenshot", "localization"] }
           ],
-          "skills": ["compose-ui-testing-patterns", "testing-localization", "testing-setup"]
+          "skills": ["compose-ui-testing-patterns", "testing-setup"]
         },
         {
           "id": "android-debugging",
@@ -192,20 +192,12 @@
           "skills": ["styles"]
         },
         {
-          "id": "android-localization",
-          "task_terms": ["android localization", "android locale", "strings xml"],
-          "file_rules": [
-            { "path_terms": ["values-", "locale", "localization", "strings.xml"] }
-          ],
-          "skills": ["testing-localization"]
-        },
-        {
           "id": "camera-api",
           "task_terms": ["camera1", "camera2", "camerax", "android camera", "legacy camera", "surfaceholder", "processcameraprovider", "cameraxviewfinder"],
           "file_rules": [
             { "path_terms": ["camera"] }
           ],
-          "skills": ["camera1-to-camerax"]
+          "skills": ["camerax"]
         },
         {
           "id": "billing-api",
@@ -253,7 +245,7 @@
           "file_rules": [
             { "path_terms": ["wear/", "wearos", "watch/", "watchface"] }
           ],
-          "skills": ["jetpack-compose-m3"]
+          "skills": ["wear-compose-m3"]
         }
       ]
     },

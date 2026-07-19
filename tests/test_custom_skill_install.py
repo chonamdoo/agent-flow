@@ -2811,28 +2811,13 @@ def test_android_profile_installs_android_skills_and_common_dependencies_only(tm
     assert "react-native-clean-architecture" not in names
     assert "ios-clean-architecture" not in names
     assert not (project / ".agent-flow" / "skills" / "react-native-clean-architecture").exists()
-    assert "android-debugging" not in names
-    assert "android-module-creator" not in names
-    assert not (project / ".agent-flow" / "skills" / "android-debugging").exists()
-    assert not (project / ".agent-flow" / "skills" / "android-module-creator").exists()
-
-    index["selection"]["external_exposure_skills"] = [
-        "android-debugging",
-        "android-module-creator",
-    ]
-    index_path = project / ".agent-flow" / "skills" / "index.json"
-    index_path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
-    kit_path = project / ".agent-flow" / "kit.json"
-    kit = json.loads(kit_path.read_text(encoding="utf-8"))
-    kit.pop("skill_index_hash_version", None)
-    kit.pop("skill_index_hash", None)
-    kit_path.write_text(json.dumps(kit, indent=2) + "\n", encoding="utf-8")
-
-    reinstalled = _install(project, "--profile", "android")
-
-    assert reinstalled.returncode == 0, reinstalled.stderr
-    assert not (project / ".agent-flow" / "skills" / "android-debugging").exists()
-    assert not (project / ".agent-flow" / "skills" / "android-module-creator").exists()
+    assert "android-debugging" in names
+    assert "android-module-creator" in names
+    assert (project / ".agent-flow" / "skills" / "android-debugging" / "SKILL.md").is_file()
+    assert (project / ".agent-flow" / "skills" / "android-module-creator" / "SKILL.md").is_file()
+    assert "compose-state-authoring" not in names
+    assert not (project / ".agent-flow" / "skills" / "compose-state-authoring").exists()
+    assert not (project / ".agent-flow" / "skills" / "kotlin-flow-state-event-modeling").exists()
 
 
 def test_android_official_provider_rejects_unpinned_host_snapshot(
