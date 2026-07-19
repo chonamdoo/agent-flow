@@ -26,9 +26,9 @@ review_angles:
   - id: io-safety
     prompt: templates/_shared/review/io-safety.md
 skills:
-  install:
-    - python-api-clean-architecture
-    - python-development-guide
+  capabilities:
+    - python.api.architecture.clean
+    - lang.python
   required_review:
     - group: profile
       skills: [python-development-guide, python-api-clean-architecture]
