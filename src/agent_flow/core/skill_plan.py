@@ -2443,6 +2443,7 @@ def resolve_runtime_skill_plan(
     required_review = selection.get("required_review")
     if not isinstance(required_review, dict):
         required_review = {}
+    by_name = _index_skills_by_logical_name(index.get("skills"))
     for profile in touched_profiles:
         raw_required.update(_logical_strings(required_review.get(profile)))
         conditional_skills = selection.get("conditional_skills")
@@ -2471,9 +2472,9 @@ def resolve_runtime_skill_plan(
             raw_required.update(
                 name
                 for name in _logical_strings(route.get("skills"))
-                if name in catalog
+                # activate routed skills that are catalog members or installed profile skills.
+                if name in catalog or name in by_name
             )
-    by_name = _index_skills_by_logical_name(index.get("skills"))
     try:
         compatibility.validate_concrete_ids(by_name)
     except SkillCompatibilityError as exc:
