@@ -2816,6 +2816,20 @@ def test_android_profile_installs_android_skills_and_common_dependencies_only(tm
     assert "android-module-creator" in names
     assert (project / ".agent-flow" / "skills" / "android-debugging" / "SKILL.md").is_file()
     assert (project / ".agent-flow" / "skills" / "android-module-creator" / "SKILL.md").is_file()
+    # P1: camerax was pulled from the android_skills catalog (no trusted pinned hash), so it
+    # is not a conditional-routing catalog member.
+    conditional = index["selection"]["conditional_skills"]["android"]["implementation"]
+    assert "camerax" not in conditional
+    # P2: android-debugging/android-module-creator are bundled skills.install members (not catalog
+    # members) whose profile-routing.json routes now activate them at runtime.
+    assert "android-debugging" not in conditional
+    debug_plan = resolve_runtime_skill_plan(
+        index,
+        phase_id="implement",
+        changed_files=["app/src/debug/CrashReporter.kt"],
+        task_scope="android crash",
+    )
+    assert "android-debugging" in {skill["name"] for skill in debug_plan["skills"]}
     assert "compose-state-authoring" not in names
     assert not (project / ".agent-flow" / "skills" / "compose-state-authoring").exists()
     assert not (project / ".agent-flow" / "skills" / "kotlin-flow-state-event-modeling").exists()

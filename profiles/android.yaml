@@ -145,8 +145,6 @@ android_skills:
       when: Jetpack Navigation 3, back stack, or navigation migration work
     - skill: testing-setup
       when: Android test setup, Gradle test dependencies, instrumentation, Robolectric, or missing test scaffolding changes
-    - skill: camerax
-      when: Camera1, Camera2, or CameraX migration work
     - skill: r8-analyzer
       when: R8, shrinker, minification, obfuscation, mapping, or release size work
     - skill: perfetto-trace-analysis

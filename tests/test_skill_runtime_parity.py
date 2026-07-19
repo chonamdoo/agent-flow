@@ -1025,3 +1025,97 @@ def test_compatibility_metadata_validation_is_identical_in_both_runtimes(
         python = {"ok": True, "value": normalized}
 
     assert _node_compatibility_normalization(compatibility) == python
+
+def test_installed_route_skill_activates_without_catalog_membership_in_both_runtimes() -> None:
+    # A routed skill that is installed (bundled skills.install) but NOT a conditional-catalog
+    # member must still activate, identically in Node and Python.
+    routing = {
+        "version": 1,
+        "profiles": {
+            "android": {
+                "task_terms": ["android crash"],
+                "file_rules": [{"path_terms": ["debug"]}],
+                "skill_routes": [
+                    {
+                        "id": "android-debugging",
+                        "task_terms": ["android crash"],
+                        "file_rules": [{"path_terms": ["debug"]}],
+                        "skills": ["android-debugging"],
+                    }
+                ],
+            }
+        },
+        "escalations": {},
+    }
+    index = {
+        "selection": {
+            "profiles": ["android"],
+            "skill_profiles": ["android"],
+            "explicit_skills": [],
+            "required_review": {},
+            "conditional_skills": {"android": {"implementation": [], "review": []}},
+            "profile_routing": routing,
+        },
+        "skills": [
+            {
+                "name": name,
+                "path": f"skills/{name}",
+                "tree_hash": hashlib.sha256(name.encode()).hexdigest(),
+            }
+            for name in ("android-debugging", "code-generation-discipline")
+        ],
+    }
+    files = ["app/src/debug/CrashReporter.kt"]
+    node = _node_plan(index, phase="implement", files=files, task="android crash")
+    python = resolve_runtime_skill_plan(
+        index, phase_id="implement", changed_files=files, task_scope="android crash"
+    )
+    assert python == node
+    assert "android-debugging" in {skill["name"] for skill in python["skills"]}
+
+def test_uppercase_route_skill_matches_installed_skill_case_insensitively_in_both_runtimes() -> None:
+    # A route referencing an installed skill in a different case must be casefold-matched in the
+    # installed-index admission branch identically by Node and Python (no parity drift).
+    routing = {
+        "version": 1,
+        "profiles": {
+            "android": {
+                "task_terms": ["android crash"],
+                "file_rules": [{"path_terms": ["debug"]}],
+                "skill_routes": [
+                    {
+                        "id": "android-debugging",
+                        "task_terms": ["android crash"],
+                        "file_rules": [{"path_terms": ["debug"]}],
+                        "skills": ["Android-Debugging"],
+                    }
+                ],
+            }
+        },
+        "escalations": {},
+    }
+    index = {
+        "selection": {
+            "profiles": ["android"],
+            "skill_profiles": ["android"],
+            "explicit_skills": [],
+            "required_review": {},
+            "conditional_skills": {"android": {"implementation": [], "review": []}},
+            "profile_routing": routing,
+        },
+        "skills": [
+            {
+                "name": name,
+                "path": f"skills/{name}",
+                "tree_hash": hashlib.sha256(name.encode()).hexdigest(),
+            }
+            for name in ("android-debugging", "code-generation-discipline")
+        ],
+    }
+    files = ["app/src/debug/CrashReporter.kt"]
+    node = _node_plan(index, phase="implement", files=files, task="android crash")
+    python = resolve_runtime_skill_plan(
+        index, phase_id="implement", changed_files=files, task_scope="android crash"
+    )
+    assert python == node
+    assert "android-debugging" in {skill["name"] for skill in python["skills"]}

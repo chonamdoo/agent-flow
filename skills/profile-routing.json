@@ -192,14 +192,6 @@
           "skills": ["styles"]
         },
         {
-          "id": "camera-api",
-          "task_terms": ["camera1", "camera2", "camerax", "android camera", "legacy camera", "surfaceholder", "processcameraprovider", "cameraxviewfinder"],
-          "file_rules": [
-            { "path_terms": ["camera"] }
-          ],
-          "skills": ["camerax"]
-        },
-        {
           "id": "billing-api",
           "task_terms": ["play billing", "billing library"],
           "file_rules": [
