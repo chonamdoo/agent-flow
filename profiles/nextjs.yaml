@@ -30,12 +30,12 @@ review_angles:
   - id: a11y
     prompt: templates/_shared/review/a11y.md
 skills:
-  install:
-    - react-app-shell-error-handling
-    - react-clean-architecture
-    - react-clean-presentation-architecture
-    - react-development-guide
-    - typescript-development-guide
+  capabilities:
+    - react.app-shell-error-handling
+    - react.architecture.clean
+    - react.presentation.clean
+    - react.development-guide
+    - lang.typescript
   required_review:
     - group: profile
       skills: [react-development-guide, typescript-development-guide, react-clean-architecture]
