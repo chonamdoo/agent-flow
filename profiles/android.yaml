@@ -32,14 +32,14 @@ review_angles:
   - id: test-edge
     prompt: templates/_shared/review/test-edge.md
 skills:
-  install:
-    - android-appshell-error-handling
-    - android-clean-architecture
-    - android-clean-presentation-architecture
-    - android-code-review
-    - android-debugging
-    - android-guides
-    - android-module-creator
+  capabilities:
+    - android.app-shell-error-handling
+    - android.architecture.clean
+    - android.presentation.clean
+    - android.code-review
+    - android.debugging
+    - android.guides
+    - android.module-creator
   required_review:
     - group: profile
       skills: [android-code-review, android-clean-architecture]

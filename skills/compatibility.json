@@ -2,6 +2,48 @@
   "version": 1,
   "skills": [
     {
+      "canonical": "android-appshell-error-handling",
+      "capabilities": [
+        "android.app-shell-error-handling"
+      ]
+    },
+    {
+      "canonical": "android-clean-architecture",
+      "capabilities": [
+        "android.architecture.clean"
+      ]
+    },
+    {
+      "canonical": "android-clean-presentation-architecture",
+      "capabilities": [
+        "android.presentation.clean"
+      ]
+    },
+    {
+      "canonical": "android-code-review",
+      "capabilities": [
+        "android.code-review"
+      ]
+    },
+    {
+      "canonical": "android-debugging",
+      "capabilities": [
+        "android.debugging"
+      ]
+    },
+    {
+      "canonical": "android-guides",
+      "capabilities": [
+        "android.guides"
+      ]
+    },
+    {
+      "canonical": "android-module-creator",
+      "capabilities": [
+        "android.module-creator"
+      ]
+    },
+    {
       "canonical": "clean-architecture",
       "capabilities": [
         "architecture.clean.compatibility"
