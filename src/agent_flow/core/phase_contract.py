@@ -14,6 +14,7 @@ from agent_flow.core.skill_compatibility import (
 )
 from agent_flow.core.skill_plan import (
     CODE_SKILL_PHASES,
+    _portable_casefold,
     authenticated_installed_skill_index,
     resolve_runtime_skill_plan,
     runtime_changed_files,
@@ -82,6 +83,27 @@ def resolve_runtime_phase_contract(
         if isinstance(skills, list)
         else ()
     )
+    lock = meta.get("resolved_skill_lock")
+    if isinstance(lock, dict):
+        locked_names = {
+            _portable_casefold(entry["name"])
+            for entry in lock.get("skills", [])
+            if isinstance(entry, dict) and isinstance(entry.get("name"), str)
+        }
+        outside = sorted(
+            name for name in resolved if _portable_casefold(name) not in locked_names
+        )
+        if outside:
+            raise SkillResolutionError(
+                [
+                    {
+                        "skill": name,
+                        "reason": "skill_outside_run_lock",
+                        "phase": phase_id,
+                    }
+                    for name in outside
+                ]
+            )
     return replace(
         phase,
         required_skills=resolved or required_skills,

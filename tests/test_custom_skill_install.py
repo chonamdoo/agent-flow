@@ -24,6 +24,7 @@ from agent_flow.artifact import find_active_run
 from agent_flow.cli import main
 from agent_flow.core.skill_plan import (
     SkillPlanSnapshotError,
+    build_resolved_skill_lock,
     installed_skill_plan_pin,
     resolve_runtime_skill_plan,
 )
@@ -4086,7 +4087,9 @@ def test_metadata_selector_drift_recalculates_the_next_runtime_plan(tmp_path: Pa
     }
 
 
-def test_python_active_run_pin_reloads_at_the_next_command_boundary(tmp_path: Path) -> None:
+def test_python_active_run_lock_freezes_on_drift_deferring_to_next_run(
+    tmp_path: Path,
+) -> None:
     project = tmp_path / "project"
     home = tmp_path / "home"
     source = home / ".codex" / "skills" / "alpha"
@@ -4107,6 +4110,7 @@ def test_python_active_run_pin_reloads_at_the_next_command_boundary(tmp_path: Pa
     active = find_active_run(project)
     assert active is not None
     previous = json.loads((active.path / "meta.json").read_text(encoding="utf-8"))
+    assert previous["resolved_skill_lock_hash"]
 
     _skill(source, "alpha-v2")
     assert _install(project, env=env).returncode == 0
@@ -4114,8 +4118,14 @@ def test_python_active_run_pin_reloads_at_the_next_command_boundary(tmp_path: Pa
         assert main(["continue", "--root", str(project)]) == 0
     reconciled = json.loads((active.path / "meta.json").read_text(encoding="utf-8"))
 
-    assert reconciled["skill_plan_hash"] != previous["skill_plan_hash"]
-    assert reconciled["skill_plan_repin_from"] == previous["skill_plan_hash"]
+    # run-scoped lock stays frozen; catalog drift only invalidates the next run.
+    assert reconciled["skill_plan_hash"] == previous["skill_plan_hash"]
+    assert "skill_plan_repin_from" not in reconciled
+    assert reconciled["resolved_skill_lock_hash"] == previous["resolved_skill_lock_hash"]
+    assert (
+        reconciled["skill_plan_drift_observed"]["skill_plan_hash"]
+        != previous["skill_plan_hash"]
+    )
 
 
 def test_dependency_drift_updates_transitive_runtime_closure(tmp_path: Path) -> None:
@@ -6839,3 +6849,78 @@ def test_android_skill_policy_is_active_host_local_only() -> None:
 
     workflow_text = (KIT_ROOT / "workflows" / "full-feature.yaml").read_text(encoding="utf-8")
     assert "missing local <group>: <skill>" in workflow_text
+
+def test_build_resolved_skill_lock_is_deterministic_and_captures_provider_claims() -> None:
+    index = {
+        "catalog_fingerprint": "cat-fp",
+        "provider_registry": {"fingerprint": "reg-fp"},
+        "selection": {"profiles": ["python", "android"]},
+        "skills": [
+            {
+                "name": "beta",
+                "path": "skills/beta/SKILL.md",
+                "tree_hash": "bbb",
+                "source": "project",
+                "capabilities": ["y", "x"],
+            },
+            {
+                "name": "alpha",
+                "path": "skills/alpha/SKILL.md",
+                "tree_hash": "aaa",
+                "source": "bundled",
+            },
+        ],
+        "skill_providers": [
+            {
+                "concrete_id": "alpha",
+                "provider_id": "official-android",
+                "provider_version": "2.1.0",
+                "source_hash": "a" * 64,
+                "trust_tier": "official",
+                "ownership": "upstream",
+            }
+        ],
+    }
+    lock, lock_hash = build_resolved_skill_lock(index, "plan-hash")
+    # deterministic: same input, same hash; skills sorted by name.
+    assert build_resolved_skill_lock(index, "plan-hash")[1] == lock_hash
+    assert [entry["name"] for entry in lock["skills"]] == ["alpha", "beta"]
+    assert lock["active_profiles"] == ["android", "python"]
+    assert lock["catalog_fingerprint"] == "cat-fp"
+    assert lock["provider_registry_fingerprint"] == "reg-fp"
+    assert lock["skill_plan_hash"] == "plan-hash"
+    alpha = lock["skills"][0]
+    assert alpha["provider_id"] == "official-android"
+    assert alpha["provider_version"] == "2.1.0"
+    assert alpha["trust_tier"] == "official"
+    assert lock["skills"][1]["capabilities"] == ["x", "y"]
+    # ordering of input skills must not change the lock hash.
+    reordered = dict(index)
+    reordered["skills"] = list(reversed(index["skills"]))
+    assert build_resolved_skill_lock(reordered, "plan-hash")[1] == lock_hash
+
+def test_build_resolved_skill_lock_matches_provider_claims_case_insensitively() -> None:
+    # Provider claims are keyed by the casefolded concrete_id; a mixed-case installed
+    # skill name must still capture its provenance instead of dropping it to None.
+    index = {
+        "selection": {"profiles": ["android"]},
+        "skills": [
+            {"name": "CameraX", "path": "skills/camerax/SKILL.md", "tree_hash": "c", "source": "project"},
+        ],
+        "skill_providers": [
+            {
+                "concrete_id": "camerax",
+                "provider_id": "android-official",
+                "provider_version": "2.0.0",
+                "source_hash": "c" * 64,
+                "trust_tier": "official",
+                "ownership": "upstream",
+            }
+        ],
+    }
+    lock, _ = build_resolved_skill_lock(index, "h")
+    entry = lock["skills"][0]
+    assert entry["name"] == "CameraX"
+    assert entry["provider_id"] == "android-official"
+    assert entry["provider_version"] == "2.0.0"
+    assert entry["source_hash"] == "c" * 64
