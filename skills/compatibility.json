@@ -63,6 +63,36 @@
       "renamed_from": [
         "code-generation"
       ]
+    },
+    {
+      "canonical": "react-app-shell-error-handling",
+      "capabilities": [
+        "react.app-shell-error-handling"
+      ]
+    },
+    {
+      "canonical": "react-clean-architecture",
+      "capabilities": [
+        "react.architecture.clean"
+      ]
+    },
+    {
+      "canonical": "react-clean-presentation-architecture",
+      "capabilities": [
+        "react.presentation.clean"
+      ]
+    },
+    {
+      "canonical": "react-development-guide",
+      "capabilities": [
+        "react.development-guide"
+      ]
+    },
+    {
+      "canonical": "typescript-development-guide",
+      "capabilities": [
+        "lang.typescript"
+      ]
     }
   ]
 }
