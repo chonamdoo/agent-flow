@@ -123,6 +123,18 @@
       "capabilities": [
         "lang.typescript"
       ]
+    },
+    {
+      "canonical": "python-api-clean-architecture",
+      "capabilities": [
+        "python.api.architecture.clean"
+      ]
+    },
+    {
+      "canonical": "python-development-guide",
+      "capabilities": [
+        "lang.python"
+      ]
     }
   ]
 }
