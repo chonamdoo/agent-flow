@@ -1119,3 +1119,121 @@ def test_uppercase_route_skill_matches_installed_skill_case_insensitively_in_bot
     )
     assert python == node
     assert "android-debugging" in {skill["name"] for skill in python["skills"]}
+
+
+_CAPABILITY_CATALOG = {
+    "version": 1,
+    "skills": [
+        {"canonical": "compose-state-authoring", "capabilities": ["compose.state"]},
+        {"canonical": "compose-state-holder-ui-split", "capabilities": ["compose.state"]},
+        {"canonical": "python-development-guide", "capabilities": ["lang.python"]},
+        {
+            "canonical": "old-guide",
+            "status": "deprecated",
+            "capabilities": ["lang.python"],
+            "replaced_by": ["python-development-guide"],
+        },
+    ],
+}
+
+
+def _capability_catalog():
+    from agent_flow.core.skill_compatibility import SkillCompatibilityCatalog
+
+    return SkillCompatibilityCatalog.from_value(_CAPABILITY_CATALOG)
+
+
+def test_capability_providers_indexes_active_records_only() -> None:
+    providers = _capability_catalog().capability_providers()
+    assert providers["compose.state"] == (
+        "compose-state-authoring",
+        "compose-state-holder-ui-split",
+    )
+    # deprecated old-guide is excluded even though it declares lang.python
+    assert providers["lang.python"] == ("python-development-guide",)
+
+
+def test_resolve_capability_single_provider_resolves() -> None:
+    resolution = _capability_catalog().resolve_capability(
+        "lang.python", ["python-development-guide"]
+    )
+    assert resolution.resolved is True
+    assert resolution.canonical == "python-development-guide"
+    assert resolution.reason is None
+
+
+def test_resolve_capability_zero_available_is_unresolved() -> None:
+    resolution = _capability_catalog().resolve_capability("lang.python", [])
+    assert resolution.resolved is False
+    assert resolution.canonical is None
+    assert resolution.reason == "capability_unresolved"
+
+
+def test_resolve_capability_multiple_available_is_ambiguous() -> None:
+    resolution = _capability_catalog().resolve_capability(
+        "compose.state",
+        ["compose-state-authoring", "compose-state-holder-ui-split"],
+    )
+    assert resolution.resolved is False
+    assert resolution.canonical is None
+    assert resolution.reason == "stack_ambiguity"
+    assert resolution.providers == (
+        "compose-state-authoring",
+        "compose-state-holder-ui-split",
+    )
+
+
+def _node_resolve_capability(
+    catalog: dict[str, object], capability: str, available: list[str]
+) -> dict[str, object]:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required")
+    script = """
+import fs from 'node:fs';
+import { createSkillCompatibilityCatalog } from './lib/skill-compatibility.mjs';
+const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+const cat = createSkillCompatibilityCatalog(input.catalog);
+const r = cat.resolveCapability(input.capability, input.available);
+process.stdout.write(JSON.stringify({
+  resolved: r.resolved,
+  canonical: r.canonical,
+  providers: r.providers,
+  reason: r.reason,
+}));
+"""
+    result = subprocess.run(
+        (node, "--input-type=module", "-e", script),
+        cwd=KIT_ROOT,
+        input=json.dumps(
+            {"catalog": catalog, "capability": capability, "available": available}
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+@pytest.mark.parametrize(
+    "capability,available",
+    [
+        ("lang.python", ["python-development-guide"]),
+        ("lang.python", []),
+        ("compose.state", ["compose-state-authoring", "compose-state-holder-ui-split"]),
+        ("compose.state", ["compose-state-authoring"]),
+        ("missing.cap", ["python-development-guide"]),
+    ],
+)
+def test_capability_resolution_parity_node_python(
+    capability: str, available: list[str]
+) -> None:
+    node = _node_resolve_capability(_CAPABILITY_CATALOG, capability, available)
+    py = _capability_catalog().resolve_capability(capability, available)
+    assert node == {
+        "resolved": py.resolved,
+        "canonical": py.canonical,
+        "providers": list(py.providers),
+        "reason": py.reason,
+    }
