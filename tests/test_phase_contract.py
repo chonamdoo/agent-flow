@@ -352,6 +352,100 @@ def test_runner_contract_expands_runtime_skill_dependency_closure(
     ) == ["phase-contract missing required skills: clean-architecture-core"]
 
 
+def test_run_lock_rejects_skill_resolved_outside_the_locked_candidate_set(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_flow.core.skill_compatibility import SkillResolutionError
+
+    project = tmp_path / "project"
+    index = {
+        "selection": {},
+        "skills": [
+            {
+                "name": "ddd-architecture",
+                "path": ".agent-flow/skills/ddd-architecture/SKILL.md",
+                "requires": ["clean-architecture-core"],
+            },
+            {
+                "name": "clean-architecture-core",
+                "path": ".agent-flow/skills/clean-architecture-core/SKILL.md",
+            },
+        ],
+    }
+    run_dir = project / ".agent-flow" / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    # The run lock froze only ddd-architecture; a dependency-closure skill that
+    # is outside the lock must be rejected, not silently followed mid-run.
+    (run_dir / "meta.json").write_text(
+        json.dumps(
+            {"task": "", "resolved_skill_lock": {"skills": [{"name": "ddd-architecture"}]}}
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("agent_flow.core.phase_contract.runtime_changed_files", lambda *_args: ())
+    monkeypatch.setattr(
+        "agent_flow.core.phase_contract.authenticated_installed_skill_index",
+        lambda _root: index,
+    )
+    runner = Runner.__new__(Runner)
+    runner.config_root = project
+    runner.project_root = project
+    runner.run_dir = run_dir
+
+    with pytest.raises(SkillResolutionError) as excinfo:
+        runner._runtime_contract_phase(
+            Phase(
+                id="ddd-design",
+                description="",
+                required_skills=("ddd-architecture",),
+                requirements=("domain-model",),
+            )
+        )
+    assert "clean-architecture-core" in str(excinfo.value)
+    assert "skill_outside_run_lock" in str(excinfo.value)
+
+
+def test_run_lock_guard_matches_locked_names_case_insensitively(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    index = {
+        "selection": {},
+        "skills": [
+            {"name": "CameraX", "path": ".agent-flow/skills/CameraX/SKILL.md"},
+        ],
+    }
+    run_dir = project / ".agent-flow" / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    # The lock stores the mixed-case installed name; resolution casefolds it, so the
+    # guard must not false-positive on a normal undrifted run.
+    (run_dir / "meta.json").write_text(
+        json.dumps({"task": "", "resolved_skill_lock": {"skills": [{"name": "CameraX"}]}}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("agent_flow.core.phase_contract.runtime_changed_files", lambda *_a: ())
+    monkeypatch.setattr(
+        "agent_flow.core.phase_contract.authenticated_installed_skill_index",
+        lambda _root: index,
+    )
+    runner = Runner.__new__(Runner)
+    runner.config_root = project
+    runner.project_root = project
+    runner.run_dir = run_dir
+
+    resolved = runner._runtime_contract_phase(
+        Phase(
+            id="ddd-design",
+            description="",
+            required_skills=("CameraX",),
+            requirements=("domain-model",),
+        )
+    )
+    assert resolved.required_skills == ("camerax",)
+
 def test_code_phase_without_static_skills_enforces_runtime_platform_skill_union(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

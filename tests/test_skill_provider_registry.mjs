@@ -898,6 +898,47 @@ test("duplicate concrete id is ambiguous unless policy selects an eligible prefe
   assert.equal(preferred.claims[0].provider_id, "provider-b");
 });
 
+test("incompatible major provider versions quarantine the candidate as version_conflict", () => {
+  const normalizeSkillProviderRegistry = requireApi("normalizeSkillProviderRegistry");
+  const resolveSkillProviderClaims = requireApi("resolveSkillProviderClaims");
+  const context = {
+    profile: "android",
+    host: "codex",
+    catalogs: {},
+    candidates: [candidate("demo", "bundled", "d".repeat(64))],
+  };
+  const resolved = resolveSkillProviderClaims(
+    normalizeSkillProviderRegistry(registry([
+      provider("provider-a", { version: "1.0.0" }),
+      provider("provider-b", { version: "2.0.0" }),
+    ])),
+    context,
+  );
+  assert.deepEqual(resolved.claims, []);
+  assert.equal(resolved.quarantined[0].reason, "version_conflict");
+});
+
+test("compatible provider versions select the highest deterministically", () => {
+  const normalizeSkillProviderRegistry = requireApi("normalizeSkillProviderRegistry");
+  const resolveSkillProviderClaims = requireApi("resolveSkillProviderClaims");
+  const context = {
+    profile: "android",
+    host: "codex",
+    catalogs: {},
+    candidates: [candidate("demo", "bundled", "d".repeat(64))],
+  };
+  const resolved = resolveSkillProviderClaims(
+    normalizeSkillProviderRegistry(registry([
+      provider("provider-a", { version: "2.0.0" }),
+      provider("provider-b", { version: "2.3.0" }),
+    ])),
+    context,
+  );
+  assert.equal(resolved.claims.length, 1);
+  assert.equal(resolved.claims[0].provider_id, "provider-b");
+  assert.equal(resolved.claims[0].provider_version, "2.3.0");
+});
+
 test("real profile catalog provider conflict fails closed without preferred policy", () => {
   const normalizeSkillProviderRegistry = requireApi("normalizeSkillProviderRegistry");
   const resolveSkillProviderClaims = requireApi("resolveSkillProviderClaims");

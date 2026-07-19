@@ -48,6 +48,7 @@ EXPLICIT_ONLY_SKILLS = frozenset({"testing-localization"})
 REVIEW_SKILL_PHASES = frozenset({"final-review", "review", "multi-review", "architecture-review"})
 GENERIC_FILE_RULE_SCORE = 20
 SKILL_PLAN_HASH_VERSION = 2
+RESOLVED_SKILL_LOCK_VERSION = 1
 SKILL_LINKS_COMMITMENT_VERSION = 2
 MANAGED_HOST_FILES_VERSION = 1
 MANAGED_HOST_FILES_COMMITMENT_VERSION = 1
@@ -994,22 +995,83 @@ def _authenticated_installed_skill_snapshot(
     return index, current_hash
 
 
+def build_resolved_skill_lock(
+    index: dict[str, Any], skill_plan_hash: str
+) -> tuple[dict[str, Any], str]:
+    """설치 index를 run 시점에 고정하는 결정적 resolved skill lock을 만든다."""
+    selection = index.get("selection") or {}
+    profiles = sorted(
+        str(name) for name in (selection.get("profiles") or []) if isinstance(name, str)
+    )
+    providers_by_name: dict[str, dict[str, Any]] = {}
+    for claim in index.get("skill_providers") or []:
+        if isinstance(claim, dict) and isinstance(claim.get("concrete_id"), str):
+            providers_by_name[claim["concrete_id"]] = claim
+    skills: list[dict[str, Any]] = []
+    for skill in index.get("skills") or []:
+        if not isinstance(skill, dict):
+            continue
+        name = skill.get("name")
+        if not isinstance(name, str):
+            continue
+        claim = providers_by_name.get(_portable_casefold(name)) or {}
+        capabilities = skill.get("capabilities")
+        skills.append(
+            {
+                "name": name,
+                "path": skill.get("path"),
+                "tree_hash": skill.get("tree_hash"),
+                "source": skill.get("source"),
+                "provider_id": claim.get("provider_id"),
+                "provider_version": claim.get("provider_version"),
+                "source_hash": claim.get("source_hash"),
+                "trust_tier": claim.get("trust_tier"),
+                "ownership": claim.get("ownership"),
+                "capabilities": sorted(str(c) for c in capabilities)
+                if isinstance(capabilities, list)
+                else None,
+            }
+        )
+    skills.sort(key=lambda entry: entry["name"])
+    provider_registry = index.get("provider_registry")
+    lock = {
+        "version": RESOLVED_SKILL_LOCK_VERSION,
+        "skill_plan_hash": skill_plan_hash,
+        "catalog_fingerprint": index.get("catalog_fingerprint"),
+        "provider_registry_fingerprint": provider_registry.get("fingerprint")
+        if isinstance(provider_registry, dict)
+        else None,
+        "active_profiles": profiles,
+        "skills": skills,
+    }
+    lock_hash = hashlib.sha256(
+        json.dumps(
+            lock, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+    ).hexdigest()
+    return lock, lock_hash
+
+
 def installed_skill_plan_pin(index_root: Path) -> dict[str, Any]:
     """설치된 index와 tree를 검증하고 새 run용 metadata를 반환한다."""
     snapshot = _authenticated_installed_skill_snapshot(index_root)
     if snapshot is None:
         return {}
-    _, current_hash = snapshot
+    index, current_hash = snapshot
     from agent_flow.core.local_skills import (
         LOCAL_SKILL_PLAN_HASH_VERSION,
         project_local_skill_plan_hash,
     )
 
+    lock, lock_hash = build_resolved_skill_lock(index, current_hash)
     return {
         "skill_plan_hash": current_hash,
         "skill_plan_hash_version": SKILL_PLAN_HASH_VERSION,
         "local_skill_plan_hash": project_local_skill_plan_hash(index_root),
         "local_skill_plan_hash_version": LOCAL_SKILL_PLAN_HASH_VERSION,
+        "resolved_skill_lock": lock,
+        "resolved_skill_lock_hash": lock_hash,
+        "resolved_skill_lock_version": RESOLVED_SKILL_LOCK_VERSION,
     }
 
 
@@ -1451,20 +1513,41 @@ def reconcile_skill_plan_pin(
 
     current_hash = current_pin["skill_plan_hash"]
     current_local_hash = current_pin["local_skill_plan_hash"]
+    locked = isinstance(meta.get("resolved_skill_lock"), dict)
     if pinned_hash:
         if pinned_version == SKILL_PLAN_HASH_VERSION:
-            if pinned_hash != current_hash:
+            pinned_local_hash = meta.get("local_skill_plan_hash")
+            pinned_local_version = meta.get("local_skill_plan_hash_version")
+            hash_drift = pinned_hash != current_hash
+            local_drift = bool(pinned_local_hash) and (
+                pinned_local_version != current_pin["local_skill_plan_hash_version"]
+                or pinned_local_hash != current_local_hash
+            )
+            if locked:
+                # run-scoped resolved skill lock은 run 수명 동안 동결된다.
+                # catalog/project-local drift는 다음 run만 무효화한다.
+                if hash_drift or local_drift:
+                    observed = {
+                        "skill_plan_hash": current_hash,
+                        "local_skill_plan_hash": current_local_hash,
+                    }
+                    if meta.get("skill_plan_drift_observed") == observed:
+                        return meta, False
+                    deferred = dict(meta)
+                    deferred["skill_plan_drift_observed"] = observed
+                    return deferred, True
+                if meta.get("skill_plan_drift_observed") is not None:
+                    cleared = dict(meta)
+                    cleared.pop("skill_plan_drift_observed", None)
+                    return cleared, True
+                return meta, False
+            if hash_drift:
                 repinned = dict(meta)
                 repinned.update(current_pin)
                 repinned["skill_plan_repin_from"] = pinned_hash
                 return repinned, True
-            pinned_local_hash = meta.get("local_skill_plan_hash")
-            pinned_local_version = meta.get("local_skill_plan_hash_version")
             if pinned_local_hash:
-                if (
-                    pinned_local_version != current_pin["local_skill_plan_hash_version"]
-                    or pinned_local_hash != current_local_hash
-                ):
+                if local_drift:
                     repinned = dict(meta)
                     repinned.update(current_pin)
                     repinned["local_skill_plan_repin_from"] = pinned_local_hash
