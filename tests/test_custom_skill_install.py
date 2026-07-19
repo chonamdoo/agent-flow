@@ -2783,7 +2783,7 @@ def test_android_profile_installs_android_skills_and_common_dependencies_only(tm
     project.mkdir()
     (project / "settings.gradle.kts").write_text("pluginManagement {}\n", encoding="utf-8")
 
-    result = _install(project)
+    result = _install(project, "--profile", "android")
 
     assert result.returncode == 0, result.stderr
     index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
@@ -2811,6 +2811,28 @@ def test_android_profile_installs_android_skills_and_common_dependencies_only(tm
     assert "react-native-clean-architecture" not in names
     assert "ios-clean-architecture" not in names
     assert not (project / ".agent-flow" / "skills" / "react-native-clean-architecture").exists()
+    assert "android-debugging" not in names
+    assert "android-module-creator" not in names
+    assert not (project / ".agent-flow" / "skills" / "android-debugging").exists()
+    assert not (project / ".agent-flow" / "skills" / "android-module-creator").exists()
+
+    index["selection"]["external_exposure_skills"] = [
+        "android-debugging",
+        "android-module-creator",
+    ]
+    index_path = project / ".agent-flow" / "skills" / "index.json"
+    index_path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
+    kit_path = project / ".agent-flow" / "kit.json"
+    kit = json.loads(kit_path.read_text(encoding="utf-8"))
+    kit.pop("skill_index_hash_version", None)
+    kit.pop("skill_index_hash", None)
+    kit_path.write_text(json.dumps(kit, indent=2) + "\n", encoding="utf-8")
+
+    reinstalled = _install(project, "--profile", "android")
+
+    assert reinstalled.returncode == 0, reinstalled.stderr
+    assert not (project / ".agent-flow" / "skills" / "android-debugging").exists()
+    assert not (project / ".agent-flow" / "skills" / "android-module-creator").exists()
 
 
 def test_android_official_provider_rejects_unpinned_host_snapshot(
@@ -3072,37 +3094,76 @@ def test_reinstall_does_not_adopt_same_tree_replaced_generated_skill(
     assert skill.lstat().st_ino == replacement_inode
 
 
+def test_legacy_generated_skill_document_path_is_managed_on_upgrade(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    first = _install(project)
+    assert first.returncode == 0, first.stderr
+    skill = project / ".agent-flow" / "skills" / "agent-flow"
+    document = skill / "SKILL.md"
+    legacy_document = b"---\nname: agent-flow\n---\nlegacy generated skill\n"
+    document.write_bytes(legacy_document)
+    index_path = skill.parent / "index.json"
+    legacy_index = json.loads(index_path.read_text(encoding="utf-8"))
+    legacy_index.pop("managed_ownership")
+    indexed = next(
+        entry for entry in legacy_index["skills"] if entry["name"] == "agent-flow"
+    )
+    assert indexed["path"] == ".agent-flow/skills/agent-flow/SKILL.md"
+    indexed["hash"] = hashlib.sha256(legacy_document).hexdigest()
+    indexed["tree_hash"] = hashlib.sha256(
+        b"SKILL.md\0" + legacy_document + b"\0"
+    ).hexdigest()
+    legacy_bytes = (json.dumps(legacy_index, indent=2) + "\n").encode()
+    index_path.write_bytes(legacy_bytes)
+    kit_path = project / ".agent-flow" / "kit.json"
+    kit = json.loads(kit_path.read_text(encoding="utf-8"))
+    kit.pop("skill_index_hash_version", None)
+    kit.pop("skill_index_hash", None)
+    kit_path.write_text(json.dumps(kit, indent=2) + "\n", encoding="utf-8")
+
+    upgraded = _install(project)
+
+    assert upgraded.returncode == 0, upgraded.stderr
+    assert document.read_bytes() != legacy_document
+
+
 def test_legacy_nested_generated_skill_path_does_not_adopt_root(
     tmp_path: Path,
 ) -> None:
     project = tmp_path / "project"
     project.mkdir()
+    first = _install(project)
+    assert first.returncode == 0, first.stderr
     skill = project / ".agent-flow" / "skills" / "agent-flow"
-    skill.mkdir(parents=True)
-    original = "---\nname: agent-flow\n---\nlegacy\n"
-    (skill / "SKILL.md").write_text(original, encoding="utf-8")
-    (skill.parent / "index.json").write_text(
-        json.dumps(
-            {
-                "skills": [
-                    {
-                        "name": "agent-flow",
-                        "source": "bundled",
-                        "hosts": ["codex"],
-                        "path": ".agent-flow/skills/agent-flow/nested",
-                    }
-                ],
-                "links": [],
-            }
-        ),
+    document = skill / "SKILL.md"
+    original = document.read_bytes()
+    index_path = skill.parent / "index.json"
+    legacy_index = json.loads(index_path.read_text(encoding="utf-8"))
+    legacy_index.pop("managed_ownership")
+    indexed = next(
+        entry for entry in legacy_index["skills"] if entry["name"] == "agent-flow"
+    )
+    indexed["path"] = ".agent-flow/skills/agent-flow/nested"
+    index_path.write_text(
+        json.dumps(legacy_index, indent=2) + "\n",
         encoding="utf-8",
     )
+    kit_path = project / ".agent-flow" / "kit.json"
+    kit = json.loads(kit_path.read_text(encoding="utf-8"))
+    kit.pop("skill_index_hash_version", None)
+    kit.pop("skill_index_hash", None)
+    kit_path.write_text(json.dumps(kit, indent=2) + "\n", encoding="utf-8")
 
     failed = _install(project)
 
     assert failed.returncode != 0
     assert "unmanaged skill entry conflicts with installed skill: agent-flow" in failed.stderr
-    assert (skill / "SKILL.md").read_text(encoding="utf-8") == original
+    assert document.read_bytes() == original
+    rolled_back_index = json.loads(index_path.read_text(encoding="utf-8"))
+    assert "managed_ownership" not in rolled_back_index
 
 
 def test_ios_project_auto_selects_ios_profile_skills(tmp_path: Path) -> None:

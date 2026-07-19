@@ -4041,7 +4041,10 @@ function materializeBundledSkillEntries(transaction, allowedDirectoryNames) {
     const entry of fs.readdirSync(sourceRoot, { withFileTypes: true })
       .sort((left, right) => compareCodePoints(left.name, right.name))
   ) {
-    if (GENERATED_PROJECT_SKILL_NAMES.has(entry.name)) continue;
+    if (
+      GENERATED_PROJECT_SKILL_NAMES.has(entry.name)
+      || PROFILE_MANAGED_HOST_ONLY_SKILLS.has(entry.name)
+    ) continue;
     if (entry.isDirectory() && !allowedDirectoryNames?.has(entry.name)) continue;
     if (!entry.isDirectory() && !entry.isFile()) continue;
     const source = path.join(sourceRoot, entry.name);
@@ -6726,7 +6729,7 @@ function preserveUnmanagedSkillEntries(transaction, previousIndex, currentIndex)
     if (
       ownershipEntries === null
       && GENERATED_PROJECT_SKILL_NAMES.has(rootName)
-      && relative === `.agent-flow/skills/${rootName}`
+      && relative === `.agent-flow/skills/${rootName}/SKILL.md`
       && skill?.name === rootName
     ) {
       const source = path.join(transaction.backup, rootName);
@@ -6807,6 +6810,7 @@ function preserveUnmanagedSkillEntries(transaction, previousIndex, currentIndex)
       const destinationState = hostPathState(destination);
       if (
         ownershipEntries === null
+        && !GENERATED_PROJECT_SKILL_NAMES.has(entry)
         && sourceState.kind === "directory"
         && destinationState.kind === "directory"
         && sourceState.tree_hash === destinationState.tree_hash
