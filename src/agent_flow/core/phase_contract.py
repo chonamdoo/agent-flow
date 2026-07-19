@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +16,7 @@ from agent_flow.core.skill_compatibility import (
 from agent_flow.core.skill_plan import (
     CODE_SKILL_PHASES,
     _portable_casefold,
+    assert_active_host_matches_catalog,
     authenticated_installed_skill_index,
     resolve_runtime_skill_plan,
     runtime_changed_files,
@@ -39,6 +41,10 @@ def resolve_runtime_phase_contract(
     index = authenticated_installed_skill_index(config_root)
     if index is None:
         return phase
+    active_host = os.environ.get("AGENT_FLOW_ACTIVE_HOST") or os.environ.get("AGENT_FLOW_HOST")
+    assert_active_host_matches_catalog(
+        index, active_host.strip().lower() if isinstance(active_host, str) else None
+    )
     workspace = meta.get("workspace")
     base_commit = workspace.get("head") if isinstance(workspace, dict) else None
     plan = resolve_runtime_skill_plan(

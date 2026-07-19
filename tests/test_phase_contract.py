@@ -621,3 +621,69 @@ phases:
     payload = json.loads(payload_line.removeprefix("status_json: "))
     assert payload["status"] == "blocked"
     assert payload["reason"] == "missing_completion_markers"
+
+def _host_index() -> dict:
+    return {
+        "catalog_active_host": "codex",
+        "selection": {},
+        "skills": [
+            {"name": "code-generation-discipline", "path": ".agent-flow/skills/code-generation-discipline/SKILL.md"},
+        ],
+    }
+
+
+def _host_runner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, index: dict):
+    project = tmp_path / "project"
+    run_dir = project / ".agent-flow" / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "meta.json").write_text('{"task":""}\n', encoding="utf-8")
+    monkeypatch.setattr("agent_flow.core.phase_contract.runtime_changed_files", lambda *_a: ())
+    monkeypatch.setattr(
+        "agent_flow.core.phase_contract.authenticated_installed_skill_index",
+        lambda _root: index,
+    )
+    runner = Runner.__new__(Runner)
+    runner.config_root = project
+    runner.project_root = project
+    runner.run_dir = run_dir
+    return runner
+
+
+def test_active_host_mismatch_blocks_phase_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_flow.core.skill_plan import HostExposureError
+
+    monkeypatch.setenv("AGENT_FLOW_ACTIVE_HOST", "claude")
+    monkeypatch.delenv("AGENT_FLOW_HOST", raising=False)
+    runner = _host_runner(tmp_path, monkeypatch, _host_index())
+    with pytest.raises(HostExposureError) as excinfo:
+        runner._runtime_contract_phase(
+            Phase(id="implement", description="", required_skills=(), requirements=())
+        )
+    assert excinfo.value.reason == "active_host_mismatch"
+    assert excinfo.value.details["active_host"] == "claude"
+    assert excinfo.value.details["catalog_active_host"] == "codex"
+
+
+def test_matching_active_host_allows_phase_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AGENT_FLOW_ACTIVE_HOST", "codex")
+    monkeypatch.delenv("AGENT_FLOW_HOST", raising=False)
+    runner = _host_runner(tmp_path, monkeypatch, _host_index())
+    resolved = runner._runtime_contract_phase(
+        Phase(id="implement", description="", required_skills=(), requirements=())
+    )
+    assert "code-generation-discipline" in resolved.required_skills
+
+
+def test_assert_active_host_matches_catalog_is_no_op_when_unbound() -> None:
+    from agent_flow.core.skill_plan import assert_active_host_matches_catalog
+
+    # host-neutral catalog: no active-host binding -> no-op even on a different host.
+    assert_active_host_matches_catalog({"selection": {}}, "claude")
+    # unknown active host -> no-op (do not over-block).
+    assert_active_host_matches_catalog({"catalog_active_host": "codex"}, None)
+    # exact match -> no-op.
+    assert_active_host_matches_catalog({"catalog_active_host": "codex"}, "codex")

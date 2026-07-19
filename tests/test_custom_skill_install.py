@@ -4060,6 +4060,8 @@ def test_worktree_catalog_drift_fails_without_refreshing_leader_install(tmp_path
 
     assert result.returncode != 0
     assert "catalog drift must be refreshed from the leader checkout" in result.stderr
+    # managed worktree defers repair and returns the authenticated leader next_command.
+    assert "agent-flow continue --root" in result.stderr
     assert index_path.read_bytes() == before
 
 
@@ -6938,3 +6940,18 @@ def test_build_resolved_skill_lock_matches_provider_claims_case_insensitively() 
     assert entry["provider_id"] == "android-official"
     assert entry["provider_version"] == "2.0.0"
     assert entry["source_hash"] == "c" * 64
+
+def test_partial_install_raises_structured_install_missing(tmp_path: Path) -> None:
+    # kit metadata present but the skill index is absent -> structured install_missing,
+    # not a raw/conflated snapshot error.
+    from agent_flow.core.skill_plan import (
+        HostExposureError,
+        authenticated_installed_skill_index,
+    )
+
+    project = tmp_path / "project"
+    (project / ".agent-flow" / "skills").mkdir(parents=True)
+    (project / ".agent-flow" / "kit.json").write_text("{}\n", encoding="utf-8")
+    with pytest.raises(HostExposureError) as excinfo:
+        authenticated_installed_skill_index(project)
+    assert excinfo.value.reason == "install_missing"

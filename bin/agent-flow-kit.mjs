@@ -4269,7 +4269,10 @@ function refreshSkillCatalogAtBoundary(root) {
   if (current === index.catalog_fingerprint && installedSkillLinksMatchIndex(leaderRoot, index)) return;
   const invocationWorktree = resolveManagedWorktreeRoot(process.cwd());
   if (invocationWorktree && samePath(invocationWorktree, leaderRoot)) {
-    throw new Error("blocked: skill catalog drift must be refreshed from the leader checkout");
+    throw new Error(
+      "blocked: skill catalog drift must be refreshed from the leader checkout; "
+      + `run: agent-flow continue --root ${leaderRoot}`,
+    );
   }
   const previousHost = process.env.AGENT_FLOW_HOST;
   if (PROJECT_SKILL_HOSTS.includes(index.catalog_active_host)) {
