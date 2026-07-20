@@ -163,6 +163,7 @@ GRADLE_PATH_OPTIONS = {
 }
 GRADLE_COMPACT_PATH_OPTIONS = ("-I", "-b", "-c", "-g", "-p")
 MANAGED_CONTEXT_FILENAMES = {"agents.md", "claude.md", ".gitignore"}
+XD_FS_MUTATORS = {"ast_edit"}
 GRADLE_OPTION_ENVIRONMENT = (
     "GRADLE_OPTS",
     "JDK_JAVA_OPTIONS",
@@ -174,7 +175,7 @@ MANAGED_MARKER_START = "<!-- agent-flow:start -->"
 MANAGED_MARKER_END = "<!-- agent-flow:end -->"
 
 
-def _load_boundary_module(leader_root: Path) -> tuple[type[Exception], object, object, object, object]:
+def _load_boundary_module(leader_root: Path) -> tuple[type[Exception], object, object, object, object, object]:
     runtime_root = leader_root / ".agent-flow" / "runtime" / "python"
     _verify_boundary_runtime(leader_root, runtime_root)
     if runtime_root.is_dir():
@@ -182,6 +183,7 @@ def _load_boundary_module(leader_root: Path) -> tuple[type[Exception], object, o
     try:
         from agent_flow.core.workspace_boundary import (
             WorkspaceBoundaryError,
+            execution_binding_exists,
             execution_identity_from_context,
             resolve_mutation_path,
             resolve_execution_finalizer_workspace,
@@ -195,6 +197,7 @@ def _load_boundary_module(leader_root: Path) -> tuple[type[Exception], object, o
         select_execution_workspace,
         resolve_mutation_path,
         resolve_execution_finalizer_workspace,
+        execution_binding_exists,
     )
 
 
@@ -318,6 +321,9 @@ def _requested_paths(tool_input: dict[str, object]) -> list[str]:
                     re.MULTILINE,
                 )
             )
+        native_patch = value.get("input")
+        if isinstance(native_patch, str):
+            paths.extend(_native_patch_paths(native_patch))
         edits = value.get("edits")
         if isinstance(edits, list):
             visit(edits)
@@ -351,6 +357,59 @@ def _string_value(mapping: dict[str, object], *keys: str) -> str | None:
         if isinstance(value, str):
             return value
     return None
+
+
+def _shell_tool_cwd(tool_input: dict[str, object], base: Path) -> Path | None:
+    for key in ("cwd", "workdir", "working_directory", "workingDirectory"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value.strip():
+            candidate = Path(value)
+            if not candidate.is_absolute():
+                candidate = base / candidate
+            return candidate
+    return None
+
+
+def _native_patch_paths(text: str) -> list[str]:
+    paths: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        header = re.fullmatch(r"\[([^#\]\r\n]+)#[0-9A-Fa-f]+\]", stripped)
+        if header:
+            paths.append(header.group(1).strip())
+            continue
+        move = re.fullmatch(r"MV\s+(.+)", stripped)
+        if move:
+            destination = move.group(1).strip()
+            try:
+                tokens = shlex.split(destination)
+            except ValueError:
+                tokens = [destination]
+            if tokens:
+                paths.append(tokens[0])
+    return paths
+
+
+def _xd_tool_targets(xd_tool: str, tool_input: dict[str, object]) -> list[str]:
+    if xd_tool != "ast_edit":
+        return []
+    content = _string_value(tool_input, "content", "input")
+    if content is None:
+        return []
+    try:
+        arguments = json.loads(content)
+    except (ValueError, TypeError):
+        return []
+    targets = arguments.get("paths") if isinstance(arguments, dict) else None
+    if not isinstance(targets, list):
+        return []
+    paths = [item for item in targets if isinstance(item, str) and item]
+    if any(re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", path) for path in paths):
+        raise ValueError(
+            "write boundary rejected: reason_code=target_uri_not_supported "
+            "xd:// filesystem mutator targets must be local filesystem paths"
+        )
+    return paths
 
 
 def _apply_declared_edit(content: str, edit: dict[str, object]) -> str:
@@ -2234,6 +2293,16 @@ def _normalized_worktree_name(value: str) -> str | None:
     return safe if safe.startswith("feat-") else f"feat-{safe}"
 
 
+def _requested_agent_flow_subcommand(command: str) -> str | None:
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return None
+    if len(words) < 2 or Path(words[0]).name.lower() not in {"agent-flow", "agent-flow-kit"}:
+        return None
+    return words[1]
+
+
 def _requested_worktree_removal(command: str) -> str | None:
     try:
         words = shlex.split(command)
@@ -2246,7 +2315,57 @@ def _requested_worktree_removal(command: str) -> str | None:
     return _normalized_worktree_name(words[4])
 
 
-def _is_agent_flow_launcher(command: str, cwd: Path, leader_root: Path, pinned_root: Path) -> bool:
+def _record_stage_arguments_are_bounded(
+    arguments: list[str],
+    *,
+    cwd: Path,
+    leader_root: Path,
+    run_dir: Path | None,
+) -> bool:
+    if run_dir is None or len(arguments) < 9 or len(arguments) % 2 == 0:
+        return False
+    allowed = {
+        "--root",
+        "--run-dir",
+        "--stage",
+        "--status",
+        "--evidence-type",
+        "--confidence",
+        "--content",
+    }
+    options: dict[str, str] = {}
+    for index in range(1, len(arguments), 2):
+        option = arguments[index]
+        if option not in allowed or option in options:
+            return False
+        options[option] = arguments[index + 1]
+    if not {"--root", "--run-dir", "--stage", "--content"} <= options.keys():
+        return False
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", options["--stage"]) is None:
+        return False
+    try:
+        requested_root = Path(options["--root"])
+        if not requested_root.is_absolute():
+            requested_root = cwd / requested_root
+        requested_run_dir = Path(options["--run-dir"])
+        if not requested_run_dir.is_absolute():
+            requested_run_dir = cwd / requested_run_dir
+        return (
+            requested_root.resolve(strict=True) == leader_root.resolve(strict=True)
+            and requested_run_dir.resolve(strict=True) == run_dir.resolve(strict=True)
+        )
+    except OSError:
+        return False
+
+
+def _is_agent_flow_launcher(
+    command: str,
+    cwd: Path,
+    leader_root: Path,
+    pinned_root: Path,
+    *,
+    run_dir: Path | None = None,
+) -> bool:
     if _has_active_shell_substitution(command) or re.search(r"[\r\n;&|]|\d*>>?|&>", command):
         return False
     if any(
@@ -2277,6 +2396,7 @@ def _is_agent_flow_launcher(command: str, cwd: Path, leader_root: Path, pinned_r
         "run",
         "gate",
         "gates",
+        "record-stage",
         "architecture-lint",
         "install",
         "worktree",
@@ -2284,6 +2404,13 @@ def _is_agent_flow_launcher(command: str, cwd: Path, leader_root: Path, pinned_r
     if arguments[0] not in trusted_subcommands:
         return False
     if arguments[:2] == ["run", "install"]:
+        return False
+    if arguments[0] == "record-stage" and not _record_stage_arguments_are_bounded(
+        arguments,
+        cwd=cwd,
+        leader_root=leader_root,
+        run_dir=run_dir,
+    ):
         return False
     if arguments[0] == "install":
         try:
@@ -2647,22 +2774,28 @@ def main() -> int:
         if tool_name not in WRITE_TOOLS and tool_name not in SHELL_TOOLS:
             return 0
         cwd_value = payload.get("cwd")
-        cwd = Path(cwd_value) if isinstance(cwd_value, str) and cwd_value else Path.cwd()
-        leader_root = _leader_root(cwd)
+        context_cwd = Path(cwd_value) if isinstance(cwd_value, str) and cwd_value else Path.cwd()
+        leader_root = _leader_root(context_cwd)
         if not (leader_root / ".git").exists():
             return 0
+        cwd = context_cwd
+        tool_input = _tool_input(payload)
+        if tool_name in SHELL_TOOLS:
+            declared_cwd = _shell_tool_cwd(tool_input, context_cwd)
+            if declared_cwd is not None:
+                cwd = declared_cwd
         host = str(
             payload.get("host")
             or _host_argument()
             or os.environ.get("AGENT_FLOW_ACTIVE_HOST")
             or "unknown"
         ).strip().lower()
-        tool_input = _tool_input(payload)
         command = ""
         paths: list[str] = []
         unresolved_shell_target = False
         requested_launcher = False
         requested_worktree_removal: str | None = None
+        requested_subcommand: str | None = None
         if tool_name in SHELL_TOOLS:
             command_value = tool_input.get("command")
             if not isinstance(command_value, str) or not command_value.strip():
@@ -2675,6 +2808,7 @@ def main() -> int:
             if not mutating:
                 return 0
             requested_launcher = _requests_agent_flow_launcher(command, cwd)
+            requested_subcommand = _requested_agent_flow_subcommand(command)
             requested_worktree_removal = _requested_worktree_removal(command)
             if (
                 requested_worktree_removal is None
@@ -2685,7 +2819,11 @@ def main() -> int:
                 elif host == "omp":
                     _required_hook_execution_id(payload)
                 return 0
-            if requested_launcher and requested_worktree_removal is None:
+            if (
+                requested_launcher
+                and requested_worktree_removal is None
+                and requested_subcommand != "record-stage"
+            ):
                 raise ValueError("write boundary rejected: agent-flow launcher is not trusted")
         (
             boundary_error,
@@ -2693,6 +2831,7 @@ def main() -> int:
             select_workspace,
             resolve_path,
             resolve_finalizer_workspace,
+            binding_exists,
         ) = _load_boundary_module(leader_root)
         execution = resolve_execution(payload, os.environ, host_hint=host)
         if requested_worktree_removal is not None:
@@ -2709,13 +2848,29 @@ def main() -> int:
         else:
             active = select_workspace(leader_root, execution)
             if active is None:
+                if binding_exists(leader_root, execution):
+                    raise boundary_error(
+                        "write boundary rejected: "
+                        f"resolved_path={cwd} "
+                        f"host={host} "
+                        f"phase={payload.get('phase') or 'unknown'} "
+                        "reason_code=bound_run_not_active "
+                        "reason=execution is bound to a run without an active pinned worktree; "
+                        "refusing mutation outside a worktree (recreate the worktree run or clear the stale binding)"
+                    )
                 return 0
         if tool_name in SHELL_TOOLS:
             pinned_root = Path(active.identity.workspace_root)
             if requested_worktree_removal is None:
                 pinned_root = pinned_root.resolve(strict=True)
-            leader_root = _leader_root(cwd).resolve(strict=True)
-            if _is_agent_flow_launcher(command, cwd, leader_root, pinned_root):
+            leader_root = leader_root.resolve(strict=True)
+            if _is_agent_flow_launcher(
+                command,
+                cwd,
+                leader_root,
+                pinned_root,
+                run_dir=Path(active.run_dir),
+            ):
                 if host == "claude":
                     _forward_claude_execution_identity(payload, tool_input, command)
                 elif host == "omp":
@@ -2735,7 +2890,21 @@ def main() -> int:
                     "reason=mutating shell command must run from pinned workspace"
                 )
         else:
-            paths = _requested_paths(tool_input)
+            primary = _string_value(
+                tool_input, "path", "file_path", "filePath", "filename"
+            )
+            if isinstance(primary, str) and primary.startswith("xd://"):
+                xd_tool = primary[len("xd://"):].strip("/").split("/", 1)[0].lower()
+                if xd_tool in XD_FS_MUTATORS:
+                    paths = _xd_tool_targets(xd_tool, tool_input)
+                    if not paths:
+                        raise boundary_error(
+                            "write boundary rejected: xd:// tool did not declare a target path"
+                        )
+                else:
+                    return 0
+            else:
+                paths = _requested_paths(tool_input)
         if unresolved_shell_target:
             raise boundary_error(
                 "write boundary rejected: shell command has an unresolved mutation target"
@@ -2752,6 +2921,7 @@ def main() -> int:
                 base_dir=cwd,
                 host=host,
                 phase=phase,
+                run_dir=getattr(active, "run_dir", None),
             )
             _verify_managed_marker_integrity(
                 tool_name,

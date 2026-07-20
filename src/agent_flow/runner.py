@@ -199,10 +199,21 @@ class Runner:
                     architecture=self.architecture,
                     run_id=pending_run_id,
                 )
+                self._pin_skill_plan()
                 self._pin_workspace_identity(captured_identity)
-            except Exception:
-                if self.run_dir is not None:
-                    mark_inactive(self.run_dir)
+            except Exception as exc:
+                cleanup_errors: list[Exception] = []
+                try:
+                    self._release_execution_binding()
+                except Exception as cleanup_error:
+                    cleanup_errors.append(cleanup_error)
+                try:
+                    if self.run_dir is not None:
+                        mark_inactive(self.run_dir)
+                except Exception as cleanup_error:
+                    cleanup_errors.append(cleanup_error)
+                for cleanup_error in cleanup_errors:
+                    exc.add_note(f"run-start cleanup failed: {cleanup_error}")
                 raise
             finally:
                 if claim is not None:
@@ -215,8 +226,8 @@ class Runner:
             print(f"▶ resuming    : {self.run_dir.name}")
             print(f"▶ task        : {meta.get('task', '')}")
             self._pin_workspace_identity()
+            self._pin_skill_plan()
 
-        self._pin_skill_plan()
         self._verify_pending_mutation_boundary()
 
         adapter = detect_adapter()
@@ -498,10 +509,10 @@ class Runner:
             self.run_dir,
             run_id=str(meta.get("run_id") or self.run_dir.name),
         )
+        self._execution_identity = execution
         if execution_payload is None:
             meta["execution"] = execution.to_dict()
             write_meta(self.run_dir, meta)
-        self._execution_identity = execution
 
     def _release_execution_binding(self) -> None:
         if not hasattr(self, "_execution_identity") or not hasattr(self, "_workspace_identity"):

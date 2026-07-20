@@ -3281,3 +3281,146 @@ def test_security_guards_reject_unsafe_names_and_escaped_paths(tmp_path: Path):
         validate_safe_name("../workflow", "workflow")
     with pytest.raises(ValueError, match="profile path escapes"):
         ensure_child_path(root, root / "nested" / "profile.yaml", "profile")
+
+def _new_runner_worktree(tmp_path: Path, name: str) -> tuple[Path, Path, Path]:
+    project = tmp_path / f"{name}_project"
+    project.mkdir()
+    _init_git_project(project)
+    worktree = tmp_path / f"{name}_worktree"
+    subprocess.run(
+        ["git", "worktree", "add", "-b", f"feat/{name}", str(worktree)],
+        cwd=project,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    state_root = project / ".git" / "agent-flow" / "worktrees" / name
+    return project, worktree, state_root
+
+
+def test_run_start_skill_plan_failure_leaves_no_execution_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from agent_flow.runner import Runner, ResumeMode
+
+    project, worktree, state_root = _new_runner_worktree(tmp_path, "skill-plan")
+    monkeypatch.setenv("AGENT_FLOW_ACTIVE_HOST", "codex")
+    monkeypatch.setenv("AGENT_FLOW_EXECUTION_ID", "skill-plan-session")
+    runner = Runner(
+        project_root=worktree,
+        state_root=state_root,
+        config_root=project,
+        workflow="default",
+    )
+
+    def failing_skill_plan() -> None:
+        raise RuntimeError("installed upstream skill lock is missing")
+
+    monkeypatch.setattr(runner, "_pin_skill_plan", failing_skill_plan)
+
+    with pytest.raises(RuntimeError, match="upstream skill lock is missing"):
+        runner.run(ResumeMode.START, task="rollback")
+
+    assert runner.run_dir is not None
+    assert not (runner.run_dir / "active").exists()
+    assert not list((project / ".git" / "agent-flow" / "executions").glob("*.json"))
+
+
+def test_run_start_metadata_failure_releases_published_execution_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import agent_flow.runner as runner_module
+    from agent_flow.runner import Runner, ResumeMode
+
+    project, worktree, state_root = _new_runner_worktree(tmp_path, "meta-failure")
+    monkeypatch.setenv("AGENT_FLOW_ACTIVE_HOST", "codex")
+    monkeypatch.setenv("AGENT_FLOW_EXECUTION_ID", "meta-failure-session")
+    runner = Runner(
+        project_root=worktree,
+        state_root=state_root,
+        config_root=project,
+        workflow="default",
+    )
+    original_write_meta = runner_module.write_meta
+    observed_binding: list[Path] = []
+
+    def fail_execution_meta(run_dir: Path, meta: dict[str, object]) -> None:
+        if "execution" in meta:
+            observed_binding.extend(
+                (project / ".git" / "agent-flow" / "executions").glob("*.json")
+            )
+            raise OSError("execution metadata write failed")
+        original_write_meta(run_dir, meta)
+
+    monkeypatch.setattr(runner_module, "write_meta", fail_execution_meta)
+
+    with pytest.raises(OSError, match="execution metadata write failed"):
+        runner.run(ResumeMode.START, task="rollback")
+
+    assert observed_binding
+    assert runner.run_dir is not None
+    assert not (runner.run_dir / "active").exists()
+    assert not list((project / ".git" / "agent-flow" / "executions").glob("*.json"))
+
+def test_run_start_release_failure_still_marks_run_inactive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import agent_flow.runner as runner_module
+    from agent_flow.runner import Runner, ResumeMode
+
+    project, worktree, state_root = _new_runner_worktree(tmp_path, "release-failure")
+    monkeypatch.setenv("AGENT_FLOW_ACTIVE_HOST", "codex")
+    monkeypatch.setenv("AGENT_FLOW_EXECUTION_ID", "release-failure-session")
+    runner = Runner(
+        project_root=worktree,
+        state_root=state_root,
+        config_root=project,
+        workflow="default",
+    )
+    original_write_meta = runner_module.write_meta
+
+    def fail_execution_meta(run_dir: Path, meta: dict[str, object]) -> None:
+        if "execution" in meta:
+            raise OSError("execution metadata write failed")
+        original_write_meta(run_dir, meta)
+
+    def fail_release() -> None:
+        raise RuntimeError("execution binding ownership changed")
+
+    monkeypatch.setattr(runner_module, "write_meta", fail_execution_meta)
+    monkeypatch.setattr(runner, "_release_execution_binding", fail_release)
+
+    with pytest.raises(OSError, match="execution metadata write failed") as failure:
+        runner.run(ResumeMode.START, task="rollback")
+
+    assert runner.run_dir is not None
+    assert not (runner.run_dir / "active").exists()
+    assert list((project / ".git" / "agent-flow" / "executions").glob("*.json"))
+    assert any(
+        "run-start cleanup failed: execution binding ownership changed" in note
+        for note in getattr(failure.value, "__notes__", ())
+    )
+
+
+
+def test_missing_android_upstream_lock_names_authenticated_install_command(
+    tmp_path: Path,
+):
+    from agent_flow.core.skill_plan import (
+        SkillPlanSnapshotError,
+        _validate_installed_android_official_provenance,
+    )
+
+    project = tmp_path / "android_lock"
+    project.mkdir()
+    index = {"selection": {"skill_profiles": ["android"]}}
+    launcher = project / ".agent-flow" / "bin" / "agent-flow"
+
+    with pytest.raises(SkillPlanSnapshotError) as failure:
+        _validate_installed_android_official_provenance(project, index)
+
+    assert f"{launcher} install" in str(failure.value)
+    assert "(agent-flow install)" not in str(failure.value)
