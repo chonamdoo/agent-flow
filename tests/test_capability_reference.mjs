@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { resolveProfileCapabilities } from "../lib/skill-selection.mjs";
+import { createSkillCompatibilityCatalog } from "../lib/skill-compatibility.mjs";
 
 const CATALOG = {
   version: 1,
@@ -70,4 +71,16 @@ test("missing catalog leaves every capability unresolved", () => {
   const { resolved, diagnostics } = resolveProfileCapabilities(null, ["lang.python"]);
   assert.deepEqual(resolved, []);
   assert.equal(diagnostics[0].reason, "capability_unresolved");
+});
+
+test("resolveCapability accepts a Set as available (no TypeError)", () => {
+  const catalog = createSkillCompatibilityCatalog(CATALOG);
+  // callers may pass a LogicalNameSet/Set; must resolve like an array does
+  const resolution = catalog.resolveCapability(
+    "lang.python",
+    new Set(["python-development-guide"]),
+  );
+  assert.equal(resolution.resolved, true);
+  assert.equal(resolution.canonical, "python-development-guide");
+  assert.equal(resolution.reason, null);
 });
