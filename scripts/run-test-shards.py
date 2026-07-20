@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -101,7 +102,7 @@ class CommandSpec:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     requested = "targeted" if args.command == "related" else args.command
-    run_id = _validate_run_id(args.run_id or _default_run_id())
+    run_id = _validate_run_id(args.run_id or _default_run_id(requested))
     run_dir = _run_directory(run_id)
     shards = FINAL_SHARDS if requested == "full-final" else (requested,)
     changed_files = _validate_changed_files(args.changed_file or _changed_files(ROOT))
@@ -945,8 +946,9 @@ def _display_command(argv: Sequence[str]) -> str:
     return " ".join(shlex.quote(value) for value in argv)
 
 
-def _default_run_id() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+def _default_run_id(shard: str) -> str:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"{timestamp}-{shard}-{os.getpid()}-{uuid.uuid4().hex}"
 
 
 def _now() -> str:

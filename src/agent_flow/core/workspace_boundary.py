@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import stat
 import subprocess
 import sys
@@ -571,24 +570,19 @@ def select_execution_workspace(
         raise WorkspaceBoundaryError("execution_binding_stale: bound workspace is not active")
     return selected
 
+
 def execution_binding_exists(
     leader_root: Path,
     execution: ExecutionIdentity | None,
 ) -> bool:
-    """현재 execution identity에 binding 파일이 존재하면 True를 반환한다.
-
-    활성 여부는 보지 않는다. run 시작이 worktree/run 활성화 전에 중단되어
-    남은 유령 binding도 "관리 대상"으로 취급해 guard가 fail-open 하지 않도록 한다.
-    존재 확인은 fail-closed다: binding 경로가 파일이든 symlink든 존재하면 True다.
-    """
+    """현재 execution identity의 binding 파일 존재 여부를 활성/비활성과 무관하게 반환한다."""
     if execution is None:
         return False
     leader = leader_root.resolve(strict=True)
     common = _authenticated_directory_root(Path(
         _git(leader, "rev-parse", "--path-format=absolute", "--git-common-dir")
     ))
-    root = _git_private_directory(common, "agent-flow", "executions", create=False)
-    binding_path = root / f"{execution.digest}.json"
+    binding_path = _execution_binding_path(common, execution)
     return binding_path.exists() or binding_path.is_symlink()
 
 
@@ -1151,25 +1145,6 @@ def _mutation_path_digest(root: Path, relative: str) -> str:
     return digest.hexdigest()
 
 
-def _is_allowed_run_artifact_path(
-    run_dir: Path,
-    resolved: Path,
-    phase: str,
-) -> bool:
-    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", phase) is None:
-        return False
-    state_root = run_dir.resolve(strict=False)
-    allowed = {
-        state_root / f"{phase}.md",
-        state_root / "artifacts" / f"{phase}.md",
-    }
-    if phase in {"red", "green"}:
-        allowed.add(state_root / "artifacts" / f"{phase}.log")
-    if phase == "gates":
-        allowed.add(state_root / "artifacts" / "gate-results.json")
-    return resolved in allowed
-
-
 def resolve_mutation_path(
     identity: WorkspaceIdentity,
     requested_path: str | Path,
@@ -1180,41 +1155,37 @@ def resolve_mutation_path(
     run_dir: Path | None = None,
 ) -> Path:
     root = validate_workspace_identity(identity)
+    allowed_roots = [root]
+    if run_dir is not None:
+        try:
+            allowed_roots.append(Path(run_dir).resolve(strict=True))
+        except OSError:
+            pass
     requested = Path(requested_path)
     base = (base_dir or root).resolve(strict=True)
     candidate = requested if requested.is_absolute() else base / requested
     resolved = candidate.resolve(strict=False)
-    allowed_root = root
-    if resolved != root and root not in resolved.parents:
-        state_root = run_dir.resolve(strict=False) if run_dir is not None else None
-        if state_root is not None and (
-            resolved == state_root or state_root in resolved.parents
-        ):
-            if not _is_allowed_run_artifact_path(state_root, resolved, phase):
-                raise WorkspaceBoundaryError(
-                    _boundary_diagnostic(
-                        requested=requested,
-                        resolved=resolved,
-                        root=root,
-                        host=host,
-                        phase=phase,
-                        reason="reason_code=protected_run_state_path run lifecycle metadata is not writable",
-                    )
-                )
-            allowed_root = state_root
-        else:
-            raise WorkspaceBoundaryError(
-                _boundary_diagnostic(
-                    requested=requested,
-                    resolved=resolved,
-                    root=root,
-                    host=host,
-                    phase=phase,
-                    reason="reason_code=target_outside_pinned_workspace resolved path escapes pinned workspace",
-                )
+    containing = next(
+        (
+            allowed
+            for allowed in allowed_roots
+            if resolved == allowed or allowed in resolved.parents
+        ),
+        None,
+    )
+    if containing is None:
+        raise WorkspaceBoundaryError(
+            _boundary_diagnostic(
+                requested=requested,
+                resolved=resolved,
+                root=root,
+                host=host,
+                phase=phase,
+                reason="reason_code=target_outside_pinned_workspace resolved path escapes pinned workspace",
             )
+        )
     existing_parent = resolved
-    while not existing_parent.exists() and existing_parent != allowed_root:
+    while not existing_parent.exists() and existing_parent != containing:
         existing_parent = existing_parent.parent
     try:
         parent_resolved = existing_parent.resolve(strict=True)
@@ -1229,7 +1200,7 @@ def resolve_mutation_path(
                 reason="reason_code=target_parent_missing target has no existing parent inside pinned workspace",
             )
         ) from exc
-    if parent_resolved != allowed_root and allowed_root not in parent_resolved.parents:
+    if parent_resolved != containing and containing not in parent_resolved.parents:
         raise WorkspaceBoundaryError(
             _boundary_diagnostic(
                 requested=requested,

@@ -40,7 +40,7 @@ from agent_flow.core.profiles import active_profile_ids, detect_profile, load_pr
 from agent_flow.core.review import summarize_reviews, write_review_summary
 from agent_flow.core.report import write_run_report
 from agent_flow.core.query import explain_run, query_run
-from agent_flow.core.security import resolve_project_path, validate_safe_name
+from agent_flow.core.security import resolve_project_path
 from agent_flow.core.workspace_boundary import (
     WorkspaceBoundaryError,
     acquire_workspace_start_claim,
@@ -100,13 +100,7 @@ from agent_flow.core.worktrees import (
     validate_worktree_removal,
     worktree_lifecycle_lock,
 )
-from agent_flow.core.state import (
-    RunRequest,
-    RunState,
-    project_launcher_command,
-    start_run,
-    status_summary,
-)
+from agent_flow.core.state import RunRequest, RunState, start_run, status_summary
 from agent_flow.core.workflow import load_workflow
 from agent_flow.eval import run_eval
 from agent_flow.memory.entities import EntityMemoryIndex
@@ -601,7 +595,7 @@ def main(argv: list[str] | None = None) -> int:
         if not (state_root / ".agent-flow" / "runs").exists():
             print("진행 중인 run 없음.")
             return 0
-        print(status_summary(state_root, project_root=root))
+        print(status_summary(state_root))
         return 0
 
     if args.command == "report":
@@ -899,15 +893,9 @@ def main(argv: list[str] | None = None) -> int:
             return 1 if index.conflicts or index.skipped else 0
 
     if args.command == "record-stage":
-        try:
-            run_dir = _resolve_record_stage_run_dir(root, args.run_dir)
-            stage_id = validate_safe_name(args.stage, "stage")
-        except (ValueError, WorkspaceBoundaryError) as exc:
-            print(f"record-stage rejected: {exc}", file=sys.stderr)
-            return 2
         path = write_stage_result(
-            run_dir=run_dir,
-            stage_id=stage_id,
+            run_dir=_resolve_project_path(root, args.run_dir),
+            stage_id=args.stage,
             status=args.status,
             evidence_type=args.evidence_type,
             confidence=args.confidence,
@@ -2008,23 +1996,6 @@ def _profile_gate_kind_tiebreaker(text: str) -> int:
     return 2
 
 
-def _resolve_record_stage_run_dir(root: Path, value: str) -> Path:
-    candidate = _resolve_project_path(root, value).resolve(strict=False)
-    local_runs = (root / ".agent-flow" / "runs").resolve(strict=False)
-    if candidate == local_runs or local_runs in candidate.parents:
-        return candidate
-    execution = execution_identity_from_context(env=os.environ)
-    if execution is None:
-        raise ValueError(f"run dir escapes project run state: {candidate}")
-    selected = select_execution_workspace(root, execution)
-    expected = selected.run_dir.resolve(strict=True)
-    if candidate != expected:
-        raise ValueError(
-            f"run dir differs from authenticated active run: {candidate}"
-        )
-    return expected
-
-
 def _resolve_run_dir(root: Path, value: str | None) -> Path | None:
     run_dir = _resolve_project_path(root, value) if value else _latest_run_dir(root)
     if run_dir is None:
@@ -2078,7 +2049,8 @@ def _profile_source_root(config_root: Path, requested_root: Path, worktree: str 
 
 
 def _continue_command(root: Path, worktree: str | None) -> str:
-    launcher = project_launcher_command(root)
+    configured = os.environ.get("AGENT_FLOW_PROJECT_LAUNCHER")
+    launcher = configured if configured and Path(configured).is_absolute() else "agent-flow"
     command = f"{shlex.quote(launcher)} continue --root {shlex.quote(str(root))}"
     if worktree is None:
         return command

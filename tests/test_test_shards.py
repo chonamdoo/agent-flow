@@ -4,6 +4,7 @@ import ast
 import hashlib
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -383,6 +384,16 @@ def test_interrupted_shard_records_active_and_unrun_commands(
     assert stored["shards"]["fast"]["results"][0]["tests"]["failed"] == ["failed"]
     assert stored["shards"]["fast"]["unrun_commands"] == ["later"]
 
+
+def test_default_run_id_is_unique_per_parallel_shard_invocation() -> None:
+    runner = _runner_module()
+
+    first = runner._default_run_id("targeted")
+    second = runner._default_run_id("targeted")
+
+    assert first != second
+    assert f"-targeted-{os.getpid()}-" in first
+    assert runner._validate_run_id(first) == first
 
 def test_run_id_cannot_escape_the_artifact_root() -> None:
     runner = _runner_module()
