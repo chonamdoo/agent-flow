@@ -4060,10 +4060,12 @@ def test_worktree_catalog_drift_fails_without_refreshing_leader_install(tmp_path
 
     assert result.returncode != 0
     assert "catalog drift must be refreshed from the leader checkout" in result.stderr
-    # managed worktree defers repair and points at the leader checkout, where the refresh
-    # actually unblocks (running `continue` from the worktree cwd would re-throw before --root).
+    # managed worktree defers repair and points at the leader checkout with a side-effect-free
+    # command; `status` triggers the boundary catalog refresh without advancing any run (a bare
+    # `continue` from the leader could advance an unrelated leader run instead of only refreshing).
     assert "cd " in result.stderr
-    assert "agent-flow continue" in result.stderr
+    assert "agent-flow status" in result.stderr
+    assert "agent-flow continue" not in result.stderr
     assert index_path.read_bytes() == before
 
 

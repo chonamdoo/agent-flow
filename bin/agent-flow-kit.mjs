@@ -4271,7 +4271,7 @@ function refreshSkillCatalogAtBoundary(root) {
   if (invocationWorktree && samePath(invocationWorktree, leaderRoot)) {
     throw new Error(
       "blocked: skill catalog drift must be refreshed from the leader checkout; "
-      + `run from the leader checkout: cd ${leaderRoot} && agent-flow continue`,
+      + `refresh without advancing a run: cd ${leaderRoot} && agent-flow status`,
     );
   }
   const previousHost = process.env.AGENT_FLOW_HOST;
