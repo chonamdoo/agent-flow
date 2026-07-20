@@ -64,7 +64,8 @@ def start_run(*, root: Path, request: RunRequest) -> RunState:
     return state
 
 
-def status_summary(root: Path) -> str:
+def status_summary(root: Path, *, project_root: Path | None = None) -> str:
+    command_root = project_root or root
     runs_root = root / ".agent-flow" / "runs"
     if not runs_root.exists():
         return "no runs"
@@ -100,7 +101,7 @@ def status_summary(root: Path) -> str:
     status = _structured_status(raw_status, required_artifact)
     reason = _reason_for_status(raw_status, required_artifact)
     next_command, next_command_template, required_action = _next_command_for_status(
-        root,
+        command_root,
         raw_status,
         payload,
         current_phase,

@@ -7912,6 +7912,46 @@ if (!missing?.block) {
             self.assertTrue(path.is_file())
             self.assertIn("Found auth module.", path.read_text(encoding="utf-8"))
 
+    def test_record_stage_rejects_out_of_tree_run_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.assertEqual(
+                main(
+                    [
+                        "record-stage",
+                        "--root",
+                        str(root),
+                        "--run-dir",
+                        "not-runs",
+                        "--stage",
+                        "explore",
+                        "--content",
+                        "x",
+                    ]
+                ),
+                2,
+            )
+
+    def test_record_stage_rejects_unsafe_stage_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.assertEqual(
+                main(
+                    [
+                        "record-stage",
+                        "--root",
+                        str(root),
+                        "--run-dir",
+                        ".agent-flow/runs/development/r1",
+                        "--stage",
+                        "../../exploit",
+                        "--content",
+                        "x",
+                    ]
+                ),
+                2,
+            )
+
     def test_handoff_writes_run_and_project_index_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

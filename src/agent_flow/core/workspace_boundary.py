@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -1145,6 +1146,25 @@ def _mutation_path_digest(root: Path, relative: str) -> str:
     return digest.hexdigest()
 
 
+def _is_allowed_run_artifact_path(
+    run_dir: Path,
+    resolved: Path,
+    phase: str,
+) -> bool:
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", phase) is None:
+        return False
+    state_root = run_dir.resolve(strict=False)
+    allowed = {
+        state_root / f"{phase}.md",
+        state_root / "artifacts" / f"{phase}.md",
+    }
+    if phase in {"red", "green"}:
+        allowed.add(state_root / "artifacts" / f"{phase}.log")
+    if phase == "gates":
+        allowed.add(state_root / "artifacts" / "gate-results.json")
+    return resolved in allowed
+
+
 def resolve_mutation_path(
     identity: WorkspaceIdentity,
     requested_path: str | Path,
@@ -1156,11 +1176,14 @@ def resolve_mutation_path(
 ) -> Path:
     root = validate_workspace_identity(identity)
     allowed_roots = [root]
+    resolved_run_dir: Path | None = None
     if run_dir is not None:
         try:
-            allowed_roots.append(Path(run_dir).resolve(strict=True))
+            resolved_run_dir = Path(run_dir).resolve(strict=True)
         except OSError:
-            pass
+            resolved_run_dir = None
+        else:
+            allowed_roots.append(resolved_run_dir)
     requested = Path(requested_path)
     base = (base_dir or root).resolve(strict=True)
     candidate = requested if requested.is_absolute() else base / requested
@@ -1182,6 +1205,22 @@ def resolve_mutation_path(
                 host=host,
                 phase=phase,
                 reason="reason_code=target_outside_pinned_workspace resolved path escapes pinned workspace",
+            )
+        )
+    if (
+        resolved_run_dir is not None
+        and resolved != root
+        and root not in resolved.parents
+        and not _is_allowed_run_artifact_path(resolved_run_dir, resolved, phase)
+    ):
+        raise WorkspaceBoundaryError(
+            _boundary_diagnostic(
+                requested=requested,
+                resolved=resolved,
+                root=root,
+                host=host,
+                phase=phase,
+                reason="reason_code=protected_run_state_path run lifecycle metadata is not writable",
             )
         )
     existing_parent = resolved

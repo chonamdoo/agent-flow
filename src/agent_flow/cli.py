@@ -40,7 +40,7 @@ from agent_flow.core.profiles import active_profile_ids, detect_profile, load_pr
 from agent_flow.core.review import summarize_reviews, write_review_summary
 from agent_flow.core.report import write_run_report
 from agent_flow.core.query import explain_run, query_run
-from agent_flow.core.security import resolve_project_path
+from agent_flow.core.security import resolve_project_path, validate_safe_name
 from agent_flow.core.workspace_boundary import (
     WorkspaceBoundaryError,
     acquire_workspace_start_claim,
@@ -595,7 +595,7 @@ def main(argv: list[str] | None = None) -> int:
         if not (state_root / ".agent-flow" / "runs").exists():
             print("진행 중인 run 없음.")
             return 0
-        print(status_summary(state_root))
+        print(status_summary(state_root, project_root=root))
         return 0
 
     if args.command == "report":
@@ -893,9 +893,15 @@ def main(argv: list[str] | None = None) -> int:
             return 1 if index.conflicts or index.skipped else 0
 
     if args.command == "record-stage":
+        try:
+            run_dir = _resolve_record_stage_run_dir(root, args.run_dir)
+            stage_id = validate_safe_name(args.stage, "stage")
+        except (ValueError, WorkspaceBoundaryError) as exc:
+            print(f"record-stage rejected: {exc}", file=sys.stderr)
+            return 2
         path = write_stage_result(
-            run_dir=_resolve_project_path(root, args.run_dir),
-            stage_id=args.stage,
+            run_dir=run_dir,
+            stage_id=stage_id,
             status=args.status,
             evidence_type=args.evidence_type,
             confidence=args.confidence,
@@ -1994,6 +2000,23 @@ def _profile_gate_kind_tiebreaker(text: str) -> int:
     if "context" in text:
         return 1
     return 2
+
+
+def _resolve_record_stage_run_dir(root: Path, value: str) -> Path:
+    candidate = _resolve_project_path(root, value).resolve(strict=False)
+    local_runs = (root / ".agent-flow" / "runs").resolve(strict=False)
+    if candidate == local_runs or local_runs in candidate.parents:
+        return candidate
+    execution = execution_identity_from_context(env=os.environ)
+    if execution is None:
+        raise ValueError(f"run dir escapes project run state: {candidate}")
+    selected = select_execution_workspace(root, execution)
+    if selected is None:
+        raise ValueError(f"run dir has no authenticated active run: {candidate}")
+    expected = selected.run_dir.resolve(strict=True)
+    if candidate != expected:
+        raise ValueError(f"run dir differs from authenticated active run: {candidate}")
+    return expected
 
 
 def _resolve_run_dir(root: Path, value: str | None) -> Path | None:

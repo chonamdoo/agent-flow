@@ -940,10 +940,29 @@ def test_write_to_pinned_run_dir_artifact_is_allowed(
         leader,
         worktree,
         "write",
-        {"path": str(run_dir / "design.md"), "content": "# design\n"},
+        {"path": str(run_dir / "implement.md"), "content": "# implement\n"},
         host=host,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+@pytest.mark.parametrize("metadata", ("meta.json", "active"))
+def test_write_to_pinned_run_dir_metadata_is_rejected(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+    metadata: str,
+) -> None:
+    leader, worktree, _runtime, run_dir = pinned_run
+    result = _structured_guard(
+        leader,
+        worktree,
+        "write",
+        {"path": str(run_dir / metadata), "content": "tampered\n"},
+        host=host,
+    )
+    assert result.returncode == 2
+    assert "protected_run_state_path" in result.stderr
 
 
 @pytest.mark.parametrize("host", ("codex", "claude", "omp"))
