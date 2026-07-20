@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -199,21 +200,10 @@ class Runner:
                     architecture=self.architecture,
                     run_id=pending_run_id,
                 )
-                self._pin_skill_plan()
                 self._pin_workspace_identity(captured_identity)
-            except Exception as exc:
-                cleanup_errors: list[Exception] = []
-                try:
-                    self._release_execution_binding()
-                except Exception as cleanup_error:
-                    cleanup_errors.append(cleanup_error)
-                try:
-                    if self.run_dir is not None:
-                        mark_inactive(self.run_dir)
-                except Exception as cleanup_error:
-                    cleanup_errors.append(cleanup_error)
-                for cleanup_error in cleanup_errors:
-                    exc.add_note(f"run-start cleanup failed: {cleanup_error}")
+            except Exception:
+                if self.run_dir is not None:
+                    mark_inactive(self.run_dir)
                 raise
             finally:
                 if claim is not None:
@@ -226,40 +216,50 @@ class Runner:
             print(f"▶ resuming    : {self.run_dir.name}")
             print(f"▶ task        : {meta.get('task', '')}")
             self._pin_workspace_identity()
+
+        try:
+            self._capture_leader_run_snapshot()
             self._pin_skill_plan()
+            self._verify_pending_mutation_boundary()
+            self._pin_execution_identity(read_meta(self.run_dir))
+            self._warn_if_leader_dirtied()
 
-        self._verify_pending_mutation_boundary()
+            adapter = detect_adapter()
+            self._adapter_name = adapter.name
+            clis = detect_available_clis()
+            cli_summary = ", ".join(c.name for c in clis) if clis else "none (generic fallback)"
+            print(f"▶ host adapter: {adapter.name}")
+            print(f"▶ available  : {cli_summary}")
+            print(f"▶ profile    : {self.profile_id}")
+            print(f"▶ architecture: {self.architecture}")
+            print(f"▶ workflow   : {self.workflow_name} ({len(self.phases)} phases)\n")
 
-        adapter = detect_adapter()
-        self._adapter_name = adapter.name
-        clis = detect_available_clis()
-        cli_summary = ", ".join(c.name for c in clis) if clis else "none (generic fallback)"
-        print(f"▶ host adapter: {adapter.name}")
-        print(f"▶ available  : {cli_summary}")
-        print(f"▶ profile    : {self.profile_id}")
-        print(f"▶ architecture: {self.architecture}")
-        print(f"▶ workflow   : {self.workflow_name} ({len(self.phases)} phases)\n")
+            # Inject profile snapshot into adapter so render_envelope can include
+            # it. Both attributes are declared on the Adapter base class, so this
+            # is plain instance-attribute assignment.
+            adapter._profile_snapshot = self.profile
+            adapter._profile_id = self.profile_id
+            adapter._architecture = self.architecture
+            adapter._config_root = self.config_root
 
-        # Inject profile snapshot into adapter so render_envelope can include
-        # it. Both attributes are declared on the Adapter base class, so this
-        # is plain instance-attribute assignment.
-        adapter._profile_snapshot = self.profile
-        adapter._profile_id = self.profile_id
-        adapter._architecture = self.architecture
-        adapter._config_root = self.config_root
+            # Auto-cite lore: search the local lore index for entries relevant
+            # to the task description and inject them into the prompt envelope.
+            # Empty list when memory dir is missing or no matches.
+            meta_for_lore = read_meta(self.run_dir) if self.run_dir else {}
+            adapter._task_scope = str(meta_for_lore.get("task", ""))
+            adapter._lore_citations = _search_lore(
+                self.project_root, meta_for_lore.get("task", ""),
+            )
 
-        # Auto-cite lore: search the local lore index for entries relevant
-        # to the task description and inject them into the prompt envelope.
-        # Empty list when memory dir is missing or no matches.
-        meta_for_lore = read_meta(self.run_dir) if self.run_dir else {}
-        adapter._task_scope = str(meta_for_lore.get("task", ""))
-        adapter._lore_citations = _search_lore(
-            self.project_root, meta_for_lore.get("task", ""),
-        )
-
-        assert self.run_dir is not None
-        meta = read_meta(self.run_dir)
-        phase_index = int(meta.get("phase_index", 0) or 0)
+            assert self.run_dir is not None
+            meta = read_meta(self.run_dir)
+            phase_index = int(meta.get("phase_index", 0) or 0)
+        except Exception:
+            if mode == ResumeMode.START:
+                self._release_execution_binding()
+                if self.run_dir is not None:
+                    mark_inactive(self.run_dir)
+            raise
         while phase_index < len(self.phases):
             phase = self._runtime_contract_phase(self.phases[phase_index])
             if self._has_artifact(phase):
@@ -479,7 +479,6 @@ class Runner:
             meta["workspace"] = identity.to_dict()
             write_meta(self.run_dir, meta)
             self._workspace_identity = identity
-            self._pin_execution_identity(meta)
             return
         identity = workspace_identity_from_dict(payload)
         root = validate_workspace_identity(identity)
@@ -488,10 +487,11 @@ class Runner:
                 f"run workspace differs from pinned workspace: current={self.project_root} pinned={root}"
             )
         self._workspace_identity = identity
-        self._pin_execution_identity(meta)
 
     def _pin_execution_identity(self, meta: dict[str, object]) -> None:
         assert self.run_dir is not None
+        if not hasattr(self, "_workspace_identity"):
+            return
         identity = self._workspace_identity
         if leader_root_for_identity(identity) == Path(identity.workspace_root):
             return
@@ -608,6 +608,38 @@ class Runner:
         if clear:
             meta.pop("mutation_boundary", None)
         write_meta(self.run_dir, meta)
+
+    def _capture_leader_run_snapshot(self) -> None:
+        if self.run_dir is None or not hasattr(self, "_workspace_identity"):
+            return
+        identity = self._workspace_identity
+        leader = leader_root_for_identity(identity)
+        if leader == Path(identity.workspace_root):
+            return
+        meta = read_meta(self.run_dir)
+        if isinstance(meta.get("leader_run_snapshot"), dict):
+            return
+        meta["leader_run_snapshot"] = capture_git_mutation_snapshot(leader)
+        write_meta(self.run_dir, meta)
+
+    def _warn_if_leader_dirtied(self) -> None:
+        if self.run_dir is None or not hasattr(self, "_workspace_identity"):
+            return
+        identity = self._workspace_identity
+        leader = leader_root_for_identity(identity)
+        if leader == Path(identity.workspace_root):
+            return
+        meta = read_meta(self.run_dir)
+        before = meta.get("leader_run_snapshot")
+        if not isinstance(before, dict):
+            return
+        changed = mutation_paths_since(before, capture_git_mutation_snapshot(leader))
+        if changed:
+            print(
+                "⚠ leader checkout changed outside the pinned worktree during this run; "
+                f"paths={', '.join(changed)}",
+                file=sys.stderr,
+            )
 
     def _next_index(self, current_index: int, phase: Phase) -> tuple[int, bool]:
         if not phase.routes:

@@ -16,18 +16,6 @@ rules:
   automatic_skill_mutation: deny
   automatic_invalid_candidate: fallback-with-diagnostic
   hash_scope: whole-tree
-official_project_snapshots:
-  manifest: "skills/upstream-lock.json#android_official"
-  catalog: "profiles/android.yaml#android_skills.implementation"
-  source: https://github.com/android/skills
-  commit: 57ff3c7d02a53781954f9ce2df92f14b7fbb2ded
-  install_policy: offline-catalog-lock-and-indexed-project-snapshot
-  runtime_fetch: false
-  provenance_mismatch: fail
-  catalog_lock_mismatch: fail
-  offline_validation: required
-  runtime_tree_verification: installed-index
-  adaptation_policy: preserve-official-guidance-and-record-local-tree-hash
 index:
   version: 2
   fields: [source, source_host, tree_hash, profiles, activation, workflowPhases, taskTerms, pathGlobs]

@@ -2857,6 +2857,24 @@ def test_android_official_provider_rejects_unpinned_host_snapshot(
     assert "provider_source_hash_mismatch" in result.stderr
 
 
+def test_android_install_without_upstream_lock_authenticates(tmp_path: Path) -> None:
+    from agent_flow.core.skill_plan import authenticated_installed_skill_index
+
+    project = tmp_path / "android-project"
+    project.mkdir()
+    (project / "settings.gradle.kts").write_text("pluginManagement {}\n", encoding="utf-8")
+
+    result = _install(project, "--profile", "android")
+    assert result.returncode == 0, result.stderr
+
+    lock_path = project / ".agent-flow" / "skills" / "upstream-lock.json"
+    assert not lock_path.exists()
+
+    index = authenticated_installed_skill_index(project)
+    assert index is not None
+    assert index["selection"]["profiles"] == ["android"]
+
+
 def test_multi_profile_install_uses_union_and_dependency_closure(tmp_path: Path) -> None:
     project = tmp_path / "mixed-project"
     project.mkdir()

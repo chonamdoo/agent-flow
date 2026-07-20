@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import shlex
 import shutil
@@ -66,9 +65,8 @@ def start_run(*, root: Path, request: RunRequest) -> RunState:
 
 
 def status_summary(root: Path, *, project_root: Path | None = None) -> str:
-    state_root = root
-    command_root = project_root or state_root
-    runs_root = state_root / ".agent-flow" / "runs"
+    command_root = project_root or root
+    runs_root = root / ".agent-flow" / "runs"
     if not runs_root.exists():
         return "no runs"
     manifests = sorted(runs_root.glob("*/*/manifest.json"), key=lambda p: p.stat().st_mtime)
@@ -92,7 +90,7 @@ def status_summary(root: Path, *, project_root: Path | None = None) -> str:
     raw_status = payload["status"]
     task = payload.get("task", "")
     raw_run_dir = payload.get("run_dir") or str(manifest.parent)
-    resolved_run_dir = _resolve_run_dir(state_root, raw_run_dir)
+    resolved_run_dir = _resolve_run_dir(root, raw_run_dir)
     run_dir = _relative_run_dir(str(resolved_run_dir))
     current_phase, required_artifact = _current_stage_status(
         workflow_id,
@@ -177,16 +175,6 @@ def _write_json(path: Path, payload: object) -> None:
     tmp.replace(path)
 
 
-def project_launcher_command(root: Path) -> str:
-    configured = os.environ.get("AGENT_FLOW_PROJECT_LAUNCHER")
-    if configured and Path(configured).is_absolute():
-        return configured
-    local = root / ".agent-flow" / "bin" / "agent-flow"
-    if local.is_file():
-        return str(local)
-    return "agent-flow"
-
-
 def _next_command_for_status(
     root: Path,
     status: str,
@@ -196,29 +184,23 @@ def _next_command_for_status(
 ) -> tuple[str, str, str]:
     if status in {"complete", "aborted"}:
         return "none", "none", "none"
-    launcher = shlex.quote(project_launcher_command(root))
-    worktree = payload.get("worktree")
     if current_phase != "-":
-        rendered_run_dir = (
-            run_dir
-            if isinstance(worktree, dict) and worktree.get("name")
-            else _relative_run_dir(run_dir)
-        )
         command_template = (
-            f"{launcher} record-stage "
+            "agent-flow record-stage "
             f"--root {shlex.quote(str(root))} "
-            f"--run-dir {shlex.quote(rendered_run_dir)} "
+            f"--run-dir {shlex.quote(_relative_run_dir(run_dir))} "
             f"--stage {shlex.quote(current_phase)} "
             "--content '<stage result>'"
         )
         return "none", command_template, "write_stage_artifact"
+    worktree = payload.get("worktree")
     if isinstance(worktree, dict) and worktree.get("name"):
         command = (
-            f"{launcher} continue --root {shlex.quote(str(root))} "
+            f"agent-flow continue --root {shlex.quote(str(root))} "
             f"--worktree {shlex.quote(str(worktree['name']))}"
         )
         return command, command, "continue"
-    command = f"{launcher} continue --root {shlex.quote(str(root))}"
+    command = f"agent-flow continue --root {shlex.quote(str(root))}"
     return command, command, "continue"
 
 

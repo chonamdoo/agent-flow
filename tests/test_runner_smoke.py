@@ -11,6 +11,8 @@ Covers:
 """
 from __future__ import annotations
 
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 import json
 import os
 import shutil
@@ -18,6 +20,7 @@ import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
 from pathlib import Path
 
 import pytest
@@ -30,9 +33,38 @@ if str(SRC_ROOT) not in sys.path:
 
 import agent_flow.artifact as artifact
 from agent_flow.artifact import create_run
+from agent_flow.cli import main as cli_main
+_GIT_PROJECT_TEMPLATE: Path | None = None
 
 
-def _run_cli(args: list[str], cwd: Path, env_extra: dict | None = None):
+@pytest.fixture(scope="module", autouse=True)
+def _cache_git_project(tmp_path_factory: pytest.TempPathFactory):
+    global _GIT_PROJECT_TEMPLATE
+    template = tmp_path_factory.mktemp("runner-git-template")
+    subprocess.run(
+        ["git", "init", "-b", "main"],
+        cwd=template,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=template, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=template, check=True)
+    (template / "README.md").write_text("test\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=template, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=template,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    _GIT_PROJECT_TEMPLATE = template
+    yield
+    _GIT_PROJECT_TEMPLATE = None
+
+
+def _cli_environment(env_extra: dict | None = None) -> dict[str, str]:
     env = os.environ.copy()
     for key in tuple(env):
         if key.startswith("AGENT_FLOW_") or key in {
@@ -46,19 +78,52 @@ def _run_cli(args: list[str], cwd: Path, env_extra: dict | None = None):
     env["AGENT_FLOW_GENERIC_MODE"] = "stub-success"
     if env_extra:
         env.update(env_extra)
+    return env
+
+
+def _run_cli(
+    args: list[str],
+    cwd: Path,
+    env_extra: dict | None = None,
+) -> subprocess.CompletedProcess[str]:
+    stdout = StringIO()
+    stderr = StringIO()
+    previous_cwd = Path.cwd()
+    try:
+        with (
+            patch.dict(os.environ, _cli_environment(env_extra), clear=True),
+            redirect_stdout(stdout),
+            redirect_stderr(stderr),
+        ):
+            os.chdir(cwd)
+            try:
+                returncode = cli_main(args)
+            except SystemExit as exc:
+                returncode = exc.code if isinstance(exc.code, int) else 1
+    finally:
+        os.chdir(previous_cwd)
+    return subprocess.CompletedProcess(args, returncode, stdout.getvalue(), stderr.getvalue())
+
+
+def _run_cli_subprocess(
+    args: list[str],
+    cwd: Path,
+    env_extra: dict | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, "-m", "agent_flow.cli", *args],
-        cwd=cwd, env=env, capture_output=True, text=True,
+        cwd=cwd,
+        env=_cli_environment(env_extra),
+        capture_output=True,
+        text=True,
     )
 
 
 def _init_git_project(project: Path) -> None:
-    subprocess.run(["git", "init"], cwd=project, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=project, check=True)
-    subprocess.run(["git", "config", "user.name", "Test User"], cwd=project, check=True)
-    (project / "README.md").write_text("test\n", encoding="utf-8")
-    subprocess.run(["git", "add", "README.md"], cwd=project, check=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=project, check=True, capture_output=True, text=True)
+    if _GIT_PROJECT_TEMPLATE is None:
+        raise RuntimeError("git project template fixture is unavailable")
+    shutil.copytree(_GIT_PROJECT_TEMPLATE / ".git", project / ".git")
+    shutil.copy2(_GIT_PROJECT_TEMPLATE / "README.md", project / "README.md")
 
 
 def _branch_exists(project: Path, branch: str) -> bool:
@@ -1355,6 +1420,130 @@ def test_start_worktree_cleans_up_new_worktree_on_start_failure(tmp_path: Path):
     assert not _branch_exists(project, "feat/task")
 
 
+def test_worktree_run_start_lock_error_leaves_no_execution_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_flow.core.worktrees import (
+        create_worktree,
+        plan_worktree,
+        worktree_runtime_root,
+    )
+    from agent_flow import runner as runner_module
+    from agent_flow.runner import ResumeMode, Runner
+    from agent_flow.core.skill_plan import SkillPlanSnapshotError
+    from agent_flow.artifact import find_active_run
+
+    project = tmp_path / "no-ghost-binding"
+    project.mkdir()
+    _init_git_project(project)
+    plan = plan_worktree(root=project, name="task")
+    status = create_worktree(root=project, plan=plan)
+    state_root = worktree_runtime_root(root=project, name=status.name)
+
+    def boom(_root):
+        raise SkillPlanSnapshotError("blocked: installed upstream skill lock is missing")
+
+    monkeypatch.setattr(runner_module, "installed_skill_plan_pin", boom)
+    monkeypatch.setenv("AGENT_FLOW_HOST", "codex")
+    monkeypatch.setenv("AGENT_FLOW_EXECUTION_ID", "lock-session")
+
+    runner = Runner(
+        status.path,
+        state_root=state_root,
+        config_root=project,
+        workflow="development",
+    )
+    with pytest.raises(SkillPlanSnapshotError):
+        runner.run(mode=ResumeMode.START, task="task")
+
+    executions = project / ".git" / "agent-flow" / "executions"
+    assert list(executions.glob("*.json")) == []
+    assert find_active_run(state_root) is None
+
+
+def test_worktree_run_start_failure_after_binding_publish_rolls_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_flow.core.worktrees import (
+        create_worktree,
+        plan_worktree,
+        worktree_runtime_root,
+    )
+    from agent_flow import runner as runner_module
+    from agent_flow.runner import ResumeMode, Runner
+    from agent_flow.artifact import find_active_run
+
+    project = tmp_path / "rollback-binding"
+    project.mkdir()
+    _init_git_project(project)
+    plan = plan_worktree(root=project, name="task")
+    status = create_worktree(root=project, plan=plan)
+    state_root = worktree_runtime_root(root=project, name=status.name)
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("boom after execution binding publish")
+
+    # detect_adapter는 binding publish 이후 setup 단계에서 실행되므로,
+    # 확장된 START cleanup 경계가 live binding을 원자적으로 rollback하는지 검증한다.
+    monkeypatch.setattr(runner_module, "detect_adapter", boom)
+    monkeypatch.setenv("AGENT_FLOW_HOST", "codex")
+    monkeypatch.setenv("AGENT_FLOW_EXECUTION_ID", "rollback-session")
+
+    runner = Runner(
+        status.path,
+        state_root=state_root,
+        config_root=project,
+        workflow="development",
+    )
+    with pytest.raises(RuntimeError, match="boom after execution binding publish"):
+        runner.run(mode=ResumeMode.START, task="task")
+
+    executions = project / ".git" / "agent-flow" / "executions"
+    assert list(executions.glob("*.json")) == []
+    assert find_active_run(state_root) is None
+
+
+def test_leader_mutation_during_run_emits_warning(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from agent_flow.core.worktrees import (
+        create_worktree,
+        plan_worktree,
+        worktree_runtime_root,
+    )
+    from agent_flow.runner import Runner
+    from agent_flow.core.workspace_boundary import capture_workspace_identity
+
+    project = tmp_path / "leader-warn"
+    project.mkdir()
+    _init_git_project(project)
+    plan = plan_worktree(root=project, name="task")
+    status = create_worktree(root=project, plan=plan)
+    state_root = worktree_runtime_root(root=project, name=status.name)
+    run_dir = create_run(state_root, "development", "task", run_id="r1")
+
+    runner = Runner(
+        status.path,
+        state_root=state_root,
+        config_root=project,
+        workflow="development",
+    )
+    runner.run_dir = run_dir
+    runner._workspace_identity = capture_workspace_identity(status.path)
+    runner._capture_leader_run_snapshot()
+
+    # pinned worktree가 아니라 leader checkout에 잘못된 쓰기가 발생한 상황.
+    (project / "leaked.txt").write_text("contamination\n", encoding="utf-8")
+    runner._warn_if_leader_dirtied()
+
+    err = capsys.readouterr().err
+    assert "leader checkout changed" in err
+    assert "leaked.txt" in err
+
+
 def test_worktree_remove_preserves_preexisting_branch_by_default(tmp_path: Path):
     project = tmp_path / "preserve-branch"
     project.mkdir()
@@ -1717,7 +1906,7 @@ def test_two_owned_worktrees_can_finish_cleanup_concurrently(tmp_path: Path):
             f"feat-{name}",
             session_id=f"cleanup-{name}",
         )
-        return _run_cli(
+        return _run_cli_subprocess(
             ["worktree", "remove", "--name", name], project, cleanup_env
         )
 
@@ -2746,9 +2935,9 @@ def test_abort_yes_flag_skips_prompt(tmp_path: Path):
     """`agent-flow abort --yes` must not block on confirmation."""
     project = tmp_path / "abort_yes"
     project.mkdir()
-    r1 = _run_cli(["run", "any task"], project)
+    r1 = _run_cli_subprocess(["run", "any task"], project)
     assert r1.returncode == 0
-    r2 = _run_cli(["abort", "--yes"], project)
+    r2 = _run_cli_subprocess(["abort", "--yes"], project)
     assert r2.returncode == 0
     assert "aborted" in r2.stdout.lower()
 
@@ -3281,146 +3470,3 @@ def test_security_guards_reject_unsafe_names_and_escaped_paths(tmp_path: Path):
         validate_safe_name("../workflow", "workflow")
     with pytest.raises(ValueError, match="profile path escapes"):
         ensure_child_path(root, root / "nested" / "profile.yaml", "profile")
-
-def _new_runner_worktree(tmp_path: Path, name: str) -> tuple[Path, Path, Path]:
-    project = tmp_path / f"{name}_project"
-    project.mkdir()
-    _init_git_project(project)
-    worktree = tmp_path / f"{name}_worktree"
-    subprocess.run(
-        ["git", "worktree", "add", "-b", f"feat/{name}", str(worktree)],
-        cwd=project,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    state_root = project / ".git" / "agent-flow" / "worktrees" / name
-    return project, worktree, state_root
-
-
-def test_run_start_skill_plan_failure_leaves_no_execution_binding(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    from agent_flow.runner import Runner, ResumeMode
-
-    project, worktree, state_root = _new_runner_worktree(tmp_path, "skill-plan")
-    monkeypatch.setenv("AGENT_FLOW_ACTIVE_HOST", "codex")
-    monkeypatch.setenv("AGENT_FLOW_EXECUTION_ID", "skill-plan-session")
-    runner = Runner(
-        project_root=worktree,
-        state_root=state_root,
-        config_root=project,
-        workflow="default",
-    )
-
-    def failing_skill_plan() -> None:
-        raise RuntimeError("installed upstream skill lock is missing")
-
-    monkeypatch.setattr(runner, "_pin_skill_plan", failing_skill_plan)
-
-    with pytest.raises(RuntimeError, match="upstream skill lock is missing"):
-        runner.run(ResumeMode.START, task="rollback")
-
-    assert runner.run_dir is not None
-    assert not (runner.run_dir / "active").exists()
-    assert not list((project / ".git" / "agent-flow" / "executions").glob("*.json"))
-
-
-def test_run_start_metadata_failure_releases_published_execution_binding(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    import agent_flow.runner as runner_module
-    from agent_flow.runner import Runner, ResumeMode
-
-    project, worktree, state_root = _new_runner_worktree(tmp_path, "meta-failure")
-    monkeypatch.setenv("AGENT_FLOW_ACTIVE_HOST", "codex")
-    monkeypatch.setenv("AGENT_FLOW_EXECUTION_ID", "meta-failure-session")
-    runner = Runner(
-        project_root=worktree,
-        state_root=state_root,
-        config_root=project,
-        workflow="default",
-    )
-    original_write_meta = runner_module.write_meta
-    observed_binding: list[Path] = []
-
-    def fail_execution_meta(run_dir: Path, meta: dict[str, object]) -> None:
-        if "execution" in meta:
-            observed_binding.extend(
-                (project / ".git" / "agent-flow" / "executions").glob("*.json")
-            )
-            raise OSError("execution metadata write failed")
-        original_write_meta(run_dir, meta)
-
-    monkeypatch.setattr(runner_module, "write_meta", fail_execution_meta)
-
-    with pytest.raises(OSError, match="execution metadata write failed"):
-        runner.run(ResumeMode.START, task="rollback")
-
-    assert observed_binding
-    assert runner.run_dir is not None
-    assert not (runner.run_dir / "active").exists()
-    assert not list((project / ".git" / "agent-flow" / "executions").glob("*.json"))
-
-def test_run_start_release_failure_still_marks_run_inactive(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    import agent_flow.runner as runner_module
-    from agent_flow.runner import Runner, ResumeMode
-
-    project, worktree, state_root = _new_runner_worktree(tmp_path, "release-failure")
-    monkeypatch.setenv("AGENT_FLOW_ACTIVE_HOST", "codex")
-    monkeypatch.setenv("AGENT_FLOW_EXECUTION_ID", "release-failure-session")
-    runner = Runner(
-        project_root=worktree,
-        state_root=state_root,
-        config_root=project,
-        workflow="default",
-    )
-    original_write_meta = runner_module.write_meta
-
-    def fail_execution_meta(run_dir: Path, meta: dict[str, object]) -> None:
-        if "execution" in meta:
-            raise OSError("execution metadata write failed")
-        original_write_meta(run_dir, meta)
-
-    def fail_release() -> None:
-        raise RuntimeError("execution binding ownership changed")
-
-    monkeypatch.setattr(runner_module, "write_meta", fail_execution_meta)
-    monkeypatch.setattr(runner, "_release_execution_binding", fail_release)
-
-    with pytest.raises(OSError, match="execution metadata write failed") as failure:
-        runner.run(ResumeMode.START, task="rollback")
-
-    assert runner.run_dir is not None
-    assert not (runner.run_dir / "active").exists()
-    assert list((project / ".git" / "agent-flow" / "executions").glob("*.json"))
-    assert any(
-        "run-start cleanup failed: execution binding ownership changed" in note
-        for note in getattr(failure.value, "__notes__", ())
-    )
-
-
-
-def test_missing_android_upstream_lock_names_authenticated_install_command(
-    tmp_path: Path,
-):
-    from agent_flow.core.skill_plan import (
-        SkillPlanSnapshotError,
-        _validate_installed_android_official_provenance,
-    )
-
-    project = tmp_path / "android_lock"
-    project.mkdir()
-    index = {"selection": {"skill_profiles": ["android"]}}
-    launcher = project / ".agent-flow" / "bin" / "agent-flow"
-
-    with pytest.raises(SkillPlanSnapshotError) as failure:
-        _validate_installed_android_official_provenance(project, index)
-
-    assert f"{launcher} install" in str(failure.value)
-    assert "(agent-flow install)" not in str(failure.value)

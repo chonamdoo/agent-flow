@@ -100,13 +100,7 @@ from agent_flow.core.worktrees import (
     validate_worktree_removal,
     worktree_lifecycle_lock,
 )
-from agent_flow.core.state import (
-    RunRequest,
-    RunState,
-    project_launcher_command,
-    start_run,
-    status_summary,
-)
+from agent_flow.core.state import RunRequest, RunState, start_run, status_summary
 from agent_flow.core.workflow import load_workflow
 from agent_flow.eval import run_eval
 from agent_flow.memory.entities import EntityMemoryIndex
@@ -2017,11 +2011,11 @@ def _resolve_record_stage_run_dir(root: Path, value: str) -> Path:
     if execution is None:
         raise ValueError(f"run dir escapes project run state: {candidate}")
     selected = select_execution_workspace(root, execution)
+    if selected is None:
+        raise ValueError(f"run dir has no authenticated active run: {candidate}")
     expected = selected.run_dir.resolve(strict=True)
     if candidate != expected:
-        raise ValueError(
-            f"run dir differs from authenticated active run: {candidate}"
-        )
+        raise ValueError(f"run dir differs from authenticated active run: {candidate}")
     return expected
 
 
@@ -2078,7 +2072,8 @@ def _profile_source_root(config_root: Path, requested_root: Path, worktree: str 
 
 
 def _continue_command(root: Path, worktree: str | None) -> str:
-    launcher = project_launcher_command(root)
+    configured = os.environ.get("AGENT_FLOW_PROJECT_LAUNCHER")
+    launcher = configured if configured and Path(configured).is_absolute() else "agent-flow"
     command = f"{shlex.quote(launcher)} continue --root {shlex.quote(str(root))}"
     if worktree is None:
         return command

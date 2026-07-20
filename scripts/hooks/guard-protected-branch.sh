@@ -124,8 +124,27 @@ def inspect_tokens(tokens, cwd):
             return branch, cwd
     return '', cwd
 
-def classify(command):
-    cwd_stack = [os.getcwd()]
+def base_cwd_from(value):
+    # PreToolUse payload는 도구가 실제로 실행되는 cwd를 전달한다. hook 프로세스의
+    # os.getcwd()(leader checkout)로 브랜치를 판정하면 feature worktree 커밋을
+    # 보호 브랜치로 오판하므로, payload cwd를 우선한다.
+    candidates = []
+    if isinstance(value, dict):
+        top = value.get('cwd')
+        if isinstance(top, str) and top:
+            candidates.append(top)
+        tool_input = value.get('tool_input')
+        if isinstance(tool_input, dict):
+            nested = tool_input.get('cwd')
+            if isinstance(nested, str) and nested:
+                candidates.append(nested)
+    for candidate in candidates:
+        if os.path.isdir(candidate):
+            return os.path.abspath(candidate)
+    return os.getcwd()
+
+def classify(command, base_cwd):
+    cwd_stack = [base_cwd]
     current = []
     for token in shell_tokens(command):
         if token in ';&|\r\n':
@@ -156,7 +175,7 @@ def classify(command):
     return ''
 
 d = json.load(sys.stdin)
-print(classify(command_from(d)))
+print(classify(command_from(d), base_cwd_from(d)))
 " 2>/dev/null <<< "$INPUT")
 
 if [ -z "$PROTECTED_BRANCH" ]; then

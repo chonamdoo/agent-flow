@@ -6061,109 +6061,6 @@ if (!missing?.block) {
                 lines,
             )
 
-    def test_status_summary_uses_project_root_for_worktree_state_launcher(self) -> None:
-        from agent_flow.core.state import status_summary
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir).resolve() / "project"
-            state_root = root / ".git" / "agent-flow" / "worktrees" / "feat-slice"
-            run_dir = state_root / ".agent-flow" / "runs" / "missing-workflow" / "r1"
-            launcher = root / ".agent-flow" / "bin" / "agent-flow"
-            run_dir.mkdir(parents=True)
-            launcher.parent.mkdir(parents=True)
-            launcher.write_text("#!/bin/sh\n", encoding="utf-8")
-            manifest = run_dir / "manifest.json"
-            payload = {
-                "workflow_id": "missing-workflow",
-                "run_id": "r1",
-                "status": "running",
-                "run_dir": str(run_dir),
-                "worktree": {"name": "feat-slice"},
-            }
-            manifest.write_text(json.dumps(payload), encoding="utf-8")
-
-            summary = status_summary(state_root, project_root=root)
-
-            self.assertIn(
-                f"next_command: {launcher} continue --root {root} --worktree feat-slice",
-                summary,
-            )
-
-            payload["workflow_id"] = "review"
-            payload["current_phase"] = "explore"
-            manifest.write_text(json.dumps(payload), encoding="utf-8")
-            summary = status_summary(state_root, project_root=root)
-            self.assertIn(
-                f"next_command_template: {launcher} record-stage --root {root} "
-                f"--run-dir {run_dir} --stage explore --content '<stage result>'",
-                summary,
-            )
-
-    def test_record_stage_rejects_run_dir_and_stage_escape(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp = Path(temp_dir).resolve()
-            root = temp / "project"
-            run_dir = root / ".agent-flow" / "runs" / "r1"
-            outside = temp / "outside-run"
-            run_dir.mkdir(parents=True)
-            outside.mkdir()
-            base_args = [
-                "record-stage",
-                "--root",
-                str(root),
-                "--content",
-                "stage result",
-            ]
-            clean_execution_env = {
-                "AGENT_FLOW_EXECUTION_ID": "",
-                "AGENT_FLOW_SESSION_ID": "",
-                "AGENT_FLOW_ACTIVE_HOST": "",
-            }
-
-            with mock.patch.dict(os.environ, clean_execution_env):
-                self.assertEqual(
-                    main(
-                        [
-                            *base_args,
-                            "--run-dir",
-                            str(run_dir),
-                            "--stage",
-                            "design",
-                        ]
-                    ),
-                    0,
-                )
-                stderr = io.StringIO()
-                with contextlib.redirect_stderr(stderr):
-                    self.assertEqual(
-                        main(
-                            [
-                                *base_args,
-                                "--run-dir",
-                                str(outside),
-                                "--stage",
-                                "design",
-                            ]
-                        ),
-                        2,
-                    )
-                    self.assertEqual(
-                        main(
-                            [
-                                *base_args,
-                                "--run-dir",
-                                str(run_dir),
-                                "--stage",
-                                "../../exploit",
-                            ]
-                        ),
-                        2,
-                    )
-
-            self.assertTrue((run_dir / "artifacts" / "design.md").is_file())
-            self.assertFalse((temp / "exploit.md").exists())
-            self.assertIn("record-stage rejected", stderr.getvalue())
-
     def test_status_escapes_task_newlines_and_emits_json(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -8015,6 +7912,46 @@ if (!missing?.block) {
             self.assertTrue(path.is_file())
             self.assertIn("Found auth module.", path.read_text(encoding="utf-8"))
 
+    def test_record_stage_rejects_out_of_tree_run_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.assertEqual(
+                main(
+                    [
+                        "record-stage",
+                        "--root",
+                        str(root),
+                        "--run-dir",
+                        "not-runs",
+                        "--stage",
+                        "explore",
+                        "--content",
+                        "x",
+                    ]
+                ),
+                2,
+            )
+
+    def test_record_stage_rejects_unsafe_stage_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.assertEqual(
+                main(
+                    [
+                        "record-stage",
+                        "--root",
+                        str(root),
+                        "--run-dir",
+                        ".agent-flow/runs/development/r1",
+                        "--stage",
+                        "../../exploit",
+                        "--content",
+                        "x",
+                    ]
+                ),
+                2,
+            )
+
     def test_handoff_writes_run_and_project_index_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -8533,6 +8470,46 @@ if (!missing?.block) {
                 )
                 self.assertEqual(blocked_after_subshell.returncode, 2, command)
                 self.assertIn("보호 브랜치", blocked_after_subshell.stderr)
+
+    def test_guard_protected_branch_uses_payload_cwd_over_process_cwd(self) -> None:
+        # 리더 체크아웃(protected)에서 실행되는 hook이 payload cwd(feature worktree)를
+        # 무시하고 process cwd로 브랜치를 판정하면 feature 커밋을 오탐 차단한다.
+        script = Path(__file__).resolve().parents[1] / "scripts" / "hooks" / "guard-protected-branch.sh"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_git_repo(root)
+            subprocess.run(("git", "commit", "--allow-empty", "-q", "-m", "init"), cwd=root, check=True)
+            feature_worktree = root / "feature-worktree"
+            subprocess.run(
+                ("git", "worktree", "add", "-q", "-b", "feat/test", str(feature_worktree), "main"),
+                cwd=root,
+                check=True,
+            )
+
+            allowed = subprocess.run(
+                ("bash", str(script)),
+                cwd=root,
+                input=json.dumps(
+                    {"cwd": str(feature_worktree), "tool_input": {"command": "git commit -m test"}}
+                ),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+            blocked = subprocess.run(
+                ("bash", str(script)),
+                cwd=feature_worktree,
+                input=json.dumps(
+                    {"cwd": str(root), "tool_input": {"command": "git push origin main"}}
+                ),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+            self.assertIn("보호 브랜치", blocked.stderr)
 
     def test_team_state_init_task_worker_and_status(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

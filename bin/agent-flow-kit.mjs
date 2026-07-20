@@ -10373,8 +10373,15 @@ export default function agentFlowHooks(pi) {
 
 
 function hookPayload(event, ctx) {
-  const input = event?.input || {};
+  const rawInput = event?.input || {};
   const toolName = String(event?.toolName || "");
+  const guardInput = normalizeGuardInput(toolName, rawInput);
+  const baseCwd = ctx?.cwd || ROOT;
+  let cwd = baseCwd;
+  const declaredCwd = guardInput && typeof guardInput.cwd === "string" ? guardInput.cwd : "";
+  if (declaredCwd) {
+    cwd = path.isAbsolute(declaredCwd) ? declaredCwd : path.resolve(baseCwd, declaredCwd);
+  }
   return {
     host: "omp",
     session_id: String(ctx?.sessionManager?.getSessionId?.() || ctx?.sessionId || ""),
@@ -10382,11 +10389,48 @@ function hookPayload(event, ctx) {
     tool_name: toolName,
     tool: toolName,
     hook_event_name: String(event?.type || ""),
-    tool_input: input,
-    input,
-    parameters: input,
-    cwd: ctx?.cwd || ROOT,
+    tool_input: guardInput,
+    input: guardInput,
+    parameters: guardInput,
+    cwd,
   };
+}
+
+const XD_FILE_MUTATORS = {
+  ast_edit(args) {
+    const items = args && Array.isArray(args.paths) ? args.paths : [];
+    return items.filter((item) => typeof item === "string" && item);
+  },
+};
+
+function xdDeviceName(value) {
+  const match = /^xd:\/\/([A-Za-z0-9_.-]+)/.exec(String(value || ""));
+  return match ? match[1] : "";
+}
+
+function normalizeGuardInput(toolName, input) {
+  if (!input || typeof input !== "object") {
+    return input || {};
+  }
+  const device = xdDeviceName(typeof input.path === "string" ? input.path : "");
+  if (!device) {
+    return input;
+  }
+  const extractor = XD_FILE_MUTATORS[device];
+  if (!extractor) {
+    return input;
+  }
+  let args = {};
+  try {
+    args = typeof input.content === "string" ? JSON.parse(input.content) : (input.content || {});
+  } catch {
+    return input;
+  }
+  const paths = extractor(args);
+  if (!Array.isArray(paths) || paths.length === 0) {
+    return input;
+  }
+  return { paths };
 }
 
 function forwardOmpExecutionIdentity(event, ctx) {
