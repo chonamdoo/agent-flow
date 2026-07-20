@@ -1697,9 +1697,18 @@ def _validate_installed_android_official_provenance(
         return
 
     skills_root = root / ".agent-flow" / "skills"
+    lock_path = skills_root / "upstream-lock.json"
+    if not lock_path.exists() and not lock_path.is_symlink():
+        launcher = root / ".agent-flow" / "bin" / "agent-flow"
+        raise SkillPlanSnapshotError(
+            "blocked: installed upstream skill lock is missing: "
+            f"{lock_path}. Reinstall agent-flow from the leader checkout "
+            f"({launcher} install) to restore the Android official skill snapshot, "
+            "then start the run again."
+        )
     lock = _read_snapshot_json(
         root,
-        skills_root / "upstream-lock.json",
+        lock_path,
         "installed upstream skill lock",
     )
     official = lock.get("android_official")

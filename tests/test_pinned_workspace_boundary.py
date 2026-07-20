@@ -370,6 +370,7 @@ def _bash_guard(
     phase: str = "implement",
     session_id: str = "session-1",
     agent_id: str = "",
+    tool_cwd: Path | None = None,
     env_override: dict[str, str | None] | None = None,
     guard: Path = GUARD,
 ) -> subprocess.CompletedProcess[str]:
@@ -396,7 +397,11 @@ def _bash_guard(
         "session_id": session_id,
         "agent_id": agent_id,
         "phase": phase,
-        "tool_input": {"command": command},
+        "tool_input": (
+            {"command": command}
+            if tool_cwd is None
+            else {"command": command, "cwd": str(tool_cwd)}
+        ),
     }
     return subprocess.run(
         (sys.executable, str(guard)),
@@ -416,6 +421,7 @@ def _structured_guard(
     tool_input: dict[str, object],
     *,
     host: str,
+    phase: str = "implement",
 ) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
     env["PYTHONPATH"] = str(KIT_ROOT / "src")
@@ -425,7 +431,7 @@ def _structured_guard(
         "cwd": str(worktree),
         "host": host,
         "session_id": "session-1",
-        "phase": "implement",
+        "phase": phase,
         "tool_input": tool_input,
     }
     return subprocess.run(
@@ -740,7 +746,7 @@ def test_unicode_execution_identity_digest_matches_node() -> None:
     assert execution.digest == result.stdout
 
 
-def test_no_active_run_allows_local_write_and_stale_binding_is_blocked(
+def test_stale_binding_without_active_run_blocks_local_write(
     pinned_run: tuple[Path, Path, Path, Path],
 ) -> None:
     leader, _worktree, _runtime, run_dir = pinned_run
@@ -748,12 +754,26 @@ def test_no_active_run_allows_local_write_and_stale_binding_is_blocked(
 
     local = _guard(leader, Path("shared.txt"), cwd=leader)
 
-    assert local.returncode == 0, local.stderr
+    assert local.returncode == 2
+    assert "bound_run_not_active" in local.stderr
     with pytest.raises(Exception, match="execution_binding_stale"):
         resolve_execution_workspace(
             leader,
             ExecutionIdentity("codex", "session-1", ""),
         )
+
+
+def test_no_binding_and_no_active_run_allows_local_write(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, _worktree, _runtime, run_dir = pinned_run
+    (run_dir / "active").unlink()
+    for binding in (leader / ".git" / "agent-flow" / "executions").glob("*.json"):
+        binding.unlink()
+
+    local = _guard(leader, Path("shared.txt"), cwd=leader)
+
+    assert local.returncode == 0, local.stderr
 
 
 def test_follow_up_launched_from_leader_mutates_only_the_pinned_worktree(
@@ -2910,3 +2930,291 @@ def test_node_run_start_rejects_the_leader_protected_branch(tmp_path: Path) -> N
     assert started.returncode == 1
     assert "protected branch main" in started.stderr
     assert not (leader / ".agent-flow" / "state" / "current-run.json").exists()
+
+def _native_edit_input(target: Path, body: str = "changed") -> dict[str, object]:
+    patch = f"[{target}#1A2B]\nSWAP 1.=1:\n+{body}\n"
+    return {"input": patch, "i": "edit source file"}
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_native_edit_patch_targets_are_resolved(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    target = worktree / "src" / "big.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("line1\nline2\n", encoding="utf-8")
+
+    allowed = _structured_guard(
+        leader, worktree, "Edit", _native_edit_input(target), host=host
+    )
+    assert allowed.returncode == 0, allowed.stderr
+
+    outside = leader / "escape.py"
+    blocked = _structured_guard(
+        leader, worktree, "Edit", _native_edit_input(outside), host=host
+    )
+    assert blocked.returncode == 2
+    assert "target_outside_pinned_workspace" in blocked.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_native_edit_move_target_is_bounded(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    target = worktree / "src" / "mod.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("value = 1\n", encoding="utf-8")
+    escape = leader / "escaped.py"
+    patch = f"[{target}#1A2B]\nSWAP 1.=1:\n+value = 2\nMV {escape}\n"
+
+    blocked = _structured_guard(
+        leader, worktree, "Edit", {"input": patch, "i": "move out"}, host=host
+    )
+    assert blocked.returncode == 2
+    assert "target_outside_pinned_workspace" in blocked.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_bash_mutation_honors_tool_declared_cwd(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+
+    allowed = _bash_guard(
+        leader, leader, "touch generated.txt", host=host, tool_cwd=worktree
+    )
+    assert allowed.returncode == 0, allowed.stderr
+
+    blocked = _bash_guard(
+        leader, leader, "touch generated.txt", host=host, tool_cwd=leader
+    )
+    assert blocked.returncode == 2
+    assert "mutation_cwd_not_pinned" in blocked.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_phase_artifact_write_into_git_private_run_dir_is_allowed(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, run_dir = pinned_run
+
+    artifact = run_dir / "design.md"
+    allowed = _structured_guard(
+        leader,
+        worktree,
+        "Write",
+        {"file_path": str(artifact), "content": "# design\n"},
+        host=host,
+        phase="design",
+    )
+    assert allowed.returncode == 0, allowed.stderr
+
+    nested = run_dir / "artifacts" / "gate-results.json"
+    allowed_nested = _structured_guard(
+        leader,
+        worktree,
+        "Write",
+        {"file_path": str(nested), "content": "{}\n"},
+        host=host,
+        phase="gates",
+    )
+    assert allowed_nested.returncode == 0, allowed_nested.stderr
+
+    escape = leader / ".git" / "agent-flow" / "executions" / "evil.json"
+    blocked = _structured_guard(
+        leader, worktree, "Write",
+        {"file_path": str(escape), "content": "{}\n"},
+        host=host,
+    )
+    assert blocked.returncode == 2
+    assert "target_outside_pinned_workspace" in blocked.stderr
+
+    for protected in ("meta.json", "manifest.json", "active"):
+        blocked_state = _structured_guard(
+            leader,
+            worktree,
+            "Write",
+            {"file_path": str(run_dir / protected), "content": "changed\n"},
+            host=host,
+            phase="design",
+        )
+        assert blocked_state.returncode == 2
+        assert "protected_run_state_path" in blocked_state.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_xd_ast_edit_real_targets_are_bounded(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    target = worktree / "src" / "mod.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("x = 1\n", encoding="utf-8")
+
+    inside = {"ops": [{"pat": "x", "out": "y"}], "paths": [str(target)]}
+    allowed = _structured_guard(
+        leader, worktree, "Write",
+        {"path": "xd://ast_edit", "content": json.dumps(inside)},
+        host=host,
+    )
+    assert allowed.returncode == 0, allowed.stderr
+
+    outside = {"ops": [{"pat": "x", "out": "y"}], "paths": [str(leader / "outside.py")]}
+    blocked = _structured_guard(
+        leader, worktree, "Write",
+        {"path": "xd://ast_edit", "content": json.dumps(outside)},
+        host=host,
+    )
+    assert blocked.returncode == 2
+    assert "target_outside_pinned_workspace" in blocked.stderr
+
+    internal = {
+        "ops": [{"pat": "x", "out": "y"}],
+        "paths": ["skill://code-generation-discipline"],
+    }
+    blocked_internal = _structured_guard(
+        leader,
+        worktree,
+        "Write",
+        {"path": "xd://ast_edit", "content": json.dumps(internal)},
+        host=host,
+    )
+    assert blocked_internal.returncode == 2
+    assert "target_uri_not_supported" in blocked_internal.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_read_only_xd_tool_write_is_allowed(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    allowed = _structured_guard(
+        leader, worktree, "Write",
+        {"path": "xd://web_search", "content": json.dumps({"query": "x"})},
+        host=host,
+    )
+    assert allowed.returncode == 0, allowed.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_status_next_command_is_a_trusted_launcher(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    from agent_flow.cli import _continue_command
+
+    monkeypatch.delenv("AGENT_FLOW_PROJECT_LAUNCHER", raising=False)
+    command = _continue_command(leader, None)
+    launcher = leader / ".agent-flow" / "bin" / "agent-flow"
+    assert str(launcher) in command
+
+    result = _bash_guard(leader, worktree, command, host=host)
+    assert result.returncode == 0, result.stderr
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_stale_binding_blocks_leader_shell_and_write(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, _worktree, _runtime, run_dir = pinned_run
+    (run_dir / "active").unlink()
+
+    shell = _bash_guard(leader, leader, "touch generated.txt", host=host)
+    assert shell.returncode == 2, shell.stderr
+    assert "bound_run_not_active" in shell.stderr
+
+    write = _structured_guard(
+        leader, leader, "Write",
+        {"file_path": str(leader / "leaked.txt"), "content": "x\n"},
+        host=host,
+    )
+    assert write.returncode == 2, write.stderr
+    assert "bound_run_not_active" in write.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_unbound_execution_without_active_run_stays_allowed(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, _worktree, _runtime, run_dir = pinned_run
+    (run_dir / "active").unlink()
+
+    shell = _bash_guard(
+        leader, leader, "touch generated.txt", host=host, session_id="unbound-session"
+    )
+    assert shell.returncode == 0, shell.stderr
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_declared_cwd_outside_repo_does_not_bypass_guard(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, _worktree, _runtime, _run_dir = pinned_run
+    outside = leader.parent / "outside"
+    outside.mkdir()
+
+    result = _bash_guard(
+        leader,
+        leader,
+        "touch escaped.txt",
+        host=host,
+        tool_cwd=outside,
+    )
+
+    assert result.returncode == 2, result.stderr
+    assert "mutation_cwd_not_pinned" in result.stderr
+    assert not (outside / "escaped.txt").exists()
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "omp"))
+def test_record_stage_launcher_is_bounded_to_authenticated_run(
+    pinned_run: tuple[Path, Path, Path, Path],
+    host: str,
+) -> None:
+    leader, _worktree, _runtime, run_dir = pinned_run
+    outside = leader.parent / "outside-run"
+    outside.mkdir()
+    launcher = leader / ".agent-flow" / "bin" / "agent-flow"
+
+    def command(target: Path, stage: str) -> str:
+        return " ".join(
+            (
+                shlex.quote(str(launcher)),
+                "record-stage",
+                "--root",
+                shlex.quote(str(leader)),
+                "--run-dir",
+                shlex.quote(str(target)),
+                "--stage",
+                shlex.quote(stage),
+                "--content",
+                shlex.quote("stage result"),
+            )
+        )
+
+    allowed = _bash_guard(leader, leader, command(run_dir, "design"), host=host)
+    outside_run = _bash_guard(leader, leader, command(outside, "design"), host=host)
+    unsafe_stage = _bash_guard(
+        leader,
+        leader,
+        command(run_dir, "../../exploit"),
+        host=host,
+    )
+
+    assert allowed.returncode == 0, allowed.stderr
+    assert outside_run.returncode == 2, outside_run.stderr
+    assert "launcher is not trusted" in outside_run.stderr
+    assert unsafe_stage.returncode == 2, unsafe_stage.stderr
+    assert "launcher is not trusted" in unsafe_stage.stderr
