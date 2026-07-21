@@ -252,11 +252,21 @@ def test_install_materializes_authenticated_project_launcher(tmp_path: Path) -> 
         check=False,
         env=env,
     )
+    aborted = subprocess.run(
+        (str(launcher), "abort", "--yes"),
+        cwd=project,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+    )
 
     assert started.returncode == 0, started.stderr
     assert status.returncode == 0, status.stderr
     assert "next_command:" in status.stdout
     assert str(launcher) in status.stdout
+    assert aborted.returncode == 0, aborted.stderr
+    assert "aborted:" in aborted.stdout
 
 
 def test_project_launcher_install_repairs_python_runtime_drift(tmp_path: Path) -> None:
@@ -1112,10 +1122,11 @@ def test_sandboxed_gate_cannot_write_outside_pinned_workspace(tmp_path: Path) ->
     outside = tmp_path / "outside.txt"
     project.mkdir()
     outside.write_text("outside\n", encoding="utf-8")
-    assert _install(project).returncode == 0
-    started = _command(project, "run", "start", "--task", "sandbox")
+    isolated_env = {"AGENT_FLOW_AUTO_EXTERNAL_SKILLS": "0"}
+    assert _install(project, env=isolated_env).returncode == 0
+    started = _command(project, "run", "start", "--task", "sandbox", env=isolated_env)
     assert started.returncode == 0, started.stderr
-    benign = _command(project, "gate", "--", sys.executable, "-c", "print('ok')")
+    benign = _command(project, "gate", "--", sys.executable, "-c", "print('ok')", env=isolated_env)
     escaped = _command(
         project,
         "gate",
@@ -1123,11 +1134,59 @@ def test_sandboxed_gate_cannot_write_outside_pinned_workspace(tmp_path: Path) ->
         sys.executable,
         "-c",
         f"from pathlib import Path; Path({str(outside)!r}).write_text('changed')",
+        env=isolated_env,
     )
 
     assert benign.returncode == 0, benign.stderr
     assert escaped.returncode != 0
     assert outside.read_text(encoding="utf-8") == "outside\n"
+
+def test_sandboxed_gradle_gate_uses_workspace_cache_and_no_daemon(
+    tmp_path: Path,
+) -> None:
+    if sys.platform != "darwin" and shutil.which("bwrap") is None:
+        pytest.skip("platform sandbox is unavailable")
+    project = tmp_path / "project"
+    outside_gradle = tmp_path / "outside-gradle"
+    project.mkdir()
+    wrapper = project / "gradlew"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        "case \" $* \" in *\" --no-daemon \"*) ;; *) exit 91 ;; esac\n"
+        "mkdir -p \"$GRADLE_USER_HOME/caches\"\n"
+        "printf '%s\\n' \"$GRADLE_USER_HOME\" > \"$GRADLE_USER_HOME/caches/location.txt\"\n",
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    isolated_env = {"AGENT_FLOW_AUTO_EXTERNAL_SKILLS": "0"}
+    assert _install(project, env=isolated_env).returncode == 0
+    assert _command(
+        project,
+        "run",
+        "start",
+        "--task",
+        "gradle sandbox",
+        env=isolated_env,
+    ).returncode == 0
+
+    result = _command(
+        project,
+        "gate",
+        "--",
+        "./gradlew",
+        "assembleDebug",
+        env={
+            "AGENT_FLOW_AUTO_EXTERNAL_SKILLS": "0",
+            "GRADLE_USER_HOME": str(outside_gradle),
+        },
+    )
+
+    managed_gradle = project / ".agent-flow" / "gate-runtime" / "gradle-home"
+    assert result.returncode == 0, result.stderr
+    assert (managed_gradle / "caches" / "location.txt").read_text(
+        encoding="utf-8"
+    ).strip() == str(managed_gradle)
+    assert not outside_gradle.exists()
 
 
 def test_sandboxed_gate_never_uses_path_shadowed_bubblewrap(tmp_path: Path) -> None:
@@ -6965,3 +7024,258 @@ def test_partial_install_raises_structured_install_missing(tmp_path: Path) -> No
     with pytest.raises(HostExposureError) as excinfo:
         authenticated_installed_skill_index(project)
     assert excinfo.value.reason == "install_missing"
+
+
+
+# ---------------------------------------------------------------------------
+# APK export ownership + TOCTOU + shell-wrapped Gradle gate regressions
+# ---------------------------------------------------------------------------
+
+_APK_KIT = str(KIT_ROOT / "bin" / "agent-flow-kit.mjs")
+
+
+def _init_export_project(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """git repo + install; returns (project, home, downloads)."""
+    project = tmp_path / "project"
+    project.mkdir()
+    subprocess.run(("git", "init", "-b", "main", str(project)), check=True, capture_output=True)
+    subprocess.run(("git", "-C", str(project), "config", "user.name", "Test User"), check=True)
+    subprocess.run(("git", "-C", str(project), "config", "user.email", "test@example.com"), check=True)
+    (project / "README.md").write_text("project\n", encoding="utf-8")
+    subprocess.run(("git", "-C", str(project), "add", "README.md"), check=True)
+    subprocess.run(("git", "-C", str(project), "commit", "-m", "initial"), check=True, capture_output=True)
+    home = tmp_path / "test-home"
+    downloads = home / "Downloads"
+    downloads.mkdir(parents=True)
+    assert _install(project, env={"HOME": str(home), "AGENT_FLOW_AUTO_EXTERNAL_SKILLS": "0"}).returncode == 0
+    return project, home, downloads
+
+
+def _export_env(home: Path, execution_id: str | None) -> dict[str, str]:
+    env = dict(os.environ)
+    for key in (
+        "AGENT_FLOW_EXECUTION_ID", "AGENT_FLOW_SESSION_ID", "AGENT_FLOW_AGENT_ID",
+        "AGENT_FLOW_ACTIVE_HOST", "AGENT_FLOW_HOST", "CODEX_THREAD_ID", "CODEX_SESSION_ID",
+        "CODEX_AGENT_ID", "CLAUDE_SESSION_ID", "CLAUDE_AGENT_ID", "OMP_SESSION_ID", "OMP_AGENT_ID",
+    ):
+        env.pop(key, None)
+    env["HOME"] = str(home)
+    env["AGENT_FLOW_AUTO_EXTERNAL_SKILLS"] = "0"
+    if execution_id is not None:
+        env["AGENT_FLOW_ACTIVE_HOST"] = "codex"
+        env["AGENT_FLOW_EXECUTION_ID"] = execution_id
+    return env
+
+
+def _bind_export_worktree(project: Path, name: str, env: dict[str, str]) -> Path:
+    """Create a managed worktree and pin+bind the given execution to it (light node path)."""
+    from agent_flow.core.worktrees import create_worktree, plan_worktree
+
+    created = create_worktree(root=project, plan=plan_worktree(root=project, name=name), allow_dirty=True)
+    worktree = created.path
+    started = _command(
+        worktree, "run", "start", "--task", f"{name} export", "--run-id", name, env=env,
+    )
+    assert started.returncode == 0, started.stderr
+    return worktree
+
+
+def _place_apk(worktree: Path, content: bytes = b"REAL-APK-PAYLOAD") -> Path:
+    outputs = worktree / "app" / "build" / "outputs"
+    outputs.mkdir(parents=True)
+    apk = outputs / "app-release.apk"
+    apk.write_bytes(content)
+    return apk
+
+
+def _read_until_marker(stream, marker: str, deadline_s: float = 10.0) -> bool:
+    end = time.time() + deadline_s
+    while time.time() < end:
+        line = stream.readline()
+        if line == "":
+            return False
+        if marker in line:
+            return True
+    return False
+
+
+def test_export_apk_rejects_leader_checkout(tmp_path: Path) -> None:
+    # Fails on pre-fix code: the leader checkout used to be an accepted export source.
+    project, home, downloads = _init_export_project(tmp_path)
+    env = _export_env(home, "leader-export")
+    (project / "leaked.apk").write_bytes(b"LEAKED-FROM-LEADER")
+
+    result = subprocess.run(
+        (_node(), _APK_KIT, "export-apk", "leaked.apk"),
+        cwd=project, text=True, capture_output=True, check=False, env=env,
+        stdin=subprocess.DEVNULL,
+    )
+
+    assert result.returncode != 0, result.stdout
+    assert "leader checkout" in result.stderr
+    assert not (downloads / "leaked.apk").exists()
+
+
+def test_export_apk_rejects_unbound_execution(tmp_path: Path) -> None:
+    # Fails on pre-fix code: any registered worktree exported without a binding check.
+    project, home, downloads = _init_export_project(tmp_path)
+    worktree = _bind_export_worktree(project, "owning-unbound", _export_env(home, "owning-unbound"))
+    _place_apk(worktree)
+    anonymous_env = _export_env(home, None)
+
+    result = subprocess.run(
+        (_node(), _APK_KIT, "export-apk", "app/build/outputs/app-release.apk"),
+        cwd=worktree, text=True, capture_output=True, check=False, env=anonymous_env,
+        stdin=subprocess.DEVNULL,
+    )
+
+    assert result.returncode != 0, result.stdout
+    assert "bound execution identity" in result.stderr
+    assert not (downloads / "app-release.apk").exists()
+
+
+def test_export_apk_rejects_sibling_worktree(tmp_path: Path) -> None:
+    # Fails on pre-fix code: a sibling worktree registered by another execution was exportable.
+    project, home, downloads = _init_export_project(tmp_path)
+    owner_env = _export_env(home, "sibling-owner")
+    other_env = _export_env(home, "sibling-other")
+    _bind_export_worktree(project, "sibling-owner", owner_env)
+    sibling = _bind_export_worktree(project, "sibling-other", other_env)
+    _place_apk(sibling)
+
+    result = subprocess.run(
+        (_node(), _APK_KIT, "export-apk", "app/build/outputs/app-release.apk"),
+        cwd=sibling, text=True, capture_output=True, check=False, env=owner_env,
+        stdin=subprocess.DEVNULL,
+    )
+
+    assert result.returncode != 0, result.stdout
+    assert "own pinned worktree" in result.stderr
+    assert not (downloads / "app-release.apk").exists()
+
+
+def test_export_apk_exports_from_owning_worktree(tmp_path: Path) -> None:
+    # Positive control: legitimate export from the execution's own worktree still works.
+    project, home, downloads = _init_export_project(tmp_path)
+    env = _export_env(home, "owning-success")
+    worktree = _bind_export_worktree(project, "owning-success", env)
+    _place_apk(worktree, content=b"OWNING-APK-PAYLOAD")
+
+    result = subprocess.run(
+        (_node(), _APK_KIT, "export-apk", "app/build/outputs/app-release.apk"),
+        cwd=worktree, text=True, capture_output=True, check=False, env=env,
+        stdin=subprocess.DEVNULL,
+    )
+
+    assert result.returncode == 0, result.stderr
+    exported = downloads / "app-release.apk"
+    assert exported.is_file()
+    assert exported.read_bytes() == b"OWNING-APK-PAYLOAD"
+
+
+def test_export_apk_rejects_source_intermediate_symlink_swap(tmp_path: Path) -> None:
+    # Fails on pre-fix code: no seam + no ancestor re-check, so a mid-operation swap of an
+    # intermediate source directory into an external symlink exfiltrated an outside apk.
+    project, home, downloads = _init_export_project(tmp_path)
+    env = _export_env(home, "source-toctou")
+    worktree = _bind_export_worktree(project, "source-toctou", env)
+    _place_apk(worktree)
+    external = tmp_path / "outside"
+    (external / "outputs").mkdir(parents=True)
+    (external / "outputs" / "app-release.apk").write_bytes(b"STOLEN-EXTERNAL-APK")
+
+    proc = subprocess.Popen(
+        (_node(), _APK_KIT, "export-apk", "app/build/outputs/app-release.apk"),
+        cwd=worktree, text=True, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env={**env, "AGENT_FLOW_TEST_HOLD_BEFORE_APK_SOURCE_CHECK_MS": "3000"},
+    )
+    try:
+        assert _read_until_marker(proc.stderr, "agent-flow:test-apk-source-check-ready"), (
+            "source-check hold seam marker not observed"
+        )
+        outputs = worktree / "app" / "build" / "outputs"
+        os.rename(outputs, worktree / "app" / "build" / "outputs.real")
+        os.symlink(external / "outputs", outputs)
+        out, err = proc.communicate(timeout=30)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate(timeout=10)
+
+    assert proc.returncode != 0, out
+    assert "not a real directory" in err
+    for candidate in downloads.glob("*.apk"):
+        assert candidate.read_bytes() != b"STOLEN-EXTERNAL-APK"
+
+
+def test_export_apk_rejects_downloads_parent_swap(tmp_path: Path) -> None:
+    # Fails on pre-fix code: the Downloads parent was only path-checked once, so a swap
+    # after the check redirected the created file outside.
+    project, home, downloads = _init_export_project(tmp_path)
+    env = _export_env(home, "dest-toctou")
+    worktree = _bind_export_worktree(project, "dest-toctou", env)
+    _place_apk(worktree)
+    external_downloads = tmp_path / "outside-downloads"
+    external_downloads.mkdir()
+
+    proc = subprocess.Popen(
+        (_node(), _APK_KIT, "export-apk", "app/build/outputs/app-release.apk"),
+        cwd=worktree, text=True, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env={**env, "AGENT_FLOW_TEST_HOLD_BEFORE_APK_DEST_OPEN_MS": "3000"},
+    )
+    try:
+        assert _read_until_marker(proc.stderr, "agent-flow:test-apk-dest-open-ready"), (
+            "dest-open hold seam marker not observed"
+        )
+        os.rename(downloads, home / "Downloads.real")
+        os.symlink(external_downloads, downloads)
+        out, err = proc.communicate(timeout=30)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate(timeout=10)
+
+    assert proc.returncode != 0, out
+    assert "Downloads" in err
+    assert list(external_downloads.glob("*.apk")) == []
+
+
+def test_shell_wrapped_gradlew_gate_is_detected(tmp_path: Path) -> None:
+    # Fails on pre-fix code: `gate -- sh -c '... ./gradlew ...'` was not recognized as a
+    # Gradle gate, so the managed GRADLE_USER_HOME env policy was skipped.
+    if sys.platform != "darwin" and shutil.which("bwrap") is None:
+        pytest.skip("platform sandbox is unavailable")
+    project = tmp_path / "project"
+    outside_gradle = tmp_path / "outside-gradle"
+    project.mkdir()
+    wrapper = project / "gradlew"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        "mkdir -p \"$GRADLE_USER_HOME/caches\"\n"
+        "printf '%s\\n' \"$GRADLE_USER_HOME\" > \"$GRADLE_USER_HOME/caches/location.txt\"\n",
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    isolated_env = {"AGENT_FLOW_AUTO_EXTERNAL_SKILLS": "0"}
+    assert _install(project, env=isolated_env).returncode == 0
+    assert _command(
+        project, "run", "start", "--task", "gradle shell wrap", env=isolated_env,
+    ).returncode == 0
+
+    result = _command(
+        project,
+        "gate", "--", "sh", "-c", "cd . && ./gradlew assembleDebug",
+        env={
+            "AGENT_FLOW_AUTO_EXTERNAL_SKILLS": "0",
+            "GRADLE_USER_HOME": str(outside_gradle),
+        },
+    )
+
+    managed_gradle = project / ".agent-flow" / "gate-runtime" / "gradle-home"
+    assert result.returncode == 0, result.stderr
+    assert (managed_gradle / "caches" / "location.txt").read_text(
+        encoding="utf-8"
+    ).strip() == str(managed_gradle)
+    assert not outside_gradle.exists()

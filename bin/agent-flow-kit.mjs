@@ -1827,7 +1827,7 @@ function validateNodeWorkspaceIdentity(identity, root, requireRegistration = tru
   }
   const metadata = fs.statSync(workspaceRoot);
   if (metadata.dev !== identity.device || metadata.ino !== identity.inode) {
-    throw new Error(`blocked: pinned workspace filesystem identity changed: ${workspaceRoot}`);
+    throw new Error(`blocked: pinned workspace filesystem identity changed: ${workspaceRoot}; from the leader checkout run: agent-flow worktree repin --name ${path.basename(workspaceRoot)}`);
   }
   const commonDir = gitOutput(workspaceRoot, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
   const gitDir = gitOutput(workspaceRoot, ["rev-parse", "--path-format=absolute", "--git-dir"]);
@@ -10362,12 +10362,18 @@ export default function agentFlowHooks(pi) {
     }
   });
 
-  pi.on("session_shutdown", async (_event, ctx) => {
-    const result = await runHook(STOP_HOOKS[0], hookPayload({ type: "session_shutdown" }, ctx), ctx);
-    const message = parseSystemMessage(result.reason);
-    if (message && ctx?.hasUI && typeof ctx.ui?.notify === "function") {
-      await ctx.ui.notify(message, "info");
-    }
+  pi.on("session_shutdown", (_event, ctx) => {
+    setTimeout(() => {
+      void runHook(STOP_HOOKS[0], hookPayload({ type: "session_shutdown" }, ctx), ctx)
+        .then((result) => {
+          const message = parseSystemMessage(result.reason);
+          if (message && ctx?.hasUI && typeof ctx.ui?.notify === "function") {
+            return ctx.ui.notify(message, "info");
+          }
+          return undefined;
+        })
+        .catch(() => {});
+    }, 0);
   });
 }
 
@@ -10832,10 +10838,294 @@ function activeGateRun(root) {
   return readPythonGateRun(root);
 }
 
+function currentExportWorkspace(root) {
+  const topLevel = gitOutput(process.cwd(), ["rev-parse", "--show-toplevel"]);
+  if (!topLevel) {
+    throw new Error("blocked: APK export requires a git workspace");
+  }
+  const workspace = fs.realpathSync(topLevel);
+  if (samePath(workspace, root)) {
+    throw new Error("blocked: APK export is not allowed from the leader checkout");
+  }
+  const execution = currentExecutionIdentity();
+  if (!execution) {
+    throw new Error("blocked: APK export requires a bound execution identity");
+  }
+  const bindingPath = executionBindingPath(root, execution);
+  if (!fs.existsSync(bindingPath)) {
+    throw new Error("blocked: APK export requires an active execution binding");
+  }
+  const binding = readOwnedJson(bindingPath);
+  if (!nodeBindingIsActive(binding, root)) {
+    throw new Error("blocked: APK export execution binding is not active");
+  }
+  // 실행 소유 worktree만 export 소스로 허용한다: 바인딩이 고정한 workspace_root가
+  // 현재 CWD toplevel과 일치해야 하며, 리더 체크아웃이나 형제 worktree는 거부한다.
+  const boundWorkspace = binding.workspace?.workspace_root;
+  if (!boundWorkspace || !samePath(boundWorkspace, workspace)) {
+    throw new Error(
+      `blocked: APK export must run from the execution's own pinned worktree: ${workspace}`,
+    );
+  }
+  const identity = registeredNodeWorkspaceIdentity(root, workspace);
+  if (!identity) {
+    throw new Error(`blocked: APK export workspace is not registered: ${workspace}`);
+  }
+  return validateNodeWorkspaceIdentity(identity, root);
+}
+
+function parseExportApkArgs(args) {
+  let source = null;
+  let name = null;
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === "--name") {
+      if (index + 1 >= args.length || !args[index + 1]) {
+        throw new Error("--name requires an APK filename");
+      }
+      name = args[++index];
+    } else if (argument.startsWith("--name=")) {
+      name = argument.slice("--name=".length);
+      if (!name) throw new Error("--name requires an APK filename");
+    } else if (argument.startsWith("-") || source !== null) {
+      throw new Error("usage: agent-flow export-apk <workspace-apk> [--name <filename.apk>]");
+    } else {
+      source = argument;
+    }
+  }
+  if (!source) {
+    throw new Error("usage: agent-flow export-apk <workspace-apk> [--name <filename.apk>]");
+  }
+  const filename = name ?? path.basename(source);
+  if (
+    filename !== path.basename(filename)
+    || filename === "."
+    || filename === ".."
+    || !filename.toLowerCase().endsWith(".apk")
+  ) {
+    throw new Error("APK export name must be a filename ending in .apk");
+  }
+  return { source, filename };
+}
+
+function openAvailableApkDestination(downloads, filename) {
+  const stem = filename.slice(0, -4);
+  const noFollow = fs.constants.O_NOFOLLOW || 0;
+  for (let suffix = 0; suffix < 1000; suffix += 1) {
+    const candidateName = suffix === 0 ? filename : `${stem}-${suffix}.apk`;
+    const candidate = path.join(downloads, candidateName);
+    try {
+      const descriptor = fs.openSync(
+        candidate,
+        fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | noFollow,
+        0o600,
+      );
+      return { descriptor, path: candidate };
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+    }
+  }
+  throw new Error(`cannot allocate APK export name for ${filename}`);
+}
+
+function captureApkDirectoryChain(base, target) {
+  const baseResolved = path.resolve(base);
+  const targetResolved = path.resolve(target);
+  const relative = path.relative(baseResolved, targetResolved);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error(`blocked: APK export path escapes its root: ${targetResolved}`);
+  }
+  const chain = [];
+  let cursor = baseResolved;
+  const record = (directory) => {
+    const metadata = fs.lstatSync(directory);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      throw new Error(`blocked: APK export path component is not a real directory: ${directory}`);
+    }
+    chain.push({ path: directory, dev: metadata.dev, ino: metadata.ino });
+  };
+  record(cursor);
+  for (const part of relative.split(path.sep).filter(Boolean)) {
+    cursor = path.join(cursor, part);
+    record(cursor);
+  }
+  return chain;
+}
+
+function assertApkDirectoryChainUnchanged(chain, label) {
+  for (const entry of chain) {
+    const metadata = fs.lstatSync(entry.path);
+    if (
+      !metadata.isDirectory()
+      || metadata.isSymbolicLink()
+      || metadata.dev !== entry.dev
+      || metadata.ino !== entry.ino
+    ) {
+      throw new Error(`blocked: APK export ${label} path changed during copy: ${entry.path}`);
+    }
+  }
+}
+
+function runExportApk(args) {
+  const root = resolveAgentFlowRoot(process.cwd());
+  assertProjectRuntimeContract(root);
+  const workspace = currentExportWorkspace(root);
+  const request = parseExportApkArgs(args);
+  const source = path.resolve(workspace, request.source);
+  ensureChildPath(workspace, source);
+  if (pathHasSymlink(workspace, source)) {
+    throw new Error(`blocked: APK export source contains a symlink: ${source}`);
+  }
+  // 소스 검사 직전 창을 노려 중간 디렉터리를 외부 심링크로 바꿔치기하는 TOCTOU를
+  // 테스트에서 결정적으로 재현하기 위한 seam.
+  holdInstallForTest("AGENT_FLOW_TEST_HOLD_BEFORE_APK_SOURCE_CHECK_MS", "apk-source-check-ready");
+  const sourceMetadata = fs.lstatSync(source);
+  if (
+    !sourceMetadata.isFile()
+    || sourceMetadata.isSymbolicLink()
+    || (typeof process.getuid === "function" && sourceMetadata.uid !== process.getuid())
+    || !source.toLowerCase().endsWith(".apk")
+  ) {
+    throw new Error(`blocked: APK export source is not an owned regular .apk file: ${source}`);
+  }
+  const sourceDirectoryChain = captureApkDirectoryChain(workspace, path.dirname(source));
+  const workspaceReal = fs.realpathSync.native(workspace);
+  const sourceParentReal = fs.realpathSync.native(path.dirname(source));
+
+  const downloads = path.join(nodeOs.homedir(), "Downloads");
+  const downloadsMetadata = fs.lstatSync(downloads);
+  if (
+    !downloadsMetadata.isDirectory()
+    || downloadsMetadata.isSymbolicLink()
+    || (typeof process.getuid === "function" && downloadsMetadata.uid !== process.getuid())
+  ) {
+    throw new Error(`blocked: Downloads directory is unsafe: ${downloads}`);
+  }
+  const downloadsDirectoryChain = captureApkDirectoryChain(nodeOs.homedir(), downloads);
+  const downloadsReal = fs.realpathSync.native(downloads);
+
+  const noFollow = fs.constants.O_NOFOLLOW || 0;
+  const sourceDescriptor = fs.openSync(source, fs.constants.O_RDONLY | noFollow);
+  let destinationDescriptor = null;
+  let destination = null;
+  let destinationIdentity = null;
+  let completed = false;
+  try {
+    const openedSource = fs.fstatSync(sourceDescriptor);
+    if (
+      !openedSource.isFile()
+      || openedSource.dev !== sourceMetadata.dev
+      || openedSource.ino !== sourceMetadata.ino
+    ) {
+      throw new Error("blocked: APK export source changed before copy");
+    }
+    // O_NOFOLLOW는 마지막 컴포넌트만 보호하므로, 동일 uid 프로세스가 중간 디렉터리를
+    // 외부 심링크로 바꿔치기해 외부 .apk를 유출하는 것을 조상 체인 재검증으로 차단한다.
+    assertApkDirectoryChainUnchanged(sourceDirectoryChain, "source");
+    if (
+      fs.realpathSync.native(path.dirname(source)) !== sourceParentReal
+      || fs.realpathSync.native(workspace) !== workspaceReal
+    ) {
+      throw new Error("blocked: APK export source path changed before copy");
+    }
+    const sourceParentRelative = path.relative(workspaceReal, sourceParentReal);
+    if (sourceParentRelative.startsWith("..") || path.isAbsolute(sourceParentRelative)) {
+      throw new Error("blocked: APK export source escaped its workspace before copy");
+    }
+
+    holdInstallForTest("AGENT_FLOW_TEST_HOLD_BEFORE_APK_DEST_OPEN_MS", "apk-dest-open-ready");
+    assertApkDirectoryChainUnchanged(downloadsDirectoryChain, "Downloads");
+    if (fs.realpathSync.native(downloads) !== downloadsReal) {
+      throw new Error("blocked: Downloads directory changed before copy");
+    }
+    const openedDestination = openAvailableApkDestination(downloads, request.filename);
+    destinationDescriptor = openedDestination.descriptor;
+    destination = openedDestination.path;
+    destinationIdentity = fs.fstatSync(destinationDescriptor);
+    // 생성된 대상의 부모 식별자가 캡처한 Downloads와 여전히 동일한지 재확인한다.
+    assertApkDirectoryChainUnchanged(downloadsDirectoryChain, "Downloads");
+    if (fs.realpathSync.native(path.dirname(destination)) !== downloadsReal) {
+      throw new Error("blocked: Downloads directory changed during copy");
+    }
+
+    const buffer = Buffer.allocUnsafe(1024 * 1024);
+    let offset = 0;
+    while (offset < openedSource.size) {
+      const read = fs.readSync(
+        sourceDescriptor,
+        buffer,
+        0,
+        Math.min(buffer.length, openedSource.size - offset),
+        offset,
+      );
+      if (read === 0) throw new Error("blocked: APK export source ended during copy");
+      let written = 0;
+      while (written < read) {
+        written += fs.writeSync(destinationDescriptor, buffer, written, read - written);
+      }
+      offset += read;
+    }
+    const finalSource = fs.fstatSync(sourceDescriptor);
+    if (
+      finalSource.dev !== openedSource.dev
+      || finalSource.ino !== openedSource.ino
+      || finalSource.size !== openedSource.size
+      || finalSource.mtimeMs !== openedSource.mtimeMs
+    ) {
+      throw new Error("blocked: APK export source changed during copy");
+    }
+    fs.fchmodSync(destinationDescriptor, 0o644);
+    fs.fsyncSync(destinationDescriptor);
+    completed = true;
+  } finally {
+    if (destinationDescriptor !== null) fs.closeSync(destinationDescriptor);
+    fs.closeSync(sourceDescriptor);
+    if (!completed && destination && destinationIdentity) {
+      const current = lstatIfExists(destination);
+      if (
+        current?.isFile()
+        && !current.isSymbolicLink()
+        && current.dev === destinationIdentity.dev
+        && current.ino === destinationIdentity.ino
+      ) {
+        fs.unlinkSync(destination);
+      }
+    }
+  }
+  console.log(`exported apk: ${destination}`);
+}
+
+function scriptInvokesGradle(script) {
+  if (typeof script !== "string" || !script) return false;
+  // 쉘 스크립트 안에서 gradle/gradlew를 독립 명령 토큰으로 호출하는 경우만 매칭한다
+  // (경로 접두사 허용, 뒤에 인접 문자가 붙는 오탐은 배제).
+  return /(?:^|[\s;&|(])(?:[^\s;&|(]*\/)?gradlew?(?:\.bat)?(?=$|[\s;&|)=])/i.test(script);
+}
+
+function isGradleGateCommand(args) {
+  if (!args.length) return false;
+  const command = path.basename(args[0]).toLowerCase();
+  if (command === "gradle" || command === "gradlew" || command === "gradlew.bat") return true;
+  if (command === "sh" || command === "bash" || command === "dash" || command === "zsh") {
+    const flagIndex = args.indexOf("-c");
+    if (flagIndex !== -1 && flagIndex + 1 < args.length) {
+      return scriptInvokesGradle(args[flagIndex + 1]);
+    }
+  }
+  return false;
+}
+
 function runSandboxedGate(args, extraEnv = {}) {
   const separator = args.indexOf("--");
-  const gateArgs = separator === -1 ? args : args.slice(separator + 1);
-  if (gateArgs.length === 0) throw new Error("gate requires a command after --");
+  const requestedGateArgs = separator === -1 ? args : args.slice(separator + 1);
+  if (requestedGateArgs.length === 0) throw new Error("gate requires a command after --");
+  const gradleGate = isGradleGateCommand(requestedGateArgs);
+  if (gradleGate && requestedGateArgs.includes("--daemon")) {
+    throw new Error("blocked: sandboxed Gradle gates do not allow --daemon");
+  }
+  const gateArgs = gradleGate && !requestedGateArgs.includes("--no-daemon")
+    ? [...requestedGateArgs, "--no-daemon"]
+    : requestedGateArgs;
   const root = resolveAgentFlowRoot(process.cwd());
   assertProjectRuntimeContract(root);
   const state = activeGateRun(root);
@@ -10850,6 +11140,12 @@ function runSandboxedGate(args, extraEnv = {}) {
   const gateTemp = path.join(gateRuntime, "tmp");
   ensureManagedDirectory(gateHome, pinned);
   ensureManagedDirectory(gateTemp, pinned);
+  const gradleHome = path.join(gateRuntime, "gradle-home");
+  const kotlinDaemon = path.join(gateRuntime, "kotlin-daemon");
+  if (gradleGate) {
+    ensureManagedDirectory(gradleHome, pinned);
+    ensureManagedDirectory(kotlinDaemon, pinned);
+  }
   const env = {
     ...process.env,
     ...extraEnv,
@@ -10858,6 +11154,11 @@ function runSandboxedGate(args, extraEnv = {}) {
     TEMP: gateTemp,
     TMP: gateTemp,
   };
+  if (gradleGate) {
+    delete env.GRADLE_OPTS;
+    env.GRADLE_USER_HOME = gradleHome;
+    env.KOTLIN_DAEMON_RUNFILES_PATH = kotlinDaemon;
+  }
   let executable;
   let sandboxArgs;
   if (process.platform === "darwin" && fs.existsSync("/usr/bin/sandbox-exec")) {
@@ -11264,8 +11565,17 @@ try {
     runProjectPythonCli(["continue"]);
   }
 
+  if (command === "abort") {
+    runProjectPythonCli(["abort", ...process.argv.slice(3)]);
+  }
+
   if (command === "worktree") {
     runProjectPythonCli(["worktree", ...process.argv.slice(3)]);
+  }
+
+  if (command === "export-apk") {
+    runExportApk(process.argv.slice(3));
+    process.exit(0);
   }
 
   if (command === "architecture-lint") {
@@ -11280,7 +11590,7 @@ try {
     runSandboxedGate(process.argv.slice(3));
   }
 
-  console.error("usage: agent-flow-kit install [--force-managed] | sync | status | continue | worktree <create|status|list|remove> | gate -- <command ...> | gates [--profile <id>] [--worktree <name>] | architecture-lint [--profile <id>] [--files ...] | run <task|install|start|status|next|advance|push-watch|push-watch-tick>");
+  console.error("usage: agent-flow-kit install [--force-managed] | sync | status | continue | abort [--worktree <name>] --yes | worktree <create|status|list|repin|remove> | export-apk <workspace-apk> [--name <filename.apk>] | gate -- <command ...> | gates [--profile <id>] [--worktree <name>] | architecture-lint [--profile <id>] [--files ...] | run <task|install|start|status|next|advance|push-watch|push-watch-tick>");
   process.exit(1);
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));

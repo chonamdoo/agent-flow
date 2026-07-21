@@ -7,7 +7,7 @@ import re
 import stat
 import subprocess
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
@@ -517,6 +517,151 @@ def release_execution_binding(
     _remove_owned_json_atomic(binding_path, payload)
 
 
+def resolve_recovery_execution_workspace_name(
+    leader_root: Path,
+    execution: ExecutionIdentity,
+) -> str | None:
+    leader = leader_root.resolve(strict=True)
+    common = _authenticated_directory_root(Path(
+        _git(leader, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    ))
+    bindings_root = _git_private_directory(common, "agent-flow", "executions")
+    binding_path = bindings_root / f"{execution.digest}.json"
+    if not binding_path.exists() and not binding_path.is_symlink():
+        return None
+    binding = _read_owned_json(binding_path)
+    if binding.get("execution") != execution.to_dict():
+        raise WorkspaceBoundaryError("execution_binding_invalid: execution identity mismatch")
+    if not _binding_is_active(binding):
+        raise WorkspaceBoundaryError("execution_binding_stale: bound run is not active")
+    workspace_name = binding.get("workspace_name")
+    if (
+        not isinstance(workspace_name, str)
+        or not workspace_name
+        or Path(workspace_name).name != workspace_name
+        or workspace_name in {".", ".."}
+    ):
+        raise WorkspaceBoundaryError("execution_binding_invalid: workspace name")
+    identity = workspace_identity_from_dict(binding.get("workspace"))
+    expected_workspace = leader / ".agent-flow" / "worktrees" / workspace_name
+    if (
+        Path(identity.git_common_dir) != common
+        or Path(identity.workspace_root) != expected_workspace
+    ):
+        raise WorkspaceBoundaryError(
+            "execution_binding_conflict: recovery workspace path changed"
+        )
+    return workspace_name
+
+
+@dataclass(frozen=True)
+class RecoveryExecutionRun:
+    run_id: str
+    run_dir: Path
+    workspace_name: str
+    identity: WorkspaceIdentity
+    git_common_dir: Path
+
+
+def resolve_recovery_execution_run(
+    leader_root: Path,
+    execution: ExecutionIdentity,
+) -> RecoveryExecutionRun | None:
+    """Authenticate the active run bound to ``execution`` and return its
+    authenticated git-private run directory.
+
+    The execution binding lives in the git-private tree, not the managed
+    checkout, so this resolves even when the worktree checkout was deleted
+    mid-run. Returns ``None`` when the execution owns no active binding.
+    """
+    leader = leader_root.resolve(strict=True)
+    common = _authenticated_directory_root(Path(
+        _git(leader, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    ))
+    bindings_root = _git_private_directory(common, "agent-flow", "executions")
+    binding_path = bindings_root / f"{execution.digest}.json"
+    if not binding_path.exists() and not binding_path.is_symlink():
+        return None
+    binding = _read_owned_json(binding_path)
+    if binding.get("execution") != execution.to_dict():
+        raise WorkspaceBoundaryError("execution_binding_invalid: execution identity mismatch")
+    if not _binding_is_active(binding):
+        raise WorkspaceBoundaryError("execution_binding_stale: bound run is not active")
+    workspace_name = binding.get("workspace_name")
+    if (
+        not isinstance(workspace_name, str)
+        or not workspace_name
+        or Path(workspace_name).name != workspace_name
+        or workspace_name in {".", ".."}
+    ):
+        raise WorkspaceBoundaryError("execution_binding_invalid: workspace name")
+    identity = workspace_identity_from_dict(binding.get("workspace"))
+    expected_workspace = leader / ".agent-flow" / "worktrees" / workspace_name
+    if (
+        Path(identity.git_common_dir) != common
+        or Path(identity.workspace_root) != expected_workspace
+    ):
+        raise WorkspaceBoundaryError(
+            "execution_binding_conflict: recovery workspace path changed"
+        )
+    run_dir_value = binding.get("run_dir")
+    if not isinstance(run_dir_value, str) or not run_dir_value:
+        raise WorkspaceBoundaryError("execution_binding_invalid: run directory")
+    runtime = authenticated_worktree_runtime_root(common, workspace_name)
+    allowed_run_roots = (
+        _owned_directory(runtime, ".agent-flow", "runs"),
+        _owned_directory(leader, ".agent-flow", "runs"),
+    )
+    run_dir = _authenticated_repin_run_dir(Path(run_dir_value), allowed_run_roots)
+    run_id = binding.get("run_id")
+    if not isinstance(run_id, str) or not run_id:
+        run_id = run_dir.name
+    return RecoveryExecutionRun(run_id, run_dir, workspace_name, identity, common)
+
+
+def _recovery_run_dir_matches(value: object, leader: Path, target: Path) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        candidate = leader / candidate
+    return candidate.resolve(strict=False) == target
+
+
+def reconcile_recovery_execution_state(
+    execution: ExecutionIdentity,
+    identity: WorkspaceIdentity,
+    run_dir: Path,
+) -> None:
+    """Clear the workspace start-claim and any Node/leader run publications that
+    referenced ``run_dir`` after a recovery abort, reusing the owned-mutation
+    helpers repin relies on. No-ops for state that was never published.
+    """
+    common = _authenticated_directory_root(Path(identity.git_common_dir))
+    leader = common.parent.resolve(strict=True)
+    target = run_dir.resolve(strict=False)
+
+    claims_root = _git_private_directory(common, "agent-flow", "workspace-start-claims")
+    if claims_root.exists():
+        digest = hashlib.sha256(identity.workspace_root.encode("utf-8")).hexdigest()
+        claim_path = claims_root / f"{digest}.lock"
+        if claim_path.exists() or claim_path.is_symlink():
+            _recover_stale_workspace_start_claim(claim_path, identity)
+
+    current_runs = _git_private_directory(common, "agent-flow", "current-runs")
+    node_path = current_runs / f"{execution.digest}.json"
+    if node_path.exists() or node_path.is_symlink():
+        payload = _read_owned_json(node_path)
+        if _recovery_run_dir_matches(payload.get("run_dir"), leader, target):
+            _remove_owned_json_atomic(node_path, payload)
+
+    leader_state = leader / ".agent-flow" / "state" / "current-run.json"
+    if leader_state.exists() or leader_state.is_symlink():
+        payload = _read_owned_json(leader_state)
+        if _recovery_run_dir_matches(payload.get("run_dir"), leader, target):
+            _remove_owned_json_atomic(leader_state, payload)
+
+
 def resolve_execution_workspace(
     leader_root: Path,
     execution: ExecutionIdentity,
@@ -1006,7 +1151,12 @@ def workspace_identity_from_dict(payload: object) -> WorkspaceIdentity:
     return identity
 
 
-def validate_workspace_identity(identity: WorkspaceIdentity) -> Path:
+def _validate_workspace_identity_components(
+    identity: WorkspaceIdentity,
+    *,
+    require_filesystem_identity: bool,
+    require_head_equality: bool = False,
+) -> tuple[Path, os.stat_result]:
     configured = Path(identity.workspace_root)
     try:
         root = configured.resolve(strict=True)
@@ -1019,10 +1169,15 @@ def validate_workspace_identity(identity: WorkspaceIdentity) -> Path:
             f"pinned workspace canonical path changed: expected={identity.workspace_root} actual={root}"
         )
     metadata = root.stat()
-    if (metadata.st_dev, metadata.st_ino) != (identity.device, identity.inode):
+    if (
+        require_filesystem_identity
+        and (metadata.st_dev, metadata.st_ino) != (identity.device, identity.inode)
+    ):
+        name = Path(identity.workspace_root).name
         raise WorkspaceBoundaryError(
             f"pinned workspace filesystem identity changed: expected={identity.device}:{identity.inode} "
-            f"actual={metadata.st_dev}:{metadata.st_ino}"
+            f"actual={metadata.st_dev}:{metadata.st_ino}; from the leader checkout run: "
+            f"agent-flow worktree repin --name {name}"
         )
     actual_common = _authenticated_directory_root(Path(
         _git(root, "rev-parse", "--path-format=absolute", "--git-common-dir")
@@ -1039,18 +1194,223 @@ def validate_workspace_identity(identity: WorkspaceIdentity) -> Path:
     if _git(root, "branch", "--show-current") != identity.branch:
         raise WorkspaceBoundaryError("pinned workspace branch changed")
     current_head = _git(root, "rev-parse", "HEAD")
-    ancestor = subprocess.run(
-        (_git_executable(), "-C", str(root), "merge-base", "--is-ancestor", identity.head, current_head),
-        text=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-        timeout=GIT_TIMEOUT_SECONDS,
-    )
-    if ancestor.returncode != 0:
-        raise WorkspaceBoundaryError(
-            f"pinned workspace HEAD diverged: pinned={identity.head} current={current_head}"
+    if require_head_equality:
+        if current_head != identity.head:
+            raise WorkspaceBoundaryError(
+                f"pinned workspace HEAD changed: pinned={identity.head} current={current_head}; "
+                "repin requires an unchanged HEAD"
+            )
+    else:
+        ancestor = subprocess.run(
+            (_git_executable(), "-C", str(root), "merge-base", "--is-ancestor", identity.head, current_head),
+            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=GIT_TIMEOUT_SECONDS,
         )
+        if ancestor.returncode != 0:
+            raise WorkspaceBoundaryError(
+                f"pinned workspace HEAD diverged: pinned={identity.head} current={current_head}"
+            )
+    return root, metadata
+
+
+def _authenticated_repin_run_dir(
+    run_dir: Path,
+    allowed_roots: tuple[Path, ...],
+) -> Path:
+    resolved = run_dir.resolve(strict=True)
+    for allowed_root in allowed_roots:
+        if not allowed_root.exists():
+            continue
+        try:
+            relative = resolved.relative_to(allowed_root)
+        except ValueError:
+            continue
+        if not relative.parts:
+            continue
+        authenticated = _owned_directory(allowed_root, *relative.parts)
+        if authenticated == resolved:
+            return authenticated
+    raise WorkspaceBoundaryError(
+        f"workspace repin run directory is outside authenticated roots: {run_dir}"
+    )
+
+
+def repin_workspace_identity(
+    leader_root: Path,
+    workspace_name: str,
+    execution: ExecutionIdentity,
+) -> tuple[WorkspaceIdentity, int]:
+    leader = leader_root.resolve(strict=True)
+    common = _authenticated_directory_root(Path(
+        _git(leader, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    ))
+    runtime = authenticated_worktree_runtime_root(common, workspace_name)
+    manifest_path = runtime / "manifest.json"
+    manifest = _read_owned_json(manifest_path)
+    if manifest.get("name") not in (None, workspace_name):
+        raise WorkspaceBoundaryError("workspace repin manifest name changed")
+    pinned = workspace_identity_from_dict(manifest.get("identity"))
+    expected_workspace = leader / ".agent-flow" / "worktrees" / workspace_name
+    if Path(pinned.workspace_root) != expected_workspace:
+        raise WorkspaceBoundaryError(
+            "workspace repin path differs from managed checkout path"
+        )
+    workspace, metadata = _validate_workspace_identity_components(
+        pinned,
+        require_filesystem_identity=False,
+        require_head_equality=True,
+    )
+
+    bindings_root = _git_private_directory(common, "agent-flow", "executions")
+    authorization_path = bindings_root / f"{execution.digest}.json"
+    if not authorization_path.exists() and not authorization_path.is_symlink():
+        raise WorkspaceBoundaryError(
+            "execution_binding_missing: active execution is not bound to the stale worktree"
+        )
+    authorization = _read_owned_json(authorization_path)
+    if authorization.get("execution") != execution.to_dict():
+        raise WorkspaceBoundaryError(
+            "execution_binding_invalid: execution identity mismatch"
+        )
+    if not _binding_is_active(authorization):
+        raise WorkspaceBoundaryError(
+            "execution_binding_stale: stale worktree is not owned by an active execution"
+        )
+    if authorization.get("workspace_name") != workspace_name:
+        raise WorkspaceBoundaryError(
+            "execution_binding_conflict: active execution owns another worktree"
+        )
+    authorization_identity = workspace_identity_from_dict(
+        authorization.get("workspace")
+    )
+    authorized_workspace, _ = _validate_workspace_identity_components(
+        authorization_identity,
+        require_filesystem_identity=False,
+        require_head_equality=True,
+    )
+    if authorized_workspace != workspace:
+        raise WorkspaceBoundaryError(
+            "execution_binding_conflict: bound workspace path changed"
+        )
+
+    allowed_run_roots = (
+        _owned_directory(runtime, ".agent-flow", "runs"),
+        _owned_directory(workspace, ".agent-flow", "runs"),
+        _owned_directory(leader, ".agent-flow", "runs"),
+    )
+    records: dict[Path, tuple[dict[str, object], tuple[str, ...]]] = {}
+
+    def add_record(path: Path, *identity_keys: str) -> dict[str, object] | None:
+        if not path.exists() and not path.is_symlink():
+            return None
+        payload = _read_owned_json(path)
+        matching: list[str] = []
+        for key in identity_keys:
+            value = payload.get(key)
+            if value is None:
+                continue
+            candidate = workspace_identity_from_dict(value)
+            if Path(candidate.workspace_root) != workspace:
+                continue
+            validated, _ = _validate_workspace_identity_components(
+                candidate,
+                require_filesystem_identity=False,
+                require_head_equality=True,
+            )
+            if validated != workspace:
+                raise WorkspaceBoundaryError(
+                    f"workspace repin metadata path changed: {path}"
+                )
+            matching.append(key)
+        if matching:
+            records[path] = (payload, tuple(matching))
+        return payload
+
+    def add_run_dir(run_dir: Path) -> None:
+        authenticated = _authenticated_repin_run_dir(run_dir, allowed_run_roots)
+        add_record(authenticated / "meta.json", "workspace")
+        add_record(authenticated / "manifest.json", "workspace")
+
+    add_record(manifest_path, "identity")
+    for binding_path in sorted(bindings_root.glob("*.json")):
+        binding = _read_owned_json(binding_path)
+        if not _binding_is_active(binding):
+            continue
+        bound = add_record(binding_path, "workspace")
+        run_dir_value = bound.get("run_dir") if bound else None
+        if isinstance(run_dir_value, str) and run_dir_value:
+            add_run_dir(Path(run_dir_value))
+
+    current_runs = _git_private_directory(common, "agent-flow", "current-runs")
+    if current_runs.exists():
+        for state_path in sorted(current_runs.glob("*.json")):
+            state = _read_owned_json(state_path)
+            if not _node_state_is_semantically_active(state):
+                continue
+            current = add_record(state_path, "workspace")
+            run_dir_value = current.get("run_dir") if current else None
+            if isinstance(run_dir_value, str) and run_dir_value:
+                run_dir = Path(run_dir_value)
+                add_run_dir(run_dir if run_dir.is_absolute() else leader / run_dir)
+
+    leader_state = leader / ".agent-flow" / "state" / "current-run.json"
+    if leader_state.exists() or leader_state.is_symlink():
+        state = _read_owned_json(leader_state)
+        if _node_state_is_semantically_active(state):
+            current = add_record(leader_state, "workspace")
+            run_dir_value = current.get("run_dir") if current else None
+            if isinstance(run_dir_value, str) and run_dir_value:
+                run_dir = Path(run_dir_value)
+                add_run_dir(run_dir if run_dir.is_absolute() else leader / run_dir)
+
+    repinned = replace(pinned, device=metadata.st_dev, inode=metadata.st_ino)
+    pending: list[tuple[Path, dict[str, object], dict[str, object]]] = []
+    for path_name, (original, keys) in sorted(
+        records.items(),
+        key=lambda item: str(item[0]),
+    ):
+        changed = dict(original)
+        for key in keys:
+            candidate = workspace_identity_from_dict(original[key])
+            next_identity = replace(
+                candidate,
+                device=metadata.st_dev,
+                inode=metadata.st_ino,
+            )
+            if next_identity != candidate:
+                changed[key] = next_identity.to_dict()
+        if changed == original:
+            continue
+        pending.append((path_name, original, changed))
+
+    # The manifest, execution bindings, and run metadata must repin as one unit:
+    # a mid-loop failure that left some records on the new inode and others stale
+    # is exactly the corruption this recovery path exists to prevent. Commit each
+    # record, and on any failure roll the already-committed records back to their
+    # original content before re-raising.
+    committed: list[tuple[Path, dict[str, object], dict[str, object]]] = []
+    try:
+        for path_name, original, changed in pending:
+            _replace_owned_json_atomic(path_name, original, changed)
+            committed.append((path_name, original, changed))
+    except BaseException:
+        for path_name, original, changed in reversed(committed):
+            try:
+                _replace_owned_json_atomic(path_name, changed, original)
+            except Exception:
+                pass
+        raise
+    return repinned, len(committed)
+
+
+def validate_workspace_identity(identity: WorkspaceIdentity) -> Path:
+    root, _ = _validate_workspace_identity_components(
+        identity,
+        require_filesystem_identity=True,
+    )
     return root
 
 
@@ -1526,32 +1886,177 @@ def _read_owned_json(path: Path) -> dict[str, object]:
     return payload
 
 
-def _remove_owned_json_atomic(path: Path, payload: Mapping[str, object]) -> None:
-    metadata = path.lstat()
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-        raise WorkspaceBoundaryError(f"git-private metadata file is not regular: {path}")
-    quarantine = path.with_name(
-        f".{path.name}.remove-{os.getpid()}-{os.urandom(8).hex()}"
-    )
-    try:
-        path.rename(quarantine)
-    except FileNotFoundError as exc:
+def _open_owned_parent_dirfd(path: Path) -> int:
+    """Open ``path``'s parent as an authenticated directory fd.
+
+    ``O_NOFOLLOW`` only pins the final component, so create/replace/remove that
+    resolve a parent *path* can be redirected by a parent-directory symlink swap
+    landing after the pre-checks. Anchoring every subsequent op to this fd keeps
+    them inside the originally-validated directory inode regardless of later
+    path swaps.
+    """
+    parent = path.parent
+    expected = parent.lstat()
+    if stat.S_ISLNK(expected.st_mode) or not stat.S_ISDIR(expected.st_mode):
         raise WorkspaceBoundaryError(
-            f"git-private metadata file disappeared: {path}"
-        ) from exc
-    moved = quarantine.lstat()
-    moved_payload = _read_owned_json(quarantine)
-    if (
-        moved.st_dev != metadata.st_dev
-        or moved.st_ino != metadata.st_ino
-        or moved_payload != payload
-    ):
-        if not path.exists():
-            quarantine.rename(path)
-        raise WorkspaceBoundaryError(
-            f"git-private metadata file changed before removal: {path}"
+            f"git-private parent directory is not a directory: {parent}"
         )
-    quarantine.unlink()
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    dir_fd = os.open(parent, flags)
+    try:
+        pinned = os.fstat(dir_fd)
+        if pinned.st_dev != expected.st_dev or pinned.st_ino != expected.st_ino:
+            raise WorkspaceBoundaryError(
+                f"git-private parent directory changed while opening: {parent}"
+            )
+    except BaseException:
+        os.close(dir_fd)
+        raise
+    return dir_fd
+
+
+def _stat_at(dir_fd: int, name: str) -> os.stat_result:
+    return os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+
+
+def _exists_at(dir_fd: int, name: str) -> bool:
+    try:
+        _stat_at(dir_fd, name)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _read_owned_json_at(dir_fd: int, name: str) -> tuple[dict[str, object], os.stat_result]:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(name, flags, dir_fd=dir_fd)
+    try:
+        metadata = os.fstat(fd)
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise WorkspaceBoundaryError(
+                f"git-private metadata file is not regular: {name}"
+            )
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(fd, 1 << 16)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        repeated = os.fstat(fd)
+    finally:
+        os.close(fd)
+    if repeated.st_dev != metadata.st_dev or repeated.st_ino != metadata.st_ino:
+        raise WorkspaceBoundaryError(
+            f"git-private metadata file changed while reading: {name}"
+        )
+    try:
+        payload = json.loads(b"".join(chunks).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise WorkspaceBoundaryError(
+            f"git-private metadata file is unreadable: {name}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise WorkspaceBoundaryError(
+            f"git-private metadata file is invalid: {name}"
+        )
+    return payload, metadata
+
+
+def _remove_owned_json_atomic(path: Path, payload: Mapping[str, object]) -> None:
+    dir_fd = _open_owned_parent_dirfd(path)
+    try:
+        name = path.name
+        metadata = _stat_at(dir_fd, name)
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise WorkspaceBoundaryError(
+                f"git-private metadata file is not regular: {path}"
+            )
+        quarantine = f".{name}.remove-{os.getpid()}-{os.urandom(8).hex()}"
+        try:
+            os.rename(name, quarantine, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        except FileNotFoundError as exc:
+            raise WorkspaceBoundaryError(
+                f"git-private metadata file disappeared: {path}"
+            ) from exc
+        moved_payload, moved = _read_owned_json_at(dir_fd, quarantine)
+        if (
+            moved.st_dev != metadata.st_dev
+            or moved.st_ino != metadata.st_ino
+            or moved_payload != payload
+        ):
+            if not _exists_at(dir_fd, name):
+                os.rename(quarantine, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            raise WorkspaceBoundaryError(
+                f"git-private metadata file changed before removal: {path}"
+            )
+        os.unlink(quarantine, dir_fd=dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def _replace_owned_json_atomic(
+    path: Path,
+    expected: Mapping[str, object],
+    payload: Mapping[str, object],
+) -> None:
+    dir_fd = _open_owned_parent_dirfd(path)
+    try:
+        name = path.name
+        metadata = _stat_at(dir_fd, name)
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise WorkspaceBoundaryError(
+                f"git-private metadata file is not regular: {path}"
+            )
+        current, _ = _read_owned_json_at(dir_fd, name)
+        if current != expected:
+            raise WorkspaceBoundaryError(
+                f"git-private metadata file changed before replacement: {path}"
+            )
+        temporary = f".{name}.replace-{os.getpid()}-{os.urandom(8).hex()}"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(temporary, flags, stat.S_IMODE(metadata.st_mode), dir_fd=dir_fd)
+        committed = False
+        try:
+            encoded = f"{json.dumps(payload, indent=2, sort_keys=True)}\n".encode("utf-8")
+            view = memoryview(encoded)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise OSError("git-private metadata replacement write failed")
+                view = view[written:]
+            os.fsync(descriptor)
+            os.close(descriptor)
+            descriptor = None
+            repeated = _stat_at(dir_fd, name)
+            current_again, _ = _read_owned_json_at(dir_fd, name)
+            if (
+                repeated.st_dev != metadata.st_dev
+                or repeated.st_ino != metadata.st_ino
+                or current_again != expected
+            ):
+                raise WorkspaceBoundaryError(
+                    f"git-private metadata file changed before replacement: {path}"
+                )
+            os.replace(temporary, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            committed = True
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            if not committed:
+                try:
+                    os.unlink(temporary, dir_fd=dir_fd)
+                except FileNotFoundError:
+                    pass
+    finally:
+        os.close(dir_fd)
 
 
 def _same_execution_binding(

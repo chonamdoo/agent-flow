@@ -47,9 +47,13 @@ from agent_flow.core.workspace_boundary import (
     execution_identity_from_context,
     execution_identity_from_dict,
     find_active_pinned_workspaces,
+    repin_workspace_identity,
     release_execution_binding,
     release_workspace_start_claim,
+    reconcile_recovery_execution_state,
     resolve_execution_finalizer_workspace,
+    resolve_recovery_execution_run,
+    resolve_recovery_execution_workspace_name,
     select_execution_workspace,
     workspace_identity_from_dict,
 )
@@ -291,6 +295,9 @@ def main(argv: list[str] | None = None) -> int:
     worktree_create.add_argument("--name", required=True)
     worktree_create.add_argument("--branch")
     worktree_create.add_argument("--allow-dirty", action="store_true")
+    worktree_repin = worktree_subparsers.add_parser("repin")
+    worktree_repin.add_argument("--root", default=".")
+    worktree_repin.add_argument("--name", required=True)
     worktree_status = worktree_subparsers.add_parser("status")
     worktree_status.add_argument("--root", default=".")
     worktree_status.add_argument("--name", required=True)
@@ -442,7 +449,57 @@ def main(argv: list[str] | None = None) -> int:
         and _managed_worktree_context(requested_root) is not None
     )
     pure_control_command = args.command == "review" and args.review_command == "retry"
-    if hasattr(args, "root") and not direct_managed_read and not pure_control_command:
+    recovery_command = args.command == "abort" or (
+        args.command == "worktree" and args.worktree_command == "repin"
+    )
+    if hasattr(args, "root") and recovery_command:
+        try:
+            root = _resolve_recovery_cli_root(requested_root)
+            if args.command == "abort" and _is_git_repo(root):
+                execution = execution_identity_from_context(env=os.environ)
+                if args.worktree is not None:
+                    if execution is None:
+                        raise WorkspaceBoundaryError(
+                            "execution_identity_missing: explicit worktree abort "
+                            "requires a host session identity"
+                        )
+                    bound_worktree = resolve_recovery_execution_workspace_name(
+                        root,
+                        execution,
+                    )
+                    requested_worktree = _slug_for_hint(root, args.worktree)
+                    if bound_worktree is None:
+                        raise WorkspaceBoundaryError(
+                            "execution_binding_missing: active execution is not "
+                            "bound to a worktree"
+                        )
+                    if requested_worktree != bound_worktree:
+                        raise WorkspaceBoundaryError(
+                            "execution_binding_conflict: requested worktree "
+                            f"{requested_worktree} differs from bound worktree "
+                            f"{bound_worktree}"
+                        )
+                elif execution is not None:
+                    args.worktree = resolve_recovery_execution_workspace_name(
+                        root,
+                        execution,
+                    )
+                    # Present-but-unbound execution must not silently no-op while
+                    # another session's run is still active — fail closed.
+                    if args.worktree is None and find_active_pinned_workspaces(root):
+                        raise WorkspaceBoundaryError(
+                            "execution_binding_missing: active execution is not "
+                            "bound to a worktree"
+                        )
+                elif find_active_pinned_workspaces(root):
+                    raise WorkspaceBoundaryError(
+                        "execution_identity_missing: active worktree runs require "
+                        "a host session identity"
+                    )
+        except (OSError, WorkspaceBoundaryError) as exc:
+            print(_format_cli_error(exc), file=sys.stderr)
+            return 2
+    elif hasattr(args, "root") and not direct_managed_read and not pure_control_command:
         try:
             root, inferred_worktree = _resolve_cli_root_context(
                 root,
@@ -543,13 +600,29 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "abort":
-        try:
-            run_root, state_root = _worktree_context(root, args.worktree) if args.worktree else (root, root)
-        except ValueError as exc:
-            print(_format_cli_error(exc), file=sys.stderr)
-            return 2
-        if run_root is None:
-            return 1
+        if args.worktree is not None:
+            try:
+                status = get_worktree_status(root=root, name=args.worktree)
+            except ValueError as exc:
+                print(_format_cli_error(exc), file=sys.stderr)
+                return 2
+            state_root = worktree_runtime_root(root=root, name=status.name)
+            if not _worktree_checkout_exists(status):
+                # Managed checkout was deleted mid-run. Recover the run through the
+                # authenticated git-private runtime when the current execution
+                # still owns its binding; the checkout is not needed.
+                recovered = _abort_recover_deleted_checkout(root, status.name)
+                if recovered is not None:
+                    return recovered
+                known = _known_worktree_names(root)
+                suffix = f" known worktrees: {', '.join(known)}" if known else " no known worktrees"
+                print(
+                    f"worktree not found or missing path: {status.name}.{suffix}",
+                    file=sys.stderr,
+                )
+                return 1
+        else:
+            state_root = root
         active = find_active_run(state_root)
         if active is None:
             print("진행 중인 run 없음 — abort할 대상이 없습니다.")
@@ -964,6 +1037,30 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             print(f"{status.name} {status.branch} {status.path}")
             return 0
+        if args.worktree_command == "repin":
+            execution = execution_identity_from_context()
+            if execution is None:
+                print(
+                    "execution_identity_missing: worktree repin requires the active host session",
+                    file=sys.stderr,
+                )
+                return 2
+            try:
+                with worktree_lifecycle_lock(root=root):
+                    identity, updated = repin_workspace_identity(
+                        root,
+                        args.name,
+                        execution,
+                    )
+            except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
+                print(_format_cli_error(exc), file=sys.stderr)
+                return 2
+            print(
+                f"{args.name} repinned {identity.device}:{identity.inode} "
+                f"updated={updated}"
+            )
+            return 0
+
         if args.worktree_command == "status":
             try:
                 status = get_worktree_status(root=root, name=args.name)
@@ -2050,6 +2147,37 @@ def _worktree_context(root: Path, name: str) -> tuple[Path | None, Path]:
     return None, worktree_runtime_root(root=root, name=status.name)
 
 
+def _abort_recover_deleted_checkout(root: Path, name: str) -> int | None:
+    """Recover an abort when the managed worktree checkout is gone.
+
+    Returns 0 on a successful authenticated recovery, 2 on an authentication
+    failure, or None when the current execution owns no matching binding (so the
+    caller reports the worktree as missing).
+    """
+    execution = execution_identity_from_context(env=os.environ)
+    if execution is None:
+        return None
+    try:
+        recovery = resolve_recovery_execution_run(root, execution)
+    except WorkspaceBoundaryError as exc:
+        print(_format_cli_error(exc), file=sys.stderr)
+        return 2
+    if recovery is None or recovery.workspace_name != name:
+        return None
+    meta = read_meta(recovery.run_dir)
+    release_execution_binding(
+        execution,
+        git_common_dir=recovery.git_common_dir,
+        run_dir=recovery.run_dir,
+    )
+    meta["status"] = "aborted"
+    write_meta(recovery.run_dir, meta)
+    mark_inactive(recovery.run_dir)
+    reconcile_recovery_execution_state(execution, recovery.identity, recovery.run_dir)
+    print(f"aborted: {recovery.run_id} (artifacts preserved at {recovery.run_dir})")
+    return 0
+
+
 def _command_project_root(config_root: Path, requested_root: Path, worktree: str | None) -> Path | None:
     if worktree is None:
         return config_root
@@ -2317,6 +2445,18 @@ def _slug_for_hint(root: Path, value: str) -> str:
         return plan_worktree(root=root, name=value).name
     except ValueError:
         return value
+
+
+def _resolve_recovery_cli_root(root: Path) -> Path:
+    managed = _managed_worktree_context(root)
+    if managed is not None:
+        return managed[0]
+    cwd_managed = _managed_worktree_context(Path.cwd())
+    if cwd_managed is not None and (
+        _same_path(root, Path.cwd()) or _same_path(root, cwd_managed[0])
+    ):
+        return cwd_managed[0]
+    return _git_common_worktree_root(root) or root
 
 
 def _resolve_cli_root_context(

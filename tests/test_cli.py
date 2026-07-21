@@ -161,6 +161,7 @@ class CliTest(unittest.TestCase):
             )
             self.assertEqual(status.returncode, 0, status.stderr)
 
+
     def test_init_creates_agent_flow_dirs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir).resolve()
@@ -1716,6 +1717,140 @@ class CliTest(unittest.TestCase):
             )
             self.assertIn("Treat the status command output as the only source of truth.", agent_flow_skill)
             self.assertIn("Do not run install just because a new session started.", agent_flow_skill)
+
+    def test_omp_session_shutdown_does_not_await_stop_hook(self) -> None:
+        if os.name == "nt":
+            self.skipTest("OMP hooks require POSIX executable scripts")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            _materialize_installed_node_project(project_root, node, cli)
+            fake_bin = project_root / "fake-bin"
+            fake_bin.mkdir()
+            fake_agent_flow = fake_bin / "agent-flow"
+            fake_agent_flow.write_text(
+                "#!/bin/sh\n"
+                "sleep 0.4\n"
+                "printf 'status: running\\ncurrent_phase: implement\\nreason: waiting\\n"
+                "next_command: agent-flow continue\\n'\n",
+                encoding="utf-8",
+            )
+            fake_agent_flow.chmod(0o755)
+            extension = project_root / ".omp" / "extensions" / "agent-flow-hooks.mjs"
+            extension.write_text(
+                (project_root / ".omp" / "extensions" / "agent-flow-hooks.ts").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            probe = project_root / "probe-shutdown.mjs"
+            probe.write_text(
+                f"""
+import agentFlowHooks from {json.dumps(extension.as_uri())};
+
+const handlers = new Map();
+const notifications = [];
+agentFlowHooks({{
+  setLabel() {{}},
+  on(name, handler) {{
+    handlers.set(name, handler);
+  }},
+}});
+process.env.PATH = {json.dumps(str(fake_bin))} + ":" + process.env.PATH;
+const context = {{
+  cwd: {json.dumps(str(project_root))},
+  hasUI: true,
+  ui: {{
+    async notify(message, level) {{
+      notifications.push([message, level]);
+    }},
+  }},
+}};
+const shutdownReturn = handlers.get("session_shutdown")({{}}, context);
+const returnedSynchronously =
+  shutdownReturn === undefined || typeof shutdownReturn?.then !== "function";
+const notifiedBeforeReturn = notifications.length;
+const deadline = Date.now() + 10000;
+while (notifications.length < 1 && Date.now() < deadline) {{
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}}
+console.log(
+  JSON.stringify({{ returnedSynchronously, notifiedBeforeReturn, notifications }}),
+);
+""",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                (node, str(probe)),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=25,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertTrue(payload["returnedSynchronously"])
+            self.assertEqual(payload["notifiedBeforeReturn"], 0)
+            self.assertEqual(len(payload["notifications"]), 1)
+            self.assertIn("current_phase: implement", payload["notifications"][0][0])
+            self.assertEqual(payload["notifications"][0][1], "info")
+
+    def test_export_apk_copies_workspace_artifact_to_downloads(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project_root = root / "project"
+            project_root.mkdir()
+            _init_git_repo(project_root)
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            _install_node_project(project_root, node, cli)
+
+            source = project_root / "app" / "build" / "outputs" / "apk" / "debug" / "app-debug.apk"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"test-apk")
+            home = root / "home"
+            downloads = home / "Downloads"
+            downloads.mkdir(parents=True)
+            launcher = project_root / ".agent-flow" / "bin" / "agent-flow"
+            env = _node_test_env(HOME=str(home), AGENT_FLOW_AUTO_EXTERNAL_SKILLS="0")
+
+            first = subprocess.run(
+                (str(launcher), "export-apk", str(source.relative_to(project_root))),
+                cwd=project_root,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            second = subprocess.run(
+                (str(launcher), "export-apk", str(source.relative_to(project_root))),
+                cwd=project_root,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            outside = root / "outside.apk"
+            outside.write_bytes(b"outside")
+            escaped = subprocess.run(
+                (str(launcher), "export-apk", str(outside)),
+                cwd=project_root,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertEqual((downloads / "app-debug.apk").read_bytes(), b"test-apk")
+            self.assertEqual((downloads / "app-debug-1.apk").read_bytes(), b"test-apk")
+            self.assertTrue(source.is_file())
+            self.assertEqual(escaped.returncode, 1)
+            self.assertIn("path escapes parent", escaped.stderr)
 
     def test_install_and_sync_upsert_canonical_agent_docs_idempotently(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -6344,6 +6479,71 @@ if (!missing?.block) {
                 result.command[1:],
                 ("architecture-lint", "--profile", "generic"),
             )
+
+    def test_run_gate_pins_gradle_to_managed_workspace_home(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gradlew = root / "gradlew"
+            gradlew.write_text(
+                "#!/bin/sh\n"
+                "case \" $* \" in *\" --no-daemon \"*) ;; *) exit 91 ;; esac\n"
+                "printf '%s\\n' \"$GRADLE_USER_HOME\"\n",
+                encoding="utf-8",
+            )
+            gradlew.chmod(0o755)
+            outside = root / "outside-gradle"
+            outside.mkdir()
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GRADLE_USER_HOME": str(outside),
+                    "AGENT_FLOW_PROJECT_LAUNCHER": "",
+                },
+            ):
+                result = run_gate(
+                    GateCommand("android:assemble", ("./gradlew", "assembleDevDebug")),
+                    cwd=root,
+                )
+
+            self.assertTrue(result.passed, result.stderr)
+            managed = root / ".agent-flow" / "gate-runtime" / "gradle-home"
+            self.assertEqual(result.stdout.strip(), str(managed))
+            self.assertNotEqual(result.stdout.strip(), str(outside))
+            self.assertIn("--no-daemon", result.command)
+
+    def test_run_gate_pins_shell_wrapped_gradle_to_managed_home(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            android = root / "android"
+            android.mkdir()
+            gradlew = android / "gradlew"
+            gradlew.write_text(
+                "#!/bin/sh\n"
+                "case \" $* \" in *\" --no-daemon \"*) ;; *) exit 91 ;; esac\n"
+                "printf '%s\\n' \"$GRADLE_USER_HOME\"\n",
+                encoding="utf-8",
+            )
+            gradlew.chmod(0o755)
+            outside = root / "outside-gradle"
+            outside.mkdir()
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GRADLE_USER_HOME": str(outside),
+                    "AGENT_FLOW_PROJECT_LAUNCHER": "",
+                },
+            ):
+                result = run_gate(
+                    GateCommand(
+                        "android:assemble",
+                        ("sh", "-c", "cd android && ./gradlew assembleDebug"),
+                    ),
+                    cwd=root,
+                )
+
+            self.assertTrue(result.passed, result.stderr)
+            managed = root / ".agent-flow" / "gate-runtime" / "gradle-home"
+            self.assertEqual(result.stdout.strip(), str(managed))
 
     def test_gates_cli_writes_results_for_run_dir(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -174,32 +174,91 @@ MANAGED_MARKER_START = "<!-- agent-flow:start -->"
 MANAGED_MARKER_END = "<!-- agent-flow:end -->"
 
 
-def _load_boundary_module(
-    leader_root: Path,
-) -> tuple[type[Exception], object, object, object, object, object]:
-    runtime_root = leader_root / ".agent-flow" / "runtime" / "python"
-    _verify_boundary_runtime(leader_root, runtime_root)
-    if runtime_root.is_dir():
-        sys.path.insert(0, str(runtime_root))
-    try:
-        from agent_flow.core.workspace_boundary import (
-            WorkspaceBoundaryError,
-            execution_binding_exists,
-            execution_identity_from_context,
-            resolve_mutation_path,
-            resolve_execution_finalizer_workspace,
-            select_execution_workspace,
-        )
-    except ImportError as exc:
-        raise RuntimeError("pinned workspace guard runtime is unavailable") from exc
-    return (
-        WorkspaceBoundaryError,
-        execution_identity_from_context,
-        select_execution_workspace,
-        resolve_mutation_path,
-        resolve_execution_finalizer_workspace,
-        execution_binding_exists,
+def _authenticate_runtime(leader_root: Path) -> None:
+    _verify_boundary_runtime(
+        leader_root,
+        leader_root / ".agent-flow" / "runtime" / "python",
     )
+
+
+def _checkout_at(candidate: Path) -> tuple[Path, Path, Path | None] | None:
+    marker = candidate / ".git"
+    try:
+        fd = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        # O_NOFOLLOW makes a swapped-in symlink marker fail closed instead of
+        # letting a racing process redirect us at another repo's gitdir.
+        raise ValueError(
+            "write boundary rejected: git checkout marker is a symlink or unreadable"
+        ) from exc
+    try:
+        marker_stat = os.fstat(fd)
+        if stat.S_ISDIR(marker_stat.st_mode):
+            root = candidate.resolve(strict=True)
+            return root, root, None
+        if not stat.S_ISREG(marker_stat.st_mode):
+            raise ValueError("write boundary rejected: git checkout marker is invalid")
+        value = os.read(fd, 65536).decode("utf-8", "strict").strip()
+    finally:
+        os.close(fd)
+    if not value.startswith("gitdir:"):
+        raise ValueError("write boundary rejected: linked worktree marker is invalid")
+    git_dir = Path(value.split(":", 1)[1].strip())
+    if not git_dir.is_absolute():
+        git_dir = candidate / git_dir
+    git_dir = git_dir.resolve(strict=True)
+    if not git_dir.is_dir():
+        raise ValueError("write boundary rejected: linked worktree git directory is invalid")
+    common = git_dir
+    while common.name != ".git" and common != common.parent:
+        common = common.parent
+    if common.name != ".git" or not common.is_dir():
+        raise ValueError("write boundary rejected: git common directory is invalid")
+    worktrees_root = (common / "worktrees").resolve(strict=True)
+    if git_dir == worktrees_root or worktrees_root not in git_dir.parents:
+        raise ValueError("write boundary rejected: linked worktree git directory is untrusted")
+    leader = common.parent.resolve(strict=True)
+    if (leader / ".git").resolve(strict=True) != common:
+        raise ValueError("write boundary rejected: git leader checkout is invalid")
+    return candidate.resolve(strict=True), leader, git_dir
+
+
+def _enclosing_checkout(cwd: Path) -> tuple[Path, Path, Path | None] | None:
+    absolute = Path(os.path.abspath(cwd))
+    try:
+        resolved = absolute.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("write boundary rejected: mutation cwd is unavailable") from exc
+    if not resolved.is_dir():
+        raise ValueError("write boundary rejected: mutation cwd is not a directory")
+
+    lexical_candidates: list[Path] = []
+    cursor = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        cursor /= part
+        try:
+            metadata = cursor.lstat()
+        except OSError as exc:
+            raise ValueError("write boundary rejected: mutation cwd is unavailable") from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            break
+        lexical_candidates.append(cursor)
+
+    seen: set[Path] = set()
+    for candidate in (
+        *reversed(lexical_candidates),
+        resolved,
+        *resolved.parents,
+    ):
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        checkout = _checkout_at(candidate)
+        if checkout is not None:
+            return checkout
+    return None
 
 
 def _host_argument() -> str:
@@ -210,26 +269,151 @@ def _host_argument() -> str:
     return sys.argv[index + 1] if index + 1 < len(sys.argv) else ""
 
 
-def _leader_root(cwd: Path) -> Path:
-    resolved = cwd.resolve(strict=True)
-    for candidate in (resolved, *resolved.parents):
-        marker = candidate / ".git"
-        if marker.is_dir():
-            return candidate
-        if marker.is_file():
-            try:
-                value = marker.read_text(encoding="utf-8").strip()
-            except OSError:
-                continue
-            if value.startswith("gitdir:"):
-                git_dir = Path(value.split(":", 1)[1].strip())
-                if not git_dir.is_absolute():
-                    git_dir = candidate / git_dir
-                common = git_dir.resolve(strict=False)
-                while common.name != ".git" and common != common.parent:
-                    common = common.parent
-                if common.name == ".git":
-                    return common.parent
+def _boundary_error(
+    *,
+    requested: str,
+    resolved: Path,
+    root: Path,
+    host: str,
+    reason_code: str,
+    reason: str,
+) -> ValueError:
+    return ValueError(
+        "write boundary rejected: "
+        f"requested_path={requested} resolved_path={resolved} "
+        f"pinned_workspace_root={root} host={host} "
+        f"reason_code={reason_code} reason={reason}"
+    )
+
+
+def _run_area(pinned_root: Path, leader_root: Path, resolved: Path) -> Path | None:
+    # Return the `.agent-flow/runs` root that contains `resolved` when it is a
+    # run directory this checkout may write phase artifacts into. The leader
+    # orchestrates every run: its own checkout-local runs plus any worktree's
+    # git-private runs (omp keeps cwd on the leader even for worktree runs). A
+    # linked worktree may write only its OWN runs — checkout-local or the
+    # git-private root keyed to its name — never a sibling's or the leader's.
+    # Lifecycle files stay gated afterward by _is_allowed_run_artifact.
+    if pinned_root == leader_root:
+        checkout_runs = leader_root / ".agent-flow" / "runs"
+        if resolved == checkout_runs or checkout_runs in resolved.parents:
+            return checkout_runs
+        private_worktrees = leader_root / ".git" / "agent-flow" / "worktrees"
+        try:
+            parts = resolved.relative_to(private_worktrees).parts
+        except ValueError:
+            return None
+        if len(parts) >= 4 and parts[1] == ".agent-flow" and parts[2] == "runs":
+            return private_worktrees / parts[0] / ".agent-flow" / "runs"
+        return None
+    worktree_runs = pinned_root / ".agent-flow" / "runs"
+    if resolved == worktree_runs or worktree_runs in resolved.parents:
+        return worktree_runs
+    own_private_runs = (
+        leader_root / ".git" / "agent-flow" / "worktrees"
+        / pinned_root.name / ".agent-flow" / "runs"
+    )
+    if resolved == own_private_runs or own_private_runs in resolved.parents:
+        return own_private_runs
+    return None
+
+
+def _is_allowed_run_artifact(run_root: Path, resolved: Path) -> bool:
+    try:
+        parts = resolved.relative_to(run_root).parts
+    except ValueError:
+        return False
+    if not parts or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.(?:md|log)", parts[-1]) is None:
+        return False
+    if len(parts) in {3, 4} and parts[-2] == "artifacts":
+        return True
+    return len(parts) in {2, 3} and resolved.suffix == ".md"
+
+
+def _ensure_cwd_within_pinned(pinned_root: Path, cwd: Path, host: str) -> None:
+    root = pinned_root.resolve(strict=True)
+    current = cwd.resolve(strict=True)
+    if current != root and root not in current.parents:
+        raise _boundary_error(
+            requested=str(cwd),
+            resolved=current,
+            root=root,
+            host=host,
+            reason_code="mutation_cwd_not_pinned",
+            reason="mutating command must run from pinned workspace",
+        )
+
+
+def _resolve_within_pinned(
+    pinned_root: Path,
+    requested: str,
+    cwd: Path,
+    *,
+    host: str,
+    leader_root: Path,
+) -> Path:
+    root = pinned_root.resolve(strict=True)
+    base = cwd.resolve(strict=True)
+    requested_path = Path(requested)
+    candidate = requested_path if requested_path.is_absolute() else base / requested_path
+    resolved = candidate.resolve(strict=False)
+    containing: Path | None = None
+    runs_root = _run_area(root, leader_root, resolved)
+    if runs_root is not None:
+        if not _is_allowed_run_artifact(runs_root, resolved):
+            raise _boundary_error(
+                requested=requested,
+                resolved=resolved,
+                root=root,
+                host=host,
+                reason_code="protected_run_state_path",
+                reason="run metadata is not writable; only phase artifacts are allowed",
+            )
+        containing = runs_root
+    elif resolved == root or root in resolved.parents:
+        git_metadata = root / ".git"
+        if resolved == git_metadata or git_metadata in resolved.parents:
+            raise _boundary_error(
+                requested=requested,
+                resolved=resolved,
+                root=root,
+                host=host,
+                reason_code="git_metadata_write",
+                reason="git metadata is not writable",
+            )
+        containing = root
+    if containing is None:
+        raise _boundary_error(
+            requested=requested,
+            resolved=resolved,
+            root=root,
+            host=host,
+            reason_code="target_outside_pinned_workspace",
+            reason="resolved path escapes pinned workspace",
+        )
+    existing_parent = resolved
+    while not existing_parent.exists() and existing_parent != containing:
+        existing_parent = existing_parent.parent
+    try:
+        parent_resolved = existing_parent.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise _boundary_error(
+            requested=requested,
+            resolved=resolved,
+            root=root,
+            host=host,
+            reason_code="target_parent_missing",
+            reason="target has no existing parent inside pinned workspace",
+        ) from exc
+    if parent_resolved != containing and containing not in parent_resolved.parents:
+        raise _boundary_error(
+            requested=requested,
+            resolved=resolved,
+            root=root,
+            host=host,
+            reason_code="target_parent_outside_pinned_workspace",
+            reason="existing parent escapes pinned workspace",
+        )
     return resolved
 
 
@@ -2243,26 +2427,6 @@ def _word_requests_agent_flow_runtime(word: str) -> bool:
     )
 
 
-def _normalized_worktree_name(value: str) -> str | None:
-    lowered = value.strip().lower()
-    safe = re.sub(r"[^a-z0-9._-]+", "-", lowered).strip("-")
-    if not safe or safe.startswith(".") or ".." in safe:
-        if not any(character.isalnum() for character in lowered):
-            return None
-        safe = f"task-{hashlib.sha1(lowered.encode('utf-8')).hexdigest()[:8]}"
-    return safe if safe.startswith("feat-") else f"feat-{safe}"
-
-
-def _requested_worktree_removal(command: str) -> str | None:
-    try:
-        words = shlex.split(command)
-    except ValueError:
-        return None
-    if len(words) != 5 or Path(words[0]).name.lower() not in {"agent-flow", "agent-flow-kit"}:
-        return None
-    if words[1:4] != ["worktree", "remove", "--name"]:
-        return None
-    return _normalized_worktree_name(words[4])
 
 
 def _is_agent_flow_launcher(command: str, cwd: Path, leader_root: Path, pinned_root: Path) -> bool:
@@ -2291,6 +2455,7 @@ def _is_agent_flow_launcher(command: str, cwd: Path, leader_root: Path, pinned_r
     if command_name not in {"agent-flow", "agent-flow-kit"} or not arguments:
         return False
     trusted_subcommands = {
+        "abort",
         "status",
         "continue",
         "run",
@@ -2299,6 +2464,7 @@ def _is_agent_flow_launcher(command: str, cwd: Path, leader_root: Path, pinned_r
         "architecture-lint",
         "install",
         "worktree",
+        "export-apk",
     }
     if arguments[0] not in trusted_subcommands:
         return False
@@ -2306,21 +2472,23 @@ def _is_agent_flow_launcher(command: str, cwd: Path, leader_root: Path, pinned_r
         return False
     if arguments[0] == "install":
         try:
-            if cwd.resolve(strict=True) != leader_root.resolve(strict=True):
+            if (
+                pinned_root.resolve(strict=True) != leader_root.resolve(strict=True)
+                or cwd.resolve(strict=True) != leader_root.resolve(strict=True)
+            ):
                 return False
         except OSError:
             return False
         if arguments[1:] not in ([], ["--force-managed"]):
             return False
     if arguments[0] == "worktree":
-        requested_name = _requested_worktree_removal(command)
         try:
-            leader = leader_root.resolve(strict=True)
-            current = cwd.resolve(strict=True)
-            pinned_name = pinned_root.name
+            if (
+                pinned_root.resolve(strict=True) != leader_root.resolve(strict=True)
+                or cwd.resolve(strict=True) != leader_root.resolve(strict=True)
+            ):
+                return False
         except OSError:
-            return False
-        if requested_name is None or current != leader or requested_name != pinned_name:
             return False
     if "/" in command_token or "\\" in command_token:
         candidate = (cwd / command_token).resolve(strict=True) if not Path(command_token).is_absolute() else Path(command_token).resolve(strict=True)
@@ -2667,7 +2835,10 @@ def main() -> int:
             return 0
         cwd_value = payload.get("cwd")
         cwd = Path(cwd_value) if isinstance(cwd_value, str) and cwd_value else Path.cwd()
-        leader_root = _leader_root(cwd)
+        checkout = _enclosing_checkout(cwd)
+        if checkout is None:
+            return 0
+        pinned_root, leader_root, _worktree_git_dir = checkout
         if not (leader_root / ".git").exists():
             return 0
         host = str(
@@ -2677,114 +2848,48 @@ def main() -> int:
             or "unknown"
         ).strip().lower()
         tool_input = _tool_input(payload)
-        command = ""
+        _ensure_cwd_within_pinned(pinned_root, cwd, host)
         paths: list[str] = []
         unresolved_shell_target = False
-        requested_launcher = False
-        requested_worktree_removal: str | None = None
         if tool_name in SHELL_TOOLS:
             command_value = tool_input.get("command")
             if not isinstance(command_value, str) or not command_value.strip():
                 raise ValueError("write boundary rejected: shell tool did not declare a command")
             command = command_value
-            mutating, paths, unresolved_shell_target = _shell_mutation_paths(
-                command,
-                base_dir=cwd,
-            )
-            if not mutating:
-                return 0
-            requested_launcher = _requests_agent_flow_launcher(command, cwd)
-            requested_worktree_removal = _requested_worktree_removal(command)
-            if (
-                requested_worktree_removal is None
-                and _is_agent_flow_launcher(command, cwd, leader_root, leader_root)
-            ):
-                if host == "claude":
-                    _forward_claude_execution_identity(payload, tool_input, command)
-                elif host == "omp":
-                    _required_hook_execution_id(payload)
-                return 0
-            if requested_launcher and requested_worktree_removal is None:
-                raise ValueError("write boundary rejected: agent-flow launcher is not trusted")
-        (
-            boundary_error,
-            resolve_execution,
-            select_workspace,
-            resolve_path,
-            resolve_finalizer_workspace,
-            binding_exists,
-        ) = _load_boundary_module(leader_root)
-        execution = resolve_execution(payload, os.environ, host_hint=host)
-        if requested_worktree_removal is not None:
-            try:
-                active = resolve_finalizer_workspace(
-                    leader_root,
-                    execution,
-                    requested_worktree_removal,
-                )
-            except boundary_error as exc:
-                raise ValueError(
-                    "write boundary rejected: worktree cleanup requires authenticated completed run ownership"
-                ) from exc
-        else:
-            active = select_workspace(leader_root, execution)
-            if active is None:
-                if binding_exists(leader_root, execution):
-                    raise boundary_error(
-                        "write boundary rejected: "
-                        f"host={host} "
-                        f"phase={payload.get('phase') or 'unknown'} "
-                        "reason_code=bound_run_not_active "
-                        "reason=execution is bound to an agent-flow run but no active "
-                        "worktree resolved; refusing leader-checkout mutation"
-                    )
-                return 0
-        if tool_name in SHELL_TOOLS:
-            pinned_root = Path(active.identity.workspace_root)
-            if requested_worktree_removal is None:
-                pinned_root = pinned_root.resolve(strict=True)
-            leader_root = _leader_root(cwd).resolve(strict=True)
             if _is_agent_flow_launcher(command, cwd, leader_root, pinned_root):
                 if host == "claude":
                     _forward_claude_execution_identity(payload, tool_input, command)
                 elif host == "omp":
                     _required_hook_execution_id(payload)
                 return 0
-            if requested_launcher:
+            if _requests_agent_flow_launcher(command, cwd):
                 raise ValueError("write boundary rejected: agent-flow launcher is not trusted")
-            current_root = cwd.resolve(strict=True)
-            if current_root != pinned_root and pinned_root not in current_root.parents:
-                raise boundary_error(
-                    "write boundary rejected: "
-                    f"requested_path={command} resolved_path={current_root} "
-                    f"pinned_workspace_root={pinned_root} "
-                    f"host={host} "
-                    f"phase={payload.get('phase') or 'unknown'} "
-                    "reason_code=mutation_cwd_not_pinned "
-                    "reason=mutating shell command must run from pinned workspace"
-                )
+            mutating, paths, unresolved_shell_target = _shell_mutation_paths(
+                command,
+                base_dir=cwd,
+            )
+            if not mutating:
+                return 0
         else:
             paths = _requested_paths(tool_input)
+            if not paths:
+                raise ValueError(
+                    "write boundary rejected: write tool did not declare a target path"
+                )
+        _authenticate_runtime(leader_root)
         if unresolved_shell_target:
-            raise boundary_error(
+            raise ValueError(
                 "write boundary rejected: shell command has an unresolved mutation target"
             )
-        if tool_name in SHELL_TOOLS and not paths:
-            return 0
         if not paths:
-            raise boundary_error("write boundary rejected: write tool did not declare a target path")
-        phase = str(payload.get("phase") or "unknown")
-        artifact_run_dir = (
-            active.run_dir if requested_worktree_removal is None else None
-        )
+            return 0
         for requested in paths:
-            target = resolve_path(
-                active.identity,
+            target = _resolve_within_pinned(
+                pinned_root,
                 requested,
-                base_dir=cwd,
+                cwd,
                 host=host,
-                phase=phase,
-                run_dir=artifact_run_dir,
+                leader_root=leader_root,
             )
             _verify_managed_marker_integrity(
                 tool_name,
