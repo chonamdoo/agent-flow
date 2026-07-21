@@ -19,6 +19,6 @@ This is a standalone interviewing skill. It sharpens a plan through questions on
 
 Ask the questions one at a time, waiting for feedback on each question before continuing. Asking multiple questions at once is bewildering.
 
-If a question can be answered by exploring the codebase, explore the codebase instead.
+If a *fact* can be found by exploring the environment (filesystem, tools, etc.), look it up rather than asking me. The *decisions*, though, are mine — put each one to me and wait for my answer.
 
 Do not enact the plan until I confirm we have reached a shared understanding.

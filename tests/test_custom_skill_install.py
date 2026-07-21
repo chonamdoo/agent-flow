@@ -2523,17 +2523,11 @@ def test_bundled_workflow_skills_are_internal_and_host_skills_are_registered(tmp
     matt_skill_closure = {
         "code-review",
         "codebase-design",
-        "diagnosing-bugs",
         "domain-modeling",
         "grill-with-docs",
         "grilling",
-        "improve-codebase-architecture",
-        "qa",
-        "setup-matt-pocock-skills",
         "tdd",
-        "to-issues",
         "to-prd",
-        "triage",
     }
     # generic profile은 공통 workflow/architecture closure만 노출한다.
     assert host_skills <= indexed
@@ -2792,17 +2786,11 @@ def test_android_profile_installs_android_skills_and_common_dependencies_only(tm
     matt_skill_closure = {
         "code-review",
         "codebase-design",
-        "diagnosing-bugs",
         "domain-modeling",
         "grill-with-docs",
         "grilling",
-        "improve-codebase-architecture",
-        "qa",
-        "setup-matt-pocock-skills",
         "tdd",
-        "to-issues",
         "to-prd",
-        "triage",
     }
     assert index["selection"]["profiles"] == ["android"]
     assert "clean-architecture-core" in names

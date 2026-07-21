@@ -10,16 +10,13 @@ This skill is for synthesis, not discovery interviewing. Do not ask a fresh ques
 
 ## Quick start
 
-1. Confirm the issue tracker and triage-label conventions exist; run `/setup-matt-pocock-skills` if they do not.
-2. Explore the repo only enough to describe current state, domain language, ADR constraints, and testing seams.
-3. Confirm the intended test seams with the user.
-4. Write the PRD from the template below. Save it to the caller's requested artifact path, or publish and label it `ready-for-agent` only when the workflow or user explicitly asks for tracker publication.
+1. Explore the repo only enough to describe current state, domain language, ADR constraints, and testing seams.
+2. Confirm the intended test seams with the user.
+3. Write the PRD from the template below. Save it to the caller's requested artifact path, or publish and label it `ready-for-agent` only when the workflow or user explicitly asks for tracker publication.
 
-Use `grilling` before this when decisions are unresolved. Use `to-issues` after this when the PRD needs implementation slices. Use `qa` for bug-report intake and `triage` for existing tracker items.
+Use `grilling` before this when decisions are unresolved.
 
 This skill takes the current conversation context and codebase understanding and produces a PRD. Do NOT interview the user — just synthesize what you already know.
-
-The issue tracker and triage label vocabulary should have been provided to you — run `/setup-matt-pocock-skills` if not.
 
 ## Process
 

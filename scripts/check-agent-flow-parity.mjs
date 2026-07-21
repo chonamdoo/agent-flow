@@ -576,17 +576,11 @@ if (CHECK_INSTALLED_COPY) {
   for (const skill of [
     "code-review",
     "codebase-design",
-    "diagnosing-bugs",
     "domain-modeling",
     "grill-with-docs",
     "grilling",
-    "improve-codebase-architecture",
-    "qa",
-    "setup-matt-pocock-skills",
     "tdd",
-    "to-issues",
     "to-prd",
-    "triage",
   ]) {
     assertSameRelativeFileSet(`skills/${skill}`, `.agent-flow/skills/${skill}`);
     for (const rel of recursiveFiles(`skills/${skill}`)) {
