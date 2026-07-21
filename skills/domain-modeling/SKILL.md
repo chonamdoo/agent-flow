@@ -14,8 +14,6 @@ Actively build and sharpen the project's domain model as you design. This is the
 3. Update `CONTEXT.md` as soon as a term is resolved, using [CONTEXT-FORMAT.md](./CONTEXT-FORMAT.md).
 4. Offer an ADR only for hard-to-reverse, surprising trade-offs, using [ADR-FORMAT.md](./ADR-FORMAT.md).
 
-This is a standalone domain-documentation skill and a companion to workflow skills such as `grilling`, `triage`, and `improve-codebase-architecture` when their conversations settle domain language or ADR-worthy decisions.
-
 ## File structure
 
 Most repos have a single context:
