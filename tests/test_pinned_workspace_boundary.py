@@ -1125,6 +1125,42 @@ def test_shell_mutation_paths_remain_confined_to_the_worktree(
 
 
 @pytest.mark.git_auth
+def test_adb_device_subcommand_paths_are_not_host_write_targets(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+
+    dump = _bash_guard(leader, worktree, "adb shell uiautomator dump /sdcard/window.xml")
+    exec_out = _bash_guard(leader, worktree, "adb exec-out uiautomator dump /dev/tty")
+    serialized = _bash_guard(
+        leader, worktree, "adb -s emulator-5554 shell uiautomator dump /sdcard/window.xml"
+    )
+    pull_escape = _bash_guard(
+        leader, worktree, f"adb pull /sdcard/window.xml {leader / 'escape.xml'}"
+    )
+    redirect_escape = _bash_guard(
+        leader, worktree, f"adb exec-out screencap -p > {leader / 'escape.png'}"
+    )
+    wait_for_dump = _bash_guard(
+        leader, worktree, "adb wait-for-device shell uiautomator dump /sdcard/window.xml"
+    )
+    wait_for_escape = _bash_guard(
+        leader, worktree, f"adb wait-for-device pull /sdcard/window.xml {leader / 'escape.xml'}"
+    )
+
+    assert dump.returncode == 0, dump.stderr
+    assert exec_out.returncode == 0, exec_out.stderr
+    assert serialized.returncode == 0, serialized.stderr
+    assert pull_escape.returncode == 2
+    assert "target_outside_pinned_workspace" in pull_escape.stderr
+    assert redirect_escape.returncode == 2
+    assert "target_outside_pinned_workspace" in redirect_escape.stderr
+    assert wait_for_dump.returncode == 0, wait_for_dump.stderr
+    assert wait_for_escape.returncode == 2
+    assert "target_outside_pinned_workspace" in wait_for_escape.stderr
+
+
+@pytest.mark.git_auth
 def test_stateless_guard_rejects_symlinked_git_marker_and_escaping_run_area(
     pinned_run: tuple[Path, Path, Path, Path],
 ) -> None:

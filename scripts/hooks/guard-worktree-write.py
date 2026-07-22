@@ -1604,6 +1604,65 @@ def _gradle_command_paths(
     return paths, unresolved
 
 
+_ADB_GLOBAL_OPTIONS_WITH_VALUE = {"-s", "-t", "-H", "-P", "-L", "--one-device"}
+# adb subcommands that run on the device or only read host files, so their
+# path operands are device-side paths, never host write targets. Host-writing
+# subcommands (pull, backup, bugreport) and unknown subcommands are excluded so
+# they stay under conservative host-path collection.
+_ADB_HOST_READ_ONLY_SUBCOMMANDS = {
+    "shell",
+    "exec-out",
+    "emu",
+    "push",
+    "install",
+    "install-multiple",
+    "install-multi-package",
+    "uninstall",
+    "sync",
+    "sideload",
+    "devices",
+    "get-state",
+    "get-serialno",
+    "get-devpath",
+    "logcat",
+    "forward",
+    "reverse",
+    "connect",
+    "disconnect",
+    "reconnect",
+    "pair",
+    "root",
+    "unroot",
+    "remount",
+    "reboot",
+    "tcpip",
+    "usb",
+    "jdwp",
+    "start-server",
+    "kill-server",
+}
+
+
+def _adb_subcommand(arguments: list[str]) -> str | None:
+    index = 0
+    while index < len(arguments):
+        token = arguments[index]
+        if token.startswith("-"):
+            index += 2 if token in _ADB_GLOBAL_OPTIONS_WITH_VALUE else 1
+            continue
+        # wait-for-* is a transport prefix that chains a real subcommand after
+        # it, so skip it and classify the following subcommand instead.
+        if token.startswith("wait-for-"):
+            index += 1
+            continue
+        return token
+    return None
+
+
+def _adb_subcommand_is_host_read_only(arguments: list[str]) -> bool:
+    return _adb_subcommand(arguments) in _ADB_HOST_READ_ONLY_SUBCOMMANDS
+
+
 def _shell_mutation_paths(
     command: str,
     *,
@@ -1883,6 +1942,12 @@ def _shell_mutation_paths(
                     )
                 else:
                     segment_paths.extend(positional)
+            elif command_name == "adb" and _adb_subcommand_is_host_read_only(
+                arguments
+            ):
+                # device-side operands are not host paths; outer shell
+                # redirections are still collected separately above.
+                pass
             else:
                 segment_paths.extend(
                     argument
