@@ -2663,52 +2663,6 @@ def test_worktree_manifest_records_canonical_identity(tmp_path: Path) -> None:
     assert identity["head"] == _git(leader, "rev-parse", "HEAD")
 
 
-@pytest.mark.git_auth
-def test_runner_fails_when_leader_changes_during_a_mutation_phase(
-    pinned_run: tuple[Path, Path, Path, Path],
-) -> None:
-    leader, worktree, runtime, run_dir = pinned_run
-    runner = Runner(
-        worktree,
-        state_root=runtime,
-        config_root=leader,
-        run_dir=run_dir,
-    )
-    runner._pin_workspace_identity()
-    runner._begin_mutation_boundary(Phase(id="implement", description="implement"))
-
-    (leader / "shared.txt").write_text("unexpected leader mutation\n", encoding="utf-8")
-
-    with pytest.raises(RuntimeError, match="leader checkout changed.*shared.txt"):
-        runner._observe_mutation_boundary(clear=True)
-    assert (leader / "shared.txt").read_text(encoding="utf-8") == "unexpected leader mutation\n"
-
-
-@pytest.mark.git_auth
-def test_runner_records_only_pinned_changes_during_a_mutation_phase(
-    pinned_run: tuple[Path, Path, Path, Path],
-) -> None:
-    leader, worktree, runtime, run_dir = pinned_run
-    runner = Runner(
-        worktree,
-        state_root=runtime,
-        config_root=leader,
-        run_dir=run_dir,
-    )
-    runner._pin_workspace_identity()
-    runner._begin_mutation_boundary(Phase(id="fix-loop", description="fix"))
-
-    (worktree / "shared.txt").write_text("pinned mutation\n", encoding="utf-8")
-    runner._observe_mutation_boundary(clear=True)
-
-    meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
-    assert meta["pinned_mutation_paths"] == ["shared.txt"]
-    assert "mutation_boundary" not in meta
-    assert (leader / "shared.txt").read_text(encoding="utf-8") == "leader\n"
-
-
-
-
 def test_node_run_start_rejects_the_leader_protected_branch(tmp_path: Path) -> None:
     leader = tmp_path / "project"
     leader.mkdir()
