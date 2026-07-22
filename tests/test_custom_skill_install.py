@@ -337,6 +337,356 @@ def test_project_launcher_install_repairs_python_runtime_drift(tmp_path: Path) -
     )
 
 
+
+def test_install_repins_foreign_machine_runtime_contract(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    assert _install(project).returncode == 0
+    kit_path = project / ".agent-flow" / "kit.json"
+    kit = json.loads(kit_path.read_text(encoding="utf-8"))
+    contract = kit["project_runtime_contract"]
+    foreign_root = tmp_path / "foreign-machine"
+    contract["node"]["path"] = str(foreign_root / "bin" / "node")
+    contract["git"]["path"] = str(foreign_root / "bin" / "git")
+    contract["python"]["path"] = str(foreign_root / "bin" / "python")
+    contract["python"]["resolved_path"] = str(foreign_root / "bin" / "python")
+    kit["project_runtime_contract_commitment"] = _runtime_contract_commitment(contract)
+    kit_path.write_text(json.dumps(kit, indent=2) + "\n", encoding="utf-8")
+
+    foreign_status = _command(project, "status")
+    assert foreign_status.returncode == 1
+    assert "runtime re-pin required" in foreign_status.stderr
+    assert "agent-flow-kit install --force-managed" in foreign_status.stderr
+
+    repinned = _command(project, "install", "--force-managed")
+
+    assert repinned.returncode == 0, repinned.stderr
+    repaired = json.loads(kit_path.read_text(encoding="utf-8"))["project_runtime_contract"]
+    assert Path(repaired["node"]["path"]).is_file()
+    assert Path(repaired["git"]["path"]).is_file()
+    assert Path(repaired["python"]["resolved_path"]).is_file()
+    assert not str(repaired["node"]["path"]).startswith(str(foreign_root))
+    status = _command(project, "status")
+    assert status.returncode == 0, status.stderr
+    assert status.stdout.strip() == "no runs"
+
+
+def test_runtime_repin_rejects_same_path_executable_content_drift(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    assert _install(project).returncode == 0
+    kit_path = project / ".agent-flow" / "kit.json"
+    kit = json.loads(kit_path.read_text(encoding="utf-8"))
+    contract = kit["project_runtime_contract"]
+    contracted_git = tmp_path / "contracted" / "git"
+    contracted_git.parent.mkdir()
+    shutil.copyfile(contract["git"]["path"], contracted_git)
+    contracted_git.chmod(Path(contract["git"]["path"]).stat().st_mode)
+    metadata = contracted_git.stat()
+    contract["git"].update(
+        {
+            "path": str(contracted_git.resolve()),
+            "sha256": hashlib.sha256(contracted_git.read_bytes()).hexdigest(),
+            "device": str(metadata.st_dev),
+            "inode": str(metadata.st_ino),
+            "links": str(metadata.st_nlink),
+            "mode": stat.S_IMODE(metadata.st_mode),
+        }
+    )
+    kit["project_runtime_contract_commitment"] = _runtime_contract_commitment(contract)
+    kit_path.write_text(json.dumps(kit, indent=2) + "\n", encoding="utf-8")
+    contracted_git.write_bytes(b"same-path executable drift\n")
+    contracted_git.chmod(metadata.st_mode)
+
+    status = _command(project, "status")
+    repin = _command(project, "install", "--force-managed")
+
+    assert status.returncode == 1
+    assert "project runtime executable identity changed" in status.stderr
+    assert "runtime re-pin required" not in status.stderr
+    assert repin.returncode == 1
+    assert "project runtime executable identity changed" in repin.stderr
+
+
+def test_guard_recovery_rejects_same_path_executable_content_drift(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    subprocess.run(("git", "init", "-b", "main", str(project)), check=True, capture_output=True)
+    assert _install(project).returncode == 0
+    kit_path = project / ".agent-flow" / "kit.json"
+    kit = json.loads(kit_path.read_text(encoding="utf-8"))
+    contract = kit["project_runtime_contract"]
+    contracted_git = tmp_path / "contracted" / "git"
+    contracted_git.parent.mkdir()
+    shutil.copyfile(contract["git"]["path"], contracted_git)
+    contracted_git.chmod(Path(contract["git"]["path"]).stat().st_mode)
+    metadata = contracted_git.stat()
+    contract["git"].update(
+        {
+            "path": str(contracted_git.resolve()),
+            "sha256": hashlib.sha256(contracted_git.read_bytes()).hexdigest(),
+            "device": str(metadata.st_dev),
+            "inode": str(metadata.st_ino),
+            "links": str(metadata.st_nlink),
+            "mode": stat.S_IMODE(metadata.st_mode),
+        }
+    )
+    kit["project_runtime_contract_commitment"] = _runtime_contract_commitment(contract)
+    kit_path.write_text(json.dumps(kit, indent=2) + "\n", encoding="utf-8")
+    contracted_git.write_bytes(b"same-path executable drift\n")
+    contracted_git.chmod(metadata.st_mode)
+    launcher = project / ".agent-flow" / "bin" / "agent-flow"
+    payload = {
+        "tool_name": "Bash",
+        "cwd": str(project),
+        "host": "codex",
+        "session_id": "session-1",
+        "tool_input": {"command": f"{shlex.quote(str(launcher))} install --force-managed"},
+    }
+
+    guarded = subprocess.run(
+        (sys.executable, str(KIT_ROOT / "scripts" / "hooks" / "guard-worktree-write.py")),
+        cwd=project,
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert guarded.returncode == 2
+    assert "launcher is not trusted" in guarded.stderr
+
+
+def test_copied_launcher_bootstraps_recovery_when_old_node_is_missing(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    foreign_node = tmp_path / "foreign-host" / "bin" / "node"
+    foreign_node.parent.mkdir(parents=True)
+    current_node = Path(_node()).resolve()
+    try:
+        os.link(current_node, foreign_node)
+    except OSError:
+        shutil.copyfile(current_node, foreign_node)
+        foreign_node.chmod(current_node.stat().st_mode)
+    process_env = {
+        **os.environ,
+        "HOME": str(tmp_path / "home"),
+        "CODEX_HOME": str(tmp_path / "home" / ".codex"),
+        "CLAUDE_CONFIG_DIR": str(tmp_path / "home" / ".claude"),
+        "PI_CODING_AGENT_DIR": str(tmp_path / "home" / ".omp" / "agent"),
+        "AGENT_FLOW_AUTO_EXTERNAL_SKILLS": "0",
+    }
+    installed = subprocess.run(
+        (str(foreign_node), str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"), "install"),
+        cwd=source,
+        env=process_env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert installed.returncode == 0, installed.stderr
+    source_contract = json.loads(
+        (source / ".agent-flow" / "kit.json").read_text(encoding="utf-8")
+    )["project_runtime_contract"]
+    assert Path(source_contract["node"]["path"]) == foreign_node.resolve()
+
+    relocated_with_available_runtime = tmp_path / "relocated-with-available-runtime"
+    shutil.copytree(source, relocated_with_available_runtime)
+    launcher_relocated = subprocess.run(
+        (
+            str(relocated_with_available_runtime / ".agent-flow" / "bin" / "agent-flow"),
+            "status",
+        ),
+        cwd=relocated_with_available_runtime,
+        env=process_env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert launcher_relocated.returncode == 0, launcher_relocated.stderr
+    assert "no runs" in launcher_relocated.stdout
+
+    source_runner_relocated = subprocess.run(
+        (
+            str(current_node),
+            str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"),
+            "status",
+        ),
+        cwd=relocated_with_available_runtime,
+        env=process_env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert source_runner_relocated.returncode == 0, source_runner_relocated.stderr
+    assert "no runs" in source_runner_relocated.stdout
+
+    copied = tmp_path / "copied"
+    launcher_drift = tmp_path / "launcher-drift"
+    runtime_drift = tmp_path / "runtime-drift"
+    for destination in (copied, launcher_drift, runtime_drift):
+        shutil.copytree(source, destination)
+    foreign_node.unlink()
+    shutil.rmtree(process_env["HOME"])
+    Path(process_env["HOME"]).mkdir(parents=True)
+
+    status_recovery = subprocess.run(
+        (str(copied / ".agent-flow" / "bin" / "agent-flow"), "status"),
+        cwd=copied,
+        env=process_env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert status_recovery.returncode == 0, status_recovery.stderr
+    assert "no runs" in status_recovery.stdout
+    continue_recovery = subprocess.run(
+        (str(copied / ".agent-flow" / "bin" / "agent-flow"), "continue"),
+        cwd=copied,
+        env=process_env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert continue_recovery.returncode == 0, continue_recovery.stderr
+    assert "진행 중인 run 없음" in continue_recovery.stdout
+
+
+    abort_recovery = subprocess.run(
+        (str(copied / ".agent-flow" / "bin" / "agent-flow"), "abort", "--yes"),
+        cwd=copied,
+        env=process_env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert abort_recovery.returncode == 0, abort_recovery.stderr
+
+    external_root = subprocess.run(
+        (
+            str(copied / ".agent-flow" / "bin" / "agent-flow"),
+            "abort",
+            "--root",
+            str(source),
+            "--yes",
+        ),
+        cwd=copied,
+        env=process_env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert external_root.returncode != 0
+    assert "portable runtime bootstrap authentication failed" in external_root.stderr
+
+    blocked = subprocess.run(
+        (str(copied / ".agent-flow" / "bin" / "agent-flow"), "run", "task"),
+        cwd=copied,
+        env=process_env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert blocked.returncode != 0
+    assert "portable runtime bootstrap authentication failed" in blocked.stderr
+
+    forged = subprocess.run(
+        (
+            str(current_node),
+            str(
+                copied
+                / ".agent-flow"
+                / "runtime"
+                / "node"
+                / "bin"
+                / "agent-flow-kit.mjs"
+            ),
+            "status",
+        ),
+        cwd=copied,
+        env={
+            **process_env,
+            "AGENT_FLOW_PORTABLE_BOOTSTRAP": "1",
+            "AGENT_FLOW_PORTABLE_BOOTSTRAP_FD": "999999",
+            "AGENT_FLOW_PROJECT_LAUNCHER": str(
+                copied / ".agent-flow" / "bin" / "agent-flow"
+            ),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert forged.returncode != 0
+    assert "runtime re-pin required" in forged.stderr
+
+    drifted_launcher = launcher_drift / ".agent-flow" / "bin" / "agent-flow"
+    drifted_launcher.write_text(
+        drifted_launcher.read_text(encoding="utf-8") + "\n# drift\n",
+        encoding="utf-8",
+    )
+    launcher_recovery = subprocess.run(
+        (str(drifted_launcher), "install", "--force-managed"),
+        cwd=launcher_drift,
+        env=process_env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert launcher_recovery.returncode != 0
+    assert "portable runtime bootstrap authentication failed" in launcher_recovery.stderr
+
+    drifted_runtime = (
+        runtime_drift / ".agent-flow" / "runtime" / "node" / "bin" / "agent-flow-kit.mjs"
+    )
+    drifted_runtime.write_text(
+        drifted_runtime.read_text(encoding="utf-8") + "\n// drift\n",
+        encoding="utf-8",
+    )
+    runtime_recovery = subprocess.run(
+        (
+            str(runtime_drift / ".agent-flow" / "bin" / "agent-flow"),
+            "install",
+            "--force-managed",
+        ),
+        cwd=runtime_drift,
+        env=process_env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert runtime_recovery.returncode != 0
+    assert "portable runtime bootstrap authentication failed" in runtime_recovery.stderr
+
+    shutil.rmtree(source)
+
+    recovered = subprocess.run(
+        (str(copied / ".agent-flow" / "bin" / "agent-flow"), "install", "--force-managed"),
+        cwd=copied,
+        env=process_env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert recovered.returncode == 0, recovered.stderr
+    repaired = json.loads(
+        (copied / ".agent-flow" / "kit.json").read_text(encoding="utf-8")
+    )["project_runtime_contract"]
+    assert Path(repaired["node"]["path"]) == current_node
+    assert Path(repaired["node"]["path"]) != foreign_node
+    current_metadata = current_node.stat()
+    assert repaired["node"]["sha256"] == hashlib.sha256(current_node.read_bytes()).hexdigest()
+    assert repaired["node"]["device"] == str(current_metadata.st_dev)
+    assert repaired["node"]["inode"] == str(current_metadata.st_ino)
+    assert repaired["node"]["mode"] == stat.S_IMODE(current_metadata.st_mode)
+    for relative in (".Codex/hooks.json", ".codex/hooks.json", ".claude/settings.json"):
+        hook_settings = (copied / relative).read_text(encoding="utf-8")
+        assert str(source) not in hook_settings
+        assert str(copied / ".agent-flow" / "scripts" / "hooks") in hook_settings
+
+
 def test_project_launcher_run_creates_and_pins_git_worktree(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
@@ -346,7 +696,10 @@ def test_project_launcher_run_creates_and_pins_git_worktree(tmp_path: Path) -> N
     (project / "README.md").write_text("project\n", encoding="utf-8")
     subprocess.run(("git", "-C", str(project), "add", "README.md"), check=True)
     subprocess.run(("git", "-C", str(project), "commit", "-m", "initial"), check=True, capture_output=True)
-    assert _install(project).returncode == 0
+    assert _install(
+        project,
+        env={"AGENT_FLOW_ACTIVE_HOST": "codex"},
+    ).returncode == 0
     subprocess.run(("git", "-C", str(project), "add", ".gitignore"), check=True)
     subprocess.run(("git", "-C", str(project), "commit", "-m", "install config"), check=True, capture_output=True)
     launcher = project / ".agent-flow" / "bin" / "agent-flow"
@@ -365,6 +718,8 @@ def test_project_launcher_run_creates_and_pins_git_worktree(tmp_path: Path) -> N
         env=env,
     )
     worktree = project / ".agent-flow" / "worktrees" / "feat-pinned-task"
+    assert started.returncode == 0, started.stderr
+    assert worktree.is_dir()
     status = subprocess.run(
         (str(launcher), "status"),
         cwd=project,
@@ -800,6 +1155,79 @@ def test_managed_python_hook_runs_repeatedly_without_runtime_drift(tmp_path: Pat
         assert result.returncode == 0, result.stderr
 
     assert _runtime_tree_integrity(python_runtime) == before
+
+
+def test_reinstall_replaces_relocated_managed_hook_commands(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    assert _install(project).returncode == 0
+    stale_root = tmp_path / "old-project"
+    stale_command = (
+        f"'{stale_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-worktree-write.py'}'"
+        " --host 'codex'"
+    )
+    stale_script = (
+        stale_root
+        / ".agent-flow"
+        / "scripts"
+        / "hooks"
+        / "guard-worktree-write.py"
+    )
+    stale_script.parent.mkdir(parents=True)
+    shutil.copyfile(
+        project
+        / ".agent-flow"
+        / "scripts"
+        / "hooks"
+        / "guard-worktree-write.py",
+        stale_script,
+    )
+    for relative in (".Codex/hooks.json", ".codex/hooks.json"):
+        settings_path = project / relative
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        settings["hooks"]["PreToolUse"].append(
+            {
+                "matcher": "Read",
+                "hooks": [{"type": "command", "command": stale_command}],
+            }
+        )
+        settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+
+    reinstalled = _install(project, "--force-managed")
+
+    assert reinstalled.returncode == 0, reinstalled.stderr
+    for relative in (".Codex/hooks.json", ".codex/hooks.json"):
+        content = (project / relative).read_text(encoding="utf-8")
+        assert str(stale_root) not in content
+        assert str(project / ".agent-flow" / "scripts" / "hooks") in content
+    status = _command(project, "status")
+    assert status.returncode == 0, status.stderr
+
+
+def test_reinstall_preserves_user_hook_with_managed_basename(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    assert _install(project).returncode == 0
+    custom_script = tmp_path / "custom" / "guard-worktree-write.py"
+    custom_script.parent.mkdir()
+    custom_script.write_text("#!/usr/bin/env python3\nprint('custom')\n", encoding="utf-8")
+    custom_command = f"'{custom_script}' --host 'codex'"
+    settings_path = project / ".Codex" / "hooks.json"
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    settings["hooks"]["PreToolUse"].append(
+        {
+            "matcher": "Read",
+            "hooks": [{"type": "command", "command": custom_command}],
+        }
+    )
+    settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+
+    reinstalled = _install(project, "--force-managed")
+
+    assert reinstalled.returncode == 0, reinstalled.stderr
+    content = settings_path.read_text(encoding="utf-8")
+    assert custom_command in content
+    assert str(project / ".agent-flow" / "scripts" / "hooks") in content
 
 
 @pytest.mark.parametrize(
@@ -2179,8 +2607,8 @@ def test_drifted_managed_skill_backup_restores_from_pinned_state(
     assert not (project / ".agent-flow" / "install-transaction").exists()
 
 
-def test_self_install_reinstall_treats_generated_agent_flow_skill_as_managed(tmp_path: Path) -> None:
-    kit = tmp_path / "kit"
+def _self_install_kit(tmp_path: Path, name: str) -> tuple[Path, dict[str, str]]:
+    kit = tmp_path / name
     kit.mkdir()
     for relative in (
         "bin",
@@ -2212,39 +2640,306 @@ def test_self_install_reinstall_treats_generated_agent_flow_skill_as_managed(tmp
             "CODEX_CLI": "",
         }
     )
-    command = (_node(), str(kit / "bin" / "agent-flow-kit.mjs"), "install", "--force-managed")
-    first = subprocess.run(
-        (*command, "--skill", "agent-flow"),
+    return kit, process_env
+
+
+def _run_self_install(
+    kit: Path,
+    process_env: dict[str, str],
+    *arguments: str,
+    installed_launcher: bool = False,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    command = (
+        str(kit / ".agent-flow" / "bin" / "agent-flow")
+        if installed_launcher
+        else _node(),
+        *(
+            ()
+            if installed_launcher
+            else (str(kit / "bin" / "agent-flow-kit.mjs"),)
+        ),
+        "install",
+        "--force-managed",
+        *arguments,
+    )
+    run_env = dict(process_env)
+    run_env.update(env or {})
+    return subprocess.run(
+        command,
         cwd=kit,
         text=True,
         capture_output=True,
         check=False,
-        env=process_env,
+        env=run_env,
     )
+
+
+def _filesystem_identity(path: Path) -> dict[str, str | int]:
+    stat = path.lstat()
+    return {
+        "device": str(stat.st_dev),
+        "inode": str(stat.st_ino),
+        "links": str(stat.st_nlink),
+        "mode": stat.st_mode & 0o777,
+    }
+
+
+def _assert_current_agent_flow_ownership(kit: Path) -> None:
+    skill = kit / ".agent-flow" / "skills" / "agent-flow"
+    index = json.loads(
+        (kit / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8")
+    )
+    assert (
+        index["managed_ownership"]["entries"]["agent-flow"]["filesystem_identity"]
+        == _filesystem_identity(skill)
+    )
+
+
+def test_self_install_reinstall_treats_generated_agent_flow_skill_as_managed(
+    tmp_path: Path,
+) -> None:
+    kit, process_env = _self_install_kit(tmp_path, "kit")
+    first = _run_self_install(kit, process_env, "--skill", "agent-flow")
     assert first.returncode == 0, first.stderr
-    launcher_command = (str(kit / ".agent-flow" / "bin" / "agent-flow"), "install", "--force-managed")
-    second = subprocess.run(
-        launcher_command,
-        cwd=kit,
-        text=True,
-        capture_output=True,
-        check=False,
-        env=process_env,
-    )
-    third = subprocess.run(
-        launcher_command,
-        cwd=kit,
-        text=True,
-        capture_output=True,
-        check=False,
-        env=process_env,
-    )
+
+    second = _run_self_install(kit, process_env, installed_launcher=True)
+    third = _run_self_install(kit, process_env, installed_launcher=True)
 
     assert second.returncode == 0, second.stderr
     assert third.returncode == 0, third.stderr
     assert "unmanaged skill entry conflicts" not in third.stderr
     assert not (kit / ".agent-flow" / "install-transaction").exists()
     assert (kit / ".agent-flow" / "skills" / "agent-flow" / "SKILL.md").is_file()
+
+
+def test_copied_self_install_reinstall_rebases_generated_agent_flow_ownership(
+    tmp_path: Path,
+) -> None:
+    source, process_env = _self_install_kit(tmp_path, "source-kit")
+    first = _run_self_install(source, process_env, "--skill", "agent-flow")
+    assert first.returncode == 0, first.stderr
+    source_index = json.loads(
+        (source / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8")
+    )
+    recorded_identity = source_index["managed_ownership"]["entries"]["agent-flow"][
+        "filesystem_identity"
+    ]
+
+    copied = tmp_path / "copied-kit"
+    shutil.copytree(source, copied)
+    copied_skill = copied / ".agent-flow" / "skills" / "agent-flow"
+    assert _filesystem_identity(copied_skill) != recorded_identity
+
+    second = _run_self_install(copied, process_env, installed_launcher=True)
+    third = _run_self_install(copied, process_env, installed_launcher=True)
+
+    assert second.returncode == 0, second.stderr
+    assert third.returncode == 0, third.stderr
+    assert "unmanaged skill entry conflicts" not in second.stderr
+    assert "unmanaged skill entry conflicts" not in third.stderr
+    document = (copied_skill / "SKILL.md").read_text(encoding="utf-8")
+    copied_launcher = str(copied / ".agent-flow" / "bin" / "agent-flow")
+    source_launcher = str(source / ".agent-flow" / "bin" / "agent-flow")
+    assert copied_launcher in document
+    assert source_launcher not in document
+    _assert_current_agent_flow_ownership(copied)
+    assert not (copied / ".agent-flow" / "install-transaction").exists()
+    assert not (copied / ".agent-flow" / "install.lock").exists()
+
+
+def test_copied_self_install_does_not_rebase_generated_agent_flow_mode_drift(
+    tmp_path: Path,
+) -> None:
+    source, process_env = _self_install_kit(tmp_path, "source-kit")
+    first = _run_self_install(source, process_env, "--skill", "agent-flow")
+    assert first.returncode == 0, first.stderr
+    source_index = json.loads(
+        (source / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8")
+    )
+    recorded_identity = source_index["managed_ownership"]["entries"]["agent-flow"][
+        "filesystem_identity"
+    ]
+    copied = tmp_path / "copied-kit"
+    shutil.copytree(source, copied)
+    skill = copied / ".agent-flow" / "skills" / "agent-flow"
+    drifted_mode = recorded_identity["mode"] ^ stat.S_IWGRP
+    skill.chmod(drifted_mode)
+
+    failed = _run_self_install(copied, process_env, installed_launcher=True)
+
+    assert failed.returncode != 0
+    assert "unmanaged skill entry conflicts with installed skill: agent-flow" in failed.stderr
+    assert stat.S_IMODE(skill.lstat().st_mode) == drifted_mode
+    assert not (copied / ".agent-flow" / "install-transaction").exists()
+
+
+def test_copied_self_install_recovers_generated_agent_flow_reownership_after_index_crash(
+    tmp_path: Path,
+) -> None:
+    source, process_env = _self_install_kit(tmp_path, "source-kit")
+    first = _run_self_install(source, process_env, "--skill", "agent-flow")
+    assert first.returncode == 0, first.stderr
+    copied = tmp_path / "copied-kit"
+    shutil.copytree(source, copied)
+
+    crashed = _run_self_install(
+        copied,
+        process_env,
+        installed_launcher=True,
+        env={"AGENT_FLOW_TEST_CRASH_AFTER_SKILL_INDEX": "1"},
+    )
+
+    assert crashed.returncode == 87, crashed.stderr
+    backup_document = (
+        copied
+        / ".agent-flow"
+        / "install-transaction"
+        / "skills-backup"
+        / "agent-flow"
+        / "SKILL.md"
+    )
+    assert backup_document.is_file()
+
+    recovered = _run_self_install(copied, process_env, installed_launcher=True)
+
+    assert recovered.returncode == 0, recovered.stderr
+    skill = copied / ".agent-flow" / "skills" / "agent-flow"
+    document = (skill / "SKILL.md").read_text(encoding="utf-8")
+    copied_launcher = str(copied / ".agent-flow" / "bin" / "agent-flow")
+    source_launcher = str(source / ".agent-flow" / "bin" / "agent-flow")
+    assert copied_launcher in document
+    assert source_launcher not in document
+    _assert_current_agent_flow_ownership(copied)
+    assert not (copied / ".agent-flow" / "install-transaction").exists()
+    assert not (copied / ".agent-flow" / "install.lock").exists()
+
+
+def test_copied_self_install_reowns_all_authenticated_managed_skills(
+    tmp_path: Path,
+) -> None:
+    source, process_env = _self_install_kit(tmp_path, "source-kit")
+    first = _run_self_install(source, process_env)
+    assert first.returncode == 0, first.stderr
+    source_index = json.loads(
+        (source / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8")
+    )
+    expected = set(source_index["managed_ownership"]["entries"])
+    assert len(expected) > 1
+    copied = tmp_path / "copied-kit"
+    shutil.copytree(source, copied)
+
+    reinstalled = _run_self_install(copied, process_env, installed_launcher=True)
+
+    assert reinstalled.returncode == 0, reinstalled.stderr
+    copied_index = json.loads(
+        (copied / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8")
+    )
+    assert set(copied_index["managed_ownership"]["entries"]) == expected
+    copied_launcher = str(copied / ".agent-flow" / "bin" / "agent-flow")
+    source_launcher = str(source / ".agent-flow" / "bin" / "agent-flow")
+    for name in ("agent-flow", "full-feature-workflow", "push-watch"):
+        document = (
+            copied / ".agent-flow" / "skills" / name / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        assert copied_launcher in document
+        assert source_launcher not in document
+
+
+def test_profile_host_catalog_parser_accepts_yaml_comments_and_source_hosts(
+    tmp_path: Path,
+) -> None:
+    profiles = tmp_path / "profiles"
+    profiles.mkdir()
+    (profiles / "android.yaml").write_text(
+        "android_skills:\n"
+        '  source: "https://example.test/catalog#fragment" # source comment\n'
+        "  install_policy: 'never' # policy comment\n"
+        "  active_host_only: YES # boolean comment\n"
+        "  source_hosts:\n"
+        "    codex: '~/.codex/skills/{skill}/SKILL.md' # host comment\n"
+        "  implementation:\n"
+        "    - skill: edge-to-edge # skill comment\n",
+        encoding="utf-8",
+    )
+    script = (
+        "import { profileManagedHostOnlySkillNames } from "
+        f"{(KIT_ROOT / 'lib' / 'skill-selection.mjs').as_uri()!r};"
+        "console.log(JSON.stringify([...profileManagedHostOnlySkillNames(process.argv[1])].sort()));"
+    )
+
+    result = subprocess.run(
+        (_node(), "--input-type=module", "-e", script, str(profiles)),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == ["edge-to-edge"]
+
+
+def test_runtime_host_skill_document_symlink_is_rejected(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    profiles = project / "profiles"
+    profiles.mkdir(parents=True)
+    (profiles / "android.yaml").write_text(
+        "android_skills:\n"
+        "  source: https://example.test/android-skills\n"
+        "  install_policy: never\n"
+        "  active_host_only: true\n"
+        "  hosts:\n"
+        "    codex: ~/.codex/skills/{skill}/SKILL.md\n"
+        "  implementation:\n"
+        "    - skill: edge-to-edge\n",
+        encoding="utf-8",
+    )
+    home = tmp_path / "home"
+    skill_document = home / ".codex" / "skills" / "edge-to-edge" / "SKILL.md"
+    skill_document.parent.mkdir(parents=True)
+    skill_document.write_text("trusted local skill\n", encoding="utf-8")
+    index = {"selection": {"profiles": ["android"], "skill_profiles": ["android"]}}
+    script = (
+        "import { resolveRuntimeSkillPlan } from "
+        f"{(KIT_ROOT / 'lib' / 'skill-selection.mjs').as_uri()!r};"
+        "const index=JSON.parse(process.argv[1]);"
+        "const result=resolveRuntimeSkillPlan(index,{phaseId:'implement',"
+        "requiredSkills:['edge-to-edge'],indexRoot:process.argv[2],"
+        "activeHost:'codex',home:process.argv[3]});"
+        "console.log(JSON.stringify(result));"
+    )
+
+    resolved = subprocess.run(
+        (_node(), "--input-type=module", "-e", script, json.dumps(index), str(project), str(home)),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert resolved.returncode == 0, resolved.stderr
+    resolved_plan = json.loads(resolved.stdout)
+    assert any(skill["name"] == "edge-to-edge" for skill in resolved_plan["skills"])
+
+    outside = tmp_path / "outside.md"
+    outside.write_text("attacker replacement\n", encoding="utf-8")
+    skill_document.unlink()
+    skill_document.symlink_to(outside)
+
+    rejected = subprocess.run(
+        (_node(), "--input-type=module", "-e", script, json.dumps(index), str(project), str(home)),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert rejected.returncode == 0, rejected.stderr
+    rejected_plan = json.loads(rejected.stdout)
+    assert "edge-to-edge" in rejected_plan["missing"]
+    assert any(
+        error["reason"] == "missing_local_host_skill"
+        and error["canonical"] == "edge-to-edge"
+        for error in rejected_plan["resolution_errors"]
+    )
 
 
 def test_unverified_existing_host_skill_is_preserved(tmp_path: Path) -> None:
@@ -2880,6 +3575,75 @@ def test_android_profile_installs_android_skills_and_common_dependencies_only(tm
     assert "compose-state-authoring" not in names
     assert not (project / ".agent-flow" / "skills" / "compose-state-authoring").exists()
     assert not (project / ".agent-flow" / "skills" / "kotlin-flow-state-event-modeling").exists()
+
+
+def test_android_runtime_loads_never_installed_skills_from_active_omp_host(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "android-project"
+    home = tmp_path / "home"
+    project.mkdir()
+    (project / "settings.gradle.kts").write_text("pluginManagement {}\n", encoding="utf-8")
+    installed = _install(
+        project,
+        "--profile",
+        "android",
+        env={
+            "HOME": str(home),
+            "AGENT_FLOW_ACTIVE_HOST": "omp",
+            "AGENT_FLOW_AUTO_EXTERNAL_SKILLS": "0",
+        },
+    )
+    assert installed.returncode == 0, installed.stderr
+    for name in ("compose-modifier-and-layout-style", "compose-slot-api-pattern"):
+        _skill(home / ".omp" / "agent" / "skills" / name, f"{name} body")
+    index = json.loads(
+        (project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8")
+    )
+    indexed_names = {skill["name"] for skill in index["skills"]}
+    assert "compose-modifier-and-layout-style" not in indexed_names
+    assert "compose-slot-api-pattern" not in indexed_names
+
+    plan = resolve_runtime_skill_plan(
+        index,
+        phase_id="implement",
+        changed_files=["app/src/main/java/example/ModifierComponent.kt"],
+        task_scope="compose modifier",
+        index_root=project,
+        active_host="omp",
+        home=home,
+    )
+
+    selected = {skill["name"]: skill for skill in plan["skills"]}
+    for name in ("compose-modifier-and-layout-style", "compose-slot-api-pattern"):
+        assert selected[name]["path"] == str(
+            home / ".omp" / "agent" / "skills" / name / "SKILL.md"
+        )
+        assert selected[name]["source_host"] == "omp"
+        assert selected[name]["load_mode"] == "plain_text"
+    assert plan["missing"] == []
+    assert plan["resolution_errors"] == []
+
+    shutil.rmtree(home / ".omp" / "agent" / "skills" / "compose-slot-api-pattern")
+    missing_plan = resolve_runtime_skill_plan(
+        index,
+        phase_id="implement",
+        changed_files=["app/src/main/java/example/ModifierComponent.kt"],
+        task_scope="compose modifier",
+        index_root=project,
+        active_host="omp",
+        home=home,
+    )
+    diagnostic = next(
+        item
+        for item in missing_plan["resolution_errors"]
+        if item["canonical"] == "compose-slot-api-pattern"
+    )
+    assert diagnostic["reason"] == "missing_local_host_skill"
+    assert diagnostic["message"] == (
+        "missing local chrisbanes_skills: compose-slot-api-pattern"
+    )
+    assert diagnostic["source"] == "https://github.com/chrisbanes/skills/tree/main/skills"
 
 
 def test_android_official_provider_rejects_unpinned_host_snapshot(

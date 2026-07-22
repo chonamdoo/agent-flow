@@ -29,6 +29,9 @@ def _node_plan(
     files: list[str],
     task: str,
     required_skills: list[str] | None = None,
+    index_root: Path | None = None,
+    active_host: str | None = None,
+    home: Path | None = None,
 ) -> dict[str, object]:
     node = shutil.which("node")
     if node is None:
@@ -42,6 +45,9 @@ process.stdout.write(JSON.stringify(resolveRuntimeSkillPlan(input.index, {
   changedFiles: input.files,
   taskScope: input.task,
   requiredSkills: input.required_skills,
+  indexRoot: input.index_root,
+  activeHost: input.active_host,
+  home: input.home,
 })));
 """
     result = subprocess.run(
@@ -54,6 +60,9 @@ process.stdout.write(JSON.stringify(resolveRuntimeSkillPlan(input.index, {
                 "files": files,
                 "task": task,
                 "required_skills": required_skills or [],
+                "index_root": str(index_root) if index_root is not None else None,
+                "active_host": active_host,
+                "home": str(home) if home is not None else None,
             }
         ),
         text=True,
@@ -213,6 +222,122 @@ def test_node_and_python_share_runtime_plan_for_each_real_host(host: str) -> Non
         "code-generation-discipline",
         "conditional",
     ]
+
+
+def test_node_and_python_load_never_installed_skill_from_active_host(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    home = tmp_path / "home"
+    profiles = project / ".agent-flow" / "profiles"
+    profiles.mkdir(parents=True)
+    profiles.joinpath("android.yaml").write_text(
+        "chrisbanes_skills:\n"
+        "  source: https://github.com/chrisbanes/skills/tree/main/skills\n"
+        "  install_policy: never\n"
+        "  active_host_only: true\n"
+        "  hosts:\n"
+        "    codex: ~/.codex/skills/{skill}/SKILL.md\n"
+        "    claude: ~/.claude/skills/{skill}/SKILL.md\n"
+        "    omp: ~/.omp/agent/skills/{skill}/SKILL.md\n"
+        "  implementation:\n"
+        "    - skill: compose-modifier-and-layout-style\n",
+        encoding="utf-8",
+    )
+    document = (
+        home
+        / ".omp"
+        / "agent"
+        / "skills"
+        / "compose-modifier-and-layout-style"
+        / "SKILL.md"
+    )
+    document.parent.mkdir(parents=True)
+    document.write_text("compose modifier rules\n", encoding="utf-8")
+    index: dict[str, object] = {
+        "version": 2,
+        "revision": "f" * 64,
+        "selection": {
+            "profiles": ["android"],
+            "skill_profiles": ["android"],
+            "explicit_skills": [],
+            "required_review": {},
+            "conditional_skills": {
+                "android": {
+                    "implementation": ["compose-modifier-and-layout-style"],
+                    "review": [],
+                }
+            },
+            "profile_routing": {
+                "profiles": {
+                    "android": {
+                        "skill_routes": [
+                            {
+                                "task_terms": ["compose modifier"],
+                                "file_rules": [],
+                                "skills": ["compose-modifier-and-layout-style"],
+                            }
+                        ]
+                    }
+                },
+                "escalations": {},
+            },
+        },
+        "skills": [
+            {
+                "name": "code-generation-discipline",
+                "path": "code",
+                "tree_hash": "a" * 64,
+            }
+        ],
+    }
+    node = _node_plan(
+        index,
+        phase="implement",
+        files=[],
+        task="compose modifier",
+        index_root=project,
+        active_host="omp",
+        home=home,
+    )
+    python = resolve_runtime_skill_plan(
+        index,
+        phase_id="implement",
+        task_scope="compose modifier",
+        index_root=project,
+        active_host="omp",
+        home=home,
+    )
+
+    assert python == node
+    selected = next(
+        skill
+        for skill in python["skills"]
+        if skill["name"] == "compose-modifier-and-layout-style"
+    )
+    assert selected["path"] == str(document)
+    assert selected["load_mode"] == "plain_text"
+
+    document.unlink()
+    missing_node = _node_plan(
+        index,
+        phase="implement",
+        files=[],
+        task="compose modifier",
+        index_root=project,
+        active_host="omp",
+        home=home,
+    )
+    missing_python = resolve_runtime_skill_plan(
+        index,
+        phase_id="implement",
+        task_scope="compose modifier",
+        index_root=project,
+        active_host="omp",
+        home=home,
+    )
+    assert missing_python == missing_node
+    assert missing_python["resolution_errors"][0]["reason"] == "missing_local_host_skill"
 
 
 def test_testing_localization_enters_both_runtimes_only_when_explicit() -> None:

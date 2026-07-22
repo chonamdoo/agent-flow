@@ -1692,7 +1692,7 @@ class CliTest(unittest.TestCase):
                 (project_root / ".agent-flow" / "prompts" / "pr-watch.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
-                "merge requires explicit approval",
+                "Do not merge without explicit approval.",
                 (project_root / ".agent-flow" / "skills" / "push-watch" / "SKILL.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
@@ -1799,6 +1799,8 @@ console.log(
             self.assertEqual(payload["notifications"][0][1], "info")
 
     def test_export_apk_copies_workspace_artifact_to_downloads(self) -> None:
+        from agent_flow.core.worktrees import create_worktree, plan_worktree
+
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             project_root = root / "project"
@@ -1806,28 +1808,54 @@ console.log(
             _init_git_repo(project_root)
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
-            _install_node_project(project_root, node, cli)
-
-            source = project_root / "app" / "build" / "outputs" / "apk" / "debug" / "app-debug.apk"
-            source.parent.mkdir(parents=True)
-            source.write_bytes(b"test-apk")
             home = root / "home"
             downloads = home / "Downloads"
             downloads.mkdir(parents=True)
-            launcher = project_root / ".agent-flow" / "bin" / "agent-flow"
-            env = _node_test_env(HOME=str(home), AGENT_FLOW_AUTO_EXTERNAL_SKILLS="0")
-
-            first = subprocess.run(
-                (str(launcher), "export-apk", str(source.relative_to(project_root))),
+            env = _node_test_env(
+                HOME=str(home),
+                AGENT_FLOW_AUTO_EXTERNAL_SKILLS="0",
+                AGENT_FLOW_ACTIVE_HOST="codex",
+                AGENT_FLOW_EXECUTION_ID="export-test",
+            )
+            installed = subprocess.run(
+                (node, cli, "install"),
                 cwd=project_root,
                 env=env,
                 text=True,
                 capture_output=True,
                 check=False,
             )
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            worktree = create_worktree(
+                root=project_root,
+                plan=plan_worktree(root=project_root, name="export-test"),
+                allow_dirty=True,
+            ).path
+            started = subprocess.run(
+                (node, cli, "run", "start", "--task", "export test", "--run-id", "export-test"),
+                cwd=worktree,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(started.returncode, 0, started.stderr)
+
+            source = worktree / "app" / "build" / "outputs" / "apk" / "debug" / "app-debug.apk"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"test-apk")
+            launcher = project_root / ".agent-flow" / "bin" / "agent-flow"
+            first = subprocess.run(
+                (str(launcher), "export-apk", str(source.relative_to(worktree))),
+                cwd=worktree,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
             second = subprocess.run(
-                (str(launcher), "export-apk", str(source.relative_to(project_root))),
-                cwd=project_root,
+                (str(launcher), "export-apk", str(source.relative_to(worktree))),
+                cwd=worktree,
                 env=env,
                 text=True,
                 capture_output=True,
@@ -1837,7 +1865,7 @@ console.log(
             outside.write_bytes(b"outside")
             escaped = subprocess.run(
                 (str(launcher), "export-apk", str(outside)),
-                cwd=project_root,
+                cwd=worktree,
                 env=env,
                 text=True,
                 capture_output=True,
@@ -2575,7 +2603,7 @@ console.log(
                     for skill_root in managed_skill_roots:
                         self.assertTrue((project_root / skill_root / "graphify").exists(), skill_root)
 
-    def test_node_installers_remove_legacy_antigravity_skill_links(self) -> None:
+    def test_node_installers_preserve_unauthenticated_legacy_antigravity_skill_links(self) -> None:
         installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
         legacy_link_paths = {
             "antigravity": ".gemini/antigravity/skills/agent-flow",
@@ -2625,8 +2653,9 @@ console.log(
                         check=False,
                     )
 
-                    # 레거시 기록에는 filesystem kind와 target commitment가 없다.
-                    self.assertEqual(result.returncode, 0, result.stderr)
+                    # 레거시 기록에는 ownership commitment가 없어 설치본으로 신뢰할 수 없다.
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("unmanaged skill entry conflicts", result.stderr)
                     for link_path in legacy_link_paths.values():
                         self.assertTrue((project_root / link_path).is_symlink(), link_path)
 

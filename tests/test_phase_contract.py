@@ -407,6 +407,68 @@ def test_run_lock_rejects_skill_resolved_outside_the_locked_candidate_set(
     assert "skill_outside_run_lock" in str(excinfo.value)
 
 
+def test_run_lock_allows_profile_validated_plain_text_skill_from_active_host(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    run_dir = project / ".agent-flow" / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "meta.json").write_text(
+        json.dumps({"task": "", "resolved_skill_lock": {"skills": []}}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AGENT_FLOW_ACTIVE_HOST", "omp")
+    monkeypatch.setattr(
+        "agent_flow.core.phase_contract.authenticated_installed_skill_index",
+        lambda _root: {"selection": {}, "skills": []},
+    )
+    monkeypatch.setattr(
+        "agent_flow.core.phase_contract.runtime_changed_files",
+        lambda *_args: (),
+    )
+    monkeypatch.setattr(
+        "agent_flow.core.phase_contract.resolve_runtime_skill_plan",
+        lambda *_args, **_kwargs: {
+            "skills": [
+                {
+                    "name": "compose-modifier-and-layout-style",
+                    "path": str(
+                        tmp_path
+                        / "home"
+                        / ".omp"
+                        / "agent"
+                        / "skills"
+                        / "compose-modifier-and-layout-style"
+                        / "SKILL.md"
+                    ),
+                    "tree_hash": None,
+                    "source_host": "omp",
+                    "load_mode": "plain_text",
+                }
+            ],
+            "missing": [],
+            "missing_profiles": [],
+            "resolution_errors": [],
+        },
+    )
+    runner = Runner.__new__(Runner)
+    runner.config_root = project
+    runner.project_root = project
+    runner.run_dir = run_dir
+
+    resolved = runner._runtime_contract_phase(
+        Phase(
+            id="implement",
+            description="",
+            required_skills=(),
+            requirements=(),
+        )
+    )
+
+    assert resolved.required_skills == ("compose-modifier-and-layout-style",)
+
+
 def test_run_lock_guard_matches_locked_names_case_insensitively(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

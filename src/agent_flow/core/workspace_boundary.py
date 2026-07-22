@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+import ctypes
+import fcntl
+import errno
 import hashlib
 import json
 import os
+import threading
 import re
 import stat
 import subprocess
 import sys
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
+from functools import wraps
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Mapping
 
@@ -59,6 +66,29 @@ class ActivePinnedWorkspace:
     name: str
     identity: WorkspaceIdentity
     run_dir: Path
+
+@dataclass(frozen=True)
+class RecoverableStaleWorkspace:
+    name: str
+    identity: WorkspaceIdentity
+    run_dir: Path
+
+
+@dataclass(frozen=True)
+class OrphanedWorkspaceQuarantine:
+    path: Path
+    workspace_name: str
+    run_id: str
+
+
+@dataclass(frozen=True)
+class _OwnedMove:
+    source: Path
+    destination: Path
+    source_parent_fd: int
+    destination_parent_fd: int
+    device: int
+    inode: int
 
 
 @dataclass(frozen=True)
@@ -129,6 +159,77 @@ def execution_identity_from_dict(payload: object) -> ExecutionIdentity:
     return identity
 
 
+_WORKSPACE_MUTATION_THREAD_LOCK = threading.RLock()
+
+
+@contextmanager
+def _workspace_mutation_lock(git_common_dir: Path) -> Iterator[None]:
+    with _WORKSPACE_MUTATION_THREAD_LOCK:
+        common = _authenticated_directory_root(git_common_dir)
+        locks_root = _git_private_directory(
+            common,
+            "agent-flow",
+            "locks",
+            create=True,
+        )
+        directory_flags = os.O_RDONLY
+        if hasattr(os, "O_DIRECTORY"):
+            directory_flags |= os.O_DIRECTORY
+        if hasattr(os, "O_NOFOLLOW"):
+            directory_flags |= os.O_NOFOLLOW
+        directory_fd = os.open(locks_root, directory_flags)
+        flags = os.O_RDWR | os.O_CREAT
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(
+            "workspace-mutation.lock",
+            flags,
+            0o600,
+            dir_fd=directory_fd,
+        )
+        try:
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1
+                or metadata.st_uid != os.getuid()
+                or metadata.st_mode & 0o077
+            ):
+                raise WorkspaceBoundaryError("workspace mutation lock is unsafe")
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+            os.close(directory_fd)
+
+
+def _serialized_workspace_mutation(
+    common_dir: Callable[..., Path],
+) -> Callable[..., object]:
+    def decorate(function: Callable[..., object]) -> Callable[..., object]:
+        @wraps(function)
+        def locked(*args: object, **kwargs: object) -> object:
+            with _workspace_mutation_lock(common_dir(*args, **kwargs)):
+                return function(*args, **kwargs)
+
+        return locked
+
+    return decorate
+
+
+def _leader_git_common_dir(leader_root: Path) -> Path:
+    leader = leader_root.resolve(strict=True)
+    return Path(
+        _git(leader, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    )
+
+
+@_serialized_workspace_mutation(
+    lambda _execution, identity, _run_dir, **_kwargs: Path(identity.git_common_dir)
+)
 def bind_execution_to_workspace(
     execution: ExecutionIdentity,
     identity: WorkspaceIdentity,
@@ -205,6 +306,9 @@ def bind_execution_to_workspace(
         temporary.unlink(missing_ok=True)
 
 
+@_serialized_workspace_mutation(
+    lambda identity, **_kwargs: Path(identity.git_common_dir)
+)
 def acquire_workspace_start_claim(
     identity: WorkspaceIdentity,
     *,
@@ -499,6 +603,9 @@ def assert_workspace_start_available(
         )
 
 
+@_serialized_workspace_mutation(
+    lambda _execution, *, git_common_dir, **_kwargs: git_common_dir
+)
 def release_execution_binding(
     execution: ExecutionIdentity,
     *,
@@ -696,8 +803,14 @@ def resolve_execution_workspace(
 def select_execution_workspace(
     leader_root: Path,
     execution: ExecutionIdentity | None,
+    *,
+    active_workspaces: tuple[ActivePinnedWorkspace, ...] | None = None,
 ) -> ActivePinnedWorkspace | None:
-    active = find_active_pinned_workspaces(leader_root)
+    active = (
+        find_active_pinned_workspaces(leader_root)
+        if active_workspaces is None
+        else active_workspaces
+    )
     if not active:
         return None
     if execution is None:
@@ -732,6 +845,9 @@ def execution_binding_exists(
     return binding_path.exists() or binding_path.is_symlink()
 
 
+@_serialized_workspace_mutation(
+    lambda identity, _execution, _run_dir, **_kwargs: Path(identity.git_common_dir)
+)
 def record_workspace_finalizer(
     identity: WorkspaceIdentity,
     execution: ExecutionIdentity,
@@ -1238,6 +1354,9 @@ def _authenticated_repin_run_dir(
     )
 
 
+@_serialized_workspace_mutation(
+    lambda leader_root, _workspace_name, _execution: _leader_git_common_dir(leader_root)
+)
 def repin_workspace_identity(
     leader_root: Path,
     workspace_name: str,
@@ -1613,11 +1732,41 @@ def resolve_mutation_path(
     return resolved
 
 
-def find_active_pinned_workspaces(leader_root: Path) -> tuple[ActivePinnedWorkspace, ...]:
+def find_active_pinned_workspaces(
+    leader_root: Path,
+    *,
+    allow_recoverable_stale: bool = False,
+) -> tuple[ActivePinnedWorkspace, ...]:
     leader = leader_root.resolve(strict=True)
     common = _authenticated_directory_root(Path(
         _git(leader, "rev-parse", "--path-format=absolute", "--git-common-dir")
     ))
+    recoverable = (
+        find_recoverable_stale_pinned_workspaces(leader)
+        if allow_recoverable_stale
+        else ()
+    )
+
+    def is_recoverable(
+        workspace_name: str,
+        identity: WorkspaceIdentity,
+        run_dir: Path,
+    ) -> bool:
+        target = run_dir.resolve(strict=False)
+        matches = [
+            item
+            for item in recoverable
+            if item.name == workspace_name
+            and item.run_dir.resolve(strict=False) == target
+        ]
+        if not matches:
+            return False
+        if any(item.identity != identity for item in matches):
+            raise WorkspaceBoundaryError(
+                "recoverable stale workspace publication identity changed"
+            )
+        return True
+
     runtime_root = _git_private_directory(common, "agent-flow", "worktrees")
     active: list[ActivePinnedWorkspace] = []
     if runtime_root.exists():
@@ -1653,6 +1802,8 @@ def find_active_pinned_workspaces(leader_root: Path) -> tuple[ActivePinnedWorksp
                         worktree_runtime / "manifest.json"
                     ).get("identity")
                 identity = workspace_identity_from_dict(workspace_payload)
+                if is_recoverable(worktree_runtime.name, identity, run_dir):
+                    continue
                 validate_workspace_identity(identity)
                 active.append(ActivePinnedWorkspace(worktree_runtime.name, identity, run_dir))
     bindings_root = _git_private_directory(common, "agent-flow", "executions")
@@ -1662,33 +1813,50 @@ def find_active_pinned_workspaces(leader_root: Path) -> tuple[ActivePinnedWorksp
             if not _binding_is_active(binding):
                 continue
             identity = workspace_identity_from_dict(binding.get("workspace"))
-            validate_workspace_identity(identity)
             run_dir_value = binding.get("run_dir")
             if not isinstance(run_dir_value, str) or not run_dir_value:
                 raise WorkspaceBoundaryError("execution_binding_invalid: run directory")
+            run_dir = Path(run_dir_value)
+            workspace_name = str(
+                binding.get("workspace_name") or Path(identity.workspace_root).name
+            )
+            if is_recoverable(workspace_name, identity, run_dir):
+                continue
+            validate_workspace_identity(identity)
             active.append(
                 ActivePinnedWorkspace(
-                    str(binding.get("workspace_name") or Path(identity.workspace_root).name),
+                    workspace_name,
                     identity,
-                    Path(run_dir_value).resolve(strict=True),
+                    run_dir.resolve(strict=True),
                 )
             )
     node_states_root = _git_private_directory(common, "agent-flow", "current-runs")
     if node_states_root.exists():
         for state_path in sorted(node_states_root.glob("*.json")):
             node_state = _read_owned_json(state_path)
+            workspace_payload = node_state.get("workspace")
+            run_dir_value = node_state.get("run_dir")
+            if workspace_payload is not None and isinstance(run_dir_value, str):
+                identity = workspace_identity_from_dict(workspace_payload)
+                run_dir = Path(run_dir_value)
+                if not run_dir.is_absolute():
+                    run_dir = leader / run_dir
+                if is_recoverable(
+                    Path(identity.workspace_root).name,
+                    identity,
+                    run_dir,
+                ):
+                    continue
             if not _node_state_publication_is_active(leader, node_state):
                 if _node_state_is_semantically_active(node_state):
                     raise WorkspaceBoundaryError(
                         _node_state_publication_error(leader, node_state)
                     )
                 continue
-            workspace_payload = node_state.get("workspace")
             if workspace_payload is None:
                 continue
             identity = workspace_identity_from_dict(workspace_payload)
             workspace_root = validate_workspace_identity(identity)
-            run_dir_value = node_state.get("run_dir")
             if not isinstance(run_dir_value, str) or not run_dir_value:
                 raise WorkspaceBoundaryError("pinned Node run directory is invalid")
             run_dir = Path(run_dir_value)
@@ -1696,7 +1864,7 @@ def find_active_pinned_workspaces(leader_root: Path) -> tuple[ActivePinnedWorksp
                 run_dir = leader / run_dir
             active.append(
                 ActivePinnedWorkspace(
-                    Path(identity.workspace_root).name,
+                    workspace_root.name,
                     identity,
                     run_dir.resolve(strict=False),
                 )
@@ -1704,29 +1872,43 @@ def find_active_pinned_workspaces(leader_root: Path) -> tuple[ActivePinnedWorksp
     node_state_path = leader / ".agent-flow" / "state" / "current-run.json"
     if node_state_path.is_file():
         node_state = _read_json(node_state_path)
-        publication_active = _node_state_publication_is_active(leader, node_state)
-        if not publication_active and _node_state_is_semantically_active(node_state):
-            raise WorkspaceBoundaryError(
-                _node_state_publication_error(leader, node_state)
-            )
-        if publication_active:
-            workspace_payload = node_state.get("workspace")
-            if workspace_payload is not None:
-                identity = workspace_identity_from_dict(workspace_payload)
-                validate_workspace_identity(identity)
-                run_dir_value = node_state.get("run_dir")
-                if not isinstance(run_dir_value, str) or not run_dir_value:
-                    raise WorkspaceBoundaryError("pinned Node run directory is invalid")
-                run_dir = Path(run_dir_value)
-                if not run_dir.is_absolute():
-                    run_dir = leader / run_dir
-                active.append(
-                    ActivePinnedWorkspace(
-                        Path(identity.workspace_root).name,
-                        identity,
-                        run_dir.resolve(strict=False),
-                    )
+        workspace_payload = node_state.get("workspace")
+        run_dir_value = node_state.get("run_dir")
+        if workspace_payload is not None and isinstance(run_dir_value, str):
+            identity = workspace_identity_from_dict(workspace_payload)
+            run_dir = Path(run_dir_value)
+            if not run_dir.is_absolute():
+                run_dir = leader / run_dir
+            if is_recoverable(
+                Path(identity.workspace_root).name,
+                identity,
+                run_dir,
+            ):
+                node_state = {}
+        if node_state:
+            publication_active = _node_state_publication_is_active(leader, node_state)
+            if not publication_active and _node_state_is_semantically_active(node_state):
+                raise WorkspaceBoundaryError(
+                    _node_state_publication_error(leader, node_state)
                 )
+            if publication_active:
+                workspace_payload = node_state.get("workspace")
+                if workspace_payload is not None:
+                    identity = workspace_identity_from_dict(workspace_payload)
+                    validate_workspace_identity(identity)
+                    run_dir_value = node_state.get("run_dir")
+                    if not isinstance(run_dir_value, str) or not run_dir_value:
+                        raise WorkspaceBoundaryError("pinned Node run directory is invalid")
+                    run_dir = Path(run_dir_value)
+                    if not run_dir.is_absolute():
+                        run_dir = leader / run_dir
+                    active.append(
+                        ActivePinnedWorkspace(
+                            Path(identity.workspace_root).name,
+                            identity,
+                            run_dir.resolve(strict=False),
+                        )
+                    )
     unique = {
         (item.identity.workspace_root, str(item.run_dir.resolve(strict=False))): item
         for item in active
@@ -1740,6 +1922,717 @@ def find_active_pinned_workspace(leader_root: Path) -> ActivePinnedWorkspace | N
         names = ", ".join(item.name for item in active)
         raise WorkspaceBoundaryError(f"multiple active pinned workspaces: {names}")
     return active[0] if active else None
+
+
+def _assert_recovery_publications_consistent(
+    leader: Path,
+    common: Path,
+    workspace_name: str,
+    run_dir: Path,
+    identity: WorkspaceIdentity,
+) -> None:
+    target_run = run_dir.resolve(strict=False)
+    bindings_root = _git_private_directory(common, "agent-flow", "executions")
+    if bindings_root.exists():
+        for binding_path in sorted(bindings_root.glob("*.json")):
+            binding = _read_owned_json(binding_path)
+            name_matches = binding.get("workspace_name") == workspace_name
+            run_matches = _recovery_run_dir_matches(
+                binding.get("run_dir"),
+                leader,
+                target_run,
+            )
+            if name_matches != run_matches:
+                raise WorkspaceBoundaryError(
+                    "recoverable stale execution publication changed"
+                )
+            if name_matches and (
+                workspace_identity_from_dict(binding.get("workspace")) != identity
+            ):
+                raise WorkspaceBoundaryError(
+                    "recoverable stale execution identity changed"
+                )
+
+    current_runs = _git_private_directory(common, "agent-flow", "current-runs")
+    if current_runs.exists():
+        for state_path in sorted(current_runs.glob("*.json")):
+            state = _read_owned_json(state_path)
+            if not _recovery_run_dir_matches(
+                state.get("run_dir"),
+                leader,
+                target_run,
+            ):
+                continue
+            workspace_payload = state.get("workspace")
+            if (
+                workspace_payload is not None
+                and workspace_identity_from_dict(workspace_payload) != identity
+            ):
+                raise WorkspaceBoundaryError(
+                    "recoverable stale Node publication identity changed"
+                )
+
+    leader_state = (
+        _owned_directory(
+            _authenticated_directory_root(leader),
+            ".agent-flow",
+            "state",
+        )
+        / "current-run.json"
+    )
+    if leader_state.exists() or leader_state.is_symlink():
+        state = _read_owned_json(leader_state)
+        if _recovery_run_dir_matches(state.get("run_dir"), leader, target_run):
+            workspace_payload = state.get("workspace")
+            if (
+                workspace_payload is not None
+                and workspace_identity_from_dict(workspace_payload) != identity
+            ):
+                raise WorkspaceBoundaryError(
+                    "recoverable stale leader publication identity changed"
+                )
+
+    claims_root = _git_private_directory(
+        common,
+        "agent-flow",
+        "workspace-start-claims",
+    )
+    claim_name = (
+        hashlib.sha256(identity.workspace_root.encode("utf-8")).hexdigest()
+        + ".lock"
+    )
+    claim_path = claims_root / claim_name
+    if claim_path.exists() or claim_path.is_symlink():
+        claim = _read_owned_json(claim_path)
+        if (
+            not _workspace_claim_matches_identity(claim, identity)
+            or claim.get("run_id") not in {run_dir.name, "pending"}
+        ):
+            raise WorkspaceBoundaryError(
+                "recoverable stale workspace claim identity changed"
+            )
+
+
+def find_recoverable_stale_pinned_workspaces(
+    leader_root: Path,
+) -> tuple[RecoverableStaleWorkspace, ...]:
+    leader = leader_root.resolve(strict=True)
+    common = _authenticated_directory_root(
+        Path(_git(leader, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+    )
+    runtime_root = _git_private_directory(common, "agent-flow", "worktrees")
+    stale: list[RecoverableStaleWorkspace] = []
+    if not runtime_root.exists():
+        return ()
+    for worktree_runtime in sorted(runtime_root.iterdir()):
+        runtime_metadata = worktree_runtime.lstat()
+        if stat.S_ISLNK(runtime_metadata.st_mode):
+            raise WorkspaceBoundaryError(
+                "pinned worktree runtime metadata is a symbolic link"
+            )
+        if not stat.S_ISDIR(runtime_metadata.st_mode):
+            continue
+        runs_root = _owned_directory(worktree_runtime, ".agent-flow", "runs")
+        if not runs_root.exists():
+            continue
+        for run_dir in sorted(runs_root.iterdir()):
+            run_metadata = run_dir.lstat()
+            if stat.S_ISLNK(run_metadata.st_mode):
+                raise WorkspaceBoundaryError("pinned run directory is a symbolic link")
+            if not stat.S_ISDIR(run_metadata.st_mode):
+                continue
+            active_path = run_dir / "active"
+            if not active_path.exists() and not active_path.is_symlink():
+                continue
+            active_metadata = active_path.lstat()
+            if stat.S_ISLNK(active_metadata.st_mode) or not stat.S_ISREG(
+                active_metadata.st_mode
+            ):
+                raise WorkspaceBoundaryError("pinned active marker is not regular")
+            meta = _read_owned_json(run_dir / "meta.json")
+            workspace_payload = meta.get("workspace")
+            manifest_path = worktree_runtime / "manifest.json"
+            if manifest_path.exists() or manifest_path.is_symlink():
+                manifest = _read_owned_json(manifest_path)
+                identity = workspace_identity_from_dict(manifest.get("identity"))
+                if (
+                    workspace_payload is not None
+                    and workspace_identity_from_dict(workspace_payload) != identity
+                ):
+                    raise WorkspaceBoundaryError(
+                        "recoverable stale run identity changed"
+                    )
+            else:
+                if workspace_payload is None:
+                    raise WorkspaceBoundaryError(
+                        "pinned worktree manifest is missing and run identity is unavailable"
+                    )
+                identity = workspace_identity_from_dict(workspace_payload)
+            if not _workspace_is_recoverably_stale(
+                leader,
+                common,
+                worktree_runtime.name,
+                identity,
+            ):
+                continue
+            _assert_recovery_publications_consistent(
+                leader,
+                common,
+                worktree_runtime.name,
+                run_dir,
+                identity,
+            )
+            stale.append(
+                RecoverableStaleWorkspace(
+                    worktree_runtime.name,
+                    identity,
+                    run_dir,
+                )
+            )
+    unique = {
+        (item.name, str(item.run_dir.resolve(strict=False))): item
+        for item in stale
+    }
+    return tuple(unique[key] for key in sorted(unique))
+
+
+@_serialized_workspace_mutation(
+    lambda leader_root, _workspace_name: _leader_git_common_dir(leader_root)
+)
+def quarantine_orphaned_workspace(
+    leader_root: Path,
+    workspace_name: str,
+) -> OrphanedWorkspaceQuarantine:
+    if (
+        not workspace_name
+        or Path(workspace_name).name != workspace_name
+        or workspace_name in {".", ".."}
+    ):
+        raise WorkspaceBoundaryError("git-private worktree name is invalid")
+    leader = leader_root.resolve(strict=True)
+    matching = [
+        item
+        for item in find_recoverable_stale_pinned_workspaces(leader)
+        if item.name == workspace_name
+    ]
+    if len(matching) != 1:
+        raise WorkspaceBoundaryError(
+            "execution_identity_missing: owner-independent abort requires exactly "
+            "one recoverable stale run"
+        )
+    stale = matching[0]
+    common = _authenticated_directory_root(Path(stale.identity.git_common_dir))
+    agent_flow_root = _git_private_directory(common, "agent-flow")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    quarantine_name = f"_quarantine-{timestamp}"
+    quarantine_path = agent_flow_root / quarantine_name
+    if quarantine_path.exists() or quarantine_path.is_symlink():
+        quarantine_name = f"{quarantine_name}-{os.urandom(4).hex()}"
+    quarantine_path = _git_private_directory(
+        common,
+        "agent-flow",
+        quarantine_name,
+        create=True,
+    )
+    quarantine_worktrees = _owned_directory(
+        quarantine_path,
+        "worktrees",
+        create=True,
+    )
+    quarantine_current_runs = _owned_directory(
+        quarantine_path,
+        "current-runs",
+        create=True,
+    )
+    quarantine_executions = _owned_directory(
+        quarantine_path,
+        "executions",
+        create=True,
+    )
+    quarantine_ondisk = _owned_directory(
+        quarantine_path,
+        "ondisk-worktrees",
+        create=True,
+    )
+    quarantine_state = _owned_directory(
+        quarantine_path,
+        "state",
+        create=True,
+    )
+    quarantine_claims = _owned_directory(
+        quarantine_path,
+        "workspace-start-claims",
+        create=True,
+    )
+
+    target_run = stale.run_dir.resolve(strict=False)
+    moves: list[_OwnedMove] = []
+    bindings_root = _git_private_directory(common, "agent-flow", "executions")
+    current_runs_root = _git_private_directory(common, "agent-flow", "current-runs")
+    try:
+        if bindings_root.exists():
+            for binding_path in sorted(bindings_root.glob("*.json")):
+                binding = _read_owned_json(binding_path)
+                if (
+                    binding.get("workspace_name") == workspace_name
+                    and _recovery_run_dir_matches(
+                        binding.get("run_dir"),
+                        leader,
+                        target_run,
+                    )
+                ):
+                    _move_owned_entry(
+                        binding_path,
+                        quarantine_executions / binding_path.name,
+                        moves,
+                        expected_payload=binding,
+                    )
+        if current_runs_root.exists():
+            for state_path in sorted(current_runs_root.glob("*.json")):
+                state = _read_owned_json(state_path)
+                if _recovery_run_dir_matches(
+                    state.get("run_dir"),
+                    leader,
+                    target_run,
+                ):
+                    _move_owned_entry(
+                        state_path,
+                        quarantine_current_runs / state_path.name,
+                        moves,
+                        expected_payload=state,
+                    )
+
+        leader_state = (
+            _owned_directory(
+                _authenticated_directory_root(leader),
+                ".agent-flow",
+                "state",
+            )
+            / "current-run.json"
+        )
+        if leader_state.exists() or leader_state.is_symlink():
+            state = _read_owned_json(leader_state)
+            if _recovery_run_dir_matches(
+                state.get("run_dir"),
+                leader,
+                target_run,
+            ):
+                _move_owned_entry(
+                    leader_state,
+                    quarantine_state / leader_state.name,
+                    moves,
+                    expected_payload=state,
+                )
+
+        claims_root = _git_private_directory(
+            common,
+            "agent-flow",
+            "workspace-start-claims",
+        )
+        claim_name = (
+            hashlib.sha256(stale.identity.workspace_root.encode("utf-8")).hexdigest()
+            + ".lock"
+        )
+        claim_path = claims_root / claim_name
+        if claim_path.exists() or claim_path.is_symlink():
+            claim = _read_owned_json(claim_path)
+            if (
+                not _workspace_claim_matches_identity(claim, stale.identity)
+                or claim.get("run_id") not in {stale.run_dir.name, "pending"}
+            ):
+                raise WorkspaceBoundaryError(
+                    "recoverable stale workspace claim identity changed"
+                )
+            _move_owned_entry(
+                claim_path,
+                quarantine_claims / claim_path.name,
+                moves,
+                expected_payload=claim,
+            )
+
+        runtime_root = authenticated_worktree_runtime_root(common, workspace_name)
+        _move_owned_entry(
+            runtime_root,
+            quarantine_worktrees / workspace_name,
+            moves,
+        )
+        checkout_root = _owned_directory(
+            _authenticated_directory_root(leader),
+            ".agent-flow",
+            "worktrees",
+        )
+        checkout = checkout_root / workspace_name
+        if checkout.exists() or checkout.is_symlink():
+            checkout_metadata = checkout.lstat()
+            if stat.S_ISLNK(checkout_metadata.st_mode) or not stat.S_ISDIR(
+                checkout_metadata.st_mode
+            ):
+                raise WorkspaceBoundaryError(
+                    "stale worktree residue is not an owned directory"
+                )
+            checkout_move = _move_owned_entry(
+                checkout,
+                quarantine_ondisk / workspace_name,
+                moves,
+            )
+            if _moved_directory_has_entry(checkout_move, ".git"):
+                raise WorkspaceBoundaryError(
+                    "owner-independent abort cannot quarantine a git worktree"
+                )
+    except BaseException as exc:
+        try:
+            _rollback_owned_moves(moves)
+        except WorkspaceBoundaryError as rollback_exc:
+            raise rollback_exc from exc
+        finally:
+            _close_owned_moves(moves)
+        raise
+    _close_owned_moves(moves)
+    return OrphanedWorkspaceQuarantine(
+        quarantine_path,
+        workspace_name,
+        stale.run_dir.name,
+    )
+
+
+def _read_worktree_link(path: Path, *, checkout: bool) -> Path | None:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise WorkspaceBoundaryError("git worktree backlink is not a regular file")
+    content = path.read_text(encoding="utf-8").strip()
+    repeated = path.lstat()
+    if repeated.st_dev != metadata.st_dev or repeated.st_ino != metadata.st_ino:
+        raise WorkspaceBoundaryError("git worktree backlink changed while reading")
+    if checkout:
+        prefix = "gitdir: "
+        if not content.startswith(prefix):
+            raise WorkspaceBoundaryError("git worktree checkout link is invalid")
+        content = content.removeprefix(prefix)
+    target = Path(content)
+    if not target.is_absolute():
+        raise WorkspaceBoundaryError("git worktree backlink is not absolute")
+    return target
+
+
+def _worktree_admin_has_live_checkout(
+    common: Path,
+    git_dir: Path,
+) -> bool:
+    if git_dir.parent != common / "worktrees":
+        raise WorkspaceBoundaryError("git worktree admin path is invalid")
+    if not git_dir.exists() and not git_dir.is_symlink():
+        return False
+    admin = _authenticated_directory_root(git_dir)
+    checkout_link = _read_worktree_link(admin / "gitdir", checkout=False)
+    if checkout_link is None:
+        return False
+    checkout_admin = _read_worktree_link(checkout_link, checkout=True)
+    if checkout_admin is None:
+        return False
+    if checkout_link.name != ".git" or checkout_admin != admin:
+        raise WorkspaceBoundaryError("git worktree backlink target changed")
+    return True
+
+
+def _workspace_is_recoverably_stale(
+    leader: Path,
+    common: Path,
+    workspace_name: str,
+    identity: WorkspaceIdentity,
+) -> bool:
+    expected_workspace = leader / ".agent-flow" / "worktrees" / workspace_name
+    git_dir = Path(identity.git_dir)
+    if (
+        Path(identity.workspace_root) != expected_workspace
+        or Path(identity.git_common_dir) != common
+        or git_dir.parent != common / "worktrees"
+    ):
+        raise WorkspaceBoundaryError("recoverable stale workspace identity is invalid")
+    if _worktree_admin_has_live_checkout(common, git_dir):
+        try:
+            validate_workspace_identity(identity)
+        except WorkspaceBoundaryError as exc:
+            raise WorkspaceBoundaryError(
+                "pinned workspace filesystem identity changed; "
+                "moved to a live checkout"
+            ) from exc
+        return False
+    workspace = Path(identity.workspace_root)
+    try:
+        metadata = workspace.lstat()
+    except FileNotFoundError:
+        return True
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise WorkspaceBoundaryError("stale workspace residue is not an owned directory")
+    git_link = workspace / ".git"
+    return not git_link.exists() and not git_link.is_symlink()
+
+
+def _move_owned_entry(
+    source: Path,
+    destination: Path,
+    moves: list[_OwnedMove],
+    *,
+    expected_payload: Mapping[str, object] | None = None,
+) -> _OwnedMove:
+    source_parent_fd = _open_owned_parent_dirfd(source)
+    try:
+        destination_parent_fd = _open_owned_parent_dirfd(destination)
+    except BaseException:
+        os.close(source_parent_fd)
+        raise
+    appended = False
+    try:
+        source_metadata = _stat_at(source_parent_fd, source.name)
+        if stat.S_ISLNK(source_metadata.st_mode):
+            raise WorkspaceBoundaryError(
+                f"quarantine source is a symbolic link: {source}"
+            )
+        if _exists_at(destination_parent_fd, destination.name):
+            raise WorkspaceBoundaryError(
+                f"quarantine destination exists: {destination}"
+            )
+        _rename_owned_no_replace_at(
+            source_parent_fd,
+            source.name,
+            destination_parent_fd,
+            destination.name,
+        )
+        os.fsync(source_parent_fd)
+        if destination_parent_fd != source_parent_fd:
+            os.fsync(destination_parent_fd)
+        move = _OwnedMove(
+            source,
+            destination,
+            source_parent_fd,
+            destination_parent_fd,
+            source_metadata.st_dev,
+            source_metadata.st_ino,
+        )
+        moves.append(move)
+        appended = True
+        moved_metadata = _stat_at(destination_parent_fd, destination.name)
+        if (
+            moved_metadata.st_dev != source_metadata.st_dev
+            or moved_metadata.st_ino != source_metadata.st_ino
+            or _exists_at(source_parent_fd, source.name)
+        ):
+            raise WorkspaceBoundaryError(
+                f"quarantine source changed while moving: {source}"
+            )
+        if expected_payload is not None:
+            moved_payload, repeated = _read_owned_json_at(
+                destination_parent_fd,
+                destination.name,
+            )
+            if (
+                moved_payload != expected_payload
+                or repeated.st_dev != source_metadata.st_dev
+                or repeated.st_ino != source_metadata.st_ino
+            ):
+                raise WorkspaceBoundaryError(
+                    f"quarantine source changed while moving: {source}"
+                )
+        return move
+    finally:
+        if not appended:
+            os.close(source_parent_fd)
+            os.close(destination_parent_fd)
+
+
+def _portable_rename_owned_no_replace_at(
+    source_fd: int,
+    source_name: str,
+    destination_fd: int,
+    destination_name: str,
+) -> None:
+    source_metadata = _stat_at(source_fd, source_name)
+    try:
+        if stat.S_ISREG(source_metadata.st_mode):
+            os.link(
+                source_name,
+                destination_name,
+                src_dir_fd=source_fd,
+                dst_dir_fd=destination_fd,
+                follow_symlinks=False,
+            )
+            try:
+                os.unlink(source_name, dir_fd=source_fd)
+            except BaseException:
+                destination_metadata = _stat_at(destination_fd, destination_name)
+                if (
+                    destination_metadata.st_dev == source_metadata.st_dev
+                    and destination_metadata.st_ino == source_metadata.st_ino
+                ):
+                    os.unlink(destination_name, dir_fd=destination_fd)
+                raise
+            return
+        if stat.S_ISDIR(source_metadata.st_mode):
+            os.mkdir(destination_name, mode=0o700, dir_fd=destination_fd)
+            placeholder = _stat_at(destination_fd, destination_name)
+            try:
+                os.rename(
+                    source_name,
+                    destination_name,
+                    src_dir_fd=source_fd,
+                    dst_dir_fd=destination_fd,
+                )
+            except BaseException:
+                try:
+                    current = _stat_at(destination_fd, destination_name)
+                    if (
+                        current.st_dev == placeholder.st_dev
+                        and current.st_ino == placeholder.st_ino
+                    ):
+                        os.rmdir(destination_name, dir_fd=destination_fd)
+                except FileNotFoundError:
+                    pass
+                raise
+            return
+    except FileExistsError as exc:
+        raise WorkspaceBoundaryError(
+            f"quarantine destination appeared: {destination_name}"
+        ) from exc
+    raise WorkspaceBoundaryError(
+        f"quarantine no-replace rename is unavailable for: {source_name}"
+    )
+
+
+def _rename_owned_no_replace_at(
+    source_fd: int,
+    source_name: str,
+    destination_fd: int,
+    destination_name: str,
+) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    encoded_source = os.fsencode(source_name)
+    encoded_destination = os.fsencode(destination_name)
+    if sys.platform == "darwin":
+        rename = libc.renameatx_np
+        rename.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        rename.restype = ctypes.c_int
+        result = rename(
+            source_fd,
+            encoded_source,
+            destination_fd,
+            encoded_destination,
+            4,
+        )
+    elif sys.platform.startswith("linux"):
+        try:
+            rename = libc.renameat2
+        except AttributeError:
+            _portable_rename_owned_no_replace_at(
+                source_fd,
+                source_name,
+                destination_fd,
+                destination_name,
+            )
+            return
+        rename.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        rename.restype = ctypes.c_int
+        result = rename(
+            source_fd,
+            encoded_source,
+            destination_fd,
+            encoded_destination,
+            1,
+        )
+    else:
+        _portable_rename_owned_no_replace_at(
+            source_fd,
+            source_name,
+            destination_fd,
+            destination_name,
+        )
+        return
+    if result == 0:
+        return
+    code = ctypes.get_errno()
+    if code in {errno.EEXIST, errno.ENOTEMPTY}:
+        raise WorkspaceBoundaryError(
+            f"quarantine destination appeared: {destination_name}"
+        )
+    raise WorkspaceBoundaryError(
+        f"quarantine no-replace rename failed: errno {code}"
+    )
+
+
+def _moved_directory_has_entry(move: _OwnedMove, name: str) -> bool:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    directory_fd = os.open(
+        move.destination.name,
+        flags,
+        dir_fd=move.destination_parent_fd,
+    )
+    try:
+        metadata = os.fstat(directory_fd)
+        if metadata.st_dev != move.device or metadata.st_ino != move.inode:
+            raise WorkspaceBoundaryError(
+                f"quarantine destination changed: {move.destination}"
+            )
+        return _exists_at(directory_fd, name)
+    finally:
+        os.close(directory_fd)
+
+
+def _rollback_owned_moves(moves: list[_OwnedMove]) -> None:
+    conflicts: list[str] = []
+    for move in reversed(moves):
+        try:
+            if _exists_at(move.source_parent_fd, move.source.name):
+                conflicts.append(f"source reappeared: {move.source}")
+                continue
+            moved = _stat_at(
+                move.destination_parent_fd,
+                move.destination.name,
+            )
+            if moved.st_dev != move.device or moved.st_ino != move.inode:
+                conflicts.append(f"destination changed: {move.destination}")
+                continue
+            _rename_owned_no_replace_at(
+                move.destination_parent_fd,
+                move.destination.name,
+                move.source_parent_fd,
+                move.source.name,
+            )
+            os.fsync(move.destination_parent_fd)
+            if move.source_parent_fd != move.destination_parent_fd:
+                os.fsync(move.source_parent_fd)
+            restored = _stat_at(move.source_parent_fd, move.source.name)
+            if restored.st_dev != move.device or restored.st_ino != move.inode:
+                conflicts.append(f"restored source changed: {move.source}")
+        except (FileNotFoundError, OSError, WorkspaceBoundaryError) as exc:
+            conflicts.append(f"{move.source}: {exc}")
+    if conflicts:
+        raise WorkspaceBoundaryError(
+            "quarantine rollback conflict: " + "; ".join(conflicts)
+        )
+
+
+def _close_owned_moves(moves: list[_OwnedMove]) -> None:
+    for move in moves:
+        os.close(move.source_parent_fd)
+        os.close(move.destination_parent_fd)
 
 
 def _git_private_directory(
@@ -1980,6 +2873,7 @@ def _remove_owned_json_atomic(path: Path, payload: Mapping[str, object]) -> None
         quarantine = f".{name}.remove-{os.getpid()}-{os.urandom(8).hex()}"
         try:
             os.rename(name, quarantine, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            os.fsync(dir_fd)
         except FileNotFoundError as exc:
             raise WorkspaceBoundaryError(
                 f"git-private metadata file disappeared: {path}"
@@ -1992,10 +2886,12 @@ def _remove_owned_json_atomic(path: Path, payload: Mapping[str, object]) -> None
         ):
             if not _exists_at(dir_fd, name):
                 os.rename(quarantine, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                os.fsync(dir_fd)
             raise WorkspaceBoundaryError(
                 f"git-private metadata file changed before removal: {path}"
             )
         os.unlink(quarantine, dir_fd=dir_fd)
+        os.fsync(dir_fd)
     finally:
         os.close(dir_fd)
 
@@ -2046,6 +2942,7 @@ def _replace_owned_json_atomic(
                     f"git-private metadata file changed before replacement: {path}"
                 )
             os.replace(temporary, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            os.fsync(dir_fd)
             committed = True
         finally:
             if descriptor is not None:

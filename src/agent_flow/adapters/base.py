@@ -90,6 +90,7 @@ class Adapter(ABC):
             project_root,
             self._task_scope,
             required_skills=phase.required_skills,
+            active_host=self.name,
         )
         local_skill_block = local_skill_prompt_block(config_root, phase.id)
         lore_block = self._render_lore_block(project_root, phase)
@@ -282,6 +283,7 @@ class Adapter(ABC):
             project_root,
             self._task_scope,
             required_skills=phase.required_skills,
+            active_host=self.name,
         )
         contract = {
             "required_skills": list(phase.required_skills),

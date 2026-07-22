@@ -57,6 +57,8 @@ def resolve_runtime_phase_contract(
         ),
         str(meta.get("task") or ""),
         required_skills,
+        index_root=config_root,
+        active_host=active_host,
     )
     resolution_errors = plan.get("resolution_errors")
     if isinstance(resolution_errors, list) and resolution_errors:
@@ -96,8 +98,20 @@ def resolve_runtime_phase_contract(
             for entry in lock.get("skills", [])
             if isinstance(entry, dict) and isinstance(entry.get("name"), str)
         }
+        host_loaded_names = {
+            _portable_casefold(skill["name"])
+            for skill in skills
+            if isinstance(skill, dict)
+            and isinstance(skill.get("name"), str)
+            and skill.get("load_mode") == "plain_text"
+            and skill.get("source_host")
+            == (active_host.strip().lower() if isinstance(active_host, str) else None)
+        }
         outside = sorted(
-            name for name in resolved if _portable_casefold(name) not in locked_names
+            name
+            for name in resolved
+            if _portable_casefold(name) not in locked_names
+            and _portable_casefold(name) not in host_loaded_names
         )
         if outside:
             raise SkillResolutionError(

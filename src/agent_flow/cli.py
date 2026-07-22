@@ -47,6 +47,8 @@ from agent_flow.core.workspace_boundary import (
     execution_identity_from_context,
     execution_identity_from_dict,
     find_active_pinned_workspaces,
+    find_recoverable_stale_pinned_workspaces,
+    quarantine_orphaned_workspace,
     repin_workspace_identity,
     release_execution_binding,
     release_workspace_start_claim,
@@ -139,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
     continue_parser.add_argument("--root", default=".")
     continue_parser.add_argument("--worktree")
 
-    abort_parser = subparsers.add_parser("abort")
+    abort_parser = subparsers.add_parser("abort", allow_abbrev=False)
     abort_parser.add_argument("--root", default=".")
     abort_parser.add_argument("--worktree")
     abort_parser.add_argument("--yes", "-y", action="store_true")
@@ -160,7 +162,7 @@ def main(argv: list[str] | None = None) -> int:
     start_parser.add_argument("--worktree-branch")
     start_parser.add_argument("--allow-dirty", action="store_true")
 
-    status_parser = subparsers.add_parser("status")
+    status_parser = subparsers.add_parser("status", allow_abbrev=False)
     status_parser.add_argument("--root", default=".")
     status_parser.add_argument("--worktree")
 
@@ -295,7 +297,7 @@ def main(argv: list[str] | None = None) -> int:
     worktree_create.add_argument("--name", required=True)
     worktree_create.add_argument("--branch")
     worktree_create.add_argument("--allow-dirty", action="store_true")
-    worktree_repin = worktree_subparsers.add_parser("repin")
+    worktree_repin = worktree_subparsers.add_parser("repin", allow_abbrev=False)
     worktree_repin.add_argument("--root", default=".")
     worktree_repin.add_argument("--name", required=True)
     worktree_status = worktree_subparsers.add_parser("status")
@@ -452,33 +454,61 @@ def main(argv: list[str] | None = None) -> int:
     recovery_command = args.command == "abort" or (
         args.command == "worktree" and args.worktree_command == "repin"
     )
-    if hasattr(args, "root") and recovery_command:
+    if (
+        hasattr(args, "root")
+        and args.command == "status"
+        and getattr(args, "worktree", None) is not None
+    ):
+        try:
+            root, inferred_worktree = _resolve_status_cli_root_context(
+                requested_root,
+                args.worktree,
+            )
+        except (OSError, WorkspaceBoundaryError) as exc:
+            print(_format_cli_error(exc), file=sys.stderr)
+            return 2
+    elif hasattr(args, "root") and recovery_command:
         try:
             root = _resolve_recovery_cli_root(requested_root)
             if args.command == "abort" and _is_git_repo(root):
                 execution = execution_identity_from_context(env=os.environ)
                 if args.worktree is not None:
-                    if execution is None:
-                        raise WorkspaceBoundaryError(
-                            "execution_identity_missing: explicit worktree abort "
-                            "requires a host session identity"
-                        )
-                    bound_worktree = resolve_recovery_execution_workspace_name(
-                        root,
-                        execution,
-                    )
                     requested_worktree = _slug_for_hint(root, args.worktree)
-                    if bound_worktree is None:
-                        raise WorkspaceBoundaryError(
-                            "execution_binding_missing: active execution is not "
-                            "bound to a worktree"
+                    if execution is None:
+                        stale = find_recoverable_stale_pinned_workspaces(root)
+                        if sum(
+                            item.name == requested_worktree for item in stale
+                        ) != 1:
+                            raise WorkspaceBoundaryError(
+                                "execution_identity_missing: explicit worktree abort "
+                                "requires a host session identity"
+                            )
+                        args.worktree = requested_worktree
+                        args.owner_independent_abort = True
+                    else:
+                        bound_worktree = resolve_recovery_execution_workspace_name(
+                            root,
+                            execution,
                         )
-                    if requested_worktree != bound_worktree:
-                        raise WorkspaceBoundaryError(
-                            "execution_binding_conflict: requested worktree "
-                            f"{requested_worktree} differs from bound worktree "
-                            f"{bound_worktree}"
-                        )
+                        if bound_worktree is None:
+                            stale = find_recoverable_stale_pinned_workspaces(root)
+                            if sum(
+                                item.name == requested_worktree for item in stale
+                            ) == 1:
+                                args.worktree = requested_worktree
+                                args.owner_independent_abort = True
+                                bound_worktree = requested_worktree
+                            else:
+                                raise WorkspaceBoundaryError(
+                                    "execution_binding_missing: active execution is not "
+                                    "bound to a worktree"
+                                )
+                        if requested_worktree != bound_worktree:
+                            raise WorkspaceBoundaryError(
+                                "execution_binding_conflict: requested worktree "
+                                f"{requested_worktree} differs from bound worktree "
+                                f"{bound_worktree}"
+                            )
                 elif execution is not None:
                     args.worktree = resolve_recovery_execution_workspace_name(
                         root,
@@ -505,6 +535,7 @@ def main(argv: list[str] | None = None) -> int:
                 root,
                 getattr(args, "worktree", None),
                 allow_unbound_execution=args.command == "run",
+                allow_recoverable_stale=args.command == "status",
             )
         except WorkspaceBoundaryError as exc:
             print(_format_cli_error(exc), file=sys.stderr)
@@ -600,6 +631,19 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "abort":
+        if (
+            args.worktree is not None
+            and getattr(args, "owner_independent_abort", False)
+        ):
+            try:
+                quarantine = quarantine_orphaned_workspace(root, args.worktree)
+            except (OSError, WorkspaceBoundaryError) as exc:
+                print(_format_cli_error(exc), file=sys.stderr)
+                return 2
+            print(f"aborted recoverable/stale run: {quarantine.run_id}")
+            print(f"quarantined: {quarantine.path}")
+            return 0
+
         if args.worktree is not None:
             try:
                 status = get_worktree_status(root=root, name=args.worktree)
@@ -654,16 +698,51 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
     if args.command == "status":
-        try:
-            run_root, state_root = _worktree_context(root, args.worktree) if args.worktree else (root, root)
-        except ValueError as exc:
-            print(_format_cli_error(exc), file=sys.stderr)
-            return 2
-        if run_root is None:
-            return 1
-        active = find_active_run(state_root)
-        if active is not None:
-            active.print_status(next_command=_continue_command(root, args.worktree), config_root=root)
+        stale = (
+            find_recoverable_stale_pinned_workspaces(root)
+            if _is_git_repo(root)
+            else ()
+        )
+        if args.worktree is not None:
+            requested_name = _slug_for_hint(root, args.worktree)
+            requested_stale = tuple(
+                item for item in stale if item.name == requested_name
+            )
+        else:
+            requested_stale = stale
+        if requested_stale:
+            run_root, state_root = root, root
+            stale = requested_stale
+        else:
+            try:
+                run_root, state_root = (
+                    _worktree_context(root, args.worktree)
+                    if args.worktree
+                    else (root, root)
+                )
+            except ValueError as exc:
+                print(_format_cli_error(exc), file=sys.stderr)
+                return 2
+            if run_root is None:
+                return 1
+            active = find_active_run(state_root)
+            if active is not None:
+                active.print_status(
+                    next_command=_continue_command(root, args.worktree),
+                    config_root=root,
+                )
+                return 0
+        if stale:
+            for item in stale:
+                print(
+                    f"recoverable/stale run: {item.run_dir.name} "
+                    f"(worktree={item.name})"
+                )
+                print(
+                    "next_command: "
+                    f"agent-flow abort --root {shlex.quote(str(root))} "
+                    f"--worktree {shlex.quote(item.name)} --yes"
+                )
             return 0
         if not (state_root / ".agent-flow" / "runs").exists():
             print("진행 중인 run 없음.")
@@ -2459,11 +2538,28 @@ def _resolve_recovery_cli_root(root: Path) -> Path:
     return _git_common_worktree_root(root) or root
 
 
+def _resolve_status_cli_root_context(
+    root: Path,
+    worktree: str,
+) -> tuple[Path, str | None]:
+    leader = _resolve_recovery_cli_root(root)
+    requested_name = _slug_for_hint(leader, worktree)
+    stale = find_recoverable_stale_pinned_workspaces(leader)
+    if any(item.name == requested_name for item in stale):
+        return leader, requested_name
+    return _resolve_cli_root_context(
+        root,
+        worktree,
+        allow_recoverable_stale=True,
+    )
+
+
 def _resolve_cli_root_context(
     root: Path,
     worktree: str | None,
     *,
     allow_unbound_execution: bool = False,
+    allow_recoverable_stale: bool = False,
 ) -> tuple[Path, str | None]:
     managed = _managed_worktree_context(root)
     if managed is not None:
@@ -2473,6 +2569,7 @@ def _resolve_cli_root_context(
             leader_root,
             requested_worktree=requested_worktree,
             allow_unbound_execution=allow_unbound_execution,
+            allow_recoverable_stale=allow_recoverable_stale,
         )
         return leader_root, active.name if active is not None else requested_worktree
     cwd_managed = _managed_worktree_context(Path.cwd())
@@ -2483,6 +2580,7 @@ def _resolve_cli_root_context(
             leader_root,
             requested_worktree=requested_worktree,
             allow_unbound_execution=allow_unbound_execution,
+            allow_recoverable_stale=allow_recoverable_stale,
         )
         return leader_root, active.name if active is not None else requested_worktree
     git_common_root = _git_common_worktree_root(root)
@@ -2491,6 +2589,7 @@ def _resolve_cli_root_context(
             git_common_root,
             requested_worktree=worktree,
             allow_unbound_execution=allow_unbound_execution,
+            allow_recoverable_stale=allow_recoverable_stale,
         )
         if active is not None:
             return git_common_root, active.name
@@ -2500,6 +2599,7 @@ def _resolve_cli_root_context(
             root,
             requested_worktree=worktree,
             allow_unbound_execution=allow_unbound_execution,
+            allow_recoverable_stale=allow_recoverable_stale,
         )
         if active is not None:
             return root, active.name
@@ -2511,8 +2611,12 @@ def _active_workspace_for_cli(
     *,
     requested_worktree: str | None = None,
     allow_unbound_execution: bool = False,
+    allow_recoverable_stale: bool = False,
 ):
-    active = find_active_pinned_workspaces(root)
+    active = find_active_pinned_workspaces(
+        root,
+        allow_recoverable_stale=allow_recoverable_stale,
+    )
     if not active:
         return None
     requested_name = (
@@ -2523,7 +2627,11 @@ def _active_workspace_for_cli(
     execution = execution_identity_from_context(env=os.environ)
     if execution is not None:
         try:
-            selected = select_execution_workspace(root, execution)
+            selected = select_execution_workspace(
+                root,
+                execution,
+                active_workspaces=active,
+            )
         except WorkspaceBoundaryError as exc:
             if allow_unbound_execution and str(exc).startswith("execution_binding_missing:"):
                 for workspace in active:
@@ -2545,7 +2653,7 @@ def _active_workspace_for_cli(
                 f"{requested_name} differs from bound worktree {selected.name}"
             )
         return selected
-    return select_execution_workspace(root, None)
+    return select_execution_workspace(root, None, active_workspaces=active)
 
 
 def _managed_worktree_context(path: Path) -> tuple[Path, str] | None:
