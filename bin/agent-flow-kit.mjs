@@ -79,9 +79,8 @@ const CANONICAL_HOOK_POLICY = Object.freeze({
   bashPre: Object.freeze([
     "guard-worktree.sh",
     "guard-protected-branch.sh",
-    "guard-worktree-write.py",
   ]),
-  writePre: Object.freeze(["guard-worktree-write.py"]),
+  writePre: Object.freeze([]),
   writePost: Object.freeze(["comment-checker.py"]),
   stop: Object.freeze(["show-phase-status.sh"]),
 });

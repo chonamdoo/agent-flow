@@ -1343,9 +1343,7 @@ def _expected_managed_hook_projection() -> list[list[str]]:
         [
             ["PostToolUse", WRITE_TOOL_MATCHER, "command", "comment-checker.py"],
             ["PreToolUse", "Bash", "command", "guard-protected-branch.sh"],
-            ["PreToolUse", "Bash", "command", "guard-worktree-write.py"],
             ["PreToolUse", "Bash", "command", "guard-worktree.sh"],
-            ["PreToolUse", WRITE_TOOL_MATCHER, "command", "guard-worktree-write.py"],
             ["Stop", "", "command", "show-phase-status.sh"],
         ]
     )
