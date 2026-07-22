@@ -933,6 +933,773 @@ def test_abort_recovers_deleted_bound_workspace(
 
 
 @pytest.mark.git_auth
+def test_status_degrades_deleted_workspace_run_to_recoverable_stale(
+    pinned_run: tuple[Path, Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    shutil.rmtree(worktree)
+    for name in (
+        "AGENT_FLOW_EXECUTION_ID",
+        "AGENT_FLOW_SESSION_ID",
+        "CODEX_THREAD_ID",
+        "CODEX_SESSION_ID",
+        "CLAUDE_SESSION_ID",
+        "OMP_SESSION_ID",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    assert cli_main(["status", "--root", str(leader)]) == 0
+
+    captured = capsys.readouterr()
+    assert "recoverable/stale" in captured.out
+    assert "feat-test" in captured.out
+    assert "abort --root" in captured.out
+    assert "pinned workspace is missing" not in captured.err
+
+
+@pytest.mark.git_auth
+def test_moved_live_worktree_is_not_recoverable_stale(
+    pinned_run: tuple[Path, Path, Path, Path],
+    tmp_path: Path,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    moved = tmp_path / "moved-worktree"
+    subprocess.run(
+        (
+            "git",
+            "-C",
+            str(leader),
+            "worktree",
+            "move",
+            str(worktree),
+            str(moved),
+        ),
+        check=True,
+        capture_output=True,
+    )
+
+    with pytest.raises(
+        workspace_boundary.WorkspaceBoundaryError,
+        match="moved to a live checkout",
+    ):
+        workspace_boundary.find_recoverable_stale_pinned_workspaces(leader)
+
+
+@pytest.mark.git_auth
+def test_abort_quarantines_deleted_workspace_run_without_owner_session(
+    pinned_run: tuple[Path, Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    leader, worktree, runtime, _run_dir = pinned_run
+    shutil.rmtree(worktree)
+    residue = worktree
+    residue.mkdir(parents=True)
+    (residue / "build.log").write_text("stale\n", encoding="utf-8")
+    current_runs = leader / ".git" / "agent-flow" / "current-runs"
+    current_runs.mkdir(parents=True)
+    current_state = current_runs / "owner.json"
+    current_state.write_text(
+        json.dumps({"run_dir": str(_run_dir.resolve())}),
+        encoding="utf-8",
+    )
+    for name in (
+        "AGENT_FLOW_EXECUTION_ID",
+        "AGENT_FLOW_SESSION_ID",
+        "CODEX_THREAD_ID",
+        "CODEX_SESSION_ID",
+        "CLAUDE_SESSION_ID",
+        "OMP_SESSION_ID",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("AGENT_FLOW_ACTIVE_HOST", "omp")
+    monkeypatch.setenv("AGENT_FLOW_EXECUTION_ID", "new-session")
+
+    assert cli_main(
+        [
+            "abort",
+            "--root",
+            str(leader),
+            "--worktree",
+            "feat-test",
+            "--yes",
+        ]
+    ) == 0
+
+    captured = capsys.readouterr()
+    assert "quarantined:" in captured.out
+    quarantine = next((leader / ".git" / "agent-flow").glob("_quarantine-*"))
+    assert not runtime.exists()
+    assert (quarantine / "worktrees" / "feat-test").is_dir()
+    assert not residue.exists()
+    assert (quarantine / "ondisk-worktrees" / "feat-test" / "build.log").is_file()
+    assert not list((leader / ".git" / "agent-flow" / "executions").glob("*.json"))
+    assert len(list((quarantine / "executions").glob("*.json"))) == 3
+    assert not current_state.exists()
+    assert (quarantine / "current-runs" / current_state.name).is_file()
+
+
+@pytest.mark.git_auth
+def test_status_with_explicit_deleted_worktree_reports_recoverable_stale(
+    pinned_run: tuple[Path, Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    shutil.rmtree(worktree)
+    for name in (
+        "AGENT_FLOW_EXECUTION_ID",
+        "AGENT_FLOW_SESSION_ID",
+        "CODEX_THREAD_ID",
+        "CODEX_SESSION_ID",
+        "CLAUDE_SESSION_ID",
+        "OMP_SESSION_ID",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    assert cli_main(
+        ["status", "--root", str(leader), "--worktree", "feat-test"]
+    ) == 0
+
+    captured = capsys.readouterr()
+    assert "recoverable/stale" in captured.out
+    assert "feat-test" in captured.out
+    assert "abort --root" in captured.out
+
+
+@pytest.mark.git_auth
+def test_live_runtime_without_manifest_uses_authenticated_run_identity(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, runtime, run_dir = pinned_run
+    (runtime / "manifest.json").unlink()
+
+    assert workspace_boundary.find_recoverable_stale_pinned_workspaces(leader) == ()
+    active = workspace_boundary.find_active_pinned_workspaces(
+        leader,
+        allow_recoverable_stale=True,
+    )
+
+    assert any(
+        item.run_dir == run_dir
+        and item.identity.workspace_root == str(worktree.resolve())
+        for item in active
+    )
+
+
+@pytest.mark.git_auth
+def test_status_lists_multiple_recoverable_stale_workspaces(
+    pinned_run: tuple[Path, Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    leader, first_worktree, _runtime, _run_dir = pinned_run
+    second_worktree = leader / ".agent-flow" / "worktrees" / "feat-other"
+    _git(
+        leader,
+        "worktree",
+        "add",
+        "-b",
+        "feat/other",
+        str(second_worktree),
+        "main",
+    )
+    metadata = second_worktree.stat()
+    identity = workspace_boundary.WorkspaceIdentity(
+        workspace_root=str(second_worktree.resolve()),
+        git_common_dir=str((leader / ".git").resolve()),
+        git_dir=str((leader / ".git" / "worktrees" / "feat-other").resolve()),
+        branch="feat/other",
+        head=_git(second_worktree, "rev-parse", "HEAD"),
+        device=metadata.st_dev,
+        inode=metadata.st_ino,
+    )
+    runtime = leader / ".git" / "agent-flow" / "worktrees" / "feat-other"
+    run_dir = runtime / ".agent-flow" / "runs" / "run-other"
+    run_dir.mkdir(parents=True)
+    (runtime / "manifest.json").write_text(
+        json.dumps({"identity": identity.to_dict()}),
+        encoding="utf-8",
+    )
+    (run_dir / "meta.json").write_text(
+        json.dumps({"run_id": "run-other", "workspace": identity.to_dict()}),
+        encoding="utf-8",
+    )
+    (run_dir / "active").write_text("", encoding="utf-8")
+    shutil.rmtree(first_worktree)
+    shutil.rmtree(second_worktree)
+    for name in (
+        "AGENT_FLOW_EXECUTION_ID",
+        "AGENT_FLOW_SESSION_ID",
+        "CODEX_THREAD_ID",
+        "CODEX_SESSION_ID",
+        "CLAUDE_SESSION_ID",
+        "OMP_SESSION_ID",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    assert cli_main(["status", "--root", str(leader)]) == 0
+
+    captured = capsys.readouterr()
+    assert "worktree=feat-test" in captured.out
+    assert "worktree=feat-other" in captured.out
+
+
+@pytest.mark.git_auth
+def test_status_selects_execution_bound_live_run_with_other_stale_run(
+    pinned_run: tuple[Path, Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    leader, _live_worktree, _runtime, _run_dir = pinned_run
+    stale_worktree = leader / ".agent-flow" / "worktrees" / "feat-stale"
+    _git(
+        leader,
+        "worktree",
+        "add",
+        "-b",
+        "feat/stale",
+        str(stale_worktree),
+        "main",
+    )
+    metadata = stale_worktree.stat()
+    stale_identity = workspace_boundary.WorkspaceIdentity(
+        workspace_root=str(stale_worktree.resolve()),
+        git_common_dir=str((leader / ".git").resolve()),
+        git_dir=str((leader / ".git" / "worktrees" / "feat-stale").resolve()),
+        branch="feat/stale",
+        head=_git(stale_worktree, "rev-parse", "HEAD"),
+        device=metadata.st_dev,
+        inode=metadata.st_ino,
+    )
+    stale_runtime = leader / ".git" / "agent-flow" / "worktrees" / "feat-stale"
+    stale_run = stale_runtime / ".agent-flow" / "runs" / "run-stale"
+    stale_run.mkdir(parents=True)
+    (stale_runtime / "manifest.json").write_text(
+        json.dumps({"identity": stale_identity.to_dict()}),
+        encoding="utf-8",
+    )
+    (stale_run / "meta.json").write_text(
+        json.dumps({"run_id": "run-stale", "workspace": stale_identity.to_dict()}),
+        encoding="utf-8",
+    )
+    (stale_run / "active").write_text("", encoding="utf-8")
+    shutil.rmtree(stale_worktree)
+    monkeypatch.setenv("AGENT_FLOW_ACTIVE_HOST", "omp")
+    monkeypatch.setenv("AGENT_FLOW_EXECUTION_ID", "session-1")
+    monkeypatch.setenv("AGENT_FLOW_AGENT_ID", "")
+    monkeypatch.setattr(
+        "agent_flow.artifact.ActiveRun.print_status",
+        lambda self, **_kwargs: print(self.run_id),
+    )
+
+    assert cli_main(["status", "--root", str(leader)]) == 0
+
+    captured = capsys.readouterr()
+    assert "pinned workspace is missing" not in captured.err
+    assert "run-1" in captured.out
+
+
+@pytest.mark.git_auth
+def test_status_does_not_hide_live_identity_drift_behind_other_stale_run(
+    pinned_run: tuple[Path, Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    leader, stale_worktree, _runtime, _run_dir = pinned_run
+    live_worktree = leader / ".agent-flow" / "worktrees" / "feat-live"
+    _git(leader, "worktree", "add", "-b", "feat/live", str(live_worktree), "main")
+    metadata = live_worktree.stat()
+    live_identity = workspace_boundary.WorkspaceIdentity(
+        workspace_root=str(live_worktree.resolve()),
+        git_common_dir=str((leader / ".git").resolve()),
+        git_dir=str((leader / ".git" / "worktrees" / "feat-live").resolve()),
+        branch="feat/live",
+        head=_git(live_worktree, "rev-parse", "HEAD"),
+        device=metadata.st_dev,
+        inode=metadata.st_ino,
+    )
+    live_runtime = leader / ".git" / "agent-flow" / "worktrees" / "feat-live"
+    live_run = live_runtime / ".agent-flow" / "runs" / "run-live"
+    live_run.mkdir(parents=True)
+    (live_runtime / "manifest.json").write_text(
+        json.dumps({"identity": live_identity.to_dict()}),
+        encoding="utf-8",
+    )
+    (live_run / "meta.json").write_text(
+        json.dumps({"run_id": "run-live", "workspace": live_identity.to_dict()}),
+        encoding="utf-8",
+    )
+    (live_run / "active").write_text("", encoding="utf-8")
+    displaced = live_worktree.with_name(".feat-live-displaced")
+    live_worktree.rename(displaced)
+    shutil.copytree(displaced, live_worktree)
+    shutil.rmtree(displaced)
+    shutil.rmtree(stale_worktree)
+    for name in (
+        "AGENT_FLOW_EXECUTION_ID",
+        "AGENT_FLOW_SESSION_ID",
+        "CODEX_THREAD_ID",
+        "CODEX_SESSION_ID",
+        "CLAUDE_SESSION_ID",
+        "OMP_SESSION_ID",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    assert cli_main(["status", "--root", str(leader)]) == 2
+
+    captured = capsys.readouterr()
+    assert "filesystem identity changed" in captured.err
+    assert "recoverable/stale" not in captured.out
+
+
+@pytest.mark.git_auth
+def test_owner_independent_abort_rejects_conflicting_stale_identity(
+    pinned_run: tuple[Path, Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    leader, worktree, runtime, run_dir = pinned_run
+    meta_path = run_dir / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["workspace"]["git_dir"] = str(
+        (leader / ".git" / "worktrees" / "different-worktree").resolve()
+    )
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    shutil.rmtree(worktree)
+    for name in (
+        "AGENT_FLOW_EXECUTION_ID",
+        "AGENT_FLOW_SESSION_ID",
+        "CODEX_THREAD_ID",
+        "CODEX_SESSION_ID",
+        "CLAUDE_SESSION_ID",
+        "OMP_SESSION_ID",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    assert cli_main(
+        [
+            "abort",
+            "--root",
+            str(leader),
+            "--worktree",
+            "feat-test",
+            "--yes",
+        ]
+    ) == 2
+
+    captured = capsys.readouterr()
+    assert "identity" in captured.err
+    assert runtime.is_dir()
+    assert not list((leader / ".git" / "agent-flow").glob("_quarantine-*"))
+
+
+@pytest.mark.git_auth
+def test_owner_independent_abort_rejects_conflicting_global_publication(
+    pinned_run: tuple[Path, Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    leader, worktree, runtime, run_dir = pinned_run
+    meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
+    publication = leader / ".git" / "agent-flow" / "current-runs" / "other.json"
+    publication.parent.mkdir(parents=True, exist_ok=True)
+    publication_identity = dict(meta["workspace"])
+    publication_identity["git_dir"] = str(
+        (leader / ".git" / "worktrees" / "different-worktree").resolve()
+    )
+    publication.write_text(
+        json.dumps(
+            {
+                "run_dir": str(run_dir.resolve()),
+                "workspace": publication_identity,
+            }
+        ),
+        encoding="utf-8",
+    )
+    shutil.rmtree(worktree)
+    for name in (
+        "AGENT_FLOW_EXECUTION_ID",
+        "AGENT_FLOW_SESSION_ID",
+        "CODEX_THREAD_ID",
+        "CODEX_SESSION_ID",
+        "CLAUDE_SESSION_ID",
+        "OMP_SESSION_ID",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    assert cli_main(
+        [
+            "abort",
+            "--root",
+            str(leader),
+            "--worktree",
+            "feat-test",
+            "--yes",
+        ]
+    ) == 2
+
+    captured = capsys.readouterr()
+    assert "publication identity changed" in captured.err
+    assert runtime.is_dir()
+    assert publication.is_file()
+    assert not list((leader / ".git" / "agent-flow").glob("_quarantine-*"))
+
+
+@pytest.mark.git_auth
+def test_owner_independent_abort_quarantines_all_publications_and_cleans_status(
+    pinned_run: tuple[Path, Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    leader, worktree, _runtime, run_dir = pinned_run
+    manifest = json.loads(
+        (
+            leader
+            / ".git"
+            / "agent-flow"
+            / "worktrees"
+            / "feat-test"
+            / "manifest.json"
+        ).read_text(encoding="utf-8")
+    )
+    identity = workspace_boundary.workspace_identity_from_dict(manifest["identity"])
+    common = leader / ".git" / "agent-flow"
+    current_runs = common / "current-runs"
+    current_runs.mkdir(parents=True, exist_ok=True)
+    node_state = current_runs / "node-owner.json"
+    node_state.write_text(
+        json.dumps(
+            {
+                "run_dir": str(run_dir.resolve()),
+                "workspace": identity.to_dict(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    leader_state = leader / ".agent-flow" / "state" / "current-run.json"
+    leader_state.parent.mkdir(parents=True, exist_ok=True)
+    leader_state.write_text(
+        json.dumps(
+            {
+                "run_dir": str(run_dir.resolve()),
+                "workspace": identity.to_dict(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    claims = common / "workspace-start-claims"
+    claims.mkdir(parents=True, exist_ok=True)
+    claim_name = (
+        hashlib.sha256(identity.workspace_root.encode("utf-8")).hexdigest() + ".lock"
+    )
+    claim = claims / claim_name
+    claim.write_text(
+        json.dumps(
+            workspace_boundary._workspace_start_claim_payload(
+                identity,
+                run_id=run_dir.name,
+                token="stale-token",
+                pid=999_999_999,
+                process_start_id="stale-process",
+            )
+        ),
+        encoding="utf-8",
+    )
+    claim.chmod(0o600)
+    shutil.rmtree(worktree)
+    for name in (
+        "AGENT_FLOW_EXECUTION_ID",
+        "AGENT_FLOW_SESSION_ID",
+        "CODEX_THREAD_ID",
+        "CODEX_SESSION_ID",
+        "CLAUDE_SESSION_ID",
+        "OMP_SESSION_ID",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    assert cli_main(
+        [
+            "abort",
+            "--root",
+            str(leader),
+            "--worktree",
+            "feat-test",
+            "--yes",
+        ]
+    ) == 0
+
+    quarantine = next(common.glob("_quarantine-*"))
+    assert (quarantine / "current-runs" / node_state.name).is_file()
+    assert (quarantine / "state" / leader_state.name).is_file()
+    assert (quarantine / "workspace-start-claims" / claim.name).is_file()
+    assert not node_state.exists()
+    assert not leader_state.exists()
+    assert not claim.exists()
+    assert cli_main(["status", "--root", str(leader)]) == 0
+    captured = capsys.readouterr()
+    assert "진행 중인 run 없음" in captured.out
+    assert "pinned workspace is missing" not in captured.err
+
+
+def test_portable_no_replace_rename_moves_files_and_directories(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    destination_root = tmp_path / "destination"
+    source_root.mkdir()
+    destination_root.mkdir()
+    source_fd = os.open(source_root, os.O_RDONLY | os.O_DIRECTORY)
+    destination_fd = os.open(destination_root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        (source_root / "record.json").write_text("record\n", encoding="utf-8")
+        workspace_boundary._portable_rename_owned_no_replace_at(
+            source_fd,
+            "record.json",
+            destination_fd,
+            "record.json",
+        )
+        assert not (source_root / "record.json").exists()
+        assert (destination_root / "record.json").read_text(encoding="utf-8") == "record\n"
+
+        (source_root / "runtime").mkdir()
+        (source_root / "runtime" / "manifest.json").write_text(
+            "manifest\n",
+            encoding="utf-8",
+        )
+        workspace_boundary._portable_rename_owned_no_replace_at(
+            source_fd,
+            "runtime",
+            destination_fd,
+            "runtime",
+        )
+        assert not (source_root / "runtime").exists()
+        assert (
+            destination_root / "runtime" / "manifest.json"
+        ).read_text(encoding="utf-8") == "manifest\n"
+
+        (source_root / "preserved.json").write_text("source\n", encoding="utf-8")
+        (destination_root / "preserved.json").write_text(
+            "destination\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(
+            workspace_boundary.WorkspaceBoundaryError,
+            match="quarantine destination appeared",
+        ):
+            workspace_boundary._portable_rename_owned_no_replace_at(
+                source_fd,
+                "preserved.json",
+                destination_fd,
+                "preserved.json",
+            )
+        assert (source_root / "preserved.json").read_text(encoding="utf-8") == "source\n"
+        assert (
+            destination_root / "preserved.json"
+        ).read_text(encoding="utf-8") == "destination\n"
+    finally:
+        os.close(source_fd)
+        os.close(destination_fd)
+
+
+@pytest.mark.git_auth
+def test_owner_independent_abort_preserves_destination_race(
+    pinned_run: tuple[Path, Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leader, worktree, runtime, _run_dir = pinned_run
+    shutil.rmtree(worktree)
+    original = workspace_boundary._rename_owned_no_replace_at
+    injected = False
+
+    def racing_rename(
+        source_fd: int,
+        source_name: str,
+        destination_fd: int,
+        destination_name: str,
+    ) -> None:
+        nonlocal injected
+        if not injected:
+            injected = True
+            descriptor = os.open(
+                destination_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=destination_fd,
+            )
+            os.write(descriptor, b"raced\n")
+            os.close(descriptor)
+        original(source_fd, source_name, destination_fd, destination_name)
+
+    monkeypatch.setattr(
+        workspace_boundary,
+        "_rename_owned_no_replace_at",
+        racing_rename,
+    )
+
+    with pytest.raises(
+        workspace_boundary.WorkspaceBoundaryError,
+        match="quarantine destination appeared",
+    ):
+        workspace_boundary.quarantine_orphaned_workspace(leader, "feat-test")
+
+    quarantine = next((leader / ".git" / "agent-flow").glob("_quarantine-*"))
+    assert runtime.is_dir()
+    raced = list((quarantine / "executions").iterdir())
+    assert len(raced) == 1
+    assert raced[0].read_bytes() == b"raced\n"
+
+
+@pytest.mark.git_auth
+def test_owner_independent_abort_preserves_reappeared_source_on_rollback(
+    pinned_run: tuple[Path, Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leader, worktree, runtime, _run_dir = pinned_run
+    shutil.rmtree(worktree)
+    bindings_root = leader / ".git" / "agent-flow" / "executions"
+    original_payloads = {
+        path.name: path.read_bytes() for path in bindings_root.glob("*.json")
+    }
+    original = workspace_boundary._rename_owned_no_replace_at
+    raced_name: str | None = None
+
+    def racing_rename(
+        source_fd: int,
+        source_name: str,
+        destination_fd: int,
+        destination_name: str,
+    ) -> None:
+        nonlocal raced_name
+        original(source_fd, source_name, destination_fd, destination_name)
+        if raced_name is None:
+            raced_name = source_name
+            descriptor = os.open(
+                source_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=source_fd,
+            )
+            os.write(descriptor, b"new-owner\n")
+            os.close(descriptor)
+
+    monkeypatch.setattr(
+        workspace_boundary,
+        "_rename_owned_no_replace_at",
+        racing_rename,
+    )
+
+    with pytest.raises(
+        workspace_boundary.WorkspaceBoundaryError,
+        match="quarantine rollback conflict",
+    ):
+        workspace_boundary.quarantine_orphaned_workspace(leader, "feat-test")
+
+    assert raced_name is not None
+    quarantine = next((leader / ".git" / "agent-flow").glob("_quarantine-*"))
+    binding = bindings_root / raced_name
+    quarantined = quarantine / "executions" / raced_name
+    assert runtime.is_dir()
+    assert binding.read_bytes() == b"new-owner\n"
+    assert quarantined.read_bytes() == original_payloads[raced_name]
+
+
+@pytest.mark.git_auth
+def test_owner_independent_abort_rolls_back_worktree_that_becomes_live(
+    pinned_run: tuple[Path, Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leader, worktree, runtime, _run_dir = pinned_run
+    shutil.rmtree(worktree)
+    worktree.mkdir(parents=True)
+    (worktree / "build.log").write_text("stale\n", encoding="utf-8")
+    original = workspace_boundary._rename_owned_no_replace_at
+    matching_moves = 0
+
+    def racing_rename(
+        source_fd: int,
+        source_name: str,
+        destination_fd: int,
+        destination_name: str,
+    ) -> None:
+        nonlocal matching_moves
+        if source_name == "feat-test":
+            matching_moves += 1
+            if matching_moves == 2:
+                directory_fd = os.open(
+                    source_name,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=source_fd,
+                )
+                try:
+                    descriptor = os.open(
+                        ".git",
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                        0o600,
+                        dir_fd=directory_fd,
+                    )
+                    os.write(descriptor, b"gitdir: raced\n")
+                    os.close(descriptor)
+                finally:
+                    os.close(directory_fd)
+        original(source_fd, source_name, destination_fd, destination_name)
+
+    monkeypatch.setattr(
+        workspace_boundary,
+        "_rename_owned_no_replace_at",
+        racing_rename,
+    )
+
+    with pytest.raises(
+        workspace_boundary.WorkspaceBoundaryError,
+        match="cannot quarantine a git worktree",
+    ):
+        workspace_boundary.quarantine_orphaned_workspace(leader, "feat-test")
+
+    assert runtime.is_dir()
+    assert worktree.is_dir()
+    assert (worktree / ".git").is_file()
+    assert list((leader / ".git" / "agent-flow" / "executions").glob("*.json"))
+
+
+@pytest.mark.git_auth
+def test_owner_independent_abort_rejects_live_worktree(
+    pinned_run: tuple[Path, Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    leader, worktree, runtime, _run_dir = pinned_run
+    for name in (
+        "AGENT_FLOW_EXECUTION_ID",
+        "AGENT_FLOW_SESSION_ID",
+        "CODEX_THREAD_ID",
+        "CODEX_SESSION_ID",
+        "CLAUDE_SESSION_ID",
+        "OMP_SESSION_ID",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    assert cli_main(
+        [
+            "abort",
+            "--root",
+            str(leader),
+            "--worktree",
+            "feat-test",
+            "--yes",
+        ]
+    ) == 2
+
+    captured = capsys.readouterr()
+    assert "execution_identity_missing" in captured.err
+    assert worktree.is_dir()
+    assert runtime.is_dir()
+    assert not list((leader / ".git" / "agent-flow").glob("_quarantine-*"))
+
+
+@pytest.mark.git_auth
 def test_repin_rolls_back_all_records_on_mid_loop_failure(
     pinned_run: tuple[Path, Path, Path, Path],
     monkeypatch: pytest.MonkeyPatch,
@@ -1066,6 +1833,54 @@ def test_launcher_authentication_rejects_shadowing_and_shell_chains(
     assert worktree_from_linked.returncode == 2
     assert "launcher is not trusted" in worktree_from_linked.stderr
     for result in (shadowed, chained):
+        assert result.returncode == 2
+        assert "launcher is not trusted" in result.stderr
+
+
+@pytest.mark.git_auth
+def test_foreign_runtime_contract_allows_only_leader_recovery_commands(
+    pinned_run: tuple[Path, Path, Path, Path],
+    tmp_path: Path,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    kit_path = leader / ".agent-flow" / "kit.json"
+    kit = json.loads(kit_path.read_text(encoding="utf-8"))
+    contract = kit["project_runtime_contract"]
+    contract["node"]["path"] = str(tmp_path / "foreign-machine" / "bin" / "node")
+    kit["project_runtime_contract_commitment"] = _runtime_contract_commitment(contract)
+    kit_path.write_text(json.dumps(kit), encoding="utf-8")
+    launcher = leader / ".agent-flow" / "bin" / "agent-flow"
+    other_root = tmp_path / "other"
+    other_root.mkdir()
+
+    recoveries = (
+        _bash_guard(leader, leader, f"{launcher} install --force-managed"),
+        _bash_guard(leader, leader, f"{launcher} sync"),
+        _bash_guard(leader, leader, f"{launcher} status"),
+        _bash_guard(leader, leader, f"{launcher} abort --yes"),
+        _bash_guard(leader, leader, f"{launcher} worktree repin --name feat-test"),
+    )
+    blocked_run = _bash_guard(leader, leader, f"{launcher} run task")
+    blocked_worktree = _bash_guard(leader, worktree, f"{launcher} status")
+    blocked_external_root = _bash_guard(
+        leader,
+        leader,
+        f"{launcher} abort --root {other_root} --yes",
+    )
+    blocked_abbreviated_root = _bash_guard(
+        leader,
+        leader,
+        f"{launcher} abort --roo {other_root} --yes",
+    )
+
+    for result in recoveries:
+        assert result.returncode == 0, result.stderr
+    for result in (
+        blocked_run,
+        blocked_worktree,
+        blocked_external_root,
+        blocked_abbreviated_root,
+    ):
         assert result.returncode == 2
         assert "launcher is not trusted" in result.stderr
 
@@ -1483,7 +2298,7 @@ def test_execution_binding_publication_is_atomic_across_worktrees(
         )
 
     assert results.count("bound") == 1
-    assert sum("execution_binding_conflict" in result for result in results) == 1
+    assert sum("execution_binding_conflict" in result for result in results) == 1, results
 
 
 

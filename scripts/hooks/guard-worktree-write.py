@@ -2491,8 +2491,160 @@ def _word_requests_agent_flow_runtime(word: str) -> bool:
         and basename in {"agent-flow", "agent-flow-kit", "agent-flow-kit.mjs"}
     )
 
+def _runtime_content_matches_contract(leader_root: Path) -> bool:
+    try:
+        kit = json.loads((leader_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
+        contract = kit["project_runtime_contract"]
+        commitment = _project_runtime_contract_commitment(contract)
+        launcher = leader_root / str(contract["launcher"]["path"])
+        node_runtime = leader_root / str(contract["runtime"]["path"])
+        python_runtime = leader_root / str(contract["python_runtime"]["path"])
+        embedded = EXPECTED_PROJECT_RUNTIME_CONTRACT_SHA256
+        embedded_python = EXPECTED_PYTHON_RUNTIME_INTEGRITY
+        return (
+            contract["version"] == 3
+            and kit["project_runtime_contract_commitment_version"] == 1
+            and kit["project_runtime_contract_commitment"] == commitment
+            and contract["launcher"]["path"] == ".agent-flow/bin/agent-flow"
+            and contract["runtime"]["path"] == ".agent-flow/runtime/node"
+            and contract["python_runtime"]["path"] == ".agent-flow/runtime/python"
+            and launcher.is_file()
+            and not launcher.is_symlink()
+            and hashlib.sha256(launcher.read_bytes()).hexdigest() == contract["launcher"]["sha256"]
+            and _runtime_tree_integrity(node_runtime) == contract["runtime"]["integrity"]
+            and _runtime_tree_integrity(python_runtime) == contract["python_runtime"]["integrity"]
+            and (embedded.startswith("__AGENT_FLOW_") or embedded == commitment)
+            and (
+                embedded_python.startswith("__AGENT_FLOW_")
+                or embedded_python == contract["python_runtime"]["integrity"]
+            )
+        )
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False
 
 
+def _contracted_executable_is_missing(
+    contract: dict[str, object],
+    path_key: str = "path",
+) -> bool:
+    try:
+        Path(str(contract[path_key])).lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return True
+    return False
+
+
+def _python_executable_contract_state(
+    contract: dict[str, object],
+) -> tuple[bool, bool]:
+    configured = Path(str(contract["path"]))
+    resolved = Path(str(contract["resolved_path"]))
+    if not configured.is_absolute() or not resolved.is_absolute():
+        return False, False
+    configured_missing = _contracted_executable_is_missing(contract, "path")
+    resolved_missing = _contracted_executable_is_missing(contract, "resolved_path")
+    if not configured_missing:
+        try:
+            current_resolved = configured.resolve(strict=True)
+        except (FileNotFoundError, NotADirectoryError):
+            if resolved_missing:
+                return True, True
+            return False, False
+        if current_resolved != resolved:
+            return False, False
+    if not resolved_missing and not _verify_executable_contract(
+        contract,
+        "resolved_path",
+    ):
+        return False, False
+    return True, configured_missing or resolved_missing
+
+
+def _runtime_requires_portable_repin(leader_root: Path) -> bool:
+    if not _runtime_content_matches_contract(leader_root):
+        return False
+    try:
+        kit = json.loads((leader_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
+        contract = kit["project_runtime_contract"]
+        missing = False
+        for executable in (contract["node"], contract["git"]):
+            if _contracted_executable_is_missing(executable):
+                missing = True
+                continue
+            if not _verify_executable_contract(executable):
+                return False
+        python_valid, python_missing = _python_executable_contract_state(
+            contract["python"]
+        )
+        return python_valid and (missing or python_missing)
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def _recovery_arguments_target_leader(
+    arguments: list[str],
+    cwd: Path,
+    leader_root: Path,
+) -> bool:
+    roots: list[str] = []
+    for index, argument in enumerate(arguments):
+        option = argument.partition("=")[0]
+        if option != "--root" and "--root".startswith(option):
+            return False
+        if argument == "--root":
+            if index + 1 >= len(arguments):
+                return False
+            roots.append(arguments[index + 1])
+        elif argument.startswith("--root="):
+            roots.append(argument.removeprefix("--root="))
+    try:
+        return all(
+            (cwd / value).resolve(strict=True) == leader_root.resolve(strict=True)
+            if not Path(value).is_absolute()
+            else Path(value).resolve(strict=True) == leader_root.resolve(strict=True)
+            for value in roots
+        )
+    except OSError:
+        return False
+
+
+def _is_leader_recovery_launcher(command: str, cwd: Path, leader_root: Path) -> bool:
+    if _has_active_shell_substitution(command) or re.search(r"[\r\n;&|]|\d*>>?|&>", command):
+        return False
+    if cwd.resolve(strict=True) != leader_root.resolve(strict=True):
+        return False
+    if any(
+        value
+        for name, value in os.environ.items()
+        if name in {"NODE_OPTIONS", "NODE_PATH", "BASH_ENV", "ENV"}
+        or name.startswith(("LD_", "DYLD_"))
+    ):
+        return False
+    try:
+        words = shlex.split(command)
+        launcher = Path(words[0])
+        if not launcher.is_absolute():
+            launcher = cwd / launcher
+        expected = leader_root / ".agent-flow" / "bin" / "agent-flow"
+        if (
+            len(words) < 2
+            or launcher.resolve(strict=True) != expected.resolve(strict=True)
+            or launcher.is_symlink()
+        ):
+            return False
+    except (IndexError, OSError, ValueError):
+        return False
+    arguments = words[1:]
+    recovery = (
+        arguments[0] in {"install", "sync", "status", "abort"}
+        or arguments[:2] == ["run", "install"]
+        or arguments[:2] == ["worktree", "repin"]
+    )
+    return (
+        recovery
+        and _recovery_arguments_target_leader(arguments, cwd, leader_root)
+        and _runtime_requires_portable_repin(leader_root)
+    )
 
 def _is_agent_flow_launcher(command: str, cwd: Path, leader_root: Path, pinned_root: Path) -> bool:
     if _has_active_shell_substitution(command) or re.search(r"[\r\n;&|]|\d*>>?|&>", command):
@@ -2928,6 +3080,8 @@ def main() -> int:
                     _required_hook_execution_id(payload)
                 return 0
             if _requests_agent_flow_launcher(command, cwd):
+                if _is_leader_recovery_launcher(command, cwd, leader_root):
+                    return 0
                 raise ValueError("write boundary rejected: agent-flow launcher is not trusted")
             mutating, paths, unresolved_shell_target = _shell_mutation_paths(
                 command,

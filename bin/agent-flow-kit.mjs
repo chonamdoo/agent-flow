@@ -79,9 +79,8 @@ const CANONICAL_HOOK_POLICY = Object.freeze({
   bashPre: Object.freeze([
     "guard-worktree.sh",
     "guard-protected-branch.sh",
-    "guard-worktree-write.py",
   ]),
-  writePre: Object.freeze(["guard-worktree-write.py"]),
+  writePre: Object.freeze([]),
   writePost: Object.freeze(["comment-checker.py"]),
   stop: Object.freeze(["show-phase-status.sh"]),
 });
@@ -233,9 +232,14 @@ function installProjectNodeRuntime(root) {
       copyRuntimeTree(path.join(KIT_ROOT, "bin"), managedRuntime, "bin");
     });
   }
+  const portableAuthority = {
+    version: 1,
+    runtime_integrity: treeIntegrity(runtimeRoot),
+    python_runtime_integrity: treeIntegrity(path.join(root, RUNTIME_PYTHON_RELATIVE)),
+  };
   writeManagedExecutableFile(
     path.join(root, PROJECT_LAUNCHER_RELATIVE),
-    projectLauncherSource(root),
+    projectLauncherSource(root, portableAuthority),
   );
 }
 
@@ -273,7 +277,7 @@ function copyRuntimeTree(sourceRoot, runtimeRoot, destinationRelative) {
   visit(sourceRoot, destinationRoot);
 }
 
-function projectLauncherSource(root) {
+function projectLauncherSource(root, portableAuthority) {
   const nodeContract = originalNodeAuthority();
   const pythonPath = shellSingleQuote(projectPythonPath());
   const gitPath = shellSingleQuote(projectGitPath());
@@ -282,6 +286,7 @@ function projectLauncherSource(root) {
     nodeContract,
     '"$launcher_dir/../runtime/node/bin/agent-flow-kit.mjs" "$@"',
   );
+  const portableRuntimeBootstrap = portableRuntimeBootstrapShellCommand(nodeContract, portableAuthority);
   return `#!/bin/sh
 unset NODE_OPTIONS NODE_PATH BASH_ENV ENV LD_AUDIT LD_BIND_NOW LD_DEBUG LD_DEBUG_OUTPUT LD_DYNAMIC_WEAK LD_HWCAP_MASK LD_LIBRARY_PATH LD_ORIGIN_PATH LD_PRELOAD LD_PROFILE LD_SHOW_AUXV LD_TRACE_LOADED_OBJECTS LD_USE_LOAD_BIAS LD_VERBOSE LD_WARN DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH DYLD_FRAMEWORK_PATH DYLD_FALLBACK_FRAMEWORK_PATH DYLD_FALLBACK_LIBRARY_PATH DYLD_ROOT_PATH DYLD_IMAGE_SUFFIX DYLD_SHARED_REGION PYTHONPATH PYTHONHOME PYTHONSTARTUP
 PYTHON=${pythonPath}
@@ -292,6 +297,7 @@ AGENT_FLOW_PROJECT_LAUNCHER=${launcherPath}
 export PYTHON PYTHON_EXECUTABLE AGENT_FLOW_PYTHON_EXECUTABLE AGENT_FLOW_GIT_EXECUTABLE AGENT_FLOW_PROJECT_LAUNCHER
 launcher_dir=\${0%/*}
 if [ "$launcher_dir" = "$0" ]; then launcher_dir=.; fi
+${portableRuntimeBootstrap}
 exec ${authenticatedNode}
 `;
 }
@@ -300,35 +306,111 @@ function shellSingleQuote(value) {
   return `'${String(value).replaceAll("'", `'"'"'`)}'`;
 }
 
+function portableRuntimeBootstrapShellCommand(nodeContract, portableAuthority) {
+  const contractedNode = shellSingleQuote(nodeContract.path);
+  const encodedAuthority = shellSingleQuote(
+    Buffer.from(JSON.stringify(portableAuthority), "utf8").toString("base64"),
+  );
+  return `if [ ! -e ${contractedNode} ] || [ -L ${contractedNode} ] || [ "$0" != "$AGENT_FLOW_PROJECT_LAUNCHER" ]; then
+  ${shellSingleQuote("/usr/bin/python3")} -I -B -c ${shellSingleQuote(PORTABLE_RUNTIME_BOOTSTRAP)} "$0" "$launcher_dir/../runtime/node/bin/agent-flow-kit.mjs" ${encodedAuthority} "$@"
+  portable_status=$?
+  if [ "$portable_status" -ne 126 ]; then exit "$portable_status"; fi
+fi`;
+}
+
+function isRuntimeRecoveryCommand() {
+  return command === "install"
+    || command === "sync"
+    || command === "status"
+    || command === "continue"
+    || command === "abort"
+    || (command === "run" && process.argv[3] === "install")
+    || (command === "worktree" && process.argv[3] === "repin")
+    || (command === "__sandboxed-mutation" && process.argv[3] === "install");
+}
+
+function assertRecoveryTargetsProject(args, root) {
+  const rootArguments = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const option = args[index].split("=", 1)[0];
+    if (option !== "--root" && "--root".startsWith(option)) {
+      throw new Error("abbreviated recovery --root is not allowed");
+    }
+    if (args[index] === "--root") {
+      if (index + 1 >= args.length) throw new Error("recovery --root is missing a value");
+      rootArguments.push(args[index + 1]);
+    } else if (args[index].startsWith("--root=")) {
+      rootArguments.push(args[index].slice("--root=".length));
+    }
+  }
+  const expected = fs.realpathSync(root);
+  for (const requested of rootArguments) {
+    const candidate = fs.realpathSync(path.resolve(root, requested));
+    if (candidate !== expected) {
+      throw new Error("recovery --root must target the launcher project");
+    }
+  }
+}
+
+
+function configuredPythonContractIsCurrent(contract) {
+  const configured = String(contract.path || "");
+  const resolved = String(contract.resolved_path || "");
+  const launcherConfigured = process.env.AGENT_FLOW_PYTHON_EXECUTABLE;
+  return path.isAbsolute(configured)
+    && fs.realpathSync(configured) === resolved
+    && (!launcherConfigured || launcherConfigured === configured);
+}
+
+
+function currentHostGitPath() {
+  return fs.existsSync("/usr/bin/git") ? "/usr/bin/git" : resolveExecutablePath("git");
+}
+
+
+function configuredGitPath() {
+  if (isRuntimeRecoveryCommand()) return currentHostGitPath();
+  return process.env.AGENT_FLOW_GIT_EXECUTABLE || currentHostGitPath();
+}
+
+
+function currentHostPythonPath() {
+  return resolveExecutablePath(preferredPython());
+}
+
+
+function reusableConfiguredPythonPath(contract) {
+  try {
+    if (configuredPythonContractIsCurrent(contract)) return String(contract.path);
+  } catch {
+    if (isRuntimeRecoveryCommand()) return null;
+    throw new Error("project runtime Python contract is invalid");
+  }
+  if (isRuntimeRecoveryCommand()) return null;
+  throw new Error("project runtime Python contract is invalid");
+}
+
+
 function projectPythonPath() {
   if (cachedProjectPythonPath === null) {
     const root = resolveAgentFlowRoot(process.cwd());
     const contract = root
       ? readJsonIfExists(path.join(root, ".agent-flow", "kit.json"))?.project_runtime_contract?.python
       : null;
-    if (contract) {
-      const configured = String(contract.path || "");
-      const resolved = String(contract.resolved_path || "");
-      const launcherConfigured = process.env.AGENT_FLOW_PYTHON_EXECUTABLE;
-      if (
-        !path.isAbsolute(configured)
-        || fs.realpathSync(configured) !== resolved
-        || (launcherConfigured && launcherConfigured !== configured)
-      ) {
-        throw new Error("project runtime Python contract is invalid");
-      }
-      cachedProjectPythonPath = configured;
-    } else {
-      cachedProjectPythonPath = resolveExecutablePath(preferredPython());
+    cachedProjectPythonPath = contract
+      ? reusableConfiguredPythonPath(contract)
+      : null;
+    if (cachedProjectPythonPath === null) {
+      cachedProjectPythonPath = currentHostPythonPath();
     }
   }
   return cachedProjectPythonPath;
 }
 
+
 function projectGitPath() {
   if (cachedProjectGitPath === null) {
-    const configured = process.env.AGENT_FLOW_GIT_EXECUTABLE
-      || (fs.existsSync("/usr/bin/git") ? "/usr/bin/git" : resolveExecutablePath("git"));
+    const configured = configuredGitPath();
     const resolved = fs.realpathSync(configured);
     const stat = fs.lstatSync(resolved);
     if (
@@ -345,6 +427,7 @@ function projectGitPath() {
   }
   return cachedProjectGitPath;
 }
+
 
 function resolveExecutablePath(candidate) {
   const value = String(candidate);
@@ -369,6 +452,7 @@ function resolveExecutablePath(candidate) {
   }
   throw new Error(`validated Python executable cannot be resolved: ${candidate}`);
 }
+
 
 function projectRuntimeContract(root) {
   const launcher = path.join(root, PROJECT_LAUNCHER_RELATIVE);
@@ -589,6 +673,13 @@ function originalNodeAuthority() {
         || current.mode !== expected.mode
         || Number.parseInt(current.links, 10) < Number.parseInt(expected.links, 10)
       ) throw new Error("identity mismatch");
+      if (expected.portable_selected === true) {
+        const root = resolveAgentFlowRoot(process.cwd());
+        if (!root || !portableRecoveryAuthorityIsValid(root)) {
+          throw new Error("portable authority mismatch");
+        }
+        return executableContract(expected.path);
+      }
       assertExecutableDependencies(expected.path, expected.dependencies);
     } catch {
       throw new Error("project runtime original Node authority is invalid");
@@ -690,6 +781,248 @@ function assertProjectRuntimeContract(root) {
   assertExecutableDependencies(contract.python.resolved_path, contract.python.dependencies);
   return contract;
 }
+
+function projectRuntimeContentMatchesContract(root) {
+  try {
+    const kit = readJsonIfExists(path.join(root, ".agent-flow", "kit.json"));
+    const contract = kit?.project_runtime_contract;
+    return Boolean(
+      contract
+      && contract.version === 3
+      && kit.project_runtime_contract_commitment_version === 1
+      && kit.project_runtime_contract_commitment === projectRuntimeContractCommitment(contract)
+      && contract.launcher.path === PROJECT_LAUNCHER_RELATIVE.split(path.sep).join("/")
+      && contract.runtime.path === RUNTIME_NODE_RELATIVE.split(path.sep).join("/")
+      && contract.python_runtime.path === RUNTIME_PYTHON_RELATIVE.split(path.sep).join("/")
+      && crypto.createHash("sha256")
+        .update(fs.readFileSync(path.join(root, PROJECT_LAUNCHER_RELATIVE)))
+        .digest("hex") === contract.launcher.sha256
+      && treeIntegrity(path.join(root, RUNTIME_NODE_RELATIVE)) === contract.runtime.integrity
+      && treeIntegrity(path.join(root, RUNTIME_PYTHON_RELATIVE)) === contract.python_runtime.integrity
+    );
+  } catch {
+    return false;
+  }
+}
+
+
+function contractedExecutableIsMissing(expected, pathKey = "path") {
+  try {
+    fs.lstatSync(String(expected[pathKey]));
+    return false;
+  } catch (error) {
+    if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return true;
+    throw error;
+  }
+}
+
+
+function validateExistingRuntimeExecutable(expected, pathKey = "path", allowAdditionalLinks = false) {
+  if (contractedExecutableIsMissing(expected, pathKey)) return false;
+  const configured = String(expected[pathKey]);
+  if (
+    !path.isAbsolute(configured)
+    || fs.realpathSync(configured) !== configured
+    || (pathKey === "resolved_path" && fs.realpathSync(String(expected.path)) !== configured)
+  ) {
+    throw new Error(`project runtime executable identity changed: ${configured}`);
+  }
+  assertExecutableIdentity(configured, expected, allowAdditionalLinks);
+  assertExecutableDependencies(configured, expected.dependencies);
+  return true;
+}
+function validateExistingPythonRuntimeExecutable(expected) {
+  const configured = String(expected.path);
+  const resolved = String(expected.resolved_path);
+  if (!path.isAbsolute(configured) || !path.isAbsolute(resolved)) {
+    throw new Error(`project runtime executable identity changed: ${configured}`);
+  }
+  const configuredMissing = contractedExecutableIsMissing(expected, "path");
+  const resolvedMissing = contractedExecutableIsMissing(expected, "resolved_path");
+  if (!configuredMissing) {
+    let currentResolved;
+    try {
+      currentResolved = fs.realpathSync(configured);
+    } catch (error) {
+      if (
+        resolvedMissing
+        && (error?.code === "ENOENT" || error?.code === "ENOTDIR")
+      ) return false;
+      throw error;
+    }
+    if (currentResolved !== resolved) {
+      throw new Error(`project runtime executable identity changed: ${configured}`);
+    }
+  }
+  if (resolvedMissing) return false;
+  assertExecutableIdentity(resolved, expected);
+  assertExecutableDependencies(resolved, expected.dependencies);
+  return !configuredMissing;
+}
+
+
+
+
+function runtimeContractRequiresPortableRepin(root) {
+  if (!projectRuntimeContentMatchesContract(root)) return false;
+  const contract = readJsonIfExists(path.join(root, ".agent-flow", "kit.json"))?.project_runtime_contract;
+  let missing = false;
+  try {
+    missing = !validateExistingRuntimeExecutable(contract.node, "path", true) || missing;
+    missing = !validateExistingRuntimeExecutable(contract.git) || missing;
+    missing = !validateExistingPythonRuntimeExecutable(contract.python) || missing;
+  } catch {
+    return false;
+  }
+  return missing;
+}
+
+
+function assertExistingRuntimeExecutablesUntampered(root) {
+  const kit = readJsonIfExists(path.join(root, ".agent-flow", "kit.json"));
+  const contract = kit?.project_runtime_contract;
+  if (
+    !contract
+    || contract.version !== 3
+    || kit.project_runtime_contract_commitment_version !== 1
+    || kit.project_runtime_contract_commitment !== projectRuntimeContractCommitment(contract)
+  ) return;
+  validateExistingRuntimeExecutable(contract.node, "path", true);
+  validateExistingRuntimeExecutable(contract.git);
+  validateExistingPythonRuntimeExecutable(contract.python);
+}
+
+
+function assertProjectRuntimeReady(root) {
+  try {
+    return assertProjectRuntimeContract(root);
+  } catch (error) {
+    if (!runtimeContractRequiresPortableRepin(root)) throw error;
+    throw new Error(
+      "project runtime re-pin required for this machine; run: agent-flow-kit install --force-managed",
+    );
+  }
+}
+
+
+const PORTABLE_RUNTIME_BOOTSTRAP = [
+  "import base64,hashlib,json,os,shutil,stat,subprocess,sys,tempfile",
+  "launcher=os.path.realpath(sys.argv[1]); runtime=os.path.realpath(sys.argv[2]); authority=json.loads(base64.b64decode(sys.argv[3],validate=True)); command=sys.argv[4:]",
+  "def digest_fd(descriptor):",
+  " os.lseek(descriptor,0,os.SEEK_SET); value=hashlib.sha256()",
+  " while True:",
+  "  chunk=os.read(descriptor,1024*1024)",
+  "  if not chunk: break",
+  "  value.update(chunk)",
+  " os.lseek(descriptor,0,os.SEEK_SET); return value.hexdigest()",
+  "def digest(path):",
+  " descriptor=os.open(path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))",
+  " try: return digest_fd(descriptor)",
+  " finally: os.close(descriptor)",
+  "def tree_integrity(root):",
+  " entries=[]",
+  " def visit(current,relative):",
+  "  metadata=os.lstat(current)",
+  "  if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode): raise OSError('unsafe runtime root')",
+  "  entries.append({'path':relative,'type':'directory','mode':stat.S_IMODE(metadata.st_mode)})",
+  "  for name in sorted(os.listdir(current)):",
+  "   child=os.path.join(current,name); child_relative=relative+'/'+name if relative else name; child_metadata=os.lstat(child)",
+  "   if stat.S_ISLNK(child_metadata.st_mode): raise OSError('runtime symlink')",
+  "   if stat.S_ISDIR(child_metadata.st_mode): visit(child,child_relative)",
+  "   elif stat.S_ISREG(child_metadata.st_mode): entries.append({'path':child_relative,'type':'file','mode':stat.S_IMODE(child_metadata.st_mode),'sha256':digest(child)})",
+  "   else: raise OSError('runtime special file')",
+  " visit(root,''); entries.sort(key=lambda entry:entry['path'])",
+  " payload=json.dumps({'version':1,'entries':entries},ensure_ascii=False,separators=(',',':')).encode()",
+  " return hashlib.sha256(payload).hexdigest()",
+  "def commitment(contract):",
+  " payload=[contract['version'],contract['launcher']['path'],contract['launcher']['sha256'],contract['node']['path'],contract['node']['sha256'],contract['node']['device'],contract['node']['inode'],contract['node']['links'],contract['node']['mode'],json.dumps(contract['node'].get('dependencies',[]),ensure_ascii=False,separators=(',',':'),sort_keys=True),contract['git']['path'],contract['git']['sha256'],contract['git']['device'],contract['git']['inode'],contract['git']['links'],contract['git']['mode'],json.dumps(contract['git'].get('dependencies',[]),ensure_ascii=False,separators=(',',':'),sort_keys=True),contract['python']['path'],contract['python']['resolved_path'],contract['python']['sha256'],contract['python']['device'],contract['python']['inode'],contract['python']['links'],contract['python']['mode'],json.dumps(contract['python'].get('dependencies',[]),ensure_ascii=False,separators=(',',':'),sort_keys=True),contract['runtime']['path'],contract['runtime']['integrity'],contract['python_runtime']['path'],contract['python_runtime']['integrity']]",
+  " return hashlib.sha256(json.dumps(payload,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()",
+  "def explicit_roots(arguments):",
+  " roots=[]",
+  " for index,value in enumerate(arguments):",
+  "  option=value.split('=',1)[0]",
+  "  if option!='--root' and '--root'.startswith(option): raise ValueError('abbreviated recovery root')",
+  "  if value=='--root':",
+  "   if index+1>=len(arguments): raise ValueError('recovery root is missing')",
+  "   roots.append(arguments[index+1])",
+  "  elif value.startswith('--root='): roots.append(value[len('--root='):])",
+  " return roots",
+  "def freeze_tree(root,frozen):",
+  " if not hasattr(os,'chflags'): return",
+  " immutable=getattr(stat,'UF_IMMUTABLE',2)",
+  " paths=[]",
+  " for current,directories,files in os.walk(root,topdown=False,followlinks=False):",
+  "  paths.extend(os.path.join(current,name) for name in files)",
+  "  paths.extend(os.path.join(current,name) for name in directories)",
+  " paths.append(root)",
+  " for target in paths:",
+  "  metadata=os.lstat(target)",
+  "  if stat.S_ISLNK(metadata.st_mode): raise OSError('staging symlink')",
+  "  os.chflags(target,metadata.st_flags|immutable,follow_symlinks=False); frozen.append(target)",
+  "try:",
+  " recovery=bool(command) and (command[0] in {'install','sync','status','continue','abort'} or command[:2]==['run','install'] or command[:2]==['worktree','repin'])",
+  " if not recovery: raise ValueError('invalid recovery command')",
+  " if set(authority)!=set(['version','runtime_integrity','python_runtime_integrity']) or authority['version']!=1: raise ValueError('invalid launcher authority')",
+  " root=os.path.dirname(os.path.dirname(os.path.dirname(launcher))); kit_path=os.path.join(root,'.agent-flow','kit.json')",
+  " for requested_root in explicit_roots(command):",
+  "  if os.path.realpath(os.path.join(root,requested_root))!=root: raise ValueError('recovery root mismatch')",
+  " with open(kit_path,encoding='utf-8') as stream: kit=json.load(stream)",
+  " contract=kit['project_runtime_contract']",
+  " if contract['version']!=3 or kit['project_runtime_contract_commitment_version']!=1 or kit['project_runtime_contract_commitment']!=commitment(contract): raise ValueError('invalid runtime commitment')",
+  " if contract['runtime']['integrity']!=authority['runtime_integrity'] or contract['python_runtime']['integrity']!=authority['python_runtime_integrity']: raise ValueError('runtime authority mismatch')",
+  " expected_launcher=os.path.join(root,contract['launcher']['path']); expected_runtime_root=os.path.join(root,contract['runtime']['path']); expected_python_root=os.path.join(root,contract['python_runtime']['path'])",
+  " launcher_fd=os.open(expected_launcher,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)); launcher_metadata=os.fstat(launcher_fd)",
+  " if launcher!=expected_launcher or not stat.S_ISREG(launcher_metadata.st_mode) or digest_fd(launcher_fd)!=contract['launcher']['sha256']: raise OSError('launcher drift')",
+  " if contract['launcher']['path']!='.agent-flow/bin/agent-flow' or contract['runtime']['path']!='.agent-flow/runtime/node' or contract['python_runtime']['path']!='.agent-flow/runtime/python': raise ValueError('invalid runtime paths')",
+  " if runtime!=os.path.join(expected_runtime_root,'bin','agent-flow-kit.mjs') or tree_integrity(expected_runtime_root)!=authority['runtime_integrity'] or tree_integrity(expected_python_root)!=authority['python_runtime_integrity']: raise OSError('runtime drift')",
+  " contracted=str(contract['node']['path']); contracted_exists=os.path.lexists(contracted)",
+  " selected=contracted if contracted_exists else shutil.which('node')",
+  " if selected is None: raise OSError('current Node is unavailable')",
+  " selected=os.path.realpath(selected); source_fd=os.open(selected,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)); selected_metadata=os.fstat(source_fd)",
+  " if not os.path.isabs(selected) or not stat.S_ISREG(selected_metadata.st_mode) or selected_metadata.st_uid not in {0,os.geteuid()} or selected_metadata.st_mode&0o022 or not selected_metadata.st_mode&0o111: raise OSError('current Node is unsafe')",
+  " if contracted_exists:",
+  "  expected=contract['node']",
+  "  if selected!=contracted or digest_fd(source_fd)!=expected['sha256'] or selected_metadata.st_dev!=int(expected['device']) or selected_metadata.st_ino!=int(expected['inode']) or stat.S_IMODE(selected_metadata.st_mode)!=expected['mode'] or selected_metadata.st_nlink<int(expected['links']): raise OSError('contracted Node identity changed')",
+  " elif selected_metadata.st_nlink!=1: raise OSError('current Node link count is unsafe')",
+  " staging_parent=os.path.join(root,'.agent-flow','bootstrap-staging'); os.makedirs(staging_parent,mode=0o700,exist_ok=True); staging_parent_metadata=os.lstat(staging_parent)",
+  " if stat.S_ISLNK(staging_parent_metadata.st_mode) or not stat.S_ISDIR(staging_parent_metadata.st_mode) or staging_parent_metadata.st_uid!=os.geteuid() or staging_parent_metadata.st_mode&0o077: raise OSError('bootstrap staging root is unsafe')",
+  " stage=tempfile.mkdtemp(prefix='portable-',dir=staging_parent); stage_runtime=os.path.join(stage,'runtime'); stage_node=os.path.join(stage,'node'); frozen=[]",
+  " try:",
+  "  shutil.copytree(expected_runtime_root,stage_runtime,symlinks=True)",
+  "  if tree_integrity(stage_runtime)!=authority['runtime_integrity']: raise OSError('staged runtime drift')",
+  "  stage_fd=os.open(stage_node,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0),0o700)",
+  "  try:",
+  "   while True:",
+  "    chunk=os.read(source_fd,1024*1024)",
+  "    if not chunk: break",
+  "    view=memoryview(chunk)",
+  "    while view:",
+  "     written=os.write(stage_fd,view)",
+  "     if written<=0: raise OSError('staged Node write failed')",
+  "     view=view[written:]",
+  "   os.fsync(stage_fd)",
+  "  finally: os.close(stage_fd)",
+  "  source_digest=digest_fd(source_fd)",
+  "  if digest(stage_node)!=source_digest: raise OSError('staged Node drift')",
+  "  freeze_tree(stage_runtime,frozen); freeze_tree(stage_node,frozen)",
+  "  if digest(stage_node)!=source_digest or tree_integrity(stage_runtime)!=authority['runtime_integrity']: raise OSError('frozen runtime drift')",
+  "  os.set_inheritable(launcher_fd,True)",
+  "  original={'path':selected,'sha256':source_digest,'device':str(selected_metadata.st_dev),'inode':str(selected_metadata.st_ino),'links':str(selected_metadata.st_nlink),'mode':stat.S_IMODE(selected_metadata.st_mode),'portable_selected':True}",
+  "  env=dict(os.environ); env['AGENT_FLOW_ORIGINAL_NODE_AUTHORITY']=base64.b64encode(json.dumps(original,separators=(',',':')).encode()).decode(); env.pop('AGENT_FLOW_AUTH_EXEC_ROOT',None); env['AGENT_FLOW_PROJECT_LAUNCHER']=launcher; env['AGENT_FLOW_PORTABLE_BOOTSTRAP']='1'; env['AGENT_FLOW_PORTABLE_BOOTSTRAP_FD']=str(launcher_fd); env['AGENT_FLOW_PORTABLE_AUTHORITY']=sys.argv[3]",
+  "  completed=subprocess.run([stage_node,os.path.join(stage_runtime,'bin','agent-flow-kit.mjs'),*command],env=env,pass_fds=(launcher_fd,),check=False)",
+  " finally:",
+  "  if hasattr(os,'chflags'):",
+  "   immutable=getattr(stat,'UF_IMMUTABLE',2)",
+  "   for target in reversed(frozen):",
+  "    try: os.chflags(target,os.lstat(target).st_flags&~immutable,follow_symlinks=False)",
+  "    except FileNotFoundError: pass",
+  "  shutil.rmtree(stage,ignore_errors=False)",
+  " os.close(source_fd); os.close(launcher_fd); raise SystemExit(completed.returncode)",
+  "except (KeyError,OSError,TypeError,UnicodeError,ValueError,json.JSONDecodeError):",
+  " print('agent-flow: blocked because portable runtime bootstrap authentication failed',file=sys.stderr)",
+  " raise SystemExit(126)",
+].join("\n");
+
 
 const AUTHENTICATED_EXEC_VERIFIER = [
   "import base64,hashlib,json,os,stat,subprocess,sys,time",
@@ -968,7 +1301,7 @@ function pythonVenvSitePackages(configuredPath) {
   const libraryRoot = path.join(venvRoot, "lib");
   if (!fs.existsSync(libraryRoot)) return [];
   return fs.readdirSync(libraryRoot)
-    .filter((name) => /^python[0-9.]+$/.test(name))
+    .filter((name) => /^python[0-9.]+t?$/.test(name))
     .map((name) => path.join(libraryRoot, name, "site-packages"))
     .filter((candidate) => fs.existsSync(candidate));
 }
@@ -997,6 +1330,10 @@ function installProjectUnlocked(root, context, lock) {
   const profile = detectProfile(root);
   let installSelection = resolveInstallSelection({ args: installArgs, detectedProfile: profile, kitRoot: KIT_ROOT, projectRoot: root });
   const existingPayload = readExistingKit(agentFlowDir);
+  const previousLauncherRoot = authenticatedInstalledLauncherRoot(root);
+  const managedHookCommandRoots = previousLauncherRoot && !samePath(previousLauncherRoot, root)
+    ? [root, previousLauncherRoot]
+    : [root];
   const previousIndexRecord = readAuthenticatedSkillIndex(agentFlowDir, existingPayload);
   holdInstallForTest("AGENT_FLOW_TEST_HOLD_AFTER_INDEX_AUTH_MS", "index-authenticated");
   const previousSkillIndex = previousIndexRecord?.payload || null;
@@ -1155,7 +1492,7 @@ function installProjectUnlocked(root, context, lock) {
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".claude", "agents"), path.join(root, ".omp", "agents"), forceManaged);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "rules", "context"), path.join(root, ".Codex", "rules", "context"), forceManaged);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "context"), path.join(root, ".Codex", "context"), forceManaged);
-  installCodexHooks(root);
+  installCodexHooks(root, managedHookCommandRoots);
   writeManagedFileIfMissingOrSame(
     path.join(root, ".Codex", "rules", "codebase-rubric.md"),
     fs.readFileSync(path.join(KIT_ROOT, ".Codex", "rules", "codebase-rubric.md"), "utf8"),
@@ -1201,7 +1538,7 @@ function installProjectUnlocked(root, context, lock) {
   ]);
   syncProjectAgentDocuments(root, agentFlowBlock);
   makeHooksExecutable(root);
-  installClaudeHooks(root);
+  installClaudeHooks(root, managedHookCommandRoots);
   installOmpHooks(root);
 
   payload.skill_index = {
@@ -2056,7 +2393,13 @@ function compareHookProjectionRows(left, right) {
   return left.length - right.length;
 }
 
-function managedHookProjection(root, settings, label, expectedScriptHashes) {
+function managedHookProjection(
+  root,
+  settings,
+  label,
+  expectedScriptHashes,
+  commandRoots = [root],
+) {
   if (!settings?.hooks || typeof settings.hooks !== "object" || Array.isArray(settings.hooks)) {
     throw new Error(`blocked: managed hook settings are missing: ${label}`);
   }
@@ -2067,7 +2410,12 @@ function managedHookProjection(root, settings, label, expectedScriptHashes) {
       if (!entry || !Array.isArray(entry.hooks)) throw new Error(`blocked: invalid managed hook settings: ${label}`);
       const matcher = typeof entry.matcher === "string" ? entry.matcher : "";
       for (const hook of entry.hooks) {
-        const scriptName = trustedManagedHookScriptName(root, hook?.command, expectedScriptHashes);
+        const scriptName = trustedManagedHookScriptName(
+          root,
+          hook?.command,
+          expectedScriptHashes,
+          commandRoots,
+        );
         if (scriptName) rows.push([event, matcher, hook.type ?? "", scriptName]);
         else if (managedHookScriptName(hook?.command)) {
           throw new Error(`blocked: managed hook command is not immutable: ${label}`);
@@ -2077,6 +2425,26 @@ function managedHookProjection(root, settings, label, expectedScriptHashes) {
   }
   return rows.sort(compareHookProjectionRows);
 }
+
+function authenticatedInstalledLauncherRoot(root) {
+  if (!projectRuntimeContentMatchesContract(root)) return null;
+  const launcher = path.join(root, PROJECT_LAUNCHER_RELATIVE);
+  const assignments = fs.readFileSync(launcher, "utf8")
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("AGENT_FLOW_PROJECT_LAUNCHER="));
+  if (assignments.length !== 1) return null;
+  const launcherPath = parseCanonicalShellSingleQuote(
+    assignments[0].slice("AGENT_FLOW_PROJECT_LAUNCHER=".length),
+  );
+  if (!launcherPath || !path.isAbsolute(launcherPath)) return null;
+  const installedRoot = path.dirname(path.dirname(path.dirname(launcherPath)));
+  if (
+    path.resolve(path.join(installedRoot, PROJECT_LAUNCHER_RELATIVE))
+    !== path.resolve(launcherPath)
+  ) return null;
+  return installedRoot;
+}
+
 
 function managedHookContract(root, runtimeContract = null) {
   const scripts = {};
@@ -2095,6 +2463,10 @@ function managedHookContract(root, runtimeContract = null) {
     scripts[relative] = { sha256: sha256Bytes(content), mode: "executable" };
   }
   const scriptHashes = new Map(Object.entries(scripts).map(([relative, entry]) => [relative, entry.sha256]));
+  const installedRoot = authenticatedInstalledLauncherRoot(root);
+  const commandRoots = installedRoot && !samePath(installedRoot, root)
+    ? [root, installedRoot]
+    : [root];
   const expected = expectedManagedHookProjection();
   const configs = {};
   for (const relative of MANAGED_HOOK_CONFIG_PATHS) {
@@ -2104,7 +2476,13 @@ function managedHookContract(root, runtimeContract = null) {
     } catch (error) {
       throw new Error(`blocked: managed hook settings are unreadable: ${relative}: ${error.message}`);
     }
-    const projection = managedHookProjection(root, settings, relative, scriptHashes);
+    const projection = managedHookProjection(
+      root,
+      settings,
+      relative,
+      scriptHashes,
+      commandRoots,
+    );
     if (JSON.stringify(projection) !== JSON.stringify(expected)) {
       throw new Error(
         `blocked: managed hook settings do not match required contract: ${relative}; `
@@ -3479,6 +3857,8 @@ function nodePhaseSkillPlan(root, state, phase) {
     changedFiles: nodeRuntimeChangedFiles(state),
     taskScope: state.task ?? "",
     requiredSkills,
+    indexRoot: root,
+    activeHost: detectActiveHost(process.env),
   });
   if (plan.resolution_errors.length > 0) {
     throw new SkillResolutionError(plan.resolution_errors);
@@ -4969,16 +5349,20 @@ function hostFilesystemIdentity(pathName) {
   };
 }
 
+function validHostFilesystemIdentity(identity) {
+  return Boolean(
+    identity
+    && typeof identity === "object"
+    && !Array.isArray(identity)
+    && /^[0-9]+$/.test(String(identity.device || ""))
+    && /^[0-9]+$/.test(String(identity.inode || ""))
+    && /^[0-9]+$/.test(String(identity.links || ""))
+    && Number.isInteger(identity.mode),
+  );
+}
+
 function sameHostFilesystemIdentity(pathName, expected) {
-  if (
-    !expected
-    || typeof expected !== "object"
-    || Array.isArray(expected)
-    || !/^[0-9]+$/.test(String(expected.device || ""))
-    || !/^[0-9]+$/.test(String(expected.inode || ""))
-    || !/^[0-9]+$/.test(String(expected.links || ""))
-    || !Number.isInteger(expected.mode)
-  ) return false;
+  if (!validHostFilesystemIdentity(expected)) return false;
   try {
     return JSON.stringify(hostFilesystemIdentity(pathName)) === JSON.stringify(expected);
   } catch {
@@ -6085,6 +6469,11 @@ function authenticateSkillBackup(
     && !Array.isArray(payload.managed_ownership.entries)
     ? payload.managed_ownership.entries
     : null;
+  const relocatedOwnershipEntries = relocatedManagedOwnershipEntries(
+    path.dirname(authorityRoot),
+    backup,
+    payload,
+  );
   const indexedEntries = new Set();
   for (const skill of payload?.skills || []) {
     const relative = String(skill?.path || "").replaceAll("\\", "/");
@@ -6130,7 +6519,10 @@ function authenticateSkillBackup(
       const current = hostPathState(target);
       if (
         current.kind !== "directory"
-        || !sameHostFilesystemIdentity(target, ownership.filesystem_identity)
+        || (
+          !sameHostFilesystemIdentity(target, ownership.filesystem_identity)
+          && !relocatedOwnershipEntries.has(entry)
+        )
         || (
           !indexedEntries.has(entry)
           && current.tree_hash !== ownership.tree_hash
@@ -6385,6 +6777,11 @@ function rejectReplacedManagedSkillEntries(
     ? previousIndex.managed_ownership.entries
     : null;
   if (!entries) return;
+  const relocatedOwnershipEntries = relocatedManagedOwnershipEntries(
+    path.dirname(agentFlowDir),
+    path.join(agentFlowDir, "skills"),
+    previousIndex,
+  );
   const indexedTreeHashes = new Map();
   for (const skill of previousIndex?.skills || []) {
     const relative = String(skill?.path || "").replaceAll("\\", "/");
@@ -6413,7 +6810,10 @@ function rejectReplacedManagedSkillEntries(
           ? indexedTreeHashes.get(entry) !== ownership?.tree_hash
           : current.tree_hash !== ownership?.tree_hash
       )
-      || !sameHostFilesystemIdentity(target, ownership?.filesystem_identity)
+      || (
+        !sameHostFilesystemIdentity(target, ownership?.filesystem_identity)
+        && !relocatedOwnershipEntries.has(entry)
+      )
     ) {
       throw new Error(`unmanaged skill entry conflicts with installed skill: ${entry}`);
     }
@@ -6723,6 +7123,11 @@ function preserveUnmanagedSkillEntries(transaction, previousIndex, currentIndex)
     && !Array.isArray(previousIndex.managed_ownership.entries)
     ? previousIndex.managed_ownership.entries
     : null;
+  const relocatedOwnershipEntries = relocatedManagedOwnershipEntries(
+    transaction.root,
+    transaction.backup,
+    previousIndex,
+  );
   for (const skill of previousIndex?.skills || []) {
     const relative = String(skill?.path || "").replaceAll("\\", "/");
     const prefix = ".agent-flow/skills/";
@@ -6760,7 +7165,10 @@ function preserveUnmanagedSkillEntries(transaction, previousIndex, currentIndex)
       if (
         validOwnership
         && state.kind === "directory"
-        && sameHostFilesystemIdentity(source, ownership.filesystem_identity)
+        && (
+          sameHostFilesystemIdentity(source, ownership.filesystem_identity)
+          || relocatedOwnershipEntries.has(rootName)
+        )
         && (state.tree_hash === ownership.tree_hash || plannedEntries.has(rootName))
       ) {
         previouslyManaged.set(rootName, state);
@@ -7961,11 +8369,219 @@ function revisionSkillTreeHash(root, skill) {
     .update(content.replaceAll(launcher, "<project-root>/.agent-flow/bin/agent-flow"))
     .digest("hex");
 }
-function projectCommandSkillMarkdown(name) {
-  if (name === "agent-flow") return agentFlowSkillMarkdown();
-  if (name === "full-feature-workflow") return fullFeatureSkillMarkdown();
-  if (name === "push-watch") return pushWatchSkillMarkdown();
-  throw new Error(`unsupported project command skill: ${name}`);
+function generatedProjectSkillMarkdown(name, agentFlowCommand = AGENT_FLOW_COMMAND) {
+  if (name === "agent-flow") return agentFlowSkillMarkdown(agentFlowCommand);
+  if (name === "architecture-reviewer") return architectureReviewerSkillMarkdown();
+  if (name === "full-feature-workflow") return fullFeatureSkillMarkdown(agentFlowCommand);
+  if (name === "plan-reviewer") return planReviewerSkillMarkdown();
+  if (name === "product-brief") return productBriefSkillMarkdown();
+  if (name === "push-watch") return pushWatchSkillMarkdown(agentFlowCommand);
+  throw new Error(`unsupported generated project skill: ${name}`);
+}
+
+
+function projectCommandSkillMarkdown(name, agentFlowCommand = AGENT_FLOW_COMMAND) {
+  if (!PROJECT_COMMAND_SKILL_NAMES.has(name)) {
+    throw new Error(`unsupported project command skill: ${name}`);
+  }
+  return generatedProjectSkillMarkdown(name, agentFlowCommand);
+}
+
+function authenticateCanonicalProjectCommandSkill(
+  skillRoot,
+  expectedCollectionRoot,
+  skill,
+  concreteId,
+  agentFlowCommand = AGENT_FLOW_COMMAND,
+) {
+  const entries = fs.readdirSync(skillRoot, { withFileTypes: true });
+  const expectedDocument = projectCommandSkillMarkdown(concreteId, agentFlowCommand);
+  const expectedHash = crypto.createHash("sha256")
+    .update(expectedDocument)
+    .digest("hex");
+  if (
+    skill.hash !== expectedHash
+    || entries.length !== 1
+    || entries[0].name !== "SKILL.md"
+    || !entries[0].isFile()
+  ) {
+    throw new Error("generated project command skill changed");
+  }
+  const sourceHash = hashSkillTree(skillRoot, {
+    authorityRoot: expectedCollectionRoot,
+    expectedDocumentHash: skill.hash,
+    skillName: concreteId,
+  });
+  if (sourceHash !== skill.tree_hash) {
+    throw new Error("installed provider candidate source hash changed");
+  }
+  return sourceHash;
+}
+
+function authenticateCanonicalGeneratedProjectSkill(
+  skillRoot,
+  expectedCollectionRoot,
+  skill,
+  concreteId,
+  agentFlowCommand = AGENT_FLOW_COMMAND,
+) {
+  const entries = fs.readdirSync(skillRoot, { withFileTypes: true });
+  const expectedDocument = generatedProjectSkillMarkdown(concreteId, agentFlowCommand);
+  const expectedHash = crypto.createHash("sha256")
+    .update(expectedDocument)
+    .digest("hex");
+  if (
+    skill.hash !== expectedHash
+    || entries.length !== 1
+    || entries[0].name !== "SKILL.md"
+    || !entries[0].isFile()
+  ) {
+    throw new Error("generated project skill changed");
+  }
+  const sourceHash = hashSkillTree(skillRoot, {
+    authorityRoot: expectedCollectionRoot,
+    expectedDocumentHash: skill.hash,
+    skillName: concreteId,
+  });
+  if (sourceHash !== skill.tree_hash) {
+    throw new Error("installed provider candidate source hash changed");
+  }
+  return sourceHash;
+}
+
+function parseCanonicalShellSingleQuote(command) {
+  if (
+    typeof command !== "string"
+    || command.length < 2
+    || command[0] !== "'"
+    || command.at(-1) !== "'"
+  ) return null;
+  const escapedQuote = `'"'"'`;
+  const inner = command.slice(1, -1);
+  let decoded = "";
+  for (let offset = 0; offset < inner.length;) {
+    if (inner.startsWith(escapedQuote, offset)) {
+      decoded += "'";
+      offset += escapedQuote.length;
+    } else {
+      if (inner[offset] === "'") return null;
+      decoded += inner[offset];
+      offset += 1;
+    }
+  }
+  return shellSingleQuote(decoded) === command ? decoded : null;
+}
+
+function indexedAgentFlowLauncherCommand(document) {
+  const prefix = "1. From the project root, run `";
+  const suffix = " status` for `/agent-flow` with no task";
+  const start = document.indexOf(prefix);
+  if (start < 0 || document.indexOf(prefix, start + prefix.length) >= 0) return null;
+  const commandStart = start + prefix.length;
+  const end = document.indexOf(suffix, commandStart);
+  if (end < 0) return null;
+  const command = document.slice(commandStart, end);
+  const launcher = parseCanonicalShellSingleQuote(command);
+  if (!launcher || !path.isAbsolute(launcher)) return null;
+  return { command, launcher };
+}
+
+function relocatedManagedOwnershipEntries(root, skillsRoot, previousIndex) {
+  const relocated = new Set();
+  try {
+    const ownershipEntries = previousIndex?.managed_ownership?.version === 1
+      && previousIndex.managed_ownership.entries
+      && typeof previousIndex.managed_ownership.entries === "object"
+      && !Array.isArray(previousIndex.managed_ownership.entries)
+      ? previousIndex.managed_ownership.entries
+      : null;
+    if (!ownershipEntries) return relocated;
+    const candidates = (previousIndex?.skills || []).filter(
+      (skill) => portableSkillCasefold(skill?.name) === "agent-flow",
+    );
+    if (candidates.length !== 1) return relocated;
+    const skill = candidates[0];
+    const ownership = ownershipEntries["agent-flow"];
+    if (
+      skill?.name !== "agent-flow"
+      || skill.source !== "bundled"
+      || (skill.source_host ?? null) !== null
+      || skill.path !== ".agent-flow/skills/agent-flow/SKILL.md"
+      || typeof skill.hash !== "string"
+      || typeof skill.tree_hash !== "string"
+      || !ownership
+      || typeof ownership !== "object"
+      || Array.isArray(ownership)
+      || ownership.tree_hash !== skill.tree_hash
+      || !ownership.filesystem_identity
+    ) return relocated;
+    const agentFlowRoot = path.join(skillsRoot, "agent-flow");
+    const document = readRegularFileSnapshotNoFollow(
+      path.join(agentFlowRoot, "SKILL.md"),
+      skillsRoot,
+      "relocated agent-flow skill",
+    ).bytes.toString("utf8");
+    const launcherCommand = indexedAgentFlowLauncherCommand(document);
+    if (!launcherCommand) return relocated;
+    const priorRoot = path.dirname(path.dirname(path.dirname(launcherCommand.launcher)));
+    if (
+      path.resolve(path.join(priorRoot, PROJECT_LAUNCHER_RELATIVE))
+        !== path.resolve(launcherCommand.launcher)
+      || samePath(priorRoot, root)
+    ) return relocated;
+    authenticateCanonicalProjectCommandSkill(
+      agentFlowRoot,
+      skillsRoot,
+      skill,
+      "agent-flow",
+      launcherCommand.command,
+    );
+    for (const [entry, entryOwnership] of Object.entries(ownershipEntries)) {
+      if (
+        !isPortableSkillName(entry)
+        || !entryOwnership
+        || typeof entryOwnership !== "object"
+        || Array.isArray(entryOwnership)
+        || typeof entryOwnership.tree_hash !== "string"
+        || !validHostFilesystemIdentity(entryOwnership.filesystem_identity)
+      ) continue;
+      const current = hostPathState(path.join(skillsRoot, entry));
+      if (
+        current.kind !== "directory"
+        || current.tree_hash !== entryOwnership.tree_hash
+        || current.filesystem_identity.links !== entryOwnership.filesystem_identity.links
+        || current.filesystem_identity.mode !== entryOwnership.filesystem_identity.mode
+      ) continue;
+      let canonical = false;
+      if (GENERATED_PROJECT_SKILL_NAMES.has(entry)) {
+        const matchingSkills = (previousIndex.skills || []).filter(
+          (candidate) => candidate?.name === entry
+            && candidate.source === "bundled"
+            && (candidate.source_host ?? null) === null
+            && candidate.path === `.agent-flow/skills/${entry}/SKILL.md`
+            && typeof candidate.hash === "string"
+            && candidate.tree_hash === entryOwnership.tree_hash,
+        );
+        if (matchingSkills.length === 1) {
+          authenticateCanonicalGeneratedProjectSkill(
+            path.join(skillsRoot, entry),
+            skillsRoot,
+            matchingSkills[0],
+            entry,
+            launcherCommand.command,
+          );
+          canonical = true;
+        }
+      } else {
+        const source = hostPathState(path.join(KIT_ROOT, "skills", entry));
+        canonical = source.kind === current.kind && source.tree_hash === current.tree_hash;
+      }
+      if (canonical) relocated.add(entry);
+    }
+  } catch {
+    return new Set();
+  }
+  return relocated;
 }
 
 function authenticateIndexedProviderCandidate(root, agentFlowDir, skill, sourceEntry) {
@@ -8016,26 +8632,19 @@ function authenticateIndexedProviderCandidate(root, agentFlowDir, skill, sourceE
   ) {
     throw new Error("installed provider candidate source path changed");
   }
-  if (projectCommandSkill) {
-    const entries = fs.readdirSync(skillRoot, { withFileTypes: true });
-    const expectedHash = crypto.createHash("sha256")
-      .update(projectCommandSkillMarkdown(concreteId))
-      .digest("hex");
-    if (
-      skill.hash !== expectedHash
-      || entries.length !== 1
-      || entries[0].name !== "SKILL.md"
-      || !entries[0].isFile()
-    ) {
-      throw new Error("generated project command skill changed");
-    }
-  }
-  const sourceHash = hashSkillTree(skillRoot, {
-    authorityRoot: expectedCollectionRoot,
-    expectedDocumentHash: skill.hash,
-    skillName: concreteId,
-  });
-  if (sourceHash !== skill.tree_hash) {
+  const sourceHash = projectCommandSkill
+    ? authenticateCanonicalProjectCommandSkill(
+      skillRoot,
+      expectedCollectionRoot,
+      skill,
+      concreteId,
+    )
+    : hashSkillTree(skillRoot, {
+      authorityRoot: expectedCollectionRoot,
+      expectedDocumentHash: skill.hash,
+      skillName: concreteId,
+    });
+  if (!projectCommandSkill && sourceHash !== skill.tree_hash) {
     throw new Error("installed provider candidate source hash changed");
   }
   return {
@@ -8746,16 +9355,46 @@ function preferredPython() {
     "python",
   ].filter(Boolean);
   for (const candidate of candidates) {
-    const result = safeSpawnSync(candidate, ["--version"], { stdio: "ignore" });
-    if (!result.error && result.status === 0 && pythonSupportsWorkflowExport(candidate)) {
-      return candidate;
+    try {
+      const authority = executableCandidateAuthority(candidate);
+      const result = safeSpawnAuthenticatedSync(authority, ["--version"], {
+        stdio: "ignore",
+        timeout: 5_000,
+      });
+      if (!result.error && result.status === 0 && pythonSupportsWorkflowExport(authority)) {
+        return authority.path;
+      }
+    } catch {
+      continue;
     }
   }
   throw new Error("no Python with PyYAML available for workflow export");
 }
 
-function pythonSupportsWorkflowExport(candidate) {
-  const result = safeSpawnSync(candidate, ["-c", "import yaml"], {
+function executableCandidateAuthority(candidate) {
+  const configured = resolveExecutablePath(candidate);
+  const resolved = fs.realpathSync(configured);
+  const metadata = fs.lstatSync(resolved);
+  if (
+    !path.isAbsolute(resolved)
+    || metadata.isSymbolicLink()
+    || !metadata.isFile()
+    || metadata.nlink !== 1
+    || (process.platform !== "win32" && ![0, process.getuid()].includes(metadata.uid))
+    || (metadata.mode & 0o022) !== 0
+  ) throw new Error("unsafe executable candidate");
+  fs.accessSync(resolved, fs.constants.X_OK);
+  return {
+    path: configured,
+    resolved_path: resolved,
+    ...executableIdentity(resolved),
+    dependencies: executableDependencyContracts(resolved),
+  };
+}
+
+
+function pythonSupportsWorkflowExport(authority) {
+  const result = safeSpawnAuthenticatedSync(authority, ["-c", "import yaml"], {
     stdio: "ignore",
     timeout: 5_000,
   });
@@ -9814,7 +10453,7 @@ function fullFeatureWorkflowYaml() {
   return fullFeatureWorkflow().text;
 }
 
-function agentFlowSkillMarkdown() {
+function agentFlowSkillMarkdown(command = AGENT_FLOW_COMMAND) {
   return `---
 name: agent-flow
 description: Runs the project-local agent-flow lifecycle from slash-triggered tasks, status checks, and phase next commands. Use when the user types /agent-flow, asks to start or continue the project workflow, or wants Claude, Codex, or OMP to drive the agent-flow lifecycle.
@@ -9826,7 +10465,7 @@ Use this skill as the common entry point for the project-local agent-flow workfl
 
 ## Quick start
 
-1. From the project root, run \`${AGENT_FLOW_COMMAND} status\` for \`/agent-flow\` with no task, or \`${AGENT_FLOW_COMMAND} run "<task>"\` for \`/agent-flow <task>\`.
+1. From the project root, run \`${command} status\` for \`/agent-flow\` with no task, or \`${command} run "<task>"\` for \`/agent-flow <task>\`.
 2. Treat the command output as the source of truth and follow its \`next_command\`.
 3. Do not reinstall agent-flow or infer missing setup unless an agent-flow command exits non-zero with that setup error.
 
@@ -9835,15 +10474,15 @@ Use this skill as the common entry point for the project-local agent-flow workfl
 When the user types \`/agent-flow <task>\`, run:
 
 \`\`\`bash
-${AGENT_FLOW_COMMAND} run "<task>"
+${command} run "<task>"
 \`\`\`
 
 Do not reinstall agent-flow for each task. Install is project setup, not the normal task entry.
-In a git repo, \`${AGENT_FLOW_COMMAND} run "<task>"\` starts the run inside \`.agent-flow/worktrees/feat-<slug>/\` on branch \`feat/<slug>\`.
+In a git repo, \`${command} run "<task>"\` starts the run inside \`.agent-flow/worktrees/feat-<slug>/\` on branch \`feat/<slug>\`.
 
 When the user types \`/agent-flow\` with no task:
 
-- Run \`${AGENT_FLOW_COMMAND} status\` from the project root.
+- Run \`${command} status\` from the project root.
 - Treat the status command output as the only source of truth.
 - If status exits 0 and reports an active run, follow the \`next_command\` from status.
 - If status exits non-zero with \`no active run\`, ask for a task using \`/agent-flow <task>\`.
@@ -9853,17 +10492,17 @@ When the user types \`/agent-flow\` with no task:
 When the user types \`/agent-flow status\`, run:
 
 \`\`\`bash
-${AGENT_FLOW_COMMAND} status
+${command} status
 \`\`\`
 
 ## Behavior
 
 - Treat \`/agent-flow\` as a project-local workflow trigger, not as a shell path.
 - Keep git-project runtime state private under the repository git dir, such as \`.git/agent-flow/worktrees/feat-<slug>/\`; expose it only for status, debugging, or artifact inspection.
-- On a new session, always check \`${AGENT_FLOW_COMMAND} status\` first and continue from that result.
+- On a new session, always check \`${command} status\` first and continue from that result.
 - After a phase writes its artifact, run the \`next_command\` printed by status or the current phase output.
-- Run direct build, test, typecheck, and lint commands from the pinned worktree through \`${AGENT_FLOW_COMMAND} gate -- <command ...>\`; do not run unsandboxed gate launchers.
-- For Android gates, run \`${AGENT_FLOW_COMMAND} gates --run-dir <run-dir>\` first so changed production modules, unit tests, and instrumented tests are selected independently. A targeted pass is recorded separately and cannot advance the workflow; after targeted success on frozen final code, run the same command with \`--full\` exactly once.
+- Run direct build, test, typecheck, and lint commands from the pinned worktree through \`${command} gate -- <command ...>\`; do not run unsandboxed gate launchers.
+- For Android gates, run \`${command} gates --run-dir <run-dir>\` first so changed production modules, unit tests, and instrumented tests are selected independently. A targeted pass is recorded separately and cannot advance the workflow; after targeted success on frozen final code, run the same command with \`--full\` exactly once.
 - Reuse a successful run-scoped gate result only when its command, Git scope, production/test/dependency/config hashes, toolchain, profile, host, and relevant environment fingerprint match exactly.
 - Reviewer sub-agents inspect the existing gate result and fingerprint evidence instead of rerunning test suites. Request only the targeted test needed for a new finding.
 - If the workflow pauses for design or slice review, summarize the relevant artifact and wait for user approval before continuing.
@@ -9873,8 +10512,8 @@ ${AGENT_FLOW_COMMAND} status
 `;
 }
 
-function fullFeatureSkillMarkdown() {
-  return `---\nname: full-feature-workflow\ndescription: Use this skill for feature work in this project.\n---\n\n# Full Feature Workflow\n\nUse this skill for feature work in this project.\n\nAlways drive progress through the runner output. Run \`${AGENT_FLOW_COMMAND} status\`, then execute the printed \`next_command\` exactly.\n\nDo not skip phases. If existing docs satisfy a phase, write the required artifact and reference those docs. If a gate, review, PR comment, or PR check fails, complete the matching fix phase and push again before merge/handoff.\n\nApply \`code-generation-discipline\` during code and review phases. Resolve required skills from active profile metadata, installed skill index, changed files, and task scope before writing or judging code.\n`;
+function fullFeatureSkillMarkdown(command = AGENT_FLOW_COMMAND) {
+  return `---\nname: full-feature-workflow\ndescription: Use this skill for feature work in this project.\n---\n\n# Full Feature Workflow\n\nUse this skill for feature work in this project.\n\nAlways drive progress through the runner output. Run \`${command} status\`, then execute the printed \`next_command\` exactly.\n\nDo not skip phases. If existing docs satisfy a phase, write the required artifact and reference those docs. If a gate, review, PR comment, or PR check fails, complete the matching fix phase and push again before merge/handoff.\n\nApply \`code-generation-discipline\` during code and review phases. Resolve required skills from active profile metadata, installed skill index, changed files, and task scope before writing or judging code. Do not claim completion until review, build, typecheck, lint, and targeted tests are green.\n`;
 }
 
 function productBriefSkillMarkdown() {
@@ -9889,8 +10528,8 @@ function architectureReviewerSkillMarkdown() {
   return `---\nname: architecture-reviewer\ndescription: Use during the full-feature architecture-review phase.\n---\n\n# Architecture Reviewer\n\nUse during the full-feature architecture-review phase.\n\nReview implemented code against domain decisions and DDD/Clean Architecture. Run two independent active-host reviewer sub-agents before approve. Each reviewer section must include \`reviewer-source: sub-agent\`; optional cross-host reviewers are extra evidence and do not replace active-host reviewers.\n\nArtifact template:\n\n# Architecture Review\n\n## Reviewer 1\nreviewer-source: sub-agent\nverdict: approve | request-changes\n\n## Findings\n\n## Domain Alignment\n\n## Layer Violations\n\n## Repository Boundary Issues\n\n## Dependency Direction Issues\n\n## Required Refactors\n\n## Approved Exceptions\n\n## Reviewer 2\nreviewer-source: sub-agent\nverdict: approve | request-changes\n\n## Findings\n\n## Overall\nverdict: approve | request-changes\n\n## Completion Gate\nskills_checked: true\nprofile-skill-selection: applied\nactive-profiles: <profile list>\nchanged-file-skill-resolution: applied\nrequired-profile-skills: checked\nmissing-required-profile-skills: none|<list>\narchitecture-contract-check: pass|fail|n/a\ncodex-claude-parity-check: pass|fail\nhook-parity-check: pass|fail\nclean-architecture: applied\nproject-local-skills: checked|n/a\nproject-local-skills-used: <skill list or n/a>\ndependency-rule: pass|fail\nusecase-boundary: pass|fail|n/a\nusecase-calls-usecase: pass|fail\nrepository-boundary: pass|fail\ncache-boundary: pass|fail|n/a\nmemory-disk-cache-separated: pass|fail|n/a\nmapping-boundary: pass|fail|n/a\ndto-entity-domain-ui-separated: pass|fail\nsolid-boundary-check: pass|fail\npresentation-skill: android|react|react-native|ios|n/a\npresentation-state-review: pass|fail|n/a\nui-state-modeling: explicit|n/a\npresentation-mapping-boundary: domain-to-uimodel|n/a\ndi-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a\n`;
 }
 
-function pushWatchSkillMarkdown() {
-  return `---\nname: push-watch\ndescription: Use this skill after local verification is complete and the branch is ready to publish.\n---\n\n# Push Watch\n\nUse this skill after local verification is complete and the branch is ready to publish.\n\nRun:\n\n\`\`\`bash\n${AGENT_FLOW_COMMAND} run push-watch\n\`\`\`\n\nFlow:\n\n1. Sanity check the branch and working tree.\n2. Commit and push the current branch.\n3. Open or record the pull request.\n4. Watch PR checks and review threads.\n5. Route failures through \`pr-comment-fix\` or \`pr-ci-fix\`; comment fixes must also resolve the corresponding GitHub review threads.\n6. Push again and return to \`pr-watch\`.\n7. When checks and comments are green, route to \`merge\`.\n\nRules:\n\n- Protected branches are blocked: main, master, develop.\n- Record PR watch state with \`status: green\`, \`status: comments\`, \`status: ci-failed\`, or \`status: pending\`.\n- merge requires explicit approval. Do not merge unattended.\n`;
+function pushWatchSkillMarkdown(command = AGENT_FLOW_COMMAND) {
+  return `---\nname: push-watch\ndescription: Use this skill after local verification is complete and the branch is ready to publish.\n---\n\n# Push Watch\n\nUse this skill after local verification is complete and the branch is ready to publish.\n\nRun:\n\n\`\`\`bash\n${command} run push-watch\n\`\`\`\n\nFlow:\n\n1. Sanity check the branch and working tree.\n2. Commit and push the current branch.\n3. Open or record the pull request.\n4. Watch PR checks and review threads.\n5. Route failures through \`pr-comment-fix\` or \`pr-ci-fix\`; comment fixes must also resolve the corresponding GitHub review threads.\n6. Push again and return to \`pr-watch\`.\n7. When checks and comments are green, route to \`merge\`.\n\nRules:\n\n- Protected branches are blocked.\n- Do not merge without explicit approval.\n`;
 }
 
 function pushWatchPromptMarkdown() {
@@ -9966,18 +10605,75 @@ function managedHookScriptName(command) {
   return null;
 }
 
-function trustedManagedHookScriptName(root, command, expectedScriptHashes = null) {
+function legacyManagedHookScriptName(root, command) {
+  if (typeof command !== "string") return null;
+  const normalizedRoot = path.resolve(root);
+  for (const scriptName of MANAGED_HOOK_SCRIPT_NAMES) {
+    const legacySource = path.join(normalizedRoot, "scripts", "hooks", scriptName);
+    const managedSource = path.join(normalizedRoot, ".agent-flow", "scripts", "hooks", scriptName);
+    if (
+      command === `scripts/hooks/${scriptName}`
+      || command === `.agent-flow/scripts/hooks/${scriptName}`
+      || command === shellQuote(legacySource)
+      || command === shellQuote(managedSource)
+      || command === `cd ${shellQuote(normalizedRoot)} && ${shellQuote(managedSource)}`
+    ) return scriptName;
+  }
+  return null;
+}
+
+function trustedManagedHookScriptName(
+  root,
+  command,
+  expectedScriptHashes = null,
+  commandRoots = [root],
+) {
   const normalizedRoot = path.resolve(root).replaceAll("\\", "/");
+  const normalizedCommandRoots = uniqueStrings(
+    commandRoots.map((candidate) => path.resolve(candidate).replaceAll("\\", "/")),
+  );
   for (const scriptName of MANAGED_HOOK_SCRIPT_NAMES) {
     const expected = `${normalizedRoot}/.agent-flow/scripts/hooks/${scriptName}`;
     const relative = `.agent-flow/scripts/hooks/${scriptName}`;
-    if (!["codex", "claude"].some((host) => command === hookScriptCommand(normalizedRoot, scriptName, host))) continue;
+    if (!normalizedCommandRoots.some(
+      (commandRoot) => ["codex", "claude"].some(
+        (host) => command === hookScriptCommand(commandRoot, scriptName, host),
+      ),
+    )) continue;
     const metadata = lstatIfExists(expected);
     if (!metadata?.isFile() || metadata.isSymbolicLink()) continue;
     const expectedSha = expectedScriptHashes instanceof Map
       ? expectedScriptHashes.get(relative)
       : sha256Bytes(fs.readFileSync(expected));
     if (typeof expectedSha === "string" && expectedSha === sha256Bytes(fs.readFileSync(expected))) return scriptName;
+  }
+  return null;
+}
+
+function trustedManagedHookScriptNameAtAnyRoot(command, expectedScriptHashes) {
+  if (typeof command !== "string" || !(expectedScriptHashes instanceof Map)) return null;
+  for (const scriptName of MANAGED_HOOK_SCRIPT_NAMES) {
+    for (const host of ["codex", "claude"]) {
+      const suffix = ` --host ${shellQuote(host)}`;
+      if (!command.endsWith(suffix)) continue;
+      const scriptPath = parseCanonicalShellSingleQuote(command.slice(0, -suffix.length));
+      if (!scriptPath || !path.isAbsolute(scriptPath)) continue;
+      const normalized = path.resolve(scriptPath);
+      const expectedSuffix = path.join(".agent-flow", "scripts", "hooks", scriptName);
+      if (!normalized.endsWith(expectedSuffix)) continue;
+      const inferredRoot = normalized.slice(0, -expectedSuffix.length).replace(/[\\/]$/, "");
+      if (hookScriptCommand(inferredRoot, scriptName, host) !== command) continue;
+      const metadata = lstatIfExists(normalized);
+      const expectedSha = expectedScriptHashes.get(
+        path.join(".agent-flow", "scripts", "hooks", scriptName).split(path.sep).join("/"),
+      );
+      if (
+        metadata?.isFile()
+        && !metadata.isSymbolicLink()
+        && typeof expectedSha === "string"
+        && expectedSha === sha256Bytes(fs.readFileSync(normalized))
+      ) return scriptName;
+    }
   }
   return null;
 }
@@ -10033,13 +10729,7 @@ function mergeHookSettings(settings, desired) {
           existing.hooks = [];
         }
         for (const hook of entry.hooks) {
-          const scriptName = managedHookScriptName(hook.command);
-          const matchingHook = existing.hooks.find(
-            (h) => scriptName && managedHookScriptName(h.command) === scriptName,
-          );
-          if (matchingHook) {
-            Object.assign(matchingHook, hook);
-          } else if (!existing.hooks.some((h) => h.command === hook.command)) {
+          if (!existing.hooks.some((candidate) => candidate.command === hook.command)) {
             existing.hooks.push(hook);
           }
         }
@@ -10075,6 +10765,38 @@ function mergeHookConfig(settings, source) {
   }
   if (source.hooks) {
     mergeHookSettings(settings, source.hooks);
+  }
+}
+
+function removeManagedHookCommands(
+  settings,
+  expectedScriptHashes,
+  root = null,
+  commandRoots = [],
+) {
+  if (!settings.hooks || typeof settings.hooks !== "object" || Array.isArray(settings.hooks)) {
+    return;
+  }
+  for (const [event, entries] of Object.entries(settings.hooks)) {
+    if (!Array.isArray(entries)) continue;
+    settings.hooks[event] = entries.filter((entry) => {
+      if (!entry || typeof entry !== "object" || !Array.isArray(entry.hooks)) return true;
+      entry.hooks = entry.hooks.filter((hook) => {
+        const trustedAtInstalledRoot = root && trustedManagedHookScriptName(
+          root,
+          hook?.command,
+          expectedScriptHashes,
+          commandRoots,
+        );
+        return !trustedAtInstalledRoot
+          && !(root && legacyManagedHookScriptName(root, hook?.command))
+          && !trustedManagedHookScriptNameAtAnyRoot(
+            hook?.command,
+            expectedScriptHashes,
+          );
+      });
+      return entry.hooks.length > 0;
+    });
   }
 }
 
@@ -10252,7 +10974,20 @@ function installCodexTrustState(root) {
   }
 }
 
-function installCodexHooks(root) {
+function managedHookScriptHashes(root) {
+  return new Map(MANAGED_HOOK_SCRIPT_NAMES.map((scriptName) => {
+    const relative = path.join(".agent-flow", "scripts", "hooks", scriptName)
+      .split(path.sep)
+      .join("/");
+    return [
+      relative,
+      sha256Bytes(fs.readFileSync(path.join(root, relative))),
+    ];
+  }));
+}
+
+
+function installCodexHooks(root, commandRoots = [root]) {
   const settingsPaths = [
     path.join(root, ".Codex", "hooks.json"),
     path.join(root, ".codex", "hooks.json"),
@@ -10261,6 +10996,7 @@ function installCodexHooks(root) {
   for (const settingsPath of settingsPaths) {
     mergeHookConfig(settings, readHookSettings(settingsPath));
   }
+  removeManagedHookCommands(settings, managedHookScriptHashes(root), root, commandRoots);
   mergeHookSettings(settings, codexHooksSettings(root).hooks);
   for (const settingsPath of settingsPaths) {
     writeManagedFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
@@ -10271,13 +11007,13 @@ function claudeHooksSettings(root) {
   return managedHostHookSettings(root, "claude");
 }
 
-function installClaudeHooks(root) {
+function installClaudeHooks(root, commandRoots = [root]) {
   const settingsPath = path.join(root, ".claude", "settings.json");
   const settings = readHookSettings(settingsPath);
+  removeManagedHookCommands(settings, managedHookScriptHashes(root), root, commandRoots);
   mergeHookSettings(settings, claudeHooksSettings(root).hooks);
   writeManagedFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
 }
-
 function ompHooksExtensionSource(root) {
   return String.raw`import fs from "node:fs";
 import { spawn } from "node:child_process";
@@ -11287,27 +12023,184 @@ function runSandboxedPythonCliCommand(subcommand, args) {
   );
 }
 
+function portableRecoveryAuthorityIsValid(root) {
+  try {
+    if (process.env.AGENT_FLOW_PORTABLE_BOOTSTRAP !== "1") return false;
+    const launcher = path.join(root, PROJECT_LAUNCHER_RELATIVE);
+    if (
+      process.env.AGENT_FLOW_PROJECT_LAUNCHER !== launcher
+      || !samePath(path.resolve(process.env.AGENT_FLOW_PROJECT_LAUNCHER), launcher)
+    ) return false;
+    const descriptor = Number.parseInt(
+      process.env.AGENT_FLOW_PORTABLE_BOOTSTRAP_FD || "",
+      10,
+    );
+    if (!Number.isInteger(descriptor)) return false;
+    const held = fs.fstatSync(descriptor);
+    const current = fs.lstatSync(launcher);
+    if (
+      !held.isFile()
+      || current.isSymbolicLink()
+      || !current.isFile()
+      || held.dev !== current.dev
+      || held.ino !== current.ino
+    ) return false;
+    const bytes = Buffer.alloc(held.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = fs.readSync(descriptor, bytes, offset, bytes.length - offset, offset);
+      if (count <= 0) return false;
+      offset += count;
+    }
+    const kit = readJsonIfExists(path.join(root, ".agent-flow", "kit.json"));
+    const contract = kit?.project_runtime_contract;
+    if (
+      !contract
+      || contract.version !== 3
+      || kit.project_runtime_contract_commitment_version !== 1
+      || kit.project_runtime_contract_commitment !== projectRuntimeContractCommitment(contract)
+      || sha256Bytes(bytes) !== contract.launcher.sha256
+    ) return false;
+    const encodedAuthority = process.env.AGENT_FLOW_PORTABLE_AUTHORITY || "";
+    if (
+      !encodedAuthority
+      || !bytes.toString("utf8").includes(` ${shellSingleQuote(encodedAuthority)} "$@"`)
+    ) return false;
+    const authority = JSON.parse(
+      Buffer.from(encodedAuthority, "base64").toString("utf8"),
+    );
+    return authority?.version === 1
+      && Object.keys(authority).sort(compareCodePoints).join(",")
+        === "python_runtime_integrity,runtime_integrity,version"
+      && authority.runtime_integrity === contract.runtime.integrity
+      && authority.python_runtime_integrity === contract.python_runtime.integrity;
+  } catch {
+    return false;
+  }
+}
+
+
+function authenticatedRelocatedProjectLauncher(root) {
+  if (!projectRuntimeContentMatchesContract(root)) {
+    throw new Error("portable project launcher authentication failed");
+  }
+  const launcher = path.join(root, PROJECT_LAUNCHER_RELATIVE);
+  const contract = readJsonIfExists(path.join(root, ".agent-flow", "kit.json"))
+    ?.project_runtime_contract;
+  const descriptor = fs.openSync(
+    launcher,
+    fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0),
+  );
+  try {
+    const before = fs.fstatSync(descriptor);
+    const named = fs.lstatSync(launcher);
+    if (
+      !before.isFile()
+      || named.isSymbolicLink()
+      || !named.isFile()
+      || before.dev !== named.dev
+      || before.ino !== named.ino
+    ) throw new Error("portable project launcher authentication failed");
+    const source = fs.readFileSync(descriptor);
+    const after = fs.fstatSync(descriptor);
+    if (
+      before.dev !== after.dev
+      || before.ino !== after.ino
+      || before.size !== after.size
+      || sha256Bytes(source) !== contract.launcher.sha256
+    ) throw new Error("portable project launcher authentication failed");
+    return { launcher, source };
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+
 function runProjectPythonCli(args) {
   const root = resolveAgentFlowRoot(process.cwd());
-  assertProjectRuntimeContract(root);
-  refreshSkillCatalogAtBoundary(root);
-  const contract = assertProjectRuntimeContract(root);
+  const portableRecoveryRequired = isRuntimeRecoveryCommand()
+    && runtimeContractRequiresPortableRepin(root);
+  const portableRecovery = isRuntimeRecoveryCommand()
+    && portableRecoveryAuthorityIsValid(root);
+  if (
+    !portableRecovery
+    && process.env.AGENT_FLOW_PORTABLE_BOOTSTRAP !== "1"
+    && isRuntimeRecoveryCommand()
+    && projectRuntimeContentMatchesContract(root)
+  ) {
+    const { launcher, source } = authenticatedRelocatedProjectLauncher(root);
+    const contract = readJsonIfExists(path.join(root, ".agent-flow", "kit.json"))
+      .project_runtime_contract;
+    const invocation = originalNodeAuthority();
+    const launcherRelocated = !source.toString("utf8").includes(
+      `AGENT_FLOW_PROJECT_LAUNCHER=${shellSingleQuote(launcher)}`,
+    );
+    const invocationChanged = invocation.path !== contract.node.path
+      || invocation.sha256 !== contract.node.sha256
+      || invocation.device !== contract.node.device
+      || invocation.inode !== contract.node.inode
+      || invocation.mode !== contract.node.mode;
+    if (portableRecoveryRequired || launcherRelocated || invocationChanged) {
+      assertRecoveryTargetsProject(args, root);
+      const env = { ...process.env };
+      delete env.AGENT_FLOW_PORTABLE_BOOTSTRAP;
+      delete env.AGENT_FLOW_PORTABLE_BOOTSTRAP_FD;
+      delete env.AGENT_FLOW_PORTABLE_AUTHORITY;
+      const delegated = safeSpawnSync(
+        "/bin/sh",
+        ["-c", source.toString("utf8"), launcher, ...args],
+        {
+          cwd: process.cwd(),
+          env,
+          stdio: "inherit",
+          timeout: 30 * 60 * 1000,
+        },
+      );
+      if (delegated.error) throw delegated.error;
+      process.exit(delegated.status ?? 1);
+    }
+  }
+  let pythonContract;
+  if (portableRecovery) {
+    assertRecoveryTargetsProject(args, root);
+    const pythonPath = projectPythonPath();
+    pythonContract = {
+      path: pythonPath,
+      resolved_path: fs.realpathSync(pythonPath),
+      ...executableIdentity(pythonPath),
+      dependencies: executableDependencyContracts(pythonPath),
+    };
+  } else {
+    assertProjectRuntimeReady(root);
+    refreshSkillCatalogAtBoundary(root);
+    pythonContract = assertProjectRuntimeContract(root).python;
+  }
   const pythonPathEntries = [
     path.join(KIT_ROOT, "src"),
     installedPythonRuntimePath(root),
   ].filter(Boolean);
-  const result = safeSpawnAuthenticatedSync(contract.python, ["-m", "agent_flow.cli", ...args], {
-    cwd: process.cwd(),
-    env: {
-      ...process.env,
-      PYTHONDONTWRITEBYTECODE: "1",
-      PYTHONNOUSERSITE: "1",
-      PYTHONSAFEPATH: "1",
-      PYTHONPATH: [...new Set(pythonPathEntries)].join(path.delimiter),
+  const result = safeSpawnAuthenticatedSync(
+    pythonContract,
+    ["-m", "agent_flow.cli", ...args],
+    {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        PYTHON: pythonContract.path,
+        PYTHON_EXECUTABLE: pythonContract.path,
+        AGENT_FLOW_PYTHON_EXECUTABLE: pythonContract.path,
+        AGENT_FLOW_GIT_EXECUTABLE: portableRecovery
+          ? projectGitPath()
+          : process.env.AGENT_FLOW_GIT_EXECUTABLE,
+        PYTHONDONTWRITEBYTECODE: "1",
+        PYTHONNOUSERSITE: "1",
+        PYTHONSAFEPATH: "1",
+        PYTHONPATH: [...new Set(pythonPathEntries)].join(path.delimiter),
+      },
+      stdio: "inherit",
+      timeout: 30 * 60 * 1000,
     },
-    stdio: "inherit",
-    timeout: 30 * 60 * 1000,
-  });
+  );
   if (result.error) throw result.error;
   process.exit(result.status ?? 1);
 }
@@ -11435,6 +12328,7 @@ function runMutationSandbox(action, rootOverride = null, requestedInstallArgs = 
     throw new Error(`managed worktree ${action} blocked; run ${action} from the leader checkout`);
   }
   const root = resolveInstallRoot(requestedRoot);
+  assertExistingRuntimeExecutablesUntampered(root);
   assertLeaderMutationSource(root, action);
   let executable = null;
   let args = [];
@@ -11558,7 +12452,7 @@ try {
   }
 
   if (command === "status") {
-    runProjectPythonCli(["status"]);
+    runProjectPythonCli(["status", ...process.argv.slice(3)]);
   }
 
   if (command === "continue") {

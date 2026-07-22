@@ -1343,9 +1343,7 @@ def _expected_managed_hook_projection() -> list[list[str]]:
         [
             ["PostToolUse", WRITE_TOOL_MATCHER, "command", "comment-checker.py"],
             ["PreToolUse", "Bash", "command", "guard-protected-branch.sh"],
-            ["PreToolUse", "Bash", "command", "guard-worktree-write.py"],
             ["PreToolUse", "Bash", "command", "guard-worktree.sh"],
-            ["PreToolUse", WRITE_TOOL_MATCHER, "command", "guard-worktree-write.py"],
             ["Stop", "", "command", "show-phase-status.sh"],
         ]
     )
@@ -2266,12 +2264,187 @@ def _is_runtime_provider_diagnostic(value: object) -> bool:
     )
 
 
+def _runtime_managed_host_only_skill_catalog(
+    index: dict[str, Any],
+    index_root: Path | None,
+) -> dict[str, dict[str, Any]]:
+    if index_root is None:
+        return {}
+    profiles_root = next(
+        (
+            candidate
+            for candidate in (
+                index_root / ".agent-flow" / "profiles",
+                index_root / "profiles",
+            )
+            if candidate.is_dir()
+        ),
+        None,
+    )
+    if profiles_root is None:
+        return {}
+    selection = index.get("selection")
+    profiles = _logical_strings(
+        selection.get("profiles") if isinstance(selection, dict) else None
+    )
+    result: dict[str, dict[str, Any]] = {}
+    for profile in sorted(profiles):
+        profile_path = profiles_root / f"{profile}.yaml"
+        if not profile_path.is_file():
+            continue
+        try:
+            payload = yaml.safe_load(profile_path.read_text(encoding="utf-8")) or {}
+        except (OSError, UnicodeError, yaml.YAMLError) as exc:
+            raise SkillPlanSnapshotError(
+                f"blocked: invalid runtime profile catalog: {profile_path}"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise SkillPlanSnapshotError(
+                f"blocked: invalid runtime profile catalog: {profile_path}"
+            )
+        for catalog_name, catalog in payload.items():
+            if not isinstance(catalog, dict):
+                continue
+            if (
+                catalog.get("install_policy") != "never"
+                or catalog.get("active_host_only") is not True
+            ):
+                continue
+            hosts = catalog.get("source_hosts")
+            if not isinstance(hosts, dict):
+                hosts = catalog.get("hosts")
+            if not isinstance(hosts, dict):
+                hosts = {}
+            normalized_hosts = {
+                str(host).lower(): str(source)
+                for host, source in hosts.items()
+                if isinstance(host, str)
+                and isinstance(source, str)
+                and source
+            }
+            for mode in ("implementation", "review"):
+                entries = catalog.get(mode)
+                if not isinstance(entries, list):
+                    continue
+                for entry in entries:
+                    name = entry.get("skill") if isinstance(entry, dict) else None
+                    if not isinstance(name, str) or not is_portable_skill_name(name):
+                        continue
+                    canonical = name.casefold()
+                    record = {
+                        "catalog": str(catalog_name),
+                        "source": catalog.get("source"),
+                        "hosts": normalized_hosts,
+                    }
+                    previous = result.get(canonical)
+                    if previous is not None and previous != record:
+                        raise SkillPlanSnapshotError(
+                            f"blocked: conflicting managed host-only skill catalog: {canonical}"
+                        )
+                    result[canonical] = record
+    return result
+
+
+def _active_host_skill_root(active_host: str, home: Path) -> Path | None:
+    if active_host == "claude":
+        return home / ".claude" / "skills"
+    if active_host == "codex":
+        return home / ".codex" / "skills"
+    if active_host == "omp":
+        return home / ".omp" / "agent" / "skills"
+    return None
+
+
+def _authenticated_host_skill_document(
+    name: str,
+    active_host: str,
+    home: Path,
+) -> Path | None:
+    root = _active_host_skill_root(active_host, home)
+    if root is None:
+        return None
+    skill_root = root / name
+    document = skill_root / "SKILL.md"
+    descriptor: int | None = None
+    try:
+        for directory in (root, skill_root):
+            mode = directory.lstat().st_mode
+            if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+                return None
+        canonical_root = root.resolve(strict=True)
+        canonical_skill_root = skill_root.resolve(strict=True)
+        canonical_skill_root.relative_to(canonical_root)
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(document, flags)
+        opened = os.fstat(descriptor)
+        repeated = document.lstat()
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_ISLNK(repeated.st_mode)
+            or opened.st_dev != repeated.st_dev
+            or opened.st_ino != repeated.st_ino
+        ):
+            return None
+        return document
+    except (OSError, RuntimeError, ValueError):
+        return None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _local_managed_host_only_skill(
+    name: str,
+    catalog: dict[str, Any],
+    active_host: str,
+    home: Path,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    hosts = catalog.get("hosts")
+    host_path = hosts.get(active_host) if isinstance(hosts, dict) else None
+    source = catalog.get("source")
+    root = _active_host_skill_root(active_host, home)
+    if root is None or not isinstance(host_path, str) or not host_path:
+        return None, {
+            "reason": "unsupported_active_host" if active_host else "active_host_required",
+            "canonical": name,
+            "source": source if isinstance(source, str) else None,
+            "message": (
+                f"active host {active_host} cannot load local {catalog['catalog']}: {name}"
+                if active_host
+                else f"active host is required to load local {catalog['catalog']}: {name}"
+            ),
+            "repairable": False,
+        }
+    document = _authenticated_host_skill_document(name, active_host, home)
+    if document is None:
+        return None, {
+            "reason": "missing_local_host_skill",
+            "canonical": name,
+            "source": source,
+            "message": f"missing local {catalog['catalog']}: {name}",
+            "repairable": False,
+        }
+    return {
+        "name": name,
+        "path": str(document),
+        "tree_hash": None,
+        "source_host": active_host,
+        "source": source,
+        "load_mode": "plain_text",
+    }, None
+
+
 def resolve_runtime_skill_plan(
     index: dict[str, Any],
     phase_id: str,
     changed_files: Iterable[str] = (),
     task_scope: str = "",
     required_skills: Iterable[str] = (),
+    index_root: Path | None = None,
+    active_host: str | None = None,
+    home: Path | None = None,
 ) -> dict[str, Any]:
     normalized_task_scope = _normalize_task_scope(task_scope)
     phase_required = set(_logical_strings(list(required_skills)))
@@ -2421,10 +2594,43 @@ def resolve_runtime_skill_plan(
     required.difference_update(EXPLICIT_ONLY_SKILLS - explicit)
     skills: list[dict[str, Any]] = []
     missing = set(unresolved_names)
+    managed_host_only = _runtime_managed_host_only_skill_catalog(index, index_root)
+    normalized_active_host = (
+        active_host
+        or os.environ.get("AGENT_FLOW_ACTIVE_HOST")
+        or os.environ.get("AGENT_FLOW_HOST")
+        or ""
+    ).strip().lower()
+    resolved_home = Path(home) if home is not None else Path.home()
     for name in sorted(required):
         skill = by_name.get(name)
         resolution = compatibility.resolve(name)
         if skill is None:
+            host_only_catalog = managed_host_only.get(name)
+            if host_only_catalog is not None:
+                local_skill, local_diagnostic = _local_managed_host_only_skill(
+                    name,
+                    host_only_catalog,
+                    normalized_active_host,
+                    resolved_home,
+                )
+                if local_skill is not None:
+                    if resolution.capabilities:
+                        local_skill["capabilities"] = list(resolution.capabilities)
+                    skills.append(local_skill)
+                    continue
+                assert local_diagnostic is not None
+                missing.add(name)
+                for requested in requests_by_canonical.get(name, {name}):
+                    diagnostic = {
+                        **local_diagnostic,
+                        "requested": requested,
+                        "capabilities": list(resolution.capabilities),
+                    }
+                    resolution_errors[
+                        (requested, str(local_diagnostic["reason"]))
+                    ] = diagnostic
+                continue
             missing.add(name)
             for requested in requests_by_canonical.get(name, {name}):
                 diagnostic = {
@@ -2769,8 +2975,18 @@ def profile_skill_prompt_block(
     task_scope: str | None = None,
     base_commit: str | None = None,
     required_skills: Iterable[str] = (),
+    *,
+    active_host: str | None = None,
+    home: Path | None = None,
 ) -> str:
     phase_required = tuple(required_skills)
+    normalized_active_host = (
+        active_host
+        or os.environ.get("AGENT_FLOW_ACTIVE_HOST")
+        or os.environ.get("AGENT_FLOW_HOST")
+        or ""
+    ).strip().lower()
+    resolved_home = Path.home() if home is None else home
     if phase_id not in CODE_SKILL_PHASES and not phase_required:
         return ""
     index_path = index_root / ".agent-flow" / "skills" / "index.json"
@@ -2794,6 +3010,9 @@ def profile_skill_prompt_block(
         ),
         _configured_task_scope(index_root) if task_scope is None else task_scope,
         phase_required,
+        index_root=index_root,
+        active_host=normalized_active_host,
+        home=resolved_home,
     )
     if plan["missing_profiles"]:
         raise RuntimeError(
@@ -2823,7 +3042,7 @@ def profile_skill_prompt_block(
     lines.append("")
     lines.extend(
         f"- `{skill['path']}` (`{skill['name']}`) — "
-        f"`{_verified_profile_skill_prompt_path(index_root, skill)}`"
+        f"`{_verified_profile_skill_prompt_path(index_root, skill, normalized_active_host, resolved_home)}`"
         for skill in plan["skills"]
     )
     lines.append("")
@@ -2833,8 +3052,25 @@ def profile_skill_prompt_block(
 def _verified_profile_skill_prompt_path(
     index_root: Path,
     skill: dict[str, Any],
+    active_host: str,
+    home: Path,
 ) -> Path:
     skill_path = _installed_skill_path(index_root, skill)
+    if skill.get("load_mode") == "plain_text":
+        expected = _authenticated_host_skill_document(
+            str(skill.get("name") or ""),
+            active_host,
+            home,
+        )
+        if (
+            expected is None
+            or skill_path != expected
+            or skill.get("source_host") != active_host
+        ):
+            raise SkillPlanSnapshotError(
+                f"blocked: local host skill path changed: {skill.get('name')}"
+            )
+        return expected
     try:
         mode = skill_path.lstat().st_mode
     except OSError as exc:
