@@ -29,6 +29,7 @@ def run_safe_command(
     cwd: Path | None = None,
     input_text: str | None = None,
     timeout_s: int = DEFAULT_COMMAND_TIMEOUT_S,
+    env: dict | None = None,
 ) -> SafeCommandResult:
     # 외부 CLI는 자동 릴레이를 멈추지 않도록 항상 timeout과 오류 캡처를 적용한다.
     command = tuple(str(arg) for arg in args)
@@ -36,6 +37,7 @@ def run_safe_command(
         completed = subprocess.run(
             command,
             cwd=cwd,
+            env=env,
             input=input_text,
             text=True,
             capture_output=True,

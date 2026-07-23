@@ -43,6 +43,7 @@ from agent_flow.core.team import (
     add_task,
     add_worker,
     approve_worker_call,
+    approved_worker_scopes,
     approve_task_result,
     archive_team,
     claim_task,
@@ -77,6 +78,15 @@ from agent_flow.core.worktrees import (
     remove_worktree,
     worktree_branch_exists,
     worktree_runtime_root,
+)
+from agent_flow.core.worktree_isolation import (
+    WorkerScope,
+    WorktreeIsolationError,
+    assert_cwd_bound,
+    assert_scopes_isolated,
+    max_worker_capacity,
+    sanitized_worker_env,
+    verify_linked_worktree,
 )
 from agent_flow.core.state import RunRequest, RunState, start_run, status_summary
 from agent_flow.core.workflow import load_workflow
@@ -276,6 +286,7 @@ def main(argv: list[str] | None = None) -> int:
     worktree_remove.add_argument("--root", default=".")
     worktree_remove.add_argument("--name", required=True)
     worktree_remove.add_argument("--keep-branch", action="store_true")
+    worktree_remove.add_argument("--allow-unmerged", action="store_true")
 
     team_parser = subparsers.add_parser("team")
     team_subparsers = team_parser.add_subparsers(dest="team_command", required=True)
@@ -850,8 +861,13 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"worktree not found or missing path: {status.name}", file=sys.stderr)
                 return 1
             try:
-                remove_worktree(root=root, status=status, delete_branch=not args.keep_branch)
-            except subprocess.CalledProcessError as exc:
+                remove_worktree(
+                    root=root,
+                    status=status,
+                    delete_branch=not args.keep_branch,
+                    allow_unmerged=args.allow_unmerged,
+                )
+            except (subprocess.CalledProcessError, WorktreeIsolationError) as exc:
                 print(_format_cli_error(exc), file=sys.stderr)
                 return 2
             print(f"removed {status.name} {status.path}")
@@ -978,6 +994,35 @@ def main(argv: list[str] | None = None) -> int:
             if prompt is None:
                 print(f"worker not approved for task: {pending.task_id}")
                 return 1
+            # In a git repo every worker runs in its own verified worktree with a
+            # sanitized git env; isolation failure is fail-closed (return 2), never
+            # a silent fallback to the leader checkout.
+            isolate = _is_git_repo(root)
+            worker_cwd = root
+            worker_env = None
+            worktree_status = None
+            if isolate:
+                capacity = max_worker_capacity()
+                in_progress = sum(1 for task in status["tasks"] if task.status == "in_progress")
+                if in_progress >= capacity:
+                    print(f"worker capacity reached ({in_progress}/{capacity})", file=sys.stderr)
+                    return 2
+                try:
+                    scopes = [
+                        WorkerScope(worker=label, paths=paths, worktree_isolated=True)
+                        for label, paths in approved_worker_scopes(root=root, team_name=args.team)
+                    ]
+                    assert_scopes_isolated(scopes)
+                    plan = plan_worktree(root=root, name=pending.task_id, unique=args.worker)
+                    worktree_status = create_worktree(root=root, plan=plan, allow_dirty=True)
+                    worker_cwd = verify_linked_worktree(
+                        root=root, path=worktree_status.path, expected_branch=plan.branch
+                    )
+                    assert_cwd_bound(worktree_path=worktree_status.path, cwd=worker_cwd)
+                except (OSError, ValueError, RuntimeError, WorktreeIsolationError, subprocess.CalledProcessError) as exc:
+                    print(_format_cli_error(exc), file=sys.stderr)
+                    return 2
+                worker_env = sanitized_worker_env()
             claimed = claim_task(
                 root=root,
                 team_name=args.team,
@@ -987,7 +1032,8 @@ def main(argv: list[str] | None = None) -> int:
             result = run_provider(
                 ProviderCommand(name="host-command", argv=tuple(args.command_argv)),
                 prompt=prompt,
-                cwd=root,
+                cwd=worker_cwd,
+                env=worker_env,
             )
             output = result.stdout.strip() or result.stderr.strip()
             if result.failed:
@@ -1006,7 +1052,8 @@ def main(argv: list[str] | None = None) -> int:
                     claim_token=claimed.claim_token or "",
                     result=output,
                 )
-            print(f"{task.task_id} {task.status}")
+            suffix = f" worktree={worktree_status.path}" if worktree_status is not None else ""
+            print(f"{task.task_id} {task.status}{suffix}")
             return 1 if result.failed else 0
         if args.team_command == "claim":
             task = claim_task(root=root, team_name=args.team, task_id=args.task, worker_name=args.worker)
@@ -1538,6 +1585,14 @@ def _parse_retry_after_arg(value: str | None) -> datetime | None:
 def _cleanup_worktree_after_failure(root: Path, status, original: BaseException) -> None:
     try:
         remove_worktree(root=root, status=status)
+    except WorktreeIsolationError as preserve_exc:
+        # Fail closed: the worktree holds uncommitted or unmerged work. Preserve
+        # it so a run failure does not also destroy the worker's changes.
+        print(
+            f"warning: preserving worktree {status.name} at {status.path}: "
+            f"{_format_cli_error(preserve_exc)}",
+            file=sys.stderr,
+        )
     except (subprocess.CalledProcessError, OSError) as cleanup_exc:
         print(
             f"warning: failed to clean up worktree {status.name}: "

@@ -10,6 +10,13 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from agent_flow.core.commands import run_safe_command
+from agent_flow.core.worktree_isolation import (
+    assert_worktree_mergeable,
+    git_safe,
+    verify_linked_worktree,
+    with_git_lock_retry,
+    worktree_creation_lock,
+)
 
 
 PROTECTED_WORKTREE_BRANCHES = {"main", "master", "develop"}
@@ -36,8 +43,13 @@ class WorktreeStatus:
     requested_name: str = ""
 
 
-def plan_worktree(*, root: Path, name: str, branch: str | None = None) -> WorktreePlan:
-    safe_name = _feature_worktree_name(name)
+def plan_worktree(
+    *, root: Path, name: str, branch: str | None = None, unique: str | None = None
+) -> WorktreePlan:
+    # A per-worker unique token keeps two workers on the same task from
+    # normalizing to one shared worktree, which would silently break isolation.
+    base_name = name if unique is None else f"{name}-{unique}"
+    safe_name = _feature_worktree_name(base_name)
     selected_branch = branch or f"feat/{safe_name.removeprefix('feat-')}"
     _validate_branch(selected_branch)
     if selected_branch in PROTECTED_WORKTREE_BRANCHES:
@@ -73,12 +85,10 @@ def create_worktree(*, root: Path, plan: WorktreePlan, allow_dirty: bool = False
         _assert_same_requested_name(root=root, plan=plan)
         return existing
     plan.path.parent.mkdir(parents=True, exist_ok=True)
-    if worktree_branch_exists(root=root, branch=plan.branch):
-        _run_git(root, "worktree", "add", str(plan.path), plan.branch)
-        branch_created = False
-    else:
-        _run_git(root, "worktree", "add", "-b", plan.branch, str(plan.path), plan.base_ref)
-        branch_created = True
+    branch_created = _add_worktree_locked(root=root, plan=plan)
+    # Fail closed: trust the path only after git confirms it is a linked
+    # worktree of this repo on the expected branch.
+    verify_linked_worktree(root=root, path=plan.path, expected_branch=plan.branch)
     status = WorktreeStatus(
         name=plan.name,
         branch=plan.branch,
@@ -91,17 +101,48 @@ def create_worktree(*, root: Path, plan: WorktreePlan, allow_dirty: bool = False
         write_worktree_manifest(root=root, status=status)
     except Exception:
         try:
-            remove_worktree(root=root, status=status)
+            remove_worktree(root=root, status=status, allow_unmerged=True)
         except Exception:
             pass
         raise
     return status
 
 
-def remove_worktree(*, root: Path, status: WorktreeStatus, delete_branch: bool = True) -> None:
+def _add_worktree_locked(*, root: Path, plan: WorktreePlan) -> bool:
+    created = {"branch": False}
+
+    def _prune_and_add() -> None:
+        # Prune first so a stale registration from a crashed run cannot make
+        # `worktree add` fail; both run under the creation lock + bounded retry.
+        _run_git(root, "worktree", "prune")
+        if worktree_branch_exists(root=root, branch=plan.branch):
+            _run_git(root, "worktree", "add", str(plan.path), plan.branch)
+            created["branch"] = False
+        else:
+            _run_git(root, "worktree", "add", "-b", plan.branch, str(plan.path), plan.base_ref)
+            created["branch"] = True
+
+    with worktree_creation_lock(root):
+        with_git_lock_retry(_prune_and_add)
+    return created["branch"]
+
+
+def remove_worktree(
+    *,
+    root: Path,
+    status: WorktreeStatus,
+    delete_branch: bool = True,
+    require_merged: bool = True,
+    allow_unmerged: bool = False,
+) -> None:
+    live = status.path.exists() and (status.path / ".git").exists()
+    if live and require_merged and not allow_unmerged:
+        # Destructive: prove the work is already in the leader before removing.
+        assert_worktree_mergeable(root=root, path=status.path)
     branch_to_delete = _owned_branch_for_live_worktree(root=root, status=status) if delete_branch else None
     if status.path.exists():
-        _run_git(root, "worktree", "remove", "--force", str(status.path))
+        force_args = ("--force",) if allow_unmerged else ()
+        _run_git(root, "worktree", "remove", *force_args, str(status.path))
     if branch_to_delete is not None:
         _run_git(root, "branch", "-D", branch_to_delete)
     remove_worktree_metadata(root=root, name=status.name)
@@ -130,7 +171,7 @@ def _assert_same_requested_name(*, root: Path, plan: WorktreePlan) -> None:
 
 
 def worktree_branch_exists(*, root: Path, branch: str) -> bool:
-    result = run_safe_command(("git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"), cwd=root)
+    result = git_safe("show-ref", "--verify", "--quiet", f"refs/heads/{branch}", cwd=root)
     return result.ok
 
 
@@ -142,7 +183,7 @@ def _default_base_ref(root: Path) -> str:
 
 
 def _git_commit_ref_exists(*, root: Path, ref: str) -> bool:
-    result = run_safe_command(("git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"), cwd=root)
+    result = git_safe("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", cwd=root)
     # git을 호출할 수 없으면 기본 ref 후보가 없는 것으로 보고 HEAD fallback을 쓴다.
     return result.ok
 
@@ -260,7 +301,7 @@ def _legacy_worktree_manifest_path(*, root: Path, name: str) -> Path:
 
 
 def _agent_flow_git_dir(root: Path) -> Path:
-    result = run_safe_command(("git", "rev-parse", "--git-common-dir"), cwd=root)
+    result = git_safe("rev-parse", "--git-common-dir", cwd=root)
     if not result.ok:
         return root / ".agent-flow"
     git_common = Path(result.stdout.strip())
@@ -276,7 +317,7 @@ def _is_agent_flow_status_line(line: str) -> bool:
 
 def _run_git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
     # worktree add/remove는 큰 저장소나 느린 디스크에서 30초를 넘을 수 있어 별도 여유를 둔다.
-    result = run_safe_command(("git", *args), cwd=root, timeout_s=GIT_WORKTREE_TIMEOUT_S)
+    result = git_safe(*args, cwd=root, timeout_s=GIT_WORKTREE_TIMEOUT_S)
     if not result.ok:
         # 호출자는 기존 subprocess 예외 경로로 처리하므로 형태를 유지한다.
         raise subprocess.CalledProcessError(
@@ -292,7 +333,7 @@ def _owned_branch_for_live_worktree(*, root: Path, status: WorktreeStatus) -> st
     planned_branch = plan_worktree(root=root, name=status.name).branch
     if not status.branch_created_by_agent_flow or status.branch != planned_branch:
         return None
-    result = run_safe_command(("git", "-C", str(status.path), "branch", "--show-current"), cwd=root)
+    result = git_safe("-C", str(status.path), "branch", "--show-current", cwd=root)
     if not result.ok:
         return None
     current_branch = result.stdout.strip()

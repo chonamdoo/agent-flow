@@ -1547,15 +1547,17 @@ def test_run_safe_command_times_out_without_hanging(tmp_path: Path):
 def test_worktree_git_commands_use_longer_timeout(tmp_path: Path, monkeypatch):
     sys.path.insert(0, str(KIT_ROOT / "src"))
     from agent_flow.core import worktrees
+    from agent_flow.core import worktree_isolation
     from agent_flow.core.commands import SafeCommandResult
 
     captured: dict[str, int] = {}
 
-    def fake_run_safe_command(args, *, cwd=None, input_text=None, timeout_s=0):
+    def fake_run_safe_command(args, *, cwd=None, input_text=None, timeout_s=0, env=None):
         captured["timeout_s"] = timeout_s
         return SafeCommandResult(args=tuple(args), returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(worktrees, "run_safe_command", fake_run_safe_command)
+    # git calls route through worktree_isolation.git_safe, which strips leaky env.
+    monkeypatch.setattr(worktree_isolation, "run_safe_command", fake_run_safe_command)
 
     worktrees._run_git(tmp_path, "worktree", "add", "path", "branch")
 
