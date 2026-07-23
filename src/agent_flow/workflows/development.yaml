@@ -12,10 +12,6 @@ phases:
   - id: implement
     role: implementer
     description: Implement the requested change.
-    requirements: [implementation-complete, focused-regression-coverage]
-    routes:
-      success: review
-      failure: implement
     prompt: |
       Implement the requested change using the existing project patterns. Keep the
       diff scoped to the task and update focused regression coverage when needed.
@@ -27,13 +23,9 @@ phases:
     replicas: 3
     description: Review the implementation.
     multi_review: true
-    skills:
-      required: [code-generation-discipline, code-review, architecture-reviewer, clean-architecture-core]
-    requirements: [independent-reviewers, architecture-contract]
     routes:
       approve: qa
       request-changes: fix-loop
-      failure: fix-loop
     prompt: |
       Run at least two independent sub-agent reviewers in parallel. Each reviewer
       checks bugs, regressions, missing tests, and contract drift.
@@ -64,10 +56,8 @@ phases:
   - id: fix-loop
     role: fixer
     description: Fix review or QA findings.
-    requirements: [findings-resolved, tests-pass]
     routes:
-      success: review
-      failure: fix-loop
+      default: review
     prompt: |
       Fix only the findings from review.md or qa.md. Preserve the original scope
       and update the relevant regression check.

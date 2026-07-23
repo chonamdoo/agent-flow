@@ -1,32 +1,26 @@
 ---
 name: agent-flow-concise-output
 description: >
-  Adapts agent-flow reviews, commits, phase artifacts, PR summaries, and
-  compressed context summaries into concise Korean while preserving parser
-  markers and technical tokens. Use when writing agent-flow review findings,
-  commit messages, phase artifacts, PR summaries, or compressed context
-  summaries.
+  Korean concise output adapter for agent-flow review, commit, and artifact
+  output. Keeps technical accuracy and parser markers intact while reducing
+  prose. Use when writing review findings, commit messages, phase artifacts,
+  PR summaries, or compressed context summaries.
 ---
 
 # Agent Flow Concise Output
 
-Use this skill to reduce prose while preserving agent-flow contracts.
-
-## Quick start
-
-1. Apply this as an output adapter after the main workflow or review skill has determined the substance.
-2. Shorten only prose; preserve parser markers, paths, commands, identifiers, code, and required verdict/status lines byte-for-byte.
-3. If a one-page rules file is needed for Codex/installer integration, read [concise-output.md](concise-output.md).
-
-This is not a standalone workflow skill. It pairs with `agent-flow` and review/commit/artifact-writing phases, and it does not replace the underlying review, QA, commit, or phase contract.
+Use this skill to make agent-flow output concise and clear while preserving its
+contracts. For anything beyond trivial shortening, apply `write-for-work`
+(reader, purpose, plain language) rather than mechanical translation.
 The installer also writes `concise-output.md` to `.Codex/rules/concise-output.md`.
 
 ## Rules
 
-- Write user-facing prose in Korean.
+- Write user-facing prose in clear, natural Korean per `write-for-work`; favor plain, specific wording over mechanical shortening.
+- Keep established English technical terms and identifiers as-is; do not force awkward Korean translations. Explain a term instead of renaming it.
 - Keep code, commands, paths, URLs, API names, function names, env vars, errors, version numbers, YAML keys, JSON keys, phase ids, and parser markers unchanged.
 - Do not use emoji.
-- Do not imitate caveman speech. Use short technical Korean.
+- Do not imitate caveman speech. Use short, natural technical Korean.
 - Preserve exact verdict/status lines, including `verdict: approve`, `verdict: request-changes`, `verdict: blocked`, and `next_command`.
 
 ## Review

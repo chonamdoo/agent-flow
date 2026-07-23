@@ -323,6 +323,45 @@ def approve_worker_call(
     return approval
 
 
+def approved_worker_scopes(*, root: Path, team_name: str) -> list:
+    """Return (worker, write_scope_paths) for every approval in the team.
+
+    The isolation scope gate uses this to detect overlapping write scopes across
+    concurrently dispatched workers.
+    """
+    safe_team = safe_team_name(team_name)
+    team_dir = _team_root(root, safe_team)
+    scopes = []
+    for task_path in _task_json_paths(team_dir):
+        task_id = task_path.stem
+        approvals_path = team_dir / "tasks" / task_id / "workers_approved.json"
+        if not approvals_path.is_file():
+            continue
+        try:
+            payload = _read_json(approvals_path)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, list):
+            continue
+        for entry in payload:
+            if not isinstance(entry, dict):
+                continue
+            worker = entry.get("worker")
+            if not isinstance(worker, str):
+                continue
+            scope = entry.get("write_scope", "none")
+            paths = _scope_paths(scope if isinstance(scope, str) else "none")
+            scopes.append((worker, paths))
+    return scopes
+
+
+def _scope_paths(scope: str) -> tuple:
+    text = scope.strip()
+    if text in {"none", "tasks-only", ""}:
+        return ()
+    return tuple(part.strip() for part in text.split(",") if part.strip())
+
+
 def write_worker_result(
     *,
     root: Path,

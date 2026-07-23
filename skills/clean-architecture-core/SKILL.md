@@ -1,31 +1,13 @@
 ---
 name: clean-architecture-core
-description: Defines the platform-neutral Clean Architecture contract for semantic layers, dependency direction, use cases, repository/source/cache/mapper boundaries, DI/composition-root placement, and cross-platform review. Use when designing, implementing, or reviewing layer boundaries or adapter seams; load it before platform clean architecture skills when framework details matter.
+description: Platform-neutral Clean Architecture contract for semantic layers, dependency direction, use cases, repository/source/cache/mapper boundaries, DI/composition-root placement, and cross-platform architecture review. Use before platform clean architecture skills and during design, implementation, architecture review, or code review.
 ---
 
 # Clean Architecture Core
 
 Use this skill as the canonical source for platform-neutral architecture rules.
-It can be used alone for shared layer semantics, dependency direction, and
-adapter boundaries. Pair it with:
-
-- a platform clean architecture skill when path, framework, DI, or sample-code
-  details matter;
-- `ddd-architecture` first when domain language, bounded contexts, aggregates,
-  or invariants are still being discovered;
-- `solid-architecture-review` during reviews that need SOLID-specific findings;
-- `codebase-design` when the main question is module depth, interface shape, or
-  seam placement rather than layer compliance.
-
-## Quick start
-
-1. Identify the current layer or seam: app shell, feature API, presentation,
-   domain, data, network, UI/resource/platform, or adapter.
-2. Check dependency direction before local details: policy-facing contracts point
-   inward; framework, transport, persistence, and SDK details stay at adapters.
-3. Apply the boundary sections that match the touched code, then record the
-   relevant checklist markers in review output.
-
+Load a platform-specific clean architecture skill only for path, framework, DI,
+or sample-code details.
 
 ## Semantic Layers
 

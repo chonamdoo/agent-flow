@@ -1,17 +1,12 @@
 ---
 name: react-clean-architecture
-description: React Web and Next.js platform adapter for `clean-architecture-core` that maps the core contract to monorepo packages, Context Provider composition roots, optional TSyringe edge use, repository/source/mapper boundaries, and web platform adapters. Use when applying Clean Architecture across React packages or reviewing package/data/DI boundaries; pair with react-clean-presentation-architecture for hooks, UiState, component-state-holder, or presentation-only work.
+description: React Web and Next.js Clean Architecture adapter for the platform-neutral clean-architecture-core contract. Use for monorepo package layout, Context Provider composition root, optional TSyringe, state holder/component boundaries, repository/source/mapper boundaries, and React architecture review.
 ---
 
 # React Clean Architecture
 
-This is not a standalone Clean Architecture guide. Load [`clean-architecture-core`](../clean-architecture-core/SKILL.md) first; this skill adds React/Next.js package, composition-root, DI-edge, and platform-boundary details only.
-
-## Quick start
-
-1. Apply the layer, dependency-direction, and review rules from `clean-architecture-core`.
-2. Use this adapter only to translate those rules into React/Next.js packages, Context Provider composition roots, optional TSyringe edge use, and web platform adapters.
-3. If the task is only hooks, UiState, component/state-holder split, effects, or presentation mapping, pair with `react-clean-presentation-architecture` before applying presentation details.
+Load `clean-architecture-core` first. This skill adds React/Next.js package,
+composition-root, and sample-code details only.
 
 ## Package Shape
 

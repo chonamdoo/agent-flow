@@ -7,11 +7,7 @@ from typing import Any
 import yaml
 
 from agent_flow.core.markers import normalize_required_markers
-from agent_flow.core.security import (
-    ensure_child_path,
-    validate_portable_skill_name,
-    validate_safe_name,
-)
+from agent_flow.core.security import ensure_child_path, validate_safe_name
 
 
 @dataclass(frozen=True)
@@ -26,10 +22,6 @@ class PhaseDefinition:
     routes: dict[str, str] | None
     required_markers: tuple[str, ...]
     artifact: str
-    required_skills: tuple[str, ...]
-    requirements: tuple[str, ...]
-    artifacts: tuple[str, ...]
-    skill_compatibility: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -96,7 +88,6 @@ def _normalize_phases(phases_raw: list[object], path: Path, workflow_id: str) ->
             )
         seen_ids.add(phase_id)
         routes = _routes(item.get("routes"), path, phase_id)
-        artifacts = _artifacts(item, path, workflow_id, phase_id)
         out.append(
             PhaseDefinition(
                 id=phase_id,
@@ -108,10 +99,7 @@ def _normalize_phases(phases_raw: list[object], path: Path, workflow_id: str) ->
                 cite_lore=_bool_field(item.get("cite_lore", False), path, phase_id, "cite_lore"),
                 routes=routes,
                 required_markers=normalize_required_markers(item.get("required_markers")),
-                artifact=artifacts[0],
-                required_skills=_required_skills(item.get("skills"), path, phase_id),
-                requirements=_logical_name_list(item.get("requirements"), path, phase_id, "requirements"),
-                artifacts=artifacts,
+                artifact=_optional_string(item.get("artifact"), _default_artifact_for_phase(workflow_id, phase_id)),
             )
         )
     return out
@@ -169,67 +157,6 @@ def _routes(value: object, path: Path, phase_id: str) -> dict[str, str] | None:
             raise ValueError(f"workflow {path}: phase {phase_id} routes must map strings to strings")
         routes[key] = target
     return routes
-
-
-def _required_skills(value: object, path: Path, phase_id: str) -> tuple[str, ...]:
-    if value is None:
-        return ()
-    if not isinstance(value, dict) or set(value) - {"required"}:
-        raise ValueError(
-            f"workflow {path}: phase {phase_id} `skills` must contain only `required`"
-        )
-    required = _logical_name_list(value.get("required"), path, phase_id, "skills.required")
-    return tuple(validate_portable_skill_name(name) for name in required)
-
-
-def _logical_name_list(
-    value: object,
-    path: Path,
-    phase_id: str,
-    field: str,
-) -> tuple[str, ...]:
-    if value is None:
-        return ()
-    if not isinstance(value, list) or any(not isinstance(item, str) or not item for item in value):
-        raise ValueError(
-            f"workflow {path}: phase {phase_id} `{field}` must be a string list"
-        )
-    normalized = tuple(dict.fromkeys(value))
-    for name in normalized:
-        validate_safe_name(name, field)
-    return normalized
-
-
-def _artifacts(
-    item: dict[str, object],
-    path: Path,
-    workflow_id: str,
-    phase_id: str,
-) -> tuple[str, ...]:
-    default = _default_artifact_for_phase(workflow_id, phase_id)
-    singular = item.get("artifact")
-    plural = item.get("artifacts")
-    if plural is None:
-        values = [_optional_string(singular, default)]
-    else:
-        if not isinstance(plural, list) or not plural or any(
-            not isinstance(value, str) or not value for value in plural
-        ):
-            raise ValueError(
-                f"workflow {path}: phase {phase_id} `artifacts` must be a non-empty string list"
-            )
-        values = list(dict.fromkeys(plural))
-        if singular is not None and singular != values[0]:
-            raise ValueError(
-                f"workflow {path}: phase {phase_id} `artifact` must equal the first `artifacts` entry"
-            )
-    for value in values:
-        artifact = Path(value)
-        if artifact.is_absolute() or ".." in artifact.parts:
-            raise ValueError(
-                f"workflow {path}: phase {phase_id} artifact path must remain relative"
-            )
-    return tuple(values)
 
 
 def _default_artifact_for_phase(workflow_id: str, phase_id: str) -> str:

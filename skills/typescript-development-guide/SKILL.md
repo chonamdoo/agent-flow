@@ -1,23 +1,11 @@
 ---
 name: typescript-development-guide
-description: TypeScript implementation and review checklist for type-safe changes in `.ts`, `.tsx`, and TypeScript project configuration. Use when writing, modifying, or reviewing TypeScript source, TSX source, `tsconfig`, or typed tooling config; do not use for React/RN framework behavior, Python, Android native code, or broad architecture rewrites by itself.
+description: TypeScript-specific implementation and review checklist. Use only when writing, modifying, or reviewing TypeScript or TSX files (`*.ts`, `*.tsx`) or TypeScript project configuration. Apply as a secondary guide after repo patterns and task scope; do not use it to demand broad rewrites.
 ---
 
 # TypeScript Development Guide
 
 Use this only for TypeScript/TSX code in the changed scope. Do not score it.
-
-## Quick start
-
-1. Confirm the changed scope includes TypeScript source or TypeScript-specific configuration.
-2. Read `tsconfig`, lint rules, and nearby domain/framework patterns before changing types.
-3. Preserve strictness: avoid `any`, unsafe casts, weakened null handling, and unawaited promises unless the boundary requires it.
-4. Run only the targeted typecheck, test, or lint command that covers the edited path.
-
-## Scope
-
-- Include TypeScript types, async typing, imports/exports, TSX type safety, `tsconfig`, and typed tooling configuration.
-- Exclude React Web behavior covered by `react-development-guide`, React Native behavior covered by `react-native-development-guide`, Python, Android native code, and broad architecture rewrites.
 
 ## Write
 

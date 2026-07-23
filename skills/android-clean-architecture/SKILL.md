@@ -1,17 +1,12 @@
 ---
 name: android-clean-architecture
-description: Android/Kotlin platform adapter for `clean-architecture-core` that maps the core contract to Gradle modules, Kotlin packages, Hilt, Retrofit data sources, and Android platform boundaries. Use when applying Clean Architecture to Android modules or reviewing module/data/DI boundaries; pair with android-clean-presentation-architecture for ViewModel, UiState, Compose screen, or presentation-only work.
+description: Android/Kotlin Clean Architecture adapter for the platform-neutral clean-architecture-core contract. Use for Gradle module shape, Kotlin package paths, Hilt DI, Retrofit remote data sources, ViewModel/Compose presentation, and Android architecture review.
 ---
 
 # Android Clean Architecture
 
-This is not a standalone Clean Architecture guide. Load [`clean-architecture-core`](../clean-architecture-core/SKILL.md) first; this skill adds Android/Kotlin module, package, DI, and platform-boundary details only.
-
-## Quick start
-
-1. Apply the layer, dependency-direction, and review rules from `clean-architecture-core`.
-2. Use this adapter only to translate those rules into Android Gradle modules, Kotlin packages, Hilt bindings, Retrofit/OkHttp boundaries, and Android platform adapters.
-3. If the task is only ViewModel, UiState, Compose screen wiring, or one-shot presentation effects, pair with `android-clean-presentation-architecture` before applying presentation details.
+Load `clean-architecture-core` first. This skill adds Android/Kotlin module,
+package, DI, and sample-code details only.
 
 ## Module Shape
 

@@ -45,13 +45,6 @@ optional:
     # The installer auto-includes declared dependencies such as clean-architecture-core.
     install:
       - "skill-name"
-    # Stable capability references (optional). Each capability resolves to a concrete
-    # provider via skills/compatibility.json at install time and is merged with install.
-    # A capability with no active provider blocks (capability_unresolved); more than one
-    # active provider blocks (stack_ambiguity) instead of guessing. Profiles without
-    # capabilities behave exactly as before.
-    capabilities:
-      - "capability-id"
     # Review-time required skills are resolved from active profile + changed files.
     # Missing required skills block only the touched platform/profile.
     required_review:
@@ -65,7 +58,7 @@ optional:
     # Canonical clean architecture role mapping. Paths are platform-native,
     # but role ids remain semantic and cross-platform.
     contract: "clean-architecture-core"
-    platform: "android | react-native | react | ios | node | python"
+    platform: "android | react-native | react | ios | python"
     strict_when_roots_present: "optional bool; if true, deterministic lint is n/a until activation_roots exist or are changed"
     activation_roots: ["optional path roots that indicate the architecture contract is adopted"]
     roles:

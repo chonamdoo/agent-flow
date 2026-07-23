@@ -1,7 +1,7 @@
 #!/bin/bash
 # agent-flow PreToolUse hook: main/master/develop 브랜치에서 커밋·푸시 차단
-INPUT=$(/bin/cat)
-PROTECTED_BRANCH=$(/usr/bin/python3 -I -B -c "
+INPUT=$(cat)
+PROTECTED_BRANCH=$(python3 -c "
 import sys, json
 import os
 import re
@@ -50,14 +50,11 @@ def git_parts(tokens):
         if tokens[0] == 'command':
             tokens = tokens[1:]
             continue
-        if re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', tokens[0]):
-            tokens = tokens[1:]
-            continue
         if tokens[0] == 'env':
             tokens = skip_env(tokens)
             continue
         break
-    if not tokens or os.path.basename(tokens[0]) != 'git':
+    if not tokens or tokens[0] != 'git':
         return [], []
     index = 1
     global_args = []
@@ -79,7 +76,7 @@ def current_branch(global_args, cwd):
     # git이 멈추거나 없을 때 hook이 도구 호출을 무기한 막지 않도록 방어한다.
     try:
         result = subprocess.run(
-            ['/usr/bin/git', *global_args, 'branch', '--show-current'],
+            ['git', *global_args, 'branch', '--show-current'],
             cwd=cwd,
             text=True,
             stdout=subprocess.PIPE,
@@ -97,14 +94,13 @@ def shell_tokens(command):
     # shlex는 ValueError 전에 일부 토큰을 이미 내보내므로, 부분 토큰으로
     # 오판하지 않도록 전체 파싱이 성공한 경우에만 토큰을 반환한다.
     try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=';&|()\r\n')
-        lexer.whitespace = ' \t'
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=';&|()')
         lexer.whitespace_split = True
         tokens = list(lexer)
     except ValueError:
         return
     for token in tokens:
-        if token and all(char in ';&|()\r\n' for char in token):
+        if token and all(char in ';&|()' for char in token):
             for char in token:
                 yield char
         else:
@@ -124,30 +120,11 @@ def inspect_tokens(tokens, cwd):
             return branch, cwd
     return '', cwd
 
-def base_cwd_from(value):
-    # PreToolUse payload는 도구가 실제로 실행되는 cwd를 전달한다. hook 프로세스의
-    # os.getcwd()(leader checkout)로 브랜치를 판정하면 feature worktree 커밋을
-    # 보호 브랜치로 오판하므로, payload cwd를 우선한다.
-    candidates = []
-    if isinstance(value, dict):
-        top = value.get('cwd')
-        if isinstance(top, str) and top:
-            candidates.append(top)
-        tool_input = value.get('tool_input')
-        if isinstance(tool_input, dict):
-            nested = tool_input.get('cwd')
-            if isinstance(nested, str) and nested:
-                candidates.append(nested)
-    for candidate in candidates:
-        if os.path.isdir(candidate):
-            return os.path.abspath(candidate)
-    return os.getcwd()
-
-def classify(command, base_cwd):
-    cwd_stack = [base_cwd]
+def classify(command):
+    cwd_stack = [os.getcwd()]
     current = []
     for token in shell_tokens(command):
-        if token in ';&|\r\n':
+        if token in ';&|':
             branch, cwd_stack[-1] = inspect_tokens(current, cwd_stack[-1])
             if branch:
                 return branch
@@ -175,7 +152,7 @@ def classify(command, base_cwd):
     return ''
 
 d = json.load(sys.stdin)
-print(classify(command_from(d), base_cwd_from(d)))
+print(classify(command_from(d)))
 " 2>/dev/null <<< "$INPUT")
 
 if [ -z "$PROTECTED_BRANCH" ]; then

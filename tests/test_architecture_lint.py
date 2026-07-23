@@ -3,15 +3,10 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pytest
-
 KIT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(KIT_ROOT / "src"))
 
-from agent_flow.core.architecture_lint import (  # noqa: E402
-    contains_forbidden_token,
-    validate_package_suffix,
-)
+from agent_flow.core.architecture_lint import validate_package_suffix  # noqa: E402
 
 
 CORE_DATA_ROLE = {"id": "core-data", "package_suffix": "core.data.<context>"}
@@ -56,29 +51,3 @@ def test_missing_package_declaration_reported():
     )
     assert len(findings) == 1
     assert "requires package declaration" in findings[0].message
-
-
-@pytest.mark.parametrize(
-    ("value", "token", "expected"),
-    (
-        ("projects.core.domain.identity", "Entity", False),
-        ("class UserEntity", "Entity", True),
-        ("EntityMapper", "Entity", True),
-        ("user_entity", "Entity", True),
-        ("userentity", "Entity", False),
-        ("PreviewState", "View", False),
-        ("UIViewState", "View", True),
-        ("OrderDTO", "DTO", True),
-        ("OrderDTO2", "DTO", True),
-        ("class Entity2", "Entity", True),
-        ("DTOMapper", "DTO", True),
-        ("@Composable fun Screen()", "@Composable", True),
-        ("ComposableState", "@Composable", False),
-    ),
-)
-def test_forbidden_token_respects_identifier_boundaries(
-    value: str,
-    token: str,
-    expected: bool,
-) -> None:
-    assert contains_forbidden_token(value, token) is expected

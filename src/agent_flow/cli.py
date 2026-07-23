@@ -3,10 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import shlex
 import shutil
-import stat
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -15,10 +13,7 @@ from pathlib import Path
 from agent_flow.adapters.registry import detect_adapter
 from agent_flow.adapters.templates import PromptContext, render_stage_prompt
 from agent_flow.core.artifacts import (
-    gate_execution_fingerprint,
     init_project,
-    reusable_gate_results,
-    write_gate_cache,
     write_gate_results,
     write_handoff,
     write_prompt,
@@ -34,31 +29,13 @@ from agent_flow.core.context_contract import (
     write_system_invariants,
 )
 from agent_flow.core.commands import run_safe_command
-from agent_flow.core.gates import GateCommand, GateResult, run_gates
+from agent_flow.core.gates import GateCommand, run_gates
 from agent_flow.core.phase_workflow import load_phase_workflow_definition
 from agent_flow.core.profiles import active_profile_ids, detect_profile, load_profile
 from agent_flow.core.review import summarize_reviews, write_review_summary
 from agent_flow.core.report import write_run_report
 from agent_flow.core.query import explain_run, query_run
-from agent_flow.core.security import resolve_project_path, validate_safe_name
-from agent_flow.core.workspace_boundary import (
-    WorkspaceBoundaryError,
-    acquire_workspace_start_claim,
-    execution_identity_from_context,
-    execution_identity_from_dict,
-    find_active_pinned_workspaces,
-    find_recoverable_stale_pinned_workspaces,
-    quarantine_orphaned_workspace,
-    repin_workspace_identity,
-    release_execution_binding,
-    release_workspace_start_claim,
-    reconcile_recovery_execution_state,
-    resolve_execution_finalizer_workspace,
-    resolve_recovery_execution_run,
-    resolve_recovery_execution_workspace_name,
-    select_execution_workspace,
-    workspace_identity_from_dict,
-)
+from agent_flow.core.security import resolve_project_path
 from agent_flow.core.tool_lint import lint_tools
 from agent_flow.core.watch import write_watch_snapshot
 from agent_flow.core.team import (
@@ -66,6 +43,7 @@ from agent_flow.core.team import (
     add_task,
     add_worker,
     approve_worker_call,
+    approved_worker_scopes,
     approve_task_result,
     archive_team,
     claim_task,
@@ -93,24 +71,29 @@ from agent_flow.core.team import (
 )
 from agent_flow.core.worktrees import (
     create_worktree,
-    delete_worktree_branch_at_tip,
     get_worktree_status,
     known_worktree_names,
     plan_worktree,
-    preserved_worktree_branch_tip,
     remove_worktree_metadata,
     remove_worktree,
     worktree_branch_exists,
-    worktree_branch_is_preserved,
     worktree_runtime_root,
-    validate_worktree_removal,
-    worktree_lifecycle_lock,
+)
+from agent_flow.core.worktree_isolation import (
+    WorkerScope,
+    WorktreeIsolationError,
+    assert_cwd_bound,
+    assert_scopes_isolated,
+    git_repo_state,
+    max_worker_capacity,
+    sanitized_worker_env,
+    verify_linked_worktree,
 )
 from agent_flow.core.state import RunRequest, RunState, start_run, status_summary
 from agent_flow.core.workflow import load_workflow
 from agent_flow.eval import run_eval
 from agent_flow.memory.entities import EntityMemoryIndex
-from agent_flow.artifact import find_active_run, mark_inactive, read_meta, write_meta
+from agent_flow.artifact import find_active_run, mark_inactive
 from agent_flow.runner import Runner, ResumeMode, _find_kit_root
 from agent_flow.providers.host import list_host_providers
 from agent_flow.providers.subprocess import ProviderCommand, run_provider
@@ -141,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
     continue_parser.add_argument("--root", default=".")
     continue_parser.add_argument("--worktree")
 
-    abort_parser = subparsers.add_parser("abort", allow_abbrev=False)
+    abort_parser = subparsers.add_parser("abort")
     abort_parser.add_argument("--root", default=".")
     abort_parser.add_argument("--worktree")
     abort_parser.add_argument("--yes", "-y", action="store_true")
@@ -162,7 +145,7 @@ def main(argv: list[str] | None = None) -> int:
     start_parser.add_argument("--worktree-branch")
     start_parser.add_argument("--allow-dirty", action="store_true")
 
-    status_parser = subparsers.add_parser("status", allow_abbrev=False)
+    status_parser = subparsers.add_parser("status")
     status_parser.add_argument("--root", default=".")
     status_parser.add_argument("--worktree")
 
@@ -205,8 +188,6 @@ def main(argv: list[str] | None = None) -> int:
     gates_parser.add_argument("--run-dir")
     gates_parser.add_argument("--timeout", type=int, default=600)
     gates_parser.add_argument("--worktree")
-    gates_parser.add_argument("--files", nargs="*")
-    gates_parser.add_argument("--full", action="store_true")
 
     architecture_lint_parser = subparsers.add_parser("architecture-lint")
     architecture_lint_parser.add_argument("--root", default=".")
@@ -297,9 +278,6 @@ def main(argv: list[str] | None = None) -> int:
     worktree_create.add_argument("--name", required=True)
     worktree_create.add_argument("--branch")
     worktree_create.add_argument("--allow-dirty", action="store_true")
-    worktree_repin = worktree_subparsers.add_parser("repin", allow_abbrev=False)
-    worktree_repin.add_argument("--root", default=".")
-    worktree_repin.add_argument("--name", required=True)
     worktree_status = worktree_subparsers.add_parser("status")
     worktree_status.add_argument("--root", default=".")
     worktree_status.add_argument("--name", required=True)
@@ -309,6 +287,7 @@ def main(argv: list[str] | None = None) -> int:
     worktree_remove.add_argument("--root", default=".")
     worktree_remove.add_argument("--name", required=True)
     worktree_remove.add_argument("--keep-branch", action="store_true")
+    worktree_remove.add_argument("--allow-unmerged", action="store_true")
 
     team_parser = subparsers.add_parser("team")
     team_subparsers = team_parser.add_subparsers(dest="team_command", required=True)
@@ -444,102 +423,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     requested_root = Path(getattr(args, "root", ".")).resolve()
     root = requested_root
-    inferred_worktree = None
-    direct_managed_read = (
-        args.command == "architecture-lint"
-        and getattr(args, "worktree", None) is None
-        and _managed_worktree_context(requested_root) is not None
-    )
-    pure_control_command = args.command == "review" and args.review_command == "retry"
-    recovery_command = args.command == "abort" or (
-        args.command == "worktree" and args.worktree_command == "repin"
-    )
-    if (
-        hasattr(args, "root")
-        and args.command == "status"
-        and getattr(args, "worktree", None) is not None
-    ):
-        try:
-            root, inferred_worktree = _resolve_status_cli_root_context(
-                requested_root,
-                args.worktree,
-            )
-        except (OSError, WorkspaceBoundaryError) as exc:
-            print(_format_cli_error(exc), file=sys.stderr)
-            return 2
-    elif hasattr(args, "root") and recovery_command:
-        try:
-            root = _resolve_recovery_cli_root(requested_root)
-            if args.command == "abort" and _is_git_repo(root):
-                execution = execution_identity_from_context(env=os.environ)
-                if args.worktree is not None:
-                    requested_worktree = _slug_for_hint(root, args.worktree)
-                    if execution is None:
-                        stale = find_recoverable_stale_pinned_workspaces(root)
-                        if sum(
-                            item.name == requested_worktree for item in stale
-                        ) != 1:
-                            raise WorkspaceBoundaryError(
-                                "execution_identity_missing: explicit worktree abort "
-                                "requires a host session identity"
-                            )
-                        args.worktree = requested_worktree
-                        args.owner_independent_abort = True
-                    else:
-                        bound_worktree = resolve_recovery_execution_workspace_name(
-                            root,
-                            execution,
-                        )
-                        if bound_worktree is None:
-                            stale = find_recoverable_stale_pinned_workspaces(root)
-                            if sum(
-                                item.name == requested_worktree for item in stale
-                            ) == 1:
-                                args.worktree = requested_worktree
-                                args.owner_independent_abort = True
-                                bound_worktree = requested_worktree
-                            else:
-                                raise WorkspaceBoundaryError(
-                                    "execution_binding_missing: active execution is not "
-                                    "bound to a worktree"
-                                )
-                        if requested_worktree != bound_worktree:
-                            raise WorkspaceBoundaryError(
-                                "execution_binding_conflict: requested worktree "
-                                f"{requested_worktree} differs from bound worktree "
-                                f"{bound_worktree}"
-                            )
-                elif execution is not None:
-                    args.worktree = resolve_recovery_execution_workspace_name(
-                        root,
-                        execution,
-                    )
-                    # Present-but-unbound execution must not silently no-op while
-                    # another session's run is still active — fail closed.
-                    if args.worktree is None and find_active_pinned_workspaces(root):
-                        raise WorkspaceBoundaryError(
-                            "execution_binding_missing: active execution is not "
-                            "bound to a worktree"
-                        )
-                elif find_active_pinned_workspaces(root):
-                    raise WorkspaceBoundaryError(
-                        "execution_identity_missing: active worktree runs require "
-                        "a host session identity"
-                    )
-        except (OSError, WorkspaceBoundaryError) as exc:
-            print(_format_cli_error(exc), file=sys.stderr)
-            return 2
-    elif hasattr(args, "root") and not direct_managed_read and not pure_control_command:
-        try:
-            root, inferred_worktree = _resolve_cli_root_context(
-                root,
-                getattr(args, "worktree", None),
-                allow_unbound_execution=args.command == "run",
-                allow_recoverable_stale=args.command == "status",
-            )
-        except WorkspaceBoundaryError as exc:
-            print(_format_cli_error(exc), file=sys.stderr)
-            return 2
+    root, inferred_worktree = _resolve_cli_root_context(root, getattr(args, "worktree", None))
     if inferred_worktree is not None and hasattr(args, "worktree") and args.worktree is None:
         args.worktree = inferred_worktree
 
@@ -631,57 +515,17 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "abort":
-        if (
-            args.worktree is not None
-            and getattr(args, "owner_independent_abort", False)
-        ):
-            try:
-                quarantine = quarantine_orphaned_workspace(root, args.worktree)
-            except (OSError, WorkspaceBoundaryError) as exc:
-                print(_format_cli_error(exc), file=sys.stderr)
-                return 2
-            print(f"aborted recoverable/stale run: {quarantine.run_id}")
-            print(f"quarantined: {quarantine.path}")
-            return 0
-
-        if args.worktree is not None:
-            try:
-                status = get_worktree_status(root=root, name=args.worktree)
-            except ValueError as exc:
-                print(_format_cli_error(exc), file=sys.stderr)
-                return 2
-            state_root = worktree_runtime_root(root=root, name=status.name)
-            if not _worktree_checkout_exists(status):
-                # Managed checkout was deleted mid-run. Recover the run through the
-                # authenticated git-private runtime when the current execution
-                # still owns its binding; the checkout is not needed.
-                recovered = _abort_recover_deleted_checkout(root, status.name)
-                if recovered is not None:
-                    return recovered
-                known = _known_worktree_names(root)
-                suffix = f" known worktrees: {', '.join(known)}" if known else " no known worktrees"
-                print(
-                    f"worktree not found or missing path: {status.name}.{suffix}",
-                    file=sys.stderr,
-                )
-                return 1
-        else:
-            state_root = root
+        try:
+            run_root, state_root = _worktree_context(root, args.worktree) if args.worktree else (root, root)
+        except ValueError as exc:
+            print(_format_cli_error(exc), file=sys.stderr)
+            return 2
+        if run_root is None:
+            return 1
         active = find_active_run(state_root)
         if active is None:
             print("진행 중인 run 없음 — abort할 대상이 없습니다.")
             return 0
-        meta = read_meta(active.path)
-        if meta.get("execution") is not None and meta.get("workspace") is not None:
-            execution = execution_identity_from_dict(meta["execution"])
-            workspace = workspace_identity_from_dict(meta["workspace"])
-            release_execution_binding(
-                execution,
-                git_common_dir=Path(workspace.git_common_dir),
-                run_dir=active.path,
-            )
-        meta["status"] = "aborted"
-        write_meta(active.path, meta)
         mark_inactive(active.path)
         print(f"aborted: {active.run_id} (artifacts preserved at {active.path})")
         return 0
@@ -698,56 +542,21 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
     if args.command == "status":
-        stale = (
-            find_recoverable_stale_pinned_workspaces(root)
-            if _is_git_repo(root)
-            else ()
-        )
-        if args.worktree is not None:
-            requested_name = _slug_for_hint(root, args.worktree)
-            requested_stale = tuple(
-                item for item in stale if item.name == requested_name
-            )
-        else:
-            requested_stale = stale
-        if requested_stale:
-            run_root, state_root = root, root
-            stale = requested_stale
-        else:
-            try:
-                run_root, state_root = (
-                    _worktree_context(root, args.worktree)
-                    if args.worktree
-                    else (root, root)
-                )
-            except ValueError as exc:
-                print(_format_cli_error(exc), file=sys.stderr)
-                return 2
-            if run_root is None:
-                return 1
-            active = find_active_run(state_root)
-            if active is not None:
-                active.print_status(
-                    next_command=_continue_command(root, args.worktree),
-                    config_root=root,
-                )
-                return 0
-        if stale:
-            for item in stale:
-                print(
-                    f"recoverable/stale run: {item.run_dir.name} "
-                    f"(worktree={item.name})"
-                )
-                print(
-                    "next_command: "
-                    f"agent-flow abort --root {shlex.quote(str(root))} "
-                    f"--worktree {shlex.quote(item.name)} --yes"
-                )
+        try:
+            run_root, state_root = _worktree_context(root, args.worktree) if args.worktree else (root, root)
+        except ValueError as exc:
+            print(_format_cli_error(exc), file=sys.stderr)
+            return 2
+        if run_root is None:
+            return 1
+        active = find_active_run(state_root)
+        if active is not None:
+            active.print_status(next_command=_continue_command(root, args.worktree), config_root=root)
             return 0
         if not (state_root / ".agent-flow" / "runs").exists():
             print("진행 중인 run 없음.")
             return 0
-        print(status_summary(state_root, project_root=root))
+        print(status_summary(state_root))
         return 0
 
     if args.command == "report":
@@ -801,128 +610,18 @@ def main(argv: list[str] | None = None) -> int:
         command_root = _command_project_root(root, requested_root, getattr(args, "worktree", None))
         if command_root is None:
             return 1
-        if args.full and args.files is not None:
-            print("--full cannot be combined with --files", file=sys.stderr)
-            return 2
         try:
             profile_ids = active_profile_ids(
                 _profile_source_root(root, requested_root, getattr(args, "worktree", None)),
                 args.profile,
             )
-            changed_files = (
-                _normalize_changed_files(command_root, args.files)
-                if args.files is not None
-                else _git_changed_files(command_root)
-            )
-            command_changed_files = None if args.full else changed_files
-            commands = _profile_gate_commands(
-                profile_ids,
-                project_root=command_root,
-                changed_files=command_changed_files,
-            )
+            commands = _profile_gate_commands(profile_ids)
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 1
-        android_modules = (
-            _android_changed_modules(command_root, changed_files)
-            if "android" in profile_ids and changed_files
-            else None
-        )
-        verification_mode = (
-            "targeted"
-            if not args.full and changed_files and android_modules is not None
-            else "full"
-        )
-        run_dir = (
-            _resolve_project_path(command_root, args.run_dir)
-            if args.run_dir is not None
-            else None
-        )
-        fingerprint = gate_execution_fingerprint(
-            root=command_root,
-            profile_ids=profile_ids,
-            verification_mode=verification_mode,
-            changed_files=changed_files,
-            commands=commands,
-        )
-        reusable = (
-            reusable_gate_results(
-                run_dir=run_dir,
-                root=command_root,
-                commands=commands,
-                fingerprint=fingerprint,
-            )
-            if run_dir is not None
-            else {}
-        )
-        pending = [command for index, command in enumerate(commands) if index not in reusable]
-        fresh = iter(run_gates(pending, cwd=command_root, timeout_s=args.timeout))
-        results = [
-            reusable[index] if index in reusable else next(fresh)
-            for index in range(len(commands))
-        ]
-        post_changed_files = (
-            _normalize_changed_files(command_root, args.files)
-            if args.files is not None
-            else _git_changed_files(command_root)
-        )
-        post_fingerprint = gate_execution_fingerprint(
-            root=command_root,
-            profile_ids=profile_ids,
-            verification_mode=verification_mode,
-            changed_files=post_changed_files,
-            commands=commands,
-        )
-        if post_fingerprint.get("fingerprint_id") != fingerprint.get("fingerprint_id"):
-            stability_command = GateCommand(
-                "workspace-stability",
-                ("agent-flow", "workspace-stability"),
-            )
-            stability_result = GateResult(
-                gate_id=stability_command.gate_id,
-                command=stability_command.command,
-                passed=False,
-                exit_code=1,
-                stdout="",
-                stderr="workspace inputs changed while gates were running",
-                executed_at=datetime.now(timezone.utc).isoformat(),
-            )
-            unstable_commands = [*commands, stability_command]
-            unstable_results = [*results, stability_result]
-            unstable_fingerprint = gate_execution_fingerprint(
-                root=command_root,
-                profile_ids=profile_ids,
-                verification_mode=verification_mode,
-                changed_files=post_changed_files,
-                commands=unstable_commands,
-            )
-            if run_dir is not None:
-                write_gate_results(
-                    run_dir=run_dir,
-                    results=unstable_results,
-                    commands=unstable_commands,
-                    fingerprint=unstable_fingerprint,
-                    verification_mode=verification_mode,
-                )
-            print("gate inputs changed while gates were running", file=sys.stderr)
-            return 1
-        fingerprint = post_fingerprint
-        if run_dir is not None:
-            write_gate_cache(
-                run_dir=run_dir,
-                root=command_root,
-                commands=commands,
-                results=results,
-                fingerprint=fingerprint,
-                reused_indices=set(reusable),
-            )
-            write_gate_results(
-                run_dir=run_dir,
-                results=results,
-                commands=commands,
-                fingerprint=fingerprint,
-                verification_mode=verification_mode,
-            )
+        results = run_gates(commands, cwd=command_root, timeout_s=args.timeout)
+        if args.run_dir is not None:
+            write_gate_results(run_dir=_resolve_project_path(command_root, args.run_dir), results=results)
         failed = [result for result in results if not result.passed]
         required_results = [result for result in results if result.required]
         failed_required = [result for result in required_results if not result.passed]
@@ -1045,15 +744,9 @@ def main(argv: list[str] | None = None) -> int:
             return 1 if index.conflicts or index.skipped else 0
 
     if args.command == "record-stage":
-        try:
-            run_dir = _resolve_record_stage_run_dir(root, args.run_dir)
-            stage_id = validate_safe_name(args.stage, "stage")
-        except (ValueError, WorkspaceBoundaryError) as exc:
-            print(f"record-stage rejected: {exc}", file=sys.stderr)
-            return 2
         path = write_stage_result(
-            run_dir=run_dir,
-            stage_id=stage_id,
+            run_dir=_resolve_project_path(root, args.run_dir),
+            stage_id=args.stage,
             status=args.status,
             evidence_type=args.evidence_type,
             confidence=args.confidence,
@@ -1116,30 +809,6 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             print(f"{status.name} {status.branch} {status.path}")
             return 0
-        if args.worktree_command == "repin":
-            execution = execution_identity_from_context()
-            if execution is None:
-                print(
-                    "execution_identity_missing: worktree repin requires the active host session",
-                    file=sys.stderr,
-                )
-                return 2
-            try:
-                with worktree_lifecycle_lock(root=root):
-                    identity, updated = repin_workspace_identity(
-                        root,
-                        args.name,
-                        execution,
-                    )
-            except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
-                print(_format_cli_error(exc), file=sys.stderr)
-                return 2
-            print(
-                f"{args.name} repinned {identity.device}:{identity.inode} "
-                f"updated={updated}"
-            )
-            return 0
-
         if args.worktree_command == "status":
             try:
                 status = get_worktree_status(root=root, name=args.name)
@@ -1172,142 +841,36 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             if not _worktree_checkout_exists(status):
                 stale_dir = root / ".agent-flow" / "worktrees" / status.name
-                if (
-                    stale_dir.exists()
-                    or stale_dir.is_symlink()
-                    or status.name in _known_worktree_names(root)
-                ):
-                    stale_issue = _stale_worktree_removal_issue(
-                        root,
-                        stale_dir,
-                        status.name,
-                    )
-                    if stale_issue is not None:
-                        print(stale_issue, file=sys.stderr)
-                        return 2
-                    if (
-                        not args.keep_branch
-                        and status.branch_created_by_agent_flow
-                        and worktree_branch_exists(root=root, branch=status.branch)
-                        and preserved_worktree_branch_tip(
-                            root=root,
-                            branch=status.branch,
-                        )
-                        is None
-                    ):
-                        print(
-                            "refusing to delete worktree branch with unpreserved commits: "
-                            f"{status.branch}",
-                            file=sys.stderr,
-                        )
-                        return 2
-                    claim = None
-                    quarantine: Path | None = None
-                    try:
-                        with worktree_lifecycle_lock(root=root):
-                            claim = _acquire_authenticated_cleanup_claim(
-                                root,
-                                status.name,
-                            )
-                            try:
-                                status = get_worktree_status(root=root, name=args.name)
-                                if _worktree_checkout_exists(status):
-                                    raise RuntimeError(
-                                        "worktree became active during stale cleanup: "
-                                        f"{status.path}"
-                                    )
-                                prune = run_safe_command(("git", "worktree", "prune"), cwd=root)
-                                if not prune.ok:
-                                    raise RuntimeError(_format_safe_command_error(prune))
-                                branch_tip = None
-                                if (
-                                    not args.keep_branch
-                                    and status.branch_created_by_agent_flow
-                                    and worktree_branch_exists(root=root, branch=status.branch)
-                                ):
-                                    branch_tip = preserved_worktree_branch_tip(
-                                        root=root,
-                                        branch=status.branch,
-                                    )
-                                    if branch_tip is None:
-                                        raise RuntimeError(
-                                            "refusing to delete worktree branch with unpreserved commits: "
-                                            f"{status.branch}"
-                                        )
-                                quarantine = _quarantine_stale_worktree_checkout(
-                                    root,
-                                    stale_dir,
-                                    status.name,
-                                )
-                                if quarantine is not None:
-                                    _remove_quarantined_stale_worktree_checkout(
-                                        root,
-                                        quarantine,
-                                        status.name,
-                                    )
-                                    quarantine = None
-                                if branch_tip is not None:
-                                    delete_worktree_branch_at_tip(
-                                        root=root,
-                                        branch=status.branch,
-                                        expected_tip=branch_tip,
-                                    )
-                                remove_worktree_metadata(root=root, name=status.name)
-                            except Exception:
-                                if (
-                                    quarantine is not None
-                                    and quarantine.exists()
-                                    and not stale_dir.exists()
-                                ):
-                                    quarantine.rename(stale_dir)
-                                raise
-                            finally:
-                                if claim is not None:
-                                    release_workspace_start_claim(claim)
-                                    claim = None
-                    except (
-                        OSError,
-                        RuntimeError,
-                        ValueError,
-                        WorkspaceBoundaryError,
-                        subprocess.CalledProcessError,
-                    ) as exc:
-                        print(_format_cli_error(exc), file=sys.stderr)
-                        return 2
+                if stale_dir.exists() or status.name in _known_worktree_names(root):
+                    if not args.keep_branch and status.branch_created_by_agent_flow:
+                        prune = run_safe_command(("git", "worktree", "prune"), cwd=root)
+                        if not prune.ok:
+                            print(_format_safe_command_error(prune), file=sys.stderr)
+                            return 2
+                        if worktree_branch_exists(root=root, branch=status.branch):
+                            delete = run_safe_command(("git", "branch", "-D", status.branch), cwd=root)
+                            if not delete.ok:
+                                print(_format_safe_command_error(delete), file=sys.stderr)
+                                return 2
+                    if stale_dir.is_dir():
+                        shutil.rmtree(stale_dir)
+                    elif stale_dir.exists():
+                        stale_dir.unlink()
+                    remove_worktree_metadata(root=root, name=status.name)
                     print(f"removed stale worktree manifest {status.name}")
                     return 0
                 print(f"worktree not found or missing path: {status.name}", file=sys.stderr)
                 return 1
             try:
-                validate_worktree_removal(
-                    root=root,
-                    status=status,
-                    delete_branch=not args.keep_branch,
-                )
-            except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as exc:
-                print(_format_cli_error(exc), file=sys.stderr)
-                return 2
-            claim = None
-            try:
-                claim = _acquire_authenticated_cleanup_claim(root, status.name)
-                status = get_worktree_status(root=root, name=args.name)
                 remove_worktree(
                     root=root,
                     status=status,
                     delete_branch=not args.keep_branch,
+                    allow_unmerged=args.allow_unmerged,
                 )
-            except (
-                OSError,
-                RuntimeError,
-                ValueError,
-                WorkspaceBoundaryError,
-                subprocess.CalledProcessError,
-            ) as exc:
+            except (subprocess.CalledProcessError, WorktreeIsolationError) as exc:
                 print(_format_cli_error(exc), file=sys.stderr)
                 return 2
-            finally:
-                if claim is not None:
-                    release_workspace_start_claim(claim)
             print(f"removed {status.name} {status.path}")
             return 0
 
@@ -1432,6 +995,53 @@ def main(argv: list[str] | None = None) -> int:
             if prompt is None:
                 print(f"worker not approved for task: {pending.task_id}")
                 return 1
+            # Worker isolation decision. A git repo runs every worker in its own
+            # verified worktree; a git call that cannot answer is fail-closed
+            # (return 2), never a silent fallback to the leader checkout.
+            repo_state = git_repo_state(root)
+            if repo_state == "unknown":
+                print("cannot determine git repo state; refusing to run unisolated", file=sys.stderr)
+                return 2
+            isolate = repo_state == "repo"
+            worker_cwd = root
+            worker_env = None
+            worktree_status = None
+            if isolate:
+                capacity = max_worker_capacity()
+                in_progress = sum(1 for task in status["tasks"] if task.status == "in_progress")
+                if in_progress >= capacity:
+                    print(f"worker capacity reached ({in_progress}/{capacity})", file=sys.stderr)
+                    return 2
+                try:
+                    # Per-worker worktrees isolate every write, so overlapping
+                    # scopes are safe here; the scope gate only bites when there
+                    # is no worktree isolation (the else branch).
+                    plan = plan_worktree(root=root, name=pending.task_id, unique=args.worker)
+                    worktree_status = create_worktree(root=root, plan=plan, allow_dirty=True)
+                    worker_cwd = verify_linked_worktree(
+                        root=root, path=worktree_status.path, expected_branch=plan.branch
+                    )
+                    assert_cwd_bound(worktree_path=worktree_status.path, cwd=worker_cwd)
+                except (OSError, ValueError, RuntimeError, WorktreeIsolationError, subprocess.CalledProcessError) as exc:
+                    print(_format_cli_error(exc), file=sys.stderr)
+                    return 2
+                worker_env = sanitized_worker_env()
+            else:
+                # No worktree isolation available: concurrent workers share the
+                # leader checkout, so overlapping write scopes would collide.
+                active = {safe_worker_name(task.owner) for task in status["tasks"]
+                          if task.status == "in_progress" and task.owner}
+                active.add(safe_worker_name(args.worker))
+                scopes = [
+                    WorkerScope(worker=worker_name, paths=paths, worktree_isolated=False)
+                    for worker_name, paths in approved_worker_scopes(root=root, team_name=args.team)
+                    if worker_name in active
+                ]
+                try:
+                    assert_scopes_isolated(scopes)
+                except WorktreeIsolationError as exc:
+                    print(_format_cli_error(exc), file=sys.stderr)
+                    return 2
             claimed = claim_task(
                 root=root,
                 team_name=args.team,
@@ -1441,7 +1051,8 @@ def main(argv: list[str] | None = None) -> int:
             result = run_provider(
                 ProviderCommand(name="host-command", argv=tuple(args.command_argv)),
                 prompt=prompt,
-                cwd=root,
+                cwd=worker_cwd,
+                env=worker_env,
             )
             output = result.stdout.strip() or result.stderr.strip()
             if result.failed:
@@ -1460,7 +1071,8 @@ def main(argv: list[str] | None = None) -> int:
                     claim_token=claimed.claim_token or "",
                     result=output,
                 )
-            print(f"{task.task_id} {task.status}")
+            suffix = f" worktree={worktree_status.path}" if worktree_status is not None else ""
+            print(f"{task.task_id} {task.status}{suffix}")
             return 1 if result.failed else 0
         if args.team_command == "claim":
             task = claim_task(root=root, team_name=args.team, task_id=args.task, worker_name=args.worker)
@@ -1790,12 +1402,7 @@ def _resolve_project_path(root: Path, value: str) -> Path:
     return resolve_project_path(root, value)
 
 
-def _profile_gate_commands(
-    profile_ids: list[str],
-    *,
-    project_root: Path | None = None,
-    changed_files: list[str] | None = None,
-) -> list[GateCommand]:
+def _profile_gate_commands(profile_ids: list[str]) -> list[GateCommand]:
     commands: list[tuple[int, GateCommand]] = []
     seen: set[tuple[str, ...]] = set()
     multi_profile = len(profile_ids) > 1
@@ -1806,43 +1413,20 @@ def _profile_gate_commands(
         profile = load_profile(profile_id)
         for gate in profile.gates:
             command = _normalize_profile_gate_command(profile.profile_id, gate.gate_id, gate.command)
-            candidate_commands = (command,)
-            if project_root is not None and changed_files is not None:
-                candidate_commands = _incremental_profile_gate_commands(
-                    profile.profile_id,
-                    gate.gate_id,
-                    command,
-                    project_root,
-                    changed_files,
-                )
-                if not candidate_commands:
-                    continue
             required = gate.required
             gate_id = f"{profile.profile_id}:{gate.gate_id}" if multi_profile else gate.gate_id
             if multi_profile and _is_architecture_lint_gate(gate.gate_id, gate.command):
                 if architecture_lint_added:
                     continue
                 command = _architecture_lint_command(architecture_lint_profile)
-                if project_root is not None and changed_files:
-                    command = (*command, "--files", *changed_files)
-                candidate_commands = (command,)
                 gate_id = "architecture-lint"
                 required = True
                 architecture_lint_added = True
-            multiple = len(candidate_commands) > 1
-            for candidate in candidate_commands:
-                if candidate in seen:
-                    continue
-                seen.add(candidate)
-                candidate_gate_id = (
-                    f"{gate_id}[{_incremental_gate_scope_label(candidate)}]"
-                    if multiple
-                    else gate_id
-                )
-                commands.append(
-                    (order, GateCommand(candidate_gate_id, candidate, required=required))
-                )
-                order += 1
+            if command in seen:
+                continue
+            seen.add(command)
+            commands.append((order, GateCommand(gate_id, command, required=required)))
+            order += 1
     return [
         command
         for _, command in sorted(
@@ -1850,277 +1434,6 @@ def _profile_gate_commands(
             key=lambda item: (*_gate_order_key(item[1]), item[0]),
         )
     ]
-
-
-def _incremental_profile_gate_commands(
-    profile_id: str,
-    gate_id: str,
-    command: tuple[str, ...],
-    project_root: Path,
-    changed_files: list[str],
-) -> tuple[tuple[str, ...], ...]:
-    if profile_id != "android" or not changed_files:
-        return (command,)
-    modules = _android_changed_modules(project_root, changed_files)
-    if _is_architecture_lint_gate(gate_id, command):
-        return ((*command, "--files", *changed_files),)
-    if modules is None:
-        return (command,)
-    if not modules:
-        return ()
-    if not command or Path(command[0]).name not in {"gradle", "gradlew"}:
-        return (command,)
-    tasks = command[1:]
-    if not tasks or any(task.startswith("-") or ":" in task for task in tasks):
-        return (command,)
-    test_scope = _android_test_scope(project_root, changed_files)
-    if gate_id == "build" and not test_scope["production"]:
-        return ()
-    if gate_id == "test":
-        selected_commands: list[tuple[str, ...]] = []
-        filters = _android_unit_test_filters(project_root, changed_files)
-        for module in modules:
-            if module in test_scope["production"] or module in test_scope["unit"]:
-                if (
-                    len(modules) == 1
-                    and not test_scope["production"]
-                    and not test_scope["instrumented"]
-                    and filters
-                ):
-                    test_task = _android_unit_test_task(project_root, module)
-                    if test_task is not None:
-                        selected_commands.append(
-                            (
-                                command[0],
-                                f"{module}:{test_task}",
-                                *(value for pattern in filters for value in ("--tests", pattern)),
-                            )
-                        )
-                    else:
-                        selected_commands.append((command[0], f"{module}:{tasks[0]}"))
-                else:
-                    selected_commands.append((command[0], f"{module}:{tasks[0]}"))
-            if module in test_scope["instrumented"]:
-                selected_commands.append((command[0], f"{module}:connectedDevDebugAndroidTest"))
-        return tuple(selected_commands)
-    return tuple(
-        (command[0], *(f"{module}:{task}" for task in tasks))
-        for module in modules
-    )
-
-
-def _incremental_gate_scope_label(command: tuple[str, ...]) -> str:
-    task = next((value for value in command[1:] if value.startswith(":")), "gate")
-    return task.strip(":").replace(":", "/")
-
-
-def _android_unit_test_task(project_root: Path, module: str) -> str | None:
-    module_root = project_root.joinpath(*module.strip(":").split(":"))
-    build_file = next(
-        (
-            candidate
-            for candidate in (module_root / "build.gradle.kts", module_root / "build.gradle")
-            if candidate.is_file()
-        ),
-        None,
-    )
-    if build_file is None:
-        return None
-    try:
-        content = build_file.read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
-        return None
-    android_plugin = re.search(
-        r"(?:com\.android\.(?:application|library|test|dynamic-feature)|"
-        r"libs\.plugins\.android(?:[.\w-]*))",
-        content,
-    )
-    if android_plugin:
-        return "testDevDebugUnitTest"
-    jvm_plugin = re.search(
-        r"(?:org\.jetbrains\.kotlin\.jvm|kotlin\s*\(\s*['\"]jvm['\"]\s*\)|"
-        r"libs\.plugins\.kotlin\.jvm|\bid\s*\(\s*['\"]java(?:-library)?['\"]\s*\))",
-        content,
-    )
-    return "test" if jvm_plugin else None
-
-
-def _android_changed_modules(
-    project_root: Path,
-    changed_files: list[str],
-) -> tuple[str, ...] | None:
-    if _has_gradle_project_dir_mapping(project_root):
-        return None
-    high_risk_roots = {
-        "build.gradle",
-        "build.gradle.kts",
-        "settings.gradle",
-        "settings.gradle.kts",
-        "gradle.properties",
-        "gradlew",
-        "gradlew.bat",
-    }
-    high_risk_prefixes = ("buildSrc/", "build-logic/", "gradle/")
-    documentation_suffixes = {".md", ".adoc", ".rst"}
-    modules: set[str] = set()
-    for relative in changed_files:
-        normalized = relative.replace("\\", "/")
-        while normalized.startswith("./"):
-            normalized = normalized[2:]
-        if not normalized:
-            continue
-        if normalized in high_risk_roots or normalized.startswith(high_risk_prefixes):
-            return None
-        if Path(normalized).suffix.lower() in documentation_suffixes:
-            continue
-        module_root = _android_module_root(project_root, normalized)
-        if module_root is None:
-            return None
-        module_relative = module_root.relative_to(project_root)
-        modules.add(":" + ":".join(module_relative.parts))
-    return tuple(sorted(modules))
-
-
-def _has_gradle_project_dir_mapping(project_root: Path) -> bool:
-    for settings in (project_root / "settings.gradle.kts", project_root / "settings.gradle"):
-        if not settings.is_file():
-            continue
-        try:
-            content = settings.read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
-            return True
-        if re.search(
-            r"\b(?:projectDir|setProjectDir|includeFlat|includeBuild)\b",
-            content,
-        ):
-            return True
-    return False
-
-
-def _android_module_root(project_root: Path, relative: str) -> Path | None:
-    candidate = project_root / relative
-    parent = candidate if candidate.is_dir() else candidate.parent
-    while parent != project_root and project_root in parent.parents:
-        if (parent / "build.gradle").is_file() or (parent / "build.gradle.kts").is_file():
-            return parent
-        parent = parent.parent
-    return None
-
-
-def _android_test_scope(
-    project_root: Path,
-    changed_files: list[str],
-) -> dict[str, set[str]]:
-    scope = {
-        "production": set(),
-        "unit": set(),
-        "instrumented": set(),
-    }
-    for relative in changed_files:
-        if Path(relative).suffix.lower() in {".md", ".adoc", ".rst"}:
-            continue
-        module_root = _android_module_root(project_root, relative)
-        if module_root is None:
-            continue
-        module = ":" + ":".join(module_root.relative_to(project_root).parts)
-        normalized = f"/{relative.replace(os.sep, '/').lower()}/"
-        if "/src/androidtest/" in normalized:
-            scope["instrumented"].add(module)
-        elif "/src/test/" in normalized:
-            scope["unit"].add(module)
-        else:
-            scope["production"].add(module)
-    return scope
-
-
-def _android_unit_test_filters(
-    project_root: Path,
-    changed_files: list[str],
-) -> tuple[str, ...]:
-    filters: set[str] = set()
-    for relative in changed_files:
-        if Path(relative).suffix.lower() in {".md", ".adoc", ".rst"}:
-            continue
-        normalized = relative.replace("\\", "/")
-        match = re.search(r"/src/test/(?:java|kotlin)/(.+)\.(?:java|kt)$", f"/{normalized}", re.IGNORECASE)
-        path = project_root / relative
-        if not match or not path.is_file():
-            return ()
-        try:
-            content = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
-            return ()
-        package_match = re.search(
-            r"(?m)^\s*package\s+([A-Za-z_][\w.]*)\s*;?\s*$",
-            content,
-        )
-        declarations = re.findall(
-            r"\b(?:class|object|interface|enum\s+class|record)\s+([A-Za-z_][A-Za-z0-9_]*)\b",
-            content,
-        )
-        class_name = path.stem
-        if declarations != [class_name]:
-            return ()
-        package_name = package_match.group(1) if package_match else ""
-        filters.add(f"{package_name + '.' if package_name else ''}{class_name}*")
-    return tuple(sorted(filters))
-
-
-def _normalize_changed_files(root: Path, values: list[str]) -> list[str]:
-    normalized: set[str] = set()
-    for value in values:
-        candidate = Path(value)
-        absolute = candidate if candidate.is_absolute() else root / candidate
-        try:
-            relative = absolute.resolve(strict=False).relative_to(root.resolve(strict=True))
-        except ValueError as exc:
-            raise ValueError(f"gate file is outside project root: {value}") from exc
-        normalized.add(relative.as_posix())
-    return sorted(normalized)
-
-
-def _git_changed_files(root: Path) -> list[str] | None:
-    probe = subprocess.run(
-        ("git", "-C", str(root), "rev-parse", "--is-inside-work-tree"),
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if probe.returncode != 0 or probe.stdout.strip() != "true":
-        return None
-    commands: list[tuple[str, ...]] = [
-        ("git", "-C", str(root), "diff", "--no-renames", "--name-only", "--diff-filter=ACMRD"),
-        ("git", "-C", str(root), "diff", "--cached", "--no-renames", "--name-only", "--diff-filter=ACMRD"),
-        ("git", "-C", str(root), "ls-files", "--others", "--exclude-standard"),
-    ]
-    for base in ("origin/main", "main"):
-        merge_base = subprocess.run(
-            ("git", "-C", str(root), "merge-base", "HEAD", base),
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        if merge_base.returncode == 0 and merge_base.stdout.strip():
-            commands.append(
-                (
-                    "git",
-                    "-C",
-                    str(root),
-                    "diff",
-                    "--no-renames",
-                    "--name-only",
-                    "--diff-filter=ACMRD",
-                    f"{merge_base.stdout.strip()}..HEAD",
-                )
-            )
-            break
-    changed: set[str] = set()
-    for command in commands:
-        result = subprocess.run(command, text=True, capture_output=True, check=False)
-        if result.returncode != 0:
-            return None
-        changed.update(line.strip() for line in result.stdout.splitlines() if line.strip())
-    return _normalize_changed_files(root, sorted(changed))
 
 
 def _is_architecture_lint_gate(gate_id: str, command: tuple[str, ...]) -> bool:
@@ -2144,26 +1457,13 @@ def _architecture_lint_command(profile_ids: str) -> tuple[str, ...]:
 
 def _gate_order_key(gate: GateCommand) -> tuple[int, int, str]:
     gate_id = gate.gate_id
-    stable_gate_id = gate_id.split("[", 1)[0].rsplit(":", 1)[-1].lower()
-    if stable_gate_id in {"build", "android-build", "ios-build"}:
-        return (0, _profile_gate_kind_tiebreaker(gate_id), gate_id)
-    if stable_gate_id == "typecheck":
-        return (1, _profile_gate_kind_tiebreaker(gate_id), gate_id)
-    if stable_gate_id in {"lint", "architecture-lint"}:
-        return (2, _profile_gate_kind_tiebreaker(gate_id), gate_id)
-    if stable_gate_id == "test" or stable_gate_id.endswith("-test"):
-        return (3, _profile_gate_kind_tiebreaker(gate_id), gate_id)
-    command = " ".join(
-        (Path(gate.command[0]).name, *gate.command[1:])
-        if gate.command
-        else ()
-    ).lower()
+    command = " ".join(gate.command).lower()
     lowered = f"{gate_id} {command}".lower()
     if any(token in lowered for token in ("build", "assemble", "xcodebuild")):
         return (0, _profile_gate_kind_tiebreaker(lowered), gate_id)
     if any(token in lowered for token in ("typecheck", "tsc", "mypy", "pyright", "type ")):
         return (1, _profile_gate_kind_tiebreaker(lowered), gate_id)
-    if any(token in lowered for token in ("lint", "ruff", "detekt", "ktlint", "architecture-lint")):
+    if any(token in lowered for token in ("lint", "ruff", "detekt", "ktlint", "check-context-docs", "architecture-lint")):
         return (2, _profile_gate_kind_tiebreaker(lowered), gate_id)
     if "test" in lowered or "pytest" in lowered:
         return (3, _profile_gate_kind_tiebreaker(lowered), gate_id)
@@ -2176,23 +1476,6 @@ def _profile_gate_kind_tiebreaker(text: str) -> int:
     if "context" in text:
         return 1
     return 2
-
-
-def _resolve_record_stage_run_dir(root: Path, value: str) -> Path:
-    candidate = _resolve_project_path(root, value).resolve(strict=False)
-    local_runs = (root / ".agent-flow" / "runs").resolve(strict=False)
-    if candidate == local_runs or local_runs in candidate.parents:
-        return candidate
-    execution = execution_identity_from_context(env=os.environ)
-    if execution is None:
-        raise ValueError(f"run dir escapes project run state: {candidate}")
-    selected = select_execution_workspace(root, execution)
-    if selected is None:
-        raise ValueError(f"run dir has no authenticated active run: {candidate}")
-    expected = selected.run_dir.resolve(strict=True)
-    if candidate != expected:
-        raise ValueError(f"run dir differs from authenticated active run: {candidate}")
-    return expected
 
 
 def _resolve_run_dir(root: Path, value: str | None) -> Path | None:
@@ -2226,37 +1509,6 @@ def _worktree_context(root: Path, name: str) -> tuple[Path | None, Path]:
     return None, worktree_runtime_root(root=root, name=status.name)
 
 
-def _abort_recover_deleted_checkout(root: Path, name: str) -> int | None:
-    """Recover an abort when the managed worktree checkout is gone.
-
-    Returns 0 on a successful authenticated recovery, 2 on an authentication
-    failure, or None when the current execution owns no matching binding (so the
-    caller reports the worktree as missing).
-    """
-    execution = execution_identity_from_context(env=os.environ)
-    if execution is None:
-        return None
-    try:
-        recovery = resolve_recovery_execution_run(root, execution)
-    except WorkspaceBoundaryError as exc:
-        print(_format_cli_error(exc), file=sys.stderr)
-        return 2
-    if recovery is None or recovery.workspace_name != name:
-        return None
-    meta = read_meta(recovery.run_dir)
-    release_execution_binding(
-        execution,
-        git_common_dir=recovery.git_common_dir,
-        run_dir=recovery.run_dir,
-    )
-    meta["status"] = "aborted"
-    write_meta(recovery.run_dir, meta)
-    mark_inactive(recovery.run_dir)
-    reconcile_recovery_execution_state(execution, recovery.identity, recovery.run_dir)
-    print(f"aborted: {recovery.run_id} (artifacts preserved at {recovery.run_dir})")
-    return 0
-
-
 def _command_project_root(config_root: Path, requested_root: Path, worktree: str | None) -> Path | None:
     if worktree is None:
         return config_root
@@ -2279,9 +1531,7 @@ def _profile_source_root(config_root: Path, requested_root: Path, worktree: str 
 
 
 def _continue_command(root: Path, worktree: str | None) -> str:
-    configured = os.environ.get("AGENT_FLOW_PROJECT_LAUNCHER")
-    launcher = configured if configured and Path(configured).is_absolute() else "agent-flow"
-    command = f"{shlex.quote(launcher)} continue --root {shlex.quote(str(root))}"
+    command = f"agent-flow continue --root {shlex.quote(str(root))}"
     if worktree is None:
         return command
     return command + f" --worktree {shlex.quote(_slug_for_hint(root, worktree))}"
@@ -2293,162 +1543,6 @@ def _known_worktree_names(root: Path) -> list[str]:
 
 def _worktree_checkout_exists(status) -> bool:
     return status.exists and (status.path / ".git").exists()
-
-
-def _acquire_authenticated_cleanup_claim(root: Path, name: str):
-    execution = execution_identity_from_context(env=os.environ)
-    finalizer = resolve_execution_finalizer_workspace(root, execution, name)
-    claim = acquire_workspace_start_claim(
-        finalizer.identity,
-        run_id=f"cleanup:{name}",
-    )
-    try:
-        current = resolve_execution_finalizer_workspace(root, execution, name)
-        if current.identity != finalizer.identity or current.run_dir != finalizer.run_dir:
-            raise WorkspaceBoundaryError(
-                "execution_finalizer_stale: cleanup ownership changed while acquiring the workspace lease"
-            )
-    except Exception:
-        release_workspace_start_claim(claim)
-        raise
-    return claim
-
-
-def _stale_worktree_removal_issue(
-    root: Path,
-    stale_path: Path,
-    name: str,
-) -> str | None:
-    if not stale_path.exists() and not stale_path.is_symlink():
-        return None
-    if stale_path.is_symlink() or not stale_path.is_dir():
-        return f"refusing to delete unowned stale worktree path: {stale_path}"
-    runtime_manifest = worktree_runtime_root(root=root, name=name) / "manifest.json"
-    if not runtime_manifest.is_file() or runtime_manifest.is_symlink():
-        return f"refusing to delete stale worktree without ownership metadata: {stale_path}"
-    stale_manifest = stale_path / "manifest.json"
-    if not stale_manifest.is_file() or stale_manifest.is_symlink():
-        return f"refusing to delete stale worktree without an owned manifest file: {stale_path}"
-    unexpected = sorted(
-        entry.name
-        for entry in stale_path.iterdir()
-        if entry.name != "manifest.json"
-    )
-    if unexpected:
-        return (
-            "refusing to delete stale worktree with unowned files: "
-            f"{stale_path} ({', '.join(unexpected)})"
-        )
-    try:
-        if stale_manifest.read_bytes() != runtime_manifest.read_bytes():
-            return f"refusing to delete stale worktree with unauthenticated manifest content: {stale_path}"
-    except OSError:
-        return f"refusing to delete stale worktree with unreadable ownership metadata: {stale_path}"
-    return None
-
-
-def _quarantine_stale_worktree_checkout(
-    root: Path,
-    stale_path: Path,
-    name: str,
-) -> Path | None:
-    if not stale_path.exists() and not stale_path.is_symlink():
-        return None
-    issue = _stale_worktree_removal_issue(root, stale_path, name)
-    if issue is not None:
-        raise RuntimeError(issue)
-    metadata = stale_path.lstat()
-    stale_manifest = stale_path / "manifest.json"
-    manifest_metadata = stale_manifest.lstat()
-    manifest_bytes = stale_manifest.read_bytes()
-    quarantine = stale_path.with_name(
-        f".{stale_path.name}.cleanup-{os.getpid()}-{os.urandom(8).hex()}"
-    )
-    stale_path.rename(quarantine)
-    moved = quarantine.lstat()
-    moved_manifest = quarantine / "manifest.json"
-    moved_manifest_metadata = moved_manifest.lstat()
-    if (
-        moved.st_dev != metadata.st_dev
-        or moved.st_ino != metadata.st_ino
-        or moved_manifest_metadata.st_dev != manifest_metadata.st_dev
-        or moved_manifest_metadata.st_ino != manifest_metadata.st_ino
-        or moved_manifest.read_bytes() != manifest_bytes
-    ):
-        if not stale_path.exists():
-            quarantine.rename(stale_path)
-        raise RuntimeError("stale worktree changed during cleanup quarantine")
-    return quarantine
-
-
-def _remove_quarantined_stale_worktree_checkout(
-    root: Path,
-    quarantine: Path,
-    name: str,
-) -> None:
-    issue = _stale_worktree_removal_issue(root, quarantine, name)
-    if issue is not None:
-        raise RuntimeError(issue)
-    manifest = quarantine / "manifest.json"
-    metadata = manifest.lstat()
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-        raise RuntimeError("stale worktree manifest is not an owned regular file")
-    runtime_manifest = worktree_runtime_root(root=root, name=name) / "manifest.json"
-    runtime_metadata = runtime_manifest.lstat()
-    payload = runtime_manifest.read_bytes()
-    removal = quarantine.with_name(
-        f".{quarantine.name}.manifest.remove-{os.getpid()}-{os.urandom(8).hex()}"
-    )
-    manifest.rename(removal)
-    moved_owned = False
-    try:
-        moved = removal.lstat()
-        moved_owned = not (
-            stat.S_ISLNK(moved.st_mode)
-            or not stat.S_ISREG(moved.st_mode)
-            or moved.st_dev != metadata.st_dev
-            or moved.st_ino != metadata.st_ino
-        )
-        if (
-            runtime_manifest.is_symlink()
-            or not runtime_manifest.is_file()
-            or runtime_manifest.lstat().st_dev != runtime_metadata.st_dev
-            or runtime_manifest.lstat().st_ino != runtime_metadata.st_ino
-            or not moved_owned
-            or removal.read_bytes() != payload
-        ):
-            raise RuntimeError("stale worktree manifest changed before removal")
-        quarantine.rmdir()
-    except (OSError, RuntimeError):
-        if removal.exists() or removal.is_symlink():
-            if manifest.exists() or manifest.is_symlink():
-                raced = quarantine / (
-                    f".manifest.json.raced-{os.getpid()}-{os.urandom(8).hex()}"
-                )
-                manifest.rename(raced)
-            if moved_owned:
-                removal.rename(manifest)
-            else:
-                raced = quarantine / (
-                    f".manifest.json.raced-{os.getpid()}-{os.urandom(8).hex()}"
-                )
-                removal.rename(raced)
-                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-                if hasattr(os, "O_NOFOLLOW"):
-                    flags |= os.O_NOFOLLOW
-                descriptor = os.open(manifest, flags, metadata.st_mode & 0o777)
-                try:
-                    view = memoryview(payload)
-                    while view:
-                        written = os.write(descriptor, view)
-                        if written <= 0:
-                            raise OSError("stale worktree manifest restore failed")
-                        view = view[written:]
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
-        raise
-    removal.unlink()
 
 
 def _format_cli_error(exc: BaseException) -> str:
@@ -2510,6 +1604,14 @@ def _parse_retry_after_arg(value: str | None) -> datetime | None:
 def _cleanup_worktree_after_failure(root: Path, status, original: BaseException) -> None:
     try:
         remove_worktree(root=root, status=status)
+    except WorktreeIsolationError as preserve_exc:
+        # Fail closed: the worktree holds uncommitted or unmerged work. Preserve
+        # it so a run failure does not also destroy the worker's changes.
+        print(
+            f"warning: preserving worktree {status.name} at {status.path}: "
+            f"{_format_cli_error(preserve_exc)}",
+            file=sys.stderr,
+        )
     except (subprocess.CalledProcessError, OSError) as cleanup_exc:
         print(
             f"warning: failed to clean up worktree {status.name}: "
@@ -2526,134 +1628,19 @@ def _slug_for_hint(root: Path, value: str) -> str:
         return value
 
 
-def _resolve_recovery_cli_root(root: Path) -> Path:
-    managed = _managed_worktree_context(root)
-    if managed is not None:
-        return managed[0]
-    cwd_managed = _managed_worktree_context(Path.cwd())
-    if cwd_managed is not None and (
-        _same_path(root, Path.cwd()) or _same_path(root, cwd_managed[0])
-    ):
-        return cwd_managed[0]
-    return _git_common_worktree_root(root) or root
-
-
-def _resolve_status_cli_root_context(
-    root: Path,
-    worktree: str,
-) -> tuple[Path, str | None]:
-    leader = _resolve_recovery_cli_root(root)
-    requested_name = _slug_for_hint(leader, worktree)
-    stale = find_recoverable_stale_pinned_workspaces(leader)
-    if any(item.name == requested_name for item in stale):
-        return leader, requested_name
-    return _resolve_cli_root_context(
-        root,
-        worktree,
-        allow_recoverable_stale=True,
-    )
-
-
-def _resolve_cli_root_context(
-    root: Path,
-    worktree: str | None,
-    *,
-    allow_unbound_execution: bool = False,
-    allow_recoverable_stale: bool = False,
-) -> tuple[Path, str | None]:
+def _resolve_cli_root_context(root: Path, worktree: str | None) -> tuple[Path, str | None]:
     managed = _managed_worktree_context(root)
     if managed is not None:
         leader_root, inferred_worktree = managed
-        requested_worktree = worktree or inferred_worktree
-        active = _active_workspace_for_cli(
-            leader_root,
-            requested_worktree=requested_worktree,
-            allow_unbound_execution=allow_unbound_execution,
-            allow_recoverable_stale=allow_recoverable_stale,
-        )
-        return leader_root, active.name if active is not None else requested_worktree
+        return leader_root, worktree or inferred_worktree
     cwd_managed = _managed_worktree_context(Path.cwd())
     if cwd_managed is not None and (_same_path(root, Path.cwd()) or _same_path(root, cwd_managed[0])):
         leader_root, inferred_worktree = cwd_managed
-        requested_worktree = worktree or inferred_worktree
-        active = _active_workspace_for_cli(
-            leader_root,
-            requested_worktree=requested_worktree,
-            allow_unbound_execution=allow_unbound_execution,
-            allow_recoverable_stale=allow_recoverable_stale,
-        )
-        return leader_root, active.name if active is not None else requested_worktree
+        return leader_root, worktree or inferred_worktree
     git_common_root = _git_common_worktree_root(root)
     if git_common_root is not None:
-        active = _active_workspace_for_cli(
-            git_common_root,
-            requested_worktree=worktree,
-            allow_unbound_execution=allow_unbound_execution,
-            allow_recoverable_stale=allow_recoverable_stale,
-        )
-        if active is not None:
-            return git_common_root, active.name
         return git_common_root, worktree
-    if (root / ".git").exists():
-        active = _active_workspace_for_cli(
-            root,
-            requested_worktree=worktree,
-            allow_unbound_execution=allow_unbound_execution,
-            allow_recoverable_stale=allow_recoverable_stale,
-        )
-        if active is not None:
-            return root, active.name
     return root, worktree
-
-
-def _active_workspace_for_cli(
-    root: Path,
-    *,
-    requested_worktree: str | None = None,
-    allow_unbound_execution: bool = False,
-    allow_recoverable_stale: bool = False,
-):
-    active = find_active_pinned_workspaces(
-        root,
-        allow_recoverable_stale=allow_recoverable_stale,
-    )
-    if not active:
-        return None
-    requested_name = (
-        _slug_for_hint(root, requested_worktree)
-        if requested_worktree is not None
-        else None
-    )
-    execution = execution_identity_from_context(env=os.environ)
-    if execution is not None:
-        try:
-            selected = select_execution_workspace(
-                root,
-                execution,
-                active_workspaces=active,
-            )
-        except WorkspaceBoundaryError as exc:
-            if allow_unbound_execution and str(exc).startswith("execution_binding_missing:"):
-                for workspace in active:
-                    payload = read_meta(workspace.run_dir).get("execution")
-                    if payload is not None and execution_identity_from_dict(payload) == execution:
-                        raise
-                if requested_name is not None and any(
-                    workspace.name == requested_name for workspace in active
-                ):
-                    raise WorkspaceBoundaryError(
-                        "execution_binding_conflict: requested worktree "
-                        f"{requested_name} belongs to another active execution"
-                    ) from exc
-                return None
-            raise
-        if requested_name is not None and selected.name != requested_name:
-            raise WorkspaceBoundaryError(
-                "execution_binding_conflict: requested worktree "
-                f"{requested_name} differs from bound worktree {selected.name}"
-            )
-        return selected
-    return select_execution_workspace(root, None, active_workspaces=active)
 
 
 def _managed_worktree_context(path: Path) -> tuple[Path, str] | None:
@@ -2673,10 +1660,7 @@ def _managed_worktree_context(path: Path) -> tuple[Path, str] | None:
 def _git_common_worktree_root(root: Path) -> Path | None:
     # worktree root 탐지는 relay 진입점이므로 git hang을 짧게 실패 처리한다.
     top_level = run_safe_command(("git", "rev-parse", "--show-toplevel"), cwd=root)
-    common_dir = run_safe_command(
-        ("git", "rev-parse", "--path-format=absolute", "--git-common-dir"),
-        cwd=root,
-    )
+    common_dir = run_safe_command(("git", "rev-parse", "--git-common-dir"), cwd=root)
     if not top_level.ok or not common_dir.ok:
         return None
     common_path = Path(common_dir.stdout.strip())

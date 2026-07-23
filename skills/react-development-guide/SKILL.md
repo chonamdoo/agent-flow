@@ -1,18 +1,11 @@
 ---
 name: react-development-guide
-description: React Web and Next.js implementation and review checklist for TSX components, hooks, state, effects, rendering, accessibility, server/client boundaries, hydration, and list rendering. Use when writing, modifying, or reviewing React Web or Next.js code; do not use for React Native-only code, TypeScript language generalities, CSS taste, or broad rewrites.
+description: React Web and Next.js implementation and review checklist. Use only when writing, modifying, or reviewing React Web, Next.js, TSX components, hooks, state, effects, rendering, accessibility, server/client boundaries, hydration, or list rendering. Do not use for React Native-only issues, TypeScript language generalities, CSS taste, or broad rewrites.
 ---
 
 # React Development Guide
 
 Use this as a secondary checklist after user request, repo instructions, existing repo patterns, and `code-generation-discipline`. Do not score it. Do not use best-practice generalities to force broad rewrites.
-
-## Quick start
-
-1. Confirm the changed scope is React Web or Next.js, not React Native-only or generic TypeScript.
-2. Read the nearest existing component, hook, route, and framework boundary pattern before applying checklist advice.
-3. Preserve the user-visible loading, empty, error, and success branches touched by the change.
-4. Run only the targeted typecheck, test, lint, or route smoke check that covers the edited path.
 
 ## Scope
 

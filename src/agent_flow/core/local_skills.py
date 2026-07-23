@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -27,7 +26,6 @@ CODE_REVIEW_PHASES = frozenset(
 )
 
 APPLIED_MARKER = "project-local-skill-docs: applied"
-LOCAL_SKILL_PLAN_HASH_VERSION = 1
 
 _INCLUDE_TERMS = (
     "code development",
@@ -163,24 +161,6 @@ def _project_local_skill_docs(project_root: Path) -> tuple[LocalSkillDoc, ...]:
     if index_docs:
         return index_docs
     return _docs_from_local_skill_tree(project_root)
-
-
-def project_local_skill_plan_hash(project_root: Path) -> str:
-    rows: list[list[str]] = []
-    for doc in _project_local_skill_docs(project_root):
-        skill_path = Path(doc.path)
-        absolute = skill_path if skill_path.is_absolute() else project_root / skill_path
-        try:
-            content_hash = hashlib.sha256(absolute.read_bytes()).hexdigest()
-        except OSError as exc:
-            raise RuntimeError(f"blocked: unreadable project-local skill: {absolute}") from exc
-        rows.append([doc.name, doc.path.replace("\\", "/"), content_hash])
-    encoded = json.dumps(
-        {"version": LOCAL_SKILL_PLAN_HASH_VERSION, "skills": rows},
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def _docs_from_index(project_root: Path) -> tuple[LocalSkillDoc, ...]:

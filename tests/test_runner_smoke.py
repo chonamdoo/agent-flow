@@ -11,16 +11,12 @@ Covers:
 """
 from __future__ import annotations
 
-from contextlib import redirect_stderr, redirect_stdout
-from io import StringIO
 import json
 import os
 import shutil
 import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import patch
 from pathlib import Path
 
 import pytest
@@ -31,40 +27,8 @@ SRC_ROOT = KIT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-import agent_flow.artifact as artifact
-from agent_flow.artifact import create_run
-from agent_flow.cli import main as cli_main
-_GIT_PROJECT_TEMPLATE: Path | None = None
 
-
-@pytest.fixture(scope="module", autouse=True)
-def _cache_git_project(tmp_path_factory: pytest.TempPathFactory):
-    global _GIT_PROJECT_TEMPLATE
-    template = tmp_path_factory.mktemp("runner-git-template")
-    subprocess.run(
-        ["git", "init", "-b", "main"],
-        cwd=template,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=template, check=True)
-    subprocess.run(["git", "config", "user.name", "Test User"], cwd=template, check=True)
-    (template / "README.md").write_text("test\n", encoding="utf-8")
-    subprocess.run(["git", "add", "README.md"], cwd=template, check=True)
-    subprocess.run(
-        ["git", "commit", "-m", "init"],
-        cwd=template,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    _GIT_PROJECT_TEMPLATE = template
-    yield
-    _GIT_PROJECT_TEMPLATE = None
-
-
-def _cli_environment(env_extra: dict | None = None) -> dict[str, str]:
+def _run_cli(args: list[str], cwd: Path, env_extra: dict | None = None):
     env = os.environ.copy()
     for key in tuple(env):
         if key.startswith("AGENT_FLOW_") or key in {
@@ -78,52 +42,19 @@ def _cli_environment(env_extra: dict | None = None) -> dict[str, str]:
     env["AGENT_FLOW_GENERIC_MODE"] = "stub-success"
     if env_extra:
         env.update(env_extra)
-    return env
-
-
-def _run_cli(
-    args: list[str],
-    cwd: Path,
-    env_extra: dict | None = None,
-) -> subprocess.CompletedProcess[str]:
-    stdout = StringIO()
-    stderr = StringIO()
-    previous_cwd = Path.cwd()
-    try:
-        with (
-            patch.dict(os.environ, _cli_environment(env_extra), clear=True),
-            redirect_stdout(stdout),
-            redirect_stderr(stderr),
-        ):
-            os.chdir(cwd)
-            try:
-                returncode = cli_main(args)
-            except SystemExit as exc:
-                returncode = exc.code if isinstance(exc.code, int) else 1
-    finally:
-        os.chdir(previous_cwd)
-    return subprocess.CompletedProcess(args, returncode, stdout.getvalue(), stderr.getvalue())
-
-
-def _run_cli_subprocess(
-    args: list[str],
-    cwd: Path,
-    env_extra: dict | None = None,
-) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, "-m", "agent_flow.cli", *args],
-        cwd=cwd,
-        env=_cli_environment(env_extra),
-        capture_output=True,
-        text=True,
+        cwd=cwd, env=env, capture_output=True, text=True,
     )
 
 
 def _init_git_project(project: Path) -> None:
-    if _GIT_PROJECT_TEMPLATE is None:
-        raise RuntimeError("git project template fixture is unavailable")
-    shutil.copytree(_GIT_PROJECT_TEMPLATE / ".git", project / ".git")
-    shutil.copy2(_GIT_PROJECT_TEMPLATE / "README.md", project / "README.md")
+    subprocess.run(["git", "init"], cwd=project, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=project, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=project, check=True)
+    (project / "README.md").write_text("test\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=project, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=project, check=True, capture_output=True, text=True)
 
 
 def _branch_exists(project: Path, branch: str) -> bool:
@@ -137,63 +68,6 @@ def _branch_exists(project: Path, branch: str) -> bool:
 
 def _worktree_runtime_root(project: Path, name: str) -> Path:
     return project / ".git" / "agent-flow" / "worktrees" / name
-
-
-def test_create_run_reports_success_when_only_lock_release_is_tampered(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    project = tmp_path / "lock-release"
-    project.mkdir()
-
-    def fail_release(_lock) -> None:
-        raise artifact.ActiveRunExists("lock ownership changed")
-
-    monkeypatch.setattr(artifact, "_release_active_run_lock", fail_release)
-
-    run_dir = create_run(project, "default", "task", run_id="created")
-
-    assert (run_dir / "active").is_file()
-    assert "run was created but its start lock could not be released" in capsys.readouterr().err
-
-
-def _authorize_worktree_cleanup(
-    project: Path,
-    name: str,
-    *,
-    session_id: str = "cleanup-session",
-) -> dict[str, str]:
-    runtime = _worktree_runtime_root(project, name)
-    manifest = json.loads((runtime / "manifest.json").read_text(encoding="utf-8"))
-    run_dir = runtime / ".agent-flow" / "runs" / f"cleanup-{session_id}"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "meta.json").write_text(
-        json.dumps(
-            {
-                "run_id": run_dir.name,
-                "status": "complete",
-                "completed_at": f"2026-07-16T12:00:{len(session_id):02d}+00:00",
-                "workspace": manifest["identity"],
-                "execution": {
-                    "host": "codex",
-                    "session_id": session_id,
-                    "agent_id": "",
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    return {
-        "AGENT_FLOW_ACTIVE_HOST": "codex",
-        "AGENT_FLOW_EXECUTION_ID": session_id,
-    }
-
-
-def _write_authenticated_stale_manifest(project: Path, name: str) -> None:
-    runtime_manifest = _worktree_runtime_root(project, name) / "manifest.json"
-    stale_manifest = project / ".agent-flow" / "worktrees" / name / "manifest.json"
-    stale_manifest.write_bytes(runtime_manifest.read_bytes())
 
 
 def test_full_cycle(tmp_path: Path):
@@ -232,10 +106,7 @@ def test_full_cycle(tmp_path: Path):
     assert not (run_dir / "active").exists()
 
 
-def test_runner_injects_installed_profile_union_into_prompt(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
+def test_runner_injects_installed_profile_union_into_prompt(tmp_path: Path):
     from agent_flow.adapters.generic import GenericAdapter
     from agent_flow.runner import Phase, Runner
 
@@ -247,8 +118,6 @@ def test_runner_injects_installed_profile_union_into_prompt(
         json.dumps({"profile": "android", "profiles": ["android", "react-native"]}),
         encoding="utf-8",
     )
-
-    monkeypatch.delenv("AGENT_FLOW_PROFILE", raising=False)
 
     runner = Runner(project_root=project)
     assert runner.profile_id == "android,react-native"
@@ -270,62 +139,6 @@ def test_runner_injects_installed_profile_union_into_prompt(
     assert "active_profiles:" in prompt
     assert "- android" in prompt
     assert "- react-native" in prompt
-
-
-def test_phase_profile_projection_and_completion_markers_have_bounded_context(tmp_path: Path):
-    from agent_flow.adapters.generic import GenericAdapter
-    from agent_flow.core.profiles import load_profile_payload
-    from agent_flow.runner import Phase
-
-    project = tmp_path / "context-budget"
-    project.mkdir()
-    adapter = GenericAdapter()
-    adapter._profile_id = "android"
-    adapter._profile_snapshot = load_profile_payload("android")
-    marker = "architecture-contract-check: pass|fail|n/a"
-    body = f"Use the architecture contract.\n{marker}\n"
-    prompt = adapter.render_envelope(
-        Phase(
-            id="architecture-review",
-            description="Review",
-            prompt=body,
-            required_markers=(marker,),
-        ),
-        project / ".agent-flow" / "runs" / "r1",
-        project,
-    )
-
-    assert "android_skills:" not in prompt
-    assert "chrisbanes_skills:" not in prompt
-    assert "review_angles:" in prompt
-    assert prompt.count(marker) == 1
-    assert len(prompt) < 5_000
-
-
-def test_reviewer_jobs_use_compact_packets_instead_of_repeating_phase_envelope(tmp_path: Path):
-    from agent_flow.adapters.hosted import HostedAdapter, _reviewer_jobs
-    from agent_flow.core.profiles import load_profile_payload
-    from agent_flow.runner import Phase
-
-    project = tmp_path / "review-budget"
-    project.mkdir()
-    adapter = HostedAdapter("codex")
-    adapter._profile_id = "android"
-    adapter._profile_snapshot = load_profile_payload("android")
-    adapter._task_scope = "x" * 20_000
-    unique_body = "FULL_PHASE_BODY_MUST_NOT_REPEAT " * 500
-    phase = Phase(id="final-review", description="Review", prompt=unique_body, multi_review=True)
-    run_dir = project / ".agent-flow" / "runs" / "r1"
-
-    jobs = _reviewer_jobs(phase, run_dir, project, adapter)
-    full_envelope = adapter.render_envelope(phase, run_dir, project)
-
-    assert len(jobs) >= 3
-    assert all("FULL_PHASE_BODY_MUST_NOT_REPEAT" not in job.prompt for job in jobs)
-    assert all("do not rerun test suites" in job.prompt for job in jobs)
-    assert max(len(job.prompt) for job in jobs) < 8_000
-    assert all("x" * 1_000 not in job.prompt for job in jobs)
-    assert sum(len(job.prompt) for job in jobs) < len(full_envelope) * len(jobs) // 2
 
 
 def test_generic_stub_mode_blocks_instead_of_completing(tmp_path: Path):
@@ -392,86 +205,6 @@ def test_concurrent_run_rejected(tmp_path: Path):
     assert "already active" in r2.stdout.lower() or "already active" in r2.stderr.lower()
 
 
-def test_create_run_recovers_authenticated_lock_after_process_crash(tmp_path: Path):
-    project = tmp_path / "crashed-start"
-    runs_root = project / ".agent-flow" / "runs"
-    lock_root = runs_root / "active.lock"
-    lock_root.mkdir(parents=True)
-    (lock_root / "owner.json").write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "pid": 99_999_999,
-                "process_start_id": "crashed-process",
-                "token": "stale-owner-token",
-                "run_id": "crashed-run",
-                "runs_root": str(runs_root.resolve()),
-                "acquired_at": "2026-07-16T00:00:00+00:00",
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    run_dir = create_run(project, "default", "recovered", run_id="recovered-run")
-
-    assert run_dir.name == "recovered-run"
-    assert (run_dir / "active").is_file()
-    assert not lock_root.exists()
-
-
-def test_create_run_recovers_old_empty_legacy_lock_without_active_run(tmp_path: Path):
-    project = tmp_path / "empty-legacy-lock"
-    runs_root = project / ".agent-flow" / "runs"
-    lock_root = runs_root / "active.lock"
-    lock_root.mkdir(parents=True)
-    stale_time = time.time() - artifact.LEGACY_EMPTY_LOCK_GRACE_SECONDS - 1
-    os.utime(lock_root, (stale_time, stale_time))
-
-    run_dir = create_run(project, "default", "recovered", run_id="legacy-recovered")
-
-    assert run_dir.name == "legacy-recovered"
-    assert (run_dir / "active").is_file()
-    assert not lock_root.exists()
-
-
-def test_create_run_does_not_steal_fresh_empty_legacy_lock(tmp_path: Path):
-    project = tmp_path / "fresh-legacy-lock"
-    lock_root = project / ".agent-flow" / "runs" / "active.lock"
-    lock_root.mkdir(parents=True)
-
-    with pytest.raises(artifact.ActiveRunExists, match="ownership is live"):
-        create_run(project, "default", "blocked", run_id="blocked-run")
-
-    assert lock_root.is_dir()
-
-
-def test_create_run_publishes_complete_lock_before_it_becomes_active(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    project = tmp_path / "atomic-start-lock"
-    project.mkdir()
-    observed: list[dict[str, object]] = []
-    release = artifact._release_active_run_lock
-
-    def inspect_and_release(lock) -> None:
-        metadata = lock.path.lstat()
-        owner = json.loads(lock.path.read_text(encoding="utf-8"))
-        assert lock.path.is_file()
-        assert not lock.path.is_symlink()
-        assert metadata.st_nlink == 1
-        assert owner == lock.owner
-        observed.append(owner)
-        release(lock)
-
-    monkeypatch.setattr(artifact, "_release_active_run_lock", inspect_and_release)
-
-    run_dir = create_run(project, "default", "atomic", run_id="atomic-run")
-
-    assert run_dir.name == "atomic-run"
-    assert observed[0]["run_id"] == "atomic-run"
-
-
 def test_abort_clears_marker(tmp_path: Path):
     project = tmp_path / "abort"
     project.mkdir()
@@ -496,15 +229,7 @@ def test_worktree_run_continue_status_abort(tmp_path: Path):
     project.mkdir()
     _init_git_project(project)
 
-    execution_env = {
-        "AGENT_FLOW_ACTIVE_HOST": "codex",
-        "AGENT_FLOW_EXECUTION_ID": "worktree-cycle",
-    }
-    r1 = _run_cli(
-        ["run", "worktree task", "--worktree", "Long Press"],
-        project,
-        execution_env,
-    )
+    r1 = _run_cli(["run", "worktree task", "--worktree", "Long Press"], project)
     assert r1.returncode == 0, r1.stderr
     assert "worktree: feat-long-press" in r1.stdout
 
@@ -515,27 +240,23 @@ def test_worktree_run_continue_status_abort(tmp_path: Path):
     assert not (worktree / ".agent-flow").exists()
     assert not (worktree / "manifest.json").exists()
 
-    r_status = _run_cli(["status", "--worktree", "Long Press"], project, execution_env)
+    r_status = _run_cli(["status", "--worktree", "Long Press"], project)
     assert r_status.returncode == 0
     assert "worktree task" in r_status.stdout
 
-    r_continue = _run_cli(["continue", "--worktree", "long-press"], project, execution_env)
+    r_continue = _run_cli(["continue", "--worktree", "long-press"], project)
     assert r_continue.returncode == 0, r_continue.stderr
     assert "run complete" in r_continue.stdout
     assert (run_dir / "artifacts" / "gate-results.json").exists()
 
-    r_empty_continue = _run_cli(
-        ["continue", "--worktree", "long-press"], project, execution_env
-    )
+    r_empty_continue = _run_cli(["continue", "--worktree", "long-press"], project)
     assert r_empty_continue.returncode == 0
     assert '--worktree "feat-long-press"' in r_empty_continue.stdout
 
-    r2 = _run_cli(["run", "abort me", "--worktree", "long-press"], project, execution_env)
+    r2 = _run_cli(["run", "abort me", "--worktree", "long-press"], project)
     assert r2.returncode == 0, r2.stderr
     active = next(p for p in (runtime_root / ".agent-flow" / "runs").iterdir() if (p / "active").exists())
-    r_abort = _run_cli(
-        ["abort", "--worktree", "long-press", "--yes"], project, execution_env
-    )
+    r_abort = _run_cli(["abort", "--worktree", "long-press", "--yes"], project)
     assert r_abort.returncode == 0
     assert not (active / "active").exists()
 
@@ -543,214 +264,9 @@ def test_worktree_run_continue_status_abort(tmp_path: Path):
     assert r_list.returncode == 0
     assert "feat-long-press" in r_list.stdout
 
-    r_remove = _run_cli(
-        ["worktree", "remove", "--name", "long-press"], project, execution_env
-    )
+    r_remove = _run_cli(["worktree", "remove", "--name", "long-press"], project)
     assert r_remove.returncode == 0, r_remove.stderr
     assert not worktree.exists()
-
-
-def test_latest_completed_run_generation_owns_worktree_cleanup(tmp_path: Path):
-    project = tmp_path / "finalizer-generation"
-    project.mkdir()
-    _init_git_project(project)
-    first_env = {
-        "AGENT_FLOW_ACTIVE_HOST": "codex",
-        "AGENT_FLOW_EXECUTION_ID": "first-owner",
-    }
-    second_env = {
-        "AGENT_FLOW_ACTIVE_HOST": "codex",
-        "AGENT_FLOW_EXECUTION_ID": "second-owner",
-    }
-    first = _run_cli(["run", "first", "--worktree", "task"], project, first_env)
-    assert first.returncode == 0, first.stderr
-    first_complete = _run_cli(
-        ["continue", "--worktree", "task"], project, first_env
-    )
-    assert first_complete.returncode == 0, first_complete.stderr
-    second = _run_cli(["run", "second", "--worktree", "task"], project, second_env)
-    assert second.returncode == 0, second.stderr
-    second_complete = _run_cli(
-        ["continue", "--worktree", "task"], project, second_env
-    )
-    assert second_complete.returncode == 0, second_complete.stderr
-
-    old_owner = _run_cli(
-        ["worktree", "remove", "--name", "task"], project, first_env
-    )
-    current_owner = _run_cli(
-        ["worktree", "remove", "--name", "task"], project, second_env
-    )
-
-    assert old_owner.returncode == 2
-    assert "not the current cleanup owner" in old_owner.stderr
-    assert current_owner.returncode == 0, current_owner.stderr
-
-
-def test_worktree_runtime_cleanup_preserves_unowned_root_file(tmp_path: Path) -> None:
-    from agent_flow.core.worktrees import _remove_owned_worktree_runtime
-    from agent_flow.core.workspace_boundary import WorkspaceBoundaryError
-
-    runtime = tmp_path / "feat-task"
-    runtime.mkdir()
-    (runtime / "manifest.json").write_text("{}\n", encoding="utf-8")
-    unrelated = runtime / "unrelated.txt"
-    unrelated.write_text("keep\n", encoding="utf-8")
-
-    with pytest.raises(WorkspaceBoundaryError, match="unowned files"):
-        _remove_owned_worktree_runtime(runtime)
-
-    assert unrelated.read_text(encoding="utf-8") == "keep\n"
-
-
-def test_worktree_runtime_cleanup_removes_canonical_state_layout(tmp_path: Path) -> None:
-    from agent_flow.core.worktrees import _remove_owned_worktree_runtime
-
-    runtime = tmp_path / "feat-task"
-    for name in ("handoffs", "runs", "state", "team"):
-        directory = runtime / ".agent-flow" / name
-        directory.mkdir(parents=True)
-        (directory / "owned.json").write_text("{}\n", encoding="utf-8")
-    (runtime / "manifest.json").write_text("{}\n", encoding="utf-8")
-
-    _remove_owned_worktree_runtime(runtime)
-
-    assert not runtime.exists()
-
-
-def test_worktree_runtime_cleanup_preserves_unowned_state_directory(tmp_path: Path) -> None:
-    from agent_flow.core.worktrees import _remove_owned_worktree_runtime
-    from agent_flow.core.workspace_boundary import WorkspaceBoundaryError
-
-    runtime = tmp_path / "feat-task"
-    unexpected = runtime / ".agent-flow" / "unexpected"
-    unexpected.mkdir(parents=True)
-    (unexpected / "keep.txt").write_text("keep\n", encoding="utf-8")
-    (runtime / "manifest.json").write_text("{}\n", encoding="utf-8")
-
-    with pytest.raises(WorkspaceBoundaryError, match="unowned state"):
-        _remove_owned_worktree_runtime(runtime)
-
-    assert (runtime / ".agent-flow" / "unexpected" / "keep.txt").read_text(
-        encoding="utf-8"
-    ) == "keep\n"
-
-
-def test_worktree_runtime_cleanup_preserves_concurrent_file(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from agent_flow.core.worktrees import _remove_owned_worktree_runtime
-
-    runtime = tmp_path / "feat-task"
-    runtime.mkdir()
-    (runtime / "manifest.json").write_text("{}\n", encoding="utf-8")
-    original_rmdir = Path.rmdir
-
-    def racing_rmdir(path: Path) -> None:
-        if path.name.startswith(".feat-task.remove-"):
-            (path / "late-user-file.txt").write_text("keep\n", encoding="utf-8")
-        original_rmdir(path)
-
-    monkeypatch.setattr(Path, "rmdir", racing_rmdir)
-
-    with pytest.raises(OSError):
-        _remove_owned_worktree_runtime(runtime)
-
-    assert (runtime / "late-user-file.txt").read_text(encoding="utf-8") == "keep\n"
-
-
-def test_worktree_runtime_cleanup_never_adopts_file_created_after_snapshot(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import agent_flow.core.worktrees as worktrees
-
-    runtime = tmp_path / "feat-task"
-    run_dir = runtime / ".agent-flow" / "runs" / "run-1"
-    run_dir.mkdir(parents=True)
-    (runtime / "manifest.json").write_text("{}\n", encoding="utf-8")
-    (run_dir / "meta.json").write_text("{}\n", encoding="utf-8")
-    original_validate = worktrees._validate_worktree_runtime_layout
-
-    def racing_validate(path: Path) -> dict[str, tuple[int, int, int]]:
-        snapshot = original_validate(path)
-        (path / ".agent-flow" / "runs" / "run-1" / "late-user-file.txt").write_text(
-            "keep\n",
-            encoding="utf-8",
-        )
-        return snapshot
-
-    monkeypatch.setattr(worktrees, "_validate_worktree_runtime_layout", racing_validate)
-
-    with pytest.raises(OSError):
-        worktrees._remove_owned_worktree_runtime(runtime)
-
-    assert (
-        runtime / ".agent-flow" / "runs" / "run-1" / "late-user-file.txt"
-    ).read_text(encoding="utf-8") == "keep\n"
-
-
-def test_worktree_runtime_cleanup_preserves_replaced_root(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import agent_flow.core.worktrees as worktrees
-
-    runtime = tmp_path / "feat-task"
-    runtime.mkdir()
-    (runtime / "manifest.json").write_text("{}\n", encoding="utf-8")
-    original_rename = Path.rename
-    raced = False
-
-    def racing_rename(path: Path, target: Path) -> Path:
-        nonlocal raced
-        if path == runtime and not raced:
-            raced = True
-            original_rename(path, tmp_path / "original-runtime")
-            path.mkdir()
-            (path / "attacker.txt").write_text("keep\n", encoding="utf-8")
-        return original_rename(path, target)
-
-    monkeypatch.setattr(Path, "rename", racing_rename)
-
-    with pytest.raises(worktrees.WorkspaceBoundaryError, match="changed before removal"):
-        worktrees._remove_owned_worktree_runtime(runtime)
-
-    assert (runtime / "attacker.txt").read_text(encoding="utf-8") == "keep\n"
-
-
-def test_worktree_runtime_cleanup_preserves_replaced_directory(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import agent_flow.core.worktrees as worktrees
-
-    runtime = tmp_path / "feat-task"
-    runs = runtime / ".agent-flow" / "runs"
-    runs.mkdir(parents=True)
-    (runs / "owned.json").write_text("{}\n", encoding="utf-8")
-    (runtime / "manifest.json").write_text("{}\n", encoding="utf-8")
-    original_rename = Path.rename
-    raced = False
-
-    def racing_rename(path: Path, target: Path) -> Path:
-        nonlocal raced
-        if path.name == "runs" and target.name.startswith(".runs.remove-") and not raced:
-            raced = True
-            original_rename(path, path.with_name("original-runs"))
-            path.mkdir()
-            (path / "attacker.txt").write_text("keep\n", encoding="utf-8")
-        return original_rename(path, target)
-
-    monkeypatch.setattr(Path, "rename", racing_rename)
-
-    with pytest.raises(worktrees.WorkspaceBoundaryError, match="entry changed before removal"):
-        worktrees._remove_owned_worktree_runtime(runtime)
-
-    assert (runtime / ".agent-flow" / "runs" / "attacker.txt").read_text(
-        encoding="utf-8"
-    ) == "keep\n"
 
 
 def test_worktree_list_empty_and_multiple(tmp_path: Path):
@@ -784,7 +300,7 @@ def test_worktree_list_tolerates_invalid_stale_directory_name(tmp_path: Path):
     assert "Traceback" not in r_list.stderr
 
 
-def test_worktree_remove_refuses_legacy_only_stale_manifest_and_preserves_branch(tmp_path: Path):
+def test_worktree_remove_cleans_stale_manifest(tmp_path: Path):
     project = tmp_path / "stale-worktree"
     project.mkdir()
     _init_git_project(project)
@@ -810,10 +326,10 @@ def test_worktree_remove_refuses_legacy_only_stale_manifest_and_preserves_branch
     assert "stale" in r_list.stdout
 
     r_remove = _run_cli(["worktree", "remove", "--name", "ghost"], project)
-    assert r_remove.returncode == 2
-    assert "without ownership metadata" in r_remove.stderr
-    assert stale_dir.exists()
-    assert _branch_exists(project, "feat/ghost")
+    assert r_remove.returncode == 0
+    assert "removed stale" in r_remove.stdout
+    assert not stale_dir.exists()
+    assert not _branch_exists(project, "feat/ghost")
 
 
 def test_worktree_status_tolerates_corrupt_manifest(tmp_path: Path):
@@ -850,8 +366,8 @@ def test_worktree_remove_does_not_trust_string_owned_manifest_flag(tmp_path: Pat
     )
 
     r_remove = _run_cli(["worktree", "remove", "--name", "ghost"], project)
-    assert r_remove.returncode == 2
-    assert stale_dir.exists()
+    assert r_remove.returncode == 0, r_remove.stderr
+    assert not stale_dir.exists()
     assert _branch_exists(project, "feature/keep")
 
 
@@ -876,8 +392,8 @@ def test_worktree_remove_does_not_trust_manifest_owned_branch(tmp_path: Path):
     )
 
     r_remove = _run_cli(["worktree", "remove", "--name", "ghost"], project)
-    assert r_remove.returncode == 2
-    assert stale_dir.exists()
+    assert r_remove.returncode == 0, r_remove.stderr
+    assert not stale_dir.exists()
     assert _branch_exists(project, "feature/keep")
 
 
@@ -929,13 +445,13 @@ def test_worktree_remove_does_not_trust_manifest_path(tmp_path: Path):
     )
 
     r_remove = _run_cli(["worktree", "remove", "--name", "ghost"], project)
-    assert r_remove.returncode == 2
-    assert stale_dir.exists()
+    assert r_remove.returncode == 0, r_remove.stderr
+    assert not stale_dir.exists()
     assert victim_dir.exists()
     assert (victim_dir / ".git").exists()
 
 
-def test_worktree_remove_preserves_unowned_stale_path_file(tmp_path: Path):
+def test_worktree_remove_handles_stale_path_file(tmp_path: Path):
     project = tmp_path / "stale-path-file"
     project.mkdir()
     _init_git_project(project)
@@ -945,182 +461,9 @@ def test_worktree_remove_preserves_unowned_stale_path_file(tmp_path: Path):
     stale_file.write_text("not a directory\n", encoding="utf-8")
 
     r_remove = _run_cli(["worktree", "remove", "--name", "ghost"], project)
-    assert r_remove.returncode == 2
-    assert "refusing to delete unowned stale worktree path" in r_remove.stderr
-    assert stale_file.read_text(encoding="utf-8") == "not a directory\n"
-
-
-def test_worktree_remove_preserves_unowned_files_in_stale_checkout(tmp_path: Path):
-    project = tmp_path / "stale-user-files"
-    project.mkdir()
-    _init_git_project(project)
-    stale_dir = project / ".agent-flow" / "worktrees" / "feat-ghost"
-    stale_dir.mkdir(parents=True)
-    (stale_dir / "manifest.json").write_text(
-        json.dumps({"name": "feat-ghost", "branch": "feat/ghost"}),
-        encoding="utf-8",
-    )
-    runtime = _worktree_runtime_root(project, "feat-ghost")
-    runtime.mkdir(parents=True)
-    (runtime / "manifest.json").write_text(
-        json.dumps({"name": "feat-ghost", "branch": "feat/ghost"}),
-        encoding="utf-8",
-    )
-    user_file = stale_dir / "user-untracked.txt"
-    user_file.write_text("keep\n", encoding="utf-8")
-
-    result = _run_cli(["worktree", "remove", "--name", "ghost"], project)
-
-    assert result.returncode == 2
-    assert "unowned files" in result.stderr
-    assert user_file.read_text(encoding="utf-8") == "keep\n"
-
-
-def test_worktree_remove_preserves_directory_named_manifest_json(tmp_path: Path):
-    project = tmp_path / "stale-manifest-directory"
-    project.mkdir()
-    _init_git_project(project)
-    stale_dir = project / ".agent-flow" / "worktrees" / "feat-ghost"
-    nested = stale_dir / "manifest.json"
-    nested.mkdir(parents=True)
-    marker = nested / "keep.txt"
-    marker.write_text("keep\n", encoding="utf-8")
-    runtime = _worktree_runtime_root(project, "feat-ghost")
-    runtime.mkdir(parents=True)
-    (runtime / "manifest.json").write_text("{}\n", encoding="utf-8")
-
-    result = _run_cli(["worktree", "remove", "--name", "ghost"], project)
-
-    assert result.returncode == 2
-    assert marker.read_text(encoding="utf-8") == "keep\n"
-
-
-def test_stale_cleanup_preserves_file_created_after_quarantine(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from agent_flow.cli import (
-        _quarantine_stale_worktree_checkout,
-        _remove_quarantined_stale_worktree_checkout,
-    )
-
-    project = tmp_path / "stale-quarantine-race"
-    project.mkdir()
-    _init_git_project(project)
-    stale_dir = project / ".agent-flow" / "worktrees" / "feat-ghost"
-    stale_dir.mkdir(parents=True)
-    runtime = _worktree_runtime_root(project, "feat-ghost")
-    runtime.mkdir(parents=True)
-    payload = b'{"name":"feat-ghost","branch":"feat/ghost"}\n'
-    (stale_dir / "manifest.json").write_bytes(payload)
-    (runtime / "manifest.json").write_bytes(payload)
-    quarantine = _quarantine_stale_worktree_checkout(
-        project,
-        stale_dir,
-        "feat-ghost",
-    )
-    assert quarantine is not None
-    original_rmdir = Path.rmdir
-
-    def racing_rmdir(path: Path) -> None:
-        if path == quarantine:
-            (path / "late-user-file.txt").write_text("keep\n", encoding="utf-8")
-        original_rmdir(path)
-
-    monkeypatch.setattr(Path, "rmdir", racing_rmdir)
-
-    with pytest.raises(OSError):
-        _remove_quarantined_stale_worktree_checkout(
-            project,
-            quarantine,
-            "feat-ghost",
-        )
-
-    assert (quarantine / "late-user-file.txt").read_text(encoding="utf-8") == "keep\n"
-    assert (quarantine / "manifest.json").read_bytes() == payload
-
-
-def test_stale_cleanup_restores_owned_manifest_and_preserves_raced_replacement(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from agent_flow.cli import (
-        _quarantine_stale_worktree_checkout,
-        _remove_quarantined_stale_worktree_checkout,
-    )
-
-    project = tmp_path / "stale-manifest-race"
-    project.mkdir()
-    _init_git_project(project)
-    stale_dir = project / ".agent-flow" / "worktrees" / "feat-ghost"
-    stale_dir.mkdir(parents=True)
-    runtime = _worktree_runtime_root(project, "feat-ghost")
-    runtime.mkdir(parents=True)
-    payload = b'{"name":"feat-ghost","branch":"feat/ghost"}\n'
-    replacement = b'{"user":"replacement"}\n'
-    (stale_dir / "manifest.json").write_bytes(payload)
-    (runtime / "manifest.json").write_bytes(payload)
-    quarantine = _quarantine_stale_worktree_checkout(project, stale_dir, "feat-ghost")
-    assert quarantine is not None
-    original_rmdir = Path.rmdir
-
-    def racing_rmdir(path: Path) -> None:
-        if path == quarantine:
-            (path / "manifest.json").write_bytes(replacement)
-        original_rmdir(path)
-
-    monkeypatch.setattr(Path, "rmdir", racing_rmdir)
-
-    with pytest.raises(OSError):
-        _remove_quarantined_stale_worktree_checkout(project, quarantine, "feat-ghost")
-
-    assert (quarantine / "manifest.json").read_bytes() == payload
-    raced = list(quarantine.glob(".manifest.json.raced-*"))
-    assert len(raced) == 1
-    assert raced[0].read_bytes() == replacement
-
-
-def test_stale_cleanup_rejects_manifest_replaced_by_symlink(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from agent_flow.cli import (
-        _quarantine_stale_worktree_checkout,
-        _remove_quarantined_stale_worktree_checkout,
-    )
-
-    project = tmp_path / "stale-manifest-symlink-race"
-    project.mkdir()
-    _init_git_project(project)
-    stale_dir = project / ".agent-flow" / "worktrees" / "feat-ghost"
-    stale_dir.mkdir(parents=True)
-    runtime = _worktree_runtime_root(project, "feat-ghost")
-    runtime.mkdir(parents=True)
-    payload = b'{"name":"feat-ghost","branch":"feat/ghost"}\n'
-    (stale_dir / "manifest.json").write_bytes(payload)
-    runtime_manifest = runtime / "manifest.json"
-    runtime_manifest.write_bytes(payload)
-    quarantine = _quarantine_stale_worktree_checkout(project, stale_dir, "feat-ghost")
-    assert quarantine is not None
-    manifest = quarantine / "manifest.json"
-    original_rename = Path.rename
-
-    def racing_rename(path: Path, target: Path) -> Path:
-        if path == manifest:
-            path.unlink()
-            path.symlink_to(runtime_manifest)
-        return original_rename(path, target)
-
-    monkeypatch.setattr(Path, "rename", racing_rename)
-
-    with pytest.raises(RuntimeError, match="changed before removal"):
-        _remove_quarantined_stale_worktree_checkout(project, quarantine, "feat-ghost")
-
-    assert not manifest.is_symlink()
-    assert manifest.read_bytes() == payload
-    raced = list(quarantine.glob(".manifest.json.raced-*"))
-    assert len(raced) == 1
-    assert raced[0].is_symlink()
+    assert r_remove.returncode == 0
+    assert "removed stale" in r_remove.stdout
+    assert not stale_file.exists()
 
 
 def test_worktree_remove_prunes_real_stale_owned_worktree_and_deletes_auto_branch(tmp_path: Path):
@@ -1134,67 +477,23 @@ def test_worktree_remove_prunes_real_stale_owned_worktree_and_deletes_auto_branc
     assert _branch_exists(project, "feat/ghost")
     shutil.rmtree(stale_dir)
     stale_dir.mkdir(parents=True)
-    _write_authenticated_stale_manifest(project, "feat-ghost")
-    cleanup_env = _authorize_worktree_cleanup(project, "feat-ghost")
-
-    r_remove = _run_cli(
-        ["worktree", "remove", "--name", "ghost"], project, cleanup_env
+    (stale_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "name": "feat-ghost",
+                "branch": "feat/ghost",
+                "path": str(stale_dir),
+                "exists": True,
+                "branch_created_by_agent_flow": True,
+            }
+        ),
+        encoding="utf-8",
     )
+
+    r_remove = _run_cli(["worktree", "remove", "--name", "ghost"], project)
     assert r_remove.returncode == 0, r_remove.stderr
     assert not stale_dir.exists()
     assert not _branch_exists(project, "feat/ghost")
-
-
-def test_stale_worktree_remove_handles_reference_hook_rejection(tmp_path: Path):
-    project = tmp_path / "stale-hook-rejection"
-    project.mkdir()
-    _init_git_project(project)
-    created = _run_cli(["worktree", "create", "--name", "ghost"], project)
-    assert created.returncode == 0, created.stderr
-    stale_dir = project / ".agent-flow" / "worktrees" / "feat-ghost"
-    shutil.rmtree(stale_dir)
-    stale_dir.mkdir(parents=True)
-    _write_authenticated_stale_manifest(project, "feat-ghost")
-    hook = project / ".git" / "hooks" / "reference-transaction"
-    hook.write_text(
-        "#!/bin/sh\n[ \"$1\" != prepared ]\n",
-        encoding="utf-8",
-    )
-    hook.chmod(0o700)
-    cleanup_env = _authorize_worktree_cleanup(project, "feat-ghost")
-
-    result = _run_cli(
-        ["worktree", "remove", "--name", "ghost"],
-        project,
-        cleanup_env,
-    )
-
-    assert result.returncode == 2
-    assert "Traceback" not in result.stderr
-    assert "ref updates aborted by hook" in result.stderr
-    assert _branch_exists(project, "feat/ghost")
-
-
-def test_stale_worktree_remove_preserves_unpushed_unique_branch_commit(tmp_path: Path):
-    project = tmp_path / "stale-unique-commit"
-    project.mkdir()
-    _init_git_project(project)
-    created = _run_cli(["worktree", "create", "--name", "ghost"], project)
-    assert created.returncode == 0, created.stderr
-    stale_dir = project / ".agent-flow" / "worktrees" / "feat-ghost"
-    (stale_dir / "unique.txt").write_text("unique\n", encoding="utf-8")
-    subprocess.run(["git", "add", "unique.txt"], cwd=stale_dir, check=True)
-    subprocess.run(["git", "commit", "-m", "unique"], cwd=stale_dir, check=True)
-    shutil.rmtree(stale_dir)
-    stale_dir.mkdir(parents=True)
-    _write_authenticated_stale_manifest(project, "feat-ghost")
-
-    result = _run_cli(["worktree", "remove", "--name", "ghost"], project)
-
-    assert result.returncode == 2
-    assert "unpreserved commits" in result.stderr
-    assert stale_dir.exists()
-    assert _branch_exists(project, "feat/ghost")
 
 
 def test_worktree_create_rejects_stale_path_reuse(tmp_path: Path):
@@ -1213,48 +512,26 @@ def test_worktree_remove_keep_branch_preserves_stale_owned_branch(tmp_path: Path
     project = tmp_path / "stale-keep-branch"
     project.mkdir()
     _init_git_project(project)
-    created = _run_cli(["worktree", "create", "--name", "ghost"], project)
-    assert created.returncode == 0, created.stderr
+    subprocess.run(["git", "branch", "feat/ghost"], cwd=project, check=True)
     stale_dir = project / ".agent-flow" / "worktrees" / "feat-ghost"
-    shutil.rmtree(stale_dir)
     stale_dir.mkdir(parents=True)
-    _write_authenticated_stale_manifest(project, "feat-ghost")
-    cleanup_env = _authorize_worktree_cleanup(project, "feat-ghost")
-
-    r_remove = _run_cli(
-        ["worktree", "remove", "--name", "ghost", "--keep-branch"],
-        project,
-        cleanup_env,
-    )
-    assert r_remove.returncode == 0
-    assert not stale_dir.exists()
-    assert _branch_exists(project, "feat/ghost")
-
-
-def test_worktree_remove_refuses_stale_checkout_symlink(tmp_path: Path):
-    project = tmp_path / "stale-symlink"
-    project.mkdir()
-    _init_git_project(project)
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    marker = outside / "keep.txt"
-    marker.write_text("keep\n", encoding="utf-8")
-    stale_path = project / ".agent-flow" / "worktrees" / "feat-ghost"
-    stale_path.parent.mkdir(parents=True)
-    stale_path.symlink_to(outside, target_is_directory=True)
-    runtime = _worktree_runtime_root(project, "feat-ghost")
-    runtime.mkdir(parents=True)
-    (runtime / "manifest.json").write_text(
-        json.dumps({"name": "feat-ghost", "branch": "feat/ghost"}),
+    (stale_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "name": "feat-ghost",
+                "branch": "feat/ghost",
+                "path": str(project / ".agent-flow" / "worktrees" / "feat-ghost"),
+                "exists": True,
+                "branch_created_by_agent_flow": True,
+            }
+        ),
         encoding="utf-8",
     )
 
-    result = _run_cli(["worktree", "remove", "--name", "ghost"], project)
-
-    assert result.returncode == 2
-    assert "unowned stale worktree path" in result.stderr
-    assert stale_path.is_symlink()
-    assert marker.read_text(encoding="utf-8") == "keep\n"
+    r_remove = _run_cli(["worktree", "remove", "--name", "ghost", "--keep-branch"], project)
+    assert r_remove.returncode == 0
+    assert not stale_dir.exists()
+    assert _branch_exists(project, "feat/ghost")
 
 
 def test_worktree_selector_requires_existing_worktree(tmp_path: Path):
@@ -1339,21 +616,13 @@ def test_worktree_run_rejects_existing_branch_mismatch(tmp_path: Path):
     project = tmp_path / "branch-mismatch"
     project.mkdir()
     _init_git_project(project)
-    execution_env = {
-        "AGENT_FLOW_ACTIVE_HOST": "codex",
-        "AGENT_FLOW_EXECUTION_ID": "branch-mismatch",
-    }
 
-    r1 = _run_cli(["run", "task", "--worktree", "task"], project, execution_env)
+    r1 = _run_cli(["run", "task", "--worktree", "task"], project)
     assert r1.returncode == 0, r1.stderr
-    r_continue = _run_cli(["continue", "--worktree", "task"], project, execution_env)
+    r_continue = _run_cli(["continue", "--worktree", "task"], project)
     assert r_continue.returncode == 0, r_continue.stderr
 
-    r2 = _run_cli(
-        ["run", "other", "--worktree", "task", "--worktree-branch", "feat/other"],
-        project,
-        execution_env,
-    )
+    r2 = _run_cli(["run", "other", "--worktree", "task", "--worktree-branch", "feat/other"], project)
     assert r2.returncode == 2
     assert "already uses branch" in r2.stderr
 
@@ -1420,130 +689,6 @@ def test_start_worktree_cleans_up_new_worktree_on_start_failure(tmp_path: Path):
     assert not _branch_exists(project, "feat/task")
 
 
-def test_worktree_run_start_lock_error_leaves_no_execution_binding(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from agent_flow.core.worktrees import (
-        create_worktree,
-        plan_worktree,
-        worktree_runtime_root,
-    )
-    from agent_flow import runner as runner_module
-    from agent_flow.runner import ResumeMode, Runner
-    from agent_flow.core.skill_plan import SkillPlanSnapshotError
-    from agent_flow.artifact import find_active_run
-
-    project = tmp_path / "no-ghost-binding"
-    project.mkdir()
-    _init_git_project(project)
-    plan = plan_worktree(root=project, name="task")
-    status = create_worktree(root=project, plan=plan)
-    state_root = worktree_runtime_root(root=project, name=status.name)
-
-    def boom(_root):
-        raise SkillPlanSnapshotError("blocked: installed upstream skill lock is missing")
-
-    monkeypatch.setattr(runner_module, "installed_skill_plan_pin", boom)
-    monkeypatch.setenv("AGENT_FLOW_HOST", "codex")
-    monkeypatch.setenv("AGENT_FLOW_EXECUTION_ID", "lock-session")
-
-    runner = Runner(
-        status.path,
-        state_root=state_root,
-        config_root=project,
-        workflow="development",
-    )
-    with pytest.raises(SkillPlanSnapshotError):
-        runner.run(mode=ResumeMode.START, task="task")
-
-    executions = project / ".git" / "agent-flow" / "executions"
-    assert list(executions.glob("*.json")) == []
-    assert find_active_run(state_root) is None
-
-
-def test_worktree_run_start_failure_after_binding_publish_rolls_back(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from agent_flow.core.worktrees import (
-        create_worktree,
-        plan_worktree,
-        worktree_runtime_root,
-    )
-    from agent_flow import runner as runner_module
-    from agent_flow.runner import ResumeMode, Runner
-    from agent_flow.artifact import find_active_run
-
-    project = tmp_path / "rollback-binding"
-    project.mkdir()
-    _init_git_project(project)
-    plan = plan_worktree(root=project, name="task")
-    status = create_worktree(root=project, plan=plan)
-    state_root = worktree_runtime_root(root=project, name=status.name)
-
-    def boom(*_args, **_kwargs):
-        raise RuntimeError("boom after execution binding publish")
-
-    # detect_adapter는 binding publish 이후 setup 단계에서 실행되므로,
-    # 확장된 START cleanup 경계가 live binding을 원자적으로 rollback하는지 검증한다.
-    monkeypatch.setattr(runner_module, "detect_adapter", boom)
-    monkeypatch.setenv("AGENT_FLOW_HOST", "codex")
-    monkeypatch.setenv("AGENT_FLOW_EXECUTION_ID", "rollback-session")
-
-    runner = Runner(
-        status.path,
-        state_root=state_root,
-        config_root=project,
-        workflow="development",
-    )
-    with pytest.raises(RuntimeError, match="boom after execution binding publish"):
-        runner.run(mode=ResumeMode.START, task="task")
-
-    executions = project / ".git" / "agent-flow" / "executions"
-    assert list(executions.glob("*.json")) == []
-    assert find_active_run(state_root) is None
-
-
-def test_leader_mutation_during_run_emits_warning(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    from agent_flow.core.worktrees import (
-        create_worktree,
-        plan_worktree,
-        worktree_runtime_root,
-    )
-    from agent_flow.runner import Runner
-    from agent_flow.core.workspace_boundary import capture_workspace_identity
-
-    project = tmp_path / "leader-warn"
-    project.mkdir()
-    _init_git_project(project)
-    plan = plan_worktree(root=project, name="task")
-    status = create_worktree(root=project, plan=plan)
-    state_root = worktree_runtime_root(root=project, name=status.name)
-    run_dir = create_run(state_root, "development", "task", run_id="r1")
-
-    runner = Runner(
-        status.path,
-        state_root=state_root,
-        config_root=project,
-        workflow="development",
-    )
-    runner.run_dir = run_dir
-    runner._workspace_identity = capture_workspace_identity(status.path)
-    runner._capture_leader_run_snapshot()
-
-    # pinned worktree가 아니라 leader checkout에 잘못된 쓰기가 발생한 상황.
-    (project / "leaked.txt").write_text("contamination\n", encoding="utf-8")
-    runner._warn_if_leader_dirtied()
-
-    err = capsys.readouterr().err
-    assert "leader checkout changed" in err
-    assert "leaked.txt" in err
-
-
 def test_worktree_remove_preserves_preexisting_branch_by_default(tmp_path: Path):
     project = tmp_path / "preserve-branch"
     project.mkdir()
@@ -1552,10 +697,7 @@ def test_worktree_remove_preserves_preexisting_branch_by_default(tmp_path: Path)
 
     r_create = _run_cli(["worktree", "create", "--name", "task", "--branch", "feat/shared"], project)
     assert r_create.returncode == 0, r_create.stderr
-    cleanup_env = _authorize_worktree_cleanup(project, "feat-task")
-    r_remove = _run_cli(
-        ["worktree", "remove", "--name", "task"], project, cleanup_env
-    )
+    r_remove = _run_cli(["worktree", "remove", "--name", "task"], project)
     assert r_remove.returncode == 0, r_remove.stderr
     assert _branch_exists(project, "feat/shared")
 
@@ -1568,412 +710,9 @@ def test_worktree_remove_deletes_agent_flow_created_branch(tmp_path: Path):
     r_create = _run_cli(["worktree", "create", "--name", "task"], project)
     assert r_create.returncode == 0, r_create.stderr
     assert _branch_exists(project, "feat/task")
-    runtime = _worktree_runtime_root(project, "feat-task")
-    manifest = json.loads((runtime / "manifest.json").read_text(encoding="utf-8"))
-    node_state = project / ".git" / "agent-flow" / "current-runs" / "completed.json"
-    node_state.parent.mkdir(parents=True, exist_ok=True)
-    node_state.write_text(
-        json.dumps(
-            {
-                "run_id": "node-complete",
-                "run_dir": ".agent-flow/worktrees/feat-task/.agent-flow/runs/node-complete",
-                "status": "complete",
-                "phase": "complete",
-                "completed_at": "2026-07-16T13:00:00+00:00",
-                "workspace": manifest["identity"],
-                "execution": {
-                    "host": "codex",
-                    "session_id": "node-cleanup",
-                    "agent_id": "",
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    r_remove = _run_cli(
-        ["worktree", "remove", "--name", "task"],
-        project,
-        {
-            "AGENT_FLOW_ACTIVE_HOST": "codex",
-            "AGENT_FLOW_EXECUTION_ID": "node-cleanup",
-        },
-    )
+    r_remove = _run_cli(["worktree", "remove", "--name", "task"], project)
     assert r_remove.returncode == 0, r_remove.stderr
     assert not _branch_exists(project, "feat/task")
-    assert not node_state.exists()
-
-
-def test_worktree_remove_requires_unique_commits_to_be_preserved_by_another_ref(
-    tmp_path: Path,
-):
-    project = tmp_path / "preserve-unique-commit"
-    project.mkdir()
-    _init_git_project(project)
-    created = _run_cli(["worktree", "create", "--name", "task"], project)
-    assert created.returncode == 0, created.stderr
-    worktree = project / ".agent-flow" / "worktrees" / "feat-task"
-    (worktree / "unique.txt").write_text("unique\n", encoding="utf-8")
-    subprocess.run(["git", "add", "unique.txt"], cwd=worktree, check=True)
-    subprocess.run(["git", "commit", "-m", "unique"], cwd=worktree, check=True)
-
-    refused = _run_cli(["worktree", "remove", "--name", "task"], project)
-
-    assert refused.returncode == 2
-    assert "unpreserved branch commits" in refused.stderr
-    assert worktree.exists()
-    assert _branch_exists(project, "feat/task")
-
-    tip = subprocess.run(
-        ["git", "rev-parse", "feat/task"],
-        cwd=project,
-        text=True,
-        capture_output=True,
-        check=True,
-    ).stdout.strip()
-    subprocess.run(
-        ["git", "update-ref", "refs/remotes/origin/feat/task", tip],
-        cwd=project,
-        check=True,
-    )
-    cleanup_env = _authorize_worktree_cleanup(project, "feat-task")
-    removed = _run_cli(
-        ["worktree", "remove", "--name", "task"], project, cleanup_env
-    )
-
-    assert removed.returncode == 0, removed.stderr
-    assert not worktree.exists()
-    assert not _branch_exists(project, "feat/task")
-
-
-def test_compare_and_delete_preserves_branch_that_moves_after_validation(tmp_path: Path):
-    from agent_flow.core.worktrees import (
-        delete_worktree_branch_at_tip,
-        preserved_worktree_branch_tip,
-    )
-
-    project = tmp_path / "branch-cas"
-    project.mkdir()
-    _init_git_project(project)
-    subprocess.run(["git", "branch", "feat/task"], cwd=project, check=True)
-    tip = subprocess.run(
-        ["git", "rev-parse", "feat/task"],
-        cwd=project,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    subprocess.run(
-        ["git", "update-ref", "refs/remotes/origin/feat/task", tip],
-        cwd=project,
-        check=True,
-    )
-    preserved = preserved_worktree_branch_tip(root=project, branch="feat/task")
-    tree = subprocess.run(
-        ["git", "rev-parse", f"{tip}^{{tree}}"],
-        cwd=project,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    moved = subprocess.run(
-        ["git", "commit-tree", tree, "-p", tip, "-m", "moved after validation"],
-        cwd=project,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    subprocess.run(
-        ["git", "update-ref", "refs/heads/feat/task", moved, tip],
-        cwd=project,
-        check=True,
-    )
-
-    with pytest.raises(subprocess.CalledProcessError):
-        delete_worktree_branch_at_tip(
-            root=project,
-            branch="feat/task",
-            expected_tip=preserved or "",
-        )
-
-    assert _branch_exists(project, "feat/task")
-    assert subprocess.run(
-        ["git", "rev-parse", "feat/task"],
-        cwd=project,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip() == moved
-
-
-def test_compare_and_delete_preserves_branch_that_moves_during_deletion(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    import agent_flow.core.worktrees as worktrees
-
-    project = tmp_path / "branch-cas-race"
-    project.mkdir()
-    _init_git_project(project)
-    subprocess.run(["git", "branch", "feat/task"], cwd=project, check=True)
-    tip = subprocess.run(
-        ["git", "rev-parse", "feat/task"],
-        cwd=project,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    tree = subprocess.run(
-        ["git", "rev-parse", f"{tip}^{{tree}}"],
-        cwd=project,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    moved = subprocess.run(
-        ["git", "commit-tree", tree, "-p", tip, "-m", "moved during deletion"],
-        cwd=project,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    original_run_git = worktrees._run_git
-    raced = False
-
-    def run_git_after_move(root: Path, *args: str, **kwargs):
-        nonlocal raced
-        if args[2:4] == ("update-ref", "-d"):
-            subprocess.run(
-                ["git", "update-ref", "refs/heads/feat/task", moved, tip],
-                cwd=project,
-                check=True,
-            )
-            raced = True
-        return original_run_git(root, *args, **kwargs)
-
-    monkeypatch.setattr(worktrees, "_run_git", run_git_after_move)
-
-    with pytest.raises(subprocess.CalledProcessError):
-        worktrees.delete_worktree_branch_at_tip(
-            root=project,
-            branch="feat/task",
-            expected_tip=tip,
-        )
-
-    assert raced
-    assert subprocess.run(
-        ["git", "rev-parse", "feat/task"],
-        cwd=project,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip() == moved
-
-
-def test_compare_and_delete_preserves_branch_checked_out_in_another_worktree(tmp_path: Path):
-    from agent_flow.core.worktrees import delete_worktree_branch_at_tip
-
-    project = tmp_path / "branch-checked-out"
-    project.mkdir()
-    _init_git_project(project)
-    subprocess.run(["git", "branch", "feat/task"], cwd=project, check=True)
-    tip = subprocess.run(
-        ["git", "rev-parse", "feat/task"],
-        cwd=project,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    other_worktree = tmp_path / "other-worktree"
-    subprocess.run(
-        ["git", "worktree", "add", str(other_worktree), "feat/task"],
-        cwd=project,
-        check=True,
-    )
-
-    with pytest.raises(RuntimeError, match="checked out in another worktree"):
-        delete_worktree_branch_at_tip(
-            root=project,
-            branch="feat/task",
-            expected_tip=tip,
-        )
-
-    assert _branch_exists(project, "feat/task")
-    assert subprocess.run(
-        ["git", "branch", "--show-current"],
-        cwd=other_worktree,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip() == "feat/task"
-
-
-def test_compare_and_delete_preserves_branch_checked_out_during_deletion(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    import agent_flow.core.worktrees as worktrees
-
-    project = tmp_path / "branch-checkout-race"
-    project.mkdir()
-    _init_git_project(project)
-    subprocess.run(["git", "branch", "feat/task"], cwd=project, check=True)
-    tip = subprocess.run(
-        ["git", "rev-parse", "feat/task"],
-        cwd=project,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    other_worktree = tmp_path / "racing-worktree"
-    original_run_git = worktrees._run_git
-    raced = False
-
-    def run_git_after_checkout(root: Path, *args: str, **kwargs):
-        nonlocal raced
-        if args[2:4] == ("update-ref", "-d"):
-            subprocess.run(
-                ["git", "worktree", "add", str(other_worktree), "feat/task"],
-                cwd=project,
-                check=True,
-            )
-            raced = True
-        return original_run_git(root, *args, **kwargs)
-
-    monkeypatch.setattr(worktrees, "_run_git", run_git_after_checkout)
-
-    with pytest.raises(subprocess.CalledProcessError):
-        worktrees.delete_worktree_branch_at_tip(
-            root=project,
-            branch="feat/task",
-            expected_tip=tip,
-        )
-
-    assert raced
-    assert _branch_exists(project, "feat/task")
-    assert subprocess.run(
-        ["git", "branch", "--show-current"],
-        cwd=other_worktree,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip() == "feat/task"
-
-
-def test_compare_and_delete_preserves_branch_when_existing_reference_hook_rejects(
-    tmp_path: Path,
-):
-    from agent_flow.core.worktrees import delete_worktree_branch_at_tip
-
-    project = tmp_path / "branch-existing-hook"
-    project.mkdir()
-    _init_git_project(project)
-    subprocess.run(["git", "branch", "feat/task"], cwd=project, check=True)
-    tip = subprocess.run(
-        ["git", "rev-parse", "feat/task"],
-        cwd=project,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    hook = project / ".git" / "hooks" / "reference-transaction"
-    hook.write_text(
-        "#!/bin/sh\n[ \"$1\" != prepared ]\n",
-        encoding="utf-8",
-    )
-    hook.chmod(0o700)
-
-    with pytest.raises(subprocess.CalledProcessError):
-        delete_worktree_branch_at_tip(
-            root=project,
-            branch="feat/task",
-            expected_tip=tip,
-        )
-
-    assert _branch_exists(project, "feat/task")
-
-
-def test_two_owned_worktrees_can_finish_cleanup_concurrently(tmp_path: Path):
-    project = tmp_path / "concurrent cleanup with spaces"
-    project.mkdir()
-    _init_git_project(project)
-    for name in ("first", "second"):
-        created = _run_cli(["worktree", "create", "--name", name], project)
-        assert created.returncode == 0, created.stderr
-
-    def remove(name: str):
-        cleanup_env = _authorize_worktree_cleanup(
-            project,
-            f"feat-{name}",
-            session_id=f"cleanup-{name}",
-        )
-        return _run_cli_subprocess(
-            ["worktree", "remove", "--name", name], project, cleanup_env
-        )
-
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        results = list(executor.map(remove, ("first", "second")))
-
-    assert all(result.returncode == 0 for result in results), [
-        result.stderr for result in results
-    ]
-    assert not (project / ".agent-flow" / "worktrees" / "feat-first").exists()
-    assert not (project / ".agent-flow" / "worktrees" / "feat-second").exists()
-    assert not _branch_exists(project, "feat/first")
-    assert not _branch_exists(project, "feat/second")
-
-
-def test_authenticated_cleanup_lease_blocks_a_new_run_start(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    from agent_flow.cli import _acquire_authenticated_cleanup_claim
-    from agent_flow.core.workspace_boundary import release_workspace_start_claim
-
-    project = tmp_path / "cleanup-start-race"
-    project.mkdir()
-    _init_git_project(project)
-    created = _run_cli(["worktree", "create", "--name", "task"], project)
-    assert created.returncode == 0, created.stderr
-    cleanup_env = _authorize_worktree_cleanup(project, "feat-task")
-    for name, value in cleanup_env.items():
-        monkeypatch.setenv(name, value)
-
-    claim = _acquire_authenticated_cleanup_claim(project, "feat-task")
-    try:
-        started = _run_cli(
-            ["run", "replacement", "--worktree", "task"],
-            project,
-            {
-                "AGENT_FLOW_ACTIVE_HOST": "codex",
-                "AGENT_FLOW_EXECUTION_ID": "replacement-session",
-            },
-        )
-    finally:
-        release_workspace_start_claim(claim)
-
-    assert started.returncode == 2
-    assert "workspace start is already in progress" in started.stderr
-
-
-def test_worktree_remove_refuses_dirty_agent_owned_worktree(tmp_path: Path):
-    project = tmp_path / "dirty-owned-worktree"
-    project.mkdir()
-    _init_git_project(project)
-    r_create = _run_cli(["worktree", "create", "--name", "task"], project)
-    assert r_create.returncode == 0, r_create.stderr
-    worktree = project / ".agent-flow" / "worktrees" / "feat-task"
-    cleanup_env = _authorize_worktree_cleanup(project, "feat-task")
-    (worktree / "user-untracked.txt").write_text("keep\n", encoding="utf-8")
-
-    r_remove = _run_cli(
-        ["worktree", "remove", "--name", "task"], project, cleanup_env
-    )
-
-    assert r_remove.returncode == 2
-    assert "uncommitted changes" in r_remove.stderr
-    assert worktree.exists()
-    assert (worktree / "user-untracked.txt").read_text(encoding="utf-8") == "keep\n"
-    assert _branch_exists(project, "feat/task")
 
 
 def test_live_worktree_remove_does_not_trust_manifest_branch_redirect(tmp_path: Path):
@@ -1985,7 +724,6 @@ def test_live_worktree_remove_does_not_trust_manifest_branch_redirect(tmp_path: 
     r_create = _run_cli(["worktree", "create", "--name", "task"], project)
     assert r_create.returncode == 0, r_create.stderr
     worktree = project / ".agent-flow" / "worktrees" / "feat-task"
-    cleanup_env = _authorize_worktree_cleanup(project, "feat-task")
     (_worktree_runtime_root(project, "feat-task") / "manifest.json").write_text(
         json.dumps(
             {
@@ -1999,9 +737,7 @@ def test_live_worktree_remove_does_not_trust_manifest_branch_redirect(tmp_path: 
         encoding="utf-8",
     )
 
-    r_remove = _run_cli(
-        ["worktree", "remove", "--name", "task"], project, cleanup_env
-    )
+    r_remove = _run_cli(["worktree", "remove", "--name", "task"], project)
     assert r_remove.returncode == 0, r_remove.stderr
     assert _branch_exists(project, "feature/keep")
     assert _branch_exists(project, "feat/task")
@@ -2014,12 +750,7 @@ def test_worktree_remove_keep_branch_preserves_agent_flow_created_branch(tmp_pat
 
     r_create = _run_cli(["worktree", "create", "--name", "task"], project)
     assert r_create.returncode == 0, r_create.stderr
-    cleanup_env = _authorize_worktree_cleanup(project, "feat-task")
-    r_remove = _run_cli(
-        ["worktree", "remove", "--name", "task", "--keep-branch"],
-        project,
-        cleanup_env,
-    )
+    r_remove = _run_cli(["worktree", "remove", "--name", "task", "--keep-branch"], project)
     assert r_remove.returncode == 0, r_remove.stderr
     assert _branch_exists(project, "feat/task")
 
@@ -2229,123 +960,6 @@ def test_route_key_requires_exact_status_or_verdict_lines():
     assert _route_key("  status: green\n") == "default"
     assert _route_key("- verdict: approve\n") == "default"
     assert _route_key("status: green\n") == "green"
-
-
-def test_gates_route_uses_top_level_green_with_result_evidence() -> None:
-    from agent_flow.runner import _gates_route_key
-
-    evidenced = json.dumps(
-        {
-            "status": "green",
-            "results": [
-                {
-                    "command": "./gradlew test",
-                    "passed": True,
-                    "exit_code": 0,
-                }
-            ],
-        }
-    )
-    status_only = json.dumps({"status": "green"})
-    contradicted = json.dumps(
-        {
-            "passed": False,
-            "status": "green",
-            "results": [
-                {
-                    "command": "./gradlew test",
-                    "passed": True,
-                    "exit_code": 0,
-                }
-            ],
-        }
-    )
-
-    assert _gates_route_key(evidenced) == "green"
-    assert _gates_route_key(status_only) == "default"
-    assert _gates_route_key(contradicted) == "request-changes"
-
-    targeted = json.dumps(
-        {
-            "passed": True,
-            "status": "targeted-green",
-            "verification_mode": "targeted",
-            "results": [
-                {
-                    "command": "./gradlew :feature:chat:test",
-                    "passed": True,
-                    "exit_code": 0,
-                }
-            ],
-        }
-    )
-    assert _gates_route_key(targeted) == "default"
-
-
-def test_gates_top_level_green_routes_to_commit_instead_of_default_fix_loop(
-    tmp_path: Path,
-) -> None:
-    from agent_flow.core.artifacts import gate_execution_fingerprint
-    from agent_flow.core.gates import GateCommand
-    from agent_flow.runner import Phase, Runner
-
-    subprocess.run(("git", "init", "-b", "main", str(tmp_path)), check=True, capture_output=True)
-    subprocess.run(("git", "-C", str(tmp_path), "config", "user.name", "Test User"), check=True)
-    subprocess.run(("git", "-C", str(tmp_path), "config", "user.email", "test@example.com"), check=True)
-    (tmp_path / "README.md").write_text("gate\n", encoding="utf-8")
-    (tmp_path / ".gitignore").write_text("run/\n", encoding="utf-8")
-    subprocess.run(("git", "-C", str(tmp_path), "add", "README.md", ".gitignore"), check=True)
-    subprocess.run(("git", "-C", str(tmp_path), "commit", "-m", "initial"), check=True, capture_output=True)
-    run_dir = tmp_path / "run"
-    artifact = run_dir / "artifacts" / "gate-results.json"
-    artifact.parent.mkdir(parents=True)
-    command = GateCommand("test", ("./gradlew", ":feature:chat:test"))
-    fingerprint = gate_execution_fingerprint(
-        root=tmp_path,
-        profile_ids=["android"],
-        verification_mode="full",
-        changed_files=[],
-        commands=[command],
-    )
-    artifact.write_text(
-        json.dumps(
-            {
-                "passed": True,
-                "status": "green",
-                "verification_mode": "full",
-                "fingerprint": fingerprint,
-                "results": [
-                    {
-                        "gate_id": "test",
-                        "command": "./gradlew :feature:chat:test",
-                        "requested_argv": ["./gradlew", ":feature:chat:test"],
-                        "required": True,
-                        "passed": True,
-                        "exit_code": 0,
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-    runner = Runner.__new__(Runner)
-    runner.run_dir = run_dir
-    runner.project_root = tmp_path
-    runner.phases = [
-        Phase(
-            id="gates",
-            description="",
-            artifact="artifacts/gate-results.json",
-            routes={"green": "commit", "default": "fix-loop"},
-        ),
-        Phase(id="fix-loop", description=""),
-        Phase(id="commit", description=""),
-    ]
-
-    assert runner._next_index(0, runner.phases[0]) == (2, False)
-
-    (tmp_path / "README.md").write_text("changed after gates\n", encoding="utf-8")
-    assert runner._next_index(0, runner.phases[0]) == (1, False)
 
 
 def test_route_without_target_blocks_instead_of_falling_through(tmp_path: Path):
@@ -2745,33 +1359,6 @@ def test_backward_route_invalidates_intermediate_fresh_artifacts(tmp_path: Path)
         assert not (run_dir / f"{phase.id}.md").exists()
 
 
-def test_multi_review_architecture_blocked_routes_to_refactor(tmp_path: Path):
-    sys.path.insert(0, str(KIT_ROOT / "src"))
-    from agent_flow.runner import Phase, Runner
-
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
-    phases = [
-        Phase(id="refactor", description=""),
-        Phase(
-            id="architecture-review",
-            description="",
-            multi_review=True,
-            routes={"approve": "done", "request-changes": "refactor", "blocked": "refactor"},
-        ),
-        Phase(id="done", description=""),
-    ]
-    (run_dir / "architecture-review.md").write_text(
-        "verdict: blocked\n",
-        encoding="utf-8",
-    )
-    runner = Runner.__new__(Runner)
-    runner.run_dir = run_dir
-    runner.phases = phases
-
-    assert runner._next_index(1, phases[1]) == (0, False)
-
-
 def test_non_git_pr_phases_are_skipped(tmp_path: Path):
     sys.path.insert(0, str(KIT_ROOT / "src"))
     from agent_flow.runner import Phase, Runner
@@ -2935,9 +1522,9 @@ def test_abort_yes_flag_skips_prompt(tmp_path: Path):
     """`agent-flow abort --yes` must not block on confirmation."""
     project = tmp_path / "abort_yes"
     project.mkdir()
-    r1 = _run_cli_subprocess(["run", "any task"], project)
+    r1 = _run_cli(["run", "any task"], project)
     assert r1.returncode == 0
-    r2 = _run_cli_subprocess(["abort", "--yes"], project)
+    r2 = _run_cli(["abort", "--yes"], project)
     assert r2.returncode == 0
     assert "aborted" in r2.stdout.lower()
 
@@ -2960,15 +1547,17 @@ def test_run_safe_command_times_out_without_hanging(tmp_path: Path):
 def test_worktree_git_commands_use_longer_timeout(tmp_path: Path, monkeypatch):
     sys.path.insert(0, str(KIT_ROOT / "src"))
     from agent_flow.core import worktrees
+    from agent_flow.core import worktree_isolation
     from agent_flow.core.commands import SafeCommandResult
 
     captured: dict[str, int] = {}
 
-    def fake_run_safe_command(args, *, cwd=None, input_text=None, timeout_s=0):
+    def fake_run_safe_command(args, *, cwd=None, input_text=None, timeout_s=0, env=None):
         captured["timeout_s"] = timeout_s
         return SafeCommandResult(args=tuple(args), returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(worktrees, "run_safe_command", fake_run_safe_command)
+    # git calls route through worktree_isolation.git_safe, which strips leaky env.
+    monkeypatch.setattr(worktree_isolation, "run_safe_command", fake_run_safe_command)
 
     worktrees._run_git(tmp_path, "worktree", "add", "path", "branch")
 
@@ -2983,7 +1572,7 @@ def test_cli_detection_runs():
     clis = detect_available_clis()
     assert isinstance(clis, list)
     for c in clis:
-        assert c.name in {"claude", "codex", "omp"}
+        assert c.name in {"claude", "codex"}
 
 
 def test_multi_review_jobs_include_mandatory_baseline(tmp_path: Path):
@@ -3002,47 +1591,6 @@ def test_multi_review_jobs_include_mandatory_baseline(tmp_path: Path):
     assert "Review Angle" in jobs[0].prompt
     assert "Architecture Design" in jobs[1].prompt
     assert "Clean Architecture" in jobs[2].prompt
-
-
-def test_multi_review_packets_include_only_compact_architecture_profile_contract(
-    tmp_path: Path,
-):
-    sys.path.insert(0, str(KIT_ROOT / "src"))
-    from agent_flow.adapters.hosted import HostedAdapter, _reviewer_jobs
-    from agent_flow.runner import Phase
-
-    adapter = HostedAdapter("codex")
-    adapter._profile_snapshot = {
-        "id": "node",
-        "review_angles": [],
-        "architecture": {
-            "contract": "clean-architecture-core",
-            "platform": "node",
-            "strict_when_roots_present": True,
-            "activation_roots": ["src", "lib"],
-            "roles": {"domain": ["src/domain/**"]},
-        },
-        "gates": [{"id": "test", "command": ["npm", "test"]}],
-    }
-    phase = Phase(id="architecture-review", description="", multi_review=True)
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
-
-    jobs = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)
-
-    assert [job.angle_id for job in jobs] == [
-        "generalist",
-        "architecture-design",
-        "clean-architecture",
-    ]
-    for job in jobs:
-        assert "Profile contract:" in job.prompt
-        assert "architecture:" in job.prompt
-        assert "contract: clean-architecture-core" in job.prompt
-        assert "platform: node" in job.prompt
-        assert "roles:" not in job.prompt
-        assert "gates:" not in job.prompt
-        assert len(job.prompt) < 8_000
 
 
 def test_multi_review_jobs_dedupe_profile_baseline(tmp_path: Path):

@@ -3,13 +3,9 @@
   "version": "0.1.0",
   "description": "Project-agnostic AI workflow kit. Single entry, AI-driven phase progression. Works with Claude and Codex.",
   "scripts": {
+    "context:check": "node scripts/check-context-docs.mjs",
     "parity:check": "node scripts/check-agent-flow-parity.mjs",
-    "skills:validate": "node scripts/validate-skills.mjs",
-    "test": "python3 scripts/run-test-shards.py fast",
-    "test:integration": "python3 scripts/run-test-shards.py integration",
-    "test:parity": "python3 scripts/run-test-shards.py parity",
-    "test:worktree": "python3 scripts/run-test-shards.py worktree-lifecycle",
-    "test:final": "python3 scripts/run-test-shards.py full-final"
+    "test": "PYTHONPATH=src python3 -m unittest tests.test_cli -q && python3 -m pytest -q tests/test_custom_skill_install.py tests/test_architecture_lint.py && node scripts/check-context-docs.mjs && node scripts/check-agent-flow-parity.mjs"
   },
   "bin": {
     "agent-flow": "bin/agent-flow-kit.mjs",

@@ -15,13 +15,9 @@ phases:
     replicas: 3
     description: Review existing changes.
     multi_review: true
-    skills:
-      required: [code-generation-discipline, code-review, architecture-reviewer, clean-architecture-core]
-    requirements: [independent-reviewers, architecture-contract]
     routes:
       approve: handoff
       request-changes: handoff
-      failure: handoff
     prompt: |
       Run at least two independent sub-agent reviewers in parallel. Each reviewer
       checks bugs, regressions, missing tests, and contract drift.

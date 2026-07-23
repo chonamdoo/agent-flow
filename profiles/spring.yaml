@@ -10,6 +10,10 @@ branching:
     slug_source: feature title
     max_slug_length: 60
 gates:
+  - id: context-lint
+    command: ["node", "scripts/check-context-docs.mjs"]
+    required: true
+    phase: pre-commit
   - id: architecture-lint
     command: ["agent-flow", "architecture-lint", "--profile", "spring"]
     required: true
@@ -22,6 +26,10 @@ gates:
     command: ["./gradlew", "test"]
     required: true
     phase: pre-push
+  - id: lint
+    command: ["./gradlew", "check"]
+    required: false
+    phase: pre-commit
 review_angles:
   - id: architecture-design
     prompt: templates/_shared/review/architecture-design.md

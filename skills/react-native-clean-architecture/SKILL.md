@@ -1,17 +1,12 @@
 ---
 name: react-native-clean-architecture
-description: React Native and Expo platform adapter for `clean-architecture-core` that maps the core contract to shared packages, RN platform/native bridge adapters, Context Provider composition roots, optional TSyringe edge use, and repository/source/mapper boundaries. Use when applying Clean Architecture across RN packages or reviewing native bridge/data/DI boundaries; pair with react-native-clean-presentation-architecture for navigation effects, screen state holders, UiState, or presentation-only work.
+description: React Native and Expo Clean Architecture adapter for the platform-neutral clean-architecture-core contract. Use for shared package layout, RN platform adapters, Context Provider composition root, optional TSyringe, native bridge boundaries, repository/source/mapper boundaries, and RN architecture review.
 ---
 
 # React Native Clean Architecture
 
-This is not a standalone Clean Architecture guide. Load [`clean-architecture-core`](../clean-architecture-core/SKILL.md) first; this skill adds React Native package, platform-adapter, native-bridge, DI-edge, and sample-code details only.
-
-## Quick start
-
-1. Apply the layer, dependency-direction, and review rules from `clean-architecture-core`.
-2. Use this adapter only to translate those rules into React Native shared packages, Context Provider composition roots, native bridge/platform adapters, and optional TSyringe edge use.
-3. If the task is only navigation effects, screen state holders, UiState, or presentation mapping, pair with `react-native-clean-presentation-architecture` before applying presentation details.
+Load `clean-architecture-core` first. This skill adds React Native package,
+platform-adapter, and sample-code details only.
 
 ## Package Shape
 

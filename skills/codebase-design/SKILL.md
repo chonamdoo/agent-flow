@@ -1,24 +1,9 @@
 ---
 name: codebase-design
-description: Provides shared vocabulary and decision rules for designing deep modules, small interfaces, testable seams, and maintainable implementation locality. Use when designing or improving a module interface, finding deepening opportunities, deciding where a seam goes, making code more testable or AI-navigable, or when another skill needs deep-module vocabulary.
+description: Shared vocabulary for designing deep modules. Use when the user wants to design or improve a module's interface, find deepening opportunities, decide where a seam goes, make code more testable or AI-navigable, or when another skill needs the deep-module vocabulary.
 ---
 
 # Codebase Design
-
-This is a standalone module-interface design skill when the main question is
-depth, seam placement, or testability through an interface. Pair it with
-`clean-architecture-core` when seams cross architectural layers, with
-`ddd-architecture` when seams follow bounded contexts or aggregates, and with
-`solid-architecture-review` when a review needs SOLID-specific findings.
-
-## Quick start
-
-1. Name the module, its current interface, and the callers that must understand
-   it.
-2. Use the deletion test: if deleting the module removes complexity, it is
-   shallow; if complexity reappears across callers, it is earning its seam.
-3. Prefer replacing shallow layers with a deeper interface over adding another
-   pass-through abstraction.
 
 Design **deep modules**: a lot of behaviour behind a small interface, placed at a clean seam, testable through that interface. Use this language and these principles wherever code is being designed or restructured. The aim is leverage for callers, locality for maintainers, and testability for everyone.
 
@@ -125,5 +110,5 @@ Good interfaces make testing natural:
 
 ## Going deeper
 
-- **Deepening a cluster given its dependencies** — read [DEEPENING.md](DEEPENING.md) when deciding whether to replace shallow layers, introduce a seam, or test through a module interface.
-- **Exploring alternative interfaces** — read [DESIGN-IT-TWICE.md](DESIGN-IT-TWICE.md) when a module interface is consequential enough to compare radically different seam placements with parallel sub-agents.
+- **Deepening a cluster given its dependencies** — see [DEEPENING.md](DEEPENING.md): dependency categories, seam discipline, and replace-don't-layer testing.
+- **Exploring alternative interfaces** — see [DESIGN-IT-TWICE.md](DESIGN-IT-TWICE.md): spin up parallel sub-agents to design the interface several radically different ways, then compare on depth, locality, and seam placement.

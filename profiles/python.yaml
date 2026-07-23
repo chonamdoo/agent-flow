@@ -10,9 +10,21 @@ branching:
     slug_source: feature title
     max_slug_length: 60
 gates:
+  - id: context-lint
+    command: ["node", "scripts/check-context-docs.mjs"]
+    required: true
+    phase: pre-commit
   - id: architecture-lint
     command: ["agent-flow", "architecture-lint", "--profile", "python"]
     required: true
+    phase: pre-commit
+  - id: type
+    command: ["mypy", "."]
+    required: false
+    phase: pre-commit
+  - id: lint
+    command: ["ruff", "check", "."]
+    required: false
     phase: pre-commit
   - id: test
     command: ["pytest", "-q"]
@@ -26,9 +38,9 @@ review_angles:
   - id: io-safety
     prompt: templates/_shared/review/io-safety.md
 skills:
-  capabilities:
-    - python.api.architecture.clean
-    - lang.python
+  install:
+    - python-api-clean-architecture
+    - python-development-guide
   required_review:
     - group: profile
       skills: [python-development-guide, python-api-clean-architecture]

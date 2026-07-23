@@ -10,6 +10,10 @@ branching:
     slug_source: feature title
     max_slug_length: 60
 gates:
+  - id: context-lint
+    command: ["node", "scripts/check-context-docs.mjs"]
+    required: true
+    phase: pre-commit
   - id: architecture-lint
     command: ["agent-flow", "architecture-lint", "--profile", "nextjs"]
     required: true
@@ -22,6 +26,10 @@ gates:
     command: ["npm", "test"]
     required: true
     phase: pre-commit
+  - id: lint
+    command: ["npm", "run", "lint"]
+    required: false
+    phase: pre-commit
 review_angles:
   - id: architecture-design
     prompt: templates/_shared/review/architecture-design.md
@@ -30,12 +38,12 @@ review_angles:
   - id: a11y
     prompt: templates/_shared/review/a11y.md
 skills:
-  capabilities:
-    - react.app-shell-error-handling
-    - react.architecture.clean
-    - react.presentation.clean
-    - react.development-guide
-    - lang.typescript
+  install:
+    - react-app-shell-error-handling
+    - react-clean-architecture
+    - react-clean-presentation-architecture
+    - react-development-guide
+    - typescript-development-guide
   required_review:
     - group: profile
       skills: [react-development-guide, typescript-development-guide, react-clean-architecture]

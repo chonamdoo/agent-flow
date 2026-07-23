@@ -1,17 +1,12 @@
 ---
 name: ios-clean-architecture
-description: iOS platform adapter for `clean-architecture-core` that maps the core contract to Swift packages/source layout, app-shell composition roots, Swinject or local factories, repository/source/mapper boundaries, and iOS platform boundaries. Use when applying Clean Architecture to iOS app/package architecture or reviewing data/DI/module boundaries; pair with ios-clean-presentation-architecture for SwiftUI/UIKit ViewModel, UiState, or presentation-only work.
+description: iOS Clean Architecture adapter for the platform-neutral clean-architecture-core contract. Use for Swift source/package layout, SwiftUI/UIKit presentation, Swinject or local factory composition root, repository/source/mapper boundaries, and iOS architecture review.
 ---
 
 # iOS Clean Architecture
 
-This is not a standalone Clean Architecture guide. Load [`clean-architecture-core`](../clean-architecture-core/SKILL.md) first; this skill adds iOS-specific source/package, DI, and platform-boundary details only.
-
-## Quick start
-
-1. Apply the layer, dependency-direction, and review rules from `clean-architecture-core`.
-2. Use this adapter only to translate those rules into Swift packages/source groups, app-shell composition roots, Swinject/local factory boundaries, and iOS platform adapters.
-3. If the task is only SwiftUI/UIKit state, ViewModel wiring, navigation effects, or presentation mapping, pair with `ios-clean-presentation-architecture` before applying presentation details.
+Load `clean-architecture-core` first. This skill adds iOS-specific layout, DI,
+and sample-code details only.
 
 ## Source Shape
 

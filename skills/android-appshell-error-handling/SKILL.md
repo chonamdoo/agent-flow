@@ -1,19 +1,12 @@
 ---
 name: android-appshell-error-handling
-description: Defines Android app-shell common-error handling where feature ViewModels notify common errors and AppShell owns global UI, root navigation, Navigation3 back stack resets, SessionExpired handling, and Retrofit CallAdapter error mapping. Use when implementing or reviewing Android Kotlin Compose app-wide error handling.
+description: Use when implementing or reviewing Android Kotlin Compose app-wide error handling where feature ViewModels notify common errors and an AppShell layer owns common dialogs, snackbars, toasts, root navigation, Navigation3 back stack resets, SessionExpired handling, or Retrofit CallAdapter error mapping.
 ---
 
 # Android AppShell Error Handling
 
 Use this with `code-generation-discipline` for Android app-wide error handling
 implementation or review.
-
-## Quick start
-
-1. Use this for common errors whose UI or side effects must be owned above feature screens: `SessionExpired`, `Maintenance`, `Forbidden`, and server-wide business codes.
-2. Start by deciding whether `notify(error)` returns `true`; if it does, route the error to AppShell and keep feature `UiState` limited to local errors.
-3. If the task is ordinary screen `UiState`, ViewModel DI, `UiModel` mapping, or stateless Compose rendering without global hosts/root reset, use `android-clean-presentation-architecture` instead.
-
 
 ## When To Use
 
@@ -22,12 +15,6 @@ implementation or review.
   handling.
 - Navi3 root back stack ownership, root flow reset, or login redirect work.
 - Retrofit CallAdapter, mapper, ViewModel, or AppShell common error review.
-
-## Do not use for
-
-- Feature-local validation or fetch errors that should render inline as screen `UiState`.
-- General ViewModel, Compose screen, DI, or presentation mapper design without AppShell-owned global error UI/root navigation; use `android-clean-presentation-architecture`.
-
 
 ## Core Contract
 

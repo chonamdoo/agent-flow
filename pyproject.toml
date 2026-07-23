@@ -16,14 +16,7 @@ readme = "README.md"
 [project.optional-dependencies]
 dev = [
   "pytest>=8",
-  "pytest-xdist>=3.8",
 ]
-
-[tool.pytest.ini_options]
-# Cap workers below the core count: the suite's real-subprocess guard/git/node
-# tests spawn child processes that starve (git 10s timeout) when in-process tests
-# saturate every core under `-n auto`. 6 workers keeps ample headroom for spawns.
-addopts = "-n 6 --dist loadgroup"
 
 [project.scripts]
 agent-flow = "agent_flow.cli:main"

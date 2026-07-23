@@ -1,6 +1,6 @@
 ---
 name: ios-app-shell-error-handling
-description: Defines iOS app-shell common-error handling where SwiftUI views/ViewModels notify common errors and an @main App, WindowGroup AppShell, NavigationStack coordinator, or UIKit AppCoordinator owns global UI, root flow switching, SessionExpired handling, Maintenance handling, and root resets. Use when implementing or reviewing iOS app-wide error handling.
+description: Use when implementing or reviewing iOS app-wide error handling where SwiftUI views/ViewModels notify common errors and an @main App, WindowGroup AppShell, NavigationStack coordinator, or UIKit AppCoordinator owns root navigation, tab/session flow switching, alerts, sheets, toast hosts, SessionExpired handling, Maintenance handling, and root reset behavior.
 ---
 
 # iOS App Shell Error Handling
@@ -8,13 +8,6 @@ description: Defines iOS app-shell common-error handling where SwiftUI views/Vie
 Use this with `code-generation-discipline` for iOS common error handling
 implementation or review. Default to SwiftUI. Use UIKit Coordinator guidance only
 when the app already uses UIKit navigation.
-
-## Quick start
-
-1. Use this for common errors whose UI or side effects must be owned above feature views: `SessionExpired`, `Maintenance`, `Forbidden`, and server-wide business codes.
-2. Start by deciding whether `notify(error)` returns `true`; if it does, route the error to AppShell/root coordinator and keep feature `UiState` limited to local errors.
-3. If the task is ordinary screen `UiState`, state-holder DI, `UiModel` mapping, or render-focused SwiftUI/UIKit views without global hosts/root reset, use `ios-clean-presentation-architecture` instead.
-
 
 ## Official Basis
 
@@ -32,12 +25,6 @@ when the app already uses UIKit navigation.
 - SwiftUI `NavigationStack(path:)`, `TabView`, or root session flow switching.
 - UIKit root coordinator, tab coordinator, or root reset work.
 - Review of Views/ViewModels that handle global errors.
-
-## Do not use for
-
-- Feature-local validation or fetch errors that should render inline as screen `UiState`.
-- General state holder, SwiftUI/UIKit view, DI, or presentation mapper design without AppShell/root-coordinator global error UI/root navigation; use `ios-clean-presentation-architecture`.
-
 
 ## AppShell Role
 

@@ -18,11 +18,7 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
-import stat
-import subprocess
 import sys
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,25 +27,13 @@ import yaml
 
 from agent_flow.core.markers import missing_markers, normalize_required_markers
 from agent_flow.core.local_skills import missing_local_skill_markers
-from agent_flow.core.phase_contract import (
-    artifact_is_stale,
-    declared_artifact_issues,
-    phase_contract_issues,
-    phase_entry_time,
-    resolve_runtime_phase_contract,
-)
-from agent_flow.core.phase_workflow import (
-    PhaseDefinition,
-    find_kit_root,
-    load_phase_workflow_definition,
-)
+from agent_flow.core.phase_workflow import find_kit_root, load_phase_workflow_definition
 
 
 RUNS_DIRNAME = ".agent-flow/runs"
 ACTIVE_MARKER = "active"
 META_FILE = "meta.json"
 ACTIVE_LOCK = "active.lock"
-LEGACY_EMPTY_LOCK_GRACE_SECONDS = 30
 
 
 class ActiveRunExists(RuntimeError):
@@ -68,23 +52,7 @@ class ActiveRun:
         artifacts = sorted(str(p.relative_to(self.path)) for p in self.path.rglob("*") if p.is_file())
         meta = read_meta(self.path)
         current_phase = meta.get("current_phase") or "-"
-        phase = _phase_definition(
-            self.path,
-            self.workflow,
-            current_phase,
-            config_root=config_root,
-        )
-        if phase is not None:
-            project_root = _status_project_root(self.path, meta, config_root)
-            phase = resolve_runtime_phase_contract(
-                phase,
-                config_root=config_root or project_root,
-                project_root=project_root,
-                meta=meta,
-            )
-            artifact_rel = Path(phase.artifact)
-        else:
-            artifact_rel, _markers = _phase_contract(self.path, self.workflow, current_phase)
+        artifact_rel, _markers = _phase_contract(self.path, self.workflow, current_phase)
         required_artifact = (
             _existing_phase_artifact(self.path, current_phase, artifact_rel)
             if current_phase != "-" and artifact_rel is not None
@@ -97,21 +65,15 @@ class ActiveRun:
             reason = "missing_phase_artifact"
         elif required_artifact is not None:
             structured_status = "blocked"
-            block_reason = (
-                "stale_artifact"
-                if artifact_is_stale(required_artifact, phase_entry_time(meta))
-                else _artifact_block_reason(required_artifact)
-            )
-            if block_reason:
-                reason = block_reason
+            stub_reason = _artifact_block_reason(required_artifact)
+            if stub_reason:
+                reason = stub_reason
             else:
                 missing_markers = _missing_completion_markers(
                     self.path,
                     self.workflow,
                     current_phase,
                     config_root=config_root,
-                    phase=phase,
-                    meta=meta,
                 )
                 reason = (
                     "missing_completion_markers"
@@ -173,29 +135,24 @@ def find_active_run(project_root: Path) -> ActiveRun | None:
     )
 
 
-@dataclass(frozen=True)
-class ActiveRunStartLock:
-    path: Path
-    device: int
-    inode: int
-    owner: dict[str, object]
-
-
 def create_run(
     project_root: Path,
     workflow: str,
     task: str,
     *,
     architecture: str | None = None,
-    run_id: str | None = None,
 ) -> Path:
     """Create a new run directory. Refuses if an active run exists."""
     runs_dir = project_root / RUNS_DIRNAME
     runs_dir.mkdir(parents=True, exist_ok=True)
-    now = datetime.now(timezone.utc)
-    selected_run_id = run_id or next_run_id(project_root, now=now)
-    lock = _acquire_active_run_lock(runs_dir, selected_run_id)
-    created = False
+    lock_dir = runs_dir / ACTIVE_LOCK
+    try:
+        lock_dir.mkdir()
+    except FileExistsError as e:
+        raise ActiveRunExists(
+            "another agent-flow run is starting. Retry after it finishes "
+            "or inspect `.agent-flow/runs/active.lock` if the process died."
+        ) from e
 
     try:
         existing = find_active_run(project_root)
@@ -206,276 +163,33 @@ def create_run(
                 f"or `agent-flow abort` to clear."
             )
 
-        if (runs_dir / selected_run_id).exists():
-            raise ActiveRunExists(f"run already exists: {selected_run_id}")
+        now = datetime.now(timezone.utc)
+        base_id = now.strftime("%Y%m%d-%H%M%S")
+        run_id = base_id
+        suffix = 1
+        while (runs_dir / run_id).exists():
+            run_id = f"{base_id}-{suffix}"
+            suffix += 1
 
-        run_path = runs_dir / selected_run_id
+        run_path = runs_dir / run_id
         run_path.mkdir()
         meta = {
-            "run_id": selected_run_id,
+            "run_id": run_id,
             "workflow": workflow,
             "task": task,
             "started_at": now.isoformat(),
             "current_phase": None,
-            "status": "running",
         }
         if architecture:
             meta["architecture"] = architecture
         write_meta(run_path, meta)
         (run_path / ACTIVE_MARKER).write_text("")
-        created = True
         return run_path
     finally:
         try:
-            _release_active_run_lock(lock)
-        except ActiveRunExists as exc:
-            if not created:
-                raise
-            print(
-                f"warning: run was created but its start lock could not be released: {exc}",
-                file=sys.stderr,
-            )
-
-
-def next_run_id(
-    project_root: Path,
-    *,
-    now: datetime | None = None,
-) -> str:
-    runs_dir = project_root / RUNS_DIRNAME
-    runs_dir.mkdir(parents=True, exist_ok=True)
-    base_id = (now or datetime.now(timezone.utc)).strftime("%Y%m%d-%H%M%S")
-    run_id = base_id
-    suffix = 1
-    while (runs_dir / run_id).exists():
-        run_id = f"{base_id}-{suffix}"
-        suffix += 1
-    return run_id
-
-
-def _acquire_active_run_lock(runs_dir: Path, run_id: str) -> ActiveRunStartLock:
-    lock_path = runs_dir / ACTIVE_LOCK
-    token = os.urandom(16).hex()
-    process_start_id = _process_start_identity(os.getpid())
-    if process_start_id is None:
-        raise ActiveRunExists("cannot authenticate active run start process")
-    owner = {
-        "version": 1,
-        "pid": os.getpid(),
-        "process_start_id": process_start_id,
-        "token": token,
-        "run_id": run_id,
-        "runs_root": str(runs_dir.resolve(strict=True)),
-        "acquired_at": datetime.now(timezone.utc).isoformat(),
-    }
-    temporary = runs_dir / f".{ACTIVE_LOCK}.{os.getpid()}.{token}.tmp"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    descriptor = os.open(temporary, flags, 0o600)
-    try:
-        payload = f"{json.dumps(owner, sort_keys=True)}\n".encode("utf-8")
-        view = memoryview(payload)
-        while view:
-            written = os.write(descriptor, view)
-            if written <= 0:
-                raise OSError("active run start lock write failed")
-            view = view[written:]
-        os.fsync(descriptor)
-        temporary_metadata = os.fstat(descriptor)
-    finally:
-        os.close(descriptor)
-    try:
-        for attempt in range(2):
-            try:
-                os.link(temporary, lock_path, follow_symlinks=False)
-                break
-            except FileExistsError as exc:
-                if attempt == 0 and _recover_stale_active_run_lock(lock_path, runs_dir):
-                    continue
-                raise ActiveRunExists(
-                    "another agent-flow run is starting; authenticated active.lock ownership is live"
-                ) from exc
-        else:
-            raise ActiveRunExists("active run start lock is unavailable")
-        metadata = lock_path.lstat()
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or stat.S_ISLNK(metadata.st_mode)
-            or metadata.st_dev != temporary_metadata.st_dev
-            or metadata.st_ino != temporary_metadata.st_ino
-        ):
-            raise ActiveRunExists("active run start lock publication changed")
-    finally:
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
-    return ActiveRunStartLock(lock_path, metadata.st_dev, metadata.st_ino, owner)
-
-
-def _recover_stale_active_run_lock(lock_path: Path, runs_dir: Path) -> bool:
-    try:
-        metadata = lock_path.lstat()
-    except FileNotFoundError:
-        return True
-    if stat.S_ISLNK(metadata.st_mode) or not (
-        stat.S_ISREG(metadata.st_mode) or stat.S_ISDIR(metadata.st_mode)
-    ):
-        return False
-    if stat.S_ISDIR(metadata.st_mode):
-        try:
-            empty_legacy_lock = not any(lock_path.iterdir())
-            active_run_exists = any(
-                child.is_dir()
-                and child.name != ACTIVE_LOCK
-                and (child / ACTIVE_MARKER).is_file()
-                for child in runs_dir.iterdir()
-            )
+            lock_dir.rmdir()
         except OSError:
-            return False
-        if empty_legacy_lock:
-            if (
-                active_run_exists
-                or time.time() - metadata.st_mtime < LEGACY_EMPTY_LOCK_GRACE_SECONDS
-            ):
-                return False
-            quarantine = lock_path.with_name(
-                f".{ACTIVE_LOCK}.stale-{os.getpid()}-{os.urandom(8).hex()}"
-            )
-            try:
-                lock_path.rename(quarantine)
-            except FileNotFoundError:
-                return True
-            moved = quarantine.lstat()
-            if (
-                moved.st_dev != metadata.st_dev
-                or moved.st_ino != metadata.st_ino
-                or not stat.S_ISDIR(moved.st_mode)
-                or any(quarantine.iterdir())
-            ):
-                if not lock_path.exists():
-                    quarantine.rename(lock_path)
-                raise ActiveRunExists(
-                    "active run start lock changed during stale recovery"
-                )
-            quarantine.rmdir()
-            return True
-    owner_path = lock_path / "owner.json" if stat.S_ISDIR(metadata.st_mode) else lock_path
-    try:
-        owner_metadata = owner_path.lstat()
-        owner = json.loads(owner_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
-        return False
-    pid = owner.get("pid")
-    process_start_id = owner.get("process_start_id")
-    if (
-        not stat.S_ISREG(owner_metadata.st_mode)
-        or stat.S_ISLNK(owner_metadata.st_mode)
-        or owner.get("version") != 1
-        or not isinstance(pid, int)
-        or pid <= 0
-        or not isinstance(process_start_id, str)
-        or not process_start_id
-        or not isinstance(owner.get("token"), str)
-        or not owner.get("token")
-        or not isinstance(owner.get("run_id"), str)
-        or not owner.get("run_id")
-        or owner.get("runs_root") != str(runs_dir.resolve(strict=True))
-    ):
-        return False
-    if _process_is_alive(pid):
-        current_start_id = _process_start_identity(pid)
-        if current_start_id is None or current_start_id == process_start_id:
-            return False
-    quarantine = lock_path.with_name(
-        f".{ACTIVE_LOCK}.stale-{os.getpid()}-{os.urandom(8).hex()}"
-    )
-    try:
-        lock_path.rename(quarantine)
-    except FileNotFoundError:
-        return True
-    moved = quarantine.lstat()
-    try:
-        moved_owner_path = (
-            quarantine / "owner.json"
-            if stat.S_ISDIR(moved.st_mode)
-            else quarantine
-        )
-        moved_owner = json.loads(moved_owner_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        if not lock_path.exists():
-            quarantine.rename(lock_path)
-        raise ActiveRunExists("active run start lock changed during stale recovery") from exc
-    if (
-        moved.st_dev != metadata.st_dev
-        or moved.st_ino != metadata.st_ino
-        or moved_owner != owner
-    ):
-        if not lock_path.exists():
-            quarantine.rename(lock_path)
-        raise ActiveRunExists("active run start lock changed during stale recovery")
-    if stat.S_ISDIR(moved.st_mode):
-        shutil.rmtree(quarantine)
-    else:
-        quarantine.unlink()
-    return True
-
-
-def _release_active_run_lock(lock: ActiveRunStartLock) -> None:
-    try:
-        metadata = lock.path.lstat()
-        owner = json.loads(lock.path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ActiveRunExists("active run start lock disappeared") from exc
-    if (
-        not stat.S_ISREG(metadata.st_mode)
-        or stat.S_ISLNK(metadata.st_mode)
-        or metadata.st_dev != lock.device
-        or metadata.st_ino != lock.inode
-        or owner != lock.owner
-    ):
-        raise ActiveRunExists("active run start lock ownership changed")
-    lock.path.unlink()
-
-
-def _process_is_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except (PermissionError, OSError):
-        return True
-    return True
-
-
-def _process_start_identity(pid: int) -> str | None:
-    if Path("/proc").is_dir():
-        try:
-            stat_text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-            fields = stat_text[stat_text.rfind(")") + 2 :].split()
-            boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(
-                encoding="utf-8"
-            ).strip()
-            if len(fields) > 19 and boot_id:
-                return f"linux:{boot_id}:{fields[19]}"
-        except (OSError, UnicodeError, ValueError):
             pass
-    try:
-        result = subprocess.run(
-            ("/bin/ps", "-o", "lstart=", "-p", str(pid)),
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=10,
-            env={"LC_ALL": "C", "LANG": "C", "TZ": "UTC0", "PATH": "/usr/bin:/bin"},
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if result.returncode != 0:
-        return None
-    value = result.stdout.strip()
-    return value or None
 
 
 def read_meta(run_path: Path) -> dict:
@@ -519,26 +233,6 @@ def write_meta(run_path: Path, meta: dict) -> None:
 
 
 def mark_inactive(run_path: Path) -> None:
-    meta = read_meta(run_path)
-    workspace = meta.get("workspace")
-    project_root = (
-        Path(str(workspace.get("workspace_root")))
-        if isinstance(workspace, dict) and workspace.get("workspace_root")
-        else None
-    )
-    if project_root is None:
-        probe = subprocess.run(
-            ("git", "-C", str(run_path), "rev-parse", "--show-toplevel"),
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        if probe.returncode == 0 and probe.stdout.strip():
-            project_root = Path(probe.stdout.strip())
-    if project_root is not None and project_root.is_dir():
-        from agent_flow.core.artifacts import remove_gate_cache
-
-        remove_gate_cache(root=project_root, run_dir=run_path)
     marker = run_path / ACTIVE_MARKER
     if marker.exists():
         marker.unlink()
@@ -554,29 +248,14 @@ def _missing_completion_markers(
     phase_id: str,
     *,
     config_root: Path | None = None,
-    phase: PhaseDefinition | None = None,
-    meta: dict | None = None,
 ) -> list[str]:
-    if phase is None:
-        artifact_rel, markers = _phase_contract(run_path, workflow, phase_id)
-    else:
-        artifact_rel, markers = Path(phase.artifact), phase.required_markers
+    artifact_rel, markers = _phase_contract(run_path, workflow, phase_id)
     artifact = _existing_phase_artifact(run_path, phase_id, artifact_rel)
     if not artifact.exists():
         return []
     text = artifact.read_text(encoding="utf-8")
     missing = _missing_markers(text, markers) if markers else []
     missing.extend(missing_local_skill_markers(text, config_root or run_path, phase_id))
-    if phase is not None:
-        missing.extend(phase_contract_issues(phase, text))
-        effective_meta = meta if meta is not None else read_meta(run_path)
-        missing.extend(
-            declared_artifact_issues(
-                run_path,
-                phase,
-                phase_entry_time(effective_meta),
-            )
-        )
     return missing
 
 
@@ -586,9 +265,6 @@ def _required_markers(run_path: Path, workflow: str, phase_id: str) -> tuple[str
 
 
 def _phase_contract(run_path: Path, workflow: str, phase_id: str) -> tuple[Path | None, tuple[str, ...]]:
-    definition = _phase_definition(run_path, workflow, phase_id)
-    if definition is not None:
-        return Path(definition.artifact), definition.required_markers
     project_root = run_path.parents[2] if len(run_path.parents) >= 3 else None
     candidates: list[Path] = []
     if project_root is not None:
@@ -604,6 +280,14 @@ def _phase_contract(run_path: Path, workflow: str, phase_id: str) -> tuple[Path 
         if not path.exists():
             continue
         try:
+            definition = load_phase_workflow_definition(path.parent.parent, workflow)
+        except (OSError, ValueError):
+            definition = None
+        if definition is not None:
+            for phase in definition.phases:
+                if phase.id == phase_id:
+                    return Path(phase.artifact), phase.required_markers
+        try:
             raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         except (OSError, yaml.YAMLError):
             continue
@@ -615,52 +299,6 @@ def _phase_contract(run_path: Path, workflow: str, phase_id: str) -> tuple[Path 
                 continue
             return Path(f"{phase_id}.md"), normalize_required_markers(phase.get("required_markers"))
     return (Path(f"{phase_id}.md") if phase_id != "-" else None, ())
-
-
-def _phase_definition(
-    run_path: Path,
-    workflow: str,
-    phase_id: str,
-    *,
-    config_root: Path | None = None,
-) -> PhaseDefinition | None:
-    project_root = run_path.parents[2] if len(run_path.parents) >= 3 else None
-    candidates: list[Path] = []
-    if config_root is not None:
-        candidates.append(config_root / ".agent-flow" / "workflows" / f"{workflow}.yaml")
-    if project_root is not None:
-        candidates.append(project_root / ".agent-flow" / "workflows" / f"{workflow}.yaml")
-    try:
-        candidates.append(find_kit_root() / "workflows" / f"{workflow}.yaml")
-    except RuntimeError:
-        pass
-    candidates.append(Path(__file__).resolve().parent / "workflows" / f"{workflow}.yaml")
-    candidates.append(Path(__file__).resolve().parents[2] / "workflows" / f"{workflow}.yaml")
-    for path in candidates:
-        if not path.exists():
-            continue
-        try:
-            definition = load_phase_workflow_definition(path.parent.parent, workflow)
-        except (OSError, ValueError):
-            continue
-        for phase in definition.phases:
-            if phase.id == phase_id:
-                return phase
-    return None
-
-
-def _status_project_root(
-    run_path: Path,
-    meta: dict,
-    config_root: Path | None,
-) -> Path:
-    workspace = meta.get("workspace")
-    workspace_root = workspace.get("workspace_root") if isinstance(workspace, dict) else None
-    if isinstance(workspace_root, str) and workspace_root:
-        return Path(workspace_root)
-    if config_root is not None:
-        return config_root
-    return run_path.parents[2] if len(run_path.parents) >= 3 else run_path
 
 
 def _existing_phase_artifact(run_path: Path, phase_id: str, artifact_rel: Path | None) -> Path:

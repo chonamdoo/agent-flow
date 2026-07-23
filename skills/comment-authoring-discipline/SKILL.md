@@ -1,19 +1,11 @@
 ---
 name: comment-authoring-discipline
-description: Provides final comment-quality discipline for deciding whether changed code needs comments and removing low-value comment additions. Use when making the final comment-quality pass before final-review, multi-review, or architecture-review after code changes across Python, Kotlin, React Web, React Native, iOS, Swift, and SwiftUI; do not use it as a substitute for code review or comment-checker hooks.
+description: Use as the final comment-quality pass before final-review, multi-review, or architecture-review after code changes. Applies equally in Codex, Claude, and OMP for Python, Kotlin, React Web, React Native, iOS, Swift, and SwiftUI.
 ---
 
 # Comment Authoring Discipline
 
 Use this only after implementation/fix work is complete and before review.
-
-## Quick start
-
-1. Inspect only the changed diff after implementation or fix work is complete.
-2. Keep or add comments only for WHY, external constraints, workarounds, security, performance, concurrency/lifecycle, complex rules, complex algorithms/regex, or public API contracts.
-3. Remove or avoid comments that merely restate code, then run `comment-checker` or the configured hook when available.
-
-This is a final-pass discipline skill, not a standalone implementation or review workflow. It does not replace code review, architecture review, language/framework guidance, or the hook-backed `comment-checker`.
 
 ## Contract
 
@@ -35,6 +27,14 @@ Use the platform's normal comment format only for:
 - Concurrency or lifecycle reasons.
 - Complex algorithms or regular expressions.
 - Public API contracts.
+
+## Writing Warranted Comments
+
+When a comment is warranted, write it well instead of padding or translating it:
+
+- Keep code identifiers, API names, and established technical terms in English; do not translate them into awkward Korean.
+- State the reason, constraint, or contract plainly and specifically, following `write-for-work`.
+- Prefer one clear sentence over a decorative block, and match the file's existing comment language.
 
 ## Remove Or Avoid
 

@@ -73,13 +73,6 @@ phases:
 
   - id: ddd-design
     description: DDD first, then Clean Architecture design.
-    skills:
-      required: [ddd-architecture, clean-architecture, clean-architecture-core]
-    requirements: [domain-model, architecture-boundaries]
-    artifacts: [artifacts/ddd-design.md]
-    routes:
-      success: worktree
-      failure: ddd-design
     required_markers:
       - "## Clean Architecture Boundary Map"
       - "clean-architecture: applied"
@@ -164,10 +157,6 @@ phases:
 
   - id: red
     description: TDD red phase.
-    requirements: [expected-test-failure]
-    routes:
-      success: green
-      failure: red
     required_markers:
       - "skills_checked: true"
       - "profile-skill-selection: applied"
@@ -215,10 +204,6 @@ phases:
 
   - id: green
     description: TDD green phase.
-    requirements: [tests-pass]
-    routes:
-      success: refactor
-      failure: green
     required_markers:
       - "skills_checked: true"
       - "profile-skill-selection: applied"
@@ -275,7 +260,6 @@ phases:
 
   - id: refactor
     description: TDD refactor phase.
-    requirements: [tests-pass, behavior-preserved]
     required_markers:
       - "skills_checked: true"
       - "profile-skill-selection: applied"
@@ -293,8 +277,7 @@ phases:
       - "presentation-mapping-boundary: domain-to-uimodel|n/a"
       - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a"
     routes:
-      success: comment-authoring
-      failure: refactor
+      default: comment-authoring
     prompt: |
       Apply code-generation-discipline. Refactor only after green. Keep
       behavior stable, apply `.agent-flow/skills/tdd/SKILL.md` and
@@ -373,10 +356,6 @@ phases:
   - id: multi-review
     description: Run implementation review with at least two independent sub-agent reviewers before approve. Runner routes approve→architecture-review, request-changes→fix-loop.
     multi_review: true
-    skills:
-      required: [code-generation-discipline, code-review, architecture-reviewer, clean-architecture-core]
-    requirements: [independent-reviewers, architecture-contract]
-    artifacts: [artifacts/multi-review.md]
     required_markers:
       - "skills_checked: true"
       - "profile-skill-selection: applied"
@@ -403,7 +382,6 @@ phases:
     routes:
       approve: architecture-review
       request-changes: fix-loop
-      failure: fix-loop
     prompt: |
       Run at least two independent sub-agent reviewers in parallel. Each
       reviewer uses code-reviewer.md as basis and
@@ -469,12 +447,8 @@ phases:
       Output: artifacts/multi-review.md.
 
   - id: architecture-review
-    description: Review implementation against DDD/Clean design. Runner routes approve→gates, request-changes/blocked→refactor.
+    description: Review implementation against DDD/Clean design. Runner routes approve→gates, request-changes→refactor.
     multi_review: true
-    skills:
-      required: [code-generation-discipline, ddd-architecture, architecture-reviewer, clean-architecture-core]
-    requirements: [independent-reviewers, architecture-contract]
-    artifacts: [artifacts/architecture-review.md]
     required_markers:
       - "skills_checked: true"
       - "profile-skill-selection: applied"
@@ -505,8 +479,6 @@ phases:
     routes:
       approve: gates
       request-changes: refactor
-      blocked: refactor
-      failure: refactor
     prompt: |
       Run two independent active-host reviewer sub-agents before QA.
       Each required reviewer section must include `reviewer-source: sub-agent`.
@@ -582,19 +554,16 @@ phases:
       pending: block
       default: fix-loop
     prompt: |
-      Run QA only after required reviewers approve. Execute configured
-      profile gates. CI/CD owns lint/static/check commands; managed local
-      profile gates keep agent-flow architecture checks and build/test
-      checks only.
-      Save structured JSON with a top-level `passed` boolean and a `results`
-      array. When an explicit route status is needed, also include top-level
-      `status` as `green`, `approve`, `request-changes`, `blocked`, `error`, or
-      `pending`.
+      Run QA only after required reviewers approve. Execute profile gates in
+      BUILD -> TYPECHECK -> LINT order where applicable, plus context lint.
+      Docs-only PRs must still run context lint. Save
+      structured JSON with a top-level `passed` boolean and a `results` array.
+      When an explicit route status is needed, also include top-level `status`
+      as `green`, `approve`, `request-changes`, `blocked`, `error`, or `pending`.
       Output: artifacts/gate-results.json.
 
   - id: fix-loop
     description: Apply review and gate fixes. Runner routes back to review before QA.
-    requirements: [findings-resolved, tests-pass]
     required_markers:
       - "skills_checked: true"
       - "profile-skill-selection: applied"
@@ -612,8 +581,7 @@ phases:
       - "presentation-mapping-boundary: domain-to-uimodel|n/a"
       - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a"
     routes:
-      success: comment-authoring
-      failure: fix-loop
+      default: comment-authoring
     prompt: |
       Apply code-generation-discipline while fixing review/gate failures. Read
       required profile skills before writing or judging code, or record that no
@@ -687,10 +655,8 @@ phases:
 
   - id: pr-comment-fix
     description: Fix actionable PR comments. Runner routes back to pr-watch.
-    requirements: [comments-resolved]
     routes:
-      success: pr-watch
-      failure: pr-comment-fix
+      default: pr-watch
     prompt: |
       Address actionable PR review comments, commit, push, resolve the
       corresponding GitHub review threads, and summarize comment/thread IDs,
@@ -698,10 +664,8 @@ phases:
 
   - id: pr-ci-fix
     description: Fix failing PR CI. Runner routes back to pr-watch.
-    requirements: [ci-pass]
     routes:
-      success: pr-watch
-      failure: pr-ci-fix
+      default: pr-watch
     prompt: |
       Diagnose failing checks, reproduce locally, fix, commit, push, and
       summarize commands and check URLs. Output: artifacts/pr-ci-fix.md.

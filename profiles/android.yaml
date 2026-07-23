@@ -10,6 +10,10 @@ branching:
     slug_source: feature title
     max_slug_length: 60
 gates:
+  - id: context-lint
+    command: ["node", "scripts/check-context-docs.mjs"]
+    required: true
+    phase: pre-commit
   - id: architecture-lint
     command: ["agent-flow", "architecture-lint", "--profile", "android"]
     required: true
@@ -22,6 +26,10 @@ gates:
     command: ["./gradlew", "test"]
     required: true
     phase: pre-commit
+  - id: lint
+    command: ["./gradlew", "lint"]
+    required: false
+    phase: pre-commit
 review_angles:
   - id: architecture-design
     prompt: templates/_shared/review/architecture-design.md
@@ -32,14 +40,12 @@ review_angles:
   - id: test-edge
     prompt: templates/_shared/review/test-edge.md
 skills:
-  capabilities:
-    - android.app-shell-error-handling
-    - android.architecture.clean
-    - android.presentation.clean
-    - android.code-review
-    - android.debugging
-    - android.guides
-    - android.module-creator
+  install:
+    - android-appshell-error-handling
+    - android-clean-architecture
+    - android-clean-presentation-architecture
+    - android-code-review
+    - android-guides
   required_review:
     - group: profile
       skills: [android-code-review, android-clean-architecture]
@@ -145,6 +151,8 @@ android_skills:
       when: Jetpack Navigation 3, back stack, or navigation migration work
     - skill: testing-setup
       when: Android test setup, Gradle test dependencies, instrumentation, Robolectric, or missing test scaffolding changes
+    - skill: camera1-to-camerax
+      when: Camera1, Camera2, or CameraX migration work
     - skill: r8-analyzer
       when: R8, shrinker, minification, obfuscation, mapping, or release size work
     - skill: perfetto-trace-analysis
@@ -192,6 +200,10 @@ chrisbanes_skills:
     - agent-flow install은 이 skill들을 설치, 복사, 링크, vendor 처리하지 않는다.
     - 현재 host 경로에 필요한 skill이 없으면 작업을 멈추고 `missing local chrisbanes_skills: <skill>`와 source URL을 사용자에게 알려 설치를 요청한다.
   implementation:
+    - skill: android-module-creator
+      when: Android module or Gradle boundary work
+    - skill: android-debugging
+      when: crash, race, recomposition, or failing test diagnosis
     - skill: compose-state-authoring
       when: local Compose state, remember, or state accessors change
     - skill: compose-state-hoisting

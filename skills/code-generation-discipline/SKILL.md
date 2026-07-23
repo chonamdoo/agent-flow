@@ -1,23 +1,11 @@
 ---
 name: code-generation-discipline
-description: Provides common implementation discipline for safe code generation and code modification across agent-flow phases. Use when starting or continuing implementation, TDD red/green/refactor, fix-loop, bug fixes, feature work, or any task where Codex, Claude, OMP, or another agent writes or changes code; pair it with the required language/framework skills instead of using it as a replacement.
+description: Common code generation and code modification discipline for agent-flow. Use before and during implementation, TDD red/green/refactor, fix-loop, bug fixes, feature work, and any task where Codex, Claude, OMP, or another agent writes or changes code. Enforces start-before, during-implementation, and after-implementation checks without a scoring rubric.
 ---
 
 # Code Generation Discipline
 
 Use this as the common implementation discipline. Do not score it. Apply it as a checklist.
-
-## Quick start
-
-1. Restate the requested behavior and choose the smallest existing code path that can satisfy it.
-2. Resolve and read only the required project, language, framework, presentation, and platform skills for the files in scope.
-3. Define the verification command or observable check before editing, then apply the before/during/after checklist below.
-
-This is a discipline skill, not a standalone implementation workflow. It does not replace language/framework skills, architecture skills, project instructions, review, QA, or user approval gates.
-
-## Companion files
-
-- [agents/openai.yaml](agents/openai.yaml): agent/profile metadata for installers or profile registries. Read it only when wiring this skill into OpenAI/Codex profile metadata, not during normal implementation.
 
 ## Before Starting
 

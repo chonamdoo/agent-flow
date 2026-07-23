@@ -22,11 +22,12 @@ class ProviderResult:
     failed: bool
 
 
-def run_provider(command: ProviderCommand, *, prompt: str, cwd: Path) -> ProviderResult:
+def run_provider(command: ProviderCommand, *, prompt: str, cwd: Path, env: dict | None = None) -> ProviderResult:
     try:
         completed = subprocess.run(
             command.argv,
             cwd=cwd,
+            env=env,
             input=prompt if command.prompt_via_stdin else "",
             text=True,
             capture_output=True,

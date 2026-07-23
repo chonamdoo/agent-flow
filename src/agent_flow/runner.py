@@ -28,7 +28,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -41,45 +40,14 @@ from agent_flow.adapters.auto import detect_adapter
 from agent_flow.artifact import (
     create_run,
     mark_inactive,
-    next_run_id,
     read_meta,
     write_meta,
 )
-from agent_flow.core.artifacts import gate_fingerprint_matches_current
 from agent_flow.cli_detect import detect_available_clis
 from agent_flow.core.commands import run_safe_command
-from agent_flow.core.phase_contract import (
-    artifact_is_stale,
-    declared_artifact_issues,
-    phase_contract_issues,
-    phase_contract_route_key,
-    phase_entry_time,
-    resolve_runtime_phase_contract,
-)
 from agent_flow.core.phase_workflow import find_kit_root, load_phase_workflow_definition
 from agent_flow.core.report import write_run_report
 from agent_flow.core.security import ensure_child_path, validate_safe_name
-from agent_flow.core.workspace_boundary import (
-    WorkspaceIdentity,
-    acquire_workspace_start_claim,
-    assert_workspace_start_available,
-    bind_execution_to_workspace,
-    capture_git_mutation_snapshot,
-    capture_workspace_identity,
-    execution_identity_from_context,
-    execution_identity_from_dict,
-    leader_root_for_identity,
-    mutation_paths_since,
-    record_workspace_finalizer,
-    release_workspace_start_claim,
-    release_execution_binding,
-    validate_workspace_identity,
-    workspace_identity_from_dict,
-)
-from agent_flow.core.skill_plan import (
-    installed_skill_plan_pin,
-    reconcile_skill_plan_pin,
-)
 from agent_flow.core.markers import has_failure_markers, missing_markers
 from agent_flow.core.local_skills import missing_local_skill_markers
 from agent_flow.memory.index import LoreIndex
@@ -126,10 +94,6 @@ class Phase:
     routes: dict[str, str] | None = None
     required_markers: tuple[str, ...] = ()
     artifact: str = ""
-    required_skills: tuple[str, ...] = ()
-    requirements: tuple[str, ...] = ()
-    artifacts: tuple[str, ...] = ()
-    skill_compatibility: dict[str, Any] | None = None
 
 
 class Runner:
@@ -162,38 +126,12 @@ class Runner:
 
     def run(self, mode: ResumeMode, task: str = "") -> None:
         if mode == ResumeMode.START:
-            pending_run_id = next_run_id(self.state_root)
-            captured_identity = (
-                capture_workspace_identity(self.project_root)
-                if (self.project_root / ".git").exists()
-                else None
+            self.run_dir = create_run(
+                self.state_root,
+                self.workflow_name,
+                task,
+                architecture=self.architecture,
             )
-            claim = (
-                acquire_workspace_start_claim(
-                    captured_identity,
-                    run_id=pending_run_id,
-                )
-                if captured_identity is not None
-                else None
-            )
-            try:
-                if captured_identity is not None:
-                    assert_workspace_start_available(captured_identity)
-                self.run_dir = create_run(
-                    self.state_root,
-                    self.workflow_name,
-                    task,
-                    architecture=self.architecture,
-                    run_id=pending_run_id,
-                )
-                self._pin_workspace_identity(captured_identity)
-            except Exception:
-                if self.run_dir is not None:
-                    mark_inactive(self.run_dir)
-                raise
-            finally:
-                if claim is not None:
-                    release_workspace_start_claim(claim)
             print(f"▶ run started : {self.run_dir.name}")
             print(f"▶ task        : {task}")
         else:
@@ -201,52 +139,38 @@ class Runner:
             meta = read_meta(self.run_dir)
             print(f"▶ resuming    : {self.run_dir.name}")
             print(f"▶ task        : {meta.get('task', '')}")
-            self._pin_workspace_identity()
 
-        try:
-            self._capture_leader_run_snapshot()
-            self._pin_skill_plan()
-            self._pin_execution_identity(read_meta(self.run_dir))
-            self._warn_if_leader_dirtied()
+        adapter = detect_adapter()
+        self._adapter_name = adapter.name
+        clis = detect_available_clis()
+        cli_summary = ", ".join(c.name for c in clis) if clis else "none (generic fallback)"
+        print(f"▶ host adapter: {adapter.name}")
+        print(f"▶ available  : {cli_summary}")
+        print(f"▶ profile    : {self.profile_id}")
+        print(f"▶ architecture: {self.architecture}")
+        print(f"▶ workflow   : {self.workflow_name} ({len(self.phases)} phases)\n")
 
-            adapter = detect_adapter()
-            self._adapter_name = adapter.name
-            clis = detect_available_clis()
-            cli_summary = ", ".join(c.name for c in clis) if clis else "none (generic fallback)"
-            print(f"▶ host adapter: {adapter.name}")
-            print(f"▶ available  : {cli_summary}")
-            print(f"▶ profile    : {self.profile_id}")
-            print(f"▶ architecture: {self.architecture}")
-            print(f"▶ workflow   : {self.workflow_name} ({len(self.phases)} phases)\n")
+        # Inject profile snapshot into adapter so render_envelope can include
+        # it. Both attributes are declared on the Adapter base class, so this
+        # is plain instance-attribute assignment.
+        adapter._profile_snapshot = self.profile
+        adapter._profile_id = self.profile_id
+        adapter._architecture = self.architecture
+        adapter._config_root = self.config_root
 
-            # Inject profile snapshot into adapter so render_envelope can include
-            # it. Both attributes are declared on the Adapter base class, so this
-            # is plain instance-attribute assignment.
-            adapter._profile_snapshot = self.profile
-            adapter._profile_id = self.profile_id
-            adapter._architecture = self.architecture
-            adapter._config_root = self.config_root
+        # Auto-cite lore: search the local lore index for entries relevant
+        # to the task description and inject them into the prompt envelope.
+        # Empty list when memory dir is missing or no matches.
+        meta_for_lore = read_meta(self.run_dir) if self.run_dir else {}
+        adapter._lore_citations = _search_lore(
+            self.project_root, meta_for_lore.get("task", ""),
+        )
 
-            # Auto-cite lore: search the local lore index for entries relevant
-            # to the task description and inject them into the prompt envelope.
-            # Empty list when memory dir is missing or no matches.
-            meta_for_lore = read_meta(self.run_dir) if self.run_dir else {}
-            adapter._task_scope = str(meta_for_lore.get("task", ""))
-            adapter._lore_citations = _search_lore(
-                self.project_root, meta_for_lore.get("task", ""),
-            )
-
-            assert self.run_dir is not None
-            meta = read_meta(self.run_dir)
-            phase_index = int(meta.get("phase_index", 0) or 0)
-        except Exception:
-            if mode == ResumeMode.START:
-                self._release_execution_binding()
-                if self.run_dir is not None:
-                    mark_inactive(self.run_dir)
-            raise
+        assert self.run_dir is not None
+        meta = read_meta(self.run_dir)
+        phase_index = int(meta.get("phase_index", 0) or 0)
         while phase_index < len(self.phases):
-            phase = self._runtime_contract_phase(self.phases[phase_index])
+            phase = self.phases[phase_index]
             if self._has_artifact(phase):
                 artifact = self._existing_artifact_path(phase)
                 blocked_reason = (
@@ -286,10 +210,14 @@ class Runner:
                 else:
                     print(f"  [skip] {phase.id}")
                     phase_index, blocked = self._next_index(phase_index, phase)
-                    meta = self._record_phase_transition(
-                        phase_index,
-                        transitioned=not blocked,
+                    meta = read_meta(self.run_dir)
+                    meta["phase_index"] = phase_index
+                    meta["current_phase"] = (
+                        self.phases[phase_index].id
+                        if phase_index < len(self.phases)
+                        else None
                     )
+                    write_meta(self.run_dir, meta)
                     if blocked:
                         print(
                             f"\n═══ phase '{phase.id}' is blocked. "
@@ -306,10 +234,14 @@ class Runner:
             if self._write_automatic_artifact(phase):
                 print(f"  [skip] {phase.id}")
                 phase_index, blocked = self._next_index(phase_index, phase)
-                meta = self._record_phase_transition(
-                    phase_index,
-                    transitioned=not blocked,
+                meta = read_meta(self.run_dir)
+                meta["phase_index"] = phase_index
+                meta["current_phase"] = (
+                    self.phases[phase_index].id
+                    if phase_index < len(self.phases)
+                    else None
                 )
+                write_meta(self.run_dir, meta)
                 if blocked:
                     print(
                         f"\n═══ phase '{phase.id}' is blocked. "
@@ -390,10 +322,14 @@ class Runner:
                 )
                 return
             phase_index, blocked = self._next_index(phase_index, phase)
-            meta = self._record_phase_transition(
-                phase_index,
-                transitioned=not blocked,
+            meta = read_meta(self.run_dir)
+            meta["phase_index"] = phase_index
+            meta["current_phase"] = (
+                self.phases[phase_index].id
+                if phase_index < len(self.phases)
+                else None
             )
+            write_meta(self.run_dir, meta)
             if blocked:
                 print(
                     f"\n═══ phase '{phase.id}' is blocked. "
@@ -408,34 +344,7 @@ class Runner:
                 return
 
         report_path = write_run_report(self.run_dir)
-        meta = read_meta(self.run_dir)
-        completed_at = datetime.now(timezone.utc).isoformat()
-        completion_claim = (
-            acquire_workspace_start_claim(
-                self._workspace_identity,
-                run_id=f"finalize:{self.run_dir.name}",
-            )
-            if hasattr(self, "_execution_identity")
-            and hasattr(self, "_workspace_identity")
-            else None
-        )
-        try:
-            if completion_claim is not None:
-                record_workspace_finalizer(
-                    self._workspace_identity,
-                    self._execution_identity,
-                    self.run_dir,
-                    run_id=str(meta.get("run_id") or self.run_dir.name),
-                    completed_at=completed_at,
-                )
-            meta["status"] = "complete"
-            meta["completed_at"] = completed_at
-            write_meta(self.run_dir, meta)
-            self._release_execution_binding()
-            mark_inactive(self.run_dir)
-        finally:
-            if completion_claim is not None:
-                release_workspace_start_claim(completion_claim)
+        mark_inactive(self.run_dir)
         print("\n✓ run complete.")
         self._print_structured_status(
             status="complete",
@@ -444,141 +353,16 @@ class Runner:
             report=report_path,
         )
 
-    def _pin_workspace_identity(
-        self,
-        captured_identity: WorkspaceIdentity | None = None,
-    ) -> None:
-        assert self.run_dir is not None
-        if not (self.project_root / ".git").exists():
-            return
-        meta = read_meta(self.run_dir)
-        payload = meta.get("workspace")
-        if payload is None:
-            identity = captured_identity or capture_workspace_identity(self.project_root)
-            meta["workspace"] = identity.to_dict()
-            write_meta(self.run_dir, meta)
-            self._workspace_identity = identity
-            return
-        identity = workspace_identity_from_dict(payload)
-        root = validate_workspace_identity(identity)
-        if root != self.project_root.resolve(strict=True):
-            raise RuntimeError(
-                f"run workspace differs from pinned workspace: current={self.project_root} pinned={root}"
-            )
-        self._workspace_identity = identity
-
-    def _pin_execution_identity(self, meta: dict[str, object]) -> None:
-        assert self.run_dir is not None
-        if not hasattr(self, "_workspace_identity"):
-            return
-        identity = self._workspace_identity
-        if leader_root_for_identity(identity) == Path(identity.workspace_root):
-            return
-        execution_payload = meta.get("execution")
-        execution = (
-            execution_identity_from_dict(execution_payload)
-            if execution_payload is not None
-            else execution_identity_from_context(env=os.environ)
-        )
-        if execution is None:
-            return
-        bind_execution_to_workspace(
-            execution,
-            identity,
-            self.run_dir,
-            run_id=str(meta.get("run_id") or self.run_dir.name),
-        )
-        self._execution_identity = execution
-        if execution_payload is None:
-            meta["execution"] = execution.to_dict()
-            write_meta(self.run_dir, meta)
-
-    def _release_execution_binding(self) -> None:
-        if not hasattr(self, "_execution_identity") or not hasattr(self, "_workspace_identity"):
-            return
-        release_execution_binding(
-            self._execution_identity,
-            git_common_dir=Path(self._workspace_identity.git_common_dir),
-            run_dir=self.run_dir,
-        )
-
-    def _pin_skill_plan(self) -> None:
-        assert self.run_dir is not None
-        meta = read_meta(self.run_dir)
-        if "skill_plan_hash" not in meta and "skill_plan_hash_version" not in meta:
-            pin = installed_skill_plan_pin(self.config_root)
-            if pin:
-                meta.update(pin)
-                write_meta(self.run_dir, meta)
-            return
-        reconciled, changed = reconcile_skill_plan_pin(meta, self.config_root)
-        if changed:
-            write_meta(self.run_dir, reconciled)
-
-    def _runtime_contract_phase(self, phase: Phase) -> Phase:
-        assert self.run_dir is not None
-        return resolve_runtime_phase_contract(
-            phase,
-            config_root=self.config_root,
-            project_root=self.project_root,
-            meta=read_meta(self.run_dir),
-        )
-
-    def _capture_leader_run_snapshot(self) -> None:
-        if self.run_dir is None or not hasattr(self, "_workspace_identity"):
-            return
-        identity = self._workspace_identity
-        leader = leader_root_for_identity(identity)
-        if leader == Path(identity.workspace_root):
-            return
-        meta = read_meta(self.run_dir)
-        if isinstance(meta.get("leader_run_snapshot"), dict):
-            return
-        meta["leader_run_snapshot"] = capture_git_mutation_snapshot(leader)
-        write_meta(self.run_dir, meta)
-
-    def _warn_if_leader_dirtied(self) -> None:
-        if self.run_dir is None or not hasattr(self, "_workspace_identity"):
-            return
-        identity = self._workspace_identity
-        leader = leader_root_for_identity(identity)
-        if leader == Path(identity.workspace_root):
-            return
-        meta = read_meta(self.run_dir)
-        before = meta.get("leader_run_snapshot")
-        if not isinstance(before, dict):
-            return
-        changed = mutation_paths_since(before, capture_git_mutation_snapshot(leader))
-        if changed:
-            print(
-                "⚠ leader checkout changed outside the pinned worktree during this run; "
-                f"paths={', '.join(changed)}",
-                file=sys.stderr,
-            )
-
     def _next_index(self, current_index: int, phase: Phase) -> tuple[int, bool]:
         if not phase.routes:
             return current_index + 1, False
         assert self.run_dir is not None
         artifact = self._existing_artifact_path(phase)
         text = artifact.read_text(encoding="utf-8") if artifact.exists() else ""
-        contract_key = phase_contract_route_key(phase, text)
-        if contract_key == "failure" and "failure" in phase.routes:
-            key = contract_key
-        elif contract_key == "success" and "success" in phase.routes:
-            key = contract_key
-        elif phase.multi_review:
+        if phase.multi_review:
             key = _multi_review_route_key(text, phase.id)
         elif phase.id == "gates":
             key = _gates_route_key(text)
-            if key in {"green", "approve"}:
-                try:
-                    payload = json.loads(text)
-                except json.JSONDecodeError:
-                    payload = None
-                project_root = getattr(self, "project_root", None)
-                if project_root is None or not gate_fingerprint_matches_current(project_root, payload):
-                    key = "default"
         else:
             key = _route_key(text)
         if key == "approve" and phase.routes.get("request-changes") and has_failure_markers(text):
@@ -625,14 +409,9 @@ class Runner:
                 if candidate.id == target:
                     if i <= current_index:
                         for stale_phase in self.phases[i:current_index + 1]:
-                            stale_artifacts = (
-                                tuple(self.run_dir / relative for relative in stale_phase.artifacts)
-                                if stale_phase.artifacts
-                                else (self._existing_artifact_path(stale_phase),)
-                            )
-                            for stale_artifact in stale_artifacts:
-                                if stale_artifact.is_file():
-                                    stale_artifact.unlink()
+                            stale_artifact = self._existing_artifact_path(stale_phase)
+                            if stale_artifact.exists():
+                                stale_artifact.unlink()
                     elif i > current_index + 1:
                         for skipped in self.phases[current_index + 1:i]:
                             skipped_artifact = self._artifact_path(skipped)
@@ -645,27 +424,6 @@ class Runner:
                     return i, False
             raise ValueError(f"phase {phase.id}: route target not found: {target}")
         return current_index + 1, False
-
-    def _record_phase_transition(
-        self,
-        phase_index: int,
-        *,
-        transitioned: bool,
-    ) -> dict[str, Any]:
-        assert self.run_dir is not None
-        meta = read_meta(self.run_dir)
-        meta["phase_index"] = phase_index
-        meta["current_phase"] = (
-            self.phases[phase_index].id
-            if phase_index < len(self.phases)
-            else None
-        )
-        if transitioned:
-            entered_at = datetime.now(timezone.utc).isoformat()
-            meta["updated_at"] = entered_at
-            meta["phase_entered_at"] = entered_at
-        write_meta(self.run_dir, meta)
-        return meta
 
     def _increment_fix_loop_rounds(self) -> int:
         assert self.run_dir is not None
@@ -731,34 +489,18 @@ class Runner:
         return True
 
     def _missing_required_markers(self, phase: Phase) -> list[str]:
-        stub_success = (
+        if (
             getattr(self, "_adapter_name", "") == "generic"
             and os.environ.get("AGENT_FLOW_GENERIC_MODE") == "stub-success"
-        )
+        ):
+            return []
         assert self.run_dir is not None
         artifact = self._existing_artifact_path(phase)
         if not artifact.exists():
             return []
         text = artifact.read_text(encoding="utf-8")
-        missing: list[str] = []
-        if not stub_success:
-            missing.extend(_missing_markers(text, phase.required_markers))
-            missing.extend(
-                missing_local_skill_markers(
-                    text,
-                    getattr(self, "config_root", self.run_dir),
-                    phase.id,
-                )
-            )
-            missing.extend(phase_contract_issues(phase, text))
-        meta = read_meta(self.run_dir)
-        missing.extend(
-            declared_artifact_issues(
-                self.run_dir,
-                phase,
-                phase_entry_time(meta),
-            )
-        )
+        missing = list(_missing_markers(text, phase.required_markers))
+        missing.extend(missing_local_skill_markers(text, self.config_root, phase.id))
         return missing
 
     def _artifact_path(self, phase: Phase) -> Path:
@@ -790,7 +532,20 @@ class Runner:
         return None
 
     def _stale_artifact_block_reason(self, artifact: Path, meta: dict[str, Any]) -> str | None:
-        return "stale_artifact" if artifact_is_stale(artifact, phase_entry_time(meta)) else None
+        entered_at = _meta_timestamp(
+            meta.get("phase_entered_at")
+            or meta.get("updated_at")
+            or meta.get("started_at")
+        )
+        if entered_at is None:
+            return None
+        try:
+            artifact_mtime = artifact.stat().st_mtime
+        except FileNotFoundError:
+            return None
+        if artifact_mtime < entered_at:
+            return "stale_artifact"
+        return None
 
     def _has_artifact(self, phase: Phase) -> bool:
         return self._artifact_path(phase).exists() or self._legacy_artifact_path(phase).exists()
@@ -852,9 +607,6 @@ def _load_workflow(kit_root: Path, name: str) -> list[Phase]:
             routes=phase.routes,
             required_markers=phase.required_markers,
             artifact=phase.artifact,
-            required_skills=phase.required_skills,
-            requirements=phase.requirements,
-            artifacts=phase.artifacts,
         )
         for phase in definition.phases
     ]
@@ -868,8 +620,21 @@ def _fix_loop_rounds(meta: dict[str, Any]) -> int:
         return 0
 
 
+def _meta_timestamp(value: object) -> float | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
 def _route_key(text: str) -> str:
     lowered = text.lower()
+    # gates 결과 JSON은 nested result가 아니라 top-level passed만 route source로 본다.
     try:
         payload = json.loads(text)
     except json.JSONDecodeError:
@@ -911,31 +676,21 @@ def _gates_route_key(text: str) -> str:
         payload = json.loads(text)
     except json.JSONDecodeError:
         return "default"
-    if not isinstance(payload, dict):
+    if not isinstance(payload, dict) or not isinstance(payload.get("passed"), bool):
         return "default"
-    if payload.get("verification_mode") not in {None, "full"}:
-        return "request-changes" if payload.get("passed") is False else "default"
-    passed = payload.get("passed")
-    if passed is not None and not isinstance(passed, bool):
-        return "default"
-    results_pass = _gate_results_prove_pass(payload.get("results"))
     status = payload.get("status")
     if isinstance(status, str):
         normalized_status = status.strip().lower().replace("_", "-")
-        if passed is not False and normalized_status in {"green", "approve"}:
-            return normalized_status if results_pass else "default"
-        if passed is False and normalized_status in {"request-changes", "blocked", "error", "pending"}:
+        if payload["passed"] is True and normalized_status in {"green", "approve"}:
+            return normalized_status if _gate_results_prove_pass(payload.get("results")) else "default"
+        if payload["passed"] is False and normalized_status in {"request-changes", "blocked", "error", "pending"}:
             return normalized_status
-    if passed is True:
-        return "green" if results_pass else "default"
-    if passed is None:
-        return "default"
+    if payload["passed"] is True:
+        return "green" if _gate_results_prove_pass(payload.get("results")) else "default"
     return "request-changes"
 
 
 def _multi_review_route_key(text: str, phase_id: str = "") -> str:
-    if _route_key(text) == "blocked":
-        return "blocked"
     verdicts = _independent_reviewer_verdicts(text)
     overall = _multi_review_overall_route_key(text)
     if not verdicts:
@@ -1163,11 +918,9 @@ def _normalized_reviewer_id(value: str) -> str:
 
 
 def _normalized_reviewer_heading_id(value: str) -> str:
-    # 명시적 구분자 뒤의 전문 분야 설명은 reviewer identity에 포함하지 않는다.
-    identity = re.split(r"\s+[—–-]\s+|\s*:\s+", value.strip(), maxsplit=1)[0]
     # Reviewer heading은 1-2 단어 id(claude, agent 1 등)만 독립 id로 인정한다.
-    # 구분자 없는 긴 서술형 heading은 reviewer가 아니라 prose일 가능성이 높아 제외한다.
-    key = _normalized_reviewer_id(identity)
+    # 긴 서술형 heading은 reviewer가 아니라 prose일 가능성이 높아 제외한다.
+    key = _normalized_reviewer_id(value)
     if re.fullmatch(r"[a-z0-9]+(?: [a-z0-9]+)?", key):
         return key
     return ""

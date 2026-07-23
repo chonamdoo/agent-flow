@@ -1,6 +1,6 @@
 ---
 name: ddd-architecture
-description: Models Domain-Driven Design concepts for bounded contexts, ubiquitous language, entities, value objects, aggregates, domain events, invariants, and domain flows. Use when design or final review depends on the domain model or business language; apply clean-architecture-core afterward when layer boundaries or dependency direction are involved.
+description: Domain-Driven Design skill for agent-flow design and final-review phases. Use when modeling bounded contexts, ubiquitous language, entities, value objects, aggregates, domain events, domain invariants, and domain flows; apply clean-architecture afterward when layer boundaries or dependency direction are involved.
 version: 2
 trigger:
   - "design"
@@ -14,27 +14,18 @@ trigger:
 phases_invoked: [design, final-review]
 ---
 
-# DDD Architecture
+# ddd-architecture skill
 
-This is a standalone domain-modeling skill when the question is "what is the
-domain?" Pair it with `clean-architecture-core` after the domain model is clear
-when layer boundaries, dependency direction, use case ports, repository adapters,
-cache, mapper, composition-root, testability, or SOLID architecture validation
-are in scope.
-
-## Quick start
-
-1. Name the bounded contexts and the terms whose meanings change between them.
-2. Capture the ubiquitous language, entities, value objects, aggregates, domain
-   events, invariants, and domain flows before selecting layers or adapters.
-3. After modeling the domain, load `clean-architecture-core` to protect it with
-   dependency rules and adapter boundaries; load `codebase-design` if the open
-   question is where a module seam should live.
+This skill covers domain modeling only. It answers "what is the domain?"
+For layer boundaries, dependency direction, UseCase port/impl boundaries,
+Repository port/adapter boundaries, Cache, Mapper, Composition Root,
+Testability, and SOLID architecture validation, apply
+`skills/clean-architecture/SKILL.md` after this skill.
 
 When both DDD and Clean Architecture are needed, apply order is:
 
 1. `ddd-architecture`: define domain terms, contexts, models, invariants, and flows.
-2. `clean-architecture-core`: protect that model with layers, ports, adapters, and dependency rules.
+2. `clean-architecture`: protect that model with layers, ports, adapters, and dependency rules.
 
 ## Core principles
 

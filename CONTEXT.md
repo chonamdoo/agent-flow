@@ -24,7 +24,7 @@
 - **Run**: 하나의 Workflow 실행 인스턴스. git branch나 전체 session이 아니다.
 - **Artifact**: phase 결과/검증/리뷰를 저장하는 재사용 record file. raw log 저장소가 아니다.
 - **Handoff**: 다음 phase가 필요한 결정, 리스크, 관련 파일, 남은 일을 요약하는 artifact.
-- **Gate**: build, typecheck, lint, test 같은 자동 검증 명령.
+- **Gate**: build, typecheck, lint, test, context-lint 같은 자동 검증 명령.
 - **Personal Workflow**: lead가 Run과 phase 전환을 소유하는 current 기본 실행 모드.
 
 ## Current Lifecycle

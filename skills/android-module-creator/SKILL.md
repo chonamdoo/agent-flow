@@ -1,6 +1,10 @@
 ---
 name: android-module-creator
-description: Android module creation workflow for new feature modules and Clean Architecture slices, including Gradle registration, convention plugin selection, dependency direction, Hilt bindings, and initial screen scaffolding. Use when creating a new Android module or feature slice; do not use for non-Android packages or presentation-only screen edits inside an existing module.
+description: |
+  Use when creating a new Android feature module or adding Clean Architecture
+  layers to an Android project. Covers Gradle module registration, convention
+  plugin selection, dependency direction, Hilt bindings, and initial screen
+  scaffolding.
 ---
 
 # Android Module Creator
@@ -8,18 +12,6 @@ description: Android module creation workflow for new feature modules and Clean 
 Use this skill when an Android project needs a new module or feature slice.
 Prefer the target repository's own Gradle convention plugins and module
 templates. If a generator task exists, use it instead of hand-creating files.
-
-## Quick start
-
-1. Inspect existing module names, Gradle convention plugins, version catalogs, and nearby feature modules.
-2. Choose the module layer and dependency direction before creating files.
-3. Register the smallest useful vertical slice in `settings.gradle.kts` and matching build files.
-4. Add DI, navigation, and screen scaffolding only where the project already uses those mechanisms.
-
-## Non-goals
-
-- Do not use this for React, React Native JS/TS, Python packages, or generic TypeScript modules.
-- Do not create extra layers that the project does not already use or need.
 
 ## Process
 
@@ -62,8 +54,8 @@ Rules:
 
 ## References
 
-- [module-creation-guide.md](../android-guides/references/module-creation-guide.md) when deciding module shape, registration, and source-set layout.
-- [gradle-build-performance-guide.md](../android-guides/references/gradle-build-performance-guide.md) when editing Gradle plugins, dependencies, or build gates.
-- [architecture-rules-guide.md](../android-guides/references/architecture-rules-guide.md) when choosing dependency direction and layer ownership.
-- [di-hilt-guide.md](../android-guides/references/di-hilt-guide.md) when adding Hilt modules, bindings, scopes, or injected components.
+- `../android-guides/references/module-creation-guide.md`
+- `../android-guides/references/gradle-build-performance-guide.md`
+- `../android-guides/references/architecture-rules-guide.md`
+- `../android-guides/references/di-hilt-guide.md`
 

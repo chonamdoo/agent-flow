@@ -16,14 +16,10 @@
 """
 from __future__ import annotations
 
-import json
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_flow.adapters.base import Adapter
-from agent_flow.core.artifacts import gate_execution_fingerprint, write_gate_results
-from agent_flow.core.gates import GateCommand, GateResult
 
 
 class GenericAdapter(Adapter):
@@ -53,39 +49,18 @@ class GenericAdapter(Adapter):
                         "reviewer-source: sub-agent\n"
                         "verdict: approve\n\n"
                         "## Overall\n"
-                        "verdict: approve\n"
-                        f"{_phase_contract_line(phase)}",
+                        "verdict: approve\n",
                         encoding="utf-8",
                     )
                     return True
                 if phase.id == "gates":
-                    command = GateCommand(
-                        "stub",
-                        ("agent-flow", "generic", "stub-success"),
-                    )
-                    fingerprint = gate_execution_fingerprint(
-                        root=project_root,
-                        profile_ids=["generic"],
-                        verification_mode="full",
-                        changed_files=[],
-                        commands=[command],
-                    )
-                    write_gate_results(
-                        run_dir=run_dir,
-                        results=[
-                            GateResult(
-                                command.gate_id,
-                                command.command,
-                                True,
-                                0,
-                                "stub-success",
-                                "",
-                                executed_at=datetime.now(timezone.utc).isoformat(),
-                            )
-                        ],
-                        commands=[command],
-                        fingerprint=fingerprint,
-                        verification_mode="full",
+                    artifact.write_text(
+                        '{"passed": true, "status": "green", '
+                        '"results": [{"id": "stub", '
+                        '"command": "agent-flow generic stub-success", '
+                        '"argv": ["agent-flow", "generic", "stub-success"], '
+                        '"passed": true, "exit_code": 0}]}\n',
+                        encoding="utf-8",
                     )
                     return True
                 if phase.id == "pr-watch":
@@ -98,7 +73,6 @@ class GenericAdapter(Adapter):
                 artifact.write_text(
                     f"# {phase.id}\n\n"
                     f"_stub artifact written by GenericAdapter (stub mode)._\n"
-                    f"{_phase_contract_line(phase)}"
                 )
             return True
         if getattr(phase, "multi_review", False):
@@ -129,19 +103,3 @@ class GenericAdapter(Adapter):
             "_stub artifact written by GenericAdapter (stub mode)._\n",
             encoding="utf-8",
         )
-
-
-def _phase_contract_line(phase) -> str:
-    required_skills = list(getattr(phase, "required_skills", ()))
-    requirements = list(getattr(phase, "requirements", ()))
-    if not required_skills and not requirements:
-        return ""
-    payload = json.dumps(
-        {
-            "applied_skills": required_skills,
-            "requirements": {requirement: "pass" for requirement in requirements},
-        },
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-    return f"\nphase-contract: {payload}\n"

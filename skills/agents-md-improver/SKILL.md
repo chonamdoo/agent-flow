@@ -7,20 +7,6 @@ description: Audit and improve AGENTS.md files for Codex project memory. Use whe
 
 Audit and improve Codex `AGENTS.md` files so future sessions get concise, current, actionable project context.
 
-## Quick start
-
-1. Discover in-repo `AGENTS.md` files, excluding generated and dependency folders.
-2. Read [quality-criteria.md](references/quality-criteria.md) before scoring.
-3. Report the score and proposed changes before editing anything.
-4. Read [update-guidelines.md](references/update-guidelines.md) before drafting edits.
-5. Use [templates.md](references/templates.md) only when a file needs a clean structure.
-
-## Reference docs
-
-- [quality-criteria.md](references/quality-criteria.md) — read before scoring or writing the audit report.
-- [update-guidelines.md](references/update-guidelines.md) — read before proposing or applying changes.
-- [templates.md](references/templates.md) — read only when an `AGENTS.md` file is missing major sections.
-
 ## Workflow
 
 ### Phase 1: Discover
@@ -44,7 +30,7 @@ Common locations:
 
 ### Phase 2: Assess Quality
 
-Read [quality-criteria.md](references/quality-criteria.md) when scoring or producing an audit report.
+Read `references/quality-criteria.md` when scoring or producing an audit report.
 
 Score each file on:
 
@@ -96,7 +82,7 @@ Use this shape:
 
 ### Phase 4: Propose Targeted Updates
 
-Read [update-guidelines.md](references/update-guidelines.md) before proposing changes.
+Read `references/update-guidelines.md` before proposing changes.
 
 Only add information that will help future Codex sessions:
 
@@ -114,4 +100,4 @@ Show a small diff for each proposed change and ask for approval before editing.
 
 After approval, edit the smallest relevant `AGENTS.md` file. Preserve existing structure, keep project files under 200 lines when feasible, and move longer material into `.Codex/rules/` with an import if the project already uses that pattern.
 
-Use [templates.md](references/templates.md) only when a file is missing major sections or needs a clean structure.
+Use `references/templates.md` only when a file is missing major sections or needs a clean structure.

@@ -10,6 +10,10 @@ branching:
     slug_source: feature title
     max_slug_length: 60
 gates:
+  - id: context-lint
+    command: ["node", "scripts/check-context-docs.mjs"]
+    required: true
+    phase: pre-commit
   - id: architecture-lint
     command: ["agent-flow", "architecture-lint", "--profile", "ios"]
     required: true
@@ -22,6 +26,10 @@ gates:
     command: ["xcodebuild", "-scheme", "App", "-destination", "platform=iOS Simulator,name=iPhone 15", "test"]
     required: true
     phase: pre-push
+  - id: lint
+    command: ["swiftlint"]
+    required: false
+    phase: pre-commit
 review_angles:
   - id: architecture-design
     prompt: templates/_shared/review/architecture-design.md
@@ -30,10 +38,10 @@ review_angles:
   - id: main-thread
     prompt: templates/_shared/review/main-thread.md
 skills:
-  capabilities:
-    - ios.app-shell-error-handling
-    - ios.architecture.clean
-    - ios.presentation.clean
+  install:
+    - ios-app-shell-error-handling
+    - ios-clean-architecture
+    - ios-clean-presentation-architecture
   required_review:
     - group: profile
       skills: [ios-clean-architecture, ios-clean-presentation-architecture]

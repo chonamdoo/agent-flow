@@ -1,9 +1,8 @@
 #!/bin/bash
 # agent-flow PreToolUse hook: leader worktree 브랜치 변경 차단 → git worktree add 안내
-INPUT=$(/bin/cat)
-ACTION=$(/usr/bin/python3 -I -B -c "
+INPUT=$(cat)
+ACTION=$(python3 -c "
 import sys, json
-import os
 import re
 import shlex
 import subprocess
@@ -30,7 +29,7 @@ def command_from(value):
     return ''
 
 def split_segments(command):
-    return [part for part in re.split(r'[;&|()\r\n]+', command) if part.strip()]
+    return [part for part in re.split(r'[;&|()]+', command) if part.strip()]
 
 def skip_env(tokens):
     index = 1
@@ -53,14 +52,11 @@ def git_args(tokens):
         if tokens[0] == 'command':
             tokens = tokens[1:]
             continue
-        if re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', tokens[0]):
-            tokens = tokens[1:]
-            continue
         if tokens[0] == 'env':
             tokens = skip_env(tokens)
             continue
         break
-    if not tokens or os.path.basename(tokens[0]) != 'git':
+    if not tokens or tokens[0] != 'git':
         return []
     index = 1
     options_with_value = {
@@ -79,7 +75,7 @@ def is_local_branch(name):
     # git이 멈추거나 없을 때 hook이 도구 호출을 무기한 막지 않도록 방어한다.
     try:
         result = subprocess.run(
-            ['/usr/bin/git', 'show-ref', '--verify', '--quiet', 'refs/heads/' + name],
+            ['git', 'show-ref', '--verify', '--quiet', 'refs/heads/' + name],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,

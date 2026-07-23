@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
+from agent_flow.core.worktree_isolation import max_worker_capacity
+
 
 @dataclass
 class SubprocessJob:
@@ -31,6 +33,7 @@ class SubprocessJob:
     args: tuple[str, ...]   # full argv after binary (e.g. ("-p", "<prompt>"))
     cwd: Path
     timeout_s: int = 600    # default 10 minutes per job
+    env: dict | None = None  # None inherits parent env; set to sanitize git leak
 
 
 @dataclass
@@ -54,6 +57,7 @@ async def _run_one(job: SubprocessJob) -> SubprocessResult:
         proc = await asyncio.create_subprocess_exec(
             job.binary, *job.args,
             cwd=str(job.cwd),
+            env=job.env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
@@ -113,7 +117,9 @@ def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
             pass
 
 
-async def run_parallel_async(jobs: Sequence[SubprocessJob]) -> list[SubprocessResult]:
+async def run_parallel_async(
+    jobs: Sequence[SubprocessJob], *, max_concurrency: int | None = None,
+) -> list[SubprocessResult]:
     """Run all jobs concurrently. Returns results in the same order as jobs.
 
     Uses return_exceptions=True for partial-survival: an unexpected `Exception`
@@ -124,7 +130,14 @@ async def run_parallel_async(jobs: Sequence[SubprocessJob]) -> list[SubprocessRe
     """
     if not jobs:
         return []
-    tasks = [asyncio.create_task(_run_one(j)) for j in jobs]
+    limit = max_concurrency if max_concurrency and max_concurrency > 0 else max_worker_capacity()
+    sem = asyncio.Semaphore(limit)
+
+    async def _bounded(job: SubprocessJob) -> SubprocessResult:
+        async with sem:
+            return await _run_one(job)
+
+    tasks = [asyncio.create_task(_bounded(j)) for j in jobs]
     raw = await asyncio.gather(*tasks, return_exceptions=True)
     out: list[SubprocessResult] = []
     for job, item in zip(jobs, raw):
