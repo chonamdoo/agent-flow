@@ -84,6 +84,7 @@ from agent_flow.core.worktree_isolation import (
     WorktreeIsolationError,
     assert_cwd_bound,
     assert_scopes_isolated,
+    git_repo_state,
     max_worker_capacity,
     sanitized_worker_env,
     verify_linked_worktree,
@@ -994,10 +995,14 @@ def main(argv: list[str] | None = None) -> int:
             if prompt is None:
                 print(f"worker not approved for task: {pending.task_id}")
                 return 1
-            # In a git repo every worker runs in its own verified worktree with a
-            # sanitized git env; isolation failure is fail-closed (return 2), never
-            # a silent fallback to the leader checkout.
-            isolate = _is_git_repo(root)
+            # Worker isolation decision. A git repo runs every worker in its own
+            # verified worktree; a git call that cannot answer is fail-closed
+            # (return 2), never a silent fallback to the leader checkout.
+            repo_state = git_repo_state(root)
+            if repo_state == "unknown":
+                print("cannot determine git repo state; refusing to run unisolated", file=sys.stderr)
+                return 2
+            isolate = repo_state == "repo"
             worker_cwd = root
             worker_env = None
             worktree_status = None
@@ -1008,11 +1013,9 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"worker capacity reached ({in_progress}/{capacity})", file=sys.stderr)
                     return 2
                 try:
-                    scopes = [
-                        WorkerScope(worker=label, paths=paths, worktree_isolated=True)
-                        for label, paths in approved_worker_scopes(root=root, team_name=args.team)
-                    ]
-                    assert_scopes_isolated(scopes)
+                    # Per-worker worktrees isolate every write, so overlapping
+                    # scopes are safe here; the scope gate only bites when there
+                    # is no worktree isolation (the else branch).
                     plan = plan_worktree(root=root, name=pending.task_id, unique=args.worker)
                     worktree_status = create_worktree(root=root, plan=plan, allow_dirty=True)
                     worker_cwd = verify_linked_worktree(
@@ -1023,6 +1026,22 @@ def main(argv: list[str] | None = None) -> int:
                     print(_format_cli_error(exc), file=sys.stderr)
                     return 2
                 worker_env = sanitized_worker_env()
+            else:
+                # No worktree isolation available: concurrent workers share the
+                # leader checkout, so overlapping write scopes would collide.
+                active = {safe_worker_name(task.owner) for task in status["tasks"]
+                          if task.status == "in_progress" and task.owner}
+                active.add(safe_worker_name(args.worker))
+                scopes = [
+                    WorkerScope(worker=worker_name, paths=paths, worktree_isolated=False)
+                    for worker_name, paths in approved_worker_scopes(root=root, team_name=args.team)
+                    if worker_name in active
+                ]
+                try:
+                    assert_scopes_isolated(scopes)
+                except WorktreeIsolationError as exc:
+                    print(_format_cli_error(exc), file=sys.stderr)
+                    return 2
             claimed = claim_task(
                 root=root,
                 team_name=args.team,

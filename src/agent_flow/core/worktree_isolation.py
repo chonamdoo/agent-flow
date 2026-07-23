@@ -205,11 +205,28 @@ def assert_scopes_isolated(scopes: Sequence[WorkerScope]) -> None:
     for i in range(len(items)):
         for j in range(i + 1, len(items)):
             a, b = items[i], items[j]
+            if a.worker == b.worker:
+                continue
             if _scopes_overlap(a, b) and not (a.worktree_isolated and b.worktree_isolated):
                 raise WorktreeIsolationError(
                     f"overlapping write scope between {a.worker!r} and {b.worker!r} "
                     "requires declared worktree isolation on both"
                 )
+
+
+def git_repo_state(root) -> str:
+    """Classify ``root`` as 'repo', 'non-repo', or 'unknown'.
+
+    'unknown' means the git call itself failed (timeout/OSError). It must not be
+    downgraded to non-git: the caller fails closed rather than silently running a
+    worker unisolated in the leader checkout.
+    """
+    result = git_safe("rev-parse", "--git-dir", cwd=root)
+    if result.ok:
+        return "repo"
+    if result.timed_out or result.error is not None:
+        return "unknown"
+    return "non-repo"
 
 
 @contextlib.contextmanager

@@ -324,7 +324,7 @@ def approve_worker_call(
 
 
 def approved_worker_scopes(*, root: Path, team_name: str) -> list:
-    """Return (worker_label, write_scope_paths) for every approval in the team.
+    """Return (worker, write_scope_paths) for every approval in the team.
 
     The isolation scope gate uses this to detect overlapping write scopes across
     concurrently dispatched workers.
@@ -351,7 +351,7 @@ def approved_worker_scopes(*, root: Path, team_name: str) -> list:
                 continue
             scope = entry.get("write_scope", "none")
             paths = _scope_paths(scope if isinstance(scope, str) else "none")
-            scopes.append((f"{task_id}:{worker}", paths))
+            scopes.append((worker, paths))
     return scopes
 
 

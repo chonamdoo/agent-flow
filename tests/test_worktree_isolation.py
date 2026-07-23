@@ -358,3 +358,55 @@ def test_e2e_team_run_next_confines_worker_writes_and_git(tmp_path):
         if line and not line[3:].startswith(".agent-flow")
     ]
     assert dirty == []
+
+def test_git_repo_state_classifies(tmp_path):
+    from agent_flow.core import worktree_isolation as wi
+    # fresh temp dir is not a git repo (and not under one)
+    assert wi.git_repo_state(tmp_path) == "non-repo"
+    _init_repo(tmp_path)
+    assert wi.git_repo_state(tmp_path) == "repo"
+
+
+def test_git_repo_state_unknown_on_git_failure(tmp_path, monkeypatch):
+    from agent_flow.core import worktree_isolation as wi
+    from agent_flow.core.commands import SafeCommandResult
+    _init_repo(tmp_path)
+    # a git call that times out must classify as unknown, not non-repo, so the
+    # caller fails closed instead of running a worker unisolated in the leader.
+    monkeypatch.setattr(
+        wi, "git_safe",
+        lambda *a, **k: SafeCommandResult(args=("git",), returncode=None, stdout="", stderr="", timed_out=True),
+    )
+    assert wi.git_repo_state(tmp_path) == "unknown"
+
+
+def test_scope_gate_ignores_same_worker_self_overlap():
+    # the same worker approved for two tasks with the same scope is not a conflict.
+    assert_scopes_isolated([
+        WorkerScope("w1", ("src/x.py",), False),
+        WorkerScope("w1", ("src/x.py",), False),
+    ])
+
+
+def test_e2e_non_git_scope_collision_is_rejected(tmp_path):
+    # No git repo -> no worktree isolation -> overlapping scopes on concurrent
+    # workers must be rejected fail-closed by the scope gate.
+    assert _cli(["team", "init", "--root", ".", "--name", "ft"], cwd=tmp_path).returncode == 0
+    for tid in ("t1", "t2"):
+        assert _cli(["team", "task", "--root", ".", "--team", "ft", "--id", tid,
+                     "--subject", "s", "--description", "d"], cwd=tmp_path).returncode == 0
+    for w in ("wA", "wB"):
+        assert _cli(["team", "worker", "--root", ".", "--team", "ft", "--name", w,
+                     "--role", "impl"], cwd=tmp_path).returncode == 0
+    for tid, w in (("t1", "wA"), ("t2", "wB")):
+        assert _cli(["team", "brief", "--root", ".", "--team", "ft", "--task", tid,
+                     "--worker", w, "--brief", "b", "--write-scope", "src/feature"], cwd=tmp_path).returncode == 0
+        assert _cli(["team", "approve-worker", "--root", ".", "--team", "ft", "--task", tid,
+                     "--worker", w, "--write-scope", "src/feature"], cwd=tmp_path).returncode == 0
+    # wB claims t2 -> in_progress; t1 stays pending for wA.
+    assert _cli(["team", "claim", "--root", ".", "--team", "ft", "--task", "t2",
+                 "--worker", "wB"], cwd=tmp_path).returncode == 0
+    res = _cli(["team", "run-next", "--root", ".", "--team", "ft", "--worker", "wA",
+                "--command", sys.executable, "-c", "print('must not run')"], cwd=tmp_path)
+    assert res.returncode == 2
+    assert "overlapping write scope" in (res.stdout + res.stderr)
