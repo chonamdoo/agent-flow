@@ -201,8 +201,8 @@ function installProject() {
     "graphify-out/cost.json",
   ]);
   removeLegacyProjectSkillCopies(root, "graphify");
-  upsertBootstrapBlock(path.join(root, "AGENTS.md"), "AGENTS.md");
-  upsertBootstrapBlock(path.join(root, "CLAUDE.md"), "CLAUDE.md");
+  upsertBootstrapBlock(path.join(root, "AGENTS.md"), "AGENTS.md", root);
+  upsertBootstrapBlock(path.join(root, "CLAUDE.md"), "CLAUDE.md", root);
   makeHooksExecutable(root);
   installClaudeHooks(root);
   installOmpHooks(root);
@@ -2261,9 +2261,49 @@ function hasGateEvidence(result) {
   return false;
 }
 
-function upsertBootstrapBlock(pathName, label) {
+function bootstrapLocalSkillSection(root) {
+  const docs = projectLocalSkillDocs(root).sort((a, b) => a.name.localeCompare(b.name));
+  if (docs.length === 0) {
+    return "";
+  }
+  return [
+    "",
+    "### Project-local Skills",
+    "",
+    "이 프로젝트의 local skill(`.agent-flow/local-skills/<name>/SKILL.md` 또는 `skills/<name>/SKILL.md`)은 아래 목록이 단일 진실 소스다. 매칭되는 작업(개발/수정/리뷰, 디자인, commit/push/PR 등)을 시작하기 전에 해당 `SKILL.md`를 먼저 읽고, 그 안의 reference·completion-gate 규칙을 그대로 따른다. 읽지 않은 skill은 적용했다고 말하지 않으며, 누락 시 리뷰는 incomplete 또는 `verdict: request-changes`로 처리한다.",
+    "",
+    ...docs.map((doc) => bootstrapLocalSkillLine(root, doc)),
+    "",
+  ].join("\n");
+}
+
+function bootstrapLocalSkillLine(root, doc) {
+  const trigger = bootstrapLocalSkillTrigger(root, doc);
+  return `- \`${doc.name}\` — \`${doc.path}\`${trigger ? `: ${trigger}` : ""}`;
+}
+
+function bootstrapLocalSkillTrigger(root, doc) {
+  const absolutePath = path.isAbsolute(doc.path) ? doc.path : path.join(root, doc.path);
+  let description = "";
+  try {
+    const frontmatter = splitSkillFrontmatter(fs.readFileSync(absolutePath, "utf8"));
+    if (frontmatter) {
+      description = String(parseSimpleYaml(frontmatter).description || "");
+    }
+  } catch (_error) {
+    description = "";
+  }
+  description = description.replace(/\s+/g, " ").trim();
+  if (description.length > 200) {
+    description = `${description.slice(0, 197).trimEnd()}...`;
+  }
+  return description;
+}
+
+function upsertBootstrapBlock(pathName, label, root) {
   const start = "<!-- agent-flow:start -->";
   const end = "<!-- agent-flow:end -->";
+  const localSkillSection = root ? bootstrapLocalSkillSection(root) : "";
   const block = `${start}
 ## Agent Flow
 
@@ -2295,7 +2335,7 @@ Follow the CLI output exactly. If no run is active, start with \`${AGENT_FLOW_CO
 - install/bootstrap 후 \`.agent-flow/skills/index.json\` metadata를 보고 필요한 skill만 읽는다. 모든 SKILL.md 전문을 항상 읽지 않는다.
 - Claude/Codex/OMP 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.
 - Claude/Codex/OMP hook이 자동 차단하는 보호 브랜치 commit/push와 leader checkout/switch 금지는 모든 host에서 동일하게 지킨다.
-
+${localSkillSection}
 ${end}
 `;
   const current = fs.existsSync(pathName) ? fs.readFileSync(pathName, "utf8") : "";

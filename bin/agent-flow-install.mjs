@@ -141,10 +141,14 @@ function bootstrapMarkdown(label) {
   if (!fs.existsSync(tmplPath)) {
     return;
   }
-  const block = fs.readFileSync(tmplPath, "utf8");
+  let block = fs.readFileSync(tmplPath, "utf8");
   const targetPath = path.join(PROJECT, label);
   const start = "<!-- agent-flow:start -->";
   const end = "<!-- agent-flow:end -->";
+  const localSkillSection = bootstrapLocalSkillSection();
+  if (localSkillSection && block.includes(end)) {
+    block = block.replace(end, () => `${localSkillSection}\n${end}`);
+  }
   const current = fs.existsSync(targetPath)
     ? fs.readFileSync(targetPath, "utf8")
     : "";
@@ -156,6 +160,87 @@ function bootstrapMarkdown(label) {
   }
   const prefix = current.trim() ? current.trimEnd() + "\n\n" : `# ${label}\n\n`;
   fs.writeFileSync(targetPath, prefix + block);
+}
+
+function bootstrapLocalSkillSection() {
+  const seen = new Map();
+  const sources = [path.join(AF_DIR, "local-skills")];
+  if (!samePath(PROJECT, KIT_ROOT)) {
+    sources.push(path.join(PROJECT, "skills"));
+  }
+  for (const base of sources) {
+    if (!fs.existsSync(base)) {
+      continue;
+    }
+    for (const entry of fs.readdirSync(base, { withFileTypes: true })) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+      const skillPath = path.join(base, entry.name, "SKILL.md");
+      if (!fs.existsSync(skillPath)) {
+        continue;
+      }
+      const name = bootstrapLocalSkillName(skillPath, entry.name);
+      if (seen.has(name)) {
+        continue;
+      }
+      seen.set(name, {
+        name,
+        path: path.relative(PROJECT, skillPath).split(path.sep).join("/"),
+        absolutePath: skillPath,
+      });
+    }
+  }
+  const docs = [...seen.values()].sort((a, b) => a.name.localeCompare(b.name));
+  if (docs.length === 0) {
+    return "";
+  }
+  return [
+    "",
+    "### Project-local Skills",
+    "",
+    "이 프로젝트의 local skill(`.agent-flow/local-skills/<name>/SKILL.md` 또는 `skills/<name>/SKILL.md`)은 아래 목록이 단일 진실 소스다. 매칭되는 작업(개발/수정/리뷰, 디자인, commit/push/PR 등)을 시작하기 전에 해당 `SKILL.md`를 먼저 읽고, 그 안의 reference·completion-gate 규칙을 그대로 따른다. 읽지 않은 skill은 적용했다고 말하지 않으며, 누락 시 리뷰는 incomplete 또는 `verdict: request-changes`로 처리한다.",
+    "",
+    ...docs.map((doc) => bootstrapLocalSkillLine(doc)),
+    "",
+  ].join("\n");
+}
+
+function bootstrapLocalSkillName(skillPath, fallback) {
+  try {
+    const frontmatter = splitSkillFrontmatter(fs.readFileSync(skillPath, "utf8"));
+    if (frontmatter) {
+      const parsed = String(parseSimpleYaml(frontmatter).name || "").trim();
+      if (parsed) {
+        return parsed;
+      }
+    }
+  } catch (_error) {
+    // fall through to the directory name
+  }
+  return fallback;
+}
+
+function bootstrapLocalSkillLine(doc) {
+  const trigger = bootstrapLocalSkillTrigger(doc.absolutePath);
+  return `- \`${doc.name}\` — \`${doc.path}\`${trigger ? `: ${trigger}` : ""}`;
+}
+
+function bootstrapLocalSkillTrigger(absolutePath) {
+  let description = "";
+  try {
+    const frontmatter = splitSkillFrontmatter(fs.readFileSync(absolutePath, "utf8"));
+    if (frontmatter) {
+      description = String(parseSimpleYaml(frontmatter).description || "");
+    }
+  } catch (_error) {
+    description = "";
+  }
+  description = description.replace(/\s+/g, " ").trim();
+  if (description.length > 200) {
+    description = `${description.slice(0, 197).trimEnd()}...`;
+  }
+  return description;
 }
 
 function detectProfile() {
