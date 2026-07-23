@@ -1,15 +1,25 @@
 ---
 name: android-code-review
-description: |
-  Use when reviewing Android Kotlin or Compose changes. Focuses on architecture
-  boundaries, MVI/state correctness, Compose stability, coroutine safety, data
-  layer behavior, testing, and Gradle hygiene.
+description: Android Kotlin and Jetpack Compose review checklist for changed code, covering architecture boundaries, MVI/state correctness, Compose stability, coroutine safety, data layer behavior, testing, and Gradle hygiene. Use when reviewing Android, Kotlin, Compose, or KMP changes; do not use as a debugging workflow or for non-Android React/TypeScript/Python reviews.
 ---
 
 # Android Code Review
 
 Review only changed behavior unless the user asks for a broader audit. Read the
 diff and relevant existing patterns directly before deciding.
+
+## Quick start
+
+1. Confirm the diff includes Android, Kotlin, Compose, Gradle, or KMP changes.
+2. Read the user request, changed files, and closest existing implementation before judging.
+3. Load only the Android/Compose/Kotlin reference material that matches the diff.
+4. Report blocking findings with file/line evidence; leave style preferences as suggestions.
+
+## Non-goals
+
+- Do not use this skill to diagnose an unlocalized bug; use `android-debugging` first.
+- Do not use it for React Web, React Native JavaScript/TypeScript, Python, or generic TypeScript review unless Android native code is also changed.
+- Do not approve broad rewrites or new architecture solely from checklist preference.
 
 ## Android Profile Skills
 
@@ -87,11 +97,10 @@ Approve only when:
 
 ## References
 
-- `../android-guides/references/code-review-checklist.md`
-- `../android-guides/references/architecture-rules-guide.md`
-- `../clean-architecture/SKILL.md`
-- `../android-guides/references/compose-performance-guide.md`
-- `../android-guides/references/kotlin-concurrency-guide.md`
-- `../android-guides/references/data-layer-guide.md`
-- `../android-guides/references/testing-guide.md`
-- `../android-appshell-error-handling/SKILL.md`
+- [code-review-checklist.md](../android-guides/references/code-review-checklist.md) when structuring the Android review.
+- [architecture-rules-guide.md](../android-guides/references/architecture-rules-guide.md) and [clean-architecture](../clean-architecture/SKILL.md) when dependency direction or layer ownership changed.
+- [compose-performance-guide.md](../android-guides/references/compose-performance-guide.md) when Compose stability, recomposition, lazy lists, or frame-time work changed.
+- [kotlin-concurrency-guide.md](../android-guides/references/kotlin-concurrency-guide.md) when coroutines, Flow, dispatchers, or cancellation changed.
+- [data-layer-guide.md](../android-guides/references/data-layer-guide.md) when repositories, DTO/domain mapping, caching, or source-of-truth behavior changed.
+- [testing-guide.md](../android-guides/references/testing-guide.md) when evaluating Android test coverage and gates.
+- [android-appshell-error-handling](../android-appshell-error-handling/SKILL.md) when app-wide common errors, session expiry, root navigation, dialogs, or snackbars changed.
