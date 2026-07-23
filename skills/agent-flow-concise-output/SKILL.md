@@ -9,15 +9,18 @@ description: >
 
 # Agent Flow Concise Output
 
-Use this skill to reduce prose while preserving agent-flow contracts.
+Use this skill to make agent-flow output concise and clear while preserving its
+contracts. For anything beyond trivial shortening, apply `write-for-work`
+(reader, purpose, plain language) rather than mechanical translation.
 The installer also writes `concise-output.md` to `.Codex/rules/concise-output.md`.
 
 ## Rules
 
-- Write user-facing prose in Korean.
+- Write user-facing prose in clear, natural Korean per `write-for-work`; favor plain, specific wording over mechanical shortening.
+- Keep established English technical terms and identifiers as-is; do not force awkward Korean translations. Explain a term instead of renaming it.
 - Keep code, commands, paths, URLs, API names, function names, env vars, errors, version numbers, YAML keys, JSON keys, phase ids, and parser markers unchanged.
 - Do not use emoji.
-- Do not imitate caveman speech. Use short technical Korean.
+- Do not imitate caveman speech. Use short, natural technical Korean.
 - Preserve exact verdict/status lines, including `verdict: approve`, `verdict: request-changes`, `verdict: blocked`, and `next_command`.
 
 ## Review

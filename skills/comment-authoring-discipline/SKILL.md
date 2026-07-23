@@ -28,6 +28,14 @@ Use the platform's normal comment format only for:
 - Complex algorithms or regular expressions.
 - Public API contracts.
 
+## Writing Warranted Comments
+
+When a comment is warranted, write it well instead of padding or translating it:
+
+- Keep code identifiers, API names, and established technical terms in English; do not translate them into awkward Korean.
+- State the reason, constraint, or contract plainly and specifically, following `write-for-work`.
+- Prefer one clear sentence over a decorative block, and match the file's existing comment language.
+
 ## Remove Or Avoid
 
 - WHAT/HOW comments that restate code.
