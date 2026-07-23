@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -48,6 +49,13 @@ def test_shard_policy_separates_slow_boundaries() -> None:
             "test_compare_and_delete_preserves_branch_checked_out_during_deletion",
         )
         == "worktree-lifecycle"
+    )
+    assert (
+        shard_for_test(
+            "tests/test_cli.py",
+            "test_export_apk_copies_workspace_artifact_to_downloads",
+        )
+        == "integration"
     )
     assert (
         shard_for_test(
@@ -117,6 +125,37 @@ def _has_slow_process_call(node: ast.AST) -> bool:
         if any("reference-transaction" in value for value in values):
             return True
     return False
+
+
+def test_package_scripts_keep_changed_test_feedback_separate_from_release_gate() -> None:
+    scripts = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["scripts"]
+
+    assert scripts["test:changed"] == "uv run --extra dev python scripts/run-test-shards.py related"
+    assert scripts["test:final"] == "python3 scripts/run-test-shards.py full-final"
+
+
+def test_changed_files_includes_committed_feature_scope_and_untracked_files(tmp_path: Path) -> None:
+    runner = _runner_module()
+    project = tmp_path / "project"
+    project.mkdir()
+
+    def git(*args: str) -> None:
+        subprocess.run(("git", "-C", str(project), *args), check=True, capture_output=True)
+
+    git("init", "-b", "main")
+    git("config", "user.name", "Test User")
+    git("config", "user.email", "test@example.com")
+    source = project / "src" / "agent_flow" / "cli.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("before = True\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-m", "initial")
+    git("checkout", "-b", "feature")
+    source.write_text("after = True\n", encoding="utf-8")
+    git("commit", "-am", "feature change")
+    (project / "scratch.py").write_text("scratch = True\n", encoding="utf-8")
+
+    assert runner._changed_files(project) == ["scratch.py", "src/agent_flow/cli.py"]
 
 
 def test_final_plan_runs_canonical_parity_once(tmp_path: Path) -> None:
@@ -202,8 +241,19 @@ def test_related_python_and_android_changes_are_scoped() -> None:
         "tests/test_cli.py::CliTest::test_gate_order_ignores_changed_file_kind_tokens",
         "tests/test_runner_smoke.py::test_stale_worktree_remove_handles_reference_hook_rejection",
     )
+    assert runner._related_python_tests(("src/agent_flow/core/workspace_boundary.py",)) == (
+        "tests/test_pinned_workspace_boundary.py",
+    )
     assert "tests/test_runner_smoke.py::test_compare_and_delete_preserves_branch_checked_out_during_deletion" in runner._related_python_tests(
         ("src/agent_flow/core/worktrees.py",)
+    )
+    assert runner._related_python_tests(("tests/shard_policy.py",)) == ("tests/test_test_shards.py",)
+    assert runner._related_python_tests(("tests/conftest.py",)) == ()
+    assert runner._related_python_tests(("bin/agent-flow-kit.mjs",)) == (
+        "tests/test_cli.py::CliTest::test_node_status_escapes_task_newlines_and_emits_json",
+        "tests/test_custom_skill_install.py::test_install_materializes_authenticated_project_launcher",
+        "tests/test_custom_skill_install.py::test_publish_artifact_exports_webp_from_owning_worktree",
+        "tests/test_pinned_workspace_boundary.py::test_trusted_agent_flow_gate_remains_the_shell_execution_route",
     )
     exact = ("tests/test_cli.py::CliTest::test_node_status_escapes_task_newlines_and_emits_json",)
     targeted = runner._targeted_commands(ROOT / ".git" / "test", (), exact)

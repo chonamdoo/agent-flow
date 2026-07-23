@@ -451,7 +451,7 @@ def _guard_environment(
     env_override: dict[str, str | None] | None = None,
 ) -> dict[str, str]:
     env = dict(os.environ)
-    env["PYTHONPATH"] = str(KIT_ROOT / "src")
+    env.pop("PYTHONPATH", None)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     for name in (
         "GRADLE_USER_HOME",
@@ -519,6 +519,8 @@ def _structured_guard(
     tool_input: dict[str, object],
     *,
     host: str = "codex",
+    session_id: str | None = None,
+    agent_id: str = "",
 ) -> subprocess.CompletedProcess[str]:
     payload = {
         "tool_name": tool_name,
@@ -526,6 +528,9 @@ def _structured_guard(
         "host": host,
         "tool_input": tool_input,
     }
+    if session_id is not None:
+        payload["session_id"] = session_id
+        payload["agent_id"] = agent_id
     return _run_guard(
         leader,
         payload,
@@ -562,7 +567,7 @@ def test_stateless_guard_confines_writes_to_the_current_checkout(
 
 
 @pytest.mark.git_auth
-def test_stateless_guard_gates_private_run_artifacts(
+def test_unbound_linked_worktree_guard_rejects_private_run_artifacts(
     pinned_run: tuple[Path, Path, Path, Path],
 ) -> None:
     leader, worktree, _runtime, run_dir = pinned_run
@@ -599,8 +604,10 @@ def test_stateless_guard_gates_private_run_artifacts(
         {"path": str(leader / ".agent-flow" / "runs" / "run-x" / "design.md"), "content": "x\n"},
     )
 
-    assert design.returncode == 0, design.stderr
-    assert log.returncode == 0, log.stderr
+    assert design.returncode == 2
+    assert "execution_identity_missing" in design.stderr
+    assert log.returncode == 2
+    assert "execution_identity_missing" in log.stderr
     assert meta.returncode == 2
     assert "protected_run_state_path" in meta.stderr
     assert escaped.returncode == 2
@@ -609,6 +616,23 @@ def test_stateless_guard_gates_private_run_artifacts(
     assert "target_outside_pinned_workspace" in sibling.stderr
     assert leader_run.returncode == 2
     assert "target_outside_pinned_workspace" in leader_run.stderr
+
+
+@pytest.mark.git_auth
+def test_bound_linked_worktree_guard_allows_own_private_run_artifacts(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, _runtime, run_dir = pinned_run
+
+    result = _structured_guard(
+        leader,
+        worktree,
+        "write",
+        {"path": str(run_dir / "design.md"), "content": "design\n"},
+        session_id="session-1",
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.git_auth
@@ -628,10 +652,12 @@ def test_leader_cwd_writes_worktree_private_run_artifacts(
     design = _structured_guard(
         leader, leader, "write",
         {"path": str(run_dir / "design.md"), "content": "design\n"},
+        session_id="session-1",
     )
     log = _structured_guard(
         leader, leader, "write",
         {"path": str(artifacts / "red.log"), "content": "failure\n"},
+        session_id="session-1",
     )
     meta = _structured_guard(
         leader, leader, "write",
@@ -654,6 +680,301 @@ def test_leader_cwd_writes_worktree_private_run_artifacts(
     assert "git_metadata_write" in binding.stderr
     assert config.returncode == 2
     assert "git_metadata_write" in config.stderr
+
+
+@pytest.mark.git_auth
+def test_leader_private_run_rejects_group_writable_execution_binding(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, _worktree, _runtime, run_dir = pinned_run
+    execution = ExecutionIdentity(host="codex", session_id="session-1", agent_id="")
+    binding = leader / ".git" / "agent-flow" / "executions" / f"{execution.digest}.json"
+    binding.chmod(0o664)
+
+    result = _structured_guard(
+        leader,
+        leader,
+        "write",
+        {"path": str(run_dir / "design.md"), "content": "design\n"},
+        session_id=execution.session_id,
+        agent_id=execution.agent_id,
+    )
+
+    assert result.returncode == 2
+    assert "git-private metadata" in result.stderr
+
+
+@pytest.mark.git_auth
+def test_leader_private_run_binding_uses_canonical_environment_identity(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, _worktree, _runtime, run_dir = pinned_run
+    original = ExecutionIdentity(host="codex", session_id="session-1", agent_id="")
+    execution = ExecutionIdentity(host="omp", session_id="env-run", agent_id="env-agent")
+    executions = leader / ".git" / "agent-flow" / "executions"
+    original_binding = executions / f"{original.digest}.json"
+    binding = json.loads(original_binding.read_text(encoding="utf-8"))
+    binding["execution"] = execution.to_dict()
+    (executions / f"{execution.digest}.json").write_text(json.dumps(binding), encoding="utf-8")
+
+    result = _run_guard(
+        leader,
+        {
+            "tool_name": "write",
+            "cwd": str(leader),
+            "tool_input": {"path": str(run_dir / "design.md"), "content": "design\n"},
+        },
+        _guard_environment(
+            {
+                "AGENT_FLOW_ACTIVE_HOST": execution.host,
+                "AGENT_FLOW_EXECUTION_ID": execution.session_id,
+                "AGENT_FLOW_AGENT_ID": execution.agent_id,
+            }
+        ),
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.git_auth
+def test_leader_private_run_binding_uses_host_native_execution_identity(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, _worktree, _runtime, run_dir = pinned_run
+    original = ExecutionIdentity(host="codex", session_id="session-1", agent_id="")
+    execution = ExecutionIdentity(host="codex", session_id="native-run", agent_id="native-agent")
+    executions = leader / ".git" / "agent-flow" / "executions"
+    binding = json.loads((executions / f"{original.digest}.json").read_text(encoding="utf-8"))
+    binding["execution"] = execution.to_dict()
+    (executions / f"{execution.digest}.json").write_text(json.dumps(binding), encoding="utf-8")
+
+    result = _run_guard(
+        leader,
+        {
+            "tool_name": "write",
+            "cwd": str(leader),
+            "tool_input": {"path": str(run_dir / "design.md"), "content": "design\n"},
+        },
+        _guard_environment(
+            {
+                "CODEX_THREAD_ID": execution.session_id,
+                "CODEX_AGENT_ID": execution.agent_id,
+            }
+        ),
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.git_auth
+def test_leader_private_run_binding_prefers_canonical_environment_over_payload(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, _worktree, _runtime, run_dir = pinned_run
+    original = ExecutionIdentity(host="codex", session_id="session-1", agent_id="")
+    execution = ExecutionIdentity(host="codex", session_id="environment-run", agent_id="environment-agent")
+    executions = leader / ".git" / "agent-flow" / "executions"
+    binding = json.loads((executions / f"{original.digest}.json").read_text(encoding="utf-8"))
+    binding["execution"] = execution.to_dict()
+    (executions / f"{execution.digest}.json").write_text(json.dumps(binding), encoding="utf-8")
+
+    result = _run_guard(
+        leader,
+        {
+            "tool_name": "write",
+            "host": "claude",
+            "cwd": str(leader),
+            "session_id": "payload-run",
+            "agent_id": "payload-agent",
+            "tool_input": {"path": str(run_dir / "design.md"), "content": "design\n"},
+        },
+        _guard_environment(
+            {
+                "AGENT_FLOW_ACTIVE_HOST": execution.host,
+                "AGENT_FLOW_EXECUTION_ID": execution.session_id,
+                "AGENT_FLOW_AGENT_ID": execution.agent_id,
+            }
+        ),
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.git_auth
+def test_leader_private_run_rejects_recreated_workspace_identity(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, _worktree, _runtime, run_dir = pinned_run
+    execution = ExecutionIdentity(host="codex", session_id="session-1", agent_id="")
+    binding_path = leader / ".git" / "agent-flow" / "executions" / f"{execution.digest}.json"
+    binding = json.loads(binding_path.read_text(encoding="utf-8"))
+    binding["workspace"]["inode"] = int(binding["workspace"]["inode"]) + 1
+    binding_path.write_text(json.dumps(binding), encoding="utf-8")
+
+    result = _structured_guard(
+        leader,
+        leader,
+        "write",
+        {"path": str(run_dir / "design.md"), "content": "design\n"},
+        session_id=execution.session_id,
+        agent_id=execution.agent_id,
+    )
+
+    assert result.returncode == 2
+    assert "execution_binding_stale" in result.stderr
+
+
+@pytest.mark.git_auth
+def test_leader_cwd_blocks_worktree_private_artifact_without_execution_binding(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, _worktree, _runtime, run_dir = pinned_run
+    execution = ExecutionIdentity(host="codex", session_id="session-1", agent_id="")
+    binding = leader / ".git" / "agent-flow" / "executions" / f"{execution.digest}.json"
+    binding.unlink()
+
+    result = _structured_guard(
+        leader,
+        leader,
+        "write",
+        {"path": str(run_dir / "design.md"), "content": "design\n"},
+        session_id=execution.session_id,
+        agent_id=execution.agent_id,
+    )
+
+    assert result.returncode == 2
+    assert "execution_binding_missing" in result.stderr
+
+
+@pytest.mark.git_auth
+def test_leader_cwd_blocks_worktree_private_artifact_with_inactive_binding(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, _worktree, _runtime, run_dir = pinned_run
+    (run_dir / "active").unlink()
+
+    result = _structured_guard(
+        leader,
+        leader,
+        "write",
+        {"path": str(run_dir / "design.md"), "content": "design\n"},
+        session_id="session-1",
+    )
+
+    assert result.returncode == 2
+    assert "execution_binding_stale" in result.stderr
+
+
+@pytest.mark.git_auth
+def test_leader_cwd_blocks_worktree_private_artifact_from_different_session(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, _worktree, _runtime, run_dir = pinned_run
+
+    result = _structured_guard(
+        leader,
+        leader,
+        "write",
+        {"path": str(run_dir / "design.md"), "content": "design\n"},
+        session_id="session-2",
+    )
+
+    assert result.returncode == 2
+    assert "execution_binding_missing" in result.stderr
+
+
+@pytest.mark.git_auth
+def test_leader_cwd_blocks_worktree_private_artifact_bound_to_different_workspace(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, _worktree, _runtime, run_dir = pinned_run
+    other_worktree = leader / ".agent-flow" / "worktrees" / "feat-other"
+    _git(leader, "worktree", "add", "-b", "feat/other", str(other_worktree), "main")
+    other_identity = capture_workspace_identity(other_worktree)
+    other_run = (
+        leader
+        / ".git"
+        / "agent-flow"
+        / "worktrees"
+        / "feat-other"
+        / ".agent-flow"
+        / "runs"
+        / "run-other"
+    )
+    other_run.mkdir(parents=True)
+    (other_run / "active").write_text("", encoding="utf-8")
+    execution = ExecutionIdentity(host="codex", session_id="session-1", agent_id="")
+    binding = leader / ".git" / "agent-flow" / "executions" / f"{execution.digest}.json"
+    binding_payload = json.loads(binding.read_text(encoding="utf-8"))
+    binding_payload.update(
+        {
+            "workspace": other_identity.to_dict(),
+            "workspace_name": other_worktree.name,
+            "run_id": other_run.name,
+            "run_dir": str(other_run.resolve()),
+        }
+    )
+    binding.write_text(json.dumps(binding_payload), encoding="utf-8")
+
+    result = _structured_guard(
+        leader,
+        leader,
+        "write",
+        {"path": str(run_dir / "design.md"), "content": "design\n"},
+        session_id=execution.session_id,
+        agent_id=execution.agent_id,
+    )
+
+    assert result.returncode == 2
+    assert "execution_binding_conflict" in result.stderr
+    assert "different workspace" in result.stderr
+
+
+@pytest.mark.git_auth
+def test_leader_cwd_blocks_worktree_private_artifact_bound_to_different_run(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, _worktree, runtime, run_dir = pinned_run
+    other_run = runtime / ".agent-flow" / "runs" / "run-2"
+    other_run.mkdir()
+    (other_run / "active").write_text("", encoding="utf-8")
+    execution = ExecutionIdentity(host="codex", session_id="session-1", agent_id="")
+    binding = leader / ".git" / "agent-flow" / "executions" / f"{execution.digest}.json"
+    binding_payload = json.loads(binding.read_text(encoding="utf-8"))
+    binding_payload.update({"run_id": other_run.name, "run_dir": str(other_run.resolve())})
+    binding.write_text(json.dumps(binding_payload), encoding="utf-8")
+
+    result = _structured_guard(
+        leader,
+        leader,
+        "write",
+        {"path": str(run_dir / "design.md"), "content": "design\n"},
+        session_id=execution.session_id,
+        agent_id=execution.agent_id,
+    )
+
+    assert result.returncode == 2
+    assert "execution_binding_conflict" in result.stderr
+    assert "different run" in result.stderr
+
+
+@pytest.mark.git_auth
+def test_ordinary_worktree_write_remains_allowed_without_execution_binding(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    bindings = leader / ".git" / "agent-flow" / "executions"
+    for binding in bindings.glob("*.json"):
+        binding.unlink()
+
+    result = _structured_guard(
+        leader,
+        worktree,
+        "write",
+        {"path": str(worktree / "shared.txt"), "content": "changed\n"},
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.git_auth
@@ -1822,6 +2143,7 @@ def test_launcher_authentication_rejects_shadowing_and_shell_chains(
         f"{launcher} worktree list",
     )
     apk_export = _bash_guard(leader, worktree, f"{launcher} export-apk app-debug.apk")
+    artifact_publish = _bash_guard(leader, worktree, f"{launcher} publish-artifact preview.webp")
     stale_abort = _bash_guard(leader, leader, f"{launcher} abort --yes")
     shadowed = _bash_guard(leader, worktree, "PATH=. agent-flow status")
     chained = _bash_guard(leader, leader, f"{launcher} status\ntouch shared.txt")
@@ -1829,12 +2151,13 @@ def test_launcher_authentication_rejects_shadowing_and_shell_chains(
     assert allowed.returncode == 0, allowed.stderr
     assert worktree_list.returncode == 0, worktree_list.stderr
     assert apk_export.returncode == 0, apk_export.stderr
+    assert artifact_publish.returncode == 0, artifact_publish.stderr
     assert stale_abort.returncode == 0, stale_abort.stderr
     assert worktree_from_linked.returncode == 2
     assert "launcher is not trusted" in worktree_from_linked.stderr
     for result in (shadowed, chained):
         assert result.returncode == 2
-        assert "launcher is not trusted" in result.stderr
+        assert "BLOCKED:" in result.stderr
 
 
 @pytest.mark.git_auth
@@ -1857,6 +2180,7 @@ def test_foreign_runtime_contract_allows_only_leader_recovery_commands(
         _bash_guard(leader, leader, f"{launcher} install --force-managed"),
         _bash_guard(leader, leader, f"{launcher} sync"),
         _bash_guard(leader, leader, f"{launcher} status"),
+        _bash_guard(leader, leader, f"{launcher} continue"),
         _bash_guard(leader, leader, f"{launcher} abort --yes"),
         _bash_guard(leader, leader, f"{launcher} worktree repin --name feat-test"),
     )
@@ -1926,7 +2250,7 @@ def test_managed_context_marker_remains_immutable(
 
 
 @pytest.mark.git_auth
-def test_shell_mutation_paths_remain_confined_to_the_worktree(
+def test_raw_shell_mutations_require_the_trusted_sandboxed_gate(
     pinned_run: tuple[Path, Path, Path, Path],
 ) -> None:
     leader, worktree, _runtime, _run_dir = pinned_run
@@ -1934,13 +2258,544 @@ def test_shell_mutation_paths_remain_confined_to_the_worktree(
     allowed = _bash_guard(leader, worktree, "touch generated.txt")
     blocked = _bash_guard(leader, worktree, f"touch {leader / 'shared.txt'}")
 
-    assert allowed.returncode == 0, allowed.stderr
+    assert allowed.returncode == 2
+    assert "trusted sandboxed agent-flow gate" in allowed.stderr
     assert blocked.returncode == 2
     assert "target_outside_pinned_workspace" in blocked.stderr
 
 
 @pytest.mark.git_auth
-def test_adb_device_subcommand_paths_are_not_host_write_targets(
+def test_inline_node_copy_file_without_a_declared_target_fails_closed(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    command = (
+        "node -e \"require('fs').copyFileSync('shared.txt', "
+        f"'{leader / 'escaped.txt'}')\""
+    )
+
+    result = _bash_guard(leader, worktree, command)
+
+    assert result.returncode == 2
+    assert "not trusted" in result.stderr
+
+
+@pytest.mark.git_auth
+def test_indirect_python_symlink_without_a_declared_target_fails_closed(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    command = (
+        "python -c \"import os; getattr(os, 'sym' + 'link')('shared.txt', "
+        f"'{leader / 'escaped-link'}')\""
+    )
+
+    result = _bash_guard(leader, worktree, command)
+
+    assert result.returncode == 2
+    assert "not trusted" in result.stderr
+
+
+@pytest.mark.git_auth
+def test_cp_target_directory_option_cannot_escape_the_worktree(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+
+    result = _bash_guard(leader, worktree, f"cp -t {leader} shared.txt")
+
+    assert result.returncode == 2
+    assert "target_outside_pinned_workspace" in result.stderr
+
+
+@pytest.mark.git_auth
+@pytest.mark.parametrize(
+    "command_template",
+    (
+        "cp -vt {leader} shared.txt",
+        "install -vt {leader} shared.txt",
+        "cp --target={leader} shared.txt",
+        "install --target-d={leader} shared.txt",
+    ),
+)
+def test_target_directory_option_variants_cannot_escape_the_worktree(
+    pinned_run: tuple[Path, Path, Path, Path],
+    command_template: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+
+    result = _bash_guard(leader, worktree, command_template.format(leader=leader))
+
+    assert result.returncode == 2
+    assert "target_outside_pinned_workspace" in result.stderr
+
+
+@pytest.mark.git_auth
+def test_rsync_preserve_times_option_does_not_hide_destination(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+
+    result = _bash_guard(
+        leader,
+        worktree,
+        f"rsync -t shared.txt {leader / 'escaped'}",
+    )
+
+    assert result.returncode == 2
+    assert "target_outside_pinned_workspace" in result.stderr
+
+
+@pytest.mark.git_auth
+@pytest.mark.parametrize(
+    "destination",
+    (
+        "example.invalid:",
+        "user@example.invalid:",
+        "example.invalid:/outside",
+        "example.invalid::module/outside",
+        "rsync://example.invalid/module/outside",
+    ),
+)
+def test_rsync_remote_destination_fails_closed(
+    pinned_run: tuple[Path, Path, Path, Path],
+    destination: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+
+    result = _bash_guard(leader, worktree, f"rsync -a shared.txt {destination}")
+
+    assert result.returncode == 2
+    assert "unresolved mutation target" in result.stderr
+
+
+@pytest.mark.git_auth
+@pytest.mark.parametrize(
+    ("command", "env_override", "message"),
+    (
+        ("./untrusted-wrapper ./safe", None, "unresolved mutation target"),
+        ("./cat input", None, "unresolved mutation target"),
+        ("PATH=./bin:/usr/bin cat input", None, "untrusted shell startup environment"),
+        (". ./untrusted-script", None, "unresolved mutation target"),
+        ("sort -o /tmp/agent-flow-sort-escaped input", None, "unresolved mutation target"),
+        ("sed -n 'w /tmp/agent-flow-sed-escaped' input", None, "unresolved mutation target"),
+        ("python-wrapper -c \"open('./allowed.txt', 'w')\"", None, "unresolved mutation target"),
+        ("/usr/bin/git -c diff.external=/tmp/agent-flow-evil diff --ext-diff", None, "unresolved mutation target"),
+        ("GIT_EXTERNAL_DIFF=/tmp/agent-flow-evil /usr/bin/git diff --ext-diff", None, "untrusted shell startup environment"),
+        ("/usr/bin/rg --pre ./workspace-preprocessor needle shared.txt", None, "unresolved mutation target"),
+        ("touch safe", {"BASH_ENV": "/tmp/agent-flow-startup"}, "untrusted shell startup environment"),
+        ("LD_PRELOAD=/tmp/agent-flow-evil.so touch safe", None, "untrusted shell startup environment"),
+        ("env LD_AUDIT=/tmp/agent-flow-audit.so touch safe", None, "untrusted shell startup environment"),
+        ("NODE_OPTIONS=--require=/tmp/agent-flow-evil.js node -e \"require('fs').writeFileSync('./safe', 'x')\"", None, "untrusted shell startup environment"),
+    ),
+)
+def test_shell_mutation_fails_closed_for_unmodeled_wrapper_and_startup_environment(
+    pinned_run: tuple[Path, Path, Path, Path],
+    command: str,
+    env_override: dict[str, str | None] | None,
+    message: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+
+    result = _bash_guard(leader, worktree, command, env_override=env_override)
+
+    assert result.returncode == 2
+    assert message in result.stderr
+
+
+@pytest.mark.git_auth
+@pytest.mark.parametrize("command", ("cat shared.txt", "/usr/bin/git status"))
+def test_raw_external_commands_require_the_trusted_sandboxed_gate(
+    pinned_run: tuple[Path, Path, Path, Path],
+    command: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+
+    result = _bash_guard(leader, worktree, command)
+
+    assert result.returncode == 2
+    assert "trusted sandboxed agent-flow gate" in result.stderr
+
+
+@pytest.mark.git_auth
+def test_raw_git_status_requires_the_trusted_sandboxed_gate(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+
+    result = _bash_guard(leader, worktree, "git status --porcelain")
+
+    assert result.returncode == 2
+    assert "trusted sandboxed agent-flow gate" in result.stderr
+
+
+@pytest.mark.git_auth
+def test_trusted_agent_flow_gate_remains_the_shell_execution_route(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    launcher = leader / ".agent-flow" / "bin" / "agent-flow"
+
+    result = _bash_guard(leader, worktree, f"{launcher} gate -- git status --porcelain")
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.git_auth
+def test_rsync_external_output_option_fails_closed(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+
+    result = _bash_guard(
+        leader,
+        worktree,
+        f"rsync --log-file={leader / 'escaped.log'} shared.txt ./safe-destination",
+    )
+
+    assert result.returncode == 2
+    assert "unresolved mutation target" in result.stderr
+
+
+@pytest.mark.git_auth
+@pytest.mark.parametrize(
+    "command",
+    (
+        "echo copy",
+        "printf symlink",
+        f"{sys.executable} -I -S --version",
+        "node --version",
+        f"{sys.executable} -I -S -c \"print(1)\"",
+    ),
+)
+def test_known_read_only_commands_require_the_trusted_sandboxed_gate(
+    pinned_run: tuple[Path, Path, Path, Path],
+    command: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+
+    result = _bash_guard(leader, worktree, command)
+
+    assert result.returncode == 2
+    assert "trusted sandboxed agent-flow gate" in result.stderr
+
+
+@pytest.mark.git_auth
+def test_python_read_only_invocation_requires_isolated_startup(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+
+    result = _bash_guard(leader, worktree, f"{sys.executable} -c \"print(1)\"")
+
+    assert result.returncode == 2
+    assert "not trusted" in result.stderr
+
+
+@pytest.mark.git_auth
+def test_read_only_interpreter_rejects_path_shadowing(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    shadow = worktree / "python"
+    shadow.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    shadow.chmod(0o755)
+
+    result = _bash_guard(
+        leader,
+        worktree,
+        "python -I -S --version",
+        env_override={"PATH": f"{worktree}:{os.environ['PATH']}"},
+    )
+
+    assert result.returncode == 2
+    assert "untrusted" in result.stderr
+
+
+@pytest.mark.git_auth
+def test_read_only_interpreter_rejects_prior_segment_startup_injection(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    node = shutil.which("node")
+    assert node is not None
+
+    results = (
+        _bash_guard(
+            leader,
+            worktree,
+            f"PATH={worktree}:/usr/bin; {node} --version",
+        ),
+        _bash_guard(
+            leader,
+            worktree,
+            f"NODE_OPTIONS=--require={worktree / 'evil.js'}; {node} -e \"console.log(1)\"",
+        ),
+        _bash_guard(
+            leader,
+            worktree,
+            f"LD_PRELOAD={worktree / 'evil.so'}; {sys.executable} -I -S -c \"print(1)\"",
+        ),
+    )
+
+    for result in results:
+        assert result.returncode == 2
+        assert "untrusted" in result.stderr
+
+
+@pytest.mark.git_auth
+def test_mutating_shell_command_still_rejects_later_interpreter_injection(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+
+    result = _bash_guard(
+        leader,
+        worktree,
+        f"touch safe; PATH={worktree}:/usr/bin; node --version",
+    )
+
+    assert result.returncode == 2
+    assert "untrusted" in result.stderr
+
+
+@pytest.mark.git_auth
+@pytest.mark.parametrize(
+    "command_template",
+    (
+        "bash -c 'PATH={worktree}:/usr/bin; node --version'",
+        "( PATH={worktree}:/usr/bin; node --version )",
+        "{{ BASH_ENV={worktree}/evil.sh bash -c 'node --version'; }}",
+        "bash -ec 'NODE_OPTIONS=--require={worktree}/evil.js node --version'",
+        "sh -euc 'PATH={worktree}:/usr/bin node --version'",
+        "env -S 'PATH={worktree}:/usr/bin node --version'",
+        "env --split-string=BASH_ENV={worktree}/evil.sh\\ bash\\ -ec\\ node\\ --version",
+    ),
+)
+def test_nested_shell_interpreter_invocation_fails_closed(
+    pinned_run: tuple[Path, Path, Path, Path],
+    command_template: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+
+    result = _bash_guard(leader, worktree, command_template.format(worktree=worktree))
+
+    assert result.returncode == 2
+    assert "BLOCKED:" in result.stderr
+
+
+@pytest.mark.git_auth
+@pytest.mark.parametrize("environment_name", ("NODE_V8_COVERAGE", "NODE_COMPILE_CACHE"))
+def test_read_only_node_rejects_inherited_output_environment(
+    pinned_run: tuple[Path, Path, Path, Path],
+    environment_name: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    node = shutil.which("node")
+    assert node is not None
+
+    result = _bash_guard(
+        leader,
+        worktree,
+        f"{node} -e \"console.log(1)\"",
+        env_override={environment_name: str(worktree)},
+    )
+
+    assert result.returncode == 2
+    assert "untrusted read-only interpreter startup environment" in result.stderr
+
+
+@pytest.mark.git_auth
+def test_mutating_node_rejects_inherited_startup_environment(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    node = shutil.which("node")
+    assert node is not None
+
+    result = _bash_guard(
+        leader,
+        worktree,
+        f"{node} -e \"require('fs').writeFileSync('./safe', 'x')\"",
+        env_override={"NODE_OPTIONS": "--require=/tmp/agent-flow-evil.js"},
+    )
+
+    assert result.returncode == 2
+    assert "not trusted" in result.stderr
+
+
+@pytest.mark.git_auth
+def test_read_only_python_rejects_dynamic_loader_audit_injection(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+
+    result = _bash_guard(
+        leader,
+        worktree,
+        f"{sys.executable} -I -S -c \"print(1)\"",
+        env_override={"LD_AUDIT": str(worktree / "audit.so")},
+    )
+
+    assert result.returncode == 2
+    assert "untrusted" in result.stderr
+
+
+@pytest.mark.git_auth
+@pytest.mark.parametrize(
+    "command_template",
+    (
+        "{python} -c \"open('./allowed.txt', 'w'); open('/' + 'tmp/agent-flow-escaped', 'w')\"",
+        "{node} -e \"require('fs').writeFileSync('./allowed.txt', 'x'); require('fs').writeFileSync('/' + 'tmp/agent-flow-escaped', 'x')\"",
+    ),
+)
+def test_mutating_inline_interpreter_fails_closed_even_with_an_allowed_literal_path(
+    pinned_run: tuple[Path, Path, Path, Path],
+    command_template: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    node = shutil.which("node")
+    assert node is not None
+
+    result = _bash_guard(
+        leader,
+        worktree,
+        command_template.format(python=sys.executable, node=node),
+    )
+
+    assert result.returncode == 2
+    assert "mutating interpreter invocation" in result.stderr
+
+
+@pytest.mark.git_auth
+def test_read_only_node_rejects_trailing_preload_option(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    node = shutil.which("node")
+    assert node is not None
+
+    result = _bash_guard(
+        leader,
+        worktree,
+        f"{node} -e \"console.log(1)\" --require {worktree / 'evil.js'}",
+    )
+
+    assert result.returncode == 2
+    assert "not trusted" in result.stderr
+
+
+@pytest.mark.git_auth
+def test_read_only_python_rejects_startup_code_injection(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+
+    result = _bash_guard(
+        leader,
+        worktree,
+        f"{sys.executable} -I -S -c \"print(1)\"",
+        env_override={"PYTHONPATH": str(worktree)},
+    )
+
+    assert result.returncode == 2
+    assert "untrusted read-only interpreter startup environment" in result.stderr
+
+
+@pytest.mark.git_auth
+def test_read_only_python_rejects_prefix_startup_injection(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+
+    result = _bash_guard(
+        leader,
+        worktree,
+        f"PYTHONPATH={worktree} {sys.executable} -I -S -c \"print(1)\"",
+    )
+
+    assert result.returncode == 2
+    assert "untrusted" in result.stderr
+
+
+@pytest.mark.git_auth
+def test_read_only_node_rejects_preload_injection(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    node = shutil.which("node")
+    assert node is not None
+
+    result = _bash_guard(
+        leader,
+        worktree,
+        f"{node} -e \"console.log(1)\"",
+        env_override={"NODE_OPTIONS": "--require=./evil.js"},
+    )
+
+    assert result.returncode == 2
+    assert "untrusted read-only interpreter startup environment" in result.stderr
+
+
+@pytest.mark.git_auth
+def test_interpreter_read_only_allowlist_does_not_mask_inline_mutation(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    command = f"python -c \"print(open('{leader / 'escaped'}', 'w'))\""
+
+    result = _bash_guard(leader, worktree, command)
+
+    assert result.returncode == 2
+    assert "not trusted" in result.stderr
+
+
+@pytest.mark.git_auth
+def test_interpreter_nonliteral_expression_without_a_target_fails_closed(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    command = "python -c \"print(__import__('os').system('true'))\""
+
+    result = _bash_guard(leader, worktree, command)
+
+    assert result.returncode == 2
+    assert "not trusted" in result.stderr
+
+
+@pytest.mark.git_auth
+def test_renamed_interpreter_without_a_resolved_target_fails_closed(
+    pinned_run: tuple[Path, Path, Path, Path],
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+    command = (
+        "python-wrapper -c \"import os; "
+        "getattr(os, ''.join(['sym', 'link']))('shared.txt', "
+        f"'{leader / 'escaped'}')\""
+    )
+
+    result = _bash_guard(leader, worktree, command)
+
+    assert result.returncode == 2
+    assert "unresolved mutation target" in result.stderr
+
+
+@pytest.mark.git_auth
+@pytest.mark.parametrize("command", ("python-wrapper ./payload.py", "python ./payload.py"))
+def test_interpreter_script_argument_without_a_target_fails_closed(
+    pinned_run: tuple[Path, Path, Path, Path],
+    command: str,
+) -> None:
+    leader, worktree, _runtime, _run_dir = pinned_run
+
+    result = _bash_guard(leader, worktree, command)
+
+    assert result.returncode == 2
+    assert "BLOCKED:" in result.stderr
+
+
+@pytest.mark.git_auth
+def test_raw_adb_commands_require_a_separate_device_capability(
     pinned_run: tuple[Path, Path, Path, Path],
 ) -> None:
     leader, worktree, _runtime, _run_dir = pinned_run
@@ -1963,16 +2818,17 @@ def test_adb_device_subcommand_paths_are_not_host_write_targets(
         leader, worktree, f"adb wait-for-device pull /sdcard/window.xml {leader / 'escape.xml'}"
     )
 
-    assert dump.returncode == 0, dump.stderr
-    assert exec_out.returncode == 0, exec_out.stderr
-    assert serialized.returncode == 0, serialized.stderr
-    assert pull_escape.returncode == 2
-    assert "target_outside_pinned_workspace" in pull_escape.stderr
-    assert redirect_escape.returncode == 2
-    assert "target_outside_pinned_workspace" in redirect_escape.stderr
-    assert wait_for_dump.returncode == 0, wait_for_dump.stderr
-    assert wait_for_escape.returncode == 2
-    assert "target_outside_pinned_workspace" in wait_for_escape.stderr
+    for result in (
+        dump,
+        exec_out,
+        serialized,
+        pull_escape,
+        redirect_escape,
+        wait_for_dump,
+        wait_for_escape,
+    ):
+        assert result.returncode == 2
+        assert "BLOCKED:" in result.stderr
 
 
 @pytest.mark.git_auth

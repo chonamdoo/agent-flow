@@ -11611,45 +11611,49 @@ function currentExportWorkspace(root) {
   return validateNodeWorkspaceIdentity(identity, root);
 }
 
-function parseExportApkArgs(args) {
+function parseExportArtifactArgs(args, { label, expectedExtension = null, commandName = "publish-artifact" }) {
   let source = null;
   let name = null;
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === "--name") {
       if (index + 1 >= args.length || !args[index + 1]) {
-        throw new Error("--name requires an APK filename");
+        throw new Error(`--name requires a ${label} filename`);
       }
       name = args[++index];
     } else if (argument.startsWith("--name=")) {
       name = argument.slice("--name=".length);
-      if (!name) throw new Error("--name requires an APK filename");
+      if (!name) throw new Error(`--name requires a ${label} filename`);
     } else if (argument.startsWith("-") || source !== null) {
-      throw new Error("usage: agent-flow export-apk <workspace-apk> [--name <filename.apk>]");
+      throw new Error(`usage: agent-flow ${commandName} <workspace-file> [--name <filename>]`);
     } else {
       source = argument;
     }
   }
   if (!source) {
-    throw new Error("usage: agent-flow export-apk <workspace-apk> [--name <filename.apk>]");
+    throw new Error(`usage: agent-flow ${commandName} <workspace-file> [--name <filename>]`);
   }
   const filename = name ?? path.basename(source);
   if (
     filename !== path.basename(filename)
     || filename === "."
     || filename === ".."
-    || !filename.toLowerCase().endsWith(".apk")
+    || filename.includes("\0")
+    || filename.length > 255
+    || (expectedExtension && !filename.toLowerCase().endsWith(expectedExtension))
   ) {
-    throw new Error("APK export name must be a filename ending in .apk");
+    const suffix = expectedExtension ? ` ending in ${expectedExtension}` : "";
+    throw new Error(`${label} publish name must be a plain filename${suffix}`);
   }
   return { source, filename };
 }
 
-function openAvailableApkDestination(downloads, filename) {
-  const stem = filename.slice(0, -4);
+function openAvailableArtifactDestination(downloads, filename) {
+  const extension = path.extname(filename);
+  const stem = extension ? filename.slice(0, -extension.length) : filename;
   const noFollow = fs.constants.O_NOFOLLOW || 0;
   for (let suffix = 0; suffix < 1000; suffix += 1) {
-    const candidateName = suffix === 0 ? filename : `${stem}-${suffix}.apk`;
+    const candidateName = suffix === 0 ? filename : `${stem}-${suffix}${extension}`;
     const candidate = path.join(downloads, candidateName);
     try {
       const descriptor = fs.openSync(
@@ -11662,7 +11666,11 @@ function openAvailableApkDestination(downloads, filename) {
       if (error?.code !== "EEXIST") throw error;
     }
   }
-  throw new Error(`cannot allocate APK export name for ${filename}`);
+  throw new Error(`cannot allocate artifact publish name for ${filename}`);
+}
+
+function openAvailableApkDestination(downloads, filename) {
+  return openAvailableArtifactDestination(downloads, filename);
 }
 
 function captureApkDirectoryChain(base, target) {
@@ -11703,11 +11711,11 @@ function assertApkDirectoryChainUnchanged(chain, label) {
   }
 }
 
-function runExportApk(args) {
+function runExportArtifact(args, { label, expectedExtension = null, commandName = "publish-artifact" }) {
   const root = resolveAgentFlowRoot(process.cwd());
   assertProjectRuntimeContract(root);
   const workspace = currentExportWorkspace(root);
-  const request = parseExportApkArgs(args);
+  const request = parseExportArtifactArgs(args, { label, expectedExtension, commandName });
   const source = path.resolve(workspace, request.source);
   ensureChildPath(workspace, source);
   if (pathHasSymlink(workspace, source)) {
@@ -11721,9 +11729,10 @@ function runExportApk(args) {
     !sourceMetadata.isFile()
     || sourceMetadata.isSymbolicLink()
     || (typeof process.getuid === "function" && sourceMetadata.uid !== process.getuid())
-    || !source.toLowerCase().endsWith(".apk")
+    || (expectedExtension && !source.toLowerCase().endsWith(expectedExtension))
   ) {
-    throw new Error(`blocked: APK export source is not an owned regular .apk file: ${source}`);
+    const suffix = expectedExtension ? ` ${expectedExtension}` : "";
+    throw new Error(`blocked: ${label} publish source is not an owned regular${suffix} file: ${source}`);
   }
   const sourceDirectoryChain = captureApkDirectoryChain(workspace, path.dirname(source));
   const workspaceReal = fs.realpathSync.native(workspace);
@@ -11775,7 +11784,7 @@ function runExportApk(args) {
     if (fs.realpathSync.native(downloads) !== downloadsReal) {
       throw new Error("blocked: Downloads directory changed before copy");
     }
-    const openedDestination = openAvailableApkDestination(downloads, request.filename);
+    const openedDestination = openAvailableArtifactDestination(downloads, request.filename);
     destinationDescriptor = openedDestination.descriptor;
     destination = openedDestination.path;
     destinationIdentity = fs.fstatSync(destinationDescriptor);
@@ -11829,7 +11838,15 @@ function runExportApk(args) {
       }
     }
   }
-  console.log(`exported apk: ${destination}`);
+  console.log(`published ${label.toLowerCase()}: ${destination}`);
+}
+
+function runExportApk(args) {
+  runExportArtifact(args, { label: "APK", expectedExtension: ".apk", commandName: "export-apk" });
+}
+
+function runPublishArtifact(args) {
+  runExportArtifact(args, { label: "artifact" });
 }
 
 function scriptInvokesGradle(script) {
@@ -11875,8 +11892,14 @@ function runSandboxedGate(args, extraEnv = {}) {
   const gateRuntime = path.join(pinned, ".agent-flow", "gate-runtime");
   const gateHome = path.join(gateRuntime, "home");
   const gateTemp = path.join(gateRuntime, "tmp");
-  ensureManagedDirectory(gateHome, pinned);
-  ensureManagedDirectory(gateTemp, pinned);
+  const gateCache = path.join(gateRuntime, "cache");
+  const nodeCache = path.join(gateCache, "node");
+  const npmCache = path.join(gateCache, "npm");
+  const pythonCache = path.join(gateCache, "python");
+  const coverageCache = path.join(gateCache, "coverage");
+  for (const directory of [gateHome, gateTemp, gateCache, nodeCache, npmCache, pythonCache, coverageCache]) {
+    ensureManagedDirectory(directory, pinned);
+  }
   const gradleHome = path.join(gateRuntime, "gradle-home");
   const kotlinDaemon = path.join(gateRuntime, "kotlin-daemon");
   if (gradleGate) {
@@ -11890,6 +11913,14 @@ function runSandboxedGate(args, extraEnv = {}) {
     TMPDIR: gateTemp,
     TEMP: gateTemp,
     TMP: gateTemp,
+    XDG_CACHE_HOME: gateCache,
+    npm_config_cache: npmCache,
+    NPM_CONFIG_CACHE: npmCache,
+    YARN_CACHE_FOLDER: npmCache,
+    PIP_CACHE_DIR: pythonCache,
+    PYTHONPYCACHEPREFIX: pythonCache,
+    NODE_COMPILE_CACHE: nodeCache,
+    NODE_V8_COVERAGE: coverageCache,
   };
   if (gradleGate) {
     delete env.GRADLE_OPTS;
@@ -12473,6 +12504,11 @@ try {
     process.exit(0);
   }
 
+  if (command === "publish-artifact") {
+    runPublishArtifact(process.argv.slice(3));
+    process.exit(0);
+  }
+
   if (command === "architecture-lint") {
     runArchitectureLint(process.argv.slice(3));
   }
@@ -12485,7 +12521,7 @@ try {
     runSandboxedGate(process.argv.slice(3));
   }
 
-  console.error("usage: agent-flow-kit install [--force-managed] | sync | status | continue | abort [--worktree <name>] --yes | worktree <create|status|list|repin|remove> | export-apk <workspace-apk> [--name <filename.apk>] | gate -- <command ...> | gates [--profile <id>] [--worktree <name>] | architecture-lint [--profile <id>] [--files ...] | run <task|install|start|status|next|advance|push-watch|push-watch-tick>");
+  console.error("usage: agent-flow-kit install [--force-managed] | sync | status | continue | abort [--worktree <name>] --yes | worktree <create|status|list|repin|remove> | export-apk <workspace-apk> [--name <filename.apk>] | publish-artifact <workspace-file> [--name <filename>] | gate -- <command ...> | gates [--profile <id>] [--worktree <name>] | architecture-lint [--profile <id>] [--files ...] | run <task|install|start|status|next|advance|push-watch|push-watch-tick>");
   process.exit(1);
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));

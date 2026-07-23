@@ -11,6 +11,7 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any, Mapping
 
 
 sys.dont_write_bytecode = True
@@ -68,18 +69,14 @@ READ_ONLY_SHELL_COMMANDS = {
     "dirname",
     "du",
     "echo",
-    "env",
     "false",
     "git",
     "grep",
     "head",
     "ls",
     "pwd",
-    "printf",
     "readlink",
     "rg",
-    "sed",
-    "sort",
     "stat",
     "tail",
     "test",
@@ -89,6 +86,7 @@ READ_ONLY_SHELL_COMMANDS = {
     "wc",
     "which",
 }
+SHELL_BUILTIN_READ_ONLY_COMMANDS = {"echo", "false", "printf", "pwd", "test", "true", "type"}
 READ_ONLY_GIT_SUBCOMMANDS = {
     "branch",
     "diff",
@@ -99,6 +97,11 @@ READ_ONLY_GIT_SUBCOMMANDS = {
     "status",
 }
 SHELL_CWD_COMMANDS = {".", "cd", "chdir", "popd", "pushd", "source"}
+SHELL_BUILTIN_COMMANDS = (
+    SHELL_CWD_COMMANDS
+    | {"declare", "eval", "export", "readonly", "typeset", "unset"}
+    | SHELL_BUILTIN_READ_ONLY_COMMANDS
+)
 NESTED_SHELL_COMMANDS = {"bash", "dash", "ksh", "sh", "zsh"}
 SCRIPT_INTERPRETERS = {
     "node",
@@ -174,8 +177,8 @@ MANAGED_MARKER_START = "<!-- agent-flow:start -->"
 MANAGED_MARKER_END = "<!-- agent-flow:end -->"
 
 
-def _authenticate_runtime(leader_root: Path) -> None:
-    _verify_boundary_runtime(
+def _authenticate_runtime(leader_root: Path) -> dict[str, Any]:
+    return _verify_boundary_runtime(
         leader_root,
         leader_root / ".agent-flow" / "runtime" / "python",
     )
@@ -416,6 +419,238 @@ def _resolve_within_pinned(
         )
     return resolved
 
+
+def _detected_execution_host(environment: Mapping[str, str]) -> str:
+    if environment.get("CODEX_THREAD_ID") or environment.get("CODEX_CLI"):
+        return "codex"
+    if environment.get("CLAUDE_SESSION_ID") or environment.get("CLAUDECODE") or environment.get("CLAUDE_CLI"):
+        return "claude"
+    if environment.get("OMP_SESSION_ID") or environment.get("OMP_PROFILE"):
+        return "omp"
+    return ""
+
+
+def _host_session_id(host: str, environment: Mapping[str, str]) -> str:
+    names = {
+        "codex": ("CODEX_THREAD_ID", "CODEX_SESSION_ID"),
+        "claude": ("CLAUDE_SESSION_ID",),
+        "omp": ("OMP_SESSION_ID",),
+    }.get(host, ())
+    return next((environment[name] for name in names if environment.get(name)), "")
+
+
+def _host_agent_id(host: str, environment: Mapping[str, str]) -> str:
+    names = {
+        "codex": ("CODEX_AGENT_ID",),
+        "claude": ("CLAUDE_AGENT_ID",),
+        "omp": ("OMP_AGENT_ID",),
+    }.get(host, ())
+    return next((environment[name] for name in names if environment.get(name)), "")
+
+
+def _leader_private_execution_identity(
+    payload: dict[str, object],
+    host: str,
+) -> dict[str, str]:
+    host = host.strip().lower()
+    session_id = (
+        os.environ.get("AGENT_FLOW_EXECUTION_ID", "").strip()
+        or os.environ.get("AGENT_FLOW_SESSION_ID", "").strip()
+        or _host_session_id(host, os.environ)
+        or _context_value(payload, "execution_id", "thread_id", "session_id")
+    )
+    agent_id = (
+        os.environ.get("AGENT_FLOW_AGENT_ID", "").strip()
+        or _host_agent_id(host, os.environ)
+        or _context_value(payload, "agent_id")
+    )
+    if not host or not session_id:
+        raise ValueError(
+            "execution_identity_missing: leader worktree-private artifact write "
+            "did not declare a stable host session identity"
+        )
+    if (
+        len(host) > 32
+        or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789_-" for character in host)
+        or len(session_id) > 512
+        or len(agent_id) > 512
+    ):
+        raise ValueError("execution_identity_invalid: leader artifact execution identity")
+    return {"host": host, "session_id": session_id, "agent_id": agent_id}
+
+
+def _read_git_private_json(leader_root: Path, path: Path) -> dict[str, object]:
+    git_root = leader_root / ".git"
+    try:
+        relative = path.relative_to(git_root)
+    except ValueError as exc:
+        raise ValueError("git-private metadata path escapes the checkout") from exc
+    if len(relative.parts) < 2:
+        raise ValueError("git-private metadata path is invalid")
+
+    directory_flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        directory_flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        directory_flags |= os.O_NOFOLLOW
+    try:
+        root_before = git_root.lstat()
+        directory_fd = os.open(git_root, directory_flags)
+    except OSError as exc:
+        raise ValueError("git-private metadata directory is unavailable") from exc
+    try:
+        root_opened = os.fstat(directory_fd)
+        if (
+            root_opened.st_dev != root_before.st_dev
+            or root_opened.st_ino != root_before.st_ino
+            or not stat.S_ISDIR(root_opened.st_mode)
+            or root_opened.st_uid != os.getuid()
+            or stat.S_IMODE(root_opened.st_mode) & 0o022
+        ):
+            raise ValueError("git-private metadata directory is unsafe")
+        for part in relative.parts[:-1]:
+            next_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+            try:
+                metadata = os.fstat(next_fd)
+                if (
+                    not stat.S_ISDIR(metadata.st_mode)
+                    or metadata.st_uid != os.getuid()
+                    or stat.S_IMODE(metadata.st_mode) & 0o022
+                ):
+                    raise ValueError("git-private metadata directory is unsafe")
+            except BaseException:
+                os.close(next_fd)
+                raise
+            os.close(directory_fd)
+            directory_fd = next_fd
+
+        file_flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            file_flags |= os.O_NOFOLLOW
+        descriptor = os.open(relative.name, file_flags, dir_fd=directory_fd)
+        try:
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1
+                or metadata.st_uid != os.getuid()
+                or stat.S_IMODE(metadata.st_mode) & 0o022
+            ):
+                raise ValueError("git-private metadata file is unsafe")
+            chunks: list[bytes] = []
+            size = 0
+            while True:
+                chunk = os.read(descriptor, 65536)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > 1024 * 1024:
+                    raise ValueError("git-private metadata file is too large")
+                chunks.append(chunk)
+            repeated = os.fstat(descriptor)
+            if repeated.st_dev != metadata.st_dev or repeated.st_ino != metadata.st_ino:
+                raise ValueError("git-private metadata changed while reading")
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(directory_fd)
+    try:
+        payload = json.loads(b"".join(chunks).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("git-private metadata is invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("git-private metadata is not an object")
+    return payload
+
+
+def _ensure_leader_private_run_binding(
+    payload: dict[str, object],
+    pinned_root: Path,
+    leader_root: Path,
+    resolved: Path,
+    host: str,
+) -> None:
+    private_worktrees = leader_root / ".git" / "agent-flow" / "worktrees"
+    try:
+        parts = resolved.relative_to(private_worktrees).parts
+    except ValueError:
+        return
+    if len(parts) < 4 or parts[1:3] != (".agent-flow", "runs"):
+        return
+
+    execution = _leader_private_execution_identity(payload, host)
+    digest = hashlib.sha256(
+        json.dumps(execution, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
+    try:
+        binding = _read_git_private_json(
+            leader_root,
+            leader_root / ".git" / "agent-flow" / "executions" / f"{digest}.json",
+        )
+    except FileNotFoundError as exc:
+        raise ValueError(
+            "execution_binding_missing: active execution is not bound to the "
+            "worktree-private run"
+        ) from exc
+    if binding.get("execution") != execution:
+        raise ValueError("execution_binding_invalid: execution identity mismatch")
+
+    workspace_name = parts[0]
+    run_dir = private_worktrees.joinpath(*parts[:4])
+    workspace = binding.get("workspace")
+    if binding.get("workspace_name") != workspace_name:
+        raise ValueError(
+            "execution_binding_conflict: active execution is bound to a different workspace"
+        )
+    expected_workspace = (leader_root / ".agent-flow" / "worktrees" / workspace_name).resolve(strict=True)
+    expected_common_dir = (leader_root / ".git").resolve(strict=True)
+    if not isinstance(workspace, dict) or (
+        workspace.get("workspace_root") != str(expected_workspace)
+        or workspace.get("git_common_dir") != str(expected_common_dir)
+    ):
+        raise ValueError("execution_binding_conflict: recovery workspace path changed")
+    try:
+        workspace_metadata = expected_workspace.lstat()
+        manifest = _read_git_private_json(
+            leader_root,
+            private_worktrees / workspace_name / "manifest.json",
+        )
+    except OSError as exc:
+        raise ValueError("execution_binding_stale: bound workspace is unavailable") from exc
+    if (
+        manifest.get("identity") != workspace
+        or workspace_metadata.st_dev != workspace.get("device")
+        or workspace_metadata.st_ino != workspace.get("inode")
+    ):
+        raise ValueError("execution_binding_stale: bound workspace identity changed")
+    run_id = parts[3]
+    if binding.get("run_id") != run_id:
+        raise ValueError("execution_binding_conflict: active execution is bound to a different run")
+    try:
+        run_meta = _read_git_private_json(leader_root, run_dir / "meta.json")
+    except OSError as exc:
+        raise ValueError("execution_binding_stale: bound run is not active") from exc
+    if run_meta.get("run_id") != run_id or run_meta.get("workspace") != workspace:
+        raise ValueError("execution_binding_stale: bound run metadata changed")
+    run_dir_value = binding.get("run_dir")
+    if not isinstance(run_dir_value, str) or not run_dir_value:
+        raise ValueError("execution_binding_invalid: run directory")
+    try:
+        authenticated_run = run_dir.resolve(strict=True)
+        declared_run = Path(run_dir_value).resolve(strict=True)
+        active = authenticated_run / "active"
+        active_metadata = active.lstat()
+    except OSError as exc:
+        raise ValueError("execution_binding_stale: bound run is not active") from exc
+    if declared_run != authenticated_run:
+        raise ValueError(
+            "execution_binding_conflict: active execution is bound to a different run"
+        )
+    if (
+        stat.S_ISLNK(active_metadata.st_mode)
+        or not stat.S_ISREG(active_metadata.st_mode)
+    ):
+        raise ValueError("execution_binding_stale: bound run is not active")
 
 def _tool_name(payload: dict[str, object]) -> str:
     for key in ("tool_name", "toolName", "name"):
@@ -1159,6 +1394,68 @@ def _shell_command_name(token: str) -> str:
     return token.lower() if token in {".", ":"} else Path(token).name.lower()
 
 
+def _read_only_shell_command_is_trusted(
+    executable: str,
+    command_name: str,
+    shell_builtin_token: bool,
+) -> bool:
+    if shell_builtin_token:
+        return command_name in SHELL_BUILTIN_READ_ONLY_COMMANDS
+    if command_name not in READ_ONLY_SHELL_COMMANDS:
+        return False
+    trusted_location = shutil.which(command_name, path=os.defpath)
+    if not trusted_location:
+        return False
+    try:
+        if "/" in executable:
+            candidate = Path(executable).resolve(strict=True)
+        else:
+            located = shutil.which(executable)
+            if not located:
+                return False
+            candidate = Path(located).resolve(strict=True)
+        trusted = Path(trusted_location).resolve(strict=True)
+    except OSError:
+        return False
+    return candidate == trusted
+
+
+def _read_only_command_arguments_are_safe(command_name: str, arguments: list[str]) -> bool:
+    if command_name == "printf":
+        return not any(argument == "-v" or argument.startswith("-v") for argument in arguments)
+    if command_name == "git":
+        if any(value for name, value in os.environ.items() if name.startswith("GIT_") or name == "PAGER"):
+            return False
+        dangerous = {
+            "-c",
+            "-C",
+            "--config",
+            "--config-env",
+            "--exec-path",
+            "--ext-diff",
+            "--paginate",
+            "--textconv",
+        }
+        return not any(
+            argument in dangerous
+            or (argument.startswith("-c") and not argument.startswith("--"))
+            or argument.startswith("--config=")
+            or argument.startswith("--config-env=")
+            or argument.startswith("--exec-path=")
+            for argument in arguments
+        )
+    if command_name == "rg":
+        if any(value for name, value in os.environ.items() if name.startswith("RIPGREP_")):
+            return False
+        return not any(
+            argument == "--pre"
+            or argument.startswith("--pre=")
+            or argument.startswith("--pre-glob")
+            for argument in arguments
+        )
+    return True
+
+
 def _compound_shell_command_words(command: str) -> list[list[str]]:
     commands: list[list[str]] = []
     for segment, _operator in _split_shell_commands(command):
@@ -1796,6 +2093,7 @@ def _shell_mutation_paths(
         shell_builtin_token = (
             "/" not in unwrapped[0]
             and unwrapped[0] == command_name
+            and command_name in SHELL_BUILTIN_COMMANDS
             and not _uses_external_command_wrapper(command_words, wrapper_unwrapped)
         )
         persistent_cdpath = (
@@ -1862,7 +2160,7 @@ def _shell_mutation_paths(
             continue
 
         state_only_command = shell_builtin_token and (
-            command_name in SHELL_CWD_COMMANDS
+            command_name in (SHELL_CWD_COMMANDS - {".", "source"})
             or command_name
             in {"declare", "export", "readonly", "typeset", "unset"}
         )
@@ -1891,10 +2189,21 @@ def _shell_mutation_paths(
                     segment_mutating_options = True
                     if index + 1 < len(unwrapped):
                         declared_paths.append(unwrapped[index + 1])
+        interpreter_read_only = (
+            not segment_inline
+            and _script_interpreter_invocation_is_read_only(
+                command_name,
+                arguments,
+            )
+        )
         segment_read_only = (
             state_only_command
+            or interpreter_read_only
             or (
-                command_name in READ_ONLY_SHELL_COMMANDS
+                _read_only_shell_command_is_trusted(
+                    unwrapped[0], command_name, shell_builtin_token
+                )
+                and _read_only_command_arguments_are_safe(command_name, arguments)
                 and (git_command is None or _git_command_is_read_only(git_command))
                 and not segment_mutating_options
                 and not segment_unsafe
@@ -1903,7 +2212,11 @@ def _shell_mutation_paths(
         )
         if not segment_read_only:
             mutating_segment = True
-            dynamic_target = dynamic_target or segment_unsafe or command_name == "xargs"
+            dynamic_target = (
+                dynamic_target
+                or segment_unsafe
+                or command_name in {"sed", "sort", "xargs"}
+            )
             segment_paths: list[str] = list(declared_paths)
             positional = [argument for argument in arguments if not argument.startswith("-")]
             if git_command is not None:
@@ -1912,8 +2225,18 @@ def _shell_mutation_paths(
                 segment_paths.extend(sed_paths)
             elif perl_mutating:
                 segment_paths.extend(perl_paths)
-            elif command_name in {"cp", "install", "rsync"}:
-                if positional:
+            elif command_name in {"cp", "install"}:
+                target_directory = _target_directory_path(arguments)
+                if target_directory is not None:
+                    segment_paths.append(target_directory)
+                elif positional:
+                    segment_paths.append(positional[-1])
+            elif command_name == "rsync":
+                if _rsync_has_unresolved_output_option(arguments):
+                    dynamic_target = True
+                elif positional and _rsync_destination_is_remote(positional[-1]):
+                    dynamic_target = True
+                elif positional:
                     segment_paths.append(positional[-1])
             elif command_name in {"ln", "mv"}:
                 segment_paths.extend(positional)
@@ -1948,12 +2271,23 @@ def _shell_mutation_paths(
                 # device-side operands are not host paths; outer shell
                 # redirections are still collected separately above.
                 pass
+            elif command_name == "adb" and _adb_subcommand(arguments) == "pull" and positional:
+                segment_paths.append(positional[-1])
+            elif command_name == "adb":
+                dynamic_target = True
+            elif (
+                not segment_inline
+                and (command_name in SCRIPT_INTERPRETERS or _has_script_program_argument(arguments))
+            ):
+                # An interpreter's program is input, not a declared write
+                # target.  A renamed wrapper has no trustworthy output target
+                # either, so treat script execution as unresolved.
+                dynamic_target = True
             else:
-                segment_paths.extend(
-                    argument
-                    for argument in arguments
-                    if _looks_like_path(argument.strip("'\""))
-                )
+                # An unmodelled executable can interpret any operand as an
+                # output path; inline literals do not make the executable or
+                # its other, potentially constructed targets trustworthy.
+                dynamic_target = True
             if segment_inline:
                 segment_paths.extend(
                     match.group(1)
@@ -1966,6 +2300,14 @@ def _shell_mutation_paths(
                     dynamic_target = True
                 if not segment_paths:
                     dynamic_target = True
+            if not segment_paths and not (
+                command_name == "adb" and _adb_subcommand_is_host_read_only(arguments)
+            ):
+                # An unclassified mutator (including a renamed interpreter) has
+                # no trustworthy write destination.  Do not let the current
+                # working directory stand in for one: that would make a hidden
+                # target fail open.
+                dynamic_target = True
             materialized, unresolved = _materialize_shell_paths(
                 segment_paths,
                 command_directories,
@@ -2139,13 +2481,323 @@ def _shell_mutation_paths(
 
 
 def _has_inline_mutation(command: str) -> bool:
+    # Normalize statically-known string concatenation before looking for mutation
+    # APIs.  This catches common indirect calls such as
+    # ``getattr(os, 'sym' + 'link')(...)`` without treating arbitrary getattr
+    # reads as writes.
+    normalized = command
+    for _ in range(8):
+        expanded = re.sub(
+            r"(['\"])([^'\"\\]*)\1\s*\+\s*\1([^'\"\\]*)\1",
+            lambda match: f"{match.group(1)}{match.group(2)}{match.group(3)}{match.group(1)}",
+            normalized,
+        )
+        if expanded == normalized:
+            break
+        normalized = expanded
+    mutation_apis = (
+        "write_text|write_bytes|unlink|mkdir|makedirs|remove|rename|replace|"
+        "copy|copy2|copyfile|symlink|writeFileSync|appendFileSync|"
+        "createWriteStream|copyFileSync|symlinkSync|rmSync|unlinkSync|"
+        "mkdirSync|renameSync"
+    )
     return re.search(
-        r"\b(write_text|write_bytes|unlink|mkdir|makedirs|remove|rename|replace)\b|"
-        r"\b(writeFileSync|appendFileSync|createWriteStream|rmSync|unlinkSync|mkdirSync|renameSync)\b|"
+        rf"\b(?:{mutation_apis})\s*\(|"
+        rf"\bgetattr\s*\([^,]+,\s*['\"](?:{mutation_apis})['\"]\s*\)\s*\(|"
         r"\b(File\.(?:write|delete|rename)|open)\s*\([^)]*,?\s*['\"][wax+]",
-        command,
+        normalized,
         re.IGNORECASE,
     ) is not None
+
+
+def _script_interpreter_invocation_is_read_only(
+    command_name: str,
+    arguments: list[str],
+) -> bool:
+    if command_name not in SCRIPT_INTERPRETERS:
+        return False
+    is_python = command_name == "py" or command_name.startswith("python")
+    if is_python:
+        options: list[str] = []
+        index = 0
+        while index < len(arguments) and arguments[index] in {"-I", "-S"}:
+            options.append(arguments[index])
+            index += 1
+        if set(options) != {"-I", "-S"}:
+            return False
+        remaining = arguments[index:]
+        if remaining in (["--version"], ["-V"]):
+            return True
+        if len(remaining) != 2 or remaining[0] != "-c":
+            return False
+        source = remaining[1].strip()
+        literal = r"(?:['\"][^'\"\\]*['\"]|[-+]?\d+(?:\.\d+)?|True|False|None)"
+        return re.fullmatch(rf"print\(\s*{literal}\s*\)", source) is not None
+    if arguments in (["--version"], ["-V"]):
+        return True
+    if len(arguments) == 2 and arguments[0] == "-e":
+        source = arguments[1].strip()
+        literal = r"(?:['\"][^'\"\\]*['\"]|[-+]?\d+(?:\.\d+)?|True|False|None)"
+        return re.fullmatch(rf"console\.log\(\s*{literal}\s*\)", source) is not None
+    return False
+
+
+def _has_script_program_argument(arguments: list[str]) -> bool:
+    script_suffixes = {".py", ".pyw", ".js", ".cjs", ".mjs", ".rb", ".pl"}
+    return any(
+        not argument.startswith("-")
+        and Path(argument.strip("'\"")).suffix.lower() in script_suffixes
+        for argument in arguments
+    )
+
+
+def _has_nested_shell_evaluation(command: str) -> bool:
+    stripped = command.lstrip()
+    if stripped.startswith(("(", "{")) or re.search(r"(?:[;|&]\s*)[({]", command):
+        return True
+    for segment, _operator in _split_shell_commands(command):
+        try:
+            words = _shell_segment_words(segment)
+        except ValueError:
+            return True
+        if words and _shell_command_name(words[0]) == "env" and any(
+            argument in {"-S", "--split-string"}
+            or argument.startswith("--split-string=")
+            for argument in words[1:]
+        ):
+            return True
+        unwrapped = _unwrap_shell_command(words)
+        if not unwrapped:
+            continue
+        executable, *arguments = unwrapped
+        command_name = _shell_command_name(executable)
+        if command_name == "env" and any(
+            argument in {"-S", "--split-string"}
+            or argument.startswith("--split-string=")
+            for argument in arguments
+        ):
+            return True
+        if command_name == "eval":
+            return True
+        if command_name in {"bash", "sh", "dash", "zsh", "ksh"} and _shell_c_command(
+            arguments
+        ) is not None:
+            return True
+    return False
+
+
+def _untrusted_shell_startup_assignment_name(name: str) -> bool:
+    return (
+        name
+        in {
+            "BASH_ENV",
+            "ENV",
+            "NODE_OPTIONS",
+            "NODE_PATH",
+            "NODE_V8_COVERAGE",
+            "NODE_COMPILE_CACHE",
+            "PATH",
+        }
+        or name.startswith("GIT_")
+        or name.startswith("RIPGREP_")
+        or name == "PAGER"
+        or name.startswith("PYTHON")
+        or name.startswith("LD_")
+        or name.startswith("DYLD_")
+        or name.startswith("BASH_FUNC_")
+    )
+
+
+def _has_untrusted_shell_startup_assignment(command: str) -> bool:
+    return any(
+        _untrusted_shell_startup_assignment_name(match.group(1))
+        for match in re.finditer(r"(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)=", command)
+    )
+
+
+def _has_untrusted_shell_startup_environment() -> bool:
+    return any(
+        value
+        and (
+            name in {"BASH_ENV", "ENV"}
+            or name.startswith("LD_")
+            or name.startswith("DYLD_")
+            or name.startswith("BASH_FUNC_")
+        )
+        for name, value in os.environ.items()
+    )
+
+
+def _ensure_read_only_interpreter_is_trusted(
+    command: str,
+    cwd: Path,
+    leader_root: Path,
+) -> None:
+    """Fail closed for syntactically read-only Python/Node invocations.
+
+    The shell guard does not execute the command, so a read-only allowlist is
+    safe only when the executable is the authenticated runtime and no startup
+    environment can preload worktree code.
+    """
+    if _has_nested_shell_evaluation(command):
+        raise ValueError("nested shell evaluation is not trusted")
+    segments = _split_shell_commands(command)
+    if len(segments) != 1 or segments[0][1]:
+        for segment, _operator in segments:
+            try:
+                words = _shell_segment_words(segment)
+            except ValueError:
+                continue
+            unwrapped = _unwrap_shell_command(words)
+            if not unwrapped:
+                continue
+            executable, *arguments = unwrapped
+            if _shell_command_name(executable) in SCRIPT_INTERPRETERS:
+                raise ValueError("untrusted interpreter invocation")
+        return
+    segment = segments[0][0]
+    try:
+        words = _shell_segment_words(segment)
+    except ValueError:
+        return
+    unwrapped = _unwrap_shell_command(words)
+    if not unwrapped:
+        return
+    executable, *arguments = unwrapped
+    command_name = _shell_command_name(executable)
+    if command_name not in SCRIPT_INTERPRETERS:
+        return
+    if not _script_interpreter_invocation_is_read_only(command_name, arguments):
+        raise ValueError("mutating interpreter invocation is not trusted")
+    if (
+        words != unwrapped
+        or _shell_redirection_paths(segment)
+        or _has_active_shell_substitution(segment)
+        or _has_shell_parameter_expansion(segment)
+    ):
+        raise ValueError("untrusted read-only interpreter invocation")
+    startup_environment = {
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "PYTHONSTARTUP",
+        "PYTHONUSERBASE",
+        "PYTHONWARNINGS",
+        "PYTHONPYCACHEPREFIX",
+        "NODE_OPTIONS",
+        "NODE_PATH",
+        "NODE_V8_COVERAGE",
+        "NODE_COMPILE_CACHE",
+        "BASH_ENV",
+        "ENV",
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_LIBRARY_PATH",
+    }
+    if any(os.environ.get(name) for name in startup_environment) or any(
+        value
+        and (
+            name.startswith("LD_")
+            or name.startswith("DYLD_")
+            or name.startswith("BASH_FUNC_")
+        )
+        for name, value in os.environ.items()
+    ):
+        raise ValueError("untrusted read-only interpreter startup environment")
+
+    contract = _authenticate_runtime(leader_root)
+    if "/" in executable:
+        candidate = Path(executable)
+        if not candidate.is_absolute():
+            candidate = cwd / candidate
+    else:
+        located = shutil.which(executable)
+        if not located:
+            raise ValueError("untrusted read-only interpreter executable")
+        candidate = Path(located)
+    try:
+        resolved = candidate.resolve(strict=True)
+        if "node_runtime" in contract:
+            if command_name in {"node", "nodejs"}:
+                # v2 contracts pin the managed Node runtime tree but predate an
+                # executable contract.  Keep legacy read-only compatibility
+                # only for a host system Node, never a workspace/PATH shadow.
+                if not any(
+                    resolved.is_relative_to(root)
+                    for root in (Path("/usr/bin"), Path("/usr/local/bin"), Path("/usr/local/lib"))
+                ):
+                    raise ValueError("legacy Node executable is not a trusted system runtime")
+                trusted = resolved
+            else:
+                # The guard process itself is the only authenticated Python
+                # authority available to a v2 contract.
+                trusted = Path(sys.executable).resolve(strict=True)
+        elif command_name in {"node", "nodejs"}:
+            trusted = Path(str(contract["node"]["path"])).resolve(strict=True)
+        else:
+            trusted = Path(str(contract["python"]["resolved_path"])).resolve(strict=True)
+    except (KeyError, OSError, RuntimeError) as exc:
+        raise ValueError("untrusted read-only interpreter executable") from exc
+    if resolved != trusted:
+        raise ValueError("untrusted read-only interpreter executable")
+
+
+def _rsync_has_unresolved_output_option(arguments: list[str]) -> bool:
+    safe_short_options = {"a", "c", "n", "q", "r", "t", "v"}
+    safe_long_options = {
+        "archive",
+        "checksum",
+        "dry-run",
+        "quiet",
+        "recursive",
+        "times",
+        "verbose",
+    }
+    for argument in arguments:
+        if argument == "--":
+            break
+        if argument.startswith("--"):
+            name = argument[2:].split("=", 1)[0]
+            if name not in safe_long_options:
+                return True
+        elif argument.startswith("-") and argument != "-":
+            if any(option not in safe_short_options for option in argument[1:]):
+                return True
+    return False
+
+
+def _rsync_destination_is_remote(destination: str) -> bool:
+    return destination.startswith("rsync://") or bool(
+        re.match(r"^(?:[^/:\s]+@)?[^/:\s]+::?.*$", destination)
+    )
+
+
+def _target_directory_path(arguments: list[str]) -> str | None:
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == "--":
+            break
+        if argument.startswith("--"):
+            name, separator, value = argument[2:].partition("=")
+            if name and "target-directory".startswith(name):
+                if separator:
+                    return value or None
+                if index + 1 < len(arguments):
+                    return arguments[index + 1]
+                return None
+        elif argument.startswith("-") and argument != "-":
+            options = argument[1:]
+            target_index = options.find("t")
+            if target_index >= 0:
+                attached_value = options[target_index + 1 :]
+                if attached_value:
+                    return attached_value
+                if index + 1 < len(arguments):
+                    return arguments[index + 1]
+                return None
+        index += 1
+    return None
 
 
 def _looks_like_path(candidate: str) -> bool:
@@ -2636,7 +3288,7 @@ def _is_leader_recovery_launcher(command: str, cwd: Path, leader_root: Path) -> 
         return False
     arguments = words[1:]
     recovery = (
-        arguments[0] in {"install", "sync", "status", "abort"}
+        arguments[0] in {"install", "sync", "status", "continue", "abort"}
         or arguments[:2] == ["run", "install"]
         or arguments[:2] == ["worktree", "repin"]
     )
@@ -2682,6 +3334,7 @@ def _is_agent_flow_launcher(command: str, cwd: Path, leader_root: Path, pinned_r
         "install",
         "worktree",
         "export-apk",
+        "publish-artifact",
     }
     if arguments[0] not in trusted_subcommands:
         return False
@@ -3007,7 +3660,7 @@ def _verify_legacy_boundary_runtime(leader_root: Path, kit: dict[str, object], c
         os.environ["AGENT_FLOW_GIT_EXECUTABLE"] = "/usr/bin/git"
 
 
-def _verify_boundary_runtime(leader_root: Path, runtime_root: Path) -> None:
+def _verify_boundary_runtime(leader_root: Path, runtime_root: Path) -> dict[str, Any]:
     kit_path = leader_root / ".agent-flow" / "kit.json"
     try:
         kit = json.loads(kit_path.read_text(encoding="utf-8"))
@@ -3017,7 +3670,7 @@ def _verify_boundary_runtime(leader_root: Path, runtime_root: Path) -> None:
         embedded_authority = not embedded.startswith("__AGENT_FLOW_")
         if not embedded_authority and "node_runtime" in contract:
             _verify_legacy_boundary_runtime(leader_root, kit, contract)
-            return
+            return contract
         commitment = _project_runtime_contract_commitment(contract)
         if (
             contract["version"] != 3
@@ -3038,6 +3691,7 @@ def _verify_boundary_runtime(leader_root: Path, runtime_root: Path) -> None:
         if not git_path.is_absolute() or git_path.resolve(strict=True) != git_path:
             raise ValueError("project git runtime is invalid")
         os.environ["AGENT_FLOW_GIT_EXECUTABLE"] = str(git_path)
+        return contract
     except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise RuntimeError("pinned workspace guard runtime authentication failed") from exc
 
@@ -3059,9 +3713,11 @@ def main() -> int:
         if not (leader_root / ".git").exists():
             return 0
         host = str(
-            payload.get("host")
+            os.environ.get("AGENT_FLOW_ACTIVE_HOST")
+            or os.environ.get("AGENT_FLOW_HOST")
+            or _detected_execution_host(os.environ)
+            or payload.get("host")
             or _host_argument()
-            or os.environ.get("AGENT_FLOW_ACTIVE_HOST")
             or "unknown"
         ).strip().lower()
         tool_input = _tool_input(payload)
@@ -3073,6 +3729,10 @@ def main() -> int:
             if not isinstance(command_value, str) or not command_value.strip():
                 raise ValueError("write boundary rejected: shell tool did not declare a command")
             command = command_value
+            if _has_untrusted_shell_startup_environment() or _has_untrusted_shell_startup_assignment(
+                command
+            ):
+                raise ValueError("untrusted shell startup environment")
             if _is_agent_flow_launcher(command, cwd, leader_root, pinned_root):
                 if host == "claude":
                     _forward_claude_execution_identity(payload, tool_input, command)
@@ -3083,12 +3743,18 @@ def main() -> int:
                 if _is_leader_recovery_launcher(command, cwd, leader_root):
                     return 0
                 raise ValueError("write boundary rejected: agent-flow launcher is not trusted")
+            # The parser is retained only to produce precise denial diagnostics
+            # for known dangerous forms. It never authorizes execution: every
+            # generic command reaches the mandatory sandboxed-gate denial below.
+            _ensure_read_only_interpreter_is_trusted(command, cwd, leader_root)
             mutating, paths, unresolved_shell_target = _shell_mutation_paths(
                 command,
                 base_dir=cwd,
             )
             if not mutating:
-                return 0
+                raise ValueError(
+                    "write boundary rejected: run arbitrary commands through the trusted sandboxed agent-flow gate"
+                )
         else:
             paths = _requested_paths(tool_input)
             if not paths:
@@ -3101,7 +3767,9 @@ def main() -> int:
                 "write boundary rejected: shell command has an unresolved mutation target"
             )
         if not paths:
-            return 0
+            raise ValueError(
+                "write boundary rejected: shell command has an unresolved mutation target"
+            )
         for requested in paths:
             target = _resolve_within_pinned(
                 pinned_root,
@@ -3110,12 +3778,23 @@ def main() -> int:
                 host=host,
                 leader_root=leader_root,
             )
+            _ensure_leader_private_run_binding(
+                payload,
+                pinned_root,
+                leader_root,
+                target,
+                host,
+            )
             _verify_managed_marker_integrity(
                 tool_name,
                 tool_input,
                 requested,
                 target,
                 cwd,
+            )
+        if tool_name in SHELL_TOOLS:
+            raise ValueError(
+                "write boundary rejected: run arbitrary commands through the trusted sandboxed agent-flow gate"
             )
         return 0
     except Exception as exc:

@@ -24,6 +24,7 @@ _WORKTREE_TERMS = (
 )
 
 _CLI_INTEGRATION_TERMS = (
+    "export",
     "install",
     "installer",
     "packaged_resources",

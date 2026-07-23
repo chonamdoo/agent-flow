@@ -6,6 +6,7 @@
     "parity:check": "node scripts/check-agent-flow-parity.mjs",
     "skills:validate": "node scripts/validate-skills.mjs",
     "test": "python3 scripts/run-test-shards.py fast",
+    "test:changed": "uv run --extra dev python scripts/run-test-shards.py related",
     "test:integration": "python3 scripts/run-test-shards.py integration",
     "test:parity": "python3 scripts/run-test-shards.py parity",
     "test:worktree": "python3 scripts/run-test-shards.py worktree-lifecycle",

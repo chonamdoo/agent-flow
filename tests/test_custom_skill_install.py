@@ -1569,6 +1569,12 @@ def test_sandboxed_gate_cannot_write_outside_pinned_workspace(tmp_path: Path) ->
     assert escaped.returncode != 0
     assert outside.read_text(encoding="utf-8") == "outside\n"
 
+def test_sandbox_gate_runtime_directory_list_is_an_array() -> None:
+    source = Path(_APK_KIT).read_text(encoding="utf-8")
+
+    assert "for (const directory of [gateHome, gateTemp, gateCache, nodeCache, npmCache, pythonCache, coverageCache])" in source
+
+
 def test_sandboxed_gradle_gate_uses_workspace_cache_and_no_daemon(
     tmp_path: Path,
 ) -> None:
@@ -7935,6 +7941,30 @@ def test_export_apk_exports_from_owning_worktree(tmp_path: Path) -> None:
     exported = downloads / "app-release.apk"
     assert exported.is_file()
     assert exported.read_bytes() == b"OWNING-APK-PAYLOAD"
+
+
+def test_publish_artifact_exports_webp_from_owning_worktree(tmp_path: Path) -> None:
+    project, home, downloads = _init_export_project(tmp_path)
+    env = _export_env(home, "webp-success")
+    worktree = _bind_export_worktree(project, "webp-success", env)
+    source = worktree / "renders" / "preview.webp"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"WEBP-PAYLOAD")
+
+    result = subprocess.run(
+        (_node(), _APK_KIT, "publish-artifact", "renders/preview.webp"),
+        cwd=worktree,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+        stdin=subprocess.DEVNULL,
+    )
+
+    assert result.returncode == 0, result.stderr
+    exported = downloads / "preview.webp"
+    assert exported.is_file()
+    assert exported.read_bytes() == b"WEBP-PAYLOAD"
 
 
 def test_export_apk_rejects_source_intermediate_symlink_swap(tmp_path: Path) -> None:

@@ -68,6 +68,13 @@ SAFE_RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 
 RELATED_TESTS_BY_PRODUCTION = {
     "scripts/run-test-shards.py": ("tests/test_test_shards.py",),
+    "tests/shard_policy.py": ("tests/test_test_shards.py",),
+    "bin/agent-flow-kit.mjs": (
+        "tests/test_cli.py::CliTest::test_node_status_escapes_task_newlines_and_emits_json",
+        "tests/test_custom_skill_install.py::test_install_materializes_authenticated_project_launcher",
+        "tests/test_custom_skill_install.py::test_publish_artifact_exports_webp_from_owning_worktree",
+        "tests/test_pinned_workspace_boundary.py::test_trusted_agent_flow_gate_remains_the_shell_execution_route",
+    ),
     "src/agent_flow/cli.py": (
         "tests/test_cli.py::CliTest::test_gate_order_ignores_changed_file_kind_tokens",
         "tests/test_runner_smoke.py::test_stale_worktree_remove_handles_reference_hook_rejection",
@@ -77,8 +84,7 @@ RELATED_TESTS_BY_PRODUCTION = {
         "tests/test_runner_smoke.py::test_compare_and_delete_preserves_branch_when_existing_reference_hook_rejects",
     ),
     "src/agent_flow/core/workspace_boundary.py": (
-        "tests/test_pinned_workspace_boundary.py::test_workspace_start_claim_recovers_reused_pid_but_not_live_owner",
-        "tests/test_pinned_workspace_boundary.py::test_worktree_lifecycle_claim_recovers_after_leader_head_changes",
+        "tests/test_pinned_workspace_boundary.py",
     ),
     "src/agent_flow/core/worktrees.py": (
         "tests/test_runner_smoke.py::test_compare_and_delete_preserves_branch_that_moves_after_validation",
@@ -748,25 +754,57 @@ def _external_tree_hash(root: Path) -> str:
 
 
 def _changed_files(root: Path) -> list[str]:
-    result = subprocess.run(
+    status = subprocess.run(
         ("git", "status", "--porcelain=v1", "-z"),
         cwd=root,
         check=True,
         capture_output=True,
     )
-    entries = result.stdout.decode(errors="surrogateescape").split("\0")
-    changed: list[str] = []
+    entries = status.stdout.decode(errors="surrogateescape").split("\0")
+    changed: set[str] = set()
     index = 0
     while index < len(entries):
         entry = entries[index]
         index += 1
         if not entry:
             continue
-        status = entry[:2]
-        changed.append(entry[3:])
-        if ("R" in status or "C" in status) and index < len(entries) and entries[index]:
-            changed.append(entries[index])
+        state = entry[:2]
+        changed.add(entry[3:])
+        if ("R" in state or "C" in state) and index < len(entries) and entries[index]:
+            changed.add(entries[index])
             index += 1
+
+    def changed_paths(*args: str) -> set[str]:
+        result = subprocess.run(
+            ("git", *args),
+            cwd=root,
+            check=True,
+            capture_output=True,
+        )
+        return {entry for entry in result.stdout.decode(errors="surrogateescape").split("\0") if entry}
+
+    for base in ("origin/main", "main"):
+        merge_base = subprocess.run(
+            ("git", "merge-base", "HEAD", base),
+            cwd=root,
+            check=False,
+            capture_output=True,
+        )
+        if merge_base.returncode != 0:
+            continue
+        ancestor = merge_base.stdout.decode(errors="surrogateescape").strip()
+        if ancestor:
+            changed.update(
+                changed_paths(
+                    "diff",
+                    "--no-renames",
+                    "--name-only",
+                    "--diff-filter=ACMRD",
+                    "-z",
+                    f"{ancestor}..HEAD",
+                )
+            )
+        break
     return sorted(changed)
 
 
@@ -833,7 +871,7 @@ def _related_python_tests(changed_files: Sequence[str]) -> tuple[str, ...]:
         if mapped:
             selected.update(mapped)
             continue
-        if path.parts and path.parts[0] == "tests" and path.suffix == ".py":
+        if path.parts and path.parts[0] == "tests" and path.name.startswith("test_") and path.suffix == ".py":
             selected.add(path.as_posix())
         elif path.parts[:2] == ("src", "agent_flow") and path.suffix == ".py":
             candidate = ROOT / "tests" / f"test_{path.stem}.py"
