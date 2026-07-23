@@ -584,7 +584,9 @@ phases:
   - id: merge
     description: Merge using profile.pr.merge_strategy.
     prompt: |
-      Merge via profile.pr.merge_strategy (squash / rebase / merge). Output:
+      Merge via profile.pr.merge_strategy (squash / rebase / merge). If the
+      merge or rebase hits conflicts, apply
+      `skills/resolving-merge-conflicts/SKILL.md` before completing. Output:
       merge.md (merge commit hash, target branch).
 
   - id: cleanup
