@@ -1073,7 +1073,7 @@ function selectProjectSkills(root, agentFlowDir, installSelection = null) {
   }
   const allowed = installSelection?.skillNames || null;
   const skills = [...byName.values()]
-    .filter((skill) => !allowed || allowed.has(skill.name))
+    .filter((skill) => skill.source !== "bundled" || !allowed || allowed.has(skill.name))
     .sort((a, b) => a.name.localeCompare(b.name));
   warnings.push(...validateSkillDependencies(skills));
   const conflicts = [];
