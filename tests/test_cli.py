@@ -2524,16 +2524,6 @@ class CliTest(unittest.TestCase):
             for installer_name in installers:
                 project_root = root / installer_name
                 project_root.mkdir()
-                skill_dir = project_root / "skills" / "android-mvi-feature"
-                skill_dir.mkdir(parents=True)
-                (skill_dir / "SKILL.md").write_text(
-                    "---\n"
-                    "name: android-mvi-feature\n"
-                    "hosts: [codex]\n"
-                    "---\n"
-                    "# Android MVI Feature\n",
-                    encoding="utf-8",
-                )
                 alias_dir = project_root / ".agent-flow" / "local-skills" / "aliased-compose"
                 alias_dir.mkdir(parents=True)
                 (alias_dir / "SKILL.md").write_text(
@@ -2568,11 +2558,9 @@ class CliTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 index = json.loads((project_root / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
                 skill_names = {skill["name"] for skill in index["skills"]}
-                self.assertNotIn("android-mvi-feature", skill_names)
                 self.assertNotIn("compose-state-authoring", skill_names)
                 self.assertNotIn("edge-to-edge", skill_names)
                 for host_root in (project_root / ".Codex" / "skills", project_root / ".codex" / "skills", project_root / ".omp" / "skills"):
-                    self.assertFalse((host_root / "android-mvi-feature").exists())
                     self.assertFalse((host_root / "compose-state-authoring").exists())
                     self.assertFalse((host_root / "edge-to-edge").exists())
 

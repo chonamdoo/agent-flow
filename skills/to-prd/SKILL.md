@@ -1,12 +1,22 @@
 ---
 name: to-prd
-description: Turn the current conversation into a PRD and publish it to the project issue tracker — no interview, just synthesis of what you've already discussed.
+description: Synthesizes the current conversation and codebase context into a PRD, then writes or publishes it according to the caller's requested output target. Use when the user asks to turn an already-discussed idea, plan, or conversation into a PRD; use `grilling` first if key decisions are still unresolved.
 disable-model-invocation: true
 ---
 
-This skill takes the current conversation context and codebase understanding and produces a PRD. Do NOT interview the user — just synthesize what you already know.
+# To PRD
 
-The issue tracker and triage label vocabulary should have been provided to you — run `/setup-matt-pocock-skills` if not.
+This skill is for synthesis, not discovery interviewing. Do not ask a fresh question set; use only the current conversation, codebase context, and any already-settled decisions.
+
+## Quick start
+
+1. Explore the repo only enough to describe current state, domain language, ADR constraints, and testing seams.
+2. Confirm the intended test seams with the user.
+3. Write the PRD from the template below. Save it to the caller's requested artifact path, or publish and label it `ready-for-agent` only when the workflow or user explicitly asks for tracker publication.
+
+Use `grilling` before this when decisions are unresolved.
+
+This skill takes the current conversation context and codebase understanding and produces a PRD. Do NOT interview the user — just synthesize what you already know.
 
 ## Process
 
@@ -16,7 +26,7 @@ The issue tracker and triage label vocabulary should have been provided to you �
 
 Check with the user that these seams match their expectations.
 
-3. Write the PRD using the template below, then publish it to the project issue tracker. Apply the `ready-for-agent` triage label - no need for additional triage.
+3. Write the PRD using the template below. Save it to the caller's requested artifact path; publish it to the project issue tracker and apply the `ready-for-agent` triage label only when the workflow or user explicitly asks for tracker publication.
 
 <prd-template>
 

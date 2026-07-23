@@ -520,18 +520,13 @@ if (CHECK_INSTALLED_COPY) {
 // skill source와 설치본이 달라지면 다른 프로젝트로 전파될 때 기준이 갈린다.
 if (CHECK_INSTALLED_COPY) {
   for (const skill of [
+    "code-review",
     "codebase-design",
-    "diagnosing-bugs",
     "domain-modeling",
     "grill-with-docs",
     "grilling",
-    "improve-codebase-architecture",
-    "qa",
-    "setup-matt-pocock-skills",
     "tdd",
-    "to-issues",
     "to-prd",
-    "triage",
   ]) {
     for (const rel of recursiveFiles(`skills/${skill}`)) {
       assertSame(rel, `.agent-flow/${rel}`);

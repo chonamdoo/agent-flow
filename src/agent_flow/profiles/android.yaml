@@ -200,8 +200,6 @@ chrisbanes_skills:
     - agent-flow install은 이 skill들을 설치, 복사, 링크, vendor 처리하지 않는다.
     - 현재 host 경로에 필요한 skill이 없으면 작업을 멈추고 `missing local chrisbanes_skills: <skill>`와 source URL을 사용자에게 알려 설치를 요청한다.
   implementation:
-    - skill: android-mvi-feature
-      when: Compose screen, ViewModel state, or MVI action work
     - skill: android-module-creator
       when: Android module or Gradle boundary work
     - skill: android-debugging

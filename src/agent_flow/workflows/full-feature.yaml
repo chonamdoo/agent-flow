@@ -47,9 +47,7 @@ phases:
   - id: prd
     description: Write the product requirements document.
     prompt: |
-      Apply `.agent-flow/skills/to-prd/SKILL.md`. Resolve its
-      `/setup-matt-pocock-skills` reference from
-      `.agent-flow/skills/setup-matt-pocock-skills/SKILL.md`. Write the PRD
+      Apply `.agent-flow/skills/to-prd/SKILL.md`. Write the PRD
       from domain-grill.md and product-brief.md. Include goal, scope,
       non-goals, user stories, acceptance criteria, edge cases, dependencies,
       and risks. Output: artifacts/prd.md.

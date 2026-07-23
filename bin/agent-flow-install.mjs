@@ -38,7 +38,6 @@ const PROFILE_MANAGED_HOST_ONLY_SKILLS = new Set([
   "android-cli",
   "android-debugging",
   "android-module-creator",
-  "android-mvi-feature",
   "appfunctions",
   "camera1-to-camerax",
   "compose-animations",
