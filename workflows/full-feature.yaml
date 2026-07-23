@@ -168,9 +168,9 @@ phases:
       - "project-local-skills-used:"
       - "presentation-skill: android|react|react-native|ios|n/a"
     prompt: |
-      Apply code-generation-discipline and `.agent-flow/skills/tdd/SKILL.md`
-      before writing tests. Resolve its `/codebase-design` reference from
-      `.agent-flow/skills/codebase-design/SKILL.md`. Write failing tests first.
+      Apply code-generation-discipline, `.agent-flow/skills/tdd/SKILL.md`, and
+      `.agent-flow/skills/codebase-design/SKILL.md` before writing tests. Write
+      failing tests first.
       Resolve required skills from active profile metadata,
       `.agent-flow/skills/index.json`, changed files, and task scope. Read only
       the touched profile skill union before writing tests. Android/Kotlin/
