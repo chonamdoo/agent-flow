@@ -682,8 +682,10 @@ phases:
   - id: merge
     description: Merge after explicit user approval.
     prompt: |
-      Merge only after explicit user approval. Record merge strategy, target
-      branch, and merge commit. Output: artifacts/merge.md.
+      Merge only after explicit user approval. If the merge or rebase hits
+      conflicts, apply `skills/resolving-merge-conflicts/SKILL.md` before
+      completing. Record merge strategy, target branch, and merge commit.
+      Output: artifacts/merge.md.
 
   - id: handoff
     description: Final handoff and cleanup.
