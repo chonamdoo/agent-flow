@@ -668,3 +668,95 @@ def test_profile_yaml_install_list_matches_fallback_map(tmp_path: Path) -> None:
     from_js = sorted(re.findall(r'"([A-Za-z0-9._-]+)"', android_block))
 
     assert from_yaml == from_js, f"yaml={from_yaml} js={from_js}"
+
+
+def _hook_state(project: Path) -> dict:
+    import json as _json
+
+    names = set()
+    for rel in (".claude/settings.json", ".Codex/hooks.json", ".codex/hooks.json"):
+        path = project / rel
+        if not path.is_file():
+            continue
+        payload = _json.loads(path.read_text(encoding="utf-8"))
+        for entries in (payload.get("hooks") or {}).values():
+            for entry in entries:
+                for hook in entry.get("hooks") or []:
+                    command = hook.get("command") or ""
+                    if command:
+                        names.add(command.split("/")[-1].strip("'\""))
+    hooks_dir = project / ".agent-flow" / "scripts" / "hooks"
+    scripts = (
+        {p.name for p in hooks_dir.iterdir() if p.suffix in {".sh", ".py"}}
+        if hooks_dir.is_dir()
+        else set()
+    )
+    kit = _json.loads((project / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
+    return {
+        "registered": names,
+        "scripts": scripts,
+        "omp": (project / ".omp" / "extensions" / "agent-flow-hooks.ts").exists(),
+        "flag": kit.get("hooks"),
+    }
+
+
+def _install_with(binary: str, project: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        (_node(), str(KIT_ROOT / "bin" / binary), "install", *args),
+        cwd=project, text=True, capture_output=True, check=False,
+    )
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_no_hooks_removes_every_managed_hook_and_survives_reinstall(
+    tmp_path: Path, binary: str
+) -> None:
+    """불변: hook을 끄면 등록·스크립트·OMP 확장이 모두 사라지고 재설치가 되살리지 않는다.
+
+    되살아나면 끈 의미가 없다 — 사용자는 install 한 번마다 다시 꺼야 한다.
+    두 진입점 모두 같은 계약이어야 한다. installer는 kit에 위임한 뒤 kit.json을
+    자기 것으로 덮으므로, 한쪽만 고치면 재설치에서 조용히 되살아난다.
+    """
+    def _install(project: Path, *args: str):  # noqa: ANN202 - 로컬 바인딩
+        return _install_with(binary, project, *args)
+
+    project = tmp_path / "hooks-off"
+    project.mkdir()
+
+    assert _install(project).returncode == 0
+    on = _hook_state(project)
+    assert on["registered"], "기본 설치는 hook을 등록해야 한다"
+    assert on["flag"] is True
+
+    assert _install(project, "--no-hooks").returncode == 0
+    off = _hook_state(project)
+    assert off["registered"] == set()
+    assert off["scripts"] == set()
+    assert off["omp"] is False
+    assert off["flag"] is False
+
+    # 플래그 없이 재설치, force까지 — 둘 다 되살리면 안 된다.
+    assert _install(project).returncode == 0
+    assert _hook_state(project)["registered"] == set()
+    assert _install(project, "--force-managed").returncode == 0
+    assert _hook_state(project)["registered"] == set()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_hooks_flag_restores_them(tmp_path: Path, binary: str) -> None:
+    """불변: 되돌릴 수 있어야 한다. 끄기가 편도면 그건 삭제다."""
+    def _install(project: Path, *args: str):  # noqa: ANN202
+        return _install_with(binary, project, *args)
+
+    project = tmp_path / "hooks-back"
+    project.mkdir()
+
+    assert _install(project, "--no-hooks").returncode == 0
+    assert _hook_state(project)["registered"] == set()
+
+    assert _install(project, "--hooks").returncode == 0
+    back = _hook_state(project)
+    assert "record-skill-read.py" in back["registered"]
+    assert "guard-protected-branch.sh" in back["registered"]
+    assert back["omp"] is True
+    assert back["flag"] is True
