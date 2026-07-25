@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Sequence
 
 from agent_flow.core.markers import completion_gate_marker_values
+from agent_flow.core.commands import run_safe_command
+from agent_flow.core.profiles import active_profile_ids, load_profile_payload
 from agent_flow.core.skill_resolver import (
     CODE_PHASES,
     PhaseSkills,
@@ -24,6 +26,48 @@ READ_EVIDENCE_MARKER = "skill-read-evidence: verified|unavailable"
 SKILLS_READ_LOG = Path(".agent-flow") / "skills-read.jsonl"
 
 
+def changed_files(project_root: Path) -> tuple[str, ...]:
+    """working tree + staged 변경 경로. git이 없거나 실패하면 빈 튜플로 degrade한다."""
+    # -uall이 없으면 git이 untracked 디렉터리를 `app/sdui/` 한 줄로 접어서
+    # pathGlobs가 파일 경로를 못 본다.
+    result = run_safe_command(
+        ["git", "status", "--porcelain=v1", "-z", "-uall"], cwd=project_root, timeout_s=10
+    )
+    if not result.ok:
+        return ()
+    paths: list[str] = []
+    for record in result.stdout.split("\0"):
+        if len(record) > 3:
+            paths.append(record[3:].replace("\\", "/"))
+    return tuple(dict.fromkeys(paths))
+
+
+def merged_profile_payload(payloads: Sequence[dict]) -> dict:
+    """다중 profile일 때 skill_sources만 이어 붙인다. resolver가 보는 건 그것뿐이다."""
+    merged: dict = {}
+    sources: list = []
+    for payload in payloads:
+        merged.update(payload)
+        declared = payload.get("skill_sources")
+        if isinstance(declared, list):
+            sources.extend(declared)
+    if sources:
+        merged["skill_sources"] = sources
+    return merged
+
+
+def resolved_profile(project_root: Path, requested: str | None = None) -> dict | None:
+    """활성 profile을 합친 payload. 호출자가 profile을 안 넘기면 여기가 유일한 출처다."""
+    try:
+        payloads = [
+            load_profile_payload(profile_id)
+            for profile_id in active_profile_ids(project_root, requested or "auto")
+        ]
+    except (OSError, ValueError, RuntimeError):
+        return None
+    return merged_profile_payload(payloads) if payloads else None
+
+
 @dataclass(frozen=True)
 class SkillReadEvidence:
     """L2 관측 결과. hook이 없으면 available=False이고 강제하지 않는다.
@@ -39,7 +83,19 @@ class SkillReadEvidence:
     read_paths: frozenset[str]
 
     def covers(self, skill: ResolvedSkill) -> bool:
-        return skill.path is not None and str(skill.path.resolve()) in self.read_paths
+        if skill.path is None:
+            return False
+        if str(skill.path.resolve()) in self.read_paths:
+            return True
+        # worktree 안에서 읽으면 같은 skill이라도 절대경로가 leader와 다르다.
+        # 경로 동등비교만 하면 실제로 읽은 skill을 "안 읽었다"고 차단한다.
+        # skill은 `<name>/SKILL.md` 자리에 있고 resolution도 이름으로 다루므로
+        # 이름 일치를 같은 skill로 본다.
+        return skill.name in self.read_skill_names
+
+    @property
+    def read_skill_names(self) -> frozenset[str]:
+        return frozenset(Path(p).parent.name for p in self.read_paths)
 
 
 def phase_skill_resolution(

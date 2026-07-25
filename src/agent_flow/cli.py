@@ -38,7 +38,9 @@ from agent_flow.core.profiles import (
     load_profile_payload,
 )
 from agent_flow.core.local_skills import (
+    changed_files,
     local_skill_prompt_block,
+    merged_profile_payload,
     missing_local_skill_markers,
     phase_skill_resolution,
 )
@@ -108,7 +110,7 @@ from agent_flow.core.workflow import load_workflow
 from agent_flow.eval import run_eval
 from agent_flow.memory.entities import EntityMemoryIndex
 from agent_flow.artifact import find_active_run, mark_inactive, read_meta
-from agent_flow.runner import Runner, ResumeMode, _changed_files, _find_kit_root
+from agent_flow.runner import Runner, ResumeMode, _find_kit_root
 from agent_flow.providers.host import list_host_providers
 from agent_flow.providers.subprocess import ProviderCommand, run_provider
 from agent_flow.pr_watch import fetch_pr, watch_pr
@@ -859,14 +861,20 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{status.name} {status.branch} {status.path} {state}")
             return 0
         if args.worktree_command == "list":
-            names = _known_worktree_names(root)
+            # 복구 명령이다. git이 대답하지 않아도 traceback으로 죽지 않고
+            # 아는 만큼 보여준 뒤 정상 종료한다.
+            try:
+                names = _known_worktree_names(root)
+            except (OSError, RuntimeError, ValueError) as exc:
+                print(_format_cli_error(exc), file=sys.stderr)
+                names = []
             if not names:
                 print("no worktrees")
                 return 0
             for name in names:
                 try:
                     status = get_worktree_status(root=root, name=name)
-                except ValueError:
+                except (ValueError, RuntimeError):
                     path = root / ".agent-flow" / "worktrees" / name
                     print(f"{name} - {path} stale")
                 else:
@@ -876,12 +884,16 @@ def main(argv: list[str] | None = None) -> int:
         if args.worktree_command == "remove":
             try:
                 status = get_worktree_status(root=root, name=args.name)
-            except ValueError as exc:
+            except (ValueError, RuntimeError) as exc:
                 print(_format_cli_error(exc), file=sys.stderr)
                 return 2
             if not _worktree_checkout_exists(status):
                 stale_dir = root / ".agent-flow" / "worktrees" / status.name
-                if stale_dir.exists() or status.name in _known_worktree_names(root):
+                try:
+                    known = _known_worktree_names(root)
+                except (OSError, RuntimeError, ValueError):
+                    known = []
+                if stale_dir.exists() or status.name in known:
                     if not args.keep_branch and status.branch_created_by_agent_flow:
                         prune = run_safe_command(("git", "worktree", "prune"), cwd=root)
                         if not prune.ok:
@@ -1047,6 +1059,7 @@ def main(argv: list[str] | None = None) -> int:
             worker_env = None
             worktree_status = None
             claimed = None
+            leader_before = None
             if isolate:
                 try:
                     with worker_claim_lock(root):
@@ -1068,6 +1081,12 @@ def main(argv: list[str] | None = None) -> int:
                             root=root, path=worktree_status.path, expected_branch=plan.branch
                         )
                         assert_cwd_bound(worktree_path=worktree_status.path, cwd=worker_cwd)
+                        # 격리된 워커가 자기 worktree 밖으로 새어 나갔는지는
+                        # 명령이 아니라 leader의 파일시스템 상태 변화로만
+                        # 판정한다. 스냅샷을 claim **앞**에서 찍는다 — 뒤에서
+                        # 찍다 raise하면 claim된 task가 영구 in_progress로
+                        # 고착되고 claim token이 없어 복구도 못 한다.
+                        leader_before = capture_leader_snapshot(root)
                         claimed = claim_task(
                             root=root,
                             team_name=args.team,
@@ -1100,9 +1119,6 @@ def main(argv: list[str] | None = None) -> int:
                     task_id=pending.task_id,
                     worker_name=args.worker,
                 )
-            # 격리된 워커가 자기 worktree 밖으로 새어 나갔는지는 명령이 아니라
-            # leader의 파일시스템 상태 변화로만 판정한다.
-            leader_before = capture_leader_snapshot(root) if isolate else None
             result = run_provider(
                 ProviderCommand(name="host-command", argv=tuple(args.command_argv)),
                 prompt=prompt,
@@ -1819,11 +1835,14 @@ def _run_skills_command(args: argparse.Namespace, root: Path) -> int:
             return 2
         phase = next((item for item in definition.phases if item.id == args.phase), None)
         if phase is None:
-            # 워크플로에 없는 phase는 skill 요구가 없는 것과 같다. JS wrapper가 실패하면 안 된다.
-            if args.skills_command == "markers":
-                print("[]")
-            return 0
-        merged = _merged_profile_payload(payloads)
+            # 조용히 "요구 없음"으로 답하면 gate가 통과해 버린다. phase가
+            # workflow에 없다는 건 상태가 어긋났다는 뜻이므로 fail-closed다.
+            print(
+                f"phase {args.phase!r} is not in workflow {args.workflow!r}",
+                file=sys.stderr,
+            )
+            return 2
+        merged = merged_profile_payload(payloads)
         # 호출자가 컨텍스트를 넘겨주길 기대하면 경로마다 갈라진다(JS는 안 넘겨서 자동
         # 활성화가 통째로 죽었다). 여기서 직접 도출해 모든 호출자가 같은 답을 받게 한다.
         context = _skill_context(root, args)
@@ -1898,23 +1917,38 @@ def _skill_context(root: Path, args: argparse.Namespace) -> dict:
     return {
         "task_text": task or "",
         "since": since,
-        "changed_files": _changed_files(root),
+        "changed_files": changed_files(root),
     }
 
 
 def _active_run_meta(root: Path) -> dict:
+    """활성 run의 meta. Python run과 JS state 중 **더 최근** 것이 이긴다.
+
+    둘 다 존재할 수 있고(같은 프로젝트를 두 경로로 몰아본 흔적), 오래된 쪽이
+    이기면 지난 phase의 task/시각으로 skill을 판정하게 된다.
+    """
+    candidates: list[dict] = []
     for state_root in _skill_state_roots(root):
         try:
             active = find_active_run(state_root)
         except OSError:
             continue
-        if active is not None:
-            meta = read_meta(active.path)
-            if meta:
-                return meta
+        if active is None:
+            continue
+        meta = read_meta(active.path)
+        if meta:
+            candidates.append(meta)
     # JS runner는 Python meta.json이 아니라 이 파일에 run 상태를 쓴다.
     # 여기를 안 보면 JS 경로에서 task/시각이 통째로 비어 자동 활성화가 죽는다.
-    return _js_run_state(root)
+    js_state = _js_run_state(root)
+    if js_state:
+        candidates.append(js_state)
+    if not candidates:
+        return {}
+    dated = [(ts, meta) for meta in candidates if (ts := _run_meta_timestamp(meta)) is not None]
+    if dated:
+        return max(dated, key=lambda pair: pair[0])[1]
+    return candidates[0]
 
 
 def _js_run_state(root: Path) -> dict:
@@ -1927,13 +1961,17 @@ def _js_run_state(root: Path) -> dict:
 
 
 def _skill_state_roots(root: Path):
+    """run meta가 있을 수 있는 자리들. leader와 관리형 worktree 런타임 루트."""
     yield root
     try:
-        managed = worktree_runtime_root(root=root, name=None)
-    except Exception:
+        names = known_worktree_names(root=root)
+    except (OSError, RuntimeError):
         return
-    if managed is not None:
-        yield managed
+    for name in names:
+        try:
+            yield worktree_runtime_root(root=root, name=name)
+        except (OSError, RuntimeError, ValueError):
+            continue
 
 
 def _run_meta_timestamp(meta: dict) -> float | None:
@@ -1946,19 +1984,6 @@ def _run_meta_timestamp(meta: dict) -> float | None:
         except ValueError:
             continue
     return None
-
-def _merged_profile_payload(payloads: list[dict]) -> dict:
-    """다중 profile일 때 skill_sources만 이어 붙인다. resolver가 보는 건 그것뿐이다."""
-    merged: dict = {}
-    sources: list = []
-    for payload in payloads:
-        merged.update(payload)
-        declared = payload.get("skill_sources")
-        if isinstance(declared, list):
-            sources.extend(declared)
-    if sources:
-        merged["skill_sources"] = sources
-    return merged
 
 
 if __name__ == "__main__":

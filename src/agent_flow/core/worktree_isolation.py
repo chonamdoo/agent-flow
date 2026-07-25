@@ -237,8 +237,10 @@ def git_repo_state(root) -> str:
 # 사실로만 판정한다. phase 진입 시 leader의 HEAD/브랜치/working tree 상태를
 # 찍어 두고 phase 종료 시 같은지 본다. 다르면 그 차이 자체가 오염이다.
 
-_WORKTREE_STATE_PREFIX = ".agent-flow/worktrees"
+_AGENT_FLOW_PREFIX = ".agent-flow"
 _TRIPWIRE_TIMEOUT_S = 120
+_STAMP_FULL_READ_BYTES = 8 * 1024 * 1024
+_STAMP_CHUNK_BYTES = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -343,29 +345,19 @@ def _snapshot_diff(before: LeaderSnapshot, after: LeaderSnapshot) -> list[str]:
 def _leader_status(leader_root) -> str:
     """leader working tree 상태를 정규화된 레코드 문자열로 만든다.
 
-    status를 두 번 부르는 이유가 있다. ``--ignored=matching``은 ignore 패턴에
-    직접 걸린 디렉터리(``.agent-flow/``)를 한 줄로 접어 버려서 그 안쪽 쓰기가
-    통째로 안 보인다. 그래서 ``.agent-flow/``만 파일 단위로 다시 훑되, 워커가
-    정당하게 쓰는 ``.agent-flow/worktrees/``는 pathspec으로 뺀다.
+    감시 대상은 leader의 **사용자 작업**이다. ``.agent-flow/``는 agent 런타임
+    상태 디렉터리이고 read hook(``skills-read.jsonl``), runner(``runs/``),
+    JS(``state/``)가 worktree 안에서 돌 때도 정당하게 leader 쪽에 쓴다. 그래서
+    파일 단위로 들여다보면 정상 동작이 100% 오탐이 된다. ``--ignored=matching``
+    이 접어 주는 한 줄로 두고, ``.agent-flow`` 레코드는 비교에서 뺀다.
 
     레코드 문자(`` M``/``!!``)만으로는 **이미 더러운 파일의 추가 수정**과
     **ignored 파일의 내용 교체**가 보이지 않는다. 그래서 tracked 변경은
-    ``diff HEAD``의 내용 해시로, ignored/untracked는 크기+mtime으로 함께 찍는다.
+    ``diff HEAD``의 내용 해시로, untracked/ignored 파일은 내용 해시로 함께
+    찍는다. mtime은 쓰지 않는다 — 같은 바이트로 다시 저장하기만 해도 바뀐다.
     """
     records = set(_status_records(leader_root, ("--ignored=matching",)))
-    records |= set(
-        _status_records(
-            leader_root,
-            (
-                "-uall",
-                "--ignored=traditional",
-                "--",
-                ".agent-flow",
-                f":(exclude){_WORKTREE_STATE_PREFIX}",
-            ),
-        )
-    )
-    kept = sorted(r for r in records if not _is_worktree_state_record(r))
+    kept = sorted(r for r in records if not _is_agent_flow_record(r))
     lines = list(kept)
     lines.append(f"tracked-content {_tracked_content_digest(leader_root)}")
     for record in kept:
@@ -376,25 +368,44 @@ def _leader_status(leader_root) -> str:
 
 
 def _tracked_content_digest(leader_root) -> str:
-    """tracked 파일의 실제 내용 변화. 상태 문자만으로는 안 보이는 재수정을 잡는다."""
+    """tracked 파일의 실제 내용 변화. 상태 문자만으로는 안 보이는 재수정을 잡는다.
+
+    읽지 못하면 sentinel을 남기지 않고 raise한다. sentinel은 다음 스냅샷과
+    무조건 어긋나 오탐이 되고, 오탐은 완료된 산출물을 버리게 만든다.
+    """
     result = git_safe("diff", "HEAD", "--no-color", cwd=leader_root, timeout_s=_TRIPWIRE_TIMEOUT_S)
     if not result.ok:
-        return "unavailable"
+        raise WorktreeIsolationError(
+            f"cannot read leader tracked content for the isolation tripwire in "
+            f"{leader_root}: {result.stderr.strip() or result.error or 'git did not answer'}"
+        )
     return hashlib.sha256(result.stdout.encode("utf-8", "replace")).hexdigest()[:16]
 
 
 def _path_content_stamp(leader_root, relative: str) -> str:
-    """untracked/ignored 파일의 내용 대리 지표. 디렉터리 레코드는 건너뛴다."""
+    """untracked/ignored 파일의 내용 지표. 디렉터리 레코드는 건너뛴다.
+
+    mtime이 아니라 내용을 해시한다. 큰 파일은 앞뒤 조각만 읽어 비용을 묶는다.
+    """
     if not relative or relative.endswith("/"):
         return ""
     target = Path(leader_root) / relative
     try:
         info = target.stat()
+        if not stat.S_ISREG(info.st_mode):
+            return ""
+        digest = hashlib.sha256()
+        with target.open("rb") as handle:
+            if info.st_size <= _STAMP_FULL_READ_BYTES:
+                for chunk in iter(lambda: handle.read(_STAMP_CHUNK_BYTES), b""):
+                    digest.update(chunk)
+            else:
+                digest.update(handle.read(_STAMP_CHUNK_BYTES))
+                handle.seek(-_STAMP_CHUNK_BYTES, os.SEEK_END)
+                digest.update(handle.read(_STAMP_CHUNK_BYTES))
     except OSError:
         return ""
-    if not stat.S_ISREG(info.st_mode):
-        return ""
-    return f"stamp {relative} {info.st_size} {int(info.st_mtime_ns)}"
+    return f"stamp {relative} {info.st_size} {digest.hexdigest()[:16]}"
 
 
 def _git_fact(leader_root, *args: str) -> str:
@@ -425,15 +436,10 @@ def _status_record_path(record: str) -> str:
     return record
 
 
-def _is_worktree_state_record(record: str) -> bool:
-    return _is_worktree_state_path(_status_record_path(record))
-
-
-def _is_worktree_state_path(relative: str) -> bool:
-    trimmed = relative.rstrip("/")
-    return trimmed == _WORKTREE_STATE_PREFIX or trimmed.startswith(
-        f"{_WORKTREE_STATE_PREFIX}/"
-    )
+def _is_agent_flow_record(record: str) -> bool:
+    """agent 런타임 디렉터리 레코드인가. tripwire 비교에서 제외한다."""
+    trimmed = _status_record_path(record).rstrip("/")
+    return trimmed == _AGENT_FLOW_PREFIX or trimmed.startswith(f"{_AGENT_FLOW_PREFIX}/")
 
 
 @contextlib.contextmanager

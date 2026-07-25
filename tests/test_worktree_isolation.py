@@ -1,14 +1,15 @@
 """Fail-closed worktree isolation tests.
 
 Every guard has a falsification case: a deliberately injected violation that must
-make the guard raise. A guard that always passes proves nothing, so each check is
-paired with a "this really fails" assertion.
+raise. Detection-only guards pair "does not raise" with a mutation case, so a
+dead assertion cannot pass silently.
 """
 from __future__ import annotations
 
 import os
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -527,12 +528,49 @@ def test_tripwire_detects_leader_branch_switch(tmp_path):
     assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=tmp_path).stdout.strip() == "sneaky"
 
 
-def test_tripwire_detects_gitignored_write(tmp_path):
-    """불변: gitignore된 `.agent-flow/` 안쪽 쓰기도 사각지대가 아니다."""
-    status, before = _isolated(tmp_path, "ign")
-    target = tmp_path / ".agent-flow" / "state" / "leaked.json"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("{}\n", encoding="utf-8")
+def test_tripwire_ignores_agent_runtime_writes(tmp_path):
+    """불변: `.agent-flow/` 쓰기는 오염이 아니다.
+
+    L2 Read hook은 worktree 안에서 돌아도 leader의
+    `.agent-flow/skills-read.jsonl`에 append한다. runner는 `.agent-flow/runs/`를,
+    JS는 `.agent-flow/state/`를 쓴다. 여기를 감시하면 정상 동작이 100% 오탐이
+    되고, 오탐 한 번이 완료된 리뷰어 산출물과 claim된 task를 날린다.
+    """
+    status, before = _isolated(tmp_path, "runtime")
+    for rel in (
+        ".agent-flow/skills-read.jsonl",
+        ".agent-flow/state/current-run.json",
+        ".agent-flow/runs/default/r1/meta.json",
+    ):
+        target = tmp_path / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("{}\n", encoding="utf-8")
+    W_ISO.assert_leader_unchanged(tmp_path, before)
+
+    # 같은 실행에서 바깥 쓰기는 여전히 잡힌다 — 무장 해제가 아니다.
+    (tmp_path / "leaked.txt").write_text("worker leak\n", encoding="utf-8")
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
+def test_tripwire_ignores_identical_rewrite_of_dirty_file(tmp_path):
+    """불변: 같은 바이트로 다시 저장하는 것은 변경이 아니다.
+
+    mtime을 지표로 쓰면 에디터 저장·포매터·빌드만으로 터진다.
+    """
+    _isolated(tmp_path, "same-bytes")
+    tracked = tmp_path / "tracked.txt"
+    tracked.write_text("user edit\n", encoding="utf-8")
+    scratch = tmp_path / "scratch.txt"
+    scratch.write_text("user scratch\n", encoding="utf-8")
+    before = W_ISO.capture_leader_snapshot(tmp_path)
+    time.sleep(0.01)
+    tracked.write_text("user edit\n", encoding="utf-8")
+    scratch.write_text("user scratch\n", encoding="utf-8")
+    W_ISO.assert_leader_unchanged(tmp_path, before)
+
+    # 내용이 실제로 바뀌면 untracked 파일도 잡힌다.
+    scratch.write_text("worker overwrote it\n", encoding="utf-8")
     with pytest.raises(W_ISO.WorktreeIsolationError):
         W_ISO.assert_leader_unchanged(tmp_path, before)
 
@@ -542,7 +580,7 @@ def test_tripwire_detects_content_change_of_already_dirty_file(tmp_path):
     status, before0 = _isolated(tmp_path, "dirty")
     (tmp_path / "tracked.txt").write_text("user edit\n", encoding="utf-8")
     before = W_ISO.capture_leader_snapshot(tmp_path)
-    # 상태 문자는 ' M tracked.txt'로 동일하다. 내용 해시가 없으면 이 케이스는 통과해 버린다.
+    # 상태 문자는 ' M tracked.txt'로 동일하다. tracked-content 해시만이 이 재수정을 본다.
     (tmp_path / "tracked.txt").write_text("worker overwrote it\n", encoding="utf-8")
     with pytest.raises(W_ISO.WorktreeIsolationError):
         W_ISO.assert_leader_unchanged(tmp_path, before)

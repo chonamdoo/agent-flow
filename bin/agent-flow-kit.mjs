@@ -16,6 +16,8 @@ const KIT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const RUNTIME_PYTHON_RELATIVE = path.join(".agent-flow", "runtime", "python");
 const installArgs = process.argv.slice(3);
 const forceManaged = installArgs.includes("--force-managed");
+// 이 표식이 남아 있으면 OMP 확장 파일을 kit 소유로 보고 업그레이드한다.
+const OMP_EXTENSION_MARKER = "agent-flow: managed omp extension";
 let cachedFullFeatureWorkflow = null;
 const PROJECT_SKILL_HOSTS = Object.freeze(["claude", "codex", "omp"]);
 const BUNDLED_HOST_SKILL_NAMES = new Set([
@@ -204,6 +206,7 @@ function installProject() {
   removeLegacyProjectSkillCopies(root, "graphify");
   upsertBootstrapBlock(path.join(root, "AGENTS.md"), "AGENTS.md", root);
   upsertBootstrapBlock(path.join(root, "CLAUDE.md"), "CLAUDE.md", root);
+  pruneRetiredHookScripts(root);
   makeHooksExecutable(root);
   installClaudeHooks(root);
   installOmpHooks(root);
@@ -2779,7 +2782,8 @@ function installClaudeHooks(root) {
 }
 
 function ompHooksExtensionSource() {
-  return String.raw`import fs from "node:fs";
+  return String.raw`// ${OMP_EXTENSION_MARKER}
+import fs from "node:fs";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -2824,16 +2828,16 @@ export default function agentFlowHooks(pi) {
     }
   });
 
+  // tool_result 핸들러는 **하나만** 둔다. 이벤트당 하나만 유지하는 host가 있어
+  // 두 번 등록하면 뒤엣것이 앞엣것을 조용히 덮는다.
   pi.on("tool_result", async (event, ctx) => {
-    if (!READ_TOOL_RE.test(String(event?.toolName || ""))) {
+    const toolName = String(event?.toolName || "");
+    if (READ_TOOL_RE.test(toolName)) {
+      // 관측 전용이다. 결과를 보지 않고, 어떤 경우에도 read를 막지 않는다.
+      await runHook("record-skill-read.py", hookPayload(event, ctx), ctx);
       return;
     }
-    // 관측 전용이다. 결과를 보지 않고, 어떤 경우에도 read를 막지 않는다.
-    await runHook("record-skill-read.py", hookPayload(event, ctx), ctx);
-  });
-
-  pi.on("tool_result", async (event, ctx) => {
-    if (!WRITE_TOOL_RE.test(String(event?.toolName || ""))) {
+    if (!WRITE_TOOL_RE.test(toolName)) {
       return;
     }
     const syncError = syncRootContextFiles(event, ctx);
@@ -3081,12 +3085,44 @@ function parseSystemMessage(text) {
 `;
 }
 
-function installOmpHooks(root) {
-  return writeManagedFileIfMissingOrSame(
-    path.join(root, ".omp", "extensions", "agent-flow-hooks.ts"),
-    ompHooksExtensionSource(),
-    forceManaged,
+function ompExtensionIsKitOwned(target) {
+  if (!fs.existsSync(target)) {
+    return true;
+  }
+  const current = fs.readFileSync(target, "utf8");
+  // 표식은 이번 버전부터 붙는다. 그 이전 설치본에는 없으므로 생성 서명으로도
+  // 인정한다. 이게 없으면 기존 사용자는 첫 업그레이드에서 영영 막힌다.
+  return (
+    current.includes(OMP_EXTENSION_MARKER) ||
+    current.includes("export default function agentFlowHooks(")
   );
+}
+
+function installOmpHooks(root) {
+  // 다른 host의 hook 설정은 병합이라 업그레이드가 저절로 되지만, 이 확장은
+  // 통째로 kit이 만든 파일이다. "내용이 다르면 덮지 않는다"만 걸어 두면
+  // 업그레이드가 정의상 내용이 다른 경우라 영구히 고착된다.
+  const target = path.join(root, ".omp", "extensions", "agent-flow-hooks.ts");
+  if (!ompExtensionIsKitOwned(target) && !forceManaged) {
+    console.warn(
+      `agent-flow: ${path.relative(root, target)} is not kit-managed; ` +
+        "leaving it alone. Re-run with --force-managed to replace it.",
+    );
+    return false;
+  }
+  return writeManagedFileIfMissingOrSame(target, ompHooksExtensionSource(), true);
+}
+
+function pruneRetiredHookScripts(root) {
+  // 설정에서만 빼면 실행 파일이 디스크에 남는다. 남은 파일을 다른 경로가
+  // 다시 집어 실행하면 은퇴시킨 guard가 되살아난다.
+  const hooksDir = path.join(root, ".agent-flow", "scripts", "hooks");
+  for (const scriptName of RETIRED_MANAGED_HOOK_SCRIPTS) {
+    const target = path.join(hooksDir, scriptName);
+    if (fs.existsSync(target)) {
+      fs.rmSync(target, { force: true });
+    }
+  }
 }
 
 function makeHooksExecutable(root) {

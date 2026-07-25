@@ -54,7 +54,7 @@ from agent_flow.core.phase_workflow import find_kit_root, load_phase_workflow_de
 from agent_flow.core.report import write_run_report
 from agent_flow.core.security import ensure_child_path, validate_safe_name
 from agent_flow.core.markers import has_failure_markers, missing_markers
-from agent_flow.core.local_skills import missing_local_skill_markers
+from agent_flow.core.local_skills import changed_files, missing_local_skill_markers
 from agent_flow.core.skill_resolver import PhaseSkills
 from agent_flow.memory.index import LoreIndex
 from agent_flow.memory.lore import Lore
@@ -165,7 +165,7 @@ class Runner:
         adapter._architecture = self.architecture
         adapter._config_root = self.config_root
         adapter._task_text = read_meta(self.run_dir).get("task", "") if self.run_dir else ""
-        adapter._changed_files = _changed_files(self.project_root)
+        adapter._changed_files = changed_files(self.project_root)
 
         # Auto-cite lore: search the local lore index for entries relevant
         # to the task description and inject them into the prompt envelope.
@@ -184,6 +184,11 @@ class Runner:
         phase_index = int(meta.get("phase_index", 0) or 0)
         while phase_index < len(self.phases):
             phase = self.phases[phase_index]
+            # 진입 시각은 phase를 **시작할 때** 찍는다. 실행 뒤에 찍으면 방금 쓴
+            # artifact가 진입 시각보다 과거가 되어 stale로 오판된다.
+            if not meta.get("phase_entered_at"):
+                self._stamp_phase(meta, phase_index)
+                write_meta(self.run_dir, meta)
             if self._has_artifact(phase):
                 artifact = self._existing_artifact_path(phase)
                 blocked_reason = (
@@ -224,12 +229,7 @@ class Runner:
                     print(f"  [skip] {phase.id}")
                     phase_index, blocked = self._next_index(phase_index, phase)
                     meta = read_meta(self.run_dir)
-                    meta["phase_index"] = phase_index
-                    meta["current_phase"] = (
-                        self.phases[phase_index].id
-                        if phase_index < len(self.phases)
-                        else None
-                    )
+                    self._stamp_phase(meta, phase_index)
                     write_meta(self.run_dir, meta)
                     if blocked:
                         print(
@@ -248,12 +248,7 @@ class Runner:
                 print(f"  [skip] {phase.id}")
                 phase_index, blocked = self._next_index(phase_index, phase)
                 meta = read_meta(self.run_dir)
-                meta["phase_index"] = phase_index
-                meta["current_phase"] = (
-                    self.phases[phase_index].id
-                    if phase_index < len(self.phases)
-                    else None
-                )
+                self._stamp_phase(meta, phase_index)
                 write_meta(self.run_dir, meta)
                 if blocked:
                     print(
@@ -280,8 +275,7 @@ class Runner:
                     leader_root, leader_before, run_id=self.run_dir.name
                 )
             meta = read_meta(self.run_dir)
-            meta["current_phase"] = phase.id
-            meta["phase_index"] = phase_index
+            self._stamp_phase(meta, phase_index)
             write_meta(self.run_dir, meta)
             if not completed:
                 print(
@@ -343,12 +337,7 @@ class Runner:
                 return
             phase_index, blocked = self._next_index(phase_index, phase)
             meta = read_meta(self.run_dir)
-            meta["phase_index"] = phase_index
-            meta["current_phase"] = (
-                self.phases[phase_index].id
-                if phase_index < len(self.phases)
-                else None
-            )
+            self._stamp_phase(meta, phase_index)
             write_meta(self.run_dir, meta)
             if blocked:
                 print(
@@ -445,6 +434,20 @@ class Runner:
             raise ValueError(f"phase {phase.id}: route target not found: {target}")
         return current_index + 1, False
 
+    def _stamp_phase(self, meta: dict[str, Any], phase_index: int) -> None:
+        """meta에 현재 phase와 **진입 시각**을 박는다.
+
+        `phase_entered_at`이 없으면 읽음 증거를 과거 기록까지 소급 인정하게 되어
+        L2 강제가 통째로 무력해진다. phase가 실제로 바뀔 때만 시각을 갱신한다.
+        """
+        phase_id = (
+            self.phases[phase_index].id if phase_index < len(self.phases) else None
+        )
+        if meta.get("current_phase") != phase_id or not meta.get("phase_entered_at"):
+            meta["phase_entered_at"] = datetime.now(timezone.utc).isoformat()
+        meta["phase_index"] = phase_index
+        meta["current_phase"] = phase_id
+
     def _increment_fix_loop_rounds(self) -> int:
         assert self.run_dir is not None
         meta = read_meta(self.run_dir)
@@ -528,7 +531,7 @@ class Runner:
                 phase.id,
                 phase_skills=phase.skills,
                 profile=self.profile,
-                changed_files=_changed_files(self.project_root),
+                changed_files=changed_files(self.project_root),
                 task_text=str(meta.get("task", "")),
                 since=_meta_timestamp(meta.get("phase_entered_at")),
             )
@@ -623,22 +626,6 @@ def _find_kit_root() -> Path:
     """Locate the agent-flow kit root (contains workflows/ and profiles/)."""
     # artifact.py의 marker 검증과 같은 kit root를 봐야 routing/검증 YAML이 갈라지지 않는다.
     return find_kit_root()
-
-
-def _changed_files(project_root: Path) -> tuple[str, ...]:
-    """working tree + staged 변경 경로. git이 없거나 실패하면 빈 튜플로 degrade한다."""
-    # -uall이 없으면 git이 untracked 디렉터리를 `app/sdui/` 한 줄로 접어서
-    # pathGlobs가 파일 경로를 못 본다.
-    result = run_safe_command(
-        ["git", "status", "--porcelain=v1", "-z", "-uall"], cwd=project_root, timeout_s=10
-    )
-    if not result.ok:
-        return ()
-    paths: list[str] = []
-    for record in result.stdout.split("\0"):
-        if len(record) > 3:
-            paths.append(record[3:].replace("\\", "/"))
-    return tuple(dict.fromkeys(paths))
 
 
 def _load_workflow(kit_root: Path, name: str) -> list[Phase]:

@@ -26,7 +26,11 @@ from pathlib import Path
 import yaml
 
 from agent_flow.core.markers import missing_markers, normalize_required_markers
-from agent_flow.core.local_skills import missing_local_skill_markers
+from agent_flow.core.local_skills import (
+    changed_files,
+    missing_local_skill_markers,
+    resolved_profile,
+)
 from agent_flow.core.skill_resolver import PhaseSkills
 from agent_flow.core.phase_workflow import find_kit_root, load_phase_workflow_definition
 
@@ -256,12 +260,18 @@ def _missing_completion_markers(
         return []
     text = artifact.read_text(encoding="utf-8")
     missing = _missing_markers(text, markers) if markers else []
+    root = config_root or run_path
+    # 컨텍스트를 안 넘기면 `status`와 runner가 서로 다른 required 집합을 본다.
+    # 도출은 local_skills가 단일 소스다.
     missing.extend(
         missing_local_skill_markers(
             text,
-            config_root or run_path,
+            root,
             phase_id,
             phase_skills=skills,
+            profile=resolved_profile(root),
+            changed_files=changed_files(root),
+            task_text=str(read_meta(run_path).get("task", "")),
             since=_phase_entered_at(run_path),
         )
     )

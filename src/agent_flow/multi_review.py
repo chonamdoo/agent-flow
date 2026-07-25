@@ -158,16 +158,19 @@ def run_distribution(distribution: Distribution, project_root: Path,
     leader = leader_root_for(project_root)
     leader_before = capture_leader_snapshot(leader) if leader is not None else None
     results = run_parallel(sub_jobs)
-    if leader_before is not None:
-        assert_leader_unchanged(leader, leader_before, run_id="multi-review")
     # Write each artifact at the angle's intended output_path so the host AI
     # can aggregate them into final-review.md.
+    #
+    # 기록이 tripwire보다 **먼저**다. 순서를 뒤집으면 오탐 1회에 완료된
+    # 리뷰어 N명의 산출물이 통째로 사라진다.
     for r in results:
         out = job_to_output.get(r.job_id)
         if out is None:
             continue
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(_render_angle_result(r))
+    if leader_before is not None:
+        assert_leader_unchanged(leader, leader_before, run_id="multi-review")
     return results
 
 

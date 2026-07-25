@@ -108,6 +108,8 @@ class SkillCatalogEntry:
     task_terms: tuple[str, ...] = ()
     path_globs: tuple[str, ...] = ()
     dependencies: tuple[str, ...] = ()
+    # taskTerms/pathGlobs를 **선언했는지**. 선언 여부와 비어 있음은 다른 뜻이다.
+    selector_declared: bool = False
 
 
 def active_host(env: dict[str, str] | None = None) -> str:
@@ -213,7 +215,7 @@ def discover_skill_catalog(
     한 번의 marker 검증에서 여러 번 불리고 매번 모든 SKILL.md를 읽는다.
     프로세스 수명 동안만 캐시한다 — CLI는 단명이라 stale 위험이 없다.
     """
-    key = tuple(root.template for root in roots)
+    key = (str(project_root.resolve()),) + tuple(root.template for root in roots)
     cached = _CATALOG_CACHE.get(key)
     if cached is not None:
         return cached
@@ -367,6 +369,9 @@ def _catalog_entry(name: str, skill_path: Path, source: str) -> SkillCatalogEntr
         task_terms=terms,
         path_globs=globs,
         dependencies=deps,
+        selector_declared=(
+            "taskTerms" in frontmatter or "pathGlobs" in frontmatter
+        ),
     )
 
 
@@ -390,7 +395,12 @@ def _entry_activates(
 ) -> bool:
     if phase_id not in entry.workflow_phases:
         return False
-    if not entry.task_terms and not entry.path_globs:
+    if entry.selector_declared:
+        # 선언했는데 전부 빈 값이면 "무조건 활성화"가 아니라 "아무것도 안 걸림"이다.
+        # 그렇지 않으면 `taskTerms: ""` 하나로 모든 phase에 조용히 얹힌다.
+        if not entry.task_terms and not entry.path_globs:
+            return False
+    elif not entry.task_terms and not entry.path_globs:
         return True
     haystack = task_text.lower()
     if any(term in haystack for term in entry.task_terms):
