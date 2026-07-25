@@ -142,16 +142,11 @@ function installProject() {
     new Set(["index.json", ...GENERATED_PROJECT_SKILL_NAMES]),
     installSelection.copyRootNames,
   );
-  // profile은 workflow와 같은 kit 데이터다. 사용자 편집을 보호한다고 두면
-  // 새 kit이 추가한 필드(skill_sources 등)가 기존 설치본에 영영 안 닿는다.
-  copyBundledDirIfMissingOrSame(
-    path.join(KIT_ROOT, "profiles"),
-    path.join(agentFlowDir, "profiles"),
-    true,
-    new Set(),
-    true,
-    true,
-  );
+  // kit이 배포하는 profile은 갱신한다. 사용자 편집을 보호한다고 두면 새 kit이
+  // 추가한 필드(skill_sources 등)가 기존 설치본에 영영 안 닿는다. 다만 지우지는
+  // 않는다 — prune을 켜면 사용자가 만든 custom profile이 함께 날아간다.
+  // 덮기 전에는 사본을 남긴다.
+  upgradeBundledProfiles(root, path.join(KIT_ROOT, "profiles"), path.join(agentFlowDir, "profiles"));
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "templates"), path.join(agentFlowDir, "templates"), forceManaged, new Set(), true, forceManaged);
   const skillIndex = installProjectSkills(root, agentFlowDir, previousSkillIndex, forceManaged, installSelection);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "scripts"), path.join(agentFlowDir, "scripts"), forceManaged);
@@ -3092,6 +3087,22 @@ function parseSystemMessage(text) {
   }
 }
 `;
+}
+
+function upgradeBundledProfiles(root, src, dest) {
+  if (!fs.existsSync(src)) {
+    return;
+  }
+  fs.mkdirSync(dest, { recursive: true });
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    if (!entry.isFile()) {
+      continue;
+    }
+    const content = fs.readFileSync(path.join(src, entry.name), "utf8");
+    const target = path.join(dest, entry.name);
+    backupIfDifferent(root, target, content);
+    fs.writeFileSync(target, content, "utf8");
+  }
 }
 
 function backupIfDifferent(root, target, content) {

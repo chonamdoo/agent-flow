@@ -1077,6 +1077,25 @@ function parseSystemMessage(text) {
 `;
 }
 
+function upgradeBundledProfiles(root, src, dest) {
+  if (!fs.existsSync(src)) {
+    return { written: 0, skipped: 0 };
+  }
+  ensureDir(dest);
+  let written = 0;
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    if (!entry.isFile()) {
+      continue;
+    }
+    const content = fs.readFileSync(path.join(src, entry.name), "utf8");
+    const target = path.join(dest, entry.name);
+    backupIfDifferent(root, target, content);
+    fs.writeFileSync(target, content, "utf8");
+    written += 1;
+  }
+  return { written, skipped: 0 };
+}
+
 function backupIfDifferent(root, target, content) {
   if (!fs.existsSync(target)) {
     return;
@@ -1670,15 +1689,14 @@ function install() {
     true,
     true,
   );
-  // profile은 workflow와 같은 kit 데이터다. 사용자 편집을 보호한다고 두면
-  // 새 kit이 추가한 필드(skill_sources 등)가 기존 설치본에 영영 안 닿는다.
-  const profilesCopied = copyDir(
+  // kit이 배포하는 profile은 갱신한다. 사용자 편집을 보호한다고 두면 새 kit이
+  // 추가한 필드(skill_sources 등)가 기존 설치본에 영영 안 닿는다. 다만 지우지는
+  // 않는다 — prune을 켜면 사용자가 만든 custom profile이 함께 날아간다.
+  // 덮기 전에는 사본을 남긴다.
+  const profilesCopied = upgradeBundledProfiles(
+    PROJECT,
     path.join(KIT_ROOT, "profiles"),
     path.join(AF_DIR, "profiles"),
-    new Set(),
-    true,
-    true,
-    true,
   );
   const templatesCopied = copyDir(
     path.join(KIT_ROOT, "templates"),
