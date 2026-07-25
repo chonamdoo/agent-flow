@@ -31,7 +31,20 @@ from agent_flow.core.context_contract import (
 from agent_flow.core.commands import run_safe_command
 from agent_flow.core.gates import GateCommand, run_gates
 from agent_flow.core.phase_workflow import load_phase_workflow_definition
-from agent_flow.core.profiles import active_profile_ids, detect_profile, load_profile
+from agent_flow.core.profiles import (
+    active_profile_ids,
+    detect_profile,
+    load_profile,
+    load_profile_payload,
+)
+from agent_flow.core.local_skills import (
+    changed_files,
+    local_skill_prompt_block,
+    merged_profile_payload,
+    missing_local_skill_markers,
+    phase_skill_resolution,
+)
+from agent_flow.core.skill_sync import parse_skill_sources, sync_skill_sources
 from agent_flow.core.review import summarize_reviews, write_review_summary
 from agent_flow.core.report import write_run_report
 from agent_flow.core.query import explain_run, query_run
@@ -83,17 +96,20 @@ from agent_flow.core.worktree_isolation import (
     WorkerScope,
     WorktreeIsolationError,
     assert_cwd_bound,
+    assert_leader_unchanged,
     assert_scopes_isolated,
+    capture_leader_snapshot,
     git_repo_state,
     max_worker_capacity,
     sanitized_worker_env,
     verify_linked_worktree,
+    worker_claim_lock,
 )
 from agent_flow.core.state import RunRequest, RunState, start_run, status_summary
 from agent_flow.core.workflow import load_workflow
 from agent_flow.eval import run_eval
 from agent_flow.memory.entities import EntityMemoryIndex
-from agent_flow.artifact import find_active_run, mark_inactive
+from agent_flow.artifact import find_active_run, mark_inactive, read_meta
 from agent_flow.runner import Runner, ResumeMode, _find_kit_root
 from agent_flow.providers.host import list_host_providers
 from agent_flow.providers.subprocess import ProviderCommand, run_provider
@@ -211,6 +227,20 @@ def main(argv: list[str] | None = None) -> int:
     workflow_export = workflow_subparsers.add_parser("export")
     workflow_export.add_argument("--workflow", default="full-feature")
     workflow_export.add_argument("--format", choices=("json",), default="json")
+
+    skills_parser = subparsers.add_parser("skills")
+    skills_subparsers = skills_parser.add_subparsers(dest="skills_command", required=True)
+    for name in ("sync", "resolve", "prompt", "markers"):
+        sub = skills_subparsers.add_parser(name)
+        sub.add_argument("--root", default=".")
+        sub.add_argument("--profile")
+        if name != "sync":
+            sub.add_argument("--phase", required=True)
+            sub.add_argument("--workflow", default="default")
+        if name == "markers":
+            sub.add_argument("--artifact", required=True)
+            # 읽음 증거를 현재 phase로 한정한다. 없으면 과거 기록까지 인정돼 강제가 약해진다.
+            sub.add_argument("--since", type=float, default=None)
 
     context_parser = subparsers.add_parser("context")
     context_subparsers = context_parser.add_subparsers(dest="context_command", required=True)
@@ -438,9 +468,18 @@ def main(argv: list[str] | None = None) -> int:
         worktree_status = None
         worktree_preexisting = False
         # git repo에서는 별도 지정이 없어도 task 이름으로 격리 worktree를 먼저 만든다.
-        worktree_name = args.worktree if args.worktree is not None else (args.task if _is_git_repo(root) else None)
+        # git이 답을 못 주는 상태(unknown)를 non-git으로 접으면 격리 없이 leader에서
+        # 그대로 진행하게 되므로 fail-closed로 멈춘다.
+        repo_state = git_repo_state(root)
+        if repo_state == "unknown":
+            print(
+                "cannot determine git repo state; refusing to run unisolated in the leader checkout",
+                file=sys.stderr,
+            )
+            return 2
+        worktree_name = args.worktree if args.worktree is not None else (args.task if repo_state == "repo" else None)
         if worktree_name is not None:
-            if not _is_git_repo(root):
+            if repo_state != "repo":
                 print("worktree runs require a git repository", file=sys.stderr)
                 return 2
             try:
@@ -461,7 +500,7 @@ def main(argv: list[str] | None = None) -> int:
         active = find_active_run(state_root)
         if active is not None:
             print(f"already active: {active.run_id} (task: {active.task!r})")
-            if worktree_name is None and _is_git_repo(root):
+            if worktree_name is None and repo_state == "repo":
                 print(
                     "parallel worktree run: "
                     'agent-flow run "<task>"'
@@ -505,13 +544,19 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print('진행 중인 run 없음. `agent-flow run "<task>"`로 시작하세요.')
             return 0
-        Runner(
-            run_root,
-            run_dir=active.path,
-            state_root=state_root,
-            config_root=root,
-            next_command=_continue_command(root, args.worktree),
-        ).run(mode=ResumeMode.RESUME)
+        try:
+            Runner(
+                run_root,
+                run_dir=active.path,
+                state_root=state_root,
+                config_root=root,
+                next_command=_continue_command(root, args.worktree),
+            ).run(mode=ResumeMode.RESUME)
+        except (OSError, ValueError, RuntimeError, KeyError, subprocess.CalledProcessError) as exc:
+            # `run`과 같은 처리다. tripwire가 raise하면 traceback 대신 사유를
+            # 보여야 사용자가 다음 수를 안다.
+            print(_format_cli_error(exc), file=sys.stderr)
+            return 2
         return 0
 
     if args.command == "abort":
@@ -680,6 +725,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"tools lint: {len(findings)} findings")
             return 1 if any(finding.severity == "error" for finding in findings) else 0
 
+    if args.command == "skills":
+        return _run_skills_command(args, root)
+
     if args.command == "workflow":
         if args.workflow_command == "export":
             try:
@@ -819,14 +867,20 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{status.name} {status.branch} {status.path} {state}")
             return 0
         if args.worktree_command == "list":
-            names = _known_worktree_names(root)
+            # 복구 명령이다. git이 대답하지 않아도 traceback으로 죽지 않고
+            # 아는 만큼 보여준 뒤 정상 종료한다.
+            try:
+                names = _known_worktree_names(root)
+            except (OSError, RuntimeError, ValueError) as exc:
+                print(_format_cli_error(exc), file=sys.stderr)
+                names = []
             if not names:
                 print("no worktrees")
                 return 0
             for name in names:
                 try:
                     status = get_worktree_status(root=root, name=name)
-                except ValueError:
+                except (ValueError, RuntimeError):
                     path = root / ".agent-flow" / "worktrees" / name
                     print(f"{name} - {path} stale")
                 else:
@@ -836,12 +890,16 @@ def main(argv: list[str] | None = None) -> int:
         if args.worktree_command == "remove":
             try:
                 status = get_worktree_status(root=root, name=args.name)
-            except ValueError as exc:
+            except (ValueError, RuntimeError) as exc:
                 print(_format_cli_error(exc), file=sys.stderr)
                 return 2
             if not _worktree_checkout_exists(status):
                 stale_dir = root / ".agent-flow" / "worktrees" / status.name
-                if stale_dir.exists() or status.name in _known_worktree_names(root):
+                try:
+                    known = _known_worktree_names(root)
+                except (OSError, RuntimeError, ValueError):
+                    known = []
+                if stale_dir.exists() or status.name in known:
                     if not args.keep_branch and status.branch_created_by_agent_flow:
                         prune = run_safe_command(("git", "worktree", "prune"), cwd=root)
                         if not prune.ok:
@@ -1006,22 +1064,41 @@ def main(argv: list[str] | None = None) -> int:
             worker_cwd = root
             worker_env = None
             worktree_status = None
+            claimed = None
+            leader_before = None
             if isolate:
-                capacity = max_worker_capacity()
-                in_progress = sum(1 for task in status["tasks"] if task.status == "in_progress")
-                if in_progress >= capacity:
-                    print(f"worker capacity reached ({in_progress}/{capacity})", file=sys.stderr)
-                    return 2
                 try:
-                    # Per-worker worktrees isolate every write, so overlapping
-                    # scopes are safe here; the scope gate only bites when there
-                    # is no worktree isolation (the else branch).
-                    plan = plan_worktree(root=root, name=pending.task_id, unique=args.worker)
-                    worktree_status = create_worktree(root=root, plan=plan, allow_dirty=True)
-                    worker_cwd = verify_linked_worktree(
-                        root=root, path=worktree_status.path, expected_branch=plan.branch
-                    )
-                    assert_cwd_bound(worktree_path=worktree_status.path, cwd=worker_cwd)
+                    with worker_claim_lock(root):
+                        # capacity를 세는 시점과 task를 잡는 시점이 갈라져 있으면
+                        # 두 워커가 같은 마지막 슬롯을 함께 통과한다. 세기와 잡기를
+                        # 한 락 안에 묶고, 카운트도 락 안에서 다시 읽는다.
+                        capacity = max_worker_capacity()
+                        live = team_status(root=root, team_name=args.team, detail=True)
+                        in_progress = sum(1 for task in live["tasks"] if task.status == "in_progress")
+                        if in_progress >= capacity:
+                            print(f"worker capacity reached ({in_progress}/{capacity})", file=sys.stderr)
+                            return 2
+                        # Per-worker worktrees isolate every write, so overlapping
+                        # scopes are safe here; the scope gate only bites when there
+                        # is no worktree isolation (the else branch).
+                        plan = plan_worktree(root=root, name=pending.task_id, unique=args.worker)
+                        worktree_status = create_worktree(root=root, plan=plan, allow_dirty=True)
+                        worker_cwd = verify_linked_worktree(
+                            root=root, path=worktree_status.path, expected_branch=plan.branch
+                        )
+                        assert_cwd_bound(worktree_path=worktree_status.path, cwd=worker_cwd)
+                        # 격리된 워커가 자기 worktree 밖으로 새어 나갔는지는
+                        # 명령이 아니라 leader의 파일시스템 상태 변화로만
+                        # 판정한다. 스냅샷을 claim **앞**에서 찍는다 — 뒤에서
+                        # 찍다 raise하면 claim된 task가 영구 in_progress로
+                        # 고착되고 claim token이 없어 복구도 못 한다.
+                        leader_before = capture_leader_snapshot(root)
+                        claimed = claim_task(
+                            root=root,
+                            team_name=args.team,
+                            task_id=pending.task_id,
+                            worker_name=args.worker,
+                        )
                 except (OSError, ValueError, RuntimeError, WorktreeIsolationError, subprocess.CalledProcessError) as exc:
                     print(_format_cli_error(exc), file=sys.stderr)
                     return 2
@@ -1042,18 +1119,32 @@ def main(argv: list[str] | None = None) -> int:
                 except WorktreeIsolationError as exc:
                     print(_format_cli_error(exc), file=sys.stderr)
                     return 2
-            claimed = claim_task(
-                root=root,
-                team_name=args.team,
-                task_id=pending.task_id,
-                worker_name=args.worker,
-            )
+                claimed = claim_task(
+                    root=root,
+                    team_name=args.team,
+                    task_id=pending.task_id,
+                    worker_name=args.worker,
+                )
             result = run_provider(
                 ProviderCommand(name="host-command", argv=tuple(args.command_argv)),
                 prompt=prompt,
                 cwd=worker_cwd,
                 env=worker_env,
             )
+            if leader_before is not None:
+                try:
+                    assert_leader_unchanged(root, leader_before, run_id=claimed.task_id)
+                except WorktreeIsolationError as exc:
+                    message = _format_cli_error(exc)
+                    print(message, file=sys.stderr)
+                    fail_task(
+                        root=root,
+                        team_name=args.team,
+                        task_id=claimed.task_id,
+                        claim_token=claimed.claim_token or "",
+                        result=message,
+                    )
+                    return 2
             output = result.stdout.strip() or result.stderr.strip()
             if result.failed:
                 task = fail_task(
@@ -1255,8 +1346,16 @@ def main(argv: list[str] | None = None) -> int:
         worktree_preexisting = False
         state = None
         # start 명령도 run과 동일하게 git repo에서는 worktree를 기본 시작점으로 삼는다.
-        worktree_name = args.worktree if args.worktree is not None else (args.task if _is_git_repo(root) else None)
-        if worktree_name is not None and not _is_git_repo(root):
+        # git 상태가 unknown이면 격리 여부를 증명할 수 없으므로 진행하지 않는다.
+        repo_state = git_repo_state(root)
+        if repo_state == "unknown":
+            print(
+                "cannot determine git repo state; refusing to start unisolated in the leader checkout",
+                file=sys.stderr,
+            )
+            return 2
+        worktree_name = args.worktree if args.worktree is not None else (args.task if repo_state == "repo" else None)
+        if worktree_name is not None and repo_state != "repo":
             print("worktree runs require a git repository", file=sys.stderr)
             return 2
         try:
@@ -1683,12 +1782,6 @@ def _home_path() -> Path:
     return Path(home).expanduser()
 
 
-def _is_git_repo(root: Path) -> bool:
-    result = run_safe_command(("git", "rev-parse", "--git-dir"), cwd=root, timeout_s=5)
-    # git이 없거나 응답하지 않는 환경은 non-git 프로젝트처럼 처리해서 fallback을 살린다.
-    return result.ok
-
-
 def _latest_run_dir(root: Path) -> Path | None:
     runs_root = root / ".agent-flow" / "runs"
     if not runs_root.exists():
@@ -1721,6 +1814,182 @@ def _is_legacy_run_dir(path: Path) -> bool:
     if not (path / "meta.json").exists():
         return False
     return not any(child.is_dir() and (child / "manifest.json").exists() for child in path.iterdir())
+
+
+def _run_skills_command(args: argparse.Namespace, root: Path) -> int:
+    profile_ids = active_profile_ids(root, getattr(args, "profile", None) or "auto")
+    payloads = [load_profile_payload(profile_id) for profile_id in profile_ids]
+
+    if args.skills_command == "sync":
+        exit_code = 0
+        for profile_id, payload in zip(profile_ids, payloads):
+            sources = parse_skill_sources(payload)
+            if not sources:
+                print(f"{profile_id}: no skill_sources declared")
+                continue
+            for result in sync_skill_sources(sources):
+                print(f"{profile_id}: {result.source_id} {result.status} {result.detail}".rstrip())
+                if result.status == "failed":
+                    exit_code = 1
+        return exit_code
+
+    if args.skills_command in {"resolve", "prompt", "markers"}:
+        try:
+            definition = load_phase_workflow_definition(_find_kit_root(), args.workflow)
+        except (OSError, ValueError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        phase = next((item for item in definition.phases if item.id == args.phase), None)
+        if phase is None:
+            # 조용히 "요구 없음"으로 답하면 gate가 통과해 버린다. phase가
+            # workflow에 없다는 건 상태가 어긋났다는 뜻이므로 fail-closed다.
+            print(
+                f"phase {args.phase!r} is not in workflow {args.workflow!r}",
+                file=sys.stderr,
+            )
+            return 2
+        merged = merged_profile_payload(payloads)
+        # 호출자가 컨텍스트를 넘겨주길 기대하면 경로마다 갈라진다(JS는 안 넘겨서 자동
+        # 활성화가 통째로 죽었다). 여기서 직접 도출해 모든 호출자가 같은 답을 받게 한다.
+        context = _skill_context(root, args)
+
+        if args.skills_command == "prompt":
+            sys.stdout.write(
+                local_skill_prompt_block(
+                    root,
+                    phase.id,
+                    phase_skills=phase.skills,
+                    profile=merged,
+                    changed_files=context["changed_files"],
+                    task_text=context["task_text"],
+                )
+            )
+            return 0
+
+        if args.skills_command == "markers":
+            artifact = _resolve_project_path(root, args.artifact)
+            text = artifact.read_text(encoding="utf-8") if artifact.is_file() else ""
+            print(
+                json.dumps(
+                    missing_local_skill_markers(
+                        text,
+                        root,
+                        phase.id,
+                        phase_skills=phase.skills,
+                        profile=merged,
+                        changed_files=context["changed_files"],
+                        task_text=context["task_text"],
+                        since=context["since"],
+                    ),
+                    ensure_ascii=False,
+                )
+            )
+            return 0
+
+        resolution = phase_skill_resolution(
+            root,
+            phase.id,
+            phase_skills=phase.skills,
+            profile=merged,
+            changed_files=context["changed_files"],
+            task_text=context["task_text"],
+        )
+        for skill in resolution.required:
+            state = skill.display_path(root) if skill.exists else f"MISSING ({skill.install_hint})"
+            print(f"required {skill.name}: {state}")
+        for skill in resolution.optional:
+            state = skill.display_path(root) if skill.exists else "not installed"
+            print(f"optional {skill.name}: {state}")
+        print(f"skill-availability: {'degraded' if resolution.missing else 'pass'}")
+        return 0
+
+    return 2
+
+
+def _skill_context(root: Path, args: argparse.Namespace) -> dict:
+    """활성 run에서 task/변경파일/phase 진입시각을 도출한다.
+
+    CLI 인자로도 override할 수 있지만 기본값이 있어야 JS wrapper와 `status`가
+    Python runner와 같은 결론에 도달한다.
+    """
+    task = getattr(args, "task", None)
+    since = getattr(args, "since", None)
+    if task is None or since is None:
+        meta = _active_run_meta(root)
+        if task is None:
+            task = str(meta.get("task", ""))
+        if since is None:
+            since = _run_meta_timestamp(meta)
+    return {
+        "task_text": task or "",
+        "since": since,
+        "changed_files": changed_files(root),
+    }
+
+
+def _active_run_meta(root: Path) -> dict:
+    """활성 run의 meta. Python run과 JS state 중 **더 최근** 것이 이긴다.
+
+    둘 다 존재할 수 있고(같은 프로젝트를 두 경로로 몰아본 흔적), 오래된 쪽이
+    이기면 지난 phase의 task/시각으로 skill을 판정하게 된다.
+    """
+    candidates: list[dict] = []
+    for state_root in _skill_state_roots(root):
+        try:
+            active = find_active_run(state_root)
+        except OSError:
+            continue
+        if active is None:
+            continue
+        meta = read_meta(active.path)
+        if meta:
+            candidates.append(meta)
+    # JS runner는 Python meta.json이 아니라 이 파일에 run 상태를 쓴다.
+    # 여기를 안 보면 JS 경로에서 task/시각이 통째로 비어 자동 활성화가 죽는다.
+    js_state = _js_run_state(root)
+    if js_state:
+        candidates.append(js_state)
+    if not candidates:
+        return {}
+    dated = [(ts, meta) for meta in candidates if (ts := _run_meta_timestamp(meta)) is not None]
+    if dated:
+        return max(dated, key=lambda pair: pair[0])[1]
+    return candidates[0]
+
+
+def _js_run_state(root: Path) -> dict:
+    state_path = root / ".agent-flow" / "state" / "current-run.json"
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _skill_state_roots(root: Path):
+    """run meta가 있을 수 있는 자리들. leader와 관리형 worktree 런타임 루트."""
+    yield root
+    try:
+        names = known_worktree_names(root=root)
+    except (OSError, RuntimeError):
+        return
+    for name in names:
+        try:
+            yield worktree_runtime_root(root=root, name=name)
+        except (OSError, RuntimeError, ValueError):
+            continue
+
+
+def _run_meta_timestamp(meta: dict) -> float | None:
+    for key in ("phase_entered_at", "updated_at", "started_at"):
+        raw = meta.get(key)
+        if not isinstance(raw, str) or not raw:
+            continue
+        try:
+            return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            continue
+    return None
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ from pathlib import Path
 from agent_flow.core.commands import run_safe_command
 from agent_flow.core.worktree_isolation import (
     assert_worktree_mergeable,
+    git_repo_state,
     git_safe,
     verify_linked_worktree,
     with_git_lock_retry,
@@ -76,13 +77,15 @@ def create_worktree(*, root: Path, plan: WorktreePlan, allow_dirty: bool = False
                 f"worktree path exists but is not a git worktree: {plan.path}. "
                 f"Run `agent-flow worktree remove --name {plan.name}` to clear stale state."
             )
+        # 재사용 경로도 생성 경로와 똑같은 증명을 통과해야 한다. `.git`이 있다는
+        # 사실만으로는 이 저장소의 worktree라는 근거가 되지 않는다.
+        verify_linked_worktree(root=root, path=plan.path)
         existing = get_worktree_status(root=root, name=plan.name)
         if plan.branch_explicit and existing.branch != plan.branch:
             raise ValueError(
                 f"worktree {plan.name} already uses branch {existing.branch}; "
                 f"requested {plan.branch}"
             )
-        _assert_same_requested_name(root=root, plan=plan)
         return existing
     plan.path.parent.mkdir(parents=True, exist_ok=True)
     branch_created = _add_worktree_locked(root=root, plan=plan)
@@ -102,8 +105,14 @@ def create_worktree(*, root: Path, plan: WorktreePlan, allow_dirty: bool = False
     except Exception:
         try:
             remove_worktree(root=root, status=status, allow_unmerged=True)
-        except Exception:
-            pass
+        except Exception as cleanup_exc:
+            # 롤백까지 실패하면 등록된 worktree가 manifest 없이 남는다. 원본
+            # 예외를 가리지 않도록 경고로 표면화한다.
+            print(
+                f"warning: could not roll back worktree {status.name} at {status.path} "
+                f"after the manifest write failed: {cleanup_exc}",
+                file=sys.stderr,
+            )
         raise
     return status
 
@@ -146,28 +155,6 @@ def remove_worktree(
     if branch_to_delete is not None:
         _run_git(root, "branch", "-D", branch_to_delete)
     remove_worktree_metadata(root=root, name=status.name)
-
-
-def _assert_same_requested_name(*, root: Path, plan: WorktreePlan) -> None:
-    # 서로 다른 이름이 같은 safe name으로 정규화되면 기존 worktree를 조용히
-    # 재사용해 상태가 섞일 수 있다. 명시적 별칭 재사용(--worktree)은 지원되는
-    # 플로우라 차단하지 않고, 기록된 원본 이름과 다르면 경고만 남긴다.
-    manifest = _worktree_manifest_path(root=root, name=plan.name)
-    if not manifest.exists():
-        return
-    try:
-        payload = json.loads(manifest.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return
-    recorded = payload.get("requested_name")
-    if not isinstance(recorded, str) or not recorded or not plan.requested_name:
-        return
-    if recorded != plan.requested_name:
-        print(
-            f"warning: worktree {plan.name} was created for '{recorded}'; "
-            f"reusing it for '{plan.requested_name}'",
-            file=sys.stderr,
-        )
 
 
 def worktree_branch_exists(*, root: Path, branch: str) -> bool:
@@ -303,7 +290,17 @@ def _legacy_worktree_manifest_path(*, root: Path, name: str) -> Path:
 def _agent_flow_git_dir(root: Path) -> Path:
     result = git_safe("rev-parse", "--git-common-dir", cwd=root)
     if not result.ok:
-        return root / ".agent-flow"
+        # git 저장소인데 common dir을 못 읽으면 state root가 leader 안으로
+        # 들어와 워커 상태가 leader에 쌓인다. 위치를 확정하지 못하면 멈춘다.
+        # 애초에 git 저장소가 아니면 지킬 leader가 없으므로 root/.agent-flow가
+        # 옳은 자리다 — 이 경로까지 막으면 non-git 프로젝트와 복구 명령이 죽는다.
+        if git_repo_state(root) == "non-repo":
+            return root / ".agent-flow"
+        raise RuntimeError(
+            f"cannot resolve the git common dir for {root}; "
+            f"refusing to place agent-flow state inside the leader checkout: "
+            f"{result.stderr.strip() or 'git did not answer'}"
+        )
     git_common = Path(result.stdout.strip())
     if not git_common.is_absolute():
         git_common = root / git_common

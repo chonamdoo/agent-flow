@@ -26,7 +26,12 @@ from pathlib import Path
 import yaml
 
 from agent_flow.core.markers import missing_markers, normalize_required_markers
-from agent_flow.core.local_skills import missing_local_skill_markers
+from agent_flow.core.local_skills import (
+    changed_files,
+    missing_local_skill_markers,
+    resolved_profile,
+)
+from agent_flow.core.skill_resolver import PhaseSkills
 from agent_flow.core.phase_workflow import find_kit_root, load_phase_workflow_definition
 
 
@@ -52,7 +57,7 @@ class ActiveRun:
         artifacts = sorted(str(p.relative_to(self.path)) for p in self.path.rglob("*") if p.is_file())
         meta = read_meta(self.path)
         current_phase = meta.get("current_phase") or "-"
-        artifact_rel, _markers = _phase_contract(self.path, self.workflow, current_phase)
+        artifact_rel, _markers, _skills = _phase_contract(self.path, self.workflow, current_phase)
         required_artifact = (
             _existing_phase_artifact(self.path, current_phase, artifact_rel)
             if current_phase != "-" and artifact_rel is not None
@@ -249,22 +254,57 @@ def _missing_completion_markers(
     *,
     config_root: Path | None = None,
 ) -> list[str]:
-    artifact_rel, markers = _phase_contract(run_path, workflow, phase_id)
+    artifact_rel, markers, skills = _phase_contract(run_path, workflow, phase_id)
     artifact = _existing_phase_artifact(run_path, phase_id, artifact_rel)
     if not artifact.exists():
         return []
     text = artifact.read_text(encoding="utf-8")
     missing = _missing_markers(text, markers) if markers else []
-    missing.extend(missing_local_skill_markers(text, config_root or run_path, phase_id))
+    root = config_root or run_path
+    # 컨텍스트를 안 넘기면 `status`와 runner가 서로 다른 required 집합을 본다.
+    # 도출은 local_skills가 단일 소스다.
+    missing.extend(
+        missing_local_skill_markers(
+            text,
+            root,
+            phase_id,
+            phase_skills=skills,
+            profile=resolved_profile(root),
+            changed_files=changed_files(root),
+            task_text=str(read_meta(run_path).get("task", "")),
+            since=_phase_entered_at(run_path),
+        )
+    )
     return missing
 
 
+def _phase_entered_at(run_path: Path) -> float | None:
+    """읽음 증거는 현재 phase 진입 이후 것만 인정한다. 없으면 None이라 과거 기록까지 통과한다."""
+    meta = read_meta(run_path)
+    for key in ("phase_entered_at", "updated_at", "started_at"):
+        parsed = _parse_timestamp(meta.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _parse_timestamp(value: object) -> float | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
 def _required_markers(run_path: Path, workflow: str, phase_id: str) -> tuple[str, ...]:
-    _artifact_rel, markers = _phase_contract(run_path, workflow, phase_id)
+    _artifact_rel, markers, _skills = _phase_contract(run_path, workflow, phase_id)
     return markers
 
 
-def _phase_contract(run_path: Path, workflow: str, phase_id: str) -> tuple[Path | None, tuple[str, ...]]:
+def _phase_contract(
+    run_path: Path, workflow: str, phase_id: str
+) -> tuple[Path | None, tuple[str, ...], PhaseSkills | None]:
     project_root = run_path.parents[2] if len(run_path.parents) >= 3 else None
     candidates: list[Path] = []
     if project_root is not None:
@@ -286,7 +326,7 @@ def _phase_contract(run_path: Path, workflow: str, phase_id: str) -> tuple[Path 
         if definition is not None:
             for phase in definition.phases:
                 if phase.id == phase_id:
-                    return Path(phase.artifact), phase.required_markers
+                    return Path(phase.artifact), phase.required_markers, phase.skills
         try:
             raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         except (OSError, yaml.YAMLError):
@@ -297,8 +337,12 @@ def _phase_contract(run_path: Path, workflow: str, phase_id: str) -> tuple[Path 
         for phase in phases:
             if not isinstance(phase, dict) or str(phase.get("id")) != phase_id:
                 continue
-            return Path(f"{phase_id}.md"), normalize_required_markers(phase.get("required_markers"))
-    return (Path(f"{phase_id}.md") if phase_id != "-" else None, ())
+            return (
+                Path(f"{phase_id}.md"),
+                normalize_required_markers(phase.get("required_markers")),
+                None,
+            )
+    return (Path(f"{phase_id}.md") if phase_id != "-" else None, (), None)
 
 
 def _existing_phase_artifact(run_path: Path, phase_id: str, artifact_rel: Path | None) -> Path:

@@ -19,6 +19,8 @@ const KIT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const AGENT_FLOW_COMMAND = "agent-flow";
 const INSTALL_ARGS = process.argv.slice(3);
 const FORCE_MANAGED = INSTALL_ARGS.includes("--force-managed");
+// 이 표식이 남아 있으면 OMP 확장 파일을 kit 소유로 보고 업그레이드한다.
+const OMP_EXTENSION_MARKER = "agent-flow: managed omp extension";
 const REQUESTED_PROJECT = process.cwd();
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
 const PROJECT = resolveInstallProject(REQUESTED_PROJECT);
@@ -145,10 +147,6 @@ function bootstrapMarkdown(label) {
   const targetPath = path.join(PROJECT, label);
   const start = "<!-- agent-flow:start -->";
   const end = "<!-- agent-flow:end -->";
-  const localSkillSection = bootstrapLocalSkillSection();
-  if (localSkillSection && block.includes(end)) {
-    block = block.replace(end, () => `${localSkillSection}\n${end}`);
-  }
   const current = fs.existsSync(targetPath)
     ? fs.readFileSync(targetPath, "utf8")
     : "";
@@ -160,50 +158,6 @@ function bootstrapMarkdown(label) {
   }
   const prefix = current.trim() ? current.trimEnd() + "\n\n" : `# ${label}\n\n`;
   fs.writeFileSync(targetPath, prefix + block);
-}
-
-function bootstrapLocalSkillSection() {
-  const seen = new Map();
-  const sources = [path.join(AF_DIR, "local-skills")];
-  if (!samePath(PROJECT, KIT_ROOT)) {
-    sources.push(path.join(PROJECT, "skills"));
-  }
-  for (const base of sources) {
-    if (!fs.existsSync(base)) {
-      continue;
-    }
-    for (const entry of fs.readdirSync(base, { withFileTypes: true })) {
-      if (!entry.isDirectory()) {
-        continue;
-      }
-      const skillPath = path.join(base, entry.name, "SKILL.md");
-      if (!fs.existsSync(skillPath)) {
-        continue;
-      }
-      const name = bootstrapLocalSkillName(skillPath, entry.name);
-      if (seen.has(name)) {
-        continue;
-      }
-      seen.set(name, {
-        name,
-        path: path.relative(PROJECT, skillPath).split(path.sep).join("/"),
-        absolutePath: skillPath,
-      });
-    }
-  }
-  const docs = [...seen.values()].sort((a, b) => a.name.localeCompare(b.name));
-  if (docs.length === 0) {
-    return "";
-  }
-  return [
-    "",
-    "### Project-local Skills",
-    "",
-    "이 프로젝트의 local skill(`.agent-flow/local-skills/<name>/SKILL.md` 또는 `skills/<name>/SKILL.md`)은 아래 목록이 단일 진실 소스다. 매칭되는 작업(개발/수정/리뷰, 디자인, commit/push/PR 등)을 시작하기 전에 해당 `SKILL.md`를 먼저 읽고, 그 안의 reference·completion-gate 규칙을 그대로 따른다. 읽지 않은 skill은 적용했다고 말하지 않으며, 누락 시 리뷰는 incomplete 또는 `verdict: request-changes`로 처리한다.",
-    "",
-    ...docs.map((doc) => bootstrapLocalSkillLine(doc)),
-    "",
-  ].join("\n");
 }
 
 function bootstrapLocalSkillName(skillPath, fallback) {
@@ -219,28 +173,6 @@ function bootstrapLocalSkillName(skillPath, fallback) {
     // fall through to the directory name
   }
   return fallback;
-}
-
-function bootstrapLocalSkillLine(doc) {
-  const trigger = bootstrapLocalSkillTrigger(doc.absolutePath);
-  return `- \`${doc.name}\` — \`${doc.path}\`${trigger ? `: ${trigger}` : ""}`;
-}
-
-function bootstrapLocalSkillTrigger(absolutePath) {
-  let description = "";
-  try {
-    const frontmatter = splitSkillFrontmatter(fs.readFileSync(absolutePath, "utf8"));
-    if (frontmatter) {
-      description = String(parseSimpleYaml(frontmatter).description || "");
-    }
-  } catch (_error) {
-    description = "";
-  }
-  description = description.replace(/\s+/g, " ").trim();
-  if (description.length > 200) {
-    description = `${description.slice(0, 197).trimEnd()}...`;
-  }
-  return description;
 }
 
 function detectProfile() {
@@ -455,7 +387,6 @@ function codexHooksSettings(root) {
         {
           matcher: "Bash",
           hooks: [
-            { type: "command", command: hookScriptCommand(root, "guard-worktree.sh") },
             { type: "command", command: hookScriptCommand(root, "guard-protected-branch.sh") },
           ],
         },
@@ -464,6 +395,10 @@ function codexHooksSettings(root) {
         {
           matcher: "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit)$",
           hooks: [{ type: "command", command: hookScriptCommand(root, "comment-checker.py") }],
+        },
+        {
+          matcher: READ_TOOL_MATCHER,
+          hooks: [{ type: "command", command: hookScriptCommand(root, "record-skill-read.py") }],
         },
       ],
       Stop: [
@@ -485,9 +420,43 @@ function unquoteShellWord(value) {
   return value;
 }
 
+const READ_TOOL_MATCHER = "^(Read|read|read_file|view|cat)$";
+// kit.mjs와 같은 계약: 은퇴한 hook을 기존 settings에서 걷어낸다. 안 그러면 사라진
+// 스크립트를 host가 계속 실행해 셸이 막힌다.
+const RETIRED_MANAGED_HOOK_SCRIPTS = ["guard-worktree.sh", "guard-worktree-write.py"];
+
+function pruneRetiredHooks(settings) {
+  if (!settings || typeof settings !== "object" || !settings.hooks) {
+    return;
+  }
+  for (const [event, entries] of Object.entries(settings.hooks)) {
+    if (!Array.isArray(entries)) {
+      continue;
+    }
+    for (const entry of entries) {
+      if (Array.isArray(entry?.hooks)) {
+        entry.hooks = entry.hooks.filter((hook) => !isRetiredHookCommand(hook?.command));
+      }
+    }
+    settings.hooks[event] = entries.filter(
+      (entry) => !Array.isArray(entry?.hooks) || entry.hooks.length > 0,
+    );
+  }
+}
+
+function isRetiredHookCommand(command) {
+  if (typeof command !== "string" || !command) {
+    return false;
+  }
+  const normalized = unquoteShellWord(command).replaceAll("\\", "/").replaceAll("'", "").replaceAll('"', "");
+  return RETIRED_MANAGED_HOOK_SCRIPTS.some(
+    (name) => normalized.endsWith(`/scripts/hooks/${name}`) || normalized === `scripts/hooks/${name}`,
+  );
+}
+
 function managedHookScriptName(command) {
   const normalized = unquoteShellWord(command).replaceAll("\\", "/").replaceAll("'", "").replaceAll('"', "");
-  for (const scriptName of ["guard-worktree.sh", "guard-protected-branch.sh", "show-phase-status.sh", "comment-checker.py"]) {
+  for (const scriptName of ["guard-protected-branch.sh", "show-phase-status.sh", "comment-checker.py", "record-skill-read.py"]) {
     if (
       normalized === `.agent-flow/scripts/hooks/${scriptName}` ||
       normalized === `scripts/hooks/${scriptName}` ||
@@ -505,7 +474,7 @@ function managedHookScriptName(command) {
 function trustedManagedHookScriptName(root, command) {
   const normalized = unquoteShellWord(command).replaceAll("\\", "/");
   const normalizedRoot = path.resolve(root).replaceAll("\\", "/");
-  for (const scriptName of ["guard-worktree.sh", "guard-protected-branch.sh", "show-phase-status.sh", "comment-checker.py"]) {
+  for (const scriptName of ["guard-protected-branch.sh", "show-phase-status.sh", "comment-checker.py", "record-skill-read.py"]) {
     if (normalized === `${normalizedRoot}/.agent-flow/scripts/hooks/${scriptName}`) {
       return scriptName;
     }
@@ -517,6 +486,7 @@ function mergeHookSettings(settings, desired) {
   if (!settings.hooks) {
     settings.hooks = {};
   }
+  pruneRetiredHooks(settings);
   for (const [event, entries] of Object.entries(desired)) {
     if (!settings.hooks[event]) {
       settings.hooks[event] = [];
@@ -772,7 +742,6 @@ function claudeHooksSettings(root) {
         {
           matcher: "Bash",
           hooks: [
-            { type: "command", command: hookScriptCommand(root, "guard-worktree.sh") },
             { type: "command", command: hookScriptCommand(root, "guard-protected-branch.sh") },
           ],
         },
@@ -781,6 +750,10 @@ function claudeHooksSettings(root) {
         {
           matcher: "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit)$",
           hooks: [{ type: "command", command: hookScriptCommand(root, "comment-checker.py") }],
+        },
+        {
+          matcher: READ_TOOL_MATCHER,
+          hooks: [{ type: "command", command: hookScriptCommand(root, "record-skill-read.py") }],
         },
       ],
       Stop: [
@@ -801,7 +774,8 @@ function installClaudeHooks(root) {
 }
 
 function ompHooksExtensionSource() {
-  return String.raw`import fs from "node:fs";
+  return String.raw`// ${OMP_EXTENSION_MARKER}
+import fs from "node:fs";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -809,6 +783,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const HOOK_DIR = path.join(ROOT, ".agent-flow", "scripts", "hooks");
 const WRITE_TOOL_RE = /^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit)$/i;
+const READ_TOOL_RE = /^(Read|read|read_file|view|cat)$/i;
 
 export default function agentFlowHooks(pi) {
   if (typeof pi.setLabel === "function") {
@@ -837,7 +812,7 @@ export default function agentFlowHooks(pi) {
       return;
     }
     const payload = hookPayload(event, ctx);
-    for (const scriptName of ["guard-worktree.sh", "guard-protected-branch.sh"]) {
+    for (const scriptName of ["guard-protected-branch.sh"]) {
       const result = await runHook(scriptName, payload, ctx);
       if (result.block) {
         return { block: true, reason: result.reason };
@@ -845,8 +820,16 @@ export default function agentFlowHooks(pi) {
     }
   });
 
+  // tool_result 핸들러는 **하나만** 둔다. 이벤트당 하나만 유지하는 host가 있어
+  // 두 번 등록하면 뒤엣것이 앞엣것을 조용히 덮는다.
   pi.on("tool_result", async (event, ctx) => {
-    if (!WRITE_TOOL_RE.test(String(event?.toolName || ""))) {
+    const toolName = String(event?.toolName || "");
+    if (READ_TOOL_RE.test(toolName)) {
+      // 관측 전용이다. 결과를 보지 않고, 어떤 경우에도 read를 막지 않는다.
+      await runHook("record-skill-read.py", hookPayload(event, ctx), ctx);
+      return;
+    }
+    if (!WRITE_TOOL_RE.test(toolName)) {
       return;
     }
     const syncError = syncRootContextFiles(event, ctx);
@@ -1094,12 +1077,111 @@ function parseSystemMessage(text) {
 `;
 }
 
-function installOmpHooks(root) {
-  return writeFileIfMissingOrSame(
-    path.join(root, ".omp", "extensions", "agent-flow-hooks.ts"),
-    ompHooksExtensionSource(),
-    FORCE_MANAGED,
+function upgradeBundledProfiles(root, src, dest) {
+  if (!fs.existsSync(src)) {
+    return { written: 0, skipped: 0 };
+  }
+  ensureDir(dest);
+  let written = 0;
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    if (!entry.isFile()) {
+      continue;
+    }
+    const content = fs.readFileSync(path.join(src, entry.name), "utf8");
+    const target = path.join(dest, entry.name);
+    backupIfDifferent(root, target, content);
+    fs.writeFileSync(target, content, "utf8");
+    written += 1;
+  }
+  return { written, skipped: 0 };
+}
+
+function nextFreeBackupPath(base, content) {
+  // 이미 같은 내용이 백업돼 있으면 사본을 늘리지 않는다. 다르면 비어 있는
+  // 다음 이름을 찾는다. 무엇도 덮지 않으므로 어떤 버전도 잃지 않는다.
+  for (let i = 0; i < 100; i += 1) {
+    const candidate = i === 0 ? base : `${base}.${i}`;
+    if (!fs.existsSync(candidate)) {
+      return candidate;
+    }
+    if (fs.readFileSync(candidate, "utf8") === content) {
+      return null;
+    }
+  }
+  return null;
+}
+
+function backupIfDifferent(root, target, content) {
+  if (!fs.existsSync(target)) {
+    return;
+  }
+  if (fs.readFileSync(target, "utf8") === content) {
+    return;
+  }
+  // 덮어쓰는 내용을 잃지 않는다. 고정 이름 하나만 쓰면 둘 중 하나를 반드시
+  // 버리게 된다 — 매번 덮으면 사용자 원본이, 안 덮으면 이번 편집이 사라진다.
+  const backup = nextFreeBackupPath(`${target}.bak`, fs.readFileSync(target, "utf8"));
+  if (backup === null) {
+    return;  // 같은 내용이 이미 백업돼 있다.
+  }
+  fs.copyFileSync(target, backup);
+  console.log(`  ~ replaced ${path.relative(root, target)} (backup: ${path.relative(root, backup)})`);
+}
+
+function ompExtensionIsKitOwned(target) {
+  if (!fs.existsSync(target)) {
+    return true;
+  }
+  const current = fs.readFileSync(target, "utf8");
+  // 표식은 이번 버전부터 붙는다. 그 이전 설치본에는 없으므로 생성 서명으로도
+  // 인정한다. 이게 없으면 기존 사용자는 첫 업그레이드에서 영영 막힌다.
+  return (
+    current.includes(OMP_EXTENSION_MARKER) ||
+    current.includes("export default function agentFlowHooks(")
   );
+}
+
+function installOmpHooks(root) {
+  // 다른 host의 hook 설정은 병합이라 업그레이드가 저절로 되지만, 이 확장은
+  // 통째로 kit이 만든 파일이다. "내용이 다르면 덮지 않는다"만 걸어 두면
+  // 업그레이드가 정의상 내용이 다른 경우라 영구히 고착된다.
+  const target = path.join(root, ".omp", "extensions", "agent-flow-hooks.ts");
+  if (!ompExtensionIsKitOwned(target) && !FORCE_MANAGED) {
+    console.warn(
+      `agent-flow: ${path.relative(root, target)} is not kit-managed; ` +
+        "leaving it alone. Re-run with --force-managed to replace it.",
+    );
+    return false;
+  }
+  // kit 소유여도 사용자가 손댔을 수 있다. 서명만으로는 구분이 안 되므로
+  // 다른 내용이면 지우기 전에 사본을 남긴다.
+  backupIfDifferent(root, target, ompHooksExtensionSource());
+  return writeFileIfMissingOrSame(target, ompHooksExtensionSource(), true);
+}
+
+function pruneRetiredHookScripts(root) {
+  // 설정에서만 빼면 실행 파일이 디스크에 남는다. 남은 파일을 다른 경로가
+  // 다시 집어 실행하면 은퇴시킨 guard가 되살아난다.
+  const hooksDir = path.join(root, ".agent-flow", "scripts", "hooks");
+  for (const scriptName of RETIRED_MANAGED_HOOK_SCRIPTS) {
+    const target = path.join(hooksDir, scriptName);
+    if (fs.existsSync(target)) {
+      // 사용자가 같은 이름으로 자기 스크립트를 뒀을 수 있다. 되돌릴 수 있게
+      // 사본을 남기고 지운다. 설치본이 관리하지 않는 host 설정이 이 경로를
+      // 여전히 가리킬 수 있으므로 경로를 함께 알린다.
+      const kept = nextFreeBackupPath(`${target}.removed`, fs.readFileSync(target, "utf8"));
+      if (kept !== null) {
+        fs.copyFileSync(target, kept);
+        // 실행 권한은 떼어 둔다. 되살릴 수 있게 남기는 사본이지 실행 대상이 아니다.
+        fs.chmodSync(kept, 0o644);
+      }
+      fs.rmSync(target, { force: true });
+      console.log(
+        `  - removed retired hook: ${path.relative(root, target)} ` +
+          `(backup: ${path.relative(root, target)}.removed)`,
+      );
+    }
+  }
 }
 
 function makeHooksExecutable(root) {
@@ -1108,7 +1190,7 @@ function makeHooksExecutable(root) {
     return;
   }
   for (const entry of fs.readdirSync(hooksDir)) {
-    if (entry.endsWith(".sh") || entry === "comment-checker.py") {
+    if (entry.endsWith(".sh") || entry.endsWith(".py")) {
       fs.chmodSync(path.join(hooksDir, entry), 0o755);
     }
   }
@@ -1632,12 +1714,14 @@ function install() {
     true,
     true,
   );
-  const profilesCopied = copyDir(
+  // kit이 배포하는 profile은 갱신한다. 사용자 편집을 보호한다고 두면 새 kit이
+  // 추가한 필드(skill_sources 등)가 기존 설치본에 영영 안 닿는다. 다만 지우지는
+  // 않는다 — prune을 켜면 사용자가 만든 custom profile이 함께 날아간다.
+  // 덮기 전에는 사본을 남긴다.
+  const profilesCopied = upgradeBundledProfiles(
+    PROJECT,
     path.join(KIT_ROOT, "profiles"),
     path.join(AF_DIR, "profiles"),
-    new Set(),
-    true,
-    FORCE_MANAGED,
   );
   const templatesCopied = copyDir(
     path.join(KIT_ROOT, "templates"),
@@ -1657,6 +1741,7 @@ function install() {
   if (!samePath(PROJECT, KIT_ROOT)) {
     removeDirIfSame(path.join(KIT_ROOT, "scripts"), path.join(PROJECT, "scripts"), FORCE_MANAGED);
   }
+  pruneRetiredHookScripts(PROJECT);
   makeHooksExecutable(PROJECT);
   const codexHooksCopied = installCodexHooks(PROJECT);
   installClaudeHooks(PROJECT);

@@ -45,11 +45,17 @@ from agent_flow.artifact import (
 )
 from agent_flow.cli_detect import detect_available_clis
 from agent_flow.core.commands import run_safe_command
+from agent_flow.core.worktree_isolation import (
+    assert_leader_unchanged,
+    capture_leader_snapshot,
+    leader_root_for,
+)
 from agent_flow.core.phase_workflow import find_kit_root, load_phase_workflow_definition
 from agent_flow.core.report import write_run_report
 from agent_flow.core.security import ensure_child_path, validate_safe_name
 from agent_flow.core.markers import has_failure_markers, missing_markers
-from agent_flow.core.local_skills import missing_local_skill_markers
+from agent_flow.core.local_skills import changed_files, missing_local_skill_markers
+from agent_flow.core.skill_resolver import PhaseSkills
 from agent_flow.memory.index import LoreIndex
 from agent_flow.memory.lore import Lore
 
@@ -94,6 +100,7 @@ class Phase:
     routes: dict[str, str] | None = None
     required_markers: tuple[str, ...] = ()
     artifact: str = ""
+    skills: PhaseSkills | None = None
 
 
 class Runner:
@@ -157,6 +164,8 @@ class Runner:
         adapter._profile_id = self.profile_id
         adapter._architecture = self.architecture
         adapter._config_root = self.config_root
+        adapter._task_text = read_meta(self.run_dir).get("task", "") if self.run_dir else ""
+        adapter._changed_files = changed_files(self.project_root)
 
         # Auto-cite lore: search the local lore index for entries relevant
         # to the task description and inject them into the prompt envelope.
@@ -166,11 +175,20 @@ class Runner:
             self.project_root, meta_for_lore.get("task", ""),
         )
 
+        # 이 실행이 worktree 안이라면 뒤에 있는 leader 체크아웃이 지켜야 할
+        # 대상이다. leader에서 그대로 도는 실행은 지킬 바깥 대상이 없다.
+        leader_root = leader_root_for(self.project_root)
+
         assert self.run_dir is not None
         meta = read_meta(self.run_dir)
         phase_index = int(meta.get("phase_index", 0) or 0)
         while phase_index < len(self.phases):
             phase = self.phases[phase_index]
+            # 진입 시각은 phase를 **시작할 때** 찍는다. 실행 뒤에 찍으면 방금 쓴
+            # artifact가 진입 시각보다 과거가 되어 stale로 오판된다.
+            if not meta.get("phase_entered_at"):
+                self._stamp_phase(meta, phase_index)
+                write_meta(self.run_dir, meta)
             if self._has_artifact(phase):
                 artifact = self._existing_artifact_path(phase)
                 blocked_reason = (
@@ -211,12 +229,7 @@ class Runner:
                     print(f"  [skip] {phase.id}")
                     phase_index, blocked = self._next_index(phase_index, phase)
                     meta = read_meta(self.run_dir)
-                    meta["phase_index"] = phase_index
-                    meta["current_phase"] = (
-                        self.phases[phase_index].id
-                        if phase_index < len(self.phases)
-                        else None
-                    )
+                    self._advance_phase(meta, phase_index, blocked)
                     write_meta(self.run_dir, meta)
                     if blocked:
                         print(
@@ -235,12 +248,7 @@ class Runner:
                 print(f"  [skip] {phase.id}")
                 phase_index, blocked = self._next_index(phase_index, phase)
                 meta = read_meta(self.run_dir)
-                meta["phase_index"] = phase_index
-                meta["current_phase"] = (
-                    self.phases[phase_index].id
-                    if phase_index < len(self.phases)
-                    else None
-                )
+                self._advance_phase(meta, phase_index, blocked)
                 write_meta(self.run_dir, meta)
                 if blocked:
                     print(
@@ -256,12 +264,18 @@ class Runner:
                     return
                 continue
             print(f"  [run]  {phase.id} — {phase.description}")
+            leader_before = (
+                capture_leader_snapshot(leader_root) if leader_root is not None else None
+            )
             completed = adapter.execute(
                 phase, run_dir=self.run_dir, project_root=self.project_root,
             )
+            if leader_before is not None:
+                assert_leader_unchanged(
+                    leader_root, leader_before, run_id=self.run_dir.name
+                )
             meta = read_meta(self.run_dir)
-            meta["current_phase"] = phase.id
-            meta["phase_index"] = phase_index
+            self._stamp_phase(meta, phase_index)
             write_meta(self.run_dir, meta)
             if not completed:
                 print(
@@ -323,12 +337,7 @@ class Runner:
                 return
             phase_index, blocked = self._next_index(phase_index, phase)
             meta = read_meta(self.run_dir)
-            meta["phase_index"] = phase_index
-            meta["current_phase"] = (
-                self.phases[phase_index].id
-                if phase_index < len(self.phases)
-                else None
-            )
+            self._advance_phase(meta, phase_index, blocked)
             write_meta(self.run_dir, meta)
             if blocked:
                 print(
@@ -425,6 +434,37 @@ class Runner:
             raise ValueError(f"phase {phase.id}: route target not found: {target}")
         return current_index + 1, False
 
+    def _advance_phase(self, meta: dict[str, Any], phase_index: int, blocked: bool) -> None:
+        """route 결과를 meta에 반영한다.
+
+        `blocked`면 제자리에 멈춘 것이므로 진입이 아니다. 여기서 시각을 밀면
+        방금 쓴 artifact가 진입 시각보다 과거가 되어 다음 실행이 진짜 사유
+        (route_blocked) 대신 stale_artifact를 보고한다.
+        """
+        self._stamp_phase(meta, phase_index, entering=not blocked)
+
+    def _stamp_phase(
+        self, meta: dict[str, Any], phase_index: int, *, entering: bool = False
+    ) -> None:
+        """meta에 현재 phase와 **진입 시각**을 박는다.
+
+        `phase_entered_at`이 없으면 읽음 증거를 과거 기록까지 소급 인정하게 되어
+        L2 강제가 통째로 무력해진다. 그래서 phase를 실제로 **새로 시작**할 때는
+        갱신한다 — 같은 phase로 되도는 self-loop도 새 라운드이므로 지난 라운드의
+        읽음 기록을 물려받으면 안 된다.
+
+        반대로 route가 막혀(`blocked`) 제자리에 멈춘 경우는 진입이 아니다.
+        여기서 시각을 밀면 방금 쓴 artifact가 진입 시각보다 과거가 되어 다음
+        실행이 진짜 사유(route_blocked) 대신 stale_artifact를 보고한다.
+        """
+        phase_id = (
+            self.phases[phase_index].id if phase_index < len(self.phases) else None
+        )
+        if entering or meta.get("current_phase") != phase_id or not meta.get("phase_entered_at"):
+            meta["phase_entered_at"] = datetime.now(timezone.utc).isoformat()
+        meta["phase_index"] = phase_index
+        meta["current_phase"] = phase_id
+
     def _increment_fix_loop_rounds(self) -> int:
         assert self.run_dir is not None
         meta = read_meta(self.run_dir)
@@ -500,7 +540,19 @@ class Runner:
             return []
         text = artifact.read_text(encoding="utf-8")
         missing = list(_missing_markers(text, phase.required_markers))
-        missing.extend(missing_local_skill_markers(text, self.config_root, phase.id))
+        meta = read_meta(self.run_dir)
+        missing.extend(
+            missing_local_skill_markers(
+                text,
+                self.config_root,
+                phase.id,
+                phase_skills=phase.skills,
+                profile=self.profile,
+                changed_files=changed_files(self.project_root),
+                task_text=str(meta.get("task", "")),
+                since=_meta_timestamp(meta.get("phase_entered_at")),
+            )
+        )
         return missing
 
     def _artifact_path(self, phase: Phase) -> Path:
@@ -607,6 +659,7 @@ def _load_workflow(kit_root: Path, name: str) -> list[Phase]:
             routes=phase.routes,
             required_markers=phase.required_markers,
             artifact=phase.artifact,
+            skills=phase.skills,
         )
         for phase in definition.phases
     ]

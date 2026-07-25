@@ -29,6 +29,11 @@ from agent_flow.core.local_skills import local_skill_prompt_block
 if TYPE_CHECKING:
     from agent_flow.runner import Phase
 
+# resolver가 이미 구체적인 skill 목록으로 바꿔 놓는 키들. 원본 표를 다시 넣지 않는다.
+_RESOLVER_OWNED_PROFILE_KEYS = frozenset(
+    {"skills", "skill_sources", "android_skills", "chrisbanes_skills"}
+)
+
 
 class Adapter(ABC):
     """Base for all host adapters.
@@ -48,6 +53,8 @@ class Adapter(ABC):
         self._architecture: str = "default"
         self._lore_citations: list[Any] = []  # list[Lore]; typed loose to avoid import cycle
         self._config_root: Path | None = None
+        self._task_text: str = ""
+        self._changed_files: tuple[str, ...] = ()
 
     @abstractmethod
     def execute(self, phase: "Phase", run_dir: Path, project_root: Path) -> bool:
@@ -74,7 +81,14 @@ class Adapter(ABC):
         architecture_block = self._render_architecture_block(phase)
         completion_gate_block = self._render_completion_gate_block(phase)
         config_root = self._config_root or project_root
-        local_skill_block = local_skill_prompt_block(config_root, phase.id)
+        local_skill_block = local_skill_prompt_block(
+            config_root,
+            phase.id,
+            phase_skills=getattr(phase, "skills", None),
+            profile=self._profile_snapshot,
+            changed_files=self._changed_files,
+            task_text=self._task_text,
+        )
         lore_block = self._render_lore_block(project_root, phase)
         return (
             f"# agent-flow phase: {phase.id}\n\n"
@@ -178,15 +192,21 @@ class Adapter(ABC):
         """Inline the active profile YAML so the host AI sees real data.
 
         The runner injects `_profile_snapshot` and `_profile_id` before
-        calling execute. If absent (e.g., adapter constructed standalone),
-        this block is omitted gracefully.
+        calling execute. Skill routing keys are excluded: the resolver already
+        turned them into a concrete per-phase skill list, and dumping the raw
+        tables again costs ~160 lines on every phase envelope.
         """
         if not self._profile_snapshot:
             return ""
+        trimmed = {
+            key: value
+            for key, value in self._profile_snapshot.items()
+            if key not in _RESOLVER_OWNED_PROFILE_KEYS
+        }
+        if not trimmed:
+            return ""
         try:
-            yaml_dump = yaml.safe_dump(
-                self._profile_snapshot, sort_keys=False, allow_unicode=True
-            ).rstrip()
+            yaml_dump = yaml.safe_dump(trimmed, sort_keys=False, allow_unicode=True).rstrip()
         except yaml.YAMLError:
             return ""
         return (

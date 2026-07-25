@@ -127,6 +127,28 @@ architecture:
       paths: ["core/navigation/impl"]
       modules: [":core:navigation:impl"]
       package_suffix: "core.navigation.impl"
+skill_sources:
+  # 설치 관리자가 이미 있는 소스는 fetch하지 않는다. 경로만 해석하고, 없으면 install 시점에 1회 안내한다.
+  - id: android-official
+    kind: host-managed
+    install_hint: "android skills install <name>  (https://github.com/android/skills)"
+    roots:
+      - "~/.android/cli/skills/**/{skill}/SKILL.md"
+      - "~/.claude/skills/{skill}/SKILL.md"
+      - "~/.codex/skills/{skill}/SKILL.md"
+  - id: chrisbanes
+    kind: host-managed
+    install_hint: "/plugin marketplace add chrisbanes/skills  (https://github.com/chrisbanes/skills)"
+    roots:
+      - "~/.claude/plugins/marketplaces/*/skills/{skill}/SKILL.md"
+      - "~/.claude/skills/{skill}/SKILL.md"
+      - "~/.codex/skills/{skill}/SKILL.md"
+  # 설치 관리자가 없는 순수 git repo만 머신 공유 캐시로 1회 fetch한다. repo 안에는 넣지 않는다.
+  - id: skydoves-compose-performance
+    kind: fetch
+    url: https://github.com/skydoves/compose-performance-skills
+    ref: main
+    layout: "*/{skill}/SKILL.md"
 android_skills:
   source: https://github.com/android/skills
   install_policy: never

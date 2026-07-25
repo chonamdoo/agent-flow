@@ -6,16 +6,14 @@ from pathlib import Path
 
 from agent_flow.core.gates import GateResult
 from agent_flow.core.report import write_run_report
+from agent_flow.core.worktree_isolation import AGENT_FLOW_STATE_DIRS
 
 
 def init_project(root: Path) -> None:
-    for relative in (
-        ".agent-flow/runs",
-        ".agent-flow/state",
-        ".agent-flow/handoffs",
-        ".agent-flow/team",
-    ):
-        (root / relative).mkdir(parents=True, exist_ok=True)
+    # tripwire가 비교에서 빼는 목록과 **같은 소스**여야 한다. 갈라지면 정상
+    # 명령이 leader 오염으로 오탐된다.
+    for name in AGENT_FLOW_STATE_DIRS:
+        (root / ".agent-flow" / name).mkdir(parents=True, exist_ok=True)
 
 
 def write_prompt(*, root: Path, run_dir: Path, stage_id: str, content: str) -> Path:

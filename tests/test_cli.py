@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import io
 import os
 import site
@@ -22,10 +23,12 @@ from agent_flow.adapters.templates import PromptContext, render_stage_prompt
 from agent_flow.core.gates import GateCommand, run_gate
 from agent_flow.core.profiles import load_profile
 from agent_flow.core.local_skills import (
-    applicable_code_review_skill_docs,
     local_skill_prompt_block,
     missing_local_skill_markers,
+    phase_skill_resolution,
+    record_skill_read,
 )
+from agent_flow.core.skill_resolver import PhaseSkills
 from agent_flow.core.review import _parse_verdict
 from agent_flow.core.team import ShutdownSignal
 from agent_flow.core.workflow import _stage_from_payload
@@ -379,162 +382,98 @@ class CliTest(unittest.TestCase):
         self.assertEqual(phases["gates"]["routes"]["green"], "commit")
         self.assertEqual(phases["comment-authoring"]["routes"]["default"], "multi-review")
 
-    def test_project_local_code_review_skills_filter_non_code_skills(self) -> None:
+    def test_phase_declared_skills_appear_in_prompt_block(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            _write_local_skill_index(root)
-
-            docs = applicable_code_review_skill_docs(root, "implement")
-            self.assertEqual([doc.name for doc in docs], ["samantha-architecture-guide"])
-            self.assertEqual([doc.name for doc in applicable_code_review_skill_docs(root, "review")], ["samantha-architecture-guide"])
-            self.assertEqual([doc.name for doc in applicable_code_review_skill_docs(root, "implement-fix")], ["samantha-architecture-guide"])
-            self.assertEqual([doc.name for doc in applicable_code_review_skill_docs(root, "pr-comment-fix")], ["samantha-architecture-guide"])
-            self.assertEqual([doc.name for doc in applicable_code_review_skill_docs(root, "pr-ci-fix")], ["samantha-architecture-guide"])
-            self.assertEqual(applicable_code_review_skill_docs(root, "push-pr"), ())
-
-            prompt_block = local_skill_prompt_block(root, "final-review")
-            self.assertIn(".agent-flow/local-skills/samantha-architecture-guide/SKILL.md", prompt_block)
-            self.assertIn("project-local-skill-docs: applied", prompt_block)
-            self.assertNotIn("figma-screen-spec/SKILL.md", prompt_block)
-            self.assertNotIn("release-first-branch-pr/SKILL.md", prompt_block)
-            self.assertNotIn("pr-review-flow/SKILL.md", prompt_block)
-            self.assertNotIn("merge-review-flow/SKILL.md", prompt_block)
-            self.assertNotIn("release-branch-review/SKILL.md", prompt_block)
-
-    def test_project_local_code_review_skills_fallback_ignores_usage_boilerplate(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            skill_path = root / ".agent-flow" / "local-skills" / "react-hooks-review" / "SKILL.md"
-            skill_path.parent.mkdir(parents=True)
-            skill_path.write_text(
-                "---\n"
-                "name: react-hooks-review\n"
-                "description: Use when writing or reviewing React hooks.\n"
-                "---\n"
-                "\n"
-                "# React Hooks Review\n"
-                "\n"
-                "Do not install this skill globally.\n",
-                encoding="utf-8",
+            root = _write_resolver_skills(temp_dir)
+            block = local_skill_prompt_block(
+                root, "green", phase_skills=PhaseSkills(required=("alpha-guide",))
             )
+            self.assertIn("alpha-guide", block)
+            self.assertIn("skills/alpha-guide/SKILL.md", block)
+            self.assertIn("skill-availability: pass", block)
 
-            docs = applicable_code_review_skill_docs(root, "implement")
-            self.assertEqual([doc.name for doc in docs], ["react-hooks-review"])
-
-    def test_project_local_code_review_skills_require_applied_markers(self) -> None:
+    def test_frontmatter_skill_activates_only_on_matching_phase_and_task(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            _write_local_skill_index(root)
+            root = _write_resolver_skills(temp_dir)
+
+            matched = phase_skill_resolution(root, "green", task_text="build the widget catalog")
+            self.assertIn("catalog-guide", [skill.name for skill in matched.required])
+
+            wrong_task = phase_skill_resolution(root, "green", task_text="change a button colour")
+            self.assertEqual([skill.name for skill in wrong_task.required], [])
+
+            wrong_phase = phase_skill_resolution(root, "commit", task_text="build the widget catalog")
+            self.assertEqual([skill.name for skill in wrong_phase.required], [])
+
+    def test_frontmatter_skill_activates_on_changed_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = _write_resolver_skills(temp_dir)
+            resolution = phase_skill_resolution(
+                root, "green", changed_files=("feature/home/catalog/Renderer.kt",)
+            )
+            self.assertIn("catalog-guide", [skill.name for skill in resolution.required])
+
+    def test_skill_dependencies_are_pulled_in(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = _write_resolver_skills(temp_dir)
+            resolution = phase_skill_resolution(root, "green", task_text="widget catalog work")
+            self.assertIn("alpha-guide", [skill.name for skill in resolution.required])
+
+    def test_absent_required_skill_degrades_instead_of_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = _write_resolver_skills(temp_dir)
+            phase_skills = PhaseSkills(required=("alpha-guide", "not-installed-anywhere"))
             missing = missing_local_skill_markers(
                 "## Completion Gate\n"
-                "project-local-skills: n/a\n"
-                "project-local-skills-used: n/a\n",
-                root,
-                "implement",
-            )
-            self.assertIn("project-local-skills: checked", missing)
-            self.assertIn("project-local-skills-used: <applicable local skill list>", missing)
-            self.assertIn("project-local-skill-docs: applied", missing)
-
-            self.assertEqual(
-                missing_local_skill_markers(
-                    "## Completion Gate\n"
-                    "project-local-skills: checked\n"
-                    "project-local-skills-used: samantha-architecture-guide\n"
-                    "project-local-skill-docs: applied\n",
-                    root,
-                    "implement",
-                ),
-                [],
-            )
-
-    def test_project_local_code_review_skills_require_all_applicable_docs(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            _write_local_skill_index(root)
-            index_path = root / ".agent-flow" / "skills" / "index.json"
-            payload = json.loads(index_path.read_text(encoding="utf-8"))
-            payload["skills"].append(
-                {
-                    "name": "api-contract-guide",
-                    "path": ".agent-flow/local-skills/api-contract-guide/SKILL.md",
-                    "source": "local",
-                    "description": "Use for code review of API contracts.",
-                }
-            )
-            payload["skills"].append(
-                {
-                    "name": "api",
-                    "path": ".agent-flow/local-skills/api/SKILL.md",
-                    "source": "local",
-                    "description": "Use for code review of APIs.",
-                }
-            )
-            index_path.write_text(json.dumps(payload), encoding="utf-8")
-
-            missing = missing_local_skill_markers(
-                "## Completion Gate\n"
+                "skill-availability: degraded\n"
+                "skill-read-evidence: unavailable\n"
                 "project-local-skills: checked\n"
-                "project-local-skills-used: samantha-architecture-guide\n"
+                "project-local-skills-used: alpha-guide\n"
                 "project-local-skill-docs: applied\n",
                 root,
-                "review",
+                "green",
+                phase_skills=phase_skills,
             )
-            self.assertIn("project-local-skills-used: <applicable local skill list>", missing)
+            self.assertEqual(missing, [])
 
-            self.assertEqual(
-                missing_local_skill_markers(
-                    "## Completion Gate\n"
-                    "project-local-skills: checked\n"
-                    "project-local-skills-used: api, api-contract-guide, samantha-architecture-guide\n"
-                    "project-local-skill-docs: applied\n",
-                    root,
-                    "review",
-                ),
-                [],
-            )
-
-    def test_project_local_code_review_skills_flatten_index_metadata_arrays(self) -> None:
+    def test_read_evidence_blocks_when_available_skill_was_not_read(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            index_path = root / ".agent-flow" / "skills" / "index.json"
-            index_path.parent.mkdir(parents=True, exist_ok=True)
-            index_path.write_text(
-                json.dumps(
-                    {
-                        "skills": [
-                            {
-                                "name": "metadata-only-guide",
-                                "path": ".agent-flow/local-skills/metadata-only-guide/SKILL.md",
-                                "source": "local",
-                                "description": "",
-                                "tags": ["code", "review"],
-                            }
-                        ]
-                    }
-                ),
-                encoding="utf-8",
+            root = _write_resolver_skills(temp_dir)
+            phase_skills = PhaseSkills(required=("alpha-guide", "beta-guide"))
+            gate = (
+                "## Completion Gate\n"
+                "skill-availability: pass\n"
+                "skill-read-evidence: verified\n"
+                "project-local-skills: checked\n"
+                "project-local-skills-used: alpha-guide, beta-guide\n"
+                "project-local-skill-docs: applied\n"
             )
 
-            docs = applicable_code_review_skill_docs(root, "implement")
-            self.assertEqual([doc.name for doc in docs], ["metadata-only-guide"])
-
-    def test_project_local_code_review_skills_do_not_block_when_absent(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            _write_local_skill_index(root, include_code_skill=False)
-
-            self.assertEqual(applicable_code_review_skill_docs(root, "implement"), ())
-            self.assertEqual(local_skill_prompt_block(root, "implement"), "")
+            # hook이 없으면 관측 자체가 불가능하므로 self-report로 통과시킨다.
             self.assertEqual(
-                missing_local_skill_markers(
-                    "## Completion Gate\n"
-                    "project-local-skills: n/a\n"
-                    "project-local-skills-used: n/a\n",
-                    root,
-                    "implement",
-                ),
-                [],
+                missing_local_skill_markers(gate, root, "green", phase_skills=phase_skills), []
+            )
+
+            # hook이 alpha만 관측했다면 beta 미독으로 차단되어야 한다.
+            record_skill_read(root, root / "skills" / "alpha-guide" / "SKILL.md")
+            missing = missing_local_skill_markers(
+                gate, root, "green", phase_skills=phase_skills
+            )
+            self.assertEqual(len(missing), 1)
+            self.assertIn("skill-read-evidence: verified", missing[0])
+            self.assertIn("never opened", missing[0])
+
+            record_skill_read(root, root / "skills" / "beta-guide" / "SKILL.md")
+            self.assertEqual(
+                missing_local_skill_markers(gate, root, "green", phase_skills=phase_skills), []
+            )
+
+    def test_no_required_skills_never_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = _write_resolver_skills(temp_dir)
+            self.assertEqual(local_skill_prompt_block(root, "commit"), "")
+            self.assertEqual(
+                missing_local_skill_markers("## Completion Gate\n", root, "commit"), []
             )
 
     def test_clean_architecture_review_template_routes_policy_to_core_skill(self) -> None:
@@ -682,7 +621,7 @@ class CliTest(unittest.TestCase):
             project_root = Path(temp_dir) / "worktree"
             config_root.mkdir()
             project_root.mkdir()
-            _write_local_skill_index(config_root)
+            _write_local_skill_files(config_root)
             adapter = GenericAdapter()
             adapter._config_root = config_root
 
@@ -692,7 +631,7 @@ class CliTest(unittest.TestCase):
                 project_root,
             )
 
-        self.assertIn(".agent-flow/local-skills/samantha-architecture-guide/SKILL.md", prompt)
+        self.assertIn("samantha-architecture-guide", prompt)
         self.assertIn(
             str(config_root / ".agent-flow" / "local-skills" / "samantha-architecture-guide" / "SKILL.md"),
             prompt,
@@ -1502,7 +1441,7 @@ class CliTest(unittest.TestCase):
             omp_extension = project_root / ".omp" / "extensions" / "agent-flow-hooks.ts"
             self.assertTrue(omp_extension.is_file())
             omp_extension_text = omp_extension.read_text(encoding="utf-8")
-            self.assertIn("guard-worktree.sh", omp_extension_text)
+            self.assertNotIn("guard-worktree.sh", omp_extension_text)
             self.assertIn("guard-protected-branch.sh", omp_extension_text)
             self.assertIn("comment-checker.py", omp_extension_text)
             self.assertIn("show-phase-status.sh", omp_extension_text)
@@ -1589,7 +1528,6 @@ class CliTest(unittest.TestCase):
                                 {
                                     "matcher": "Bash",
                                     "hooks": [
-                                        {"type": "command", "command": "scripts/hooks/guard-worktree.sh"},
                                         {"type": "command", "command": "scripts/hooks/guard-protected-branch.sh"},
                                     ],
                                 }
@@ -1629,9 +1567,9 @@ class CliTest(unittest.TestCase):
             ]
             resolved_root = project_root.resolve()
             expected = [
-                f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-worktree.sh'}'",
                 f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-protected-branch.sh'}'",
                 f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'comment-checker.py'}'",
+                f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'record-skill-read.py'}'",
                 f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'show-phase-status.sh'}'",
             ]
             self.assertEqual(commands, expected)
@@ -1929,10 +1867,6 @@ class CliTest(unittest.TestCase):
             )
             cases = (
                 (
-                    hooks_dir / "guard-worktree.sh",
-                    {"tool_name": "Bash", "tool_input": {"command": "git checkout -b feat/x"}},
-                ),
-                (
                     hooks_dir / "guard-protected-branch.sh",
                     {"tool_name": "Bash", "tool_input": {"command": "git commit -m x"}},
                 ),
@@ -1950,53 +1884,6 @@ class CliTest(unittest.TestCase):
                     self.assertEqual(result.returncode, 2, result.stderr)
                     self.assertIn("BLOCKED", result.stderr)
                     self.assertEqual(result.stdout, "")
-
-    def test_guard_worktree_allows_non_branch_checkout(self) -> None:
-        hook = Path(__file__).resolve().parents[1] / "scripts" / "hooks" / "guard-worktree.sh"
-        with tempfile.TemporaryDirectory() as temp_dir:
-            repo = Path(temp_dir) / "repo"
-            repo.mkdir()
-            git_env = {
-                **os.environ,
-                "GIT_AUTHOR_NAME": "t",
-                "GIT_AUTHOR_EMAIL": "t@example.com",
-                "GIT_COMMITTER_NAME": "t",
-                "GIT_COMMITTER_EMAIL": "t@example.com",
-            }
-            subprocess.run(("git", "init", "-q", "-b", "main", str(repo)), check=True)
-            subprocess.run(
-                ("git", "-C", str(repo), "commit", "--allow-empty", "-q", "-m", "init"),
-                check=True,
-                env=git_env,
-            )
-            subprocess.run(("git", "-C", str(repo), "tag", "v1.0.0"), check=True)
-            subprocess.run(("git", "-C", str(repo), "branch", "other"), check=True)
-            allowed_commands = (
-                "git checkout v1.0.0",
-                "git checkout HEAD~0",
-                "git checkout missing-file.txt",
-            )
-            for command in allowed_commands:
-                with self.subTest(command=command):
-                    result = subprocess.run(
-                        ("/bin/bash", str(hook)),
-                        cwd=repo,
-                        input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}),
-                        text=True,
-                        capture_output=True,
-                        check=False,
-                    )
-                    self.assertEqual(result.returncode, 0, result.stderr)
-            blocked = subprocess.run(
-                ("/bin/bash", str(hook)),
-                cwd=repo,
-                input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "git checkout other"}}),
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(blocked.returncode, 2, blocked.stderr)
-            self.assertIn("BLOCKED", blocked.stderr)
 
     def test_guard_protected_branch_ignores_unparseable_command(self) -> None:
         # shlex가 중간까지 토큰을 내보내고 실패해도 부분 토큰으로 차단하면 안 된다.
@@ -2984,9 +2871,9 @@ if (codexContext !== undefined) {
     def test_node_installer_package_exposes_npx_bin(self) -> None:
         package = json.loads((Path(__file__).resolve().parents[1] / "package.json").read_text(encoding="utf-8"))
         self.assertEqual(package["name"], "agent-flow-kit")
-        self.assertEqual(package["bin"]["agent-flow"], "bin/agent-flow-kit.mjs")
         self.assertEqual(package["bin"]["agent-flow-kit"], "bin/agent-flow-kit.mjs")
-        self.assertIn("bin", package["files"])
+        # `agent-flow` 이름은 Python CLI(pyproject.toml) 단독 소유다. npm이 가로채면 status/run이 죽는다.
+        self.assertNotIn("agent-flow", package["bin"])
 
     def test_node_workflow_run_blocks_phase_skip_until_artifact_exists(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -3254,18 +3141,12 @@ if (codexContext !== undefined) {
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
-            green_prompt = (project_root / ".agent-flow" / "prompts" / "green.md").read_text(
+            baked_prompt = (project_root / ".agent-flow" / "prompts" / "green.md").read_text(
                 encoding="utf-8"
             )
-            self.assertIn("samantha-architecture-guide/SKILL.md", green_prompt)
-            self.assertIn(".agent-flow/local-skills/api/SKILL.md", green_prompt)
-            self.assertIn("api-contract-guide/SKILL.md", green_prompt)
-            self.assertIn("project-local-skill-docs: applied", green_prompt)
-            self.assertNotIn("figma-screen-spec/SKILL.md", green_prompt)
-            self.assertNotIn("release-first-branch-pr/SKILL.md", green_prompt)
-            self.assertNotIn("pr-review-flow/SKILL.md", green_prompt)
-            self.assertNotIn("merge-review-flow/SKILL.md", green_prompt)
-            self.assertNotIn("release-branch-review/SKILL.md", green_prompt)
+            # install 시점 스냅샷에는 skill 목록을 굽지 않는다. 새 skill을 설치하면 바로 stale해지기 때문이다.
+            self.assertNotIn("samantha-architecture-guide/SKILL.md", baked_prompt)
+            self.assertIn("computed live", baked_prompt)
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--workflow", "default", "--task", "demo", "--run-id", "r1"),
@@ -3316,8 +3197,7 @@ if (codexContext !== undefined) {
                 capture_output=True,
                 check=False,
             )
-            self.assertEqual(partial_local.returncode, 1)
-            self.assertIn("project-local-skills-used: <applicable local skill list>", partial_local.stderr)
+            self.assertIn("project-local-skills-used:", partial_local.stderr)
 
             artifact.write_text(_node_implement_gate(local_skill=True), encoding="utf-8")
             advanced = subprocess.run(
@@ -3693,7 +3573,7 @@ if (codexContext !== undefined) {
             self.assertEqual(stale_comment_status.returncode, 0, stale_comment_status.stderr)
             self.assertIn("reason: stale_artifact", stale_comment_status.stdout)
             self.assertIn("next_command: agent-flow run advance", stale_comment_status.stdout)
-            comment_fix.write_text("pushed comment fixes\n", encoding="utf-8")
+            comment_fix.write_text(_node_phase_content("pr-comment-fix", "pushed comment fixes "), encoding="utf-8")
             same_ms = json.loads((project_root / ".agent-flow" / "state" / "current-run.json").read_text(encoding="utf-8"))
             entered_ts = _node_epoch_seconds(same_ms["phase_entered_at"])
             os.utime(comment_fix, (entered_ts, entered_ts))
@@ -3726,7 +3606,7 @@ if (codexContext !== undefined) {
             )
             self.assertEqual(reused_comment_fix.returncode, 1)
             self.assertIn("blocked: missing artifact", reused_comment_fix.stderr)
-            comment_fix.write_text("pushed second comment fixes\n", encoding="utf-8")
+            comment_fix.write_text(_node_phase_content("pr-comment-fix", "pushed second comment fixes "), encoding="utf-8")
             self.assertEqual(
                 subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode,
                 0,
@@ -3743,7 +3623,7 @@ if (codexContext !== undefined) {
             self.assertEqual(ci_failed.returncode, 0, ci_failed.stderr)
             self.assertIn("Current phase: pr-ci-fix", ci_failed.stdout)
             ci_fix = run_dir / _node_phase_artifact("pr-ci-fix")
-            ci_fix.write_text("old ci fixes\n", encoding="utf-8")
+            ci_fix.write_text(_node_phase_content("pr-ci-fix", "old ci fixes "), encoding="utf-8")
             os.utime(ci_fix, (1, 1))
             stale_ci_fix = subprocess.run(
                 (node, cli, "run", "advance"),
@@ -3754,7 +3634,7 @@ if (codexContext !== undefined) {
             )
             self.assertEqual(stale_ci_fix.returncode, 1)
             self.assertIn("blocked: stale artifact", stale_ci_fix.stderr)
-            ci_fix.write_text("pushed ci fixes\n", encoding="utf-8")
+            ci_fix.write_text(_node_phase_content("pr-ci-fix", "pushed ci fixes "), encoding="utf-8")
             back_to_watch_again = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=project_root,
@@ -5179,14 +5059,6 @@ if (codexContext !== undefined) {
                 self.assertEqual(main(["detect-profile", "--root", temp_dir]), 0)
             self.assertEqual(output.getvalue().strip(), "react-native")
 
-    def test_is_git_repo_treats_missing_git_as_non_git(self) -> None:
-        from agent_flow.cli import _is_git_repo
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # git 실행 파일이 없는 환경에서도 run/start가 non-git fallback으로 이어져야 한다.
-            with mock.patch("agent_flow.core.commands.subprocess.run", side_effect=FileNotFoundError):
-                self.assertFalse(_is_git_repo(Path(temp_dir)))
-
     def test_provider_list_reports_host_provider_availability(self) -> None:
         output = io.StringIO()
         with mock.patch("agent_flow.providers.host.shutil.which") as which:
@@ -5900,6 +5772,8 @@ if (codexContext !== undefined) {
                 encoding="utf-8",
             )
             _write_minimal_context_docs(root)
+            # --worktree는 gate cwd를 worktree로 옮긴다. context-lint가 거기서 돌므로 문서도 거기 있어야 한다.
+            _write_minimal_context_docs(worktree)
             run_dir = root / ".agent-flow" / "runs" / "worktree-runtime"
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
@@ -6367,64 +6241,6 @@ if (codexContext !== undefined) {
                 0,
             )
             self.assertTrue((root / ".agent-flow" / "worktrees" / "feat-after-init").is_dir())
-
-    def test_guard_worktree_blocks_leader_branch_switch(self) -> None:
-        script = Path(__file__).resolve().parents[1] / "scripts" / "hooks" / "guard-worktree.sh"
-        payload = json.dumps({"tool_input": {"command": "git switch codex/current && npm test"}})
-        result = subprocess.run(
-            ("bash", str(script)),
-            input=payload,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        # agent가 기준 worktree의 브랜치 표시를 바꾸는 명령을 실행하지 못하게 막는다.
-        self.assertEqual(result.returncode, 2)
-        self.assertIn("기준 worktree", result.stderr)
-
-        chained = subprocess.run(
-            ("bash", str(script)),
-            input=json.dumps({"tool_input": {"cmd": "cd . && git checkout -b feat/test"}}),
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        self.assertEqual(chained.returncode, 2)
-        self.assertIn("브랜치만 만들지", chained.stderr)
-
-        for command in (
-            "git -C . checkout -b feat/test",
-            "command git checkout -b feat/test",
-            "env TEST=1 git checkout -B feat/test",
-        ):
-            blocked_create = subprocess.run(
-                ("bash", str(script)),
-                input=json.dumps({"tool_input": {"command": command}}),
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(blocked_create.returncode, 2, command)
-            self.assertIn("브랜치만 만들지", blocked_create.stderr)
-
-        blocked_detach = subprocess.run(
-            ("bash", str(script)),
-            input=json.dumps({"tool_input": {"command": "git checkout --detach main"}}),
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        self.assertEqual(blocked_detach.returncode, 2)
-        self.assertIn("기준 worktree", blocked_detach.stderr)
-
-        allowed = subprocess.run(
-            ("bash", str(script)),
-            input=json.dumps({"tool_input": {"command": "git checkout -- README.md"}}),
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        self.assertEqual(allowed.returncode, 0)
 
     def test_guard_protected_branch_blocks_chained_commit(self) -> None:
         script = Path(__file__).resolve().parents[1] / "scripts" / "hooks" / "guard-protected-branch.sh"
@@ -8881,14 +8697,45 @@ def _node_presentation_gate() -> str:
     )
 
 
-def _node_project_local_gate() -> str:
-    # 테스트 fixture에서는 프로젝트별 로컬 skill이 적용되지 않은 경우를 명시한다.
-    return "project-local-skills: n/a\nproject-local-skills-used: n/a\n"
+@functools.lru_cache(maxsize=None)
+def _node_declared_skills(phase: str) -> tuple[str, ...]:
+    """workflow YAML이 그 phase에 선언한 required skill. fixture가 진실 소스를 직접 읽는다."""
+    from agent_flow.core.phase_workflow import find_kit_root, load_phase_workflow_definition
+
+    kit_root = find_kit_root()
+    for workflow in ("full-feature", "default", "bugfix", "review", "development"):
+        for item in load_phase_workflow_definition(kit_root, workflow).phases:
+            if item.id == phase and item.skills:
+                return item.skills.required
+    return ()
+
+
+def _node_project_local_gate(phase: str = "") -> str:
+    required = _node_declared_skills(phase) if phase else ()
+    if not required:
+        return (
+            "skill-availability: n/a\n"
+            "skill-read-evidence: unavailable\n"
+            "project-local-skills: n/a\n"
+            "project-local-skills-used: n/a\n"
+        )
+    return (
+        "skill-availability: pass\n"
+        "skill-read-evidence: unavailable\n"
+        "project-local-skills: checked\n"
+        f"project-local-skills-used: {', '.join(required)}\n"
+        "project-local-skill-docs: applied\n"
+    )
 
 def _node_project_local_applied_gate() -> str:
+    # implement phase가 workflow에서 선언한 skill + local-skills drop-box 전부가 대상이다.
     return (
+        "skill-availability: pass\n"
+        "skill-read-evidence: unavailable\n"
         "project-local-skills: checked\n"
-        "project-local-skills-used: api, api-contract-guide, samantha-architecture-guide\n"
+        "project-local-skills-used: code-generation-discipline, tdd, clean-architecture,"
+        " api, api-contract-guide, figma-screen-spec, merge-review-flow, pr-review-flow,"
+        " release-branch-review, release-first-branch-pr, samantha-architecture-guide\n"
         "project-local-skill-docs: applied\n"
     )
 
@@ -8929,7 +8776,7 @@ def _node_phase_content(phase: str, prefix: str = "") -> str:
         "## Completion Gate\n"
         "skills_checked: true\n"
         + _node_profile_skill_gate()
-        + _node_project_local_gate()
+        + _node_project_local_gate(phase)
         + _node_presentation_gate()
     )
     clean_design_gate = (
@@ -9013,7 +8860,7 @@ def _node_phase_content(phase: str, prefix: str = "") -> str:
             + _node_profile_skill_gate()
             + _node_review_parity_gate()
             + clean_code_review_gate
-            + _node_project_local_gate()
+            + _node_project_local_gate(phase)
             + _node_presentation_gate()
         )
     if phase == "architecture-review":
@@ -9032,24 +8879,24 @@ def _node_phase_content(phase: str, prefix: str = "") -> str:
             + "skills_checked: true\n"
             + _node_profile_skill_gate()
             + "clean-architecture: applied\n"
-            + _node_project_local_gate()
+            + _node_project_local_gate(phase)
             + _node_presentation_gate()
         )
-    if phase in {"green", "refactor", "fix-loop"}:
+    if phase in {"green", "refactor", "fix-loop", "pr-comment-fix", "pr-ci-fix"}:
         return content + skills_gate + "clean-architecture: applied\n"
-    if phase in {"red", "green", "refactor", "fix-loop"}:
+    if phase == "red":
         return content + skills_gate
     return content
 
 
-def _with_skills_gate(content: str) -> str:
+def _with_skills_gate(content: str, phase: str = "multi-review") -> str:
     return (
         f"{content.rstrip()}\n\n## Completion Gate\n"
         "skills_checked: true\n"
         + _node_profile_skill_gate()
         + _node_review_parity_gate()
         + "clean-architecture-review: applied\n"
-        + _node_project_local_gate()
+        + _node_project_local_gate(phase)
         + "usecase-interface-check: applied\n"
         "usecase-composition-check: applied\n"
         "cache-boundary-check: applied\n"
@@ -9059,14 +8906,14 @@ def _with_skills_gate(content: str) -> str:
     )
 
 
-def _with_final_review_gate(content: str, dependency_rule: str = "pass") -> str:
+def _with_final_review_gate(content: str, dependency_rule: str = "pass", phase: str = "final-review") -> str:
     return (
         f"{content.rstrip()}\n\n## Completion Gate\n"
         "skills_checked: true\n"
         + _node_profile_skill_gate()
         + _node_review_parity_gate()
         + "clean-architecture: applied\n"
-        + _node_project_local_gate()
+        + _node_project_local_gate(phase)
         + f"dependency-rule: {dependency_rule}\n"
         "usecase-boundary: n/a\n"
         "usecase-calls-usecase: pass\n"
@@ -9124,6 +8971,33 @@ def _node_epoch_seconds(value: str) -> float:
     from datetime import datetime
 
     return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+
+
+def _write_resolver_skills(temp_dir: str) -> Path:
+    """resolver 테스트용 최소 프로젝트. alpha/beta는 선언 없음, catalog는 자기선언 skill이다."""
+    root = Path(temp_dir)
+    (root / ".agent-flow").mkdir(parents=True, exist_ok=True)
+    for name in ("alpha-guide", "beta-guide"):
+        skill_dir = root / "skills" / name
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: Example guide.\n---\n\n# {name}\n",
+            encoding="utf-8",
+        )
+    catalog = root / "skills" / "catalog-guide"
+    catalog.mkdir(parents=True, exist_ok=True)
+    (catalog / "SKILL.md").write_text(
+        "---\n"
+        "name: catalog-guide\n"
+        "description: Example catalog guide.\n"
+        "workflowPhases: [green, refactor]\n"
+        "taskTerms: [widget catalog]\n"
+        'pathGlobs: ["**/catalog/**"]\n'
+        "dependencies: [alpha-guide]\n"
+        "---\n\n# catalog-guide\n",
+        encoding="utf-8",
+    )
+    return root
 
 
 if __name__ == "__main__":

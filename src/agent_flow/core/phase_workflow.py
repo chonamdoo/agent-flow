@@ -8,6 +8,7 @@ import yaml
 
 from agent_flow.core.markers import normalize_required_markers
 from agent_flow.core.security import ensure_child_path, validate_safe_name
+from agent_flow.core.skill_resolver import PhaseSkills
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,7 @@ class PhaseDefinition:
     routes: dict[str, str] | None
     required_markers: tuple[str, ...]
     artifact: str
+    skills: PhaseSkills | None = None
 
 
 @dataclass(frozen=True)
@@ -100,9 +102,40 @@ def _normalize_phases(phases_raw: list[object], path: Path, workflow_id: str) ->
                 routes=routes,
                 required_markers=normalize_required_markers(item.get("required_markers")),
                 artifact=_optional_string(item.get("artifact"), _default_artifact_for_phase(workflow_id, phase_id)),
+                skills=_phase_skills(item.get("skills"), path, phase_id),
             )
         )
     return out
+
+
+def _phase_skills(value: object, path: Path, phase_id: str) -> PhaseSkills | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"workflow {path}: phase {phase_id} `skills` must be a mapping")
+    unknown = set(value) - {"required", "optional"}
+    if unknown:
+        raise ValueError(
+            f"workflow {path}: phase {phase_id} `skills` has unknown keys {sorted(unknown)}"
+        )
+    skills = PhaseSkills(
+        required=_skill_names(value.get("required"), path, phase_id, "required"),
+        optional=_skill_names(value.get("optional"), path, phase_id, "optional"),
+    )
+    return None if skills.is_empty() else skills
+
+
+def _skill_names(value: object, path: Path, phase_id: str, field: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ValueError(f"workflow {path}: phase {phase_id} `skills.{field}` must be a list")
+    names: list[str] = []
+    for item in value:
+        name = str(item)
+        validate_safe_name(name, f"phase {phase_id} skills.{field}")
+        names.append(name)
+    return tuple(dict.fromkeys(names))
 
 
 def _validate_routes(phases: list[PhaseDefinition], path: Path) -> None:

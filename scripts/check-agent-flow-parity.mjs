@@ -206,6 +206,26 @@ for (const installer of ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"]
   assertContains(installer, ".omp\", \"extensions\", \"agent-flow-hooks.ts");
 }
 
+// 두 installer가 심는 OMP 확장은 **바이트 단위로** 같아야 한다. 예전에 한쪽만
+// `tool_result` 핸들러 등록 순서가 달라서, 이벤트당 핸들러 하나만 남기는 host에서
+// 루트 컨텍스트 동기화가 통째로 죽었다. 규율이 아니라 검사로 묶는다.
+{
+  const sources = ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"].map((rel) => {
+    const text = readIfExists(rel);
+    if (text === null) return null;
+    const start = text.indexOf("function ompHooksExtensionSource() {");
+    const end = text.indexOf("\n`;\n}", start);
+    if (start < 0 || end < 0) {
+      failures.push(`${rel} missing ompHooksExtensionSource() body`);
+      return null;
+    }
+    return text.slice(start, end);
+  });
+  if (sources[0] !== null && sources[1] !== null && sources[0] !== sources[1]) {
+    failures.push("omp extension source diverged between bin/agent-flow-kit.mjs and bin/agent-flow-install.mjs");
+  }
+}
+
 const fullFeatureWorkflowCopies = [
   "workflows/full-feature.yaml",
   "src/agent_flow/workflows/full-feature.yaml",
@@ -915,7 +935,7 @@ function assertCompletionMarkerPrefixParity(workflow) {
       continue;
     }
     const lines = markers.map((marker, index) => `${prefixes[index % prefixes.length]}${renderCompletionMarker(marker)}`);
-    const content = ["## Completion Gate", ...lines, ""].join("\n");
+    const content = ["## Completion Gate", ...lines, ...skillGateLines(phase), ""].join("\n");
     const pythonMissing = pythonMissingCompletionMarkers(content, markers);
     const node = nodePhaseOutcome(workflow, phase.id, content);
     if (pythonMissing === null || !node) {
@@ -1259,7 +1279,7 @@ function assertInstalledHookParity(label, tempRoot) {
     failures.push(`${label} install missing claude, codex, or omp hook settings`);
     return;
   }
-  const managedScripts = ["guard-worktree.sh", "guard-protected-branch.sh", "comment-checker.py", "show-phase-status.sh"];
+  const managedScripts = ["guard-protected-branch.sh", "comment-checker.py", "record-skill-read.py", "show-phase-status.sh"];
   for (const [host, settings] of [["claude", claude], ["codex", codex], ["codex-lower", lowerCodex]]) {
     for (const event of ["PreToolUse", "PostToolUse", "Stop"]) {
       const entries = settings.hooks[event];
@@ -1416,6 +1436,16 @@ import tempfile
 from pathlib import Path
 
 from agent_flow.runner import Phase, Runner
+from agent_flow.core.skill_resolver import PhaseSkills
+
+
+def _phase_skills(value):
+    if not isinstance(value, dict):
+        return None
+    required = tuple(value.get("required") or ())
+    optional = tuple(value.get("optional") or ())
+    return PhaseSkills(required=required, optional=optional) if (required or optional) else None
+
 
 payload = json.loads(sys.stdin.read())
 workflow = payload["workflow"]
@@ -1430,6 +1460,7 @@ with tempfile.TemporaryDirectory() as temp_dir:
             artifact=item.get("artifact", f"{item['id']}.md"),
             multi_review=bool(item.get("multi_review", False)),
             routes=item.get("routes"),
+            skills=_phase_skills(item.get("skills")),
         ))
     target_index = next(i for i, phase in enumerate(phases) if phase.id == test_case["target"])
     current_index = next(i for i, phase in enumerate(phases) if phase.id == test_case["source"])
@@ -1439,6 +1470,9 @@ with tempfile.TemporaryDirectory() as temp_dir:
         artifact.write_text(test_case["content"] if phase.id == test_case["source"] else "stale\n", encoding="utf-8")
     runner = Runner.__new__(Runner)
     runner.run_dir = run_dir
+    runner.config_root = run_dir
+    runner.project_root = run_dir
+    runner.profile = {}
     runner.phases = phases
     runner._next_index(current_index, phases[current_index])
     remaining = []
@@ -1556,8 +1590,25 @@ function phaseArtifactWithMarkers(phase, routeLine) {
     "",
     "## Completion Gate",
     ...lines,
+    ...skillGateLines(phase),
     "",
   ].join("\n");
+}
+
+// runner가 phase.skills로부터 주입하는 marker는 required_markers에 없다.
+// 그 계약도 fixture에 담아야 Python/Node가 같은 조건에서 비교된다.
+function skillGateLines(phase) {
+  const required = phase.skills?.required ?? [];
+  if (required.length === 0) {
+    return [];
+  }
+  return [
+    "skill-availability: pass",
+    "skill-read-evidence: unavailable",
+    "project-local-skills: checked",
+    `project-local-skills-used: ${required.join(", ")}`,
+    "project-local-skill-docs: applied",
+  ];
 }
 
 function renderCompletionMarker(marker) {
@@ -1688,6 +1739,16 @@ from agent_flow.runner import (
     _multi_review_route_key,
     _route_key,
 )
+from agent_flow.core.skill_resolver import PhaseSkills
+
+
+def _phase_skills(value):
+    if not isinstance(value, dict):
+        return None
+    required = tuple(value.get("required") or ())
+    optional = tuple(value.get("optional") or ())
+    return PhaseSkills(required=required, optional=optional) if (required or optional) else None
+
 
 payload = json.loads(sys.stdin.read())
 workflow = payload["workflow"]
@@ -1705,6 +1766,7 @@ with tempfile.TemporaryDirectory() as temp_dir:
             artifact=item.get("artifact", f"{item['id']}.md"),
             multi_review=bool(item.get("multi_review", False)),
             routes=item.get("routes"),
+            skills=_phase_skills(item.get("skills")),
         ))
     index = next(i for i, phase in enumerate(phases) if phase.id == phase_id)
     artifact = run_dir / phases[index].artifact
@@ -1712,6 +1774,9 @@ with tempfile.TemporaryDirectory() as temp_dir:
     artifact.write_text(content, encoding="utf-8")
     runner = Runner.__new__(Runner)
     runner.run_dir = run_dir
+    runner.config_root = run_dir
+    runner.project_root = run_dir
+    runner.profile = {}
     runner.phases = phases
     if phases[index].multi_review:
         route_key = _multi_review_route_key(content, phases[index].id)
@@ -1722,8 +1787,12 @@ with tempfile.TemporaryDirectory() as temp_dir:
     if route_key == "approve" and phases[index].routes and phases[index].routes.get("request-changes") and has_failure_markers(content):
         route_key = "request-changes"
     try:
-        next_index, blocked = runner._next_index(index, phases[index])
-        outcome = "blocked" if blocked else (phases[next_index].id if next_index < len(phases) else "complete")
+        # Node의 advance는 completion marker를 먼저 강제한다. 같은 계층을 비교해야 parity가 의미를 갖는다.
+        if runner._missing_required_markers(phases[index]):
+            outcome = "blocked"
+        else:
+            next_index, blocked = runner._next_index(index, phases[index])
+            outcome = "blocked" if blocked else (phases[next_index].id if next_index < len(phases) else "complete")
     except Exception:
         outcome = "blocked"
     print("OUTCOME:" + json.dumps({"outcome": outcome, "route_key": route_key, "fix_loop_rounds": read_meta(run_dir).get("fix_loop_rounds")}, sort_keys=True))

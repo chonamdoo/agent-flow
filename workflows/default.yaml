@@ -14,6 +14,8 @@ description: |
 
 phases:
   - id: design
+    skills:
+      required: [grill-with-docs, grilling, domain-modeling, ddd-architecture, clean-architecture, clean-architecture-core]
     description: |
       Unified design phase. Grill-style interview → docs → DDD model → Clean
       Architecture layer map → SOLID check. Single artifact captures the
@@ -161,6 +163,9 @@ phases:
       Output: worktree.md (branch name, base, worktree path).
 
   - id: implement
+    skills:
+      required: [code-generation-discipline, tdd, clean-architecture]
+      optional: [codebase-design]
     description: |
       TDD-driven implementation. For each slice, run the full red → green →
       refactor cycle in order, then move to the next slice. Single artifact
@@ -268,6 +273,8 @@ phases:
           chrisbanes-skills-used: <skill list or n/a>
 
   - id: comment-authoring
+    skills:
+      required: [comment-authoring-discipline]
     description: Final comment-quality pass before final-review. Runner routes to final-review.
     required_markers:
       - "comment-authoring: applied"
@@ -304,6 +311,8 @@ phases:
           module-split: none
 
   - id: final-review
+    skills:
+      required: [code-generation-discipline, code-review, architecture-reviewer, clean-architecture, clean-architecture-core]
     description: |
       Final review. Requires at least two independent active-host reviewer
       sub-agents before approve. Profiles add stack-specific specialists on top.
@@ -436,6 +445,8 @@ phases:
       Output: artifacts/gate-results.json.
 
   - id: fix-loop
+    skills:
+      required: [code-generation-discipline, clean-architecture]
     description: Address review findings. Tests stay green.
     required_markers:
       - "skills_checked: true"
@@ -495,6 +506,8 @@ phases:
       Output: fix-loop.md.
 
   - id: commit
+    skills:
+      required: [agent-flow-concise-output]
     description: Stage and commit using profile.commit_convention.
     prompt: |
       Group changes into logical commits per profile.commit_convention.style.
@@ -511,6 +524,8 @@ phases:
       title, body summary).
 
   - id: pr-watch
+    skills:
+      required: [push-watch]
     description: Watch PR — auto-respond to comments and CI failures.
     routes:
       green: merge
@@ -565,6 +580,8 @@ phases:
       PR comment IDs).
 
   - id: pr-comment-fix
+    skills:
+      required: [code-generation-discipline, clean-architecture]
     description: Fix actionable PR comments. Runner routes back to pr-watch.
     routes:
       default: pr-watch
@@ -574,6 +591,8 @@ phases:
       fixes, commits, and resolved thread IDs. Output: pr-comment-fix.md.
 
   - id: pr-ci-fix
+    skills:
+      required: [code-generation-discipline, clean-architecture]
     description: Fix failing PR CI. Runner routes back to pr-watch.
     routes:
       default: pr-watch
@@ -582,6 +601,8 @@ phases:
       failed check names, commands, fixes, and commits. Output: pr-ci-fix.md.
 
   - id: merge
+    skills:
+      optional: [resolving-merge-conflicts]
     description: Merge using profile.pr.merge_strategy.
     prompt: |
       Merge via profile.pr.merge_strategy (squash / rebase / merge). If the

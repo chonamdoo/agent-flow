@@ -12,6 +12,8 @@ context_policy: ".Codex/rules/context/agent-flow-context-map.md"
 
 phases:
   - id: domain-grill
+    skills:
+      required: [grill-with-docs, grilling, domain-modeling]
     description: Interview one question at a time until the domain problem is clear.
     cite_lore: true
     required_markers:
@@ -38,6 +40,8 @@ phases:
       and explain why in the artifact.
 
   - id: product-brief
+    skills:
+      required: [product-brief]
     description: Validate whether this is worth building.
     prompt: |
       Apply YC office-hours style pressure: target user, painful problem,
@@ -45,6 +49,8 @@ phases:
       build/defer/cut decision. Output: artifacts/product-brief.md.
 
   - id: prd
+    skills:
+      required: [to-prd]
     description: Write the product requirements document.
     prompt: |
       Apply `.agent-flow/skills/to-prd/SKILL.md`. Write the PRD
@@ -61,6 +67,8 @@ phases:
       application, infrastructure, and presentation. Output: artifacts/slice-plan.md.
 
   - id: plan-review
+    skills:
+      required: [plan-reviewer]
     description: Senior-style plan review gate. Runner routes approve→ddd-design, request-changes→slice-plan.
     routes:
       approve: ddd-design
@@ -72,6 +80,8 @@ phases:
       `verdict: request-changes`.
 
   - id: ddd-design
+    skills:
+      required: [ddd-architecture, clean-architecture, clean-architecture-core]
     description: DDD first, then Clean Architecture design.
     required_markers:
       - "## Clean Architecture Boundary Map"
@@ -156,6 +166,8 @@ phases:
       Output: artifacts/run-start.md.
 
   - id: red
+    skills:
+      required: [code-generation-discipline, tdd, codebase-design]
     description: TDD red phase.
     required_markers:
       - "skills_checked: true"
@@ -203,6 +215,8 @@ phases:
       Output: artifacts/red.log.
 
   - id: green
+    skills:
+      required: [code-generation-discipline, tdd, clean-architecture]
     description: TDD green phase.
     required_markers:
       - "skills_checked: true"
@@ -259,6 +273,8 @@ phases:
       Output: artifacts/green.log.
 
   - id: refactor
+    skills:
+      required: [code-generation-discipline, tdd, clean-architecture]
     description: TDD refactor phase.
     required_markers:
       - "skills_checked: true"
@@ -318,6 +334,8 @@ phases:
       Output: artifacts/refactor.md.
 
   - id: comment-authoring
+    skills:
+      required: [comment-authoring-discipline]
     description: Final comment-quality pass before multi-review. Runner routes to multi-review.
     required_markers:
       - "comment-authoring: applied"
@@ -354,6 +372,8 @@ phases:
           module-split: none
 
   - id: multi-review
+    skills:
+      required: [code-review, clean-architecture-core, clean-architecture, agent-flow-concise-output]
     description: Run implementation review with at least two independent sub-agent reviewers before approve. Runner routes approve→architecture-review, request-changes→fix-loop.
     multi_review: true
     required_markers:
@@ -447,6 +467,8 @@ phases:
       Output: artifacts/multi-review.md.
 
   - id: architecture-review
+    skills:
+      required: [ddd-architecture, clean-architecture-core, clean-architecture, architecture-reviewer]
     description: Review implementation against DDD/Clean design. Runner routes approve→gates, request-changes→refactor.
     multi_review: true
     required_markers:
@@ -563,6 +585,8 @@ phases:
       Output: artifacts/gate-results.json.
 
   - id: fix-loop
+    skills:
+      required: [code-generation-discipline, clean-architecture]
     description: Apply review and gate fixes. Runner routes back to review before QA.
     required_markers:
       - "skills_checked: true"
@@ -621,6 +645,8 @@ phases:
       Output: artifacts/fix-loop.md.
 
   - id: commit
+    skills:
+      required: [agent-flow-concise-output]
     description: Commit verified changes.
     prompt: |
       Commit the verified slice and record commit hashes/messages. Use
@@ -635,6 +661,8 @@ phases:
       Use repo-relative paths only. Output: artifacts/push-pr.md.
 
   - id: pr-watch
+    skills:
+      required: [push-watch]
     description: Watch PR checks and comments. Runner routes green→merge-approval, comments→pr-comment-fix, ci-failed→pr-ci-fix, merged/skipped→handoff.
     routes:
       green: merge-approval
@@ -654,6 +682,8 @@ phases:
       `status: skipped`, `status: closed`, or `status: error`.
 
   - id: pr-comment-fix
+    skills:
+      required: [code-generation-discipline, clean-architecture]
     description: Fix actionable PR comments. Runner routes back to pr-watch.
     routes:
       default: pr-watch
@@ -663,6 +693,8 @@ phases:
       fixes, commits, and resolved thread IDs. Output: artifacts/pr-comment-fix.md.
 
   - id: pr-ci-fix
+    skills:
+      required: [code-generation-discipline, clean-architecture]
     description: Fix failing PR CI. Runner routes back to pr-watch.
     routes:
       default: pr-watch
@@ -680,6 +712,8 @@ phases:
       merge-approval.md with exactly `verdict: approve` only after approval.
 
   - id: merge
+    skills:
+      optional: [resolving-merge-conflicts]
     description: Merge after explicit user approval.
     prompt: |
       Merge only after explicit user approval. If the merge or rebase hits
