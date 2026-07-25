@@ -187,6 +187,9 @@ def test_android_profile_installs_android_skills_and_common_dependencies_only(tm
     assert matt_skill_closure <= names
     assert "android-clean-architecture" in names
     assert "android-code-review" in names
+    # 설치되지 않으면 카탈로그에 안 올라가고, frontmatter가 무슨 선언을 하든
+    # 자동 활성화가 통째로 죽는다. 기본 install로 닿아야 한다.
+    assert "android-sdui-architecture" in names
     assert "react-native-clean-architecture" not in names
     assert "ios-clean-architecture" not in names
     assert not (project / ".agent-flow" / "skills" / "react-native-clean-architecture").exists()
@@ -630,3 +633,38 @@ def test_android_skill_policy_is_active_host_local_only() -> None:
 
     kit_text = (KIT_ROOT / "bin" / "agent-flow-kit.mjs").read_text(encoding="utf-8")
     assert "missing local <group>: <skill>" in kit_text
+
+
+def test_sdui_skill_is_android_only(tmp_path: Path) -> None:
+    """반증: SDUI는 Android 전용이다. 다른 profile까지 따라가면 안 된다."""
+    project = tmp_path / "python-project"
+    project.mkdir()
+    (project / "pyproject.toml").write_text('[project]\nname = "x"\nversion = "0"\n', encoding="utf-8")
+
+    result = _install(project)
+
+    assert result.returncode == 0, result.stderr
+    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    names = {skill["name"] for skill in index["skills"]}
+    assert index["selection"]["profiles"] == ["python"]
+    assert "android-sdui-architecture" not in names
+
+
+def test_profile_yaml_install_list_matches_fallback_map(tmp_path: Path) -> None:
+    """불변: profile YAML의 install 목록과 JS fallback 맵이 갈라지지 않는다.
+
+    실제 설치를 정하는 것은 YAML이고 맵은 YAML이 없을 때의 대비책이다. 둘이
+    어긋나면 어느 쪽을 고쳐도 절반만 반영된다.
+    """
+    import re
+
+    kit = Path(__file__).resolve().parents[1]
+    yaml_text = (kit / "profiles" / "android.yaml").read_text(encoding="utf-8")
+    block = yaml_text.split("\nskills:\n", 1)[1].split("\n  required_review:", 1)[0]
+    from_yaml = sorted(re.findall(r"^\s+- ([A-Za-z0-9._-]+)$", block, re.M))
+
+    js = (kit / "lib" / "skill-selection.mjs").read_text(encoding="utf-8")
+    android_block = js.split('["android", [', 1)[1].split("]],", 1)[0]
+    from_js = sorted(re.findall(r'"([A-Za-z0-9._-]+)"', android_block))
+
+    assert from_yaml == from_js, f"yaml={from_yaml} js={from_js}"
