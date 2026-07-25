@@ -32,6 +32,12 @@ from agent_flow.cli_detect import (
     cli_by_name,
     detect_host_cli,
 )
+from agent_flow.core.worktree_isolation import (
+    assert_leader_unchanged,
+    capture_leader_snapshot,
+    leader_root_for,
+    sanitized_worker_env,
+)
 from agent_flow.subprocess_pool import SubprocessJob, SubprocessResult, run_parallel
 
 
@@ -124,6 +130,9 @@ def run_distribution(distribution: Distribution, project_root: Path,
 
     sub_jobs: list[SubprocessJob] = []
     job_to_output: dict[str, Path] = {}
+    # 리뷰어 자식은 부모 환경을 통째로 물려받으면 오염된 GIT_DIR/GIT_WORK_TREE로
+    # leader 저장소에 그대로 닿는다. git 탐색 env를 벗겨서 cwd를 권위로 만든다.
+    reviewer_env = sanitized_worker_env()
     for cli_name, jobs in distribution.by_cli.items():
         if cli_name == distribution.host:
             continue  # host AI handles its own angles in-session
@@ -137,13 +146,20 @@ def run_distribution(distribution: Distribution, project_root: Path,
             sub_jobs.append(SubprocessJob(
                 job_id=sub_id, binary=binary, args=args,
                 cwd=project_root, timeout_s=timeout_s,
+                env=reviewer_env,
             ))
             job_to_output[sub_id] = job.output_path
 
     if not sub_jobs:
         return []
 
+    # project_root가 worktree면 그 뒤의 leader 체크아웃이 지켜야 할 대상이다.
+    # leader에서 그대로 도는 리뷰라면 지킬 바깥 대상이 없어 무장하지 않는다.
+    leader = leader_root_for(project_root)
+    leader_before = capture_leader_snapshot(leader) if leader is not None else None
     results = run_parallel(sub_jobs)
+    if leader_before is not None:
+        assert_leader_unchanged(leader, leader_before, run_id="multi-review")
     # Write each artifact at the angle's intended output_path so the host AI
     # can aggregate them into final-review.md.
     for r in results:

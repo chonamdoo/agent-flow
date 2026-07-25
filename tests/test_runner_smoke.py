@@ -1015,6 +1015,9 @@ def test_required_markers_block_incomplete_artifact(tmp_path: Path):
 
     runner = Runner.__new__(Runner)
     runner.run_dir = run_dir
+    runner.config_root = tmp_path
+    runner.project_root = tmp_path
+    runner.profile = {}
     phase = Phase(
         id="domain-grill",
         description="",
@@ -1572,7 +1575,7 @@ def test_cli_detection_runs():
     clis = detect_available_clis()
     assert isinstance(clis, list)
     for c in clis:
-        assert c.name in {"claude", "codex"}
+        assert c.name in {"claude", "codex", "omp"}
 
 
 def test_multi_review_jobs_include_mandatory_baseline(tmp_path: Path):
