@@ -15,13 +15,14 @@ profiles/               ← Stack별 profile (android, nextjs, python 등)
 skills/                 ← Source skills (install 시 target .agent-flow/skills/로 복사)
 templates/              ← Review angle templates (_shared/review/)
 bootstrap/              ← AGENTS/CLAUDE.md template
-scripts/hooks/          ← PreToolUse/Stop hooks (guard-worktree, guard-protected-branch)
+scripts/hooks/          ← PreToolUse/PostToolUse/Stop hooks (guard-protected-branch, comment-checker, record-skill-read)
 .Codex/agents/          ← code-reviewer.md (리뷰 기준)
 ```
 
 ## Key Files
 
-- `bin/agent-flow-kit.mjs`: PHASES 배열이 phase 순서의 단일 진실 소스. `nextPhaseIndex()`가 모든 라우팅 결정.
+- `workflows/*.yaml`: phase 순서와 routes의 단일 진실 소스. JS는 Python `workflow export` JSON을 소비한다 (`bin/agent-flow-kit.mjs:385`).
+- `bin/agent-flow-kit.mjs`: JS runner. `nextPhaseIndex()`가 phase의 routes로 다음 phase index를 계산하고 fix-loop round cap을 적용한다.
 - `src/agent_flow/runner.py`: Python runner. YAML routes 파싱, fix-loop round cap.
 - `profiles/_schema.yaml`: profile 필드 스키마 (gates, branching, worktree).
 - `skills/code-generation-discipline/SKILL.md`: 코드 생성 기준의 canonical source.
@@ -66,5 +67,4 @@ Follow the CLI output exactly. If no run is active, start with `agent-flow run "
 - install/bootstrap 후 `.agent-flow/skills/index.json` metadata를 보고 필요한 skill만 읽는다. 모든 SKILL.md 전문을 항상 읽지 않는다.
 - Claude/Codex/OMP 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.
 - Claude/Codex/OMP hook이 자동 차단하는 보호 브랜치 commit/push와 leader checkout/switch 금지는 모든 host에서 동일하게 지킨다.
-
 <!-- agent-flow:end -->

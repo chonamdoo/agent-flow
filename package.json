@@ -8,7 +8,6 @@
     "test": "PYTHONPATH=src python3 -m unittest tests.test_cli -q && python3 -m pytest -q tests/test_custom_skill_install.py tests/test_architecture_lint.py && node scripts/check-context-docs.mjs && node scripts/check-agent-flow-parity.mjs"
   },
   "bin": {
-    "agent-flow": "bin/agent-flow-kit.mjs",
     "agent-flow-install": "bin/agent-flow-install.mjs",
     "agent-flow-kit": "bin/agent-flow-kit.mjs"
   },

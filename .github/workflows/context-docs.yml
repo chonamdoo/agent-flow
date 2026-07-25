@@ -17,3 +17,22 @@ jobs:
         with:
           node-version: "20"
       - run: node scripts/check-context-docs.mjs
+
+  parity:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e .
+      # parity checker는 설치 산출물(.agent-flow/)과 source를 비교하므로 install이 선행되어야 한다.
+      - run: node bin/agent-flow-kit.mjs install --force-managed
+        env:
+          AGENT_FLOW_SKIP_CODEX_TRUST: "1"
+      - run: node scripts/check-agent-flow-parity.mjs
