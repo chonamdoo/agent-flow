@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Sequence
 from agent_flow.core.markers import completion_gate_marker_values
 from agent_flow.core.commands import run_safe_command
 from agent_flow.core.profiles import active_profile_ids, load_profile_payload
+from agent_flow.core.worktree_isolation import git_repo_state, leader_root_for
 from agent_flow.core.skill_resolver import (
     CODE_PHASES,
     PhaseSkills,
@@ -34,6 +36,15 @@ def changed_files(project_root: Path) -> tuple[str, ...]:
         ["git", "status", "--porcelain=v1", "-z", "-uall"], cwd=project_root, timeout_s=10
     )
     if not result.ok:
+        # 저장소인데 실패한 것과 애초에 저장소가 아닌 것은 다르다. 전자는
+        # pathGlobs skill 강제가 통째로 꺼지는 사고이므로 조용히 넘기지 않는다.
+        if git_repo_state(project_root) == "repo":
+            print(
+                "agent-flow: git status 실패로 변경 파일을 못 읽었다. "
+                "pathGlobs로 걸리는 skill이 활성화되지 않는다: "
+                f"{result.stderr.strip() or result.error or 'git did not answer'}",
+                file=sys.stderr,
+            )
         return ()
     paths: list[str] = []
     for record in result.stdout.split("\0"):
@@ -57,13 +68,18 @@ def merged_profile_payload(payloads: Sequence[dict]) -> dict:
 
 
 def resolved_profile(project_root: Path, requested: str | None = None) -> dict | None:
-    """활성 profile을 합친 payload. 호출자가 profile을 안 넘기면 여기가 유일한 출처다."""
+    """활성 profile을 합친 payload. 호출자가 profile을 안 넘기면 여기가 유일한 출처다.
+
+    실패는 조용히 넘기지 않는다. profile을 못 읽으면 skill_sources가 사라져
+    required 집합이 조용히 줄고, 그게 status와 runner를 다시 갈라놓는다.
+    """
     try:
         payloads = [
             load_profile_payload(profile_id)
             for profile_id in active_profile_ids(project_root, requested or "auto")
         ]
-    except (OSError, ValueError, RuntimeError):
+    except Exception as exc:  # yaml 오류까지 포함해야 status가 traceback으로 죽지 않는다
+        print(f"agent-flow: profile을 읽지 못해 skill 판정이 축소됐다: {exc}", file=sys.stderr)
         return None
     return merged_profile_payload(payloads) if payloads else None
 
@@ -81,21 +97,40 @@ class SkillReadEvidence:
 
     available: bool
     read_paths: frozenset[str]
+    # 같은 저장소의 다른 체크아웃들(leader와 worktree). 같은 skill이 여기 각각
+    # 존재하므로 절대경로는 다르지만 체크아웃 기준 상대경로는 같다.
+    checkout_roots: tuple[str, ...] = ()
 
     def covers(self, skill: ResolvedSkill) -> bool:
         if skill.path is None:
             return False
-        if str(skill.path.resolve()) in self.read_paths:
+        resolved = skill.path.resolve()
+        if str(resolved) in self.read_paths:
             return True
         # worktree 안에서 읽으면 같은 skill이라도 절대경로가 leader와 다르다.
         # 경로 동등비교만 하면 실제로 읽은 skill을 "안 읽었다"고 차단한다.
-        # skill은 `<name>/SKILL.md` 자리에 있고 resolution도 이름으로 다루므로
-        # 이름 일치를 같은 skill로 본다.
-        return skill.name in self.read_skill_names
+        #
+        # 그렇다고 이름이나 경로 꼬리로 비교하면 안 된다. `skills/<n>/SKILL.md`
+        # 꼬리는 project·bundled·host root 7곳이 전부 공유해서, 낡은 사본이나
+        # `/tmp/skills/<n>/SKILL.md`를 읽어도 통과해 버린다. 체크아웃 기준
+        # **상대경로**가 같을 때만 같은 skill로 본다.
+        target = _checkout_relative(resolved, self.checkout_roots)
+        if target is None:
+            return False
+        return any(
+            _checkout_relative(Path(path), self.checkout_roots) == target
+            for path in self.read_paths
+        )
 
-    @property
-    def read_skill_names(self) -> frozenset[str]:
-        return frozenset(Path(p).parent.name for p in self.read_paths)
+
+def _checkout_relative(path: Path, roots: Sequence[str]) -> str | None:
+    """path를 담고 있는 체크아웃 root를 찾아 그 기준 상대경로를 돌려준다."""
+    text = str(path)
+    for root in roots:
+        prefix = root.rstrip("/") + "/"
+        if text.startswith(prefix):
+            return text[len(prefix):]
+    return None
 
 
 def phase_skill_resolution(
@@ -199,14 +234,15 @@ def missing_local_skill_markers(
 
 def read_skill_evidence(project_root: Path, *, since: float | None = None) -> SkillReadEvidence:
     """Read hook이 남긴 기록을 읽는다. 파일이 없으면 hook 미등록/미지원 host로 본다."""
+    roots = _checkout_roots(project_root)
     log_path = project_root / SKILLS_READ_LOG
     if not log_path.is_file():
-        return SkillReadEvidence(available=False, read_paths=frozenset())
+        return SkillReadEvidence(available=False, read_paths=frozenset(), checkout_roots=roots)
     paths: set[str] = set()
     try:
         raw = log_path.read_text(encoding="utf-8")
     except OSError:
-        return SkillReadEvidence(available=False, read_paths=frozenset())
+        return SkillReadEvidence(available=False, read_paths=frozenset(), checkout_roots=roots)
     for line in raw.splitlines():
         line = line.strip()
         if not line:
@@ -222,7 +258,20 @@ def read_skill_evidence(project_root: Path, *, since: float | None = None) -> Sk
         path = entry.get("path")
         if isinstance(path, str) and path:
             paths.add(path)
-    return SkillReadEvidence(available=True, read_paths=frozenset(paths))
+    return SkillReadEvidence(
+        available=True, read_paths=frozenset(paths), checkout_roots=roots
+    )
+
+
+def _checkout_roots(project_root: Path) -> tuple[str, ...]:
+    """같은 저장소의 체크아웃 root들. worktree에서 돌면 leader도 함께 본다."""
+    roots = [str(project_root.resolve())]
+    leader = leader_root_for(project_root)
+    if leader is not None:
+        resolved = str(Path(leader).resolve())
+        if resolved not in roots:
+            roots.append(resolved)
+    return tuple(roots)
 
 
 def record_skill_read(project_root: Path, skill_path: Path) -> None:

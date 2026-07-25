@@ -544,13 +544,19 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print('진행 중인 run 없음. `agent-flow run "<task>"`로 시작하세요.')
             return 0
-        Runner(
-            run_root,
-            run_dir=active.path,
-            state_root=state_root,
-            config_root=root,
-            next_command=_continue_command(root, args.worktree),
-        ).run(mode=ResumeMode.RESUME)
+        try:
+            Runner(
+                run_root,
+                run_dir=active.path,
+                state_root=state_root,
+                config_root=root,
+                next_command=_continue_command(root, args.worktree),
+            ).run(mode=ResumeMode.RESUME)
+        except (OSError, ValueError, RuntimeError, KeyError, subprocess.CalledProcessError) as exc:
+            # `run`과 같은 처리다. tripwire가 raise하면 traceback 대신 사유를
+            # 보여야 사용자가 다음 수를 안다.
+            print(_format_cli_error(exc), file=sys.stderr)
+            return 2
         return 0
 
     if args.command == "abort":

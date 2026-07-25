@@ -206,6 +206,26 @@ for (const installer of ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"]
   assertContains(installer, ".omp\", \"extensions\", \"agent-flow-hooks.ts");
 }
 
+// 두 installer가 심는 OMP 확장은 **바이트 단위로** 같아야 한다. 예전에 한쪽만
+// `tool_result` 핸들러 등록 순서가 달라서, 이벤트당 핸들러 하나만 남기는 host에서
+// 루트 컨텍스트 동기화가 통째로 죽었다. 규율이 아니라 검사로 묶는다.
+{
+  const sources = ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"].map((rel) => {
+    const text = readIfExists(rel);
+    if (text === null) return null;
+    const start = text.indexOf("function ompHooksExtensionSource() {");
+    const end = text.indexOf("\n`;\n}", start);
+    if (start < 0 || end < 0) {
+      failures.push(`${rel} missing ompHooksExtensionSource() body`);
+      return null;
+    }
+    return text.slice(start, end);
+  });
+  if (sources[0] !== null && sources[1] !== null && sources[0] !== sources[1]) {
+    failures.push("omp extension source diverged between bin/agent-flow-kit.mjs and bin/agent-flow-install.mjs");
+  }
+}
+
 const fullFeatureWorkflowCopies = [
   "workflows/full-feature.yaml",
   "src/agent_flow/workflows/full-feature.yaml",

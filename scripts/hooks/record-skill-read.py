@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
 
 READ_TOOL_RE = ("read", "read_file", "view", "cat")
-LOG_RELATIVE = Path(".agent-flow") / "skills-read.jsonl"
+# `:10-40`, `:10`, `:10+5`, `:raw`, `:raw:2-4` 같은 읽기 선택자만 꼬리로 인정한다.
+_SELECTOR_RE = re.compile(r"(?::(?:raw|\d+(?:[-+]\d+)?)(?:,\d+(?:[-+]\d+)?)*)+")
 
 
 def main() -> int:
@@ -59,14 +61,19 @@ def main() -> int:
 
 
 def _strip_selector(raw: str) -> str:
-    """`path/SKILL.md:10-40` 같은 선택자만 떼고 경로는 보존한다.
+    """`path/SKILL.md:10-40` 같은 **줄 범위 선택자**만 떼고 경로는 보존한다.
 
-    앞에서부터 자르면 `skill://x`나 `C:\\...`가 통째로 망가진다. SKILL.md 뒤에
-    붙은 꼬리만 제거한다.
+    앞에서부터 자르면 `skill://x`나 `C:\\...`가 통째로 망가진다. 그렇다고
+    `SKILL.md` 뒤를 무조건 자르면 `SKILL.md.bak`, `SKILL.md-old/notes.txt`가
+    형제 `SKILL.md`를 읽은 것으로 둔갑한다 — 게이트 위조 경로다. 그래서
+    `SKILL.md` 직후가 선택자이거나 문자열 끝일 때만 자른다.
     """
     marker = "SKILL.md"
     index = raw.rfind(marker)
     if index < 0:
+        return raw
+    tail = raw[index + len(marker):]
+    if tail and not _SELECTOR_RE.fullmatch(tail):
         return raw
     return raw[: index + len(marker)]
 

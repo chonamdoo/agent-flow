@@ -1077,6 +1077,18 @@ function parseSystemMessage(text) {
 `;
 }
 
+function backupIfDifferent(root, target, content) {
+  if (!fs.existsSync(target)) {
+    return;
+  }
+  if (fs.readFileSync(target, "utf8") === content) {
+    return;
+  }
+  const backup = `${target}.bak`;
+  fs.copyFileSync(target, backup);
+  console.log(`  ~ replaced ${path.relative(root, target)} (backup: ${path.relative(root, backup)})`);
+}
+
 function ompExtensionIsKitOwned(target) {
   if (!fs.existsSync(target)) {
     return true;
@@ -1102,6 +1114,9 @@ function installOmpHooks(root) {
     );
     return false;
   }
+  // kit 소유여도 사용자가 손댔을 수 있다. 서명만으로는 구분이 안 되므로
+  // 다른 내용이면 지우기 전에 사본을 남긴다.
+  backupIfDifferent(root, target, ompHooksExtensionSource());
   return writeFileIfMissingOrSame(target, ompHooksExtensionSource(), true);
 }
 
@@ -1112,7 +1127,15 @@ function pruneRetiredHookScripts(root) {
   for (const scriptName of RETIRED_MANAGED_HOOK_SCRIPTS) {
     const target = path.join(hooksDir, scriptName);
     if (fs.existsSync(target)) {
+      // 사용자가 같은 이름으로 자기 스크립트를 뒀을 수 있다. 되돌릴 수 있게
+      // 사본을 남기고 지운다. 설치본이 관리하지 않는 host 설정이 이 경로를
+      // 여전히 가리킬 수 있으므로 경로를 함께 알린다.
+      fs.copyFileSync(target, `${target}.removed`);
       fs.rmSync(target, { force: true });
+      console.log(
+        `  - removed retired hook: ${path.relative(root, target)} ` +
+          `(backup: ${path.relative(root, target)}.removed)`,
+      );
     }
   }
 }
@@ -1647,12 +1670,15 @@ function install() {
     true,
     true,
   );
+  // profile은 workflow와 같은 kit 데이터다. 사용자 편집을 보호한다고 두면
+  // 새 kit이 추가한 필드(skill_sources 등)가 기존 설치본에 영영 안 닿는다.
   const profilesCopied = copyDir(
     path.join(KIT_ROOT, "profiles"),
     path.join(AF_DIR, "profiles"),
     new Set(),
     true,
-    FORCE_MANAGED,
+    true,
+    true,
   );
   const templatesCopied = copyDir(
     path.join(KIT_ROOT, "templates"),

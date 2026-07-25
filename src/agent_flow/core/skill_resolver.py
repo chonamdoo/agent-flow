@@ -214,8 +214,9 @@ def discover_skill_catalog(
 
     한 번의 marker 검증에서 여러 번 불리고 매번 모든 SKILL.md를 읽는다.
     프로세스 수명 동안만 캐시한다 — CLI는 단명이라 stale 위험이 없다.
+    template은 project root를 이미 펼친 절대경로라 그 자체로 프로젝트를 가른다.
     """
-    key = (str(project_root.resolve()),) + tuple(root.template for root in roots)
+    key = tuple(root.template for root in roots)
     cached = _CATALOG_CACHE.get(key)
     if cached is not None:
         return cached

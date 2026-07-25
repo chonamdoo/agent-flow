@@ -238,7 +238,18 @@ def git_repo_state(root) -> str:
 # 찍어 두고 phase 종료 시 같은지 본다. 다르면 그 차이 자체가 오염이다.
 
 _AGENT_FLOW_PREFIX = ".agent-flow"
+# 워커가 worktree 안에서 돌아도 leader 쪽에 정당하게 쓰는 자리들. 여기만 뺀다.
+# `scripts/`는 절대 넣지 마라 — host가 매 tool call마다 실행하는 표면이다.
+_RUNTIME_WRITE_PATHS = (
+    f"{_AGENT_FLOW_PREFIX}/worktrees",
+    f"{_AGENT_FLOW_PREFIX}/runs",
+    f"{_AGENT_FLOW_PREFIX}/state",
+    f"{_AGENT_FLOW_PREFIX}/runtime",
+    f"{_AGENT_FLOW_PREFIX}/skills-read.jsonl",
+)
 _TRIPWIRE_TIMEOUT_S = 120
+# porcelain v1 상태 문자. 레코드 앞 두 글자가 전부 여기 속할 때만 경로 접두어로 본다.
+_STATUS_CODES = frozenset(" MADRCUT?!")
 _STAMP_FULL_READ_BYTES = 8 * 1024 * 1024
 _STAMP_CHUNK_BYTES = 64 * 1024
 
@@ -345,11 +356,15 @@ def _snapshot_diff(before: LeaderSnapshot, after: LeaderSnapshot) -> list[str]:
 def _leader_status(leader_root) -> str:
     """leader working tree 상태를 정규화된 레코드 문자열로 만든다.
 
-    감시 대상은 leader의 **사용자 작업**이다. ``.agent-flow/``는 agent 런타임
-    상태 디렉터리이고 read hook(``skills-read.jsonl``), runner(``runs/``),
-    JS(``state/``)가 worktree 안에서 돌 때도 정당하게 leader 쪽에 쓴다. 그래서
-    파일 단위로 들여다보면 정상 동작이 100% 오탐이 된다. ``--ignored=matching``
-    이 접어 주는 한 줄로 두고, ``.agent-flow`` 레코드는 비교에서 뺀다.
+    status를 두 번 부르는 이유가 있다. ``--ignored=matching``은 ignore 패턴에
+    직접 걸린 디렉터리(``.agent-flow/``)를 한 줄로 접어 버려서 그 안쪽 쓰기가
+    통째로 안 보인다. 그래서 ``.agent-flow/``만 파일 단위로 다시 훑는다.
+
+    다만 ``.agent-flow/`` 전체를 감시하면 정상 동작이 100% 오탐이 된다. read
+    hook은 worktree 안에서 돌아도 leader의 ``skills-read.jsonl``에 append하고,
+    runner는 ``runs/``, JS는 ``state/``를 쓴다. 그래서 **그 경로들만** 빼고
+    나머지는 계속 본다. 특히 ``scripts/hooks/``는 host가 매 tool call마다
+    실행하는 표면이라 여기를 놓치면 워커가 leader에 hook을 심을 수 있다.
 
     레코드 문자(`` M``/``!!``)만으로는 **이미 더러운 파일의 추가 수정**과
     **ignored 파일의 내용 교체**가 보이지 않는다. 그래서 tracked 변경은
@@ -357,7 +372,14 @@ def _leader_status(leader_root) -> str:
     찍는다. mtime은 쓰지 않는다 — 같은 바이트로 다시 저장하기만 해도 바뀐다.
     """
     records = set(_status_records(leader_root, ("--ignored=matching",)))
-    kept = sorted(r for r in records if not _is_agent_flow_record(r))
+    records |= set(
+        _status_records(
+            leader_root,
+            ("-uall", "--ignored=traditional", "--", _AGENT_FLOW_PREFIX)
+            + tuple(f":(exclude){path}" for path in _RUNTIME_WRITE_PATHS),
+        )
+    )
+    kept = sorted(r for r in records if not _is_runtime_write_record(r))
     lines = list(kept)
     lines.append(f"tracked-content {_tracked_content_digest(leader_root)}")
     for record in kept:
@@ -385,16 +407,22 @@ def _tracked_content_digest(leader_root) -> str:
 def _path_content_stamp(leader_root, relative: str) -> str:
     """untracked/ignored 파일의 내용 지표. 디렉터리 레코드는 건너뛴다.
 
-    mtime이 아니라 내용을 해시한다. 큰 파일은 앞뒤 조각만 읽어 비용을 묶는다.
+    mtime이 아니라 내용을 해시한다. ``lstat``을 쓰는 이유는 파일을 같은 내용의
+    symlink로 바꿔치기하는 걸 잡기 위해서다 — ``stat``은 대상을 따라가 구분을
+    잃는다. 한도를 넘는 파일은 앞뒤 조각만 읽으므로 가운데만 바뀌면 놓친다.
+    그 구간만 mtime을 함께 찍어 메운다.
     """
     if not relative or relative.endswith("/"):
         return ""
     target = Path(leader_root) / relative
     try:
-        info = target.stat()
+        info = target.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            return f"stamp {relative} symlink {os.readlink(target)}"
         if not stat.S_ISREG(info.st_mode):
             return ""
         digest = hashlib.sha256()
+        suffix = ""
         with target.open("rb") as handle:
             if info.st_size <= _STAMP_FULL_READ_BYTES:
                 for chunk in iter(lambda: handle.read(_STAMP_CHUNK_BYTES), b""):
@@ -403,9 +431,10 @@ def _path_content_stamp(leader_root, relative: str) -> str:
                 digest.update(handle.read(_STAMP_CHUNK_BYTES))
                 handle.seek(-_STAMP_CHUNK_BYTES, os.SEEK_END)
                 digest.update(handle.read(_STAMP_CHUNK_BYTES))
+                suffix = f" {info.st_mtime_ns}"
     except OSError:
         return ""
-    return f"stamp {relative} {info.st_size} {digest.hexdigest()[:16]}"
+    return f"stamp {relative} {info.st_size} {digest.hexdigest()[:16]}{suffix}"
 
 
 def _git_fact(leader_root, *args: str) -> str:
@@ -431,15 +460,31 @@ def _status_records(leader_root, extra_args: Sequence[str]) -> list[str]:
 def _status_record_path(record: str) -> str:
     # porcelain=v1 -z 레코드는 "XY <path>". rename 원본 경로는 상태 접두어 없이
     # 바로 다음 레코드로 이어지므로 접두어가 없으면 레코드 전체가 경로다.
-    if len(record) > 3 and record[2] == " ":
+    # 상태 문자 검사 없이 3글자를 자르면 `db backup.sql` 같은 원본 경로가
+    # `backup.sql`로 잘려 엉뚱한 파일을 stamp한다.
+    if len(record) > 3 and record[2] == " " and _is_status_code(record[:2]):
         return record[3:]
     return record
 
 
-def _is_agent_flow_record(record: str) -> bool:
-    """agent 런타임 디렉터리 레코드인가. tripwire 비교에서 제외한다."""
+def _is_status_code(prefix: str) -> bool:
+    return all(char in _STATUS_CODES for char in prefix)
+
+
+def _is_runtime_write_record(record: str) -> bool:
+    """비교에서 뺄 레코드인가.
+
+    두 종류다. (1) 워커가 leader 쪽에 정당하게 쓰는 런타임 경로.
+    (2) ``!! .agent-flow/`` 접힌 디렉터리 레코드 — 심층 스캔이 그 안을 파일
+    단위로 이미 보고하므로 정보가 없고, 디렉터리가 생기고 사라지는 것만으로
+    변화가 생겨 오탐이 된다.
+    """
     trimmed = _status_record_path(record).rstrip("/")
-    return trimmed == _AGENT_FLOW_PREFIX or trimmed.startswith(f"{_AGENT_FLOW_PREFIX}/")
+    if trimmed == _AGENT_FLOW_PREFIX:
+        return True
+    return any(
+        trimmed == path or trimmed.startswith(f"{path}/") for path in _RUNTIME_WRITE_PATHS
+    )
 
 
 @contextlib.contextmanager

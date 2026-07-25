@@ -229,7 +229,7 @@ class Runner:
                     print(f"  [skip] {phase.id}")
                     phase_index, blocked = self._next_index(phase_index, phase)
                     meta = read_meta(self.run_dir)
-                    self._stamp_phase(meta, phase_index)
+                    self._stamp_phase(meta, phase_index, entering=True)
                     write_meta(self.run_dir, meta)
                     if blocked:
                         print(
@@ -248,7 +248,7 @@ class Runner:
                 print(f"  [skip] {phase.id}")
                 phase_index, blocked = self._next_index(phase_index, phase)
                 meta = read_meta(self.run_dir)
-                self._stamp_phase(meta, phase_index)
+                self._stamp_phase(meta, phase_index, entering=True)
                 write_meta(self.run_dir, meta)
                 if blocked:
                     print(
@@ -337,7 +337,7 @@ class Runner:
                 return
             phase_index, blocked = self._next_index(phase_index, phase)
             meta = read_meta(self.run_dir)
-            self._stamp_phase(meta, phase_index)
+            self._stamp_phase(meta, phase_index, entering=True)
             write_meta(self.run_dir, meta)
             if blocked:
                 print(
@@ -434,16 +434,20 @@ class Runner:
             raise ValueError(f"phase {phase.id}: route target not found: {target}")
         return current_index + 1, False
 
-    def _stamp_phase(self, meta: dict[str, Any], phase_index: int) -> None:
+    def _stamp_phase(
+        self, meta: dict[str, Any], phase_index: int, *, entering: bool = False
+    ) -> None:
         """meta에 현재 phase와 **진입 시각**을 박는다.
 
         `phase_entered_at`이 없으면 읽음 증거를 과거 기록까지 소급 인정하게 되어
-        L2 강제가 통째로 무력해진다. phase가 실제로 바뀔 때만 시각을 갱신한다.
+        L2 강제가 통째로 무력해진다. phase 전이에서는 항상 갱신한다 — 같은
+        phase로 되도는 self-loop도 새 라운드이므로 지난 라운드의 읽음 기록을
+        물려받으면 안 된다. 이미 진행 중인 phase를 다시 저장할 뿐이면 유지한다.
         """
         phase_id = (
             self.phases[phase_index].id if phase_index < len(self.phases) else None
         )
-        if meta.get("current_phase") != phase_id or not meta.get("phase_entered_at"):
+        if entering or meta.get("current_phase") != phase_id or not meta.get("phase_entered_at"):
             meta["phase_entered_at"] = datetime.now(timezone.utc).isoformat()
         meta["phase_index"] = phase_index
         meta["current_phase"] = phase_id

