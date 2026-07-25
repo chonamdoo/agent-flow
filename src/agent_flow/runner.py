@@ -45,11 +45,17 @@ from agent_flow.artifact import (
 )
 from agent_flow.cli_detect import detect_available_clis
 from agent_flow.core.commands import run_safe_command
+from agent_flow.core.worktree_isolation import (
+    assert_leader_unchanged,
+    capture_leader_snapshot,
+    leader_root_for,
+)
 from agent_flow.core.phase_workflow import find_kit_root, load_phase_workflow_definition
 from agent_flow.core.report import write_run_report
 from agent_flow.core.security import ensure_child_path, validate_safe_name
 from agent_flow.core.markers import has_failure_markers, missing_markers
 from agent_flow.core.local_skills import missing_local_skill_markers
+from agent_flow.core.skill_resolver import PhaseSkills
 from agent_flow.memory.index import LoreIndex
 from agent_flow.memory.lore import Lore
 
@@ -94,6 +100,7 @@ class Phase:
     routes: dict[str, str] | None = None
     required_markers: tuple[str, ...] = ()
     artifact: str = ""
+    skills: PhaseSkills | None = None
 
 
 class Runner:
@@ -157,6 +164,8 @@ class Runner:
         adapter._profile_id = self.profile_id
         adapter._architecture = self.architecture
         adapter._config_root = self.config_root
+        adapter._task_text = read_meta(self.run_dir).get("task", "") if self.run_dir else ""
+        adapter._changed_files = _changed_files(self.project_root)
 
         # Auto-cite lore: search the local lore index for entries relevant
         # to the task description and inject them into the prompt envelope.
@@ -165,6 +174,10 @@ class Runner:
         adapter._lore_citations = _search_lore(
             self.project_root, meta_for_lore.get("task", ""),
         )
+
+        # 이 실행이 worktree 안이라면 뒤에 있는 leader 체크아웃이 지켜야 할
+        # 대상이다. leader에서 그대로 도는 실행은 지킬 바깥 대상이 없다.
+        leader_root = leader_root_for(self.project_root)
 
         assert self.run_dir is not None
         meta = read_meta(self.run_dir)
@@ -256,9 +269,16 @@ class Runner:
                     return
                 continue
             print(f"  [run]  {phase.id} — {phase.description}")
+            leader_before = (
+                capture_leader_snapshot(leader_root) if leader_root is not None else None
+            )
             completed = adapter.execute(
                 phase, run_dir=self.run_dir, project_root=self.project_root,
             )
+            if leader_before is not None:
+                assert_leader_unchanged(
+                    leader_root, leader_before, run_id=self.run_dir.name
+                )
             meta = read_meta(self.run_dir)
             meta["current_phase"] = phase.id
             meta["phase_index"] = phase_index
@@ -500,7 +520,19 @@ class Runner:
             return []
         text = artifact.read_text(encoding="utf-8")
         missing = list(_missing_markers(text, phase.required_markers))
-        missing.extend(missing_local_skill_markers(text, self.config_root, phase.id))
+        meta = read_meta(self.run_dir)
+        missing.extend(
+            missing_local_skill_markers(
+                text,
+                self.config_root,
+                phase.id,
+                phase_skills=phase.skills,
+                profile=self.profile,
+                changed_files=_changed_files(self.project_root),
+                task_text=str(meta.get("task", "")),
+                since=_meta_timestamp(meta.get("phase_entered_at")),
+            )
+        )
         return missing
 
     def _artifact_path(self, phase: Phase) -> Path:
@@ -593,6 +625,22 @@ def _find_kit_root() -> Path:
     return find_kit_root()
 
 
+def _changed_files(project_root: Path) -> tuple[str, ...]:
+    """working tree + staged 변경 경로. git이 없거나 실패하면 빈 튜플로 degrade한다."""
+    # -uall이 없으면 git이 untracked 디렉터리를 `app/sdui/` 한 줄로 접어서
+    # pathGlobs가 파일 경로를 못 본다.
+    result = run_safe_command(
+        ["git", "status", "--porcelain=v1", "-z", "-uall"], cwd=project_root, timeout_s=10
+    )
+    if not result.ok:
+        return ()
+    paths: list[str] = []
+    for record in result.stdout.split("\0"):
+        if len(record) > 3:
+            paths.append(record[3:].replace("\\", "/"))
+    return tuple(dict.fromkeys(paths))
+
+
 def _load_workflow(kit_root: Path, name: str) -> list[Phase]:
     definition = load_phase_workflow_definition(kit_root, name)
     return [
@@ -607,6 +655,7 @@ def _load_workflow(kit_root: Path, name: str) -> list[Phase]:
             routes=phase.routes,
             required_markers=phase.required_markers,
             artifact=phase.artifact,
+            skills=phase.skills,
         )
         for phase in definition.phases
     ]
