@@ -19,6 +19,9 @@ const KIT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const AGENT_FLOW_COMMAND = "agent-flow";
 const INSTALL_ARGS = process.argv.slice(3);
 const FORCE_MANAGED = INSTALL_ARGS.includes("--force-managed");
+const HOOKS_FLAG_OFF = INSTALL_ARGS.includes("--no-hooks");
+const HOOKS_FLAG_ON = INSTALL_ARGS.includes("--hooks");
+let hooksDisabled = HOOKS_FLAG_OFF;
 // 이 표식이 남아 있으면 OMP 확장 파일을 kit 소유로 보고 업그레이드한다.
 const OMP_EXTENSION_MARKER = "agent-flow: managed omp extension";
 const REQUESTED_PROJECT = process.cwd();
@@ -423,7 +426,20 @@ function unquoteShellWord(value) {
 const READ_TOOL_MATCHER = "^(Read|read|read_file|view|cat)$";
 // kit.mjs와 같은 계약: 은퇴한 hook을 기존 settings에서 걷어낸다. 안 그러면 사라진
 // 스크립트를 host가 계속 실행해 셸이 막힌다.
+const MANAGED_HOOK_SCRIPTS = [
+  "guard-protected-branch.sh",
+  "show-phase-status.sh",
+  "comment-checker.py",
+  "record-skill-read.py",
+];
 const RETIRED_MANAGED_HOOK_SCRIPTS = ["guard-worktree.sh", "guard-worktree-write.py"];
+
+// hook을 끄면 "관리 대상 전부를 은퇴시킨 것"과 같다. kit.mjs와 같은 계약이다.
+function retiredHookScripts() {
+  return hooksDisabled
+    ? [...RETIRED_MANAGED_HOOK_SCRIPTS, ...MANAGED_HOOK_SCRIPTS]
+    : RETIRED_MANAGED_HOOK_SCRIPTS;
+}
 
 function pruneRetiredHooks(settings) {
   if (!settings || typeof settings !== "object" || !settings.hooks) {
@@ -449,7 +465,7 @@ function isRetiredHookCommand(command) {
     return false;
   }
   const normalized = unquoteShellWord(command).replaceAll("\\", "/").replaceAll("'", "").replaceAll('"', "");
-  return RETIRED_MANAGED_HOOK_SCRIPTS.some(
+  return retiredHookScripts().some(
     (name) => normalized.endsWith(`/scripts/hooks/${name}`) || normalized === `scripts/hooks/${name}`,
   );
 }
@@ -1159,11 +1175,51 @@ function installOmpHooks(root) {
   return writeFileIfMissingOrSame(target, ompHooksExtensionSource(), true);
 }
 
+function pruneManagedHookRegistrations(root) {
+  for (const rel of [
+    [".claude", "settings.json"],
+    [".Codex", "hooks.json"],
+    [".codex", "hooks.json"],
+  ]) {
+    const target = path.join(root, ...rel);
+    if (!fs.existsSync(target)) {
+      continue;
+    }
+    let settings;
+    try {
+      settings = JSON.parse(fs.readFileSync(target, "utf8"));
+    } catch {
+      continue;
+    }
+    if (pruneRetiredHooks(settings)) {
+      fs.writeFileSync(target, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+      console.log(`  - hooks disabled: cleared ${path.join(...rel)}`);
+    }
+  }
+}
+
+function removeOmpHooksExtension(root) {
+  const target = path.join(root, ".omp", "extensions", "agent-flow-hooks.ts");
+  if (!fs.existsSync(target)) {
+    return;
+  }
+  if (!ompExtensionIsKitOwned(target)) {
+    console.warn(`agent-flow: ${path.relative(root, target)} is not kit-managed; leaving it alone.`);
+    return;
+  }
+  const kept = nextFreeBackupPath(`${target}.removed`, fs.readFileSync(target, "utf8"));
+  if (kept !== null) {
+    fs.copyFileSync(target, kept);
+  }
+  fs.rmSync(target, { force: true });
+  console.log(`  - hooks disabled: removed ${path.relative(root, target)}`);
+}
+
 function pruneRetiredHookScripts(root) {
   // 설정에서만 빼면 실행 파일이 디스크에 남는다. 남은 파일을 다른 경로가
   // 다시 집어 실행하면 은퇴시킨 guard가 되살아난다.
   const hooksDir = path.join(root, ".agent-flow", "scripts", "hooks");
-  for (const scriptName of RETIRED_MANAGED_HOOK_SCRIPTS) {
+  for (const scriptName of retiredHookScripts()) {
     const target = path.join(hooksDir, scriptName);
     if (fs.existsSync(target)) {
       // 사용자가 같은 이름으로 자기 스크립트를 뒀을 수 있다. 되돌릴 수 있게
@@ -1741,11 +1797,19 @@ function install() {
   if (!samePath(PROJECT, KIT_ROOT)) {
     removeDirIfSame(path.join(KIT_ROOT, "scripts"), path.join(PROJECT, "scripts"), FORCE_MANAGED);
   }
+  hooksDisabled = HOOKS_FLAG_OFF || (!HOOKS_FLAG_ON && readJsonIfExists(path.join(AF_DIR, "kit.json"))?.hooks === false);
   pruneRetiredHookScripts(PROJECT);
   makeHooksExecutable(PROJECT);
-  const codexHooksCopied = installCodexHooks(PROJECT);
-  installClaudeHooks(PROJECT);
-  const ompHooksCopied = installOmpHooks(PROJECT);
+  let codexHooksCopied = false;
+  let ompHooksCopied = false;
+  if (hooksDisabled) {
+    pruneManagedHookRegistrations(PROJECT);
+    removeOmpHooksExtension(PROJECT);
+  } else {
+    codexHooksCopied = installCodexHooks(PROJECT);
+    installClaudeHooks(PROJECT);
+    ompHooksCopied = installOmpHooks(PROJECT);
+  }
   const codexAgentsCopied = copyDir(
     path.join(KIT_ROOT, ".Codex", "agents"),
     path.join(PROJECT, ".Codex", "agents"),
@@ -1816,6 +1880,9 @@ function install() {
     profile,
     profiles: installSelection.profiles,
     selected_skills: installSelection.skillNames ? [...installSelection.skillNames].sort() : "all",
+    // 이 파일이 kit.mjs가 쓴 kit.json을 덮는다. 여기 안 남기면 hook 비활성이
+    // 재설치마다 풀린다.
+    hooks: !hooksDisabled,
     project_root: PROJECT,
     installed_at: new Date().toISOString(),
     skills_copied: skillsCopied,
