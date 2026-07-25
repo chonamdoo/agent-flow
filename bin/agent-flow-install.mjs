@@ -1096,6 +1096,21 @@ function upgradeBundledProfiles(root, src, dest) {
   return { written, skipped: 0 };
 }
 
+function nextFreeBackupPath(base, content) {
+  // 이미 같은 내용이 백업돼 있으면 사본을 늘리지 않는다. 다르면 비어 있는
+  // 다음 이름을 찾는다. 무엇도 덮지 않으므로 어떤 버전도 잃지 않는다.
+  for (let i = 0; i < 100; i += 1) {
+    const candidate = i === 0 ? base : `${base}.${i}`;
+    if (!fs.existsSync(candidate)) {
+      return candidate;
+    }
+    if (fs.readFileSync(candidate, "utf8") === content) {
+      return null;
+    }
+  }
+  return null;
+}
+
 function backupIfDifferent(root, target, content) {
   if (!fs.existsSync(target)) {
     return;
@@ -1103,12 +1118,11 @@ function backupIfDifferent(root, target, content) {
   if (fs.readFileSync(target, "utf8") === content) {
     return;
   }
-  const backup = `${target}.bak`;
-  if (fs.existsSync(backup)) {
-    // 첫 백업이 사용자 원본이다. 다음 업그레이드에서 덮으면 그 원본이 kit의
-    // 이전 버전 내용으로 바뀌어 영영 사라진다. 먼저 만든 것을 지킨다.
-    console.log(`  ~ replaced ${path.relative(root, target)} (kept earlier backup: ${path.relative(root, backup)})`);
-    return;
+  // 덮어쓰는 내용을 잃지 않는다. 고정 이름 하나만 쓰면 둘 중 하나를 반드시
+  // 버리게 된다 — 매번 덮으면 사용자 원본이, 안 덮으면 이번 편집이 사라진다.
+  const backup = nextFreeBackupPath(`${target}.bak`, fs.readFileSync(target, "utf8"));
+  if (backup === null) {
+    return;  // 같은 내용이 이미 백업돼 있다.
   }
   fs.copyFileSync(target, backup);
   console.log(`  ~ replaced ${path.relative(root, target)} (backup: ${path.relative(root, backup)})`);
@@ -1155,8 +1169,8 @@ function pruneRetiredHookScripts(root) {
       // 사용자가 같은 이름으로 자기 스크립트를 뒀을 수 있다. 되돌릴 수 있게
       // 사본을 남기고 지운다. 설치본이 관리하지 않는 host 설정이 이 경로를
       // 여전히 가리킬 수 있으므로 경로를 함께 알린다.
-      const kept = `${target}.removed`;
-      if (!fs.existsSync(kept)) {
+      const kept = nextFreeBackupPath(`${target}.removed`, fs.readFileSync(target, "utf8"));
+      if (kept !== null) {
         fs.copyFileSync(target, kept);
         // 실행 권한은 떼어 둔다. 되살릴 수 있게 남기는 사본이지 실행 대상이 아니다.
         fs.chmodSync(kept, 0o644);

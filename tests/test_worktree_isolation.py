@@ -913,3 +913,38 @@ def test_state_dirs_match_artifacts_init(tmp_path):
     artifacts.init_project(tmp_path)
     created = {p.name for p in (tmp_path / ".agent-flow").iterdir() if p.is_dir()}
     assert expected <= created
+
+
+def test_tripwire_sees_inside_gitignored_agent_flow(tmp_path):
+    """불변: `.agent-flow/`가 gitignore돼도 안쪽 코드 변경은 보인다.
+
+    `--ignored=matching`은 ignore 패턴에 직접 걸린 디렉터리를 한 줄로 접는다.
+    심층 스캔(pathspec)이 없으면 그 안쪽이 통째로 사각지대가 된다 — 실제
+    프로젝트가 정확히 이 배치다.
+    """
+    status, before = _isolated(tmp_path, "deep")
+    assert ".agent-flow/" in (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    planted = tmp_path / ".agent-flow" / "scripts" / "hooks" / "sneaky.sh"
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    planted.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
+def test_tripwire_ignores_the_folded_agent_flow_record(tmp_path):
+    """불변: 접힌 `!! .agent-flow/` 한 줄은 비교에서 뺀다.
+
+    심층 스캔이 안을 파일 단위로 이미 보고하므로 정보가 없고, 디렉터리가
+    처음 생기는 것만으로 변화가 생겨 정상 동작이 오탐이 된다.
+    """
+    tmp_path.joinpath("x.txt").write_text("x\n", encoding="utf-8")
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text(".agent-flow/\n", encoding="utf-8")
+    _git("add", ".gitignore", cwd=tmp_path)
+    _git("commit", "-m", "ignore", cwd=tmp_path)
+    before = W_ISO.capture_leader_snapshot(tmp_path)
+    assert not (tmp_path / ".agent-flow").exists()
+    runs = tmp_path / ".agent-flow" / "runs" / "default" / "r1"
+    runs.mkdir(parents=True)
+    (runs / "meta.json").write_text("{}\n", encoding="utf-8")
+    W_ISO.assert_leader_unchanged(tmp_path, before)

@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -102,3 +103,105 @@ def test_no_checkout_roots_falls_back_to_exact_match(layout):
     assert SkillReadEvidence(
         available=True, read_paths=frozenset({str(resolved.resolve())}), checkout_roots=()
     ).covers(_skill(resolved))
+
+
+# --- read_skill_evidence를 실제로 통과하는 경로 -----------------------------
+#
+# 위 테스트들은 checkout_roots를 손으로 넘긴다. 그러면 `_checkout_roots`를
+# 통째로 `return ()`로 바꿔도 전부 통과한다 — 4라운드가 고친 바로 그 코드가
+# 무방비다. 아래는 실제 git leader + linked worktree를 만들어 배선을 지킨다.
+
+
+def _git(*args, cwd: Path):
+    return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True, check=False)
+
+
+def _leader_with_worktree(tmp_path: Path):
+    leader = tmp_path / "leader"
+    leader.mkdir()
+    _git("init", "-q", cwd=leader)
+    _git("config", "user.email", "a@b", cwd=leader)
+    _git("config", "user.name", "t", cwd=leader)
+    skill = leader / "skills" / "alpha" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# alpha\n", encoding="utf-8")
+    (leader / ".gitignore").write_text(".agent-flow/\n", encoding="utf-8")
+    _git("add", "-A", cwd=leader)
+    _git("commit", "-qm", "init", cwd=leader)
+    checkout = leader / ".agent-flow" / "worktrees" / "feat-x"
+    checkout.parent.mkdir(parents=True, exist_ok=True)
+    _git("worktree", "add", "-q", "-b", "feat/x", str(checkout), "HEAD", cwd=leader)
+    return leader, checkout
+
+
+def _record(leader: Path, path: Path) -> None:
+    from agent_flow.core.local_skills import record_skill_read
+
+    record_skill_read(leader, path)
+
+
+def test_worktree_read_is_credited_through_read_skill_evidence(tmp_path):
+    """불변: worktree 사본을 읽어도 leader 기준 게이트가 인정한다.
+
+    hook은 leader 로그에 쓰고 게이트도 leader root로 불린다. 체크아웃 목록이
+    한쪽만 보면 정당한 읽음이 전부 미인정으로 차단된다.
+    """
+    from agent_flow.core.local_skills import read_skill_evidence
+
+    leader, checkout = _leader_with_worktree(tmp_path)
+    _record(leader, checkout / "skills" / "alpha" / "SKILL.md")
+    evidence = read_skill_evidence(leader)
+    assert evidence.available
+    assert evidence.covers(_skill(leader / "skills" / "alpha" / "SKILL.md"))
+
+
+def test_stale_worktree_directory_is_not_a_trusted_root(tmp_path):
+    """반증: 삭제 잔재 디렉터리를 체크아웃으로 신뢰하면 엉뚱한 파일이 증거가 된다."""
+    from agent_flow.core.local_skills import read_skill_evidence
+
+    leader, _ = _leader_with_worktree(tmp_path)
+    stale = leader / ".agent-flow" / "worktrees" / "gone"
+    decoy = stale / "skills" / "alpha" / "SKILL.md"
+    decoy.parent.mkdir(parents=True)
+    decoy.write_text("완전히 다른 내용\n", encoding="utf-8")
+    _record(leader, decoy)
+    evidence = read_skill_evidence(leader)
+    assert not evidence.covers(_skill(leader / "skills" / "alpha" / "SKILL.md"))
+
+
+def test_symlinked_worktree_entry_is_not_a_trusted_root(tmp_path):
+    """반증: symlink를 체크아웃으로 받으면 저장소 밖 파일 읽기가 통과한다.
+
+    대상 디렉터리에 `.git`까지 두어 존재 검사만으로는 못 거르게 한다.
+    symlink 자체를 거부해야 막힌다.
+    """
+    from agent_flow.core.local_skills import read_skill_evidence
+
+    leader, _ = _leader_with_worktree(tmp_path)
+    outside = tmp_path / "outside"
+    decoy = outside / "skills" / "alpha" / "SKILL.md"
+    decoy.parent.mkdir(parents=True)
+    decoy.write_text("forged\n", encoding="utf-8")
+    (outside / ".git").write_text("gitdir: /nowhere\n", encoding="utf-8")
+    (leader / ".agent-flow" / "worktrees" / "linked").symlink_to(outside)
+    _record(leader, decoy)
+    evidence = read_skill_evidence(leader)
+    assert not evidence.covers(_skill(leader / "skills" / "alpha" / "SKILL.md"))
+
+
+def test_checkout_roots_link_leader_and_worktree_both_ways(tmp_path):
+    """불변: 체크아웃 목록은 양방향이다.
+
+    게이트는 leader root로 불리지만(`cli.py`가 `config_root=root`) agent는
+    worktree cwd에서 읽는다. 한쪽만 담으면 정당한 읽음이 미인정으로 차단된다.
+    """
+    from agent_flow.core.local_skills import _checkout_roots
+
+    leader, checkout = _leader_with_worktree(tmp_path)
+    from_leader = _checkout_roots(leader)
+    from_worktree = _checkout_roots(checkout)
+
+    assert str(leader.resolve()) in from_leader
+    assert str(checkout.resolve()) in from_leader
+    assert str(leader.resolve()) in from_worktree
+    assert str(checkout.resolve()) in from_worktree

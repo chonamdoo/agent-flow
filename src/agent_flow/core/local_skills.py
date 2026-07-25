@@ -295,8 +295,15 @@ def _checkout_roots(project_root: Path) -> tuple[str, ...]:
     except OSError:
         entries = []
     for entry in entries:
-        if entry.is_dir():
-            add(entry)
+        # 디렉터리라는 것만으로 신뢰하면 안 된다. 삭제 잔재나 누가 만들어 둔
+        # 빈 디렉터리, 저장소 밖을 가리키는 symlink까지 "같은 체크아웃"으로
+        # 인정돼 엉뚱한 파일을 읽고도 게이트를 통과한다. git이 인정한 linked
+        # worktree만 받는다.
+        if entry.is_symlink() or not entry.is_dir():
+            continue
+        if not (entry / ".git").exists():
+            continue
+        add(entry)
     return tuple(roots)
 
 

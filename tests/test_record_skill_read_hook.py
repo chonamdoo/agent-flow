@@ -98,3 +98,21 @@ def test_hook_never_blocks_on_garbage_input(tmp_path):
         )
         assert result.returncode == 0, (payload, result.stderr)
         assert result.stderr == "", (payload, result.stderr)
+
+
+def test_hook_does_not_record_a_nonexistent_skill(tmp_path):
+    """반증: 열지도 못한 경로가 증거가 되면 게이트를 위조할 수 있다."""
+    root = _project(tmp_path)
+    ghost = root / "skills" / "ghost" / "SKILL.md"
+    result = _invoke(root, str(ghost))
+    assert result.returncode == 0, result.stderr
+    assert _log(root) == []
+
+
+def test_hook_does_not_record_a_directory_named_skill_md(tmp_path):
+    root = _project(tmp_path)
+    weird = root / "skills" / "dir" / "SKILL.md"
+    weird.mkdir(parents=True)
+    result = _invoke(root, str(weird))
+    assert result.returncode == 0, result.stderr
+    assert _log(root) == []
