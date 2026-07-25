@@ -145,10 +145,6 @@ function bootstrapMarkdown(label) {
   const targetPath = path.join(PROJECT, label);
   const start = "<!-- agent-flow:start -->";
   const end = "<!-- agent-flow:end -->";
-  const localSkillSection = bootstrapLocalSkillSection();
-  if (localSkillSection && block.includes(end)) {
-    block = block.replace(end, () => `${localSkillSection}\n${end}`);
-  }
   const current = fs.existsSync(targetPath)
     ? fs.readFileSync(targetPath, "utf8")
     : "";
@@ -160,50 +156,6 @@ function bootstrapMarkdown(label) {
   }
   const prefix = current.trim() ? current.trimEnd() + "\n\n" : `# ${label}\n\n`;
   fs.writeFileSync(targetPath, prefix + block);
-}
-
-function bootstrapLocalSkillSection() {
-  const seen = new Map();
-  const sources = [path.join(AF_DIR, "local-skills")];
-  if (!samePath(PROJECT, KIT_ROOT)) {
-    sources.push(path.join(PROJECT, "skills"));
-  }
-  for (const base of sources) {
-    if (!fs.existsSync(base)) {
-      continue;
-    }
-    for (const entry of fs.readdirSync(base, { withFileTypes: true })) {
-      if (!entry.isDirectory()) {
-        continue;
-      }
-      const skillPath = path.join(base, entry.name, "SKILL.md");
-      if (!fs.existsSync(skillPath)) {
-        continue;
-      }
-      const name = bootstrapLocalSkillName(skillPath, entry.name);
-      if (seen.has(name)) {
-        continue;
-      }
-      seen.set(name, {
-        name,
-        path: path.relative(PROJECT, skillPath).split(path.sep).join("/"),
-        absolutePath: skillPath,
-      });
-    }
-  }
-  const docs = [...seen.values()].sort((a, b) => a.name.localeCompare(b.name));
-  if (docs.length === 0) {
-    return "";
-  }
-  return [
-    "",
-    "### Project-local Skills",
-    "",
-    "이 프로젝트의 local skill(`.agent-flow/local-skills/<name>/SKILL.md` 또는 `skills/<name>/SKILL.md`)은 아래 목록이 단일 진실 소스다. 매칭되는 작업(개발/수정/리뷰, 디자인, commit/push/PR 등)을 시작하기 전에 해당 `SKILL.md`를 먼저 읽고, 그 안의 reference·completion-gate 규칙을 그대로 따른다. 읽지 않은 skill은 적용했다고 말하지 않으며, 누락 시 리뷰는 incomplete 또는 `verdict: request-changes`로 처리한다.",
-    "",
-    ...docs.map((doc) => bootstrapLocalSkillLine(doc)),
-    "",
-  ].join("\n");
 }
 
 function bootstrapLocalSkillName(skillPath, fallback) {
@@ -219,28 +171,6 @@ function bootstrapLocalSkillName(skillPath, fallback) {
     // fall through to the directory name
   }
   return fallback;
-}
-
-function bootstrapLocalSkillLine(doc) {
-  const trigger = bootstrapLocalSkillTrigger(doc.absolutePath);
-  return `- \`${doc.name}\` — \`${doc.path}\`${trigger ? `: ${trigger}` : ""}`;
-}
-
-function bootstrapLocalSkillTrigger(absolutePath) {
-  let description = "";
-  try {
-    const frontmatter = splitSkillFrontmatter(fs.readFileSync(absolutePath, "utf8"));
-    if (frontmatter) {
-      description = String(parseSimpleYaml(frontmatter).description || "");
-    }
-  } catch (_error) {
-    description = "";
-  }
-  description = description.replace(/\s+/g, " ").trim();
-  if (description.length > 200) {
-    description = `${description.slice(0, 197).trimEnd()}...`;
-  }
-  return description;
 }
 
 function detectProfile() {
@@ -455,7 +385,6 @@ function codexHooksSettings(root) {
         {
           matcher: "Bash",
           hooks: [
-            { type: "command", command: hookScriptCommand(root, "guard-worktree.sh") },
             { type: "command", command: hookScriptCommand(root, "guard-protected-branch.sh") },
           ],
         },
@@ -464,6 +393,10 @@ function codexHooksSettings(root) {
         {
           matcher: "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit)$",
           hooks: [{ type: "command", command: hookScriptCommand(root, "comment-checker.py") }],
+        },
+        {
+          matcher: READ_TOOL_MATCHER,
+          hooks: [{ type: "command", command: hookScriptCommand(root, "record-skill-read.py") }],
         },
       ],
       Stop: [
@@ -485,9 +418,43 @@ function unquoteShellWord(value) {
   return value;
 }
 
+const READ_TOOL_MATCHER = "^(Read|read|read_file|view|cat)$";
+// kit.mjs와 같은 계약: 은퇴한 hook을 기존 settings에서 걷어낸다. 안 그러면 사라진
+// 스크립트를 host가 계속 실행해 셸이 막힌다.
+const RETIRED_MANAGED_HOOK_SCRIPTS = ["guard-worktree.sh", "guard-worktree-write.py"];
+
+function pruneRetiredHooks(settings) {
+  if (!settings || typeof settings !== "object" || !settings.hooks) {
+    return;
+  }
+  for (const [event, entries] of Object.entries(settings.hooks)) {
+    if (!Array.isArray(entries)) {
+      continue;
+    }
+    for (const entry of entries) {
+      if (Array.isArray(entry?.hooks)) {
+        entry.hooks = entry.hooks.filter((hook) => !isRetiredHookCommand(hook?.command));
+      }
+    }
+    settings.hooks[event] = entries.filter(
+      (entry) => !Array.isArray(entry?.hooks) || entry.hooks.length > 0,
+    );
+  }
+}
+
+function isRetiredHookCommand(command) {
+  if (typeof command !== "string" || !command) {
+    return false;
+  }
+  const normalized = unquoteShellWord(command).replaceAll("\\", "/").replaceAll("'", "").replaceAll('"', "");
+  return RETIRED_MANAGED_HOOK_SCRIPTS.some(
+    (name) => normalized.endsWith(`/scripts/hooks/${name}`) || normalized === `scripts/hooks/${name}`,
+  );
+}
+
 function managedHookScriptName(command) {
   const normalized = unquoteShellWord(command).replaceAll("\\", "/").replaceAll("'", "").replaceAll('"', "");
-  for (const scriptName of ["guard-worktree.sh", "guard-protected-branch.sh", "show-phase-status.sh", "comment-checker.py"]) {
+  for (const scriptName of ["guard-protected-branch.sh", "show-phase-status.sh", "comment-checker.py", "record-skill-read.py"]) {
     if (
       normalized === `.agent-flow/scripts/hooks/${scriptName}` ||
       normalized === `scripts/hooks/${scriptName}` ||
@@ -505,7 +472,7 @@ function managedHookScriptName(command) {
 function trustedManagedHookScriptName(root, command) {
   const normalized = unquoteShellWord(command).replaceAll("\\", "/");
   const normalizedRoot = path.resolve(root).replaceAll("\\", "/");
-  for (const scriptName of ["guard-worktree.sh", "guard-protected-branch.sh", "show-phase-status.sh", "comment-checker.py"]) {
+  for (const scriptName of ["guard-protected-branch.sh", "show-phase-status.sh", "comment-checker.py", "record-skill-read.py"]) {
     if (normalized === `${normalizedRoot}/.agent-flow/scripts/hooks/${scriptName}`) {
       return scriptName;
     }
@@ -517,6 +484,7 @@ function mergeHookSettings(settings, desired) {
   if (!settings.hooks) {
     settings.hooks = {};
   }
+  pruneRetiredHooks(settings);
   for (const [event, entries] of Object.entries(desired)) {
     if (!settings.hooks[event]) {
       settings.hooks[event] = [];
@@ -772,7 +740,6 @@ function claudeHooksSettings(root) {
         {
           matcher: "Bash",
           hooks: [
-            { type: "command", command: hookScriptCommand(root, "guard-worktree.sh") },
             { type: "command", command: hookScriptCommand(root, "guard-protected-branch.sh") },
           ],
         },
@@ -781,6 +748,10 @@ function claudeHooksSettings(root) {
         {
           matcher: "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit)$",
           hooks: [{ type: "command", command: hookScriptCommand(root, "comment-checker.py") }],
+        },
+        {
+          matcher: READ_TOOL_MATCHER,
+          hooks: [{ type: "command", command: hookScriptCommand(root, "record-skill-read.py") }],
         },
       ],
       Stop: [
@@ -809,6 +780,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const HOOK_DIR = path.join(ROOT, ".agent-flow", "scripts", "hooks");
 const WRITE_TOOL_RE = /^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit)$/i;
+const READ_TOOL_RE = /^(Read|read|read_file|view|cat)$/i;
 
 export default function agentFlowHooks(pi) {
   if (typeof pi.setLabel === "function") {
@@ -837,7 +809,7 @@ export default function agentFlowHooks(pi) {
       return;
     }
     const payload = hookPayload(event, ctx);
-    for (const scriptName of ["guard-worktree.sh", "guard-protected-branch.sh"]) {
+    for (const scriptName of ["guard-protected-branch.sh"]) {
       const result = await runHook(scriptName, payload, ctx);
       if (result.block) {
         return { block: true, reason: result.reason };
@@ -865,6 +837,14 @@ export default function agentFlowHooks(pi) {
         isError: true,
       };
     }
+  });
+
+  pi.on("tool_result", async (event, ctx) => {
+    if (!READ_TOOL_RE.test(String(event?.toolName || ""))) {
+      return;
+    }
+    // 관측 전용이다. 결과를 보지 않고, 어떤 경우에도 read를 막지 않는다.
+    await runHook("record-skill-read.py", hookPayload(event, ctx), ctx);
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
@@ -1108,7 +1088,7 @@ function makeHooksExecutable(root) {
     return;
   }
   for (const entry of fs.readdirSync(hooksDir)) {
-    if (entry.endsWith(".sh") || entry === "comment-checker.py") {
+    if (entry.endsWith(".sh") || entry.endsWith(".py")) {
       fs.chmodSync(path.join(hooksDir, entry), 0o755);
     }
   }

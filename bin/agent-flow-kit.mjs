@@ -2,6 +2,7 @@
 
 import fs from "node:fs";
 import crypto from "node:crypto";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
@@ -174,7 +175,7 @@ function installProject() {
   for (const phase of phases) {
     writeManagedFile(
       path.join(agentFlowDir, "prompts", `${phase.id}.md`),
-      phasePrompt(phase, root),
+      phasePrompt(phase),
     );
   }
   writeManagedFile(path.join(agentFlowDir, "rules", "workflow-contract.md"), workflowContract());
@@ -215,7 +216,22 @@ function installProject() {
   };
 
   fs.writeFileSync(path.join(agentFlowDir, "kit.json"), `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  syncSkillSources(root);
   console.log(`agent-flow installed profile=${profile}`);
+}
+
+// 설치 시점에 1회만 돈다. 런타임에는 절대 호출하지 않는다 — 사용자에게 매번 물어보지 않기 위한 지점이다.
+function syncSkillSources(root) {
+  const out = runSkillsCli(["sync", "--root", root]);
+  if (out === null) {
+    return;
+  }
+  for (const line of out.split("\n")) {
+    // 선언이 없으면 조용히 넘어간다. install 출력은 계약이라 노이즈를 추가하지 않는다.
+    if (line && !line.endsWith("no skill_sources declared")) {
+      console.log(`skills: ${line}`);
+    }
+  }
 }
 
 function runWorkflowCommand(args) {
@@ -325,7 +341,7 @@ function runWorkflowCommand(args) {
       throw new Error(`blocked: missing artifact ${artifact}`);
     }
     assertFreshArtifact(state, phase, artifact);
-    assertCompletionMarkers(phase, artifact, root);
+    assertCompletionMarkers(phase, artifact, root, state.workflow);
     const nextIndex = nextPhaseIndex(state, phases, phase, artifact);
     syncRouteArtifacts(runDir, phases, state.phase_index, nextIndex);
     const nextPhase = phases[nextIndex];
@@ -446,6 +462,20 @@ function normalizeExportedPhase(phase, name, index) {
     required_markers: requiredMarkers,
     multi_review: normalizeExportedBoolean(phase.multi_review, name, index, "multi_review"),
     routes: normalizeExportedRoutes(phase.routes, name, index),
+    skills: normalizeExportedSkills(phase.skills, name, index),
+  };
+}
+
+function normalizeExportedSkills(value, name, index) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`workflow export ${name}: phase ${index} skills must be an object`);
+  }
+  return {
+    required: normalizeExportedStringList(value.required, name, index, "skills.required"),
+    optional: normalizeExportedStringList(value.optional, name, index, "skills.optional"),
   };
 }
 
@@ -819,7 +849,7 @@ function printNext(state, root = null) {
     console.log(`workflow complete: ${state.run_id}`);
     return;
   }
-  const localSkillBlock = root ? localSkillPromptBlock(root, phase.id) : "";
+  const localSkillBlock = root ? localSkillPromptBlock(root, phase.id, state.workflow) : "";
   console.log(`Current phase: ${phase.id}`);
   console.log(`Run: ${state.run_id}`);
   console.log(`Required artifact: ${path.join(state.run_dir, phase.artifact)}`);
@@ -842,6 +872,7 @@ function printStatus(state, root) {
       fs.readFileSync(resolvedRequiredArtifact, "utf8"),
       phase,
       root,
+      state.workflow,
     );
     status = "blocked";
     if (artifactIsStale(state, resolvedRequiredArtifact)) {
@@ -1504,9 +1535,9 @@ function artifactIsStale(state, artifact) {
   return artifactMtime < enteredAt;
 }
 
-function assertCompletionMarkers(phase, artifact, root) {
+function assertCompletionMarkers(phase, artifact, root, workflow) {
   const content = fs.readFileSync(artifact, "utf8");
-  const missing = missingMarkersForPhase(content, phase, root);
+  const missing = missingMarkersForPhase(content, phase, root, workflow);
   if (missing.length > 0) {
     throw new Error(`blocked: ${phase.id} artifact missing completion markers: ${missing.join(", ")}`);
   }
@@ -1520,253 +1551,88 @@ function missingMarkers(content, markers) {
   });
 }
 
-const CODE_REVIEW_LOCAL_SKILL_PHASES = new Set([
-  "implement",
-  "implement-fix",
-  "red",
-  "green",
-  "refactor",
-  "fix-loop",
-  "final-review",
-  "review",
-  "pr-comment-fix",
-  "pr-ci-fix",
-  "multi-review",
-  "architecture-review",
-]);
-const PROJECT_LOCAL_SKILL_APPLIED_MARKER = "project-local-skill-docs: applied";
-const PROJECT_LOCAL_SKILL_INCLUDE_TERMS = [
-  "code development",
-  "code generation",
-  "code review",
-  "development or review",
-  "developing or reviewing",
-  "implementing or reviewing",
-  "writing or reviewing",
-  "modifying or reviewing",
-  "architecture review",
-  "android code",
-  "kotlin implementation",
-  "compose implementation",
-  "코드 개발",
-  "코드 작성",
-  "코드 수정",
-  "코드 리뷰",
-  "코드리뷰",
-  "구현·리뷰",
-  "개발/수정/리뷰",
-  "작성·리뷰",
-];
-const PROJECT_LOCAL_SKILL_EXCLUDE_TERMS = [
-  "figma",
-  "screen-spec",
-  "screen spec",
-  "design link",
-  "figma.com/design",
-  "git commit",
-  "git push",
-  "pull request",
-  "pull-request",
-  "pr-review",
-  "pr review",
-  "branch-pr",
-  "branch base",
-  "branch creation",
-  "branch review",
-  "release branch",
-  "worktree",
-  "cleanup",
-  "merge cleanup",
-  "merge review",
-  "release-first",
-  "pretooluse",
-  "posttooluse",
-  "guard-worktree",
-  "guard-protected-branch",
-  "comment-checker",
-  "claude hook",
-  "codex hook",
-  "agent-flow lifecycle",
-  "workflow lifecycle",
-];
-const PROJECT_LOCAL_SKILL_EXCLUDE_TOKEN_PATTERN = /(^|[^a-z0-9])(pr|branch|merge)([^a-z0-9]|$)/;
+// local-skill 판정은 Python resolver 한 곳에만 있다. JS는 workflow export와 같은 방식으로 위임한다.
+// 여기에 휴리스틱을 다시 구현하면 Python과 조용히 갈라진다 — 그게 이 저장소의 최대 유지보수 리스크였다.
+function runSkillsCli(args) {
+  const result = safeSpawnSync(preferredPython(), ["-m", "agent_flow.cli", "skills", ...args], {
+    cwd: KIT_ROOT,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      PYTHONPATH: [path.join(KIT_ROOT, "src"), process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
+    },
+    timeout: 15_000,
+  });
+  if (result.error || result.status !== 0) {
+    const detail = result.error?.message || result.stderr?.trim() || `exit ${result.status}`;
+    process.stderr.write(`agent-flow: skills ${args[0]} failed: ${detail}\n`);
+    return null;
+  }
+  return result.stdout;
+}
 
-function missingMarkersForPhase(content, phase, root) {
+function missingMarkersForPhase(content, phase, root, workflow) {
   const missing = missingMarkers(content, phase.required_markers ?? []);
-  missing.push(...missingProjectLocalSkillMarkers(content, root, phase.id));
-  return missing;
+  if (!root) {
+    return missing;
+  }
+  return missing.concat(missingProjectLocalSkillMarkers(content, root, phase, workflow));
 }
 
-function localSkillPromptBlock(root, phaseId) {
-  const docs = applicableProjectLocalSkillDocs(root, phaseId);
-  if (docs.length === 0) {
+
+function localSkillPromptBlock(root, phase, workflow) {
+  const phaseId = typeof phase === "string" ? phase : phase?.id;
+  if (!root || !phaseId) {
     return "";
   }
-  return [
-    "",
-    "",
-    "## Project-local code/review skills",
-    "",
-    "Project-local markdown skill docs that apply to code generation or code review were found.",
-    "Read only the applicable docs before completing this phase. Design/Figma, hook, branch, PR, merge, and cleanup skills are intentionally excluded here.",
-    "",
-    "Applicable docs:",
-    "",
-    ...docs.map((doc) => localSkillPromptLine(root, doc)),
-    "",
-    "When this block appears, the `## Completion Gate` must include:",
-    "",
-    "```text",
-    "project-local-skills: checked",
-    "project-local-skills-used: <comma-separated applicable skill names>",
-    PROJECT_LOCAL_SKILL_APPLIED_MARKER,
-    "```",
-    "",
-    "If this block is absent, `project-local-skills: n/a` remains valid.",
-    "",
-  ].join("\n");
+  const out = runSkillsCli(["prompt", "--root", root, "--phase", phaseId, "--workflow", workflow || "default"]);
+  return out ?? "";
 }
 
-function localSkillPromptLine(root, doc) {
-  const absolutePath = path.isAbsolute(doc.path)
-    ? doc.path
-    : path.join(root, doc.path);
-  return `- \`${doc.path}\` (\`${doc.name}\`) — \`${absolutePath}\``;
-}
-
-function missingProjectLocalSkillMarkers(content, root, phaseId) {
-  const docs = applicableProjectLocalSkillDocs(root, phaseId);
-  if (docs.length === 0) {
+function missingProjectLocalSkillMarkers(content, root, phase, workflow) {
+  const phaseId = typeof phase === "string" ? phase : phase?.id;
+  if (!root || !phaseId) {
     return [];
   }
-  const values = completionGateMarkerValues(content);
-  const missing = [];
-  if (values.get("project-local-skills") !== "checked") {
-    missing.push("project-local-skills: checked");
-  }
-  const used = (values.get("project-local-skills-used") ?? "").trim();
-  const usedNames = new Set(
-    used
-      .split(",")
-      .map((name) => name.trim().replace(/^`|`$/g, "").toLowerCase())
-      .filter(Boolean),
-  );
-  if (["", "n/a", "none", "optional"].includes(used)) {
-    missing.push("project-local-skills-used: <applicable local skill list>");
-  } else if (!docs.every((doc) => usedNames.has(doc.name.toLowerCase()))) {
-    missing.push("project-local-skills-used: <applicable local skill list>");
-  }
-  if (values.get("project-local-skill-docs") !== "applied") {
-    missing.push(PROJECT_LOCAL_SKILL_APPLIED_MARKER);
-  }
-  return missing;
-}
-
-function applicableProjectLocalSkillDocs(root, phaseId) {
-  if (!CODE_REVIEW_LOCAL_SKILL_PHASES.has(phaseId)) {
-    return [];
-  }
-  return projectLocalSkillDocs(root)
-    .filter((doc) => isCodeReviewLocalSkill(doc))
-    .sort((a, b) => a.name.localeCompare(b.name));
-}
-
-function projectLocalSkillDocs(root) {
-  const indexDocs = localSkillDocsFromIndex(root);
-  if (indexDocs.length > 0) {
-    return dedupeLocalSkillDocs(indexDocs);
-  }
-  return dedupeLocalSkillDocs(localSkillDocsFromTree(root));
-}
-
-function localSkillDocsFromIndex(root) {
-  const indexPath = path.join(root, ".agent-flow", "skills", "index.json");
-  if (!fs.existsSync(indexPath)) {
-    return [];
-  }
-  let payload;
+  const artifact = writeTempArtifact(content);
   try {
-    payload = JSON.parse(fs.readFileSync(indexPath, "utf8"));
-  } catch (_error) {
-    return [];
-  }
-  if (!Array.isArray(payload.skills)) {
-    return [];
-  }
-  return payload.skills
-    .filter((skill) => skill && ["local", "project"].includes(skill.source))
-    .filter((skill) => isProjectLocalSkillPath(String(skill.path ?? "")))
-    .map((skill) => ({
-      name: String(skill.name || path.basename(path.dirname(String(skill.path ?? "")))),
-      path: String(skill.path ?? ""),
-      description: [
-        skill.description,
-        skill.trigger,
-        ...(Array.isArray(skill.tags) ? skill.tags : []),
-        ...(Array.isArray(skill.workflowPhases) ? skill.workflowPhases : []),
-        ...(Array.isArray(skill.reviewAngles) ? skill.reviewAngles : []),
-      ].filter(Boolean).join(" "),
-    }));
-}
-
-function localSkillDocsFromTree(root) {
-  const base = path.join(root, ".agent-flow", "local-skills");
-  if (!fs.existsSync(base)) {
-    return [];
-  }
-  return fs.readdirSync(base, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => {
-      const skillPath = path.join(base, entry.name, "SKILL.md");
-      if (!fs.existsSync(skillPath)) {
-        return null;
-      }
-      return {
-        name: entry.name,
-        path: path.relative(root, skillPath).split(path.sep).join("/"),
-        description: localSkillMetadataText(skillPath),
-      };
-    })
-    .filter(Boolean);
-}
-
-function localSkillMetadataText(skillPath) {
-  try {
-    const text = fs.readFileSync(skillPath, "utf8");
-    const frontmatter = text.match(/^---\n([\s\S]*?)\n---/);
-    return frontmatter ? frontmatter[1] : text.split(/\r?\n/).slice(0, 20).join("\n");
-  } catch (_error) {
-    return "";
-  }
-}
-
-function isProjectLocalSkillPath(relPath) {
-  const normalized = relPath.replaceAll("\\", "/");
-  return (
-    normalized.endsWith("/SKILL.md") &&
-    (normalized.startsWith(".agent-flow/local-skills/") || normalized.startsWith("skills/"))
-  );
-}
-
-function isCodeReviewLocalSkill(doc) {
-  const haystack = `${doc.name} ${doc.path} ${doc.description}`.toLowerCase();
-  if (
-    PROJECT_LOCAL_SKILL_EXCLUDE_TERMS.some((term) => haystack.includes(term)) ||
-    PROJECT_LOCAL_SKILL_EXCLUDE_TOKEN_PATTERN.test(haystack)
-  ) {
-    return false;
-  }
-  return PROJECT_LOCAL_SKILL_INCLUDE_TERMS.some((term) => haystack.includes(term));
-}
-
-function dedupeLocalSkillDocs(docs) {
-  const byName = new Map();
-  for (const doc of docs) {
-    if (!byName.has(doc.name)) {
-      byName.set(doc.name, doc);
+    // task/changed_files/since는 넘기지 않는다. Python이 활성 run에서 직접 도출해야
+    // JS·status·Python runner 세 경로가 같은 skill 집합을 본다.
+    const out = runSkillsCli([
+      "markers",
+      "--root",
+      root,
+      "--phase",
+      phaseId,
+      "--workflow",
+      workflow || "default",
+      "--artifact",
+      artifact,
+    ]);
+    if (out === null) {
+      // resolver가 대답하지 못하면 skill 강제가 있는지 없는지 알 수 없다.
+      // 조용히 통과시키면 강제 전체가 무음으로 꺼진다 — fail-closed로 막는다.
+      return ["skill-check-unavailable: python skill resolver did not answer"];
+    }
+    const parsed = JSON.parse(out);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    process.stderr.write(`agent-flow: skill marker check failed: ${error.message}\n`);
+    return ["skill-check-unavailable: python skill resolver did not answer"];
+  } finally {
+    try {
+      fs.rmSync(artifact, { force: true });
+    } catch (_error) {
+      /* 임시 파일 정리 실패가 phase 판정을 막아서는 안 된다. */
     }
   }
-  return [...byName.values()];
+}
+
+function writeTempArtifact(content) {
+  const file = path.join(os.tmpdir(), `agent-flow-markers-${process.pid}-${Date.now()}.md`);
+  fs.writeFileSync(file, content, "utf8");
+  return file;
 }
 
 function markerPresent(content, gateLines, marker) {
@@ -2261,49 +2127,9 @@ function hasGateEvidence(result) {
   return false;
 }
 
-function bootstrapLocalSkillSection(root) {
-  const docs = projectLocalSkillDocs(root).sort((a, b) => a.name.localeCompare(b.name));
-  if (docs.length === 0) {
-    return "";
-  }
-  return [
-    "",
-    "### Project-local Skills",
-    "",
-    "이 프로젝트의 local skill(`.agent-flow/local-skills/<name>/SKILL.md` 또는 `skills/<name>/SKILL.md`)은 아래 목록이 단일 진실 소스다. 매칭되는 작업(개발/수정/리뷰, 디자인, commit/push/PR 등)을 시작하기 전에 해당 `SKILL.md`를 먼저 읽고, 그 안의 reference·completion-gate 규칙을 그대로 따른다. 읽지 않은 skill은 적용했다고 말하지 않으며, 누락 시 리뷰는 incomplete 또는 `verdict: request-changes`로 처리한다.",
-    "",
-    ...docs.map((doc) => bootstrapLocalSkillLine(root, doc)),
-    "",
-  ].join("\n");
-}
-
-function bootstrapLocalSkillLine(root, doc) {
-  const trigger = bootstrapLocalSkillTrigger(root, doc);
-  return `- \`${doc.name}\` — \`${doc.path}\`${trigger ? `: ${trigger}` : ""}`;
-}
-
-function bootstrapLocalSkillTrigger(root, doc) {
-  const absolutePath = path.isAbsolute(doc.path) ? doc.path : path.join(root, doc.path);
-  let description = "";
-  try {
-    const frontmatter = splitSkillFrontmatter(fs.readFileSync(absolutePath, "utf8"));
-    if (frontmatter) {
-      description = String(parseSimpleYaml(frontmatter).description || "");
-    }
-  } catch (_error) {
-    description = "";
-  }
-  description = description.replace(/\s+/g, " ").trim();
-  if (description.length > 200) {
-    description = `${description.slice(0, 197).trimEnd()}...`;
-  }
-  return description;
-}
-
 function upsertBootstrapBlock(pathName, label, root) {
   const start = "<!-- agent-flow:start -->";
   const end = "<!-- agent-flow:end -->";
-  const localSkillSection = root ? bootstrapLocalSkillSection(root) : "";
   const block = `${start}
 ## Agent Flow
 
@@ -2335,7 +2161,6 @@ Follow the CLI output exactly. If no run is active, start with \`${AGENT_FLOW_CO
 - install/bootstrap 후 \`.agent-flow/skills/index.json\` metadata를 보고 필요한 skill만 읽는다. 모든 SKILL.md 전문을 항상 읽지 않는다.
 - Claude/Codex/OMP 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.
 - Claude/Codex/OMP hook이 자동 차단하는 보호 브랜치 commit/push와 leader checkout/switch 금지는 모든 host에서 동일하게 지킨다.
-${localSkillSection}
 ${end}
 `;
   const current = fs.existsSync(pathName) ? fs.readFileSync(pathName, "utf8") : "";
@@ -2531,12 +2356,14 @@ function pushWatchTickPromptMarkdown() {
   return `# push-watch-tick\n\nPoll the current PR checks and review threads.\n\nUse \`${AGENT_FLOW_COMMAND} run push-watch-tick\`.\n\nWrite \`artifacts/pr-watch.md\` with one status line: \`status: green\`, \`status: comments\`, \`status: ci-failed\`, or \`status: pending\`.\n`;
 }
 
-function phasePrompt(phase, root = null) {
+function phasePrompt(phase) {
   const markers = phase.required_markers?.length
     ? `\n\n## Completion markers\n\nThe runner blocks this phase until the artifact includes a \`## Completion Gate\` section with these marker lines:\n\n${phase.required_markers.map((marker) => `- \`${marker}\``).join("\n")}\n`
     : "";
-  const localSkillBlock = root ? localSkillPromptBlock(root, phase.id) : "";
-  return `# ${phase.id}\n\n${phase.instruction}${markers}${localSkillBlock}\n\nSave the required artifact before running:\n\n\`\`\`bash\n${AGENT_FLOW_COMMAND} run advance\n\`\`\`\n`;
+  // skill 목록은 여기에 굽지 않는다. install 시점 스냅샷은 새 skill이 설치되면 바로 stale해진다.
+  // 실제 목록은 `agent-flow-kit run next` / `status`가 매번 resolver로 다시 만든다.
+  const skillNote = "\n\n## Required skills\n\nRun `agent-flow-kit run next` for the resolved skill list for this phase — it is computed live, not baked here.\n";
+  return `# ${phase.id}\n\n${phase.instruction}${markers}${skillNote}\n\nSave the required artifact before running:\n\n\`\`\`bash\n${AGENT_FLOW_COMMAND} run advance\n\`\`\`\n`;
 }
 
 function shellQuote(value) {
@@ -2557,9 +2384,55 @@ function unquoteShellWord(value) {
   return value;
 }
 
+// Read 계열 tool 이름은 host마다 다르다. comment-checker의 write matcher와 같은 방식으로 합집합을 쓴다.
+const READ_TOOL_MATCHER = "^(Read|read|read_file|view|cat)$";
+
+// 관리 대상에서 빠진 hook은 기존 설치본 settings에 그대로 남는다. mergeHookSettings는
+// additive-only라서, 스크립트 파일만 지우면 host가 없는 경로를 계속 실행해 셸이 통째로
+// 막힌다. 은퇴한 이름을 여기 남겨 install 때 등록에서 걷어낸다.
+const RETIRED_MANAGED_HOOK_SCRIPTS = ["guard-worktree.sh", "guard-worktree-write.py"];
+
+function pruneRetiredHooks(settings) {
+  if (!settings || typeof settings !== "object" || !settings.hooks) {
+    return false;
+  }
+  let changed = false;
+  for (const [event, entries] of Object.entries(settings.hooks)) {
+    if (!Array.isArray(entries)) {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!Array.isArray(entry?.hooks)) {
+        continue;
+      }
+      const kept = entry.hooks.filter((hook) => !isRetiredHookCommand(hook?.command));
+      if (kept.length !== entry.hooks.length) {
+        entry.hooks = kept;
+        changed = true;
+      }
+    }
+    const nonEmpty = entries.filter((entry) => !Array.isArray(entry?.hooks) || entry.hooks.length > 0);
+    if (nonEmpty.length !== entries.length) {
+      settings.hooks[event] = nonEmpty;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function isRetiredHookCommand(command) {
+  if (typeof command !== "string" || !command) {
+    return false;
+  }
+  const normalized = unquoteShellWord(command).replaceAll("\\", "/").replaceAll("'", "").replaceAll('"', "");
+  return RETIRED_MANAGED_HOOK_SCRIPTS.some(
+    (name) => normalized.endsWith(`/scripts/hooks/${name}`) || normalized === `scripts/hooks/${name}`,
+  );
+}
+
 function managedHookScriptName(command) {
   const normalized = unquoteShellWord(command).replaceAll("\\", "/").replaceAll("'", "").replaceAll('"', "");
-  for (const scriptName of ["guard-worktree.sh", "guard-protected-branch.sh", "show-phase-status.sh", "comment-checker.py"]) {
+  for (const scriptName of ["guard-protected-branch.sh", "show-phase-status.sh", "comment-checker.py", "record-skill-read.py"]) {
     if (
       normalized === `.agent-flow/scripts/hooks/${scriptName}` ||
       normalized === `scripts/hooks/${scriptName}` ||
@@ -2577,7 +2450,7 @@ function managedHookScriptName(command) {
 function trustedManagedHookScriptName(root, command) {
   const normalized = unquoteShellWord(command).replaceAll("\\", "/");
   const normalizedRoot = path.resolve(root).replaceAll("\\", "/");
-  for (const scriptName of ["guard-worktree.sh", "guard-protected-branch.sh", "show-phase-status.sh", "comment-checker.py"]) {
+  for (const scriptName of ["guard-protected-branch.sh", "show-phase-status.sh", "comment-checker.py", "record-skill-read.py"]) {
     if (normalized === `${normalizedRoot}/.agent-flow/scripts/hooks/${scriptName}`) {
       return scriptName;
     }
@@ -2592,7 +2465,6 @@ function codexHooksSettings(root) {
         {
           matcher: "Bash",
           hooks: [
-            { type: "command", command: hookScriptCommand(root, "guard-worktree.sh") },
             { type: "command", command: hookScriptCommand(root, "guard-protected-branch.sh") },
           ],
         },
@@ -2601,6 +2473,10 @@ function codexHooksSettings(root) {
         {
           matcher: "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit)$",
           hooks: [{ type: "command", command: hookScriptCommand(root, "comment-checker.py") }],
+        },
+        {
+          matcher: READ_TOOL_MATCHER,
+          hooks: [{ type: "command", command: hookScriptCommand(root, "record-skill-read.py") }],
         },
       ],
       Stop: [
@@ -2616,6 +2492,7 @@ function mergeHookSettings(settings, desired) {
   if (!settings.hooks) {
     settings.hooks = {};
   }
+  pruneRetiredHooks(settings);
   for (const [event, entries] of Object.entries(desired)) {
     if (!settings.hooks[event]) {
       settings.hooks[event] = [];
@@ -2870,7 +2747,6 @@ function claudeHooksSettings(root) {
         {
           matcher: "Bash",
           hooks: [
-            { type: "command", command: hookScriptCommand(root, "guard-worktree.sh") },
             { type: "command", command: hookScriptCommand(root, "guard-protected-branch.sh") },
           ],
         },
@@ -2879,6 +2755,10 @@ function claudeHooksSettings(root) {
         {
           matcher: "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit)$",
           hooks: [{ type: "command", command: hookScriptCommand(root, "comment-checker.py") }],
+        },
+        {
+          matcher: READ_TOOL_MATCHER,
+          hooks: [{ type: "command", command: hookScriptCommand(root, "record-skill-read.py") }],
         },
       ],
       Stop: [
@@ -2907,6 +2787,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const HOOK_DIR = path.join(ROOT, ".agent-flow", "scripts", "hooks");
 const WRITE_TOOL_RE = /^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit)$/i;
+const READ_TOOL_RE = /^(Read|read|read_file|view|cat)$/i;
 
 export default function agentFlowHooks(pi) {
   if (typeof pi.setLabel === "function") {
@@ -2935,12 +2816,20 @@ export default function agentFlowHooks(pi) {
       return;
     }
     const payload = hookPayload(event, ctx);
-    for (const scriptName of ["guard-worktree.sh", "guard-protected-branch.sh"]) {
+    for (const scriptName of ["guard-protected-branch.sh"]) {
       const result = await runHook(scriptName, payload, ctx);
       if (result.block) {
         return { block: true, reason: result.reason };
       }
     }
+  });
+
+  pi.on("tool_result", async (event, ctx) => {
+    if (!READ_TOOL_RE.test(String(event?.toolName || ""))) {
+      return;
+    }
+    // 관측 전용이다. 결과를 보지 않고, 어떤 경우에도 read를 막지 않는다.
+    await runHook("record-skill-read.py", hookPayload(event, ctx), ctx);
   });
 
   pi.on("tool_result", async (event, ctx) => {
@@ -3206,7 +3095,7 @@ function makeHooksExecutable(root) {
     return;
   }
   for (const entry of fs.readdirSync(hooksDir)) {
-    if (entry.endsWith(".sh") || entry === "comment-checker.py") {
+    if (entry.endsWith(".sh") || entry.endsWith(".py")) {
       fs.chmodSync(path.join(hooksDir, entry), 0o755);
     }
   }
