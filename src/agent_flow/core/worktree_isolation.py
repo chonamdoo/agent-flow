@@ -238,19 +238,32 @@ def git_repo_state(root) -> str:
 # 찍어 두고 phase 종료 시 같은지 본다. 다르면 그 차이 자체가 오염이다.
 
 _AGENT_FLOW_PREFIX = ".agent-flow"
-# 워커가 worktree 안에서 돌아도 leader 쪽에 정당하게 쓰는 자리들. 여기만 뺀다.
-# `scripts/`는 절대 넣지 마라 — host가 매 tool call마다 실행하는 표면이다.
-_RUNTIME_WRITE_PATHS = (
-    f"{_AGENT_FLOW_PREFIX}/worktrees",
-    f"{_AGENT_FLOW_PREFIX}/runs",
-    f"{_AGENT_FLOW_PREFIX}/state",
-    f"{_AGENT_FLOW_PREFIX}/runtime",
-    f"{_AGENT_FLOW_PREFIX}/skills-read.jsonl",
+
+# agent-flow가 스스로 쓰는 **상태** 디렉터리. `artifacts.init_project`가 이걸
+# 그대로 만든다. tripwire 비교에서 빼는 유일한 자리이므로 둘이 갈라지면 정상
+# 명령이 오탐을 낸다.
+AGENT_FLOW_STATE_DIRS = (
+    "runs",
+    "state",
+    "handoffs",
+    "team",
+    "archive",
+    "context",
+    "memory",
+    "worktrees",
 )
+# 워커가 worktree 안에서 돌아도 leader 쪽에 정당하게 쓰는 자리들. 여기만 뺀다.
+# `scripts/`도 `runtime/`도 절대 넣지 마라 — 둘 다 host와 gate가 **실행하는**
+# 코드다. runtime에서 정당하게 생기는 것은 bytecode뿐이라 그것만 따로 뺀다.
+_RUNTIME_WRITE_PATHS = tuple(
+    f"{_AGENT_FLOW_PREFIX}/{name}" for name in AGENT_FLOW_STATE_DIRS
+) + (f"{_AGENT_FLOW_PREFIX}/skills-read.jsonl",)
+_GENERATED_PATH_SEGMENTS = ("__pycache__",)
 _TRIPWIRE_TIMEOUT_S = 120
 # porcelain v1 상태 문자. 레코드 앞 두 글자가 전부 여기 속할 때만 경로 접두어로 본다.
 _STATUS_CODES = frozenset(" MADRCUT?!")
-_STAMP_FULL_READ_BYTES = 8 * 1024 * 1024
+# 내용 해시 한도. 넘으면 크기만 찍는다 — mtime을 섞으면 touch만으로 오탐이 난다.
+_STAMP_FULL_READ_BYTES = 64 * 1024 * 1024
 _STAMP_CHUNK_BYTES = 64 * 1024
 
 
@@ -371,19 +384,23 @@ def _leader_status(leader_root) -> str:
     ``diff HEAD``의 내용 해시로, untracked/ignored 파일은 내용 해시로 함께
     찍는다. mtime은 쓰지 않는다 — 같은 바이트로 다시 저장하기만 해도 바뀐다.
     """
-    records = set(_status_records(leader_root, ("--ignored=matching",)))
-    records |= set(
+    entries = dict(_status_records(leader_root, ("--ignored=matching",)))
+    entries.update(
         _status_records(
             leader_root,
             ("-uall", "--ignored=traditional", "--", _AGENT_FLOW_PREFIX)
             + tuple(f":(exclude){path}" for path in _RUNTIME_WRITE_PATHS),
         )
     )
-    kept = sorted(r for r in records if not _is_runtime_write_record(r))
-    lines = list(kept)
+    kept = sorted(
+        (record, path)
+        for record, path in entries.items()
+        if not _is_excluded_path(path)
+    )
+    lines = [record for record, _ in kept]
     lines.append(f"tracked-content {_tracked_content_digest(leader_root)}")
-    for record in kept:
-        stamp = _path_content_stamp(leader_root, _status_record_path(record))
+    for _, path in kept:
+        stamp = _path_content_stamp(leader_root, path)
         if stamp:
             lines.append(stamp)
     return "\n".join(lines)
@@ -421,20 +438,18 @@ def _path_content_stamp(leader_root, relative: str) -> str:
             return f"stamp {relative} symlink {os.readlink(target)}"
         if not stat.S_ISREG(info.st_mode):
             return ""
+        if info.st_size > _STAMP_FULL_READ_BYTES:
+            # 한도 초과는 크기만 본다. 앞뒤 조각 해시 + mtime을 섞어 봤더니
+            # touch 한 번에 오탐이 나면서 정작 가운데 변조는 mtime 위조로
+            # 빠져나갔다. 오탐이 훨씬 비싸므로 여기서는 미탐을 택한다.
+            return f"stamp {relative} {info.st_size} oversize"
         digest = hashlib.sha256()
-        suffix = ""
         with target.open("rb") as handle:
-            if info.st_size <= _STAMP_FULL_READ_BYTES:
-                for chunk in iter(lambda: handle.read(_STAMP_CHUNK_BYTES), b""):
-                    digest.update(chunk)
-            else:
-                digest.update(handle.read(_STAMP_CHUNK_BYTES))
-                handle.seek(-_STAMP_CHUNK_BYTES, os.SEEK_END)
-                digest.update(handle.read(_STAMP_CHUNK_BYTES))
-                suffix = f" {info.st_mtime_ns}"
+            for chunk in iter(lambda: handle.read(_STAMP_CHUNK_BYTES), b""):
+                digest.update(chunk)
     except OSError:
         return ""
-    return f"stamp {relative} {info.st_size} {digest.hexdigest()[:16]}{suffix}"
+    return f"stamp {relative} {info.st_size} {digest.hexdigest()[:16]}"
 
 
 def _git_fact(leader_root, *args: str) -> str:
@@ -447,7 +462,14 @@ def _git_fact(leader_root, *args: str) -> str:
     return result.stdout.strip()
 
 
-def _status_records(leader_root, extra_args: Sequence[str]) -> list[str]:
+def _status_records(leader_root, extra_args: Sequence[str]) -> list[tuple[str, str]]:
+    """``--porcelain=v1 -z`` 스트림을 (레코드, 경로) 쌍으로 읽는다.
+
+    경로를 레코드 문자열에서 되짚어 추측하지 않는다. rename/copy(``R``/``C``)는
+    바로 다음 원소가 원본 경로라는 것이 형식의 약속이므로, 그 약속대로 소비한다.
+    문자열을 잘라 맞히려 들면 ``db backup.sql``이나 ``MD file.txt`` 같은 경로에서
+    반드시 틀린다.
+    """
     result = git_safe(
         "status", "--porcelain=v1", "-z", *extra_args, cwd=leader_root, timeout_s=_TRIPWIRE_TIMEOUT_S
     )
@@ -455,13 +477,31 @@ def _status_records(leader_root, extra_args: Sequence[str]) -> list[str]:
         raise WorktreeIsolationError(
             f"cannot read leader working tree status: {leader_root}: {result.stderr.strip()}"
         )
-    return [record for record in result.stdout.split("\0") if record]
+    fields = [field for field in result.stdout.split("\0") if field]
+    entries: list[tuple[str, str]] = []
+    index = 0
+    while index < len(fields):
+        record = fields[index]
+        index += 1
+        if len(record) <= 3 or record[2] != " ":
+            # 상태 접두어가 없는 조각은 형식상 나올 수 없다. 통째로 경로로 본다.
+            entries.append((record, record))
+            continue
+        status, path = record[:2], record[3:]
+        entries.append((record, path))
+        if ("R" in status or "C" in status) and index < len(fields):
+            source = fields[index]
+            index += 1
+            entries.append((f"{status} <- {source}", source))
+    return entries
+
 
 def _status_record_path(record: str) -> str:
-    # porcelain=v1 -z 레코드는 "XY <path>". rename 원본 경로는 상태 접두어 없이
-    # 바로 다음 레코드로 이어지므로 접두어가 없으면 레코드 전체가 경로다.
-    # 상태 문자 검사 없이 3글자를 자르면 `db backup.sql` 같은 원본 경로가
-    # `backup.sql`로 잘려 엉뚱한 파일을 stamp한다.
+    """진단 문자열용 경로 추정. **판정에는 쓰지 않는다.**
+
+    판정 경로는 ``_status_records``가 위치 기반으로 돌려주는 값이다. 여기는
+    스냅샷 문자열만 남은 diff 메시지를 사람이 읽게 다듬는 용도다.
+    """
     if len(record) > 3 and record[2] == " " and _is_status_code(record[:2]):
         return record[3:]
     return record
@@ -471,19 +511,23 @@ def _is_status_code(prefix: str) -> bool:
     return all(char in _STATUS_CODES for char in prefix)
 
 
-def _is_runtime_write_record(record: str) -> bool:
-    """비교에서 뺄 레코드인가.
+def _is_excluded_path(path: str) -> bool:
+    """비교에서 뺄 경로인가.
 
-    두 종류다. (1) 워커가 leader 쪽에 정당하게 쓰는 런타임 경로.
-    (2) ``!! .agent-flow/`` 접힌 디렉터리 레코드 — 심층 스캔이 그 안을 파일
-    단위로 이미 보고하므로 정보가 없고, 디렉터리가 생기고 사라지는 것만으로
-    변화가 생겨 오탐이 된다.
+    세 종류다. (1) agent-flow가 스스로 쓰는 상태 디렉터리. (2) 접힌
+    ``.agent-flow/`` 디렉터리 레코드 — 심층 스캔이 안을 파일 단위로 이미
+    보고하므로 정보가 없고, 디렉터리가 생기고 사라지는 것만으로 변화가 생긴다.
+    (3) 실행으로 저절로 생기는 bytecode(``__pycache__``).
     """
-    trimmed = _status_record_path(record).rstrip("/")
+    trimmed = path.rstrip("/")
     if trimmed == _AGENT_FLOW_PREFIX:
         return True
+    parts = trimmed.split("/")
+    if any(segment in _GENERATED_PATH_SEGMENTS for segment in parts):
+        return True
     return any(
-        trimmed == path or trimmed.startswith(f"{path}/") for path in _RUNTIME_WRITE_PATHS
+        trimmed == path_prefix or trimmed.startswith(f"{path_prefix}/")
+        for path_prefix in _RUNTIME_WRITE_PATHS
     )
 
 

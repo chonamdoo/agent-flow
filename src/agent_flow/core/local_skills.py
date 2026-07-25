@@ -124,13 +124,21 @@ class SkillReadEvidence:
 
 
 def _checkout_relative(path: Path, roots: Sequence[str]) -> str | None:
-    """path를 담고 있는 체크아웃 root를 찾아 그 기준 상대경로를 돌려준다."""
+    """path를 담고 있는 체크아웃 root를 찾아 그 기준 상대경로를 돌려준다.
+
+    **가장 긴** root가 이긴다. worktree 체크아웃은 leader 안에 있어서
+    (`<leader>/.agent-flow/worktrees/<name>`) leader가 접두사로 먼저 걸리면
+    상대경로가 `.agent-flow/worktrees/...`로 나와 같은 skill을 못 알아본다.
+    """
     text = str(path)
+    best: str | None = None
+    best_len = -1
     for root in roots:
         prefix = root.rstrip("/") + "/"
-        if text.startswith(prefix):
-            return text[len(prefix):]
-    return None
+        if text.startswith(prefix) and len(prefix) > best_len:
+            best = text[len(prefix):]
+            best_len = len(prefix)
+    return best
 
 
 def phase_skill_resolution(
@@ -264,13 +272,31 @@ def read_skill_evidence(project_root: Path, *, since: float | None = None) -> Sk
 
 
 def _checkout_roots(project_root: Path) -> tuple[str, ...]:
-    """같은 저장소의 체크아웃 root들. worktree에서 돌면 leader도 함께 본다."""
+    """같은 저장소의 체크아웃 root들.
+
+    양방향이어야 한다. worktree에서 돌면 leader를, leader에서 돌면 그 아래
+    관리형 worktree들을 함께 본다. 게이트는 항상 leader root로 불리는데
+    (`cli.py`가 `config_root=root`를 넘긴다) agent는 worktree cwd에서 상대경로로
+    읽는다. leader 쪽만 보면 정당한 읽음이 전부 미인정으로 차단된다.
+    """
     roots = [str(project_root.resolve())]
-    leader = leader_root_for(project_root)
-    if leader is not None:
-        resolved = str(Path(leader).resolve())
+
+    def add(path) -> None:
+        resolved = str(Path(path).resolve())
         if resolved not in roots:
             roots.append(resolved)
+
+    leader = leader_root_for(project_root)
+    if leader is not None:
+        add(leader)
+    checkout_parent = Path(leader if leader is not None else project_root) / ".agent-flow" / "worktrees"
+    try:
+        entries = sorted(checkout_parent.iterdir())
+    except OSError:
+        entries = []
+    for entry in entries:
+        if entry.is_dir():
+            add(entry)
     return tuple(roots)
 
 

@@ -229,7 +229,7 @@ class Runner:
                     print(f"  [skip] {phase.id}")
                     phase_index, blocked = self._next_index(phase_index, phase)
                     meta = read_meta(self.run_dir)
-                    self._stamp_phase(meta, phase_index, entering=True)
+                    self._advance_phase(meta, phase_index, blocked)
                     write_meta(self.run_dir, meta)
                     if blocked:
                         print(
@@ -248,7 +248,7 @@ class Runner:
                 print(f"  [skip] {phase.id}")
                 phase_index, blocked = self._next_index(phase_index, phase)
                 meta = read_meta(self.run_dir)
-                self._stamp_phase(meta, phase_index, entering=True)
+                self._advance_phase(meta, phase_index, blocked)
                 write_meta(self.run_dir, meta)
                 if blocked:
                     print(
@@ -337,7 +337,7 @@ class Runner:
                 return
             phase_index, blocked = self._next_index(phase_index, phase)
             meta = read_meta(self.run_dir)
-            self._stamp_phase(meta, phase_index, entering=True)
+            self._advance_phase(meta, phase_index, blocked)
             write_meta(self.run_dir, meta)
             if blocked:
                 print(
@@ -434,15 +434,28 @@ class Runner:
             raise ValueError(f"phase {phase.id}: route target not found: {target}")
         return current_index + 1, False
 
+    def _advance_phase(self, meta: dict[str, Any], phase_index: int, blocked: bool) -> None:
+        """route 결과를 meta에 반영한다.
+
+        `blocked`면 제자리에 멈춘 것이므로 진입이 아니다. 여기서 시각을 밀면
+        방금 쓴 artifact가 진입 시각보다 과거가 되어 다음 실행이 진짜 사유
+        (route_blocked) 대신 stale_artifact를 보고한다.
+        """
+        self._stamp_phase(meta, phase_index, entering=not blocked)
+
     def _stamp_phase(
         self, meta: dict[str, Any], phase_index: int, *, entering: bool = False
     ) -> None:
         """meta에 현재 phase와 **진입 시각**을 박는다.
 
         `phase_entered_at`이 없으면 읽음 증거를 과거 기록까지 소급 인정하게 되어
-        L2 강제가 통째로 무력해진다. phase 전이에서는 항상 갱신한다 — 같은
-        phase로 되도는 self-loop도 새 라운드이므로 지난 라운드의 읽음 기록을
-        물려받으면 안 된다. 이미 진행 중인 phase를 다시 저장할 뿐이면 유지한다.
+        L2 강제가 통째로 무력해진다. 그래서 phase를 실제로 **새로 시작**할 때는
+        갱신한다 — 같은 phase로 되도는 self-loop도 새 라운드이므로 지난 라운드의
+        읽음 기록을 물려받으면 안 된다.
+
+        반대로 route가 막혀(`blocked`) 제자리에 멈춘 경우는 진입이 아니다.
+        여기서 시각을 밀면 방금 쓴 artifact가 진입 시각보다 과거가 되어 다음
+        실행이 진짜 사유(route_blocked) 대신 stale_artifact를 보고한다.
         """
         phase_id = (
             self.phases[phase_index].id if phase_index < len(self.phases) else None

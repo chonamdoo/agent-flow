@@ -2021,3 +2021,62 @@ def test_security_guards_reject_unsafe_names_and_escaped_paths(tmp_path: Path):
         validate_safe_name("../workflow", "workflow")
     with pytest.raises(ValueError, match="profile path escapes"):
         ensure_child_path(root, root / "nested" / "profile.yaml", "profile")
+
+
+def test_blocked_route_keeps_phase_entered_at(tmp_path: Path):
+    """불변: route가 막혀 제자리에 멈추는 것은 phase 진입이 아니다.
+
+    여기서 시각을 밀면 방금 쓴 artifact가 진입 시각보다 과거가 되어 다음
+    실행이 진짜 사유(route_blocked) 대신 stale_artifact를 보고한다.
+    """
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.runner import Phase, Runner
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "pr-watch.md").write_text("status: pending\n", encoding="utf-8")
+
+    runner = Runner.__new__(Runner)
+    runner.run_dir = run_dir
+    runner.phases = [Phase(id="pr-watch", description="", routes={"pending": "block"})]
+
+    phase_index, blocked = runner._next_index(0, runner.phases[0])
+    assert blocked is True
+
+    meta = {"current_phase": "pr-watch", "phase_entered_at": "2026-01-01T00:00:00+00:00"}
+    runner._advance_phase(meta, phase_index, blocked)
+    assert meta["phase_entered_at"] == "2026-01-01T00:00:00+00:00"
+
+
+def test_self_loop_route_refreshes_phase_entered_at(tmp_path: Path):
+    """불변: 같은 phase로 되도는 것은 새 라운드다. 지난 라운드 읽음 기록을 물려받지 않는다."""
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.runner import Phase, Runner
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    runner = Runner.__new__(Runner)
+    runner.run_dir = run_dir
+    runner.phases = [Phase(id="review", description="")]
+
+    meta = {"current_phase": "review", "phase_entered_at": "2026-01-01T00:00:00+00:00"}
+    runner._advance_phase(meta, 0, False)
+    assert meta["phase_entered_at"] != "2026-01-01T00:00:00+00:00"
+
+
+def test_phase_change_always_refreshes_phase_entered_at(tmp_path: Path):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.runner import Phase, Runner
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    runner = Runner.__new__(Runner)
+    runner.run_dir = run_dir
+    runner.phases = [Phase(id="a", description=""), Phase(id="b", description="")]
+
+    meta = {"current_phase": "a", "phase_entered_at": "2026-01-01T00:00:00+00:00"}
+    runner._advance_phase(meta, 1, True)
+    assert meta["current_phase"] == "b"
+    assert meta["phase_entered_at"] != "2026-01-01T00:00:00+00:00"

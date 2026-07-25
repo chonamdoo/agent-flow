@@ -18,8 +18,12 @@ import time
 from pathlib import Path
 
 READ_TOOL_RE = ("read", "read_file", "view", "cat")
-# `:10-40`, `:10`, `:10+5`, `:raw`, `:raw:2-4` 같은 읽기 선택자만 꼬리로 인정한다.
-_SELECTOR_RE = re.compile(r"(?::(?:raw|\d+(?:[-+]\d+)?)(?:,\d+(?:[-+]\d+)?)*)+")
+LOG_RELATIVE = Path(".agent-flow") / "skills-read.jsonl"
+# `:10-40`, `:10`, `:50-`, `:10+5`, `:raw`, `:raw:2-4`, `:conflicts` 같은 읽기
+# 선택자만 꼬리로 인정한다. 그 외 꼬리는 `SKILL.md.bak`처럼 다른 파일이다.
+_SELECTOR_RE = re.compile(
+    r"(?::(?:raw|conflicts|\d+(?:[-+]\d+)?-?)(?:,\d+(?:[-+]\d+)?-?)*)+"
+)
 
 
 def main() -> int:

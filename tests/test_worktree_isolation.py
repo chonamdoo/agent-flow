@@ -861,3 +861,55 @@ def test_state_root_refuses_to_fall_back_into_the_leader(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError) as refused:
         W.worktree_runtime_root(root=tmp_path, name="anything")
     assert "leader checkout" in str(refused.value)
+
+
+def test_tripwire_watches_installed_runtime_code(tmp_path):
+    """불변: `.agent-flow/runtime/`은 gate가 PYTHONPATH 최우선으로 실행하는 코드다.
+
+    상태 디렉터리라고 통째로 빼면 tripwire 자기 자신을 포함한 런타임 전체가
+    사각지대가 된다. 정당하게 생기는 것은 bytecode뿐이다.
+    """
+    status, before = _isolated(tmp_path, "runtime")
+    planted = tmp_path / ".agent-flow" / "runtime" / "python" / "agent_flow" / "runner.py"
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    planted.write_text("import os\n", encoding="utf-8")
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
+def test_tripwire_ignores_generated_bytecode(tmp_path):
+    """불변: `__pycache__`/`.pyc`는 실행하면 저절로 생긴다. 오탐이면 안 된다."""
+    status, before = _isolated(tmp_path, "pyc")
+    cache = tmp_path / ".agent-flow" / "runtime" / "python" / "agent_flow" / "__pycache__"
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / "runner.cpython-312.pyc").write_bytes(b"\x00bytecode\n")
+    W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
+def test_tripwire_ignores_every_declared_state_dir(tmp_path):
+    """불변: `AGENT_FLOW_STATE_DIRS`는 `artifacts.init_project`와 같은 소스다.
+
+    갈라지면 정상 명령(handoff, team, memory 쓰기)이 leader 오염으로 오탐된다.
+    """
+    status, before = _isolated(tmp_path, "statedirs")
+    for name in W_ISO.AGENT_FLOW_STATE_DIRS:
+        target = tmp_path / ".agent-flow" / name / "written.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x\n", encoding="utf-8")
+    W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
+def test_state_dirs_match_artifacts_init(tmp_path):
+    """불변: agent-flow가 실제로 쓰는 상태 디렉터리 전부가 제외 목록에 있다.
+
+    목록을 그대로 순회하는 검사는 항목이 빠져도 통과한다(자기참조). 그래서
+    기대값을 여기에 못박는다. 새 상태 디렉터리를 만들면 이 테스트가 먼저 깨진다.
+    """
+    from agent_flow.core import artifacts
+
+    expected = {"runs", "state", "handoffs", "team", "archive", "context", "memory", "worktrees"}
+    assert set(W_ISO.AGENT_FLOW_STATE_DIRS) == expected
+
+    artifacts.init_project(tmp_path)
+    created = {p.name for p in (tmp_path / ".agent-flow").iterdir() if p.is_dir()}
+    assert expected <= created

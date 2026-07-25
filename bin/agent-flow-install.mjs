@@ -1104,6 +1104,12 @@ function backupIfDifferent(root, target, content) {
     return;
   }
   const backup = `${target}.bak`;
+  if (fs.existsSync(backup)) {
+    // 첫 백업이 사용자 원본이다. 다음 업그레이드에서 덮으면 그 원본이 kit의
+    // 이전 버전 내용으로 바뀌어 영영 사라진다. 먼저 만든 것을 지킨다.
+    console.log(`  ~ replaced ${path.relative(root, target)} (kept earlier backup: ${path.relative(root, backup)})`);
+    return;
+  }
   fs.copyFileSync(target, backup);
   console.log(`  ~ replaced ${path.relative(root, target)} (backup: ${path.relative(root, backup)})`);
 }
@@ -1149,7 +1155,12 @@ function pruneRetiredHookScripts(root) {
       // 사용자가 같은 이름으로 자기 스크립트를 뒀을 수 있다. 되돌릴 수 있게
       // 사본을 남기고 지운다. 설치본이 관리하지 않는 host 설정이 이 경로를
       // 여전히 가리킬 수 있으므로 경로를 함께 알린다.
-      fs.copyFileSync(target, `${target}.removed`);
+      const kept = `${target}.removed`;
+      if (!fs.existsSync(kept)) {
+        fs.copyFileSync(target, kept);
+        // 실행 권한은 떼어 둔다. 되살릴 수 있게 남기는 사본이지 실행 대상이 아니다.
+        fs.chmodSync(kept, 0o644);
+      }
       fs.rmSync(target, { force: true });
       console.log(
         `  - removed retired hook: ${path.relative(root, target)} ` +
