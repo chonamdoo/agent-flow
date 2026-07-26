@@ -37,11 +37,13 @@ MANAGED_HOOK_SCRIPTS = (
     "show-phase-status.sh",
     "comment-checker.py",
     "record-skill-read.py",
+    "record-command-run.py",
 )
 
 # 판정하지 않고 기록만 하는 hook. 항상 exit 0이며 PreToolUse에 달면 안 된다.
 OBSERVATIONAL_HOOK_SCRIPTS = (
     "record-skill-read.py",
+    "record-command-run.py",
 )
 
 # host가 허용/차단을 기대하는 이벤트. 관측 hook 금지 구역이다.

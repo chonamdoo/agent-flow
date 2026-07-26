@@ -403,6 +403,10 @@ function codexHooksSettings(root) {
           matcher: READ_TOOL_MATCHER,
           hooks: [{ type: "command", command: hookScriptCommand(root, "record-skill-read.py") }],
         },
+        {
+          matcher: COMMAND_TOOL_MATCHER,
+          hooks: [{ type: "command", command: hookScriptCommand(root, "record-command-run.py") }],
+        },
       ],
       Stop: [
         {
@@ -424,13 +428,20 @@ function unquoteShellWord(value) {
 }
 
 const READ_TOOL_MATCHER = "^(Read|read|read_file|view|cat)$";
+// 셸 실행 tool도 host마다 이름이 다르다. 관측 전용이라 PostToolUse에만 붙는다.
+const COMMAND_TOOL_MATCHER = "^(Bash|bash|shell|run_terminal_cmd|execute_command|local_shell|terminal)$";
 // kit.mjs와 같은 계약: 은퇴한 hook을 기존 settings에서 걷어낸다. 안 그러면 사라진
 // 스크립트를 host가 계속 실행해 셸이 막힌다.
+// 관측 hook(`record-*`)은 PostToolUse, 강제 hook은 PreToolUse. 이 구분을 어기면
+// 관측자가 판정자로 승격되고, 스크립트가 없거나 죽는 순간 host가 그걸 차단으로
+// 읽어 사용자 도구가 통째로 막힌다. 런 시작 시 `core/hook_integrity.py`가
+// 이 목록과 배치를 kit.json 기록과 대조한다.
 const MANAGED_HOOK_SCRIPTS = [
   "guard-protected-branch.sh",
   "show-phase-status.sh",
   "comment-checker.py",
   "record-skill-read.py",
+  "record-command-run.py",
 ];
 const RETIRED_MANAGED_HOOK_SCRIPTS = ["guard-worktree.sh", "guard-worktree-write.py"];
 
@@ -647,6 +658,10 @@ function claudeHooksSettings(root) {
           matcher: READ_TOOL_MATCHER,
           hooks: [{ type: "command", command: hookScriptCommand(root, "record-skill-read.py") }],
         },
+        {
+          matcher: COMMAND_TOOL_MATCHER,
+          hooks: [{ type: "command", command: hookScriptCommand(root, "record-command-run.py") }],
+        },
       ],
       Stop: [
         {
@@ -676,6 +691,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", ".
 const HOOK_DIR = path.join(ROOT, ".agent-flow", "scripts", "hooks");
 const WRITE_TOOL_RE = /^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit)$/i;
 const READ_TOOL_RE = /^(Read|read|read_file|view|cat)$/i;
+const COMMAND_TOOL_RE = /^(Bash|bash|shell|run_terminal_cmd|execute_command|local_shell|terminal)$/i;
 
 export default function agentFlowHooks(pi) {
   if (typeof pi.setLabel === "function") {
@@ -721,6 +737,12 @@ export default function agentFlowHooks(pi) {
       await runHook("record-skill-read.py", hookPayload(event, ctx), ctx);
       return;
     }
+    if (COMMAND_TOOL_RE.test(toolName)) {
+      // 관측 전용. tool_call(PreToolUse에 해당)이 아니라 여기 붙는다 — 관측자가
+      // 판정자로 승격되면 실패한 관측이 곧 사용자 도구 차단이 된다.
+      await runHook("record-command-run.py", commandRunPayload(event, ctx), ctx);
+      return;
+    }
     if (!WRITE_TOOL_RE.test(toolName)) {
       return;
     }
@@ -751,6 +773,20 @@ export default function agentFlowHooks(pi) {
   });
 }
 
+
+function commandRunPayload(event, ctx) {
+  // exit code는 관측 hook이 보는 유일한 결과 신호다. host가 안 실어 보내면
+  // 없는 채로 기록된다 — 없는 것과 0을 섞지 않는다.
+  const payload = hookPayload(event, ctx);
+  const result = event?.output ?? event?.result ?? null;
+  const code = result && typeof result === "object"
+    ? result.exit_code ?? result.exitCode ?? null
+    : null;
+  if (typeof code === "number") {
+    payload.exit_code = code;
+  }
+  return payload;
+}
 
 function hookPayload(event, ctx) {
   const input = event?.input || {};

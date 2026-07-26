@@ -62,6 +62,12 @@ def _host_settings(root: Path) -> dict:
                         {"type": "command", "command": _hook_command(root, "record-skill-read.py")}
                     ],
                 },
+                {
+                    "matcher": "^(Bash|bash)$",
+                    "hooks": [
+                        {"type": "command", "command": _hook_command(root, "record-command-run.py")}
+                    ],
+                },
             ],
             "Stop": [
                 {

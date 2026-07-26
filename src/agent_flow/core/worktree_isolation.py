@@ -257,7 +257,10 @@ AGENT_FLOW_STATE_DIRS = (
 # 코드다. runtime에서 정당하게 생기는 것은 bytecode뿐이라 그것만 따로 뺀다.
 _RUNTIME_WRITE_PATHS = tuple(
     f"{_AGENT_FLOW_PREFIX}/{name}" for name in AGENT_FLOW_STATE_DIRS
-) + (f"{_AGENT_FLOW_PREFIX}/skills-read.jsonl",)
+) + (
+    f"{_AGENT_FLOW_PREFIX}/skills-read.jsonl",
+    f"{_AGENT_FLOW_PREFIX}/commands-run.jsonl",
+)
 _GENERATED_PATH_SEGMENTS = ("__pycache__",)
 _TRIPWIRE_TIMEOUT_S = 120
 # porcelain v1 상태 문자. 레코드 앞 두 글자가 전부 여기 속할 때만 경로 접두어로 본다.

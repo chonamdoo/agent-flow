@@ -1310,7 +1310,29 @@ function assertInstalledHookParity(label, tempRoot) {
     failures.push(`${label} install missing claude, codex, or omp hook settings`);
     return;
   }
-  const managedScripts = ["guard-protected-branch.sh", "comment-checker.py", "record-skill-read.py", "show-phase-status.sh"];
+  const managedScripts = [
+    "guard-protected-branch.sh",
+    "comment-checker.py",
+    "record-skill-read.py",
+    "record-command-run.py",
+    "show-phase-status.sh",
+  ];
+  // 관측 hook은 PostToolUse. PreToolUse에 실리면 관측 실패가 곧 도구 차단이다.
+  const observationScripts = ["record-skill-read.py", "record-command-run.py"];
+  for (const [host, settings] of [["claude", claude], ["codex", codex], ["codex-lower", lowerCodex]]) {
+    const preText = JSON.stringify(settings.hooks.PreToolUse ?? []);
+    for (const script of observationScripts) {
+      if (preText.includes(script)) {
+        failures.push(`${label} ${host} registers observation hook ${script} on PreToolUse`);
+      }
+    }
+    const postText = JSON.stringify(settings.hooks.PostToolUse ?? []);
+    for (const script of observationScripts) {
+      if (!postText.includes(script)) {
+        failures.push(`${label} ${host} does not register observation hook ${script} on PostToolUse`);
+      }
+    }
+  }
   for (const [host, settings] of [["claude", claude], ["codex", codex], ["codex-lower", lowerCodex]]) {
     for (const event of ["PreToolUse", "PostToolUse", "Stop"]) {
       const entries = settings.hooks[event];

@@ -1570,6 +1570,7 @@ class CliTest(unittest.TestCase):
                 f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-protected-branch.sh'}'",
                 f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'comment-checker.py'}'",
                 f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'record-skill-read.py'}'",
+                f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'record-command-run.py'}'",
                 f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'show-phase-status.sh'}'",
             ]
             self.assertEqual(commands, expected)
