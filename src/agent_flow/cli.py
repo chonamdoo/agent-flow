@@ -907,11 +907,13 @@ def main(argv: list[str] | None = None) -> int:
                 except (OSError, RuntimeError, ValueError):
                     known = []
                 if stale_dir.exists() or status.name in known:
+                    # 디렉터리가 사라져도 git 등록은 남는다. 먼저 걷어내지 않으면
+                    # 같은 이름의 다음 create가 등록 충돌로 죽는다.
+                    prune = run_safe_command(("git", "worktree", "prune"), cwd=root)
+                    if not prune.ok:
+                        print(_format_safe_command_error(prune), file=sys.stderr)
+                        return 2
                     if not args.keep_branch and status.branch_created_by_agent_flow:
-                        prune = run_safe_command(("git", "worktree", "prune"), cwd=root)
-                        if not prune.ok:
-                            print(_format_safe_command_error(prune), file=sys.stderr)
-                            return 2
                         if worktree_branch_exists(root=root, branch=status.branch):
                             delete = run_safe_command(("git", "branch", "-D", status.branch), cwd=root)
                             if not delete.ok:
@@ -937,6 +939,10 @@ def main(argv: list[str] | None = None) -> int:
                 print(_format_cli_error(exc), file=sys.stderr)
                 return 2
             print(f"removed {status.name} {status.path}")
+            if not args.keep_branch and worktree_branch_exists(root=root, branch=status.branch):
+                # agent-flow가 만든 브랜치라는 증거가 없어 남긴 경우다. 조용히 두면
+                # 사용자는 정리가 끝난 줄 안다.
+                print(f"kept branch {status.branch}")
             return 0
 
     if args.command == "team":
