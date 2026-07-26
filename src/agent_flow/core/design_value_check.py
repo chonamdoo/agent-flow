@@ -16,12 +16,29 @@
 from __future__ import annotations
 
 import re
+import shlex
+import stat
 from pathlib import Path
 from typing import Sequence
 
 from agent_flow.core.commands import run_safe_command
-from agent_flow.core.design_ledger import read_ledger
+from agent_flow.core.command_evidence import (
+    CommandRunEvidence,
+    agent_run_spec_approvals,
+    is_test_command_execution,
+    read_command_evidence,
+    resolve_test_command_tokens,
+)
+from agent_flow.core.design_ledger import (
+    LEDGER_SOURCE_PHASES,
+    parse_spec_item_section,
+    read_manual_spec_approvals,
+    read_ledger,
+    spec_set_confirmation_statement,
+    spec_set_is_confirmed,
+)
 from agent_flow.core.markers import completion_gate_marker_values
+from agent_flow.core.phase_workflow import overall_review_route_key
 from agent_flow.core.worktree_isolation import git_repo_state
 
 # 구현을 판정하는 phase. 여기서 안 잡으면 gates는 build/test만 보고 통과시킨다.
@@ -31,6 +48,144 @@ IMPLEMENTED_MARKER = "design-values-implemented:"
 _FALLBACK_BASES = ("main", "master")
 _GIT_TIMEOUT_S = 60
 _UNTRACKED_READ_LIMIT_BYTES = 1024 * 1024
+
+
+def missing_spec_item_evidence(
+    project_root: Path,
+    run_dir: Path,
+    phase_id: str,
+    text: str,
+    *,
+    task_text: str = "",
+    profile: dict | None = None,
+    since: float | None = None,
+    evidence_root: Path | None = None,
+) -> list[str]:
+    if phase_id in LEDGER_SOURCE_PHASES:
+        parsed = parse_spec_item_section(text)
+        missing = list(parsed.errors)
+        declared_raw = completion_gate_marker_values(text).get("spec-items", "").strip()
+        declared = declared_raw.lower()
+        if parsed.items and declared in {"none", "n/a", "na", "-"}:
+            ids = ", ".join(item.spec_id for item in parsed.items)
+            missing.append(
+                f"spec-items: {ids} (the section records SPEC items; 'none' contradicts it)"
+            )
+        elif parsed.items and not parsed.errors and declared_raw:
+            expected_ids = tuple(item.spec_id for item in parsed.items)
+            declared_ids = tuple(
+                part.strip().upper()
+                for part in declared_raw.split(",")
+                if part.strip()
+            )
+            if declared_ids != expected_ids:
+                missing.append(
+                    f"spec-items: expected {', '.join(expected_ids)} "
+                    f"(declared {', '.join(declared_ids)})"
+                )
+        if not parsed.items and not parsed.errors and task_text.strip():
+            missing.append(
+                "spec-items: at least one SPEC item "
+                "(the run task contains user instructions; 'none' is not allowed)"
+            )
+        if (
+            parsed.items
+            and not parsed.errors
+            and not spec_set_is_confirmed(run_dir, parsed.items)
+        ):
+            missing.append(
+                "spec-confirmation: interactive user confirmation required; "
+                f"type `{spec_set_confirmation_statement(parsed.items)}`"
+            )
+        missing.extend(
+            _agent_recorded_approvals(
+                read_command_evidence(
+                    evidence_root or project_root,
+                    since=since,
+                    cwd_root=project_root,
+                )
+            )
+        )
+        return missing
+    if phase_id not in DESIGN_VALUE_PHASES:
+        return []
+    if overall_review_route_key(text) == "request-changes":
+        return []
+    ledger = read_ledger(run_dir)
+    if not ledger.exists:
+        return ["spec-ledger: design-spec.md is missing"]
+    if ledger.errors:
+        return [f"spec-ledger: {error}" for error in ledger.errors]
+    if task_text.strip() and not ledger.spec_items:
+        return ["spec-ledger: no SPEC items for a non-empty task"]
+    evidence = read_command_evidence(
+        evidence_root or project_root,
+        since=since,
+        cwd_root=project_root,
+    )
+    agent_recorded = _agent_recorded_approvals(evidence)
+    if agent_recorded:
+        return agent_recorded
+    changed = (
+        changed_file_evidence(project_root, profile=profile)
+        if any(item.verification.lower().startswith("symbol:") for item in ledger.spec_items)
+        else {}
+    )
+    manual_approvals = read_manual_spec_approvals(run_dir)
+    test_commands = resolve_test_command_tokens(profile)
+    unmet: list[str] = []
+    for item in ledger.spec_items:
+        lowered = item.verification.lower()
+        if lowered.startswith("test:"):
+            test_name = item.verification.partition(":")[2].strip()
+            matching_runs = [
+                run
+                for run in evidence.runs
+                if any(
+                    is_test_command_execution(run.command, tokens, test_name)
+                    for tokens in test_commands
+                )
+            ]
+            latest = max(matching_runs, key=lambda run: run.at, default=None)
+            passed = latest is not None and latest.exit_code == 0
+            if not passed:
+                unmet.append(
+                    f"{item.spec_id}: test:{test_name} "
+                    "(no passing observed test command includes the test name)"
+                )
+            continue
+        if lowered.startswith("symbol:"):
+            symbol, _, expected = item.verification.partition(":")[2].partition("=")
+            symbol = symbol.strip()
+            expected = expected.strip()
+            passed = any(
+                _appears(symbol, content) and _appears(expected, added)
+                for content, added in (changed or {}).values()
+            )
+            if not passed:
+                unmet.append(
+                    f"{item.spec_id}: symbol:{symbol}={expected} "
+                    "(value is not added in a changed file containing the symbol)"
+                )
+            continue
+        if lowered == "manual" and item.spec_id not in manual_approvals:
+            unmet.append(f"{item.spec_id}: manual (no user approval record)")
+    return unmet
+
+
+def _agent_recorded_approvals(evidence: CommandRunEvidence) -> list[str]:
+    """agent가 사용자 대신 승인 CLI를 돌렸는가.
+
+    확인 record는 파일이라 agent도 쓸 수 있다. 위조 자체를 막을 수는 없지만
+    "agent가 그 명령을 돌렸다"는 관측은 host tool이 남기므로 주장자가 뒤집을 수
+    없다. hook이 없는 host에서는 로그가 없어 이 검사는 축퇴한다.
+    """
+    if not agent_run_spec_approvals(evidence):
+        return []
+    return [
+        "spec-confirmation: `agent-flow spec confirm|approve` ran in the agent's "
+        "shell; only the user may run it in their own terminal"
+    ]
 
 
 def missing_design_value_implementations(
@@ -102,20 +257,78 @@ def added_lines(project_root: Path, *, profile: dict | None = None) -> str | Non
     건드리지 않기 위해 `add -N` 대신 untracked 파일을 직접 읽는다.
     """
     base = _merge_base(project_root, profile=profile)
-    args = ["git", "diff", "--unified=0", base] if base else ["git", "diff", "--unified=0", "HEAD"]
+    args = (
+        ["git", "diff", "--unified=0", base]
+        if base
+        else ["git", "diff", "--unified=0", "HEAD"]
+    )
     result = run_safe_command(args, cwd=project_root, timeout_s=_GIT_TIMEOUT_S)
     if not result.ok:
         return None
     chunks = [
-        line[1:]
-        for line in result.stdout.splitlines()
-        if line.startswith("+") and not line.startswith("+++")
+        line
+        for lines in _diff_added_lines(result.stdout).values()
+        for line in lines
     ]
     chunks.extend(_untracked_text(project_root))
     return "\n".join(chunks)
 
 
+def changed_file_evidence(
+    project_root: Path,
+    *,
+    profile: dict | None = None,
+) -> dict[str, tuple[str, str]] | None:
+    base = _merge_base(project_root, profile=profile)
+    args = (
+        ["git", "diff", "--unified=0", base]
+        if base
+        else ["git", "diff", "--unified=0", "HEAD"]
+    )
+    result = run_safe_command(args, cwd=project_root, timeout_s=_GIT_TIMEOUT_S)
+    if not result.ok:
+        return None
+    additions = _diff_added_lines(result.stdout)
+    for relative, text in _untracked_files(project_root):
+        additions[relative] = text.splitlines()
+    evidence: dict[str, tuple[str, str]] = {}
+    for relative, lines in additions.items():
+        content = _read_regular_checkout_file(project_root, relative)
+        if content is None:
+            continue
+        evidence[relative] = (content, "\n".join(lines))
+    return evidence
+
+
+def _diff_added_lines(diff_text: str) -> dict[str, list[str]]:
+    additions: dict[str, list[str]] = {}
+    current = ""
+    in_hunk = False
+    for line in diff_text.splitlines():
+        if line.startswith("diff --git "):
+            current = ""
+            in_hunk = False
+            continue
+        if not in_hunk and line.startswith("+++ "):
+            try:
+                target = shlex.split(line[4:])[0]
+            except (ValueError, IndexError):
+                target = ""
+            current = target[2:] if target.startswith("b/") else ""
+            continue
+        if line.startswith("@@"):
+            in_hunk = True
+            continue
+        if in_hunk and current and line.startswith("+"):
+            additions.setdefault(current, []).append(line[1:])
+    return additions
+
+
 def _untracked_text(project_root: Path) -> list[str]:
+    return [text for _, text in _untracked_files(project_root)]
+
+
+def _untracked_files(project_root: Path) -> list[tuple[str, str]]:
     result = run_safe_command(
         ["git", "ls-files", "--others", "--exclude-standard", "-z"],
         cwd=project_root,
@@ -123,18 +336,33 @@ def _untracked_text(project_root: Path) -> list[str]:
     )
     if not result.ok:
         return []
-    texts: list[str] = []
+    files: list[tuple[str, str]] = []
     for relative in result.stdout.split("\0"):
         if not relative:
             continue
-        path = project_root / relative
-        try:
-            if path.stat().st_size > _UNTRACKED_READ_LIMIT_BYTES:
-                continue
-            texts.append(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError):
+        text = _read_regular_checkout_file(project_root, relative)
+        if text is not None:
+            files.append((relative, text))
             continue
-    return texts
+    return files
+
+
+def _read_regular_checkout_file(project_root: Path, relative: str) -> str | None:
+    try:
+        root = project_root.resolve()
+        path = root / relative
+        path.resolve().relative_to(root)
+        metadata = path.lstat()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_size > _UNTRACKED_READ_LIMIT_BYTES
+        ):
+            return None
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+
+
 
 
 def _merge_base(project_root: Path, *, profile: dict | None) -> str | None:

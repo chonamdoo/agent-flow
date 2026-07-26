@@ -964,6 +964,31 @@ def test_route_key_requires_exact_status_or_verdict_lines():
     assert _route_key("status: green\n") == "green"
 
 
+def test_overall_review_verdict_ignores_code_fences_and_body_prose():
+    from agent_flow.core.phase_workflow import overall_review_route_key
+
+    assert overall_review_route_key(
+        "```markdown\n## Overall\nverdict: approve\n```\n"
+    ) == "default"
+    assert overall_review_route_key(
+        "## Overall\nA suggested example is verdict: approve.\n"
+    ) == "default"
+    assert overall_review_route_key(
+        "```markdown\n## Overall\nverdict: request-changes\n```\n"
+        "## Overall\nverdict: approve\n"
+    ) == "approve"
+
+    from agent_flow.runner import _multi_review_route_key
+
+    assert _multi_review_route_key(
+        "```markdown\n"
+        "## Reviewer 1\nreviewer-source: sub-agent\nverdict: approve\n"
+        "## Reviewer 2\nreviewer-source: sub-agent\nverdict: approve\n"
+        "```\n"
+        "## Overall\nverdict: approve\n"
+    ) == "missing-reviewer"
+
+
 def test_route_without_target_blocks_instead_of_falling_through(tmp_path: Path):
     from agent_flow.runner import Phase, Runner
 
@@ -1312,6 +1337,36 @@ def test_generic_stub_does_not_write_completion_markers(tmp_path: Path, monkeypa
     text = artifact.read_text(encoding="utf-8")
     assert "domain-grill: complete" not in text
     assert "shared_understanding: reached" not in text
+
+
+def test_generic_stub_success_source_phase_emits_task_backed_spec_item(
+    tmp_path: Path,
+    monkeypatch,
+):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.adapters.generic import GenericAdapter
+    from agent_flow.runner import Phase
+
+    run_dir = tmp_path / "run"
+    project_root = tmp_path / "project"
+    run_dir.mkdir()
+    project_root.mkdir()
+    (run_dir / "meta.json").write_text(
+        json.dumps({"task": "Show empty search results."}),
+        encoding="utf-8",
+    )
+    phase = Phase(id="design", description="")
+    monkeypatch.setenv("AGENT_FLOW_GENERIC_MODE", "stub-success")
+
+    assert GenericAdapter().execute(
+        phase,
+        run_dir=run_dir,
+        project_root=project_root,
+    )
+    text = (run_dir / "design.md").read_text(encoding="utf-8")
+    assert "SPEC-1: Show empty search results." in text
+    assert "verify: manual" in text
+    assert "spec-items: SPEC-1" in text
 
 
 def test_backward_route_invalidates_target_artifact(tmp_path: Path):

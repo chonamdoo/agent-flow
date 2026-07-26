@@ -22,6 +22,11 @@ from pathlib import Path
 
 from agent_flow.adapters.base import Adapter
 from agent_flow.core.artifacts import run_gate_nonce
+from agent_flow.core.design_ledger import (
+    parse_spec_item_section,
+    record_spec_set_confirmation,
+    spec_set_confirmation_statement,
+)
 
 
 # stub-success가 만든 artifact임을 나타내는 표식. runner는 이 표식이 있는
@@ -93,6 +98,39 @@ class GenericAdapter(Adapter):
                         encoding="utf-8",
                     )
                     return True
+                if phase.id in {"design", "prd"}:
+                    task = _stub_task(run_dir)
+                    if task:
+                        spec_items = (
+                            f"SPEC-1: {task}\n"
+                            "verify: manual\n\n"
+                        )
+                        spec_marker = "SPEC-1"
+                    else:
+                        spec_items = ""
+                        spec_marker = "none"
+                    content = (
+                        f"# {phase.id}\n\n"
+                        f"<!-- {STUB_SENTINEL} -->\n\n"
+                        "## Spec Items\n\n"
+                        f"{spec_items}"
+                        "## Design Values\n\n"
+                        "## Completion Gate\n"
+                        f"spec-items: {spec_marker}\n"
+                        "design-values: none\n"
+                    )
+                    artifact.write_text(content, encoding="utf-8")
+                    # stub은 사람과 agent를 통째로 대신한다. 확인 기록이 없으면
+                    # 원장 capture가 fail-closed로 막혀 state machine 픽스처가
+                    # 첫 phase에서 멈춘다 - 마커 검사를 건너뛰는 것과 같은 계약이다.
+                    parsed = parse_spec_item_section(content)
+                    if parsed.items and not parsed.errors:
+                        record_spec_set_confirmation(
+                            run_dir,
+                            parsed.items,
+                            spec_set_confirmation_statement(parsed.items),
+                        )
+                    return True
                 artifact.write_text(
                     f"# {phase.id}\n\n"
                     f"<!-- {STUB_SENTINEL} -->\n\n"
@@ -127,3 +165,14 @@ class GenericAdapter(Adapter):
             "_stub artifact written by GenericAdapter (stub mode)._\n",
             encoding="utf-8",
         )
+
+
+def _stub_task(run_dir: Path) -> str:
+    for name in ("meta.json", "manifest.json"):
+        try:
+            payload = json.loads((run_dir / name).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict) and isinstance(payload.get("task"), str):
+            return " ".join(payload["task"].split())
+    return ""

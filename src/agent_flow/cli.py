@@ -29,6 +29,16 @@ from agent_flow.core.context_contract import (
     write_system_invariants,
 )
 from agent_flow.core.commands import run_safe_command
+from agent_flow.core.design_ledger import (
+    capture_design_ledger,
+    ledger_prompt_block,
+    manual_spec_approval_statement,
+    parse_spec_item_section,
+    record_manual_spec_approval,
+    record_spec_set_confirmation,
+    spec_set_confirmation_statement,
+)
+from agent_flow.core.design_value_check import missing_spec_item_evidence
 from agent_flow.core.gates import GateCommand, run_gates
 from agent_flow.core.phase_workflow import load_phase_workflow_definition
 from agent_flow.core.profiles import (
@@ -46,6 +56,7 @@ from agent_flow.core.local_skills import (
     merged_profile_payload,
     missing_local_skill_markers,
     phase_skill_resolution,
+    resolved_profile,
 )
 from agent_flow.core.skill_sync import parse_skill_sources, sync_skill_sources
 from agent_flow.core.review import summarize_reviews, write_review_summary
@@ -261,6 +272,31 @@ def main(argv: list[str] | None = None) -> int:
             # 읽음 증거를 현재 phase로 한정한다. 없으면 과거 기록까지 인정돼 강제가 약해진다.
             sub.add_argument("--since", type=float, default=None)
 
+
+    spec_parser = subparsers.add_parser("spec")
+    spec_subparsers = spec_parser.add_subparsers(dest="spec_command", required=True)
+    spec_approve = spec_subparsers.add_parser("approve")
+    spec_approve.add_argument("spec_id")
+    spec_approve.add_argument("--run-dir", required=True)
+    spec_approve.add_argument("--root", default=".")
+    spec_confirm = spec_subparsers.add_parser("confirm")
+    spec_confirm.add_argument("--run-dir", required=True)
+    spec_confirm.add_argument("--root", default=".")
+    spec_confirm.add_argument("--artifact", required=True)
+    spec_capture = spec_subparsers.add_parser("capture")
+    spec_capture.add_argument("--root", default=".")
+    spec_capture.add_argument("--run-dir", required=True)
+    spec_capture.add_argument("--phase", required=True)
+    spec_capture.add_argument("--artifact", required=True)
+    spec_prompt = spec_subparsers.add_parser("prompt")
+    spec_prompt.add_argument("--root", default=".")
+    spec_prompt.add_argument("--run-dir", required=True)
+    spec_markers = spec_subparsers.add_parser("markers")
+    spec_markers.add_argument("--root", default=".")
+    spec_markers.add_argument("--run-dir", required=True)
+    spec_markers.add_argument("--project-root")
+    spec_markers.add_argument("--phase", required=True)
+    spec_markers.add_argument("--artifact", required=True)
     context_parser = subparsers.add_parser("context")
     context_subparsers = context_parser.add_subparsers(dest="context_command", required=True)
     context_init = context_subparsers.add_parser("init")
@@ -615,7 +651,11 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         active = find_active_run(state_root)
         if active is not None:
-            active.print_status(next_command=_continue_command(root, args.worktree), config_root=root)
+            active.print_status(
+                next_command=_continue_command(root, args.worktree),
+                config_root=root,
+                project_root=run_root,
+            )
             return 0
         if not (state_root / ".agent-flow" / "runs").exists():
             print("진행 중인 run 없음.")
@@ -782,6 +822,79 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             print(json.dumps(definition.to_json_dict(), ensure_ascii=False, sort_keys=True))
             return 0
+
+    if args.command == "spec":
+        try:
+            run_dir = _resolve_project_path(root, args.run_dir)
+            if args.spec_command == "approve":
+                expected = manual_spec_approval_statement(run_dir, args.spec_id)
+                statement = _read_interactive_approval(expected)
+                approval_path = record_manual_spec_approval(
+                    run_dir,
+                    args.spec_id,
+                    statement,
+                )
+                print(f"{args.spec_id.upper()} approved: {approval_path}")
+                return 0
+            if args.spec_command == "confirm":
+                artifact = _resolve_project_path(root, args.artifact)
+                parsed = parse_spec_item_section(
+                    artifact.read_text(encoding="utf-8")
+                )
+                if parsed.errors:
+                    raise ValueError("; ".join(parsed.errors))
+                if not parsed.items:
+                    raise ValueError("no SPEC items to confirm")
+                expected = spec_set_confirmation_statement(parsed.items)
+                statement = _read_interactive_approval(expected)
+                confirmation_path = record_spec_set_confirmation(
+                    run_dir,
+                    parsed.items,
+                    statement,
+                )
+                print(f"SPEC set confirmed: {confirmation_path}")
+                return 0
+            if args.spec_command == "capture":
+                artifact = _resolve_project_path(root, args.artifact)
+                ledger = capture_design_ledger(
+                    run_dir,
+                    args.phase,
+                    artifact.read_text(encoding="utf-8"),
+                )
+                if ledger is not None:
+                    print(run_dir / "design-spec.md")
+                return 0
+            if args.spec_command == "prompt":
+                sys.stdout.write(ledger_prompt_block(run_dir))
+                return 0
+            if args.spec_command == "markers":
+                artifact = _resolve_project_path(root, args.artifact)
+                project = (
+                    _resolve_project_path(root, args.project_root)
+                    if args.project_root
+                    else root
+                )
+                context = _spec_run_context(run_dir)
+                print(
+                    json.dumps(
+                        missing_spec_item_evidence(
+                            project,
+                            run_dir,
+                            args.phase,
+                            artifact.read_text(encoding="utf-8"),
+                            task_text=context["task_text"],
+                            profile=resolved_profile(root),
+                            since=context["since"],
+                            evidence_root=root,
+                        ),
+                        ensure_ascii=False,
+                    )
+                )
+                return 0
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        return 2
 
     if args.command == "context":
         run_dir = _resolve_project_path(root, args.run_dir) if getattr(args, "run_dir", None) else None
@@ -2015,6 +2128,37 @@ def _skill_context(root: Path, args: argparse.Namespace) -> dict:
         "task_text": task or "",
         "since": since,
         "changed_files": changed_files(root),
+    }
+
+
+def _read_interactive_approval(expected: str) -> str:
+    if not sys.stdin.isatty():
+        raise RuntimeError(
+            "SPEC approval requires an interactive user terminal; "
+            "agents and redirected stdin cannot approve"
+        )
+    print(f"Type exactly to approve: {expected}")
+    statement = sys.stdin.readline().strip()
+    if statement != expected:
+        raise ValueError("SPEC approval statement did not match")
+    return statement
+
+
+def _spec_run_context(run_dir: Path) -> dict:
+    meta = read_meta(run_dir)
+    if not meta:
+        try:
+            payload = json.loads(
+                (run_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+        meta = payload if isinstance(payload, dict) else {}
+    started_at = meta.get("started_at")
+    since = _run_meta_timestamp({"started_at": started_at})
+    return {
+        "task_text": str(meta.get("task", "")),
+        "since": since,
     }
 
 

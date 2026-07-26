@@ -16,6 +16,7 @@ Robustness fixes applied (post-review):
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -32,6 +33,7 @@ from agent_flow.core.local_skills import (
     missing_local_skill_markers,
     resolved_profile,
 )
+from agent_flow.core.design_value_check import missing_spec_item_evidence
 from agent_flow.core.skill_resolver import PhaseSkills
 from agent_flow.core.phase_workflow import find_kit_root, load_phase_workflow_definition
 
@@ -54,7 +56,13 @@ class ActiveRun:
     task: str
     started_at: str
 
-    def print_status(self, *, next_command: str = "agent-flow continue", config_root: Path | None = None) -> None:
+    def print_status(
+        self,
+        *,
+        next_command: str = "agent-flow continue",
+        config_root: Path | None = None,
+        project_root: Path | None = None,
+    ) -> None:
         artifacts = sorted(str(p.relative_to(self.path)) for p in self.path.rglob("*") if p.is_file())
         meta = read_meta(self.path)
         current_phase = meta.get("current_phase") or "-"
@@ -66,6 +74,7 @@ class ActiveRun:
         )
         structured_status = "running"
         reason = "in_progress"
+        missing_markers: list[str] = []
         if required_artifact is not None and not required_artifact.exists():
             structured_status = "awaiting_host"
             reason = "missing_phase_artifact"
@@ -80,6 +89,7 @@ class ActiveRun:
                     self.workflow,
                     current_phase,
                     config_root=config_root,
+                    project_root=project_root,
                 )
                 reason = (
                     "missing_completion_markers"
@@ -94,6 +104,7 @@ class ActiveRun:
             "reason": reason,
             "required_artifact": str(required_artifact) if required_artifact is not None else None,
             "next_command": next_command,
+            "missing_completion_markers": missing_markers,
         }
         print(f"Run id     : {self.run_id}")
         print(f"Workflow   : {self.workflow}")
@@ -110,6 +121,11 @@ class ActiveRun:
         print(f"reason: {_status_value(reason)}")
         if required_artifact is not None:
             print(f"required_artifact: {_status_value(required_artifact)}")
+        if missing_markers:
+            print(
+                "missing_completion_markers: "
+                f"{json.dumps(missing_markers, ensure_ascii=False)}"
+            )
         print(f"next_command: {_status_value(next_command)}")
         print(f"status_json: {json.dumps(payload, sort_keys=True)}")
 
@@ -183,6 +199,9 @@ def create_run(
             "run_id": run_id,
             "workflow": workflow,
             "task": task,
+            # design-spec.md의 task digest와 대조되는 값. 런 도중 task를 바꿔치기하면
+            # 원장이 가리키는 사용자 지시와 어긋나므로 gate가 막는다.
+            "task_digest": hashlib.sha256(task.strip().encode("utf-8")).hexdigest(),
             "started_at": now.isoformat(),
             "current_phase": None,
             # gate-results.json의 출처 표식. `agent-flow gates`만 이 값을 찍는다.
@@ -259,6 +278,7 @@ def _missing_completion_markers(
     phase_id: str,
     *,
     config_root: Path | None = None,
+    project_root: Path | None = None,
 ) -> list[str]:
     artifact_rel, markers, skills = _phase_contract(run_path, workflow, phase_id)
     artifact = _existing_phase_artifact(run_path, phase_id, artifact_rel)
@@ -266,19 +286,35 @@ def _missing_completion_markers(
         return []
     text = artifact.read_text(encoding="utf-8")
     missing = _missing_markers(text, markers) if markers else []
-    root = config_root or run_path
+    config = config_root or run_path
+    project = project_root or config
+    meta = read_meta(run_path)
+    phase_since = _phase_entered_at(run_path)
+    profile = resolved_profile(config)
     # 컨텍스트를 안 넘기면 `status`와 runner가 서로 다른 required 집합을 본다.
     # 도출은 local_skills가 단일 소스다.
     missing.extend(
         missing_local_skill_markers(
             text,
-            root,
+            config,
             phase_id,
             phase_skills=skills,
-            profile=resolved_profile(root),
-            changed_files=changed_files(root),
-            task_text=str(read_meta(run_path).get("task", "")),
-            since=_phase_entered_at(run_path),
+            profile=profile,
+            changed_files=changed_files(project),
+            task_text=str(meta.get("task", "")),
+            since=phase_since,
+        )
+    )
+    missing.extend(
+        missing_spec_item_evidence(
+            project,
+            run_path,
+            phase_id,
+            text,
+            task_text=str(meta.get("task", "")),
+            profile=profile,
+            since=_parse_timestamp(meta.get("started_at")),
+            evidence_root=config,
         )
     )
     return missing

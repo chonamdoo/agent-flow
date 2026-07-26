@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
+import re
 from typing import Any
 
 import yaml
 
-from agent_flow.core.markers import normalize_required_markers
+from agent_flow.core.markers import normalize_required_markers, unfenced_markdown_text
 from agent_flow.core.security import ensure_child_path, validate_safe_name
 from agent_flow.core.skill_resolver import PhaseSkills
 
@@ -171,6 +172,40 @@ def _optional_string_or_none(value: object) -> str | None:
     if not isinstance(value, str):
         raise ValueError("workflow phase prompt must be a string")
     return value
+
+
+def overall_review_route_key(text: str) -> str:
+    in_overall_section = False
+    verdicts: list[str] = []
+    overall_sections = 0
+    for line in unfenced_markdown_text(text).splitlines():
+        stripped = line.strip()
+        heading = re.match(r"^(#{1,6})\s+(.+)$", stripped, re.IGNORECASE)
+        if heading:
+            in_overall_section = bool(
+                heading.group(1) == "##"
+                and re.fullmatch(
+                    r"(?:overall|final)(?:\s+verdict)?",
+                    heading.group(2).strip(),
+                    re.IGNORECASE,
+                )
+            )
+            if in_overall_section:
+                overall_sections += 1
+            continue
+        if not in_overall_section:
+            continue
+        match = re.fullmatch(
+            r"verdict:\s*(approve|request-changes)",
+            stripped,
+            re.IGNORECASE,
+        )
+        if match:
+            verdicts.append(match.group(1).lower())
+    if overall_sections > 1 or len(verdicts) > 1:
+        return "invalid-verdict"
+    return verdicts[0] if verdicts else "default"
+
 
 
 def _bool_field(value: object, path: Path, phase_id: str, field: str) -> bool:

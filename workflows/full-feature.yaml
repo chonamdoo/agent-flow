@@ -54,6 +54,8 @@ phases:
     description: Write the product requirements document and record supplied design values.
     pause_after: true
     required_markers:
+      - "## Spec Items"
+      - "spec-items:"
       - "## Design Values"
       - "design-values:"
       - "design-values-confirmed: yes|n/a"
@@ -63,6 +65,24 @@ phases:
       non-goals, user stories, acceptance criteria, edge cases, dependencies,
       and risks. Output: artifacts/prd.md.
 
+      ## Spec Items
+      Record every user instruction as one ordered item:
+
+          SPEC-<n>: <requirement>
+          verify: test:<name> | symbol:<symbol>=<value> | manual
+
+      Every item must have exactly one verifier. Record `spec-items: none` only
+      when the run task contains no user instruction.
+
+      After writing `artifacts/prd.md`, show the user the complete ordered SPEC
+      list and tell them to run
+      `agent-flow spec confirm --run-dir <run-dir> --artifact <artifacts/prd.md>`
+      in their interactive terminal. Never run this command or write its
+      confirmation record on the user's behalf: if that command is observed in
+      your own shell, the record is rejected. The confirmation covers the
+      complete ordered set; any requirement or verifier edit requires a new
+      confirmation before this phase can complete.
+
       ## Design Values
       Record every concrete value the user supplied as one `key: value` line
       each, using the user's exact value: spacing, sizes, colors, durations,
@@ -70,10 +90,10 @@ phases:
       Figma link, the numbers here are **what you read off it** — a lossy
       reading, not the source. Write them verbatim anyway.
 
-      The runner copies this section into `design-spec.md` and injects it into
-      the prompt of every later phase. It is the only carrier that survives a
-      compacted conversation, so a value missing here is a value the
-      implementation phase will not see.
+      The runner copies this section and Design Values into `design-spec.md`
+      and injects them into every later phase. This ledger is the only carrier
+      that survives a compacted conversation, so an omitted instruction or
+      value will not reach implementation.
 
       ## Read-back
       Before finishing, print the recorded values back to the user as a table
