@@ -7,8 +7,10 @@ eval 자체는 모델과 네트워크가 필요해 스위트에 넣지 않는다
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import importlib.util
+import re
 import shutil
 import subprocess
 import sys
@@ -401,16 +403,6 @@ VALUE_ALIASED_CHAINED_DEPENDENCIES = CHAINED_DEPENDENCIES.replace(
     "get_checkout_total=GetCheckoutTotalUseCase(cart_dependency, discount_dependency)",
 )
 
-FACTORY_CHAINED_DEPENDENCIES = CHAINED_DEPENDENCIES.replace(
-    "@dataclass(frozen=True)\n",
-    "def build_checkout(get_cart_total, get_active_discount):\n"
-    "    return GetCheckoutTotalUseCase(get_cart_total, get_active_discount)\n\n\n"
-    "@dataclass(frozen=True)\n",
-).replace(
-    "get_checkout_total=GetCheckoutTotalUseCase(get_cart_total, get_active_discount)",
-    "get_checkout_total=build_checkout(get_cart_total, get_active_discount)",
-)
-
 CART_TOTAL_WITH_POLICY = """from shop.core.domain.repositories import CartRepository
 
 
@@ -486,80 +478,6 @@ KWARGS_CHAINED_DEPENDENCIES = CHAINED_DEPENDENCIES.replace(
     "GetCheckoutTotalUseCase(get_cart_total, get_active_discount)",
     "GetCheckoutTotalUseCase(**checkout_dependencies)",
 )
-
-CLASSMETHOD_FACTORY_CHAINED_DEPENDENCIES = """from __future__ import annotations
-
-from dataclasses import dataclass
-
-from shop.core.data.repositories import InMemoryCartRepository, InMemoryDiscountRepository
-from shop.core.domain.get_active_discount import GetActiveDiscountUseCase
-from shop.core.domain.get_cart_total import GetCartTotalUseCase
-from shop.core.domain.get_checkout_total import GetCheckoutTotalUseCase
-
-
-@dataclass(frozen=True)
-class Dependencies:
-    get_cart_total: GetCartTotalUseCase
-    get_active_discount: GetActiveDiscountUseCase
-    get_checkout_total: GetCheckoutTotalUseCase
-
-    @classmethod
-    def create(cls, total_cents: int, discount_percent: int) -> Dependencies:
-        get_cart_total = GetCartTotalUseCase(InMemoryCartRepository(total_cents))
-        get_active_discount = GetActiveDiscountUseCase(
-            InMemoryDiscountRepository(discount_percent)
-        )
-        return cls._assemble(get_cart_total, get_active_discount)
-
-    @classmethod
-    def _assemble(cls, get_cart_total, get_active_discount) -> Dependencies:
-        return cls(
-            get_cart_total=get_cart_total,
-            get_active_discount=get_active_discount,
-            get_checkout_total=GetCheckoutTotalUseCase(
-                get_cart_total,
-                get_active_discount,
-            ),
-        )
-"""
-
-PRODUCER_CHAINED_DEPENDENCIES = """from __future__ import annotations
-
-from dataclasses import dataclass
-
-from shop.core.data.repositories import InMemoryCartRepository, InMemoryDiscountRepository
-from shop.core.domain.get_active_discount import GetActiveDiscountUseCase
-from shop.core.domain.get_cart_total import GetCartTotalUseCase
-from shop.core.domain.get_checkout_total import GetCheckoutTotalUseCase
-
-
-def build_cart_total(total_cents):
-    return GetCartTotalUseCase(InMemoryCartRepository(total_cents))
-
-
-def build_active_discount(discount_percent):
-    return GetActiveDiscountUseCase(InMemoryDiscountRepository(discount_percent))
-
-
-@dataclass(frozen=True)
-class Dependencies:
-    get_cart_total: GetCartTotalUseCase
-    get_active_discount: GetActiveDiscountUseCase
-    get_checkout_total: GetCheckoutTotalUseCase
-
-    @classmethod
-    def create(cls, total_cents: int, discount_percent: int) -> Dependencies:
-        get_cart_total = build_cart_total(total_cents)
-        get_active_discount = build_active_discount(discount_percent)
-        return cls(
-            get_cart_total=get_cart_total,
-            get_active_discount=get_active_discount,
-            get_checkout_total=GetCheckoutTotalUseCase(
-                build_cart_total(total_cents),
-                build_active_discount(discount_percent),
-            ),
-        )
-"""
 
 MODULE_GLOBAL_CHAINED_DEPENDENCIES = """from __future__ import annotations
 
@@ -719,39 +637,6 @@ def test_layer_boundary_oracle_rejects_module_indirection(
     assert _score_layer(tmp_path, checkout_source) == {"behavior": True, "norm": False}
 
 
-def test_layer_boundary_oracle_rejects_imported_usecase_factory(tmp_path):
-    checkout = """from shop.core.domain.cart_builder import build_cart_total
-from shop.core.domain.repositories import CartRepository, DiscountRepository
-
-
-class GetCheckoutTotalUseCase:
-    def __init__(
-        self,
-        cart_repository: CartRepository,
-        discount_repository: DiscountRepository,
-    ) -> None:
-        self._get_cart_total = build_cart_total(cart_repository)
-        self._discount_repository = discount_repository
-
-    def __call__(self) -> int:
-        total_cents = self._get_cart_total()
-        discount_percent = self._discount_repository.get_active_percent()
-        return max(0, total_cents * (100 - discount_percent) // 100)
-"""
-    builder = """from shop.core.domain.get_cart_total import GetCartTotalUseCase
-
-
-def build_cart_total(repository):
-    return GetCartTotalUseCase(repository)
-"""
-
-    assert _score_layer(
-        tmp_path,
-        checkout,
-        domain_sources={"cart_builder.py": builder},
-    ) == {"behavior": True, "norm": False}
-
-
 def test_layer_boundary_oracle_resolves_transitive_class_aliases():
     oracle = _load_layer_oracle()
     tree = ast.parse(
@@ -795,74 +680,16 @@ def test_layer_boundary_oracle_rejects_injected_sibling_usecases_without_target_
     "dependencies_source",
     [
         VALUE_ALIASED_CHAINED_DEPENDENCIES,
-        FACTORY_CHAINED_DEPENDENCIES,
         KEYWORD_CHAINED_DEPENDENCIES,
         KWARGS_CHAINED_DEPENDENCIES,
-        CLASSMETHOD_FACTORY_CHAINED_DEPENDENCIES,
-        PRODUCER_CHAINED_DEPENDENCIES,
     ],
-    ids=["value-alias", "factory", "keywords", "kwargs", "classmethod-factory", "producer"],
+    ids=["value-alias", "keywords", "kwargs"],
 )
 def test_layer_boundary_oracle_rejects_indirect_sibling_usecase_injection(
     tmp_path,
     dependencies_source,
 ):
     assert _score_layer(tmp_path, UNTYPED_CHAINED_CHECKOUT, dependencies_source) == {
-        "behavior": True,
-        "norm": False,
-    }
-
-
-@pytest.mark.parametrize("factory_style", ["nested-kwargs", "lambda-varargs"])
-def test_layer_boundary_oracle_rejects_nested_callable_factories(
-    tmp_path,
-    factory_style,
-):
-    if factory_style == "nested-kwargs":
-        factory = (
-            "        def build_checkout(**dependencies):\n"
-            "            return GetCheckoutTotalUseCase(**dependencies)\n"
-        )
-        call = (
-            "build_checkout(\n"
-            "                get_cart_total=get_cart_total,\n"
-            "                get_active_discount=get_active_discount,\n"
-            "            )"
-        )
-    else:
-        factory = (
-            "        build_checkout = lambda *dependencies: "
-            "GetCheckoutTotalUseCase(*dependencies)\n"
-        )
-        call = "build_checkout(get_cart_total, get_active_discount)"
-    dependencies = CHAINED_DEPENDENCIES.replace(
-        "        return cls(\n",
-        f"{factory}        return cls(\n",
-    ).replace(
-        "GetCheckoutTotalUseCase(get_cart_total, get_active_discount)",
-        call,
-    )
-
-    assert _score_layer(tmp_path, UNTYPED_CHAINED_CHECKOUT, dependencies) == {
-        "behavior": True,
-        "norm": False,
-    }
-
-
-def test_layer_boundary_oracle_rejects_container_member_injection(tmp_path):
-    dependencies = CHAINED_DEPENDENCIES.replace(
-        "        return cls(\n",
-        "        checkout_dependencies = (get_cart_total, get_active_discount)\n"
-        "        return cls(\n",
-    ).replace(
-        "GetCheckoutTotalUseCase(get_cart_total, get_active_discount)",
-        "GetCheckoutTotalUseCase(\n"
-        "                checkout_dependencies[0],\n"
-        "                checkout_dependencies[1],\n"
-        "            )",
-    )
-
-    assert _score_layer(tmp_path, UNTYPED_CHAINED_CHECKOUT, dependencies) == {
         "behavior": True,
         "norm": False,
     }
@@ -1137,40 +964,6 @@ class Dependencies:
     ) == {"behavior": True, "norm": False}
 
 
-def test_layer_boundary_oracle_tracks_callable_object_factories(tmp_path):
-    dependencies = """from __future__ import annotations
-
-from dataclasses import dataclass
-
-from shop.core.data.repositories import InMemoryCartRepository, InMemoryDiscountRepository
-from shop.core.domain.get_active_discount import GetActiveDiscountUseCase
-from shop.core.domain.get_cart_total import GetCartTotalUseCase
-from shop.core.domain.get_checkout_total import GetCheckoutTotalUseCase
-
-
-class CartFactory:
-    def __call__(self, repository):
-        return GetCartTotalUseCase(repository)
-
-
-@dataclass(frozen=True)
-class Dependencies:
-    get_checkout_total: GetCheckoutTotalUseCase
-
-    @classmethod
-    def create(cls, total_cents: int, discount_percent: int) -> Dependencies:
-        factory = CartFactory()
-        cart = factory(InMemoryCartRepository(total_cents))
-        discount = GetActiveDiscountUseCase(InMemoryDiscountRepository(discount_percent))
-        return cls(GetCheckoutTotalUseCase(cart, discount))
-"""
-    assert _score_layer(
-        tmp_path,
-        UNTYPED_CHAINED_CHECKOUT,
-        dependencies,
-    ) == {"behavior": True, "norm": False}
-
-
 def test_layer_boundary_oracle_tracks_factory_default_injection(tmp_path):
     dependencies = """from __future__ import annotations
 
@@ -1218,26 +1011,6 @@ def test_layer_boundary_oracle_does_not_taint_unselected_container_members(tmp_p
         "        choices = [unused, cart_repository]\n"
         "        return cls(\n"
         "            get_checkout_total=GetCheckoutTotalUseCase(choices[1], discount_repository),\n"
-        "        )",
-    )
-    assert _score_layer(
-        tmp_path,
-        COMPLIANT_CHECKOUT,
-        dependencies,
-    ) == {"behavior": True, "norm": True}
-
-
-def test_layer_boundary_oracle_preserves_destructured_dependency_lineage(tmp_path):
-    dependencies = DIRECT_DEPENDENCIES.replace(
-        "return cls(\n"
-        "            get_checkout_total=GetCheckoutTotalUseCase(cart_repository, discount_repository),\n"
-        "        )",
-        "unused, cart_repository = (\n"
-        "            GetCartTotalUseCase(cart_repository),\n"
-        "            cart_repository,\n"
-        "        )\n"
-        "        return cls(\n"
-        "            get_checkout_total=GetCheckoutTotalUseCase(cart_repository, discount_repository),\n"
         "        )",
     )
     assert _score_layer(
@@ -1319,192 +1092,6 @@ class CartFactory:
         candidate_files={
             "src/shop/core/domain/cart_factory.py": factory,
         },
-    ) == {"behavior": True, "norm": False}
-
-
-def test_layer_boundary_oracle_tracks_default_producer_injection(tmp_path):
-    dependencies = """from __future__ import annotations
-
-from dataclasses import dataclass
-
-from shop.core.data.repositories import InMemoryCartRepository, InMemoryDiscountRepository
-from shop.core.domain.cart_builder import build_cart_total
-from shop.core.domain.get_checkout_total import GetCheckoutTotalUseCase
-
-
-def build_checkout(cart_repository, discount_repository, cart_factory=build_cart_total):
-    return GetCheckoutTotalUseCase(
-        cart_factory(cart_repository),
-        discount_repository,
-    )
-
-
-@dataclass(frozen=True)
-class Dependencies:
-    get_checkout_total: GetCheckoutTotalUseCase
-
-    @classmethod
-    def create(cls, total_cents: int, discount_percent: int) -> Dependencies:
-        return cls(
-            build_checkout(
-                InMemoryCartRepository(total_cents),
-                InMemoryDiscountRepository(discount_percent),
-            )
-        )
-"""
-    builder = """from shop.core.domain.get_cart_total import GetCartTotalUseCase
-
-
-def build_cart_total(repository):
-    return GetCartTotalUseCase(repository)
-"""
-    checkout = """class GetCheckoutTotalUseCase:
-    def __init__(self, get_cart_total, discount_repository):
-        self._get_cart_total = get_cart_total
-        self._discount_repository = discount_repository
-
-    def __call__(self):
-        total_cents = self._get_cart_total()
-        discount_percent = self._discount_repository.get_active_percent()
-        return max(0, total_cents * (100 - discount_percent) // 100)
-"""
-    assert _score_layer(
-        tmp_path,
-        checkout,
-        dependencies,
-        candidate_files={
-            "src/shop/core/domain/cart_builder.py": builder,
-        },
-    ) == {"behavior": True, "norm": False}
-
-
-def test_layer_boundary_oracle_selects_named_container_members_precisely(tmp_path):
-    dependencies = DIRECT_DEPENDENCIES.replace(
-        "return cls(\n"
-        "            get_checkout_total=GetCheckoutTotalUseCase(cart_repository, discount_repository),\n"
-        "        )",
-        "parts = (GetCartTotalUseCase(cart_repository), cart_repository)\n"
-        "        unused, selected_repository = parts\n"
-        "        return cls(\n"
-        "            get_checkout_total=GetCheckoutTotalUseCase(selected_repository, discount_repository),\n"
-        "        )",
-    )
-    assert _score_layer(
-        tmp_path,
-        COMPLIANT_CHECKOUT,
-        dependencies,
-    ) == {"behavior": True, "norm": True}
-
-
-def test_layer_boundary_oracle_respects_selector_helper_result(tmp_path):
-    dependencies = """from __future__ import annotations
-
-from dataclasses import dataclass
-
-from shop.core.data.repositories import InMemoryCartRepository, InMemoryDiscountRepository
-from shop.core.domain.get_active_discount import GetActiveDiscountUseCase
-from shop.core.domain.get_cart_total import GetCartTotalUseCase
-from shop.core.domain.get_checkout_total import GetCheckoutTotalUseCase
-
-
-def select_repository(parts):
-    return parts[1]
-
-
-@dataclass(frozen=True)
-class Dependencies:
-    get_cart_total: GetCartTotalUseCase
-    get_active_discount: GetActiveDiscountUseCase
-    get_checkout_total: GetCheckoutTotalUseCase
-
-    @classmethod
-    def create(cls, total_cents: int, discount_percent: int) -> Dependencies:
-        cart_repository = InMemoryCartRepository(total_cents)
-        discount_repository = InMemoryDiscountRepository(discount_percent)
-        return cls(
-            get_cart_total=GetCartTotalUseCase(cart_repository),
-            get_active_discount=GetActiveDiscountUseCase(discount_repository),
-            get_checkout_total=GetCheckoutTotalUseCase(
-                select_repository((GetCartTotalUseCase(cart_repository), cart_repository)),
-                discount_repository,
-            ),
-        )
-"""
-    assert _score_layer(
-        tmp_path,
-        COMPLIANT_CHECKOUT,
-        dependencies,
-    ) == {"behavior": True, "norm": True}
-
-
-def test_layer_boundary_oracle_tracks_selector_helper_violation(tmp_path):
-    dependencies = """from __future__ import annotations
-
-from dataclasses import dataclass
-
-from shop.core.data.repositories import InMemoryCartRepository, InMemoryDiscountRepository
-from shop.core.domain.get_active_discount import GetActiveDiscountUseCase
-from shop.core.domain.get_cart_total import GetCartTotalUseCase
-from shop.core.domain.get_checkout_total import GetCheckoutTotalUseCase
-
-
-def select_usecase(parts):
-    return parts[0]
-
-
-@dataclass(frozen=True)
-class Dependencies:
-    get_checkout_total: GetCheckoutTotalUseCase
-
-    @classmethod
-    def create(cls, total_cents: int, discount_percent: int) -> Dependencies:
-        cart_repository = InMemoryCartRepository(total_cents)
-        discount = GetActiveDiscountUseCase(
-            InMemoryDiscountRepository(discount_percent)
-        )
-        return cls(
-            GetCheckoutTotalUseCase(
-                select_usecase(
-                    (GetCartTotalUseCase(cart_repository), cart_repository)
-                ),
-                discount,
-            )
-        )
-"""
-    assert _score_layer(
-        tmp_path,
-        UNTYPED_CHAINED_CHECKOUT,
-        dependencies,
-    ) == {"behavior": True, "norm": False}
-
-
-def test_layer_boundary_oracle_tracks_partial_target_factories(tmp_path):
-    dependencies = """from __future__ import annotations
-
-import functools
-from dataclasses import dataclass
-
-from shop.core.data.repositories import InMemoryCartRepository, InMemoryDiscountRepository
-from shop.core.domain.get_active_discount import GetActiveDiscountUseCase
-from shop.core.domain.get_cart_total import GetCartTotalUseCase
-from shop.core.domain.get_checkout_total import GetCheckoutTotalUseCase
-
-
-@dataclass(frozen=True)
-class Dependencies:
-    get_checkout_total: GetCheckoutTotalUseCase
-
-    @classmethod
-    def create(cls, total_cents: int, discount_percent: int) -> Dependencies:
-        cart = GetCartTotalUseCase(InMemoryCartRepository(total_cents))
-        discount = GetActiveDiscountUseCase(InMemoryDiscountRepository(discount_percent))
-        factory = functools.partial(GetCheckoutTotalUseCase, cart)
-        return cls(factory(discount))
-"""
-    assert _score_layer(
-        tmp_path,
-        UNTYPED_CHAINED_CHECKOUT,
-        dependencies,
     ) == {"behavior": True, "norm": False}
 
 
@@ -1626,61 +1213,6 @@ class GetCheckoutTotalUseCase(CheckoutBase):
     ) == {"behavior": True, "norm": False}
 
 
-@pytest.mark.parametrize(
-    "injection",
-    [
-        (
-            "checkout._get_cart_total = get_cart_total\n"
-            "        checkout._get_active_discount = get_active_discount"
-        ),
-        "checkout.set_collaborators(get_cart_total, get_active_discount)",
-    ],
-)
-def test_layer_boundary_oracle_tracks_target_member_injection(
-    tmp_path,
-    injection,
-):
-    checkout = """class GetCheckoutTotalUseCase:
-    def set_collaborators(self, get_cart_total, get_active_discount):
-        self._get_cart_total = get_cart_total
-        self._get_active_discount = get_active_discount
-
-    def __call__(self):
-        total_cents = self._get_cart_total()
-        discount_percent = self._get_active_discount()
-        return max(0, total_cents * (100 - discount_percent) // 100)
-"""
-    dependencies = """from __future__ import annotations
-
-from dataclasses import dataclass
-
-from shop.core.data.repositories import InMemoryCartRepository, InMemoryDiscountRepository
-from shop.core.domain.get_active_discount import GetActiveDiscountUseCase
-from shop.core.domain.get_cart_total import GetCartTotalUseCase
-from shop.core.domain.get_checkout_total import GetCheckoutTotalUseCase
-
-
-@dataclass(frozen=True)
-class Dependencies:
-    get_checkout_total: GetCheckoutTotalUseCase
-
-    @classmethod
-    def create(cls, total_cents: int, discount_percent: int) -> Dependencies:
-        get_cart_total = GetCartTotalUseCase(InMemoryCartRepository(total_cents))
-        get_active_discount = GetActiveDiscountUseCase(
-            InMemoryDiscountRepository(discount_percent)
-        )
-        checkout = GetCheckoutTotalUseCase()
-        __INJECTION__
-        return cls(checkout)
-""".replace("__INJECTION__", injection)
-    assert _score_layer(
-        tmp_path,
-        checkout,
-        dependencies,
-    ) == {"behavior": True, "norm": False}
-
-
 def test_layer_boundary_oracle_tracks_concrete_usecase_contract_implementation(
     tmp_path,
 ):
@@ -1789,146 +1321,6 @@ class Dependencies:
     ) == {"behavior": True, "norm": False}
 
 
-def test_layer_boundary_oracle_preserves_target_factory_selector_precision(
-    tmp_path,
-):
-    dependencies = """from __future__ import annotations
-
-from dataclasses import dataclass
-
-from shop.core.data.repositories import InMemoryCartRepository, InMemoryDiscountRepository
-from shop.core.domain.get_cart_total import GetCartTotalUseCase
-from shop.core.domain.get_checkout_total import GetCheckoutTotalUseCase
-
-
-def choose_repository(parts):
-    return parts[1]
-
-
-def build_checkout(parts, discount_repository):
-    return GetCheckoutTotalUseCase(
-        choose_repository(parts),
-        discount_repository,
-    )
-
-
-@dataclass(frozen=True)
-class Dependencies:
-    get_checkout_total: GetCheckoutTotalUseCase
-
-    @classmethod
-    def create(cls, total_cents: int, discount_percent: int) -> Dependencies:
-        cart_repository = InMemoryCartRepository(total_cents)
-        return cls(
-            build_checkout(
-                (GetCartTotalUseCase(cart_repository), cart_repository),
-                InMemoryDiscountRepository(discount_percent),
-            )
-        )
-"""
-    assert _score_layer(
-        tmp_path,
-        COMPLIANT_CHECKOUT,
-        dependencies,
-    ) == {"behavior": True, "norm": True}
-
-
-@pytest.mark.parametrize(
-    ("domain_sources", "candidate_files"),
-    [
-        (
-            {"dynamic_probe.py": 'import importlib\nimportlib.import_module("http.client")\n'},
-            None,
-        ),
-        (
-            {"dynamic_probe.py": "import shop.shared.dynamic_loader\n"},
-            {
-                "src/shop/shared/dynamic_loader.py": (
-                    'from importlib import import_module\n'
-                    'import_module("shop.core.data.repositories")\n'
-                )
-            },
-        ),
-        (
-            {"dynamic_probe.py": '__import__("http.client")\n'},
-            None,
-        ),
-    ],
-)
-def test_layer_boundary_oracle_rejects_literal_dynamic_imports(
-    tmp_path,
-    domain_sources,
-    candidate_files,
-):
-    assert _score_layer(
-        tmp_path,
-        COMPLIANT_CHECKOUT,
-        domain_sources=domain_sources,
-        candidate_files=candidate_files,
-    ) == {"behavior": True, "norm": False}
-
-
-def test_layer_boundary_oracle_resolves_concrete_usecase_mro(tmp_path):
-    checkout = """class GetCheckoutTotalUseCase:
-    def __init__(self, cart_total, discount_repository) -> None:
-        self._cart_total = cart_total
-        self._discount_repository = discount_repository
-
-    def __call__(self) -> int:
-        total_cents = self._cart_total()
-        discount_percent = self._discount_repository.get_active_percent()
-        return max(0, total_cents * (100 - discount_percent) // 100)
-"""
-    dependencies = """from dataclasses import dataclass
-
-from shop.core.data.repositories import InMemoryCartRepository, InMemoryDiscountRepository
-from shop.core.domain.get_active_discount import GetActiveDiscountUseCase
-from shop.core.domain.get_cart_total import GetCartTotalUseCase
-from shop.core.domain.get_checkout_total import GetCheckoutTotalUseCase
-
-
-class CallMixin:
-    def __call__(self) -> int:
-        return self._repository.get_total_cents()
-
-
-class CartTotal(CallMixin, GetCartTotalUseCase):
-    def __init__(self, repository) -> None:
-        self._repository = repository
-
-
-@dataclass(frozen=True)
-class Dependencies:
-    get_checkout_total: GetCheckoutTotalUseCase
-
-    @classmethod
-    def create(cls, total_cents: int, discount_percent: int) -> "Dependencies":
-        cart_repository = InMemoryCartRepository(total_cents)
-        discount_repository = InMemoryDiscountRepository(discount_percent)
-        return cls(
-            get_checkout_total=GetCheckoutTotalUseCase(
-                CartTotal(cart_repository),
-                discount_repository,
-            )
-        )
-"""
-    cart_contract = """from abc import ABC, abstractmethod
-
-
-class GetCartTotalUseCase(ABC):
-    @abstractmethod
-    def __call__(self) -> int:
-        raise NotImplementedError
-"""
-
-    assert _score_layer(
-        tmp_path,
-        checkout,
-        dependencies,
-        domain_sources={"get_cart_total.py": cart_contract},
-    ) == {"behavior": True, "norm": False}
-
-
 def test_layer_boundary_oracle_resolves_parameterized_target_alias(tmp_path):
     checkout = """from typing import Generic, TypeVar
 
@@ -1983,207 +1375,6 @@ class Dependencies:
     }
 
 
-def test_layer_boundary_oracle_tracks_target_instances_in_containers(tmp_path):
-    checkout = """class GetCheckoutTotalUseCase:
-    def __init__(self) -> None:
-        self._cart_total = None
-        self._active_discount = None
-
-    def set_collaborators(self, cart_total, active_discount) -> None:
-        self._cart_total = cart_total
-        self._active_discount = active_discount
-
-    def __call__(self) -> int:
-        total_cents = self._cart_total()
-        discount_percent = self._active_discount()
-        return max(0, total_cents * (100 - discount_percent) // 100)
-"""
-    dependencies = """from dataclasses import dataclass
-
-from shop.core.data.repositories import InMemoryCartRepository, InMemoryDiscountRepository
-from shop.core.domain.get_active_discount import GetActiveDiscountUseCase
-from shop.core.domain.get_cart_total import GetCartTotalUseCase
-from shop.core.domain.get_checkout_total import GetCheckoutTotalUseCase
-
-
-@dataclass(frozen=True)
-class Dependencies:
-    get_checkout_total: GetCheckoutTotalUseCase
-
-    @classmethod
-    def create(cls, total_cents: int, discount_percent: int) -> "Dependencies":
-        checkout = GetCheckoutTotalUseCase()
-        targets = [checkout]
-        targets[0].set_collaborators(
-            GetCartTotalUseCase(InMemoryCartRepository(total_cents)),
-            GetActiveDiscountUseCase(
-                InMemoryDiscountRepository(discount_percent)
-            ),
-        )
-        return cls(get_checkout_total=targets[0])
-"""
-
-    assert _score_layer(tmp_path, checkout, dependencies) == {
-        "behavior": True,
-        "norm": False,
-    }
-
-
-def test_layer_boundary_oracle_applies_selector_to_factory_default(tmp_path):
-    checkout = """class GetCheckoutTotalUseCase:
-    def __init__(self, cart_total, discount_repository) -> None:
-        self._cart_total = cart_total
-        self._discount_repository = discount_repository
-
-    def __call__(self) -> int:
-        total_cents = self._cart_total()
-        discount_percent = self._discount_repository.get_active_percent()
-        return max(0, total_cents * (100 - discount_percent) // 100)
-"""
-    dependencies = """from dataclasses import dataclass
-
-from shop.core.data.repositories import InMemoryCartRepository, InMemoryDiscountRepository
-from shop.core.domain.get_cart_total import GetCartTotalUseCase
-from shop.core.domain.get_checkout_total import GetCheckoutTotalUseCase
-
-
-def build_checkout(
-    repository,
-    discount_repository,
-    choices=(GetCartTotalUseCase, InMemoryCartRepository),
-):
-    return GetCheckoutTotalUseCase(
-        choices[0](repository),
-        discount_repository,
-    )
-
-
-@dataclass(frozen=True)
-class Dependencies:
-    get_checkout_total: GetCheckoutTotalUseCase
-
-    @classmethod
-    def create(cls, total_cents: int, discount_percent: int) -> "Dependencies":
-        return cls(
-            get_checkout_total=build_checkout(
-                InMemoryCartRepository(total_cents),
-                InMemoryDiscountRepository(discount_percent),
-            )
-        )
-"""
-
-    assert _score_layer(tmp_path, checkout, dependencies) == {
-        "behavior": True,
-        "norm": False,
-    }
-
-
-@pytest.mark.parametrize(
-    ("policy_source", "expected_norm"),
-    [
-        (
-            """import importlib
-
-importlib.import_module(name="http.client")
-
-
-def checkout_total(total_cents: int, discount_percent: int) -> int:
-    return max(0, total_cents * (100 - discount_percent) // 100)
-""",
-            False,
-        ),
-        (
-            """from importlib import import_module
-
-loader = import_module
-loader("http.client")
-
-
-def checkout_total(total_cents: int, discount_percent: int) -> int:
-    return max(0, total_cents * (100 - discount_percent) // 100)
-""",
-            False,
-        ),
-        (
-            """from importlib import import_module
-
-
-def local_loader(name):
-    return name
-
-
-loader = local_loader
-loader("http.client")
-
-
-def checkout_total(total_cents: int, discount_percent: int) -> int:
-    return max(0, total_cents * (100 - discount_percent) // 100)
-""",
-            True,
-        ),
-    ],
-)
-def test_layer_boundary_oracle_resolves_dynamic_import_calls(
-    tmp_path,
-    policy_source,
-    expected_norm,
-):
-    assert _score_layer(
-        tmp_path,
-        COMPLIANT_CHECKOUT,
-        DIRECT_DEPENDENCIES,
-        domain_sources={"checkout_policy.py": policy_source},
-    ) == {"behavior": True, "norm": expected_norm}
-
-
-def test_layer_boundary_oracle_follows_property_producer(tmp_path):
-    checkout = """class GetCheckoutTotalUseCase:
-    def __init__(self, cart_total, discount_repository) -> None:
-        self._cart_total = cart_total
-        self._discount_repository = discount_repository
-
-    def __call__(self) -> int:
-        total_cents = self._cart_total()
-        discount_percent = self._discount_repository.get_active_percent()
-        return max(0, total_cents * (100 - discount_percent) // 100)
-"""
-    dependencies = """from dataclasses import dataclass
-
-from shop.core.data.repositories import InMemoryCartRepository, InMemoryDiscountRepository
-from shop.core.domain.get_cart_total import GetCartTotalUseCase
-from shop.core.domain.get_checkout_total import GetCheckoutTotalUseCase
-
-
-class Provider:
-    def __init__(self, repository) -> None:
-        self._repository = repository
-
-    @property
-    def cart_total(self):
-        return GetCartTotalUseCase(self._repository)
-
-
-@dataclass(frozen=True)
-class Dependencies:
-    get_checkout_total: GetCheckoutTotalUseCase
-
-    @classmethod
-    def create(cls, total_cents: int, discount_percent: int) -> "Dependencies":
-        cart_repository = InMemoryCartRepository(total_cents)
-        return cls(
-            get_checkout_total=GetCheckoutTotalUseCase(
-                Provider(cart_repository).cart_total,
-                InMemoryDiscountRepository(discount_percent),
-            )
-        )
-"""
-
-    assert _score_layer(tmp_path, checkout, dependencies) == {
-        "behavior": True,
-        "norm": False,
-    }
-
-
 def test_layer_boundary_oracle_traverses_parent_package_initializers(tmp_path):
     checkout = COMPLIANT_CHECKOUT.replace(
         "shop.core.domain.checkout_policy",
@@ -2200,53 +1391,6 @@ def test_layer_boundary_oracle_traverses_parent_package_initializers(tmp_path):
         DIRECT_DEPENDENCIES,
         candidate_files=candidate_files,
     ) == {"behavior": True, "norm": False}
-
-
-def test_layer_boundary_oracle_kills_overwritten_selector_lineage(tmp_path):
-    dependencies = """from dataclasses import dataclass
-
-from shop.core.data.repositories import InMemoryCartRepository, InMemoryDiscountRepository
-from shop.core.domain.get_cart_total import GetCartTotalUseCase
-from shop.core.domain.get_checkout_total import GetCheckoutTotalUseCase
-
-
-def select_repository(parts):
-    selected = parts[0]
-    selected = parts[1]
-    return selected
-
-
-def build_checkout(parts, discount_repository):
-    return GetCheckoutTotalUseCase(
-        select_repository(parts),
-        discount_repository,
-    )
-
-
-@dataclass(frozen=True)
-class Dependencies:
-    get_checkout_total: GetCheckoutTotalUseCase
-
-    @classmethod
-    def create(cls, total_cents: int, discount_percent: int) -> "Dependencies":
-        cart_repository = InMemoryCartRepository(total_cents)
-        parts = (
-            GetCartTotalUseCase(cart_repository),
-            cart_repository,
-        )
-        return cls(
-            get_checkout_total=build_checkout(
-                parts,
-                InMemoryDiscountRepository(discount_percent),
-            )
-        )
-"""
-
-    assert _score_layer(
-        tmp_path,
-        COMPLIANT_CHECKOUT,
-        dependencies,
-    ) == {"behavior": True, "norm": True}
 
 
 def _load_eval_runner():
@@ -2832,173 +1976,6 @@ def test_layer_boundary_distinguishes_valid_target_from_sibling_call(tmp_path):
     ) == {"behavior": True, "norm": False}
 
 
-@pytest.mark.parametrize(
-    "condition,expected_norm",
-    [
-        ("False", True),
-        ("condition", False),
-    ],
-    ids=["dead-branch", "runtime-branch"],
-)
-def test_layer_boundary_tracks_branch_reachability(
-    tmp_path,
-    condition,
-    expected_norm,
-):
-    dependencies = f"""from dataclasses import dataclass
-from shop.core.data.repositories import InMemoryCartRepository, InMemoryDiscountRepository
-from shop.core.domain.get_cart_total import GetCartTotalUseCase
-from shop.core.domain.get_checkout_total import GetCheckoutTotalUseCase
-
-
-def select_repository(repository, condition):
-    selected = repository
-    if {condition}:
-        selected = GetCartTotalUseCase(repository)
-    return selected
-
-
-@dataclass(frozen=True)
-class Dependencies:
-    get_checkout_total: GetCheckoutTotalUseCase
-
-    @classmethod
-    def create(cls, total_cents: int, discount_percent: int) -> "Dependencies":
-        cart_repository = InMemoryCartRepository(total_cents)
-        discount_repository = InMemoryDiscountRepository(discount_percent)
-        return cls(
-            GetCheckoutTotalUseCase(
-                select_repository(cart_repository, total_cents < 0),
-                discount_repository,
-            )
-        )
-"""
-
-    assert _score_layer(
-        tmp_path,
-        COMPLIANT_CHECKOUT,
-        dependencies,
-    ) == {"behavior": True, "norm": expected_norm}
-
-
-@pytest.mark.parametrize(
-    "local_binding,expected_norm",
-    [
-        (
-            "        selected = lambda: cart_repository.get_total_cents()\n",
-            True,
-        ),
-        ("", False),
-    ],
-    ids=["inner-shadow", "outer-capture"],
-)
-def test_layer_boundary_tracks_nested_scope_shadowing(
-    tmp_path,
-    local_binding,
-    expected_norm,
-):
-    dependencies = f"""from dataclasses import dataclass
-from shop.core.data.repositories import InMemoryCartRepository, InMemoryDiscountRepository
-from shop.core.domain.get_cart_total import GetCartTotalUseCase
-from shop.core.domain.get_checkout_total import GetCheckoutTotalUseCase
-
-
-def build_checkout(cart_repository, discount_repository):
-    selected = GetCartTotalUseCase(cart_repository)
-
-    def selected_cart():
-{local_binding}        return selected
-
-    return GetCheckoutTotalUseCase(
-        selected_cart(),
-        lambda: discount_repository.get_active_percent(),
-    )
-
-
-@dataclass(frozen=True)
-class Dependencies:
-    get_checkout_total: GetCheckoutTotalUseCase
-
-    @classmethod
-    def create(cls, total_cents: int, discount_percent: int) -> "Dependencies":
-        return cls(
-            build_checkout(
-                InMemoryCartRepository(total_cents),
-                InMemoryDiscountRepository(discount_percent),
-            )
-        )
-"""
-
-    assert _score_layer(
-        tmp_path,
-        UNTYPED_CHAINED_CHECKOUT,
-        dependencies,
-    ) == {"behavior": True, "norm": expected_norm}
-
-
-@pytest.mark.parametrize(
-    "setup,expected_norm",
-    [
-        (
-            "from importlib import import_module\n"
-            "loader = import_module\n"
-            "loader('http.client')\n"
-            "loader = lambda name: name\n",
-            False,
-        ),
-        (
-            "from importlib import import_module\n"
-            "loader = import_module\n"
-            "loader = lambda name: name\n"
-            "loader('http.client')\n",
-            True,
-        ),
-        (
-            "loader = __import__\n"
-            "loader('socket')\n"
-            "loader = lambda name: name\n",
-            False,
-        ),
-        (
-            "loader = __import__\n"
-            "loader = lambda name: name\n"
-            "loader('socket')\n",
-            True,
-        ),
-        (
-            "from importlib import import_module\n"
-            "def load(loader=import_module):\n"
-            "    loader('http.client')\n"
-            "load()\n",
-            False,
-        ),
-    ],
-    ids=[
-        "import-module-before-rebind",
-        "import-module-after-rebind",
-        "dunder-import-before-rebind",
-        "dunder-import-after-rebind",
-        "default-import-alias",
-    ],
-)
-def test_layer_boundary_tracks_dynamic_import_alias_order(
-    tmp_path,
-    setup,
-    expected_norm,
-):
-    policy = (
-        setup
-        + "\n\ndef checkout_total(total_cents: int, discount_percent: int) -> int:\n"
-        "    return max(0, total_cents * (100 - discount_percent) // 100)\n"
-    )
-
-    assert _score_layer(
-        tmp_path,
-        COMPLIANT_CHECKOUT,
-        domain_sources={"checkout_policy.py": policy},
-    ) == {"behavior": True, "norm": expected_norm}
-
-
 def test_layer_boundary_tracks_module_scope_kwargs_injection(tmp_path):
     dependencies = """from dataclasses import dataclass
 from shop.core.data.repositories import InMemoryCartRepository, InMemoryDiscountRepository
@@ -3100,6 +2077,114 @@ def test_layer_boundary_distinguishes_bare_repository_and_usecase_classes(
         checkout,
         violating,
     ) == {"behavior": True, "norm": False}
+
+
+MERGED_LAYER_RESULT = KIT_ROOT / "evals" / "results" / "20260726T233416.json"
+
+
+def _eval_source_hash(source: str | None) -> str:
+    if source is None:
+        return "<absent>"
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
+def _layer_seed_sources() -> dict[str, str]:
+    seed = LAYER_CASE / "seed"
+    return {
+        str(path.relative_to(seed)): path.read_text(encoding="utf-8")
+        for path in sorted(seed.rglob("*.py"))
+    }
+
+
+def _parse_eval_diff(source_diff: str) -> list[dict]:
+    entries: list[dict] = []
+    for line in source_diff.splitlines():
+        if line.startswith("diff --eval "):
+            entries.append({"path": line[len("diff --eval "):], "patch": []})
+        elif not entries:
+            continue
+        elif not entries[-1]["patch"] and line.startswith(
+            ("status: ", "old-sha256: ", "new-sha256: ")
+        ):
+            key, value = line.split(": ", 1)
+            entries[-1][key] = value
+        elif not line.startswith(("--- ", "+++ ")):
+            entries[-1]["patch"].append(line)
+    return entries
+
+
+def _apply_eval_patch(old_text: str, patch: list[str]) -> str:
+    old = old_text.splitlines(keepends=True)
+    restored: list[str] = []
+    consumed = 0
+    index = 0
+    while index < len(patch):
+        header = re.match(r"^@@ -(\d+)(?:,(\d+))? \+", patch[index])
+        index += 1
+        if header is None:
+            continue
+        start, count = int(header.group(1)), int(header.group(2) or 1)
+        begin = start - 1 if count else start
+        restored.extend(old[consumed:begin])
+        consumed = begin
+        while index < len(patch) and not patch[index].startswith("@@"):
+            line = patch[index]
+            index += 1
+            if not line or line.startswith("\\"):
+                continue
+            if line.startswith(" "):
+                restored.append(old[consumed])
+                consumed += 1
+            elif line.startswith("-"):
+                consumed += 1
+            elif line.startswith("+"):
+                restored.append(line[1:] + "\n")
+    restored.extend(old[consumed:])
+    return "".join(restored)
+
+
+def _restore_eval_candidate(project: Path, row: dict) -> None:
+    seed_sources = _layer_seed_sources()
+    shutil.copytree(LAYER_CASE / "seed", project)
+    for entry in _parse_eval_diff(row["source_diff"]):
+        path = project / entry["path"]
+        old = seed_sources.get(entry["path"])
+        assert _eval_source_hash(old) == entry["old-sha256"], (
+            f"{entry['path']}: seed가 실측 실행 시점과 다르다"
+        )
+        if entry["status"] == "deleted":
+            path.unlink()
+            continue
+        restored = _apply_eval_patch(old or "", entry["patch"])
+        assert _eval_source_hash(restored) == entry["new-sha256"], (
+            f"{entry['path']}: source_diff로 후보 소스를 복원하지 못했다"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(restored, encoding="utf-8")
+
+
+def test_layer_boundary_oracle_reproduces_merged_run_norm_verdicts(tmp_path):
+    """반증: 축소된 oracle이 실측 후보 소스에 다른 판정을 내면 머지된 norm 수치가 무효다."""
+    oracle = _load_layer_oracle()
+    rows = json.loads(MERGED_LAYER_RESULT.read_text(encoding="utf-8"))["rows"]
+    assert len(rows) == 20
+
+    replayed = []
+    for index, row in enumerate(rows):
+        project = tmp_path / f"row{index}"
+        _restore_eval_candidate(project, row)
+        violations = oracle._architecture_violations(project)
+        replayed.append(
+            {
+                "norm": oracle._architecture_ok(violations),
+                "norm_reasons": violations,
+            }
+        )
+
+    assert replayed == [
+        {"norm": row["norm"], "norm_reasons": row["norm_reasons"]}
+        for row in rows
+    ]
 
 
 def test_runner_keeps_duplicate_host_output_in_memory(tmp_path):
