@@ -132,6 +132,9 @@ class Runner:
         self.profile_id, self.profile = _load_profile(self.kit_root, self.config_root)
 
     def run(self, mode: ResumeMode, task: str = "") -> None:
+        # 첫 `capture_leader_snapshot`보다 먼저 돈다. 뒤에서 돌면 이미 오염된
+        # 상태를 tripwire 기준선으로 굳혀 격리 검증 전체가 무의미해진다.
+        assert_managed_hooks_registered(self.project_root, self.config_root)
         if mode == ResumeMode.START:
             self.run_dir = create_run(
                 self.state_root,

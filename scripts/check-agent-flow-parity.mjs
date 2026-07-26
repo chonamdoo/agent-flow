@@ -196,14 +196,45 @@ function recursiveFiles(relDir) {
   return out.sort();
 }
 
+function assertAbsent(rel, needle, why) {
+  const text = readIfExists(rel);
+  if (text === null) return;
+  if (text.includes(needle)) {
+    failures.push(`${rel} must not contain ${JSON.stringify(needle)}: ${why}`);
+  }
+}
+
 for (const installer of ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"]) {
   assertContains(installer, "function installCodexTrustState(root)");
-  assertContains(installer, "function queryCodexProjectHookHashes(root)");
-  assertContains(installer, "function trustedManagedHookScriptName(root, command)");
-  assertContains(installer, "normalized === `${normalizedRoot}/.agent-flow/scripts/hooks/${scriptName}`");
-  assertContains(installer, "[hooks.state.");
   assertContains(installer, "function installOmpHooks(root)");
   assertContains(installer, ".omp\", \"extensions\", \"agent-flow-hooks.ts");
+  // install이 **현재 등록된** hook의 해시를 trusted로 되받아 적으면, 변조된
+  // 등록이 다음 install에서 승인 상태로 세탁된다. 읽는 코드도 없었다.
+  // 등록 무결성은 런 시작 시 hook_integrity가 kit.json과 대조한다.
+  assertAbsent(installer, "[hooks.state.", "install must not launder managed hook approval");
+  assertAbsent(installer, "trusted_hash", "install must not launder managed hook approval");
+}
+
+// 관리 hook 이름은 이제 등록 지점이 4곳이다 — installer 2개, 이 파일, 그리고
+// 런 시작 무결성 검증(Python). 갈라지면 검증이 조용히 좁아진다.
+{
+  const jsManagedScripts = (() => {
+    const text = readIfExists("bin/agent-flow-kit.mjs");
+    if (text === null) return null;
+    const match = text.match(/const MANAGED_HOOK_SCRIPTS = \[([\s\S]*?)\];/);
+    if (!match) {
+      failures.push("bin/agent-flow-kit.mjs missing MANAGED_HOOK_SCRIPTS");
+      return null;
+    }
+    return [...match[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]).sort();
+  })();
+  if (jsManagedScripts) {
+    assertPythonContract("managed hook script parity", `
+from agent_flow.core.hook_integrity import MANAGED_HOOK_SCRIPTS
+expected = ${JSON.stringify(jsManagedScripts)}
+assert sorted(MANAGED_HOOK_SCRIPTS) == expected, (sorted(MANAGED_HOOK_SCRIPTS), expected)
+`);
+  }
 }
 
 // 두 installer가 심는 OMP 확장은 **바이트 단위로** 같아야 한다. 예전에 한쪽만

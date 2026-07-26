@@ -760,3 +760,72 @@ def test_hooks_flag_restores_them(tmp_path: Path, binary: str) -> None:
     assert "guard-protected-branch.sh" in back["registered"]
     assert back["omp"] is True
     assert back["flag"] is True
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_install_does_not_record_hook_approval_hashes(tmp_path: Path, binary: str) -> None:
+    """반증: install이 hook 승인 해시를 적으면 변조가 승인 상태로 세탁된다.
+
+    install은 **현재 등록된** hook의 해시를 받아 적을 뿐이라, 변조된 등록도
+    그대로 trusted가 된다. 읽어서 검증하는 코드는 처음부터 0개였다. 프로젝트
+    trust_level은 사용자가 명시적으로 고른 설치 대상이라 남긴다.
+    """
+    import os
+    import sys
+
+    project = tmp_path / "trust"
+    project.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {k: v for k, v in os.environ.items() if k != "AGENT_FLOW_SKIP_CODEX_TRUST"}
+    env["HOME"] = str(home)
+    # HOME을 갈아끼우면 user-site에 있던 PyYAML이 사라져 workflow export가 죽는다.
+    # 검사 대상은 codex trust 기록이므로 인터프리터와 yaml 경로는 고정해 준다.
+    import yaml
+
+    env["PYTHON"] = sys.executable
+    env["PYTHONPATH"] = os.pathsep.join(
+        p for p in (str(Path(yaml.__file__).resolve().parents[1]), env.get("PYTHONPATH")) if p
+    )
+
+    result = subprocess.run(
+        (_node(), str(KIT_ROOT / "bin" / binary), "install"),
+        cwd=project, text=True, capture_output=True, check=False, env=env,
+    )
+    assert result.returncode == 0, result.stderr
+
+    config = home / ".codex" / "config.toml"
+    text = config.read_text(encoding="utf-8") if config.is_file() else ""
+    assert "trust_level" in text
+    assert "hooks.state" not in text
+    assert "trusted_hash" not in text
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("hooks_flag", [(), ("--no-hooks",)])
+def test_install_output_satisfies_the_run_start_hook_gate(
+    tmp_path: Path, binary: str, hooks_flag: tuple[str, ...]
+) -> None:
+    """불변: installer가 만든 상태는 런 시작 게이트를 그대로 통과한다.
+
+    게이트의 기대값과 installer가 심는 것이 갈라지면, 정상 설치가 모든 런을
+    막거나(오탐) 게이트가 아무것도 안 보게 된다(미탐). 둘 다 조용히 생긴다.
+    """
+    import sys
+
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.core.hook_integrity import verify_managed_hooks
+
+    project = tmp_path / f"gate-{binary}-{len(hooks_flag)}"
+    project.mkdir()
+    result = subprocess.run(
+        (_node(), str(KIT_ROOT / "bin" / binary), "install", *hooks_flag),
+        cwd=project, text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+    reports = verify_managed_hooks(project)
+    assert len(reports) == 1
+    assert reports[0].recorded is True
+    assert reports[0].expected_enabled is (not hooks_flag)
+    assert reports[0].violations == ()

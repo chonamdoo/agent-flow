@@ -6,7 +6,9 @@ dead assertion cannot pass silently.
 """
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -695,6 +697,48 @@ def test_recovery_commands_bypass_tripwire(tmp_path):
     ):
         result = _cli(argv, cwd=plain)
         assert result.returncode == 0, f"{argv} blocked in non-git: {result.stdout}{result.stderr}"
+
+
+def test_recovery_commands_survive_a_hook_integrity_violation(tmp_path):
+    """불변: 런 시작 게이트가 막는 상태에서도 복구 명령은 통과한다.
+
+    tripwire 오염만 검사하던 위 테스트는 이 실패 유형을 안 덮는다. 게이트를
+    새로 추가할 때마다 §10.2가 조용히 깨질 수 있으므로 오염 유형을 함께 늘린다.
+    """
+    project = tmp_path / "proj"
+    project.mkdir()
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required")
+    kit = Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"
+    installed = subprocess.run(
+        (node, str(kit), "install"), cwd=project, capture_output=True, text=True
+    )
+    assert installed.returncode == 0, installed.stderr
+    _init_repo(project)
+
+    # #102가 실증한 붕괴 경로 그대로: 읽기 hook 등록만 지운다.
+    settings_path = project / ".claude" / "settings.json"
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    settings["hooks"]["PostToolUse"] = [
+        entry
+        for entry in settings["hooks"]["PostToolUse"]
+        if not any("record-skill-read.py" in hook["command"] for hook in entry["hooks"])
+    ]
+    settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+
+    for argv in (
+        ["status", "--root", "."],
+        ["worktree", "list", "--root", "."],
+        ["abort", "--root", "."],
+    ):
+        result = _cli(argv, cwd=project)
+        assert result.returncode == 0, f"{argv} blocked: {result.stdout}{result.stderr}"
+
+    # 반증: 같은 오염에서 런은 반드시 막힌다. 막히지 않으면 위 통과는 무의미하다.
+    blocked = _cli(["run", "demo task", "--root", "."], cwd=project)
+    assert blocked.returncode == 2, blocked.stdout
+    assert "managed hook registration" in blocked.stderr
 
 
 def test_multi_review_reviewer_env_is_sanitized(tmp_path, monkeypatch):

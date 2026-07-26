@@ -92,6 +92,10 @@ from agent_flow.core.worktrees import (
     worktree_branch_exists,
     worktree_runtime_root,
 )
+from agent_flow.core.hook_integrity import (
+    HookIntegrityError,
+    assert_managed_hooks_registered,
+)
 from agent_flow.core.worktree_isolation import (
     WorkerScope,
     WorktreeIsolationError,
@@ -1067,6 +1071,13 @@ def main(argv: list[str] | None = None) -> int:
             claimed = None
             leader_before = None
             if isolate:
+                # 스냅샷보다 먼저다. 오염된 등록 상태를 기준선으로 굳히면
+                # tripwire가 그 오염을 정상으로 승인한다.
+                try:
+                    assert_managed_hooks_registered(root)
+                except HookIntegrityError as exc:
+                    print(_format_cli_error(exc), file=sys.stderr)
+                    return 2
                 try:
                     with worker_claim_lock(root):
                         # capacity를 세는 시점과 task를 잡는 시점이 갈라져 있으면
