@@ -673,7 +673,22 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         results = run_gates(commands, cwd=command_root, timeout_s=args.timeout)
         if args.run_dir is not None:
-            write_gate_results(run_dir=_resolve_project_path(command_root, args.run_dir), results=results)
+            # run을 소유하는 것은 leader checkout도 worktree checkout도 아니라
+            # worktree runtime root다(`cli.py:497`가 state_root로 쓰는 자리).
+            # 상대 --run-dir을 command_root 기준으로 풀면 runner가 읽지 않는
+            # 자리에 결과가 남는다.
+            # 절대경로면 base가 쓰이지 않는다. worktree_runtime_root는 git을 새로
+            # 띄우고 실패 시 예외를 던지므로, 방금 끝난 게이트 결과를 그 조회
+            # 때문에 잃지 않도록 필요한 때만 계산한다.
+            run_base = (
+                worktree_runtime_root(root=root, name=args.worktree)
+                if getattr(args, "worktree", None) and not Path(args.run_dir).is_absolute()
+                else root
+            )
+            write_gate_results(
+                run_dir=_resolve_project_path(run_base, args.run_dir),
+                results=results,
+            )
         failed = [result for result in results if not result.passed]
         required_results = [result for result in results if result.required]
         failed_required = [result for result in required_results if not result.passed]
