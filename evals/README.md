@@ -21,7 +21,7 @@
 evals/
   cases/<id>/task.md    agent에게 주는 과제 문장
   cases/<id>/seed/      과제 시작 상태 (그대로 복사된다)
-  cases/<id>/check.py   기계 oracle. score(project) -> dict[str, bool]
+  cases/<id>/check.py   기계 oracle. behavior와 case별 norm을 반환한다
   configs.py            컨텍스트 전달 방식 4종
   run.py                러너. (case × config × trial)마다 격리 프로젝트를 만들고 채점한다
 ```
@@ -33,12 +33,12 @@ evals/
 | 축 | 무엇을 보는가 | 누가 판정하는가 |
 |---|---|---|
 | `behavior` | seed의 테스트가 통과하는가 | `pytest` |
-| `norm` | 이 프로젝트의 주석 규범을 지켰는가 | `scripts/hooks/comment-checker.py` |
+| `norm` | case별 주석 규범 또는 계층 경계를 지켰는가 | comment-checker 또는 Python AST/import graph |
 
-`norm`이 신호를 만드는 축이다. 일반 통념으로 쓰면 `Returns the delay.` 같은
-저가치 주석이 나오고 comment-checker가 잡는다. 규범을 읽으면 *왜*를 적어 통과한다.
-훈련 데이터에 없는 것을 재야 문서 접근이 실제로 효과를 내는지 보인다는
-Vercel의 지적이 여기에 그대로 적용된다.
+주석 case에서는 일반 통념으로 쓴 저가치 주석을 comment-checker가 잡는다.
+`layer_boundary`에서는 candidate 밖의 canonical test로 behavior를 실행하고,
+AST/import graph가 target use case의 sibling use case 참조·주입과 domain의
+data/HTTP/framework import를 거부한다. agent의 자기신고는 어느 축에도 쓰지 않는다.
 
 ## 실행
 
@@ -51,7 +51,7 @@ host CLI(`claude` / `codex`)가 필요하고 네트워크를 쓴다. 그래서 p
 넣지 않는다 — 느리고 비결정적이다. 대신 채점 코드는 `tests/test_eval_scoring.py`가
 결정적으로 검사한다.
 
-결과는 `evals/results/<timestamp>.json`에 남는다.
+결과는 `evals/results/<timestamp>.json`에 host 상태, norm 사유, source diff와 함께 남는다.
 
 ## 지금까지 잰 것 (claude, trials=5)
 
@@ -97,3 +97,24 @@ baseline이 실패하는 과제가 필요하다. 모델이 추론으로 맞힐 �
 
 셋 다 단일 파일 과제로는 재현되지 않는다. seed가 커지고 루프가 느려지는 대신,
 baseline이 실제로 틀릴 수 있는 영역이다.
+
+## `layer_boundary` 실측 (claude, trials=5)
+
+| config | valid/attempted | behavior | norm | both |
+|---|---:|---:|---:|---:|
+| baseline | 5/5 | 100% | 0% | 0% |
+| skill-ondemand | 5/5 | 100% | 0% | 0% |
+| agents-index | 5/5 | 100% | 20% | 20% |
+| agents-index-noisy | 5/5 | 100% | 20% | 20% |
+
+원자료: `results/20260726T233416.json` (`resolution: true`).
+
+20회 모두 `host_ok=true`였고 baseline이 behavior를 통과하면서 5회 모두 norm을
+위반했으므로 case 자체의 해상도는 확인했다. 전달 방식 차이는 이 표본에서
+agents-index 계열 각각 5회 중 1회 norm 통과로, 구성당 1 trial 차이다. n=5에서
+이 차이로 개선을 주장하지 않는다.
+
+같은 harness로 앞서 돌린 `results/20260726T224200.json`은 `agents-index` 1회가
+300s timeout으로 `host_ok=false`가 되어 `resolution: false`
+(`invalid-host-trials`)로 남았다. 그 실행의 유효 19회는 네 구성 모두
+behavior 100% / norm 0%였다. 위 표는 `--timeout 600`으로 20/20을 채운 실행이다.

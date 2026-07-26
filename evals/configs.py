@@ -9,12 +9,24 @@ from __future__ import annotations
 from pathlib import Path
 
 KIT_ROOT = Path(__file__).resolve().parents[1]
-NORM_SKILLS = ("code-generation-discipline", "comment-authoring-discipline")
+CASE_NORM_SKILLS = {
+    "comment_norm": ("code-generation-discipline", "comment-authoring-discipline"),
+    "no_narration": ("code-generation-discipline", "comment-authoring-discipline"),
+    "layer_boundary": (
+        "code-generation-discipline",
+        "clean-architecture-core",
+        "python-api-clean-architecture",
+    ),
+}
 
 _RETRIEVAL_LINE = (
     "IMPORTANT: 아래 파일이 기억보다 우선한다. 변경 대상을 먼저 훑고, "
     "scope가 걸리는 것만 읽는다."
 )
+
+
+def _required_norm_skills(case: str) -> tuple[str, ...]:
+    return CASE_NORM_SKILLS[case]
 
 
 def _install_skills(project: Path) -> list[str]:
@@ -31,16 +43,17 @@ def _install_skills(project: Path) -> list[str]:
     return names
 
 
-def baseline(project: Path) -> None:
+def baseline(project: Path, case: str) -> None:
     """문서 없음. 모델의 사전 지식만."""
-    return None
+    _required_norm_skills(case)
 
 
-def skill_ondemand(project: Path) -> None:
+def skill_ondemand(project: Path, case: str) -> None:
     """skill은 디스크에 있고, AGENTS.md는 "필요하면 index를 읽어라"라고만 한다.
 
     이 저장소가 이번 변경 전까지 쓰던 방식이다. 읽을지 말지가 agent의 판단이다.
     """
+    _required_norm_skills(case)
     names = _install_skills(project)
     index = {"skills": [{"name": name, "path": f".agent-flow/skills/{name}/SKILL.md"} for name in names]}
     import json
@@ -57,11 +70,11 @@ def skill_ondemand(project: Path) -> None:
     )
 
 
-def agents_index(project: Path) -> None:
+def agents_index(project: Path, case: str) -> None:
     """AGENTS.md가 압축 인덱스를 직접 들고 있다. 읽을지 말지의 판단이 없다."""
     names = _install_skills(project)
-    passive = [name for name in names if name in NORM_SKILLS]
-    on_demand = [name for name in names if name not in NORM_SKILLS]
+    passive = _required_norm_skills(case)
+    on_demand = [name for name in names if name not in passive]
     (project / "AGENTS.md").write_text(
         "# AGENTS.md\n\n"
         "```text\n"
@@ -74,13 +87,13 @@ def agents_index(project: Path) -> None:
     )
 
 
-def agents_index_noisy(project: Path) -> None:
+def agents_index_noisy(project: Path, case: str) -> None:
     """같은 인덱스에 쓰지 않는 이름 200개를 섞는다.
 
     Vercel은 안 쓰는 skill이 test pass를 63%에서 58%로 **떨어뜨리는** 것을 봤다.
     잡음 비용이 우리 환경에도 있는지를 이 구성이 잰다.
     """
-    agents_index(project)
+    agents_index(project, case)
     text = (project / "AGENTS.md").read_text(encoding="utf-8")
     noise = ",".join(f"vendor-guide-{index:03d}" for index in range(200))
     (project / "AGENTS.md").write_text(text.replace("```\n", f"|on-demand:{{{noise}}}\n```\n", 1), encoding="utf-8")
