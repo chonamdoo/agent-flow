@@ -385,7 +385,7 @@ assertPythonContract("profile gate build/typecheck/lint order", `
 from agent_flow.cli import _profile_gate_commands
 
 def gate_ids(profile):
-    return [command.gate_id for command in _profile_gate_commands([profile])]
+    return [command.gate_id for command in _profile_gate_commands([profile], phase="all")]
 
 def require_before(ids, left, right):
     if ids.index(left) > ids.index(right):
@@ -396,7 +396,7 @@ for profile in ("android", "generic", "ios", "nextjs", "node", "python", "react-
     ids = gate_ids(profile)
     if "architecture-lint" not in ids:
         raise AssertionError(f"{profile} missing architecture-lint gate: {ids}")
-generic_commands = [command.command for command in _profile_gate_commands(["generic"])]
+generic_commands = [command.command for command in _profile_gate_commands(["generic"], phase="all")]
 if ("node", "scripts/check-context-docs.mjs") not in generic_commands:
     raise AssertionError(generic_commands)
 require_before(typescript, "build", "typecheck")
@@ -406,8 +406,8 @@ react_native = gate_ids("react-native")
 require_before(react_native, "android-build", "lint")
 require_before(react_native, "ios-build", "lint")
 
-union = [command.gate_id for command in _profile_gate_commands(["android", "react-native"])]
-union_commands = [command.command for command in _profile_gate_commands(["android", "react-native"])]
+union = [command.gate_id for command in _profile_gate_commands(["android", "react-native"], phase="all")]
+union_commands = [command.command for command in _profile_gate_commands(["android", "react-native"], phase="all")]
 require_before(union, "react-native:android-build", "architecture-lint")
 require_before(union, "react-native:android-build", "android:lint")
 architecture_command = next((command for command in union_commands if command[-2:] == ("--profile", "android,react-native")), None)
@@ -416,6 +416,30 @@ if architecture_command is None or "agent_flow.core.architecture_lint" not in ar
 if any(command[-2:] == ("--profile", "android") for command in union_commands):
     raise AssertionError(union_commands)
 	`);
+// Node `gates`는 인자를 그대로 Python CLI로 relay한다(`bin/agent-flow-kit.mjs:runGates`).
+// 두 진입점이 같은 게이트 집합을 보려면 Python이 소유한 phase 필터가 살아 있어야 한다.
+assertPythonContract("profile gate phase filter", `
+from agent_flow.cli import _profile_gate_commands
+from agent_flow.core.profiles import DEFAULT_GATE_PHASE, load_profile
+
+if DEFAULT_GATE_PHASE != "pre-commit":
+    raise AssertionError(DEFAULT_GATE_PHASE)
+
+default_ids = [command.gate_id for command in _profile_gate_commands(["python"])]
+if "test" in default_ids:
+    raise AssertionError(f"pre-push gate ran at pre-commit: {default_ids}")
+all_ids = [command.gate_id for command in _profile_gate_commands(["python"], phase="all")]
+if "test" not in all_ids:
+    raise AssertionError(f"--phase all dropped a gate: {all_ids}")
+
+pre_push = [command.gate_id for command in _profile_gate_commands(["python"], phase="pre-push")]
+if pre_push != ["test"]:
+    raise AssertionError(pre_push)
+
+for gate in load_profile("python").gates:
+    if gate.phase not in ("pre-commit", "pre-push", "post-merge"):
+        raise AssertionError(f"{gate.gate_id}: {gate.phase}")
+`);
 assertPythonContract("react-native profile wins over Gradle", `
 import json
 from pathlib import Path

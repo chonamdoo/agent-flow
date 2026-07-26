@@ -9,11 +9,20 @@ from typing import Any
 import yaml
 
 
+# `profiles/_schema.yaml`의 gates[].phase가 선언하는 전체 집합.
+GATE_PHASES: tuple[str, ...] = ("pre-commit", "pre-push", "post-merge")
+# workflow상 gates는 final-review → gates → commit 사이에서 돈다(`workflows/default.yaml`).
+DEFAULT_GATE_PHASE = "pre-commit"
+# phase 필터를 끄는 선택자. 실제 gate가 이 값을 phase로 선언할 수는 없다.
+GATE_PHASE_ALL = "all"
+
+
 @dataclass(frozen=True)
 class ProfileGate:
     gate_id: str
     command: tuple[str, ...]
     required: bool = True
+    phase: str = DEFAULT_GATE_PHASE
 
 
 @dataclass(frozen=True)
@@ -121,6 +130,19 @@ def _gate_from_payload(item: object, *, profile_id: str) -> ProfileGate:
         gate_id=gate_id,
         command=tuple(command),
         required=required if isinstance(required, bool) else True,
+        phase=_gate_phase_from_payload(item.get("phase"), profile_id=profile_id, gate_id=gate_id),
+    )
+
+
+def _gate_phase_from_payload(value: object, *, profile_id: str, gate_id: str) -> str:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return DEFAULT_GATE_PHASE
+    if isinstance(value, str) and value.strip() in GATE_PHASES:
+        return value.strip()
+    # 오타를 기본값으로 접으면 pre-push 게이트가 조용히 pre-commit에서 돈다.
+    # 죽은 설정으로 돌아가는 경로라 거부한다.
+    raise ValueError(
+        f"profile gate phase must be one of {'|'.join(GATE_PHASES)}: {profile_id}:{gate_id}"
     )
 
 

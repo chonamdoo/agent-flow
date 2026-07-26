@@ -3508,7 +3508,7 @@ try {
     runGates(process.argv.slice(3));
   }
 
-  console.error("usage: agent-flow-kit install [--force-managed] | gates [--profile <id>] [--worktree <name>] | architecture-lint [--profile <id>] [--files ...] | run <install|start|status|next|advance|push-watch|push-watch-tick>");
+  console.error("usage: agent-flow-kit install [--force-managed] | gates [--profile <id>] [--phase <pre-commit|pre-push|post-merge|all>] [--worktree <name>] | architecture-lint [--profile <id>] [--files ...] | run <install|start|status|next|advance|push-watch|push-watch-tick>");
   process.exit(1);
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));

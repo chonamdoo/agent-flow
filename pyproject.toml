@@ -27,3 +27,8 @@ packages = ["src/agent_flow"]
 [tool.hatch.build.targets.wheel.force-include]
 "bootstrap" = "agent_flow/bootstrap"
 "templates/_shared" = "agent_flow/templates/_shared"
+
+[tool.pytest.ini_options]
+# evals/cases/*/seed/test_*.py는 의도적으로 red인 픽스처다. 루트 수집에 섞이면
+# test 게이트가 항상 빨간색을 리턴해 신호 가치를 잃는다.
+testpaths = ["tests"]
