@@ -42,6 +42,12 @@ LEAKY_GIT_ENV_VARS = (
     "GIT_CEILING_DIRECTORIES",
 )
 
+# git이 사람에게 보여주는 메시지는 로케일에 따라 번역된다. 우리가 그 문자열로
+# 분기하는 자리가 남아 있는 한(`is_git_lock_contention`) 로케일을 고정하지 않으면
+# 한국어 환경에서 그 분기가 통째로 죽는다 — lock 경합 재시도가 아예 발동하지
+# 않는다. 사용자에게 보이는 문구는 agent-flow가 직접 만드는 것이라 영향이 없다.
+_GIT_STABLE_LOCALE = {"LC_ALL": "C", "LANG": "C", "LANGUAGE": ""}
+
 DEFAULT_MAX_WORKERS = 8
 _LOCK_TIMEOUT_S = 120
 _LOCK_POLL_S = 0.05
@@ -72,6 +78,16 @@ def max_worker_capacity() -> int:
 
 
 def sanitized_worker_env(*, base_env: Optional[dict] = None) -> dict:
+    """워커에게 넘길 env에서 git discovery 변수를 제거한다.
+
+    **보장 범위는 git 서브프로세스뿐이다.** git은 이 변수들을 cwd보다 우선하므로,
+    제거하면 git 경로에 한해 cwd가 권위가 된다. 파일시스템 쓰기는 여기에 해당하지
+    않는다 — 절대경로 쓰기는 cwd를 무시하며 이 함수로 막을 수 없다.
+
+    그래서 이건 확률 저감이지 격리 보장이 아니다. 오염 판정은 오직
+    ``capture_leader_snapshot``/``assert_leader_unchanged`` tripwire가 한다. 이
+    함수를 "격리"로 읽으면 tripwire 없이도 안전하다는 오독이 생긴다.
+    """
     env = dict(os.environ if base_env is None else base_env)
     for name in LEAKY_GIT_ENV_VARS:
         env.pop(name, None)
@@ -145,7 +161,9 @@ def verify_linked_worktree(
         )
 
     # Authoritative registration check: git itself must list this worktree.
-    if target not in _registered_worktree_paths(root):
+    # 조회가 실패하면 raise한다. 빈 집합으로 강등하면 "등록 안 됨"과 "물어보지
+    # 못했다"가 같은 값이 되어, 진단이 실제 원인과 무관해진다.
+    if target not in registered_worktree_paths(root):
         raise WorktreeIsolationError(f"worktree is not registered with git: {target}")
 
     if expected_branch is not None:
@@ -167,28 +185,44 @@ def assert_worktree_mergeable(*, root, path) -> None:
     """
     target = real_path(path)
 
-    status = git_safe("-C", str(target), "status", "--porcelain", cwd=target)
+    status = git_safe(
+        "-C", str(target), "status", "--porcelain", cwd=target, optional_locks=False
+    )
     if not status.ok:
-        raise WorktreeIsolationError(f"cannot inspect worktree status before cleanup: {target}")
+        raise _tripwire_git_error(
+            f"cannot inspect worktree status before cleanup: {target}", status
+        )
     if status.stdout.strip():
         raise WorktreeIsolationError(
             f"worktree has uncommitted changes; refusing to remove: {target}"
         )
 
-    tip = git_safe("-C", str(target), "rev-parse", "HEAD", cwd=target)
+    tip = git_safe(
+        "-C", str(target), "rev-parse", "HEAD", cwd=target, optional_locks=False
+    )
     if not tip.ok or not tip.stdout.strip():
-        raise WorktreeIsolationError(f"cannot resolve worktree HEAD before cleanup: {target}")
+        raise _tripwire_git_error(f"cannot resolve worktree HEAD before cleanup: {target}", tip)
     tip_sha = tip.stdout.strip()
 
     leader_head = _leader_head_sha(root)
     if leader_head is None:
         raise WorktreeIsolationError("cannot resolve leader HEAD for merge proof")
 
-    ancestor = git_safe("merge-base", "--is-ancestor", tip_sha, leader_head, cwd=root)
-    if not ancestor.ok:
+    ancestor = git_safe(
+        "merge-base", "--is-ancestor", tip_sha, leader_head, cwd=root, optional_locks=False
+    )
+    if ancestor.returncode == 1 and not ancestor.stderr.strip():
+        # exit 1은 git이 정상 실행되어 "조상이 아니다"라고 답한 것이다. 그 외의
+        # 실패를 같은 문구로 보고하면 사용자가 고장을 미머지로 오독한다.
         raise WorktreeIsolationError(
             f"worktree commit {tip_sha[:12]} is not merged into leader "
             f"{leader_head[:12]}; refusing to remove (unmerged work would be lost)"
+        )
+    if not ancestor.ok:
+        raise _tripwire_git_error(
+            f"cannot prove worktree commit {tip_sha[:12]} is merged into leader "
+            f"{leader_head[:12]}; refusing to remove",
+            ancestor,
         )
 
 
@@ -219,16 +253,44 @@ def assert_scopes_isolated(scopes: Sequence[WorkerScope]) -> None:
 def git_repo_state(root) -> str:
     """Classify ``root`` as 'repo', 'non-repo', or 'unknown'.
 
-    'unknown' means the git call itself failed (timeout/OSError). It must not be
-    downgraded to non-git: the caller fails closed rather than silently running a
-    worker unisolated in the leader checkout.
+    'unknown' means git could not answer. It must never be downgraded to
+    non-git: the caller fails closed rather than running a worker unisolated in
+    the leader checkout, or planting agent-flow state inside it.
+
+    non-zero exit alone does not prove "not a repository". ``rev-parse`` exits
+    128 for every fatal — dubious ownership (``safe.directory``), an unreadable
+    ``.git``, a corrupt config. Those are exactly the states where the tripwire
+    must stay armed, yet the old code folded all of them into 'non-repo', which
+    made ``capture_leader_snapshot`` return a disarmed snapshot and silently
+    drop the only contamination verdict there is.
+
+    So a failure is downgraded only when the filesystem *proves* it. That oracle
+    spawns no process, so it cannot be defeated by the locale, the git version,
+    or the contention that caused the failure in the first place.
     """
-    result = git_safe("rev-parse", "--git-dir", cwd=root)
+    result = git_safe("rev-parse", "--git-dir", cwd=root, optional_locks=False)
     if result.ok:
         return "repo"
-    if result.timed_out or result.error is not None:
-        return "unknown"
-    return "non-repo"
+    return "non-repo" if _no_git_dir_above(root) else "unknown"
+
+
+def _no_git_dir_above(root) -> bool:
+    """``root``와 그 조상 어디에도 ``.git``이 없음을 증명했는가.
+
+    존재만 본다. 읽지 못하는 ``.git``도 "있다"로 센다 — 판정 불가를 non-repo로
+    접지 않기 위해서다. ``Path.exists()``는 권한 오류를 False로 삼키므로 쓰지
+    않고 ``lstat``의 예외 종류로 구분한다.
+    """
+    current = real_path(root)
+    for candidate in (current, *current.parents):
+        try:
+            os.lstat(candidate / ".git")
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return False
+        return False
+    return True
 
 
 # --- leader tripwire ---------------------------------------------------------
@@ -306,6 +368,11 @@ def capture_leader_snapshot(leader_root: Path) -> LeaderSnapshot:
 
     git이 대답하지 못하면(unknown) 비교 기준을 세울 수 없으므로 fail-closed로
     raise한다. 비-git 프로젝트는 지킬 leader가 없으니 disarmed 스냅샷을 준다.
+
+    재시도 단위는 개별 git 호출이 아니라 **스냅샷 전체**다. 호출마다 재시도하면
+    경합이 걷히는 도중에 찍힌 조각들이 한 스냅샷 안에 섞여, 어느 시점과도
+    일치하지 않는 기준선이 만들어진다. 그런 기준선은 다음 비교에서 반드시 오탐을
+    내고, 오탐은 완료된 워커 산출물을 failed로 되돌린다.
     """
     state = git_repo_state(leader_root)
     if state == "non-repo":
@@ -379,9 +446,7 @@ def leader_root_for(worker_root) -> Optional[Path]:
 def _snapshot_diff(before: LeaderSnapshot, after: LeaderSnapshot) -> list[str]:
     reasons: list[str] = []
     if before.head != after.head:
-        reasons.append(
-            f"HEAD moved {before.head[:12] or '(unborn)'} -> {after.head[:12] or '(unborn)'}"
-        )
+        reasons.append(f"HEAD moved {before.head[:12]} -> {after.head[:12]}")
     if before.branch != after.branch:
         reasons.append(f"branch switched {before.branch!r} -> {after.branch!r}")
     known = set(before.records())
@@ -457,11 +522,12 @@ def _tracked_content_digest(leader_root) -> str:
         *(f":(exclude){path}" for path in _RUNTIME_WRITE_PATHS),
         cwd=leader_root,
         timeout_s=_TRIPWIRE_TIMEOUT_S,
+        optional_locks=False,
     )
     if not result.ok:
-        raise WorktreeIsolationError(
-            f"cannot read leader tracked content for the isolation tripwire in "
-            f"{leader_root}: {result.stderr.strip() or result.error or 'git did not answer'}"
+        raise _tripwire_git_error(
+            f"cannot read leader tracked content for the isolation tripwire in {leader_root}",
+            result,
         )
     return hashlib.sha256(result.stdout.encode("utf-8", "replace")).hexdigest()[:16]
 
@@ -493,7 +559,10 @@ def _path_content_stamp(leader_root, relative: str) -> str:
             for chunk in iter(lambda: handle.read(_STAMP_CHUNK_BYTES), b""):
                 digest.update(chunk)
     except OSError:
-        return ""
+        # ""를 돌려주면 이 파일의 stamp 줄이 통째로 빠져 내용 변화가 영구히 안
+        # 보인다. sentinel은 결정적이라 unreadable이 유지되는 동안 오탐이 없고,
+        # readable -> unreadable 전이만 정확히 잡는다.
+        return f"stamp {relative} unreadable"
     return f"stamp {relative} {info.st_size} {digest.hexdigest()[:16]}"
 
 
@@ -508,7 +577,9 @@ def _git_fact(leader_root, *args: str) -> str:
     stderr 원문을 메시지에 싣는다. ``tripwire_git_lock_retryable``이 일시적
     lock 경합인지 판정하는 근거가 이 문자열밖에 없다.
     """
-    result = git_safe(*args, cwd=leader_root, timeout_s=_TRIPWIRE_TIMEOUT_S)
+    result = git_safe(
+        *args, cwd=leader_root, timeout_s=_TRIPWIRE_TIMEOUT_S, optional_locks=False
+    )
     if result.ok:
         return result.stdout.strip()
     if result.timed_out:
@@ -526,6 +597,22 @@ def _git_fact(leader_root, *args: str) -> str:
     )
 
 
+def _tripwire_git_error(message: str, result) -> WorktreeIsolationError:
+    """관측 실패를 예외로 만든다. 실패 원인과 stderr 원문을 함께 싣는다.
+
+    ``tripwire_git_lock_retryable``이 일시적 lock 경합인지 판정하는 근거가 이
+    문자열밖에 없다. 원문을 빼면 재시도가 조용히 죽는다.
+    """
+    if result.timed_out:
+        cause = "timed out"
+    elif result.error is not None:
+        cause = "could not run git"
+    else:
+        cause = f"git exited {result.returncode}"
+    detail = result.stderr.strip() or result.error or ""
+    return WorktreeIsolationError(f"{message}: {cause}" + (f": {detail}" if detail else ""))
+
+
 def _status_records(leader_root, extra_args: Sequence[str]) -> list[tuple[str, str]]:
     """``--porcelain=v1 -z`` 스트림을 (레코드, 경로) 쌍으로 읽는다.
 
@@ -535,11 +622,17 @@ def _status_records(leader_root, extra_args: Sequence[str]) -> list[tuple[str, s
     반드시 틀린다.
     """
     result = git_safe(
-        "status", "--porcelain=v1", "-z", *extra_args, cwd=leader_root, timeout_s=_TRIPWIRE_TIMEOUT_S
+        "status",
+        "--porcelain=v1",
+        "-z",
+        *extra_args,
+        cwd=leader_root,
+        timeout_s=_TRIPWIRE_TIMEOUT_S,
+        optional_locks=False,
     )
     if not result.ok:
-        raise WorktreeIsolationError(
-            f"cannot read leader working tree status: {leader_root}: {result.stderr.strip()}"
+        raise _tripwire_git_error(
+            f"cannot read leader working tree status in {leader_root}", result
         )
     fields = [field for field in result.stdout.split("\0") if field]
     entries: list[tuple[str, str]] = []
@@ -622,8 +715,19 @@ def worker_claim_lock(root, *, timeout_s: int = _LOCK_TIMEOUT_S) -> Iterator[Non
 
 @contextlib.contextmanager
 def _cross_process_lock(root, name: str, *, timeout_s: int) -> Iterator[None]:
-    common = _git_common_dir(root) or real_path(Path(root) / ".git")
-    lock_dir = common / "agent-flow"
+    common = _git_common_dir(root)
+    if common is None:
+        # 경로를 추측하면 프로세스마다 다른 lock 파일을 잡아 상호배제가 조용히
+        # 사라진다. git이 대답하지 못할 확률은 경합이 심할 때 가장 높으므로,
+        # 가드가 필요한 바로 그 순간에 꺼지는 fail-open이다. 증명된 non-git만
+        # 예외로 두고, 그때는 지킬 leader가 없으므로 `.agent-flow`를 쓴다.
+        if git_repo_state(root) != "non-repo":
+            raise WorktreeIsolationError(
+                f"cannot resolve the git common dir for the cross-process lock: {root}"
+            )
+        lock_dir = real_path(Path(root) / _AGENT_FLOW_PREFIX)
+    else:
+        lock_dir = common / "agent-flow"
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_path = lock_dir / name
     deadline = time.monotonic() + timeout_s
@@ -709,13 +813,24 @@ def with_git_lock_retry(
     raise last
 
 
-def git_safe(*args, cwd, timeout_s: Optional[int] = None):
+def git_safe(*args, cwd, timeout_s: Optional[int] = None, optional_locks: bool = True):
     """Run git with git-discovery env vars stripped so cwd stays authoritative.
 
     A poisoned ambient GIT_DIR/GIT_WORK_TREE must never redirect our own git
     operations away from the requested cwd.
+
+    ``optional_locks=False`` for read-only observation. ``status`` and ``diff``
+    refresh the index by default and take ``index.lock`` to do it, so the
+    tripwire would manufacture the very contention it then has to retry. Never
+    pass it on a mutation — it tells git to skip work a writer may actually need.
+
+    The locale is pinned so every message we branch on stays deterministic. It is
+    applied to this command only and never leaks into the worker env.
     """
     env = sanitized_worker_env()
+    env.update(_GIT_STABLE_LOCALE)
+    if not optional_locks:
+        env["GIT_OPTIONAL_LOCKS"] = "0"
     command = ("git",) + tuple(str(a) for a in args)
     if timeout_s is None:
         return run_safe_command(command, cwd=cwd, env=env)
@@ -723,7 +838,7 @@ def git_safe(*args, cwd, timeout_s: Optional[int] = None):
 
 
 def _git_toplevel(path) -> Optional[Path]:
-    result = git_safe("rev-parse", "--show-toplevel", cwd=path)
+    result = git_safe("rev-parse", "--show-toplevel", cwd=path, optional_locks=False)
     if not result.ok:
         return None
     raw = result.stdout.strip()
@@ -731,7 +846,7 @@ def _git_toplevel(path) -> Optional[Path]:
 
 
 def _git_common_dir(path) -> Optional[Path]:
-    result = git_safe("rev-parse", "--git-common-dir", cwd=path)
+    result = git_safe("rev-parse", "--git-common-dir", cwd=path, optional_locks=False)
     if not result.ok:
         return None
     raw = result.stdout.strip()
@@ -744,29 +859,97 @@ def _git_common_dir(path) -> Optional[Path]:
 
 
 def _current_branch(path) -> Optional[str]:
-    result = git_safe("rev-parse", "--abbrev-ref", "HEAD", cwd=path)
+    result = git_safe("rev-parse", "--abbrev-ref", "HEAD", cwd=path, optional_locks=False)
     if not result.ok:
         return None
     return result.stdout.strip() or None
 
 
 def _leader_head_sha(root) -> Optional[str]:
-    result = git_safe("rev-parse", "HEAD", cwd=root)
+    result = git_safe("rev-parse", "HEAD", cwd=root, optional_locks=False)
     if not result.ok:
         return None
     return result.stdout.strip() or None
 
 
-def _registered_worktree_paths(root) -> set:
-    result = git_safe("worktree", "list", "--porcelain", cwd=root)
+@dataclass(frozen=True)
+class RegisteredWorktree:
+    """``git worktree list --porcelain``이 보고한 한 행.
+
+    제거·정리의 진실 원천은 manifest 이름이 아니라 이 값이다. 이름 정규화 규칙을
+    바꾸면 조회가 깨지지만, git이 보고한 경로는 규칙과 무관하게 항상 맞다.
+    """
+
+    path: Path                    # realpath된 절대경로
+    branch: Optional[str]         # 'refs/heads/x' -> 'x'; detached면 None
+    head: Optional[str] = None
+    bare: bool = False
+    locked: bool = False
+    prunable: bool = False
+
+
+def list_registered_worktrees(root) -> list:
+    """git이 등록한 worktree 전부. **실패하면 raise한다 (fail-closed).**
+
+    빈 목록을 실패의 대체값으로 쓰면 안 된다. 조회 실패와 "등록된 worktree가
+    없다"가 같은 값이 되는 순간, 제거 경로는 지울 게 없다고 판단하고 소유권
+    증명은 통과할 근거 없이 통과한다. 표시용 강등이 필요하면 호출부에서
+    ``WorktreeIsolationError``를 잡아 그 자리에서 명시적으로 하라 — 이 함수가
+    대신 삼켜 주지 않는다.
+    """
+    result = git_safe("worktree", "list", "--porcelain", cwd=root, optional_locks=False)
     if not result.ok:
-        return set()
-    paths = set()
-    prefix = "worktree "
-    for line in result.stdout.splitlines():
-        if line.startswith(prefix):
-            paths.add(real_path(line[len(prefix):].strip()))
-    return paths
+        raise _tripwire_git_error(f"cannot list registered worktrees for {root}", result)
+    return _parse_worktree_list(result.stdout)
+
+
+def _parse_worktree_list(payload: str) -> list:
+    entries: list = []
+    current: dict = {}
+
+    def flush() -> None:
+        raw = current.get("worktree")
+        if raw:
+            branch = current.get("branch") or None
+            entries.append(
+                RegisteredWorktree(
+                    path=real_path(raw),
+                    branch=branch.removeprefix("refs/heads/") if branch else None,
+                    head=current.get("HEAD") or None,
+                    bare="bare" in current,
+                    locked="locked" in current,
+                    prunable="prunable" in current,
+                )
+            )
+        current.clear()
+
+    for line in payload.splitlines():
+        if not line.strip():
+            flush()
+            continue
+        key, _, value = line.partition(" ")
+        current[key] = value.strip()
+    flush()
+    return entries
+
+
+def registered_worktree_paths(root) -> set:
+    """등록된 worktree 경로 집합. ``list_registered_worktrees``와 같은 fail-closed 계약."""
+    return {entry.path for entry in list_registered_worktrees(root)}
+
+
+def worktree_path_key(path) -> str:
+    """경로 비교용 정규화 키. 이름이 아니라 이걸로 대상을 찾는다.
+
+    ``realpath``가 symlink와 macOS의 ``/private`` 별칭을, ``normcase``가 대소문자를
+    구분하지 않는 파일시스템을 흡수한다. 존재하지 않는 경로도 정규화되므로 비교를
+    건너뛰는 분기가 없다 — 정규화 실패 시 가드를 스킵하면 그게 곧 fail-open이다.
+    """
+    return os.path.normcase(str(real_path(path)))
+
+
+def same_worktree_path(left, right) -> bool:
+    return worktree_path_key(left) == worktree_path_key(right)
 
 
 def _is_within(child: Path, parent: Path) -> bool:

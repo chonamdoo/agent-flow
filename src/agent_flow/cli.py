@@ -83,12 +83,15 @@ from agent_flow.core.team import (
     write_worker_result,
 )
 from agent_flow.core.worktrees import (
+    WorktreeLockedError,
+    assert_worktree_unlocked,
     create_worktree,
     get_worktree_status,
     known_worktree_names,
     plan_worktree,
     remove_worktree_metadata,
     remove_worktree,
+    removable_worktrees,
     worktree_branch_exists,
     worktree_runtime_root,
 )
@@ -108,6 +111,7 @@ from agent_flow.core.worktree_isolation import (
     sanitized_worker_env,
     verify_linked_worktree,
     worker_claim_lock,
+    worktree_path_key,
 )
 from agent_flow.core.state import RunRequest, RunState, start_run, status_summary
 from agent_flow.core.workflow import load_workflow
@@ -892,7 +896,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.worktree_command == "status":
             try:
                 status = get_worktree_status(root=root, name=args.name)
-            except ValueError as exc:
+            except (ValueError, WorktreeIsolationError) as exc:
                 print(_format_cli_error(exc), file=sys.stderr)
                 return 2
             state = "exists" if status.exists else "missing"
@@ -901,23 +905,37 @@ def main(argv: list[str] | None = None) -> int:
         if args.worktree_command == "list":
             # 복구 명령이다. git이 대답하지 않아도 traceback으로 죽지 않고
             # 아는 만큼 보여준 뒤 정상 종료한다.
+            registered: list = []
+            names: list[str] = []
             try:
+                registered = removable_worktrees(root=root)
                 names = _known_worktree_names(root)
             except (OSError, RuntimeError, ValueError) as exc:
                 print(_format_cli_error(exc), file=sys.stderr)
-                names = []
-            if not names:
-                print("no worktrees")
-                return 0
+            # git 등록부가 목록의 authority다. 이름 정규화로는 찾을 수 없는
+            # 체크아웃도 여기서는 보고된 경로 그대로 보인다.
+            rows = [
+                f"{entry.path.name} {entry.branch or '-'} {entry.path} "
+                f"{'exists' if (entry.path / '.git').exists() else 'stale'}"
+                for entry in sorted(registered, key=lambda item: str(item.path))
+            ]
+            listed = {worktree_path_key(entry.path) for entry in registered}
             for name in names:
                 try:
                     status = get_worktree_status(root=root, name=name)
                 except (ValueError, RuntimeError):
                     path = root / ".agent-flow" / "worktrees" / name
-                    print(f"{name} - {path} stale")
+                    if worktree_path_key(path) not in listed:
+                        rows.append(f"{name} - {path} stale")
                 else:
-                    state = "exists" if _worktree_checkout_exists(status) else "stale"
-                    print(f"{status.name} {status.branch} {status.path} {state}")
+                    if worktree_path_key(status.path) not in listed:
+                        state = "exists" if _worktree_checkout_exists(status) else "stale"
+                        rows.append(f"{status.name} {status.branch} {status.path} {state}")
+            if not rows:
+                print("no worktrees")
+                return 0
+            for row in rows:
+                print(row)
             return 0
         if args.worktree_command == "remove":
             try:
@@ -926,14 +944,19 @@ def main(argv: list[str] | None = None) -> int:
                 print(_format_cli_error(exc), file=sys.stderr)
                 return 2
             if not _worktree_checkout_exists(status):
-                stale_dir = root / ".agent-flow" / "worktrees" / status.name
+                stale_path = status.path
                 try:
                     known = _known_worktree_names(root)
                 except (OSError, RuntimeError, ValueError):
                     known = []
-                if stale_dir.exists() or status.name in known:
-                    # 디렉터리가 사라져도 git 등록은 남는다. 먼저 걷어내지 않으면
-                    # 같은 이름의 다음 create가 등록 충돌로 죽는다.
+                if stale_path.exists() or status.name in known:
+                    try:
+                        assert_worktree_unlocked(root=root, path=stale_path)
+                    except (WorktreeIsolationError, WorktreeLockedError) as exc:
+                        print(_format_cli_error(exc), file=sys.stderr)
+                        return 2
+                    # 등록만 남고 체크아웃이 죽은 항목은 prune으로 걷어내야 목록에서
+                    # 사라진다. 브랜치 삭제도 등록이 남아 있으면 git이 거부한다.
                     prune = run_safe_command(("git", "worktree", "prune"), cwd=root)
                     if not prune.ok:
                         print(_format_safe_command_error(prune), file=sys.stderr)
@@ -944,10 +967,13 @@ def main(argv: list[str] | None = None) -> int:
                             if not delete.ok:
                                 print(_format_safe_command_error(delete), file=sys.stderr)
                                 return 2
-                    if stale_dir.is_dir():
-                        shutil.rmtree(stale_dir)
-                    elif stale_dir.exists():
-                        stale_dir.unlink()
+                    # 잔재 삭제는 agent-flow가 관리하는 자리 안에서만 한다. 사용자가
+                    # 직접 만든 체크아웃 디렉터리는 등록만 걷어내고 그대로 둔다.
+                    if _is_managed_worktree_path(root, stale_path):
+                        if stale_path.is_dir():
+                            shutil.rmtree(stale_path)
+                        elif stale_path.exists():
+                            stale_path.unlink()
                     remove_worktree_metadata(root=root, name=status.name)
                     print(f"removed stale worktree manifest {status.name}")
                     return 0
@@ -960,7 +986,11 @@ def main(argv: list[str] | None = None) -> int:
                     delete_branch=not args.keep_branch,
                     allow_unmerged=args.allow_unmerged,
                 )
-            except (subprocess.CalledProcessError, WorktreeIsolationError) as exc:
+            except (
+                subprocess.CalledProcessError,
+                WorktreeIsolationError,
+                WorktreeLockedError,
+            ) as exc:
                 print(_format_cli_error(exc), file=sys.stderr)
                 return 2
             print(f"removed {status.name} {status.path}")
@@ -1687,6 +1717,11 @@ def _known_worktree_names(root: Path) -> list[str]:
 
 def _worktree_checkout_exists(status) -> bool:
     return status.exists and (status.path / ".git").exists()
+
+
+def _is_managed_worktree_path(root: Path, path: Path) -> bool:
+    managed = worktree_path_key(root / ".agent-flow" / "worktrees")
+    return worktree_path_key(path).startswith(managed + os.sep)
 
 
 def _format_cli_error(exc: BaseException) -> str:
