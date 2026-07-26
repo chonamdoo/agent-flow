@@ -5591,7 +5591,7 @@ if (codexContext !== undefined) {
             output = io.StringIO()
             with mock.patch("agent_flow.cli.run_gates", side_effect=fake_run_gates):
                 with contextlib.redirect_stdout(output):
-                    self.assertEqual(main(["gates", "--root", str(root)]), 0)
+                    self.assertEqual(main(["gates", "--root", str(root), "--phase", "all"]), 0)
 
             commands = [command.command for command in captured]
             architecture_command = (sys.executable, "-m", "agent_flow.core.architecture_lint", "--profile", "android,react-native")
@@ -5607,12 +5607,14 @@ if (codexContext !== undefined) {
     def test_profile_gate_commands_enforce_build_typecheck_lint_order(self) -> None:
         from agent_flow.cli import _profile_gate_commands
 
-        typescript_ids = [command.gate_id for command in _profile_gate_commands(["typescript"])]
+        # BUILD -> TYPECHECK -> LINT 순서 계약은 게이트 전체 집합에 대한 것이다.
+        # build 게이트는 pre-push라 기본 phase 필터에서는 보이지 않는다.
+        typescript_ids = [command.gate_id for command in _profile_gate_commands(["typescript"], phase="all")]
         self.assertIn("architecture-lint", typescript_ids)
         self.assertLess(typescript_ids.index("build"), typescript_ids.index("typecheck"))
         self.assertLess(typescript_ids.index("typecheck"), typescript_ids.index("lint"))
 
-        react_native_ids = [command.gate_id for command in _profile_gate_commands(["react-native"])]
+        react_native_ids = [command.gate_id for command in _profile_gate_commands(["react-native"], phase="all")]
         self.assertLess(react_native_ids.index("android-build"), react_native_ids.index("lint"))
         self.assertLess(react_native_ids.index("ios-build"), react_native_ids.index("lint"))
 
@@ -5676,6 +5678,8 @@ if (codexContext !== undefined) {
                                 str(root),
                                 "--worktree",
                                 "semantic-architecture-parity",
+                                "--phase",
+                                "all",
                             ]
                         ),
                         0,

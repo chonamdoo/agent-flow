@@ -32,6 +32,9 @@ from agent_flow.core.commands import run_safe_command
 from agent_flow.core.gates import GateCommand, run_gates
 from agent_flow.core.phase_workflow import load_phase_workflow_definition
 from agent_flow.core.profiles import (
+    DEFAULT_GATE_PHASE,
+    GATE_PHASE_ALL,
+    GATE_PHASES,
     active_profile_ids,
     detect_profile,
     load_profile,
@@ -212,6 +215,11 @@ def main(argv: list[str] | None = None) -> int:
     gates_parser.add_argument("--run-dir")
     gates_parser.add_argument("--timeout", type=int, default=600)
     gates_parser.add_argument("--worktree")
+    gates_parser.add_argument(
+        "--phase",
+        default=DEFAULT_GATE_PHASE,
+        choices=(*GATE_PHASES, GATE_PHASE_ALL),
+    )
 
     architecture_lint_parser = subparsers.add_parser("architecture-lint")
     architecture_lint_parser.add_argument("--root", default=".")
@@ -671,7 +679,7 @@ def main(argv: list[str] | None = None) -> int:
                 _profile_source_root(root, requested_root, getattr(args, "worktree", None)),
                 args.profile,
             )
-            commands = _profile_gate_commands(profile_ids)
+            commands = _profile_gate_commands(profile_ids, phase=args.phase)
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 1
@@ -1576,7 +1584,7 @@ def _resolve_project_path(root: Path, value: str) -> Path:
     return resolve_project_path(root, value)
 
 
-def _profile_gate_commands(profile_ids: list[str]) -> list[GateCommand]:
+def _profile_gate_commands(profile_ids: list[str], *, phase: str = DEFAULT_GATE_PHASE) -> list[GateCommand]:
     commands: list[tuple[int, GateCommand]] = []
     seen: set[tuple[str, ...]] = set()
     multi_profile = len(profile_ids) > 1
@@ -1586,6 +1594,8 @@ def _profile_gate_commands(profile_ids: list[str]) -> list[GateCommand]:
     for profile_id in profile_ids:
         profile = load_profile(profile_id)
         for gate in profile.gates:
+            if phase != GATE_PHASE_ALL and gate.phase != phase:
+                continue
             command = _normalize_profile_gate_command(profile.profile_id, gate.gate_id, gate.command)
             required = gate.required
             gate_id = f"{profile.profile_id}:{gate.gate_id}" if multi_profile else gate.gate_id
