@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -760,3 +762,217 @@ def test_hooks_flag_restores_them(tmp_path: Path, binary: str) -> None:
     assert "guard-protected-branch.sh" in back["registered"]
     assert back["omp"] is True
     assert back["flag"] is True
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_install_does_not_record_hook_approval_hashes(tmp_path: Path, binary: str) -> None:
+    """반증: install이 hook 승인 해시를 적으면 변조가 승인 상태로 세탁된다.
+
+    install은 **현재 등록된** hook의 해시를 받아 적을 뿐이라, 변조된 등록도
+    그대로 trusted가 된다. 읽어서 검증하는 코드는 처음부터 0개였다. 프로젝트
+    trust_level은 사용자가 명시적으로 고른 설치 대상이라 남긴다.
+    """
+    import os
+    import sys
+
+    project = tmp_path / "trust"
+    project.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {k: v for k, v in os.environ.items() if k != "AGENT_FLOW_SKIP_CODEX_TRUST"}
+    env["HOME"] = str(home)
+    # HOME을 갈아끼우면 user-site에 있던 PyYAML이 사라져 workflow export가 죽는다.
+    # 검사 대상은 codex trust 기록이므로 인터프리터와 yaml 경로는 고정해 준다.
+    import yaml
+
+    env["PYTHON"] = sys.executable
+    env["PYTHONPATH"] = os.pathsep.join(
+        p for p in (str(Path(yaml.__file__).resolve().parents[1]), env.get("PYTHONPATH")) if p
+    )
+
+    result = subprocess.run(
+        (_node(), str(KIT_ROOT / "bin" / binary), "install"),
+        cwd=project, text=True, capture_output=True, check=False, env=env,
+    )
+    assert result.returncode == 0, result.stderr
+
+    config = home / ".codex" / "config.toml"
+    text = config.read_text(encoding="utf-8") if config.is_file() else ""
+    assert "trust_level" in text
+    assert "hooks.state" not in text
+    assert "trusted_hash" not in text
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("hooks_flag", [(), ("--no-hooks",)])
+def test_install_output_satisfies_the_run_start_hook_gate(
+    tmp_path: Path, binary: str, hooks_flag: tuple[str, ...]
+) -> None:
+    """불변: installer가 만든 상태는 런 시작 게이트를 그대로 통과한다.
+
+    게이트의 기대값과 installer가 심는 것이 갈라지면, 정상 설치가 모든 런을
+    막거나(오탐) 게이트가 아무것도 안 보게 된다(미탐). 둘 다 조용히 생긴다.
+    """
+    import sys
+
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.core.hook_integrity import verify_managed_hooks
+
+    project = tmp_path / f"gate-{binary}-{len(hooks_flag)}"
+    project.mkdir()
+    result = subprocess.run(
+        (_node(), str(KIT_ROOT / "bin" / binary), "install", *hooks_flag),
+        cwd=project, text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+    reports = verify_managed_hooks(project)
+    assert len(reports) == 1
+    assert reports[0].recorded is True
+    assert reports[0].expected_enabled is (not hooks_flag)
+    assert reports[0].violations == ()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_broken_host_skill_symlink_does_not_brick_install(tmp_path: Path, binary: str) -> None:
+    """반증: `existsSync`는 심링크를 따라가 끊어진 링크에 false를 준다.
+
+    그러면 stale link 정리 분기를 못 타고 링크 생성이 `EEXIST`로 죽어 install이
+    exit 1로 끝난다. profile을 좁히거나 `--skills` 선택을 바꾸면 이전 선택의 host
+    링크가 끊긴 채 남으므로 실제로 밟는 경로다.
+    """
+    project = tmp_path / "broken-link"
+    project.mkdir()
+    first = subprocess.run(
+        (_node(), str(KIT_ROOT / "bin" / binary), "install"),
+        cwd=project, text=True, capture_output=True, check=False,
+    )
+    assert first.returncode == 0, first.stderr
+    links = sorted(
+        entry for entry in (project / ".claude" / "skills").iterdir() if entry.is_symlink()
+    )
+    if not links:
+        pytest.skip("this platform copied instead of symlinking host skills")
+
+    dangling = links[0]
+    target = Path(os.readlink(dangling))
+    dangling.unlink()
+    dangling.symlink_to(project / "gone" / dangling.name)
+    assert dangling.is_symlink() and not dangling.exists()
+
+    result = subprocess.run(
+        (_node(), str(KIT_ROOT / "bin" / binary), "install"),
+        cwd=project, text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (dangling / "SKILL.md").is_file(), f"stale link was not repaired (was {target})"
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_installers_never_probe_a_link_path_with_existssync(binary: str) -> None:
+    """`existsSync`는 심링크를 따라가므로 끊어진 링크에 false를 준다.
+
+    행위 테스트는 kit 경로만 닿는다 — installer는 kit에 위임한 뒤 이미 고쳐진
+    링크를 보기 때문이다. 그래서 두 진입점 모두에 소스 계약으로 못박는다.
+    """
+    source = (KIT_ROOT / "bin" / binary).read_text(encoding="utf-8")
+    assert "lstatIfExists(destDir)" in source
+    assert "fs.existsSync(destDir)" not in source
+
+
+
+def test_cross_tree_install_keeps_the_targets_tracked_scripts(tmp_path: Path) -> None:
+    """반증: worktree의 kit으로 leader를 install하면 leader의 추적 소스가 삭제됐다.
+
+    실측으로 `git status`에 `D scripts/*` 7개가 남았다. 관리 사본을 걷어내는 것이
+    목적이지 사용자 소스를 지우는 것이 아니다.
+    """
+    project = tmp_path / "leader"
+    project.mkdir()
+    shutil.copytree(KIT_ROOT / "scripts", project / "scripts")
+    for command in (
+        ["git", "init", "-b", "main"],
+        ["git", "config", "user.email", "t@t"],
+        ["git", "config", "user.name", "t"],
+        ["git", "add", "-A"],
+        ["git", "commit", "-m", "track scripts"],
+    ):
+        subprocess.run(command, cwd=project, check=True, capture_output=True)
+
+    result = _install(project)
+    assert result.returncode == 0, result.stderr
+    assert (project / "scripts").is_dir()
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "--", "scripts"],
+        cwd=project, text=True, capture_output=True, check=True,
+    ).stdout
+    assert " D " not in status and not status.startswith("D "), status
+
+
+def _skill_index_block(project: Path, file_name: str = "AGENTS.md") -> str:
+    text = (project / file_name).read_text(encoding="utf-8")
+    start = text.index("<!-- agent-flow:skills:start -->")
+    end = text.index("<!-- agent-flow:skills:end -->")
+    return text[start:end]
+
+
+def _indexed_names(block: str, group: str) -> set[str]:
+    match = re.search(rf"\|{group}:\{{([^}}]*)\}}", block)
+    if not match:
+        return set()
+    return {name.strip() for name in match.group(1).split(",") if name.strip()}
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_install_writes_the_skill_index_into_agents_md(tmp_path: Path, binary: str) -> None:
+    """설치된 skill을 AGENTS.md 안에서 바로 보여야 한다.
+
+    `index.json`을 읽으라고 안내만 하면 그건 판단 지점이고, agent는 그 판단을
+    자주 건너뛴다. 목록이 문서 안에 있으면 건너뛸 판단 자체가 없다.
+    """
+    project = tmp_path / f"index-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+
+    installed = {
+        entry.name
+        for entry in (project / ".agent-flow" / "skills").iterdir()
+        if entry.is_dir() and (entry / "SKILL.md").is_file()
+    }
+    assert installed
+    for file_name in ("AGENTS.md", "CLAUDE.md"):
+        block = _skill_index_block(project, file_name)
+        assert "[agent-flow skill index]" in block, f"{file_name} 인덱스가 채워지지 않았다"
+        listed = _indexed_names(block, "always") | _indexed_names(block, "on-demand")
+        assert listed == installed, f"{file_name}: {installed ^ listed}"
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_passive_delivery_lands_on_the_always_line(tmp_path: Path, binary: str) -> None:
+    """반증: 전부 on-demand로 적으면 "항상 적용" 선언이 인덱스에서 사라진다."""
+    project = tmp_path / f"delivery-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+
+    block = _skill_index_block(project)
+    always = _indexed_names(block, "always")
+    assert "code-generation-discipline" in always
+    assert "comment-authoring-discipline" in always
+    # 선언하지 않은 skill이 always로 올라가면 안 쓰는 skill이 상시 노출된다.
+    assert "tdd" in _indexed_names(block, "on-demand")
+    assert "tdd" not in always
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_reinstall_does_not_duplicate_the_skill_index(tmp_path: Path, binary: str) -> None:
+    """반증: 블록을 덧붙이면 재설치마다 AGENTS.md가 자란다."""
+    project = tmp_path / f"reinstall-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+    first = (project / "AGENTS.md").read_text(encoding="utf-8")
+    assert _install_with(binary, project).returncode == 0
+    second = (project / "AGENTS.md").read_text(encoding="utf-8")
+
+    assert second == first
+    assert second.count("<!-- agent-flow:skills:start -->") == 1
+    assert second.count("[agent-flow skill index]") == 1

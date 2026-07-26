@@ -1181,7 +1181,7 @@ class CliTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            subprocess.run(("git", "init", "-q"), cwd=root, check=True)
+            subprocess.run(("git", "init", "-q", "-b", "main"), cwd=root, check=True)
             untracked = root / "core" / "domain" / "chat" / "New.kt"
             untracked.parent.mkdir(parents=True, exist_ok=True)
             untracked.write_text("class New\n", encoding="utf-8")
@@ -1570,6 +1570,7 @@ class CliTest(unittest.TestCase):
                 f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-protected-branch.sh'}'",
                 f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'comment-checker.py'}'",
                 f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'record-skill-read.py'}'",
+                f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'record-command-run.py'}'",
                 f"'{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'show-phase-status.sh'}'",
             ]
             self.assertEqual(commands, expected)
@@ -3089,7 +3090,7 @@ if (codexContext !== undefined) {
             for phase in ["domain-grill", "product-brief", "prd", "slice-plan", "plan-review"]:
                 artifact = run_dir / _node_phase_artifact(phase)
                 artifact.parent.mkdir(parents=True, exist_ok=True)
-                content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase)
+                content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase, run_dir=run_dir)
                 artifact.write_text(content, encoding="utf-8")
                 self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
 
@@ -3413,7 +3414,7 @@ if (codexContext !== undefined) {
                 elif phase in {"plan-review", "merge-approval"}:
                     content = "verdict: approve\n"
                 else:
-                    content = _node_phase_content(phase)
+                    content = _node_phase_content(phase, run_dir=run_dir)
                 artifact.write_text(content, encoding="utf-8")
                 advance = subprocess.run(
                     (node, cli, "run", "advance"),
@@ -3515,7 +3516,7 @@ if (codexContext !== undefined) {
             ]:
                 artifact = run_dir / _node_phase_artifact(phase)
                 artifact.parent.mkdir(parents=True, exist_ok=True)
-                content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase)
+                content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase, run_dir=run_dir)
                 artifact.write_text(content, encoding="utf-8")
                 self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
 
@@ -3675,7 +3676,7 @@ if (codexContext !== undefined) {
             for phase in ["domain-grill", "product-brief", "prd", "slice-plan"]:
                 artifact = run_dir / _node_phase_artifact(phase)
                 artifact.parent.mkdir(parents=True, exist_ok=True)
-                artifact.write_text(_node_phase_content(phase), encoding="utf-8")
+                artifact.write_text(_node_phase_content(phase, run_dir=run_dir), encoding="utf-8")
                 self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
 
             plan_review = run_dir / _node_phase_artifact("plan-review")
@@ -3719,7 +3720,7 @@ if (codexContext !== undefined) {
             ]:
                 artifact = run_dir / _node_phase_artifact(phase)
                 artifact.parent.mkdir(parents=True, exist_ok=True)
-                artifact.write_text(_node_phase_content(phase), encoding="utf-8")
+                artifact.write_text(_node_phase_content(phase, run_dir=run_dir), encoding="utf-8")
                 self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
 
             architecture_review = run_dir / _node_phase_artifact("architecture-review")
@@ -3798,7 +3799,15 @@ if (codexContext !== undefined) {
 
             gates = run_dir / _node_phase_artifact("gates")
             gates.write_text(
-                '{"passed": true, "results": [{"id": "lint", "command": "npm run lint", "passed": true, "exit_code": 0}]}\n',
+                _node_gate_results(
+                    run_dir,
+                    {
+                        "passed": True,
+                        "results": [
+                            {"id": "lint", "command": "npm run lint", "passed": True, "exit_code": 0}
+                        ],
+                    },
+                ),
                 encoding="utf-8",
             )
             committed = subprocess.run(
@@ -3836,7 +3845,7 @@ if (codexContext !== undefined) {
             ]:
                 artifact = run_dir / _node_phase_artifact(phase)
                 artifact.parent.mkdir(parents=True, exist_ok=True)
-                content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase)
+                content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase, run_dir=run_dir)
                 artifact.write_text(content, encoding="utf-8")
                 self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
 
@@ -3905,7 +3914,15 @@ if (codexContext !== undefined) {
             self.assertIn("Current phase: gates", result.stdout)
 
             gates_artifact.write_text(
-                '{"passed": true, "results": [{"id": "lint", "command": "npm run lint", "passed": true, "output": "ok"}]}\n',
+                _node_gate_results(
+                    run_dir,
+                    {
+                        "passed": True,
+                        "results": [
+                            {"id": "lint", "command": "npm run lint", "passed": True, "output": "ok"}
+                        ],
+                    },
+                ),
                 encoding="utf-8",
             )
             result = subprocess.run(
@@ -3942,7 +3959,7 @@ if (codexContext !== undefined) {
             ]:
                 artifact = run_dir / _node_phase_artifact(phase)
                 artifact.parent.mkdir(parents=True, exist_ok=True)
-                content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase)
+                content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase, run_dir=run_dir)
                 artifact.write_text(content, encoding="utf-8")
                 self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
 
@@ -4063,7 +4080,7 @@ if (codexContext !== undefined) {
             for phase in ["design", "slice-plan", "worktree", "implement"]:
                 artifact = run_dir / f"{phase}.md"
                 artifact.parent.mkdir(parents=True, exist_ok=True)
-                artifact.write_text(_node_phase_content(phase), encoding="utf-8")
+                artifact.write_text(_node_phase_content(phase, run_dir=run_dir), encoding="utf-8")
                 self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
 
             comment_artifact = run_dir / "comment-authoring.md"
@@ -4125,7 +4142,7 @@ if (codexContext !== undefined) {
             ]:
                 artifact = run_dir / _node_phase_artifact(phase)
                 artifact.parent.mkdir(parents=True, exist_ok=True)
-                content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase)
+                content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase, run_dir=run_dir)
                 artifact.write_text(content, encoding="utf-8")
                 self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
 
@@ -4133,7 +4150,7 @@ if (codexContext !== undefined) {
                 for phase in ("comment-authoring", "multi-review", "architecture-review"):
                     artifact = run_dir / _node_phase_artifact(phase)
                     artifact.parent.mkdir(parents=True, exist_ok=True)
-                    artifact.write_text(_node_phase_content(phase), encoding="utf-8")
+                    artifact.write_text(_node_phase_content(phase, run_dir=run_dir), encoding="utf-8")
                     self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
                 gates_artifact = run_dir / _node_phase_artifact("gates")
                 gates_artifact.parent.mkdir(parents=True, exist_ok=True)
@@ -4145,7 +4162,7 @@ if (codexContext !== undefined) {
 
             for phase in ("comment-authoring", "multi-review", "architecture-review"):
                 artifact = run_dir / _node_phase_artifact(phase)
-                artifact.write_text(_node_phase_content(phase), encoding="utf-8")
+                artifact.write_text(_node_phase_content(phase, run_dir=run_dir), encoding="utf-8")
                 self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
             gates_artifact = run_dir / _node_phase_artifact("gates")
             gates_artifact.write_text('{"passed": false}\n', encoding="utf-8")
@@ -4187,7 +4204,7 @@ if (codexContext !== undefined) {
             ]:
                 artifact = run_dir / _node_phase_artifact(phase)
                 artifact.parent.mkdir(parents=True, exist_ok=True)
-                content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase)
+                content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase, run_dir=run_dir)
                 artifact.write_text(content, encoding="utf-8")
                 self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
 
@@ -4230,7 +4247,7 @@ if (codexContext !== undefined) {
             ]:
                 artifact = run_dir / _node_phase_artifact(phase)
                 artifact.parent.mkdir(parents=True, exist_ok=True)
-                content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase)
+                content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase, run_dir=run_dir)
                 artifact.write_text(content, encoding="utf-8")
                 self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
 
@@ -4529,7 +4546,7 @@ if (codexContext !== undefined) {
             ]:
                 artifact = run_dir / _node_phase_artifact(phase)
                 artifact.parent.mkdir(parents=True, exist_ok=True)
-                content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase)
+                content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase, run_dir=run_dir)
                 artifact.write_text(content, encoding="utf-8")
                 self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
 
@@ -8396,7 +8413,10 @@ if (codexContext !== undefined) {
 
 
 def _init_git_repo(root: Path) -> None:
-    subprocess.run(("git", "init", "-q"), cwd=root, check=True)
+    # `git init`의 기본 브랜치는 `init.defaultBranch`에 좌우된다. 이름을 고정하지
+    # 않으면 테스트가 실행 머신의 git 설정에 의존한다 — CI(ubuntu, master 기본)에서
+    # `worktree add ... main`이 exit 128로 죽었다.
+    subprocess.run(("git", "init", "-q", "-b", "main"), cwd=root, check=True)
     subprocess.run(("git", "config", "user.email", "test@example.com"), cwd=root, check=True)
     subprocess.run(("git", "config", "user.name", "Test User"), cwd=root, check=True)
     (root / "README.md").write_text("# test\n", encoding="utf-8")
@@ -8770,7 +8790,24 @@ def _node_review_parity_gate() -> str:
     )
 
 
-def _node_phase_content(phase: str, prefix: str = "") -> str:
+def _node_gate_nonce(run_dir) -> str:
+    """JS runner가 run 시작 시 심는 nonce. 손으로 쓴 gate 결과는 이 값을 모른다."""
+    if run_dir is None:
+        return ""
+    manifest = Path(run_dir) / "manifest.json"
+    if not manifest.is_file():
+        return ""
+    return str(json.loads(manifest.read_text(encoding="utf-8")).get("gate_nonce", ""))
+
+
+def _node_gate_results(run_dir, body: dict) -> str:
+    nonce = _node_gate_nonce(run_dir)
+    if nonce:
+        body = {**body, "produced_by": {"tool": "agent-flow gates", "nonce": nonce}}
+    return json.dumps(body, sort_keys=True) + "\n"
+
+
+def _node_phase_content(phase: str, prefix: str = "", run_dir=None) -> str:
     content = f"{prefix}{phase}\n"
     skills_gate = (
         "## Completion Gate\n"
@@ -8835,7 +8872,23 @@ def _node_phase_content(phase: str, prefix: str = "") -> str:
             + "context_docs_updated: not_needed\n"
         )
     if phase == "gates":
-        return '{"passed": true, "results": [{"id": "test", "command": "npm test", "passed": true, "output": "ok"}]}\n'
+        return _node_gate_results(
+            run_dir,
+            {
+                "passed": True,
+                "results": [
+                    {"id": "test", "command": "npm test", "passed": True, "output": "ok"}
+                ],
+            },
+        )
+    if phase == "prd":
+        return (
+            content
+            + "## Design Values\n\n"
+            + "## Completion Gate\n"
+            + "design-values: none\n"
+            + "design-values-confirmed: n/a\n"
+        )
     if phase == "comment-authoring":
         return (
             content
@@ -8848,7 +8901,12 @@ def _node_phase_content(phase: str, prefix: str = "") -> str:
             + "module-split: none\n"
         )
     if phase in {"design", "ddd-design"}:
-        return content + clean_design_gate
+        return (
+            content
+            + "## Design Values\n\n"
+            + clean_design_gate
+            + "design-values: none\n"
+        )
     if phase == "multi-review":
         return (
             "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"
@@ -8885,7 +8943,13 @@ def _node_phase_content(phase: str, prefix: str = "") -> str:
     if phase in {"green", "refactor", "fix-loop", "pr-comment-fix", "pr-ci-fix"}:
         return content + skills_gate + "clean-architecture: applied\n"
     if phase == "red":
-        return content + skills_gate
+        return (
+            content
+            + skills_gate
+            + "regression-test: tests/test_x.py::test_bug\n"
+            + "red-observed: 1\n"
+            + "test-run-evidence: unavailable\n"
+        )
     return content
 
 
@@ -8961,7 +9025,7 @@ def _node_start_full_feature_at_pr_watch(project_root: Path, node: str, cli: str
     ]:
         artifact = run_dir / _node_phase_artifact(phase)
         artifact.parent.mkdir(parents=True, exist_ok=True)
-        content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase)
+        content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase, run_dir=run_dir)
         artifact.write_text(content, encoding="utf-8")
         subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=True)
     return run_dir

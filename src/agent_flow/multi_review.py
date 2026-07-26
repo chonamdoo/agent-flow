@@ -32,6 +32,7 @@ from agent_flow.cli_detect import (
     cli_by_name,
     detect_host_cli,
 )
+from agent_flow.core.hook_integrity import assert_managed_hooks_registered
 from agent_flow.core.worktree_isolation import (
     assert_leader_unchanged,
     capture_leader_snapshot,
@@ -156,6 +157,8 @@ def run_distribution(distribution: Distribution, project_root: Path,
     # project_root가 worktree면 그 뒤의 leader 체크아웃이 지켜야 할 대상이다.
     # leader에서 그대로 도는 리뷰라면 지킬 바깥 대상이 없어 무장하지 않는다.
     leader = leader_root_for(project_root)
+    # 스냅샷보다 먼저다. 오염된 등록 상태를 기준선으로 굳히면 안 된다.
+    assert_managed_hooks_registered(project_root, leader)
     leader_before = capture_leader_snapshot(leader) if leader is not None else None
     results = run_parallel(sub_jobs)
     # Write each artifact at the angle's intended output_path so the host AI

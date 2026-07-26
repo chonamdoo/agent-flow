@@ -115,7 +115,7 @@ def _line_has_failure_marker(line: str) -> bool:
 
 def _line_matches_marker(line: str, marker: str) -> bool:
     if marker.endswith(":"):
-        return line.startswith(marker) and bool(line[len(marker):].strip())
+        return line.startswith(marker) and _is_concrete_value(line[len(marker):])
     key, separator, value = marker.partition(":")
     if separator and "|" in value:
         line_key, line_separator, line_value = line.partition(":")
@@ -127,3 +127,16 @@ def _line_matches_marker(line: str, marker: str) -> bool:
             allowed.add("optional")
         return line_value.strip() in allowed
     return line == marker
+
+
+def _is_concrete_value(value: str) -> bool:
+    """빈 값과 `<...>` 자리표시자를 거른다.
+
+    프롬프트는 `cache-invalidation-policy: <policy or n/a>` 같은 틀을 그대로
+    보여준다. 그걸 복사해 붙이면 게이트는 통과하고 값은 없다. 빈 값 검사만
+    있으면 자리표시자가 그 구멍을 그대로 대신한다.
+    """
+    stripped = value.strip()
+    if not stripped:
+        return False
+    return not (stripped.startswith("<") and stripped.endswith(">"))

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -184,6 +185,11 @@ def create_run(
             "task": task,
             "started_at": now.isoformat(),
             "current_phase": None,
+            # gate-results.json의 출처 표식. `agent-flow gates`만 이 값을 찍는다.
+            # 손으로 쓴 JSON은 값을 모르므로 green으로 라우팅되지 않는다.
+            # 파일에 있는 값이라 복사는 가능하다 — 적대적 위조가 아니라
+            # "실수로 손으로 쓰는 것"을 막는 층이다.
+            "gate_nonce": secrets.token_hex(16),
         }
         if architecture:
             meta["architecture"] = architecture

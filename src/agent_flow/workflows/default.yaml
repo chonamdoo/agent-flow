@@ -45,6 +45,8 @@ phases:
       - "solid-lsp-contracts:"
       - "solid-isp-consumer-ports:"
       - "solid-dip-dependency-direction:"
+      - "## Design Values"
+      - "design-values:"
     prompt: |
       Produce the unified design document. Sections in order:
 
@@ -111,7 +113,20 @@ phases:
       it as Constraint / Rejected / Directive (matches lore schema). Skip
       otherwise.
 
-      Output: design.md (single artifact, all six sections).
+      ## Design Values
+      Record every concrete value the user supplied as one `key: value` line
+      each, using the user's exact value: spacing, sizes, colors, durations,
+      counts, thresholds, limits, timeouts. If the input was an image or a
+      Figma link, write the values you read off it verbatim. If the task
+      carries no such values, leave the section empty and record
+      `design-values: none`.
+
+      The runner copies this section into `design-spec.md` and injects it into
+      the prompt of every later phase. It is the only carrier that survives a
+      compacted conversation, so a value that is missing here is a value the
+      implementation phase will not see.
+
+      Output: design.md (single artifact, all seven sections).
       End with:
 
           ## Completion Gate
@@ -129,6 +144,7 @@ phases:
           solid-lsp-contracts: <summary>
           solid-isp-consumer-ports: <summary>
           solid-dip-dependency-direction: <summary>
+          design-values: <comma-separated keys recorded above, or none>
 
   - id: slice-plan
     description: Decompose the design into TDD-ready slices (≤50% context each).

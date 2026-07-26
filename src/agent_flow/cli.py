@@ -92,6 +92,10 @@ from agent_flow.core.worktrees import (
     worktree_branch_exists,
     worktree_runtime_root,
 )
+from agent_flow.core.hook_integrity import (
+    HookIntegrityError,
+    assert_managed_hooks_registered,
+)
 from agent_flow.core.worktree_isolation import (
     WorkerScope,
     WorktreeIsolationError,
@@ -234,6 +238,9 @@ def main(argv: list[str] | None = None) -> int:
         sub = skills_subparsers.add_parser(name)
         sub.add_argument("--root", default=".")
         sub.add_argument("--profile")
+        if name == "sync":
+            # 갱신 경로가 없으면 움직이는 ref가 최초 1회 받은 커밋에 영구히 굳는다.
+            sub.add_argument("--refresh", action="store_true")
         if name != "sync":
             sub.add_argument("--phase", required=True)
             sub.add_argument("--workflow", default="default")
@@ -1067,6 +1074,13 @@ def main(argv: list[str] | None = None) -> int:
             claimed = None
             leader_before = None
             if isolate:
+                # 스냅샷보다 먼저다. 오염된 등록 상태를 기준선으로 굳히면
+                # tripwire가 그 오염을 정상으로 승인한다.
+                try:
+                    assert_managed_hooks_registered(root)
+                except HookIntegrityError as exc:
+                    print(_format_cli_error(exc), file=sys.stderr)
+                    return 2
                 try:
                     with worker_claim_lock(root):
                         # capacity를 세는 시점과 task를 잡는 시점이 갈라져 있으면
@@ -1827,7 +1841,7 @@ def _run_skills_command(args: argparse.Namespace, root: Path) -> int:
             if not sources:
                 print(f"{profile_id}: no skill_sources declared")
                 continue
-            for result in sync_skill_sources(sources):
+            for result in sync_skill_sources(sources, refresh=bool(getattr(args, "refresh", False))):
                 print(f"{profile_id}: {result.source_id} {result.status} {result.detail}".rstrip())
                 if result.status == "failed":
                     exit_code = 1

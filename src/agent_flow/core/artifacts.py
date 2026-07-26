@@ -32,6 +32,13 @@ def write_gate_results(*, run_dir: Path, results: list[GateResult]) -> Path:
         "status": "green" if passed else "request-changes",
         "results": serialized_results,
     }
+    # 출처 표식. runner는 이 값이 run meta의 nonce와 같을 때만 green으로 라우팅한다.
+    # 이 층이 막는 것은 손으로 쓴 gate-results.json이지 적대적 위조가 아니다 —
+    # nonce도 디스크에 있으므로 읽어서 복사할 수 있다. 진짜 해법은 runner가
+    # `run_gates`를 직접 부르는 것이고, 그때까지의 임시방편이다.
+    nonce = run_gate_nonce(run_dir)
+    if nonce:
+        payload["produced_by"] = {"tool": "agent-flow gates", "nonce": nonce}
     path = run_dir / "artifacts" / "gate-results.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -158,3 +165,13 @@ def write_recovery(
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def run_gate_nonce(run_dir: Path) -> str:
+    """run meta에 심긴 gate nonce. 없으면 빈 문자열(구버전 run이나 직접 호출)."""
+    try:
+        payload = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    nonce = payload.get("gate_nonce") if isinstance(payload, dict) else None
+    return nonce if isinstance(nonce, str) else ""

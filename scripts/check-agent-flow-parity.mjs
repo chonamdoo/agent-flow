@@ -11,6 +11,11 @@ const SOURCE_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
 const SOURCE_IS_MANAGED_WORKTREE = resolveManagedWorktreeRoot(SOURCE_ROOT) !== null;
 const CHECK_INSTALLED_COPY = !SOURCE_IS_MANAGED_WORKTREE;
+// 두 runner에 **같은** nonce를 준다. node는 `run start`가 무작위로 심고 python은
+// meta에서 읽으므로, 고정하지 않으면 같은 입력이 아니게 되어 provenance 검사가
+// parity 오탐으로 보인다.
+const PARITY_GATE_NONCE = "parity-gate-nonce";
+
 const INSTALL_ROOT = resolveInstalledRoot(process.cwd()) ?? SOURCE_ROOT;
 // bin/agent-flow-install.mjs / bin/agent-flow-kit.mjs의 BUNDLED_HOST_SKILL_NAMES와
 // 동일해야 한다. allowlist 밖 bundled skill은 host link 없이 index에만 노출된다.
@@ -196,14 +201,50 @@ function recursiveFiles(relDir) {
   return out.sort();
 }
 
+function assertAbsent(rel, needle, why) {
+  const text = readIfExists(rel);
+  if (text === null) return;
+  if (text.includes(needle)) {
+    failures.push(`${rel} must not contain ${JSON.stringify(needle)}: ${why}`);
+  }
+}
+
 for (const installer of ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"]) {
   assertContains(installer, "function installCodexTrustState(root)");
-  assertContains(installer, "function queryCodexProjectHookHashes(root)");
-  assertContains(installer, "function trustedManagedHookScriptName(root, command)");
-  assertContains(installer, "normalized === `${normalizedRoot}/.agent-flow/scripts/hooks/${scriptName}`");
-  assertContains(installer, "[hooks.state.");
   assertContains(installer, "function installOmpHooks(root)");
   assertContains(installer, ".omp\", \"extensions\", \"agent-flow-hooks.ts");
+  // 두 installer가 같은 인덱스를 만들어야 한다. 한쪽만 채우면 install 순서에
+  // 따라 AGENTS.md의 인덱스가 있었다 없었다 한다.
+  assertContains(installer, "function skillIndexBlock(root)");
+  assertContains(installer, "function upsertSkillIndexBlock(root)");
+  assertContains(installer, 'const SKILL_INDEX_START = "<!-- agent-flow:skills:start -->"');
+  // install이 **현재 등록된** hook의 해시를 trusted로 되받아 적으면, 변조된
+  // 등록이 다음 install에서 승인 상태로 세탁된다. 읽는 코드도 없었다.
+  // 등록 무결성은 런 시작 시 hook_integrity가 kit.json과 대조한다.
+  assertAbsent(installer, "[hooks.state.", "install must not launder managed hook approval");
+  assertAbsent(installer, "trusted_hash", "install must not launder managed hook approval");
+}
+
+// 관리 hook 이름은 이제 등록 지점이 4곳이다 — installer 2개, 이 파일, 그리고
+// 런 시작 무결성 검증(Python). 갈라지면 검증이 조용히 좁아진다.
+{
+  const jsManagedScripts = (() => {
+    const text = readIfExists("bin/agent-flow-kit.mjs");
+    if (text === null) return null;
+    const match = text.match(/const MANAGED_HOOK_SCRIPTS = \[([\s\S]*?)\];/);
+    if (!match) {
+      failures.push("bin/agent-flow-kit.mjs missing MANAGED_HOOK_SCRIPTS");
+      return null;
+    }
+    return [...match[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]).sort();
+  })();
+  if (jsManagedScripts) {
+    assertPythonContract("managed hook script parity", `
+from agent_flow.core.hook_integrity import MANAGED_HOOK_SCRIPTS
+expected = ${JSON.stringify(jsManagedScripts)}
+assert sorted(MANAGED_HOOK_SCRIPTS) == expected, (sorted(MANAGED_HOOK_SCRIPTS), expected)
+`);
+  }
 }
 
 // 두 installer가 심는 OMP 확장은 **바이트 단위로** 같아야 한다. 예전에 한쪽만
@@ -879,6 +920,13 @@ function promptOutputArtifacts(prompt) {
     .map((match) => match[1]);
 }
 
+function provenGateResults(body) {
+  return JSON.stringify({
+    ...body,
+    produced_by: { tool: "agent-flow gates", nonce: PARITY_GATE_NONCE },
+  }) + "\n";
+}
+
 function assertRouteParity(workflow) {
   const phaseIds = new Set(workflow.phases.map((phase) => phase.id));
   const cases = [
@@ -895,9 +943,17 @@ function assertRouteParity(workflow) {
     ["pr-watch status ci_failed", "pr-watch", "status: ci_failed\n"],
     ["gates passed without evidence", "gates", "{\"passed\": true}\n"],
     [
-      "gates passed with evidence",
+      "gates passed with evidence but no provenance",
       "gates",
       "{\"passed\": true, \"results\": [{\"command\": \"npm test\", \"passed\": true, \"output\": \"ok\"}]}\n",
+    ],
+    [
+      "gates passed with evidence and provenance",
+      "gates",
+      provenGateResults({
+        passed: true,
+        results: [{ command: "npm test", passed: true, output: "ok" }],
+      }),
     ],
   ];
   for (const phase of workflow.phases) {
@@ -909,8 +965,8 @@ function assertRouteParity(workflow) {
     if (!phaseIds.has(phaseId)) {
       continue;
     }
-    const python = pythonPhaseOutcome(workflow, phaseId, content);
-    const node = nodePhaseOutcome(workflow, phaseId, content);
+    const python = pythonPhaseOutcome(workflow, phaseId, content, { gate_nonce: PARITY_GATE_NONCE });
+    const node = nodePhaseOutcome(workflow, phaseId, content, { gate_nonce: PARITY_GATE_NONCE });
     if (!python || !node) continue;
     if (python.route_key !== node.route_key) {
       failures.push(`python/node route key mismatch ${label}: python=${python.route_key} node=${node.route_key}`);
@@ -1257,6 +1313,7 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
     }
     assertInstalledHookParity(label, tempRoot);
     assertSkillIndexComplete(label, tempRoot);
+    assertSkillIndexBlockMatchesInstall(label, tempRoot);
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
@@ -1270,6 +1327,25 @@ function readJsonSafe(pathName) {
   }
 }
 
+// Python이 무결성 검증에 쓰는 배치 계약을 그대로 읽는다. JS에 사본을 두면
+// 두 목록이 갈라지고, 갈라진 순간 parity가 지키는 대상이 사라진다.
+function pythonManagedHookPlacement() {
+  const source = fs.readFileSync(path.join(SOURCE_ROOT, "src", "agent_flow", "core", "hook_integrity.py"), "utf8");
+  const block = source.match(/MANAGED_HOOK_PLACEMENT = \{([\s\S]*?)\n\}/);
+  if (!block) {
+    throw new Error("MANAGED_HOOK_PLACEMENT not found in hook_integrity.py");
+  }
+  const placement = {};
+  const entry = /"([^"]+)":\s*\(\s*"([^"]*)",\s*\n?\s*"((?:[^"\\]|\\.)*)",?\s*\)/g;
+  for (const match of block[1].matchAll(entry)) {
+    placement[match[1]] = [match[2], match[3].replaceAll("\\\\", "\\")];
+  }
+  if (Object.keys(placement).length === 0) {
+    throw new Error("MANAGED_HOOK_PLACEMENT parsed empty");
+  }
+  return placement;
+}
+
 function assertInstalledHookParity(label, tempRoot) {
   const claude = readJsonSafe(path.join(tempRoot, ".claude", "settings.json"));
   const codex = readJsonSafe(path.join(tempRoot, ".Codex", "hooks.json"));
@@ -1279,42 +1355,37 @@ function assertInstalledHookParity(label, tempRoot) {
     failures.push(`${label} install missing claude, codex, or omp hook settings`);
     return;
   }
-  const managedScripts = ["guard-protected-branch.sh", "comment-checker.py", "record-skill-read.py", "show-phase-status.sh"];
+  // 이름 목록을 여기서 따로 들면 Python 계약과 갈라진다. 실제 등록을
+  // `MANAGED_HOOK_PLACEMENT`와 직접 대조한다 — 이벤트/matcher까지 포함해서.
+  // 이 대조가 Python의 hook_integrity가 믿는 계약을 실제 installer 출력에 묶는다.
+  const placement = pythonManagedHookPlacement();
+  const managedScripts = Object.keys(placement);
   for (const [host, settings] of [["claude", claude], ["codex", codex], ["codex-lower", lowerCodex]]) {
-    for (const event of ["PreToolUse", "PostToolUse", "Stop"]) {
-      const entries = settings.hooks[event];
-      if (!Array.isArray(entries) || entries.length === 0) {
-        failures.push(`${label} ${host} hooks missing ${event}`);
+    for (const [script, [event, matcher]] of Object.entries(placement)) {
+      const found = [];
+      for (const [registeredEvent, blocks] of Object.entries(settings.hooks ?? {})) {
+        for (const block of Array.isArray(blocks) ? blocks : []) {
+          const commands = (block.hooks ?? []).map((hook) => String(hook.command ?? ""));
+          if (commands.some((command) => command.includes(`/hooks/${script}`))) {
+            found.push([registeredEvent, String(block.matcher ?? "")]);
+          }
+        }
       }
-    }
-    const text = JSON.stringify(settings);
-    for (const script of managedScripts) {
-      if (!text.includes(script)) {
+      if (found.length === 0) {
         failures.push(`${label} ${host} hooks missing ${script}`);
+        continue;
+      }
+      if (!found.some(([ev, mt]) => ev === event && mt === matcher)) {
+        const actual = found.map(([ev, mt]) => `${ev}/${mt || "(none)"}`).join(", ");
+        failures.push(
+          `${label} ${host} registers ${script} at ${actual}, python contract says ${event}/${matcher || "(none)"}`,
+        );
       }
     }
     const stopEntries = settings.hooks.Stop;
     if (Array.isArray(stopEntries) && stopEntries.length !== 1) {
       failures.push(`${label} ${host} Stop hook entries must stay 1 after reinstall, got ${stopEntries.length}`);
     }
-  }
-  // 기존 사용자 hook이 보존되면 managed entry가 index 0이 아닐 수 있으므로
-  // comment-checker.py를 가진 entry를 찾아 matcher를 검사한다.
-  const managedPostToolUseMatcher = (settings) =>
-    (settings.hooks.PostToolUse ?? []).find((entry) =>
-      (entry.hooks ?? []).some((hook) => String(hook.command ?? "").includes("comment-checker.py")),
-    )?.matcher ?? "";
-  const claudeMatcher = managedPostToolUseMatcher(claude);
-  if (!claudeMatcher.includes("apply_patch")) {
-    failures.push(`${label} claude PostToolUse matcher must cover apply_patch, got ${claudeMatcher}`);
-  }
-  const codexMatcher = managedPostToolUseMatcher(codex);
-  if (!codexMatcher.includes("apply_patch")) {
-    failures.push(`${label} codex PostToolUse matcher must cover apply_patch, got ${codexMatcher}`);
-  }
-  const lowerCodexMatcher = managedPostToolUseMatcher(lowerCodex);
-  if (!lowerCodexMatcher.includes("apply_patch")) {
-    failures.push(`${label} codex-lower PostToolUse matcher must cover apply_patch, got ${lowerCodexMatcher}`);
   }
   const ompExtensionText = fs.readFileSync(ompExtension, "utf8");
   for (const script of managedScripts) {
@@ -1336,6 +1407,71 @@ function assertInstalledHookParity(label, tempRoot) {
   }
   if (!ompExtensionText.includes("syncRootContextFiles") || !ompExtensionText.includes("modifiedRootContextFiles")) {
     failures.push(`${label} omp extension missing root AGENTS.md/CLAUDE.md sync`);
+  }
+}
+
+// AGENTS.md에 심은 인덱스가 실제 설치본과 같은가.
+//
+// 인덱스는 agent가 "이 프로젝트에 뭐가 있나"를 판단 없이 아는 유일한 경로다.
+// 낡은 인덱스는 없는 것보다 나쁘다 - 없는 skill을 찾게 만들고, 있는 skill을
+// 숨긴다. 그래서 목록 자체를 설치 결과와 대조한다.
+function assertSkillIndexBlockMatchesInstall(label, tempRoot) {
+  const index = readJsonSafe(path.join(tempRoot, ".agent-flow", "skills", "index.json"));
+  if (!index || !Array.isArray(index.skills)) {
+    return;
+  }
+  const expected = new Set(index.skills.map((skill) => String(skill.name)));
+  const expectedPassive = new Set(
+    index.skills.filter((skill) => skill.delivery === "passive").map((skill) => String(skill.name)),
+  );
+  for (const fileName of ["AGENTS.md", "CLAUDE.md"]) {
+    const target = path.join(tempRoot, fileName);
+    if (!fs.existsSync(target)) {
+      failures.push(`${label} ${fileName} missing after install`);
+      continue;
+    }
+    const text = fs.readFileSync(target, "utf8");
+    const start = text.indexOf("<!-- agent-flow:skills:start -->");
+    const end = text.indexOf("<!-- agent-flow:skills:end -->");
+    if (start === -1 || end === -1) {
+      failures.push(`${label} ${fileName} has no skill index block`);
+      continue;
+    }
+    const block = text.slice(start, end);
+    if (!block.includes("[agent-flow skill index]")) {
+      failures.push(`${label} ${fileName} skill index block was never filled`);
+      continue;
+    }
+    const listed = new Set(
+      [...block.matchAll(/\|(?:always|on-demand):\{([^}]*)\}/g)]
+        .flatMap((match) => match[1].split(","))
+        .map((name) => name.trim())
+        .filter(Boolean),
+    );
+    for (const name of expected) {
+      if (!listed.has(name)) {
+        failures.push(`${label} ${fileName} skill index omits installed skill: ${name}`);
+      }
+    }
+    for (const name of listed) {
+      if (!expected.has(name)) {
+        failures.push(`${label} ${fileName} skill index lists a skill that is not installed: ${name}`);
+      }
+    }
+    const alwaysMatch = block.match(/\|always:\{([^}]*)\}/);
+    const always = new Set(
+      (alwaysMatch ? alwaysMatch[1].split(",") : []).map((name) => name.trim()).filter(Boolean),
+    );
+    for (const name of expectedPassive) {
+      if (!always.has(name)) {
+        failures.push(`${label} ${fileName} skill index does not mark ${name} as always-applied`);
+      }
+    }
+    for (const name of always) {
+      if (!expectedPassive.has(name)) {
+        failures.push(`${label} ${fileName} skill index claims ${name} is always-applied, frontmatter says otherwise`);
+      }
+    }
   }
 }
 
@@ -1690,7 +1826,7 @@ function assertHostSkillParity(root, index, label = "clean install") {
 
 var nodeRouteKeyEvaluator = null;
 
-function nodeRouteKeyFromKit(phase, content) {
+function nodeRouteKeyFromKit(phase, content, state = {}) {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agent-flow-route-key-"));
   try {
     const artifact = path.join(tempRoot, "artifact.txt");
@@ -1698,7 +1834,7 @@ function nodeRouteKeyFromKit(phase, content) {
     if (!nodeRouteKeyEvaluator) {
       nodeRouteKeyEvaluator = buildNodeRouteKeyEvaluator();
     }
-    return nodeRouteKeyEvaluator(phase, artifact);
+    return nodeRouteKeyEvaluator(phase, artifact, state);
   } catch (error) {
     return `blocked:${error.message}`;
   } finally {
@@ -1719,7 +1855,8 @@ function buildNodeRouteKeyEvaluator() {
     "fs",
     "phase",
     "artifact",
-    `${routeKeySource}\nreturn nodeRouteKey(phase, artifact);`,
+    "state",
+    `${routeKeySource}\nreturn nodeRouteKey(phase, artifact, state);`,
   ).bind(null, fs);
 }
 
@@ -1781,7 +1918,7 @@ with tempfile.TemporaryDirectory() as temp_dir:
     if phases[index].multi_review:
         route_key = _multi_review_route_key(content, phases[index].id)
     elif phases[index].id == "gates":
-        route_key = _gates_route_key(content)
+        route_key = _gates_route_key(content, nonce=str(read_meta(run_dir).get("gate_nonce", "")))
     else:
         route_key = _route_key(content)
     if route_key == "approve" and phases[index].routes and phases[index].routes.get("request-changes") and has_failure_markers(content):
@@ -1900,7 +2037,7 @@ function nodePhaseOutcome(workflow, phaseId, content, stateOverrides = {}) {
     const artifact = path.join(runDir, phase.artifact);
     fs.mkdirSync(path.dirname(artifact), { recursive: true });
     fs.writeFileSync(artifact, content, "utf8");
-    const routeKey = nodeRouteKeyFromKit(phase, content);
+    const routeKey = nodeRouteKeyFromKit(phase, content, state);
     const advance = spawnSync(process.execPath, [path.join(SOURCE_ROOT, "bin/agent-flow-kit.mjs"), "run", "advance"], {
       cwd: tempRoot,
       encoding: "utf8",

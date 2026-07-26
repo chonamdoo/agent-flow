@@ -6,7 +6,9 @@ dead assertion cannot pass silently.
 """
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -697,6 +699,48 @@ def test_recovery_commands_bypass_tripwire(tmp_path):
         assert result.returncode == 0, f"{argv} blocked in non-git: {result.stdout}{result.stderr}"
 
 
+def test_recovery_commands_survive_a_hook_integrity_violation(tmp_path):
+    """불변: 런 시작 게이트가 막는 상태에서도 복구 명령은 통과한다.
+
+    tripwire 오염만 검사하던 위 테스트는 이 실패 유형을 안 덮는다. 게이트를
+    새로 추가할 때마다 §10.2가 조용히 깨질 수 있으므로 오염 유형을 함께 늘린다.
+    """
+    project = tmp_path / "proj"
+    project.mkdir()
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required")
+    kit = Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"
+    installed = subprocess.run(
+        (node, str(kit), "install"), cwd=project, capture_output=True, text=True
+    )
+    assert installed.returncode == 0, installed.stderr
+    _init_repo(project)
+
+    # #102가 실증한 붕괴 경로 그대로: 읽기 hook 등록만 지운다.
+    settings_path = project / ".claude" / "settings.json"
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    settings["hooks"]["PostToolUse"] = [
+        entry
+        for entry in settings["hooks"]["PostToolUse"]
+        if not any("record-skill-read.py" in hook["command"] for hook in entry["hooks"])
+    ]
+    settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+
+    for argv in (
+        ["status", "--root", "."],
+        ["worktree", "list", "--root", "."],
+        ["abort", "--root", "."],
+    ):
+        result = _cli(argv, cwd=project)
+        assert result.returncode == 0, f"{argv} blocked: {result.stdout}{result.stderr}"
+
+    # 반증: 같은 오염에서 런은 반드시 막힌다. 막히지 않으면 위 통과는 무의미하다.
+    blocked = _cli(["run", "demo task", "--root", "."], cwd=project)
+    assert blocked.returncode == 2, blocked.stdout
+    assert "managed hook registration" in blocked.stderr
+
+
 def test_multi_review_reviewer_env_is_sanitized(tmp_path, monkeypatch):
     """불변: reviewer 자식 프로세스는 오염된 GIT_DIR을 물려받지 않는다."""
     from agent_flow import multi_review as MR
@@ -948,3 +992,64 @@ def test_tripwire_ignores_the_folded_agent_flow_record(tmp_path):
     runs.mkdir(parents=True)
     (runs / "meta.json").write_text("{}\n", encoding="utf-8")
     W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        ".venv/bin/agent-flow",
+        "node_modules/.bin/tsc",
+        ".claude/settings.json",
+        ".claude/hooks/pre.sh",
+        ".Codex/hooks.json",
+        ".codex/hooks.json",
+        ".omp/extensions/agent-flow-hooks.ts",
+    ],
+)
+def test_tripwire_detects_execution_surface_replacement(tmp_path, relative):
+    """불변: 다음 phase가 **실행할** 것을 바꾸면 잡힌다.
+
+    실측 BLIND였던 자리다. `command -v agent-flow`가 `.venv/bin/agent-flow`이고,
+    host의 PreToolUse 등록 파일은 이 저장소에서 하나도 tracked가 아니다.
+    """
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("original\n", encoding="utf-8")
+    (tmp_path / ".gitignore").write_text(
+        ".agent-flow/\n.venv/\nnode_modules/\n.claude/\n.Codex/\n.codex/\n.omp/\n",
+        encoding="utf-8",
+    )
+    _git("add", ".gitignore", cwd=tmp_path)
+    _init_repo(tmp_path)
+    plan = W.plan_worktree(root=tmp_path, name="exec")
+    W.create_worktree(root=tmp_path, plan=plan)
+    before = capture_leader_snapshot(tmp_path)
+
+    target.write_text("replaced by the worker\n", encoding="utf-8")
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
+def test_tripwire_ignores_agent_flow_runtime_state_in_tracked_diff(tmp_path):
+    """반증: `.agent-flow/`가 git-tracked인 프로젝트에서 완료된 task가 failed로 되돌아갔다.
+
+    `_status_records`에만 제외가 걸려 있고 `git diff HEAD`에는 pathspec이 없어서,
+    agent-flow 자신의 `claim_task` 상태 쓰기가 tracked-content digest를 바꿨다.
+    """
+    _init_repo(tmp_path)
+    state_file = tmp_path / ".agent-flow" / "state" / "team.json"
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    state_file.write_text('{"tasks": []}\n', encoding="utf-8")
+    _git("add", "-A", cwd=tmp_path)
+    _git("commit", "-m", "track agent-flow state", cwd=tmp_path)
+    plan = W.plan_worktree(root=tmp_path, name="state")
+    W.create_worktree(root=tmp_path, plan=plan)
+    before = capture_leader_snapshot(tmp_path)
+
+    state_file.write_text('{"tasks": [{"id": "T1", "status": "in_progress"}]}\n', encoding="utf-8")
+    W_ISO.assert_leader_unchanged(tmp_path, before)
+
+    # 무장 해제가 아니다. 같은 실행에서 진짜 소스 변경은 여전히 잡힌다.
+    (tmp_path / "f.txt").write_text("worker leak\n", encoding="utf-8")
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, before)

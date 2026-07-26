@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { SKILL_DEPENDENCIES, mergeInstallSelectionWithPrevious, resolveInstallSelection } from "../lib/skill-selection.mjs";
 
@@ -220,6 +221,7 @@ function installProject() {
   removeLegacyProjectSkillCopies(root, "graphify");
   upsertBootstrapBlock(path.join(root, "AGENTS.md"), "AGENTS.md", root);
   upsertBootstrapBlock(path.join(root, "CLAUDE.md"), "CLAUDE.md", root);
+  upsertSkillIndexBlock(root);
   pruneRetiredHookScripts(root);
   makeHooksExecutable(root);
   if (hooksDisabled) {
@@ -288,6 +290,8 @@ function runWorkflowCommand(args) {
       run_dir: runDirRel,
       started_at: startedAt,
       phase_entered_at: startedAt,
+      // gate-results.json의 출처 표식. Python `artifact.create_run`과 같은 계약이다.
+      gate_nonce: randomBytes(16).toString("hex"),
     };
     writeJson(path.join(runDir, "manifest.json"), state);
     writeJson(currentRunPath(root), state);
@@ -1047,10 +1051,26 @@ function removeManagedDirIfSame(src, dest, force = false) {
   if (!fs.existsSync(dest)) {
     return;
   }
+  // 대상이 git이 추적하는 소스면 건드리지 않는다. worktree의 kit으로 leader를
+  // install하면 `root !== KIT_ROOT`라 이 경로가 돌고, leader의 추적 중인
+  // `scripts/`가 통째로 삭제됐다(실측: `git status`에 `D scripts/*` 7개).
+  // 관리 사본을 걷어내는 것이 목적이지 사용자 소스를 지우는 것이 아니다.
+  if (isGitTracked(dest)) {
+    return;
+  }
   if (!force && !dirContentsMatch(src, dest)) {
     return;
   }
   fs.rmSync(dest, { recursive: true, force: true });
+}
+
+function isGitTracked(target) {
+  const result = spawnSync("git", ["ls-files", "--error-unmatch", "-z", "--", "."], {
+    cwd: fs.statSync(target).isDirectory() ? target : path.dirname(target),
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+  return !result.error && result.status === 0 && result.stdout.trim().length > 0;
 }
 
 function dirContentsMatch(src, dest) {
@@ -1214,6 +1234,7 @@ function discoverSkills(baseDir, source, root, ignoredNames = new Set(), allowed
       workflowPhases: metadata.workflowPhases,
       reviewAngles: metadata.reviewAngles,
       installGroup: metadata.installGroup,
+      delivery: metadata.delivery,
       excludes: metadata.excludes,
       tags: metadata.tags,
       description: metadata.description,
@@ -1268,6 +1289,10 @@ function parseSkillMetadata(text, fallbackName) {
     workflowPhases: arrayValue(metadata.workflowPhases),
     reviewAngles: arrayValue(metadata.reviewAngles),
     installGroup: String(metadata.installGroup || ""),
+    // 전달 방식. `passive`는 "항상 적용되는 규범"이라 AGENTS.md 인덱스의 always 줄에
+    // 오르고, 나머지는 phase나 사용자 요청이 부를 때만 열린다. 선언이 없으면
+    // on-demand다 — 안 쓰는 skill을 상시 노출하면 잡음이 되어 결과가 나빠진다.
+    delivery: String(metadata.delivery || "on-demand"),
     excludes: arrayValue(metadata.excludes || metadata.conflicts),
     warnings,
   };
@@ -1407,9 +1432,13 @@ function linkProjectSkill(root, skill, host, previousIndex, force = false) {
   ensureChildPath(hostRoot, destDir);
   const destSkill = path.join(destDir, "SKILL.md");
   const previousHash = previousSkillHash(previousIndex, skill.name);
-  if (fs.existsSync(destDir)) {
-    const stat = fs.lstatSync(destDir);
-    if (stat.isSymbolicLink()) {
+  // `existsSync`는 심링크를 **따라가서** 끊어진 링크에 false를 준다. 그러면 stale
+  // link 정리 분기를 못 타고 곧바로 링크 생성이 EEXIST로 죽는다. profile을 좁히거나
+  // `--skills` 선택을 바꾸면 이전 선택의 host 링크가 끊긴 채 남으므로 실제로 밟는다.
+  // lstat은 링크 자체를 보므로 끊어진 링크도 정리 대상으로 잡힌다.
+  const destStat = lstatIfExists(destDir);
+  if (destStat) {
+    if (destStat.isSymbolicLink()) {
       fs.unlinkSync(destDir);
     } else if (fs.existsSync(destSkill)) {
       const currentHash = crypto.createHash("sha256").update(fs.readFileSync(destSkill, "utf8")).digest("hex");
@@ -1796,7 +1825,7 @@ function nextPhaseIndex(state, phases, phase, artifact) {
   if (!phase.routes) {
     return state.phase_index + 1;
   }
-  const key = nodeRouteKey(phase, artifact);
+  const key = nodeRouteKey(phase, artifact, state);
   const target = phase.routes[key] ?? phase.routes.default;
   if (!target) {
     throw new Error(`blocked: ${phase.id} artifact has no route for ${key}`);
@@ -1855,9 +1884,9 @@ function nextFixLoopRounds(state, phase, nextPhase) {
   return state.fix_loop_rounds;
 }
 
-function nodeRouteKey(phase, artifact) {
+function nodeRouteKey(phase, artifact, state) {
   if (phase.id === "gates") {
-    return readGatesRouteKey(artifact);
+    return readGatesRouteKey(artifact, state?.gate_nonce ?? "");
   }
   if (phase.multi_review) {
     const verdict = readMultiReviewVerdict(artifact, phase.id);
@@ -2091,11 +2120,20 @@ function normalizeReviewerHeadingId(value) {
   return /^[a-z0-9]+(?: [a-z0-9]+)?$/.test(key) ? key : "";
 }
 
-function readGatesPassed(pathName) {
-  return readGatesRouteKey(pathName) === "green";
+function readGatesPassed(pathName, nonce = "") {
+  return readGatesRouteKey(pathName, nonce) === "green";
 }
 
-function readGatesRouteKey(pathName) {
+// run meta의 nonce와 대조한다. 이 층이 막는 것은 손으로 쓴 gate-results.json이지
+// 적대적 위조가 아니다 — nonce도 디스크에 있으므로 읽어서 복사할 수 있다.
+function gateNonceMatches(data, nonce) {
+  if (!nonce) {
+    return true;
+  }
+  return Boolean(data.produced_by) && data.produced_by.nonce === nonce;
+}
+
+function readGatesRouteKey(pathName, nonce = "") {
   try {
     const content = fs.readFileSync(pathName, "utf8");
     const data = JSON.parse(content);
@@ -2111,6 +2149,7 @@ function readGatesRouteKey(pathName) {
     // 완료 보고는 실제 실행한 gate command와 결과 evidence가 함께 있을 때만 허용한다.
     const requiredResults = data.results.filter((r) => r && r.required !== false);
     const resultsPass =
+      gateNonceMatches(data, nonce) &&
       requiredResults.length > 0 &&
       requiredResults.every((r) =>
         r &&
@@ -2151,6 +2190,73 @@ function hasGateEvidence(result) {
   return false;
 }
 
+const SKILL_INDEX_START = "<!-- agent-flow:skills:start -->";
+const SKILL_INDEX_END = "<!-- agent-flow:skills:end -->";
+
+// 설치된 skill 목록을 AGENTS.md 안에 직접 심는다.
+//
+// 이전에는 `.agent-flow/skills/index.json`을 읽으라고 안내만 했다. 그건 판단
+// 지점이고, agent는 그 판단을 자주 건너뛴다 - Vercel의 Next.js 16 eval에서
+// on-demand 문서 조회는 56%의 경우 아예 발동하지 않아 문서 없는 baseline과
+// 같은 점수(53%)였고, 같은 문서를 AGENTS.md 인덱스로 심자 100%가 됐다.
+//
+// 그래서 여기 있는 것은 내용이 아니라 **인덱스**다. 이름만 주고 본문은 파일에
+// 남긴다 - 전문을 넣으면 AGENTS.md가 곧 문서가 되고, 적용 시점 문장은 phase
+// 프롬프트가 이미 profile YAML에서 그대로 들고 온다. 여기서 다시 지으면 갈라진다.
+function skillIndexBlock(root) {
+  const index = readJsonIfExists(path.join(root, ".agent-flow", "skills", "index.json"));
+  const skills = Array.isArray(index?.skills) ? index.skills : [];
+  if (skills.length === 0) {
+    // 인덱스가 없는 설치본에서 거짓 목록을 쓰지 않는다. 빈 인덱스는 "아직
+    // 모른다"이지 "skill이 없다"가 아니다.
+    return [
+      SKILL_INDEX_START,
+      `- 설치된 skill 인덱스가 아직 없다. \`${AGENT_FLOW_COMMAND} skills sync\` 후 다시 생성된다.`,
+      SKILL_INDEX_END,
+    ].join("\n");
+  }
+  const names = (delivery) =>
+    skills
+      .filter((skill) => (skill.delivery === "passive") === (delivery === "passive"))
+      .map((skill) => String(skill.name))
+      .sort((a, b) => a.localeCompare(b));
+  const lines = [
+    SKILL_INDEX_START,
+    "```text",
+    "[agent-flow skill index]|root: .agent-flow/skills",
+    "|IMPORTANT: 아래 파일이 기억보다 우선한다. 변경 대상을 먼저 훑고, scope가 걸리는 것만 읽는다.",
+  ];
+  const passive = names("passive");
+  if (passive.length > 0) {
+    lines.push(`|always:{${passive.join(",")}}`);
+  }
+  const onDemand = names("on-demand");
+  if (onDemand.length > 0) {
+    lines.push(`|on-demand:{${onDemand.join(",")}}`);
+  }
+  lines.push("```", SKILL_INDEX_END);
+  return lines.join("\n");
+}
+// 인덱스는 install이 skill 링크를 다 만든 **뒤에** 채운다. bootstrap 블록을 쓰는
+// 시점에는 아직 목록이 확정되지 않아, 거기서 채우면 한 install 안에서 곧바로
+// 낡는다. 그래서 블록에는 자리만 두고 여기서 그 자리만 바꾼다.
+function upsertSkillIndexBlock(root) {
+  const block = skillIndexBlock(root);
+  for (const fileName of ["AGENTS.md", "CLAUDE.md"]) {
+    const target = path.join(root, fileName);
+    if (!fs.existsSync(target)) continue;
+    const current = fs.readFileSync(target, "utf8");
+    const start = current.indexOf(SKILL_INDEX_START);
+    const end = current.indexOf(SKILL_INDEX_END);
+    if (start === -1 || end === -1 || end < start) continue;
+    const next = current.slice(0, start) + block + current.slice(end + SKILL_INDEX_END.length);
+    if (next !== current) {
+      fs.writeFileSync(target, next, "utf8");
+    }
+  }
+}
+
+
 function upsertBootstrapBlock(pathName, label, root) {
   const start = "<!-- agent-flow:start -->";
   const end = "<!-- agent-flow:end -->";
@@ -2182,7 +2288,10 @@ Follow the CLI output exactly. If no run is active, start with \`${AGENT_FLOW_CO
 - 필요한 경우만 current phase, action, \`next_command\`, blocker를 요약한다.
 - 모든 guide를 항상 로드하지 말고 변경 파일에 필요한 guide만 읽는다.
 - 프로젝트 skill은 \`skills/<name>/SKILL.md\` 또는 private \`.agent-flow/local-skills/<name>/SKILL.md\`에 둔다.
-- install/bootstrap 후 \`.agent-flow/skills/index.json\` metadata를 보고 필요한 skill만 읽는다. 모든 SKILL.md 전문을 항상 읽지 않는다.
+<!-- agent-flow:skills:start -->
+- 설치된 skill 인덱스가 아직 없다. install이 이 자리에 채운다.
+<!-- agent-flow:skills:end -->
+- 인덱스에 없는 skill은 이 프로젝트에 설치돼 있지 않다. 런타임에 설치를 묻지 말고 \`${AGENT_FLOW_COMMAND} skills sync\`에 맡긴다.
 - Claude/Codex/OMP 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.
 - Claude/Codex/OMP hook이 자동 차단하는 보호 브랜치 commit/push와 leader checkout/switch 금지는 모든 host에서 동일하게 지킨다.
 ${end}
@@ -2410,15 +2519,22 @@ function unquoteShellWord(value) {
 
 // Read 계열 tool 이름은 host마다 다르다. comment-checker의 write matcher와 같은 방식으로 합집합을 쓴다.
 const READ_TOOL_MATCHER = "^(Read|read|read_file|view|cat)$";
+// 셸 실행 tool도 host마다 이름이 다르다. 관측 전용이라 PostToolUse에만 붙는다.
+const COMMAND_TOOL_MATCHER = "^(Bash|bash|shell|run_terminal_cmd|execute_command|local_shell|terminal)$";
 
 // 관리 대상에서 빠진 hook은 기존 설치본 settings에 그대로 남는다. mergeHookSettings는
 // additive-only라서, 스크립트 파일만 지우면 host가 없는 경로를 계속 실행해 셸이 통째로
 // 막힌다. 은퇴한 이름을 여기 남겨 install 때 등록에서 걷어낸다.
+// 관측 hook(`record-*`)은 PostToolUse, 강제 hook은 PreToolUse. 이 구분을 어기면
+// 관측자가 판정자로 승격되고, 스크립트가 없거나 죽는 순간 host가 그걸 차단으로
+// 읽어 사용자 도구가 통째로 막힌다. 런 시작 시 `core/hook_integrity.py`가
+// 이 목록과 배치를 kit.json 기록과 대조한다.
 const MANAGED_HOOK_SCRIPTS = [
   "guard-protected-branch.sh",
   "show-phase-status.sh",
   "comment-checker.py",
   "record-skill-read.py",
+  "record-command-run.py",
 ];
 const RETIRED_MANAGED_HOOK_SCRIPTS = ["guard-worktree.sh", "guard-worktree-write.py"];
 
@@ -2470,7 +2586,7 @@ function isRetiredHookCommand(command) {
 
 function managedHookScriptName(command) {
   const normalized = unquoteShellWord(command).replaceAll("\\", "/").replaceAll("'", "").replaceAll('"', "");
-  for (const scriptName of ["guard-protected-branch.sh", "show-phase-status.sh", "comment-checker.py", "record-skill-read.py"]) {
+  for (const scriptName of MANAGED_HOOK_SCRIPTS) {
     if (
       normalized === `.agent-flow/scripts/hooks/${scriptName}` ||
       normalized === `scripts/hooks/${scriptName}` ||
@@ -2479,17 +2595,6 @@ function managedHookScriptName(command) {
       normalized.includes(`/.agent-flow/scripts/hooks/${scriptName}`) ||
       normalized.includes(`/scripts/hooks/${scriptName}`)
     ) {
-      return scriptName;
-    }
-  }
-  return null;
-}
-
-function trustedManagedHookScriptName(root, command) {
-  const normalized = unquoteShellWord(command).replaceAll("\\", "/");
-  const normalizedRoot = path.resolve(root).replaceAll("\\", "/");
-  for (const scriptName of ["guard-protected-branch.sh", "show-phase-status.sh", "comment-checker.py", "record-skill-read.py"]) {
-    if (normalized === `${normalizedRoot}/.agent-flow/scripts/hooks/${scriptName}`) {
       return scriptName;
     }
   }
@@ -2515,6 +2620,10 @@ function codexHooksSettings(root) {
         {
           matcher: READ_TOOL_MATCHER,
           hooks: [{ type: "command", command: hookScriptCommand(root, "record-skill-read.py") }],
+        },
+        {
+          matcher: COMMAND_TOOL_MATCHER,
+          hooks: [{ type: "command", command: hookScriptCommand(root, "record-command-run.py") }],
         },
       ],
       Stop: [
@@ -2634,130 +2743,17 @@ function upsertCodexConfigTableValue(tableHeader, key, value) {
   return true;
 }
 
-function resolveCodexBinary() {
-  const candidates = [
-    process.env.CODEX_CLI_PATH,
-    "/Applications/Codex.app/Contents/Resources/codex",
-    "codex",
-  ].filter(Boolean);
-  for (const candidate of candidates) {
-    const result = spawnSync(candidate, ["--version"], { encoding: "utf8", timeout: 3000 });
-    if (!result.error && result.status === 0) {
-      return candidate;
-    }
-  }
-  return null;
-}
-
-function queryCodexProjectHookHashes(root) {
-  const codexBinary = resolveCodexBinary();
-  if (!codexBinary) {
-    return [];
-  }
-  const helper = String.raw`
-const { spawn } = require("child_process");
-const codexBinary = process.argv[1];
-const root = process.argv[2];
-const responses = [];
-let finished = false;
-let stdoutBuffer = "";
-const proc = spawn(codexBinary, ["app-server", "--stdio"], { stdio: ["pipe", "pipe", "pipe"] });
-proc.stdout.on("data", (chunk) => {
-  stdoutBuffer += chunk.toString();
-  let newlineIndex;
-  while ((newlineIndex = stdoutBuffer.indexOf("\n")) !== -1) {
-    handleLine(stdoutBuffer.slice(0, newlineIndex));
-    stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
-  }
-});
-proc.stderr.on("data", () => {});
-function handleLine(line) {
-  const trimmed = line.trim();
-  if (!trimmed) {
-    return;
-  }
-  try {
-    const response = JSON.parse(trimmed);
-    responses.push(response);
-    if (response.id === 2) {
-      finish(response);
-    }
-  } catch {
-    // Ignore non-JSON app-server output.
-  }
-}
-function send(id, method, params) {
-  proc.stdin.write(JSON.stringify({ id, method, params }) + "\n");
-}
-setTimeout(() => {
-  send(1, "initialize", {
-    clientInfo: { name: "agent-flow-install", title: null, version: "1" },
-    capabilities: { experimentalApi: true, requestAttestation: false },
-  });
-  setTimeout(() => send(2, "hooks/list", { cwds: [root] }), 250);
-}, 50);
-function finish(response) {
-  if (finished) {
-    return;
-  }
-  finished = true;
-  if (!response || response.error) {
-    proc.kill("SIGTERM");
-    process.exit(1);
-  }
-  const entry = response.result?.data?.find((item) => item.cwd === root);
-  const sourcePaths = new Set([root + "/.Codex/hooks.json", root + "/.codex/hooks.json"]);
-  const hooks = (entry?.hooks ?? [])
-    .filter((hook) => sourcePaths.has(hook.sourcePath) && hook.key && hook.currentHash)
-    .map((hook) => ({ key: hook.key, trustedHash: hook.currentHash, command: hook.command ?? "" }));
-  console.log(JSON.stringify(hooks));
-  proc.kill("SIGTERM");
-}
-const timer = setTimeout(() => finish(responses.find((item) => item.id === 2)), 3000);
-proc.on("exit", () => {
-  if (stdoutBuffer.trim()) {
-    handleLine(stdoutBuffer);
-    stdoutBuffer = "";
-  }
-  clearTimeout(timer);
-  if (!finished) {
-    finish(responses.find((item) => item.id === 2));
-  }
-});
-`;
-  const result = spawnSync(process.execPath, ["-e", helper, codexBinary, root], {
-    encoding: "utf8",
-    timeout: 8000,
-  });
-  if (result.error || result.status !== 0) {
-    return [];
-  }
-  try {
-    const parsed = JSON.parse(result.stdout.trim());
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
 function installCodexTrustState(root) {
   if (process.env.AGENT_FLOW_SKIP_CODEX_TRUST === "1") {
     return;
   }
+  // hook 승인 해시는 기록하지 않는다. install은 **현재 등록된**(=변조됐을 수도
+  // 있는) hook의 해시를 되받아 적을 뿐이고, 그 값을 다시 읽어 검증하는 코드는
+  // 어디에도 없었다. 검증하지 않는 신뢰 기록은 보호가 아니라 승인 세탁기다.
+  // 등록 무결성은 런 시작 시 `core/hook_integrity.py`가 kit.json과 대조한다.
   const projectHeader = `[projects."${tomlBasicString(root)}"]`;
   if (!upsertCodexConfigTableValue(projectHeader, "trust_level", "\"trusted\"")) {
     console.error("warning: Codex project trust not registered; HOME is unavailable");
-    return;
-  }
-  const hooks = queryCodexProjectHookHashes(root);
-  const managedHooks = hooks.filter((hook) => trustedManagedHookScriptName(root, hook.command));
-  if (managedHooks.length === 0) {
-    console.error("warning: Codex hook trust not registered; codex app-server did not return project hooks");
-    return;
-  }
-  for (const hook of managedHooks) {
-    const hookHeader = `[hooks.state."${tomlBasicString(hook.key)}"]`;
-    upsertCodexConfigTableValue(hookHeader, "trusted_hash", `"${tomlBasicString(hook.trustedHash)}"`);
   }
 }
 
@@ -2798,6 +2794,10 @@ function claudeHooksSettings(root) {
           matcher: READ_TOOL_MATCHER,
           hooks: [{ type: "command", command: hookScriptCommand(root, "record-skill-read.py") }],
         },
+        {
+          matcher: COMMAND_TOOL_MATCHER,
+          hooks: [{ type: "command", command: hookScriptCommand(root, "record-command-run.py") }],
+        },
       ],
       Stop: [
         {
@@ -2827,6 +2827,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", ".
 const HOOK_DIR = path.join(ROOT, ".agent-flow", "scripts", "hooks");
 const WRITE_TOOL_RE = /^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit)$/i;
 const READ_TOOL_RE = /^(Read|read|read_file|view|cat)$/i;
+const COMMAND_TOOL_RE = /^(Bash|bash|shell|run_terminal_cmd|execute_command|local_shell|terminal)$/i;
 
 export default function agentFlowHooks(pi) {
   if (typeof pi.setLabel === "function") {
@@ -2872,6 +2873,12 @@ export default function agentFlowHooks(pi) {
       await runHook("record-skill-read.py", hookPayload(event, ctx), ctx);
       return;
     }
+    if (COMMAND_TOOL_RE.test(toolName)) {
+      // 관측 전용. tool_call(PreToolUse에 해당)이 아니라 여기 붙는다 — 관측자가
+      // 판정자로 승격되면 실패한 관측이 곧 사용자 도구 차단이 된다.
+      await runHook("record-command-run.py", commandRunPayload(event, ctx), ctx);
+      return;
+    }
     if (!WRITE_TOOL_RE.test(toolName)) {
       return;
     }
@@ -2902,6 +2909,20 @@ export default function agentFlowHooks(pi) {
   });
 }
 
+
+function commandRunPayload(event, ctx) {
+  // exit code는 관측 hook이 보는 유일한 결과 신호다. host가 안 실어 보내면
+  // 없는 채로 기록된다 — 없는 것과 0을 섞지 않는다.
+  const payload = hookPayload(event, ctx);
+  const result = event?.output ?? event?.result ?? null;
+  const code = result && typeof result === "object"
+    ? result.exit_code ?? result.exitCode ?? null
+    : null;
+  if (typeof code === "number") {
+    payload.exit_code = code;
+  }
+  return payload;
+}
 
 function hookPayload(event, ctx) {
   const input = event?.input || {};

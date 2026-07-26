@@ -51,12 +51,39 @@ phases:
   - id: prd
     skills:
       required: [to-prd]
-    description: Write the product requirements document.
+    description: Write the product requirements document and record supplied design values.
+    pause_after: true
+    required_markers:
+      - "## Design Values"
+      - "design-values:"
+      - "design-values-confirmed: yes|n/a"
     prompt: |
       Apply `.agent-flow/skills/to-prd/SKILL.md`. Write the PRD
       from domain-grill.md and product-brief.md. Include goal, scope,
       non-goals, user stories, acceptance criteria, edge cases, dependencies,
       and risks. Output: artifacts/prd.md.
+
+      ## Design Values
+      Record every concrete value the user supplied as one `key: value` line
+      each, using the user's exact value: spacing, sizes, colors, durations,
+      counts, thresholds, limits, timeouts. If the input was an image or a
+      Figma link, the numbers here are **what you read off it** — a lossy
+      reading, not the source. Write them verbatim anyway.
+
+      The runner copies this section into `design-spec.md` and injects it into
+      the prompt of every later phase. It is the only carrier that survives a
+      compacted conversation, so a value missing here is a value the
+      implementation phase will not see.
+
+      ## Read-back
+      Before finishing, print the recorded values back to the user as a table
+      and ask them to confirm each one. You are the only reader of the image;
+      the user is the only one who can tell you that you misread it. Record
+      `design-values-confirmed: yes` only after the user answers. Use
+      `design-values-confirmed: n/a` **only** when the task carries no supplied
+      values at all — never as a shortcut around asking.
+
+      This phase pauses. Confirmation happens during the pause, not after.
 
   - id: slice-plan
     description: Break PRD into independently shippable slices.
@@ -179,10 +206,18 @@ phases:
       - "project-local-skills: checked|n/a"
       - "project-local-skills-used:"
       - "presentation-skill: android|react|react-native|ios|n/a"
+      - "regression-test:"
+      - "red-observed:"
+      - "test-run-evidence: verified|unavailable"
     prompt: |
       Apply code-generation-discipline, `.agent-flow/skills/tdd/SKILL.md`, and
       `.agent-flow/skills/codebase-design/SKILL.md` before writing tests. Write
       failing tests first.
+
+      Then **run them** and let them fail. The run itself is observed by the
+      `record-command-run.py` PostToolUse hook, so "I wrote a test" without a
+      test command in this phase is rejected regardless of what you record.
+      A test that passes on the first run is not a red phase.
       Resolve required skills from active profile metadata,
       `.agent-flow/skills/index.json`, changed files, and task scope. Read only
       the touched profile skill union before writing tests. Android/Kotlin/
@@ -204,6 +239,13 @@ phases:
           project-local-skills: checked|n/a
           project-local-skills-used: <skill list or n/a>
           presentation-skill: n/a
+          regression-test: <test id that reproduces the required behavior>
+          red-observed: <exit code of the failing run>
+          test-run-evidence: verified|unavailable
+
+      Use `test-run-evidence: unavailable` only when the host does not run the
+      observation hook. When the hook is active the runner reads the log
+      directly and your marker value does not decide anything.
 
       If Android/Kotlin/Compose/KMP files are changed, add:
 

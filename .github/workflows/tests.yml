@@ -1,0 +1,31 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  # 이 job이 없으면 테스트 스위트 전체가 로컬 자기신고다. 통과 여부를 저장소
+  # 밖에서 판정하는 관측자는 CI뿐이다.
+  pytest:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      # 설치·hook·worktree 테스트가 node를 서브프로세스로 띄운다.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      # 서브셋이 아니라 전 스위트를 돈다. package.json의 `test`는 일부만 돌려서
+      # CI 기준으로 쓸 수 없다.
+      - run: PYTHONPATH=src python3 -m pytest tests -q -p no:cacheprovider -o addopts=""
+        env:
+          AGENT_FLOW_SKIP_CODEX_TRUST: "1"

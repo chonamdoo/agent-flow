@@ -1,0 +1,216 @@
+{
+  "host": "claude",
+  "trials": 5,
+  "rows": [
+    {
+      "case": "comment_norm",
+      "config": "baseline",
+      "host_ok": true,
+      "seconds": 46.5,
+      "behavior": true,
+      "norm": true,
+      "trial": 0
+    },
+    {
+      "case": "comment_norm",
+      "config": "baseline",
+      "host_ok": true,
+      "seconds": 42.8,
+      "behavior": true,
+      "norm": true,
+      "trial": 1
+    },
+    {
+      "case": "comment_norm",
+      "config": "baseline",
+      "host_ok": true,
+      "seconds": 53.7,
+      "behavior": true,
+      "norm": true,
+      "trial": 2
+    },
+    {
+      "case": "comment_norm",
+      "config": "baseline",
+      "host_ok": true,
+      "seconds": 41.8,
+      "behavior": true,
+      "norm": true,
+      "trial": 3
+    },
+    {
+      "case": "comment_norm",
+      "config": "baseline",
+      "host_ok": true,
+      "seconds": 43.3,
+      "behavior": true,
+      "norm": true,
+      "trial": 4
+    },
+    {
+      "case": "comment_norm",
+      "config": "skill-ondemand",
+      "host_ok": true,
+      "seconds": 39.5,
+      "behavior": true,
+      "norm": true,
+      "trial": 0
+    },
+    {
+      "case": "comment_norm",
+      "config": "skill-ondemand",
+      "host_ok": true,
+      "seconds": 48.3,
+      "behavior": true,
+      "norm": true,
+      "trial": 1
+    },
+    {
+      "case": "comment_norm",
+      "config": "skill-ondemand",
+      "host_ok": true,
+      "seconds": 41.0,
+      "behavior": true,
+      "norm": true,
+      "trial": 2
+    },
+    {
+      "case": "comment_norm",
+      "config": "skill-ondemand",
+      "host_ok": true,
+      "seconds": 77.0,
+      "behavior": true,
+      "norm": true,
+      "trial": 3
+    },
+    {
+      "case": "comment_norm",
+      "config": "skill-ondemand",
+      "host_ok": true,
+      "seconds": 42.4,
+      "behavior": true,
+      "norm": true,
+      "trial": 4
+    },
+    {
+      "case": "comment_norm",
+      "config": "agents-index",
+      "host_ok": true,
+      "seconds": 40.6,
+      "behavior": true,
+      "norm": true,
+      "trial": 0
+    },
+    {
+      "case": "comment_norm",
+      "config": "agents-index",
+      "host_ok": true,
+      "seconds": 53.3,
+      "behavior": true,
+      "norm": true,
+      "trial": 1
+    },
+    {
+      "case": "comment_norm",
+      "config": "agents-index",
+      "host_ok": true,
+      "seconds": 45.6,
+      "behavior": true,
+      "norm": true,
+      "trial": 2
+    },
+    {
+      "case": "comment_norm",
+      "config": "agents-index",
+      "host_ok": true,
+      "seconds": 36.5,
+      "behavior": true,
+      "norm": true,
+      "trial": 3
+    },
+    {
+      "case": "comment_norm",
+      "config": "agents-index",
+      "host_ok": true,
+      "seconds": 62.2,
+      "behavior": true,
+      "norm": true,
+      "trial": 4
+    },
+    {
+      "case": "comment_norm",
+      "config": "agents-index-noisy",
+      "host_ok": true,
+      "seconds": 36.7,
+      "behavior": true,
+      "norm": true,
+      "trial": 0
+    },
+    {
+      "case": "comment_norm",
+      "config": "agents-index-noisy",
+      "host_ok": true,
+      "seconds": 42.3,
+      "behavior": true,
+      "norm": true,
+      "trial": 1
+    },
+    {
+      "case": "comment_norm",
+      "config": "agents-index-noisy",
+      "host_ok": true,
+      "seconds": 64.8,
+      "behavior": true,
+      "norm": true,
+      "trial": 2
+    },
+    {
+      "case": "comment_norm",
+      "config": "agents-index-noisy",
+      "host_ok": true,
+      "seconds": 50.1,
+      "behavior": true,
+      "norm": true,
+      "trial": 3
+    },
+    {
+      "case": "comment_norm",
+      "config": "agents-index-noisy",
+      "host_ok": true,
+      "seconds": 44.2,
+      "behavior": true,
+      "norm": true,
+      "trial": 4
+    }
+  ],
+  "summary": [
+    {
+      "config": "baseline",
+      "n": 5,
+      "behavior": 1.0,
+      "norm": 1.0,
+      "both": 1.0
+    },
+    {
+      "config": "skill-ondemand",
+      "n": 5,
+      "behavior": 1.0,
+      "norm": 1.0,
+      "both": 1.0
+    },
+    {
+      "config": "agents-index",
+      "n": 5,
+      "behavior": 1.0,
+      "norm": 1.0,
+      "both": 1.0
+    },
+    {
+      "config": "agents-index-noisy",
+      "n": 5,
+      "behavior": 1.0,
+      "norm": 1.0,
+      "both": 1.0
+    }
+  ]
+}

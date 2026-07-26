@@ -39,6 +39,8 @@ review_angles:
     prompt: templates/_shared/review/compose-stability.md
   - id: test-edge
     prompt: templates/_shared/review/test-edge.md
+  - id: sdui
+    prompt: templates/_shared/review/sdui.md
 skills:
   install:
     - android-appshell-error-handling

@@ -16,10 +16,18 @@
 """
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
 from agent_flow.adapters.base import Adapter
+from agent_flow.core.artifacts import run_gate_nonce
+
+
+# stub-success가 만든 artifact임을 나타내는 표식. runner는 이 표식이 있는
+# artifact에서만 마커 검사를 건너뛴다. 표식이 없으면 사람이 쓴 artifact이므로
+# 환경변수 하나로 마커 검사 전체가 꺼지지 않는다.
+STUB_SENTINEL = "agent-flow generic stub-success"
 
 
 class GenericAdapter(Adapter):
@@ -42,6 +50,7 @@ class GenericAdapter(Adapter):
                 if getattr(phase, "multi_review", False):
                     artifact.write_text(
                         f"# {phase.id}\n\n"
+                        f"<!-- {STUB_SENTINEL} -->\n\n"
                         "## Reviewer 1\n"
                         "reviewer-source: sub-agent\n"
                         "verdict: approve\n\n"
@@ -54,24 +63,39 @@ class GenericAdapter(Adapter):
                     )
                     return True
                 if phase.id == "gates":
+                    # 출처 표식은 runner 쪽에서 찍는다. 이 파일을 쓴 주체가
+                    # agent가 아니라 adapter이므로 provenance는 성립한다.
+                    payload = {
+                        "passed": True,
+                        "status": "green",
+                        "results": [
+                            {
+                                "id": "stub",
+                                "command": "agent-flow generic stub-success",
+                                "argv": ["agent-flow", "generic", "stub-success"],
+                                "passed": True,
+                                "exit_code": 0,
+                            }
+                        ],
+                    }
+                    nonce = run_gate_nonce(run_dir)
+                    if nonce:
+                        payload["produced_by"] = {"tool": "agent-flow gates", "nonce": nonce}
                     artifact.write_text(
-                        '{"passed": true, "status": "green", '
-                        '"results": [{"id": "stub", '
-                        '"command": "agent-flow generic stub-success", '
-                        '"argv": ["agent-flow", "generic", "stub-success"], '
-                        '"passed": true, "exit_code": 0}]}\n',
-                        encoding="utf-8",
+                        f"{json.dumps(payload, sort_keys=True)}\n", encoding="utf-8"
                     )
                     return True
                 if phase.id == "pr-watch":
                     artifact.write_text(
                         f"# {phase.id}\n\n"
+                        f"<!-- {STUB_SENTINEL} -->\n\n"
                         "status: green\n",
                         encoding="utf-8",
                     )
                     return True
                 artifact.write_text(
                     f"# {phase.id}\n\n"
+                    f"<!-- {STUB_SENTINEL} -->\n\n"
                     f"_stub artifact written by GenericAdapter (stub mode)._\n"
                 )
             return True
