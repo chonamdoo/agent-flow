@@ -22,6 +22,7 @@ class GateResult:
     stdout: str
     stderr: str
     required: bool = True
+    timed_out: bool = False
 
 
 def run_gate(command: GateCommand, *, cwd: Path, timeout_s: int = 600) -> GateResult:
@@ -44,8 +45,9 @@ def run_gate(command: GateCommand, *, cwd: Path, timeout_s: int = 600) -> GateRe
             passed=False,
             exit_code=None,
             stdout=_text(exc.stdout),
-            stderr=_text(exc.stderr),
+            stderr=_text(exc.stderr) or f"gate timed out after {timeout_s}s",
             required=command.required,
+            timed_out=True,
         )
     except OSError as exc:
         return GateResult(
@@ -66,6 +68,10 @@ def run_gate(command: GateCommand, *, cwd: Path, timeout_s: int = 600) -> GateRe
         stderr=completed.stderr,
         required=command.required,
     )
+
+
+def gate_results_timed_out(results: list[GateResult]) -> bool:
+    return any(result.timed_out for result in results)
 
 
 def run_gates(commands: list[GateCommand], *, cwd: Path, timeout_s: int = 600) -> list[GateResult]:

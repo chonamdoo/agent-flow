@@ -10,7 +10,8 @@
 - 주입 지점에서 헬퍼 함수나 호출 가능 객체가 sibling use case를 만들어 반환하는 간접 생성.
 - 컨테이너(튜플/리스트/딕셔너리)에서 원소를 골라 꺼내 넘기는 주입.
 - target 인스턴스를 만든 뒤 속성 대입이나 setter 메서드로 sibling을 심는 주입.
-- MRO/믹스인을 따라가야만 드러나는 구체 use case 판별.
+- MRO 순서를 풀어야만 드러나는 구체 use case 판별. base 상속으로 끌어온 concrete
+  sibling은 잡지만, 믹스인 순서에 따라 구현이 갈리는 경우는 보지 않는다.
 - `importlib.import_module` / `__import__` 같은 동적 import로 부르는 금지 모듈.
 - 분기 도달 가능성 구분: 죽은 분기의 대입도 그대로 값으로 본다.
 """
@@ -227,22 +228,33 @@ def _architecture_violations(project: Path) -> list[str]:
 
     target_classes = _target_class_family(target_qualified, classes, modules)
     target_owners = _class_ancestors(target_classes, classes, modules)
-    sibling_usecases = _usecase_classes(classes, modules) - target_owners
+    usecases = _usecase_classes(classes, modules)
+    # 상속으로 끌어온 concrete sibling use case는 target 쪽 클래스가 아니라 위반이다.
+    # 추상 base나 Protocol 조상은 concrete가 아니므로 여기 걸리지 않는다.
+    inherited_siblings = {
+        owner
+        for owner in (target_owners - target_classes) & usecases
+        if _is_concrete_usecase(owner, classes, modules)
+    }
+    target_scope_owners = target_owners - inherited_siblings
+    sibling_usecases = usecases - target_scope_owners
+    for sibling in inherited_siblings:
+        violations.add(f"usecase-reference:{sibling}")
     for module_name in {
         classes[target_owner][0]
-        for target_owner in target_owners
+        for target_owner in target_scope_owners
     }:
         for sibling in _sibling_references(
             modules[module_name],
             modules,
             sibling_usecases,
-            target_owners,
+            target_scope_owners,
         ):
             violations.add(f"usecase-reference:{sibling}")
     for sibling in _transitive_target_references(
         modules,
         sibling_usecases,
-        target_owners,
+        target_scope_owners,
     ):
         violations.add(f"usecase-reference:{sibling}")
     for sibling in _target_injections(
@@ -479,6 +491,47 @@ def _usecase_classes(
         if node.name.endswith("UseCase")
     }
     return _subclass_closure(named, classes, modules)
+
+
+def _is_concrete_usecase(
+    qualified: str,
+    classes: dict[str, tuple[str, ast.ClassDef]],
+    modules: dict[str, _ParsedModule],
+) -> bool:
+    # 조상까지 보는 이유는 base가 구현을 주고 자식이 이름만 바꾸는 경우가 있어서다.
+    return any(
+        _defines_concrete_call(classes[owner][1])
+        for owner in _class_ancestors({qualified}, classes, modules)
+    )
+
+
+def _defines_concrete_call(node: ast.ClassDef) -> bool:
+    for member in node.body:
+        if not isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if member.name != "__call__":
+            continue
+        if any(
+            _expression_key(decorator) in {"abstractmethod", "abc.abstractmethod"}
+            for decorator in member.decorator_list
+        ):
+            continue
+        if all(_is_placeholder_statement(statement) for statement in member.body):
+            continue
+        return True
+    return False
+
+
+def _is_placeholder_statement(node: ast.stmt) -> bool:
+    if isinstance(node, ast.Pass):
+        return True
+    if isinstance(node, ast.Expr):
+        value = node.value
+        if isinstance(value, ast.Constant) and (value.value is Ellipsis or isinstance(value.value, str)):
+            return True
+    if isinstance(node, ast.Raise):
+        return True
+    return False
 
 
 def _class_ancestors(
@@ -1047,12 +1100,15 @@ def _target_injections(
     for module in modules.values():
         for scope, owner, receiver in _scope_entries(module):
             aliases = _scope_aliases(module, scope, modules, owner, receiver)
-            values = _scope_values(module, scope)
-            for node in _nodes_in_scope(scope):
-                if not isinstance(node, ast.Call):
-                    continue
+            calls = [node for node in _nodes_in_scope(scope) if isinstance(node, ast.Call)]
+            enclosing = _enclosing_values(module, scope)
+            for node in calls:
                 if _resolve_expression(node.func, aliases, modules) not in target_classes:
                     continue
+                values = {
+                    **enclosing,
+                    **_local_values(scope, _source_order(node)),
+                }
                 for argument in (
                     *node.args,
                     *(keyword.value for keyword in node.keywords),
@@ -1069,13 +1125,29 @@ def _target_injections(
     return injected
 
 
-def _scope_values(module: _ParsedModule, scope: ast.AST) -> dict[str, ast.AST]:
+def _enclosing_values(module: _ParsedModule, scope: ast.AST) -> dict[str, ast.AST]:
     values: dict[str, ast.AST] = {}
     for lexical_scope in _scope_chain(module.tree, scope):
         if isinstance(lexical_scope, _CALLABLE_SCOPES):
             values.update(_parameter_defaults(lexical_scope))
+        if lexical_scope is scope:
+            continue
         for node in sorted(_nodes_in_scope(lexical_scope), key=_source_order):
             values.update(_name_bindings(node))
+    return values
+
+
+def _local_values(scope: ast.AST, limit: tuple[int, int]) -> dict[str, ast.AST]:
+    """호출 지점 앞에서 끝난 같은 scope의 바인딩만 돌려준다.
+
+    scope 전체의 마지막 바인딩만 보면, 위반 호출 뒤에 같은 이름을 다른 값으로
+    덮어쓰는 것만으로 R1을 빠져나갈 수 있다.
+    """
+    values: dict[str, ast.AST] = {}
+    for node in sorted(_nodes_in_scope(scope), key=_source_order):
+        if _source_order(node) >= limit:
+            break
+        values.update(_name_bindings(node))
     return values
 
 

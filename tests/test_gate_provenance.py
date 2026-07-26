@@ -18,8 +18,8 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 from agent_flow.artifact import create_run, read_meta
-from agent_flow.core.artifacts import write_gate_results
-from agent_flow.core.gates import GateResult
+from agent_flow.core.artifacts import run_gate_nonce, write_gate_results
+from agent_flow.core.gates import GateCommand, GateResult, run_gate
 from agent_flow.runner import _gates_route_key
 
 FORGED = json.dumps(
@@ -121,3 +121,181 @@ def test_python_and_node_agree_on_provenance(tmp_path):
         [node, str(script), str(target), "abc123"], capture_output=True, text=True, check=True
     ).stdout.strip()
     assert signed == "green"
+
+
+def test_node_run_manifest_nonce_is_read(tmp_path):
+    """Node runner는 manifest.json에 nonce를 쓴다. 못 읽으면 그 run은 영영 green이 안 된다."""
+    run_dir = tmp_path / "run"
+    (run_dir).mkdir()
+    (run_dir / "manifest.json").write_text(
+        json.dumps({"gate_nonce": "node-side-nonce"}), encoding="utf-8"
+    )
+
+    assert run_gate_nonce(run_dir) == "node-side-nonce"
+
+
+def test_python_run_meta_nonce_wins_over_manifest(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "meta.json").write_text(
+        json.dumps({"gate_nonce": "python-side"}), encoding="utf-8"
+    )
+    (run_dir / "manifest.json").write_text(
+        json.dumps({"gate_nonce": "node-side"}), encoding="utf-8"
+    )
+
+    assert run_gate_nonce(run_dir) == "python-side"
+
+
+def test_results_written_into_a_node_run_route_green(tmp_path):
+    run_dir = tmp_path / "run"
+    (run_dir / "artifacts").mkdir(parents=True)
+    (run_dir / "manifest.json").write_text(
+        json.dumps({"gate_nonce": "node-side-nonce"}), encoding="utf-8"
+    )
+    path = write_gate_results(
+        run_dir=run_dir,
+        results=[
+            GateResult(
+                gate_id="lint",
+                command=("ruff", "check", "."),
+                passed=True,
+                exit_code=0,
+                stdout="ok",
+                stderr="",
+            )
+        ],
+    )
+
+    assert (
+        _gates_route_key(path.read_text(encoding="utf-8"), nonce="node-side-nonce")
+        == "green"
+    )
+
+
+def test_gate_timeout_is_recorded_as_a_gate_result(tmp_path):
+    """게이트 자체 timeout은 게이트 결과다. CLI 오류로 새어 나가면 안 된다."""
+    result = run_gate(
+        GateCommand(gate_id="slow", command=(sys.executable, "-c", "import time; time.sleep(5)")),
+        cwd=tmp_path,
+        timeout_s=1,
+    )
+
+    assert result.timed_out is True
+    assert result.passed is False
+    assert result.exit_code is None
+    assert "timed out" in result.stderr
+
+
+def test_gate_failure_is_not_marked_as_timeout(tmp_path):
+    result = run_gate(
+        GateCommand(gate_id="fail", command=(sys.executable, "-c", "raise SystemExit(3)")),
+        cwd=tmp_path,
+        timeout_s=30,
+    )
+
+    assert result.timed_out is False
+    assert result.exit_code == 3
+
+
+def _timed_out_payload(required: bool) -> str:
+    return json.dumps(
+        {
+            "passed": not required,
+            "status": "green" if not required else "request-changes",
+            "produced_by": {"tool": "agent-flow gates", "nonce": "abc123"},
+            "results": [
+                {
+                    "gate_id": "slow",
+                    "command": "pytest -q",
+                    "passed": False,
+                    "required": required,
+                    "exit_code": None,
+                    "timed_out": True,
+                    "stdout": "",
+                    "stderr": "gate timed out after 600s",
+                }
+            ],
+        }
+    )
+
+
+@pytest.mark.parametrize("required", [True, False])
+def test_timed_out_gate_routes_to_error(required):
+    """반증: optional 게이트가 상한을 다 쓰고 죽어도 passed 집계는 green이다."""
+    assert _gates_route_key(_timed_out_payload(required), nonce="abc123") == "error"
+
+
+def test_node_and_python_agree_on_timeout_routing(tmp_path):
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required")
+    kit = (REPO / "bin" / "agent-flow-kit.mjs").read_text(encoding="utf-8")
+    end = kit.index("\n}\n", kit.index("function hasGateEvidence(result)")) + 3
+    helpers = kit[kit.index("function gateNonceMatches(data, nonce)"):end]
+    script = tmp_path / "probe.mjs"
+    script.write_text(
+        "import fs from 'node:fs';\n"
+        + helpers
+        + "\nconsole.log(readGatesRouteKey(process.argv[2], process.argv[3] ?? ''));\n",
+        encoding="utf-8",
+    )
+    target = tmp_path / "gate-results.json"
+    target.write_text(_timed_out_payload(False), encoding="utf-8")
+
+    routed = subprocess.run(
+        [node, str(script), str(target), "abc123"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    assert routed == "error"
+
+
+def test_written_timeout_survives_serialization_and_routes_to_error(tmp_path):
+    """반증: timeout을 optional 실패로 집계하면 검증이 끊긴 실행이 green으로 남는다.
+
+    artifact의 `passed`/`status`, 라우팅 키, CLI 종료 코드가 서로 다른 말을 하면
+    셋 중 하나만 읽는 소비자가 timeout을 통과로 본다.
+    """
+    run_dir = tmp_path / "run"
+    (run_dir / "artifacts").mkdir(parents=True)
+    (run_dir / "meta.json").write_text(
+        json.dumps({"gate_nonce": "abc123"}), encoding="utf-8"
+    )
+    path = write_gate_results(
+        run_dir=run_dir,
+        results=[
+            GateResult(
+                gate_id="required-ok",
+                command=("true",),
+                passed=True,
+                exit_code=0,
+                stdout="ok",
+                stderr="",
+            ),
+            GateResult(
+                gate_id="optional-slow",
+                command=("pytest", "-q"),
+                passed=False,
+                exit_code=None,
+                stdout="",
+                stderr="gate timed out after 600s",
+                required=False,
+                timed_out=True,
+            ),
+        ],
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+
+    assert payload["passed"] is False
+    assert payload["status"] == "error"
+    assert any(entry["timed_out"] is True for entry in payload["results"])
+    assert _gates_route_key(
+        path.read_text(encoding="utf-8"),
+        nonce=run_gate_nonce(run_dir),
+    ) == "error"

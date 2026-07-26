@@ -781,6 +781,10 @@ def _gates_route_key(text: str, *, nonce: str = "") -> str:
         return "default"
     if not isinstance(payload, dict) or not isinstance(payload.get("passed"), bool):
         return "default"
+    # timeout은 "실패"가 아니라 "판정 불가"다. optional 게이트가 상한을 다 쓰고
+    # 죽어도 passed 집계는 required만 보므로 green이 된다. 그 구멍을 여기서 닫는다.
+    if _gate_results_timed_out(payload.get("results")):
+        return "error"
     # 통과 라우팅에만 출처를 요구한다. 실패/차단은 손으로 써도 앞으로 못 가므로
     # 막을 이유가 없고, 막으면 복구 경로만 좁아진다.
     proven = _gate_results_prove_pass(payload.get("results")) and _gate_nonce_matches(payload, nonce)
@@ -794,6 +798,15 @@ def _gates_route_key(text: str, *, nonce: str = "") -> str:
     if payload["passed"] is True:
         return "green" if proven else "default"
     return "request-changes"
+
+
+def _gate_results_timed_out(results: object) -> bool:
+    if not isinstance(results, list):
+        return False
+    return any(
+        isinstance(result, dict) and result.get("timed_out") is True
+        for result in results
+    )
 
 
 def _gate_nonce_matches(payload: dict[str, object], nonce: str) -> bool:

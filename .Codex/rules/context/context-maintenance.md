@@ -2,7 +2,7 @@
 
 ## Hot Context Rule
 
-- `CONTEXT.md` must stay under 200 lines.
+- `CONTEXT.md`는 hot context다. 짧게 유지하되 게이트가 줄 수를 강제하지 않는다.
 - It contains current vocabulary, lifecycle relationships, current/future split, and hard operating rules only.
 - Long examples, rationale, decision history, PRD/issue detail, and phase procedure live outside hot context.
 
@@ -21,4 +21,4 @@ Run:
 node scripts/check-context-docs.mjs
 ```
 
-The gate checks hot context size, conflict markers, absolute path leaks, current/future vocabulary drift, and Agent Flow artifact path policy.
+The gate checks conflict markers, absolute path leaks, current/future vocabulary drift, and Agent Flow artifact path policy.

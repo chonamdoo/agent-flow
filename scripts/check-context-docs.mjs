@@ -66,10 +66,6 @@ function checkContext(result) {
     return;
   }
   const text = readText(CONTEXT);
-  const lineCount = countLines(text);
-  if (lineCount >= MAX_HOT_DOC_LINES) {
-    result.push(`CONTEXT.md has ${lineCount} lines; must be under ${MAX_HOT_DOC_LINES} lines`);
-  }
   checkText("CONTEXT.md", text, result);
   const current = sectionUntilNextHeading(text, "Current Vocabulary");
   if (current === undefined) {

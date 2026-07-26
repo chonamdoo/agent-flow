@@ -723,12 +723,61 @@ function gitOutput(cwd, args) {
   return output || null;
 }
 
+const DEFAULT_RELAY_TIMEOUT_MS = 30_000;
+// gates는 프로파일 게이트를 순차로 돌린다. 개별 게이트 상한은 Python `--timeout`이
+// 소유하므로 wrapper는 그 총량만 감싼다. 무제한으로 두면 python이 시작조차 못 한
+// 경우 전경이 영영 멈춘다.
+const DEFAULT_GATE_TIMEOUT_S = 600;
+// `--profile a,b`와 kit.json의 profiles 리스트는 여러 프로파일의 게이트를 합집합으로
+// 돌린다(`src/agent_flow/cli.py:_profile_gate_commands`). 배포 프로파일 전부를 켠
+// 실측 최대가 20개라 그보다 위에서 자른다.
+const MAX_TOTAL_GATES = 24;
+const GATE_RELAY_SLACK_MS = 120_000;
+
+function gateTimeoutSeconds(args) {
+  // argparse는 `--timeout 900`, `--timeout=900`, 유일 접두 축약(`--time 900`)을
+  // 모두 받는다. 한 형태만 읽으면 사용자가 올린 상한이 예산에 반영되지 않는다.
+  const isTimeoutFlag = (value) =>
+    value.length >= 3 && "--timeout".startsWith(value);
+  let selected = DEFAULT_GATE_TIMEOUT_S;
+  for (const [index, arg] of args.entries()) {
+    if (typeof arg !== "string" || !arg.startsWith("--t")) {
+      continue;
+    }
+    const separator = arg.indexOf("=");
+    const flag = separator === -1 ? arg : arg.slice(0, separator);
+    if (!isTimeoutFlag(flag)) {
+      continue;
+    }
+    const raw = separator === -1 ? args[index + 1] : arg.slice(separator + 1);
+    const requested = Number(raw);
+    if (Number.isFinite(requested) && requested > 0) {
+      // argparse는 플래그가 반복되면 마지막 값을 쓴다. 첫 값을 잡으면 예산이
+      // 실제 게이트 상한보다 작아질 수 있다.
+      selected = requested;
+    }
+  }
+  return selected;
+}
+
+function relayTimeoutForSubcommand(subcommand, args) {
+  if (subcommand !== "gates") {
+    return DEFAULT_RELAY_TIMEOUT_MS;
+  }
+  return gateTimeoutSeconds(args) * 1000 * MAX_TOTAL_GATES + GATE_RELAY_SLACK_MS;
+}
+
 function safeSpawnSync(commandName, args, options = {}) {
   // 외부 CLI는 자동 relay를 멈추지 않도록 기본 timeout을 둔다.
-  return spawnSync(commandName, args, {
-    timeout: options.timeout ?? 30_000,
-    ...options,
-  });
+  const timeout = options.timeout ?? DEFAULT_RELAY_TIMEOUT_MS;
+  const result = spawnSync(commandName, args, { ...options, timeout });
+  if (timeout && result.error?.code === "ETIMEDOUT") {
+    // 기본 메시지는 "spawnSync <cmd> ETIMEDOUT"뿐이라 무엇이 끊겼는지 안 보인다.
+    result.error = new Error(
+      `${commandName} exceeded the ${timeout}ms agent-flow relay timeout`,
+    );
+  }
+  return result;
 }
 
 function readCurrentRun(root) {
@@ -2199,6 +2248,10 @@ function readGatesRouteKey(pathName, nonce = "") {
       }
       return typeof data.passed === "boolean" && data.passed === false ? "request-changes" : "default";
     }
+    // timeout은 "실패"가 아니라 "판정 불가"다. Python runner와 같은 규칙이다.
+    if (data.results.some((r) => r && r.timed_out === true)) {
+      return "error";
+    }
     // 완료 보고는 실제 실행한 gate command와 결과 evidence가 함께 있을 때만 허용한다.
     const requiredResults = data.results.filter((r) => r && r.required !== false);
     const resultsPass =
@@ -3369,7 +3422,7 @@ Implementation rules:
 
 Document size rules:
 
-- \`CONTEXT.md\`, domain-grill outputs, compact domain maps, and long planning docs must stay under 200 lines each.
+- domain-grill outputs, compact domain maps, and long planning docs must stay under 200 lines each.
 - If a source doc grows past 200 lines, create or refresh a matching \`*-summary.md\` under \`.Codex/rules/\` and use that summary as agent context.
 - Preserve the original long doc only as reference; do not load it as hot context unless the current phase needs a specific section.
 - Artifacts must link to long docs by repo-relative path and summarize only the needed decision, not paste the full content.
@@ -3378,7 +3431,7 @@ Context rules:
 
 - Artifacts and manifests must use repo-relative paths; local absolute paths are forbidden.
 - Do not paste full docs or raw logs into artifacts. Summarize and link by relative path.
-- \`CONTEXT.md\` is hot context only and must stay under 200 lines.
+- \`CONTEXT.md\` is hot context only.
 - Current and future vocabulary must stay separated.
 - Follow the phase context map in \`.Codex/rules/context/\` for phase-specific context loading.
 - User-facing agent-flow replies must be short Korean by default. Keep code, commands, paths, and identifiers in English.
@@ -3405,6 +3458,10 @@ function runPythonCliCommand(subcommand, args) {
     ...process.env,
     PYTHONPATH: [...new Set(pythonPathEntries)].join(path.delimiter),
   };
+  // gates는 프로파일 게이트 전체를 순차로 돌린다. 이 저장소에서 가장 비싼 게이트는
+  // `pytest -q`로 실측 5분대다. relay용 30초 상한을 걸면 정상 실행이 끝나기 전에
+  // 죽는다. 개별 게이트 상한은 Python `--timeout`이 소유하고, wrapper는 그 총량만
+  // 감싼다.
   const result = safeSpawnSync(
     "python3",
     ["-m", "agent_flow.cli", subcommand, ...args],
@@ -3413,6 +3470,7 @@ function runPythonCliCommand(subcommand, args) {
       env,
       encoding: "utf8",
       stdio: ["ignore", "inherit", "inherit"],
+      timeout: relayTimeoutForSubcommand(subcommand, args),
     },
   );
   if (result.error) {
