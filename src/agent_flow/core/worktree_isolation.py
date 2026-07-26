@@ -292,7 +292,7 @@ _STAMP_CHUNK_BYTES = 64 * 1024
 
 @dataclass(frozen=True)
 class LeaderSnapshot:
-    head: str              # git rev-parse HEAD ("" on an unborn branch)
+    head: str              # git rev-parse HEAD (unborn HEAD fails closed)
     branch: str            # git rev-parse --abbrev-ref HEAD ("HEAD" when detached)
     status: str            # normalized git status records, newline joined
     armed: bool = True     # False면 지킬 leader가 없다(비-git 프로젝트)
@@ -314,10 +314,16 @@ def capture_leader_snapshot(leader_root: Path) -> LeaderSnapshot:
         raise WorktreeIsolationError(
             f"cannot read leader git state for the isolation tripwire: {leader_root}"
         )
-    return LeaderSnapshot(
-        head=_git_fact(leader_root, "rev-parse", "HEAD"),
-        branch=_git_fact(leader_root, "rev-parse", "--abbrev-ref", "HEAD"),
-        status=_leader_status(leader_root),
+    # 재시도 단위가 개별 git 호출이 아니라 **관측 전체**인 이유: HEAD를 attempt
+    # 1에서, status를 attempt 2에서 주워 담으면 lock이 풀리는 순간에 걸친 반쪽
+    # 상태가 기준선으로 굳어 다음 비교에서 있지도 않은 diff를 만든다.
+    return with_git_lock_retry(
+        lambda: LeaderSnapshot(
+            head=_git_fact(leader_root, "rev-parse", "HEAD"),
+            branch=_git_fact(leader_root, "rev-parse", "--abbrev-ref", "HEAD"),
+            status=_leader_status(leader_root),
+        ),
+        is_retryable=tripwire_git_lock_retryable,
     )
 
 
@@ -492,13 +498,32 @@ def _path_content_stamp(leader_root, relative: str) -> str:
 
 
 def _git_fact(leader_root, *args: str) -> str:
+    """tripwire 기준선이 되는 git 사실 하나. 성패는 오직 return code로 가른다.
+
+    빈 stdout은 실패가 아니다 — detached HEAD의 ``branch --show-current``는
+    정상적으로 빈 문자열을 준다. 반대로 non-zero exit은 stdout이 무엇이든
+    사실이 아니다. 예전엔 exit code를 안 봐서 unborn HEAD의 ``rev-parse HEAD``가
+    stdout으로 뱉는 ``HEAD`` 문자열을 그대로 기준선으로 굳혔다.
+
+    stderr 원문을 메시지에 싣는다. ``tripwire_git_lock_retryable``이 일시적
+    lock 경합인지 판정하는 근거가 이 문자열밖에 없다.
+    """
     result = git_safe(*args, cwd=leader_root, timeout_s=_TRIPWIRE_TIMEOUT_S)
-    if result.timed_out or result.error is not None:
-        raise WorktreeIsolationError(
-            f"git did not answer for the isolation tripwire in {leader_root}: "
-            f"{result.stderr.strip() or result.error}"
-        )
-    return result.stdout.strip()
+    if result.ok:
+        return result.stdout.strip()
+    if result.timed_out:
+        cause = "timed out"
+    elif result.error is not None:
+        cause = "could not run git"
+    else:
+        cause = f"git exited {result.returncode}"
+    detail = result.stderr.strip() or result.error or ""
+    purpose = " ".join(("git",) + tuple(str(arg) for arg in args))
+    raise WorktreeIsolationError(
+        f"cannot read `{purpose}` for the isolation tripwire in {leader_root}: "
+        + cause
+        + (f": {detail}" if detail else "")
+    )
 
 
 def _status_records(leader_root, extra_args: Sequence[str]) -> list[tuple[str, str]]:
@@ -645,6 +670,17 @@ def default_git_lock_retryable(exc: BaseException) -> bool:
         blob = f"{getattr(exc, 'stderr', '') or ''}{getattr(exc, 'output', '') or ''}"
         return is_git_lock_contention(blob)
     return False
+
+
+def tripwire_git_lock_retryable(exc: BaseException) -> bool:
+    """tripwire **관측**만 재시도한다. 관측 결과(실제 leader diff)는 대상이 아니다.
+
+    `default_git_lock_retryable`은 `CalledProcessError`만 본다. tripwire의 git
+    호출은 `git_safe`를 거쳐 `WorktreeIsolationError`로 올라오므로, 그 메시지에
+    실려 온 stderr 원문으로만 판정한다. lock 경합이 아닌 git 오류는 재시도해도
+    같은 답이 나오므로 즉시 fail-closed다.
+    """
+    return isinstance(exc, WorktreeIsolationError) and is_git_lock_contention(str(exc))
 
 
 def with_git_lock_retry(

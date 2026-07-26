@@ -21,6 +21,7 @@ SRC = str(Path(__file__).resolve().parents[1] / "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
+from agent_flow.core.commands import SafeCommandResult
 from agent_flow.core import worktrees as W
 from agent_flow.core import worktree_isolation as W_ISO
 from agent_flow.core.worktree_isolation import (
@@ -1053,3 +1054,203 @@ def test_tripwire_ignores_agent_flow_runtime_state_in_tracked_diff(tmp_path):
     (tmp_path / "f.txt").write_text("worker leak\n", encoding="utf-8")
     with pytest.raises(W_ISO.WorktreeIsolationError):
         W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
+_LOCK_STDERR = (
+    "fatal: Unable to create '/leader/.git/index.lock': File exists.\n"
+    "Another git process seems to be running in this repository."
+)
+
+
+def _git_result(*, returncode=0, stdout="", stderr="", timed_out=False, error=None):
+    return SafeCommandResult(
+        args=("git",), returncode=returncode, stdout=stdout, stderr=stderr,
+        timed_out=timed_out, error=error,
+    )
+
+
+def _intercept_git_safe(monkeypatch, respond):
+    """`git_safe`를 가로챈다. `respond(args, n)`이 None을 주면 진짜 git이 답한다.
+
+    tripwire는 한 관측에서 git을 여러 번 부르므로, 특정 호출만 골라 실패시키고
+    나머지는 진짜 저장소를 읽게 해야 부분 실패를 재현할 수 있다.
+    """
+    real = W_ISO.git_safe
+    calls: list[tuple] = []
+
+    def _fake(*args, **kwargs):
+        calls.append(args)
+        canned = respond(args, len(calls))
+        return real(*args, **kwargs) if canned is None else canned
+
+    monkeypatch.setattr(W_ISO, "git_safe", _fake)
+    return calls
+
+
+@pytest.mark.parametrize(
+    "canned, marker",
+    [
+        (dict(returncode=None, stderr="command timed out after 120s", timed_out=True), "timed out"),
+        (dict(returncode=None, stderr="[Errno 2] git not found",
+              error="[Errno 2] git not found"), "could not run git"),
+        (dict(returncode=128, stderr="fatal: bad object HEAD"), "git exited 128"),
+    ],
+    ids=["timeout", "spawn-failure", "nonzero-exit"],
+)
+def test_git_fact_fails_closed_with_a_distinct_diagnostic(tmp_path, monkeypatch, canned, marker):
+    """불변: git이 대답하지 못하면 빈 사실을 지어내지 않는다.
+
+    반증: non-zero exit만 검사에서 빠져 있었다. `rev-parse HEAD`는 unborn/broken
+    HEAD에서 stdout으로 `HEAD`를 뱉으며 128로 죽는데, 예전 코드는 그 쓰레기를
+    leader 기준선으로 굳혀 다음 비교를 통째로 무의미하게 만들었다.
+    """
+    _init_repo(tmp_path)
+    _intercept_git_safe(
+        monkeypatch,
+        lambda args, _n: _git_result(**canned)
+        if args[0] == "rev-parse" and "--git-dir" not in args else None,
+    )
+    with pytest.raises(WorktreeIsolationError) as failed:
+        capture_leader_snapshot(tmp_path)
+
+    message = str(failed.value)
+    # 목적 / leader 경로 / 원문이 모두 남아야 사람이 어디를 고칠지 안다.
+    assert "git rev-parse HEAD" in message
+    assert str(tmp_path) in message
+    assert canned["stderr"] in message
+    # 세 실패 모드는 진단 문자열로 구분된다.
+    assert marker in message
+    assert not [
+        other
+        for other in ({"timed out", "could not run git", "git exited 128"} - {marker})
+        if other in message
+    ]
+
+
+def test_git_fact_accepts_a_valid_empty_answer(tmp_path):
+    """불변: 빈 stdout 자체는 오류가 아니다. 성패는 오직 return code가 가른다."""
+    _init_repo(tmp_path)
+    _git("checkout", "--detach", cwd=tmp_path)
+    # detached HEAD에서 `branch --show-current`의 정답은 exit 0 + 빈 문자열이다.
+    assert W_ISO._git_fact(tmp_path, "branch", "--show-current") == ""
+    assert W_ISO._git_fact(tmp_path, "rev-parse", "HEAD")
+
+
+def test_non_git_project_disarms_before_any_git_fact(tmp_path, monkeypatch):
+    """회귀: 비-git 프로젝트는 `_git_fact` fail-closed 앞에서 무장 해제된다.
+
+    disarm 판정이 `_git_fact` 뒤로 밀리면 git 없는 사용자가 모든 phase에서
+    막힌다 — 지킬 leader가 없는데 fail-closed가 걸리는 셈이다.
+    """
+    def _must_not_run(*args, **kwargs):
+        raise AssertionError("disarm 판정이 _git_fact 뒤로 밀렸다")
+
+    monkeypatch.setattr(W_ISO, "_git_fact", _must_not_run)
+    snapshot = capture_leader_snapshot(tmp_path)
+    assert snapshot.armed is False
+    assert_leader_unchanged(tmp_path, snapshot)
+
+
+def test_tripwire_retries_transient_git_lock_contention(tmp_path, monkeypatch):
+    """불변: 일시적 `.git/index.lock` 경합은 관측을 다시 찍어 넘긴다.
+
+    반증: 경합 하나가 그대로 `WorktreeIsolationError`로 올라가면 `cli.py`가
+    정상 완료된 워커 결과를 `fail_task`로 되돌린다.
+    """
+    _init_repo(tmp_path)
+    monkeypatch.setattr(W_ISO.time, "sleep", lambda _s: None)
+    contended: list[tuple] = []
+
+    def _respond(args, _n):
+        if args[0] == "status" and len(contended) < 2:
+            contended.append(args)
+            return _git_result(returncode=128, stderr=_LOCK_STDERR)
+        return None
+
+    calls = _intercept_git_safe(monkeypatch, _respond)
+    snapshot = capture_leader_snapshot(tmp_path)
+
+    assert snapshot.armed and snapshot.head and snapshot.branch == "main"
+    assert len(contended) == 2
+    # 재시도 단위는 개별 git 호출이 아니라 관측 전체다. HEAD도 attempt마다 다시
+    # 찍혀야 서로 다른 순간의 반쪽 상태가 기준선으로 굳지 않는다.
+    assert len([c for c in calls if c[:2] == ("rev-parse", "HEAD")]) == 3
+
+    # phase 종료 검증도 같은 경합을 넘긴다 — task가 실패로 되돌아가지 않는다.
+    contended.clear()
+    assert_leader_unchanged(tmp_path, snapshot)
+    assert len(contended) == 2
+
+
+def test_tripwire_gives_up_on_persistent_lock_contention(tmp_path, monkeypatch):
+    """불변: 경합이 풀리지 않으면 무한히 돌지 않고 원래 진단을 살린 채 멈춘다."""
+    _init_repo(tmp_path)
+    sleeps: list[float] = []
+    monkeypatch.setattr(W_ISO.time, "sleep", sleeps.append)
+    calls = _intercept_git_safe(
+        monkeypatch,
+        lambda args, _n: _git_result(returncode=128, stderr=_LOCK_STDERR)
+        if args[0] == "status" else None,
+    )
+    with pytest.raises(WorktreeIsolationError) as failed:
+        capture_leader_snapshot(tmp_path)
+
+    # 마지막 git 진단이 retry 껍데기에 가려지면 사람이 원인을 못 본다.
+    assert "cannot read leader working tree status" in str(failed.value)
+    assert "index.lock" in str(failed.value)
+    assert len([c for c in calls if c[0] == "status"]) == W_ISO._GIT_LOCK_RETRY_ATTEMPTS
+    assert sleeps == [
+        W_ISO._GIT_LOCK_RETRY_BASE_DELAY_S * (2 ** i)
+        for i in range(W_ISO._GIT_LOCK_RETRY_ATTEMPTS - 1)
+    ]
+
+
+def test_tripwire_does_not_retry_a_non_lock_git_failure(tmp_path, monkeypatch):
+    """불변: lock 경합이 아닌 git 오류는 다시 물어도 같은 답이므로 즉시 멈춘다."""
+    _init_repo(tmp_path)
+    monkeypatch.setattr(W_ISO.time, "sleep", lambda _s: pytest.fail("non-lock 오류를 재시도했다"))
+    calls = _intercept_git_safe(
+        monkeypatch,
+        lambda args, _n: _git_result(returncode=128, stderr="fatal: not a valid object name")
+        if args[0] == "status" else None,
+    )
+    with pytest.raises(WorktreeIsolationError):
+        capture_leader_snapshot(tmp_path)
+    assert len([c for c in calls if c[0] == "status"]) == 1
+
+
+def test_tripwire_reports_a_real_leader_diff_without_retrying(tmp_path, monkeypatch):
+    """불변: 진짜 격리 위반은 retry에 지연되거나 삼켜지지 않는다.
+
+    재시도 대상은 **관측**이지 관측 결과가 아니다. diff를 재시도하면 위반이
+    backoff만큼 늦게 보고되고, 그 사이 leader가 다시 바뀌면 아예 사라진다.
+    """
+    _init_repo(tmp_path)
+    before = capture_leader_snapshot(tmp_path)
+    (tmp_path / "f.txt").write_text("worker leak\n", encoding="utf-8")
+    monkeypatch.setattr(W_ISO.time, "sleep", lambda _s: pytest.fail("실제 diff를 재시도했다"))
+    observed: list = []
+    monkeypatch.setattr(
+        W_ISO,
+        "_leader_status",
+        lambda root, _real=W_ISO._leader_status: observed.append(root) or _real(root),
+    )
+    with pytest.raises(WorktreeIsolationError) as failed:
+        assert_leader_unchanged(tmp_path, before)
+
+    assert "leader checkout changed during the phase" in str(failed.value)
+    assert len(observed) == 1
+
+
+def test_tripwire_retry_predicate_only_fires_on_lock_contention():
+    """불변: 재시도 판정은 tripwire의 lock 경합 원문에서만 참이다."""
+    from agent_flow.core.hook_integrity import HookIntegrityError
+
+    assert W_ISO.tripwire_git_lock_retryable(
+        WorktreeIsolationError(f"cannot read leader working tree status: {_LOCK_STDERR}")
+    )
+    assert not W_ISO.tripwire_git_lock_retryable(
+        WorktreeIsolationError("leader checkout changed during the phase: HEAD moved a -> b")
+    )
+    # 같은 문구를 실어도 tripwire 관측 실패가 아니면 재시도 대상이 아니다.
+    assert not W_ISO.tripwire_git_lock_retryable(HookIntegrityError(_LOCK_STDERR))
