@@ -7,6 +7,7 @@ artifact를 검사 대상에서 뺀다 — 커밋될 수 없는 파일은 경로
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -148,6 +149,32 @@ def test_command_and_output_normalization_share_one_rule(tmp_path):
         str(target), base
     )
     assert relativize_local_paths(f"see {target}", base) == "see scripts/check-context-docs.mjs"
+
+
+def test_foreign_platform_absolute_path_is_deidentified(tmp_path):
+    """반증: 다른 플랫폼의 절대 경로를 그대로 두면 artifact가 계속 red다."""
+    base = tmp_path.resolve()
+
+    recorded = relativize_local_paths(r"tmpdir: D:\work\project\run.log", base)
+
+    assert recorded == r"tmpdir: work\project\run.log"
+    assert not ABSOLUTE_PATH_RE.search(recorded)
+
+
+def test_unrelativizable_path_never_raises(tmp_path, monkeypatch):
+    """Windows 교차 드라이브에서 relpath는 ValueError다. 그러면 결과가 안 남는다."""
+    base = tmp_path.resolve()
+    target = base / "run.log"
+
+    def cross_drive(*_args, **_kwargs):
+        raise ValueError("path is on mount 'D:', start on mount 'C:'")
+
+    monkeypatch.setattr(os.path, "relpath", cross_drive)
+    recorded = relativize_local_paths(f"see {target}", base)
+
+    assert recorded == f"see {str(target).lstrip('/')}"
+    assert not ABSOLUTE_PATH_RE.search(recorded)
+
 
 
 def test_gitignored_artifact_is_not_linted(tmp_path):

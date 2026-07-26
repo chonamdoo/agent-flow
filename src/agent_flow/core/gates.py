@@ -4,7 +4,7 @@ import subprocess
 import os
 import re
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 # `scripts/check-context-docs.mjs` / `scripts/check-context-docs.ts`의
 # ABSOLUTE_PATH_RE와 같은 접두사 집합이어야 한다. 검사기가 잡는 것보다 좁으면
@@ -93,9 +93,31 @@ def relativize_local_path(value: str, base: Path) -> str:
 
     gate command와 gate 출력이 같은 규칙을 쓰도록 두 경로가 이 함수만 부른다.
     """
-    if not Path(value).is_absolute():
-        return value
-    return os.path.relpath(value, base.resolve())
+    if Path(value).is_absolute():
+        try:
+            return os.path.relpath(value, base.resolve())
+        except ValueError:
+            # Windows에서 checkout과 다른 드라이브면 상대 경로 자체가 없다.
+            # 여기서 예외를 올리면 gate 실행 뒤 `write_gate_results`가 죽어
+            # 결과 artifact가 남지 않고 run이 멈춘다.
+            return _strip_path_anchor(value)
+    if _foreign_absolute(value):
+        # POSIX에서 만난 `D:\...`(또는 그 반대). 이 플랫폼에는 기준점이 없어
+        # relpath가 무의미한 값을 만든다. 검사기가 잡는 절대 경로 표기만 없앤다.
+        return _strip_path_anchor(value)
+    return value
+
+
+def _foreign_absolute(value: str) -> bool:
+    return PureWindowsPath(value).is_absolute() or PurePosixPath(value).is_absolute()
+
+
+def _strip_path_anchor(value: str) -> str:
+    for flavour in (PureWindowsPath, PurePosixPath):
+        anchor = flavour(value).anchor
+        if anchor:
+            return value[len(anchor) :] or value
+    return value
 
 
 def relativize_local_paths(text: str, base: Path) -> str:
