@@ -2,8 +2,18 @@ from __future__ import annotations
 
 import subprocess
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
+
+# `scripts/check-context-docs.mjs` / `scripts/check-context-docs.ts`의
+# ABSOLUTE_PATH_RE와 같은 접두사 집합이어야 한다. 검사기가 잡는 것보다 좁으면
+# artifact가 red로 남고, 넓으면 로그가 필요 이상으로 뒤틀린다.
+_LOCAL_ABSOLUTE_PATH_RE = re.compile(
+    r"(?<![\w.-])"
+    r"(?:/Users/|/home/|/private/var/|/workspace/|/tmp/|/var/|/opt/|/mnt/|[A-Za-z]:[\\/])"
+    r"[^\s\"'<>|,;)\]}]*"
+)
 
 
 @dataclass(frozen=True)
@@ -78,6 +88,27 @@ def run_gates(commands: list[GateCommand], *, cwd: Path, timeout_s: int = 600) -
     return [run_gate(command, cwd=cwd, timeout_s=timeout_s) for command in commands]
 
 
+def relativize_local_path(value: str, base: Path) -> str:
+    """절대 경로 하나를 ``base`` 기준 상대 경로로 바꾼다.
+
+    gate command와 gate 출력이 같은 규칙을 쓰도록 두 경로가 이 함수만 부른다.
+    """
+    if not Path(value).is_absolute():
+        return value
+    return os.path.relpath(value, base.resolve())
+
+
+def relativize_local_paths(text: str, base: Path) -> str:
+    """자유 텍스트(gate stdout/stderr)에 실린 로컬 절대 경로를 상대화한다."""
+    return _LOCAL_ABSOLUTE_PATH_RE.sub(lambda match: _relativized_match(match.group(0), base), text)
+
+
+def _relativized_match(raw: str, base: Path) -> str:
+    # 경로 뒤에 붙은 문장 부호(`...foo.py:`, `...tmpdir.`)는 경로의 일부가 아니다.
+    trimmed = raw.rstrip(".:")
+    return relativize_local_path(trimmed, base) + raw[len(trimmed) :]
+
+
 def _gate_environment(cwd: Path) -> dict[str, str]:
     env = os.environ.copy()
     python_paths: list[Path] = []
@@ -113,13 +144,7 @@ def _resolve_gate_command(command: tuple[str, ...], cwd: Path) -> tuple[str, ...
 
 
 def _recorded_gate_command(command: tuple[str, ...], cwd: Path) -> tuple[str, ...]:
-    recorded: list[str] = []
-    for part in command:
-        if Path(part).is_absolute():
-            recorded.append(os.path.relpath(part, cwd.resolve()))
-        else:
-            recorded.append(part)
-    return tuple(recorded)
+    return tuple(relativize_local_path(part, cwd) for part in command)
 
 
 def _installed_agent_flow_file(cwd: Path, *parts: str) -> Path | None:

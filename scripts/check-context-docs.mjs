@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const SCRIPT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -186,21 +187,53 @@ function checkAgentFlowArtifacts(result) {
   if (!fs.existsSync(agentFlow)) {
     return;
   }
+  const candidates = [];
   for (const relDir of ["runs", "handoffs", "memory"]) {
     const artifactDir = path.join(agentFlow, relDir);
     if (!fs.existsSync(artifactDir)) {
       continue;
     }
     for (const file of listFiles(artifactDir)) {
-      if (![".md", ".json", ".jsonl"].includes(path.extname(file))) {
-        continue;
-      }
-      const text = readText(file);
-      if (ABSOLUTE_PATH_RE.test(text)) {
-        result.push(`absolute local path in Agent Flow artifact: ${relative(file)}`);
+      if ([".md", ".json", ".jsonl"].includes(path.extname(file))) {
+        candidates.push(file);
       }
     }
   }
+  // tracked-only가 아니라 not-ignored를 검사한다. ignore된 artifact는 커밋될 수
+  // 없어 "절대경로가 커밋에 샌다"가 성립하지 않지만, `.agent-flow/`를 무시하지
+  // 않는 소비자 저장소에서는 아직 `git add` 전인 artifact도 계속 잡아야 한다.
+  const ignored = gitIgnoredPaths(candidates);
+  for (const file of candidates) {
+    if (ignored.has(file)) {
+      continue;
+    }
+    if (ABSOLUTE_PATH_RE.test(readText(file))) {
+      result.push(`absolute local path in Agent Flow artifact: ${relative(file)}`);
+    }
+  }
+}
+
+function gitIgnoredPaths(files) {
+  if (files.length === 0) {
+    return new Set();
+  }
+  const probe = spawnSync("git", ["check-ignore", "-z", "--stdin"], {
+    cwd: ROOT,
+    input: files.map((file) => `${file}\0`).join(""),
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+  // exit 1 = ignore된 경로 없음. 그 밖의 실패는 git이 대답하지 못한 것이므로
+  // 아무것도 빼지 않고 전부 검사한다(fail-closed).
+  if (probe.error || (probe.status !== 0 && probe.status !== 1)) {
+    return new Set();
+  }
+  return new Set(
+    probe.stdout
+      .split("\0")
+      .filter((line) => line.length > 0)
+      .map((line) => path.resolve(ROOT, line)),
+  );
 }
 
 function checkText(label, text, result) {

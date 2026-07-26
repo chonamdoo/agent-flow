@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agent_flow.core.gates import GateResult, gate_results_timed_out
+from agent_flow.core.gates import GateResult, gate_results_timed_out, relativize_local_paths
 from agent_flow.core.report import write_run_report
 from agent_flow.core.worktree_isolation import AGENT_FLOW_STATE_DIRS
 
@@ -24,14 +24,19 @@ def write_prompt(*, root: Path, run_dir: Path, stage_id: str, content: str) -> P
     return path
 
 
-def write_gate_results(*, run_dir: Path, results: list[GateResult]) -> Path:
+def write_gate_results(
+    *, run_dir: Path, results: list[GateResult], cwd: Path | None = None
+) -> Path:
     # timeout은 "optional 실패"가 아니라 "판정 불가"다. required만 세면 검증이
     # 끊긴 실행이 green으로 기록되고, 그 상태를 읽는 shell/CI가 성공으로 본다.
     timed_out = gate_results_timed_out(results)
     passed = not timed_out and all(
         result.passed or not result.required for result in results
     )
-    serialized_results = [_gate_result_payload(result) for result in results]
+    # gate 출력에 실린 절대 경로는 이 파일이 쓰이는 순간 artifact가 된다.
+    # command와 같은 규칙으로 상대화하지 않으면 로컬 경로가 그대로 남는다.
+    base = cwd if cwd is not None else _checkout_root(run_dir)
+    serialized_results = [_gate_result_payload(result, base) for result in results]
     payload = {
         "passed": passed,
         "status": "error" if timed_out else "green" if passed else "request-changes",
@@ -59,7 +64,22 @@ def write_gate_results(*, run_dir: Path, results: list[GateResult]) -> Path:
     return path
 
 
-def _gate_result_payload(result: GateResult) -> dict[str, object]:
+def _checkout_root(run_dir: Path) -> Path:
+    """``run_dir``을 담고 있는 체크아웃 루트.
+
+    gate는 이 자리를 cwd로 돌았으므로 출력의 절대 경로도 같은 기준으로 상대화해야
+    command 정규화와 어긋나지 않는다. ``.agent-flow`` 표식이 없으면(임시 run_dir)
+    run_dir 자신을 기준으로 둔다 — 기준을 못 찾았다고 정규화를 건너뛰면 절대
+    경로가 그대로 남는다.
+    """
+    resolved = run_dir.resolve()
+    for parent in resolved.parents:
+        if parent.name == ".agent-flow":
+            return parent.parent
+    return resolved
+
+
+def _gate_result_payload(result: GateResult, base: Path) -> dict[str, object]:
     return {
         "gate_id": result.gate_id,
         "command": " ".join(result.command),
@@ -68,8 +88,8 @@ def _gate_result_payload(result: GateResult) -> dict[str, object]:
         "required": result.required,
         "exit_code": result.exit_code,
         "timed_out": result.timed_out,
-        "stdout": result.stdout,
-        "stderr": result.stderr,
+        "stdout": relativize_local_paths(result.stdout, base),
+        "stderr": relativize_local_paths(result.stderr, base),
     }
 
 
