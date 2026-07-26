@@ -64,6 +64,9 @@ class ResolvedSkill:
     source: str
     exists: bool
     install_hint: str = ""
+    # frontmatter `description`의 첫 문장. optional 목록은 "scope가 걸리면 읽어라"인데
+    # 이름만 주면 scope를 판단할 재료가 없다 — 정보 없는 판단 지점은 안 읽힌다.
+    summary: str = ""
 
     def display_path(self, project_root: Path) -> str:
         if self.path is None:
@@ -159,7 +162,13 @@ def resolve_skill(name: str, roots: Sequence[SkillRoot]) -> ResolvedSkill:
     for root in roots:
         match = _match_template(root.template, name)
         if match is not None:
-            return ResolvedSkill(name=name, path=match, source=root.source, exists=True)
+            return ResolvedSkill(
+                name=name,
+                path=match,
+                source=root.source,
+                exists=True,
+                summary=skill_summary(match),
+            )
         if root.install_hint:
             hints.append(root.install_hint)
     return ResolvedSkill(
@@ -242,18 +251,31 @@ def skill_prompt_block(
     `enforced`는 이 phase에 실제로 read gate가 걸리는지다. 게이트 없는 phase에서
     "Read every one of these"는 거짓 약속이고, 거짓 약속은 지켜지는 다른 게이트의
     신뢰까지 깎는다. 강제를 늘리는 대신 문구를 사실대로 적는다.
+
+    문구 순서는 취향이 아니다. Vercel의 Next.js 16 eval에서 같은 skill·같은 문서로
+    "먼저 skill을 호출하라"는 문서 패턴에 앵커링돼 프로젝트 컨텍스트를 놓쳤고,
+    "프로젝트를 먼저 훑고 그 다음 호출하라"가 더 나은 결과를 냈다. 게이트는 읽음
+    여부만 보고 순서는 보지 않으므로, 강제는 그대로 두고 순서만 사실대로 권한다.
     """
     if not resolution.required and not resolution.optional:
         return ""
     lines = ["\n## Required skills for this phase", ""]
+    # 훈련 데이터의 일반 통념과 이 파일이 갈리면 파일이 이긴다. 우리 skill은
+    # 일반 개념이 아니라 **이 프로젝트의 규범**이라, 기억으로 대체하면 조용히 틀린다.
+    lines.append(
+        "Prefer what these files say over what you already know. Where a skill and "
+        "your prior knowledge disagree, the skill wins — it is this project's norm, "
+        "not the general one."
+    )
+    lines.append("")
     if resolution.required:
         lines.append(
-            "Read every one of these before writing or judging code. The completion "
-            "gate blocks this phase when a listed skill exists on disk and was never "
-            "opened during it:"
+            "First skim the files this phase actually changes, then read every one of "
+            "these before you write or judge code. The completion gate blocks this "
+            "phase when a listed skill exists on disk and was never opened during it:"
             if enforced
             else "This phase has no skill read gate. Nothing below is machine-checked "
-            "— read the ones that actually apply to the change:"
+            "— skim the change first, then read the ones that actually apply:"
         )
         lines.append("")
         for skill in resolution.required:
@@ -285,9 +307,36 @@ def _skill_prompt_line(project_root: Path, skill: ResolvedSkill) -> str:
     # worktree에서 실행되는 agent는 leader 상대경로를 열 수 없다. 절대경로를 함께 준다.
     relative = skill.display_path(project_root)
     absolute = str(skill.path) if skill.path is not None else ""
-    if absolute and absolute != relative:
-        return f"- `{skill.name}` ({skill.source}) — `{relative}` — `{absolute}`"
-    return f"- `{skill.name}` ({skill.source}) — `{relative}`"
+    location = f"`{relative}` — `{absolute}`" if absolute and absolute != relative else f"`{relative}`"
+    summary = f" — {skill.summary}" if skill.summary else ""
+    return f"- `{skill.name}` ({skill.source}) — {location}{summary}"
+
+
+_SUMMARY_CACHE: dict[str, str] = {}
+_SUMMARY_MAX_CHARS = 140
+
+
+def skill_summary(skill_path: Path) -> str:
+    """frontmatter `description`의 첫 문장. 없으면 빈 문자열.
+
+    전문을 넣으면 목록이 곧 문서가 된다 — 압축이 목적이다. 한 문장이면 "이 변경이
+    이 skill의 scope에 걸리는가"를 판단하기에 충분하고, 아니면 파일을 열면 된다.
+    프로세스 수명 동안만 캐시한다. CLI는 단명이라 stale 위험이 없다.
+    """
+    key = str(skill_path)
+    cached = _SUMMARY_CACHE.get(key)
+    if cached is not None:
+        return cached
+    raw = (_read_frontmatter(skill_path) or {}).get("description")
+    summary = ""
+    if isinstance(raw, str):
+        text = " ".join(raw.split())
+        head = re.split(r"(?<=[.!?])\s", text, maxsplit=1)[0] if text else ""
+        if len(head) > _SUMMARY_MAX_CHARS:
+            head = f"{head[: _SUMMARY_MAX_CHARS - 1].rstrip()}…"
+        summary = head
+    _SUMMARY_CACHE[key] = summary
+    return summary
 
 
 def _profile_skill_source_roots(profile: dict | None) -> list[SkillRoot]:

@@ -221,6 +221,7 @@ function installProject() {
   removeLegacyProjectSkillCopies(root, "graphify");
   upsertBootstrapBlock(path.join(root, "AGENTS.md"), "AGENTS.md", root);
   upsertBootstrapBlock(path.join(root, "CLAUDE.md"), "CLAUDE.md", root);
+  upsertSkillIndexBlock(root);
   pruneRetiredHookScripts(root);
   makeHooksExecutable(root);
   if (hooksDisabled) {
@@ -1233,6 +1234,7 @@ function discoverSkills(baseDir, source, root, ignoredNames = new Set(), allowed
       workflowPhases: metadata.workflowPhases,
       reviewAngles: metadata.reviewAngles,
       installGroup: metadata.installGroup,
+      delivery: metadata.delivery,
       excludes: metadata.excludes,
       tags: metadata.tags,
       description: metadata.description,
@@ -1287,6 +1289,10 @@ function parseSkillMetadata(text, fallbackName) {
     workflowPhases: arrayValue(metadata.workflowPhases),
     reviewAngles: arrayValue(metadata.reviewAngles),
     installGroup: String(metadata.installGroup || ""),
+    // 전달 방식. `passive`는 "항상 적용되는 규범"이라 AGENTS.md 인덱스의 always 줄에
+    // 오르고, 나머지는 phase나 사용자 요청이 부를 때만 열린다. 선언이 없으면
+    // on-demand다 — 안 쓰는 skill을 상시 노출하면 잡음이 되어 결과가 나빠진다.
+    delivery: String(metadata.delivery || "on-demand"),
     excludes: arrayValue(metadata.excludes || metadata.conflicts),
     warnings,
   };
@@ -2184,6 +2190,73 @@ function hasGateEvidence(result) {
   return false;
 }
 
+const SKILL_INDEX_START = "<!-- agent-flow:skills:start -->";
+const SKILL_INDEX_END = "<!-- agent-flow:skills:end -->";
+
+// 설치된 skill 목록을 AGENTS.md 안에 직접 심는다.
+//
+// 이전에는 `.agent-flow/skills/index.json`을 읽으라고 안내만 했다. 그건 판단
+// 지점이고, agent는 그 판단을 자주 건너뛴다 - Vercel의 Next.js 16 eval에서
+// on-demand 문서 조회는 56%의 경우 아예 발동하지 않아 문서 없는 baseline과
+// 같은 점수(53%)였고, 같은 문서를 AGENTS.md 인덱스로 심자 100%가 됐다.
+//
+// 그래서 여기 있는 것은 내용이 아니라 **인덱스**다. 이름만 주고 본문은 파일에
+// 남긴다 - 전문을 넣으면 AGENTS.md가 곧 문서가 되고, 적용 시점 문장은 phase
+// 프롬프트가 이미 profile YAML에서 그대로 들고 온다. 여기서 다시 지으면 갈라진다.
+function skillIndexBlock(root) {
+  const index = readJsonIfExists(path.join(root, ".agent-flow", "skills", "index.json"));
+  const skills = Array.isArray(index?.skills) ? index.skills : [];
+  if (skills.length === 0) {
+    // 인덱스가 없는 설치본에서 거짓 목록을 쓰지 않는다. 빈 인덱스는 "아직
+    // 모른다"이지 "skill이 없다"가 아니다.
+    return [
+      SKILL_INDEX_START,
+      `- 설치된 skill 인덱스가 아직 없다. \`${AGENT_FLOW_COMMAND} skills sync\` 후 다시 생성된다.`,
+      SKILL_INDEX_END,
+    ].join("\n");
+  }
+  const names = (delivery) =>
+    skills
+      .filter((skill) => (skill.delivery === "passive") === (delivery === "passive"))
+      .map((skill) => String(skill.name))
+      .sort((a, b) => a.localeCompare(b));
+  const lines = [
+    SKILL_INDEX_START,
+    "```text",
+    "[agent-flow skill index]|root: .agent-flow/skills",
+    "|IMPORTANT: 아래 파일이 기억보다 우선한다. 변경 대상을 먼저 훑고, scope가 걸리는 것만 읽는다.",
+  ];
+  const passive = names("passive");
+  if (passive.length > 0) {
+    lines.push(`|always:{${passive.join(",")}}`);
+  }
+  const onDemand = names("on-demand");
+  if (onDemand.length > 0) {
+    lines.push(`|on-demand:{${onDemand.join(",")}}`);
+  }
+  lines.push("```", SKILL_INDEX_END);
+  return lines.join("\n");
+}
+// 인덱스는 install이 skill 링크를 다 만든 **뒤에** 채운다. bootstrap 블록을 쓰는
+// 시점에는 아직 목록이 확정되지 않아, 거기서 채우면 한 install 안에서 곧바로
+// 낡는다. 그래서 블록에는 자리만 두고 여기서 그 자리만 바꾼다.
+function upsertSkillIndexBlock(root) {
+  const block = skillIndexBlock(root);
+  for (const fileName of ["AGENTS.md", "CLAUDE.md"]) {
+    const target = path.join(root, fileName);
+    if (!fs.existsSync(target)) continue;
+    const current = fs.readFileSync(target, "utf8");
+    const start = current.indexOf(SKILL_INDEX_START);
+    const end = current.indexOf(SKILL_INDEX_END);
+    if (start === -1 || end === -1 || end < start) continue;
+    const next = current.slice(0, start) + block + current.slice(end + SKILL_INDEX_END.length);
+    if (next !== current) {
+      fs.writeFileSync(target, next, "utf8");
+    }
+  }
+}
+
+
 function upsertBootstrapBlock(pathName, label, root) {
   const start = "<!-- agent-flow:start -->";
   const end = "<!-- agent-flow:end -->";
@@ -2215,7 +2288,10 @@ Follow the CLI output exactly. If no run is active, start with \`${AGENT_FLOW_CO
 - 필요한 경우만 current phase, action, \`next_command\`, blocker를 요약한다.
 - 모든 guide를 항상 로드하지 말고 변경 파일에 필요한 guide만 읽는다.
 - 프로젝트 skill은 \`skills/<name>/SKILL.md\` 또는 private \`.agent-flow/local-skills/<name>/SKILL.md\`에 둔다.
-- install/bootstrap 후 \`.agent-flow/skills/index.json\` metadata를 보고 필요한 skill만 읽는다. 모든 SKILL.md 전문을 항상 읽지 않는다.
+<!-- agent-flow:skills:start -->
+- 설치된 skill 인덱스가 아직 없다. install이 이 자리에 채운다.
+<!-- agent-flow:skills:end -->
+- 인덱스에 없는 skill은 이 프로젝트에 설치돼 있지 않다. 런타임에 설치를 묻지 말고 \`${AGENT_FLOW_COMMAND} skills sync\`에 맡긴다.
 - Claude/Codex/OMP 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.
 - Claude/Codex/OMP hook이 자동 차단하는 보호 브랜치 commit/push와 leader checkout/switch 금지는 모든 host에서 동일하게 지킨다.
 ${end}

@@ -213,6 +213,11 @@ for (const installer of ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"]
   assertContains(installer, "function installCodexTrustState(root)");
   assertContains(installer, "function installOmpHooks(root)");
   assertContains(installer, ".omp\", \"extensions\", \"agent-flow-hooks.ts");
+  // 두 installer가 같은 인덱스를 만들어야 한다. 한쪽만 채우면 install 순서에
+  // 따라 AGENTS.md의 인덱스가 있었다 없었다 한다.
+  assertContains(installer, "function skillIndexBlock(root)");
+  assertContains(installer, "function upsertSkillIndexBlock(root)");
+  assertContains(installer, 'const SKILL_INDEX_START = "<!-- agent-flow:skills:start -->"');
   // install이 **현재 등록된** hook의 해시를 trusted로 되받아 적으면, 변조된
   // 등록이 다음 install에서 승인 상태로 세탁된다. 읽는 코드도 없었다.
   // 등록 무결성은 런 시작 시 hook_integrity가 kit.json과 대조한다.
@@ -1308,6 +1313,7 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
     }
     assertInstalledHookParity(label, tempRoot);
     assertSkillIndexComplete(label, tempRoot);
+    assertSkillIndexBlockMatchesInstall(label, tempRoot);
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
@@ -1401,6 +1407,71 @@ function assertInstalledHookParity(label, tempRoot) {
   }
   if (!ompExtensionText.includes("syncRootContextFiles") || !ompExtensionText.includes("modifiedRootContextFiles")) {
     failures.push(`${label} omp extension missing root AGENTS.md/CLAUDE.md sync`);
+  }
+}
+
+// AGENTS.md에 심은 인덱스가 실제 설치본과 같은가.
+//
+// 인덱스는 agent가 "이 프로젝트에 뭐가 있나"를 판단 없이 아는 유일한 경로다.
+// 낡은 인덱스는 없는 것보다 나쁘다 - 없는 skill을 찾게 만들고, 있는 skill을
+// 숨긴다. 그래서 목록 자체를 설치 결과와 대조한다.
+function assertSkillIndexBlockMatchesInstall(label, tempRoot) {
+  const index = readJsonSafe(path.join(tempRoot, ".agent-flow", "skills", "index.json"));
+  if (!index || !Array.isArray(index.skills)) {
+    return;
+  }
+  const expected = new Set(index.skills.map((skill) => String(skill.name)));
+  const expectedPassive = new Set(
+    index.skills.filter((skill) => skill.delivery === "passive").map((skill) => String(skill.name)),
+  );
+  for (const fileName of ["AGENTS.md", "CLAUDE.md"]) {
+    const target = path.join(tempRoot, fileName);
+    if (!fs.existsSync(target)) {
+      failures.push(`${label} ${fileName} missing after install`);
+      continue;
+    }
+    const text = fs.readFileSync(target, "utf8");
+    const start = text.indexOf("<!-- agent-flow:skills:start -->");
+    const end = text.indexOf("<!-- agent-flow:skills:end -->");
+    if (start === -1 || end === -1) {
+      failures.push(`${label} ${fileName} has no skill index block`);
+      continue;
+    }
+    const block = text.slice(start, end);
+    if (!block.includes("[agent-flow skill index]")) {
+      failures.push(`${label} ${fileName} skill index block was never filled`);
+      continue;
+    }
+    const listed = new Set(
+      [...block.matchAll(/\|(?:always|on-demand):\{([^}]*)\}/g)]
+        .flatMap((match) => match[1].split(","))
+        .map((name) => name.trim())
+        .filter(Boolean),
+    );
+    for (const name of expected) {
+      if (!listed.has(name)) {
+        failures.push(`${label} ${fileName} skill index omits installed skill: ${name}`);
+      }
+    }
+    for (const name of listed) {
+      if (!expected.has(name)) {
+        failures.push(`${label} ${fileName} skill index lists a skill that is not installed: ${name}`);
+      }
+    }
+    const alwaysMatch = block.match(/\|always:\{([^}]*)\}/);
+    const always = new Set(
+      (alwaysMatch ? alwaysMatch[1].split(",") : []).map((name) => name.trim()).filter(Boolean),
+    );
+    for (const name of expectedPassive) {
+      if (!always.has(name)) {
+        failures.push(`${label} ${fileName} skill index does not mark ${name} as always-applied`);
+      }
+    }
+    for (const name of always) {
+      if (!expectedPassive.has(name)) {
+        failures.push(`${label} ${fileName} skill index claims ${name} is always-applied, frontmatter says otherwise`);
+      }
+    }
   }
 }
 

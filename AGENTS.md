@@ -64,7 +64,10 @@ Follow the CLI output exactly. If no run is active, start with `agent-flow run "
 - 필요한 경우만 current phase, action, `next_command`, blocker를 요약한다.
 - 모든 guide를 항상 로드하지 말고 변경 파일에 필요한 guide만 읽는다.
 - 프로젝트 skill은 `skills/<name>/SKILL.md` 또는 private `.agent-flow/local-skills/<name>/SKILL.md`에 둔다.
-- install/bootstrap 후 `.agent-flow/skills/index.json` metadata를 보고 필요한 skill만 읽는다. 모든 SKILL.md 전문을 항상 읽지 않는다.
+<!-- agent-flow:skills:start -->
+- 설치된 skill 인덱스가 아직 없다. install이 이 자리에 채운다.
+<!-- agent-flow:skills:end -->
+- 인덱스에 없는 skill은 이 프로젝트에 설치돼 있지 않다. 런타임에 설치를 묻지 말고 `agent-flow skills sync`에 맡긴다.
 - Claude/Codex/OMP 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.
 - Claude/Codex/OMP hook이 자동 차단하는 보호 브랜치 commit/push와 leader checkout/switch 금지는 모든 host에서 동일하게 지킨다.
 <!-- agent-flow:end -->

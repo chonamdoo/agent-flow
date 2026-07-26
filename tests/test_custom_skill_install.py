@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -906,3 +907,72 @@ def test_cross_tree_install_keeps_the_targets_tracked_scripts(tmp_path: Path) ->
         cwd=project, text=True, capture_output=True, check=True,
     ).stdout
     assert " D " not in status and not status.startswith("D "), status
+
+
+def _skill_index_block(project: Path, file_name: str = "AGENTS.md") -> str:
+    text = (project / file_name).read_text(encoding="utf-8")
+    start = text.index("<!-- agent-flow:skills:start -->")
+    end = text.index("<!-- agent-flow:skills:end -->")
+    return text[start:end]
+
+
+def _indexed_names(block: str, group: str) -> set[str]:
+    match = re.search(rf"\|{group}:\{{([^}}]*)\}}", block)
+    if not match:
+        return set()
+    return {name.strip() for name in match.group(1).split(",") if name.strip()}
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_install_writes_the_skill_index_into_agents_md(tmp_path: Path, binary: str) -> None:
+    """설치된 skill을 AGENTS.md 안에서 바로 보여야 한다.
+
+    `index.json`을 읽으라고 안내만 하면 그건 판단 지점이고, agent는 그 판단을
+    자주 건너뛴다. 목록이 문서 안에 있으면 건너뛸 판단 자체가 없다.
+    """
+    project = tmp_path / f"index-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+
+    installed = {
+        entry.name
+        for entry in (project / ".agent-flow" / "skills").iterdir()
+        if entry.is_dir() and (entry / "SKILL.md").is_file()
+    }
+    assert installed
+    for file_name in ("AGENTS.md", "CLAUDE.md"):
+        block = _skill_index_block(project, file_name)
+        assert "[agent-flow skill index]" in block, f"{file_name} 인덱스가 채워지지 않았다"
+        listed = _indexed_names(block, "always") | _indexed_names(block, "on-demand")
+        assert listed == installed, f"{file_name}: {installed ^ listed}"
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_passive_delivery_lands_on_the_always_line(tmp_path: Path, binary: str) -> None:
+    """반증: 전부 on-demand로 적으면 "항상 적용" 선언이 인덱스에서 사라진다."""
+    project = tmp_path / f"delivery-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+
+    block = _skill_index_block(project)
+    always = _indexed_names(block, "always")
+    assert "code-generation-discipline" in always
+    assert "comment-authoring-discipline" in always
+    # 선언하지 않은 skill이 always로 올라가면 안 쓰는 skill이 상시 노출된다.
+    assert "tdd" in _indexed_names(block, "on-demand")
+    assert "tdd" not in always
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_reinstall_does_not_duplicate_the_skill_index(tmp_path: Path, binary: str) -> None:
+    """반증: 블록을 덧붙이면 재설치마다 AGENTS.md가 자란다."""
+    project = tmp_path / f"reinstall-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+    first = (project / "AGENTS.md").read_text(encoding="utf-8")
+    assert _install_with(binary, project).returncode == 0
+    second = (project / "AGENTS.md").read_text(encoding="utf-8")
+
+    assert second == first
+    assert second.count("<!-- agent-flow:skills:start -->") == 1
+    assert second.count("[agent-flow skill index]") == 1

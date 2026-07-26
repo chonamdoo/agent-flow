@@ -20,7 +20,12 @@ if SRC not in sys.path:
 
 from agent_flow.adapters.generic import STUB_SENTINEL
 from agent_flow.core.markers import missing_markers
-from agent_flow.core.skill_resolver import ResolvedSkill, SkillResolution, skill_prompt_block
+from agent_flow.core.skill_resolver import (
+    SkillResolution,
+    SkillRoot,
+    resolve_skill,
+    skill_prompt_block,
+)
 
 
 def _gate(body: str) -> str:
@@ -61,14 +66,10 @@ def test_enum_marker_still_rejects_illegal_values():
 
 
 def _resolution() -> SkillResolution:
-    skill = ResolvedSkill(
-        name="tdd",
-        source="bundled",
-        path=REPO / "skills" / "tdd" / "SKILL.md",
-        exists=True,
-        install_hint="",
-    )
-    return SkillResolution(required=(skill,), optional=())
+    # 손으로 만든 ResolvedSkill은 resolve_skill이 채우는 필드를 못 담는다. 실제
+    # 해석 경로로 만들어야 fixture가 계약과 갈라지지 않는다.
+    root = SkillRoot(source="bundled", template=str(REPO / "skills" / "{skill}" / "SKILL.md"))
+    return SkillResolution(required=(resolve_skill("tdd", (root,)),), optional=())
 
 
 def test_enforced_phase_prompt_states_the_gate():
@@ -81,6 +82,75 @@ def test_ungated_phase_prompt_does_not_promise_enforcement():
     block = skill_prompt_block(REPO, _resolution(), enforced=False)
     assert "no skill read gate" in block
     assert "completion gate blocks this phase" not in block
+
+
+def test_prompt_puts_exploration_before_reading():
+    """Vercel eval: "먼저 skill을 호출하라"는 문서 패턴에 앵커링돼 프로젝트 컨텍스트를 놓쳤다.
+
+    반증: 순서 힌트가 사라지면 우리는 측정된 열등 문구로 돌아간다.
+    """
+    for enforced in (True, False):
+        block = skill_prompt_block(REPO, _resolution(), enforced=enforced)
+        skim = block.find("skim")
+        read = block.find("read every one of these" if enforced else "read the ones that actually apply")
+        assert 0 <= skim < read, block
+
+
+def test_prompt_prefers_the_files_over_recalled_knowledge():
+    """retrieval-led over pre-training-led. 이 문장이 Vercel eval의 100%를 만들었다."""
+    block = skill_prompt_block(REPO, _resolution(), enforced=True)
+    assert "Prefer what these files say over what you already know" in block
+
+
+def test_prompt_lines_carry_a_one_line_summary():
+    """이름만 주면 optional의 "scope가 걸리면 읽어라"는 판단 재료가 없는 판단 지점이다."""
+    from agent_flow.core.skill_resolver import skill_summary
+
+    summary = skill_summary(REPO / "skills" / "tdd" / "SKILL.md")
+    assert summary
+    assert summary in skill_prompt_block(REPO, _resolution(), enforced=True)
+
+
+def test_summary_is_the_first_sentence_not_the_whole_description(tmp_path):
+    """반증: 전문을 넣으면 목록이 곧 문서가 된다 — 압축이 목적이다.
+
+    길이 상한과 독립으로 확인한다. 상한이 잘라 준 결과를 압축으로 착각하면
+    문장 분리를 no-op으로 바꿔도 테스트가 안 죽는다.
+    """
+    from agent_flow.core.skill_resolver import skill_summary
+
+    path = tmp_path / "SKILL.md"
+    path.write_text(
+        "---\nname: probe\ndescription: First sentence. Second sentence that must not appear.\n---\n",
+        encoding="utf-8",
+    )
+    assert skill_summary(path) == "First sentence."
+
+
+def test_a_sentenceless_description_is_capped(tmp_path):
+    """반증: 문장 경계가 없으면 상한만 남는다. 상한이 없으면 한 줄이 문단이 된다."""
+    from agent_flow.core.skill_resolver import _SUMMARY_MAX_CHARS, skill_summary
+
+    path = tmp_path / "SKILL.md"
+    path.write_text(
+        f"---\nname: probe\ndescription: {'word ' * 200}\n---\n",
+        encoding="utf-8",
+    )
+    summary = skill_summary(path)
+    assert len(summary) == _SUMMARY_MAX_CHARS
+    assert summary.endswith("…")
+
+
+def test_a_multiline_description_stays_on_one_line(tmp_path):
+    """반증: 줄바꿈이 남으면 markdown 목록 항목이 그 자리에서 끊긴다."""
+    from agent_flow.core.skill_resolver import skill_summary
+
+    path = tmp_path / "SKILL.md"
+    path.write_text(
+        "---\nname: probe\ndescription: |\n  First line\n  second line.\n  Tail.\n---\n",
+        encoding="utf-8",
+    )
+    assert skill_summary(path) == "First line second line."
 
 
 @pytest.mark.parametrize("phase_id,enforced", [("green", True), ("commit", False)])
