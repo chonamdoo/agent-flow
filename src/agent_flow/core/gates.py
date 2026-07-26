@@ -70,6 +70,10 @@ def run_gate(command: GateCommand, *, cwd: Path, timeout_s: int = 600) -> GateRe
     )
 
 
+def gate_results_timed_out(results: list[GateResult]) -> bool:
+    return any(result.timed_out for result in results)
+
+
 def run_gates(commands: list[GateCommand], *, cwd: Path, timeout_s: int = 600) -> list[GateResult]:
     return [run_gate(command, cwd=cwd, timeout_s=timeout_s) for command in commands]
 

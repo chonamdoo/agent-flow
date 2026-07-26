@@ -257,10 +257,10 @@ def test_node_and_python_agree_on_timeout_routing(tmp_path):
 
 
 def test_written_timeout_survives_serialization_and_routes_to_error(tmp_path):
-    """반증: timed_out을 gate-results.json에 안 실으면 라우팅이 다시 green이 된다.
+    """반증: timeout을 optional 실패로 집계하면 검증이 끊긴 실행이 green으로 남는다.
 
-    optional 게이트가 상한을 다 쓰고 죽어도 `passed`는 required만 보므로 True다.
-    이 경로가 error로 가는 유일한 근거가 직렬화된 `timed_out`이다.
+    artifact의 `passed`/`status`, 라우팅 키, CLI 종료 코드가 서로 다른 말을 하면
+    셋 중 하나만 읽는 소비자가 timeout을 통과로 본다.
     """
     run_dir = tmp_path / "run"
     (run_dir / "artifacts").mkdir(parents=True)
@@ -292,7 +292,8 @@ def test_written_timeout_survives_serialization_and_routes_to_error(tmp_path):
     )
     payload = json.loads(path.read_text(encoding="utf-8"))
 
-    assert payload["passed"] is True
+    assert payload["passed"] is False
+    assert payload["status"] == "error"
     assert any(entry["timed_out"] is True for entry in payload["results"])
     assert _gates_route_key(
         path.read_text(encoding="utf-8"),

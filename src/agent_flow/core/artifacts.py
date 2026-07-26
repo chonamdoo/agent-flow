@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agent_flow.core.gates import GateResult
+from agent_flow.core.gates import GateResult, gate_results_timed_out
 from agent_flow.core.report import write_run_report
 from agent_flow.core.worktree_isolation import AGENT_FLOW_STATE_DIRS
 
@@ -25,11 +25,16 @@ def write_prompt(*, root: Path, run_dir: Path, stage_id: str, content: str) -> P
 
 
 def write_gate_results(*, run_dir: Path, results: list[GateResult]) -> Path:
-    passed = all(result.passed or not result.required for result in results)
+    # timeout은 "optional 실패"가 아니라 "판정 불가"다. required만 세면 검증이
+    # 끊긴 실행이 green으로 기록되고, 그 상태를 읽는 shell/CI가 성공으로 본다.
+    timed_out = gate_results_timed_out(results)
+    passed = not timed_out and all(
+        result.passed or not result.required for result in results
+    )
     serialized_results = [_gate_result_payload(result) for result in results]
     payload = {
         "passed": passed,
-        "status": "green" if passed else "request-changes",
+        "status": "error" if timed_out else "green" if passed else "request-changes",
         "results": serialized_results,
     }
     # 출처 표식. runner는 이 값이 run meta의 nonce와 같을 때만 green으로 라우팅한다.

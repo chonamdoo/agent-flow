@@ -8411,6 +8411,37 @@ if (codexContext !== undefined) {
             self.assertEqual(task["status"], "in_progress")
             self.assertIn(task["owner"], {"worker-1", "worker-2"})
 
+    def test_gates_exit_code_fails_when_an_optional_gate_times_out(self) -> None:
+        """반증: exit code가 required만 보면 timeout된 검증이 CI에서 성공으로 읽힌다."""
+        from agent_flow.core.gates import GateResult
+
+        results = [
+            GateResult(
+                gate_id="required-ok",
+                command=("true",),
+                passed=True,
+                exit_code=0,
+                stdout="ok",
+                stderr="",
+            ),
+            GateResult(
+                gate_id="optional-slow",
+                command=("pytest", "-q"),
+                passed=False,
+                exit_code=None,
+                stdout="",
+                stderr="gate timed out after 600s",
+                required=False,
+                timed_out=True,
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            (root / ".agent-flow").mkdir(parents=True)
+            with mock.patch("agent_flow.cli.run_gates", return_value=results):
+                exit_code = main(["gates", "--root", str(root), "--profile", "generic"])
+        self.assertEqual(exit_code, 1)
+
     def test_gates_relay_budget_exceeds_the_default_wrapper_timeout(self) -> None:
         """반증: gates에 relay용 30초 상한을 걸면 프로파일 게이트가 끝나기 전에 죽는다.
 

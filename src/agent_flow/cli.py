@@ -700,6 +700,16 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             print(f"{','.join(profile_ids)}: {len(results) - len(failed)}/{len(results)} gates passed")
+        timed_out = [result for result in results if result.timed_out]
+        if timed_out:
+            # 검증이 끊긴 것을 성공으로 돌려주면 exit code를 읽는 shell/CI가
+            # timeout을 통과로 본다. required 여부와 무관하게 실패다.
+            print(
+                f"{','.join(profile_ids)}: timed out: "
+                f"{', '.join(result.gate_id for result in timed_out)}",
+                file=sys.stderr,
+            )
+            return 1
         return 1 if failed_required else 0
 
     if args.command == "architecture-lint":
