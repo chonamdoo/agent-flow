@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,7 @@ from agent_flow.core.worktree_isolation import (
     list_registered_worktrees,
     real_path,
 )
+from agent_flow.core import worktrees as W
 from agent_flow.core.worktrees import (
     AmbiguousWorktreeSelector,
     removable_worktrees,
@@ -277,3 +279,64 @@ def test_registered_listing_failure_is_not_an_empty_list(tmp_path: Path):
     # 반증 짝: 파일시스템이 non-repo를 증명한 자리에서만 빈 목록으로 접는다.
     assert removable_worktrees(root=outside) == []
     assert resolve_worktree(root=outside, selector="feat-demo") is None
+
+
+def test_removing_a_colliding_external_worktree_keeps_managed_metadata(tmp_path):
+    """불변: 이름이 같은 키로 접히는 외부 worktree를 지워도 관리형 상태는 남는다.
+
+    런타임 메타데이터 키는 정규화된 이름이라 서로 다른 등록 경로가 한 키로 접힌다
+    — 관리형 ``.../feat-demo``와 외부 ``.../demo``가 둘 다 ``feat-demo``다. 경로
+    소유 증명 없이 지우면 외부 worktree 제거가 관리형 worktree의 활성 run을
+    통째로 날린다.
+    """
+    _init_repo(tmp_path)
+    plan = W.plan_worktree(root=tmp_path, name="demo")
+    managed = W.create_worktree(root=tmp_path, plan=plan)
+    runtime_root = W.worktree_runtime_root(root=tmp_path, name=managed.name)
+    active_run = runtime_root / ".agent-flow" / "runs" / "live"
+    active_run.mkdir(parents=True)
+    (active_run / "active").write_text("1\n", encoding="utf-8")
+
+    external = tmp_path.parent / "elsewhere" / "demo"
+    external.parent.mkdir(parents=True, exist_ok=True)
+    _git("worktree", "add", "-q", "-b", "other/demo", str(external), "main", cwd=tmp_path)
+
+    status = W.get_worktree_status(root=tmp_path, name=str(external))
+    assert status.name == managed.name, "이 테스트는 키가 실제로 충돌할 때만 의미가 있다"
+    W.remove_worktree(root=tmp_path, status=status, allow_unmerged=True)
+
+    assert not external.exists()
+    assert (active_run / "active").exists()
+    assert managed.path.exists()
+
+
+def test_removal_stops_when_the_path_was_re_registered(tmp_path, monkeypatch):
+    """불변: 같은 경로에 다른 worktree가 다시 등록됐으면 제거하지 않는다.
+
+    재확인이 "여전히 등록돼 있다"만 보면, 그 사이 다른 프로세스가 같은 경로를
+    갈아끼운 경우를 통과시킨다. ``--force``까지 붙으면 남의 미커밋 변경을 지운다.
+    """
+    _init_repo(tmp_path)
+    plan = W.plan_worktree(root=tmp_path, name="swap")
+    status = W.create_worktree(root=tmp_path, plan=plan)
+
+    real = W.list_registered_worktrees
+    seen = {"n": 0}
+
+    def replaced(root):
+        entries = real(root)
+        seen["n"] += 1
+        if seen["n"] < 2:
+            return entries
+        return [
+            entry
+            if not W.same_worktree_path(entry.path, status.path)
+            else replace(entry, branch="someone/else", head="0" * 40)
+            for entry in entries
+        ]
+
+    monkeypatch.setattr(W, "list_registered_worktrees", replaced)
+    with pytest.raises(WorktreeIsolationError) as caught:
+        W.remove_worktree(root=tmp_path, status=status, allow_unmerged=True)
+    assert "registration changed" in str(caught.value)
+    assert status.path.exists()

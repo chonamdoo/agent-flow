@@ -198,7 +198,10 @@ def remove_worktree(
         # 우리가 증명한 그 경로가 여전히 같은 상태인지 확인한다.
         recheck = _registered_at_path(root=root, path=status.path)
         _assert_not_locked(path=status.path, entry=recheck)
-        if registered is not None and recheck is None:
+        if registered is not None and not _same_registration(registered, recheck):
+            # 경로가 여전히 등록돼 있다는 것만으로는 부족하다. 다른 프로세스가 그
+            # 사이에 같은 경로를 제거하고 새 worktree를 등록했으면 우리가 증명한
+            # 대상이 아니다. --force까지 붙으면 남의 미커밋 변경을 지운다.
             raise WorktreeIsolationError(
                 f"worktree registration changed while removing {status.path}; re-run the command"
             )
@@ -206,7 +209,16 @@ def remove_worktree(
         _run_git(root, "worktree", "remove", *force_args, str(status.path))
     if branch_to_delete is not None:
         _run_git(root, "branch", "-D", branch_to_delete)
-    remove_worktree_metadata(root=root, name=status.name)
+    remove_worktree_metadata(root=root, name=status.name, path=status.path)
+
+
+def _same_registration(
+    before: RegisteredWorktree, after: RegisteredWorktree | None
+) -> bool:
+    """같은 등록인가. 경로가 같아도 가리키는 대상이 바뀌었으면 다른 worktree다."""
+    if after is None:
+        return False
+    return before.branch == after.branch and before.head == after.head
 
 
 def _registered_at_path(*, root: Path, path: Path) -> RegisteredWorktree | None:
@@ -484,7 +496,17 @@ def known_worktree_names(*, root: Path) -> list[str]:
     return sorted(names)
 
 
-def remove_worktree_metadata(*, root: Path, name: str) -> None:
+def remove_worktree_metadata(*, root: Path, name: str, path: Path | None = None) -> None:
+    """``name``의 런타임 메타데이터를 지운다.
+
+    ``path``를 주면 그 등록 경로의 소유임을 증명한 경우에만 지운다. 메타데이터
+    키는 정규화된 이름이라 서로 다른 등록 경로가 같은 키로 접힌다 — 관리형
+    ``.../feat-demo``와 외부 ``.../demo``가 둘 다 ``feat-demo``다. 증명 없이
+    지우면 외부 worktree를 제거하다가 관리형 worktree의 활성 run과 manifest를
+    날린다.
+    """
+    if path is not None and not _metadata_belongs_to_path(root=root, name=name, path=path):
+        return
     try:
         runtime_root = worktree_runtime_root(root=root, name=name)
         legacy_manifest = _legacy_worktree_manifest_path(root=root, name=name)
@@ -495,6 +517,25 @@ def remove_worktree_metadata(*, root: Path, name: str) -> None:
         shutil.rmtree(runtime_root)
     if legacy_manifest.exists():
         legacy_manifest.unlink()
+
+
+def _metadata_belongs_to_path(*, root: Path, name: str, path: Path) -> bool:
+    """``name`` 키의 메타데이터가 이 등록 경로의 것인가.
+
+    manifest가 있으면 그 안에 기록된 경로가 진실이다. manifest가 없으면 생성
+    규약(관리 루트 아래 ``<name>`` 디렉터리)으로만 인정한다 — 롤백 경로처럼
+    manifest를 쓰기 전에 정리해야 하는 경우가 그 하나다.
+    """
+    payload = _load_worktree_manifest(root=root, name=name)
+    if payload is None:
+        return same_worktree_path(root / ".agent-flow" / "worktrees" / name, path)
+    recorded = payload.get("path")
+    if not isinstance(recorded, str) or not recorded:
+        return False
+    candidate = Path(recorded)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    return same_worktree_path(candidate, path)
 
 
 def _git_dirty(root: Path) -> bool:
