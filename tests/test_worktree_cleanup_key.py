@@ -1,0 +1,279 @@
+"""제거·조회 대상은 이름이 아니라 git이 보고한 경로다 (issue #110).
+
+workflow 프롬프트는 사용자에게 raw ``git worktree add``를 시킨다. 그렇게 만든
+체크아웃에는 agent-flow manifest가 없고, 이름도 ``feat-`` 정규화 규칙과 무관하다.
+여기 있는 케이스는 전부 이름 역산 조회로 되돌리면 실패한다 — 그게 이 파일의 존재
+이유다. 안전 방향(잠금·leader·모호성)도 각각 반증 짝을 갖는다.
+"""
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+KIT_ROOT = Path(__file__).resolve().parents[1]
+SRC = str(KIT_ROOT / "src")
+if SRC not in sys.path:
+    sys.path.insert(0, SRC)
+
+from agent_flow.core.worktree_isolation import (
+    WorktreeIsolationError,
+    list_registered_worktrees,
+    real_path,
+)
+from agent_flow.core.worktrees import (
+    AmbiguousWorktreeSelector,
+    removable_worktrees,
+    resolve_worktree,
+)
+
+
+def _git(*args, cwd) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(("git", *args), cwd=str(cwd), capture_output=True, text=True)
+
+
+def _init_repo(root: Path) -> None:
+    _git("init", "-b", "main", cwd=root)
+    _git("config", "user.email", "t@t", cwd=root)
+    _git("config", "user.name", "t", cwd=root)
+    (root / "f.txt").write_text("base\n", encoding="utf-8")
+    _git("add", ".", cwd=root)
+    _git("commit", "-m", "init", cwd=root)
+
+
+def _run_cli(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    for key in tuple(env):
+        if key.startswith("AGENT_FLOW_") or key in {"CLAUDECODE", "CLAUDE_CLI", "CODEX_CLI"}:
+            env.pop(key, None)
+    env["PYTHONPATH"] = SRC
+    env["AGENT_FLOW_ADAPTER"] = "generic"
+    env["AGENT_FLOW_GENERIC_MODE"] = "stub-success"
+    return subprocess.run(
+        [sys.executable, "-m", "agent_flow.cli", *args],
+        cwd=str(cwd),
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _branch_exists(root: Path, branch: str) -> bool:
+    return _git("show-ref", "--verify", "--quiet", f"refs/heads/{branch}", cwd=root).returncode == 0
+
+
+def _registered_paths(root: Path) -> set[Path]:
+    return {entry.path for entry in list_registered_worktrees(root)}
+
+
+def _add_raw_worktree(root: Path, branch: str, path: Path) -> None:
+    """workflow 프롬프트가 사용자에게 시키는 그대로. agent-flow manifest는 없다."""
+    result = _git("worktree", "add", "-b", branch, str(path), "main", cwd=root)
+    assert result.returncode == 0, result.stderr
+
+
+def test_raw_worktree_in_managed_dir_is_listed_and_removed(tmp_path: Path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _init_repo(root)
+    checkout = root / ".agent-flow" / "worktrees" / "feat-demo"
+    _add_raw_worktree(root, "feat/demo", checkout)
+
+    listed = _run_cli(["worktree", "list"], root)
+    assert listed.returncode == 0, listed.stderr
+    assert "feat-demo feat/demo" in listed.stdout
+    assert "exists" in listed.stdout
+
+    removed = _run_cli(["worktree", "remove", "--name", "feat-demo"], root)
+    assert removed.returncode == 0, removed.stderr
+    assert not checkout.exists()
+    assert real_path(checkout) not in _registered_paths(root)
+    # agent-flow가 만들지 않은 브랜치는 남는다.
+    assert _branch_exists(root, "feat/demo")
+
+
+def test_raw_worktree_in_managed_dir_is_removable_by_absolute_path(tmp_path: Path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _init_repo(root)
+    checkout = root / ".agent-flow" / "worktrees" / "feat-demo"
+    _add_raw_worktree(root, "feat/demo", checkout)
+
+    removed = _run_cli(["worktree", "remove", "--name", str(checkout)], root)
+    assert removed.returncode == 0, removed.stderr
+    assert not checkout.exists()
+    assert real_path(checkout) not in _registered_paths(root)
+
+
+def test_raw_worktree_outside_managed_dir_is_listed_and_removed(tmp_path: Path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _init_repo(root)
+    checkout = tmp_path / "elsewhere" / "wt"
+    _add_raw_worktree(root, "feat/outside", checkout)
+
+    listed = _run_cli(["worktree", "list"], root)
+    assert listed.returncode == 0, listed.stderr
+    assert str(real_path(checkout)) in listed.stdout
+    assert "wt feat/outside" in listed.stdout
+
+    removed = _run_cli(["worktree", "remove", "--name", "wt"], root)
+    assert removed.returncode == 0, removed.stderr
+    assert not checkout.exists()
+    assert real_path(checkout) not in _registered_paths(root)
+    assert _branch_exists(root, "feat/outside")
+
+
+def test_outside_worktree_is_removable_by_its_branch(tmp_path: Path):
+    """이슈에 실린 실제 사례: 디렉터리 ``feat-issue`` + 브랜치 ``<user>/feat-issue``."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    _init_repo(root)
+    checkout = tmp_path / "workspaces" / "feat-issue"
+    _add_raw_worktree(root, "chonamdoo/feat-issue", checkout)
+
+    removed = _run_cli(["worktree", "remove", "--name", "chonamdoo/feat-issue"], root)
+    assert removed.returncode == 0, removed.stderr
+    assert not checkout.exists()
+    assert real_path(checkout) not in _registered_paths(root)
+    assert _branch_exists(root, "chonamdoo/feat-issue")
+
+
+def test_name_normalization_cannot_reach_the_outside_worktree(tmp_path: Path):
+    """반증 짝: 이름 역산 경로에는 아무것도 없고, 매칭은 등록부하고만 일어난다."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    _init_repo(root)
+    _add_raw_worktree(root, "feat/outside", tmp_path / "elsewhere" / "wt")
+
+    assert not (root / ".agent-flow" / "worktrees" / "feat-wt").exists()
+    assert resolve_worktree(root=root, selector="feat-wt") is None
+    assert resolve_worktree(root=root, selector="unrelated") is None
+    missing = _run_cli(["worktree", "remove", "--name", "feat-wt"], root)
+    assert missing.returncode == 1
+    assert "worktree not found" in missing.stderr
+    # 등록부에 있는 식별자는 정확히 그 항목으로 해석된다.
+    assert resolve_worktree(root=root, selector="wt").branch == "feat/outside"
+
+
+def test_ambiguous_selector_raises_with_candidates(tmp_path: Path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _init_repo(root)
+    derived = root / ".agent-flow" / "worktrees" / "feat-demo"
+    literal = tmp_path / "elsewhere" / "demo"
+    _add_raw_worktree(root, "feat/demo", derived)
+    _add_raw_worktree(root, "feat/literal", literal)
+
+    with pytest.raises(AmbiguousWorktreeSelector) as excinfo:
+        resolve_worktree(root=root, selector="demo")
+    rendered = str(excinfo.value)
+    assert str(real_path(derived)) in rendered
+    assert str(real_path(literal)) in rendered
+
+    result = _run_cli(["worktree", "remove", "--name", "demo"], root)
+    assert result.returncode == 2
+    assert "ambiguous" in result.stderr
+    assert derived.exists() and literal.exists()
+
+    # 반증 짝: 모호하지 않은 선택자는 정확히 하나로 해석된다.
+    assert resolve_worktree(root=root, selector="feat-demo").path == real_path(derived)
+    assert resolve_worktree(root=root, selector="feat/literal").path == real_path(literal)
+
+
+def test_locked_worktree_survives_allow_unmerged(tmp_path: Path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _init_repo(root)
+    checkout = root / ".agent-flow" / "worktrees" / "feat-demo"
+    _add_raw_worktree(root, "feat/demo", checkout)
+    (checkout / "dirty.txt").write_text("unstaged\n", encoding="utf-8")
+    assert _git("worktree", "lock", str(checkout), cwd=root).returncode == 0
+
+    result = _run_cli(["worktree", "remove", "--name", "feat-demo", "--allow-unmerged"], root)
+    assert result.returncode == 2
+    assert "locked" in result.stderr
+    assert "git worktree unlock" in result.stderr
+    assert checkout.exists()
+    assert real_path(checkout) in _registered_paths(root)
+
+    # 반증 짝: 잠금을 풀면 같은 명령이 통과한다.
+    assert _git("worktree", "unlock", str(checkout), cwd=root).returncode == 0
+    unlocked = _run_cli(["worktree", "remove", "--name", "feat-demo", "--allow-unmerged"], root)
+    assert unlocked.returncode == 0, unlocked.stderr
+    assert not checkout.exists()
+
+
+def test_locked_worktree_with_dead_checkout_is_not_wiped(tmp_path: Path):
+    """잔재 정리 경로도 잠금을 넘지 않는다."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    _init_repo(root)
+    checkout = root / ".agent-flow" / "worktrees" / "feat-demo"
+    _add_raw_worktree(root, "feat/demo", checkout)
+    (checkout / ".git").unlink()
+    assert _git("worktree", "lock", str(checkout), cwd=root).returncode == 0
+
+    result = _run_cli(["worktree", "remove", "--name", "feat-demo"], root)
+    assert result.returncode == 2
+    assert "locked" in result.stderr
+    assert checkout.exists()
+
+
+def test_leader_is_never_resolved_as_a_target(tmp_path: Path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _init_repo(root)
+    linked = root / ".agent-flow" / "worktrees" / "feat-demo"
+    _add_raw_worktree(root, "feat/demo", linked)
+
+    for selector in (str(root), str(real_path(root)), ".", "main", root.name):
+        assert resolve_worktree(root=root, selector=selector) is None, selector
+    assert real_path(root) not in {entry.path for entry in removable_worktrees(root=root)}
+
+    result = _run_cli(["worktree", "remove", "--name", str(root)], root)
+    assert result.returncode != 0
+    assert (root / "f.txt").exists()
+    assert real_path(root) in _registered_paths(root)
+
+    # 반증 짝: leader가 아닌 linked worktree는 같은 경로 선택자로 잡힌다.
+    assert resolve_worktree(root=root, selector=str(linked)).path == real_path(linked)
+
+
+def test_leader_removal_is_refused_from_a_linked_worktree(tmp_path: Path):
+    """워커 cwd에서도 leader는 후보가 아니다."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    _init_repo(root)
+    linked = root / ".agent-flow" / "worktrees" / "feat-demo"
+    _add_raw_worktree(root, "feat/demo", linked)
+
+    assert resolve_worktree(root=linked, selector=str(root)) is None
+    assert resolve_worktree(root=linked, selector=str(linked)).path == real_path(linked)
+
+
+def test_registered_listing_failure_is_not_an_empty_list(tmp_path: Path):
+    outside = tmp_path / "not-a-repo"
+    outside.mkdir()
+    with pytest.raises(WorktreeIsolationError):
+        list_registered_worktrees(outside)
+
+    # 저장소인데 git이 대답하지 못하는 상태는 "등록된 worktree가 없다"와 다르다.
+    broken = tmp_path / "broken"
+    broken.mkdir()
+    _init_repo(broken)
+    (broken / ".git" / "config").write_text("[core\nnot valid ini\n", encoding="utf-8")
+
+    with pytest.raises(WorktreeIsolationError):
+        list_registered_worktrees(broken)
+    with pytest.raises(WorktreeIsolationError):
+        removable_worktrees(root=broken)
+    with pytest.raises(WorktreeIsolationError):
+        resolve_worktree(root=broken, selector="feat-demo")
+
+    # 반증 짝: 파일시스템이 non-repo를 증명한 자리에서만 빈 목록으로 접는다.
+    assert removable_worktrees(root=outside) == []
+    assert resolve_worktree(root=outside, selector="feat-demo") is None
