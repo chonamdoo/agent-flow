@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 import yaml
+from agent_flow.core.design_ledger import ledger_prompt_block
 from agent_flow.core.local_skills import local_skill_prompt_block
 
 if TYPE_CHECKING:
@@ -90,14 +91,20 @@ class Adapter(ABC):
             task_text=self._task_text,
         )
         lore_block = self._render_lore_block(project_root, phase)
+        # 이전 phase의 수치는 대화 컨텍스트가 아니라 여기로만 건너온다.
+        # 렌더러가 넣으므로 agent가 빼거나 잊을 수 없다.
+        design_values_block = ledger_prompt_block(run_dir)
+        task_line = f"**Task**: {self._task_text}\n" if self._task_text else ""
         return (
             f"# agent-flow phase: {phase.id}\n\n"
             f"**Description**: {phase.description}\n\n"
+            f"{task_line}"
             f"**Run id**: {run_dir.name}\n"
             f"**Project root**: {project_root}\n"
             f"**Artifact target** (write this when the phase is complete):\n"
             f"  `{relative_artifact}`\n"
             f"\n## Phase prompt\n\n{body}\n"
+            f"{design_values_block}"
             f"{profile_block}"
             f"{architecture_block}"
             f"{completion_gate_block}"

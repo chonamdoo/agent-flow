@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { SKILL_DEPENDENCIES, mergeInstallSelectionWithPrevious, resolveInstallSelection } from "../lib/skill-selection.mjs";
 
@@ -288,6 +289,8 @@ function runWorkflowCommand(args) {
       run_dir: runDirRel,
       started_at: startedAt,
       phase_entered_at: startedAt,
+      // gate-results.json의 출처 표식. Python `artifact.create_run`과 같은 계약이다.
+      gate_nonce: randomBytes(16).toString("hex"),
     };
     writeJson(path.join(runDir, "manifest.json"), state);
     writeJson(currentRunPath(root), state);
@@ -1796,7 +1799,7 @@ function nextPhaseIndex(state, phases, phase, artifact) {
   if (!phase.routes) {
     return state.phase_index + 1;
   }
-  const key = nodeRouteKey(phase, artifact);
+  const key = nodeRouteKey(phase, artifact, state);
   const target = phase.routes[key] ?? phase.routes.default;
   if (!target) {
     throw new Error(`blocked: ${phase.id} artifact has no route for ${key}`);
@@ -1855,9 +1858,9 @@ function nextFixLoopRounds(state, phase, nextPhase) {
   return state.fix_loop_rounds;
 }
 
-function nodeRouteKey(phase, artifact) {
+function nodeRouteKey(phase, artifact, state) {
   if (phase.id === "gates") {
-    return readGatesRouteKey(artifact);
+    return readGatesRouteKey(artifact, state?.gate_nonce ?? "");
   }
   if (phase.multi_review) {
     const verdict = readMultiReviewVerdict(artifact, phase.id);
@@ -2091,11 +2094,20 @@ function normalizeReviewerHeadingId(value) {
   return /^[a-z0-9]+(?: [a-z0-9]+)?$/.test(key) ? key : "";
 }
 
-function readGatesPassed(pathName) {
-  return readGatesRouteKey(pathName) === "green";
+function readGatesPassed(pathName, nonce = "") {
+  return readGatesRouteKey(pathName, nonce) === "green";
 }
 
-function readGatesRouteKey(pathName) {
+// run meta의 nonce와 대조한다. 이 층이 막는 것은 손으로 쓴 gate-results.json이지
+// 적대적 위조가 아니다 — nonce도 디스크에 있으므로 읽어서 복사할 수 있다.
+function gateNonceMatches(data, nonce) {
+  if (!nonce) {
+    return true;
+  }
+  return Boolean(data.produced_by) && data.produced_by.nonce === nonce;
+}
+
+function readGatesRouteKey(pathName, nonce = "") {
   try {
     const content = fs.readFileSync(pathName, "utf8");
     const data = JSON.parse(content);
@@ -2111,6 +2123,7 @@ function readGatesRouteKey(pathName) {
     // 완료 보고는 실제 실행한 gate command와 결과 evidence가 함께 있을 때만 허용한다.
     const requiredResults = data.results.filter((r) => r && r.required !== false);
     const resultsPass =
+      gateNonceMatches(data, nonce) &&
       requiredResults.length > 0 &&
       requiredResults.every((r) =>
         r &&

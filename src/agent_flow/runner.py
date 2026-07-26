@@ -45,6 +45,14 @@ from agent_flow.artifact import (
 )
 from agent_flow.cli_detect import detect_available_clis
 from agent_flow.core.commands import run_safe_command
+from agent_flow.core.command_evidence import missing_test_evidence_markers
+from agent_flow.core.design_ledger import (
+    LEDGER_SOURCE_PHASES,
+    capture_design_ledger,
+    missing_design_value_markers,
+)
+from agent_flow.core.design_value_check import missing_design_value_implementations
+from agent_flow.core.hook_integrity import assert_managed_hooks_registered
 from agent_flow.core.worktree_isolation import (
     assert_leader_unchanged,
     capture_leader_snapshot,
@@ -366,6 +374,9 @@ class Runner:
         )
 
     def _next_index(self, current_index: int, phase: Phase) -> tuple[int, bool]:
+        # phase를 떠나는 유일한 통로다. 여기서 원장을 굳혀야 skip 경로(재개)와
+        # 실행 경로 양쪽에서 같은 값이 다음 phase로 넘어간다.
+        self._capture_design_ledger(phase)
         if not phase.routes:
             return current_index + 1, False
         assert self.run_dir is not None
@@ -374,7 +385,7 @@ class Runner:
         if phase.multi_review:
             key = _multi_review_route_key(text, phase.id)
         elif phase.id == "gates":
-            key = _gates_route_key(text)
+            key = _gates_route_key(text, nonce=str(read_meta(self.run_dir).get("gate_nonce", "")))
         else:
             key = _route_key(text)
         if key == "approve" and phase.routes.get("request-changes") and has_failure_markers(text):
@@ -436,6 +447,15 @@ class Runner:
                     return i, False
             raise ValueError(f"phase {phase.id}: route target not found: {target}")
         return current_index + 1, False
+
+    def _capture_design_ledger(self, phase: Phase) -> None:
+        """설계 phase의 수치를 원장으로 굳힌다. 다음 phase는 여기서만 값을 본다."""
+        if phase.id not in LEDGER_SOURCE_PHASES or self.run_dir is None:
+            return
+        artifact = self._existing_artifact_path(phase)
+        if not artifact.exists():
+            return
+        capture_design_ledger(self.run_dir, phase.id, artifact.read_text(encoding="utf-8"))
 
     def _advance_phase(self, meta: dict[str, Any], phase_index: int, blocked: bool) -> None:
         """route 결과를 meta에 반영한다.
@@ -532,18 +552,28 @@ class Runner:
         return True
 
     def _missing_required_markers(self, phase: Phase) -> list[str]:
-        if (
-            getattr(self, "_adapter_name", "") == "generic"
-            and os.environ.get("AGENT_FLOW_GENERIC_MODE") == "stub-success"
-        ):
-            return []
         assert self.run_dir is not None
         artifact = self._existing_artifact_path(phase)
         if not artifact.exists():
             return []
         text = artifact.read_text(encoding="utf-8")
+        # stub 모드는 host AI 없이 state machine을 돌리는 픽스처 경로다. 다만
+        # **stub이 직접 쓴 artifact**에서만 마커 검사를 건너뛴다. 예전에는 환경변수
+        # 하나로 사람이 쓴 artifact까지 통째로 통과해서, 마커 검사 전면 킬스위치였다.
+        if self._is_stub_authored(text):
+            return []
         missing = list(_missing_markers(text, phase.required_markers))
+        missing.extend(missing_design_value_markers(text, phase.id))
         meta = read_meta(self.run_dir)
+        missing.extend(
+            missing_test_evidence_markers(
+                self.config_root,
+                phase.id,
+                text,
+                profile=self.profile,
+                since=_meta_timestamp(meta.get("phase_entered_at")),
+            )
+        )
         missing.extend(
             missing_local_skill_markers(
                 text,
@@ -727,23 +757,40 @@ def _route_key(text: str) -> str:
     return "default"
 
 
-def _gates_route_key(text: str) -> str:
+def _gates_route_key(text: str, *, nonce: str = "") -> str:
     try:
         payload = json.loads(text)
     except json.JSONDecodeError:
         return "default"
     if not isinstance(payload, dict) or not isinstance(payload.get("passed"), bool):
         return "default"
+    # 통과 라우팅에만 출처를 요구한다. 실패/차단은 손으로 써도 앞으로 못 가므로
+    # 막을 이유가 없고, 막으면 복구 경로만 좁아진다.
+    proven = _gate_results_prove_pass(payload.get("results")) and _gate_nonce_matches(payload, nonce)
     status = payload.get("status")
     if isinstance(status, str):
         normalized_status = status.strip().lower().replace("_", "-")
         if payload["passed"] is True and normalized_status in {"green", "approve"}:
-            return normalized_status if _gate_results_prove_pass(payload.get("results")) else "default"
+            return normalized_status if proven else "default"
         if payload["passed"] is False and normalized_status in {"request-changes", "blocked", "error", "pending"}:
             return normalized_status
     if payload["passed"] is True:
-        return "green" if _gate_results_prove_pass(payload.get("results")) else "default"
+        return "green" if proven else "default"
     return "request-changes"
+
+
+def _gate_nonce_matches(payload: dict[str, object], nonce: str) -> bool:
+    """이 run의 `agent-flow gates`가 쓴 파일인가.
+
+    run에 nonce가 없으면(구버전 run, CLI 직접 사용) 대조할 기준이 없으므로
+    요구하지 않는다. "없으면 위반"이 아니라 "기록과 다르면 위반"이다.
+    """
+    if not nonce:
+        return True
+    produced_by = payload.get("produced_by")
+    if not isinstance(produced_by, dict):
+        return False
+    return produced_by.get("nonce") == nonce
 
 
 def _multi_review_route_key(text: str, phase_id: str = "") -> str:

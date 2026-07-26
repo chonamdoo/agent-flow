@@ -19,8 +19,37 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
+
+from agent_flow.core.markers import completion_gate_marker_values
 
 COMMANDS_RUN_LOG = Path(".agent-flow") / "commands-run.jsonl"
+
+# 재현 테스트를 요구하는 phase. `bugfix`에는 red phase 자체가 없어서
+# "같은 버그 10번 재현"의 직접 원인이 여기였다.
+TEST_EVIDENCE_PHASES = frozenset({"red", "implement-fix"})
+
+TEST_RUN_EVIDENCE_MARKER = "test-run-evidence: verified|unavailable"
+
+# profile에 test gate가 없을 때의 대비책(`generic`이 그렇다). 넓게 잡아도
+# 잡으려는 것은 "아무 테스트도 안 돌렸다" 하나다.
+FALLBACK_TEST_TOKENS = (
+    "pytest",
+    "unittest",
+    "tox",
+    "nox",
+    "jest",
+    "vitest",
+    "mocha",
+    "gradlew",
+    "mvn",
+    "cargo",
+    "rspec",
+    "phpunit",
+    "ctest",
+    "xcodebuild",
+)
+
 
 @dataclass(frozen=True)
 class CommandRun:
@@ -48,6 +77,16 @@ class CommandRunEvidence:
     def failed(self, *needles: str) -> bool:
         """관측된 실패가 하나라도 있는가. exit code를 안 실어 보내는 host면 False다."""
         return any(run.exit_code not in (None, 0) for run in self.matching(*needles))
+
+    def matching_all(self, tokens: Sequence[str]) -> tuple[CommandRun, ...]:
+        """토큰 전부가 한 명령 안에 있는 실행. gate 명령을 통째로 대조할 때 쓴다."""
+        patterns = [_needle_pattern(token) for token in tokens if token.strip()]
+        if not patterns:
+            return ()
+        return tuple(
+            run for run in self.runs if all(pattern.search(run.command) for pattern in patterns)
+        )
+
 
 def read_command_evidence(project_root: Path, *, since: float | None = None) -> CommandRunEvidence:
     """관측 로그를 읽는다. 파일이 없으면 hook 미등록/미지원 host로 본다."""
@@ -88,3 +127,65 @@ def read_command_evidence(project_root: Path, *, since: float | None = None) -> 
 def _needle_pattern(needle: str) -> re.Pattern[str]:
     """토큰 경계로 맞춘다. 부분 문자열로 맞추면 `mypytest`가 `pytest`로 통과한다."""
     return re.compile(rf"(?<![\w.-]){re.escape(needle.strip())}(?![\w.-])")
+
+
+def resolve_test_command_tokens(profile: dict | None) -> tuple[tuple[str, ...], ...]:
+    """profile의 test gate 명령을 토큰 집합으로 만든다.
+
+    플래그(`-q`)는 뺀다. 같은 gate라도 agent가 옵션을 바꿔 돌리는 것은 정상이고,
+    옵션까지 요구하면 관측이 문자열 일치 게임이 된다.
+    """
+    sets: list[tuple[str, ...]] = []
+    for gate in (profile or {}).get("gates") or []:
+        if not isinstance(gate, dict) or "test" not in str(gate.get("id", "")).lower():
+            continue
+        command = gate.get("command")
+        if isinstance(command, str):
+            command = command.split()
+        if not isinstance(command, list):
+            continue
+        tokens = tuple(str(part) for part in command if not str(part).startswith("-"))
+        if tokens:
+            sets.append(tokens)
+    if sets:
+        return tuple(sets)
+    return tuple((token,) for token in FALLBACK_TEST_TOKENS)
+
+
+def missing_test_evidence_markers(
+    project_root: Path,
+    phase_id: str,
+    text: str,
+    *,
+    profile: dict | None = None,
+    since: float | None = None,
+) -> list[str]:
+    """"테스트를 아예 안 돌렸다"만 잡는다. 그 이상은 이 층이 증명하지 못한다.
+
+    관측이 불가능한 host에서는 자기신고(`unavailable`)로 축퇴한다. 관측 불가를
+    위반으로 들면 hook 미지원 host에서 red/fix phase가 통째로 막힌다.
+    """
+    if phase_id not in TEST_EVIDENCE_PHASES:
+        return []
+    evidence = read_command_evidence(project_root, since=since)
+    values = completion_gate_marker_values(text)
+    if not evidence.available:
+        if values.get("test-run-evidence") not in {"verified", "unavailable"}:
+            return [TEST_RUN_EVIDENCE_MARKER]
+        return []
+    token_sets = resolve_test_command_tokens(profile)
+    observed = [run for tokens in token_sets for run in evidence.matching_all(tokens)]
+    if not observed:
+        return [
+            "test-run-evidence: verified (no test command was observed during this "
+            "phase; the regression test has to actually run)"
+        ]
+    if phase_id != "red":
+        return []
+    reported = [run.exit_code for run in observed if run.exit_code is not None]
+    if reported and all(code == 0 for code in reported):
+        return [
+            "red-observed: <failing exit code> (every observed test command exited 0; "
+            "a red phase has to leave a failing test behind)"
+        ]
+    return []

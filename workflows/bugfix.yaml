@@ -11,10 +11,30 @@ phases:
 
   - id: implement-fix
     role: fixer
-    description: Fix the reproduced defect.
+    description: Fix the reproduced defect with a regression test that ran.
+    required_markers:
+      - "regression-test:"
+      - "red-observed:"
+      - "test-run-evidence: verified|unavailable"
     prompt: |
       Fix only the reproduced defect. Keep the change scoped to the failing behavior
       and update or add the narrowest regression test that proves the fix.
+
+      Run that test **before** the fix and watch it fail, then run it again after.
+      The runs are observed by the `record-command-run.py` PostToolUse hook, so a
+      fix with no test command in this phase is rejected regardless of what you
+      record. Fixing the defect without a test that reproduces it is how the same
+      bug comes back.
+      End with:
+
+          ## Completion Gate
+          regression-test: <test id that reproduces the defect>
+          red-observed: <exit code of the pre-fix failing run>
+          test-run-evidence: verified|unavailable
+
+      Use `test-run-evidence: unavailable` only when the host does not run the
+      observation hook.
+
       Output: implement-fix.md.
 
   - id: review

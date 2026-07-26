@@ -11,6 +11,11 @@ const SOURCE_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
 const SOURCE_IS_MANAGED_WORKTREE = resolveManagedWorktreeRoot(SOURCE_ROOT) !== null;
 const CHECK_INSTALLED_COPY = !SOURCE_IS_MANAGED_WORKTREE;
+// 두 runner에 **같은** nonce를 준다. node는 `run start`가 무작위로 심고 python은
+// meta에서 읽으므로, 고정하지 않으면 같은 입력이 아니게 되어 provenance 검사가
+// parity 오탐으로 보인다.
+const PARITY_GATE_NONCE = "parity-gate-nonce";
+
 const INSTALL_ROOT = resolveInstalledRoot(process.cwd()) ?? SOURCE_ROOT;
 // bin/agent-flow-install.mjs / bin/agent-flow-kit.mjs의 BUNDLED_HOST_SKILL_NAMES와
 // 동일해야 한다. allowlist 밖 bundled skill은 host link 없이 index에만 노출된다.
@@ -910,6 +915,13 @@ function promptOutputArtifacts(prompt) {
     .map((match) => match[1]);
 }
 
+function provenGateResults(body) {
+  return JSON.stringify({
+    ...body,
+    produced_by: { tool: "agent-flow gates", nonce: PARITY_GATE_NONCE },
+  }) + "\n";
+}
+
 function assertRouteParity(workflow) {
   const phaseIds = new Set(workflow.phases.map((phase) => phase.id));
   const cases = [
@@ -926,9 +938,17 @@ function assertRouteParity(workflow) {
     ["pr-watch status ci_failed", "pr-watch", "status: ci_failed\n"],
     ["gates passed without evidence", "gates", "{\"passed\": true}\n"],
     [
-      "gates passed with evidence",
+      "gates passed with evidence but no provenance",
       "gates",
       "{\"passed\": true, \"results\": [{\"command\": \"npm test\", \"passed\": true, \"output\": \"ok\"}]}\n",
+    ],
+    [
+      "gates passed with evidence and provenance",
+      "gates",
+      provenGateResults({
+        passed: true,
+        results: [{ command: "npm test", passed: true, output: "ok" }],
+      }),
     ],
   ];
   for (const phase of workflow.phases) {
@@ -940,8 +960,8 @@ function assertRouteParity(workflow) {
     if (!phaseIds.has(phaseId)) {
       continue;
     }
-    const python = pythonPhaseOutcome(workflow, phaseId, content);
-    const node = nodePhaseOutcome(workflow, phaseId, content);
+    const python = pythonPhaseOutcome(workflow, phaseId, content, { gate_nonce: PARITY_GATE_NONCE });
+    const node = nodePhaseOutcome(workflow, phaseId, content, { gate_nonce: PARITY_GATE_NONCE });
     if (!python || !node) continue;
     if (python.route_key !== node.route_key) {
       failures.push(`python/node route key mismatch ${label}: python=${python.route_key} node=${node.route_key}`);
@@ -1743,7 +1763,7 @@ function assertHostSkillParity(root, index, label = "clean install") {
 
 var nodeRouteKeyEvaluator = null;
 
-function nodeRouteKeyFromKit(phase, content) {
+function nodeRouteKeyFromKit(phase, content, state = {}) {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agent-flow-route-key-"));
   try {
     const artifact = path.join(tempRoot, "artifact.txt");
@@ -1751,7 +1771,7 @@ function nodeRouteKeyFromKit(phase, content) {
     if (!nodeRouteKeyEvaluator) {
       nodeRouteKeyEvaluator = buildNodeRouteKeyEvaluator();
     }
-    return nodeRouteKeyEvaluator(phase, artifact);
+    return nodeRouteKeyEvaluator(phase, artifact, state);
   } catch (error) {
     return `blocked:${error.message}`;
   } finally {
@@ -1772,7 +1792,8 @@ function buildNodeRouteKeyEvaluator() {
     "fs",
     "phase",
     "artifact",
-    `${routeKeySource}\nreturn nodeRouteKey(phase, artifact);`,
+    "state",
+    `${routeKeySource}\nreturn nodeRouteKey(phase, artifact, state);`,
   ).bind(null, fs);
 }
 
@@ -1834,7 +1855,7 @@ with tempfile.TemporaryDirectory() as temp_dir:
     if phases[index].multi_review:
         route_key = _multi_review_route_key(content, phases[index].id)
     elif phases[index].id == "gates":
-        route_key = _gates_route_key(content)
+        route_key = _gates_route_key(content, nonce=str(read_meta(run_dir).get("gate_nonce", "")))
     else:
         route_key = _route_key(content)
     if route_key == "approve" and phases[index].routes and phases[index].routes.get("request-changes") and has_failure_markers(content):
@@ -1953,7 +1974,7 @@ function nodePhaseOutcome(workflow, phaseId, content, stateOverrides = {}) {
     const artifact = path.join(runDir, phase.artifact);
     fs.mkdirSync(path.dirname(artifact), { recursive: true });
     fs.writeFileSync(artifact, content, "utf8");
-    const routeKey = nodeRouteKeyFromKit(phase, content);
+    const routeKey = nodeRouteKeyFromKit(phase, content, state);
     const advance = spawnSync(process.execPath, [path.join(SOURCE_ROOT, "bin/agent-flow-kit.mjs"), "run", "advance"], {
       cwd: tempRoot,
       encoding: "utf8",
