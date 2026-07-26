@@ -82,7 +82,7 @@ def plan_worktree(
     # normalizing to one shared worktree, which would silently break isolation.
     base_name = name if unique is None else f"{name}-{unique}"
     safe_name = _feature_worktree_name(base_name)
-    selected_branch = branch or f"feat/{safe_name.removeprefix('feat-')}"
+    selected_branch = branch or _default_branch_for_name(safe_name)
     _validate_branch(selected_branch)
     if selected_branch in PROTECTED_WORKTREE_BRANCHES:
         raise ValueError(f"protected worktree branch is not allowed: {selected_branch}")
@@ -91,7 +91,7 @@ def plan_worktree(
     return WorktreePlan(
         name=safe_name,
         branch=selected_branch,
-        path=root / ".agent-flow" / "worktrees" / safe_name,
+        path=_managed_checkout_path(root=root, name=safe_name),
         # leader worktree가 feature branch여도 새 작업은 기본 브랜치 commit에서 시작한다.
         base_ref=_default_base_ref(root),
         branch_explicit=branch is not None,
@@ -189,9 +189,22 @@ def remove_worktree(
     registered = _registered_at_path(root=root, path=status.path)
     _assert_not_locked(path=status.path, entry=registered)
     live = status.path.exists() and (status.path / ".git").exists()
-    if live and require_merged and not allow_unmerged:
-        # Destructive: prove the work is already in the leader before removing.
-        assert_worktree_mergeable(root=root, path=status.path)
+    if live:
+        # manifest 없이 손으로 만든 checkout도 지울 수 있어야 하지만 소유 증명이
+        # 먼저다. 증명은 **경로 모양이 아니라 git 등록부**다 — 남의 저장소가 우리
+        # 관리 루트 안에 심어 둔 checkout은 등록부에 없으므로 걸러지고, 관리 루트
+        # 밖이라도 등록돼 있으면 이 저장소의 worktree이므로 지울 수 있다.
+        # `verify_linked_worktree`는 여기에 맞지 않는다. 그건 생성 경로의 불변식
+        # (관리 루트 안에 있어야 한다)을 함께 요구해서, 소유권과 생성 주체를
+        # 같은 조건으로 묶어 버린다.
+        if registered is None:
+            raise WorktreeIsolationError(
+                f"refusing to remove {status.path}: "
+                f"not registered as a worktree of this repository"
+            )
+        if require_merged and not allow_unmerged:
+            # Destructive: prove the work is already in the leader before removing.
+            assert_worktree_mergeable(root=root, path=status.path)
     branch_to_delete = _owned_branch_for_live_worktree(root=root, status=status) if delete_branch else None
     if status.path.exists():
         # 관측과 실행 사이에 등록이 바뀔 수 있다. git을 부르기 직전에 다시 읽어
@@ -379,12 +392,13 @@ def get_worktree_status(*, root: Path, name: str) -> WorktreeStatus:
 def _status_for_registered(
     *, root: Path, registered: RegisteredWorktree, requested: str
 ) -> WorktreeStatus:
-    try:
-        name = _feature_worktree_name(registered.path.name)
-    except ValueError:
-        # 정규화되지 않는 디렉터리 이름이어도 목록에서 사라지면 안 된다. 경로가
-        # 진실이므로 표시 이름만 경로에서 그대로 가져온다.
-        name = registered.path.name
+    # 표시·조회 이름은 등록부가 보고한 디렉터리 이름 그대로다. 여기서 정규화하면
+    # `feat-issue#110` 같은 합법적인 디렉터리가 `feat-issue-110`으로 뭉개져,
+    # 목록이 보여 준 이름을 그대로 넣어도 다시 못 찾는 원래 버그로 되돌아간다.
+    name = registered.path.name
+    # 반면 manifest/런타임 상태의 **키**는 생성 시점의 정규화된 이름이다. 그쪽만
+    # 정규화해서 찾는다. 정규화할 수 없는 이름이면 애초에 agent-flow가 만든
+    # 자리가 아니므로 manifest도 없다.
     planned_branch = _planned_branch(name)
     payload = _load_worktree_manifest(root=root, name=name)
     manifest_branch = _manifest_branch(payload)
@@ -469,7 +483,7 @@ def _manifest_branch(payload: dict | None) -> str | None:
 
 
 def write_worktree_manifest(*, root: Path, status: WorktreeStatus) -> Path:
-    path = _worktree_manifest_path(root=root, name=status.name)
+    path = _runtime_state_root(root=root, name=status.name) / "manifest.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = asdict(status)
     payload["path"] = str(status.path.relative_to(root))
@@ -479,7 +493,24 @@ def write_worktree_manifest(*, root: Path, status: WorktreeStatus) -> Path:
 
 
 def worktree_runtime_root(*, root: Path, name: str) -> Path:
-    return _agent_flow_git_dir(root) / "worktrees" / _feature_worktree_name(name)
+    return _runtime_state_root(root=root, name=resolve_worktree_name(root=root, name=name))
+
+
+def resolve_worktree_name(*, root: Path, name: str) -> str:
+    """조회용 이름 해석. 실제로 존재하는 이름이 정규화보다 우선한다.
+
+    워크플로가 `git worktree add`로 직접 만든 checkout은 agent-flow의 정규화를
+    거치지 않는다. 조회까지 정규화를 강제하면 디스크에 멀쩡히 있는 그 checkout을
+    영영 못 찾는다(issue #110). 정규화 강제는 생성 경로에만 남긴다.
+    """
+    candidates = frozenset(known_worktree_names(root=root))
+    if name in candidates:
+        return name
+    if name.startswith("feat/"):
+        dashed = f"feat-{name[len('feat/'):]}"
+        if dashed in candidates:
+            return dashed
+    return _feature_worktree_name(name)
 
 
 def known_worktree_names(*, root: Path) -> list[str]:
@@ -508,7 +539,9 @@ def remove_worktree_metadata(*, root: Path, name: str, path: Path | None = None)
     if path is not None and not _metadata_belongs_to_path(root=root, name=name, path=path):
         return
     try:
-        runtime_root = worktree_runtime_root(root=root, name=name)
+        # 이름을 여기서 다시 해석하면 안 된다. checkout을 지운 뒤 불릴 때 후보
+        # 목록이 비어 정규화로 흘러 엉뚱한 디렉터리를 가리킨다.
+        runtime_root = _runtime_state_root(root=root, name=_feature_worktree_name(name))
         legacy_manifest = _legacy_worktree_manifest_path(root=root, name=name)
     except ValueError:
         # agent-flow 이름 규칙으로 정규화되지 않는 이름에는 애초에 메타데이터가 없다.
@@ -556,12 +589,22 @@ def _git_dirty(root: Path) -> bool:
     return bool(dirty_lines)
 
 
+def _managed_checkout_path(*, root: Path, name: str) -> Path:
+    return root / ".agent-flow" / "worktrees" / name
+
+
+def _runtime_state_root(*, root: Path, name: str) -> Path:
+    return _agent_flow_git_dir(root) / "worktrees" / name
+
+
 def _worktree_manifest_path(*, root: Path, name: str) -> Path:
-    return worktree_runtime_root(root=root, name=name) / "manifest.json"
+    return _runtime_state_root(root=root, name=_feature_worktree_name(name)) / "manifest.json"
 
 
 def _legacy_worktree_manifest_path(*, root: Path, name: str) -> Path:
-    return root / ".agent-flow" / "worktrees" / _feature_worktree_name(name) / "manifest.json"
+    # 정규화를 거치는 이유는 경로 안전이다. 호출자가 넘긴 이름을 그대로 이어
+    # 붙이면 `../`가 섞인 이름이 관리 루트 밖을 가리킨다.
+    return _managed_checkout_path(root=root, name=_feature_worktree_name(name)) / "manifest.json"
 
 
 def _agent_flow_git_dir(root: Path) -> Path:
@@ -634,6 +677,55 @@ def _feature_worktree_name(value: str) -> str:
     # worktree 디렉터리는 slash를 못 쓰므로 feat/<slug> 브랜치와 feat-<slug> 디렉터리를 짝지어 둔다.
     safe = _safe_component(value)
     return safe if safe.startswith("feat-") else f"feat-{safe}"
+
+
+def _default_branch_for_name(name: str) -> str:
+    return f"feat/{name.removeprefix('feat-')}"
+
+
+def _live_branch(*, root: Path, path: Path) -> str | None:
+    """manifest 없는 checkout의 실제 브랜치. 이름에서 유추하지 않고 git에 묻는다."""
+    if not (path / ".git").exists():
+        return None
+    result = git_safe("-C", str(path), "branch", "--show-current", cwd=root)
+    if not result.ok:
+        return None
+    branch = result.stdout.strip()
+    if not branch:
+        return None
+    try:
+        _validate_branch(branch)
+    except ValueError:
+        return None
+    return branch
+
+
+def _registered_managed_worktree_names(root: Path) -> set[str]:
+    """git이 등록한 checkout 중 managed root 바로 아래 있는 것들의 이름.
+
+    디렉터리가 지워져도 등록은 남으므로 디스크 스캔만으로는 안 보인다. 이름을
+    다시 `<managed>/<name>`으로 되돌릴 수 있는 자리만 후보로 받는다 — 그 밖의
+    등록은 이름만으로 경로를 복원할 수 없어 remove가 엉뚱한 곳을 가리킨다.
+    """
+    managed_root = real_path(root / ".agent-flow" / "worktrees")
+    leader = real_path(root)
+    return {
+        path.name
+        for path in _registered_worktree_paths(root)
+        if path != leader and path.parent == managed_root
+    }
+
+
+def _registered_worktree_paths(root: Path) -> set[Path]:
+    result = git_safe("worktree", "list", "--porcelain", cwd=root)
+    if not result.ok:
+        return set()
+    prefix = "worktree "
+    return {
+        real_path(line[len(prefix):].strip())
+        for line in result.stdout.splitlines()
+        if line.startswith(prefix)
+    }
 
 
 def _validate_branch(value: str) -> None:

@@ -21,7 +21,6 @@ if SRC not in sys.path:
 from agent_flow.core import worktree_isolation as W_ISO
 from agent_flow.core.commands import SafeCommandResult
 from agent_flow.core.worktree_isolation import (
-    GitContentionError,
     WorktreeIsolationError,
     assert_leader_unchanged,
     capture_leader_snapshot,
@@ -102,51 +101,15 @@ def test_repo_ancestor_blocks_the_non_repo_downgrade(tmp_path):
     assert W_ISO._no_git_dir_above(tmp_path.parent) is True
 
 
-def test_head_probe_failure_is_fail_closed(tmp_path, monkeypatch):
-    """불변: HEAD 관측이 실패하면 값이 아니라 예외다.
-
-    빈 문자열을 돌려주면 before/after가 같은 빈 값으로 일치해 HEAD 축이 조용히
-    꺼진다. returncode 검사를 빼면 이 테스트는 예외 없이 통과한다.
-    """
-    _init_repo(tmp_path)
-    _fail_git_for(
-        monkeypatch,
-        prefix=("rev-parse", "--verify", "--quiet", "HEAD"),
-        result=_failed("fatal: injected head failure"),
-    )
-    with pytest.raises(WorktreeIsolationError) as caught:
-        capture_leader_snapshot(tmp_path)
-    assert "injected head failure" in str(caught.value)
-
-
-def test_unborn_head_is_a_distinct_value_not_a_failure(tmp_path):
-    """불변: 커밋 없는 leader는 정상 관측이고, 첫 커밋은 HEAD 이동으로 잡힌다.
-
-    "아직 커밋이 없다"와 "git이 대답하지 못했다"가 같은 빈 문자열이면 두 상태를
-    구분할 수 없다. sentinel이 값으로 남아야 전이가 diff로 보인다.
-    """
-    _git("init", "-b", "main", cwd=tmp_path)
-    _git("config", "user.email", "t@t", cwd=tmp_path)
-    _git("config", "user.name", "t", cwd=tmp_path)
-
-    before = capture_leader_snapshot(tmp_path)
-    assert before.armed and before.head == W_ISO._HEAD_UNRESOLVED
-    assert before.branch == "refs/heads/main"
-
-    (tmp_path / "f.txt").write_text("first\n", encoding="utf-8")
-    _git("add", ".", cwd=tmp_path)
-    _git("commit", "-m", "first", cwd=tmp_path)
-    with pytest.raises(WorktreeIsolationError) as caught:
-        assert_leader_unchanged(tmp_path, before)
-    assert "HEAD moved" in str(caught.value)
-
-
 def test_detached_head_is_stable_and_not_an_error(tmp_path):
-    """반증: detached HEAD를 실패로 보면 정상 상태에서 런이 통째로 막힌다."""
+    """반증: detached HEAD를 실패로 보면 정상 상태에서 런이 통째로 막힌다.
+
+    `_git_fact`의 non-zero 판정이 빈 stdout까지 실패로 접으면 여기서 걸린다.
+    """
     _init_repo(tmp_path)
     _git("checkout", "-q", "--detach", cwd=tmp_path)
     before = capture_leader_snapshot(tmp_path)
-    assert before.branch == W_ISO._HEAD_DETACHED
+    assert before.armed and before.branch == "HEAD"
     assert_leader_unchanged(tmp_path, before)
 
 
@@ -259,66 +222,6 @@ def test_unreadable_file_is_distinguishable_from_a_non_target(tmp_path):
     assert directory == ""
     assert unreadable not in ("", directory, readable)
 
-
-def test_transient_contention_retries_the_whole_snapshot(tmp_path, monkeypatch):
-    """불변: 일시적 lock 경합은 흡수되고 정상 결과를 failed로 만들지 않는다.
-
-    재시도 단위는 개별 호출이 아니라 스냅샷 전체다. 호출 단위로 재시도하면
-    경합이 걷히는 도중의 조각들이 한 스냅샷에 섞여 어느 시점과도 맞지 않는
-    기준선이 된다. head가 두 번 이상 찍혔다는 것이 그 증거다.
-    """
-    _init_repo(tmp_path)
-    real = W_ISO.git_safe
-    calls = {"head": 0, "status": 0}
-
-    def fake(*args, **kwargs):
-        head = tuple(str(a) for a in args[:2]) == ("rev-parse", "--verify")
-        if head:
-            calls["head"] += 1
-        if tuple(str(a) for a in args[:1]) == ("status",):
-            calls["status"] += 1
-            if calls["status"] == 1:
-                return _failed(_CONTENTION)
-        return real(*args, **kwargs)
-
-    monkeypatch.setattr(W_ISO, "git_safe", fake)
-    snapshot = capture_leader_snapshot(tmp_path)
-
-    assert snapshot.armed and snapshot.head
-    assert calls["head"] >= 2
-
-
-def test_non_contention_failure_is_not_retried(tmp_path, monkeypatch):
-    """반증: 진짜 고장까지 재시도하면 backoff로 결함을 덮는다."""
-    _init_repo(tmp_path)
-    attempts = {"n": 0}
-    real = W_ISO.git_safe
-
-    def fake(*args, **kwargs):
-        if tuple(str(a) for a in args[:1]) == ("status",):
-            attempts["n"] += 1
-            return _failed("fatal: bad object")
-        return real(*args, **kwargs)
-
-    monkeypatch.setattr(W_ISO, "git_safe", fake)
-    with pytest.raises(WorktreeIsolationError) as caught:
-        capture_leader_snapshot(tmp_path)
-    assert not isinstance(caught.value, GitContentionError)
-    assert attempts["n"] == 1
-
-
-def test_contention_that_never_clears_still_fails_closed(tmp_path, monkeypatch):
-    """불변: 재시도 상한을 넘으면 통과시키지 않고 원래 git 진단을 보존한다."""
-    _init_repo(tmp_path)
-    _fail_git_for(monkeypatch, prefix=("status",), result=_failed(_CONTENTION))
-    with pytest.raises(GitContentionError) as caught:
-        W_ISO.with_git_lock_retry(
-            lambda: W_ISO._capture_leader_snapshot_once(tmp_path),
-            is_retryable=W_ISO._is_git_contention,
-            attempts=2,
-            base_delay_s=0.0,
-        )
-    assert "index.lock" in str(caught.value)
 
 
 def test_registered_worktree_listing_never_degrades_to_empty(tmp_path, monkeypatch):

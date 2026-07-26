@@ -994,6 +994,10 @@ def main(argv: list[str] | None = None) -> int:
                 print(_format_cli_error(exc), file=sys.stderr)
                 return 2
             print(f"removed {status.name} {status.path}")
+            if not args.keep_branch and worktree_branch_exists(root=root, branch=status.branch):
+                # agent-flow가 만든 브랜치라는 증거가 없어 남긴 경우다. 조용히 두면
+                # 사용자는 정리가 끝난 줄 안다.
+                print(f"kept branch {status.branch}")
             return 0
 
     if args.command == "team":

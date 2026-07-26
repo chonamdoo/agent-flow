@@ -6259,6 +6259,192 @@ if (codexContext !== undefined) {
             )
             self.assertTrue((root / ".agent-flow" / "worktrees" / "feat-after-init").is_dir())
 
+    def test_worktree_remove_accepts_listed_name_of_direct_worktree(self) -> None:
+        # workflows/full-feature.yaml이 시키는 그대로 만든 worktree다. manifest가 없고
+        # 디스크 이름이 agent-flow 정규화 결과와 어긋난다.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_git_repo(root)
+            subprocess.run(
+                (
+                    "git",
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "feat/issue#110",
+                    ".agent-flow/worktrees/feat-issue#110/",
+                    "main",
+                ),
+                cwd=root,
+                check=True,
+            )
+            listing = io.StringIO()
+            with contextlib.redirect_stdout(listing):
+                self.assertEqual(main(["worktree", "list", "--root", str(root)]), 0)
+            listed_name = listing.getvalue().split()[0]
+            self.assertEqual(listed_name, "feat-issue#110")
+
+            removed = io.StringIO()
+            with contextlib.redirect_stdout(removed):
+                self.assertEqual(
+                    main(["worktree", "remove", "--root", str(root), "--name", listed_name]),
+                    0,
+                )
+            self.assertFalse((root / ".agent-flow" / "worktrees" / "feat-issue#110").exists())
+            # agent-flow가 그 브랜치를 만들었다는 증거가 없으므로 브랜치는 남는다.
+            self.assertIn("kept branch feat/issue#110", removed.getvalue())
+            branches = subprocess.run(
+                ("git", "branch", "--format=%(refname:short)"),
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout.split()
+            self.assertIn("feat/issue#110", branches)
+
+    def test_worktree_status_resolves_slug_dash_and_slash_names(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            _init_git_repo(root)
+            self.assertEqual(main(["worktree", "create", "--root", str(root), "--name", "slice-a"]), 0)
+            expected = root / ".agent-flow" / "worktrees" / "feat-slice-a"
+            for name in ("slice-a", "feat-slice-a", "feat/slice-a"):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(
+                        main(["worktree", "status", "--root", str(root), "--name", name]),
+                        0,
+                    )
+                self.assertEqual(
+                    output.getvalue().strip(),
+                    f"feat-slice-a feat/slice-a {expected} exists",
+                    name,
+                )
+
+    def test_worktree_remove_refuses_checkout_owned_by_another_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "leader"
+            root.mkdir()
+            _init_git_repo(root)
+            foreign = Path(temp_dir) / "foreign"
+            foreign.mkdir()
+            _init_git_repo(foreign)
+            planted = root / ".agent-flow" / "worktrees" / "feat-alien"
+            planted.parent.mkdir(parents=True)
+            subprocess.run(
+                ("git", "worktree", "add", "-q", "-b", "feat/alien", str(planted), "main"),
+                cwd=foreign,
+                check=True,
+            )
+
+            # --allow-unmerged로 병합 증명을 건너뛰어도 소유 증명은 남아 있어야 한다.
+            for argv in (
+                ["worktree", "remove", "--root", str(root), "--name", "feat-alien"],
+                ["worktree", "remove", "--root", str(root), "--name", "feat-alien", "--allow-unmerged"],
+            ):
+                error = io.StringIO()
+                with contextlib.redirect_stderr(error):
+                    self.assertEqual(main(argv), 2)
+                self.assertIn("refusing to remove", error.getvalue())
+                self.assertIn("feat-alien", error.getvalue())
+            self.assertTrue((planted / ".git").is_file())
+            foreign_branches = subprocess.run(
+                ("git", "branch", "--format=%(refname:short)"),
+                cwd=foreign,
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout.split()
+            self.assertIn("feat/alien", foreign_branches)
+
+    def test_worktree_remove_clears_registration_when_directory_is_gone(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_git_repo(root)
+            worktree = root / ".agent-flow" / "worktrees" / "feat-issue#110"
+            subprocess.run(
+                (
+                    "git",
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "feat/issue#110",
+                    ".agent-flow/worktrees/feat-issue#110/",
+                    "main",
+                ),
+                cwd=root,
+                check=True,
+            )
+            # 디렉터리만 사라지고 git 등록은 남은 상태. 디스크 스캔으로는 안 보인다.
+            shutil.rmtree(worktree)
+
+            listing = io.StringIO()
+            with contextlib.redirect_stdout(listing):
+                self.assertEqual(main(["worktree", "list", "--root", str(root)]), 0)
+            self.assertIn("feat-issue#110", listing.getvalue())
+            self.assertIn("stale", listing.getvalue())
+
+            self.assertEqual(
+                main(["worktree", "remove", "--root", str(root), "--name", "feat-issue#110"]),
+                0,
+            )
+            registered = subprocess.run(
+                ("git", "worktree", "list", "--porcelain"),
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout
+            self.assertNotIn("feat-issue#110", registered)
+
+    def test_worktree_remove_protects_uncommitted_work_in_direct_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_git_repo(root)
+            worktree = root / ".agent-flow" / "worktrees" / "feat-issue#110"
+            subprocess.run(
+                (
+                    "git",
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "feat/issue#110",
+                    ".agent-flow/worktrees/feat-issue#110/",
+                    "main",
+                ),
+                cwd=root,
+                check=True,
+            )
+            (worktree / "wip.txt").write_text("wip\n", encoding="utf-8")
+
+            error = io.StringIO()
+            with contextlib.redirect_stderr(error):
+                self.assertEqual(
+                    main(["worktree", "remove", "--root", str(root), "--name", "feat-issue#110"]),
+                    2,
+                )
+            self.assertIn("uncommitted", error.getvalue())
+            self.assertTrue(worktree.is_dir())
+
+            self.assertEqual(
+                main(
+                    [
+                        "worktree",
+                        "remove",
+                        "--root",
+                        str(root),
+                        "--name",
+                        "feat-issue#110",
+                        "--allow-unmerged",
+                    ]
+                ),
+                0,
+            )
+            self.assertFalse(worktree.exists())
+
     def test_guard_protected_branch_blocks_chained_commit(self) -> None:
         script = Path(__file__).resolve().parents[1] / "scripts" / "hooks" / "guard-protected-branch.sh"
         with tempfile.TemporaryDirectory() as temp_dir:

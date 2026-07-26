@@ -302,7 +302,11 @@ def test_removing_a_colliding_external_worktree_keeps_managed_metadata(tmp_path)
     _git("worktree", "add", "-q", "-b", "other/demo", str(external), "main", cwd=tmp_path)
 
     status = W.get_worktree_status(root=tmp_path, name=str(external))
-    assert status.name == managed.name, "이 테스트는 키가 실제로 충돌할 때만 의미가 있다"
+    # 충돌은 표시 이름이 아니라 런타임 메타데이터 **키**에서 난다. 전제를 고정해
+    # 두지 않으면 정규화 규칙이 바뀔 때 이 테스트가 조용히 무의미해진다.
+    assert W._feature_worktree_name(status.name) == W._feature_worktree_name(
+        managed.name
+    ), "이 테스트는 메타데이터 키가 실제로 충돌할 때만 의미가 있다"
     W.remove_worktree(root=tmp_path, status=status, allow_unmerged=True)
 
     assert not external.exists()
