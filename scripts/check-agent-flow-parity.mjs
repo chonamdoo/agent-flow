@@ -1321,6 +1321,25 @@ function readJsonSafe(pathName) {
   }
 }
 
+// Python이 무결성 검증에 쓰는 배치 계약을 그대로 읽는다. JS에 사본을 두면
+// 두 목록이 갈라지고, 갈라진 순간 parity가 지키는 대상이 사라진다.
+function pythonManagedHookPlacement() {
+  const source = fs.readFileSync(path.join(SOURCE_ROOT, "src", "agent_flow", "core", "hook_integrity.py"), "utf8");
+  const block = source.match(/MANAGED_HOOK_PLACEMENT = \{([\s\S]*?)\n\}/);
+  if (!block) {
+    throw new Error("MANAGED_HOOK_PLACEMENT not found in hook_integrity.py");
+  }
+  const placement = {};
+  const entry = /"([^"]+)":\s*\(\s*"([^"]*)",\s*\n?\s*"((?:[^"\\]|\\.)*)",?\s*\)/g;
+  for (const match of block[1].matchAll(entry)) {
+    placement[match[1]] = [match[2], match[3].replaceAll("\\\\", "\\")];
+  }
+  if (Object.keys(placement).length === 0) {
+    throw new Error("MANAGED_HOOK_PLACEMENT parsed empty");
+  }
+  return placement;
+}
+
 function assertInstalledHookParity(label, tempRoot) {
   const claude = readJsonSafe(path.join(tempRoot, ".claude", "settings.json"));
   const codex = readJsonSafe(path.join(tempRoot, ".Codex", "hooks.json"));
@@ -1330,64 +1349,37 @@ function assertInstalledHookParity(label, tempRoot) {
     failures.push(`${label} install missing claude, codex, or omp hook settings`);
     return;
   }
-  const managedScripts = [
-    "guard-protected-branch.sh",
-    "comment-checker.py",
-    "record-skill-read.py",
-    "record-command-run.py",
-    "show-phase-status.sh",
-  ];
-  // 관측 hook은 PostToolUse. PreToolUse에 실리면 관측 실패가 곧 도구 차단이다.
-  const observationScripts = ["record-skill-read.py", "record-command-run.py"];
+  // 이름 목록을 여기서 따로 들면 Python 계약과 갈라진다. 실제 등록을
+  // `MANAGED_HOOK_PLACEMENT`와 직접 대조한다 — 이벤트/matcher까지 포함해서.
+  // 이 대조가 Python의 hook_integrity가 믿는 계약을 실제 installer 출력에 묶는다.
+  const placement = pythonManagedHookPlacement();
+  const managedScripts = Object.keys(placement);
   for (const [host, settings] of [["claude", claude], ["codex", codex], ["codex-lower", lowerCodex]]) {
-    const preText = JSON.stringify(settings.hooks.PreToolUse ?? []);
-    for (const script of observationScripts) {
-      if (preText.includes(script)) {
-        failures.push(`${label} ${host} registers observation hook ${script} on PreToolUse`);
+    for (const [script, [event, matcher]] of Object.entries(placement)) {
+      const found = [];
+      for (const [registeredEvent, blocks] of Object.entries(settings.hooks ?? {})) {
+        for (const block of Array.isArray(blocks) ? blocks : []) {
+          const commands = (block.hooks ?? []).map((hook) => String(hook.command ?? ""));
+          if (commands.some((command) => command.includes(`/hooks/${script}`))) {
+            found.push([registeredEvent, String(block.matcher ?? "")]);
+          }
+        }
       }
-    }
-    const postText = JSON.stringify(settings.hooks.PostToolUse ?? []);
-    for (const script of observationScripts) {
-      if (!postText.includes(script)) {
-        failures.push(`${label} ${host} does not register observation hook ${script} on PostToolUse`);
-      }
-    }
-  }
-  for (const [host, settings] of [["claude", claude], ["codex", codex], ["codex-lower", lowerCodex]]) {
-    for (const event of ["PreToolUse", "PostToolUse", "Stop"]) {
-      const entries = settings.hooks[event];
-      if (!Array.isArray(entries) || entries.length === 0) {
-        failures.push(`${label} ${host} hooks missing ${event}`);
-      }
-    }
-    const text = JSON.stringify(settings);
-    for (const script of managedScripts) {
-      if (!text.includes(script)) {
+      if (found.length === 0) {
         failures.push(`${label} ${host} hooks missing ${script}`);
+        continue;
+      }
+      if (!found.some(([ev, mt]) => ev === event && mt === matcher)) {
+        const actual = found.map(([ev, mt]) => `${ev}/${mt || "(none)"}`).join(", ");
+        failures.push(
+          `${label} ${host} registers ${script} at ${actual}, python contract says ${event}/${matcher || "(none)"}`,
+        );
       }
     }
     const stopEntries = settings.hooks.Stop;
     if (Array.isArray(stopEntries) && stopEntries.length !== 1) {
       failures.push(`${label} ${host} Stop hook entries must stay 1 after reinstall, got ${stopEntries.length}`);
     }
-  }
-  // 기존 사용자 hook이 보존되면 managed entry가 index 0이 아닐 수 있으므로
-  // comment-checker.py를 가진 entry를 찾아 matcher를 검사한다.
-  const managedPostToolUseMatcher = (settings) =>
-    (settings.hooks.PostToolUse ?? []).find((entry) =>
-      (entry.hooks ?? []).some((hook) => String(hook.command ?? "").includes("comment-checker.py")),
-    )?.matcher ?? "";
-  const claudeMatcher = managedPostToolUseMatcher(claude);
-  if (!claudeMatcher.includes("apply_patch")) {
-    failures.push(`${label} claude PostToolUse matcher must cover apply_patch, got ${claudeMatcher}`);
-  }
-  const codexMatcher = managedPostToolUseMatcher(codex);
-  if (!codexMatcher.includes("apply_patch")) {
-    failures.push(`${label} codex PostToolUse matcher must cover apply_patch, got ${codexMatcher}`);
-  }
-  const lowerCodexMatcher = managedPostToolUseMatcher(lowerCodex);
-  if (!lowerCodexMatcher.includes("apply_patch")) {
-    failures.push(`${label} codex-lower PostToolUse matcher must cover apply_patch, got ${lowerCodexMatcher}`);
   }
   const ompExtensionText = fs.readFileSync(ompExtension, "utf8");
   for (const script of managedScripts) {

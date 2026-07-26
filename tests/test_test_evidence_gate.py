@@ -106,11 +106,21 @@ def test_red_passes_when_the_host_reports_no_exit_codes(tmp_path):
     assert missing_test_evidence_markers(root, "red", GATE, profile=PYTHON_PROFILE) == []
 
 
-def test_implement_fix_does_not_require_a_failing_exit_code(tmp_path):
-    """fix phase는 고친 뒤가 초록이라 실패 관측을 요구할 수 없다."""
+def test_implement_fix_with_only_passing_test_runs_is_blocked(tmp_path):
+    """반증: 고친 뒤 한 번만 돌리면 회귀 테스트가 그 버그를 잡는지 아무도 안 봤다."""
     root = _project(tmp_path)
     _observe(root, "pytest -q", exit_code=0)
-    assert missing_test_evidence_markers(root, "implement-fix", GATE, profile=PYTHON_PROFILE) == []
+    missing = missing_test_evidence_markers(root, "implement-fix", GATE, profile=PYTHON_PROFILE)
+    assert any(item.startswith("red-observed:") for item in missing)
+
+
+def test_implement_fix_passes_with_a_failing_run_before_the_fix(tmp_path):
+    root = _project(tmp_path)
+    _observe(root, "pytest -q tests/test_bug.py", exit_code=1, at=100.0)
+    _observe(root, "pytest -q tests/test_bug.py", exit_code=0, at=101.0)
+    assert (
+        missing_test_evidence_markers(root, "implement-fix", GATE, profile=PYTHON_PROFILE) == []
+    )
 
 
 def test_evidence_is_windowed_to_the_phase(tmp_path):

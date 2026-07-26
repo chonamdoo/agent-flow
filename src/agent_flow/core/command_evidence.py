@@ -180,12 +180,16 @@ def missing_test_evidence_markers(
             "test-run-evidence: verified (no test command was observed during this "
             "phase; the regression test has to actually run)"
         ]
-    if phase_id != "red":
-        return []
     reported = [run.exit_code for run in observed if run.exit_code is not None]
     if reported and all(code == 0 for code in reported):
-        return [
-            "red-observed: <failing exit code> (every observed test command exited 0; "
-            "a red phase has to leave a failing test behind)"
-        ]
+        # `implement-fix`도 같은 요구를 받는다. 고친 뒤 한 번만 돌리면 초록이라
+        # 통과하는데, 그러면 회귀 테스트가 그 버그를 정말 잡는지 아무도 안 봤다는
+        # 뜻이다 - `red-observed`가 자유 서술이 된다. bugfix workflow의 prompt도
+        # 수정 전 실패와 수정 후 통과를 같은 phase에서 요구한다.
+        detail = (
+            "a red phase has to leave a failing test behind"
+            if phase_id == "red"
+            else "run the regression test before the fix and watch it fail"
+        )
+        return [f"red-observed: <failing exit code> (every observed test command exited 0; {detail})"]
     return []

@@ -49,7 +49,9 @@ def _run_cli(args: list[str], cwd: Path, env_extra: dict | None = None):
 
 
 def _init_git_project(project: Path) -> None:
-    subprocess.run(["git", "init"], cwd=project, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "init", "-b", "main"], cwd=project, check=True, capture_output=True, text=True
+    )
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=project, check=True)
     subprocess.run(["git", "config", "user.name", "Test User"], cwd=project, check=True)
     (project / "README.md").write_text("test\n", encoding="utf-8")

@@ -1181,7 +1181,7 @@ class CliTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            subprocess.run(("git", "init", "-q"), cwd=root, check=True)
+            subprocess.run(("git", "init", "-q", "-b", "main"), cwd=root, check=True)
             untracked = root / "core" / "domain" / "chat" / "New.kt"
             untracked.parent.mkdir(parents=True, exist_ok=True)
             untracked.write_text("class New\n", encoding="utf-8")
@@ -8413,7 +8413,10 @@ if (codexContext !== undefined) {
 
 
 def _init_git_repo(root: Path) -> None:
-    subprocess.run(("git", "init", "-q"), cwd=root, check=True)
+    # `git init`의 기본 브랜치는 `init.defaultBranch`에 좌우된다. 이름을 고정하지
+    # 않으면 테스트가 실행 머신의 git 설정에 의존한다 — CI(ubuntu, master 기본)에서
+    # `worktree add ... main`이 exit 128로 죽었다.
+    subprocess.run(("git", "init", "-q", "-b", "main"), cwd=root, check=True)
     subprocess.run(("git", "config", "user.email", "test@example.com"), cwd=root, check=True)
     subprocess.run(("git", "config", "user.name", "Test User"), cwd=root, check=True)
     (root / "README.md").write_text("# test\n", encoding="utf-8")

@@ -19,6 +19,7 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 from agent_flow.core.hook_integrity import (
+    MANAGED_HOOK_PLACEMENT,
     MANAGED_HOOK_SCRIPTS,
     OBSERVATIONAL_HOOK_SCRIPTS,
     HookIntegrityError,
@@ -38,46 +39,18 @@ def _hook_command(root: Path, name: str) -> str:
 
 
 def _host_settings(root: Path) -> dict:
-    """install이 실제로 쓰는 배치. 관측 hook은 PostToolUse에 있다."""
-    return {
-        "hooks": {
-            "PreToolUse": [
-                {
-                    "matcher": "Bash",
-                    "hooks": [
-                        {"type": "command", "command": _hook_command(root, "guard-protected-branch.sh")}
-                    ],
-                }
-            ],
-            "PostToolUse": [
-                {
-                    "matcher": "^(Write|Edit)$",
-                    "hooks": [
-                        {"type": "command", "command": _hook_command(root, "comment-checker.py")}
-                    ],
-                },
-                {
-                    "matcher": "^(Read|read)$",
-                    "hooks": [
-                        {"type": "command", "command": _hook_command(root, "record-skill-read.py")}
-                    ],
-                },
-                {
-                    "matcher": "^(Bash|bash)$",
-                    "hooks": [
-                        {"type": "command", "command": _hook_command(root, "record-command-run.py")}
-                    ],
-                },
-            ],
-            "Stop": [
-                {
-                    "hooks": [
-                        {"type": "command", "command": _hook_command(root, "show-phase-status.sh")}
-                    ]
-                }
-            ],
-        }
-    }
+    """install이 실제로 쓰는 배치. 계약(`MANAGED_HOOK_PLACEMENT`)에서 그대로 짓는다.
+
+    손으로 적으면 계약과 갈라지고, 갈라진 fixture는 계약 위반을 정상으로
+    가르친다. 계약 자체는 parity가 실제 installer 출력과 대조한다.
+    """
+    hooks: dict[str, list[dict]] = {}
+    for script, (event, matcher) in MANAGED_HOOK_PLACEMENT.items():
+        block: dict = {"hooks": [{"type": "command", "command": _hook_command(root, script)}]}
+        if matcher:
+            block["matcher"] = matcher
+        hooks.setdefault(event, []).append(block)
+    return {"hooks": hooks}
 
 
 def _install(root: Path, *, hooks: bool = True) -> Path:
@@ -284,9 +257,66 @@ def test_observation_hook_on_pretooluse_is_detected(tmp_path, script):
 
     _rewrite_claude(tmp_path, promote)
     assert any(
-        "observation hook" in v and script in v and "PreToolUse" in v
+        "observation hooks must stay off PreToolUse" in v and script in v
         for v in _violations(tmp_path)
     )
+
+
+ENFORCEMENT_SCRIPTS = tuple(
+    script for script in MANAGED_HOOK_SCRIPTS if script not in OBSERVATIONAL_HOOK_SCRIPTS
+)
+
+
+@pytest.mark.parametrize("script", ENFORCEMENT_SCRIPTS)
+def test_enforcement_hook_moved_off_its_event_is_detected(tmp_path, script):
+    """이름만 대조하면 자리 바꾸기를 못 본다.
+
+    `guard-protected-branch.sh`를 PostToolUse로 옮기면 보호 브랜치 명령이
+    *실행된 뒤* hook이 불린다 — 등록은 남고 차단은 사라진다.
+    """
+    _install(tmp_path)
+    event, _ = MANAGED_HOOK_PLACEMENT[script]
+    elsewhere = "PostToolUse" if event != "PostToolUse" else "PreToolUse"
+
+    def move(payload):
+        blocks = payload["hooks"][event]
+        moved = [b for b in blocks if any(script in h["command"] for h in b["hooks"])]
+        payload["hooks"][event] = [b for b in blocks if b not in moved]
+        payload["hooks"].setdefault(elsewhere, []).extend(moved)
+
+    _rewrite_claude(tmp_path, move)
+    assert any(
+        script in v and f"registers {script} at {elsewhere}" in v for v in _violations(tmp_path)
+    )
+
+
+def test_enforcement_hook_with_a_dead_matcher_is_detected(tmp_path):
+    """matcher를 안 맞는 패턴으로 바꾸면 등록은 남고 hook은 영영 안 불린다."""
+    _install(tmp_path)
+
+    def neuter(payload):
+        for block in payload["hooks"]["PreToolUse"]:
+            if any("guard-protected-branch.sh" in h["command"] for h in block["hooks"]):
+                block["matcher"] = "^$"
+
+    _rewrite_claude(tmp_path, neuter)
+    assert any("expected PreToolUse/Bash" in v for v in _violations(tmp_path))
+
+
+def test_trailing_shell_syntax_on_a_managed_command_is_detected(tmp_path):
+    """`|| true`가 hook의 exit code를 덮는다. 이름만 떼어 보면 승인된 hook으로 보인다."""
+    _install(tmp_path)
+
+    def swallow(payload):
+        for block in payload["hooks"]["PreToolUse"]:
+            for hook in block["hooks"]:
+                if "guard-protected-branch.sh" in hook["command"]:
+                    hook["command"] = f"{hook['command']} || true"
+
+    _rewrite_claude(tmp_path, swallow)
+    violations = _violations(tmp_path)
+    assert any("extra shell syntax" in v for v in violations)
+    assert any("does not register guard-protected-branch.sh" in v for v in violations)
 
 
 def test_assert_raises_and_changes_nothing(tmp_path):
