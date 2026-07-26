@@ -65,6 +65,8 @@ Team Orchestration은 optional future module이다. current Personal Workflow와
 
 ## Artifact Policy
 
-- commit 가능: final summary artifact, `gate-results.json`, review decision.
+- 기본 설치는 `.agent-flow/`를 gitignore한다. 그 아래 run artifact는 커밋 대상이 아니다.
+- `.agent-flow/`를 추적하는 프로젝트에 한해 commit 가능: final summary artifact, `gate-results.json`, review decision.
 - 최소화/제외: raw logs, 반복 phase logs, local absolute path가 들어갈 수 있는 manifest.
-- manifest가 필요하면 repo-relative path만 저장한다.
+- artifact에는 repo-relative path만 저장한다. gate 출력의 절대 경로는 `write_gate_results`가 상대화한다.
+- context-lint는 gitignore되지 않은 artifact만 검사한다. ignore된 파일은 커밋될 수 없어 경로 누출 경로가 없다.

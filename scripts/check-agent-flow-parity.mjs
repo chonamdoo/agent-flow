@@ -381,6 +381,15 @@ assertContains("bin/agent-flow-kit.mjs", "src\", \"agent_flow");
 assertContains("src/agent_flow/core/gates.py", "\".agent-flow\" / \"runtime\" / \"python\"");
 assertContains("src/agent_flow/core/gates.py", "_resolve_gate_command");
 assertContains("scripts/check-context-docs.mjs", 'path.basename(SCRIPT_ROOT) === ".agent-flow"');
+// artifact 경로 정규화는 한 벌만 존재해야 한다. artifacts.py가 자기 규칙을 다시
+// 쓰면 command와 gate 출력이 서로 다른 경로를 기록한다.
+assertContains("src/agent_flow/core/gates.py", "def relativize_local_path");
+assertContains("src/agent_flow/core/artifacts.py", "relativize_local_paths");
+// 검사 범위는 두 구현이 같은 문장을 말해야 한다. 한쪽만 좁히면 소스와 설치본이
+// 서로 다른 파일을 red로 만든다.
+for (const rel of ["scripts/check-context-docs.mjs", "scripts/check-context-docs.ts"]) {
+  assertContains(rel, "check-ignore");
+}
 assertPythonContract("profile gate build/typecheck/lint order", `
 from agent_flow.cli import _profile_gate_commands
 

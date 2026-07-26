@@ -700,6 +700,7 @@ def main(argv: list[str] | None = None) -> int:
             write_gate_results(
                 run_dir=_resolve_project_path(run_base, args.run_dir),
                 results=results,
+                cwd=command_root,
             )
         failed = [result for result in results if not result.passed]
         required_results = [result for result in results if result.required]
