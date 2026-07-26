@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -976,3 +977,134 @@ def test_reinstall_does_not_duplicate_the_skill_index(tmp_path: Path, binary: st
     assert second == first
     assert second.count("<!-- agent-flow:skills:start -->") == 1
     assert second.count("[agent-flow skill index]") == 1
+
+
+def _workflow_backups(project: Path, stem: str) -> dict[str, str]:
+    workflows = project / ".agent-flow" / "workflows"
+    return {
+        path.name: path.read_text(encoding="utf-8")
+        for path in workflows.iterdir()
+        if path.name.startswith(f"{stem}.removed")
+    }
+
+
+def _kit_json(project: Path) -> dict:
+    return json.loads((project / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_pruned_custom_workflow_leaves_a_backup_and_says_where(tmp_path: Path, binary: str) -> None:
+    """반증: prune이 사용자가 만든 workflow를 경고도 사본도 없이 지웠다.
+
+    알리지 않으면 사용자는 자기 workflow가 사라진 것을 다음 run이 깨질 때 안다.
+    그때는 되돌릴 원본이 없다. 두 진입점이 같은 문장을 내야 한다 — 한쪽만
+    알리면 어느 CLI를 썼는지에 따라 손실이 조용해진다.
+    """
+    project = tmp_path / f"prune-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+
+    body = "id: my-custom\nphases: []\n"
+    custom = project / ".agent-flow" / "workflows" / "my-custom.yaml"
+    custom.write_text(body, encoding="utf-8")
+    result = _install_with(binary, project)
+    assert result.returncode == 0
+
+    assert not custom.exists()
+    backup = custom.with_name("my-custom.yaml.removed")
+    assert backup.read_text(encoding="utf-8") == body
+    # 백업이 `.yaml`로 끝나면 workflow 로더가 그것을 workflow로 되살려 읽는다.
+    assert not backup.name.endswith(".yaml")
+
+    expected = (
+        "  - pruned: .agent-flow/workflows/my-custom.yaml"
+        " (backup: .agent-flow/workflows/my-custom.yaml.removed)"
+    )
+    assert result.stdout.splitlines().count(expected) == 1, result.stdout
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_repeated_install_never_multiplies_workflow_backups(tmp_path: Path, binary: str) -> None:
+    """불변: 백업은 잃은 버전당 하나다.
+
+    `.removed`가 prune 대상에 남아 있으면 다음 install이 백업을 지운다. 반대로
+    매번 새 이름을 붙이면 재설치 횟수만큼 사본이 쌓인다. 둘 다 손실이다.
+    """
+    project = tmp_path / f"prune-idem-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+    custom = project / ".agent-flow" / "workflows" / "my-custom.yaml"
+
+    first = "id: my-custom\nphases: []\n"
+    for _ in range(3):
+        custom.write_text(first, encoding="utf-8")
+        assert _install_with(binary, project).returncode == 0
+    assert _workflow_backups(project, "my-custom.yaml") == {"my-custom.yaml.removed": first}
+
+    second = "id: my-custom\nphases: [edited]\n"
+    for _ in range(2):
+        custom.write_text(second, encoding="utf-8")
+        assert _install_with(binary, project).returncode == 0
+    digest = hashlib.sha256(second.encode("utf-8")).hexdigest()[:8]
+    assert _workflow_backups(project, "my-custom.yaml") == {
+        "my-custom.yaml.removed": first,
+        f"my-custom.yaml.removed.{digest}": second,
+    }
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_installed_at_is_the_first_install_and_updated_at_is_the_last(
+    tmp_path: Path, binary: str
+) -> None:
+    """불변: installed_at은 최초 설치, updated_at은 마지막 설치다.
+
+    두 진입점이 같은 필드에 다른 뜻을 담고 있었다 — kit은 보존하고 installer는
+    매번 덮었다. 그러면 "언제부터 쓰던 프로젝트인가"의 답이 어느 CLI를 썼는지에
+    따라 달라진다.
+    """
+    project = tmp_path / f"stamp-{binary}"
+    project.mkdir()
+
+    assert _install_with(binary, project).returncode == 0
+    stamps = [_kit_json(project)]
+    for args in ((), ("--force-managed",), ("--no-hooks",)):
+        assert _install_with(binary, project, *args).returncode == 0
+        stamps.append(_kit_json(project))
+
+    first = stamps[0]["installed_at"]
+    assert {stamp["installed_at"] for stamp in stamps} == {first}
+    updated = [stamp["updated_at"] for stamp in stamps]
+    assert updated == sorted(updated)
+    assert first <= updated[0] < updated[-1]
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_legacy_kit_json_keeps_installed_at_and_gains_updated_at(
+    tmp_path: Path, binary: str
+) -> None:
+    """반증: updated_at을 기존 installed_at으로 backfill하면 없는 기록을 지어낸다.
+
+    updated_at이 없던 설치본은 마지막 설치 시각을 모른다. 모르는 값을 꾸미는
+    대신 이번 install로 채운다. 읽을 수 없는 kit.json은 최초 설치와 같다.
+    """
+    project = tmp_path / f"legacy-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+
+    legacy = "2020-01-01T00:00:00.000Z"
+    kit_path = project / ".agent-flow" / "kit.json"
+    payload = _kit_json(project)
+    payload["installed_at"] = legacy
+    payload.pop("updated_at", None)
+    kit_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    assert _install_with(binary, project).returncode == 0
+    migrated = _kit_json(project)
+    assert migrated["installed_at"] == legacy
+    assert migrated["updated_at"] > legacy
+
+    kit_path.write_text("{ broken", encoding="utf-8")
+    assert _install_with(binary, project).returncode == 0
+    fresh = _kit_json(project)
+    assert fresh["installed_at"] > legacy
+    assert fresh["installed_at"] <= fresh["updated_at"]

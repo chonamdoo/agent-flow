@@ -109,6 +109,7 @@ function installProject() {
   fs.mkdirSync(path.join(agentFlowDir, "skills", "agent-flow"), { recursive: true });
   fs.mkdirSync(path.join(agentFlowDir, "skills", "full-feature-workflow"), { recursive: true });
 
+  const installTimestamp = new Date().toISOString();
   const payload = {
     install_scope: "project",
     profile,
@@ -116,7 +117,10 @@ function installProject() {
     selected_skills: installSelection.skillNames ? [...installSelection.skillNames].sort() : "all",
     root: ".",
     hooks: !hooksDisabled,
-    installed_at: existingPayload?.installed_at || new Date().toISOString(),
+    // installed_at은 최초 설치 시각이다. 매 install이 덮으면 "언제부터 쓰던
+    // 프로젝트인가"에 답할 기록이 사라진다. 마지막 install은 updated_at이 센다.
+    installed_at: typeof existingPayload?.installed_at === "string" ? existingPayload.installed_at : installTimestamp,
+    updated_at: installTimestamp,
   };
 
   writeManagedFile(path.join(agentFlowDir, "workflows", "full-feature.yaml"), fullFeatureWorkflowYaml());
@@ -127,6 +131,9 @@ function installProject() {
     new Set(),
     true,
     true,
+    new Set(),
+    null,
+    root,
   );
   const agentFlowSkill = agentFlowSkillMarkdown();
   writeManagedFile(path.join(agentFlowDir, "skills", "agent-flow", "SKILL.md"), agentFlowSkill);
@@ -1010,6 +1017,7 @@ function copyBundledDirIfMissingOrSame(
   pruneExtraneous = false,
   preservedExtraneousRootNames = new Set(),
   allowedRootDirs = null,
+  backupPrunedRoot = null,
 ) {
   if (!fs.existsSync(src)) {
     return;
@@ -1029,7 +1037,7 @@ function copyBundledDirIfMissingOrSame(
         removeManagedDirIfSame(srcPath, destPath, force);
         continue;
       }
-      copyBundledDirIfMissingOrSame(srcPath, destPath, force, excludedRootDirs, false, pruneExtraneous, preservedExtraneousRootNames, null);
+      copyBundledDirIfMissingOrSame(srcPath, destPath, force, excludedRootDirs, false, pruneExtraneous, preservedExtraneousRootNames, null, backupPrunedRoot);
       continue;
     }
     if (!entry.isFile()) {
@@ -1040,11 +1048,56 @@ function copyBundledDirIfMissingOrSame(
   }
   if (force && pruneExtraneous) {
     for (const entry of fs.readdirSync(dest, { withFileTypes: true })) {
-      if (!sourceNames.has(entry.name) && !(isRoot && preservedExtraneousRootNames.has(entry.name))) {
-        fs.rmSync(path.join(dest, entry.name), { recursive: true, force: true });
+      if (sourceNames.has(entry.name) || (isRoot && preservedExtraneousRootNames.has(entry.name))) {
+        continue;
       }
+      const target = path.join(dest, entry.name);
+      if (backupPrunedRoot) {
+        // 백업까지 prune하면 다음 install이 그것을 지운다. 그러면 복구 사본은
+        // 재설치 한 번만 버틴다.
+        if (isPruneBackupName(entry.name)) {
+          continue;
+        }
+        if (entry.isFile()) {
+          const backup = writePruneBackup(target);
+          console.log(
+            `${PRUNE_NOTICE_PREFIX}${path.relative(backupPrunedRoot, target)}` +
+              ` (backup: ${path.relative(backupPrunedRoot, backup)})`,
+          );
+        }
+      }
+      fs.rmSync(target, { recursive: true, force: true });
     }
   }
+}
+
+const PRUNE_BACKUP_SUFFIX = ".removed";
+const PRUNE_BACKUP_VERSIONED = /\.removed\.[0-9a-f]{8}$/;
+const PRUNE_NOTICE_PREFIX = "  - pruned: ";
+
+function isPruneBackupName(name) {
+  return name.endsWith(PRUNE_BACKUP_SUFFIX) || PRUNE_BACKUP_VERSIONED.test(name);
+}
+
+// prune은 source에 없는 파일을 지운다. 사용자가 직접 만든 workflow가 여기
+// 걸리면 경고도 사본도 없이 사라졌다. 같은 내용이 이미 백업돼 있으면 다시
+// 쓰지 않는다 — 재설치마다 사본이 불어나면 그것대로 잃는 것과 같다.
+function writePruneBackup(target) {
+  const content = fs.readFileSync(target);
+  const primary = `${target}${PRUNE_BACKUP_SUFFIX}`;
+  if (!fs.existsSync(primary)) {
+    fs.writeFileSync(primary, content);
+    return primary;
+  }
+  if (fs.readFileSync(primary).equals(content)) {
+    return primary;
+  }
+  const digest = crypto.createHash("sha256").update(content).digest("hex").slice(0, 8);
+  const versioned = `${primary}.${digest}`;
+  if (!fs.existsSync(versioned) || !fs.readFileSync(versioned).equals(content)) {
+    fs.writeFileSync(versioned, content);
+  }
+  return versioned;
 }
 
 function removeManagedDirIfSame(src, dest, force = false) {

@@ -310,6 +310,7 @@ function copyDir(
   pruneExtraneous = false,
   preservedExtraneousRootNames = new Set(),
   allowedRootDirs = null,
+  backupPrunedRoot = null,
 ) {
   // Recursive copy without overwriting user-modified files. If a file exists
   // at dest with different content, leave it (user customization wins) and
@@ -344,6 +345,7 @@ function copyDir(
         pruneExtraneous,
         preservedExtraneousRootNames,
         null,
+        backupPrunedRoot,
       );
       written += r.written;
       skipped += r.skipped;
@@ -363,12 +365,57 @@ function copyDir(
   }
   if (force && pruneExtraneous) {
     for (const entry of fs.readdirSync(dest, { withFileTypes: true })) {
-      if (!sourceNames.has(entry.name) && !(isRoot && preservedExtraneousRootNames.has(entry.name))) {
-        fs.rmSync(path.join(dest, entry.name), { recursive: true, force: true });
+      if (sourceNames.has(entry.name) || (isRoot && preservedExtraneousRootNames.has(entry.name))) {
+        continue;
       }
+      const target = path.join(dest, entry.name);
+      if (backupPrunedRoot) {
+        // 백업까지 prune하면 다음 install이 그것을 지운다. 그러면 복구 사본은
+        // 재설치 한 번만 버틴다.
+        if (isPruneBackupName(entry.name)) {
+          continue;
+        }
+        if (entry.isFile()) {
+          const backup = writePruneBackup(target);
+          console.log(
+            `${PRUNE_NOTICE_PREFIX}${path.relative(backupPrunedRoot, target)}` +
+              ` (backup: ${path.relative(backupPrunedRoot, backup)})`,
+          );
+        }
+      }
+      fs.rmSync(target, { recursive: true, force: true });
     }
   }
   return { written, skipped };
+}
+
+const PRUNE_BACKUP_SUFFIX = ".removed";
+const PRUNE_BACKUP_VERSIONED = /\.removed\.[0-9a-f]{8}$/;
+const PRUNE_NOTICE_PREFIX = "  - pruned: ";
+
+function isPruneBackupName(name) {
+  return name.endsWith(PRUNE_BACKUP_SUFFIX) || PRUNE_BACKUP_VERSIONED.test(name);
+}
+
+// prune은 source에 없는 파일을 지운다. 사용자가 직접 만든 workflow가 여기
+// 걸리면 경고도 사본도 없이 사라졌다. 같은 내용이 이미 백업돼 있으면 다시
+// 쓰지 않는다 — 재설치마다 사본이 불어나면 그것대로 잃는 것과 같다.
+function writePruneBackup(target) {
+  const content = fs.readFileSync(target);
+  const primary = `${target}${PRUNE_BACKUP_SUFFIX}`;
+  if (!fs.existsSync(primary)) {
+    fs.writeFileSync(primary, content);
+    return primary;
+  }
+  if (fs.readFileSync(primary).equals(content)) {
+    return primary;
+  }
+  const digest = crypto.createHash("sha256").update(content).digest("hex").slice(0, 8);
+  const versioned = `${primary}.${digest}`;
+  if (!fs.existsSync(versioned) || !fs.readFileSync(versioned).equals(content)) {
+    fs.writeFileSync(versioned, content);
+  }
+  return versioned;
 }
 
 function removeDirIfSame(src, dest, force = false) {
@@ -1673,6 +1720,13 @@ function runKitInstall() {
   const forwarded = INSTALL_ARGS.filter((arg) => arg !== "install");
   const args = [kitCli, "install", ...forwarded];
   const result = spawnSync(process.execPath, args, { cwd: PROJECT, encoding: "utf8" });
+  // kit.mjs의 stdout은 여기서 갇힌다. prune 알림만은 사용자가 잃은 파일과
+  // 복구 사본을 아는 유일한 통로라 그대로 다시 낸다.
+  for (const line of (result.stdout || "").split("\n")) {
+    if (line.startsWith(PRUNE_NOTICE_PREFIX)) {
+      console.log(line);
+    }
+  }
   if (result.status !== 0) {
     const detail = (result.stderr || result.stdout || String(result.error || "unknown error")).trim().split("\n")[0];
     console.error(`warning: agent-flow-kit install skipped (${detail}); .agent-flow prompts/bootstrap may be incomplete until \`agent-flow-kit install\` succeeds`);
@@ -1757,6 +1811,9 @@ function install() {
     true,
     true,
     true,
+    new Set(),
+    null,
+    PROJECT,
   );
   // kit이 배포하는 profile은 갱신한다. 사용자 편집을 보호한다고 두면 새 kit이
   // 추가한 필드(skill_sources 등)가 기존 설치본에 영영 안 닿는다. 다만 지우지는
@@ -1861,6 +1918,10 @@ function install() {
     }
   }
 
+  // 이 파일이 kit.mjs가 쓴 kit.json을 덮는다. 먼저 읽지 않으면 최초 설치
+  // 시각이 재설치마다 지금으로 리셋된다.
+  const existingKit = readJsonIfExists(path.join(AF_DIR, "kit.json"));
+  const installTimestamp = new Date().toISOString();
   const kitJson = {
     kit: "agent-flow",
     version: "0.1.0",
@@ -1872,7 +1933,10 @@ function install() {
     // 재설치마다 풀린다.
     hooks: !hooksDisabled,
     project_root: PROJECT,
-    installed_at: new Date().toISOString(),
+    // installed_at은 최초 설치 시각이다. 매 install이 덮으면 "언제부터 쓰던
+    // 프로젝트인가"에 답할 기록이 사라진다. 마지막 install은 updated_at이 센다.
+    installed_at: typeof existingKit?.installed_at === "string" ? existingKit.installed_at : installTimestamp,
+    updated_at: installTimestamp,
     skills_copied: skillsCopied,
     workflows_copied: workflowsCopied,
     profiles_copied: profilesCopied,
