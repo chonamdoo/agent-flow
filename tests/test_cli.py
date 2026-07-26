@@ -8411,6 +8411,172 @@ if (codexContext !== undefined) {
             self.assertEqual(task["status"], "in_progress")
             self.assertIn(task["owner"], {"worker-1", "worker-2"})
 
+    def test_gates_exit_code_fails_when_an_optional_gate_times_out(self) -> None:
+        """반증: exit code가 required만 보면 timeout된 검증이 CI에서 성공으로 읽힌다."""
+        from agent_flow.core.gates import GateResult
+
+        results = [
+            GateResult(
+                gate_id="required-ok",
+                command=("true",),
+                passed=True,
+                exit_code=0,
+                stdout="ok",
+                stderr="",
+            ),
+            GateResult(
+                gate_id="optional-slow",
+                command=("pytest", "-q"),
+                passed=False,
+                exit_code=None,
+                stdout="",
+                stderr="gate timed out after 600s",
+                required=False,
+                timed_out=True,
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            (root / ".agent-flow").mkdir(parents=True)
+            with mock.patch("agent_flow.cli.run_gates", return_value=results):
+                exit_code = main(["gates", "--root", str(root), "--profile", "generic"])
+        self.assertEqual(exit_code, 1)
+
+    def test_gates_relay_budget_exceeds_the_default_wrapper_timeout(self) -> None:
+        """반증: gates에 relay용 30초 상한을 걸면 프로파일 게이트가 끝나기 전에 죽는다.
+
+        이 저장소의 가장 비싼 게이트는 `pytest -q`로 실측 5분대다(context-lint는
+        0.02s). 상한이 살아 있으면 `agent-flow gates`는 어떤 프로젝트에서도 정상
+        종료할 수 없다. 실시간으로 기다리는 대신 wrapper가 계산하는 예산을 고정한다.
+        """
+        node = _node_executable()
+        kit = (
+            Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"
+        ).read_text(encoding="utf-8")
+        start = kit.index("const DEFAULT_RELAY_TIMEOUT_MS")
+        end = kit.index("\n}\n", kit.index("function relayTimeoutForSubcommand")) + 3
+        with tempfile.TemporaryDirectory() as temp_dir:
+            probe = Path(temp_dir) / "probe.mjs"
+            probe.write_text(
+                kit[start:end]
+                + "\nconsole.log(JSON.stringify({\n"
+                + '  default: DEFAULT_RELAY_TIMEOUT_MS,\n'
+                + '  gates: relayTimeoutForSubcommand("gates", []),\n'
+                + '  gatesCustom: relayTimeoutForSubcommand("gates", ["--timeout", "900"]),\n'
+                + '  gatesEquals: relayTimeoutForSubcommand("gates", ["--timeout=900"]),\n'
+                + '  gatesAbbrev: relayTimeoutForSubcommand("gates", ["--time", "900"]),\n'
+                + '  gatesJunk: relayTimeoutForSubcommand("gates", ["--timeout", "nope"]),\n'
+                + '  gatesZero: relayTimeoutForSubcommand("gates", ["--timeout", "0"]),\n'
+                + '  gatesRepeated: relayTimeoutForSubcommand(\n'
+                + '    "gates", ["--timeout", "100", "--timeout", "900"]\n'
+                + '  ),\n'
+                + '  lint: relayTimeoutForSubcommand("architecture-lint", []),\n'
+                + "}));\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                (node, str(probe)),
+                text=True,
+                capture_output=True,
+                timeout=60,
+                check=True,
+            )
+        budgets = json.loads(result.stdout)
+        self.assertEqual(budgets["default"], 30_000)
+        self.assertEqual(budgets["lint"], 30_000)
+        # 가장 비싼 게이트 하나가 5분대다. 전체 예산은 그보다 훨씬 커야 한다.
+        self.assertGreater(budgets["gates"], 30 * 60_000)
+        # argparse가 받는 세 형태 모두 같은 예산이어야 한다. 하나라도 놓치면
+        # 사용자가 올린 상한이 wrapper에 반영되지 않아 #119가 되돌아온다.
+        self.assertGreater(budgets["gatesCustom"], budgets["gates"])
+        self.assertEqual(budgets["gatesEquals"], budgets["gatesCustom"])
+        self.assertEqual(budgets["gatesAbbrev"], budgets["gatesCustom"])
+        # 해석 불가/0은 기본 상한으로 떨어진다.
+        self.assertEqual(budgets["gatesJunk"], budgets["gates"])
+        self.assertEqual(budgets["gatesZero"], budgets["gates"])
+        # argparse는 반복 플래그의 마지막 값을 쓴다.
+        self.assertEqual(budgets["gatesRepeated"], budgets["gatesCustom"])
+
+    def test_relay_timeout_reports_which_command_exceeded_it(self) -> None:
+        """짧은 상한이 걸린 경로는 무엇이 얼마나 걸려 끊겼는지 말해야 한다."""
+        node = _node_executable()
+        kit = (
+            Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"
+        ).read_text(encoding="utf-8")
+        start = kit.index("const DEFAULT_RELAY_TIMEOUT_MS")
+        end = kit.index(
+            "\n}\n",
+            kit.index("function safeSpawnSync(commandName, args, options = {})"),
+        ) + 3
+        with tempfile.TemporaryDirectory() as temp_dir:
+            probe = Path(temp_dir) / "probe.mjs"
+            probe.write_text(
+                'import { spawnSync } from "node:child_process";\n'
+                + kit[start:end]
+                + '\nconst result = safeSpawnSync("sleep", ["5"], { timeout: 200 });\n'
+                + "console.log(result.error?.message ?? 'no error');\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                (node, str(probe)),
+                text=True,
+                capture_output=True,
+                timeout=60,
+                check=True,
+            )
+            self.assertIn("sleep", result.stdout)
+            self.assertIn("200ms", result.stdout)
+
+    def test_gates_run_dir_lands_where_the_runner_reads_it(self) -> None:
+        """반증: run-dir을 checkout 기준으로 풀면 runner가 읽지 않는 자리에 결과가 남는다.
+
+        managed worktree run을 소유하는 것은 leader checkout도 worktree checkout도
+        아니라 worktree runtime root다. 손으로 만든 run 디렉터리로 검증하면 구현과
+        같은 가정을 반복하게 되므로 실제 `run`으로 만든다.
+        """
+        from agent_flow.core.gates import GateResult
+        from agent_flow.core.worktrees import worktree_runtime_root
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "project"
+            root.mkdir()
+            _init_git_repo(root)
+            self.assertEqual(main(["run", "slice", "--root", str(root)]), 0)
+            checkout = root / ".agent-flow" / "worktrees" / "feat-slice"
+            self.assertTrue((checkout / ".git").exists())
+            state_root = worktree_runtime_root(root=root, name="feat-slice")
+            run_dir = next((state_root / ".agent-flow" / "runs").iterdir())
+            relative = run_dir.relative_to(state_root)
+
+            results = [
+                GateResult(
+                    gate_id="lint",
+                    command=("true",),
+                    passed=True,
+                    exit_code=0,
+                    stdout="ok",
+                    stderr="",
+                )
+            ]
+            with mock.patch("agent_flow.cli.run_gates", return_value=results):
+                main(
+                    [
+                        "gates",
+                        "--root",
+                        str(root),
+                        "--profile",
+                        "generic",
+                        "--worktree",
+                        "feat-slice",
+                        "--run-dir",
+                        str(relative),
+                    ]
+                )
+
+            self.assertTrue((run_dir / "artifacts" / "gate-results.json").exists())
+            self.assertFalse((checkout / ".agent-flow" / "runs").exists())
+            self.assertFalse((root / ".agent-flow" / "runs").exists())
+
 
 def _init_git_repo(root: Path) -> None:
     # `git init`의 기본 브랜치는 `init.defaultBranch`에 좌우된다. 이름을 고정하지

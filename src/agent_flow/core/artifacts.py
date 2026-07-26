@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agent_flow.core.gates import GateResult
+from agent_flow.core.gates import GateResult, gate_results_timed_out
 from agent_flow.core.report import write_run_report
 from agent_flow.core.worktree_isolation import AGENT_FLOW_STATE_DIRS
 
@@ -25,11 +25,16 @@ def write_prompt(*, root: Path, run_dir: Path, stage_id: str, content: str) -> P
 
 
 def write_gate_results(*, run_dir: Path, results: list[GateResult]) -> Path:
-    passed = all(result.passed or not result.required for result in results)
+    # timeout은 "optional 실패"가 아니라 "판정 불가"다. required만 세면 검증이
+    # 끊긴 실행이 green으로 기록되고, 그 상태를 읽는 shell/CI가 성공으로 본다.
+    timed_out = gate_results_timed_out(results)
+    passed = not timed_out and all(
+        result.passed or not result.required for result in results
+    )
     serialized_results = [_gate_result_payload(result) for result in results]
     payload = {
         "passed": passed,
-        "status": "green" if passed else "request-changes",
+        "status": "error" if timed_out else "green" if passed else "request-changes",
         "results": serialized_results,
     }
     # 출처 표식. runner는 이 값이 run meta의 nonce와 같을 때만 green으로 라우팅한다.
@@ -62,6 +67,7 @@ def _gate_result_payload(result: GateResult) -> dict[str, object]:
         "passed": result.passed,
         "required": result.required,
         "exit_code": result.exit_code,
+        "timed_out": result.timed_out,
         "stdout": result.stdout,
         "stderr": result.stderr,
     }
@@ -168,10 +174,18 @@ def _now() -> str:
 
 
 def run_gate_nonce(run_dir: Path) -> str:
-    """run meta에 심긴 gate nonce. 없으면 빈 문자열(구버전 run이나 직접 호출)."""
-    try:
-        payload = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return ""
-    nonce = payload.get("gate_nonce") if isinstance(payload, dict) else None
-    return nonce if isinstance(nonce, str) else ""
+    """run meta에 심긴 gate nonce. 없으면 빈 문자열(구버전 run이나 직접 호출).
+
+    Python runner는 `meta.json`에, Node runner는 `manifest.json`에 쓴다. 한쪽만
+    보면 다른 쪽 runner가 연 run에서 gates 산출물이 출처 없이 남고, 그 run은
+    green으로 라우팅되지 못한다.
+    """
+    for name in ("meta.json", "manifest.json"):
+        try:
+            payload = json.loads((run_dir / name).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        nonce = payload.get("gate_nonce") if isinstance(payload, dict) else None
+        if isinstance(nonce, str) and nonce:
+            return nonce
+    return ""

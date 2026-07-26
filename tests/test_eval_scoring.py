@@ -3171,3 +3171,69 @@ def test_eval_config_manifests_exclude_oracle_and_result_artifacts(tmp_path):
             for content in files.values()
         )
         assert not any(marker in rendered for marker in forbidden_text)
+
+
+def test_layer_boundary_oracle_rejects_inherited_sibling_usecase(tmp_path):
+    checkout = """from shop.core.domain.get_cart_total import GetCartTotalUseCase
+from shop.core.domain.repositories import CartRepository, DiscountRepository
+
+
+class GetCheckoutTotalUseCase(GetCartTotalUseCase):
+    def __init__(
+        self,
+        cart_repository: CartRepository,
+        discount_repository: DiscountRepository,
+    ) -> None:
+        super().__init__(cart_repository)
+        self._discount_repository = discount_repository
+
+    def __call__(self) -> int:
+        total_cents = super().__call__()
+        discount_percent = self._discount_repository.get_active_percent()
+        return max(0, total_cents * (100 - discount_percent) // 100)
+"""
+
+    result = _score_layer(tmp_path, checkout, full=True)
+
+    assert result["behavior"] is True
+    assert result["norm"] is False
+    assert (
+        "usecase-reference:shop.core.domain.get_cart_total.GetCartTotalUseCase"
+        in result["norm_reasons"]
+    )
+
+
+def test_layer_boundary_oracle_allows_abstract_usecase_base(tmp_path):
+    base = """from abc import ABC, abstractmethod
+
+
+class CheckoutUseCase(ABC):
+    @abstractmethod
+    def __call__(self) -> int: ...
+"""
+    checkout = """from shop.core.domain.checkout_base import CheckoutUseCase
+from shop.core.domain.checkout_policy import checkout_total
+from shop.core.domain.repositories import CartRepository, DiscountRepository
+
+
+class GetCheckoutTotalUseCase(CheckoutUseCase):
+    def __init__(
+        self,
+        cart_repository: CartRepository,
+        discount_repository: DiscountRepository,
+    ) -> None:
+        self._cart_repository = cart_repository
+        self._discount_repository = discount_repository
+
+    def __call__(self) -> int:
+        return checkout_total(
+            self._cart_repository.get_total_cents(),
+            self._discount_repository.get_active_percent(),
+        )
+"""
+
+    assert _score_layer(
+        tmp_path,
+        checkout,
+        domain_sources={"checkout_base.py": base},
+    ) == {"behavior": True, "norm": True}
