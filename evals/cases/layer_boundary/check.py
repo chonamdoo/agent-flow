@@ -238,22 +238,29 @@ def _architecture_violations(project: Path) -> list[str]:
         modules,
     )
     target_owners = _class_ancestors(target_classes, classes, modules)
-    sibling_usecases = _concrete_usecases(classes, modules) - target_owners
+    concrete_usecases = _concrete_usecases(classes, modules)
+    # 상속으로 끌어온 concrete sibling use case는 target 쪽 클래스가 아니라 위반이다.
+    # 추상 base나 Protocol 조상은 concrete가 아니므로 여기 걸리지 않는다.
+    inherited_siblings = (target_owners - target_classes) & concrete_usecases
+    target_scope_owners = target_owners - inherited_siblings
+    sibling_usecases = concrete_usecases - target_scope_owners
+    for sibling in inherited_siblings:
+        violations.add(f"usecase-reference:{sibling}")
     for module_name in {
         classes[target_owner][0]
-        for target_owner in target_owners
+        for target_owner in target_scope_owners
     }:
         for sibling in _sibling_references(
             modules[module_name],
             modules,
             sibling_usecases,
-            target_owners,
+            target_scope_owners,
         ):
             violations.add(f"usecase-reference:{sibling}")
     for sibling in _transitive_target_references(
         modules,
         sibling_usecases,
-        target_owners,
+        target_scope_owners,
     ):
         violations.add(f"usecase-reference:{sibling}")
     for sibling in _target_injections(

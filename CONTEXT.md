@@ -1,6 +1,6 @@
 # Agent Flow Hot Context
 
-항상 로드되는 hot context다. 200줄 미만 유지. 긴 도메인/워크플로우 설명은 `.Codex/rules/context/`에서 phase별로만 읽는다.
+항상 로드되는 hot context다. 긴 도메인/워크플로우 설명은 `.Codex/rules/context/`에서 phase별로만 읽는다.
 
 ## 작업 원칙
 
