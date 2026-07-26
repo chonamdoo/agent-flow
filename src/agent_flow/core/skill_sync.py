@@ -86,9 +86,14 @@ def parse_skill_sources(profile: dict | None) -> tuple[SkillSource, ...]:
 
 
 def sync_skill_sources(
-    sources: Sequence[SkillSource], *, env: dict[str, str] | None = None
+    sources: Sequence[SkillSource], *, env: dict[str, str] | None = None, refresh: bool = False
 ) -> list[SyncResult]:
-    """fetch 종류만 실제로 가져온다. 이미 핀이 맞으면 네트워크를 쓰지 않는다."""
+    """fetch 종류만 실제로 가져온다. 이미 핀이 맞으면 네트워크를 쓰지 않는다.
+
+    `refresh=True`면 캐시를 버리고 다시 받는다. 이게 없으면 `main` 같은 움직이는
+    ref가 최초 1회 받은 커밋에 영구히 굳는다 — 머신마다 다른, 보이지 않는 핀이
+    된다. 실측으로 캐시가 upstream보다 뒤처진 상태가 그대로 남아 있었다.
+    """
     results: list[SyncResult] = []
     for source in sources:
         if source.kind != "fetch":
@@ -96,8 +101,18 @@ def sync_skill_sources(
                 SyncResult(source_id=source.id, status="skipped", detail=source.install_hint)
             )
             continue
-        results.append(_fetch_source(source, env=env))
+        results.append(_fetch_source(source, env=env, refresh=refresh))
     return results
+
+
+def cached_source_sha(source: SkillSource, *, env: dict[str, str] | None = None) -> str:
+    """캐시가 어느 커밋에 굳어 있는지. 기록이 없으면 빈 문자열이다."""
+    try:
+        marker = (_checkout_path(source, env=env) / _READY_MARKER).read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    parts = marker.split()
+    return parts[1] if len(parts) > 1 else ""
 
 
 def fetched_source_roots(
@@ -114,7 +129,9 @@ def fetched_source_roots(
     return templates
 
 
-def _fetch_source(source: SkillSource, *, env: dict[str, str] | None) -> SyncResult:
+def _fetch_source(
+    source: SkillSource, *, env: dict[str, str] | None, refresh: bool = False
+) -> SyncResult:
     if not source.url or not source.ref:
         return SyncResult(
             source_id=source.id, status="failed", detail="fetch source needs both url and ref"
@@ -124,8 +141,12 @@ def _fetch_source(source: SkillSource, *, env: dict[str, str] | None) -> SyncRes
     checkout = _checkout_path(source, env=env)
     # 완료 표식이 있어야 cached다. clone은 됐는데 checkout이 실패한 디렉터리를
     # `.git` 존재만으로 정상 취급하면 잘못된 트리가 영구히 굳는다.
-    if (checkout / ".git").exists() and (checkout / _READY_MARKER).exists():
-        return SyncResult(source_id=source.id, status="cached", detail=str(checkout))
+    if not refresh and (checkout / ".git").exists() and (checkout / _READY_MARKER).exists():
+        return SyncResult(
+            source_id=source.id,
+            status="cached",
+            detail=f"{checkout} {cached_source_sha(source, env=env)}".rstrip(),
+        )
     if checkout.exists():
         shutil.rmtree(checkout, ignore_errors=True)
     checkout.parent.mkdir(parents=True, exist_ok=True)
@@ -143,8 +164,14 @@ def _fetch_source(source: SkillSource, *, env: dict[str, str] | None) -> SyncRes
         return SyncResult(
             source_id=source.id, status="failed", detail=checkout_ref.stderr.strip()
         )
-    (checkout / _READY_MARKER).write_text(source.ref + "\n", encoding="utf-8")
-    return SyncResult(source_id=source.id, status="fetched", detail=str(checkout))
+    # 어느 커밋을 받았는지 기록한다. ref만 적으면 `main`이 움직여도 캐시가
+    # 무엇에 굳었는지 알 길이 없어서 stale을 눈으로도 확인하지 못한다.
+    resolved = run_safe_command(
+        ["git", "-C", str(checkout), "rev-parse", "HEAD"], timeout_s=30
+    )
+    sha = resolved.stdout.strip() if resolved.ok else ""
+    (checkout / _READY_MARKER).write_text(f"{source.ref} {sha}\n".rstrip() + "\n", encoding="utf-8")
+    return SyncResult(source_id=source.id, status="fetched", detail=f"{checkout} {sha}".rstrip())
 
 
 def _is_safe_ref(ref: str) -> bool:

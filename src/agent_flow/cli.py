@@ -238,6 +238,9 @@ def main(argv: list[str] | None = None) -> int:
         sub = skills_subparsers.add_parser(name)
         sub.add_argument("--root", default=".")
         sub.add_argument("--profile")
+        if name == "sync":
+            # 갱신 경로가 없으면 움직이는 ref가 최초 1회 받은 커밋에 영구히 굳는다.
+            sub.add_argument("--refresh", action="store_true")
         if name != "sync":
             sub.add_argument("--phase", required=True)
             sub.add_argument("--workflow", default="default")
@@ -1838,7 +1841,7 @@ def _run_skills_command(args: argparse.Namespace, root: Path) -> int:
             if not sources:
                 print(f"{profile_id}: no skill_sources declared")
                 continue
-            for result in sync_skill_sources(sources):
+            for result in sync_skill_sources(sources, refresh=bool(getattr(args, "refresh", False))):
                 print(f"{profile_id}: {result.source_id} {result.status} {result.detail}".rstrip())
                 if result.status == "failed":
                     exit_code = 1

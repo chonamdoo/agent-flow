@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -829,3 +830,79 @@ def test_install_output_satisfies_the_run_start_hook_gate(
     assert reports[0].recorded is True
     assert reports[0].expected_enabled is (not hooks_flag)
     assert reports[0].violations == ()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_broken_host_skill_symlink_does_not_brick_install(tmp_path: Path, binary: str) -> None:
+    """반증: `existsSync`는 심링크를 따라가 끊어진 링크에 false를 준다.
+
+    그러면 stale link 정리 분기를 못 타고 링크 생성이 `EEXIST`로 죽어 install이
+    exit 1로 끝난다. profile을 좁히거나 `--skills` 선택을 바꾸면 이전 선택의 host
+    링크가 끊긴 채 남으므로 실제로 밟는 경로다.
+    """
+    project = tmp_path / "broken-link"
+    project.mkdir()
+    first = subprocess.run(
+        (_node(), str(KIT_ROOT / "bin" / binary), "install"),
+        cwd=project, text=True, capture_output=True, check=False,
+    )
+    assert first.returncode == 0, first.stderr
+    links = sorted(
+        entry for entry in (project / ".claude" / "skills").iterdir() if entry.is_symlink()
+    )
+    if not links:
+        pytest.skip("this platform copied instead of symlinking host skills")
+
+    dangling = links[0]
+    target = Path(os.readlink(dangling))
+    dangling.unlink()
+    dangling.symlink_to(project / "gone" / dangling.name)
+    assert dangling.is_symlink() and not dangling.exists()
+
+    result = subprocess.run(
+        (_node(), str(KIT_ROOT / "bin" / binary), "install"),
+        cwd=project, text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (dangling / "SKILL.md").is_file(), f"stale link was not repaired (was {target})"
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_installers_never_probe_a_link_path_with_existssync(binary: str) -> None:
+    """`existsSync`는 심링크를 따라가므로 끊어진 링크에 false를 준다.
+
+    행위 테스트는 kit 경로만 닿는다 — installer는 kit에 위임한 뒤 이미 고쳐진
+    링크를 보기 때문이다. 그래서 두 진입점 모두에 소스 계약으로 못박는다.
+    """
+    source = (KIT_ROOT / "bin" / binary).read_text(encoding="utf-8")
+    assert "lstatIfExists(destDir)" in source
+    assert "fs.existsSync(destDir)" not in source
+
+
+
+def test_cross_tree_install_keeps_the_targets_tracked_scripts(tmp_path: Path) -> None:
+    """반증: worktree의 kit으로 leader를 install하면 leader의 추적 소스가 삭제됐다.
+
+    실측으로 `git status`에 `D scripts/*` 7개가 남았다. 관리 사본을 걷어내는 것이
+    목적이지 사용자 소스를 지우는 것이 아니다.
+    """
+    project = tmp_path / "leader"
+    project.mkdir()
+    shutil.copytree(KIT_ROOT / "scripts", project / "scripts")
+    for command in (
+        ["git", "init", "-b", "main"],
+        ["git", "config", "user.email", "t@t"],
+        ["git", "config", "user.name", "t"],
+        ["git", "add", "-A"],
+        ["git", "commit", "-m", "track scripts"],
+    ):
+        subprocess.run(command, cwd=project, check=True, capture_output=True)
+
+    result = _install(project)
+    assert result.returncode == 0, result.stderr
+    assert (project / "scripts").is_dir()
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "--", "scripts"],
+        cwd=project, text=True, capture_output=True, check=True,
+    ).stdout
+    assert " D " not in status and not status.startswith("D "), status

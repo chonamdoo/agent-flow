@@ -234,13 +234,27 @@ def discover_skill_catalog(
     return result
 
 
-def skill_prompt_block(project_root: Path, resolution: SkillResolution) -> str:
-    """resolver 결과만 프롬프트에 넣는다. profile YAML 전량 dump를 대체한다."""
+def skill_prompt_block(
+    project_root: Path, resolution: SkillResolution, *, enforced: bool = True
+) -> str:
+    """resolver 결과만 프롬프트에 넣는다. profile YAML 전량 dump를 대체한다.
+
+    `enforced`는 이 phase에 실제로 read gate가 걸리는지다. 게이트 없는 phase에서
+    "Read every one of these"는 거짓 약속이고, 거짓 약속은 지켜지는 다른 게이트의
+    신뢰까지 깎는다. 강제를 늘리는 대신 문구를 사실대로 적는다.
+    """
     if not resolution.required and not resolution.optional:
         return ""
     lines = ["\n## Required skills for this phase", ""]
     if resolution.required:
-        lines.append("Read every one of these before writing or judging code:")
+        lines.append(
+            "Read every one of these before writing or judging code. The completion "
+            "gate blocks this phase when a listed skill exists on disk and was never "
+            "opened during it:"
+            if enforced
+            else "This phase has no skill read gate. Nothing below is machine-checked "
+            "— read the ones that actually apply to the change:"
+        )
         lines.append("")
         for skill in resolution.required:
             if skill.exists:

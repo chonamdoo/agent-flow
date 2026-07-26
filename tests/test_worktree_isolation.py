@@ -992,3 +992,64 @@ def test_tripwire_ignores_the_folded_agent_flow_record(tmp_path):
     runs.mkdir(parents=True)
     (runs / "meta.json").write_text("{}\n", encoding="utf-8")
     W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        ".venv/bin/agent-flow",
+        "node_modules/.bin/tsc",
+        ".claude/settings.json",
+        ".claude/hooks/pre.sh",
+        ".Codex/hooks.json",
+        ".codex/hooks.json",
+        ".omp/extensions/agent-flow-hooks.ts",
+    ],
+)
+def test_tripwire_detects_execution_surface_replacement(tmp_path, relative):
+    """불변: 다음 phase가 **실행할** 것을 바꾸면 잡힌다.
+
+    실측 BLIND였던 자리다. `command -v agent-flow`가 `.venv/bin/agent-flow`이고,
+    host의 PreToolUse 등록 파일은 이 저장소에서 하나도 tracked가 아니다.
+    """
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("original\n", encoding="utf-8")
+    (tmp_path / ".gitignore").write_text(
+        ".agent-flow/\n.venv/\nnode_modules/\n.claude/\n.Codex/\n.codex/\n.omp/\n",
+        encoding="utf-8",
+    )
+    _git("add", ".gitignore", cwd=tmp_path)
+    _init_repo(tmp_path)
+    plan = W.plan_worktree(root=tmp_path, name="exec")
+    W.create_worktree(root=tmp_path, plan=plan)
+    before = capture_leader_snapshot(tmp_path)
+
+    target.write_text("replaced by the worker\n", encoding="utf-8")
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
+def test_tripwire_ignores_agent_flow_runtime_state_in_tracked_diff(tmp_path):
+    """반증: `.agent-flow/`가 git-tracked인 프로젝트에서 완료된 task가 failed로 되돌아갔다.
+
+    `_status_records`에만 제외가 걸려 있고 `git diff HEAD`에는 pathspec이 없어서,
+    agent-flow 자신의 `claim_task` 상태 쓰기가 tracked-content digest를 바꿨다.
+    """
+    _init_repo(tmp_path)
+    state_file = tmp_path / ".agent-flow" / "state" / "team.json"
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    state_file.write_text('{"tasks": []}\n', encoding="utf-8")
+    _git("add", "-A", cwd=tmp_path)
+    _git("commit", "-m", "track agent-flow state", cwd=tmp_path)
+    plan = W.plan_worktree(root=tmp_path, name="state")
+    W.create_worktree(root=tmp_path, plan=plan)
+    before = capture_leader_snapshot(tmp_path)
+
+    state_file.write_text('{"tasks": [{"id": "T1", "status": "in_progress"}]}\n', encoding="utf-8")
+    W_ISO.assert_leader_unchanged(tmp_path, before)
+
+    # 무장 해제가 아니다. 같은 실행에서 진짜 소스 변경은 여전히 잡힌다.
+    (tmp_path / "f.txt").write_text("worker leak\n", encoding="utf-8")
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, before)

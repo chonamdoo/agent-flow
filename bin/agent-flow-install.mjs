@@ -1475,8 +1475,12 @@ function linkProjectSkill(skill, host, previousIndex, forceManaged = false) {
   ensureChildPath(hostRoot, destDir);
   const destSkill = path.join(destDir, "SKILL.md");
   const previousHash = previousSkillHash(previousIndex, skill.name);
-  if (fs.existsSync(destDir)) {
-    const stat = fs.lstatSync(destDir);
+  // `existsSync`는 심링크를 **따라가서** 끊어진 링크에 false를 준다. 그러면 stale
+  // link 정리 분기를 못 타고 곧바로 링크 생성이 EEXIST로 죽는다. profile을 좁히거나
+  // `--skills` 선택을 바꾸면 이전 선택의 host 링크가 끊긴 채 남으므로 실제로 밟는다.
+  // lstat은 링크 자체를 보므로 끊어진 링크도 정리 대상으로 잡힌다.
+  const stat = lstatIfExists(destDir);
+  if (stat) {
     if (forceManaged) {
       if (stat.isSymbolicLink()) fs.unlinkSync(destDir);
       else fs.rmSync(destDir, { recursive: true, force: true });

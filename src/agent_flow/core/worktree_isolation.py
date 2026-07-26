@@ -261,6 +261,26 @@ _RUNTIME_WRITE_PATHS = tuple(
     f"{_AGENT_FLOW_PREFIX}/skills-read.jsonl",
     f"{_AGENT_FLOW_PREFIX}/commands-run.jsonl",
 )
+# 심층 스캔에 함께 넣는 **실행 표면**. 다음 phase가 실제로 실행하는 바이너리와
+# host의 hook 등록 파일이다. `--ignored=matching`은 ignore된 디렉터리를 한 줄로
+# 접어서 그 안쪽 교체가 통째로 안 보인다. 실측 BLIND였던 자리를 그대로 편다:
+# `.venv/bin/agent-flow` 덮어쓰기, `node_modules/.bin/*`, `.claude/hooks/pre.sh`.
+#
+# 전면 확대가 아니라 화이트리스트인 이유는 성능이다. `node_modules` 전체를
+# phase당 두 번 해시하면 tripwire가 런보다 비싸진다.
+#
+# host hook 등록 파일을 빼면 안 된다 — 워커가 leader의 `.claude/settings.json`을
+# 갈아끼워 **다음 phase의 권한 판정 자리 자체**를 무탐지로 바꿀 수 있다.
+# 런 *시작 전*의 오염은 이걸로 안 보인다. 그건 `hook_integrity`가 본다.
+_EXEC_SURFACE_PATHS = (
+    ".venv/bin",
+    "node_modules/.bin",
+    ".claude/settings.json",
+    ".claude/hooks",
+    ".Codex/hooks.json",
+    ".codex/hooks.json",
+    ".omp/extensions",
+)
 _GENERATED_PATH_SEGMENTS = ("__pycache__",)
 _TRIPWIRE_TIMEOUT_S = 120
 # porcelain v1 상태 문자. 레코드 앞 두 글자가 전부 여기 속할 때만 경로 접두어로 본다.
@@ -386,12 +406,17 @@ def _leader_status(leader_root) -> str:
     **ignored 파일의 내용 교체**가 보이지 않는다. 그래서 tracked 변경은
     ``diff HEAD``의 내용 해시로, untracked/ignored 파일은 내용 해시로 함께
     찍는다. mtime은 쓰지 않는다 — 같은 바이트로 다시 저장하기만 해도 바뀐다.
+
+    ``.agent-flow/``만으로는 부족하다. 워커가 다음 phase가 **실행할** 것을 바꾸는
+    자리가 밖에도 있다 — `.venv/bin`, `node_modules/.bin`, 그리고 host의 hook
+    등록 파일. 그래서 `_EXEC_SURFACE_PATHS`를 같은 심층 스캔에 함께 넣는다.
     """
     entries = dict(_status_records(leader_root, ("--ignored=matching",)))
     entries.update(
         _status_records(
             leader_root,
             ("-uall", "--ignored=traditional", "--", _AGENT_FLOW_PREFIX)
+            + _EXEC_SURFACE_PATHS
             + tuple(f":(exclude){path}" for path in _RUNTIME_WRITE_PATHS),
         )
     )
@@ -415,7 +440,18 @@ def _tracked_content_digest(leader_root) -> str:
     읽지 못하면 sentinel을 남기지 않고 raise한다. sentinel은 다음 스냅샷과
     무조건 어긋나 오탐이 되고, 오탐은 완료된 산출물을 버리게 만든다.
     """
-    result = git_safe("diff", "HEAD", "--no-color", cwd=leader_root, timeout_s=_TRIPWIRE_TIMEOUT_S)
+    # pathspec이 없으면 agent-flow 자신의 상태 쓰기가 digest를 바꾼다. `.agent-flow/`가
+    # git-tracked인 프로젝트에서 `claim_task` 한 번에 완료된 task가 failed로 되돌아갔다.
+    result = git_safe(
+        "diff",
+        "HEAD",
+        "--no-color",
+        "--",
+        ".",
+        *(f":(exclude){path}" for path in _RUNTIME_WRITE_PATHS),
+        cwd=leader_root,
+        timeout_s=_TRIPWIRE_TIMEOUT_S,
+    )
     if not result.ok:
         raise WorktreeIsolationError(
             f"cannot read leader tracked content for the isolation tripwire in "

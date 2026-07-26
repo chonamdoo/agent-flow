@@ -177,10 +177,12 @@ def local_skill_prompt_block(
         changed_files=changed_files,
         task_text=task_text,
     )
-    block = skill_prompt_block(project_root, resolution)
+    # 강제 지점과 같은 조건을 쓴다. 둘이 갈라지면 프롬프트가 다시 거짓말한다.
+    enforced = phase_id in CODE_PHASES
+    block = skill_prompt_block(project_root, resolution, enforced=enforced)
     if not block:
         return ""
-    return block + _marker_instruction(resolution)
+    return block + _marker_instruction(resolution, enforced=enforced)
 
 
 def missing_local_skill_markers(
@@ -320,9 +322,11 @@ def record_skill_read(project_root: Path, skill_path: Path) -> None:
         handle.write(entry + "\n")
 
 
-def _marker_instruction(resolution: SkillResolution) -> str:
+def _marker_instruction(resolution: SkillResolution, *, enforced: bool = True) -> str:
     expected = ", ".join(skill.name for skill in resolution.available_required) or "n/a"
     availability = "degraded" if resolution.missing else "pass"
+    if not enforced:
+        return ""
     return "\n".join(
         [
             "",

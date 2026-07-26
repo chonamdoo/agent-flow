@@ -50,6 +50,7 @@ class GenericAdapter(Adapter):
                 if getattr(phase, "multi_review", False):
                     artifact.write_text(
                         f"# {phase.id}\n\n"
+                        f"<!-- {STUB_SENTINEL} -->\n\n"
                         "## Reviewer 1\n"
                         "reviewer-source: sub-agent\n"
                         "verdict: approve\n\n"

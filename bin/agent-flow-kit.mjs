@@ -1050,10 +1050,26 @@ function removeManagedDirIfSame(src, dest, force = false) {
   if (!fs.existsSync(dest)) {
     return;
   }
+  // 대상이 git이 추적하는 소스면 건드리지 않는다. worktree의 kit으로 leader를
+  // install하면 `root !== KIT_ROOT`라 이 경로가 돌고, leader의 추적 중인
+  // `scripts/`가 통째로 삭제됐다(실측: `git status`에 `D scripts/*` 7개).
+  // 관리 사본을 걷어내는 것이 목적이지 사용자 소스를 지우는 것이 아니다.
+  if (isGitTracked(dest)) {
+    return;
+  }
   if (!force && !dirContentsMatch(src, dest)) {
     return;
   }
   fs.rmSync(dest, { recursive: true, force: true });
+}
+
+function isGitTracked(target) {
+  const result = spawnSync("git", ["ls-files", "--error-unmatch", "-z", "--", "."], {
+    cwd: fs.statSync(target).isDirectory() ? target : path.dirname(target),
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+  return !result.error && result.status === 0 && result.stdout.trim().length > 0;
 }
 
 function dirContentsMatch(src, dest) {
@@ -1410,9 +1426,13 @@ function linkProjectSkill(root, skill, host, previousIndex, force = false) {
   ensureChildPath(hostRoot, destDir);
   const destSkill = path.join(destDir, "SKILL.md");
   const previousHash = previousSkillHash(previousIndex, skill.name);
-  if (fs.existsSync(destDir)) {
-    const stat = fs.lstatSync(destDir);
-    if (stat.isSymbolicLink()) {
+  // `existsSync`는 심링크를 **따라가서** 끊어진 링크에 false를 준다. 그러면 stale
+  // link 정리 분기를 못 타고 곧바로 링크 생성이 EEXIST로 죽는다. profile을 좁히거나
+  // `--skills` 선택을 바꾸면 이전 선택의 host 링크가 끊긴 채 남으므로 실제로 밟는다.
+  // lstat은 링크 자체를 보므로 끊어진 링크도 정리 대상으로 잡힌다.
+  const destStat = lstatIfExists(destDir);
+  if (destStat) {
+    if (destStat.isSymbolicLink()) {
       fs.unlinkSync(destDir);
     } else if (fs.existsSync(destSkill)) {
       const currentHash = crypto.createHash("sha256").update(fs.readFileSync(destSkill, "utf8")).digest("hex");

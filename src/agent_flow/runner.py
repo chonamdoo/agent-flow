@@ -37,6 +37,7 @@ from typing import Any
 import yaml
 
 from agent_flow.adapters.auto import detect_adapter
+from agent_flow.adapters.generic import STUB_SENTINEL
 from agent_flow.artifact import (
     create_run,
     mark_inactive,
@@ -586,7 +587,23 @@ class Runner:
                 since=_meta_timestamp(meta.get("phase_entered_at")),
             )
         )
+        missing.extend(
+            missing_design_value_implementations(
+                self.project_root,
+                self.run_dir,
+                phase.id,
+                text,
+                profile=self.profile,
+            )
+        )
         return missing
+
+    def _is_stub_authored(self, text: str) -> bool:
+        return (
+            getattr(self, "_adapter_name", "") == "generic"
+            and os.environ.get("AGENT_FLOW_GENERIC_MODE") == "stub-success"
+            and STUB_SENTINEL in text
+        )
 
     def _artifact_path(self, phase: Phase) -> Path:
         assert self.run_dir is not None
