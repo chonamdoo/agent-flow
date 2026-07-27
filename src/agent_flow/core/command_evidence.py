@@ -146,8 +146,27 @@ def _needle_pattern(needle: str) -> re.Pattern[str]:
 # 사용자만 돌려야 하는 명령. agent의 셸에서 관측되면 그 record는 사용자 확인이
 # 아니다. 관측이 "안 돌렸다"만 잡는 다른 gate와 방향이 반대다 - 여기서는 로그에
 # 남았다는 사실 자체가 위반의 증거다.
-_SPEC_APPROVAL_CLI_TOKENS = ("agent-flow", "agent_flow.cli")
+#
+# node 래퍼(`agent-flow-kit`, `node bin/agent-flow-kit.mjs`)도 모르는 명령을
+# Python CLI로 넘기면서 stdin을 물려준다. 즉 래퍼로 부른 `spec confirm`도 실제
+# 승인 파일을 만든다. 여기서 빠지면 agent가 만든 승인이 사용자 승인으로 통과한다.
+_SPEC_APPROVAL_CLI_TOKENS = (
+    "agent-flow",
+    "agent_flow.cli",
+    "agent-flow-kit",
+    "agent-flow-kit.mjs",
+)
 _SPEC_APPROVAL_SUBCOMMANDS = ("confirm", "approve")
+
+# `node <script>` 형태는 실행 파일이 인터프리터다. 실제로 무엇을 실행하는지는
+# 첫 비플래그 인자에 있다.
+_SCRIPT_RUNNERS = frozenset({"node", "bun"})
+
+
+# 승인 기록을 만들 수 없는 호출. 도움말은 인자만 읽고 끝나므로 승인 시도가 아니다.
+# 이걸 위반으로 세면 명령 형태를 확인한 것만으로 그 런은 영영 못 푼다 — 증거 창이
+# `since = started_at`이라 런 안에서는 되돌릴 방법이 없다.
+_SPEC_APPROVAL_INERT_FLAGS = frozenset({"--help", "-h"})
 
 
 def agent_run_spec_approvals(evidence: CommandRunEvidence) -> tuple[CommandRun, ...]:
@@ -157,8 +176,75 @@ def agent_run_spec_approvals(evidence: CommandRunEvidence) -> tuple[CommandRun, 
     observed: list[CommandRun] = []
     for cli in _SPEC_APPROVAL_CLI_TOKENS:
         for subcommand in _SPEC_APPROVAL_SUBCOMMANDS:
-            observed.extend(evidence.matching_all((cli, "spec", subcommand)))
+            observed.extend(
+                run
+                for run in evidence.matching_all((cli, "spec", subcommand))
+                if not _is_inert_invocation(run.command)
+            )
     return tuple(dict.fromkeys(observed))
+
+
+def _is_inert_invocation(command: str) -> bool:
+    segments = _shell_segments(command)
+    if segments is None:
+        # 파싱이 안 되는 명령. 무엇을 했는지 모르면 면제하지 않는다.
+        return False
+    cli_segments = [argv for argv in segments if _spec_approval_cli(argv)]
+    if not cli_segments:
+        # `sh -c '<실제 승인>' --help`의 `--help`는 셸의 $0일 뿐 CLI에 닿지 않는다.
+        # CLI를 직접 부른 자리를 못 찾으면 면제하지 않는다.
+        return False
+    # 실행 단위 하나라도 도움말이 아니면 승인이 실제로 돈다. `<승인>; echo --help`,
+    # 두 줄짜리 명령, `<승인> && <도움말>`이 전부 여기서 걸린다.
+    return all(
+        any(token in _SPEC_APPROVAL_INERT_FLAGS for token in argv)
+        for argv in cli_segments
+    )
+
+
+def _spec_approval_cli(argv: Sequence[str]) -> str:
+    """argv가 승인 CLI를 직접 부르면 그 이름, 아니면 빈 문자열."""
+    executable = _effective_executable(argv)
+    if executable in _SPEC_APPROVAL_CLI_TOKENS:
+        return executable
+    names = tuple(os.path.basename(part).lower() for part in argv)
+    if not names or names[0] not in _SCRIPT_RUNNERS:
+        return ""
+    for name in names[1:]:
+        if name.startswith("-"):
+            continue
+        return name if name in _SPEC_APPROVAL_CLI_TOKENS else ""
+    return ""
+
+
+def _shell_segments(command: str) -> tuple[tuple[str, ...], ...] | None:
+    """줄과 셸 연산자로 끊어 실행 단위 목록을 만든다. 파싱 실패는 None.
+
+    `--help 2>&1`, `--help | cat`, `--help || true`처럼 출력을 돌리거나 종료 코드를
+    무시하는 확인 명령이 흔하다. 연산자가 보인다고 통째로 판단을 포기하면 도움말
+    한 번에 런이 영구히 막힌다. 대신 단위별로 본다.
+    """
+    segments: list[tuple[str, ...]] = []
+    for line in command.splitlines():
+        if not line.strip():
+            continue
+        try:
+            lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|<>()")
+            lexer.whitespace_split = True
+            tokens = tuple(lexer)
+        except ValueError:
+            return None
+        current: list[str] = []
+        for token in tokens:
+            if token == "!" or (token and set(token) <= set(";&|<>()")):
+                if current:
+                    segments.append(_strip_env_prefix(tuple(current)))
+                current = []
+                continue
+            current.append(token)
+        if current:
+            segments.append(_strip_env_prefix(tuple(current)))
+    return tuple(segments)
 
 
 def command_is_unmasked(command: str) -> bool:
@@ -233,8 +319,13 @@ def _single_command_argv(command: str) -> tuple[str, ...]:
         for token in argv
     ):
         return ()
+    return _strip_env_prefix(argv)
+
+
+def _strip_env_prefix(argv: tuple[str, ...]) -> tuple[str, ...]:
+    """`env FOO=1 cmd`, `FOO=1 cmd`의 앞머리를 걷어낸다."""
     index = 0
-    if argv[0] == "env":
+    if argv and argv[0] == "env":
         index = 1
     while index < len(argv) and re.fullmatch(
         r"[A-Za-z_][A-Za-z0-9_]*=.*",

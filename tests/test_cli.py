@@ -55,6 +55,22 @@ def _node_test_env(**overrides: str) -> dict[str, str]:
     return env
 
 
+_SPEC_CONFIRM_ARTIFACT = """# design
+
+## Spec Items
+
+SPEC-1: Empty search results show the empty state.
+verify: test:test_empty_search_results_show_the_empty_state
+
+## Design Values
+
+## Completion Gate
+
+spec-items: SPEC-1
+design-values: none
+"""
+
+
 def _strip_markdown_frontmatter(text: str) -> str:
     if not text.startswith("---\n"):
         return text
@@ -3108,6 +3124,87 @@ if (codexContext !== undefined) {
             self.assertEqual(result.stdout.strip(), "agent-flow installed profile=node")
             kit = json.loads((project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
             self.assertEqual(kit["profile"], "node")
+
+    def test_node_cli_routes_spec_confirm_to_the_interactive_python_cli(self) -> None:
+        """워크플로가 안내하는 `agent-flow spec confirm`은 래퍼에서도 살아 있어야 한다.
+
+        래퍼가 받지 않으면 usage만 나온다. 사용자는 그때부터 인터프리터와
+        PYTHONPATH를 손으로 찾게 되고, PyYAML 없는 시스템 python을 타면
+        ModuleNotFoundError로 끝난다. 실제로 SPEC 승인이 그 자리에서 멈췄다.
+
+        상대경로 artifact와 종료 코드까지 함께 본다. cwd를 KIT_ROOT로 넘기면
+        사용자가 준 상대경로가 엉뚱한 곳에서 풀린다.
+        """
+        node = _node_executable()
+        cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            run_dir = project_root / ".agent-flow" / "runs" / "default" / "r1"
+            run_dir.mkdir(parents=True)
+            (run_dir / "manifest.json").write_text(
+                json.dumps({"task": "demo", "started_at": "2026-01-01T00:00:00+00:00"}),
+                encoding="utf-8",
+            )
+            (run_dir / "design.md").write_text(_SPEC_CONFIRM_ARTIFACT, encoding="utf-8")
+            result = subprocess.run(
+                (
+                    node,
+                    cli,
+                    "spec",
+                    "confirm",
+                    "--run-dir",
+                    ".agent-flow/runs/default/r1",
+                    "--artifact",
+                    ".agent-flow/runs/default/r1/design.md",
+                ),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+                env=_node_test_env(),
+            )
+        combined = result.stdout + result.stderr
+        self.assertNotIn("usage: agent-flow-kit", combined)
+        self.assertNotIn("ModuleNotFoundError", combined)
+        # cwd 기준으로 상대경로가 풀렸고, 승인 문구를 받는 자리까지 닿았다는 증거다.
+        # 여기서 멈추는 이유는 파이프로 물린 stdin이 TTY가 아니기 때문뿐이다.
+        self.assertIn("interactive user terminal", combined)
+        self.assertEqual(result.returncode, 2)
+
+    def test_node_cli_forwards_stdin_to_the_python_cli(self) -> None:
+        """승인 문구는 사람이 직접 친다. stdin을 끊으면 그 입력이 CLI에 닿지 않는다."""
+        node = _node_executable()
+        cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = subprocess.run(
+                (node, cli, "spec-stdin-probe"),
+                cwd=temp_dir,
+                text=True,
+                capture_output=True,
+                check=False,
+                input="probe-line\n",
+                env=_node_test_env(
+                    PYTHON=str(Path(__file__).resolve().parent / "fixtures" / "stdin_probe.py"),
+                ),
+            )
+        self.assertIn("stdin-received: probe-line", result.stdout + result.stderr)
+
+    def test_node_cli_forwards_unknown_commands_instead_of_printing_usage(self) -> None:
+        """`status`, `continue`도 워크플로가 안내하는 명령이다. 같은 자리에서 막히면 안 된다."""
+        node = _node_executable()
+        cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+        for subcommand in ("status", "continue"):
+            with self.subTest(subcommand=subcommand):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    result = subprocess.run(
+                        (node, cli, subcommand),
+                        cwd=temp_dir,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                        env=_node_test_env(),
+                    )
+                self.assertNotIn("usage: agent-flow-kit", result.stdout + result.stderr)
 
     def test_node_installer_uses_source_workflow_yaml_for_prompts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
