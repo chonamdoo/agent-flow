@@ -344,3 +344,27 @@ def test_removal_stops_when_the_path_was_re_registered(tmp_path, monkeypatch):
         W.remove_worktree(root=tmp_path, status=status, allow_unmerged=True)
     assert "registration changed" in str(caught.value)
     assert status.path.exists()
+
+
+def test_removal_clears_runtime_state_keyed_by_the_registered_name(tmp_path: Path):
+    """불변: 런타임 상태를 쓴 키와 지우는 키가 같다.
+
+    정규화되지 않는 이름(``feat-issue#110``)은 등록된 이름 그대로 상태가 쌓이는데
+    제거만 정규화하면 죽은 active 마커가 남아 같은 자리의 다음 run을 막는다.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    _init_repo(root)
+    checkout = root / ".agent-flow" / "worktrees" / "feat-issue#110"
+    _add_raw_worktree(root, "feat/issue#110", checkout)
+
+    started = _run_cli(["run", "task", "--worktree", "feat-issue#110"], root)
+    assert started.returncode == 0, started.stderr
+    runtime_root = root / ".git" / "agent-flow" / "worktrees" / "feat-issue#110"
+    assert runtime_root.exists()
+
+    removed = _run_cli(
+        ["worktree", "remove", "--name", "feat-issue#110", "--allow-unmerged"], root
+    )
+    assert removed.returncode == 0, removed.stderr
+    assert not runtime_root.exists()

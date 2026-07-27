@@ -83,11 +83,7 @@ def plan_worktree(
     base_name = name if unique is None else f"{name}-{unique}"
     safe_name = _feature_worktree_name(base_name)
     selected_branch = branch or _default_branch_for_name(safe_name)
-    _validate_branch(selected_branch)
-    if selected_branch in PROTECTED_WORKTREE_BRANCHES:
-        raise ValueError(f"protected worktree branch is not allowed: {selected_branch}")
-    if not selected_branch.startswith("feat/"):
-        raise ValueError(f"worktree branch must start with feat/: {selected_branch}")
+    _assert_requestable_branch(selected_branch)
     return WorktreePlan(
         name=safe_name,
         branch=selected_branch,
@@ -146,6 +142,79 @@ def create_worktree(*, root: Path, plan: WorktreePlan, allow_dirty: bool = False
             )
         raise
     return status
+
+
+def attach_worktree(
+    *, root: Path, selector: str, branch: str | None = None, allow_dirty: bool = False
+) -> WorktreeStatus | None:
+    """등록부가 아는 관리형 checkout에 그대로 붙는다. 붙을 대상이 없으면 ``None``.
+
+    조회 계열(`status`/`continue`/`worktree remove`)은 이미 `resolve_worktree`로
+    등록부를 본다. 진입 경로만 이름을 정규화해 경로를 유도하므로, 등록부가 보고한
+    이름이 그 규칙과 다르면 같은 selector가 두 번째 checkout과 브랜치를 만들어
+    낸다. 그 비대칭을 여기서 닫는다.
+
+    ``None``은 "붙을 대상이 없으니 생성 경로로 가라"는 뜻이다. 반대로 붙을 대상이
+    있는데 안전하지 않으면 ``None`` 대신 raise한다 — 사용자가 지목한 checkout을
+    그대로 두고 조용히 다른 것을 만드는 것이 이 함수가 막으려는 사고다.
+    """
+    registered = resolve_worktree(root=root, selector=selector)
+    if registered is None:
+        return None
+    if not allow_dirty and _git_dirty(root):
+        # 생성 경로와 같은 계약이다. 재사용도 leader가 더러우면 멈춘다
+        # (`create_worktree`가 관리형 checkout 재사용 앞에서 거는 것과 같은 문)
+        raise RuntimeError(
+            "leader workspace is dirty; pass --allow-dirty to use a worktree anyway"
+        )
+    if not _is_managed_child(root=root, path=registered.path):
+        # 관리 루트 밖 checkout에 붙는 것은 지원 범위가 아니다. 그렇다고 생성
+        # 경로로 흘려보내면 selector를 디렉터리 이름으로 뭉개 엉뚱한 checkout을
+        # 만든다(절대경로 selector는 경로 전체가 이름이 된다).
+        raise ValueError(
+            f"worktree {registered.path} is not a direct child of {_managed_root(root)}; "
+            f"attaching to a checkout there is not supported"
+        )
+    if not (registered.path / ".git").is_file():
+        # 등록은 남았는데 checkout이 사라졌다. 생성 경로가 prune 후 다시 만든다.
+        return None
+    if registered.branch is None:
+        # detached HEAD면 등록부가 브랜치를 주지 못한다. 이름에서 유도한 브랜치로
+        # 메우면 존재하지도 않는 브랜치로 commit/push 단계가 돈다.
+        raise ValueError(
+            f"worktree {registered.path.name} is on a detached HEAD; "
+            f"check out a branch before starting a run there"
+        )
+    if registered.branch in PROTECTED_WORKTREE_BRANCHES:
+        raise ValueError(f"protected worktree branch is not allowed: {registered.branch}")
+    if branch is not None:
+        # 요청된 브랜치는 생성 경로와 같은 규칙을 통과해야 한다. 붙는 대상의
+        # 기존 브랜치가 아니라 사용자가 방금 넘긴 값에 대한 검사다.
+        _assert_requestable_branch(branch)
+        if branch != registered.branch:
+            raise ValueError(
+                f"worktree {registered.path.name} already uses branch {registered.branch}; "
+                f"requested {branch}"
+            )
+    # 등록부를 읽은 시점과 실제로 쓰는 시점 사이를 좁힌다. 같은 저장소의 linked
+    # worktree이고 여전히 그 브랜치 위에 있다는 것을 git으로 다시 증명한다.
+    verify_linked_worktree(root=root, path=registered.path, expected_branch=registered.branch)
+    # manifest는 쓰지 않는다. 소유권(`branch_created_by_agent_flow`)은 만든 쪽만
+    # 주장할 수 있다. attach가 덮어쓰면 정리 단계가 사용자 브랜치를 지우거나
+    # 우리가 만든 브랜치를 영구히 남긴다.
+    return _status_for_registered(root=root, registered=registered, requested=selector)
+
+
+def _is_managed_child(*, root: Path, path: Path) -> bool:
+    return worktree_path_key(path.parent) == worktree_path_key(_managed_root(root))
+
+
+def _assert_requestable_branch(branch: str) -> None:
+    _validate_branch(branch)
+    if branch in PROTECTED_WORKTREE_BRANCHES:
+        raise ValueError(f"protected worktree branch is not allowed: {branch}")
+    if not branch.startswith("feat/"):
+        raise ValueError(f"worktree branch must start with feat/: {branch}")
 
 
 def _add_worktree_locked(*, root: Path, plan: WorktreePlan) -> bool:
@@ -539,9 +608,10 @@ def remove_worktree_metadata(*, root: Path, name: str, path: Path | None = None)
     if path is not None and not _metadata_belongs_to_path(root=root, name=name, path=path):
         return
     try:
-        # 이름을 여기서 다시 해석하면 안 된다. checkout을 지운 뒤 불릴 때 후보
-        # 목록이 비어 정규화로 흘러 엉뚱한 디렉터리를 가리킨다.
-        runtime_root = _runtime_state_root(root=root, name=_feature_worktree_name(name))
+        # 런타임 상태를 쓸 때와 같은 키로 지운다(`worktree_runtime_root`). 여기서만
+        # 정규화하면 `feat-issue#110` 같은 이름의 상태가 지워지지 않고 남아, 같은
+        # 자리에 새 run을 시작할 때 죽은 active 마커가 되살아난다.
+        runtime_root = _runtime_state_root(root=root, name=_runtime_state_key(root=root, name=name))
         legacy_manifest = _legacy_worktree_manifest_path(root=root, name=name)
     except ValueError:
         # agent-flow 이름 규칙으로 정규화되지 않는 이름에는 애초에 메타데이터가 없다.
@@ -550,6 +620,19 @@ def remove_worktree_metadata(*, root: Path, name: str, path: Path | None = None)
         shutil.rmtree(runtime_root)
     if legacy_manifest.exists():
         legacy_manifest.unlink()
+
+
+def _runtime_state_key(*, root: Path, name: str) -> str:
+    """런타임 상태 디렉터리 키. 등록·상태 디렉터리에 실재하는 이름이 정규화보다 우선한다.
+
+    조회가 실패해도 정리는 계속돼야 하므로 정규화로 접는다. 여기서 raise하면
+    복구 명령이 메타데이터를 남긴 채 죽는다.
+    """
+    try:
+        return resolve_worktree_name(root=root, name=name)
+    except (OSError, RuntimeError, ValueError):
+        return _feature_worktree_name(name)
+
 
 
 def _metadata_belongs_to_path(*, root: Path, name: str, path: Path) -> bool:
@@ -589,8 +672,12 @@ def _git_dirty(root: Path) -> bool:
     return bool(dirty_lines)
 
 
+def _managed_root(root: Path) -> Path:
+    return root / ".agent-flow" / "worktrees"
+
+
 def _managed_checkout_path(*, root: Path, name: str) -> Path:
-    return root / ".agent-flow" / "worktrees" / name
+    return _managed_root(root) / name
 
 
 def _runtime_state_root(*, root: Path, name: str) -> Path:

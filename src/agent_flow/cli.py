@@ -98,7 +98,9 @@ from agent_flow.core.team import (
 )
 from agent_flow.core.worktrees import (
     WorktreeLockedError,
+    WorktreeStatus,
     assert_worktree_unlocked,
+    attach_worktree,
     create_worktree,
     get_worktree_status,
     known_worktree_names,
@@ -106,6 +108,7 @@ from agent_flow.core.worktrees import (
     remove_worktree_metadata,
     remove_worktree,
     removable_worktrees,
+    resolve_worktree,
     worktree_branch_exists,
     worktree_runtime_root,
 )
@@ -122,6 +125,7 @@ from agent_flow.core.worktree_isolation import (
     capture_leader_snapshot,
     git_repo_state,
     max_worker_capacity,
+    same_worktree_path,
     sanitized_worker_env,
     verify_linked_worktree,
     worker_claim_lock,
@@ -538,14 +542,13 @@ def main(argv: list[str] | None = None) -> int:
                 print("worktree runs require a git repository", file=sys.stderr)
                 return 2
             try:
-                plan = plan_worktree(root=root, name=worktree_name, branch=args.worktree_branch)
-            except ValueError as exc:
-                print(str(exc), file=sys.stderr)
-                return 2
-            state_root = worktree_runtime_root(root=root, name=plan.name)
-            worktree_preexisting = plan.path.exists()
-            try:
-                worktree_status = create_worktree(root=root, plan=plan, allow_dirty=args.allow_dirty)
+                worktree_status, worktree_preexisting = _resolve_entry_worktree(
+                    root=root,
+                    selector=worktree_name,
+                    explicit=args.worktree is not None,
+                    branch=args.worktree_branch,
+                    allow_dirty=args.allow_dirty,
+                )
             except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
                 print(_format_cli_error(exc), file=sys.stderr)
                 return 2
@@ -568,7 +571,9 @@ def main(argv: list[str] | None = None) -> int:
                 config_root=root,
                 workflow=args.workflow,
                 architecture=args.architecture,
-                next_command=_continue_command(root, worktree_name),
+                next_command=_continue_command(
+                    root, worktree_status.name if worktree_status is not None else worktree_name
+                ),
             ).run(
                 mode=ResumeMode.START,
                 task=args.task,
@@ -1560,9 +1565,13 @@ def main(argv: list[str] | None = None) -> int:
             profile = detect_profile(root) if args.profile == "auto" else args.profile
             adapter = detect_adapter() if args.adapter == "auto" else args.adapter
             if worktree_name is not None:
-                plan = plan_worktree(root=root, name=worktree_name, branch=args.worktree_branch)
-                worktree_preexisting = plan.path.exists()
-                status = create_worktree(root=root, plan=plan, allow_dirty=args.allow_dirty)
+                status, worktree_preexisting = _resolve_entry_worktree(
+                    root=root,
+                    selector=worktree_name,
+                    explicit=args.worktree is not None,
+                    branch=args.worktree_branch,
+                    allow_dirty=args.allow_dirty,
+                )
                 worktree_status = status
                 worktree = {
                     "name": status.name,
@@ -1807,6 +1816,52 @@ def _worktree_context(root: Path, name: str) -> tuple[Path | None, Path]:
     return None, worktree_runtime_root(root=root, name=status.name)
 
 
+def _resolve_entry_worktree(
+    *, root: Path, selector: str, explicit: bool, branch: str | None, allow_dirty: bool
+) -> tuple[WorktreeStatus, bool]:
+    """run/start이 쓸 worktree 하나를 확정한다. 반환: (status, 이미 있던 것인가).
+
+    명시 selector(`--worktree`, 또는 worktree cwd에서 추론된 이름)만 등록부 우선으로
+    해석한다. task 이름에서 온 암묵 selector까지 넓히면 task 문자열이 남의 브랜치
+    이름과 겹치는 순간 엉뚱한 checkout에 붙는다.
+
+    모호한 selector는 여기서 잡지 않는다. 생성 경로도 같은 지점에서 다시 raise하므로
+    (`create_worktree` → `get_worktree_status` → `resolve_worktree`) 폴백은 실패를
+    두 번 알리기만 한다.
+    """
+    if explicit:
+        attached = attach_worktree(
+            root=root, selector=selector, branch=branch, allow_dirty=allow_dirty
+        )
+        if attached is not None:
+            _warn_if_cwd_is_other_checkout(root=root, target=attached.path)
+            return attached, True
+    plan = plan_worktree(root=root, name=selector, branch=branch)
+    preexisting = plan.path.exists()
+    status = create_worktree(root=root, plan=plan, allow_dirty=allow_dirty)
+    _warn_if_cwd_is_other_checkout(root=root, target=status.path)
+    return status, preexisting
+
+
+def _warn_if_cwd_is_other_checkout(*, root: Path, target: Path) -> None:
+    """cwd가 이 저장소의 다른 checkout인데 작업은 다른 자리에서 도는 경우를 알린다.
+
+    관리 루트 밖 checkout에 붙는 것은 지원 범위가 아니다. 그렇다고 조용히 다른
+    자리에서 돌면 사용자는 서 있던 checkout에서 작업이 도는 줄 안다.
+    """
+    result = run_safe_command(("git", "rev-parse", "--show-toplevel"), cwd=Path.cwd())
+    if not result.ok:
+        return
+    checkout = Path(result.stdout.strip())
+    if same_worktree_path(checkout, root) or same_worktree_path(checkout, target):
+        return
+    print(
+        f"notice: cwd is worktree {checkout}; this run uses {target}. "
+        f"Pass --worktree to continue in the checkout you are standing in.",
+        file=sys.stderr,
+    )
+
+
 def _command_project_root(config_root: Path, requested_root: Path, worktree: str | None) -> Path | None:
     if worktree is None:
         return config_root
@@ -1925,6 +1980,14 @@ def _cleanup_worktree_after_failure(root: Path, status, original: BaseException)
 
 
 def _slug_for_hint(root: Path, value: str) -> str:
+    # 등록부가 먼저다. 정규화로 이름을 뭉개면 출력된 next_command가 다른 checkout을
+    # 가리키고, 그 명령이 세 번째 worktree를 만든다.
+    try:
+        registered = resolve_worktree(root=root, selector=value)
+    except (OSError, ValueError, RuntimeError):
+        registered = None
+    if registered is not None:
+        return registered.path.name
     try:
         return plan_worktree(root=root, name=value).name
     except ValueError:
