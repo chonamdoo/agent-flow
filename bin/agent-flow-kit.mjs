@@ -441,11 +441,16 @@ function runWorkflowCommand(args) {
   // 오타는 task가 아니다. Python `run`은 task로 worktree와 브랜치까지 만들므로
   // `run statsu` 한 번이 쓰레기 worktree를 남긴다. 서브커맨드에 근접한 단일 토큰은
   // 넘기지 않는다. 여러 단어면 사람이 쓴 task이므로 그대로 넘긴다.
+  // `stats`처럼 정말 그 한 단어가 task인 경우가 있으므로 `--`로 빠져나갈 수 있다.
+  if (subcommand === "--") {
+    runPythonCliCommand("run", args.slice(1), { interactive: true });
+  }
   const nearMiss = args.length === 1 ? nearestRunSubcommand(subcommand) : "";
   if (nearMiss) {
     throw new Error(
       `unknown run subcommand: ${subcommand}. did you mean \`run ${nearMiss}\`? `
-      + `to start a run with this as the task, quote it as a sentence: agent-flow run "<task>"`,
+      + `if ${subcommand} really is the task, run it as \`agent-flow-kit run -- ${subcommand}\` `
+      + `or use the Python CLI directly: agent-flow run "${subcommand}"`,
     );
   }
   runPythonCliCommand("run", args, { interactive: true });
@@ -966,7 +971,11 @@ function assertInstalled(root) {
 // install이 target으로 복사하는 자산의 지문. `.Codex/agents`와 `.claude/agents`는
 // `assertInstalled`가 필수로 요구하는 파일이라 반드시 포함한다. `bin`/`lib`는
 // 설치 산출물의 본문(`rules/workflow-contract.md`, 생성되는 SKILL.md 등)을 만들어
-// 내는 소스라 여기 빠지면 그 변경이 지문에 안 잡힌다.
+// 내는 소스라 여기 빠지면 그 변경이 지문에 안 잡힌다. host 경로는 installer가 kit에서
+// **읽는** 자리만 넣는다 — `.Codex/hooks.json`, `.claude/settings.json`,
+// `.Codex/rules/concise-output.md`는 installer가 target에 만들어 내는 산출물이라
+// 넣으면 self-install 직후부터 자산 변경 없이 지문이 흔들린다.
+// Python `core/kit_digest.py`와 같은 목록이어야 한다. parity가 두 값을 대조한다.
 const KIT_SOURCE_DIGEST_ROOTS = [
   "workflows",
   "profiles",
@@ -977,8 +986,11 @@ const KIT_SOURCE_DIGEST_ROOTS = [
   "src/agent_flow",
   "bin",
   "lib",
-  ".Codex",
-  ".claude",
+  ".Codex/agents",
+  ".Codex/rules/context",
+  ".Codex/rules/codebase-rubric.md",
+  ".Codex/context",
+  ".claude/agents",
 ];
 
 // 파생 산출물은 소스가 아니다. `.pyc`는 헤더에 소스 mtime을 담는데 git은 mtime을
@@ -1008,10 +1020,15 @@ function kitSourceDigest() {
   return hash.digest("hex");
 }
 
-function walkFilesSorted(dir) {
-  if (!fs.existsSync(dir)) {
+function walkFilesSorted(target) {
+  if (!fs.existsSync(target)) {
     return [];
   }
+  // digest root는 디렉터리일 수도 단일 파일일 수도 있다.
+  if (!fs.statSync(target).isDirectory()) {
+    return [target];
+  }
+  const dir = target;
   const files = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
     if (DIGEST_EXCLUDED_DIRS.has(entry.name) || entry.name.endsWith(".pyc")) {

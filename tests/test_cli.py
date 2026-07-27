@@ -3419,6 +3419,64 @@ if (codexContext !== undefined) {
             self.assertEqual(legacy.returncode, 0, legacy.stderr)
             self.assertNotIn("agent-flow-kit install", legacy.stderr)
 
+    def test_python_entry_points_warn_about_a_stale_install(self) -> None:
+        """문서가 안내하는 진입점은 Python CLI다.
+
+        JS 래퍼에만 검사가 있으면 `agent-flow status`만 쓰는 사용자는 kit을 올린
+        뒤에도 낡은 설치본을 끝까지 못 본다.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            (project_root / ".agent-flow").mkdir(parents=True)
+            kit_path = project_root / ".agent-flow" / "kit.json"
+
+            kit_path.write_text(
+                json.dumps({"kit_source_digest": "0" * 64}), encoding="utf-8"
+            )
+            stale = io.StringIO()
+            with contextlib.redirect_stderr(stale):
+                main(["status", "--root", str(project_root)])
+            self.assertIn("run: agent-flow-kit install", stale.getvalue())
+
+            # 지문을 기록하기 전에 설치된 프로젝트에는 대조 기준이 없다.
+            kit_path.write_text(json.dumps({"profile": "python"}), encoding="utf-8")
+            legacy = io.StringIO()
+            with contextlib.redirect_stderr(legacy):
+                main(["status", "--root", str(project_root)])
+            self.assertNotIn("agent-flow-kit install", legacy.getvalue())
+
+    def test_node_run_double_dash_forwards_a_one_word_task(self) -> None:
+        """`stats`처럼 서브커맨드에 가까운 한 단어도 정상적인 task일 수 있다.
+
+        오타 가드에 escape가 없으면 그 task는 래퍼로 영영 시작할 수 없다.
+        """
+        node = _node_executable()
+        cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            guarded = subprocess.run(
+                (node, cli, "run", "stats"),
+                cwd=temp_dir,
+                text=True,
+                capture_output=True,
+                check=False,
+                env=_node_test_env(),
+            )
+            self.assertEqual(guarded.returncode, 1)
+            self.assertIn("run -- stats", guarded.stdout + guarded.stderr)
+
+            escaped = subprocess.run(
+                (node, cli, "run", "--", "stats"),
+                cwd=temp_dir,
+                text=True,
+                capture_output=True,
+                check=False,
+                env=_node_test_env(
+                    PYTHON=str(Path(__file__).resolve().parent / "fixtures" / "argv_probe.py"),
+                ),
+            )
+        output = escaped.stdout + escaped.stderr
+        self.assertIn("argv-received: -m agent_flow.cli run stats", output)
+
     def test_node_workflow_run_blocks_phase_skip_until_artifact_exists(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"

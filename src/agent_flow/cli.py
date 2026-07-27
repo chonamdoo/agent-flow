@@ -40,6 +40,7 @@ from agent_flow.core.design_ledger import (
 )
 from agent_flow.core.design_value_check import missing_spec_item_evidence
 from agent_flow.core.gates import GateCommand, run_gates
+from agent_flow.core.kit_digest import warn_if_installed_kit_is_stale
 from agent_flow.core.phase_workflow import load_phase_workflow_definition
 from agent_flow.core.profiles import (
     DEFAULT_GATE_PHASE,
@@ -140,6 +141,11 @@ from agent_flow.runner import Runner, ResumeMode, _find_kit_root
 from agent_flow.providers.host import list_host_providers
 from agent_flow.providers.subprocess import ProviderCommand, run_provider
 from agent_flow.pr_watch import fetch_pr, watch_pr
+
+
+# 사용자가 워크플로를 몰기 위해 직접 치는 명령. 래퍼가 위임하는 하위 명령
+# (`skills markers`, `spec prompt` 등)까지 넣으면 한 phase에 경고가 여러 번 뜬다.
+_KIT_FRESHNESS_COMMANDS = frozenset({"run", "start", "status", "continue"})
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -515,6 +521,11 @@ def main(argv: list[str] | None = None) -> int:
     root, inferred_worktree = _resolve_cli_root_context(root, getattr(args, "worktree", None))
     if inferred_worktree is not None and hasattr(args, "worktree") and args.worktree is None:
         args.worktree = inferred_worktree
+    # 문서가 안내하는 진입점은 이쪽이다. JS 래퍼에만 검사가 있으면 일반적인
+    # 사용자는 kit을 올린 뒤에도 낡은 설치본을 끝까지 못 본다.
+    if args.command in _KIT_FRESHNESS_COMMANDS:
+        warn_if_installed_kit_is_stale(root, _find_kit_root())
+
 
     if args.command == "init":
         init_project(root)
