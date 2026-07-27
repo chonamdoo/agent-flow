@@ -150,6 +150,12 @@ _SPEC_APPROVAL_CLI_TOKENS = ("agent-flow", "agent_flow.cli")
 _SPEC_APPROVAL_SUBCOMMANDS = ("confirm", "approve")
 
 
+# 승인 기록을 만들 수 없는 호출. 도움말은 인자만 읽고 끝나므로 승인 시도가 아니다.
+# 이걸 위반으로 세면 명령 형태를 확인한 것만으로 그 런은 영영 못 푼다 — 증거 창이
+# `since = started_at`이라 런 안에서는 되돌릴 방법이 없다.
+_SPEC_APPROVAL_INERT_FLAGS = frozenset({"--help", "-h"})
+
+
 def agent_run_spec_approvals(evidence: CommandRunEvidence) -> tuple[CommandRun, ...]:
     """agent 셸에서 관측된 `agent-flow spec confirm|approve` 실행."""
     if not evidence.available:
@@ -157,8 +163,28 @@ def agent_run_spec_approvals(evidence: CommandRunEvidence) -> tuple[CommandRun, 
     observed: list[CommandRun] = []
     for cli in _SPEC_APPROVAL_CLI_TOKENS:
         for subcommand in _SPEC_APPROVAL_SUBCOMMANDS:
-            observed.extend(evidence.matching_all((cli, "spec", subcommand)))
+            observed.extend(
+                run
+                for run in evidence.matching_all((cli, "spec", subcommand))
+                if not _is_inert_invocation(run.command)
+            )
     return tuple(dict.fromkeys(observed))
+
+
+def _is_inert_invocation(command: str) -> bool:
+    if "\n" in command:
+        # 여러 줄이면 첫 줄이 승인을 실행하고 다음 줄에 `--help`만 얹어도 면제된다.
+        # 실행 단위를 하나로 특정할 수 없으면 면제하지 않는다.
+        return False
+    argv = _single_command_argv(command)
+    if not argv:
+        # 파싱이 안 되거나 셸 연산자가 섞인 명령. 무엇을 했는지 모르면 면제하지 않는다.
+        return False
+    if _effective_executable(argv) not in _SPEC_APPROVAL_CLI_TOKENS:
+        # `sh -c '<실제 승인>' --help`의 `--help`는 셸의 $0일 뿐 CLI에 닿지 않는다.
+        # 면제는 CLI를 직접 부른 호출에만 준다.
+        return False
+    return any(token in _SPEC_APPROVAL_INERT_FLAGS for token in argv)
 
 
 def command_is_unmasked(command: str) -> bool:

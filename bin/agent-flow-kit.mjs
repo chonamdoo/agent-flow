@@ -1674,7 +1674,13 @@ function preferredPython() {
       return candidate;
     }
   }
-  throw new Error("no Python with PyYAML available for workflow export");
+  // 이 경로는 workflow export 말고도 spec confirm과 status가 함께 탄다. 무엇이
+  // 없는지와 무엇을 하면 되는지를 같이 적지 않으면 사용자는 인터프리터를 손으로
+  // 찾아 헤매다 PyYAML 없는 python을 타고 ModuleNotFoundError를 본다.
+  throw new Error(
+    "no Python with PyYAML found. Install it (pip install pyyaml) or point PYTHON at an interpreter that has it. "
+    + `Tried: ${candidates.join(", ")}`,
+  );
 }
 
 function pythonSupportsWorkflowExport(candidate) {
@@ -1756,6 +1762,7 @@ function runSpecCli(args) {
   }
   return result.stdout;
 }
+
 
 function captureSpecLedger(root, runDir, phase, artifact) {
   if (!["design", "prd"].includes(phase?.id)) {
@@ -3561,7 +3568,7 @@ function runGates(args) {
   runPythonCliCommand("gates", args);
 }
 
-function runPythonCliCommand(subcommand, args) {
+function runPythonCliCommand(subcommand, args, { interactive = false } = {}) {
   const root = resolveAgentFlowRoot(process.cwd());
   const pythonPathEntries = [
     root ? installedPythonRuntimePath(root) : "",
@@ -3575,16 +3582,20 @@ function runPythonCliCommand(subcommand, args) {
   // gates는 프로파일 게이트 전체를 순차로 돌린다. 이 저장소에서 가장 비싼 게이트는
   // `pytest -q`로 실측 5분대다. relay용 30초 상한을 걸면 정상 실행이 끝나기 전에
   // 죽는다. 개별 게이트 상한은 Python `--timeout`이 소유하고, wrapper는 그 총량만
-  // 감싼다.
+  // 감싼다. interactive는 사람이 타이핑하는 동안 기다려야 하므로 상한 자체가 없다.
   const result = safeSpawnSync(
-    "python3",
+    preferredPython(),
     ["-m", "agent_flow.cli", subcommand, ...args],
     {
+      // Python CLI는 `--root` 기본값 "."을 여기서 받는다. 그 뒤 leader/git-common
+      // root로 옮겨 가므로 cwd는 최종 기준이 아니라 그 해석의 출발점이다.
       cwd: process.cwd(),
       env,
       encoding: "utf8",
-      stdio: ["ignore", "inherit", "inherit"],
-      timeout: relayTimeoutForSubcommand(subcommand, args),
+      // 승인 문구는 사람에게서 직접 받는다. stdin을 끊으면 TTY 검사에서 죽는다.
+      // relay로 도는 명령은 반대로 stdin을 끊어야 입력 대기로 멈추지 않는다.
+      stdio: interactive ? "inherit" : ["ignore", "inherit", "inherit"],
+      timeout: interactive ? 0 : relayTimeoutForSubcommand(subcommand, args),
     },
   );
   if (result.error) {
@@ -3622,7 +3633,15 @@ try {
     runGates(process.argv.slice(3));
   }
 
-  console.error("usage: agent-flow-kit install [--force-managed] | gates [--profile <id>] [--phase <pre-commit|pre-push|post-merge|all>] [--worktree <name>] | architecture-lint [--profile <id>] [--files ...] | run <install|start|status|next|advance|push-watch|push-watch-tick>");
+  // 래퍼가 모르는 명령은 Python CLI가 주인이다. `spec confirm`, `status`,
+  // `continue`처럼 워크플로 프롬프트와 AGENTS.md가 안내하는 명령들이 여기로 온다.
+  // 예전엔 전부 usage만 뱉었고, 사용자는 인터프리터와 PYTHONPATH를 손으로 찾다가
+  // PyYAML 없는 python을 타고 ModuleNotFoundError로 끝났다.
+  if (command) {
+    runPythonCliCommand(command, process.argv.slice(3), { interactive: true });
+  }
+
+  console.error("usage: agent-flow-kit <command> [...] — install [--force-managed] | gates [--profile <id>] [--phase <pre-commit|pre-push|post-merge|all>] [--worktree <name>] | architecture-lint [--profile <id>] [--files ...] | run <install|start|status|next|advance|push-watch|push-watch-tick> | any other command is handled by the Python CLI (spec, status, continue, skills, ...)");
   process.exit(1);
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));

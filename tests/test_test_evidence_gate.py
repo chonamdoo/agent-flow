@@ -23,6 +23,9 @@ from agent_flow.core.command_evidence import (
     COMMANDS_RUN_LOG,
     FALLBACK_TEST_TOKENS,
     TEST_RUN_EVIDENCE_MARKER,
+    CommandRun,
+    CommandRunEvidence,
+    agent_run_spec_approvals,
     missing_test_evidence_markers,
     resolve_test_command_tokens,
 )
@@ -170,3 +173,54 @@ def test_workflows_require_the_regression_markers(workflow, phase_id, copy):
     assert "regression-test:" in markers
     assert "red-observed:" in markers
     assert TEST_RUN_EVIDENCE_MARKER in markers
+
+
+def _spec_evidence(command: str) -> CommandRunEvidence:
+    return CommandRunEvidence(
+        available=True,
+        runs=(CommandRun(command=command, exit_code=0, at=1.0, cwd=""),),
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "agent-flow spec confirm --help",
+        "agent-flow spec approve -h",
+        "python3 -m agent_flow.cli spec confirm --help",
+    ],
+)
+def test_help_invocation_is_not_an_agent_run_approval(command: str):
+    """반증: 도움말만 봐도 위반이면 명령 형태를 확인한 것만으로 그 런이 끝난다.
+
+    증거 창은 런 시작 시각부터라 한 번 기록되면 같은 런에서는 풀 방법이 없다.
+    실제로 사용자가 런을 새로 파야 했다.
+    """
+    assert agent_run_spec_approvals(_spec_evidence(command)) == ()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "agent-flow spec confirm --run-dir .agent-flow/runs/default/r1 --artifact design.md",
+        "python3 -m agent_flow.cli spec approve --run-dir .agent-flow/runs/default/r1 --spec-id SPEC-1",
+    ],
+)
+def test_real_approval_in_the_agent_shell_is_still_caught(command: str):
+    """짝 테스트. 도움말 예외가 승인 자체까지 눈감으면 안 된다."""
+    assert len(agent_run_spec_approvals(_spec_evidence(command))) == 1
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # `--help`가 셸의 $0로 먹히고 따옴표 안의 승인은 그대로 실행된다.
+        "sh -c 'agent-flow spec confirm --run-dir r --artifact design.md' --help",
+        # 첫 줄이 승인을 실행하고 둘째 줄은 장식이다. 로그에는 원문이 그대로 남는다.
+        "agent-flow spec confirm --run-dir r --artifact design.md\nagent-flow spec confirm --help",
+        "agent-flow spec confirm --run-dir r --artifact design.md; echo --help",
+    ],
+)
+def test_inert_flag_cannot_launder_a_real_approval(command: str):
+    """반증: 토큰만 훑으면 승인을 실제로 실행하는 명령까지 면제된다."""
+    assert len(agent_run_spec_approvals(_spec_evidence(command))) == 1
