@@ -188,6 +188,15 @@ def _spec_evidence(command: str) -> CommandRunEvidence:
         "agent-flow spec confirm --help",
         "agent-flow spec approve -h",
         "python3 -m agent_flow.cli spec confirm --help",
+        # 출력을 돌리거나 종료 코드를 무시하는 확인 명령. 셸 연산자가 보인다고
+        # 판단을 포기하면 이런 한 번으로 런이 영구히 막힌다.
+        "agent-flow spec confirm --help 2>&1",
+        "agent-flow spec confirm --help | cat",
+        "agent-flow spec confirm --help || true",
+        "agent-flow spec confirm --help > /tmp/spec-help.txt 2>&1",
+        # 래퍼로 부른 도움말도 승인 기록을 만들지 않는다.
+        "agent-flow-kit spec confirm --help",
+        "node bin/agent-flow-kit.mjs spec confirm --help",
     ],
 )
 def test_help_invocation_is_not_an_agent_run_approval(command: str):
@@ -214,11 +223,34 @@ def test_real_approval_in_the_agent_shell_is_still_caught(command: str):
 @pytest.mark.parametrize(
     "command",
     [
+        "agent-flow-kit spec confirm --run-dir .agent-flow/runs/default/r1 --artifact design.md",
+        "node bin/agent-flow-kit.mjs spec confirm --run-dir r --artifact design.md",
+        "node /opt/kit/bin/agent-flow-kit.mjs spec approve --run-dir r --spec-id SPEC-1",
+        "npx agent-flow-kit spec confirm --run-dir r --artifact design.md",
+        "agent-flow-kit spec confirm --run-dir r --artifact design.md | cat",
+    ],
+)
+def test_wrapper_approval_in_the_agent_shell_is_caught(command: str):
+    """반증: 래퍼는 stdin을 물려주므로 실제 승인 파일을 만든다.
+
+    `agent-flow`와 `agent_flow.cli`만 훑으면 agent가 만든 승인이 사용자 승인으로
+    통과한다.
+    """
+    assert len(agent_run_spec_approvals(_spec_evidence(command))) == 1
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
         # `--help`가 셸의 $0로 먹히고 따옴표 안의 승인은 그대로 실행된다.
         "sh -c 'agent-flow spec confirm --run-dir r --artifact design.md' --help",
         # 첫 줄이 승인을 실행하고 둘째 줄은 장식이다. 로그에는 원문이 그대로 남는다.
         "agent-flow spec confirm --run-dir r --artifact design.md\nagent-flow spec confirm --help",
         "agent-flow spec confirm --run-dir r --artifact design.md; echo --help",
+        # 도움말 단위를 앞에 붙여도 뒤 단위가 승인을 실행한다.
+        "agent-flow spec confirm --help && agent-flow spec confirm --run-dir r --artifact design.md",
+        "echo $(agent-flow spec confirm --run-dir r --artifact design.md) --help",
+        "`agent-flow spec confirm --run-dir r --artifact design.md` --help",
     ],
 )
 def test_inert_flag_cannot_launder_a_real_approval(command: str):
