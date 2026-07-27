@@ -56,8 +56,10 @@ skills:
       missing: "missing local profile: <skill>"
     - group: android-native-escalation
       profiles: [android]
+      skills_from: android_skills
       when: React Native android/ native code changes
       missing: "missing local android_skills: <skill>"
+      path_globs: ["android/**"]
 architecture:
   contract: clean-architecture-core
   platform: react-native

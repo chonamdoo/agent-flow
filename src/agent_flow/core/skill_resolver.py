@@ -47,6 +47,13 @@ CODE_PHASES = (
     "architecture-review",
 )
 
+# 표 섹션이 가리키는 phase 집합. `profile_routing`이 정의하고 여기서 다시 노출한다 —
+# 소비자가 CODE_PHASES와 함께 한 곳에서 보게 한다.
+from agent_flow.core.profile_routing import (  # noqa: E402  (CODE_PHASES 정의 뒤여야 한다)
+    IMPLEMENTATION_PHASES,
+    REVIEW_PHASES,
+)
+
 
 @dataclass(frozen=True)
 class SkillRoot:
@@ -55,6 +62,9 @@ class SkillRoot:
     source: str
     template: str
     install_hint: str = ""
+    # 이 root가 특정 host 소유면 그 이름. profile 표는 `active_host_only`를 선언하므로
+    # 표로 붙은 skill은 다른 host의 사본으로 충족시키면 안 된다.
+    host: str = ""
 
 
 @dataclass(frozen=True)
@@ -147,18 +157,32 @@ def skill_roots(
     ordered_hosts.extend(name for name in _HOST_ORDER if name != resolved_host)
     for name in ordered_hosts:
         roots.extend(
-            SkillRoot(source="host", template=template) for template in _HOST_TEMPLATES[name]
+            SkillRoot(source="host", template=template, host=name)
+            for template in _HOST_TEMPLATES[name]
         )
     roots.extend(SkillRoot(source="shared", template=template) for template in _SHARED_TEMPLATES)
     roots.extend(_profile_skill_source_roots(profile))
     return tuple(_dedupe_roots(roots))
 
 
-def resolve_skill(name: str, roots: Sequence[SkillRoot]) -> ResolvedSkill:
+def active_host_roots(roots: Sequence[SkillRoot], host: str) -> tuple[SkillRoot, ...]:
+    """다른 host 소유 root를 뺀 목록.
+
+    host를 못 알아내면(`""`) 거를 기준이 없다. 그때 전부 빼면 CI처럼 host 표식이
+    없는 환경에서 모든 skill이 사라지므로, 알 수 없을 때는 거르지 않는다.
+    """
+    if not host:
+        return tuple(roots)
+    return tuple(root for root in roots if not root.host or root.host == host)
+
+
+def resolve_skill(
+    name: str, roots: Sequence[SkillRoot], *, install_hint: str = ""
+) -> ResolvedSkill:
     """첫 매치가 이긴다. 어디에도 없으면 exists=False와 설치 안내를 담아 돌려준다."""
     if not _is_safe_skill_name(name):
         return ResolvedSkill(name=name, path=None, source="", exists=False, install_hint="")
-    hints: list[str] = []
+    hints: list[str] = [install_hint] if install_hint else []
     for root in roots:
         match = _match_template(root.template, name)
         if match is not None:
@@ -191,7 +215,9 @@ def resolve_phase_skills(
     host: str | None = None,
     env: dict[str, str] | None = None,
 ) -> SkillResolution:
-    """phase가 선언한 skill + 스스로 이 phase에 걸린다고 선언한 skill을 합쳐 해석한다."""
+    """phase 선언 + frontmatter 선언 + profile 표를 합쳐 해석한다."""
+    from agent_flow.core.profile_routing import routed_profile_skills
+
     roots = skill_roots(project_root, profile=profile, host=host, env=env)
     declared = phase_skills or PhaseSkills()
     required_names: list[str] = list(declared.required)
@@ -204,11 +230,38 @@ def resolve_phase_skills(
         if _entry_activates(entry, phase_id, changed_files, task_text):
             required_names.append(entry.name)
 
+    # profile 표로 붙는 skill은 upstream 파일이라 frontmatter 선언이 없다.
+    # 부재 안내는 표의 source URL로 한다 — root의 일반 install hint로는
+    # 어느 저장소에서 받아야 하는지 알 수 없다.
+    routed_hints: dict[str, str] = {}
+    routed_only: set[str] = set()
+    for routed in routed_profile_skills(
+        profile, phase_id=phase_id, changed_files=changed_files, task_text=task_text
+    ):
+        if routed.source:
+            routed_hints.setdefault(routed.name, routed.source)
+        if routed.name not in required_names:
+            required_names.append(routed.name)
+            routed_only.add(routed.name)
+
     required_names = _expand_dependencies(required_names, catalog)
     optional_names = [name for name in optional_names if name not in required_names]
 
+    # 표는 `active_host_only: true`를 선언한다. 다른 host의 사본으로 충족시키면
+    # 프롬프트가 엉뚱한 파일을 가리키고 진짜 부재가 숨는다. 표로만 붙은 이름에만
+    # 적용한다 — phase가 직접 선언했거나 frontmatter로 붙은 skill은 host 소유가 아니다.
+    resolved_host = active_host(env) if host is None else host
+    routed_roots = active_host_roots(roots, resolved_host)
+
     return SkillResolution(
-        required=tuple(resolve_skill(name, roots) for name in _stable_unique(required_names)),
+        required=tuple(
+            resolve_skill(
+                name,
+                routed_roots if name in routed_only else roots,
+                install_hint=routed_hints.get(name, ""),
+            )
+            for name in _stable_unique(required_names)
+        ),
         optional=tuple(resolve_skill(name, roots) for name in _stable_unique(optional_names)),
     )
 
@@ -348,7 +401,12 @@ def _profile_skill_source_roots(profile: dict | None) -> list[SkillRoot]:
         label = "fetched" if source.kind == "fetch" else "host"
         hint = source.install_hint or source.id
         roots.extend(
-            SkillRoot(source=label, template=template, install_hint=hint)
+            SkillRoot(
+                source=label,
+                template=template,
+                install_hint=hint,
+                host=_template_host(template),
+            )
             for template in source.roots
         )
         if source.kind == "fetch" and source.layout:
@@ -361,6 +419,26 @@ def _profile_skill_source_roots(profile: dict | None) -> list[SkillRoot]:
                 )
             )
     return roots
+
+
+_HOST_TEMPLATE_PREFIXES = {
+    "claude": ("~/.claude/",),
+    "codex": ("~/.codex/",),
+    "omp": ("~/.omp/",),
+}
+
+
+def _template_host(template: str) -> str:
+    """profile이 선언한 root가 특정 host 홈에 있으면 그 host 이름.
+
+    profile은 세 host 경로를 나란히 적지만 표는 `active_host_only`를 선언한다.
+    태그가 없으면 Codex로 돌면서 Claude 경로의 사본을 읽고도 통과한다.
+    """
+    normalized = template.replace(str(Path.home()), "~", 1)
+    for host, prefixes in _HOST_TEMPLATE_PREFIXES.items():
+        if any(normalized.startswith(prefix) for prefix in prefixes):
+            return host
+    return ""
 
 
 def _dedupe_roots(roots: Iterable[SkillRoot]) -> list[SkillRoot]:
@@ -454,6 +532,28 @@ def _read_frontmatter(skill_path: Path) -> dict | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def selector_matches(
+    *,
+    task_terms: Sequence[str],
+    path_globs: Sequence[str],
+    changed_files: Sequence[str],
+    task_text: str,
+) -> bool:
+    """task 문구나 변경 경로가 선택자에 걸리는가.
+
+    frontmatter 선언과 profile 표가 같은 판정을 쓰도록 여기 하나만 둔다.
+    """
+    haystack = task_text.lower()
+    if any(term.lower() in haystack for term in task_terms if term):
+        return True
+    normalized = [str(path).replace("\\", "/") for path in changed_files]
+    return any(
+        _glob_matches(pattern, candidate)
+        for pattern in path_globs
+        for candidate in normalized
+    )
+
+
 def _entry_activates(
     entry: SkillCatalogEntry, phase_id: str, changed_files: Sequence[str], task_text: str
 ) -> bool:
@@ -466,14 +566,11 @@ def _entry_activates(
             return False
     elif not entry.task_terms and not entry.path_globs:
         return True
-    haystack = task_text.lower()
-    if any(term in haystack for term in entry.task_terms):
-        return True
-    normalized = [str(path).replace("\\", "/") for path in changed_files]
-    return any(
-        _glob_matches(pattern, candidate)
-        for pattern in entry.path_globs
-        for candidate in normalized
+    return selector_matches(
+        task_terms=entry.task_terms,
+        path_globs=entry.path_globs,
+        changed_files=changed_files,
+        task_text=task_text,
     )
 
 
