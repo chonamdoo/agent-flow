@@ -47,6 +47,13 @@ CODE_PHASES = (
     "architecture-review",
 )
 
+# 표 섹션이 가리키는 phase 집합. `profile_routing`이 정의하고 여기서 다시 노출한다 —
+# 소비자가 CODE_PHASES와 함께 한 곳에서 보게 한다.
+from agent_flow.core.profile_routing import (  # noqa: E402  (CODE_PHASES 정의 뒤여야 한다)
+    IMPLEMENTATION_PHASES,
+    REVIEW_PHASES,
+)
+
 
 @dataclass(frozen=True)
 class SkillRoot:
@@ -154,11 +161,13 @@ def skill_roots(
     return tuple(_dedupe_roots(roots))
 
 
-def resolve_skill(name: str, roots: Sequence[SkillRoot]) -> ResolvedSkill:
+def resolve_skill(
+    name: str, roots: Sequence[SkillRoot], *, install_hint: str = ""
+) -> ResolvedSkill:
     """첫 매치가 이긴다. 어디에도 없으면 exists=False와 설치 안내를 담아 돌려준다."""
     if not _is_safe_skill_name(name):
         return ResolvedSkill(name=name, path=None, source="", exists=False, install_hint="")
-    hints: list[str] = []
+    hints: list[str] = [install_hint] if install_hint else []
     for root in roots:
         match = _match_template(root.template, name)
         if match is not None:
@@ -191,7 +200,9 @@ def resolve_phase_skills(
     host: str | None = None,
     env: dict[str, str] | None = None,
 ) -> SkillResolution:
-    """phase가 선언한 skill + 스스로 이 phase에 걸린다고 선언한 skill을 합쳐 해석한다."""
+    """phase 선언 + frontmatter 선언 + profile 표를 합쳐 해석한다."""
+    from agent_flow.core.profile_routing import routed_profile_skills
+
     roots = skill_roots(project_root, profile=profile, host=host, env=env)
     declared = phase_skills or PhaseSkills()
     required_names: list[str] = list(declared.required)
@@ -204,11 +215,26 @@ def resolve_phase_skills(
         if _entry_activates(entry, phase_id, changed_files, task_text):
             required_names.append(entry.name)
 
+    # profile 표로 붙는 skill은 upstream 파일이라 frontmatter 선언이 없다.
+    # 부재 안내는 표의 source URL로 한다 — root의 일반 install hint로는
+    # 어느 저장소에서 받아야 하는지 알 수 없다.
+    routed_hints: dict[str, str] = {}
+    for routed in routed_profile_skills(
+        profile, phase_id=phase_id, changed_files=changed_files, task_text=task_text
+    ):
+        if routed.source:
+            routed_hints.setdefault(routed.name, routed.source)
+        if routed.name not in required_names:
+            required_names.append(routed.name)
+
     required_names = _expand_dependencies(required_names, catalog)
     optional_names = [name for name in optional_names if name not in required_names]
 
     return SkillResolution(
-        required=tuple(resolve_skill(name, roots) for name in _stable_unique(required_names)),
+        required=tuple(
+            resolve_skill(name, roots, install_hint=routed_hints.get(name, ""))
+            for name in _stable_unique(required_names)
+        ),
         optional=tuple(resolve_skill(name, roots) for name in _stable_unique(optional_names)),
     )
 
@@ -454,6 +480,28 @@ def _read_frontmatter(skill_path: Path) -> dict | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def selector_matches(
+    *,
+    task_terms: Sequence[str],
+    path_globs: Sequence[str],
+    changed_files: Sequence[str],
+    task_text: str,
+) -> bool:
+    """task 문구나 변경 경로가 선택자에 걸리는가.
+
+    frontmatter 선언과 profile 표가 같은 판정을 쓰도록 여기 하나만 둔다.
+    """
+    haystack = task_text.lower()
+    if any(term.lower() in haystack for term in task_terms if term):
+        return True
+    normalized = [str(path).replace("\\", "/") for path in changed_files]
+    return any(
+        _glob_matches(pattern, candidate)
+        for pattern in path_globs
+        for candidate in normalized
+    )
+
+
 def _entry_activates(
     entry: SkillCatalogEntry, phase_id: str, changed_files: Sequence[str], task_text: str
 ) -> bool:
@@ -466,14 +514,11 @@ def _entry_activates(
             return False
     elif not entry.task_terms and not entry.path_globs:
         return True
-    haystack = task_text.lower()
-    if any(term in haystack for term in entry.task_terms):
-        return True
-    normalized = [str(path).replace("\\", "/") for path in changed_files]
-    return any(
-        _glob_matches(pattern, candidate)
-        for pattern in entry.path_globs
-        for candidate in normalized
+    return selector_matches(
+        task_terms=entry.task_terms,
+        path_globs=entry.path_globs,
+        changed_files=changed_files,
+        task_text=task_text,
     )
 
 

@@ -10,6 +10,7 @@ from typing import Sequence
 from agent_flow.core.markers import completion_gate_marker_values
 from agent_flow.core.commands import run_safe_command
 from agent_flow.core.profiles import active_profile_ids, load_profile_payload
+from agent_flow.core.profile_routing import routed_profile_skills
 from agent_flow.core.worktree_isolation import git_repo_state, leader_root_for
 from agent_flow.core.skill_resolver import (
     CODE_PHASES,
@@ -54,16 +55,45 @@ def changed_files(project_root: Path) -> tuple[str, ...]:
 
 
 def merged_profile_payload(payloads: Sequence[dict]) -> dict:
-    """다중 profile일 때 skill_sources만 이어 붙인다. resolver가 보는 건 그것뿐이다."""
+    """다중 profile 합본. resolver가 보는 키만 이어 붙인다.
+
+    `update`만 하면 뒤 profile이 앞 profile의 `skills.required_review`와 skill 표를
+    통째로 덮는다. react-native + android처럼 둘 다 활성인 조합에서 한쪽 routing이
+    조용히 사라지는 경로가 그것이다. 순서는 `active_profile_ids()`가 준 순서를
+    유지하고, 같은 그룹/표 이름은 **먼저 온 profile이 이긴다** — detect 우선순위가
+    곧 소유권이다.
+    """
     merged: dict = {}
     sources: list = []
+    groups: list[dict] = []
+    seen_groups: set[str] = set()
+    tables: dict[str, dict] = {}
     for payload in payloads:
         merged.update(payload)
         declared = payload.get("skill_sources")
         if isinstance(declared, list):
             sources.extend(declared)
+        skills = payload.get("skills")
+        if isinstance(skills, dict) and isinstance(skills.get("required_review"), list):
+            for group in skills["required_review"]:
+                if not isinstance(group, dict):
+                    continue
+                key = str(group.get("group", "")) + "|" + str(group.get("skills_from", ""))
+                if key in seen_groups:
+                    continue
+                seen_groups.add(key)
+                groups.append(group)
+        for key, value in payload.items():
+            if isinstance(value, dict) and isinstance(value.get("implementation"), list):
+                tables.setdefault(key, value)
     if sources:
         merged["skill_sources"] = sources
+    if groups:
+        skills = dict(merged.get("skills") or {})
+        skills["required_review"] = groups
+        merged["skills"] = skills
+    for name, table in tables.items():
+        merged[name] = table
     return merged
 
 
@@ -239,6 +269,28 @@ def missing_local_skill_markers(
             missing.append(f"project-local-skills-used: {expected}")
         if values.get("project-local-skill-docs") != "applied":
             missing.append(APPLIED_MARKER)
+
+    # L4: profile 표로 붙었는데 host에 없는 skill. 설치를 강요하지는 않지만,
+    #     "없다"는 사실이 artifact에 이름으로 남아야 한다. `none`으로 덮으면
+    #     Android scope만 조용히 검증 없이 통과한다.
+    routed_missing = _missing_routed_names(
+        phase_id,
+        profile=profile,
+        changed_files=changed_files,
+        task_text=task_text,
+        resolution=resolution,
+    )
+    if routed_missing:
+        declared = values.get("missing-required-profile-skills", "").strip()
+        names = {
+            token.strip().lower()
+            for token in declared.replace(";", ",").split(",")
+            if token.strip()
+        }
+        if not all(name.lower() in names for name in routed_missing):
+            missing.append(
+                "missing-required-profile-skills: " + ", ".join(routed_missing)
+            )
     return missing
 
 
@@ -342,6 +394,28 @@ def _marker_instruction(resolution: SkillResolution, *, enforced: bool = True) -
             "",
         ]
     )
+
+
+def _missing_routed_names(
+    phase_id: str,
+    *,
+    profile: dict | None,
+    changed_files: Sequence[str],
+    task_text: str,
+    resolution: SkillResolution,
+) -> list[str]:
+    routed = {
+        skill.name
+        for skill in routed_profile_skills(
+            profile,
+            phase_id=phase_id,
+            changed_files=changed_files,
+            task_text=task_text,
+        )
+    }
+    if not routed:
+        return []
+    return [skill.name for skill in resolution.missing if skill.name in routed]
 
 
 def _mentions_required(value: str, resolution: SkillResolution) -> bool:

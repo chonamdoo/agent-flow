@@ -683,6 +683,60 @@ for (const entry of fs.readdirSync(path.join(SOURCE_ROOT, "profiles")).sort()) {
   }
 }
 
+// #105: profile skill 표는 소비자가 있어야 한다. 선언만 남으면 "보여 주지 않는
+// 표를 읽으라"로 되돌아간다.
+{
+  const resolverText = readIfExists("src/agent_flow/core/skill_resolver.py") ?? "";
+  if (!resolverText.includes("routed_profile_skills(")) {
+    failures.push("skill_resolver.py must consume profile_routing.routed_profile_skills");
+  }
+  const routingText = readIfExists("src/agent_flow/core/profile_routing.py");
+  if (routingText === null) {
+    failures.push("src/agent_flow/core/profile_routing.py is missing");
+  }
+  // Node runner는 skill 판정을 Python CLI에 위임한다. 여기에 matcher가 생기면
+  // 두 벌이 조용히 갈라진다.
+  const kitText = readIfExists("bin/agent-flow-kit.mjs") ?? "";
+  if (kitText.includes("task_terms")) {
+    failures.push("bin/agent-flow-kit.mjs must not reimplement profile skill routing");
+  }
+  for (const entry of fs.readdirSync(path.join(SOURCE_ROOT, "profiles")).sort()) {
+    if (!entry.endsWith(".yaml") || entry.startsWith("_")) continue;
+    const text = readIfExists(`profiles/${entry}`) ?? "";
+    for (const [name, block] of skillTableEntries(text)) {
+      if (!/\n\s+(task_terms|path_globs):/.test(block)) {
+        failures.push(
+          `profiles/${entry}: skill table entry ${name} has no task_terms/path_globs and can never activate`,
+        );
+      }
+    }
+  }
+}
+
+function skillTableEntries(text) {
+  const lines = text.split(/\r?\n/);
+  const found = [];
+  let inTable = false;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^\S/.test(line)) {
+      inTable = /^(android_skills|chrisbanes_skills):\s*$/.test(line);
+      continue;
+    }
+    if (!inTable) continue;
+    const match = line.match(/^(\s+)- skill: (\S+)\s*$/);
+    if (!match) continue;
+    const body = [];
+    for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
+      const next = lines[cursor];
+      if (!next.startsWith(`${match[1]}  `) || /^\s+- /.test(next)) break;
+      body.push(next);
+    }
+    found.push([match[2], `\n${body.join("\n")}`]);
+  }
+  return found;
+}
+
 // bootstrap은 반복 install 대신 기존 설치된 CLI로 worktree run을 시작해야 한다.
 assertSame("bootstrap/AGENTS.md.template", "bootstrap/CLAUDE.md.template");
 if (CHECK_INSTALLED_COPY) {
