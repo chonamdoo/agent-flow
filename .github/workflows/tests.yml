@@ -5,6 +5,14 @@ on:
   push:
     branches:
       - main
+  # 전 스위트가 몇 분인지는 로컬 추정이 아니라 실측이어야 한다.
+  # `gh workflow run tests.yml`로 아무 브랜치에서나 재볼 수 있게 열어 둔다.
+  workflow_dispatch:
+    inputs:
+      pytest_k:
+        description: "pytest -k expression (empty = full suite)"
+        required: false
+        default: ""
 
 jobs:
   # 이 job이 없으면 테스트 스위트 전체가 로컬 자기신고다. 통과 여부를 저장소
@@ -24,8 +32,38 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e ".[dev]"
-      # 서브셋이 아니라 전 스위트를 돈다. package.json의 `test`는 일부만 돌려서
-      # CI 기준으로 쓸 수 없다.
-      - run: PYTHONPATH=src python3 -m pytest tests -q -p no:cacheprovider -o addopts=""
+      # 기본은 전 스위트다. package.json의 `test`는 일부만 돌려서 CI 기준으로 쓸 수
+      # 없다. workflow_dispatch에서 pytest_k를 준 경우에만 그 선택으로 좁힌다.
+      - name: pytest
+        shell: bash
         env:
           AGENT_FLOW_SKIP_CODEX_TRUST: "1"
+          PYTEST_K: ${{ inputs.pytest_k }}
+        run: |
+          started=$(date +%s)
+          set +e
+          if [ -n "$PYTEST_K" ]; then
+            PYTHONPATH=src python3 -m pytest tests -q -p no:cacheprovider -o addopts="" \
+              --durations=20 -k "$PYTEST_K" 2>&1 | tee pytest.log
+          else
+            PYTHONPATH=src python3 -m pytest tests -q -p no:cacheprovider -o addopts="" \
+              --durations=20 2>&1 | tee pytest.log
+          fi
+          status=${PIPESTATUS[0]}
+          set -e
+          elapsed=$(( $(date +%s) - started ))
+          # 로그를 뒤지지 않고도 벽시계 시간이 남게 요약에 박는다. 요약 기록이
+          # 실패해도 pytest 종료 코드를 잃지 않게 통째로 감싼다. 펜스는 pytest
+          # 출력의 ```보다 길게 잡는다.
+          {
+            echo "## pytest"
+            echo
+            echo "- selection: ${PYTEST_K:-full suite}"
+            echo "- wall clock: ${elapsed}s"
+            echo "- exit code: ${status}"
+            echo
+            echo '````'
+            tail -n 30 pytest.log
+            echo '````'
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}" || true
+          exit "$status"

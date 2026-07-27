@@ -648,6 +648,152 @@ def test_worktree_create_and_start_reject_existing_branch_mismatch(tmp_path: Pat
     assert "already uses branch" in r_start_mismatch.stderr
 
 
+def _add_worktree(project: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", "worktree", "add", *args], cwd=project, check=True, capture_output=True, text=True
+    )
+
+
+def test_worktree_attach_resolves_branch_selector_to_registered_checkout(tmp_path: Path):
+    project = tmp_path / "attach-branch-selector"
+    project.mkdir()
+    _init_git_project(project)
+    # 디렉터리 이름이 생성 규칙과 다르다. 이름 정규화로 경로를 유도하면 이미
+    # 체크아웃된 브랜치를 두 번째 자리에 add하려다 git이 거부한다.
+    _add_worktree(project, "-b", "feat/api", str(project / ".agent-flow" / "worktrees" / "api-work"), "main")
+
+    result = _run_cli(["run", "task", "--worktree", "feat/api"], project)
+
+    assert result.returncode == 0, result.stderr
+    assert "worktree: api-work" in result.stdout
+    assert not (project / ".agent-flow" / "worktrees" / "feat-api").exists()
+
+
+def test_worktree_attach_keeps_name_that_normalization_would_rewrite(tmp_path: Path):
+    project = tmp_path / "attach-odd-name"
+    project.mkdir()
+    _init_git_project(project)
+    checkout = project / ".agent-flow" / "worktrees" / "feat-issue#110"
+    _add_worktree(project, "-b", "feat/issue#110", str(checkout), "main")
+
+    result = _run_cli(["run", "task", "--worktree", "feat-issue#110"], project)
+
+    assert result.returncode == 0, result.stderr
+    assert "worktree: feat-issue#110" in result.stdout
+    # 정규화 경로로 새 checkout과 브랜치가 생기면 조회 명령과 진입 명령이 서로 다른
+    # 대상을 가리키게 된다.
+    assert not (project / ".agent-flow" / "worktrees" / "feat-issue-110").exists()
+    assert not _branch_exists(project, "feat/issue-110")
+
+    status = _run_cli(["status", "--worktree", "feat-issue#110"], project)
+    assert status.returncode == 0, status.stderr
+    assert "feat-issue#110" in status.stdout
+    assert "feat-issue-110" not in status.stdout
+
+
+def test_worktree_attach_rejects_detached_head(tmp_path: Path):
+    project = tmp_path / "attach-detached"
+    project.mkdir()
+    _init_git_project(project)
+    _add_worktree(project, "--detach", str(project / ".agent-flow" / "worktrees" / "feat-det"), "main")
+
+    result = _run_cli(["run", "task", "--worktree", "feat-det"], project)
+
+    assert result.returncode == 2
+    assert "detached HEAD" in result.stderr
+
+
+def test_worktree_attach_rejects_protected_branch(tmp_path: Path):
+    project = tmp_path / "attach-protected"
+    project.mkdir()
+    _init_git_project(project)
+    subprocess.run(["git", "branch", "develop"], cwd=project, check=True, capture_output=True, text=True)
+    _add_worktree(project, str(project / ".agent-flow" / "worktrees" / "feat-dev"), "develop")
+
+    result = _run_cli(["run", "task", "--worktree", "feat-dev"], project)
+
+    assert result.returncode == 2
+    assert "protected worktree branch is not allowed: develop" in result.stderr
+
+
+def test_worktree_selector_outside_managed_root_is_rejected(tmp_path: Path):
+    project = tmp_path / "attach-outside"
+    project.mkdir()
+    _init_git_project(project)
+    outside = tmp_path / "outside-checkout"
+    _add_worktree(project, "-b", "feat/outside", str(outside), "main")
+
+    result = _run_cli(["run", "task", "--worktree", str(outside)], project)
+
+    assert result.returncode == 2
+    assert "is not supported" in result.stderr
+    # 경로 selector를 디렉터리 이름으로 뭉갠 checkout이 생기면 안 된다.
+    managed = project / ".agent-flow" / "worktrees"
+    assert not managed.exists() or list(managed.iterdir()) == []
+
+
+def test_run_from_unmanaged_worktree_reports_the_worktree_it_uses(tmp_path: Path):
+    project = tmp_path / "notice-other-checkout"
+    project.mkdir()
+    _init_git_project(project)
+    outside = tmp_path / "outside-run"
+    _add_worktree(project, "-b", "feat/outside", str(outside), "main")
+
+    result = _run_cli(["run", "task"], outside)
+
+    assert result.returncode == 0, result.stderr
+    assert "cwd is worktree" in result.stderr
+    assert (project / ".agent-flow" / "worktrees" / "feat-task").exists()
+
+
+def test_worktree_attach_keeps_the_dirty_leader_guard(tmp_path: Path):
+    project = tmp_path / "attach-dirty-leader"
+    project.mkdir()
+    _init_git_project(project)
+    r_create = _run_cli(["worktree", "create", "--name", "task"], project)
+    assert r_create.returncode == 0, r_create.stderr
+    (project / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+
+    # 재사용도 생성과 같은 문을 지난다. attach가 이 검사를 건너뛰면 --allow-dirty가
+    # 그 경로에서만 무의미해진다.
+    blocked = _run_cli(["run", "task", "--worktree", "task"], project)
+    assert blocked.returncode == 2
+    assert "dirty" in blocked.stderr
+
+    allowed = _run_cli(["run", "task", "--worktree", "task", "--allow-dirty"], project)
+    assert allowed.returncode == 0, allowed.stderr
+
+
+def test_implicit_task_selector_never_attaches_to_a_registered_worktree(tmp_path: Path):
+    project = tmp_path / "implicit-no-attach"
+    project.mkdir()
+    _init_git_project(project)
+    _add_worktree(project, "-b", "feat/api", str(project / ".agent-flow" / "worktrees" / "api-work"), "main")
+
+    # task 이름은 명시 selector가 아니다. 등록부 우선 해석을 여기까지 넓히면 task
+    # 문자열이 남의 checkout 이름과 겹치는 순간 조용히 그 자리에 붙는다.
+    result = _run_cli(["run", "api-work"], project)
+
+    assert result.returncode == 0, result.stderr
+    assert "worktree: feat-api-work" in result.stdout
+    assert (project / ".agent-flow" / "worktrees" / "feat-api-work").exists()
+
+
+def test_start_attaches_to_registered_worktree_and_keys_state_by_its_name(tmp_path: Path):
+    project = tmp_path / "start-attach"
+    project.mkdir()
+    _init_git_project(project)
+    _add_worktree(project, "-b", "feat/api", str(project / ".agent-flow" / "worktrees" / "api-work"), "main")
+
+    result = _run_cli(["start", "development", "--task", "task", "--worktree", "feat/api"], project)
+
+    assert result.returncode == 0, result.stderr
+    assert not (project / ".agent-flow" / "worktrees" / "feat-api").exists()
+    runtime_root = _worktree_runtime_root(project, "api-work")
+    run_dir = next((runtime_root / ".agent-flow" / "runs" / "development").iterdir())
+    assert (run_dir / "manifest.json").exists()
+
+
 def test_start_worktree_writes_state_outside_worktree(tmp_path: Path):
     project = tmp_path / "start-worktree-state"
     project.mkdir()
