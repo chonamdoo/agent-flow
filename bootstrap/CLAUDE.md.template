@@ -47,6 +47,10 @@ Android/Kotlin/Compose/KMP 변경 때만 Android profile의 `android_skills`와 
 ```
 `/agent-flow`는 shell path가 아니라 agent-flow skill trigger로 취급하세요.
 
+run이 SPEC 확인 대기로 막히면 사용자가 대화형 터미널에서 `agent-flow spec confirm --run-dir <run-dir> --artifact <run-dir>/artifacts/design.md`를 직접 실행해야 풀립니다.
+`manual` verify 항목은 사용자가 `agent-flow spec approve <spec-id> --run-dir <run-dir>`를 실행해야 승인 record가 남습니다.
+agent는 이 두 명령을 대신 실행하지 않습니다. agent 셸에서 관측된 확인·승인은 무효 처리됩니다.
+
 ### Artifact
 
 run artifact는 `.agent-flow/runs/<run-id>/`에 저장됩니다. 컨텍스트가 끊겨도 artifact 기반으로 정확히 재개됩니다.

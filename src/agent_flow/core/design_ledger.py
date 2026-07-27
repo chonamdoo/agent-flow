@@ -315,7 +315,13 @@ def read_ledger(run_dir: Path) -> DesignLedger:
         errors.append("run task does not match design-spec.md")
     capture = _read_json(run_dir / SPEC_CAPTURE_FILE)
     if not isinstance(capture, dict):
-        errors.append("spec capture state is missing")
+        # spec capture는 design-spec.md보다 늦게 도입됐다. 그 사이에 시작된 run은
+        # 원장만 있고 capture가 없어 여기서 걸린다. 무엇이 없는지만 말하면 사용자는
+        # 복구 경로를 못 찾는다.
+        errors.append(
+            "spec capture state is missing (this run's design-spec.md predates spec "
+            "capture; redo the design/prd phase so the runner recaptures it)"
+        )
     else:
         if capture.get("source_phase") != source:
             errors.append("source phase does not match spec capture state")
@@ -618,7 +624,11 @@ def ledger_prompt_block(run_dir: Path) -> str:
             raise RuntimeError("design-spec.md is missing after the source phase")
         return ""
     if ledger.errors:
-        raise RuntimeError(f"design-spec.md is invalid: {'; '.join(ledger.errors)}")
+        raise RuntimeError(
+            f"design-spec.md is invalid: {'; '.join(ledger.errors)}. "
+            "This block is injected into every phase prompt, so the run cannot "
+            "advance until it is valid: redo the source phase, or start a new run."
+        )
     if _run_task_text(run_dir) and not ledger.spec_items:
         raise RuntimeError("design-spec.md has no SPEC items for a non-empty task")
     header = (

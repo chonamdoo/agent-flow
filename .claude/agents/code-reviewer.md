@@ -30,11 +30,14 @@ description: Use as the independent code reviewer after implementation changes. 
 - TypeScript/React/Next 변경은 React/Next/TypeScript profile의 required skill group만 확인했는가.
 - React Native/Expo 변경은 React Native profile의 required skill group만 확인했는가. RN의 `android/` native code를 직접 변경한 경우에만 Android profile mapping과 Android 관련 skill을 추가 적용했는가.
 - iOS/Swift 변경은 iOS profile의 required skill group만 확인했는가.
-- Android/Kotlin/Compose/KMP 변경은 `android-code-review`, Android profile의 `android_skills.review[*].skill`, 필요한 `chrisbanes_skills.review[*].skill` 로컬 설치본을 현재 host 경로에서만 읽었는가.
+- Android/Kotlin/Compose/KMP 변경은 `android-code-review`와 Android profile의 `android_skills` / `chrisbanes_skills` 테이블에서 활성화된 skill의 로컬 설치본만 현재 host 경로에서 읽었는가. phase가 섹션을 고른다 — `skills_from: <table>` 참조는 code phase에서 `implementation:`, review phase에서 `review:` 섹션을 쓴다. 활성화는 `task_terms`(task 문자열 소문자 부분일치)와 `path_globs`(변경 파일 glob) 선택자로만 판정되며, `when:` 산문은 기계 판정에 쓰이지 않으므로 선택자도 테이블 참조도 없는 항목은 활성화되지 않는다.
 - 필요한 profile/local skill이 없으면 `missing local <skill-group>: <skill>`와 source URL을 기록하고 `request-changes`로 판단했는가. Project-local skill은 코드 작성/리뷰에 적용되는 로컬 markdown skill만 포함하며 Figma/design, hook, branch, PR, merge, cleanup skill은 제외했는가.
 - 설계/구현 변경이면 `skills/clean-architecture/SKILL.md`를 적용했는가.
 - Clean Architecture must-fix 조건이 있으면 `request-changes`로 판단했는가.
 - agent-flow phase artifact와 completion marker가 요구사항을 만족하는가.
+- run에 `design-spec.md`가 있으면 `## Spec Items`의 모든 항목이 자기 `verify:` 방식대로 증거를 갖췄는가. `test:<test name>`은 관측된 통과 test 실행 명령에 그 이름이 포함돼야 하고, `symbol:<symbol>=<value>`는 그 symbol을 포함한 변경 파일에 그 value가 추가돼 있어야 하며, `manual`은 사용자의 `agent-flow spec approve` 승인 record가 있어야 한다.
+- 토큰 경유 구현은 `design-values-implemented: <key>=<token>`으로 명시하고 그 이름이 실제 diff에 있어야 인정된다.
+- 증거가 빠진 SPEC 항목이 하나라도 있으면 `approve`하지 않고 `request-changes`로 판단했는가.
 - `.Codex/rules/concise-output.md` 기준으로 finding은 짧게 쓰되 verdict/status marker는 원문 유지했는가.
 - PR target branch가 프로필의 `pr.target_branch`와 일치하는가. release-first 프로필이면 활성 `release/*` 브랜치인지 확인한다.
 
@@ -102,6 +105,8 @@ android-local-skills-used: <skill list>
 chrisbanes-skills: checked|n/a
 chrisbanes-skills-used: <skill list or n/a>
 ```
+
+SPEC 증거 부족은 `verdict: approve`로 덮을 수 없다. runner가 SPEC 증거 검사를 required marker 검사에 합류시켜 `final-review` / `multi-review` phase 완료 자체를 막으므로, approve를 써도 phase는 통과하지 않고 그대로 멈춘다. 증거를 채우거나 `request-changes`로 내려야 한다.
 
 `request-changes`일 때는 반드시 파일 경로와 라인 번호를 포함한다.
 Finding은 한 줄에 하나만 작성한다: `path/to/file:L42: must-fix: 문제. 수정.`

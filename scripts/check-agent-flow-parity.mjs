@@ -449,6 +449,37 @@ for gate in load_profile("python").gates:
     if gate.phase not in ("pre-commit", "pre-push", "post-merge"):
         raise AssertionError(f"{gate.gate_id}: {gate.phase}")
 `);
+// 설치본 낡음 경고는 두 진입점에 다 있다. 지문이 갈라지면 한쪽만 경고하거나
+// 한쪽이 자산 변경 없이 오경고한다.
+assertPythonContract("kit source digest matches the node wrapper", `
+import hashlib
+from pathlib import Path
+
+from agent_flow.core.kit_digest import KIT_SOURCE_DIGEST_ROOTS, kit_source_digest
+
+expected = ${JSON.stringify(nodeKitSourceDigest())}
+actual = kit_source_digest(Path(${JSON.stringify(SOURCE_ROOT)}))
+if actual != expected:
+    raise AssertionError(f"python {actual} != node {expected}")
+`);
+
+function nodeKitSourceDigest() {
+  const source = read("bin/agent-flow-kit.mjs");
+  const start = source.indexOf("const KIT_SOURCE_DIGEST_ROOTS");
+  const end = source.indexOf("\n}\n", source.indexOf("function walkFilesSorted")) + 3;
+  if (start === -1 || end <= start) {
+    failures.push("node kit source digest extraction failed");
+    return "";
+  }
+  return new Function(
+    "fs",
+    "path",
+    "crypto",
+    "KIT_ROOT",
+    `${source.slice(start, end)}\nreturn kitSourceDigest();`,
+  )(fs, path, { createHash }, SOURCE_ROOT);
+}
+
 assertPythonContract("react-native profile wins over Gradle", `
 import json
 from pathlib import Path
@@ -775,7 +806,7 @@ assertContains(".claude/agents/code-reviewer.md", "description:");
 
 if (CHECK_INSTALLED_COPY) {
   assertContains(".agent-flow/rules/workflow-contract.md", "Required review happens before completion QA");
-  assertContains(".agent-flow/rules/workflow-contract.md", "gates run BUILD -> TYPECHECK -> LINT");
+  assertContains(".agent-flow/rules/workflow-contract.md", "agent-flow gates --phase all");
   assertContains(".agent-flow/rules/workflow-contract.md", "default workflow, gates run as their own phase");
   assertContains(".agent-flow/rules/workflow-contract.md", "short Korean");
   assertContains(".agent-flow/rules/workflow-contract.md", "two active-host sub-agents");
@@ -811,13 +842,13 @@ function resolveInstalledRoot(start) {
 
 function resolveManagedWorktreeRoot(start) {
   const parts = start.split(path.sep);
-  const markers = new Set([".agent-flow", ".codex", ".Codex"]);
+  const markers = new Set([".agent-flow", ".codex", ".Codex", ".omp"]);
   for (let index = parts.length - 2; index >= 0; index -= 1) {
     if (parts[index + 1] !== "worktrees") continue;
     if (!markers.has(parts[index])) continue;
     const root = parts.slice(0, index).join(path.sep) || path.sep;
-    // 홈의 전역 Codex worktree는 설치 루트가 아니라 git common root를 따라간다.
-    if (HOME && samePath(root, HOME) && (parts[index] === ".codex" || parts[index] === ".Codex")) {
+    // 홈의 전역 Codex/OMP worktree는 설치 루트가 아니라 git common root를 따라간다.
+    if (HOME && samePath(root, HOME) && (parts[index] === ".codex" || parts[index] === ".Codex" || parts[index] === ".omp")) {
       continue;
     }
     return root;

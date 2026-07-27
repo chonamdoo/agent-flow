@@ -493,6 +493,20 @@ phases:
       `missing local <group>: <skill>` with the source URL and make that
       reviewer verdict `request-changes`. Unrelated platform skill absence must
       not block.
+      The markers below are not the whole completion contract. The runner also
+      verifies this run's `design-spec.md` ledger at this phase, and
+      `verdict: approve` does not override it — an unmet item blocks phase
+      completion. Every SPEC item needs evidence in the form its `verify:`
+      declares:
+        - `test:<name>` — an observed test command that ran that name and exited 0
+        - `symbol:<symbol>=<value>` — the value added in a changed file that
+          contains the symbol
+        - `manual` — a user approval record, which only the user can create with
+          `agent-flow spec approve`
+      Recorded design values must appear in the diff. When a value reaches the
+      code through a token, declare it as
+      `design-values-implemented: <key>=<token>` and that token must be in the
+      diff.
       Also include:
 
           ## Completion Gate
@@ -638,8 +652,12 @@ phases:
       pending: block
       default: fix-loop
     prompt: |
-      Run QA only after required reviewers approve. Execute profile gates in
-      BUILD -> TYPECHECK -> LINT order where applicable, plus context lint.
+      Run QA only after required reviewers approve. Run the profile gates with
+      `agent-flow gates --phase all --run-dir <run-dir>`, plus context lint.
+      `--phase all` is required: the CLI default is `pre-commit`, build and test
+      gates are declared `pre-push`, and a default run never puts them on the
+      list. The runner reads `produced_by.gate_phase` from the result file and
+      does not accept a `pre-commit` run as passing QA evidence.
       Docs-only PRs must still run context lint. Save
       structured JSON with a top-level `passed` boolean and a `results` array.
       When an explicit route status is needed, also include top-level `status`

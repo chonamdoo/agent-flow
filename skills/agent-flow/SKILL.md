@@ -33,6 +33,20 @@ When the user types `/agent-flow status`, run:
 agent-flow status
 ```
 
+## User-Only Commands
+
+Two commands confirm SPEC items and must be typed by the user in an interactive terminal:
+
+```bash
+agent-flow spec confirm --run-dir <run-dir> --artifact <run-dir>/artifacts/design.md
+agent-flow spec approve <spec-id> --run-dir <run-dir>
+```
+
+- `spec confirm` confirms the `## Spec Items` of a design or prd artifact. `--artifact` takes a path, not a bare name.
+- `spec approve` records the approval for a SPEC item whose `verify:` is `manual`.
+- Never run either command yourself. A confirmation or approval observed from an agent shell is voided and the phase stays blocked.
+- When a run is waiting on SPEC confirmation, print the exact command and wait for the user.
+
 ## Behavior
 
 - Treat `/agent-flow` as a project-local workflow trigger, not as a shell path.
