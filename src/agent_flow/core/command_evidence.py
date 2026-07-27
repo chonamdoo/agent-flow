@@ -16,7 +16,9 @@ hook이 없는 host에서는 로그 파일 자체가 없다. 그때는 `availabl
 from __future__ import annotations
 
 import json
+import os
 import re
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -56,6 +58,7 @@ class CommandRun:
     command: str
     exit_code: int | None
     at: float
+    cwd: str = ""
 
 
 @dataclass(frozen=True)
@@ -88,7 +91,12 @@ class CommandRunEvidence:
         )
 
 
-def read_command_evidence(project_root: Path, *, since: float | None = None) -> CommandRunEvidence:
+def read_command_evidence(
+    project_root: Path,
+    *,
+    since: float | None = None,
+    cwd_root: Path | None = None,
+) -> CommandRunEvidence:
     """관측 로그를 읽는다. 파일이 없으면 hook 미등록/미지원 host로 본다."""
     log_path = project_root / COMMANDS_RUN_LOG
     try:
@@ -113,12 +121,18 @@ def read_command_evidence(project_root: Path, *, since: float | None = None) -> 
         stamp = float(at) if isinstance(at, (int, float)) else 0.0
         if since is not None and stamp < since:
             continue
+        cwd = entry.get("cwd")
+        if cwd_root is not None and (
+            not isinstance(cwd, str) or not _path_is_within(Path(cwd), cwd_root)
+        ):
+            continue
         code = entry.get("exit_code")
         runs.append(
             CommandRun(
                 command=command,
                 exit_code=code if isinstance(code, int) and not isinstance(code, bool) else None,
                 at=stamp,
+                cwd=cwd if isinstance(cwd, str) else "",
             )
         )
     return CommandRunEvidence(available=True, runs=tuple(runs))
@@ -127,6 +141,131 @@ def read_command_evidence(project_root: Path, *, since: float | None = None) -> 
 def _needle_pattern(needle: str) -> re.Pattern[str]:
     """토큰 경계로 맞춘다. 부분 문자열로 맞추면 `mypytest`가 `pytest`로 통과한다."""
     return re.compile(rf"(?<![\w.-]){re.escape(needle.strip())}(?![\w.-])")
+
+
+# 사용자만 돌려야 하는 명령. agent의 셸에서 관측되면 그 record는 사용자 확인이
+# 아니다. 관측이 "안 돌렸다"만 잡는 다른 gate와 방향이 반대다 - 여기서는 로그에
+# 남았다는 사실 자체가 위반의 증거다.
+_SPEC_APPROVAL_CLI_TOKENS = ("agent-flow", "agent_flow.cli")
+_SPEC_APPROVAL_SUBCOMMANDS = ("confirm", "approve")
+
+
+def agent_run_spec_approvals(evidence: CommandRunEvidence) -> tuple[CommandRun, ...]:
+    """agent 셸에서 관측된 `agent-flow spec confirm|approve` 실행."""
+    if not evidence.available:
+        return ()
+    observed: list[CommandRun] = []
+    for cli in _SPEC_APPROVAL_CLI_TOKENS:
+        for subcommand in _SPEC_APPROVAL_SUBCOMMANDS:
+            observed.extend(evidence.matching_all((cli, "spec", subcommand)))
+    return tuple(dict.fromkeys(observed))
+
+
+def command_is_unmasked(command: str) -> bool:
+    return bool(_single_command_argv(command))
+
+
+def is_concrete_test_selector(value: str) -> bool:
+    selector = value.strip()
+    return bool(
+        len(selector) >= 3
+        and re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.:/#\[\]-]*", selector)
+    )
+
+
+def is_test_command_execution(
+    command: str,
+    expected_tokens: Sequence[str],
+    test_name: str,
+) -> bool:
+    argv = _single_command_argv(command)
+    if not argv or not is_concrete_test_selector(test_name):
+        return False
+    lowered = tuple(part.lower() for part in argv)
+    if any(
+        flag in lowered
+        for flag in (
+            "--collect-only",
+            "--list-tests",
+            "--listtests",
+            "--dry-run",
+            "--help",
+            "--version",
+        )
+    ):
+        return False
+    normalized = tuple(os.path.basename(part).lower() for part in argv)
+    required = tuple(
+        os.path.basename(str(token)).lower()
+        for token in expected_tokens
+        if str(token).strip() and not str(token).startswith("-")
+    )
+    if not required or not all(token in normalized for token in required):
+        return False
+    executable = _effective_executable(argv)
+    allowed = {required[0], *FALLBACK_TEST_TOKENS, "npm", "pnpm", "yarn", "bun"}
+    if executable not in allowed:
+        return False
+    return _command_selects_exact_test(argv, test_name)
+
+
+def _command_selects_exact_test(argv: Sequence[str], test_name: str) -> bool:
+    escaped = re.escape(test_name)
+    node_selector = re.compile(rf"[:/#.]{escaped}(?:$|[\[])")
+    anchored_selector = re.compile(
+        rf"^(?:--test-name-pattern|--testNamePattern|--filter)=\^{escaped}\$$"
+    )
+    return any(
+        node_selector.search(part) or anchored_selector.fullmatch(part)
+        for part in argv[1:]
+    )
+
+
+def _single_command_argv(command: str) -> tuple[str, ...]:
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>()")
+        lexer.whitespace_split = True
+        argv = tuple(lexer)
+    except ValueError:
+        return ()
+    if not argv or any(
+        token == "!" or (token and set(token) <= set(";&|<>()"))
+        for token in argv
+    ):
+        return ()
+    index = 0
+    if argv[0] == "env":
+        index = 1
+    while index < len(argv) and re.fullmatch(
+        r"[A-Za-z_][A-Za-z0-9_]*=.*",
+        argv[index],
+    ):
+        index += 1
+    return argv[index:]
+
+
+def _effective_executable(argv: Sequence[str]) -> str:
+    if not argv:
+        return ""
+    names = tuple(os.path.basename(part).lower() for part in argv)
+    first = names[0]
+    if first.startswith("python") and len(names) >= 3 and names[1] == "-m":
+        return names[2]
+    if first in {"uv", "poetry", "pipenv"} and len(names) >= 3 and names[1] == "run":
+        return names[2]
+    if first == "bundle" and len(names) >= 3 and names[1] == "exec":
+        return names[2]
+    if first in {"npx", "pnpx"} and len(names) >= 2:
+        return names[1]
+    return first
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 def resolve_test_command_tokens(profile: dict | None) -> tuple[tuple[str, ...], ...]:

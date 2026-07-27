@@ -291,6 +291,8 @@ function runWorkflowCommand(args) {
       run_id: runId,
       workflow,
       task,
+      // design-spec.md의 task digest와 대조된다. Python `artifact.create_run`과 같은 계약이다.
+      task_digest: crypto.createHash("sha256").update(task.trim()).digest("hex"),
       phase_index: 0,
       phase: phases[0].id,
       status: "running",
@@ -376,7 +378,8 @@ function runWorkflowCommand(args) {
       throw new Error(`blocked: missing artifact ${artifact}`);
     }
     assertFreshArtifact(state, phase, artifact);
-    assertCompletionMarkers(phase, artifact, root, state.workflow);
+    assertCompletionMarkers(phase, artifact, root, state.workflow, runDir);
+    captureSpecLedger(root, runDir, phase, artifact);
     const nextIndex = nextPhaseIndex(state, phases, phase, artifact);
     syncRouteArtifacts(runDir, phases, state.phase_index, nextIndex);
     const nextPhase = phases[nextIndex];
@@ -631,7 +634,7 @@ function resolveAgentFlowRoot(start) {
     return worktreeRoot;
   }
   const gitCommonRoot = resolveGitCommonWorktreeRoot(start);
-  if (gitCommonRoot && fs.existsSync(path.join(gitCommonRoot, ".agent-flow", "kit.json"))) {
+  if (gitCommonRoot) {
     return gitCommonRoot;
   }
   const parts = start.split(path.sep);
@@ -703,7 +706,7 @@ function resolveGitCommonWorktreeRoot(start) {
   if (!topLevel || !commonDir) {
     return null;
   }
-  const resolvedCommonDir = path.resolve(topLevel, commonDir);
+  const resolvedCommonDir = path.resolve(start, commonDir);
   if (path.basename(resolvedCommonDir) !== ".git") {
     return null;
   }
@@ -933,11 +936,13 @@ function printNext(state, root = null) {
     console.log(`workflow complete: ${state.run_id}`);
     return;
   }
+  const resolvedRunDir = root ? resolveRunDir(root, state.run_dir) : state.run_dir;
   const localSkillBlock = root ? localSkillPromptBlock(root, phase.id, state.workflow) : "";
+  const specBlock = root ? specPromptBlock(root, resolvedRunDir) : "";
   console.log(`Current phase: ${phase.id}`);
   console.log(`Run: ${state.run_id}`);
   console.log(`Required artifact: ${path.join(state.run_dir, phase.artifact)}`);
-  console.log(`Instruction: ${phase.instruction}${localSkillBlock}`);
+  console.log(`Instruction: ${phase.instruction}${specBlock}${localSkillBlock}`);
 }
 
 function printStatus(state, root) {
@@ -948,20 +953,22 @@ function printStatus(state, root) {
   const resolvedRequiredArtifact = phase ? path.join(resolvedRunDir, phase.artifact) : null;
   let status = complete ? "complete" : state.status;
   let reason = complete ? "workflow_complete" : "in_progress";
+  let missingCompletionMarkers = [];
   if (!complete && resolvedRequiredArtifact && !fs.existsSync(resolvedRequiredArtifact)) {
     status = "awaiting_host";
     reason = "missing_phase_artifact";
   } else if (!complete && requiredArtifact) {
-    const missing = missingMarkersForPhase(
+    missingCompletionMarkers = missingMarkersForPhase(
       fs.readFileSync(resolvedRequiredArtifact, "utf8"),
       phase,
       root,
       state.workflow,
+      resolvedRunDir,
     );
     status = "blocked";
     if (artifactIsStale(state, resolvedRequiredArtifact)) {
       reason = "stale_artifact";
-    } else if (missing.length > 0) {
+    } else if (missingCompletionMarkers.length > 0) {
       reason = "missing_completion_markers";
     } else {
       try {
@@ -985,6 +992,7 @@ function printStatus(state, root) {
     reason,
     required_artifact: requiredArtifact,
     next_command: nextCommand,
+    missing_completion_markers: missingCompletionMarkers,
   };
   console.log(`${state.workflow} ${state.run_id} ${status} phase=${phase?.id ?? "-"}`);
   console.log(`status: ${statusValue(status)}`);
@@ -994,6 +1002,9 @@ function printStatus(state, root) {
   console.log(`reason: ${statusValue(reason)}`);
   if (requiredArtifact) {
     console.log(`required_artifact: ${statusValue(requiredArtifact)}`);
+  }
+  if (missingCompletionMarkers.length > 0) {
+    console.log(`missing_completion_markers: ${JSON.stringify(missingCompletionMarkers)}`);
   }
   console.log(`next_command: ${statusValue(nextCommand)}`);
   console.log(`status_json: ${JSON.stringify(payload)}`);
@@ -1690,9 +1701,9 @@ function artifactIsStale(state, artifact) {
   return artifactMtime < enteredAt;
 }
 
-function assertCompletionMarkers(phase, artifact, root, workflow) {
+function assertCompletionMarkers(phase, artifact, root, workflow, runDir) {
   const content = fs.readFileSync(artifact, "utf8");
-  const missing = missingMarkersForPhase(content, phase, root, workflow);
+  const missing = missingMarkersForPhase(content, phase, root, workflow, runDir);
   if (missing.length > 0) {
     throw new Error(`blocked: ${phase.id} artifact missing completion markers: ${missing.join(", ")}`);
   }
@@ -1727,12 +1738,61 @@ function runSkillsCli(args) {
   return result.stdout;
 }
 
-function missingMarkersForPhase(content, phase, root, workflow) {
+function runSpecCli(args) {
+  const result = safeSpawnSync(preferredPython(), ["-m", "agent_flow.cli", "spec", ...args], {
+    cwd: KIT_ROOT,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      PYTHONPATH: [path.join(KIT_ROOT, "src"), process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
+    },
+    timeout: 15_000,
+  });
+  if (result.error || result.status !== 0) {
+    const detail = result.error?.message || result.stderr?.trim() || `exit ${result.status}`;
+    process.stderr.write(`agent-flow: spec ${args[0]} failed: ${detail}\n`);
+    return null;
+  }
+  return result.stdout;
+}
+
+function captureSpecLedger(root, runDir, phase, artifact) {
+  if (!["design", "prd"].includes(phase?.id)) {
+    return;
+  }
+  const out = runSpecCli([
+    "capture",
+    "--root",
+    root,
+    "--run-dir",
+    runDir,
+    "--phase",
+    phase.id,
+    "--artifact",
+    artifact,
+  ]);
+  if (out === null) {
+    throw new Error("blocked: Python SPEC ledger capture did not answer");
+  }
+}
+
+function specPromptBlock(root, runDir) {
+  const out = runSpecCli(["prompt", "--root", root, "--run-dir", runDir]);
+  if (out === null) {
+    throw new Error("blocked: Python SPEC prompt resolver did not answer");
+  }
+  return out;
+}
+
+function missingMarkersForPhase(content, phase, root, workflow, runDir = null) {
   const missing = missingMarkers(content, phase.required_markers ?? []);
   if (!root) {
     return missing;
   }
-  return missing.concat(missingProjectLocalSkillMarkers(content, root, phase, workflow));
+  return missing
+    .concat(missingProjectLocalSkillMarkers(content, root, phase, workflow))
+    .concat(missingSpecMarkers(content, root, phase, runDir));
 }
 
 
@@ -1784,6 +1844,44 @@ function missingProjectLocalSkillMarkers(content, root, phase, workflow) {
   }
 }
 
+function missingSpecMarkers(content, root, phase, runDir) {
+  const phaseId = typeof phase === "string" ? phase : phase?.id;
+  if (!root || !phaseId || !runDir) {
+    return [];
+  }
+  const checkoutRoot = gitOutput(process.cwd(), ["rev-parse", "--show-toplevel"]) || root;
+  const artifact = writeTempArtifact(content);
+  try {
+    const out = runSpecCli([
+      "markers",
+      "--root",
+      root,
+      "--run-dir",
+      runDir,
+      "--project-root",
+      checkoutRoot,
+      "--phase",
+      phaseId,
+      "--artifact",
+      artifact,
+    ]);
+    if (out === null) {
+      return ["spec-check-unavailable: Python SPEC resolver did not answer"];
+    }
+    const parsed = JSON.parse(out);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    process.stderr.write(`agent-flow: SPEC marker check failed: ${error.message}\n`);
+    return ["spec-check-unavailable: Python SPEC resolver did not answer"];
+  } finally {
+    try {
+      fs.rmSync(artifact, { force: true });
+    } catch (_error) {
+      /* 임시 파일 정리 실패가 phase 판정을 막아서는 안 된다. */
+    }
+  }
+}
+
 function writeTempArtifact(content) {
   const file = path.join(os.tmpdir(), `agent-flow-markers-${process.pid}-${Date.now()}.md`);
   fs.writeFileSync(file, content, "utf8");
@@ -1798,20 +1896,11 @@ function markerPresent(content, gateLines, marker) {
 }
 
 function headingPresent(content, marker) {
-  let inFence = false;
-  for (const line of content.split(/\r?\n/)) {
+  for (const line of unfencedMarkdownText(content).split(/\r?\n/)) {
     if (line.startsWith("    ") || line.startsWith("\t")) {
       continue;
     }
-    const stripped = line.trim();
-    const lowered = stripped.toLowerCase();
-    if (lowered.startsWith("```") || lowered.startsWith("~~~")) {
-      inFence = !inFence;
-      continue;
-    }
-    if (inFence) {
-      continue;
-    }
+    const lowered = line.trim().toLowerCase();
     if (lowered.startsWith("#") && lowered === marker) {
       return true;
     }
@@ -1820,23 +1909,14 @@ function headingPresent(content, marker) {
 }
 
 function completionGateLines(content) {
-  const lines = content.split(/\r?\n/);
   const out = [];
   let inGate = false;
-  let inFence = false;
-  for (const line of lines) {
+  for (const line of unfencedMarkdownText(content).split(/\r?\n/)) {
     if (line.startsWith("    ") || line.startsWith("\t")) {
       continue;
     }
     const stripped = line.trim();
     const lowered = stripped.toLowerCase();
-    if (lowered.startsWith("```") || lowered.startsWith("~~~")) {
-      inFence = !inFence;
-      continue;
-    }
-    if (inFence) {
-      continue;
-    }
     if (lowered.startsWith("#")) {
       const heading = lowered.replace(/^#+/, "").trim();
       if (heading === "completion gate") {
@@ -2072,7 +2152,40 @@ function readMultiReviewVerdict(pathName, phaseId = "") {
   throw new Error("blocked: multi-review artifact must include matching reviewer verdicts and overall verdict");
 }
 
+function unfencedMarkdownText(content) {
+  // Python `phase_workflow.unfenced_markdown_text`와 같은 판정이어야 한다. 한 줄짜리
+  // 코드 스팬(```js x```)을 fence 시작으로 읽으면 그 뒤 본문이 통째로 사라진다.
+  const visible = [];
+  let fenceChar = "";
+  let fenceLength = 0;
+  for (const line of String(content).split(/\r?\n/)) {
+    if (fenceChar) {
+      const closer = new RegExp(`^ {0,3}\\${fenceChar}{${fenceLength},}[ \\t]*$`);
+      if (closer.test(line)) {
+        fenceChar = "";
+        fenceLength = 0;
+      }
+      continue;
+    }
+    const opener = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+    if (opener) {
+      const [, marker, info] = opener;
+      if (marker[0] === "`" && info.includes("`")) {
+        visible.push(line);
+        continue;
+      }
+      fenceChar = marker[0];
+      fenceLength = marker.length;
+      continue;
+    }
+    visible.push(line);
+  }
+  return visible.join("\n");
+}
+
+
 function readMultiReviewOverallVerdict(content) {
+  content = unfencedMarkdownText(content);
   // Python runner와 같은 heading alias(Overall/Final [Verdict])를 인정한다.
   const sections = content.split(/^##[ \t]+(?:Overall|Final)(?:[ \t]+Verdict)?[ \t]*$/im);
   if (sections.length < 2) {
@@ -2094,6 +2207,7 @@ function readMultiReviewOverallVerdict(content) {
 }
 
 function parseReviewerVerdicts(content) {
+  content = unfencedMarkdownText(content);
   // reviewer id를 키로 정규화해 한 reviewer가 여러 번 approve를 찍어도 독립 리뷰로 세지 않는다.
   const reviewers = new Map();
   const stateFor = (reviewerId) => {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shlex
@@ -150,6 +151,8 @@ def _append_event(run_dir: Path, event: str, details: dict[str, str]) -> None:
 
 def _state_payload(state: RunState) -> dict[str, str]:
     payload = asdict(state)
+    # design-spec.md의 task digest와 대조된다. `artifact.create_run`과 같은 계약이다.
+    payload["task_digest"] = hashlib.sha256(state.task.strip().encode("utf-8")).hexdigest()
     payload["run_dir"] = str(Path(".agent-flow") / "runs" / state.workflow_id / state.run_id)
     if isinstance(payload.get("worktree"), dict):
         worktree = dict(payload["worktree"])

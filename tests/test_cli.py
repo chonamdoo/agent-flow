@@ -21,6 +21,13 @@ from importlib import resources
 from agent_flow.cli import main
 from agent_flow.adapters.templates import PromptContext, render_stage_prompt
 from agent_flow.core.gates import GateCommand, run_gate
+from agent_flow.core.design_ledger import (
+    capture_design_ledger,
+    parse_spec_item_section,
+    record_spec_set_confirmation,
+    spec_set_confirmation_statement,
+)
+from agent_flow.core.phase_workflow import load_phase_workflow_definition
 from agent_flow.core.profiles import load_profile
 from agent_flow.core.local_skills import (
     local_skill_prompt_block,
@@ -2164,6 +2171,293 @@ class CliTest(unittest.TestCase):
             self.assertIn("reason: phase_artifact_written_advance_required", status.stdout)
             self.assertNotIn("reason: missing_phase_artifact", status.stdout)
 
+    def test_node_runner_blocks_missing_manual_spec_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            kit_root = Path(__file__).resolve().parents[1]
+            node = _node_executable()
+            install = subprocess.run(
+                (node, str(kit_root / "bin" / "agent-flow-kit.mjs"), "install"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(install.returncode, 0, install.stderr)
+            start = subprocess.run(
+                (
+                    node,
+                    str(kit_root / "bin" / "agent-flow-kit.mjs"),
+                    "run",
+                    "start",
+                    "--task",
+                    "confirm rendered copy",
+                    "--run-id",
+                    "r1",
+                ),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(start.returncode, 0, start.stderr)
+            run_dir = project_root / ".agent-flow" / "runs" / "full-feature" / "r1"
+            source_artifact = """## Spec Items
+
+SPEC-1: Confirm the rendered copy.
+verify: manual
+
+## Design Values
+"""
+            _capture_node_spec_source(run_dir, source_artifact)
+            definition = load_phase_workflow_definition(kit_root, "full-feature")
+            phase_index, phase = next(
+                (index, candidate)
+                for index, candidate in enumerate(definition.phases)
+                if candidate.id == "multi-review"
+            )
+            state_path = project_root / ".agent-flow" / "state" / "current-run.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state.update(
+                {
+                    "phase_index": phase_index,
+                    "phase": phase.id,
+                    "status": "running",
+                }
+            )
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            artifact = run_dir / phase.artifact
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text(_node_phase_content("multi-review"), encoding="utf-8")
+
+            result = subprocess.run(
+                (
+                    node,
+                    str(kit_root / "bin" / "agent-flow-kit.mjs"),
+                    "run",
+                    "advance",
+                ),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("SPEC-1: manual (no user approval record)", result.stderr)
+
+    def test_node_spec_check_uses_project_root_from_a_subdirectory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            source = project_root / "SearchResults.kt"
+            source.write_text("class SearchResults\n", encoding="utf-8")
+            for command in (
+                ("git", "init", "-b", "main"),
+                ("git", "config", "user.email", "test@example.com"),
+                ("git", "config", "user.name", "Test"),
+                ("git", "add", "SearchResults.kt"),
+                ("git", "commit", "-m", "base"),
+            ):
+                completed = subprocess.run(
+                    command,
+                    cwd=project_root,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+
+            kit_root = Path(__file__).resolve().parents[1]
+            node = _node_executable()
+            install = subprocess.run(
+                (node, str(kit_root / "bin" / "agent-flow-kit.mjs"), "install"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(install.returncode, 0, install.stderr)
+            start = subprocess.run(
+                (
+                    node,
+                    str(kit_root / "bin" / "agent-flow-kit.mjs"),
+                    "run",
+                    "start",
+                    "--task",
+                    "show empty search results",
+                    "--run-id",
+                    "r1",
+                ),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(start.returncode, 0, start.stderr)
+            run_dir = project_root / ".agent-flow" / "runs" / "full-feature" / "r1"
+            source_artifact = """## Spec Items
+
+SPEC-1: Show the empty search state.
+verify: symbol:SearchResults=No results
+
+## Design Values
+"""
+            _capture_node_spec_source(run_dir, source_artifact)
+            source.write_text(
+                'class SearchResults {\n    val emptyLabel = "No results"\n}\n',
+                encoding="utf-8",
+            )
+            definition = load_phase_workflow_definition(kit_root, "full-feature")
+            phase_index, phase = next(
+                (index, candidate)
+                for index, candidate in enumerate(definition.phases)
+                if candidate.id == "multi-review"
+            )
+            state_path = project_root / ".agent-flow" / "state" / "current-run.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state.update(
+                {
+                    "phase_index": phase_index,
+                    "phase": phase.id,
+                    "status": "running",
+                }
+            )
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            artifact = run_dir / phase.artifact
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text(
+                _node_phase_content("multi-review"),
+                encoding="utf-8",
+            )
+            nested = project_root / "nested"
+            nested.mkdir()
+
+            result = subprocess.run(
+                (
+                    node,
+                    str(kit_root / "bin" / "agent-flow-kit.mjs"),
+                    "run",
+                    "advance",
+                ),
+                cwd=nested,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_node_runner_captures_and_injects_spec_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            kit_root = Path(__file__).resolve().parents[1]
+            node = _node_executable()
+            install = subprocess.run(
+                (node, str(kit_root / "bin" / "agent-flow-kit.mjs"), "install"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(install.returncode, 0, install.stderr)
+            start = subprocess.run(
+                (
+                    node,
+                    str(kit_root / "bin" / "agent-flow-kit.mjs"),
+                    "run",
+                    "start",
+                    "--task",
+                    "confirm rendered copy",
+                    "--run-id",
+                    "r1",
+                ),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(start.returncode, 0, start.stderr)
+            definition = load_phase_workflow_definition(kit_root, "full-feature")
+            phase_index, phase = next(
+                (index, candidate)
+                for index, candidate in enumerate(definition.phases)
+                if candidate.id == "prd"
+            )
+            state_path = project_root / ".agent-flow" / "state" / "current-run.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state.update(
+                {
+                    "phase_index": phase_index,
+                    "phase": phase.id,
+                    "status": "running",
+                }
+            )
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            run_dir = project_root / ".agent-flow" / "runs" / "full-feature" / "r1"
+            artifact = run_dir / phase.artifact
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            source_artifact = (
+                """# prd
+
+## Spec Items
+
+SPEC-1: Confirm the rendered copy.
+verify: manual
+
+## Design Values
+
+## Completion Gate
+
+spec-items: SPEC-1
+design-values: none
+design-values-confirmed: n/a
+"""
+                + _node_project_local_gate("prd")
+            )
+            artifact.write_text(source_artifact, encoding="utf-8")
+            _confirm_node_spec_set(run_dir, source_artifact)
+
+            result = subprocess.run(
+                (
+                    node,
+                    str(kit_root / "bin" / "agent-flow-kit.mjs"),
+                    "run",
+                    "advance",
+                ),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            ledger = (run_dir / "design-spec.md").read_text(encoding="utf-8")
+            self.assertIn("SPEC-1: Confirm the rendered copy.", ledger)
+            self.assertIn("SPEC-1: Confirm the rendered copy.", result.stdout)
+
+            (run_dir / "design-spec.md").unlink()
+            blocked_prompt = subprocess.run(
+                (
+                    node,
+                    str(kit_root / "bin" / "agent-flow-kit.mjs"),
+                    "run",
+                    "next",
+                ),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(
+                blocked_prompt.returncode,
+                0,
+                blocked_prompt.stdout + blocked_prompt.stderr,
+            )
+            self.assertIn("design-spec.md is missing", blocked_prompt.stderr)
+
     def test_node_runner_uses_parent_install_from_codex_worktree(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
@@ -2928,6 +3222,27 @@ if (codexContext !== undefined) {
             artifact.parent.mkdir(parents=True, exist_ok=True)
             artifact.write_text("domain-grill\n", encoding="utf-8")
 
+            blocked_status = subprocess.run(
+                (node, cli, "run", "status"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(blocked_status.returncode, 0, blocked_status.stderr)
+            blocked_json = next(
+                line
+                for line in blocked_status.stdout.splitlines()
+                if line.startswith("status_json: ")
+            )
+            blocked_payload = json.loads(
+                blocked_json.removeprefix("status_json: ")
+            )
+            self.assertIn(
+                "domain-grill: complete",
+                blocked_payload["missing_completion_markers"],
+            )
+
             missing_markers = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=project_root,
@@ -3253,6 +3568,12 @@ if (codexContext !== undefined) {
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
+            subprocess.run(
+                ("git", "init"),
+                cwd=project_root,
+                check=True,
+                capture_output=True,
+            )
             node = _node_executable()
             result = subprocess.run(
                 (
@@ -4266,6 +4587,29 @@ if (codexContext !== undefined) {
             )
             self.assertEqual(result.returncode, 1)
             self.assertIn("at least 1 independent sub-agent reviewer verdict", result.stderr)
+
+            mr_artifact.write_text(
+                _with_skills_gate(
+                    "```markdown\n"
+                    "## Reviewer 1\nreviewer-source: sub-agent\nverdict: approve\n\n"
+                    "## Reviewer 2\nreviewer-source: sub-agent\nverdict: approve\n\n"
+                    "## Overall\nverdict: approve\n"
+                    "```\n"
+                ),
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                (node, cli, "run", "advance"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn(
+                "at least 1 independent sub-agent reviewer verdict",
+                result.stderr,
+            )
 
             mr_artifact.write_text(_with_skills_gate(
                 "## Reviewer Notes\nverdict: approve\n\nverdict: approve\n",
@@ -5367,6 +5711,17 @@ if (codexContext !== undefined) {
             self.assertIn("status: blocked", lines)
             self.assertIn("reason: missing_completion_markers", lines)
             self.assertTrue(any(line.startswith("status_json: ") for line in lines))
+            status_json = next(
+                line for line in lines if line.startswith("status_json: ")
+            )
+            payload = json.loads(status_json.removeprefix("status_json: "))
+            self.assertIn(
+                "domain-grill: complete",
+                payload["missing_completion_markers"],
+            )
+            self.assertTrue(
+                any(line.startswith("missing_completion_markers: ") for line in lines)
+            )
 
     def test_profile_detection_for_node_and_python(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -9163,6 +9518,59 @@ def _node_gate_results(run_dir, body: dict) -> str:
     return json.dumps(body, sort_keys=True) + "\n"
 
 
+def _confirm_node_spec_set(run_dir, artifact: str) -> None:
+    parsed = parse_spec_item_section(artifact)
+    record_spec_set_confirmation(
+        Path(run_dir),
+        parsed.items,
+        spec_set_confirmation_statement(parsed.items),
+    )
+
+
+def _capture_node_spec_source(run_dir, artifact: str) -> None:
+    source_path = Path(run_dir) / "artifacts" / "prd.md"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text(artifact, encoding="utf-8")
+    _confirm_node_spec_set(run_dir, artifact)
+    capture_design_ledger(Path(run_dir), "prd", artifact)
+
+
+def _node_spec_gate(run_dir) -> str:
+    test_name = "test_agent_flow_spec_contract"
+    if run_dir is not None:
+        project_root = Path(run_dir).parents[3]
+        evidence_path = project_root / ".agent-flow" / "commands-run.jsonl"
+        evidence_path.parent.mkdir(parents=True, exist_ok=True)
+        with evidence_path.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "command": (
+                            "pytest -q "
+                            f"tests/test_agent_flow.py::{test_name}"
+                        ),
+                        "exit_code": 0,
+                        "at": datetime.now(timezone.utc).timestamp(),
+                        "cwd": str(project_root),
+                    }
+                )
+                + "\n"
+            )
+    spec_block = (
+        "## Spec Items\n\n"
+        "SPEC-1: Complete the requested test workflow.\n"
+        f"verify: test:{test_name}\n\n"
+    )
+    if run_dir is not None:
+        parsed = parse_spec_item_section(spec_block)
+        record_spec_set_confirmation(
+            Path(run_dir),
+            parsed.items,
+            spec_set_confirmation_statement(parsed.items),
+        )
+    return spec_block
+
+
 def _node_phase_content(phase: str, prefix: str = "", run_dir=None) -> str:
     content = f"{prefix}{phase}\n"
     skills_gate = (
@@ -9240,8 +9648,10 @@ def _node_phase_content(phase: str, prefix: str = "", run_dir=None) -> str:
     if phase == "prd":
         return (
             content
+            + _node_spec_gate(run_dir)
             + "## Design Values\n\n"
             + "## Completion Gate\n"
+            + "spec-items: SPEC-1\n"
             + "design-values: none\n"
             + "design-values-confirmed: n/a\n"
         )
@@ -9256,13 +9666,17 @@ def _node_phase_content(phase: str, prefix: str = "", run_dir=None) -> str:
             + "performance-optimization: none\n"
             + "module-split: none\n"
         )
-    if phase in {"design", "ddd-design"}:
+    if phase == "design":
         return (
             content
+            + _node_spec_gate(run_dir)
             + "## Design Values\n\n"
             + clean_design_gate
+            + "spec-items: SPEC-1\n"
             + "design-values: none\n"
         )
+    if phase == "ddd-design":
+        return content + "## Design Values\n\n" + clean_design_gate + "design-values: none\n"
     if phase == "multi-review":
         return (
             "## Reviewer 1\nreviewer-source: sub-agent\nreviewer-1 verdict: approve\n\n"

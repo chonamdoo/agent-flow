@@ -52,14 +52,22 @@ from agent_flow.core.design_ledger import (
     capture_design_ledger,
     missing_design_value_markers,
 )
-from agent_flow.core.design_value_check import missing_design_value_implementations
+from agent_flow.core.design_value_check import (
+    missing_design_value_implementations,
+    missing_spec_item_evidence,
+)
 from agent_flow.core.hook_integrity import assert_managed_hooks_registered
 from agent_flow.core.worktree_isolation import (
     assert_leader_unchanged,
     capture_leader_snapshot,
     leader_root_for,
 )
-from agent_flow.core.phase_workflow import find_kit_root, load_phase_workflow_definition
+from agent_flow.core.phase_workflow import (
+    find_kit_root,
+    load_phase_workflow_definition,
+    overall_review_route_key,
+    unfenced_markdown_text,
+)
 from agent_flow.core.report import write_run_report
 from agent_flow.core.security import ensure_child_path, validate_safe_name
 from agent_flow.core.markers import has_failure_markers, missing_markers
@@ -588,6 +596,18 @@ class Runner:
             )
         )
         missing.extend(
+            missing_spec_item_evidence(
+                self.project_root,
+                self.run_dir,
+                phase.id,
+                text,
+                task_text=str(meta.get("task", "")),
+                profile=self.profile,
+                since=_meta_timestamp(meta.get("started_at")),
+                evidence_root=self.config_root,
+            )
+        )
+        missing.extend(
             missing_design_value_implementations(
                 self.project_root,
                 self.run_dir,
@@ -825,7 +845,7 @@ def _gate_nonce_matches(payload: dict[str, object], nonce: str) -> bool:
 
 def _multi_review_route_key(text: str, phase_id: str = "") -> str:
     verdicts = _independent_reviewer_verdicts(text)
-    overall = _multi_review_overall_route_key(text)
+    overall = overall_review_route_key(text)
     if not verdicts:
         return "missing-reviewer"
     if overall == "invalid-verdict":
@@ -874,37 +894,6 @@ def _gate_result_has_evidence(result: dict[str, object]) -> bool:
     return False
 
 
-def _multi_review_overall_route_key(text: str) -> str:
-    in_overall_section = False
-    verdicts: list[str] = []
-    overall_sections = 0
-    for line in text.splitlines():
-        stripped = line.strip()
-        lowered = stripped.lower()
-        heading = re.match(r"^(#{1,6})\s+(.+)$", lowered)
-        if heading:
-            title = heading.group(2)
-            # reviewer 파서와 같은 heading alias(overall/final [verdict])를 인정한다.
-            in_overall_section = bool(
-                heading.group(1) == "##"
-                and re.fullmatch(r"(?:overall|final)(?:\s+verdict)?", title.strip())
-            )
-            if in_overall_section:
-                overall_sections += 1
-            continue
-        if not in_overall_section:
-            continue
-        match = re.match(r"^verdict:\s*(approve|request-changes)\s*$", stripped)
-        if not match:
-            continue
-        verdicts.append(match.group(1))
-    if overall_sections > 1:
-        return "invalid-verdict"
-    if not verdicts:
-        return "default"
-    if len(verdicts) != 1:
-        return "invalid-verdict"
-    return verdicts[0]
 
 
 def _independent_reviewer_verdict_count(text: str) -> int:
@@ -914,7 +903,7 @@ def _independent_reviewer_verdict_count(text: str) -> int:
 def _independent_reviewer_verdicts(text: str) -> dict[str, str]:
     reviewers: dict[str, dict[str, object]] = {}
     current_reviewer: str | None = None
-    for line in text.splitlines():
+    for line in unfenced_markdown_text(text).splitlines():
         stripped = line.strip()
         lowered = stripped.lower()
         if not stripped:
@@ -981,7 +970,10 @@ def _line_marks_non_subagent_source(value: str) -> bool:
 
 
 def _has_subagent_reviewer(text: str) -> bool:
-    return any(_line_marks_subagent_source(line.strip().lower()) for line in text.splitlines())
+    return any(
+        _line_marks_subagent_source(line.strip().lower())
+        for line in unfenced_markdown_text(text).splitlines()
+    )
 
 
 def _is_subagent_source(value: str) -> bool:
