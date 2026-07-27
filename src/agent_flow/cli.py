@@ -746,7 +746,18 @@ def main(argv: list[str] | None = None) -> int:
                 run_dir=_resolve_project_path(run_base, args.run_dir),
                 results=results,
                 cwd=command_root,
+                phase=args.phase,
             )
+            if args.phase != GATE_PHASE_ALL:
+                # runner는 이 결과를 pass 라우팅으로 받아 주지 않는다. 이유를 여기서
+                # 말하지 않으면 사용자는 전 게이트 green인 파일이 fix-loop로 되돌려지는
+                # 것만 보고 왜인지 알 수 없다.
+                print(
+                    f"note: --phase {args.phase} skips the other gate phases "
+                    "(build and test are declared pre-push). The workflow gates phase "
+                    "requires `--phase all`; this result will not route as passing QA.",
+                    file=sys.stderr,
+                )
         failed = [result for result in results if not result.passed]
         required_results = [result for result in results if result.required]
         failed_required = [result for result in required_results if not result.passed]

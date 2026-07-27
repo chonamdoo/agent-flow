@@ -121,6 +121,9 @@ function installProject() {
     // 프로젝트인가"에 답할 기록이 사라진다. 마지막 install은 updated_at이 센다.
     installed_at: typeof existingPayload?.installed_at === "string" ? existingPayload.installed_at : installTimestamp,
     updated_at: installTimestamp,
+    // 설치본이 어느 kit source에서 왔는지. 이 값이 없으면 낡은 설치본이 조용히
+    // 계속 돈다 — version은 하드코딩이라 릴리스 없이 바뀐 자산을 구분하지 못한다.
+    kit_source_digest: kitSourceDigest(),
   };
 
   writeManagedFile(path.join(agentFlowDir, "workflows", "full-feature.yaml"), fullFeatureWorkflowYaml());
@@ -267,9 +270,32 @@ function syncSkillSources(root) {
   }
 }
 
+// JS 상태기계가 직접 처리하는 서브커맨드. 나머지는 Python CLI가 주인이다.
+const JS_RUN_SUBCOMMAND_NAMES = [
+  "start",
+  "status",
+  "next",
+  "advance",
+  "push-watch",
+  "push-watch-tick",
+];
+const JS_RUN_SUBCOMMANDS = new Set(JS_RUN_SUBCOMMAND_NAMES);
+
 function runWorkflowCommand(args) {
   const subcommand = args[0];
+
+  // `--worktree`는 Python의 worktree 등록부 해석을 거쳐야 하는 선택자다. JS는 그
+  // 해석을 갖고 있지 않아 플래그를 조용히 무시했고, 다른 checkout을 겨냥한 명령이
+  // 현재 root의 run을 전이시켰다. 무시하느니 막는다. argparse는 고유 접두도 받으므로
+  // `--workt`부터(그 아래는 `--workflow`와 갈린다) 전부 같은 선택자로 본다.
+  if (JS_RUN_SUBCOMMANDS.has(subcommand) && args.some(isWorktreeSelector)) {
+    throw new Error(
+      `agent-flow-kit run ${subcommand} does not support --worktree. `
+      + "Run it inside that worktree, or use the Python CLI (agent-flow status|continue --worktree <name>).",
+    );
+  }
   const root = resolveAgentFlowRoot(process.cwd());
+  warnIfInstalledKitIsStale(root);
   if (subcommand === "start") {
     const task = optionValue(args, "--task");
     if (!task) {
@@ -404,7 +430,86 @@ function runWorkflowCommand(args) {
     return;
   }
 
-  throw new Error("usage: agent-flow-kit run <install|start|status|next|advance|push-watch|push-watch-tick>");
+  // 아는 서브커맨드가 아니면 Python CLI의 `run`이 주인이다. `agent-flow run
+  // "<task>"`가 여기로 온다 — 래퍼 자신의 안내문(`readCurrentRun`)이 그 형태를
+  // 지시하는데 usage로 죽으면 사용자는 run을 시작조차 못 한다.
+  if (!subcommand) {
+    throw new Error(
+      'usage: agent-flow-kit run <install|start|status|next|advance|push-watch|push-watch-tick> | run "<task>"',
+    );
+  }
+  // 오타는 task가 아니다. Python `run`은 task로 worktree와 브랜치까지 만들므로
+  // `run statsu` 한 번이 쓰레기 worktree를 남긴다. 서브커맨드에 근접한 단일 토큰은
+  // 넘기지 않는다. 여러 단어면 사람이 쓴 task이므로 그대로 넘긴다.
+  const nearMiss = args.length === 1 ? nearestRunSubcommand(subcommand) : "";
+  if (nearMiss) {
+    throw new Error(
+      `unknown run subcommand: ${subcommand}. did you mean \`run ${nearMiss}\`? `
+      + `to start a run with this as the task, quote it as a sentence: agent-flow run "<task>"`,
+    );
+  }
+  runPythonCliCommand("run", args, { interactive: true });
+}
+
+function isWorktreeSelector(arg) {
+  const flag = arg.split("=", 1)[0];
+  return flag.length >= 6 && "--worktree".startsWith(flag);
+}
+
+// `--workflow`와 갈리는 지점까지 좁힌 접두 판정과 짝을 이룬다. 편집 거리 2는
+// 인접 키 오타와 글자 누락을 덮고, 실제 task 문구까지 삼키지 않는 폭이다.
+function nearestRunSubcommand(token) {
+  if (/\s/.test(token) || token.startsWith("-")) {
+    return "";
+  }
+  for (const candidate of ["install", ...JS_RUN_SUBCOMMAND_NAMES]) {
+    if (candidate !== token && editDistance(candidate, token) <= 2) {
+      return candidate;
+    }
+  }
+  return "";
+}
+
+function editDistance(left, right) {
+  let previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let i = 1; i <= left.length; i += 1) {
+    const current = [i];
+    for (let j = 1; j <= right.length; j += 1) {
+      current[j] = Math.min(
+        previous[j] + 1,
+        current[j - 1] + 1,
+        previous[j - 1] + (left[i - 1] === right[j - 1] ? 0 : 1),
+      );
+    }
+    previous = current;
+  }
+  return previous[right.length];
+}
+
+// Python `git_safe`(`core/worktree_isolation.py`)와 같은 목적이다. 오염된 ambient
+// GIT_DIR/GIT_WORK_TREE가 우리 git을 요청한 cwd 밖으로 돌리면 JS와 Python이 서로
+// 다른 root를 고른다.
+const GIT_DISCOVERY_ENV = [
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_COMMON_DIR",
+  "GIT_INDEX_FILE",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_CEILING_DIRECTORIES",
+  "GIT_NAMESPACE",
+  "GIT_PREFIX",
+];
+
+function gitEnv() {
+  const env = { ...process.env };
+  for (const name of GIT_DISCOVERY_ENV) {
+    delete env[name];
+  }
+  // 분기 대상 메시지를 결정적으로 유지한다. 이 명령에만 적용된다.
+  env.LC_ALL = "C";
+  env.LANG = "C";
+  return env;
 }
 
 function loadWorkflowDefinition(name) {
@@ -716,10 +821,24 @@ function resolveGitCommonWorktreeRoot(start) {
 function gitOutput(cwd, args) {
   const result = safeSpawnSync("git", args, {
     cwd,
+    env: gitEnv(),
     encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"],
+    stdio: ["ignore", "pipe", "pipe"],
   });
-  if (result.error || result.status !== 0) {
+  if (result.error) {
+    // git을 실행조차 못 했다. 바이너리가 없으면(ENOENT) 대안이 경로 스캔뿐이지만,
+    // 타임아웃처럼 "돌긴 했는데 대답을 못 받은" 경우까지 조용히 넘기면 어느
+    // 저장소인지 모르는 채로 계속 간다.
+    if (result.error.code === "ENOENT") {
+      return null;
+    }
+    throw new Error(`git ${args.join(" ")} failed: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    // 비영 종료는 "여기는 그 질문에 답할 수 있는 저장소가 아니다"다. 저장소 아님,
+    // bare repo, 열 수 없는 repo format, dubious ownership이 전부 여기로 온다.
+    // 이걸 오류로 올리면 non-git 디렉터리에서 install조차 못 한다. 호출자의 폴백은
+    // `.agent-flow/kit.json`이 실제로 있는 자리만 고르는 앵커된 탐색이라 안전하다.
     return null;
   }
   const output = result.stdout.trim();
@@ -763,11 +882,19 @@ function gateTimeoutSeconds(args) {
   return selected;
 }
 
+// architecture-lint는 profile gate로도 돌고(그때는 gate 예산 안에 있다) node로
+// 직접도 불린다. 직접 호출만 30초로 잘리면 같은 명령이 호출 경로에 따라 다르게
+// 죽는다. Python 파서에 `--timeout`이 없으므로 게이트 하나치 기본 예산을 준다.
+const SINGLE_GATE_RELAY_TIMEOUT_MS = DEFAULT_GATE_TIMEOUT_S * 1000 + GATE_RELAY_SLACK_MS;
+
 function relayTimeoutForSubcommand(subcommand, args) {
-  if (subcommand !== "gates") {
-    return DEFAULT_RELAY_TIMEOUT_MS;
+  if (subcommand === "gates") {
+    return gateTimeoutSeconds(args) * 1000 * MAX_TOTAL_GATES + GATE_RELAY_SLACK_MS;
   }
-  return gateTimeoutSeconds(args) * 1000 * MAX_TOTAL_GATES + GATE_RELAY_SLACK_MS;
+  if (subcommand === "architecture-lint") {
+    return SINGLE_GATE_RELAY_TIMEOUT_MS;
+  }
+  return DEFAULT_RELAY_TIMEOUT_MS;
 }
 
 function safeSpawnSync(commandName, args, options = {}) {
@@ -836,6 +963,89 @@ function assertInstalled(root) {
   }
 }
 
+// install이 target으로 복사하는 자산의 지문. `.Codex/agents`와 `.claude/agents`는
+// `assertInstalled`가 필수로 요구하는 파일이라 반드시 포함한다. `bin`/`lib`는
+// 설치 산출물의 본문(`rules/workflow-contract.md`, 생성되는 SKILL.md 등)을 만들어
+// 내는 소스라 여기 빠지면 그 변경이 지문에 안 잡힌다.
+const KIT_SOURCE_DIGEST_ROOTS = [
+  "workflows",
+  "profiles",
+  "templates",
+  "bootstrap",
+  "skills",
+  "scripts",
+  "src/agent_flow",
+  "bin",
+  "lib",
+  ".Codex",
+  ".claude",
+];
+
+// 파생 산출물은 소스가 아니다. `.pyc`는 헤더에 소스 mtime을 담는데 git은 mtime을
+// 보존하지 않으므로, 넣으면 같은 커밋의 두 체크아웃이 다른 지문을 낸다.
+// `scripts/check-agent-flow-parity.mjs`의 self-install 필터와 같은 목록이다.
+const DIGEST_EXCLUDED_DIRS = new Set([
+  ".agent-flow",
+  ".git",
+  ".mypy_cache",
+  ".pytest_cache",
+  ".ruff_cache",
+  ".venv",
+  "__pycache__",
+  "node_modules",
+]);
+
+function kitSourceDigest() {
+  const hash = crypto.createHash("sha256");
+  for (const relativeRoot of KIT_SOURCE_DIGEST_ROOTS) {
+    for (const filePath of walkFilesSorted(path.join(KIT_ROOT, relativeRoot))) {
+      hash.update(path.relative(KIT_ROOT, filePath).split(path.sep).join("/"));
+      hash.update("\0");
+      hash.update(crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex"));
+      hash.update("\0");
+    }
+  }
+  return hash.digest("hex");
+}
+
+function walkFilesSorted(dir) {
+  if (!fs.existsSync(dir)) {
+    return [];
+  }
+  const files = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+    if (DIGEST_EXCLUDED_DIRS.has(entry.name) || entry.name.endsWith(".pyc")) {
+      continue;
+    }
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...walkFilesSorted(full));
+    } else if (entry.isFile()) {
+      files.push(full);
+    }
+  }
+  return files;
+}
+
+// 낡은 설치본은 조용히 옛 workflow/profile/runtime을 돌린다. `skills sync`는
+// 이것을 고치지 않는다 — 그 명령은 외부 skill_sources만 fetch한다.
+function warnIfInstalledKitIsStale(root) {
+  const payload = readJsonIfExists(path.join(root, ".agent-flow", "kit.json"));
+  const recorded = payload?.kit_source_digest;
+  if (typeof recorded !== "string" || !recorded) {
+    // 이 지문을 기록하기 전에 설치된 프로젝트. 대조 기준이 없으므로 판정하지 않는다.
+    return;
+  }
+  if (recorded === kitSourceDigest()) {
+    return;
+  }
+  console.warn(
+    "warning: the installed agent-flow assets are older than this kit "
+    + "(workflows, profiles, skills, or the Python runtime changed). "
+    + "run: agent-flow-kit install",
+  );
+}
+
 function selectedSkillPath(root, skill) {
   if (!skill || typeof skill !== "object") {
     return null;
@@ -877,6 +1087,7 @@ function pushWatchStatePath(root) {
 function currentBranch(root) {
   const result = safeSpawnSync("git", ["branch", "--show-current"], {
     cwd: root,
+    env: gitEnv(),
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -1180,6 +1391,7 @@ function removeManagedDirIfSame(src, dest, force = false) {
 function isGitTracked(target) {
   const result = spawnSync("git", ["ls-files", "--error-unmatch", "-z", "--", "."], {
     cwd: fs.statSync(target).isDirectory() ? target : path.dirname(target),
+    env: gitEnv(),
     encoding: "utf8",
     timeout: 10_000,
   });
@@ -2356,6 +2568,21 @@ function gateNonceMatches(data, nonce) {
   return Boolean(data.produced_by) && data.produced_by.nonce === nonce;
 }
 
+// `agent-flow gates`의 기본 phase는 `pre-commit`이고 build/test는 `pre-push`다.
+// Python `_gate_phase_covers_verification`과 같은 규칙이다.
+const GATE_PHASE_ALL = "all";
+
+function gatePhaseCoversVerification(data) {
+  if (!data.produced_by || typeof data.produced_by !== "object") {
+    return true;
+  }
+  const recorded = data.produced_by.gate_phase;
+  if (typeof recorded !== "string" || !recorded) {
+    return true;
+  }
+  return recorded === GATE_PHASE_ALL;
+}
+
 function readGatesRouteKey(pathName, nonce = "") {
   try {
     const content = fs.readFileSync(pathName, "utf8");
@@ -2377,6 +2604,7 @@ function readGatesRouteKey(pathName, nonce = "") {
     const requiredResults = data.results.filter((r) => r && r.required !== false);
     const resultsPass =
       gateNonceMatches(data, nonce) &&
+      gatePhaseCoversVerification(data) &&
       requiredResults.length > 0 &&
       requiredResults.every((r) =>
         r &&
@@ -2499,6 +2727,10 @@ ${AGENT_FLOW_COMMAND} status
 install은 프로젝트당 1회만 수행합니다. 새 세션이 시작됐다는 이유로 install을 다시 실행하지 않습니다.
 Follow the CLI output exactly. If no run is active, start with \`${AGENT_FLOW_COMMAND} run "<task>"\`. If a run is active, continue with the printed \`next_command\`.
 
+run이 SPEC 확인 대기로 막히면 사용자가 대화형 터미널에서 \`${AGENT_FLOW_COMMAND} spec confirm --run-dir <run-dir> --artifact <run-dir>/artifacts/design.md\`를 직접 실행해야 풀립니다.
+\`manual\` verify 항목은 사용자가 \`${AGENT_FLOW_COMMAND} spec approve <spec-id> --run-dir <run-dir>\`를 실행해야 승인 record가 남습니다.
+agent는 이 두 명령을 대신 실행하지 않습니다. agent 셸에서 관측된 확인·승인은 무효 처리됩니다.
+
 ### Workflow Contract
 
 - 활성 workflow와 current phase는 항상 \`${AGENT_FLOW_COMMAND} status\` 출력 기준이다.
@@ -2605,6 +2837,10 @@ ${AGENT_FLOW_COMMAND} run "<task>"
 install은 프로젝트당 1회만 수행합니다. 새 세션이 시작됐다는 이유로 install을 다시 실행하지 않습니다.
 Follow the CLI output exactly. Git projects start inside \`.agent-flow/worktrees/feat-<slug>/\` without switching the leader branch; continue with the printed \`next_command\`.
 
+run이 SPEC 확인 대기로 막히면 사용자가 대화형 터미널에서 \`${AGENT_FLOW_COMMAND} spec confirm --run-dir <run-dir> --artifact <run-dir>/artifacts/design.md\`를 직접 실행해야 풀립니다.
+\`manual\` verify 항목은 사용자가 \`${AGENT_FLOW_COMMAND} spec approve <spec-id> --run-dir <run-dir>\`를 실행해야 승인 record가 남습니다.
+agent는 이 두 명령을 대신 실행하지 않습니다. agent 셸에서 관측된 확인·승인은 무효 처리됩니다.
+
 ### Workflow Contract
 
 - 활성 workflow와 current phase는 항상 \`${AGENT_FLOW_COMMAND} status\` 출력 기준이다.
@@ -2674,6 +2910,20 @@ When the user types \`/agent-flow status\`, run:
 \`\`\`bash
 ${AGENT_FLOW_COMMAND} status
 \`\`\`
+
+## User-Only Commands
+
+Two commands confirm SPEC items and must be typed by the user in an interactive terminal:
+
+\`\`\`bash
+${AGENT_FLOW_COMMAND} spec confirm --run-dir <run-dir> --artifact <run-dir>/artifacts/design.md
+${AGENT_FLOW_COMMAND} spec approve <spec-id> --run-dir <run-dir>
+\`\`\`
+
+- \`spec confirm\` confirms the \`## Spec Items\` of a design or prd artifact. \`--artifact\` takes a path, not a bare name.
+- \`spec approve\` records the approval for a SPEC item whose \`verify:\` is \`manual\`.
+- Never run either command yourself. A confirmation or approval observed from an agent shell is voided and the phase stays blocked.
+- When a run is waiting on SPEC confirmation, print the exact command and wait for the user.
 
 ## Behavior
 
@@ -3537,7 +3787,7 @@ Implementation rules:
 - Run every phase through the runner. Do not skip review, QA, PR watch, or fix-loop phases.
 - Apply \`code-generation-discipline\` during red, green, refactor, fix-loop, and review phases. Resolve required skills from active profile metadata, installed skill index, changed files, and task scope before writing or judging code.
 - If review or QA fails, return to the fix phase before continuing.
-- Required review happens before completion QA. After reviewer approve, gates run BUILD -> TYPECHECK -> LINT where applicable. If review or QA fails, fix-loop routes back through comment-authoring and review before gates run again.
+- Required review happens before completion QA. After reviewer approve, run \`agent-flow gates --phase all\`. The CLI default is \`pre-commit\` and build/test gates are declared \`pre-push\`, so only \`--phase all\` runs them; a \`pre-commit\` run is not accepted as QA evidence. If review or QA fails, fix-loop routes back through comment-authoring and review before gates run again.
 - Code review requires at least two active-host sub-agents (Codex sub-agent in Codex, Claude sub-agent in Claude, OMP sub-agent in OMP). If the changed scope spans multiple areas, run one additional active-host sub-agent in parallel. Additional non-host providers are optional, and every multi-review verdict requires 2+ independent sub-agent reviewer verdicts with reviewer-source: sub-agent. After recording each sub-agent result, close that sub-agent session. End multi-review artifacts with ## Overall followed by exactly one verdict line: verdict: approve or verdict: request-changes.
 - In the default workflow, gates run as their own phase after final-review approve.
 

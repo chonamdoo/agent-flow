@@ -123,6 +123,157 @@ def test_python_and_node_agree_on_provenance(tmp_path):
     assert signed == "green"
 
 
+def test_pre_commit_gate_phase_does_not_route_green():
+    """build/test는 `pre-push`다. `--phase pre-commit`으로 돈 결과는 그 게이트가
+    목록에 오르지도 않은 실행이라 QA 통과의 증거가 아니다."""
+    payload = json.loads(FORGED)
+    payload["produced_by"] = {
+        "tool": "agent-flow gates",
+        "nonce": "abc123",
+        "gate_phase": "pre-commit",
+    }
+    assert _gates_route_key(json.dumps(payload), nonce="abc123") == "default"
+
+
+def test_all_gate_phase_routes_green():
+    payload = json.loads(FORGED)
+    payload["produced_by"] = {
+        "tool": "agent-flow gates",
+        "nonce": "abc123",
+        "gate_phase": "all",
+    }
+    assert _gates_route_key(json.dumps(payload), nonce="abc123") == "green"
+
+
+def test_results_without_a_recorded_gate_phase_are_not_blocked():
+    """구버전 파일에는 기록이 없다. nonce와 같은 규칙 — 없으면 위반이 아니다."""
+    payload = json.loads(FORGED)
+    payload["produced_by"] = {"tool": "agent-flow gates", "nonce": "abc123"}
+    assert _gates_route_key(json.dumps(payload), nonce="abc123") == "green"
+
+
+def test_cli_written_results_record_the_gate_phase(tmp_path):
+    run_dir = create_run(tmp_path, "default", "task")
+    path = write_gate_results(
+        run_dir=run_dir,
+        results=[GateResult("test", ("pytest", "-q"), True, 0, "ok", "")],
+        phase="all",
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["produced_by"]["gate_phase"] == "all"
+    assert (
+        _gates_route_key(
+            path.read_text(encoding="utf-8"), nonce=read_meta(run_dir)["gate_nonce"]
+        )
+        == "green"
+    )
+
+
+@pytest.mark.parametrize(
+    "phase,expected_route",
+    [("all", "green"), ("pre-commit", "default")],
+)
+def test_gates_cli_records_the_phase_it_filtered_on(tmp_path, phase, expected_route):
+    """CLI가 `--phase`를 결과 파일로 옮기지 않으면 runner는 대조할 것이 없다.
+
+    `all` 한 방향만 보면 `phase="all"` 하드코딩이 살아남는다. 그 변이는
+    `--phase pre-commit` 결과에 `gate_phase: "all"`을 붙여 이 검사를 통째로
+    무력화한다.
+    """
+    from unittest import mock
+
+    from agent_flow.cli import main
+
+    run_dir = create_run(tmp_path, "default", "task")
+    results = [GateResult("lint", ("ruff", "check", "."), True, 0, "ok", "")]
+    with mock.patch("agent_flow.cli.run_gates", return_value=results):
+        exit_code = main(
+            [
+                "gates",
+                "--root",
+                str(tmp_path),
+                "--profile",
+                "generic",
+                "--run-dir",
+                str(run_dir),
+                "--phase",
+                phase,
+            ]
+        )
+
+    assert exit_code == 0
+    text = (run_dir / "artifacts" / "gate-results.json").read_text(encoding="utf-8")
+    payload = json.loads(text)
+    assert payload["produced_by"]["gate_phase"] == phase
+    assert (
+        _gates_route_key(text, nonce=read_meta(run_dir)["gate_nonce"]) == expected_route
+    )
+
+
+def test_gates_cli_says_why_a_partial_phase_will_not_pass(capsys, tmp_path):
+    """green인 파일이 fix-loop로 되돌려지는 이유는 결과 목록에 안 보인다."""
+    from unittest import mock
+
+    from agent_flow.cli import main
+
+    run_dir = create_run(tmp_path, "default", "task")
+    results = [GateResult("lint", ("ruff", "check", "."), True, 0, "ok", "")]
+    with mock.patch("agent_flow.cli.run_gates", return_value=results):
+        main(
+            [
+                "gates",
+                "--root",
+                str(tmp_path),
+                "--profile",
+                "generic",
+                "--run-dir",
+                str(run_dir),
+                "--phase",
+                "pre-commit",
+            ]
+        )
+
+    assert "--phase all" in capsys.readouterr().err
+
+
+def test_python_and_node_agree_on_gate_phase(tmp_path):
+    """이중 구현이 갈라지면 한쪽 runner에서만 pre-commit 결과가 QA로 통과한다."""
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required")
+    script = tmp_path / "probe.mjs"
+    kit = (REPO / "bin" / "agent-flow-kit.mjs").read_text(encoding="utf-8")
+    end = kit.index("\n}\n", kit.index("function hasGateEvidence(result)")) + 3
+    helpers = kit[kit.index("function gateNonceMatches(data, nonce)"):end]
+    script.write_text(
+        "import fs from 'node:fs';\n"
+        + helpers
+        + "\nconst p = process.argv[2];\n"
+        + "console.log(readGatesRouteKey(p, process.argv[3] ?? ''));\n",
+        encoding="utf-8",
+    )
+    target = tmp_path / "gate-results.json"
+    for phase, expected in (("pre-commit", "default"), ("all", "green")):
+        payload = json.loads(FORGED)
+        payload["produced_by"] = {
+            "tool": "agent-flow gates",
+            "nonce": "abc123",
+            "gate_phase": phase,
+        }
+        target.write_text(json.dumps(payload), encoding="utf-8")
+        node_key = subprocess.run(
+            [node, str(script), str(target), "abc123"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert node_key == expected
+        assert _gates_route_key(target.read_text(encoding="utf-8"), nonce="abc123") == expected
+
+
 def test_node_run_manifest_nonce_is_read(tmp_path):
     """Node runner는 manifest.json에 nonce를 쓴다. 못 읽으면 그 run은 영영 green이 안 된다."""
     run_dir = tmp_path / "run"

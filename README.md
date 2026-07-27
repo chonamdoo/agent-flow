@@ -43,6 +43,24 @@ agent-flow abort --worktree "feat-user-profile"
 agent-flow worktree list
 agent-flow worktree remove --name "feat-user-profile"
 
+# SPEC ledger (design / prd items)
+# `spec confirm` must be typed by the user in an interactive terminal;
+# a confirmation observed from an agent shell voids the approval.
+agent-flow spec confirm --run-dir <run-dir> --artifact <run-dir>/artifacts/design.md
+agent-flow spec approve <spec-id> --run-dir <run-dir>
+
+# Gates
+# The workflow `gates` phase must be run with --phase all. A --phase pre-commit
+# result is not accepted as QA evidence: the runner reads `produced_by.gate_phase`
+# from gate-results.json.
+agent-flow gates                             # default --phase pre-commit (local spot check)
+agent-flow gates --phase all                 # required by the gates phase: pre-commit + pre-push (build / test)
+
+# Skills
+# `skills sync` only fetches the profile's external skill_sources.
+# Profiles and workflows themselves are updated by re-running the installer.
+agent-flow skills sync
+
 # Lore (memory) management
 agent-flow lore init <slug>                  # scaffold a new lore entry
 agent-flow lore list                         # list active lore, sorted by weight

@@ -62,6 +62,7 @@ from agent_flow.core.worktree_isolation import (
     capture_leader_snapshot,
     leader_root_for,
 )
+from agent_flow.core.profiles import GATE_PHASE_ALL
 from agent_flow.core.phase_workflow import (
     find_kit_root,
     load_phase_workflow_definition,
@@ -395,6 +396,17 @@ class Runner:
             key = _multi_review_route_key(text, phase.id)
         elif phase.id == "gates":
             key = _gates_route_key(text, nonce=str(read_meta(self.run_dir).get("gate_nonce", "")))
+            if key == "default":
+                # `passed: true`인 파일이 fix-loop로 되돌려지는 이유는 결과 목록에
+                # 안 보인다. 말하지 않으면 같은 명령을 세 번 재시도하다 round cap에
+                # 걸려 run이 영구 정지한다.
+                recorded = _recorded_gate_phase(text)
+                if recorded and recorded != GATE_PHASE_ALL:
+                    print(
+                        f"  [route] gate-results.json ran --phase {recorded}; "
+                        f"build and test gates are pre-push. re-run: "
+                        f"agent-flow gates --phase {GATE_PHASE_ALL} --run-dir <run-dir>"
+                    )
         else:
             key = _route_key(text)
         if key == "approve" and phase.routes.get("request-changes") and has_failure_markers(text):
@@ -807,7 +819,11 @@ def _gates_route_key(text: str, *, nonce: str = "") -> str:
         return "error"
     # 통과 라우팅에만 출처를 요구한다. 실패/차단은 손으로 써도 앞으로 못 가므로
     # 막을 이유가 없고, 막으면 복구 경로만 좁아진다.
-    proven = _gate_results_prove_pass(payload.get("results")) and _gate_nonce_matches(payload, nonce)
+    proven = (
+        _gate_results_prove_pass(payload.get("results"))
+        and _gate_nonce_matches(payload, nonce)
+        and _gate_phase_covers_verification(payload)
+    )
     status = payload.get("status")
     if isinstance(status, str):
         normalized_status = status.strip().lower().replace("_", "-")
@@ -841,6 +857,45 @@ def _gate_nonce_matches(payload: dict[str, object], nonce: str) -> bool:
     if not isinstance(produced_by, dict):
         return False
     return produced_by.get("nonce") == nonce
+
+
+def _gate_phase_covers_verification(payload: dict[str, object]) -> bool:
+    """QA gate가 build/test까지 돌렸는가.
+
+    `agent-flow gates`의 기본 phase는 `pre-commit`이고 build/test는 `pre-push`다.
+    workflow의 gates phase는 커밋 직전 마지막 검증이므로 둘 다 돌아야 한다.
+    `--phase pre-commit`으로 돈 결과는 "전부 통과"처럼 보이지만 실제로는
+    build/test가 목록에 오르지도 않은 실행이다.
+
+    `all`만 받는다. `pre-push` 단독은 lint/type/architecture-lint를 빼먹고, 부분
+    phase를 조합으로 인정하기 시작하면 "무엇이 돌았는가"를 결과 목록에서 다시
+    역산해야 한다. 번들 프로필에 post-merge gate는 아직 없다 — 생기면 `all`이
+    그것까지 커밋 전에 돌리므로 그때 이 규칙을 다시 봐야 한다.
+
+    기록이 없으면(구버전 파일, CLI 직접 사용) 대조할 기준이 없으므로 요구하지
+    않는다. nonce와 같은 규칙이다 — "없으면 위반"이 아니라 "기록과 다르면 위반".
+    """
+    produced_by = payload.get("produced_by")
+    if not isinstance(produced_by, dict):
+        return True
+    recorded = produced_by.get("gate_phase")
+    if not isinstance(recorded, str) or not recorded:
+        return True
+    return recorded == GATE_PHASE_ALL
+
+
+def _recorded_gate_phase(text: str) -> str:
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    produced_by = payload.get("produced_by")
+    if not isinstance(produced_by, dict):
+        return ""
+    recorded = produced_by.get("gate_phase")
+    return recorded if isinstance(recorded, str) else ""
 
 
 def _multi_review_route_key(text: str, phase_id: str = "") -> str:

@@ -25,7 +25,11 @@ def write_prompt(*, root: Path, run_dir: Path, stage_id: str, content: str) -> P
 
 
 def write_gate_results(
-    *, run_dir: Path, results: list[GateResult], cwd: Path | None = None
+    *,
+    run_dir: Path,
+    results: list[GateResult],
+    cwd: Path | None = None,
+    phase: str = "",
 ) -> Path:
     # timeout은 "optional 실패"가 아니라 "판정 불가"다. required만 세면 검증이
     # 끊긴 실행이 green으로 기록되고, 그 상태를 읽는 shell/CI가 성공으로 본다.
@@ -48,7 +52,15 @@ def write_gate_results(
     # `run_gates`를 직접 부르는 것이고, 그때까지의 임시방편이다.
     nonce = run_gate_nonce(run_dir)
     if nonce:
-        payload["produced_by"] = {"tool": "agent-flow gates", "nonce": nonce}
+        # phase도 함께 남긴다. 어떤 gate가 돌았는지는 결과 목록으로 알 수 있지만
+        # "무엇을 돌리려 했는가"는 필터 값에만 있다. build/test는 pre-push라
+        # `--phase pre-commit`으로는 애초에 목록에 오르지 않으므로, 이 값이 없으면
+        # runner는 "안 돈 것"과 "없어서 안 돈 것"을 구분할 수 없다.
+        payload["produced_by"] = {
+            "tool": "agent-flow gates",
+            "nonce": nonce,
+            "gate_phase": phase,
+        }
     path = run_dir / "artifacts" / "gate-results.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(

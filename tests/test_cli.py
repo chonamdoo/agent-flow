@@ -3206,6 +3206,97 @@ if (codexContext !== undefined) {
                     )
                 self.assertNotIn("usage: agent-flow-kit", result.stdout + result.stderr)
 
+    def test_node_run_forwards_a_task_to_the_python_cli(self) -> None:
+        """`agent-flow run "<task>"`는 래퍼 자신의 안내문이 지시하는 형태다.
+
+        `run` 서브트리만 화이트리스트로 남아 있으면 사용자는 도구가 시키는 대로
+        치고도 usage만 보고 run을 시작조차 못 한다.
+        """
+        node = _node_executable()
+        cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = subprocess.run(
+                (node, cli, "run", "add a dark mode toggle"),
+                cwd=temp_dir,
+                text=True,
+                capture_output=True,
+                check=False,
+                env=_node_test_env(
+                    PYTHON=str(Path(__file__).resolve().parent / "fixtures" / "argv_probe.py"),
+                ),
+            )
+        output = result.stdout + result.stderr
+        self.assertNotIn("usage: agent-flow-kit run", output)
+        self.assertIn(
+            "argv-received: -m agent_flow.cli run add a dark mode toggle", output
+        )
+
+    def test_node_run_rejects_the_worktree_selector(self) -> None:
+        """JS 상태기계는 worktree 등록부 해석을 갖고 있지 않다.
+
+        조용히 무시하면 다른 checkout을 겨냥한 명령이 현재 root의 run을 전이시킨다.
+        """
+        node = _node_executable()
+        cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+        for selector in ("--worktree", "--worktree=feat-x"):
+            with self.subTest(selector=selector):
+                args = (
+                    (node, cli, "run", "advance", selector, "feat-x")
+                    if selector == "--worktree"
+                    else (node, cli, "run", "advance", selector)
+                )
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    result = subprocess.run(
+                        args,
+                        cwd=temp_dir,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                        env=_node_test_env(),
+                    )
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("--worktree", result.stdout + result.stderr)
+
+    def test_node_git_calls_ignore_a_poisoned_git_dir(self) -> None:
+        """오염된 GIT_DIR이 우리 git을 요청한 cwd 밖으로 돌리면 안 된다.
+
+        Python `git_safe`는 이미 discovery 환경변수를 벗긴다. JS가 안 벗기면 같은
+        cwd에서 두 런타임이 서로 다른 root를 고른다.
+        """
+        node = _node_executable()
+        kit = (
+            Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"
+        ).read_text(encoding="utf-8")
+        start = kit.index("const GIT_DISCOVERY_ENV")
+        end = kit.index("\n}\n", kit.index("function gitOutput(cwd, args)")) + 3
+        with tempfile.TemporaryDirectory() as temp_dir:
+            here = Path(temp_dir) / "here"
+            elsewhere = Path(temp_dir) / "elsewhere"
+            for repo in (here, elsewhere):
+                repo.mkdir()
+                subprocess.run(("git", "init", "-q"), cwd=repo, check=True)
+            probe = Path(temp_dir) / "probe.mjs"
+            probe.write_text(
+                "import { spawnSync } from 'node:child_process';\n"
+                + "import process from 'node:process';\n"
+                + "const DEFAULT_RELAY_TIMEOUT_MS = 30_000;\n"
+                + "function safeSpawnSync(c, a, o = {}) "
+                + "{ return spawnSync(c, a, { ...o, timeout: o.timeout ?? DEFAULT_RELAY_TIMEOUT_MS }); }\n"
+                + kit[start:end]
+                + "\nconsole.log(gitOutput(process.argv[2], "
+                + "['rev-parse', '--show-toplevel']));\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                (node, str(probe), str(here)),
+                text=True,
+                capture_output=True,
+                check=True,
+                env={**os.environ, "GIT_DIR": str(elsewhere / ".git")},
+            )
+        resolved = Path(result.stdout.strip()).resolve()
+        self.assertEqual(resolved, here.resolve())
+
     def test_node_installer_uses_source_workflow_yaml_for_prompts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
@@ -3266,6 +3357,67 @@ if (codexContext !== undefined) {
         self.assertEqual(package["bin"]["agent-flow-kit"], "bin/agent-flow-kit.mjs")
         # `agent-flow` 이름은 Python CLI(pyproject.toml) 단독 소유다. npm이 가로채면 status/run이 죽는다.
         self.assertNotIn("agent-flow", package["bin"])
+
+    def test_install_records_a_kit_source_digest_and_warns_when_stale(self) -> None:
+        """낡은 설치본은 조용히 옛 workflow/profile/runtime을 돌린다.
+
+        `skills sync`는 이것을 고치지 않는다 — 그 명령은 외부 skill_sources만
+        fetch한다. 알려주는 코드가 없으면 사용자는 재설치할 이유를 알 수 없다.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            node = _node_executable()
+            cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            install = subprocess.run(
+                (node, cli, "install"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(install.returncode, 0, install.stderr)
+
+            kit_path = project_root / ".agent-flow" / "kit.json"
+            payload = json.loads(kit_path.read_text(encoding="utf-8"))
+            digest = payload.get("kit_source_digest")
+            self.assertIsInstance(digest, str)
+            self.assertEqual(len(digest), 64)
+
+            fresh = subprocess.run(
+                (node, cli, "run", "start", "--task", "demo", "--run-id", "fresh"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(fresh.returncode, 0, fresh.stderr)
+            self.assertNotIn("agent-flow-kit install", fresh.stderr)
+
+            payload["kit_source_digest"] = "0" * 64
+            kit_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            stale = subprocess.run(
+                (node, cli, "run", "start", "--task", "demo", "--run-id", "stale"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(stale.returncode, 0, stale.stderr)
+            self.assertIn("run: agent-flow-kit install", stale.stderr)
+
+            # 지문을 기록하기 전에 설치된 프로젝트에는 대조 기준이 없다. 판정하지 않는다.
+            del payload["kit_source_digest"]
+            kit_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            legacy = subprocess.run(
+                (node, cli, "run", "start", "--task", "demo", "--run-id", "legacy"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(legacy.returncode, 0, legacy.stderr)
+            self.assertNotIn("agent-flow-kit install", legacy.stderr)
 
     def test_node_workflow_run_blocks_phase_skip_until_artifact_exists(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -9113,6 +9265,10 @@ if (codexContext !== undefined) {
                 + '    "gates", ["--timeout", "100", "--timeout", "900"]\n'
                 + '  ),\n'
                 + '  lint: relayTimeoutForSubcommand("architecture-lint", []),\n'
+                + '  lintIgnoresTimeout: relayTimeoutForSubcommand(\n'
+                + '    "architecture-lint", ["--timeout", "900"]\n'
+                + '  ),\n'
+                + '  other: relayTimeoutForSubcommand("skills", []),\n'
                 + "}));\n",
                 encoding="utf-8",
             )
@@ -9125,7 +9281,15 @@ if (codexContext !== undefined) {
             )
         budgets = json.loads(result.stdout)
         self.assertEqual(budgets["default"], 30_000)
-        self.assertEqual(budgets["lint"], 30_000)
+        self.assertEqual(budgets["other"], 30_000)
+        # architecture-lint는 profile gate로 돌 때 gate 예산 안에 있다. node로 직접
+        # 부를 때만 30초로 잘리면 같은 명령이 호출 경로에 따라 다르게 죽는다.
+        # 게이트 하나치 예산이지 gates 전체 예산은 아니다.
+        self.assertGreater(budgets["lint"], 30_000)
+        self.assertLess(budgets["lint"], budgets["gates"])
+        # Python 파서에 architecture-lint용 `--timeout`이 없다. 인자를 훑어 예산을
+        # 키우면 CLI가 거부하는 입력에 맞춘 죽은 코드가 된다.
+        self.assertEqual(budgets["lintIgnoresTimeout"], budgets["lint"])
         # 가장 비싼 게이트 하나가 5분대다. 전체 예산은 그보다 훨씬 커야 한다.
         self.assertGreater(budgets["gates"], 30 * 60_000)
         # argparse가 받는 세 형태 모두 같은 예산이어야 한다. 하나라도 놓치면

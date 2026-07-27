@@ -775,7 +775,7 @@ assertContains(".claude/agents/code-reviewer.md", "description:");
 
 if (CHECK_INSTALLED_COPY) {
   assertContains(".agent-flow/rules/workflow-contract.md", "Required review happens before completion QA");
-  assertContains(".agent-flow/rules/workflow-contract.md", "gates run BUILD -> TYPECHECK -> LINT");
+  assertContains(".agent-flow/rules/workflow-contract.md", "agent-flow gates --phase all");
   assertContains(".agent-flow/rules/workflow-contract.md", "default workflow, gates run as their own phase");
   assertContains(".agent-flow/rules/workflow-contract.md", "short Korean");
   assertContains(".agent-flow/rules/workflow-contract.md", "two active-host sub-agents");
@@ -811,13 +811,13 @@ function resolveInstalledRoot(start) {
 
 function resolveManagedWorktreeRoot(start) {
   const parts = start.split(path.sep);
-  const markers = new Set([".agent-flow", ".codex", ".Codex"]);
+  const markers = new Set([".agent-flow", ".codex", ".Codex", ".omp"]);
   for (let index = parts.length - 2; index >= 0; index -= 1) {
     if (parts[index + 1] !== "worktrees") continue;
     if (!markers.has(parts[index])) continue;
     const root = parts.slice(0, index).join(path.sep) || path.sep;
-    // 홈의 전역 Codex worktree는 설치 루트가 아니라 git common root를 따라간다.
-    if (HOME && samePath(root, HOME) && (parts[index] === ".codex" || parts[index] === ".Codex")) {
+    // 홈의 전역 Codex/OMP worktree는 설치 루트가 아니라 git common root를 따라간다.
+    if (HOME && samePath(root, HOME) && (parts[index] === ".codex" || parts[index] === ".Codex" || parts[index] === ".omp")) {
       continue;
     }
     return root;
