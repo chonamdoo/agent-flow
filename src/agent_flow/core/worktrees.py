@@ -531,10 +531,23 @@ def _load_worktree_manifest(*, root: Path, name: str) -> dict | None:
         return None
     if not manifest.exists() and legacy.exists():
         manifest = legacy
-    if not manifest.exists():
+    return _read_manifest(manifest)
+
+
+def _state_key_manifest(*, root: Path, key: str) -> dict | None:
+    """정규화 없이 ``key`` 자리의 manifest만 읽는다."""
+    manifest = _runtime_state_root(root=root, name=key) / "manifest.json"
+    legacy = _managed_checkout_path(root=root, name=key) / "manifest.json"
+    if not manifest.exists() and legacy.exists():
+        manifest = legacy
+    return _read_manifest(manifest)
+
+
+def _read_manifest(path: Path) -> dict | None:
+    if not path.exists():
         return None
     try:
-        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     return payload if isinstance(payload, dict) else None
@@ -599,23 +612,25 @@ def known_worktree_names(*, root: Path) -> list[str]:
 def remove_worktree_metadata(*, root: Path, name: str, path: Path | None = None) -> None:
     """``name``의 런타임 메타데이터를 지운다.
 
-    ``path``를 주면 그 등록 경로의 소유임을 증명한 경우에만 지운다. 메타데이터
-    키는 정규화된 이름이라 서로 다른 등록 경로가 같은 키로 접힌다 — 관리형
-    ``.../feat-demo``와 외부 ``.../demo``가 둘 다 ``feat-demo``다. 증명 없이
-    지우면 외부 worktree를 제거하다가 관리형 worktree의 활성 run과 manifest를
-    날린다.
+    ``path``를 주면 그 등록 경로의 소유임을 증명한 경우에만 지운다. 정규화된 키는
+    서로 다른 등록 경로를 한 자리로 접는다 — 관리형 ``.../feat-demo``와 외부
+    ``.../demo``가 둘 다 ``feat-demo``다. 증명 없이 지우면 외부 worktree를
+    제거하다가 관리형 worktree의 활성 run과 manifest를 날린다.
+
+    증명과 삭제는 **런타임 상태를 실제로 쌓는 같은 키**로 한다
+    (`worktree_runtime_root`). 증명만 정규화하면 ``feat-issue#110``의 소유 판정을
+    형제 ``feat-issue-110``의 manifest가 대신 내려 먼저 False가 되고, 대상 자신의
+    죽은 active 마커가 남아 같은 자리의 다음 run을 `already active`로 막는다.
     """
-    if path is not None and not _metadata_belongs_to_path(root=root, name=name, path=path):
-        return
     try:
-        # 런타임 상태를 쓸 때와 같은 키로 지운다(`worktree_runtime_root`). 여기서만
-        # 정규화하면 `feat-issue#110` 같은 이름의 상태가 지워지지 않고 남아, 같은
-        # 자리에 새 run을 시작할 때 죽은 active 마커가 되살아난다.
-        runtime_root = _runtime_state_root(root=root, name=_runtime_state_key(root=root, name=name))
-        legacy_manifest = _legacy_worktree_manifest_path(root=root, name=name)
+        key = _runtime_state_key(root=root, name=name)
     except ValueError:
         # agent-flow 이름 규칙으로 정규화되지 않는 이름에는 애초에 메타데이터가 없다.
         return
+    if path is not None and not _metadata_belongs_to_path(root=root, key=key, path=path):
+        return
+    runtime_root = _runtime_state_root(root=root, name=key)
+    legacy_manifest = _managed_checkout_path(root=root, name=key) / "manifest.json"
     if runtime_root.exists():
         shutil.rmtree(runtime_root)
     if legacy_manifest.exists():
@@ -629,22 +644,26 @@ def _runtime_state_key(*, root: Path, name: str) -> str:
     복구 명령이 메타데이터를 남긴 채 죽는다.
     """
     try:
-        return resolve_worktree_name(root=root, name=name)
+        resolved = resolve_worktree_name(root=root, name=name)
     except (OSError, RuntimeError, ValueError):
-        return _feature_worktree_name(name)
+        resolved = _feature_worktree_name(name)
+    # 정규화를 건너뛰는 자리라 경로 안전은 여기서 증명한다. 키는 상태 루트와 관리
+    # 루트의 직계 자식 이름이어야 한다 — `../`가 섞인 이름은 그 밖을 가리킨다.
+    if not resolved or Path(resolved).name != resolved:
+        raise ValueError(f"unsafe worktree state key: {resolved!r}")
+    return resolved
 
 
-
-def _metadata_belongs_to_path(*, root: Path, name: str, path: Path) -> bool:
-    """``name`` 키의 메타데이터가 이 등록 경로의 것인가.
+def _metadata_belongs_to_path(*, root: Path, key: str, path: Path) -> bool:
+    """``key`` 자리의 메타데이터가 이 등록 경로의 것인가.
 
     manifest가 있으면 그 안에 기록된 경로가 진실이다. manifest가 없으면 생성
-    규약(관리 루트 아래 ``<name>`` 디렉터리)으로만 인정한다 — 롤백 경로처럼
+    규약(관리 루트 아래 ``<key>`` 디렉터리)으로만 인정한다 — 롤백 경로처럼
     manifest를 쓰기 전에 정리해야 하는 경우가 그 하나다.
     """
-    payload = _load_worktree_manifest(root=root, name=name)
+    payload = _state_key_manifest(root=root, key=key)
     if payload is None:
-        return same_worktree_path(root / ".agent-flow" / "worktrees" / name, path)
+        return same_worktree_path(_managed_checkout_path(root=root, name=key), path)
     recorded = payload.get("path")
     if not isinstance(recorded, str) or not recorded:
         return False

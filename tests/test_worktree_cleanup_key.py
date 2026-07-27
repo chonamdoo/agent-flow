@@ -368,3 +368,41 @@ def test_removal_clears_runtime_state_keyed_by_the_registered_name(tmp_path: Pat
     )
     assert removed.returncode == 0, removed.stderr
     assert not runtime_root.exists()
+
+
+def test_removal_clears_runtime_state_when_a_sibling_owns_the_normalized_manifest(
+    tmp_path: Path,
+):
+    """불변: 정규화 키를 형제가 쥐고 있어도 대상 자신의 런타임 상태는 지운다.
+
+    ``feat-issue#110``의 정규화 키는 관리형 형제 ``feat-issue-110``과 같다. 소유
+    증명이 정규화 키의 manifest(형제의 것)를 보면 경로가 어긋나 먼저 False가 되고,
+    제거 대상 자신의 exact-key 상태가 남는다. 그 죽은 active 마커는 같은 경로를
+    다시 등록한 뒤 도는 run을 ``already active``로 막는다.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    _init_repo(root)
+    sibling = W.create_worktree(root=root, plan=W.plan_worktree(root=root, name="issue-110"))
+    sibling_manifest = W.worktree_runtime_root(root=root, name=sibling.name) / "manifest.json"
+    assert sibling_manifest.is_file()
+
+    checkout = root / ".agent-flow" / "worktrees" / "feat-issue#110"
+    _add_raw_worktree(root, "feat/issue#110", checkout)
+    # 충돌이 실제로 나야 이 테스트가 의미가 있다. 이름 selector는 형제와 모호해지므로
+    # 등록부가 유일 후보를 주는 정확한 경로로 지목한다.
+    assert W._feature_worktree_name("feat-issue#110") == sibling.name
+
+    started = _run_cli(["run", "task", "--worktree", str(checkout)], root)
+    assert started.returncode == 0, started.stderr
+    runtime_root = root / ".git" / "agent-flow" / "worktrees" / "feat-issue#110"
+    assert runtime_root.exists()
+
+    removed = _run_cli(
+        ["worktree", "remove", "--name", str(checkout), "--allow-unmerged"], root
+    )
+    assert removed.returncode == 0, removed.stderr
+    assert not runtime_root.exists()
+    # 반증 짝: 형제의 상태와 checkout은 그대로다.
+    assert sibling_manifest.is_file()
+    assert sibling.path.exists()
