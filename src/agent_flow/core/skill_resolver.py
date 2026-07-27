@@ -62,6 +62,9 @@ class SkillRoot:
     source: str
     template: str
     install_hint: str = ""
+    # 이 root가 특정 host 소유면 그 이름. profile 표는 `active_host_only`를 선언하므로
+    # 표로 붙은 skill은 다른 host의 사본으로 충족시키면 안 된다.
+    host: str = ""
 
 
 @dataclass(frozen=True)
@@ -154,11 +157,23 @@ def skill_roots(
     ordered_hosts.extend(name for name in _HOST_ORDER if name != resolved_host)
     for name in ordered_hosts:
         roots.extend(
-            SkillRoot(source="host", template=template) for template in _HOST_TEMPLATES[name]
+            SkillRoot(source="host", template=template, host=name)
+            for template in _HOST_TEMPLATES[name]
         )
     roots.extend(SkillRoot(source="shared", template=template) for template in _SHARED_TEMPLATES)
     roots.extend(_profile_skill_source_roots(profile))
     return tuple(_dedupe_roots(roots))
+
+
+def active_host_roots(roots: Sequence[SkillRoot], host: str) -> tuple[SkillRoot, ...]:
+    """다른 host 소유 root를 뺀 목록.
+
+    host를 못 알아내면(`""`) 거를 기준이 없다. 그때 전부 빼면 CI처럼 host 표식이
+    없는 환경에서 모든 skill이 사라지므로, 알 수 없을 때는 거르지 않는다.
+    """
+    if not host:
+        return tuple(roots)
+    return tuple(root for root in roots if not root.host or root.host == host)
 
 
 def resolve_skill(
@@ -219,6 +234,7 @@ def resolve_phase_skills(
     # 부재 안내는 표의 source URL로 한다 — root의 일반 install hint로는
     # 어느 저장소에서 받아야 하는지 알 수 없다.
     routed_hints: dict[str, str] = {}
+    routed_only: set[str] = set()
     for routed in routed_profile_skills(
         profile, phase_id=phase_id, changed_files=changed_files, task_text=task_text
     ):
@@ -226,13 +242,24 @@ def resolve_phase_skills(
             routed_hints.setdefault(routed.name, routed.source)
         if routed.name not in required_names:
             required_names.append(routed.name)
+            routed_only.add(routed.name)
 
     required_names = _expand_dependencies(required_names, catalog)
     optional_names = [name for name in optional_names if name not in required_names]
 
+    # 표는 `active_host_only: true`를 선언한다. 다른 host의 사본으로 충족시키면
+    # 프롬프트가 엉뚱한 파일을 가리키고 진짜 부재가 숨는다. 표로만 붙은 이름에만
+    # 적용한다 — phase가 직접 선언했거나 frontmatter로 붙은 skill은 host 소유가 아니다.
+    resolved_host = active_host(env) if host is None else host
+    routed_roots = active_host_roots(roots, resolved_host)
+
     return SkillResolution(
         required=tuple(
-            resolve_skill(name, roots, install_hint=routed_hints.get(name, ""))
+            resolve_skill(
+                name,
+                routed_roots if name in routed_only else roots,
+                install_hint=routed_hints.get(name, ""),
+            )
             for name in _stable_unique(required_names)
         ),
         optional=tuple(resolve_skill(name, roots) for name in _stable_unique(optional_names)),
@@ -374,7 +401,12 @@ def _profile_skill_source_roots(profile: dict | None) -> list[SkillRoot]:
         label = "fetched" if source.kind == "fetch" else "host"
         hint = source.install_hint or source.id
         roots.extend(
-            SkillRoot(source=label, template=template, install_hint=hint)
+            SkillRoot(
+                source=label,
+                template=template,
+                install_hint=hint,
+                host=_template_host(template),
+            )
             for template in source.roots
         )
         if source.kind == "fetch" and source.layout:
@@ -387,6 +419,26 @@ def _profile_skill_source_roots(profile: dict | None) -> list[SkillRoot]:
                 )
             )
     return roots
+
+
+_HOST_TEMPLATE_PREFIXES = {
+    "claude": ("~/.claude/",),
+    "codex": ("~/.codex/",),
+    "omp": ("~/.omp/",),
+}
+
+
+def _template_host(template: str) -> str:
+    """profile이 선언한 root가 특정 host 홈에 있으면 그 host 이름.
+
+    profile은 세 host 경로를 나란히 적지만 표는 `active_host_only`를 선언한다.
+    태그가 없으면 Codex로 돌면서 Claude 경로의 사본을 읽고도 통과한다.
+    """
+    normalized = template.replace(str(Path.home()), "~", 1)
+    for host, prefixes in _HOST_TEMPLATE_PREFIXES.items():
+        if any(normalized.startswith(prefix) for prefix in prefixes):
+            return host
+    return ""
 
 
 def _dedupe_roots(roots: Iterable[SkillRoot]) -> list[SkillRoot]:

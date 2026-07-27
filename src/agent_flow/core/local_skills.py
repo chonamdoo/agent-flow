@@ -212,7 +212,16 @@ def local_skill_prompt_block(
     block = skill_prompt_block(project_root, resolution, enforced=enforced)
     if not block:
         return ""
-    return block + _marker_instruction(resolution, enforced=enforced)
+    routed_missing = _missing_routed_names(
+        phase_id,
+        profile=profile,
+        changed_files=changed_files,
+        task_text=task_text,
+        resolution=resolution,
+    )
+    return block + _marker_instruction(
+        resolution, enforced=enforced, routed_missing=routed_missing
+    )
 
 
 def missing_local_skill_markers(
@@ -374,11 +383,18 @@ def record_skill_read(project_root: Path, skill_path: Path) -> None:
         handle.write(entry + "\n")
 
 
-def _marker_instruction(resolution: SkillResolution, *, enforced: bool = True) -> str:
+def _marker_instruction(
+    resolution: SkillResolution,
+    *,
+    enforced: bool = True,
+    routed_missing: Sequence[str] = (),
+) -> str:
     expected = ", ".join(skill.name for skill in resolution.available_required) or "n/a"
     availability = "degraded" if resolution.missing else "pass"
     if not enforced:
         return ""
+    # 게이트가 요구하는 마커는 전부 여기 적는다. 하나라도 빠지면 계약대로 쓴
+    # artifact가 반드시 한 번 거부되고, 그 순간 이 블록 전체가 신뢰를 잃는다.
     return "\n".join(
         [
             "",
@@ -390,6 +406,7 @@ def _marker_instruction(resolution: SkillResolution, *, enforced: bool = True) -
             "project-local-skills: checked",
             f"project-local-skills-used: {expected}",
             APPLIED_MARKER,
+            f"missing-required-profile-skills: {', '.join(routed_missing) or 'none'}",
             "```",
             "",
         ]

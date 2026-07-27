@@ -309,3 +309,53 @@ def test_unrelated_profile_gate_stays_silent(tmp_path):
     )
 
     assert not [item for item in missing if item.startswith("missing-required-profile-skills:")]
+
+
+def test_prompt_contract_lists_every_marker_the_gate_demands(tmp_path):
+    """반증: 계약에 빠진 마커가 있으면 계약대로 쓴 artifact가 반드시 한 번 거부된다."""
+    project = _android_project(tmp_path)
+    common = dict(
+        profile=load_profile_payload("android"),
+        changed_files=["app/src/main/java/A.kt"],
+        task_text="Fix recomposition jank",
+    )
+
+    block = local_skill_prompt_block(project, "implement", **common)
+    contract = block.split("```text")[1].split("```")[0]
+    artifact = "## Completion Gate\n" + contract.replace(
+        "skill-read-evidence: verified|unavailable", "skill-read-evidence: unavailable"
+    )
+
+    assert missing_local_skill_markers(artifact, project, "implement", **common) == []
+
+
+def test_routed_skill_does_not_resolve_from_another_host(tmp_path, monkeypatch):
+    """표가 `active_host_only`를 선언한다. 다른 host 사본으로 채우면 부재가 숨는다."""
+    project = _android_project(tmp_path)
+    home = tmp_path / "home"
+    other = home / ".claude" / "skills" / "compose-recomposition-performance"
+    other.mkdir(parents=True)
+    (other / "SKILL.md").write_text("---\nname: x\n---\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+
+    common = dict(
+        project_root=project,
+        phase_id="implement",
+        profile=load_profile_payload("android"),
+        changed_files=["app/src/main/java/A.kt"],
+        task_text="Fix recomposition jank",
+        env={},
+    )
+
+    on_codex = resolve_phase_skills(host="codex", **common)
+    on_claude = resolve_phase_skills(host="claude", **common)
+
+    def found(resolution):
+        return next(
+            skill.exists
+            for skill in resolution.required
+            if skill.name == "compose-recomposition-performance"
+        )
+
+    assert found(on_codex) is False
+    assert found(on_claude) is True
