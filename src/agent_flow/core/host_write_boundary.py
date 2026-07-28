@@ -276,6 +276,15 @@ def host_write_boundary_violation(payload: object, project_root: Path) -> str | 
     opaque_violation = _opaque_command_violation(command)
     if opaque_violation is not None:
         return opaque_violation
+    # 위 후보 루프는 **다른 checkout**을 지킨다. 그것만으로는 `Write` 도구가 받는
+    # 제약과 어긋난다 — `_target_violation`은 worktree 밖이면 무조건 거부하는데,
+    # 셸은 leader/타 checkout만 보므로 `Write(/tmp/x)`는 막히고
+    # `touch /tmp/x`는 통과했다. 같은 규칙을 셸의 **쓰기 대상**에만 적용한다.
+    # 후보 전부에 적용하면 `/usr/bin/python3` 같은 읽기 경로까지 막힌다.
+    for target in _command_write_targets(command):
+        violation = _target_violation(target, current, base=declared_cwd)
+        if violation is not None:
+            return violation
     return None
 
 
@@ -664,6 +673,82 @@ def _command_path_candidates(command: str, cwd: Path) -> Iterable[str]:
         ):
             candidates.append(stripped)
     return tuple(candidates)
+
+
+# 셸이 **쓰는** 자리만 고른다. `_command_path_candidates`는 읽기 경로까지 모으므로
+# 그 전부를 worktree 안으로 강제하면 `python3 /usr/bin/thing.py` 같은 정상 호출이
+# 막힌다. 정적 분석이 셸의 쓰기 범위를 전부 증명하지는 못한다 —
+# `_opaque_command_violation`이 계산된 경로·인라인 eval을 이미 거부해 표면을 좁히고,
+# 여기서는 남은 리터럴 형태만 본다.
+_SHELL_SEPARATORS = frozenset({";", "&&", "||", "|", "&", "|&"})
+_WRITE_REDIRECTS = frozenset({">", ">>"})
+# `2>&1`은 fd 복제라 파일 대상이 아니다. 뒤 토큰을 목적지로 읽으면 `1`을 경로로 본다.
+_NON_FILE_REDIRECTS = frozenset({">&", "<&", "<", "<<", "<<<"})
+_WRITE_OPERAND_COMMANDS = frozenset(
+    {
+        "touch", "mkdir", "rmdir", "rm", "unlink", "shred",
+        "truncate", "tee", "chmod", "chown", "chgrp",
+    }
+)
+# 마지막 피연산자만 목적지인 명령.
+_WRITE_DEST_LAST_COMMANDS = frozenset({"cp", "mv", "ln", "install", "rsync"})
+
+
+def _shell_tokens(command: str) -> list[str]:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        return list(lexer)
+    except ValueError as exc:
+        raise HostWriteBoundaryError("cannot parse shell command safely") from exc
+
+
+def _command_write_targets(command: str) -> tuple[str, ...]:
+    targets: list[str] = []
+    argv: list[str] = []
+
+    def drain() -> None:
+        if not argv:
+            return
+        name = os.path.basename(argv[0]).lower()
+        operands = [token for token in argv[1:] if not token.startswith("-")]
+        if name in _WRITE_OPERAND_COMMANDS:
+            targets.extend(operands)
+        elif name in _WRITE_DEST_LAST_COMMANDS and len(operands) >= 2:
+            targets.append(operands[-1])
+        elif name == "dd":
+            targets.extend(
+                token.partition("=")[2]
+                for token in argv[1:]
+                if token.startswith("of=")
+            )
+        elif name == "sed" and any(
+            token.startswith("-i") for token in argv[1:] if token.startswith("-")
+        ):
+            # 첫 피연산자는 스크립트고, 제자리 편집 대상은 그 뒤다.
+            targets.extend(operands[1:])
+        argv.clear()
+
+    tokens = _shell_tokens(command)
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token in _SHELL_SEPARATORS:
+            drain()
+            index += 1
+            continue
+        if token in _WRITE_REDIRECTS:
+            if index + 1 < len(tokens):
+                targets.append(tokens[index + 1])
+            index += 2
+            continue
+        if token in _NON_FILE_REDIRECTS:
+            index += 2
+            continue
+        argv.append(token)
+        index += 1
+    drain()
+    return tuple(target for target in targets if target.strip())
 
 
 def _opaque_command_violation(command: str) -> str | None:

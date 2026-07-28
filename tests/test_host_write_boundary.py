@@ -176,6 +176,57 @@ def test_host_binding_allows_only_its_checkout_and_runtime(tmp_path: Path):
     assert sibling_violation is not None and "outside the bound worktree" in sibling_violation
 
 
+def test_shell_write_target_obeys_the_same_rule_as_the_write_tool(tmp_path: Path):
+    """반증: `Write`가 막는 자리를 `bash`가 열어 주면 경계는 없는 것과 같다.
+
+    두 경로가 같은 규칙을 쓰는지 한 대상으로 대조한다. 규칙이 갈리면 에이전트는
+    거부당한 write를 그대로 셸로 옮겨 적기만 하면 된다.
+    """
+    root, statuses, runs = _setup(tmp_path)
+    first, _second = statuses
+    record_host_checkout_binding(_status_payload(root, first, runs[0]), root)
+
+    outside = tmp_path / "outside.txt"
+    write_violation = host_write_boundary_violation(_write_payload(outside), root)
+    shell_violation = host_write_boundary_violation(
+        _command_payload(f"touch {outside}", cwd=first.path),
+        root,
+    )
+    assert write_violation is not None
+    assert shell_violation is not None, "bash가 Write와 달리 worktree 밖 쓰기를 통과시켰다"
+    assert "outside the bound worktree" in shell_violation
+
+    # 리다이렉션도 같은 대상이다. 명령 이름만 보면 이 형태를 놓친다.
+    redirect_violation = host_write_boundary_violation(
+        _command_payload(f"printf x > {outside}", cwd=first.path),
+        root,
+    )
+    assert redirect_violation is not None
+
+
+def test_shell_reads_outside_the_worktree_stay_allowed(tmp_path: Path):
+    """불변: 쓰기 경계가 읽기까지 막으면 인터프리터·도구 호출이 전부 죽는다.
+
+    변이 케이스로 짝을 이룬다 — 같은 절대 경로를 쓰기 대상으로 바꾸면 거부돼야
+    한다. 그래야 "읽기 허용"이 경계를 통째로 끈 결과가 아님이 증명된다.
+    """
+    root, statuses, runs = _setup(tmp_path)
+    first, _second = statuses
+    record_host_checkout_binding(_status_payload(root, first, runs[0]), root)
+
+    tool = tmp_path / "tool.py"
+    tool.write_text("print('hi')\n", encoding="utf-8")
+    assert host_write_boundary_violation(
+        _command_payload(f"python3 {tool} --check", cwd=first.path),
+        root,
+    ) is None
+
+    assert host_write_boundary_violation(
+        _command_payload(f"truncate -s 0 {tool}", cwd=first.path),
+        root,
+    ) is not None
+
+
 def test_host_binding_rejects_recreated_active_run_checkout(tmp_path: Path):
     root, statuses, runs = _setup(tmp_path)
     first = statuses[0]
