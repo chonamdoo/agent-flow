@@ -26,7 +26,6 @@ from agent_flow.core.worktree_isolation import (
     git_repo_state,
     git_safe,
     list_registered_worktrees,
-    probe_provider_leases,
     real_path,
     same_worktree_path,
     shared_file_lease,
@@ -40,7 +39,6 @@ from agent_flow.core.worktree_isolation import (
 PROTECTED_WORKTREE_BRANCHES = {"main", "master", "develop"}
 GIT_WORKTREE_TIMEOUT_S = 300
 CLEANUP_JOURNAL_VERSION = 3
-RUN_ACTIVATION_LOCK = "run-activation.lock"
 CLEANUP_STEPS = (
     "archive",
     "integration_proof",
@@ -151,7 +149,7 @@ def create_worktree(
     allow_dirty: bool = False,
     reuse_existing: bool = True,
 ) -> WorktreeStatus:
-    with _worktree_creation_lease(root):
+    with worktree_creation_lock(root):
         return _create_worktree(
             root=root,
             plan=plan,
@@ -396,8 +394,9 @@ def _add_worktree_locked(*, root: Path, plan: WorktreePlan) -> bool:
             _run_git(root, "worktree", "add", "-b", plan.branch, str(plan.path), plan.base_ref)
             created["branch"] = True
 
-    with worktree_creation_lock(root):
-        with_git_lock_retry(_prune_and_add)
+    # 생성 전체가 이미 `create_worktree`의 creation lock 안이다. 같은 파일을
+    # 다시 flock하면 fd가 달라 같은 프로세스에서도 블로킹된다.
+    with_git_lock_retry(_prune_and_add)
     return created["branch"]
 
 
@@ -410,10 +409,9 @@ def remove_worktree(
     allow_unmerged: bool = False,
 ) -> None:
     """Remove one checkout only while repository-wide cleanup exclusion is held."""
-    with _cleanup_lease(root):
+    with _cleanup_lease(root, status.path):
         runtime_root = _runtime_root_for_status(root=root, status=status)
         with _run_start_exclusion(runtime_root):
-            _assert_provider_leases_idle(root)
             _assert_no_active_runs(runtime_root)
             _remove_worktree_locked(
                 root=root,
@@ -463,7 +461,6 @@ def _remove_worktree_locked(
         expected_registration=registered,
         branch_delete=branch_delete,
     )
-    _assert_provider_leases_idle(root)
 
     if live:
         force_args = ("--force",) if allow_unmerged else ()
@@ -544,14 +541,13 @@ def run_worktree_cleanup_transaction(
 
     runtime_root = Path(journal["run"]["source_state_root"])
     lock_root = runtime_root if runtime_root.exists() else Path(journal["run"]["archive_state_root"])
-    with _cleanup_lease(root) as cleanup_lease:
+    with _cleanup_lease(root, checkout_path) as cleanup_lease:
         journal["leases"]["cleanup"] = {
             "path": str(cleanup_lease),
             "state": "held",
         }
         _write_cleanup_journal(journal_path, journal)
         with _run_start_exclusion(lock_root):
-            _assert_provider_leases_idle(root)
             _assert_cleanup_owner_active(journal_path=journal_path, journal=journal)
             for step in CLEANUP_STEPS:
                 try:
@@ -1337,7 +1333,6 @@ def _validate_cleanup_snapshot(
             raise CleanupBlockedError(
                 f"checkout is dirty at {path}; preserving checkout"
             )
-    _assert_provider_leases_idle(root)
 
 
 def _remove_journal_checkout(
@@ -1635,17 +1630,14 @@ def assert_worktree_unlocked(*, root: Path, path: Path) -> None:
     _assert_not_locked(path=path, entry=_registered_at_path(root=root, path=path))
 
 
-@contextmanager
-def _worktree_creation_lease(root: Path) -> Iterator[None]:
-    lock_path = _agent_flow_state_dir(root) / "cleanup-leases" / "repository.lock"
-    try:
-        with shared_file_lease(lock_path):
-            yield
-    except FileLeaseUnavailable as exc:
-        raise WorktreeIsolationError(
-            f"repository cleanup is active or unsafe at {lock_path}; "
-            "worktree creation is blocked"
-        ) from exc
+def _checkout_lease_path(root: Path, path: Path) -> Path:
+    """One lease file per checkout. 저장소 전역 lease는 워커가 상시 도는
+    상태에서 cleanup을 영원히 굶긴다. 정리 대상과 무관한 checkout의 활동은
+    정리를 막을 이유가 없다."""
+    digest = hashlib.sha256(
+        worktree_path_key(real_path(path)).encode("utf-8")
+    ).hexdigest()[:16]
+    return _agent_flow_state_dir(root) / "cleanup-leases" / f"checkout-{digest}.lock"
 
 
 @contextmanager
@@ -1660,7 +1652,7 @@ def worktree_run_activation(
         raise WorktreeIsolationError(
             f"worktree registration identity is unavailable: {path}"
         )
-    lock_path = _agent_flow_state_dir(root) / "cleanup-leases" / RUN_ACTIVATION_LOCK
+    lock_path = _checkout_lease_path(root, path)
     try:
         with shared_file_lease(lock_path):
             current = _registered_at_path(root=root, path=path)
@@ -1686,18 +1678,15 @@ def worktree_run_activation(
 
 
 @contextmanager
-def _cleanup_lease(root: Path) -> Iterator[Path]:
-    lease_dir = _agent_flow_state_dir(root) / "cleanup-leases"
-    activation_path = lease_dir / RUN_ACTIVATION_LOCK
-    lock_path = lease_dir / "repository.lock"
+def _cleanup_lease(root: Path, checkout_path: Path) -> Iterator[Path]:
+    lock_path = _checkout_lease_path(root, checkout_path)
     try:
-        with exclusive_file_lease(activation_path):
-            with exclusive_file_lease(lock_path):
-                yield lock_path
+        with exclusive_file_lease(lock_path):
+            yield lock_path
     except FileLeaseUnavailable as exc:
         raise CleanupBlockedError(
-            f"another provider, run activation, worktree creation, or cleanup "
-            f"lease is active or unsafe at {lease_dir}; preserving checkout"
+            f"this checkout is activating a run or already being retired "
+            f"at {lock_path}; preserving checkout"
         ) from exc
 
 
@@ -1716,17 +1705,7 @@ def _run_start_exclusion(runtime_root: Path | None) -> Iterator[None]:
         ) from exc
 
 
-def _assert_provider_leases_idle(root: Path) -> None:
-    try:
-        state = probe_provider_leases(root)
-    except Exception as exc:
-        raise CleanupBlockedError(
-            "provider lease state is unknown; preserving checkout"
-        ) from exc
-    if state != "inactive":
-        raise CleanupBlockedError(
-            f"provider lease state is {state}; preserving checkout"
-        )
+
 
 
 def _runtime_root_for_status(*, root: Path, status: WorktreeStatus) -> Path | None:

@@ -17,6 +17,7 @@ if SRC not in sys.path:
 from agent_flow.artifact import create_run, mark_inactive, read_meta, write_meta
 from agent_flow.core.commands import SafeCommandResult
 from agent_flow.core import worktrees as W
+from agent_flow.core import worktree_isolation as W_ISO
 from agent_flow.runner import ResumeMode, Runner
 import agent_flow.runner as runner_module
 import agent_flow.cli as cli_module
@@ -60,9 +61,32 @@ def _managed_run(root: Path, name: str = "cleanup") -> tuple[W.WorktreeStatus, P
     return status, run_dir
 
 
-@pytest.fixture(autouse=True)
-def _inactive_provider_leases(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(W, "probe_provider_leases", lambda _root: "inactive")
+
+def test_cleanup_completes_while_another_checkout_holds_a_provider_lease(
+    tmp_path: Path,
+) -> None:
+    """반증: 워커가 상시 도는 정상 상태에서 cleanup이 영원히 진입하지 못했다.
+
+    provider lease는 저장소 전역이라 워크트리를 수십 개 돌리면 비는 순간이
+    없다. cleanup이 그 전역 idle을 요구하면 체크아웃이 무한 누적된다. 정리
+    대상 checkout과 무관한 lease는 정리를 막을 이유가 없다.
+    """
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status, run_dir = _managed_run(root, "lease-neighbor")
+
+    with W_ISO.provider_lease(root, capacity=2):
+        result = W.run_worktree_cleanup_transaction(
+            root=root,
+            checkout_path=status.path,
+            run_dir=run_dir,
+            target_branch="main",
+            integration_strategy="merge",
+        )
+        W.complete_worktree_cleanup(result)
+
+    assert not status.path.exists()
+    assert not W.worktree_branch_exists(root=root, branch=status.branch)
 
 
 def test_run_lifecycle_lease_is_shared_and_recovers_after_owner_crash(
@@ -156,8 +180,8 @@ def test_run_activation_blocks_cleanup_until_active_marker_is_durable(
     try:
         assert holder.stdout is not None
         assert holder.stdout.readline().strip() == "ready"
-        with pytest.raises(W.CleanupBlockedError, match="run activation"):
-            with W._cleanup_lease(root):
+        with pytest.raises(W.CleanupBlockedError, match="activating a run"):
+            with W._cleanup_lease(root, status.path):
                 pytest.fail("cleanup entered before the active marker was durable")
     finally:
         release.write_text("release\n", encoding="utf-8")
@@ -167,31 +191,50 @@ def test_run_activation_blocks_cleanup_until_active_marker_is_durable(
     assert status.path.exists()
 
 
-def test_create_worktree_holds_repository_cleanup_interlock(
+def test_creating_one_checkout_does_not_block_retiring_another(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """반증: 생성이 저장소 전역 cleanup 인터록을 쥐어 남의 정리를 막았다.
+
+    수십 개가 상시 생성·정리되는 상태에서 전역 인터록은 양방향 기아를 만든다.
+    서로 다른 checkout의 생성과 정리는 간섭하지 않아야 한다.
+    """
+    root = tmp_path / "repo"
+    _init_repo(root)
+    retiring = W.create_worktree(
+        root=root, plan=W.plan_worktree(root=root, name="retiring")
+    )
+    original_add = W._add_worktree_locked
+    observed = False
+
+    def add_while_retiring_another(*, root: Path, plan: W.WorktreePlan) -> bool:
+        nonlocal observed
+        with W._cleanup_lease(root, retiring.path):
+            observed = True
+        return original_add(root=root, plan=plan)
+
+    monkeypatch.setattr(W, "_add_worktree_locked", add_while_retiring_another)
+    created = W.create_worktree(
+        root=root, plan=W.plan_worktree(root=root, name="creating")
+    )
+
+    assert observed
+    assert created.path.exists()
+
+
+def test_retiring_a_checkout_excludes_a_second_retirement_of_the_same_one(
+    tmp_path: Path,
 ) -> None:
     root = tmp_path / "repo"
     _init_repo(root)
-    original_add = W._add_worktree_locked
-    interlock_observed = False
-
-    def add_while_probing_cleanup(
-        *, root: Path, plan: W.WorktreePlan
-    ) -> bool:
-        nonlocal interlock_observed
-        with pytest.raises(W.CleanupBlockedError, match="worktree creation"):
-            with W._cleanup_lease(root):
-                pytest.fail("cleanup entered while worktree creation was active")
-        interlock_observed = True
-        return original_add(root=root, plan=plan)
-
-    monkeypatch.setattr(W, "_add_worktree_locked", add_while_probing_cleanup)
     status = W.create_worktree(
-        root=root, plan=W.plan_worktree(root=root, name="interlock")
+        root=root, plan=W.plan_worktree(root=root, name="same-target")
     )
 
-    assert interlock_observed
-    assert status.path.exists()
+    with W._cleanup_lease(root, status.path):
+        with pytest.raises(W.CleanupBlockedError, match="already being retired"):
+            with W._cleanup_lease(root, status.path):
+                pytest.fail("two cleanups entered the same checkout")
 
 
 def test_manual_removal_preserves_checkout_with_active_run(tmp_path: Path) -> None:
@@ -206,20 +249,6 @@ def test_manual_removal_preserves_checkout_with_active_run(tmp_path: Path) -> No
     assert (run_dir / "active").exists()
     assert W.worktree_branch_exists(root=root, branch=status.branch)
 
-
-def test_provider_unknown_preserves_checkout_before_mutation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "repo"
-    _init_repo(root)
-    status = W.create_worktree(root=root, plan=W.plan_worktree(root=root, name="provider"))
-    monkeypatch.setattr(W, "probe_provider_leases", lambda _root: "unknown")
-
-    with pytest.raises(W.CleanupBlockedError, match="unknown"):
-        W.remove_worktree(root=root, status=status, allow_unmerged=True)
-
-    assert status.path.exists()
-    assert W.worktree_branch_exists(root=root, branch=status.branch)
 
 
 def test_cleanup_preserves_checkout_with_ignored_files(tmp_path: Path) -> None:

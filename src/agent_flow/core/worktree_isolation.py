@@ -103,7 +103,6 @@ class ProviderLease:
     slot: int
     capability: str = field(repr=False)
     _slot_fd: int = field(repr=False)
-    _cleanup_fd: int = field(repr=False)
     _active: bool = field(default=True, repr=False)
 
     @property
@@ -142,32 +141,17 @@ def acquire_provider_lease(
 
     Slot ownership is a kernel ``flock`` held by this process. A crash releases
     it in the kernel; no PID file or age heuristic ever reclaims an unknown
-    owner. The shared cleanup lock closes the probe-then-delete race with the
-    cleanup transaction's exclusive lock.
+    owner. Cleanup does not require repository-wide provider idleness, so this
+    lease deliberately holds nothing outside its own slot.
     """
 
     requested = _strict_provider_capacity(capacity)
     common = _required_git_common_dir(root)
-    cleanup_dir = _ensure_lock_directory(common, _CLEANUP_LEASE_DIR)
-    cleanup_path = cleanup_dir / _CLEANUP_REPOSITORY_LOCK
-    cleanup_fd = _open_lock_file(cleanup_path, create=True)
     slot_fd: Optional[int] = None
     slot = -1
     slot_key: Optional[tuple[str, int]] = None
     capability = os.urandom(32).hex()
     try:
-        try:
-            fcntl.flock(cleanup_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-            _assert_lock_file_binding(cleanup_path, cleanup_fd)
-        except OSError as exc:
-            if _is_lock_busy(exc):
-                raise ProviderLeaseUnavailable(
-                    "repository cleanup is active; provider launch is blocked"
-                ) from exc
-            raise WorktreeIsolationError(
-                "cannot acquire the repository cleanup interlock"
-            ) from exc
-
         registry_dir = _ensure_lock_directory(common, _PROVIDER_LEASE_DIR)
         registry_path = registry_dir / _PROVIDER_REGISTRY_LOCK
         registry_fd = _open_lock_file(registry_path, create=True)
@@ -224,7 +208,6 @@ def acquire_provider_lease(
             slot=slot,
             capability=capability,
             _slot_fd=slot_fd,
-            _cleanup_fd=cleanup_fd,
         )
     except BaseException:
         if slot_fd is not None:
@@ -236,10 +219,6 @@ def acquire_provider_lease(
             with _IN_PROCESS_PROVIDER_LEASES_LOCK:
                 if _IN_PROCESS_PROVIDER_LEASES.get(slot_key) == capability:
                     _IN_PROCESS_PROVIDER_LEASES.pop(slot_key, None)
-        try:
-            fcntl.flock(cleanup_fd, fcntl.LOCK_UN)
-        finally:
-            os.close(cleanup_fd)
         raise
 
 
@@ -268,10 +247,9 @@ def assert_provider_lease(lease: ProviderLease, *, root) -> None:
         )
     try:
         os.fstat(lease._slot_fd)
-        os.fstat(lease._cleanup_fd)
     except OSError as exc:
         raise ProviderLeaseUnavailable(
-            "provider lease capability no longer owns live lock files"
+            "provider lease capability no longer owns a live lock file"
         ) from exc
     common = _required_git_common_dir(root)
     if common != lease.common_dir:
@@ -382,8 +360,6 @@ def _release_provider_lease(lease: ProviderLease) -> None:
         with _IN_PROCESS_PROVIDER_LEASES_LOCK:
             if _IN_PROCESS_PROVIDER_LEASES.get(key) == capability:
                 _IN_PROCESS_PROVIDER_LEASES.pop(key, None)
-        os.close(lease._cleanup_fd)
-        lease._cleanup_fd = -1
     if release_error is not None:
         raise WorktreeIsolationError(
             "provider process-tree lease release could not be verified"
