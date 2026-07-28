@@ -68,6 +68,7 @@ _GIT_STABLE_LOCALE = {"LC_ALL": "C", "LANG": "C", "LANGUAGE": ""}
 DEFAULT_MAX_WORKERS = 8
 _LOCK_TIMEOUT_S = 120
 _LOCK_POLL_S = 0.05
+_LOCK_OPEN_ATTEMPTS = 8
 _GIT_LOCK_RETRY_ATTEMPTS = 8
 _GIT_LOCK_RETRY_BASE_DELAY_S = 0.1
 _MANAGED_WORKTREE_MARKERS = (".agent-flow", ".codex", ".Codex", ".omp")
@@ -464,20 +465,53 @@ def _is_secure_lock_directory(common: Path, path: Path) -> bool:
 def _open_lock_file(path: Path, *, create: bool) -> int:
     nofollow = getattr(os, "O_NOFOLLOW", None)
     cloexec = getattr(os, "O_CLOEXEC", None)
-    if nofollow is None or cloexec is None:
+    directory = getattr(os, "O_DIRECTORY", None)
+    if nofollow is None or cloexec is None or directory is None:
         raise WorktreeIsolationError(
             "secure repository lease file opening is unsupported"
         )
-    flags = os.O_RDWR | nofollow | cloexec
-    if create:
-        flags |= os.O_CREAT
-    fd = os.open(path, flags, 0o600)
+    parent_fd = -1
+    fd = -1
     try:
+        parent_fd = os.open(
+            path.parent,
+            os.O_RDONLY | directory | nofollow | cloexec,
+        )
+        opened_parent = os.fstat(parent_fd)
+        visible_parent = path.parent.lstat()
+        if (
+            not stat.S_ISDIR(opened_parent.st_mode)
+            or stat.S_ISLNK(visible_parent.st_mode)
+            or (opened_parent.st_dev, opened_parent.st_ino)
+            != (visible_parent.st_dev, visible_parent.st_ino)
+        ):
+            raise WorktreeIsolationError(
+                f"repository lease directory identity changed: {path.parent}"
+            )
+        flags = os.O_RDWR | nofollow | cloexec
+        if create:
+            flags |= os.O_CREAT
+        # 생성은 반드시 검증된 부모 fd를 거친다. 절대경로로 열면 부모가 교체된
+        # 순간 공격자 디렉터리에 파일이 만들어진다. Darwin은 경합 중
+        # `openat(dir_fd, name, O_CREAT)`가 부모가 살아 있는데도 ENOENT를 내므로
+        # 그 한 가지 조건만 좁게 다시 시도한다.
+        for attempt in range(_LOCK_OPEN_ATTEMPTS):
+            try:
+                fd = os.open(path.name, flags, 0o600, dir_fd=parent_fd)
+                break
+            except FileNotFoundError:
+                if not create or attempt == _LOCK_OPEN_ATTEMPTS - 1:
+                    raise
+                time.sleep(_LOCK_POLL_S)
         _assert_lock_file_binding(path, fd)
+        return fd
     except BaseException:
-        os.close(fd)
+        if fd >= 0:
+            os.close(fd)
         raise
-    return fd
+    finally:
+        if parent_fd >= 0:
+            os.close(parent_fd)
 
 
 def _assert_lock_file_binding(path: Path, fd: int) -> None:
@@ -499,20 +533,15 @@ def _assert_lock_file_binding(path: Path, fd: int) -> None:
         )
 
 def _ensure_lease_parent(path: Path) -> None:
-    """Create the lease directory chain exactly once, with private modes."""
-    missing = []
-    current = path.parent
-    while not current.is_dir():
-        missing.append(current)
-        parent = current.parent
-        if parent == current:
+    """Create the lease directory chain through the one private-dir creator."""
+    target = path.parent
+    base = target
+    while not base.is_dir():
+        parent = base.parent
+        if parent == base:
             break
-        current = parent
-    for directory in reversed(missing):
-        try:
-            os.mkdir(directory, mode=0o700)
-        except FileExistsError:
-            pass
+        base = parent
+    _ensure_lock_directory(real_path(base), target.relative_to(base))
 
 
 @contextlib.contextmanager
@@ -1506,7 +1535,7 @@ def _cross_process_lock(root, name: str, *, timeout_s: int) -> Iterator[None]:
         lock_dir = real_path(Path(root) / _AGENT_FLOW_PREFIX)
     else:
         lock_dir = common / "agent-flow"
-    lock_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_lease_parent(lock_dir / name)
     lock_path = lock_dir / name
     deadline = time.monotonic() + timeout_s
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)

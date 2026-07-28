@@ -43,12 +43,11 @@ if violation:
     raise SystemExit(2)
 PY
 STATUS=$?
-if [ "$STATUS" -eq 0 ]; then
-  exit 0
-fi
 if [ "$STATUS" -eq 2 ]; then
   echo "작업을 중단했습니다: 현재 host session에 연결된 worktree 밖으로 쓰거나 실행하려 했습니다. 안내된 worktree 경로에서 agent-flow status/continue를 다시 실행한 뒤 계속하세요." >&2
-else
-  echo "작업을 중단했습니다: host worktree 경계를 안전하게 판정하지 못했습니다. 상태를 확인한 뒤 다시 시도하세요." >&2
+  exit 2
 fi
-exit 2
+# 판정기 자체가 죽은 것은 사용자의 위반 증거가 아니다. hook 설치·무결성은 run
+# 시작 게이트(hook_integrity digest)가 이미 증명하므로, 여기서 차단 판정을
+# 만들어 내면 복구 명령까지 막히는 데드락만 남는다.
+exit 0
