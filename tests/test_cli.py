@@ -10688,7 +10688,14 @@ if (codexContext !== undefined) {
             checkout = root / ".agent-flow" / "worktrees" / "feat-slice"
             self.assertTrue((checkout / ".git").exists())
             state_root = worktree_runtime_root(root=root, name="feat-slice")
-            run_dir = next((state_root / ".agent-flow" / "runs").iterdir())
+            # runs/ 에는 run 디렉터리 말고 `active` 마커와 `active.lock` lease 파일도
+            # 산다. `iterdir()` 순서는 파일시스템이 정하므로 첫 항목을 집으면
+            # APFS에서는 통과하고 CI(ext4)에서는 lease 파일을 run으로 오인한다.
+            run_dir = next(
+                path
+                for path in sorted((state_root / ".agent-flow" / "runs").iterdir())
+                if path.is_dir()
+            )
             relative = run_dir.relative_to(state_root)
 
             results = [

@@ -14,6 +14,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -1953,6 +1954,19 @@ def _git_result(*, returncode=0, stdout="", stderr="", timed_out=False, error=No
     )
 
 
+def _patch_isolation_sleep(monkeypatch, on_sleep):
+    """`worktree_isolation`이 부르는 sleep만 가로챈다.
+
+    `W_ISO.time`의 속성을 갈아끼우면 그건 전역 `time` 모듈이라 CPython
+    `subprocess`가 자식 종료를 기다리며 도는 폴링(0.0005s에서 배로 늘려 0.05s로
+    캡)까지 함께 잡힌다. 관측 대상이 아닌 sleep이 섞여 backoff 단언이 깨지고,
+    폴링이 no-op이 되어 수천 번 공회전한다. 모듈 참조만 바꿔 범위를 가둔다.
+    """
+    monkeypatch.setattr(
+        W_ISO, "time", SimpleNamespace(sleep=on_sleep, monotonic=time.monotonic)
+    )
+
+
 def _intercept_git_safe(monkeypatch, respond):
     """`git_safe`를 가로챈다. `respond(args, n)`이 None을 주면 진짜 git이 답한다.
 
@@ -2068,7 +2082,7 @@ def test_tripwire_retries_transient_git_lock_contention(tmp_path, monkeypatch):
     정상 완료된 워커 결과를 `fail_task`로 되돌린다.
     """
     _init_repo(tmp_path)
-    monkeypatch.setattr(W_ISO.time, "sleep", lambda _s: None)
+    _patch_isolation_sleep(monkeypatch, lambda _s: None)
     contended: list[tuple] = []
 
     def _respond(args, _n):
@@ -2096,7 +2110,7 @@ def test_tripwire_gives_up_on_persistent_lock_contention(tmp_path, monkeypatch):
     """불변: 경합이 풀리지 않으면 무한히 돌지 않고 원래 진단을 살린 채 멈춘다."""
     _init_repo(tmp_path)
     sleeps: list[float] = []
-    monkeypatch.setattr(W_ISO.time, "sleep", sleeps.append)
+    _patch_isolation_sleep(monkeypatch, sleeps.append)
     calls = _intercept_git_safe(
         monkeypatch,
         lambda args, _n: _git_result(returncode=128, stderr=_LOCK_STDERR)
@@ -2118,7 +2132,7 @@ def test_tripwire_gives_up_on_persistent_lock_contention(tmp_path, monkeypatch):
 def test_tripwire_does_not_retry_a_non_lock_git_failure(tmp_path, monkeypatch):
     """불변: lock 경합이 아닌 git 오류는 다시 물어도 같은 답이므로 즉시 멈춘다."""
     _init_repo(tmp_path)
-    monkeypatch.setattr(W_ISO.time, "sleep", lambda _s: pytest.fail("non-lock 오류를 재시도했다"))
+    _patch_isolation_sleep(monkeypatch, lambda _s: pytest.fail("non-lock 오류를 재시도했다"))
     calls = _intercept_git_safe(
         monkeypatch,
         lambda args, _n: _git_result(returncode=128, stderr="fatal: not a valid object name")
@@ -2138,7 +2152,7 @@ def test_tripwire_reports_a_real_leader_diff_without_retrying(tmp_path, monkeypa
     _init_repo(tmp_path)
     before = capture_leader_snapshot(tmp_path)
     (tmp_path / "f.txt").write_text("worker leak\n", encoding="utf-8")
-    monkeypatch.setattr(W_ISO.time, "sleep", lambda _s: pytest.fail("실제 diff를 재시도했다"))
+    _patch_isolation_sleep(monkeypatch, lambda _s: pytest.fail("실제 diff를 재시도했다"))
     observed: list = []
     monkeypatch.setattr(
         W_ISO,
