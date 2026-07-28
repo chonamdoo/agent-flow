@@ -28,6 +28,8 @@ SRC_ROOT = KIT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from agent_flow.core.worktrees import plan_worktree, worktree_runtime_root
+
 
 def _run_cli(args: list[str], cwd: Path, env_extra: dict | None = None):
     env = os.environ.copy()
@@ -72,7 +74,8 @@ def _branch_exists(project: Path, branch: str) -> bool:
 
 
 def _worktree_runtime_root(project: Path, name: str) -> Path:
-    return project / ".git" / "agent-flow" / "worktrees" / name
+    # 경로를 문자열로 박지 않는다 — run 상태의 위치는 프로덕션 helper가 정한다.
+    return worktree_runtime_root(root=project, name=name)
 
 
 def test_full_cycle(tmp_path: Path):
@@ -84,7 +87,12 @@ def test_full_cycle(tmp_path: Path):
     assert r1.returncode == 0, r1.stderr
     assert "run started" in r1.stdout
 
-    runs_dir = project / ".agent-flow" / "runs"
+    # 계약 변경: run은 leader가 아니라 task에서 유도한 managed worktree의 runtime
+    # root에 상태를 쌓는다. 그래서 경로를 프로덕션 helper에서 유도해야 한다.
+    plan = plan_worktree(root=project, name="test feature")
+    runs_dir = (
+        worktree_runtime_root(root=project, name=plan.name) / ".agent-flow" / "runs"
+    )
     runs = [path for path in runs_dir.iterdir() if path.is_dir()]
     assert len(runs) == 1
     run_dir = runs[0]
@@ -95,21 +103,31 @@ def test_full_cycle(tmp_path: Path):
         assert (run_dir / f"{a}.md").exists(), f"missing pre-pause: {a}"
     assert "pause" in r1.stdout.lower()
 
-    r_status = _run_cli(["status"], project)
+    r_status = _run_cli(["status", "--worktree", plan.name], project)
     assert r_status.returncode == 0
     assert "test feature" in r_status.stdout
 
-    r2 = _run_cli(["continue"], project)
+    r2 = _run_cli(["continue", "--worktree", plan.name], project)
     assert r2.returncode == 0, r2.stderr
     assert "run complete" in r2.stdout
+
+    # 계약 변경: 완주하면 cleanup이 worktree를 제거하고 run을 archive로 옮긴다.
+    # 따라서 완주 후 아티팩트는 cleanup journal이 가리키는 archive_dir에서 본다.
+    journal_paths = list(
+        (project / ".git" / "agent-flow" / "cleanup-pending").glob("*.json")
+    )
+    assert len(journal_paths) == 1
+    journal = json.loads(journal_paths[0].read_text(encoding="utf-8"))
+    completed_run = Path(journal["run"]["archive_dir"])
 
     expected_post = [
         "worktree", "implement", "comment-authoring", "final-review", "artifacts/gate-results", "fix-loop",
         "commit", "push-pr", "pr-watch", "merge", "cleanup",
     ]
     for a in expected_post:
-        assert (run_dir / f"{a}.md").exists() or (run_dir / f"{a}.json").exists(), f"missing post-pause: {a}"
-    assert not (run_dir / "active").exists()
+        assert (completed_run / f"{a}.md").exists() or (completed_run / f"{a}.json").exists(), f"missing post-pause: {a}"
+    assert not (completed_run / "active").exists()
+    assert not run_dir.exists()
 
 
 def test_runner_injects_installed_profile_union_into_prompt(tmp_path: Path):
@@ -150,6 +168,8 @@ def test_runner_injects_installed_profile_union_into_prompt(tmp_path: Path):
 def test_generic_stub_mode_blocks_instead_of_completing(tmp_path: Path):
     project = tmp_path / "stub-blocked"
     project.mkdir()
+    # 계약 변경: run은 격리 worktree를 요구하므로 git 프로젝트가 전제다.
+    _init_git_project(project)
 
     result = _run_cli(
         ["run", "test feature"],
@@ -159,9 +179,14 @@ def test_generic_stub_mode_blocks_instead_of_completing(tmp_path: Path):
 
     assert result.returncode == 0, result.stderr
     assert "generic_stub_artifact" in result.stdout
+    plan = plan_worktree(root=project, name="test feature")
     runs = [
         path
-        for path in (project / ".agent-flow" / "runs").iterdir()
+        for path in (
+            worktree_runtime_root(root=project, name=plan.name)
+            / ".agent-flow"
+            / "runs"
+        ).iterdir()
         if path.is_dir()
     ]
     assert len(runs) == 1
@@ -171,7 +196,7 @@ def test_generic_stub_mode_blocks_instead_of_completing(tmp_path: Path):
     assert not (run_dir / "slice-plan.md").exists()
 
     status = _run_cli(
-        ["status"],
+        ["status", "--worktree", plan.name],
         project,
         env_extra={"AGENT_FLOW_GENERIC_MODE": "stub"},
     )
@@ -195,6 +220,8 @@ def test_concurrent_run_rejected(tmp_path: Path):
     """Starting a run while one is active must be rejected with a clear message."""
     project = tmp_path / "concurrent"
     project.mkdir()
+    # 계약 변경: run은 격리 worktree를 요구하므로 git 프로젝트가 전제다.
+    _init_git_project(project)
 
     # Start the first run with stub mode → it'll loop and eventually pause.
     r1 = _run_cli(["run", "first task"], project, env_extra={
@@ -205,12 +232,17 @@ def test_concurrent_run_rejected(tmp_path: Path):
     assert r1.returncode == 0
 
     # Active marker should exist (paused).
-    runs_dir = project / ".agent-flow" / "runs"
+    plan = plan_worktree(root=project, name="first task")
+    runs_dir = (
+        worktree_runtime_root(root=project, name=plan.name) / ".agent-flow" / "runs"
+    )
     actives = [p for p in runs_dir.iterdir() if (p / "active").exists()]
     assert len(actives) == 1
 
     # Try starting another run — must fail with exit code 2.
-    r2 = _run_cli(["run", "second task"], project)
+    # 계약 변경: active run 가드가 worktree 단위로 좁아졌다. task마다 worktree가
+    # 갈리므로 같은 worktree를 겨냥해야 동일한 "already active" 거부를 본다.
+    r2 = _run_cli(["run", "second task", "--worktree", plan.name], project)
     assert r2.returncode == 2
     assert "already active" in r2.stdout.lower() or "already active" in r2.stderr.lower()
 
@@ -218,15 +250,20 @@ def test_concurrent_run_rejected(tmp_path: Path):
 def test_abort_clears_marker(tmp_path: Path):
     project = tmp_path / "abort"
     project.mkdir()
+    # 계약 변경: run은 격리 worktree를 요구하므로 git 프로젝트가 전제다.
+    _init_git_project(project)
 
     r1 = _run_cli(["run", "to be aborted"], project)
     assert r1.returncode == 0
 
-    runs_dir = project / ".agent-flow" / "runs"
+    plan = plan_worktree(root=project, name="to be aborted")
+    runs_dir = (
+        worktree_runtime_root(root=project, name=plan.name) / ".agent-flow" / "runs"
+    )
     active = next(p for p in runs_dir.iterdir() if (p / "active").exists())
     assert active.exists()
 
-    r2 = _run_cli(["abort", "--yes"], project)
+    r2 = _run_cli(["abort", "--worktree", plan.name, "--yes"], project)
     assert r2.returncode == 0
     assert "aborted" in r2.stdout.lower()
     assert not (active / "active").exists()
@@ -320,8 +357,11 @@ def test_hosted_phase_durable_baseline_detects_post_adapter_leader_write(
         capture_output=True,
         text=True,
     )
+    # `_init_git_project`가 이미 같은 `.gitignore`를 커밋하므로 stage될 변경이 없을
+    # 수 있다. tripwire가 지키는 건 어댑터 이후 leader 쓰기 탐지이고 여기서 필요한
+    # 전제는 "leader tree가 깨끗하다"뿐이라, empty commit을 허용해 순서를 고정한다.
     subprocess.run(
-        ["git", "commit", "-m", "ignore runtime"],
+        ["git", "commit", "--allow-empty", "-m", "ignore runtime"],
         cwd=project,
         check=True,
         capture_output=True,
@@ -1223,16 +1263,21 @@ def test_worktree_run_allow_dirty_overrides_dirty_leader(tmp_path: Path):
 def test_malformed_meta_does_not_crash(tmp_path: Path):
     project = tmp_path / "broken"
     project.mkdir()
+    # 계약 변경: run은 격리 worktree를 요구하므로 git 프로젝트가 전제다.
+    _init_git_project(project)
 
     r1 = _run_cli(["run", "ok task"], project)
     assert r1.returncode == 0
 
-    runs_dir = project / ".agent-flow" / "runs"
+    plan = plan_worktree(root=project, name="ok task")
+    runs_dir = (
+        worktree_runtime_root(root=project, name=plan.name) / ".agent-flow" / "runs"
+    )
     active = next(p for p in runs_dir.iterdir() if (p / "active").exists())
     # Corrupt the meta file
     (active / "meta.json").write_text("not-json{{{")
 
-    r_status = _run_cli(["status"], project)
+    r_status = _run_cli(["status", "--worktree", plan.name], project)
     # status should still respond (degraded), not crash
     assert r_status.returncode == 0
 
@@ -2009,9 +2054,12 @@ def test_abort_yes_flag_skips_prompt(tmp_path: Path):
     """`agent-flow abort --yes` must not block on confirmation."""
     project = tmp_path / "abort_yes"
     project.mkdir()
+    # 계약 변경: run은 격리 worktree를 요구하므로 git 프로젝트가 전제다.
+    _init_git_project(project)
     r1 = _run_cli(["run", "any task"], project)
     assert r1.returncode == 0
-    r2 = _run_cli(["abort", "--yes"], project)
+    plan = plan_worktree(root=project, name="any task")
+    r2 = _run_cli(["abort", "--worktree", plan.name, "--yes"], project)
     assert r2.returncode == 0
     assert "aborted" in r2.stdout.lower()
 
