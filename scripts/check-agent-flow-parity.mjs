@@ -259,7 +259,6 @@ assert sorted(MANAGED_HOOK_SCRIPTS) == expected, (sorted(MANAGED_HOOK_SCRIPTS), 
 
 const fullFeatureWorkflowCopies = [
   `${PACKAGED_WORKFLOWS}/full-feature.yaml`,
-  "src/agent_flow/workflows/full-feature.yaml",
   ...(CHECK_INSTALLED_COPY ? [".agent-flow/workflows/full-feature.yaml"] : []),
 ];
 
