@@ -26,6 +26,12 @@ optional:
       examples:
         - "feat/chat-search-bottom-padding"
         - "feat/og-metadata-preview"
+    # `git worktree add`는 추적 파일만 가져온다. gitignored 머신 설정은 새 worktree에
+    # 없어서 빌드가 leader에서는 되고 worktree에서는 안 된다. 여기 선언한 파일만
+    # leader에서 복사한다 — 이미 있는 파일은 덮지 않고, symlink는 건너뛴다.
+    worktree_setup:
+      copy:
+        - "gitignored machine config to carry into a new worktree (e.g. local.properties)"
 
   gates:
     # ordered list of verification commands

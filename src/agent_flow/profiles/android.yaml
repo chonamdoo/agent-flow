@@ -9,6 +9,10 @@ branching:
     slug_style: kebab-case
     slug_source: feature title
     max_slug_length: 60
+  worktree_setup:
+    # Gradle은 `sdk.dir`을 여기서 읽는다. 없으면 worktree 빌드가 SDK를 못 찾는다.
+    copy:
+      - local.properties
 gates:
   - id: architecture-lint
     command: ["agent-flow", "architecture-lint", "--profile", "android"]
