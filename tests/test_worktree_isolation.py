@@ -1592,14 +1592,17 @@ def test_multi_review_rejects_non_linked_cwd_before_spawn(
     )
     results = MR.run_distribution(distribution, tmp_path, timeout_s=60)
 
-    assert len(results) == 1
-    assert results[0].error == (
+    # 지켜야 하는 불변식은 "spawn하지 않는다"다. 거부 사유는 플랫폼이 정한다 —
+    # write-sandbox가 없는 OS에서는 cwd를 관측하기 전에 backend가 먼저 막는다.
+    expected_error = (
         "external providers require a verified linked worktree cwd"
+        if sys.platform == "darwin"
+        else "no verified provider write-sandbox backend for this operating system"
     )
+    assert len(results) == 1
+    assert results[0].error == expected_error
     assert launches == []
-    assert "external providers require a verified linked worktree cwd" in (
-        out.read_text(encoding="utf-8")
-    )
+    assert expected_error in out.read_text(encoding="utf-8")
 
 
 def test_run_blocks_when_git_state_unknown(tmp_path, monkeypatch):

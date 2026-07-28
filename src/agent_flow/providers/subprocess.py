@@ -78,6 +78,8 @@ def confined_provider_launch(
 
     if not argv or not all(isinstance(item, str) and item for item in argv):
         raise WorktreeIsolationError("provider argv must contain non-empty strings")
+    # backend 검증이 먼저다. 이 OS에 write-sandbox가 없으면 어떤 관측도 하기 전에
+    # 멈춰야 한다 — git을 먼저 부르면 막을 수 없는 플랫폼에서 일을 시작한 셈이다.
     backend = verify_provider_sandbox_backend()
     verified = _verified_provider_worktree(cwd)
     provider_kind = _provider_kind(argv[0])
