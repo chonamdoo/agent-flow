@@ -941,7 +941,7 @@ def verify_linked_worktree(
     # Authoritative registration check: git itself must list this worktree.
     # 조회가 실패하면 raise한다. 빈 집합으로 강등하면 "등록 안 됨"과 "물어보지
     # 못했다"가 같은 값이 되어, 진단이 실제 원인과 무관해진다.
-    if target not in registered_worktree_paths(root):
+    if registered_worktree_at(root, target) is None:
         raise WorktreeIsolationError(f"worktree is not registered with git: {target}")
 
     if expected_branch is not None:
@@ -1826,42 +1826,68 @@ def list_registered_worktrees(root) -> list:
     ``WorktreeIsolationError``를 잡아 그 자리에서 명시적으로 하라 — 이 함수가
     대신 삼켜 주지 않는다.
     """
+    return _parse_worktree_list(
+        _registered_worktree_payload(root),
+        common_dir=_git_common_dir(root),
+    )
+
+
+def registered_worktree_at(root, path) -> Optional[RegisteredWorktree]:
+    """대상 경로 한 행만 돌려준다. 같은 fail-closed 계약이다.
+
+    등록 행마다 지문을 계산하면 등록 수 N에 비례하는 lstat/open/read가 매
+    경계에 얹혀 lifecycle 연산당 O(N²)로 증폭된다. 필요한 것은 대상 1행이므로
+    파싱 루프 안에서 걸러 그 행만 지문을 만든다.
+
+    지문은 **스냅샷 시점에 즉시** 계산해야 한다. 접근 시점으로 미루면
+    ``_same_registration``의 before/after 비교가 항상 같은 값을 읽어 ABA 탐지가
+    조용히 사라진다.
+    """
+    entries = _parse_worktree_list(
+        _registered_worktree_payload(root),
+        common_dir=_git_common_dir(root),
+        only_path=path,
+    )
+    return entries[0] if entries else None
+
+
+def _registered_worktree_payload(root) -> str:
     result = git_safe("worktree", "list", "--porcelain", cwd=root, optional_locks=False)
     if not result.ok:
         raise _tripwire_git_error(f"cannot list registered worktrees for {root}", result)
-    return _parse_worktree_list(
-        result.stdout,
-        common_dir=_git_common_dir(root),
-    )
+    return result.stdout
 
 
 def _parse_worktree_list(
     payload: str,
     *,
     common_dir: Path | None = None,
+    only_path=None,
 ) -> list:
     entries: list = []
     current: dict = {}
+    wanted = worktree_path_key(only_path) if only_path is not None else None
 
     def flush() -> None:
         raw = current.get("worktree")
         if raw:
-            branch = current.get("branch") or None
             path = real_path(raw)
-            entries.append(
-                RegisteredWorktree(
-                    path=path,
-                    branch=branch.removeprefix("refs/heads/") if branch else None,
-                    head=current.get("HEAD") or None,
-                    bare="bare" in current,
-                    locked="locked" in current,
-                    prunable="prunable" in current,
-                    registration_identity=_registered_worktree_identity(
-                        path,
-                        common_dir=common_dir,
-                    ),
+            if wanted is None or worktree_path_key(path) == wanted:
+                branch = current.get("branch") or None
+                entries.append(
+                    RegisteredWorktree(
+                        path=path,
+                        branch=branch.removeprefix("refs/heads/") if branch else None,
+                        head=current.get("HEAD") or None,
+                        bare="bare" in current,
+                        locked="locked" in current,
+                        prunable="prunable" in current,
+                        registration_identity=_registered_worktree_identity(
+                            path,
+                            common_dir=common_dir,
+                        ),
+                    )
                 )
-            )
         current.clear()
 
     for line in payload.splitlines():
@@ -1872,11 +1898,6 @@ def _parse_worktree_list(
         current[key] = value.strip()
     flush()
     return entries
-
-
-def registered_worktree_paths(root) -> set:
-    """등록된 worktree 경로 집합. ``list_registered_worktrees``와 같은 fail-closed 계약."""
-    return {entry.path for entry in list_registered_worktrees(root)}
 
 
 def worktree_path_key(path) -> str:

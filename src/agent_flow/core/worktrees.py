@@ -27,6 +27,7 @@ from agent_flow.core.worktree_isolation import (
     git_safe,
     list_registered_worktrees,
     real_path,
+    registered_worktree_at,
     same_worktree_path,
     shared_file_lease,
     verify_linked_worktree,
@@ -1610,10 +1611,7 @@ def _same_registration(
 
 
 def _registered_at_path(*, root: Path, path: Path) -> RegisteredWorktree | None:
-    for entry in list_registered_worktrees(root):
-        if same_worktree_path(entry.path, path):
-            return entry
-    return None
+    return registered_worktree_at(root, path)
 
 
 def _assert_not_locked(*, path: Path, entry: RegisteredWorktree | None) -> None:

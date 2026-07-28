@@ -313,22 +313,19 @@ def test_removal_stops_when_the_path_was_re_registered(tmp_path, monkeypatch):
     plan = W.plan_worktree(root=tmp_path, name="swap")
     status = W.create_worktree(root=tmp_path, plan=plan)
 
-    real = W.list_registered_worktrees
+    real = W.registered_worktree_at
     seen = {"n": 0}
 
-    def replaced(root):
-        entries = real(root)
+    def replaced(root, path):
+        entry = real(root, path)
         seen["n"] += 1
-        if seen["n"] < 2:
-            return entries
-        return [
-            entry
-            if not W.same_worktree_path(entry.path, status.path)
-            else replace(entry, branch="someone/else", head="0" * 40)
-            for entry in entries
-        ]
+        if seen["n"] < 2 or entry is None:
+            return entry
+        if not W.same_worktree_path(entry.path, status.path):
+            return entry
+        return replace(entry, branch="someone/else", head="0" * 40)
 
-    monkeypatch.setattr(W, "list_registered_worktrees", replaced)
+    monkeypatch.setattr(W, "registered_worktree_at", replaced)
     with pytest.raises(WorktreeIsolationError) as caught:
         W.remove_worktree(root=tmp_path, status=status, allow_unmerged=True)
     assert "registration changed" in str(caught.value)

@@ -58,6 +58,52 @@ def _managed(root: Path) -> Path:
     return root / ".agent-flow" / "worktrees"
 
 
+def test_path_scoped_lookup_separates_query_failure_from_absence(tmp_path: Path):
+    """반증: 조회 실패와 미등록이 같은 값이면 미등록 판정이 격리 우회가 된다.
+
+    경로 스코프로 좁혀도 두 상태의 생성 계층은 갈라져 있어야 한다 —
+    git이 실패하면 raise, 정상 출력에 대상 행이 없을 때만 None이다.
+    """
+    _init_repo(tmp_path)
+    status = W.create_worktree(
+        root=tmp_path, plan=W.plan_worktree(root=tmp_path, name="scoped")
+    )
+
+    found = W_ISO.registered_worktree_at(tmp_path, status.path)
+    assert found is not None and found.registration_identity
+
+    assert W_ISO.registered_worktree_at(tmp_path, tmp_path / "never-registered") is None
+
+    broken = tmp_path.parent / f"{tmp_path.name}-broken"
+    broken.mkdir()
+    _init_repo(broken)
+    (broken / ".git" / "config").write_text("[core\nnot valid ini\n", encoding="utf-8")
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.registered_worktree_at(broken, status.path)
+
+def test_path_scoped_lookup_computes_only_the_target_fingerprint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """불변: 등록 수만큼 지문을 계산하면 lifecycle 연산당 O(N²)로 증폭된다."""
+    _init_repo(tmp_path)
+    targets = [
+        W.create_worktree(root=tmp_path, plan=W.plan_worktree(root=tmp_path, name=f"n{i}"))
+        for i in range(4)
+    ]
+    real_identity = W_ISO._registered_worktree_identity
+    calls: list = []
+
+    def counting_identity(path, *, common_dir=None):
+        calls.append(path)
+        return real_identity(path, common_dir=common_dir)
+
+    monkeypatch.setattr(W_ISO, "_registered_worktree_identity", counting_identity)
+    assert W_ISO.registered_worktree_at(tmp_path, targets[-1].path) is not None
+
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize("raw", ("abc", "0", "-3"))
 def test_declared_and_provider_capacity_reject_the_same_bad_env(
     raw: str,
