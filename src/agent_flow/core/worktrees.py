@@ -39,7 +39,7 @@ from agent_flow.core.worktree_isolation import (
 
 PROTECTED_WORKTREE_BRANCHES = {"main", "master", "develop"}
 GIT_WORKTREE_TIMEOUT_S = 300
-CLEANUP_JOURNAL_VERSION = 4
+CLEANUP_JOURNAL_VERSION = 3
 RUN_ACTIVATION_LOCK = "run-activation.lock"
 CLEANUP_STEPS = (
     "archive",
@@ -650,8 +650,6 @@ def complete_worktree_cleanup(result: CleanupTransactionResult) -> Path:
     if (
         meta.get("run_id") != journal["run_id"]
         or meta.get("checkout_identity") != journal["checkout"]["identity"]
-        or meta.get("cleanup_identity_digest")
-        != _cleanup_journal_identity_digest(journal)
     ):
         raise CleanupBlockedError(
             "archived run identity does not match cleanup owner; refusing terminal completion",
@@ -854,7 +852,6 @@ def _prepare_or_load_cleanup_journal(
             "expected_base_ref": status.base_ref,
             "expected_base_oid": status.base_oid,
             "expected_head_oid": branch_oid,
-            "expected_branch_oid": branch_oid,
             "branch_owned": status.branch_created_by_agent_flow,
             "delete_branch": delete_branch,
         },
@@ -899,8 +896,6 @@ def _prepare_or_load_cleanup_journal(
         run_dir=run_dir,
         journal_path=journal_path,
         checkout_identity=checkout_identity,
-        cleanup_identity_digest=_cleanup_journal_identity_digest(journal),
-        establish=True,
         checkout_registration_identity=registered.registration_identity,
     )
     return journal_path, journal
@@ -937,7 +932,6 @@ def _validate_cleanup_resume(
         checkout_registration_identity=journal["checkout"][
             "registration_identity"
         ],
-        cleanup_identity_digest=_cleanup_journal_identity_digest(journal),
     )
 
 
@@ -947,8 +941,6 @@ def _bind_run_to_cleanup(
     journal_path: Path,
     checkout_identity: str,
     checkout_registration_identity: str,
-    cleanup_identity_digest: str,
-    establish: bool = False,
 ) -> None:
     meta = read_meta(run_dir)
     if (
@@ -956,17 +948,11 @@ def _bind_run_to_cleanup(
         or meta.get("checkout_identity") != checkout_identity
         or meta.get("checkout_registration_identity")
         != checkout_registration_identity
-        or (
-            not establish
-            and meta.get("cleanup_identity_digest")
-            != cleanup_identity_digest
-        )
     ):
         raise CleanupBlockedError(
             f"run identity is unknown or mismatched at {run_dir}; preserving checkout"
         )
     meta["cleanup_state"] = "cleanup_pending"
-    meta["cleanup_identity_digest"] = cleanup_identity_digest
     meta["cleanup_journal"] = str(journal_path)
     write_meta(run_dir, meta)
 
@@ -1243,8 +1229,6 @@ def _assert_cleanup_owner_active(
         or meta.get("checkout_identity") != journal["checkout"]["identity"]
         or meta.get("cleanup_state") != "cleanup_pending"
         or meta.get("cleanup_journal") != str(journal_path)
-        or meta.get("cleanup_identity_digest")
-        != _cleanup_journal_identity_digest(journal)
     ):
         raise CleanupBlockedError(
             "active run owner identity or cleanup phase is unknown; preserving checkout"
@@ -1320,10 +1304,7 @@ def _validate_cleanup_snapshot(
         )
     _assert_not_locked(path=path, entry=registered)
     branch_oid = _ref_oid(root=root, ref=f"refs/heads/{checkout['branch']}")
-    if (
-        branch_oid != checkout["expected_branch_oid"]
-        or checkout["expected_branch_oid"] != checkout["expected_head_oid"]
-    ):
+    if branch_oid != checkout["expected_head_oid"]:
         raise CleanupBlockedError(
             "worktree branch ref changed since cleanup preparation; preserving checkout"
         )
@@ -1387,7 +1368,7 @@ def _delete_journal_branch(
     if not checkout["delete_branch"] or not checkout["branch_owned"]:
         return
     branch = checkout["branch"]
-    expected_oid = checkout["expected_branch_oid"]
+    expected_oid = checkout["expected_head_oid"]
     current_oid = _ref_oid(root=root, ref=f"refs/heads/{branch}")
     if current_oid is None:
         return
@@ -1527,32 +1508,6 @@ def _cleanup_repository_identity(root: Path) -> dict[str, str | int]:
         "leader_root": str(real_path(root)),
     }
 
-
-def _cleanup_journal_identity_digest(journal: dict[str, Any]) -> str:
-    run = journal["run"]
-    payload = {
-        "version": journal["version"],
-        "run_id": journal["run_id"],
-        "repository": journal["repository"],
-        "checkout": journal["checkout"],
-        "target_ref": journal["target"]["ref"],
-        "integration_strategy": journal["integration"]["strategy"],
-        "run": {
-            key: run[key]
-            for key in (
-                "source_dir",
-                "source_state_root",
-                "archive_dir",
-                "archive_state_root",
-            )
-        },
-    }
-    encoded = json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def _valid_cleanup_repository_identity(value: object) -> bool:
