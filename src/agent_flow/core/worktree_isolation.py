@@ -763,14 +763,9 @@ def real_path(value) -> Path:
 
 
 def max_worker_capacity() -> int:
-    raw = os.environ.get("AGENT_FLOW_MAX_WORKERS")
-    if raw is None:
-        return DEFAULT_MAX_WORKERS
-    try:
-        value = int(raw)
-    except ValueError:
-        return DEFAULT_MAX_WORKERS
-    return value if value > 0 else DEFAULT_MAX_WORKERS
+    """선언된 동시성. 잘못된 env를 조용히 기본값으로 접으면 provider slot은
+    거부하고 pool은 계속 도는 상태가 되어 선언값과 실제가 갈린다."""
+    return _strict_provider_capacity(None)
 
 
 def sanitized_worker_env(*, base_env: Optional[dict] = None) -> dict:

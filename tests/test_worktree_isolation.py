@@ -58,6 +58,30 @@ def _managed(root: Path) -> Path:
     return root / ".agent-flow" / "worktrees"
 
 
+@pytest.mark.parametrize("raw", ("abc", "0", "-3"))
+def test_declared_and_provider_capacity_reject_the_same_bad_env(
+    raw: str,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """반증: 잘못된 상한에서 provider slot은 거부하고 pool은 8로 계속 돌았다.
+
+    같은 env를 두 파서가 다르게 읽으면 선언된 병렬도와 실제 병렬도가 갈린다.
+    """
+    monkeypatch.setenv("AGENT_FLOW_MAX_WORKERS", raw)
+
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO._strict_provider_capacity(None)
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.max_worker_capacity()
+
+
+def test_declared_capacity_matches_the_provider_slot_count(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("AGENT_FLOW_MAX_WORKERS", "12")
+    assert W_ISO.max_worker_capacity() == W_ISO._strict_provider_capacity(None) == 12
+
+
 def test_file_lease_rejects_parent_swap_between_validation_and_open(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
