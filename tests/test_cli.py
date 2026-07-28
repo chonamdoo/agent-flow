@@ -20,6 +20,8 @@ from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 from importlib import resources
 
+from tests.test_hook_integrity import _install as _install_managed_hooks
+
 from agent_flow.cli import main
 from agent_flow.adapters.templates import PromptContext, render_stage_prompt
 from agent_flow.core.gates import GateCommand, run_gate
@@ -30,6 +32,7 @@ from agent_flow.core.design_ledger import (
     spec_set_confirmation_statement,
 )
 from agent_flow.core.phase_workflow import load_phase_workflow_definition
+from agent_flow.core.hook_integrity import find_install_root
 from agent_flow.core.kit_digest import kit_source_digest
 from agent_flow.core.profiles import load_profile
 from agent_flow.core.local_skills import (
@@ -42,7 +45,11 @@ from agent_flow.core.skill_resolver import PhaseSkills
 from agent_flow.core.review import _parse_verdict
 from agent_flow.core.team import ShutdownSignal
 from agent_flow.core.workflow import _stage_from_payload
-from agent_flow.core.worktrees import plan_worktree, worktree_runtime_root
+from agent_flow.core.worktrees import (
+    get_worktree_status,
+    plan_worktree,
+    worktree_runtime_root,
+)
 
 
 os.environ.setdefault("AGENT_FLOW_SKIP_CODEX_TRUST", "1")
@@ -94,11 +101,16 @@ class CliTest(unittest.TestCase):
     def test_start_creates_manifest_and_prompts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir).resolve()
+            _init_git_repo(root)
+            # start는 leader가 아니라 managed worktree에서 run을 연다. manifest도
+            # 그 runtime root에 쌓이므로 경로를 프로덕션 helper에서 유도한다.
+            plan = plan_worktree(root=root, name="demo")
             self.assertEqual(
                 main(["start", "development", "--root", str(root), "--task", "demo", "--adapter", "manual"]),
                 0,
             )
-            manifests = list((root / ".agent-flow" / "runs").glob("development/*/manifest.json"))
+            state_root = worktree_runtime_root(root=root, name=plan.name)
+            manifests = list((state_root / ".agent-flow" / "runs").glob("development/*/manifest.json"))
             self.assertEqual(len(manifests), 1)
             run_dir = manifests[0].parent
             self.assertTrue((run_dir / "events.jsonl").is_file())
@@ -169,6 +181,7 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(init.returncode, 0, init.stderr)
+            _init_git_repo(project_root)
             result = subprocess.run(
                 (
                     package_python,
@@ -192,7 +205,11 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            run_dir = project_root / ".agent-flow" / "runs" / "development" / "r1"
+            state_root = worktree_runtime_root(
+                root=project_root,
+                name=plan_worktree(root=project_root, name="demo").name,
+            )
+            run_dir = state_root / ".agent-flow" / "runs" / "development" / "r1"
             self.assertTrue((project_root / ".agent-flow").is_dir())
             self.assertTrue((run_dir / "manifest.json").is_file())
             self.assertTrue((run_dir / "prompts" / "explore.md").is_file())
@@ -2306,7 +2323,6 @@ class CliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
-            _init_git_repo(project_root)
             node = _node_executable()
             install = subprocess.run(
                 (
@@ -2320,12 +2336,9 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(install.returncode, 0, install.stderr)
-            subprocess.run(("git", "add", ".gitignore"), cwd=project_root, check=True)
-            subprocess.run(
-                ("git", "commit", "-q", "-m", "record agent-flow install"),
-                cwd=project_root,
-                check=True,
-            )
+            # git 초기화는 install 뒤에 온다. 앞서면 픽스처 stub hook이 자리를
+            # 차지해 installer가 진짜 hook을 못 쓰고, kit.json digest와 갈라진다.
+            _init_git_repo(project_root)
             subprocess.run(("git", "branch", "feat/slice"), cwd=project_root, check=True)
             worktree = project_root / ".agent-flow" / "worktrees" / "slice"
             worktree.parent.mkdir(parents=True, exist_ok=True)
@@ -2411,6 +2424,10 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(install.returncode, 0, install.stderr)
+            _init_git_repo(project_root)
+            # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
+            # 프로덕션 planner에서 유도한다 — 문자열로 박으면 slug 규칙이 바뀔 때 깨진다.
+            plan = plan_worktree(root=project_root, name="confirm rendered copy")
             start = subprocess.run(
                 (
                     node,
@@ -2428,7 +2445,7 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(start.returncode, 0, start.stderr)
-            run_dir = _node_phase_run_dir(project_root)
+            run_dir = _node_phase_run_dir(project_root, worktree=plan.name)
             source_artifact = """## Spec Items
 
 SPEC-1: Confirm the rendered copy.
@@ -2454,7 +2471,7 @@ verify: manual
                     "run",
                     "advance",
                 ),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -2592,6 +2609,10 @@ verify: symbol:SearchResults=No results
                 check=False,
             )
             self.assertEqual(install.returncode, 0, install.stderr)
+            _init_git_repo(project_root)
+            # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
+            # 프로덕션 planner에서 유도한다 — 문자열로 박으면 slug 규칙이 바뀔 때 깨진다.
+            plan = plan_worktree(root=project_root, name="confirm rendered copy")
             start = subprocess.run(
                 (
                     node,
@@ -2615,7 +2636,7 @@ verify: symbol:SearchResults=No results
                 for index, candidate in enumerate(definition.phases)
                 if candidate.id == "prd"
             )
-            run_dir = _node_phase_run_dir(project_root)
+            run_dir = _node_phase_run_dir(project_root, worktree=plan.name)
             artifact = _set_node_phase(run_dir, phase.id)
             artifact.parent.mkdir(parents=True, exist_ok=True)
             source_artifact = (
@@ -2646,7 +2667,7 @@ design-values-confirmed: n/a
                     "run",
                     "advance",
                 ),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -2665,7 +2686,7 @@ design-values-confirmed: n/a
                     "run",
                     "advance",
                 ),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -2681,7 +2702,6 @@ design-values-confirmed: n/a
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
-            _init_git_repo(project_root)
             node = _node_executable()
             install = subprocess.run(
                 (
@@ -2695,12 +2715,7 @@ design-values-confirmed: n/a
                 check=False,
             )
             self.assertEqual(install.returncode, 0, install.stderr)
-            subprocess.run(("git", "add", ".gitignore"), cwd=project_root, check=True)
-            subprocess.run(
-                ("git", "commit", "-q", "-m", "record agent-flow install"),
-                cwd=project_root,
-                check=True,
-            )
+            _init_git_repo(project_root)
             for index, marker in enumerate((".codex", ".Codex"), start=1):
                 with self.subTest(marker=marker):
                     run_id = f"r{index}"
@@ -3786,7 +3801,6 @@ if (codexContext !== undefined) {
         with tempfile.TemporaryDirectory() as temp_dir:
             project = Path(temp_dir) / "project"
             project.mkdir()
-            _init_git_repo(project)
             installed = subprocess.run(
                 (node, cli, "install"),
                 cwd=project,
@@ -3795,6 +3809,7 @@ if (codexContext !== undefined) {
                 check=False,
             )
             self.assertEqual(installed.returncode, 0, installed.stderr)
+            _init_git_repo(project)
             started = subprocess.run(
                 (
                     node,
@@ -4181,6 +4196,10 @@ if (codexContext !== undefined) {
                 check=False,
             )
             self.assertEqual(install.returncode, 0, install.stderr)
+            _init_git_repo(project_root)
+            # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
+            # 프로덕션 planner에서 유도한다 — 문자열로 박으면 slug 규칙이 바뀔 때 깨진다.
+            plan = plan_worktree(root=project_root, name="demo feature")
 
             start = subprocess.run(
                 (node, cli, "run", "start", "--task", "demo feature", "--run-id", "r1"),
@@ -4194,7 +4213,7 @@ if (codexContext !== undefined) {
 
             status = subprocess.run(
                 (node, cli, "run", "status"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -4207,7 +4226,7 @@ if (codexContext !== undefined) {
 
             blocked = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -4215,13 +4234,13 @@ if (codexContext !== undefined) {
             self.assertEqual(blocked.returncode, 0, blocked.stderr)
             self.assertIn("reason: missing_phase_artifact", blocked.stdout)
 
-            artifact = _node_phase_run_dir(project_root) / "artifacts" / "domain-grill.md"
+            artifact = _node_phase_run_dir(project_root, worktree=plan.name) / "artifacts" / "domain-grill.md"
             artifact.parent.mkdir(parents=True, exist_ok=True)
             artifact.write_text("domain-grill\n", encoding="utf-8")
 
             blocked_status = subprocess.run(
                 (node, cli, "run", "status"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -4242,7 +4261,7 @@ if (codexContext !== undefined) {
 
             missing_markers = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -4257,7 +4276,7 @@ if (codexContext !== undefined) {
             )
             false_positive = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -4272,7 +4291,7 @@ if (codexContext !== undefined) {
             )
             outside_gate = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -4290,7 +4309,7 @@ if (codexContext !== undefined) {
             )
             fenced_example = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -4308,7 +4327,7 @@ if (codexContext !== undefined) {
             )
             fenced_heading = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -4325,7 +4344,7 @@ if (codexContext !== undefined) {
             )
             indented_heading = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -4343,7 +4362,7 @@ if (codexContext !== undefined) {
             )
             bad_value = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -4361,7 +4380,7 @@ if (codexContext !== undefined) {
             )
             status = subprocess.run(
                 (node, cli, "run", "status"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -4373,14 +4392,14 @@ if (codexContext !== undefined) {
 
             advanced = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
             )
             self.assertEqual(advanced.returncode, 0, advanced.stderr)
             self.assertIn("current_phase: product-brief", advanced.stdout)
-            state = _read_node_phase(_node_phase_run_dir(project_root))
+            state = _read_node_phase(_node_phase_run_dir(project_root, worktree=plan.name))
             self.assertEqual(state["current_phase"], "product-brief")
 
     def test_node_heading_required_markers_ignore_fenced_examples(self) -> None:
@@ -4390,6 +4409,10 @@ if (codexContext !== undefined) {
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _init_git_repo(project_root)
+            # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
+            # 프로덕션 planner에서 유도한다 — 문자열로 박으면 slug 규칙이 바뀔 때 깨진다.
+            plan = plan_worktree(root=project_root, name="demo")
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -4398,13 +4421,13 @@ if (codexContext !== undefined) {
                 ).returncode,
                 0,
             )
-            run_dir = _node_phase_run_dir(project_root)
+            run_dir = _node_phase_run_dir(project_root, worktree=plan.name)
             for phase in ["domain-grill", "product-brief", "prd", "slice-plan", "plan-review"]:
                 artifact = run_dir / _node_phase_artifact(phase)
                 artifact.parent.mkdir(parents=True, exist_ok=True)
                 content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase, run_dir=run_dir)
                 artifact.write_text(content, encoding="utf-8")
-                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
 
             ddd_artifact = run_dir / _node_phase_artifact("ddd-design")
             ddd_artifact.write_text(
@@ -4438,7 +4461,7 @@ if (codexContext !== undefined) {
             )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -4454,6 +4477,10 @@ if (codexContext !== undefined) {
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _init_git_repo(project_root)
+            # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
+            # 프로덕션 planner에서 유도한다 — 문자열로 박으면 slug 규칙이 바뀔 때 깨진다.
+            plan = plan_worktree(root=project_root, name="demo")
             baked_prompt = (project_root / ".agent-flow" / "prompts" / "green.md").read_text(
                 encoding="utf-8"
             )
@@ -4468,11 +4495,11 @@ if (codexContext !== undefined) {
                 ).returncode,
                 0,
             )
-            run_dir = _node_phase_run_dir(project_root)
+            run_dir = _node_phase_run_dir(project_root, worktree=plan.name)
             artifact = _set_node_phase(run_dir, "implement", workflow="default")
             phase_prompt = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -4485,7 +4512,7 @@ if (codexContext !== undefined) {
 
             missing_local = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -4500,7 +4527,7 @@ if (codexContext !== undefined) {
             )
             partial_local = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -4510,7 +4537,7 @@ if (codexContext !== undefined) {
             artifact.write_text(_node_implement_gate(local_skill=True), encoding="utf-8")
             advanced = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -4526,6 +4553,10 @@ if (codexContext !== undefined) {
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _init_git_repo(project_root)
+            # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
+            # 프로덕션 planner에서 유도한다 — 문자열로 박으면 slug 규칙이 바뀔 때 깨진다.
+            plan = plan_worktree(root=project_root, name="demo")
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--workflow", "bugfix", "--task", "demo", "--run-id", "r1"),
@@ -4534,7 +4565,7 @@ if (codexContext !== undefined) {
                 ).returncode,
                 0,
             )
-            run_dir = _node_phase_run_dir(project_root)
+            run_dir = _node_phase_run_dir(project_root, worktree=plan.name)
             artifact = _set_node_phase(run_dir, "implement-fix", workflow="bugfix")
             artifact.parent.mkdir(parents=True, exist_ok=True)
             artifact.write_text(
@@ -4544,7 +4575,7 @@ if (codexContext !== undefined) {
 
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -4594,6 +4625,10 @@ if (codexContext !== undefined) {
                 check=False,
             )
             self.assertEqual(install.returncode, 0, install.stderr)
+            _init_git_repo(project_root)
+            # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
+            # 프로덕션 planner에서 유도한다 — 문자열로 박으면 slug 규칙이 바뀔 때 깨진다.
+            plan = plan_worktree(root=project_root, name="demo")
             self.assertFalse((project_root / ".agent-flow" / "skills" / "ios-clean-architecture").exists())
             self.assertFalse((project_root / ".agent-flow" / "skills" / "react-native-clean-architecture").exists())
 
@@ -4627,6 +4662,10 @@ if (codexContext !== undefined) {
                 check=False,
             )
             self.assertEqual(install.returncode, 0, install.stderr)
+            _init_git_repo(project_root)
+            # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
+            # 프로덕션 planner에서 유도한다 — 문자열로 박으면 slug 규칙이 바뀔 때 깨진다.
+            plan = plan_worktree(root=project_root, name="demo")
 
             result = subprocess.run(
                 (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -4686,6 +4725,10 @@ if (codexContext !== undefined) {
                 subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode,
                 0,
             )
+            _init_git_repo(project_root)
+            # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
+            # 프로덕션 planner에서 유도한다 — 문자열로 박으면 slug 규칙이 바뀔 때 깨진다.
+            plan = plan_worktree(root=project_root, name="demo")
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -4712,7 +4755,7 @@ if (codexContext !== undefined) {
                 "gates",
                 "handoff",
             ]
-            run_dir = _node_phase_run_dir(project_root)
+            run_dir = _node_phase_run_dir(project_root, worktree=plan.name)
             for index, phase in enumerate(expected_phases):
                 state = _read_node_phase(run_dir)
                 self.assertEqual(state["current_phase"], phase)
@@ -4727,7 +4770,7 @@ if (codexContext !== undefined) {
                 artifact.write_text(content, encoding="utf-8")
                 advance = subprocess.run(
                     (node, cli, "run", "advance"),
-                    cwd=project_root,
+                    cwd=plan.path,
                     text=True,
                     capture_output=True,
                     check=False,
@@ -4743,7 +4786,7 @@ if (codexContext !== undefined) {
 
             complete = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -4758,6 +4801,10 @@ if (codexContext !== undefined) {
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _init_git_repo(project_root)
+            # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
+            # 프로덕션 planner에서 유도한다 — 문자열로 박으면 slug 규칙이 바뀔 때 깨진다.
+            plan = plan_worktree(root=project_root, name="demo")
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -4766,7 +4813,7 @@ if (codexContext !== undefined) {
                 ).returncode,
                 0,
             )
-            run_dir = _node_phase_run_dir(project_root)
+            run_dir = _node_phase_run_dir(project_root, worktree=plan.name)
             meta_path = run_dir / "meta.json"
             state = _read_node_phase(run_dir)
             state["current_phase"] = "red"
@@ -4775,7 +4822,7 @@ if (codexContext !== undefined) {
 
             next_result = subprocess.run(
                 (node, cli, "run", "next"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -4795,20 +4842,13 @@ if (codexContext !== undefined) {
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
-            _init_git_repo(project_root)
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
-            subprocess.run(
-                ("git", "add", ".gitignore"),
-                cwd=project_root,
-                check=True,
-            )
-            subprocess.run(
-                ("git", "commit", "-q", "-m", "record agent-flow install"),
-                cwd=project_root,
-                check=True,
-            )
+            _init_git_repo(project_root)
+            # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
+            # 프로덕션 planner에서 유도한다 — 문자열로 박으면 slug 규칙이 바뀔 때 깨진다.
+            plan = plan_worktree(root=project_root, name="demo")
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -4828,7 +4868,7 @@ if (codexContext !== undefined) {
             watch.write_text("status: pending\n", encoding="utf-8")
             pending = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -4837,7 +4877,7 @@ if (codexContext !== undefined) {
             self.assertIn("[block] pr-watch status=pending", pending.stdout)
             pending_status = subprocess.run(
                 (node, cli, "run", "status"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -4849,7 +4889,7 @@ if (codexContext !== undefined) {
             watch.write_text("status: comments\n", encoding="utf-8")
             comments = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -4861,7 +4901,7 @@ if (codexContext !== undefined) {
             os.utime(comment_fix, (1, 1))
             stale_comment_fix = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -4870,7 +4910,7 @@ if (codexContext !== undefined) {
             self.assertIn("reason: stale_artifact", stale_comment_fix.stdout)
             stale_comment_status = subprocess.run(
                 (node, cli, "run", "status"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -4884,7 +4924,7 @@ if (codexContext !== undefined) {
             os.utime(comment_fix, (entered_ts, entered_ts))
             back_to_watch = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -4895,7 +4935,7 @@ if (codexContext !== undefined) {
             watch.write_text("status: comments\n", encoding="utf-8")
             comments_again = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -4904,7 +4944,7 @@ if (codexContext !== undefined) {
             self.assertIn("current_phase: pr-comment-fix", comments_again.stdout)
             reused_comment_fix = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -4913,14 +4953,14 @@ if (codexContext !== undefined) {
             self.assertIn("reason: missing_phase_artifact", reused_comment_fix.stdout)
             comment_fix.write_text(_node_phase_content("pr-comment-fix", "pushed second comment fixes "), encoding="utf-8")
             self.assertEqual(
-                subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode,
+                subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode,
                 0,
             )
 
             watch.write_text("status: ci-failed\n", encoding="utf-8")
             ci_failed = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -4932,7 +4972,7 @@ if (codexContext !== undefined) {
             os.utime(ci_fix, (1, 1))
             stale_ci_fix = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -4942,7 +4982,7 @@ if (codexContext !== undefined) {
             ci_fix.write_text(_node_phase_content("pr-ci-fix", "pushed ci fixes "), encoding="utf-8")
             back_to_watch_again = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -4953,7 +4993,7 @@ if (codexContext !== undefined) {
             watch.write_text("status: green\n", encoding="utf-8")
             ready = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -4973,6 +5013,10 @@ if (codexContext !== undefined) {
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _init_git_repo(project_root)
+            # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
+            # 프로덕션 planner에서 유도한다 — 문자열로 박으면 slug 규칙이 바뀔 때 깨진다.
+            plan = plan_worktree(root=project_root, name="demo")
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -4981,18 +5025,18 @@ if (codexContext !== undefined) {
                 ).returncode,
                 0,
             )
-            run_dir = _node_phase_run_dir(project_root)
+            run_dir = _node_phase_run_dir(project_root, worktree=plan.name)
             for phase in ["domain-grill", "product-brief", "prd", "slice-plan"]:
                 artifact = run_dir / _node_phase_artifact(phase)
                 artifact.parent.mkdir(parents=True, exist_ok=True)
                 artifact.write_text(_node_phase_content(phase, run_dir=run_dir), encoding="utf-8")
-                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
 
             plan_review = run_dir / _node_phase_artifact("plan-review")
             plan_review.write_text("verdict: REQUEST-CHANGES\n", encoding="utf-8")
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5003,7 +5047,7 @@ if (codexContext !== undefined) {
             slice_plan = run_dir / _node_phase_artifact("slice-plan")
             missing_slice_plan = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5012,12 +5056,12 @@ if (codexContext !== undefined) {
             self.assertIn("reason: missing_phase_artifact", missing_slice_plan.stdout)
 
             slice_plan.write_text("updated slice-plan\n", encoding="utf-8")
-            self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+            self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
             plan_review.write_text("verdict: APPROVE\n", encoding="utf-8")
-            self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+            self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
             ddd = run_dir / _node_phase_artifact("ddd-design")
             ddd.write_text(_node_phase_content("ddd-design"), encoding="utf-8")
-            self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+            self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
             for phase in [
                 "worktree",
                 "run-start",
@@ -5030,7 +5074,7 @@ if (codexContext !== undefined) {
                 artifact = run_dir / _node_phase_artifact(phase)
                 artifact.parent.mkdir(parents=True, exist_ok=True)
                 artifact.write_text(_node_phase_content(phase, run_dir=run_dir), encoding="utf-8")
-                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
 
             architecture_review = run_dir / _node_phase_artifact("architecture-review")
             architecture_review.write_text(
@@ -5039,7 +5083,7 @@ if (codexContext !== undefined) {
             )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5049,7 +5093,7 @@ if (codexContext !== undefined) {
             refactor = run_dir / _node_phase_artifact("refactor")
             missing_refactor = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5058,7 +5102,7 @@ if (codexContext !== undefined) {
             self.assertIn("reason: missing_phase_artifact", missing_refactor.stdout)
 
             refactor.write_text(_node_phase_content("refactor", "updated "), encoding="utf-8")
-            self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+            self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
             for phase, next_phase in [
                 ("comment-authoring", "multi-review"),
                 ("multi-review", "architecture-review"),
@@ -5066,7 +5110,7 @@ if (codexContext !== undefined) {
                 artifact = run_dir / _node_phase_artifact(phase)
                 missing_artifact = subprocess.run(
                     (node, cli, "run", "advance"),
-                    cwd=project_root,
+                    cwd=plan.path,
                     text=True,
                     capture_output=True,
                     check=False,
@@ -5082,7 +5126,7 @@ if (codexContext !== undefined) {
                 artifact.write_text(_node_phase_content(phase, prefix="updated "), encoding="utf-8")
                 advanced = subprocess.run(
                     (node, cli, "run", "advance"),
-                    cwd=project_root,
+                    cwd=plan.path,
                     text=True,
                     capture_output=True,
                     check=False,
@@ -5092,7 +5136,7 @@ if (codexContext !== undefined) {
 
             missing_architecture_review = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5103,7 +5147,7 @@ if (codexContext !== undefined) {
             architecture_review.write_text(_node_phase_content("architecture-review"), encoding="utf-8")
             approved = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5126,7 +5170,7 @@ if (codexContext !== undefined) {
             )
             committed = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5147,6 +5191,10 @@ if (codexContext !== undefined) {
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _init_git_repo(project_root)
+            # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
+            # 프로덕션 planner에서 유도한다 — 문자열로 박으면 slug 규칙이 바뀔 때 깨진다.
+            plan = plan_worktree(root=project_root, name="demo")
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -5155,7 +5203,7 @@ if (codexContext !== undefined) {
                 ).returncode,
                 0,
             )
-            run_dir = _node_phase_run_dir(project_root)
+            run_dir = _node_phase_run_dir(project_root, worktree=plan.name)
             for phase in [
                 "domain-grill", "product-brief", "prd",
                 "slice-plan", "plan-review", "ddd-design", "worktree",
@@ -5166,7 +5214,7 @@ if (codexContext !== undefined) {
                 artifact.parent.mkdir(parents=True, exist_ok=True)
                 content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase, run_dir=run_dir)
                 artifact.write_text(content, encoding="utf-8")
-                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
 
             state = _read_node_phase(run_dir)
             self.assertEqual(state["current_phase"], "gates")
@@ -5176,7 +5224,7 @@ if (codexContext !== undefined) {
             gates_artifact.write_text('{"passed": false, "results": [{"name": "lint", "passed": false}]}\n', encoding="utf-8")
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5188,7 +5236,7 @@ if (codexContext !== undefined) {
             fix_loop_artifact.write_text(_node_phase_content("fix-loop"), encoding="utf-8")
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5200,7 +5248,7 @@ if (codexContext !== undefined) {
             comment_artifact.write_text(_node_phase_content("comment-authoring"), encoding="utf-8")
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5212,7 +5260,7 @@ if (codexContext !== undefined) {
             multi_review.write_text(_node_phase_content("multi-review"), encoding="utf-8")
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5224,7 +5272,7 @@ if (codexContext !== undefined) {
             architecture_review.write_text(_node_phase_content("architecture-review"), encoding="utf-8")
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5246,7 +5294,7 @@ if (codexContext !== undefined) {
             )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5267,6 +5315,10 @@ if (codexContext !== undefined) {
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _init_git_repo(project_root)
+            # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
+            # 프로덕션 planner에서 유도한다 — 문자열로 박으면 slug 규칙이 바뀔 때 깨진다.
+            plan = plan_worktree(root=project_root, name="demo")
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -5275,7 +5327,7 @@ if (codexContext !== undefined) {
                 ).returncode,
                 0,
             )
-            run_dir = _node_phase_run_dir(project_root)
+            run_dir = _node_phase_run_dir(project_root, worktree=plan.name)
             for phase in [
                 "domain-grill", "product-brief", "prd",
                 "slice-plan", "plan-review", "ddd-design", "worktree",
@@ -5285,7 +5337,7 @@ if (codexContext !== undefined) {
                 artifact.parent.mkdir(parents=True, exist_ok=True)
                 content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase, run_dir=run_dir)
                 artifact.write_text(content, encoding="utf-8")
-                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
             _record_node_test_evidence(run_dir, exit_code=0)
 
             state = _read_node_phase(run_dir)
@@ -5302,7 +5354,7 @@ if (codexContext !== undefined) {
             )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5314,7 +5366,7 @@ if (codexContext !== undefined) {
             fix_loop_artifact.write_text(_node_phase_content("fix-loop"), encoding="utf-8")
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5326,7 +5378,7 @@ if (codexContext !== undefined) {
             comment_artifact.write_text(_node_phase_content("comment-authoring"), encoding="utf-8")
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5344,7 +5396,7 @@ if (codexContext !== undefined) {
             )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5354,13 +5406,13 @@ if (codexContext !== undefined) {
 
             fix_loop_artifact.write_text(_node_phase_content("fix-loop"), encoding="utf-8")
             self.assertEqual(
-                subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode,
+                subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode,
                 0,
             )
             comment_artifact.write_text(_node_phase_content("comment-authoring"), encoding="utf-8")
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5378,7 +5430,7 @@ if (codexContext !== undefined) {
             )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5393,6 +5445,10 @@ if (codexContext !== undefined) {
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _init_git_repo(project_root)
+            # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
+            # 프로덕션 planner에서 유도한다 — 문자열로 박으면 slug 규칙이 바뀔 때 깨진다.
+            plan = plan_worktree(root=project_root, name="demo")
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--workflow", "default", "--task", "demo", "--run-id", "r1"),
@@ -5401,7 +5457,7 @@ if (codexContext !== undefined) {
                 ).returncode,
                 0,
             )
-            run_dir = _node_phase_run_dir(project_root)
+            run_dir = _node_phase_run_dir(project_root, worktree=plan.name)
             _capture_node_spec_source(run_dir, _node_spec_gate(run_dir))
             final_artifact = _set_node_phase(
                 run_dir, "final-review", workflow="default"
@@ -5411,7 +5467,7 @@ if (codexContext !== undefined) {
             final_artifact.write_text(_with_final_review_gate("verdict: approve\n"), encoding="utf-8")
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5433,7 +5489,7 @@ if (codexContext !== undefined) {
             )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5454,6 +5510,10 @@ if (codexContext !== undefined) {
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _init_git_repo(project_root)
+            # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
+            # 프로덕션 planner에서 유도한다 — 문자열로 박으면 slug 규칙이 바뀔 때 깨진다.
+            plan = plan_worktree(root=project_root, name="demo")
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -5462,7 +5522,7 @@ if (codexContext !== undefined) {
                 ).returncode,
                 0,
             )
-            run_dir = _node_phase_run_dir(project_root)
+            run_dir = _node_phase_run_dir(project_root, worktree=plan.name)
             for phase in [
                 "domain-grill", "product-brief", "prd",
                 "slice-plan", "plan-review", "ddd-design", "worktree",
@@ -5472,31 +5532,31 @@ if (codexContext !== undefined) {
                 artifact.parent.mkdir(parents=True, exist_ok=True)
                 content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase, run_dir=run_dir)
                 artifact.write_text(content, encoding="utf-8")
-                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
 
             for round_num in range(3):
                 for phase in ("comment-authoring", "multi-review", "architecture-review"):
                     artifact = run_dir / _node_phase_artifact(phase)
                     artifact.parent.mkdir(parents=True, exist_ok=True)
                     artifact.write_text(_node_phase_content(phase, run_dir=run_dir), encoding="utf-8")
-                    self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+                    self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
                 gates_artifact = run_dir / _node_phase_artifact("gates")
                 gates_artifact.parent.mkdir(parents=True, exist_ok=True)
                 gates_artifact.write_text('{"passed": false}\n', encoding="utf-8")
-                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
                 fix_artifact = run_dir / _node_phase_artifact("fix-loop")
                 fix_artifact.write_text(_node_phase_content("fix-loop"), encoding="utf-8")
-                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
 
             for phase in ("comment-authoring", "multi-review", "architecture-review"):
                 artifact = run_dir / _node_phase_artifact(phase)
                 artifact.write_text(_node_phase_content(phase, run_dir=run_dir), encoding="utf-8")
-                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
             gates_artifact = run_dir / _node_phase_artifact("gates")
             gates_artifact.write_text('{"passed": false}\n', encoding="utf-8")
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5519,6 +5579,10 @@ if (codexContext !== undefined) {
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _init_git_repo(project_root)
+            # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
+            # 프로덕션 planner에서 유도한다 — 문자열로 박으면 slug 규칙이 바뀔 때 깨진다.
+            plan = plan_worktree(root=project_root, name="demo")
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -5527,7 +5591,7 @@ if (codexContext !== undefined) {
                 ).returncode,
                 0,
             )
-            run_dir = _node_phase_run_dir(project_root)
+            run_dir = _node_phase_run_dir(project_root, worktree=plan.name)
             for phase in [
                 "domain-grill", "product-brief", "prd",
                 "slice-plan", "plan-review", "ddd-design", "worktree",
@@ -5537,7 +5601,7 @@ if (codexContext !== undefined) {
                 artifact.parent.mkdir(parents=True, exist_ok=True)
                 content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase, run_dir=run_dir)
                 artifact.write_text(content, encoding="utf-8")
-                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
 
             arch_artifact = run_dir / _node_phase_artifact("architecture-review")
             arch_artifact.write_text(
@@ -5546,7 +5610,7 @@ if (codexContext !== undefined) {
             )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5567,6 +5631,10 @@ if (codexContext !== undefined) {
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _init_git_repo(project_root)
+            # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
+            # 프로덕션 planner에서 유도한다 — 문자열로 박으면 slug 규칙이 바뀔 때 깨진다.
+            plan = plan_worktree(root=project_root, name="demo")
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -5575,7 +5643,7 @@ if (codexContext !== undefined) {
                 ).returncode,
                 0,
             )
-            run_dir = _node_phase_run_dir(project_root)
+            run_dir = _node_phase_run_dir(project_root, worktree=plan.name)
             for phase in [
                 "domain-grill", "product-brief", "prd",
                 "slice-plan", "plan-review", "ddd-design", "worktree",
@@ -5585,7 +5653,7 @@ if (codexContext !== undefined) {
                 artifact.parent.mkdir(parents=True, exist_ok=True)
                 content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase, run_dir=run_dir)
                 artifact.write_text(content, encoding="utf-8")
-                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
             _record_node_test_evidence(run_dir, exit_code=0)
 
             mr_artifact = run_dir / _node_phase_artifact("multi-review")
@@ -5596,7 +5664,7 @@ if (codexContext !== undefined) {
             )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5619,7 +5687,7 @@ if (codexContext !== undefined) {
             )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5637,7 +5705,7 @@ if (codexContext !== undefined) {
             )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5656,7 +5724,7 @@ if (codexContext !== undefined) {
             )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5675,7 +5743,7 @@ if (codexContext !== undefined) {
             )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5690,7 +5758,7 @@ if (codexContext !== undefined) {
                 mr_artifact.write_text(_with_skills_gate(legacy_status), encoding="utf-8")
                 result = subprocess.run(
                     (node, cli, "run", "advance"),
-                    cwd=project_root,
+                    cwd=plan.path,
                     text=True,
                     capture_output=True,
                     check=False,
@@ -5714,7 +5782,7 @@ if (codexContext !== undefined) {
                 mr_artifact.write_text(_with_skills_gate(bad_source), encoding="utf-8")
                 result = subprocess.run(
                     (node, cli, "run", "advance"),
-                    cwd=project_root,
+                    cwd=plan.path,
                     text=True,
                     capture_output=True,
                     check=False,
@@ -5732,7 +5800,7 @@ if (codexContext !== undefined) {
             )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5752,7 +5820,7 @@ if (codexContext !== undefined) {
             )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5770,7 +5838,7 @@ if (codexContext !== undefined) {
             )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5788,7 +5856,7 @@ if (codexContext !== undefined) {
             )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5806,7 +5874,7 @@ if (codexContext !== undefined) {
             )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5825,7 +5893,7 @@ if (codexContext !== undefined) {
             )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5844,7 +5912,7 @@ if (codexContext !== undefined) {
             )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5863,7 +5931,7 @@ if (codexContext !== undefined) {
             )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5882,7 +5950,7 @@ if (codexContext !== undefined) {
             )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5903,7 +5971,7 @@ if (codexContext !== undefined) {
             )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5923,7 +5991,7 @@ if (codexContext !== undefined) {
             )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -5943,6 +6011,10 @@ if (codexContext !== undefined) {
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _init_git_repo(project_root)
+            # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
+            # 프로덕션 planner에서 유도한다 — 문자열로 박으면 slug 규칙이 바뀔 때 깨진다.
+            plan = plan_worktree(root=project_root, name="demo")
             self.assertEqual(
                 subprocess.run(
                     (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
@@ -5951,7 +6023,7 @@ if (codexContext !== undefined) {
                 ).returncode,
                 0,
             )
-            run_dir = _node_phase_run_dir(project_root)
+            run_dir = _node_phase_run_dir(project_root, worktree=plan.name)
             for phase in [
                 "domain-grill", "product-brief", "prd",
                 "slice-plan", "plan-review", "ddd-design", "worktree",
@@ -5961,7 +6033,7 @@ if (codexContext !== undefined) {
                 artifact.parent.mkdir(parents=True, exist_ok=True)
                 content = "verdict: approve\n" if phase == "plan-review" else _node_phase_content(phase, run_dir=run_dir)
                 artifact.write_text(content, encoding="utf-8")
-                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=project_root, check=False).returncode, 0)
+                self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
 
             mr_artifact = run_dir / _node_phase_artifact("multi-review")
             mr_artifact.write_text(_with_skills_gate(
@@ -5972,7 +6044,7 @@ if (codexContext !== undefined) {
             )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -6029,7 +6101,7 @@ if (codexContext !== undefined) {
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
-            run_dir = _node_start_full_feature_at_pr_watch(project_root, node, cli)
+            run_dir, checkout = _node_start_full_feature_at_pr_watch(project_root, node, cli)
             bin_dir = Path(temp_dir) / "bin"
             bin_dir.mkdir()
             gh = bin_dir / "gh"
@@ -6049,7 +6121,7 @@ if (codexContext !== undefined) {
 
             result = subprocess.run(
                 (node, cli, "run", "push-watch-tick"),
-                cwd=project_root,
+                cwd=checkout,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -6069,6 +6141,8 @@ if (codexContext !== undefined) {
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
+            _init_git_repo(project_root)
+            checkout = plan_worktree(root=project_root, name="demo").path
             subprocess.run(
                 (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
                 cwd=project_root,
@@ -6077,7 +6151,7 @@ if (codexContext !== undefined) {
 
             result = subprocess.run(
                 (node, cli, "run", "push-watch-tick"),
-                cwd=project_root,
+                cwd=checkout,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -6093,7 +6167,7 @@ if (codexContext !== undefined) {
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
-            run_dir = _node_start_full_feature_at_pr_watch(project_root, node, cli)
+            run_dir, checkout = _node_start_full_feature_at_pr_watch(project_root, node, cli)
             bin_dir = Path(temp_dir) / "bin"
             bin_dir.mkdir()
             gh = bin_dir / "gh"
@@ -6113,7 +6187,7 @@ if (codexContext !== undefined) {
 
             result = subprocess.run(
                 (node, cli, "run", "push-watch-tick"),
-                cwd=project_root,
+                cwd=checkout,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -6130,7 +6204,7 @@ if (codexContext !== undefined) {
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
-            run_dir = _node_start_full_feature_at_pr_watch(project_root, node, cli)
+            run_dir, checkout = _node_start_full_feature_at_pr_watch(project_root, node, cli)
             bin_dir = Path(temp_dir) / "bin"
             bin_dir.mkdir()
             gh = bin_dir / "gh"
@@ -6150,7 +6224,7 @@ if (codexContext !== undefined) {
 
             result = subprocess.run(
                 (node, cli, "run", "push-watch-tick"),
-                cwd=project_root,
+                cwd=checkout,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -6167,7 +6241,7 @@ if (codexContext !== undefined) {
             node = _node_executable()
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
-            run_dir = _node_start_full_feature_at_pr_watch(project_root, node, cli)
+            run_dir, checkout = _node_start_full_feature_at_pr_watch(project_root, node, cli)
             bin_dir = Path(temp_dir) / "bin"
             bin_dir.mkdir()
             gh = bin_dir / "gh"
@@ -6187,7 +6261,7 @@ if (codexContext !== undefined) {
 
             result = subprocess.run(
                 (node, cli, "run", "push-watch-tick"),
-                cwd=project_root,
+                cwd=checkout,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -6588,13 +6662,19 @@ if (codexContext !== undefined) {
     def test_status_reports_latest_run(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir).resolve()
+            _init_git_repo(root)
+            plan = plan_worktree(root=root, name="review demo")
             self.assertEqual(
                 main(["start", "review", "--root", str(root), "--task", "review demo", "--run-id", "r1"]),
                 0,
             )
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                self.assertEqual(main(["status", "--root", str(root)]), 0)
+                # run이 managed worktree로 격리됐다. "최신 run이 보인다"는 목적을
+                # 지키려면 기대값을 낮추는 대신 status에 그 checkout을 지정한다.
+                self.assertEqual(
+                    main(["status", "--root", str(root), "--worktree", plan.name]), 0
+                )
             lines = output.getvalue().strip().splitlines()
             self.assertEqual(lines[0], "review r1 awaiting_host")
             self.assertIn("status: awaiting_host", lines)
@@ -6610,7 +6690,7 @@ if (codexContext !== undefined) {
             self.assertIn("next_command: none", lines)
             self.assertIn(
                 "next_command_template: agent-flow record-stage --root "
-                + str(root)
+                + str(worktree_runtime_root(root=root, name=plan.name))
                 + " --run-dir .agent-flow/runs/review/r1 --stage explore --content '<stage result>'",
                 lines,
             )
@@ -6619,11 +6699,14 @@ if (codexContext !== undefined) {
     def test_status_summary_advances_to_next_missing_stage_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir).resolve()
+            _init_git_repo(root)
+            plan = plan_worktree(root=root, name="review demo")
+            state_root = worktree_runtime_root(root=root, name=plan.name)
             self.assertEqual(
                 main(["start", "review", "--root", str(root), "--task", "review demo", "--run-id", "r1"]),
                 0,
             )
-            run_dir = root / ".agent-flow" / "runs" / "review" / "r1"
+            run_dir = state_root / ".agent-flow" / "runs" / "review" / "r1"
             manifest = run_dir / "manifest.json"
             payload = json.loads(manifest.read_text(encoding="utf-8"))
             payload["current_phase"] = "explore"
@@ -6633,7 +6716,7 @@ if (codexContext !== undefined) {
                     [
                         "record-stage",
                         "--root",
-                        str(root),
+                        str(state_root),
                         "--run-dir",
                         ".agent-flow/runs/review/r1",
                         "--stage",
@@ -6647,7 +6730,9 @@ if (codexContext !== undefined) {
 
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                self.assertEqual(main(["status", "--root", str(root)]), 0)
+                self.assertEqual(
+                    main(["status", "--root", str(root), "--worktree", plan.name]), 0
+                )
             lines = output.getvalue().strip().splitlines()
             self.assertIn("current_phase: review-1", lines)
             self.assertIn(
@@ -6658,7 +6743,7 @@ if (codexContext !== undefined) {
             self.assertIn("required_action: write_stage_artifact", lines)
             self.assertIn(
                 "next_command_template: agent-flow record-stage --root "
-                + str(root)
+                + str(state_root)
                 + " --run-dir .agent-flow/runs/review/r1 --stage review-1 --content '<stage result>'",
                 lines,
             )
@@ -6666,14 +6751,18 @@ if (codexContext !== undefined) {
     def test_status_escapes_task_newlines_and_emits_json(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
+            _init_git_repo(root)
             task = "review demo\nstatus: complete\nreason: injected"
+            plan = plan_worktree(root=root, name=task)
             self.assertEqual(
                 main(["start", "review", "--root", str(root), "--task", task, "--run-id", "r1"]),
                 0,
             )
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                self.assertEqual(main(["status", "--root", str(root)]), 0)
+                self.assertEqual(
+                    main(["status", "--root", str(root), "--worktree", plan.name]), 0
+                )
             lines = output.getvalue().strip().splitlines()
             self.assertIn(r"task: review demo\nstatus: complete\nreason: injected", lines)
             self.assertNotIn("reason: injected", lines)
@@ -6730,6 +6819,10 @@ if (codexContext !== undefined) {
             cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
             task = "demo\nstatus: complete\nreason: injected"
+            _init_git_repo(project_root)
+            # run은 leader가 아니라 managed worktree 안에서 돈다. 이름/경로는
+            # 프로덕션 planner에서 유도한다 — 문자열로 박으면 slug 규칙이 바뀔 때 깨진다.
+            plan = plan_worktree(root=project_root, name=task)
             start = subprocess.run(
                 (node, cli, "run", "start", "--task", task, "--run-id", "r1"),
                 cwd=project_root,
@@ -6740,7 +6833,7 @@ if (codexContext !== undefined) {
             self.assertEqual(start.returncode, 0, start.stderr)
             status = subprocess.run(
                 (node, cli, "run", "status"),
-                cwd=project_root,
+                cwd=plan.path,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -6756,6 +6849,9 @@ if (codexContext !== undefined) {
     def test_status_reports_missing_completion_markers_for_active_run(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
+            _init_git_repo(root)
+            plan = plan_worktree(root=root, name="demo task")
+            state_root = worktree_runtime_root(root=root, name=plan.name)
             with mock.patch.dict(
                 os.environ,
                 {"AGENT_FLOW_ADAPTER": "generic", "AGENT_FLOW_GENERIC_MODE": "emit"},
@@ -6767,7 +6863,7 @@ if (codexContext !== undefined) {
                 )
             run_dir = next(
                 path
-                for path in (root / ".agent-flow" / "runs").iterdir()
+                for path in (state_root / ".agent-flow" / "runs").iterdir()
                 if path.is_dir()
             )
             (run_dir / "domain-grill.md").write_text(
@@ -6779,7 +6875,9 @@ if (codexContext !== undefined) {
 
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                self.assertEqual(main(["status", "--root", str(root)]), 0)
+                self.assertEqual(
+                    main(["status", "--root", str(root), "--worktree", plan.name]), 0
+                )
             lines = output.getvalue().strip().splitlines()
             self.assertIn("status: blocked", lines)
             self.assertIn("reason: missing_completion_markers", lines)
@@ -10604,8 +10702,27 @@ def _init_git_repo(root: Path) -> None:
     subprocess.run(("git", "init", "-q", "-b", "main"), cwd=root, check=True)
     subprocess.run(("git", "config", "user.email", "test@example.com"), cwd=root, check=True)
     subprocess.run(("git", "config", "user.name", "Test User"), cwd=root, check=True)
+    # run 시작 게이트는 managed hook 등록을 요구한다. 픽스처를 파일마다 손으로
+    # 세우면 계약과 갈라지므로, 계약(`MANAGED_HOOK_PLACEMENT`)에서 등록을 짓는
+    # 공유 helper 하나만 쓴다. 다만 실제 installer(`agent-flow-kit.mjs install`)를
+    # 먼저 돌린 프로젝트에는 진짜 hook과 그 digest가 이미 kit.json에 박혀 있다.
+    # 거기에 stub을 덧대면 기록과 내용이 갈라져 게이트가 정상 설치본을 위반으로
+    # 읽는다. 설치본이 있으면 그 등록을 그대로 쓴다.
+    if not (root / ".agent-flow" / "kit.json").is_file():
+        _install_managed_hooks(root)
+    # installer가 자기 `.gitignore`를 이미 써 뒀으면 그대로 둔다. 덮으면
+    # installer가 무시하도록 적어 둔 `AGENTS.md`/`CLAUDE.md`가 추적 밖으로
+    # 떨어져 leader가 dirty로 읽히고, worktree 생성 게이트가 막는다.
+    gitignore = root / ".gitignore"
+    if not gitignore.exists():
+        gitignore.write_text(
+            "\n".join((".agent-flow/", ".claude/", ".Codex/", ".codex/", ".omp/")) + "\n",
+            encoding="utf-8",
+        )
     (root / "README.md").write_text("# test\n", encoding="utf-8")
-    subprocess.run(("git", "add", "README.md"), cwd=root, check=True)
+    # 남는 untracked 파일 하나가 leader를 dirty로 만든다. 초기 커밋은 무시 대상을
+    # 뺀 전부를 담는다.
+    subprocess.run(("git", "add", "-A"), cwd=root, check=True)
     subprocess.run(("git", "commit", "-q", "-m", "init"), cwd=root, check=True)
 
 
@@ -10989,7 +11106,17 @@ def _capture_node_spec_source(run_dir, artifact: str) -> None:
 
 
 def _record_node_test_evidence(run_dir: Path, *, exit_code: int) -> None:
-    project_root = run_dir.parents[2]
+    # 로그 파일은 leader 설치본 아래 하나로 쌓이지만, runner는 "이 run의 체크아웃
+    # 안에서 관측된 명령"만 증거로 받는다. run이 managed worktree로 옮겨가면 두
+    # 경로가 갈라지므로, 상대 위치를 세지 말고 설치 규칙(`find_install_root`)과
+    # 등록된 worktree 경로(`get_worktree_status`)를 프로덕션에서 그대로 가져온다.
+    state_root = run_dir.parents[2]
+    project_root = find_install_root(run_dir) or state_root
+    checkout = (
+        project_root
+        if state_root == project_root
+        else get_worktree_status(root=project_root, name=state_root.name).path
+    )
     evidence_path = project_root / ".agent-flow" / "commands-run.jsonl"
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
     with evidence_path.open("a", encoding="utf-8") as handle:
@@ -11002,7 +11129,7 @@ def _record_node_test_evidence(run_dir: Path, *, exit_code: int) -> None:
                     ),
                     "exit_code": exit_code,
                     "at": datetime.now(timezone.utc).timestamp(),
-                    "cwd": str(project_root),
+                    "cwd": str(checkout),
                 }
             )
             + "\n"
@@ -11289,15 +11416,23 @@ def _read_node_phase(run_dir: Path) -> dict[str, object]:
     return json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
 
 
-def _node_start_full_feature_at_pr_watch(project_root: Path, node: str, cli: str) -> Path:
+def _node_start_full_feature_at_pr_watch(
+    project_root: Path, node: str, cli: str
+) -> tuple[Path, Path]:
+    # run은 leader가 아니라 managed worktree 안에서 돈다. 뒤따르는 lifecycle
+    # 명령을 leader에서 부르면 run을 못 찾으므로 checkout 경로도 함께 돌려준다.
+    # 이름은 프로덕션 planner에서 유도한다 — 문자열로 박으면 slug 규칙이 바뀔 때
+    # 같은 회귀가 다시 난다.
+    _init_git_repo(project_root)
+    plan = plan_worktree(root=project_root, name="demo")
     subprocess.run(
         (node, cli, "run", "start", "--task", "demo", "--run-id", "r1"),
         cwd=project_root,
         check=True,
     )
-    run_dir = _node_phase_run_dir(project_root)
+    run_dir = _node_phase_run_dir(project_root, worktree=plan.name)
     _set_node_phase(run_dir, "pr-watch")
-    return run_dir
+    return run_dir, plan.path
 
 
 def _node_epoch_seconds(value: str) -> float:
