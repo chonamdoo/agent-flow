@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -57,10 +58,21 @@ from agent_flow.core.design_value_check import (
     missing_spec_item_evidence,
 )
 from agent_flow.core.hook_integrity import assert_managed_hooks_registered
+from agent_flow.core.worktrees import (
+    CleanupBlockedError,
+    complete_worktree_cleanup,
+    run_worktree_cleanup_transaction,
+    worktree_run_activation,
+)
 from agent_flow.core.worktree_isolation import (
+    LeaderSnapshot,
+    WorktreeIsolationError,
     assert_leader_unchanged,
     capture_leader_snapshot,
+    git_safe,
     leader_root_for,
+    real_path,
+    sanitized_worker_env,
 )
 from agent_flow.core.profiles import GATE_PHASE_ALL
 from agent_flow.core.phase_workflow import (
@@ -89,6 +101,12 @@ GIT_DEPENDENT_PHASES = {
     "merge-approval",
 }
 FIX_LOOP_MAX_ROUNDS = 3
+_HOST_PHASE_LEADER_BASELINE = "host_phase_leader_baseline"
+PROTECTED_BRANCHES = frozenset({"main", "master", "develop"})
+CONVENTIONAL_COMMIT_RE = re.compile(
+    r"^(?:feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)"
+    r"(?:\([^)]+\))?!?: \S.*$"
+)
 DDD_REQUIRED_DESIGN_SECTIONS = (
     ("bounded context", ("bounded context", "bounded contexts", "context map", "컨텍스트")),
     ("ubiquitous language", ("ubiquitous language", "ubiquitous language terms", "domain language", "보편 언어", "유비쿼터스 언어")),
@@ -131,6 +149,9 @@ class Runner:
         run_dir: Path | None = None,
         architecture: str = "default",
         next_command: str = "agent-flow continue",
+        requested_run_id: str | None = None,
+        checkout_identity: str | None = None,
+        checkout_registration_identity: str | None = None,
     ) -> None:
         if architecture not in ARCHITECTURE_MODES:
             raise ValueError(f"invalid architecture mode: {architecture!r}")
@@ -141,6 +162,9 @@ class Runner:
         self.run_dir = run_dir
         self.architecture = architecture
         self.next_command = next_command
+        self.requested_run_id = requested_run_id
+        self.checkout_identity = checkout_identity
+        self.checkout_registration_identity = checkout_registration_identity
         self.kit_root = _find_kit_root()
         if run_dir is not None:
             meta = read_meta(run_dir)
@@ -154,17 +178,46 @@ class Runner:
         # 상태를 tripwire 기준선으로 굳혀 격리 검증 전체가 무의미해진다.
         assert_managed_hooks_registered(self.project_root, self.config_root)
         if mode == ResumeMode.START:
-            self.run_dir = create_run(
-                self.state_root,
-                self.workflow_name,
-                task,
-                architecture=self.architecture,
+            activation = (
+                worktree_run_activation(
+                    root=self.config_root,
+                    path=self.project_root,
+                    registration_identity=self.checkout_registration_identity,
+                )
+                if self.checkout_identity
+                and self.checkout_identity.startswith("worktree:")
+                else nullcontext()
             )
+            with activation:
+                self.run_dir = create_run(
+                    self.state_root,
+                    self.workflow_name,
+                    task,
+                    architecture=self.architecture,
+                    run_id=self.requested_run_id,
+                    checkout_identity=self.checkout_identity,
+                    checkout_registration_identity=(
+                        self.checkout_registration_identity
+                    ),
+                )
             print(f"▶ run started : {self.run_dir.name}")
             print(f"▶ task        : {task}")
         else:
             assert self.run_dir is not None
             meta = read_meta(self.run_dir)
+            stored_checkout = meta.get("checkout_identity")
+            if (
+                isinstance(stored_checkout, str)
+                and stored_checkout.startswith("worktree:")
+            ):
+                with worktree_run_activation(
+                    root=self.config_root,
+                    path=self.project_root,
+                    registration_identity=meta.get(
+                        "checkout_registration_identity"
+                    ),
+                ):
+                    pass
             print(f"▶ resuming    : {self.run_dir.name}")
             print(f"▶ task        : {meta.get('task', '')}")
 
@@ -205,6 +258,12 @@ class Runner:
         phase_index = int(meta.get("phase_index", 0) or 0)
         while phase_index < len(self.phases):
             phase = self.phases[phase_index]
+            leader_before = self._verify_host_phase_leader_baseline(
+                meta=meta,
+                phase=phase,
+                phase_index=phase_index,
+                leader_root=leader_root,
+            )
             # 진입 시각은 phase를 **시작할 때** 찍는다. 실행 뒤에 찍으면 방금 쓴
             # artifact가 진입 시각보다 과거가 되어 stale로 오판된다.
             if not meta.get("phase_entered_at"):
@@ -285,15 +344,23 @@ class Runner:
                     return
                 continue
             print(f"  [run]  {phase.id} — {phase.description}")
-            leader_before = (
-                capture_leader_snapshot(leader_root) if leader_root is not None else None
-            )
+            if leader_root is not None and leader_before is None:
+                leader_before = capture_leader_snapshot(leader_root)
+                self._persist_host_phase_leader_baseline(
+                    phase=phase,
+                    phase_index=phase_index,
+                    leader_root=leader_root,
+                    snapshot=leader_before,
+                )
             completed = adapter.execute(
                 phase, run_dir=self.run_dir, project_root=self.project_root,
             )
             if leader_before is not None:
                 assert_leader_unchanged(
-                    leader_root, leader_before, run_id=self.run_dir.name
+                    leader_root,
+                    leader_before,
+                    run_id=self.run_dir.name,
+                    worker_root=self.project_root,
                 )
             meta = read_meta(self.run_dir)
             self._stamp_phase(meta, phase_index)
@@ -374,7 +441,34 @@ class Runner:
                 return
 
         report_path = write_run_report(self.run_dir)
-        mark_inactive(self.run_dir)
+        cleanup_journal = read_meta(self.run_dir).get("cleanup_journal")
+        if leader_root is not None or cleanup_journal:
+            try:
+                target_branch, integration_strategy = _cleanup_profile_contract(
+                    self.profile
+                )
+                cleanup = run_worktree_cleanup_transaction(
+                    root=self.config_root,
+                    checkout_path=self.project_root,
+                    run_dir=self.run_dir,
+                    target_branch=target_branch,
+                    integration_strategy=integration_strategy,
+                )
+                self.run_dir = complete_worktree_cleanup(cleanup)
+                report_path = self.run_dir / report_path.name
+            except CleanupBlockedError as exc:
+                if exc.run_dir is not None and exc.run_dir.exists():
+                    self.run_dir = exc.run_dir
+                print(f"\n═══ cleanup is pending. {exc} ═══")
+                self._print_structured_status(
+                    status="blocked",
+                    phase=None,
+                    reason="cleanup_pending",
+                    required_artifact=exc.journal_path,
+                )
+                return
+        else:
+            mark_inactive(self.run_dir)
         print("\n✓ run complete.")
         self._print_structured_status(
             status="complete",
@@ -382,6 +476,118 @@ class Runner:
             reason="workflow_complete",
             report=report_path,
         )
+
+    def _verify_host_phase_leader_baseline(
+        self,
+        *,
+        meta: dict[str, Any],
+        phase: Phase,
+        phase_index: int,
+        leader_root: Path | None,
+    ) -> LeaderSnapshot | None:
+        raw = meta.get(_HOST_PHASE_LEADER_BASELINE)
+        if raw is None:
+            return None
+        if leader_root is None:
+            raise WorktreeIsolationError(
+                "durable host-phase leader baseline exists without a linked worktree"
+            )
+        if not isinstance(raw, dict) or set(raw) != {
+            "version",
+            "run_id",
+            "phase_id",
+            "phase_index",
+            "leader_root",
+            "snapshot",
+        }:
+            raise WorktreeIsolationError(
+                "durable host-phase leader baseline is malformed"
+            )
+        assert self.run_dir is not None
+        expected_root = str(real_path(leader_root))
+        if (
+            raw.get("version") != 1
+            or raw.get("run_id") != self.run_dir.name
+            or raw.get("phase_id") != phase.id
+            or isinstance(raw.get("phase_index"), bool)
+            or raw.get("phase_index") != phase_index
+            or raw.get("leader_root") != expected_root
+        ):
+            raise WorktreeIsolationError(
+                "durable host-phase leader baseline does not match the current "
+                "run, phase, or leader checkout"
+            )
+        snapshot_raw = raw.get("snapshot")
+        if not isinstance(snapshot_raw, dict) or set(snapshot_raw) != {
+            "head",
+            "branch",
+            "status",
+            "armed",
+        }:
+            raise WorktreeIsolationError(
+                "durable host-phase leader snapshot is malformed"
+            )
+        head = snapshot_raw.get("head")
+        branch = snapshot_raw.get("branch")
+        status = snapshot_raw.get("status")
+        armed = snapshot_raw.get("armed")
+        if (
+            not isinstance(head, str)
+            or not head
+            or not isinstance(branch, str)
+            or not branch
+            or not isinstance(status, str)
+            or armed is not True
+        ):
+            raise WorktreeIsolationError(
+                "durable host-phase leader snapshot is incomplete"
+            )
+        snapshot = LeaderSnapshot(
+            head=head,
+            branch=branch,
+            status=status,
+            armed=True,
+        )
+        assert_leader_unchanged(
+            leader_root,
+            snapshot,
+            run_id=self.run_dir.name,
+            worker_root=self.project_root,
+        )
+        return snapshot
+
+    def _persist_host_phase_leader_baseline(
+        self,
+        *,
+        phase: Phase,
+        phase_index: int,
+        leader_root: Path,
+        snapshot: LeaderSnapshot,
+    ) -> None:
+        assert self.run_dir is not None
+        if not snapshot.armed:
+            raise WorktreeIsolationError(
+                "cannot persist an unarmed host-phase leader baseline"
+            )
+        meta = read_meta(self.run_dir)
+        if meta.get(_HOST_PHASE_LEADER_BASELINE) is not None:
+            raise WorktreeIsolationError(
+                "host-phase leader baseline changed without phase advancement"
+            )
+        meta[_HOST_PHASE_LEADER_BASELINE] = {
+            "version": 1,
+            "run_id": self.run_dir.name,
+            "phase_id": phase.id,
+            "phase_index": phase_index,
+            "leader_root": str(real_path(leader_root)),
+            "snapshot": {
+                "head": snapshot.head,
+                "branch": snapshot.branch,
+                "status": snapshot.status,
+                "armed": snapshot.armed,
+            },
+        }
+        write_meta(self.run_dir, meta)
 
     def _next_index(self, current_index: int, phase: Phase) -> tuple[int, bool]:
         # phase를 떠나는 유일한 통로다. 여기서 원장을 굳혀야 skip 경로(재개)와
@@ -485,6 +691,11 @@ class Runner:
         방금 쓴 artifact가 진입 시각보다 과거가 되어 다음 실행이 진짜 사유
         (route_blocked) 대신 stale_artifact를 보고한다.
         """
+        if blocked:
+            meta["phase_blocked_reason"] = "route_blocked"
+        else:
+            meta.pop(_HOST_PHASE_LEADER_BASELINE, None)
+            meta.pop("phase_blocked_reason", None)
         self._stamp_phase(meta, phase_index, entering=not blocked)
 
     def _stamp_phase(
@@ -584,6 +795,14 @@ class Runner:
         if self._is_stub_authored(text):
             return []
         missing = list(_missing_markers(text, phase.required_markers))
+        missing.extend(
+            _missing_delivery_evidence(
+                self.project_root,
+                phase.id,
+                text,
+                profile=self.profile,
+            )
+        )
         missing.extend(missing_design_value_markers(text, phase.id))
         meta = read_meta(self.run_dir)
         missing.extend(
@@ -725,6 +944,30 @@ def _find_kit_root() -> Path:
     """Locate the agent-flow kit root (contains workflows/ and profiles/)."""
     # artifact.py의 marker 검증과 같은 kit root를 봐야 routing/검증 YAML이 갈라지지 않는다.
     return find_kit_root()
+
+
+def _cleanup_profile_contract(profile: dict[str, Any]) -> tuple[str, str]:
+    branching = profile.get("branching")
+    pr = profile.get("pr")
+    if not isinstance(branching, dict) or not isinstance(pr, dict):
+        raise CleanupBlockedError(
+            "profile integration contract is unknown; preserving checkout"
+        )
+    integration = branching.get("integration")
+    target = pr.get("target_branch")
+    strategy = pr.get("merge_strategy")
+    if (
+        not isinstance(integration, str)
+        or not integration
+        or not isinstance(target, str)
+        or target != integration
+        or strategy not in {"merge", "squash", "rebase"}
+    ):
+        raise CleanupBlockedError(
+            "profile target or merge strategy is unknown or inconsistent; "
+            "preserving checkout"
+        )
+    return target, str(strategy)
 
 
 def _load_workflow(kit_root: Path, name: str) -> list[Phase]:
@@ -1104,6 +1347,230 @@ def _normalized_reviewer_heading_id(value: str) -> str:
     if re.fullmatch(r"[a-z0-9]+(?: [a-z0-9]+)?", key):
         return key
     return ""
+
+
+def _missing_delivery_evidence(
+    project_root: Path,
+    phase_id: str,
+    text: str,
+    *,
+    profile: dict[str, Any] | None = None,
+) -> list[str]:
+    if phase_id == "commit":
+        return _missing_commit_evidence(project_root, text)
+    if phase_id == "push-pr":
+        target_branch = _profile_pr_target(profile)
+        if target_branch is None:
+            return ["delivery evidence: profile pr.target_branch is unavailable"]
+        return _missing_push_pr_evidence(
+            project_root,
+            text,
+            target_branch=target_branch,
+        )
+    return []
+
+
+def _delivery_fields(
+    text: str, names: tuple[str, ...]
+) -> tuple[dict[str, str], list[str]]:
+    body = unfenced_markdown_text(text)
+    fields: dict[str, str] = {}
+    errors: list[str] = []
+    for name in names:
+        values = [
+            match.group(1).strip()
+            for match in re.finditer(
+                rf"^[ \t]*{re.escape(name)}[ \t]*:[ \t]*(.*?)[ \t]*$",
+                body,
+                re.MULTILINE,
+            )
+            if match.group(1).strip()
+        ]
+        if len(values) != 1:
+            errors.append(
+                f"delivery evidence: {name}: requires exactly one non-empty value"
+            )
+            continue
+        fields[name] = values[0]
+    return fields, errors
+
+
+def _missing_commit_evidence(project_root: Path, text: str) -> list[str]:
+    fields, errors = _delivery_fields(text, ("commit-oid", "commit-subject"))
+    if errors:
+        return errors
+
+    head = git_safe(
+        "rev-parse", "--verify", "HEAD^{commit}",
+        cwd=project_root,
+        optional_locks=False,
+    )
+    if not head.ok or not head.stdout.strip():
+        return ["delivery evidence: cannot prove current git HEAD"]
+    head_oid = head.stdout.strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40,64}", fields["commit-oid"].lower()):
+        errors.append("delivery evidence: commit-oid must be a full git object id")
+    elif fields["commit-oid"].lower() != head_oid:
+        errors.append("delivery evidence: commit-oid does not match current HEAD")
+
+    branch = git_safe(
+        "symbolic-ref", "--quiet", "--short", "HEAD",
+        cwd=project_root,
+        optional_locks=False,
+    )
+    if not branch.ok or not branch.stdout.strip():
+        errors.append("delivery evidence: detached or unknown current branch")
+    elif branch.stdout.strip() in PROTECTED_BRANCHES:
+        errors.append(
+            f"delivery evidence: protected branch {branch.stdout.strip()} cannot be committed"
+        )
+
+    status = git_safe(
+        "status", "--porcelain=v1", "--untracked-files=normal",
+        cwd=project_root,
+        optional_locks=False,
+    )
+    if not status.ok:
+        errors.append("delivery evidence: cannot prove a clean git worktree")
+    elif status.stdout.strip():
+        errors.append("delivery evidence: git worktree is not clean")
+
+    subject = git_safe(
+        "show", "-s", "--format=%s", head_oid,
+        cwd=project_root,
+        optional_locks=False,
+    )
+    if not subject.ok:
+        errors.append("delivery evidence: cannot read the committed subject")
+    else:
+        actual_subject = subject.stdout.rstrip("\r\n")
+        if fields["commit-subject"] != actual_subject:
+            errors.append(
+                "delivery evidence: commit-subject does not match current HEAD"
+            )
+        if not CONVENTIONAL_COMMIT_RE.fullmatch(actual_subject):
+            errors.append(
+                "delivery evidence: current HEAD subject is not a Conventional Commit"
+            )
+    return errors
+
+
+def _profile_pr_target(profile: dict[str, Any] | None) -> str | None:
+    pr = profile.get("pr") if isinstance(profile, dict) else None
+    target = pr.get("target_branch") if isinstance(pr, dict) else None
+    return target.strip() if isinstance(target, str) and target.strip() else None
+
+
+def _missing_push_pr_evidence(
+    project_root: Path,
+    text: str,
+    *,
+    target_branch: str,
+) -> list[str]:
+    fields, errors = _delivery_fields(
+        text,
+        ("remote", "branch", "remote-oid", "pr-url", "pr-base"),
+    )
+    if errors:
+        return errors
+    if fields["pr-base"] != target_branch:
+        errors.append(
+            f"delivery evidence: pr-base must match profile target {target_branch}"
+        )
+    if not re.fullmatch(r"https://[^\s]+", fields["pr-url"]):
+        errors.append("delivery evidence: pr-url must be an HTTPS URL")
+
+    head = git_safe(
+        "rev-parse", "--verify", "HEAD^{commit}",
+        cwd=project_root,
+        optional_locks=False,
+    )
+    branch = git_safe(
+        "symbolic-ref", "--quiet", "--short", "HEAD",
+        cwd=project_root,
+        optional_locks=False,
+    )
+    if not head.ok or not head.stdout.strip():
+        errors.append("delivery evidence: cannot prove current git HEAD")
+    if not branch.ok or not branch.stdout.strip():
+        errors.append("delivery evidence: detached or unknown current branch")
+    if errors:
+        return errors
+
+    head_oid = head.stdout.strip().lower()
+    branch_name = branch.stdout.strip()
+    if fields["branch"] != branch_name:
+        errors.append("delivery evidence: branch does not match the current branch")
+    if fields["remote-oid"].lower() != head_oid:
+        errors.append("delivery evidence: remote-oid does not match local HEAD")
+
+    remotes = git_safe("remote", cwd=project_root, optional_locks=False)
+    if not remotes.ok or fields["remote"] not in remotes.stdout.splitlines():
+        errors.append("delivery evidence: named git remote is unavailable")
+    else:
+        remote_ref = f"refs/heads/{branch_name}"
+        remote = git_safe(
+            "ls-remote", "--heads", fields["remote"], remote_ref,
+            cwd=project_root,
+            timeout_s=30,
+            optional_locks=False,
+        )
+        rows = [line.split() for line in remote.stdout.splitlines()] if remote.ok else []
+        matching = [
+            row[0].lower()
+            for row in rows
+            if len(row) == 2 and row[1] == remote_ref
+        ]
+        if len(matching) != 1:
+            errors.append("delivery evidence: cannot prove the pushed remote branch OID")
+        elif matching[0] != head_oid or matching[0] != fields["remote-oid"].lower():
+            errors.append(
+                "delivery evidence: local HEAD, remote-oid, and pushed branch OID differ"
+            )
+
+    pr = run_safe_command(
+        (
+            "gh", "pr", "view", fields["pr-url"], "--json",
+            "url,baseRefName,headRefName,headRefOid",
+        ),
+        cwd=project_root,
+        env=sanitized_worker_env(),
+        timeout_s=30,
+    )
+    if not pr.ok:
+        errors.append("delivery evidence: gh cannot prove the pull request")
+        return errors
+    try:
+        payload = json.loads(pr.stdout)
+    except json.JSONDecodeError:
+        errors.append("delivery evidence: gh returned invalid pull request evidence")
+        return errors
+    if not isinstance(payload, dict):
+        return [*errors, "delivery evidence: gh returned invalid pull request evidence"]
+
+    actual_url = payload.get("url")
+    if (
+        not isinstance(actual_url, str)
+        or not actual_url.startswith("https://")
+        or actual_url.rstrip("/") != fields["pr-url"].rstrip("/")
+    ):
+        errors.append("delivery evidence: pr-url does not match the live pull request")
+    if payload.get("baseRefName") != target_branch:
+        errors.append(
+            f"delivery evidence: live pull request base is not {target_branch}"
+        )
+    if payload.get("headRefName") != branch_name:
+        errors.append("delivery evidence: live pull request head branch differs")
+    gh_head_oid = payload.get("headRefOid")
+    if (
+        not isinstance(gh_head_oid, str)
+        or gh_head_oid.lower() != head_oid
+        or gh_head_oid.lower() != fields["remote-oid"].lower()
+    ):
+        errors.append(
+            "delivery evidence: local HEAD, remote-oid, and PR headRefOid differ"
+        )
+    return errors
 
 
 def _missing_markers(text: str, markers: tuple[str, ...]) -> list[str]:

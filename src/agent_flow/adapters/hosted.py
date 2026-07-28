@@ -17,14 +17,15 @@ from pathlib import Path
 from types import MappingProxyType
 
 from agent_flow.adapters.base import Adapter
+from agent_flow.core.worktree_isolation import WorktreeIsolationError
 from agent_flow.multi_review import (
-    ReviewerJob,
     Distribution,
+    ReviewerJob,
     distribute,
-    residual_host_jobs,
-    resolve_review_clis,
+    reviewer_result_error,
     run_distribution,
 )
+from agent_flow.subprocess_pool import SubprocessResult
 
 _BASE_REVIEW_ANGLES: tuple[dict[str, str], ...] = (
     {
@@ -44,11 +45,14 @@ _BASE_REVIEW_PROMPTS = {
     str(item["prompt"])
     for item in _BASE_REVIEW_ANGLES
 }
+_ARTIFACT_COMPONENT_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyz0123456789-"
+)
 
 _CLAUDE_HINT = """\
-- For multi-reviewer phases, use the `Task` tool to spawn at least two
-  reviewer sub-agents in the same assistant message so they execute in parallel.
-- Each reviewer section must include `reviewer-source: sub-agent`.
+- Multi-review angles are launched by agent-flow as independent OS-confined
+  subprocesses. Aggregate their per-angle artifacts; do not replace them with
+  in-session Task sub-agents.
 - Use `TodoWrite` for slice tracking during `implement` phase. Mark each
   TDD red→green→refactor step in_progress / completed.
 - For long-running phases, prefer parallel reads (multiple `Read` calls in
@@ -57,23 +61,19 @@ _CLAUDE_HINT = """\
 """
 
 _CODEX_HINT = """\
-- For multi-reviewer phases, spawn at least two Codex reviewer sub-agents
-  in parallel.
+- Multi-review angles are launched by agent-flow as independent OS-confined
+  subprocesses. Aggregate their per-angle artifacts; do not replace them with
+  in-session Codex sub-agents.
 - Each reviewer section must include `reviewer-source: sub-agent`.
-- After recording each Codex sub-agent result in `final-review.md`, close that
-  sub-agent session.
-- If agent-flow already distributed angles across installed CLIs, invoke each
-  non-host CLI in parallel and aggregate stdout into the artifact.
-- Per-angle artifacts are written by agent-flow as `final-review-<angle>.md`
-  when subprocess delegation succeeds; aggregate them into the final
-  `final-review.md` summary.
+- Per-angle artifacts are written as `final-review-<angle>.md`; aggregate them
+  into the final `final-review.md` summary.
 - Cite file:line references using the `path/to/file:42` format.
 """
 
 _OMP_HINT = """\
-- For multi-reviewer phases, use the `task` tool to spawn at least two
-  OMP reviewer sub-agents in the same assistant message so they execute in
-  parallel.
+- Multi-review angles are launched by agent-flow as independent OS-confined
+  subprocesses. Aggregate their per-angle artifacts; do not replace them with
+  in-session task sub-agents.
 - Each reviewer section must include `reviewer-source: sub-agent`.
 - For long-running phases, prefer parallel reads/tool calls over sequential
   exploration.
@@ -108,11 +108,28 @@ class HostedAdapter(Adapter):
 
     def execute(self, phase, run_dir: Path, project_root: Path) -> bool:
         host_hint = self._hint
+        host_hint += (
+            "\n\n### Host-session isolation boundary\n"
+            "This controller session is not counted as an isolated worker. "
+            "Every child reviewer is launched separately through the verified "
+            "provider sandbox; never substitute controller-session work for a "
+            "failed child process."
+        )
         if phase.multi_review:
-            distribution = _run_multi_review_distribution(
+            distribution, results = _run_multi_review_distribution(
                 phase, run_dir, project_root, self
             )
-            host_hint += "\n" + _multi_reviewer_block(distribution)
+            failures = _required_reviewer_failures(distribution, results)
+            if distribution.fallback_to_generic:
+                failures.append("active host reviewer CLI is unavailable")
+            if distribution.insufficient_reviewers:
+                failures.append("fewer than two active-host reviewers were assigned")
+            if failures:
+                raise WorktreeIsolationError(
+                    "required reviewer subprocesses failed closed: "
+                    + "; ".join(failures)
+                )
+            host_hint += "\n" + _multi_reviewer_block(distribution, results)
         prompt = self.render_envelope(
             phase, run_dir, project_root, host_hint=host_hint,
         )
@@ -125,11 +142,11 @@ def _run_multi_review_distribution(
     run_dir: Path,
     project_root: Path,
     adapter: Adapter,
-) -> Distribution:
+) -> tuple[Distribution, list[SubprocessResult]]:
     jobs = _reviewer_jobs(phase, run_dir, project_root, adapter)
     distribution = distribute(jobs, host=adapter.name)
-    run_distribution(distribution, project_root)
-    return distribution
+    results = run_distribution(distribution, project_root)
+    return distribution, results
 
 
 def _reviewer_jobs(
@@ -148,8 +165,15 @@ def _reviewer_jobs(
         angle_id = str(item.get("id") or "").strip()
         if not angle_id:
             continue
+        angle_output = _review_angle_output(run_dir, phase.id, angle_id)
         angle_prompt = (
             f"{base_prompt}\n\n"
+            "## Isolated reviewer process contract\n\n"
+            "You are one read-only reviewer subprocess. Do not invoke "
+            "`agent-flow status`, do not continue the workflow, and do not "
+            "write the aggregate phase artifact named above. Return only this "
+            "angle's review in your final stdout; the parent records it at "
+            f"`{angle_output}`. Include `reviewer-source: sub-agent`.\n\n"
             f"## Review angle\n\n"
             f"- id: {angle_id}\n"
             f"{_review_angle_prompt(project_root, item.get('prompt', ''))}\n"
@@ -157,9 +181,28 @@ def _reviewer_jobs(
         jobs.append(ReviewerJob(
             angle_id=angle_id,
             prompt=angle_prompt,
-            output_path=run_dir / f"{phase.id}-{angle_id}.md",
+            output_path=angle_output,
+            artifact_root=run_dir.resolve(),
         ))
     return jobs
+
+
+def _review_angle_output(run_dir: Path, phase_id: str, angle_id: str) -> Path:
+    for label, value in (("phase", phase_id), ("angle", angle_id)):
+        if (
+            not value
+            or len(value) > 64
+            or value[0] not in "abcdefghijklmnopqrstuvwxyz0123456789"
+            or any(character not in _ARTIFACT_COMPONENT_CHARS for character in value)
+        ):
+            raise ValueError(f"invalid review {label} id: {value}")
+    artifact_root = run_dir.resolve()
+    output = artifact_root / f"{phase_id}-{angle_id}.md"
+    if output.parent != artifact_root or output.is_symlink():
+        raise ValueError(f"invalid review angle artifact path: {output}")
+    if output.exists() and not output.is_file():
+        raise ValueError(f"review angle artifact is not a regular file: {output}")
+    return output
 
 
 def _merge_review_angles(
@@ -214,55 +257,74 @@ def _validate_review_prompt_path(prompt_path: str) -> None:
         raise ValueError(f"invalid review angle prompt path: {prompt_path}")
 
 
-def _multi_reviewer_block(distribution: Distribution | None = None) -> str:
-    """Distribution preview for multi-reviewer phases.
+def _required_reviewer_failures(
+    distribution: Distribution,
+    results: list[SubprocessResult],
+) -> list[str]:
+    by_id = {result.job_id: result for result in results}
+    failures: list[str] = []
+    for job_id in sorted(distribution.required_job_ids):
+        result = by_id.get(job_id)
+        if result is None:
+            failures.append(f"{job_id}: missing result")
+        else:
+            reason = reviewer_result_error(result)
+            if reason is not None:
+                failures.append(f"{job_id}: {reason}")
+    return failures
 
-    The actual angle list is profile-driven and read by the host AI from
-    the profile YAML; this block shows the suggested CLI distribution.
-    """
-    available = resolve_review_clis()
-    if not available:
-        return ("### Multi-CLI distribution\n"
-                "No optional reviewer providers configured. Spawn at least "
-                "two host-native reviewer sub-agents, then aggregate their independent "
-                "verdicts. "
-                "Each reviewer section must include `reviewer-source: sub-agent`. "
-                "Close sub-agent sessions after recording results. "
-                "Multi-review requires 2+ independent sub-agent reviewer verdicts.\n")
-    names = [c.name for c in available]
+
+def _multi_reviewer_block(
+    distribution: Distribution | None = None,
+    results: list[SubprocessResult] | None = None,
+) -> str:
+    """Render the observed subprocess distribution for host aggregation."""
     lines = [
-        "### Multi-CLI distribution",
-        f"Configured optional reviewer providers: {', '.join(names)}.",
-        "",
-        "When fanning out review angles, distribute round-robin across "
-        "the installed CLIs (host last). For non-host CLIs, invoke via "
-        "the `Bash` tool:",
-        "",
+        "### Confined reviewer subprocesses",
+        "Use only the per-angle artifacts produced by agent-flow's isolated "
+        "reviewer processes. Do not spawn or substitute in-session sub-agents.",
+        "Each accepted reviewer section must include "
+        "`reviewer-source: sub-agent`.",
     ]
-    for cli in available:
-        lines.append(f"- `{cli.binaries[0]} {' '.join(cli.invoke)} '<angle prompt>'`")
-    lines.append("")
-    lines.append(
-        "Capture each subprocess's stdout and aggregate into "
-        "`final-review.md`. For host-CLI angles, use the host-native "
-        "sub-agent mechanism with at least two reviewer sub-agents. "
-        "Each reviewer section must include `reviewer-source: sub-agent`. "
-        "Close sub-agent sessions after recording results."
-    )
-    if distribution is not None and distribution.insufficient_reviewers:
-        lines.append(
-            "Only one reviewer provider is available. Ensure host "
-            "sub-agents run so the artifact contains 2+ independent sub-agent "
-            "reviewer verdicts."
-        )
-    if distribution is not None:
-        residual = residual_host_jobs(distribution)
-        lines.append("")
-        lines.append(f"Distribution summary: {distribution.summary()}.")
-        if residual:
-            lines.append(
-                "Residual host-handled angles: "
-                + ", ".join(job.angle_id for job in residual)
-                + "."
+    if distribution is None:
+        return "\n".join(lines) + "\n"
+    lines.extend(("", f"Distribution summary: {distribution.summary()}."))
+    if distribution.fallback_to_generic:
+        lines.extend(
+            (
+                "status: blocked",
+                "reason: no verified reviewer subprocess is available",
+                "Do not approve this phase from controller-session review.",
             )
+        )
+        return "\n".join(lines) + "\n"
+    by_id = {
+        result.job_id: result
+        for result in results or []
+    }
+    for cli_name, jobs in distribution.by_cli.items():
+        for job in jobs:
+            job_id = f"{cli_name}-{job.angle_id}"
+            result = by_id.get(job_id)
+            status = (
+                "pass"
+                if result is not None and reviewer_result_error(result) is None
+                else "optional-failed"
+            )
+            source = (
+                "required"
+                if job_id in distribution.required_job_ids
+                else "optional"
+            )
+            lines.append(
+                f"- {cli_name}:{job.angle_id} ({source}, {status}) "
+                f"-> `{job.output_path.name}`"
+            )
+    if distribution.insufficient_reviewers:
+        lines.extend(
+            (
+                "status: blocked",
+                "reason: fewer than two independent reviewer processes were assigned",
+            )
+        )
     return "\n".join(lines) + "\n"

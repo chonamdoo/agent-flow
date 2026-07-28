@@ -6,9 +6,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-# `scripts/check-context-docs.mjs` / `scripts/check-context-docs.ts`의
-# ABSOLUTE_PATH_RE와 같은 접두사 집합이어야 한다. 검사기가 잡는 것보다 좁으면
-# artifact가 red로 남고, 넓으면 로그가 필요 이상으로 뒤틀린다.
+# 여러 운영체제의 로컬 절대 경로를 같은 기준으로 가려 artifact에 개발자 경로가 남지 않게 한다.
 _LOCAL_ABSOLUTE_PATH_RE = re.compile(
     r"(?<![\w.-])"
     r"(?:/Users/|/home/|/private/var/|/workspace/|/tmp/|/var/|/opt/|/mnt/|[A-Za-z]:[\\/])"
@@ -36,7 +34,7 @@ class GateResult:
 
 
 def run_gate(command: GateCommand, *, cwd: Path, timeout_s: int = 600) -> GateResult:
-    executable_command = _resolve_gate_command(command.command, cwd)
+    executable_command = command.command
     recorded_command = _recorded_gate_command(executable_command, cwd)
     try:
         completed = subprocess.run(
@@ -157,24 +155,10 @@ def _installed_python_runtime_path(cwd: Path) -> Path | None:
     return None
 
 
-def _resolve_gate_command(command: tuple[str, ...], cwd: Path) -> tuple[str, ...]:
-    if command == ("node", "scripts/check-context-docs.mjs"):
-        script = _installed_agent_flow_file(cwd, "scripts", "check-context-docs.mjs")
-        if script is not None:
-            return ("node", os.path.relpath(script, cwd.resolve()))
-    return command
 
 
 def _recorded_gate_command(command: tuple[str, ...], cwd: Path) -> tuple[str, ...]:
     return tuple(relativize_local_path(part, cwd) for part in command)
-
-
-def _installed_agent_flow_file(cwd: Path, *parts: str) -> Path | None:
-    for root in _candidate_agent_flow_roots(cwd):
-        candidate = root / ".agent-flow" / Path(*parts)
-        if candidate.is_file():
-            return candidate
-    return None
 
 
 def _candidate_agent_flow_roots(cwd: Path) -> list[Path]:

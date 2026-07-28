@@ -33,19 +33,15 @@ When the user types `/agent-flow status`, run:
 agent-flow status
 ```
 
-## User-Only Commands
+## User-Only Approval
 
-Two commands confirm SPEC items and must be typed by the user in an interactive terminal:
+When a run waits for SPEC set confirmation:
 
-```bash
-agent-flow spec confirm --run-dir <run-dir> --artifact <run-dir>/artifacts/design.md
-agent-flow spec approve <spec-id> --run-dir <run-dir>
-```
+- On a supported Codex, Claude, or OMP host, show the complete ordered SPEC list and ask the user to reply exactly `승인` in a new turn of the current chat. The managed user-prompt hook confirms the current pending SPEC.
+- Only when that hook is unavailable, ask the user to run the path-free fallback `agent-flow spec confirm` from the target worktree in an interactive terminal.
+- A `manual` verifier still requires the user to run `agent-flow spec approve <spec-id> --run-dir <run-dir>`.
 
-- `spec confirm` confirms the `## Spec Items` of a design or prd artifact. `--artifact` takes a path, not a bare name.
-- `spec approve` records the approval for a SPEC item whose `verify:` is `manual`.
-- Never run either command yourself. A confirmation or approval observed from an agent shell is voided and the phase stays blocked.
-- When a run is waiting on SPEC confirmation, print the exact command and wait for the user.
+Never run the fallback or manual approval command, or invoke the user-prompt hook yourself. Confirmation or approval observed from an agent shell is void and the phase stays blocked.
 
 ## Behavior
 

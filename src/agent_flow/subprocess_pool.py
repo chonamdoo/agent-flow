@@ -23,7 +23,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
-from agent_flow.core.worktree_isolation import max_worker_capacity
+from agent_flow.core.worktree_isolation import WorktreeIsolationError, max_worker_capacity
+from agent_flow.providers.subprocess import (
+    MAX_PROVIDER_OUTPUT_BYTES,
+    _PROVIDER_POLL_S,
+    _PROVIDER_REAP_TIMEOUT_S,
+    _provider_output_exceeded,
+    _read_provider_outputs,
+    confined_provider_launch,
+)
 
 
 @dataclass
@@ -34,6 +42,7 @@ class SubprocessJob:
     cwd: Path
     timeout_s: int = 600    # default 10 minutes per job
     env: dict | None = None  # None inherits parent env; set to sanitize git leak
+    allow_workspace_writes: bool = True
 
 
 @dataclass
@@ -53,55 +62,138 @@ class SubprocessResult:
 
 async def _run_one(job: SubprocessJob) -> SubprocessResult:
     started = time.monotonic()
+    proc: asyncio.subprocess.Process | None = None
+    wait_task: asyncio.Task[int] | None = None
+    stdout_path: Path | None = None
+    stderr_path: Path | None = None
     try:
-        proc = await asyncio.create_subprocess_exec(
-            job.binary, *job.args,
-            cwd=str(job.cwd),
+        with confined_provider_launch(
+            argv=(job.binary, *job.args),
+            cwd=job.cwd,
             env=job.env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
-        )
-    except FileNotFoundError as e:
-        return SubprocessResult(
-            job_id=job.job_id,
-            error=f"binary not found: {job.binary}",
-            duration_s=time.monotonic() - started,
-        )
-    except OSError as e:
-        return SubprocessResult(
-            job_id=job.job_id,
-            error=f"OSError starting subprocess: {e}",
-            duration_s=time.monotonic() - started,
-        )
+            allow_workspace_writes=job.allow_workspace_writes,
+        ) as launch:
+            stdout_path = launch.scratch / "stdout"
+            stderr_path = launch.scratch / "stderr"
+            try:
+                with stdout_path.open("xb") as stdout_file, stderr_path.open(
+                    "xb"
+                ) as stderr_file:
+                    proc = await asyncio.create_subprocess_exec(
+                        *launch.argv,
+                        stdin=asyncio.subprocess.DEVNULL,
+                        cwd=str(launch.cwd),
+                        env=launch.env,
+                        stdout=stdout_file,
+                        stderr=stderr_file,
+                        start_new_session=True,
+                        close_fds=True,
+                        pass_fds=launch.lease.process_lifetime_fds,
+                    )
+                    wait_task = asyncio.create_task(proc.wait())
+                    outcome = await _wait_for_provider(
+                        wait_task,
+                        timeout_s=job.timeout_s,
+                        stdout_path=stdout_path,
+                        stderr_path=stderr_path,
+                    )
+                    if outcome != "completed":
+                        _kill_process_tree(proc)
+                    await _bounded_reap(proc, wait_task)
+                    if _provider_output_exceeded(stdout_path, stderr_path):
+                        outcome = "output-limit"
+            except FileNotFoundError:
+                return SubprocessResult(
+                    job_id=job.job_id,
+                    error=f"binary not found: {job.binary}",
+                    duration_s=time.monotonic() - started,
+                )
+            except OSError as exc:
+                return SubprocessResult(
+                    job_id=job.job_id,
+                    error=f"OSError starting subprocess: {exc}",
+                    duration_s=time.monotonic() - started,
+                )
+            finally:
+                if proc is not None:
+                    _kill_process_tree(proc)
+                    await _bounded_reap(proc, wait_task)
 
-    try:
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(), timeout=job.timeout_s,
-        )
+            stdout, stderr = _read_provider_outputs(stdout_path, stderr_path)
+            return SubprocessResult(
+                job_id=job.job_id,
+                stdout=stdout,
+                stderr=stderr,
+                returncode=(
+                    proc.returncode
+                    if outcome == "completed" and proc.returncode is not None
+                    else -1
+                ),
+                duration_s=time.monotonic() - started,
+                timed_out=outcome == "timeout",
+                error=(
+                    f"provider output exceeded {MAX_PROVIDER_OUTPUT_BYTES} bytes"
+                    if outcome == "output-limit"
+                    else None
+                ),
+            )
+    except (OSError, WorktreeIsolationError) as exc:
+        stdout, stderr = _read_provider_outputs(stdout_path, stderr_path)
         return SubprocessResult(
             job_id=job.job_id,
-            stdout=stdout.decode("utf-8", errors="replace"),
-            stderr=stderr.decode("utf-8", errors="replace"),
-            returncode=proc.returncode if proc.returncode is not None else -1,
+            stdout=stdout,
+            stderr=stderr,
+            error=str(exc),
             duration_s=time.monotonic() - started,
+        )
+    finally:
+        if proc is not None:
+            _kill_process_tree(proc)
+            await _bounded_reap(proc, wait_task)
+
+
+async def _wait_for_provider(
+    wait_task: asyncio.Task[int],
+    *,
+    timeout_s: float,
+    stdout_path: Path,
+    stderr_path: Path,
+) -> str:
+    deadline = time.monotonic() + max(timeout_s, 0)
+    while True:
+        if _provider_output_exceeded(stdout_path, stderr_path):
+            return "output-limit"
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return "timeout"
+        done, _ = await asyncio.wait(
+            {wait_task}, timeout=min(_PROVIDER_POLL_S, remaining)
+        )
+        if done:
+            return "completed"
+
+
+async def _bounded_reap(
+    proc: asyncio.subprocess.Process,
+    wait_task: asyncio.Task[int] | None,
+) -> None:
+    if proc.returncode is not None:
+        return
+    task = wait_task if wait_task is not None else asyncio.create_task(proc.wait())
+    try:
+        await asyncio.wait_for(
+            asyncio.shield(task), timeout=_PROVIDER_REAP_TIMEOUT_S
         )
     except asyncio.TimeoutError:
         _kill_process_tree(proc)
         try:
-            stdout, stderr = await proc.communicate()
-            captured_out = stdout.decode("utf-8", errors="replace")
-            captured_err = stderr.decode("utf-8", errors="replace")
-        except Exception:
-            captured_out = ""
-            captured_err = ""
-        return SubprocessResult(
-            job_id=job.job_id,
-            stdout=captured_out,
-            stderr=captured_err,
-            timed_out=True,
-            duration_s=time.monotonic() - started,
-        )
+            await asyncio.wait_for(
+                asyncio.shield(task), timeout=_PROVIDER_REAP_TIMEOUT_S
+            )
+        except asyncio.TimeoutError as exc:
+            raise WorktreeIsolationError(
+                "provider process could not be reaped within the bounded deadline"
+            ) from exc
 
 
 def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:

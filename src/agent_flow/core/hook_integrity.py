@@ -8,24 +8,25 @@ tripwire(`assert_leader_unchanged`)는 런 *도중*의 변경만 본다. 런이 
 변경탐지가 아니라 대조인 이유는 오라클이 있기 때문이다. install이 심는
 스크립트 집합(`MANAGED_HOOK_SCRIPTS`)과 hook 사용 여부(`kit.json:hooks`)가
 기대값이다. 그래서 판정은 "없으면 위반"이 아니라 **"기록과 다르면 위반"**이다.
-`--no-hooks` 설치와 hook 미지원 host는 정상 상태이고, `hooks` 키가 아예 없는
-설치본은 대조할 기록이 없으므로 검증하지 않는다.
+`--no-hooks` 설치와 hook 미지원 host는 파일 상태 검사에서는 정상으로 보고하지만,
+런 시작 게이트는 강제 hook이 없는 상태를 안전하다고 증명할 수 없어 거부한다.
 
 **관측 hook은 PostToolUse, 강제 hook은 PreToolUse.** PreToolUse는 host가 허용/
 차단 판정을 기대하는 자리라, 관측용 스크립트를 거기 달면 스크립트가 없거나
 죽는 순간 host가 그것을 차단으로 읽어 사용자 도구가 통째로 막힌다. 관측자를
 늘리려던 변경이 실행 경로를 끊는 것이 이 계약이 막는 사고다.
-
 판정 범위는 **관리 네임스페이스**(`.agent-flow/scripts/hooks/`)로 한정한다.
 그 밖의 사용자 hook은 정당한 설정이라 오라클이 없다 — 런 *도중*에 그 파일들이
 바뀌는 것은 tripwire 심층 스캔(`worktree_isolation._EXEC_SURFACE_PATHS`)이 본다.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import posixpath
 import re
+import shlex
 import stat
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,7 +36,12 @@ from typing import Iterator
 # (`bin/agent-flow-install.mjs`, `bin/agent-flow-kit.mjs`,
 # `scripts/check-agent-flow-parity.mjs`)과 갈라지면 parity가 잡는다.
 MANAGED_HOOK_SCRIPTS = (
+    "bind-host-worktree.py",
+    "confirm-spec-user-prompt.py",
     "guard-protected-branch.sh",
+    "guard-host-worktree.sh",
+    "guard-spec-approval.sh",
+    "prepare-spec-user-prompt.py",
     "show-phase-status.sh",
     "comment-checker.py",
     "record-skill-read.py",
@@ -57,7 +63,27 @@ ENFORCEMENT_EVENT = "PreToolUse"
 # `"Bash"`를 `"^$"`로 바꾸면 등록은 남고 hook은 영영 안 불린다.
 # JS installer의 실제 등록과 갈라지면 parity가 잡는다.
 MANAGED_HOOK_PLACEMENT = {
+    "bind-host-worktree.py": (
+        "PostToolUse",
+        "^(Bash|bash|shell|run_terminal_cmd|execute_command|local_shell|terminal)$",
+    ),
+    "confirm-spec-user-prompt.py": ("UserPromptSubmit", ""),
     "guard-protected-branch.sh": ("PreToolUse", "Bash"),
+    "guard-host-worktree.sh": (
+        "PreToolUse",
+        "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit|"
+        "Bash|bash|shell|run_terminal_cmd|execute_command|local_shell|terminal)$",
+    ),
+    "guard-spec-approval.sh": (
+        "PreToolUse",
+        "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit|"
+        "Bash|bash|shell|run_terminal_cmd|execute_command|local_shell|terminal)$",
+    ),
+    "prepare-spec-user-prompt.py": (
+        "PostToolUse",
+        "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit|"
+        "Bash|bash|shell|run_terminal_cmd|execute_command|local_shell|terminal)$",
+    ),
     "comment-checker.py": (
         "PostToolUse",
         "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit)$",
@@ -134,23 +160,36 @@ def find_install_root(start) -> Path | None:
 
 
 def assert_managed_hooks_registered(*roots) -> tuple[HookIntegrityReport, ...]:
-    """런 시작 게이트. 어긋나면 `HookIntegrityError`로 멈춘다.
-
-    되돌리거나 재설치하지 않는다. install은 현재 등록된 것을 그대로 기대값으로
-    되받아 적으므로, 위반을 자동 복구하면 그게 곧 승인 세탁이다.
-    """
+    """런 시작 게이트. 강제 hook을 증명하지 못하면 시작 전에 멈춘다."""
     reports = verify_managed_hooks(*roots)
-    failed = [report for report in reports if not report.ok]
+    if not reports:
+        raise HookIntegrityError(
+            "managed hook installation could not be found. Nothing was changed. "
+            "Run `node bin/agent-flow-kit.mjs install --hooks` from the leader "
+            "checkout before starting a run."
+        )
+    failed = [
+        report
+        for report in reports
+        if not report.recorded or not report.expected_enabled or not report.ok
+    ]
     if not failed:
         return reports
     detail = "; ".join(
-        f"{report.root}: " + ", ".join(report.violations) for report in failed
+        f"{report.root}: "
+        + (
+            ", ".join(report.violations)
+            if report.violations
+            else "managed enforcement hooks are not enabled"
+        )
+        for report in failed
     )
     raise HookIntegrityError(
-        "managed hook registration does not match .agent-flow/kit.json: "
+        "managed hook registration does not match the enabled enforcement "
+        "contract in .agent-flow/kit.json: "
         + detail
-        + ". Nothing was changed. The enforcement and observation hooks this run "
-        "depends on may be disabled, so the run refuses to start. Re-run "
+        + ". Nothing was changed. The enforcement hooks this run depends on "
+        "cannot be proven active, so the run refuses to start. Re-run "
         "`node bin/agent-flow-kit.mjs install --hooks` from the leader checkout "
         "only after confirming the registration was not tampered with."
     )
@@ -181,6 +220,7 @@ def _verify_root(root: Path) -> HookIntegrityReport:
     )
     if expected_enabled:
         violations.extend(_missing_registrations(root, surfaces))
+        violations.extend(_managed_hook_digest_violations(root, kit))
         violations.extend(_misplaced_managed_hooks(surfaces))
     else:
         violations.extend(_unexpected_registrations(surfaces))
@@ -237,6 +277,38 @@ def _missing_registrations(root: Path, surfaces: tuple[_Surface, ...]) -> Iterat
         for script in MANAGED_HOOK_SCRIPTS:
             if script not in registered:
                 yield f"{surface.name} does not register {script}"
+
+
+def _managed_hook_digest_violations(
+    root: Path, kit: dict
+) -> Iterator[str]:
+    expected = kit.get("managed_hook_digests")
+    if not isinstance(expected, dict):
+        yield "kit.json does not record managed hook content digests"
+        return
+    hook_dir = root / HOOK_DIR_RELATIVE
+    for script in MANAGED_HOOK_SCRIPTS:
+        recorded = expected.get(script)
+        if not isinstance(recorded, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", recorded
+        ):
+            yield f"kit.json has no valid content digest for managed hook: {script}"
+            continue
+        path = hook_dir / script
+        try:
+            identity = path.lstat()
+        except OSError:
+            continue
+        if not stat.S_ISREG(identity.st_mode) or stat.S_ISLNK(identity.st_mode):
+            yield f"managed hook script is not a regular owned file: {script}"
+            continue
+        try:
+            actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            yield f"managed hook script cannot be read for digest verification: {script}"
+            continue
+        if actual != recorded:
+            yield f"managed hook content digest does not match kit.json: {script}"
 
 
 def _unexpected_registrations(surfaces: tuple[_Surface, ...]) -> Iterator[str]:
@@ -371,24 +443,28 @@ def _entry_commands(entry: object) -> Iterator[str]:
 
 
 def managed_path_hook_name(root: Path, command: str) -> str | None:
-    """`command`가 **정확히** 이 루트의 관리 hook 하나만 실행할 때 그 이름을 준다.
-
-    후행 토큰을 허용하면 안 된다. `.../guard-protected-branch.sh || true`는
-    승인된 이름을 그대로 내놓지만, 실제 셸은 hook의 실패를 `true`로 덮어
-    보호 브랜치 차단을 무력화한다. 그래서 인용을 벗긴 명령 **전체**가 관리
-    경로 하나와 같을 때만 인정한다.
-
-    반대로 관리 디렉터리 안이기만 하면 관리 대상이 아닌 이름도 돌려준다 —
-    그게 "미승인 hook"의 정의다.
-    """
-    normalized = _unquote(command).replace("\\", "/").strip()
-    if not normalized:
+    """Return the script name only for one exact trusted hook invocation."""
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
         return None
+    if len(tokens) == 2 and tokens[0] == "/bin/bash":
+        candidate = tokens[1]
+        expected_suffix = ".sh"
+    elif (
+        len(tokens) == 3
+        and tokens[:2] == ["/usr/bin/python3", "-I"]
+    ):
+        candidate = tokens[2]
+        expected_suffix = ".py"
+    else:
+        return None
+    normalized = candidate.replace("\\", "/")
     name = posixpath.basename(normalized)
-    # 파일명 문자만 인정한다. `guard.sh || true`의 basename은 공백을 품은 통짜
-    # 문자열이라, 이걸 이름으로 받으면 "미승인 hook"이라는 엉뚱한 사유가 나온다.
-    # 여기서 거르면 `mentions_managed_hook_dir`가 정확한 사유를 만든다.
-    if not _SAFE_HOOK_NAME.fullmatch(name):
+    if (
+        not name.endswith(expected_suffix)
+        or not _SAFE_HOOK_NAME.fullmatch(name)
+    ):
         return None
     try:
         parent = os.path.realpath(posixpath.dirname(normalized))

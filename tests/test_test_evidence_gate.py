@@ -175,10 +175,14 @@ def test_workflows_require_the_regression_markers(workflow, phase_id, copy):
     assert TEST_RUN_EVIDENCE_MARKER in markers
 
 
-def _spec_evidence(command: str) -> CommandRunEvidence:
+def _spec_evidence(
+    command: str,
+    *,
+    exit_code: int | None = 0,
+) -> CommandRunEvidence:
     return CommandRunEvidence(
         available=True,
-        runs=(CommandRun(command=command, exit_code=0, at=1.0, cwd=""),),
+        runs=(CommandRun(command=command, exit_code=exit_code, at=1.0, cwd=""),),
     )
 
 
@@ -188,6 +192,8 @@ def _spec_evidence(command: str) -> CommandRunEvidence:
         "agent-flow spec confirm --help",
         "agent-flow spec approve -h",
         "python3 -m agent_flow.cli spec confirm --help",
+        "/usr/bin/env -i agent-flow spec confirm --help",
+        "env --unset APPROVAL python3 -m agent_flow.cli spec approve -h",
         # 출력을 돌리거나 종료 코드를 무시하는 확인 명령. 셸 연산자가 보인다고
         # 판단을 포기하면 이런 한 번으로 런이 영구히 막힌다.
         "agent-flow spec confirm --help 2>&1",
@@ -213,11 +219,118 @@ def test_help_invocation_is_not_an_agent_run_approval(command: str):
     [
         "agent-flow spec confirm --run-dir .agent-flow/runs/default/r1 --artifact design.md",
         "python3 -m agent_flow.cli spec approve --run-dir .agent-flow/runs/default/r1 --spec-id SPEC-1",
+        "/usr/bin/env agent-flow spec confirm --run-dir .agent-flow/runs/default/r1 --artifact design.md",
+        "env -i python3 -m agent_flow.cli spec approve --run-dir .agent-flow/runs/default/r1 --spec-id SPEC-1",
+        "python3 -I -m agent_flow.cli spec approve --run-dir r --spec-id SPEC-1",
+        "python3 -W ignore -m agent_flow.cli spec confirm --run-dir r --artifact design.md",
+        "python3 --check-hash-based-pycs always -m agent_flow.cli spec approve --run-dir r --spec-id SPEC-1",
+        "env --ignore-environment -u APPROVAL agent-flow spec confirm --run-dir r --artifact design.md",
+        "env --unset APPROVAL -- agent-flow spec approve --run-dir r --spec-id SPEC-1",
     ],
 )
 def test_real_approval_in_the_agent_shell_is_still_caught(command: str):
     """짝 테스트. 도움말 예외가 승인 자체까지 눈감으면 안 된다."""
     assert len(agent_run_spec_approvals(_spec_evidence(command))) == 1
+
+
+@pytest.mark.parametrize("exit_code", [None, 0, 1])
+def test_user_prompt_hook_invocation_is_caught_without_exit_evidence(
+    exit_code: int | None,
+):
+    evidence = _spec_evidence(
+        "scripts/hooks/confirm-spec-user-prompt.py",
+        exit_code=exit_code,
+    )
+    assert len(agent_run_spec_approvals(evidence)) == 1
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "scripts/hooks/confirm-spec-user-prompt.py",
+        "/repo/.agent-flow/scripts/hooks/confirm-spec-user-prompt.py",
+        "python3 scripts/hooks/confirm-spec-user-prompt.py",
+        "python3 /repo/.agent-flow/scripts/hooks/confirm-spec-user-prompt.py",
+        "python3 -I scripts/hooks/confirm-spec-user-prompt.py",
+        "python3 -W ignore scripts/hooks/confirm-spec-user-prompt.py",
+        "python3 --check-hash-based-pycs always scripts/hooks/confirm-spec-user-prompt.py",
+        "env APPROVAL=1 python3 scripts/hooks/confirm-spec-user-prompt.py",
+        "/usr/bin/env python3 /repo/.agent-flow/scripts/hooks/confirm-spec-user-prompt.py",
+        "env -i python3 scripts/hooks/confirm-spec-user-prompt.py",
+        "env --ignore-environment python3 scripts/hooks/confirm-spec-user-prompt.py",
+        "env -u APPROVAL python3 scripts/hooks/confirm-spec-user-prompt.py",
+        "env --unset APPROVAL python3 scripts/hooks/confirm-spec-user-prompt.py",
+        "env -uAPPROVAL python3 scripts/hooks/confirm-spec-user-prompt.py",
+        "env --unset=APPROVAL -- APPROVAL=1 python3 scripts/hooks/confirm-spec-user-prompt.py",
+        "uv run python3 scripts/hooks/confirm-spec-user-prompt.py",
+        "sh -c 'scripts/hooks/confirm-spec-user-prompt.py'",
+        "bash -lc 'python3 /repo/.agent-flow/scripts/hooks/confirm-spec-user-prompt.py'",
+    ],
+)
+def test_agent_cannot_invoke_the_user_prompt_hook_as_approval(command: str):
+    assert len(agent_run_spec_approvals(_spec_evidence(command))) == 1
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        (
+            "python3 -c 'import subprocess; "
+            "subprocess.run([\"agent-flow\", \"spec\", \"confirm\", "
+            "\"--run-dir\", \"r\", \"--artifact\", \"design.md\"])'"
+        ),
+        (
+            "python3 -c 'import os; "
+            "os.execvp(\"agent-flow\", [\"agent-flow\", \"spec\", \"approve\", "
+            "\"--run-dir\", \"r\", \"--spec-id\", \"SPEC-1\"])'"
+        ),
+        (
+            "python3 -c 'from subprocess import run as invoke; "
+            "invoke([\"agent-flow\", \"spec\", \"confirm\", "
+            "\"--run-dir\", \"r\", \"--artifact\", \"design.md\"])'"
+        ),
+    ],
+)
+def test_interpreter_process_indirection_is_treated_as_agent_approval(
+    command: str,
+):
+    assert len(agent_run_spec_approvals(_spec_evidence(command))) == 1
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat scripts/hooks/confirm-spec-user-prompt.py",
+        "python3 -m py_compile scripts/hooks/confirm-spec-user-prompt.py",
+        "/usr/bin/env -i python3 -m py_compile scripts/hooks/confirm-spec-user-prompt.py",
+        "sh -c 'cat scripts/hooks/confirm-spec-user-prompt.py'",
+        "bash -lc 'python3 -m py_compile scripts/hooks/confirm-spec-user-prompt.py'",
+    ],
+)
+def test_reading_the_user_prompt_hook_is_not_an_approval(command: str):
+    assert agent_run_spec_approvals(_spec_evidence(command)) == ()
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo 'agent-flow spec confirm --run-dir r --artifact design.md'",
+        "printf '%s\\n' 'agent-flow spec approve --run-dir r --spec-id SPEC-1'",
+        "echo '`agent-flow spec confirm --run-dir r`'",
+        "echo '$(agent-flow spec confirm --run-dir r)'",
+        "bash -lc 'echo \"agent-flow spec confirm --run-dir r\"'",
+        (
+            "cat <<'EOF'\n"
+            "agent-flow spec confirm --run-dir r --artifact design.md\n"
+            "EOF"
+        ),
+        "printf '%s\\n' '.agent-flow/runs/r/spec-user-confirmation.json'",
+        (
+            "python3 -c 'print(\"record_spec_set_confirmation\")'"
+        ),
+    ],
+)
+def test_approval_text_is_not_treated_as_executed_command(command: str):
+    assert agent_run_spec_approvals(_spec_evidence(command)) == ()
 
 
 @pytest.mark.parametrize(
@@ -255,4 +368,42 @@ def test_wrapper_approval_in_the_agent_shell_is_caught(command: str):
 )
 def test_inert_flag_cannot_launder_a_real_approval(command: str):
     """반증: 토큰만 훑으면 승인을 실제로 실행하는 명령까지 면제된다."""
+    assert len(agent_run_spec_approvals(_spec_evidence(command))) == 1
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "command agent-flow spec confirm",
+        "exec agent-flow spec approve SPEC-1 --run-dir r",
+        "eval 'agent-flow spec confirm'",
+        "APPROVAL='command agent-flow spec confirm'; eval \"$APPROVAL\"",
+        (
+            "APPROVAL='agent-flow spec confirm'; eval \"$APPROVAL\"; "
+            "APPROVAL='echo safe'"
+        ),
+        "sh -c 'exec agent-flow spec confirm'",
+        "bash -lc 'command python3 -m agent_flow.cli spec prepare-confirmation --session-id s'",
+        "python3 scripts/hooks/prepare-spec-user-prompt.py",
+        (
+            "python3 -c 'from agent_flow.core.design_ledger import "
+            "record_spec_set_confirmation; record_spec_set_confirmation(None, (), \"\")'"
+        ),
+        (
+            "python3 -c 'from agent_flow.core.design_ledger import "
+            "attest_user_spec_confirmation'"
+        ),
+        "printf forged > .agent-flow/runs/r/spec-user-confirmation.json",
+        "rm .agent-flow/commands-run.jsonl",
+        "truncate -s 0 .agent-flow/commands-run.jsonl",
+        (
+            "python3 -c 'from pathlib import Path; "
+            "Path(\".agent-flow/commands-run.jsonl\").unlink()'"
+        ),
+    ],
+)
+def test_execution_indirection_cannot_hide_protected_approval_state(
+    command: str,
+):
+    """반증: shell wrapper와 direct state 진입도 동일한 사용자 전용 실행이다."""
     assert len(agent_run_spec_approvals(_spec_evidence(command))) == 1

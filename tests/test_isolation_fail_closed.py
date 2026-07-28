@@ -7,6 +7,8 @@
 """
 from __future__ import annotations
 
+import os
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -26,7 +28,11 @@ from agent_flow.core.worktree_isolation import (
     capture_leader_snapshot,
     git_repo_state,
     list_registered_worktrees,
+    probe_provider_leases,
+    provider_lease,
 )
+from agent_flow.providers import subprocess as PROVIDER_PROCESS
+from agent_flow.providers.subprocess import ProviderCommand, run_provider
 from agent_flow.core import worktrees as W
 
 _CONTENTION = "fatal: Unable to create '/r/.git/index.lock': File exists."
@@ -293,6 +299,29 @@ def _repo_with_linked(tmp_path: Path) -> Path:
     return linked
 
 
+@pytest.mark.parametrize("marker", (".agent-flow", ".codex", ".Codex", ".omp"))
+def test_provider_accepts_only_recognized_managed_worktree_roots(tmp_path, marker):
+    _init_repo(tmp_path)
+    linked = tmp_path / marker / "worktrees" / "feat-w"
+    linked.parent.mkdir(parents=True, exist_ok=True)
+    _git("worktree", "add", "-q", "-b", "feat/w", str(linked), "HEAD", cwd=tmp_path)
+
+    assert PROVIDER_PROCESS._verified_provider_worktree(linked) == linked.resolve()
+
+
+def test_provider_rejects_registered_worktree_outside_managed_roots(tmp_path):
+    _init_repo(tmp_path)
+    linked = tmp_path.parent / f"{tmp_path.name}-outside"
+    _git("worktree", "add", "-q", "-b", "feat/outside", str(linked), "HEAD", cwd=tmp_path)
+
+    with pytest.raises(
+        WorktreeIsolationError,
+        match="not a direct child of a managed root",
+    ):
+        PROVIDER_PROCESS._verified_provider_worktree(linked)
+
+
+
 def test_candidate_list_refuses_when_the_leader_cannot_be_resolved(tmp_path, monkeypatch):
     """불변: leader를 지목하지 못하면 후보 목록 자체를 만들지 않는다.
 
@@ -325,3 +354,438 @@ def test_leader_exclusion_does_not_depend_on_porcelain_ordering(tmp_path, monkey
     )
     paths = {entry.path for entry in W.removable_worktrees(root=tmp_path)}
     assert paths == {W_ISO.real_path(linked)}
+
+
+def test_invalid_provider_capacity_fails_before_registry_mutation(
+    tmp_path, monkeypatch
+):
+    _init_repo(tmp_path)
+    monkeypatch.setenv("AGENT_FLOW_MAX_WORKERS", "unknown")
+
+    with pytest.raises(WorktreeIsolationError):
+        with provider_lease(tmp_path):
+            pytest.fail("invalid capacity must never acquire")
+
+    assert not (
+        tmp_path / ".git" / "agent-flow" / "provider-leases"
+    ).exists()
+
+
+def test_malformed_provider_registry_probes_unknown(tmp_path):
+    _init_repo(tmp_path)
+    with provider_lease(tmp_path, capacity=1):
+        assert probe_provider_leases(tmp_path) == "active"
+    registry = (
+        tmp_path
+        / ".git"
+        / "agent-flow"
+        / "provider-leases"
+        / "registry.json"
+    )
+    registry.write_text("{not-json", encoding="utf-8")
+
+    assert probe_provider_leases(tmp_path) == "unknown"
+
+
+def _capture_provider_launches(
+    monkeypatch, provider_argv: tuple[str, ...]
+) -> tuple[list[tuple[str, ...]], list[tuple[str, ...]]]:
+    real_popen = subprocess.Popen
+    provider_launches: list[tuple[str, ...]] = []
+    verifier_launches: list[tuple[str, ...]] = []
+
+    def capture(*args, **kwargs):
+        command = args[0] if args else kwargs["args"]
+        normalized = (
+            (command,)
+            if isinstance(command, str)
+            else tuple(str(item) for item in command)
+        )
+        if normalized == provider_argv or normalized[-len(provider_argv) :] == provider_argv:
+            provider_launches.append(normalized)
+            raise AssertionError("provider command was spawned")
+        verifier_launches.append(normalized)
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(PROVIDER_PROCESS.subprocess, "Popen", capture)
+    return provider_launches, verifier_launches
+
+
+@pytest.mark.parametrize(
+    ("mode", "uid", "expected"),
+    (
+        (stat.S_IFREG | 0o755, 0, True),
+        (stat.S_IFREG | 0o755, 501, False),
+        (stat.S_IFREG | 0o775, 0, False),
+        (stat.S_IFREG | 0o757, 0, False),
+        (stat.S_IFDIR | 0o755, 0, False),
+    ),
+)
+def test_sandbox_backend_requires_trusted_system_executable_identity(
+    mode, uid, expected, monkeypatch
+):
+    class Identity:
+        pass
+
+    identity = Identity()
+    identity.st_mode = mode
+    identity.st_uid = uid
+
+    class Candidate:
+        def stat(self):
+            return identity
+
+    monkeypatch.setattr(PROVIDER_PROCESS.os, "access", lambda path, flag: True)
+
+    assert PROVIDER_PROCESS._is_trusted_system_executable(Candidate()) is expected
+
+
+@pytest.mark.parametrize(
+    "argv",
+    (
+        ("codex", "exec", "--cd", "../leader"),
+        ("codex", "exec", "-C", "../leader"),
+        ("codex-aarch64-apple-darwin", "exec", "--cd", "../leader"),
+        ("omp", "-p", "review", "--cwd=../leader"),
+    ),
+)
+def test_provider_cli_rejects_cwd_outside_verified_worktree(tmp_path, argv):
+    verified = tmp_path / "worker"
+    verified.mkdir()
+
+    with pytest.raises(
+        W_ISO.WorktreeIsolationError,
+        match="does not match the verified worktree",
+    ):
+        PROVIDER_PROCESS._assert_provider_cli_cwd(argv, verified.resolve())
+
+
+@pytest.mark.parametrize(
+    "argv",
+    (
+        ("codex", "exec", "--cd", "."),
+        ("codex", "exec", "-C", "."),
+        ("codex-aarch64-apple-darwin", "exec", "--cd", "."),
+        ("omp", "-p", "review", "--cwd=."),
+    ),
+)
+def test_provider_cli_accepts_verified_worktree_cwd(tmp_path, argv):
+    verified = tmp_path / "worker"
+    verified.mkdir()
+
+    PROVIDER_PROCESS._assert_provider_cli_cwd(argv, verified.resolve())
+
+
+@pytest.mark.parametrize(
+    ("argv", "provider_kind", "expected_option"),
+    (
+        (("codex", "exec"), "codex", "--cd"),
+        (("omp", "-p", "review"), "omp", "--cwd"),
+    ),
+)
+def test_provider_cli_injects_exact_verified_worktree_cwd(
+    tmp_path,
+    argv,
+    provider_kind,
+    expected_option,
+):
+    verified = (tmp_path / "worker").resolve()
+    verified.mkdir()
+
+    bound = PROVIDER_PROCESS._bind_provider_cli_cwd(
+        argv,
+        verified,
+        provider_kind=provider_kind,
+    )
+
+    assert bound[:3] == (argv[0], expected_option, str(verified))
+    assert bound[3:] == argv[1:]
+
+
+def test_provider_cli_preserves_verified_explicit_cwd(tmp_path):
+    verified = (tmp_path / "worker").resolve()
+    verified.mkdir()
+    argv = ("codex", "--cd", str(verified), "exec")
+
+    assert PROVIDER_PROCESS._bind_provider_cli_cwd(
+        argv,
+        verified,
+        provider_kind="codex",
+    ) == argv
+
+
+def test_provider_sandbox_writes_only_to_the_verified_worktree(tmp_path):
+    linked = _repo_with_linked(tmp_path)
+    profile = PROVIDER_PROCESS._macos_sandbox_profile(linked)
+    leader = linked.parents[2]
+
+    assert (
+        f'(allow file-write* (subpath "{linked.resolve()}"))'
+        in profile
+    )
+    assert (
+        f'(allow file-write* (subpath "{leader.resolve()}"))'
+        not in profile
+    )
+    assert (
+        f'(deny file-write* (literal "{linked.resolve() / ".git"}"))'
+        in profile
+    )
+    scratch = tmp_path / "provider-scratch"
+    scratch.mkdir()
+    read_only_profile = PROVIDER_PROCESS._macos_sandbox_profile(
+        linked,
+        allow_workspace_writes=False,
+        scratch=scratch,
+    )
+    assert (
+        f'(allow file-write* (subpath "{linked.resolve()}"))'
+        not in read_only_profile
+    )
+    assert (
+        f'(allow file-write* (subpath "{scratch.resolve()}"))'
+        in read_only_profile
+    )
+    for parent in (Path.home().resolve(), leader.resolve(), linked.resolve()):
+        for name in (".claude", ".Codex", ".codex", ".omp", ".agents"):
+            assert (
+                f'(deny file-write* (subpath "{parent / name}"))'
+                in profile
+            )
+    worker_allow = f'(allow file-write* (subpath "{linked.resolve()}"))'
+    worker_state_deny = (
+        f'(deny file-write* (subpath "{linked.resolve() / ".claude"}"))'
+    )
+    assert profile.index(worker_allow) < profile.index(worker_state_deny)
+    custom_home = tmp_path / "custom-home"
+    custom_profile = PROVIDER_PROCESS._macos_sandbox_profile(
+        linked,
+        host_home=custom_home,
+    )
+    assert (
+        f'(deny file-write* (subpath "{custom_home.resolve() / ".codex"}"))'
+        in custom_profile
+    )
+
+
+def test_provider_state_isolated_in_private_scratch(tmp_path):
+    user_home = tmp_path / "user"
+    codex_home = user_home / ".codex"
+    codex_home.mkdir(parents=True)
+    auth = codex_home / "auth.json"
+    auth.write_text('{"token":"secret"}\n', encoding="utf-8")
+    auth.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    scratch = tmp_path / "codex-scratch"
+    scratch.mkdir()
+    env = {"HOME": str(user_home)}
+
+    PROVIDER_PROCESS._prepare_provider_state(
+        argv=("codex", "exec"),
+        env=env,
+        scratch=scratch,
+    )
+
+    isolated_auth = Path(env["CODEX_HOME"]) / "auth.json"
+    assert isolated_auth.read_text(encoding="utf-8") == auth.read_text(
+        encoding="utf-8"
+    )
+    assert stat.S_IMODE(isolated_auth.stat().st_mode) == 0o600
+    assert isolated_auth.resolve().is_relative_to(scratch.resolve())
+
+
+def test_provider_state_copy_reads_the_attested_file_descriptor(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "state"
+    source.write_text("attested", encoding="utf-8")
+    source.chmod(0o600)
+    replacement = tmp_path / "replacement"
+    replacement.write_text("replacement", encoding="utf-8")
+    replacement.chmod(0o600)
+    target = tmp_path / "copy"
+    real_open = os.open
+
+    def open_then_replace(path, flags):
+        fd = real_open(path, flags)
+        if Path(path) == source:
+            source.unlink()
+            replacement.replace(source)
+        return fd
+
+    monkeypatch.setattr(PROVIDER_PROCESS.os, "open", open_then_replace)
+
+    PROVIDER_PROCESS._copy_owned_regular_file(
+        source,
+        target,
+        max_size=1024,
+        require_private=True,
+    )
+
+    assert target.read_text(encoding="utf-8") == "attested"
+    assert source.read_text(encoding="utf-8") == "replacement"
+
+
+def test_provider_state_copy_stops_when_source_grows_past_limit(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "state"
+    source.write_bytes(b"123456789")
+    source.chmod(0o600)
+    target = tmp_path / "copy"
+    real_fstat = os.fstat
+
+    def stale_fstat(fd):
+        identity = list(real_fstat(fd))
+        identity[6] = 8
+        return os.stat_result(identity)
+
+    monkeypatch.setattr(PROVIDER_PROCESS.os, "fstat", stale_fstat)
+
+    with pytest.raises(WorktreeIsolationError, match="copy limit"):
+        PROVIDER_PROCESS._copy_owned_regular_file(
+            source,
+            target,
+            max_size=8,
+            require_private=True,
+        )
+
+    assert not target.exists()
+
+
+def test_omp_provider_uses_consistent_private_state_snapshot(tmp_path):
+    source = tmp_path / "omp-agent"
+    source.mkdir()
+    config = source / "config.yml"
+    config.write_text("model: test\n", encoding="utf-8")
+    config.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    for index, name in enumerate(("models.db", "agent.db")):
+        connection = sqlite3.connect(source / name)
+        connection.execute("CREATE TABLE seed (value INTEGER)")
+        connection.execute("INSERT INTO seed VALUES (?)", (index,))
+        connection.commit()
+        connection.close()
+    (source / "models.db").chmod(0o644)
+    (source / "agent.db").chmod(0o600)
+    scratch = tmp_path / "omp-scratch"
+    scratch.mkdir()
+    env = {"HOME": str(tmp_path), "PI_CODING_AGENT_DIR": str(source)}
+
+    PROVIDER_PROCESS._prepare_provider_state(
+        argv=("omp", "-p"),
+        env=env,
+        scratch=scratch,
+    )
+
+    isolated = Path(env["PI_CODING_AGENT_DIR"])
+    assert isolated.resolve().is_relative_to(scratch.resolve())
+    assert Path(env["HOME"]).resolve().is_relative_to(scratch.resolve())
+    assert (isolated / "config.yml").read_text(encoding="utf-8") == "model: test\n"
+    for index, name in enumerate(("models.db", "agent.db")):
+        connection = sqlite3.connect(isolated / name)
+        try:
+            assert connection.execute("SELECT value FROM seed").fetchone() == (index,)
+        finally:
+            connection.close()
+        assert stat.S_IMODE((isolated / name).stat().st_mode) == 0o600
+
+
+def test_unverified_sandbox_backend_blocks_before_provider_spawn(
+    tmp_path, monkeypatch
+):
+    linked = _repo_with_linked(tmp_path)
+    marker = linked / "spawned"
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    fake_backend = fake_bin / "sandbox-exec"
+    fake_backend.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_backend.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+    monkeypatch.setattr("agent_flow.providers.subprocess.sys.platform", "darwin")
+    monkeypatch.setattr(
+        "agent_flow.providers.subprocess._MACOS_SANDBOX_EXEC",
+        fake_backend,
+    )
+    monkeypatch.setenv(
+        "PATH",
+        str(fake_bin),
+        prepend=PROVIDER_PROCESS.os.pathsep,
+    )
+    provider_argv = (
+        sys.executable,
+        "-c",
+        f"open({str(marker)!r}, 'w').close()",
+    )
+    provider_launches, verifier_launches = _capture_provider_launches(
+        monkeypatch, provider_argv
+    )
+
+    result = run_provider(
+        ProviderCommand(name="blocked", argv=provider_argv),
+        prompt="",
+        cwd=linked,
+    )
+
+    assert result.failed is True
+    assert result.exit_code is None
+    assert "verified macOS sandbox-exec backend is unavailable" in result.stderr
+    assert provider_launches == []
+    assert verifier_launches == []
+    assert not marker.exists()
+
+
+def test_unsupported_sandbox_backend_blocks_before_provider_spawn(
+    tmp_path, monkeypatch
+):
+    linked = _repo_with_linked(tmp_path)
+    monkeypatch.setattr("agent_flow.providers.subprocess.sys.platform", "linux")
+    provider_argv = (sys.executable, "-c", "pass")
+    provider_launches, verifier_launches = _capture_provider_launches(
+        monkeypatch, provider_argv
+    )
+
+    result = run_provider(
+        ProviderCommand(name="blocked", argv=provider_argv),
+        prompt="",
+        cwd=linked,
+    )
+
+    assert result.failed is True
+    assert result.exit_code is None
+    assert "no verified provider write-sandbox backend" in result.stderr
+    assert provider_launches == []
+    assert verifier_launches == []
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").is_file(),
+    reason="macOS sandbox-exec confinement is required",
+)
+def test_provider_executable_cannot_resolve_from_the_repository(
+    tmp_path, monkeypatch
+):
+    linked = _repo_with_linked(tmp_path)
+    fake = linked / "codex"
+    fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake.chmod(0o755)
+    provider_argv = (
+        str(fake.resolve()),
+        "exec",
+        "--cd",
+        str(linked.resolve()),
+    )
+    provider_launches, _ = _capture_provider_launches(
+        monkeypatch, provider_argv
+    )
+
+    result = run_provider(
+        ProviderCommand(
+            name="untrusted-provider",
+            argv=("codex", "exec", "--cd", str(linked.resolve())),
+        ),
+        prompt="",
+        cwd=linked,
+        env={"HOME": str(tmp_path), "PATH": str(linked)},
+    )
+
+    assert result.failed is True
+    assert "provider executable is not a trusted external regular file" in result.stderr
+    assert provider_launches == []

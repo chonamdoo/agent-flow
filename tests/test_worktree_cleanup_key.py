@@ -27,7 +27,6 @@ from agent_flow.core.worktree_isolation import (
 )
 from agent_flow.core import worktrees as W
 from agent_flow.core.worktrees import (
-    AmbiguousWorktreeSelector,
     removable_worktrees,
     resolve_worktree,
 )
@@ -161,7 +160,7 @@ def test_name_normalization_cannot_reach_the_outside_worktree(tmp_path: Path):
     assert resolve_worktree(root=root, selector="wt").branch == "feat/outside"
 
 
-def test_ambiguous_selector_raises_with_candidates(tmp_path: Path):
+def test_exact_selector_beats_a_derived_alias(tmp_path: Path):
     root = tmp_path / "repo"
     root.mkdir()
     _init_repo(root)
@@ -170,18 +169,8 @@ def test_ambiguous_selector_raises_with_candidates(tmp_path: Path):
     _add_raw_worktree(root, "feat/demo", derived)
     _add_raw_worktree(root, "feat/literal", literal)
 
-    with pytest.raises(AmbiguousWorktreeSelector) as excinfo:
-        resolve_worktree(root=root, selector="demo")
-    rendered = str(excinfo.value)
-    assert str(real_path(derived)) in rendered
-    assert str(real_path(literal)) in rendered
-
-    result = _run_cli(["worktree", "remove", "--name", "demo"], root)
-    assert result.returncode == 2
-    assert "ambiguous" in result.stderr
-    assert derived.exists() and literal.exists()
-
-    # 반증 짝: 모호하지 않은 선택자는 정확히 하나로 해석된다.
+    # 사용자가 입력한 실제 디렉터리 이름이 정규화로 유도한 alias보다 우선한다.
+    assert resolve_worktree(root=root, selector="demo").path == real_path(literal)
     assert resolve_worktree(root=root, selector="feat-demo").path == real_path(derived)
     assert resolve_worktree(root=root, selector="feat/literal").path == real_path(literal)
 
@@ -363,6 +352,16 @@ def test_removal_clears_runtime_state_keyed_by_the_registered_name(tmp_path: Pat
     runtime_root = root / ".git" / "agent-flow" / "worktrees" / "feat-issue#110"
     assert runtime_root.exists()
 
+    blocked = _run_cli(
+        ["worktree", "remove", "--name", "feat-issue#110", "--allow-unmerged"], root
+    )
+    assert blocked.returncode == 2
+    assert "active run exists" in blocked.stderr
+    aborted = _run_cli(
+        ["abort", "--worktree", "feat-issue#110", "--yes"],
+        root,
+    )
+    assert aborted.returncode == 0, aborted.stderr
     removed = _run_cli(
         ["worktree", "remove", "--name", "feat-issue#110", "--allow-unmerged"], root
     )
@@ -398,6 +397,16 @@ def test_removal_clears_runtime_state_when_a_sibling_owns_the_normalized_manifes
     runtime_root = root / ".git" / "agent-flow" / "worktrees" / "feat-issue#110"
     assert runtime_root.exists()
 
+    blocked = _run_cli(
+        ["worktree", "remove", "--name", str(checkout), "--allow-unmerged"], root
+    )
+    assert blocked.returncode == 2
+    assert "active run exists" in blocked.stderr
+    aborted = _run_cli(
+        ["abort", "--worktree", str(checkout), "--yes"],
+        root,
+    )
+    assert aborted.returncode == 0, aborted.stderr
     removed = _run_cli(
         ["worktree", "remove", "--name", str(checkout), "--allow-unmerged"], root
     )

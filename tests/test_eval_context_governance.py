@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import stat
+import subprocess
 from pathlib import Path
 
 from agent_flow.cli import main
@@ -16,13 +17,62 @@ from agent_flow.core.team import (
     add_worker,
     approve_task_result,
     approve_worker_call,
+    claim_task,
     init_team,
     write_worker_brief,
     write_worker_result,
 )
 from agent_flow.core.tool_lint import lint_tools
+from agent_flow.providers.subprocess import ProviderResult
 from agent_flow.eval import run_eval
 
+
+
+def _init_git_repo(root: Path) -> None:
+    subprocess.run(("git", "init", "-b", "main"), cwd=root, check=True, capture_output=True)
+    subprocess.run(
+        ("git", "config", "user.email", "test@example.com"),
+        cwd=root,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ("git", "config", "user.name", "Test"),
+        cwd=root,
+        check=True,
+        capture_output=True,
+    )
+    (root / ".gitignore").write_text(".agent-flow/\n", encoding="utf-8")
+    subprocess.run(("git", "add", ".gitignore"), cwd=root, check=True, capture_output=True)
+    subprocess.run(
+        ("git", "commit", "-m", "base"),
+        cwd=root,
+        check=True,
+        capture_output=True,
+    )
+
+
+def _capture_provider_prompts(monkeypatch, captured: list[tuple[str, Path]]) -> None:
+    monkeypatch.setattr(
+        "agent_flow.cli.verify_provider_sandbox_backend",
+        lambda: Path("/verified-sandbox"),
+    )
+    monkeypatch.setattr(
+        "agent_flow.cli.assert_managed_hooks_registered",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def fake_run_provider(command, *, prompt, cwd, lease):
+        captured.append((prompt, cwd))
+        return ProviderResult(
+            name=command.name,
+            exit_code=0,
+            stdout="result",
+            stderr="",
+            failed=False,
+        )
+
+    monkeypatch.setattr("agent_flow.cli.run_provider", fake_run_provider)
 
 def test_eval_regression_gate_passes_and_fails(tmp_path: Path) -> None:
     fixtures = tmp_path / "fixtures.json"
@@ -199,7 +249,13 @@ def test_team_status_ignores_worker_contract_sidecar_json(tmp_path: Path) -> Non
     assert len(status["tasks"]) == 1
 
 
-def test_team_run_next_uses_worker_brief_and_approval_contract(tmp_path: Path) -> None:
+def test_team_run_next_uses_worker_brief_and_approval_contract(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _init_git_repo(tmp_path)
+    captured: list[tuple[str, Path]] = []
+    _capture_provider_prompts(monkeypatch, captured)
     init_team(root=tmp_path, name="feature-team", description="")
     add_worker(root=tmp_path, team_name="feature-team", worker_name="worker-a", role="worker")
     add_task(root=tmp_path, team_name="feature-team", task_id="task-1", subject="Do work", description="")
@@ -219,7 +275,6 @@ def test_team_run_next_uses_worker_brief_and_approval_contract(tmp_path: Path) -
         reviewer="lead",
         write_scope="tasks-only",
     )
-    capture = tmp_path / "prompt.txt"
 
     assert main(
         [
@@ -234,14 +289,106 @@ def test_team_run_next_uses_worker_brief_and_approval_contract(tmp_path: Path) -
             "--command",
             "sh",
             "-c",
-            f"cat > {capture}; printf result",
+            "printf result",
         ]
     ) == 0
 
-    prompt = capture.read_text(encoding="utf-8")
+    assert captured
+    prompt, worker_cwd = captured[0]
+    assert worker_cwd != tmp_path
     assert "worker-brief.md" in prompt
     assert "workers_approved.json" in prompt
     assert "write_scope: tasks-only" in prompt
+
+
+def test_team_run_next_revalidates_pending_task_inside_claim_lock(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _init_git_repo(tmp_path)
+    captured: list[tuple[str, Path]] = []
+    _capture_provider_prompts(monkeypatch, captured)
+    init_team(root=tmp_path, name="feature-team", description="")
+    add_worker(
+        root=tmp_path,
+        team_name="feature-team",
+        worker_name="worker-a",
+        role="worker",
+    )
+    add_worker(
+        root=tmp_path,
+        team_name="feature-team",
+        worker_name="worker-b",
+        role="worker",
+    )
+    add_task(
+        root=tmp_path,
+        team_name="feature-team",
+        task_id="task-1",
+        subject="Do work",
+        description="",
+    )
+    write_worker_brief(
+        root=tmp_path,
+        team_name="feature-team",
+        task_id="task-1",
+        worker_name="worker-a",
+        brief="Use the worker-brief contract.",
+        write_scope="tasks-only",
+    )
+    approve_worker_call(
+        root=tmp_path,
+        team_name="feature-team",
+        task_id="task-1",
+        worker_name="worker-a",
+        reviewer="lead",
+        write_scope="tasks-only",
+    )
+    monkeypatch.setattr(
+        "agent_flow.core.team.assert_provider_lease",
+        lambda *_args, **_kwargs: None,
+    )
+
+    class RacingClaimLock:
+        def __enter__(self):
+            claim_task(
+                root=tmp_path,
+                team_name="feature-team",
+                task_id="task-1",
+                worker_name="worker-b",
+                lease=object(),
+            )
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    monkeypatch.setattr(
+        "agent_flow.cli.worker_claim_lock",
+        lambda _root: RacingClaimLock(),
+    )
+
+    def stale_create_is_a_bug(**_kwargs):
+        raise AssertionError("stale task reached worktree creation")
+
+    monkeypatch.setattr("agent_flow.cli.create_worktree", stale_create_is_a_bug)
+
+    assert main(
+        [
+            "team",
+            "run-next",
+            "--root",
+            str(tmp_path),
+            "--team",
+            "feature-team",
+            "--worker",
+            "worker-a",
+            "--command",
+            "sh",
+            "-c",
+            "printf should-not-run",
+        ]
+    ) == 2
+    assert captured == []
 
 
 def test_team_run_next_requires_worker_approval_contract(tmp_path: Path) -> None:
@@ -293,7 +440,13 @@ def test_team_run_next_requires_worker_approval_contract(tmp_path: Path) -> None
     ) == 1
 
 
-def test_team_run_next_canonicalizes_team_and_worker_for_contract(tmp_path: Path) -> None:
+def test_team_run_next_canonicalizes_team_and_worker_for_contract(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _init_git_repo(tmp_path)
+    captured: list[tuple[str, Path]] = []
+    _capture_provider_prompts(monkeypatch, captured)
     init_team(root=tmp_path, name="Feature Team", description="")
     add_worker(root=tmp_path, team_name="Feature Team", worker_name="Worker A", role="worker")
     add_task(root=tmp_path, team_name="Feature Team", task_id="task-1", subject="Do work", description="")
@@ -313,7 +466,6 @@ def test_team_run_next_canonicalizes_team_and_worker_for_contract(tmp_path: Path
         reviewer="lead",
         write_scope="tasks-only",
     )
-    capture = tmp_path / "prompt.txt"
 
     assert main(
         [
@@ -328,11 +480,12 @@ def test_team_run_next_canonicalizes_team_and_worker_for_contract(tmp_path: Path
             "--command",
             "sh",
             "-c",
-            f"cat > {capture}; printf result",
+            "printf result",
         ]
     ) == 0
 
-    assert "worker-brief.md" in capture.read_text(encoding="utf-8")
+    assert captured
+    assert "worker-brief.md" in captured[0][0]
 
 
 def test_multi_review_requires_subagent_source_for_approval(tmp_path: Path) -> None:

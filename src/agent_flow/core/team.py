@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
+from agent_flow.core.worktree_isolation import ProviderLease, assert_provider_lease
+
 TaskStatus = Literal["pending", "blocked", "in_progress", "completed", "failed"]
 MAX_BRIEF_CHARS = 4000
 MAX_RESULT_CHARS = 8000
@@ -435,7 +437,15 @@ def approve_task_result(
     return approval
 
 
-def claim_task(*, root: Path, team_name: str, task_id: str, worker_name: str) -> TeamTask:
+def claim_task(
+    *,
+    root: Path,
+    team_name: str,
+    task_id: str,
+    worker_name: str,
+    lease: ProviderLease,
+) -> TeamTask:
+    assert_provider_lease(lease, root=root)
     safe_team = safe_team_name(team_name)
     _require_team(root=root, team_name=safe_team)
     safe_worker = safe_worker_name(worker_name)

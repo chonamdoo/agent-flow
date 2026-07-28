@@ -1,21 +1,11 @@
-"""Multi-reviewer distribution and parallel execution.
+"""Multi-reviewer distribution and OS-confined parallel execution.
 
-The final-review phase fans out N review angles. Distribution rules:
+Every review angle runs in a separate provider process bound to the verified
+linked worktree. The active host CLI participates through the same subprocess
+boundary; an in-session sub-agent is never accepted as an isolation fallback.
 
-  - Default → host AI must use at least two host-native sub-agents.
-  - 1 opt-in CLI → all angles to that CLI plus host sub-agent fallback so the
-    final artifact still has at least two independent reviewer verdicts.
-  - 2+ opt-in CLIs → round-robin assignment, host CLI last.
-
-Async execution:
-  - Each non-host CLI is invoked via subprocess in parallel (asyncio).
-  - Each angle writes an independent artifact: `final-review-<angle>.md`.
-  - Partial results survive: a timed-out angle leaves siblings intact, and
-    the host AI can aggregate whatever completed into `final-review.md`.
-
-Override:
-  AGENT_FLOW_REVIEWERS="claude,codex,omp" opts into optional providers.
-  AGENT_FLOW_REVIEWERS="omp" pins all angles to OMP plus fallback guard.
+AGENT_FLOW_REVIEWERS may add cross-host providers. Without that opt-in, two or
+more independent processes from the active host satisfy reviewer independence.
 """
 from __future__ import annotations
 
@@ -25,11 +15,13 @@ import re
 import shlex
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+import tempfile
 from pathlib import Path
 
 from agent_flow.cli_detect import (
     CliInfo,
     cli_by_name,
+    detect_available_clis,
     detect_host_cli,
 )
 from agent_flow.core.hook_integrity import assert_managed_hooks_registered
@@ -37,9 +29,14 @@ from agent_flow.core.worktree_isolation import (
     assert_leader_unchanged,
     capture_leader_snapshot,
     leader_root_for,
+    WorktreeIsolationError,
     sanitized_worker_env,
 )
 from agent_flow.subprocess_pool import SubprocessJob, SubprocessResult, run_parallel
+
+_REVIEWER_PROVENANCE_RE = re.compile(
+    r"(?m)^\s*(?:-\s*)?reviewer-source:\s*sub-agent\s*$"
+)
 
 
 @dataclass
@@ -47,6 +44,7 @@ class ReviewerJob:
     angle_id: str           # e.g. "architecture-design", "compose-stability"
     prompt: str             # full angle prompt text (rendered)
     output_path: Path       # artifact target
+    artifact_root: Path
 
 
 @dataclass
@@ -56,6 +54,7 @@ class Distribution:
     fallback_to_generic: bool = False
     insufficient_reviewers: bool = False
     host: str | None = None
+    required_job_ids: frozenset[str] = frozenset()
 
     def empty(self) -> bool:
         return not self.by_cli and not self.fallback_to_generic
@@ -82,12 +81,15 @@ def resolve_review_clis() -> list[CliInfo]:
 
 
 def distribute(jobs: list[ReviewerJob], host: str | None = None) -> Distribution:
-    """Round-robin angles across available CLIs, host last."""
+    """Assign every required angle to the host and duplicate optional extras."""
     if not jobs:
         return Distribution()
-    available = resolve_review_clis()
     host = host or detect_host_cli()
-    if not available:
+    installed_host = next(
+        (cli for cli in detect_available_clis() if cli.name == host),
+        None,
+    )
+    if installed_host is None:
         return Distribution(
             fallback_jobs=list(jobs),
             fallback_to_generic=True,
@@ -95,61 +97,126 @@ def distribute(jobs: list[ReviewerJob], host: str | None = None) -> Distribution
             host=host,
         )
 
-    # Host last: non-host CLIs run first.
-    ordered = sorted(available, key=lambda c: c.name == host)
-
-    by_cli: dict[str, list[ReviewerJob]] = {c.name: [] for c in ordered}
-    for i, job in enumerate(jobs):
-        cli = ordered[i % len(ordered)]
-        by_cli[cli.name].append(job)
-    if host and not by_cli.get(host):
-        donor_jobs = next((assigned for assigned in by_cli.values() if assigned), None)
-        if donor_jobs:
-            by_cli.setdefault(host, []).append(donor_jobs.pop(0))
+    by_cli = {installed_host.name: list(jobs)}
+    optional = {
+        cli.name: cli
+        for cli in resolve_review_clis()
+        if cli.name != installed_host.name
+    }
+    for cli_name in optional:
+        by_cli[cli_name] = [
+            _optional_reviewer_job(job, cli_name=cli_name)
+            for job in jobs
+        ]
+    required_job_ids = frozenset(
+        _subprocess_job_id(installed_host.name, job)
+        for job in jobs
+    )
     return Distribution(
         by_cli=by_cli,
-        insufficient_reviewers=len(ordered) < 2,
+        insufficient_reviewers=len(required_job_ids) < 2,
         host=host,
+        required_job_ids=required_job_ids,
     )
 
 
-def run_distribution(distribution: Distribution, project_root: Path,
-                     timeout_s: int = 600) -> list[SubprocessResult]:
-    """Execute the distribution by subprocess-invoking non-host CLIs in
-    parallel. The host CLI's jobs are NOT subprocess-invoked here — they
-    are returned as residual jobs the host AI must handle directly (a
-    subprocess from inside a host AI session would block that session).
+def _optional_reviewer_job(
+    job: ReviewerJob,
+    *,
+    cli_name: str,
+) -> ReviewerJob:
+    output = job.output_path.with_name(
+        f"{job.output_path.stem}-{cli_name}{job.output_path.suffix}"
+    )
+    return ReviewerJob(
+        angle_id=f"{job.angle_id}-{cli_name}-extra",
+        prompt=job.prompt,
+        output_path=output,
+        artifact_root=job.artifact_root,
+    )
 
-    Returns the list of subprocess results (one per non-host job). Each
-    result also gets written as `<output_path>` for partial-survival.
 
-    Caller is responsible for surfacing residual host-CLI jobs (those need
-    in-host parallelism, not subprocess).
+def _subprocess_job_id(cli_name: str, job: ReviewerJob) -> str:
+    return f"{cli_name}-{job.angle_id}"
+
+
+def _reviewer_cli_args(
+    cli: CliInfo,
+    *,
+    prompt: str,
+    project_root: Path,
+) -> tuple[str, ...]:
+    root = str(project_root.resolve())
+    if cli.name == "codex":
+        return (
+            *cli.invoke,
+            "--ephemeral",
+            "--ignore-user-config",
+            "--sandbox",
+            "read-only",
+            "--cd",
+            root,
+            prompt,
+        )
+    if cli.name == "claude":
+        return (
+            *cli.invoke,
+            "--permission-mode",
+            "plan",
+            "--no-session-persistence",
+            prompt,
+        )
+    if cli.name == "omp":
+        return (
+            *cli.invoke,
+            "--no-session",
+            f"--cwd={root}",
+            "--tools=read,grep,glob,bash",
+            "--auto-approve",
+            prompt,
+        )
+    return (*cli.invoke, prompt)
+
+
+def run_distribution(
+    distribution: Distribution,
+    project_root: Path,
+    timeout_s: int = 600,
+) -> list[SubprocessResult]:
+    """Execute every assigned angle in an independent confined subprocess.
+
+    The active host is not special here. Running it through the same provider
+    boundary is what makes reviewer isolation enforceable rather than prompt
+    advice.
     """
     if distribution.fallback_to_generic or distribution.empty():
         return []
 
     sub_jobs: list[SubprocessJob] = []
-    job_to_output: dict[str, Path] = {}
+    job_to_output: dict[str, ReviewerJob] = {}
     # 리뷰어 자식은 부모 환경을 통째로 물려받으면 오염된 GIT_DIR/GIT_WORK_TREE로
     # leader 저장소에 그대로 닿는다. git 탐색 env를 벗겨서 cwd를 권위로 만든다.
     reviewer_env = sanitized_worker_env()
     for cli_name, jobs in distribution.by_cli.items():
-        if cli_name == distribution.host:
-            continue  # host AI handles its own angles in-session
         cli = cli_by_name(cli_name)
         if cli is None or not jobs:
             continue
         for job in jobs:
             binary = cli.binaries[0]
-            args = (*cli.invoke, job.prompt)
-            sub_id = f"{cli_name}-{job.angle_id}"
+            args = _reviewer_cli_args(
+                cli,
+                prompt=job.prompt,
+                project_root=project_root,
+            )
+            sub_id = _subprocess_job_id(cli_name, job)
             sub_jobs.append(SubprocessJob(
                 job_id=sub_id, binary=binary, args=args,
                 cwd=project_root, timeout_s=timeout_s,
                 env=reviewer_env,
+                allow_workspace_writes=False,
             ))
-            job_to_output[sub_id] = job.output_path
+            _validate_review_artifact(job)
+            job_to_output[sub_id] = job
 
     if not sub_jobs:
         return []
@@ -167,25 +234,84 @@ def run_distribution(distribution: Distribution, project_root: Path,
     # 기록이 tripwire보다 **먼저**다. 순서를 뒤집으면 오탐 1회에 완료된
     # 리뷰어 N명의 산출물이 통째로 사라진다.
     for r in results:
-        out = job_to_output.get(r.job_id)
-        if out is None:
+        job = job_to_output.get(r.job_id)
+        if job is None:
             continue
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(_render_angle_result(r))
+        _write_review_artifact(job, _render_angle_result(r))
     if leader_before is not None:
-        assert_leader_unchanged(leader, leader_before, run_id="multi-review")
+        assert_leader_unchanged(
+            leader,
+            leader_before,
+            run_id="multi-review",
+            worker_root=project_root,
+        )
     return results
 
 
+def _validate_review_artifact(job: ReviewerJob) -> tuple[Path, Path]:
+    artifact_root = job.artifact_root.resolve()
+    output = job.output_path
+    if (
+        not artifact_root.is_dir()
+        or output.parent != artifact_root
+        or output.parent.resolve() != artifact_root
+        or output.is_symlink()
+        or (output.exists() and not output.is_file())
+    ):
+        raise WorktreeIsolationError(
+            f"review artifact target is outside its attested run directory: {output}"
+        )
+    return artifact_root, output
+
+
+def _write_review_artifact(job: ReviewerJob, content: str) -> None:
+    artifact_root, output = _validate_review_artifact(job)
+    fd, raw_temporary = tempfile.mkstemp(
+        dir=artifact_root,
+        prefix=f".{output.name}.",
+        suffix=".tmp",
+    )
+    temporary = Path(raw_temporary)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, output)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        temporary.unlink(missing_ok=True)
+
+
 def residual_host_jobs(distribution: Distribution) -> list[ReviewerJob]:
-    """Return jobs assigned to the host CLI — these need in-host parallelism
-    (e.g., Claude Task tool fan-out), not subprocess invocation.
-    """
+    """Return jobs only when no confined reviewer process can be launched."""
     if distribution.fallback_to_generic:
         return list(distribution.fallback_jobs)
-    if distribution.host is None:
-        return []
-    return list(distribution.by_cli.get(distribution.host, []))
+    return []
+
+
+def reviewer_result_error(result: SubprocessResult) -> str | None:
+    rate_limit = _rate_limit_payload(result)
+    if rate_limit is not None:
+        return f"rate limited until {rate_limit['retry_after']}"
+    if result.timed_out:
+        return "timeout"
+    if result.error:
+        return result.error
+    if result.returncode != 0:
+        return (
+            f"exit {result.returncode}"
+            if result.returncode is not None
+            else "missing exit status"
+        )
+    output = result.stdout.strip()
+    if not output:
+        return "empty reviewer output"
+    if _REVIEWER_PROVENANCE_RE.search(output) is None:
+        return "reviewer output is missing provenance marker"
+    return None
 
 
 def _render_angle_result(r: SubprocessResult) -> str:
@@ -206,7 +332,8 @@ def _render_angle_result(r: SubprocessResult) -> str:
         if r.stderr.strip():
             lines += ["", "## stderr", "", r.stderr]
         return "\n".join(lines) + "\n"
-    status = "OK" if r.ok else ("TIMEOUT" if r.timed_out else "ERROR")
+    semantic_error = reviewer_result_error(r)
+    status = "OK" if semantic_error is None else ("TIMEOUT" if r.timed_out else "ERROR")
     parts = [
         f"# {r.job_id}",
         "",
@@ -216,6 +343,8 @@ def _render_angle_result(r: SubprocessResult) -> str:
     ]
     if r.error:
         parts += ["", "## error", "", r.error]
+    elif semantic_error:
+        parts += ["", "## error", "", semantic_error]
     if r.stdout.strip():
         parts += ["", "## review output", "", r.stdout]
     if r.stderr.strip():
@@ -227,12 +356,12 @@ def _rate_limit_payload(r: SubprocessResult) -> dict[str, str] | None:
     reviewer = r.job_id.split("-", 1)[0]
     text = "\n".join(part for part in (r.stdout, r.stderr, r.error or "") if part)
     lowered = text.lower()
-    signals = {
-        "claude": ("limit", "rate limit", "too many requests", "429"),
-        "codex": ("rate limit", "too many requests", "429"),
-    }
-    reviewer_signals = signals.get(reviewer, ("rate limit", "too many requests", "429"))
-    if not any(signal in lowered for signal in reviewer_signals):
+    signals = ("rate limit", "too many requests", "429")
+    if reviewer == "claude":
+        signals += ("you've hit your limit", "usage limit", "limit reached")
+    if r.returncode == 0 and _REVIEWER_PROVENANCE_RE.search(r.stdout):
+        return None
+    if not any(signal in lowered for signal in signals):
         return None
     retry_after = _parse_retry_after(text)
     return {

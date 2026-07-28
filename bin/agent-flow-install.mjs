@@ -493,12 +493,24 @@ function shellQuote(value) {
 }
 
 function hookScriptCommand(root, scriptName) {
-  return shellQuote(path.join(root, ".agent-flow", "scripts", "hooks", scriptName));
+  const scriptPath = shellQuote(path.join(root, ".agent-flow", "scripts", "hooks", scriptName));
+  if (scriptName.endsWith(".py")) {
+    return `/usr/bin/python3 -I ${scriptPath}`;
+  }
+  return `/bin/bash ${scriptPath}`;
 }
 
 function codexHooksSettings(root) {
   return {
     hooks: {
+      UserPromptSubmit: [
+        {
+          hooks: [
+            { type: "command", command: hookScriptCommand(root, "prepare-spec-user-prompt.py") },
+            { type: "command", command: hookScriptCommand(root, "confirm-spec-user-prompt.py") },
+          ],
+        },
+      ],
       PreToolUse: [
         {
           matcher: "Bash",
@@ -506,11 +518,27 @@ function codexHooksSettings(root) {
             { type: "command", command: hookScriptCommand(root, "guard-protected-branch.sh") },
           ],
         },
+        {
+          matcher: SPEC_PREPARE_TOOL_MATCHER,
+          hooks: [
+            { type: "command", command: hookScriptCommand(root, "guard-host-worktree.sh") },
+            { type: "command", command: hookScriptCommand(root, "guard-spec-approval.sh") },
+          ],
+        },
       ],
       PostToolUse: [
         {
           matcher: "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit)$",
-          hooks: [{ type: "command", command: hookScriptCommand(root, "comment-checker.py") }],
+          hooks: [
+            { type: "command", command: hookScriptCommand(root, "comment-checker.py") },
+            { type: "command", command: hookScriptCommand(root, "guard-host-worktree.sh") },
+          ],
+        },
+        {
+          matcher: SPEC_PREPARE_TOOL_MATCHER,
+          hooks: [
+            { type: "command", command: hookScriptCommand(root, "prepare-spec-user-prompt.py") },
+          ],
         },
         {
           matcher: READ_TOOL_MATCHER,
@@ -518,7 +546,11 @@ function codexHooksSettings(root) {
         },
         {
           matcher: COMMAND_TOOL_MATCHER,
-          hooks: [{ type: "command", command: hookScriptCommand(root, "record-command-run.py") }],
+          hooks: [
+            { type: "command", command: hookScriptCommand(root, "record-command-run.py") },
+            { type: "command", command: hookScriptCommand(root, "bind-host-worktree.py") },
+            { type: "command", command: hookScriptCommand(root, "guard-host-worktree.sh") },
+          ],
         },
       ],
       Stop: [
@@ -543,6 +575,7 @@ function unquoteShellWord(value) {
 const READ_TOOL_MATCHER = "^(Read|read|read_file|view|cat)$";
 // 셸 실행 tool도 host마다 이름이 다르다. 관측 전용이라 PostToolUse에만 붙는다.
 const COMMAND_TOOL_MATCHER = "^(Bash|bash|shell|run_terminal_cmd|execute_command|local_shell|terminal)$";
+const SPEC_PREPARE_TOOL_MATCHER = "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit|Bash|bash|shell|run_terminal_cmd|execute_command|local_shell|terminal)$";
 // kit.mjs와 같은 계약: 은퇴한 hook을 기존 settings에서 걷어낸다. 안 그러면 사라진
 // 스크립트를 host가 계속 실행해 셸이 막힌다.
 // 관측 hook(`record-*`)은 PostToolUse, 강제 hook은 PreToolUse. 이 구분을 어기면
@@ -550,12 +583,29 @@ const COMMAND_TOOL_MATCHER = "^(Bash|bash|shell|run_terminal_cmd|execute_command
 // 읽어 사용자 도구가 통째로 막힌다. 런 시작 시 `core/hook_integrity.py`가
 // 이 목록과 배치를 kit.json 기록과 대조한다.
 const MANAGED_HOOK_SCRIPTS = [
+  "bind-host-worktree.py",
+  "confirm-spec-user-prompt.py",
   "guard-protected-branch.sh",
+  "guard-host-worktree.sh",
+  "guard-spec-approval.sh",
+  "prepare-spec-user-prompt.py",
   "show-phase-status.sh",
   "comment-checker.py",
   "record-skill-read.py",
   "record-command-run.py",
 ];
+
+function managedHookDigests() {
+  return Object.fromEntries(
+    MANAGED_HOOK_SCRIPTS.map((name) => [
+      name,
+      crypto
+        .createHash("sha256")
+        .update(fs.readFileSync(path.join(KIT_ROOT, "scripts", "hooks", name)))
+        .digest("hex"),
+    ]),
+  );
+}
 const RETIRED_MANAGED_HOOK_SCRIPTS = ["guard-worktree.sh", "guard-worktree-write.py"];
 
 // hook을 끄면 "관리 대상 전부를 은퇴시킨 것"과 같다. kit.mjs와 같은 계약이다.
@@ -565,23 +615,37 @@ function retiredHookScripts() {
     : RETIRED_MANAGED_HOOK_SCRIPTS;
 }
 
-function pruneRetiredHooks(settings) {
+function pruneRetiredHooks(settings, replaceManaged = false) {
   if (!settings || typeof settings !== "object" || !settings.hooks) {
-    return;
+    return false;
   }
+  let changed = false;
   for (const [event, entries] of Object.entries(settings.hooks)) {
     if (!Array.isArray(entries)) {
       continue;
     }
     for (const entry of entries) {
-      if (Array.isArray(entry?.hooks)) {
-        entry.hooks = entry.hooks.filter((hook) => !isRetiredHookCommand(hook?.command));
+      if (!Array.isArray(entry?.hooks)) {
+        continue;
+      }
+      const kept = entry.hooks.filter(
+        (hook) => !isRetiredHookCommand(hook?.command)
+          && !(replaceManaged && managedHookScriptName(hook?.command)),
+      );
+      if (kept.length !== entry.hooks.length) {
+        entry.hooks = kept;
+        changed = true;
       }
     }
-    settings.hooks[event] = entries.filter(
+    const nonEmpty = entries.filter(
       (entry) => !Array.isArray(entry?.hooks) || entry.hooks.length > 0,
     );
+    if (nonEmpty.length !== entries.length) {
+      settings.hooks[event] = nonEmpty;
+      changed = true;
+    }
   }
+  return changed;
 }
 
 function isRetiredHookCommand(command) {
@@ -615,7 +679,7 @@ function mergeHookSettings(settings, desired) {
   if (!settings.hooks) {
     settings.hooks = {};
   }
-  pruneRetiredHooks(settings);
+  pruneRetiredHooks(settings, true);
   for (const [event, entries] of Object.entries(desired)) {
     if (!settings.hooks[event]) {
       settings.hooks[event] = [];
@@ -680,23 +744,6 @@ function tomlBasicString(value) {
   return String(value).replaceAll("\\", "\\\\").replaceAll("\"", "\\\"");
 }
 
-function upsertTomlValue(text, tableHeader, key, value) {
-  const tableName = tableHeader.slice(1, -1);
-  const tablePattern = new RegExp(`(^|\\n)\\s*\\[\\s*${escapeRegex(tableName)}\\s*\\]\\s*(?:#.*)?\\n([\\s\\S]*?)(?=\\n\\s*\\[[^\\n]+\\]|$)`);
-  const keyPattern = new RegExp(`(^|\\n)\\s*${escapeRegex(key)}\\s*=.*(?=\\n|$)`);
-  const match = text.match(tablePattern);
-  if (!match) {
-    const prefix = text.trim() ? `${text.replace(/\n*$/, "\n\n")}` : "";
-    return `${prefix}${tableHeader}\n${key} = ${value}\n`;
-  }
-  return text.replace(tablePattern, (full, leading, body) => {
-    const nextBody = keyPattern.test(body)
-      ? body.replace(keyPattern, `$1${key} = ${value}`)
-      : `${body.replace(/\n*$/, "")}\n${key} = ${value}\n`;
-    return `${leading}${tableHeader}\n${nextBody}`;
-  });
-}
-
 function codexConfigPath() {
   if (!HOME) {
     return null;
@@ -704,32 +751,31 @@ function codexConfigPath() {
   return path.join(HOME, ".codex", "config.toml");
 }
 
-function upsertCodexConfigTableValue(tableHeader, key, value) {
+function removeCodexBroadTrustState(root) {
   const configPath = codexConfigPath();
-  if (!configPath) {
-    return false;
-  }
-  const current = fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : "";
-  const next = upsertTomlValue(current, tableHeader, key, value);
-  if (next === current) {
-    return true;
-  }
-  fs.mkdirSync(path.dirname(configPath), { recursive: true });
-  fs.writeFileSync(configPath, next.endsWith("\n") ? next : `${next}\n`, "utf8");
-  return true;
-}
-
-function installCodexTrustState(root) {
-  if (process.env.AGENT_FLOW_SKIP_CODEX_TRUST === "1") {
+  if (!configPath || !fs.existsSync(configPath)) {
     return;
   }
-  // hook 승인 해시는 기록하지 않는다. install은 **현재 등록된**(=변조됐을 수도
-  // 있는) hook의 해시를 되받아 적을 뿐이고, 그 값을 다시 읽어 검증하는 코드는
-  // 어디에도 없었다. 검증하지 않는 신뢰 기록은 보호가 아니라 승인 세탁기다.
-  // 등록 무결성은 런 시작 시 `core/hook_integrity.py`가 kit.json과 대조한다.
-  const projectHeader = `[projects."${tomlBasicString(root)}"]`;
-  if (!upsertCodexConfigTableValue(projectHeader, "trust_level", "\"trusted\"")) {
-    console.error("warning: Codex project trust not registered; HOME is unavailable");
+  const tableHeader = `[projects."${tomlBasicString(root)}"]`;
+  const tableName = tableHeader.slice(1, -1);
+  const tablePattern = new RegExp(
+    `(^|\\n)\\s*\\[\\s*${escapeRegex(tableName)}\\s*\\]\\s*(?:#.*)?\\n`
+      + "([\\s\\S]*?)(?=\\n\\s*\\[[^\\n]+\\]|$)",
+  );
+  const trustPattern = /(^|\n)\s*trust_level\s*=\s*"trusted"\s*(?:#.*)?(?=\n|$)/;
+  const current = fs.readFileSync(configPath, "utf8");
+  const next = current.replace(tablePattern, (full, leading, body) => {
+    if (!trustPattern.test(body)) {
+      return full;
+    }
+    const kept = body.replace(trustPattern, "$1");
+    if (!kept.trim()) {
+      return leading;
+    }
+    return `${leading}${tableHeader}\n${kept.replace(/^\n/, "")}`;
+  });
+  if (next !== current) {
+    fs.writeFileSync(configPath, next.endsWith("\n") ? next : `${next}\n`, "utf8");
   }
 }
 
@@ -747,13 +793,20 @@ function installCodexHooks(root) {
     ensureDir(path.dirname(settingsPath));
     fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
   }
-  installCodexTrustState(root);
   return true;
 }
 
 function claudeHooksSettings(root) {
   return {
     hooks: {
+      UserPromptSubmit: [
+        {
+          hooks: [
+            { type: "command", command: hookScriptCommand(root, "prepare-spec-user-prompt.py") },
+            { type: "command", command: hookScriptCommand(root, "confirm-spec-user-prompt.py") },
+          ],
+        },
+      ],
       PreToolUse: [
         {
           matcher: "Bash",
@@ -761,11 +814,27 @@ function claudeHooksSettings(root) {
             { type: "command", command: hookScriptCommand(root, "guard-protected-branch.sh") },
           ],
         },
+        {
+          matcher: SPEC_PREPARE_TOOL_MATCHER,
+          hooks: [
+            { type: "command", command: hookScriptCommand(root, "guard-host-worktree.sh") },
+            { type: "command", command: hookScriptCommand(root, "guard-spec-approval.sh") },
+          ],
+        },
       ],
       PostToolUse: [
         {
           matcher: "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit)$",
-          hooks: [{ type: "command", command: hookScriptCommand(root, "comment-checker.py") }],
+          hooks: [
+            { type: "command", command: hookScriptCommand(root, "comment-checker.py") },
+            { type: "command", command: hookScriptCommand(root, "guard-host-worktree.sh") },
+          ],
+        },
+        {
+          matcher: SPEC_PREPARE_TOOL_MATCHER,
+          hooks: [
+            { type: "command", command: hookScriptCommand(root, "prepare-spec-user-prompt.py") },
+          ],
         },
         {
           matcher: READ_TOOL_MATCHER,
@@ -773,7 +842,11 @@ function claudeHooksSettings(root) {
         },
         {
           matcher: COMMAND_TOOL_MATCHER,
-          hooks: [{ type: "command", command: hookScriptCommand(root, "record-command-run.py") }],
+          hooks: [
+            { type: "command", command: hookScriptCommand(root, "record-command-run.py") },
+            { type: "command", command: hookScriptCommand(root, "bind-host-worktree.py") },
+            { type: "command", command: hookScriptCommand(root, "guard-host-worktree.sh") },
+          ],
         },
       ],
       Stop: [
@@ -812,6 +885,23 @@ export default function agentFlowHooks(pi) {
   }
 
 
+  pi.on("input", async (event, ctx) => {
+    if (event?.source !== "interactive") {
+      return;
+    }
+    const prompt = inputPrompt(event);
+    if (!prompt) {
+      return;
+    }
+    const payload = {
+      hook_event_name: "UserPromptSubmit",
+      cwd: ctx?.cwd || ROOT,
+      prompt,
+      session_id: sessionIdentity(event, ctx),
+    };
+    await runHook("prepare-spec-user-prompt.py", payload, ctx);
+    await runHook("confirm-spec-user-prompt.py", payload, ctx);
+  });
   pi.on("context", async (event) => {
     const messages = Array.isArray(event?.messages) ? event.messages : [];
     const filtered = messages.filter((message) => {
@@ -829,11 +919,16 @@ export default function agentFlowHooks(pi) {
     }
   });
   pi.on("tool_call", async (event, ctx) => {
-    if (!isBashTool(event?.toolName)) {
+    const toolName = String(event?.toolName || "");
+    const commandTool = COMMAND_TOOL_RE.test(toolName);
+    if (!commandTool && !WRITE_TOOL_RE.test(toolName)) {
       return;
     }
     const payload = hookPayload(event, ctx);
-    for (const scriptName of ["guard-protected-branch.sh"]) {
+    const scripts = commandTool
+      ? ["guard-protected-branch.sh", "guard-host-worktree.sh", "guard-spec-approval.sh"]
+      : ["guard-host-worktree.sh", "guard-spec-approval.sh"];
+    for (const scriptName of scripts) {
       const result = await runHook(scriptName, payload, ctx);
       if (result.block) {
         return { block: true, reason: result.reason };
@@ -853,11 +948,37 @@ export default function agentFlowHooks(pi) {
     if (COMMAND_TOOL_RE.test(toolName)) {
       // 관측 전용. tool_call(PreToolUse에 해당)이 아니라 여기 붙는다 — 관측자가
       // 판정자로 승격되면 실패한 관측이 곧 사용자 도구 차단이 된다.
-      await runHook("record-command-run.py", commandRunPayload(event, ctx), ctx);
+      const payload = commandRunPayload(event, ctx);
+      await runHook("record-command-run.py", payload, ctx);
+      const binding = await runHook("bind-host-worktree.py", payload, ctx);
+      if (binding.block) {
+        return {
+          content: [{ type: "text", text: binding.reason }],
+          details: { agentFlowHook: "bind-host-worktree.py" },
+          isError: true,
+        };
+      }
+      const boundary = await runHook("guard-host-worktree.sh", payload, ctx);
+      if (boundary.block) {
+        return {
+          content: [{ type: "text", text: boundary.reason }],
+          details: { agentFlowHook: "guard-host-worktree.sh" },
+          isError: true,
+        };
+      }
+      await runHook("prepare-spec-user-prompt.py", payload, ctx);
       return;
     }
     if (!WRITE_TOOL_RE.test(toolName)) {
       return;
+    }
+    const boundary = await runHook("guard-host-worktree.sh", hookPayload(event, ctx), ctx);
+    if (boundary.block) {
+      return {
+        content: [{ type: "text", text: boundary.reason }],
+        details: { agentFlowHook: "guard-host-worktree.sh" },
+        isError: true,
+      };
     }
     const syncError = syncRootContextFiles(event, ctx);
     if (syncError) {
@@ -867,6 +988,7 @@ export default function agentFlowHooks(pi) {
         isError: true,
       };
     }
+    await runHook("prepare-spec-user-prompt.py", hookPayload(event, ctx), ctx);
     const result = await runHook("comment-checker.py", hookPayload(event, ctx), ctx);
     if (result.block) {
       return {
@@ -891,14 +1013,37 @@ function commandRunPayload(event, ctx) {
   // exit code는 관측 hook이 보는 유일한 결과 신호다. host가 안 실어 보내면
   // 없는 채로 기록된다 — 없는 것과 0을 섞지 않는다.
   const payload = hookPayload(event, ctx);
-  const result = event?.output ?? event?.result ?? null;
+  const result = event?.output ?? event?.result ?? event?.toolResult ?? event ?? null;
   const code = result && typeof result === "object"
     ? result.exit_code ?? result.exitCode ?? null
     : null;
   if (typeof code === "number") {
     payload.exit_code = code;
   }
+  const output = commandOutputText(result);
+  if (output) {
+    payload.output = output.slice(-65_536);
+  }
   return payload;
+}
+
+function commandOutputText(value, depth = 0) {
+  if (depth > 5 || value == null) {
+    return "";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => commandOutputText(item, depth + 1)).filter(Boolean).join("\n");
+  }
+  if (typeof value !== "object") {
+    return "";
+  }
+  return ["stdout", "text", "content", "message", "output"]
+    .map((key) => commandOutputText(value[key], depth + 1))
+    .filter(Boolean)
+    .join("\n");
 }
 
 function hookPayload(event, ctx) {
@@ -912,8 +1057,38 @@ function hookPayload(event, ctx) {
     input,
     parameters: input,
     cwd: ctx?.cwd || ROOT,
+    session_id: sessionIdentity(event, ctx),
   };
 }
+
+
+function sessionIdentity(event, ctx) {
+  return String(
+    event?.session_id
+      ?? event?.sessionId
+      ?? ctx?.session_id
+      ?? ctx?.sessionId
+      ?? ctx?.session?.id
+      ?? process.env.OMP_SESSION_ID
+      ?? "",
+  ).trim();
+}
+
+function inputPrompt(event) {
+  if (typeof event === "string") {
+    return event;
+  }
+  for (const key of ["prompt", "text", "message"]) {
+    if (typeof event?.[key] === "string") {
+      return event[key];
+    }
+  }
+  if (event?.message && typeof event.message === "object") {
+    return messageText(event.message);
+  }
+  return "";
+}
+
 
 function messageText(message) {
   const content = message?.content;
@@ -1053,13 +1228,10 @@ function samePath(left, right) {
   return path.resolve(left) === path.resolve(right);
 }
 
-function isBashTool(toolName) {
-  return /^(Bash|bash)$/.test(String(toolName || ""));
-}
 
 async function runHook(scriptName, payload, ctx) {
   const scriptPath = path.join(HOOK_DIR, scriptName);
-  const result = await spawnHook(scriptPath, JSON.stringify(payload), ctx?.cwd || ROOT);
+  const result = await spawnHook(scriptName, scriptPath, JSON.stringify(payload), ctx?.cwd || ROOT);
   const reason = (result.stderr || result.stdout || "").trim();
   if (result.status === 0) {
     return { block: false, reason };
@@ -1067,9 +1239,11 @@ async function runHook(scriptName, payload, ctx) {
   return { block: true, reason: reason || "agent-flow hook blocked: " + scriptName };
 }
 
-function spawnHook(scriptPath, input, cwd) {
+function spawnHook(scriptName, scriptPath, input, cwd) {
   return new Promise((resolve) => {
-    const proc = spawn(scriptPath, [], { cwd, stdio: ["pipe", "pipe", "pipe"] });
+    const command = scriptName.endsWith(".py") ? "/usr/bin/python3" : "/bin/bash";
+    const args = scriptName.endsWith(".py") ? ["-I", scriptPath] : [scriptPath];
+    const proc = spawn(command, args, { cwd, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     let settled = false;
@@ -1094,11 +1268,19 @@ function spawnHook(scriptPath, input, cwd) {
     proc.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
     });
-    proc.on("error", () => {
-      finish({ status: 0, stdout: "", stderr: "" });
+    proc.on("error", (error) => {
+      finish({
+        status: 126,
+        stdout,
+        stderr: stderr || String(error?.message || "agent-flow hook failed to start"),
+      });
     });
-    proc.on("close", (status) => {
-      finish({ status: status ?? 0, stdout, stderr });
+    proc.on("close", (status, signal) => {
+      finish({
+        status: status ?? 1,
+        stdout,
+        stderr: stderr || (signal ? "agent-flow hook terminated by " + signal : ""),
+      });
     });
     proc.stdin.end(input);
   });
@@ -1264,6 +1446,24 @@ function pruneRetiredHookScripts(root) {
     }
   }
 }
+
+function pruneRetiredManagedScripts(root) {
+  const scriptsDir = path.join(root, ".agent-flow", "scripts");
+  for (const scriptName of ["check-context-docs.mjs", "check-context-docs.ts"]) {
+    const target = path.join(scriptsDir, scriptName);
+    if (!fs.existsSync(target) || !fs.statSync(target).isFile()) {
+      continue;
+    }
+    const kept = nextFreeBackupPath(`${target}.removed`, fs.readFileSync(target, "utf8"));
+    if (kept !== null) {
+      fs.copyFileSync(target, kept);
+      fs.chmodSync(kept, 0o644);
+    }
+    fs.rmSync(target, { force: true });
+    console.log(`  - removed retired script: ${path.relative(root, target)}`);
+  }
+}
+
 
 function makeHooksExecutable(root) {
   const hooksDir = path.join(root, ".agent-flow", "scripts", "hooks");
@@ -1773,11 +1973,11 @@ function install() {
     "CLAUDE.md",
     "AGENTS/",
     "CLAUDE/",
-    "scripts/check-context-docs.*",
     "agent-flow/",
   ]);
   removeGitignoreEntries(gitignorePath, [
     "graphify/",
+    "scripts/check-context-docs.*",
     "graphify-out/manifest.json",
     "graphify-out/cost.json",
   ]);
@@ -1832,6 +2032,14 @@ function install() {
     FORCE_MANAGED,
     FORCE_MANAGED,
   );
+  copyDir(
+    path.join(KIT_ROOT, "templates"),
+    path.join(AF_DIR, "runtime", "python", "agent_flow", "templates"),
+    new Set(),
+    true,
+    true,
+    true,
+  );
   const scriptsCopied = copyDir(
     path.join(KIT_ROOT, "scripts"),
     path.join(AF_DIR, "scripts"),
@@ -1844,9 +2052,11 @@ function install() {
   }
   hooksDisabled = HOOKS_FLAG_OFF || (!HOOKS_FLAG_ON && readJsonIfExists(path.join(AF_DIR, "kit.json"))?.hooks === false);
   pruneRetiredHookScripts(PROJECT);
+  pruneRetiredManagedScripts(PROJECT);
   makeHooksExecutable(PROJECT);
   let codexHooksCopied = false;
   let ompHooksCopied = false;
+  removeCodexBroadTrustState(PROJECT);
   if (hooksDisabled) {
     pruneManagedHookRegistrations(PROJECT);
     removeOmpHooksExtension(PROJECT);
@@ -1937,6 +2147,8 @@ function install() {
     // 프로젝트인가"에 답할 기록이 사라진다. 마지막 install은 updated_at이 센다.
     installed_at: typeof existingKit?.installed_at === "string" ? existingKit.installed_at : installTimestamp,
     updated_at: installTimestamp,
+    kit_source_digest: existingKit?.kit_source_digest,
+    managed_hook_digests: managedHookDigests(),
     skills_copied: skillsCopied,
     workflows_copied: workflowsCopied,
     profiles_copied: profilesCopied,

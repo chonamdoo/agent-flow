@@ -24,6 +24,8 @@ from agent_flow.core.design_ledger import (
     LEDGER_FILE,
     MANUAL_SPEC_APPROVALS_FILE,
     SPEC_CAPTURE_FILE,
+    SPEC_SET_USER_REPLY,
+    attest_user_spec_confirmation,
     capture_design_ledger,
     ledger_prompt_block,
     manual_spec_approval_statement,
@@ -32,10 +34,16 @@ from agent_flow.core.design_ledger import (
     parse_spec_item_section,
     read_ledger,
     read_manual_spec_approvals,
+    prepare_and_attest_user_spec_confirmation,
+    prepare_user_spec_confirmation,
     record_spec_set_confirmation,
     spec_set_confirmation_statement,
+    spec_set_is_confirmed,
 )
-from agent_flow.runner import Phase
+from agent_flow.runner import Phase, Runner
+
+HOOK_CAPABILITY = "a" * 64
+HOOK_CAPABILITY_HASH = hashlib.sha256(HOOK_CAPABILITY.encode()).hexdigest()
 
 ARTIFACT = """# prd
 
@@ -153,6 +161,11 @@ def test_spec_items_round_trip_and_prompt_injection(tmp_path):
 def test_source_spec_set_requires_confirmation_and_invalidates_on_change(tmp_path):
     parsed = parse_spec_item_section(SPEC_ARTIFACT)
     expected = spec_set_confirmation_statement(parsed.items)
+    confirmation_message = (
+        "spec-confirmation: current user confirmation required; "
+        f"reply exactly `{SPEC_SET_USER_REPLY}` in this chat "
+        "(fallback: `agent-flow spec confirm`)"
+    )
 
     missing = design_value_check.missing_spec_item_evidence(
         tmp_path,
@@ -161,10 +174,7 @@ def test_source_spec_set_requires_confirmation_and_invalidates_on_change(tmp_pat
         SPEC_ARTIFACT,
         task_text="Implement both requirements.",
     )
-    assert missing == [
-        "spec-confirmation: interactive user confirmation required; "
-        f"type `{expected}`"
-    ]
+    assert missing == [confirmation_message]
 
     record_spec_set_confirmation(tmp_path, parsed.items, expected)
     assert design_value_check.missing_spec_item_evidence(
@@ -186,10 +196,193 @@ def test_source_spec_set_requires_confirmation_and_invalidates_on_change(tmp_pat
         changed,
         task_text="Implement both requirements.",
     )
-    assert changed_missing == [
-        "spec-confirmation: interactive user confirmation required; "
-        f"type `{spec_set_confirmation_statement(parse_spec_item_section(changed).items)}`"
-    ]
+    assert changed_missing == [confirmation_message]
+
+
+def test_runner_recaptures_changed_source_after_reconfirmation(tmp_path):
+    _capture(tmp_path, "design", SPEC_ARTIFACT)
+    changed = SPEC_ARTIFACT.replace(
+        "Empty search results show the empty state.",
+        "Empty search results show a retry action.",
+    )
+    (tmp_path / "design.md").write_text(changed, encoding="utf-8")
+    parsed = parse_spec_item_section(changed)
+    record_spec_set_confirmation(
+        tmp_path,
+        parsed.items,
+        spec_set_confirmation_statement(parsed.items),
+    )
+    assert design_value_check.missing_spec_item_evidence(
+        tmp_path,
+        tmp_path,
+        "design",
+        changed,
+        task_text="Implement both requirements.",
+    ) == []
+
+    runner = Runner(tmp_path, run_dir=tmp_path)
+    assert runner._next_index(0, Phase(id="design", description="")) == (1, False)
+    assert read_ledger(tmp_path).spec_items[0].requirement == (
+        "Empty search results show a retry action."
+    )
+
+
+def test_host_confirmation_requires_matching_one_time_challenge(tmp_path):
+    parsed = parse_spec_item_section(SPEC_ARTIFACT)
+    legacy_confirmation = record_spec_set_confirmation(
+        tmp_path,
+        parsed.items,
+        spec_set_confirmation_statement(parsed.items),
+    )
+    legacy_payload = json.loads(legacy_confirmation.read_text(encoding="utf-8"))
+    legacy_payload["provenance"] = "host-user-prompt"
+    legacy_confirmation.write_text(
+        json.dumps(legacy_payload),
+        encoding="utf-8",
+    )
+    assert not spec_set_is_confirmed(tmp_path, parsed.items)
+    legacy_confirmation.unlink()
+
+    challenge = prepare_user_spec_confirmation(
+        tmp_path,
+        parsed.items,
+        session_id="session-current",
+        checkout_identity="worktree:feature",
+        hook_capability_hash=HOOK_CAPABILITY_HASH,
+    )
+    assert challenge is not None and challenge.is_file()
+
+    assert (
+        attest_user_spec_confirmation(
+            tmp_path,
+            parsed.items,
+            prompt=SPEC_SET_USER_REPLY,
+            session_id="session-stale",
+            checkout_identity="worktree:feature",
+            hook_capability=HOOK_CAPABILITY,
+        )
+        is None
+    )
+    assert challenge.is_file()
+    assert (
+        attest_user_spec_confirmation(
+            tmp_path,
+            parsed.items,
+            prompt=SPEC_SET_USER_REPLY,
+            session_id="session-current",
+            checkout_identity="leader",
+            hook_capability=HOOK_CAPABILITY,
+        )
+        is None
+    )
+    assert challenge.is_file()
+
+    assert (
+        attest_user_spec_confirmation(
+            tmp_path,
+            parsed.items,
+            prompt=SPEC_SET_USER_REPLY,
+            session_id="session-current",
+            checkout_identity="worktree:feature",
+            hook_capability="b" * 64,
+        )
+        is None
+    )
+    assert challenge.is_file()
+    confirmation = attest_user_spec_confirmation(
+        tmp_path,
+        parsed.items,
+        prompt=SPEC_SET_USER_REPLY,
+        session_id="session-current",
+        checkout_identity="worktree:feature",
+        hook_capability=HOOK_CAPABILITY,
+    )
+    assert confirmation is not None and confirmation.is_file()
+    assert spec_set_is_confirmed(tmp_path, parsed.items)
+    payload = json.loads(confirmation.read_text(encoding="utf-8"))
+    assert payload["attestation"]["run_id"] == tmp_path.name
+    assert payload["attestation"]["session_id"] == "session-current"
+
+    confirmation.unlink()
+    assert (
+        attest_user_spec_confirmation(
+            tmp_path,
+            parsed.items,
+            prompt=SPEC_SET_USER_REPLY,
+            session_id="session-current",
+            checkout_identity="worktree:feature",
+            hook_capability=HOOK_CAPABILITY,
+        )
+        is None
+    )
+    assert not spec_set_is_confirmed(tmp_path, parsed.items)
+
+
+def test_exact_approval_consumes_only_same_session_prepared_challenge(tmp_path):
+    parsed = parse_spec_item_section(SPEC_ARTIFACT)
+    stale = prepare_user_spec_confirmation(
+        tmp_path,
+        parsed.items,
+        session_id="session-stale",
+        checkout_identity="worktree:feature",
+        hook_capability_hash=HOOK_CAPABILITY_HASH,
+    )
+    assert stale is not None
+    stale_payload = json.loads(stale.read_text(encoding="utf-8"))
+
+    assert (
+        prepare_and_attest_user_spec_confirmation(
+            tmp_path,
+            parsed.items,
+            prompt=SPEC_SET_USER_REPLY,
+            session_id="session-fresh",
+            checkout_identity="worktree:feature",
+            hook_capability=HOOK_CAPABILITY,
+        )
+        is None
+    )
+    assert json.loads(stale.read_text(encoding="utf-8")) == stale_payload
+    assert not spec_set_is_confirmed(tmp_path, parsed.items)
+
+    fresh = prepare_user_spec_confirmation(
+        tmp_path,
+        parsed.items,
+        session_id="session-fresh",
+        checkout_identity="worktree:feature",
+        hook_capability_hash=HOOK_CAPABILITY_HASH,
+    )
+    assert fresh is not None
+    fresh_payload = json.loads(fresh.read_text(encoding="utf-8"))
+    assert fresh_payload["challenge_id"] != stale_payload["challenge_id"]
+
+    confirmation = prepare_and_attest_user_spec_confirmation(
+        tmp_path,
+        parsed.items,
+        prompt=SPEC_SET_USER_REPLY,
+        session_id="session-fresh",
+        checkout_identity="worktree:feature",
+        hook_capability=HOOK_CAPABILITY,
+    )
+    assert confirmation is not None
+    payload = json.loads(confirmation.read_text(encoding="utf-8"))
+    assert payload["attestation"]["session_id"] == "session-fresh"
+    assert payload["attestation"]["challenge_id"] == fresh_payload["challenge_id"]
+    assert payload["attestation"]["run_identity"] == str(tmp_path.resolve())
+    assert spec_set_is_confirmed(tmp_path, parsed.items)
+
+    confirmation.unlink()
+    assert (
+        prepare_and_attest_user_spec_confirmation(
+            tmp_path,
+            parsed.items,
+            prompt=SPEC_SET_USER_REPLY,
+            session_id="session-fresh",
+            checkout_identity="worktree:feature",
+            hook_capability=HOOK_CAPABILITY,
+        )
+        is None
+    )
+    assert not spec_set_is_confirmed(tmp_path, parsed.items)
 
 
 def test_ledger_tampering_or_missing_capture_state_fails_closed(tmp_path):
