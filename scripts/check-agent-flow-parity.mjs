@@ -213,7 +213,9 @@ function assertAbsent(rel, needle, why) {
   }
 }
 
-for (const installer of ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"]) {
+// install 구현은 kit 하나다. `bin/agent-flow-install.mjs`는 공개된 진입점 이름을
+// 유지하는 shim이라 여기서 볼 것이 없다.
+for (const installer of ["bin/agent-flow-kit.mjs"]) {
   assertContains(installer, "function removeCodexBroadTrustState(root)");
   assertNotContains(installer, "function installCodexTrustState(root)");
   assertContains(installer, "function installOmpHooks(root)");
@@ -230,15 +232,15 @@ for (const installer of ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"]
   assertAbsent(installer, "trusted_hash", "install must not launder managed hook approval");
 }
 
-// 관리 hook 이름은 이제 등록 지점이 4곳이다 — installer 2개, 이 파일, 그리고
-// 런 시작 무결성 검증(Python). 갈라지면 검증이 조용히 좁아진다.
+// 관리 hook 이름의 등록 지점은 Node 1곳(`lib/managed-hooks.mjs`)과 Python 1곳이다.
+// 언어 경계라 합칠 수 없으므로 둘이 같은지는 계속 확인한다.
 {
   const jsManagedScripts = (() => {
-    const text = readIfExists("bin/agent-flow-kit.mjs");
+    const text = readIfExists("lib/managed-hooks.mjs");
     if (text === null) return null;
     const match = text.match(/const MANAGED_HOOK_SCRIPTS = \[([\s\S]*?)\];/);
     if (!match) {
-      failures.push("bin/agent-flow-kit.mjs missing MANAGED_HOOK_SCRIPTS");
+      failures.push("lib/managed-hooks.mjs missing MANAGED_HOOK_SCRIPTS");
       return null;
     }
     return [...match[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]).sort();
@@ -249,26 +251,6 @@ from agent_flow.core.hook_integrity import MANAGED_HOOK_SCRIPTS
 expected = ${JSON.stringify(jsManagedScripts)}
 assert sorted(MANAGED_HOOK_SCRIPTS) == expected, (sorted(MANAGED_HOOK_SCRIPTS), expected)
 `);
-  }
-}
-
-// 두 installer가 심는 OMP 확장은 **바이트 단위로** 같아야 한다. 예전에 한쪽만
-// `tool_result` 핸들러 등록 순서가 달라서, 이벤트당 핸들러 하나만 남기는 host에서
-// 루트 컨텍스트 동기화가 통째로 죽었다. 규율이 아니라 검사로 묶는다.
-{
-  const sources = ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"].map((rel) => {
-    const text = readIfExists(rel);
-    if (text === null) return null;
-    const start = text.indexOf("function ompHooksExtensionSource() {");
-    const end = text.indexOf("\n`;\n}", start);
-    if (start < 0 || end < 0) {
-      failures.push(`${rel} missing ompHooksExtensionSource() body`);
-      return null;
-    }
-    return text.slice(start, end);
-  });
-  if (sources[0] !== null && sources[1] !== null && sources[0] !== sources[1]) {
-    failures.push("omp extension source diverged between bin/agent-flow-kit.mjs and bin/agent-flow-install.mjs");
   }
 }
 
