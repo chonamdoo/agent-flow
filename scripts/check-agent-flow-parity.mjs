@@ -213,9 +213,12 @@ function assertAbsent(rel, needle, why) {
   }
 }
 
-// install 구현은 kit 하나다. `bin/agent-flow-install.mjs`는 공개된 진입점 이름을
-// 유지하는 shim이라 여기서 볼 것이 없다.
-for (const installer of ["bin/agent-flow-kit.mjs"]) {
+// 두 진입점은 `lib/`의 공유 모듈에서 omp 확장 소스와 managed hook 목록을 가져다
+// 쓰지만, `installCodexHooks`/`installClaudeHooks`/`installOmpHooks`/
+// `removeCodexBroadTrustState` 본문은 아직 각자 갖고 있다. 아래 단언들은 그 본문에
+// 걸린 계약이므로 두 파일 모두를 봐야 한다 — 한쪽만 보면 다른 쪽에서 승인 세탁이
+// 검사 없이 되살아난다.
+for (const installer of ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"]) {
   assertContains(installer, "function removeCodexBroadTrustState(root)");
   assertNotContains(installer, "function installCodexTrustState(root)");
   assertContains(installer, "function installOmpHooks(root)");
