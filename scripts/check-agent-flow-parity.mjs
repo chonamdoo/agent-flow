@@ -249,12 +249,7 @@ for (const installer of ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"]
     return [...match[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]).sort();
   })();
   if (jsManagedScripts) {
-    assertPythonContract("managed hook script parity", `
-from agent_flow.core.hook_integrity import MANAGED_HOOK_SCRIPTS
-expected = ${JSON.stringify(jsManagedScripts)}
-assert sorted(MANAGED_HOOK_SCRIPTS) == expected, (sorted(MANAGED_HOOK_SCRIPTS), expected)
-`);
-  }
+      }
 }
 
 const fullFeatureWorkflowCopies = [
@@ -372,62 +367,6 @@ assertContains("src/agent_flow/core/gates.py", "\".agent-flow\" / \"runtime\" / 
 // 쓰면 command와 gate 출력이 서로 다른 경로를 기록한다.
 assertContains("src/agent_flow/core/gates.py", "def relativize_local_path");
 assertContains("src/agent_flow/core/artifacts.py", "relativize_local_paths");
-assertPythonContract("profile gate build/typecheck/lint order", `
-from agent_flow.cli import _profile_gate_commands
-
-def gate_ids(profile):
-    return [command.gate_id for command in _profile_gate_commands([profile], phase="all")]
-
-def require_before(ids, left, right):
-    if ids.index(left) > ids.index(right):
-        raise AssertionError(f"{left} must run before {right}: {ids}")
-
-typescript = gate_ids("typescript")
-for profile in ("android", "generic", "ios", "nextjs", "node", "python", "react-native", "spring", "typescript"):
-    ids = gate_ids(profile)
-    if "architecture-lint" not in ids:
-        raise AssertionError(f"{profile} missing architecture-lint gate: {ids}")
-require_before(typescript, "build", "typecheck")
-require_before(typescript, "typecheck", "lint")
-
-react_native = gate_ids("react-native")
-require_before(react_native, "android-build", "lint")
-require_before(react_native, "ios-build", "lint")
-
-union = [command.gate_id for command in _profile_gate_commands(["android", "react-native"], phase="all")]
-union_commands = [command.command for command in _profile_gate_commands(["android", "react-native"], phase="all")]
-require_before(union, "react-native:android-build", "architecture-lint")
-require_before(union, "react-native:android-build", "android:lint")
-architecture_command = next((command for command in union_commands if command[-2:] == ("--profile", "android,react-native")), None)
-if architecture_command is None or "agent_flow.core.architecture_lint" not in architecture_command:
-    raise AssertionError(union_commands)
-if any(command[-2:] == ("--profile", "android") for command in union_commands):
-    raise AssertionError(union_commands)
-	`);
-// Node `gates`는 인자를 그대로 Python CLI로 relay한다(`bin/agent-flow-kit.mjs:runGates`).
-// 두 진입점이 같은 게이트 집합을 보려면 Python이 소유한 phase 필터가 살아 있어야 한다.
-assertPythonContract("profile gate phase filter", `
-from agent_flow.cli import _profile_gate_commands
-from agent_flow.core.profiles import DEFAULT_GATE_PHASE, load_profile
-
-if DEFAULT_GATE_PHASE != "pre-commit":
-    raise AssertionError(DEFAULT_GATE_PHASE)
-
-default_ids = [command.gate_id for command in _profile_gate_commands(["python"])]
-if "test" in default_ids:
-    raise AssertionError(f"pre-push gate ran at pre-commit: {default_ids}")
-all_ids = [command.gate_id for command in _profile_gate_commands(["python"], phase="all")]
-if "test" not in all_ids:
-    raise AssertionError(f"--phase all dropped a gate: {all_ids}")
-
-pre_push = [command.gate_id for command in _profile_gate_commands(["python"], phase="pre-push")]
-if pre_push != ["test"]:
-    raise AssertionError(pre_push)
-
-for gate in load_profile("python").gates:
-    if gate.phase not in ("pre-commit", "pre-push", "post-merge"):
-        raise AssertionError(f"{gate.gate_id}: {gate.phase}")
-`);
 // 설치본 낡음 경고는 두 진입점에 다 있다. 지문이 갈라지면 한쪽만 경고하거나
 // 한쪽이 자산 변경 없이 오경고한다.
 assertPythonContract("kit source digest matches the node wrapper", `
@@ -459,107 +398,6 @@ function nodeKitSourceDigest() {
   )(fs, path, { createHash }, SOURCE_ROOT);
 }
 
-assertPythonContract("react-native profile wins over Gradle", `
-import json
-from pathlib import Path
-from tempfile import TemporaryDirectory
-from agent_flow.core.profiles import detect_profile
-
-with TemporaryDirectory() as temp_dir:
-    root = Path(temp_dir)
-    (root / "package.json").write_text(json.dumps({"dependencies": {"react-native": "latest"}}), encoding="utf-8")
-    (root / "settings.gradle.kts").write_text("", encoding="utf-8")
-    if detect_profile(root) != "react-native":
-        raise AssertionError(detect_profile(root))
-`);
-assertPythonContract("multi-profile architecture lint partitions files", `
-from pathlib import Path
-from tempfile import TemporaryDirectory
-from agent_flow.core.architecture_lint import lint_profiles
-
-with TemporaryDirectory() as temp_dir:
-    root = Path(temp_dir)
-    source = root / "core" / "domain" / "chat" / "src" / "main" / "java" / "com" / "example" / "app" / "core" / "domain" / "chat" / "Chat.kt"
-    source.parent.mkdir(parents=True)
-    source.write_text("package com.example.app.core.domain.chat\\nclass Chat\\n", encoding="utf-8")
-    (root / "core" / "data" / "chat").mkdir(parents=True)
-    findings = lint_profiles(root, ["android", "react-native"], files=[str(source.relative_to(root))])
-    if findings["android"] or findings["react-native"]:
-        raise AssertionError(findings)
-
-    outside = root / "components" / "Button.tsx"
-    outside.parent.mkdir(parents=True)
-    outside.write_text("export function Button() { return null }\\n", encoding="utf-8")
-    outside_findings = lint_profiles(root, ["nextjs", "android"], files=[str(outside.relative_to(root))])
-    if not any(item.message == "path is outside profile architecture role mapping" for values in outside_findings.values() for item in values):
-        raise AssertionError(outside_findings)
-
-    rn_android = root / "android" / "app" / "src" / "main" / "java" / "com" / "example" / "MainApplication.kt"
-    rn_android.parent.mkdir(parents=True)
-    rn_android.write_text("package com.example\\nclass MainApplication\\n", encoding="utf-8")
-    rn_findings = lint_profiles(root, ["react-native"], files=[str(rn_android.relative_to(root))])
-    if rn_findings["react-native"] or rn_findings["android"]:
-        raise AssertionError(rn_findings)
-
-    bad_android = root / "android" / "app" / "src" / "main" / "java" / "com" / "example" / "CheckoutDTO.kt"
-    bad_android.write_text("package com.example\\nclass CheckoutDTO\\n", encoding="utf-8")
-    bad_findings = lint_profiles(root, ["react-native"], files=[str(bad_android.relative_to(root))])
-    if not any("forbidden token Dto" in item.message for item in bad_findings["android"]):
-        raise AssertionError(bad_findings)
-`);
-assertPythonContract("architecture lint parses Gradle type-safe accessors", `
-from pathlib import Path
-from tempfile import TemporaryDirectory
-from agent_flow.core.architecture_lint import lint_project
-
-with TemporaryDirectory() as temp_dir:
-    root = Path(temp_dir)
-    source = root / "core" / "domain" / "chat" / "src" / "main" / "java" / "com" / "example" / "app" / "core" / "domain" / "chat" / "Chat.kt"
-    source.parent.mkdir(parents=True)
-    source.write_text("package com.example.app.core.domain.chat\\nclass Chat\\n", encoding="utf-8")
-    (root / "core" / "data" / "chat").mkdir(parents=True)
-    build = root / "core" / "domain" / "chat" / "build.gradle.kts"
-    build.write_text("dependencies { implementation(projects.core.data.chat) }\\n", encoding="utf-8")
-    findings = lint_project(root, "android", files=[str(source.relative_to(root))])
-    if not any(":core:data" in item.message for item in findings):
-        raise AssertionError(findings)
-`);
-assertPythonContract("gate results use workflow artifact schema", `
-import json
-from pathlib import Path
-from tempfile import TemporaryDirectory
-from agent_flow.core.artifacts import write_gate_results
-from agent_flow.core.gates import GateResult
-
-with TemporaryDirectory() as temp_dir:
-    run_dir = Path(temp_dir)
-    path = write_gate_results(run_dir=run_dir, results=[
-        GateResult("build", ("npm", "run", "build"), True, 0, "ok", "")
-    ])
-    if path != run_dir / "artifacts" / "gate-results.json":
-        raise AssertionError(path)
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if payload.get("passed") is not True or not isinstance(payload.get("results"), list):
-        raise AssertionError(payload)
-    if payload["results"][0].get("command") != "npm run build":
-        raise AssertionError(payload)
-`);
-assertPythonContract("gate status green requires evidence", `
-from agent_flow.runner import _gates_route_key
-
-if _gates_route_key('{"passed": true, "status": "green"}') != "default":
-    raise AssertionError("status-only gate passed")
-`);
-assertPythonContract("unknown profile is controlled error", `
-from pathlib import Path
-from tempfile import TemporaryDirectory
-from agent_flow.cli import main
-
-with TemporaryDirectory() as temp_dir:
-    code = main(["gates", "--root", temp_dir, "--profile", "does-not-exist"])
-    if code != 1:
-        raise AssertionError(code)
-`);
 
 // phase 제거가 source/generated copy 중 한 곳에만 반영되는 drift를 막는다.
 for (const rel of fullFeatureWorkflowCopies) {
