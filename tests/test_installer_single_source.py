@@ -97,3 +97,33 @@ def test_agent_flow_install_entry_point_still_installs(tmp_path: Path):
     )
     assert result.returncode == 0, result.stderr
     assert (project / ".agent-flow" / "workflows" / "default.yaml").is_file()
+
+
+@pytest.mark.parametrize(
+    "entry", ["agent-flow-kit.mjs", "agent-flow-install.mjs"]
+)
+def test_installer_never_launders_managed_hook_approval(entry: str):
+    """불변: install이 현재 등록된 hook 해시를 trusted로 되받아 적으면 안 된다.
+
+    그렇게 하면 변조된 등록이 다음 install에서 승인 상태로 세탁된다. 등록 무결성은
+    런 시작 시 `hook_integrity`가 `kit.json`과 대조해서 판정하는 것이지, install이
+    현장에서 재승인할 일이 아니다.
+
+    두 진입점 모두 제 `installCodexHooks`/`installClaudeHooks`/`installOmpHooks`
+    본문을 갖고 있으므로 둘 다 본다. 한쪽만 보면 다른 쪽에서 조용히 되살아난다.
+    """
+    source = (BIN / entry).read_text(encoding="utf-8")
+    for forbidden in ("[hooks.state.", "trusted_hash"):
+        assert forbidden not in source, (
+            f"{entry}가 {forbidden!r}를 다시 들였다 — hook 승인 세탁 경로"
+        )
+
+
+@pytest.mark.parametrize(
+    "entry", ["agent-flow-kit.mjs", "agent-flow-install.mjs"]
+)
+def test_installer_removes_broad_codex_trust_but_never_adds_it(entry: str):
+    """불변: install은 넓은 trust를 걷어내는 쪽이지 심는 쪽이 아니다."""
+    source = (BIN / entry).read_text(encoding="utf-8")
+    assert "function removeCodexBroadTrustState(root)" in source
+    assert "function installCodexTrustState(root)" not in source
