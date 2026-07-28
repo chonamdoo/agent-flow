@@ -76,6 +76,7 @@ from agent_flow.core.worktree_isolation import (
 )
 from agent_flow.core.profiles import GATE_PHASE_ALL
 from agent_flow.core.phase_workflow import (
+    package_root,
     find_kit_root,
     load_phase_workflow_definition,
     overall_review_route_key,
@@ -1686,6 +1687,16 @@ def _load_profile(kit_root: Path, project_root: Path) -> tuple[str, dict[str, An
     )
 
 
+def _packaged_profile_path(profile_id: str) -> Path | None:
+    """설치된 `agent_flow` 패키지가 싣고 있는 profile 정의."""
+    package_dir = package_root()
+    if package_dir is None:
+        return None
+    path = package_dir / "profiles" / f"{profile_id}.yaml"
+    _ensure_child_path(package_dir / "profiles", path, "profile")
+    return path if path.is_file() else None
+
+
 def _load_single_profile(
     kit_root: Path,
     profile_id: str,
@@ -1698,6 +1709,13 @@ def _load_single_profile(
 
     profile_path = kit_root / "profiles" / f"{profile_id}.yaml"
     _ensure_child_path(kit_root / "profiles", profile_path, "profile")
+    if not profile_path.exists():
+        # 워크플로 정의와 같은 규율이다 — 정본은 패키지 자원이고 kit root 사본은
+        # 설치본이 덮어쓰는 자리다. 사본이 없다고 "없는 profile"로 판정하면
+        # 루트 사본을 지울 수 없다.
+        packaged = _packaged_profile_path(profile_id)
+        if packaged is not None:
+            profile_path = packaged
     if not profile_path.exists():
         # Hard error when kit.json says a profile that doesn't exist (typo).
         # Lenient fallback only when explicitly requested via env var or when
@@ -1716,6 +1734,10 @@ def _load_single_profile(
         )
         profile_id = "generic"
         profile_path = kit_root / "profiles" / "generic.yaml"
+        if not profile_path.exists():
+            packaged_generic = _packaged_profile_path("generic")
+            if packaged_generic is not None:
+                profile_path = packaged_generic
 
     raw = yaml.safe_load(profile_path.read_text()) or {}
     if not isinstance(raw, dict):
