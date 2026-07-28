@@ -25,6 +25,7 @@ from agent_flow.core.worktree_isolation import (
     list_registered_worktrees,
     real_path,
 )
+from tests.test_hook_integrity import _install as _install_managed_hooks
 from agent_flow.core import worktrees as W
 from agent_flow.core.worktrees import (
     removable_worktrees,
@@ -40,8 +41,13 @@ def _init_repo(root: Path) -> None:
     _git("init", "-b", "main", cwd=root)
     _git("config", "user.email", "t@t", cwd=root)
     _git("config", "user.name", "t", cwd=root)
+    _install_managed_hooks(root)
+    (root / ".gitignore").write_text(
+        "\n".join((".agent-flow/", ".claude/", ".Codex/", ".codex/", ".omp/")) + "\n",
+        encoding="utf-8",
+    )
     (root / "f.txt").write_text("base\n", encoding="utf-8")
-    _git("add", ".", cwd=root)
+    _git("add", ".gitignore", "f.txt", cwd=root)
     _git("commit", "-m", "init", cwd=root)
 
 

@@ -22,6 +22,7 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 from agent_flow.core.commands import SafeCommandResult
+from tests.test_hook_integrity import _install as _install_managed_hooks
 from agent_flow.core import worktrees as W
 from agent_flow.core import worktree_isolation as W_ISO
 from agent_flow.core.worktree_isolation import (
@@ -51,6 +52,25 @@ def _init_repo(root: Path) -> None:
     _git("config", "user.name", "t", cwd=root)
     (root / "f.txt").write_text("base\n", encoding="utf-8")
     _git("add", ".", cwd=root)
+    _git("commit", "-m", "init", cwd=root)
+
+
+def _init_repo_with_managed_hooks(root: Path) -> None:
+    """run 시작 게이트가 요구하는 managed hook 등록까지 세운다.
+
+    tripwire 테스트는 leader의 더러움·ignored 상태를 직접 구성하므로 hook 설치가
+    관측을 바꾼다. 그래서 run을 실제로 시작하는 테스트만 이걸 쓴다.
+    """
+    _git("init", "-b", "main", cwd=root)
+    _git("config", "user.email", "t@t", cwd=root)
+    _git("config", "user.name", "t", cwd=root)
+    _install_managed_hooks(root)
+    (root / ".gitignore").write_text(
+        "\n".join((".agent-flow/", ".claude/", ".Codex/", ".codex/", ".omp/")) + "\n",
+        encoding="utf-8",
+    )
+    (root / "f.txt").write_text("base\n", encoding="utf-8")
+    _git("add", ".gitignore", "f.txt", cwd=root)
     _git("commit", "-m", "init", cwd=root)
 
 
@@ -663,7 +683,7 @@ def _cli(argv, cwd, env=None):
     reason="macOS sandbox-exec confinement is required",
 )
 def test_e2e_team_run_next_confines_worker_writes_and_git(tmp_path):
-    _init_repo(tmp_path)
+    _init_repo_with_managed_hooks(tmp_path)
     assert _cli(["team", "init", "--root", ".", "--name", "ft"], cwd=tmp_path).returncode == 0
     assert _cli(["team", "task", "--root", ".", "--team", "ft", "--id", "t1",
                  "--subject", "s", "--description", "d"], cwd=tmp_path).returncode == 0
@@ -1491,7 +1511,7 @@ def test_multi_review_reviewer_env_is_sanitized(tmp_path, monkeypatch):
     from agent_flow import multi_review as MR
     from agent_flow.cli_detect import CliInfo
 
-    _init_repo(tmp_path)
+    _init_repo_with_managed_hooks(tmp_path)
     plan = W.plan_worktree(root=tmp_path, name="multi-review")
     status = W.create_worktree(root=tmp_path, plan=plan)
     linked = status.path
@@ -1542,7 +1562,7 @@ def test_multi_review_rejects_non_linked_cwd_before_spawn(
     from agent_flow.cli_detect import CliInfo
     from agent_flow import subprocess_pool as POOL
 
-    _init_repo(tmp_path)
+    _init_repo_with_managed_hooks(tmp_path)
     out = tmp_path / "angle.md"
     fake = CliInfo(
         name="probe",
