@@ -464,42 +464,20 @@ def _is_secure_lock_directory(common: Path, path: Path) -> bool:
 def _open_lock_file(path: Path, *, create: bool) -> int:
     nofollow = getattr(os, "O_NOFOLLOW", None)
     cloexec = getattr(os, "O_CLOEXEC", None)
-    directory = getattr(os, "O_DIRECTORY", None)
-    if nofollow is None or cloexec is None or directory is None:
+    if nofollow is None or cloexec is None:
         raise WorktreeIsolationError(
             "secure repository lease file opening is unsupported"
         )
-    parent_fd = -1
-    fd = -1
+    flags = os.O_RDWR | nofollow | cloexec
+    if create:
+        flags |= os.O_CREAT
+    fd = os.open(path, flags, 0o600)
     try:
-        parent_fd = os.open(
-            path.parent,
-            os.O_RDONLY | directory | nofollow | cloexec,
-        )
-        opened_parent = os.fstat(parent_fd)
-        visible_parent = path.parent.lstat()
-        if (
-            not stat.S_ISDIR(opened_parent.st_mode)
-            or stat.S_ISLNK(visible_parent.st_mode)
-            or (opened_parent.st_dev, opened_parent.st_ino)
-            != (visible_parent.st_dev, visible_parent.st_ino)
-        ):
-            raise WorktreeIsolationError(
-                f"repository lease directory identity changed: {path.parent}"
-            )
-        flags = os.O_RDWR | nofollow | cloexec
-        if create:
-            flags |= os.O_CREAT
-        fd = os.open(path.name, flags, 0o600, dir_fd=parent_fd)
         _assert_lock_file_binding(path, fd)
-        return fd
     except BaseException:
-        if fd >= 0:
-            os.close(fd)
+        os.close(fd)
         raise
-    finally:
-        if parent_fd >= 0:
-            os.close(parent_fd)
+    return fd
 
 
 def _assert_lock_file_binding(path: Path, fd: int) -> None:

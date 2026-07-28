@@ -35,6 +35,10 @@ def main() -> int:
         return 0
     if not isinstance(payload, dict):
         return 0
+    if payload.get("hook_event_name") == "UserPromptSubmit":
+        # 승인 경로의 challenge 회전 주체는 confirm hook 하나다. 같은 이벤트에
+        # 병렬로 등록된 두 hook이 각자 회전하면 정당한 승인이 조용히 유실된다.
+        return 0
     session_id = payload.get("session_id") or payload.get("sessionId")
     if not isinstance(session_id, str) or not session_id:
         return 0
