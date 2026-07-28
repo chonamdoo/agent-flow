@@ -2810,7 +2810,10 @@ def _spec_artifact_waiting_for_confirmation(
         if parsed.errors or not parsed.items:
             continue
         if pending_only and spec_set_is_confirmed(run_dir, parsed.items):
-            continue
+            # 한 run의 현재 SPEC artifact는 하나다. 확인된 것을 건너뛰고 다음
+            # 후보로 넘어가면, agent가 두 번째 artifact를 써 두는 것만으로
+            # 사용자가 이미 승인한 집합이 다른 집합으로 갈아치워진다.
+            return None
         return artifact
     return None
 

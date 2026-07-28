@@ -385,6 +385,47 @@ def test_exact_approval_consumes_only_same_session_prepared_challenge(tmp_path):
     assert not spec_set_is_confirmed(tmp_path, parsed.items)
 
 
+def test_recorded_approval_survives_a_later_session_preparing_again(tmp_path):
+    """반증: `agent-flow continue`로 세션을 갈아타면 승인이 사라졌다.
+
+    사용자가 승인한 사실은 SPEC 집합·run·checkout에 묶인다. session_id는 그
+    키 입력을 전달한 채팅 창일 뿐이라, 세션이 바뀌었다는 이유로 기록을 지우면
+    정상 재개가 곧 동의 파기가 된다.
+    """
+    parsed = parse_spec_item_section(SPEC_ARTIFACT)
+    prepare_user_spec_confirmation(
+        tmp_path,
+        parsed.items,
+        session_id="session-a",
+        checkout_identity="worktree:feature",
+        hook_capability_hash=HOOK_CAPABILITY_HASH,
+    )
+    confirmation = prepare_and_attest_user_spec_confirmation(
+        tmp_path,
+        parsed.items,
+        prompt=SPEC_SET_USER_REPLY,
+        session_id="session-a",
+        checkout_identity="worktree:feature",
+        hook_capability=HOOK_CAPABILITY,
+    )
+    assert confirmation is not None
+    recorded = json.loads(confirmation.read_text(encoding="utf-8"))
+
+    assert (
+        prepare_user_spec_confirmation(
+            tmp_path,
+            parsed.items,
+            session_id="session-b",
+            checkout_identity="worktree:feature",
+            hook_capability_hash=HOOK_CAPABILITY_HASH,
+        )
+        is None
+    )
+    assert confirmation.is_file()
+    assert json.loads(confirmation.read_text(encoding="utf-8")) == recorded
+    assert spec_set_is_confirmed(tmp_path, parsed.items)
+
+
 def test_ledger_tampering_or_missing_capture_state_fails_closed(tmp_path):
     _capture(tmp_path, "design", SPEC_ARTIFACT)
     ledger_path = tmp_path / LEDGER_FILE

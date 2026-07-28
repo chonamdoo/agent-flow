@@ -25,7 +25,11 @@ SRC = str(REPO / "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-from agent_flow.cli import _is_foreground_user_terminal, main
+from agent_flow.cli import (
+    _is_foreground_user_terminal,
+    _spec_artifact_waiting_for_confirmation,
+    main,
+)
 from agent_flow.artifact import _missing_completion_markers
 from agent_flow.core.command_evidence import COMMANDS_RUN_LOG
 from agent_flow.core.design_ledger import (
@@ -765,6 +769,47 @@ def test_cli_spec_confirmation_resolves_current_python_active_meta_run_from_user
             "session-python",
         ]
     ) == 0
+    assert spec_set_is_confirmed(run_dir, parsed.items)
+
+
+def test_a_second_spec_artifact_cannot_displace_a_confirmed_one(project):
+    """반증: agent가 두 번째 artifact를 써 두면 승인 대상이 갈아치워졌다.
+
+    확인된 후보를 건너뛰고 다음 후보를 반환하면, 사용자가 본 적 없는 SPEC
+    집합으로 승인이 옮겨간다. 한 run의 현재 SPEC artifact는 하나다.
+    """
+    run_dir = project / ".agent-flow" / "runs" / "20260728-090000"
+    run_dir.mkdir(parents=True)
+    (run_dir / "meta.json").write_text(
+        json.dumps({"run_id": run_dir.name, "current_phase": "design"}),
+        encoding="utf-8",
+    )
+    artifact = (
+        "## Spec Items\n\n"
+        "SPEC-1: Empty search results show the empty state.\n"
+        "verify: test:test_empty_state\n\n"
+        "## Completion Gate\n\n"
+        "spec-items: SPEC-1\n"
+    )
+    (run_dir / "design.md").write_text(artifact, encoding="utf-8")
+    parsed = parse_spec_item_section(artifact)
+    record_spec_set_confirmation(
+        run_dir,
+        parsed.items,
+        spec_set_confirmation_statement(parsed.items),
+    )
+    assert spec_set_is_confirmed(run_dir, parsed.items)
+
+    (run_dir / "artifacts").mkdir()
+    (run_dir / "artifacts" / "design.md").write_text(
+        artifact.replace("empty state", "retry action"),
+        encoding="utf-8",
+    )
+
+    assert (
+        _spec_artifact_waiting_for_confirmation(run_dir, pending_only=True)
+        is None
+    )
     assert spec_set_is_confirmed(run_dir, parsed.items)
 
 

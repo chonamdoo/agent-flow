@@ -536,19 +536,9 @@ def _prepare_user_spec_confirmation(
     ):
         path.unlink(missing_ok=True)
         return None
-    if _host_spec_confirmation_matches(
-        run_dir,
-        items,
-        confirmation,
-        expected_subject=expected,
-    ):
+    if _host_spec_confirmation_matches(run_dir, items, confirmation):
         path.unlink(missing_ok=True)
         return None
-    if (
-        isinstance(confirmation, dict)
-        and confirmation.get("provenance") == "host-user-prompt"
-    ):
-        confirmation_path.unlink(missing_ok=True)
     if _spec_confirmation_subject_was_consumed(run_dir, expected):
         path.unlink(missing_ok=True)
         return None
@@ -763,8 +753,6 @@ def _host_spec_confirmation_matches(
     run_dir: Path,
     items: tuple[SpecItem, ...],
     payload: object,
-    *,
-    expected_subject: dict[str, object] | None = None,
 ) -> bool:
     if (
         not isinstance(payload, dict)
@@ -801,8 +789,6 @@ def _host_spec_confirmation_matches(
         session_id=session_id,
         checkout_identity=checkout_identity,
     )
-    if expected_subject is not None and subject != expected_subject:
-        return False
     if (
         attestation.get("spec_digest") != subject["spec_digest"]
         or attestation.get("run_id") != subject["run_id"]
