@@ -23,7 +23,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
+from agent_flow.core.provider_sandbox import (
+    SandboxUnavailableError,
+    SpawnBoundary,
+    resolve_spawn_argv,
+)
 from agent_flow.core.worktree_isolation import max_worker_capacity
+
+
+# What `resolve_spawn_argv` can raise: an unenforceable capability, a policy
+# that will not render, or a missing sandbox binary. None of these is a
+# property of one job, so none of them may be recorded as one job's failure.
+_BOUNDARY_FAILURES = (SandboxUnavailableError, ValueError, FileNotFoundError)
 
 
 @dataclass
@@ -34,6 +45,14 @@ class SubprocessJob:
     cwd: Path
     timeout_s: int = 600    # default 10 minutes per job
     env: dict | None = None  # None inherits parent env; set to sanitize git leak
+    # Reviewers are agents too: one absolute path in a generated command
+    # reaches the leader checkout. No default — a forgotten boundary must be a
+    # construction error, not a silently unbounded spawn.
+    sandbox: SpawnBoundary = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.sandbox is None:
+            raise ValueError(f"job {self.job_id!r} has no spawn boundary")
 
 
 @dataclass
@@ -53,19 +72,28 @@ class SubprocessResult:
 
 async def _run_one(job: SubprocessJob) -> SubprocessResult:
     started = time.monotonic()
+    # Outside the try on purpose: a policy that cannot be turned into argv is a
+    # refusal, not one job's spawn failure. `SandboxedSpawn` already proved the
+    # capability at construction, so what surfaces here is a malformed policy
+    # (`ValueError`) or a missing `sandbox-exec` (`FileNotFoundError`) — both
+    # properties of the host, not of this job.
+    argv = resolve_spawn_argv(job.sandbox, (job.binary, *job.args))
     try:
         proc = await asyncio.create_subprocess_exec(
-            job.binary, *job.args,
+            *argv,
             cwd=str(job.cwd),
             env=job.env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
         )
-    except FileNotFoundError as e:
+    except FileNotFoundError:
+        # argv[0] is the sandbox wrapper, not the reviewer CLI. A missing
+        # reviewer binary no longer lands here: sandbox-exec execs it and
+        # reports the failure itself, so naming job.binary would be wrong.
         return SubprocessResult(
             job_id=job.job_id,
-            error=f"binary not found: {job.binary}",
+            error=f"binary not found: {argv[0]}",
             duration_s=time.monotonic() - started,
         )
     except OSError as e:
@@ -126,7 +154,9 @@ async def run_parallel_async(
     in one job is captured as a SubprocessResult with `error` set, not aborting
     siblings. `BaseException` (KeyboardInterrupt, asyncio.CancelledError,
     SystemExit) is re-raised — those signal genuine cancellation/shutdown that
-    must propagate.
+    must propagate. So is a boundary failure: `resolve_spawn_argv` fails on a
+    property of the host, not of one job, so recording it per job turns "this
+    machine cannot enforce the write boundary" into N reviewers that look flaky.
     """
     if not jobs:
         return []
@@ -141,6 +171,10 @@ async def run_parallel_async(
     raw = await asyncio.gather(*tasks, return_exceptions=True)
     out: list[SubprocessResult] = []
     for job, item in zip(jobs, raw):
+        if isinstance(item, _BOUNDARY_FAILURES):
+            # The host cannot enforce the boundary. That is one answer for the
+            # whole batch, not one reviewer's failed run.
+            raise item
         if isinstance(item, BaseException) and not isinstance(item, Exception):
             # KeyboardInterrupt / CancelledError / SystemExit — propagate.
             raise item

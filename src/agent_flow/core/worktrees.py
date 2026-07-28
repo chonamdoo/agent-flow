@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from agent_flow.core.commands import run_safe_command
+from agent_flow.core.provider_sandbox import SandboxPolicy, derive_sandbox_policy
 from agent_flow.core.worktree_isolation import (
     RegisteredWorktree,
     WorktreeIsolationError,
@@ -18,6 +19,7 @@ from agent_flow.core.worktree_isolation import (
     git_safe,
     list_registered_worktrees,
     real_path,
+    registered_worktree_paths,
     same_worktree_path,
     verify_linked_worktree,
     with_git_lock_retry,
@@ -714,23 +716,153 @@ def _legacy_worktree_manifest_path(*, root: Path, name: str) -> Path:
 
 
 def _agent_flow_git_dir(root: Path) -> Path:
-    result = git_safe("rev-parse", "--git-common-dir", cwd=root)
-    if not result.ok:
-        # git 저장소인데 common dir을 못 읽으면 state root가 leader 안으로
-        # 들어와 워커 상태가 leader에 쌓인다. 위치를 확정하지 못하면 멈춘다.
-        # 애초에 git 저장소가 아니면 지킬 leader가 없으므로 root/.agent-flow가
-        # 옳은 자리다 — 이 경로까지 막으면 non-git 프로젝트와 복구 명령이 죽는다.
+    # 해석은 `_git_common_dir_of` 하나로 모은다. 사본이 둘이면 git 호출 방식이
+    # 갈라지고, sandbox 정책과 state root가 서로 다른 자리를 가리키게 된다.
+    # 성공 경로에서 git을 한 번만 부르도록 non-repo 확인은 실패 뒤로 미룬다 —
+    # 이 함수는 policy 도출마다 여러 번 불린다.
+    try:
+        return _git_common_dir_of(root) / "agent-flow"
+    except RuntimeError as exc:
+        # git 저장소가 아니면 지킬 leader가 없으므로 root/.agent-flow가 옳은
+        # 자리다 — 이 경로까지 막으면 non-git 프로젝트와 복구 명령이 죽는다.
         if git_repo_state(root) == "non-repo":
             return root / ".agent-flow"
+        # 여기서만 성립하는 결과를 덧붙인다: 위치를 모른 채 진행하면 워커 상태가
+        # leader 체크아웃 안에 쌓여 격리가 조용히 무너진다.
         raise RuntimeError(
-            f"cannot resolve the git common dir for {root}; "
-            f"refusing to place agent-flow state inside the leader checkout: "
+            f"{exc}; refusing to place agent-flow state inside the leader checkout"
+        ) from exc
+
+
+def leader_checkout_of(path: Path) -> Path | None:
+    """The main checkout backing ``path``, or None when there is none.
+
+    Two questions, answered in the order that avoids needing the harder one.
+    First: is ``path`` itself the main worktree? git answers that exactly —
+    `--git-dir` equals `--git-common-dir` there and points into
+    `<common>/worktrees/<name>` for a linked checkout — so a repository whose
+    common dir is not named `.git` still gets a straight answer instead of a
+    refusal that protects nothing.
+
+    Only a linked checkout needs the second question, and that one is
+    delegated to `leader_worktree_path`, which refuses the positional "first
+    porcelain entry is main" guess and raises rather than folding an
+    unanswerable layout into None.
+
+    Fail-closed where `leader_root_for` is not. That helper returns the same
+    None for "git could not answer" and "this is the leader", and a caller
+    reading None as "nothing to protect" then skips the boundary on a
+    transient git failure — which under fan-out is when it matters most.
+
+    A linked worktree whose repository is bare, or whose common dir is a
+    `--separate-git-dir` target, raises for the same reason. There is no main
+    checkout to name, but siblings and the common metadata still exist and
+    still need denying, and this function cannot express that. Returning None
+    would hand the caller the one answer that switches the boundary off.
+    """
+    if git_repo_state(path) == "non-repo":
+        # No repository, so no outer checkout exists and no policy would deny
+        # anything; multi-review in a plain directory must keep working.
+        return None
+    if same_worktree_path(_git_dir_of(path), _git_common_dir_of(path)):
+        # The main worktree, or a bare repository. Nothing outside it.
+        return None
+    return leader_worktree_path(path)
+
+
+def sandbox_policy_for_worktree(
+    *, root: Path, worktree_path: Path, name: str, branch: str | None
+) -> SandboxPolicy:
+    """Write policy for a worker bound to ``worktree_path``.
+
+    Recomputed from git on every call. Persisting it would let a worktree that
+    moved, was removed, or was replaced keep grants that no longer describe
+    the checkout the worker is about to run in.
+    """
+    common = _git_common_dir_of(root)
+    state_key = resolve_worktree_name(root=root, name=name)
+    worker = real_path(worktree_path)
+    # Every other registered checkout is off limits, including the leader.
+    # Enumerating from git rather than from a naming convention keeps
+    # externally created worktrees covered. Sorted so the rendered profile is
+    # byte-stable across runs — a policy that reshuffles is hard to diff when
+    # someone is working out why a write was denied.
+    siblings = sorted(
+        path
+        for path in registered_worktree_paths(root)
+        if not same_worktree_path(path, worker)
+    )
+    return derive_sandbox_policy(
+        worktree=worker,
+        leader_root=root,
+        git_common_dir=common,
+        worktree_git_dir=_git_dir_of(worktree_path),
+        branch=branch,
+        run_state_dir=_runtime_state_root(root=root, name=state_key),
+        sibling_roots=siblings,
+    )
+
+
+def sibling_worktree_policy(root: Path) -> SandboxPolicy | None:
+    """Deny the linked checkouts registered beside ``root``, and nothing else.
+
+    For a spawn that runs in the main checkout: it owns that checkout, so it
+    needs no grants, but the linked worktrees under it are other workers'
+    live trees. None when nothing is registered beside ``root`` — the caller
+    then has a spawn with genuinely nothing to protect, and an empty policy
+    would claim a boundary that denies no path at all.
+
+    Registry entries that are not linked working trees are dropped. A `bare`
+    entry has no tree, and in a `--separate-git-dir` layout git reports the
+    git dir where the main entry would be — denying that is denying the spawn
+    its own `index.lock`, which fails every `add` and `commit` it makes.
+    """
+    worker = real_path(root)
+    common = real_path(_git_common_dir_of(root))
+    siblings = sorted(
+        real_path(entry.path)
+        for entry in list_registered_worktrees(root)
+        if not entry.bare
+        and not same_worktree_path(entry.path, worker)
+        and not same_worktree_path(entry.path, common)
+    )
+    if not siblings:
+        return None
+    return SandboxPolicy(
+        protected_roots=tuple(siblings),
+        writable_subpaths=(),
+        writable_literals=(),
+        protected_literals=(),
+        undeletable=(),
+    )
+
+
+def _git_common_dir_of(root: Path) -> Path:
+    result = git_safe("rev-parse", "--git-common-dir", cwd=root, optional_locks=False)
+    if not result.ok:
+        raise RuntimeError(
+            f"cannot resolve the git common dir for {root}: "
             f"{result.stderr.strip() or 'git did not answer'}"
         )
-    git_common = Path(result.stdout.strip())
-    if not git_common.is_absolute():
-        git_common = root / git_common
-    return git_common / "agent-flow"
+    return _absolute_git_path(base=root, raw=result.stdout.strip())
+
+
+def _git_dir_of(worktree_path: Path) -> Path:
+    result = git_safe("rev-parse", "--git-dir", cwd=worktree_path, optional_locks=False)
+    if not result.ok:
+        raise RuntimeError(
+            f"cannot resolve the git dir for {worktree_path}: "
+            f"{result.stderr.strip() or 'git did not answer'}"
+        )
+    return _absolute_git_path(base=worktree_path, raw=result.stdout.strip())
+
+
+def _absolute_git_path(*, base: Path, raw: str) -> Path:
+    # git answers relative to the cwd it was asked from when the repo is
+    # discovered there; a relative path resolved against the wrong base points
+    # at nothing and silently drops the rule built from it.
+    path = Path(raw)
+    return real_path(path if path.is_absolute() else base / path)
 
 
 def _is_agent_flow_status_line(line: str) -> bool:

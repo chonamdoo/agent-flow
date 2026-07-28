@@ -110,6 +110,8 @@ from agent_flow.core.worktrees import (
     remove_worktree,
     removable_worktrees,
     resolve_worktree,
+    resolve_worktree_name,
+    sandbox_policy_for_worktree,
     worktree_branch_exists,
     worktree_runtime_root,
 )
@@ -125,7 +127,9 @@ from agent_flow.core.worktree_isolation import (
     assert_scopes_isolated,
     capture_leader_snapshot,
     git_repo_state,
+    git_safe,
     max_worker_capacity,
+    real_path,
     same_worktree_path,
     sanitized_worker_env,
     verify_linked_worktree,
@@ -139,6 +143,19 @@ from agent_flow.memory.entities import EntityMemoryIndex
 from agent_flow.artifact import find_active_run, mark_inactive, read_meta
 from agent_flow.runner import Runner, ResumeMode, _find_kit_root
 from agent_flow.providers.host import list_host_providers
+from agent_flow.core.provider_sandbox import (
+    SandboxedSpawn,
+    SpawnBoundary,
+    UnboundedSpawn,
+)
+from agent_flow.core.worktree_consent import (
+    PROMPT as REUSE_PROMPT,
+    CurrentCheckout,
+    consent_granted,
+    decide_worktree_reuse,
+    render_checkout_summary,
+)
+from agent_flow.providers.sandbox import select_sandbox_backend
 from agent_flow.providers.subprocess import ProviderCommand, run_provider
 from agent_flow.pr_watch import fetch_pr, watch_pr
 
@@ -162,6 +179,11 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--worktree")
     run_parser.add_argument("--worktree-branch")
     run_parser.add_argument("--allow-dirty", action="store_true")
+    run_parser.add_argument(
+        "--reuse-current",
+        action="store_true",
+        help="reuse the worktree this command runs from without prompting",
+    )
     run_parser.add_argument(
         "--architecture",
         choices=("default", "ddd", "service-layer"),
@@ -192,6 +214,25 @@ def main(argv: list[str] | None = None) -> int:
     start_parser.add_argument("--worktree")
     start_parser.add_argument("--worktree-branch")
     start_parser.add_argument("--allow-dirty", action="store_true")
+    start_parser.add_argument(
+        "--reuse-current",
+        action="store_true",
+        help="reuse the worktree this command runs from without prompting",
+    )
+
+    secure_parser = subparsers.add_parser(
+        "secure",
+        help="run an external command behind the worktree write boundary",
+    )
+    secure_sub = secure_parser.add_subparsers(dest="secure_command", required=True)
+    secure_launch = secure_sub.add_parser("launch")
+    secure_launch.add_argument("--root", default=".")
+    secure_launch.add_argument("--worktree")
+    # Positional REMAINDER, not `--command`. On an optional, REMAINDER stops at
+    # the first `--`, so `--command git log -- src/` drops the pathspec and
+    # argparse then rejects the leftovers. As a positional it captures
+    # everything after the subcommand verbatim.
+    secure_launch.add_argument("command_argv", nargs=argparse.REMAINDER)
 
     status_parser = subparsers.add_parser("status")
     status_parser.add_argument("--root", default=".")
@@ -516,11 +557,43 @@ def main(argv: list[str] | None = None) -> int:
     team_import_apply.add_argument("--report")
 
     args = parser.parse_args(argv)
-    requested_root = Path(getattr(args, "root", ".")).resolve()
+    root_arg = getattr(args, "root", ".")
+    requested_root = Path(root_arg or ".").resolve()
     root = requested_root
-    root, inferred_worktree = _resolve_cli_root_context(root, getattr(args, "worktree", None))
+    requested_worktree = getattr(args, "worktree", None)
+    # 사용자가 지금 서 있는 checkout이 아닌 다른 자리를 적어 낸 `--root`만
+    # 지목으로 본다. 경로 문자열 비교로는 부족하다. `--root .`, `--root ./`,
+    # `--root "$PWD"`는 물론 하위 디렉터리에서 친 `--root ..`,
+    # `--root "$(git rev-parse --show-toplevel)"`도 모두 "여기"를 다르게 쓴
+    # 것뿐이다. 그것들이 지목으로 세어지면 worktree 안에서 친 `agent-flow run`이
+    # 게이트를 그냥 지나간다 — 이 게이트가 존재하는 바로 그 경우다. 어느
+    # worktree를 가리키는지로 비교하면 철자와 무관하게 갈린다.
+    requested_context = _managed_worktree_context(requested_root)
+    named_root = requested_context is not None and requested_context != _managed_worktree_context(
+        Path.cwd()
+    )
+    root, inferred_worktree = _resolve_cli_root_context(root, requested_worktree)
     if inferred_worktree is not None and hasattr(args, "worktree") and args.worktree is None:
         args.worktree = inferred_worktree
+    # cwd나 `--root`에서 이름을 주워온 경우에만 물어본다. `--worktree`로 직접
+    # 지목했으면 이미 답을 받은 것이고, 여기서 다시 해석하면 잘못된 이름이
+    # 아래의 정상 오류 경로 대신 traceback으로 새어 나간다.
+    if (
+        args.command in _WORKTREE_CONSENT_COMMANDS
+        and requested_worktree is None
+        and inferred_worktree is not None
+    ):
+        allowed = _confirm_worktree_reuse(
+            root=root,
+            name=args.worktree,
+            explicit=named_root or getattr(args, "reuse_current", False),
+        )
+        if not allowed:
+            return 2
+
+    if args.command == "secure":
+        return _secure_launch(root=root, worktree=args.worktree, argv=args.command_argv)
+
     # 문서가 안내하는 진입점은 이쪽이다. JS 래퍼에만 검사가 있으면 일반적인
     # 사용자는 kit을 올린 뒤에도 낡은 설치본을 끝까지 못 본다.
     if args.command in _KIT_FRESHNESS_COMMANDS:
@@ -1283,7 +1356,20 @@ def main(argv: list[str] | None = None) -> int:
             worktree_status = None
             claimed = None
             leader_before = None
+            worker_policy = None
+            capability = None
+            # Capability first: a host that cannot enforce the boundary must
+            # refuse before a branch, a worktree, or a claim exists, otherwise
+            # the refusal leaves state behind for someone else to clean up.
+            sandbox_backend = select_sandbox_backend()
             if isolate:
+                capability = sandbox_backend.probe()
+                if not capability.available:
+                    print(
+                        f"refusing to spawn a worker without a write boundary: {capability.reason}",
+                        file=sys.stderr,
+                    )
+                    return 2
                 # 스냅샷보다 먼저다. 오염된 등록 상태를 기준선으로 굳히면
                 # tripwire가 그 오염을 정상으로 승인한다.
                 try:
@@ -1311,6 +1397,20 @@ def main(argv: list[str] | None = None) -> int:
                             root=root, path=worktree_status.path, expected_branch=plan.branch
                         )
                         assert_cwd_bound(worktree_path=worktree_status.path, cwd=worker_cwd)
+                        # 정책 도출도 claim **앞**이다. git 조회 세 번이 들어
+                        # 있고 실패하면 raise한다 — 뒤에서 하면 아래 스냅샷
+                        # 주석이 막으려는 상태를 그대로 다시 만든다.
+                        worker_policy = sandbox_policy_for_worktree(
+                            root=root,
+                            worktree_path=worktree_status.path,
+                            name=worktree_status.name,
+                            branch=worktree_status.branch,
+                        )
+                        # 렌더링도 여기서 한 번 해 본다. 백엔드가 표현할 수
+                        # 없는 경로면 그건 거부지 실행 실패가 아니고, claim
+                        # 뒤에서 터지면 바로 위 주석이 막으려는 고착 상태가
+                        # 그대로 재현된다.
+                        sandbox_backend.wrap(("true",), policy=worker_policy)
                         # 격리된 워커가 자기 worktree 밖으로 새어 나갔는지는
                         # 명령이 아니라 leader의 파일시스템 상태 변화로만
                         # 판정한다. 스냅샷을 claim **앞**에서 찍는다 — 뒤에서
@@ -1349,11 +1449,19 @@ def main(argv: list[str] | None = None) -> int:
                     task_id=pending.task_id,
                     worker_name=args.worker,
                 )
+            boundary: SpawnBoundary = (
+                SandboxedSpawn(
+                    backend=sandbox_backend, policy=worker_policy, capability=capability
+                )
+                if worker_policy is not None
+                else UnboundedSpawn("no worktree isolation available; worker shares the leader checkout")
+            )
             result = run_provider(
                 ProviderCommand(name="host-command", argv=tuple(args.command_argv)),
                 prompt=prompt,
                 cwd=worker_cwd,
                 env=worker_env,
+                sandbox=boundary,
             )
             if leader_before is not None:
                 try:
@@ -1967,6 +2075,139 @@ def _print_review_retry_status(reviewer: str, retry_after: str | None) -> None:
     print("next_command: none")
 
 
+# `continue`/`status`는 이미 만들어진 run을 이어가거나 읽기만 한다. 여기까지
+# 물으면 워크플로가 매 phase마다 멈춘다. 새 run을 여는 명령만 대상이다.
+_WORKTREE_CONSENT_COMMANDS = frozenset({"run", "start"})
+
+
+def _confirm_worktree_reuse(*, root: Path, name: str, explicit: bool) -> bool:
+    """Ask before reusing the checkout the user is standing in.
+
+    Every path through this function is read-only, so a refusal leaves refs,
+    the worktree registry, and runtime state exactly as they were.
+    """
+    # An explicit selector already decides the outcome. Probing the checkout
+    # first would run `git worktree list` and `git status` on every run for an
+    # answer that cannot change.
+    if explicit:
+        return True
+    decision = decide_worktree_reuse(
+        checkout=_current_checkout(root=root, name=name),
+        explicit_selector=False,
+        interactive=sys.stdin.isatty(),
+    )
+    if not decision.needs_prompt:
+        if not decision.blocks_run:
+            return True
+        print(f"refusing to reuse the current worktree: {decision.reason}", file=sys.stderr)
+        if decision.checkout is not None:
+            print(render_checkout_summary(decision.checkout), file=sys.stderr)
+        return False
+    print(render_checkout_summary(decision.checkout))
+    print(REUSE_PROMPT, end="", flush=True)
+    if not consent_granted(sys.stdin.readline()):
+        print("aborted: worktree reuse declined; nothing was changed", file=sys.stderr)
+        return False
+    return True
+
+
+def _secure_launch(*, root: Path, worktree: str | None, argv: list[str] | None) -> int:
+    """Run an external command behind the boundary, inheriting this terminal.
+
+    Opt-in on purpose. Wrapping a general-purpose CLI subjects every write it
+    makes to the policy, and the caller — not agent-flow — is the one who
+    knows whether that is what they want.
+    """
+    # Strip only the separator at the head of the capture. Removing every `--`
+    # rewrites the command: `git log -- src/` loses its pathspec and
+    # `npm run build -- --flag` loses npm's own separator.
+    command = list(argv or [])
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        print("secure launch requires a command: secure launch -- <argv>", file=sys.stderr)
+        return 2
+    if _invokes_agent_flow(command):
+        # agent-flow writes run state and drives gates. Wrapping it turns a
+        # policy miss into a workflow that can neither advance nor recover.
+        print("refusing to sandbox agent-flow itself", file=sys.stderr)
+        return 2
+    # `args.worktree` already carries the cwd-inferred name (main resolves it
+    # before dispatch). Re-inferring here would only fire when `--root` names a
+    # different repository, and would then look the name up under the wrong one.
+    if not worktree:
+        print("secure launch must run from a worktree or pass --worktree", file=sys.stderr)
+        return 2
+    backend = select_sandbox_backend()
+    capability = backend.probe()
+    if not capability.available:
+        print(f"refusing to launch without a write boundary: {capability.reason}", file=sys.stderr)
+        return 2
+    try:
+        status = get_worktree_status(root=root, name=worktree)
+        if not _worktree_checkout_exists(status):
+            print(f"worktree not found or missing path: {worktree}", file=sys.stderr)
+            return 2
+        path = verify_linked_worktree(root=root, path=status.path, expected_branch=status.branch)
+        policy = sandbox_policy_for_worktree(
+            root=root, worktree_path=path, name=status.name, branch=status.branch
+        )
+        # Rendered here, not at spawn: a path the backend cannot express is a
+        # refusal to report, and past this point the failure would arrive as a
+        # traceback with the launch banner already printed.
+        wrapped = backend.wrap(command, policy=policy)
+    except (OSError, ValueError, RuntimeError, WorktreeIsolationError) as exc:
+        print(_format_cli_error(exc), file=sys.stderr)
+        return 2
+    print(f"sandbox: {backend.name} worktree={path}", file=sys.stderr)
+    # stdio is inherited so an interactive CLI keeps its terminal.
+    completed = subprocess.run(wrapped, cwd=path, check=False)
+    return completed.returncode
+
+
+def _invokes_agent_flow(command: list[str]) -> bool:
+    """Does ``command`` reach the same run state and gate machinery?
+
+    A best-effort typo guard, not a boundary — `secure launch` is opt-in and
+    the caller typed the command. It covers the spellings the docs actually
+    produce so the common mistake is caught rather than silently deadlocking a
+    workflow.
+    """
+    head = Path(command[0]).name
+    if head in {"agent-flow", "agent-flow-kit", "agent-flow-install"}:
+        return True
+    rest = " ".join(command[1:])
+    if head.startswith("python") and "agent_flow" in rest:
+        return True
+    return head in {"node", "npx"} and "agent-flow" in rest
+
+
+def _current_checkout(*, root: Path, name: str) -> CurrentCheckout | None:
+    try:
+        status = get_worktree_status(root=root, name=name)
+    except (OSError, ValueError, RuntimeError, WorktreeIsolationError):
+        # 이름이나 등록부를 해석하지 못하면 재사용할 checkout도 없다. 진단은
+        # 아래의 기존 경로가 낸다 — 여기서 또 보고하면 같은 실패를 두 번 알리고,
+        # 올려 보내면 이 게이트가 dispatch 앞이라 traceback으로 새어 나간다.
+        return None
+    if not _worktree_checkout_exists(status):
+        return None
+    path = real_path(status.path)
+    return CurrentCheckout(
+        path=path,
+        branch=status.branch,
+        dirty=_checkout_is_dirty(path),
+        state_key=resolve_worktree_name(root=root, name=status.name),
+        is_leader=same_worktree_path(path, root),
+    )
+
+
+def _checkout_is_dirty(path: Path) -> bool:
+    # 관측일 뿐이다. index를 refresh하면 동시에 도는 워커와 lock 경합을 만든다.
+    result = git_safe("status", "--porcelain", cwd=path, optional_locks=False)
+    return bool(result.ok and result.stdout.strip())
+
+
 def _parse_retry_after_arg(value: str | None) -> datetime | None:
     if value is None:
         return None
@@ -2034,12 +2275,18 @@ def _resolve_cli_root_context(root: Path, worktree: str | None) -> tuple[Path, s
 def _managed_worktree_context(path: Path) -> tuple[Path, str] | None:
     resolved = path.resolve()
     parts = resolved.parts
-    markers = {".agent-flow", ".codex", ".Codex"}
-    for index in range(len(parts) - 2, 0, -1):
+    # `.omp` matches the JS surfaces (bin/agent-flow-kit.mjs, the installer and
+    # the parity check all carry it). Leaving it out here made the reuse gate
+    # skip a checkout every other entry point calls managed.
+    markers = {".agent-flow", ".codex", ".Codex", ".omp"}
+    # `len(parts) - 3`, because the body reads `parts[index + 2]`. Starting at
+    # `- 2` matches a path that ends at `<marker>/worktrees` and then indexes
+    # past the end — an IndexError traceback out of a security gate.
+    for index in range(len(parts) - 3, 0, -1):
         if parts[index] not in markers or parts[index + 1] != "worktrees":
             continue
         root = Path(*parts[:index])
-        if parts[index] in {".codex", ".Codex"} and _same_path(root, _home_path()):
+        if parts[index] in {".codex", ".Codex", ".omp"} and _same_path(root, _home_path()):
             continue
         return root, parts[index + 2]
     return None
@@ -2053,10 +2300,17 @@ def _git_common_worktree_root(root: Path) -> Path | None:
         return None
     common_path = Path(common_dir.stdout.strip())
     if not common_path.is_absolute():
-        common_path = Path(top_level.stdout.strip()) / common_path
+        # git answers relative to the directory it was asked from, not to the
+        # toplevel, and the `..` segments must collapse before `.parent` — the
+        # unresolved `<repo>/../.git` takes the parent of the wrong directory,
+        # which lands the root above the repository. From there
+        # `leader_checkout_of` sees a non-repo and the reviewer boundary drops
+        # off with a live worker checkout beside it.
+        common_path = root / common_path
+    common_path = common_path.resolve()
     if common_path.name != ".git":
         return None
-    return common_path.parent.resolve()
+    return common_path.parent
 
 
 def _same_path(left: Path, right: Path) -> bool:

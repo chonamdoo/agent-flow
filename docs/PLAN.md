@@ -73,14 +73,14 @@ Make PR watch, fix, and merge workflow phases operational.
 - Filter unread messages.
 - Mark messages as read.
 - Preserve Team Orchestration as state-only; no worker process execution.
-- Keep AI CLI execution on host adapters/providers; no sandbox support.
+- Keep AI CLI execution on host adapters/providers. Provider and reviewer processes run under an OS write boundary; agent-flow itself, gate commands and the eval judge do not, and the already-running host CLI cannot be wrapped from inside itself.
 
 ### Non-Goals
 
 - No Team Orchestration runtime.
 - No Worktree management.
 - No direct Codex/Claude provider execution.
-- No sandbox execution.
+- No container or VM execution. The write boundary is an OS policy on spawned processes, not a runtime.
 
 ## Current Slice
 

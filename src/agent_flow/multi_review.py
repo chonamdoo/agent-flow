@@ -33,12 +33,20 @@ from agent_flow.cli_detect import (
     detect_host_cli,
 )
 from agent_flow.core.hook_integrity import assert_managed_hooks_registered
+from agent_flow.core.provider_sandbox import SpawnBoundary, UnboundedSpawn, prove_sandbox
+from agent_flow.core.worktrees import (
+    git_repo_state,
+    leader_checkout_of,
+    sandbox_policy_for_worktree,
+    sibling_worktree_policy,
+)
 from agent_flow.core.worktree_isolation import (
     assert_leader_unchanged,
     capture_leader_snapshot,
-    leader_root_for,
+    git_safe,
     sanitized_worker_env,
 )
+from agent_flow.providers.sandbox import select_sandbox_backend
 from agent_flow.subprocess_pool import SubprocessJob, SubprocessResult, run_parallel
 
 
@@ -129,11 +137,11 @@ def run_distribution(distribution: Distribution, project_root: Path,
     if distribution.fallback_to_generic or distribution.empty():
         return []
 
-    sub_jobs: list[SubprocessJob] = []
+    # (job_id, binary, args, output_path) 먼저 모으고 job은 경계가 확정된 뒤에
+    # 만든다. `SubprocessJob`은 경계 없는 생성을 거부하므로, 나중에 채워 넣는
+    # 방식은 그 검사를 무의미하게 만든다.
+    specs: list[tuple[str, str, tuple[str, ...]]] = []
     job_to_output: dict[str, Path] = {}
-    # 리뷰어 자식은 부모 환경을 통째로 물려받으면 오염된 GIT_DIR/GIT_WORK_TREE로
-    # leader 저장소에 그대로 닿는다. git 탐색 env를 벗겨서 cwd를 권위로 만든다.
-    reviewer_env = sanitized_worker_env()
     for cli_name, jobs in distribution.by_cli.items():
         if cli_name == distribution.host:
             continue  # host AI handles its own angles in-session
@@ -141,22 +149,34 @@ def run_distribution(distribution: Distribution, project_root: Path,
         if cli is None or not jobs:
             continue
         for job in jobs:
-            binary = cli.binaries[0]
-            args = (*cli.invoke, job.prompt)
             sub_id = f"{cli_name}-{job.angle_id}"
-            sub_jobs.append(SubprocessJob(
-                job_id=sub_id, binary=binary, args=args,
-                cwd=project_root, timeout_s=timeout_s,
-                env=reviewer_env,
-            ))
+            specs.append((sub_id, cli.binaries[0], (*cli.invoke, job.prompt)))
             job_to_output[sub_id] = job.output_path
 
-    if not sub_jobs:
+    if not specs:
         return []
 
-    # project_root가 worktree면 그 뒤의 leader 체크아웃이 지켜야 할 대상이다.
-    # leader에서 그대로 도는 리뷰라면 지킬 바깥 대상이 없어 무장하지 않는다.
-    leader = leader_root_for(project_root)
+    # leader 해석은 fail-closed다. git이 답을 못 하면 raise한다 — 여기서 None으로
+    # 접으면 boundary와 tripwire가 한 번에 꺼지고, 그 조합이 바로 이 변경이
+    # 막으려는 상태다. leader가 없다는 것은 project_root가 곧 leader라는 뜻이고,
+    # 그때만 지켜야 할 바깥 checkout이 없어 unbounded가 정당하다.
+    #
+    # 돌릴 job이 있다고 확인한 뒤에 푼다. host CLI 몫만 있는 distribution은
+    # 예전처럼 git을 한 번도 건드리지 않고 빈 리스트로 끝나야 한다.
+    leader = leader_checkout_of(project_root)
+    boundary = _reviewer_boundary(project_root=project_root, leader=leader)
+    # 리뷰어 자식은 부모 환경을 통째로 물려받으면 오염된 GIT_DIR/GIT_WORK_TREE로
+    # leader 저장소에 그대로 닿는다. git 탐색 env를 벗겨서 cwd를 권위로 만든다.
+    reviewer_env = sanitized_worker_env()
+    sub_jobs = [
+        SubprocessJob(
+            job_id=sub_id, binary=binary, args=args,
+            cwd=project_root, timeout_s=timeout_s,
+            env=reviewer_env, sandbox=boundary,
+        )
+        for sub_id, binary, args in specs
+    ]
+
     # 스냅샷보다 먼저다. 오염된 등록 상태를 기준선으로 굳히면 안 된다.
     assert_managed_hooks_registered(project_root, leader)
     leader_before = capture_leader_snapshot(leader) if leader is not None else None
@@ -175,6 +195,40 @@ def run_distribution(distribution: Distribution, project_root: Path,
     if leader_before is not None:
         assert_leader_unchanged(leader, leader_before, run_id="multi-review")
     return results
+
+
+def _reviewer_boundary(*, project_root: Path, leader: Path | None) -> SpawnBoundary:
+    if leader is None:
+        if git_repo_state(project_root) == "non-repo":
+            # No repository, so nothing is registered beside this directory.
+            # Asking git would fail closed on a layout that is supported.
+            return UnboundedSpawn("review runs outside a git repository; no checkout to protect")
+        # No outer checkout, but the worker checkouts registered under this one
+        # are live and are somebody else's. A leader-rooted review needs no
+        # grants of its own — `allow default` already covers the checkout it
+        # runs in — so the policy is the sibling denials and nothing else.
+        siblings = sibling_worktree_policy(project_root)
+        if siblings is None:
+            return UnboundedSpawn("review runs in a checkout with nothing registered beside it")
+        return prove_sandbox(select_sandbox_backend(), siblings)
+    return prove_sandbox(
+        select_sandbox_backend(),
+        sandbox_policy_for_worktree(
+            root=leader,
+            worktree_path=project_root,
+            name=project_root.name,
+            branch=_current_branch(project_root),
+        ),
+    )
+
+
+def _current_branch(path: Path) -> str | None:
+    result = git_safe("rev-parse", "--abbrev-ref", "HEAD", cwd=path, optional_locks=False)
+    if not result.ok:
+        return None
+    branch = result.stdout.strip()
+    # Detached HEAD has no branch ref to grant; git prints the literal "HEAD".
+    return None if branch in ("", "HEAD") else branch
 
 
 def residual_host_jobs(distribution: Distribution) -> list[ReviewerJob]:

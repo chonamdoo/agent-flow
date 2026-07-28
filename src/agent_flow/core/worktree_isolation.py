@@ -317,7 +317,10 @@ AGENT_FLOW_STATE_DIRS = (
 # 워커가 worktree 안에서 돌아도 leader 쪽에 정당하게 쓰는 자리들. 여기만 뺀다.
 # `scripts/`도 `runtime/`도 절대 넣지 마라 — 둘 다 host와 gate가 **실행하는**
 # 코드다. runtime에서 정당하게 생기는 것은 bytecode뿐이라 그것만 따로 뺀다.
-_RUNTIME_WRITE_PATHS = tuple(
+#
+# sandbox 정책도 이 목록을 그대로 쓴다. 둘이 갈라지면 tripwire가 정상이라고
+# 인정하는 쓰기를 커널이 거부해, 오류 없이 조용히 실패하는 hook이 생긴다.
+RUNTIME_WRITE_PATHS = tuple(
     f"{_AGENT_FLOW_PREFIX}/{name}" for name in AGENT_FLOW_STATE_DIRS
 ) + (
     f"{_AGENT_FLOW_PREFIX}/skills-read.jsonl",
@@ -488,7 +491,7 @@ def _leader_status(leader_root) -> str:
             leader_root,
             ("-uall", "--ignored=traditional", "--", _AGENT_FLOW_PREFIX)
             + _EXEC_SURFACE_PATHS
-            + tuple(f":(exclude){path}" for path in _RUNTIME_WRITE_PATHS),
+            + tuple(f":(exclude){path}" for path in RUNTIME_WRITE_PATHS),
         )
     )
     kept = sorted(
@@ -519,7 +522,7 @@ def _tracked_content_digest(leader_root) -> str:
         "--no-color",
         "--",
         ".",
-        *(f":(exclude){path}" for path in _RUNTIME_WRITE_PATHS),
+        *(f":(exclude){path}" for path in RUNTIME_WRITE_PATHS),
         cwd=leader_root,
         timeout_s=_TRIPWIRE_TIMEOUT_S,
         optional_locks=False,
@@ -684,7 +687,7 @@ def _is_excluded_path(path: str) -> bool:
         return True
     return any(
         trimmed == path_prefix or trimmed.startswith(f"{path_prefix}/")
-        for path_prefix in _RUNTIME_WRITE_PATHS
+        for path_prefix in RUNTIME_WRITE_PATHS
     )
 
 

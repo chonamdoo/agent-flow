@@ -4,6 +4,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from agent_flow.core.provider_sandbox import SpawnBoundary, resolve_spawn_argv
+
 
 @dataclass(frozen=True)
 class ProviderCommand:
@@ -22,10 +24,24 @@ class ProviderResult:
     failed: bool
 
 
-def run_provider(command: ProviderCommand, *, prompt: str, cwd: Path, env: dict | None = None) -> ProviderResult:
+def run_provider(
+    command: ProviderCommand,
+    *,
+    prompt: str,
+    cwd: Path,
+    env: dict | None = None,
+    sandbox: SpawnBoundary,
+) -> ProviderResult:
+    """Run a provider CLI behind the sandbox.
+
+    ``sandbox`` is required with no default. An optional boundary is the same
+    as no boundary: the one caller that forgets it gets an unenforced run that
+    reads as enforced everywhere else.
+    """
+    argv = resolve_spawn_argv(sandbox, command.argv)
     try:
         completed = subprocess.run(
-            command.argv,
+            argv,
             cwd=cwd,
             env=env,
             input=prompt if command.prompt_via_stdin else "",

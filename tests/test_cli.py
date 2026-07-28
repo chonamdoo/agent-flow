@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 from importlib import resources
 
-from agent_flow.cli import main
+from agent_flow.cli import _managed_worktree_context, _resolve_cli_root_context, main
 from agent_flow.adapters.templates import PromptContext, render_stage_prompt
 from agent_flow.core.gates import GateCommand, run_gate
 from agent_flow.core.design_ledger import (
@@ -2558,8 +2558,16 @@ design-values-confirmed: n/a
             try:
                 os.chdir(worktree)
                 output = io.StringIO()
-                with contextlib.redirect_stdout(output):
+                errors = io.StringIO()
+                # 동의 없이 조용히 붙던 자리다. 이제 재사용은 명시해야 한다 —
+                # 비대화형에서 기본값이 재사용이면 자동화가 그걸 못 본다.
+                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
                     self.assertEqual(main(["run", "other"]), 2)
+                self.assertIn("--reuse-current", errors.getvalue())
+
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(main(["run", "other", "--reuse-current"]), 2)
             finally:
                 os.chdir(old_cwd)
 
@@ -9440,6 +9448,260 @@ if (codexContext !== undefined) {
             self.assertTrue((run_dir / "artifacts" / "gate-results.json").exists())
             self.assertFalse((checkout / ".agent-flow" / "runs").exists())
             self.assertFalse((root / ".agent-flow" / "runs").exists())
+
+    def _worktree_project(self, temp_dir: str):
+        """leader + 등록된 linked worktree 한 쌍."""
+        root = Path(temp_dir) / "project"
+        root.mkdir()
+        _init_git_repo(root)
+        checkout = root / ".agent-flow" / "worktrees" / "feat-existing"
+        checkout.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ("git", "worktree", "add", "-q", "-b", "feat/existing", str(checkout), "main"),
+            cwd=root,
+            check=True,
+        )
+        return root, checkout
+
+    def _repo_fingerprint(self, root: Path) -> tuple:
+        def git(*args):
+            return subprocess.run(
+                ("git", *args), cwd=root, capture_output=True, text=True, check=False
+            ).stdout
+
+        runtime = root / ".git" / "agent-flow"
+        return (
+            git("for-each-ref", "--format=%(refname) %(objectname)"),
+            git("worktree", "list", "--porcelain"),
+            sorted(str(p.relative_to(runtime)) for p in runtime.rglob("*")) if runtime.exists() else [],
+        )
+
+    def test_run_prompts_before_reusing_current_worktree(self) -> None:
+        """추론된 재사용은 조용히 붙지 않는다. 경로/브랜치/dirty/state key를 보여준다."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root, checkout = self._worktree_project(temp_dir)
+            buffer = io.StringIO()
+            with mock.patch("agent_flow.cli.Path.cwd", return_value=checkout), \
+                 mock.patch("sys.stdin", _FakeTty("n\n")), \
+                 contextlib.redirect_stdout(buffer):
+                code = main(["run", "some task", "--root", str(root)])
+            printed = buffer.getvalue()
+            self.assertEqual(code, 2)
+            self.assertIn(str(checkout.resolve()), printed)
+            self.assertIn("feat/existing", printed)
+            self.assertIn("dirty", printed)
+            self.assertIn("state key : feat-existing", printed)
+            self.assertIn("Reuse this worktree for this run? [y/N]", printed)
+
+    def test_worktree_reuse_rejection_has_zero_mutation(self) -> None:
+        """반증: 거절 뒤에 ref/등록부/런타임 상태 중 하나라도 늘면 실패한다."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root, checkout = self._worktree_project(temp_dir)
+            before = self._repo_fingerprint(root)
+            for answer in ("n\n", "", "sure\n"):
+                with mock.patch("agent_flow.cli.Path.cwd", return_value=checkout), \
+                     mock.patch("sys.stdin", _FakeTty(answer)), \
+                     contextlib.redirect_stdout(io.StringIO()), \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    code = main(["run", "some task", "--root", str(root)])
+                self.assertEqual(code, 2, answer)
+                self.assertEqual(self._repo_fingerprint(root), before, answer)
+
+    def test_run_refuses_implicit_reuse_without_a_terminal(self) -> None:
+        """비대화형에서 조용히 재사용하면 자동화가 그걸 못 본다."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root, checkout = self._worktree_project(temp_dir)
+            before = self._repo_fingerprint(root)
+            errors = io.StringIO()
+            with mock.patch("agent_flow.cli.Path.cwd", return_value=checkout), \
+                 mock.patch("sys.stdin", _FakeTty("y\n", tty=False)), \
+                 contextlib.redirect_stdout(io.StringIO()), \
+                 contextlib.redirect_stderr(errors):
+                code = main(["run", "some task", "--root", str(root)])
+            self.assertEqual(code, 2)
+            self.assertIn("--reuse-current", errors.getvalue())
+            self.assertEqual(self._repo_fingerprint(root), before)
+
+    def test_run_reuses_current_worktree_without_creation(self) -> None:
+        """동의하면 새 브랜치/worktree 없이 그 checkout 그대로 쓴다."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root, checkout = self._worktree_project(temp_dir)
+            registry_before = subprocess.run(
+                ("git", "worktree", "list", "--porcelain"),
+                cwd=root, capture_output=True, text=True, check=False,
+            ).stdout
+            with mock.patch("agent_flow.cli.Path.cwd", return_value=checkout), \
+                 mock.patch("sys.stdin", _FakeTty("y\n")), \
+                 contextlib.redirect_stdout(io.StringIO()), \
+                 contextlib.redirect_stderr(io.StringIO()):
+                code = main(["run", "some task", "--root", str(root)])
+            self.assertEqual(code, 0)
+            registry_after = subprocess.run(
+                ("git", "worktree", "list", "--porcelain"),
+                cwd=root, capture_output=True, text=True, check=False,
+            ).stdout
+            self.assertEqual(registry_after, registry_before)
+            self.assertTrue((root / ".git" / "agent-flow" / "worktrees" / "feat-existing").exists())
+
+    def test_explicit_reuse_current_skips_the_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root, checkout = self._worktree_project(temp_dir)
+            buffer = io.StringIO()
+            with mock.patch("agent_flow.cli.Path.cwd", return_value=checkout), \
+                 mock.patch("sys.stdin", _FakeTty("", tty=False)), \
+                 contextlib.redirect_stdout(buffer), \
+                 contextlib.redirect_stderr(io.StringIO()):
+                code = main(["run", "some task", "--root", str(root), "--reuse-current"])
+            self.assertEqual(code, 0)
+            self.assertNotIn("Reuse this worktree", buffer.getvalue())
+
+    def test_secure_launch_is_opt_in_and_never_gates_agent_flow(self) -> None:
+        """secure launch는 기본 경로가 아니고, agent-flow 자신은 감싸지 않는다."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root, checkout = self._worktree_project(temp_dir)
+            errors = io.StringIO()
+            with contextlib.redirect_stderr(errors), contextlib.redirect_stdout(io.StringIO()):
+                code = main(
+                    ["secure", "launch", "--root", str(root), "--worktree", "feat-existing",
+                     "--", "agent-flow", "status"]
+                )
+            self.assertEqual(code, 2)
+            self.assertIn("refusing to sandbox agent-flow itself", errors.getvalue())
+
+            # 평소 경로는 sandbox를 요구하지 않는다: run은 그대로 돈다.
+            with mock.patch("agent_flow.cli.Path.cwd", return_value=checkout), \
+                 mock.patch("sys.stdin", _FakeTty("y\n")), \
+                 contextlib.redirect_stdout(io.StringIO()), \
+                 contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(main(["run", "task", "--root", str(root)]), 0)
+
+    def test_run_without_root_from_inside_a_worktree_still_prompts(self) -> None:
+        """반증: `--root` 기본값 `"."`을 명시 지목으로 세면 이 게이트가 통째로 죽는다.
+
+        문서가 안내하는 호출은 worktree 안에서 `agent-flow run "<task>"`다.
+        cwd를 mock하지 않고 실제로 chdir해야 그 경로를 검사한다.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root, checkout = self._worktree_project(temp_dir)
+            before = self._repo_fingerprint(root)
+            buffer = io.StringIO()
+            origin = os.getcwd()
+            os.chdir(checkout)
+            try:
+                with mock.patch("sys.stdin", _FakeTty("n\n")), \
+                     contextlib.redirect_stdout(buffer), \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    code = main(["run", "some task"])
+            finally:
+                os.chdir(origin)
+            self.assertEqual(code, 2)
+            self.assertIn("Reuse this worktree for this run? [y/N]", buffer.getvalue())
+            self.assertEqual(self._repo_fingerprint(root), before)
+
+    def test_run_with_root_spelling_the_current_checkout_still_prompts(self) -> None:
+        """반증: 철자로 판정하면 같은 checkout을 다르게 쓴 것만으로 게이트가 열린다.
+
+        `agent-flow run "$TASK" --root "${ROOT:-.}"`나
+        `--root "$(git rev-parse --show-toplevel)"`는 흔한 래퍼 형태다. 하위
+        디렉터리에서 실행되면 `..`, 절대경로 등 철자만 달라진다. 어느 쪽도
+        대상을 고른 것이 아니라 "여기"라고 말한 것이므로 동의로 셀 수 없다.
+
+        판별하는 행은 하위 디렉터리 두 개다. 나머지 셋은 경로가 cwd로 그대로
+        풀려서 경로 비교만으로도 통과했었다 — 회귀 커버리지지 반증이 아니다.
+        """
+        cases = (
+            (".", "."),
+            ("./", "."),
+            ("abs", "."),
+            ("..", "src"),
+            ("abs", "src"),
+        )
+        for root_arg, subdir in cases:
+            with self.subTest(root=root_arg, cwd=subdir), tempfile.TemporaryDirectory() as temp_dir:
+                root, checkout = self._worktree_project(temp_dir)
+                start = checkout if subdir == "." else checkout / subdir
+                start.mkdir(parents=True, exist_ok=True)
+                spelled = str(checkout) if root_arg == "abs" else root_arg
+                before = self._repo_fingerprint(root)
+                errors = io.StringIO()
+                origin = os.getcwd()
+                os.chdir(start)
+                try:
+                    with mock.patch("sys.stdin", _FakeTty("", tty=False)), \
+                         contextlib.redirect_stdout(io.StringIO()), \
+                         contextlib.redirect_stderr(errors):
+                        code = main(["run", "some task", "--root", spelled])
+                finally:
+                    os.chdir(origin)
+                self.assertEqual(code, 2)
+                self.assertIn("no interactive terminal", errors.getvalue())
+                self.assertEqual(self._repo_fingerprint(root), before)
+
+    def test_run_from_the_worktrees_container_does_not_crash(self) -> None:
+        """반증: `parts[index + 2]`를 읽으면서 루프를 `- 2`에서 시작하면 범위를 넘는다.
+
+        `<root>/.agent-flow/worktrees`는 marker 검사에 걸리고 그다음 인덱스가
+        없다. 이 경로는 이제 보안 게이트의 유일한 판정 절차라 IndexError가
+        traceback으로 새어 나간다.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root, checkout = self._worktree_project(temp_dir)
+            container = checkout.parent
+            origin = os.getcwd()
+            os.chdir(container)
+            try:
+                with mock.patch("sys.stdin", _FakeTty("", tty=False)), \
+                     contextlib.redirect_stdout(io.StringIO()), \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    code = main(["status", "--root", str(container)])
+            finally:
+                os.chdir(origin)
+            self.assertIn(code, (0, 1, 2))
+
+    def test_omp_worktrees_are_managed_like_agent_flow_ones(self) -> None:
+        """반증: marker가 JS surface와 갈리면 한쪽만 관리 대상으로 본다.
+
+        `.omp/worktrees/<name>`은 bin/agent-flow-kit.mjs와 installer가 모두
+        managed로 취급한다. 여기서 빠지면 그 checkout에서만 reuse 게이트가
+        조용히 열린다.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "project"
+            (root / ".omp" / "worktrees" / "feat-o" / "src").mkdir(parents=True)
+            context = _managed_worktree_context(root / ".omp" / "worktrees" / "feat-o" / "src")
+            self.assertEqual(context, (root.resolve(), "feat-o"))
+
+    def test_root_resolves_to_the_repository_from_a_subdirectory(self) -> None:
+        """반증: `..`를 접기 전에 `.parent`를 하면 root가 저장소 위로 올라간다.
+
+        git은 `--git-common-dir`을 물어본 자리 기준 상대 경로로 답한다.
+        `<repo>/src`에서는 `../.git`이고, 그대로 `.parent`를 하면 `<repo>`의
+        부모가 root가 된다. 그 자리에서는 저장소가 안 보이니 리뷰어 경계가
+        살아 있는 worker checkout을 옆에 두고 조용히 사라진다.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root, _ = self._worktree_project(temp_dir)
+            deep = root / "src" / "deep"
+            deep.mkdir(parents=True)
+            for start in (root, root / "src", deep):
+                with self.subTest(cwd=str(start)):
+                    resolved, _ = _resolve_cli_root_context(start, None)
+                    self.assertEqual(resolved, root.resolve())
+
+
+class _FakeTty(io.StringIO):
+    """stdin double whose isatty() we control.
+
+    The consent gate branches on `isatty()`, so a plain StringIO would test
+    only the non-interactive path and quietly skip the prompt itself.
+    """
+
+    def __init__(self, payload: str, tty: bool = True) -> None:
+        super().__init__(payload)
+        self._tty = tty
+
+    def isatty(self) -> bool:
+        return self._tty
 
 
 def _init_git_repo(root: Path) -> None:

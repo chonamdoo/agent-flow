@@ -2,7 +2,7 @@
 
 Project-agnostic AI workflow kit. Start with `/agent-flow` in Claude Code or Codex; the same CLI core writes the same artifacts underneath.
 
-> **Status**: Phase 1–5 active. Scaffold, real adapters, multi-CLI fan-out, 8 profiles, Lore engine (parse / search / 4-tier compaction / auto-cite), PR-watch (gh-CLI polling with status classification). Phase 6 (optional sandboxing) deferred.
+> **Status**: Phase 1–6 active. Scaffold, real adapters, multi-CLI fan-out, 8 profiles, Lore engine (parse / search / 4-tier compaction / auto-cite), PR-watch (gh-CLI polling with status classification), OS-enforced write boundary on provider and reviewer processes (macOS).
 
 ## Philosophy
 
@@ -42,6 +42,18 @@ agent-flow status --worktree "feat-user-profile"
 agent-flow abort --worktree "feat-user-profile"
 agent-flow worktree list
 agent-flow worktree remove --name "feat-user-profile"
+
+# Worktree reuse
+# Starting a run from inside a managed worktree (`.agent-flow/worktrees/<name>`)
+# asks before reusing it. Refusal, EOF and a non-interactive stdin change
+# nothing. A worktree outside that directory is not detected as reusable.
+agent-flow run "<task>" --reuse-current      # reuse this checkout without the prompt
+
+# Write boundary (macOS)
+# Provider and reviewer processes already run under it. agent-flow itself,
+# gate commands and the eval judge do not. This wraps a CLI you start yourself.
+# Everything after `--` is passed through verbatim.
+agent-flow secure launch -- claude
 
 # SPEC ledger (design / prd items)
 # `spec confirm` must be typed by the user in an interactive terminal;
@@ -131,4 +143,4 @@ Override with `AGENT_FLOW_REVIEWERS="claude,codex"`. Per-angle artifacts (`final
 
 - **Phase 4** (active): Lore engine — Constraint/Rejected/Directive index, fingerprint dedup, 4-tier compaction (dedup/stale-drop/weight-decay/cluster reports), auto-cite into design phase.
 - **Phase 5** (active): PR-watch — gh-CLI polling, status classification (green / has_comments / ci_failed / pending / merged / closed), exponential backoff with jitter.
-- **Phase 6** (deferred): optional sandboxing if user demand emerges (currently out of scope).
+- **Phase 6** (active): write boundary — provider and reviewer processes run under a macOS Seatbelt policy derived from their worktree; hosts without a backend refuse to spawn. agent-flow subcommands, gate commands and `eval --judge-command` stay outside it.

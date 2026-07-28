@@ -26,6 +26,13 @@
 - **Handoff**: 다음 phase가 필요한 결정, 리스크, 관련 파일, 남은 일을 요약하는 artifact.
 - **Gate**: build, typecheck, lint, test, context-lint 같은 자동 검증 명령.
 - **Personal Workflow**: lead가 Run과 phase 전환을 소유하는 current 기본 실행 모드.
+- **Verified Worktree**: canonical path, branch, git common dir 정합성을 확인한 non-leader linked checkout.
+- **Sandbox Capability**: 현재 host가 write 경계를 실제로 강제할 수 있음을 증명한 결과. 없으면 spawn을 거부한다.
+- **Protected Roots**: 절대 바뀌면 안 되는 닫힌 경로 집합. leader checkout, 다른 linked checkout, git common metadata, 다른 run의 상태 디렉터리.
+- **Sandbox Policy**: 하나의 Verified Worktree에 묶인 write 규칙. allow 기본값 위에 Protected Roots를 deny하고, 그 spawn 자기 경로를 다시 열고, 그 안에 남는 pointer 파일을 다시 닫는 3단 순서다. 열어 준 entry 자체와 shared object database 안쪽은 따로 unlink를 막아, grant를 symlink로 바꿔치기하거나 history를 지우는 길을 닫는다.
+- **Sandboxed Spawn**: agent-flow가 정책 아래에서 시작한 외부 프로세스 하나.
+- **Unbounded Spawn**: 보호할 바깥 checkout이 없어 경계 없이 시작했다고 호출 지점이 명시한 spawn. 빠뜨린 것과 구분하기 위해 이유를 함께 기록한다.
+- **Reuse Consent**: 지금 서 있는 checkout을 그대로 쓰겠다는 명시적 확인.
 
 ## Current Lifecycle
 
@@ -54,6 +61,8 @@ Team Orchestration은 optional future module이다. current Personal Workflow와
 - Artifact를 raw log, manifest, source change와 혼동하지 않는다.
 - Gate와 phase completion marker를 혼동하지 않는다.
 - Adapter와 Provider를 혼동하지 않는다.
+- Worktree separation과 Provider Process Isolation을 같은 보안 경계로 표현하지 않는다.
+- Sandbox Policy 없이 실행된 hosted/embedded process를 sandboxed라고 부르지 않는다.
 
 ## Context Loading
 
