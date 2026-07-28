@@ -10,8 +10,8 @@
 ```text
 bin/agent-flow-kit.mjs  ← JS runner (phase routing, install, artifact validation)
 src/agent_flow/         ← Python CLI (runner, adapters, gates, multi-review, worktrees)
-workflows/              ← Source YAML (full-feature, bugfix, review 등)
-profiles/               ← Stack별 profile (android, nextjs, python 등)
+src/agent_flow/workflows/  ← Source YAML (full-feature, bugfix, review 등). 정본은 여기 한 벌뿐이다
+src/agent_flow/profiles/   ← Stack별 profile (android, nextjs, python 등)
 skills/                 ← Source skills (install 시 target .agent-flow/skills/로 복사)
 templates/              ← Review angle templates (_shared/review/)
 bootstrap/              ← AGENTS/CLAUDE.md template
@@ -21,10 +21,10 @@ scripts/hooks/          ← PreToolUse/PostToolUse/Stop hooks (guard-protected-b
 
 ## Key Files
 
-- `workflows/*.yaml`: phase 순서와 routes의 단일 진실 소스. JS는 Python `workflow export` JSON을 소비한다 (`bin/agent-flow-kit.mjs:385`).
+- `src/agent_flow/workflows/*.yaml`: phase 순서와 routes의 단일 진실 소스. 루트에 사본을 두지 않는다 — 두 벌이면 둘을 맞추는 검사가 따로 필요해진다. JS는 Python `workflow export` JSON을 소비한다 (`bin/agent-flow-kit.mjs:385`).
 - `bin/agent-flow-kit.mjs`: JS runner. `nextPhaseIndex()`가 phase의 routes로 다음 phase index를 계산하고 fix-loop round cap을 적용한다.
 - `src/agent_flow/runner.py`: Python runner. YAML routes 파싱, fix-loop round cap.
-- `profiles/_schema.yaml`: profile 필드 스키마 (gates, branching, worktree).
+- `src/agent_flow/profiles/_schema.yaml`: profile 필드 스키마 (gates, branching, worktree).
 - `skills/code-generation-discipline/SKILL.md`: 코드 생성 기준의 canonical source.
 
 ## Gotchas

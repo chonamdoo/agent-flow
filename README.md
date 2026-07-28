@@ -88,9 +88,9 @@ agent-flow-new/
 │   ├── cli_detect.py                 # detect installed AI CLIs on PATH
 │   ├── multi_review.py               # distribute review angles across CLIs
 │   ├── subprocess_pool.py            # async parallel subprocess with timeout/drain
-│   └── adapters/                     # base + auto + hosted (one class) + generic
-├── workflows/default.yaml            # single full-cycle workflow
-├── profiles/{generic,nextjs,node,python,react-native,android,ios,spring}.yaml
+│   ├── adapters/                     # base + auto + hosted (one class) + generic
+│   ├── workflows/default.yaml        # single full-cycle workflow (정본 한 벌)
+│   └── profiles/{generic,nextjs,node,python,react-native,android,ios,spring}.yaml
 ├── templates/_shared/review/         # AI-facing review-angle prompts
 ├── skills/agent-flow/                # `/agent-flow` common entry skill
 ├── skills/ddd-architecture/          # bundled DDD/Clean Arch expert skill
