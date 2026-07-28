@@ -232,14 +232,32 @@ class TestSiblingWorktreePolicy:
         return path
 
     def test_registered_worktrees_are_denied_and_nothing_is_granted(self, tmp_path: Path) -> None:
-        """반증: leader에서 도는 리뷰어를 무경계로 두면 worker 체크아웃을 덮어쓴다."""
+        """반증: leader에서 도는 리뷰어를 무경계로 두면 worker 체크아웃을 덮어쓴다.
+
+        working tree만 막으면 절반이다. sibling의 admin dir과 branch ref는
+        공유 `.git` 안에 있어 `allow default`에 그대로 남고, `git update-ref`
+        한 번으로 다른 worker의 브랜치를 옮길 수 있다.
+        """
         leader = self._repo(tmp_path / "repo")
         worker = leader / ".agent-flow" / "worktrees" / "feat-mine"
         worker.parent.mkdir(parents=True)
         self._git("worktree", "add", "-q", str(worker), "-b", "feat/mine", "main", cwd=leader)
+        common = (leader / ".git").resolve()
         policy = sibling_worktree_policy(leader)
         assert policy is not None
-        assert policy.protected_roots == (worker.resolve(),)
+        assert set(policy.protected_roots) == {
+            worker.resolve(),
+            (common / "worktrees" / "feat-mine").resolve(),
+        }
+        literals = {p.relative_to(common).as_posix() for p in policy.protected_literals}
+        assert literals == {
+            "refs/heads/feat",
+            "refs/heads/feat/mine",
+            "refs/heads/feat/mine.lock",
+            "logs/refs/heads/feat",
+            "logs/refs/heads/feat/mine",
+            "logs/refs/heads/feat/mine.lock",
+        }
         # leader 자신은 열지 않는다. `allow default`가 이미 덮으므로 grant를
         # 얹으면 deny보다 뒤에 놓여 sibling을 다시 열어 버린다.
         assert policy.writable_subpaths == ()

@@ -10,7 +10,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from agent_flow.core.commands import run_safe_command
-from agent_flow.core.provider_sandbox import SandboxPolicy, derive_sandbox_policy
+from agent_flow.core.provider_sandbox import (
+    SandboxPolicy,
+    branch_write_targets,
+    derive_sandbox_policy,
+)
 from agent_flow.core.worktree_isolation import (
     RegisteredWorktree,
     WorktreeIsolationError,
@@ -804,13 +808,22 @@ def sandbox_policy_for_worktree(
 
 
 def sibling_worktree_policy(root: Path) -> SandboxPolicy | None:
-    """Deny the linked checkouts registered beside ``root``, and nothing else.
+    """Deny what the checkouts registered beside ``root`` own, and nothing else.
 
     For a spawn that runs in the main checkout: it owns that checkout, so it
     needs no grants, but the linked worktrees under it are other workers'
     live trees. None when nothing is registered beside ``root`` — the caller
     then has a spawn with genuinely nothing to protect, and an empty policy
     would claim a boundary that denies no path at all.
+
+    A sibling is more than its working tree. Its admin dir under
+    `<common>/worktrees/` holds the HEAD and index git resolves that checkout
+    through, and its branch ref and reflog are what a `git update-ref` from
+    here would move under it. Denying only the tree leaves both open under
+    `allow default`, so a reviewer could reset another worker's branch or
+    delete the admin dir without touching a denied path. The rest of the
+    common dir stays writable: this spawn's own index, refs and objects live
+    there.
 
     Registry entries that are not linked working trees are dropped. A `bare`
     entry has no tree, and in a `--separate-git-dir` layout git reports the
@@ -819,22 +832,61 @@ def sibling_worktree_policy(root: Path) -> SandboxPolicy | None:
     """
     worker = real_path(root)
     common = real_path(_git_common_dir_of(root))
-    siblings = sorted(
-        real_path(entry.path)
+    siblings = [
+        entry
         for entry in list_registered_worktrees(root)
         if not entry.bare
         and not same_worktree_path(entry.path, worker)
         and not same_worktree_path(entry.path, common)
-    )
+    ]
     if not siblings:
         return None
+    protected = [real_path(entry.path) for entry in siblings]
+    protected += [
+        admin
+        for entry in siblings
+        for admin in (_registered_admin_dir(common, entry),)
+        if admin is not None
+    ]
+    literals: list[Path] = []
+    for entry in siblings:
+        parents, leaves = branch_write_targets(common, entry.branch)
+        literals.extend(parents + leaves)
     return SandboxPolicy(
-        protected_roots=tuple(siblings),
+        protected_roots=tuple(sorted(set(protected))),
         writable_subpaths=(),
         writable_literals=(),
-        protected_literals=(),
+        # Refs sit outside the denied trees, so they need naming one by one.
+        # `branch_write_targets` already knows the four paths git moves a
+        # branch through, including the parent directories `pack-refs` removes
+        # and recreates.
+        protected_literals=tuple(sorted(set(literals))),
         undeletable=(),
     )
+
+
+def _registered_admin_dir(common: Path, entry: RegisteredWorktree) -> Path | None:
+    """The `<common>/worktrees/<name>` dir git resolves ``entry`` through.
+
+    Matched by the `gitdir` pointer rather than by the checkout's basename:
+    the admin name is whatever git chose when the worktree was added, and two
+    checkouts with the same basename get suffixed names. A pointer that no
+    longer resolves is skipped — there is nothing to protect.
+    """
+    registry = common / "worktrees"
+    if not registry.is_dir():
+        return None
+    target = real_path(entry.path)
+    for admin in registry.iterdir():
+        pointer = admin / "gitdir"
+        try:
+            recorded = Path(pointer.read_text(encoding="utf-8").strip())
+        except OSError:
+            continue
+        # `gitdir` names the checkout's `.git` file, not the checkout.
+        if same_worktree_path(recorded.parent, target):
+            return real_path(admin)
+    return None
 
 
 def _git_common_dir_of(root: Path) -> Path:

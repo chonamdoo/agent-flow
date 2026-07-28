@@ -192,7 +192,7 @@ def derive_sandbox_policy(
     # degrade to "unavailable" and pass — a guard switching off with no signal.
     writable += [resolved_leader / relative for relative in _LEADER_RUNTIME_WRITES]
     writable_dirs = _unique(writable)
-    ref_parents, ref_leaves = _branch_write_targets(resolved_common, branch)
+    ref_parents, ref_leaves = branch_write_targets(resolved_common, branch)
 
     return SandboxPolicy(
         protected_roots=protected_roots,
@@ -256,7 +256,7 @@ def _object_staging_globs(objects: Path) -> tuple[str, ...]:
     )
 
 
-def _branch_write_targets(
+def branch_write_targets(
     common: Path, branch: str | None
 ) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
     """The directories and the files git touches to move one branch.

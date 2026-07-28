@@ -7278,6 +7278,46 @@ if (codexContext !== undefined) {
                 )
             self.assertIn("task task-1 completed owner=worker-1 subject=Implement login", status_output.getvalue())
 
+    def test_team_run_next_rolls_back_a_worktree_it_could_not_prepare(self) -> None:
+        """반증: 준비가 실패했는데 checkout이 남으면 다음 실행이 그걸 재사용한다.
+
+        `create_worktree` 뒤에 정책 도출이나 렌더링이 실패하면 claim되지 않은
+        checkout과 manifest만 저장소에 남는다. 아무도 그걸 가리키지 않으므로
+        다음 `run-next`가 같은 이름을 계획하고 그 고아를 정상처럼 재사용한다.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "project"
+            root.mkdir()
+            # 격리 경로는 git 저장소에서만 돈다. 평범한 디렉터리면 worktree를
+            # 아예 만들지 않으므로 롤백할 것도 없다.
+            _init_git_repo(root)
+            main(["init", "--root", str(root)])
+            _create_team_with_task_and_worker(root)
+            _approve_worker_for_task(root)
+            worktrees = root / ".agent-flow" / "worktrees"
+            before = sorted(p.name for p in worktrees.iterdir()) if worktrees.is_dir() else []
+            errors = io.StringIO()
+            with mock.patch(
+                "agent_flow.cli.sandbox_policy_for_worktree",
+                side_effect=RuntimeError("boom"),
+            ), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(errors):
+                code = main(
+                    [
+                        "team", "run-next", "--root", str(root), "--team", "feature-team",
+                        "--worker", "worker-1", "--command", sys.executable, "-c", "print('x')",
+                    ]
+                )
+            self.assertEqual(code, 2)
+            self.assertIn("boom", errors.getvalue())
+            after = sorted(p.name for p in worktrees.iterdir()) if worktrees.is_dir() else []
+            self.assertEqual(after, before)
+
+            status_output = io.StringIO()
+            with contextlib.redirect_stdout(status_output):
+                main(["team", "status", "--root", str(root), "--team", "feature-team", "--detail"])
+            # 롤백은 task도 건드리지 않는다: claim 전에 실패했으므로 pending이다.
+            self.assertIn("task task-1 pending", status_output.getvalue())
+
     def test_team_run_next_fails_task_when_host_command_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

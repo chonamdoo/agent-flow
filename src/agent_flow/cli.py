@@ -1377,6 +1377,7 @@ def main(argv: list[str] | None = None) -> int:
                 except HookIntegrityError as exc:
                     print(_format_cli_error(exc), file=sys.stderr)
                     return 2
+                created: WorktreeStatus | None = None
                 try:
                     with worker_claim_lock(root):
                         # capacity를 세는 시점과 task를 잡는 시점이 갈라져 있으면
@@ -1392,7 +1393,13 @@ def main(argv: list[str] | None = None) -> int:
                         # scopes are safe here; the scope gate only bites when there
                         # is no worktree isolation (the else branch).
                         plan = plan_worktree(root=root, name=pending.task_id, unique=args.worker)
+                        # `create_worktree`는 경로가 이미 있으면 그 등록을 그대로
+                        # 돌려준다. 롤백 대상은 이 호출이 만든 것뿐이다 — 남의
+                        # checkout을 준비 실패의 대가로 지우면 안 된다.
+                        preexisting = plan.path.exists()
                         worktree_status = create_worktree(root=root, plan=plan, allow_dirty=True)
+                        if not preexisting:
+                            created = worktree_status
                         worker_cwd = verify_linked_worktree(
                             root=root, path=worktree_status.path, expected_branch=plan.branch
                         )
@@ -1423,8 +1430,10 @@ def main(argv: list[str] | None = None) -> int:
                             task_id=pending.task_id,
                             worker_name=args.worker,
                         )
+                        created = None
                 except (OSError, ValueError, RuntimeError, WorktreeIsolationError, subprocess.CalledProcessError) as exc:
                     print(_format_cli_error(exc), file=sys.stderr)
+                    _discard_unclaimed_worktree(root=root, status=created)
                     return 2
                 worker_env = sanitized_worker_env()
             else:
@@ -2109,6 +2118,30 @@ def _confirm_worktree_reuse(*, root: Path, name: str, explicit: bool) -> bool:
         print("aborted: worktree reuse declined; nothing was changed", file=sys.stderr)
         return False
     return True
+
+
+def _discard_unclaimed_worktree(*, root: Path, status: WorktreeStatus | None) -> None:
+    """Undo a worktree this call created but never handed to a task.
+
+    Nothing claimed it, so nothing can find it again: the next `run-next`
+    plans the same name, `create_worktree` reuses the orphan, and whatever
+    made the preparation fail is now attached to a checkout that looks
+    established. Only the registration from this call is passed in.
+
+    `allow_unmerged` because the branch was created moments ago with no
+    commits on it, and a removal failure is reported rather than raised: the
+    caller is already returning the error that got us here, and replacing it
+    with a cleanup error hides the cause.
+    """
+    if status is None:
+        return
+    try:
+        remove_worktree(root=root, status=status, allow_unmerged=True)
+    except (OSError, ValueError, RuntimeError, WorktreeIsolationError) as exc:
+        print(
+            f"warning: could not roll back {status.path}: {_format_cli_error(exc)}",
+            file=sys.stderr,
+        )
 
 
 def _secure_launch(*, root: Path, worktree: str | None, argv: list[str] | None) -> int:
