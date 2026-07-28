@@ -3864,6 +3864,7 @@ if (codexContext !== undefined) {
                 capture_output=True, check=False,
             )
             self.assertEqual(installed.returncode, 0, installed.stderr)
+            _init_git_repo(project)
             started = subprocess.run(
                 (
                     node, cli, "run", "start", "--workflow", "full-feature",
@@ -3873,11 +3874,15 @@ if (codexContext !== undefined) {
                 env=_node_test_env(),
             )
             self.assertEqual(started.returncode, 0, started.stderr)
-            meta = json.loads(
-                (project / ".agent-flow" / "runs" / "r1" / "meta.json")
-                .read_text(encoding="utf-8")
+            # 하위 디렉터리에서 시작해도 run은 leader가 아니라 관리형 worktree의
+            # runtime state에 만들어지고, 상태 소유자는 Python 하나다.
+            plan = plan_worktree(root=project, name="demo")
+            run_dir = (
+                worktree_runtime_root(root=project, name=plan.name)
+                / ".agent-flow" / "runs" / "r1"
             )
-            self.assertEqual(meta["checkout_identity"], "leader")
+            meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["checkout_identity"], f"worktree:{plan.name}")
             self.assertFalse(
                 (project / ".agent-flow" / "state" / "current-run.json").exists()
             )
@@ -4715,7 +4720,7 @@ if (codexContext !== undefined) {
         {"AGENT_FLOW_ADAPTER": "generic", "AGENT_FLOW_GENERIC_MODE": "emit"},
         clear=False,
     )
-    def test_node_workflow_run_advances_all_phases_and_handles_complete_state(self) -> None:
+    def test_node_workflow_run_advances_every_phase_up_to_the_delivery_gate(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
@@ -4753,7 +4758,8 @@ if (codexContext !== undefined) {
                 "multi-review",
                 "architecture-review",
                 "gates",
-                "handoff",
+                "commit",
+                "push-pr",
             ]
             run_dir = _node_phase_run_dir(project_root, worktree=plan.name)
             for index, phase in enumerate(expected_phases):
@@ -4765,6 +4771,28 @@ if (codexContext !== undefined) {
                     content = "status: green\n"
                 elif phase in {"plan-review", "merge-approval"}:
                     content = "verdict: approve\n"
+                elif phase == "commit":
+                    # delivery gate는 기록된 OID/subject를 실제 HEAD와 대조한다.
+                    # 문자열만 적으면 통과하지 않는다 — 진짜 커밋에서 유도한다.
+                    subprocess.run(
+                        ("git", "commit", "--allow-empty", "-m", "feat: demo"),
+                        cwd=plan.path,
+                        check=True,
+                        capture_output=True,
+                    )
+                    head = subprocess.run(
+                        ("git", "rev-parse", "HEAD"),
+                        cwd=plan.path,
+                        text=True,
+                        capture_output=True,
+                        check=True,
+                    ).stdout.strip()
+                    content = (
+                        "commit\n"
+                        "## Completion Gate\n"
+                        f"commit-oid: {head}\n"
+                        "commit-subject: feat: demo\n"
+                    )
                 else:
                     content = _node_phase_content(phase, run_dir=run_dir)
                 artifact.write_text(content, encoding="utf-8")
@@ -4781,18 +4809,12 @@ if (codexContext !== undefined) {
                         f"current_phase: {expected_phases[index + 1]}",
                         advance.stdout,
                     )
-                else:
-                    self.assertIn("status: complete", advance.stdout)
 
-            complete = subprocess.run(
-                (node, cli, "run", "advance"),
-                cwd=plan.path,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(complete.returncode, 0, complete.stderr)
-            self.assertIn("진행 중인 run 없음", complete.stdout)
+            # push-pr는 원격과 PR을 실제로 증명해야 넘어간다. 오프라인 fixture로는
+            # 증명할 수 없고, 증명 없이 넘어가면 그게 배달 게이트의 구멍이다.
+            self.assertIn("status: blocked", advance.stdout)
+            self.assertIn("current_phase: push-pr", advance.stdout)
+            self.assertIn("delivery evidence", advance.stdout)
 
     def test_node_workflow_next_relays_python_status_without_mutating_meta(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -5176,7 +5198,7 @@ if (codexContext !== undefined) {
                 check=False,
             )
             self.assertEqual(committed.returncode, 0, committed.stderr)
-            self.assertIn("current_phase: handoff", committed.stdout)
+            self.assertIn("current_phase: commit", committed.stdout)
 
     @mock.patch.dict(
         os.environ,
@@ -5300,7 +5322,7 @@ if (codexContext !== undefined) {
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("current_phase: handoff", result.stdout)
+            self.assertIn("current_phase: commit", result.stdout)
 
     @mock.patch.dict(
         os.environ,
@@ -8382,15 +8404,19 @@ if (codexContext !== undefined) {
                 json.loads(line)
                 for line in calls.read_text(encoding="utf-8").splitlines()
             ]
+            # 승인 경로의 challenge 회전 주체는 confirm hook 하나다. 그래서
+            # UserPromptSubmit에서는 prepare-confirmation과 confirm이 같은
+            # 프로세스에서 짝으로 나온다.
             self.assertEqual(recorded[0][:2], ["spec", "prepare-confirmation"])
-            self.assertEqual(recorded[1][:2], ["spec", "confirm"])
-            self.assertIn(str(worktree), recorded[0])
-            self.assertIn(str(worktree), recorded[1])
-            prepare_hash = recorded[0][
-                recorded[0].index("--hook-capability-hash") + 1
+            self.assertEqual(recorded[1][:2], ["spec", "prepare-confirmation"])
+            self.assertEqual(recorded[2][:2], ["spec", "confirm"])
+            for call in recorded:
+                self.assertIn(str(worktree), call)
+            prepare_hash = recorded[1][
+                recorded[1].index("--hook-capability-hash") + 1
             ]
-            confirm_capability = recorded[1][
-                recorded[1].index("--hook-capability") + 1
+            confirm_capability = recorded[2][
+                recorded[2].index("--hook-capability") + 1
             ]
             self.assertEqual(
                 prepare_hash,
@@ -11212,6 +11238,15 @@ def _node_phase_content(phase: str, prefix: str = "", run_dir=None) -> str:
         "mapping-boundary-check: applied\n"
         "solid-clean-architecture-check: applied\n"
     )
+    if phase == "push-pr":
+        return content + (
+            "## Completion Gate\n"
+            "remote: origin\n"
+            "branch: feat/demo\n"
+            "remote-oid: 0123456789abcdef0123456789abcdef01234567\n"
+            "pr-url: https://example.invalid/pr/1\n"
+            "pr-base: main\n"
+        )
     if phase == "domain-grill":
         return (
             content

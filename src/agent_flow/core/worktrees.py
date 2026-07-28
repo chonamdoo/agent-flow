@@ -2148,11 +2148,22 @@ def _manifest_oid(payload: dict | None, key: str) -> str | None:
 
 
 def write_worktree_manifest(*, root: Path, status: WorktreeStatus) -> Path:
+    """소비되는 키만 쓴다.
+
+    `asdict(status)` 전체를 쓰면 읽는 쪽이 없는 필드가 함께 박제된다.
+    `exists`는 쓰기 시점의 `path.exists()`라 읽는 시점에 의미가 없고,
+    `registration_identity`는 등록부가 호출마다 다시 계산하는 값이라 사본이
+    화석이 된다 — 소비자는 전부 `registered.registration_identity`만 쓴다.
+    """
     path = _runtime_state_root(root=root, name=status.name) / "manifest.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = asdict(status)
-    payload["path"] = str(status.path.relative_to(root))
-    payload["leader_root"] = str(root)
+    payload = {
+        "path": str(status.path.relative_to(root)),
+        "branch": status.branch,
+        "base_ref": status.base_ref,
+        "base_oid": status.base_oid,
+        "branch_created_by_agent_flow": status.branch_created_by_agent_flow,
+    }
     path.write_text(f"{json.dumps(payload, indent=2, sort_keys=True)}\n", encoding="utf-8")
     return path
 

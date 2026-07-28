@@ -1842,7 +1842,6 @@ def main(argv: list[str] | None = None) -> int:
                     "name": status.name,
                     "branch": status.branch,
                     "path": str(status.path),
-                    "registration_identity": status.registration_identity or "",
                 }
             state_root = (
                 worktree_runtime_root(root=root, name=worktree["name"])
