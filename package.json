@@ -13,8 +13,6 @@
   "files": [
     "bin",
     "lib",
-    "workflows",
-    "profiles",
     "templates",
     "bootstrap",
     "skills",

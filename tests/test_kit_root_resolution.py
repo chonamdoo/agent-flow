@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -120,3 +121,72 @@ def test_unknown_profile_still_fails_closed(tmp_path: Path):
             explicit_fallback=False,
             source="test",
         )
+
+
+def _tracked_files() -> list[str]:
+    repo = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        ("git", "ls-files"),
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.split()
+
+
+@pytest.mark.parametrize("kind", ["workflows", "profiles", "roles"])
+def test_repository_tracks_one_copy_of_each_definition(kind: str):
+    """반증: 같은 정의가 두 벌 추적되면 둘을 맞추는 도구가 계속 필요하다.
+
+    루트 사본과 패키지 사본이 바이트 동일하다는 것을 parity 스크립트가 지켜 왔다.
+    사본이 한 벌이면 지킬 것이 없어지고 그 검사도 함께 죽는다.
+    """
+    tracked = [
+        path
+        for path in _tracked_files()
+        if path.endswith(".yaml") and f"{kind}/" in path
+    ]
+    assert tracked, f"{kind} 정의가 하나도 추적되지 않는다"
+
+    by_name: dict[str, list[str]] = {}
+    for path in tracked:
+        by_name.setdefault(Path(path).name, []).append(path)
+
+    duplicated = {name: paths for name, paths in by_name.items() if len(paths) > 1}
+    assert not duplicated, f"{kind} 정의가 두 벌 이상 추적된다: {duplicated}"
+
+
+def test_skill_selection_reads_the_packaged_profile_yaml():
+    """반증: 경로가 틀려도 하드코딩 맵으로 폴백해서 조용히 통과한다.
+
+    `lib/skill-selection.mjs`는 profile YAML을 못 읽으면 `PROFILE_SKILLS` 맵으로
+    떨어진다. 그래서 경로가 깨져도 테스트가 녹색이고, YAML이 정본이라는 계약만
+    소리 없이 사라진다. 경로 자체가 실재하는지를 직접 본다.
+    """
+    repo = Path(__file__).resolve().parents[1]
+    profiles = sorted(
+        path.stem
+        for path in (repo / "src" / "agent_flow" / "profiles").glob("*.yaml")
+        if not path.stem.startswith("_")
+    )
+    assert profiles, "패키지에 profile 정의가 없다"
+
+    script = (
+        "import { profileYamlPath } from './lib/skill-selection.mjs';\n"
+        "import fs from 'node:fs';\n"
+        f"const names = {list(profiles)!r}.map(String);\n"
+        "const missing = names.filter((name) => "
+        "!fs.existsSync(profileYamlPath(process.cwd(), name)));\n"
+        "console.log(JSON.stringify(missing));\n"
+    ).replace("'", "'")
+    result = subprocess.run(
+        ("node", "--input-type=module", "-e", script),
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip() == "[]", (
+        f"skill-selection이 못 찾는 profile YAML: {result.stdout.strip()}"
+    )

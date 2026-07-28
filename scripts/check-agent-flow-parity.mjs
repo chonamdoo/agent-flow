@@ -11,6 +11,10 @@ const SOURCE_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
 const SOURCE_IS_MANAGED_WORKTREE = resolveManagedWorktreeRoot(SOURCE_ROOT) !== null;
 const CHECK_INSTALLED_COPY = !SOURCE_IS_MANAGED_WORKTREE;
+// 워크플로·프로파일 정의는 설치 가능한 패키지 안에 한 벌만 산다. 예전에는 루트에
+// 같은 파일이 또 있었고, 이 스크립트가 둘의 바이트 동일성을 지켰다.
+const PACKAGED_WORKFLOWS = "src/agent_flow/workflows";
+const PACKAGED_PROFILES = "src/agent_flow/profiles";
 // 두 runner에 **같은** nonce를 준다. node는 `run start`가 무작위로 심고 python은
 // meta에서 읽으므로, 고정하지 않으면 같은 입력이 아니게 되어 provenance 검사가
 // parity 오탐으로 보인다.
@@ -269,7 +273,7 @@ assert sorted(MANAGED_HOOK_SCRIPTS) == expected, (sorted(MANAGED_HOOK_SCRIPTS), 
 }
 
 const fullFeatureWorkflowCopies = [
-  "workflows/full-feature.yaml",
+  `${PACKAGED_WORKFLOWS}/full-feature.yaml`,
   "src/agent_flow/workflows/full-feature.yaml",
   ...(CHECK_INSTALLED_COPY ? [".agent-flow/workflows/full-feature.yaml"] : []),
 ];
@@ -595,28 +599,25 @@ for (const rel of fullFeatureWorkflowCopies) {
   assertNotContains(rel, "grill-me");
 }
 
-assertSameYamlFileSet("workflows", "src/agent_flow/workflows");
+// 정의는 패키지 안에 한 벌만 있다. 예전에는 루트 사본과 바이트 비교를 했지만
+// 비교할 두 번째 사본이 없어졌다. 설치본이 정본에서 밀리지 않았는지만 본다.
 if (CHECK_INSTALLED_COPY) {
-  assertSameYamlFileSet("workflows", ".agent-flow/workflows");
-}
-for (const entry of fs.readdirSync(path.join(SOURCE_ROOT, "workflows")).sort()) {
-  if (!entry.endsWith(".yaml")) continue;
-  const source = `workflows/${entry}`;
-  assertSame(source, `src/agent_flow/workflows/${entry}`);
-  if (CHECK_INSTALLED_COPY) {
-    assertSame(source, `.agent-flow/workflows/${entry}`);
+  assertSameYamlFileSet(PACKAGED_WORKFLOWS, ".agent-flow/workflows");
+  for (const entry of fs.readdirSync(path.join(SOURCE_ROOT, PACKAGED_WORKFLOWS)).sort()) {
+    if (!entry.endsWith(".yaml")) continue;
+    assertSame(`${PACKAGED_WORKFLOWS}/${entry}`, `.agent-flow/workflows/${entry}`);
   }
 }
-assertContains("workflows/default.yaml", "active-host reviewer sub-agents");
-assertNotContains("workflows/default.yaml", "Gemini sub-agent");
-assertContains("workflows/default.yaml", "reviewer-source: sub-agent");
-assertContains("workflows/default.yaml", "close that sub-agent session");
-assertContains("workflows/default.yaml", "## Overall");
-assertContains("workflows/default.yaml", "verdict: approve");
-assertContains("workflows/default.yaml", "verdict: request-changes");
-assertContains("workflows/default.yaml", "id: comment-authoring");
-assertContains("workflows/default.yaml", "`n/a` only when the changed diff has no");
-assertContains("workflows/default.yaml", "comment-scope: final-pass-only");
+assertContains(`${PACKAGED_WORKFLOWS}/default.yaml`, "active-host reviewer sub-agents");
+assertNotContains(`${PACKAGED_WORKFLOWS}/default.yaml`, "Gemini sub-agent");
+assertContains(`${PACKAGED_WORKFLOWS}/default.yaml`, "reviewer-source: sub-agent");
+assertContains(`${PACKAGED_WORKFLOWS}/default.yaml`, "close that sub-agent session");
+assertContains(`${PACKAGED_WORKFLOWS}/default.yaml`, "## Overall");
+assertContains(`${PACKAGED_WORKFLOWS}/default.yaml`, "verdict: approve");
+assertContains(`${PACKAGED_WORKFLOWS}/default.yaml`, "verdict: request-changes");
+assertContains(`${PACKAGED_WORKFLOWS}/default.yaml`, "id: comment-authoring");
+assertContains(`${PACKAGED_WORKFLOWS}/default.yaml`, "`n/a` only when the changed diff has no");
+assertContains(`${PACKAGED_WORKFLOWS}/default.yaml`, "comment-scope: final-pass-only");
 assertContains("skills/code-generation-discipline/SKILL.md", "Write comments only when code alone cannot carry the reason or contract.");
 assertNotContains("skills/code-generation-discipline/SKILL.md", "Every new or modified code block must include Korean " + "comments");
 if (CHECK_INSTALLED_COPY) {
@@ -628,7 +629,7 @@ if (CHECK_INSTALLED_COPY) {
   assertContains(".agent-flow/prompts/multi-review.md", "## Overall");
   assertContains(".agent-flow/prompts/multi-review.md", "verdict: approve");
   assertContains(".agent-flow/prompts/multi-review.md", "verdict: request-changes");
-  assertNotContains("workflows/full-feature.yaml", "Gemini sub-agent");
+  assertNotContains(`${PACKAGED_WORKFLOWS}/full-feature.yaml`, "Gemini sub-agent");
   assertNotContains("bootstrap/AGENTS.md.template", "Gemini sub-agent");
   assertNotContains("bootstrap/CLAUDE.md.template", "Gemini sub-agent");
 }
@@ -671,9 +672,8 @@ function gateIds(text) {
   return ids;
 }
 
-assertSameYamlFileSet("profiles", "src/agent_flow/profiles");
 if (CHECK_INSTALLED_COPY) {
-  assertSameYamlFileSet("profiles", ".agent-flow/profiles");
+  assertSameYamlFileSet(PACKAGED_PROFILES, ".agent-flow/profiles");
 }
 
 if (CHECK_INSTALLED_COPY) {
@@ -682,23 +682,20 @@ if (CHECK_INSTALLED_COPY) {
     assertSame(rel, `.agent-flow/${rel}`);
   }
 }
-for (const entry of fs.readdirSync(path.join(SOURCE_ROOT, "profiles")).sort()) {
+for (const entry of fs.readdirSync(path.join(SOURCE_ROOT, PACKAGED_PROFILES)).sort()) {
   if (!entry.endsWith(".yaml")) continue;
-  const source = `profiles/${entry}`;
-  const packaged = `src/agent_flow/profiles/${entry}`;
-  const sourceText = readIfExists(source);
+  const packaged = `${PACKAGED_PROFILES}/${entry}`;
   const packagedText = readIfExists(packaged);
-  if (sourceText === null || packagedText === null) continue;
-  if (sourceText !== packagedText) {
-    failures.push(`${packaged} differs from ${source}`);
-  }
+  if (packagedText === null) continue;
+  const installed = `.agent-flow/profiles/${entry}`;
   if (CHECK_INSTALLED_COPY) {
-    assertSame(source, `.agent-flow/profiles/${entry}`);
+    assertSame(packaged, installed);
   }
-  const sourceGates = gateIds(sourceText);
+  const installedText = CHECK_INSTALLED_COPY ? readIfExists(installed) : packagedText;
+  const sourceGates = gateIds(installedText ?? packagedText);
   const packagedGates = gateIds(packagedText);
   if (sourceGates.join("|") !== packagedGates.join("|")) {
-    failures.push(`${packaged} gates differ from ${source}`);
+    failures.push(`${packaged} gates differ from the installed copy`);
   }
 }
 
@@ -719,13 +716,13 @@ for (const entry of fs.readdirSync(path.join(SOURCE_ROOT, "profiles")).sort()) {
   if (kitText.includes("task_terms")) {
     failures.push("bin/agent-flow-kit.mjs must not reimplement profile skill routing");
   }
-  for (const entry of fs.readdirSync(path.join(SOURCE_ROOT, "profiles")).sort()) {
+  for (const entry of fs.readdirSync(path.join(SOURCE_ROOT, PACKAGED_PROFILES)).sort()) {
     if (!entry.endsWith(".yaml") || entry.startsWith("_")) continue;
-    const text = readIfExists(`profiles/${entry}`) ?? "";
+    const text = readIfExists(`${PACKAGED_PROFILES}/${entry}`) ?? "";
     for (const [name, block] of skillTableEntries(text)) {
       if (!/\n\s+(task_terms|path_globs):/.test(block)) {
         failures.push(
-          `profiles/${entry}: skill table entry ${name} has no task_terms/path_globs and can never activate`,
+          `${PACKAGED_PROFILES}/${entry}: skill table entry ${name} has no task_terms/path_globs and can never activate`,
         );
       }
     }
@@ -974,7 +971,7 @@ function assertPythonContract(label, code) {
 }
 
 function assertAllWorkflowContracts() {
-  for (const name of yamlFileNames("workflows").map((file) => file.replace(/\.yaml$/, ""))) {
+  for (const name of yamlFileNames(PACKAGED_WORKFLOWS).map((file) => file.replace(/\.yaml$/, ""))) {
     const workflow = workflowExport(name);
     if (!workflow) {
       continue;

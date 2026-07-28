@@ -173,7 +173,7 @@ def test_prompt_enforcement_claim_matches_the_gate(tmp_path, phase_id, enforced)
 # --- P8 -----------------------------------------------------------------
 
 
-@pytest.mark.parametrize("copy", ["profiles", "src/agent_flow/profiles"])
+@pytest.mark.parametrize("copy", ["src/agent_flow/profiles"])
 def test_sdui_review_angle_is_dispatched(copy):
     """저장소에서 유일한 기계적 수치 검사가 한 번도 실행된 적이 없었다."""
     profile = yaml.safe_load((REPO / copy / "android.yaml").read_text(encoding="utf-8"))

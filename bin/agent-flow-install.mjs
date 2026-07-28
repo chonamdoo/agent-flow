@@ -16,6 +16,8 @@ import { spawnSync } from "node:child_process";
 import { SKILL_DEPENDENCIES, mergeInstallSelectionWithPrevious, resolveInstallSelection } from "../lib/skill-selection.mjs";
 
 const KIT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+// 정의의 정본은 패키지 안이다. `agent-flow-kit.mjs`와 같은 자리를 본다.
+const PACKAGED_ASSETS = path.join(KIT_ROOT, "src", "agent_flow");
 const AGENT_FLOW_COMMAND = "agent-flow";
 const INSTALL_ARGS = process.argv.slice(3);
 const FORCE_MANAGED = INSTALL_ARGS.includes("--force-managed");
@@ -1984,7 +1986,7 @@ function install() {
   removeLegacyProjectSkillCopies(PROJECT, "graphify");
   writeManagedFile(
     path.join(AF_DIR, "workflows", "full-feature.yaml"),
-    fs.readFileSync(path.join(KIT_ROOT, "workflows", "full-feature.yaml"), "utf8"),
+    fs.readFileSync(path.join(PACKAGED_ASSETS, "workflows", "full-feature.yaml"), "utf8"),
   );
 
   // Copy bundled skills into project-local skills dir.
@@ -2005,7 +2007,7 @@ function install() {
   const skillIndex = installProjectSkills(FORCE_MANAGED, installSelection);
   upsertSkillIndexBlock(PROJECT);
   const workflowsCopied = copyDir(
-    path.join(KIT_ROOT, "workflows"),
+    path.join(PACKAGED_ASSETS, "workflows"),
     path.join(AF_DIR, "workflows"),
     new Set(),
     true,
@@ -2021,7 +2023,7 @@ function install() {
   // 덮기 전에는 사본을 남긴다.
   const profilesCopied = upgradeBundledProfiles(
     PROJECT,
-    path.join(KIT_ROOT, "profiles"),
+    path.join(PACKAGED_ASSETS, "profiles"),
     path.join(AF_DIR, "profiles"),
   );
   const templatesCopied = copyDir(

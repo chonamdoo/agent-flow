@@ -25,7 +25,7 @@ from agent_flow.core.profiles import (  # noqa: E402
     load_profile,
 )
 
-PROFILES_DIR = KIT_ROOT / "profiles"
+PROFILES_DIR = KIT_ROOT / "src" / "agent_flow" / "profiles"
 
 
 def _schema_gate_phases() -> list[str]:

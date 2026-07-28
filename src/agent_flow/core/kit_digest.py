@@ -18,8 +18,6 @@ from pathlib import Path
 # installer가 target에 만들어 내는 산출물이라 넣으면 self-install 직후부터 자산 변경
 # 없이 지문이 흔들린다.
 KIT_SOURCE_DIGEST_ROOTS: tuple[str, ...] = (
-    "workflows",
-    "profiles",
     "templates",
     "bootstrap",
     "skills",

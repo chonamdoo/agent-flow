@@ -14,6 +14,9 @@ const command = process.argv[2];
 const AGENT_FLOW_COMMAND = "agent-flow";
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
 const KIT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+// 워크플로·프로파일 정의의 정본은 설치 가능한 패키지 안이다. 루트에 사본을 두면
+// 같은 파일이 두 벌이 되고, 둘이 갈라지지 않았는지 보는 검사가 따로 필요해진다.
+const PACKAGED_ASSETS = path.join(KIT_ROOT, "src", "agent_flow");
 const RUNTIME_PYTHON_RELATIVE = path.join(".agent-flow", "runtime", "python");
 const installArgs = process.argv.slice(3);
 const forceManaged = installArgs.includes("--force-managed");
@@ -129,7 +132,7 @@ function installProject() {
 
   writeManagedFile(path.join(agentFlowDir, "workflows", "full-feature.yaml"), fullFeatureWorkflowYaml());
   copyBundledDirIfMissingOrSame(
-    path.join(KIT_ROOT, "workflows"),
+    path.join(PACKAGED_ASSETS, "workflows"),
     path.join(agentFlowDir, "workflows"),
     true,
     new Set(),
@@ -166,7 +169,7 @@ function installProject() {
   // 추가한 필드(skill_sources 등)가 기존 설치본에 영영 안 닿는다. 다만 지우지는
   // 않는다 — prune을 켜면 사용자가 만든 custom profile이 함께 날아간다.
   // 덮기 전에는 사본을 남긴다.
-  upgradeBundledProfiles(root, path.join(KIT_ROOT, "profiles"), path.join(agentFlowDir, "profiles"));
+  upgradeBundledProfiles(root, path.join(PACKAGED_ASSETS, "profiles"), path.join(agentFlowDir, "profiles"));
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "templates"), path.join(agentFlowDir, "templates"), forceManaged, new Set(), true, forceManaged);
   const skillIndex = installProjectSkills(root, agentFlowDir, previousSkillIndex, forceManaged, installSelection);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "scripts"), path.join(agentFlowDir, "scripts"), forceManaged);
@@ -537,7 +540,7 @@ function loadWorkflowDefinition(name) {
   if (!/^[A-Za-z0-9_-]+$/.test(name)) {
     throw new Error(`unsafe workflow name: ${name}`);
   }
-  const workflowPath = path.join(KIT_ROOT, "workflows", `${name}.yaml`);
+  const workflowPath = path.join(PACKAGED_ASSETS, "workflows", `${name}.yaml`);
   const text = fs.readFileSync(workflowPath, "utf8");
   const definition = exportWorkflowDefinition(name);
   return {
@@ -1185,8 +1188,6 @@ function assertInstalled(root) {
 // 넣으면 self-install 직후부터 자산 변경 없이 지문이 흔들린다.
 // Python `core/kit_digest.py`와 같은 목록이어야 한다. parity가 두 값을 대조한다.
 const KIT_SOURCE_DIGEST_ROOTS = [
-  "workflows",
-  "profiles",
   "templates",
   "bootstrap",
   "skills",

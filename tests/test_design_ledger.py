@@ -776,7 +776,7 @@ def test_non_source_phases_are_not_checked():
     assert missing_design_value_markers(text, "implement") == []
 
 
-@pytest.mark.parametrize("copy", ["workflows", "src/agent_flow/workflows"])
+@pytest.mark.parametrize("copy", ["src/agent_flow/workflows"])
 def test_prd_pauses_for_the_read_back(copy):
     """관측자가 사람인 유일한 지점이다. pause가 없으면 확인 자리가 없다."""
     import yaml
@@ -790,9 +790,7 @@ def test_prd_pauses_for_the_read_back(copy):
 @pytest.mark.parametrize(
     ("copy", "workflow_name", "phase_id"),
     [
-        ("workflows", "default.yaml", "design"),
         ("src/agent_flow/workflows", "default.yaml", "design"),
-        ("workflows", "full-feature.yaml", "prd"),
         ("src/agent_flow/workflows", "full-feature.yaml", "prd"),
     ],
 )
