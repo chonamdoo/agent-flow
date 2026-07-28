@@ -1239,6 +1239,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 plan = plan_worktree(root=root, name=args.name, branch=args.branch)
                 status = create_worktree(root=root, plan=plan, allow_dirty=args.allow_dirty)
+                _apply_worktree_setup(root=root, checkout=status.path)
             except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
                 print(_format_cli_error(exc), file=sys.stderr)
                 return 2
@@ -1513,6 +1514,7 @@ def main(argv: list[str] | None = None) -> int:
                             allow_dirty=True,
                             reuse_existing=False,
                         )
+                        _apply_worktree_setup(root=root, checkout=worktree_status.path)
                         worker_cwd = verify_linked_worktree(
                             root=root,
                             path=worktree_status.path,

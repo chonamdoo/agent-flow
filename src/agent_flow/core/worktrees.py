@@ -2354,6 +2354,23 @@ def _worktree_setup_path(base: Path, name: str) -> Path:
     return Path(resolved)
 
 
+def _has_symlinked_component(base: Path, target: Path) -> bool:
+    """base 아래 어느 구성요소든 symlink인가.
+
+    마지막 구성요소만 보면 중간 디렉터리 symlink로 봉쇄가 뚫린다. lexical 판정은
+    통과하고, leaf는 symlink가 아니며, `is_file()`은 따라간 곳을 보고 참을 낸다.
+    git은 symlink를 커밋할 수 있으므로 `config` -> `/etc`가 저장소에 들어와 있을 수 있고,
+    그러면 `config/passwd` 선언 한 줄로 저장소 밖 파일이 복사된다. 쓰는 쪽도 같다 —
+    checkout의 중간 디렉터리가 symlink면 복사본이 worktree 밖에 떨어진다.
+    """
+    current = base
+    for part in target.relative_to(base).parts:
+        current = current / part
+        if current.is_symlink():
+            return True
+    return False
+
+
 def copy_declared_worktree_files(
     *, leader: Path, checkout: Path, names: Iterable[str]
 ) -> tuple[str, ...]:
@@ -2372,13 +2389,17 @@ def copy_declared_worktree_files(
 
     반환값은 실제로 복사한 선언 이름들이다.
     """
+    leader_base = Path(os.path.normpath(str(leader)))
+    checkout_base = Path(os.path.normpath(str(checkout)))
     copied: list[str] = []
     for name in names:
         source = _worktree_setup_path(leader, name)
         target = _worktree_setup_path(checkout, name)
         if target.exists() or target.is_symlink():
             continue
-        if source.is_symlink() or not source.is_file():
+        if _has_symlinked_component(checkout_base, target):
+            continue
+        if _has_symlinked_component(leader_base, source) or not source.is_file():
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)

@@ -117,3 +117,48 @@ def test_symlinked_declaration_is_refused(tmp_path: Path):
 
     assert copied == ()
     assert not (checkout / "local.properties").exists()
+
+
+def test_symlinked_parent_directory_is_refused(tmp_path: Path):
+    """반증: 마지막 구성요소만 보면 중간 디렉터리 symlink로 밖을 읽는다.
+
+    leader에 `config`가 저장소 밖을 가리키는 symlink로 커밋돼 있고 profile이
+    `config/passwd`를 선언하면, lexical 봉쇄는 통과하고 leaf는 symlink가 아니며
+    `is_file()`은 따라간 곳을 보고 참을 낸다. 선언 한 줄로 저장소 밖 파일이 복사된다.
+    git은 symlink를 커밋할 수 있으므로 실제로 닿는 경로다.
+    """
+    leader, checkout = tmp_path / "leader", tmp_path / "wt"
+    _repo(leader)
+    checkout.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "passwd").write_text("root:x:0:0\n", encoding="utf-8")
+    (leader / "config").symlink_to(outside, target_is_directory=True)
+
+    copied = copy_declared_worktree_files(
+        leader=leader, checkout=checkout, names=["config/passwd"]
+    )
+
+    assert copied == ()
+    assert not (checkout / "config").exists()
+
+
+def test_symlinked_parent_in_the_checkout_is_refused(tmp_path: Path):
+    """불변: 쓰는 쪽도 같다. checkout의 중간 디렉터리가 symlink면 밖에 쓴다."""
+    leader, checkout = tmp_path / "leader", tmp_path / "wt"
+    _repo(leader)
+    checkout.mkdir()
+    nested = leader / "config" / "local.properties"
+    nested.parent.mkdir(parents=True)
+    nested.write_text("sdk.dir=/opt/android\n", encoding="utf-8")
+
+    outside = tmp_path / "sink"
+    outside.mkdir()
+    (checkout / "config").symlink_to(outside, target_is_directory=True)
+
+    copied = copy_declared_worktree_files(
+        leader=leader, checkout=checkout, names=["config/local.properties"]
+    )
+
+    assert copied == ()
+    assert not (outside / "local.properties").exists()
