@@ -2436,16 +2436,50 @@ def _owned_branch_for_live_worktree(*, root: Path, status: WorktreeStatus) -> st
     return current_branch if current_branch == planned_branch else None
 
 
-def _safe_component(value: str) -> str:
+@dataclass(frozen=True)
+class SlugQuality:
+    """slug와, 그 slug를 믿어도 되는지에 대한 판정.
+
+    `kind`는 세 가지다.
+
+    ``ascii``   task의 모든 단어가 이름에 기여했다. 그대로 쓴다.
+    ``partial`` 일부만 살아남았다. **가장 위험한 상태다** — 이름이 그럴듯해 보이지만
+                task를 대표하지 않는다. `로그인 화면 Figma 구현`이 `figma`가 되는 경우다.
+    ``digest``  아무것도 살아남지 못해 안정적인 해시로 떨어졌다. 의미는 없지만 없다는
+                사실이 이름에 드러난다.
+
+    비율로 판정하지 않는다. 임계값을 두면 그 숫자가 곧 정책이 되는데, 몇 퍼센트부터
+    나쁜 이름인지는 코드가 답할 수 있는 질문이 아니다. 버려진 단어가 있으면 있다고만
+    말하고, 무엇을 할지는 부르는 쪽이 정한다.
+    """
+
+    slug: str
+    kind: str
+    dropped: tuple[str, ...]
+
+
+def describe_slug(value: str) -> SlugQuality:
     lowered = value.strip().lower()
     safe = re.sub(r"[^a-z0-9._-]+", "-", lowered).strip("-")
+    dropped = tuple(
+        word
+        for word in value.split()
+        if any(char.isalnum() for char in word)
+        and not re.sub(r"[^a-z0-9._-]+", "", word.lower())
+    )
     if not safe or safe.startswith(".") or ".." in safe:
         if not any(char.isalnum() for char in lowered):
             raise ValueError(f"worktree name must contain at least one safe character: {value}")
         # 한글 등 비ASCII task도 기본 worktree 이름으로 쓸 수 있게 안정적인 fallback을 둔다.
         digest = hashlib.sha1(lowered.encode("utf-8")).hexdigest()[:8]
-        safe = f"task-{digest}"
-    return safe
+        return SlugQuality(slug=f"task-{digest}", kind="digest", dropped=dropped)
+    return SlugQuality(
+        slug=safe, kind="partial" if dropped else "ascii", dropped=dropped
+    )
+
+
+def _safe_component(value: str) -> str:
+    return describe_slug(value).slug
 
 
 def _feature_worktree_name(value: str) -> str:

@@ -112,6 +112,7 @@ from agent_flow.core.worktrees import (
     get_worktree_status,
     cleanup_state_root,
     copy_declared_worktree_files,
+    describe_slug,
     find_pending_worktree_cleanup,
     known_worktree_names,
     plan_worktree,
@@ -2178,6 +2179,35 @@ def _confirm_inferred_worktree_reuse(
     return False
 
 
+def _warn_if_slug_does_not_represent_the_task(task: str) -> None:
+    """task에서 뽑은 이름이 그 task를 대표하지 못하면 사실대로 말한다.
+
+    가장 나쁜 동작은 품질 낮은 이름을 성공한 것처럼 내놓는 것이다.
+    `로그인 화면 Figma 구현`이 `feat-figma`가 되면 그럴듯해 보여서 아무도 이상하게
+    여기지 않고, 그 이름이 브랜치 목록·PR 제목·머지 커밋까지 그대로 간다. 해시로
+    떨어지는 쪽은 오히려 낫다 — 이름이 없다는 사실이 이름에 드러나기 때문이다.
+
+    사용자가 `--worktree`로 직접 지은 이름에는 아무 말도 하지 않는다. 거기까지
+    참견하면 경고가 소음이 되고, 소음이 된 경고는 읽히지 않는다.
+    """
+    try:
+        quality = describe_slug(task)
+    except ValueError:
+        return
+    if quality.kind == "ascii":
+        return
+    dropped = ", ".join(quality.dropped)
+    if quality.kind == "digest":
+        detail = f"task에서 쓸 수 있는 문자를 찾지 못했다 (버려진 말: {dropped})"
+    else:
+        detail = f"task의 일부만 이름에 남았다 (버려진 말: {dropped})"
+    print(
+        f"warning: worktree 이름 `feat-{quality.slug}`이 task를 대표하지 못한다 — "
+        f"{detail}. 원하는 이름이 있으면 `--worktree <name>`으로 지정하라.",
+        file=sys.stderr,
+    )
+
+
 def _resolve_entry_worktree(
     *,
     root: Path,
@@ -2211,6 +2241,8 @@ def _resolve_entry_worktree(
             _apply_worktree_setup(root=root, checkout=attached.path)
             _warn_if_cwd_is_other_checkout(root=root, target=attached.path)
             return attached, True
+    if not explicit:
+        _warn_if_slug_does_not_represent_the_task(selector)
     plan = plan_worktree(root=root, name=selector, branch=branch)
     try:
         status = create_worktree(
