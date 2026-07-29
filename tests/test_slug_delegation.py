@@ -109,7 +109,7 @@ def test_ascii_task_never_reaches_delegation(tmp_path, monkeypatch):
     from agent_flow import cli as CLI
 
     called: list[str] = []
-    monkeypatch.setattr(CLI, "_slug_command_for_active_host", lambda root: called.append("x") or [])
+    monkeypatch.setattr(CLI, "_slug_naming_for_active_host", lambda root: (called.append("x") or [], 60))
 
     assert CLI._derive_worktree_selector(root=tmp_path, task="fix padding") == "fix padding"
     assert called == [], "영문 task는 위임 경로에 들어가면 안 된다"
@@ -119,7 +119,7 @@ def test_delegated_name_is_used_when_the_host_succeeds(tmp_path, monkeypatch, ca
     """불변: 위임이 성공하면 그 이름을 쓰고, 썼다는 사실을 알린다."""
     from agent_flow import cli as CLI
 
-    monkeypatch.setattr(CLI, "_slug_command_for_active_host", lambda root: ["fake"])
+    monkeypatch.setattr(CLI, "_slug_naming_for_active_host", lambda root: (["fake"], 60))
     monkeypatch.setattr(CLI, "delegated_slug", lambda **kw: "login-screen-figma")
 
     assert CLI._derive_worktree_selector(
@@ -136,7 +136,7 @@ def test_failed_delegation_falls_back_to_the_honest_warning(tmp_path, monkeypatc
     """
     from agent_flow import cli as CLI
 
-    monkeypatch.setattr(CLI, "_slug_command_for_active_host", lambda root: ["fake"])
+    monkeypatch.setattr(CLI, "_slug_naming_for_active_host", lambda root: (["fake"], 60))
     monkeypatch.setattr(CLI, "delegated_slug", lambda **kw: None)
 
     task = "로그인 화면 Figma 구현"
@@ -148,7 +148,7 @@ def test_no_declaration_means_no_delegation(tmp_path, monkeypatch, capsys):
     """불변: 선언이 없는 프로젝트는 지금과 똑같이 동작한다."""
     from agent_flow import cli as CLI
 
-    monkeypatch.setattr(CLI, "_slug_command_for_active_host", lambda root: [])
+    monkeypatch.setattr(CLI, "_slug_naming_for_active_host", lambda root: ([], 60))
     monkeypatch.setattr(
         CLI, "delegated_slug", lambda **kw: pytest.fail("선언이 없는데 위임했다")
     )
@@ -156,3 +156,32 @@ def test_no_declaration_means_no_delegation(tmp_path, monkeypatch, capsys):
     task = "홈 검색 결과 화면 디자인 수정"
     assert CLI._derive_worktree_selector(root=tmp_path, task=task) == task
     assert "task-" in capsys.readouterr().err
+
+
+def test_profile_length_limit_reaches_the_delegated_name(tmp_path, monkeypatch):
+    """불변: profile이 선언한 제한을 안 읽으면 host가 낸 긴 이름이 그대로 쓰인다."""
+    from agent_flow import cli as CLI
+
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(CLI, "_slug_naming_for_active_host", lambda root: (["fake"], 20))
+    monkeypatch.setattr(
+        CLI, "delegated_slug", lambda **kw: seen.update(kw) or "short-name"
+    )
+
+    CLI._derive_worktree_selector(root=tmp_path, task="로그인 화면 Figma 구현")
+    assert seen.get("max_length") == 20
+
+
+def test_missing_length_declaration_falls_back_to_the_default(tmp_path, monkeypatch):
+    """불변: 선언이 없거나 값이 이상하면 기본값으로 떨어진다."""
+    from agent_flow import cli as CLI
+    from agent_flow.core.worktrees import DEFAULT_SLUG_MAX_LENGTH
+
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        CLI, "_slug_naming_for_active_host", lambda root: (["fake"], DEFAULT_SLUG_MAX_LENGTH)
+    )
+    monkeypatch.setattr(CLI, "delegated_slug", lambda **kw: seen.update(kw) or "n")
+
+    CLI._derive_worktree_selector(root=tmp_path, task="로그인 화면 Figma 구현")
+    assert seen.get("max_length") == DEFAULT_SLUG_MAX_LENGTH
