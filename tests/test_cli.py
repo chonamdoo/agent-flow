@@ -3143,10 +3143,12 @@ design-values-confirmed: n/a
                 # 왜 안 쓰이는지 알 수 없다. 색인하고 `skills doctor`가 충돌을 보고한다.
                 self.assertIn("compose-state-authoring", skill_names)
                 self.assertIn("edge-to-edge", skill_names)
-                # frontmatter가 `hosts: [codex]`라 codex 경로에만 링크된다.
-                for host_root in (project_root / ".Codex" / "skills", project_root / ".codex" / "skills"):
-                    self.assertTrue((host_root / "compose-state-authoring").exists())
-                    self.assertTrue((host_root / "edge-to-edge").exists())
+                # frontmatter가 `hosts: [codex]`라 codex 경로에만 링크된다. codex link는
+                # `hostSkillRoot`가 `.Codex`로 고정한다 - case-insensitive FS에서 두
+                # 이름이 같은 디렉터리라 `.codex`까지 단언하면 그 FS에서만 통과한다.
+                codex_root = project_root / ".Codex" / "skills"
+                self.assertTrue((codex_root / "compose-state-authoring").exists())
+                self.assertTrue((codex_root / "edge-to-edge").exists())
                 for host_root in (project_root / ".omp" / "skills", project_root / ".claude" / "skills"):
                     self.assertFalse((host_root / "compose-state-authoring").exists())
                     self.assertFalse((host_root / "edge-to-edge").exists())
