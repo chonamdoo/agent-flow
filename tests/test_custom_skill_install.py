@@ -7,6 +7,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -1358,21 +1359,45 @@ def _hook_matchers(project: Path, script: str) -> list[str]:
     return matchers
 
 
-def test_skill_use_observer_is_registered_for_the_skill_and_shell_tools(tmp_path: Path) -> None:
-    """Skill tool 사용은 SKILL.md Read를 발생시키지 않는다. Read matcher만 달면 증거가 항상 비어 있다."""
+def _tool_names(matcher: str) -> list[str]:
+    return matcher.removeprefix("^(").removesuffix(")$").split("|")
+
+
+def test_skill_use_observer_records_every_tool_its_matcher_admits(tmp_path: Path) -> None:
+    """등록과 소비가 갈라지면 matcher가 붙인 tool이 조용히 버려진다."""
     project = tmp_path / "project"
     project.mkdir()
     (project / "pyproject.toml").write_text("[project]\nname = \"x\"\n", encoding="utf-8")
+    assert _install(project).returncode == 0
+    skill = project / "demo" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: demo\n---\n", encoding="utf-8")
+    hook = project / ".agent-flow" / "scripts" / "hooks" / "record-skill-read.py"
 
-    result = _install(project)
-
-    assert result.returncode == 0, result.stderr
     matchers = _hook_matchers(project, "record-skill-read.py")
     assert matchers
     for matcher in matchers:
-        assert re.match(matcher, "Skill"), matcher
-        assert re.match(matcher, "Bash"), matcher
-        assert re.match(matcher, "Read"), matcher
+        for tool in ("Skill", "Bash", "Read"):
+            assert re.match(matcher, tool), matcher
+
+    log = project / ".agent-flow" / "skills-read.jsonl"
+    for tool in _tool_names(matchers[0]):
+        log.unlink(missing_ok=True)
+        payload = {
+            "tool_name": tool,
+            "cwd": str(project),
+            "tool_input": {"command": f"cat {skill}", "skill": "demo", "path": str(skill)},
+        }
+        subprocess.run(
+            (sys.executable, str(hook)),
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            cwd=str(project),
+            timeout=30,
+            check=False,
+        )
+        assert log.is_file(), tool
 
 
 def test_installers_do_not_enumerate_external_skill_names() -> None:
@@ -1394,6 +1419,7 @@ def test_plain_install_refreshes_a_managed_hook_to_match_its_recorded_digest(tmp
     assert _install(project).returncode == 0
     hook = project / ".agent-flow" / "scripts" / "hooks" / "record-skill-read.py"
     hook.write_text("# stale copy from an older kit\n", encoding="utf-8")
+    os.chmod(hook, 0o755)
 
     assert _install(project).returncode == 0
 
@@ -1401,3 +1427,11 @@ def test_plain_install_refreshes_a_managed_hook_to_match_its_recorded_digest(tmp
     digest = recorded["managed_hook_digests"]["record-skill-read.py"]
     assert hashlib.sha256(hook.read_bytes()).hexdigest() == digest
     assert os.access(hook, os.X_OK)
+    # digest만 보면 백업이 남긴 실행 파일이 run 시작을 막는 것을 놓친다.
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.core.hook_integrity import verify_managed_hooks
+
+    reports = verify_managed_hooks(project)
+    assert reports and all(report.ok for report in reports), [
+        list(report.violations) for report in reports
+    ]

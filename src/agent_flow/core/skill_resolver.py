@@ -282,7 +282,7 @@ def resolve_phase_skills(
         matched[match.name] = ResolvedSkill(
             name=match.name,
             path=match.path,
-            source="host",
+            source=match.source,
             exists=match.path is not None,
             summary=skill_summary(match.path) if match.path is not None else "",
         )

@@ -336,23 +336,51 @@ def test_truncation_gives_every_domain_a_slot():
     assert "edge-to-edge" in {item.name for item in matches if item.tier == REQUIRED}
 
 
-def test_terms_match_on_word_boundaries():
-    """실측: `chart`가 xlsx의 "charting"에, `modifier`가 SwiftUI의 "modifiers"에 걸렸다."""
-    domain = {"id": "docs", "terms": ["chart", "modifier"], "phases": ["implementation"]}
-    catalog = (
-        _entry("xlsx", "Charting and cleaning tabular data."),
-        _entry("reviewing-swiftui", "Covers SwiftUI views, modifiers, data flow."),
-    )
+def test_a_term_does_not_match_a_longer_word():
+    """실측: `chart`가 xlsx의 "charting"에 걸려 무관한 skill이 required까지 올라갔다."""
+    domain = {"id": "docs", "terms": ["chart"], "phases": ["implementation"]}
 
     matches = match_external(
         _profile([domain]),
-        catalog,
+        (_entry("xlsx", "Charting and cleaning tabular data."),),
         phase_id="implement",
-        task_text="add a chart and extract a modifier",
+        task_text="add a chart",
         env={},
     )
 
     assert matches == ()
+
+
+def test_a_term_still_matches_its_plural():
+    """skill description은 term을 복수로 쓰는 쪽이 흔하다. 금지하면 정탐 13건이 사라졌다."""
+    domain = {"id": "rn", "terms": ["turbo module"], "phases": ["implementation"]}
+
+    matches = match_external(
+        _profile([domain]),
+        (_entry("optimizing-react-native", "Covers turbo modules and Hermes."),),
+        phase_id="implement",
+        task_text="turbo module 추가",
+        env={},
+    )
+
+    assert [item.name for item in matches] == ["optimizing-react-native"]
+
+
+def test_routable_names_is_empty_while_routing_is_off():
+    """꺼져 있는데 도달 가능으로 세면 doctor가 실제로 죽은 skill의 보고를 지운다."""
+    profile = {"skills": {"external": {"enabled": False, "domains": [_INSETS]}}}
+
+    assert routable_names(profile, (_entry("edge-to-edge", "Use when insets change."),), env={}) == set()
+
+
+def test_a_matched_skill_keeps_its_catalog_source():
+    entry = _entry("shepherd", "Use when insets change.", source="shared")
+
+    matches = match_external(
+        _profile([_INSETS]), (entry,), phase_id="implement", task_text="insets 정리", env={}
+    )
+
+    assert matches[0].source == "shared"
 
 
 def test_routable_names_ignores_the_run_scope():

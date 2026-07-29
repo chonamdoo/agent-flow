@@ -48,6 +48,10 @@ skills:
     - android-clean-presentation-architecture
     - android-code-review
     - android-guides
+    # 우리가 배포하는 Android skill이다. 이름이 upstream과 겹쳐 보인다는 이유로 표가
+    # 이 둘을 외부 것으로 선언했고, 그 결과 install 대상에서 빠져 있었다.
+    - android-debugging
+    - android-module-creator
     # 설치와 활성화는 다른 층이다. 여기 없으면 카탈로그에 아예 안 올라가서
     # frontmatter의 taskTerms/pathGlobs가 무슨 선언을 하든 죽는다.
     # 설치는 profile이 넓게, 활성화는 선언이 좁게 한다.

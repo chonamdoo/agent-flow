@@ -1134,6 +1134,16 @@ function readJsonSafe(pathName) {
   }
 }
 
+// 배치 계약이 이름 목록을 전부 담고 있는지 세려면 이름 목록도 Python에서 읽어야 한다.
+function pythonManagedHookScripts() {
+  const source = fs.readFileSync(path.join(SOURCE_ROOT, "src", "agent_flow", "core", "hook_integrity.py"), "utf8");
+  const block = source.match(/MANAGED_HOOK_SCRIPTS = \(([\s\S]*?)\)/);
+  if (!block) {
+    throw new Error("MANAGED_HOOK_SCRIPTS not found in hook_integrity.py");
+  }
+  return [...block[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+}
+
 // Python이 무결성 검증에 쓰는 배치 계약을 그대로 읽는다. JS에 사본을 두면
 // 두 목록이 갈라지고, 갈라진 순간 parity가 지키는 대상이 사라진다.
 function pythonManagedHookPlacement() {
@@ -1143,12 +1153,25 @@ function pythonManagedHookPlacement() {
     throw new Error("MANAGED_HOOK_PLACEMENT not found in hook_integrity.py");
   }
   const placement = {};
-  const entry = /"([^"]+)":\s*\(\s*"([^"]*)",\s*\n?\s*"((?:[^"\\]|\\.)*)",?\s*\)/g;
+  // 값이 여러 줄 문자열로 쪼개져 있어도 읽는다. Python은 암시적 연결을 하나의
+  // 문자열로 보는데, 리터럴 하나만 집으면 계약이 조용히 반쪽으로 읽힌다.
+  // 마지막 항목은 블록 캡처가 끝나는 자리라 뒤에 개행이 없다.
+  const entry = /"([^"]+)":\s*\(([\s\S]*?)\),(?:\n|$)/g;
   for (const match of block[1].matchAll(entry)) {
-    placement[match[1]] = [match[2], match[3].replaceAll("\\\\", "\\")];
+    const literals = [...match[2].matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((item) => item[1]);
+    if (literals.length === 0) {
+      continue;
+    }
+    const [event, ...rest] = literals;
+    placement[match[1]] = [event, rest.join("").replaceAll("\\\\", "\\")];
   }
-  if (Object.keys(placement).length === 0) {
-    throw new Error("MANAGED_HOOK_PLACEMENT parsed empty");
+  // 개수를 세지 않으면 정규식이 못 읽는 형태(암시적 문자열 연결 등)로 적힌 항목이
+  // 무음으로 빠지고, 그 항목의 JS/Python 갈라짐이 이 검사를 통과한다. 실측으로
+  // `record-skill-read.py`가 그렇게 빠져 있었다.
+  const managed = pythonManagedHookScripts();
+  const missing = managed.filter((name) => !(name in placement));
+  if (missing.length > 0) {
+    throw new Error(`MANAGED_HOOK_PLACEMENT entries unreadable: ${missing.join(", ")}`);
   }
   return placement;
 }

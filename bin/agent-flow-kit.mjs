@@ -1588,7 +1588,7 @@ function selectProjectSkills(root, agentFlowDir, installSelection = null) {
       path.join(agentFlowDir, "skills"),
       "bundled",
       root,
-      new Set(["index.json", ...PROFILE_MANAGED_HOST_ONLY_SKILLS]),
+      new Set(["index.json", "catalog.lock.json", ...PROFILE_MANAGED_HOST_ONLY_SKILLS]),
     ),
   ];
   const byName = new Map();
@@ -2416,7 +2416,12 @@ function upgradeManagedHooks(root, src, dest) {
     const source = path.join(src, entry.name);
     const content = fs.readFileSync(source, "utf8");
     const target = path.join(dest, entry.name);
-    backupIfDifferent(root, target, content);
+    const backup = backupIfDifferent(root, target, content);
+    if (backup) {
+      // 백업은 hook 디렉터리 안에 남는다. 실행 권한을 그대로 물려주면
+      // `hook_integrity`가 관리 대상 아닌 실행 파일로 보고 run 시작을 막는다.
+      fs.chmodSync(backup, 0o644);
+    }
     fs.writeFileSync(target, content, "utf8");
     fs.chmodSync(target, fs.statSync(source).mode & 0o777);
   }

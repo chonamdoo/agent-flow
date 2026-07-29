@@ -23,7 +23,14 @@ READ_TOOL_RE = ("read", "read_file", "view", "cat")
 # 0건이었다. 경로만 관측하면 정상 사용이 미사용으로 판정된다.
 SKILL_TOOLS = ("skill",)
 # Codex에는 Read tool이 없다. skill을 읽을 때 셸로 파일을 연다.
-SHELL_TOOLS = ("bash", "shell", "run_command", "exec")
+SHELL_TOOLS = (
+    "bash",
+    "shell",
+    "run_terminal_cmd",
+    "execute_command",
+    "local_shell",
+    "terminal",
+)
 LOG_RELATIVE = Path(".agent-flow") / "skills-read.jsonl"
 # `:10-40`, `:10`, `:50-`, `:10+5`, `:raw`, `:raw:2-4`, `:conflicts` 같은 읽기
 # 선택자만 꼬리로 인정한다. 그 외 꼬리는 `SKILL.md.bak`처럼 다른 파일이다.

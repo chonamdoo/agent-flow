@@ -23,6 +23,10 @@ from agent_flow.core.skill_resolver import SkillCatalogEntry, selector_matches
 REQUIRED = "required"
 OFFERED = "offered"
 
+# 어휘로 라우팅되는 것은 설치된 외부 skill뿐이다. 우리가 배포하는 것은 이름을
+# 우리가 소유하므로 `profile_routing`이 담당한다.
+_EXTERNAL_SOURCES = frozenset({"host", "shared", "fetched"})
+
 _SECTION_PHASES = {
     "implementation": IMPLEMENTATION_PHASES,
     "review": REVIEW_PHASES,
@@ -58,6 +62,7 @@ class ExternalMatch:
     # 카탈로그가 이미 아는 실제 경로. 이름으로 다시 해석하면 활성 host 필터에 걸려
     # 설치돼 있는 skill을 "없다"고 보고한다.
     path: Path | None = None
+    source: str = "host"
 
 
 def parse_external(profile: dict | None, *, env: dict[str, str] | None = None) -> ExternalConfig:
@@ -96,7 +101,7 @@ def match_external(
         if not _domain_active(domain, phase_id, changed_files, task_text):
             continue
         for entry in catalog:
-            if entry.source not in {"host", "shared", "fetched"}:
+            if entry.source not in _EXTERNAL_SOURCES:
                 continue
             terms = _entry_terms(entry, domain.terms)
             if not terms:
@@ -109,7 +114,7 @@ def match_external(
             if existing is not None and (existing.tier == REQUIRED or tier == OFFERED):
                 continue
             matches[entry.name] = ExternalMatch(
-                entry.name, domain.id, tier, shared or terms[0], entry.path
+                entry.name, domain.id, tier, shared or terms[0], entry.path, entry.source
             )
     return _truncate(matches.values(), config)
 
@@ -127,10 +132,16 @@ def routable_names(
     라우팅되는 skill을 매번 미라우팅으로 보고한다.
     """
     config = parse_external(profile, env=env)
+    if not config.enabled:
+        # routing이 꺼져 있으면 도달 가능한 이름도 없다. 아니면 doctor가 유령 이름을
+        # 도달 가능으로 세어 실제로 죽어 있는 skill의 보고를 지운다.
+        return set()
     names: set[str] = set()
     for domain in config.domains:
         for entry in catalog:
-            if entry.name not in names and _entry_terms(entry, domain.terms):
+            if entry.source not in _EXTERNAL_SOURCES or entry.name in names:
+                continue
+            if _entry_terms(entry, domain.terms):
                 names.add(entry.name)
     return names
 
@@ -207,12 +218,16 @@ def _term_in(term: str, text: str) -> bool:
     부분문자열로 보면 `chart`가 `charting`에, `modifier`가 SwiftUI description의
     `modifiers`에 걸려 무관한 플랫폼 skill이 required까지 올라간다(실측).
 
-    경계는 ASCII 영숫자로만 잡는다. `\\w`를 쓰면 한글이 word 문자라서
+    경계는 ASCII 영숫자로만 잡는다. `\w`를 쓰면 한글이 word 문자라서
     `status bar가`처럼 조사가 붙은 한국어 task 문구가 전부 미매치가 된다.
+
+    복수 접미사는 허용한다. skill description은 term을 복수로 쓰는 쪽이 흔해서
+    (`turbo modules`, `slide decks`, `mcp servers`) 금지하면 정탐 13건이 사라졌다.
+    `charting`/`modifiers`는 여전히 배제된다.
     """
     pattern = _TERM_CACHE.get(term)
     if pattern is None:
-        pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(term)}(?![A-Za-z0-9_])")
+        pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(term)}(?:e?s)?(?![A-Za-z0-9_])")
         _TERM_CACHE[term] = pattern
     return pattern.search(text) is not None
 
