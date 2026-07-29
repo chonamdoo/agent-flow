@@ -609,6 +609,10 @@ def _installed_profile_yaml(project: Path, *, runtime: bool = False) -> set[str]
     return {entry.name for entry in directory.iterdir() if entry.suffix == ".yaml"}
 
 
+def _bundled_profile_yaml() -> set[str]:
+    return {entry.name for entry in (KIT_ROOT / "src" / "agent_flow" / "profiles").glob("*.yaml")}
+
+
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
 def test_install_scopes_profiles_to_the_detected_stack(tmp_path: Path, binary: str) -> None:
     # 두 진입점이 keep-set을 각자 구하므로 둘 다 태운다. 갈라지면 install.mjs로 깐
@@ -620,18 +624,56 @@ def test_install_scopes_profiles_to_the_detected_stack(tmp_path: Path, binary: s
     result = _install_with(binary, project)
 
     assert result.returncode == 0, result.stderr
-    expected = {"_schema.yaml", "generic.yaml", "android.yaml"}
-    assert _installed_profile_yaml(project) == expected
-    # runner가 실제로 읽는 자리도 같아야 한다. 여기가 넓으면 보이는 것과 읽히는
-    # 것이 갈라진다.
-    assert _installed_profile_yaml(project, runtime=True) == expected
+    assert _installed_profile_yaml(project) == {"_schema.yaml", "generic.yaml", "android.yaml"}
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_install_keeps_the_full_runtime_profile_catalog(tmp_path: Path, binary: str) -> None:
+    """반증: runtime 사본이 profile YAML의 실제 read path이자 override의 자원이다.
+
+    여기를 좁히면 `gates --profile ios`가 `unknown profile: ios`로 죽고,
+    `AGENT_FLOW_PROFILE=ios`는 경고만 내고 `generic`으로 조용히 내려앉는다.
+    """
+    project = tmp_path / f"runtime-catalog-{binary}"
+    project.mkdir()
+    (project / "settings.gradle").write_text("pluginManagement { repositories { google() } }\n", encoding="utf-8")
+
+    result = _install_with(binary, project)
+
+    assert result.returncode == 0, result.stderr
+    assert _installed_profile_yaml(project, runtime=True) == _bundled_profile_yaml()
+
+
+def test_installed_runtime_loads_a_profile_the_project_did_not_select(tmp_path: Path) -> None:
+    """`--profile` / `AGENT_FLOW_PROFILE` override가 설치 후에도 살아 있어야 한다."""
+    project = tmp_path / "override-project"
+    project.mkdir()
+    (project / "settings.gradle").write_text("pluginManagement { repositories { google() } }\n", encoding="utf-8")
+    assert _install(project).returncode == 0
+
+    runtime = project / ".agent-flow" / "runtime" / "python"
+    probe = (
+        "from pathlib import Path\n"
+        "from agent_flow.core.profiles import active_profile_ids, load_profile\n"
+        f"ids = active_profile_ids(Path({str(project)!r}), 'ios')\n"
+        "print(ids[0], load_profile(ids[0]).profile_id)\n"
+    )
+    proc = subprocess.run(
+        (os.environ.get("PYTHON", "python3"), "-c", probe),
+        cwd=project,
+        text=True,
+        capture_output=True,
+        check=False,
+        env={**os.environ, "PYTHONPATH": str(runtime)},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "ios ios"
 
 
 def test_install_keeps_profiles_pulled_in_by_required_review(tmp_path: Path) -> None:
-    """반증: react-native는 `android/**` 변경에서 Android skill 표를 끌어온다.
+    """react-native는 `android/**` 변경에서 Android skill 표를 끌어온다.
 
-    그 표의 주인인 `android.yaml`이 빠지면 `profile_routing._table_owner`가
-    `load_profile_payload` 예외를 삼켜 필수 skill이 경고 없이 사라진다.
+    그 표의 주인도 이 프로젝트에 걸리는 profile이므로 보이는 목록에 있어야 한다.
     """
     project = tmp_path / "rn-project"
     project.mkdir()
@@ -642,15 +684,18 @@ def test_install_keeps_profiles_pulled_in_by_required_review(tmp_path: Path) -> 
     result = _install(project)
 
     assert result.returncode == 0, result.stderr
-    expected = {"_schema.yaml", "generic.yaml", "react-native.yaml", "android.yaml"}
-    assert _installed_profile_yaml(project) == expected
-    assert _installed_profile_yaml(project, runtime=True) == expected
+    assert _installed_profile_yaml(project) == {
+        "_schema.yaml",
+        "generic.yaml",
+        "react-native.yaml",
+        "android.yaml",
+    }
 
 
 def test_install_keeps_the_detected_profile_when_another_is_requested(tmp_path: Path) -> None:
-    """반증: worktree에는 kit.json이 없어 런타임이 감지 profile로 되돌아간다.
+    """worktree에는 kit.json이 없어 런타임이 감지 profile로 되돌아간다.
 
-    감지 id의 YAML까지 지우면 `gates --worktree`가 `unknown profile`로 죽는다.
+    그래서 감지 id는 선택하지 않아도 이 프로젝트에 걸린다.
     """
     project = tmp_path / "gradle-as-ios"
     project.mkdir()
@@ -678,9 +723,12 @@ def test_install_scopes_profiles_to_requested_profiles(tmp_path: Path) -> None:
     result = _install(project, "--profile", "android,ios")
 
     assert result.returncode == 0, result.stderr
-    expected = {"_schema.yaml", "generic.yaml", "android.yaml", "ios.yaml"}
-    assert _installed_profile_yaml(project) == expected
-    assert _installed_profile_yaml(project, runtime=True) == expected
+    assert _installed_profile_yaml(project) == {
+        "_schema.yaml",
+        "generic.yaml",
+        "android.yaml",
+        "ios.yaml",
+    }
 
 
 def test_reinstall_prunes_foreign_profiles_and_keeps_custom_ones(tmp_path: Path) -> None:
@@ -719,8 +767,13 @@ def test_reinstall_is_quiet_when_pruning_loses_nothing(tmp_path: Path) -> None:
     (project / "settings.gradle").write_text("pluginManagement { repositories { google() } }\n", encoding="utf-8")
     assert _install(project).returncode == 0
 
-    # runtime 사본은 매 install이 전부 다시 깔고 다시 걷어낸다. 그 걷어냄이 알림을
-    # 내면 재설치마다 같은 줄이 stack 수만큼 반복된다.
+    # 손대지 않은 kit 사본을 지우는 것은 잃는 것이 없다. 그때도 알리면 "정리했다"는
+    # 사실만 매 재설치마다 stack 수만큼 되풀이된다.
+    bundled = KIT_ROOT / "src" / "agent_flow" / "profiles"
+    installed_dir = project / ".agent-flow" / "profiles"
+    for source in bundled.glob("*.yaml"):
+        shutil.copyfile(source, installed_dir / source.name)
+
     result = _install(project)
 
     assert result.returncode == 0, result.stderr

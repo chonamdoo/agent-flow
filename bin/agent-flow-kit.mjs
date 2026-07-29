@@ -227,8 +227,9 @@ function installProject() {
   // 추가한 필드(skill_sources 등)가 기존 설치본에 영영 안 닿는다.
   // 덮기 전에는 사본을 남긴다.
   //
-  // 깔리는 것은 이 프로젝트의 stack + generic + _schema뿐이다. 전부 깔면 남의
-  // stack 정의가 함께 쌓여서 어느 파일이 읽히는지 알 수 없다.
+  // 여기 깔리는 것은 이 프로젝트가 실제로 쓰는 stack + generic + _schema뿐이다.
+  // 전부 깔면 남의 stack 정의가 함께 쌓여서 어느 파일이 이 프로젝트에 걸리는지
+  // 구분할 수 없다.
   const installedProfileNames = installedProfileFileNames(
     activeInstallProfileIds(profile, installSelection),
     path.join(PACKAGED_ASSETS, "profiles"),
@@ -242,6 +243,12 @@ function installProject() {
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "templates"), path.join(agentFlowDir, "templates"), forceManaged, new Set(), true, forceManaged);
   const skillIndex = installProjectSkills(root, agentFlowDir, previousSkillIndex, forceManaged, installSelection);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "scripts"), path.join(agentFlowDir, "scripts"), forceManaged);
+  // 이 runtime 패키지 사본의 profile은 좁히지 않는다. `find_kit_root()`가 설치본에서
+  // 이 디렉터리로 떨어지므로 profile YAML을 실제로 읽는 자리가 여기이고, override는
+  // 설치 때 고르지 않은 profile도 지명할 수 있다 — 좁히면 `gates --profile ios`가
+  // `unknown profile: ios`로 죽고, `AGENT_FLOW_PROFILE=ios`는 경고만 내고 `generic`
+  // 으로 조용히 내려앉는다(`runner.py` `_load_single_profile`). 위 `.agent-flow/profiles/`
+  // 가 "이 프로젝트의 stack"을 보여 주는 자리이고, 이쪽은 override가 참조할 카탈로그다.
   copyBundledDirIfMissingOrSame(
     path.join(KIT_ROOT, "src", "agent_flow"),
     path.join(root, RUNTIME_PYTHON_RELATIVE, "agent_flow"),
@@ -249,18 +256,6 @@ function installProject() {
     new Set(),
     true,
     true,
-  );
-  // runtime 패키지 사본이 profile YAML의 정본이다 — `find_kit_root()`가 설치본에서
-  // 이 디렉터리로 떨어지므로 runner가 실제로 읽는 자리는 여기다. 위쪽
-  // `.agent-flow/profiles/`만 좁히면 보이는 것과 읽히는 것이 갈라진다.
-  //
-  // 반드시 바로 위 패키지 통째 복사 **뒤에** 와야 한다. 그 복사가 배포되는 profile을
-  // 전부 다시 깔기 때문에, 앞으로 옮기면 이 prune이 조용히 무력화된다.
-  pruneUninstalledProfiles(
-    root,
-    path.join(KIT_ROOT, "src", "agent_flow", "profiles"),
-    path.join(root, RUNTIME_PYTHON_RELATIVE, "agent_flow", "profiles"),
-    installedProfileNames,
   );
   copyBundledDirIfMissingOrSame(
     path.join(KIT_ROOT, "templates"),

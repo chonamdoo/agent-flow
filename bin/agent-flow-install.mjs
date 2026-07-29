@@ -1086,8 +1086,9 @@ function install() {
   // 추가한 필드(skill_sources 등)가 기존 설치본에 영영 안 닿는다.
   // 덮기 전에는 사본을 남긴다.
   //
-  // 깔리는 것은 이 프로젝트의 stack + generic + _schema뿐이다. 전부 깔면 남의
-  // stack 정의가 함께 쌓여서 어느 파일이 읽히는지 알 수 없다.
+  // 여기 깔리는 것은 이 프로젝트가 실제로 쓰는 stack + generic + _schema뿐이다.
+  // runtime 패키지 사본(`runtime/python/agent_flow/profiles/`)은 좁히지 않는다 —
+  // 그쪽이 실제 read path이자 override가 참조할 카탈로그다(`agent-flow-kit.mjs` 참조).
   const installedProfileNames = installedProfileFileNames(
     activeInstallProfileIds(profile, installSelection),
     path.join(PACKAGED_ASSETS, "profiles"),
@@ -1096,15 +1097,6 @@ function install() {
     PROJECT,
     path.join(PACKAGED_ASSETS, "profiles"),
     path.join(AF_DIR, "profiles"),
-    installedProfileNames,
-  );
-  // runner가 실제로 읽는 자리는 runtime 패키지 사본이다. 보통은 자식
-  // `runKitInstall()`이 이미 좁혀 두지만 그 호출은 실패해도 경고만 내고 넘어가므로,
-  // 예전 설치본이 남긴 남의 stack profile이 그대로 살아 있을 수 있다.
-  pruneUninstalledProfiles(
-    PROJECT,
-    path.join(PACKAGED_ASSETS, "profiles"),
-    path.join(AF_DIR, "runtime", "python", "agent_flow", "profiles"),
     installedProfileNames,
   );
   const templatesCopied = copyDir(
