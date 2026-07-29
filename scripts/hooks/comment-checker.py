@@ -77,6 +77,63 @@ LOW_VALUE_DETAIL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# 링크는 죽고 주석만 남는다. 이유는 주석에, 참조는 커밋 메시지나 PR에 적는다.
+EXTERNAL_REF_RE = re.compile(
+    r"(https?://|\bfigma\b|\bnotion\b|\bconfluence\b|\bjira\b|\bslack\b)",
+    re.IGNORECASE,
+)
+
+# 사내 문서 번호는 그 문서를 못 보는 사람에게 아무 의미가 없다. 규칙은 남기고 번호만 뺀다.
+DOC_ID_RE = re.compile(r"\b[A-Z]{2,}(?:-[A-Z0-9]+)*-\d{2,}\b")
+# 공개 표준은 문서 번호가 아니라 이름의 일부다.
+DOC_ID_ALLOWED_PREFIXES = frozenset(
+    {
+        "UTF", "ISO", "RFC", "SHA", "MD", "AES", "RSA", "HTTP", "IPV", "TLS", "SSL",
+        "PEP", "PKCS", "API", "CVE", "IEEE", "ANSI", "ECMA",
+    }
+)
+
+# 코드가 이미 말하는 값을 되풀이하면, 값이 바뀔 때 주석만 거짓말로 남는다.
+VALUE_TOKEN_RE = re.compile(
+    r"(#[0-9a-fA-F]{3,8}\b|\brgba?\([\d\s.,%]+\)|\b\d+\s*(?:->|→)\s*\d+\b)"
+)
+# 한국어 정책 문장은 서술형으로 끝난다. 값만 덩그러니 있는 주석과 그것으로 가른다.
+KOREAN_SENTENCE_END_RE = re.compile(r"(다|요|음|함|됨|말\s*것)[.!?]?\s*$")
+
+# 명사형으로 끝나는 짧은 주석은 다음 줄을 우리말로 옮긴 것이다.
+# 앞 글자가 한글이면 `재생성`처럼 복합어의 뒷부분이라 세지 않는다.
+KOREAN_RESTATE_RE = re.compile(
+    r"(?<![가-힣])"
+    r"(초기화|설정|생성|반환|호출|처리|추가|삭제|제거|변환|저장|조회|갱신|적용|연결)"
+    r"[.\s]*$"
+)
+# 재서술은 짧다. 긴 문장이 그 낱말로 끝나는 것은 여러 줄 주석의 중간 줄이다.
+KOREAN_RESTATE_MAX_WORDS = 3
+
+# 과정 메모는 머지되는 순간 소음이 된다.
+PROCESS_NOTE_RE = re.compile(
+    r"(\[\s*temp|temp-test|리뷰\s*반영|요청대로|원복|되돌리지\s*말|재노출\s*시|"
+    r"\d+\s*월\s*배포|배포\s*예정|작성자|담당자)",
+    re.IGNORECASE,
+)
+
+
+def leaks_external_reference(normalized: str, raw: str) -> bool:
+    """문서 번호는 대문자가 신호라 원문으로 본다. `normalized`는 소문자다."""
+    if EXTERNAL_REF_RE.search(normalized):
+        return True
+    for match in DOC_ID_RE.finditer(raw):
+        if match.group(0).split("-")[0].upper() not in DOC_ID_ALLOWED_PREFIXES:
+            return True
+    return False
+
+
+def restates_a_value(normalized: str) -> bool:
+    if not VALUE_TOKEN_RE.search(normalized):
+        return False
+    return not KOREAN_SENTENCE_END_RE.search(normalized)
+
+
 SECTION_RE = re.compile(r"^\s*(?:[-=_*#/\s]{6,}|[-=_*#/\s]{3,}.*[-=_*#/\s]{3,})\s*$")
 TODO_RE = re.compile(r"^\s*(todo|note|fixme)\b", re.IGNORECASE)
 
@@ -375,6 +432,18 @@ def is_low_value_comment(text: str) -> bool:
         return False
     if SECTION_RE.match(normalized):
         return True
+    # 아래 넷은 이유를 함께 적었더라도 남길 수 없다. 참조·값·과정은 주석의 몫이 아니다.
+    if leaks_external_reference(normalized, raw_comment_text(text)):
+        return True
+    if restates_a_value(normalized):
+        return True
+    if PROCESS_NOTE_RE.search(normalized):
+        return True
+    if (
+        KOREAN_RESTATE_RE.search(normalized)
+        and len(normalized.split()) <= KOREAN_RESTATE_MAX_WORDS
+    ):
+        return True
     if ALLOWED_REASON_RE.search(normalized):
         return False
     if is_unqualified_todo_comment(text):
@@ -418,6 +487,10 @@ def is_unqualified_todo_comment(text: str) -> bool:
             re.IGNORECASE,
         )
     )
+
+
+def raw_comment_text(text: str) -> str:
+    return re.sub(r"\s+", " ", strip_comment_marker(text)).strip()
 
 
 def normalize_comment_text(text: str) -> str:
