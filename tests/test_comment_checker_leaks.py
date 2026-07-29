@@ -208,3 +208,87 @@ def test_bare_noun_comment_is_still_blocked_after_the_fix() -> None:
     """불변: 오탐을 고치면서 원래 잡던 것까지 놓치면 안 된다."""
     assert _check("// 뷰모델 초기화").returncode == 2
     assert _check("// 결과 반환").returncode == 2
+
+
+def _check_block(body: str) -> subprocess.CompletedProcess[str]:
+    payload = {
+        "tool_name": "Edit",
+        "hook_event_name": "PostToolUse",
+        "cwd": str(ROOT),
+        "tool_input": {
+            "file_path": "Sample.kt",
+            "old_string": "val a = 1\n",
+            "new_string": f"{body}\nval a = 1\n",
+        },
+    }
+    return subprocess.run(
+        (sys.executable, str(CHECKER)),
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+@pytest.mark.parametrize(
+    "leak",
+    [
+        " * Figma 스펙: Variant=Outlined",
+        " * 색상 #7D8890",
+        " * 리뷰 반영: 순서 교정",
+        " * 뷰모델 초기화",
+    ],
+)
+def test_a_reason_line_does_not_shelter_the_rest_of_the_block(leak: str) -> None:
+    """반증: 블록 첫 줄에 이유 한 줄만 적으면 나머지가 통째로 빠져나간다."""
+    block = "\n".join(
+        (
+            "/* Why: 스크롤 중 딤이 사라지던 회귀가 있어 항상 적용한다.",
+            leak,
+            " */",
+        )
+    )
+    assert _check_block(block).returncode == 2, f"통과했다: {leak}"
+
+
+def test_a_clean_reason_block_is_still_allowed() -> None:
+    """불변: 우회를 막으면서 정당한 블록까지 막으면 규칙이 소음이 된다."""
+    block = "\n".join(
+        (
+            "/* Why: 스크롤 중 딤이 사라지던 회귀가 있어 항상 적용한다.",
+            " * 사용자 제스처로 시작한 스크롤만 예외로 둔다.",
+            " */",
+        )
+    )
+    result = _check_block(block)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "comment",
+    [
+        "// 재시도 간격에 slack을 둬야 서버가 몰리지 않는다.",
+        "// 마감까지 slack time이 없어 동기 호출로 둔다.",
+        "// 작성자만 삭제할 수 있다.",
+        "// 담당자가 없으면 팀 큐로 보낸다.",
+    ],
+)
+def test_common_noun_is_not_treated_as_a_reference(comment: str) -> None:
+    """반증: 일반 낱말을 참조로 보면 정당한 정책 주석이 막힌다."""
+    result = _check(comment)
+    assert result.returncode == 0, f"정당한 주석을 막았다: {comment}\n{result.stderr}"
+
+
+@pytest.mark.parametrize(
+    "comment",
+    [
+        "// 자세한 건 슬랙 스레드 참고",
+        "// https://team.slack.com/archives/C123",
+        "// slack 채널에 정리해 뒀다",
+        "// 작성자: 홍길동",
+        "// 담당자: 김철수",
+    ],
+)
+def test_pointer_form_is_still_blocked(comment: str) -> None:
+    """불변: 오탐을 고치면서 원래 잡던 것까지 놓치면 안 된다."""
+    assert _check(comment).returncode == 2, f"통과했다: {comment}"

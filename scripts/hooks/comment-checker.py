@@ -79,7 +79,12 @@ LOW_VALUE_DETAIL_RE = re.compile(
 
 # 링크는 죽고 주석만 남는다. 이유는 주석에, 참조는 커밋 메시지나 PR에 적는다.
 EXTERNAL_REF_RE = re.compile(
-    r"(https?://|\bfigma\b|\bnotion\b|\bconfluence\b|\bjira\b|\bslack\b)",
+    r"(https?://|\bfigma\b|\bnotion\b|\bconfluence\b|\bjira\b)",
+    re.IGNORECASE,
+)
+# `slack`은 여유·유휴를 뜻하는 일반 낱말이기도 하다. 가리키는 곳일 때만 참조로 본다.
+SLACK_REF_RE = re.compile(
+    r"(slack\.com|슬랙|\bslack\s*(?:링크|스레드|채널|메시지|thread|channel|dm|message))",
     re.IGNORECASE,
 )
 
@@ -111,16 +116,17 @@ KOREAN_RESTATE_RE = re.compile(
 KOREAN_RESTATE_MAX_WORDS = 3
 
 # 과정 메모는 머지되는 순간 소음이 된다.
+# `작성자`·`담당자`는 도메인 낱말이기도 해서 이름을 붙인 형태만 본다.
 PROCESS_NOTE_RE = re.compile(
     r"(\[\s*temp|temp-test|리뷰\s*반영|요청대로|원복|되돌리지\s*말|재노출\s*시|"
-    r"\d+\s*월\s*배포|배포\s*예정|작성자|담당자)",
+    r"\d+\s*월\s*배포|배포\s*예정|(?:작성자|담당자)\s*[:：]\s*\S)",
     re.IGNORECASE,
 )
 
 
 def leaks_external_reference(normalized: str, raw: str) -> bool:
     """문서 번호는 대문자가 신호라 원문으로 본다. `normalized`는 소문자다."""
-    if EXTERNAL_REF_RE.search(normalized):
+    if EXTERNAL_REF_RE.search(normalized) or SLACK_REF_RE.search(normalized):
         return True
     for match in DOC_ID_RE.finditer(raw):
         if match.group(0).split("-")[0].upper() not in DOC_ID_ALLOWED_PREFIXES:
@@ -426,23 +432,34 @@ def strip_comment_marker(line: str) -> str:
     return " ".join(part for part in cleaned if part).strip()
 
 
-def is_low_value_comment(text: str) -> bool:
+def leaks_regardless_of_reason(text: str) -> bool:
+    """이유를 함께 적었더라도 남길 수 없는 것들. 참조·값·과정은 주석의 몫이 아니다.
+
+    `Why:`가 있는 블록 안에서도 같은 판단을 써야 한다. 한 줄만 이유를 적으면 나머지
+    줄이 통째로 빠져나가기 때문이다.
+    """
     normalized = normalize_comment_text(text)
     if not normalized:
         return False
-    if SECTION_RE.match(normalized):
-        return True
-    # 아래 넷은 이유를 함께 적었더라도 남길 수 없다. 참조·값·과정은 주석의 몫이 아니다.
     if leaks_external_reference(normalized, raw_comment_text(text)):
         return True
     if restates_a_value(normalized):
         return True
     if PROCESS_NOTE_RE.search(normalized):
         return True
-    if (
+    return bool(
         KOREAN_RESTATE_RE.search(normalized)
         and len(normalized.split()) <= KOREAN_RESTATE_MAX_WORDS
-    ):
+    )
+
+
+def is_low_value_comment(text: str) -> bool:
+    normalized = normalize_comment_text(text)
+    if not normalized:
+        return False
+    if SECTION_RE.match(normalized):
+        return True
+    if leaks_regardless_of_reason(text):
         return True
     if ALLOWED_REASON_RE.search(normalized):
         return False
@@ -468,6 +485,7 @@ def should_check_comment_in_allowed_block(text: str) -> bool:
     normalized = normalize_comment_text(text)
     return bool(
         SECTION_RE.match(normalized)
+        or leaks_regardless_of_reason(text)
         or is_unqualified_todo_comment(text)
         or is_generic_low_value_comment(text)
     )
