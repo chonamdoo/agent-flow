@@ -58,7 +58,7 @@ def test_unknown_action_is_refused_not_ignored(tmp_path: Path):
     leader, checkout = _pair(tmp_path)
     with pytest.raises(UnknownWorktreeSetupAction):
         run_declared_worktree_actions(
-            leader=leader, checkout=checkout, declared={"run_npm_instal": True}
+            leader=leader, checkout=checkout, declared={"link_node_module": True}
         )
 
 
@@ -184,3 +184,70 @@ def test_unknown_action_warns_but_does_not_stop_the_run(tmp_path: Path, capsys):
     err = capsys.readouterr().err
     assert "link_node_module" in err
     assert "known:" in err
+
+
+def test_actions_run_even_when_no_copy_is_declared(tmp_path: Path, capsys):
+    """반증: copy 목록만 보고 일찍 돌아가면 동작만 선언한 profile이 조용히 무시된다."""
+    from agent_flow import cli as CLI
+
+    ran: list[str] = []
+    CLI._run_worktree_setup_actions(
+        root=tmp_path,
+        checkout=tmp_path,
+        profile={"branching": {"worktree_setup": {"link_node_modules": False}}},
+    )
+    assert "unknown" not in capsys.readouterr().err
+
+
+def test_unknown_key_does_not_cancel_a_valid_action():
+    """반증: 모르는 키 하나가 유효한 동작까지 취소하면, 스키마가 늘 때마다 조용히 멈춘다."""
+    from agent_flow.cli import _declared_worktree_actions
+
+    declared = _declared_worktree_actions(
+        {"branching": {"worktree_setup": {"link_node_modules": True, "timeout": 60}}}
+    )
+    assert declared == {"link_node_modules": True}
+
+
+def test_npm_install_is_not_an_available_action():
+    """불변: 이름만 고르게 해도 그 함수가 package.json의 훅을 실행하면 성질이 깨진다."""
+    assert "run_npm_install" not in WORKTREE_SETUP_ACTIONS
+
+
+def test_exclude_is_registered_when_the_leader_is_itself_a_worktree(tmp_path: Path):
+    """반증: `.git`을 디렉터리로 가정하면 symlink만 남고 항목 등록이 실패한다.
+
+    그 상태의 worktree는 untracked symlink 때문에 정리가 막힌다.
+    """
+    origin = tmp_path / "origin"
+    _repo(origin)
+    nested = tmp_path / "nested"
+    _git("worktree", "add", "-b", "nested", str(nested), cwd=origin)
+    assert (nested / ".git").is_file()
+    (nested / "node_modules").mkdir()
+    checkout = tmp_path / "wt"
+    checkout.mkdir()
+
+    ran = run_declared_worktree_actions(
+        leader=nested, checkout=checkout, declared={"link_node_modules": True}
+    )
+
+    assert ran == ("link_node_modules",)
+    exclude = (origin / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+    assert "/node_modules" in exclude
+
+
+def test_exclude_entry_is_written_once(tmp_path: Path):
+    """불변: worktree를 만들 때마다 같은 줄이 쌓이면 파일이 자란다."""
+    leader, first = _pair(tmp_path)
+    second = tmp_path / "wt2"
+    second.mkdir()
+    (leader / "node_modules").mkdir()
+
+    for checkout in (first, second):
+        run_declared_worktree_actions(
+            leader=leader, checkout=checkout, declared={"link_node_modules": True}
+        )
+
+    exclude = (leader / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+    assert exclude.split().count("/node_modules") == 1

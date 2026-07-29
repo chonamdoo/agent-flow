@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator, Sequence
 
 from agent_flow.artifact import ACTIVE_MARKER, find_active_runs, read_meta, write_meta
 from agent_flow.core.commands import run_safe_command
@@ -2378,8 +2378,16 @@ class UnknownWorktreeSetupAction(ValueError):
 def _register_git_exclude(leader: Path, pattern: str) -> None:
     """`node_modules/`처럼 슬래시로 끝나는 항목은 디렉터리만 맞아서 symlink 자체를
     못 가린다. 루트 고정 패턴을 따로 적어야 worktree 정리가 막히지 않는다.
+
+    worktree를 지울 때 이 항목은 지우지 않는다. 저장소가 공유하는 파일이라 다른
+    worktree가 아직 같은 symlink를 쓰고 있을 수 있다. 추적 중인 경로는 exclude로
+    가려지지 않으므로 남겨도 손해가 없다.
     """
-    exclude = leader / ".git" / "info" / "exclude"
+    # leader가 그 자체로 linked worktree면 `.git`은 디렉터리가 아니라 파일이다.
+    common = Path(_run_git(leader, "rev-parse", "--git-common-dir").stdout.strip())
+    if not common.is_absolute():
+        common = leader / common
+    exclude = common / "info" / "exclude"
     exclude.parent.mkdir(parents=True, exist_ok=True)
     current = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
     if pattern in current.split():
@@ -2401,26 +2409,12 @@ def _link_node_modules(*, leader: Path, checkout: Path) -> bool:
     return True
 
 
-def _run_npm_install(*, leader: Path, checkout: Path) -> bool:
-    """의존성을 새 worktree에 설치한다. 명령은 여기서 정한다 — profile은 켜고 끌 뿐이다."""
-    if not (checkout / "package.json").is_file():
-        return False
-    if (checkout / "node_modules").exists():
-        return False
-    argv = ["npm", "ci"] if (checkout / "package-lock.json").is_file() else ["npm", "install"]
-    result = subprocess.run(
-        argv, cwd=checkout, capture_output=True, text=True,
-        timeout=NPM_INSTALL_TIMEOUT_S, check=False,
-    )
-    return result.returncode == 0
-
-
-NPM_INSTALL_TIMEOUT_S = 600
-
-# profile은 이 이름들만 고를 수 있다. 명령 문자열이 들어올 자리가 없으므로 주입면이 없다.
+# profile은 이 이름들만 고른다. 명령 문자열이 들어올 자리가 없다.
+#
+# npm 설치는 뺐다. 이름만 고르더라도 그 함수가 저장소의 package.json에서
+# preinstall/postinstall을 끌어다 실행하므로 위 성질이 그 동작에서만 깨진다.
 WORKTREE_SETUP_ACTIONS: dict[str, Any] = {
     "link_node_modules": _link_node_modules,
-    "run_npm_install": _run_npm_install,
 }
 
 
@@ -2515,16 +2509,100 @@ def _owned_branch_for_live_worktree(*, root: Path, status: WorktreeStatus) -> st
     return current_branch if current_branch == planned_branch else None
 
 
-def _safe_component(value: str) -> str:
+@dataclass(frozen=True)
+class SlugQuality:
+    """slug와 그것을 믿어도 되는지.
+
+    `partial`이 가장 위험하다 — 그럴듯해 보이지만 task를 대표하지 않는다.
+    비율로 판정하지 않는다. 임계값을 두면 그 숫자가 곧 정책이 된다.
+    """
+
+    slug: str
+    kind: str
+    dropped: tuple[str, ...]
+
+
+def describe_slug(value: str) -> SlugQuality:
     lowered = value.strip().lower()
     safe = re.sub(r"[^a-z0-9._-]+", "-", lowered).strip("-")
+    dropped = tuple(
+        word
+        for word in value.split()
+        if any(char.isalnum() for char in word)
+        and not re.sub(r"[^a-z0-9._-]+", "", word.lower())
+    )
     if not safe or safe.startswith(".") or ".." in safe:
         if not any(char.isalnum() for char in lowered):
             raise ValueError(f"worktree name must contain at least one safe character: {value}")
         # 한글 등 비ASCII task도 기본 worktree 이름으로 쓸 수 있게 안정적인 fallback을 둔다.
         digest = hashlib.sha1(lowered.encode("utf-8")).hexdigest()[:8]
-        safe = f"task-{digest}"
-    return safe
+        return SlugQuality(slug=f"task-{digest}", kind="digest", dropped=dropped)
+    return SlugQuality(
+        slug=safe, kind="partial" if dropped else "ascii", dropped=dropped
+    )
+
+
+DEFAULT_SLUG_MAX_LENGTH = 60
+DEFAULT_SLUG_TIMEOUT_S = 20
+
+
+def delegated_slug(
+    *,
+    task: str,
+    command: Sequence[str],
+    timeout_s: int = DEFAULT_SLUG_TIMEOUT_S,
+    max_length: int = DEFAULT_SLUG_MAX_LENGTH,
+) -> str | None:
+    """profile이 선언한 명령에 이름 짓기를 위임한다. 실패하면 `None`.
+
+    셸을 거치지 않는다 — task는 사용자 문자열이라 명령에 끼워 넣으면 명령이 된다.
+    host 출력은 제안일 뿐이라 slug 규칙으로 다시 검증한다.
+    어떤 실패도 worktree 생성을 막지 않는다.
+    """
+    if not command:
+        return None
+    argv = [task if part == "{task}" else part for part in command]
+    if all(part != task for part in argv):
+        argv = [*argv, task]
+    try:
+        result = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    first_line = next(
+        (line for line in (result.stdout or "").splitlines() if line.strip()), ""
+    )
+    try:
+        quality = describe_slug(first_line.strip().strip("\"'"))
+    except ValueError:
+        return None
+    if quality.kind != "ascii":
+        return None
+    return _truncate_slug(quality.slug, max_length)
+
+
+def _truncate_slug(slug: str, max_length: int) -> str:
+    """길이 제한은 되도록 단어 경계에서 건다. 첫 낱말이 이미 길면 잘라 쓴다."""
+    if len(slug) <= max_length:
+        return slug
+    parts: list[str] = []
+    for part in slug.split("-"):
+        candidate = "-".join([*parts, part])
+        if parts and len(candidate) > max_length:
+            break
+        parts.append(part)
+    return "-".join(parts)[:max_length].strip("-")
+
+
+def _safe_component(value: str) -> str:
+    return describe_slug(value).slug
 
 
 def _feature_worktree_name(value: str) -> str:
