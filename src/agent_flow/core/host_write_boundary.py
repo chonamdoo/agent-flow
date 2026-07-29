@@ -263,7 +263,8 @@ def host_write_boundary_violation(payload: object, project_root: Path) -> str | 
         resolved = _resolve_path(candidate, declared_cwd)
         if resolved is None:
             continue
-        # 심링크를 따르기 전 논리 경로가 worktree 안이면 통과 — 공유 node_modules 심링크 등
+        # worktree 안에서 만든 심링크는 그 worktree의 것으로 본다. 실경로만 보면
+        # leader의 `node_modules`를 공유한 순간 그 안의 실행 파일이 전부 막힌다.
         logical = _logical_path(candidate, declared_cwd)
         if logical is not None and (
             _is_within(logical, current.checkout)
@@ -1038,12 +1039,6 @@ def bound_worktree_for_session(
     if not active:
         return None
     return _load_binding(root, session_id, active)
-
-
-def active_worktree_checkouts(project_root: Path) -> "tuple[ActiveCheckout, ...]":
-    """활성 worktree 목록. worktree-tripwire hook이 sibling 탐지에 쓴다."""
-    root = _validated_project_root(project_root)
-    return _active_checkouts(root)
 
 
 def _is_within(path: Path, root: Path) -> bool:

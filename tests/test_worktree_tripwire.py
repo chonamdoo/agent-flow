@@ -1,19 +1,7 @@
-"""worktree-tripwire.py 및 관련 정적 분석 변경 테스트.
+"""정적 증명을 걷어낸 자리에 tripwire가 실제로 무는지 본다.
 
-테스트 범위:
-1. 이전에 _opaque_command_violation 이 막던 합법 명령(echo $HOME, 히어독, $(date))이
-   이제 정적 분석을 통과하는지 확인한다.
-2. tripwire hook 이 실제 leader 외부 쓰기를 잡는지 확인한다(exit 2).
-3. tripwire hook 이 worktree 내부 쓰기에 반응하지 않는지 확인한다(exit 0).
-4. node_modules 심링크 false positive 회귀 — 심링크가 leader 쪽으로 해소되더라도
-   논리 경로가 worktree 안이면 위반으로 보지 않는다.
-
-탐지 방법과 한계:
-- leader: binding 저장 시점 스냅샷과 현재 git status 를 비교한다. 스냅샷 이후
-  변경만 잡는다.
-- sibling worktree: git status --porcelain 이 깨끗한지 본다. 명령 실행 전에 이미
-  dirty 상태였으면 새 쓰기와 구분하지 못한다(false positive 가능).
-- gitignore 대상 파일이나 git 트리 밖(/tmp 등) 쓰기는 잡지 못한다.
+leader는 binding 시점 스냅샷과 대조하고, 다른 worktree는 명령 전후를 대조한다.
+gitignore 대상과 git 트리 밖 쓰기는 잡지 못한다.
 """
 from __future__ import annotations
 
@@ -21,9 +9,14 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+SRC = str(Path(__file__).resolve().parents[1] / "src")
+if SRC not in sys.path:
+    sys.path.insert(0, SRC)
 
 from agent_flow.artifact import create_run
 from agent_flow.core.host_write_boundary import (
@@ -355,3 +348,49 @@ def test_genuine_sibling_path_still_blocked_after_symlink_fix(tmp_path: Path):
 
     assert violation is not None
     assert "outside the bound worktree" in violation
+
+
+def test_tripwire_ignores_work_that_was_already_in_a_sibling(tmp_path: Path):
+    """반증: 다른 worktree에 진행 중인 작업이 있는 것은 위반이 아니라 기본 상태다.
+
+    그것으로 물면 병렬 worktree를 쓰는 프로젝트에서 모든 명령이 막힌다. 그러면
+    개발자는 hook을 끄지 규칙을 지키지 않는다.
+    """
+    root, statuses, runs = _setup(tmp_path)
+    hooks = _install_tripwire_hook(root)
+
+    # 다른 worktree에서 이미 하던 작업. 이 명령이 만든 것이 아니다.
+    (statuses[1].path / "in-progress.py").write_text("wip\n", encoding="utf-8")
+
+    subprocess.run(
+        ("/usr/bin/python3", "-I", str(hooks / "bind-host-worktree.py")),
+        cwd=root,
+        input=json.dumps(_status_payload(root, statuses[0], runs[0])),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    result = subprocess.run(
+        ("/usr/bin/python3", "-I", str(hooks / "worktree-tripwire.py")),
+        cwd=root,
+        input=json.dumps(_command_payload("echo $HOME", cwd=statuses[0].path)),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_tripwire_does_not_watch_other_worktrees(tmp_path: Path):
+    """불변: 못 잡는 것을 적어 둔다. 안 적으면 잡는 줄 알고 기댄다.
+
+    다른 worktree에는 저마다 세션이 붙어 일하는 중이라, 그쪽 변경이 이 명령에서
+    왔는지 가릴 수 없다. 대신 명시된 경로는 경계가 명령 전에 막는다.
+    """
+    hook = (
+        Path(__file__).resolve().parents[1] / "scripts" / "hooks" / "worktree-tripwire.py"
+    ).read_text(encoding="utf-8")
+    assert "status --porcelain" not in hook
+    assert "assert_leader_unchanged" in hook
