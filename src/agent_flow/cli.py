@@ -65,6 +65,7 @@ from agent_flow.core.local_skills import (
     phase_skill_resolution,
     resolved_profile,
 )
+from agent_flow.core import skill_catalog
 from agent_flow.core.skill_sync import parse_skill_sources, sync_skill_sources
 from agent_flow.core.review import summarize_reviews, write_review_summary
 from agent_flow.core.report import write_run_report
@@ -298,20 +299,22 @@ def main(argv: list[str] | None = None) -> int:
 
     skills_parser = subparsers.add_parser("skills")
     skills_subparsers = skills_parser.add_subparsers(dest="skills_command", required=True)
-    for name in ("sync", "resolve", "prompt", "markers"):
+    for name in ("sync", "resolve", "prompt", "markers", "scan", "doctor"):
         sub = skills_subparsers.add_parser(name)
         sub.add_argument("--root", default=".")
         sub.add_argument("--profile")
         if name == "sync":
             # 갱신 경로가 없으면 움직이는 ref가 최초 1회 받은 커밋에 영구히 굳는다.
             sub.add_argument("--refresh", action="store_true")
-        if name != "sync":
+        if name in {"resolve", "prompt", "markers"}:
             sub.add_argument("--phase", required=True)
             sub.add_argument("--workflow", default="default")
         if name == "markers":
             sub.add_argument("--artifact", required=True)
             # 읽음 증거를 현재 phase로 한정한다. 없으면 과거 기록까지 인정돼 강제가 약해진다.
             sub.add_argument("--since", type=float, default=None)
+        if name == "scan":
+            sub.add_argument("--no-write", action="store_true")
 
 
     spec_parser = subparsers.add_parser("spec")
@@ -2759,6 +2762,24 @@ def _run_skills_command(args: argparse.Namespace, root: Path) -> int:
                 if result.status == "failed":
                     exit_code = 1
         return exit_code
+
+    if args.skills_command in {"scan", "doctor"}:
+        merged = merged_profile_payload(payloads)
+        result = skill_catalog.scan(root, profile=merged)
+        sources = ", ".join(
+            f"{source} {count}" for source, count in sorted(result.by_source().items())
+        )
+        print(f"catalog: {len(result.entries)} skills ({sources}) stamp={result.stamp[:12]}")
+        if args.skills_command == "scan" and not getattr(args, "no_write", False):
+            print(f"lock: {skill_catalog.write_lock(root, result).relative_to(root)}")
+        for finding in result.findings:
+            line = f"{finding.kind} {finding.name}"
+            if finding.detail:
+                line = f"{line} — {finding.detail}"
+            print(line)
+            if finding.fix:
+                print(f"  Fix: {finding.fix}")
+        return 0
 
     if args.skills_command in {"resolve", "prompt", "markers"}:
         try:
