@@ -17,6 +17,7 @@ import { SKILL_DEPENDENCIES, mergeInstallSelectionWithPrevious, resolveInstallSe
 import { OMP_EXTENSION_MARKER, ompHooksExtensionSource } from "../lib/omp-hooks-extension.mjs";
 import { MANAGED_HOOK_SCRIPTS, RETIRED_MANAGED_HOOK_SCRIPTS } from "../lib/managed-hooks.mjs";
 import {
+  activeInstallProfileIds,
   AGENT_FLOW_COMMAND,
   architectureReviewerSkillMarkdown,
   arrayValue,
@@ -31,6 +32,7 @@ import {
   hasChildWithSuffix,
   HOME,
   hookScriptCommand,
+  installedProfileFileNames,
   isPruneBackupName,
   isRetiredHookCommand,
   KIT_ROOT,
@@ -45,9 +47,11 @@ import {
   productBriefSkillMarkdown,
   PRUNE_BACKUP_SUFFIX,
   PRUNE_BACKUP_VERSIONED,
+  PRUNE_NOTICE_PREFIX,
   pruneRetiredHooks,
   pruneRetiredHookScripts,
   pruneRetiredManagedScripts,
+  pruneUninstalledProfiles,
   pushWatchSkillMarkdown,
   READ_TOOL_MATCHER,
   readHookSettings,
@@ -389,8 +393,6 @@ function copyDir(
   return { written, skipped };
 }
 
-const PRUNE_NOTICE_PREFIX = "  - pruned: ";
-
 
 // prune은 source에 없는 파일을 지운다. 사용자가 직접 만든 workflow가 여기
 // 걸리면 경고도 사본도 없이 사라졌다. 같은 내용이 이미 백업돼 있으면 다시
@@ -523,14 +525,14 @@ function installClaudeHooks(root) {
 
 
 
-function upgradeBundledProfiles(root, src, dest) {
+function upgradeBundledProfiles(root, src, dest, keepNames) {
   if (!fs.existsSync(src)) {
-    return { written: 0, skipped: 0 };
+    return { written: 0, skipped: 0, pruned: 0 };
   }
   ensureDir(dest);
   let written = 0;
   for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
-    if (!entry.isFile()) {
+    if (!entry.isFile() || !keepNames.has(entry.name)) {
       continue;
     }
     const content = fs.readFileSync(path.join(src, entry.name), "utf8");
@@ -539,7 +541,10 @@ function upgradeBundledProfiles(root, src, dest) {
     fs.writeFileSync(target, content, "utf8");
     written += 1;
   }
-  return { written, skipped: 0 };
+  // 지운 수를 `skipped`에 실으면 "그대로 둔 파일"과 구분이 안 된다. 배너와
+  // kit.json이 그 값을 그대로 보여 주므로 별 필드로 센다.
+  const pruned = pruneUninstalledProfiles(root, src, dest, keepNames);
+  return { written, skipped: 0, pruned };
 }
 
 
@@ -1078,13 +1083,29 @@ function install() {
     PROJECT,
   );
   // kit이 배포하는 profile은 갱신한다. 사용자 편집을 보호한다고 두면 새 kit이
-  // 추가한 필드(skill_sources 등)가 기존 설치본에 영영 안 닿는다. 다만 지우지는
-  // 않는다 — prune을 켜면 사용자가 만든 custom profile이 함께 날아간다.
+  // 추가한 필드(skill_sources 등)가 기존 설치본에 영영 안 닿는다.
   // 덮기 전에는 사본을 남긴다.
+  //
+  // 깔리는 것은 이 프로젝트의 stack + generic + _schema뿐이다. 전부 깔면 남의
+  // stack 정의가 함께 쌓여서 어느 파일이 읽히는지 알 수 없다.
+  const installedProfileNames = installedProfileFileNames(
+    activeInstallProfileIds(profile, installSelection),
+    path.join(PACKAGED_ASSETS, "profiles"),
+  );
   const profilesCopied = upgradeBundledProfiles(
     PROJECT,
     path.join(PACKAGED_ASSETS, "profiles"),
     path.join(AF_DIR, "profiles"),
+    installedProfileNames,
+  );
+  // runner가 실제로 읽는 자리는 runtime 패키지 사본이다. 보통은 자식
+  // `runKitInstall()`이 이미 좁혀 두지만 그 호출은 실패해도 경고만 내고 넘어가므로,
+  // 예전 설치본이 남긴 남의 stack profile이 그대로 살아 있을 수 있다.
+  pruneUninstalledProfiles(
+    PROJECT,
+    path.join(PACKAGED_ASSETS, "profiles"),
+    path.join(AF_DIR, "runtime", "python", "agent_flow", "profiles"),
+    installedProfileNames,
   );
   const templatesCopied = copyDir(
     path.join(KIT_ROOT, "templates"),
@@ -1242,7 +1263,7 @@ function install() {
   console.log(`  root    : ${AF_DIR}`);
   console.log(`  skills  : ${skillsCopied.written} written, ${skillsCopied.skipped} skipped`);
   console.log(`  workflows: ${workflowsCopied.written} written, ${workflowsCopied.skipped} skipped`);
-  console.log(`  profiles : ${profilesCopied.written} written, ${profilesCopied.skipped} skipped`);
+  console.log(`  profiles : ${profilesCopied.written} written, ${profilesCopied.pruned} pruned`);
   console.log(`  claude  : agent-flow skill ${claudeSkillStatus}`);
   console.log(`  codex   : agent-flow skill ${codexSkillStatus}`);
   console.log(`  omp     : agent-flow skill ${ompSkillStatus}`);

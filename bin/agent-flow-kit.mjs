@@ -12,6 +12,7 @@ import { SKILL_DEPENDENCIES, mergeInstallSelectionWithPrevious, resolveInstallSe
 import { OMP_EXTENSION_MARKER, ompHooksExtensionSource } from "../lib/omp-hooks-extension.mjs";
 import { MANAGED_HOOK_SCRIPTS, RETIRED_MANAGED_HOOK_SCRIPTS } from "../lib/managed-hooks.mjs";
 import {
+  activeInstallProfileIds,
   AGENT_FLOW_COMMAND,
   architectureReviewerSkillMarkdown,
   arrayValue,
@@ -26,6 +27,7 @@ import {
   hasChildWithSuffix,
   HOME,
   hookScriptCommand,
+  installedProfileFileNames,
   isPruneBackupName,
   isRetiredHookCommand,
   KIT_ROOT,
@@ -40,9 +42,11 @@ import {
   productBriefSkillMarkdown,
   PRUNE_BACKUP_SUFFIX,
   PRUNE_BACKUP_VERSIONED,
+  PRUNE_NOTICE_PREFIX,
   pruneRetiredHooks,
   pruneRetiredHookScripts,
   pruneRetiredManagedScripts,
+  pruneUninstalledProfiles,
   pushWatchSkillMarkdown,
   READ_TOOL_MATCHER,
   readHookSettings,
@@ -220,10 +224,21 @@ function installProject() {
     installSelection.copyRootNames,
   );
   // kit이 배포하는 profile은 갱신한다. 사용자 편집을 보호한다고 두면 새 kit이
-  // 추가한 필드(skill_sources 등)가 기존 설치본에 영영 안 닿는다. 다만 지우지는
-  // 않는다 — prune을 켜면 사용자가 만든 custom profile이 함께 날아간다.
+  // 추가한 필드(skill_sources 등)가 기존 설치본에 영영 안 닿는다.
   // 덮기 전에는 사본을 남긴다.
-  upgradeBundledProfiles(root, path.join(PACKAGED_ASSETS, "profiles"), path.join(agentFlowDir, "profiles"));
+  //
+  // 깔리는 것은 이 프로젝트의 stack + generic + _schema뿐이다. 전부 깔면 남의
+  // stack 정의가 함께 쌓여서 어느 파일이 읽히는지 알 수 없다.
+  const installedProfileNames = installedProfileFileNames(
+    activeInstallProfileIds(profile, installSelection),
+    path.join(PACKAGED_ASSETS, "profiles"),
+  );
+  upgradeBundledProfiles(
+    root,
+    path.join(PACKAGED_ASSETS, "profiles"),
+    path.join(agentFlowDir, "profiles"),
+    installedProfileNames,
+  );
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "templates"), path.join(agentFlowDir, "templates"), forceManaged, new Set(), true, forceManaged);
   const skillIndex = installProjectSkills(root, agentFlowDir, previousSkillIndex, forceManaged, installSelection);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "scripts"), path.join(agentFlowDir, "scripts"), forceManaged);
@@ -234,6 +249,18 @@ function installProject() {
     new Set(),
     true,
     true,
+  );
+  // runtime 패키지 사본이 profile YAML의 정본이다 — `find_kit_root()`가 설치본에서
+  // 이 디렉터리로 떨어지므로 runner가 실제로 읽는 자리는 여기다. 위쪽
+  // `.agent-flow/profiles/`만 좁히면 보이는 것과 읽히는 것이 갈라진다.
+  //
+  // 반드시 바로 위 패키지 통째 복사 **뒤에** 와야 한다. 그 복사가 배포되는 profile을
+  // 전부 다시 깔기 때문에, 앞으로 옮기면 이 prune이 조용히 무력화된다.
+  pruneUninstalledProfiles(
+    root,
+    path.join(KIT_ROOT, "src", "agent_flow", "profiles"),
+    path.join(root, RUNTIME_PYTHON_RELATIVE, "agent_flow", "profiles"),
+    installedProfileNames,
   );
   copyBundledDirIfMissingOrSame(
     path.join(KIT_ROOT, "templates"),
@@ -1515,8 +1542,6 @@ function copyBundledDirIfMissingOrSame(
   }
 }
 
-const PRUNE_NOTICE_PREFIX = "  - pruned: ";
-
 
 // prune은 source에 없는 파일을 지운다. 사용자가 직접 만든 workflow가 여기
 // 걸리면 경고도 사본도 없이 사라졌다. 같은 내용이 이미 백업돼 있으면 다시
@@ -2406,13 +2431,13 @@ function installClaudeHooks(root) {
 
 
 
-function upgradeBundledProfiles(root, src, dest) {
+function upgradeBundledProfiles(root, src, dest, keepNames) {
   if (!fs.existsSync(src)) {
     return;
   }
   fs.mkdirSync(dest, { recursive: true });
   for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
-    if (!entry.isFile()) {
+    if (!entry.isFile() || !keepNames.has(entry.name)) {
       continue;
     }
     const content = fs.readFileSync(path.join(src, entry.name), "utf8");
@@ -2420,6 +2445,7 @@ function upgradeBundledProfiles(root, src, dest) {
     backupIfDifferent(root, target, content);
     fs.writeFileSync(target, content, "utf8");
   }
+  pruneUninstalledProfiles(root, src, dest, keepNames);
 }
 
 
