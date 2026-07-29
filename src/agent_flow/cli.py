@@ -2479,25 +2479,28 @@ def _apply_worktree_setup(*, root: Path, checkout: Path) -> None:
     except Exception as exc:  # profile 해석 실패가 worktree 생성을 막을 이유는 없다
         print(f"warning: skipped worktree setup: {_format_cli_error(exc)}", file=sys.stderr)
         return
-    if not declared:
-        _run_worktree_setup_actions(root=root, checkout=checkout, profile=profile)
-        return
-    try:
-        copied = copy_declared_worktree_files(
-            leader=root, checkout=checkout, names=[str(name) for name in declared]
-        )
-    except (ValueError, OSError) as exc:
-        print(f"warning: worktree setup failed: {_format_cli_error(exc)}", file=sys.stderr)
-        return
-    missing = [str(name) for name in declared if str(name) not in copied]
-    if copied:
-        print(f"worktree setup copied: {', '.join(copied)}")
-    if missing:
-        print(
-            f"warning: worktree setup did not copy {', '.join(missing)} "
-            f"(absent in {root}, already present, or a symlink)",
-            file=sys.stderr,
-        )
+    # 복사와 동작은 서로 독립이다. 한쪽이 실패했다고 다른 쪽을 건너뛰면 선언한
+    # 동작이 조용히 빠진다.
+    if declared:
+        try:
+            copied = copy_declared_worktree_files(
+                leader=root, checkout=checkout, names=[str(name) for name in declared]
+            )
+        except (ValueError, OSError) as exc:
+            print(
+                f"warning: worktree setup failed: {_format_cli_error(exc)}",
+                file=sys.stderr,
+            )
+            copied = ()
+        missing = [str(name) for name in declared if str(name) not in copied]
+        if copied:
+            print(f"worktree setup copied: {', '.join(copied)}")
+        if missing:
+            print(
+                f"warning: worktree setup did not copy {', '.join(missing)} "
+                f"(absent in {root}, already present, or a symlink)",
+                file=sys.stderr,
+            )
     _run_worktree_setup_actions(root=root, checkout=checkout, profile=profile)
 
 

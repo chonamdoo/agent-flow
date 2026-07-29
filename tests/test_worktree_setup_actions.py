@@ -251,3 +251,30 @@ def test_exclude_entry_is_written_once(tmp_path: Path):
 
     exclude = (leader / ".git" / "info" / "exclude").read_text(encoding="utf-8")
     assert exclude.split().count("/node_modules") == 1
+
+
+def test_a_failed_copy_does_not_cancel_the_declared_actions(tmp_path: Path, monkeypatch, capsys):
+    """반증: 복사 실패로 일찍 돌아가면 선언한 동작이 경고도 없이 빠진다."""
+    from agent_flow import cli as CLI
+
+    profile = {
+        "branching": {
+            "worktree_setup": {"copy": ["local.properties"], "link_node_modules": True}
+        }
+    }
+    monkeypatch.setattr(CLI, "_find_kit_root", lambda: tmp_path)
+    monkeypatch.setattr(CLI, "_load_profile", lambda kit_root, root: ("p", profile))
+
+    def _boom(**_kwargs):
+        raise OSError("read-only filesystem")
+
+    monkeypatch.setattr(CLI, "copy_declared_worktree_files", _boom)
+    ran: list[dict] = []
+    monkeypatch.setattr(
+        CLI, "_run_worktree_setup_actions", lambda **kwargs: ran.append(kwargs)
+    )
+
+    CLI._apply_worktree_setup(root=tmp_path, checkout=tmp_path)
+
+    assert len(ran) == 1
+    assert "worktree setup failed" in capsys.readouterr().err
