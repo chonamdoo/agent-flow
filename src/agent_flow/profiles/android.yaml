@@ -68,6 +68,54 @@ skills:
       when: Compose/Kotlin/KMP implementation or review scope matches a chrisbanes_skills entry
       missing: "missing local chrisbanes_skills: <skill>"
       path_globs: ["**/*.kt", "**/*.kts"]
+  # 설치된 외부 skill 라우팅. 이름은 여기 적지 않는다 — upstream이 6개월에 이름 35%를
+  # 바꿨고(실측: `camera1-to-camerax` → `camerax`), 이름을 적는 순간 우리 파일이 낡는다.
+  # 대신 스택 어휘를 적고, 판정은 설치된 SKILL.md의 name + description에 대해 한다.
+  external:
+    enabled: false
+    domains:
+      - id: ui-insets-systembars
+        terms: ["edge-to-edge", "insets", "system bar", "status bar", "navigation bar", "cutout", "fullscreen"]
+        phases: [implementation, review]
+      - id: adaptive-formfactor
+        terms: ["adaptive", "window size class", "foldable", "tablet", "large screen", "wear os", "material3"]
+        phases: [implementation, review]
+      - id: navigation
+        terms: ["navigation 3", "navigation3", "nav3", "back stack", "navigation graph", "deep link"]
+        phases: [implementation, review]
+      - id: compose-state-performance
+        terms: ["recomposition", "stability", "strong skipping", "deferred read", "state hoisting",
+                "state holder", "launchedeffect", "disposableeffect", "side effect", "slot api",
+                "modifier", "lazy list", "baseline profile"]
+        path_globs: ["**/*.kt"]
+        phases: [implementation, review]
+      - id: kotlin-concurrency
+        terms: ["coroutine", "coroutinescope", "stateflow", "sharedflow", "statein", "cancellation",
+                "runblocking", "expect/actual", "multiplatform", "value class"]
+        path_globs: ["**/*.kt"]
+        phases: [implementation, review]
+      - id: testing
+        terms: ["testing setup", "robolectric", "androidtest", "instrumentation", "screenshot test",
+                "semantics", "compose ui test"]
+        path_globs: ["**/src/test/**", "**/src/androidTest/**"]
+        phases: [implementation, review]
+      - id: release-shrinker
+        terms: ["r8", "proguard", "shrinker", "minify", "obfuscation", "mapping file", "app size"]
+        path_globs: ["**/proguard-rules.pro", "**/*.pro"]
+        phases: [implementation, review]
+      - id: performance-trace
+        terms: ["perfetto", "trace analysis", "jank", "startup time", "frame timing"]
+        phases: [implementation, review]
+      # 리뷰에서 요구할 이유가 없는 통합 작업. phase축은 우리 workflow의 개념이라
+      # upstream이 바뀌어도 낡지 않는다.
+      - id: platform-sdk
+        terms: ["camerax", "camera2", "play billing", "engage sdk", "app functions", "credential manager",
+                "verified email", "glimmer", "display glasses", "intent redirection", "pendingintent"]
+        phases: [implementation]
+      - id: tooling-cli
+        terms: ["adb", "emulator", "sdkmanager", "agp", "gradle plugin", "perfetto sql", "trace query",
+                "xml to compose", "styles api"]
+        phases: [implementation]
 architecture:
   contract: clean-architecture-core
   platform: android

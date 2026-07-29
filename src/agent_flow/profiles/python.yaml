@@ -42,6 +42,55 @@ skills:
       skills: [python-development-guide, python-api-clean-architecture]
       when: Python/API files change
       missing: "missing local profile: <skill>"
+  # 설치된 외부 skill 라우팅. 이름은 적지 않는다 — Python은 벤더 first-party skill이 사실상
+  # 없어(FastAPI·Pydantic 각 1개, Django/Flask/SQLAlchemy 0개) 이름 목록은 대부분 빈 칸이 되고,
+  # 실제 공급원인 커뮤니티 배포본은 이름이 더 자주 바뀐다. 대신 스택 어휘로 판정한다.
+  external:
+    enabled: false
+    domains:
+      - id: async-concurrency
+        terms: ["asyncio", "coroutine", "async def", "await", "event loop", "asgi", "uvicorn",
+                "celery", "background task", "blocking call", "thread pool", "task group",
+                "structured concurrency", "async context manager", "graceful shutdown"]
+        phases: [implementation, review]
+      # mypy(정적)와 pydantic(런타임)은 같은 계약을 다른 시점에 강제한다. 어휘가 겹쳐서
+      # 따로 두면 한 skill을 두 domain이 중복으로 끌어온다.
+      - id: typing-validation
+        terms: ["type hint", "type annotation", "type checker", "type checking", "static type",
+                "mypy", "typeddict", "protocol class", "generic type", "type stub", "py.typed",
+                "ruff", "pydantic", "basemodel", "field validator", "data validation",
+                "json schema", "dataclass", "serialization"]
+        phases: [implementation, review]
+      - id: orm-migrations
+        terms: ["sqlalchemy", "alembic", "database migration", "django orm", "session maker",
+                "n+1 query", "connection pool", "repository pattern"]
+        path_globs: ["**/migrations/**", "**/alembic/**"]
+        phases: [implementation, review]
+      - id: web-api-framework
+        terms: ["fastapi", "django", "flask", "litestar", "starlette", "rest endpoint", "openapi",
+                "dependency injection", "auth middleware", "rate limit", "pagination", "httpx"]
+        phases: [implementation, review]
+      - id: pytest-suite
+        terms: ["pytest", "conftest", "fixture", "monkeypatch", "mocking", "test double",
+                "parametrized test", "coverage report", "flaky test", "integration test"]
+        path_globs: ["**/tests/**", "**/conftest.py", "**/test_*.py"]
+        phases: [implementation, review]
+      # 아래 셋은 리뷰에서 요구할 이유가 없다. 심사 대상이 우리 코드가 아니라 도구와 산출물이다.
+      - id: packaging-tooling
+        terms: ["pyproject", "uv lock", "lock file", "poetry", "setuptools", "wheel build",
+                "editable install", "virtual environment", "dependency resolution"]
+        path_globs: ["pyproject.toml", "uv.lock", "requirements*.txt"]
+        phases: [implementation]
+      # `pdf`/`excel` 단독은 canvas-design·math-olympiad·code-review-excellence를 끌어온다(부분
+      # 문자열 실측). 문서 계열은 확장자와 구절로만 적는다.
+      - id: document-generation
+        terms: ["spreadsheet", "excel file", "excel workbook", "xlsx", "docx", "pptx", "csv",
+                "pivot table", "formula", "chart", "presentation", "slide deck", "word document",
+                "document generation", "pdf form", "pdf file"]
+        phases: [implementation]
+      - id: mcp-server
+        terms: ["mcp server", "model context protocol", "tool schema", "stdio transport", "json-rpc"]
+        phases: [implementation]
 architecture:
   contract: clean-architecture-core
   platform: python

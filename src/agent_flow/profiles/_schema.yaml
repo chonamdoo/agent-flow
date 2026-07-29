@@ -74,6 +74,21 @@ optional:
         task_terms: ["optional lowercase substring matched against the run task"]
         path_globs: ["optional changed-file glob"]
         missing: "missing local <skill-group>: <skill>"
+    # Installed external skills. We never enumerate their names here: upstream
+    # renames and deletions make any name list stale (measured: 35% name churn in
+    # six months for android/skills). The consumer declares vocabulary and scope;
+    # the runtime matches it against the `name` + `description` every installed
+    # SKILL.md carries. `pins` exists only for a measured vocabulary gap.
+    external:
+      enabled: "bool; when false the vocabulary is parsed but never routed"
+      required_max: "int; deterministic truncation of the required tier"
+      offered_max: "int; deterministic truncation of the offered tier"
+      pins: ["exact skill name to force into the required tier when matched by a domain"]
+      domains:
+        - id: "stable domain id owned by this repo, not by upstream"
+          terms: ["lowercase substring matched against both the run task and the skill text"]
+          path_globs: ["optional changed-file glob that activates this domain"]
+          phases: ["implementation | review"]
 
   architecture:
     # Canonical clean architecture role mapping. Paths are platform-native,

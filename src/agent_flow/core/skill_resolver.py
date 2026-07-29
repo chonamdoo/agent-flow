@@ -233,8 +233,11 @@ def resolve_phase_skills(
     host: str | None = None,
     env: dict[str, str] | None = None,
 ) -> SkillResolution:
-    """phase 선언 + frontmatter 선언 + profile 표를 합쳐 해석한다."""
+    """phase 선언 + frontmatter 선언 + profile 표/어휘를 합쳐 해석한다."""
+    # 지연 import: 두 모듈이 이 모듈을 되짚어 참조한다.
     from agent_flow.core.profile_routing import routed_profile_skills
+    from agent_flow.core.skill_matching import REQUIRED as EXTERNAL_REQUIRED
+    from agent_flow.core.skill_matching import match_external
 
     roots = skill_roots(project_root, profile=profile, host=host, env=env)
     declared = phase_skills or PhaseSkills()
@@ -261,6 +264,24 @@ def resolve_phase_skills(
         if routed.name not in required_names:
             required_names.append(routed.name)
             routed_only.add(routed.name)
+
+    # 어휘 조인으로 붙는 설치 skill. 이름을 우리가 적지 않으므로 `routed_only`(host 전용
+    # 해석)에 넣는다 — 다른 host의 사본으로 충족시키면 프롬프트가 엉뚱한 파일을 가리킨다.
+    for match in match_external(
+        profile,
+        catalog,
+        phase_id=phase_id,
+        changed_files=changed_files,
+        task_text=task_text,
+        env=env,
+    ):
+        if match.name in required_names or match.name in optional_names:
+            continue
+        if match.tier == EXTERNAL_REQUIRED:
+            required_names.append(match.name)
+            routed_only.add(match.name)
+        else:
+            optional_names.append(match.name)
 
     required_names = _expand_dependencies(required_names, catalog)
     optional_names = [name for name in optional_names if name not in required_names]
