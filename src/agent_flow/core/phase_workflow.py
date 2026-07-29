@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from importlib import resources
 from pathlib import Path
 import re
 from typing import Any
@@ -41,20 +42,48 @@ class PhaseWorkflowDefinition:
         }
 
 
-def find_kit_root() -> Path:
-    """Locate the agent-flow kit root (contains workflows/ and profiles/)."""
-    here = Path(__file__).resolve()
-    candidates = [
-        parent
-        for parent in here.parents
-        if (parent / "workflows").is_dir() and (parent / "profiles").is_dir()
-    ]
-    for candidate in candidates:
-        if (candidate / "pyproject.toml").is_file() or (candidate / "package.json").is_file():
-            return candidate
-    if candidates:
-        return candidates[0]
+def find_kit_root(start: Path | None = None) -> Path:
+    """Locate the agent-flow kit root.
+
+    kit을 **자산 배치**로 알아보면 배치가 곧 정의가 된다. 예전 술어는
+    `workflows/`와 `profiles/`를 둘 다 가진 조상이었고, 그래서 그 두 디렉터리를
+    한 벌로 줄이는 순간 탐지가 함께 깨졌다. 대신 kit 고유 서명을 본다.
+
+    `pyproject.toml`이나 `package.json` 하나만으로는 부족하다 — Python과 Node를
+    함께 쓰는 평범한 사용자 프로젝트가 전부 후보가 되고, 그러면 남의 워크플로를
+    돌린다. 설치된 패키지 트리에는 그 서명이 없으므로 패키지 디렉터리로 떨어진다.
+    """
+    here = (start or Path(__file__)).resolve()
+    for parent in here.parents:
+        if (parent / "pyproject.toml").is_file() and (
+            parent / "bin" / "agent-flow-kit.mjs"
+        ).is_file():
+            return parent
+    package_dir = package_root()
+    if package_dir is not None:
+        return package_dir
     raise RuntimeError("Could not locate agent-flow kit root from " + str(here))
+
+
+def package_root() -> Path | None:
+    """설치된 `agent_flow` 패키지 디렉터리. 워크플로 정의의 정본이 사는 자리다."""
+    try:
+        root = resources.files("agent_flow")
+    except (ImportError, ModuleNotFoundError, TypeError):
+        return None
+    try:
+        return Path(str(root))
+    except TypeError:
+        return None
+
+
+def _packaged_workflow_path(name: str) -> Path | None:
+    package_dir = package_root()
+    if package_dir is None:
+        return None
+    path = package_dir / "workflows" / f"{name}.yaml"
+    ensure_child_path(package_dir / "workflows", path, "workflow")
+    return path if path.is_file() else None
 
 
 def load_phase_workflow_definition(kit_root: Path, name: str) -> PhaseWorkflowDefinition:
@@ -62,7 +91,12 @@ def load_phase_workflow_definition(kit_root: Path, name: str) -> PhaseWorkflowDe
     path = kit_root / "workflows" / f"{name}.yaml"
     ensure_child_path(kit_root / "workflows", path, "workflow")
     if not path.exists():
-        raise FileNotFoundError(f"Workflow not found: {path}")
+        # 정의의 정본은 설치 가능한 패키지 자원이다. kit root 사본은 설치본이
+        # 덮어쓸 수 있는 자리라 먼저 보지만, 없다고 실패하면 그 사본을 지울 수 없다.
+        packaged = _packaged_workflow_path(name)
+        if packaged is None:
+            raise FileNotFoundError(f"Workflow not found: {path}")
+        path = packaged
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     if not isinstance(raw, dict):
         raise ValueError(f"workflow {path}: top-level must be a mapping")

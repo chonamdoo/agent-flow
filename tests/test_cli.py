@@ -1405,7 +1405,7 @@ class CliTest(unittest.TestCase):
     def test_source_profiles_use_argv_command_lists(self) -> None:
         import yaml
 
-        profiles_root = Path(__file__).resolve().parents[1] / "profiles"
+        profiles_root = Path(__file__).resolve().parents[1] / "src" / "agent_flow" / "profiles"
         for profile_path in profiles_root.glob("*.yaml"):
             if profile_path.name.startswith("_"):
                 continue
@@ -4017,7 +4017,7 @@ if (codexContext !== undefined) {
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            source_workflow = (Path(__file__).resolve().parents[1] / "workflows" / "full-feature.yaml").read_text(encoding="utf-8")
+            source_workflow = (Path(__file__).resolve().parents[1] / "src" / "agent_flow" / "workflows" / "full-feature.yaml").read_text(encoding="utf-8")
             installed_workflow = (project_root / ".agent-flow" / "workflows" / "full-feature.yaml").read_text(encoding="utf-8")
             self.assertEqual(installed_workflow, source_workflow)
             prompt = (project_root / ".agent-flow" / "prompts" / "product-brief.md").read_text(encoding="utf-8")

@@ -164,7 +164,7 @@ def test_profile_without_a_test_gate_falls_back(tmp_path):
     "workflow,phase_id",
     [("full-feature", "red"), ("bugfix", "implement-fix")],
 )
-@pytest.mark.parametrize("copy", ["workflows", "src/agent_flow/workflows"])
+@pytest.mark.parametrize("copy", ["src/agent_flow/workflows"])
 def test_workflows_require_the_regression_markers(workflow, phase_id, copy):
     """`bugfix.yaml`에는 red phase도 required_markers도 0개였다."""
     data = yaml.safe_load((REPO / copy / f"{workflow}.yaml").read_text(encoding="utf-8"))

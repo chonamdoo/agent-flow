@@ -603,11 +603,11 @@ def test_android_upstream_skills_are_not_installed_or_vendored(tmp_path: Path) -
 
 def test_android_skill_policy_is_active_host_local_only() -> None:
     profile_paths = [
-        KIT_ROOT / "profiles" / "android.yaml",
+        KIT_ROOT / "src" / "agent_flow" / "profiles" / "android.yaml",
         KIT_ROOT / "src" / "agent_flow" / "profiles" / "android.yaml",
     ]
     policy_paths = [
-        KIT_ROOT / "profiles" / "_schema.yaml",
+        KIT_ROOT / "src" / "agent_flow" / "profiles" / "_schema.yaml",
         KIT_ROOT / "templates" / "_shared" / "review" / "android-skills.md",
         KIT_ROOT / "templates" / "_shared" / "review" / "android-chrisbanes.md",
         KIT_ROOT / "skills" / "android-code-review" / "SKILL.md",
@@ -663,7 +663,7 @@ def test_profile_yaml_install_list_matches_fallback_map(tmp_path: Path) -> None:
     import re
 
     kit = Path(__file__).resolve().parents[1]
-    yaml_text = (kit / "profiles" / "android.yaml").read_text(encoding="utf-8")
+    yaml_text = (kit / "src" / "agent_flow" / "profiles" / "android.yaml").read_text(encoding="utf-8")
     block = yaml_text.split("\nskills:\n", 1)[1].split("\n  required_review:", 1)[0]
     from_yaml = sorted(re.findall(r"^\s+- ([A-Za-z0-9._-]+)$", block, re.M))
 

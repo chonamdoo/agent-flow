@@ -2305,8 +2305,17 @@ def test_multi_review_packaged_prompt_survives_project_templates_dir(tmp_path: P
     assert "Review Angle" in jobs[0].prompt
 
 
+def _packaged_profiles() -> list[Path]:
+    """정의는 패키지 안에 산다. 없는 디렉터리를 glob하면 0개가 나올 뿐 예외가 없어서,
+    경로가 틀리면 이 테스트가 아무것도 검사하지 않은 채 통과한다."""
+    root = KIT_ROOT / "src" / "agent_flow" / "profiles"
+    paths = sorted(root.glob("*.yaml"))
+    assert paths, f"profile 정의를 찾지 못했다: {root}"
+    return paths
+
+
 def test_packaged_profile_review_prompts_exist():
-    for profile_path in (KIT_ROOT / "profiles").glob("*.yaml"):
+    for profile_path in _packaged_profiles():
         if profile_path.name.startswith("_"):
             continue
         text = profile_path.read_text(encoding="utf-8")
