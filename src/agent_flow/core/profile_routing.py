@@ -1,21 +1,18 @@
 """Profile → phase → 변경 범위 기반 skill routing.
 
-우리가 쓰지 않는 upstream skill(google/android, chrisbanes)은 frontmatter에
-`workflowPhases` 같은 agent-flow 선언이 없다. 그 파일을 우리가 고칠 수 없으니
-활성화 선언을 **profile 쪽에** 둔다. 이 모듈은 그 선언을 읽어 skill 이름을
-내놓고, 실제 해석·프롬프트·read gate는 `skill_resolver`가 하던 그대로 한다.
+이 모듈은 **우리가 이름을 소유한 skill**만 다룬다 — repo가 배포하는 bundled skill이다.
+설치된 외부 skill은 이름을 우리가 정하지 않으므로 `skill_matching`이 어휘로 라우팅한다.
 
 ## Routing contract
 
 입력은 셋이다.
 
 1. **profile** — `active_profile_ids()`가 고른 profile들의 합본. 비활성 profile의
-   표는 입력에 아예 없다. Python 프로젝트에서 Android skill이 나오지 않는 이유가
+   선언은 입력에 아예 없다. Python 프로젝트에서 Android skill이 나오지 않는 이유가
    이것이고, 다른 층의 조건문이 아니다.
-2. **phase_id** — 표의 섹션이 phase 집합을 정한다. `implementation:`은 코드를
-   쓰는 phase, `review:`는 판정하는 phase다. 한 엔트리가 두 섹션에 다 있으면
-   두 집합 모두에서 활성화된다.
-3. **changed_files / task_text** — 엔트리의 `task_terms` / `path_globs`.
+2. **phase_id** — 코드를 쓰는 phase(`IMPLEMENTATION_PHASES`)와 판정하는
+   phase(`REVIEW_PHASES`)를 가른다.
+3. **changed_files / task_text** — 그룹의 `task_terms` / `path_globs`.
    `skill_resolver`의 selector matcher를 그대로 쓴다. 규칙이 둘로 갈라지면
    frontmatter로 붙은 skill과 profile로 붙은 skill이 다른 기준으로 활성화된다.
 
@@ -25,46 +22,25 @@
 
 ## 선언 형식
 
-`profiles/<id>.yaml`의 `skills.required_review[]`가 그룹을 선언한다.
-
 ```yaml
-- group: android_skills
-  skills_from: android_skills.review   # <표>.<섹션>
-  path_globs: ["**/*.kt", "**/*.kts"]  # 그룹 전체 게이트(선택)
-  missing: "missing local android_skills: <skill>"
-- group: android-native-escalation
-  profiles: [android]                  # 다른 profile의 표를 끌어온다
-  skills_from: android_skills.review
-  path_globs: ["android/**"]
+- group: profile
+  skills: [android-code-review, android-clean-architecture]
+  path_globs: ["**/*.kt", "**/*.kts"]
+  missing: "missing local profile: <skill>"
 ```
 
-표의 엔트리는 사람이 읽는 `when:` 산문과 기계가 읽는 선택자를 함께 갖는다.
-산문은 근거이고 판정에 쓰이지 않는다 — 판정은 선택자만 본다.
+## 선택자 없는 그룹은 활성화되지 않는다
 
-```yaml
-implementation:
-  - skill: edge-to-edge
-    when: system bars, insets, or cutout behavior changes
-    task_terms: [edge-to-edge, insets, status bar]
-    path_globs: ["**/*.kt"]
-```
-
-## 선택자 없는 엔트리는 활성화되지 않는다
-
-`skill_resolver`의 `selector_declared` 규칙과 같다. 선택자를 안 적은 엔트리를
-"항상 활성화"로 읽으면 Android 파일을 한 줄도 안 건드린 run에서 표 전체가
-required가 된다. 표는 크고 host 설치는 사용자 몫이라, 그 순간 모든 run이
-`skill-availability: degraded`로 물든다.
+`skill_resolver`의 `selector_declared` 규칙과 같다. 선택자를 안 적은 선언을
+"항상 활성화"로 읽으면 그 파일을 한 줄도 안 건드린 run에서도 required가 된다.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Sequence
 
-from agent_flow.core.profiles import load_profile_payload
-
-# 표의 섹션이 곧 phase 집합이다. 합집합은 `skill_resolver.CODE_PHASES`와 같아야
-# 한다 — read gate가 걸리지 않는 phase에 skill을 밀어 넣으면 프롬프트만 길어진다.
+# 합집합은 `skill_resolver.CODE_PHASES`와 같아야 한다 — read gate가 걸리지 않는 phase에
+# skill을 밀어 넣으면 프롬프트만 길어진다.
 IMPLEMENTATION_PHASES = frozenset(
     {
         "implement",
@@ -78,10 +54,7 @@ IMPLEMENTATION_PHASES = frozenset(
     }
 )
 REVIEW_PHASES = frozenset({"final-review", "review", "multi-review", "architecture-review"})
-_SECTION_PHASES = {
-    "implementation": IMPLEMENTATION_PHASES,
-    "review": REVIEW_PHASES,
-}
+
 
 _MISSING_PLACEHOLDER = "<skill>"
 
@@ -110,13 +83,7 @@ def routed_profile_skills(
     for group in _required_review_groups(profile):
         if not _selectors_match(group, changed_files=changed_files, task_text=task_text):
             continue
-        for skill in _group_skills(
-            group,
-            profile,
-            phase_id=phase_id,
-            changed_files=changed_files,
-            task_text=task_text,
-        ):
+        for skill in _group_skills(group, phase_id=phase_id):
             routed.setdefault(skill.name, skill)
     return tuple(routed.values())
 
@@ -133,39 +100,20 @@ def _required_review_groups(profile: dict) -> list[dict]:
 
 def _group_skills(
     group: dict,
-    profile: dict,
     *,
     phase_id: str,
-    changed_files: Sequence[str],
-    task_text: str,
 ) -> list[RoutedSkill]:
     group_id = str(group.get("group", "")).strip() or "profile"
-    missing_report = str(group.get("missing", "")).strip()
     literal = _string_list(group.get("skills"))
-    if literal:
-        # 표를 안 가리키는 그룹은 엔트리 선택자가 없다. 그룹 자신이 범위를
-        # 선언하지 않으면 활성화 근거가 없어 코드 phase 전체에 얹힌다 — 기존
-        # profile들은 선언만 해 둔 상태라 여기서 조용히 새 게이트가 생긴다.
-        if not _has_selectors(group):
-            return []
-        if phase_id not in IMPLEMENTATION_PHASES and phase_id not in REVIEW_PHASES:
-            return []
-        return [RoutedSkill(name, group_id, "", missing_report) for name in literal]
-    reference = str(group.get("skills_from", "")).strip()
-    if not reference:
+    if not literal:
         return []
-    owner = _table_owner(group, profile)
-    if owner is None:
+    # 그룹 자신이 범위를 선언하지 않으면 활성화 근거가 없어 코드 phase 전체에 얹힌다.
+    if not _has_selectors(group):
         return []
-    return _table_skills(
-        owner,
-        reference,
-        group_id=group_id,
-        missing_report=missing_report,
-        phase_id=phase_id,
-        changed_files=changed_files,
-        task_text=task_text,
-    )
+    if phase_id not in IMPLEMENTATION_PHASES and phase_id not in REVIEW_PHASES:
+        return []
+    missing_report = str(group.get("missing", "")).strip()
+    return [RoutedSkill(name, group_id, "", missing_report) for name in literal]
 
 
 def _has_selectors(declaration: dict) -> bool:
@@ -173,76 +121,6 @@ def _has_selectors(declaration: dict) -> bool:
         _string_list(declaration.get("task_terms"))
         or _string_list(declaration.get("path_globs"))
     )
-
-
-def _table_owner(group: dict, profile: dict) -> dict | None:
-    """표를 소유한 payload. `profiles:`가 있으면 그 profile을 끌어온다.
-
-    React Native의 `android/` native 변경이 Android 표를 쓰는 경로다. 이때
-    끌어오는 것은 **표뿐**이고 그 profile의 gate나 install 목록은 따라오지 않는다.
-    """
-    escalated = _string_list(group.get("profiles"))
-    if not escalated:
-        return profile
-    for profile_id in escalated:
-        try:
-            payload = load_profile_payload(profile_id)
-        except Exception:
-            continue
-        if isinstance(payload, dict):
-            return payload
-    return None
-
-
-def _table_skills(
-    payload: dict,
-    reference: str,
-    *,
-    group_id: str,
-    missing_report: str,
-    phase_id: str,
-    changed_files: Sequence[str],
-    task_text: str,
-) -> list[RoutedSkill]:
-    table_name, separator, section = reference.partition(".")
-    if not table_name:
-        return []
-    if separator != ".":
-        # 섹션을 안 적으면 phase가 고른다. `implementation`과 `review`를 그룹 두
-        # 개로 쪼개면 같은 표를 두 번 선언하게 되고 둘이 어긋난다.
-        resolved = _phase_section(phase_id)
-        if resolved is None:
-            return []
-        section = resolved
-    elif not section:
-        return []
-    if phase_id not in _SECTION_PHASES.get(section, frozenset()):
-        return []
-    table = payload.get(table_name)
-    if not isinstance(table, dict):
-        return []
-    entries = table.get(section)
-    if not isinstance(entries, list):
-        return []
-    source = str(table.get("source", "")).strip()
-    routed: list[RoutedSkill] = []
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        name = str(entry.get("skill", "")).strip()
-        if not name:
-            continue
-        if not _selectors_match(entry, changed_files=changed_files, task_text=task_text):
-            continue
-        routed.append(RoutedSkill(name, group_id, source, missing_report))
-    return routed
-
-
-def _phase_section(phase_id: str) -> str | None:
-    for section, phases in _SECTION_PHASES.items():
-        if phase_id in phases:
-            return section
-    return None
 
 
 def _selectors_match(

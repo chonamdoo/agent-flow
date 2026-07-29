@@ -18,11 +18,31 @@ import time
 from pathlib import Path
 
 READ_TOOL_RE = ("read", "read_file", "view", "cat")
+# Skill tool은 파일을 읽지 않는다. Claude Code 문서가 "does not re-read the skill file
+# on later turns"라고 명시하고, 실측 transcript에서도 Skill tool 세션의 SKILL.md Read는
+# 0건이었다. 경로만 관측하면 정상 사용이 미사용으로 판정된다.
+SKILL_TOOLS = ("skill",)
+# Codex에는 Read tool이 없다. skill을 읽을 때 셸로 파일을 연다.
+SHELL_TOOLS = (
+    "bash",
+    "shell",
+    "run_terminal_cmd",
+    "execute_command",
+    "local_shell",
+    "terminal",
+)
 LOG_RELATIVE = Path(".agent-flow") / "skills-read.jsonl"
 # `:10-40`, `:10`, `:50-`, `:10+5`, `:raw`, `:raw:2-4`, `:conflicts` 같은 읽기
 # 선택자만 꼬리로 인정한다. 그 외 꼬리는 `SKILL.md.bak`처럼 다른 파일이다.
 _SELECTOR_RE = re.compile(
     r"(?::(?:raw|conflicts|\d+(?:[-+]\d+)?-?)(?:,\d+(?:[-+]\d+)?-?)*)+"
+)
+_SKILL_URI_PREFIX = "skill://"
+_SAFE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+_SHELL_SKILL_RE = re.compile(r"((?:~|/|\.{1,2}/)?[^\s'\"|;&<>]*SKILL\.md)")
+# 파일 내용을 실제로 출력하는 커맨드만. `ls`/`stat`/`echo`/`rm`은 읽기가 아니다.
+_SHELL_READER_RE = re.compile(
+    r"(?<!\w)(cat|bat|head|tail|less|more|sed|awk|grep|rg|nl|fold|strings)(?!\w)"
 )
 
 
@@ -33,23 +53,35 @@ def main() -> int:
         return 0
 
     tool = str(find_first(payload, ("tool_name", "tool")) or "").lower()
-    if tool and not any(candidate == tool for candidate in READ_TOOL_RE):
+    observed = tool in SKILL_TOOLS or tool in SHELL_TOOLS or not tool or tool in READ_TOOL_RE
+    if not observed:
         return 0
 
     tool_input = find_first(payload, ("tool_input", "input", "parameters"))
     if not isinstance(tool_input, dict):
         return 0
-    raw_path = first_string(tool_input, ("file_path", "path", "filename", "target"))
-    if not raw_path:
-        return 0
-
-    candidate = Path(_strip_selector(raw_path))
-    if candidate.name != "SKILL.md":
-        return 0
 
     cwd = str(find_first(payload, ("cwd", "workspace", "project_root")) or os.getcwd())
     project_root = find_project_root(Path(cwd))
     if project_root is None:
+        return 0
+    log_path = project_root / LOG_RELATIVE
+
+    if tool in SKILL_TOOLS:
+        return append_name(log_path, first_string(tool_input, ("skill", "name")))
+
+    raw_path = first_string(tool_input, ("file_path", "path", "filename", "target"))
+    if not raw_path and tool in SHELL_TOOLS:
+        raw_path = shell_skill_path(first_string(tool_input, ("command", "cmd", "script")))
+    if not raw_path:
+        return 0
+
+    if raw_path.startswith(_SKILL_URI_PREFIX):
+        # OMP는 `read skill://<name>`으로 연다. 파일 경로가 오지 않는다.
+        return append_name(log_path, raw_path[len(_SKILL_URI_PREFIX):])
+
+    candidate = Path(_strip_selector(raw_path))
+    if candidate.name != "SKILL.md":
         return 0
 
     resolved = candidate if candidate.is_absolute() else (Path(cwd) / candidate)
@@ -60,8 +92,29 @@ def main() -> int:
     if not resolved.is_file():
         return 0
 
-    append_entry(project_root / LOG_RELATIVE, resolved)
+    append_entry(log_path, resolved)
     return 0
+
+
+def append_name(log_path: Path, raw: str) -> int:
+    """이름으로만 관측되는 경로. plugin skill은 `<plugin>:<skill>`로 스코프된다."""
+    name = raw.strip().split("/", 1)[0].rsplit(":", 1)[-1]
+    if not name or not _SAFE_NAME_RE.fullmatch(name):
+        return 0
+    append_record(log_path, {"skill": name})
+    return 0
+
+
+def shell_skill_path(command: str) -> str:
+    """셸로 파일을 **읽은** 경우만 증거다.
+
+    경로가 커맨드에 등장한다는 것만으로 인정하면 `ls`, `stat`, `echo`, `rm`이 게이트를
+    통과시킨다 — 파일을 열지 않고 읽음 증거를 만들 수 있다.
+    """
+    if not _SHELL_READER_RE.search(command):
+        return ""
+    match = _SHELL_SKILL_RE.search(command)
+    return match.group(1) if match else ""
 
 
 def _strip_selector(raw: str) -> str:
@@ -83,11 +136,13 @@ def _strip_selector(raw: str) -> str:
 
 
 def append_entry(log_path: Path, skill_path: Path) -> None:
+    append_record(log_path, {"path": str(skill_path)})
+
+
+def append_record(log_path: Path, record: dict) -> None:
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(
-            {"path": str(skill_path), "at": time.time()}, ensure_ascii=False, sort_keys=True
-        )
+        line = json.dumps({**record, "at": time.time()}, ensure_ascii=False, sort_keys=True)
         with log_path.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
     except OSError:

@@ -7,9 +7,11 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 KIT_ROOT = Path(__file__).resolve().parent.parent
@@ -597,8 +599,8 @@ def test_android_upstream_skills_are_not_installed_or_vendored(tmp_path: Path) -
     bootstrap = (project / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8")
     assert "missing local <group>: <skill>" in bootstrap
     android_profile = (project / ".agent-flow" / "profiles" / "android.yaml").read_text(encoding="utf-8")
-    assert "source: https://github.com/android/skills" in android_profile
-    assert "source: https://github.com/chrisbanes/skills/tree/main/skills" in android_profile
+    assert "url: https://github.com/skydoves/compose-performance-skills" in android_profile
+    assert "kind: host-managed" in android_profile
 
 
 def _installed_profile_yaml(project: Path, *, runtime: bool = False) -> set[str]:
@@ -670,10 +672,15 @@ def test_installed_runtime_loads_a_profile_the_project_did_not_select(tmp_path: 
     assert proc.stdout.strip() == "ios ios"
 
 
-def test_install_keeps_profiles_pulled_in_by_required_review(tmp_path: Path) -> None:
-    """react-native는 `android/**` 변경에서 Android skill 표를 끌어온다.
+def test_react_native_carries_its_android_vocabulary_without_the_android_profile(
+    tmp_path: Path,
+) -> None:
+    """react-native의 `android/**` 변경은 자기 어휘로 Android skill을 잡는다.
 
-    그 표의 주인도 이 프로젝트에 걸리는 profile이므로 보이는 목록에 있어야 한다.
+    옛 `android-native-escalation`은 android profile의 표를 지명해서 그 표의 주인
+    파일까지 깔아야 했다. 표가 사라진 지금 남의 stack 정의를 끼워 넣으면 "이
+    프로젝트에 걸리는 profile"이라는 구분이 다시 흐려진다 - 그래서 목록에서 빼고,
+    빠져도 잃는 것이 없다는 근거를 같은 테스트가 함께 못 박는다.
     """
     project = tmp_path / "rn-project"
     project.mkdir()
@@ -688,8 +695,12 @@ def test_install_keeps_profiles_pulled_in_by_required_review(tmp_path: Path) -> 
         "_schema.yaml",
         "generic.yaml",
         "react-native.yaml",
-        "android.yaml",
     }
+    installed = yaml.safe_load(
+        (project / ".agent-flow" / "profiles" / "react-native.yaml").read_text(encoding="utf-8")
+    )
+    domains = {domain["id"]: domain for domain in installed["skills"]["external"]["domains"]}
+    assert domains["android-native"]["path_globs"] == ["android/**"]
 
 
 def test_install_keeps_the_detected_profile_when_another_is_requested(tmp_path: Path) -> None:
@@ -780,42 +791,42 @@ def test_reinstall_is_quiet_when_pruning_loses_nothing(tmp_path: Path) -> None:
     assert "pruned: " not in result.stdout
 
 
-def test_android_skill_policy_is_active_host_local_only() -> None:
-    profile_paths = [
-        KIT_ROOT / "src" / "agent_flow" / "profiles" / "android.yaml",
-        KIT_ROOT / "src" / "agent_flow" / "profiles" / "android.yaml",
-    ]
-    policy_paths = [
-        KIT_ROOT / "src" / "agent_flow" / "profiles" / "_schema.yaml",
-        KIT_ROOT / "templates" / "_shared" / "review" / "android-skills.md",
-        KIT_ROOT / "templates" / "_shared" / "review" / "android-chrisbanes.md",
-        KIT_ROOT / "skills" / "android-code-review" / "SKILL.md",
-    ]
+def test_no_profile_enumerates_external_skill_names() -> None:
+    """upstream이 6개월에 이름 35%를 바꿨다. 이름을 적으면 우리 파일이 항상 낡는다."""
+    profiles = sorted((KIT_ROOT / "src" / "agent_flow" / "profiles").glob("*.yaml"))
+    assert profiles
 
-    for path in profile_paths:
+    for path in profiles:
         text = path.read_text(encoding="utf-8")
-        assert "install_policy: never" in text
-        assert "active_host_only: true" in text
-        assert "codex: ~/.codex/skills/{skill}/SKILL.md" in text
-        assert "claude: ~/.claude/skills/{skill}/SKILL.md" in text
-        assert "omp: ~/.omp/agent/skills/{skill}/SKILL.md" in text
-        assert "missing local android_skills: <skill>" in text
-        assert "missing local chrisbanes_skills: <skill>" in text
-        assert "vendor_dir" not in text
-        assert "native_loader" not in text
-        assert ".agent-flow/vendor" not in text
+        assert "android_skills:" not in text, path
+        assert "chrisbanes_skills:" not in text, path
+        assert "skills_from:" not in text, path
+        assert ".agent-flow/vendor" not in text, path
 
-    for path in policy_paths:
-        text = path.read_text(encoding="utf-8")
-        assert "~/.codex/skills/{skill}/SKILL.md" in text
-        assert "~/.claude/skills/{skill}/SKILL.md" in text
-        assert "~/.omp/agent/skills/{skill}/SKILL.md" in text
-        assert "falling back to" not in text
-        assert ".agent-flow/vendor/android-skills" not in text
-        assert ".agent-flow/vendor/chrisbanes-skills" not in text
 
+def test_external_sources_declare_host_roots_without_installing() -> None:
+    """설치는 사용자 소유다. 우리는 경로만 해석하고 fetch는 관리자 없는 소스에만 쓴다."""
+    android = yaml.safe_load(
+        (KIT_ROOT / "src" / "agent_flow" / "profiles" / "android.yaml").read_text(encoding="utf-8")
+    )
+    sources = {source["id"]: source for source in android["skill_sources"]}
+
+    host_managed = sources["android-official"]
+    assert host_managed["kind"] == "host-managed"
+    assert "~/.claude/skills/{skill}/SKILL.md" in host_managed["roots"]
+    assert "~/.codex/skills/{skill}/SKILL.md" in host_managed["roots"]
+    assert sources["skydoves-compose-performance"]["kind"] == "fetch"
+
+
+def test_bootstrap_and_kit_keep_the_missing_skill_wording() -> None:
+    """부재를 알리는 문구는 계약이다. 사라지면 사용자가 무엇을 깔아야 하는지 알 수 없다."""
     kit_text = (KIT_ROOT / "bin" / "agent-flow-kit.mjs").read_text(encoding="utf-8")
+    review_text = (KIT_ROOT / "skills" / "android-code-review" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+
     assert "missing local <group>: <skill>" in kit_text
+    assert "missing local <group>: <skill>" in review_text
 
 
 def test_sdui_skill_is_android_only(tmp_path: Path) -> None:
@@ -1517,3 +1528,101 @@ def test_legacy_kit_json_keeps_installed_at_and_gains_updated_at(
     fresh = _kit_json(project)
     assert fresh["installed_at"] > legacy
     assert fresh["installed_at"] <= fresh["updated_at"]
+
+
+def _hook_matchers(project: Path, script: str) -> list[str]:
+    matchers: list[str] = []
+    for relative in (".claude/settings.json", ".Codex/hooks.json", ".codex/hooks.json"):
+        path = project / relative
+        if not path.is_file():
+            continue
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        for entries in (payload.get("hooks") or {}).values():
+            for entry in entries:
+                commands = " ".join(
+                    str(hook.get("command", "")) for hook in entry.get("hooks") or []
+                )
+                if script in commands:
+                    matchers.append(str(entry.get("matcher", "")))
+    return matchers
+
+
+def _tool_names(matcher: str) -> list[str]:
+    return matcher.removeprefix("^(").removesuffix(")$").split("|")
+
+
+def test_skill_use_observer_records_every_tool_its_matcher_admits(tmp_path: Path) -> None:
+    """등록과 소비가 갈라지면 matcher가 붙인 tool이 조용히 버려진다."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "pyproject.toml").write_text("[project]\nname = \"x\"\n", encoding="utf-8")
+    assert _install(project).returncode == 0
+    skill = project / "demo" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: demo\n---\n", encoding="utf-8")
+    hook = project / ".agent-flow" / "scripts" / "hooks" / "record-skill-read.py"
+
+    matchers = _hook_matchers(project, "record-skill-read.py")
+    assert matchers
+    for matcher in matchers:
+        for tool in ("Skill", "Bash", "Read"):
+            assert re.match(matcher, tool), matcher
+
+    log = project / ".agent-flow" / "skills-read.jsonl"
+    for tool in _tool_names(matchers[0]):
+        log.unlink(missing_ok=True)
+        payload = {
+            "tool_name": tool,
+            "cwd": str(project),
+            "tool_input": {"command": f"cat {skill}", "skill": "demo", "path": str(skill)},
+        }
+        subprocess.run(
+            (sys.executable, str(hook)),
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            cwd=str(project),
+            timeout=30,
+            check=False,
+        )
+        assert log.is_file(), tool
+
+
+def test_installers_do_not_enumerate_external_skill_names() -> None:
+    """열거된 목록은 우리가 배포하지도 않는 이름을 영구히 들고 있게 된다."""
+    for name in ("bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"):
+        text = (KIT_ROOT / name).read_text(encoding="utf-8")
+        match = re.search(
+            r"const PROFILE_MANAGED_HOST_ONLY_SKILLS = new Set\((.*?)\);", text, re.S
+        )
+        assert match, name
+        assert match.group(1).strip() == "", name
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_plain_install_refreshes_a_managed_hook_to_match_its_recorded_digest(
+    tmp_path: Path, binary: str
+) -> None:
+    """digest는 갱신되고 hook 파일은 안 갱신되면 run 시작이 막힌다 — 평범한 install로 복구돼야 한다."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "pyproject.toml").write_text("[project]\nname = \"x\"\n", encoding="utf-8")
+    assert _install_with(binary, project).returncode == 0
+    hook = project / ".agent-flow" / "scripts" / "hooks" / "record-skill-read.py"
+    hook.write_text("# stale copy from an older kit\n", encoding="utf-8")
+    os.chmod(hook, 0o755)
+
+    assert _install_with(binary, project).returncode == 0
+
+    recorded = json.loads((project / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
+    digest = recorded["managed_hook_digests"]["record-skill-read.py"]
+    assert hashlib.sha256(hook.read_bytes()).hexdigest() == digest
+    assert os.access(hook, os.X_OK)
+    # digest만 보면 백업이 남긴 실행 파일이 run 시작을 막는 것을 놓친다.
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.core.hook_integrity import verify_managed_hooks
+
+    reports = verify_managed_hooks(project)
+    assert reports and all(report.ok for report in reports), [
+        list(report.violations) for report in reports
+    ]

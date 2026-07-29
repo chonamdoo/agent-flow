@@ -243,7 +243,7 @@ phases:
       `.agent-flow/skills/index.json`, changed files, and task scope. Read only
       the touched profile skill union before writing tests. Android/Kotlin/
       Compose/KMP changes require Android profile skills, `android-code-review`,
-      matching `android_skills`, and matching `chrisbanes_skills`; React Native
+      and the skills this phase prompt lists for the change; React Native
       `android/` native changes also apply Android profile mapping. Unrelated
       platform skill absence must not block. Save the failure summary and
       command output. If a required local skill is missing, do not complete this
@@ -303,10 +303,11 @@ phases:
       `skills/clean-architecture/SKILL.md`. Resolve required skills from active
       profile metadata, installed skill index, changed files, and task scope.
       Read only the touched profile skill union before writing code.
-      Android/Chris Banes skills are required only for Android/Kotlin/
-      Compose/KMP changes or React Native `android/` native code. If a required
-      local skill is missing, do not complete this artifact; report
-      `missing local <group>: <skill>` with the source URL.
+      Android/Kotlin/Compose/KMP changes require Android profile skills,
+      `android-code-review`, and the skills this phase prompt lists for the
+      change; React Native `android/` native changes also apply Android profile
+      mapping. If a required local skill is missing, do not complete this
+      artifact; report `missing local <group>: <skill>` with the source URL.
       End with:
 
           ## Completion Gate
@@ -363,9 +364,10 @@ phases:
       `skills/clean-architecture/SKILL.md`, read every required profile skill
       before changing code, and summarize structural changes. Required skills
       come from active profile metadata, installed skill index, changed files,
-      and task scope. Android/Chris Banes skills are required only for
-      Android/Kotlin/Compose/KMP changes or React Native
-      `android/` native code. If a required local skill is missing, do not
+      and task scope. Android/Kotlin/Compose/KMP changes require Android
+      profile skills, `android-code-review`, and the skills this phase prompt
+      lists for the change; React Native `android/` native changes also apply
+      Android profile mapping. If a required local skill is missing, do not
       complete this artifact; report `missing local <group>: <skill>` with the
       source URL.
       End with:
@@ -488,10 +490,11 @@ phases:
       prose, no emoji, and parser verdict markers unchanged.
       Resolve required review skills from active profile metadata,
       `.agent-flow/skills/index.json`, changed files, and task scope. Review
-      only the touched profile skill union. Android/Chris Banes skills are
-      required only for Android/Kotlin/Compose/KMP changes or React Native
-      `android/` native code. If a required local skill is missing, record
-      `missing local <group>: <skill>` with the source URL and make that
+      only the touched profile skill union. Android/Kotlin/Compose/KMP changes
+      require Android profile skills, `android-code-review`, and the skills this
+      phase prompt lists for the change; React Native `android/` native changes
+      also apply Android profile mapping. If a required local skill is missing,
+      record `missing local <group>: <skill>` with the source URL and make that
       reviewer verdict `request-changes`. Unrelated platform skill absence must
       not block.
       The markers below are not the whole completion contract. The runner also
@@ -602,11 +605,12 @@ phases:
       unchanged.
       Before judging code, resolve required review skills from active profile
       metadata, installed skill index, changed files, and task scope. Review
-      only the touched profile skill union. Android/Chris Banes skills are
-      required only for Android/Kotlin/Compose/KMP changes or React Native
-      `android/` native code. Missing required profile skills make that reviewer
-      verdict `request-changes`; unrelated platform skill absence must be
-      ignored.
+      only the touched profile skill union. Android/Kotlin/Compose/KMP changes
+      require Android profile skills, `android-code-review`, and the skills this
+      phase prompt lists for the change; React Native `android/` native changes
+      also apply Android profile mapping. Missing required profile skills make
+      that reviewer verdict `request-changes`; unrelated platform skill absence
+      must be ignored.
       End with:
 
           ## Completion Gate
@@ -695,11 +699,12 @@ phases:
       required profile skills before writing or judging code, or record that no
       fixes were required. Apply `skills/clean-architecture/SKILL.md` to any
       boundary-affecting fix. Required skills come from active profile metadata,
-      installed skill index, changed files, and task scope. Android/Chris Banes
-      skills are required only for Android/Kotlin/Compose/KMP fixes or React
-      Native `android/` native code. If a required local skill is missing, do
-      not complete this artifact; report `missing local <group>: <skill>` with
-      the source URL.
+      installed skill index, changed files, and task scope.
+      Android/Kotlin/Compose/KMP fixes require Android profile skills,
+      `android-code-review`, and the skills this phase prompt lists for the
+      change; React Native `android/` native fixes also apply Android profile
+      mapping. If a required local skill is missing, do not complete this
+      artifact; report `missing local <group>: <skill>` with the source URL.
       End with:
 
           ## Completion Gate

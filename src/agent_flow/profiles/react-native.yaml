@@ -50,12 +50,58 @@ skills:
       skills: [react-native-development-guide, react-native-clean-architecture]
       when: React Native/Expo files change
       missing: "missing local profile: <skill>"
-    - group: android-native-escalation
-      profiles: [android]
-      skills_from: android_skills
-      when: React Native android/ native code changes
-      missing: "missing local android_skills: <skill>"
-      path_globs: ["android/**"]
+  # 설치된 외부 skill 라우팅. 이름은 여기 적지 않는다 — Expo 공식 `expo/skills`가 6개월에
+  # rename 10건 + 삭제 2건을 냈다(실측: `upgrading-expo` → `expo-upgrade`,
+  # `expo-deployment` → `eas-app-stores`). 이름을 적는 순간 우리 파일이 낡는다.
+  external:
+    enabled: true
+    domains:
+      # `expo`/`eas` 단독 term은 금지다. 실측으로 "export"/"exportable"과 "easy"/"measured"에
+      # substring으로 걸려 building-with-xcode·ios-screenshots·math-olympiad를 끌어온다.
+      - id: expo-sdk-config
+        terms: ["expo sdk", "expo upgrade", "expo prebuild", "expo module", "config plugin",
+                "app.config", "app.json", "dev client", "development build", "expo dom",
+                "autolinking"]
+        phases: [implementation]
+      - id: eas-release
+        terms: ["eas build", "eas update", "eas submit", "eas workflow", "over-the-air",
+                "ota update", "app store submission", "play store submission",
+                "internal distribution"]
+        phases: [implementation]
+      # `fabric`은 "fabricate"에 걸리므로 구절로만 쓴다. native-bridge가 이 profile의
+      # review angle이라 review에서도 활성화한다.
+      - id: native-interop
+        terms: ["turbo module", "turbomodule", "fabric renderer", "fabric component", "jsi",
+                "codegen", "native module", "view manager", "bridgeless", "new architecture",
+                "native bridge"]
+        phases: [implementation, review]
+      - id: list-render-performance
+        terms: ["flatlist", "flashlist", "sectionlist", "virtualized list", "re-render",
+                "rerender", "memoization", "usememo", "usecallback", "reanimated",
+                "gesture handler", "list performance"]
+        phases: [implementation, review]
+      - id: hermes-bundle
+        terms: ["hermes", "bundle size", "metro bundler", "metro config", "inline requires",
+                "startup time", "tree shaking", "source map", "ram bundle"]
+        phases: [implementation, review]
+      - id: navigation-linking
+        terms: ["react navigation", "expo router", "stack navigator", "bottom tabs", "deep link",
+                "universal link", "app link", "screen options", "navigation state"]
+        phases: [implementation, review]
+      # 이 두 domain이 `android-native-escalation`의 자리를 대신한다. 다른 profile의 표를
+      # 끌어오는 대신, 네이티브 디렉터리 변경만으로 설치된 네이티브 skill에 직접 붙는다.
+      - id: android-native
+        terms: ["gradle plugin", "android gradle plugin", "agp", "proguard", "r8", "kotlin",
+                "edge-to-edge", "insets", "android manifest", "foreground service",
+                "runtime permission"]
+        path_globs: ["android/**"]
+        phases: [implementation, review]
+      - id: ios-native
+        terms: ["cocoapods", "podfile", "xcodebuild", "xcode project", "code signing",
+                "provisioning profile", "swift package", "info.plist", "usage description",
+                "app extension"]
+        path_globs: ["ios/**"]
+        phases: [implementation, review]
 architecture:
   contract: clean-architecture-core
   platform: react-native

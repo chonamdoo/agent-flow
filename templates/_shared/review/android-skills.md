@@ -1,12 +1,14 @@
 # Review Angle — Android Skills
 
-Review Android, Kotlin, Jetpack Compose, and KMP changes against the active
-Android profile's `android_skills` and `chrisbanes_skills`.
+Review Android, Kotlin, Jetpack Compose, and KMP changes against the Android
+profile's required review skills and the skills the phase prompt matched to this
+change.
 
 ## Required routing
 
-Before approving, choose matching entries from both profile lists when relevant.
-Resolve them through the current active host only:
+Before approving, read the skills the phase prompt lists — required ones with
+paths, in-scope ones by name. Use an in-scope one only when the diff actually
+touches it. Resolve them through the current active host only:
 
 - Codex: `~/.codex/skills/{skill}/SKILL.md`
 - Claude: `~/.claude/skills/{skill}/SKILL.md`
@@ -15,8 +17,7 @@ Resolve them through the current active host only:
 Read selected `SKILL.md` files as plain text. Do not install, copy, link, or
 vendor Android skills. Do not load the same skill from multiple host paths. If a
 required local skill is missing from the current host path, stop approval and
-report `missing local android_skills: <skill>` or
-`missing local chrisbanes_skills: <skill>` with the profile source URL.
+report `missing local <group>: <skill>` with the profile source URL.
 If no Android/Kotlin/Compose/KMP files changed, mark the completion gate `n/a`.
 
 ## Review focus

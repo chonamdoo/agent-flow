@@ -48,6 +48,10 @@ skills:
     - android-clean-presentation-architecture
     - android-code-review
     - android-guides
+    # 우리가 배포하는 Android skill이다. 이름이 upstream과 겹쳐 보인다는 이유로 표가
+    # 이 둘을 외부 것으로 선언했고, 그 결과 install 대상에서 빠져 있었다.
+    - android-debugging
+    - android-module-creator
     # 설치와 활성화는 다른 층이다. 여기 없으면 카탈로그에 아예 안 올라가서
     # frontmatter의 taskTerms/pathGlobs가 무슨 선언을 하든 죽는다.
     # 설치는 profile이 넓게, 활성화는 선언이 좁게 한다.
@@ -58,16 +62,54 @@ skills:
       when: Android/Kotlin/Compose/KMP files or Android profile architecture roles change
       missing: "missing local profile: <skill>"
       path_globs: ["**/*.kt", "**/*.kts", "**/*.java", "**/AndroidManifest.xml"]
-    - group: android_skills
-      skills_from: android_skills
-      when: Android implementation or review scope matches an android_skills entry
-      missing: "missing local android_skills: <skill>"
-      path_globs: ["**/*.kt", "**/*.kts", "**/*.java", "**/AndroidManifest.xml"]
-    - group: chrisbanes_skills
-      skills_from: chrisbanes_skills
-      when: Compose/Kotlin/KMP implementation or review scope matches a chrisbanes_skills entry
-      missing: "missing local chrisbanes_skills: <skill>"
-      path_globs: ["**/*.kt", "**/*.kts"]
+  # 설치된 외부 skill 라우팅. 이름은 여기 적지 않는다 — upstream이 6개월에 이름 35%를
+  # 바꿨고(실측: `camera1-to-camerax` → `camerax`), 이름을 적는 순간 우리 파일이 낡는다.
+  # 대신 스택 어휘를 적고, 판정은 설치된 SKILL.md의 name + description에 대해 한다.
+  external:
+    enabled: true
+    domains:
+      - id: ui-insets-systembars
+        terms: ["edge-to-edge", "insets", "system bar", "status bar", "navigation bar", "cutout", "fullscreen"]
+        phases: [implementation, review]
+      - id: adaptive-formfactor
+        terms: ["adaptive", "window size class", "foldable", "tablet", "large screen", "wear os", "material3"]
+        phases: [implementation, review]
+      - id: navigation
+        terms: ["navigation 3", "navigation3", "nav3", "back stack", "navigation graph", "deep link"]
+        phases: [implementation, review]
+      # `**/*.kt` 같은 광역 glob은 넣지 않는다. Kotlin 한 줄 변경만으로 domain이 켜지고
+      # 실측으로 무관한 skill 20개가 offered를 포화시켰다. task 문구가 근거를 대야 한다.
+      - id: compose-state-performance
+        terms: ["recomposition", "stability", "strong skipping", "deferred read", "state hoisting",
+                "state holder", "launchedeffect", "disposableeffect", "side effect", "slot api",
+                "compose modifier", "modifier chain", "modifier node", "lazy list", "baseline profile"]
+        phases: [implementation, review]
+      - id: kotlin-concurrency
+        terms: ["coroutine", "coroutinescope", "stateflow", "sharedflow", "statein", "cancellation",
+                "runblocking", "expect/actual", "multiplatform", "value class"]
+        phases: [implementation, review]
+      - id: testing
+        terms: ["testing setup", "robolectric", "androidtest", "instrumentation", "screenshot test",
+                "semantics", "compose ui test"]
+        path_globs: ["**/src/test/**", "**/src/androidTest/**"]
+        phases: [implementation, review]
+      - id: release-shrinker
+        terms: ["r8", "proguard", "shrinker", "minify", "obfuscation", "mapping file", "app size"]
+        path_globs: ["**/proguard-rules.pro", "**/*.pro"]
+        phases: [implementation, review]
+      - id: performance-trace
+        terms: ["perfetto", "trace analysis", "jank", "startup time", "frame timing"]
+        phases: [implementation, review]
+      # 리뷰에서 요구할 이유가 없는 통합 작업. phase축은 우리 workflow의 개념이라
+      # upstream이 바뀌어도 낡지 않는다.
+      - id: platform-sdk
+        terms: ["camerax", "camera2", "play billing", "engage sdk", "app functions", "credential manager",
+                "verified email", "glimmer", "display glasses", "intent redirection", "pendingintent"]
+        phases: [implementation]
+      - id: tooling-cli
+        terms: ["adb", "emulator", "sdkmanager", "agp", "gradle plugin", "perfetto sql", "trace query",
+                "xml to compose", "styles api"]
+        phases: [implementation]
 architecture:
   contract: clean-architecture-core
   platform: android
@@ -140,7 +182,7 @@ skill_sources:
   # 설치 관리자가 이미 있는 소스는 fetch하지 않는다. 경로만 해석하고, 없으면 install 시점에 1회 안내한다.
   - id: android-official
     kind: host-managed
-    install_hint: "android skills install <name>  (https://github.com/android/skills)"
+    install_hint: "android skills add <name>  (https://github.com/android/skills)"
     roots:
       - "~/.android/cli/skills/**/{skill}/SKILL.md"
       - "~/.claude/skills/{skill}/SKILL.md"
@@ -158,211 +200,6 @@ skill_sources:
     url: https://github.com/skydoves/compose-performance-skills
     ref: main
     layout: "*/{skill}/SKILL.md"
-android_skills:
-  source: https://github.com/android/skills
-  install_policy: never
-  active_host_only: true
-  load_mode: plain_text
-  hosts:
-    codex: ~/.codex/skills/{skill}/SKILL.md
-    claude: ~/.claude/skills/{skill}/SKILL.md
-    omp: ~/.omp/agent/skills/{skill}/SKILL.md
-  load_policy:
-    - Android/Kotlin/Compose/KMP 개발 또는 코드 리뷰 전 변경 영역과 맞는 로컬 설치 skill만 plain text로 읽는다.
-    - 현재 실행 host의 경로 하나만 사용한다. Codex는 `~/.codex/skills`, Claude는 `~/.claude/skills`, OMP는 `~/.omp/agent/skills`.
-    - 다른 host 경로의 동일 skill을 중복 로드하지 않는다.
-    - agent-flow install은 이 skill들을 설치, 복사, 링크, vendor 처리하지 않는다.
-    - 현재 host 경로에 필요한 skill이 없으면 작업을 멈추고 `missing local android_skills: <skill>`와 source URL을 사용자에게 알려 설치를 요청한다.
-  implementation:
-    - skill: edge-to-edge
-      when: system bars, insets, edge-to-edge, status bar, navigation bar, or cutout behavior changes
-      task_terms: ["edge-to-edge", "edge to edge", "insets", "system bar", "status bar", "navigation bar", "cutout", "fullscreen"]
-    - skill: adaptive
-      when: Compose adaptive layout, window size classes, foldables, tablets, or responsive UI changes
-      task_terms: ["adaptive", "window size class", "foldable", "tablet", "responsive layout", "large screen"]
-    - skill: navigation-3
-      when: Jetpack Navigation 3, back stack, or navigation migration work
-      task_terms: ["navigation 3", "navigation3", "nav3", "back stack", "navigation graph", "navigation migration"]
-    - skill: testing-setup
-      when: Android test setup, Gradle test dependencies, instrumentation, Robolectric, or missing test scaffolding changes
-      task_terms: ["test setup", "instrumentation", "robolectric", "test dependencies", "androidtest"]
-      path_globs: ["**/src/test/**", "**/src/androidTest/**"]
-    - skill: camera1-to-camerax
-      when: Camera1, Camera2, or CameraX migration work
-      task_terms: ["camerax", "camera1", "camera2", "camera migration"]
-    - skill: r8-analyzer
-      when: R8, shrinker, minification, obfuscation, mapping, or release size work
-      task_terms: ["r8", "proguard", "shrinker", "minify", "minification", "obfuscation", "mapping file", "app size"]
-      path_globs: ["**/proguard-rules.pro", "**/*.pro"]
-    - skill: perfetto-trace-analysis
-      when: Perfetto trace, startup, jank, frame timing, or system performance analysis
-      task_terms: ["perfetto", "trace", "jank", "startup time", "frame timing"]
-    - skill: perfetto-sql
-      when: Perfetto SQL query or trace metric work
-      task_terms: ["perfetto sql", "trace metric", "trace query"]
-    - skill: play-billing-library-version-upgrade
-      when: Play Billing Library upgrade work
-      task_terms: ["play billing", "billing library"]
-    - skill: engage-sdk-integration
-      when: Google Play Engage SDK integration work
-      task_terms: ["engage sdk"]
-    - skill: verified-email
-      when: verified email or identity API work
-      task_terms: ["verified email", "credential manager", "identity api"]
-    - skill: appfunctions
-      when: Android app functions or device AI integration work
-      task_terms: ["app functions", "appfunctions", "device ai"]
-    - skill: android-cli
-      when: Android CLI tooling, adb, emulator, sdkmanager, or command-line build setup changes
-      task_terms: ["adb", "emulator", "sdkmanager", "android cli"]
-    - skill: display-glasses-with-jetpack-compose-glimmer
-      when: Android XR display glasses or Compose Glimmer work
-      task_terms: ["glimmer", "display glasses", "android xr"]
-  review:
-    - skill: edge-to-edge
-      when: reviewing system bars, insets, fullscreen, or edge-to-edge behavior
-      task_terms: ["edge-to-edge", "edge to edge", "insets", "system bar", "status bar", "navigation bar", "cutout", "fullscreen"]
-    - skill: adaptive
-      when: reviewing Compose adaptive UI, tablets, foldables, or responsive layout
-      task_terms: ["adaptive", "window size class", "foldable", "tablet", "responsive layout", "large screen"]
-    - skill: navigation-3
-      when: reviewing navigation graph, back stack, or Navigation 3 migration
-      task_terms: ["navigation 3", "navigation3", "nav3", "back stack", "navigation graph", "navigation migration"]
-    - skill: testing-setup
-      when: reviewing Android test coverage, test setup, or missing tests
-      task_terms: ["test setup", "instrumentation", "robolectric", "test dependencies", "androidtest"]
-      path_globs: ["**/src/test/**", "**/src/androidTest/**"]
-    - skill: r8-analyzer
-      when: reviewing release shrinker, R8, mapping, or app size risk
-      task_terms: ["r8", "proguard", "shrinker", "minify", "minification", "obfuscation", "mapping file", "app size"]
-      path_globs: ["**/proguard-rules.pro", "**/*.pro"]
-    - skill: perfetto-trace-analysis
-      when: reviewing performance fixes backed by Perfetto traces
-      task_terms: ["perfetto", "trace", "jank", "startup time", "frame timing"]
-chrisbanes_skills:
-  source: https://github.com/chrisbanes/skills/tree/main/skills
-  install_policy: never
-  active_host_only: true
-  load_mode: plain_text
-  hosts:
-    codex: ~/.codex/skills/{skill}/SKILL.md
-    claude: ~/.claude/skills/{skill}/SKILL.md
-    omp: ~/.omp/agent/skills/{skill}/SKILL.md
-  load_policy:
-    - Android/Kotlin/Compose/KMP 개발 또는 코드 리뷰 전 변경 영역과 맞는 로컬 설치 skill만 plain text로 읽는다.
-    - 현재 실행 host의 경로 하나만 사용한다. Codex는 `~/.codex/skills`, Claude는 `~/.claude/skills`, OMP는 `~/.omp/agent/skills`.
-    - 다른 host 경로의 동일 skill을 중복 로드하지 않는다.
-    - agent-flow install은 이 skill들을 설치, 복사, 링크, vendor 처리하지 않는다.
-    - 현재 host 경로에 필요한 skill이 없으면 작업을 멈추고 `missing local chrisbanes_skills: <skill>`와 source URL을 사용자에게 알려 설치를 요청한다.
-  implementation:
-    - skill: android-module-creator
-      when: Android module or Gradle boundary work
-      task_terms: ["new module", "gradle module", "module boundary", "convention plugin"]
-      path_globs: ["**/settings.gradle.kts", "**/settings.gradle"]
-    - skill: android-debugging
-      when: crash, race, recomposition, or failing test diagnosis
-      task_terms: ["crash", "race condition", "flaky", "debugging", "stack trace"]
-    - skill: compose-state-authoring
-      when: local Compose state, remember, or state accessors change
-      task_terms: ["remember", "mutablestateof", "compose state"]
-    - skill: compose-state-hoisting
-      when: deciding local state vs hoisted state vs state holder
-      task_terms: ["state hoisting", "hoisted state"]
-    - skill: compose-state-holder-ui-split
-      when: screen state holder and plain UI split changes
-      task_terms: ["state holder", "ui split", "screen state"]
-    - skill: compose-side-effects
-      when: LaunchedEffect, DisposableEffect, event Flow, navigation, snackbar, or analytics changes
-      task_terms: ["launchedeffect", "disposableeffect", "side effect", "snackbar", "one-shot event"]
-    - skill: compose-recomposition-performance
-      when: recomposition, jank, stability, or deferred read work
-      task_terms: ["recomposition", "jank", "deferred read", "compose performance"]
-    - skill: compose-stability-diagnostics
-      when: Compose stability, strong skipping, or compiler reports are relevant
-      task_terms: ["stability", "strong skipping", "compiler report", "unstable parameter"]
-    - skill: compose-state-deferred-reads
-      when: scroll, animation, gesture, or frame-rate state is read
-      task_terms: ["scroll state", "animation state", "gesture", "frame rate"]
-    - skill: compose-modifier-and-layout-style
-      when: modifier APIs, layout APIs, or caller-placeable components change
-      task_terms: ["modifier", "layout api", "placeable"]
-    - skill: compose-slot-api-pattern
-      when: reusable Compose component slots change
-      task_terms: ["slot api", "slot pattern", "reusable component"]
-    - skill: compose-animations
-      when: Compose animation APIs or transitions change
-      task_terms: ["animation", "animate", "transition"]
-    - skill: compose-focus-navigation
-      when: keyboard, TV, D-pad, or accessibility focus changes
-      task_terms: ["focus", "d-pad", "keyboard navigation"]
-    - skill: compose-ui-testing-patterns
-      when: Compose UI tests, semantics, focus tests, or screenshot tests change
-      task_terms: ["compose ui test", "semantics", "screenshot test"]
-      path_globs: ["**/src/androidTest/**"]
-    - skill: kotlin-coroutines-structured-concurrency
-      when: CoroutineScope, launch, cancellation, blocking, or suspend boundaries change
-      task_terms: ["coroutine", "coroutinescope", "suspend", "cancellation", "runblocking"]
-    - skill: kotlin-flow-state-event-modeling
-      when: StateFlow, SharedFlow, Channel, stateIn, or one-shot events change
-      task_terms: ["stateflow", "sharedflow", "channel", "statein", "flow"]
-    - skill: kotlin-multiplatform-expect-actual
-      when: KMP expect/actual or platform boundary changes
-      task_terms: ["expect/actual", "expect actual", "kmp", "multiplatform"]
-      path_globs: ["**/commonMain/**", "**/androidMain/**", "**/iosMain/**"]
-    - skill: kotlin-types-value-class
-      when: single-field domain types or Compose-stable value types change
-      task_terms: ["value class", "inline class", "domain type"]
-  review:
-    - skill: compose-state-authoring
-      when: Compose state changed
-      task_terms: ["remember", "mutablestateof", "compose state"]
-    - skill: compose-state-hoisting
-      when: state ownership changed
-      task_terms: ["state hoisting", "hoisted state"]
-    - skill: compose-state-holder-ui-split
-      when: screen state holder or UI split changed
-      task_terms: ["state holder", "ui split", "screen state"]
-    - skill: compose-side-effects
-      when: Compose effects or event collection changed
-      task_terms: ["launchedeffect", "disposableeffect", "side effect", "snackbar", "one-shot event"]
-    - skill: compose-recomposition-performance
-      when: recomposition, jank, or stability risk exists
-      task_terms: ["recomposition", "jank", "deferred read", "compose performance"]
-    - skill: compose-stability-diagnostics
-      when: stable/unstable parameters or skipping behavior changed
-      task_terms: ["stability", "strong skipping", "compiler report", "unstable parameter"]
-    - skill: compose-state-deferred-reads
-      when: frame-rate state reads changed
-      task_terms: ["scroll state", "animation state", "gesture", "frame rate"]
-    - skill: compose-modifier-and-layout-style
-      when: modifiers or layout APIs changed
-      task_terms: ["modifier", "layout api", "placeable"]
-    - skill: compose-slot-api-pattern
-      when: slot APIs changed
-      task_terms: ["slot api", "slot pattern", "reusable component"]
-    - skill: compose-animations
-      when: animations changed
-      task_terms: ["animation", "animate", "transition"]
-    - skill: compose-focus-navigation
-      when: focus behavior changed
-      task_terms: ["focus", "d-pad", "keyboard navigation"]
-    - skill: compose-ui-testing-patterns
-      when: Compose UI tests changed or are missing
-      task_terms: ["compose ui test", "semantics", "screenshot test"]
-      path_globs: ["**/src/androidTest/**"]
-    - skill: kotlin-coroutines-structured-concurrency
-      when: coroutine ownership or cancellation risk exists
-      task_terms: ["coroutine", "coroutinescope", "suspend", "cancellation", "runblocking"]
-    - skill: kotlin-flow-state-event-modeling
-      when: Flow state or event modeling changed
-      task_terms: ["stateflow", "sharedflow", "channel", "statein", "flow"]
-    - skill: kotlin-multiplatform-expect-actual
-      when: KMP boundaries changed
-      task_terms: ["expect/actual", "expect actual", "kmp", "multiplatform"]
-      path_globs: ["**/commonMain/**", "**/androidMain/**", "**/iosMain/**"]
-    - skill: kotlin-types-value-class
-      when: value classes or single-field domain types changed
-      task_terms: ["value class", "inline class", "domain type"]
 artifacts:
   prd: optional
   adr: optional

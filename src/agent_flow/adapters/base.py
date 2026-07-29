@@ -30,10 +30,8 @@ from agent_flow.core.local_skills import local_skill_prompt_block
 if TYPE_CHECKING:
     from agent_flow.runner import Phase
 
-# resolver가 이미 구체적인 skill 목록으로 바꿔 놓는 키들. 원본 표를 다시 넣지 않는다.
-_RESOLVER_OWNED_PROFILE_KEYS = frozenset(
-    {"skills", "skill_sources", "android_skills", "chrisbanes_skills"}
-)
+# resolver가 이미 구체적인 skill 목록으로 바꿔 놓는 키들. 원본 선언을 다시 넣지 않는다.
+_RESOLVER_OWNED_PROFILE_KEYS = frozenset({"skills", "skill_sources"})
 
 
 class Adapter(ABC):

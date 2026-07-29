@@ -43,6 +43,54 @@ skills:
       skills: [ios-clean-architecture, ios-clean-presentation-architecture]
       when: iOS/Swift files change
       missing: "missing local profile: <skill>"
+  # iOS 생태계에는 Apple 공식 앱개발 skill이 없고, 커뮤니티가 1 repo = 1 skill로
+  # 파편화되어 있다(twostraws/Dimillian/AvdLee/...). 이름을 적으면 repo 하나가 사라질
+  # 때마다 낡으므로, 스택 어휘만 두고 설치된 SKILL.md의 name + description에 맞춘다.
+  external:
+    enabled: true
+    domains:
+      - id: swiftui-view-state
+        terms: ["swiftui", "swiftui view", "ios views", "view modifier", "navigationstack",
+                "navigationsplitview", "observable macro", "environment object", "state holder",
+                "property wrapper", "data flow", "preview macro"]
+        path_globs: ["**/*.swift"]
+        phases: [implementation, review]
+      - id: swift-concurrency
+        terms: ["swift concurrency", "async/await", "actor isolation", "sendable", "mainactor",
+                "structured concurrency", "task cancellation", "asyncsequence", "data race"]
+        path_globs: ["**/*.swift"]
+        phases: [implementation, review]
+      - id: swift-persistence
+        terms: ["swiftdata", "core data", "modelcontainer", "modelcontext", "nsmanagedobject",
+                "nspersistentcontainer", "schema migration"]
+        phases: [implementation, review]
+      - id: xcode-build-signing
+        terms: ["xcodebuild", "xcode scheme", "xcconfig", "build settings", "build configuration",
+                "code signing", "provisioning profile", "archiving", "xcarchive", "export ipa",
+                "derived data"]
+        path_globs: ["**/*.xcodeproj/**", "**/*.xcconfig", "**/Podfile", "**/Package.swift"]
+        phases: [implementation, review]
+      - id: swift-testing
+        terms: ["swift testing", "xctest", "xcuitest", "test macro", "snapshot test",
+                "ui automation test"]
+        path_globs: ["**/*Tests/**"]
+        phases: [implementation, review]
+      - id: accessibility-voiceover
+        terms: ["voiceover", "dynamic type", "accessibility label", "accessibility trait",
+                "accessibility identifier", "tap target", "contrast", "wcag"]
+        phases: [implementation, review]
+      # 스토어 자산과 시뮬레이터 구동은 산출물을 만드는 작업이라 리뷰가 요구할 대상이 아니다.
+      - id: simulator-store-assets
+        terms: ["simulator", "app store screenshot", "marketing screenshot", "store listing",
+                "app store connect", "testflight", "device navigation"]
+        phases: [implementation]
+      # KMP가 iOS 경로에 걸릴 때만 쓰는 어휘. "kotlin multiplatform"/"kmp"는 실측상
+      # agp-9-upgrade(무관)를 끌어와서 뺐다.
+      - id: kmp-ios-interop
+        terms: ["cocoapods", "podfile", "xcframework", "spm migration", "objective-c interop",
+                "expect/actual", "kotlin/native"]
+        path_globs: ["**/iosMain/**", "**/iosApp/**"]
+        phases: [implementation]
 architecture:
   contract: clean-architecture-core
   platform: ios

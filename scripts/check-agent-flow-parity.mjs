@@ -499,7 +499,6 @@ function installedKitPayload() {
 const INSTALLED_KIT = installedKitPayload();
 const INSTALLED_PROFILE_FILES = installedProfileFileNames(
   activeInstallProfileIds(INSTALLED_KIT?.profile, INSTALLED_KIT),
-  absPath(PACKAGED_PROFILES),
 );
 
 if (CHECK_INSTALLED_COPY) {
@@ -557,29 +556,39 @@ for (const entry of fs.readdirSync(path.join(SOURCE_ROOT, PACKAGED_PROFILES)).so
   for (const entry of fs.readdirSync(path.join(SOURCE_ROOT, PACKAGED_PROFILES)).sort()) {
     if (!entry.endsWith(".yaml") || entry.startsWith("_")) continue;
     const text = readIfExists(`${PACKAGED_PROFILES}/${entry}`) ?? "";
-    for (const [name, block] of skillTableEntries(text)) {
-      if (!/\n\s+(task_terms|path_globs):/.test(block)) {
+    if (/^\s*(android_skills|chrisbanes_skills):\s*$/m.test(text)) {
+      failures.push(
+        `${PACKAGED_PROFILES}/${entry}: external skill names must not be enumerated in a profile table`,
+      );
+    }
+    for (const [name, block] of externalDomainsWithoutTerms(text)) {
+      if (!/\n\s+terms:/.test(block)) {
         failures.push(
-          `${PACKAGED_PROFILES}/${entry}: skill table entry ${name} has no task_terms/path_globs and can never activate`,
+          `${PACKAGED_PROFILES}/${entry}: external domain ${name} has no terms and can never activate`,
         );
       }
     }
   }
 }
 
-function skillTableEntries(text) {
+// 어휘 없는 domain은 활성화될 수 없다. 선언만 남아 아무 일도 하지 않는 상태를 막는다.
+function externalDomainsWithoutTerms(text) {
   const lines = text.split(/\r?\n/);
   const found = [];
-  let inTable = false;
+  let inDomains = false;
+  let indent = "";
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
-    if (/^\S/.test(line)) {
-      inTable = /^(android_skills|chrisbanes_skills):\s*$/.test(line);
+    const opener = line.match(/^(\s+)domains:\s*$/);
+    if (opener) {
+      inDomains = true;
+      indent = opener[1];
       continue;
     }
-    if (!inTable) continue;
-    const match = line.match(/^(\s+)- skill: (\S+)\s*$/);
-    if (!match) continue;
+    if (inDomains && /^\S/.test(line)) inDomains = false;
+    if (!inDomains) continue;
+    const match = line.match(/^(\s+)- id: (\S+)\s*$/);
+    if (!match || match[1].length <= indent.length) continue;
     const body = [];
     for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
       const next = lines[cursor];
@@ -1143,6 +1152,16 @@ function readJsonSafe(pathName) {
   }
 }
 
+// 배치 계약이 이름 목록을 전부 담고 있는지 세려면 이름 목록도 Python에서 읽어야 한다.
+function pythonManagedHookScripts() {
+  const source = fs.readFileSync(path.join(SOURCE_ROOT, "src", "agent_flow", "core", "hook_integrity.py"), "utf8");
+  const block = source.match(/MANAGED_HOOK_SCRIPTS = \(([\s\S]*?)\)/);
+  if (!block) {
+    throw new Error("MANAGED_HOOK_SCRIPTS not found in hook_integrity.py");
+  }
+  return [...block[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+}
+
 // Python이 무결성 검증에 쓰는 배치 계약을 그대로 읽는다. JS에 사본을 두면
 // 두 목록이 갈라지고, 갈라진 순간 parity가 지키는 대상이 사라진다.
 function pythonManagedHookPlacement() {
@@ -1152,12 +1171,25 @@ function pythonManagedHookPlacement() {
     throw new Error("MANAGED_HOOK_PLACEMENT not found in hook_integrity.py");
   }
   const placement = {};
-  const entry = /"([^"]+)":\s*\(\s*"([^"]*)",\s*\n?\s*"((?:[^"\\]|\\.)*)",?\s*\)/g;
+  // 값이 여러 줄 문자열로 쪼개져 있어도 읽는다. Python은 암시적 연결을 하나의
+  // 문자열로 보는데, 리터럴 하나만 집으면 계약이 조용히 반쪽으로 읽힌다.
+  // 마지막 항목은 블록 캡처가 끝나는 자리라 뒤에 개행이 없다.
+  const entry = /"([^"]+)":\s*\(([\s\S]*?)\),(?:\n|$)/g;
   for (const match of block[1].matchAll(entry)) {
-    placement[match[1]] = [match[2], match[3].replaceAll("\\\\", "\\")];
+    const literals = [...match[2].matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((item) => item[1]);
+    if (literals.length === 0) {
+      continue;
+    }
+    const [event, ...rest] = literals;
+    placement[match[1]] = [event, rest.join("").replaceAll("\\\\", "\\")];
   }
-  if (Object.keys(placement).length === 0) {
-    throw new Error("MANAGED_HOOK_PLACEMENT parsed empty");
+  // 개수를 세지 않으면 정규식이 못 읽는 형태(암시적 문자열 연결 등)로 적힌 항목이
+  // 무음으로 빠지고, 그 항목의 JS/Python 갈라짐이 이 검사를 통과한다. 실측으로
+  // `record-skill-read.py`가 그렇게 빠져 있었다.
+  const managed = pythonManagedHookScripts();
+  const missing = managed.filter((name) => !(name in placement));
+  if (missing.length > 0) {
+    throw new Error(`MANAGED_HOOK_PLACEMENT entries unreadable: ${missing.join(", ")}`);
   }
   return placement;
 }

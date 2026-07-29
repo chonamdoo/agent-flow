@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 from dataclasses import dataclass
@@ -14,10 +15,24 @@ _DEFAULT_PROJECT_TEMPLATES = (
     ("project-local", ".agent-flow/local-skills/{skill}/SKILL.md"),
     ("project", "skills/{skill}/SKILL.md"),
     ("bundled", ".agent-flow/skills/{skill}/SKILL.md"),
+    # `npx skills add` 는 프로젝트 설치를 이 두 곳에 앉힌다. 전역 설치를 거부하는
+    # 벤더(Prisma)는 여기밖에 안 놓으므로 project root도 봐야 한다. source를 `project`와
+    # 가르는 이유는 이름 소유권이다 — `skills/`는 우리 것이고 여기는 남의 것이라
+    # 어휘 라우팅 대상이다.
+    ("vendor", ".claude/skills/{skill}/SKILL.md"),
+    ("vendor", ".agents/skills/{skill}/SKILL.md"),
 )
 
 _HOST_TEMPLATES = {
-    "claude": ("~/.claude/skills/{skill}/SKILL.md",),
+    # plugin skill은 marketplace 레이아웃이 네 가지다. 단일 패턴만 두면 이 머신
+    # 실측으로 plugins 아래 SKILL.md 53개 중 17개만 잡힌다.
+    "claude": (
+        "~/.claude/skills/{skill}/SKILL.md",
+        "~/.claude/plugins/marketplaces/*/skills/{skill}/SKILL.md",
+        "~/.claude/plugins/marketplaces/*/plugins/*/skills/{skill}/SKILL.md",
+        "~/.claude/plugins/external_plugins/*/skills/{skill}/SKILL.md",
+        "~/.claude/plugins/cache/*/*/*/skills/{skill}/SKILL.md",
+    ),
     "codex": ("~/.codex/skills/{skill}/SKILL.md",),
     "omp": ("~/.omp/agent/skills/{skill}/SKILL.md", "~/.omp/skills/{skill}/SKILL.md"),
 }
@@ -123,6 +138,11 @@ class SkillCatalogEntry:
     dependencies: tuple[str, ...] = ()
     # taskTerms/pathGlobs를 **선언했는지**. 선언 여부와 비어 있음은 다른 뜻이다.
     selector_declared: bool = False
+    # `workflowPhases`를 스스로 선언했는지. upstream SKILL.md는 이 필드를 쓰지 않으므로
+    # (실측 953개 중 0개) 이것이 곧 "자동 활성화 근거가 있는가"다.
+    phase_declared: bool = False
+    description: str = ""
+    keywords: tuple[str, ...] = ()
 
 
 def active_host(env: dict[str, str] | None = None) -> str:
@@ -215,8 +235,11 @@ def resolve_phase_skills(
     host: str | None = None,
     env: dict[str, str] | None = None,
 ) -> SkillResolution:
-    """phase 선언 + frontmatter 선언 + profile 표를 합쳐 해석한다."""
+    """phase 선언 + frontmatter 선언 + profile 표/어휘를 합쳐 해석한다."""
+    # 지연 import: 두 모듈이 이 모듈을 되짚어 참조한다.
     from agent_flow.core.profile_routing import routed_profile_skills
+    from agent_flow.core.skill_matching import REQUIRED as EXTERNAL_REQUIRED
+    from agent_flow.core.skill_matching import match_external
 
     roots = skill_roots(project_root, profile=profile, host=host, env=env)
     declared = phase_skills or PhaseSkills()
@@ -244,56 +267,109 @@ def resolve_phase_skills(
             required_names.append(routed.name)
             routed_only.add(routed.name)
 
+    # 어휘 조인으로 붙는 설치 skill. 카탈로그가 이미 실제 경로를 아는 것만 담으므로
+    # 이름으로 다시 해석하지 않는다 — host 필터로 재해석하면 다른 host 홈에 설치된
+    # skill을 매칭해 required로 올린 뒤 "설치돼 있지 않다"고 보고한다.
+    matched: dict[str, ResolvedSkill] = {}
+    for match in match_external(
+        profile,
+        catalog,
+        phase_id=phase_id,
+        changed_files=changed_files,
+        task_text=task_text,
+        env=env,
+    ):
+        if match.name in required_names or match.name in optional_names:
+            continue
+        matched[match.name] = ResolvedSkill(
+            name=match.name,
+            path=match.path,
+            source=match.source,
+            exists=match.path is not None,
+            summary=skill_summary(match.path) if match.path is not None else "",
+        )
+        if match.tier == EXTERNAL_REQUIRED:
+            required_names.append(match.name)
+        else:
+            optional_names.append(match.name)
+
     required_names = _expand_dependencies(required_names, catalog)
     optional_names = [name for name in optional_names if name not in required_names]
 
-    # 표는 `active_host_only: true`를 선언한다. 다른 host의 사본으로 충족시키면
-    # 프롬프트가 엉뚱한 파일을 가리키고 진짜 부재가 숨는다. 표로만 붙은 이름에만
-    # 적용한다 — phase가 직접 선언했거나 frontmatter로 붙은 skill은 host 소유가 아니다.
+    # 우리가 이름으로 선언한 skill만 활성 host로 좁힌다. 그 이름은 미설치일 수 있고,
+    # 다른 host의 사본으로 충족시키면 프롬프트가 엉뚱한 파일을 가리킨다.
     resolved_host = active_host(env) if host is None else host
     routed_roots = active_host_roots(roots, resolved_host)
 
+    def resolve(name: str) -> ResolvedSkill:
+        found = matched.get(name)
+        if found is not None:
+            return found
+        return resolve_skill(
+            name,
+            routed_roots if name in routed_only else roots,
+            install_hint=routed_hints.get(name, ""),
+        )
+
     return SkillResolution(
-        required=tuple(
-            resolve_skill(
-                name,
-                routed_roots if name in routed_only else roots,
-                install_hint=routed_hints.get(name, ""),
-            )
-            for name in _stable_unique(required_names)
-        ),
-        optional=tuple(resolve_skill(name, roots) for name in _stable_unique(optional_names)),
+        required=tuple(resolve(name) for name in _stable_unique(required_names)),
+        optional=tuple(resolve(name) for name in _stable_unique(optional_names)),
     )
 
 
-_CATALOG_CACHE: dict[tuple[str, ...], tuple["SkillCatalogEntry", ...]] = {}
+_CATALOG_CACHE: dict[tuple[tuple[str, ...], str], tuple["SkillCatalogEntry", ...]] = {}
 
 
 def discover_skill_catalog(
     project_root: Path, roots: Sequence[SkillRoot]
 ) -> tuple[SkillCatalogEntry, ...]:
-    """root들을 훑어 frontmatter 활성화 선언이 있는 skill만 카탈로그로 만든다.
+    """root들을 훑어 발견한 모든 SKILL.md를 카탈로그로 만든다.
 
     한 번의 marker 검증에서 여러 번 불리고 매번 모든 SKILL.md를 읽는다.
-    프로세스 수명 동안만 캐시한다 — CLI는 단명이라 stale 위험이 없다.
-    template은 project root를 이미 펼친 절대경로라 그 자체로 프로젝트를 가른다.
+    디스크 스탬프를 캐시 키에 넣는다 — template만 키로 쓰면 같은 프로세스 안에서
+    skill이 갱신되거나 새로 깔려도 낡은 카탈로그를 계속 쓴다.
     """
-    key = tuple(root.template for root in roots)
+    files = catalog_files(roots)
+    key = (tuple(root.template for root in roots), catalog_stamp(files))
     cached = _CATALOG_CACHE.get(key)
     if cached is not None:
         return cached
     entries: dict[str, SkillCatalogEntry] = {}
-    for root in roots:
-        for skill_path in _iter_root_skills(root.template):
-            name = skill_path.parent.name
-            if name in entries or not _is_safe_skill_name(name):
-                continue
-            entry = _catalog_entry(name, skill_path, root.source)
-            if entry is not None:
-                entries[name] = entry
+    seen_files: set[str] = set()
+    for source, skill_path in files:
+        name = skill_path.parent.name
+        if name in entries or not _is_safe_skill_name(name):
+            continue
+        # 같은 파일이 여러 root에 걸린다(`~/.claude/skills/<n>` → `~/.agents/skills/<n>`
+        # symlink가 이 머신 25개 중 15개). 이름이 달라도 같은 파일이면 한 번만 담는다.
+        real = os.path.realpath(skill_path)
+        if real in seen_files:
+            continue
+        seen_files.add(real)
+        entries[name] = _catalog_entry(name, skill_path, source)
     result = tuple(entries.values())
     _CATALOG_CACHE[key] = result
     return result
+
+
+def catalog_files(roots: Sequence[SkillRoot]) -> tuple[tuple[str, Path], ...]:
+    return tuple(
+        (root.source, skill_path)
+        for root in roots
+        for skill_path in _iter_root_skills(root.template)
+    )
+
+
+def catalog_stamp(files: Sequence[tuple[str, Path]]) -> str:
+    """카탈로그 무효화 스탬프. 내용 해시가 아니라 stat이다 — 실측 131개에 0.4ms."""
+    parts: list[str] = []
+    for _source, skill_path in files:
+        try:
+            info = skill_path.stat()
+        except OSError:
+            continue
+        parts.append(f"{skill_path}:{info.st_mtime_ns}:{info.st_size}")
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
 
 
 def skill_prompt_block(
@@ -491,7 +567,7 @@ def _split_glob(expanded: str) -> tuple[Path | None, str]:
     return base, str(Path(*remainder))
 
 
-def _catalog_entry(name: str, skill_path: Path, source: str) -> SkillCatalogEntry | None:
+def _catalog_entry(name: str, skill_path: Path, source: str) -> SkillCatalogEntry:
     frontmatter = _read_frontmatter(skill_path) or {}
     phases = _string_tuple(frontmatter.get("workflowPhases"))
     terms = tuple(term.lower() for term in _string_tuple(frontmatter.get("taskTerms")))
@@ -499,21 +575,26 @@ def _catalog_entry(name: str, skill_path: Path, source: str) -> SkillCatalogEntr
     deps = _string_tuple(frontmatter.get("dependencies")) + _string_tuple(
         frontmatter.get("requires")
     )
-    if not phases:
-        if source != "project-local":
-            return None
-        phases = CODE_PHASES
+    metadata = frontmatter.get("metadata")
+    keywords = (
+        tuple(word.lower() for word in _string_tuple(metadata.get("keywords")))
+        if isinstance(metadata, dict)
+        else ()
+    )
     return SkillCatalogEntry(
         name=name,
         path=skill_path,
         source=source,
-        workflow_phases=phases,
+        workflow_phases=phases or CODE_PHASES,
         task_terms=terms,
         path_globs=globs,
         dependencies=deps,
         selector_declared=(
             "taskTerms" in frontmatter or "pathGlobs" in frontmatter
         ),
+        phase_declared=bool(phases),
+        description=str(frontmatter.get("description") or "").strip(),
+        keywords=keywords,
     )
 
 
@@ -558,6 +639,11 @@ def _entry_activates(
     entry: SkillCatalogEntry, phase_id: str, changed_files: Sequence[str], task_text: str
 ) -> bool:
     if phase_id not in entry.workflow_phases:
+        return False
+    if not entry.phase_declared and entry.source != "project-local":
+        # upstream SKILL.md는 `workflowPhases`를 선언하지 않는다. 카탈로그에는 담되
+        # 자동 활성화는 하지 않는다 — 이 가드가 없으면 host에 깔린 skill 전량이
+        # 선택자 없는 엔트리로 required가 된다.
         return False
     if entry.selector_declared:
         # 선언했는데 전부 빈 값이면 "무조건 활성화"가 아니라 "아무것도 안 걸림"이다.

@@ -96,40 +96,11 @@ const BUNDLED_HOST_SKILL_NAMES = new Set([
   "react-app-shell-error-handling",
   "react-native-app-shell-error-handling",
 ]);
-const PROFILE_MANAGED_HOST_ONLY_SKILLS = new Set([
-  "adaptive",
-  "android-cli",
-  "android-debugging",
-  "android-module-creator",
-  "appfunctions",
-  "camera1-to-camerax",
-  "compose-animations",
-  "compose-focus-navigation",
-  "compose-modifier-and-layout-style",
-  "compose-recomposition-performance",
-  "compose-side-effects",
-  "compose-slot-api-pattern",
-  "compose-stability-diagnostics",
-  "compose-state-authoring",
-  "compose-state-deferred-reads",
-  "compose-state-hoisting",
-  "compose-state-holder-ui-split",
-  "compose-ui-testing-patterns",
-  "display-glasses-with-jetpack-compose-glimmer",
-  "edge-to-edge",
-  "engage-sdk-integration",
-  "kotlin-coroutines-structured-concurrency",
-  "kotlin-flow-state-event-modeling",
-  "kotlin-multiplatform-expect-actual",
-  "kotlin-types-value-class",
-  "navigation-3",
-  "perfetto-sql",
-  "perfetto-trace-analysis",
-  "play-billing-library-version-upgrade",
-  "r8-analyzer",
-  "testing-setup",
-  "verified-email",
-]);
+// 설치된 외부 skill 이름은 여기 열거하지 않는다. upstream이 6개월에 이름 35%를 바꿨고
+// (실측: `camera1-to-camerax` → `camerax`), 열거된 목록은 우리가 배포하지도 않는 이름을
+// 영구히 들고 있게 된다. 프로젝트 skill 색인은 우리가 배포한 것만 담고, 외부 skill은
+// 런타임이 host 경로에서 해석한다.
+const PROFILE_MANAGED_HOST_ONLY_SKILLS = new Set();
 const GENERATED_PROJECT_SKILL_NAMES = new Set([
   "architecture-reviewer",
   "full-feature-workflow",
@@ -220,7 +191,7 @@ function installProject() {
     PROFILE_MANAGED_HOST_ONLY_SKILLS,
     true,
     forceManaged,
-    new Set(["index.json", ...GENERATED_PROJECT_SKILL_NAMES]),
+    new Set(["index.json", "catalog.lock.json", ...GENERATED_PROJECT_SKILL_NAMES]),
     installSelection.copyRootNames,
   );
   // kit이 배포하는 profile은 갱신한다. 사용자 편집을 보호한다고 두면 새 kit이
@@ -232,7 +203,6 @@ function installProject() {
   // 구분할 수 없다.
   const installedProfileNames = installedProfileFileNames(
     activeInstallProfileIds(profile, installSelection),
-    path.join(PACKAGED_ASSETS, "profiles"),
   );
   upgradeBundledProfiles(
     root,
@@ -243,6 +213,13 @@ function installProject() {
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "templates"), path.join(agentFlowDir, "templates"), forceManaged, new Set(), true, forceManaged);
   const skillIndex = installProjectSkills(root, agentFlowDir, previousSkillIndex, forceManaged, installSelection);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "scripts"), path.join(agentFlowDir, "scripts"), forceManaged);
+  // scripts 복사는 사용자 편집을 보호해 덮지 않는다. managed hook은 그 보호가 곧
+  // digest 불일치이므로 별도로 갱신한다.
+  upgradeManagedHooks(
+    root,
+    path.join(KIT_ROOT, "scripts", "hooks"),
+    path.join(agentFlowDir, "scripts", "hooks"),
+  );
   // 이 runtime 패키지 사본의 profile은 좁히지 않는다. `find_kit_root()`가 설치본에서
   // 이 디렉터리로 떨어지므로 profile YAML을 실제로 읽는 자리가 여기이고, override는
   // 설치 때 고르지 않은 profile도 지명할 수 있다 — 좁히면 `gates --profile ios`가
@@ -1630,7 +1607,7 @@ function selectProjectSkills(root, agentFlowDir, installSelection = null) {
       path.join(agentFlowDir, "skills"),
       "bundled",
       root,
-      new Set(["index.json", ...PROFILE_MANAGED_HOST_ONLY_SKILLS]),
+      new Set(["index.json", "catalog.lock.json", ...PROFILE_MANAGED_HOST_ONLY_SKILLS]),
     ),
   ];
   const byName = new Map();
@@ -2272,7 +2249,7 @@ agent는 fallback·manual 승인 명령이나 user-prompt hook을 대신 실행�
 - Claude/Codex/OMP hook이 자동 차단하는 보호 브랜치 commit/push와 leader checkout/switch 금지는 모든 host에서 동일하게 지킨다.
 
 During code generation, modification, and code review phases, apply \`code-generation-discipline\`. Resolve required skills from active profile metadata, installed skill index, changed files, and task scope. Load only the touched profile skill union.
-For Android/Kotlin/Compose/KMP changes, read matching local skill files from the Android profile's \`android_skills\` and \`chrisbanes_skills\` for the active host. React Native \`android/\` native changes also apply the Android profile mapping. Do not require unrelated platform skills, and do not install, copy, link, or load duplicate skills from other host directories. If a required local skill is missing, report \`missing local <group>: <skill>\` with the profile source URL and ask the user to install it.
+The phase prompt lists the skills for this change — required ones with paths, in-scope ones by name. That list is resolved per run from the active profile's skill vocabulary, the skills installed on this machine, the changed files, and the task text. Read the required ones; call the in-scope ones by name only when the change actually touches them. No configuration enumerates installed external skill names: vocabulary is declared instead, so an upstream add, delete, or rename needs no edit here. If a required local skill is missing, report \`missing local <group>: <skill>\` with the profile source URL and ask the user to install it.
 `;
 }
 
@@ -2441,6 +2418,33 @@ function upgradeBundledProfiles(root, src, dest, keepNames) {
     fs.writeFileSync(target, content, "utf8");
   }
   pruneUninstalledProfiles(root, src, dest, keepNames);
+}
+
+// managed hook은 digest가 `kit.json`에 기록되고 run 시작이 그 일치를 요구한다
+// (`hook_integrity`). "내용이 다르면 덮지 않는다"만 걸어 두면 kit 업그레이드가
+// 정의상 내용이 다른 경우라 digest는 새 값, 파일은 옛 값으로 갈라져 run이 막힌다.
+// profile과 같은 취급을 한다 — 덮되 사본을 남긴다.
+function upgradeManagedHooks(root, src, dest) {
+  if (!fs.existsSync(src)) {
+    return;
+  }
+  fs.mkdirSync(dest, { recursive: true });
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    if (!entry.isFile()) {
+      continue;
+    }
+    const source = path.join(src, entry.name);
+    const content = fs.readFileSync(source, "utf8");
+    const target = path.join(dest, entry.name);
+    const backup = backupIfDifferent(root, target, content);
+    if (backup) {
+      // 백업은 hook 디렉터리 안에 남는다. 실행 권한을 그대로 물려주면
+      // `hook_integrity`가 관리 대상 아닌 실행 파일로 보고 run 시작을 막는다.
+      fs.chmodSync(backup, 0o644);
+    }
+    fs.writeFileSync(target, content, "utf8");
+    fs.chmodSync(target, fs.statSync(source).mode & 0o777);
+  }
 }
 
 

@@ -398,7 +398,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("skill makes the verdict", architecture_review_prompt)
         self.assertIn("presentation-skill: android|react|react-native|ios|n/a", phases["green"]["required_markers"])
         self.assertNotIn("android-local-skills: checked|n/a", phases["green"]["required_markers"])
-        self.assertIn("Android/Chris Banes skills are required only", phases["green"]["prompt"])
+        self.assertIn("Android/Kotlin/Compose/KMP changes require Android profile skills", phases["green"]["prompt"])
         self.assertEqual(phases["gates"]["artifact"], "artifacts/gate-results.json")
         self.assertEqual(phases["gates"]["routes"]["green"], "commit")
         self.assertEqual(phases["comment-authoring"]["routes"]["default"], "multi-review")
@@ -1523,8 +1523,8 @@ class CliTest(unittest.TestCase):
             self.assertTrue((project_root / ".agent-flow" / "skills" / "architecture-reviewer" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "android-code-review" / "SKILL.md").is_file())
             self.assertFalse((project_root / ".agent-flow" / "skills" / "android-mvi-feature").exists())
-            self.assertFalse((project_root / ".agent-flow" / "skills" / "android-module-creator").exists())
-            self.assertFalse((project_root / ".agent-flow" / "skills" / "android-debugging").exists())
+            self.assertTrue((project_root / ".agent-flow" / "skills" / "android-module-creator").exists())
+            self.assertTrue((project_root / ".agent-flow" / "skills" / "android-debugging").exists())
             self.assertFalse((project_root / ".agent-flow" / "skills" / "graphify").exists())
             self.assertTrue(
                 (
@@ -3097,7 +3097,7 @@ design-values-confirmed: n/a
             )
             self.assertFalse(_node_phase_run_dir(project_root).exists())
 
-    def test_node_installers_ignore_profile_managed_host_only_project_skills(self) -> None:
+    def test_node_installers_index_project_skills_that_collide_with_external_names(self) -> None:
         installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -3139,9 +3139,17 @@ design-values-confirmed: n/a
                 self.assertEqual(result.returncode, 0, result.stderr)
                 index = json.loads((project_root / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
                 skill_names = {skill["name"] for skill in index["skills"]}
-                self.assertNotIn("compose-state-authoring", skill_names)
-                self.assertNotIn("edge-to-edge", skill_names)
-                for host_root in (project_root / ".Codex" / "skills", project_root / ".codex" / "skills", project_root / ".omp" / "skills"):
+                # 프로젝트가 직접 쓴 파일이다. 조용히 버리면 사용자는 자기 skill이
+                # 왜 안 쓰이는지 알 수 없다. 색인하고 `skills doctor`가 충돌을 보고한다.
+                self.assertIn("compose-state-authoring", skill_names)
+                self.assertIn("edge-to-edge", skill_names)
+                # frontmatter가 `hosts: [codex]`라 codex 경로에만 링크된다. codex link는
+                # `hostSkillRoot`가 `.Codex`로 고정한다 - case-insensitive FS에서 두
+                # 이름이 같은 디렉터리라 `.codex`까지 단언하면 그 FS에서만 통과한다.
+                codex_root = project_root / ".Codex" / "skills"
+                self.assertTrue((codex_root / "compose-state-authoring").exists())
+                self.assertTrue((codex_root / "edge-to-edge").exists())
+                for host_root in (project_root / ".omp" / "skills", project_root / ".claude" / "skills"):
                     self.assertFalse((host_root / "compose-state-authoring").exists())
                     self.assertFalse((host_root / "edge-to-edge").exists())
 
@@ -7003,10 +7011,10 @@ if (codexContext !== undefined) {
         android_required = android.skills["required_review"]
         self.assertEqual(android_required[0]["group"], "profile")
         self.assertIn("android-code-review", android_required[0]["skills"])
-        self.assertEqual(android_required[1]["group"], "android_skills")
-        self.assertEqual(android_required[2]["group"], "chrisbanes_skills")
+        self.assertEqual([group["group"] for group in android_required], ["profile"])
+        self.assertNotIn("android_skills", android.skills)
         rn_required = load_profile("react-native").skills["required_review"]
-        self.assertEqual(rn_required[1]["group"], "android-native-escalation")
+        self.assertEqual([group["group"] for group in rn_required], ["profile"])
 
     def test_runner_prefers_repository_kit_root(self) -> None:
         from agent_flow.runner import _find_kit_root

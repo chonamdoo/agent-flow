@@ -89,7 +89,9 @@ MANAGED_HOOK_PLACEMENT = {
         "PostToolUse",
         "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit)$",
     ),
-    "record-skill-read.py": ("PostToolUse", "^(Read|read|read_file|view|cat)$"),
+    # 값은 한 줄로 둔다. parity 파서가 암시적 문자열 연결을 접지 못해 항목이 무음으로
+    # 탈락하고, 그러면 JS/Python 갈라짐이 CI를 통과한다.
+    "record-skill-read.py": ("PostToolUse", "^(Read|read|read_file|view|cat|Skill|skill|Bash|bash|shell|run_terminal_cmd|execute_command|local_shell|terminal)$"),
     "record-command-run.py": (
         "PostToolUse",
         "^(Bash|bash|shell|run_terminal_cmd|execute_command|local_shell|terminal)$",
