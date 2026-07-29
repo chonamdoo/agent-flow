@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator, Sequence
 
 from agent_flow.artifact import ACTIVE_MARKER, find_active_runs, read_meta, write_meta
 from agent_flow.core.commands import run_safe_command
@@ -2438,19 +2438,10 @@ def _owned_branch_for_live_worktree(*, root: Path, status: WorktreeStatus) -> st
 
 @dataclass(frozen=True)
 class SlugQuality:
-    """slug와, 그 slug를 믿어도 되는지에 대한 판정.
+    """slug와 그것을 믿어도 되는지.
 
-    `kind`는 세 가지다.
-
-    ``ascii``   task의 모든 단어가 이름에 기여했다. 그대로 쓴다.
-    ``partial`` 일부만 살아남았다. **가장 위험한 상태다** — 이름이 그럴듯해 보이지만
-                task를 대표하지 않는다. `로그인 화면 Figma 구현`이 `figma`가 되는 경우다.
-    ``digest``  아무것도 살아남지 못해 안정적인 해시로 떨어졌다. 의미는 없지만 없다는
-                사실이 이름에 드러난다.
-
-    비율로 판정하지 않는다. 임계값을 두면 그 숫자가 곧 정책이 되는데, 몇 퍼센트부터
-    나쁜 이름인지는 코드가 답할 수 있는 질문이 아니다. 버려진 단어가 있으면 있다고만
-    말하고, 무엇을 할지는 부르는 쪽이 정한다.
+    `partial`이 가장 위험하다 — 그럴듯해 보이지만 task를 대표하지 않는다.
+    비율로 판정하지 않는다. 임계값을 두면 그 숫자가 곧 정책이 된다.
     """
 
     slug: str
@@ -2460,7 +2451,9 @@ class SlugQuality:
 
 def describe_slug(value: str) -> SlugQuality:
     lowered = value.strip().lower()
-    safe = re.sub(r"[^a-z0-9._-]+", "-", lowered).strip("-")
+    safe = re.sub(r"[^a-z0-9._-]+", "-", lowered)
+    # `-`가 허용 문자라 `rm -rf`는 치환 결과와 겹쳐 `rm--rf`가 된다.
+    safe = re.sub(r"-{2,}", "-", safe).strip("-")
     dropped = tuple(
         word
         for word in value.split()
@@ -2476,6 +2469,65 @@ def describe_slug(value: str) -> SlugQuality:
     return SlugQuality(
         slug=safe, kind="partial" if dropped else "ascii", dropped=dropped
     )
+
+
+DEFAULT_SLUG_MAX_LENGTH = 60
+DEFAULT_SLUG_TIMEOUT_S = 20
+
+
+def delegated_slug(
+    *,
+    task: str,
+    command: Sequence[str],
+    timeout_s: int = DEFAULT_SLUG_TIMEOUT_S,
+    max_length: int = DEFAULT_SLUG_MAX_LENGTH,
+) -> str | None:
+    """profile이 선언한 명령에 이름 짓기를 위임한다. 실패하면 `None`.
+
+    셸을 거치지 않는다 — task는 사용자 문자열이라 명령에 끼워 넣으면 명령이 된다.
+    host 출력은 제안일 뿐이라 slug 규칙으로 다시 검증한다.
+    어떤 실패도 worktree 생성을 막지 않는다.
+    """
+    if not command:
+        return None
+    argv = [task if part == "{task}" else part for part in command]
+    if all(part != task for part in argv):
+        argv = [*argv, task]
+    try:
+        result = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    first_line = next(
+        (line for line in (result.stdout or "").splitlines() if line.strip()), ""
+    )
+    try:
+        quality = describe_slug(first_line.strip().strip("\"'"))
+    except ValueError:
+        return None
+    if quality.kind != "ascii":
+        return None
+    return _truncate_slug(quality.slug, max_length)
+
+
+def _truncate_slug(slug: str, max_length: int) -> str:
+    """길이 제한은 단어 경계에서 건다."""
+    if len(slug) <= max_length:
+        return slug
+    parts: list[str] = []
+    for part in slug.split("-"):
+        candidate = "-".join([*parts, part])
+        if parts and len(candidate) > max_length:
+            break
+        parts.append(part)
+    return "-".join(parts)[:max_length].strip("-")
 
 
 def _safe_component(value: str) -> str:

@@ -113,6 +113,7 @@ from agent_flow.core.worktrees import (
     cleanup_state_root,
     copy_declared_worktree_files,
     describe_slug,
+    delegated_slug,
     find_pending_worktree_cleanup,
     known_worktree_names,
     plan_worktree,
@@ -2179,16 +2180,49 @@ def _confirm_inferred_worktree_reuse(
     return False
 
 
+def _slug_command_for_active_host(root: Path) -> list[str]:
+    """활성 host에 해당하는 이름 짓기 명령. 선언이 없으면 빈 목록."""
+    try:
+        _profile_id, profile = _load_profile(_find_kit_root(), root)
+    except Exception:
+        return []
+    host = (os.environ.get("AGENT_FLOW_HOST") or "").strip().lower()
+    if not host:
+        return []
+    sources = [profile]
+    nested = profile.get("profiles")
+    if isinstance(nested, list):
+        sources.extend(item for item in nested if isinstance(item, dict))
+    for source in sources:
+        naming = ((source.get("branching") or {}).get("naming") or {})
+        declared = (naming.get("slug_command") or {}).get(host)
+        if isinstance(declared, list) and declared:
+            return [str(part) for part in declared]
+    return []
+
+
+def _derive_worktree_selector(*, root: Path, task: str) -> str:
+    """task에서 worktree 이름을 정한다. 위임 실패는 경고로 드러낸다."""
+    try:
+        quality = describe_slug(task)
+    except ValueError:
+        return task
+    if quality.kind == "ascii":
+        return task
+    command = _slug_command_for_active_host(root)
+    if command:
+        delegated = delegated_slug(task=task, command=command)
+        if delegated:
+            print(f"worktree 이름을 활성 host가 지었다: feat-{delegated}")
+            return delegated
+    _warn_if_slug_does_not_represent_the_task(task)
+    return task
+
+
 def _warn_if_slug_does_not_represent_the_task(task: str) -> None:
-    """task에서 뽑은 이름이 그 task를 대표하지 못하면 사실대로 말한다.
+    """이름이 task를 대표하지 못하면 사실대로 말한다.
 
-    가장 나쁜 동작은 품질 낮은 이름을 성공한 것처럼 내놓는 것이다.
-    `로그인 화면 Figma 구현`이 `feat-figma`가 되면 그럴듯해 보여서 아무도 이상하게
-    여기지 않고, 그 이름이 브랜치 목록·PR 제목·머지 커밋까지 그대로 간다. 해시로
-    떨어지는 쪽은 오히려 낫다 — 이름이 없다는 사실이 이름에 드러나기 때문이다.
-
-    사용자가 `--worktree`로 직접 지은 이름에는 아무 말도 하지 않는다. 거기까지
-    참견하면 경고가 소음이 되고, 소음이 된 경고는 읽히지 않는다.
+    `--worktree`로 사용자가 직접 지은 이름에는 아무 말도 하지 않는다.
     """
     try:
         quality = describe_slug(task)
@@ -2242,7 +2276,7 @@ def _resolve_entry_worktree(
             _warn_if_cwd_is_other_checkout(root=root, target=attached.path)
             return attached, True
     if not explicit:
-        _warn_if_slug_does_not_represent_the_task(selector)
+        selector = _derive_worktree_selector(root=root, task=selector)
     plan = plan_worktree(root=root, name=selector, branch=branch)
     try:
         status = create_worktree(
