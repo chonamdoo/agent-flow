@@ -2206,6 +2206,9 @@ def _resolve_entry_worktree(
             expected_registration_identity=expected_registration_identity,
         )
         if attached is not None:
+            # 재사용도 셋업 대상이다. 손으로 만든 checkout이거나 선언이 나중에 추가된
+            # 경우 파일이 없을 수 있다. 이미 있으면 건너뛰므로 반복해도 무해하다.
+            _apply_worktree_setup(root=root, checkout=attached.path)
             _warn_if_cwd_is_other_checkout(root=root, target=attached.path)
             return attached, True
     plan = plan_worktree(root=root, name=selector, branch=branch)
@@ -2358,6 +2361,34 @@ def _keep_failed_worktree() -> bool:
     return os.environ.get(KEEP_FAILED_WORKTREE_ENV, "").strip().lower() in _TRUTHY_ENV
 
 
+def _declared_worktree_copies(profile: dict) -> list[str]:
+    """단일 profile과 multi-profile 합성본 양쪽에서 선언을 모은다.
+
+    `_load_profile_union`이 만드는 합성 dict에는 최상위 `branching`이 없다 —
+    개별 profile은 `profiles` 아래에 들어가고 최상위에는 `review_angles`/`gates`/
+    `skills`/`architecture`만 합쳐진다. 최상위만 보면 android+react-native처럼
+    profile이 둘 이상인 프로젝트에서 선언이 조용히 빈 목록이 되고, `local.properties`가
+    영영 복사되지 않는다.
+    """
+    sources: list[dict] = [profile]
+    nested = profile.get("profiles")
+    if isinstance(nested, list):
+        sources.extend(item for item in nested if isinstance(item, dict))
+    names: list[str] = []
+    for source in sources:
+        branching = source.get("branching")
+        if not isinstance(branching, dict):
+            continue
+        setup = branching.get("worktree_setup")
+        if not isinstance(setup, dict):
+            continue
+        for name in setup.get("copy") or []:
+            text = str(name)
+            if text not in names:
+                names.append(text)
+    return names
+
+
 def _apply_worktree_setup(*, root: Path, checkout: Path) -> None:
     """profile이 선언한 gitignored 머신 설정을 새 checkout으로 옮긴다.
 
@@ -2366,7 +2397,7 @@ def _apply_worktree_setup(*, root: Path, checkout: Path) -> None:
     """
     try:
         _profile_id, profile = _load_profile(_find_kit_root(), root)
-        declared = ((profile.get("branching") or {}).get("worktree_setup") or {}).get("copy") or []
+        declared = _declared_worktree_copies(profile)
     except Exception as exc:  # profile 해석 실패가 worktree 생성을 막을 이유는 없다
         print(f"warning: skipped worktree setup: {_format_cli_error(exc)}", file=sys.stderr)
         return
