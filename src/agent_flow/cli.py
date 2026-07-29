@@ -2184,7 +2184,8 @@ def _slug_command_for_active_host(root: Path) -> list[str]:
     """활성 host에 해당하는 이름 짓기 명령. 선언이 없으면 빈 목록."""
     try:
         _profile_id, profile = _load_profile(_find_kit_root(), root)
-    except Exception:
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError):
+        # profile을 못 읽는다고 worktree 생성을 막지 않는다. 이름만 못 지을 뿐이다.
         return []
     host = (os.environ.get("AGENT_FLOW_HOST") or "").strip().lower()
     if not host:

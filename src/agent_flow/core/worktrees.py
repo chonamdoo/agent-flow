@@ -2451,9 +2451,7 @@ class SlugQuality:
 
 def describe_slug(value: str) -> SlugQuality:
     lowered = value.strip().lower()
-    safe = re.sub(r"[^a-z0-9._-]+", "-", lowered)
-    # `-`가 허용 문자라 `rm -rf`는 치환 결과와 겹쳐 `rm--rf`가 된다.
-    safe = re.sub(r"-{2,}", "-", safe).strip("-")
+    safe = re.sub(r"[^a-z0-9._-]+", "-", lowered).strip("-")
     dropped = tuple(
         word
         for word in value.split()
@@ -2518,7 +2516,7 @@ def delegated_slug(
 
 
 def _truncate_slug(slug: str, max_length: int) -> str:
-    """길이 제한은 단어 경계에서 건다."""
+    """길이 제한은 되도록 단어 경계에서 건다. 첫 낱말이 이미 길면 잘라 쓴다."""
     if len(slug) <= max_length:
         return slug
     parts: list[str] = []

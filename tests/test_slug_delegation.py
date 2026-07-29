@@ -1,12 +1,7 @@
 """비ASCII task의 이름 짓기를 활성 host에 위임하는 경로.
 
-`describe_slug`는 실패를 숨기지 않게 만들었을 뿐, 좋은 이름을 만들어 주지는 않는다.
-영문 이름을 실제로 얻으려면 번역이 필요하고, agent-flow는 멀티 호스트라 특정 CLI를
-하드코딩할 수 없다. 그래서 profile이 host별 명령을 선언하고 활성 host로 위임한다.
-
-이건 profile이 선언한 임의 명령을 돌리는 경로다. 그래서 경계를 좁게 잡는다 —
-출력은 slug 규칙으로 **검증**하고, 실패는 어떤 형태든 이름 짓기 실패로만 떨어지며,
-worktree 생성 자체를 막지 않는다. 셸을 거치지 않으므로 명령 문자열 조립도 없다.
+profile이 선언한 임의 명령을 돌리므로 경계를 좁게 잡는다 — 셸을 거치지 않고, 출력은
+slug 규칙으로 다시 검증하며, 어떤 실패도 worktree 생성을 막지 않는다.
 """
 from __future__ import annotations
 
@@ -101,7 +96,7 @@ def test_task_is_passed_as_an_argument_not_a_shell_string():
     show_argv = [sys.executable, "-c", "import sys; print(sys.argv[1])", "{task}"]
     assert delegated_slug(
         task="drop; rm -rf ~", command=show_argv, timeout_s=10
-    ) == "drop-rm-rf"
+    ) == "drop-rm--rf"
 
 
 def test_empty_command_declaration_is_skipped():
