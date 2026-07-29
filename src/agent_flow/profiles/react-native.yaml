@@ -50,17 +50,11 @@ skills:
       skills: [react-native-development-guide, react-native-clean-architecture]
       when: React Native/Expo files change
       missing: "missing local profile: <skill>"
-    - group: android-native-escalation
-      profiles: [android]
-      skills_from: android_skills
-      when: React Native android/ native code changes
-      missing: "missing local android_skills: <skill>"
-      path_globs: ["android/**"]
   # 설치된 외부 skill 라우팅. 이름은 여기 적지 않는다 — Expo 공식 `expo/skills`가 6개월에
   # rename 10건 + 삭제 2건을 냈다(실측: `upgrading-expo` → `expo-upgrade`,
   # `expo-deployment` → `eas-app-stores`). 이름을 적는 순간 우리 파일이 낡는다.
   external:
-    enabled: false
+    enabled: true
     domains:
       # `expo`/`eas` 단독 term은 금지다. 실측으로 "export"/"exportable"과 "easy"/"measured"에
       # substring으로 걸려 building-with-xcode·ios-screenshots·math-olympiad를 끌어온다.

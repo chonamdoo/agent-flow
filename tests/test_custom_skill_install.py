@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 KIT_ROOT = Path(__file__).resolve().parent.parent
@@ -597,46 +598,46 @@ def test_android_upstream_skills_are_not_installed_or_vendored(tmp_path: Path) -
     bootstrap = (project / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8")
     assert "missing local <group>: <skill>" in bootstrap
     android_profile = (project / ".agent-flow" / "profiles" / "android.yaml").read_text(encoding="utf-8")
-    assert "source: https://github.com/android/skills" in android_profile
-    assert "source: https://github.com/chrisbanes/skills/tree/main/skills" in android_profile
+    assert "url: https://github.com/skydoves/compose-performance-skills" in android_profile
+    assert "kind: host-managed" in android_profile
 
 
-def test_android_skill_policy_is_active_host_local_only() -> None:
-    profile_paths = [
-        KIT_ROOT / "src" / "agent_flow" / "profiles" / "android.yaml",
-        KIT_ROOT / "src" / "agent_flow" / "profiles" / "android.yaml",
-    ]
-    policy_paths = [
-        KIT_ROOT / "src" / "agent_flow" / "profiles" / "_schema.yaml",
-        KIT_ROOT / "templates" / "_shared" / "review" / "android-skills.md",
-        KIT_ROOT / "templates" / "_shared" / "review" / "android-chrisbanes.md",
-        KIT_ROOT / "skills" / "android-code-review" / "SKILL.md",
-    ]
+def test_no_profile_enumerates_external_skill_names() -> None:
+    """upstream이 6개월에 이름 35%를 바꿨다. 이름을 적으면 우리 파일이 항상 낡는다."""
+    profiles = sorted((KIT_ROOT / "src" / "agent_flow" / "profiles").glob("*.yaml"))
+    assert profiles
 
-    for path in profile_paths:
+    for path in profiles:
         text = path.read_text(encoding="utf-8")
-        assert "install_policy: never" in text
-        assert "active_host_only: true" in text
-        assert "codex: ~/.codex/skills/{skill}/SKILL.md" in text
-        assert "claude: ~/.claude/skills/{skill}/SKILL.md" in text
-        assert "omp: ~/.omp/agent/skills/{skill}/SKILL.md" in text
-        assert "missing local android_skills: <skill>" in text
-        assert "missing local chrisbanes_skills: <skill>" in text
-        assert "vendor_dir" not in text
-        assert "native_loader" not in text
-        assert ".agent-flow/vendor" not in text
+        assert "android_skills:" not in text, path
+        assert "chrisbanes_skills:" not in text, path
+        assert "skills_from:" not in text, path
+        assert ".agent-flow/vendor" not in text, path
 
-    for path in policy_paths:
-        text = path.read_text(encoding="utf-8")
-        assert "~/.codex/skills/{skill}/SKILL.md" in text
-        assert "~/.claude/skills/{skill}/SKILL.md" in text
-        assert "~/.omp/agent/skills/{skill}/SKILL.md" in text
-        assert "falling back to" not in text
-        assert ".agent-flow/vendor/android-skills" not in text
-        assert ".agent-flow/vendor/chrisbanes-skills" not in text
 
+def test_external_sources_declare_host_roots_without_installing() -> None:
+    """설치는 사용자 소유다. 우리는 경로만 해석하고 fetch는 관리자 없는 소스에만 쓴다."""
+    android = yaml.safe_load(
+        (KIT_ROOT / "src" / "agent_flow" / "profiles" / "android.yaml").read_text(encoding="utf-8")
+    )
+    sources = {source["id"]: source for source in android["skill_sources"]}
+
+    host_managed = sources["android-official"]
+    assert host_managed["kind"] == "host-managed"
+    assert "~/.claude/skills/{skill}/SKILL.md" in host_managed["roots"]
+    assert "~/.codex/skills/{skill}/SKILL.md" in host_managed["roots"]
+    assert sources["skydoves-compose-performance"]["kind"] == "fetch"
+
+
+def test_bootstrap_and_kit_keep_the_missing_skill_wording() -> None:
+    """부재를 알리는 문구는 계약이다. 사라지면 사용자가 무엇을 깔아야 하는지 알 수 없다."""
     kit_text = (KIT_ROOT / "bin" / "agent-flow-kit.mjs").read_text(encoding="utf-8")
+    review_text = (KIT_ROOT / "skills" / "android-code-review" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+
     assert "missing local <group>: <skill>" in kit_text
+    assert "missing local <group>: <skill>" in review_text
 
 
 def test_sdui_skill_is_android_only(tmp_path: Path) -> None:

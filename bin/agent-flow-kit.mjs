@@ -2252,7 +2252,7 @@ agent는 fallback·manual 승인 명령이나 user-prompt hook을 대신 실행�
 - Claude/Codex/OMP hook이 자동 차단하는 보호 브랜치 commit/push와 leader checkout/switch 금지는 모든 host에서 동일하게 지킨다.
 
 During code generation, modification, and code review phases, apply \`code-generation-discipline\`. Resolve required skills from active profile metadata, installed skill index, changed files, and task scope. Load only the touched profile skill union.
-For Android/Kotlin/Compose/KMP changes, read matching local skill files from the Android profile's \`android_skills\` and \`chrisbanes_skills\` for the active host. React Native \`android/\` native changes also apply the Android profile mapping. Do not require unrelated platform skills, and do not install, copy, link, or load duplicate skills from other host directories. If a required local skill is missing, report \`missing local <group>: <skill>\` with the profile source URL and ask the user to install it.
+The phase prompt lists the skills for this change — required ones with paths, in-scope ones by name. That list is resolved per run from the active profile's skill vocabulary, the skills installed on this machine, the changed files, and the task text. Read the required ones; call the in-scope ones by name only when the change actually touches them. No configuration enumerates installed external skill names: vocabulary is declared instead, so an upstream add, delete, or rename needs no edit here. If a required local skill is missing, report \`missing local <group>: <skill>\` with the profile source URL and ask the user to install it.
 `;
 }
 

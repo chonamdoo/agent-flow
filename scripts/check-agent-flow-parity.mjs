@@ -538,29 +538,39 @@ for (const entry of fs.readdirSync(path.join(SOURCE_ROOT, PACKAGED_PROFILES)).so
   for (const entry of fs.readdirSync(path.join(SOURCE_ROOT, PACKAGED_PROFILES)).sort()) {
     if (!entry.endsWith(".yaml") || entry.startsWith("_")) continue;
     const text = readIfExists(`${PACKAGED_PROFILES}/${entry}`) ?? "";
-    for (const [name, block] of skillTableEntries(text)) {
-      if (!/\n\s+(task_terms|path_globs):/.test(block)) {
+    if (/^\s*(android_skills|chrisbanes_skills):\s*$/m.test(text)) {
+      failures.push(
+        `${PACKAGED_PROFILES}/${entry}: external skill names must not be enumerated in a profile table`,
+      );
+    }
+    for (const [name, block] of externalDomainsWithoutTerms(text)) {
+      if (!/\n\s+terms:/.test(block)) {
         failures.push(
-          `${PACKAGED_PROFILES}/${entry}: skill table entry ${name} has no task_terms/path_globs and can never activate`,
+          `${PACKAGED_PROFILES}/${entry}: external domain ${name} has no terms and can never activate`,
         );
       }
     }
   }
 }
 
-function skillTableEntries(text) {
+// 어휘 없는 domain은 활성화될 수 없다. 선언만 남아 아무 일도 하지 않는 상태를 막는다.
+function externalDomainsWithoutTerms(text) {
   const lines = text.split(/\r?\n/);
   const found = [];
-  let inTable = false;
+  let inDomains = false;
+  let indent = "";
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
-    if (/^\S/.test(line)) {
-      inTable = /^(android_skills|chrisbanes_skills):\s*$/.test(line);
+    const opener = line.match(/^(\s+)domains:\s*$/);
+    if (opener) {
+      inDomains = true;
+      indent = opener[1];
       continue;
     }
-    if (!inTable) continue;
-    const match = line.match(/^(\s+)- skill: (\S+)\s*$/);
-    if (!match) continue;
+    if (inDomains && /^\S/.test(line)) inDomains = false;
+    if (!inDomains) continue;
+    const match = line.match(/^(\s+)- id: (\S+)\s*$/);
+    if (!match || match[1].length <= indent.length) continue;
     const body = [];
     for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
       const next = lines[cursor];

@@ -302,3 +302,24 @@ def test_an_exclusion_clause_does_not_pull_the_skill_in():
     )
 
     assert matches == ()
+
+
+def test_truncation_gives_every_domain_a_slot():
+    """실측: recomposition 어휘에 걸린 8개가 `edge-to-edge`를 required에서 밀어냈다."""
+    domains = [
+        {"id": "a-perf", "terms": ["recomposition"], "phases": ["implementation"]},
+        {"id": "z-insets", "terms": ["insets"], "phases": ["implementation"]},
+    ]
+    catalog = tuple(
+        _entry(f"perf-{index}", "Use when recomposition is slow.") for index in range(8)
+    ) + (_entry("edge-to-edge", "Use when insets overlap content."),)
+
+    matches = match_external(
+        _profile(domains, required_max=3),
+        catalog,
+        phase_id="implement",
+        task_text="recomposition jank과 insets 정리",
+        env={},
+    )
+
+    assert "edge-to-edge" in {item.name for item in matches if item.tier == REQUIRED}

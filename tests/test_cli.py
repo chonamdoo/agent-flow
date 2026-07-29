@@ -7003,10 +7003,10 @@ if (codexContext !== undefined) {
         android_required = android.skills["required_review"]
         self.assertEqual(android_required[0]["group"], "profile")
         self.assertIn("android-code-review", android_required[0]["skills"])
-        self.assertEqual(android_required[1]["group"], "android_skills")
-        self.assertEqual(android_required[2]["group"], "chrisbanes_skills")
+        self.assertEqual([group["group"] for group in android_required], ["profile"])
+        self.assertNotIn("android_skills", android.skills)
         rn_required = load_profile("react-native").skills["required_review"]
-        self.assertEqual(rn_required[1]["group"], "android-native-escalation")
+        self.assertEqual([group["group"] for group in rn_required], ["profile"])
 
     def test_runner_prefers_repository_kit_root(self) -> None:
         from agent_flow.runner import _find_kit_root

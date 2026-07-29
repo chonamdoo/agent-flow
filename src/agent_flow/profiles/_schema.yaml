@@ -60,16 +60,12 @@ optional:
     # The installer auto-includes declared dependencies such as clean-architecture-core.
     install:
       - "skill-name"
-    # Skill routing consumed by `core/profile_routing.py`. Despite the name this
-    # drives implementation phases too: a `skills_from` table reference picks the
-    # table's `implementation:` section on code phases and `review:` on review phases.
-    # A group activates only when it declares selectors or references a table;
-    # a declaration with neither has no activation evidence and stays inert.
+    # Skills this repo owns and therefore may name. A group activates only when it
+    # declares selectors; a declaration without them has no activation evidence and
+    # stays inert. Installed external skills are never named here - see `external`.
     required_review:
-      - group: "profile | android_skills | chrisbanes_skills | android-native-escalation"
+      - group: "profile"
         skills: ["skill-name"]
-        skills_from: "table name (phase picks the section) or table.section"
-        profiles: ["optional profile id whose table is pulled in"]
         when: "human rationale; not machine-matched"
         task_terms: ["optional lowercase substring matched against the run task"]
         path_globs: ["optional changed-file glob"]
@@ -104,64 +100,6 @@ optional:
         package_suffix: "optional package suffix pattern"
         pair_with: "optional role id that must exist for the same semantic boundary"
         forbidden: ["optional token that must not appear in this role"]
-
-  android_skills:
-    # Optional host-readable Android/Kotlin/Compose/KMP skill routing.
-    # Use exact installed skill names from https://github.com/android/skills.
-    source: "https://github.com/android/skills"
-    install_policy: "never"
-    active_host_only: true
-    load_mode: "plain_text"
-    hosts:
-      codex: "~/.codex/skills/{skill}/SKILL.md"
-      claude: "~/.claude/skills/{skill}/SKILL.md"
-      omp: "~/.omp/agent/skills/{skill}/SKILL.md"
-    load_policy:
-      - "read only matching local skill files for the active host"
-      - "do not install, copy, link, vendor, or fallback to another host path"
-      - "if required local skill is missing, report missing local android_skills and ask the user to install from source"
-    # `when` is the human rationale. Activation is decided by the selectors only,
-    # and an entry without selectors never activates - otherwise one Kotlin file
-    # would pull in the whole table and every run would report degraded skills.
-    implementation:
-      - skill: "exact skill name"
-        when: "human rationale; not machine-matched"
-        task_terms: ["lowercase substring matched against the run task"]
-        path_globs: ["changed-file glob"]
-    review:
-      - skill: "exact skill name"
-        when: "human rationale; not machine-matched"
-        task_terms: ["lowercase substring matched against the run task"]
-        path_globs: ["changed-file glob"]
-
-  chrisbanes_skills:
-    # Optional host-readable Compose/Kotlin/KMP skill routing.
-    # Use exact skill names from https://github.com/chrisbanes/skills/tree/main/skills.
-    source: "https://github.com/chrisbanes/skills/tree/main/skills"
-    install_policy: "never"
-    active_host_only: true
-    load_mode: "plain_text"
-    hosts:
-      codex: "~/.codex/skills/{skill}/SKILL.md"
-      claude: "~/.claude/skills/{skill}/SKILL.md"
-      omp: "~/.omp/agent/skills/{skill}/SKILL.md"
-    load_policy:
-      - "read only matching local skill files for the active host"
-      - "do not install, copy, link, vendor, or fallback to another host path"
-      - "if required local skill is missing, report missing local chrisbanes_skills and ask the user to install from source"
-    # `when` is the human rationale. Activation is decided by the selectors only,
-    # and an entry without selectors never activates - otherwise one Kotlin file
-    # would pull in the whole table and every run would report degraded skills.
-    implementation:
-      - skill: "exact skill name"
-        when: "human rationale; not machine-matched"
-        task_terms: ["lowercase substring matched against the run task"]
-        path_globs: ["changed-file glob"]
-    review:
-      - skill: "exact skill name"
-        when: "human rationale; not machine-matched"
-        task_terms: ["lowercase substring matched against the run task"]
-        path_globs: ["changed-file glob"]
 
   artifacts:
     prd: "required | optional | skip"

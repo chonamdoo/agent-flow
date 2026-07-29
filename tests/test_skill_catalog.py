@@ -160,8 +160,14 @@ def test_doctor_names_a_declared_skill_that_is_not_installed(tmp_path, monkeypat
     project = tmp_path / "app"
     project.mkdir()
     profile = {
-        "android_skills": {
-            "implementation": [{"skill": "camera1-to-camerax", "task_terms": ["camerax"]}]
+        "skills": {
+            "required_review": [
+                {
+                    "group": "profile",
+                    "skills": ["camera1-to-camerax"],
+                    "task_terms": ["camerax"],
+                }
+            ]
         }
     }
 

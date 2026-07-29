@@ -46,7 +46,7 @@ skills:
   # 없어(FastAPI·Pydantic 각 1개, Django/Flask/SQLAlchemy 0개) 이름 목록은 대부분 빈 칸이 되고,
   # 실제 공급원인 커뮤니티 배포본은 이름이 더 자주 바뀐다. 대신 스택 어휘로 판정한다.
   external:
-    enabled: false
+    enabled: true
     domains:
       - id: async-concurrency
         terms: ["asyncio", "coroutine", "async def", "await", "event loop", "asgi", "uvicorn",

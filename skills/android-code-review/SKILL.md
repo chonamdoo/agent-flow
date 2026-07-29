@@ -21,22 +21,26 @@ diff and relevant existing patterns directly before deciding.
 - Do not use it for React Web, React Native JavaScript/TypeScript, Python, or generic TypeScript review unless Android native code is also changed.
 - Do not approve broad rewrites or new architecture solely from checklist preference.
 
-## Android Profile Skills
+## Skills For The Diff
 
-For Android/Kotlin/Compose/KMP diffs, read matching entries from the Android
-profile's `android_skills` and `chrisbanes_skills` as plain text before
-approving. Use these chrisbanes skill names as checklist labels:
+The phase prompt lists the skills matched to this change — required ones with
+paths, in-scope ones by name. Read the required ones as plain text before
+approving; use an in-scope one only when the diff actually touches it. No list
+of upstream skill names is kept in this repo: matching runs per diff over the
+stack vocabulary the Android profile declares and the `name`/`description` of
+the skills installed on this machine. Cover these angles when the diff touches
+them:
 
-- Compose state/effects: `compose-state-authoring`, `compose-state-hoisting`,
-  `compose-state-holder-ui-split`, `compose-side-effects`
-- Compose performance: `compose-recomposition-performance`,
-  `compose-stability-diagnostics`, `compose-state-deferred-reads`
-- Compose UI API/layout: `compose-modifier-and-layout-style`,
-  `compose-slot-api-pattern`, `compose-animations`, `compose-focus-navigation`
-- Compose tests: `compose-ui-testing-patterns`
-- Kotlin: `kotlin-coroutines-structured-concurrency`,
-  `kotlin-flow-state-event-modeling`, `kotlin-types-value-class`
-- KMP: `kotlin-multiplatform-expect-actual`
+- Compose state/effects: state ownership, hoisting, state-holder/UI split,
+  effect keys, one-shot event handling
+- Compose performance: recomposition scope, stability, deferred reads, strong
+  skipping compatibility
+- Compose UI APIs: modifier placement and order, layout, slot APIs, animation,
+  focus navigation
+- Compose UI testing: semantics and test coverage
+- Kotlin concurrency: structured concurrency, cancellation, dispatcher choice,
+  Flow state/event modeling
+- KMP and domain types: expect/actual boundaries, value class suitability
 
 Do not parse upstream frontmatter through the native skill loader. Resolve
 skills through the current active host only:
@@ -47,8 +51,7 @@ skills through the current active host only:
 
 Do not install, copy, link, vendor, or fallback to another host path. If a
 required local skill is missing, stop approval and report
-`missing local android_skills: <skill>` or
-`missing local chrisbanes_skills: <skill>` with the profile source URL.
+`missing local <group>: <skill>` with the profile source URL.
 Record `android-local-skills: checked`,
 `android-local-skills-used: <skill list>`, `chrisbanes-skills: checked|n/a`,
 and `chrisbanes-skills-used: <skill list or n/a>` in the review artifact's

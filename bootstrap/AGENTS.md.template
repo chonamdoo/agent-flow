@@ -37,7 +37,7 @@ active run이 있으면 status 출력의 `next_command`를 그대로 실행하�
 - Claude/Codex/OMP 프로젝트 skill 경로는 leader checkout의 install 결과를 따릅니다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않습니다.
 
 코드 생성·수정·코드리뷰 phase에서는 `code-generation-discipline`을 적용합니다. active profile, installed skill index, changed files, task scope로 필요한 profile skill만 결정하고, 관련 없는 platform skill은 요구하지 않습니다.
-Android/Kotlin/Compose/KMP 변경 때만 Android profile의 `android_skills`와 `chrisbanes_skills`에서 변경 영역과 맞는 로컬 설치 skill을 plain text로 읽습니다. React Native의 `android/` native code를 직접 변경한 경우에도 Android profile mapping을 추가 적용합니다. 필요한 skill이 현재 host에 없으면 설치하지 말고 `missing local <group>: <skill>`와 source URL을 사용자에게 알려 설치를 요청합니다.
+phase 프롬프트가 이번 변경에 필요한 skill을 나열합니다 — required는 경로와 함께, 범위에 걸린 것은 이름으로. 그 목록은 active profile의 skill 어휘, 이 머신에 설치된 skill, 변경 파일, task 문구로 매 run 결정됩니다. required는 읽고, 범위에 걸린 것은 변경이 실제로 닿을 때만 이름으로 부릅니다. 설치된 외부 skill의 이름은 어느 설정에도 열거돼 있지 않습니다 — 이름 대신 어휘가 선언돼 있고, upstream이 skill을 추가·삭제·rename해도 선언을 고칠 일이 없습니다. 필요한 skill이 현재 host에 없으면 설치하지 말고 `missing local <group>: <skill>`와 source URL을 사용자에게 알려 설치를 요청합니다.
 
 진행 중인 run은 자동 감지됩니다:
 

@@ -49,7 +49,7 @@ skills:
   # shadcn-ui, stripe)라 이름 목록은 유지 자체가 불가능하다. 게다가 웹 SKILL.md에는
   # metadata.keywords가 없어 판정 근거가 name + description뿐이다. 그래서 어휘로만 적는다.
   external:
-    enabled: false
+    enabled: true
     domains:
       - id: rsc-boundaries
         terms: ["server component", "client component", "server/client", "use client", "use server",

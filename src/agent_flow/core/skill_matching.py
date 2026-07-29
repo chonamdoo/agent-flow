@@ -111,9 +111,28 @@ def _truncate(
     matches: Sequence[ExternalMatch] | tuple[ExternalMatch, ...], config: ExternalConfig
 ) -> tuple[ExternalMatch, ...]:
     ordered = sorted(matches, key=lambda item: (item.tier != REQUIRED, item.domain, item.name))
-    required = [item for item in ordered if item.tier == REQUIRED][: config.required_max]
-    offered = [item for item in ordered if item.tier == OFFERED][: config.offered_max]
+    required = _round_robin([item for item in ordered if item.tier == REQUIRED], config.required_max)
+    offered = _round_robin([item for item in ordered if item.tier == OFFERED], config.offered_max)
     return tuple(required + offered)
+
+
+def _round_robin(matches: Sequence[ExternalMatch], limit: int) -> list[ExternalMatch]:
+    """domain마다 한 자리씩 먼저 준다.
+
+    이름 순으로 그냥 자르면 매치가 많은 domain 하나가 나머지를 굶긴다 — 실측으로
+    recomposition 어휘에 걸린 8개가 `edge-to-edge`를 required에서 밀어냈다.
+    """
+    buckets: dict[str, list[ExternalMatch]] = {}
+    for match in matches:
+        buckets.setdefault(match.domain, []).append(match)
+    out: list[ExternalMatch] = []
+    while len(out) < limit and any(buckets.values()):
+        for queue in buckets.values():
+            if len(out) >= limit:
+                break
+            if queue:
+                out.append(queue.pop(0))
+    return out
 
 
 def _domain_active(

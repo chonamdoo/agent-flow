@@ -60,43 +60,58 @@ def changed_files(project_root: Path) -> tuple[str, ...]:
 def merged_profile_payload(payloads: Sequence[dict]) -> dict:
     """다중 profile 합본. resolver가 보는 키만 이어 붙인다.
 
-    `update`만 하면 뒤 profile이 앞 profile의 `skills.required_review`와 skill 표를
+    `update`만 하면 뒤 profile이 앞 profile의 `skills.required_review`와 `skills.external`을
     통째로 덮는다. react-native + android처럼 둘 다 활성인 조합에서 한쪽 routing이
     조용히 사라지는 경로가 그것이다. 순서는 `active_profile_ids()`가 준 순서를
-    유지하고, 같은 그룹/표 이름은 **먼저 온 profile이 이긴다** — detect 우선순위가
+    유지하고, 같은 그룹/domain 이름은 **먼저 온 profile이 이긴다** — detect 우선순위가
     곧 소유권이다.
     """
     merged: dict = {}
     sources: list = []
     groups: list[dict] = []
     seen_groups: set[str] = set()
-    tables: dict[str, dict] = {}
+    domains: list[dict] = []
+    seen_domains: set[str] = set()
+    external: dict = {}
     for payload in payloads:
         merged.update(payload)
         declared = payload.get("skill_sources")
         if isinstance(declared, list):
             sources.extend(declared)
         skills = payload.get("skills")
-        if isinstance(skills, dict) and isinstance(skills.get("required_review"), list):
+        if not isinstance(skills, dict):
+            continue
+        if isinstance(skills.get("required_review"), list):
             for group in skills["required_review"]:
                 if not isinstance(group, dict):
                     continue
-                key = str(group.get("group", "")) + "|" + str(group.get("skills_from", ""))
+                key = str(group.get("group", ""))
                 if key in seen_groups:
                     continue
                 seen_groups.add(key)
                 groups.append(group)
-        for key, value in payload.items():
-            if isinstance(value, dict) and isinstance(value.get("implementation"), list):
-                tables.setdefault(key, value)
+        block = skills.get("external")
+        if isinstance(block, dict):
+            # `enabled`는 합집합이다. RN 프로젝트의 `android/` 변경이 Android 어휘를
+            # 함께 받는 경로가 여기다 — 옛 escalation 그룹이 하던 일을 이것이 대신한다.
+            external = {**block, **external, "enabled": external.get("enabled") or block.get("enabled")}
+            for domain in block.get("domains") or []:
+                if not isinstance(domain, dict):
+                    continue
+                domain_id = str(domain.get("id", ""))
+                if domain_id in seen_domains:
+                    continue
+                seen_domains.add(domain_id)
+                domains.append(domain)
     if sources:
         merged["skill_sources"] = sources
-    if groups:
+    if groups or domains:
         skills = dict(merged.get("skills") or {})
-        skills["required_review"] = groups
+        if groups:
+            skills["required_review"] = groups
+        if domains:
+            skills["external"] = {**external, "domains": domains}
         merged["skills"] = skills
-    for name, table in tables.items():
-        merged[name] = table
     return merged
 
 

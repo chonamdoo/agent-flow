@@ -47,7 +47,7 @@ skills:
   # 파편화되어 있다(twostraws/Dimillian/AvdLee/...). 이름을 적으면 repo 하나가 사라질
   # 때마다 낡으므로, 스택 어휘만 두고 설치된 SKILL.md의 name + description에 맞춘다.
   external:
-    enabled: false
+    enabled: true
     domains:
       - id: swiftui-view-state
         terms: ["swiftui", "swiftui view", "ios views", "view modifier", "navigationstack",
