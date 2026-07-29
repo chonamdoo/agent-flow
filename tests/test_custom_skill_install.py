@@ -1411,17 +1411,20 @@ def test_installers_do_not_enumerate_external_skill_names() -> None:
         assert match.group(1).strip() == "", name
 
 
-def test_plain_install_refreshes_a_managed_hook_to_match_its_recorded_digest(tmp_path: Path) -> None:
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_plain_install_refreshes_a_managed_hook_to_match_its_recorded_digest(
+    tmp_path: Path, binary: str
+) -> None:
     """digest는 갱신되고 hook 파일은 안 갱신되면 run 시작이 막힌다 — 평범한 install로 복구돼야 한다."""
     project = tmp_path / "project"
     project.mkdir()
     (project / "pyproject.toml").write_text("[project]\nname = \"x\"\n", encoding="utf-8")
-    assert _install(project).returncode == 0
+    assert _install_with(binary, project).returncode == 0
     hook = project / ".agent-flow" / "scripts" / "hooks" / "record-skill-read.py"
     hook.write_text("# stale copy from an older kit\n", encoding="utf-8")
     os.chmod(hook, 0o755)
 
-    assert _install(project).returncode == 0
+    assert _install_with(binary, project).returncode == 0
 
     recorded = json.loads((project / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
     digest = recorded["managed_hook_digests"]["record-skill-read.py"]

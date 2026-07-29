@@ -25,7 +25,7 @@ OFFERED = "offered"
 
 # 어휘로 라우팅되는 것은 설치된 외부 skill뿐이다. 우리가 배포하는 것은 이름을
 # 우리가 소유하므로 `profile_routing`이 담당한다.
-_EXTERNAL_SOURCES = frozenset({"host", "shared", "fetched"})
+_EXTERNAL_SOURCES = frozenset({"host", "shared", "fetched", "vendor"})
 
 _SECTION_PHASES = {
     "implementation": IMPLEMENTATION_PHASES,
@@ -215,15 +215,16 @@ def _entry_terms(entry: SkillCatalogEntry, terms: Sequence[str]) -> tuple[str, .
 def _term_in(term: str, text: str) -> bool:
     """단어 경계로 본다.
 
-    부분문자열로 보면 `chart`가 `charting`에, `modifier`가 SwiftUI description의
-    `modifiers`에 걸려 무관한 플랫폼 skill이 required까지 올라간다(실측).
+    부분문자열로 보면 `chart`가 `charting`에 걸려 무관한 플랫폼 skill이 required까지
+    올라간다(실측). 복수형은 허용하므로 `modifier`는 `modifiers`에 계속 걸린다 —
+    그 오탐은 어휘를 구절로 좁혀서 막는다(`compose modifier`, `modifier chain`).
 
     경계는 ASCII 영숫자로만 잡는다. `\w`를 쓰면 한글이 word 문자라서
     `status bar가`처럼 조사가 붙은 한국어 task 문구가 전부 미매치가 된다.
 
     복수 접미사는 허용한다. skill description은 term을 복수로 쓰는 쪽이 흔해서
     (`turbo modules`, `slide decks`, `mcp servers`) 금지하면 정탐 13건이 사라졌다.
-    `charting`/`modifiers`는 여전히 배제된다.
+    `charting`처럼 복수형이 아닌 확장은 계속 배제된다.
     """
     pattern = _TERM_CACHE.get(term)
     if pattern is None:

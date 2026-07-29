@@ -16,9 +16,11 @@ _DEFAULT_PROJECT_TEMPLATES = (
     ("project", "skills/{skill}/SKILL.md"),
     ("bundled", ".agent-flow/skills/{skill}/SKILL.md"),
     # `npx skills add` 는 프로젝트 설치를 이 두 곳에 앉힌다. 전역 설치를 거부하는
-    # 벤더(Prisma)는 여기밖에 안 놓으므로 project root도 봐야 한다.
-    ("project", ".claude/skills/{skill}/SKILL.md"),
-    ("project", ".agents/skills/{skill}/SKILL.md"),
+    # 벤더(Prisma)는 여기밖에 안 놓으므로 project root도 봐야 한다. source를 `project`와
+    # 가르는 이유는 이름 소유권이다 — `skills/`는 우리 것이고 여기는 남의 것이라
+    # 어휘 라우팅 대상이다.
+    ("vendor", ".claude/skills/{skill}/SKILL.md"),
+    ("vendor", ".agents/skills/{skill}/SKILL.md"),
 )
 
 _HOST_TEMPLATES = {

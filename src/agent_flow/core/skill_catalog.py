@@ -152,8 +152,9 @@ def write_lock(project_root: Path, result: CatalogScan) -> Path:
 def declared_skill_names(profile: dict | None) -> tuple[str, ...]:
     """profile이 **이름으로** 박아 둔 skill 전부.
 
-    표(`android_skills`/`chrisbanes_skills`)와 `required_review`의 literal 목록을 함께 본다.
-    이 집합이 디스크와 어긋나는 것이 우리가 겪은 드리프트의 정의다.
+    `required_review`의 literal 목록, 그리고 이름을 열거하는 어떤 표든 함께 본다.
+    이 집합이 디스크와 어긋나는 것이 우리가 겪은 드리프트의 정의다 — 그래서 표를
+    지운 뒤에도 남는 유일한 열거 지점(우리가 소유한 bundled skill)을 계속 감시한다.
     """
     if not isinstance(profile, dict):
         return ()
@@ -216,7 +217,7 @@ def _unrouted_findings(
             f"{entry.source} root에 있으나 어떤 어휘에도 걸리지 않는다",
         )
         for entry in entries
-        if entry.source in {"host", "shared", "fetched"} and entry.name not in reachable
+        if entry.source in {"host", "shared", "fetched", "vendor"} and entry.name not in reachable
     ]
 
 

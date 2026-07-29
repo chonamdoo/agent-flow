@@ -406,3 +406,33 @@ def test_a_matched_skill_carries_its_discovered_path():
     )
 
     assert matches[0].path == entry.path
+
+
+def test_a_vendor_skill_installed_under_the_project_routes(tmp_path, monkeypatch):
+    """전역 설치를 거부하는 벤더는 프로젝트 root에만 놓는다. 그 root를 더해 놓고
+    라우팅 대상에서 빼면 더한 이유가 사라진다."""
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    project = tmp_path / "app"
+    path = project / ".claude" / "skills" / "prisma-vendor" / "SKILL.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "---\nname: prisma-vendor\ndescription: Use when working with prisma schema.\n---\n",
+        encoding="utf-8",
+    )
+    profile = _profile(
+        [{"id": "orm", "terms": ["prisma schema"], "phases": ["implementation"]}]
+    )
+
+    resolution = resolve_phase_skills(
+        project_root=project,
+        phase_id="implement",
+        profile=profile,
+        task_text="prisma schema 수정",
+        host="claude",
+    )
+
+    matched = next(
+        skill for skill in resolution.required if skill.name == "prisma-vendor"
+    )
+    assert matched.exists
+    assert matched.source == "vendor"
