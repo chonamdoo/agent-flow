@@ -208,21 +208,22 @@ function assertAbsent(rel, needle, why) {
   }
 }
 
-// 두 진입점은 `lib/`의 공유 모듈에서 omp 확장 소스와 managed hook 목록을 가져다
-// 쓰지만, `installCodexHooks`/`installClaudeHooks`/`installOmpHooks`/
-// `removeCodexBroadTrustState` 본문은 아직 각자 갖고 있다. 아래 단언들은 그 본문에
-// 걸린 계약이므로 두 파일 모두를 봐야 한다 — 한쪽만 보면 다른 쪽에서 승인 세탁이
-// 검사 없이 되살아난다.
+// 넓은 trust를 걷어내는 본문과 skill 인덱스 본문은 이제 공유 모듈에만 있다.
+assertContains("lib/installer-shared.mjs", "export function removeCodexBroadTrustState(root)");
+assertContains("lib/installer-shared.mjs", "export function skillIndexBlock(root)");
+assertContains("lib/installer-shared.mjs", "export function upsertSkillIndexBlock(root)");
+assertContains("lib/installer-shared.mjs", 'export const SKILL_INDEX_START = "<!-- agent-flow:skills:start -->"');
+
+// `installCodexHooks`/`installClaudeHooks`/`installOmpHooks` 본문은 각 진입점의
+// 전역을 읽어 아직 각자 갖고 있다. 아래 단언은 그 본문에 걸린 계약이라 두 파일을
+// 모두 봐야 한다 — 한쪽만 보면 다른 쪽에서 승인 세탁이 검사 없이 되살아난다.
 for (const installer of ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"]) {
-  assertContains(installer, "function removeCodexBroadTrustState(root)");
   assertNotContains(installer, "function installCodexTrustState(root)");
   assertContains(installer, "function installOmpHooks(root)");
   assertContains(installer, ".omp\", \"extensions\", \"agent-flow-hooks.ts");
-  // 두 installer가 같은 인덱스를 만들어야 한다. 한쪽만 채우면 install 순서에
-  // 따라 AGENTS.md의 인덱스가 있었다 없었다 한다.
-  assertContains(installer, "function skillIndexBlock(root)");
-  assertContains(installer, "function upsertSkillIndexBlock(root)");
-  assertContains(installer, 'const SKILL_INDEX_START = "<!-- agent-flow:skills:start -->"');
+  // 두 진입점이 같은 인덱스를 만들어야 한다. 한쪽만 채우면 install 순서에 따라
+  // AGENTS.md의 인덱스가 있었다 없었다 한다.
+  assertContains(installer, "upsertSkillIndexBlock(");
   // install이 **현재 등록된** hook의 해시를 trusted로 되받아 적으면, 변조된
   // 등록이 다음 install에서 승인 상태로 세탁된다. 읽는 코드도 없었다.
   // 등록 무결성은 런 시작 시 hook_integrity가 kit.json과 대조한다.
@@ -243,8 +244,9 @@ for (const installer of ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"]
     }
     return [...match[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]).sort();
   })();
-  if (jsManagedScripts) {
-      }
+  if (jsManagedScripts && jsManagedScripts.length === 0) {
+    failures.push("lib/managed-hooks.mjs declares no managed hook scripts");
+  }
 }
 
 const fullFeatureWorkflowCopies = [
