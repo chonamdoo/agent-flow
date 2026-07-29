@@ -11,6 +11,26 @@ import { fileURLToPath } from "node:url";
 import { SKILL_DEPENDENCIES, mergeInstallSelectionWithPrevious, resolveInstallSelection } from "../lib/skill-selection.mjs";
 import { OMP_EXTENSION_MARKER, ompHooksExtensionSource } from "../lib/omp-hooks-extension.mjs";
 import { MANAGED_HOOK_SCRIPTS, RETIRED_MANAGED_HOOK_SCRIPTS } from "../lib/managed-hooks.mjs";
+import {
+  arrayValue,
+  backupIfDifferent,
+  ensureChildPath,
+  escapeRegex,
+  hasChildWithSuffix,
+  makeHooksExecutable,
+  nextFreeBackupPath,
+  planReviewerSkillMarkdown,
+  pruneRetiredManagedScripts,
+  readHookSettings,
+  removeGitignoreEntries,
+  removeLegacyProjectSkillCopies,
+  shellQuote,
+  tomlBasicString,
+  uniqueStrings,
+  unquoteShellWord,
+  upsertGitignore,
+  validateSkillDependencies,
+} from "../lib/installer-shared.mjs";
 
 const command = process.argv[2];
 const AGENT_FLOW_COMMAND = "agent-flow";
@@ -751,12 +771,7 @@ function detectProfile(rootDir) {
   return "generic";
 }
 
-function hasChildWithSuffix(rootDir, suffix) {
-  if (!fs.existsSync(rootDir)) {
-    return false;
-  }
-  return fs.readdirSync(rootDir).some((name) => name.endsWith(suffix));
-}
+
 
 function resolveAgentFlowRoot(start) {
   const worktreeRoot = resolveManagedWorktreeRoot(start);
@@ -1635,18 +1650,7 @@ function selectProjectSkills(root, agentFlowDir, installSelection = null) {
   };
 }
 
-function validateSkillDependencies(skills) {
-  const names = new Set(skills.map((skill) => skill.name));
-  const warnings = [];
-  for (const skill of skills) {
-    for (const required of skill.requires || []) {
-      if (!names.has(required)) {
-        warnings.push(`${skill.name}: missing required skill ${required}`);
-      }
-    }
-  }
-  return warnings;
-}
+
 
 function discoverProjectSkills(root) {
   if (samePath(root, KIT_ROOT)) {
@@ -1763,13 +1767,9 @@ function skillRequires(name) {
   return SKILL_DEPENDENCIES.get(name) || [];
 }
 
-function arrayValue(value) {
-  return Array.isArray(value) ? value.map(String) : [];
-}
 
-function uniqueStrings(values) {
-  return [...new Set(values.map(String).filter(Boolean))];
-}
+
+
 
 function safeSkillName(value) {
   const candidate = String(value).trim();
@@ -1971,14 +1971,7 @@ function readJsonIfExists(pathName) {
   }
 }
 
-function ensureChildPath(parent, child) {
-  const parentResolved = path.resolve(parent);
-  const childResolved = path.resolve(child);
-  const relative = path.relative(parentResolved, childResolved);
-  if (relative.startsWith("..") || path.isAbsolute(relative)) {
-    throw new Error(`path escapes parent: ${child}`);
-  }
-}
+
 
 function pathHasSymlink(root, target) {
   const relative = path.relative(root, target);
@@ -2887,64 +2880,13 @@ ${end}
   fs.writeFileSync(pathName, `${prefix}${block}`, "utf8");
 }
 
-function upsertGitignore(pathName, entries) {
-  const current = fs.existsSync(pathName) ? fs.readFileSync(pathName, "utf8") : "";
-  const lines = current.split(/\r?\n/);
-  const existing = new Set(lines.map((line) => line.trim()));
-  const missing = entries.filter((entry) => !isGitignoreEntryCovered(entry, existing));
-  if (missing.length === 0) {
-    return;
-  }
-  const prefix = current.trimEnd();
-  const next = `${prefix}${prefix ? "\n" : ""}${missing.join("\n")}\n`;
-  fs.writeFileSync(pathName, next, "utf8");
-}
 
-function removeGitignoreEntries(pathName, entries) {
-  if (!fs.existsSync(pathName)) return;
-  const removals = new Set(entries);
-  const current = fs.readFileSync(pathName, "utf8");
-  const lines = current.split(/\r?\n/);
-  const filtered = lines.filter((line) => !removals.has(line.trim()));
-  if (filtered.length === lines.length) return;
-  const next = `${filtered.join("\n").replace(/\n*$/, "")}\n`;
-  fs.writeFileSync(pathName, next, "utf8");
-}
 
-function removeLegacyProjectSkillCopies(projectRoot, skillName) {
-  for (const parent of [
-    path.join(projectRoot, ".agent-flow", "skills"),
-    path.join(projectRoot, ".claude", "skills"),
-    path.join(projectRoot, ".codex", "skills"),
-    path.join(projectRoot, ".Codex", "skills"),
-    path.join(projectRoot, ".omp", "skills"),
-    path.join(projectRoot, ".gemini", "skills"),
-    path.join(projectRoot, ".gemini", "antigravity", "skills"),
-  ]) {
-    fs.rmSync(path.join(parent, skillName), { recursive: true, force: true });
-  }
-}
 
-function isGitignoreEntryCovered(entry, existing) {
-  if (existing.has(entry)) {
-    return true;
-  }
-  const normalized = entry.replace(/^\/+/, "");
-  const parts = normalized.split("/");
-  for (let index = 1; index < parts.length; index += 1) {
-    const parent = `${parts.slice(0, index).join("/")}/`;
-    const parentWithoutSlash = parent.replace(/\/$/, "");
-    if (
-      existing.has(parent) ||
-      existing.has(parentWithoutSlash) ||
-      existing.has(`/${parent}`) ||
-      existing.has(`/${parentWithoutSlash}`)
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
+
+
+
+
 
 function bootstrapMarkdown(label) {
   return `# ${label} Agent Flow Bootstrap
@@ -3063,9 +3005,7 @@ function productBriefSkillMarkdown() {
   return `---\nname: product-brief\ndescription: Use during the full-feature product-brief phase.\n---\n\n# Product Brief\n\nUse during the full-feature product-brief phase.\n\nAsk YC-style forcing questions before implementation:\n\n1. Demand Reality: what behavior proves people want this?\n2. Status Quo: how do they solve it today?\n3. Desperate Specificity: who is the most painful target user?\n4. Narrowest Wedge: what is the smallest version worth using now?\n5. Observation: what concrete user behavior was observed?\n6. Future Fit: why is now the right time?\n\nArtifact template:\n\n# Product Brief\n\n## Mode\nstartup | builder | internal\n\n## Demand Evidence\n\n## Status Quo\n\n## Target User\n\n## Narrowest Wedge\n\n## Observed Behavior\n\n## Why Now\n\n## Cut List\n\n## Assignment\n\n## Decision\nbuild | defer | cut\n`;
 }
 
-function planReviewerSkillMarkdown() {
-  return `---\nname: plan-reviewer\ndescription: Use during the full-feature plan-review phase.\n---\n\n# Plan Reviewer\n\nUse during the full-feature plan-review phase.\n\nReview only. Do not rewrite the plan.\n\nCheck:\n\n- Missing data collection steps.\n- Missing validation steps.\n- Wrong implementation order.\n- Oversized slices that should be split.\n- Missing state/storage steps.\n- Test coverage gaps.\n- Architecture risks before coding.\n\nArtifact template:\n\n# Plan Review\n\nverdict: approve | request-changes\n\n## Scope Checked\n\n## Missing Steps\n\n## Wrong Order\n\n## Oversized Slices\n\n## Validation Gaps\n\n## Data/State Gaps\n\n## Architecture Risks\n\n## Required Changes\n\n## Approval Notes\n`;
-}
+
 
 function architectureReviewerSkillMarkdown() {
   return `---\nname: architecture-reviewer\ndescription: Use during the full-feature architecture-review phase.\n---\n\n# Architecture Reviewer\n\nUse during the full-feature architecture-review phase.\n\nReview implemented code against domain decisions and DDD/Clean Architecture. Run two independent active-host reviewer sub-agents before approve. Each reviewer section must include \`reviewer-source: sub-agent\`; optional cross-host reviewers are extra evidence and do not replace active-host reviewers.\n\nArtifact template:\n\n# Architecture Review\n\n## Reviewer 1\nreviewer-source: sub-agent\nverdict: approve | request-changes\n\n## Findings\n\n## Domain Alignment\n\n## Layer Violations\n\n## Repository Boundary Issues\n\n## Dependency Direction Issues\n\n## Required Refactors\n\n## Approved Exceptions\n\n## Reviewer 2\nreviewer-source: sub-agent\nverdict: approve | request-changes\n\n## Findings\n\n## Overall\nverdict: approve | request-changes\n\n## Completion Gate\nskills_checked: true\nprofile-skill-selection: applied\nactive-profiles: <profile list>\nchanged-file-skill-resolution: applied\nrequired-profile-skills: checked\nmissing-required-profile-skills: none|<list>\narchitecture-contract-check: pass|fail|n/a\ncodex-claude-parity-check: pass|fail\nhook-parity-check: pass|fail\nclean-architecture: applied\nproject-local-skills: checked|n/a\nproject-local-skills-used: <skill list or n/a>\ndependency-rule: pass|fail\nusecase-boundary: pass|fail|n/a\nusecase-calls-usecase: pass|fail\nrepository-boundary: pass|fail\ncache-boundary: pass|fail|n/a\nmemory-disk-cache-separated: pass|fail|n/a\nmapping-boundary: pass|fail|n/a\ndto-entity-domain-ui-separated: pass|fail\nsolid-boundary-check: pass|fail\npresentation-skill: android|react|react-native|ios|n/a\npresentation-state-review: pass|fail|n/a\nui-state-modeling: explicit|n/a\npresentation-mapping-boundary: domain-to-uimodel|n/a\ndi-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a\n`;
@@ -3093,9 +3033,7 @@ function phasePrompt(phase) {
   return `# ${phase.id}\n\n${phase.instruction}${markers}${skillNote}\n\nSave the required artifact before running:\n\n\`\`\`bash\n${AGENT_FLOW_COMMAND} run advance\n\`\`\`\n`;
 }
 
-function shellQuote(value) {
-  return `'${String(value).replaceAll("'", "'\\''")}'`;
-}
+
 
 function hookScriptCommand(root, scriptName) {
   const scriptPath = shellQuote(path.join(root, ".agent-flow", "scripts", "hooks", scriptName));
@@ -3105,15 +3043,7 @@ function hookScriptCommand(root, scriptName) {
   return `/bin/bash ${scriptPath}`;
 }
 
-function unquoteShellWord(value) {
-  if (typeof value !== "string") {
-    return "";
-  }
-  if (value.startsWith("'") && value.endsWith("'")) {
-    return value.slice(1, -1).replaceAll("'\\''", "'");
-  }
-  return value;
-}
+
 
 // Read 계열 tool 이름은 host마다 다르다. comment-checker의 write matcher와 같은 방식으로 합집합을 쓴다.
 const READ_TOOL_MATCHER = "^(Read|read|read_file|view|cat)$";
@@ -3290,19 +3220,7 @@ function mergeHookSettings(settings, desired) {
   }
 }
 
-function readHookSettings(settingsPath) {
-  if (!fs.existsSync(settingsPath)) {
-    return {};
-  }
-  try {
-    return JSON.parse(fs.readFileSync(settingsPath, "utf8"));
-  } catch {
-    const backupPath = `${settingsPath}.bak`;
-    fs.copyFileSync(settingsPath, backupPath);
-    console.error(`warning: could not parse ${settingsPath}; backed up to ${backupPath} before overwriting`);
-    return {};
-  }
-}
+
 
 function mergeHookConfig(settings, source) {
   if (!source || typeof source !== "object") {
@@ -3318,13 +3236,9 @@ function mergeHookConfig(settings, source) {
   }
 }
 
-function escapeRegex(value) {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
 
-function tomlBasicString(value) {
-  return String(value).replaceAll("\\", "\\\\").replaceAll("\"", "\\\"");
-}
+
+
 
 function codexConfigPath() {
   if (!HOME) {
@@ -3465,37 +3379,9 @@ function upgradeBundledProfiles(root, src, dest) {
   }
 }
 
-function nextFreeBackupPath(base, content) {
-  // 이미 같은 내용이 백업돼 있으면 사본을 늘리지 않는다. 다르면 비어 있는
-  // 다음 이름을 찾는다. 무엇도 덮지 않으므로 어떤 버전도 잃지 않는다.
-  for (let i = 0; i < 100; i += 1) {
-    const candidate = i === 0 ? base : `${base}.${i}`;
-    if (!fs.existsSync(candidate)) {
-      return candidate;
-    }
-    if (fs.readFileSync(candidate, "utf8") === content) {
-      return null;
-    }
-  }
-  return null;
-}
 
-function backupIfDifferent(root, target, content) {
-  if (!fs.existsSync(target)) {
-    return;
-  }
-  if (fs.readFileSync(target, "utf8") === content) {
-    return;
-  }
-  // 덮어쓰는 내용을 잃지 않는다. 고정 이름 하나만 쓰면 둘 중 하나를 반드시
-  // 버리게 된다 — 매번 덮으면 사용자 원본이, 안 덮으면 이번 편집이 사라진다.
-  const backup = nextFreeBackupPath(`${target}.bak`, fs.readFileSync(target, "utf8"));
-  if (backup === null) {
-    return;  // 같은 내용이 이미 백업돼 있다.
-  }
-  fs.copyFileSync(target, backup);
-  console.log(`  ~ replaced ${path.relative(root, target)} (backup: ${path.relative(root, backup)})`);
-}
+
+
 
 function ompExtensionIsKitOwned(target) {
   if (!fs.existsSync(target)) {
@@ -3594,35 +3480,10 @@ function pruneRetiredHookScripts(root) {
   }
 }
 
-function pruneRetiredManagedScripts(root) {
-  const scriptsDir = path.join(root, ".agent-flow", "scripts");
-  for (const scriptName of ["check-context-docs.mjs", "check-context-docs.ts"]) {
-    const target = path.join(scriptsDir, scriptName);
-    if (!fs.existsSync(target) || !fs.statSync(target).isFile()) {
-      continue;
-    }
-    const kept = nextFreeBackupPath(`${target}.removed`, fs.readFileSync(target, "utf8"));
-    if (kept !== null) {
-      fs.copyFileSync(target, kept);
-      fs.chmodSync(kept, 0o644);
-    }
-    fs.rmSync(target, { force: true });
-    console.log(`  - removed retired script: ${path.relative(root, target)}`);
-  }
-}
 
 
-function makeHooksExecutable(root) {
-  const hooksDir = path.join(root, ".agent-flow", "scripts", "hooks");
-  if (!fs.existsSync(hooksDir)) {
-    return;
-  }
-  for (const entry of fs.readdirSync(hooksDir)) {
-    if (entry.endsWith(".sh") || entry.endsWith(".py")) {
-      fs.chmodSync(path.join(hooksDir, entry), 0o755);
-    }
-  }
-}
+
+
 
 function workflowContract() {
   return `# Workflow Contract
