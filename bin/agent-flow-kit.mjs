@@ -124,6 +124,7 @@ function installProject() {
     // 설치본이 어느 kit source에서 왔는지. 이 값이 없으면 낡은 설치본이 조용히
     // 계속 돈다 — version은 하드코딩이라 릴리스 없이 바뀐 자산을 구분하지 못한다.
     kit_source_digest: kitSourceDigest(),
+    managed_hook_digests: managedHookDigests(),
   };
 
   writeManagedFile(path.join(agentFlowDir, "workflows", "full-feature.yaml"), fullFeatureWorkflowYaml());
@@ -177,6 +178,14 @@ function installProject() {
     true,
     true,
   );
+  copyBundledDirIfMissingOrSame(
+    path.join(KIT_ROOT, "templates"),
+    path.join(root, RUNTIME_PYTHON_RELATIVE, "agent_flow", "templates"),
+    true,
+    new Set(),
+    true,
+    true,
+  );
   if (!samePath(root, KIT_ROOT)) {
     removeManagedDirIfSame(path.join(KIT_ROOT, "scripts"), path.join(root, "scripts"), forceManaged);
   }
@@ -184,6 +193,7 @@ function installProject() {
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".claude", "agents"), path.join(root, ".claude", "agents"), forceManaged);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "rules", "context"), path.join(root, ".Codex", "rules", "context"), forceManaged);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "context"), path.join(root, ".Codex", "context"), forceManaged);
+  removeCodexBroadTrustState(root);
   if (!hooksDisabled) {
     installCodexHooks(root);
   }
@@ -220,11 +230,11 @@ function installProject() {
     "CLAUDE.md",
     "AGENTS/",
     "CLAUDE/",
-    "scripts/check-context-docs.*",
     "agent-flow/",
   ]);
   removeGitignoreEntries(gitignorePath, [
     "graphify/",
+    "scripts/check-context-docs.*",
     "graphify-out/manifest.json",
     "graphify-out/cost.json",
   ]);
@@ -233,6 +243,7 @@ function installProject() {
   upsertBootstrapBlock(path.join(root, "CLAUDE.md"), "CLAUDE.md", root);
   upsertSkillIndexBlock(root);
   pruneRetiredHookScripts(root);
+  pruneRetiredManagedScripts(root);
   makeHooksExecutable(root);
   if (hooksDisabled) {
     // 등록을 지우는 것은 prune이 한다. 여기서는 host별 설정을 한 번 더 훑어
@@ -270,7 +281,9 @@ function syncSkillSources(root) {
   }
 }
 
-// JS 상태기계가 직접 처리하는 서브커맨드. 나머지는 Python CLI가 주인이다.
+// Lifecycle state has one owner: the Python CLI. JS only translates the
+// compatibility command names and never creates or advances run state.
+const PYTHON_RUN_LIFECYCLE = new Set(["start", "status", "next", "advance"]);
 const JS_RUN_SUBCOMMAND_NAMES = [
   "start",
   "status",
@@ -279,69 +292,18 @@ const JS_RUN_SUBCOMMAND_NAMES = [
   "push-watch",
   "push-watch-tick",
 ];
-const JS_RUN_SUBCOMMANDS = new Set(JS_RUN_SUBCOMMAND_NAMES);
 
 function runWorkflowCommand(args) {
   const subcommand = args[0];
-
-  // `--worktree`는 Python의 worktree 등록부 해석을 거쳐야 하는 선택자다. JS는 그
-  // 해석을 갖고 있지 않아 플래그를 조용히 무시했고, 다른 checkout을 겨냥한 명령이
-  // 현재 root의 run을 전이시켰다. 무시하느니 막는다. argparse는 고유 접두도 받으므로
-  // `--workt`부터(그 아래는 `--workflow`와 갈린다) 전부 같은 선택자로 본다.
-  if (JS_RUN_SUBCOMMANDS.has(subcommand) && args.some(isWorktreeSelector)) {
-    throw new Error(
-      `agent-flow-kit run ${subcommand} does not support --worktree. `
-      + "Run it inside that worktree, or use the Python CLI (agent-flow status|continue --worktree <name>).",
-    );
-  }
-  const root = resolveAgentFlowRoot(process.cwd());
+  const requestedRoot = cliOptionValue(args.slice(1), "--root");
+  const root = resolveAgentFlowRoot(
+    requestedRoot ? path.resolve(process.cwd(), requestedRoot) : process.cwd(),
+  );
   warnIfInstalledKitIsStale(root);
-  if (subcommand === "start") {
-    const task = optionValue(args, "--task");
-    if (!task) {
-      throw new Error("run start requires --task");
-    }
-    const workflow = optionValue(args, "--workflow") ?? "full-feature";
-    const runId = optionValue(args, "--run-id") ?? newRunId();
-    assertInstalled(root);
-    const phases = workflowPhases(workflow);
-    const runDir = path.join(root, ".agent-flow", "runs", workflow, runId);
-    const runDirRel = path.join(".agent-flow", "runs", workflow, runId);
-    if (fs.existsSync(runDir)) {
-      throw new Error(`run already exists: ${runId}`);
-    }
-    fs.mkdirSync(path.join(runDir, "artifacts"), { recursive: true });
-    fs.mkdirSync(path.join(runDir, "logs"), { recursive: true });
-    const startedAt = new Date().toISOString();
-    const state = {
-      run_id: runId,
-      workflow,
-      task,
-      // design-spec.md의 task digest와 대조된다. Python `artifact.create_run`과 같은 계약이다.
-      task_digest: crypto.createHash("sha256").update(task.trim()).digest("hex"),
-      phase_index: 0,
-      phase: phases[0].id,
-      status: "running",
-      run_dir: runDirRel,
-      started_at: startedAt,
-      phase_entered_at: startedAt,
-      // gate-results.json의 출처 표식. Python `artifact.create_run`과 같은 계약이다.
-      gate_nonce: randomBytes(16).toString("hex"),
-    };
-    writeJson(path.join(runDir, "manifest.json"), state);
-    writeJson(currentRunPath(root), state);
-    printNext(state, root);
-    return;
-  }
 
-  if (subcommand === "status") {
-    const state = readCurrentRun(root);
-    printStatus(state, root);
-    return;
-  }
-
-  if (subcommand === "next") {
-    printNext(readCurrentRun(root), root);
+  if (PYTHON_RUN_LIFECYCLE.has(subcommand)) {
+    assertPythonRuntimeInstalled(root);
+    relayPythonRunLifecycle(subcommand, args.slice(1), root);
     return;
   }
 
@@ -390,45 +352,6 @@ function runWorkflowCommand(args) {
     return;
   }
 
-  if (subcommand === "advance") {
-    const state = readCurrentRun(root);
-    const runDir = resolveRunDir(root, state.run_dir);
-    if (state.status === "complete" || state.phase === "complete") {
-      console.log(`workflow already complete: ${state.run_id}`);
-      return;
-    }
-    const phases = workflowPhases(state.workflow);
-    const phase = phases[state.phase_index];
-    const artifact = path.join(runDir, phase.artifact);
-    if (!fs.existsSync(artifact)) {
-      throw new Error(`blocked: missing artifact ${artifact}`);
-    }
-    assertFreshArtifact(state, phase, artifact);
-    assertCompletionMarkers(phase, artifact, root, state.workflow, runDir);
-    captureSpecLedger(root, runDir, phase, artifact);
-    const nextIndex = nextPhaseIndex(state, phases, phase, artifact);
-    syncRouteArtifacts(runDir, phases, state.phase_index, nextIndex);
-    const nextPhase = phases[nextIndex];
-    const transitionedAt = new Date().toISOString();
-    const fixLoopRounds = nextFixLoopRounds(state, phase, nextPhase);
-    const nextState = {
-      ...state,
-      phase_index: nextIndex,
-      phase: nextPhase?.id ?? "complete",
-      status: nextPhase ? "running" : "complete",
-      updated_at: transitionedAt,
-      phase_entered_at: transitionedAt,
-      fix_loop_rounds: fixLoopRounds,
-    };
-    writeJson(path.join(runDir, "manifest.json"), nextState);
-    writeJson(currentRunPath(root), nextState);
-    if (nextPhase) {
-      printNext(nextState, root);
-    } else {
-      console.log(`workflow complete: ${state.run_id}`);
-    }
-    return;
-  }
 
   // 아는 서브커맨드가 아니면 Python CLI의 `run`이 주인이다. `agent-flow run
   // "<task>"`가 여기로 온다 — 래퍼 자신의 안내문(`readCurrentRun`)이 그 형태를
@@ -456,9 +379,102 @@ function runWorkflowCommand(args) {
   runPythonCliCommand("run", args, { interactive: true });
 }
 
-function isWorktreeSelector(arg) {
-  const flag = arg.split("=", 1)[0];
-  return flag.length >= 6 && "--worktree".startsWith(flag);
+function relayPythonRunLifecycle(subcommand, args, root) {
+  const requestedWorktree = cliOptionValue(args, "--worktree");
+  const worktree = requestedWorktree
+    ? resolveRegisteredWorktreeName(root, requestedWorktree)
+    : null;
+  const checkoutIdentity = worktree
+    ? `worktree:${worktree}`
+    : currentCheckoutIdentity(root);
+  if (checkoutIdentity === "unknown") {
+    throw new Error(
+      "checkout identity is unknown; refusing to relay lifecycle state",
+    );
+  }
+
+  const rootedArgs = hasCliOption(args, "--root")
+    ? [...args]
+    : [...args, "--root", root];
+  const identityArgs = [
+    ...rootedArgs,
+    "--checkout-identity",
+    checkoutIdentity,
+  ];
+  if (subcommand === "start") {
+    const extracted = extractCliOption(identityArgs, "--workflow");
+    runPythonCliCommand(
+      "start",
+      [
+        extracted.value ?? "full-feature",
+        ...extracted.args,
+        "--phase-runner",
+      ],
+      { interactive: true },
+    );
+    return;
+  }
+  if (subcommand === "next") {
+    runPythonCliCommand("status", identityArgs);
+    return;
+  }
+  runPythonCliCommand(
+    subcommand === "advance" ? "continue" : "status",
+    identityArgs,
+  );
+}
+
+function hasCliOption(args, name) {
+  return args.some((arg) => arg === name || arg.startsWith(`${name}=`));
+}
+
+function cliOptionValue(args, name) {
+  let value;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === name) {
+      if (index + 1 >= args.length) {
+        throw new Error(`${name} requires a value`);
+      }
+      if (value !== undefined) {
+        throw new Error(`${name} may only be specified once`);
+      }
+      value = args[index + 1];
+      index += 1;
+    } else if (arg.startsWith(`${name}=`)) {
+      if (value !== undefined) {
+        throw new Error(`${name} may only be specified once`);
+      }
+      value = arg.slice(name.length + 1);
+    }
+  }
+  return value;
+}
+
+function extractCliOption(args, name) {
+  const kept = [];
+  let value;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === name) {
+      if (index + 1 >= args.length) {
+        throw new Error(`${name} requires a value`);
+      }
+      if (value !== undefined) {
+        throw new Error(`${name} may only be specified once`);
+      }
+      value = args[index + 1];
+      index += 1;
+    } else if (arg.startsWith(`${name}=`)) {
+      if (value !== undefined) {
+        throw new Error(`${name} may only be specified once`);
+      }
+      value = arg.slice(name.length + 1);
+    } else {
+      kept.push(arg);
+    }
+  }
+  return { value, args: kept };
 }
 
 // `--workflow`와 갈리는 지점까지 좁힌 접두 판정과 짝을 이룬다. 편집 거리 2는
@@ -786,19 +802,35 @@ function resolveInstallRoot(start) {
 }
 
 function resolveManagedWorktreeRoot(start) {
-  const parts = start.split(path.sep);
+  return resolveManagedWorktreeContext(start)?.root ?? null;
+}
+
+function resolveManagedWorktreeContext(start) {
+  const resolved = canonicalPath(start);
+  const parts = resolved.split(path.sep);
   const markers = new Set([".agent-flow", ".codex", ".Codex", ".omp"]);
-  for (let index = parts.length - 2; index >= 0; index -= 1) {
+  for (let index = parts.length - 3; index >= 0; index -= 1) {
     if (parts[index + 1] !== "worktrees") continue;
     if (!markers.has(parts[index])) continue;
     const root = parts.slice(0, index).join(path.sep) || path.sep;
-    // 홈의 전역 Codex/OMP worktree는 프로젝트 내부 worktree가 아니다.
-    if (HOME && samePath(root, HOME) && (parts[index] === ".codex" || parts[index] === ".Codex" || parts[index] === ".omp")) {
+    if (
+      HOME
+      && samePath(root, HOME)
+      && [".codex", ".Codex", ".omp"].includes(parts[index])
+    ) {
       continue;
     }
-    return root;
+    return { root, name: parts[index + 2] };
   }
   return null;
+}
+
+function canonicalPath(value) {
+  try {
+    return fs.realpathSync.native(value);
+  } catch {
+    return path.resolve(value);
+  }
 }
 
 function samePath(left, right) {
@@ -808,6 +840,26 @@ function samePath(left, right) {
     // 심볼릭 링크가 섞인 임시 경로에서도 홈 비교는 보수적으로 처리한다.
     return path.resolve(left) === path.resolve(right);
   }
+}
+
+
+function currentCheckoutIdentity(root) {
+  const cwd = canonicalPath(process.cwd());
+  const managed = resolveManagedWorktreeContext(cwd);
+  if (managed && samePath(managed.root, root)) {
+    return `worktree:${managed.name}`;
+  }
+  const leader = canonicalPath(root);
+  const relative = path.relative(leader, cwd);
+  if (
+    relative === ""
+    || (relative !== ".."
+      && !relative.startsWith(`..${path.sep}`)
+      && !path.isAbsolute(relative))
+  ) {
+    return "leader";
+  }
+  return "unknown";
 }
 
 function resolveGitCommonWorktreeRoot(start) {
@@ -903,28 +955,184 @@ function relayTimeoutForSubcommand(subcommand, args) {
 }
 
 function safeSpawnSync(commandName, args, options = {}) {
-  // 외부 CLI는 자동 relay를 멈추지 않도록 기본 timeout을 둔다.
+  // spawnSync의 기본 SIGTERM은 자식이 무시하면 timeout 뒤에도 영원히 기다린다.
+  // relay에는 무시할 수 없는 종료 신호를 써서 lifecycle 명령의 상한을 실제로 보장한다.
   const timeout = options.timeout ?? DEFAULT_RELAY_TIMEOUT_MS;
-  const result = spawnSync(commandName, args, { ...options, timeout });
+  const killSignal = options.killSignal ?? "SIGKILL";
+  const result = spawnSync(commandName, args, {
+    ...options,
+    timeout,
+    killSignal,
+  });
   if (timeout && result.error?.code === "ETIMEDOUT") {
-    // 기본 메시지는 "spawnSync <cmd> ETIMEDOUT"뿐이라 무엇이 끊겼는지 안 보인다.
-    result.error = new Error(
+    const timeoutError = new Error(
       `${commandName} exceeded the ${timeout}ms agent-flow relay timeout`,
+      { cause: result.error },
     );
+    timeoutError.code = "ETIMEDOUT";
+    result.error = timeoutError;
   }
   return result;
 }
 
-function readCurrentRun(root) {
-  const pathName = currentRunPath(root);
-  if (!fs.existsSync(pathName)) {
+function readCurrentRun(root, worktree = null) {
+  const stateRoot = pythonRunStateRoot(root, worktree);
+  const runsRoot = path.join(stateRoot, ".agent-flow", "runs");
+  if (!fs.existsSync(runsRoot)) {
     throw new Error('no active run. start one with: agent-flow run "<task>"');
   }
-  return normalizeRunState(root, JSON.parse(fs.readFileSync(pathName, "utf8")));
+  const activeRuns = fs.readdirSync(runsRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && fs.existsSync(path.join(runsRoot, entry.name, "active")))
+    .map((entry) => path.join(runsRoot, entry.name));
+  if (activeRuns.length === 0) {
+    throw new Error('no active run. start one with: agent-flow run "<task>"');
+  }
+  if (activeRuns.length > 1) {
+    throw new Error(`multiple active Python runs found: ${activeRuns.join(", ")}`);
+  }
+  const runDir = activeRuns[0];
+  const meta = readJsonIfExists(path.join(runDir, "meta.json"));
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) {
+    throw new Error(`active Python run has invalid meta.json: ${runDir}`);
+  }
+  return {
+    ...meta,
+    phase: meta.current_phase ?? null,
+    run_dir: runDir,
+  };
+}
+
+function pythonRunStateRoot(root, worktree = null) {
+  const managed = resolveManagedWorktreeContext(process.cwd());
+  const requestedName = worktree || (
+    managed && samePath(managed.root, root)
+      ? managed.name
+      : null
+  );
+  if (!requestedName) {
+    return root;
+  }
+  const worktreeName = resolveRegisteredWorktreeName(root, requestedName);
+  const commonDir = gitOutput(root, ["rev-parse", "--git-common-dir"]);
+  if (!commonDir) {
+    throw new Error("cannot resolve Python worktree state without the git common dir");
+  }
+  return path.join(path.resolve(root, commonDir), "agent-flow", "worktrees", worktreeName);
+}
+
+function resolveRegisteredWorktreeName(root, selector) {
+  const output = gitOutput(root, ["worktree", "list", "--porcelain", "-z"]);
+  if (!output) {
+    return selector;
+  }
+  const entries = [];
+  let current = null;
+  for (const field of output.split("\0").filter(Boolean)) {
+    const separator = field.indexOf(" ");
+    const key = separator === -1 ? field : field.slice(0, separator);
+    const value = separator === -1 ? "" : field.slice(separator + 1);
+    if (key === "worktree") {
+      if (current) entries.push(current);
+      current = { path: canonicalPath(value), branch: null, bare: false };
+    } else if (current && key === "branch") {
+      current.branch = value.startsWith("refs/heads/")
+        ? value.slice("refs/heads/".length)
+        : value;
+    } else if (current && key === "bare") {
+      current.bare = true;
+    }
+  }
+  if (current) entries.push(current);
+
+  const wanted = selector.trim();
+  const pathCandidates = path.isAbsolute(wanted)
+    ? [canonicalPath(wanted)]
+    : [
+      canonicalPath(path.resolve(root, wanted)),
+      canonicalPath(path.resolve(process.cwd(), wanted)),
+    ];
+  const ranked = new Map();
+  for (const entry of entries) {
+    if (entry.bare || samePath(entry.path, root)) continue;
+    let rank = null;
+    if (pathCandidates.some((candidate) => samePath(candidate, entry.path))) {
+      rank = 0;
+    } else if (wanted === entry.branch) {
+      rank = 1;
+    } else if (wanted === path.basename(entry.path)) {
+      rank = 2;
+    } else {
+      const derived = derivedWorktreeIdentity(wanted);
+      if (
+        derived
+        && (
+          derived.name === path.basename(entry.path)
+          || derived.branch === entry.branch
+        )
+      ) {
+        rank = 3;
+      }
+    }
+    if (rank === null) continue;
+    const bucket = ranked.get(rank) ?? new Map();
+    bucket.set(entry.path, entry);
+    ranked.set(rank, bucket);
+  }
+  if (ranked.size === 0) {
+    return selector;
+  }
+  const bestRank = Math.min(...ranked.keys());
+  const matches = [...ranked.get(bestRank).values()];
+  if (matches.length !== 1) {
+    throw new Error(
+      `worktree selector is ambiguous: ${selector}; candidates: `
+      + matches.map((entry) => `${entry.path} (${entry.branch ?? "detached"})`).join(", "),
+    );
+  }
+  return path.basename(matches[0].path);
+}
+
+function derivedWorktreeIdentity(selector) {
+  const lowered = selector.trim().toLowerCase();
+  let safe = lowered.replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  if (!safe || safe.startsWith(".") || safe.includes("..")) {
+    if (!/[\p{L}\p{N}]/u.test(lowered)) return null;
+    const digest = crypto.createHash("sha1").update(lowered, "utf8").digest("hex").slice(0, 8);
+    safe = `task-${digest}`;
+  }
+  const name = safe.startsWith("feat-") ? safe : `feat-${safe}`;
+  return { name, branch: `feat/${name.slice("feat-".length)}` };
 }
 
 function resolveRunDir(root, runDir) {
   return path.isAbsolute(runDir) ? runDir : path.join(root, runDir);
+}
+
+function assertPythonRuntimeInstalled(root) {
+  const installMarker = path.join(root, ".agent-flow", "kit.json");
+  if (!fs.existsSync(installMarker)) {
+    throw new Error("agent-flow is not installed. run: agent-flow-kit install");
+  }
+  const required = [
+    installMarker,
+    path.join(root, RUNTIME_PYTHON_RELATIVE, "agent_flow", "__init__.py"),
+    path.join(root, RUNTIME_PYTHON_RELATIVE, "agent_flow", "cli.py"),
+    path.join(
+      root,
+      RUNTIME_PYTHON_RELATIVE,
+      "agent_flow",
+      "templates",
+      "_shared",
+      "review",
+      "architecture.md",
+    ),
+  ];
+  const missing = required.filter((filePath) => !fs.existsSync(filePath));
+  if (missing.length > 0) {
+    throw new Error(
+      `agent-flow is not installed or its Python runtime is incomplete. Re-run agent-flow-kit install. Missing: ${missing.join(", ")}`,
+    );
+  }
 }
 
 function assertInstalled(root) {
@@ -1020,6 +1228,18 @@ function kitSourceDigest() {
   return hash.digest("hex");
 }
 
+function managedHookDigests() {
+  return Object.fromEntries(
+    MANAGED_HOOK_SCRIPTS.map((name) => [
+      name,
+      crypto
+        .createHash("sha256")
+        .update(fs.readFileSync(path.join(KIT_ROOT, "scripts", "hooks", name)))
+        .digest("hex"),
+    ]),
+  );
+}
+
 function walkFilesSorted(target) {
   if (!fs.existsSync(target)) {
     return [];
@@ -1076,26 +1296,6 @@ function selectedSkillPath(root, skill) {
   return null;
 }
 
-function normalizeRunState(root, state) {
-  if (state.status === "complete" || state.phase === "complete") {
-    return state;
-  }
-  const index = workflowPhases(state.workflow).findIndex((phase) => phase.id === state.phase);
-  if (index === -1 || index === state.phase_index) {
-    return state;
-  }
-  const normalized = {
-    ...state,
-    phase_index: index,
-  };
-  writeJson(path.join(resolveRunDir(root, state.run_dir), "manifest.json"), normalized);
-  writeJson(currentRunPath(root), normalized);
-  return normalized;
-}
-
-function currentRunPath(root) {
-  return path.join(root, ".agent-flow", "state", "current-run.json");
-}
 
 function pushWatchStatePath(root) {
   return path.join(root, ".agent-flow", "state", "push-watch.json");
@@ -1158,89 +1358,6 @@ function pullRequestWatchStatus(pr) {
   return "green";
 }
 
-function printNext(state, root = null) {
-  const phase = workflowPhases(state.workflow)[state.phase_index];
-  if (!phase) {
-    console.log(`workflow complete: ${state.run_id}`);
-    return;
-  }
-  const resolvedRunDir = root ? resolveRunDir(root, state.run_dir) : state.run_dir;
-  const localSkillBlock = root ? localSkillPromptBlock(root, phase.id, state.workflow) : "";
-  const specBlock = root ? specPromptBlock(root, resolvedRunDir) : "";
-  console.log(`Current phase: ${phase.id}`);
-  console.log(`Run: ${state.run_id}`);
-  console.log(`Required artifact: ${path.join(state.run_dir, phase.artifact)}`);
-  console.log(`Instruction: ${phase.instruction}${specBlock}${localSkillBlock}`);
-}
-
-function printStatus(state, root) {
-  const phase = workflowPhases(state.workflow)[state.phase_index];
-  const resolvedRunDir = resolveRunDir(root, state.run_dir);
-  const complete = state.status === "complete" || state.phase === "complete" || !phase;
-  const requiredArtifact = phase ? path.join(state.run_dir, phase.artifact) : null;
-  const resolvedRequiredArtifact = phase ? path.join(resolvedRunDir, phase.artifact) : null;
-  let status = complete ? "complete" : state.status;
-  let reason = complete ? "workflow_complete" : "in_progress";
-  let missingCompletionMarkers = [];
-  if (!complete && resolvedRequiredArtifact && !fs.existsSync(resolvedRequiredArtifact)) {
-    status = "awaiting_host";
-    reason = "missing_phase_artifact";
-  } else if (!complete && requiredArtifact) {
-    missingCompletionMarkers = missingMarkersForPhase(
-      fs.readFileSync(resolvedRequiredArtifact, "utf8"),
-      phase,
-      root,
-      state.workflow,
-      resolvedRunDir,
-    );
-    status = "blocked";
-    if (artifactIsStale(state, resolvedRequiredArtifact)) {
-      reason = "stale_artifact";
-    } else if (missingCompletionMarkers.length > 0) {
-      reason = "missing_completion_markers";
-    } else {
-      try {
-        nextPhaseIndex(state, workflowPhases(state.workflow), phase, resolvedRequiredArtifact);
-        reason = "phase_artifact_written_advance_required";
-      } catch (_error) {
-        reason = "route_blocked";
-      }
-    }
-  }
-  const nextCommand = complete
-    ? "none"
-    : reason === "route_blocked"
-      ? `${AGENT_FLOW_COMMAND} run next`
-      : `${AGENT_FLOW_COMMAND} run advance`;
-  const payload = {
-    status,
-    run: `${state.workflow}/${state.run_id}`,
-    task: state.task ?? "",
-    current_phase: phase?.id ?? "-",
-    reason,
-    required_artifact: requiredArtifact,
-    next_command: nextCommand,
-    missing_completion_markers: missingCompletionMarkers,
-  };
-  console.log(`${state.workflow} ${state.run_id} ${status} phase=${phase?.id ?? "-"}`);
-  console.log(`status: ${statusValue(status)}`);
-  console.log(`run: ${statusValue(payload.run)}`);
-  console.log(`task: ${statusValue(payload.task)}`);
-  console.log(`current_phase: ${statusValue(payload.current_phase)}`);
-  console.log(`reason: ${statusValue(reason)}`);
-  if (requiredArtifact) {
-    console.log(`required_artifact: ${statusValue(requiredArtifact)}`);
-  }
-  if (missingCompletionMarkers.length > 0) {
-    console.log(`missing_completion_markers: ${JSON.stringify(missingCompletionMarkers)}`);
-  }
-  console.log(`next_command: ${statusValue(nextCommand)}`);
-  console.log(`status_json: ${JSON.stringify(payload)}`);
-}
-
-function statusValue(value) {
-  return String(value).replace(/\r/g, "\\r").replace(/\n/g, "\\n");
-}
 
 function optionValue(args, name) {
   const index = args.indexOf(name);
@@ -2013,13 +2130,6 @@ function captureSpecLedger(root, runDir, phase, artifact) {
   }
 }
 
-function specPromptBlock(root, runDir) {
-  const out = runSpecCli(["prompt", "--root", root, "--run-dir", runDir]);
-  if (out === null) {
-    throw new Error("blocked: Python SPEC prompt resolver did not answer");
-  }
-  return out;
-}
 
 function missingMarkersForPhase(content, phase, root, workflow, runDir = null) {
   const missing = missingMarkers(content, phase.required_markers ?? []);
@@ -2032,14 +2142,6 @@ function missingMarkersForPhase(content, phase, root, workflow, runDir = null) {
 }
 
 
-function localSkillPromptBlock(root, phase, workflow) {
-  const phaseId = typeof phase === "string" ? phase : phase?.id;
-  if (!root || !phaseId) {
-    return "";
-  }
-  const out = runSkillsCli(["prompt", "--root", root, "--phase", phaseId, "--workflow", workflow || "default"]);
-  return out ?? "";
-}
 
 function missingProjectLocalSkillMarkers(content, root, phase, workflow) {
   const phaseId = typeof phase === "string" ? phase : phase?.id;
@@ -2744,9 +2846,9 @@ ${AGENT_FLOW_COMMAND} status
 install은 프로젝트당 1회만 수행합니다. 새 세션이 시작됐다는 이유로 install을 다시 실행하지 않습니다.
 Follow the CLI output exactly. If no run is active, start with \`${AGENT_FLOW_COMMAND} run "<task>"\`. If a run is active, continue with the printed \`next_command\`.
 
-run이 SPEC 확인 대기로 막히면 사용자가 대화형 터미널에서 \`${AGENT_FLOW_COMMAND} spec confirm --run-dir <run-dir> --artifact <run-dir>/artifacts/design.md\`를 직접 실행해야 풀립니다.
+run이 SPEC 확인 대기로 막히면 지원되는 Codex·Claude·OMP host에서는 사용자에게 현재 대화의 새 turn으로 정확히 \`승인\`이라고 답해 달라고 안내합니다. managed user-prompt hook이 현재 pending SPEC을 확인합니다. hook을 사용할 수 없을 때만 사용자가 대상 worktree의 대화형 터미널에서 경로 없는 fallback \`${AGENT_FLOW_COMMAND} spec confirm\`을 직접 실행합니다.
 \`manual\` verify 항목은 사용자가 \`${AGENT_FLOW_COMMAND} spec approve <spec-id> --run-dir <run-dir>\`를 실행해야 승인 record가 남습니다.
-agent는 이 두 명령을 대신 실행하지 않습니다. agent 셸에서 관측된 확인·승인은 무효 처리됩니다.
+agent는 fallback·manual 승인 명령이나 user-prompt hook을 대신 실행하지 않습니다. agent 셸에서 관측된 확인·승인은 무효 처리됩니다.
 
 ### Workflow Contract
 
@@ -2854,9 +2956,9 @@ ${AGENT_FLOW_COMMAND} run "<task>"
 install은 프로젝트당 1회만 수행합니다. 새 세션이 시작됐다는 이유로 install을 다시 실행하지 않습니다.
 Follow the CLI output exactly. Git projects start inside \`.agent-flow/worktrees/feat-<slug>/\` without switching the leader branch; continue with the printed \`next_command\`.
 
-run이 SPEC 확인 대기로 막히면 사용자가 대화형 터미널에서 \`${AGENT_FLOW_COMMAND} spec confirm --run-dir <run-dir> --artifact <run-dir>/artifacts/design.md\`를 직접 실행해야 풀립니다.
+run이 SPEC 확인 대기로 막히면 지원되는 Codex·Claude·OMP host에서는 사용자에게 현재 대화의 새 turn으로 정확히 \`승인\`이라고 답해 달라고 안내합니다. managed user-prompt hook이 현재 pending SPEC을 확인합니다. hook을 사용할 수 없을 때만 사용자가 대상 worktree의 대화형 터미널에서 경로 없는 fallback \`${AGENT_FLOW_COMMAND} spec confirm\`을 직접 실행합니다.
 \`manual\` verify 항목은 사용자가 \`${AGENT_FLOW_COMMAND} spec approve <spec-id> --run-dir <run-dir>\`를 실행해야 승인 record가 남습니다.
-agent는 이 두 명령을 대신 실행하지 않습니다. agent 셸에서 관측된 확인·승인은 무효 처리됩니다.
+agent는 fallback·manual 승인 명령이나 user-prompt hook을 대신 실행하지 않습니다. agent 셸에서 관측된 확인·승인은 무효 처리됩니다.
 
 ### Workflow Contract
 
@@ -2928,19 +3030,15 @@ When the user types \`/agent-flow status\`, run:
 ${AGENT_FLOW_COMMAND} status
 \`\`\`
 
-## User-Only Commands
+## User-Only Approval
 
-Two commands confirm SPEC items and must be typed by the user in an interactive terminal:
+When a run waits for SPEC set confirmation:
 
-\`\`\`bash
-${AGENT_FLOW_COMMAND} spec confirm --run-dir <run-dir> --artifact <run-dir>/artifacts/design.md
-${AGENT_FLOW_COMMAND} spec approve <spec-id> --run-dir <run-dir>
-\`\`\`
+- On a supported Codex, Claude, or OMP host, show the complete ordered SPEC list and ask the user to reply exactly \`승인\` in a new turn of the current chat. The managed user-prompt hook confirms the current pending SPEC.
+- Only when that hook is unavailable, ask the user to run the path-free fallback \`${AGENT_FLOW_COMMAND} spec confirm\` from the target worktree in an interactive terminal.
+- A \`manual\` verifier still requires the user to run \`${AGENT_FLOW_COMMAND} spec approve <spec-id> --run-dir <run-dir>\`.
 
-- \`spec confirm\` confirms the \`## Spec Items\` of a design or prd artifact. \`--artifact\` takes a path, not a bare name.
-- \`spec approve\` records the approval for a SPEC item whose \`verify:\` is \`manual\`.
-- Never run either command yourself. A confirmation or approval observed from an agent shell is voided and the phase stays blocked.
-- When a run is waiting on SPEC confirmation, print the exact command and wait for the user.
+Never run the fallback or manual approval command, or invoke the user-prompt hook yourself. Confirmation or approval observed from an agent shell is void and the phase stays blocked.
 
 ## Behavior
 
@@ -2998,7 +3096,11 @@ function shellQuote(value) {
 }
 
 function hookScriptCommand(root, scriptName) {
-  return shellQuote(path.join(root, ".agent-flow", "scripts", "hooks", scriptName));
+  const scriptPath = shellQuote(path.join(root, ".agent-flow", "scripts", "hooks", scriptName));
+  if (scriptName.endsWith(".py")) {
+    return `/usr/bin/python3 -I ${scriptPath}`;
+  }
+  return `/bin/bash ${scriptPath}`;
 }
 
 function unquoteShellWord(value) {
@@ -3015,6 +3117,7 @@ function unquoteShellWord(value) {
 const READ_TOOL_MATCHER = "^(Read|read|read_file|view|cat)$";
 // 셸 실행 tool도 host마다 이름이 다르다. 관측 전용이라 PostToolUse에만 붙는다.
 const COMMAND_TOOL_MATCHER = "^(Bash|bash|shell|run_terminal_cmd|execute_command|local_shell|terminal)$";
+const SPEC_PREPARE_TOOL_MATCHER = "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit|Bash|bash|shell|run_terminal_cmd|execute_command|local_shell|terminal)$";
 
 // 관리 대상에서 빠진 hook은 기존 설치본 settings에 그대로 남는다. mergeHookSettings는
 // additive-only라서, 스크립트 파일만 지우면 host가 없는 경로를 계속 실행해 셸이 통째로
@@ -3024,7 +3127,12 @@ const COMMAND_TOOL_MATCHER = "^(Bash|bash|shell|run_terminal_cmd|execute_command
 // 읽어 사용자 도구가 통째로 막힌다. 런 시작 시 `core/hook_integrity.py`가
 // 이 목록과 배치를 kit.json 기록과 대조한다.
 const MANAGED_HOOK_SCRIPTS = [
+  "bind-host-worktree.py",
+  "confirm-spec-user-prompt.py",
   "guard-protected-branch.sh",
+  "guard-host-worktree.sh",
+  "guard-spec-approval.sh",
+  "prepare-spec-user-prompt.py",
   "show-phase-status.sh",
   "comment-checker.py",
   "record-skill-read.py",
@@ -3040,7 +3148,7 @@ function retiredHookScripts() {
     : RETIRED_MANAGED_HOOK_SCRIPTS;
 }
 
-function pruneRetiredHooks(settings) {
+function pruneRetiredHooks(settings, replaceManaged = false) {
   if (!settings || typeof settings !== "object" || !settings.hooks) {
     return false;
   }
@@ -3053,7 +3161,10 @@ function pruneRetiredHooks(settings) {
       if (!Array.isArray(entry?.hooks)) {
         continue;
       }
-      const kept = entry.hooks.filter((hook) => !isRetiredHookCommand(hook?.command));
+      const kept = entry.hooks.filter(
+        (hook) => !isRetiredHookCommand(hook?.command)
+          && !(replaceManaged && managedHookScriptName(hook?.command)),
+      );
       if (kept.length !== entry.hooks.length) {
         entry.hooks = kept;
         changed = true;
@@ -3098,6 +3209,14 @@ function managedHookScriptName(command) {
 function codexHooksSettings(root) {
   return {
     hooks: {
+      UserPromptSubmit: [
+        {
+          hooks: [
+            { type: "command", command: hookScriptCommand(root, "prepare-spec-user-prompt.py") },
+            { type: "command", command: hookScriptCommand(root, "confirm-spec-user-prompt.py") },
+          ],
+        },
+      ],
       PreToolUse: [
         {
           matcher: "Bash",
@@ -3105,11 +3224,27 @@ function codexHooksSettings(root) {
             { type: "command", command: hookScriptCommand(root, "guard-protected-branch.sh") },
           ],
         },
+        {
+          matcher: SPEC_PREPARE_TOOL_MATCHER,
+          hooks: [
+            { type: "command", command: hookScriptCommand(root, "guard-host-worktree.sh") },
+            { type: "command", command: hookScriptCommand(root, "guard-spec-approval.sh") },
+          ],
+        },
       ],
       PostToolUse: [
         {
           matcher: "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit)$",
-          hooks: [{ type: "command", command: hookScriptCommand(root, "comment-checker.py") }],
+          hooks: [
+            { type: "command", command: hookScriptCommand(root, "comment-checker.py") },
+            { type: "command", command: hookScriptCommand(root, "guard-host-worktree.sh") },
+          ],
+        },
+        {
+          matcher: SPEC_PREPARE_TOOL_MATCHER,
+          hooks: [
+            { type: "command", command: hookScriptCommand(root, "prepare-spec-user-prompt.py") },
+          ],
         },
         {
           matcher: READ_TOOL_MATCHER,
@@ -3117,7 +3252,11 @@ function codexHooksSettings(root) {
         },
         {
           matcher: COMMAND_TOOL_MATCHER,
-          hooks: [{ type: "command", command: hookScriptCommand(root, "record-command-run.py") }],
+          hooks: [
+            { type: "command", command: hookScriptCommand(root, "record-command-run.py") },
+            { type: "command", command: hookScriptCommand(root, "bind-host-worktree.py") },
+            { type: "command", command: hookScriptCommand(root, "guard-host-worktree.sh") },
+          ],
         },
       ],
       Stop: [
@@ -3133,7 +3272,7 @@ function mergeHookSettings(settings, desired) {
   if (!settings.hooks) {
     settings.hooks = {};
   }
-  pruneRetiredHooks(settings);
+  pruneRetiredHooks(settings, true);
   for (const [event, entries] of Object.entries(desired)) {
     if (!settings.hooks[event]) {
       settings.hooks[event] = [];
@@ -3198,23 +3337,6 @@ function tomlBasicString(value) {
   return String(value).replaceAll("\\", "\\\\").replaceAll("\"", "\\\"");
 }
 
-function upsertTomlValue(text, tableHeader, key, value) {
-  const tableName = tableHeader.slice(1, -1);
-  const tablePattern = new RegExp(`(^|\\n)\\s*\\[\\s*${escapeRegex(tableName)}\\s*\\]\\s*(?:#.*)?\\n([\\s\\S]*?)(?=\\n\\s*\\[[^\\n]+\\]|$)`);
-  const keyPattern = new RegExp(`(^|\\n)\\s*${escapeRegex(key)}\\s*=.*(?=\\n|$)`);
-  const match = text.match(tablePattern);
-  if (!match) {
-    const prefix = text.trim() ? `${text.replace(/\n*$/, "\n\n")}` : "";
-    return `${prefix}${tableHeader}\n${key} = ${value}\n`;
-  }
-  return text.replace(tablePattern, (full, leading, body) => {
-    const nextBody = keyPattern.test(body)
-      ? body.replace(keyPattern, `$1${key} = ${value}`)
-      : `${body.replace(/\n*$/, "")}\n${key} = ${value}\n`;
-    return `${leading}${tableHeader}\n${nextBody}`;
-  });
-}
-
 function codexConfigPath() {
   if (!HOME) {
     return null;
@@ -3222,32 +3344,31 @@ function codexConfigPath() {
   return path.join(HOME, ".codex", "config.toml");
 }
 
-function upsertCodexConfigTableValue(tableHeader, key, value) {
+function removeCodexBroadTrustState(root) {
   const configPath = codexConfigPath();
-  if (!configPath) {
-    return false;
-  }
-  const current = fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : "";
-  const next = upsertTomlValue(current, tableHeader, key, value);
-  if (next === current) {
-    return true;
-  }
-  fs.mkdirSync(path.dirname(configPath), { recursive: true });
-  fs.writeFileSync(configPath, next.endsWith("\n") ? next : `${next}\n`, "utf8");
-  return true;
-}
-
-function installCodexTrustState(root) {
-  if (process.env.AGENT_FLOW_SKIP_CODEX_TRUST === "1") {
+  if (!configPath || !fs.existsSync(configPath)) {
     return;
   }
-  // hook 승인 해시는 기록하지 않는다. install은 **현재 등록된**(=변조됐을 수도
-  // 있는) hook의 해시를 되받아 적을 뿐이고, 그 값을 다시 읽어 검증하는 코드는
-  // 어디에도 없었다. 검증하지 않는 신뢰 기록은 보호가 아니라 승인 세탁기다.
-  // 등록 무결성은 런 시작 시 `core/hook_integrity.py`가 kit.json과 대조한다.
-  const projectHeader = `[projects."${tomlBasicString(root)}"]`;
-  if (!upsertCodexConfigTableValue(projectHeader, "trust_level", "\"trusted\"")) {
-    console.error("warning: Codex project trust not registered; HOME is unavailable");
+  const tableHeader = `[projects."${tomlBasicString(root)}"]`;
+  const tableName = tableHeader.slice(1, -1);
+  const tablePattern = new RegExp(
+    `(^|\\n)\\s*\\[\\s*${escapeRegex(tableName)}\\s*\\]\\s*(?:#.*)?\\n`
+      + "([\\s\\S]*?)(?=\\n\\s*\\[[^\\n]+\\]|$)",
+  );
+  const trustPattern = /(^|\n)\s*trust_level\s*=\s*"trusted"\s*(?:#.*)?(?=\n|$)/;
+  const current = fs.readFileSync(configPath, "utf8");
+  const next = current.replace(tablePattern, (full, leading, body) => {
+    if (!trustPattern.test(body)) {
+      return full;
+    }
+    const kept = body.replace(trustPattern, "$1");
+    if (!kept.trim()) {
+      return leading;
+    }
+    return `${leading}${tableHeader}\n${kept.replace(/^\n/, "")}`;
+  });
+  if (next !== current) {
+    fs.writeFileSync(configPath, next.endsWith("\n") ? next : `${next}\n`, "utf8");
   }
 }
 
@@ -3265,12 +3386,19 @@ function installCodexHooks(root) {
     fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
     fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
   }
-  installCodexTrustState(root);
 }
 
 function claudeHooksSettings(root) {
   return {
     hooks: {
+      UserPromptSubmit: [
+        {
+          hooks: [
+            { type: "command", command: hookScriptCommand(root, "prepare-spec-user-prompt.py") },
+            { type: "command", command: hookScriptCommand(root, "confirm-spec-user-prompt.py") },
+          ],
+        },
+      ],
       PreToolUse: [
         {
           matcher: "Bash",
@@ -3278,11 +3406,27 @@ function claudeHooksSettings(root) {
             { type: "command", command: hookScriptCommand(root, "guard-protected-branch.sh") },
           ],
         },
+        {
+          matcher: SPEC_PREPARE_TOOL_MATCHER,
+          hooks: [
+            { type: "command", command: hookScriptCommand(root, "guard-host-worktree.sh") },
+            { type: "command", command: hookScriptCommand(root, "guard-spec-approval.sh") },
+          ],
+        },
       ],
       PostToolUse: [
         {
           matcher: "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit)$",
-          hooks: [{ type: "command", command: hookScriptCommand(root, "comment-checker.py") }],
+          hooks: [
+            { type: "command", command: hookScriptCommand(root, "comment-checker.py") },
+            { type: "command", command: hookScriptCommand(root, "guard-host-worktree.sh") },
+          ],
+        },
+        {
+          matcher: SPEC_PREPARE_TOOL_MATCHER,
+          hooks: [
+            { type: "command", command: hookScriptCommand(root, "prepare-spec-user-prompt.py") },
+          ],
         },
         {
           matcher: READ_TOOL_MATCHER,
@@ -3290,7 +3434,11 @@ function claudeHooksSettings(root) {
         },
         {
           matcher: COMMAND_TOOL_MATCHER,
-          hooks: [{ type: "command", command: hookScriptCommand(root, "record-command-run.py") }],
+          hooks: [
+            { type: "command", command: hookScriptCommand(root, "record-command-run.py") },
+            { type: "command", command: hookScriptCommand(root, "bind-host-worktree.py") },
+            { type: "command", command: hookScriptCommand(root, "guard-host-worktree.sh") },
+          ],
         },
       ],
       Stop: [
@@ -3329,6 +3477,23 @@ export default function agentFlowHooks(pi) {
   }
 
 
+  pi.on("input", async (event, ctx) => {
+    if (event?.source !== "interactive") {
+      return;
+    }
+    const prompt = inputPrompt(event);
+    if (!prompt) {
+      return;
+    }
+    const payload = {
+      hook_event_name: "UserPromptSubmit",
+      cwd: ctx?.cwd || ROOT,
+      prompt,
+      session_id: sessionIdentity(event, ctx),
+    };
+    await runHook("prepare-spec-user-prompt.py", payload, ctx);
+    await runHook("confirm-spec-user-prompt.py", payload, ctx);
+  });
   pi.on("context", async (event) => {
     const messages = Array.isArray(event?.messages) ? event.messages : [];
     const filtered = messages.filter((message) => {
@@ -3346,11 +3511,16 @@ export default function agentFlowHooks(pi) {
     }
   });
   pi.on("tool_call", async (event, ctx) => {
-    if (!isBashTool(event?.toolName)) {
+    const toolName = String(event?.toolName || "");
+    const commandTool = COMMAND_TOOL_RE.test(toolName);
+    if (!commandTool && !WRITE_TOOL_RE.test(toolName)) {
       return;
     }
     const payload = hookPayload(event, ctx);
-    for (const scriptName of ["guard-protected-branch.sh"]) {
+    const scripts = commandTool
+      ? ["guard-protected-branch.sh", "guard-host-worktree.sh", "guard-spec-approval.sh"]
+      : ["guard-host-worktree.sh", "guard-spec-approval.sh"];
+    for (const scriptName of scripts) {
       const result = await runHook(scriptName, payload, ctx);
       if (result.block) {
         return { block: true, reason: result.reason };
@@ -3370,11 +3540,37 @@ export default function agentFlowHooks(pi) {
     if (COMMAND_TOOL_RE.test(toolName)) {
       // 관측 전용. tool_call(PreToolUse에 해당)이 아니라 여기 붙는다 — 관측자가
       // 판정자로 승격되면 실패한 관측이 곧 사용자 도구 차단이 된다.
-      await runHook("record-command-run.py", commandRunPayload(event, ctx), ctx);
+      const payload = commandRunPayload(event, ctx);
+      await runHook("record-command-run.py", payload, ctx);
+      const binding = await runHook("bind-host-worktree.py", payload, ctx);
+      if (binding.block) {
+        return {
+          content: [{ type: "text", text: binding.reason }],
+          details: { agentFlowHook: "bind-host-worktree.py" },
+          isError: true,
+        };
+      }
+      const boundary = await runHook("guard-host-worktree.sh", payload, ctx);
+      if (boundary.block) {
+        return {
+          content: [{ type: "text", text: boundary.reason }],
+          details: { agentFlowHook: "guard-host-worktree.sh" },
+          isError: true,
+        };
+      }
+      await runHook("prepare-spec-user-prompt.py", payload, ctx);
       return;
     }
     if (!WRITE_TOOL_RE.test(toolName)) {
       return;
+    }
+    const boundary = await runHook("guard-host-worktree.sh", hookPayload(event, ctx), ctx);
+    if (boundary.block) {
+      return {
+        content: [{ type: "text", text: boundary.reason }],
+        details: { agentFlowHook: "guard-host-worktree.sh" },
+        isError: true,
+      };
     }
     const syncError = syncRootContextFiles(event, ctx);
     if (syncError) {
@@ -3384,6 +3580,7 @@ export default function agentFlowHooks(pi) {
         isError: true,
       };
     }
+    await runHook("prepare-spec-user-prompt.py", hookPayload(event, ctx), ctx);
     const result = await runHook("comment-checker.py", hookPayload(event, ctx), ctx);
     if (result.block) {
       return {
@@ -3408,14 +3605,37 @@ function commandRunPayload(event, ctx) {
   // exit code는 관측 hook이 보는 유일한 결과 신호다. host가 안 실어 보내면
   // 없는 채로 기록된다 — 없는 것과 0을 섞지 않는다.
   const payload = hookPayload(event, ctx);
-  const result = event?.output ?? event?.result ?? null;
+  const result = event?.output ?? event?.result ?? event?.toolResult ?? event ?? null;
   const code = result && typeof result === "object"
     ? result.exit_code ?? result.exitCode ?? null
     : null;
   if (typeof code === "number") {
     payload.exit_code = code;
   }
+  const output = commandOutputText(result);
+  if (output) {
+    payload.output = output.slice(-65_536);
+  }
   return payload;
+}
+
+function commandOutputText(value, depth = 0) {
+  if (depth > 5 || value == null) {
+    return "";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => commandOutputText(item, depth + 1)).filter(Boolean).join("\n");
+  }
+  if (typeof value !== "object") {
+    return "";
+  }
+  return ["stdout", "text", "content", "message", "output"]
+    .map((key) => commandOutputText(value[key], depth + 1))
+    .filter(Boolean)
+    .join("\n");
 }
 
 function hookPayload(event, ctx) {
@@ -3429,8 +3649,38 @@ function hookPayload(event, ctx) {
     input,
     parameters: input,
     cwd: ctx?.cwd || ROOT,
+    session_id: sessionIdentity(event, ctx),
   };
 }
+
+
+function sessionIdentity(event, ctx) {
+  return String(
+    event?.session_id
+      ?? event?.sessionId
+      ?? ctx?.session_id
+      ?? ctx?.sessionId
+      ?? ctx?.session?.id
+      ?? process.env.OMP_SESSION_ID
+      ?? "",
+  ).trim();
+}
+
+function inputPrompt(event) {
+  if (typeof event === "string") {
+    return event;
+  }
+  for (const key of ["prompt", "text", "message"]) {
+    if (typeof event?.[key] === "string") {
+      return event[key];
+    }
+  }
+  if (event?.message && typeof event.message === "object") {
+    return messageText(event.message);
+  }
+  return "";
+}
+
 
 function messageText(message) {
   const content = message?.content;
@@ -3570,13 +3820,10 @@ function samePath(left, right) {
   return path.resolve(left) === path.resolve(right);
 }
 
-function isBashTool(toolName) {
-  return /^(Bash|bash)$/.test(String(toolName || ""));
-}
 
 async function runHook(scriptName, payload, ctx) {
   const scriptPath = path.join(HOOK_DIR, scriptName);
-  const result = await spawnHook(scriptPath, JSON.stringify(payload), ctx?.cwd || ROOT);
+  const result = await spawnHook(scriptName, scriptPath, JSON.stringify(payload), ctx?.cwd || ROOT);
   const reason = (result.stderr || result.stdout || "").trim();
   if (result.status === 0) {
     return { block: false, reason };
@@ -3584,9 +3831,11 @@ async function runHook(scriptName, payload, ctx) {
   return { block: true, reason: reason || "agent-flow hook blocked: " + scriptName };
 }
 
-function spawnHook(scriptPath, input, cwd) {
+function spawnHook(scriptName, scriptPath, input, cwd) {
   return new Promise((resolve) => {
-    const proc = spawn(scriptPath, [], { cwd, stdio: ["pipe", "pipe", "pipe"] });
+    const command = scriptName.endsWith(".py") ? "/usr/bin/python3" : "/bin/bash";
+    const args = scriptName.endsWith(".py") ? ["-I", scriptPath] : [scriptPath];
+    const proc = spawn(command, args, { cwd, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     let settled = false;
@@ -3611,11 +3860,19 @@ function spawnHook(scriptPath, input, cwd) {
     proc.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
     });
-    proc.on("error", () => {
-      finish({ status: 0, stdout: "", stderr: "" });
+    proc.on("error", (error) => {
+      finish({
+        status: 126,
+        stdout,
+        stderr: stderr || String(error?.message || "agent-flow hook failed to start"),
+      });
     });
-    proc.on("close", (status) => {
-      finish({ status: status ?? 0, stdout, stderr });
+    proc.on("close", (status, signal) => {
+      finish({
+        status: status ?? 1,
+        stdout,
+        stderr: stderr || (signal ? "agent-flow hook terminated by " + signal : ""),
+      });
     });
     proc.stdin.end(input);
   });
@@ -3779,6 +4036,24 @@ function pruneRetiredHookScripts(root) {
     }
   }
 }
+
+function pruneRetiredManagedScripts(root) {
+  const scriptsDir = path.join(root, ".agent-flow", "scripts");
+  for (const scriptName of ["check-context-docs.mjs", "check-context-docs.ts"]) {
+    const target = path.join(scriptsDir, scriptName);
+    if (!fs.existsSync(target) || !fs.statSync(target).isFile()) {
+      continue;
+    }
+    const kept = nextFreeBackupPath(`${target}.removed`, fs.readFileSync(target, "utf8"));
+    if (kept !== null) {
+      fs.copyFileSync(target, kept);
+      fs.chmodSync(kept, 0o644);
+    }
+    fs.rmSync(target, { force: true });
+    console.log(`  - removed retired script: ${path.relative(root, target)}`);
+  }
+}
+
 
 function makeHooksExecutable(root) {
   const hooksDir = path.join(root, ".agent-flow", "scripts", "hooks");

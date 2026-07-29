@@ -210,7 +210,8 @@ function assertAbsent(rel, needle, why) {
 }
 
 for (const installer of ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"]) {
-  assertContains(installer, "function installCodexTrustState(root)");
+  assertContains(installer, "function removeCodexBroadTrustState(root)");
+  assertNotContains(installer, "function installCodexTrustState(root)");
   assertContains(installer, "function installOmpHooks(root)");
   assertContains(installer, ".omp\", \"extensions\", \"agent-flow-hooks.ts");
   // 두 installer가 같은 인덱스를 만들어야 한다. 한쪽만 채우면 install 순서에
@@ -379,17 +380,10 @@ assertAllWorkflowContracts();
 assertContains("bin/agent-flow-kit.mjs", "RUNTIME_PYTHON_RELATIVE");
 assertContains("bin/agent-flow-kit.mjs", "src\", \"agent_flow");
 assertContains("src/agent_flow/core/gates.py", "\".agent-flow\" / \"runtime\" / \"python\"");
-assertContains("src/agent_flow/core/gates.py", "_resolve_gate_command");
-assertContains("scripts/check-context-docs.mjs", 'path.basename(SCRIPT_ROOT) === ".agent-flow"');
 // artifact 경로 정규화는 한 벌만 존재해야 한다. artifacts.py가 자기 규칙을 다시
 // 쓰면 command와 gate 출력이 서로 다른 경로를 기록한다.
 assertContains("src/agent_flow/core/gates.py", "def relativize_local_path");
 assertContains("src/agent_flow/core/artifacts.py", "relativize_local_paths");
-// 검사 범위는 두 구현이 같은 문장을 말해야 한다. 한쪽만 좁히면 소스와 설치본이
-// 서로 다른 파일을 red로 만든다.
-for (const rel of ["scripts/check-context-docs.mjs", "scripts/check-context-docs.ts"]) {
-  assertContains(rel, "check-ignore");
-}
 assertPythonContract("profile gate build/typecheck/lint order", `
 from agent_flow.cli import _profile_gate_commands
 
@@ -405,9 +399,6 @@ for profile in ("android", "generic", "ios", "nextjs", "node", "python", "react-
     ids = gate_ids(profile)
     if "architecture-lint" not in ids:
         raise AssertionError(f"{profile} missing architecture-lint gate: {ids}")
-generic_commands = [command.command for command in _profile_gate_commands(["generic"], phase="all")]
-if ("node", "scripts/check-context-docs.mjs") not in generic_commands:
-    raise AssertionError(generic_commands)
 require_before(typescript, "build", "typecheck")
 require_before(typescript, "typecheck", "lint")
 
@@ -708,9 +699,6 @@ for (const entry of fs.readdirSync(path.join(SOURCE_ROOT, "profiles")).sort()) {
   const packagedGates = gateIds(packagedText);
   if (sourceGates.join("|") !== packagedGates.join("|")) {
     failures.push(`${packaged} gates differ from ${source}`);
-  }
-  if (sourceGates.includes("context-lint") !== packagedGates.includes("context-lint")) {
-    failures.push(`${packaged} context-lint presence differs from ${source}`);
   }
 }
 
@@ -1830,53 +1818,16 @@ with tempfile.TemporaryDirectory() as temp_dir:
 }
 
 function nodeBackwardFreshArtifactOutcome(workflow, testCase) {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agent-flow-backward-parity-"));
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-flow-backward-parity-"));
   try {
-    const install = spawnSync(process.execPath, [path.join(SOURCE_ROOT, "bin/agent-flow-kit.mjs"), "install", "--force-managed"], {
-      cwd: tempRoot,
-      encoding: "utf8",
-      env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1" },
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 30_000,
-    });
-    if (install.error || install.status !== 0) {
-      failures.push(`node backward parity install failed: ${install.error?.message || install.stderr.trim() || install.status}`);
-      return null;
-    }
-    const start = spawnSync(process.execPath, [
-      path.join(SOURCE_ROOT, "bin/agent-flow-kit.mjs"),
-      "run",
-      "start",
-      "--workflow",
-      workflow.id,
-      "--task",
-      "backward-parity",
-      "--run-id",
-      "r1",
-    ], {
-      cwd: tempRoot,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 30_000,
-    });
-    if (start.error || start.status !== 0) {
-      failures.push(`node backward parity start failed: ${start.error?.message || start.stderr.trim() || start.status}`);
-      return null;
-    }
     const targetIndex = workflow.phases.findIndex((phase) => phase.id === testCase.target);
     const currentIndex = workflow.phases.findIndex((phase) => phase.id === testCase.source);
-    const runDir = path.join(tempRoot, ".agent-flow", "runs", workflow.id, "r1");
-    const manifestPath = path.join(runDir, "manifest.json");
-    const statePath = path.join(tempRoot, ".agent-flow", "state", "current-run.json");
+    const phase = workflow.phases[currentIndex];
     const state = {
-      ...JSON.parse(fs.readFileSync(manifestPath, "utf8")),
       phase_index: currentIndex,
-      phase: testCase.source,
-      status: "running",
-      phase_entered_at: "2000-01-01T00:00:00.000Z",
+      current_phase: testCase.source,
+      gate_nonce: PARITY_GATE_NONCE,
     };
-    fs.writeFileSync(manifestPath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
-    fs.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
     for (const stalePhase of workflow.phases.slice(targetIndex, currentIndex + 1)) {
       const artifact = path.join(runDir, stalePhase.artifact);
       fs.mkdirSync(path.dirname(artifact), { recursive: true });
@@ -1886,14 +1837,17 @@ function nodeBackwardFreshArtifactOutcome(workflow, testCase) {
         "utf8",
       );
     }
-    const advance = spawnSync(process.execPath, [path.join(SOURCE_ROOT, "bin/agent-flow-kit.mjs"), "run", "advance"], {
-      cwd: tempRoot,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 30_000,
-    });
-    if (advance.error || advance.status !== 0) {
-      return { remaining: [`route-blocked:${advance.stderr.trim() || advance.status}`] };
+    const artifact = path.join(runDir, phase.artifact);
+    const result = getNodeWorkflowEvaluator()(
+      "cleanup",
+      phase,
+      artifact,
+      state,
+      workflow.phases,
+      runDir,
+    );
+    if (result.outcome === "blocked") {
+      return { remaining: [`route-blocked:${result.route_key}`] };
     }
     const remaining = [];
     for (const stalePhase of workflow.phases.slice(targetIndex, currentIndex + 1)) {
@@ -1903,7 +1857,7 @@ function nodeBackwardFreshArtifactOutcome(workflow, testCase) {
     }
     return { remaining };
   } finally {
-    fs.rmSync(tempRoot, { recursive: true, force: true });
+    fs.rmSync(runDir, { recursive: true, force: true });
   }
 }
 
@@ -2018,40 +1972,73 @@ function assertHostSkillParity(root, index, label = "clean install") {
   }
 }
 
-var nodeRouteKeyEvaluator = null;
+var nodeWorkflowEvaluator = null;
 
-function nodeRouteKeyFromKit(phase, content, state = {}) {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agent-flow-route-key-"));
-  try {
-    const artifact = path.join(tempRoot, "artifact.txt");
-    fs.writeFileSync(artifact, content, "utf8");
-    if (!nodeRouteKeyEvaluator) {
-      nodeRouteKeyEvaluator = buildNodeRouteKeyEvaluator();
-    }
-    return nodeRouteKeyEvaluator(phase, artifact, state);
-  } catch (error) {
-    return `blocked:${error.message}`;
-  } finally {
-    fs.rmSync(tempRoot, { recursive: true, force: true });
+function getNodeWorkflowEvaluator() {
+  if (nodeWorkflowEvaluator) {
+    return nodeWorkflowEvaluator;
   }
-}
-
-function buildNodeRouteKeyEvaluator() {
   const source = read("bin/agent-flow-kit.mjs");
   const start = source.indexOf("function assertCompletionMarkers");
   const end = source.indexOf("function upsertBootstrapBlock");
   if (start === -1 || end === -1 || end <= start) {
-    failures.push("node route key evaluator source extraction failed");
-    return () => "blocked:source-extraction";
+    failures.push("node workflow evaluator source extraction failed");
+    return () => ({
+      outcome: "blocked",
+      route_key: "blocked:source-extraction",
+    });
   }
-  const routeKeySource = source.slice(start, end);
-  return new Function(
+  const workflowSource = source.slice(start, end);
+  nodeWorkflowEvaluator = new Function(
     "fs",
+    "path",
+    "action",
     "phase",
     "artifact",
     "state",
-    `${routeKeySource}\nreturn nodeRouteKey(phase, artifact, state);`,
-  ).bind(null, fs);
+    "phases",
+    "runDir",
+    `${workflowSource}
+let routeKey;
+try {
+  routeKey = nodeRouteKey(phase, artifact, state);
+} catch (error) {
+  return {
+    outcome: "blocked",
+    route_key: \`blocked:\${error.message}\`,
+    fix_loop_rounds: state.fix_loop_rounds,
+  };
+}
+try {
+  if (action === "phase") {
+    const content = fs.readFileSync(artifact, "utf8");
+    if (missingMarkers(content, phase.required_markers ?? []).length > 0) {
+      return {
+        outcome: "blocked",
+        route_key: routeKey,
+        fix_loop_rounds: state.fix_loop_rounds,
+      };
+    }
+  }
+  const nextIndex = nextPhaseIndex(state, phases, phase, artifact);
+  const nextPhase = phases[nextIndex];
+  if (action === "cleanup") {
+    syncRouteArtifacts(runDir, phases, state.phase_index, nextIndex);
+  }
+  return {
+    outcome: nextPhase?.id ?? "complete",
+    route_key: routeKey,
+    fix_loop_rounds: nextFixLoopRounds(state, phase, nextPhase),
+  };
+} catch (_error) {
+  return {
+    outcome: "blocked",
+    route_key: routeKey,
+    fix_loop_rounds: state.fix_loop_rounds,
+  };
+}`,
+  ).bind(null, fs, path);
+  return nodeWorkflowEvaluator;
 }
 
 function pythonPhaseOutcome(workflow, phaseId, content, meta = {}) {
@@ -2062,7 +2049,7 @@ import tempfile
 from pathlib import Path
 
 from agent_flow.artifact import read_meta, write_meta
-from agent_flow.core.markers import has_failure_markers
+from agent_flow.core.markers import has_failure_markers, missing_markers
 from agent_flow.runner import (
     Phase,
     Runner,
@@ -2098,6 +2085,7 @@ with tempfile.TemporaryDirectory() as temp_dir:
             multi_review=bool(item.get("multi_review", False)),
             routes=item.get("routes"),
             skills=_phase_skills(item.get("skills")),
+            required_markers=tuple(item.get("required_markers") or ()),
         ))
     index = next(i for i, phase in enumerate(phases) if phase.id == phase_id)
     artifact = run_dir / phases[index].artifact
@@ -2118,8 +2106,9 @@ with tempfile.TemporaryDirectory() as temp_dir:
     if route_key == "approve" and phases[index].routes and phases[index].routes.get("request-changes") and has_failure_markers(content):
         route_key = "request-changes"
     try:
-        # Node의 advance는 completion marker를 먼저 강제한다. 같은 계층을 비교해야 parity가 의미를 갖는다.
-        if runner._missing_required_markers(phases[index]):
+        # Dynamic skill/SPEC checks have separate parity tests. This comparison
+        # isolates the static workflow marker and route contract.
+        if missing_markers(content, phases[index].required_markers):
             outcome = "blocked"
         else:
             next_index, blocked = runner._next_index(index, phases[index])
@@ -2182,68 +2171,25 @@ print(json.dumps(missing_markers(payload["content"], tuple(payload["markers"])))
 function nodePhaseOutcome(workflow, phaseId, content, stateOverrides = {}) {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agent-flow-parity-"));
   try {
-    const install = spawnSync(process.execPath, [path.join(SOURCE_ROOT, "bin/agent-flow-kit.mjs"), "install", "--force-managed"], {
-      cwd: tempRoot,
-      env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1" },
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 30_000,
-    });
-    if (install.error || install.status !== 0) {
-      failures.push(`node route parity install failed: ${install.error?.message || install.stderr.trim() || install.status}`);
-      return null;
-    }
-    const start = spawnSync(process.execPath, [
-      path.join(SOURCE_ROOT, "bin/agent-flow-kit.mjs"),
-      "run",
-      "start",
-      "--workflow",
-      workflow.id,
-      "--task",
-      "parity",
-      "--run-id",
-      "r1",
-    ], {
-      cwd: tempRoot,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 30_000,
-    });
-    if (start.error || start.status !== 0) {
-      failures.push(`node route parity start failed: ${start.error?.message || start.stderr.trim() || start.status}`);
-      return null;
-    }
     const phaseIndex = workflow.phases.findIndex((phase) => phase.id === phaseId);
     const phase = workflow.phases[phaseIndex];
-    const runDir = path.join(tempRoot, ".agent-flow", "runs", workflow.id, "r1");
-    const manifestPath = path.join(runDir, "manifest.json");
-    const statePath = path.join(tempRoot, ".agent-flow", "state", "current-run.json");
+    const artifact = path.join(tempRoot, phase.artifact);
     const state = {
-      ...JSON.parse(fs.readFileSync(manifestPath, "utf8")),
       ...stateOverrides,
       phase_index: phaseIndex,
-      phase: phaseId,
-      status: "running",
-      phase_entered_at: "2000-01-01T00:00:00.000Z",
+      current_phase: phaseId,
+      gate_nonce: stateOverrides.gate_nonce ?? PARITY_GATE_NONCE,
     };
-    fs.writeFileSync(manifestPath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
-    fs.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
-    const artifact = path.join(runDir, phase.artifact);
     fs.mkdirSync(path.dirname(artifact), { recursive: true });
     fs.writeFileSync(artifact, content, "utf8");
-    const routeKey = nodeRouteKeyFromKit(phase, content, state);
-    const advance = spawnSync(process.execPath, [path.join(SOURCE_ROOT, "bin/agent-flow-kit.mjs"), "run", "advance"], {
-      cwd: tempRoot,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 30_000,
-    });
-    const nextState = JSON.parse(fs.readFileSync(statePath, "utf8"));
-    return {
-      outcome: advance.status === 0 ? nextState.phase : "blocked",
-      route_key: routeKey,
-      fix_loop_rounds: nextState.fix_loop_rounds,
-    };
+    return getNodeWorkflowEvaluator()(
+      "phase",
+      phase,
+      artifact,
+      state,
+      workflow.phases,
+      tempRoot,
+    );
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }

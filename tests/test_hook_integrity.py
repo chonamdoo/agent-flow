@@ -6,8 +6,10 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import shlex
 import stat
 import sys
 from pathlib import Path
@@ -35,7 +37,10 @@ HOOK_DIR = Path(".agent-flow") / "scripts" / "hooks"
 
 
 def _hook_command(root: Path, name: str) -> str:
-    return str(root / HOOK_DIR / name)
+    path = shlex.quote(str(root / HOOK_DIR / name))
+    if name.endswith(".py"):
+        return f"/usr/bin/python3 -I {path}"
+    return f"/bin/bash {path}"
 
 
 def _host_settings(root: Path) -> dict:
@@ -60,8 +65,19 @@ def _install(root: Path, *, hooks: bool = True) -> Path:
         script = hook_dir / name
         script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         script.chmod(0o755)
+    digests = {
+        name: hashlib.sha256((hook_dir / name).read_bytes()).hexdigest()
+        for name in MANAGED_HOOK_SCRIPTS
+    }
     (root / ".agent-flow" / "kit.json").write_text(
-        json.dumps({"profile": "generic", "hooks": hooks}), encoding="utf-8"
+        json.dumps(
+            {
+                "profile": "generic",
+                "hooks": hooks,
+                "managed_hook_digests": digests,
+            }
+        ),
+        encoding="utf-8",
     )
     settings = _host_settings(root) if hooks else {"hooks": {}}
     for relative in (CLAUDE_SETTINGS, CODEX_SETTINGS, Path(".codex") / "hooks.json"):
@@ -144,6 +160,18 @@ def test_missing_hook_script_on_disk_is_detected(tmp_path):
     (tmp_path / HOOK_DIR / "record-skill-read.py").unlink()
     assert any(
         "missing from disk" in v and "record-skill-read.py" in v for v in _violations(tmp_path)
+    )
+
+
+def test_modified_managed_hook_content_is_detected(tmp_path):
+    _install(tmp_path)
+    script = tmp_path / HOOK_DIR / "guard-spec-approval.sh"
+    script.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+
+    assert any(
+        "content digest does not match" in violation
+        and "guard-spec-approval.sh" in violation
+        for violation in _violations(tmp_path)
     )
 
 
@@ -318,6 +346,26 @@ def test_trailing_shell_syntax_on_a_managed_command_is_detected(tmp_path):
     assert any("extra shell syntax" in v for v in violations)
     assert any("does not register guard-protected-branch.sh" in v for v in violations)
 
+def test_untrusted_interpreter_on_a_managed_command_is_detected(tmp_path):
+    _install(tmp_path)
+
+    def replace_interpreter(payload):
+        for block in payload["hooks"]["UserPromptSubmit"]:
+            for hook in block["hooks"]:
+                if "confirm-spec-user-prompt.py" in hook["command"]:
+                    hook["command"] = hook["command"].replace(
+                        "/usr/bin/python3 -I",
+                        "python3",
+                    )
+
+    _rewrite_claude(tmp_path, replace_interpreter)
+    violations = _violations(tmp_path)
+    assert any("extra shell syntax" in value for value in violations)
+    assert any(
+        "does not register confirm-spec-user-prompt.py" in value
+        for value in violations
+    )
+
 
 def test_assert_raises_and_changes_nothing(tmp_path):
     _install(tmp_path)
@@ -337,9 +385,17 @@ def test_assert_passes_for_a_clean_install(tmp_path):
     assert [report.ok for report in reports] == [True]
 
 
-def test_project_without_kit_json_is_not_verified(tmp_path):
+def test_run_gate_rejects_project_without_kit_json(tmp_path):
     assert verify_managed_hooks(tmp_path) == ()
-    assert assert_managed_hooks_registered(tmp_path) == ()
+    with pytest.raises(HookIntegrityError, match="installation could not be found"):
+        assert_managed_hooks_registered(tmp_path)
+
+
+def test_run_gate_rejects_hooks_disabled_install(tmp_path):
+    _install(tmp_path, hooks=False)
+    assert verify_managed_hooks(tmp_path)[0].violations == ()
+    with pytest.raises(HookIntegrityError, match="not enabled"):
+        assert_managed_hooks_registered(tmp_path)
 
 
 def test_install_root_resolves_from_a_nested_worktree(tmp_path):

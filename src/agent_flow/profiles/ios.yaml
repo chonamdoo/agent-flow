@@ -10,10 +10,6 @@ branching:
     slug_source: feature title
     max_slug_length: 60
 gates:
-  - id: context-lint
-    command: ["node", "scripts/check-context-docs.mjs"]
-    required: true
-    phase: pre-commit
   - id: architecture-lint
     command: ["agent-flow", "architecture-lint", "--profile", "ios"]
     required: true

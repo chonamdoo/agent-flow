@@ -31,10 +31,10 @@ from agent_flow.core.command_evidence import (
 )
 from agent_flow.core.design_ledger import (
     LEDGER_SOURCE_PHASES,
+    SPEC_SET_USER_REPLY,
     parse_spec_item_section,
     read_manual_spec_approvals,
     read_ledger,
-    spec_set_confirmation_statement,
     spec_set_is_confirmed,
 )
 from agent_flow.core.markers import completion_gate_marker_values
@@ -94,8 +94,9 @@ def missing_spec_item_evidence(
             and not spec_set_is_confirmed(run_dir, parsed.items)
         ):
             missing.append(
-                "spec-confirmation: interactive user confirmation required; "
-                f"type `{spec_set_confirmation_statement(parsed.items)}`"
+                "spec-confirmation: current user confirmation required; "
+                f"reply exactly `{SPEC_SET_USER_REPLY}` in this chat "
+                "(fallback: `agent-flow spec confirm`)"
             )
         missing.extend(
             _agent_recorded_approvals(
@@ -183,8 +184,9 @@ def _agent_recorded_approvals(evidence: CommandRunEvidence) -> list[str]:
     if not agent_run_spec_approvals(evidence):
         return []
     return [
-        "spec-confirmation: `agent-flow spec confirm|approve` ran in the agent's "
-        "shell; only the user may run it in their own terminal"
+        "spec-confirmation: an approval command or managed approval hook ran in "
+        "the agent's shell; only the user may approve through chat or their own "
+        "terminal"
     ]
 
 

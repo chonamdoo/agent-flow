@@ -79,7 +79,7 @@ def test_unknown_phase_is_rejected(phase):
 def test_default_gate_run_excludes_the_pre_push_test_gate():
     commands = _profile_gate_commands(["python"])
 
-    assert [command.gate_id for command in commands] == ["type", "architecture-lint", "context-lint", "lint"]
+    assert [command.gate_id for command in commands] == ["type", "architecture-lint", "lint"]
     assert not any("pytest" in part for command in commands for part in command.command)
 
 
@@ -87,7 +87,7 @@ def test_phase_all_runs_the_pre_push_test_gate():
     by_id = {command.gate_id: command.command for command in _profile_gate_commands(["python"], phase=GATE_PHASE_ALL)}
 
     assert by_id["test"] == (sys.executable, "-m", "pytest", "-q")
-    assert "context-lint" in by_id
+    assert "architecture-lint" in by_id
 
 
 def test_explicit_phase_selects_only_that_phase():

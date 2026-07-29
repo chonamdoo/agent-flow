@@ -7,6 +7,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,13 +31,18 @@ from agent_flow.core.context_contract import (
 )
 from agent_flow.core.commands import run_safe_command
 from agent_flow.core.design_ledger import (
+    LEDGER_SOURCE_PHASES,
+    SPEC_SET_USER_REPLY,
+    prepare_and_attest_user_spec_confirmation,
     capture_design_ledger,
     ledger_prompt_block,
     manual_spec_approval_statement,
     parse_spec_item_section,
     record_manual_spec_approval,
+    prepare_user_spec_confirmation,
     record_spec_set_confirmation,
     spec_set_confirmation_statement,
+    spec_set_is_confirmed,
 )
 from agent_flow.core.design_value_check import missing_spec_item_evidence
 from agent_flow.core.gates import GateCommand, run_gates
@@ -71,7 +77,6 @@ from agent_flow.core.team import (
     add_task,
     add_worker,
     approve_worker_call,
-    approved_worker_scopes,
     approve_task_result,
     archive_team,
     claim_task,
@@ -99,11 +104,14 @@ from agent_flow.core.team import (
 )
 from agent_flow.core.worktrees import (
     WorktreeLockedError,
+    WorktreeAlreadyExistsError,
     WorktreeStatus,
     assert_worktree_unlocked,
     attach_worktree,
     create_worktree,
     get_worktree_status,
+    cleanup_state_root,
+    find_pending_worktree_cleanup,
     known_worktree_names,
     plan_worktree,
     remove_worktree_metadata,
@@ -112,22 +120,20 @@ from agent_flow.core.worktrees import (
     resolve_worktree,
     worktree_branch_exists,
     worktree_runtime_root,
+    worktree_run_activation,
 )
 from agent_flow.core.hook_integrity import (
     HookIntegrityError,
     assert_managed_hooks_registered,
 )
 from agent_flow.core.worktree_isolation import (
-    WorkerScope,
     WorktreeIsolationError,
     assert_cwd_bound,
     assert_leader_unchanged,
-    assert_scopes_isolated,
     capture_leader_snapshot,
     git_repo_state,
-    max_worker_capacity,
+    provider_lease,
     same_worktree_path,
-    sanitized_worker_env,
     verify_linked_worktree,
     worker_claim_lock,
     worktree_path_key,
@@ -136,10 +142,14 @@ from agent_flow.core.state import RunRequest, RunState, start_run, status_summar
 from agent_flow.core.workflow import load_workflow
 from agent_flow.eval import run_eval
 from agent_flow.memory.entities import EntityMemoryIndex
-from agent_flow.artifact import find_active_run, mark_inactive, read_meta
+from agent_flow.artifact import find_active_run, find_active_runs, mark_inactive, read_meta
 from agent_flow.runner import Runner, ResumeMode, _find_kit_root
 from agent_flow.providers.host import list_host_providers
-from agent_flow.providers.subprocess import ProviderCommand, run_provider
+from agent_flow.providers.subprocess import (
+    ProviderCommand,
+    run_provider,
+    verify_provider_sandbox_backend,
+)
 from agent_flow.pr_watch import fetch_pr, watch_pr
 
 
@@ -163,6 +173,11 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--worktree-branch")
     run_parser.add_argument("--allow-dirty", action="store_true")
     run_parser.add_argument(
+        "--reuse-existing-worktree",
+        action="store_true",
+        help="reuse the managed worktree inferred from the current directory",
+    )
+    run_parser.add_argument(
         "--architecture",
         choices=("default", "ddd", "service-layer"),
         default="default",
@@ -171,6 +186,7 @@ def main(argv: list[str] | None = None) -> int:
     continue_parser = subparsers.add_parser("continue")
     continue_parser.add_argument("--root", default=".")
     continue_parser.add_argument("--worktree")
+    continue_parser.add_argument("--checkout-identity", help=argparse.SUPPRESS)
 
     abort_parser = subparsers.add_parser("abort")
     abort_parser.add_argument("--root", default=".")
@@ -192,10 +208,18 @@ def main(argv: list[str] | None = None) -> int:
     start_parser.add_argument("--worktree")
     start_parser.add_argument("--worktree-branch")
     start_parser.add_argument("--allow-dirty", action="store_true")
+    start_parser.add_argument(
+        "--reuse-existing-worktree",
+        action="store_true",
+        help="reuse the managed worktree inferred from the current directory",
+    )
+    start_parser.add_argument("--phase-runner", action="store_true", help=argparse.SUPPRESS)
+    start_parser.add_argument("--checkout-identity", help=argparse.SUPPRESS)
 
     status_parser = subparsers.add_parser("status")
     status_parser.add_argument("--root", default=".")
     status_parser.add_argument("--worktree")
+    status_parser.add_argument("--checkout-identity", help=argparse.SUPPRESS)
 
     report_parser = subparsers.add_parser("report")
     report_parser.add_argument("--root", default=".")
@@ -290,9 +314,27 @@ def main(argv: list[str] | None = None) -> int:
     spec_approve.add_argument("--run-dir", required=True)
     spec_approve.add_argument("--root", default=".")
     spec_confirm = spec_subparsers.add_parser("confirm")
-    spec_confirm.add_argument("--run-dir", required=True)
+    spec_confirm.add_argument("--run-dir")
     spec_confirm.add_argument("--root", default=".")
-    spec_confirm.add_argument("--artifact", required=True)
+    spec_confirm.add_argument("--artifact")
+    spec_confirm.add_argument(
+        "--from-user-prompt",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    spec_confirm.add_argument("--session-id", help=argparse.SUPPRESS)
+    spec_confirm.add_argument("--hook-capability", help=argparse.SUPPRESS)
+    spec_prepare_confirmation = spec_subparsers.add_parser(
+        "prepare-confirmation",
+        help=argparse.SUPPRESS,
+    )
+    spec_prepare_confirmation.add_argument("--root", default=".")
+    spec_prepare_confirmation.add_argument("--session-id", required=True)
+    spec_prepare_confirmation.add_argument(
+        "--hook-capability-hash",
+        required=True,
+        help=argparse.SUPPRESS,
+    )
     spec_capture = spec_subparsers.add_parser("capture")
     spec_capture.add_argument("--root", default=".")
     spec_capture.add_argument("--run-dir", required=True)
@@ -516,11 +558,67 @@ def main(argv: list[str] | None = None) -> int:
     team_import_apply.add_argument("--report")
 
     args = parser.parse_args(argv)
+    args._worktree_explicit = bool(getattr(args, "worktree", None))
     requested_root = Path(getattr(args, "root", ".")).resolve()
     root = requested_root
-    root, inferred_worktree = _resolve_cli_root_context(root, getattr(args, "worktree", None))
+    root, inferred_worktree = _resolve_cli_root_context(
+        root,
+        getattr(args, "worktree", None),
+    )
+    inferred_registration_identity: str | None = None
+    if (
+        args.command in {"run", "start"}
+        and inferred_worktree is not None
+        and not args._worktree_explicit
+    ):
+        try:
+            inferred_status = get_worktree_status(
+                root=root,
+                name=inferred_worktree,
+            )
+            if (
+                not inferred_status.exists
+                or inferred_status.registration_identity is None
+            ):
+                raise WorktreeIsolationError(
+                    "cannot prove the inferred worktree registration before "
+                    "requesting reuse consent"
+                )
+            inferred_registration_identity = (
+                inferred_status.registration_identity
+            )
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(_format_cli_error(exc), file=sys.stderr)
+            return 2
     if inferred_worktree is not None and hasattr(args, "worktree") and args.worktree is None:
         args.worktree = inferred_worktree
+    reuse_entry_commands = {"run", "start"}
+    reuse_preapproved = bool(
+        getattr(args, "reuse_existing_worktree", False)
+    )
+    if (
+        args.command in reuse_entry_commands
+        and reuse_preapproved
+        and inferred_worktree is None
+        and not args._worktree_explicit
+    ):
+        print(
+            "--reuse-existing-worktree requires a managed worktree cwd or "
+            "an explicit --worktree selector",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        args.command in reuse_entry_commands
+        and inferred_worktree is not None
+        and not args._worktree_explicit
+        and not _confirm_inferred_worktree_reuse(
+            name=inferred_worktree,
+            path=requested_root,
+            preapproved=reuse_preapproved,
+        )
+    ):
+        return 2
     # 문서가 안내하는 진입점은 이쪽이다. JS 래퍼에만 검사가 있으면 일반적인
     # 사용자는 kit을 올린 뒤에도 낡은 설치본을 끝까지 못 본다.
     if args.command in _KIT_FRESHNESS_COMMANDS:
@@ -547,11 +645,20 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
-        worktree_name = args.worktree if args.worktree is not None else (args.task if repo_state == "repo" else None)
+        if repo_state != "repo":
+            print(
+                "worktree runs require a git repository; refusing to start "
+                "without isolation",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            assert_managed_hooks_registered(root)
+        except HookIntegrityError as exc:
+            print(_format_cli_error(exc), file=sys.stderr)
+            return 2
+        worktree_name = args.worktree if args.worktree is not None else args.task
         if worktree_name is not None:
-            if repo_state != "repo":
-                print("worktree runs require a git repository", file=sys.stderr)
-                return 2
             try:
                 worktree_status, worktree_preexisting = _resolve_entry_worktree(
                     root=root,
@@ -559,6 +666,7 @@ def main(argv: list[str] | None = None) -> int:
                     explicit=args.worktree is not None,
                     branch=args.worktree_branch,
                     allow_dirty=args.allow_dirty,
+                    expected_registration_identity=inferred_registration_identity,
                 )
             except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
                 print(_format_cli_error(exc), file=sys.stderr)
@@ -585,6 +693,14 @@ def main(argv: list[str] | None = None) -> int:
                 next_command=_continue_command(
                     root, worktree_status.name if worktree_status is not None else worktree_name
                 ),
+                checkout_identity=_checkout_identity(
+                    worktree_status.name if worktree_status is not None else None
+                ),
+                checkout_registration_identity=(
+                    worktree_status.registration_identity
+                    if worktree_status is not None
+                    else None
+                ),
             ).run(
                 mode=ResumeMode.START,
                 task=args.task,
@@ -599,14 +715,30 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "continue":
         try:
-            run_root, state_root = _worktree_context(root, args.worktree) if args.worktree else (root, root)
-        except ValueError as exc:
+            _assert_relay_checkout_identity(root, args.worktree, args.checkout_identity)
+            run_root, state_root = (
+                _worktree_context(root, args.worktree)
+                if args.worktree
+                else (root, root)
+            )
+        except (ValueError, RuntimeError) as exc:
             print(_format_cli_error(exc), file=sys.stderr)
             return 2
         if run_root is None:
             return 1
+        pending_cleanup = (
+            find_pending_worktree_cleanup(root=root, selector=args.worktree)
+            if args.worktree
+            else None
+        )
         active = find_active_run(state_root)
-        if active is None:
+        resume_run_dir = active.path if active is not None else (
+            pending_cleanup.run_dir if pending_cleanup is not None else None
+        )
+        if resume_run_dir is None:
+            if _legacy_js_state_exists(root):
+                _print_legacy_js_state_migration(root)
+                return 2
             if args.worktree:
                 print(
                     f'진행 중인 run 없음. `agent-flow run "<task>" '
@@ -618,7 +750,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             Runner(
                 run_root,
-                run_dir=active.path,
+                run_dir=resume_run_dir,
                 state_root=state_root,
                 config_root=root,
                 next_command=_continue_command(root, args.worktree),
@@ -659,7 +791,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "status":
         try:
-            run_root, state_root = _worktree_context(root, args.worktree) if args.worktree else (root, root)
+            _assert_relay_checkout_identity(root, args.worktree, args.checkout_identity)
+            run_root, state_root = (
+                _worktree_context(root, args.worktree)
+                if args.worktree
+                else (root, root)
+            )
         except ValueError as exc:
             print(_format_cli_error(exc), file=sys.stderr)
             return 2
@@ -673,6 +810,9 @@ def main(argv: list[str] | None = None) -> int:
                 project_root=run_root,
             )
             return 0
+        if _legacy_js_state_exists(root):
+            _print_legacy_js_state_migration(root)
+            return 2
         if not (state_root / ".agent-flow" / "runs").exists():
             print("진행 중인 run 없음.")
             return 0
@@ -852,6 +992,85 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "spec":
         try:
+            if args.spec_command == "confirm":
+                if args.from_user_prompt and (
+                    args.run_dir is not None or args.artifact is not None
+                ):
+                    raise ValueError(
+                        "--from-user-prompt does not accept run or artifact paths"
+                    )
+                if args.from_user_prompt and not args.hook_capability:
+                    raise ValueError(
+                        "host user-prompt confirmation requires a hook capability"
+                    )
+                if not args.from_user_prompt and args.hook_capability is not None:
+                    raise ValueError(
+                        "--hook-capability is reserved for host user-prompt confirmation"
+                    )
+                target = _resolve_spec_confirmation_target(
+                    root,
+                    run_dir_value=args.run_dir,
+                    artifact_value=args.artifact,
+                    inferred_worktree=inferred_worktree,
+                    interactive=not args.from_user_prompt,
+                )
+                if target is None:
+                    if args.from_user_prompt:
+                        return 0
+                    raise ValueError("no active run is waiting for SPEC confirmation")
+                parsed = parse_spec_item_section(
+                    target.artifact.read_text(encoding="utf-8")
+                )
+                if parsed.errors or not parsed.items:
+                    raise ValueError(
+                        "invalid SPEC set: "
+                        + "; ".join(parsed.errors or ("no SPEC items",))
+                    )
+                if args.from_user_prompt:
+                    if not args.session_id:
+                        return 0
+                    confirmation_path = prepare_and_attest_user_spec_confirmation(
+                        target.run_dir,
+                        parsed.items,
+                        prompt=sys.stdin.read(),
+                        session_id=args.session_id,
+                        checkout_identity=target.checkout_identity,
+                        hook_capability=args.hook_capability,
+                    )
+                    if confirmation_path is None:
+                        return 0
+                else:
+                    _read_interactive_approval(SPEC_SET_USER_REPLY)
+                    confirmation_path = record_spec_set_confirmation(
+                        target.run_dir,
+                        parsed.items,
+                        spec_set_confirmation_statement(parsed.items),
+                    )
+                print(f"SPEC set confirmed: {confirmation_path}")
+                return 0
+            if args.spec_command == "prepare-confirmation":
+                target = _resolve_spec_confirmation_target(
+                    root,
+                    run_dir_value=None,
+                    artifact_value=None,
+                    inferred_worktree=inferred_worktree,
+                    interactive=False,
+                )
+                if target is None:
+                    return 0
+                parsed = parse_spec_item_section(
+                    target.artifact.read_text(encoding="utf-8")
+                )
+                if parsed.errors or not parsed.items:
+                    return 0
+                prepare_user_spec_confirmation(
+                    target.run_dir,
+                    parsed.items,
+                    session_id=args.session_id,
+                    checkout_identity=target.checkout_identity,
+                    hook_capability_hash=args.hook_capability_hash,
+                )
+                return 0
             run_dir = _resolve_project_path(root, args.run_dir)
             if args.spec_command == "approve":
                 expected = manual_spec_approval_statement(run_dir, args.spec_id)
@@ -861,25 +1080,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.spec_id,
                     statement,
                 )
-                print(f"{args.spec_id.upper()} approved: {approval_path}")
-                return 0
-            if args.spec_command == "confirm":
-                artifact = _resolve_project_path(root, args.artifact)
-                parsed = parse_spec_item_section(
-                    artifact.read_text(encoding="utf-8")
-                )
-                if parsed.errors:
-                    raise ValueError("; ".join(parsed.errors))
-                if not parsed.items:
-                    raise ValueError("no SPEC items to confirm")
-                expected = spec_set_confirmation_statement(parsed.items)
-                statement = _read_interactive_approval(expected)
-                confirmation_path = record_spec_set_confirmation(
-                    run_dir,
-                    parsed.items,
-                    statement,
-                )
-                print(f"SPEC set confirmed: {confirmation_path}")
+                print(f"SPEC approved: {approval_path}")
                 return 0
             if args.spec_command == "capture":
                 artifact = _resolve_project_path(root, args.artifact)
@@ -1093,41 +1294,18 @@ def main(argv: list[str] | None = None) -> int:
                 print(_format_cli_error(exc), file=sys.stderr)
                 return 2
             if not _worktree_checkout_exists(status):
-                stale_path = status.path
                 try:
                     known = _known_worktree_names(root)
-                except (OSError, RuntimeError, ValueError):
-                    known = []
-                if stale_path.exists() or status.name in known:
-                    try:
-                        assert_worktree_unlocked(root=root, path=stale_path)
-                    except (WorktreeIsolationError, WorktreeLockedError) as exc:
-                        print(_format_cli_error(exc), file=sys.stderr)
-                        return 2
-                    # 등록만 남고 체크아웃이 죽은 항목은 prune으로 걷어내야 목록에서
-                    # 사라진다. 브랜치 삭제도 등록이 남아 있으면 git이 거부한다.
-                    prune = run_safe_command(("git", "worktree", "prune"), cwd=root)
-                    if not prune.ok:
-                        print(_format_safe_command_error(prune), file=sys.stderr)
-                        return 2
-                    if not args.keep_branch and status.branch_created_by_agent_flow:
-                        if worktree_branch_exists(root=root, branch=status.branch):
-                            delete = run_safe_command(("git", "branch", "-D", status.branch), cwd=root)
-                            if not delete.ok:
-                                print(_format_safe_command_error(delete), file=sys.stderr)
-                                return 2
-                    # 잔재 삭제는 agent-flow가 관리하는 자리 안에서만 한다. 사용자가
-                    # 직접 만든 체크아웃 디렉터리는 등록만 걷어내고 그대로 둔다.
-                    if _is_managed_worktree_path(root, stale_path):
-                        if stale_path.is_dir():
-                            shutil.rmtree(stale_path)
-                        elif stale_path.exists():
-                            stale_path.unlink()
-                    remove_worktree_metadata(root=root, name=status.name)
-                    print(f"removed stale worktree manifest {status.name}")
-                    return 0
-                print(f"worktree not found or missing path: {status.name}", file=sys.stderr)
-                return 1
+                except (OSError, RuntimeError, ValueError) as exc:
+                    print(_format_cli_error(exc), file=sys.stderr)
+                    return 2
+                if not status.path.exists() and status.name not in known:
+                    print(
+                        f"worktree not found or missing path: {status.name}",
+                        file=sys.stderr,
+                    )
+                    return 1
+            checkout_was_live = _worktree_checkout_exists(status)
             try:
                 remove_worktree(
                     root=root,
@@ -1142,7 +1320,12 @@ def main(argv: list[str] | None = None) -> int:
             ) as exc:
                 print(_format_cli_error(exc), file=sys.stderr)
                 return 2
-            print(f"removed {status.name} {status.path}")
+            if checkout_was_live:
+                print(f"removed {status.name} {status.path}")
+            elif status.path.exists():
+                print(f"removed stale metadata {status.name}; kept path {status.path}")
+            else:
+                print(f"removed stale metadata {status.name} {status.path}")
             if not args.keep_branch and worktree_branch_exists(root=root, branch=status.branch):
                 # agent-flow가 만든 브랜치라는 증거가 없어 남긴 경우다. 조용히 두면
                 # 사용자는 정리가 끝난 줄 안다.
@@ -1270,129 +1453,165 @@ def main(argv: list[str] | None = None) -> int:
             if prompt is None:
                 print(f"worker not approved for task: {pending.task_id}")
                 return 1
-            # Worker isolation decision. A git repo runs every worker in its own
-            # verified worktree; a git call that cannot answer is fail-closed
-            # (return 2), never a silent fallback to the leader checkout.
             repo_state = git_repo_state(root)
             if repo_state == "unknown":
-                print("cannot determine git repo state; refusing to run unisolated", file=sys.stderr)
+                print(
+                    "cannot determine git repo state; refusing external provider launch",
+                    file=sys.stderr,
+                )
                 return 2
-            isolate = repo_state == "repo"
-            worker_cwd = root
-            worker_env = None
-            worktree_status = None
-            claimed = None
-            leader_before = None
-            if isolate:
-                # 스냅샷보다 먼저다. 오염된 등록 상태를 기준선으로 굳히면
-                # tripwire가 그 오염을 정상으로 승인한다.
-                try:
-                    assert_managed_hooks_registered(root)
-                except HookIntegrityError as exc:
-                    print(_format_cli_error(exc), file=sys.stderr)
-                    return 2
-                try:
+            if repo_state != "repo":
+                print(
+                    "external providers require a verified linked git worktree",
+                    file=sys.stderr,
+                )
+                return 2
+            try:
+                verify_provider_sandbox_backend()
+                assert_managed_hooks_registered(root)
+                with provider_lease(root) as lease:
                     with worker_claim_lock(root):
-                        # capacity를 세는 시점과 task를 잡는 시점이 갈라져 있으면
-                        # 두 워커가 같은 마지막 슬롯을 함께 통과한다. 세기와 잡기를
-                        # 한 락 안에 묶고, 카운트도 락 안에서 다시 읽는다.
-                        capacity = max_worker_capacity()
-                        live = team_status(root=root, team_name=args.team, detail=True)
-                        in_progress = sum(1 for task in live["tasks"] if task.status == "in_progress")
-                        if in_progress >= capacity:
-                            print(f"worker capacity reached ({in_progress}/{capacity})", file=sys.stderr)
-                            return 2
-                        # Per-worker worktrees isolate every write, so overlapping
-                        # scopes are safe here; the scope gate only bites when there
-                        # is no worktree isolation (the else branch).
-                        plan = plan_worktree(root=root, name=pending.task_id, unique=args.worker)
-                        worktree_status = create_worktree(root=root, plan=plan, allow_dirty=True)
-                        worker_cwd = verify_linked_worktree(
-                            root=root, path=worktree_status.path, expected_branch=plan.branch
+                        current_status = team_status(
+                            root=root,
+                            team_name=args.team,
+                            detail=True,
                         )
-                        assert_cwd_bound(worktree_path=worktree_status.path, cwd=worker_cwd)
-                        # 격리된 워커가 자기 worktree 밖으로 새어 나갔는지는
-                        # 명령이 아니라 leader의 파일시스템 상태 변화로만
-                        # 판정한다. 스냅샷을 claim **앞**에서 찍는다 — 뒤에서
-                        # 찍다 raise하면 claim된 task가 영구 in_progress로
-                        # 고착되고 claim token이 없어 복구도 못 한다.
+                        current_task = next(
+                            (
+                                task
+                                for task in current_status["tasks"]
+                                if task.task_id == pending.task_id
+                            ),
+                            None,
+                        )
+                        if current_task is None or current_task.status != "pending":
+                            raise ValueError(
+                                f"task is no longer pending: {pending.task_id}"
+                            )
+                        prompt = _team_run_next_prompt(
+                            root=root,
+                            team_name=args.team,
+                            task_id=pending.task_id,
+                            worker_name=args.worker,
+                            fallback_subject=current_task.subject,
+                            fallback_description=current_task.description,
+                        )
+                        if prompt is None:
+                            raise ValueError(
+                                f"worker is no longer approved for task: "
+                                f"{pending.task_id}"
+                            )
+                        plan = plan_worktree(
+                            root=root,
+                            name=pending.task_id,
+                            unique=args.worker,
+                        )
+                        worktree_status = create_worktree(
+                            root=root,
+                            plan=plan,
+                            allow_dirty=True,
+                            reuse_existing=False,
+                        )
+                        worker_cwd = verify_linked_worktree(
+                            root=root,
+                            path=worktree_status.path,
+                            expected_branch=plan.branch,
+                        )
+                        assert_cwd_bound(
+                            worktree_path=worktree_status.path,
+                            cwd=worker_cwd,
+                        )
                         leader_before = capture_leader_snapshot(root)
                         claimed = claim_task(
                             root=root,
                             team_name=args.team,
                             task_id=pending.task_id,
                             worker_name=args.worker,
+                            lease=lease,
                         )
-                except (OSError, ValueError, RuntimeError, WorktreeIsolationError, subprocess.CalledProcessError) as exc:
-                    print(_format_cli_error(exc), file=sys.stderr)
-                    return 2
-                worker_env = sanitized_worker_env()
-            else:
-                # No worktree isolation available: concurrent workers share the
-                # leader checkout, so overlapping write scopes would collide.
-                active = {safe_worker_name(task.owner) for task in status["tasks"]
-                          if task.status == "in_progress" and task.owner}
-                active.add(safe_worker_name(args.worker))
-                scopes = [
-                    WorkerScope(worker=worker_name, paths=paths, worktree_isolated=False)
-                    for worker_name, paths in approved_worker_scopes(root=root, team_name=args.team)
-                    if worker_name in active
-                ]
-                try:
-                    assert_scopes_isolated(scopes)
-                except WorktreeIsolationError as exc:
-                    print(_format_cli_error(exc), file=sys.stderr)
-                    return 2
-                claimed = claim_task(
-                    root=root,
-                    team_name=args.team,
-                    task_id=pending.task_id,
-                    worker_name=args.worker,
-                )
-            result = run_provider(
-                ProviderCommand(name="host-command", argv=tuple(args.command_argv)),
-                prompt=prompt,
-                cwd=worker_cwd,
-                env=worker_env,
-            )
-            if leader_before is not None:
-                try:
-                    assert_leader_unchanged(root, leader_before, run_id=claimed.task_id)
-                except WorktreeIsolationError as exc:
-                    message = _format_cli_error(exc)
-                    print(message, file=sys.stderr)
-                    fail_task(
-                        root=root,
-                        team_name=args.team,
-                        task_id=claimed.task_id,
-                        claim_token=claimed.claim_token or "",
-                        result=message,
+
+                    result = run_provider(
+                        ProviderCommand(
+                            name="host-command",
+                            argv=tuple(args.command_argv),
+                        ),
+                        prompt=prompt,
+                        cwd=worker_cwd,
+                        lease=lease,
                     )
-                    return 2
-            output = result.stdout.strip() or result.stderr.strip()
-            if result.failed:
-                task = fail_task(
-                    root=root,
-                    team_name=args.team,
-                    task_id=claimed.task_id,
-                    claim_token=claimed.claim_token or "",
-                    result=output,
-                )
-            else:
-                task = complete_task(
-                    root=root,
-                    team_name=args.team,
-                    task_id=claimed.task_id,
-                    claim_token=claimed.claim_token or "",
-                    result=output,
-                )
-            suffix = f" worktree={worktree_status.path}" if worktree_status is not None else ""
-            print(f"{task.task_id} {task.status}{suffix}")
-            return 1 if result.failed else 0
+                    try:
+                        assert_leader_unchanged(
+                            root,
+                            leader_before,
+                            run_id=claimed.task_id,
+                            worker_root=worker_cwd,
+                        )
+                    except WorktreeIsolationError as exc:
+                        message = _format_cli_error(exc)
+                        print(message, file=sys.stderr)
+                        fail_task(
+                            root=root,
+                            team_name=args.team,
+                            task_id=claimed.task_id,
+                            claim_token=claimed.claim_token or "",
+                            result=message,
+                        )
+                        return 2
+
+                    output = result.stdout.strip() or result.stderr.strip()
+                    if result.failed:
+                        task = fail_task(
+                            root=root,
+                            team_name=args.team,
+                            task_id=claimed.task_id,
+                            claim_token=claimed.claim_token or "",
+                            result=output,
+                        )
+                    else:
+                        task = complete_task(
+                            root=root,
+                            team_name=args.team,
+                            task_id=claimed.task_id,
+                            claim_token=claimed.claim_token or "",
+                            result=output,
+                        )
+                    print(
+                        f"{task.task_id} {task.status} "
+                        f"worktree={worktree_status.path}"
+                    )
+                    return 1 if result.failed else 0
+            except (
+                HookIntegrityError,
+                OSError,
+                ValueError,
+                RuntimeError,
+                WorktreeIsolationError,
+                subprocess.CalledProcessError,
+            ) as exc:
+                print(_format_cli_error(exc), file=sys.stderr)
+                return 2
         if args.team_command == "claim":
-            task = claim_task(root=root, team_name=args.team, task_id=args.task, worker_name=args.worker)
-            print(f"{task.task_id} {task.status} {task.owner} {task.claim_token}")
-            return 0
+            recovery = shlex.join(
+                (
+                    "agent-flow",
+                    "team",
+                    "run-next",
+                    "--root",
+                    str(root),
+                    "--team",
+                    args.team,
+                    "--worker",
+                    args.worker,
+                    "--command",
+                    "<provider-command>",
+                )
+            )
+            print(
+                "direct team claim is disabled because it has no live provider "
+                f"lease; use `{recovery}`",
+                file=sys.stderr,
+            )
+            return 2
         if args.team_command == "complete":
             task = complete_task(
                 root=root,
@@ -1569,8 +1788,6 @@ def main(argv: list[str] | None = None) -> int:
         worktree_status = None
         worktree_preexisting = False
         state = None
-        # start 명령도 run과 동일하게 git repo에서는 worktree를 기본 시작점으로 삼는다.
-        # git 상태가 unknown이면 격리 여부를 증명할 수 없으므로 진행하지 않는다.
         repo_state = git_repo_state(root)
         if repo_state == "unknown":
             print(
@@ -1578,14 +1795,39 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
-        worktree_name = args.worktree if args.worktree is not None else (args.task if repo_state == "repo" else None)
-        if worktree_name is not None and repo_state != "repo":
-            print("worktree runs require a git repository", file=sys.stderr)
+        if repo_state != "repo":
+            print(
+                "worktree runs require a git repository; refusing to start "
+                "without isolation",
+                file=sys.stderr,
+            )
             return 2
         try:
-            workflow = load_workflow(args.workflow)
-            profile = detect_profile(root) if args.profile == "auto" else args.profile
-            adapter = detect_adapter() if args.adapter == "auto" else args.adapter
+            assert_managed_hooks_registered(root)
+        except HookIntegrityError as exc:
+            print(_format_cli_error(exc), file=sys.stderr)
+            return 2
+        worktree_name = args.worktree
+        implicit_phase_worktree = args.phase_runner and worktree_name is None
+        if worktree_name is None:
+            worktree_name = args.task
+        if args.phase_runner:
+            if _legacy_js_state_exists(root):
+                _print_legacy_js_state_migration(root)
+                return 2
+            try:
+                _assert_entry_checkout_identity(
+                    root=root,
+                    worktree=None if implicit_phase_worktree else worktree_name,
+                    branch=(
+                        None if implicit_phase_worktree else args.worktree_branch
+                    ),
+                    claimed=args.checkout_identity,
+                )
+            except (OSError, ValueError, RuntimeError) as exc:
+                print(_format_cli_error(exc), file=sys.stderr)
+                return 2
+        try:
             if worktree_name is not None:
                 status, worktree_preexisting = _resolve_entry_worktree(
                     root=root,
@@ -1593,6 +1835,7 @@ def main(argv: list[str] | None = None) -> int:
                     explicit=args.worktree is not None,
                     branch=args.worktree_branch,
                     allow_dirty=args.allow_dirty,
+                    expected_registration_identity=inferred_registration_identity,
                 )
                 worktree_status = status
                 worktree = {
@@ -1600,21 +1843,79 @@ def main(argv: list[str] | None = None) -> int:
                     "branch": status.branch,
                     "path": str(status.path),
                 }
-            state_root = worktree_runtime_root(root=root, name=worktree["name"]) if worktree is not None else root
-            state = start_run(
-                root=state_root,
-                request=RunRequest(
-                    workflow_id=workflow.workflow_id,
-                    task=args.task,
-                    adapter=adapter,
-                    profile=profile,
-                    architecture=args.architecture,
-                    run_id=args.run_id,
-                    worktree=worktree,
-                ),
+            state_root = (
+                worktree_runtime_root(root=root, name=worktree["name"])
+                if worktree is not None
+                else root
             )
+            if args.phase_runner:
+                actual_identity = _checkout_identity(
+                    worktree_status.name if worktree_status is not None else None
+                )
+                if (
+                    not implicit_phase_worktree
+                    and args.checkout_identity != actual_identity
+                ):
+                    raise ValueError(
+                        "checkout identity changed during worktree resolution; refusing to start"
+                    )
+                run_root = (
+                    worktree_status.path if worktree_status is not None else root
+                )
+                Runner(
+                    run_root,
+                    state_root=state_root,
+                    config_root=root,
+                    workflow=args.workflow,
+                    architecture=args.architecture,
+                    next_command=_continue_command(
+                        root,
+                        worktree_status.name
+                        if worktree_status is not None
+                        else None,
+                    ),
+                    requested_run_id=args.run_id,
+                    checkout_identity=actual_identity,
+                    checkout_registration_identity=(
+                        worktree_status.registration_identity
+                        if worktree_status is not None
+                        else None
+                    ),
+                ).run(mode=ResumeMode.START, task=args.task)
+                return 0
+
+            workflow = load_workflow(args.workflow)
+            profile = detect_profile(root) if args.profile == "auto" else args.profile
+            adapter = detect_adapter() if args.adapter == "auto" else args.adapter
+            if worktree_status is None:
+                raise WorktreeIsolationError(
+                    "worktree registration is unavailable before run activation"
+                )
+            with worktree_run_activation(
+                root=root,
+                path=worktree_status.path,
+                registration_identity=worktree_status.registration_identity,
+            ):
+                state = start_run(
+                    root=state_root,
+                    request=RunRequest(
+                        workflow_id=workflow.workflow_id,
+                        task=args.task,
+                        adapter=adapter,
+                        profile=profile,
+                        architecture=args.architecture,
+                        run_id=args.run_id,
+                        worktree=worktree,
+                    ),
+                )
             _write_stage_prompts(root=state_root, state=state, workflow=workflow)
-        except (OSError, ValueError, RuntimeError, KeyError, subprocess.CalledProcessError) as exc:
+        except (
+            OSError,
+            ValueError,
+            RuntimeError,
+            KeyError,
+            subprocess.CalledProcessError,
+        ) as exc:
             if state is not None and state.run_dir.exists():
                 shutil.rmtree(state.run_dir)
             if worktree_status is not None and not worktree_preexisting:
@@ -1792,7 +2093,7 @@ def _gate_order_key(gate: GateCommand) -> tuple[int, int, str]:
         return (0, _profile_gate_kind_tiebreaker(lowered), gate_id)
     if any(token in lowered for token in ("typecheck", "tsc", "mypy", "pyright", "type ")):
         return (1, _profile_gate_kind_tiebreaker(lowered), gate_id)
-    if any(token in lowered for token in ("lint", "ruff", "detekt", "ktlint", "check-context-docs", "architecture-lint")):
+    if any(token in lowered for token in ("lint", "ruff", "detekt", "ktlint", "architecture-lint")):
         return (2, _profile_gate_kind_tiebreaker(lowered), gate_id)
     if "test" in lowered or "pytest" in lowered:
         return (3, _profile_gate_kind_tiebreaker(lowered), gate_id)
@@ -1830,6 +2131,10 @@ def _worktree_root(root: Path, name: str) -> Path | None:
 
 def _worktree_context(root: Path, name: str) -> tuple[Path | None, Path]:
     status = get_worktree_status(root=root, name=name)
+    pending = find_pending_worktree_cleanup(root=root, selector=name)
+    if pending is not None:
+        checkout_root = status.path if _worktree_checkout_exists(status) else root
+        return checkout_root, cleanup_state_root(pending)
     if _worktree_checkout_exists(status):
         return status.path, worktree_runtime_root(root=root, name=status.name)
     known = _known_worktree_names(root)
@@ -1838,8 +2143,46 @@ def _worktree_context(root: Path, name: str) -> tuple[Path | None, Path]:
     return None, worktree_runtime_root(root=root, name=status.name)
 
 
+def _confirm_inferred_worktree_reuse(
+    *,
+    name: str,
+    path: Path,
+    preapproved: bool,
+) -> bool:
+    if preapproved:
+        return True
+    if not sys.stdin.isatty():
+        print(
+            f"existing worktree inferred from cwd: {name} ({path}). "
+            "Refusing implicit reuse in a non-interactive session; pass "
+            "--reuse-existing-worktree or an explicit --worktree selector.",
+            file=sys.stderr,
+        )
+        return False
+    try:
+        answer = input(
+            f"Existing worktree detected: {name} ({path}). Reuse it? [y/N] "
+        )
+    except EOFError:
+        answer = ""
+    if answer.strip().lower() in {"y", "yes"}:
+        return True
+    print(
+        "run cancelled; start from the leader checkout or pass a different "
+        "--worktree selector to create another worktree.",
+        file=sys.stderr,
+    )
+    return False
+
+
 def _resolve_entry_worktree(
-    *, root: Path, selector: str, explicit: bool, branch: str | None, allow_dirty: bool
+    *,
+    root: Path,
+    selector: str,
+    explicit: bool,
+    branch: str | None,
+    allow_dirty: bool,
+    expected_registration_identity: str | None = None,
 ) -> tuple[WorktreeStatus, bool]:
     """run/start이 쓸 worktree 하나를 확정한다. 반환: (status, 이미 있던 것인가).
 
@@ -1853,16 +2196,32 @@ def _resolve_entry_worktree(
     """
     if explicit:
         attached = attach_worktree(
-            root=root, selector=selector, branch=branch, allow_dirty=allow_dirty
+            root=root,
+            selector=selector,
+            branch=branch,
+            allow_dirty=allow_dirty,
+            expected_registration_identity=expected_registration_identity,
         )
         if attached is not None:
             _warn_if_cwd_is_other_checkout(root=root, target=attached.path)
             return attached, True
     plan = plan_worktree(root=root, name=selector, branch=branch)
-    preexisting = plan.path.exists()
-    status = create_worktree(root=root, plan=plan, allow_dirty=allow_dirty)
+    try:
+        status = create_worktree(
+            root=root,
+            plan=plan,
+            allow_dirty=allow_dirty,
+            reuse_existing=False,
+        )
+    except WorktreeAlreadyExistsError as exc:
+        if not explicit:
+            raise WorktreeAlreadyExistsError(
+                f"task-derived worktree already exists: {plan.path}. "
+                f"Pass --worktree {plan.name} to reuse it explicitly."
+            ) from exc
+        raise
     _warn_if_cwd_is_other_checkout(root=root, target=status.path)
-    return status, preexisting
+    return status, False
 
 
 def _warn_if_cwd_is_other_checkout(*, root: Path, target: Path) -> None:
@@ -2016,6 +2375,70 @@ def _slug_for_hint(root: Path, value: str) -> str:
         return value
 
 
+def _expected_checkout_identity(
+    *, root: Path, worktree: str | None, branch: str | None = None
+) -> str:
+    if worktree is None:
+        return "leader"
+    registered = resolve_worktree(root=root, selector=worktree)
+    if registered is not None:
+        return f"worktree:{registered.path.name}"
+    planned = plan_worktree(root=root, name=worktree, branch=branch)
+    return f"worktree:{planned.name}"
+
+
+def _assert_entry_checkout_identity(
+    *,
+    root: Path,
+    worktree: str | None,
+    branch: str | None,
+    claimed: str | None,
+) -> None:
+    if not claimed or claimed == "unknown":
+        raise ValueError(
+            "checkout identity is unknown; refusing to start before any state mutation"
+        )
+    expected = _expected_checkout_identity(
+        root=root,
+        worktree=worktree,
+        branch=branch,
+    )
+    if claimed != expected:
+        raise ValueError(
+            f"checkout identity mismatch: claimed {claimed!r}, expected {expected!r}"
+        )
+
+
+def _assert_relay_checkout_identity(
+    root: Path, worktree: str | None, claimed: str | None
+) -> None:
+    if claimed is None:
+        return
+    if claimed == "unknown":
+        raise ValueError("checkout identity is unknown; refusing lifecycle relay")
+    expected = _expected_checkout_identity(root=root, worktree=worktree)
+    if claimed != expected:
+        raise ValueError(
+            f"checkout identity mismatch: claimed {claimed!r}, expected {expected!r}"
+        )
+
+
+def _legacy_js_state_exists(root: Path) -> bool:
+    return (root / ".agent-flow" / "state" / "current-run.json").is_file()
+
+
+def _print_legacy_js_state_migration(root: Path) -> None:
+    path = root / ".agent-flow" / "state" / "current-run.json"
+    print(
+        f"legacy JS run state detected at {path}; automatic fallback is disabled. "
+        "Archive the legacy run artifacts, remove current-run.json, then start a "
+        "new Python-authoritative run.",
+        file=sys.stderr,
+    )
+
+
+
+
 def _resolve_cli_root_context(root: Path, worktree: str | None) -> tuple[Path, str | None]:
     managed = _managed_worktree_context(root)
     if managed is not None:
@@ -2034,12 +2457,12 @@ def _resolve_cli_root_context(root: Path, worktree: str | None) -> tuple[Path, s
 def _managed_worktree_context(path: Path) -> tuple[Path, str] | None:
     resolved = path.resolve()
     parts = resolved.parts
-    markers = {".agent-flow", ".codex", ".Codex"}
+    markers = {".agent-flow", ".codex", ".Codex", ".omp"}
     for index in range(len(parts) - 2, 0, -1):
         if parts[index] not in markers or parts[index + 1] != "worktrees":
             continue
         root = Path(*parts[:index])
-        if parts[index] in {".codex", ".Codex"} and _same_path(root, _home_path()):
+        if parts[index] in {".codex", ".Codex", ".omp"} and _same_path(root, _home_path()):
             continue
         return root, parts[index + 2]
     return None
@@ -2217,28 +2640,185 @@ def _skill_context(root: Path, args: argparse.Namespace) -> dict:
 
 
 def _read_interactive_approval(expected: str) -> str:
-    if not sys.stdin.isatty():
+    if not _is_foreground_user_terminal():
         raise RuntimeError(
-            "SPEC approval requires an interactive user terminal; "
-            "agents and redirected stdin cannot approve"
+            "SPEC approval requires one foreground user terminal attached to "
+            "stdin, stdout, and stderr; agents and redirected or synthetic "
+            "sessions cannot approve"
         )
     print(f"Type exactly to approve: {expected}")
     statement = sys.stdin.readline().strip()
     if statement != expected:
-        raise ValueError("SPEC approval statement did not match")
+        raise RuntimeError("approval statement did not match exactly")
     return statement
 
 
-def _spec_run_context(run_dir: Path) -> dict:
+def _is_foreground_user_terminal() -> bool:
+    if any(
+        os.environ.get(name)
+        for name in (
+            "CLAUDECODE",
+            "CLAUDE_CLI",
+            "CODEX_CLI",
+            "CODEX_HOME",
+            "OMPCODE",
+            "OMP_PROFILE",
+        )
+    ):
+        return False
+    streams = (sys.stdin, sys.stdout, sys.stderr)
+    try:
+        fds = tuple(stream.fileno() for stream in streams)
+        if any(not stream.isatty() or not os.isatty(fd) for stream, fd in zip(streams, fds)):
+            return False
+        if len({os.fstat(fd).st_rdev for fd in fds}) != 1:
+            return False
+        getpgrp = getattr(os, "getpgrp", None)
+        getsid = getattr(os, "getsid", None)
+        tcgetpgrp = getattr(os, "tcgetpgrp", None)
+        if getpgrp is None or getsid is None or tcgetpgrp is None:
+            return False
+        process_group = getpgrp()
+        if any(tcgetpgrp(fd) != process_group for fd in fds):
+            return False
+        return getsid(os.getpid()) == getsid(os.getppid())
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
+
+
+def _read_run_state(run_dir: Path) -> dict:
     meta = read_meta(run_dir)
-    if not meta:
-        try:
-            payload = json.loads(
-                (run_dir / "manifest.json").read_text(encoding="utf-8")
+    if meta:
+        return meta
+    try:
+        payload = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+@dataclass(frozen=True)
+class _SpecConfirmationTarget:
+    run_dir: Path
+    artifact: Path
+    checkout_identity: str
+
+
+def _resolve_spec_confirmation_target(
+    root: Path,
+    *,
+    run_dir_value: str | None,
+    artifact_value: str | None,
+    inferred_worktree: str | None,
+    interactive: bool,
+) -> _SpecConfirmationTarget | None:
+    if run_dir_value is not None:
+        run_dir = _resolve_project_path(root, run_dir_value)
+        if artifact_value is not None:
+            artifact = _resolve_project_path(root, artifact_value)
+        else:
+            artifact = _spec_artifact_waiting_for_confirmation(run_dir, pending_only=False)
+            if artifact is None:
+                raise ValueError(f"run has no current SPEC source artifact: {run_dir}")
+        return _SpecConfirmationTarget(
+            run_dir=run_dir,
+            artifact=artifact,
+            checkout_identity=_checkout_identity(inferred_worktree),
+        )
+
+    candidates: list[_SpecConfirmationTarget] = []
+    seen: set[Path] = set()
+    for state_root, checkout_identity in _spec_confirmation_state_roots(
+        root,
+        inferred_worktree=inferred_worktree,
+    ):
+        for active in find_active_runs(state_root):
+            if active.path in seen:
+                continue
+            seen.add(active.path)
+            artifact = _spec_artifact_waiting_for_confirmation(
+                active.path,
+                pending_only=True,
             )
-        except (OSError, json.JSONDecodeError):
-            payload = {}
-        meta = payload if isinstance(payload, dict) else {}
+            if artifact is not None:
+                candidates.append(
+                    _SpecConfirmationTarget(
+                        run_dir=active.path,
+                        artifact=artifact,
+                        checkout_identity=checkout_identity,
+                    )
+                )
+
+
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        target = candidates[0]
+        if artifact_value is None:
+            return target
+        return _SpecConfirmationTarget(
+            run_dir=target.run_dir,
+            artifact=_resolve_project_path(root, artifact_value),
+            checkout_identity=target.checkout_identity,
+        )
+    if not interactive:
+        return None
+    raise ValueError(
+        "pathless SPEC confirmation requires exactly one pending run in the "
+        "current checkout"
+    )
+
+
+def _checkout_identity(inferred_worktree: str | None) -> str:
+    if inferred_worktree is None:
+        return "leader"
+    return f"worktree:{inferred_worktree}"
+
+
+def _spec_confirmation_state_roots(
+    root: Path,
+    *,
+    inferred_worktree: str | None,
+) -> tuple[tuple[Path, str], ...]:
+    if inferred_worktree is None:
+        return ((root, "leader"),)
+    return (
+        (
+            worktree_runtime_root(root=root, name=inferred_worktree),
+            _checkout_identity(inferred_worktree),
+        ),
+    )
+
+
+def _spec_artifact_waiting_for_confirmation(
+    run_dir: Path,
+    *,
+    pending_only: bool,
+) -> Path | None:
+    meta = _read_run_state(run_dir)
+    phase_id = str(meta.get("current_phase") or meta.get("phase") or "")
+    if phase_id not in LEDGER_SOURCE_PHASES:
+        return None
+    for artifact in (
+        run_dir / f"{phase_id}.md",
+        run_dir / "artifacts" / f"{phase_id}.md",
+    ):
+        if not artifact.is_file():
+            continue
+        parsed = parse_spec_item_section(artifact.read_text(encoding="utf-8"))
+        if parsed.errors or not parsed.items:
+            continue
+        if pending_only and spec_set_is_confirmed(run_dir, parsed.items):
+            # 한 run의 현재 SPEC artifact는 하나다. 확인된 것을 건너뛰고 다음
+            # 후보로 넘어가면, agent가 두 번째 artifact를 써 두는 것만으로
+            # 사용자가 이미 승인한 집합이 다른 집합으로 갈아치워진다.
+            return None
+        return artifact
+    return None
+
+
+def _spec_run_context(run_dir: Path) -> dict:
+    meta = _read_run_state(run_dir)
     started_at = meta.get("started_at")
     since = _run_meta_timestamp({"started_at": started_at})
     return {
@@ -2248,11 +2828,7 @@ def _spec_run_context(run_dir: Path) -> dict:
 
 
 def _active_run_meta(root: Path) -> dict:
-    """활성 run의 meta. Python run과 JS state 중 **더 최근** 것이 이긴다.
-
-    둘 다 존재할 수 있고(같은 프로젝트를 두 경로로 몰아본 흔적), 오래된 쪽이
-    이기면 지난 phase의 task/시각으로 skill을 판정하게 된다.
-    """
+    """Return the newest Python-authoritative active run metadata."""
     candidates: list[dict] = []
     for state_root in _skill_state_roots(root):
         try:
@@ -2264,11 +2840,6 @@ def _active_run_meta(root: Path) -> dict:
         meta = read_meta(active.path)
         if meta:
             candidates.append(meta)
-    # JS runner는 Python meta.json이 아니라 이 파일에 run 상태를 쓴다.
-    # 여기를 안 보면 JS 경로에서 task/시각이 통째로 비어 자동 활성화가 죽는다.
-    js_state = _js_run_state(root)
-    if js_state:
-        candidates.append(js_state)
     if not candidates:
         return {}
     dated = [(ts, meta) for meta in candidates if (ts := _run_meta_timestamp(meta)) is not None]
@@ -2277,13 +2848,6 @@ def _active_run_meta(root: Path) -> dict:
     return candidates[0]
 
 
-def _js_run_state(root: Path) -> dict:
-    state_path = root / ".agent-flow" / "state" / "current-run.json"
-    try:
-        payload = json.loads(state_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
 
 
 def _skill_state_roots(root: Path):

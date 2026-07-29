@@ -37,6 +37,17 @@ When a comment is warranted, write it well instead of padding or translating it:
 - State the reason, constraint, or contract plainly and specifically, following `write-for-work`.
 - Prefer one clear sentence over a decorative block, and match the file's existing comment language.
 
+## Korean Comment Quality
+
+When repository instructions require Korean comments, docstrings, review notes, or phase-artifact prose:
+
+- Write the sentence in natural Korean from the start. Do not preserve English word order and replace only individual words.
+- Keep only code identifiers, API names, product names, and established project terms in English. Write ordinary concepts in Korean.
+- Do not mix duplicate Korean and English labels such as `field 필터`, `reason 값`, or `notify 우선순위`. If the English token is an identifier, wrap that exact token in backticks and explain it once in natural Korean.
+- Reuse the repository's existing domain terms and glossary. Do not invent a translation or use a near-synonym when the project already has a name for the concept.
+- Read the sentence without its code tokens. If the remaining Korean is awkward, ambiguous, or sounds translated, rewrite it or remove the comment.
+- Apply the same wording check to findings and artifact explanations produced during the comment-authoring pass.
+
 ## Remove Or Avoid
 
 - WHAT/HOW comments that restate code.

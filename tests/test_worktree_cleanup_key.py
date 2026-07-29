@@ -25,9 +25,9 @@ from agent_flow.core.worktree_isolation import (
     list_registered_worktrees,
     real_path,
 )
+from tests.test_hook_integrity import _install as _install_managed_hooks
 from agent_flow.core import worktrees as W
 from agent_flow.core.worktrees import (
-    AmbiguousWorktreeSelector,
     removable_worktrees,
     resolve_worktree,
 )
@@ -41,8 +41,13 @@ def _init_repo(root: Path) -> None:
     _git("init", "-b", "main", cwd=root)
     _git("config", "user.email", "t@t", cwd=root)
     _git("config", "user.name", "t", cwd=root)
+    _install_managed_hooks(root)
+    (root / ".gitignore").write_text(
+        "\n".join((".agent-flow/", ".claude/", ".Codex/", ".codex/", ".omp/")) + "\n",
+        encoding="utf-8",
+    )
     (root / "f.txt").write_text("base\n", encoding="utf-8")
-    _git("add", ".", cwd=root)
+    _git("add", ".gitignore", "f.txt", cwd=root)
     _git("commit", "-m", "init", cwd=root)
 
 
@@ -161,7 +166,7 @@ def test_name_normalization_cannot_reach_the_outside_worktree(tmp_path: Path):
     assert resolve_worktree(root=root, selector="wt").branch == "feat/outside"
 
 
-def test_ambiguous_selector_raises_with_candidates(tmp_path: Path):
+def test_exact_selector_beats_a_derived_alias(tmp_path: Path):
     root = tmp_path / "repo"
     root.mkdir()
     _init_repo(root)
@@ -170,18 +175,8 @@ def test_ambiguous_selector_raises_with_candidates(tmp_path: Path):
     _add_raw_worktree(root, "feat/demo", derived)
     _add_raw_worktree(root, "feat/literal", literal)
 
-    with pytest.raises(AmbiguousWorktreeSelector) as excinfo:
-        resolve_worktree(root=root, selector="demo")
-    rendered = str(excinfo.value)
-    assert str(real_path(derived)) in rendered
-    assert str(real_path(literal)) in rendered
-
-    result = _run_cli(["worktree", "remove", "--name", "demo"], root)
-    assert result.returncode == 2
-    assert "ambiguous" in result.stderr
-    assert derived.exists() and literal.exists()
-
-    # 반증 짝: 모호하지 않은 선택자는 정확히 하나로 해석된다.
+    # 사용자가 입력한 실제 디렉터리 이름이 정규화로 유도한 alias보다 우선한다.
+    assert resolve_worktree(root=root, selector="demo").path == real_path(literal)
     assert resolve_worktree(root=root, selector="feat-demo").path == real_path(derived)
     assert resolve_worktree(root=root, selector="feat/literal").path == real_path(literal)
 
@@ -324,22 +319,19 @@ def test_removal_stops_when_the_path_was_re_registered(tmp_path, monkeypatch):
     plan = W.plan_worktree(root=tmp_path, name="swap")
     status = W.create_worktree(root=tmp_path, plan=plan)
 
-    real = W.list_registered_worktrees
+    real = W.registered_worktree_at
     seen = {"n": 0}
 
-    def replaced(root):
-        entries = real(root)
+    def replaced(root, path):
+        entry = real(root, path)
         seen["n"] += 1
-        if seen["n"] < 2:
-            return entries
-        return [
-            entry
-            if not W.same_worktree_path(entry.path, status.path)
-            else replace(entry, branch="someone/else", head="0" * 40)
-            for entry in entries
-        ]
+        if seen["n"] < 2 or entry is None:
+            return entry
+        if not W.same_worktree_path(entry.path, status.path):
+            return entry
+        return replace(entry, branch="someone/else", head="0" * 40)
 
-    monkeypatch.setattr(W, "list_registered_worktrees", replaced)
+    monkeypatch.setattr(W, "registered_worktree_at", replaced)
     with pytest.raises(WorktreeIsolationError) as caught:
         W.remove_worktree(root=tmp_path, status=status, allow_unmerged=True)
     assert "registration changed" in str(caught.value)
@@ -363,6 +355,16 @@ def test_removal_clears_runtime_state_keyed_by_the_registered_name(tmp_path: Pat
     runtime_root = root / ".git" / "agent-flow" / "worktrees" / "feat-issue#110"
     assert runtime_root.exists()
 
+    blocked = _run_cli(
+        ["worktree", "remove", "--name", "feat-issue#110", "--allow-unmerged"], root
+    )
+    assert blocked.returncode == 2
+    assert "active run exists" in blocked.stderr
+    aborted = _run_cli(
+        ["abort", "--worktree", "feat-issue#110", "--yes"],
+        root,
+    )
+    assert aborted.returncode == 0, aborted.stderr
     removed = _run_cli(
         ["worktree", "remove", "--name", "feat-issue#110", "--allow-unmerged"], root
     )
@@ -398,6 +400,16 @@ def test_removal_clears_runtime_state_when_a_sibling_owns_the_normalized_manifes
     runtime_root = root / ".git" / "agent-flow" / "worktrees" / "feat-issue#110"
     assert runtime_root.exists()
 
+    blocked = _run_cli(
+        ["worktree", "remove", "--name", str(checkout), "--allow-unmerged"], root
+    )
+    assert blocked.returncode == 2
+    assert "active run exists" in blocked.stderr
+    aborted = _run_cli(
+        ["abort", "--worktree", str(checkout), "--yes"],
+        root,
+    )
+    assert aborted.returncode == 0, aborted.stderr
     removed = _run_cli(
         ["worktree", "remove", "--name", str(checkout), "--allow-unmerged"], root
     )

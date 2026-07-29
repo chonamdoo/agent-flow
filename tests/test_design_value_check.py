@@ -9,7 +9,11 @@
 """
 from __future__ import annotations
 
+import hashlib
+import io
 import json
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -21,7 +25,11 @@ SRC = str(REPO / "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-from agent_flow.cli import main
+from agent_flow.cli import (
+    _is_foreground_user_terminal,
+    _spec_artifact_waiting_for_confirmation,
+    main,
+)
 from agent_flow.artifact import _missing_completion_markers
 from agent_flow.core.command_evidence import COMMANDS_RUN_LOG
 from agent_flow.core.design_ledger import (
@@ -31,6 +39,7 @@ from agent_flow.core.design_ledger import (
     record_manual_spec_approval,
     record_spec_set_confirmation,
     spec_set_confirmation_statement,
+    spec_set_is_confirmed,
 )
 from agent_flow.core.design_value_check import (
     declared_tokens,
@@ -38,6 +47,9 @@ from agent_flow.core.design_value_check import (
     missing_spec_item_evidence,
 )
 from agent_flow.runner import Phase, Runner
+
+HOOK_CAPABILITY = "a" * 64
+HOOK_CAPABILITY_HASH = hashlib.sha256(HOOK_CAPABILITY.encode()).hexdigest()
 
 LEDGER_SOURCE = """## Design Values
 
@@ -137,7 +149,6 @@ def test_cli_spec_confirmation_requires_exact_interactive_user_input(
     artifact_path = run_dir / "design.md"
     artifact_path.write_text(artifact, encoding="utf-8")
     parsed = parse_spec_item_section(artifact)
-    expected = spec_set_confirmation_statement(parsed.items)
     command = [
         "spec",
         "confirm",
@@ -160,10 +171,14 @@ def test_cli_spec_confirmation_requires_exact_interactive_user_input(
         (),
         {
             "isatty": lambda self: True,
-            "readline": lambda self: "CONFIRM SPEC SET wrong\n",
+            "readline": lambda self: "승인 아님\n",
         },
     )()
     monkeypatch.setattr(sys, "stdin", wrong_terminal)
+    monkeypatch.setattr(
+        "agent_flow.cli._is_foreground_user_terminal",
+        lambda: True,
+    )
     assert main(command) == 2
 
     terminal = type(
@@ -171,11 +186,15 @@ def test_cli_spec_confirmation_requires_exact_interactive_user_input(
         (),
         {
             "isatty": lambda self: True,
-            "readline": lambda self: expected + "\n",
+            "readline": lambda self: "승인\n",
         },
     )()
     monkeypatch.setattr(sys, "stdin", terminal)
     assert main(command) == 0
+    confirmation = json.loads(
+        (run_dir / "spec-user-confirmation.json").read_text(encoding="utf-8")
+    )
+    assert confirmation["provenance"] == "interactive-user"
     assert missing_spec_item_evidence(
         project,
         run_dir,
@@ -183,6 +202,749 @@ def test_cli_spec_confirmation_requires_exact_interactive_user_input(
         artifact,
         task_text="Implement the empty state.",
     ) == []
+
+
+@pytest.mark.parametrize(
+    "agent_env",
+    [
+        "CLAUDECODE",
+        "CLAUDE_CLI",
+        "CODEX_CLI",
+        "CODEX_HOME",
+        "OMPCODE",
+        "OMP_PROFILE",
+    ],
+)
+def test_interactive_spec_approval_rejects_agent_process_environment(
+    monkeypatch,
+    agent_env,
+):
+    for name in (
+        "CLAUDECODE",
+        "CLAUDE_CLI",
+        "CODEX_CLI",
+        "CODEX_HOME",
+        "OMPCODE",
+        "OMP_PROFILE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(agent_env, "1")
+
+    assert not _is_foreground_user_terminal()
+
+
+@pytest.mark.parametrize("attach_all_stdio", [False, True])
+def test_cli_spec_confirmation_rejects_synthetic_pseudo_terminal(
+    project,
+    run_dir,
+    attach_all_stdio,
+):
+    if not hasattr(os, "openpty"):
+        pytest.skip("pseudo terminals are unavailable")
+    artifact_path = run_dir / "design.md"
+    artifact_path.write_text(
+        "## Spec Items\n\n"
+        "SPEC-1: Empty search results show the empty state.\n"
+        "verify: test:test_empty_search_results_show_the_empty_state\n\n"
+        "## Completion Gate\n\n"
+        "spec-items: SPEC-1\n",
+        encoding="utf-8",
+    )
+    command = (
+        sys.executable,
+        "-m",
+        "agent_flow.cli",
+        "spec",
+        "confirm",
+        "--run-dir",
+        str(run_dir),
+        "--artifact",
+        str(artifact_path),
+    )
+    env = os.environ.copy()
+    for name in (
+        "CLAUDECODE",
+        "CLAUDE_CLI",
+        "CODEX_CLI",
+        "CODEX_HOME",
+        "OMPCODE",
+        "OMP_PROFILE",
+    ):
+        env.pop(name, None)
+    env.update(
+        {
+            "PYTHONPATH": SRC,
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+    )
+    master_fd, slave_fd = os.openpty()
+    try:
+        os.write(master_fd, "승인\n".encode())
+        result = subprocess.run(
+            command,
+            cwd=project,
+            env=env,
+            stdin=slave_fd,
+            stdout=slave_fd if attach_all_stdio else subprocess.PIPE,
+            stderr=slave_fd if attach_all_stdio else subprocess.PIPE,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    finally:
+        os.close(slave_fd)
+        os.close(master_fd)
+
+    assert result.returncode == 2
+    assert not (run_dir / "spec-user-confirmation.json").exists()
+
+
+def test_cli_spec_confirmation_accepts_only_the_current_exact_user_prompt(
+    project,
+    monkeypatch,
+):
+    run_dir = project / ".agent-flow" / "runs" / "20260727-210417"
+    run_dir.mkdir(parents=True)
+    (run_dir / "active").touch()
+    (run_dir / "meta.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_dir.name,
+                "workflow": "default",
+                "task": "Implement the empty state.",
+                "started_at": "2026-07-27T21:04:17+00:00",
+                "current_phase": "design",
+            }
+        ),
+        encoding="utf-8",
+    )
+    artifact = (
+        "## Spec Items\n\n"
+        "SPEC-1: Empty search results show the empty state.\n"
+        "verify: test:test_empty_search_results_show_the_empty_state\n\n"
+        "## Completion Gate\n\n"
+        "spec-items: SPEC-1\n"
+    )
+    (run_dir / "design.md").write_text(artifact, encoding="utf-8")
+    parsed = parse_spec_item_section(artifact)
+    pending_path = run_dir / "spec-user-confirmation.pending.json"
+    confirmation_path = run_dir / "spec-user-confirmation.json"
+    command = [
+        "spec",
+        "confirm",
+        "--root",
+        str(project),
+        "--hook-capability",
+        HOOK_CAPABILITY,
+        "--from-user-prompt",
+        "--session-id",
+        "session-current",
+    ]
+    assert main(
+        [
+            "spec",
+            "prepare-confirmation",
+            "--root",
+            str(project),
+            "--hook-capability-hash",
+            HOOK_CAPABILITY_HASH,
+            "--session-id",
+            "session-current",
+        ]
+    ) == 0
+    challenge = json.loads(pending_path.read_text(encoding="utf-8"))
+    assert challenge["session_id"] == "session-current"
+    assert challenge["run_id"] == run_dir.name
+    assert challenge["run_identity"] == str(run_dir.resolve())
+
+    stale_session_command = [*command[:-1], "session-stale"]
+    monkeypatch.setattr(sys, "stdin", io.StringIO("승인"))
+    assert main(stale_session_command) == 0
+    assert not confirmation_path.exists()
+    assert json.loads(pending_path.read_text(encoding="utf-8")) == challenge
+    assert not spec_set_is_confirmed(run_dir, parsed.items)
+
+    for wrong_prompt in (
+        "이전에 사용자가 '승인'이라고 했습니다.\n",
+        "> 승인\n",
+        "승인\n",
+    ):
+        monkeypatch.setattr(sys, "stdin", io.StringIO(wrong_prompt))
+        assert main(command) == 0
+        assert not confirmation_path.exists()
+        assert json.loads(pending_path.read_text(encoding="utf-8")) == challenge
+        assert not spec_set_is_confirmed(run_dir, parsed.items)
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("승인"))
+    assert main(command) == 0
+    assert spec_set_is_confirmed(run_dir, parsed.items)
+    confirmation = json.loads(confirmation_path.read_text(encoding="utf-8"))
+    attestation = confirmation["attestation"]
+    assert confirmation["provenance"] == "host-user-prompt"
+    assert confirmation["spec_digest"] == challenge["spec_digest"]
+    assert confirmation["spec_fingerprints"] == challenge["spec_fingerprints"]
+    assert attestation["challenge_id"] == challenge["challenge_id"]
+    assert attestation["session_id"] == challenge["session_id"]
+    assert attestation["checkout_identity"] == challenge["checkout_identity"]
+    assert attestation["run_id"] == challenge["run_id"]
+    assert attestation["run_identity"] == challenge["run_identity"]
+    assert not pending_path.exists()
+
+    confirmation_path.unlink()
+    monkeypatch.setattr(sys, "stdin", io.StringIO("승인"))
+    assert main(command) == 0
+    assert not confirmation_path.exists()
+    assert not spec_set_is_confirmed(run_dir, parsed.items)
+
+    assert main(
+        [
+            "spec",
+            "prepare-confirmation",
+            "--root",
+            str(project),
+            "--hook-capability-hash",
+            HOOK_CAPABILITY_HASH,
+            "--session-id",
+            "session-next",
+        ]
+    ) == 0
+    next_challenge = json.loads(pending_path.read_text(encoding="utf-8"))
+    assert next_challenge["session_id"] == "session-next"
+    assert next_challenge["challenge_id"] != challenge["challenge_id"]
+    monkeypatch.setattr(sys, "stdin", io.StringIO("승인"))
+    assert main(command) == 0
+    assert not confirmation_path.exists()
+    assert json.loads(pending_path.read_text(encoding="utf-8")) == next_challenge
+    assert not spec_set_is_confirmed(run_dir, parsed.items)
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("승인"))
+    assert main([*command[:-1], "session-next"]) == 0
+    assert spec_set_is_confirmed(run_dir, parsed.items)
+
+    assert not pending_path.exists()
+    confirmation = json.loads(confirmation_path.read_text(encoding="utf-8"))
+    attestation = confirmation["attestation"]
+    assert attestation["challenge_id"] == next_challenge["challenge_id"]
+    assert attestation["session_id"] == next_challenge["session_id"]
+    assert attestation["checkout_identity"] == next_challenge["checkout_identity"]
+    assert attestation["run_id"] == next_challenge["run_id"]
+    assert attestation["run_identity"] == next_challenge["run_identity"]
+    consumed_path = (
+        run_dir
+        / f".{pending_path.name}.{next_challenge['challenge_id']}.consumed"
+    )
+    assert json.loads(consumed_path.read_text(encoding="utf-8")) == next_challenge
+
+
+def test_cli_spec_confirmation_resolves_the_active_run_without_paths(
+    project,
+    monkeypatch,
+):
+    run_dir = project / ".agent-flow" / "runs" / "20260727-210417"
+    run_dir.mkdir(parents=True)
+    (run_dir / "active").touch()
+    (run_dir / "meta.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_dir.name,
+                "workflow": "default",
+                "task": "Implement the empty state.",
+                "started_at": "2026-07-27T21:04:17+00:00",
+                "current_phase": "design",
+            }
+        ),
+        encoding="utf-8",
+    )
+    artifact = (
+        "## Spec Items\n\n"
+        "SPEC-1: Empty search results show the empty state.\n"
+        "verify: test:test_empty_search_results_show_the_empty_state\n\n"
+        "## Completion Gate\n\n"
+        "spec-items: SPEC-1\n"
+    )
+    (run_dir / "design.md").write_text(artifact, encoding="utf-8")
+    parsed = parse_spec_item_section(artifact)
+    terminal = type(
+        "InteractiveInput",
+        (),
+        {
+            "isatty": lambda self: True,
+            "readline": lambda self: "승인\n",
+        },
+    )()
+    monkeypatch.setattr(sys, "stdin", terminal)
+    monkeypatch.setattr(
+        "agent_flow.cli._is_foreground_user_terminal",
+        lambda: True,
+    )
+
+    assert main(["spec", "confirm", "--root", str(project)]) == 0
+    assert spec_set_is_confirmed(run_dir, parsed.items)
+
+def test_spec_confirmation_never_silently_selects_latest_active_run(
+    project,
+    monkeypatch,
+):
+    artifact = (
+        "## Spec Items\n\n"
+        "SPEC-1: Empty search results show the empty state.\n"
+        "verify: test:test_empty_search_results_show_the_empty_state\n\n"
+        "## Completion Gate\n\n"
+        "spec-items: SPEC-1\n"
+    )
+    runs: list[Path] = []
+    for run_id in ("r1", "r2"):
+        run_dir = project / ".agent-flow" / "runs" / run_id
+        run_dir.mkdir(parents=True)
+        (run_dir / "active").touch()
+        (run_dir / "meta.json").write_text(
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "workflow": "default",
+                    "task": f"task-{run_id}",
+                    "started_at": f"2026-07-27T21:04:1{run_id[-1]}+00:00",
+                    "current_phase": "design",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (run_dir / "design.md").write_text(artifact, encoding="utf-8")
+        runs.append(run_dir)
+    parsed = parse_spec_item_section(artifact)
+
+    assert main(
+        [
+            "spec",
+            "prepare-confirmation",
+            "--root",
+            str(project),
+            "--hook-capability-hash",
+            HOOK_CAPABILITY_HASH,
+            "--session-id",
+            "session-current",
+        ]
+    ) == 0
+    monkeypatch.setattr(sys, "stdin", io.StringIO("승인"))
+    assert main(
+        [
+            "spec",
+            "confirm",
+            "--root",
+            str(project),
+            "--hook-capability",
+            HOOK_CAPABILITY,
+            "--from-user-prompt",
+            "--session-id",
+            "session-current",
+        ]
+    ) == 0
+    assert not any(spec_set_is_confirmed(run, parsed.items) for run in runs)
+
+    terminal = type(
+        "InteractiveInput",
+        (),
+        {
+            "isatty": lambda self: True,
+            "readline": lambda self: "승인\n",
+        },
+    )()
+    monkeypatch.setattr(sys, "stdin", terminal)
+    assert main(["spec", "confirm", "--root", str(project)]) == 2
+    assert not any(spec_set_is_confirmed(run, parsed.items) for run in runs)
+
+
+def test_host_prompt_does_not_scan_sibling_worktree_runs(
+    project,
+    monkeypatch,
+):
+    run_dir = (
+        project
+        / ".git"
+        / "agent-flow"
+        / "worktrees"
+        / "feat-sibling"
+        / ".agent-flow"
+        / "runs"
+        / "r1"
+    )
+    run_dir.mkdir(parents=True)
+    (run_dir / "active").touch()
+    (run_dir / "meta.json").write_text(
+        json.dumps(
+            {
+                "run_id": "r1",
+                "workflow": "default",
+                "task": "sibling task",
+                "started_at": "2026-07-27T21:04:17+00:00",
+                "current_phase": "design",
+            }
+        ),
+        encoding="utf-8",
+    )
+    artifact = (
+        "## Spec Items\n\n"
+        "SPEC-1: Empty search results show the empty state.\n"
+        "verify: test:test_empty_search_results_show_the_empty_state\n\n"
+        "## Completion Gate\n\n"
+        "spec-items: SPEC-1\n"
+    )
+    (run_dir / "design.md").write_text(artifact, encoding="utf-8")
+    parsed = parse_spec_item_section(artifact)
+
+    assert main(
+        [
+            "spec",
+            "prepare-confirmation",
+            "--root",
+            str(project),
+            "--hook-capability-hash",
+            HOOK_CAPABILITY_HASH,
+            "--session-id",
+            "leader-session",
+        ]
+    ) == 0
+    assert not (run_dir / "spec-user-confirmation.pending.json").exists()
+
+    terminal = type(
+        "InteractiveInput",
+        (),
+        {
+            "isatty": lambda self: True,
+            "readline": lambda self: "승인\n",
+        },
+    )()
+    monkeypatch.setattr(sys, "stdin", terminal)
+    assert main(["spec", "confirm", "--root", str(project)]) == 2
+    assert not spec_set_is_confirmed(run_dir, parsed.items)
+
+
+def test_host_confirmation_is_bound_to_the_current_worktree(
+    project,
+    monkeypatch,
+):
+    worktree = project / ".agent-flow" / "worktrees" / "feat-child"
+    _git("worktree", "add", "-b", "feat/child", str(worktree), "main", cwd=project)
+    run_dir = (
+        project
+        / ".git"
+        / "agent-flow"
+        / "worktrees"
+        / "feat-child"
+        / ".agent-flow"
+        / "runs"
+        / "r1"
+    )
+    run_dir.mkdir(parents=True)
+    (run_dir / "active").touch()
+    (run_dir / "meta.json").write_text(
+        json.dumps(
+            {
+                "run_id": "r1",
+                "workflow": "default",
+                "task": "child task",
+                "started_at": "2026-07-27T21:04:17+00:00",
+                "current_phase": "design",
+            }
+        ),
+        encoding="utf-8",
+    )
+    artifact = (
+        "## Spec Items\n\n"
+        "SPEC-1: Empty search results show the empty state.\n"
+        "verify: test:test_empty_search_results_show_the_empty_state\n\n"
+        "## Completion Gate\n\n"
+        "spec-items: SPEC-1\n"
+    )
+    (run_dir / "design.md").write_text(artifact, encoding="utf-8")
+    parsed = parse_spec_item_section(artifact)
+
+    monkeypatch.chdir(worktree)
+    assert main(
+        [
+            "spec",
+            "prepare-confirmation",
+            "--root",
+            str(project),
+            "--hook-capability-hash",
+            HOOK_CAPABILITY_HASH,
+            "--session-id",
+            "child-session",
+        ]
+    ) == 0
+    challenge = json.loads(
+        (run_dir / "spec-user-confirmation.pending.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert challenge["checkout_identity"] == "worktree:feat-child"
+
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("승인"))
+    assert main(
+        [
+            "spec",
+            "confirm",
+            "--root",
+            str(project),
+            "--hook-capability",
+            HOOK_CAPABILITY,
+            "--from-user-prompt",
+            "--session-id",
+            "child-session",
+        ]
+    ) == 0
+    assert not spec_set_is_confirmed(run_dir, parsed.items)
+
+    monkeypatch.chdir(worktree)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("승인"))
+    assert main(
+        [
+            "spec",
+            "confirm",
+            "--root",
+            str(project),
+            "--hook-capability",
+            HOOK_CAPABILITY,
+            "--from-user-prompt",
+            "--session-id",
+            "child-session",
+        ]
+    ) == 0
+    assert spec_set_is_confirmed(run_dir, parsed.items)
+
+
+def test_cli_spec_confirmation_resolves_current_python_active_meta_run_from_user_prompt(
+    project,
+    monkeypatch,
+):
+    run_dir = project / ".agent-flow" / "runs" / "20260727-210417"
+    run_dir.mkdir(parents=True)
+    (run_dir / "active").touch()
+    (run_dir / "meta.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_dir.name,
+                "workflow": "default",
+                "task": "Implement the empty state.",
+                "started_at": "2026-07-27T21:04:17+00:00",
+                "current_phase": "design",
+            }
+        ),
+        encoding="utf-8",
+    )
+    artifact = (
+        "## Spec Items\n\n"
+        "SPEC-1: Empty search results show the empty state.\n"
+        "verify: test:test_empty_search_results_show_the_empty_state\n\n"
+        "## Completion Gate\n\n"
+        "spec-items: SPEC-1\n"
+    )
+    (run_dir / "design.md").write_text(artifact, encoding="utf-8")
+    parsed = parse_spec_item_section(artifact)
+    assert main(
+        [
+            "spec",
+            "prepare-confirmation",
+            "--root",
+            str(project),
+            "--hook-capability-hash",
+            HOOK_CAPABILITY_HASH,
+            "--session-id",
+            "session-python",
+        ]
+    ) == 0
+    monkeypatch.setattr(sys, "stdin", io.StringIO("승인"))
+
+    assert main(
+        [
+            "spec",
+            "confirm",
+            "--root",
+            str(project),
+            "--hook-capability",
+            HOOK_CAPABILITY,
+            "--from-user-prompt",
+            "--session-id",
+            "session-python",
+        ]
+    ) == 0
+    assert spec_set_is_confirmed(run_dir, parsed.items)
+
+
+def test_a_second_spec_artifact_cannot_displace_a_confirmed_one(project):
+    """반증: agent가 두 번째 artifact를 써 두면 승인 대상이 갈아치워졌다.
+
+    확인된 후보를 건너뛰고 다음 후보를 반환하면, 사용자가 본 적 없는 SPEC
+    집합으로 승인이 옮겨간다. 한 run의 현재 SPEC artifact는 하나다.
+    """
+    run_dir = project / ".agent-flow" / "runs" / "20260728-090000"
+    run_dir.mkdir(parents=True)
+    (run_dir / "meta.json").write_text(
+        json.dumps({"run_id": run_dir.name, "current_phase": "design"}),
+        encoding="utf-8",
+    )
+    artifact = (
+        "## Spec Items\n\n"
+        "SPEC-1: Empty search results show the empty state.\n"
+        "verify: test:test_empty_state\n\n"
+        "## Completion Gate\n\n"
+        "spec-items: SPEC-1\n"
+    )
+    (run_dir / "design.md").write_text(artifact, encoding="utf-8")
+    parsed = parse_spec_item_section(artifact)
+    record_spec_set_confirmation(
+        run_dir,
+        parsed.items,
+        spec_set_confirmation_statement(parsed.items),
+    )
+    assert spec_set_is_confirmed(run_dir, parsed.items)
+
+    (run_dir / "artifacts").mkdir()
+    (run_dir / "artifacts" / "design.md").write_text(
+        artifact.replace("empty state", "retry action"),
+        encoding="utf-8",
+    )
+
+    assert (
+        _spec_artifact_waiting_for_confirmation(run_dir, pending_only=True)
+        is None
+    )
+    assert spec_set_is_confirmed(run_dir, parsed.items)
+
+
+def test_fresh_session_host_prepare_then_exact_prompt_consumes_once(project):
+    run_dir = project / ".agent-flow" / "runs" / "20260727-210417"
+    run_dir.mkdir(parents=True)
+    (run_dir / "active").touch()
+    (run_dir / "meta.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_dir.name,
+                "workflow": "default",
+                "task": "Implement the empty state.",
+                "started_at": "2026-07-27T21:04:17+00:00",
+                "current_phase": "design",
+            }
+        ),
+        encoding="utf-8",
+    )
+    artifact = (
+        "## Spec Items\n\n"
+        "SPEC-1: Empty search results show the empty state.\n"
+        "verify: test:test_empty_search_results_show_the_empty_state\n\n"
+        "## Completion Gate\n\n"
+        "spec-items: SPEC-1\n"
+    )
+    (run_dir / "design.md").write_text(artifact, encoding="utf-8")
+    invocation_marker = project / "hook-invoked"
+    launcher = project / ".agent-flow" / "bin" / "agent-flow"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text(
+        f"#!{sys.executable}\n"
+        "from pathlib import Path\n"
+        f"Path({str(invocation_marker)!r}).touch()\n"
+        "from agent_flow.cli import main\n"
+        "raise SystemExit(main())\n",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o755)
+    env = os.environ.copy()
+    env["AGENT_FLOW"] = str(launcher)
+    env["PYTHONPATH"] = str(SRC)
+    hook_dir = project / ".agent-flow" / "scripts" / "hooks"
+    hook_dir.mkdir(parents=True)
+    for name in (
+        "confirm-spec-user-prompt.py",
+        "prepare-spec-user-prompt.py",
+    ):
+        shutil.copy2(REPO / "scripts" / "hooks" / name, hook_dir / name)
+    confirm_hook = hook_dir / "confirm-spec-user-prompt.py"
+    prepare_hook = hook_dir / "prepare-spec-user-prompt.py"
+    parsed = parse_spec_item_section(artifact)
+    pending_path = run_dir / "spec-user-confirmation.pending.json"
+    confirmation_path = run_dir / "spec-user-confirmation.json"
+
+    def run_hook(path: Path, payload: dict[str, str]) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            (sys.executable, str(path)),
+            input=json.dumps(payload),
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+
+    stale_payload = {
+        "hook_event_name": "PostToolUse",
+        "cwd": str(project),
+        "session_id": "session-stale",
+    }
+    prepared = run_hook(prepare_hook, stale_payload)
+    assert prepared.returncode == 0
+    stale_challenge = json.loads(pending_path.read_text(encoding="utf-8"))
+    assert stale_challenge["session_id"] == "session-stale"
+    assert invocation_marker.is_file()
+    invocation_marker.unlink()
+    assert not (
+        project / ".agent-flow" / "runtime" / "spec-hook-capabilities"
+    ).exists()
+
+    ignored = run_hook(
+        confirm_hook,
+        {
+            "hook_event_name": "PostToolUse",
+            "prompt": "승인",
+            "cwd": str(project),
+            "session_id": "session-hook",
+        },
+    )
+    assert ignored.returncode == 0
+    assert not invocation_marker.exists()
+    assert json.loads(pending_path.read_text(encoding="utf-8")) == stale_challenge
+    assert not spec_set_is_confirmed(run_dir, parsed.items)
+
+    quoted = run_hook(
+        confirm_hook,
+        {
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "> 승인",
+            "cwd": str(project),
+            "session_id": "session-hook",
+        },
+    )
+    assert quoted.returncode == 0
+    assert invocation_marker.is_file()
+    invocation_marker.unlink()
+    current_challenge = json.loads(pending_path.read_text(encoding="utf-8"))
+    assert current_challenge["session_id"] == "session-hook"
+    assert current_challenge["challenge_id"] != stale_challenge["challenge_id"]
+    assert not spec_set_is_confirmed(run_dir, parsed.items)
+    assert not (
+        project / ".agent-flow" / "runtime" / "spec-hook-capabilities"
+    ).exists()
+
+    current_payload = {
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "승인",
+        "cwd": str(project),
+        "session_id": "session-hook",
+    }
+    result = run_hook(confirm_hook, current_payload)
+    assert result.returncode == 0
+    assert invocation_marker.is_file()
+    assert spec_set_is_confirmed(run_dir, parsed.items)
+    confirmation = json.loads(confirmation_path.read_text(encoding="utf-8"))
+    assert confirmation["provenance"] == "host-user-prompt"
+    assert confirmation["attestation"]["session_id"] == "session-hook"
+    invocation_marker.unlink()
+
+    confirmation_path.unlink()
+    replay = run_hook(confirm_hook, current_payload)
+    assert replay.returncode == 0
+    assert invocation_marker.is_file()
+    assert not confirmation_path.exists()
+    assert not spec_set_is_confirmed(run_dir, parsed.items)
 
 
 def test_test_spec_requires_observed_passing_named_test(project, run_dir):
@@ -381,8 +1143,9 @@ def test_agent_run_confirmation_command_is_rejected(project, run_dir):
     _capture_spec_ledger(run_dir, "manual")
     _observe(project, f"agent-flow spec confirm --run-dir {run_dir}", exit_code=0)
     expected = [
-        "spec-confirmation: `agent-flow spec confirm|approve` ran in the agent's "
-        "shell; only the user may run it in their own terminal"
+        "spec-confirmation: an approval command or managed approval hook ran in "
+        "the agent's shell; only the user may approve through chat or their own "
+        "terminal"
     ]
 
     assert missing_spec_item_evidence(
@@ -419,8 +1182,7 @@ def test_final_review_rechecks_the_spec_set_confirmation(project, run_dir):
         GATE,
     ) == [
         "spec-ledger: SPEC set does not have current user confirmation "
-        "(the user must run `agent-flow spec confirm --run-dir <run-dir> "
-        "--artifact design.md`)"
+        "(reply exactly `승인` in the chat; fallback: `agent-flow spec confirm`)"
     ]
 
 
@@ -459,6 +1221,10 @@ def test_cli_records_manual_spec_approval(project, run_dir, monkeypatch):
         },
     )()
     monkeypatch.setattr(sys, "stdin", terminal)
+    monkeypatch.setattr(
+        "agent_flow.cli._is_foreground_user_terminal",
+        lambda: True,
+    )
 
     exit_code = main(
         [

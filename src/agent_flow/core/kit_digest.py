@@ -86,6 +86,16 @@ def warn_if_installed_kit_is_stale(root: Path, kit_root: Path) -> None:
     `skills sync`는 이것을 고치지 않는다 — 그 명령은 외부 skill_sources만 fetch한다.
     """
     try:
+        kit_root.resolve().relative_to(
+            (root / ".agent-flow" / "runtime" / "python").resolve()
+        )
+    except (OSError, ValueError):
+        pass
+    else:
+        # 프로젝트에 복사된 축소 runtime은 source kit과 디렉터리 구성이 다르다.
+        # 이 경로를 source로 해시하면 self-install 직후에도 반드시 stale이 된다.
+        return
+    try:
         payload = json.loads(
             (root / ".agent-flow" / "kit.json").read_text(encoding="utf-8")
         )

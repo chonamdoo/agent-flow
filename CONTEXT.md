@@ -24,7 +24,7 @@
 - **Run**: 하나의 Workflow 실행 인스턴스. git branch나 전체 session이 아니다.
 - **Artifact**: phase 결과/검증/리뷰를 저장하는 재사용 record file. raw log 저장소가 아니다.
 - **Handoff**: 다음 phase가 필요한 결정, 리스크, 관련 파일, 남은 일을 요약하는 artifact.
-- **Gate**: build, typecheck, lint, test, context-lint 같은 자동 검증 명령.
+- **Gate**: build, typecheck, lint, test 같은 자동 검증 명령.
 - **Personal Workflow**: lead가 Run과 phase 전환을 소유하는 current 기본 실행 모드.
 
 ## Current Lifecycle
@@ -69,4 +69,3 @@ Team Orchestration은 optional future module이다. current Personal Workflow와
 - `.agent-flow/`를 추적하는 프로젝트에 한해 commit 가능: final summary artifact, `gate-results.json`, review decision.
 - 최소화/제외: raw logs, 반복 phase logs, local absolute path가 들어갈 수 있는 manifest.
 - artifact에는 repo-relative path만 저장한다. gate 출력의 절대 경로는 `write_gate_results`가 상대화한다.
-- context-lint는 gitignore되지 않은 artifact만 검사한다. ignore된 파일은 커밋될 수 없어 경로 누출 경로가 없다.

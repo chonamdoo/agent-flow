@@ -2,23 +2,34 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import stat
 import shutil
 import subprocess
+import tempfile
 import sys
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Callable, Iterator
 
+from agent_flow.artifact import ACTIVE_MARKER, find_active_runs, read_meta, write_meta
 from agent_flow.core.commands import run_safe_command
 from agent_flow.core.worktree_isolation import (
     RegisteredWorktree,
+    FileLeaseUnavailable,
     WorktreeIsolationError,
     assert_worktree_mergeable,
+    exclusive_file_lease,
     git_repo_state,
     git_safe,
     list_registered_worktrees,
     real_path,
+    registered_worktree_at,
     same_worktree_path,
+    shared_file_lease,
     verify_linked_worktree,
     with_git_lock_retry,
     worktree_creation_lock,
@@ -28,6 +39,36 @@ from agent_flow.core.worktree_isolation import (
 
 PROTECTED_WORKTREE_BRANCHES = {"main", "master", "develop"}
 GIT_WORKTREE_TIMEOUT_S = 300
+CLEANUP_JOURNAL_VERSION = 3
+CLEANUP_STEPS = (
+    "archive",
+    "integration_proof",
+    "checkout_removal",
+    "branch_ref_cas",
+    "metadata_cleanup",
+)
+
+
+class CleanupBlockedError(WorktreeIsolationError):
+    """Cleanup could not prove that destructive progress is safe."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        journal_path: Path | None = None,
+        run_dir: Path | None = None,
+    ) -> None:
+        self.journal_path = journal_path
+        self.run_dir = run_dir
+        super().__init__(message)
+
+
+@dataclass(frozen=True)
+class CleanupTransactionResult:
+    journal_path: Path
+    run_dir: Path
+
 
 
 class AmbiguousWorktreeSelector(ValueError):
@@ -65,6 +106,10 @@ class WorktreePlan:
     requested_name: str = ""
 
 
+class WorktreeAlreadyExistsError(ValueError):
+    pass
+
+
 @dataclass(frozen=True)
 class WorktreeStatus:
     name: str
@@ -73,6 +118,9 @@ class WorktreeStatus:
     exists: bool
     branch_created_by_agent_flow: bool = False
     requested_name: str = ""
+    base_ref: str = ""
+    base_oid: str = ""
+    registration_identity: str | None = None
 
 
 def plan_worktree(
@@ -95,10 +143,36 @@ def plan_worktree(
     )
 
 
-def create_worktree(*, root: Path, plan: WorktreePlan, allow_dirty: bool = False) -> WorktreeStatus:
+def create_worktree(
+    *,
+    root: Path,
+    plan: WorktreePlan,
+    allow_dirty: bool = False,
+    reuse_existing: bool = True,
+) -> WorktreeStatus:
+    with worktree_creation_lock(root):
+        return _create_worktree(
+            root=root,
+            plan=plan,
+            allow_dirty=allow_dirty,
+            reuse_existing=reuse_existing,
+        )
+
+
+def _create_worktree(
+    *,
+    root: Path,
+    plan: WorktreePlan,
+    allow_dirty: bool = False,
+    reuse_existing: bool = True,
+) -> WorktreeStatus:
     if not allow_dirty and _git_dirty(root):
         raise RuntimeError("leader workspace is dirty; pass --allow-dirty to create a worktree anyway")
     if plan.path.exists():
+        if not reuse_existing:
+            raise WorktreeAlreadyExistsError(
+                f"worktree already exists: {plan.path}"
+            )
         if not (plan.path / ".git").exists():
             raise RuntimeError(
                 f"worktree path exists but is not a git worktree: {plan.path}. "
@@ -119,6 +193,12 @@ def create_worktree(*, root: Path, plan: WorktreePlan, allow_dirty: bool = False
     # Fail closed: trust the path only after git confirms it is a linked
     # worktree of this repo on the expected branch.
     verify_linked_worktree(root=root, path=plan.path, expected_branch=plan.branch)
+    registered = _registered_at_path(root=root, path=plan.path)
+    if registered is None or registered.registration_identity is None:
+        raise WorktreeIsolationError(
+            f"cannot prove worktree registration identity after creation: {plan.path}"
+        )
+    base_oid = _merge_base_oid(root=plan.path, left="HEAD", right=plan.base_ref)
     status = WorktreeStatus(
         name=plan.name,
         branch=plan.branch,
@@ -126,12 +206,24 @@ def create_worktree(*, root: Path, plan: WorktreePlan, allow_dirty: bool = False
         exists=True,
         branch_created_by_agent_flow=branch_created,
         requested_name=plan.requested_name,
+        base_ref=plan.base_ref,
+        base_oid=base_oid,
+        registration_identity=registered.registration_identity,
     )
     try:
         write_worktree_manifest(root=root, status=status)
     except Exception:
         try:
-            remove_worktree(root=root, status=status, allow_unmerged=True)
+            # create_worktree still owns the shared repository lease here. Calling
+            # public remove_worktree would try to upgrade that lease to exclusive
+            # and fail, leaving an unpublished checkout behind.
+            _remove_worktree_locked(
+                root=root,
+                status=status,
+                delete_branch=True,
+                require_merged=False,
+                allow_unmerged=False,
+            )
         except Exception as cleanup_exc:
             # 롤백까지 실패하면 등록된 worktree가 manifest 없이 남는다. 원본
             # 예외를 가리지 않도록 경고로 표면화한다.
@@ -145,7 +237,12 @@ def create_worktree(*, root: Path, plan: WorktreePlan, allow_dirty: bool = False
 
 
 def attach_worktree(
-    *, root: Path, selector: str, branch: str | None = None, allow_dirty: bool = False
+    *,
+    root: Path,
+    selector: str,
+    branch: str | None = None,
+    allow_dirty: bool = False,
+    expected_registration_identity: str | None = None,
 ) -> WorktreeStatus | None:
     """등록부가 아는 관리형 checkout에 그대로 붙는다. 붙을 대상이 없으면 ``None``.
 
@@ -161,6 +258,17 @@ def attach_worktree(
     registered = resolve_worktree(root=root, selector=selector)
     if registered is None:
         return None
+    if registered.registration_identity is None:
+        raise WorktreeIsolationError(
+            f"worktree registration identity is unavailable: {registered.path}"
+        )
+    if (
+        expected_registration_identity is not None
+        and registered.registration_identity != expected_registration_identity
+    ):
+        raise WorktreeIsolationError(
+            f"worktree registration changed after reuse consent: {registered.path}"
+        )
     if not allow_dirty and _git_dirty(root):
         # 생성 경로와 같은 계약이다. 재사용도 leader가 더러우면 멈춘다
         # (`create_worktree`가 관리형 checkout 재사용 앞에서 거는 것과 같은 문)
@@ -198,15 +306,71 @@ def attach_worktree(
             )
     # 등록부를 읽은 시점과 실제로 쓰는 시점 사이를 좁힌다. 같은 저장소의 linked
     # worktree이고 여전히 그 브랜치 위에 있다는 것을 git으로 다시 증명한다.
-    verify_linked_worktree(root=root, path=registered.path, expected_branch=registered.branch)
-    # manifest는 쓰지 않는다. 소유권(`branch_created_by_agent_flow`)은 만든 쪽만
-    # 주장할 수 있다. attach가 덮어쓰면 정리 단계가 사용자 브랜치를 지우거나
-    # 우리가 만든 브랜치를 영구히 남긴다.
-    return _status_for_registered(root=root, registered=registered, requested=selector)
+    verify_linked_worktree(
+        root=root,
+        path=registered.path,
+        expected_branch=registered.branch,
+        managed_root=registered.path.parent,
+    )
+    status = _status_for_registered(
+        root=root, registered=registered, requested=selector
+    )
+    runtime_root = _runtime_root_for_status(root=root, status=status)
+    if runtime_root is not None and runtime_root.exists() and status.base_oid:
+        return status
+
+    # `git worktree add`로 먼저 만든 관리 루트의 checkout도 명시적 재사용 동의를
+    # 받았으면 lifecycle metadata를 새로 기록해 채택할 수 있다. 브랜치 소유권은
+    # 주장하지 않으므로 terminal cleanup은 checkout만 제거하고 branch는 보존한다.
+    with worktree_creation_lock(root):
+        current = _registered_at_path(root=root, path=registered.path)
+        if not _same_registration(registered, current):
+            raise ValueError(
+                f"worktree registration changed while attaching {registered.path}; "
+                "re-run the command"
+            )
+        status = _status_for_registered(
+            root=root, registered=current, requested=selector
+        )
+        runtime_root = _runtime_root_for_status(root=root, status=status)
+        if runtime_root is None:
+            raise ValueError(
+                f"worktree {registered.path.name} has conflicting agent-flow metadata; "
+                "refusing attach"
+            )
+        if runtime_root.exists():
+            if status.base_oid:
+                return status
+            raise ValueError(
+                f"worktree {registered.path.name} has incomplete agent-flow metadata; "
+                "refusing to overwrite it"
+            )
+        base_ref = _default_base_ref(root)
+        status = WorktreeStatus(
+            name=registered.path.name,
+            branch=current.branch or "",
+            path=current.path,
+            exists=True,
+            branch_created_by_agent_flow=False,
+            requested_name=selector,
+            base_ref=base_ref,
+            base_oid=_merge_base_oid(
+                root=current.path,
+                left="HEAD",
+                right=base_ref,
+            ),
+            registration_identity=current.registration_identity,
+        )
+        write_worktree_manifest(root=root, status=status)
+        return status
 
 
 def _is_managed_child(*, root: Path, path: Path) -> bool:
-    return worktree_path_key(path.parent) == worktree_path_key(_managed_root(root))
+    parent_key = worktree_path_key(path.parent)
+    return any(
+        parent_key == worktree_path_key(root / marker / "worktrees")
+        for marker in (".agent-flow", ".codex", ".Codex", ".omp")
+    )
 
 
 def _assert_requestable_branch(branch: str) -> None:
@@ -231,8 +395,9 @@ def _add_worktree_locked(*, root: Path, plan: WorktreePlan) -> bool:
             _run_git(root, "worktree", "add", "-b", plan.branch, str(plan.path), plan.base_ref)
             created["branch"] = True
 
-    with worktree_creation_lock(root):
-        with_git_lock_retry(_prune_and_add)
+    # 생성 전체가 이미 `create_worktree`의 creation lock 안이다. 같은 파일을
+    # 다시 flock하면 fd가 달라 같은 프로세스에서도 블로킹된다.
+    with_git_lock_retry(_prune_and_add)
     return created["branch"]
 
 
@@ -244,70 +409,1209 @@ def remove_worktree(
     require_merged: bool = True,
     allow_unmerged: bool = False,
 ) -> None:
+    """Remove one checkout only while repository-wide cleanup exclusion is held."""
+    with _cleanup_lease(root, status.path):
+        runtime_root = _runtime_root_for_status(root=root, status=status)
+        with _run_start_exclusion(runtime_root):
+            _assert_no_active_runs(runtime_root)
+            _remove_worktree_locked(
+                root=root,
+                status=status,
+                delete_branch=delete_branch,
+                require_merged=require_merged,
+                allow_unmerged=allow_unmerged,
+            )
+
+
+def _remove_worktree_locked(
+    *,
+    root: Path,
+    status: WorktreeStatus,
+    delete_branch: bool,
+    require_merged: bool,
+    allow_unmerged: bool,
+) -> None:
     leader = leader_worktree_path(root)
     if leader is None:
-        # leader를 지목하지 못한 채 제거를 진행하면 "leader가 아님"을 증명하지 못한
-        # 상태로 파괴적 명령을 돌리는 것이다. 파일시스템이 non-git을 증명한 경우만
-        # 지킬 leader가 없다고 보고 통과시킨다.
         if git_repo_state(root) != "non-repo":
             raise WorktreeIsolationError(
                 f"cannot resolve the leader checkout for {root}; refusing to remove {status.path}"
             )
     elif same_worktree_path(leader, status.path):
         raise WorktreeIsolationError(f"refusing to remove the leader checkout: {status.path}")
+
     registered = _registered_at_path(root=root, path=status.path)
     _assert_not_locked(path=status.path, entry=registered)
     live = status.path.exists() and (status.path / ".git").exists()
+    if live and registered is None:
+        raise WorktreeIsolationError(
+            f"refusing to remove {status.path}: "
+            f"not registered as a worktree of this repository"
+        )
+    if live and require_merged and not allow_unmerged:
+        assert_worktree_mergeable(root=root, path=status.path)
+
+    branch_delete = (
+        _branch_delete_identity(root=root, status=status, registered=registered)
+        if live and delete_branch
+        else None
+    )
+    _assert_registration_and_ref_unchanged(
+        root=root,
+        status=status,
+        expected_registration=registered,
+        branch_delete=branch_delete,
+    )
+
     if live:
-        # manifest 없이 손으로 만든 checkout도 지울 수 있어야 하지만 소유 증명이
-        # 먼저다. 증명은 **경로 모양이 아니라 git 등록부**다 — 남의 저장소가 우리
-        # 관리 루트 안에 심어 둔 checkout은 등록부에 없으므로 걸러지고, 관리 루트
-        # 밖이라도 등록돼 있으면 이 저장소의 worktree이므로 지울 수 있다.
-        # `verify_linked_worktree`는 여기에 맞지 않는다. 그건 생성 경로의 불변식
-        # (관리 루트 안에 있어야 한다)을 함께 요구해서, 소유권과 생성 주체를
-        # 같은 조건으로 묶어 버린다.
-        if registered is None:
-            raise WorktreeIsolationError(
-                f"refusing to remove {status.path}: "
-                f"not registered as a worktree of this repository"
-            )
-        if require_merged and not allow_unmerged:
-            # Destructive: prove the work is already in the leader before removing.
-            assert_worktree_mergeable(root=root, path=status.path)
-    branch_to_delete = _owned_branch_for_live_worktree(root=root, status=status) if delete_branch else None
-    if status.path.exists():
-        # 관측과 실행 사이에 등록이 바뀔 수 있다. git을 부르기 직전에 다시 읽어
-        # 우리가 증명한 그 경로가 여전히 같은 상태인지 확인한다.
-        recheck = _registered_at_path(root=root, path=status.path)
-        _assert_not_locked(path=status.path, entry=recheck)
-        if registered is not None and not _same_registration(registered, recheck):
-            # 경로가 여전히 등록돼 있다는 것만으로는 부족하다. 다른 프로세스가 그
-            # 사이에 같은 경로를 제거하고 새 worktree를 등록했으면 우리가 증명한
-            # 대상이 아니다. --force까지 붙으면 남의 미커밋 변경을 지운다.
-            raise WorktreeIsolationError(
-                f"worktree registration changed while removing {status.path}; re-run the command"
-            )
         force_args = ("--force",) if allow_unmerged else ()
         _run_git(root, "worktree", "remove", *force_args, str(status.path))
-    if branch_to_delete is not None:
-        _run_git(root, "branch", "-D", branch_to_delete)
-    remove_worktree_metadata(root=root, name=status.name, path=status.path)
+    else:
+        if registered is not None:
+            if status.path.exists():
+                raise WorktreeIsolationError(
+                    f"stale worktree path is occupied at {status.path}; preserving it"
+                )
+            _run_git(root, "worktree", "remove", str(status.path))
+            if _registered_at_path(root=root, path=status.path) is not None:
+                raise WorktreeIsolationError(
+                    f"stale worktree registration remains for {status.path}; preserving metadata"
+                )
 
+    if branch_delete is not None:
+        branch, expected_oid = branch_delete
+        _delete_branch_ref_cas(root=root, branch=branch, expected_oid=expected_oid)
+    remove_worktree_metadata(root=root, name=status.name, path=status.path)
+    if not live and status.path.is_dir() and _is_managed_child(root=root, path=status.path):
+        try:
+            status.path.rmdir()
+        except OSError:
+            pass
+
+
+def _assert_registration_and_ref_unchanged(
+    *,
+    root: Path,
+    status: WorktreeStatus,
+    expected_registration: RegisteredWorktree | None,
+    branch_delete: tuple[str, str] | None,
+) -> None:
+    current = _registered_at_path(root=root, path=status.path)
+    _assert_not_locked(path=status.path, entry=current)
+    if expected_registration is not None and not _same_registration(expected_registration, current):
+        raise WorktreeIsolationError(
+            f"worktree registration changed while removing {status.path}; re-run the command"
+        )
+    if expected_registration is None and current is not None:
+        raise WorktreeIsolationError(
+            f"worktree registration appeared while removing {status.path}; re-run the command"
+        )
+    if branch_delete is not None:
+        branch, expected_oid = branch_delete
+        current_oid = _ref_oid(root=root, ref=f"refs/heads/{branch}")
+        if current_oid != expected_oid:
+            raise WorktreeIsolationError(
+                f"branch ref changed while removing {status.path}; "
+                f"expected {expected_oid}, found {current_oid or 'missing'}"
+            )
+
+
+
+def run_worktree_cleanup_transaction(
+    *,
+    root: Path,
+    checkout_path: Path,
+    run_dir: Path,
+    target_branch: str,
+    integration_strategy: str,
+    delete_branch: bool = True,
+    after_step: Callable[[str], None] | None = None,
+) -> CleanupTransactionResult:
+    """Run or resume the ordered, durable retirement of a workflow checkout."""
+    journal_path, journal = _prepare_or_load_cleanup_journal(
+        root=root,
+        checkout_path=checkout_path,
+        run_dir=run_dir,
+        target_branch=target_branch,
+        integration_strategy=integration_strategy,
+        delete_branch=delete_branch,
+    )
+    archived_run = Path(journal["run"]["archive_dir"])
+    if journal.get("status") == "complete":
+        return CleanupTransactionResult(journal_path=journal_path, run_dir=archived_run)
+
+    runtime_root = Path(journal["run"]["source_state_root"])
+    lock_root = runtime_root if runtime_root.exists() else Path(journal["run"]["archive_state_root"])
+    with _cleanup_lease(root, checkout_path) as cleanup_lease:
+        journal["leases"]["cleanup"] = {
+            "path": str(cleanup_lease),
+            "state": "held",
+        }
+        _write_cleanup_journal(journal_path, journal)
+        with _run_start_exclusion(lock_root):
+            _assert_cleanup_owner_active(journal_path=journal_path, journal=journal)
+            for step in CLEANUP_STEPS:
+                try:
+                    if journal["steps"][step]["status"] == "done":
+                        if step == "archive":
+                            _assert_archived_run_identity(
+                                archive=archived_run,
+                                journal_path=journal_path,
+                                journal=journal,
+                            )
+                        continue
+                    if step == "archive":
+                        _archive_cleanup_run(journal_path=journal_path, journal=journal)
+                    elif step == "integration_proof":
+                        _record_integration_proof(root=root, journal=journal)
+                    elif step == "checkout_removal":
+                        _remove_journal_checkout(
+                            root=root,
+                            journal_path=journal_path,
+                            journal=journal,
+                        )
+                    elif step == "branch_ref_cas":
+                        _delete_journal_branch(
+                            root=root,
+                            journal_path=journal_path,
+                            journal=journal,
+                        )
+                    else:
+                        _remove_journal_metadata(root=root, journal=journal)
+                except CleanupBlockedError as exc:
+                    _record_cleanup_failure(journal_path, journal, str(exc))
+                    exc.journal_path = journal_path
+                    exc.run_dir = (
+                        archived_run if archived_run.exists() else Path(journal["run"]["source_dir"])
+                    )
+                    raise
+                except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
+                    message = f"cleanup step {step} failed: {exc}; preserving remaining state"
+                    _record_cleanup_failure(journal_path, journal, message)
+                    raise CleanupBlockedError(
+                        message,
+                        journal_path=journal_path,
+                        run_dir=(
+                            archived_run
+                            if archived_run.exists()
+                            else Path(journal["run"]["source_dir"])
+                        ),
+                    ) from exc
+                journal["steps"][step] = {
+                    "status": "done",
+                    "completed_at": _utc_now(),
+                }
+                journal["step"] = step
+                journal["last_error"] = None
+                journal["updated_at"] = _utc_now()
+                if step == CLEANUP_STEPS[-1]:
+                    journal["status"] = "steps_complete"
+                _write_cleanup_journal(journal_path, journal)
+                if after_step is not None:
+                    after_step(step)
+
+    journal["leases"]["cleanup"]["state"] = "released"
+    journal["updated_at"] = _utc_now()
+    _write_cleanup_journal(journal_path, journal)
+    return CleanupTransactionResult(journal_path=journal_path, run_dir=archived_run)
+
+
+def complete_worktree_cleanup(result: CleanupTransactionResult) -> Path:
+    """Publish terminal completion in a crash-resumable order."""
+    journal = _load_cleanup_journal(result.journal_path)
+    if (
+        journal.get("status") not in {"steps_complete", "complete"}
+        or journal.get("integration", {}).get("proof") != "verified"
+        or any(
+            journal["steps"][step]["status"] != "done"
+            for step in CLEANUP_STEPS
+        )
+    ):
+        raise CleanupBlockedError(
+            "cleanup transaction is incomplete; active run remains retryable",
+            journal_path=result.journal_path,
+            run_dir=result.run_dir,
+        )
+    if not result.run_dir.is_dir():
+        raise CleanupBlockedError(
+            f"archived run is missing at {result.run_dir}; refusing terminal completion",
+            journal_path=result.journal_path,
+            run_dir=result.run_dir,
+        )
+    _assert_archived_run_identity(
+        archive=result.run_dir,
+        journal_path=result.journal_path,
+        journal=journal,
+    )
+    meta = read_meta(result.run_dir)
+    if (
+        meta.get("run_id") != journal["run_id"]
+        or meta.get("checkout_identity") != journal["checkout"]["identity"]
+    ):
+        raise CleanupBlockedError(
+            "archived run identity does not match cleanup owner; refusing terminal completion",
+            journal_path=result.journal_path,
+            run_dir=result.run_dir,
+        )
+    if journal["status"] != "complete":
+        journal["status"] = "complete"
+        journal["terminal_completed_at"] = _utc_now()
+        journal["updated_at"] = journal["terminal_completed_at"]
+        journal["leases"]["cleanup"]["state"] = "released"
+        _write_cleanup_journal(result.journal_path, journal)
+    meta["cleanup_state"] = "complete"
+    meta["cleanup_journal"] = str(result.journal_path)
+    write_meta(result.run_dir, meta)
+    marker = result.run_dir / ACTIVE_MARKER
+    if marker.exists():
+        marker.unlink()
+    return result.run_dir
+
+def _cleanup_terminal_publication_complete(
+    *, run_dir: Path, journal_path: Path
+) -> bool:
+    if not run_dir.is_dir():
+        return False
+    try:
+        meta = read_meta(run_dir)
+    except (OSError, ValueError):
+        return False
+    return (
+        meta.get("cleanup_state") == "complete"
+        and meta.get("cleanup_journal") == str(journal_path)
+        and not (run_dir / ACTIVE_MARKER).exists()
+    )
+
+
+
+def find_pending_worktree_cleanup(
+    *, root: Path, selector: str
+) -> CleanupTransactionResult | None:
+    pending_root = _cleanup_pending_root(root)
+    if not pending_root.is_dir():
+        return None
+    matches: list[CleanupTransactionResult] = []
+    try:
+        candidates = tuple(pending_root.glob("*.json"))
+    except OSError as exc:
+        raise CleanupBlockedError(
+            f"cannot inspect pending cleanup journals at {pending_root}"
+        ) from exc
+    for path in candidates:
+        journal = _load_cleanup_journal(path)
+        checkout = journal["checkout"]
+        if selector not in {
+            checkout["name"],
+            checkout["branch"],
+            checkout["identity"],
+            checkout["path"],
+        }:
+            continue
+        archive = Path(journal["run"]["archive_dir"])
+        source = Path(journal["run"]["source_dir"])
+        run_dir = archive if archive.exists() else source
+        if (
+            journal.get("status") == "complete"
+            and _cleanup_terminal_publication_complete(
+                run_dir=run_dir,
+                journal_path=path,
+            )
+        ):
+            continue
+        matches.append(
+            CleanupTransactionResult(
+                journal_path=path,
+                run_dir=run_dir,
+            )
+        )
+    if len(matches) > 1:
+        raise CleanupBlockedError(
+            f"multiple cleanup journals match {selector!r}; refusing to choose one"
+        )
+    return matches[0] if matches else None
+
+
+def cleanup_state_root(result: CleanupTransactionResult) -> Path:
+    run_dir = result.run_dir
+    if run_dir.parent.name != "runs" or run_dir.parent.parent.name != ".agent-flow":
+        raise CleanupBlockedError(f"invalid archived run path: {run_dir}")
+    return run_dir.parent.parent.parent
+
+
+def _prepare_or_load_cleanup_journal(
+    *,
+    root: Path,
+    checkout_path: Path,
+    run_dir: Path,
+    target_branch: str,
+    integration_strategy: str,
+    delete_branch: bool,
+) -> tuple[Path, dict[str, Any]]:
+    meta = read_meta(run_dir)
+    pointer = meta.get("cleanup_journal")
+    if isinstance(pointer, str) and pointer:
+        journal_path = Path(pointer)
+        journal = _load_cleanup_journal(journal_path)
+        _validate_cleanup_resume(
+            root=root,
+            run_dir=run_dir,
+            target_branch=target_branch,
+            journal_path=journal_path,
+            journal=journal,
+            checkout_path=checkout_path,
+        )
+        return journal_path, journal
+
+    registered = _registered_at_path(root=root, path=checkout_path)
+    if (
+        registered is None
+        or registered.branch is None
+        or registered.head is None
+        or registered.registration_identity is None
+    ):
+        raise CleanupBlockedError(
+            f"checkout registration identity is unknown for {checkout_path}; preserving it"
+        )
+    status = _status_for_registered(
+        root=root, registered=registered, requested=str(checkout_path)
+    )
+    checkout_identity = f"worktree:{status.name}"
+    if meta.get("checkout_identity") != checkout_identity:
+        raise CleanupBlockedError(
+            f"run checkout identity is unknown or mismatched for {checkout_path}; preserving it"
+        )
+    if (
+        meta.get("checkout_registration_identity")
+        != registered.registration_identity
+    ):
+        raise CleanupBlockedError(
+            f"run checkout registration changed for {checkout_path}; preserving it"
+        )
+    if meta.get("run_id") != run_dir.name:
+        raise CleanupBlockedError(
+            f"run identity is unknown or mismatched at {run_dir}; preserving checkout"
+        )
+    if not status.base_oid or not _is_oid(status.base_oid):
+        raise CleanupBlockedError(
+            f"recorded base OID is missing for {checkout_path}; preserving it"
+        )
+    _validate_branch(target_branch)
+    target_ref = f"refs/heads/{target_branch}"
+    if target_branch == status.branch:
+        raise CleanupBlockedError("cleanup target branch cannot be the worktree branch")
+    target_oid = _ref_oid(root=root, ref=target_ref)
+    branch_oid = _ref_oid(root=root, ref=f"refs/heads/{status.branch}")
+    if target_oid is None or branch_oid is None:
+        raise CleanupBlockedError(
+            "target or worktree branch OID is unknown; preserving checkout"
+        )
+    if registered.head != branch_oid:
+        raise CleanupBlockedError(
+            "worktree registration and branch ref disagree; preserving checkout"
+        )
+    runtime_root = _runtime_root_for_status(root=root, status=status)
+    if runtime_root is None:
+        raise CleanupBlockedError(
+            f"runtime metadata does not belong to {checkout_path}; preserving checkout"
+        )
+    expected_run_parent = runtime_root / ".agent-flow" / "runs"
+    if run_dir.parent != expected_run_parent:
+        raise CleanupBlockedError(
+            f"run directory is outside checkout runtime state: {run_dir}"
+        )
+
+    digest = hashlib.sha256(
+        f"{worktree_path_key(_git_common_dir(root))}\0{worktree_path_key(status.path)}".encode(
+            "utf-8"
+        )
+    ).hexdigest()[:16]
+    archive_state = (
+        _agent_flow_state_dir(root)
+        / "archive"
+        / "worktrees"
+        / f"{_safe_component(status.name)}-{digest}"
+    )
+    archive_run = archive_state / ".agent-flow" / "runs" / run_dir.name
+    journal_path = _cleanup_pending_root(root) / f"{digest}-{run_dir.name}.json"
+    now = _utc_now()
+    journal: dict[str, Any] = {
+        "version": CLEANUP_JOURNAL_VERSION,
+        "status": "cleanup_pending",
+        "step": "prepared",
+        "run_id": run_dir.name,
+        "repository": _cleanup_repository_identity(root),
+        "checkout": {
+            "identity": checkout_identity,
+            "name": status.name,
+            "path": str(real_path(status.path)),
+            "registration_identity": registered.registration_identity,
+            "branch": status.branch,
+            "expected_base_ref": status.base_ref,
+            "expected_base_oid": status.base_oid,
+            "expected_head_oid": branch_oid,
+            "branch_owned": status.branch_created_by_agent_flow,
+            "delete_branch": delete_branch,
+        },
+        "target": {
+            "ref": target_ref,
+            "expected_oid": target_oid,
+        },
+        "integration": {
+            "strategy": integration_strategy,
+            "proof": "pending",
+            "method": None,
+        },
+        "leases": {
+            "cleanup": {
+                "path": str(
+                    _agent_flow_state_dir(root)
+                    / "cleanup-leases"
+                    / "repository.lock"
+                ),
+                "state": "pending",
+            },
+            "provider": {"state": "inactive"},
+        },
+        "run": {
+            "source_dir": str(run_dir),
+            "source_state_root": str(runtime_root),
+            "archive_dir": str(archive_run),
+            "archive_state_root": str(archive_state),
+            "archive_digest": None,
+        },
+        "steps": {
+            step: {"status": "pending", "completed_at": None}
+            for step in CLEANUP_STEPS
+        },
+        "created_at": now,
+        "updated_at": now,
+        "last_error": None,
+        "recovery": "agent-flow continue --worktree " + status.name,
+    }
+    _write_cleanup_journal(journal_path, journal)
+    _bind_run_to_cleanup(
+        run_dir=run_dir,
+        journal_path=journal_path,
+        checkout_identity=checkout_identity,
+        checkout_registration_identity=registered.registration_identity,
+    )
+    return journal_path, journal
+
+
+def _validate_cleanup_resume(
+    *,
+    root: Path,
+    checkout_path: Path,
+    run_dir: Path,
+    target_branch: str,
+    journal_path: Path,
+    journal: dict[str, Any],
+) -> None:
+    expected_root = _cleanup_pending_root(root)
+    if real_path(journal_path.parent) != real_path(expected_root):
+        raise CleanupBlockedError("cleanup journal escapes the repository state root")
+    if journal["repository"] != _cleanup_repository_identity(root):
+        raise CleanupBlockedError("cleanup journal repository identity changed")
+    if journal["target"]["ref"] != f"refs/heads/{target_branch}":
+        raise CleanupBlockedError("cleanup target branch changed since journal preparation")
+    if real_path(Path(journal["checkout"]["path"])) != real_path(checkout_path):
+        raise CleanupBlockedError("cleanup checkout path changed since journal preparation")
+    allowed = {
+        Path(journal["run"]["source_dir"]),
+        Path(journal["run"]["archive_dir"]),
+    }
+    if run_dir not in allowed:
+        raise CleanupBlockedError("cleanup resume run directory does not match journal owner")
+    _bind_run_to_cleanup(
+        run_dir=run_dir,
+        journal_path=journal_path,
+        checkout_identity=journal["checkout"]["identity"],
+        checkout_registration_identity=journal["checkout"][
+            "registration_identity"
+        ],
+    )
+
+
+def _bind_run_to_cleanup(
+    *,
+    run_dir: Path,
+    journal_path: Path,
+    checkout_identity: str,
+    checkout_registration_identity: str,
+) -> None:
+    meta = read_meta(run_dir)
+    if (
+        meta.get("run_id") != run_dir.name
+        or meta.get("checkout_identity") != checkout_identity
+        or meta.get("checkout_registration_identity")
+        != checkout_registration_identity
+    ):
+        raise CleanupBlockedError(
+            f"run identity is unknown or mismatched at {run_dir}; preserving checkout"
+        )
+    meta["cleanup_state"] = "cleanup_pending"
+    meta["cleanup_journal"] = str(journal_path)
+    write_meta(run_dir, meta)
+
+
+def _archive_historical_runs(
+    *, journal_path: Path, journal: dict[str, Any]
+) -> None:
+    source_runs = Path(journal["run"]["source_state_root"]) / ".agent-flow" / "runs"
+    archive_runs = Path(journal["run"]["archive_state_root"]) / ".agent-flow" / "runs"
+    owner = Path(journal["run"]["source_dir"])
+    try:
+        candidates = sorted(source_runs.iterdir(), key=lambda path: path.name)
+    except OSError as exc:
+        raise CleanupBlockedError(
+            f"cannot enumerate checkout run history: {source_runs}"
+        ) from exc
+    records = journal["run"].setdefault("historical_archives", {})
+    if not isinstance(records, dict):
+        raise CleanupBlockedError("cleanup historical archive records are malformed")
+    for source in candidates:
+        if source == owner:
+            continue
+        try:
+            identity = source.lstat()
+        except OSError as exc:
+            raise CleanupBlockedError(
+                f"cannot inspect historical run: {source}"
+            ) from exc
+        if source.name == "active.lock" and stat.S_ISREG(identity.st_mode):
+            continue
+        if not stat.S_ISDIR(identity.st_mode) or stat.S_ISLNK(identity.st_mode):
+            raise CleanupBlockedError(
+                f"historical run is not a real directory: {source}"
+            )
+        digest = _run_tree_digest(source, exclude_lifecycle=False)
+        record = records.get(source.name)
+        destination = archive_runs / source.name
+        expected_record = {
+            "source": str(source),
+            "archive": str(destination),
+            "digest": digest,
+        }
+        if record is None:
+            records[source.name] = expected_record
+            journal["updated_at"] = _utc_now()
+            _write_cleanup_journal(journal_path, journal)
+        elif record != expected_record:
+            raise CleanupBlockedError(
+                f"historical run changed after cleanup preparation: {source}"
+            )
+        if destination.exists():
+            if _run_tree_digest(destination, exclude_lifecycle=False) != digest:
+                raise CleanupBlockedError(
+                    f"historical run archive checksum mismatch: {destination}"
+                )
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(
+            f".{destination.name}.tmp-{os.getpid()}"
+        )
+        if temporary.exists():
+            shutil.rmtree(temporary)
+        try:
+            shutil.copytree(source, temporary, symlinks=True)
+            if _run_tree_digest(source, exclude_lifecycle=False) != digest:
+                raise CleanupBlockedError(
+                    f"historical run changed during archive copy: {source}"
+                )
+            if _run_tree_digest(temporary, exclude_lifecycle=False) != digest:
+                raise CleanupBlockedError(
+                    f"historical run archive copy checksum mismatch: {temporary}"
+                )
+            os.replace(temporary, destination)
+        finally:
+            if temporary.exists():
+                shutil.rmtree(temporary)
+
+
+def _archive_cleanup_run(
+    *, journal_path: Path, journal: dict[str, Any]
+) -> None:
+    _archive_historical_runs(journal_path=journal_path, journal=journal)
+    source = Path(journal["run"]["source_dir"])
+    archive = Path(journal["run"]["archive_dir"])
+    expected_digest = journal["run"].get("archive_digest")
+    if not isinstance(expected_digest, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", expected_digest
+    ):
+        if archive.exists():
+            raise CleanupBlockedError(
+                f"archive checksum is missing for existing archive: {archive}"
+            )
+        if not source.is_dir():
+            raise CleanupBlockedError(
+                f"source run disappeared before archive: {source}"
+            )
+        expected_digest = _run_tree_digest(source)
+        journal["run"]["archive_digest"] = expected_digest
+        journal["updated_at"] = _utc_now()
+        _write_cleanup_journal(journal_path, journal)
+    if archive.exists():
+        _assert_archived_run_identity(
+            archive=archive, journal_path=journal_path, journal=journal
+        )
+        if source.is_dir() and _run_tree_digest(source) != expected_digest:
+            raise CleanupBlockedError(
+                f"source run changed after archive snapshot: {source}"
+            )
+        return
+    if not source.is_dir():
+        raise CleanupBlockedError(
+            f"source run disappeared before archive: {source}"
+        )
+    if _run_tree_digest(source) != expected_digest:
+        raise CleanupBlockedError(
+            f"source run changed before archive copy: {source}"
+        )
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    temporary = archive.with_name(f".{archive.name}.tmp-{os.getpid()}")
+    if temporary.exists():
+        shutil.rmtree(temporary)
+    try:
+        shutil.copytree(source, temporary, symlinks=True)
+        if _run_tree_digest(source) != expected_digest:
+            raise CleanupBlockedError(
+                f"source run changed during archive copy: {source}"
+            )
+        if _run_tree_digest(temporary) != expected_digest:
+            raise CleanupBlockedError(
+                f"archive copy checksum mismatch: {temporary}"
+            )
+        os.replace(temporary, archive)
+    finally:
+        if temporary.exists():
+            shutil.rmtree(temporary)
+    _assert_archived_run_identity(
+        archive=archive, journal_path=journal_path, journal=journal
+    )
+
+
+def _assert_archived_run_identity(
+    *, archive: Path, journal_path: Path, journal: dict[str, Any]
+) -> None:
+    meta = read_meta(archive)
+    if (
+        meta.get("run_id") != journal["run_id"]
+        or meta.get("checkout_identity") != journal["checkout"]["identity"]
+        or meta.get("cleanup_journal") != str(journal_path)
+    ):
+        raise CleanupBlockedError(
+            f"archive identity is unknown or mismatched at {archive}"
+        )
+    expected_digest = journal["run"].get("archive_digest")
+    if (
+        not isinstance(expected_digest, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", expected_digest)
+        or _run_tree_digest(archive) != expected_digest
+    ):
+        raise CleanupBlockedError(
+            f"archive checksum is missing or mismatched at {archive}"
+        )
+
+
+def _run_tree_digest(root: Path, *, exclude_lifecycle: bool = True) -> str:
+    """Hash immutable run payload while excluding lifecycle publication files."""
+    try:
+        root_identity = root.lstat()
+    except OSError as exc:
+        raise CleanupBlockedError(f"cannot inspect run archive: {root}") from exc
+    if not stat.S_ISDIR(root_identity.st_mode) or stat.S_ISLNK(root_identity.st_mode):
+        raise CleanupBlockedError(f"run archive is not a real directory: {root}")
+    digest = hashlib.sha256(b"agent-flow-run-archive-v1\0")
+    try:
+        paths = sorted(root.rglob("*"), key=lambda path: path.relative_to(root).as_posix())
+    except OSError as exc:
+        raise CleanupBlockedError(f"cannot enumerate run archive: {root}") from exc
+    for path in paths:
+        relative = path.relative_to(root).as_posix()
+        if exclude_lifecycle and relative in {"active", "meta.json"}:
+            continue
+        try:
+            identity = path.lstat()
+        except OSError as exc:
+            raise CleanupBlockedError(
+                f"run archive entry changed during checksum: {path}"
+            ) from exc
+        if stat.S_ISDIR(identity.st_mode):
+            kind = "directory"
+            size = 0
+        elif stat.S_ISREG(identity.st_mode):
+            kind = "file"
+            size = identity.st_size
+        else:
+            raise CleanupBlockedError(
+                f"run archive contains a non-regular entry: {path}"
+            )
+        header = json.dumps(
+            [kind, relative, stat.S_IMODE(identity.st_mode), size],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        digest.update(len(header).to_bytes(8, "big"))
+        digest.update(header)
+        if kind == "file":
+            _digest_run_file(path=path, expected=identity, digest=digest)
+    return digest.hexdigest()
+
+
+def _digest_run_file(
+    *, path: Path, expected: os.stat_result, digest: Any
+) -> None:
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise CleanupBlockedError(
+            "run archive checksum requires no-follow file opening"
+        )
+    try:
+        fd = os.open(path, os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0))
+    except OSError as exc:
+        raise CleanupBlockedError(
+            f"cannot open run archive entry safely: {path}"
+        ) from exc
+    try:
+        opened = os.fstat(fd)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino, opened.st_size)
+            != (expected.st_dev, expected.st_ino, expected.st_size)
+        ):
+            raise CleanupBlockedError(
+                f"run archive entry identity changed during checksum: {path}"
+            )
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        after = os.fstat(fd)
+        if (
+            after.st_size != opened.st_size
+            or after.st_mtime_ns != opened.st_mtime_ns
+        ):
+            raise CleanupBlockedError(
+                f"run archive entry changed during checksum: {path}"
+            )
+    finally:
+        os.close(fd)
+
+
+def _assert_cleanup_owner_active(
+    *, journal_path: Path, journal: dict[str, Any]
+) -> None:
+    source_state = Path(journal["run"]["source_state_root"])
+    source_run = Path(journal["run"]["source_dir"])
+    archive_state = Path(journal["run"]["archive_state_root"])
+    archive_run = Path(journal["run"]["archive_dir"])
+    if source_state.exists():
+        state_root, owner_run = source_state, source_run
+    else:
+        state_root, owner_run = archive_state, archive_run
+    try:
+        active = find_active_runs(state_root)
+    except Exception as exc:
+        raise CleanupBlockedError(
+            f"active run state is unknown at {state_root}; preserving checkout"
+        ) from exc
+    if len(active) != 1 or active[0].path != owner_run:
+        raise CleanupBlockedError(
+            "cleanup owner is not the only exact active run; preserving checkout"
+        )
+    meta = read_meta(owner_run)
+    if (
+        meta.get("run_id") != journal["run_id"]
+        or meta.get("checkout_identity") != journal["checkout"]["identity"]
+        or meta.get("cleanup_state") != "cleanup_pending"
+        or meta.get("cleanup_journal") != str(journal_path)
+    ):
+        raise CleanupBlockedError(
+            "active run owner identity or cleanup phase is unknown; preserving checkout"
+        )
+
+
+def _record_integration_proof(*, root: Path, journal: dict[str, Any]) -> None:
+    target_oid = _refresh_integration_target(root=root, journal=journal)
+    _validate_cleanup_snapshot(root=root, journal=journal, require_clean=True)
+    _prove_recorded_integration(
+        root=root,
+        journal=journal,
+        target_oid=target_oid,
+    )
+
+
+def _refresh_integration_target(*, root: Path, journal: dict[str, Any]) -> str:
+    target_ref = journal["target"]["ref"]
+    current = _ref_oid(root=root, ref=target_ref)
+    if current is None:
+        raise CleanupBlockedError(
+            "integration target disappeared; preserving checkout and branch"
+        )
+    if current != journal["target"]["expected_oid"]:
+        journal["target"]["expected_oid"] = current
+        journal["integration"]["proof"] = "pending"
+        journal["integration"]["method"] = None
+        journal["integration"].pop("verified_at", None)
+        journal["integration"]["target_refreshed_at"] = _utc_now()
+    return current
+
+
+def _prove_recorded_integration(
+    *, root: Path, journal: dict[str, Any], target_oid: str
+) -> None:
+    base_oid = journal["checkout"]["expected_base_oid"]
+    head_oid = journal["checkout"]["expected_head_oid"]
+    for oid in (base_oid, head_oid, target_oid):
+        _assert_commit_oid(root=root, oid=oid)
+    if not _is_ancestor(root=root, ancestor=base_oid, descendant=head_oid):
+        raise CleanupBlockedError(
+            "recorded base is not an ancestor of recorded head; proof is unknown"
+        )
+    if _is_ancestor(root=root, ancestor=head_oid, descendant=target_oid):
+        method = "head-ancestor-of-target"
+    elif _merge_tree_is_noop(root=root, head_oid=head_oid, target_oid=target_oid):
+        method = "merge-tree-noop"
+    else:
+        raise CleanupBlockedError(
+            "cannot prove recorded head is integrated into recorded target; "
+            "preserving checkout and branch"
+        )
+    journal["integration"]["proof"] = "verified"
+    journal["integration"]["method"] = method
+    journal["integration"]["verified_at"] = _utc_now()
+
+
+def _validate_cleanup_snapshot(
+    *, root: Path, journal: dict[str, Any], require_clean: bool
+) -> None:
+    checkout = journal["checkout"]
+    path = Path(checkout["path"])
+    registered = _registered_at_path(root=root, path=path)
+    if (
+        registered is None
+        or registered.branch != checkout["branch"]
+        or registered.head != checkout["expected_head_oid"]
+        or registered.registration_identity
+        != checkout["registration_identity"]
+    ):
+        raise CleanupBlockedError(
+            "worktree registration changed since cleanup preparation; preserving checkout"
+        )
+    _assert_not_locked(path=path, entry=registered)
+    branch_oid = _ref_oid(root=root, ref=f"refs/heads/{checkout['branch']}")
+    if branch_oid != checkout["expected_head_oid"]:
+        raise CleanupBlockedError(
+            "worktree branch ref changed since cleanup preparation; preserving checkout"
+        )
+    target_oid = _ref_oid(root=root, ref=journal["target"]["ref"])
+    if target_oid != journal["target"]["expected_oid"]:
+        raise CleanupBlockedError(
+            "integration target drifted since cleanup preparation; preserving checkout"
+        )
+    for oid in (
+        checkout["expected_base_oid"],
+        checkout["expected_head_oid"],
+        target_oid,
+    ):
+        _assert_commit_oid(root=root, oid=oid)
+    if require_clean:
+        status = git_safe(
+            "-C",
+            str(path),
+            "status",
+            "--porcelain",
+            "--ignored=matching",
+            cwd=path,
+            optional_locks=False,
+        )
+        if not status.ok:
+            raise CleanupBlockedError(
+                f"cannot inspect checkout status at {path}; preserving checkout"
+            )
+        if status.stdout.strip():
+            raise CleanupBlockedError(
+                f"checkout is dirty at {path}; preserving checkout"
+            )
+
+
+def _remove_journal_checkout(
+    *, root: Path, journal_path: Path, journal: dict[str, Any]
+) -> None:
+    path = Path(journal["checkout"]["path"])
+    registered = _registered_at_path(root=root, path=path)
+    if not path.exists() and registered is None:
+        return
+    _assert_cleanup_owner_active(
+        journal_path=journal_path,
+        journal=journal,
+    )
+    _record_integration_proof(root=root, journal=journal)
+    journal["updated_at"] = _utc_now()
+    _write_cleanup_journal(journal_path, journal)
+    _run_git(root, "worktree", "remove", str(path))
+    if path.exists() or _registered_at_path(root=root, path=path) is not None:
+        raise CleanupBlockedError(
+            f"checkout removal did not retire registration and path: {path}"
+        )
+
+
+def _delete_journal_branch(
+    *, root: Path, journal_path: Path, journal: dict[str, Any]
+) -> None:
+    checkout = journal["checkout"]
+    if not checkout["delete_branch"] or not checkout["branch_owned"]:
+        return
+    branch = checkout["branch"]
+    expected_oid = checkout["expected_head_oid"]
+    current_oid = _ref_oid(root=root, ref=f"refs/heads/{branch}")
+    if current_oid is None:
+        return
+    if current_oid != expected_oid:
+        raise CleanupBlockedError(
+            "worktree branch ref changed before CAS; preserving branch ref"
+        )
+    target_oid = _refresh_integration_target(root=root, journal=journal)
+    _prove_recorded_integration(
+        root=root,
+        journal=journal,
+        target_oid=target_oid,
+    )
+    journal["updated_at"] = _utc_now()
+    _write_cleanup_journal(journal_path, journal)
+    _delete_branch_ref_cas(
+        root=root,
+        branch=branch,
+        expected_oid=expected_oid,
+        target_ref=journal["target"]["ref"],
+        target_oid=target_oid,
+    )
+
+
+def _remove_journal_metadata(*, root: Path, journal: dict[str, Any]) -> None:
+    checkout = journal["checkout"]
+    path = Path(checkout["path"])
+    if path.exists() or _registered_at_path(root=root, path=path) is not None:
+        raise CleanupBlockedError(
+            "checkout still exists before metadata cleanup; preserving metadata"
+        )
+    remove_worktree_metadata(
+        root=root,
+        name=checkout["name"],
+        path=path,
+    )
+    runtime_root = Path(journal["run"]["source_state_root"])
+    if runtime_root.exists():
+        raise CleanupBlockedError(
+            f"checkout runtime metadata still exists at {runtime_root}"
+        )
+
+
+def _assert_commit_oid(*, root: Path, oid: str) -> None:
+    if not _is_oid(oid):
+        raise CleanupBlockedError(f"invalid recorded commit OID: {oid!r}")
+    result = git_safe(
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        f"{oid}^{{commit}}",
+        cwd=root,
+        optional_locks=False,
+    )
+    if not result.ok or result.stdout.strip() != oid:
+        raise CleanupBlockedError(
+            f"recorded commit OID cannot be resolved: {oid}"
+        )
+
+
+def _is_ancestor(*, root: Path, ancestor: str, descendant: str) -> bool:
+    result = git_safe(
+        "merge-base",
+        "--is-ancestor",
+        ancestor,
+        descendant,
+        cwd=root,
+        optional_locks=False,
+    )
+    if result.ok:
+        return True
+    if result.returncode == 1 and not result.stderr.strip():
+        return False
+    raise CleanupBlockedError(
+        f"git cannot prove ancestry from {ancestor} to {descendant}"
+    )
+
+
+def _merge_tree_is_noop(*, root: Path, head_oid: str, target_oid: str) -> bool:
+    merged = git_safe(
+        "merge-tree",
+        "--write-tree",
+        target_oid,
+        head_oid,
+        cwd=root,
+        optional_locks=False,
+    )
+    if not merged.ok:
+        return False
+    merged_tree = merged.stdout.splitlines()[0].strip() if merged.stdout else ""
+    target_tree = _tree_oid(root=root, oid=target_oid)
+    return _is_oid(merged_tree) and merged_tree == target_tree
+
+
+def _tree_oid(*, root: Path, oid: str) -> str:
+    result = git_safe(
+        "rev-parse",
+        "--verify",
+        f"{oid}^{{tree}}",
+        cwd=root,
+        optional_locks=False,
+    )
+    tree = result.stdout.strip() if result.ok else ""
+    if not _is_oid(tree):
+        raise CleanupBlockedError(f"cannot resolve tree for recorded OID {oid}")
+    return tree
+
+
+def _cleanup_pending_root(root: Path) -> Path:
+    return _agent_flow_state_dir(root) / "cleanup-pending"
+
+
+def _git_common_dir(root: Path) -> Path:
+    return real_path(_agent_flow_git_dir(root).parent)
+
+
+def _agent_flow_state_dir(root: Path) -> Path:
+    return _git_common_dir(root) / "agent-flow"
+
+
+def _cleanup_repository_identity(root: Path) -> dict[str, str | int]:
+    common_dir = _git_common_dir(root)
+    try:
+        identity = common_dir.lstat()
+    except OSError as exc:
+        raise CleanupBlockedError(
+            f"cleanup repository identity is unavailable: {common_dir}"
+        ) from exc
+    if not stat.S_ISDIR(identity.st_mode) or common_dir.is_symlink():
+        raise CleanupBlockedError(
+            f"cleanup repository identity is not a real directory: {common_dir}"
+        )
+    return {
+        "common_dir": str(common_dir),
+        "common_dir_device": identity.st_dev,
+        "common_dir_inode": identity.st_ino,
+        "leader_root": str(real_path(root)),
+    }
+
+
+
+def _valid_cleanup_repository_identity(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    return (
+        isinstance(value.get("common_dir"), str)
+        and bool(value["common_dir"])
+        and isinstance(value.get("leader_root"), str)
+        and bool(value["leader_root"])
+        and isinstance(value.get("common_dir_device"), int)
+        and not isinstance(value["common_dir_device"], bool)
+        and value["common_dir_device"] >= 0
+        and isinstance(value.get("common_dir_inode"), int)
+        and not isinstance(value["common_dir_inode"], bool)
+        and value["common_dir_inode"] > 0
+    )
+
+
+def _load_cleanup_journal(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CleanupBlockedError(
+            f"cleanup journal is missing or unreadable at {path}"
+        ) from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("version") != CLEANUP_JOURNAL_VERSION
+        or payload.get("status")
+        not in {"cleanup_pending", "steps_complete", "complete"}
+        or not _valid_cleanup_repository_identity(payload.get("repository"))
+        or not isinstance(payload.get("checkout"), dict)
+        or not isinstance(
+            payload["checkout"].get("registration_identity"), str
+        )
+        or not payload["checkout"]["registration_identity"]
+        or not isinstance(payload.get("steps"), dict)
+        or any(
+            not isinstance(payload["steps"].get(step), dict)
+            or payload["steps"][step].get("status") not in {"pending", "done"}
+            for step in CLEANUP_STEPS
+        )
+    ):
+        raise CleanupBlockedError(
+            f"cleanup journal schema is unknown at {path}; preserving checkout"
+        )
+    return payload
+
+
+def _write_cleanup_journal(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, raw_temporary = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    temporary = Path(raw_temporary)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(f"{json.dumps(payload, indent=2, sort_keys=True)}\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _record_cleanup_failure(
+    path: Path, journal: dict[str, Any], message: str
+) -> None:
+    journal["status"] = "cleanup_pending"
+    journal["last_error"] = {
+        "message": message,
+        "at": _utc_now(),
+    }
+    journal["updated_at"] = journal["last_error"]["at"]
+    _write_cleanup_journal(path, journal)
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 def _same_registration(
     before: RegisteredWorktree, after: RegisteredWorktree | None
 ) -> bool:
-    """같은 등록인가. 경로가 같아도 가리키는 대상이 바뀌었으면 다른 worktree다."""
-    if after is None:
+    """같은 등록인가. 경로·branch·HEAD가 재사용돼도 checkout 인스턴스는 다르다."""
+    if (
+        after is None
+        or before.registration_identity is None
+        or after.registration_identity is None
+    ):
         return False
-    return before.branch == after.branch and before.head == after.head
+    return (
+        before.branch == after.branch
+        and before.head == after.head
+        and before.registration_identity == after.registration_identity
+    )
 
 
 def _registered_at_path(*, root: Path, path: Path) -> RegisteredWorktree | None:
-    for entry in list_registered_worktrees(root):
-        if same_worktree_path(entry.path, path):
-            return entry
-    return None
+    return registered_worktree_at(root, path)
 
 
 def _assert_not_locked(*, path: Path, entry: RegisteredWorktree | None) -> None:
@@ -322,6 +1626,262 @@ def _assert_not_locked(*, path: Path, entry: RegisteredWorktree | None) -> None:
 def assert_worktree_unlocked(*, root: Path, path: Path) -> None:
     """git이 잠근 경로면 하드 실패. 잔재 정리 경로도 이 잠금을 넘지 않는다."""
     _assert_not_locked(path=path, entry=_registered_at_path(root=root, path=path))
+
+
+def _checkout_lease_path(root: Path, path: Path) -> Path:
+    """One lease file per checkout. 저장소 전역 lease는 워커가 상시 도는
+    상태에서 cleanup을 영원히 굶긴다. 정리 대상과 무관한 checkout의 활동은
+    정리를 막을 이유가 없다."""
+    digest = hashlib.sha256(
+        worktree_path_key(real_path(path)).encode("utf-8")
+    ).hexdigest()[:16]
+    return _agent_flow_state_dir(root) / "cleanup-leases" / f"checkout-{digest}.lock"
+
+
+@contextmanager
+def worktree_run_activation(
+    *,
+    root: Path,
+    path: Path,
+    registration_identity: str | None,
+) -> Iterator[None]:
+    """Pin one checkout registration until its active run marker is durable."""
+    if registration_identity is None:
+        raise WorktreeIsolationError(
+            f"worktree registration identity is unavailable: {path}"
+        )
+    lock_path = _checkout_lease_path(root, path)
+    try:
+        with shared_file_lease(lock_path):
+            current = _registered_at_path(root=root, path=path)
+            if (
+                current is None
+                or current.registration_identity != registration_identity
+            ):
+                raise WorktreeIsolationError(
+                    f"worktree registration changed before run activation: {path}"
+                )
+            verify_linked_worktree(
+                root=root,
+                path=path,
+                expected_branch=current.branch,
+                managed_root=path.parent,
+            )
+            yield
+    except FileLeaseUnavailable as exc:
+        raise WorktreeIsolationError(
+            f"repository cleanup is active or unsafe at {lock_path}; "
+            "run activation is blocked"
+        ) from exc
+
+
+@contextmanager
+def _cleanup_lease(root: Path, checkout_path: Path) -> Iterator[Path]:
+    lock_path = _checkout_lease_path(root, checkout_path)
+    try:
+        with exclusive_file_lease(lock_path):
+            yield lock_path
+    except FileLeaseUnavailable as exc:
+        raise CleanupBlockedError(
+            f"this checkout is activating a run or already being retired "
+            f"at {lock_path}; preserving checkout"
+        ) from exc
+
+
+@contextmanager
+def _run_start_exclusion(runtime_root: Path | None) -> Iterator[None]:
+    if runtime_root is None:
+        yield
+        return
+    lock_path = runtime_root / ".agent-flow" / "runs" / "active.lock"
+    try:
+        with exclusive_file_lease(lock_path):
+            yield
+    except FileLeaseUnavailable as exc:
+        raise CleanupBlockedError(
+            f"run lifecycle is changing or unsafe at {runtime_root}; preserving checkout"
+        ) from exc
+
+
+
+
+
+def _runtime_root_for_status(*, root: Path, status: WorktreeStatus) -> Path | None:
+    try:
+        key = _runtime_state_key(root=root, name=status.name)
+        runtime_root = _runtime_state_root(root=root, name=key)
+        if runtime_root.exists() and not _metadata_belongs_to_path(
+            root=root, key=key, path=status.path
+        ):
+            return None
+        return runtime_root
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise CleanupBlockedError(
+            f"cannot resolve runtime state for {status.path}; preserving checkout"
+        ) from exc
+
+
+def _assert_no_active_runs(runtime_root: Path | None) -> None:
+    if runtime_root is None:
+        return
+    try:
+        active = find_active_runs(runtime_root)
+    except Exception as exc:
+        raise CleanupBlockedError(
+            f"active run state is unknown at {runtime_root}; preserving checkout"
+        ) from exc
+    if active:
+        run_ids = ", ".join(run.run_id for run in active)
+        raise CleanupBlockedError(
+            f"active run exists for checkout ({run_ids}); preserving checkout"
+        )
+
+
+def _branch_delete_identity(
+    *,
+    root: Path,
+    status: WorktreeStatus,
+    registered: RegisteredWorktree | None,
+) -> tuple[str, str] | None:
+    planned_branch = _planned_branch(status.name)
+    if (
+        planned_branch is None
+        or not status.branch_created_by_agent_flow
+        or status.branch != planned_branch
+    ):
+        return None
+    expected_oid = _ref_oid(root=root, ref=f"refs/heads/{planned_branch}")
+    if expected_oid is None:
+        return None
+    if registered is not None and (
+        registered.branch != planned_branch or registered.head != expected_oid
+    ):
+        raise WorktreeIsolationError(
+            f"worktree registration changed for owned branch at {status.path}; "
+            "preserving checkout"
+        )
+    return planned_branch, expected_oid
+
+
+def _delete_branch_ref_cas(
+    *,
+    root: Path,
+    branch: str,
+    expected_oid: str,
+    target_ref: str | None = None,
+    target_oid: str | None = None,
+) -> None:
+    if (target_ref is None) != (target_oid is None):
+        raise ValueError("target ref and OID must be supplied together")
+    ref = f"refs/heads/{branch}"
+
+    def delete_once() -> None:
+        current_oid = _ref_oid(root=root, ref=ref)
+        if current_oid is None:
+            return
+        if current_oid != expected_oid:
+            raise WorktreeIsolationError(
+                f"branch ref changed before CAS delete: {ref}; preserving it"
+            )
+        commands: list[str] = []
+        if target_ref is not None and target_oid is not None:
+            current_target = _ref_oid(root=root, ref=target_ref)
+            if current_target != target_oid:
+                raise WorktreeIsolationError(
+                    f"integration target changed before CAS delete: {target_ref}; "
+                    "preserving branch ref"
+                )
+            commands.append(f"verify {target_ref} {target_oid}")
+        commands.append(f"delete {ref} {expected_oid}")
+        result = git_safe(
+            "update-ref",
+            "--stdin",
+            cwd=root,
+            timeout_s=GIT_WORKTREE_TIMEOUT_S,
+            input_text="\n".join(commands) + "\n",
+        )
+        if result.ok:
+            return
+        current_oid = _ref_oid(root=root, ref=ref)
+        if current_oid is None:
+            return
+        if current_oid != expected_oid:
+            raise WorktreeIsolationError(
+                f"branch ref changed during CAS delete: {ref}; preserving it"
+            )
+        if target_ref is not None and _ref_oid(root=root, ref=target_ref) != target_oid:
+            raise WorktreeIsolationError(
+                f"integration target changed during CAS delete: {target_ref}; "
+                "preserving branch ref"
+            )
+        detail = result.stderr.strip() or result.error or f"git exited {result.returncode}"
+        raise WorktreeIsolationError(
+            f"branch ref CAS failed for {ref} at {expected_oid}: {detail}; "
+            "the ref was preserved"
+        )
+
+    with_git_lock_retry(
+        delete_once,
+        is_retryable=lambda exc: (
+            isinstance(exc, WorktreeIsolationError)
+            and any(
+                marker in str(exc).lower()
+                for marker in (
+                    "index.lock",
+                    "config.lock",
+                    "packed-refs.lock",
+                    "unable to create",
+                    "another git process seems to be running",
+                    "file exists",
+                )
+            )
+        ),
+    )
+    if _ref_oid(root=root, ref=ref) is not None:
+        raise WorktreeIsolationError(
+            f"branch ref still exists after CAS delete: {ref}; preserving it"
+        )
+
+
+def _ref_oid(*, root: Path, ref: str) -> str | None:
+    result = git_safe(
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "--end-of-options",
+        ref,
+        cwd=root,
+        optional_locks=False,
+    )
+    if result.ok:
+        oid = result.stdout.strip()
+        if _is_oid(oid):
+            return oid
+        raise WorktreeIsolationError(f"git returned an invalid object id for {ref}")
+    if result.returncode == 1 and not result.stderr.strip():
+        return None
+    raise WorktreeIsolationError(
+        f"cannot resolve {ref}; preserving checkout: "
+        f"{result.stderr.strip() or result.stdout.strip() or 'git did not answer'}"
+    )
+
+
+def _merge_base_oid(*, root: Path, left: str, right: str) -> str:
+    result = git_safe(
+        "merge-base", left, right, cwd=root, optional_locks=False
+    )
+    oid = result.stdout.strip() if result.ok else ""
+    if not _is_oid(oid):
+        raise WorktreeIsolationError(
+            f"cannot record worktree base OID for {left} and {right}"
+        )
+    return oid
+
+
+def _is_oid(value: object) -> bool:
+    return isinstance(value, str) and bool(
+        re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", value)
+    )
 
 
 def worktree_branch_exists(*, root: Path, branch: str) -> bool:
@@ -399,36 +1959,43 @@ def removable_worktrees(*, root: Path) -> list[RegisteredWorktree]:
 
 
 def resolve_worktree(*, root: Path, selector: str) -> RegisteredWorktree | None:
-    """선택자를 git이 등록한 worktree 하나로 해석한다.
-
-    이름에서 경로를 역산하지 않는다. ``git worktree list``가 보고한 항목만 후보이고
-    선택자는 그 목록과 대조만 한다 — 그래야 agent-flow가 만들지 않은 체크아웃도
-    사용자가 목록에서 본 그대로 지목할 수 있다.
-    """
+    """Resolve one registered worktree without letting aliases beat exact IDs."""
     wanted = selector.strip()
     if not wanted:
         return None
-    matched: dict[str, RegisteredWorktree] = {}
+    ranked: dict[int, dict[str, RegisteredWorktree]] = {}
     for entry in removable_worktrees(root=root):
-        if _selector_matches(root=root, selector=wanted, entry=entry):
-            matched[worktree_path_key(entry.path)] = entry
+        rank = _selector_match_rank(root=root, selector=wanted, entry=entry)
+        if rank is not None:
+            ranked.setdefault(rank, {})[worktree_path_key(entry.path)] = entry
+    if not ranked:
+        return None
+    matched = ranked[min(ranked)]
     if len(matched) > 1:
         raise AmbiguousWorktreeSelector(
             wanted, tuple(sorted(matched.values(), key=lambda item: str(item.path)))
         )
-    return next(iter(matched.values()), None)
+    return next(iter(matched.values()))
 
 
-def _selector_matches(*, root: Path, selector: str, entry: RegisteredWorktree) -> bool:
-    if selector == entry.branch or selector == entry.path.name:
-        return True
-    derived = _derived_worktree_identity(selector)
-    if derived is not None and (derived[0] == entry.path.name or derived[1] == entry.branch):
-        return True
-    return any(
+def _selector_match_rank(
+    *, root: Path, selector: str, entry: RegisteredWorktree
+) -> int | None:
+    if any(
         same_worktree_path(candidate, entry.path)
         for candidate in _selector_path_candidates(root=root, selector=selector)
-    )
+    ):
+        return 0
+    if selector == entry.branch:
+        return 1
+    if selector == entry.path.name:
+        return 2
+    derived = _derived_worktree_identity(selector)
+    if derived is not None and (
+        derived[0] == entry.path.name or derived[1] == entry.branch
+    ):
+        return 3
+    return None
 
 
 def _derived_worktree_identity(selector: str) -> tuple[str, str] | None:
@@ -465,12 +2032,14 @@ def _status_for_registered(
     # `feat-issue#110` 같은 합법적인 디렉터리가 `feat-issue-110`으로 뭉개져,
     # 목록이 보여 준 이름을 그대로 넣어도 다시 못 찾는 원래 버그로 되돌아간다.
     name = registered.path.name
-    # 반면 manifest/런타임 상태의 **키**는 생성 시점의 정규화된 이름이다. 그쪽만
-    # 정규화해서 찾는다. 정규화할 수 없는 이름이면 애초에 agent-flow가 만든
-    # 자리가 아니므로 manifest도 없다.
+    # manifest와 런타임 상태도 등록부의 exact 이름을 우선한다. 정규화된 형제가
+    # 존재해도 이 checkout의 상태를 읽어야 resume와 terminal cleanup이 같은
+    # 소유권 기록을 사용한다.
     planned_branch = _planned_branch(name)
     payload = _load_worktree_manifest(root=root, name=name)
     manifest_branch = _manifest_branch(payload)
+    manifest_base_ref = _manifest_string(payload, "base_ref")
+    manifest_base_oid = _manifest_oid(payload, "base_oid")
     # 소유권은 manifest가 계획 브랜치를 주장할 때만 인정한다. 등록부가 보고한 실제
     # 브랜치까지 같아야 위조된 manifest가 남의 브랜치를 지우지 못한다.
     owned = (
@@ -487,6 +2056,9 @@ def _status_for_registered(
         exists=registered.path.exists(),
         branch_created_by_agent_flow=owned,
         requested_name=requested,
+        base_ref=manifest_base_ref or "",
+        base_oid=manifest_base_oid or "",
+        registration_identity=registered.registration_identity,
     )
 
 
@@ -494,6 +2066,8 @@ def _status_for_planned_name(*, root: Path, name: str) -> WorktreeStatus:
     plan = plan_worktree(root=root, name=name)
     payload = _load_worktree_manifest(root=root, name=plan.name)
     manifest_branch = _manifest_branch(payload)
+    manifest_base_ref = _manifest_string(payload, "base_ref")
+    manifest_base_oid = _manifest_oid(payload, "base_oid")
     owned = (
         payload is not None
         and payload.get("branch_created_by_agent_flow") is True
@@ -506,6 +2080,8 @@ def _status_for_planned_name(*, root: Path, name: str) -> WorktreeStatus:
         exists=plan.path.exists(),
         branch_created_by_agent_flow=owned,
         requested_name=name,
+        base_ref=manifest_base_ref or plan.base_ref,
+        base_oid=manifest_base_oid or "",
     )
 
 
@@ -525,13 +2101,10 @@ def _planned_branch(name: str) -> str | None:
 
 def _load_worktree_manifest(*, root: Path, name: str) -> dict | None:
     try:
-        manifest = _worktree_manifest_path(root=root, name=name)
-        legacy = _legacy_worktree_manifest_path(root=root, name=name)
+        key = _runtime_state_key(root=root, name=name)
     except ValueError:
         return None
-    if not manifest.exists() and legacy.exists():
-        manifest = legacy
-    return _read_manifest(manifest)
+    return _state_key_manifest(root=root, key=key)
 
 
 def _state_key_manifest(*, root: Path, key: str) -> dict | None:
@@ -564,12 +2137,33 @@ def _manifest_branch(payload: dict | None) -> str | None:
     return value
 
 
+def _manifest_string(payload: dict | None, key: str) -> str | None:
+    value = payload.get(key) if payload else None
+    return value if isinstance(value, str) and value else None
+
+
+def _manifest_oid(payload: dict | None, key: str) -> str | None:
+    value = _manifest_string(payload, key)
+    return value if value is not None and _is_oid(value) else None
+
+
 def write_worktree_manifest(*, root: Path, status: WorktreeStatus) -> Path:
+    """소비되는 키만 쓴다.
+
+    `asdict(status)` 전체를 쓰면 읽는 쪽이 없는 필드가 함께 박제된다.
+    `exists`는 쓰기 시점의 `path.exists()`라 읽는 시점에 의미가 없고,
+    `registration_identity`는 등록부가 호출마다 다시 계산하는 값이라 사본이
+    화석이 된다 — 소비자는 전부 `registered.registration_identity`만 쓴다.
+    """
     path = _runtime_state_root(root=root, name=status.name) / "manifest.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = asdict(status)
-    payload["path"] = str(status.path.relative_to(root))
-    payload["leader_root"] = str(root)
+    payload = {
+        "path": str(status.path.relative_to(root)),
+        "branch": status.branch,
+        "base_ref": status.base_ref,
+        "base_oid": status.base_oid,
+        "branch_created_by_agent_flow": status.branch_created_by_agent_flow,
+    }
     path.write_text(f"{json.dumps(payload, indent=2, sort_keys=True)}\n", encoding="utf-8")
     return path
 

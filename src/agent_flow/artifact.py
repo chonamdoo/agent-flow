@@ -36,6 +36,11 @@ from agent_flow.core.local_skills import (
 from agent_flow.core.design_value_check import missing_spec_item_evidence
 from agent_flow.core.skill_resolver import PhaseSkills
 from agent_flow.core.phase_workflow import find_kit_root, load_phase_workflow_definition
+from agent_flow.core.security import validate_safe_name
+from agent_flow.core.worktree_isolation import (
+    FileLeaseUnavailable,
+    exclusive_file_lease,
+)
 
 
 RUNS_DIRNAME = ".agent-flow/runs"
@@ -80,9 +85,15 @@ class ActiveRun:
             reason = "missing_phase_artifact"
         elif required_artifact is not None:
             structured_status = "blocked"
+            persisted_reason = meta.get("phase_blocked_reason")
+            stale_reason = _stale_artifact_block_reason(self.path, required_artifact)
             stub_reason = _artifact_block_reason(required_artifact)
-            if stub_reason:
+            if stale_reason:
+                reason = stale_reason
+            elif stub_reason:
                 reason = stub_reason
+            elif persisted_reason == "route_blocked":
+                reason = persisted_reason
             else:
                 missing_markers = _missing_completion_markers(
                     self.path,
@@ -130,27 +141,37 @@ class ActiveRun:
         print(f"status_json: {json.dumps(payload, sort_keys=True)}")
 
 
-def find_active_run(project_root: Path) -> ActiveRun | None:
+def find_active_runs(project_root: Path) -> tuple[ActiveRun, ...]:
     runs_dir = project_root / RUNS_DIRNAME
     if not runs_dir.exists():
-        return None
-    actives = [p for p in runs_dir.iterdir() if (p / ACTIVE_MARKER).exists()]
+        return ()
+    paths = sorted(
+        (path for path in runs_dir.iterdir() if (path / ACTIVE_MARKER).exists()),
+        key=lambda path: path.name,
+    )
+    return tuple(_active_run(path) for path in paths)
+
+
+def find_active_run(project_root: Path) -> ActiveRun | None:
+    actives = find_active_runs(project_root)
     if not actives:
         return None
     if len(actives) > 1:
-        # Should never happen in normal flow; surface so user can choose.
-        names = ", ".join(p.name for p in actives)
+        names = ", ".join(active.run_id for active in actives)
         print(
             f"⚠️  multiple active runs detected: {names}. "
             f"Resuming the most recent; abort the others with `agent-flow abort` "
             f"after switching directories or by hand-deleting the marker file.",
             file=sys.stderr,
         )
-    chosen = max(actives, key=lambda p: p.name)
-    meta = read_meta(chosen)
+    return max(actives, key=lambda active: active.run_id)
+
+
+def _active_run(path: Path) -> ActiveRun:
+    meta = read_meta(path)
     return ActiveRun(
-        path=chosen,
-        run_id=chosen.name,
+        path=path,
+        run_id=path.name,
         workflow=meta.get("workflow", "unknown"),
         task=meta.get("task", ""),
         started_at=meta.get("started_at", ""),
@@ -163,63 +184,107 @@ def create_run(
     task: str,
     *,
     architecture: str | None = None,
+    run_id: str | None = None,
+    checkout_identity: str | None = None,
+    checkout_registration_identity: str | None = None,
 ) -> Path:
     """Create a new run directory. Refuses if an active run exists."""
+    if run_id is not None:
+        validate_safe_name(run_id, "run id")
+    if checkout_identity is not None:
+        _validate_checkout_identity(checkout_identity)
+        if (
+            checkout_identity.startswith("worktree:")
+            and checkout_registration_identity is None
+        ):
+            raise ValueError(
+                "worktree checkout registration identity is required"
+            )
+    if checkout_registration_identity is not None:
+        if (
+            checkout_identity is None
+            or not checkout_identity.startswith("worktree:")
+            or len(checkout_registration_identity) != 64
+        ):
+            raise ValueError("invalid checkout registration identity")
+        try:
+            int(checkout_registration_identity, 16)
+        except ValueError as exc:
+            raise ValueError("invalid checkout registration identity") from exc
     runs_dir = project_root / RUNS_DIRNAME
     runs_dir.mkdir(parents=True, exist_ok=True)
-    lock_dir = runs_dir / ACTIVE_LOCK
     try:
-        lock_dir.mkdir()
-    except FileExistsError as e:
+        with exclusive_file_lease(runs_dir / ACTIVE_LOCK):
+            existing = find_active_run(project_root)
+            if existing is not None:
+                raise ActiveRunExists(
+                    f"active run already exists: {existing.run_id} "
+                    f"(task: {existing.task!r}). Use `agent-flow continue` to resume "
+                    f"or `agent-flow abort` to clear."
+                )
+
+            now = datetime.now(timezone.utc)
+            if run_id is None:
+                base_id = now.strftime("%Y%m%d-%H%M%S")
+                run_id = base_id
+                suffix = 1
+                while (runs_dir / run_id).exists():
+                    run_id = f"{base_id}-{suffix}"
+                    suffix += 1
+            elif (runs_dir / run_id).exists():
+                raise FileExistsError(f"run already exists: {run_id}")
+
+            run_path = runs_dir / run_id
+            run_path.mkdir()
+            meta = {
+                "run_id": run_id,
+                "workflow": workflow,
+                "task": task,
+                # design-spec.md의 task digest와 대조되는 값. 런 도중 task를 바꿔치기하면
+                # 원장이 가리키는 사용자 지시와 어긋나므로 gate가 막는다.
+                "task_digest": hashlib.sha256(task.strip().encode("utf-8")).hexdigest(),
+                "started_at": now.isoformat(),
+                "current_phase": None,
+                # gate-results.json의 출처 표식. `agent-flow gates`만 이 값을 찍는다.
+                # 손으로 쓴 JSON은 값을 모르므로 green으로 라우팅되지 않는다.
+                # 파일에 있는 값이라 복사는 가능하다 — 적대적 위조가 아니라
+                # "실수로 손으로 쓰는 것"을 막는 층이다.
+                "gate_nonce": secrets.token_hex(16),
+            }
+            if architecture:
+                meta["architecture"] = architecture
+            if checkout_identity is not None:
+                meta["checkout_identity"] = checkout_identity
+            if checkout_registration_identity is not None:
+                meta["checkout_registration_identity"] = (
+                    checkout_registration_identity
+                )
+            write_meta(run_path, meta)
+            (run_path / ACTIVE_MARKER).write_text("")
+            return run_path
+    except FileLeaseUnavailable as exc:
         raise ActiveRunExists(
-            "another agent-flow run is starting. Retry after it finishes "
-            "or inspect `.agent-flow/runs/active.lock` if the process died."
-        ) from e
+            "another agent-flow run is starting or its lifecycle lock is unsafe; "
+            "retry after the current process exits"
+        ) from exc
 
-    try:
-        existing = find_active_run(project_root)
-        if existing is not None:
-            raise ActiveRunExists(
-                f"active run already exists: {existing.run_id} "
-                f"(task: {existing.task!r}). Use `agent-flow continue` to resume "
-                f"or `agent-flow abort` to clear."
-            )
 
-        now = datetime.now(timezone.utc)
-        base_id = now.strftime("%Y%m%d-%H%M%S")
-        run_id = base_id
-        suffix = 1
-        while (runs_dir / run_id).exists():
-            run_id = f"{base_id}-{suffix}"
-            suffix += 1
-
-        run_path = runs_dir / run_id
-        run_path.mkdir()
-        meta = {
-            "run_id": run_id,
-            "workflow": workflow,
-            "task": task,
-            # design-spec.md의 task digest와 대조되는 값. 런 도중 task를 바꿔치기하면
-            # 원장이 가리키는 사용자 지시와 어긋나므로 gate가 막는다.
-            "task_digest": hashlib.sha256(task.strip().encode("utf-8")).hexdigest(),
-            "started_at": now.isoformat(),
-            "current_phase": None,
-            # gate-results.json의 출처 표식. `agent-flow gates`만 이 값을 찍는다.
-            # 손으로 쓴 JSON은 값을 모르므로 green으로 라우팅되지 않는다.
-            # 파일에 있는 값이라 복사는 가능하다 — 적대적 위조가 아니라
-            # "실수로 손으로 쓰는 것"을 막는 층이다.
-            "gate_nonce": secrets.token_hex(16),
-        }
-        if architecture:
-            meta["architecture"] = architecture
-        write_meta(run_path, meta)
-        (run_path / ACTIVE_MARKER).write_text("")
-        return run_path
-    finally:
-        try:
-            lock_dir.rmdir()
-        except OSError:
-            pass
+def _validate_checkout_identity(value: str) -> None:
+    if value == "leader":
+        return
+    prefix = "worktree:"
+    if not value.startswith(prefix):
+        raise ValueError(f"invalid checkout identity: {value!r}")
+    name = value[len(prefix):]
+    if (
+        not name
+        or name in {".", ".."}
+        or "/" in name
+        or "\\" in name
+        or not name.isprintable()
+        or Path(name).name != name
+    ):
+        raise ValueError(f"invalid checkout identity name: {name!r}")
 
 
 def read_meta(run_path: Path) -> dict:
@@ -401,6 +466,17 @@ def _missing_markers(text: str, markers: tuple[str, ...]) -> list[str]:
 
 def _status_value(value: object) -> str:
     return str(value).replace("\r", "\\r").replace("\n", "\\n")
+
+
+def _stale_artifact_block_reason(run_path: Path, artifact: Path) -> str | None:
+    entered_at = _phase_entered_at(run_path)
+    if entered_at is None:
+        return None
+    try:
+        artifact_mtime = artifact.stat().st_mtime
+    except FileNotFoundError:
+        return None
+    return "stale_artifact" if artifact_mtime < entered_at else None
 
 
 def _artifact_block_reason(artifact: Path) -> str | None:

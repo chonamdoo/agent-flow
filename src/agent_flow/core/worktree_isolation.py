@@ -10,21 +10,38 @@ from __future__ import annotations
 
 import contextlib
 import errno
-import fcntl
+try:
+    import fcntl
+except ModuleNotFoundError:
+    class _UnavailableFcntl:
+        LOCK_SH = LOCK_EX = LOCK_NB = LOCK_UN = 0
+
+        @staticmethod
+        def flock(_fd: int, _operation: int) -> None:
+            raise OSError(errno.ENOSYS, "fcntl.flock is unavailable")
+
+    fcntl = _UnavailableFcntl()  # type: ignore[assignment]
 import hashlib
+import json
 import os
 import stat
 import subprocess
+import tempfile
+import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Callable, Iterator, Optional, Sequence, TypeVar
+from typing import Callable, Iterator, Literal, Optional, Sequence, TypeVar
 
 from agent_flow.core.commands import run_safe_command
 
 
 class WorktreeIsolationError(RuntimeError):
     """An isolation guarantee could not be proven; the caller must fail closed."""
+
+class FileLeaseUnavailable(WorktreeIsolationError):
+    """A kernel-backed file lease cannot be acquired safely."""
+
 
 
 # git honors these env vars over cwd-based discovery. A worker that inherits any
@@ -51,10 +68,689 @@ _GIT_STABLE_LOCALE = {"LC_ALL": "C", "LANG": "C", "LANGUAGE": ""}
 DEFAULT_MAX_WORKERS = 8
 _LOCK_TIMEOUT_S = 120
 _LOCK_POLL_S = 0.05
+_LOCK_OPEN_ATTEMPTS = 8
 _GIT_LOCK_RETRY_ATTEMPTS = 8
 _GIT_LOCK_RETRY_BASE_DELAY_S = 0.1
+_MANAGED_WORKTREE_MARKERS = (".agent-flow", ".codex", ".Codex", ".omp")
 
 T = TypeVar("T")
+
+
+ProviderLeaseState = Literal["inactive", "active", "unknown"]
+
+_PROVIDER_LEASE_VERSION = 1
+_MAX_PROVIDER_CAPACITY = 1024
+_PROVIDER_LEASE_DIR = Path("agent-flow") / "provider-leases"
+_CLEANUP_LEASE_DIR = Path("agent-flow") / "cleanup-leases"
+_PROVIDER_REGISTRY_LOCK = "registry.lock"
+_PROVIDER_REGISTRY_STATE = "registry.json"
+_CLEANUP_REPOSITORY_LOCK = "repository.lock"
+_PROVIDER_REGISTRY_TIMEOUT_S = 5.0
+_IN_PROCESS_PROVIDER_LEASES: dict[tuple[str, int], str] = {}
+_IN_PROCESS_PROVIDER_LEASES_LOCK = threading.Lock()
+
+
+class ProviderLeaseUnavailable(WorktreeIsolationError):
+    """The repository-wide provider capacity is currently occupied."""
+
+
+@dataclass
+class ProviderLease:
+    """Live capability for one repository-global provider slot."""
+
+    common_dir: Path
+    capacity: int
+    slot: int
+    capability: str = field(repr=False)
+    _slot_fd: int = field(repr=False)
+    _active: bool = field(default=True, repr=False)
+
+    @property
+    def active(self) -> bool:
+        return self._active
+    @property
+    def process_lifetime_fds(self) -> tuple[int]:
+        if not self._active or self._slot_fd < 0:
+            raise ProviderLeaseUnavailable(
+                "provider lease capability no longer owns a live slot"
+            )
+        return (self._slot_fd,)
+
+
+    def release(self) -> None:
+        _release_provider_lease(self)
+
+
+@contextlib.contextmanager
+def provider_lease(
+    root, *, capacity: Optional[int] = None
+) -> Iterator[ProviderLease]:
+    """Hold one canonical repository slot until the provider tree is finished."""
+
+    lease = acquire_provider_lease(root=root, capacity=capacity)
+    try:
+        yield lease
+    finally:
+        lease.release()
+
+
+def acquire_provider_lease(
+    *, root, capacity: Optional[int] = None
+) -> ProviderLease:
+    """Acquire a non-stale repository-global provider capability.
+
+    Slot ownership is a kernel ``flock`` held by this process. A crash releases
+    it in the kernel; no PID file or age heuristic ever reclaims an unknown
+    owner. Cleanup does not require repository-wide provider idleness, so this
+    lease deliberately holds nothing outside its own slot.
+    """
+
+    requested = _strict_provider_capacity(capacity)
+    common = _required_git_common_dir(root)
+    slot_fd: Optional[int] = None
+    slot = -1
+    slot_key: Optional[tuple[str, int]] = None
+    capability = os.urandom(32).hex()
+    try:
+        registry_dir = _ensure_lock_directory(common, _PROVIDER_LEASE_DIR)
+        registry_path = registry_dir / _PROVIDER_REGISTRY_LOCK
+        registry_fd = _open_lock_file(registry_path, create=True)
+        try:
+            _lock_registry(registry_fd)
+            _assert_lock_file_binding(registry_path, registry_fd)
+            _prepare_provider_registry(registry_dir, requested)
+            registry_key = str(registry_dir)
+            for candidate in range(requested):
+                candidate_key = (registry_key, candidate)
+                with _IN_PROCESS_PROVIDER_LEASES_LOCK:
+                    if candidate_key in _IN_PROCESS_PROVIDER_LEASES:
+                        continue
+                candidate_path = _provider_slot_path(registry_dir, candidate)
+                candidate_fd = _open_lock_file(candidate_path, create=True)
+                try:
+                    fcntl.flock(
+                        candidate_fd, fcntl.LOCK_EX | fcntl.LOCK_NB
+                    )
+                    _assert_lock_file_binding(candidate_path, candidate_fd)
+                except WorktreeIsolationError:
+                    os.close(candidate_fd)
+                    raise
+                except OSError as exc:
+                    os.close(candidate_fd)
+                    if _is_lock_busy(exc):
+                        continue
+                    raise WorktreeIsolationError(
+                        f"cannot acquire provider lease slot {candidate}"
+                    ) from exc
+                with _IN_PROCESS_PROVIDER_LEASES_LOCK:
+                    if candidate_key in _IN_PROCESS_PROVIDER_LEASES:
+                        fcntl.flock(candidate_fd, fcntl.LOCK_UN)
+                        os.close(candidate_fd)
+                        continue
+                    _IN_PROCESS_PROVIDER_LEASES[candidate_key] = capability
+                slot = candidate
+                slot_fd = candidate_fd
+                slot_key = candidate_key
+                break
+        finally:
+            try:
+                fcntl.flock(registry_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(registry_fd)
+
+        if slot_fd is None:
+            raise ProviderLeaseUnavailable(
+                f"repository provider capacity reached ({requested}/{requested})"
+            )
+        return ProviderLease(
+            common_dir=common,
+            capacity=requested,
+            slot=slot,
+            capability=capability,
+            _slot_fd=slot_fd,
+        )
+    except BaseException:
+        if slot_fd is not None:
+            try:
+                fcntl.flock(slot_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(slot_fd)
+        if slot_key is not None:
+            with _IN_PROCESS_PROVIDER_LEASES_LOCK:
+                if _IN_PROCESS_PROVIDER_LEASES.get(slot_key) == capability:
+                    _IN_PROCESS_PROVIDER_LEASES.pop(slot_key, None)
+        raise
+
+
+def assert_provider_lease(lease: ProviderLease, *, root) -> None:
+    """Require a live capability for the same canonical repository."""
+
+    if (
+        not isinstance(lease, ProviderLease)
+        or not lease.active
+        or not lease.capability
+    ):
+        raise ProviderLeaseUnavailable(
+            "a live provider lease capability is required"
+        )
+    key = (
+        str(lease.common_dir / _PROVIDER_LEASE_DIR),
+        lease.slot,
+    )
+    with _IN_PROCESS_PROVIDER_LEASES_LOCK:
+        registered = (
+            _IN_PROCESS_PROVIDER_LEASES.get(key) == lease.capability
+        )
+    if not registered:
+        raise ProviderLeaseUnavailable(
+            "provider lease capability is not owned by this process"
+        )
+    try:
+        os.fstat(lease._slot_fd)
+    except OSError as exc:
+        raise ProviderLeaseUnavailable(
+            "provider lease capability no longer owns a live lock file"
+        ) from exc
+    common = _required_git_common_dir(root)
+    if common != lease.common_dir:
+        raise ProviderLeaseUnavailable(
+            "provider lease belongs to a different repository"
+        )
+
+
+def probe_provider_leases(root) -> ProviderLeaseState:
+    """Return active/inactive/unknown without reclaiming any owner.
+
+    The probe serializes with acquisitions through ``registry.lock`` and then
+    nonblockingly locks every configured slot. Any malformed or unreadable
+    registry is ``unknown`` so destructive cleanup must preserve it.
+    """
+
+    common = _git_common_dir(root)
+    if common is None:
+        return "unknown"
+    registry_dir = common / _PROVIDER_LEASE_DIR
+    if not os.path.lexists(registry_dir):
+        return "inactive"
+    if not _is_secure_lock_directory(common, registry_dir):
+        return "unknown"
+    registry_path = registry_dir / _PROVIDER_REGISTRY_LOCK
+    state_path = registry_dir / _PROVIDER_REGISTRY_STATE
+    if not os.path.lexists(registry_path) and not os.path.lexists(state_path):
+        return "inactive"
+    if not os.path.lexists(registry_path) or not os.path.lexists(state_path):
+        return "unknown"
+    try:
+        registry_fd = _open_lock_file(registry_path, create=False)
+    except (OSError, WorktreeIsolationError):
+        return "unknown"
+    try:
+        try:
+            fcntl.flock(registry_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _assert_lock_file_binding(registry_path, registry_fd)
+        except WorktreeIsolationError:
+            return "unknown"
+        except OSError as exc:
+            return "active" if _is_lock_busy(exc) else "unknown"
+        try:
+            capacity = _read_provider_registry_capacity(state_path)
+            return _probe_provider_slots(registry_dir, capacity)
+        except (OSError, ValueError, WorktreeIsolationError):
+            return "unknown"
+        finally:
+            fcntl.flock(registry_fd, fcntl.LOCK_UN)
+    finally:
+        os.close(registry_fd)
+
+
+def _release_provider_lease(lease: ProviderLease) -> None:
+    if not lease._active:
+        return
+    capability = lease.capability
+    lease._active = False
+    lease.capability = ""
+    registry_dir = lease.common_dir / _PROVIDER_LEASE_DIR
+    key = (str(registry_dir), lease.slot)
+    inherited_holder = False
+    release_error: OSError | WorktreeIsolationError | None = None
+    registry_fd: int | None = None
+    probe_fd: int | None = None
+    try:
+        registry_fd = _open_lock_file(
+            registry_dir / _PROVIDER_REGISTRY_LOCK,
+            create=False,
+        )
+        _lock_registry(registry_fd)
+        _assert_lock_file_binding(
+            registry_dir / _PROVIDER_REGISTRY_LOCK,
+            registry_fd,
+        )
+        os.close(lease._slot_fd)
+        lease._slot_fd = -1
+        probe_fd = _open_lock_file(
+            _provider_slot_path(registry_dir, lease.slot),
+            create=False,
+        )
+        try:
+            fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _assert_lock_file_binding(
+                _provider_slot_path(registry_dir, lease.slot),
+                probe_fd,
+            )
+        except OSError as exc:
+            if _is_lock_busy(exc):
+                inherited_holder = True
+            else:
+                release_error = exc
+        else:
+            fcntl.flock(probe_fd, fcntl.LOCK_UN)
+    except (OSError, WorktreeIsolationError) as exc:
+        release_error = exc
+        if lease._slot_fd >= 0:
+            os.close(lease._slot_fd)
+            lease._slot_fd = -1
+    finally:
+        if probe_fd is not None:
+            os.close(probe_fd)
+        if registry_fd is not None:
+            try:
+                fcntl.flock(registry_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(registry_fd)
+        with _IN_PROCESS_PROVIDER_LEASES_LOCK:
+            if _IN_PROCESS_PROVIDER_LEASES.get(key) == capability:
+                _IN_PROCESS_PROVIDER_LEASES.pop(key, None)
+    if release_error is not None:
+        raise WorktreeIsolationError(
+            "provider process-tree lease release could not be verified"
+        ) from release_error
+    if inherited_holder:
+        raise WorktreeIsolationError(
+            "provider descendant remains active after the provider exited; "
+            "the inherited repository lease remains locked"
+        )
+
+
+def _strict_provider_capacity(value: Optional[int]) -> int:
+    if value is None:
+        raw = os.environ.get("AGENT_FLOW_MAX_WORKERS")
+        if raw is None:
+            capacity = DEFAULT_MAX_WORKERS
+        else:
+            try:
+                capacity = int(raw)
+            except ValueError as exc:
+                raise WorktreeIsolationError(
+                    "AGENT_FLOW_MAX_WORKERS must be an integer"
+                ) from exc
+    else:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise WorktreeIsolationError(
+                "provider capacity must be an integer"
+            )
+        capacity = value
+    if capacity < 1 or capacity > _MAX_PROVIDER_CAPACITY:
+        raise WorktreeIsolationError(
+            "provider capacity must be between "
+            f"1 and {_MAX_PROVIDER_CAPACITY}"
+        )
+    return capacity
+
+
+def _required_git_common_dir(root) -> Path:
+    common = _git_common_dir(root)
+    if common is None:
+        raise WorktreeIsolationError(
+            "cannot prove the canonical git common dir for provider isolation"
+        )
+    return common
+
+
+def _ensure_lock_directory(common: Path, relative: Path) -> Path:
+    current = common
+    for component in relative.parts:
+        current = current / component
+        try:
+            current.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise WorktreeIsolationError(
+                f"cannot create repository lock directory: {current}"
+            ) from exc
+        if not _is_secure_lock_directory(common, current):
+            raise WorktreeIsolationError(
+                f"repository lock directory is not trustworthy: {current}"
+            )
+    return current
+
+
+def _is_secure_lock_directory(common: Path, path: Path) -> bool:
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(info.st_mode)
+        and not stat.S_ISLNK(info.st_mode)
+        and real_path(path) == path
+        and _is_within(path, common)
+    )
+
+
+def _open_lock_file(path: Path, *, create: bool) -> int:
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    cloexec = getattr(os, "O_CLOEXEC", None)
+    directory = getattr(os, "O_DIRECTORY", None)
+    if nofollow is None or cloexec is None or directory is None:
+        raise WorktreeIsolationError(
+            "secure repository lease file opening is unsupported"
+        )
+    parent_fd = -1
+    fd = -1
+    try:
+        parent_fd = os.open(
+            path.parent,
+            os.O_RDONLY | directory | nofollow | cloexec,
+        )
+        opened_parent = os.fstat(parent_fd)
+        visible_parent = path.parent.lstat()
+        if (
+            not stat.S_ISDIR(opened_parent.st_mode)
+            or stat.S_ISLNK(visible_parent.st_mode)
+            or (opened_parent.st_dev, opened_parent.st_ino)
+            != (visible_parent.st_dev, visible_parent.st_ino)
+        ):
+            raise WorktreeIsolationError(
+                f"repository lease directory identity changed: {path.parent}"
+            )
+        flags = os.O_RDWR | nofollow | cloexec
+        if create:
+            flags |= os.O_CREAT
+        # 생성은 반드시 검증된 부모 fd를 거친다. 절대경로로 열면 부모가 교체된
+        # 순간 공격자 디렉터리에 파일이 만들어진다. Darwin은 경합 중
+        # `openat(dir_fd, name, O_CREAT)`가 부모가 살아 있는데도 ENOENT를 내므로
+        # 그 한 가지 조건만 좁게 다시 시도한다.
+        for attempt in range(_LOCK_OPEN_ATTEMPTS):
+            try:
+                fd = os.open(path.name, flags, 0o600, dir_fd=parent_fd)
+                break
+            except FileNotFoundError:
+                if not create or attempt == _LOCK_OPEN_ATTEMPTS - 1:
+                    raise
+                time.sleep(_LOCK_POLL_S)
+        _assert_lock_file_binding(path, fd)
+        return fd
+    except BaseException:
+        if fd >= 0:
+            os.close(fd)
+        raise
+    finally:
+        if parent_fd >= 0:
+            os.close(parent_fd)
+
+
+def _assert_lock_file_binding(path: Path, fd: int) -> None:
+    opened = os.fstat(fd)
+    visible = path.lstat()
+    visible_parent = path.parent.lstat()
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or not stat.S_ISREG(visible.st_mode)
+        or stat.S_ISLNK(visible.st_mode)
+        or not stat.S_ISDIR(visible_parent.st_mode)
+        or stat.S_ISLNK(visible_parent.st_mode)
+        or (opened.st_dev, opened.st_ino) != (visible.st_dev, visible.st_ino)
+        or opened.st_uid != os.getuid()
+        or opened.st_nlink != 1
+    ):
+        raise WorktreeIsolationError(
+            f"repository lease path no longer names the opened lock file: {path}"
+        )
+
+def _ensure_lease_parent(path: Path) -> None:
+    """Create the lease directory chain through the one private-dir creator."""
+    target = path.parent
+    base = target
+    while not base.is_dir():
+        parent = base.parent
+        if parent == base:
+            break
+        base = parent
+    _ensure_lock_directory(real_path(base), target.relative_to(base))
+
+
+@contextlib.contextmanager
+def exclusive_file_lease(path: Path) -> Iterator[None]:
+    """Hold a crash-released exclusive lease on one regular file."""
+    try:
+        _ensure_lease_parent(path)
+        fd = _open_lock_file(path, create=True)
+    except (OSError, WorktreeIsolationError) as exc:
+        raise FileLeaseUnavailable(
+            f"cannot establish file lease at {path}"
+        ) from exc
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _assert_lock_file_binding(path, fd)
+        except WorktreeIsolationError as exc:
+            raise FileLeaseUnavailable(
+                f"file lease path changed while acquiring {path}"
+            ) from exc
+        except OSError as exc:
+            if _is_lock_busy(exc):
+                raise FileLeaseUnavailable(
+                    f"file lease is already held at {path}"
+                ) from exc
+            raise FileLeaseUnavailable(
+                f"cannot acquire file lease at {path}"
+            ) from exc
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+
+
+@contextlib.contextmanager
+def shared_file_lease(path: Path) -> Iterator[None]:
+    """Hold a crash-released shared lease on one regular file."""
+    try:
+        _ensure_lease_parent(path)
+        fd = _open_lock_file(path, create=True)
+    except (OSError, WorktreeIsolationError) as exc:
+        raise FileLeaseUnavailable(
+            f"cannot establish file lease at {path}"
+        ) from exc
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            _assert_lock_file_binding(path, fd)
+        except WorktreeIsolationError as exc:
+            raise FileLeaseUnavailable(
+                f"file lease path changed while acquiring {path}"
+            ) from exc
+        except OSError as exc:
+            if _is_lock_busy(exc):
+                raise FileLeaseUnavailable(
+                    f"file lease is already held exclusively at {path}"
+                ) from exc
+            raise FileLeaseUnavailable(
+                f"cannot acquire file lease at {path}"
+            ) from exc
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+
+
+
+def _lock_registry(fd: int) -> None:
+    deadline = time.monotonic() + _PROVIDER_REGISTRY_TIMEOUT_S
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except OSError as exc:
+            if not _is_lock_busy(exc):
+                raise WorktreeIsolationError(
+                    "cannot lock the provider lease registry"
+                ) from exc
+            if time.monotonic() >= deadline:
+                raise ProviderLeaseUnavailable(
+                    "provider lease registry is busy"
+                ) from exc
+            time.sleep(_LOCK_POLL_S)
+
+
+def _prepare_provider_registry(
+    registry_dir: Path, requested_capacity: int
+) -> None:
+    state_path = registry_dir / _PROVIDER_REGISTRY_STATE
+    if os.path.lexists(state_path):
+        current_capacity = _read_provider_registry_capacity(state_path)
+        if current_capacity == requested_capacity:
+            return
+        state = _probe_provider_slots(registry_dir, current_capacity)
+        if state == "active":
+            raise ProviderLeaseUnavailable(
+                "provider capacity cannot change while a lease is active "
+                f"({current_capacity} -> {requested_capacity})"
+            )
+        if state == "unknown":
+            raise WorktreeIsolationError(
+                "cannot prove provider slots inactive for a capacity change"
+            )
+    else:
+        unexpected_slots = tuple(registry_dir.glob("slot-*.lock"))
+        if unexpected_slots:
+            raise WorktreeIsolationError(
+                "provider lease slots exist without registry metadata"
+            )
+    _write_provider_registry_capacity(state_path, requested_capacity)
+
+
+def _read_provider_registry_capacity(path: Path) -> int:
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    cloexec = getattr(os, "O_CLOEXEC", None)
+    if nofollow is None or cloexec is None:
+        raise WorktreeIsolationError(
+            "secure provider registry reads are unsupported"
+        )
+    fd = os.open(path, os.O_RDONLY | nofollow | cloexec)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise WorktreeIsolationError(
+                "provider lease registry metadata is not a regular file"
+            )
+        with os.fdopen(fd, "r", encoding="utf-8") as stream:
+            fd = -1
+            payload = json.load(stream)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"version", "capacity"}
+        or payload.get("version") != _PROVIDER_LEASE_VERSION
+    ):
+        raise WorktreeIsolationError(
+            "provider lease registry metadata is malformed"
+        )
+    capacity = payload.get("capacity")
+    if (
+        isinstance(capacity, bool)
+        or not isinstance(capacity, int)
+        or capacity < 1
+        or capacity > _MAX_PROVIDER_CAPACITY
+    ):
+        raise WorktreeIsolationError(
+            "provider lease registry capacity is invalid"
+        )
+    return capacity
+
+
+def _write_provider_registry_capacity(path: Path, capacity: int) -> None:
+    payload = {
+        "version": _PROVIDER_LEASE_VERSION,
+        "capacity": capacity,
+    }
+    fd, raw_temp = tempfile.mkstemp(
+        prefix=".registry-", suffix=".tmp", dir=path.parent
+    )
+    temp_path = Path(raw_temp)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            fd = -1
+            json.dump(payload, stream, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_path, path)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        if os.path.lexists(temp_path):
+            temp_path.unlink()
+
+
+def _provider_slot_path(registry_dir: Path, slot: int) -> Path:
+    return registry_dir / f"slot-{slot:04d}.lock"
+
+
+def _probe_provider_slots(
+    registry_dir: Path, capacity: int
+) -> ProviderLeaseState:
+    registry_key = str(registry_dir)
+    with _IN_PROCESS_PROVIDER_LEASES_LOCK:
+        if any(
+            key[0] == registry_key
+            for key in _IN_PROCESS_PROVIDER_LEASES
+        ):
+            return "active"
+    locked: list[int] = []
+    try:
+        for slot in range(capacity):
+            path = _provider_slot_path(registry_dir, slot)
+            if not os.path.lexists(path):
+                continue
+            try:
+                fd = _open_lock_file(path, create=False)
+            except (OSError, WorktreeIsolationError):
+                return "unknown"
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                _assert_lock_file_binding(path, fd)
+            except WorktreeIsolationError:
+                os.close(fd)
+                return "unknown"
+            except OSError as exc:
+                os.close(fd)
+                if _is_lock_busy(exc):
+                    return "active"
+                return "unknown"
+            locked.append(fd)
+        return "inactive"
+    finally:
+        for fd in locked:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+
+
+def _is_lock_busy(exc: OSError) -> bool:
+    return exc.errno in {errno.EACCES, errno.EAGAIN}
 
 
 def real_path(value) -> Path:
@@ -67,14 +763,9 @@ def real_path(value) -> Path:
 
 
 def max_worker_capacity() -> int:
-    raw = os.environ.get("AGENT_FLOW_MAX_WORKERS")
-    if raw is None:
-        return DEFAULT_MAX_WORKERS
-    try:
-        value = int(raw)
-    except ValueError:
-        return DEFAULT_MAX_WORKERS
-    return value if value > 0 else DEFAULT_MAX_WORKERS
+    """선언된 동시성. 잘못된 env를 조용히 기본값으로 접으면 provider slot은
+    거부하고 pool은 계속 도는 상태가 되어 선언값과 실제가 갈린다."""
+    return _strict_provider_capacity(None)
 
 
 def sanitized_worker_env(*, base_env: Optional[dict] = None) -> dict:
@@ -101,6 +792,50 @@ def assert_cwd_bound(*, worktree_path, cwd) -> None:
         raise WorktreeIsolationError(
             f"worker cwd {got} is not bound to worktree {want}"
         )
+
+def managed_worktree_root(*, root, path) -> Path:
+    """Return the exact recognized managed root containing ``path``."""
+    target = real_path(path)
+    for marker in _MANAGED_WORKTREE_MARKERS:
+        candidate = real_path(Path(root) / marker / "worktrees")
+        if target.parent == candidate:
+            return candidate
+    raise WorktreeIsolationError(
+        f"worktree path is not a direct child of a managed root: {target}"
+    )
+
+
+
+def _read_stable_regular_text(
+    path: Path,
+    *,
+    observed: os.stat_result,
+    label: str,
+) -> str:
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise WorktreeIsolationError(f"{label} cannot be opened without no-follow support")
+    try:
+        fd = os.open(
+            path,
+            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+        )
+    except OSError as exc:
+        raise WorktreeIsolationError(f"cannot read {label}: {path}") from exc
+    try:
+        opened = os.fstat(fd)
+        content = os.read(fd, 4097)
+    finally:
+        os.close(fd)
+    if (
+        opened.st_dev != observed.st_dev
+        or opened.st_ino != observed.st_ino
+        or not stat.S_ISREG(opened.st_mode)
+        or opened.st_uid != os.getuid()
+        or opened.st_nlink != 1
+        or len(content) > 4096
+    ):
+        raise WorktreeIsolationError(f"{label} identity changed or is not trusted: {path}")
+    return content.decode("utf-8", errors="replace").strip()
 
 
 def verify_linked_worktree(
@@ -140,14 +875,25 @@ def verify_linked_worktree(
     # A linked worktree has a `.git` file (a `gitdir:` pointer); the leader and
     # standalone clones have a `.git` directory.
     dot_git = target / ".git"
-    if not dot_git.is_file():
+    try:
+        dot_git_identity = dot_git.lstat()
+    except OSError as exc:
         raise WorktreeIsolationError(
             f"not a linked worktree (.git is not a gitdir pointer file): {target}"
+        ) from exc
+    if (
+        dot_git.is_symlink()
+        or not stat.S_ISREG(dot_git_identity.st_mode)
+        or dot_git_identity.st_nlink != 1
+    ):
+        raise WorktreeIsolationError(
+            f"not a linked worktree (.git is not a trusted pointer file): {target}"
         )
-    try:
-        gitdir_line = dot_git.read_text(encoding="utf-8", errors="replace").strip()
-    except OSError as exc:
-        raise WorktreeIsolationError(f"cannot read worktree .git pointer: {target}") from exc
+    gitdir_line = _read_stable_regular_text(
+        dot_git,
+        observed=dot_git_identity,
+        label="worktree .git pointer",
+    )
     if not gitdir_line.startswith("gitdir:"):
         raise WorktreeIsolationError(f"malformed linked worktree .git pointer: {target}")
 
@@ -159,11 +905,43 @@ def verify_linked_worktree(
         raise WorktreeIsolationError(
             f"worktree does not share this repo's git common dir: {target}"
         )
+    gitdir_value = gitdir_line.partition(":")[2].strip()
+    gitdir = Path(gitdir_value).expanduser()
+    if not gitdir.is_absolute():
+        gitdir = target / gitdir
+    gitdir = real_path(gitdir)
+    if gitdir.parent != leader_common / "worktrees":
+        raise WorktreeIsolationError(
+            f"worktree .git pointer escapes the repository worktree registry: {target}"
+        )
+    backlink = gitdir / "gitdir"
+    try:
+        backlink_identity = backlink.lstat()
+    except OSError as exc:
+        raise WorktreeIsolationError(
+            f"cannot verify worktree .git backlink: {target}"
+        ) from exc
+    backlink_value = _read_stable_regular_text(
+        backlink,
+        observed=backlink_identity,
+        label="worktree .git backlink",
+    )
+    backlink_path = Path(backlink_value).expanduser()
+    if not backlink_path.is_absolute():
+        backlink_path = gitdir / backlink_path
+    if (
+        backlink.is_symlink()
+        or not stat.S_ISREG(backlink_identity.st_mode)
+        or real_path(backlink_path) != dot_git
+    ):
+        raise WorktreeIsolationError(
+            f"worktree .git pointer does not point back to this checkout: {target}"
+        )
 
     # Authoritative registration check: git itself must list this worktree.
     # 조회가 실패하면 raise한다. 빈 집합으로 강등하면 "등록 안 됨"과 "물어보지
     # 못했다"가 같은 값이 되어, 진단이 실제 원인과 무관해진다.
-    if target not in registered_worktree_paths(root):
+    if registered_worktree_at(root, target) is None:
         raise WorktreeIsolationError(f"worktree is not registered with git: {target}")
 
     if expected_branch is not None:
@@ -343,12 +1121,9 @@ _EXEC_SURFACE_PATHS = (
     ".codex/hooks.json",
     ".omp/extensions",
 )
-_GENERATED_PATH_SEGMENTS = ("__pycache__",)
 _TRIPWIRE_TIMEOUT_S = 120
 # porcelain v1 상태 문자. 레코드 앞 두 글자가 전부 여기 속할 때만 경로 접두어로 본다.
 _STATUS_CODES = frozenset(" MADRCUT?!")
-# 내용 해시 한도. 넘으면 크기만 찍는다 — mtime을 섞으면 touch만으로 오탐이 난다.
-_STAMP_FULL_READ_BYTES = 64 * 1024 * 1024
 _STAMP_CHUNK_BYTES = 64 * 1024
 
 
@@ -363,7 +1138,11 @@ class LeaderSnapshot:
         return tuple(self.status.split("\n")) if self.status else ()
 
 
-def capture_leader_snapshot(leader_root: Path) -> LeaderSnapshot:
+def capture_leader_snapshot(
+    leader_root: Path,
+    *,
+    include_ignored: bool = True,
+) -> LeaderSnapshot:
     """phase 진입 시점 leader 상태를 찍는다.
 
     git이 대답하지 못하면(unknown) 비교 기준을 세울 수 없으므로 fail-closed로
@@ -384,18 +1163,36 @@ def capture_leader_snapshot(leader_root: Path) -> LeaderSnapshot:
     # 재시도 단위가 개별 git 호출이 아니라 **관측 전체**인 이유: HEAD를 attempt
     # 1에서, status를 attempt 2에서 주워 담으면 lock이 풀리는 순간에 걸친 반쪽
     # 상태가 기준선으로 굳어 다음 비교에서 있지도 않은 diff를 만든다.
-    return with_git_lock_retry(
-        lambda: LeaderSnapshot(
-            head=_git_fact(leader_root, "rev-parse", "HEAD"),
-            branch=_git_fact(leader_root, "rev-parse", "--abbrev-ref", "HEAD"),
-            status=_leader_status(leader_root),
+    git_fact = _git_fact
+    leader_status = _leader_status
+    snapshot_type = LeaderSnapshot
+    retry = with_git_lock_retry
+    retryable = tripwire_git_lock_retryable
+    return retry(
+        lambda: snapshot_type(
+            head=git_fact(leader_root, "rev-parse", "HEAD"),
+            branch=git_fact(
+                leader_root,
+                "rev-parse",
+                "--abbrev-ref",
+                "HEAD",
+            ),
+            status=leader_status(
+                leader_root,
+                include_ignored=include_ignored,
+            ),
         ),
-        is_retryable=tripwire_git_lock_retryable,
+        is_retryable=retryable,
     )
 
 
 def assert_leader_unchanged(
-    leader_root: Path, before: LeaderSnapshot, *, run_id: str = ""
+    leader_root: Path,
+    before: LeaderSnapshot,
+    *,
+    run_id: str = "",
+    worker_root: Path | None = None,
+    include_ignored: bool = True,
 ) -> None:
     """leader가 phase 진입 시점과 동일한지 검증한다. **아무것도 바꾸지 않는다.**
 
@@ -409,7 +1206,10 @@ def assert_leader_unchanged(
     """
     if not before.armed:
         return
-    after = capture_leader_snapshot(leader_root)
+    after = capture_leader_snapshot(
+        leader_root,
+        include_ignored=include_ignored,
+    )
     if not after.armed:
         raise WorktreeIsolationError(
             f"leader stopped being a git repository during the phase: {leader_root}"
@@ -417,13 +1217,19 @@ def assert_leader_unchanged(
     reasons = _snapshot_diff(before, after)
     if not reasons:
         return
+    recovery = (
+        f" Resume only from the worker checkout: {real_path(worker_root)}."
+        if worker_root is not None
+        else ""
+    )
     raise WorktreeIsolationError(
         "leader checkout changed during the phase: "
         + "; ".join(reasons)
         + ". Nothing was modified or reverted - the leader is exactly as you left it. "
-        "If a worker leaked these writes, move them into the worktree and clean the "
-        "leader. If they are your own edits, commit or stash them before re-running "
+        "If a worker leaked these writes, move them into the worker checkout and clean "
+        "the leader. If they are your own edits, commit or stash them before re-running "
         "so the tripwire has a stable baseline."
+        + recovery
     )
 
 
@@ -460,37 +1266,14 @@ def _snapshot_diff(before: LeaderSnapshot, after: LeaderSnapshot) -> list[str]:
     return reasons
 
 
-def _leader_status(leader_root) -> str:
-    """leader working tree 상태를 정규화된 레코드 문자열로 만든다.
-
-    status를 두 번 부르는 이유가 있다. ``--ignored=matching``은 ignore 패턴에
-    직접 걸린 디렉터리(``.agent-flow/``)를 한 줄로 접어 버려서 그 안쪽 쓰기가
-    통째로 안 보인다. 그래서 ``.agent-flow/``만 파일 단위로 다시 훑는다.
-
-    다만 ``.agent-flow/`` 전체를 감시하면 정상 동작이 100% 오탐이 된다. read
-    hook은 worktree 안에서 돌아도 leader의 ``skills-read.jsonl``에 append하고,
-    runner는 ``runs/``, JS는 ``state/``를 쓴다. 그래서 **그 경로들만** 빼고
-    나머지는 계속 본다. 특히 ``scripts/hooks/``는 host가 매 tool call마다
-    실행하는 표면이라 여기를 놓치면 워커가 leader에 hook을 심을 수 있다.
-
-    레코드 문자(`` M``/``!!``)만으로는 **이미 더러운 파일의 추가 수정**과
-    **ignored 파일의 내용 교체**가 보이지 않는다. 그래서 tracked 변경은
-    ``diff HEAD``의 내용 해시로, untracked/ignored 파일은 내용 해시로 함께
-    찍는다. mtime은 쓰지 않는다 — 같은 바이트로 다시 저장하기만 해도 바뀐다.
-
-    ``.agent-flow/``만으로는 부족하다. 워커가 다음 phase가 **실행할** 것을 바꾸는
-    자리가 밖에도 있다 — `.venv/bin`, `node_modules/.bin`, 그리고 host의 hook
-    등록 파일. 그래서 `_EXEC_SURFACE_PATHS`를 같은 심층 스캔에 함께 넣는다.
-    """
-    entries = dict(_status_records(leader_root, ("--ignored=matching",)))
-    entries.update(
-        _status_records(
-            leader_root,
-            ("-uall", "--ignored=traditional", "--", _AGENT_FLOW_PREFIX)
-            + _EXEC_SURFACE_PATHS
-            + tuple(f":(exclude){path}" for path in _RUNTIME_WRITE_PATHS),
-        )
+def _leader_status(leader_root, *, include_ignored: bool = True) -> str:
+    """Return a content-sensitive snapshot of every non-runtime leader path."""
+    status_args = (
+        ("-uall", "--ignored=traditional")
+        if include_ignored
+        else ("-uall",)
     )
+    entries = dict(_status_records(leader_root, status_args))
     kept = sorted(
         (record, path)
         for record, path in entries.items()
@@ -537,8 +1320,8 @@ def _path_content_stamp(leader_root, relative: str) -> str:
 
     mtime이 아니라 내용을 해시한다. ``lstat``을 쓰는 이유는 파일을 같은 내용의
     symlink로 바꿔치기하는 걸 잡기 위해서다 — ``stat``은 대상을 따라가 구분을
-    잃는다. 한도를 넘는 파일은 앞뒤 조각만 읽으므로 가운데만 바뀌면 놓친다.
-    그 구간만 mtime을 함께 찍어 메운다.
+    잃는다. 크기와 무관하게 전체를 스트리밍 해시한다. 큰 파일의 가운데를 같은
+    크기로 바꾼 누출도 놓치지 않아야 하므로 크기 기반 표본화는 하지 않는다.
     """
     if not relative or relative.endswith("/"):
         return ""
@@ -549,11 +1332,6 @@ def _path_content_stamp(leader_root, relative: str) -> str:
             return f"stamp {relative} symlink {os.readlink(target)}"
         if not stat.S_ISREG(info.st_mode):
             return ""
-        if info.st_size > _STAMP_FULL_READ_BYTES:
-            # 한도 초과는 크기만 본다. 앞뒤 조각 해시 + mtime을 섞어 봤더니
-            # touch 한 번에 오탐이 나면서 정작 가운데 변조는 mtime 위조로
-            # 빠져나갔다. 오탐이 훨씬 비싸므로 여기서는 미탐을 택한다.
-            return f"stamp {relative} {info.st_size} oversize"
         digest = hashlib.sha256()
         with target.open("rb") as handle:
             for chunk in iter(lambda: handle.read(_STAMP_CHUNK_BYTES), b""):
@@ -674,14 +1452,14 @@ def _is_excluded_path(path: str) -> bool:
     세 종류다. (1) agent-flow가 스스로 쓰는 상태 디렉터리. (2) 접힌
     ``.agent-flow/`` 디렉터리 레코드 — 심층 스캔이 안을 파일 단위로 이미
     보고하므로 정보가 없고, 디렉터리가 생기고 사라지는 것만으로 변화가 생긴다.
-    (3) 실행으로 저절로 생기는 bytecode(``__pycache__``).
+    ``.agent-flow/runtime`` 아래에서 실행으로 생기는 bytecode(``__pycache__``).
     """
     trimmed = path.rstrip("/")
     if trimmed == _AGENT_FLOW_PREFIX:
         return True
     parts = trimmed.split("/")
-    if any(segment in _GENERATED_PATH_SEGMENTS for segment in parts):
-        return True
+    if "__pycache__" in parts:
+        return parts[:2] == [_AGENT_FLOW_PREFIX, "runtime"]
     return any(
         trimmed == path_prefix or trimmed.startswith(f"{path_prefix}/")
         for path_prefix in _RUNTIME_WRITE_PATHS
@@ -690,11 +1468,11 @@ def _is_excluded_path(path: str) -> bool:
 
 @contextlib.contextmanager
 def worktree_creation_lock(root, *, timeout_s: int = _LOCK_TIMEOUT_S) -> Iterator[None]:
-    """Serialize concurrent ``git worktree add`` across processes via flock.
+    """Serialize repository-global ``git worktree add`` mutations.
 
-    Concurrent creation races on the shared index/ref locks and can leave a
-    half-registered worktree; a cross-process file lock makes creation the sole
-    writer for the critical section.
+    Worktree metadata and refs share a common git directory, so concurrent
+    mutation can contend even when paths and branches are unique. This lock is
+    preventive hardening; contention alone does not explain writes to leader.
     """
     with _cross_process_lock(root, "worktree-create.lock", timeout_s=timeout_s):
         yield
@@ -728,7 +1506,7 @@ def _cross_process_lock(root, name: str, *, timeout_s: int) -> Iterator[None]:
         lock_dir = real_path(Path(root) / _AGENT_FLOW_PREFIX)
     else:
         lock_dir = common / "agent-flow"
-    lock_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_lease_parent(lock_dir / name)
     lock_path = lock_dir / name
     deadline = time.monotonic() + timeout_s
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
@@ -813,7 +1591,13 @@ def with_git_lock_retry(
     raise last
 
 
-def git_safe(*args, cwd, timeout_s: Optional[int] = None, optional_locks: bool = True):
+def git_safe(
+    *args,
+    cwd,
+    timeout_s: Optional[int] = None,
+    optional_locks: bool = True,
+    input_text: str | None = None,
+):
     """Run git with git-discovery env vars stripped so cwd stays authoritative.
 
     A poisoned ambient GIT_DIR/GIT_WORK_TREE must never redirect our own git
@@ -832,9 +1616,10 @@ def git_safe(*args, cwd, timeout_s: Optional[int] = None, optional_locks: bool =
     if not optional_locks:
         env["GIT_OPTIONAL_LOCKS"] = "0"
     command = ("git",) + tuple(str(a) for a in args)
-    if timeout_s is None:
-        return run_safe_command(command, cwd=cwd, env=env)
-    return run_safe_command(command, cwd=cwd, env=env, timeout_s=timeout_s)
+    options = {"cwd": cwd, "env": env, "input_text": input_text}
+    if timeout_s is not None:
+        options["timeout_s"] = timeout_s
+    return run_safe_command(command, **options)
 
 
 def _git_toplevel(path) -> Optional[Path]:
@@ -872,6 +1657,149 @@ def _leader_head_sha(root) -> Optional[str]:
     return result.stdout.strip() or None
 
 
+def _read_registration_file(path: Path) -> tuple[os.stat_result, bytes] | None:
+    if not hasattr(os, "O_NOFOLLOW"):
+        return None
+    try:
+        observed = path.lstat()
+    except OSError:
+        return None
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(observed.st_mode)
+        or observed.st_uid != os.getuid()
+        or observed.st_nlink != 1
+    ):
+        return None
+    try:
+        fd = os.open(
+            path,
+            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+        )
+    except OSError:
+        return None
+    try:
+        opened = os.fstat(fd)
+        content = os.read(fd, 4097)
+    finally:
+        os.close(fd)
+    if (
+        opened.st_dev != observed.st_dev
+        or opened.st_ino != observed.st_ino
+        or len(content) > 4096
+    ):
+        return None
+    return opened, content
+
+
+def _registration_admin_for_path(
+    path: Path,
+    *,
+    common_dir: Path | None,
+) -> Path | None:
+    dot_git = path / ".git"
+    pointer = _read_registration_file(dot_git)
+    if pointer is not None:
+        try:
+            pointer_line = pointer[1].decode("utf-8").strip()
+        except UnicodeDecodeError:
+            return None
+        if not pointer_line.startswith("gitdir:"):
+            return None
+        admin = Path(pointer_line.partition(":")[2].strip()).expanduser()
+        if not admin.is_absolute():
+            admin = path / admin
+        return real_path(admin)
+    try:
+        dot_git_identity = dot_git.lstat()
+    except OSError:
+        dot_git_identity = None
+    if (
+        dot_git_identity is not None
+        and stat.S_ISDIR(dot_git_identity.st_mode)
+        and not dot_git.is_symlink()
+        and dot_git_identity.st_uid == os.getuid()
+    ):
+        return real_path(dot_git)
+    if common_dir is None:
+        return None
+
+    registry = real_path(common_dir) / "worktrees"
+    try:
+        candidates = tuple(registry.iterdir())
+    except OSError:
+        return None
+    expected_backlink = real_path(dot_git)
+    matches: list[Path] = []
+    for candidate in candidates:
+        backlink = _read_registration_file(candidate / "gitdir")
+        if backlink is None:
+            continue
+        backlink_path = Path(
+            backlink[1].decode("utf-8", errors="replace").strip()
+        ).expanduser()
+        if not backlink_path.is_absolute():
+            backlink_path = candidate / backlink_path
+        if real_path(backlink_path) == expected_backlink:
+            matches.append(real_path(candidate))
+    return matches[0] if len(matches) == 1 else None
+
+
+def _registered_worktree_identity(
+    path: Path,
+    *,
+    common_dir: Path | None = None,
+) -> Optional[str]:
+    admin_path = _registration_admin_for_path(path, common_dir=common_dir)
+    if admin_path is None:
+        return None
+    try:
+        admin_identity = admin_path.lstat()
+    except OSError:
+        return None
+    if (
+        admin_path.is_symlink()
+        or not stat.S_ISDIR(admin_identity.st_mode)
+        or admin_identity.st_uid != os.getuid()
+    ):
+        return None
+
+    backlink_identity: os.stat_result | None = None
+    backlink_content = b""
+    if admin_path != real_path(path / ".git"):
+        backlink = _read_registration_file(admin_path / "gitdir")
+        if backlink is None:
+            return None
+        backlink_identity, backlink_content = backlink
+        backlink_path = Path(
+            backlink_content.decode("utf-8", errors="replace").strip()
+        ).expanduser()
+        if not backlink_path.is_absolute():
+            backlink_path = admin_path / backlink_path
+        if real_path(backlink_path) != real_path(path / ".git"):
+            return None
+
+    payload = json.dumps(
+        (
+            str(real_path(path)),
+            str(admin_path),
+            admin_identity.st_dev,
+            admin_identity.st_ino,
+            admin_identity.st_uid,
+            admin_identity.st_mode,
+            None if backlink_identity is None else backlink_identity.st_dev,
+            None if backlink_identity is None else backlink_identity.st_ino,
+            None if backlink_identity is None else backlink_identity.st_uid,
+            None if backlink_identity is None else backlink_identity.st_mode,
+            None if backlink_identity is None else backlink_identity.st_nlink,
+            None if backlink_identity is None else backlink_identity.st_ctime_ns,
+            backlink_content.hex(),
+        ),
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 @dataclass(frozen=True)
 class RegisteredWorktree:
     """``git worktree list --porcelain``이 보고한 한 행.
@@ -886,6 +1814,7 @@ class RegisteredWorktree:
     bare: bool = False
     locked: bool = False
     prunable: bool = False
+    registration_identity: Optional[str] = None
 
 
 def list_registered_worktrees(root) -> list:
@@ -897,30 +1826,68 @@ def list_registered_worktrees(root) -> list:
     ``WorktreeIsolationError``를 잡아 그 자리에서 명시적으로 하라 — 이 함수가
     대신 삼켜 주지 않는다.
     """
+    return _parse_worktree_list(
+        _registered_worktree_payload(root),
+        common_dir=_git_common_dir(root),
+    )
+
+
+def registered_worktree_at(root, path) -> Optional[RegisteredWorktree]:
+    """대상 경로 한 행만 돌려준다. 같은 fail-closed 계약이다.
+
+    등록 행마다 지문을 계산하면 등록 수 N에 비례하는 lstat/open/read가 매
+    경계에 얹혀 lifecycle 연산당 O(N²)로 증폭된다. 필요한 것은 대상 1행이므로
+    파싱 루프 안에서 걸러 그 행만 지문을 만든다.
+
+    지문은 **스냅샷 시점에 즉시** 계산해야 한다. 접근 시점으로 미루면
+    ``_same_registration``의 before/after 비교가 항상 같은 값을 읽어 ABA 탐지가
+    조용히 사라진다.
+    """
+    entries = _parse_worktree_list(
+        _registered_worktree_payload(root),
+        common_dir=_git_common_dir(root),
+        only_path=path,
+    )
+    return entries[0] if entries else None
+
+
+def _registered_worktree_payload(root) -> str:
     result = git_safe("worktree", "list", "--porcelain", cwd=root, optional_locks=False)
     if not result.ok:
         raise _tripwire_git_error(f"cannot list registered worktrees for {root}", result)
-    return _parse_worktree_list(result.stdout)
+    return result.stdout
 
 
-def _parse_worktree_list(payload: str) -> list:
+def _parse_worktree_list(
+    payload: str,
+    *,
+    common_dir: Path | None = None,
+    only_path=None,
+) -> list:
     entries: list = []
     current: dict = {}
+    wanted = worktree_path_key(only_path) if only_path is not None else None
 
     def flush() -> None:
         raw = current.get("worktree")
         if raw:
-            branch = current.get("branch") or None
-            entries.append(
-                RegisteredWorktree(
-                    path=real_path(raw),
-                    branch=branch.removeprefix("refs/heads/") if branch else None,
-                    head=current.get("HEAD") or None,
-                    bare="bare" in current,
-                    locked="locked" in current,
-                    prunable="prunable" in current,
+            path = real_path(raw)
+            if wanted is None or worktree_path_key(path) == wanted:
+                branch = current.get("branch") or None
+                entries.append(
+                    RegisteredWorktree(
+                        path=path,
+                        branch=branch.removeprefix("refs/heads/") if branch else None,
+                        head=current.get("HEAD") or None,
+                        bare="bare" in current,
+                        locked="locked" in current,
+                        prunable="prunable" in current,
+                        registration_identity=_registered_worktree_identity(
+                            path,
+                            common_dir=common_dir,
+                        ),
+                    )
                 )
-            )
         current.clear()
 
     for line in payload.splitlines():
@@ -931,11 +1898,6 @@ def _parse_worktree_list(payload: str) -> list:
         current[key] = value.strip()
     flush()
     return entries
-
-
-def registered_worktree_paths(root) -> set:
-    """등록된 worktree 경로 집합. ``list_registered_worktrees``와 같은 fail-closed 계약."""
-    return {entry.path for entry in list_registered_worktrees(root)}
 
 
 def worktree_path_key(path) -> str:

@@ -75,13 +75,14 @@ phases:
       when the run task contains no user instruction.
 
       After writing `artifacts/prd.md`, show the user the complete ordered SPEC
-      list and tell them to run
-      `agent-flow spec confirm --run-dir <run-dir> --artifact <artifacts/prd.md>`
-      in their interactive terminal. Never run this command or write its
-      confirmation record on the user's behalf: if that command is observed in
-      your own shell, the record is rejected. The confirmation covers the
-      complete ordered set; any requirement or verifier edit requires a new
-      confirmation before this phase can complete.
+      list and ask them to reply exactly `승인` in the current chat. Do not treat
+      quoted text, an earlier message, or agent-authored text as approval. The
+      managed user-prompt hook records only the current exact reply. If that
+      host hook is unavailable, tell the user to run the short fallback
+      `agent-flow spec confirm` from the target worktree. Never run the fallback
+      or invoke the approval hook yourself. The confirmation covers the complete
+      ordered set; any requirement or verifier edit requires a new confirmation
+      before this phase can complete.
 
       ## Design Values
       Record every concrete value the user supplied as one `key: value` line
@@ -465,9 +466,10 @@ phases:
       approve: architecture-review
       request-changes: fix-loop
     prompt: |
-      Run at least two independent sub-agent reviewers in parallel. Each
-      reviewer uses code-reviewer.md as basis and
-      outputs an independent verdict: approve or request-changes.
+      Run at least two independent active-host reviewer sub-agents in parallel
+      through agent-flow's verified OS-confined subprocess boundary. Each
+      reviewer uses code-reviewer.md as basis and outputs an independent
+      verdict: approve or request-changes.
       For architecture/SOLID findings, reviewers also apply
       `skills/clean-architecture-core/SKILL.md` and the compatibility markers
       in `skills/clean-architecture/SKILL.md`; any must-avoid or failing
@@ -476,13 +478,12 @@ phases:
       Any request-changes from any reviewer makes the overall verdict
       request-changes. Default reviewers are active-host sub-agents (Codex
       sub-agent in Codex, Claude sub-agent in Claude, OMP sub-agent in OMP).
-      Additional non-host providers are optional when available.
-      Provider failure falls back to active-host sub-agents only. Each reviewer
-      section must include
-      `reviewer-source: sub-agent`. After recording each sub-agent result,
-      close that sub-agent session. Record per-reviewer verdicts and end with
-      `## Overall` followed by exactly one verdict line: `verdict: approve` or
-      `verdict: request-changes`.
+      Additional non-host providers are optional when available. Provider
+      failure blocks review; never fall back to controller-session work. Each
+      reviewer section must include `reviewer-source: sub-agent`. After
+      recording each sub-agent result, close that sub-agent session. Record
+      per-reviewer verdicts and end with `## Overall` followed by exactly one
+      verdict line: `verdict: approve` or `verdict: request-changes`.
       Apply agent-flow-concise-output: one finding per line, Korean concise
       prose, no emoji, and parser verdict markers unchanged.
       Resolve required review skills from active profile metadata,
@@ -578,11 +579,14 @@ phases:
       approve: gates
       request-changes: refactor
     prompt: |
-      Run two independent active-host reviewer sub-agents before QA.
-      Each required reviewer section must include `reviewer-source: sub-agent`.
+      Run two independent active-host reviewer sub-agents through agent-flow's
+      verified OS-confined subprocess boundary before QA. Each required
+      reviewer section must include `reviewer-source: sub-agent`.
       Optional cross-host reviewers may be recorded as extra evidence, but they
-      do not replace the two active-host sub-agent reviewers and are not a
-      general completion blocker.
+      do not replace the two active-host sub-agent reviewers. A failed required
+      reviewer process blocks approval and must not be replaced by
+      controller-session work. After recording each result, close that
+      sub-agent session.
       Compare code against domain-grill.md and ddd-design.md. Check layer
       violations, repository boundary leaks, naming drift, and dependency
       direction. Apply `skills/ddd-architecture/SKILL.md` first for domain fit,
@@ -727,18 +731,31 @@ phases:
   - id: commit
     skills:
       required: [agent-flow-concise-output]
+    required_markers:
+      - "commit-oid:"
+      - "commit-subject:"
     description: Commit verified changes.
     prompt: |
-      Commit the verified slice and record commit hashes/messages. Use
-      agent-flow-concise-output commit rules: Conventional Commit subject
-      target 50 chars, hard cap 72 chars, body only when the reason is unclear.
-      Output: artifacts/commit.md.
+      Commit the verified slice. Use agent-flow-concise-output commit rules:
+      Conventional Commit subject target 50 chars, hard cap 72 chars, body
+      only when the reason is unclear. Record exactly one full current HEAD
+      OID and its exact subject as `commit-oid: <oid>` and
+      `commit-subject: <subject>`. Output: artifacts/commit.md.
 
   - id: push-pr
+    required_markers:
+      - "remote:"
+      - "branch:"
+      - "remote-oid:"
+      - "pr-url:"
+      - "pr-base:"
     description: Push branch and open PR.
     prompt: |
-      Push branch, open PR, and record PR URL, branch, title, and summary.
-      Use repo-relative paths only. Output: artifacts/push-pr.md.
+      Push branch and open a PR against `profile.pr.target_branch`. Record
+      `remote:`, `branch:`, the pushed `remote-oid:`, HTTPS `pr-url:`, and the
+      exact profile target as `pr-base:`, plus title and summary. Use
+      repo-relative paths only.
+      Output: artifacts/push-pr.md.
 
   - id: pr-watch
     skills:
@@ -802,7 +819,10 @@ phases:
       Output: artifacts/merge.md.
 
   - id: handoff
-    description: Final handoff and cleanup.
+    description: Final handoff before Runner-owned transactional cleanup.
     prompt: |
       Summarize shipped work, verification, PR/merge result, follow-up items,
-      and cleanup state. Output: artifacts/handoff.md.
+      and the expected integration target in artifacts/handoff.md. Do not
+      delete the branch, worktree, runtime metadata, or `active` marker.
+      Runner performs and proves every cleanup transaction step after handoff;
+      this artifact alone cannot make the run terminally complete.

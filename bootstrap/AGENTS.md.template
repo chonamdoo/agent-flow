@@ -20,7 +20,7 @@ active run이 있으면 status 출력의 `next_command`를 그대로 실행하�
 
 - `default.yaml`: design → slice-plan → worktree → implement → comment-authoring → final-review → gates ↔ fix-loop → comment-authoring → final-review → gates → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge → cleanup
 - `full-feature.yaml`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → comment-authoring → multi-review → architecture-review → gates ↔ fix-loop → comment-authoring → multi-review → architecture-review → gates → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
-- `multi-review`는 현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수다. 두 sub-agent를 병렬 실행하고, `reviewer-source: sub-agent`를 기록한 뒤 sub-agent를 닫는다. 마지막에 `## Overall`과 `verdict: approve` 또는 `verdict: request-changes`만 기록한다. 활성 host가 아닌 추가 provider는 optional이다.
+- `multi-review`는 현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수다. agent-flow는 두 sub-agent를 검증된 worktree에 바인딩한 별도 OS sandbox subprocess로 병렬 실행한다. 각 결과에 `reviewer-source: sub-agent`를 기록한 뒤 sub-agent를 닫는다. 마지막에 `## Overall`과 `verdict: approve` 또는 `verdict: request-changes`만 기록한다. 활성 host가 아닌 추가 provider는 optional이다.
 
 ### Context Economy
 
@@ -47,9 +47,9 @@ Android/Kotlin/Compose/KMP 변경 때만 Android profile의 `android_skills`와 
 ```
 `/agent-flow`는 shell path가 아니라 agent-flow skill trigger로 취급하세요.
 
-run이 SPEC 확인 대기로 막히면 사용자가 대화형 터미널에서 `agent-flow spec confirm --run-dir <run-dir> --artifact <run-dir>/artifacts/design.md`를 직접 실행해야 풀립니다.
+run이 SPEC 확인 대기로 막히면 지원되는 Codex·Claude·OMP host에서는 사용자에게 현재 대화의 새 turn으로 정확히 `승인`이라고 답해 달라고 안내합니다. managed user-prompt hook이 현재 pending SPEC을 확인합니다. hook을 사용할 수 없을 때만 사용자가 대상 worktree의 대화형 터미널에서 경로 없는 fallback `agent-flow spec confirm`을 직접 실행합니다.
 `manual` verify 항목은 사용자가 `agent-flow spec approve <spec-id> --run-dir <run-dir>`를 실행해야 승인 record가 남습니다.
-agent는 이 두 명령을 대신 실행하지 않습니다. agent 셸에서 관측된 확인·승인은 무효 처리됩니다.
+agent는 fallback·manual 승인 명령이나 user-prompt hook을 대신 실행하지 않습니다. agent 셸에서 관측된 확인·승인은 무효 처리됩니다.
 
 ### Artifact
 

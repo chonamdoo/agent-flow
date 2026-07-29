@@ -125,13 +125,14 @@ phases:
       when the run task contains no user instruction.
 
       After writing `design.md`, show the user the complete ordered SPEC list
-      and tell them to run
-      `agent-flow spec confirm --run-dir <run-dir> --artifact <design.md>`
-      in their interactive terminal. Never run this command or write its
-      confirmation record on the user's behalf: if that command is observed in
-      your own shell, the record is rejected. The confirmation covers the
-      complete ordered set; any requirement or verifier edit requires a new
-      confirmation before this phase can complete.
+      and ask them to reply exactly `승인` in the current chat. Do not treat
+      quoted text, an earlier message, or agent-authored text as approval. The
+      managed user-prompt hook records only the current exact reply. If that
+      host hook is unavailable, tell the user to run the short fallback
+      `agent-flow spec confirm` from the target worktree. Never run the fallback
+      or invoke the approval hook yourself. The confirmation covers the complete
+      ordered set; any requirement or verifier edit requires a new confirmation
+      before this phase can complete.
 
       ## Design Values
       Record every concrete value the user supplied as one `key: value` line
@@ -352,7 +353,8 @@ phases:
       required: [code-generation-discipline, code-review, architecture-reviewer, clean-architecture, clean-architecture-core]
     description: |
       Final review. Requires at least two independent active-host reviewer
-      sub-agents before approve. Profiles add stack-specific specialists on top.
+      sub-agents launched in OS-confined subprocesses before approve. Profiles
+      add stack-specific specialists on top.
     multi_review: true
     required_markers:
       - "skills_checked: true"
@@ -392,15 +394,17 @@ phases:
       request-changes: fix-loop
     prompt: |
       Spawn at least two active-host reviewer sub-agents (Codex sub-agent in
-      Codex, Claude sub-agent in Claude, OMP sub-agent in OMP). Additional
+      Codex, Claude sub-agent in Claude, OMP sub-agent in OMP) in parallel
+      through agent-flow's verified OS-confined subprocess boundary. Additional
       non-host providers are optional extras when available:
         - Generalist (templates/_shared/review/architecture.md)
         - Architecture-design specialist (templates/_shared/review/architecture-design.md) — MANDATORY
         - Clean Architecture specialist (templates/_shared/review/clean-architecture.md) — MANDATORY
         - Plus angles declared in profile.review_angles
-      Each reviewer section must include `reviewer-source: sub-agent`.
-      After recording each sub-agent result, close that sub-agent session.
-      Aggregate findings into final-review.md with severity (must-fix /
+      Never replace a failed subprocess with controller-session work. Each
+      reviewer section must include `reviewer-source: sub-agent`. After
+      recording each sub-agent result, close that sub-agent session. Aggregate
+      findings into final-review.md with severity (must-fix /
       should-fix / note) and source angle. Cite paths as `path/to/file:line`.
       Apply agent-flow-concise-output: one finding per line, Korean concise
       prose, no emoji, and parser verdict markers unchanged.
@@ -563,20 +567,32 @@ phases:
   - id: commit
     skills:
       required: [agent-flow-concise-output]
+    required_markers:
+      - "commit-oid:"
+      - "commit-subject:"
     description: Stage and commit using profile.commit_convention.
     prompt: |
       Group changes into logical commits per profile.commit_convention.style.
       Use agent-flow-concise-output commit rules: Conventional Commit subject
       target 50 chars, hard cap 72 chars, body only when the reason is unclear.
       Do not include co-author trailers unless profile.commit_convention.co_author
-      is `include`. Output: commit.md (commit messages + hashes).
+      is `include`. Record exactly one full current HEAD OID and its exact
+      subject as `commit-oid: <oid>` and `commit-subject: <subject>`.
+      Output: commit.md.
 
   - id: push-pr
+    required_markers:
+      - "remote:"
+      - "branch:"
+      - "remote-oid:"
+      - "pr-url:"
+      - "pr-base:"
     description: Push branch and open PR against profile.pr.target_branch.
     prompt: |
-      Push the branch and open a PR. Body references: design section, slice
-      list, verification results, open risks. Output: push-pr.md (PR URL,
-      title, body summary).
+      Push the branch and open a PR against `profile.pr.target_branch`. Body
+      references: design and verification results. Record `remote:`, `branch:`,
+      the pushed `remote-oid:`, HTTPS `pr-url:`, and the exact profile target as
+      `pr-base:`. Output: push-pr.md.
 
   - id: pr-watch
     skills:
@@ -666,10 +682,11 @@ phases:
       merge.md (merge commit hash, target branch).
 
   - id: cleanup
-    description: Delete worktree, sync integration branch, archive run.
+    description: Record cleanup handoff; Runner retires the checkout transactionally.
     prompt: |
-      Delete the working branch and worktree if created. Sync the integration
-      branch on the local clone. Move the run's `active` marker so subsequent
-      runs do not resume this one. Prompt the user to add a Lore entry if the
-      run produced architectural decisions, failures, or tradeoffs worth
-      preserving. Output: cleanup.md.
+      Do not delete the working branch, worktree, runtime metadata, or `active`
+      marker. Record the integration target and any Lore-worthy architectural
+      decisions, failures, or tradeoffs in cleanup.md. After this artifact is
+      accepted, Runner owns the durable archive → integration proof → worktree
+      removal → expected-OID branch CAS → metadata cleanup transaction.
+      cleanup.md alone is never terminal-completion evidence.
