@@ -2522,14 +2522,18 @@ class SlugQuality:
     dropped: tuple[str, ...]
 
 
+_SLUG_SAFE_CHAR_RE = re.compile(r"[a-z0-9]")
+
+
 def describe_slug(value: str) -> SlugQuality:
     lowered = value.strip().lower()
     safe = re.sub(r"[^a-z0-9._-]+", "-", lowered).strip("-")
+    # 토큰 단위로 생사를 보면 `로그인화면Figma구현`처럼 붙여 쓴 task가 통째로
+    # 살아남은 것이 된다. 실제로 지워진 글자를 기준으로 센다.
     dropped = tuple(
         word
         for word in value.split()
-        if any(char.isalnum() for char in word)
-        and not re.sub(r"[^a-z0-9._-]+", "", word.lower())
+        if any(char.isalnum() and not _SLUG_SAFE_CHAR_RE.match(char.lower()) for char in word)
     )
     if not safe or safe.startswith(".") or ".." in safe:
         if not any(char.isalnum() for char in lowered):

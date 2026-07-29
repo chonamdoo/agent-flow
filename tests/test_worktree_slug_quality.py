@@ -109,3 +109,19 @@ def test_unusable_task_does_not_crash_the_warning(capsys):
 
     _warn_if_slug_does_not_represent_the_task("...")
     assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize(
+    "task",
+    ["로그인화면Figma구현", "로그인(Figma)", "검색결과UI수정"],
+)
+def test_non_ascii_glued_to_ascii_is_still_partial(task: str):
+    """반증: 토큰 단위로 생사를 보면 붙여 쓴 task가 통째로 살아남은 것이 된다.
+
+    공백이 없으면 토큰이 하나뿐이고, 그 안에 ASCII가 남아 있으니 보존으로 판정된다.
+    결과는 `feat-figma`인데 `ascii`로 나와 경고도 위임도 건너뛴다 — 이 작업이 막으려던
+    바로 그 실패다.
+    """
+    quality = describe_slug(task)
+    assert quality.kind == "partial", f"{task} -> {quality.kind}"
+    assert quality.dropped, "무엇이 사라졌는지 말해야 한다"

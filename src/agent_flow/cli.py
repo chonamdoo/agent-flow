@@ -114,6 +114,7 @@ from agent_flow.core.worktrees import (
     UnknownWorktreeSetupAction,
     WORKTREE_SETUP_ACTIONS,
     copy_declared_worktree_files,
+    DEFAULT_SLUG_MAX_LENGTH,
     describe_slug,
     delegated_slug,
     run_declared_worktree_actions,
@@ -2183,16 +2184,20 @@ def _confirm_inferred_worktree_reuse(
     return False
 
 
-def _slug_command_for_active_host(root: Path) -> list[str]:
-    """활성 host에 해당하는 이름 짓기 명령. 선언이 없으면 빈 목록."""
+def _slug_naming_for_active_host(root: Path) -> tuple[list[str], int]:
+    """활성 host의 이름 짓기 명령과 profile이 선언한 길이 제한.
+
+    제한을 안 읽으면 profile이 20을 선언해도 host가 낸 50자가 그대로 이름이 된다.
+    """
+    empty: tuple[list[str], int] = ([], DEFAULT_SLUG_MAX_LENGTH)
     try:
         _profile_id, profile = _load_profile(_find_kit_root(), root)
     except (OSError, RuntimeError, ValueError, KeyError, TypeError):
         # profile을 못 읽는다고 worktree 생성을 막지 않는다. 이름만 못 지을 뿐이다.
-        return []
+        return empty
     host = (os.environ.get("AGENT_FLOW_HOST") or "").strip().lower()
     if not host:
-        return []
+        return empty
     sources = [profile]
     nested = profile.get("profiles")
     if isinstance(nested, list):
@@ -2201,8 +2206,11 @@ def _slug_command_for_active_host(root: Path) -> list[str]:
         naming = ((source.get("branching") or {}).get("naming") or {})
         declared = (naming.get("slug_command") or {}).get(host)
         if isinstance(declared, list) and declared:
-            return [str(part) for part in declared]
-    return []
+            limit = naming.get("max_slug_length")
+            if not isinstance(limit, int) or limit < 1:
+                limit = DEFAULT_SLUG_MAX_LENGTH
+            return [str(part) for part in declared], limit
+    return empty
 
 
 def _derive_worktree_selector(*, root: Path, task: str) -> str:
@@ -2213,9 +2221,9 @@ def _derive_worktree_selector(*, root: Path, task: str) -> str:
         return task
     if quality.kind == "ascii":
         return task
-    command = _slug_command_for_active_host(root)
+    command, max_length = _slug_naming_for_active_host(root)
     if command:
-        delegated = delegated_slug(task=task, command=command)
+        delegated = delegated_slug(task=task, command=command, max_length=max_length)
         if delegated:
             print(f"worktree 이름을 활성 host가 지었다: feat-{delegated}")
             return delegated
