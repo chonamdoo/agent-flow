@@ -7,6 +7,8 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
+import { activeInstallProfileIds, installedProfileFileNames } from "../lib/installer-shared.mjs";
+
 const SOURCE_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
 const SOURCE_IS_MANAGED_WORKTREE = resolveManagedWorktreeRoot(SOURCE_ROOT) !== null;
@@ -472,27 +474,48 @@ if (CHECK_INSTALLED_COPY) {
   assertSame("skills/code-generation-discipline/SKILL.md", ".agent-flow/skills/code-generation-discipline/SKILL.md");
 }
 
-function gateIds(text) {
-  const lines = text.split("\n");
-  const ids = [];
-  let inGates = false;
-  for (const line of lines) {
-    if (line === "gates:") {
-      inGates = true;
-      continue;
-    }
-    if (inGates && line && !line.startsWith(" ")) {
-      break;
-    }
-    if (!inGates) continue;
-    const match = line.match(/^\s+- id: (.+)$/);
-    if (match) ids.push(match[1].trim());
+function installedKitPayload() {
+  const text = readIfExists(".agent-flow/kit.json");
+  if (text === null) {
+    return null;
   }
-  return ids;
+  try {
+    const payload = JSON.parse(text);
+    if (payload && typeof payload === "object") {
+      return payload;
+    }
+    failures.push(".agent-flow/kit.json is not an object");
+    return null;
+  } catch {
+    // 조용히 null로 넘기면 아래 keep-set이 최소 집합으로 쪼그라들고, 정상 선택된
+    // profile이 비교 대상에서 빠져 바이트 동일성 검사가 통째로 꺼진다.
+    failures.push(".agent-flow/kit.json is not valid JSON");
+    return null;
+  }
 }
 
+// 설치본은 이 프로젝트의 stack + generic + _schema만 싣는다. 전체 집합을 요구하면
+// 정상 설치가 "빠진 profile"로 잡힌다.
+const INSTALLED_KIT = installedKitPayload();
+const INSTALLED_PROFILE_FILES = installedProfileFileNames(
+  activeInstallProfileIds(INSTALLED_KIT?.profile, INSTALLED_KIT),
+);
+
 if (CHECK_INSTALLED_COPY) {
-  assertSameYamlFileSet(PACKAGED_PROFILES, ".agent-flow/profiles");
+  const packagedProfiles = new Set(yamlFileNames(PACKAGED_PROFILES));
+  const installedProfiles = new Set(yamlFileNames(".agent-flow/profiles"));
+  for (const file of INSTALLED_PROFILE_FILES) {
+    if (!installedProfiles.has(file)) {
+      failures.push(`.agent-flow/profiles missing ${file} from ${PACKAGED_PROFILES}`);
+    }
+  }
+  for (const file of installedProfiles) {
+    // 배포 이름이 아닌 것은 사용자가 만든 custom profile이다. install이 그것을
+    // 보존하는 것이 계약이므로 여기서 실패로 잡으면 오탐이다.
+    if (packagedProfiles.has(file) && !INSTALLED_PROFILE_FILES.has(file)) {
+      failures.push(`.agent-flow/profiles has unselected ${file}`);
+    }
+  }
 }
 
 if (CHECK_INSTALLED_COPY) {
@@ -503,19 +526,14 @@ if (CHECK_INSTALLED_COPY) {
 }
 for (const entry of fs.readdirSync(path.join(SOURCE_ROOT, PACKAGED_PROFILES)).sort()) {
   if (!entry.endsWith(".yaml")) continue;
-  const packaged = `${PACKAGED_PROFILES}/${entry}`;
-  const packagedText = readIfExists(packaged);
-  if (packagedText === null) continue;
-  const installed = `.agent-flow/profiles/${entry}`;
-  if (CHECK_INSTALLED_COPY) {
-    assertSame(packaged, installed);
+  // 이 프로젝트가 고르지 않은 stack은 설치본에 없다. 그 자리는 비교 대상이
+  // 아니라 계약대로 빠진 것이다.
+  if (!CHECK_INSTALLED_COPY || !INSTALLED_PROFILE_FILES.has(entry)) {
+    continue;
   }
-  const installedText = CHECK_INSTALLED_COPY ? readIfExists(installed) : packagedText;
-  const sourceGates = gateIds(installedText ?? packagedText);
-  const packagedGates = gateIds(packagedText);
-  if (sourceGates.join("|") !== packagedGates.join("|")) {
-    failures.push(`${packaged} gates differ from the installed copy`);
-  }
+  // 바이트 동일성이 gate 목록 동일성을 포함한다. gate id를 따로 비교하면 같은
+  // drift를 두 줄로 보고할 뿐이다.
+  assertSame(`${PACKAGED_PROFILES}/${entry}`, `.agent-flow/profiles/${entry}`);
 }
 
 // #105: profile skill 표는 소비자가 있어야 한다. 선언만 남으면 "보여 주지 않는
