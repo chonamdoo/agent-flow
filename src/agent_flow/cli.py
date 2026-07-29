@@ -112,6 +112,8 @@ from agent_flow.core.worktrees import (
     get_worktree_status,
     cleanup_state_root,
     copy_declared_worktree_files,
+    describe_slug,
+    delegated_slug,
     find_pending_worktree_cleanup,
     known_worktree_names,
     plan_worktree,
@@ -2178,6 +2180,69 @@ def _confirm_inferred_worktree_reuse(
     return False
 
 
+def _slug_command_for_active_host(root: Path) -> list[str]:
+    """활성 host에 해당하는 이름 짓기 명령. 선언이 없으면 빈 목록."""
+    try:
+        _profile_id, profile = _load_profile(_find_kit_root(), root)
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError):
+        # profile을 못 읽는다고 worktree 생성을 막지 않는다. 이름만 못 지을 뿐이다.
+        return []
+    host = (os.environ.get("AGENT_FLOW_HOST") or "").strip().lower()
+    if not host:
+        return []
+    sources = [profile]
+    nested = profile.get("profiles")
+    if isinstance(nested, list):
+        sources.extend(item for item in nested if isinstance(item, dict))
+    for source in sources:
+        naming = ((source.get("branching") or {}).get("naming") or {})
+        declared = (naming.get("slug_command") or {}).get(host)
+        if isinstance(declared, list) and declared:
+            return [str(part) for part in declared]
+    return []
+
+
+def _derive_worktree_selector(*, root: Path, task: str) -> str:
+    """task에서 worktree 이름을 정한다. 위임 실패는 경고로 드러낸다."""
+    try:
+        quality = describe_slug(task)
+    except ValueError:
+        return task
+    if quality.kind == "ascii":
+        return task
+    command = _slug_command_for_active_host(root)
+    if command:
+        delegated = delegated_slug(task=task, command=command)
+        if delegated:
+            print(f"worktree 이름을 활성 host가 지었다: feat-{delegated}")
+            return delegated
+    _warn_if_slug_does_not_represent_the_task(task)
+    return task
+
+
+def _warn_if_slug_does_not_represent_the_task(task: str) -> None:
+    """이름이 task를 대표하지 못하면 사실대로 말한다.
+
+    `--worktree`로 사용자가 직접 지은 이름에는 아무 말도 하지 않는다.
+    """
+    try:
+        quality = describe_slug(task)
+    except ValueError:
+        return
+    if quality.kind == "ascii":
+        return
+    dropped = ", ".join(quality.dropped)
+    if quality.kind == "digest":
+        detail = f"task에서 쓸 수 있는 문자를 찾지 못했다 (버려진 말: {dropped})"
+    else:
+        detail = f"task의 일부만 이름에 남았다 (버려진 말: {dropped})"
+    print(
+        f"warning: worktree 이름 `feat-{quality.slug}`이 task를 대표하지 못한다 — "
+        f"{detail}. 원하는 이름이 있으면 `--worktree <name>`으로 지정하라.",
+        file=sys.stderr,
+    )
+
+
 def _resolve_entry_worktree(
     *,
     root: Path,
@@ -2211,6 +2276,8 @@ def _resolve_entry_worktree(
             _apply_worktree_setup(root=root, checkout=attached.path)
             _warn_if_cwd_is_other_checkout(root=root, target=attached.path)
             return attached, True
+    if not explicit:
+        selector = _derive_worktree_selector(root=root, task=selector)
     plan = plan_worktree(root=root, name=selector, branch=branch)
     try:
         status = create_worktree(
