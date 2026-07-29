@@ -12,7 +12,9 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Sequence
 
 from agent_flow.core.profile_routing import IMPLEMENTATION_PHASES, REVIEW_PHASES
@@ -53,6 +55,9 @@ class ExternalMatch:
     domain: str
     tier: str
     term: str
+    # 카탈로그가 이미 아는 실제 경로. 이름으로 다시 해석하면 활성 host 필터에 걸려
+    # 설치돼 있는 skill을 "없다"고 보고한다.
+    path: Path | None = None
 
 
 def parse_external(profile: dict | None, *, env: dict[str, str] | None = None) -> ExternalConfig:
@@ -98,13 +103,36 @@ def match_external(
                 continue
             # tier는 "어느 term이 양쪽에 다 걸렸나"로 정한다. 첫 매치만 보면 skill 쪽에서
             # 먼저 걸린 term이 task 쪽에 없다는 이유로 required가 offered로 떨어진다.
-            shared = next((term for term in terms if term in haystack), None)
+            shared = next((term for term in terms if _term_in(term, haystack)), None)
             tier = REQUIRED if shared or entry.name in config.pins else OFFERED
             existing = matches.get(entry.name)
             if existing is not None and (existing.tier == REQUIRED or tier == OFFERED):
                 continue
-            matches[entry.name] = ExternalMatch(entry.name, domain.id, tier, shared or terms[0])
+            matches[entry.name] = ExternalMatch(
+                entry.name, domain.id, tier, shared or terms[0], entry.path
+            )
     return _truncate(matches.values(), config)
+
+
+def routable_names(
+    profile: dict | None,
+    catalog: Sequence[SkillCatalogEntry],
+    *,
+    env: dict[str, str] | None = None,
+) -> set[str]:
+    """어느 domain의 어휘에든 걸릴 수 있는 skill 이름.
+
+    `match_external`은 이번 run의 task/경로까지 본다. doctor는 그것과 무관하게
+    "이 skill이 어떤 run에서든 라우팅될 수 있는가"를 물어야 한다 — 안 그러면 정상
+    라우팅되는 skill을 매번 미라우팅으로 보고한다.
+    """
+    config = parse_external(profile, env=env)
+    names: set[str] = set()
+    for domain in config.domains:
+        for entry in catalog:
+            if entry.name not in names and _entry_terms(entry, domain.terms):
+                names.add(entry.name)
+    return names
 
 
 def _truncate(
@@ -158,6 +186,7 @@ def _domain_active(
 # spreadsheets…"를 실어서 `spreadsheet` 어휘에 걸렸다. 긍정 매칭만 하므로 배제 조항은
 # 신호에서 빼야 한다 — 아니면 "쓰지 말라"는 문장이 그 skill을 불러온다.
 _NEGATION_MARKERS = ("do not use", "do not trigger", "do not apply", "don't use")
+_TERM_CACHE: dict[str, "re.Pattern[str]"] = {}
 
 
 def _entry_terms(entry: SkillCatalogEntry, terms: Sequence[str]) -> tuple[str, ...]:
@@ -169,7 +198,23 @@ def _entry_terms(entry: SkillCatalogEntry, terms: Sequence[str]) -> tuple[str, .
             " ".join(entry.keywords),
         )
     ).lower()
-    return tuple(term for term in terms if term and term in signal)
+    return tuple(term for term in terms if term and _term_in(term, signal))
+
+
+def _term_in(term: str, text: str) -> bool:
+    """단어 경계로 본다.
+
+    부분문자열로 보면 `chart`가 `charting`에, `modifier`가 SwiftUI description의
+    `modifiers`에 걸려 무관한 플랫폼 skill이 required까지 올라간다(실측).
+
+    경계는 ASCII 영숫자로만 잡는다. `\\w`를 쓰면 한글이 word 문자라서
+    `status bar가`처럼 조사가 붙은 한국어 task 문구가 전부 미매치가 된다.
+    """
+    pattern = _TERM_CACHE.get(term)
+    if pattern is None:
+        pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(term)}(?![A-Za-z0-9_])")
+        _TERM_CACHE[term] = pattern
+    return pattern.search(text) is not None
 
 
 def _positive_description(description: str) -> str:
@@ -180,7 +225,6 @@ def _positive_description(description: str) -> str:
         if index != -1:
             cut = min(cut, index)
     return description[:cut]
-    return tuple(term for term in terms if term and term in signal)
 
 
 def _domains(value: object) -> list[ExternalDomain]:

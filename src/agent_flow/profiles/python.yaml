@@ -82,10 +82,12 @@ skills:
         path_globs: ["pyproject.toml", "uv.lock", "requirements*.txt"]
         phases: [implementation]
       # `pdf`/`excel` 단독은 canvas-design·math-olympiad·code-review-excellence를 끌어온다(부분
-      # 문자열 실측). 문서 계열은 확장자와 구절로만 적는다.
+      # 문자열 실측). 문서 계열은 확장자와 구절로만 적는다. `presentation`은 이 repo의
+      # clean-architecture role 이름(`feature-presentation`)과 겹쳐 무관한 run에서 `pptx`를
+      # required로 올렸으므로 쓰지 않는다.
       - id: document-generation
         terms: ["spreadsheet", "excel file", "excel workbook", "xlsx", "docx", "pptx", "csv",
-                "pivot table", "formula", "chart", "presentation", "slide deck", "word document",
+                "pivot table", "slide deck", "word document", "powerpoint",
                 "document generation", "pdf form", "pdf file"]
         phases: [implementation]
       - id: mcp-server

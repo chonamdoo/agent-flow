@@ -89,7 +89,11 @@ MANAGED_HOOK_PLACEMENT = {
         "PostToolUse",
         "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit)$",
     ),
-    "record-skill-read.py": ("PostToolUse", "^(Read|read|read_file|view|cat)$"),
+    "record-skill-read.py": (
+        "PostToolUse",
+        "^(Read|read|read_file|view|cat|Skill|skill|"
+        "Bash|bash|shell|run_terminal_cmd|execute_command|local_shell|terminal)$",
+    ),
     "record-command-run.py": (
         "PostToolUse",
         "^(Bash|bash|shell|run_terminal_cmd|execute_command|local_shell|terminal)$",

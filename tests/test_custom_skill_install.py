@@ -1339,3 +1339,65 @@ def test_legacy_kit_json_keeps_installed_at_and_gains_updated_at(
     fresh = _kit_json(project)
     assert fresh["installed_at"] > legacy
     assert fresh["installed_at"] <= fresh["updated_at"]
+
+
+def _hook_matchers(project: Path, script: str) -> list[str]:
+    matchers: list[str] = []
+    for relative in (".claude/settings.json", ".Codex/hooks.json", ".codex/hooks.json"):
+        path = project / relative
+        if not path.is_file():
+            continue
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        for entries in (payload.get("hooks") or {}).values():
+            for entry in entries:
+                commands = " ".join(
+                    str(hook.get("command", "")) for hook in entry.get("hooks") or []
+                )
+                if script in commands:
+                    matchers.append(str(entry.get("matcher", "")))
+    return matchers
+
+
+def test_skill_use_observer_is_registered_for_the_skill_and_shell_tools(tmp_path: Path) -> None:
+    """Skill tool 사용은 SKILL.md Read를 발생시키지 않는다. Read matcher만 달면 증거가 항상 비어 있다."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "pyproject.toml").write_text("[project]\nname = \"x\"\n", encoding="utf-8")
+
+    result = _install(project)
+
+    assert result.returncode == 0, result.stderr
+    matchers = _hook_matchers(project, "record-skill-read.py")
+    assert matchers
+    for matcher in matchers:
+        assert re.match(matcher, "Skill"), matcher
+        assert re.match(matcher, "Bash"), matcher
+        assert re.match(matcher, "Read"), matcher
+
+
+def test_installers_do_not_enumerate_external_skill_names() -> None:
+    """열거된 목록은 우리가 배포하지도 않는 이름을 영구히 들고 있게 된다."""
+    for name in ("bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"):
+        text = (KIT_ROOT / name).read_text(encoding="utf-8")
+        match = re.search(
+            r"const PROFILE_MANAGED_HOST_ONLY_SKILLS = new Set\((.*?)\);", text, re.S
+        )
+        assert match, name
+        assert match.group(1).strip() == "", name
+
+
+def test_plain_install_refreshes_a_managed_hook_to_match_its_recorded_digest(tmp_path: Path) -> None:
+    """digest는 갱신되고 hook 파일은 안 갱신되면 run 시작이 막힌다 — 평범한 install로 복구돼야 한다."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "pyproject.toml").write_text("[project]\nname = \"x\"\n", encoding="utf-8")
+    assert _install(project).returncode == 0
+    hook = project / ".agent-flow" / "scripts" / "hooks" / "record-skill-read.py"
+    hook.write_text("# stale copy from an older kit\n", encoding="utf-8")
+
+    assert _install(project).returncode == 0
+
+    recorded = json.loads((project / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
+    digest = recorded["managed_hook_digests"]["record-skill-read.py"]
+    assert hashlib.sha256(hook.read_bytes()).hexdigest() == digest
+    assert os.access(hook, os.X_OK)

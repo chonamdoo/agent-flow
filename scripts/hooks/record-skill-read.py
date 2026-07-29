@@ -33,6 +33,10 @@ _SELECTOR_RE = re.compile(
 _SKILL_URI_PREFIX = "skill://"
 _SAFE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _SHELL_SKILL_RE = re.compile(r"((?:~|/|\.{1,2}/)?[^\s'\"|;&<>]*SKILL\.md)")
+# 파일 내용을 실제로 출력하는 커맨드만. `ls`/`stat`/`echo`/`rm`은 읽기가 아니다.
+_SHELL_READER_RE = re.compile(
+    r"(?<!\w)(cat|bat|head|tail|less|more|sed|awk|grep|rg|nl|fold|strings)(?!\w)"
+)
 
 
 def main() -> int:
@@ -95,6 +99,13 @@ def append_name(log_path: Path, raw: str) -> int:
 
 
 def shell_skill_path(command: str) -> str:
+    """셸로 파일을 **읽은** 경우만 증거다.
+
+    경로가 커맨드에 등장한다는 것만으로 인정하면 `ls`, `stat`, `echo`, `rm`이 게이트를
+    통과시킨다 — 파일을 열지 않고 읽음 증거를 만들 수 있다.
+    """
+    if not _SHELL_READER_RE.search(command):
+        return ""
     match = _SHELL_SKILL_RE.search(command)
     return match.group(1) if match else ""
 

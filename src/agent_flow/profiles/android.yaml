@@ -73,16 +73,16 @@ skills:
       - id: navigation
         terms: ["navigation 3", "navigation3", "nav3", "back stack", "navigation graph", "deep link"]
         phases: [implementation, review]
+      # `**/*.kt` 같은 광역 glob은 넣지 않는다. Kotlin 한 줄 변경만으로 domain이 켜지고
+      # 실측으로 무관한 skill 20개가 offered를 포화시켰다. task 문구가 근거를 대야 한다.
       - id: compose-state-performance
         terms: ["recomposition", "stability", "strong skipping", "deferred read", "state hoisting",
                 "state holder", "launchedeffect", "disposableeffect", "side effect", "slot api",
-                "modifier", "lazy list", "baseline profile"]
-        path_globs: ["**/*.kt"]
+                "compose modifier", "modifier chain", "modifier node", "lazy list", "baseline profile"]
         phases: [implementation, review]
       - id: kotlin-concurrency
         terms: ["coroutine", "coroutinescope", "stateflow", "sharedflow", "statein", "cancellation",
                 "runblocking", "expect/actual", "multiplatform", "value class"]
-        path_globs: ["**/*.kt"]
         phases: [implementation, review]
       - id: testing
         terms: ["testing setup", "robolectric", "androidtest", "instrumentation", "screenshot test",

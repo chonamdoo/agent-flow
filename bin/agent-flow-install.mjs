@@ -94,40 +94,11 @@ const BUNDLED_HOST_SKILL_NAMES = new Set([
   "react-app-shell-error-handling",
   "react-native-app-shell-error-handling",
 ]);
-const PROFILE_MANAGED_HOST_ONLY_SKILLS = new Set([
-  "adaptive",
-  "android-cli",
-  "android-debugging",
-  "android-module-creator",
-  "appfunctions",
-  "camera1-to-camerax",
-  "compose-animations",
-  "compose-focus-navigation",
-  "compose-modifier-and-layout-style",
-  "compose-recomposition-performance",
-  "compose-side-effects",
-  "compose-slot-api-pattern",
-  "compose-stability-diagnostics",
-  "compose-state-authoring",
-  "compose-state-deferred-reads",
-  "compose-state-hoisting",
-  "compose-state-holder-ui-split",
-  "compose-ui-testing-patterns",
-  "display-glasses-with-jetpack-compose-glimmer",
-  "edge-to-edge",
-  "engage-sdk-integration",
-  "kotlin-coroutines-structured-concurrency",
-  "kotlin-flow-state-event-modeling",
-  "kotlin-multiplatform-expect-actual",
-  "kotlin-types-value-class",
-  "navigation-3",
-  "perfetto-sql",
-  "perfetto-trace-analysis",
-  "play-billing-library-version-upgrade",
-  "r8-analyzer",
-  "testing-setup",
-  "verified-email",
-]);
+// 설치된 외부 skill 이름은 여기 열거하지 않는다. upstream이 6개월에 이름 35%를 바꿨고
+// (실측: `camera1-to-camerax` → `camerax`), 열거된 목록은 우리가 배포하지도 않는 이름을
+// 영구히 들고 있게 된다. 프로젝트 skill 색인은 우리가 배포한 것만 담고, 외부 skill은
+// 런타임이 host 경로에서 해석한다.
+const PROFILE_MANAGED_HOST_ONLY_SKILLS = new Set();
 const GENERATED_PROJECT_SKILL_NAMES = new Set([
   "architecture-reviewer",
   "full-feature-workflow",
@@ -522,6 +493,27 @@ function installClaudeHooks(root) {
 }
 
 
+
+// managed hook은 digest가 `kit.json`에 기록되고 run 시작이 그 일치를 요구한다
+// (`hook_integrity`). "내용이 다르면 덮지 않는다"만 걸어 두면 kit 업그레이드가
+// 정의상 내용이 다른 경우라 digest는 새 값, 파일은 옛 값으로 갈라져 run이 막힌다.
+function upgradeManagedHooks(root, src, dest) {
+  if (!fs.existsSync(src)) {
+    return;
+  }
+  fs.mkdirSync(dest, { recursive: true });
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    if (!entry.isFile()) {
+      continue;
+    }
+    const source = path.join(src, entry.name);
+    const content = fs.readFileSync(source, "utf8");
+    const target = path.join(dest, entry.name);
+    backupIfDifferent(root, target, content);
+    fs.writeFileSync(target, content, "utf8");
+    fs.chmodSync(target, fs.statSync(source).mode & 0o777);
+  }
+}
 
 function upgradeBundledProfiles(root, src, dest) {
   if (!fs.existsSync(src)) {
@@ -1060,7 +1052,7 @@ function install() {
     true,
     FORCE_MANAGED,
     FORCE_MANAGED,
-    new Set(["index.json", ...GENERATED_PROJECT_SKILL_NAMES]),
+    new Set(["index.json", "catalog.lock.json", ...GENERATED_PROJECT_SKILL_NAMES]),
     installSelection.copyRootNames,
   );
   installManagedWorkflowSkills();
@@ -1108,6 +1100,11 @@ function install() {
     new Set(),
     true,
     FORCE_MANAGED,
+  );
+  upgradeManagedHooks(
+    PROJECT,
+    path.join(KIT_ROOT, "scripts", "hooks"),
+    path.join(AF_DIR, "scripts", "hooks"),
   );
   if (!samePath(PROJECT, KIT_ROOT)) {
     removeDirIfSame(path.join(KIT_ROOT, "scripts"), path.join(PROJECT, "scripts"), FORCE_MANAGED);

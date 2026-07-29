@@ -1523,8 +1523,8 @@ class CliTest(unittest.TestCase):
             self.assertTrue((project_root / ".agent-flow" / "skills" / "architecture-reviewer" / "SKILL.md").is_file())
             self.assertTrue((project_root / ".agent-flow" / "skills" / "android-code-review" / "SKILL.md").is_file())
             self.assertFalse((project_root / ".agent-flow" / "skills" / "android-mvi-feature").exists())
-            self.assertFalse((project_root / ".agent-flow" / "skills" / "android-module-creator").exists())
-            self.assertFalse((project_root / ".agent-flow" / "skills" / "android-debugging").exists())
+            self.assertTrue((project_root / ".agent-flow" / "skills" / "android-module-creator").exists())
+            self.assertTrue((project_root / ".agent-flow" / "skills" / "android-debugging").exists())
             self.assertFalse((project_root / ".agent-flow" / "skills" / "graphify").exists())
             self.assertTrue(
                 (
@@ -3097,7 +3097,7 @@ design-values-confirmed: n/a
             )
             self.assertFalse(_node_phase_run_dir(project_root).exists())
 
-    def test_node_installers_ignore_profile_managed_host_only_project_skills(self) -> None:
+    def test_node_installers_index_project_skills_that_collide_with_external_names(self) -> None:
         installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -3139,9 +3139,15 @@ design-values-confirmed: n/a
                 self.assertEqual(result.returncode, 0, result.stderr)
                 index = json.loads((project_root / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
                 skill_names = {skill["name"] for skill in index["skills"]}
-                self.assertNotIn("compose-state-authoring", skill_names)
-                self.assertNotIn("edge-to-edge", skill_names)
-                for host_root in (project_root / ".Codex" / "skills", project_root / ".codex" / "skills", project_root / ".omp" / "skills"):
+                # 프로젝트가 직접 쓴 파일이다. 조용히 버리면 사용자는 자기 skill이
+                # 왜 안 쓰이는지 알 수 없다. 색인하고 `skills doctor`가 충돌을 보고한다.
+                self.assertIn("compose-state-authoring", skill_names)
+                self.assertIn("edge-to-edge", skill_names)
+                # frontmatter가 `hosts: [codex]`라 codex 경로에만 링크된다.
+                for host_root in (project_root / ".Codex" / "skills", project_root / ".codex" / "skills"):
+                    self.assertTrue((host_root / "compose-state-authoring").exists())
+                    self.assertTrue((host_root / "edge-to-edge").exists())
+                for host_root in (project_root / ".omp" / "skills", project_root / ".claude" / "skills"):
                     self.assertFalse((host_root / "compose-state-authoring").exists())
                     self.assertFalse((host_root / "edge-to-edge").exists())
 

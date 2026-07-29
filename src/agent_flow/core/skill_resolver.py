@@ -265,8 +265,10 @@ def resolve_phase_skills(
             required_names.append(routed.name)
             routed_only.add(routed.name)
 
-    # 어휘 조인으로 붙는 설치 skill. 이름을 우리가 적지 않으므로 `routed_only`(host 전용
-    # 해석)에 넣는다 — 다른 host의 사본으로 충족시키면 프롬프트가 엉뚱한 파일을 가리킨다.
+    # 어휘 조인으로 붙는 설치 skill. 카탈로그가 이미 실제 경로를 아는 것만 담으므로
+    # 이름으로 다시 해석하지 않는다 — host 필터로 재해석하면 다른 host 홈에 설치된
+    # skill을 매칭해 required로 올린 뒤 "설치돼 있지 않다"고 보고한다.
+    matched: dict[str, ResolvedSkill] = {}
     for match in match_external(
         profile,
         catalog,
@@ -277,31 +279,39 @@ def resolve_phase_skills(
     ):
         if match.name in required_names or match.name in optional_names:
             continue
+        matched[match.name] = ResolvedSkill(
+            name=match.name,
+            path=match.path,
+            source="host",
+            exists=match.path is not None,
+            summary=skill_summary(match.path) if match.path is not None else "",
+        )
         if match.tier == EXTERNAL_REQUIRED:
             required_names.append(match.name)
-            routed_only.add(match.name)
         else:
             optional_names.append(match.name)
 
     required_names = _expand_dependencies(required_names, catalog)
     optional_names = [name for name in optional_names if name not in required_names]
 
-    # 표는 `active_host_only: true`를 선언한다. 다른 host의 사본으로 충족시키면
-    # 프롬프트가 엉뚱한 파일을 가리키고 진짜 부재가 숨는다. 표로만 붙은 이름에만
-    # 적용한다 — phase가 직접 선언했거나 frontmatter로 붙은 skill은 host 소유가 아니다.
+    # 우리가 이름으로 선언한 skill만 활성 host로 좁힌다. 그 이름은 미설치일 수 있고,
+    # 다른 host의 사본으로 충족시키면 프롬프트가 엉뚱한 파일을 가리킨다.
     resolved_host = active_host(env) if host is None else host
     routed_roots = active_host_roots(roots, resolved_host)
 
+    def resolve(name: str) -> ResolvedSkill:
+        found = matched.get(name)
+        if found is not None:
+            return found
+        return resolve_skill(
+            name,
+            routed_roots if name in routed_only else roots,
+            install_hint=routed_hints.get(name, ""),
+        )
+
     return SkillResolution(
-        required=tuple(
-            resolve_skill(
-                name,
-                routed_roots if name in routed_only else roots,
-                install_hint=routed_hints.get(name, ""),
-            )
-            for name in _stable_unique(required_names)
-        ),
-        optional=tuple(resolve_skill(name, roots) for name in _stable_unique(optional_names)),
+        required=tuple(resolve(name) for name in _stable_unique(required_names)),
+        optional=tuple(resolve(name) for name in _stable_unique(optional_names)),
     )
 
 

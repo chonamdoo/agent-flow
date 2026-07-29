@@ -32,6 +32,7 @@ REMOVED = "removed"
 DEAD_DECLARATION = "dead-declaration"
 UNROUTED = "unrouted"
 SHADOWED = "shadowed"
+COLLISION = "collision"
 
 
 @dataclass(frozen=True)
@@ -85,6 +86,7 @@ def scan(
     findings = list(_lock_findings(read_lock(project_root), entries))
     findings.extend(_declaration_findings(profile, entries))
     findings.extend(_unrouted_findings(profile, entries))
+    findings.extend(_collision_findings(files, entries))
     if shadowed:
         findings.append(
             CatalogFinding(
@@ -99,6 +101,33 @@ def scan(
         findings=tuple(findings),
         shadowed=shadowed,
     )
+
+
+def _collision_findings(
+    files: Sequence[tuple[str, Path]], entries: Sequence[SkillCatalogEntry]
+) -> list[CatalogFinding]:
+    """같은 이름이 서로 다른 파일로 여러 root에 있다.
+
+    카탈로그는 우선순위 root의 것 하나만 담고 나머지를 조용히 버린다. 프로젝트가
+    설치된 외부 skill과 같은 이름을 쓰면 그 그림자가 보이지 않는다.
+    """
+    chosen = {entry.name: os.path.realpath(entry.path) for entry in entries}
+    seen: dict[str, set[str]] = {}
+    for _source, skill_path in files:
+        name = skill_path.parent.name
+        if name not in chosen:
+            continue
+        seen.setdefault(name, set()).add(os.path.realpath(skill_path))
+    return [
+        CatalogFinding(
+            COLLISION,
+            name,
+            f"{len(paths)}곳에 서로 다른 파일로 있다. 쓰이는 것은 {chosen[name]}",
+            "이름을 바꾸거나 중복 사본을 지운다",
+        )
+        for name, paths in sorted(seen.items())
+        if len(paths) > 1
+    ]
 
 
 def write_lock(project_root: Path, result: CatalogScan) -> Path:
@@ -176,15 +205,18 @@ def _declaration_findings(
 def _unrouted_findings(
     profile: dict | None, entries: Sequence[SkillCatalogEntry]
 ) -> list[CatalogFinding]:
-    declared = set(declared_skill_names(profile))
+    # 지연 import: skill_matching이 resolver를 되짚어 참조한다.
+    from agent_flow.core.skill_matching import routable_names
+
+    reachable = set(declared_skill_names(profile)) | routable_names(profile, entries)
     return [
         CatalogFinding(
             UNROUTED,
             entry.name,
-            f"{entry.source} root에 있으나 어떤 선언에도 걸리지 않는다",
+            f"{entry.source} root에 있으나 어떤 어휘에도 걸리지 않는다",
         )
         for entry in entries
-        if entry.source in {"host", "shared", "fetched"} and entry.name not in declared
+        if entry.source in {"host", "shared", "fetched"} and entry.name not in reachable
     ]
 
 

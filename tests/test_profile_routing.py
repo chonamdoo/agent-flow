@@ -301,11 +301,12 @@ def test_prompt_contract_lists_every_marker_the_gate_demands(tmp_path):
     assert missing_local_skill_markers(artifact, project, "implement", **common) == []
 
 
-def test_matched_skill_does_not_resolve_from_another_host(tmp_path, monkeypatch):
-    """어휘로 붙은 skill은 활성 host에서만 해석한다. 다른 host 사본으로 채우면 부재가 숨는다."""
+def test_matched_skill_reports_the_path_it_was_discovered_at(tmp_path, monkeypatch):
+    """카탈로그는 설치된 것만 담는다. 이름으로 다시 해석하면 활성 host 필터가
+    설치돼 있는 skill을 "없다"고 보고한다 — 그 거짓 진술이 게이트를 degraded로 만든다."""
     project = _android_project(tmp_path)
     home = tmp_path / "home"
-    _install(home, "edge-to-edge", "Use when the status bar or insets overlap content.")
+    installed = _install(home, "edge-to-edge", "Use when the status bar or insets overlap content.")
     monkeypatch.setenv("HOME", str(home))
     common = dict(
         project_root=project,
@@ -315,16 +316,40 @@ def test_matched_skill_does_not_resolve_from_another_host(tmp_path, monkeypatch)
         task_text="status bar overlap 수정",
     )
 
-    on_codex = resolve_phase_skills(host="codex", **common)
-    on_claude = resolve_phase_skills(host="claude", **common)
-
-    def found(resolution) -> bool:
-        return any(
-            skill.exists for skill in resolution.required if skill.name == "edge-to-edge"
+    def matched(host: str):
+        resolution = resolve_phase_skills(host=host, **common)
+        return next(
+            skill for skill in resolution.required if skill.name == "edge-to-edge"
         )
 
-    assert found(on_codex) is False
-    assert found(on_claude) is True
+    for host in ("claude", "codex"):
+        skill = matched(host)
+        assert skill.exists is True, host
+        assert skill.path == installed, host
+
+
+def test_a_declared_bundled_name_still_resolves_from_the_active_host_only(tmp_path, monkeypatch):
+    """우리가 이름으로 선언한 skill은 미설치일 수 있다. 그쪽은 host 격리를 유지한다."""
+    project = _android_project(tmp_path)
+    home = tmp_path / "home"
+    _install(home, "android-code-review", "Bundled review skill.")
+    monkeypatch.setenv("HOME", str(home))
+    common = dict(
+        project_root=project,
+        phase_id="implement",
+        profile=load_profile_payload("android"),
+        changed_files=["app/src/main/java/A.kt"],
+        task_text="rename a variable",
+    )
+
+    def found(host: str) -> bool:
+        resolution = resolve_phase_skills(host=host, **common)
+        return any(
+            skill.exists for skill in resolution.required if skill.name == "android-code-review"
+        )
+
+    assert found("claude") is True
+    assert found("codex") is False
 
 
 def test_missing_report_uses_the_declared_wording():

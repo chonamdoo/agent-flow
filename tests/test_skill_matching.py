@@ -18,7 +18,9 @@ from agent_flow.core.skill_matching import (
     REQUIRED,
     match_external,
     parse_external,
+    routable_names,
 )
+from agent_flow.core.local_skills import local_skill_prompt_block
 from agent_flow.core.skill_resolver import SkillCatalogEntry, resolve_phase_skills
 
 
@@ -283,6 +285,15 @@ def test_resolution_puts_required_in_required_and_offered_in_optional(tmp_path, 
 
     assert "edge-to-edge" in {skill.name for skill in resolution.required}
     assert "r8-analyzer" in {skill.name for skill in resolution.optional}
+    # offered tier의 존재 이유는 프롬프트 노출이다. dataclass만 보면 렌더링이 사라져도 통과한다.
+    block = local_skill_prompt_block(
+        project,
+        "implement",
+        profile=profile,
+        changed_files=["app/proguard-rules.pro"],
+        task_text="insets 정리",
+    )
+    assert "r8-analyzer" in block
 
 
 def test_an_exclusion_clause_does_not_pull_the_skill_in():
@@ -323,3 +334,47 @@ def test_truncation_gives_every_domain_a_slot():
     )
 
     assert "edge-to-edge" in {item.name for item in matches if item.tier == REQUIRED}
+
+
+def test_terms_match_on_word_boundaries():
+    """실측: `chart`가 xlsx의 "charting"에, `modifier`가 SwiftUI의 "modifiers"에 걸렸다."""
+    domain = {"id": "docs", "terms": ["chart", "modifier"], "phases": ["implementation"]}
+    catalog = (
+        _entry("xlsx", "Charting and cleaning tabular data."),
+        _entry("reviewing-swiftui", "Covers SwiftUI views, modifiers, data flow."),
+    )
+
+    matches = match_external(
+        _profile([domain]),
+        catalog,
+        phase_id="implement",
+        task_text="add a chart and extract a modifier",
+        env={},
+    )
+
+    assert matches == ()
+
+
+def test_routable_names_ignores_the_run_scope():
+    """doctor는 "이 skill이 어떤 run에서든 걸릴 수 있는가"를 물어야 한다."""
+    profile = _profile([_INSETS])
+    catalog = (
+        _entry("edge-to-edge", "Use when insets overlap content."),
+        _entry("handoff", "Use when handing work over."),
+    )
+
+    assert routable_names(profile, catalog, env={}) == {"edge-to-edge"}
+
+
+def test_a_matched_skill_carries_its_discovered_path():
+    entry = _entry("edge-to-edge", "Use when insets overlap content.")
+
+    matches = match_external(
+        _profile([_INSETS]),
+        (entry,),
+        phase_id="implement",
+        task_text="insets 정리",
+        env={},
+    )
+
+    assert matches[0].path == entry.path

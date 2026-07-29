@@ -157,3 +157,16 @@ def test_reader_still_demands_an_evidence_marker_when_neither_key_is_present(tmp
     missing = _markers(root, _gate("skills-checked: true"))
 
     assert any(item.startswith("skill-read-evidence") for item in missing)
+
+
+def test_shell_commands_that_do_not_read_are_not_evidence(tmp_path):
+    """경로가 커맨드에 있다는 것만으로 인정하면 파일을 열지 않고 게이트를 통과할 수 있다."""
+    root = _project(tmp_path)
+    skill = root / "skills" / "alpha" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# alpha\n", encoding="utf-8")
+
+    for command in (f"ls -la {skill}", f"stat {skill}", f"echo {skill}", f"rm -f {skill}.bak"):
+        _run_hook(root, {"tool_name": "Bash", "tool_input": {"command": command}})
+
+    assert _log(root) == []

@@ -213,3 +213,46 @@ def test_lock_diff_reports_new_and_removed_names(tmp_path, monkeypatch):
     kinds = {(finding.kind, finding.name) for finding in result.findings}
     assert (skill_catalog.NEW, "zoom-out") in kinds
     assert (skill_catalog.REMOVED, "diagnose") in kinds
+
+
+def test_doctor_does_not_report_a_vocabulary_routable_skill_as_unrouted(tmp_path, monkeypatch):
+    """실측: 어휘를 안 보던 doctor가 정상 라우팅되는 skill 122개를 미라우팅으로 보고했다."""
+    home = tmp_path / "home"
+    _upstream_skill(home / ".claude" / "skills", "edge-to-edge", "Use when insets overlap.")
+    monkeypatch.setenv("HOME", str(home))
+    project = tmp_path / "app"
+    project.mkdir()
+    profile = {
+        "skills": {
+            "external": {
+                "enabled": True,
+                "domains": [
+                    {"id": "ui", "terms": ["insets"], "phases": ["implementation"]}
+                ],
+            }
+        }
+    }
+
+    result = skill_catalog.scan(project, profile=profile, host="claude")
+
+    unrouted = [
+        finding.name for finding in result.findings if finding.kind == skill_catalog.UNROUTED
+    ]
+    assert "edge-to-edge" not in unrouted
+
+
+def test_doctor_reports_a_project_skill_that_shadows_an_installed_one(tmp_path, monkeypatch):
+    """카탈로그는 우선순위 root의 것 하나만 담는다. 그 그림자가 조용하면 사용자는
+    자기 skill이 왜 안 쓰이는지 알 수 없다."""
+    home = tmp_path / "home"
+    _upstream_skill(home / ".claude" / "skills", "edge-to-edge", "Upstream copy.")
+    monkeypatch.setenv("HOME", str(home))
+    project = tmp_path / "app"
+    _upstream_skill(project / "skills", "edge-to-edge", "Project copy.")
+
+    result = skill_catalog.scan(project, profile={}, host="claude")
+
+    collisions = [
+        finding.name for finding in result.findings if finding.kind == skill_catalog.COLLISION
+    ]
+    assert collisions == ["edge-to-edge"]
