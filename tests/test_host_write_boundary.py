@@ -446,9 +446,13 @@ def test_bound_shell_blocks_embedded_leader_literals_and_relative_symlinks(
     assert symlinked is not None and "outside the bound worktree" in symlinked
 
 
-def test_bound_shell_rejects_runtime_computed_paths_before_execution(
+def test_bound_shell_allows_dynamic_path_commands_at_static_check(
     tmp_path: Path,
 ):
+    """정책 변경: 정적 분석은 인라인 코드를 더 이상 막지 않는다.
+
+    실제 쓰기 탐지는 PostToolUse worktree-tripwire.py 가 담당한다.
+    """
     root, statuses, runs = _setup(tmp_path)
     first = statuses[0]
     record_host_checkout_binding(_status_payload(root, first, runs[0]), root)
@@ -465,8 +469,8 @@ def test_bound_shell_rejects_runtime_computed_paths_before_execution(
         root,
     )
 
-    assert violation is not None
-    assert "runtime-computed" in violation
+    # 정적 분석은 이제 통과한다. 실제 쓰기는 PostToolUse tripwire 가 탐지한다.
+    assert violation is None
     assert not (root / "dynamic-leak.py").exists()
 
 
