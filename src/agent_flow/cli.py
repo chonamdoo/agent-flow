@@ -111,6 +111,7 @@ from agent_flow.core.worktrees import (
     create_worktree,
     get_worktree_status,
     cleanup_state_root,
+    copy_declared_worktree_files,
     find_pending_worktree_cleanup,
     known_worktree_names,
     plan_worktree,
@@ -143,7 +144,7 @@ from agent_flow.core.workflow import load_workflow
 from agent_flow.eval import run_eval
 from agent_flow.memory.entities import EntityMemoryIndex
 from agent_flow.artifact import find_active_run, find_active_runs, mark_inactive, read_meta
-from agent_flow.runner import Runner, ResumeMode, _find_kit_root
+from agent_flow.runner import Runner, ResumeMode, _find_kit_root, _load_profile
 from agent_flow.providers.host import list_host_providers
 from agent_flow.providers.subprocess import (
     ProviderCommand,
@@ -1238,6 +1239,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 plan = plan_worktree(root=root, name=args.name, branch=args.branch)
                 status = create_worktree(root=root, plan=plan, allow_dirty=args.allow_dirty)
+                _apply_worktree_setup(root=root, checkout=status.path)
             except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
                 print(_format_cli_error(exc), file=sys.stderr)
                 return 2
@@ -1512,6 +1514,7 @@ def main(argv: list[str] | None = None) -> int:
                             allow_dirty=True,
                             reuse_existing=False,
                         )
+                        _apply_worktree_setup(root=root, checkout=worktree_status.path)
                         worker_cwd = verify_linked_worktree(
                             root=root,
                             path=worktree_status.path,
@@ -2203,6 +2206,9 @@ def _resolve_entry_worktree(
             expected_registration_identity=expected_registration_identity,
         )
         if attached is not None:
+            # 재사용도 셋업 대상이다. 손으로 만든 checkout이거나 선언이 나중에 추가된
+            # 경우 파일이 없을 수 있다. 이미 있으면 건너뛰므로 반복해도 무해하다.
+            _apply_worktree_setup(root=root, checkout=attached.path)
             _warn_if_cwd_is_other_checkout(root=root, target=attached.path)
             return attached, True
     plan = plan_worktree(root=root, name=selector, branch=branch)
@@ -2220,6 +2226,7 @@ def _resolve_entry_worktree(
                 f"Pass --worktree {plan.name} to reuse it explicitly."
             ) from exc
         raise
+    _apply_worktree_setup(root=root, checkout=status.path)
     _warn_if_cwd_is_other_checkout(root=root, target=status.path)
     return status, False
 
@@ -2340,7 +2347,91 @@ def _parse_retry_after_arg(value: str | None) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+# 디버깅 중에는 실패 현장을 남길 수 있어야 한다. 커밋되지 않은 작업이 있으면 아래
+# `WorktreeIsolationError` 경로가 이미 보존하지만, 게이트 실패나 재현이 어려운 경합처럼
+# 그 조건에 안 걸리는 실패는 증거가 worktree와 함께 사라진다.
+#
+# 사용자가 직접 부르는 `worktree remove`에는 걸지 않는다. 그건 정리하겠다는 명시적
+# 의사이고, 여기서 막으면 끄고 나서 치울 방법이 없어진다.
+KEEP_FAILED_WORKTREE_ENV = "AGENT_FLOW_KEEP_FAILED_WORKTREE"
+_TRUTHY_ENV = frozenset({"1", "true", "yes", "on"})
+
+
+def _keep_failed_worktree() -> bool:
+    return os.environ.get(KEEP_FAILED_WORKTREE_ENV, "").strip().lower() in _TRUTHY_ENV
+
+
+def _declared_worktree_copies(profile: dict) -> list[str]:
+    """단일 profile과 multi-profile 합성본 양쪽에서 선언을 모은다.
+
+    `_load_profile_union`이 만드는 합성 dict에는 최상위 `branching`이 없다 —
+    개별 profile은 `profiles` 아래에 들어가고 최상위에는 `review_angles`/`gates`/
+    `skills`/`architecture`만 합쳐진다. 최상위만 보면 android+react-native처럼
+    profile이 둘 이상인 프로젝트에서 선언이 조용히 빈 목록이 되고, `local.properties`가
+    영영 복사되지 않는다.
+    """
+    sources: list[dict] = [profile]
+    nested = profile.get("profiles")
+    if isinstance(nested, list):
+        sources.extend(item for item in nested if isinstance(item, dict))
+    names: list[str] = []
+    for source in sources:
+        branching = source.get("branching")
+        if not isinstance(branching, dict):
+            continue
+        setup = branching.get("worktree_setup")
+        if not isinstance(setup, dict):
+            continue
+        for name in setup.get("copy") or []:
+            text = str(name)
+            if text not in names:
+                names.append(text)
+    return names
+
+
+def _apply_worktree_setup(*, root: Path, checkout: Path) -> None:
+    """profile이 선언한 gitignored 머신 설정을 새 checkout으로 옮긴다.
+
+    실패해도 worktree 생성을 되돌리지 않는다. 설정이 없어서 빌드가 한 번 실패하는 것과
+    방금 만든 checkout이 통째로 사라지는 것은 무게가 다르다. 대신 무엇이 빠졌는지 알린다.
+    """
+    try:
+        _profile_id, profile = _load_profile(_find_kit_root(), root)
+        declared = _declared_worktree_copies(profile)
+    except Exception as exc:  # profile 해석 실패가 worktree 생성을 막을 이유는 없다
+        print(f"warning: skipped worktree setup: {_format_cli_error(exc)}", file=sys.stderr)
+        return
+    if not declared:
+        return
+    try:
+        copied = copy_declared_worktree_files(
+            leader=root, checkout=checkout, names=[str(name) for name in declared]
+        )
+    except (ValueError, OSError) as exc:
+        print(f"warning: worktree setup failed: {_format_cli_error(exc)}", file=sys.stderr)
+        return
+    missing = [str(name) for name in declared if str(name) not in copied]
+    if copied:
+        print(f"worktree setup copied: {', '.join(copied)}")
+    if missing:
+        print(
+            f"warning: worktree setup did not copy {', '.join(missing)} "
+            f"(absent in {root}, already present, or a symlink)",
+            file=sys.stderr,
+        )
+
+
 def _cleanup_worktree_after_failure(root: Path, status, original: BaseException) -> None:
+    if _keep_failed_worktree():
+        # 왜 남았는지 말하지 않으면 유출과 구분되지 않는다.
+        print(
+            f"warning: keeping worktree {status.name} at {status.path} "
+            f"({KEEP_FAILED_WORKTREE_ENV} is set); remove it with "
+            f"`agent-flow worktree remove --name {status.name}`",
+            file=sys.stderr,
+        )
+        print(_format_cli_error(original), file=sys.stderr)
+        return
     try:
         remove_worktree(root=root, status=status)
     except WorktreeIsolationError as preserve_exc:

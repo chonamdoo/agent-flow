@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
 from agent_flow.artifact import ACTIVE_MARKER, find_active_runs, read_meta, write_meta
 from agent_flow.core.commands import run_safe_command
@@ -2330,6 +2330,81 @@ def _agent_flow_git_dir(root: Path) -> Path:
 def _is_agent_flow_status_line(line: str) -> bool:
     path = line[3:] if len(line) > 3 else ""
     return path == ".agent-flow" or path.startswith(".agent-flow/")
+
+
+def _worktree_setup_path(base: Path, name: str) -> Path:
+    """선언된 이름을 base 안의 경로로 푼다.
+
+    선언은 설정 **파일 이름**이지 임의 경로가 아니다. `../../.ssh/id_rsa` 한 줄이면
+    profile이 저장소 밖을 읽고 쓰게 된다. 봉쇄 판정은 lexical로 한다 — 실제 경로를
+    따라가면 base 자체가 symlink인 환경(macOS `/tmp`)에서 판정이 흔들리고, 마지막
+    구성요소가 symlink인 경우는 호출부가 따로 거부한다.
+    """
+    if not name or not name.strip():
+        raise ValueError("worktree setup entry must not be empty")
+    candidate = Path(name)
+    if candidate.is_absolute():
+        raise ValueError(f"worktree setup entry must be relative: {name}")
+    base_norm = os.path.normpath(str(base))
+    resolved = os.path.normpath(os.path.join(base_norm, name))
+    if resolved != base_norm and not resolved.startswith(base_norm + os.sep):
+        raise ValueError(f"worktree setup entry escapes {base}: {name}")
+    if resolved == base_norm:
+        raise ValueError(f"worktree setup entry must name a file: {name}")
+    return Path(resolved)
+
+
+def _has_symlinked_component(base: Path, target: Path) -> bool:
+    """base 아래 어느 구성요소든 symlink인가.
+
+    마지막 구성요소만 보면 중간 디렉터리 symlink로 봉쇄가 뚫린다. lexical 판정은
+    통과하고, leaf는 symlink가 아니며, `is_file()`은 따라간 곳을 보고 참을 낸다.
+    git은 symlink를 커밋할 수 있으므로 `config` -> `/etc`가 저장소에 들어와 있을 수 있고,
+    그러면 `config/passwd` 선언 한 줄로 저장소 밖 파일이 복사된다. 쓰는 쪽도 같다 —
+    checkout의 중간 디렉터리가 symlink면 복사본이 worktree 밖에 떨어진다.
+    """
+    current = base
+    for part in target.relative_to(base).parts:
+        current = current / part
+        if current.is_symlink():
+            return True
+    return False
+
+
+def copy_declared_worktree_files(
+    *, leader: Path, checkout: Path, names: Iterable[str]
+) -> tuple[str, ...]:
+    """gitignored 머신 설정을 leader에서 새 checkout으로 옮긴다.
+
+    `git worktree add`는 추적 파일만 가져온다. Android `local.properties`의 `sdk.dir`
+    처럼 머신마다 다른 값은 gitignored라 새 worktree에 없고, 그래서 빌드가 leader에서는
+    되고 worktree에서는 안 된다.
+
+    symlink가 아니라 **복사**다. 작고 머신 고정인 설정은 worktree 안에서 고쳐도 leader로
+    새면 안 된다. 큰 의존성 디렉터리 공유는 성격이 달라 여기서 다루지 않는다.
+
+    이미 있는 파일은 건드리지 않는다 — 사용자가 손댄 설정을 덮으면 그 수정이 조용히
+    사라진다. leader 쪽이 symlink면 건너뛴다. 따라간 곳이 저장소 밖일 수 있고, 그
+    내용을 worktree로 실어 나를 이유가 없다.
+
+    반환값은 실제로 복사한 선언 이름들이다.
+    """
+    leader_base = Path(os.path.normpath(str(leader)))
+    checkout_base = Path(os.path.normpath(str(checkout)))
+    copied: list[str] = []
+    for name in names:
+        source = _worktree_setup_path(leader, name)
+        target = _worktree_setup_path(checkout, name)
+        if target.exists() or target.is_symlink():
+            continue
+        if _has_symlinked_component(checkout_base, target):
+            continue
+        if _has_symlinked_component(leader_base, source) or not source.is_file():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        copied.append(name)
+    return tuple(copied)
 
 
 def _run_git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
