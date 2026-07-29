@@ -32,6 +32,10 @@ optional:
     worktree_setup:
       copy:
         - "gitignored machine config to carry into a new worktree (e.g. local.properties)"
+      # 정해진 동작만 켜고 끈다. 명령 문자열은 선언하지 않는다 — 임의 셸을 받으면
+      # 그 한 줄이 CLI 신뢰 컨텍스트에서 검증 없이 돈다.
+      link_node_modules: false   # leader의 node_modules를 symlink로 공유
+      run_npm_install: false     # 새 worktree에서 npm ci|install
 
   gates:
     # ordered list of verification commands

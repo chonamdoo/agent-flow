@@ -111,7 +111,9 @@ from agent_flow.core.worktrees import (
     create_worktree,
     get_worktree_status,
     cleanup_state_root,
+    UnknownWorktreeSetupAction,
     copy_declared_worktree_files,
+    run_declared_worktree_actions,
     find_pending_worktree_cleanup,
     known_worktree_names,
     plan_worktree,
@@ -2419,6 +2421,40 @@ def _apply_worktree_setup(*, root: Path, checkout: Path) -> None:
             f"(absent in {root}, already present, or a symlink)",
             file=sys.stderr,
         )
+    _run_worktree_setup_actions(root=root, checkout=checkout, profile=profile)
+
+
+def _declared_worktree_actions(profile: dict) -> dict:
+    """`copy` 말고 선언된 동작 키들. 합성 profile도 함께 본다."""
+    sources: list[dict] = [profile]
+    nested = profile.get("profiles")
+    if isinstance(nested, list):
+        sources.extend(item for item in nested if isinstance(item, dict))
+    actions: dict = {}
+    for source in sources:
+        setup = ((source.get("branching") or {}).get("worktree_setup") or {})
+        if not isinstance(setup, dict):
+            continue
+        for key, value in setup.items():
+            if key != "copy":
+                actions[key] = bool(value) or actions.get(key, False)
+    return actions
+
+
+def _run_worktree_setup_actions(*, root: Path, checkout: Path, profile: dict) -> None:
+    declared = _declared_worktree_actions(profile)
+    if not declared:
+        return
+    try:
+        ran = run_declared_worktree_actions(
+            leader=root, checkout=checkout, declared=declared
+        )
+    except UnknownWorktreeSetupAction as exc:
+        # 오타를 조용히 넘기면 선언했는데 아무 일도 일어나지 않는다.
+        print(f"warning: {_format_cli_error(exc)}", file=sys.stderr)
+        return
+    if ran:
+        print(f"worktree setup ran: {', '.join(ran)}")
 
 
 def _cleanup_worktree_after_failure(root: Path, status, original: BaseException) -> None:
