@@ -24,6 +24,9 @@ from agent_flow.core.skill_resolver import (
 APPLIED_MARKER = "project-local-skill-docs: applied"
 AVAILABILITY_MARKER = "skill-availability: pass|degraded"
 READ_EVIDENCE_MARKER = "skill-read-evidence: verified|unavailable"
+# 마커 키는 옛 artifact와 새 artifact가 한동안 섞인다. 리더는 둘 다 받는다 —
+# 개명 하나로 진행 중인 run의 gate가 멈추면 안 된다.
+USE_EVIDENCE_KEYS = ("skill-read-evidence", "skill-use-evidence")
 
 # Read hook이 SKILL.md 읽기를 append-only로 기록하는 파일. O_APPEND라 read-modify-write race가 없다.
 SKILLS_READ_LOG = Path(".agent-flow") / "skills-read.jsonl"
@@ -130,8 +133,12 @@ class SkillReadEvidence:
     # 같은 저장소의 다른 체크아웃들(leader와 worktree). 같은 skill이 여기 각각
     # 존재하므로 절대경로는 다르지만 체크아웃 기준 상대경로는 같다.
     checkout_roots: tuple[str, ...] = ()
+    # Skill tool과 `skill://`은 경로를 주지 않는다. 이름만 관측되는 사용 경로다.
+    used_names: frozenset[str] = frozenset()
 
     def covers(self, skill: ResolvedSkill) -> bool:
+        if skill.name in self.used_names:
+            return True
         if skill.path is None:
             return False
         resolved = skill.path.resolve()
@@ -265,7 +272,7 @@ def missing_local_skill_markers(
                 f"skill-read-evidence: verified ({len(unread)} required skill(s) were "
                 "never opened during this phase)"
             )
-    elif values.get("skill-read-evidence") not in {"verified", "unavailable"}:
+    elif not any(values.get(key) in {"verified", "unavailable"} for key in USE_EVIDENCE_KEYS):
         missing.append(READ_EVIDENCE_MARKER)
 
     # L3: 자기신고는 표시용이다. resolver가 required로 판정하고 실제로 있는 것만 요구한다.
@@ -310,6 +317,7 @@ def read_skill_evidence(project_root: Path, *, since: float | None = None) -> Sk
     if not log_path.is_file():
         return SkillReadEvidence(available=False, read_paths=frozenset(), checkout_roots=roots)
     paths: set[str] = set()
+    names: set[str] = set()
     try:
         raw = log_path.read_text(encoding="utf-8")
     except OSError:
@@ -329,8 +337,14 @@ def read_skill_evidence(project_root: Path, *, since: float | None = None) -> Sk
         path = entry.get("path")
         if isinstance(path, str) and path:
             paths.add(path)
+        name = entry.get("skill")
+        if isinstance(name, str) and name:
+            names.add(name)
     return SkillReadEvidence(
-        available=True, read_paths=frozenset(paths), checkout_roots=roots
+        available=True,
+        read_paths=frozenset(paths),
+        checkout_roots=roots,
+        used_names=frozenset(names),
     )
 
 
