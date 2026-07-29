@@ -17,30 +17,64 @@ import { SKILL_DEPENDENCIES, mergeInstallSelectionWithPrevious, resolveInstallSe
 import { OMP_EXTENSION_MARKER, ompHooksExtensionSource } from "../lib/omp-hooks-extension.mjs";
 import { MANAGED_HOOK_SCRIPTS, RETIRED_MANAGED_HOOK_SCRIPTS } from "../lib/managed-hooks.mjs";
 import {
+  AGENT_FLOW_COMMAND,
+  architectureReviewerSkillMarkdown,
   arrayValue,
   backupIfDifferent,
+  claudeHooksSettings,
+  codexConfigPath,
+  codexHooksSettings,
+  COMMAND_TOOL_MATCHER,
   ensureChildPath,
   escapeRegex,
+  fullFeatureSkillMarkdown,
   hasChildWithSuffix,
+  HOME,
+  hookScriptCommand,
+  isPruneBackupName,
+  isRetiredHookCommand,
+  KIT_ROOT,
   makeHooksExecutable,
+  managedHookDigests,
+  managedHookScriptName,
+  mergeHookConfig,
+  mergeHookSettings,
   nextFreeBackupPath,
+  ompExtensionIsKitOwned,
   planReviewerSkillMarkdown,
+  productBriefSkillMarkdown,
+  PRUNE_BACKUP_SUFFIX,
+  PRUNE_BACKUP_VERSIONED,
+  pruneRetiredHooks,
+  pruneRetiredHookScripts,
   pruneRetiredManagedScripts,
+  pushWatchSkillMarkdown,
+  READ_TOOL_MATCHER,
   readHookSettings,
+  readJsonIfExists,
+  removeCodexBroadTrustState,
   removeGitignoreEntries,
   removeLegacyProjectSkillCopies,
+  removeOmpHooksExtension,
+  retiredHookScripts,
+  safeSkillName,
   shellQuote,
+  SKILL_INDEX_END,
+  SKILL_INDEX_START,
+  skillIndexBlock,
+  skillRequires,
+  SPEC_PREPARE_TOOL_MATCHER,
   tomlBasicString,
   uniqueStrings,
   unquoteShellWord,
   upsertGitignore,
+  upsertSkillIndexBlock,
   validateSkillDependencies,
+  writePruneBackup,
 } from "../lib/installer-shared.mjs";
 
-const KIT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 // 정의의 정본은 패키지 안이다. `agent-flow-kit.mjs`와 같은 자리를 본다.
 const PACKAGED_ASSETS = path.join(KIT_ROOT, "src", "agent_flow");
-const AGENT_FLOW_COMMAND = "agent-flow";
 const INSTALL_ARGS = process.argv.slice(3);
 const FORCE_MANAGED = INSTALL_ARGS.includes("--force-managed");
 const HOOKS_FLAG_OFF = INSTALL_ARGS.includes("--no-hooks");
@@ -48,7 +82,6 @@ const HOOKS_FLAG_ON = INSTALL_ARGS.includes("--hooks");
 let hooksDisabled = HOOKS_FLAG_OFF;
 // 이 표식이 남아 있으면 OMP 확장 파일을 kit 소유로 보고 업그레이드한다.
 const REQUESTED_PROJECT = process.cwd();
-const HOME = process.env.HOME || process.env.USERPROFILE || "";
 const PROJECT = resolveInstallProject(REQUESTED_PROJECT);
 const AF_DIR = path.join(PROJECT, ".agent-flow");
 const PROJECT_SKILL_HOSTS = Object.freeze(["claude", "codex", "omp"]);
@@ -164,8 +197,6 @@ function samePath(left, right) {
   }
 }
 
-const SKILL_INDEX_START = "<!-- agent-flow:skills:start -->";
-const SKILL_INDEX_END = "<!-- agent-flow:skills:end -->";
 
 // 설치된 skill 목록을 AGENTS.md 안에 직접 심는다.
 //
@@ -177,58 +208,9 @@ const SKILL_INDEX_END = "<!-- agent-flow:skills:end -->";
 // 그래서 여기 있는 것은 내용이 아니라 **인덱스**다. 이름만 주고 본문은 파일에
 // 남긴다 - 전문을 넣으면 AGENTS.md가 곧 문서가 되고, 적용 시점 문장은 phase
 // 프롬프트가 이미 profile YAML에서 그대로 들고 온다. 여기서 다시 지으면 갈라진다.
-function skillIndexBlock(root) {
-  const index = readJsonIfExists(path.join(root, ".agent-flow", "skills", "index.json"));
-  const skills = Array.isArray(index?.skills) ? index.skills : [];
-  if (skills.length === 0) {
-    // 인덱스가 없는 설치본에서 거짓 목록을 쓰지 않는다. 빈 인덱스는 "아직
-    // 모른다"이지 "skill이 없다"가 아니다.
-    return [
-      SKILL_INDEX_START,
-      `- 설치된 skill 인덱스가 아직 없다. \`${AGENT_FLOW_COMMAND} skills sync\` 후 다시 생성된다.`,
-      SKILL_INDEX_END,
-    ].join("\n");
-  }
-  const names = (delivery) =>
-    skills
-      .filter((skill) => (skill.delivery === "passive") === (delivery === "passive"))
-      .map((skill) => String(skill.name))
-      .sort((a, b) => a.localeCompare(b));
-  const lines = [
-    SKILL_INDEX_START,
-    "```text",
-    "[agent-flow skill index]|root: .agent-flow/skills",
-    "|IMPORTANT: 아래 파일이 기억보다 우선한다. 변경 대상을 먼저 훑고, scope가 걸리는 것만 읽는다.",
-  ];
-  const passive = names("passive");
-  if (passive.length > 0) {
-    lines.push(`|always:{${passive.join(",")}}`);
-  }
-  const onDemand = names("on-demand");
-  if (onDemand.length > 0) {
-    lines.push(`|on-demand:{${onDemand.join(",")}}`);
-  }
-  lines.push("```", SKILL_INDEX_END);
-  return lines.join("\n");
-}
 // 인덱스는 install이 skill 링크를 다 만든 **뒤에** 채운다. bootstrap 블록을 쓰는
 // 시점에는 아직 목록이 확정되지 않아, 거기서 채우면 한 install 안에서 곧바로
 // 낡는다. 그래서 블록에는 자리만 두고 여기서 그 자리만 바꾼다.
-function upsertSkillIndexBlock(root) {
-  const block = skillIndexBlock(root);
-  for (const fileName of ["AGENTS.md", "CLAUDE.md"]) {
-    const target = path.join(root, fileName);
-    if (!fs.existsSync(target)) continue;
-    const current = fs.readFileSync(target, "utf8");
-    const start = current.indexOf(SKILL_INDEX_START);
-    const end = current.indexOf(SKILL_INDEX_END);
-    if (start === -1 || end === -1 || end < start) continue;
-    const next = current.slice(0, start) + block + current.slice(end + SKILL_INDEX_END.length);
-    if (next !== current) {
-      fs.writeFileSync(target, next, "utf8");
-    }
-  }
-}
 
 function bootstrapMarkdown(label) {
   const tmplPath = path.join(KIT_ROOT, "bootstrap", `${label}.template`);
@@ -407,34 +389,12 @@ function copyDir(
   return { written, skipped };
 }
 
-const PRUNE_BACKUP_SUFFIX = ".removed";
-const PRUNE_BACKUP_VERSIONED = /\.removed\.[0-9a-f]{8}$/;
 const PRUNE_NOTICE_PREFIX = "  - pruned: ";
 
-function isPruneBackupName(name) {
-  return name.endsWith(PRUNE_BACKUP_SUFFIX) || PRUNE_BACKUP_VERSIONED.test(name);
-}
 
 // prune은 source에 없는 파일을 지운다. 사용자가 직접 만든 workflow가 여기
 // 걸리면 경고도 사본도 없이 사라졌다. 같은 내용이 이미 백업돼 있으면 다시
 // 쓰지 않는다 — 재설치마다 사본이 불어나면 그것대로 잃는 것과 같다.
-function writePruneBackup(target) {
-  const content = fs.readFileSync(target);
-  const primary = `${target}${PRUNE_BACKUP_SUFFIX}`;
-  if (!fs.existsSync(primary)) {
-    fs.writeFileSync(primary, content);
-    return primary;
-  }
-  if (fs.readFileSync(primary).equals(content)) {
-    return primary;
-  }
-  const digest = crypto.createHash("sha256").update(content).digest("hex").slice(0, 8);
-  const versioned = `${primary}.${digest}`;
-  if (!fs.existsSync(versioned) || !fs.readFileSync(versioned).equals(content)) {
-    fs.writeFileSync(versioned, content);
-  }
-  return versioned;
-}
 
 function removeDirIfSame(src, dest, force = false) {
   if (!fs.existsSync(dest)) return { written: 0, skipped: 0 };
@@ -508,82 +468,10 @@ function writeManagedFile(pathName, content) {
 
 
 
-function hookScriptCommand(root, scriptName) {
-  const scriptPath = shellQuote(path.join(root, ".agent-flow", "scripts", "hooks", scriptName));
-  if (scriptName.endsWith(".py")) {
-    return `/usr/bin/python3 -I ${scriptPath}`;
-  }
-  return `/bin/bash ${scriptPath}`;
-}
-
-function codexHooksSettings(root) {
-  return {
-    hooks: {
-      UserPromptSubmit: [
-        {
-          hooks: [
-            { type: "command", command: hookScriptCommand(root, "prepare-spec-user-prompt.py") },
-            { type: "command", command: hookScriptCommand(root, "confirm-spec-user-prompt.py") },
-          ],
-        },
-      ],
-      PreToolUse: [
-        {
-          matcher: "Bash",
-          hooks: [
-            { type: "command", command: hookScriptCommand(root, "guard-protected-branch.sh") },
-          ],
-        },
-        {
-          matcher: SPEC_PREPARE_TOOL_MATCHER,
-          hooks: [
-            { type: "command", command: hookScriptCommand(root, "guard-host-worktree.sh") },
-            { type: "command", command: hookScriptCommand(root, "guard-spec-approval.sh") },
-          ],
-        },
-      ],
-      PostToolUse: [
-        {
-          matcher: "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit)$",
-          hooks: [
-            { type: "command", command: hookScriptCommand(root, "comment-checker.py") },
-            { type: "command", command: hookScriptCommand(root, "guard-host-worktree.sh") },
-          ],
-        },
-        {
-          matcher: SPEC_PREPARE_TOOL_MATCHER,
-          hooks: [
-            { type: "command", command: hookScriptCommand(root, "prepare-spec-user-prompt.py") },
-          ],
-        },
-        {
-          matcher: READ_TOOL_MATCHER,
-          hooks: [{ type: "command", command: hookScriptCommand(root, "record-skill-read.py") }],
-        },
-        {
-          matcher: COMMAND_TOOL_MATCHER,
-          hooks: [
-            { type: "command", command: hookScriptCommand(root, "record-command-run.py") },
-            { type: "command", command: hookScriptCommand(root, "bind-host-worktree.py") },
-            { type: "command", command: hookScriptCommand(root, "guard-host-worktree.sh") },
-          ],
-        },
-      ],
-      Stop: [
-        {
-          hooks: [{ type: "command", command: hookScriptCommand(root, "show-phase-status.sh") }],
-        },
-      ],
-    },
-  };
-}
 
 
 
-const READ_TOOL_MATCHER = "^(Read|read|read_file|view|cat)$";
-// 셸 실행 tool도 host마다 이름이 다르다. 관측 전용이라 PostToolUse에만 붙는다.
-const COMMAND_TOOL_MATCHER = "^(Bash|bash|shell|run_terminal_cmd|execute_command|local_shell|terminal)$";
-const SPEC_PREPARE_TOOL_MATCHER = "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit|Bash|bash|shell|run_terminal_cmd|execute_command|local_shell|terminal)$";
+
 // kit.mjs와 같은 계약: 은퇴한 hook을 기존 settings에서 걷어낸다. 안 그러면 사라진
 // 스크립트를 host가 계속 실행해 셸이 막힌다.
 // 관측 hook(`record-*`)은 PostToolUse, 강제 hook은 PreToolUse. 이 구분을 어기면
@@ -591,172 +479,21 @@ const SPEC_PREPARE_TOOL_MATCHER = "^(apply_patch|Write|Edit|MultiEdit|write|edit
 // 읽어 사용자 도구가 통째로 막힌다. 런 시작 시 `core/hook_integrity.py`가
 // 이 목록과 배치를 kit.json 기록과 대조한다.
 
-function managedHookDigests() {
-  return Object.fromEntries(
-    MANAGED_HOOK_SCRIPTS.map((name) => [
-      name,
-      crypto
-        .createHash("sha256")
-        .update(fs.readFileSync(path.join(KIT_ROOT, "scripts", "hooks", name)))
-        .digest("hex"),
-    ]),
-  );
-}
 
 // hook을 끄면 "관리 대상 전부를 은퇴시킨 것"과 같다. kit.mjs와 같은 계약이다.
-function retiredHookScripts() {
-  return hooksDisabled
-    ? [...RETIRED_MANAGED_HOOK_SCRIPTS, ...MANAGED_HOOK_SCRIPTS]
-    : RETIRED_MANAGED_HOOK_SCRIPTS;
-}
-
-function pruneRetiredHooks(settings, replaceManaged = false) {
-  if (!settings || typeof settings !== "object" || !settings.hooks) {
-    return false;
-  }
-  let changed = false;
-  for (const [event, entries] of Object.entries(settings.hooks)) {
-    if (!Array.isArray(entries)) {
-      continue;
-    }
-    for (const entry of entries) {
-      if (!Array.isArray(entry?.hooks)) {
-        continue;
-      }
-      const kept = entry.hooks.filter(
-        (hook) => !isRetiredHookCommand(hook?.command)
-          && !(replaceManaged && managedHookScriptName(hook?.command)),
-      );
-      if (kept.length !== entry.hooks.length) {
-        entry.hooks = kept;
-        changed = true;
-      }
-    }
-    const nonEmpty = entries.filter(
-      (entry) => !Array.isArray(entry?.hooks) || entry.hooks.length > 0,
-    );
-    if (nonEmpty.length !== entries.length) {
-      settings.hooks[event] = nonEmpty;
-      changed = true;
-    }
-  }
-  return changed;
-}
-
-function isRetiredHookCommand(command) {
-  if (typeof command !== "string" || !command) {
-    return false;
-  }
-  const normalized = unquoteShellWord(command).replaceAll("\\", "/").replaceAll("'", "").replaceAll('"', "");
-  return retiredHookScripts().some(
-    (name) => normalized.endsWith(`/scripts/hooks/${name}`) || normalized === `scripts/hooks/${name}`,
-  );
-}
-
-function managedHookScriptName(command) {
-  const normalized = unquoteShellWord(command).replaceAll("\\", "/").replaceAll("'", "").replaceAll('"', "");
-  for (const scriptName of MANAGED_HOOK_SCRIPTS) {
-    if (
-      normalized === `.agent-flow/scripts/hooks/${scriptName}` ||
-      normalized === `scripts/hooks/${scriptName}` ||
-      normalized.endsWith(`/.agent-flow/scripts/hooks/${scriptName}`) ||
-      normalized.endsWith(`/scripts/hooks/${scriptName}`) ||
-      normalized.includes(`/.agent-flow/scripts/hooks/${scriptName}`) ||
-      normalized.includes(`/scripts/hooks/${scriptName}`)
-    ) {
-      return scriptName;
-    }
-  }
-  return null;
-}
-
-function mergeHookSettings(settings, desired) {
-  if (!settings.hooks) {
-    settings.hooks = {};
-  }
-  pruneRetiredHooks(settings, true);
-  for (const [event, entries] of Object.entries(desired)) {
-    if (!settings.hooks[event]) {
-      settings.hooks[event] = [];
-    }
-    for (const entry of entries) {
-      const existing = settings.hooks[event].find((e) => (e.matcher ?? "") === (entry.matcher ?? ""));
-      if (existing) {
-        if (!existing.hooks) {
-          existing.hooks = [];
-        }
-        for (const hook of entry.hooks) {
-          const scriptName = managedHookScriptName(hook.command);
-          const matchingHook = existing.hooks.find(
-            (h) => scriptName && managedHookScriptName(h.command) === scriptName,
-          );
-          if (matchingHook) {
-            Object.assign(matchingHook, hook);
-          } else if (!existing.hooks.some((h) => h.command === hook.command)) {
-            existing.hooks.push(hook);
-          }
-        }
-      } else {
-        settings.hooks[event].push(entry);
-      }
-    }
-  }
-}
-
-
-
-function mergeHookConfig(settings, source) {
-  if (!source || typeof source !== "object") {
-    return;
-  }
-  for (const [key, value] of Object.entries(source)) {
-    if (key !== "hooks" && settings[key] === undefined) {
-      settings[key] = value;
-    }
-  }
-  if (source.hooks) {
-    mergeHookSettings(settings, source.hooks);
-  }
-}
 
 
 
 
 
-function codexConfigPath() {
-  if (!HOME) {
-    return null;
-  }
-  return path.join(HOME, ".codex", "config.toml");
-}
 
-function removeCodexBroadTrustState(root) {
-  const configPath = codexConfigPath();
-  if (!configPath || !fs.existsSync(configPath)) {
-    return;
-  }
-  const tableHeader = `[projects."${tomlBasicString(root)}"]`;
-  const tableName = tableHeader.slice(1, -1);
-  const tablePattern = new RegExp(
-    `(^|\\n)\\s*\\[\\s*${escapeRegex(tableName)}\\s*\\]\\s*(?:#.*)?\\n`
-      + "([\\s\\S]*?)(?=\\n\\s*\\[[^\\n]+\\]|$)",
-  );
-  const trustPattern = /(^|\n)\s*trust_level\s*=\s*"trusted"\s*(?:#.*)?(?=\n|$)/;
-  const current = fs.readFileSync(configPath, "utf8");
-  const next = current.replace(tablePattern, (full, leading, body) => {
-    if (!trustPattern.test(body)) {
-      return full;
-    }
-    const kept = body.replace(trustPattern, "$1");
-    if (!kept.trim()) {
-      return leading;
-    }
-    return `${leading}${tableHeader}\n${kept.replace(/^\n/, "")}`;
-  });
-  if (next !== current) {
-    fs.writeFileSync(configPath, next.endsWith("\n") ? next : `${next}\n`, "utf8");
-  }
-}
+
+
+
+
+
+
+
 
 function installCodexHooks(root) {
   const settingsPaths = [
@@ -765,9 +502,9 @@ function installCodexHooks(root) {
   ];
   const settings = {};
   for (const settingsPath of settingsPaths) {
-    mergeHookConfig(settings, readHookSettings(settingsPath));
+    mergeHookConfig(settings, readHookSettings(settingsPath), hooksDisabled);
   }
-  mergeHookSettings(settings, codexHooksSettings(root).hooks);
+  mergeHookSettings(settings, codexHooksSettings(root).hooks, hooksDisabled);
   for (const settingsPath of settingsPaths) {
     ensureDir(path.dirname(settingsPath));
     fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
@@ -775,72 +512,11 @@ function installCodexHooks(root) {
   return true;
 }
 
-function claudeHooksSettings(root) {
-  return {
-    hooks: {
-      UserPromptSubmit: [
-        {
-          hooks: [
-            { type: "command", command: hookScriptCommand(root, "prepare-spec-user-prompt.py") },
-            { type: "command", command: hookScriptCommand(root, "confirm-spec-user-prompt.py") },
-          ],
-        },
-      ],
-      PreToolUse: [
-        {
-          matcher: "Bash",
-          hooks: [
-            { type: "command", command: hookScriptCommand(root, "guard-protected-branch.sh") },
-          ],
-        },
-        {
-          matcher: SPEC_PREPARE_TOOL_MATCHER,
-          hooks: [
-            { type: "command", command: hookScriptCommand(root, "guard-host-worktree.sh") },
-            { type: "command", command: hookScriptCommand(root, "guard-spec-approval.sh") },
-          ],
-        },
-      ],
-      PostToolUse: [
-        {
-          matcher: "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit)$",
-          hooks: [
-            { type: "command", command: hookScriptCommand(root, "comment-checker.py") },
-            { type: "command", command: hookScriptCommand(root, "guard-host-worktree.sh") },
-          ],
-        },
-        {
-          matcher: SPEC_PREPARE_TOOL_MATCHER,
-          hooks: [
-            { type: "command", command: hookScriptCommand(root, "prepare-spec-user-prompt.py") },
-          ],
-        },
-        {
-          matcher: READ_TOOL_MATCHER,
-          hooks: [{ type: "command", command: hookScriptCommand(root, "record-skill-read.py") }],
-        },
-        {
-          matcher: COMMAND_TOOL_MATCHER,
-          hooks: [
-            { type: "command", command: hookScriptCommand(root, "record-command-run.py") },
-            { type: "command", command: hookScriptCommand(root, "bind-host-worktree.py") },
-            { type: "command", command: hookScriptCommand(root, "guard-host-worktree.sh") },
-          ],
-        },
-      ],
-      Stop: [
-        {
-          hooks: [{ type: "command", command: hookScriptCommand(root, "show-phase-status.sh") }],
-        },
-      ],
-    },
-  };
-}
 
 function installClaudeHooks(root) {
   const settingsPath = path.join(root, ".claude", "settings.json");
   const settings = readHookSettings(settingsPath);
-  mergeHookSettings(settings, claudeHooksSettings(root).hooks);
+  mergeHookSettings(settings, claudeHooksSettings(root).hooks, hooksDisabled);
   ensureDir(path.dirname(settingsPath));
   fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
 }
@@ -870,18 +546,6 @@ function upgradeBundledProfiles(root, src, dest) {
 
 
 
-function ompExtensionIsKitOwned(target) {
-  if (!fs.existsSync(target)) {
-    return true;
-  }
-  const current = fs.readFileSync(target, "utf8");
-  // 표식은 이번 버전부터 붙는다. 그 이전 설치본에는 없으므로 생성 서명으로도
-  // 인정한다. 이게 없으면 기존 사용자는 첫 업그레이드에서 영영 막힌다.
-  return (
-    current.includes(OMP_EXTENSION_MARKER) ||
-    current.includes("export default function agentFlowHooks(")
-  );
-}
 
 function installOmpHooks(root) {
   // 다른 host의 hook 설정은 병합이라 업그레이드가 저절로 되지만, 이 확장은
@@ -917,54 +581,14 @@ function pruneManagedHookRegistrations(root) {
     } catch {
       continue;
     }
-    if (pruneRetiredHooks(settings)) {
+    if (pruneRetiredHooks(settings, false, hooksDisabled)) {
       fs.writeFileSync(target, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
       console.log(`  - hooks disabled: cleared ${path.join(...rel)}`);
     }
   }
 }
 
-function removeOmpHooksExtension(root) {
-  const target = path.join(root, ".omp", "extensions", "agent-flow-hooks.ts");
-  if (!fs.existsSync(target)) {
-    return;
-  }
-  if (!ompExtensionIsKitOwned(target)) {
-    console.warn(`agent-flow: ${path.relative(root, target)} is not kit-managed; leaving it alone.`);
-    return;
-  }
-  const kept = nextFreeBackupPath(`${target}.removed`, fs.readFileSync(target, "utf8"));
-  if (kept !== null) {
-    fs.copyFileSync(target, kept);
-  }
-  fs.rmSync(target, { force: true });
-  console.log(`  - hooks disabled: removed ${path.relative(root, target)}`);
-}
 
-function pruneRetiredHookScripts(root) {
-  // 설정에서만 빼면 실행 파일이 디스크에 남는다. 남은 파일을 다른 경로가
-  // 다시 집어 실행하면 은퇴시킨 guard가 되살아난다.
-  const hooksDir = path.join(root, ".agent-flow", "scripts", "hooks");
-  for (const scriptName of retiredHookScripts()) {
-    const target = path.join(hooksDir, scriptName);
-    if (fs.existsSync(target)) {
-      // 사용자가 같은 이름으로 자기 스크립트를 뒀을 수 있다. 되돌릴 수 있게
-      // 사본을 남기고 지운다. 설치본이 관리하지 않는 host 설정이 이 경로를
-      // 여전히 가리킬 수 있으므로 경로를 함께 알린다.
-      const kept = nextFreeBackupPath(`${target}.removed`, fs.readFileSync(target, "utf8"));
-      if (kept !== null) {
-        fs.copyFileSync(target, kept);
-        // 실행 권한은 떼어 둔다. 되살릴 수 있게 남기는 사본이지 실행 대상이 아니다.
-        fs.chmodSync(kept, 0o644);
-      }
-      fs.rmSync(target, { force: true });
-      console.log(
-        `  - removed retired hook: ${path.relative(root, target)} ` +
-          `(backup: ${path.relative(root, target)}.removed)`,
-      );
-    }
-  }
-}
 
 
 
@@ -1158,23 +782,11 @@ function parseSkillMetadata(text, fallbackName) {
   };
 }
 
-function skillRequires(name) {
-  return SKILL_DEPENDENCIES.get(name) || [];
-}
 
 
 
 
 
-function safeSkillName(value) {
-  const candidate = String(value).trim();
-  return /^[A-Za-z0-9._-]+$/.test(candidate) && !candidate.startsWith(".") && !candidate.includes("..") && candidate !== "."
-    ? candidate
-    : String(candidate || "skill")
-        .toLowerCase()
-        .replace(/[^a-z0-9_-]+/g, "-")
-        .replace(/^-+|-+$/g, "") || "skill";
-}
 
 function removeStaleProjectSkillLinks(skills, previousIndex, forceManaged = false) {
   if (!previousIndex || !Array.isArray(previousIndex.links)) return [];
@@ -1336,37 +948,17 @@ function installManagedWorkflowSkills() {
   }
 }
 
-function fullFeatureSkillMarkdown() {
-  return `---\nname: full-feature-workflow\ndescription: Use this skill for feature work in this project.\n---\n\n# Full Feature Workflow\n\nUse this skill for feature work in this project.\n\nAlways drive progress through the runner output. Run \`${AGENT_FLOW_COMMAND} status\`, then execute the printed \`next_command\` exactly.\n\nDo not skip phases. If existing docs satisfy a phase, write the required artifact and reference those docs. If a gate, review, PR comment, or PR check fails, complete the matching fix phase and push again before merge/handoff.\n\nApply \`code-generation-discipline\` during code and review phases. Resolve required skills from active profile metadata, installed skill index, changed files, and task scope before writing or judging code.\n`;
-}
-
-function productBriefSkillMarkdown() {
-  return `---\nname: product-brief\ndescription: Use during the full-feature product-brief phase.\n---\n\n# Product Brief\n\nUse during the full-feature product-brief phase.\n\nAsk YC-style forcing questions before implementation:\n\n1. Demand Reality: what behavior proves people want this?\n2. Status Quo: how do they solve it today?\n3. Desperate Specificity: who is the most painful target user?\n4. Narrowest Wedge: what is the smallest version worth using now?\n5. Observation: what concrete user behavior was observed?\n6. Future Fit: why is now the right time?\n\nArtifact template:\n\n# Product Brief\n\n## Mode\nstartup | builder | internal\n\n## Demand Evidence\n\n## Status Quo\n\n## Target User\n\n## Narrowest Wedge\n\n## Observed Behavior\n\n## Why Now\n\n## Cut List\n\n## Assignment\n\n## Decision\nbuild | defer | cut\n`;
-}
 
 
 
-function architectureReviewerSkillMarkdown() {
-  return `---\nname: architecture-reviewer\ndescription: Use during the full-feature architecture-review phase.\n---\n\n# Architecture Reviewer\n\nUse during the full-feature architecture-review phase.\n\nReview implemented code against domain decisions and DDD/Clean Architecture. Run two independent active-host reviewer sub-agents before approve. Each reviewer section must include \`reviewer-source: sub-agent\`; optional cross-host reviewers are extra evidence and do not replace active-host reviewers.\n\nArtifact template:\n\n# Architecture Review\n\n## Reviewer 1\nreviewer-source: sub-agent\nverdict: approve | request-changes\n\n## Findings\n\n## Domain Alignment\n\n## Layer Violations\n\n## Repository Boundary Issues\n\n## Dependency Direction Issues\n\n## Required Refactors\n\n## Approved Exceptions\n\n## Reviewer 2\nreviewer-source: sub-agent\nverdict: approve | request-changes\n\n## Findings\n\n## Overall\nverdict: approve | request-changes\n\n## Completion Gate\nskills_checked: true\nprofile-skill-selection: applied\nactive-profiles: <profile list>\nchanged-file-skill-resolution: applied\nrequired-profile-skills: checked\nmissing-required-profile-skills: none|<list>\narchitecture-contract-check: pass|fail|n/a\ncodex-claude-parity-check: pass|fail\nhook-parity-check: pass|fail\nclean-architecture: applied\nproject-local-skills: checked|n/a\nproject-local-skills-used: <skill list or n/a>\ndependency-rule: pass|fail\nusecase-boundary: pass|fail|n/a\nusecase-calls-usecase: pass|fail\nrepository-boundary: pass|fail\ncache-boundary: pass|fail|n/a\nmemory-disk-cache-separated: pass|fail|n/a\nmapping-boundary: pass|fail|n/a\ndto-entity-domain-ui-separated: pass|fail\nsolid-boundary-check: pass|fail\npresentation-skill: android|react|react-native|ios|n/a\npresentation-state-review: pass|fail|n/a\nui-state-modeling: explicit|n/a\npresentation-mapping-boundary: domain-to-uimodel|n/a\ndi-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a\n`;
-}
 
-function pushWatchSkillMarkdown() {
-  return `---\nname: push-watch\ndescription: Use this skill after local verification is complete and the branch is ready to publish.\n---\n\n# Push Watch\n\nUse this skill after local verification is complete and the branch is ready to publish.\n\nRun:\n\n\`\`\`bash\n${AGENT_FLOW_COMMAND} run push-watch\n\`\`\`\n\nFlow:\n\n1. Sanity check the branch and working tree.\n2. Commit and push the current branch.\n3. Open or record the pull request.\n4. Watch PR checks and review threads.\n5. Route failures through \`pr-comment-fix\` or \`pr-ci-fix\`; comment fixes must also resolve the corresponding GitHub review threads.\n6. Push again and return to \`pr-watch\`.\n7. When checks and comments are green, route to \`merge\`.\n\nRules:\n\n- Protected branches are blocked: main, master, develop.\n- Record PR watch state with \`status: green\`, \`status: comments\`, \`status: ci-failed\`, or \`status: pending\`.\n- merge requires explicit approval. Do not merge unattended.\n`;
-}
+
 
 function previousSkillHash(previousIndex, name) {
   if (!previousIndex || !Array.isArray(previousIndex.skills)) return "";
   return previousIndex.skills.find((skill) => skill && skill.name === name)?.hash || "";
 }
 
-function readJsonIfExists(pathName) {
-  if (!fs.existsSync(pathName)) return null;
-  try {
-    return JSON.parse(fs.readFileSync(pathName, "utf8"));
-  } catch {
-    return null;
-  }
-}
 
 
 
@@ -1521,7 +1113,7 @@ function install() {
     removeDirIfSame(path.join(KIT_ROOT, "scripts"), path.join(PROJECT, "scripts"), FORCE_MANAGED);
   }
   hooksDisabled = HOOKS_FLAG_OFF || (!HOOKS_FLAG_ON && readJsonIfExists(path.join(AF_DIR, "kit.json"))?.hooks === false);
-  pruneRetiredHookScripts(PROJECT);
+  pruneRetiredHookScripts(PROJECT, hooksDisabled);
   pruneRetiredManagedScripts(PROJECT);
   makeHooksExecutable(PROJECT);
   let codexHooksCopied = false;

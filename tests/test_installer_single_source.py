@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import sys
@@ -119,11 +120,69 @@ def test_installer_never_launders_managed_hook_approval(entry: str):
         )
 
 
+def test_installer_removes_broad_codex_trust_but_never_adds_it():
+    """불변: install은 넓은 trust를 걷어내는 쪽이지 심는 쪽이 아니다."""
+    sources = _js_sources()
+    definers = [
+        name
+        for name, text in sources.items()
+        if "function removeCodexBroadTrustState(root)" in text
+    ]
+    assert definers == ["lib/installer-shared.mjs"], (
+        f"removeCodexBroadTrustState()를 정의하는 파일이 하나가 아니다: {definers}"
+    )
+    for name, text in sources.items():
+        assert "function installCodexTrustState(root)" not in text, name
+
+
 @pytest.mark.parametrize(
     "entry", ["agent-flow-kit.mjs", "agent-flow-install.mjs"]
 )
-def test_installer_removes_broad_codex_trust_but_never_adds_it(entry: str):
-    """불변: install은 넓은 trust를 걷어내는 쪽이지 심는 쪽이 아니다."""
+def test_both_entry_points_call_the_shared_trust_removal(entry: str):
+    """반증: 한쪽이 호출을 빼면 그 진입점에서만 넓은 trust가 살아남는다."""
     source = (BIN / entry).read_text(encoding="utf-8")
-    assert "function removeCodexBroadTrustState(root)" in source
-    assert "function installCodexTrustState(root)" not in source
+    assert "removeCodexBroadTrustState(" in source
+    assert "removeCodexBroadTrustState," in source, (
+        f"{entry}가 공유 모듈에서 removeCodexBroadTrustState를 가져오지 않는다"
+    )
+
+
+# 두 진입점에 본문이 한 벌씩 있던 것들. 사본이 다시 생기면 여기서 걸린다.
+_SHARED_ONLY = (
+    "architectureReviewerSkillMarkdown", "fullFeatureSkillMarkdown",
+    "productBriefSkillMarkdown", "pushWatchSkillMarkdown", "hookScriptCommand",
+    "isPruneBackupName", "writePruneBackup", "managedHookScriptName",
+    "managedHookDigests", "codexConfigPath", "ompExtensionIsKitOwned",
+    "removeOmpHooksExtension", "safeSkillName", "skillRequires",
+    "readJsonIfExists", "retiredHookScripts", "isRetiredHookCommand",
+    "pruneRetiredHooks", "pruneRetiredHookScripts", "mergeHookSettings",
+    "mergeHookConfig", "claudeHooksSettings", "codexHooksSettings",
+    "skillIndexBlock", "upsertSkillIndexBlock",
+)
+
+
+@pytest.mark.parametrize("name", _SHARED_ONLY)
+def test_previously_duplicated_helper_is_defined_once(name: str):
+    """불변: 사본이 하나라도 돌아오면 둘이 갈라졌는지 보는 검사가 다시 필요해진다."""
+    definers = [
+        source
+        for source, text in _js_sources().items()
+        if re.search(rf"^(?:export )?function {re.escape(name)}\(", text, re.M)
+    ]
+    assert definers == ["lib/installer-shared.mjs"], (
+        f"{name}()를 정의하는 파일이 하나가 아니다: {definers}"
+    )
+
+
+def test_hooks_disabled_is_passed_in_not_read_from_the_entry_point():
+    """불변: 공유 본문이 진입점 전역을 읽으면 그 진입점에서만 도는 코드가 된다.
+
+    기본값을 두면 인자를 빠뜨린 호출이 hook을 켜 둔 것으로 조용히 처리된다.
+    """
+    shared = (KIT_ROOT / "lib" / "installer-shared.mjs").read_text(encoding="utf-8")
+    for name in ("retiredHookScripts", "pruneRetiredHooks", "pruneRetiredHookScripts",
+                 "mergeHookSettings", "mergeHookConfig", "isRetiredHookCommand"):
+        signature = re.search(rf"^export function {name}\(([^)]*)\)", shared, re.M)
+        assert signature is not None, name
+        assert "hooksDisabled" in signature.group(1), name
+        assert "hooksDisabled =" not in signature.group(1), name

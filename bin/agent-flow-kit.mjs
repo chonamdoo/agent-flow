@@ -12,30 +12,63 @@ import { SKILL_DEPENDENCIES, mergeInstallSelectionWithPrevious, resolveInstallSe
 import { OMP_EXTENSION_MARKER, ompHooksExtensionSource } from "../lib/omp-hooks-extension.mjs";
 import { MANAGED_HOOK_SCRIPTS, RETIRED_MANAGED_HOOK_SCRIPTS } from "../lib/managed-hooks.mjs";
 import {
+  AGENT_FLOW_COMMAND,
+  architectureReviewerSkillMarkdown,
   arrayValue,
   backupIfDifferent,
+  claudeHooksSettings,
+  codexConfigPath,
+  codexHooksSettings,
+  COMMAND_TOOL_MATCHER,
   ensureChildPath,
   escapeRegex,
+  fullFeatureSkillMarkdown,
   hasChildWithSuffix,
+  HOME,
+  hookScriptCommand,
+  isPruneBackupName,
+  isRetiredHookCommand,
+  KIT_ROOT,
   makeHooksExecutable,
+  managedHookDigests,
+  managedHookScriptName,
+  mergeHookConfig,
+  mergeHookSettings,
   nextFreeBackupPath,
+  ompExtensionIsKitOwned,
   planReviewerSkillMarkdown,
+  productBriefSkillMarkdown,
+  PRUNE_BACKUP_SUFFIX,
+  PRUNE_BACKUP_VERSIONED,
+  pruneRetiredHooks,
+  pruneRetiredHookScripts,
   pruneRetiredManagedScripts,
+  pushWatchSkillMarkdown,
+  READ_TOOL_MATCHER,
   readHookSettings,
+  readJsonIfExists,
+  removeCodexBroadTrustState,
   removeGitignoreEntries,
   removeLegacyProjectSkillCopies,
+  removeOmpHooksExtension,
+  retiredHookScripts,
+  safeSkillName,
   shellQuote,
+  SKILL_INDEX_END,
+  SKILL_INDEX_START,
+  skillIndexBlock,
+  skillRequires,
+  SPEC_PREPARE_TOOL_MATCHER,
   tomlBasicString,
   uniqueStrings,
   unquoteShellWord,
   upsertGitignore,
+  upsertSkillIndexBlock,
   validateSkillDependencies,
+  writePruneBackup,
 } from "../lib/installer-shared.mjs";
 
 const command = process.argv[2];
-const AGENT_FLOW_COMMAND = "agent-flow";
-const HOME = process.env.HOME || process.env.USERPROFILE || "";
-const KIT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 // 워크플로·프로파일 정의의 정본은 설치 가능한 패키지 안이다. 루트에 사본을 두면
 // 같은 파일이 두 벌이 되고, 둘이 갈라지지 않았는지 보는 검사가 따로 필요해진다.
 const PACKAGED_ASSETS = path.join(KIT_ROOT, "src", "agent_flow");
@@ -266,7 +299,7 @@ function installProject() {
   upsertBootstrapBlock(path.join(root, "AGENTS.md"), "AGENTS.md", root);
   upsertBootstrapBlock(path.join(root, "CLAUDE.md"), "CLAUDE.md", root);
   upsertSkillIndexBlock(root);
-  pruneRetiredHookScripts(root);
+  pruneRetiredHookScripts(root, hooksDisabled);
   pruneRetiredManagedScripts(root);
   makeHooksExecutable(root);
   if (hooksDisabled) {
@@ -1245,17 +1278,6 @@ function kitSourceDigest() {
   return hash.digest("hex");
 }
 
-function managedHookDigests() {
-  return Object.fromEntries(
-    MANAGED_HOOK_SCRIPTS.map((name) => [
-      name,
-      crypto
-        .createHash("sha256")
-        .update(fs.readFileSync(path.join(KIT_ROOT, "scripts", "hooks", name)))
-        .digest("hex"),
-    ]),
-  );
-}
 
 function walkFilesSorted(target) {
   if (!fs.existsSync(target)) {
@@ -1493,34 +1515,12 @@ function copyBundledDirIfMissingOrSame(
   }
 }
 
-const PRUNE_BACKUP_SUFFIX = ".removed";
-const PRUNE_BACKUP_VERSIONED = /\.removed\.[0-9a-f]{8}$/;
 const PRUNE_NOTICE_PREFIX = "  - pruned: ";
 
-function isPruneBackupName(name) {
-  return name.endsWith(PRUNE_BACKUP_SUFFIX) || PRUNE_BACKUP_VERSIONED.test(name);
-}
 
 // prune은 source에 없는 파일을 지운다. 사용자가 직접 만든 workflow가 여기
 // 걸리면 경고도 사본도 없이 사라졌다. 같은 내용이 이미 백업돼 있으면 다시
 // 쓰지 않는다 — 재설치마다 사본이 불어나면 그것대로 잃는 것과 같다.
-function writePruneBackup(target) {
-  const content = fs.readFileSync(target);
-  const primary = `${target}${PRUNE_BACKUP_SUFFIX}`;
-  if (!fs.existsSync(primary)) {
-    fs.writeFileSync(primary, content);
-    return primary;
-  }
-  if (fs.readFileSync(primary).equals(content)) {
-    return primary;
-  }
-  const digest = crypto.createHash("sha256").update(content).digest("hex").slice(0, 8);
-  const versioned = `${primary}.${digest}`;
-  if (!fs.existsSync(versioned) || !fs.readFileSync(versioned).equals(content)) {
-    fs.writeFileSync(versioned, content);
-  }
-  return versioned;
-}
 
 function removeManagedDirIfSame(src, dest, force = false) {
   if (!fs.existsSync(dest)) {
@@ -1763,23 +1763,11 @@ function parseSkillMetadata(text, fallbackName) {
   };
 }
 
-function skillRequires(name) {
-  return SKILL_DEPENDENCIES.get(name) || [];
-}
 
 
 
 
 
-function safeSkillName(value) {
-  const candidate = String(value).trim();
-  return /^[A-Za-z0-9._-]+$/.test(candidate) && !candidate.startsWith(".") && !candidate.includes("..") && candidate !== "."
-    ? candidate
-    : String(candidate || "skill")
-        .toLowerCase()
-        .replace(/[^a-z0-9_-]+/g, "-")
-        .replace(/^-+|-+$/g, "") || "skill";
-}
 
 function removeStaleProjectSkillLinks(root, skills, previousIndex, force = false) {
   if (!previousIndex || !Array.isArray(previousIndex.links)) {
@@ -1960,16 +1948,6 @@ function previousSkillHash(previousIndex, name) {
   return previous?.hash || "";
 }
 
-function readJsonIfExists(pathName) {
-  if (!fs.existsSync(pathName)) {
-    return null;
-  }
-  try {
-    return JSON.parse(fs.readFileSync(pathName, "utf8"));
-  } catch {
-    return null;
-  }
-}
 
 
 
@@ -2048,22 +2026,6 @@ function artifactIsStale(state, artifact) {
   return artifactMtime < enteredAt;
 }
 
-function assertCompletionMarkers(phase, artifact, root, workflow, runDir) {
-  const content = fs.readFileSync(artifact, "utf8");
-  const missing = missingMarkersForPhase(content, phase, root, workflow, runDir);
-  if (missing.length > 0) {
-    throw new Error(`blocked: ${phase.id} artifact missing completion markers: ${missing.join(", ")}`);
-  }
-}
-
-function missingMarkers(content, markers) {
-  const lines = completionGateLines(content);
-  return markers.filter((marker) => {
-    const normalized = marker.trim().toLowerCase();
-    return !markerPresent(content, lines, normalized);
-  });
-}
-
 // local-skill 판정은 Python resolver 한 곳에만 있다. JS는 workflow export와 같은 방식으로 위임한다.
 // 여기에 휴리스틱을 다시 구현하면 Python과 조용히 갈라진다 — 그게 이 저장소의 최대 유지보수 리스크였다.
 function runSkillsCli(args) {
@@ -2083,590 +2045,6 @@ function runSkillsCli(args) {
     return null;
   }
   return result.stdout;
-}
-
-function runSpecCli(args) {
-  const result = safeSpawnSync(preferredPython(), ["-m", "agent_flow.cli", "spec", ...args], {
-    cwd: KIT_ROOT,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-    env: {
-      ...process.env,
-      PYTHONPATH: [path.join(KIT_ROOT, "src"), process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
-    },
-    timeout: 15_000,
-  });
-  if (result.error || result.status !== 0) {
-    const detail = result.error?.message || result.stderr?.trim() || `exit ${result.status}`;
-    process.stderr.write(`agent-flow: spec ${args[0]} failed: ${detail}\n`);
-    return null;
-  }
-  return result.stdout;
-}
-
-
-function captureSpecLedger(root, runDir, phase, artifact) {
-  if (!["design", "prd"].includes(phase?.id)) {
-    return;
-  }
-  const out = runSpecCli([
-    "capture",
-    "--root",
-    root,
-    "--run-dir",
-    runDir,
-    "--phase",
-    phase.id,
-    "--artifact",
-    artifact,
-  ]);
-  if (out === null) {
-    throw new Error("blocked: Python SPEC ledger capture did not answer");
-  }
-}
-
-
-function missingMarkersForPhase(content, phase, root, workflow, runDir = null) {
-  const missing = missingMarkers(content, phase.required_markers ?? []);
-  if (!root) {
-    return missing;
-  }
-  return missing
-    .concat(missingProjectLocalSkillMarkers(content, root, phase, workflow))
-    .concat(missingSpecMarkers(content, root, phase, runDir));
-}
-
-
-
-function missingProjectLocalSkillMarkers(content, root, phase, workflow) {
-  const phaseId = typeof phase === "string" ? phase : phase?.id;
-  if (!root || !phaseId) {
-    return [];
-  }
-  const artifact = writeTempArtifact(content);
-  try {
-    // task/changed_files/since는 넘기지 않는다. Python이 활성 run에서 직접 도출해야
-    // JS·status·Python runner 세 경로가 같은 skill 집합을 본다.
-    const out = runSkillsCli([
-      "markers",
-      "--root",
-      root,
-      "--phase",
-      phaseId,
-      "--workflow",
-      workflow || "default",
-      "--artifact",
-      artifact,
-    ]);
-    if (out === null) {
-      // resolver가 대답하지 못하면 skill 강제가 있는지 없는지 알 수 없다.
-      // 조용히 통과시키면 강제 전체가 무음으로 꺼진다 — fail-closed로 막는다.
-      return ["skill-check-unavailable: python skill resolver did not answer"];
-    }
-    const parsed = JSON.parse(out);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch (error) {
-    process.stderr.write(`agent-flow: skill marker check failed: ${error.message}\n`);
-    return ["skill-check-unavailable: python skill resolver did not answer"];
-  } finally {
-    try {
-      fs.rmSync(artifact, { force: true });
-    } catch (_error) {
-      /* 임시 파일 정리 실패가 phase 판정을 막아서는 안 된다. */
-    }
-  }
-}
-
-function missingSpecMarkers(content, root, phase, runDir) {
-  const phaseId = typeof phase === "string" ? phase : phase?.id;
-  if (!root || !phaseId || !runDir) {
-    return [];
-  }
-  const checkoutRoot = gitOutput(process.cwd(), ["rev-parse", "--show-toplevel"]) || root;
-  const artifact = writeTempArtifact(content);
-  try {
-    const out = runSpecCli([
-      "markers",
-      "--root",
-      root,
-      "--run-dir",
-      runDir,
-      "--project-root",
-      checkoutRoot,
-      "--phase",
-      phaseId,
-      "--artifact",
-      artifact,
-    ]);
-    if (out === null) {
-      return ["spec-check-unavailable: Python SPEC resolver did not answer"];
-    }
-    const parsed = JSON.parse(out);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch (error) {
-    process.stderr.write(`agent-flow: SPEC marker check failed: ${error.message}\n`);
-    return ["spec-check-unavailable: Python SPEC resolver did not answer"];
-  } finally {
-    try {
-      fs.rmSync(artifact, { force: true });
-    } catch (_error) {
-      /* 임시 파일 정리 실패가 phase 판정을 막아서는 안 된다. */
-    }
-  }
-}
-
-function writeTempArtifact(content) {
-  const file = path.join(os.tmpdir(), `agent-flow-markers-${process.pid}-${Date.now()}.md`);
-  fs.writeFileSync(file, content, "utf8");
-  return file;
-}
-
-function markerPresent(content, gateLines, marker) {
-  if (marker.startsWith("#")) {
-    return headingPresent(content, marker);
-  }
-  return gateLines.some((line) => lineMatchesMarker(line, marker));
-}
-
-function headingPresent(content, marker) {
-  for (const line of unfencedMarkdownText(content).split(/\r?\n/)) {
-    if (line.startsWith("    ") || line.startsWith("\t")) {
-      continue;
-    }
-    const lowered = line.trim().toLowerCase();
-    if (lowered.startsWith("#") && lowered === marker) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function completionGateLines(content) {
-  const out = [];
-  let inGate = false;
-  for (const line of unfencedMarkdownText(content).split(/\r?\n/)) {
-    if (line.startsWith("    ") || line.startsWith("\t")) {
-      continue;
-    }
-    const stripped = line.trim();
-    const lowered = stripped.toLowerCase();
-    if (lowered.startsWith("#")) {
-      const heading = lowered.replace(/^#+/, "").trim();
-      if (heading === "completion gate") {
-        inGate = true;
-        continue;
-      }
-      if (inGate) {
-        break;
-      }
-    }
-    if (inGate) {
-      out.push(normalizeCompletionMarkerLine(stripped).toLowerCase());
-    }
-  }
-  return out;
-}
-
-function completionGateMarkerValues(content) {
-  const values = new Map();
-  for (const line of completionGateLines(content)) {
-    const separator = line.indexOf(":");
-    if (separator !== -1) {
-      values.set(line.slice(0, separator).trim(), line.slice(separator + 1).trim());
-    }
-  }
-  return values;
-}
-
-function normalizeCompletionMarkerLine(line) {
-  let candidate = line.trim();
-  if (candidate.startsWith("+")) {
-    candidate = candidate.slice(1).trim();
-  }
-  const lowered = candidate.toLowerCase();
-  for (const prefix of ["- [x] ", "- [ ] ", "- ", "* "]) {
-    if (lowered.startsWith(prefix)) {
-      return candidate.slice(prefix.length).trim();
-    }
-  }
-  return candidate;
-}
-
-function lineMatchesMarker(line, marker) {
-  if (marker.endsWith(":")) {
-    return line.startsWith(marker) && line.slice(marker.length).trim().length > 0;
-  }
-  const separator = marker.indexOf(":");
-  if (separator !== -1 && marker.slice(separator + 1).includes("|")) {
-    const lineSeparator = line.indexOf(":");
-    if (lineSeparator === -1) {
-      return false;
-    }
-    const lineKey = line.slice(0, lineSeparator).trim();
-    const markerKey = marker.slice(0, separator).trim();
-    const allowed = marker
-      .slice(separator + 1)
-      .split("|")
-      .map((value) => value.trim())
-      .filter(Boolean);
-    // n/a 마커는 artifact에서 optional로 써도 같은 비적용 상태로 인정한다.
-    if (allowed.includes("n/a")) {
-      allowed.push("optional");
-    }
-    return lineKey === markerKey && allowed.includes(line.slice(lineSeparator + 1).trim());
-  }
-  return line === marker;
-}
-
-function artifactHasFailureMarkers(pathName) {
-  const content = fs.readFileSync(pathName, "utf8");
-  return completionGateLines(content).some((line) => {
-    const separator = line.indexOf(":");
-    if (separator === -1) {
-      return false;
-    }
-    const key = line.slice(0, separator).trim();
-    const value = line.slice(separator + 1).trim();
-    if (value === "fail") {
-      return true;
-    }
-    return key === "missing-required-profile-skills" && !["", "none", "n/a"].includes(value);
-  });
-}
-
-const FIX_LOOP_MAX_ROUNDS = 3;
-
-function nextPhaseIndex(state, phases, phase, artifact) {
-  if (!phase.routes) {
-    return state.phase_index + 1;
-  }
-  const key = nodeRouteKey(phase, artifact, state);
-  const target = phase.routes[key] ?? phase.routes.default;
-  if (!target) {
-    throw new Error(`blocked: ${phase.id} artifact has no route for ${key}`);
-  }
-  if (target === "block") {
-    if (phase.id === "pr-watch" && key === "pending") {
-      throw new Error("blocked: PR watch is pending");
-    }
-    throw new Error(`blocked: ${phase.id} route ${key}`);
-  }
-  // gates뿐 아니라 fix-loop로 라우팅하는 모든 phase에 같은 상한을 적용한다 (Python runner와 동일).
-  if (target === "fix-loop") {
-    const rounds = (state.fix_loop_rounds ?? 0) + 1;
-    if (rounds > FIX_LOOP_MAX_ROUNDS) {
-      throw new Error(`blocked: fix-loop exceeded ${FIX_LOOP_MAX_ROUNDS} rounds — escalate to user`);
-    }
-  }
-  return phaseIndex(phases, target);
-}
-
-function syncRouteArtifacts(runDir, phases, currentIndex, nextIndex) {
-  if (nextIndex <= currentIndex) {
-    for (const phase of phases.slice(nextIndex, currentIndex + 1)) {
-      const artifact = path.join(runDir, phase.artifact);
-      if (fs.existsSync(artifact)) {
-        fs.unlinkSync(artifact);
-      }
-    }
-    return;
-  }
-  if (nextIndex <= currentIndex + 1) {
-    return;
-  }
-  for (const phase of phases.slice(currentIndex + 1, nextIndex)) {
-    const artifact = path.join(runDir, phase.artifact);
-    if (fs.existsSync(artifact)) {
-      continue;
-    }
-    fs.mkdirSync(path.dirname(artifact), { recursive: true });
-    fs.writeFileSync(
-      artifact,
-      `# ${phase.id}\n\nstatus: skipped\nreason: route_to_${phases[nextIndex].id}\n`,
-      "utf8",
-    );
-  }
-}
-
-function nextFixLoopRounds(state, phase, nextPhase) {
-  const routesToFixLoop = Boolean(phase.routes) && Object.values(phase.routes).includes("fix-loop");
-  if (routesToFixLoop && nextPhase?.id === "fix-loop") {
-    return (state.fix_loop_rounds ?? 0) + 1;
-  }
-  if (phase.id === "gates" && routesToFixLoop && state.fix_loop_rounds !== undefined) {
-    return undefined;
-  }
-  return state.fix_loop_rounds;
-}
-
-function nodeRouteKey(phase, artifact, state) {
-  if (phase.id === "gates") {
-    return readGatesRouteKey(artifact, state?.gate_nonce ?? "");
-  }
-  if (phase.multi_review) {
-    const verdict = readMultiReviewVerdict(artifact, phase.id);
-    if (verdict === "approve" || verdict === "request-changes") {
-      if (verdict === "approve" && phase.routes?.["request-changes"] && artifactHasFailureMarkers(artifact)) {
-        return "request-changes";
-      }
-      return verdict;
-    }
-    throw new Error("blocked: multi-review artifact must include verdict: approve or verdict: request-changes");
-  }
-  if (phase.id === "pr-watch") {
-    const status = readArtifactStatus(artifact);
-    if (["green", "merged", "skipped", "comments", "has_comments", "ci-failed", "ci_failed", "pending", "closed", "error"].includes(status)) {
-      return status;
-    }
-    return "default";
-  }
-  if (phase.id === "plan-review" || phase.id === "architecture-review" || phase.id === "merge-approval") {
-    const verdict = readArtifactVerdict(artifact);
-    if (["approve", "request-changes", "blocked"].includes(verdict)) {
-      if (verdict === "approve" && phase.routes?.["request-changes"] && artifactHasFailureMarkers(artifact)) {
-        return "request-changes";
-      }
-      return verdict;
-    }
-    return "default";
-  }
-  return readArtifactStatus(artifact) ?? readArtifactVerdict(artifact) ?? "default";
-}
-
-function phaseIndex(phases, id) {
-  const index = phases.findIndex((phase) => phase.id === id);
-  if (index === -1) {
-    throw new Error(`unknown phase: ${id}`);
-  }
-  return index;
-}
-
-function readArtifactStatus(pathName) {
-  const content = fs.readFileSync(pathName, "utf8");
-  const match = content.match(/^status:\s*([a-z_-]+)\s*$/im);
-  return match?.[1]?.toLowerCase();
-}
-
-function readArtifactVerdict(pathName) {
-  const content = fs.readFileSync(pathName, "utf8");
-  const match = content.match(/^verdict:\s*([a-z-]+)\s*$/im);
-  return match?.[1]?.toLowerCase();
-}
-
-function assertMinReviewerCount(pathName, minimum) {
-  const content = fs.readFileSync(pathName, "utf8");
-  const reviewers = parseReviewerVerdicts(content);
-  if (reviewers.size >= minimum) {
-    return;
-  }
-  throw new Error(`blocked: multi-review artifact must contain at least ${minimum} independent reviewer verdicts`);
-}
-
-function readMultiReviewVerdict(pathName, phaseId = "") {
-  const content = fs.readFileSync(pathName, "utf8");
-  const overall = readMultiReviewOverallVerdict(content);
-  if (overall && !["approve", "request-changes"].includes(overall)) {
-    throw new Error("blocked: multi-review artifact overall verdict must be approve or request-changes");
-  }
-  const reviewers = parseReviewerVerdicts(content);
-  if (reviewers.size < 1) {
-    throw new Error("blocked: multi-review artifact must contain at least 1 independent sub-agent reviewer verdict");
-  }
-  const verdicts = [...reviewers.values()];
-  if (overall === "request-changes" || verdicts.includes("request-changes")) {
-    return "request-changes";
-  }
-  if (reviewers.size < 2) {
-    throw new Error("blocked: multi-review artifact must contain at least 2 independent sub-agent reviewer verdicts");
-  }
-  if (overall === "approve" && verdicts.every((verdict) => verdict === "approve")) {
-    return "approve";
-  }
-  throw new Error("blocked: multi-review artifact must include matching reviewer verdicts and overall verdict");
-}
-
-function unfencedMarkdownText(content) {
-  // Python `phase_workflow.unfenced_markdown_text`와 같은 판정이어야 한다. 한 줄짜리
-  // 코드 스팬(```js x```)을 fence 시작으로 읽으면 그 뒤 본문이 통째로 사라진다.
-  const visible = [];
-  let fenceChar = "";
-  let fenceLength = 0;
-  for (const line of String(content).split(/\r?\n/)) {
-    if (fenceChar) {
-      const closer = new RegExp(`^ {0,3}\\${fenceChar}{${fenceLength},}[ \\t]*$`);
-      if (closer.test(line)) {
-        fenceChar = "";
-        fenceLength = 0;
-      }
-      continue;
-    }
-    const opener = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
-    if (opener) {
-      const [, marker, info] = opener;
-      if (marker[0] === "`" && info.includes("`")) {
-        visible.push(line);
-        continue;
-      }
-      fenceChar = marker[0];
-      fenceLength = marker.length;
-      continue;
-    }
-    visible.push(line);
-  }
-  return visible.join("\n");
-}
-
-
-function readMultiReviewOverallVerdict(content) {
-  content = unfencedMarkdownText(content);
-  // Python runner와 같은 heading alias(Overall/Final [Verdict])를 인정한다.
-  const sections = content.split(/^##[ \t]+(?:Overall|Final)(?:[ \t]+Verdict)?[ \t]*$/im);
-  if (sections.length < 2) {
-    return undefined;
-  }
-  if (sections.length > 2) {
-    return "invalid-verdict";
-  }
-  const overallBlock = sections[sections.length - 1].split(/^#{1,6}[ \t]+/m, 1)[0] ?? "";
-  const verdicts = [...overallBlock.matchAll(/^verdict:\s*([a-z-]+)\s*$/gim)]
-    .map((match) => match[1]);
-  if (verdicts.length === 0) {
-    return undefined;
-  }
-  if (verdicts.length !== 1) {
-    return "invalid-verdict";
-  }
-  return verdicts[0];
-}
-
-function parseReviewerVerdicts(content) {
-  content = unfencedMarkdownText(content);
-  // reviewer id를 키로 정규화해 한 reviewer가 여러 번 approve를 찍어도 독립 리뷰로 세지 않는다.
-  const reviewers = new Map();
-  const stateFor = (reviewerId) => {
-    if (!reviewers.has(reviewerId)) {
-      reviewers.set(reviewerId, { subagent: false, verdict: undefined });
-    }
-    return reviewers.get(reviewerId);
-  };
-  const sourcePattern = /^(reviewer[-_ ]?[a-z0-9-]+)\s+reviewer[-_ ]?source:\s*(.+)$/gim;
-  for (const match of content.matchAll(sourcePattern)) {
-    const reviewerId = normalizeReviewerId(match[1]);
-    if (reviewerId && isSubagentSource(match[2])) {
-      stateFor(reviewerId).subagent = true;
-    }
-  }
-  const linePattern = /^reviewer[-_ ]?([a-z0-9-]*)[^\n]*verdict:\s*(approve|request-changes)\s*$/gim;
-  for (const match of content.matchAll(linePattern)) {
-    const reviewerId = normalizeReviewerId(match[1]);
-    if (!reviewerId) {
-      continue;
-    }
-    if (!["approve", "request-changes"].includes(match[2])) {
-      continue;
-    }
-    stateFor(reviewerId).verdict = match[2];
-  }
-  const sections = content.split(/^##[ \t]+Reviewer[ \t]*([^\n]*)/im);
-  for (let index = 1; index < sections.length; index += 2) {
-    const reviewerId = normalizeReviewerHeadingId(sections[index]);
-    if (!reviewerId) {
-      continue;
-    }
-    const reviewerBlock = sections[index + 1]?.split(/\n##[ \t]+(?:Reviewer|Overall|Final)\b/i, 1)[0] ?? "";
-    if (hasSubagentSource(reviewerBlock)) {
-      stateFor(reviewerId).subagent = true;
-    }
-    const verdict = reviewerBlock.match(/^\s*verdict:\s*(approve|request-changes)\s*$/im)?.[1];
-    if (verdict && !["approve", "request-changes"].includes(verdict)) {
-      continue;
-    }
-    if (verdict) {
-      stateFor(reviewerId).verdict = verdict;
-    }
-  }
-  return new Map(
-    [...reviewers.entries()]
-      .filter(([, state]) => state.subagent && state.verdict)
-      .map(([reviewerId, state]) => [reviewerId, state.verdict])
-  );
-}
-
-function hasSubagentSource(value) {
-  const sourcePattern = /(?:^|\n)\s*reviewer[-_ ]?source\s*:\s*([^\n]+)/gi;
-  return [...String(value).matchAll(sourcePattern)].some((match) => isSubagentSource(match[1]));
-}
-
-function isSubagentSource(value) {
-  const normalized = String(value).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-  return [
-    "sub agent",
-    "subagent",
-    "host sub agent",
-    "host subagent",
-    "active host sub agent",
-    "active host subagent",
-  ].includes(normalized);
-}
-
-function normalizeReviewerId(value) {
-  // 섹션 라벨과 종합 verdict는 독립 reviewer id로 세지 않는다.
-  const genericLabels = new Set([
-    "verdict",
-    "verdicts",
-    "overall",
-    "final",
-    "summary",
-    "review",
-    "reviews",
-    "feedback",
-    "report",
-    "reports",
-    "assessment",
-    "assessments",
-    "analysis",
-    "analyses",
-    "decision",
-    "decisions",
-    "conclusion",
-    "conclusions",
-    "status",
-    "statuses",
-    "approval",
-    "approvals",
-    "note",
-    "notes",
-    "finding",
-    "findings",
-    "comment",
-    "comments",
-    "output",
-    "outputs",
-    "result",
-    "results",
-    "scope",
-    "check",
-    "checks",
-    "checklist",
-    "details",
-    "detail",
-  ]);
-  const key = String(value ?? "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .replace(/^reviewer\b/, "")
-    .trim();
-  if (!key || key.split(/\s+/).some((part) => genericLabels.has(part))) {
-    return "";
-  }
-  return key;
-}
-
-function normalizeReviewerHeadingId(value) {
-  // Reviewer heading은 1-2 단어 id(claude, agent 1 등)만 독립 id로 인정한다.
-  // 긴 서술형 heading은 reviewer가 아니라 prose일 가능성이 높아 제외한다.
-  const key = normalizeReviewerId(value);
-  return /^[a-z0-9]+(?: [a-z0-9]+)?$/.test(key) ? key : "";
 }
 
 function readGatesPassed(pathName, nonce = "") {
@@ -2759,8 +2137,6 @@ function hasGateEvidence(result) {
   return false;
 }
 
-const SKILL_INDEX_START = "<!-- agent-flow:skills:start -->";
-const SKILL_INDEX_END = "<!-- agent-flow:skills:end -->";
 
 // 설치된 skill 목록을 AGENTS.md 안에 직접 심는다.
 //
@@ -2772,58 +2148,9 @@ const SKILL_INDEX_END = "<!-- agent-flow:skills:end -->";
 // 그래서 여기 있는 것은 내용이 아니라 **인덱스**다. 이름만 주고 본문은 파일에
 // 남긴다 - 전문을 넣으면 AGENTS.md가 곧 문서가 되고, 적용 시점 문장은 phase
 // 프롬프트가 이미 profile YAML에서 그대로 들고 온다. 여기서 다시 지으면 갈라진다.
-function skillIndexBlock(root) {
-  const index = readJsonIfExists(path.join(root, ".agent-flow", "skills", "index.json"));
-  const skills = Array.isArray(index?.skills) ? index.skills : [];
-  if (skills.length === 0) {
-    // 인덱스가 없는 설치본에서 거짓 목록을 쓰지 않는다. 빈 인덱스는 "아직
-    // 모른다"이지 "skill이 없다"가 아니다.
-    return [
-      SKILL_INDEX_START,
-      `- 설치된 skill 인덱스가 아직 없다. \`${AGENT_FLOW_COMMAND} skills sync\` 후 다시 생성된다.`,
-      SKILL_INDEX_END,
-    ].join("\n");
-  }
-  const names = (delivery) =>
-    skills
-      .filter((skill) => (skill.delivery === "passive") === (delivery === "passive"))
-      .map((skill) => String(skill.name))
-      .sort((a, b) => a.localeCompare(b));
-  const lines = [
-    SKILL_INDEX_START,
-    "```text",
-    "[agent-flow skill index]|root: .agent-flow/skills",
-    "|IMPORTANT: 아래 파일이 기억보다 우선한다. 변경 대상을 먼저 훑고, scope가 걸리는 것만 읽는다.",
-  ];
-  const passive = names("passive");
-  if (passive.length > 0) {
-    lines.push(`|always:{${passive.join(",")}}`);
-  }
-  const onDemand = names("on-demand");
-  if (onDemand.length > 0) {
-    lines.push(`|on-demand:{${onDemand.join(",")}}`);
-  }
-  lines.push("```", SKILL_INDEX_END);
-  return lines.join("\n");
-}
 // 인덱스는 install이 skill 링크를 다 만든 **뒤에** 채운다. bootstrap 블록을 쓰는
 // 시점에는 아직 목록이 확정되지 않아, 거기서 채우면 한 install 안에서 곧바로
 // 낡는다. 그래서 블록에는 자리만 두고 여기서 그 자리만 바꾼다.
-function upsertSkillIndexBlock(root) {
-  const block = skillIndexBlock(root);
-  for (const fileName of ["AGENTS.md", "CLAUDE.md"]) {
-    const target = path.join(root, fileName);
-    if (!fs.existsSync(target)) continue;
-    const current = fs.readFileSync(target, "utf8");
-    const start = current.indexOf(SKILL_INDEX_START);
-    const end = current.indexOf(SKILL_INDEX_END);
-    if (start === -1 || end === -1 || end < start) continue;
-    const next = current.slice(0, start) + block + current.slice(end + SKILL_INDEX_END.length);
-    if (next !== current) {
-      fs.writeFileSync(target, next, "utf8");
-    }
-  }
-}
 
 
 function upsertBootstrapBlock(pathName, label, root) {
@@ -2997,23 +2324,11 @@ Never run the fallback or manual approval command, or invoke the user-prompt hoo
 `;
 }
 
-function fullFeatureSkillMarkdown() {
-  return `---\nname: full-feature-workflow\ndescription: Use this skill for feature work in this project.\n---\n\n# Full Feature Workflow\n\nUse this skill for feature work in this project.\n\nAlways drive progress through the runner output. Run \`${AGENT_FLOW_COMMAND} status\`, then execute the printed \`next_command\` exactly.\n\nDo not skip phases. If existing docs satisfy a phase, write the required artifact and reference those docs. If a gate, review, PR comment, or PR check fails, complete the matching fix phase and push again before merge/handoff.\n\nApply \`code-generation-discipline\` during code and review phases. Resolve required skills from active profile metadata, installed skill index, changed files, and task scope before writing or judging code.\n`;
-}
-
-function productBriefSkillMarkdown() {
-  return `---\nname: product-brief\ndescription: Use during the full-feature product-brief phase.\n---\n\n# Product Brief\n\nUse during the full-feature product-brief phase.\n\nAsk YC-style forcing questions before implementation:\n\n1. Demand Reality: what behavior proves people want this?\n2. Status Quo: how do they solve it today?\n3. Desperate Specificity: who is the most painful target user?\n4. Narrowest Wedge: what is the smallest version worth using now?\n5. Observation: what concrete user behavior was observed?\n6. Future Fit: why is now the right time?\n\nArtifact template:\n\n# Product Brief\n\n## Mode\nstartup | builder | internal\n\n## Demand Evidence\n\n## Status Quo\n\n## Target User\n\n## Narrowest Wedge\n\n## Observed Behavior\n\n## Why Now\n\n## Cut List\n\n## Assignment\n\n## Decision\nbuild | defer | cut\n`;
-}
 
 
 
-function architectureReviewerSkillMarkdown() {
-  return `---\nname: architecture-reviewer\ndescription: Use during the full-feature architecture-review phase.\n---\n\n# Architecture Reviewer\n\nUse during the full-feature architecture-review phase.\n\nReview implemented code against domain decisions and DDD/Clean Architecture. Run two independent active-host reviewer sub-agents before approve. Each reviewer section must include \`reviewer-source: sub-agent\`; optional cross-host reviewers are extra evidence and do not replace active-host reviewers.\n\nArtifact template:\n\n# Architecture Review\n\n## Reviewer 1\nreviewer-source: sub-agent\nverdict: approve | request-changes\n\n## Findings\n\n## Domain Alignment\n\n## Layer Violations\n\n## Repository Boundary Issues\n\n## Dependency Direction Issues\n\n## Required Refactors\n\n## Approved Exceptions\n\n## Reviewer 2\nreviewer-source: sub-agent\nverdict: approve | request-changes\n\n## Findings\n\n## Overall\nverdict: approve | request-changes\n\n## Completion Gate\nskills_checked: true\nprofile-skill-selection: applied\nactive-profiles: <profile list>\nchanged-file-skill-resolution: applied\nrequired-profile-skills: checked\nmissing-required-profile-skills: none|<list>\narchitecture-contract-check: pass|fail|n/a\ncodex-claude-parity-check: pass|fail\nhook-parity-check: pass|fail\nclean-architecture: applied\nproject-local-skills: checked|n/a\nproject-local-skills-used: <skill list or n/a>\ndependency-rule: pass|fail\nusecase-boundary: pass|fail|n/a\nusecase-calls-usecase: pass|fail\nrepository-boundary: pass|fail\ncache-boundary: pass|fail|n/a\nmemory-disk-cache-separated: pass|fail|n/a\nmapping-boundary: pass|fail|n/a\ndto-entity-domain-ui-separated: pass|fail\nsolid-boundary-check: pass|fail\npresentation-skill: android|react|react-native|ios|n/a\npresentation-state-review: pass|fail|n/a\nui-state-modeling: explicit|n/a\npresentation-mapping-boundary: domain-to-uimodel|n/a\ndi-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a\n`;
-}
 
-function pushWatchSkillMarkdown() {
-  return `---\nname: push-watch\ndescription: Use this skill after local verification is complete and the branch is ready to publish.\n---\n\n# Push Watch\n\nUse this skill after local verification is complete and the branch is ready to publish.\n\nRun:\n\n\`\`\`bash\n${AGENT_FLOW_COMMAND} run push-watch\n\`\`\`\n\nFlow:\n\n1. Sanity check the branch and working tree.\n2. Commit and push the current branch.\n3. Open or record the pull request.\n4. Watch PR checks and review threads.\n5. Route failures through \`pr-comment-fix\` or \`pr-ci-fix\`; comment fixes must also resolve the corresponding GitHub review threads.\n6. Push again and return to \`pr-watch\`.\n7. When checks and comments are green, route to \`merge\`.\n\nRules:\n\n- Protected branches are blocked: main, master, develop.\n- Record PR watch state with \`status: green\`, \`status: comments\`, \`status: ci-failed\`, or \`status: pending\`.\n- merge requires explicit approval. Do not merge unattended.\n`;
-}
+
 
 function pushWatchPromptMarkdown() {
   return `# push-watch\n\nCommit, push, open a PR, and start the PR watch loop.\n\nUse \`${AGENT_FLOW_COMMAND} run push-watch\`.\n\nDo not run on protected branches. Do not merge without explicit approval.\n`;
@@ -3035,21 +2350,9 @@ function phasePrompt(phase) {
 
 
 
-function hookScriptCommand(root, scriptName) {
-  const scriptPath = shellQuote(path.join(root, ".agent-flow", "scripts", "hooks", scriptName));
-  if (scriptName.endsWith(".py")) {
-    return `/usr/bin/python3 -I ${scriptPath}`;
-  }
-  return `/bin/bash ${scriptPath}`;
-}
 
 
 
-// Read 계열 tool 이름은 host마다 다르다. comment-checker의 write matcher와 같은 방식으로 합집합을 쓴다.
-const READ_TOOL_MATCHER = "^(Read|read|read_file|view|cat)$";
-// 셸 실행 tool도 host마다 이름이 다르다. 관측 전용이라 PostToolUse에만 붙는다.
-const COMMAND_TOOL_MATCHER = "^(Bash|bash|shell|run_terminal_cmd|execute_command|local_shell|terminal)$";
-const SPEC_PREPARE_TOOL_MATCHER = "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit|Bash|bash|shell|run_terminal_cmd|execute_command|local_shell|terminal)$";
 
 // 관리 대상에서 빠진 hook은 기존 설치본 settings에 그대로 남는다. mergeHookSettings는
 // additive-only라서, 스크립트 파일만 지우면 host가 없는 경로를 계속 실행해 셸이 통째로
@@ -3061,219 +2364,20 @@ const SPEC_PREPARE_TOOL_MATCHER = "^(apply_patch|Write|Edit|MultiEdit|write|edit
 
 // hook을 끄면 "관리 대상 전부를 은퇴시킨 것"과 같다. 별도 제거 경로를 새로
 // 만들지 않고 이미 검증된 prune 경로를 그대로 태운다.
-function retiredHookScripts() {
-  return hooksDisabled
-    ? [...RETIRED_MANAGED_HOOK_SCRIPTS, ...MANAGED_HOOK_SCRIPTS]
-    : RETIRED_MANAGED_HOOK_SCRIPTS;
-}
-
-function pruneRetiredHooks(settings, replaceManaged = false) {
-  if (!settings || typeof settings !== "object" || !settings.hooks) {
-    return false;
-  }
-  let changed = false;
-  for (const [event, entries] of Object.entries(settings.hooks)) {
-    if (!Array.isArray(entries)) {
-      continue;
-    }
-    for (const entry of entries) {
-      if (!Array.isArray(entry?.hooks)) {
-        continue;
-      }
-      const kept = entry.hooks.filter(
-        (hook) => !isRetiredHookCommand(hook?.command)
-          && !(replaceManaged && managedHookScriptName(hook?.command)),
-      );
-      if (kept.length !== entry.hooks.length) {
-        entry.hooks = kept;
-        changed = true;
-      }
-    }
-    const nonEmpty = entries.filter((entry) => !Array.isArray(entry?.hooks) || entry.hooks.length > 0);
-    if (nonEmpty.length !== entries.length) {
-      settings.hooks[event] = nonEmpty;
-      changed = true;
-    }
-  }
-  return changed;
-}
-
-function isRetiredHookCommand(command) {
-  if (typeof command !== "string" || !command) {
-    return false;
-  }
-  const normalized = unquoteShellWord(command).replaceAll("\\", "/").replaceAll("'", "").replaceAll('"', "");
-  return retiredHookScripts().some(
-    (name) => normalized.endsWith(`/scripts/hooks/${name}`) || normalized === `scripts/hooks/${name}`,
-  );
-}
-
-function managedHookScriptName(command) {
-  const normalized = unquoteShellWord(command).replaceAll("\\", "/").replaceAll("'", "").replaceAll('"', "");
-  for (const scriptName of MANAGED_HOOK_SCRIPTS) {
-    if (
-      normalized === `.agent-flow/scripts/hooks/${scriptName}` ||
-      normalized === `scripts/hooks/${scriptName}` ||
-      normalized.endsWith(`/.agent-flow/scripts/hooks/${scriptName}`) ||
-      normalized.endsWith(`/scripts/hooks/${scriptName}`) ||
-      normalized.includes(`/.agent-flow/scripts/hooks/${scriptName}`) ||
-      normalized.includes(`/scripts/hooks/${scriptName}`)
-    ) {
-      return scriptName;
-    }
-  }
-  return null;
-}
-
-function codexHooksSettings(root) {
-  return {
-    hooks: {
-      UserPromptSubmit: [
-        {
-          hooks: [
-            { type: "command", command: hookScriptCommand(root, "prepare-spec-user-prompt.py") },
-            { type: "command", command: hookScriptCommand(root, "confirm-spec-user-prompt.py") },
-          ],
-        },
-      ],
-      PreToolUse: [
-        {
-          matcher: "Bash",
-          hooks: [
-            { type: "command", command: hookScriptCommand(root, "guard-protected-branch.sh") },
-          ],
-        },
-        {
-          matcher: SPEC_PREPARE_TOOL_MATCHER,
-          hooks: [
-            { type: "command", command: hookScriptCommand(root, "guard-host-worktree.sh") },
-            { type: "command", command: hookScriptCommand(root, "guard-spec-approval.sh") },
-          ],
-        },
-      ],
-      PostToolUse: [
-        {
-          matcher: "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit)$",
-          hooks: [
-            { type: "command", command: hookScriptCommand(root, "comment-checker.py") },
-            { type: "command", command: hookScriptCommand(root, "guard-host-worktree.sh") },
-          ],
-        },
-        {
-          matcher: SPEC_PREPARE_TOOL_MATCHER,
-          hooks: [
-            { type: "command", command: hookScriptCommand(root, "prepare-spec-user-prompt.py") },
-          ],
-        },
-        {
-          matcher: READ_TOOL_MATCHER,
-          hooks: [{ type: "command", command: hookScriptCommand(root, "record-skill-read.py") }],
-        },
-        {
-          matcher: COMMAND_TOOL_MATCHER,
-          hooks: [
-            { type: "command", command: hookScriptCommand(root, "record-command-run.py") },
-            { type: "command", command: hookScriptCommand(root, "bind-host-worktree.py") },
-            { type: "command", command: hookScriptCommand(root, "guard-host-worktree.sh") },
-          ],
-        },
-      ],
-      Stop: [
-        {
-          hooks: [{ type: "command", command: hookScriptCommand(root, "show-phase-status.sh") }],
-        },
-      ],
-    },
-  };
-}
-
-function mergeHookSettings(settings, desired) {
-  if (!settings.hooks) {
-    settings.hooks = {};
-  }
-  pruneRetiredHooks(settings, true);
-  for (const [event, entries] of Object.entries(desired)) {
-    if (!settings.hooks[event]) {
-      settings.hooks[event] = [];
-    }
-    for (const entry of entries) {
-      const existing = settings.hooks[event].find((e) => (e.matcher ?? "") === (entry.matcher ?? ""));
-      if (existing) {
-        if (!existing.hooks) {
-          existing.hooks = [];
-        }
-        for (const hook of entry.hooks) {
-          const scriptName = managedHookScriptName(hook.command);
-          const matchingHook = existing.hooks.find(
-            (h) => scriptName && managedHookScriptName(h.command) === scriptName,
-          );
-          if (matchingHook) {
-            Object.assign(matchingHook, hook);
-          } else if (!existing.hooks.some((h) => h.command === hook.command)) {
-            existing.hooks.push(hook);
-          }
-        }
-      } else {
-        settings.hooks[event].push(entry);
-      }
-    }
-  }
-}
-
-
-
-function mergeHookConfig(settings, source) {
-  if (!source || typeof source !== "object") {
-    return;
-  }
-  for (const [key, value] of Object.entries(source)) {
-    if (key !== "hooks" && settings[key] === undefined) {
-      settings[key] = value;
-    }
-  }
-  if (source.hooks) {
-    mergeHookSettings(settings, source.hooks);
-  }
-}
 
 
 
 
 
-function codexConfigPath() {
-  if (!HOME) {
-    return null;
-  }
-  return path.join(HOME, ".codex", "config.toml");
-}
 
-function removeCodexBroadTrustState(root) {
-  const configPath = codexConfigPath();
-  if (!configPath || !fs.existsSync(configPath)) {
-    return;
-  }
-  const tableHeader = `[projects."${tomlBasicString(root)}"]`;
-  const tableName = tableHeader.slice(1, -1);
-  const tablePattern = new RegExp(
-    `(^|\\n)\\s*\\[\\s*${escapeRegex(tableName)}\\s*\\]\\s*(?:#.*)?\\n`
-      + "([\\s\\S]*?)(?=\\n\\s*\\[[^\\n]+\\]|$)",
-  );
-  const trustPattern = /(^|\n)\s*trust_level\s*=\s*"trusted"\s*(?:#.*)?(?=\n|$)/;
-  const current = fs.readFileSync(configPath, "utf8");
-  const next = current.replace(tablePattern, (full, leading, body) => {
-    if (!trustPattern.test(body)) {
-      return full;
-    }
-    const kept = body.replace(trustPattern, "$1");
-    if (!kept.trim()) {
-      return leading;
-    }
-    return `${leading}${tableHeader}\n${kept.replace(/^\n/, "")}`;
-  });
-  if (next !== current) {
-    fs.writeFileSync(configPath, next.endsWith("\n") ? next : `${next}\n`, "utf8");
-  }
-}
+
+
+
+
+
+
+
+
 
 function installCodexHooks(root) {
   const settingsPaths = [
@@ -3282,81 +2386,20 @@ function installCodexHooks(root) {
   ];
   const settings = {};
   for (const settingsPath of settingsPaths) {
-    mergeHookConfig(settings, readHookSettings(settingsPath));
+    mergeHookConfig(settings, readHookSettings(settingsPath), hooksDisabled);
   }
-  mergeHookSettings(settings, codexHooksSettings(root).hooks);
+  mergeHookSettings(settings, codexHooksSettings(root).hooks, hooksDisabled);
   for (const settingsPath of settingsPaths) {
     fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
     fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
   }
 }
 
-function claudeHooksSettings(root) {
-  return {
-    hooks: {
-      UserPromptSubmit: [
-        {
-          hooks: [
-            { type: "command", command: hookScriptCommand(root, "prepare-spec-user-prompt.py") },
-            { type: "command", command: hookScriptCommand(root, "confirm-spec-user-prompt.py") },
-          ],
-        },
-      ],
-      PreToolUse: [
-        {
-          matcher: "Bash",
-          hooks: [
-            { type: "command", command: hookScriptCommand(root, "guard-protected-branch.sh") },
-          ],
-        },
-        {
-          matcher: SPEC_PREPARE_TOOL_MATCHER,
-          hooks: [
-            { type: "command", command: hookScriptCommand(root, "guard-host-worktree.sh") },
-            { type: "command", command: hookScriptCommand(root, "guard-spec-approval.sh") },
-          ],
-        },
-      ],
-      PostToolUse: [
-        {
-          matcher: "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit)$",
-          hooks: [
-            { type: "command", command: hookScriptCommand(root, "comment-checker.py") },
-            { type: "command", command: hookScriptCommand(root, "guard-host-worktree.sh") },
-          ],
-        },
-        {
-          matcher: SPEC_PREPARE_TOOL_MATCHER,
-          hooks: [
-            { type: "command", command: hookScriptCommand(root, "prepare-spec-user-prompt.py") },
-          ],
-        },
-        {
-          matcher: READ_TOOL_MATCHER,
-          hooks: [{ type: "command", command: hookScriptCommand(root, "record-skill-read.py") }],
-        },
-        {
-          matcher: COMMAND_TOOL_MATCHER,
-          hooks: [
-            { type: "command", command: hookScriptCommand(root, "record-command-run.py") },
-            { type: "command", command: hookScriptCommand(root, "bind-host-worktree.py") },
-            { type: "command", command: hookScriptCommand(root, "guard-host-worktree.sh") },
-          ],
-        },
-      ],
-      Stop: [
-        {
-          hooks: [{ type: "command", command: hookScriptCommand(root, "show-phase-status.sh") }],
-        },
-      ],
-    },
-  };
-}
 
 function installClaudeHooks(root) {
   const settingsPath = path.join(root, ".claude", "settings.json");
   const settings = readHookSettings(settingsPath);
-  mergeHookSettings(settings, claudeHooksSettings(root).hooks);
+  mergeHookSettings(settings, claudeHooksSettings(root).hooks, hooksDisabled);
   fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
   fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
 }
@@ -3383,18 +2426,6 @@ function upgradeBundledProfiles(root, src, dest) {
 
 
 
-function ompExtensionIsKitOwned(target) {
-  if (!fs.existsSync(target)) {
-    return true;
-  }
-  const current = fs.readFileSync(target, "utf8");
-  // 표식은 이번 버전부터 붙는다. 그 이전 설치본에는 없으므로 생성 서명으로도
-  // 인정한다. 이게 없으면 기존 사용자는 첫 업그레이드에서 영영 막힌다.
-  return (
-    current.includes(OMP_EXTENSION_MARKER) ||
-    current.includes("export default function agentFlowHooks(")
-  );
-}
 
 function installOmpHooks(root) {
   // 다른 host의 hook 설정은 병합이라 업그레이드가 저절로 되지만, 이 확장은
@@ -3431,54 +2462,14 @@ function pruneManagedHookRegistrations(root) {
     } catch {
       continue;  // 사용자 파일이 깨져 있으면 건드리지 않는다.
     }
-    if (pruneRetiredHooks(settings)) {
+    if (pruneRetiredHooks(settings, false, hooksDisabled)) {
       fs.writeFileSync(target, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
       console.log(`  - hooks disabled: cleared ${path.join(...rel)}`);
     }
   }
 }
 
-function removeOmpHooksExtension(root) {
-  const target = path.join(root, ".omp", "extensions", "agent-flow-hooks.ts");
-  if (!fs.existsSync(target)) {
-    return;
-  }
-  if (!ompExtensionIsKitOwned(target)) {
-    console.warn(`agent-flow: ${path.relative(root, target)} is not kit-managed; leaving it alone.`);
-    return;
-  }
-  const kept = nextFreeBackupPath(`${target}.removed`, fs.readFileSync(target, "utf8"));
-  if (kept !== null) {
-    fs.copyFileSync(target, kept);
-  }
-  fs.rmSync(target, { force: true });
-  console.log(`  - hooks disabled: removed ${path.relative(root, target)}`);
-}
 
-function pruneRetiredHookScripts(root) {
-  // 설정에서만 빼면 실행 파일이 디스크에 남는다. 남은 파일을 다른 경로가
-  // 다시 집어 실행하면 은퇴시킨 guard가 되살아난다.
-  const hooksDir = path.join(root, ".agent-flow", "scripts", "hooks");
-  for (const scriptName of retiredHookScripts()) {
-    const target = path.join(hooksDir, scriptName);
-    if (fs.existsSync(target)) {
-      // 사용자가 같은 이름으로 자기 스크립트를 뒀을 수 있다. 되돌릴 수 있게
-      // 사본을 남기고 지운다. 설치본이 관리하지 않는 host 설정이 이 경로를
-      // 여전히 가리킬 수 있으므로 경로를 함께 알린다.
-      const kept = nextFreeBackupPath(`${target}.removed`, fs.readFileSync(target, "utf8"));
-      if (kept !== null) {
-        fs.copyFileSync(target, kept);
-        // 실행 권한은 떼어 둔다. 되살릴 수 있게 남기는 사본이지 실행 대상이 아니다.
-        fs.chmodSync(kept, 0o644);
-      }
-      fs.rmSync(target, { force: true });
-      console.log(
-        `  - removed retired hook: ${path.relative(root, target)} ` +
-          `(backup: ${path.relative(root, target)}.removed)`,
-      );
-    }
-  }
-}
 
 
 

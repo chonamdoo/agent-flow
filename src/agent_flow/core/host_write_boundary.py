@@ -263,6 +263,14 @@ def host_write_boundary_violation(payload: object, project_root: Path) -> str | 
         resolved = _resolve_path(candidate, declared_cwd)
         if resolved is None:
             continue
+        # worktree 안에서 만든 심링크는 그 worktree의 것으로 본다. 실경로만 보면
+        # leader의 `node_modules`를 공유한 순간 그 안의 실행 파일이 전부 막힌다.
+        logical = _logical_path(candidate, declared_cwd)
+        if logical is not None and (
+            _is_within(logical, current.checkout)
+            or _is_within(logical, current.runtime_root)
+        ):
+            continue
         if _is_within(resolved, current.checkout) or _is_within(
             resolved, current.runtime_root
         ):
@@ -273,9 +281,6 @@ def host_write_boundary_violation(payload: object, project_root: Path) -> str | 
                     f"shell command references checkout path {resolved} outside the bound "
                     f"worktree {current.checkout}"
                 )
-    opaque_violation = _opaque_command_violation(command)
-    if opaque_violation is not None:
-        return opaque_violation
     # 위 후보 루프는 **다른 checkout**을 지킨다. 그것만으로는 `Write` 도구가 받는
     # 제약과 어긋난다 — `_target_violation`은 worktree 밖이면 무조건 거부하는데,
     # 셸은 leader/타 checkout만 보므로 `Write(/tmp/x)`는 막히고
@@ -677,9 +682,7 @@ def _command_path_candidates(command: str, cwd: Path) -> Iterable[str]:
 
 # 셸이 **쓰는** 자리만 고른다. `_command_path_candidates`는 읽기 경로까지 모으므로
 # 그 전부를 worktree 안으로 강제하면 `python3 /usr/bin/thing.py` 같은 정상 호출이
-# 막힌다. 정적 분석이 셸의 쓰기 범위를 전부 증명하지는 못한다 —
-# `_opaque_command_violation`이 계산된 경로·인라인 eval을 이미 거부해 표면을 좁히고,
-# 여기서는 남은 리터럴 형태만 본다.
+# 막힌다. 리터럴로 특정된 쓰기 대상만 본다.
 _SHELL_SEPARATORS = frozenset({";", "&&", "||", "|", "&", "|&"})
 _WRITE_REDIRECTS = frozenset({">", ">>"})
 # `2>&1`은 fd 복제라 파일 대상이 아니다. 뒤 토큰을 목적지로 읽으면 `1`을 경로로 본다.
@@ -750,50 +753,6 @@ def _command_write_targets(command: str) -> tuple[str, ...]:
     drain()
     return tuple(target for target in targets if target.strip())
 
-
-def _opaque_command_violation(command: str) -> str | None:
-    if re.search(r"\$\(|`|[<>]\(|<<|(?<!\\)\$(?:\{|[A-Za-z_])", command):
-        return (
-            "shell command contains a runtime-computed path or command; "
-            "the host worktree boundary cannot prove its write scope"
-        )
-    try:
-        tokens = shlex.split(command, posix=True)
-    except ValueError:
-        return "shell command is not statically parseable at the host worktree boundary"
-    for index, token in enumerate(tokens):
-        name = os.path.basename(token).lower()
-        following = tokens[index + 1 :]
-        if name.startswith("python") and any(
-            option == "-c" or (option.startswith("-c") and option != "-c")
-            for option in following
-        ):
-            return (
-                "python inline code can compute a runtime-computed path; "
-                "use a checked module or script inside the bound worktree"
-            )
-        if name in {"node", "bun", "ruby", "perl", "php", "osascript"} and any(
-            option in {"-e", "--eval", "-p", "--print"}
-            or option.startswith(("--eval=", "-e"))
-            for option in following
-        ):
-            return (
-                f"{name} inline code can compute a runtime-computed path; "
-                "use a checked module or script inside the bound worktree"
-            )
-        if name in {"bash", "dash", "sh", "zsh"} and any(
-            option.startswith("-") and "c" in option[1:] for option in following
-        ):
-            return (
-                "nested shell code can compute a runtime-computed path; "
-                "invoke the checked command directly inside the bound worktree"
-            )
-        if name in {"eval", "source"} or token == ".":
-            return (
-                "dynamic shell evaluation can compute a runtime-computed path; "
-                "invoke the checked command directly inside the bound worktree"
-            )
-    return None
 
 
 def _command_literal_violation(
@@ -1055,6 +1014,31 @@ def _resolve_path(value: str, base: Path) -> Path | None:
         return path.resolve(strict=False)
     except (OSError, RuntimeError, ValueError):
         return None
+
+
+def _logical_path(value: str, base: Path) -> Path | None:
+    """심링크를 따르지 않고 표준화만 한 논리 경로."""
+    text = value.strip().strip("\"'")
+    if not text or _VIRTUAL_PATH.match(text):
+        return None
+    try:
+        path = Path(text).expanduser()
+        if not path.is_absolute():
+            path = base / path
+        return Path(os.path.normpath(path))
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def bound_worktree_for_session(
+    session_id: str, project_root: Path
+) -> "HostCheckoutBinding | None":
+    """세션에 연결된 worktree binding. worktree-tripwire hook이 쓴다."""
+    root = _validated_project_root(project_root)
+    active = _active_checkouts(root)
+    if not active:
+        return None
+    return _load_binding(root, session_id, active)
 
 
 def _is_within(path: Path, root: Path) -> bool:

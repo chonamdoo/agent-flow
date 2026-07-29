@@ -46,6 +46,7 @@ MANAGED_HOOK_SCRIPTS = (
     "comment-checker.py",
     "record-skill-read.py",
     "record-command-run.py",
+    "worktree-tripwire.py",
 )
 
 # 판정하지 않고 기록만 하는 hook. 항상 exit 0이며 PreToolUse에 달면 안 된다.
@@ -90,6 +91,10 @@ MANAGED_HOOK_PLACEMENT = {
     ),
     "record-skill-read.py": ("PostToolUse", "^(Read|read|read_file|view|cat)$"),
     "record-command-run.py": (
+        "PostToolUse",
+        "^(Bash|bash|shell|run_terminal_cmd|execute_command|local_shell|terminal)$",
+    ),
+    "worktree-tripwire.py": (
         "PostToolUse",
         "^(Bash|bash|shell|run_terminal_cmd|execute_command|local_shell|terminal)$",
     ),

@@ -2371,6 +2371,79 @@ def _has_symlinked_component(base: Path, target: Path) -> bool:
     return False
 
 
+class UnknownWorktreeSetupAction(ValueError):
+    """선언에 없는 이름. 조용히 넘기면 선언했는데 아무 일도 일어나지 않는다."""
+
+
+def _register_git_exclude(leader: Path, pattern: str) -> None:
+    """`node_modules/`처럼 슬래시로 끝나는 항목은 디렉터리만 맞아서 symlink 자체를
+    못 가린다. 루트 고정 패턴을 따로 적어야 worktree 정리가 막히지 않는다.
+
+    worktree를 지울 때 이 항목은 지우지 않는다. 저장소가 공유하는 파일이라 다른
+    worktree가 아직 같은 symlink를 쓰고 있을 수 있다. 추적 중인 경로는 exclude로
+    가려지지 않으므로 남겨도 손해가 없다.
+    """
+    # leader가 그 자체로 linked worktree면 `.git`은 디렉터리가 아니라 파일이다.
+    common = Path(_run_git(leader, "rev-parse", "--git-common-dir").stdout.strip())
+    if not common.is_absolute():
+        common = leader / common
+    exclude = common / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    current = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
+    if pattern in current.split():
+        return
+    prefix = "" if not current or current.endswith("\n") else "\n"
+    exclude.write_text(f"{current}{prefix}{pattern}\n", encoding="utf-8")
+
+
+def _link_node_modules(*, leader: Path, checkout: Path) -> bool:
+    source = leader / "node_modules"
+    target = checkout / "node_modules"
+    # 이미 있는 트리를 symlink로 갈아치우면 그 안의 작업이 사라진다.
+    if target.exists() or target.is_symlink():
+        return False
+    if not source.is_dir() or source.is_symlink():
+        return False
+    target.symlink_to(source, target_is_directory=True)
+    _register_git_exclude(leader, "/node_modules")
+    return True
+
+
+# profile은 이 이름들만 고른다. 명령 문자열이 들어올 자리가 없다.
+#
+# npm 설치는 뺐다. 이름만 고르더라도 그 함수가 저장소의 package.json에서
+# preinstall/postinstall을 끌어다 실행하므로 위 성질이 그 동작에서만 깨진다.
+WORKTREE_SETUP_ACTIONS: dict[str, Any] = {
+    "link_node_modules": _link_node_modules,
+}
+
+
+def run_declared_worktree_actions(
+    *, leader: Path, checkout: Path, declared: dict[str, Any]
+) -> tuple[str, ...]:
+    """선언이 켜 둔 동작만 돌린다. 반환값은 실제로 수행된 이름들.
+
+    실패는 이름 짓기와 같은 규율이다 — 경고만 내고 worktree 생성을 되돌리지 않는다.
+    설정 하나 없어 빌드가 한 번 실패하는 것과 작업 자리가 없어지는 것은 무게가 다르다.
+    """
+    unknown = sorted(set(declared) - set(WORKTREE_SETUP_ACTIONS))
+    if unknown:
+        raise UnknownWorktreeSetupAction(
+            f"unknown worktree setup action(s): {', '.join(unknown)}; "
+            f"known: {', '.join(sorted(WORKTREE_SETUP_ACTIONS))}"
+        )
+    ran: list[str] = []
+    for name in sorted(declared):
+        if not declared[name]:
+            continue
+        try:
+            if WORKTREE_SETUP_ACTIONS[name](leader=leader, checkout=checkout):
+                ran.append(name)
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(f"warning: worktree setup action {name} failed: {exc}", file=sys.stderr)
+    return tuple(ran)
+
+
 def copy_declared_worktree_files(
     *, leader: Path, checkout: Path, names: Iterable[str]
 ) -> tuple[str, ...]:

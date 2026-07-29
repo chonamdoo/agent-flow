@@ -111,10 +111,13 @@ from agent_flow.core.worktrees import (
     create_worktree,
     get_worktree_status,
     cleanup_state_root,
+    UnknownWorktreeSetupAction,
+    WORKTREE_SETUP_ACTIONS,
     copy_declared_worktree_files,
     DEFAULT_SLUG_MAX_LENGTH,
     describe_slug,
     delegated_slug,
+    run_declared_worktree_actions,
     find_pending_worktree_cleanup,
     known_worktree_names,
     plan_worktree,
@@ -2476,24 +2479,70 @@ def _apply_worktree_setup(*, root: Path, checkout: Path) -> None:
     except Exception as exc:  # profile 해석 실패가 worktree 생성을 막을 이유는 없다
         print(f"warning: skipped worktree setup: {_format_cli_error(exc)}", file=sys.stderr)
         return
+    # 복사와 동작은 서로 독립이다. 한쪽이 실패했다고 다른 쪽을 건너뛰면 선언한
+    # 동작이 조용히 빠진다.
+    if declared:
+        try:
+            copied = copy_declared_worktree_files(
+                leader=root, checkout=checkout, names=[str(name) for name in declared]
+            )
+        except (ValueError, OSError) as exc:
+            print(
+                f"warning: worktree setup failed: {_format_cli_error(exc)}",
+                file=sys.stderr,
+            )
+            copied = ()
+        missing = [str(name) for name in declared if str(name) not in copied]
+        if copied:
+            print(f"worktree setup copied: {', '.join(copied)}")
+        if missing:
+            print(
+                f"warning: worktree setup did not copy {', '.join(missing)} "
+                f"(absent in {root}, already present, or a symlink)",
+                file=sys.stderr,
+            )
+    _run_worktree_setup_actions(root=root, checkout=checkout, profile=profile)
+
+
+def _declared_worktree_actions(profile: dict) -> dict:
+    """`copy` 말고 선언된 동작 키들. 합성 profile도 함께 본다."""
+    sources: list[dict] = [profile]
+    nested = profile.get("profiles")
+    if isinstance(nested, list):
+        sources.extend(item for item in nested if isinstance(item, dict))
+    actions: dict = {}
+    for source in sources:
+        setup = ((source.get("branching") or {}).get("worktree_setup") or {})
+        if not isinstance(setup, dict):
+            continue
+        for key, value in setup.items():
+            if key == "copy":
+                continue
+            if key not in WORKTREE_SETUP_ACTIONS:
+                print(
+                    f"warning: unknown worktree setup key {key!r}; known: "
+                    f"{', '.join(sorted(WORKTREE_SETUP_ACTIONS))}",
+                    file=sys.stderr,
+                )
+                continue
+            actions[key] = bool(value) or actions.get(key, False)
+    return actions
+
+
+def _run_worktree_setup_actions(*, root: Path, checkout: Path, profile: dict) -> None:
+    declared = _declared_worktree_actions(profile)
     if not declared:
         return
     try:
-        copied = copy_declared_worktree_files(
-            leader=root, checkout=checkout, names=[str(name) for name in declared]
+        ran = run_declared_worktree_actions(
+            leader=root, checkout=checkout, declared=declared
         )
-    except (ValueError, OSError) as exc:
-        print(f"warning: worktree setup failed: {_format_cli_error(exc)}", file=sys.stderr)
+    except UnknownWorktreeSetupAction as exc:
+        # 오타를 조용히 넘기면 선언했는데 아무 일도 일어나지 않는다.
+        print(f"warning: {_format_cli_error(exc)}", file=sys.stderr)
         return
-    missing = [str(name) for name in declared if str(name) not in copied]
-    if copied:
-        print(f"worktree setup copied: {', '.join(copied)}")
-    if missing:
-        print(
-            f"warning: worktree setup did not copy {', '.join(missing)} "
-            f"(absent in {root}, already present, or a symlink)",
-            file=sys.stderr,
-        )
+    if ran:
+        print(f"worktree setup ran: {', '.join(ran)}")
 
 
 def _cleanup_worktree_after_failure(root: Path, status, original: BaseException) -> None:

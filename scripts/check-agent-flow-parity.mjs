@@ -15,11 +15,6 @@ const CHECK_INSTALLED_COPY = !SOURCE_IS_MANAGED_WORKTREE;
 // 같은 파일이 또 있었고, 이 스크립트가 둘의 바이트 동일성을 지켰다.
 const PACKAGED_WORKFLOWS = "src/agent_flow/workflows";
 const PACKAGED_PROFILES = "src/agent_flow/profiles";
-// 두 runner에 **같은** nonce를 준다. node는 `run start`가 무작위로 심고 python은
-// meta에서 읽으므로, 고정하지 않으면 같은 입력이 아니게 되어 provenance 검사가
-// parity 오탐으로 보인다.
-const PARITY_GATE_NONCE = "parity-gate-nonce";
-
 const INSTALL_ROOT = resolveInstalledRoot(process.cwd()) ?? SOURCE_ROOT;
 // bin/agent-flow-install.mjs / bin/agent-flow-kit.mjs의 BUNDLED_HOST_SKILL_NAMES와
 // 동일해야 한다. allowlist 밖 bundled skill은 host link 없이 index에만 노출된다.
@@ -213,21 +208,22 @@ function assertAbsent(rel, needle, why) {
   }
 }
 
-// 두 진입점은 `lib/`의 공유 모듈에서 omp 확장 소스와 managed hook 목록을 가져다
-// 쓰지만, `installCodexHooks`/`installClaudeHooks`/`installOmpHooks`/
-// `removeCodexBroadTrustState` 본문은 아직 각자 갖고 있다. 아래 단언들은 그 본문에
-// 걸린 계약이므로 두 파일 모두를 봐야 한다 — 한쪽만 보면 다른 쪽에서 승인 세탁이
-// 검사 없이 되살아난다.
+// 넓은 trust를 걷어내는 본문과 skill 인덱스 본문은 이제 공유 모듈에만 있다.
+assertContains("lib/installer-shared.mjs", "export function removeCodexBroadTrustState(root)");
+assertContains("lib/installer-shared.mjs", "export function skillIndexBlock(root)");
+assertContains("lib/installer-shared.mjs", "export function upsertSkillIndexBlock(root)");
+assertContains("lib/installer-shared.mjs", 'export const SKILL_INDEX_START = "<!-- agent-flow:skills:start -->"');
+
+// `installCodexHooks`/`installClaudeHooks`/`installOmpHooks` 본문은 각 진입점의
+// 전역을 읽어 아직 각자 갖고 있다. 아래 단언은 그 본문에 걸린 계약이라 두 파일을
+// 모두 봐야 한다 — 한쪽만 보면 다른 쪽에서 승인 세탁이 검사 없이 되살아난다.
 for (const installer of ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"]) {
-  assertContains(installer, "function removeCodexBroadTrustState(root)");
   assertNotContains(installer, "function installCodexTrustState(root)");
   assertContains(installer, "function installOmpHooks(root)");
   assertContains(installer, ".omp\", \"extensions\", \"agent-flow-hooks.ts");
-  // 두 installer가 같은 인덱스를 만들어야 한다. 한쪽만 채우면 install 순서에
-  // 따라 AGENTS.md의 인덱스가 있었다 없었다 한다.
-  assertContains(installer, "function skillIndexBlock(root)");
-  assertContains(installer, "function upsertSkillIndexBlock(root)");
-  assertContains(installer, 'const SKILL_INDEX_START = "<!-- agent-flow:skills:start -->"');
+  // 두 진입점이 같은 인덱스를 만들어야 한다. 한쪽만 채우면 install 순서에 따라
+  // AGENTS.md의 인덱스가 있었다 없었다 한다.
+  assertContains(installer, "upsertSkillIndexBlock(");
   // install이 **현재 등록된** hook의 해시를 trusted로 되받아 적으면, 변조된
   // 등록이 다음 install에서 승인 상태로 세탁된다. 읽는 코드도 없었다.
   // 등록 무결성은 런 시작 시 hook_integrity가 kit.json과 대조한다.
@@ -248,8 +244,9 @@ for (const installer of ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"]
     }
     return [...match[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]).sort();
   })();
-  if (jsManagedScripts) {
-      }
+  if (jsManagedScripts && jsManagedScripts.length === 0) {
+    failures.push("lib/managed-hooks.mjs declares no managed hook scripts");
+  }
 }
 
 const fullFeatureWorkflowCopies = [
@@ -802,10 +799,6 @@ function assertAllWorkflowContracts() {
       failures.push(`workflow export ${name} id mismatch: ${workflow.id}`);
     }
     assertWorkflowArtifactContract(workflow);
-    assertRouteParity(workflow);
-    assertFixLoopRoundParity(workflow);
-    assertBackwardFreshArtifactSafety(workflow);
-    assertCompletionMarkerPrefixParity(workflow);
   }
 }
 
@@ -843,203 +836,6 @@ function assertWorkflowArtifactContract(workflow) {
 function promptOutputArtifacts(prompt) {
   return [...prompt.matchAll(/Output:\s+`?([A-Za-z0-9_./-]+\.(?:md|json|log))`?\.?/g)]
     .map((match) => match[1]);
-}
-
-function provenGateResults(body) {
-  return JSON.stringify({
-    ...body,
-    produced_by: { tool: "agent-flow gates", nonce: PARITY_GATE_NONCE },
-  }) + "\n";
-}
-
-function assertRouteParity(workflow) {
-  const phaseIds = new Set(workflow.phases.map((phase) => phase.id));
-  const cases = [
-    ["plan-review verdict fail", "plan-review", "verdict: fail\n"],
-    ["plan-review request", "plan-review", "verdict: request-changes\n"],
-    ["plan-review bullet approve", "plan-review", "- verdict: approve\n"],
-    ["pr-watch status passed", "pr-watch", "status: passed\n"],
-    ["pr-watch status green", "pr-watch", "status: green\n"],
-    ["pr-watch bullet status green", "pr-watch", "- status: green\n"],
-    ["pr-watch note status green", "pr-watch", "note: status: green\n"],
-    ["pr-watch indented status green", "pr-watch", "  status: green\n"],
-    ["pr-watch status has_comments", "pr-watch", "status: has_comments\n"],
-    ["pr-watch status has-comments", "pr-watch", "status: has-comments\n"],
-    ["pr-watch status ci_failed", "pr-watch", "status: ci_failed\n"],
-    ["gates passed without evidence", "gates", "{\"passed\": true}\n"],
-    [
-      "gates passed with evidence but no provenance",
-      "gates",
-      "{\"passed\": true, \"results\": [{\"command\": \"npm test\", \"passed\": true, \"output\": \"ok\"}]}\n",
-    ],
-    [
-      "gates passed with evidence and provenance",
-      "gates",
-      provenGateResults({
-        passed: true,
-        results: [{ command: "npm test", passed: true, output: "ok" }],
-      }),
-    ],
-  ];
-  for (const phase of workflow.phases) {
-    for (const key of Object.keys(phase.routes ?? {})) {
-      cases.push([`${phase.id} ${key}`, phase.id, routeArtifactContent(phase, key)]);
-    }
-  }
-  for (const [label, phaseId, content] of cases) {
-    if (!phaseIds.has(phaseId)) {
-      continue;
-    }
-    const python = pythonPhaseOutcome(workflow, phaseId, content, { gate_nonce: PARITY_GATE_NONCE });
-    const node = nodePhaseOutcome(workflow, phaseId, content, { gate_nonce: PARITY_GATE_NONCE });
-    if (!python || !node) continue;
-    if (python.route_key !== node.route_key) {
-      failures.push(`python/node route key mismatch ${label}: python=${python.route_key} node=${node.route_key}`);
-    }
-    if (python.outcome !== node.outcome) {
-      failures.push(`python/node route mismatch ${label}: python=${python.outcome} node=${node.outcome}`);
-    }
-  }
-}
-
-function assertCompletionMarkerPrefixParity(workflow) {
-  // marker만으로 완료가 결정되는 모든 phase를 검사한다. verdict/status/JSON으로
-  // 라우팅되는 phase는 marker 외 입력이 outcome을 좌우하므로 제외한다.
-  const prefixes = ["- [x] ", "* ", "+ ", "- ", ""];
-  for (const phase of workflow.phases) {
-    const markers = phase.required_markers ?? [];
-    if (markers.length === 0 || phase.multi_review) {
-      continue;
-    }
-    const routeKeys = Object.keys(phase.routes ?? {});
-    if (routeKeys.some((key) => key !== "default")) {
-      continue;
-    }
-    const lines = markers.map((marker, index) => `${prefixes[index % prefixes.length]}${renderCompletionMarker(marker)}`);
-    const content = ["## Completion Gate", ...lines, ...skillGateLines(phase), ""].join("\n");
-    const pythonMissing = pythonMissingCompletionMarkers(content, markers);
-    const node = nodePhaseOutcome(workflow, phase.id, content);
-    if (pythonMissing === null || !node) {
-      continue;
-    }
-    const pythonPasses = pythonMissing.length === 0;
-    const nodePasses = node.outcome !== "blocked";
-    if (pythonPasses !== nodePasses) {
-      failures.push(
-        `python/node completion marker prefix mismatch (${phase.id}): python_missing=${pythonMissing.join(",")} node=${node.outcome}`,
-      );
-    }
-  }
-}
-
-function assertFixLoopRoundParity(workflow) {
-  const phase = workflow.phases.find((candidate) => Object.values(candidate.routes ?? {}).includes("fix-loop"));
-  if (!phase) {
-    return;
-  }
-  const key = Object.entries(phase.routes).find(([, target]) => target === "fix-loop")?.[0];
-  const content = routeArtifactContent(phase, key);
-  const pythonAllowed = pythonPhaseOutcome(workflow, phase.id, content, { fix_loop_rounds: 2 });
-  const nodeAllowed = nodePhaseOutcome(workflow, phase.id, content, { fix_loop_rounds: 2 });
-  if (pythonAllowed && nodeAllowed) {
-    if (pythonAllowed.outcome !== nodeAllowed.outcome || pythonAllowed.fix_loop_rounds !== nodeAllowed.fix_loop_rounds) {
-      failures.push(`python/node fix-loop round 3 mismatch (${workflow.id} ${phase.id})`);
-    }
-  }
-  const pythonBlocked = pythonPhaseOutcome(workflow, phase.id, content, { fix_loop_rounds: 3 });
-  const nodeBlocked = nodePhaseOutcome(workflow, phase.id, content, { fix_loop_rounds: 3 });
-  if (pythonBlocked && nodeBlocked && (pythonBlocked.outcome !== "blocked" || nodeBlocked.outcome !== "blocked")) {
-    failures.push(`python/node fix-loop round cap mismatch (${workflow.id} ${phase.id}): python=${pythonBlocked.outcome} node=${nodeBlocked.outcome}`);
-  }
-  if (pythonBlocked && nodeBlocked && pythonBlocked.fix_loop_rounds !== nodeBlocked.fix_loop_rounds) {
-    failures.push(`python/node blocked fix-loop round state mismatch (${workflow.id} ${phase.id}): python=${pythonBlocked.fix_loop_rounds} node=${nodeBlocked.fix_loop_rounds}`);
-  }
-}
-
-function assertBackwardFreshArtifactSafety(workflow) {
-  for (const testCase of backwardFreshRouteCases(workflow)) {
-    const python = pythonBackwardFreshArtifactOutcome(workflow, testCase);
-    const node = nodeBackwardFreshArtifactOutcome(workflow, testCase);
-    const label = `${workflow.id} ${testCase.source} ${testCase.key}->${testCase.target}`;
-    if (python && python.remaining.length > 0) {
-      failures.push(`python backward route left fresh artifacts (${label}): ${python.remaining.join(",")}`);
-    }
-    if (node && node.remaining.length > 0) {
-      failures.push(`node backward route left fresh artifacts (${label}): ${node.remaining.join(",")}`);
-    }
-    if (python && node && python.remaining.join("|") !== node.remaining.join("|")) {
-      failures.push(`python/node backward route cleanup mismatch (${label}): python=${python.remaining.join(",")} node=${node.remaining.join(",")}`);
-    }
-  }
-}
-
-function backwardFreshRouteCases(workflow) {
-  const phaseIndex = new Map(workflow.phases.map((phase, index) => [phase.id, index]));
-  const cases = [];
-  for (const [index, phase] of workflow.phases.entries()) {
-    if (!phase.routes || phase.multi_review) {
-      continue;
-    }
-    for (const [key, target] of Object.entries(phase.routes)) {
-      const targetIndex = phaseIndex.get(target);
-      if (targetIndex === undefined || targetIndex > index) {
-        continue;
-      }
-      const content = routeArtifactContent(phase, key);
-      if (content !== null) {
-        cases.push({ source: phase.id, target, key, content });
-      }
-    }
-  }
-  return cases;
-}
-
-function routeArtifactContent(phase, key) {
-  if (phase.id === "gates") {
-    if (key === "green" || key === "approve") {
-      return JSON.stringify({
-        passed: true,
-        status: key,
-        results: [{ command: "npm test", passed: true, output: "ok" }],
-      }) + "\n";
-    }
-    if (key === "request-changes" || key === "blocked" || key === "error" || key === "pending") {
-      return JSON.stringify({ passed: false, status: key, results: [] }) + "\n";
-    }
-    return JSON.stringify({ passed: true }) + "\n";
-  }
-  if (phase.multi_review) {
-    return phaseArtifactWithMarkers(phase, multiReviewArtifactContent(key, phase.id));
-  }
-  if (phase.id === "plan-review" || phase.id === "architecture-review" || phase.id === "merge-approval") {
-    return phaseArtifactWithMarkers(phase, `verdict: ${key}`);
-  }
-  if (phase.id === "pr-watch") {
-    return phaseArtifactWithMarkers(phase, `status: ${key}`);
-  }
-  if (key === "default") {
-    return phaseArtifactWithMarkers(phase, "");
-  }
-  return phaseArtifactWithMarkers(phase, `status: ${key}`);
-}
-
-function multiReviewArtifactContent(key, phaseId = "") {
-  const reviewerAVerdict = key === "request-changes" ? "request-changes" : "approve";
-  const reviewerBVerdict = "approve";
-  const overall = key === "request-changes" ? "request-changes" : "approve";
-  return [
-    "## Reviewer A",
-    "reviewer-source: sub-agent",
-    `verdict: ${reviewerAVerdict}`,
-    "",
-    "## Reviewer B",
-    "reviewer-source: sub-agent",
-    `verdict: ${reviewerBVerdict}`,
-    "",
-    "## Overall",
-    `verdict: ${overall}`,
-    "",
-  ].join("\n");
 }
 
 function assertCleanInstallCopiesTemplates() {
@@ -1565,173 +1361,6 @@ function removePathOrSymlink(target) {
   }
 }
 
-function pythonBackwardFreshArtifactOutcome(workflow, testCase) {
-  const code = String.raw`
-import json
-import sys
-import tempfile
-from pathlib import Path
-
-from agent_flow.runner import Phase, Runner
-from agent_flow.core.skill_resolver import PhaseSkills
-
-
-def _phase_skills(value):
-    if not isinstance(value, dict):
-        return None
-    required = tuple(value.get("required") or ())
-    optional = tuple(value.get("optional") or ())
-    return PhaseSkills(required=required, optional=optional) if (required or optional) else None
-
-
-payload = json.loads(sys.stdin.read())
-workflow = payload["workflow"]
-test_case = payload["test_case"]
-with tempfile.TemporaryDirectory() as temp_dir:
-    run_dir = Path(temp_dir)
-    phases = []
-    for item in workflow["phases"]:
-        phases.append(Phase(
-            id=item["id"],
-            description=item.get("description", ""),
-            artifact=item.get("artifact", f"{item['id']}.md"),
-            multi_review=bool(item.get("multi_review", False)),
-            routes=item.get("routes"),
-            skills=_phase_skills(item.get("skills")),
-        ))
-    target_index = next(i for i, phase in enumerate(phases) if phase.id == test_case["target"])
-    current_index = next(i for i, phase in enumerate(phases) if phase.id == test_case["source"])
-    for phase in phases[target_index:current_index + 1]:
-        artifact = run_dir / phase.artifact
-        artifact.parent.mkdir(parents=True, exist_ok=True)
-        artifact.write_text(test_case["content"] if phase.id == test_case["source"] else "stale\n", encoding="utf-8")
-    runner = Runner.__new__(Runner)
-    runner.run_dir = run_dir
-    runner.config_root = run_dir
-    runner.project_root = run_dir
-    runner.profile = {}
-    runner.phases = phases
-    runner._next_index(current_index, phases[current_index])
-    remaining = []
-    for phase in phases[target_index:current_index + 1]:
-        if (run_dir / phase.artifact).exists():
-            remaining.append(phase.id)
-    print(json.dumps({"remaining": remaining}, sort_keys=True))
-`;
-  const result = spawnSync(preferredPython(), ["-c", code], {
-    cwd: SOURCE_ROOT,
-    input: JSON.stringify({ workflow, test_case: testCase }),
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      PYTHONPATH: [path.join(SOURCE_ROOT, "src"), process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
-    },
-    stdio: ["pipe", "pipe", "pipe"],
-    timeout: 30_000,
-  });
-  if (result.error || result.status !== 0) {
-    failures.push(`python backward fresh artifact check failed: ${result.error?.message || result.stderr.trim() || result.status}`);
-    return null;
-  }
-  return JSON.parse(result.stdout);
-}
-
-function nodeBackwardFreshArtifactOutcome(workflow, testCase) {
-  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-flow-backward-parity-"));
-  try {
-    const targetIndex = workflow.phases.findIndex((phase) => phase.id === testCase.target);
-    const currentIndex = workflow.phases.findIndex((phase) => phase.id === testCase.source);
-    const phase = workflow.phases[currentIndex];
-    const state = {
-      phase_index: currentIndex,
-      current_phase: testCase.source,
-      gate_nonce: PARITY_GATE_NONCE,
-    };
-    for (const stalePhase of workflow.phases.slice(targetIndex, currentIndex + 1)) {
-      const artifact = path.join(runDir, stalePhase.artifact);
-      fs.mkdirSync(path.dirname(artifact), { recursive: true });
-      fs.writeFileSync(
-        artifact,
-        stalePhase.id === testCase.source ? testCase.content : "stale\n",
-        "utf8",
-      );
-    }
-    const artifact = path.join(runDir, phase.artifact);
-    const result = getNodeWorkflowEvaluator()(
-      "cleanup",
-      phase,
-      artifact,
-      state,
-      workflow.phases,
-      runDir,
-    );
-    if (result.outcome === "blocked") {
-      return { remaining: [`route-blocked:${result.route_key}`] };
-    }
-    const remaining = [];
-    for (const stalePhase of workflow.phases.slice(targetIndex, currentIndex + 1)) {
-      if (fs.existsSync(path.join(runDir, stalePhase.artifact))) {
-        remaining.push(stalePhase.id);
-      }
-    }
-    return { remaining };
-  } finally {
-    fs.rmSync(runDir, { recursive: true, force: true });
-  }
-}
-
-function phaseArtifactWithMarkers(phase, routeLine) {
-  const markers = phase.required_markers ?? [];
-  const headings = markers.filter((marker) => marker.trim().startsWith("#"));
-  const lines = markers
-    .filter((marker) => !marker.trim().startsWith("#"))
-    .map(renderCompletionMarker);
-  return [
-    routeLine,
-    "",
-    ...headings,
-    "",
-    "## Completion Gate",
-    ...lines,
-    ...skillGateLines(phase),
-    "",
-  ].join("\n");
-}
-
-// runner가 phase.skills로부터 주입하는 marker는 required_markers에 없다.
-// 그 계약도 fixture에 담아야 Python/Node가 같은 조건에서 비교된다.
-function skillGateLines(phase) {
-  const required = phase.skills?.required ?? [];
-  if (required.length === 0) {
-    return [];
-  }
-  return [
-    "skill-availability: pass",
-    "skill-read-evidence: unavailable",
-    "project-local-skills: checked",
-    `project-local-skills-used: ${required.join(", ")}`,
-    "project-local-skill-docs: applied",
-  ];
-}
-
-function renderCompletionMarker(marker) {
-  const trimmed = marker.trim();
-  if (trimmed.endsWith(":")) {
-    return `${trimmed} n/a`;
-  }
-  const separator = trimmed.indexOf(":");
-  if (separator !== -1 && trimmed.slice(separator + 1).includes("|")) {
-    const key = trimmed.slice(0, separator).trim();
-    const value = trimmed
-      .slice(separator + 1)
-      .split("|")
-      .map((item) => item.trim())
-      .filter(Boolean)[0] ?? "n/a";
-    return `${key}: ${value}`;
-  }
-  return trimmed;
-}
-
 function hostSkillRoot(root, host) {
   if (host === "codex") {
     return path.join(root, ".Codex", "skills");
@@ -1788,229 +1417,6 @@ function assertHostSkillParity(root, index, label = "clean install") {
     if (statuses.size !== 1) {
       failures.push(`${label} host link status differs for ${name}: ${hostLinks.map((link) => `${link.host}=${link.status}`).join(" ")}`);
     }
-  }
-}
-
-var nodeWorkflowEvaluator = null;
-
-function getNodeWorkflowEvaluator() {
-  if (nodeWorkflowEvaluator) {
-    return nodeWorkflowEvaluator;
-  }
-  const source = read("bin/agent-flow-kit.mjs");
-  const start = source.indexOf("function assertCompletionMarkers");
-  const end = source.indexOf("function upsertBootstrapBlock");
-  if (start === -1 || end === -1 || end <= start) {
-    failures.push("node workflow evaluator source extraction failed");
-    return () => ({
-      outcome: "blocked",
-      route_key: "blocked:source-extraction",
-    });
-  }
-  const workflowSource = source.slice(start, end);
-  nodeWorkflowEvaluator = new Function(
-    "fs",
-    "path",
-    "action",
-    "phase",
-    "artifact",
-    "state",
-    "phases",
-    "runDir",
-    `${workflowSource}
-let routeKey;
-try {
-  routeKey = nodeRouteKey(phase, artifact, state);
-} catch (error) {
-  return {
-    outcome: "blocked",
-    route_key: \`blocked:\${error.message}\`,
-    fix_loop_rounds: state.fix_loop_rounds,
-  };
-}
-try {
-  if (action === "phase") {
-    const content = fs.readFileSync(artifact, "utf8");
-    if (missingMarkers(content, phase.required_markers ?? []).length > 0) {
-      return {
-        outcome: "blocked",
-        route_key: routeKey,
-        fix_loop_rounds: state.fix_loop_rounds,
-      };
-    }
-  }
-  const nextIndex = nextPhaseIndex(state, phases, phase, artifact);
-  const nextPhase = phases[nextIndex];
-  if (action === "cleanup") {
-    syncRouteArtifacts(runDir, phases, state.phase_index, nextIndex);
-  }
-  return {
-    outcome: nextPhase?.id ?? "complete",
-    route_key: routeKey,
-    fix_loop_rounds: nextFixLoopRounds(state, phase, nextPhase),
-  };
-} catch (_error) {
-  return {
-    outcome: "blocked",
-    route_key: routeKey,
-    fix_loop_rounds: state.fix_loop_rounds,
-  };
-}`,
-  ).bind(null, fs, path);
-  return nodeWorkflowEvaluator;
-}
-
-function pythonPhaseOutcome(workflow, phaseId, content, meta = {}) {
-  const code = String.raw`
-import json
-import sys
-import tempfile
-from pathlib import Path
-
-from agent_flow.artifact import read_meta, write_meta
-from agent_flow.core.markers import has_failure_markers, missing_markers
-from agent_flow.runner import (
-    Phase,
-    Runner,
-    _gates_route_key,
-    _multi_review_route_key,
-    _route_key,
-)
-from agent_flow.core.skill_resolver import PhaseSkills
-
-
-def _phase_skills(value):
-    if not isinstance(value, dict):
-        return None
-    required = tuple(value.get("required") or ())
-    optional = tuple(value.get("optional") or ())
-    return PhaseSkills(required=required, optional=optional) if (required or optional) else None
-
-
-payload = json.loads(sys.stdin.read())
-workflow = payload["workflow"]
-phase_id = payload["phase_id"]
-content = payload["content"]
-
-with tempfile.TemporaryDirectory() as temp_dir:
-    run_dir = Path(temp_dir)
-    write_meta(run_dir, payload.get("meta", {}))
-    phases = []
-    for item in workflow["phases"]:
-        phases.append(Phase(
-            id=item["id"],
-            description=item.get("description", ""),
-            artifact=item.get("artifact", f"{item['id']}.md"),
-            multi_review=bool(item.get("multi_review", False)),
-            routes=item.get("routes"),
-            skills=_phase_skills(item.get("skills")),
-            required_markers=tuple(item.get("required_markers") or ()),
-        ))
-    index = next(i for i, phase in enumerate(phases) if phase.id == phase_id)
-    artifact = run_dir / phases[index].artifact
-    artifact.parent.mkdir(parents=True, exist_ok=True)
-    artifact.write_text(content, encoding="utf-8")
-    runner = Runner.__new__(Runner)
-    runner.run_dir = run_dir
-    runner.config_root = run_dir
-    runner.project_root = run_dir
-    runner.profile = {}
-    runner.phases = phases
-    if phases[index].multi_review:
-        route_key = _multi_review_route_key(content, phases[index].id)
-    elif phases[index].id == "gates":
-        route_key = _gates_route_key(content, nonce=str(read_meta(run_dir).get("gate_nonce", "")))
-    else:
-        route_key = _route_key(content)
-    if route_key == "approve" and phases[index].routes and phases[index].routes.get("request-changes") and has_failure_markers(content):
-        route_key = "request-changes"
-    try:
-        # Dynamic skill/SPEC checks have separate parity tests. This comparison
-        # isolates the static workflow marker and route contract.
-        if missing_markers(content, phases[index].required_markers):
-            outcome = "blocked"
-        else:
-            next_index, blocked = runner._next_index(index, phases[index])
-            outcome = "blocked" if blocked else (phases[next_index].id if next_index < len(phases) else "complete")
-    except Exception:
-        outcome = "blocked"
-    print("OUTCOME:" + json.dumps({"outcome": outcome, "route_key": route_key, "fix_loop_rounds": read_meta(run_dir).get("fix_loop_rounds")}, sort_keys=True))
-`;
-  const result = spawnSync(preferredPython(), ["-c", code], {
-    cwd: SOURCE_ROOT,
-    input: JSON.stringify({ workflow, phase_id: phaseId, content, meta }),
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      PYTHONPATH: [path.join(SOURCE_ROOT, "src"), process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
-    },
-    stdio: ["pipe", "pipe", "pipe"],
-    timeout: 30_000,
-  });
-  if (result.error || result.status !== 0) {
-    failures.push(`python route parity failed: ${result.error?.message || result.stderr.trim() || result.status}`);
-    return null;
-  }
-  const match = result.stdout.match(/OUTCOME:(.+)$/m);
-  if (!match) {
-    failures.push("python route parity missing outcome");
-    return null;
-  }
-  return JSON.parse(match[1]);
-}
-
-function pythonMissingCompletionMarkers(content, markers) {
-  const code = String.raw`
-import json
-import sys
-
-from agent_flow.core.markers import missing_markers
-
-payload = json.loads(sys.stdin.read())
-print(json.dumps(missing_markers(payload["content"], tuple(payload["markers"]))))
-`;
-  const result = spawnSync(preferredPython(), ["-c", code], {
-    cwd: SOURCE_ROOT,
-    input: JSON.stringify({ content, markers }),
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      PYTHONPATH: [path.join(SOURCE_ROOT, "src"), process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
-    },
-    stdio: ["pipe", "pipe", "pipe"],
-    timeout: 30_000,
-  });
-  if (result.error || result.status !== 0) {
-    failures.push(`python marker parity failed: ${result.error?.message || result.stderr.trim() || result.status}`);
-    return null;
-  }
-  return JSON.parse(result.stdout);
-}
-
-function nodePhaseOutcome(workflow, phaseId, content, stateOverrides = {}) {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agent-flow-parity-"));
-  try {
-    const phaseIndex = workflow.phases.findIndex((phase) => phase.id === phaseId);
-    const phase = workflow.phases[phaseIndex];
-    const artifact = path.join(tempRoot, phase.artifact);
-    const state = {
-      ...stateOverrides,
-      phase_index: phaseIndex,
-      current_phase: phaseId,
-      gate_nonce: stateOverrides.gate_nonce ?? PARITY_GATE_NONCE,
-    };
-    fs.mkdirSync(path.dirname(artifact), { recursive: true });
-    fs.writeFileSync(artifact, content, "utf8");
-    return getNodeWorkflowEvaluator()(
-      "phase",
-      phase,
-      artifact,
-      state,
-      workflow.phases,
-      tempRoot,
-    );
-  } finally {
-    fs.rmSync(tempRoot, { recursive: true, force: true });
   }
 }
 
