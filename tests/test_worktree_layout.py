@@ -17,8 +17,12 @@ SRC = str(Path(__file__).resolve().parents[1] / "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
+import pytest
+
 from agent_flow.core.worktrees import (
     _is_managed_child,
+    adopt_worktree,
+    attach_worktree,
     create_worktree,
     get_worktree_status,
     known_worktree_names,
@@ -73,16 +77,41 @@ def test_creation_records_its_own_adoption(tmp_path: Path):
     assert verify_linked_worktree(root=root, path=status.path) == status.path.resolve()
 
 
-def test_both_creation_layouts_count_as_managed(tmp_path: Path):
-    """예전 자리의 checkout도 agent-flow가 만든 것이다. 계속 관리형으로 본다."""
+def test_sibling_layout_alone_does_not_prove_management(tmp_path: Path):
+    """형제 경로는 누구나 만들 수 있다. 모양이 아니라 채택 기록이 근거다.
+
+    모양으로 인정하면 raw `git worktree add`가 미채택 차단을 우회하고, 그 checkout은
+    나중에 host write boundary가 소유를 증명하지 못해 run이 막힌다.
+    """
     root = _leader(tmp_path)
     created = create_worktree(root=root, plan=plan_worktree(root=root, name="slice"))
+    raw = managed_worktrees_root(root) / "feat-raw"
+    _git("worktree", "add", "-q", "-b", "feat/raw", str(raw), "main", cwd=root)
     legacy = legacy_managed_root(root) / "feat-old"
     legacy.parent.mkdir(parents=True, exist_ok=True)
     _git("worktree", "add", "-q", "-b", "feat/old", str(legacy), "main", cwd=root)
 
-    assert _is_managed_child(root=root, path=created.path)
+    # marker 자리는 모양만으로 관리형이다 — 예전 생성 규약이 쓰던 자리다.
     assert _is_managed_child(root=root, path=legacy)
+    # 형제 자리는 생성이 남긴 기록으로만 관리형이 된다.
+    assert not _is_managed_child(root=root, path=created.path)
+    assert not _is_managed_child(root=root, path=raw)
+    assert adopted_worktree_parent(root=root, path=created.path) is not None
+    assert adopted_worktree_parent(root=root, path=raw) is None
+
+
+def test_raw_sibling_checkout_must_be_adopted_before_attach(tmp_path: Path):
+    root = _leader(tmp_path)
+    raw = managed_worktrees_root(root) / "feat-raw"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    _git("worktree", "add", "-q", "-b", "feat/raw", str(raw), "main", cwd=root)
+
+    with pytest.raises(ValueError, match="is not adopted"):
+        attach_worktree(root=root, selector="feat-raw")
+
+    adopt_worktree(root=root, path=raw)
+    attached = attach_worktree(root=root, selector="feat-raw")
+    assert attached is not None and same_worktree_path(attached.path, raw)
 
 
 def test_names_are_enumerated_from_both_layouts(tmp_path: Path):

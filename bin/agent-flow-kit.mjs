@@ -2302,7 +2302,7 @@ ${AGENT_FLOW_COMMAND} run "<task>"
 \`\`\`
 
 install은 프로젝트당 1회만 수행합니다. 새 세션이 시작됐다는 이유로 install을 다시 실행하지 않습니다.
-Follow the CLI output exactly. Git projects start inside \`.agent-flow/worktrees/feat-<slug>/\` without switching the leader branch; continue with the printed \`next_command\`.
+Follow the CLI output exactly. Git projects start inside the sibling folder \`<repo>.worktrees/feat-<slug>/\` without switching the leader branch; continue with the printed \`next_command\`.
 
 run이 SPEC 확인 대기로 막히면 지원되는 Codex·Claude·OMP host에서는 사용자에게 현재 대화의 새 turn으로 정확히 \`승인\`이라고 답해 달라고 안내합니다. managed user-prompt hook이 현재 pending SPEC을 확인합니다. hook을 사용할 수 없을 때만 사용자가 대상 worktree의 대화형 터미널에서 경로 없는 fallback \`${AGENT_FLOW_COMMAND} spec confirm\`을 직접 실행합니다.
 \`manual\` verify 항목은 사용자가 \`${AGENT_FLOW_COMMAND} spec approve <spec-id> --run-dir <run-dir>\`를 실행해야 승인 record가 남습니다.
@@ -2361,7 +2361,7 @@ ${AGENT_FLOW_COMMAND} run "<task>"
 \`\`\`
 
 Do not reinstall agent-flow for each task. Install is project setup, not the normal task entry.
-In a git repo, \`${AGENT_FLOW_COMMAND} run "<task>"\` starts the run inside \`.agent-flow/worktrees/feat-<slug>/\` on branch \`feat/<slug>\`.
+In a git repo, \`${AGENT_FLOW_COMMAND} run "<task>"\` starts the run inside the sibling folder \`<repo>.worktrees/feat-<slug>/\` on branch \`feat/<slug>\`.
 
 When the user types \`/agent-flow\` with no task:
 

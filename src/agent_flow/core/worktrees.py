@@ -460,17 +460,29 @@ def _adopted(*, root: Path, path: Path) -> bool:
 
 
 def _is_managed_child(*, root: Path, path: Path) -> bool:
-    """agent-flow의 생성 규약이 정한 자리에 있는가.
+    """marker 관리 루트의 직계 자식인가 — 모양 자체가 관리형임을 증명하는 자리다.
 
-    새 자리(leader 형제)와 예전 자리(`<leader>/<marker>/worktrees`)를 모두 인정한다.
-    이미 만들어진 checkout은 예전 자리에 있고, 그것도 agent-flow가 만든 것이다.
+    새 기본 자리(leader 형제)는 여기 넣지 않는다. 그 경로는 누구나 `git worktree add`로
+    만들 수 있어 모양이 근거가 되지 못한다. 그쪽 근거는 생성이 남긴 채택 기록이다 —
+    넣으면 raw checkout이 미채택 차단을 우회하고, 나중에 host write boundary가
+    소유를 증명하지 못해 run이 막힌다.
     """
     parent_key = worktree_path_key(path.parent)
-    candidates = [managed_worktrees_root(root)] + [
-        root / marker / "worktrees"
+    return any(
+        parent_key == worktree_path_key(root / marker / "worktrees")
         for marker in (".agent-flow", ".codex", ".Codex", ".omp")
-    ]
-    return any(parent_key == worktree_path_key(candidate) for candidate in candidates)
+    )
+
+
+def _is_creation_layout_child(*, root: Path, path: Path) -> bool:
+    """생성 규약이 쓰는 자리(현재/예전)의 직계 자식인가.
+
+    신뢰 판정이 아니라 자리 판정이다. 빈 디렉터리 정리처럼 소유권이 이미 확정된
+    뒤의 뒷정리에만 쓴다.
+    """
+    if worktree_path_key(path.parent) == worktree_path_key(managed_worktrees_root(root)):
+        return True
+    return _is_managed_child(root=root, path=path)
 
 
 def _assert_requestable_branch(branch: str) -> None:
@@ -584,7 +596,7 @@ def _remove_worktree_locked(
         branch, expected_oid = branch_delete
         _delete_branch_ref_cas(root=root, branch=branch, expected_oid=expected_oid)
     remove_worktree_metadata(root=root, name=status.name, path=status.path)
-    if not live and status.path.is_dir() and _is_managed_child(root=root, path=status.path):
+    if not live and status.path.is_dir() and _is_creation_layout_child(root=root, path=status.path):
         try:
             status.path.rmdir()
         except OSError:

@@ -29,6 +29,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from agent_flow.core.worktrees import (
+    legacy_managed_root as _legacy_managed,
     managed_worktrees_root as _managed,
     plan_worktree,
     worktree_runtime_root,
@@ -873,19 +874,19 @@ def test_worktree_attach_resolves_branch_selector_to_registered_checkout(tmp_pat
     _init_git_project(project)
     # 디렉터리 이름이 생성 규칙과 다르다. 이름 정규화로 경로를 유도하면 이미
     # 체크아웃된 브랜치를 두 번째 자리에 add하려다 git이 거부한다.
-    _add_worktree(project, "-b", "feat/api", str(_managed(project) / "api-work"), "main")
+    _add_worktree(project, "-b", "feat/api", str(_legacy_managed(project) / "api-work"), "main")
 
     result = _run_cli(["run", "task", "--worktree", "feat/api"], project)
 
     assert result.returncode == 0, result.stderr
     assert "worktree: api-work" in result.stdout
-    assert not (_managed(project) / "feat-api").exists()
+    assert not (_legacy_managed(project) / "feat-api").exists()
 def test_exact_branch_selector_wins_over_a_derived_path_alias(tmp_path: Path):
     project = tmp_path / "exact-branch-selector"
     project.mkdir()
     _init_git_project(project)
-    exact = _managed(project) / "api-work"
-    alias = _managed(project) / "feat-api"
+    exact = _legacy_managed(project) / "api-work"
+    alias = _legacy_managed(project) / "feat-api"
     _add_worktree(project, "-b", "feat/api", str(exact), "main")
     _add_worktree(project, "-b", "feat/other", str(alias), "main")
 
@@ -901,7 +902,7 @@ def test_worktree_attach_keeps_name_that_normalization_would_rewrite(tmp_path: P
     project = tmp_path / "attach-odd-name"
     project.mkdir()
     _init_git_project(project)
-    checkout = _managed(project) / "feat-issue#110"
+    checkout = _legacy_managed(project) / "feat-issue#110"
     _add_worktree(project, "-b", "feat/issue#110", str(checkout), "main")
 
     result = _run_cli(["run", "task", "--worktree", "feat-issue#110"], project)
@@ -914,7 +915,7 @@ def test_worktree_attach_keeps_name_that_normalization_would_rewrite(tmp_path: P
     assert meta["checkout_identity"] == "worktree:feat-issue#110"
     # 정규화 경로로 새 checkout과 브랜치가 생기면 조회 명령과 진입 명령이 서로 다른
     # 대상을 가리키게 된다.
-    assert not (_managed(project) / "feat-issue-110").exists()
+    assert not (_legacy_managed(project) / "feat-issue-110").exists()
     assert not _branch_exists(project, "feat/issue-110")
 
     status = _run_cli(["status", "--worktree", "feat-issue#110"], project)
@@ -970,7 +971,7 @@ def test_worktree_attach_rejects_detached_head(tmp_path: Path):
     project = tmp_path / "attach-detached"
     project.mkdir()
     _init_git_project(project)
-    _add_worktree(project, "--detach", str(_managed(project) / "feat-det"), "main")
+    _add_worktree(project, "--detach", str(_legacy_managed(project) / "feat-det"), "main")
 
     result = _run_cli(["run", "task", "--worktree", "feat-det"], project)
 
@@ -983,7 +984,7 @@ def test_worktree_attach_rejects_protected_branch(tmp_path: Path):
     project.mkdir()
     _init_git_project(project)
     subprocess.run(["git", "branch", "develop"], cwd=project, check=True, capture_output=True, text=True)
-    _add_worktree(project, str(_managed(project) / "feat-dev"), "develop")
+    _add_worktree(project, str(_legacy_managed(project) / "feat-dev"), "develop")
 
     result = _run_cli(["run", "task", "--worktree", "feat-dev"], project)
 
@@ -1171,7 +1172,7 @@ def test_start_adopts_registered_worktree_without_agent_flow_metadata(
     project = tmp_path / "start-attach-unowned"
     project.mkdir()
     _init_git_project(project)
-    checkout = _managed(project) / "api-work"
+    checkout = _legacy_managed(project) / "api-work"
     _add_worktree(project, "-b", "feat/api", str(checkout), "main")
 
     result = _run_cli(
