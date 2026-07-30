@@ -6,7 +6,7 @@ Project-agnostic AI workflow kit. Start with `/agent-flow` in Claude Code or Cod
 
 ## Philosophy
 
-1. **One trigger to remember.** `/agent-flow <task>` in Claude / Codex, backed by `agent-flow run "<task>"`. Git projects start inside `.agent-flow/worktrees/feat-<slug>/` on branch `feat/<slug>`; installer setup is not repeated per task.
+1. **One trigger to remember.** `/agent-flow <task>` in Claude / Codex, backed by `agent-flow run "<task>"`. Git projects start inside the sibling folder `<repo>.worktrees/feat-<slug>/` on branch `feat/<slug>`, leaving the leader checkout untouched; installer setup is not repeated per task.
 2. **Artifacts as state machine.** Each run writes state under `.agent-flow/runs/`; git-backed worktree runs keep runtime state under the repository git dir at `.git/agent-flow/worktrees/feat-<slug>/`. Context loss never loses progress.
 3. **Chain is enforcement.** The next phase cannot start until the previous artifact exists. The slash trigger is only the entry point; the artifact chain blocks skipping.
 4. **Stack-agnostic core, profile-specific knobs.** Workflow YAML stays generic. Profiles supply branching strategy, gate commands, review angles, vocabulary.

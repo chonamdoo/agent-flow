@@ -10,6 +10,8 @@ layout을 옮기면 신뢰의 근거도 함께 옮겨야 한다. marker 경로�
 from __future__ import annotations
 
 import json
+import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -289,3 +291,26 @@ def test_recorded_checkout_path_keeps_the_legacy_shape(tmp_path: Path):
     legacy.mkdir(parents=True)
 
     assert _safe_relative_path(str(legacy), root=root) == ".agent-flow/worktrees/feat-old"
+
+
+def test_creation_root_is_owner_only(tmp_path: Path):
+    """기본 umask면 0755로 생긴다. 같은 호스트의 다른 사용자가 소스를 읽는다."""
+    root = _leader(tmp_path)
+
+    create_worktree(root=root, plan=plan_worktree(root=root, name="slice"))
+
+    mode = managed_worktrees_root(root).stat().st_mode
+    assert not mode & (stat.S_IRWXG | stat.S_IRWXO)
+
+
+def test_existing_creation_root_is_hardened(tmp_path: Path):
+    """예전 버전이 umask 그대로 만든 자리도 다음 생성에서 좁혀진다."""
+    root = _leader(tmp_path)
+    created = create_worktree(root=root, plan=plan_worktree(root=root, name="slice"))
+    creation_root = managed_worktrees_root(root)
+    os.chmod(creation_root, 0o755)
+
+    _ensure_creation_root(creation_root)
+
+    assert not creation_root.stat().st_mode & (stat.S_IRWXG | stat.S_IRWXO)
+    assert created.path.exists()

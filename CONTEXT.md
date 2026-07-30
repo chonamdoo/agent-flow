@@ -29,7 +29,7 @@
 
 ## Current Lifecycle
 
-1. `agent-flow run "<task>"`가 Run을 만들고 git repo에서는 `.agent-flow/worktrees/feat-<slug>/` worktree에서 시작한다.
+1. `agent-flow run "<task>"`가 Run을 만들고 git repo에서는 leader의 형제 폴더 `<repo>.worktrees/feat-<slug>/` worktree에서 시작한다.
 2. `agent-flow status` 또는 직전 phase 출력의 `next_command`가 다음 실행 명령을 결정한다.
 3. agent는 phase context map에 맞는 문서만 읽는다.
 4. artifact 작성 후에도 runner가 출력한 `next_command`로만 전환한다.
@@ -45,7 +45,7 @@ Team Orchestration은 optional future module이다. current Personal Workflow와
 - **Team State**: future team coordination state.
 - **Mailbox**: future Worker/lead 비동기 메시지 큐.
 - **Heartbeat**: future Worker liveness record.
-- **Worktree**: 독립 변경을 만들기 위한 git worktree. 프로젝트 내부 `.agent-flow/worktrees/feat-<slug>/`를 사용하고 브랜치는 `feat/<slug>`를 기본값으로 둔다.
+- **Worktree**: 독립 변경을 만들기 위한 git worktree. leader의 형제 폴더 `<repo>.worktrees/feat-<slug>/`를 기본 자리로 쓰고(프로젝트 폴더 안에 두면 leader IDE가 leader 캐시를 건드려 tripwire가 막는다) 브랜치는 `feat/<slug>`를 기본값으로 둔다. 예전 자리 `.agent-flow/worktrees/<name>/`의 checkout은 계속 인식된다.
 
 ## 금지어 / 혼동어
 

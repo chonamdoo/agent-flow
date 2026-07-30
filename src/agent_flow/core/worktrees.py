@@ -2688,13 +2688,17 @@ def _safe_creation_root(path: Path) -> bool:
 
 
 def _ensure_creation_root(path: Path) -> None:
-    """checkout의 부모를 만든다. symlink를 절대 따라가지 않는다.
+    """checkout의 부모를 만든다. symlink를 절대 따라가지 않고 비공개로 만든다.
 
     `mkdir(exist_ok=True)`는 심어 둔 symlink를 그대로 따라간다. 우리가 만들면 소유가
     증명되고, 이미 있으면 lstat으로 실체를 확인한 뒤에만 쓴다.
+
+    권한은 0700이다. 기본 umask면 0755로 만들어져 같은 호스트의 다른 사용자가 형제
+    checkout의 소스와 setup 파일을 읽는다 — leader가 0700인 비공개 저장소여도
+    checkout을 만드는 순간 새는 자리가 여기다.
     """
     try:
-        path.mkdir(parents=True)
+        path.mkdir(parents=True, mode=0o700)
         return
     except FileExistsError:
         pass
@@ -2702,6 +2706,30 @@ def _ensure_creation_root(path: Path) -> None:
         raise WorktreeIsolationError(
             f"refusing to create a worktree under an unsafe parent: {path}; "
             "it is a symlink, not a directory, or not owned by this user"
+        )
+    _harden_creation_root(path)
+
+
+def _harden_creation_root(path: Path) -> None:
+    """이미 있는 생성 루트의 group/other 권한을 걷어낸다.
+
+    예전 버전이 umask 그대로 만든 자리가 남아 있을 수 있다. 소유는 이미 증명된
+    상태이므로(위 검사) 여기서 권한만 좁힌다.
+    """
+    try:
+        info = path.stat()
+    except OSError:
+        return
+    exposed = info.st_mode & (stat.S_IRWXG | stat.S_IRWXO)
+    if not exposed:
+        return
+    try:
+        os.chmod(path, info.st_mode & ~exposed)
+    except OSError:
+        # 권한을 못 좁히면 그 사실을 감추지 않는다. 이 자리는 leader가 만든 것이고
+        # 못 좁히는 상태 자체가 통제 밖이라는 뜻이다.
+        raise WorktreeIsolationError(
+            f"cannot restrict the worktree root to owner-only access: {path}"
         )
 
 
