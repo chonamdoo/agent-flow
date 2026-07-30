@@ -43,6 +43,7 @@ import {
   nextFreeBackupPath,
   ompExtensionIsKitOwned,
   planReviewerSkillMarkdown,
+  preserveKitSkillHashes,
   productBriefSkillMarkdown,
   projectLauncherDigest,
   projectLauncherPythonRecord,
@@ -73,6 +74,7 @@ import {
   tomlBasicString,
   uniqueStrings,
   unquoteShellWord,
+  upgradeBundledSkills,
   upsertGitignore,
   upsertSkillIndexBlock,
   validateSkillDependencies,
@@ -219,6 +221,14 @@ function installProject(requestedRoot) {
     architectureReviewerSkillMarkdown(),
   );
   writeManagedFile(path.join(agentFlowDir, "skills", "push-watch", "SKILL.md"), pushWatchSkillMarkdown());
+  upgradeBundledSkills(
+    root,
+    path.join(KIT_ROOT, "skills"),
+    path.join(agentFlowDir, "skills"),
+    previousSkillIndex,
+    installSelection.copyRootNames,
+    GENERATED_PROJECT_SKILL_NAMES,
+  );
   copyBundledDirIfMissingOrSame(
     path.join(KIT_ROOT, "skills"),
     path.join(agentFlowDir, "skills"),
@@ -1642,7 +1652,7 @@ function installProjectSkills(root, agentFlowDir, previousIndex, force = false, 
     }
   }
   links.push(...removeStaleProjectSkillLinks(root, selected.skills, previousIndex, force));
-  const index = { ...selected, links };
+  const index = preserveKitSkillHashes({ ...selected, links }, previousIndex, path.join(KIT_ROOT, "skills"));
   fs.writeFileSync(
     path.join(agentFlowDir, "skills", "index.json"),
     `${JSON.stringify(index, null, 2)}\n`,

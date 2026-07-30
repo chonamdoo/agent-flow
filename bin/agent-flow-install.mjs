@@ -46,6 +46,7 @@ import {
   nextFreeBackupPath,
   ompExtensionIsKitOwned,
   planReviewerSkillMarkdown,
+  preserveKitSkillHashes,
   productBriefSkillMarkdown,
   projectLauncherDigest,
   projectLauncherPythonRecord,
@@ -70,12 +71,14 @@ import {
   shellQuote,
   SKILL_INDEX_END,
   SKILL_INDEX_START,
+  SKILL_UPGRADE_NOTICE_PREFIX,
   skillIndexBlock,
   skillRequires,
   SPEC_PREPARE_TOOL_MATCHER,
   tomlBasicString,
   uniqueStrings,
   unquoteShellWord,
+  upgradeBundledSkills,
   upsertGitignore,
   upsertSkillIndexBlock,
   validateSkillDependencies,
@@ -717,7 +720,7 @@ function installProjectSkills(forceManaged = false, installSelection = null) {
     }
   }
   links.push(...removeStaleProjectSkillLinks(selected.skills, previousIndex, forceManaged));
-  const index = { ...selected, links };
+  const index = preserveKitSkillHashes({ ...selected, links }, previousIndex, path.join(KIT_ROOT, "skills"));
   fs.writeFileSync(path.join(AF_DIR, "skills", "index.json"), `${JSON.stringify(index, null, 2)}\n`);
   return index;
 }
@@ -1061,10 +1064,11 @@ function runKitInstall() {
   const forwarded = withoutInstallRootOption(INSTALL_ARGS).filter((arg) => arg !== "install");
   const args = [kitCli, "install", ...forwarded];
   const result = spawnSync(process.execPath, args, { cwd: PROJECT, encoding: "utf8" });
-  // kit.mjs의 stdout은 여기서 갇힌다. prune 알림만은 사용자가 잃은 파일과
-  // 복구 사본을 아는 유일한 통로라 그대로 다시 낸다.
+  // kit.mjs의 stdout은 여기서 갇힌다. prune과 skill 갱신 알림만은 사용자가 무엇이
+  // 바뀌었는지 아는 유일한 통로라 그대로 다시 낸다 — 실제 갱신은 자식이 하므로
+  // 여기서 걸러 내면 install.mjs 경로가 통째로 무음이 된다.
   for (const line of (result.stdout || "").split("\n")) {
-    if (line.startsWith(PRUNE_NOTICE_PREFIX)) {
+    if (line.startsWith(PRUNE_NOTICE_PREFIX) || line.startsWith(SKILL_UPGRADE_NOTICE_PREFIX)) {
       console.log(line);
     }
   }
@@ -1109,6 +1113,9 @@ function install() {
     process.exitCode = 1;
     return;
   }
+  // 자식 kit install이 index를 다시 쓴다. 그 뒤에 읽으면 "사용자가 손댔는가"를
+  // 가르는 hash가 방금 관측한 현재 내용으로 갱신돼 있어 오라클이 사라진다.
+  const previousSkillIndex = readJsonIfExists(path.join(AF_DIR, "skills", "index.json"));
   runKitInstall();
   ensureDir(path.join(AF_DIR, "runs"));
   ensureDir(path.join(AF_DIR, "memory"));
@@ -1117,7 +1124,6 @@ function install() {
   ensureDir(path.join(AF_DIR, "local-skills"));
 
   const profile = detectProfile();
-  const previousSkillIndex = readJsonIfExists(path.join(AF_DIR, "skills", "index.json"));
   let installSelection = resolveInstallSelection({ args: INSTALL_ARGS, detectedProfile: profile, kitRoot: KIT_ROOT, projectRoot: PROJECT });
   installSelection = mergeInstallSelectionWithPrevious(installSelection, previousSkillIndex, KIT_ROOT, PROJECT);
 
@@ -1153,6 +1159,14 @@ function install() {
   // Host-AI-specific skill paths (`.claude/skills/`, `.Codex/skills/`, `.omp/skills/`) are
   // populated by symlinking from .agent-flow/skills/ where possible, so
   // updates to the kit propagate without re-installing.
+  upgradeBundledSkills(
+    PROJECT,
+    path.join(KIT_ROOT, "skills"),
+    path.join(AF_DIR, "skills"),
+    previousSkillIndex,
+    installSelection.copyRootNames,
+    GENERATED_PROJECT_SKILL_NAMES,
+  );
   const skillsCopied = copyDir(
     path.join(KIT_ROOT, "skills"),
     path.join(AF_DIR, "skills"),

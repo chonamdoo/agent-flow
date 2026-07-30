@@ -384,7 +384,8 @@ _SHARED_ONLY = (
     "mergeHookConfig", "claudeHooksSettings", "codexHooksSettings",
     "skillIndexBlock", "upsertSkillIndexBlock",
     "extractCliOption", "cliOptionValue", "requestedInstallRootOption",
-    "withoutInstallRootOption", "assertInstallRootIsFinal",
+    "withoutInstallRootOption", "assertInstallRootIsFinal", "upgradeBundledSkills",
+    "preserveKitSkillHashes",
 )
 
 
