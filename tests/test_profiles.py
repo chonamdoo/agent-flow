@@ -103,3 +103,32 @@ def test_phase_filter_applies_across_a_profile_union():
     assert "react-native:ios-build" not in union
     assert "react-native:test" not in union
     assert "android:test" in union
+
+
+BOOTSTRAP_TEMPLATES = (
+    KIT_ROOT / "bootstrap" / "AGENTS.md.template",
+    KIT_ROOT / "bootstrap" / "CLAUDE.md.template",
+)
+
+
+def test_bootstrap_names_the_profile_as_the_branching_source_of_truth():
+    """반증: profile은 base main인데 local skill은 release/*를 지시했다. 정본이 둘이었다."""
+    texts = [path.read_text(encoding="utf-8") for path in BOOTSTRAP_TEMPLATES]
+    # 두 템플릿은 parity 검사가 동일성을 요구한다. 한쪽만 고치면 install 결과가 갈린다.
+    assert texts[0] == texts[1]
+    for text in texts:
+        assert "branching과 PR 대상의 정본은 active profile의 `branching`/`pr`이다" in text
+        assert "`pr.target_branch`로 표현" in text
+        assert "`git branch -D`로 대체하지 않는다" in text
+
+
+@pytest.mark.parametrize("profile_id", _profile_ids())
+def test_every_profile_declares_the_branching_contract_it_owns(profile_id):
+    """정본을 profile이라 선언했으므로 그 값이 실제로 있어야 한다."""
+    payload = yaml.safe_load((PROFILES_DIR / f"{profile_id}.yaml").read_text(encoding="utf-8"))
+    branching = payload.get("branching") or {}
+    pr = payload.get("pr") or {}
+    assert branching.get("strategy") in {"trunk", "gitflow", "release-first"}
+    assert branching.get("base")
+    assert branching.get("integration")
+    assert pr.get("target_branch")
