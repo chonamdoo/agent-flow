@@ -3072,6 +3072,71 @@ design-values-confirmed: n/a
 
             self.assertFalse((root / ".agent-flow" / "worktrees" / "feat-other").exists())
 
+    def test_node_lifecycle_relay_recognizes_an_adopted_external_checkout(self) -> None:
+        """반증: JS relay가 cwd를 leader/관리 경로로만 분류하면, 채택된 외부 checkout에서
+        `--worktree` 없이 부른 lifecycle 명령이 전부 `identity is unknown`으로 거절된다.
+        `agent-flow`는 이 JS 진입점이므로 Python 쪽만 고쳐도 사용자에게는 안 고쳐진다."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            _init_git_repo(project_root)
+            node = _node_executable()
+            kit = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            env = _node_test_env()
+            # relay는 설치된 Python runtime을 부른다. stub kit.json만으로는 그 앞에서 멈춘다.
+            install = subprocess.run(
+                (node, kit, "install"),
+                cwd=project_root,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(install.returncode, 0, install.stderr)
+            external = Path(temp_dir) / "outside" / "ext"
+            external.parent.mkdir(parents=True)
+            subprocess.run(
+                ("git", "worktree", "add", "-q", "-b", "feat/ext", str(external), "HEAD"),
+                cwd=project_root,
+                check=True,
+            )
+
+            before = subprocess.run(
+                (node, kit, "run", "status"),
+                cwd=external,
+                env=_node_test_env(),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertIn("identity is unknown", before.stdout + before.stderr)
+
+            self.assertEqual(
+                main(
+                    [
+                        "worktree",
+                        "adopt",
+                        "--path",
+                        str(external),
+                        "--allow-dirty",
+                        "--root",
+                        str(project_root),
+                    ]
+                ),
+                0,
+            )
+
+            after = subprocess.run(
+                (node, kit, "run", "status"),
+                cwd=external,
+                env=_node_test_env(),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotIn("identity is unknown", after.stdout + after.stderr)
+            self.assertNotIn("identity mismatch", after.stdout + after.stderr)
+
     def test_node_installer_from_agent_flow_worktree_without_root_install_is_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"

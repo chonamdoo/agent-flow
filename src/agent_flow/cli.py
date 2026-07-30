@@ -2767,6 +2767,17 @@ def _resolve_cli_root_context(
     if cwd_managed is not None and (_same_path(root, Path.cwd()) or _same_path(root, cwd_managed[0])):
         leader_root, inferred_worktree = cwd_managed
         return leader_root, worktree or inferred_worktree, None
+    cwd_leader = leader_root_for(Path.cwd())
+    if cwd_leader is not None and _same_path(root, cwd_leader):
+        # `--root <leader>`로 불렸어도 서 있는 자리가 채택된 checkout이면 그 자리를 쓴다.
+        # JS relay가 언제나 `--root`를 붙여 주므로(`relayPythonRunLifecycle`) 이 분기가
+        # 없으면 채택된 worktree에서 부른 lifecycle 명령이 전부 leader로 접힌다.
+        cwd_checkout = _registered_checkout(leader_root=cwd_leader, path=Path.cwd())
+        if (
+            cwd_checkout is not None
+            and adopted_worktree_parent(root=cwd_leader, path=cwd_checkout) is not None
+        ):
+            return cwd_leader, worktree or cwd_checkout.name, None
     leader_root = leader_root_for(root)
     if leader_root is not None:
         # 경로 모양이 관리 규약과 달라도 이 저장소의 linked worktree다. 인식 근거를

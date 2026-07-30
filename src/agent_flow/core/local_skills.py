@@ -13,6 +13,8 @@ from agent_flow.core.profiles import active_profile_ids, load_profile_payload
 from agent_flow.core.profile_routing import routed_profile_skills
 from agent_flow.core.worktree_isolation import (
     WorktreeIsolationError,
+    adopted_checkout_path,
+    adopted_worktree_parent,
     git_repo_state,
     leader_root_for,
     list_registered_worktrees,
@@ -369,6 +371,26 @@ def read_skill_evidence(project_root: Path, *, since: float | None = None) -> Sk
     )
 
 
+def _trusted_checkout(*, base: Path, path: Path) -> bool:
+    """이 checkout에서 읽은 skill을 증거로 인정할 수 있는가.
+
+    등록만으로는 안 된다. 활성 워커도 `git worktree add`를 할 수 있고, 그렇게 만든
+    checkout에 변조한 `skills/<name>/SKILL.md`를 두면 증거 게이트가 leader 정본을 읽은
+    것으로 인정한다. 채택 기록은 지문까지 대조한다 — 채택했던 자리를 지우고 다시 만든
+    checkout은 기록의 경로는 맞지만 지문이 낡아서 여기서 걸린다.
+    """
+    if adopted_worktree_parent(root=base, path=path) is not None:
+        return True
+    # 생성 규약이 정한 자리(관리 루트 아래)는 채택 기록 없이도 agent-flow가 만든 것이다.
+    adopted = adopted_checkout_path(root=base, name=path.name)
+    layout = tuple(
+        candidate
+        for candidate in trusted_checkout_paths(root=base, name=path.name)
+        if candidate != adopted
+    )
+    return real_path(path) in layout
+
+
 def _checkout_roots(project_root: Path) -> tuple[str, ...]:
     """같은 저장소의 체크아웃 root들.
 
@@ -394,14 +416,10 @@ def _checkout_roots(project_root: Path) -> tuple[str, ...]:
         # 미인정으로 차단된다. 조회가 실패하면 아래 스캔 결과만 남는다 — 실패로
         # 목록을 넓히지는 않는다.
         for registered in list_registered_worktrees(base):
-            # 등록만으로는 신뢰하지 않는다. 활성 워커도 `git worktree add`를 할 수 있고,
-            # 그렇게 만든 checkout에 변조한 `skills/<name>/SKILL.md`를 두면 증거 게이트가
-            # leader 정본을 읽은 것으로 인정한다. 생성 규약 자리이거나 채택된 것만 받는다.
-            # prunable 행은 checkout이 이미 사라진 자리라 같은 이유로 제외한다.
+            # prunable 행은 checkout이 이미 사라진 자리다.
             if registered.prunable or not (registered.path / ".git").exists():
                 continue
-            trusted = trusted_checkout_paths(root=base, name=registered.path.name)
-            if real_path(registered.path) not in trusted:
+            if not _trusted_checkout(base=base, path=registered.path):
                 continue
             add(registered.path)
     except WorktreeIsolationError:

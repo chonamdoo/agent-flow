@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import stat
 import shutil
 import subprocess
@@ -47,6 +48,14 @@ from agent_flow.core.worktree_isolation import (
 
 PROTECTED_WORKTREE_BRANCHES = {"main", "master", "develop"}
 GIT_WORKTREE_TIMEOUT_S = 300
+# `dir_fd`는 POSIX 전용이다. 없는 플랫폼에서는 이름 기반 경로로 내려가고, 그 경우 부모
+# 디렉터리 바꿔치기까지는 막지 못한다. `os.replace`는 macOS에서 `supports_dir_fd`에 없고
+# `os.rename`만 있다 — POSIX의 `renameat`은 대상이 있어도 원자적으로 덮으므로 같은 것이다.
+_DIR_FD_SUPPORTED = (
+    os.open in os.supports_dir_fd
+    and os.rename in os.supports_dir_fd
+    and os.unlink in os.supports_dir_fd
+)
 CLEANUP_JOURNAL_VERSION = 3
 CLEANUP_STEPS = (
     "archive",
@@ -2921,10 +2930,30 @@ def _provision_one_host_hook_registration(
             " merge the agent-flow hook entry into it by hand or delete the file"
         )
     _make_host_hook_parents(base=checkout_base, target=target)
-    # 대상 inode에 바로 쓰면 안 된다. 그 자리가 checkout 밖 파일과 hard link면 그 원본이
-    # 함께 덮인다(`is_file()`은 hard link를 통과시킨다). 임시 파일에 쓴 뒤 rename하면
-    # 디렉터리 엔트리만 바뀌어 링크된 inode는 그대로다. 임시 경로도 예측 가능하면 같은
-    # 위험이 그쪽으로 옮겨가므로 배타 생성으로 만든다(워커가 쓸 수 있는 디렉터리다).
+    _write_host_hook_registration(target=target, payload=payload)
+    return True, None
+
+
+def _write_host_hook_registration(*, target: Path, payload: bytes) -> None:
+    """등록 파일을 그 자리에 원자적으로 놓는다.
+
+    대상 inode에 바로 쓰면 안 된다. 그 자리가 checkout 밖 파일과 hard link면 그 원본이
+    함께 덮인다(`is_file()`은 hard link를 통과시킨다). 임시 파일에 쓴 뒤 rename하면
+    디렉터리 엔트리만 바뀌어 링크된 inode는 그대로다.
+
+    부모 디렉터리는 fd로 고정한다. 이름으로 열면 검사와 쓰기 사이에 워커가 `.claude`를
+    저장소 밖 디렉터리 symlink로 바꿔치기해 그쪽 등록 파일을 덮게 만들 수 있다 —
+    무작위 파일명은 그 TOCTOU를 막지 못한다.
+    """
+    if _DIR_FD_SUPPORTED:
+        parent = os.open(
+            target.parent, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            _replace_at(parent=parent, name=target.name, payload=payload)
+        finally:
+            os.close(parent)
+        return
     handle, staging_name = tempfile.mkstemp(
         dir=str(target.parent), prefix=f"{target.name}.", suffix=".tmp"
     )
@@ -2937,7 +2966,22 @@ def _provision_one_host_hook_registration(
     except BaseException:
         staging.unlink(missing_ok=True)
         raise
-    return True, None
+
+
+def _replace_at(*, parent: int, name: str, payload: bytes) -> None:
+    staging = f"{name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    handle = os.open(staging, flags, 0o644, dir_fd=parent)
+    try:
+        with os.fdopen(handle, "wb") as stream:
+            stream.write(payload)
+        os.rename(staging, name, src_dir_fd=parent, dst_dir_fd=parent)
+    except BaseException:
+        try:
+            os.unlink(staging, dir_fd=parent)
+        except OSError:
+            pass
+        raise
 
 
 def _host_hook_registration_is_kit_owned(

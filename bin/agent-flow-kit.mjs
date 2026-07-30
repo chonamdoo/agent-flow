@@ -474,6 +474,8 @@ function relayPythonRunLifecycle(subcommand, args, root) {
   const rootedArgs = hasCliOption(args, "--root")
     ? [...args]
     : [...args, "--root", root];
+  // `--worktree`를 여기서 만들어 넣지 않는다. 그러면 Python이 명시 selector로 보고
+  // 암묵 재사용 동의 게이트를 건너뛴다. cwd 유도는 Python이 같은 규칙으로 다시 한다.
   const identityArgs = [
     ...rootedArgs,
     "--checkout-identity",
@@ -934,7 +936,40 @@ function currentCheckoutIdentity(root) {
   ) {
     return "leader";
   }
+  // 채택된 외부 checkout. 여기서 "unknown"으로 접으면 명시적 `--worktree` 없이 그
+  // cwd에서 부른 lifecycle 명령이 전부 거절된다 — Python 쪽은 채택 기록으로 같은
+  // identity를 유도한다(`_resolve_cli_root_context`). 지문 대조는 Python이 다시 한다.
+  const adopted = adoptedCheckoutIdentity(root, cwd);
+  if (adopted) {
+    return adopted;
+  }
   return "unknown";
+}
+
+function adoptedCheckoutIdentity(root, cwd) {
+  const topLevel = gitOutput(cwd, ["rev-parse", "--show-toplevel"]);
+  const commonDir = gitOutput(cwd, ["rev-parse", "--git-common-dir"]);
+  if (!topLevel || !commonDir) {
+    return null;
+  }
+  const common = path.resolve(cwd, commonDir);
+  if (path.basename(common) !== ".git" || !samePath(path.dirname(common), root)) {
+    return null;
+  }
+  const checkout = canonicalPath(topLevel);
+  const name = path.basename(checkout);
+  const record = path.join(common, "agent-flow", "adopted", `${name}.json`);
+  let payload;
+  try {
+    payload = JSON.parse(fs.readFileSync(record, "utf8"));
+  } catch {
+    return null;
+  }
+  const recorded = payload && typeof payload.path === "string" ? payload.path : "";
+  if (!recorded || !samePath(recorded, checkout)) {
+    return null;
+  }
+  return `worktree:${name}`;
 }
 
 function resolveGitCommonWorktreeRoot(start) {
