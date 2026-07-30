@@ -24,11 +24,11 @@ must still reject the literal.
 
 Source: PART 1-8, PART 6-3, PART 6-6.
 
-Rule: state holders and UI observe a storage flow for the state that must survive
-a process restart and is shared across screens. No component subscribes to an API
-response, and refresh writes to storage before anything renders. Progress flags,
-one-shot effects, command responses, server clock offset, cursor pages, auth
-credentials, and media bytes stay outside storage — see
+Rule: state holders and UI observe a storage flow for every state that must
+survive a process restart, whether one screen or many observe it. No component
+subscribes to an API response, and refresh writes to storage before anything
+renders. Progress flags, one-shot effects, command responses, server clock offset,
+cursor pages, auth credentials, and media bytes stay outside storage — see
 `offline-ssot-data-guide.md`.
 
 How to check: confirm the durable screen flow originates from a DAO or DataStore

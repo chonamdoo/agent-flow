@@ -41,9 +41,9 @@ Three axes hold the design together (PART 3-1):
 
 1. **Hybrid rendering** — layout tree for free composition, semantic components
    for fixed design.
-2. **Offline-first** — local storage is the single source of truth for the state
-   the screen must survive a process restart with. `offline-ssot-data-guide.md`
-   names what stays outside it.
+2. **Offline-first** — local storage is the single source of truth for every
+   state the screen must survive a process restart with, whether one screen or
+   many observe it. `offline-ssot-data-guide.md` names what stays outside it.
 3. **UDF** — state flows storage to UI, events flow UI to the state holder.
 
 ## Module Shape
@@ -106,7 +106,8 @@ Read only the matching file.
 8. **Semantic promotion** — a combination repeated in three or more places
    becomes a semantic component.
 9. **UDF contract** — the upward event type carries only UI input, the downward
-   one-shot type leaves through a `Channel`, and renderers stay stateless.
+   one-shot type leaves through a single-consumer channel that neither drops nor
+   replays, and renderers stay stateless.
 
 ## Required Markers
 

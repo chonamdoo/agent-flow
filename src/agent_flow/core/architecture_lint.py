@@ -41,6 +41,33 @@ CORE_FAMILY_SEGMENTS = {
     "ui",
 }
 PLACEHOLDER_RESERVED_SEGMENTS = {"src", "build", "gradle", ".gradle"}
+# role id는 profile 간 공유 어휘다. 표를 모듈 상수로 두면 어떤 role이 gradle 의존
+# 규칙을 갖고 어떤 role이 의도적으로 무제약인지 한자리에서 읽히고, 테스트가 profile의
+# role 집합과 대조할 수 있다. if 사슬로 두면 role을 늘릴 때 규칙 누락이 조용히 통과한다.
+FORBIDDEN_GRADLE_MODULES: dict[str, tuple[str, ...]] = {
+    # 도메인이 Room 모듈을 보면 저장소 구현이 도메인 계약을 통과해 새어 들어온다.
+    "core-domain": (":app", ":core:data", ":core:database", ":core:network", ":core:platform", ":core:navigation:impl", ":feature"),
+    "core-data": (":app", ":feature"),
+    # 선언된 방향은 `core:data -> core:database` 하나뿐이다. 역방향을 열어 두면
+    # Room 모듈이 repository 구현을 통해 도메인 계약까지 되짚어 올라간다.
+    "core-database": (":app", ":core:data", ":feature"),
+    "feature-api": (":app", ":core:data", ":core:database", ":feature:<feature>:presentation"),
+    "feature-presentation": (":app", ":core:data", ":core:database"),
+    "navigation-api": (":app", ":core:navigation:impl", ":feature"),
+}
+# gradle 의존 방향 제약을 두지 않기로 한 role. 표에 없는 것과 구분해서 적는다.
+UNCONSTRAINED_GRADLE_ROLES: frozenset[str] = frozenset({
+    "app-shell",
+    "android-native",
+    "core-ui",
+    "core-design-system",
+    "core-resources",
+    "core-network",
+    "core-platform",
+    "core-platform-adapter",
+    "core-permission",
+    "navigation-impl",
+})
 
 
 @dataclass(frozen=True)
@@ -550,22 +577,19 @@ def gradle_accessor_segment_to_module(segment: str) -> str:
 
 
 def forbidden_gradle_dependencies(role_id: str, captures: dict[str, str]) -> list[str]:
-    if role_id == "core-domain":
-        # 도메인이 Room 모듈을 보면 저장소 구현이 도메인 계약을 통과해 새어 들어온다.
-        return [":app", ":core:data", ":core:database", ":core:network", ":core:platform", ":core:navigation:impl", ":feature"]
-    if role_id == "core-data":
-        return [":app", ":feature"]
-    if role_id == "core-database":
-        # 선언된 방향은 `core:data -> core:database` 하나뿐이다. 역방향을 열어 두면
-        # Room 모듈이 repository 구현을 통해 도메인 계약까지 되짚어 올라간다.
-        return [":app", ":core:data", ":feature"]
-    if role_id == "feature-api":
-        return [":app", ":core:data", ":core:database", ":feature:" + captures.get("feature", "") + ":presentation"]
-    if role_id == "feature-presentation":
-        return [":app", ":core:data", ":core:database"]
-    if role_id == "navigation-api":
-        return [":app", ":core:navigation:impl", ":feature"]
-    return []
+    return _resolved_modules(FORBIDDEN_GRADLE_MODULES.get(role_id, ()), captures)
+
+
+def _resolved_modules(templates: tuple[str, ...], captures: dict[str, str]) -> list[str]:
+    resolved: list[str] = []
+    for template in templates:
+        module = replace_placeholders(template, captures)
+        # 치환되지 않은 placeholder가 남으면 어떤 모듈 문자열과도 매치되지 않는다.
+        # 그대로 반환하면 규칙이 finding 없이 사라지므로 여기서 떨어뜨린다.
+        if "<" in module:
+            continue
+        resolved.append(module)
+    return resolved
 
 
 def required_gradle_dependencies(role_id: str, captures: dict[str, str]) -> list[str]:
@@ -640,7 +664,15 @@ def main(argv: list[str] | None = None) -> int:
         if inactive:
             print(f"{','.join(inactive)}: architecture lint n/a (activation_roots absent)")
         return 0
-    print(f"{','.join(profile_ids)}: architecture lint failed", file=sys.stderr)
+    # 실패 헤드라인도 검사한 profile만 이름 부른다. 비활성 profile을 함께 적으면
+    # 성공 경로에서 분리한 "통과 아님 = 비적용"이 실패 경로에서 다시 뭉개진다.
+    failed = [profile_id for profile_id, findings in findings_by_profile.items() if findings]
+    print(f"{','.join(failed)}: architecture lint failed", file=sys.stderr)
+    if inactive:
+        print(
+            f"{','.join(inactive)}: architecture lint n/a (activation_roots absent)",
+            file=sys.stderr,
+        )
     for profile_id, findings in findings_by_profile.items():
         for finding in findings:
             print(f"- [{profile_id}] {finding.path}: {finding.message}", file=sys.stderr)

@@ -21,12 +21,12 @@ diff touches none of these, mark the completion gate `n/a`.
    fallback in the token table is resilience, not permission.
 
 2. **`sdui-room-ssot-scope`** — state holders and UI observe a storage flow for
-   the state that must survive a process restart and is shared across screens,
-   never an API response. Confirm the durable screen flow originates from a DAO or
-   DataStore `Flow`, that no network data source is injected into a state holder,
-   and that refresh returns `Result<Unit>` instead of a screen. Then name which
-   observed state this change treats as durable and which as ephemeral — progress
-   flags, one-shot effects, command responses, clock offset, cursor pages,
+   every state that must survive a process restart, whether one screen or many
+   observe it, never an API response. Confirm the durable screen flow originates
+   from a DAO or DataStore `Flow`, that no network data source is injected into a
+   state holder, and that refresh returns `Result<Unit>` instead of a screen. Then
+   name which observed state this change treats as durable and which as ephemeral —
+   progress flags, one-shot effects, command responses, clock offset, cursor pages,
    credentials, and media bytes belong outside storage, and holding them there is
    not a finding.
 
@@ -70,7 +70,8 @@ diff touches none of these, mark the completion gate `n/a`.
 9. **`sdui-udf-contract`** — the UDF direction survives the server-driven
    indirection. Confirm the upward type (often named `ScreenEvent`) carries only
    UI input, that the downward one-shot type (often named `UiEffect`) leaves
-   through a buffered `Channel`, never `StateFlow`, and that renderers and node
+   through a buffered `Channel` or another deliberate single-consumer model that
+   neither drops nor replays, never `StateFlow`, and that renderers and node
    composables stay stateless: no `hiltViewModel()`, `viewModel()`,
    `collectAsStateWithLifecycle()`, or navigation API below the screen entry.
    `templates/_shared/review/udf.md` judges the rest; this item only fixes the

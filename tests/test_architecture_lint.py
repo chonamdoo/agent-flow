@@ -139,7 +139,7 @@ def _android_architecture() -> dict[str, Any]:
     return yaml.safe_load(ANDROID_PROFILE.read_text(encoding="utf-8"))["architecture"]
 
 
-def test_android_lint_activates_only_with_a_domain_root(tmp_path):
+def test_android_lint_activates_only_on_adopted_roots(tmp_path):
     """반증: 평면 `core/*` 저장소에서 필수 gate가 변경 파일 전량을 미매핑으로 잡았다."""
     from agent_flow.core.architecture_lint import architecture_lint_is_active
 
@@ -237,3 +237,66 @@ def test_schema_role_vocabulary_covers_every_shipped_role():
             shipped.add(role["id"])
     assert shipped - declared == set()
     assert declared - shipped == set()
+
+
+def test_failure_headline_names_only_the_profiles_it_checked(tmp_path, capsys):
+    """반증: 비활성 profile을 실패 헤드라인에 함께 적으면 성공 경로에서 나눈 사실이 다시 뭉개진다."""
+    from agent_flow.core.architecture_lint import main
+
+    root = tmp_path / "mixed"
+    wrong = root / "src" / "core" / "wrong"
+    wrong.mkdir(parents=True)
+    (wrong / "Thing.ts").write_text("export const value = 1\n", encoding="utf-8")
+    # python은 `src/core`를 activation_roots로 갖고 nextjs는 조건 없이 활성이다.
+    # 여기서는 android를 비활성 쪽으로 붙여 두 사실이 한 출력에 섞이는 경우를 만든다.
+    assert main(
+        [
+            "--root",
+            str(root),
+            "--profile",
+            "nextjs,android",
+            "--files",
+            "src/core/wrong/Thing.ts",
+        ]
+    ) == 1
+    err = capsys.readouterr().err
+    assert "nextjs: architecture lint failed" in err
+    assert "nextjs,android: architecture lint failed" not in err
+    assert "android: architecture lint n/a (activation_roots absent)" in err
+
+
+def _shipped_role_ids() -> set[str]:
+    profiles_dir = KIT_ROOT / "src" / "agent_flow" / "profiles"
+    shipped: set[str] = set()
+    for path in sorted(profiles_dir.glob("*.yaml")):
+        if path.stem.startswith("_"):
+            continue
+        architecture = (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("architecture") or {}
+        for role in architecture.get("roles") or []:
+            shipped.add(role["id"])
+    return shipped
+
+
+def test_every_shipped_role_declares_its_gradle_stance():
+    """반증: 표에 없는 role은 의존 규칙 0개로 조용히 통과한다. 무제약과 누락이 같아진다."""
+    from agent_flow.core.architecture_lint import (
+        FORBIDDEN_GRADLE_MODULES,
+        UNCONSTRAINED_GRADLE_ROLES,
+    )
+
+    covered = set(FORBIDDEN_GRADLE_MODULES) | set(UNCONSTRAINED_GRADLE_ROLES)
+    assert _shipped_role_ids() - covered == set()
+    assert covered - _shipped_role_ids() == set()
+    assert set(FORBIDDEN_GRADLE_MODULES) & set(UNCONSTRAINED_GRADLE_ROLES) == set()
+
+
+def test_unresolved_placeholder_module_is_dropped_instead_of_silently_dead():
+    """반증: `:feature::presentation`은 어떤 모듈과도 매치되지 않아 규칙이 사라진다."""
+    from agent_flow.core.architecture_lint import forbidden_gradle_dependencies
+
+    with_feature = forbidden_gradle_dependencies("feature-api", {"feature": "home"})
+    assert ":feature:home:presentation" in with_feature
+
+    without_feature = forbidden_gradle_dependencies("feature-api", {})
+    assert all(":presentation" not in module for module in without_feature)
+    assert ":core:data" in without_feature

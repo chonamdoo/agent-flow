@@ -5,11 +5,13 @@ Source: PART 1-8, plus PART 6 (whole).
 ## Rule
 
 Local storage is the single source of truth for the state a screen observes when
-that state must survive a process restart **and** is shared by two or more
-screens. The UI subscribes to storage for that state, never to an API response.
-Structure, queries, and lists live in Room; settings, toggles, and small scalars
-live in DataStore. The storage engine follows the shape of the data, not a rule
-about Room.
+that state must survive a process restart. Durability is the whole test: a
+durable value observed by one screen belongs in storage exactly as much as one
+observed by five. Sharing changes only the consequence — when two or more screens
+observe the same value they observe the same table, which is what makes storage a
+single source rather than a per-screen cache. Structure, queries, and lists live
+in Room; settings, toggles, and small scalars live in DataStore. The storage
+engine follows the shape of the data, not a rule about Room.
 
 ```text
 API response -> validate/parse -> storage write -> Flow emit -> state holder -> Compose

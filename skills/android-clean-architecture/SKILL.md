@@ -142,9 +142,15 @@ hilt-composition-root: pass|fail
 repository-impl-direct-api-service: pass|fail
 remote-data-source-boundary: pass|fail
 feature-api-public-contract-only: pass|fail
-viewmodel-dependency-boundary: usecase|single-context-repository|fail|n/a
+viewmodel-dependency-boundary: usecase|single-context-repository|mixed|no-domain-dependency|fail|n/a
 compose-route-screen-split: pass|fail|n/a
 ```
+
+`viewmodel-dependency-boundary` records which allowed shape the ViewModel used:
+`usecase` for use cases only, `single-context-repository` for a direct repository
+interface from one context, `mixed` when both appear, `no-domain-dependency` when
+the ViewModel injects only platform/UI abstractions, `fail` for a repository
+implementation, data source, or API service, and `n/a` when no ViewModel changed.
 
 ## Evidence Basis
 

@@ -367,8 +367,11 @@ def test_viewmodel_dependency_boundary_replaces_the_usecase_only_marker():
     """반증: 조건절 없는 marker를 남겨 두면 use case 3개짜리 저장소가 전면 fail이 된다."""
     clean = (SKILLS / "android-clean-architecture" / "SKILL.md").read_text(encoding="utf-8")
     assert "viewmodel-injects-usecases-only" not in clean
+    # 혼합 주입과 도메인 의존 없는 ViewModel도 합법 상태다. 값이 없으면 marker가
+    # 조건절 없는 marker와 같은 방식으로 정상 코드를 fail로 만든다.
     assert (
-        "viewmodel-dependency-boundary: usecase|single-context-repository|fail|n/a" in clean
+        "viewmodel-dependency-boundary: "
+        "usecase|single-context-repository|mixed|no-domain-dependency|fail|n/a" in clean
     )
 
     presentation = PRESENTATION_SKILL.read_text(encoding="utf-8")

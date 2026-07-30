@@ -126,7 +126,7 @@ State patterns:
 
 Event patterns:
 - Prefer modeling critical results as `ScreenUiState`; use `ScreenUiEvent` only for UI behavior such as navigation, snackbar, toast, permission launcher, browser intent, focus, or haptic feedback.
-- Use `Channel<ScreenUiEvent>(Channel.BUFFERED)` plus `receiveAsFlow()` for single-consumer UI behavior events.
+- Use `Channel<ScreenUiEvent>(Channel.BUFFERED)` plus `receiveAsFlow()` for single-consumer UI behavior events. Another deliberate single-consumer model is acceptable when it drops nothing and replays nothing; the requirement is single-consumer delivery without replay, not the `Channel` type.
 - Do not model fire-once effects as `StateFlow`.
 - Prefer explicit `UiEvent` sealed interfaces over raw strings or lambdas from ViewModel to UI.
 
