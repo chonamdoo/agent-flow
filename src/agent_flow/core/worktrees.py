@@ -2604,7 +2604,16 @@ def bootstrap_host_hook_surfaces(*, leader: Path, checkout: Path) -> tuple[str, 
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.is_file():
             shutil.copy2(target, _next_free_backup(target))
-        shutil.copy2(source, target)
+        # 대상 inode에 바로 쓰면 안 된다. 그 자리가 checkout 밖 파일과 hard link면
+        # `copy2`가 그 원본을 truncate한다(`is_file()`은 hard link를 통과시킨다).
+        # 임시 파일에 쓴 뒤 rename하면 디렉터리 엔트리만 바뀌어 링크된 inode는 그대로다.
+        staging = _next_free_backup(target.with_name(f"{target.name}.tmp"))
+        try:
+            shutil.copy2(source, staging)
+            os.replace(staging, target)
+        except BaseException:
+            staging.unlink(missing_ok=True)
+            raise
         installed.append(str(relative))
     return tuple(installed)
 
