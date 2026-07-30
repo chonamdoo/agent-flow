@@ -115,6 +115,10 @@ skills:
 architecture:
   contract: clean-architecture-core
   platform: android
+  # 평면 `core/*` 레이아웃(role 표에 없는 형태)에 설치하면 필수 gate가 변경 파일 전량에
+  # 미매핑 finding을 냈다. `core/domain`이 있을 때만 이 계약을 채택한 저장소로 본다.
+  strict_when_roots_present: true
+  activation_roots: ["core/domain"]
   roles:
     - id: app-shell
       paths: ["app", "android/app"]

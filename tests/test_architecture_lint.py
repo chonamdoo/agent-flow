@@ -127,3 +127,35 @@ def test_case_folding_length_change_keeps_the_boundary_index_valid():
     # `İ`.lower()는 코드포인트가 늘어난다. 접은 문자열에서 얻은 인덱스를 원문에 그대로
     # 쓰면 경계 판정이 밀려 IndexError로 필수 gate가 죽는다.
     assert len(_forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", "İ" * 8 + "\nclass ChatEntity\n")) == 1
+
+
+ANDROID_PROFILE = KIT_ROOT / "src" / "agent_flow" / "profiles" / "android.yaml"
+
+
+def _android_architecture() -> dict:
+    import yaml
+
+    return yaml.safe_load(ANDROID_PROFILE.read_text(encoding="utf-8"))["architecture"]
+
+
+def test_android_lint_activates_only_with_a_domain_root(tmp_path):
+    """반증: 평면 `core/*` 저장소에서 필수 gate가 변경 파일 전량을 미매핑으로 잡았다."""
+    from agent_flow.core.architecture_lint import architecture_lint_is_active
+
+    architecture = _android_architecture()
+    assert architecture["strict_when_roots_present"] is True
+    assert architecture["activation_roots"] == ["core/domain"]
+
+    flat = tmp_path / "flat"
+    (flat / "core" / "data" / "src" / "main").mkdir(parents=True)
+    assert (
+        architecture_lint_is_active(flat, architecture, ["core/data/src/main/Repo.kt"]) is False
+    )
+
+    adopted = tmp_path / "adopted"
+    (adopted / "core" / "domain" / "auth").mkdir(parents=True)
+    assert architecture_lint_is_active(adopted, architecture, ["app/Main.kt"]) is True
+    # 디렉터리가 아직 없어도 변경 후보에 들어오면 그 커밋이 계약을 채택하는 커밋이다.
+    assert (
+        architecture_lint_is_active(flat, architecture, ["core/domain/auth/Session.kt"]) is True
+    )
