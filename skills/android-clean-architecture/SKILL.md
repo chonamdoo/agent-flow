@@ -17,7 +17,7 @@ This is not a standalone Clean Architecture guide. Load [`clean-architecture-cor
 
 ```text
 app/
-core/{ui,designsystem,resources,platform,network,navigation/api,navigation/impl}
+core/{ui,designsystem,resources,platform,network,database,navigation/api,navigation/impl}
 core/domain/<context>/
 core/data/<context>/
 feature/<name>/api/
@@ -36,6 +36,12 @@ string after `src/main/java`.
   policies, domain services, domain errors.
 - `core/data/<context>`: repository impls, API services, DTOs, mappers,
   remote/local sources, cache, Hilt data modules.
+- `core/database`: optional. When a repo keeps a shared database module, Room
+  entities, DAOs, and patch transactions live here and `core/data/<context>`
+  depends on it. The dependency runs `core:data -> core:database` only; the
+  database module never depends on `core:data`, a feature, or `app`, and
+  `core/domain/<context>` never depends on it. A repo without this module keeps
+  local sources under `core/data/<context>/source/local`.
 - `core/network`: Retrofit/OkHttp factories, response envelope, common network
   failure mapping, interceptors, qualifiers.
 - `core/navigation/api`: route/nav-key contracts.

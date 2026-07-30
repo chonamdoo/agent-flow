@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -307,11 +308,13 @@ def test_udf_review_angle_is_dispatched():
         assert marker in text
 
 
-def _frontmatter(path: Path) -> dict:
+def _frontmatter(path: Path) -> dict[str, Any]:
     text = path.read_text(encoding="utf-8")
     assert text.startswith("---\n")
     body = text.split("---\n", 2)[1]
-    return yaml.safe_load(body) or {}
+    parsed = yaml.safe_load(body)
+    assert isinstance(parsed, dict)
+    return parsed
 
 
 def test_sdui_depends_on_the_presentation_contract():
@@ -350,7 +353,9 @@ def test_promoted_presentation_rules_stay_project_neutral():
         "launchCatching",
         "CommonErrorNotifier",
         "ViewModelErrorLauncher",
+        "AppError",
         "AppFailure",
+        "AppResult",
         "TaraeDimensions",
         "TaraeColors",
         "TaraeTypography",
@@ -382,6 +387,9 @@ def test_viewmodel_dependency_boundary_replaces_the_usecase_only_marker():
         text = path.read_text(encoding="utf-8")
         assert "sdui-room-ssot:" not in text
         assert "Room is the single source of truth" not in text
+        # frontmatter description도 같은 단정을 하면 phase 프롬프트 한 줄 요약이
+        # 좁혀진 규칙보다 넓은 문장을 먼저 보여 준다.
+        assert "Room-as-single-source-of-truth" not in text
     assert "sdui-room-ssot-scope: pass|fail|n/a" in SDUI_SKILL.read_text(encoding="utf-8")
     assert "sdui-room-ssot-scope: pass|fail|n/a" in (REVIEW_ANGLES / "sdui.md").read_text(
         encoding="utf-8"
@@ -399,11 +407,17 @@ def test_the_three_contradicted_rules_are_reconciled():
     assert "where acquisition happens, not the call shape" in presentation
     assert "stateful overload" in presentation
 
-    guide = (
-        SKILLS / "android-guides" / "references" / "architecture-rules-guide.md"
-    ).read_text(encoding="utf-8")
-    # samantha 전역에 없는 타입이었다. 프로젝트가 선언한 추상으로 일반화한다.
-    assert "AppResult" not in guide
-    assert "AppError" not in guide
+    # 존재하지 않는 타입 요구가 android profile의 다른 앵글로 옮겨가지 않게 함께 본다.
+    generalized = (
+        SKILLS / "android-guides" / "references" / "architecture-rules-guide.md",
+        REVIEW_ANGLES / "android-skills.md",
+    )
+    for path in generalized:
+        text = path.read_text(encoding="utf-8")
+        assert "AppResult" not in text
+        assert "AppError" not in text
+    guide = generalized[0].read_text(encoding="utf-8")
     assert "the project's result type" in guide
     assert "existing `Result`/exception contract" in guide
+    angle = generalized[1].read_text(encoding="utf-8")
+    assert "transport-failure to domain-error" in angle

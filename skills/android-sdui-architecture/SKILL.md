@@ -1,6 +1,6 @@
 ---
 name: android-sdui-architecture
-description: Hybrid Server-Driven UI architecture for Android — server layout tree vs client semantic components, design-token-only styling, Room-as-single-source-of-truth offline rendering, a finite action vocabulary, and crash-safe recursive renderers. Use when designing, implementing, or reviewing SDUI screens, UiNode trees, screen JSON schemas, action interpreters, section patch operations, or server-side screen composition on Android. Do not use for static native Compose screens, WebView-hosted dynamic content, or payload design no renderer consumes.
+description: Hybrid Server-Driven UI architecture for Android — server layout tree vs client semantic components, design-token-only styling, storage-backed offline rendering scoped to durable shared state, a finite action vocabulary, and crash-safe recursive renderers. Use when designing, implementing, or reviewing SDUI screens, UiNode trees, screen JSON schemas, action interpreters, section patch operations, or server-side screen composition on Android. Do not use for static native Compose screens, WebView-hosted dynamic content, or payload design no renderer consumes.
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
 taskTerms: [sdui, server-driven ui, server driven ui, 서버 드리븐, 서버드리븐, 서버 주도 ui, 동적 화면, json 렌더링, 컴포넌트 카탈로그]
 pathGlobs: ["**/sdui/**", "**/*UiNode*", "**/*ScreenComposer*", "**/*NodeRenderer*"]

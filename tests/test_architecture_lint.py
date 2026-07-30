@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
+
+import yaml
 
 KIT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(KIT_ROOT / "src"))
@@ -132,9 +135,7 @@ def test_case_folding_length_change_keeps_the_boundary_index_valid():
 ANDROID_PROFILE = KIT_ROOT / "src" / "agent_flow" / "profiles" / "android.yaml"
 
 
-def _android_architecture() -> dict:
-    import yaml
-
+def _android_architecture() -> dict[str, Any]:
     return yaml.safe_load(ANDROID_PROFILE.read_text(encoding="utf-8"))["architecture"]
 
 
@@ -144,10 +145,17 @@ def test_android_lint_activates_only_with_a_domain_root(tmp_path):
 
     architecture = _android_architecture()
     assert architecture["strict_when_roots_present"] is True
-    assert architecture["activation_roots"] == ["core/domain"]
+    roots = architecture["activation_roots"]
+    assert "core/domain" in roots
+    # react-native 저장소는 `android/` 변경에 이 profile이 덧붙는다. 이 루트가 없으면
+    # `app-shell`이 선언한 `android/app` 검사까지 함께 꺼져 무음 통과가 된다.
+    assert "android/app" in roots
+    # 맨 `app`이 들어오면 평면 Android 저장소의 미매핑 오탐이 되살아난다.
+    assert "app" not in roots
 
     flat = tmp_path / "flat"
     (flat / "core" / "data" / "src" / "main").mkdir(parents=True)
+    (flat / "app").mkdir()
     assert (
         architecture_lint_is_active(flat, architecture, ["core/data/src/main/Repo.kt"]) is False
     )
@@ -155,6 +163,14 @@ def test_android_lint_activates_only_with_a_domain_root(tmp_path):
     adopted = tmp_path / "adopted"
     (adopted / "core" / "domain" / "auth").mkdir(parents=True)
     assert architecture_lint_is_active(adopted, architecture, ["app/Main.kt"]) is True
+
+    react_native = tmp_path / "rn"
+    (react_native / "android" / "app" / "src").mkdir(parents=True)
+    (react_native / "src" / "core" / "domain").mkdir(parents=True)
+    assert (
+        architecture_lint_is_active(react_native, architecture, ["android/app/src/Main.kt"]) is True
+    )
+
     # 디렉터리가 아직 없어도 변경 후보에 들어오면 그 커밋이 계약을 채택하는 커밋이다.
     assert (
         architecture_lint_is_active(flat, architecture, ["core/domain/auth/Session.kt"]) is True
@@ -171,7 +187,10 @@ def test_core_database_role_is_mapped_and_dependency_gated():
     assert match.role["id"] == "core-database"
     assert match.role["package_suffix"] == "core.database"
 
-    assert forbidden_gradle_dependencies("core-database", {}) == [":app", ":feature"]
+    # 선언된 방향은 `core:data -> core:database` 하나뿐이다.
+    assert forbidden_gradle_dependencies("core-database", {}) == [":app", ":core:data", ":feature"]
     # 도메인이 Room 모듈을 보면 저장소 구현이 도메인 계약을 통과해 새어 들어온다.
     assert ":core:database" in forbidden_gradle_dependencies("core-domain", {})
+    assert ":core:database" in forbidden_gradle_dependencies("feature-presentation", {})
+    assert ":core:database" in forbidden_gradle_dependencies("feature-api", {"feature": "home"})
     assert ":core:database" not in forbidden_gradle_dependencies("core-data", {})

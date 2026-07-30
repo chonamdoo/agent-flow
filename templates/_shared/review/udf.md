@@ -24,12 +24,13 @@ stateless for the same reason a hand-written screen does.
    no mutable holder, `MutableList`, or Compose `MutableState` escapes the state
    holder.
 
-2. **`udf-explicit-state-modeling`** — `UiState` is a `@Stable sealed interface`
-   and every state the screen can actually reach is a named member: not-ready,
-   loading, refreshing, placeholder, empty, error, offline, permission-required,
-   success. A fake domain default (empty list meaning "loading", `-1`, blank
-   string) instead of a state member is the failure. `n/a` on a server-driven
-   screen whose state type is owned by the shared renderer.
+2. **`udf-explicit-state-modeling`** — every state the screen can actually reach
+   is a named member of a `@Stable sealed interface`, per the skill's
+   `## UiState Rule` member list. Check by listing the states this screen can
+   enter, then diffing against the type's members; a fake domain default (empty
+   list standing in for loading, `-1`, blank string) instead of a member is the
+   failure. `n/a` on a server-driven screen whose state type is owned by the
+   shared renderer.
 
 3. **`udf-event-direction`** — input travels UI to state holder, one-shot effects
    travel state holder to UI, and nothing durable rides the effect path. **Judge
@@ -40,10 +41,10 @@ stateless for the same reason a hand-written screen does.
    screen must redraw after recreation.
 
 4. **`viewmodel-statein-initial-load`** — flow-backed state terminates in one
-   shared `stateIn` value, not a `stateIn` per call site or per collector. Initial
-   loading starts when the route collects, not from `init`. When
-   `SharingStarted.WhileSubscribed(5_000)` is used, confirm no caller reads the
-   stale `.value` as a fresh source after the timeout.
+   shared `stateIn` value, not a `stateIn` per call site or per collector, and
+   initial loading starts when the route collects rather than in `init`. Where the
+   skill's `SharingStarted` guidance applies, confirm no caller reads the stale
+   `.value` as a fresh source after the subscriber timeout.
 
 5. **`udf-stateless-content-composable`** — screen and content composables do not
    call `hiltViewModel()`, `viewModel()`, `collectAsStateWithLifecycle()`, or a
@@ -62,15 +63,14 @@ stateless for the same reason a hand-written screen does.
    `n/a` when the screen's state carries a server-authored node tree; that mapping
    boundary belongs to the node parser.
 
-8. **`udf-state-holder-purity`** — the state holder holds no `Context`,
-   `Activity`, `NavController`, `Navigator`, launcher, `Intent`, `WebView`, or
-   Compose state object, and route keys carry serializable data only — no
-   lambdas, no `NavController`, no mutable objects.
+8. **`udf-state-holder-purity`** — the state holder holds none of the platform and
+   navigation types the skill's `## ViewModel Rule` forbids, and route keys carry
+   serializable data only. Check the constructor, the properties, and the route
+   key declaration against that list rather than re-deriving it.
 
-9. **`derived-state-precomputed`** — cross-item display derivation lives in the
-   state holder or mapper, not in the composable. Neighbor and grouping flags,
-   index and position flags, and selection or action flags are fields on the item
-   model. A composable deriving them from `items[index ± 1]`,
+9. **`derived-state-precomputed`** — the cross-item display flags the skill's
+   `## Derived Display State` names are fields on the item model, computed in the
+   state holder or mapper. A composable deriving one from `items[index ± 1]`,
    `index == lastIndex`, or unrelated screen state is the failure.
 
 ## Must-fix policy

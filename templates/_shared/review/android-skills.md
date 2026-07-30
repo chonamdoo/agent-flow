@@ -37,12 +37,15 @@ If no Android/Kotlin/Compose/KMP files changed, mark the completion gate `n/a`.
    `@JvmInline value class` suitability, and Compose stability implications.
 7. Data/error boundaries: `api` for Retrofit services, `source.remote` and
    `source.local` for data source implementations, DTO/request/response models
-   in `model`, conversions in `mapper`, `NetworkFailure -> AppError` in
-   repository/data mappers, and `AppError -> ErrorUiModel` in presentation
-   mappers. For app-wide common errors, verify that AppShell owns common
-   dialog/snackbar/toast hosts and root navigation; feature ViewModels only
-   notify common errors and do not hold `NavController`, `Context`, dialogs, or
-   login-flow stack reset logic.
+   in `model`, conversions in `mapper`, transport-failure to domain-error
+   translation in repository/data mappers, and domain-error to `ErrorUiModel`
+   translation in presentation mappers. Judge these against the typed
+   error/result abstraction the project actually declares; when it declares
+   none, the existing `Result`/exception contract is the contract and a missing
+   abstraction is not a finding. For app-wide common errors, verify that
+   AppShell owns common dialog/snackbar/toast hosts and root navigation; feature
+   ViewModels only notify common errors and do not hold `NavController`,
+   `Context`, dialogs, or login-flow stack reset logic.
 
 ## Output
 

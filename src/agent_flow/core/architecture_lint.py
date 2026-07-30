@@ -545,11 +545,13 @@ def forbidden_gradle_dependencies(role_id: str, captures: dict[str, str]) -> lis
     if role_id == "core-data":
         return [":app", ":feature"]
     if role_id == "core-database":
-        return [":app", ":feature"]
+        # 선언된 방향은 `core:data -> core:database` 하나뿐이다. 역방향을 열어 두면
+        # Room 모듈이 repository 구현을 통해 도메인 계약까지 되짚어 올라간다.
+        return [":app", ":core:data", ":feature"]
     if role_id == "feature-api":
-        return [":app", ":core:data", ":feature:" + captures.get("feature", "") + ":presentation"]
+        return [":app", ":core:data", ":core:database", ":feature:" + captures.get("feature", "") + ":presentation"]
     if role_id == "feature-presentation":
-        return [":app", ":core:data"]
+        return [":app", ":core:data", ":core:database"]
     if role_id == "navigation-api":
         return [":app", ":core:navigation:impl", ":feature"]
     return []
