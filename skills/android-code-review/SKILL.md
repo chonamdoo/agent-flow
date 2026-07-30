@@ -52,10 +52,7 @@ skills through the current active host only:
 Do not install, copy, link, vendor, or fallback to another host path. If a
 required local skill is missing, stop approval and report
 `missing local <group>: <skill>` with the profile source URL.
-Record `android-local-skills: checked`,
-`android-local-skills-used: <skill list>`, `chrisbanes-skills: checked|n/a`,
-and `chrisbanes-skills-used: <skill list or n/a>` in the review artifact's
-`## Completion Gate`.
+Cite the skill paths you read in the review artifact's Calibration section.
 
 ## Review Order
 

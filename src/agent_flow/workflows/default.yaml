@@ -304,13 +304,6 @@ phases:
           presentation-mapping-boundary: n/a
           di-boundary: n/a
 
-      If Android/Kotlin/Compose/KMP files are changed, add:
-
-          android-local-skills: checked
-          android-local-skills-used: <skill list>
-          chrisbanes-skills: checked|n/a
-          chrisbanes-skills-used: <skill list or n/a>
-
   - id: comment-authoring
     skills:
       required: [comment-authoring-discipline]
@@ -475,13 +468,6 @@ phases:
           presentation-mapping-boundary: n/a
           di-boundary: n/a
 
-      If Android/Kotlin/Compose/KMP files are changed, add:
-
-          android-local-skills: checked
-          android-local-skills-used: <skill list>
-          chrisbanes-skills: checked|n/a
-          chrisbanes-skills-used: <skill list or n/a>
-
   - id: gates
     description: Run project verification gates after final-review approve. Runner routes fail→fix-loop, pass→commit.
     artifact: artifacts/gate-results.json
@@ -558,13 +544,6 @@ phases:
           ui-state-modeling: n/a
           presentation-mapping-boundary: n/a
           di-boundary: n/a
-
-      If Android/Kotlin/Compose/KMP files are changed, add:
-
-          android-local-skills: checked
-          android-local-skills-used: <skill list>
-          chrisbanes-skills: checked|n/a
-          chrisbanes-skills-used: <skill list or n/a>
 
       Output: fix-loop.md.
 

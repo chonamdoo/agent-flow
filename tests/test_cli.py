@@ -397,7 +397,6 @@ class CliTest(unittest.TestCase):
         self.assertIn("must-avoid or failing checklist", architecture_review_prompt)
         self.assertIn("skill makes the verdict", architecture_review_prompt)
         self.assertIn("presentation-skill: android|react|react-native|ios|n/a", phases["green"]["required_markers"])
-        self.assertNotIn("android-local-skills: checked|n/a", phases["green"]["required_markers"])
         self.assertIn("Android/Kotlin/Compose/KMP changes require Android profile skills", phases["green"]["prompt"])
         self.assertEqual(phases["gates"]["artifact"], "artifacts/gate-results.json")
         self.assertEqual(phases["gates"]["routes"]["green"], "commit")
