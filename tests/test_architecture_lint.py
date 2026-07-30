@@ -159,3 +159,19 @@ def test_android_lint_activates_only_with_a_domain_root(tmp_path):
     assert (
         architecture_lint_is_active(flat, architecture, ["core/domain/auth/Session.kt"]) is True
     )
+
+
+def test_core_database_role_is_mapped_and_dependency_gated():
+    """반증: core/database 경로에 role이 없어 Room 모듈 전체가 미매핑으로 잡혔다."""
+    from agent_flow.core.architecture_lint import forbidden_gradle_dependencies, match_role
+
+    roles = _android_architecture()["roles"]
+    match = match_role("core/database/src/main/java/com/example/app/core/database/ScreenDao.kt", roles)
+    assert match is not None
+    assert match.role["id"] == "core-database"
+    assert match.role["package_suffix"] == "core.database"
+
+    assert forbidden_gradle_dependencies("core-database", {}) == [":app", ":feature"]
+    # 도메인이 Room 모듈을 보면 저장소 구현이 도메인 계약을 통과해 새어 들어온다.
+    assert ":core:database" in forbidden_gradle_dependencies("core-domain", {})
+    assert ":core:database" not in forbidden_gradle_dependencies("core-data", {})

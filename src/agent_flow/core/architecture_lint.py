@@ -540,8 +540,11 @@ def gradle_accessor_segment_to_module(segment: str) -> str:
 
 def forbidden_gradle_dependencies(role_id: str, captures: dict[str, str]) -> list[str]:
     if role_id == "core-domain":
-        return [":app", ":core:data", ":core:network", ":core:platform", ":core:navigation:impl", ":feature"]
+        # 도메인이 Room 모듈을 보면 저장소 구현이 도메인 계약을 통과해 새어 들어온다.
+        return [":app", ":core:data", ":core:database", ":core:network", ":core:platform", ":core:navigation:impl", ":feature"]
     if role_id == "core-data":
+        return [":app", ":feature"]
+    if role_id == "core-database":
         return [":app", ":feature"]
     if role_id == "feature-api":
         return [":app", ":core:data", ":feature:" + captures.get("feature", "") + ":presentation"]

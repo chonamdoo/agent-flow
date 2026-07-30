@@ -164,6 +164,11 @@ architecture:
       paths: ["core/network"]
       modules: [":core:network"]
       package_suffix: "core.network"
+    - id: core-database
+      paths: ["core/database"]
+      modules: [":core:database"]
+      package_suffix: "core.database"
+      forbidden: ["@Composable", "ViewModel", "ApiService", "Dto"]
     - id: core-platform
       paths: ["core/platform"]
       modules: [":core:platform"]
