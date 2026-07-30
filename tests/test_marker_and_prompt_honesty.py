@@ -228,3 +228,47 @@ def test_stub_sentinel_is_absent_outside_stub_mode(tmp_path, monkeypatch):
         f"# implement\n\n<!-- {STUB_SENTINEL} -->\n", encoding="utf-8"
     )
     assert runner._missing_required_markers(phase) == ["clean-architecture: applied"]
+
+
+_ANDROID_SELF_REPORT_MARKERS = (
+    "android-local-skills",
+    "android-local-skills-used",
+    "chrisbanes-skills",
+    "chrisbanes-skills-used",
+)
+
+_SCANNED_SUFFIXES = frozenset({".json", ".md", ".mjs", ".py", ".sh", ".template", ".yaml", ".yml"})
+_SKIPPED_DIRS = frozenset(
+    {".agent-flow", ".git", ".pytest_cache", ".venv", "__pycache__", "dist", "node_modules"}
+)
+# `chrisbanes-skills`는 vendor 설치 디렉터리명으로도 쓰인다. 그 단정은 마커 계약이
+# 아니라 설치 경로 계약이라 이 검사 대상이 아니다. 이 파일 자신은 마커 이름을
+# 리터럴로 들고 있으므로 자기 자신도 제외한다.
+_SKIPPED_FILES = frozenset(
+    {"tests/test_custom_skill_install.py", "tests/test_marker_and_prompt_honesty.py"}
+)
+
+
+def _kit_source_lines():
+    for path in sorted(REPO.rglob("*")):
+        rel = path.relative_to(REPO)
+        if path.suffix not in _SCANNED_SUFFIXES or not path.is_file():
+            continue
+        if _SKIPPED_DIRS.intersection(rel.parts) or rel.as_posix() in _SKIPPED_FILES:
+            continue
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            yield rel.as_posix(), number, line
+
+
+def test_android_self_report_markers_are_gone():
+    """죽은 자기신고다. 어떤 workflow `required_markers`도 이 4종을 요구하지 않는다.
+
+    이름 표가 어휘 조인으로 바뀐 뒤 "어느 그룹에서 왔는지"를 산출물에 적게 하는
+    계약은 검사되지 않는 신고로만 남았다.
+    """
+    offenders = [
+        f"{rel}:{number}"
+        for rel, number, line in _kit_source_lines()
+        if any(marker in line for marker in _ANDROID_SELF_REPORT_MARKERS)
+    ]
+    assert offenders == []

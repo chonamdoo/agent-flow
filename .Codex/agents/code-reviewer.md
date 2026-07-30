@@ -92,15 +92,6 @@ mapping-boundary-check: applied
 solid-clean-architecture-check: applied
 ```
 
-Android profile이 active이고 Android/Kotlin/Compose/KMP 변경이 있을 때만 아래 marker를 추가한다:
-
-```markdown
-android-local-skills: checked
-android-local-skills-used: <skill list>
-chrisbanes-skills: checked|n/a
-chrisbanes-skills-used: <skill list or n/a>
-```
-
 SPEC 증거 부족은 `verdict: approve`로 덮을 수 없다. runner가 SPEC 증거 검사를 required marker 검사에 합류시켜 `final-review` / `multi-review` phase 완료 자체를 막으므로, approve를 써도 phase는 통과하지 않고 그대로 멈춘다. 증거를 채우거나 `request-changes`로 내려야 한다.
 
 `request-changes`일 때는 반드시 파일 경로와 라인 번호를 포함한다.

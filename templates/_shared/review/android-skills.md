@@ -50,12 +50,6 @@ Use the standard review angle output. Cite local skill paths used in Calibration
 If a required local skill is missing, request changes with the missing skill and
 source URL.
 
-Include this completion gate:
-
-```text
-## Completion Gate
-android-local-skills: checked
-android-local-skills-used: <skill list>
-chrisbanes-skills: checked|n/a
-chrisbanes-skills-used: <skill list or n/a>
-```
+The run's own `skill-availability` and `skill-use-evidence` markers already
+record which required skills were resolved and opened, so this angle adds no
+marker of its own.

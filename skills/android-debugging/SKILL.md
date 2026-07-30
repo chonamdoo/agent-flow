@@ -1,6 +1,8 @@
 ---
 name: android-debugging
 description: Android diagnosis workflow for crashes, ANRs, incorrect UI state, coroutine or Flow bugs, data loading failures, and Compose rendering issues. Use when an Android app is broken, throwing, hanging, rendering incorrectly, or needs root-cause analysis; do not use as a general code-review checklist.
+workflowPhases: [implement, implement-fix, red, green, fix-loop, pr-ci-fix]
+taskTerms: [crash, anr, stack trace, root cause, hang, 크래시, 재현, 무한 로딩, 렌더링 오류, 원인 분석]
 ---
 
 # Android Debugging

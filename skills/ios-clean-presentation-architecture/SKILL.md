@@ -1,6 +1,9 @@
 ---
 name: ios-clean-presentation-architecture
 description: Use when creating, modifying, or reviewing an iOS Clean Architecture presentation layer with SwiftUI/UIKit state holders, explicit UiState, UiModel mapping, dependency injection, and state-based presentation code review.
+workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
+taskTerms: [uistate, ui state, state holder, observableobject, swiftui view state, 상태 홀더, 화면 상태, 프레젠테이션 계층]
+pathGlobs: ["**/*ViewModel.swift", "**/*UiState.swift", "**/Presentation/**"]
 required_markers:
   - "presentation-skill: ios"
   - "presentation-state-based-development: applied|n/a"

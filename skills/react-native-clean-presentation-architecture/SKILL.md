@@ -1,6 +1,9 @@
 ---
 name: react-native-clean-presentation-architecture
 description: Use when creating, modifying, or reviewing a React Native Clean Architecture presentation layer with Context Provider DI, state-holder hooks, uiState modeling, UiModel mapping, navigation effects, and state-based presentation code review.
+workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
+taskTerms: [uistate, ui state, state holder, screen state, navigation effect, 상태 홀더, 화면 상태, 프레젠테이션 계층]
+pathGlobs: ["**/*UiState.ts", "**/*UiState.tsx", "**/presentation/**"]
 required_markers:
   - "presentation-skill: react-native"
   - "presentation-state-based-development: applied|n/a"

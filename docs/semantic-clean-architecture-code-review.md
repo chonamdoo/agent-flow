@@ -58,5 +58,3 @@ usecase-composition-check: applied
 cache-boundary-check: applied
 mapping-boundary-check: applied
 solid-clean-architecture-check: applied
-android-local-skills: n/a
-android-local-skills-used: n/a

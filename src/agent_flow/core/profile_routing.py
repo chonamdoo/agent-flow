@@ -88,6 +88,23 @@ def routed_profile_skills(
     return tuple(routed.values())
 
 
+def routable_group_skills(profile: dict | None) -> frozenset[str]:
+    """selectors를 선언한 `required_review` group의 skill 이름.
+
+    doctor는 "어떤 변경에서든 켜질 수 있는가"를 묻는다. phase도 변경 파일도 그 질문의
+    입력이 아니다. selectors 없는 group은 `_group_skills`가 빈 목록을 주므로 이름이
+    선언돼 있어도 도달 불가다 — 그 판정을 doctor가 복제하지 않게 여기서 내보낸다.
+    """
+    if not isinstance(profile, dict):
+        return frozenset()
+    return frozenset(
+        name
+        for group in _required_review_groups(profile)
+        if _has_selectors(group)
+        for name in _string_list(group.get("skills"))
+    )
+
+
 def _required_review_groups(profile: dict) -> list[dict]:
     skills = profile.get("skills")
     if not isinstance(skills, dict):

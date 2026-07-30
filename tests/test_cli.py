@@ -397,7 +397,6 @@ class CliTest(unittest.TestCase):
         self.assertIn("must-avoid or failing checklist", architecture_review_prompt)
         self.assertIn("skill makes the verdict", architecture_review_prompt)
         self.assertIn("presentation-skill: android|react|react-native|ios|n/a", phases["green"]["required_markers"])
-        self.assertNotIn("android-local-skills: checked|n/a", phases["green"]["required_markers"])
         self.assertIn("Android/Kotlin/Compose/KMP changes require Android profile skills", phases["green"]["prompt"])
         self.assertEqual(phases["gates"]["artifact"], "artifacts/gate-results.json")
         self.assertEqual(phases["gates"]["routes"]["green"], "commit")
@@ -447,7 +446,7 @@ class CliTest(unittest.TestCase):
             missing = missing_local_skill_markers(
                 "## Completion Gate\n"
                 "skill-availability: degraded\n"
-                "skill-read-evidence: unavailable\n"
+                "skill-use-evidence: unavailable\n"
                 "project-local-skills: checked\n"
                 "project-local-skills-used: alpha-guide\n"
                 "project-local-skill-docs: applied\n",
@@ -457,14 +456,14 @@ class CliTest(unittest.TestCase):
             )
             self.assertEqual(missing, [])
 
-    def test_read_evidence_blocks_when_available_skill_was_not_read(self) -> None:
+    def test_use_evidence_blocks_when_available_skill_was_not_read(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = _write_resolver_skills(temp_dir)
             phase_skills = PhaseSkills(required=("alpha-guide", "beta-guide"))
             gate = (
                 "## Completion Gate\n"
                 "skill-availability: pass\n"
-                "skill-read-evidence: verified\n"
+                "skill-use-evidence: verified\n"
                 "project-local-skills: checked\n"
                 "project-local-skills-used: alpha-guide, beta-guide\n"
                 "project-local-skill-docs: applied\n"
@@ -481,7 +480,7 @@ class CliTest(unittest.TestCase):
                 gate, root, "green", phase_skills=phase_skills
             )
             self.assertEqual(len(missing), 1)
-            self.assertIn("skill-read-evidence: verified", missing[0])
+            self.assertIn("skill-use-evidence: verified", missing[0])
             self.assertIn("never opened", missing[0])
 
             record_skill_read(root, root / "skills" / "beta-guide" / "SKILL.md")
@@ -7116,7 +7115,9 @@ if (codexContext !== undefined) {
         self.assertEqual([group["group"] for group in android_required], ["profile"])
         self.assertNotIn("android_skills", android.skills)
         rn_required = load_profile("react-native").skills["required_review"]
-        self.assertEqual([group["group"] for group in rn_required], ["profile"])
+        # `typescript` group은 `typescript-development-guide`의 범위를 스택 glob에서
+        # 분리한 자리다. 옛 escalation group이 되살아나면 이 목록이 늘어난다.
+        self.assertEqual([group["group"] for group in rn_required], ["profile", "typescript"])
 
     def test_runner_prefers_repository_kit_root(self) -> None:
         from agent_flow.runner import _find_kit_root
@@ -11160,13 +11161,13 @@ def _node_project_local_gate(phase: str = "") -> str:
     if not required:
         return (
             "skill-availability: n/a\n"
-            "skill-read-evidence: unavailable\n"
+            "skill-use-evidence: unavailable\n"
             "project-local-skills: n/a\n"
             "project-local-skills-used: n/a\n"
         )
     return (
         "skill-availability: pass\n"
-        "skill-read-evidence: unavailable\n"
+        "skill-use-evidence: unavailable\n"
         "project-local-skills: checked\n"
         f"project-local-skills-used: {', '.join(required)}\n"
         "project-local-skill-docs: applied\n"
@@ -11176,7 +11177,7 @@ def _node_project_local_applied_gate() -> str:
     # implement phase가 workflow에서 선언한 skill + local-skills drop-box 전부가 대상이다.
     return (
         "skill-availability: pass\n"
-        "skill-read-evidence: unavailable\n"
+        "skill-use-evidence: unavailable\n"
         "project-local-skills: checked\n"
         "project-local-skills-used: code-generation-discipline, tdd, clean-architecture,"
         " api, api-contract-guide, figma-screen-spec, merge-review-flow, pr-review-flow,"
