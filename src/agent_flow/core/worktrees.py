@@ -2864,9 +2864,28 @@ def _host_hook_registration_is_kit_owned(
     commands = list(_json_hook_commands(document))
     # 등록이 하나도 없으면 kit이 쓴 결과일 수 없다. 하나라도 이 leader의 관리 hook
     # 호출이 아니면 사용자가 자기 hook을 넣어 둔 파일이다.
-    return bool(commands) and all(
-        managed_path_hook_name(leader, command) is not None for command in commands
-    )
+    if not commands or any(
+        managed_path_hook_name(leader, command) is None for command in commands
+    ):
+        return False
+    # hook 밖의 키(`permissions`, `env`, MCP 설정 …)는 installer가 병합해 보존하는
+    # 사용자 소유다. 그 부분이 leader와 다르면 이 checkout에만 있는 설정이므로
+    # 파일째 덮으면 조용히 사라진다 — 그때는 사용자 소유로 본다.
+    leader_document = _load_registration_document(leader / rel)
+    return _non_hook_keys(document) == _non_hook_keys(leader_document)
+
+
+def _load_registration_document(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+
+
+def _non_hook_keys(document: Any) -> Any:
+    if not isinstance(document, dict):
+        return document
+    return {key: value for key, value in sorted(document.items()) if key != "hooks"}
 
 
 def _json_hook_commands(node: Any) -> Iterator[str]:

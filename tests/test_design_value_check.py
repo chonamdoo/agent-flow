@@ -1401,6 +1401,58 @@ def test_fresh_session_host_prepare_then_exact_prompt_consumes_once(project):
     assert not spec_set_is_confirmed(run_dir, parsed.items)
 
 
+def test_spec_hooks_forward_cli_warnings_to_their_own_stderr(project):
+    """반증: hook이 CLI stderr를 전부 DEVNULL로 버리면 binding 무효 같은 사유가
+    어디에도 남지 않는다. 사용자에게는 정확한 `승인`이 다시 이유 없이 무시된 것으로만
+    보인다 — 이 hook이 고치려는 증상이 그것이다.
+    """
+    launcher = project / ".agent-flow" / "bin" / "agent-flow"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text(
+        "#!/bin/sh\n"
+        "printf 'warning: host session binding is unusable\\n' >&2\n"
+        "printf 'noise line\\n' >&2\n",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o755)
+    _record_launcher_digest(project, launcher)
+    hook_dir = project / ".agent-flow" / "scripts" / "hooks"
+    hook_dir.mkdir(parents=True)
+    for name in ("confirm-spec-user-prompt.py", "prepare-spec-user-prompt.py"):
+        shutil.copy2(REPO / "scripts" / "hooks" / name, hook_dir / name)
+
+    for name, payload in (
+        (
+            "prepare-spec-user-prompt.py",
+            {
+                "hook_event_name": "PostToolUse",
+                "cwd": str(project),
+                "session_id": "session-warn",
+            },
+        ),
+        (
+            "confirm-spec-user-prompt.py",
+            {
+                "hook_event_name": "UserPromptSubmit",
+                "cwd": str(project),
+                "session_id": "session-warn",
+                "prompt": "승인",
+            },
+        ),
+    ):
+        result = subprocess.run(
+            (sys.executable, str(hook_dir / name)),
+            input=json.dumps(payload),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode == 0
+        assert "warning: host session binding is unusable" in result.stderr, name
+        # 성공 경로의 잡음을 늘리면 사용자가 읽지 않는다.
+        assert "noise line" not in result.stderr, name
+
+
 def test_test_spec_requires_observed_passing_named_test(project, run_dir):
     test_name = "test_empty_search_results_show_the_empty_state"
     _capture_spec_ledger(run_dir, f"test:{test_name}")

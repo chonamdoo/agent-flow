@@ -381,6 +381,33 @@ def test_a_user_written_registration_in_the_checkout_is_not_overwritten(
     assert "this kit did not write" in reported
 
 
+def test_user_keys_next_to_managed_hooks_are_not_overwritten(tmp_path: Path, capsys):
+    """반증: hook command만 보고 kit 소유로 판정하면, 같은 파일에 사용자가 둔
+    `permissions`/`env`/MCP 설정이 leader 파일로 통째 교체돼 조용히 사라진다.
+    installer의 `mergeHookConfig`가 그 공존을 보존하므로 흔한 구성이다.
+    """
+    leader = tmp_path / "leader"
+    _leader_with_host_hooks(leader)
+    json_rel = ".claude/settings.json"
+    (leader / json_rel).write_text(
+        _kit_settings_json(leader, "confirm-spec-user-prompt.py"), encoding="utf-8"
+    )
+    checkout = _managed_checkout(leader, "feat-user-keys")
+
+    mine = checkout / json_rel
+    mine.parent.mkdir()
+    document = json.loads(_kit_settings_json(leader, "confirm-spec-user-prompt.py"))
+    document["permissions"] = {"allow": ["Bash(ls:*)"]}
+    mine.write_text(json.dumps(document), encoding="utf-8")
+    before = mine.read_bytes()
+
+    written = provision_host_hook_registrations(leader=leader, checkout=checkout)
+
+    assert json_rel not in written
+    assert mine.read_bytes() == before
+    assert json_rel in capsys.readouterr().err
+
+
 def test_a_registration_this_kit_wrote_is_upgraded_in_place(tmp_path: Path):
     """반증: 소유 판정이 "이미 있으면 손대지 않는다"로 굳으면 등록 갱신이 checkout까지
     번지지 않는다. 그 checkout은 낡은 command를 계속 부르고 `승인`은 다시 무시된다.

@@ -488,11 +488,20 @@ def test_replaced_launcher_interpreter_is_detected(tmp_path):
     )
 
 
-def test_group_writable_launcher_interpreter_is_detected(tmp_path):
+def test_world_writable_launcher_interpreter_is_detected(tmp_path):
+    """group write는 정상 환경(homebrew, CI toolcache)이라 위반이 아니다.
+
+    거기까지 막으면 정당한 설치본의 모든 run이 시작 거부된다 — 교체는 digest가 잡는다.
+    """
     _install(tmp_path)
-    (tmp_path / ".agent-flow" / "python-stub").chmod(0o775)
+    interpreter = tmp_path / ".agent-flow" / "python-stub"
+    interpreter.chmod(0o775)
+    assert not any(
+        "writable" in value for value in _violations(tmp_path)
+    )
+    interpreter.chmod(0o777)
     assert any(
-        "managed launcher interpreter is group or world writable" in value
+        "managed launcher interpreter is world writable" in value
         for value in _violations(tmp_path)
     )
 

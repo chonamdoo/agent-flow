@@ -49,6 +49,20 @@ def _launcher_digest_matches(install_root: Path, launcher: Path) -> bool:
         return False
 
 
+def _forward_warnings(text: object) -> None:
+    """CLI가 낸 진단을 hook의 stderr로 흘린다.
+
+    전부 DEVNULL로 버리면 binding 무효 같은 사유가 어디에도 남지 않아 사용자에게는
+    승인이 조용히 무시된 것으로만 보인다 — 이 hook이 고치려는 증상이 그것이다.
+    성공 경로의 잡음을 늘리지 않도록 `warning:` 줄만 올린다.
+    """
+    if not isinstance(text, str) or not text:
+        return
+    lines = [line for line in text.splitlines() if line.startswith("warning:")]
+    if lines:
+        sys.stderr.write("\n".join(lines) + "\n")
+
+
 def main() -> int:
     try:
         payload = json.load(sys.stdin)
@@ -72,7 +86,7 @@ def main() -> int:
         return 0
     capability = secrets.token_hex(32)
     try:
-        subprocess.run(
+        prepared = subprocess.run(
             (
                 *command,
                 "spec",
@@ -85,10 +99,12 @@ def main() -> int:
                 hashlib.sha256(capability.encode("ascii")).hexdigest(),
             ),
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
             timeout=5,
             check=False,
         )
+        _forward_warnings(prepared.stderr)
     except (OSError, subprocess.TimeoutExpired):
         pass
     return 0
