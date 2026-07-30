@@ -204,6 +204,16 @@ def _create_worktree(
                 f"worktree {plan.name} already uses branch {existing.branch}; "
                 f"requested {plan.branch}"
             )
+        # 재사용도 leader가 내리는 채택이다. 기록하지 않으면 create가 성공한 직후의
+        # `run --worktree <name>`이 미채택으로 거절된다 — 사용자에게는 방금 만든
+        # worktree가 이유 없이 막힌 것으로 보인다.
+        if existing.registration_identity is not None:
+            record_adopted_checkout(
+                root=root,
+                name=existing.name,
+                path=existing.path,
+                registration_identity=existing.registration_identity,
+            )
         return existing
     _ensure_creation_root(plan.path.parent)
     branch_created = _add_worktree_locked(root=root, plan=plan)
@@ -2404,10 +2414,22 @@ def _load_worktree_manifest(*, root: Path, name: str) -> dict | None:
 def _state_key_manifest(*, root: Path, key: str) -> dict | None:
     """정규화 없이 ``key`` 자리의 manifest만 읽는다."""
     manifest = _runtime_state_root(root=root, name=key) / "manifest.json"
-    legacy = _managed_checkout_path(root=root, name=key) / "manifest.json"
-    if not manifest.exists() and legacy.exists():
-        manifest = legacy
-    return _read_manifest(manifest)
+    if manifest.exists():
+        return _read_manifest(manifest)
+    for legacy in _in_checkout_manifest_paths(root=root, key=key):
+        if legacy.exists():
+            return _read_manifest(legacy)
+    return None
+
+
+def _in_checkout_manifest_paths(*, root: Path, key: str) -> tuple[Path, ...]:
+    """checkout 안에 manifest를 두던 시절의 자리들. 생성 자리 둘을 모두 본다.
+
+    현재 자리만 보면 업그레이드 전 checkout의 branch ownership과 base를 잃는다 —
+    정리가 agent-flow가 만든 브랜치를 "증거 없음"으로 남긴다.
+    """
+    roots = dict.fromkeys((managed_worktrees_root(root), legacy_managed_root(root)))
+    return tuple(candidate / key / "manifest.json" for candidate in roots)
 
 
 def _read_manifest(path: Path) -> dict | None:
@@ -2530,11 +2552,11 @@ def remove_worktree_metadata(*, root: Path, name: str, path: Path | None = None)
     if path is not None and not _metadata_belongs_to_path(root=root, key=key, path=path):
         return
     runtime_root = _runtime_state_root(root=root, name=key)
-    legacy_manifest = _managed_checkout_path(root=root, name=key) / "manifest.json"
     if runtime_root.exists():
         shutil.rmtree(runtime_root)
-    if legacy_manifest.exists():
-        legacy_manifest.unlink()
+    for legacy_manifest in _in_checkout_manifest_paths(root=root, key=key):
+        if legacy_manifest.exists():
+            legacy_manifest.unlink()
     forget_adopted_checkout(root=root, name=key)
 
 
@@ -2646,6 +2668,10 @@ def _safe_creation_root(path: Path) -> bool:
 
     ``lstat``으로 본다. symlink는 자체가 목적지를 감추고, 남의 소유 디렉터리는 우리가
     만든 것이 아니다. 둘 다 checkout을 우리 통제 밖으로 옮긴다.
+
+    소유권 검사는 POSIX 전용이다. native Windows Python에는 `os.getuid`가 없어서
+    무조건 부르면 첫 create 이후의 모든 조회가 AttributeError로 죽는다. 그쪽에서는
+    symlink·디렉터리 검사만 남는다.
     """
     try:
         info = path.lstat()
@@ -2655,7 +2681,10 @@ def _safe_creation_root(path: Path) -> bool:
         return False
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
         return False
-    return info.st_uid == os.getuid()
+    getuid = getattr(os, "getuid", None)
+    if getuid is None:
+        return True
+    return info.st_uid == getuid()
 
 
 def _ensure_creation_root(path: Path) -> None:
@@ -2699,16 +2728,6 @@ def _runtime_state_root(*, root: Path, name: str) -> Path:
 
 def _worktree_manifest_path(*, root: Path, name: str) -> Path:
     return _runtime_state_root(root=root, name=_feature_worktree_name(name)) / "manifest.json"
-
-
-def _legacy_worktree_manifest_path(*, root: Path, name: str) -> Path:
-    # 업그레이드 전에 만들어진 checkout은 예전 자리에 manifest를 들고 있다. 새 자리를
-    # 보면 그 checkout의 branch ownership과 base를 잃고, 정리가 브랜치를 남긴다.
-    # 정규화를 거치는 이유는 경로 안전이다. 호출자가 넘긴 이름을 그대로 이어
-    # 붙이면 `../`가 섞인 이름이 관리 루트 밖을 가리킨다.
-    return (
-        legacy_managed_root(root) / _feature_worktree_name(name) / "manifest.json"
-    )
 
 
 def _agent_flow_git_dir(root: Path) -> Path:

@@ -9,6 +9,7 @@ layout을 옮기면 신뢰의 근거도 함께 옮겨야 한다. marker 경로�
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -22,7 +23,7 @@ import pytest
 from agent_flow.core.worktrees import (
     _ensure_creation_root,
     _is_managed_child,
-    _legacy_worktree_manifest_path,
+    _load_worktree_manifest,
     adopt_worktree,
     attach_worktree,
     create_worktree,
@@ -32,6 +33,7 @@ from agent_flow.core.worktrees import (
     managed_worktrees_root,
     plan_worktree,
     remove_worktree,
+    remove_worktree_metadata,
 )
 from agent_flow.cli import _verified_checkout_identity
 from agent_flow.core.state import _safe_relative_path
@@ -185,13 +187,52 @@ def test_creation_refuses_a_symlink_planted_after_path_selection(tmp_path: Path)
         _ensure_creation_root(planted)
 
 
-def test_legacy_manifest_is_read_from_the_legacy_root(tmp_path: Path):
-    """업그레이드 전 checkout은 예전 자리에 manifest를 들고 있다."""
+def test_legacy_in_checkout_manifest_is_read_and_removed(tmp_path: Path):
+    """업그레이드 전 checkout은 예전 자리에 manifest를 들고 있다.
+
+    현재 자리만 보면 그 checkout의 branch ownership과 base를 잃고, 정리 뒤에도
+    manifest가 남는다.
+    """
     root = _leader(tmp_path)
+    legacy = legacy_managed_root(root) / "feat-old"
+    legacy.mkdir(parents=True)
+    manifest = legacy / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "name": "feat-old",
+                "branch": "feat/old",
+                "path": str(legacy),
+                "branch_created_by_agent_flow": True,
+                "base_ref": "main",
+            }
+        ),
+        encoding="utf-8",
+    )
 
-    path = _legacy_worktree_manifest_path(root=root, name="feat-old")
+    payload = _load_worktree_manifest(root=root, name="feat-old")
+    assert payload is not None and payload["branch"] == "feat/old"
 
-    assert path.parent.parent == legacy_managed_root(root)
+    status = get_worktree_status(root=root, name="feat-old")
+    assert status.branch_created_by_agent_flow is True
+
+    remove_worktree_metadata(root=root, name="feat-old", path=legacy)
+    assert not manifest.exists()
+
+
+def test_reusing_an_existing_checkout_records_its_adoption(tmp_path: Path):
+    """create가 성공했는데 run이 미채택으로 막히면 사용자에게는 이유 없는 차단이다."""
+    root = _leader(tmp_path)
+    raw = managed_worktrees_root(root) / "feat-x"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    _git("worktree", "add", "-q", "-b", "feat/x", str(raw), "main", cwd=root)
+    assert adopted_worktree_parent(root=root, path=raw) is None
+
+    reused = create_worktree(root=root, plan=plan_worktree(root=root, name="x"))
+
+    assert same_worktree_path(reused.path, raw)
+    assert adopted_worktree_parent(root=root, path=raw) is not None
+    assert _verified_checkout_identity(root=root, path=raw) == "worktree:feat-x"
 
 
 def test_stale_legacy_leftover_is_reported_and_removed_at_its_real_path(tmp_path: Path):
