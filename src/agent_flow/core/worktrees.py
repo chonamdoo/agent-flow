@@ -2645,11 +2645,12 @@ def managed_worktrees_root(root: Path) -> Path:
     보고하고, 남은 phase가 전부 exit 2로 막혔다(실측). git이 프로젝트 폴더 안에 있어야
     한다고 요구하지 않으므로 형제 디렉터리로 뺀다.
 
-    프로젝트 부모는 우리 것이 아닐 수 있다. 그 자리가 이미 symlink거나 남의 소유면
-    예전 자리로 내려간다 — 따라가면 비공개 소스와 setup 파일이 남의 경로에 생긴다.
+    부모 디렉터리가 우리 통제 밖이면 형제 자리를 아예 고르지 않는다. 남이 쓸 수 있고
+    sticky bit도 없는 부모에서는, 우리가 0700으로 만든 디렉터리도 공격자가 rename하고
+    symlink로 갈아끼울 수 있다 — 그 교체 구간을 권한 강화로는 닫지 못한다.
     """
     sibling = root.parent / f"{root.name}.worktrees"
-    if _writable_dir(sibling.parent) and _safe_creation_root(sibling):
+    if _trusted_parent_dir(sibling.parent) and _safe_creation_root(sibling):
         return sibling
     return legacy_managed_root(root)
 
@@ -2659,8 +2660,24 @@ def legacy_managed_root(root: Path) -> Path:
     return root / ".agent-flow" / "worktrees"
 
 
-def _writable_dir(path: Path) -> bool:
-    return path.is_dir() and os.access(path, os.W_OK | os.X_OK)
+def _trusted_parent_dir(path: Path) -> bool:
+    """이 디렉터리 안의 항목을 우리만 갈아끼울 수 있는가.
+
+    rename·삭제 권한은 항목이 아니라 **부모**가 준다. 그래서 소유자와 쓰기 비트를
+    본다: 우리(또는 root) 소유여야 하고, group/other가 쓸 수 있으면 sticky bit로
+    남의 항목 교체가 막혀 있어야 한다(`/tmp`가 그 형태다).
+    """
+    if not (path.is_dir() and os.access(path, os.W_OK | os.X_OK)):
+        return False
+    try:
+        info = path.stat()
+    except OSError:
+        return False
+    getuid = getattr(os, "getuid", None)
+    if getuid is not None and info.st_uid not in (0, getuid()):
+        return False
+    shared_write = info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+    return not shared_write or bool(info.st_mode & stat.S_ISVTX)
 
 
 def _safe_creation_root(path: Path) -> bool:

@@ -53,9 +53,8 @@ def _git(*args: str, cwd: Path) -> None:
     subprocess.run(("git", *args), cwd=cwd, check=True, capture_output=True, text=True)
 
 
-def _leader(tmp_path: Path) -> Path:
-    root = tmp_path / "myapp"
-    root.mkdir()
+def _leader_at(root: Path) -> Path:
+    root.mkdir(parents=True)
     _git("init", "-b", "main", ".", cwd=root)
     _git("config", "user.email", "t@t", cwd=root)
     _git("config", "user.name", "t", cwd=root)
@@ -63,6 +62,10 @@ def _leader(tmp_path: Path) -> Path:
     _git("add", ".", cwd=root)
     _git("commit", "-m", "init", cwd=root)
     return root
+
+
+def _leader(tmp_path: Path) -> Path:
+    return _leader_at(tmp_path / "myapp")
 
 
 def test_created_checkout_lands_outside_the_leader_project(tmp_path: Path):
@@ -314,3 +317,24 @@ def test_existing_creation_root_is_hardened(tmp_path: Path):
 
     assert not creation_root.stat().st_mode & (stat.S_IRWXG | stat.S_IRWXO)
     assert created.path.exists()
+
+
+def test_shared_parent_keeps_checkouts_inside_the_repo(tmp_path: Path):
+    """부모를 남이 쓸 수 있으면 형제 자리를 고르지 않는다.
+
+    rename 권한은 항목이 아니라 부모가 준다. 우리가 0700으로 만들어도 공격자가
+    그 디렉터리를 rename하고 symlink로 갈아끼울 수 있다 — 권한 강화로는 못 막는다.
+    """
+    parent = tmp_path / "shared"
+    parent.mkdir()
+    root = _leader_at(parent / "myapp")
+    os.chmod(parent, 0o777)
+
+    assert managed_worktrees_root(root) == legacy_managed_root(root)
+
+    created = create_worktree(root=root, plan=plan_worktree(root=root, name="slice"))
+    assert created.path.parent == legacy_managed_root(root)
+
+    # sticky bit가 있으면 남의 항목을 갈아끼울 수 없다 — `/tmp`가 그 형태다.
+    os.chmod(parent, 0o1777)
+    assert managed_worktrees_root(root) == parent / "myapp.worktrees"
