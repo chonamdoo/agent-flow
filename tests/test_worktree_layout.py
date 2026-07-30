@@ -31,7 +31,9 @@ from agent_flow.core.worktrees import (
     legacy_managed_root,
     managed_worktrees_root,
     plan_worktree,
+    remove_worktree,
 )
+from agent_flow.cli import _verified_checkout_identity
 from agent_flow.core.worktree_isolation import (
     WorktreeIsolationError,
     adopted_worktree_parent,
@@ -189,3 +191,32 @@ def test_legacy_manifest_is_read_from_the_legacy_root(tmp_path: Path):
     path = _legacy_worktree_manifest_path(root=root, name="feat-old")
 
     assert path.parent.parent == legacy_managed_root(root)
+
+
+def test_stale_legacy_leftover_is_reported_and_removed_at_its_real_path(tmp_path: Path):
+    """예전 자리 잔재를 현재 자리로 보고하면 정리가 헛돌고 목록에 계속 남는다."""
+    root = _leader(tmp_path)
+    stale = legacy_managed_root(root) / "feat-ghost"
+    stale.mkdir(parents=True)
+
+    status = get_worktree_status(root=root, name="feat-ghost")
+    assert status.path == stale
+
+    remove_worktree(root=root, status=status, require_merged=False)
+
+    assert not stale.exists()
+    assert "feat-ghost" not in known_worktree_names(root=root)
+
+
+def test_identity_command_refuses_a_recreated_checkout(tmp_path: Path):
+    """채택 기록의 지문이 낡으면 identity를 주지 않는다. JS 상태 루트의 authority다."""
+    root = _leader(tmp_path)
+    created = create_worktree(root=root, plan=plan_worktree(root=root, name="slice"))
+
+    assert _verified_checkout_identity(root=root, path=created.path) == "worktree:feat-slice"
+    assert _verified_checkout_identity(root=root, path=root) == "leader"
+
+    _git("worktree", "remove", "--force", str(created.path), cwd=root)
+    _git("worktree", "add", "-q", str(created.path), "feat/slice", cwd=root)
+
+    assert _verified_checkout_identity(root=root, path=created.path) is None

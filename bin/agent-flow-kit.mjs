@@ -976,7 +976,15 @@ function adoptedCheckoutName(root, cwd) {
   if (!recorded || !samePath(recorded, checkout)) {
     return null;
   }
-  return name;
+  // 경로 일치는 예선일 뿐이다. 채택 기록의 registration fingerprint까지 맞아야
+  // 한다 — 지운 뒤 같은 자리에 다시 만든 checkout이 앞 checkout의 runtime state를
+  // 물려받으면 `run push-watch`가 남의 artifact를 갱신한다. 판정은 Python이 소유한다.
+  const verified = pythonCliOutput(
+    "worktree",
+    ["identity", "--root", root, "--path", checkout],
+    { cwd: checkout },
+  );
+  return verified === `worktree:${name}` ? name : null;
 }
 
 function resolveGitCommonWorktreeRoot(start) {
@@ -2624,17 +2632,41 @@ function runGates(args) {
   runPythonCliCommand("gates", args);
 }
 
-function runPythonCliCommand(subcommand, args, { interactive = false } = {}) {
+function pythonCliEnv() {
   const root = resolveAgentFlowRoot(process.cwd());
   const pythonPathEntries = [
     root ? installedPythonRuntimePath(root) : "",
     path.join(KIT_ROOT, "src"),
     process.env.PYTHONPATH,
   ].filter(Boolean);
-  const env = {
+  return {
     ...process.env,
     PYTHONPATH: [...new Set(pythonPathEntries)].join(path.delimiter),
   };
+}
+
+// 판정을 Python에 묻는다. 지문 검증을 두 언어로 구현하면 갈라지고, 갈라진 쪽이
+// 느슨하면 그쪽이 유효한 우회로가 된다.
+function pythonCliOutput(subcommand, args, { cwd = process.cwd() } = {}) {
+  const result = safeSpawnSync(
+    preferredPython(),
+    ["-m", "agent_flow.cli", subcommand, ...args],
+    {
+      cwd,
+      env: pythonCliEnv(),
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 30000,
+    },
+  );
+  if (result.error || result.status !== 0) {
+    return null;
+  }
+  return String(result.stdout ?? "").trim() || null;
+}
+
+function runPythonCliCommand(subcommand, args, { interactive = false } = {}) {
+  const env = pythonCliEnv();
   // gates는 프로파일 게이트 전체를 순차로 돌린다. 이 저장소에서 가장 비싼 게이트는
   // `pytest -q`로 실측 5분대다. relay용 30초 상한을 걸면 정상 실행이 끝나기 전에
   // 죽는다. 개별 게이트 상한은 Python `--timeout`이 소유하고, wrapper는 그 총량만

@@ -2364,11 +2364,14 @@ def _status_for_planned_name(*, root: Path, name: str) -> WorktreeStatus:
         and payload.get("branch_created_by_agent_flow") is True
         and manifest_branch == plan.branch
     )
+    # 등록이 없는 이름이다. 잔재는 예전 자리에 있을 수 있으므로 실제로 있는 자리를
+    # 보고한다 — 현재 자리만 보면 정리가 없는 경로를 지웠다고 출력한다.
+    checkout_path = existing_checkout_path(root=root, name=plan.name)
     return WorktreeStatus(
         name=plan.name,
         branch=manifest_branch or plan.branch,
-        path=plan.path,
-        exists=plan.path.exists(),
+        path=checkout_path,
+        exists=checkout_path.exists(),
         branch_created_by_agent_flow=owned,
         requested_name=name,
         base_ref=manifest_base_ref or plan.base_ref,
@@ -2557,11 +2560,19 @@ def _metadata_belongs_to_path(*, root: Path, key: str, path: Path) -> bool:
 
     manifest가 있으면 그 안에 기록된 경로가 진실이다. manifest가 없으면 생성
     규약(관리 루트 아래 ``<key>`` 디렉터리)으로만 인정한다 — 롤백 경로처럼
-    manifest를 쓰기 전에 정리해야 하는 경우가 그 하나다.
+    manifest를 쓰기 전에 정리해야 하는 경우가 그 하나다. 생성 자리는 둘이므로
+    (현재/예전) 둘 다 본다. 한쪽만 보면 예전 자리 잔재의 런타임 메타데이터가 남아
+    그 이름이 `worktree list`에 계속 다시 나타난다.
     """
     payload = _state_key_manifest(root=root, key=key)
     if payload is None:
-        return same_worktree_path(_managed_checkout_path(root=root, name=key), path)
+        return any(
+            same_worktree_path(candidate_root / key, path)
+            for candidate_root in (
+                managed_worktrees_root(root),
+                legacy_managed_root(root),
+            )
+        )
     recorded = payload.get("path")
     if not isinstance(recorded, str) or not recorded:
         return False
@@ -2666,6 +2677,19 @@ def _ensure_creation_root(path: Path) -> None:
 
 
 def _managed_checkout_path(*, root: Path, name: str) -> Path:
+    return managed_worktrees_root(root) / name
+
+
+def existing_checkout_path(*, root: Path, name: str) -> Path:
+    """``name``의 checkout이 실제로 있는 자리. 없으면 현재 생성 자리.
+
+    조회·정리는 이 함수를 쓴다. 현재 자리만 보면 예전 자리의 잔재를 "정리했다"고
+    출력하면서 남겨 두고, 그 잔재가 `worktree list`에 계속 다시 나타난다.
+    """
+    for candidate_root in (managed_worktrees_root(root), legacy_managed_root(root)):
+        candidate = candidate_root / name
+        if candidate.exists():
+            return candidate
     return managed_worktrees_root(root) / name
 
 
