@@ -926,6 +926,15 @@ function currentCheckoutIdentity(root) {
   if (managed && samePath(managed.root, root)) {
     return `worktree:${managed.name}`;
   }
+  // 채택 판정이 leader containment보다 먼저다. 채택된 checkout이 `<leader>/.worktrees/foo`
+  // 처럼 leader 디렉터리 **아래**이면서 관리 경로 밖이면, containment가 먼저 "leader"를
+  // 내고 Python은 cwd의 채택 기록으로 `worktree:foo`를 유도해 두 값이 어긋난다.
+  // 채택 기록은 leader 자신을 지목할 수 없으므로(leader는 채택 대상이 아니다) 이 순서가
+  // leader 판정을 삼키지 않는다.
+  const adopted = adoptedCheckoutIdentity(root, cwd);
+  if (adopted) {
+    return adopted;
+  }
   const leader = canonicalPath(root);
   const relative = path.relative(leader, cwd);
   if (
@@ -935,13 +944,6 @@ function currentCheckoutIdentity(root) {
       && !path.isAbsolute(relative))
   ) {
     return "leader";
-  }
-  // 채택된 외부 checkout. 여기서 "unknown"으로 접으면 명시적 `--worktree` 없이 그
-  // cwd에서 부른 lifecycle 명령이 전부 거절된다 — Python 쪽은 채택 기록으로 같은
-  // identity를 유도한다(`_resolve_cli_root_context`). 지문 대조는 Python이 다시 한다.
-  const adopted = adoptedCheckoutIdentity(root, cwd);
-  if (adopted) {
-    return adopted;
   }
   return "unknown";
 }

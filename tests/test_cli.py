@@ -3137,6 +3137,41 @@ design-values-confirmed: n/a
             self.assertNotIn("identity is unknown", after.stdout + after.stderr)
             self.assertNotIn("identity mismatch", after.stdout + after.stderr)
 
+            # leader 디렉터리 **아래**이지만 관리 경로 밖인 자리. containment 판정이
+            # 먼저 오면 JS는 "leader", Python은 채택 기록으로 `worktree:<name>`을 내
+            # 두 값이 어긋난다.
+            inside = project_root / ".worktrees" / "nested"
+            inside.parent.mkdir(parents=True)
+            subprocess.run(
+                ("git", "worktree", "add", "-q", "-b", "feat/nested", str(inside), "HEAD"),
+                cwd=project_root,
+                check=True,
+            )
+            self.assertEqual(
+                main(
+                    [
+                        "worktree",
+                        "adopt",
+                        "--path",
+                        str(inside),
+                        "--allow-dirty",
+                        "--root",
+                        str(project_root),
+                    ]
+                ),
+                0,
+            )
+            nested = subprocess.run(
+                (node, kit, "run", "status"),
+                cwd=inside,
+                env=_node_test_env(),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotIn("identity mismatch", nested.stdout + nested.stderr)
+            self.assertNotIn("identity is unknown", nested.stdout + nested.stderr)
+
     def test_node_installer_from_agent_flow_worktree_without_root_install_is_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
