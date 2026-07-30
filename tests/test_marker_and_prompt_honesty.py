@@ -272,3 +272,36 @@ def test_android_self_report_markers_are_gone():
         if any(marker in line for marker in _ANDROID_SELF_REPORT_MARKERS)
     ]
     assert offenders == []
+ANDROID_PROFILE = REPO / "src" / "agent_flow" / "profiles" / "android.yaml"
+REVIEW_ANGLES = REPO / "templates" / "_shared" / "review"
+SKILLS = REPO / "skills"
+PRESENTATION_SKILL = SKILLS / "android-clean-presentation-architecture" / "SKILL.md"
+SDUI_SKILL = SKILLS / "android-sdui-architecture" / "SKILL.md"
+
+
+def _android_review_angles() -> dict[str, str]:
+    profile = yaml.safe_load(ANDROID_PROFILE.read_text(encoding="utf-8"))
+    return {angle["id"]: angle["prompt"] for angle in profile["review_angles"]}
+
+
+def test_udf_review_angle_is_dispatched():
+    """반증: sdui 앵글만 등재돼 비-SDUI 화면의 UDF는 아무도 판정하지 않았다."""
+    assert _android_review_angles().get("udf") == "templates/_shared/review/udf.md"
+    template = REVIEW_ANGLES / "udf.md"
+    assert template.is_file()
+    text = template.read_text(encoding="utf-8")
+    # 규칙 본문은 skill이 소유한다. 템플릿이 복제하면 원본이 둘이 된다.
+    assert "skills/android-clean-presentation-architecture/SKILL.md" in text
+    for marker in (
+        "udf-architecture: applied",
+        "udf-immutable-state-exposure: pass|fail|n/a",
+        "udf-explicit-state-modeling: pass|fail|n/a",
+        "udf-event-direction: pass|fail|n/a",
+        "viewmodel-statein-initial-load: pass|fail|n/a",
+        "udf-stateless-content-composable: pass|fail|n/a",
+        "udf-route-owns-collection: pass|fail|n/a",
+        "udf-uimodel-boundary: pass|fail|n/a",
+        "udf-state-holder-purity: pass|fail|n/a",
+        "derived-state-precomputed: pass|fail|n/a",
+    ):
+        assert marker in text

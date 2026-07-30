@@ -41,6 +41,8 @@ review_angles:
     prompt: templates/_shared/review/test-edge.md
   - id: sdui
     prompt: templates/_shared/review/sdui.md
+  - id: udf
+    prompt: templates/_shared/review/udf.md
 skills:
   install:
     - android-appshell-error-handling
