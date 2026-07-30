@@ -161,5 +161,5 @@ fi
 
 # exit 2일 때 Claude는 stderr만 모델에 전달한다. stdout은 무시된다.
 echo "BLOCKED: 보호 브랜치 '$PROTECTED_BRANCH'에서 직접 커밋/푸시하지 마세요." >&2
-echo "git worktree add -b feat/<slug> .agent-flow/worktrees/feat-<slug>/ main 로 작업 브랜치를 만드세요." >&2
+echo "agent-flow worktree create --name feat-<slug> 로 작업 worktree를 만드세요." >&2
 exit 2

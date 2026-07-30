@@ -127,6 +127,8 @@ from agent_flow.core.worktrees import (
     run_declared_worktree_actions,
     find_pending_worktree_cleanup,
     known_worktree_names,
+    legacy_managed_root,
+    managed_worktrees_root,
     plan_worktree,
     provision_host_hook_registrations,
     remove_worktree_metadata,
@@ -1342,7 +1344,7 @@ def main(argv: list[str] | None = None) -> int:
                 try:
                     status = get_worktree_status(root=root, name=name)
                 except (ValueError, RuntimeError):
-                    path = root / ".agent-flow" / "worktrees" / name
+                    path = _stale_checkout_path(root, name)
                     if worktree_path_key(path) not in listed:
                         rows.append(f"{name} - {path} stale")
                 else:
@@ -1976,6 +1978,7 @@ def main(argv: list[str] | None = None) -> int:
                         run_id=args.run_id,
                         worktree=worktree,
                     ),
+                    project_root=root,
                 )
             _write_stage_prompts(root=state_root, state=state, workflow=workflow)
         except (
@@ -2430,6 +2433,15 @@ def _continue_command(root: Path, worktree: str | None) -> str:
 
 def _known_worktree_names(root: Path) -> list[str]:
     return known_worktree_names(root=root)
+
+
+def _stale_checkout_path(root: Path, name: str) -> Path:
+    """이름만 남은 잔재의 자리. 두 생성 자리 중 실제로 있는 쪽을 보고한다."""
+    for candidate_root in (managed_worktrees_root(root), legacy_managed_root(root)):
+        candidate = candidate_root / name
+        if candidate.exists():
+            return candidate
+    return managed_worktrees_root(root) / name
 
 
 def _worktree_checkout_exists(status) -> bool:

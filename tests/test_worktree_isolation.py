@@ -76,7 +76,8 @@ def _init_repo_with_managed_hooks(root: Path) -> None:
 
 
 def _managed(root: Path) -> Path:
-    return root / ".agent-flow" / "worktrees"
+    """생성 규약이 정한 자리. 리터럴로 박으면 layout 변경을 테스트가 먼저 막는다."""
+    return W.managed_worktrees_root(root)
 
 
 def test_path_scoped_lookup_separates_query_failure_from_absence(tmp_path: Path):
@@ -334,8 +335,15 @@ def test_verify_rejects_a_git_pointer_to_a_sibling_worktree(tmp_path: Path):
     )
     (first.path / ".git").write_bytes((second.path / ".git").read_bytes())
 
-    with pytest.raises(WorktreeIsolationError, match="does not point back"):
+    # 훔친 gitdir 포인터는 채택 지문을 먼저 깬다 — 관리 루트 판정에서 걸린다.
+    with pytest.raises(WorktreeIsolationError, match="not a direct child of a managed root"):
         verify_linked_worktree(root=tmp_path, path=first.path)
+
+    # 그릇을 호출자가 지정해 그 판정을 건너뛰어도 gitdir 왕복 검증이 잡는다.
+    with pytest.raises(WorktreeIsolationError, match="does not point back"):
+        verify_linked_worktree(
+            root=tmp_path, path=first.path, managed_root=first.path.parent
+        )
 
 
 def test_verify_rejects_wrong_branch(tmp_path):
@@ -710,7 +718,7 @@ def test_e2e_team_run_next_confines_worker_writes_and_git(tmp_path):
     assert res.returncode == 0, res.stderr
     assert "t1 completed" in res.stdout
 
-    wt = tmp_path / ".agent-flow" / "worktrees" / "feat-t1-w1"
+    wt = _managed(tmp_path) / "feat-t1-w1"
     assert (wt / "worker-out.txt").exists(), "worker output missing from its worktree"
     assert not (tmp_path / "worker-out.txt").exists(), "worker leaked a write into the leader"
 

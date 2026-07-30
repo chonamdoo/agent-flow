@@ -1,0 +1,123 @@
+"""새 checkout이 leader 프로젝트 폴더 **밖**에 태어나는지 본다.
+
+안에 두면 leader를 열어 둔 IDE가 worktree 작업에 반응해 leader 쪽 캐시를 건드린다.
+tripwire는 그 변경을 정당하게 오염으로 보고하고, 남은 phase가 전부 막힌다. 그래서
+기본 자리는 leader의 형제 폴더다.
+
+layout을 옮기면 신뢰의 근거도 함께 옮겨야 한다. marker 경로는 모양만으로 관리형임을
+증명했지만 형제 폴더는 그렇지 않다 — 그래서 생성 자신이 채택 기록을 남긴다.
+"""
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+SRC = str(Path(__file__).resolve().parents[1] / "src")
+if SRC not in sys.path:
+    sys.path.insert(0, SRC)
+
+from agent_flow.core.worktrees import (
+    _is_managed_child,
+    create_worktree,
+    get_worktree_status,
+    known_worktree_names,
+    legacy_managed_root,
+    managed_worktrees_root,
+    plan_worktree,
+)
+from agent_flow.core.worktree_isolation import (
+    adopted_worktree_parent,
+    managed_worktree_root,
+    same_worktree_path,
+    trusted_checkout_paths,
+    verify_linked_worktree,
+)
+
+
+def _git(*args: str, cwd: Path) -> None:
+    subprocess.run(("git", *args), cwd=cwd, check=True, capture_output=True, text=True)
+
+
+def _leader(tmp_path: Path) -> Path:
+    root = tmp_path / "myapp"
+    root.mkdir()
+    _git("init", "-b", "main", ".", cwd=root)
+    _git("config", "user.email", "t@t", cwd=root)
+    _git("config", "user.name", "t", cwd=root)
+    (root / "f.txt").write_text("base\n", encoding="utf-8")
+    _git("add", ".", cwd=root)
+    _git("commit", "-m", "init", cwd=root)
+    return root
+
+
+def test_created_checkout_lands_outside_the_leader_project(tmp_path: Path):
+    root = _leader(tmp_path)
+
+    status = create_worktree(root=root, plan=plan_worktree(root=root, name="slice"))
+
+    assert status.path.parent == managed_worktrees_root(root)
+    assert root.resolve() not in status.path.resolve().parents
+
+
+def test_creation_records_its_own_adoption(tmp_path: Path):
+    """형제 폴더는 모양으로 증명되지 않는다. 생성이 기록을 남겨야 경계가 신뢰한다."""
+    root = _leader(tmp_path)
+
+    status = create_worktree(root=root, plan=plan_worktree(root=root, name="slice"))
+
+    assert adopted_worktree_parent(root=root, path=status.path) is not None
+    assert managed_worktree_root(root=root, path=status.path) == status.path.parent.resolve()
+    assert status.path.resolve() in trusted_checkout_paths(root=root, name=status.name)
+    # 기록이 없으면 containment 판정 자체가 실패해야 한다 — 모양은 근거가 아니다.
+    assert verify_linked_worktree(root=root, path=status.path) == status.path.resolve()
+
+
+def test_both_creation_layouts_count_as_managed(tmp_path: Path):
+    """예전 자리의 checkout도 agent-flow가 만든 것이다. 계속 관리형으로 본다."""
+    root = _leader(tmp_path)
+    created = create_worktree(root=root, plan=plan_worktree(root=root, name="slice"))
+    legacy = legacy_managed_root(root) / "feat-old"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    _git("worktree", "add", "-q", "-b", "feat/old", str(legacy), "main", cwd=root)
+
+    assert _is_managed_child(root=root, path=created.path)
+    assert _is_managed_child(root=root, path=legacy)
+
+
+def test_names_are_enumerated_from_both_layouts(tmp_path: Path):
+    """정리 명령은 목록으로 대상을 찾는다. 한쪽만 스캔하면 잔재가 안 보인다."""
+    root = _leader(tmp_path)
+    create_worktree(root=root, plan=plan_worktree(root=root, name="slice"))
+    stale = legacy_managed_root(root) / "feat-stale"
+    stale.mkdir(parents=True)
+
+    names = known_worktree_names(root=root)
+
+    assert "feat-slice" in names
+    assert "feat-stale" in names
+
+
+def test_status_resolves_the_created_checkout(tmp_path: Path):
+    root = _leader(tmp_path)
+    created = create_worktree(root=root, plan=plan_worktree(root=root, name="slice"))
+
+    status = get_worktree_status(root=root, name="slice")
+
+    assert same_worktree_path(status.path, created.path)
+    assert status.branch == "feat/slice"
+    assert status.branch_created_by_agent_flow is True
+
+
+def test_creation_falls_back_when_the_parent_is_not_writable(tmp_path: Path):
+    """상위에 쓸 수 없으면 예전 자리로 내려간다. 생성이 아예 막히는 것보다 낫다."""
+    parent = tmp_path / "ro"
+    parent.mkdir()
+    root = parent / "myapp"
+    root.mkdir()
+    _git("init", "-b", "main", ".", cwd=root)
+    parent.chmod(0o500)
+    try:
+        assert managed_worktrees_root(root) == legacy_managed_root(root)
+    finally:
+        parent.chmod(0o700)

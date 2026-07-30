@@ -949,6 +949,11 @@ function currentCheckoutIdentity(root) {
 }
 
 function adoptedCheckoutIdentity(root, cwd) {
+  const name = adoptedCheckoutName(root, cwd);
+  return name ? `worktree:${name}` : null;
+}
+
+function adoptedCheckoutName(root, cwd) {
   const topLevel = gitOutput(cwd, ["rev-parse", "--show-toplevel"]);
   const commonDir = gitOutput(cwd, ["rev-parse", "--git-common-dir"]);
   if (!topLevel || !commonDir) {
@@ -971,7 +976,7 @@ function adoptedCheckoutIdentity(root, cwd) {
   if (!recorded || !samePath(recorded, checkout)) {
     return null;
   }
-  return `worktree:${name}`;
+  return name;
 }
 
 function resolveGitCommonWorktreeRoot(start) {
@@ -1128,12 +1133,13 @@ function readCurrentRun(root, worktree = null) {
 }
 
 function pythonRunStateRoot(root, worktree = null) {
-  const managed = resolveManagedWorktreeContext(process.cwd());
-  const requestedName = worktree || (
-    managed && samePath(managed.root, root)
-      ? managed.name
-      : null
-  );
+  const cwd = canonicalPath(process.cwd());
+  const managed = resolveManagedWorktreeContext(cwd);
+  // 채택 기록도 이름의 근거다. 새 기본 자리는 관리 경로 밖이므로 이걸 빼면 worktree
+  // 안에서 leader의 run state를 읽어 phase가 어긋난다.
+  const requestedName = worktree
+    || (managed && samePath(managed.root, root) ? managed.name : null)
+    || adoptedCheckoutName(root, cwd);
   if (!requestedName) {
     return root;
   }

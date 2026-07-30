@@ -48,6 +48,8 @@ from agent_flow.core.team import ShutdownSignal
 from agent_flow.core.workflow import _stage_from_payload
 from agent_flow.core.worktrees import (
     get_worktree_status,
+    legacy_managed_root,
+    managed_worktrees_root,
     plan_worktree,
     worktree_runtime_root,
 )
@@ -2388,7 +2390,7 @@ class CliTest(unittest.TestCase):
     def test_node_installer_skips_managed_worktree_reinstall(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
-            worktree_root = project_root / ".agent-flow" / "worktrees" / "feat-task"
+            worktree_root = legacy_managed_root(project_root) / "feat-task"
             worktree_root.mkdir(parents=True)
             node = _node_executable()
             installer = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
@@ -2418,7 +2420,7 @@ class CliTest(unittest.TestCase):
     def test_legacy_node_installer_skips_managed_worktree_reinstall(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
-            worktree_root = project_root / ".agent-flow" / "worktrees" / "feat-task"
+            worktree_root = legacy_managed_root(project_root) / "feat-task"
             worktree_root.mkdir(parents=True)
             node = _node_executable()
             kit_installer = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
@@ -2466,7 +2468,7 @@ class CliTest(unittest.TestCase):
             # 차지해 installer가 진짜 hook을 못 쓰고, kit.json digest와 갈라진다.
             _init_git_repo(project_root)
             subprocess.run(("git", "branch", "feat/slice"), cwd=project_root, check=True)
-            worktree = project_root / ".agent-flow" / "worktrees" / "slice"
+            worktree = legacy_managed_root(project_root) / "slice"
             worktree.parent.mkdir(parents=True, exist_ok=True)
             subprocess.run(
                 ("git", "worktree", "add", "-q", str(worktree), "feat/slice"),
@@ -2673,7 +2675,7 @@ verify: manual
             )
             self.assertEqual(start.returncode, 0, start.stderr)
             worktree_name = "feat-show-empty-search-results"
-            checkout = project_root / ".agent-flow" / "worktrees" / worktree_name
+            checkout = managed_worktrees_root(project_root) / worktree_name
             run_dir = _node_phase_run_dir(
                 project_root,
                 worktree=worktree_name,
@@ -2893,7 +2895,7 @@ design-values-confirmed: n/a
                 "AGENT_FLOW_GENERIC_MODE": "stub-success",
             }):
                 self.assertEqual(main(["run", "slice", "--root", str(root)]), 0)
-            worktree = root / ".agent-flow" / "worktrees" / "feat-slice"
+            worktree = managed_worktrees_root(root) / "feat-slice"
             self.assertTrue((worktree / ".git").exists())
 
             old_cwd = Path.cwd()
@@ -2917,7 +2919,7 @@ design-values-confirmed: n/a
             root.mkdir()
             _init_git_repo(root)
             self.assertEqual(main(["run", "slice", "--root", str(root)]), 0)
-            worktree = root / ".agent-flow" / "worktrees" / "feat-slice"
+            worktree = managed_worktrees_root(root) / "feat-slice"
 
             old_cwd = Path.cwd()
             try:
@@ -2934,8 +2936,8 @@ design-values-confirmed: n/a
                 os.chdir(old_cwd)
 
             self.assertIn("already active", output.getvalue())
-            self.assertFalse((root / ".agent-flow" / "worktrees" / "feat-other").exists())
-            self.assertFalse((worktree / ".agent-flow" / "worktrees").exists())
+            self.assertFalse((managed_worktrees_root(root) / "feat-other").exists())
+            self.assertFalse((managed_worktrees_root(worktree)).exists())
 
     def test_python_cli_consent_starts_run_in_current_managed_worktree(self) -> None:
         from agent_flow.core.worktrees import create_worktree
@@ -2972,7 +2974,7 @@ design-values-confirmed: n/a
                 status.path.resolve(),
             )
             self.assertFalse(
-                (root / ".agent-flow" / "worktrees" / "feat-new-task").exists()
+                (managed_worktrees_root(root) / "feat-new-task").exists()
             )
 
     def test_python_cli_start_from_worktree_requires_and_accepts_reuse_consent(
@@ -3044,7 +3046,7 @@ design-values-confirmed: n/a
             root.mkdir()
             _init_git_repo(root)
             self.assertEqual(main(["run", "slice", "--root", str(root)]), 0)
-            worktree = root / ".agent-flow" / "worktrees" / "feat-slice"
+            worktree = managed_worktrees_root(root) / "feat-slice"
 
             old_cwd = Path.cwd()
             try:
@@ -3070,7 +3072,7 @@ design-values-confirmed: n/a
             finally:
                 os.chdir(old_cwd)
 
-            self.assertFalse((root / ".agent-flow" / "worktrees" / "feat-other").exists())
+            self.assertFalse((managed_worktrees_root(root) / "feat-other").exists())
 
     def test_node_lifecycle_relay_recognizes_an_adopted_external_checkout(self) -> None:
         """반증: JS relay가 cwd를 leader/관리 경로로만 분류하면, 채택된 외부 checkout에서
@@ -3177,7 +3179,7 @@ design-values-confirmed: n/a
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
             node = _node_executable()
-            worktree = project_root / ".agent-flow" / "worktrees" / "slice"
+            worktree = legacy_managed_root(project_root) / "slice"
             worktree.mkdir(parents=True)
 
             result = subprocess.run(
@@ -4055,7 +4057,7 @@ if (codexContext !== undefined) {
                 check=False,
             )
             self.assertEqual(installed.returncode, 0, installed.stderr)
-            checkout = project / ".agent-flow" / "worktrees" / "api-work"
+            checkout = managed_worktrees_root(project) / "api-work"
             checkout.parent.mkdir(parents=True, exist_ok=True)
             subprocess.run(
                 ("git", "worktree", "add", "-b", "feat/api", str(checkout), "main"),
@@ -4164,7 +4166,7 @@ if (codexContext !== undefined) {
                 ),
             )
 
-            checkout = project / ".agent-flow" / "worktrees" / "feat-demo"
+            checkout = managed_worktrees_root(project) / "feat-demo"
             run_dir = _node_phase_run_dir(
                 project,
                 "r1",
@@ -5211,7 +5213,7 @@ if (codexContext !== undefined) {
             )
             run_dir = _node_phase_run_dir(project_root, worktree="feat-demo")
             project_root = (
-                project_root / ".agent-flow" / "worktrees" / "feat-demo"
+                managed_worktrees_root(project_root) / "feat-demo"
             )
             _set_node_phase(run_dir, "pr-watch")
 
@@ -6648,16 +6650,16 @@ if (codexContext !== undefined) {
                     ),
                     0,
                 )
-            worktree = root / ".agent-flow" / "worktrees" / "feat-slice-a"
+            worktree = managed_worktrees_root(root) / "feat-slice-a"
             run_dir = worktree_runtime_root(root=root, name="feat-slice-a") / ".agent-flow" / "runs" / "development" / "r1"
             manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["worktree"]["name"], "feat-slice-a")
+            self.assertEqual(manifest["worktree"]["branch"], "feat/slice-a")
+            # 기본 자리가 leader 밖이라 기록은 절대 경로다. 어느 쪽이든 그
+            # checkout을 가리켜야 한다.
             self.assertEqual(
-                manifest["worktree"],
-                {
-                    "name": "feat-slice-a",
-                    "branch": "feat/slice-a",
-                    "path": ".agent-flow/worktrees/feat-slice-a",
-                },
+                (root / manifest["worktree"]["path"]).resolve(),
+                worktree.resolve(),
             )
             self.assertTrue(worktree.is_dir())
 
@@ -6771,7 +6773,7 @@ if (codexContext !== undefined) {
                     2,
                 )
             self.assertFalse((root / ".agent-flow" / "runs" / "development" / "r1").exists())
-            self.assertFalse((root / ".agent-flow" / "worktrees" / "feat-slice-a").exists())
+            self.assertFalse((managed_worktrees_root(root) / "feat-slice-a").exists())
 
     def test_worktree_create_manifest_write_failure_cleans_worktree(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -6783,7 +6785,7 @@ if (codexContext !== undefined) {
                     main(["worktree", "create", "--root", str(root), "--name", "slice-a"]),
                     2,
                 )
-            self.assertFalse((root / ".agent-flow" / "worktrees" / "feat-slice-a").exists())
+            self.assertFalse((managed_worktrees_root(root) / "feat-slice-a").exists())
 
     def test_start_reuses_existing_worktree_manifest_branch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -6878,7 +6880,7 @@ if (codexContext !== undefined) {
                 )
             )
             self.assertEqual(manifest["worktree"]["branch"], "feat/slice-a")
-            self.assertTrue((root / ".agent-flow" / "worktrees" / "feat-slice-a").is_dir())
+            self.assertTrue((managed_worktrees_root(root) / "feat-slice-a").is_dir())
 
     def test_detect_profile_defaults_to_generic(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -7493,7 +7495,7 @@ if (codexContext !== undefined) {
                 json.dumps({"profile": "android", "profiles": ["android", "react-native"]}),
                 encoding="utf-8",
             )
-            worktree = root / ".agent-flow" / "worktrees" / "semantic-architecture-parity"
+            worktree = legacy_managed_root(root) / "semantic-architecture-parity"
             worktree.mkdir(parents=True)
             (worktree / ".git").write_text("gitdir: ../../.git/worktrees/semantic-architecture-parity\n", encoding="utf-8")
 
@@ -7598,7 +7600,7 @@ if (codexContext !== undefined) {
     def test_node_architecture_lint_accepts_worktree_argument(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            worktree = root / ".agent-flow" / "worktrees" / "semantic-architecture-parity"
+            worktree = legacy_managed_root(root) / "semantic-architecture-parity"
             worktree.mkdir(parents=True)
             (worktree / ".git").write_text("gitdir: ../../.git/worktrees/semantic-architecture-parity\n", encoding="utf-8")
             node = _node_executable()
@@ -7626,7 +7628,7 @@ if (codexContext !== undefined) {
     def test_node_gates_accepts_worktree_argument(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            worktree = root / ".agent-flow" / "worktrees" / "semantic-architecture-parity"
+            worktree = legacy_managed_root(root) / "semantic-architecture-parity"
             worktree.mkdir(parents=True)
             (worktree / ".git").write_text("gitdir: ../../.git/worktrees/semantic-architecture-parity\n", encoding="utf-8")
             run_dir = root / ".agent-flow" / "runs" / "worktree-runtime"
@@ -7992,13 +7994,13 @@ if (codexContext !== undefined) {
             plan = plan_worktree(root=root, name="Implement Login")
             self.assertEqual(plan.name, "feat-implement-login")
             self.assertEqual(plan.branch, "feat/implement-login")
-            self.assertEqual(plan.path, root / ".agent-flow" / "worktrees" / "feat-implement-login")
+            self.assertEqual(plan.path, managed_worktrees_root(root) / "feat-implement-login")
 
             korean_plan = plan_worktree(root=root, name="버그 수정")
             # 한글 task도 deterministic fallback slug로 worktree를 만들 수 있어야 한다.
             self.assertRegex(korean_plan.name, r"^feat-task-[a-f0-9]{8}$")
             self.assertEqual(korean_plan.branch, korean_plan.name.replace("feat-", "feat/", 1))
-            self.assertEqual(korean_plan.path, root / ".agent-flow" / "worktrees" / korean_plan.name)
+            self.assertEqual(korean_plan.path, managed_worktrees_root(root) / korean_plan.name)
             with mock.patch("agent_flow.core.commands.subprocess.Popen", side_effect=OSError("no git")):
                 fallback_plan = plan_worktree(root=root, name="No Git")
             # git 확인이 불가능한 환경에서는 기존 HEAD fallback으로 plan 생성만 유지한다.
@@ -8036,7 +8038,7 @@ if (codexContext !== undefined) {
                     ),
                     0,
             )
-            worktree = root / ".agent-flow" / "worktrees" / "feat-slice-a"
+            worktree = managed_worktrees_root(root) / "feat-slice-a"
             self.assertTrue(worktree.is_dir())
             self.assertTrue((worktree_runtime_root(root=root, name="feat-slice-a") / "manifest.json").is_file())
             self.assertFalse((worktree / "manifest.json").exists())
@@ -8070,7 +8072,7 @@ if (codexContext !== undefined) {
             ).stdout.strip()
             worktree_head = subprocess.run(
                 ("git", "rev-parse", "HEAD"),
-                cwd=root / ".agent-flow" / "worktrees" / "feat-slice-a",
+                cwd=managed_worktrees_root(root) / "feat-slice-a",
                 text=True,
                 capture_output=True,
                 check=True,
@@ -8095,11 +8097,11 @@ if (codexContext !== undefined) {
                 main(["worktree", "create", "--root", str(root), "--name", "after-init"]),
                 0,
             )
-            self.assertTrue((root / ".agent-flow" / "worktrees" / "feat-after-init").is_dir())
+            self.assertTrue((managed_worktrees_root(root) / "feat-after-init").is_dir())
 
     def test_worktree_remove_accepts_listed_name_of_direct_worktree(self) -> None:
-        # workflows/full-feature.yaml이 시키는 그대로 만든 worktree다. manifest가 없고
-        # 디스크 이름이 agent-flow 정규화 결과와 어긋난다.
+        # 손으로 예전 자리에 만든 worktree다. manifest가 없고 디스크 이름이
+        # agent-flow 정규화 결과와 어긋난다.
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             _init_git_repo(root)
@@ -8129,7 +8131,7 @@ if (codexContext !== undefined) {
                     main(["worktree", "remove", "--root", str(root), "--name", listed_name]),
                     0,
                 )
-            self.assertFalse((root / ".agent-flow" / "worktrees" / "feat-issue#110").exists())
+            self.assertFalse((managed_worktrees_root(root) / "feat-issue#110").exists())
             # agent-flow가 그 브랜치를 만들었다는 증거가 없으므로 브랜치는 남는다.
             self.assertIn("kept branch feat/issue#110", removed.getvalue())
             branches = subprocess.run(
@@ -8146,7 +8148,7 @@ if (codexContext !== undefined) {
             root = Path(temp_dir).resolve()
             _init_git_repo(root)
             self.assertEqual(main(["worktree", "create", "--root", str(root), "--name", "slice-a"]), 0)
-            expected = root / ".agent-flow" / "worktrees" / "feat-slice-a"
+            expected = managed_worktrees_root(root) / "feat-slice-a"
             for name in ("slice-a", "feat-slice-a", "feat/slice-a"):
                 output = io.StringIO()
                 with contextlib.redirect_stdout(output):
@@ -8168,7 +8170,7 @@ if (codexContext !== undefined) {
             foreign = Path(temp_dir) / "foreign"
             foreign.mkdir()
             _init_git_repo(foreign)
-            planted = root / ".agent-flow" / "worktrees" / "feat-alien"
+            planted = managed_worktrees_root(root) / "feat-alien"
             planted.parent.mkdir(parents=True)
             subprocess.run(
                 ("git", "worktree", "add", "-q", "-b", "feat/alien", str(planted), "main"),
@@ -8200,7 +8202,7 @@ if (codexContext !== undefined) {
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             _init_git_repo(root)
-            worktree = root / ".agent-flow" / "worktrees" / "feat-issue#110"
+            worktree = legacy_managed_root(root) / "feat-issue#110"
             subprocess.run(
                 (
                     "git",
@@ -8241,7 +8243,7 @@ if (codexContext !== undefined) {
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             _init_git_repo(root)
-            worktree = root / ".agent-flow" / "worktrees" / "feat-issue#110"
+            worktree = legacy_managed_root(root) / "feat-issue#110"
             subprocess.run(
                 (
                     "git",
@@ -8706,7 +8708,7 @@ if (codexContext !== undefined) {
                 ),
                 encoding="utf-8",
             )
-            worktree = root / ".agent-flow" / "worktrees" / "feat-child"
+            worktree = managed_worktrees_root(root) / "feat-child"
             worktree.mkdir(parents=True)
             untrusted_calls = root / "untrusted-hook-cli-calls"
             untrusted = worktree / ".agent-flow" / "bin" / "agent-flow"
@@ -11030,7 +11032,7 @@ if (codexContext !== undefined) {
             root.mkdir()
             _init_git_repo(root)
             self.assertEqual(main(["run", "slice", "--root", str(root)]), 0)
-            checkout = root / ".agent-flow" / "worktrees" / "feat-slice"
+            checkout = managed_worktrees_root(root) / "feat-slice"
             self.assertTrue((checkout / ".git").exists())
             state_root = worktree_runtime_root(root=root, name="feat-slice")
             # runs/ 에는 run 디렉터리 말고 `active` 마커와 `active.lock` lease 파일도

@@ -197,7 +197,7 @@ def _create_worktree(
             )
         # 재사용 경로도 생성 경로와 똑같은 증명을 통과해야 한다. `.git`이 있다는
         # 사실만으로는 이 저장소의 worktree라는 근거가 되지 않는다.
-        verify_linked_worktree(root=root, path=plan.path)
+        verify_linked_worktree(root=root, path=plan.path, managed_root=plan.path.parent)
         existing = get_worktree_status(root=root, name=plan.name)
         if plan.branch_explicit and existing.branch != plan.branch:
             raise ValueError(
@@ -209,7 +209,14 @@ def _create_worktree(
     branch_created = _add_worktree_locked(root=root, plan=plan)
     # Fail closed: trust the path only after git confirms it is a linked
     # worktree of this repo on the expected branch.
-    verify_linked_worktree(root=root, path=plan.path, expected_branch=plan.branch)
+    # containment는 생성 규약이 정한 자리를 그대로 넘긴다. 기본값은 예전 자리라
+    # 새 기본 위치에서 항상 escape로 걸린다. 실질 증명은 아래 gitdir 왕복 검증이다.
+    verify_linked_worktree(
+        root=root,
+        path=plan.path,
+        expected_branch=plan.branch,
+        managed_root=plan.path.parent,
+    )
     registered = _registered_at_path(root=root, path=plan.path)
     if registered is None or registered.registration_identity is None:
         raise WorktreeIsolationError(
@@ -229,6 +236,15 @@ def _create_worktree(
     )
     try:
         write_worktree_manifest(root=root, status=status)
+        # 새 기본 자리는 marker 후보가 아니다. 경계가 claim의 소유 checkout을 고르는
+        # 근거(`trusted_checkout_paths`)는 marker layout 아니면 채택 기록뿐이므로,
+        # agent-flow가 만든 것도 스스로 기록해 둔다 — 이건 leader 쪽 행위다.
+        record_adopted_checkout(
+            root=root,
+            name=status.name,
+            path=status.path,
+            registration_identity=status.registration_identity,
+        )
     except Exception:
         try:
             # create_worktree still owns the shared repository lease here. Calling
@@ -303,7 +319,7 @@ def attach_worktree(
         # 생성 경로로 흘려보내면 selector를 디렉터리 이름으로 뭉개 엉뚱한 checkout을
         # 만든다(절대경로 selector는 경로 전체가 이름이 된다).
         raise ValueError(
-            f"worktree {registered.path} is outside {_managed_root(root)} and is not "
+            f"worktree {registered.path} is outside {managed_worktrees_root(root)} and is not "
             f"adopted; run `agent-flow worktree adopt --path {registered.path}` first"
         )
     if not (registered.path / ".git").is_file():
@@ -444,11 +460,17 @@ def _adopted(*, root: Path, path: Path) -> bool:
 
 
 def _is_managed_child(*, root: Path, path: Path) -> bool:
+    """agent-flow의 생성 규약이 정한 자리에 있는가.
+
+    새 자리(leader 형제)와 예전 자리(`<leader>/<marker>/worktrees`)를 모두 인정한다.
+    이미 만들어진 checkout은 예전 자리에 있고, 그것도 agent-flow가 만든 것이다.
+    """
     parent_key = worktree_path_key(path.parent)
-    return any(
-        parent_key == worktree_path_key(root / marker / "worktrees")
+    candidates = [managed_worktrees_root(root)] + [
+        root / marker / "worktrees"
         for marker in (".agent-flow", ".codex", ".Codex", ".omp")
-    )
+    ]
+    return any(parent_key == worktree_path_key(candidate) for candidate in candidates)
 
 
 def _assert_requestable_branch(branch: str) -> None:
@@ -2458,9 +2480,11 @@ def resolve_worktree_name(*, root: Path, name: str) -> str:
 
 def known_worktree_names(*, root: Path) -> list[str]:
     names: set[str] = set()
-    checkout_root = root / ".agent-flow" / "worktrees"
-    if checkout_root.exists():
-        names.update(path.name for path in checkout_root.iterdir() if path.is_dir())
+    # 생성 자리는 둘이다: 현재 기본 자리와 예전 자리. 하나만 보면 남은 잔재를
+    # `worktree list`가 보고하지 못해 정리 명령이 대상을 못 찾는다.
+    for checkout_root in {managed_worktrees_root(root), legacy_managed_root(root)}:
+        if checkout_root.exists():
+            names.update(path.name for path in checkout_root.iterdir() if path.is_dir())
     runtime_root = _agent_flow_git_dir(root) / "worktrees"
     if runtime_root.exists():
         names.update(path.name for path in runtime_root.iterdir() if path.is_dir())
@@ -2568,12 +2592,34 @@ def _git_dirty(root: Path) -> bool:
     return bool(dirty_lines)
 
 
-def _managed_root(root: Path) -> Path:
+def managed_worktrees_root(root: Path) -> Path:
+    """새 checkout이 태어나는 자리. leader 프로젝트 폴더 **밖**이다.
+
+    안에 두면 leader를 열어 둔 IDE가 worktree 작업에 반응해 leader 쪽 캐시를 건드린다 —
+    Android Studio가 `.gradle/`을 갱신해 leader tripwire가 그것을 정당하게 오염으로
+    보고하고, 남은 phase가 전부 exit 2로 막혔다(실측). git이 프로젝트 폴더 안에 있어야
+    한다고 요구하지 않으므로 형제 디렉터리로 뺀다.
+
+    상위 디렉터리에 쓸 수 없으면 예전 자리로 내려간다. 인식은 layout이 아니라 등록부와
+    채택 기록이 하므로(`trusted_checkout_paths`) 이 선택이 신뢰를 바꾸지는 않는다.
+    """
+    sibling = root.parent / f"{root.name}.worktrees"
+    if _writable_dir(sibling.parent):
+        return sibling
+    return legacy_managed_root(root)
+
+
+def legacy_managed_root(root: Path) -> Path:
+    """예전 기본 자리. 이미 만들어진 checkout이 여기 있으므로 계속 인식한다."""
     return root / ".agent-flow" / "worktrees"
 
 
+def _writable_dir(path: Path) -> bool:
+    return path.is_dir() and os.access(path, os.W_OK | os.X_OK)
+
+
 def _managed_checkout_path(*, root: Path, name: str) -> Path:
-    return _managed_root(root) / name
+    return managed_worktrees_root(root) / name
 
 
 def _runtime_state_root(*, root: Path, name: str) -> Path:
