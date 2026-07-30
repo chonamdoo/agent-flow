@@ -89,7 +89,7 @@ HomeRepositoryImpl -> HomeRemoteDataSource -> HomeApiService
 - ViewModels inject use cases, one context's repository interface, and platform
   abstractions — never repository impls, data sources, API services, DTOs,
   `Context`, `Activity`, or `NavController`. A use case is required when the call
-  crosses contexts, orders multi-step side effects, or translates error codes.
+  crosses contexts, orders multi-step side effects, or adds domain/business failure semantics.
 - UI state is immutable and explicit for loading/error/empty/offline/success
   states that can occur.
 - Domain-to-UI mapping lives in presentation mappers.

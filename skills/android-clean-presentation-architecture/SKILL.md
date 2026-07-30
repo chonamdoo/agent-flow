@@ -53,7 +53,8 @@ For Android/Kotlin/Compose/KMP implementation or review:
 - `domain` owns repository interfaces, use cases, and domain models.
 - `data` implements domain repositories and binds implementations to interfaces.
 - `network` provides Retrofit/API infrastructure.
-- A ViewModel may inject a **single context's repository interface** directly. Put a use case in `core/domain/<context>` when one of these holds: (a) it combines repositories from two or more contexts, (b) it runs multi-step side effects whose order carries meaning (reservation, fence, polling), (c) it translates transport or domain error codes into the screen's result type. Do not write a use case that forwards one repository method without changing its arguments.
+- A ViewModel may inject a **single context's repository interface** directly. Put a use case in `core/domain/<context>` when one of these holds: (a) it combines repositories from two or more contexts, (b) it runs multi-step side effects whose order carries meaning (reservation, fence, polling), (c) it adds domain/business failure semantics beyond repository error translation. Do not write a use case that forwards one repository method without changing its arguments.
+- Repositories/data map transport failures to domain errors; a presentation mapper converts domain/application errors into screen-specific UI results.
 - In every case presentation injects neither a repository implementation, nor a data source, nor an API service.
 - Keep public feature contracts, including route keys and exported entry contracts, in `feature:*:api` when the repo uses feature api/presentation split.
 - Keep Compose screens, routes, ViewModels, UI contracts, UI models, and mappers in `feature:*:presentation`.

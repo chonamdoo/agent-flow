@@ -622,6 +622,12 @@ def gradle_project_dependencies(path: Path) -> set[str]:
     text = path.read_text(encoding="utf-8", errors="replace")
     dependencies = set(re.findall(r"project\(\s*['\"](:[A-Za-z0-9_:-]+)['\"]\s*\)", text))
     dependencies.update(re.findall(r"project\s+['\"](:[A-Za-z0-9_:-]+)['\"]", text))
+    dependencies.update(
+        re.findall(
+            r"\bproject\(\s*path\s*(?:=|:)\s*['\"](:[A-Za-z0-9_:-]+)['\"]",
+            text,
+        )
+    )
     dependencies.update(type_safe_project_dependencies(text))
     return dependencies
 

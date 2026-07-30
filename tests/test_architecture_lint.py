@@ -197,6 +197,25 @@ def test_core_database_role_is_mapped_and_dependency_gated():
     assert ":core:database" not in forbidden_gradle_dependencies("core-data", {})
 
 
+def test_gradle_named_project_dependencies_are_extracted(tmp_path):
+    """반증: named `path` 형식을 놓치면 금지된 모듈 의존이 gate를 통과한다."""
+    from agent_flow.core.architecture_lint import gradle_project_dependencies
+
+    kotlin_build = tmp_path / "build.gradle.kts"
+    kotlin_build.write_text(
+        'implementation(project(path = ":core:data"))\n',
+        encoding="utf-8",
+    )
+    groovy_build = tmp_path / "build.gradle"
+    groovy_build.write_text(
+        "implementation(project(path: ':core:database'))\n",
+        encoding="utf-8",
+    )
+
+    assert gradle_project_dependencies(kotlin_build) == {":core:data"}
+    assert gradle_project_dependencies(groovy_build) == {":core:database"}
+
+
 def test_container_build_file_does_not_bind_to_placeholder_role():
     """반증: leaf 모듈의 build.gradle.kts가 `<adapter>` 하위 모듈로 오인됐다."""
     from agent_flow.core.architecture_lint import match_role

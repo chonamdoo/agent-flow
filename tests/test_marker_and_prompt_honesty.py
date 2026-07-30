@@ -406,6 +406,23 @@ def test_viewmodel_dependency_boundary_replaces_the_usecase_only_marker():
     )
 
 
+def test_use_case_error_semantics_do_not_cross_the_ui_mapping_boundary():
+    """반증: use case가 screen result를 만들면 domain이 UI 표현에 의존한다."""
+    sources = (
+        SKILLS / "clean-architecture-core" / "SKILL.md",
+        SKILLS / "android-clean-architecture" / "SKILL.md",
+        PRESENTATION_SKILL,
+    )
+
+    for path in sources:
+        text = path.read_text(encoding="utf-8")
+        assert "domain/business failure semantics" in text
+        assert "screen result type" not in text
+        assert "screen's result type" not in text
+    presentation = PRESENTATION_SKILL.read_text(encoding="utf-8")
+    assert "presentation mapper" in presentation
+
+
 def test_the_three_contradicted_rules_are_reconciled():
     """반증: 두 문서가 같은 어휘로 정반대를 요구하면 리뷰어가 어느 쪽이든 fail을 낼 수 있다."""
     stability = (REVIEW_ANGLES / "compose-stability.md").read_text(encoding="utf-8")

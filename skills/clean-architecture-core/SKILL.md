@@ -38,12 +38,13 @@ Repository impl -> RemoteDataSource / LocalDataSource / Cache / Mapper
 RemoteDataSource -> ApiService or transport client
 ```
 
-A presentation state holder may depend on a single context's repository interface
+- A presentation state holder may depend on a single context's repository interface
 directly when no orchestration is needed: the use case in the chain above is
-required when the call crosses contexts, orders multi-step side effects, or
-translates transport/domain error codes into a screen result type. The forbidden
-edge is presentation to a repository implementation, data source, or API service,
-never presentation to a domain contract.
+required when the call crosses contexts, orders multi-step side effects, or adds
+domain/business failure semantics. Repositories/data map transport failures to
+domain errors; presentation maps domain/application errors to UI results. The
+forbidden edge is presentation to a repository implementation, data source, or
+API service, never presentation to a domain contract.
 
 - Domain must not import UI, DB, HTTP, SDK, serialization framework, DI
   framework, or transport implementation details.
