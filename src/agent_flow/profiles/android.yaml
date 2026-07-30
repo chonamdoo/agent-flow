@@ -41,6 +41,8 @@ review_angles:
     prompt: templates/_shared/review/test-edge.md
   - id: sdui
     prompt: templates/_shared/review/sdui.md
+  - id: udf
+    prompt: templates/_shared/review/udf.md
 skills:
   install:
     - android-appshell-error-handling
@@ -113,6 +115,14 @@ skills:
 architecture:
   contract: clean-architecture-core
   platform: android
+  # 평면 `core/*` 레이아웃(role 표에 없는 형태)에 설치하면 필수 gate가 변경 파일 전량에
+  # 미매핑 finding을 냈다. `core/domain`이 있을 때만 이 계약을 채택한 저장소로 본다.
+  # `android/app`은 별개 이유로 필요하다 — react-native 저장소는 `android/` 변경에
+  # 이 profile이 덧붙는데(`expanded_lint_profile_ids`) 루트 `core/domain`이 없어서,
+  # 이 목록에 없으면 `app-shell` role이 선언한 `android/app` 검사까지 함께 꺼진다.
+  # 맨 `app`은 넣지 않는다 — 평면 Android 저장소의 미매핑 오탐이 되살아난다.
+  strict_when_roots_present: true
+  activation_roots: ["core/domain", "android/app"]
   roles:
     - id: app-shell
       paths: ["app", "android/app"]
@@ -158,6 +168,11 @@ architecture:
       paths: ["core/network"]
       modules: [":core:network"]
       package_suffix: "core.network"
+    - id: core-database
+      paths: ["core/database"]
+      modules: [":core:database"]
+      package_suffix: "core.database"
+      forbidden: ["@Composable", "ViewModel", "ApiService", "Dto"]
     - id: core-platform
       paths: ["core/platform"]
       modules: [":core:platform"]

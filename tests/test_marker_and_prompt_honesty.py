@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -272,3 +273,186 @@ def test_android_self_report_markers_are_gone():
         if any(marker in line for marker in _ANDROID_SELF_REPORT_MARKERS)
     ]
     assert offenders == []
+ANDROID_PROFILE = REPO / "src" / "agent_flow" / "profiles" / "android.yaml"
+REVIEW_ANGLES = REPO / "templates" / "_shared" / "review"
+SKILLS = REPO / "skills"
+PRESENTATION_SKILL = SKILLS / "android-clean-presentation-architecture" / "SKILL.md"
+SDUI_SKILL = SKILLS / "android-sdui-architecture" / "SKILL.md"
+
+
+def _android_review_angles() -> dict[str, str]:
+    profile = yaml.safe_load(ANDROID_PROFILE.read_text(encoding="utf-8"))
+    return {angle["id"]: angle["prompt"] for angle in profile["review_angles"]}
+
+
+def test_udf_review_angle_is_dispatched():
+    """반증: sdui 앵글만 등재돼 비-SDUI 화면의 UDF는 아무도 판정하지 않았다."""
+    assert _android_review_angles().get("udf") == "templates/_shared/review/udf.md"
+    template = REVIEW_ANGLES / "udf.md"
+    assert template.is_file()
+    text = template.read_text(encoding="utf-8")
+    # 규칙 본문은 skill이 소유한다. 템플릿이 복제하면 원본이 둘이 된다.
+    assert "skills/android-clean-presentation-architecture/SKILL.md" in text
+    for marker in (
+        "udf-architecture: applied",
+        "udf-immutable-state-exposure: pass|fail|n/a",
+        "udf-explicit-state-modeling: pass|fail|n/a",
+        "udf-event-direction: pass|fail|n/a",
+        "viewmodel-statein-initial-load: pass|fail|n/a",
+        "udf-stateless-content-composable: pass|fail|n/a",
+        "udf-route-owns-collection: pass|fail|n/a",
+        "udf-uimodel-boundary: pass|fail|n/a",
+        "udf-state-holder-purity: pass|fail|n/a",
+        "derived-state-precomputed: pass|fail|n/a",
+    ):
+        assert marker in text
+
+
+def _frontmatter(path: Path) -> dict[str, Any]:
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith("---\n")
+    body = text.split("---\n", 2)[1]
+    parsed = yaml.safe_load(body)
+    assert isinstance(parsed, dict)
+    return parsed
+
+
+def test_sdui_depends_on_the_presentation_contract():
+    """반증: dependencies에 presentation이 없어 SDUI 세션은 UDF 원문을 한 번도 읽지 않았다."""
+    dependencies = _frontmatter(SDUI_SKILL).get("dependencies") or []
+    assert "android-clean-architecture" in dependencies
+    assert "android-clean-presentation-architecture" in dependencies
+
+    presentation = PRESENTATION_SKILL.read_text(encoding="utf-8")
+    assert "## Server-Driven Screen Exception" in presentation
+    # 이름이 반대로 붙는다는 사실이 예외 절의 핵심이다. 방향으로 판정하게 만든다.
+    assert "ScreenEvent" in presentation and "UiEffect" in presentation
+    assert presentation.index("## Server-Driven Screen Exception") < presentation.index(
+        "## Navigation Rule"
+    )
+
+    sdui_angle = (REVIEW_ANGLES / "sdui.md").read_text(encoding="utf-8")
+    assert "sdui-udf-contract: pass|fail|n/a" in sdui_angle
+    assert "sdui-udf-contract: pass|fail|n/a" in SDUI_SKILL.read_text(encoding="utf-8")
+
+    checklist = (SDUI_SKILL.parent / "references" / "sdui-review-checklist.md").read_text(
+        encoding="utf-8"
+    )
+    item_nine = checklist.split("## 9. `sdui-udf-contract`", 1)[1]
+    for evidence_rule in ("Source:", "Rule:", "How to check:", "Verdict:"):
+        assert evidence_rule in item_nine
+
+
+def test_promoted_presentation_rules_stay_project_neutral():
+    """반증: `AppResult<T>`를 올렸다가 존재하지 않는 타입을 요구한 적이 있다."""
+    text = PRESENTATION_SKILL.read_text(encoding="utf-8")
+    for promoted in (
+        "Do not start initial screen-state loading from `init`",
+        "`MutableStateFlow` is for ViewModel-owned input and transient transition state",
+        "## Derived Display State",
+        "## List Item Modeling",
+        "## UiModel Stability",
+        "Preview and Compose UI tests target the stateless screen/content composable",
+    ):
+        assert promoted in text
+    # 프로젝트 로컬 메커니즘은 승격 대상이 아니다. 올리면 없는 타입을 요구하게 된다.
+    for project_local in (
+        "launchCatching",
+        "CommonErrorNotifier",
+        "ViewModelErrorLauncher",
+        "AppError",
+        "AppFailure",
+        "AppResult",
+        "TaraeDimensions",
+        "TaraeColors",
+        "TaraeTypography",
+    ):
+        assert project_local not in text
+
+
+def test_viewmodel_dependency_boundary_replaces_the_usecase_only_marker():
+    """반증: 조건절 없는 marker를 남겨 두면 use case 3개짜리 저장소가 전면 fail이 된다."""
+    clean = (SKILLS / "android-clean-architecture" / "SKILL.md").read_text(encoding="utf-8")
+    assert "viewmodel-injects-usecases-only" not in clean
+    # 혼합 주입과 도메인 의존 없는 ViewModel도 합법 상태다. 값이 없으면 marker가
+    # 조건절 없는 marker와 같은 방식으로 정상 코드를 fail로 만든다.
+    assert (
+        "viewmodel-dependency-boundary: "
+        "usecase|single-context-repository|mixed|no-domain-dependency|fail|n/a" in clean
+    )
+
+    presentation = PRESENTATION_SKILL.read_text(encoding="utf-8")
+    assert "single context's repository interface" in presentation
+    # 조건 셋이 문장에 남아 있어야 "언제 use case인가"가 판정 가능하다.
+    assert "two or more contexts" in presentation
+    assert "order carries meaning" in presentation
+
+    ssot_sources = (
+        SDUI_SKILL,
+        SKILLS / "android-sdui-architecture" / "references" / "offline-ssot-data-guide.md",
+        SKILLS / "android-sdui-architecture" / "references" / "sdui-review-checklist.md",
+        REVIEW_ANGLES / "sdui.md",
+    )
+    for path in ssot_sources:
+        text = path.read_text(encoding="utf-8")
+        assert "sdui-room-ssot:" not in text
+        assert "Room is the single source of truth" not in text
+        # frontmatter description도 같은 단정을 하면 phase 프롬프트 한 줄 요약이
+        # 좁혀진 규칙보다 넓은 문장을 먼저 보여 준다.
+        assert "Room-as-single-source-of-truth" not in text
+    assert "sdui-room-ssot-scope: pass|fail|n/a" in SDUI_SKILL.read_text(encoding="utf-8")
+    assert "sdui-room-ssot-scope: pass|fail|n/a" in (REVIEW_ANGLES / "sdui.md").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_use_case_error_semantics_do_not_cross_the_ui_mapping_boundary():
+    """반증: use case가 screen result를 만들면 domain이 UI 표현에 의존한다."""
+    sources = (
+        SKILLS / "clean-architecture-core" / "SKILL.md",
+        SKILLS / "android-clean-architecture" / "SKILL.md",
+        PRESENTATION_SKILL,
+    )
+
+    for path in sources:
+        text = path.read_text(encoding="utf-8")
+        assert "domain/business failure semantics" in text
+        assert "screen result type" not in text
+        assert "screen's result type" not in text
+    presentation = PRESENTATION_SKILL.read_text(encoding="utf-8")
+    assert "presentation mapper" in presentation
+
+
+def test_the_three_contradicted_rules_are_reconciled():
+    """반증: 두 문서가 같은 어휘로 정반대를 요구하면 리뷰어가 어느 쪽이든 fail을 낼 수 있다."""
+    stability = (REVIEW_ANGLES / "compose-stability.md").read_text(encoding="utf-8")
+    # 값 읽기는 아래로, flow 수집은 진입 composable에. 둘을 구분하지 않으면 UDF와 충돌한다.
+    assert "Narrow the read, never the collection point." in stability
+    assert "skills/android-clean-presentation-architecture/SKILL.md" in stability
+
+    presentation = PRESENTATION_SKILL.read_text(encoding="utf-8")
+    assert "where acquisition happens, not the call shape" in presentation
+    assert "stateful overload" in presentation
+    assert "screen/content composables" not in presentation.lower()
+    assert "stateless rendering composables" in presentation
+    clean = (SKILLS / "android-clean-architecture" / "SKILL.md").read_text(encoding="utf-8")
+    assert "screen/content composables" not in clean.lower()
+    assert "stateless rendering composables" in clean.lower()
+    udf = " ".join((REVIEW_ANGLES / "udf.md").read_text(encoding="utf-8").split())
+    assert "screen and content composables do not" not in udf
+    assert "content composables below the screen entry do not" in udf
+
+    # 존재하지 않는 타입 요구가 android profile의 다른 앵글로 옮겨가지 않게 함께 본다.
+    generalized = (
+        SKILLS / "android-guides" / "references" / "architecture-rules-guide.md",
+        REVIEW_ANGLES / "android-skills.md",
+    )
+    for path in generalized:
+        text = path.read_text(encoding="utf-8")
+        assert "AppResult" not in text
+        assert "AppError" not in text
+    guide = generalized[0].read_text(encoding="utf-8")
+    assert "the project's result type" in guide
+    assert "existing `Result`/exception contract" in guide
+    angle = generalized[1].read_text(encoding="utf-8")
+    assert "transport-failure to domain-error" in angle

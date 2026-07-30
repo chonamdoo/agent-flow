@@ -20,10 +20,15 @@ diff touches none of these, mark the completion gate `n/a`.
    confirm token resolution lives only in the design-system module. A numeric
    fallback in the token table is resilience, not permission.
 
-2. **`sdui-room-ssot`** — state holders and UI observe a storage flow, never an
-   API response. Confirm the screen flow originates from a DAO `Flow`, that no
-   network data source is injected into a state holder, and that refresh returns
-   `Result<Unit>` instead of a screen.
+2. **`sdui-room-ssot-scope`** — state holders and UI observe a storage flow for
+   every state that must survive a process restart, whether one screen or many
+   observe it, never an API response. Confirm the durable screen flow originates
+   from a DAO or DataStore `Flow`, that no network data source is injected into a
+   state holder, and that refresh returns `Result<Unit>` instead of a screen. Then
+   name which observed state this change treats as durable and which as ephemeral —
+   progress flags, one-shot effects, command responses, clock offset, cursor pages,
+   credentials, and media bytes belong outside storage, and holding them there is
+   not a finding.
 
 3. **`sdui-action-finite-vocabulary`** — every action `type` in the payload has a
    counterpart in the sealed action model, the executor `when` is exhaustive with
@@ -62,11 +67,23 @@ diff touches none of these, mark the completion gate `n/a`.
    occurrence identified; report `n/a` when repository-wide repetition was not
    surveyed, and say so rather than guessing.
 
+9. **`sdui-udf-contract`** — the UDF direction survives the server-driven
+   indirection. Confirm the upward type (often named `ScreenEvent`) carries only
+   UI input, that the downward one-shot type (often named `UiEffect`) leaves
+   through a buffered `Channel` or another deliberate single-consumer model that
+   neither drops nor replays, never `StateFlow`, and that renderers and node
+   composables stay stateless: no `hiltViewModel()`, `viewModel()`,
+   `collectAsStateWithLifecycle()`, or navigation API below the screen entry.
+   `templates/_shared/review/udf.md` judges the rest; this item only fixes the
+   two contracts SDUI indirection can quietly break.
+
 ## Must-fix policy
 
 Items 1 through 6 are correctness or contract failures. Any `fail` there produces
 `verdict: request-changes`. Item 7 is must-fix when an interactive node was added
-or changed, otherwise should-fix. Item 8 is never must-fix on its own.
+or changed, otherwise should-fix. Item 8 is never must-fix on its own. Item 9 is
+must-fix: a durable state riding the effect channel or a stateful renderer breaks
+every screen the renderer serves.
 
 ## Required completion gate
 
@@ -74,13 +91,14 @@ or changed, otherwise should-fix. Item 8 is never must-fix on its own.
 ## Completion Gate
 sdui-architecture: applied
 sdui-design-token-only: pass|fail
-sdui-room-ssot: pass|fail|n/a
+sdui-room-ssot-scope: pass|fail|n/a
 sdui-action-finite-vocabulary: pass|fail|n/a
 sdui-parse-depth-limit: pass|fail|n/a
 sdui-unknown-node-fallback: pass|fail|n/a
 sdui-list-key-contenttype: pass|fail|n/a
 sdui-accessibility-field: pass|fail|n/a
 sdui-semantic-promotion: pass|fail|n/a
+sdui-udf-contract: pass|fail|n/a
 ```
 
 ## Output format

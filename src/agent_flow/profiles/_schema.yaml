@@ -94,7 +94,7 @@ optional:
     strict_when_roots_present: "optional bool; if true, deterministic lint is n/a until activation_roots exist or are changed"
     activation_roots: ["optional path roots that indicate the architecture contract is adopted"]
     roles:
-      - id: "app-shell | core-domain | core-data | feature-api | feature-presentation | core-ui | core-network | core-platform | core-platform-adapter | navigation-api | navigation-impl"
+      - id: "app-shell | android-native | core-domain | core-data | core-database | core-ui | core-design-system | core-resources | core-network | core-platform | core-platform-adapter | core-permission | feature-api | feature-presentation | navigation-api | navigation-impl"
         paths: ["platform/native/path/<context-or-feature>"]
         modules: ["optional module id pattern"]
         package_suffix: "optional package suffix pattern"

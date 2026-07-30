@@ -20,19 +20,25 @@ Verdict: `fail` on any raw literal in a styling field. A numeric fallback inside
 the token table is resilience, not permission — server-side schema validation
 must still reject the literal.
 
-## 2. `sdui-room-ssot`
+## 2. `sdui-room-ssot-scope`
 
 Source: PART 1-8, PART 6-3, PART 6-6.
 
-Rule: state holders and UI observe a storage flow. No component subscribes to an
-API response, and refresh writes to storage before anything renders.
+Rule: state holders and UI observe a storage flow for every state that must
+survive a process restart, whether one screen or many observe it. No component
+subscribes to an API response, and refresh writes to storage before anything
+renders. Progress flags, one-shot effects, command responses, server clock offset,
+cursor pages, auth credentials, and media bytes stay outside storage — see
+`offline-ssot-data-guide.md`.
 
-How to check: confirm the screen flow originates from a DAO `Flow`; confirm no
-network data source is injected into a state holder; confirm refresh functions
-return `Result<Unit>` rather than a screen.
+How to check: confirm the durable screen flow originates from a DAO or DataStore
+`Flow`; confirm no network data source is injected into a state holder; confirm
+refresh functions return `Result<Unit>` rather than a screen; then name which
+observed state the change treats as durable and which as ephemeral.
 
-Verdict: `fail` if a rendered value can reach the UI without passing through
-storage. `n/a` when the change touches no data path.
+Verdict: `fail` if a durable rendered value reaches the UI without passing through
+storage, or if a DTO is subscribed to directly. `n/a` when the change touches no
+data path. Ephemeral state held outside storage is not a finding on its own.
 
 ## 3. `sdui-action-finite-vocabulary`
 
@@ -125,3 +131,20 @@ compare the count against the existing semantic component list.
 Verdict: `fail` only with a concrete third occurrence identified. `n/a` is the
 correct verdict when the change is diff-local and repository-wide repetition was
 not surveyed — say so rather than guessing.
+
+## 9. `sdui-udf-contract`
+
+Source: PART 11.
+
+Rule: the upward event type carries only UI input, the downward one-shot type
+uses a deliberate single-consumer channel that neither drops nor replays, and
+renderers stay stateless.
+
+How to check: inspect the event/effect types and their transport, then inspect
+renderer and node composables for state-holder creation, state collection, or
+navigation calls below the screen entry.
+
+Verdict: `fail` when durable state rides the effect channel, the effect transport
+drops or replays one-shot work, or a renderer/node composable owns screen state
+or navigation. `n/a` when the change does not touch these contracts.
+

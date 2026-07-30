@@ -1,18 +1,21 @@
 ---
 name: android-sdui-architecture
-description: Hybrid Server-Driven UI architecture for Android — server layout tree vs client semantic components, design-token-only styling, Room-as-single-source-of-truth offline rendering, a finite action vocabulary, and crash-safe recursive renderers. Use when designing, implementing, or reviewing SDUI screens, UiNode trees, screen JSON schemas, action interpreters, section patch operations, or server-side screen composition on Android. Do not use for static native Compose screens, WebView-hosted dynamic content, or payload design no renderer consumes.
+description: Hybrid Server-Driven UI architecture for Android — server layout tree vs client semantic components, design-token-only styling, storage-backed offline rendering scoped to durable shared state, a finite action vocabulary, and crash-safe recursive renderers. Use when designing, implementing, or reviewing SDUI screens, UiNode trees, screen JSON schemas, action interpreters, section patch operations, or server-side screen composition on Android. Do not use for static native Compose screens, WebView-hosted dynamic content, or payload design no renderer consumes.
 workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
 taskTerms: [sdui, server-driven ui, server driven ui, 서버 드리븐, 서버드리븐, 서버 주도 ui, 동적 화면, json 렌더링, 컴포넌트 카탈로그]
 pathGlobs: ["**/sdui/**", "**/*UiNode*", "**/*ScreenComposer*", "**/*NodeRenderer*"]
-dependencies: [android-clean-architecture]
+dependencies: [android-clean-architecture, android-clean-presentation-architecture]
 ---
 
 # Android SDUI Architecture
 
 Server-Driven UI is a contract problem before it is a rendering problem. Load
-[`android-clean-architecture`](../android-clean-architecture/SKILL.md) first for
-module, data, and DI boundaries; this skill adds only the SDUI-specific axes,
-schema rules, and failure modes.
+[`android-clean-architecture`](../android-clean-architecture/SKILL.md) for module,
+data, and DI boundaries and
+[`android-clean-presentation-architecture`](../android-clean-presentation-architecture/SKILL.md)
+for the UDF contract its `## Server-Driven Screen Exception` section scopes for
+server-driven screens; this skill adds only the SDUI-specific axes, schema rules,
+and failure modes.
 
 ## Quick start
 
@@ -38,7 +41,9 @@ Three axes hold the design together (PART 3-1):
 
 1. **Hybrid rendering** — layout tree for free composition, semantic components
    for fixed design.
-2. **Offline-first** — Room is the single source of truth; UI observes Room only.
+2. **Offline-first** — local storage is the single source of truth for every
+   state the screen must survive a process restart with, whether one screen or
+   many observe it. `offline-ssot-data-guide.md` names what stays outside it.
 3. **UDF** — state flows storage to UI, events flow UI to the state holder.
 
 ## Module Shape
@@ -91,7 +96,8 @@ Read only the matching file.
 ## Review Checklist
 
 1. **Design tokens only** — styling JSON carries token names, never raw dp or hex.
-2. **Room is the source of truth** — state holders observe storage, not responses.
+2. **Storage is the source of truth, in scope** — durable shared screen state is
+   observed from storage; ephemeral state is named and excluded.
 3. **Finite action vocabulary** — every action `type` is in the sealed vocabulary.
 4. **Parse depth limit** — the recursive parser caps depth and falls back past it.
 5. **Unknown node fallback** — unsupported types render a fallback, never crash.
@@ -99,6 +105,9 @@ Read only the matching file.
 7. **Accessibility field** — interactive nodes carry label/role mapped to semantics.
 8. **Semantic promotion** — a combination repeated in three or more places
    becomes a semantic component.
+9. **UDF contract** — the upward event type carries only UI input, the downward
+   one-shot type leaves through a single-consumer channel that neither drops nor
+   replays, and renderers stay stateless.
 
 ## Required Markers
 
@@ -107,13 +116,14 @@ Include these in the completion artifact or review output:
 ```text
 sdui-architecture: applied
 sdui-design-token-only: pass|fail
-sdui-room-ssot: pass|fail|n/a
+sdui-room-ssot-scope: pass|fail|n/a
 sdui-action-finite-vocabulary: pass|fail|n/a
 sdui-parse-depth-limit: pass|fail|n/a
 sdui-unknown-node-fallback: pass|fail|n/a
 sdui-list-key-contenttype: pass|fail|n/a
 sdui-accessibility-field: pass|fail|n/a
 sdui-semantic-promotion: pass|fail|n/a
+sdui-udf-contract: pass|fail|n/a
 ```
 
 ## Evidence Basis

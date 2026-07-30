@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import argparse
 import re
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from agent_flow.core.profiles import active_profile_ids, load_profile_payload
+from agent_flow.core.commands import run_safe_command
 
 
 SOURCE_SUFFIXES = {".gradle", ".kt", ".kts", ".java", ".swift", ".py", ".ts", ".tsx", ".js", ".jsx"}
@@ -40,7 +40,45 @@ CORE_FAMILY_SEGMENTS = {
     "resources",
     "ui",
 }
-PLACEHOLDER_RESERVED_SEGMENTS = {"src", "build", "gradle", ".gradle"}
+PLACEHOLDER_RESERVED_SEGMENTS = {
+    "src",
+    "build",
+    "gradle",
+    ".gradle",
+    "build.gradle",
+    "build.gradle.kts",
+}
+# role id는 profile 간 공유 어휘다. 표를 모듈 상수로 두면 어떤 role이 gradle 의존
+# 규칙을 갖고 어떤 role이 의도적으로 무제약인지 한자리에서 읽히고, 테스트가 profile의
+# role 집합과 대조할 수 있다. if 사슬로 두면 role을 늘릴 때 규칙 누락이 조용히 통과한다.
+FORBIDDEN_GRADLE_MODULES: dict[str, tuple[str, ...]] = {
+    # 도메인이 Room 모듈을 보면 저장소 구현이 도메인 계약을 통과해 새어 들어온다.
+    "core-domain": (":app", ":core:data", ":core:database", ":core:network", ":core:platform", ":core:navigation:impl", ":feature"),
+    "core-data": (":app", ":feature"),
+    # 선언된 방향은 `core:data -> core:database` 하나뿐이다. 역방향을 열어 두면
+    # Room 모듈이 repository 구현을 통해 도메인 계약까지 되짚어 올라간다.
+    "core-database": (":app", ":core:data", ":feature"),
+    "feature-api": (":app", ":core:data", ":core:database", ":feature:<feature>:presentation"),
+    "feature-presentation": (":app", ":core:data", ":core:database"),
+    "navigation-api": (":app", ":core:navigation:impl", ":feature"),
+}
+REQUIRED_GRADLE_MODULES: dict[str, tuple[str, ...]] = {
+    "core-data": (":core:domain:<context>",),
+    "feature-presentation": (":feature:<feature>:api",),
+    "navigation-impl": (":core:navigation:api",),
+}
+# gradle 의존 방향 제약을 두지 않기로 한 role. 표에 없는 것과 구분해서 적는다.
+UNCONSTRAINED_GRADLE_ROLES: frozenset[str] = frozenset({
+    "app-shell",
+    "android-native",
+    "core-ui",
+    "core-design-system",
+    "core-resources",
+    "core-network",
+    "core-platform",
+    "core-platform-adapter",
+    "core-permission",
+})
 
 
 @dataclass(frozen=True)
@@ -74,7 +112,11 @@ def lint_project(root: Path, profile_id: str, files: list[str] | None = None) ->
         path = root / rel_path
         match = match_role(rel_path, roles)
         if match is None:
-            if managed_roots and not is_root_gradle_config(rel_path):
+            if (
+                managed_roots
+                and is_managed_architecture_path(rel_path, managed_roots)
+                and not is_root_gradle_config(rel_path)
+            ):
                 findings.append(Finding(rel_path, "path is outside profile architecture role mapping"))
             continue
         text = path.read_text(encoding="utf-8", errors="replace") if path.exists() and path.is_file() else ""
@@ -88,8 +130,9 @@ def lint_project(root: Path, profile_id: str, files: list[str] | None = None) ->
 
 
 def lint_profiles(root: Path, profile_ids: list[str], files: list[str] | None = None) -> dict[str, list[Finding]]:
+    requested_profile_ids = list(profile_ids)
     candidates = normalized_candidate_files(files if files is not None else changed_files(root))
-    profile_ids = expanded_lint_profile_ids(profile_ids, candidates)
+    profile_ids = expanded_lint_profile_ids(requested_profile_ids, candidates)
     if len(profile_ids) <= 1:
         return {
             profile_id: lint_project(root, profile_id, files=files)
@@ -99,12 +142,23 @@ def lint_profiles(root: Path, profile_ids: list[str], files: list[str] | None = 
         profile_id: profile_lint_context(profile_id)
         for profile_id in profile_ids
     }
+    android_is_supplemental = (
+        "react-native" in requested_profile_ids
+        and "android" not in requested_profile_ids
+        and "android" in profile_ids
+    )
     selected: dict[str, list[str]] = {profile_id: [] for profile_id in profile_ids}
     for rel_path in candidates:
         relevant_profiles = [
             profile_id
             for profile_id, context in contexts.items()
-            if context_path_is_relevant(rel_path, context)
+            if not (
+                android_is_supplemental
+                and profile_id == "android"
+                and rel_path != "android"
+                and not rel_path.startswith("android/")
+            )
+            and context_path_is_relevant(rel_path, context)
         ]
         if not relevant_profiles:
             fallback = first_profile_with_roles(profile_ids, contexts)
@@ -116,6 +170,33 @@ def lint_profiles(root: Path, profile_ids: list[str], files: list[str] | None = 
         profile_id: lint_project(root, profile_id, files=profile_files)
         for profile_id, profile_files in selected.items()
     }
+
+
+def inactive_lint_profile_ids(root: Path, profile_ids: list[str], candidates: list[str]) -> list[str]:
+    inactive: list[str] = []
+    for profile_id in profile_ids:
+        architecture = load_profile_payload(profile_id).get("architecture")
+        if not isinstance(architecture, dict):
+            continue
+        roles = architecture.get("roles")
+        if not isinstance(roles, list) or not roles:
+            continue
+        if not architecture_lint_is_active(root, architecture, candidates):
+            inactive.append(profile_id)
+    return inactive
+
+
+def unconfigured_lint_profile_ids(profile_ids: list[str]) -> list[str]:
+    unconfigured: list[str] = []
+    for profile_id in profile_ids:
+        architecture = load_profile_payload(profile_id).get("architecture")
+        if not isinstance(architecture, dict):
+            unconfigured.append(profile_id)
+            continue
+        roles = architecture.get("roles")
+        if not isinstance(roles, list) or not roles:
+            unconfigured.append(profile_id)
+    return unconfigured
 
 
 def expanded_lint_profile_ids(profile_ids: list[str], candidates: list[str]) -> list[str]:
@@ -181,25 +262,48 @@ def root_path_is_active(rel_path: str, activation_roots: tuple[str, ...]) -> boo
 def changed_files(root: Path) -> list[str]:
     if not (root / ".git").exists():
         return []
-    tracked = subprocess.run(
-        ["git", "diff", "--name-only", "--diff-filter=ACMRTUXB", "HEAD", "--"],
+    tracked = run_safe_command(
+        ["git", "diff", "--name-only", "-z", "--diff-filter=ACMRTUXB", "HEAD", "--"],
         cwd=root,
-        text=True,
-        capture_output=True,
-        check=False,
     )
-    untracked = subprocess.run(
-        ["git", "ls-files", "--others", "--exclude-standard"],
+    tracked_outputs: list[str] = []
+    if tracked.ok:
+        tracked_outputs.append(tracked.stdout)
+    else:
+        staged = run_safe_command(
+            ["git", "diff", "--cached", "--name-only", "-z", "--diff-filter=ACMRTUXB", "--"],
+            cwd=root,
+        )
+        unstaged = run_safe_command(
+            ["git", "diff", "--name-only", "-z", "--diff-filter=ACMRTUXB", "--"],
+            cwd=root,
+        )
+        if not staged.ok or not unstaged.ok:
+            details = [
+                result.stderr.strip() or result.error or "git did not answer"
+                for result in (tracked, staged, unstaged)
+                if not result.ok
+            ]
+            raise ValueError(
+                "git diff failed while discovering architecture lint candidates: "
+                + "; ".join(details)
+            )
+        tracked_outputs.extend((staged.stdout, unstaged.stdout))
+    untracked = run_safe_command(
+        ["git", "ls-files", "-z", "--others", "--exclude-standard"],
         cwd=root,
-        text=True,
-        capture_output=True,
-        check=False,
     )
-    files: list[str] = []
-    if tracked.returncode == 0:
-        files.extend(line.strip() for line in tracked.stdout.splitlines() if line.strip())
-    if untracked.returncode == 0:
-        files.extend(line.strip() for line in untracked.stdout.splitlines() if line.strip())
+    if not untracked.ok:
+        detail = untracked.stderr.strip() or untracked.error or "git did not answer"
+        raise ValueError(
+            f"git ls-files failed while discovering architecture lint candidates: {detail}"
+        )
+    files = [
+        item
+        for output in (*tracked_outputs, untracked.stdout)
+        for item in output.split("\0")
+        if item
+    ]
     return list(dict.fromkeys(files))
 
 
@@ -518,6 +622,12 @@ def gradle_project_dependencies(path: Path) -> set[str]:
     text = path.read_text(encoding="utf-8", errors="replace")
     dependencies = set(re.findall(r"project\(\s*['\"](:[A-Za-z0-9_:-]+)['\"]\s*\)", text))
     dependencies.update(re.findall(r"project\s+['\"](:[A-Za-z0-9_:-]+)['\"]", text))
+    dependencies.update(
+        re.findall(
+            r"\bproject\(\s*path\s*(?:=|:)\s*['\"](:[A-Za-z0-9_:-]+)['\"]",
+            text,
+        )
+    )
     dependencies.update(type_safe_project_dependencies(text))
     return dependencies
 
@@ -539,27 +649,23 @@ def gradle_accessor_segment_to_module(segment: str) -> str:
 
 
 def forbidden_gradle_dependencies(role_id: str, captures: dict[str, str]) -> list[str]:
-    if role_id == "core-domain":
-        return [":app", ":core:data", ":core:network", ":core:platform", ":core:navigation:impl", ":feature"]
-    if role_id == "core-data":
-        return [":app", ":feature"]
-    if role_id == "feature-api":
-        return [":app", ":core:data", ":feature:" + captures.get("feature", "") + ":presentation"]
-    if role_id == "feature-presentation":
-        return [":app", ":core:data"]
-    if role_id == "navigation-api":
-        return [":app", ":core:navigation:impl", ":feature"]
-    return []
+    return _resolved_modules(FORBIDDEN_GRADLE_MODULES.get(role_id, ()), captures)
+
+
+def _resolved_modules(templates: tuple[str, ...], captures: dict[str, str]) -> list[str]:
+    resolved: list[str] = []
+    for template in templates:
+        module = replace_placeholders(template, captures)
+        # 치환되지 않은 placeholder가 남으면 어떤 모듈 문자열과도 매치되지 않는다.
+        # 그대로 반환하면 규칙이 finding 없이 사라지므로 여기서 떨어뜨린다.
+        if "<" in module:
+            continue
+        resolved.append(module)
+    return resolved
 
 
 def required_gradle_dependencies(role_id: str, captures: dict[str, str]) -> list[str]:
-    if role_id == "core-data" and captures.get("context"):
-        return [f":core:domain:{captures['context']}"]
-    if role_id == "feature-presentation" and captures.get("feature"):
-        return [f":feature:{captures['feature']}:api"]
-    if role_id == "navigation-impl":
-        return [":core:navigation:api"]
-    return []
+    return _resolved_modules(REQUIRED_GRADLE_MODULES.get(role_id, ()), captures)
 
 
 def replace_placeholders(value: str, captures: dict[str, str]) -> str:
@@ -604,14 +710,57 @@ def main(argv: list[str] | None = None) -> int:
     root = Path(args.root).resolve()
     try:
         profile_ids = active_profile_ids(root, args.profile)
-        findings_by_profile = lint_profiles(root, profile_ids, files=args.files)
+        unconfigured = unconfigured_lint_profile_ids(profile_ids)
+        if profile_ids and len(unconfigured) == len(profile_ids):
+            print(
+                f"{','.join(unconfigured)}: architecture lint n/a "
+                "(architecture contract absent)"
+            )
+            return 0
+        # 확장 출처는 `lint_profiles`가 보존해야 한다. react-native가 덧붙인 Android
+        # profile은 `android/**`만 검사하고, 명시적으로 요청된 Android는 전체 role을 검사한다.
+        candidates = normalized_candidate_files(
+            args.files if args.files is not None else changed_files(root)
+        )
+        findings_by_profile = lint_profiles(root, profile_ids, files=candidates)
+        profile_ids = list(findings_by_profile)
+        inactive = inactive_lint_profile_ids(root, profile_ids, candidates)
+        unconfigured = unconfigured_lint_profile_ids(profile_ids)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 1
+    checked = [
+        profile_id
+        for profile_id in profile_ids
+        if profile_id not in inactive and profile_id not in unconfigured
+    ]
     if not any(findings_by_profile.values()):
-        print(f"{','.join(profile_ids)}: architecture lint passed")
+        # 필수 gate가 한 파일도 검사하지 않고 "passed"를 찍으면 운영자는 통과와
+        # 비적용을 구분할 수 없다. 활성 조건을 도입한 순간부터 둘은 다른 사실이다.
+        if checked:
+            print(f"{','.join(checked)}: architecture lint passed")
+        if inactive:
+            print(f"{','.join(inactive)}: architecture lint n/a (activation_roots absent)")
+        if unconfigured:
+            print(f"{','.join(unconfigured)}: architecture lint n/a (architecture contract absent)")
         return 0
-    print(f"{','.join(profile_ids)}: architecture lint failed", file=sys.stderr)
+    # 실패 헤드라인도 profile별 판정 사실을 유지한다. 한 profile의 실패 때문에 다른
+    # profile의 통과와 비적용이 출력에서 사라지면 gate 결과를 구분할 수 없다.
+    failed = [profile_id for profile_id, findings in findings_by_profile.items() if findings]
+    passed = [profile_id for profile_id in checked if profile_id not in failed]
+    print(f"{','.join(failed)}: architecture lint failed", file=sys.stderr)
+    if passed:
+        print(f"{','.join(passed)}: architecture lint passed", file=sys.stderr)
+    if inactive:
+        print(
+            f"{','.join(inactive)}: architecture lint n/a (activation_roots absent)",
+            file=sys.stderr,
+        )
+    if unconfigured:
+        print(
+            f"{','.join(unconfigured)}: architecture lint n/a (architecture contract absent)",
+            file=sys.stderr,
+        )
     for profile_id, findings in findings_by_profile.items():
         for finding in findings:
             print(f"- [{profile_id}] {finding.path}: {finding.message}", file=sys.stderr)

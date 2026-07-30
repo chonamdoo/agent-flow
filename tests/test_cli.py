@@ -1238,7 +1238,7 @@ class CliTest(unittest.TestCase):
             unmanaged.parent.mkdir(parents=True, exist_ok=True)
             unmanaged.write_text("export function Button() { return null }\n", encoding="utf-8")
             unmanaged_findings = lint_project(root, "nextjs", files=[str(unmanaged.relative_to(root))])
-            self.assertIn("path is outside profile architecture role mapping", "\n".join(f.message for f in unmanaged_findings))
+            self.assertEqual(unmanaged_findings, [])
             self.assertEqual(lint_project(root, "android", files=["settings.gradle.kts"]), [])
 
             managed_outside_role = root / "src" / "core" / "wrong" / "Thing.ts"
@@ -1298,10 +1298,7 @@ class CliTest(unittest.TestCase):
             outside.parent.mkdir(parents=True, exist_ok=True)
             outside.write_text("export function Button() { return null }\n", encoding="utf-8")
             partitioned_outside = lint_profiles(root, ["nextjs", "android"], files=[str(outside.relative_to(root))])
-            self.assertIn(
-                "path is outside profile architecture role mapping",
-                "\n".join(f.message for findings in partitioned_outside.values() for f in findings),
-            )
+            self.assertTrue(all(not findings for findings in partitioned_outside.values()))
 
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -7553,15 +7550,18 @@ if (codexContext !== undefined) {
             self.assertEqual(output.getvalue().strip(), "generic: 1/1 gates passed")
 
             output = io.StringIO()
-            captured_lint: dict[str, object] = {}
+            captured_lint_args: list[str] = []
 
-            def fake_lint_profiles(cwd: Path, profile_ids: list[str], files: list[str] | None = None):
-                captured_lint["cwd"] = cwd
-                captured_lint["profile_ids"] = profile_ids
-                captured_lint["files"] = files
-                return {profile_id: [] for profile_id in profile_ids}
+            def fake_architecture_lint_main(argv: list[str] | None = None) -> int:
+                self.assertIsNotNone(argv)
+                captured_lint_args.extend(argv or [])
+                print("android,react-native: architecture lint passed")
+                return 0
 
-            with mock.patch("agent_flow.cli.lint_profiles", side_effect=fake_lint_profiles):
+            with mock.patch(
+                "agent_flow.cli.architecture_lint_main",
+                side_effect=fake_architecture_lint_main,
+            ):
                 with contextlib.redirect_stdout(output):
                     self.assertEqual(
                         main(
@@ -7575,8 +7575,10 @@ if (codexContext !== undefined) {
                         ),
                         0,
                     )
-            self.assertEqual(captured_lint["cwd"].resolve(), worktree.resolve())
-            self.assertEqual(captured_lint["profile_ids"], ["android", "react-native"])
+            root_index = captured_lint_args.index("--root") + 1
+            profile_index = captured_lint_args.index("--profile") + 1
+            self.assertEqual(Path(captured_lint_args[root_index]).resolve(), worktree.resolve())
+            self.assertEqual(captured_lint_args[profile_index], "android,react-native")
             self.assertIn("android,react-native: architecture lint passed", output.getvalue())
 
             output = io.StringIO()
@@ -7595,7 +7597,10 @@ if (codexContext !== undefined) {
                     ),
                     0,
                 )
-            self.assertIn("generic: architecture lint passed", output.getvalue())
+            self.assertIn(
+                "generic: architecture lint n/a (architecture contract absent)",
+                output.getvalue(),
+            )
 
     def test_node_architecture_lint_accepts_worktree_argument(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -7623,7 +7628,10 @@ if (codexContext !== undefined) {
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("generic: architecture lint passed", result.stdout)
+            self.assertIn(
+                "generic: architecture lint n/a (architecture contract absent)",
+                result.stdout,
+            )
 
     def test_node_gates_accepts_worktree_argument(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

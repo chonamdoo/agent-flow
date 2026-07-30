@@ -17,7 +17,7 @@ This is not a standalone Clean Architecture guide. Load [`clean-architecture-cor
 
 ```text
 app/
-core/{ui,designsystem,resources,platform,network,navigation/api,navigation/impl}
+core/{ui,designsystem,resources,platform,network,database,navigation/api,navigation/impl}
 core/domain/<context>/
 core/data/<context>/
 feature/<name>/api/
@@ -36,6 +36,12 @@ string after `src/main/java`.
   policies, domain services, domain errors.
 - `core/data/<context>`: repository impls, API services, DTOs, mappers,
   remote/local sources, cache, Hilt data modules.
+- `core/database`: optional. When a repo keeps a shared database module, Room
+  entities, DAOs, and patch transactions live here and `core/data/<context>`
+  depends on it. The dependency runs `core:data -> core:database` only; the
+  database module never depends on `core:data`, a feature, or `app`, and
+  `core/domain/<context>` never depends on it. A repo without this module keeps
+  local sources under `core/data/<context>/source/local`.
 - `core/network`: Retrofit/OkHttp factories, response envelope, common network
   failure mapping, interceptors, qualifiers.
 - `core/navigation/api`: route/nav-key contracts.
@@ -78,10 +84,12 @@ HomeRepositoryImpl -> HomeRemoteDataSource -> HomeApiService
 
 - Route/top-level wiring obtains ViewModel, collects state/events with lifecycle,
   performs navigation/platform calls, and passes plain state/callbacks down.
-- Screen/content composables are stateless and do not call `hiltViewModel()`,
-  `viewModel()`, lifecycle collection, or navigation APIs.
-- ViewModels inject use cases/platform abstractions, not repositories impls,
-  data sources, API services, DTOs, `Context`, `Activity`, or `NavController`.
+- Stateless rendering composables do not call `hiltViewModel()`, `viewModel()`,
+  lifecycle collection, or navigation APIs; route/top-level entry wiring owns them.
+- ViewModels inject use cases, one context's repository interface, and platform
+  abstractions — never repository impls, data sources, API services, DTOs,
+  `Context`, `Activity`, or `NavController`. A use case is required when the call
+  crosses contexts, orders multi-step side effects, or adds domain/business failure semantics.
 - UI state is immutable and explicit for loading/error/empty/offline/success
   states that can occur.
 - Domain-to-UI mapping lives in presentation mappers.
@@ -134,9 +142,15 @@ hilt-composition-root: pass|fail
 repository-impl-direct-api-service: pass|fail
 remote-data-source-boundary: pass|fail
 feature-api-public-contract-only: pass|fail
-viewmodel-injects-usecases-only: pass|fail|n/a
+viewmodel-dependency-boundary: usecase|single-context-repository|mixed|no-domain-dependency|fail|n/a
 compose-route-screen-split: pass|fail|n/a
 ```
+
+`viewmodel-dependency-boundary` records which allowed shape the ViewModel used:
+`usecase` for use cases only, `single-context-repository` for a direct repository
+interface from one context, `mixed` when both appear, `no-domain-dependency` when
+the ViewModel injects only platform/UI abstractions, `fail` for a repository
+implementation, data source, or API service, and `n/a` when no ViewModel changed.
 
 ## Evidence Basis
 
