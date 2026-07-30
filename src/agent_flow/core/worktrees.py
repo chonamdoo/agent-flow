@@ -205,7 +205,7 @@ def _create_worktree(
                 f"requested {plan.branch}"
             )
         return existing
-    plan.path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_creation_root(plan.path.parent)
     branch_created = _add_worktree_locked(root=root, plan=plan)
     # Fail closed: trust the path only after git confirms it is a linked
     # worktree of this repo on the expected branch.
@@ -2612,11 +2612,11 @@ def managed_worktrees_root(root: Path) -> Path:
     보고하고, 남은 phase가 전부 exit 2로 막혔다(실측). git이 프로젝트 폴더 안에 있어야
     한다고 요구하지 않으므로 형제 디렉터리로 뺀다.
 
-    상위 디렉터리에 쓸 수 없으면 예전 자리로 내려간다. 인식은 layout이 아니라 등록부와
-    채택 기록이 하므로(`trusted_checkout_paths`) 이 선택이 신뢰를 바꾸지는 않는다.
+    프로젝트 부모는 우리 것이 아닐 수 있다. 그 자리가 이미 symlink거나 남의 소유면
+    예전 자리로 내려간다 — 따라가면 비공개 소스와 setup 파일이 남의 경로에 생긴다.
     """
     sibling = root.parent / f"{root.name}.worktrees"
-    if _writable_dir(sibling.parent):
+    if _writable_dir(sibling.parent) and _safe_creation_root(sibling):
         return sibling
     return legacy_managed_root(root)
 
@@ -2628,6 +2628,41 @@ def legacy_managed_root(root: Path) -> Path:
 
 def _writable_dir(path: Path) -> bool:
     return path.is_dir() and os.access(path, os.W_OK | os.X_OK)
+
+
+def _safe_creation_root(path: Path) -> bool:
+    """``path``를 생성 루트로 써도 되는가. 없으면 만들 수 있으니 참이다.
+
+    ``lstat``으로 본다. symlink는 자체가 목적지를 감추고, 남의 소유 디렉터리는 우리가
+    만든 것이 아니다. 둘 다 checkout을 우리 통제 밖으로 옮긴다.
+    """
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        return False
+    return info.st_uid == os.getuid()
+
+
+def _ensure_creation_root(path: Path) -> None:
+    """checkout의 부모를 만든다. symlink를 절대 따라가지 않는다.
+
+    `mkdir(exist_ok=True)`는 심어 둔 symlink를 그대로 따라간다. 우리가 만들면 소유가
+    증명되고, 이미 있으면 lstat으로 실체를 확인한 뒤에만 쓴다.
+    """
+    try:
+        path.mkdir(parents=True)
+        return
+    except FileExistsError:
+        pass
+    if not _safe_creation_root(path):
+        raise WorktreeIsolationError(
+            f"refusing to create a worktree under an unsafe parent: {path}; "
+            "it is a symlink, not a directory, or not owned by this user"
+        )
 
 
 def _managed_checkout_path(*, root: Path, name: str) -> Path:
@@ -2643,9 +2678,13 @@ def _worktree_manifest_path(*, root: Path, name: str) -> Path:
 
 
 def _legacy_worktree_manifest_path(*, root: Path, name: str) -> Path:
+    # 업그레이드 전에 만들어진 checkout은 예전 자리에 manifest를 들고 있다. 새 자리를
+    # 보면 그 checkout의 branch ownership과 base를 잃고, 정리가 브랜치를 남긴다.
     # 정규화를 거치는 이유는 경로 안전이다. 호출자가 넘긴 이름을 그대로 이어
     # 붙이면 `../`가 섞인 이름이 관리 루트 밖을 가리킨다.
-    return _managed_checkout_path(root=root, name=_feature_worktree_name(name)) / "manifest.json"
+    return (
+        legacy_managed_root(root) / _feature_worktree_name(name) / "manifest.json"
+    )
 
 
 def _agent_flow_git_dir(root: Path) -> Path:

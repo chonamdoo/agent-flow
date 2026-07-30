@@ -20,7 +20,9 @@ if SRC not in sys.path:
 import pytest
 
 from agent_flow.core.worktrees import (
+    _ensure_creation_root,
     _is_managed_child,
+    _legacy_worktree_manifest_path,
     adopt_worktree,
     attach_worktree,
     create_worktree,
@@ -31,6 +33,7 @@ from agent_flow.core.worktrees import (
     plan_worktree,
 )
 from agent_flow.core.worktree_isolation import (
+    WorktreeIsolationError,
     adopted_worktree_parent,
     managed_worktree_root,
     same_worktree_path,
@@ -150,3 +153,39 @@ def test_creation_falls_back_when_the_parent_is_not_writable(tmp_path: Path):
         assert managed_worktrees_root(root) == legacy_managed_root(root)
     finally:
         parent.chmod(0o700)
+
+
+def test_planted_symlink_at_the_sibling_root_is_refused(tmp_path: Path):
+    """부모가 남의 것일 수 있다. 심어 둔 symlink를 따라가면 소스가 그쪽에 생긴다."""
+    root = _leader(tmp_path)
+    attacker = tmp_path / "attacker"
+    attacker.mkdir()
+    (tmp_path / "myapp.worktrees").symlink_to(attacker)
+
+    assert managed_worktrees_root(root) == legacy_managed_root(root)
+
+    created = create_worktree(root=root, plan=plan_worktree(root=root, name="slice"))
+
+    assert created.path.parent == legacy_managed_root(root)
+    assert list(attacker.iterdir()) == []
+
+
+def test_creation_refuses_a_symlink_planted_after_path_selection(tmp_path: Path):
+    """선택과 생성 사이에 끼워 넣어도 mkdir이 따라가지 않는다."""
+    root = _leader(tmp_path)
+    attacker = tmp_path / "attacker"
+    attacker.mkdir()
+    planted = managed_worktrees_root(root)
+    planted.symlink_to(attacker)
+
+    with pytest.raises(WorktreeIsolationError, match="unsafe parent"):
+        _ensure_creation_root(planted)
+
+
+def test_legacy_manifest_is_read_from_the_legacy_root(tmp_path: Path):
+    """업그레이드 전 checkout은 예전 자리에 manifest를 들고 있다."""
+    root = _leader(tmp_path)
+
+    path = _legacy_worktree_manifest_path(root=root, name="feat-old")
+
+    assert path.parent.parent == legacy_managed_root(root)
