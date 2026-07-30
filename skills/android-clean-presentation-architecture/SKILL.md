@@ -120,6 +120,8 @@ State patterns:
 - Use `MutableStateFlow.update { ... }` for copy/update operations.
 - Use `combine(...)` when UI state depends on multiple flows.
 - Keep paging request ids, selected item ids, and active `Job` handles private inside the ViewModel.
+- Do not start initial screen-state loading from `init`. Model it as a cold flow terminated by `stateIn` so the work starts when the route collects — including a one-shot initial API load, unless product behavior requires an explicit user action to begin.
+- `MutableStateFlow` is for ViewModel-owned input and transient transition state. State produced from a repository or use-case stream terminates in `stateIn` instead of being pushed into a manually updated `MutableStateFlow`.
 
 Event patterns:
 - Prefer modeling critical results as `ScreenUiState`; use `ScreenUiEvent` only for UI behavior such as navigation, snackbar, toast, permission launcher, browser intent, focus, or haptic feedback.
@@ -157,6 +159,32 @@ Keep `UiState` immutable:
 - prefer immutable collections when the project already uses them
 - include only data needed by the UI surface
 
+## UiModel Stability
+
+- Leaf `*UiModel` data classes are not annotated with `@Stable` by default. When every field is immutable, let the Compose compiler infer stability.
+- When a pure immutable value model needs an explicit contract, prefer `@Immutable` over `@Stable`.
+- `@Stable` is allowed only when the equality contract is actually true, and only when a compiler stability report or a measured recomposition problem backs it.
+- At presentation boundaries prefer `ImmutableList`, `ImmutableSet`, or `ImmutableMap`. Do not annotate a model to hide a raw mutable collection.
+
+## List Item Modeling
+
+Use this when one scroll surface renders several distinct section types.
+
+- Model the mixed sections as one `@Stable sealed interface <Screen>ListItemUiModel` with one subtype per section.
+- Subtypes are `@Immutable data class`es or `data object`s, and each exposes a stable unique `val key: String`.
+- The ViewModel or mapper builds one immutable list; the lazy layout renders it with `items(items, key = { it.key }, contentType = { it::class })` and an exhaustive `when`.
+- Do not model mixed sections as nullable payload buckets, `Any`, raw `Pair`/`Triple`, or a string type switch, and do not compute the list shape inside the composable.
+- Keep callbacks at the call site. Do not store lambdas in an item model.
+
+## Derived Display State
+
+The state holder or mapper owns cross-item and cross-screen display derivation. Precompute these onto the item `UiModel`:
+- neighbor and grouping flags (`showHeader`, `isLastIntroMessage`, block grouping, previous speaker)
+- index and position flags (`isLast`, section index display, separator placement)
+- selection and action flags derived from screen state (`selectable`, `isSelected`, `canDelete`)
+
+The composable renders these fields. It must not derive them from `items[index ± 1]`, `index == lastIndex`, or unrelated screen state. This is a UDF and testability rule, not a recomposition shortcut.
+
 ## Compose Screen Rule
 
 Split state-holder wiring from rendering:
@@ -168,6 +196,7 @@ Split state-holder wiring from rendering:
 - screen/content composables should not call `hiltViewModel()`, `viewModel()`, `collectAsStateWithLifecycle()`, or navigation APIs
 - child composables should not know about Hilt, repositories, use cases, or ViewModels
 - collect navigation and one-shot commands with `collect`, not `collectLatest`
+- Preview and Compose UI tests target the stateless screen/content composable with a fake `UiState`.
 
 Keep UI-local state local:
 - scroll, focus, text field editing state, pager state, and animation state can stay in Compose unless they drive business or repository work
@@ -213,6 +242,11 @@ stateless-content rule — a node renderer is a content composable.
 - one-shot UI behavior events use `Channel(...).receiveAsFlow()` or another deliberate event model.
 - flows converted to UI state use one shared `stateIn` value, not per-call `stateIn`.
 - `SharingStarted.WhileSubscribed(5_000)` is acceptable only when stale cached `.value` is not used as a fresh source.
+- initial screen-state loading is not started from `init`; a cold flow plus `stateIn` starts it when the route collects.
+- leaf `*UiModel`s are not blanket-annotated `@Stable`; `@Immutable` or inferred stability is the default.
+- mixed section lists use one sealed `*ListItemUiModel` with stable keys, `contentType`, and an exhaustive `when`.
+- neighbor/index/selection display flags are precomputed in the state holder or mapper, not derived inside a composable.
+- Preview and Compose UI tests render the stateless screen with a fake `UiState`.
 - Route/top-level Compose wiring collects with lifecycle APIs and passes state/callbacks downward.
 - Route/top-level wiring owns ViewModel collection, one-shot event collection, and navigation/platform calls.
 - Screen/content composables are stateless and do not obtain ViewModels, lifecycle flows, Hilt dependencies, or navigation APIs.

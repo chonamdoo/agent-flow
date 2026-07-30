@@ -331,3 +331,28 @@ def test_sdui_depends_on_the_presentation_contract():
     sdui_angle = (REVIEW_ANGLES / "sdui.md").read_text(encoding="utf-8")
     assert "sdui-udf-contract: pass|fail|n/a" in sdui_angle
     assert "sdui-udf-contract: pass|fail|n/a" in SDUI_SKILL.read_text(encoding="utf-8")
+
+
+def test_promoted_presentation_rules_stay_project_neutral():
+    """반증: `AppResult<T>`를 올렸다가 존재하지 않는 타입을 요구한 적이 있다."""
+    text = PRESENTATION_SKILL.read_text(encoding="utf-8")
+    for promoted in (
+        "Do not start initial screen-state loading from `init`",
+        "`MutableStateFlow` is for ViewModel-owned input and transient transition state",
+        "## Derived Display State",
+        "## List Item Modeling",
+        "## UiModel Stability",
+        "Preview and Compose UI tests target the stateless screen/content composable",
+    ):
+        assert promoted in text
+    # 프로젝트 로컬 메커니즘은 승격 대상이 아니다. 올리면 없는 타입을 요구하게 된다.
+    for project_local in (
+        "launchCatching",
+        "CommonErrorNotifier",
+        "ViewModelErrorLauncher",
+        "AppFailure",
+        "TaraeDimensions",
+        "TaraeColors",
+        "TaraeTypography",
+    ):
+        assert project_local not in text
