@@ -44,6 +44,28 @@ def _host_root(directory: Path) -> SkillRoot:
     return SkillRoot(source="host", template=str(directory / "{skill}" / "SKILL.md"))
 
 
+def _bundled_shipped_skill(project: Path, name: str) -> Path:
+    """install이 kit skill을 앉히는 자리. source가 `bundled`라 스스로 선언해야 활성화된다."""
+    return _write_skill(
+        project / ".agent-flow" / "skills",
+        name,
+        (REPO / "skills" / name / "SKILL.md").read_text(encoding="utf-8"),
+    )
+
+
+def _required_for(project: Path, changed_files: list[str]) -> set[str]:
+    return {
+        skill.name
+        for skill in resolve_phase_skills(
+            project_root=project,
+            phase_id="implement",
+            changed_files=changed_files,
+            host="claude",
+        ).required
+    }
+
+
+
 def test_external_skill_without_workflow_phases_enters_catalog(tmp_path):
     """현행 `_catalog_entry`의 early return으로는 반드시 실패하는 계약."""
     host = tmp_path / "host"
@@ -256,3 +278,31 @@ def test_doctor_reports_a_project_skill_that_shadows_an_installed_one(tmp_path, 
         finding.name for finding in result.findings if finding.kind == skill_catalog.COLLISION
     ]
     assert collisions == ["edge-to-edge"]
+
+
+def test_shipped_presentation_skill_activates_on_a_presentation_change(tmp_path, monkeypatch):
+    """설치만 되고 활성화가 안 되면 UDF·use case 규칙이 프롬프트에 영원히 안 들어온다."""
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    project = tmp_path / "app"
+    _bundled_shipped_skill(project, "android-clean-presentation-architecture")
+
+    required = _required_for(
+        project,
+        ["feature/chat/presentation/src/main/java/io/levvels/samantha/feature/chat/presentation/ChatViewModel.kt"],
+    )
+
+    assert "android-clean-presentation-architecture" in required
+
+
+def test_shipped_presentation_skill_stays_off_for_a_data_layer_change(tmp_path, monkeypatch):
+    """pathGlobs가 presentation 밖으로 넓어지면 이 테스트만 깨져야 한다."""
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    project = tmp_path / "app"
+    _bundled_shipped_skill(project, "android-clean-presentation-architecture")
+
+    required = _required_for(
+        project,
+        ["core/data/chat/src/main/java/io/levvels/samantha/core/data/chat/ChatRepositoryImpl.kt"],
+    )
+
+    assert "android-clean-presentation-architecture" not in required

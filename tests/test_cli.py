@@ -1258,6 +1258,12 @@ class CliTest(unittest.TestCase):
             web_presentation_findings = lint_project(root, "nextjs", files=[str(web_presentation_dto.relative_to(root))])
             self.assertIn("feature-presentation contains forbidden token Dto", "\n".join(f.message for f in web_presentation_findings))
 
+            # 필수 pre-commit gate의 오탐 회귀. `useIdentity`는 `Entity`를 부분문자열로
+            # 포함해 samantha 프로덕션 소스 70건을 위반으로 잡고 커밋을 막았다.
+            web_presentation_ok = root / "src" / "features" / "checkout" / "presentation" / "useIdentity.ts"
+            web_presentation_ok.write_text("export const identity = 1\n", encoding="utf-8")
+            self.assertEqual(lint_project(root, "nextjs", files=[str(web_presentation_ok.relative_to(root))]), [])
+
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             android_file = root / "core" / "domain" / "chat" / "src" / "main" / "java" / "com" / "example" / "app" / "core" / "domain" / "chat" / "Chat.kt"
