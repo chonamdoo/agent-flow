@@ -68,7 +68,7 @@ Use these sections only when they fit the repo. Do not force every section into 
 
 ```markdown
 ## Gotchas
-- Worktrees must live under `.agent-flow/worktrees/` or `.codex/worktrees/`.
+- Worktrees are created by `agent-flow worktree create`; the default location is the sibling folder `<repo>.worktrees/`.
 - Keep generated agent artifacts ignored unless the user asks to commit them.
 ```
 

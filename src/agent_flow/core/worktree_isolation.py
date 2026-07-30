@@ -1026,12 +1026,14 @@ def verify_linked_worktree(
             f"refusing to treat leader checkout as a worktree: {target}"
         )
 
-    # Creation-path pattern: managed worktrees always live under this directory.
+    # 담을 그릇을 호출자가 주지 않으면 **인식된** 관리 루트로 판정한다. 여기에
+    # layout 리터럴을 두면 기본 자리를 옮길 때 이 함수가 유효한 checkout을 거절한다 —
+    # 신뢰의 근거는 경로 모양이 아니라 marker layout 또는 채택 기록이다.
     # realpath on both sides means a symlinked target cannot slip past it.
     expected_parent = (
         real_path(managed_root)
         if managed_root is not None
-        else real_path(Path(root) / ".agent-flow" / "worktrees")
+        else managed_worktree_root(root=root, path=path)
     )
     if target == expected_parent or not _is_within(target, expected_parent):
         raise WorktreeIsolationError(

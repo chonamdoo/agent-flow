@@ -345,13 +345,22 @@ def _active_checkouts(root: Path) -> tuple[ActiveCheckout, ...]:
                 f"multiple active runs claim one worktree: {name}"
             )
         checkout = real_path(entry.path)
-        verified_root = managed_worktree_root(root=root, path=checkout)
-        verify_linked_worktree(
-            root=root,
-            path=checkout,
-            expected_branch=entry.branch,
-            managed_root=verified_root,
-        )
+        # 관리 자리 밖의 checkout은 채택 기록이 소유를 증명한다. 증명이 깨지면
+        # (raw git으로 지우고 다시 만든 경우처럼) 경계 오류로 바꿔 던진다 —
+        # 여기서 isolation 예외가 그대로 나가면 host hook이 깔끔한 차단이 아니라
+        # 추적 불가한 예외로 죽는다.
+        try:
+            verified_root = managed_worktree_root(root=root, path=checkout)
+            verify_linked_worktree(
+                root=root,
+                path=checkout,
+                expected_branch=entry.branch,
+                managed_root=verified_root,
+            )
+        except WorktreeIsolationError as exc:
+            raise HostWriteBoundaryError(
+                f"active run checkout is not a provable managed worktree: {exc}"
+            ) from exc
         run = runs[0]
         if run.metadata.get("checkout_identity") != f"worktree:{name}":
             raise HostWriteBoundaryError(

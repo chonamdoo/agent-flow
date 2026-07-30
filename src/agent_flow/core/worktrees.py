@@ -197,19 +197,36 @@ def _create_worktree(
             )
         # 재사용 경로도 생성 경로와 똑같은 증명을 통과해야 한다. `.git`이 있다는
         # 사실만으로는 이 저장소의 worktree라는 근거가 되지 않는다.
-        verify_linked_worktree(root=root, path=plan.path)
+        verify_linked_worktree(root=root, path=plan.path, managed_root=plan.path.parent)
         existing = get_worktree_status(root=root, name=plan.name)
         if plan.branch_explicit and existing.branch != plan.branch:
             raise ValueError(
                 f"worktree {plan.name} already uses branch {existing.branch}; "
                 f"requested {plan.branch}"
             )
+        # 재사용도 leader가 내리는 채택이다. 기록하지 않으면 create가 성공한 직후의
+        # `run --worktree <name>`이 미채택으로 거절된다 — 사용자에게는 방금 만든
+        # worktree가 이유 없이 막힌 것으로 보인다.
+        if existing.registration_identity is not None:
+            record_adopted_checkout(
+                root=root,
+                name=existing.name,
+                path=existing.path,
+                registration_identity=existing.registration_identity,
+            )
         return existing
-    plan.path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_creation_root(plan.path.parent)
     branch_created = _add_worktree_locked(root=root, plan=plan)
     # Fail closed: trust the path only after git confirms it is a linked
     # worktree of this repo on the expected branch.
-    verify_linked_worktree(root=root, path=plan.path, expected_branch=plan.branch)
+    # containment는 생성 규약이 정한 자리를 그대로 넘긴다. 기본값은 예전 자리라
+    # 새 기본 위치에서 항상 escape로 걸린다. 실질 증명은 아래 gitdir 왕복 검증이다.
+    verify_linked_worktree(
+        root=root,
+        path=plan.path,
+        expected_branch=plan.branch,
+        managed_root=plan.path.parent,
+    )
     registered = _registered_at_path(root=root, path=plan.path)
     if registered is None or registered.registration_identity is None:
         raise WorktreeIsolationError(
@@ -229,6 +246,15 @@ def _create_worktree(
     )
     try:
         write_worktree_manifest(root=root, status=status)
+        # 새 기본 자리는 marker 후보가 아니다. 경계가 claim의 소유 checkout을 고르는
+        # 근거(`trusted_checkout_paths`)는 marker layout 아니면 채택 기록뿐이므로,
+        # agent-flow가 만든 것도 스스로 기록해 둔다 — 이건 leader 쪽 행위다.
+        record_adopted_checkout(
+            root=root,
+            name=status.name,
+            path=status.path,
+            registration_identity=status.registration_identity,
+        )
     except Exception:
         try:
             # create_worktree still owns the shared repository lease here. Calling
@@ -303,7 +329,7 @@ def attach_worktree(
         # 생성 경로로 흘려보내면 selector를 디렉터리 이름으로 뭉개 엉뚱한 checkout을
         # 만든다(절대경로 selector는 경로 전체가 이름이 된다).
         raise ValueError(
-            f"worktree {registered.path} is outside {_managed_root(root)} and is not "
+            f"worktree {registered.path} is outside {managed_worktrees_root(root)} and is not "
             f"adopted; run `agent-flow worktree adopt --path {registered.path}` first"
         )
     if not (registered.path / ".git").is_file():
@@ -444,11 +470,29 @@ def _adopted(*, root: Path, path: Path) -> bool:
 
 
 def _is_managed_child(*, root: Path, path: Path) -> bool:
+    """marker 관리 루트의 직계 자식인가 — 모양 자체가 관리형임을 증명하는 자리다.
+
+    새 기본 자리(leader 형제)는 여기 넣지 않는다. 그 경로는 누구나 `git worktree add`로
+    만들 수 있어 모양이 근거가 되지 못한다. 그쪽 근거는 생성이 남긴 채택 기록이다 —
+    넣으면 raw checkout이 미채택 차단을 우회하고, 나중에 host write boundary가
+    소유를 증명하지 못해 run이 막힌다.
+    """
     parent_key = worktree_path_key(path.parent)
     return any(
         parent_key == worktree_path_key(root / marker / "worktrees")
         for marker in (".agent-flow", ".codex", ".Codex", ".omp")
     )
+
+
+def _is_creation_layout_child(*, root: Path, path: Path) -> bool:
+    """생성 규약이 쓰는 자리(현재/예전)의 직계 자식인가.
+
+    신뢰 판정이 아니라 자리 판정이다. 빈 디렉터리 정리처럼 소유권이 이미 확정된
+    뒤의 뒷정리에만 쓴다.
+    """
+    if worktree_path_key(path.parent) == worktree_path_key(managed_worktrees_root(root)):
+        return True
+    return _is_managed_child(root=root, path=path)
 
 
 def _assert_requestable_branch(branch: str) -> None:
@@ -562,7 +606,7 @@ def _remove_worktree_locked(
         branch, expected_oid = branch_delete
         _delete_branch_ref_cas(root=root, branch=branch, expected_oid=expected_oid)
     remove_worktree_metadata(root=root, name=status.name, path=status.path)
-    if not live and status.path.is_dir() and _is_managed_child(root=root, path=status.path):
+    if not live and status.path.is_dir() and _is_creation_layout_child(root=root, path=status.path):
         try:
             status.path.rmdir()
         except OSError:
@@ -2330,11 +2374,14 @@ def _status_for_planned_name(*, root: Path, name: str) -> WorktreeStatus:
         and payload.get("branch_created_by_agent_flow") is True
         and manifest_branch == plan.branch
     )
+    # 등록이 없는 이름이다. 잔재는 예전 자리에 있을 수 있으므로 실제로 있는 자리를
+    # 보고한다 — 현재 자리만 보면 정리가 없는 경로를 지웠다고 출력한다.
+    checkout_path = existing_checkout_path(root=root, name=plan.name)
     return WorktreeStatus(
         name=plan.name,
         branch=manifest_branch or plan.branch,
-        path=plan.path,
-        exists=plan.path.exists(),
+        path=checkout_path,
+        exists=checkout_path.exists(),
         branch_created_by_agent_flow=owned,
         requested_name=name,
         base_ref=manifest_base_ref or plan.base_ref,
@@ -2367,10 +2414,22 @@ def _load_worktree_manifest(*, root: Path, name: str) -> dict | None:
 def _state_key_manifest(*, root: Path, key: str) -> dict | None:
     """정규화 없이 ``key`` 자리의 manifest만 읽는다."""
     manifest = _runtime_state_root(root=root, name=key) / "manifest.json"
-    legacy = _managed_checkout_path(root=root, name=key) / "manifest.json"
-    if not manifest.exists() and legacy.exists():
-        manifest = legacy
-    return _read_manifest(manifest)
+    if manifest.exists():
+        return _read_manifest(manifest)
+    for legacy in _in_checkout_manifest_paths(root=root, key=key):
+        if legacy.exists():
+            return _read_manifest(legacy)
+    return None
+
+
+def _in_checkout_manifest_paths(*, root: Path, key: str) -> tuple[Path, ...]:
+    """checkout 안에 manifest를 두던 시절의 자리들. 생성 자리 둘을 모두 본다.
+
+    현재 자리만 보면 업그레이드 전 checkout의 branch ownership과 base를 잃는다 —
+    정리가 agent-flow가 만든 브랜치를 "증거 없음"으로 남긴다.
+    """
+    roots = dict.fromkeys((managed_worktrees_root(root), legacy_managed_root(root)))
+    return tuple(candidate / key / "manifest.json" for candidate in roots)
 
 
 def _read_manifest(path: Path) -> dict | None:
@@ -2458,9 +2517,11 @@ def resolve_worktree_name(*, root: Path, name: str) -> str:
 
 def known_worktree_names(*, root: Path) -> list[str]:
     names: set[str] = set()
-    checkout_root = root / ".agent-flow" / "worktrees"
-    if checkout_root.exists():
-        names.update(path.name for path in checkout_root.iterdir() if path.is_dir())
+    # 생성 자리는 둘이다: 현재 기본 자리와 예전 자리. 하나만 보면 남은 잔재를
+    # `worktree list`가 보고하지 못해 정리 명령이 대상을 못 찾는다.
+    for checkout_root in {managed_worktrees_root(root), legacy_managed_root(root)}:
+        if checkout_root.exists():
+            names.update(path.name for path in checkout_root.iterdir() if path.is_dir())
     runtime_root = _agent_flow_git_dir(root) / "worktrees"
     if runtime_root.exists():
         names.update(path.name for path in runtime_root.iterdir() if path.is_dir())
@@ -2491,11 +2552,11 @@ def remove_worktree_metadata(*, root: Path, name: str, path: Path | None = None)
     if path is not None and not _metadata_belongs_to_path(root=root, key=key, path=path):
         return
     runtime_root = _runtime_state_root(root=root, name=key)
-    legacy_manifest = _managed_checkout_path(root=root, name=key) / "manifest.json"
     if runtime_root.exists():
         shutil.rmtree(runtime_root)
-    if legacy_manifest.exists():
-        legacy_manifest.unlink()
+    for legacy_manifest in _in_checkout_manifest_paths(root=root, key=key):
+        if legacy_manifest.exists():
+            legacy_manifest.unlink()
     forget_adopted_checkout(root=root, name=key)
 
 
@@ -2521,11 +2582,19 @@ def _metadata_belongs_to_path(*, root: Path, key: str, path: Path) -> bool:
 
     manifest가 있으면 그 안에 기록된 경로가 진실이다. manifest가 없으면 생성
     규약(관리 루트 아래 ``<key>`` 디렉터리)으로만 인정한다 — 롤백 경로처럼
-    manifest를 쓰기 전에 정리해야 하는 경우가 그 하나다.
+    manifest를 쓰기 전에 정리해야 하는 경우가 그 하나다. 생성 자리는 둘이므로
+    (현재/예전) 둘 다 본다. 한쪽만 보면 예전 자리 잔재의 런타임 메타데이터가 남아
+    그 이름이 `worktree list`에 계속 다시 나타난다.
     """
     payload = _state_key_manifest(root=root, key=key)
     if payload is None:
-        return same_worktree_path(_managed_checkout_path(root=root, name=key), path)
+        return any(
+            same_worktree_path(candidate_root / key, path)
+            for candidate_root in (
+                managed_worktrees_root(root),
+                legacy_managed_root(root),
+            )
+        )
     recorded = payload.get("path")
     if not isinstance(recorded, str) or not recorded:
         return False
@@ -2568,12 +2637,134 @@ def _git_dirty(root: Path) -> bool:
     return bool(dirty_lines)
 
 
-def _managed_root(root: Path) -> Path:
+def managed_worktrees_root(root: Path) -> Path:
+    """새 checkout이 태어나는 자리. leader 프로젝트 폴더 **밖**이다.
+
+    안에 두면 leader를 열어 둔 IDE가 worktree 작업에 반응해 leader 쪽 캐시를 건드린다 —
+    Android Studio가 `.gradle/`을 갱신해 leader tripwire가 그것을 정당하게 오염으로
+    보고하고, 남은 phase가 전부 exit 2로 막혔다(실측). git이 프로젝트 폴더 안에 있어야
+    한다고 요구하지 않으므로 형제 디렉터리로 뺀다.
+
+    부모 디렉터리가 우리 통제 밖이면 형제 자리를 아예 고르지 않는다. 남이 쓸 수 있고
+    sticky bit도 없는 부모에서는, 우리가 0700으로 만든 디렉터리도 공격자가 rename하고
+    symlink로 갈아끼울 수 있다 — 그 교체 구간을 권한 강화로는 닫지 못한다.
+    """
+    sibling = root.parent / f"{root.name}.worktrees"
+    if _trusted_parent_dir(sibling.parent) and _safe_creation_root(sibling):
+        return sibling
+    return legacy_managed_root(root)
+
+
+def legacy_managed_root(root: Path) -> Path:
+    """예전 기본 자리. 이미 만들어진 checkout이 여기 있으므로 계속 인식한다."""
     return root / ".agent-flow" / "worktrees"
 
 
+def _trusted_parent_dir(path: Path) -> bool:
+    """이 디렉터리 안의 항목을 우리만 갈아끼울 수 있는가.
+
+    rename·삭제 권한은 항목이 아니라 **부모**가 준다. 그래서 소유자와 쓰기 비트를
+    본다: 우리(또는 root) 소유여야 하고, group/other가 쓸 수 있으면 sticky bit로
+    남의 항목 교체가 막혀 있어야 한다(`/tmp`가 그 형태다).
+    """
+    if not (path.is_dir() and os.access(path, os.W_OK | os.X_OK)):
+        return False
+    try:
+        info = path.stat()
+    except OSError:
+        return False
+    getuid = getattr(os, "getuid", None)
+    if getuid is not None and info.st_uid not in (0, getuid()):
+        return False
+    shared_write = info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+    return not shared_write or bool(info.st_mode & stat.S_ISVTX)
+
+
+def _safe_creation_root(path: Path) -> bool:
+    """``path``를 생성 루트로 써도 되는가. 없으면 만들 수 있으니 참이다.
+
+    ``lstat``으로 본다. symlink는 자체가 목적지를 감추고, 남의 소유 디렉터리는 우리가
+    만든 것이 아니다. 둘 다 checkout을 우리 통제 밖으로 옮긴다.
+
+    소유권 검사는 POSIX 전용이다. native Windows Python에는 `os.getuid`가 없어서
+    무조건 부르면 첫 create 이후의 모든 조회가 AttributeError로 죽는다. 그쪽에서는
+    symlink·디렉터리 검사만 남는다.
+    """
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        return False
+    getuid = getattr(os, "getuid", None)
+    if getuid is None:
+        return True
+    return info.st_uid == getuid()
+
+
+def _ensure_creation_root(path: Path) -> None:
+    """checkout의 부모를 만든다. symlink를 절대 따라가지 않고 비공개로 만든다.
+
+    `mkdir(exist_ok=True)`는 심어 둔 symlink를 그대로 따라간다. 우리가 만들면 소유가
+    증명되고, 이미 있으면 lstat으로 실체를 확인한 뒤에만 쓴다.
+
+    권한은 0700이다. 기본 umask면 0755로 만들어져 같은 호스트의 다른 사용자가 형제
+    checkout의 소스와 setup 파일을 읽는다 — leader가 0700인 비공개 저장소여도
+    checkout을 만드는 순간 새는 자리가 여기다.
+    """
+    try:
+        path.mkdir(parents=True, mode=0o700)
+        return
+    except FileExistsError:
+        pass
+    if not _safe_creation_root(path):
+        raise WorktreeIsolationError(
+            f"refusing to create a worktree under an unsafe parent: {path}; "
+            "it is a symlink, not a directory, or not owned by this user"
+        )
+    _harden_creation_root(path)
+
+
+def _harden_creation_root(path: Path) -> None:
+    """이미 있는 생성 루트의 group/other 권한을 걷어낸다.
+
+    예전 버전이 umask 그대로 만든 자리가 남아 있을 수 있다. 소유는 이미 증명된
+    상태이므로(위 검사) 여기서 권한만 좁힌다.
+    """
+    try:
+        info = path.stat()
+    except OSError:
+        return
+    exposed = info.st_mode & (stat.S_IRWXG | stat.S_IRWXO)
+    if not exposed:
+        return
+    try:
+        os.chmod(path, info.st_mode & ~exposed)
+    except OSError:
+        # 권한을 못 좁히면 그 사실을 감추지 않는다. 이 자리는 leader가 만든 것이고
+        # 못 좁히는 상태 자체가 통제 밖이라는 뜻이다.
+        raise WorktreeIsolationError(
+            f"cannot restrict the worktree root to owner-only access: {path}"
+        )
+
+
 def _managed_checkout_path(*, root: Path, name: str) -> Path:
-    return _managed_root(root) / name
+    return managed_worktrees_root(root) / name
+
+
+def existing_checkout_path(*, root: Path, name: str) -> Path:
+    """``name``의 checkout이 실제로 있는 자리. 없으면 현재 생성 자리.
+
+    조회·정리는 이 함수를 쓴다. 현재 자리만 보면 예전 자리의 잔재를 "정리했다"고
+    출력하면서 남겨 두고, 그 잔재가 `worktree list`에 계속 다시 나타난다.
+    """
+    for candidate_root in (managed_worktrees_root(root), legacy_managed_root(root)):
+        candidate = candidate_root / name
+        if candidate.exists():
+            return candidate
+    return managed_worktrees_root(root) / name
 
 
 def _runtime_state_root(*, root: Path, name: str) -> Path:
@@ -2582,12 +2773,6 @@ def _runtime_state_root(*, root: Path, name: str) -> Path:
 
 def _worktree_manifest_path(*, root: Path, name: str) -> Path:
     return _runtime_state_root(root=root, name=_feature_worktree_name(name)) / "manifest.json"
-
-
-def _legacy_worktree_manifest_path(*, root: Path, name: str) -> Path:
-    # 정규화를 거치는 이유는 경로 안전이다. 호출자가 넘긴 이름을 그대로 이어
-    # 붙이면 `../`가 섞인 이름이 관리 루트 밖을 가리킨다.
-    return _managed_checkout_path(root=root, name=_feature_worktree_name(name)) / "manifest.json"
 
 
 def _agent_flow_git_dir(root: Path) -> Path:

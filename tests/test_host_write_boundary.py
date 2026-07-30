@@ -243,9 +243,11 @@ def test_host_binding_rejects_recreated_active_run_checkout(tmp_path: Path):
     _git("worktree", "remove", "--force", str(first.path), cwd=root)
     _git("worktree", "add", str(first.path), first.branch, cwd=root)
 
+    # 같은 경로에 raw git으로 다시 만든 checkout은 등록 지문도 채택 기록도 원래
+    # 것을 잇지 못한다. 관리 자리 밖이면 채택 증명이 먼저 깨지므로 경계 오류로 나온다.
     with pytest.raises(
         HostWriteBoundaryError,
-        match="active run registration does not own its worktree",
+        match="does not own its worktree|is not a provable managed worktree",
     ):
         record_host_checkout_binding(
             _status_payload(root, first, runs[0]),
@@ -290,7 +292,8 @@ def test_relative_write_target_uses_the_real_host_cwd(tmp_path: Path):
     )
     leader_to_worktree = host_write_boundary_violation(
         _write_payload(
-            first.path.relative_to(root) / "src" / "feature.py",
+            # 새 기본 자리는 leader 밖이므로 leader 기준 상대 경로는 `..`로 시작한다.
+            os.path.relpath(first.path / "src" / "feature.py", root),
             host_cwd=root,
         ),
         root,

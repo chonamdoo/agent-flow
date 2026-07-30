@@ -126,7 +126,10 @@ from agent_flow.core.worktrees import (
     delegated_slug,
     run_declared_worktree_actions,
     find_pending_worktree_cleanup,
+    existing_checkout_path,
     known_worktree_names,
+    legacy_managed_root,
+    managed_worktrees_root,
     plan_worktree,
     provision_host_hook_registrations,
     remove_worktree_metadata,
@@ -458,6 +461,9 @@ def main(argv: list[str] | None = None) -> int:
     worktree_adopt.add_argument("--root", default=".")
     worktree_adopt.add_argument("--path", required=True)
     worktree_adopt.add_argument("--allow-dirty", action="store_true")
+    worktree_identity = worktree_subparsers.add_parser("identity")
+    worktree_identity.add_argument("--root", default=".")
+    worktree_identity.add_argument("--path", default=".")
 
     team_parser = subparsers.add_parser("team")
     team_subparsers = team_parser.add_subparsers(dest="team_command", required=True)
@@ -1311,6 +1317,19 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             print(f"{status.name} {status.branch} {status.path} adopted")
             return 0
+        if args.worktree_command == "identity":
+            # JS runner가 상태 루트를 고르는 authority다. 지문 검증을 두 언어로
+            # 구현하면 갈라진다 — 판정은 여기 한 곳에만 둔다.
+            checkout = Path(args.path).resolve()
+            identity = _verified_checkout_identity(root=root, path=checkout)
+            if identity is None:
+                print(
+                    f"cannot prove a managed checkout at {checkout}",
+                    file=sys.stderr,
+                )
+                return 1
+            print(identity)
+            return 0
         if args.worktree_command == "status":
             try:
                 status = get_worktree_status(root=root, name=args.name)
@@ -1342,7 +1361,7 @@ def main(argv: list[str] | None = None) -> int:
                 try:
                     status = get_worktree_status(root=root, name=name)
                 except (ValueError, RuntimeError):
-                    path = root / ".agent-flow" / "worktrees" / name
+                    path = _stale_checkout_path(root, name)
                     if worktree_path_key(path) not in listed:
                         rows.append(f"{name} - {path} stale")
                 else:
@@ -1976,6 +1995,7 @@ def main(argv: list[str] | None = None) -> int:
                         run_id=args.run_id,
                         worktree=worktree,
                     ),
+                    project_root=root,
                 )
             _write_stage_prompts(root=state_root, state=state, workflow=workflow)
         except (
@@ -2430,6 +2450,11 @@ def _continue_command(root: Path, worktree: str | None) -> str:
 
 def _known_worktree_names(root: Path) -> list[str]:
     return known_worktree_names(root=root)
+
+
+def _stale_checkout_path(root: Path, name: str) -> Path:
+    """이름만 남은 잔재의 자리. 판정은 `worktrees`가 소유한다."""
+    return existing_checkout_path(root=root, name=name)
 
 
 def _worktree_checkout_exists(status) -> bool:
@@ -3201,6 +3226,31 @@ def _checkout_identity(inferred_worktree: str | None) -> str:
     if inferred_worktree is None:
         return "leader"
     return f"worktree:{inferred_worktree}"
+
+
+def _verified_checkout_identity(*, root: Path, path: Path) -> str | None:
+    """``path``에 서 있는 checkout의 증명된 identity. 증명 못 하면 ``None``.
+
+    leader면 ``leader``, 관리형 checkout이면 ``worktree:<name>``이다. 관리 경로 밖은
+    채택 기록이 지문까지 맞아야 통과한다(`adopted_worktree_parent`) — 경로만 맞는
+    낡은 기록은 거절이다. 그렇지 않으면 지운 뒤 같은 자리에 다시 만든 checkout이
+    앞 checkout의 런타임 상태를 물려받는다.
+    """
+    checkout = _registered_checkout(leader_root=root, path=path)
+    if checkout is None:
+        return "leader"
+    managed = _managed_worktree_context(checkout)
+    if managed is not None and _same_path(managed[0], root):
+        return f"worktree:{managed[1]}"
+    if adopted_worktree_parent(root=root, path=checkout) is None:
+        return None
+    try:
+        registered = registered_worktree_at(root, checkout)
+    except WorktreeIsolationError:
+        return None
+    if registered is None or registered.prunable:
+        return None
+    return f"worktree:{checkout.name}"
 
 
 def _spec_confirmation_state_roots(

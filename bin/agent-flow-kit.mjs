@@ -949,6 +949,11 @@ function currentCheckoutIdentity(root) {
 }
 
 function adoptedCheckoutIdentity(root, cwd) {
+  const name = adoptedCheckoutName(root, cwd);
+  return name ? `worktree:${name}` : null;
+}
+
+function adoptedCheckoutName(root, cwd) {
   const topLevel = gitOutput(cwd, ["rev-parse", "--show-toplevel"]);
   const commonDir = gitOutput(cwd, ["rev-parse", "--git-common-dir"]);
   if (!topLevel || !commonDir) {
@@ -971,7 +976,15 @@ function adoptedCheckoutIdentity(root, cwd) {
   if (!recorded || !samePath(recorded, checkout)) {
     return null;
   }
-  return `worktree:${name}`;
+  // 경로 일치는 예선일 뿐이다. 채택 기록의 registration fingerprint까지 맞아야
+  // 한다 — 지운 뒤 같은 자리에 다시 만든 checkout이 앞 checkout의 runtime state를
+  // 물려받으면 `run push-watch`가 남의 artifact를 갱신한다. 판정은 Python이 소유한다.
+  const verified = pythonCliOutput(
+    "worktree",
+    ["identity", "--root", root, "--path", checkout],
+    { cwd: checkout },
+  );
+  return verified === `worktree:${name}` ? name : null;
 }
 
 function resolveGitCommonWorktreeRoot(start) {
@@ -1128,12 +1141,13 @@ function readCurrentRun(root, worktree = null) {
 }
 
 function pythonRunStateRoot(root, worktree = null) {
-  const managed = resolveManagedWorktreeContext(process.cwd());
-  const requestedName = worktree || (
-    managed && samePath(managed.root, root)
-      ? managed.name
-      : null
-  );
+  const cwd = canonicalPath(process.cwd());
+  const managed = resolveManagedWorktreeContext(cwd);
+  // 채택 기록도 이름의 근거다. 새 기본 자리는 관리 경로 밖이므로 이걸 빼면 worktree
+  // 안에서 leader의 run state를 읽어 phase가 어긋난다.
+  const requestedName = worktree
+    || (managed && samePath(managed.root, root) ? managed.name : null)
+    || adoptedCheckoutName(root, cwd);
   if (!requestedName) {
     return root;
   }
@@ -2296,7 +2310,7 @@ ${AGENT_FLOW_COMMAND} run "<task>"
 \`\`\`
 
 install은 프로젝트당 1회만 수행합니다. 새 세션이 시작됐다는 이유로 install을 다시 실행하지 않습니다.
-Follow the CLI output exactly. Git projects start inside \`.agent-flow/worktrees/feat-<slug>/\` without switching the leader branch; continue with the printed \`next_command\`.
+Follow the CLI output exactly. Git projects start inside the sibling folder \`<repo>.worktrees/feat-<slug>/\` without switching the leader branch; continue with the printed \`next_command\`.
 
 run이 SPEC 확인 대기로 막히면 지원되는 Codex·Claude·OMP host에서는 사용자에게 현재 대화의 새 turn으로 정확히 \`승인\`이라고 답해 달라고 안내합니다. managed user-prompt hook이 현재 pending SPEC을 확인합니다. hook을 사용할 수 없을 때만 사용자가 대상 worktree의 대화형 터미널에서 경로 없는 fallback \`${AGENT_FLOW_COMMAND} spec confirm\`을 직접 실행합니다.
 \`manual\` verify 항목은 사용자가 \`${AGENT_FLOW_COMMAND} spec approve <spec-id> --run-dir <run-dir>\`를 실행해야 승인 record가 남습니다.
@@ -2355,7 +2369,7 @@ ${AGENT_FLOW_COMMAND} run "<task>"
 \`\`\`
 
 Do not reinstall agent-flow for each task. Install is project setup, not the normal task entry.
-In a git repo, \`${AGENT_FLOW_COMMAND} run "<task>"\` starts the run inside \`.agent-flow/worktrees/feat-<slug>/\` on branch \`feat/<slug>\`.
+In a git repo, \`${AGENT_FLOW_COMMAND} run "<task>"\` starts the run inside the sibling folder \`<repo>.worktrees/feat-<slug>/\` on branch \`feat/<slug>\`.
 
 When the user types \`/agent-flow\` with no task:
 
@@ -2618,17 +2632,41 @@ function runGates(args) {
   runPythonCliCommand("gates", args);
 }
 
-function runPythonCliCommand(subcommand, args, { interactive = false } = {}) {
+function pythonCliEnv() {
   const root = resolveAgentFlowRoot(process.cwd());
   const pythonPathEntries = [
     root ? installedPythonRuntimePath(root) : "",
     path.join(KIT_ROOT, "src"),
     process.env.PYTHONPATH,
   ].filter(Boolean);
-  const env = {
+  return {
     ...process.env,
     PYTHONPATH: [...new Set(pythonPathEntries)].join(path.delimiter),
   };
+}
+
+// 판정을 Python에 묻는다. 지문 검증을 두 언어로 구현하면 갈라지고, 갈라진 쪽이
+// 느슨하면 그쪽이 유효한 우회로가 된다.
+function pythonCliOutput(subcommand, args, { cwd = process.cwd() } = {}) {
+  const result = safeSpawnSync(
+    preferredPython(),
+    ["-m", "agent_flow.cli", subcommand, ...args],
+    {
+      cwd,
+      env: pythonCliEnv(),
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 30000,
+    },
+  );
+  if (result.error || result.status !== 0) {
+    return null;
+  }
+  return String(result.stdout ?? "").trim() || null;
+}
+
+function runPythonCliCommand(subcommand, args, { interactive = false } = {}) {
+  const env = pythonCliEnv();
   // gates는 프로파일 게이트 전체를 순차로 돌린다. 이 저장소에서 가장 비싼 게이트는
   // `pytest -q`로 실측 5분대다. relay용 30초 상한을 걸면 정상 실행이 끝나기 전에
   // 죽는다. 개별 게이트 상한은 Python `--timeout`이 소유하고, wrapper는 그 총량만

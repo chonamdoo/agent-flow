@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shlex
 import shutil
@@ -39,7 +40,7 @@ class RunState:
     worktree: dict[str, str] | None = None
 
 
-def start_run(*, root: Path, request: RunRequest) -> RunState:
+def start_run(*, root: Path, request: RunRequest, project_root: Path | None = None) -> RunState:
     init_project(root)
     run_id = request.run_id or _new_run_id()
     run_dir = root / ".agent-flow" / "runs" / request.workflow_id / run_id
@@ -57,7 +58,12 @@ def start_run(*, root: Path, request: RunRequest) -> RunState:
         worktree=request.worktree,
     )
     try:
-        _write_json(run_dir / "manifest.json", _state_payload(state))
+        # `root`는 worktree run에서 git-private state root다. checkout 경로는 그
+        # 기준으로 적으면 `../../../..` 체인이 되므로 leader 프로젝트 루트로 적는다.
+        _write_json(
+            run_dir / "manifest.json",
+            _state_payload(state, root=project_root or root),
+        )
         _append_event(run_dir, "started", {"profile": state.profile, "adapter": state.adapter})
     except Exception:
         shutil.rmtree(run_dir)
@@ -149,7 +155,7 @@ def _append_event(run_dir: Path, event: str, details: dict[str, str]) -> None:
         file.write(f"{json.dumps(payload, sort_keys=True)}\n")
 
 
-def _state_payload(state: RunState) -> dict[str, str]:
+def _state_payload(state: RunState, *, root: Path | None = None) -> dict[str, str]:
     payload = asdict(state)
     # design-spec.md의 task digest와 대조된다. `artifact.create_run`과 같은 계약이다.
     payload["task_digest"] = hashlib.sha256(state.task.strip().encode("utf-8")).hexdigest()
@@ -158,7 +164,7 @@ def _state_payload(state: RunState) -> dict[str, str]:
         worktree = dict(payload["worktree"])
         raw_path = worktree.get("path")
         if raw_path:
-            worktree["path"] = _safe_relative_path(str(raw_path))
+            worktree["path"] = _safe_relative_path(str(raw_path), root=root)
         payload["worktree"] = worktree
     if payload["worktree"] is None:
         del payload["worktree"]
@@ -261,11 +267,36 @@ def _relative_run_dir(run_dir: str) -> str:
     return run_dir
 
 
-def _safe_relative_path(path: str) -> str:
-    rel_path = _relative_run_dir(path)
-    if Path(rel_path).is_absolute() or re.match(r"^[A-Za-z]:[\\/]", rel_path):
+def _is_absolute_path_text(value: str) -> bool:
+    return bool(Path(value).is_absolute() or re.match(r"^[A-Za-z]:[\\/]", value))
+
+
+def _safe_relative_path(path: str, *, root: Path | None = None) -> str:
+    """상태 파일에 호스트 절대 경로를 남기지 않으면서 어디인지는 잃지 않는다.
+
+    checkout이 leader 밖(현재 기본 자리)이면 leader 기준 상대 경로가 되므로 `..`로
+    시작한다. 그마저 불가능할 때만 이름으로 내려간다 — 이름만 남으면 진단에서
+    "어디에 있었는가"가 사라진다.
+
+    판정은 **원본** 경로로 한다. `_relative_run_dir`를 먼저 태우면 프로젝트가
+    `.agent-flow`를 포함한 경로에 있을 때(`/x/.agent-flow/repos/app`) 절대 경로가
+    거기서 잘려 leader 아래의 없는 자리를 가리킨다.
+    """
+    if _is_absolute_path_text(path):
+        if root is not None:
+            try:
+                # 양쪽을 realpath로 맞춘다. macOS의 `/var` -> `/private/var`처럼 한쪽만
+                # 심링크를 지나면 상대 경로가 엉뚱한 자리를 가리킨다.
+                return os.path.relpath(
+                    os.path.realpath(path), os.path.realpath(root)
+                )
+            except (OSError, ValueError):
+                pass
+        trimmed = _relative_run_dir(path)
+        if not _is_absolute_path_text(trimmed):
+            return trimmed
         return Path(path.replace("\\", "/")).name or "worktree"
-    return rel_path
+    return _relative_run_dir(path)
 
 
 def _status_value(value: object) -> str:

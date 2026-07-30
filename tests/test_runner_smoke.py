@@ -28,7 +28,12 @@ SRC_ROOT = KIT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from agent_flow.core.worktrees import plan_worktree, worktree_runtime_root
+from agent_flow.core.worktrees import (
+    legacy_managed_root as _legacy_managed,
+    managed_worktrees_root as _managed,
+    plan_worktree,
+    worktree_runtime_root,
+)
 
 
 def _run_cli(args: list[str], cwd: Path, env_extra: dict | None = None):
@@ -280,7 +285,7 @@ def test_worktree_run_continue_status_abort(tmp_path: Path):
     assert r1.returncode == 0, r1.stderr
     assert "worktree: feat-long-press" in r1.stdout
 
-    worktree = project / ".agent-flow" / "worktrees" / "feat-long-press"
+    worktree = _managed(project) / "feat-long-press"
     runtime_root = _worktree_runtime_root(project, "feat-long-press")
     run_dir = next(
         path
@@ -434,7 +439,7 @@ def test_run_reuses_current_worktree_only_with_explicit_consent(tmp_path: Path):
     _init_git_project(project)
     created = _run_cli(["worktree", "create", "--name", "existing"], project)
     assert created.returncode == 0, created.stderr
-    checkout = project / ".agent-flow" / "worktrees" / "feat-existing"
+    checkout = _managed(project) / "feat-existing"
 
     started = _run_cli(
         ["run", "different task", "--reuse-existing-worktree"],
@@ -443,7 +448,7 @@ def test_run_reuses_current_worktree_only_with_explicit_consent(tmp_path: Path):
 
     assert started.returncode == 0, started.stderr
     assert f"worktree: feat-existing {checkout}" in started.stdout
-    assert not (project / ".agent-flow" / "worktrees" / "feat-different-task").exists()
+    assert not (_managed(project) / "feat-different-task").exists()
     state_root = _worktree_runtime_root(project, "feat-existing")
     assert any(
         (candidate / "active").exists()
@@ -463,7 +468,7 @@ def test_reuse_existing_worktree_flag_fails_from_leader(tmp_path: Path):
 
     assert result.returncode == 2
     assert "requires a managed worktree cwd" in result.stderr
-    assert not (project / ".agent-flow" / "worktrees" / "feat-task").exists()
+    assert not (_managed(project) / "feat-task").exists()
 
 
 def test_worktree_list_empty_and_multiple(tmp_path: Path):
@@ -487,7 +492,7 @@ def test_worktree_list_tolerates_invalid_stale_directory_name(tmp_path: Path):
     project = tmp_path / "list-invalid-stale"
     project.mkdir()
     _init_git_project(project)
-    invalid_dir = project / ".agent-flow" / "worktrees" / "!!!"
+    invalid_dir = _managed(project) / "!!!"
     invalid_dir.mkdir(parents=True)
 
     r_list = _run_cli(["worktree", "list"], project)
@@ -502,14 +507,14 @@ def test_worktree_remove_cleans_stale_metadata_but_preserves_unproved_ref(tmp_pa
     project.mkdir()
     _init_git_project(project)
     subprocess.run(["git", "branch", "feat/ghost"], cwd=project, check=True)
-    stale_dir = project / ".agent-flow" / "worktrees" / "feat-ghost"
+    stale_dir = _managed(project) / "feat-ghost"
     stale_dir.mkdir(parents=True)
     (stale_dir / "manifest.json").write_text(
         json.dumps(
             {
                 "name": "feat-ghost",
                 "branch": "feat/ghost",
-                "path": str(project / ".agent-flow" / "worktrees" / "feat-ghost"),
+                "path": str(_managed(project) / "feat-ghost"),
                 "exists": True,
                 "branch_created_by_agent_flow": True,
             }
@@ -533,7 +538,7 @@ def test_worktree_status_tolerates_corrupt_manifest(tmp_path: Path):
     project = tmp_path / "corrupt-manifest"
     project.mkdir()
     _init_git_project(project)
-    worktree_dir = project / ".agent-flow" / "worktrees" / "feat-ghost"
+    worktree_dir = _managed(project) / "feat-ghost"
     worktree_dir.mkdir(parents=True)
     (worktree_dir / "manifest.json").write_text("{bad json", encoding="utf-8")
 
@@ -547,7 +552,7 @@ def test_worktree_remove_does_not_trust_string_owned_manifest_flag(tmp_path: Pat
     project.mkdir()
     _init_git_project(project)
     subprocess.run(["git", "branch", "feature/keep"], cwd=project, check=True)
-    stale_dir = project / ".agent-flow" / "worktrees" / "feat-ghost"
+    stale_dir = _managed(project) / "feat-ghost"
     stale_dir.mkdir(parents=True)
     (stale_dir / "manifest.json").write_text(
         json.dumps(
@@ -573,7 +578,7 @@ def test_worktree_remove_does_not_trust_manifest_owned_branch(tmp_path: Path):
     project.mkdir()
     _init_git_project(project)
     subprocess.run(["git", "branch", "feature/keep"], cwd=project, check=True)
-    stale_dir = project / ".agent-flow" / "worktrees" / "feat-ghost"
+    stale_dir = _managed(project) / "feat-ghost"
     stale_dir.mkdir(parents=True)
     (stale_dir / "manifest.json").write_text(
         json.dumps(
@@ -598,7 +603,7 @@ def test_worktree_status_sanitizes_malformed_manifest_name_and_branch(tmp_path: 
     project = tmp_path / "malformed-manifest-fields"
     project.mkdir()
     _init_git_project(project)
-    worktree_dir = project / ".agent-flow" / "worktrees" / "feat-ghost"
+    worktree_dir = _managed(project) / "feat-ghost"
     worktree_dir.mkdir(parents=True)
     (worktree_dir / "manifest.json").write_text(
         json.dumps(
@@ -625,8 +630,8 @@ def test_worktree_remove_does_not_trust_manifest_path(tmp_path: Path):
 
     r_victim = _run_cli(["worktree", "create", "--name", "victim"], project)
     assert r_victim.returncode == 0, r_victim.stderr
-    victim_dir = project / ".agent-flow" / "worktrees" / "feat-victim"
-    stale_dir = project / ".agent-flow" / "worktrees" / "feat-ghost"
+    victim_dir = _managed(project) / "feat-victim"
+    stale_dir = _managed(project) / "feat-ghost"
     stale_dir.mkdir(parents=True)
     (stale_dir / "manifest.json").write_text(
         json.dumps(
@@ -653,7 +658,7 @@ def test_worktree_remove_preserves_stale_path_file_data(tmp_path: Path):
     project = tmp_path / "stale-path-file"
     project.mkdir()
     _init_git_project(project)
-    worktrees_root = project / ".agent-flow" / "worktrees"
+    worktrees_root = _managed(project)
     worktrees_root.mkdir(parents=True)
     stale_file = worktrees_root / "feat-ghost"
     stale_file.write_text("not a directory\n", encoding="utf-8")
@@ -671,7 +676,7 @@ def test_worktree_remove_prunes_missing_registration_but_preserves_ref(tmp_path:
 
     r_create = _run_cli(["worktree", "create", "--name", "ghost"], project)
     assert r_create.returncode == 0, r_create.stderr
-    stale_dir = project / ".agent-flow" / "worktrees" / "feat-ghost"
+    stale_dir = _managed(project) / "feat-ghost"
     assert _branch_exists(project, "feat/ghost")
     shutil.rmtree(stale_dir)
 
@@ -685,7 +690,7 @@ def test_worktree_create_rejects_stale_path_reuse(tmp_path: Path):
     project = tmp_path / "stale-path-reuse"
     project.mkdir()
     _init_git_project(project)
-    stale_dir = project / ".agent-flow" / "worktrees" / "feat-task"
+    stale_dir = _managed(project) / "feat-task"
     stale_dir.mkdir(parents=True)
 
     r_create = _run_cli(["worktree", "create", "--name", "task"], project)
@@ -698,14 +703,14 @@ def test_worktree_remove_keep_branch_preserves_stale_owned_branch(tmp_path: Path
     project.mkdir()
     _init_git_project(project)
     subprocess.run(["git", "branch", "feat/ghost"], cwd=project, check=True)
-    stale_dir = project / ".agent-flow" / "worktrees" / "feat-ghost"
+    stale_dir = _managed(project) / "feat-ghost"
     stale_dir.mkdir(parents=True)
     (stale_dir / "manifest.json").write_text(
         json.dumps(
             {
                 "name": "feat-ghost",
                 "branch": "feat/ghost",
-                "path": str(project / ".agent-flow" / "worktrees" / "feat-ghost"),
+                "path": str(_managed(project) / "feat-ghost"),
                 "exists": True,
                 "branch_created_by_agent_flow": True,
             }
@@ -814,7 +819,7 @@ def test_worktree_run_rejects_existing_branch_mismatch(tmp_path: Path):
 
     r1 = _run_cli(["run", "task", "--worktree", "task"], project)
     assert r1.returncode == 0, r1.stderr
-    worktree = project / ".agent-flow" / "worktrees" / "feat-task"
+    worktree = _managed(project) / "feat-task"
     runtime_root = _worktree_runtime_root(project, "feat-task")
     active = next(
         path
@@ -869,19 +874,19 @@ def test_worktree_attach_resolves_branch_selector_to_registered_checkout(tmp_pat
     _init_git_project(project)
     # 디렉터리 이름이 생성 규칙과 다르다. 이름 정규화로 경로를 유도하면 이미
     # 체크아웃된 브랜치를 두 번째 자리에 add하려다 git이 거부한다.
-    _add_worktree(project, "-b", "feat/api", str(project / ".agent-flow" / "worktrees" / "api-work"), "main")
+    _add_worktree(project, "-b", "feat/api", str(_legacy_managed(project) / "api-work"), "main")
 
     result = _run_cli(["run", "task", "--worktree", "feat/api"], project)
 
     assert result.returncode == 0, result.stderr
     assert "worktree: api-work" in result.stdout
-    assert not (project / ".agent-flow" / "worktrees" / "feat-api").exists()
+    assert not (_legacy_managed(project) / "feat-api").exists()
 def test_exact_branch_selector_wins_over_a_derived_path_alias(tmp_path: Path):
     project = tmp_path / "exact-branch-selector"
     project.mkdir()
     _init_git_project(project)
-    exact = project / ".agent-flow" / "worktrees" / "api-work"
-    alias = project / ".agent-flow" / "worktrees" / "feat-api"
+    exact = _legacy_managed(project) / "api-work"
+    alias = _legacy_managed(project) / "feat-api"
     _add_worktree(project, "-b", "feat/api", str(exact), "main")
     _add_worktree(project, "-b", "feat/other", str(alias), "main")
 
@@ -897,7 +902,7 @@ def test_worktree_attach_keeps_name_that_normalization_would_rewrite(tmp_path: P
     project = tmp_path / "attach-odd-name"
     project.mkdir()
     _init_git_project(project)
-    checkout = project / ".agent-flow" / "worktrees" / "feat-issue#110"
+    checkout = _legacy_managed(project) / "feat-issue#110"
     _add_worktree(project, "-b", "feat/issue#110", str(checkout), "main")
 
     result = _run_cli(["run", "task", "--worktree", "feat-issue#110"], project)
@@ -910,7 +915,7 @@ def test_worktree_attach_keeps_name_that_normalization_would_rewrite(tmp_path: P
     assert meta["checkout_identity"] == "worktree:feat-issue#110"
     # 정규화 경로로 새 checkout과 브랜치가 생기면 조회 명령과 진입 명령이 서로 다른
     # 대상을 가리키게 된다.
-    assert not (project / ".agent-flow" / "worktrees" / "feat-issue-110").exists()
+    assert not (_legacy_managed(project) / "feat-issue-110").exists()
     assert not _branch_exists(project, "feat/issue-110")
 
     status = _run_cli(["status", "--worktree", "feat-issue#110"], project)
@@ -966,7 +971,7 @@ def test_worktree_attach_rejects_detached_head(tmp_path: Path):
     project = tmp_path / "attach-detached"
     project.mkdir()
     _init_git_project(project)
-    _add_worktree(project, "--detach", str(project / ".agent-flow" / "worktrees" / "feat-det"), "main")
+    _add_worktree(project, "--detach", str(_legacy_managed(project) / "feat-det"), "main")
 
     result = _run_cli(["run", "task", "--worktree", "feat-det"], project)
 
@@ -979,7 +984,7 @@ def test_worktree_attach_rejects_protected_branch(tmp_path: Path):
     project.mkdir()
     _init_git_project(project)
     subprocess.run(["git", "branch", "develop"], cwd=project, check=True, capture_output=True, text=True)
-    _add_worktree(project, str(project / ".agent-flow" / "worktrees" / "feat-dev"), "develop")
+    _add_worktree(project, str(_legacy_managed(project) / "feat-dev"), "develop")
 
     result = _run_cli(["run", "task", "--worktree", "feat-dev"], project)
 
@@ -1001,7 +1006,7 @@ def test_worktree_selector_outside_managed_root_requires_adopt(tmp_path: Path):
     assert "is not adopted" in result.stderr
     assert "worktree adopt --path" in result.stderr
     # 경로 selector를 디렉터리 이름으로 뭉갠 checkout이 생기면 안 된다.
-    managed = project / ".agent-flow" / "worktrees"
+    managed = _managed(project)
     assert not managed.exists() or list(managed.iterdir()) == []
 
 
@@ -1019,7 +1024,7 @@ def test_run_from_unadopted_linked_worktree_is_blocked(tmp_path: Path):
     assert result.returncode == 2
     assert "has not adopted" in result.stderr
     assert "worktree adopt --path" in result.stderr
-    assert not (project / ".agent-flow" / "worktrees" / "feat-task").exists()
+    assert not (_managed(project) / "feat-task").exists()
 
 
 def test_run_warns_when_cwd_is_another_managed_checkout(tmp_path: Path):
@@ -1037,7 +1042,7 @@ def test_run_warns_when_cwd_is_another_managed_checkout(tmp_path: Path):
     assert here.returncode == 0, here.stderr
     there = _run_cli(["worktree", "create", "--name", "there"], project)
     assert there.returncode == 0, there.stderr
-    standing = project / ".agent-flow" / "worktrees" / "feat-here"
+    standing = _managed(project) / "feat-here"
 
     result = _run_cli(["run", "task", "--worktree", "there"], standing)
 
@@ -1048,7 +1053,7 @@ def test_run_warns_when_cwd_is_another_managed_checkout(tmp_path: Path):
     assert "feat-there" in result.stderr
 
 
-def test_adopt_registers_a_linked_worktree_outside_the_managed_root(tmp_path: Path):
+def test_adopt_registers_a_linked_worktree_outside_themanaged_worktrees_root(tmp_path: Path):
     project = tmp_path / "adopt-outside"
     project.mkdir()
     _init_git_project(project)
@@ -1085,7 +1090,7 @@ def test_run_in_an_adopted_linked_worktree_stays_in_place(tmp_path: Path):
     assert result.returncode == 0, result.stderr
     assert f"worktree: {outside.name}" in result.stdout
     # 채택된 자리에서 그대로 돈다. 세 번째 checkout이 생기면 안 된다.
-    assert not (project / ".agent-flow" / "worktrees" / "feat-task").exists()
+    assert not (_managed(project) / "feat-task").exists()
 
 
 def test_worktree_attach_keeps_the_dirty_leader_guard(tmp_path: Path):
@@ -1110,7 +1115,7 @@ def test_implicit_task_selector_never_attaches_to_a_registered_worktree(tmp_path
     project = tmp_path / "implicit-no-attach"
     project.mkdir()
     _init_git_project(project)
-    _add_worktree(project, "-b", "feat/api", str(project / ".agent-flow" / "worktrees" / "api-work"), "main")
+    _add_worktree(project, "-b", "feat/api", str(_managed(project) / "api-work"), "main")
 
     # task 이름은 명시 selector가 아니다. 등록부 우선 해석을 여기까지 넓히면 task
     # 문자열이 남의 checkout 이름과 겹치는 순간 조용히 그 자리에 붙는다.
@@ -1118,7 +1123,7 @@ def test_implicit_task_selector_never_attaches_to_a_registered_worktree(tmp_path
 
     assert result.returncode == 0, result.stderr
     assert "worktree: feat-api-work" in result.stdout
-    assert (project / ".agent-flow" / "worktrees" / "feat-api-work").exists()
+    assert (_managed(project) / "feat-api-work").exists()
 
 
 def test_implicit_task_selector_refuses_an_existing_derived_worktree(tmp_path: Path):
@@ -1155,7 +1160,7 @@ def test_start_attaches_to_registered_worktree_and_keys_state_by_its_name(tmp_pa
     result = _run_cli(["start", "development", "--task", "task", "--worktree", "feat/api"], project)
 
     assert result.returncode == 0, result.stderr
-    assert not (project / ".agent-flow" / "worktrees" / "feat-api").exists()
+    assert not (_managed(project) / "feat-api").exists()
     runtime_root = _worktree_runtime_root(project, "feat-api-work")
     run_dir = next((runtime_root / ".agent-flow" / "runs" / "development").iterdir())
     assert (run_dir / "manifest.json").exists()
@@ -1167,7 +1172,7 @@ def test_start_adopts_registered_worktree_without_agent_flow_metadata(
     project = tmp_path / "start-attach-unowned"
     project.mkdir()
     _init_git_project(project)
-    checkout = project / ".agent-flow" / "worktrees" / "api-work"
+    checkout = _legacy_managed(project) / "api-work"
     _add_worktree(project, "-b", "feat/api", str(checkout), "main")
 
     result = _run_cli(
@@ -1179,7 +1184,9 @@ def test_start_adopts_registered_worktree_without_agent_flow_metadata(
     assert checkout.exists()
     runtime_root = _worktree_runtime_root(project, "api-work")
     ownership = json.loads((runtime_root / "manifest.json").read_text(encoding="utf-8"))
-    assert ownership["path"] == ".agent-flow/worktrees/api-work"
+    # 기록된 path는 상대·절대 어느 쪽이어도 그 checkout을 가리켜야 한다. 새 기본
+    # 자리는 project 밖이므로 절대 경로로 기록된다.
+    assert (project / ownership["path"]).resolve() == checkout.resolve()
     assert ownership["branch"] == "feat/api"
     assert ownership["branch_created_by_agent_flow"] is False
     run_dir = next((runtime_root / ".agent-flow" / "runs" / "development").iterdir())
@@ -1193,7 +1200,7 @@ def test_start_worktree_writes_state_outside_worktree(tmp_path: Path):
 
     r_start = _run_cli(["start", "development", "--task", "task", "--worktree", "task"], project)
     assert r_start.returncode == 0, r_start.stderr
-    worktree = project / ".agent-flow" / "worktrees" / "feat-task"
+    worktree = _managed(project) / "feat-task"
     runtime_root = _worktree_runtime_root(project, "feat-task")
     run_dir = next((runtime_root / ".agent-flow" / "runs" / "development").iterdir())
     assert (run_dir / "manifest.json").exists()
@@ -1213,7 +1220,7 @@ def test_worktree_run_cleans_up_new_worktree_on_start_failure(tmp_path: Path):
     r1 = _run_cli(["run", "task", "--worktree", "task", "--workflow", "missing"], project)
     assert r1.returncode == 2
     assert "Traceback" not in r1.stderr
-    assert not (project / ".agent-flow" / "worktrees" / "feat-task").exists()
+    assert not (_managed(project) / "feat-task").exists()
     assert not _branch_exists(project, "feat/task")
 
 
@@ -1225,7 +1232,7 @@ def test_start_worktree_cleans_up_new_worktree_on_start_failure(tmp_path: Path):
     r1 = _run_cli(["start", "missing", "--task", "task", "--worktree", "task"], project)
     assert r1.returncode == 2
     assert "Traceback" not in r1.stderr
-    assert not (project / ".agent-flow" / "worktrees" / "feat-task").exists()
+    assert not (_managed(project) / "feat-task").exists()
     assert not _branch_exists(project, "feat/task")
 
 
@@ -1263,7 +1270,7 @@ def test_live_worktree_remove_does_not_trust_manifest_branch_redirect(tmp_path: 
 
     r_create = _run_cli(["worktree", "create", "--name", "task"], project)
     assert r_create.returncode == 0, r_create.stderr
-    worktree = project / ".agent-flow" / "worktrees" / "feat-task"
+    worktree = _managed(project) / "feat-task"
     (_worktree_runtime_root(project, "feat-task") / "manifest.json").write_text(
         json.dumps(
             {
@@ -1305,7 +1312,7 @@ def test_worktree_run_failure_preserves_preexisting_branch(tmp_path: Path):
     assert r1.returncode == 2
     assert "Traceback" not in r1.stderr
     assert _branch_exists(project, "feat/shared")
-    assert not (project / ".agent-flow" / "worktrees" / "feat-task").exists()
+    assert not (_managed(project) / "feat-task").exists()
 
 
 def test_worktree_run_reports_dirty_leader_without_traceback(tmp_path: Path):
@@ -1328,7 +1335,7 @@ def test_worktree_run_allow_dirty_overrides_dirty_leader(tmp_path: Path):
 
     r1 = _run_cli(["run", "task", "--worktree", "task", "--allow-dirty"], project)
     assert r1.returncode == 0, r1.stderr
-    assert (project / ".agent-flow" / "worktrees" / "feat-task").exists()
+    assert (_managed(project) / "feat-task").exists()
 
 
 def test_malformed_meta_does_not_crash(tmp_path: Path):
