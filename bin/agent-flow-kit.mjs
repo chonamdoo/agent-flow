@@ -125,6 +125,21 @@ function installProject() {
     }
     return;
   }
+  // linked worktree(Orca의 `~/orca/workspaces/<repo>/<slug>` 등)도 managed worktree와
+  // 같은 정책이다. `resolveInstallRoot`가 leader로 올라가 버리면 다른 checkout에서
+  // leader의 tracked 파일(bootstrap markdown, .gitignore, profiles)을 갈아치운다.
+  const linkedLeader = resolveLinkedWorktreeLeader(requestedRoot);
+  if (linkedLeader) {
+    // managed 분기와 같은 종료코드 정책이다(leader에 설치본이 있으면 skip + rc 0).
+    // 갈라지면 install을 CI/부트스트랩에 넣은 사용자가 worktree 안에서만 죽는다.
+    if (fs.existsSync(path.join(linkedLeader, ".agent-flow", "kit.json"))) {
+      console.log(`agent-flow already installed root=${linkedLeader}`);
+      console.log("worktree install skipped; reinstall from the leader checkout if needed");
+    } else {
+      throw new Error("linked worktree install blocked; install from the leader checkout first");
+    }
+    return;
+  }
   const root = resolveInstallRoot(requestedRoot);
   const agentFlowDir = path.join(root, ".agent-flow");
   const profile = detectProfile(root);
@@ -459,6 +474,8 @@ function relayPythonRunLifecycle(subcommand, args, root) {
   const rootedArgs = hasCliOption(args, "--root")
     ? [...args]
     : [...args, "--root", root];
+  // `--worktree`를 여기서 만들어 넣지 않는다. 그러면 Python이 명시 selector로 보고
+  // 암묵 재사용 동의 게이트를 건너뛴다. cwd 유도는 Python이 같은 규칙으로 다시 한다.
   const identityArgs = [
     ...rootedArgs,
     "--checkout-identity",
@@ -856,6 +873,8 @@ function resolveInstallRoot(start) {
   if (markerIndex !== -1) {
     return parts.slice(0, markerIndex).join(path.sep) || path.sep;
   }
+  // non-git 프로젝트(git repo가 아니거나 git 실행 불가)의 마지막 수단이다. 위의 git
+  // 기반 판정이 전부 null을 낸 경우이므로, 여기서 cwd를 그대로 install root로 쓴다.
   return start;
 }
 
@@ -907,6 +926,15 @@ function currentCheckoutIdentity(root) {
   if (managed && samePath(managed.root, root)) {
     return `worktree:${managed.name}`;
   }
+  // 채택 판정이 leader containment보다 먼저다. 채택된 checkout이 `<leader>/.worktrees/foo`
+  // 처럼 leader 디렉터리 **아래**이면서 관리 경로 밖이면, containment가 먼저 "leader"를
+  // 내고 Python은 cwd의 채택 기록으로 `worktree:foo`를 유도해 두 값이 어긋난다.
+  // 채택 기록은 leader 자신을 지목할 수 없으므로(leader는 채택 대상이 아니다) 이 순서가
+  // leader 판정을 삼키지 않는다.
+  const adopted = adoptedCheckoutIdentity(root, cwd);
+  if (adopted) {
+    return adopted;
+  }
   const leader = canonicalPath(root);
   const relative = path.relative(leader, cwd);
   if (
@@ -920,6 +948,32 @@ function currentCheckoutIdentity(root) {
   return "unknown";
 }
 
+function adoptedCheckoutIdentity(root, cwd) {
+  const topLevel = gitOutput(cwd, ["rev-parse", "--show-toplevel"]);
+  const commonDir = gitOutput(cwd, ["rev-parse", "--git-common-dir"]);
+  if (!topLevel || !commonDir) {
+    return null;
+  }
+  const common = path.resolve(cwd, commonDir);
+  if (path.basename(common) !== ".git" || !samePath(path.dirname(common), root)) {
+    return null;
+  }
+  const checkout = canonicalPath(topLevel);
+  const name = path.basename(checkout);
+  const record = path.join(common, "agent-flow", "adopted", `${name}.json`);
+  let payload;
+  try {
+    payload = JSON.parse(fs.readFileSync(record, "utf8"));
+  } catch {
+    return null;
+  }
+  const recorded = payload && typeof payload.path === "string" ? payload.path : "";
+  if (!recorded || !samePath(recorded, checkout)) {
+    return null;
+  }
+  return `worktree:${name}`;
+}
+
 function resolveGitCommonWorktreeRoot(start) {
   const topLevel = gitOutput(start, ["rev-parse", "--show-toplevel"]);
   const commonDir = gitOutput(start, ["rev-parse", "--git-common-dir"]);
@@ -931,6 +985,19 @@ function resolveGitCommonWorktreeRoot(start) {
     return null;
   }
   return path.dirname(resolvedCommonDir);
+}
+
+// linked worktree 판정. leader를 cwd와 직접 비교하면 `<leader>/src`처럼 leader의
+// 하위 디렉토리에서 install하는 정상 경로까지 막힌다 - 그래서 이 checkout의
+// toplevel과 견준다. linked worktree에서만 toplevel(worktree root)과
+// leader(git common dir의 부모)가 갈라진다.
+function resolveLinkedWorktreeLeader(start) {
+  const topLevel = gitOutput(start, ["rev-parse", "--show-toplevel"]);
+  const leader = resolveGitCommonWorktreeRoot(start);
+  if (!topLevel || !leader || samePath(leader, topLevel)) {
+    return null;
+  }
+  return leader;
 }
 
 function gitOutput(cwd, args) {

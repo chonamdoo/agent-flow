@@ -987,7 +987,7 @@ def test_worktree_attach_rejects_protected_branch(tmp_path: Path):
     assert "protected worktree branch is not allowed: develop" in result.stderr
 
 
-def test_worktree_selector_outside_managed_root_is_rejected(tmp_path: Path):
+def test_worktree_selector_outside_managed_root_requires_adopt(tmp_path: Path):
     project = tmp_path / "attach-outside"
     project.mkdir()
     _init_git_project(project)
@@ -997,13 +997,15 @@ def test_worktree_selector_outside_managed_root_is_rejected(tmp_path: Path):
     result = _run_cli(["run", "task", "--worktree", str(outside)], project)
 
     assert result.returncode == 2
-    assert "is not supported" in result.stderr
+    # git 등록만으로는 인가가 되지 않는다. 채택은 사람이 하는 별도 행위다.
+    assert "is not adopted" in result.stderr
+    assert "worktree adopt --path" in result.stderr
     # 경로 selector를 디렉터리 이름으로 뭉갠 checkout이 생기면 안 된다.
     managed = project / ".agent-flow" / "worktrees"
     assert not managed.exists() or list(managed.iterdir()) == []
 
 
-def test_run_from_unmanaged_worktree_reports_the_worktree_it_uses(tmp_path: Path):
+def test_run_from_unadopted_linked_worktree_is_blocked(tmp_path: Path):
     project = tmp_path / "notice-other-checkout"
     project.mkdir()
     _init_git_project(project)
@@ -1012,9 +1014,78 @@ def test_run_from_unmanaged_worktree_reports_the_worktree_it_uses(tmp_path: Path
 
     result = _run_cli(["run", "task"], outside)
 
+    # 예전에는 leader root만 남긴 채 task 이름으로 세 번째 worktree를 만들고 rc 0으로
+    # 끝났다. 사용자가 서 있는 checkout이 아닌 곳에서 런이 도는 것이 그 증상이다.
+    assert result.returncode == 2
+    assert "has not adopted" in result.stderr
+    assert "worktree adopt --path" in result.stderr
+    assert not (project / ".agent-flow" / "worktrees" / "feat-task").exists()
+
+
+def test_run_warns_when_cwd_is_another_managed_checkout(tmp_path: Path):
+    """반증: 이 경고가 없으면 사용자는 서 있는 checkout에서 런이 도는 줄 안다.
+
+    경고를 만드는 rev-parse가 raw subprocess에서 sanitize된 git_safe로 옮겨졌는데,
+    문구를 보는 단언이 레포에서 한 건도 남지 않았다. 그러면 rev-parse가 조용히
+    실패해 경고가 사라져도 아무 테스트가 붉어지지 않는다.
+    """
+    project = tmp_path / "cwd-other-checkout"
+    project.mkdir()
+    _init_git_project(project)
+    # 경고는 attach/create 이후에 나온다. 두 checkout이 미리 있어야 그 자리에 닿는다.
+    here = _run_cli(["worktree", "create", "--name", "here"], project)
+    assert here.returncode == 0, here.stderr
+    there = _run_cli(["worktree", "create", "--name", "there"], project)
+    assert there.returncode == 0, there.stderr
+    standing = project / ".agent-flow" / "worktrees" / "feat-here"
+
+    result = _run_cli(["run", "task", "--worktree", "there"], standing)
+
     assert result.returncode == 0, result.stderr
     assert "cwd is worktree" in result.stderr
-    assert (project / ".agent-flow" / "worktrees" / "feat-task").exists()
+    # 어느 자리에 서 있고 어디서 도는지 둘 다 말해야 사용자가 옮겨 갈 수 있다.
+    assert "feat-here" in result.stderr
+    assert "feat-there" in result.stderr
+
+
+def test_adopt_registers_a_linked_worktree_outside_the_managed_root(tmp_path: Path):
+    project = tmp_path / "adopt-outside"
+    project.mkdir()
+    _init_git_project(project)
+    outside = tmp_path / "outside-adopt"
+    _add_worktree(project, "-b", "feat/outside", str(outside), "main")
+
+    adopted = _run_cli(["worktree", "adopt", "--path", str(outside)], project)
+
+    assert adopted.returncode == 0, adopted.stderr
+    assert str(outside) in adopted.stdout
+    manifest = json.loads(
+        (_worktree_runtime_root(project, outside.name) / "manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    # 관리 루트 밖 checkout은 leader 기준으로 상대화할 수 없다.
+    assert Path(manifest["path"]).is_absolute()
+    assert Path(manifest["path"]).resolve() == outside.resolve()
+    # 채택은 브랜치 소유권을 주장하지 않는다. 정리 단계가 남의 브랜치를 지우면 안 된다.
+    assert manifest["branch_created_by_agent_flow"] is False
+
+
+def test_run_in_an_adopted_linked_worktree_stays_in_place(tmp_path: Path):
+    project = tmp_path / "adopted-run"
+    project.mkdir()
+    _init_git_project(project)
+    outside = tmp_path / "outside-adopted-run"
+    _add_worktree(project, "-b", "feat/outside", str(outside), "main")
+    adopted = _run_cli(["worktree", "adopt", "--path", str(outside)], project)
+    assert adopted.returncode == 0, adopted.stderr
+
+    result = _run_cli(["run", "task", "--reuse-existing-worktree"], outside)
+
+    assert result.returncode == 0, result.stderr
+    assert f"worktree: {outside.name}" in result.stdout
+    # 채택된 자리에서 그대로 돈다. 세 번째 checkout이 생기면 안 된다.
+    assert not (project / ".agent-flow" / "worktrees" / "feat-task").exists()
 
 
 def test_worktree_attach_keeps_the_dirty_leader_guard(tmp_path: Path):

@@ -800,9 +800,175 @@ def managed_worktree_root(*, root, path) -> Path:
         candidate = real_path(Path(root) / marker / "worktrees")
         if target.parent == candidate:
             return candidate
+    adopted = adopted_worktree_parent(root=root, path=path)
+    if adopted is not None:
+        return adopted
     raise WorktreeIsolationError(
         f"worktree path is not a direct child of a managed root: {target}"
     )
+
+
+def adopted_worktree_parent(*, root, path) -> Optional[Path]:
+    """채택 기록이 ``path``를 지목할 때 그 checkout의 부모.
+
+    git 등록만으로는 인가가 되지 않는다. 워커도 `git worktree add`를 실행할 수 있고
+    그 호출은 host write boundary의 write 명령 집합에 없어서 경계를 그대로 통과한다.
+    그래서 등록 지문(위조 방지)에 더해 **채택 기록**을 요구한다.
+
+    기록을 worktree manifest에 두면 안 된다. manifest는 `<git_common>/agent-flow/
+    worktrees/<name>/`, 즉 바인딩된 워커의 쓰기 허용 구역 안이라 워커가 자기 이름의
+    manifest에서 `path`만 바꿔 관리 루트 밖 임의 디렉터리를 자기 checkout으로
+    승격시킬 수 있다. 그래서 기록은 그 구역 밖의 `adopted/`에 둔다.
+
+    기록은 경로만으로 참이 되지 않는다. 채택 시점의 등록 지문을 함께 적고 현재
+    지문과 대조한다 — 그러지 않으면 채택했던 자리를 지우고 다른 목적으로 다시 만든
+    checkout이 사람의 인가 없이 그 기록을 물려받는다.
+
+    관리 루트 밖 checkout은 공유 부모가 없으므로 자기 부모를 돌려준다. 그 값이
+    ``verify_linked_worktree``의 containment 인자로 쓰이면 그 검사는 항진식이 된다 —
+    관리 루트 안에서도 호출자들이 이미 같은 값을 넘기고 있고, 실질 증명은 gitdir
+    왕복 검증과 등록 지문이 한다.
+    """
+    target = real_path(path)
+    payload = _adopted_record(root=root, name=target.name)
+    if payload is None:
+        return None
+    if _recorded_checkout(root=root, payload=payload) != target:
+        return None
+    expected = payload.get("registration_identity")
+    if not isinstance(expected, str) or not expected:
+        return None
+    registered = registered_worktree_at(root, target)
+    if registered is None or registered.registration_identity != expected:
+        return None
+    return target.parent
+
+
+def adopted_checkout_path(*, root, name) -> Optional[Path]:
+    """``name`` 기록이 지목하는 checkout의 실경로. 기록이 없으면 ``None``.
+
+    후보를 만드는 용도다. 지문 대조는 ``adopted_worktree_parent``가 한다.
+    """
+    payload = _adopted_record(root=root, name=name)
+    if payload is None:
+        return None
+    return _recorded_checkout(root=root, payload=payload)
+
+
+def trusted_checkout_paths(*, root, name) -> tuple[Path, ...]:
+    """런타임 상태 키 ``name``이 가리킬 수 있는 checkout 경로들.
+
+    두 근거만 인정한다: 생성 규약이 정한 관리 루트 아래 자리, 그리고 채택 기록.
+    둘 다 워커가 쓸 수 없는 곳에서 나온다 — 이 목록으로 소유자를 고르는 자리가
+    host write boundary이므로, 워커가 쓸 수 있는 값이 섞이면 경계가 무의미해진다.
+    """
+    candidates: list[Path] = []
+    adopted = adopted_checkout_path(root=root, name=name)
+    if adopted is not None:
+        candidates.append(adopted)
+    for marker in _MANAGED_WORKTREE_MARKERS:
+        candidates.append(real_path(Path(root) / marker / "worktrees" / name))
+    return tuple(candidates)
+
+
+def record_adopted_checkout(*, root, name, path, registration_identity) -> Path:
+    """채택 기록을 남긴다. 채택 명령만 호출한다."""
+    record = adopted_record_path(root=root, name=name)
+    if record is None:
+        raise WorktreeIsolationError(
+            f"cannot record adoption without a git common directory: {path}"
+        )
+    if not registration_identity:
+        raise WorktreeIsolationError(
+            f"cannot record adoption without a registration identity: {path}"
+        )
+    record.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    payload = json.dumps(
+        {
+            "path": str(real_path(path)),
+            "registration_identity": registration_identity,
+        },
+        sort_keys=True,
+    )
+    # 기존 자리를 열어 자르면 안 된다. `O_NOFOLLOW`는 symlink만 막고 hard link는
+    # 통과시키므로, 기록 자리가 남의 파일과 연결돼 있으면 `O_TRUNC`가 그 파일을 먼저
+    # 비운다. 배타 생성한 임시 파일에 쓴 뒤 atomic rename으로 갈아 끼운다.
+    staging = record.with_name(f"{record.name}.{os.getpid()}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    handle = os.open(staging, flags, 0o600)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(f"{payload}\n")
+        os.replace(staging, record)
+    except BaseException:
+        staging.unlink(missing_ok=True)
+        raise
+    return record
+
+
+def forget_adopted_checkout(*, root, name) -> None:
+    record = adopted_record_path(root=root, name=name)
+    if record is None:
+        return
+    try:
+        record.unlink()
+    except OSError:
+        # 기록이 없거나 지울 수 없어도 제거 자체를 막지 않는다. 남은 기록은 경로가
+        # 다시 일치할 때만 의미가 있고, 그때는 채택이 여전히 참이다.
+        pass
+
+
+def adopted_record_path(*, root, name) -> Optional[Path]:
+    # 워커의 쓰기 허용 구역(`agent-flow/worktrees/<name>`) 밖이어야 한다.
+    common = _git_common_dir(root)
+    if common is None or common.name != ".git":
+        return None
+    if not name or Path(name).name != name or name in {".", ".."}:
+        raise WorktreeIsolationError(f"invalid adopted checkout key: {name!r}")
+    return common / "agent-flow" / "adopted" / f"{name}.json"
+
+
+def _adopted_record(*, root, name) -> Optional[dict]:
+    record = adopted_record_path(root=root, name=name)
+    if record is None:
+        return None
+    try:
+        info = record.lstat()
+    except OSError:
+        return None
+    # 인가 상태는 정규 파일 하나여야 한다. symlink나 hardlink는 기록을 저장소 밖에서
+    # 갈아치울 수 있는 자리다(host 바인딩 파일에 이미 걸린 계약과 같다).
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        return None
+    try:
+        payload = json.loads(record.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _recorded_checkout(*, root, payload: dict) -> Optional[Path]:
+    recorded = payload.get("path")
+    if not isinstance(recorded, str) or not recorded:
+        return None
+    candidate = Path(recorded)
+    if not candidate.is_absolute():
+        candidate = Path(root) / candidate
+    return real_path(candidate)
+
+
+def git_common_dir(path) -> Optional[Path]:
+    """sanitize된 git으로 얻은 common dir. anchor 유도는 이 함수만 쓴다.
+
+    ambient `GIT_DIR`/`GIT_COMMON_DIR`을 상속한 채 물으면 대답이 다른 저장소를
+    가리키고, 그 값의 부모가 그대로 config/state root가 된다.
+    """
+    return _git_common_dir(path)
+
+
+def git_toplevel(path) -> Optional[Path]:
+    """sanitize된 git으로 얻은 checkout 최상위. 같은 이유로 이 함수만 쓴다."""
+    return _git_toplevel(path)
 
 
 

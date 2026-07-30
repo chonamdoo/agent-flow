@@ -3072,6 +3072,106 @@ design-values-confirmed: n/a
 
             self.assertFalse((root / ".agent-flow" / "worktrees" / "feat-other").exists())
 
+    def test_node_lifecycle_relay_recognizes_an_adopted_external_checkout(self) -> None:
+        """반증: JS relay가 cwd를 leader/관리 경로로만 분류하면, 채택된 외부 checkout에서
+        `--worktree` 없이 부른 lifecycle 명령이 전부 `identity is unknown`으로 거절된다.
+        `agent-flow`는 이 JS 진입점이므로 Python 쪽만 고쳐도 사용자에게는 안 고쳐진다."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            project_root.mkdir()
+            _init_git_repo(project_root)
+            node = _node_executable()
+            kit = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            env = _node_test_env()
+            # relay는 설치된 Python runtime을 부른다. stub kit.json만으로는 그 앞에서 멈춘다.
+            install = subprocess.run(
+                (node, kit, "install"),
+                cwd=project_root,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(install.returncode, 0, install.stderr)
+            external = Path(temp_dir) / "outside" / "ext"
+            external.parent.mkdir(parents=True)
+            subprocess.run(
+                ("git", "worktree", "add", "-q", "-b", "feat/ext", str(external), "HEAD"),
+                cwd=project_root,
+                check=True,
+            )
+
+            before = subprocess.run(
+                (node, kit, "run", "status"),
+                cwd=external,
+                env=_node_test_env(),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertIn("identity is unknown", before.stdout + before.stderr)
+
+            self.assertEqual(
+                main(
+                    [
+                        "worktree",
+                        "adopt",
+                        "--path",
+                        str(external),
+                        "--allow-dirty",
+                        "--root",
+                        str(project_root),
+                    ]
+                ),
+                0,
+            )
+
+            after = subprocess.run(
+                (node, kit, "run", "status"),
+                cwd=external,
+                env=_node_test_env(),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotIn("identity is unknown", after.stdout + after.stderr)
+            self.assertNotIn("identity mismatch", after.stdout + after.stderr)
+
+            # leader 디렉터리 **아래**이지만 관리 경로 밖인 자리. containment 판정이
+            # 먼저 오면 JS는 "leader", Python은 채택 기록으로 `worktree:<name>`을 내
+            # 두 값이 어긋난다.
+            inside = project_root / ".worktrees" / "nested"
+            inside.parent.mkdir(parents=True)
+            subprocess.run(
+                ("git", "worktree", "add", "-q", "-b", "feat/nested", str(inside), "HEAD"),
+                cwd=project_root,
+                check=True,
+            )
+            self.assertEqual(
+                main(
+                    [
+                        "worktree",
+                        "adopt",
+                        "--path",
+                        str(inside),
+                        "--allow-dirty",
+                        "--root",
+                        str(project_root),
+                    ]
+                ),
+                0,
+            )
+            nested = subprocess.run(
+                (node, kit, "run", "status"),
+                cwd=inside,
+                env=_node_test_env(),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotIn("identity mismatch", nested.stdout + nested.stderr)
+            self.assertNotIn("identity is unknown", nested.stdout + nested.stderr)
+
     def test_node_installer_from_agent_flow_worktree_without_root_install_is_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
@@ -3124,7 +3224,7 @@ design-values-confirmed: n/a
                     self.assertFalse((project_root / ".agent-flow" / "kit.json").exists())
                     self.assertFalse((worktree / ".agent-flow" / "kit.json").exists())
 
-    def test_node_installer_from_external_codex_worktree_updates_git_common_install(self) -> None:
+    def test_node_installer_from_external_codex_worktree_is_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
@@ -3135,6 +3235,7 @@ design-values-confirmed: n/a
             subprocess.run(("git", "worktree", "add", "-q", "--detach", str(worktree), "HEAD"), cwd=project_root, check=True)
             node = _node_executable()
             env = _node_test_env(HOME=str(home))
+            leader_kit = (project_root / ".agent-flow" / "kit.json").read_bytes()
 
             result = subprocess.run(
                 (
@@ -3149,11 +3250,19 @@ design-values-confirmed: n/a
                 check=False,
             )
 
+            # leader를 PROJECT로 잡아 install을 끝내는 예전 경로는 leader의
+            # CLAUDE.md/AGENTS.md를 백업 없이 덮고, tracked `.gitignore`를 고쳐 leader를
+            # dirty로 만들고, 미선택 profile을 지운다. 그래서 여기서는 아무것도 쓰지
+            # 않는다. 다만 leader에 설치본이 이미 있으면 "할 일이 없음"이지 실패가
+            # 아니라서 managed worktree 분기와 같은 rc 0으로 건너뛴다 - 같은 정책인데
+            # rc만 갈라지면 install을 CI/부트스트랩에 넣은 사용자가 worktree 안에서만
+            # 스크립트 전진이 죽는다.
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertTrue((project_root / ".agent-flow" / "kit.json").is_file())
+            self.assertIn("worktree install skipped", result.stdout)
+            self.assertEqual((project_root / ".agent-flow" / "kit.json").read_bytes(), leader_kit)
             self.assertFalse((worktree / ".agent-flow" / "kit.json").exists())
 
-    def test_legacy_node_installer_from_external_codex_worktree_updates_git_common_install(self) -> None:
+    def test_legacy_node_installer_from_external_codex_worktree_is_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
@@ -3164,6 +3273,7 @@ design-values-confirmed: n/a
             subprocess.run(("git", "worktree", "add", "-q", "--detach", str(worktree), "HEAD"), cwd=project_root, check=True)
             node = _node_executable()
             env = _node_test_env(HOME=str(home))
+            leader_kit = (project_root / ".agent-flow" / "kit.json").read_bytes()
 
             result = subprocess.run(
                 (
@@ -3179,8 +3289,94 @@ design-values-confirmed: n/a
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertTrue((project_root / ".agent-flow" / "kit.json").is_file())
+            self.assertIn("worktree install skipped", result.stdout)
+            self.assertEqual((project_root / ".agent-flow" / "kit.json").read_bytes(), leader_kit)
+            self.assertFalse((project_root / "CLAUDE.md").exists())
             self.assertFalse((worktree / ".agent-flow" / "kit.json").exists())
+
+    def test_node_installers_from_linked_worktree_without_leader_install_are_blocked(self) -> None:
+        # 위 두 테스트는 leader에 설치본이 있는 분기(rc 0 skip)를 고정한다. 없는 분기는
+        # 여전히 fail-closed여야 한다 - 조용히 leader를 PROJECT로 잡으면 다른 checkout의
+        # install이 leader의 tracked 파일을 갈아치운다. `_init_git_repo`는 stub kit.json을
+        # 만들므로 여기서는 맨 git repo로 세운다.
+        installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            node = _node_executable()
+            for installer_name in installers:
+                with self.subTest(installer=installer_name):
+                    project_root = root / f"{installer_name}-bare-leader"
+                    project_root.mkdir()
+                    subprocess.run(("git", "init", "-q", "-b", "main"), cwd=project_root, check=True)
+                    subprocess.run(("git", "config", "user.email", "test@example.com"), cwd=project_root, check=True)
+                    subprocess.run(("git", "config", "user.name", "Test User"), cwd=project_root, check=True)
+                    (project_root / "README.md").write_text("# test\n", encoding="utf-8")
+                    subprocess.run(("git", "add", "-A"), cwd=project_root, check=True)
+                    subprocess.run(("git", "commit", "-q", "-m", "init"), cwd=project_root, check=True)
+                    home = root / f"{installer_name}-home"
+                    worktree = home / ".codex" / "worktrees" / "slice" / "project"
+                    worktree.parent.mkdir(parents=True)
+                    subprocess.run(
+                        ("git", "worktree", "add", "-q", "--detach", str(worktree), "HEAD"),
+                        cwd=project_root,
+                        check=True,
+                    )
+
+                    result = subprocess.run(
+                        (
+                            node,
+                            str(Path(__file__).resolve().parents[1] / "bin" / installer_name),
+                            "install",
+                        ),
+                        cwd=worktree,
+                        env=_node_test_env(HOME=str(home)),
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertIn("linked worktree install blocked", result.stderr)
+                    self.assertFalse((project_root / ".agent-flow" / "kit.json").exists())
+                    self.assertFalse((worktree / ".agent-flow" / "kit.json").exists())
+
+    def test_node_installers_from_leader_subdirectory_install_into_leader(self) -> None:
+        # `git rev-parse --git-common-dir`은 cwd 기준 상대경로를 낸다: leader 루트에서는
+        # `.git`, `<leader>/src`에서는 `../.git`. 그래서 leader 판정은 cwd(start) 기준으로
+        # 풀어야 한다. toplevel 기준으로 풀면 `<leader>/src`에서 leader의 부모가 leader로
+        # 잡혀 toplevel과 갈라지고, worktree가 하나도 없는데도 install이
+        # "linked worktree install blocked"로 죽는다.
+        installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            node = _node_executable()
+            for installer_name in installers:
+                with self.subTest(installer=installer_name):
+                    project_root = root / f"{installer_name}-leader-subdir"
+                    source_dir = project_root / "src"
+                    source_dir.mkdir(parents=True)
+                    _init_git_repo(project_root)
+
+                    result = subprocess.run(
+                        (
+                            node,
+                            str(Path(__file__).resolve().parents[1] / "bin" / installer_name),
+                            "install",
+                        ),
+                        cwd=source_dir,
+                        env=_node_test_env(),
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertNotIn("worktree install blocked", result.stderr)
+                    self.assertTrue((project_root / ".agent-flow" / "kit.json").is_file(), result.stdout)
+                    self.assertTrue((project_root / ".claude" / "settings.json").is_file(), result.stdout)
+                    # 하위 디렉터리가 자기 설치본을 갖게 되면 leader와 두 벌이 된다.
+                    self.assertFalse((source_dir / ".agent-flow").exists())
+                    self.assertFalse((source_dir / ".claude").exists())
 
     def test_node_runner_rejects_unbound_external_codex_worktree_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

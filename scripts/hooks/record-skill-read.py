@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -43,6 +44,20 @@ _SHELL_SKILL_RE = re.compile(r"((?:~|/|\.{1,2}/)?[^\s'\"|;&<>]*SKILL\.md)")
 # 파일 내용을 실제로 출력하는 커맨드만. `ls`/`stat`/`echo`/`rm`은 읽기가 아니다.
 _SHELL_READER_RE = re.compile(
     r"(?<!\w)(cat|bat|head|tail|less|more|sed|awk|grep|rg|nl|fold|strings)(?!\w)"
+)
+# git 하위프로세스를 띄울 때 벗겨야 하는 ambient discovery 변수. 실측으로
+# `GIT_COMMON_DIR=<decoy>/.git` 하나만 새어 들어와도 rev-parse가 decoy를 반환하고,
+# 그러면 hook이 남의 저장소에 증거를 쓴다. core의 LEAKY_GIT_ENV_VARS와 같은 목록이다.
+LEAKY_GIT_ENV_VARS = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_PREFIX",
+    "GIT_CEILING_DIRECTORIES",
 )
 
 
@@ -150,7 +165,39 @@ def append_record(log_path: Path, record: dict) -> None:
         return
 
 
+def git_leader_checkout(start: Path) -> Path | None:
+    """`start`가 속한 저장소의 leader checkout. git이 없거나 저장소가 아니면 None이다."""
+    env = {name: value for name, value in os.environ.items() if name not in LEAKY_GIT_ENV_VARS}
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            cwd=str(start),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        # hook은 관측 전용이다. git 부재·timeout은 예상 상황이라 증거 하나를 포기하고 넘어간다.
+        return None
+    if result.returncode != 0:
+        return None
+    common = Path(result.stdout.strip() or ".")
+    if not common.is_absolute():
+        # leader 자신에서는 `.git`처럼 상대경로가 나온다. 기준은 실행 cwd인 `start`다.
+        common = start / common
+    if common.name != ".git":
+        return None
+    return common.parent
+
+
 def find_project_root(start: Path) -> Path | None:
+    # leader-first. `.agent-flow/worktrees/` 밖의 linked worktree(Orca workspace 등)에는
+    # `.agent-flow`가 아예 없어서 조상 탐색만으로는 증거가 통째로 사라진다. 반대로 조상
+    # 탐색을 먼저 하면 `$HOME/.agent-flow/kit.json`이 실제 leader를 가려버린다.
+    leader = git_leader_checkout(start)
+    if leader is not None and (leader / ".agent-flow" / "kit.json").is_file():
+        return leader
     for candidate in [start, *start.parents]:
         if (candidate / ".agent-flow" / "kit.json").is_file():
             return candidate

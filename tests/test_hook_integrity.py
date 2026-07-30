@@ -11,6 +11,7 @@ import json
 import os
 import shlex
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -548,6 +549,49 @@ def test_install_root_resolves_from_a_nested_worktree(tmp_path):
     nested = tmp_path / ".agent-flow" / "worktrees" / "feat-x" / "src"
     nested.mkdir(parents=True)
     assert find_install_root(nested) == tmp_path
+
+
+def _git(*args: str, cwd: Path) -> None:
+    subprocess.run(("git", *args), cwd=cwd, check=True, capture_output=True, text=True)
+
+
+def _repo(root: Path) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    _git("init", "-b", "main", cwd=root)
+    _git("config", "user.email", "t@t", cwd=root)
+    _git("config", "user.name", "t", cwd=root)
+    (root / "f.txt").write_text("base\n", encoding="utf-8")
+    _git("add", ".", cwd=root)
+    _git("commit", "-m", "init", cwd=root)
+
+
+def test_install_root_resolves_the_leader_from_an_external_linked_worktree(tmp_path):
+    """불변: 관리 루트 밖 linked worktree도 자기를 지탱하는 leader 설치본을 찾는다.
+
+    조상 탐색만 하면 `<tmp>/outside/feat-x`에는 조상 중 설치본이 없어 `None`이 되고,
+    무결성 게이트는 "설치본을 못 찾음"으로 런을 거부한다.
+    """
+    leader = tmp_path / "leader"
+    _repo(leader)
+    _install(leader)
+    external = tmp_path / "outside" / "feat-x"
+    _git("worktree", "add", "-b", "feat/x", str(external), cwd=leader)
+
+    assert find_install_root(external) == leader.resolve()
+
+
+def test_worktree_local_kit_json_does_not_shadow_the_leader_install(tmp_path):
+    """반증: checkout 안의 `kit.json`이 이겨 버리면 워커가 자기 무결성 기준선을 쓴다."""
+    leader = tmp_path / "leader"
+    _repo(leader)
+    _install(leader)
+    external = tmp_path / "outside" / "feat-x"
+    _git("worktree", "add", "-b", "feat/x", str(external), cwd=leader)
+    planted = external / ".agent-flow" / "kit.json"
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    planted.write_text(json.dumps({"profile": "generic", "hooks": False}), encoding="utf-8")
+
+    assert find_install_root(external) == leader.resolve()
 
 
 def test_duplicate_roots_are_reported_once(tmp_path):

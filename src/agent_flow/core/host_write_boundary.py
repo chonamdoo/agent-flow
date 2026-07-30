@@ -20,6 +20,7 @@ from agent_flow.core.worktree_isolation import (
     list_registered_worktrees,
     managed_worktree_root,
     real_path,
+    trusted_checkout_paths,
     verify_linked_worktree,
 )
 
@@ -102,6 +103,27 @@ class _ActiveRunClaim:
     metadata: dict[str, Any]
 
 
+
+
+def assert_adoption_allowed(*, root: Path) -> None:
+    """채택은 런이 도는 동안에는 하지 않는다.
+
+    채택은 인가다. 워커가 스스로 인가하면 관리 루트 밖 어디로든 쓰기 경계를 넓힌다.
+    tool 경계의 명령 문자열 검사로는 막을 수 없고(`env agent-flow …`, 절대경로 호출,
+    `python3 -m agent_flow.cli …`), 호출자의 cwd로도 막을 수 없다 — 그 값은 호출자가
+    고른다(`cd /tmp && agent-flow worktree adopt …`). 그래서 호출자가 고를 수 없는
+    것으로 판정한다: 이 저장소에 활성 run이 하나라도 있으면 거절한다.
+
+    활성 run을 증명할 수 없으면 예외가 그대로 올라간다. 통과로 접으면 워커가 자기
+    자리를 스스로 인가할 수 있다.
+    """
+    active = _active_checkouts(root)
+    if active:
+        names = ", ".join(context.name for context in active)
+        raise HostWriteBoundaryError(
+            f"refusing to adopt while runs are active in {root} ({names}); "
+            "adoption is a leader-side action — finish or abort the run first"
+        )
 
 
 def record_host_checkout_binding(payload: object, project_root: Path) -> Path | None:
@@ -301,25 +323,27 @@ def _active_checkouts(root: Path) -> tuple[ActiveCheckout, ...]:
     runtime_claims = _runtime_active_claims(root)
     if not runtime_claims:
         return ()
-    registered_by_name: dict[str, list[Any]] = {}
+    registered_by_path: dict[Path, Any] = {}
     for registered in list_registered_worktrees(root):
         checkout = real_path(registered.path)
         if checkout == root:
             continue
-        registered_by_name.setdefault(checkout.name, []).append(registered)
+        registered_by_path[checkout] = registered
 
     contexts: list[ActiveCheckout] = []
     for name, runs in sorted(runtime_claims.items()):
-        registered = registered_by_name.get(name, [])
-        if len(registered) != 1:
+        entry = _registered_for_claim(
+            root=root, name=name, registered_by_path=registered_by_path
+        )
+        if entry is None:
             raise HostWriteBoundaryError(
-                f"active run state has no unique registered worktree: {name}"
+                "active run state has no provable registered worktree owner: "
+                f"{name}"
             )
         if len(runs) != 1:
             raise HostWriteBoundaryError(
                 f"multiple active runs claim one worktree: {name}"
             )
-        entry = registered[0]
         checkout = real_path(entry.path)
         verified_root = managed_worktree_root(root=root, path=checkout)
         verify_linked_worktree(
@@ -351,6 +375,29 @@ def _active_checkouts(root: Path) -> tuple[ActiveCheckout, ...]:
             )
         )
     return tuple(contexts)
+
+
+def _registered_for_claim(
+    *,
+    root: Path,
+    name: str,
+    registered_by_path: dict[Path, Any],
+) -> Any | None:
+    """이 런타임 claim이 소유한 등록 행 하나.
+
+    디렉터리 이름으로 묶으면 관리 루트 안의 ``feat-x``와 밖의 ``feat-x``가 같은 키가
+    되고, 그 순간 무관한 worktree까지 저장소 전역으로 경계 판정이 죽는다. 그래서
+    이름이 아니라 경로로 고른다.
+
+    후보는 워커가 쓸 수 없는 두 근거에서만 나온다(생성 규약의 자리, 채택 기록).
+    manifest는 후보 근거가 아니다 — 워커의 쓰기 허용 구역 안이라 자기 claim을 다른
+    checkout으로 돌릴 수 있다. 증명이 안 되면 ``None``이고, 호출자는 fail-closed다.
+    """
+    for candidate in trusted_checkout_paths(root=root, name=name):
+        entry = registered_by_path.get(candidate)
+        if entry is not None:
+            return entry
+    return None
 
 
 def _active_checkout(

@@ -87,6 +87,24 @@ const FORCE_MANAGED = INSTALL_ARGS.includes("--force-managed");
 const HOOKS_FLAG_OFF = INSTALL_ARGS.includes("--no-hooks");
 const HOOKS_FLAG_ON = INSTALL_ARGS.includes("--hooks");
 let hooksDisabled = HOOKS_FLAG_OFF;
+// Python `LEAKY_GIT_ENV_VARS`(`src/agent_flow/core/worktree_isolation.py`)와 같은
+// 목록이어야 한다. ambient discovery 변수가 하나라도 남으면 우리 git이 요청한 cwd
+// 밖을 본다 - 실측으로 `GIT_COMMON_DIR=/private/tmp/af-decoy/.git`만 있어도
+// `rev-parse --git-common-dir`이 decoy를 반환하고, 그 부모가 install PROJECT가 됐다.
+// PROJECT 계산이 모듈 최상단에서 곧바로 git을 부르므로, 이 상수는 그보다 위에
+// 있어야 한다(아래에 두면 TDZ로 로드 자체가 죽는다).
+const LEAKY_GIT_ENV_VARS = [
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_COMMON_DIR",
+  "GIT_INDEX_FILE",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_NAMESPACE",
+  "GIT_PREFIX",
+  "GIT_CEILING_DIRECTORIES",
+];
+
 // 이 표식이 남아 있으면 OMP 확장 파일을 kit 소유로 보고 업그레이드한다.
 const REQUESTED_PROJECT = process.cwd();
 const PROJECT = resolveInstallProject(REQUESTED_PROJECT);
@@ -147,16 +165,41 @@ function resolveGitCommonWorktreeRoot(start) {
   if (!topLevel || !commonDir) {
     return null;
   }
-  const resolvedCommonDir = path.resolve(topLevel, commonDir);
+  // `git rev-parse --git-common-dir`은 **cwd 기준** 상대경로("../.git" 등)를 낸다.
+  // topLevel 기준으로 풀면 cwd가 하위 디렉토리일 때 한 단계씩 어긋난 경로가 나온다.
+  // `bin/agent-flow-kit.mjs`의 같은 함수도 start 기준이라 그쪽과 맞췄다.
+  const resolvedCommonDir = path.resolve(start, commonDir);
   if (path.basename(resolvedCommonDir) !== ".git") {
     return null;
   }
   return path.dirname(resolvedCommonDir);
 }
 
+// linked worktree 판정. leader를 cwd와 직접 비교하면 `<leader>/src`처럼 leader의
+// 하위 디렉토리에서 install하는 정상 경로까지 막힌다 - 그래서 이 checkout의
+// toplevel과 견준다. linked worktree에서만 toplevel(worktree root)과
+// leader(git common dir의 부모)가 갈라진다.
+function resolveLinkedWorktreeLeader(start) {
+  const topLevel = gitOutput(start, ["rev-parse", "--show-toplevel"]);
+  const leader = resolveGitCommonWorktreeRoot(start);
+  if (!topLevel || !leader || samePath(leader, topLevel)) {
+    return null;
+  }
+  return leader;
+}
+
+function gitEnv() {
+  const env = { ...process.env };
+  for (const name of LEAKY_GIT_ENV_VARS) {
+    delete env[name];
+  }
+  return env;
+}
+
 function gitOutput(cwd, args) {
   const result = spawnSync("git", args, {
     cwd,
+    env: gitEnv(),
     encoding: "utf8",
     stdio: ["ignore", "pipe", "ignore"],
   });
@@ -1011,6 +1054,27 @@ function install() {
       return;
     }
     console.error("managed worktree install blocked; install from the leader checkout first");
+    process.exitCode = 1;
+    return;
+  }
+  // linked worktree(Orca의 `~/orca/workspaces/<repo>/<slug>` 등)도 managed 경로와
+  // 똑같이 fail-closed다. 조용히 leader를 PROJECT로 잡으면 이 아래 전부가 leader를
+  // 때린다: `bootstrapMarkdown`이 leader의 CLAUDE.md/AGENTS.md를 백업 없이 덮고,
+  // tracked `.gitignore`를 고치고, `.claude/settings.json`과
+  // `.agent-flow/profiles/*`(미선택 profile 삭제)를 갈아치우며, `--force-managed`면
+  // `removeDirIfSame`가 tracked `<leader>/scripts/`를 내용 확인 없이 recursive 삭제한다.
+  const leaderRoot = resolveLinkedWorktreeLeader(REQUESTED_PROJECT);
+  if (leaderRoot) {
+    // 종료코드는 managed 분기와 같아야 한다. 같은 정책인데 rc만 갈라지면
+    // `npx agent-flow install`을 CI/부트스트랩 스크립트에 넣은 사용자가 worktree
+    // 안에서만 스크립트 전진이 죽는다. leader에 설치본이 있으면 "이미 설치됨"이라
+    // 할 일이 없는 것이지 실패가 아니다.
+    if (fs.existsSync(path.join(leaderRoot, ".agent-flow", "kit.json"))) {
+      console.log(`agent-flow already installed root=${leaderRoot}`);
+      console.log("worktree install skipped; reinstall from the leader checkout if needed");
+      return;
+    }
+    console.error(`linked worktree install blocked; install from the leader checkout ${leaderRoot}`);
     process.exitCode = 1;
     return;
   }

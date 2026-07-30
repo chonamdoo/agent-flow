@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import stat
 import shutil
 import subprocess
@@ -26,12 +27,15 @@ from agent_flow.core.worktree_isolation import (
     RegisteredWorktree,
     FileLeaseUnavailable,
     WorktreeIsolationError,
+    adopted_worktree_parent,
     assert_worktree_mergeable,
     exclusive_file_lease,
+    forget_adopted_checkout,
     git_repo_state,
     git_safe,
     list_registered_worktrees,
     real_path,
+    record_adopted_checkout,
     registered_worktree_at,
     same_worktree_path,
     shared_file_lease,
@@ -44,6 +48,14 @@ from agent_flow.core.worktree_isolation import (
 
 PROTECTED_WORKTREE_BRANCHES = {"main", "master", "develop"}
 GIT_WORKTREE_TIMEOUT_S = 300
+# `dir_fd`는 POSIX 전용이다. 없는 플랫폼에서는 이름 기반 경로로 내려가고, 그 경우 부모
+# 디렉터리 바꿔치기까지는 막지 못한다. `os.replace`는 macOS에서 `supports_dir_fd`에 없고
+# `os.rename`만 있다 — POSIX의 `renameat`은 대상이 있어도 원자적으로 덮으므로 같은 것이다.
+_DIR_FD_SUPPORTED = (
+    os.open in os.supports_dir_fd
+    and os.rename in os.supports_dir_fd
+    and os.unlink in os.supports_dir_fd
+)
 CLEANUP_JOURNAL_VERSION = 3
 CLEANUP_STEPS = (
     "archive",
@@ -248,6 +260,7 @@ def attach_worktree(
     branch: str | None = None,
     allow_dirty: bool = False,
     expected_registration_identity: str | None = None,
+    adopt: bool = False,
 ) -> WorktreeStatus | None:
     """등록부가 아는 관리형 checkout에 그대로 붙는다. 붙을 대상이 없으면 ``None``.
 
@@ -280,13 +293,18 @@ def attach_worktree(
         raise RuntimeError(
             "leader workspace is dirty; pass --allow-dirty to use a worktree anyway"
         )
-    if not _is_managed_child(root=root, path=registered.path):
-        # 관리 루트 밖 checkout에 붙는 것은 지원 범위가 아니다. 그렇다고 생성
-        # 경로로 흘려보내면 selector를 디렉터리 이름으로 뭉개 엉뚱한 checkout을
+    if (
+        not adopt
+        and not _is_managed_child(root=root, path=registered.path)
+        and not _adopted(root=root, path=registered.path)
+    ):
+        # 관리 루트 밖 checkout은 등록만으로 들어오지 못한다. 등록은 git이 해 주는
+        # 것이고 워커도 할 수 있으므로, leader가 서명한 manifest를 요구한다. 그렇다고
+        # 생성 경로로 흘려보내면 selector를 디렉터리 이름으로 뭉개 엉뚱한 checkout을
         # 만든다(절대경로 selector는 경로 전체가 이름이 된다).
         raise ValueError(
-            f"worktree {registered.path} is not a direct child of {_managed_root(root)}; "
-            f"attaching to a checkout there is not supported"
+            f"worktree {registered.path} is outside {_managed_root(root)} and is not "
+            f"adopted; run `agent-flow worktree adopt --path {registered.path}` first"
         )
     if not (registered.path / ".git").is_file():
         # 등록은 남았는데 checkout이 사라졌다. 생성 경로가 prune 후 다시 만든다.
@@ -339,9 +357,12 @@ def attach_worktree(
         )
         runtime_root = _runtime_root_for_status(root=root, status=status)
         if runtime_root is None:
+            # 이름은 같지만 메타데이터가 다른 checkout의 것이다. 어느 자리가 막고
+            # 있는지 말해 주지 않으면 사용자는 "채택하라"는 안내와 "채택 거부" 사이를
+            # 무한히 왕복한다.
             raise ValueError(
                 f"worktree {registered.path.name} has conflicting agent-flow metadata; "
-                "refusing attach"
+                f"refusing attach. {_conflicting_metadata_hint(root=root, status=status)}"
             )
         if runtime_root.exists():
             if status.base_oid:
@@ -368,6 +389,58 @@ def attach_worktree(
         )
         write_worktree_manifest(root=root, status=status)
         return status
+
+
+def adopt_worktree(
+    *,
+    root: Path,
+    path: Path,
+    allow_dirty: bool = False,
+) -> WorktreeStatus:
+    """등록부가 아는 checkout 하나를 lifecycle metadata와 함께 채택한다.
+
+    경로 모양은 묻지 않는다. git이 이 저장소의 linked worktree로 등록했고 gitdir 왕복
+    검증을 통과하면 된다. 이 명령이 채택의 유일한 진입점인 이유는 인가를 사람이
+    주어야 하기 때문이다 — `git worktree add`는 워커도 할 수 있고 그 호출은 host
+    write boundary의 write 명령 집합에 없다.
+
+    채택은 브랜치 소유권을 주장하지 않는다(`branch_created_by_agent_flow=False`).
+    terminal cleanup은 checkout만 제거하고 브랜치는 보존한다.
+    """
+    checkout = real_path(path)
+    status = attach_worktree(
+        root=root,
+        selector=str(checkout),
+        allow_dirty=allow_dirty,
+        adopt=True,
+    )
+    if status is None:
+        raise ValueError(
+            f"no linked worktree of {root} is registered at {path}; "
+            "create it with `git worktree add` first"
+        )
+    # 기록은 manifest가 아니라 워커 쓰기 구역 밖의 `adopted/`에 남긴다. 이후의 모든
+    # 인가 판정(`adopted_worktree_parent`, `trusted_checkout_paths`)이 이 파일을 본다.
+    try:
+        record_adopted_checkout(
+            root=root,
+            name=status.name,
+            path=status.path,
+            registration_identity=status.registration_identity,
+        )
+    except (OSError, WorktreeIsolationError) as exc:
+        # attach는 이미 끝났다. 그 사실을 말하지 않으면 사용자는 "채택하라"는 안내와
+        # 원시 errno 사이에서 지금 상태가 무엇인지 알 수 없다.
+        raise WorktreeIsolationError(
+            f"attached {status.path} but could not record the adoption: {exc}. "
+            "That checkout is still unadopted — clear the cause and run the same "
+            "command again"
+        ) from exc
+    return status
+
+
+def _adopted(*, root: Path, path: Path) -> bool:
+    return adopted_worktree_parent(root=root, path=path) is not None
 
 
 def _is_managed_child(*, root: Path, path: Path) -> bool:
@@ -2331,6 +2404,16 @@ def _manifest_oid(payload: dict | None, key: str) -> str | None:
     return value if value is not None and _is_oid(value) else None
 
 
+def _manifest_path_value(*, root: Path, path: Path) -> str:
+    # 관리 루트 안 checkout은 leader 기준 상대경로로 남긴다(설치본을 옮겨도 유효).
+    # 관리 루트 밖 checkout은 상대화가 불가능하므로 절대경로를 쓴다 — 읽는 쪽
+    # (`_metadata_belongs_to_path`)이 이미 두 형태를 모두 해석한다.
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(real_path(path))
+
+
 def write_worktree_manifest(*, root: Path, status: WorktreeStatus) -> Path:
     """소비되는 키만 쓴다.
 
@@ -2342,7 +2425,7 @@ def write_worktree_manifest(*, root: Path, status: WorktreeStatus) -> Path:
     path = _runtime_state_root(root=root, name=status.name) / "manifest.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "path": str(status.path.relative_to(root)),
+        "path": _manifest_path_value(root=root, path=status.path),
         "branch": status.branch,
         "base_ref": status.base_ref,
         "base_oid": status.base_oid,
@@ -2413,6 +2496,7 @@ def remove_worktree_metadata(*, root: Path, name: str, path: Path | None = None)
         shutil.rmtree(runtime_root)
     if legacy_manifest.exists():
         legacy_manifest.unlink()
+    forget_adopted_checkout(root=root, name=key)
 
 
 def _runtime_state_key(*, root: Path, name: str) -> str:
@@ -2449,6 +2533,21 @@ def _metadata_belongs_to_path(*, root: Path, key: str, path: Path) -> bool:
     if not candidate.is_absolute():
         candidate = root / candidate
     return same_worktree_path(candidate, path)
+
+
+def _conflicting_metadata_hint(*, root: Path, status: WorktreeStatus) -> str:
+    try:
+        key = _runtime_state_key(root=root, name=status.name)
+    except ValueError:
+        return "the registry key for that name is unusable"
+    runtime_root = _runtime_state_root(root=root, name=key)
+    payload = _state_key_manifest(root=root, key=key)
+    recorded = payload.get("path") if isinstance(payload, dict) else None
+    owner = f" and records {recorded}" if isinstance(recorded, str) and recorded else ""
+    return (
+        f"registry key {runtime_root} belongs to another checkout{owner}; "
+        "remove that metadata directory to free the name"
+    )
 
 
 def _git_dirty(root: Path) -> bool:
@@ -2831,9 +2930,58 @@ def _provision_one_host_hook_registration(
             " merge the agent-flow hook entry into it by hand or delete the file"
         )
     _make_host_hook_parents(base=checkout_base, target=target)
-    target.write_bytes(payload)
-    os.chmod(target, 0o644)
+    _write_host_hook_registration(target=target, payload=payload)
     return True, None
+
+
+def _write_host_hook_registration(*, target: Path, payload: bytes) -> None:
+    """등록 파일을 그 자리에 원자적으로 놓는다.
+
+    대상 inode에 바로 쓰면 안 된다. 그 자리가 checkout 밖 파일과 hard link면 그 원본이
+    함께 덮인다(`is_file()`은 hard link를 통과시킨다). 임시 파일에 쓴 뒤 rename하면
+    디렉터리 엔트리만 바뀌어 링크된 inode는 그대로다.
+
+    부모 디렉터리는 fd로 고정한다. 이름으로 열면 검사와 쓰기 사이에 워커가 `.claude`를
+    저장소 밖 디렉터리 symlink로 바꿔치기해 그쪽 등록 파일을 덮게 만들 수 있다 —
+    무작위 파일명은 그 TOCTOU를 막지 못한다.
+    """
+    if _DIR_FD_SUPPORTED:
+        parent = os.open(
+            target.parent, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            _replace_at(parent=parent, name=target.name, payload=payload)
+        finally:
+            os.close(parent)
+        return
+    handle, staging_name = tempfile.mkstemp(
+        dir=str(target.parent), prefix=f"{target.name}.", suffix=".tmp"
+    )
+    staging = Path(staging_name)
+    try:
+        with os.fdopen(handle, "wb") as stream:
+            stream.write(payload)
+        os.chmod(staging, 0o644)
+        os.replace(staging, target)
+    except BaseException:
+        staging.unlink(missing_ok=True)
+        raise
+
+
+def _replace_at(*, parent: int, name: str, payload: bytes) -> None:
+    staging = f"{name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    handle = os.open(staging, flags, 0o644, dir_fd=parent)
+    try:
+        with os.fdopen(handle, "wb") as stream:
+            stream.write(payload)
+        os.rename(staging, name, src_dir_fd=parent, dst_dir_fd=parent)
+    except BaseException:
+        try:
+            os.unlink(staging, dir_fd=parent)
+        except OSError:
+            pass
+        raise
 
 
 def _host_hook_registration_is_kit_owned(
