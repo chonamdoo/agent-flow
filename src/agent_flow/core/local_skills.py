@@ -23,10 +23,7 @@ from agent_flow.core.skill_resolver import (
 
 APPLIED_MARKER = "project-local-skill-docs: applied"
 AVAILABILITY_MARKER = "skill-availability: pass|degraded"
-READ_EVIDENCE_MARKER = "skill-read-evidence: verified|unavailable"
-# 마커 키는 옛 artifact와 새 artifact가 한동안 섞인다. 리더는 둘 다 받는다 —
-# 개명 하나로 진행 중인 run의 gate가 멈추면 안 된다.
-USE_EVIDENCE_KEYS = ("skill-read-evidence", "skill-use-evidence")
+USE_EVIDENCE_MARKER = "skill-use-evidence: verified|unavailable"
 
 # Read hook이 SKILL.md 읽기를 append-only로 기록하는 파일. O_APPEND라 read-modify-write race가 없다.
 SKILLS_READ_LOG = Path(".agent-flow") / "skills-read.jsonl"
@@ -284,11 +281,11 @@ def missing_local_skill_markers(
         unread = [skill for skill in resolution.available_required if not evidence.covers(skill)]
         if unread:
             missing.append(
-                f"skill-read-evidence: verified ({len(unread)} required skill(s) were "
+                f"skill-use-evidence: verified ({len(unread)} required skill(s) were "
                 "never opened during this phase)"
             )
-    elif not any(values.get(key) in {"verified", "unavailable"} for key in USE_EVIDENCE_KEYS):
-        missing.append(READ_EVIDENCE_MARKER)
+    elif values.get("skill-use-evidence") not in {"verified", "unavailable"}:
+        missing.append(USE_EVIDENCE_MARKER)
 
     # L3: 자기신고는 표시용이다. resolver가 required로 판정하고 실제로 있는 것만 요구한다.
     if values.get("project-local-skills") != "checked":
@@ -431,7 +428,7 @@ def _marker_instruction(
             "",
             "```text",
             f"skill-availability: {availability}",
-            "skill-read-evidence: verified|unavailable",
+            "skill-use-evidence: verified|unavailable",
             "project-local-skills: checked",
             f"project-local-skills-used: {expected}",
             APPLIED_MARKER,

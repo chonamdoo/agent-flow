@@ -241,7 +241,7 @@ def test_missing_bundled_skill_must_be_named_in_the_gate(tmp_path, monkeypatch):
     gate = (
         "## Completion Gate\n"
         "skill-availability: degraded\n"
-        "skill-read-evidence: unavailable\n"
+        "skill-use-evidence: unavailable\n"
         "project-local-skills: checked\n"
         "project-local-skills-used: n/a\n"
         "missing-required-profile-skills: none\n"
@@ -266,7 +266,7 @@ def test_unrelated_profile_gate_stays_silent(tmp_path):
     gate = (
         "## Completion Gate\n"
         "skill-availability: pass\n"
-        "skill-read-evidence: unavailable\n"
+        "skill-use-evidence: unavailable\n"
         "project-local-skills: checked\n"
         "project-local-skills-used: n/a\n"
     )
@@ -295,7 +295,7 @@ def test_prompt_contract_lists_every_marker_the_gate_demands(tmp_path):
     block = local_skill_prompt_block(project, "implement", **common)
     contract = block.split("```text")[1].split("```")[0]
     artifact = "## Completion Gate\n" + contract.replace(
-        "skill-read-evidence: verified|unavailable", "skill-read-evidence: unavailable"
+        "skill-use-evidence: verified|unavailable", "skill-use-evidence: unavailable"
     )
 
     assert missing_local_skill_markers(artifact, project, "implement", **common) == []

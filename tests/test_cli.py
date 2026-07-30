@@ -446,7 +446,7 @@ class CliTest(unittest.TestCase):
             missing = missing_local_skill_markers(
                 "## Completion Gate\n"
                 "skill-availability: degraded\n"
-                "skill-read-evidence: unavailable\n"
+                "skill-use-evidence: unavailable\n"
                 "project-local-skills: checked\n"
                 "project-local-skills-used: alpha-guide\n"
                 "project-local-skill-docs: applied\n",
@@ -456,14 +456,14 @@ class CliTest(unittest.TestCase):
             )
             self.assertEqual(missing, [])
 
-    def test_read_evidence_blocks_when_available_skill_was_not_read(self) -> None:
+    def test_use_evidence_blocks_when_available_skill_was_not_read(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = _write_resolver_skills(temp_dir)
             phase_skills = PhaseSkills(required=("alpha-guide", "beta-guide"))
             gate = (
                 "## Completion Gate\n"
                 "skill-availability: pass\n"
-                "skill-read-evidence: verified\n"
+                "skill-use-evidence: verified\n"
                 "project-local-skills: checked\n"
                 "project-local-skills-used: alpha-guide, beta-guide\n"
                 "project-local-skill-docs: applied\n"
@@ -480,7 +480,7 @@ class CliTest(unittest.TestCase):
                 gate, root, "green", phase_skills=phase_skills
             )
             self.assertEqual(len(missing), 1)
-            self.assertIn("skill-read-evidence: verified", missing[0])
+            self.assertIn("skill-use-evidence: verified", missing[0])
             self.assertIn("never opened", missing[0])
 
             record_skill_read(root, root / "skills" / "beta-guide" / "SKILL.md")
@@ -11063,13 +11063,13 @@ def _node_project_local_gate(phase: str = "") -> str:
     if not required:
         return (
             "skill-availability: n/a\n"
-            "skill-read-evidence: unavailable\n"
+            "skill-use-evidence: unavailable\n"
             "project-local-skills: n/a\n"
             "project-local-skills-used: n/a\n"
         )
     return (
         "skill-availability: pass\n"
-        "skill-read-evidence: unavailable\n"
+        "skill-use-evidence: unavailable\n"
         "project-local-skills: checked\n"
         f"project-local-skills-used: {', '.join(required)}\n"
         "project-local-skill-docs: applied\n"
@@ -11079,7 +11079,7 @@ def _node_project_local_applied_gate() -> str:
     # implement phase가 workflow에서 선언한 skill + local-skills drop-box 전부가 대상이다.
     return (
         "skill-availability: pass\n"
-        "skill-read-evidence: unavailable\n"
+        "skill-use-evidence: unavailable\n"
         "project-local-skills: checked\n"
         "project-local-skills-used: code-generation-discipline, tdd, clean-architecture,"
         " api, api-contract-guide, figma-screen-spec, merge-review-flow, pr-review-flow,"

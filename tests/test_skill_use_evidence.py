@@ -140,15 +140,15 @@ def _markers(root: Path, gate: str) -> list[str]:
     )
 
 
-def test_reader_accepts_both_the_old_and_the_new_evidence_key(tmp_path):
-    """개명 하나로 진행 중인 run의 gate가 멈추면 안 된다."""
+def test_legacy_read_evidence_key_is_rejected(tmp_path):
+    """구 키를 계속 받아 주면 개명이 영구 별칭이 된다. 인정 키는 하나뿐이다."""
     root = _project(tmp_path)
 
-    old = _markers(root, _gate("skill-read-evidence: unavailable"))
-    new = _markers(root, _gate("skill-use-evidence: unavailable"))
+    legacy = _markers(root, _gate("skill-read-evidence: unavailable"))
+    current = _markers(root, _gate("skill-use-evidence: unavailable"))
 
-    assert not [item for item in old if item.startswith("skill-read-evidence")]
-    assert not [item for item in new if item.startswith("skill-read-evidence")]
+    assert [item for item in legacy if item.startswith("skill-use-evidence")]
+    assert not [item for item in current if item.startswith("skill-use-evidence")]
 
 
 def test_reader_still_demands_an_evidence_marker_when_neither_key_is_present(tmp_path):
@@ -156,7 +156,7 @@ def test_reader_still_demands_an_evidence_marker_when_neither_key_is_present(tmp
 
     missing = _markers(root, _gate("skills-checked: true"))
 
-    assert any(item.startswith("skill-read-evidence") for item in missing)
+    assert any(item.startswith("skill-use-evidence") for item in missing)
 
 
 def test_shell_commands_that_do_not_read_are_not_evidence(tmp_path):
