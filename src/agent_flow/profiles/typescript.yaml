@@ -45,6 +45,7 @@ skills:
       skills: [typescript-development-guide]
       when: TypeScript files change
       missing: "missing local profile: <skill>"
+      path_globs: ["**/*.ts", "**/*.tsx", "**/*.mts", "**/*.cts"]
 artifacts:
   prd: optional
   adr: optional

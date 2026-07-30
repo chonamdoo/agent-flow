@@ -64,6 +64,14 @@ def _install(home: Path, name: str, description: str) -> Path:
     return path
 
 
+PROFILES_DIR = REPO / "src" / "agent_flow" / "profiles"
+
+
+def _profile_ids() -> list[str]:
+    return sorted(
+        path.stem for path in PROFILES_DIR.glob("*.yaml") if not path.stem.startswith("_")
+    )
+
 
 def test_section_phases_cover_exactly_the_gated_phases():
     """read gate가 없는 phase에 skill을 밀어 넣으면 프롬프트만 길어진다."""
@@ -146,7 +154,11 @@ def test_unrelated_profiles_never_route_android_vocabulary(profile_id, tmp_path,
     )
 
     assert "edge-to-edge" not in {skill.name for skill in resolution.required}
-    assert _route(profile_id, phase_id="implement", changed_files=["src/a.py"], task_text="") == ()
+    # 이 profile의 표가 스스로 라우팅되는 것은 정상이다. 금지 조건은 android 이름이
+    # 여기 섞이는 것 하나다 — `== ()`로 적으면 표가 죽어 있어야만 통과한다.
+    routed = _names(_route(profile_id, phase_id="implement", changed_files=["src/a.py"], task_text=""))
+    android = _names(_route("android", phase_id="implement", changed_files=["A.kt"], task_text=""))
+    assert not routed & android
 
 
 def test_react_native_reaches_native_vocabulary_only_through_native_paths(tmp_path, monkeypatch):
@@ -322,7 +334,10 @@ def test_unrelated_profile_gate_stays_silent(tmp_path):
         task_text="recomposition jank insets compose state",
     )
 
-    assert not [item for item in missing if item.startswith("missing-required-profile-skills:")]
+    reports = [item for item in missing if item.startswith("missing-required-profile-skills:")]
+    # python 표가 자기 skill의 부재를 보고하는 것은 정상이다. 금지 조건은 compose/android
+    # 어휘가 python 게이트에 android 이름을 끌어오는 것 하나다.
+    assert not [item for item in reports if "android" in item], reports
 
 
 def test_prompt_contract_lists_every_marker_the_gate_demands(tmp_path):

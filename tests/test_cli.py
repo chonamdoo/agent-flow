@@ -7019,7 +7019,9 @@ if (codexContext !== undefined) {
         self.assertEqual([group["group"] for group in android_required], ["profile"])
         self.assertNotIn("android_skills", android.skills)
         rn_required = load_profile("react-native").skills["required_review"]
-        self.assertEqual([group["group"] for group in rn_required], ["profile"])
+        # `typescript` group은 `typescript-development-guide`의 범위를 스택 glob에서
+        # 분리한 자리다. 옛 escalation group이 되살아나면 이 목록이 늘어난다.
+        self.assertEqual([group["group"] for group in rn_required], ["profile", "typescript"])
 
     def test_runner_prefers_repository_kit_root(self) -> None:
         from agent_flow.runner import _find_kit_root
