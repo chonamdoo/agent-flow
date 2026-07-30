@@ -385,7 +385,8 @@ _SHARED_ONLY = (
     "skillIndexBlock", "upsertSkillIndexBlock",
     "extractCliOption", "cliOptionValue", "requestedInstallRootOption",
     "withoutInstallRootOption", "assertInstallRootIsFinal", "upgradeBundledSkills",
-    "preserveKitSkillHashes",
+    "preserveKitSkillHashes", "syncKitAssets", "readKitAssetRecord", "writeKitAssetRecord",
+    "isBundledSkillManifest", "reportSkippedUserEdit",
 )
 
 

@@ -20,6 +20,8 @@ import {
   activeInstallProfileIds,
   AGENT_FLOW_COMMAND,
   architectureReviewerSkillMarkdown,
+  ASSET_BACKUP_NOTICE_PREFIX,
+  ASSET_UPGRADE_NOTICE_PREFIX,
   arrayValue,
   assertInstallRootIsFinal,
   backupIfDifferent,
@@ -35,8 +37,10 @@ import {
   hookScriptCommand,
   installedProfileFileNames,
   installProjectLauncher,
+  isBundledSkillManifest,
   isPruneBackupName,
   isRetiredHookCommand,
+  KIT_ASSETS_RELATIVE,
   KIT_ROOT,
   makeHooksExecutable,
   managedHookDigests,
@@ -61,10 +65,12 @@ import {
   READ_TOOL_MATCHER,
   readHookSettings,
   readJsonIfExists,
+  readKitAssetRecord,
   removeCodexBroadTrustState,
   removeGitignoreEntries,
   removeLegacyProjectSkillCopies,
   removeOmpHooksExtension,
+  reportSkippedUserEdit,
   requestedInstallRootOption,
   retiredHookScripts,
   safeSkillName,
@@ -75,6 +81,7 @@ import {
   skillIndexBlock,
   skillRequires,
   SPEC_PREPARE_TOOL_MATCHER,
+  syncKitAssets,
   tomlBasicString,
   uniqueStrings,
   unquoteShellWord,
@@ -82,6 +89,7 @@ import {
   upsertGitignore,
   upsertSkillIndexBlock,
   validateSkillDependencies,
+  writeKitAssetRecord,
   withoutInstallRootOption,
   writePruneBackup,
 } from "../lib/installer-shared.mjs";
@@ -408,7 +416,7 @@ function copyDir(
         const destContent = fs.readFileSync(destPath, "utf8");
         if (srcContent !== destContent && !force) {
           skipped += 1;
-          console.log(`  ! skipped (user-modified): ${path.relative(PROJECT, destPath)}`);
+          reportSkippedUserEdit(path.relative(PROJECT, destPath));
           continue;
         }
       }
@@ -491,7 +499,7 @@ function copyFileIfMissingOrSame(src, dest, force = false) {
     return true;
   }
   if (fs.existsSync(dest) && fs.readFileSync(dest, "utf8") !== srcContent) {
-    console.log(`  ! skipped (user-modified): ${path.relative(PROJECT, dest)}`);
+    reportSkippedUserEdit(path.relative(PROJECT, dest));
     return false;
   }
   fs.copyFileSync(src, dest);
@@ -505,7 +513,7 @@ function writeFileIfMissingOrSame(dest, content, force = false) {
     return true;
   }
   if (fs.existsSync(dest) && fs.readFileSync(dest, "utf8") !== content) {
-    console.log(`  ! skipped (user-modified): ${path.relative(PROJECT, dest)}`);
+    reportSkippedUserEdit(path.relative(PROJECT, dest));
     return false;
   }
   fs.writeFileSync(dest, content, "utf8");
@@ -1068,7 +1076,12 @@ function runKitInstall() {
   // 바뀌었는지 아는 유일한 통로라 그대로 다시 낸다 — 실제 갱신은 자식이 하므로
   // 여기서 걸러 내면 install.mjs 경로가 통째로 무음이 된다.
   for (const line of (result.stdout || "").split("\n")) {
-    if (line.startsWith(PRUNE_NOTICE_PREFIX) || line.startsWith(SKILL_UPGRADE_NOTICE_PREFIX)) {
+    if (
+      line.startsWith(PRUNE_NOTICE_PREFIX)
+      || line.startsWith(SKILL_UPGRADE_NOTICE_PREFIX)
+      || line.startsWith(ASSET_UPGRADE_NOTICE_PREFIX)
+      || line.startsWith(ASSET_BACKUP_NOTICE_PREFIX)
+    ) {
       console.log(line);
     }
   }
@@ -1159,6 +1172,8 @@ function install() {
   // Host-AI-specific skill paths (`.claude/skills/`, `.Codex/skills/`, `.omp/skills/`) are
   // populated by symlinking from .agent-flow/skills/ where possible, so
   // updates to the kit propagate without re-installing.
+  const recordedAssets = readKitAssetRecord(PROJECT);
+  const writtenAssets = new Map();
   upgradeBundledSkills(
     PROJECT,
     path.join(KIT_ROOT, "skills"),
@@ -1215,6 +1230,17 @@ function install() {
     FORCE_MANAGED,
     FORCE_MANAGED,
   );
+  // 복사 단계는 내용이 다르면 손대지 않으므로 kit이 고친 형제 파일과 템플릿이 기존
+  // 설치본에 닿지 않는다. `SKILL.md`는 index hash가 오라클이고, 나머지는 이 기록이다.
+  if (recordedAssets) {
+    syncKitAssets(PROJECT, path.join(KIT_ROOT, "skills"), path.join(AF_DIR, "skills"), recordedAssets, writtenAssets, {
+      skip: isBundledSkillManifest,
+    });
+    syncKitAssets(PROJECT, path.join(KIT_ROOT, "templates"), path.join(AF_DIR, "templates"), recordedAssets, writtenAssets);
+    writeKitAssetRecord(PROJECT, writtenAssets);
+  } else {
+    console.warn(`warning: ${KIT_ASSETS_RELATIVE} is unreadable; kit asset sync skipped (delete it to re-bootstrap)`);
+  }
   copyDir(
     path.join(KIT_ROOT, "templates"),
     path.join(AF_DIR, "runtime", "python", "agent_flow", "templates"),
