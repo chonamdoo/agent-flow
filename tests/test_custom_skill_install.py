@@ -1911,3 +1911,102 @@ def test_an_upgraded_skill_can_still_be_dropped_by_narrowing_the_profile(tmp_pat
     assert _install_with(binary, project, "--profile", "ios").returncode == 0
 
     assert not skill_dir.exists(), sorted(item.name for item in skill_dir.iterdir())
+
+
+_SIBLING_RELATIVE = Path(".agent-flow/skills/android-guides/references/architecture-rules-guide.md")
+_TEMPLATE_RELATIVE = Path(".agent-flow/templates/_shared/review/sdui.md")
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("relative", [_SIBLING_RELATIVE, _TEMPLATE_RELATIVE], ids=["sibling", "template"])
+def test_kit_assets_without_a_record_are_upgraded_once(tmp_path: Path, binary: str, relative: Path) -> None:
+    """반증: `SKILL.md` 밖 자산은 오라클이 없어 낡은 채로 남았다 — review 템플릿 4개가
+    실제로 그랬다. 기록이 생기기 전에 깔린 프로젝트는 사본을 남기고 한 번 갱신한다."""
+    project = tmp_path / f"project-{binary}-{relative.name}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+    target = project / relative
+    assert target.is_file()
+    shipped = target.read_text(encoding="utf-8")
+    target.write_text("# 낡은 판본\n", encoding="utf-8")
+    (project / ".agent-flow" / "kit-assets.json").unlink()
+
+    result = _install_with(binary, project)
+
+    assert result.returncode == 0, result.stderr
+    assert target.read_text(encoding="utf-8") == shipped
+    assert f"upgraded: {relative.as_posix()}" in result.stdout
+    backup = project / ".agent-flow" / "backups" / relative.relative_to(".agent-flow")
+    assert backup.read_text(encoding="utf-8") == "# 낡은 판본\n"
+    # 사본은 미러 트리 밖에 남는다. 안에 남기면 profile을 좁혀도 그 skill이 안 지워진다.
+    assert not list(target.parent.glob("*.bak*"))
+    assert f"backup: .agent-flow/backups/{relative.relative_to('.agent-flow').as_posix()}" in result.stdout
+
+    again = _install_with(binary, project)
+    assert f"upgraded: {relative.as_posix()}" not in again.stdout
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("relative", [_SIBLING_RELATIVE, _TEMPLATE_RELATIVE], ids=["sibling", "template"])
+def test_kit_assets_keep_a_user_edit_across_reinstalls(tmp_path: Path, binary: str, relative: Path) -> None:
+    """불변: 기록과 다른 내용은 사용자 편집이다. 몇 번을 재설치해도 남아야 한다."""
+    project = tmp_path / f"project-{binary}-{relative.name}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+    target = project / relative
+    target.write_text("# 우리 규칙\n", encoding="utf-8")
+
+    for _ in range(3):
+        result = _install_with(binary, project)
+        assert result.returncode == 0, result.stderr
+        assert target.read_text(encoding="utf-8") == "# 우리 규칙\n"
+        # 복사 단계와 동기화 단계가 같은 파일을 각각 판정한다. 둘 다 알리면 잡음이 된다.
+        assert result.stdout.count(f"skipped (user-modified): {relative.as_posix()}") == 1
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_install_records_the_kit_assets_it_wrote(tmp_path: Path, binary: str) -> None:
+    """기록이 없으면 다음 install이 "우리가 쓴 그대로인가"를 물을 수 없다."""
+    project = tmp_path / f"project-{binary}"
+    project.mkdir()
+
+    assert _install_with(binary, project).returncode == 0
+
+    record = json.loads((project / ".agent-flow" / "kit-assets.json").read_text(encoding="utf-8"))
+    assert record["version"] == 1
+    assert _SIBLING_RELATIVE.as_posix() in record["files"]
+    assert _TEMPLATE_RELATIVE.as_posix() in record["files"]
+    # `SKILL.md`는 index hash가 오라클이다. 두 기록이 겹치면 어느 쪽이 이기는지 모른다.
+    assert not any(name.endswith("/SKILL.md") for name in record["files"])
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_reinstall_reports_a_skipped_user_edited_skill(tmp_path: Path, binary: str) -> None:
+    """무음 skip이 "왜 kit 개정이 안 왔는가"를 물을 자리를 없앴다."""
+    project = tmp_path / f"project-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+    installed = project / ".agent-flow" / "skills" / _UPGRADE_PROBE_SKILL / "SKILL.md"
+    installed.write_text("---\nname: code-generation-discipline\n---\n\n# 우리 규칙\n", encoding="utf-8")
+
+    result = _install_with(binary, project)
+
+    assert result.returncode == 0, result.stderr
+    assert f"skipped (user-modified): .agent-flow/skills/{_UPGRADE_PROBE_SKILL}/SKILL.md" in result.stdout
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_a_synced_sibling_asset_does_not_block_profile_pruning(tmp_path: Path, binary: str) -> None:
+    """반증: 사본을 skill 디렉터리 안에 남기면 `dirContentsMatch`의 항목 수 비교가
+    어긋나 profile을 좁혀도 그 skill이 다시는 지워지지 않는다."""
+    project = tmp_path / f"project-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+    (project / _SIBLING_RELATIVE).write_text("# 낡은 판본\n", encoding="utf-8")
+    (project / ".agent-flow" / "kit-assets.json").unlink()
+    assert _install_with(binary, project).returncode == 0
+
+    assert _install_with(binary, project, "--profile", "ios").returncode == 0
+
+    dropped = project / ".agent-flow" / "skills" / "android-guides"
+    assert not dropped.exists(), sorted(item.name for item in dropped.rglob("*"))
