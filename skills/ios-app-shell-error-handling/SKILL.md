@@ -1,6 +1,8 @@
 ---
 name: ios-app-shell-error-handling
 description: Use when implementing or reviewing iOS app-wide error handling where SwiftUI views/ViewModels notify common errors and an @main App, WindowGroup AppShell, NavigationStack coordinator, or UIKit AppCoordinator owns root navigation, tab/session flow switching, alerts, sheets, toast hosts, SessionExpired handling, Maintenance handling, and root reset behavior.
+workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
+taskTerms: [app shell, appshell, global error, common error, session expired, alert host, toast host, root reset, 공통 에러, 전역 에러, 세션 만료]
 ---
 
 # iOS App Shell Error Handling

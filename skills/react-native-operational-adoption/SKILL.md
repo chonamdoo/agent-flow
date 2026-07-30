@@ -1,6 +1,9 @@
 ---
 name: react-native-operational-adoption
 description: "Supplemental React Native and Expo development skill. Use alongside react-native-development-guide when writing, modifying, or reviewing RN app code that touches architecture, app shell, navigation, Hermes/RN upgrade strategy, New Architecture boundaries, native modules, micro-frontend routing, signed OTA bundles with rollback, legacy/new RN coexistence, FlashList, MMKV, Reanimated, Relay/SWR, react-native-web parity, or mobile observability. Do not use for React Web-only work, generic React component styling, generic TypeScript issues, or reverse-engineering a specific third-party app itself."
+workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
+taskTerms: [hermes, new architecture, turbo module, native module, ota, over-the-air, flashlist, mmkv, reanimated, react-native-web, micro-frontend, observability, rn upgrade, 앱 셸, 내비게이션 구조]
+pathGlobs: ["**/metro.config.*", "**/react-native.config.*", "**/*.podspec", "**/ios/Podfile", "**/android/settings.gradle", "**/android/settings.gradle.kts"]
 ---
 
 # React Native Operational Adoption
