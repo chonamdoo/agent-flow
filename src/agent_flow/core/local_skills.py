@@ -16,6 +16,8 @@ from agent_flow.core.worktree_isolation import (
     git_repo_state,
     leader_root_for,
     list_registered_worktrees,
+    real_path,
+    trusted_checkout_paths,
 )
 from agent_flow.core.skill_resolver import (
     CODE_PHASES,
@@ -392,10 +394,14 @@ def _checkout_roots(project_root: Path) -> tuple[str, ...]:
         # 미인정으로 차단된다. 조회가 실패하면 아래 스캔 결과만 남는다 — 실패로
         # 목록을 넓히지는 않는다.
         for registered in list_registered_worktrees(base):
-            # prunable 등록은 checkout이 이미 사라진 자리다. 그 경로를 root로 인정하면
-            # 같은 자리에 만든 평범한 디렉터리의 `skills/<name>/SKILL.md`가 leader 정본을
-            # 읽은 것으로 통과한다 — 증거 게이트가 그 경로를 checkout 상대경로로만 본다.
+            # 등록만으로는 신뢰하지 않는다. 활성 워커도 `git worktree add`를 할 수 있고,
+            # 그렇게 만든 checkout에 변조한 `skills/<name>/SKILL.md`를 두면 증거 게이트가
+            # leader 정본을 읽은 것으로 인정한다. 생성 규약 자리이거나 채택된 것만 받는다.
+            # prunable 행은 checkout이 이미 사라진 자리라 같은 이유로 제외한다.
             if registered.prunable or not (registered.path / ".git").exists():
+                continue
+            trusted = trusted_checkout_paths(root=base, name=registered.path.name)
+            if real_path(registered.path) not in trusted:
                 continue
             add(registered.path)
     except WorktreeIsolationError:

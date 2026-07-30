@@ -2923,10 +2923,15 @@ def _provision_one_host_hook_registration(
     _make_host_hook_parents(base=checkout_base, target=target)
     # 대상 inode에 바로 쓰면 안 된다. 그 자리가 checkout 밖 파일과 hard link면 그 원본이
     # 함께 덮인다(`is_file()`은 hard link를 통과시킨다). 임시 파일에 쓴 뒤 rename하면
-    # 디렉터리 엔트리만 바뀌어 링크된 inode는 그대로다.
-    staging = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+    # 디렉터리 엔트리만 바뀌어 링크된 inode는 그대로다. 임시 경로도 예측 가능하면 같은
+    # 위험이 그쪽으로 옮겨가므로 배타 생성으로 만든다(워커가 쓸 수 있는 디렉터리다).
+    handle, staging_name = tempfile.mkstemp(
+        dir=str(target.parent), prefix=f"{target.name}.", suffix=".tmp"
+    )
+    staging = Path(staging_name)
     try:
-        staging.write_bytes(payload)
+        with os.fdopen(handle, "wb") as stream:
+            stream.write(payload)
         os.chmod(staging, 0o644)
         os.replace(staging, target)
     except BaseException:
