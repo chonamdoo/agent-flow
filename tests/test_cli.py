@@ -1794,6 +1794,51 @@ class CliTest(unittest.TestCase):
                     self.assertEqual(hijacked.returncode, 0, hijacked.stderr)
                     self.assertIn("spec confirm", hijacked.stdout)
                     self.assertNotIn("decoy", hijacked.stdout)
+                    kit_python = kit["project_launcher_python"]
+                    self.assertEqual(
+                        kit_python["sha256"],
+                        hashlib.sha256(Path(kit_python["path"]).read_bytes()).hexdigest(),
+                    )
+                    # user-site를 끄는 `-I`가 가능하면 그걸 써야 한다. `-E`는
+                    # user-site를 남겨 `usercustomize`가 이 프로세스에서 돈다.
+                    isolated = subprocess.run(
+                        (kit_python["path"], "-I", "-c", "import yaml"),
+                        capture_output=True,
+                        check=False,
+                    )
+                    if isolated.returncode == 0:
+                        self.assertEqual(kit_python["flag"], "-I")
+                        self.assertIn(" -I -c ", source)
+                    # 반증: 승인 경로의 cwd는 agent가 매일 파일을 쓰는 체크아웃이다.
+                    # `-c`가 sys.path에 남기는 cwd를 지우지 않으면 저장소에 놓인 평범한
+                    # `argparse.py` 하나가 capability 토큰을 들고 실행된다. `-I`는
+                    # 그것까지 막지만, user-site에만 yaml이 있는 배치는 `-E`로 내려가므로
+                    # bootstrap 자체가 cwd를 지우는지를 그 플래그로 확인한다.
+                    (project_root / "argparse.py").write_text(
+                        "import sys\n"
+                        "sys.stderr.write('cwd-shadow ran\\n')\n"
+                        "raise SystemExit(0)\n",
+                        encoding="utf-8",
+                    )
+                    unisolated = launcher.parent / "agent-flow-unisolated"
+                    unisolated.write_text(
+                        source.replace(
+                            f" {kit_python['flag']} -c ", " -E -c "
+                        ),
+                        encoding="utf-8",
+                    )
+                    unisolated.chmod(0o755)
+                    for variant in (launcher, unisolated):
+                        shadowed = subprocess.run(
+                            (str(variant), "spec", "confirm", "--help"),
+                            cwd=project_root,
+                            text=True,
+                            capture_output=True,
+                            check=False,
+                        )
+                        self.assertNotIn("cwd-shadow ran", shadowed.stderr)
+                        self.assertEqual(shadowed.returncode, 0, shadowed.stderr)
+                        self.assertIn("spec confirm", shadowed.stdout)
 
     def test_node_installer_writes_cwd_independent_hook_commands(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

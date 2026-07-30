@@ -1037,7 +1037,11 @@ def test_host_confirmation_refuses_a_binding_whose_leader_snapshot_moved(
     monkeypatch,
     capsys,
 ):
-    """binding의 다른 소비자와 같은 leader tripwire를 승인 경로도 통과해야 한다."""
+    """binding의 다른 소비자와 같은 leader tripwire를 승인 경로도 통과해야 한다.
+
+    실패를 leader-only로 접으면 승인이 사용자가 고른 worktree가 아니라 leader run에
+    기록된다 — 생략보다 나쁘다. 그래서 어느 root도 쓰지 않고 거부한다.
+    """
     status, worktree_run = _pending_worktree_run(project)
     _bind_host_session(project, status, worktree_run, "bound-session")
     parsed = parse_spec_item_section(SPEC_ARTIFACT)
@@ -1059,8 +1063,11 @@ def test_host_confirmation_refuses_a_binding_whose_leader_snapshot_moved(
         ]
     ) == 0
     assert not (worktree_run / "spec-user-confirmation.pending.json").exists()
-    # 조용히 leader-only로 내려가면 "승인이 무시된다"와 분간되지 않는다.
-    assert "host session binding is unusable" in capsys.readouterr().err
+    # 조용히 넘기면 "승인이 무시된다"와 분간되지 않는다.
+    assert (
+        "refusing to resolve a SPEC confirmation while the leader checkout differs"
+        in capsys.readouterr().err
+    )
 
     monkeypatch.setattr(sys, "stdin", io.StringIO("승인"))
     assert main(

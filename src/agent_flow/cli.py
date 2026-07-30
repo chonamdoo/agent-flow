@@ -3075,7 +3075,18 @@ def _spec_confirmation_state_roots(
                 _checkout_identity(inferred_worktree),
             ),
         )
-    binding = _bound_host_checkout(root, session_id)
+    try:
+        binding = _bound_host_checkout(root, session_id)
+    except WorktreeIsolationError as exc:
+        # leader가 binding 기록 이후 바뀌었다. 여기서 leader-only로 내려가면 승인이
+        # 사용자가 고른 worktree가 아니라 leader run에 기록된다 — 생략보다 나쁘다.
+        # 형제 소비자(`host_write_boundary_violation`)도 같은 예외를 위반으로 올린다.
+        print(
+            "warning: refusing to resolve a SPEC confirmation while the leader "
+            f"checkout differs from the host session binding: {_format_cli_error(exc)}",
+            file=sys.stderr,
+        )
+        return ()
     if binding is None:
         return ((root, "leader"),)
     return (
@@ -3096,7 +3107,12 @@ def _bound_host_checkout(
     binding 파일이 세션↔checkout 1:1 결합의 유일한 증거다. 없으면 형제 worktree를
     추측으로 고르지 않고 leader만 본다. 승인은 load-bearing 보안 경계이므로 다른
     binding 소비자(`host_write_boundary_violation`, binding 재확인)와 같은 leader
-    tripwire 검증을 통과한 binding만 쓴다.
+    tripwire 검증을 통과한 binding만 쓴다 — 그 검증 실패는 호출자가 fail-closed로
+    처리하도록 그대로 올린다.
+
+    binding을 **읽지** 못하는 것은 다른 사건이라 leader-only로 내려간다. 이 사유는
+    hook 경로에서는 stderr가 버려져 사용자에게 닿지 않고, `spec confirm`을 직접
+    실행할 때만 보인다.
     """
     if not session_id:
         return None
@@ -3111,14 +3127,7 @@ def _bound_host_checkout(
             include_ignored=False,
         )
         return binding
-    except (
-        HostWriteBoundaryError,
-        WorktreeIsolationError,
-        OSError,
-        ValueError,
-    ) as exc:
-        # 조용히 leader-only로 내려가면 "승인이 무시된다"와 분간되지 않는다.
-        # 사유는 보이되 `spec confirm` 자체는 그대로 exit 0을 유지한다.
+    except (HostWriteBoundaryError, OSError, ValueError) as exc:
         print(
             "warning: host session binding is unusable, falling back to the "
             f"leader checkout: {_format_cli_error(exc)}",

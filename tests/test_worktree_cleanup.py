@@ -281,15 +281,38 @@ def _ignore_host_dirs(root: Path) -> None:
     _git("commit", "-m", "chore: ignore host dirs", cwd=root)
 
 
+def _kit_registration_bytes(root: Path, rel: str) -> str:
+    """installer가 실제로 깔 모양. 소유 판정은 이 leader가 생성하는 절대경로 호출
+    하나만 인정하므로 여기서도 그 모양이어야 정리 경로가 같은 것을 본다."""
+    if rel == ".omp/extensions/agent-flow-hooks.ts":
+        return (
+            "// agent-flow: managed omp extension\n"
+            "export default function agentFlowHooks(ctx) {}\n"
+        )
+    command = (
+        f"/usr/bin/python3 -I '{root}/.agent-flow/scripts/hooks/confirm-spec-user-prompt.py'"
+    )
+    return json.dumps(
+        {
+            "hooks": {
+                "UserPromptSubmit": [
+                    {"hooks": [{"type": "command", "command": command}]}
+                ]
+            }
+        }
+    )
+
+
 def _provisioned_checkout(root: Path, name: str) -> tuple[W.WorktreeStatus, Path]:
     # 등록 파일은 checkout이 생긴 뒤에 leader에 나타난다(설치·업그레이드가 그 순서다).
     # 먼저 쓰면 host 디렉터리를 ignore하지 않은 저장소에서 leader가 dirty가 되어
     # `create_worktree` 자체가 거부하고, 그러면 그 조합을 아예 지나갈 수 없다.
     status, run_dir = _managed_run(root, name)
+    (root / ".agent-flow" / "scripts" / "hooks").mkdir(parents=True, exist_ok=True)
     for rel in W.HOST_HOOK_REGISTRATION_FILES:
         target = root / rel
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(f"hook: {root}\n", encoding="utf-8")
+        target.write_text(_kit_registration_bytes(root, rel), encoding="utf-8")
     written = W.provision_host_hook_registrations(leader=root, checkout=status.path)
     assert written, "등록 파일이 하나도 깔리지 않으면 이 검사는 아무것도 반증하지 못한다"
     return status, run_dir
@@ -318,14 +341,17 @@ def test_cleanup_is_not_blocked_by_the_host_hook_registrations_it_provisioned(
 
 
 def test_a_modified_registration_file_still_blocks_cleanup(tmp_path: Path) -> None:
-    """불변: 제외는 leader 바이트와 동일할 때뿐이다. 사용자가 손댄 등록 파일은
-    버려도 되는 파일이 아니다."""
+    """불변: 제외는 kit 소유로 읽히는 등록뿐이다. 사용자가 손대 kit이 생성할 수 없는
+    모양이 된 파일은 버려도 되는 파일이 아니다."""
     root = tmp_path / "repo"
     _init_repo(root)
     _ignore_host_dirs(root)
     status, run_dir = _provisioned_checkout(root, "edited-registration")
     edited = status.path / ".claude" / "settings.json"
     edited.write_text(edited.read_text(encoding="utf-8") + "x", encoding="utf-8")
+    assert not W._host_hook_registration_is_kit_owned(
+        leader=root, rel=".claude/settings.json", payload=edited.read_bytes()
+    ), "손댄 파일이 여전히 kit 소유로 읽히면 이 검사는 아무것도 반증하지 못한다"
 
     with pytest.raises(W.CleanupBlockedError, match="checkout is dirty"):
         W.run_worktree_cleanup_transaction(
@@ -390,6 +416,14 @@ def test_a_stray_file_inside_a_registration_directory_blocks_cleanup(
     assert stray.read_text(encoding="utf-8") == "직접 만든 백업\n"
 
 
+def _git_common_exclude(root: Path) -> str:
+    common = Path(_git("rev-parse", "--git-common-dir", cwd=root).stdout.strip())
+    if not common.is_absolute():
+        common = root / common
+    exclude = common / "info" / "exclude"
+    return exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
+
+
 def test_cleanup_completes_when_the_worktree_commit_does_not_ignore_host_dirs(
     tmp_path: Path,
 ) -> None:
@@ -397,7 +431,7 @@ def test_cleanup_completes_when_the_worktree_commit_does_not_ignore_host_dirs(
     디렉터리를 담지 않을 수 있다(installer는 leader의 작업본만 고친다). 그러면
     provision된 파일이 untracked로 남아 `assert_worktree_mergeable`과 `--force` 없는
     `git worktree remove`가 그 checkout을 영구히 정리 불가로 만든다 — provision 자체가
-    checkout을 누적시킨다. 여기서 깐 것은 저장소 공유 exclude로 함께 가려야 한다.
+    checkout을 누적시킨다. 정리 직전에 우리가 깐 것만 걷어내야 한다.
     """
     root = tmp_path / "repo"
     _init_repo(root)
@@ -406,9 +440,8 @@ def test_cleanup_completes_when_the_worktree_commit_does_not_ignore_host_dirs(
     assert not (root / ".gitignore").exists(), (
         "host 디렉터리가 ignore된 상태에서는 이 검사가 아무것도 반증하지 못한다"
     )
-    assert _git("status", "--porcelain", cwd=status.path).stdout == "", (
-        "provision된 파일이 untracked로 남으면 `assert_worktree_mergeable`과 `--force`"
-        " 없는 `git worktree remove`가 이 checkout을 영구히 정리 불가로 만든다"
+    assert "?? .claude/" in _git("status", "--porcelain", cwd=status.path).stdout, (
+        "provision된 파일이 untracked로 보이지 않으면 이 검사는 아무것도 반증하지 못한다"
     )
 
     result = W.run_worktree_cleanup_transaction(
@@ -423,6 +456,29 @@ def test_cleanup_completes_when_the_worktree_commit_does_not_ignore_host_dirs(
     assert not status.path.exists()
     assert not W.worktree_branch_exists(root=root, branch=status.branch)
 
+
+def test_provisioning_never_hides_the_leaders_own_host_settings(tmp_path: Path) -> None:
+    """반증: `info/exclude`는 git common dir에 있어 leader와 모든 worktree가 공유한다.
+
+    거기에 루트 고정 `/.claude/settings.json`을 올리면 **leader 루트의 그 파일**도 함께
+    숨는다. 그 파일은 installer가 사용자 내용에 병합해 넣는 사용자 파일이라, worktree를
+    하나 만든 것만으로 사용자가 커밋하려던 설정이 `git status`에서 사라지고 `git add`가
+    거부된다 — worktree를 지워도 남는다.
+    """
+    root = tmp_path / "repo"
+    _init_repo(root)
+    before = _git_common_exclude(root)
+    status, _ = _provisioned_checkout(root, "no-leader-exclude")
+
+    assert _git_common_exclude(root) == before, (
+        "provision이 저장소 공유 exclude를 건드렸다 — leader의 같은 경로까지 영구히 숨는다"
+    )
+    assert ".claude/settings.json" in _git(
+        "status", "--porcelain", "-uall", cwd=root
+    ).stdout, "leader의 사용자 host 설정이 `git status`에서 사라졌다"
+    # exclude에 걸리면 `git add`가 "ignored by one of your .gitignore files"로 거부한다.
+    _git("add", "--dry-run", "--", ".claude/settings.json", cwd=root)
+    assert status.path.exists()
 
 
 def test_unmerged_head_is_archived_but_checkout_and_ref_are_preserved(

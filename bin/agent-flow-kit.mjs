@@ -42,6 +42,7 @@ import {
   planReviewerSkillMarkdown,
   productBriefSkillMarkdown,
   projectLauncherDigest,
+  projectLauncherPythonRecord,
   PRUNE_BACKUP_SUFFIX,
   PRUNE_BACKUP_VERSIONED,
   PRUNE_NOTICE_PREFIX,
@@ -162,6 +163,7 @@ function installProject() {
     kit_source_digest: kitSourceDigest(),
     managed_hook_digests: managedHookDigests(),
     project_launcher_digest: projectLauncherDigest(root),
+    project_launcher_python: projectLauncherPythonRecord(),
   };
 
   writeManagedFile(path.join(agentFlowDir, "workflows", "full-feature.yaml"), fullFeatureWorkflowYaml());

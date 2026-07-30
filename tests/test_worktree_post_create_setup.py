@@ -23,6 +23,7 @@ SRC = str(Path(__file__).resolve().parents[1] / "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
+from agent_flow.core import worktrees as W
 from agent_flow.core.worktrees import (
     HOST_HOOK_REGISTRATION_FILES,
     copy_declared_worktree_files,
@@ -490,3 +491,148 @@ def test_kit_ownership_matches_what_the_installers_actually_generate(tmp_path: P
             f"installer가 생성한 {rel}을 kit 소유로 읽지 못했다 — 갱신이 checkout에 닿지 않는다"
         )
         assert (checkout / rel).read_bytes() == (leader / rel).read_bytes()
+
+
+def _settings_json_with_command(command: str) -> str:
+    return json.dumps(
+        {
+            "hooks": {
+                "UserPromptSubmit": [
+                    {"hooks": [{"type": "command", "command": command}]}
+                ]
+            }
+        }
+    )
+
+
+def test_a_user_wrapper_around_a_managed_hook_is_not_overwritten(
+    tmp_path: Path, capsys
+):
+    """반증: 관리 hook 디렉터리를 **부분문자열**로 찾으면 사용자가 그 hook을 감싸서 넣은
+    항목까지 kit 소유로 읽힌다. 그 래퍼(로깅·알림)는 백업도 경고도 없이 사라지고,
+    `status`/`continue`가 매번 이 경로를 타므로 다시 써 넣어도 또 짓밟힌다.
+    """
+    leader = tmp_path / "leader"
+    _leader_with_host_hooks(leader)
+    rel = ".claude/settings.json"
+    (leader / rel).write_text(
+        _kit_settings_json(leader, "confirm-spec-user-prompt.py"), encoding="utf-8"
+    )
+    checkout = _managed_checkout(leader, "feat-wrapper")
+    mine = checkout / rel
+    mine.parent.mkdir()
+    mine.write_text(
+        _settings_json_with_command(
+            "/bin/bash -c 'mylog; /usr/bin/python3 -I "
+            f"{leader}/.agent-flow/scripts/hooks/comment-checker.py'"
+        ),
+        encoding="utf-8",
+    )
+    before = mine.read_bytes()
+
+    written = provision_host_hook_registrations(leader=leader, checkout=checkout)
+
+    assert rel not in written
+    assert mine.read_bytes() == before, "관리 hook을 감싼 사용자 래퍼를 덮었다"
+    reported = capsys.readouterr().err
+    assert rel in reported and "this kit did not write" in reported, (
+        f"덮지 않은 사유가 없다: {reported!r}"
+    )
+
+
+def test_a_registration_pointing_at_another_installation_is_not_overwritten(
+    tmp_path: Path, capsys
+):
+    """반증: 부분문자열 판정은 **다른 설치본**의 hook 디렉터리를 가리키는 command도 kit
+    소유로 읽는다. 이 leader가 생성할 수 없는 command라면 사용자가 넣은 것이다.
+    """
+    leader = tmp_path / "leader"
+    _leader_with_host_hooks(leader)
+    rel = ".claude/settings.json"
+    (leader / rel).write_text(
+        _kit_settings_json(leader, "confirm-spec-user-prompt.py"), encoding="utf-8"
+    )
+    other = tmp_path / "other-install"
+    (other / ".agent-flow" / "scripts" / "hooks").mkdir(parents=True)
+    checkout = _managed_checkout(leader, "feat-foreign")
+    mine = checkout / rel
+    mine.parent.mkdir()
+    mine.write_text(
+        _kit_settings_json(other, "confirm-spec-user-prompt.py"), encoding="utf-8"
+    )
+    before = mine.read_bytes()
+
+    written = provision_host_hook_registrations(leader=leader, checkout=checkout)
+
+    assert rel not in written
+    assert mine.read_bytes() == before, "다른 설치본을 가리키는 등록을 이 leader 것으로 덮었다"
+    reported = capsys.readouterr().err
+    assert rel in reported and "this kit did not write" in reported, (
+        f"덮지 않은 사유가 없다: {reported!r}"
+    )
+
+
+def test_an_unfixable_skip_is_reported_once_and_stops_spawning_git(
+    tmp_path: Path, capsys, monkeypatch
+):
+    """반증: `status`는 host 세션이 매 턴 돌리는 명령이다. 사유를 기억하지 않으면 고칠
+    수 없는 구성에서 같은 경고가 무한히 쌓여 아무도 읽지 않고, tracked 판정도 호출마다
+    `git ls-files`를 새로 띄운다 — 그 케이스는 구조적으로 내용 동일성 skip을 통과할 수
+    없으므로 그 spawn이 영구 비용이 된다.
+    """
+    leader = tmp_path / "leader"
+    _leader_with_host_hooks(leader)
+    tracked = ".claude/settings.json"
+    (leader / tracked).write_text("COMMITTED\n", encoding="utf-8")
+    _git("add", tracked, cwd=leader)
+    _git("commit", "-m", "track claude settings", cwd=leader)
+    checkout = _managed_checkout(leader, "feat-quiet")
+    (leader / tracked).write_text(
+        _kit_settings_json(leader, "confirm-spec-user-prompt.py"), encoding="utf-8"
+    )
+
+    provision_host_hook_registrations(leader=leader, checkout=checkout)
+    assert "tracked by git" in capsys.readouterr().err, (
+        "첫 호출에서 사유를 말하지 않으면 사용자는 고칠 기회를 못 얻는다"
+    )
+
+    spawned: list[tuple[str, ...]] = []
+    real_git_safe = W.git_safe
+
+    def _counting_git_safe(*args, **kwargs):
+        spawned.append(args)
+        return real_git_safe(*args, **kwargs)
+
+    monkeypatch.setattr(W, "git_safe", _counting_git_safe)
+    provision_host_hook_registrations(leader=leader, checkout=checkout)
+
+    assert capsys.readouterr().err == "", "같은 사유를 매 호출마다 반복해서 낸다"
+    assert [args for args in spawned if args[:1] == ("ls-files",)] == [], (
+        f"tracked 판정이 호출마다 git을 띄운다: {spawned!r}"
+    )
+
+
+def test_a_changed_skip_reason_is_reported_again(tmp_path: Path, capsys):
+    """불변: 기억은 같은 사유의 반복만 없앤다. 사유가 바뀌면 그건 새 사건이다."""
+    leader = tmp_path / "leader"
+    _leader_with_host_hooks(leader)
+    rel = ".claude/settings.json"
+    (leader / rel).write_text(
+        _kit_settings_json(leader, "confirm-spec-user-prompt.py"), encoding="utf-8"
+    )
+    checkout = _managed_checkout(leader, "feat-changed-reason")
+    mine = checkout / rel
+    mine.parent.mkdir()
+    mine.write_text(_settings_json_with_command("/usr/bin/env my-hook"), encoding="utf-8")
+
+    provision_host_hook_registrations(leader=leader, checkout=checkout)
+    assert "this kit did not write" in capsys.readouterr().err
+
+    mine.unlink()
+    mine.parent.rmdir()
+    (checkout / ".claude").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+
+    provision_host_hook_registrations(leader=leader, checkout=checkout)
+
+    reported = capsys.readouterr().err
+    assert "symlink" in reported, f"사유가 바뀌었는데 침묵한다: {reported!r}"

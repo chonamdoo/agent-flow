@@ -1265,9 +1265,10 @@ function assertInstalledHookParity(label, tempRoot) {
   assertInstalledLauncherParity(label, tempRoot);
 }
 
-// launcher는 chat 승인 hook이 CLI를 태우는 유일한 경로다. 문자열 grep으로는
-// `if (false)`로 감싼 호출이나 재설치에서 갱신되지 않는 digest를 못 잡는다.
-// 이 하네스는 실제 설치 결과물을 보므로 그 두 가지를 실제로 반증한다.
+// launcher는 chat 승인 hook이 CLI를 태우는 유일한 경로다. 이 하네스가 잡는 것은
+// **최종 설치 상태**다 — 호출을 `if (false)`로 감싸거나 심는 자리를 없애면 잡힌다.
+// 심는 순서(digest보다 나중)는 여기서 안 보인다. 그건 tests/test_cli.py의
+// `test_node_installers_write_the_spec_approval_launcher`가 digest 일치로 잡는다.
 function assertInstalledLauncherParity(label, tempRoot) {
   const launcher = path.join(tempRoot, pythonLauncherRelative());
   const identity = fs.lstatSync(launcher, { throwIfNoEntry: false });
@@ -1326,7 +1327,8 @@ function pythonLauncherDigestKey() {
     path.join(SOURCE_ROOT, "src", "agent_flow", "core", "hook_integrity.py"),
     "utf8",
   );
-  const match = source.match(/kit\.get\("(project_launcher_digest[^"]*)"\)/);
+  // 접근 형태(`kit.get(...)` / `kit[...]` / `... in kit`)는 바뀔 수 있으니 키 이름만 본다.
+  const match = source.match(/"(project_launcher_digest)"/);
   if (!match) {
     throw new Error("launcher digest key not found in hook_integrity.py");
   }

@@ -74,6 +74,11 @@ def _install(root: Path, *, hooks: bool = True) -> Path:
     runtime_cli = root / RUNTIME_CLI_RELATIVE
     runtime_cli.parent.mkdir(parents=True, exist_ok=True)
     runtime_cli.write_text("", encoding="utf-8")
+    # stub은 `.agent-flow/` 안에 둔다. 이 fixture를 재사용하는 다른 테스트가
+    # leader를 dirty로 보지 않아야 한다.
+    interpreter = root / ".agent-flow" / "python-stub"
+    interpreter.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    interpreter.chmod(0o755)
     digests = {
         name: hashlib.sha256((hook_dir / name).read_bytes()).hexdigest()
         for name in MANAGED_HOOK_SCRIPTS
@@ -87,6 +92,11 @@ def _install(root: Path, *, hooks: bool = True) -> Path:
                 "project_launcher_digest": hashlib.sha256(
                     launcher.read_bytes()
                 ).hexdigest(),
+                "project_launcher_python": {
+                    "path": str(interpreter),
+                    "flag": "-I",
+                    "sha256": hashlib.sha256(interpreter.read_bytes()).hexdigest(),
+                },
             }
         ),
         encoding="utf-8",
@@ -464,6 +474,48 @@ def test_assert_raises_and_changes_nothing(tmp_path):
     # 자동 복구는 곧 승인 세탁이다. 아무것도 되돌리지 않는다.
     assert not (tmp_path / CLAUDE_SETTINGS).exists()
     assert sorted(p.name for p in (tmp_path / HOOK_DIR).iterdir()) == before
+
+
+def test_replaced_launcher_interpreter_is_detected(tmp_path):
+    """launcher 바이트를 안 건드려도 그가 exec하는 인터프리터를 갈면 승인이 위조된다."""
+    _install(tmp_path)
+    interpreter = tmp_path / ".agent-flow" / "python-stub"
+    interpreter.write_text("#!/bin/sh\nexec /bin/sh -c 'true'\n", encoding="utf-8")
+    interpreter.chmod(0o755)
+    assert any(
+        "managed launcher interpreter changed since install" in value
+        for value in _violations(tmp_path)
+    )
+
+
+def test_group_writable_launcher_interpreter_is_detected(tmp_path):
+    _install(tmp_path)
+    (tmp_path / ".agent-flow" / "python-stub").chmod(0o775)
+    assert any(
+        "managed launcher interpreter is group or world writable" in value
+        for value in _violations(tmp_path)
+    )
+
+
+def test_kit_json_without_the_launcher_interpreter_is_detected(tmp_path):
+    _install(tmp_path)
+    kit_path = tmp_path / ".agent-flow" / "kit.json"
+    payload = json.loads(kit_path.read_text(encoding="utf-8"))
+    del payload["project_launcher_python"]
+    kit_path.write_text(json.dumps(payload), encoding="utf-8")
+    assert any(
+        "does not record the interpreter the managed launcher execs" in value
+        for value in _violations(tmp_path)
+    )
+
+
+def test_missing_launcher_interpreter_is_detected(tmp_path):
+    _install(tmp_path)
+    (tmp_path / ".agent-flow" / "python-stub").unlink()
+    assert any(
+        "the interpreter the managed launcher execs is missing" in value
+        for value in _violations(tmp_path)
+    )
 
 
 def test_assert_passes_for_a_clean_install(tmp_path):

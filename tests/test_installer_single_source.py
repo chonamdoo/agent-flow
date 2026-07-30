@@ -212,26 +212,38 @@ def test_omp_extension_resolves_its_hook_dir_from_the_install_root(tmp_path: Pat
     assert resolved == outsider / ".agent-flow" / "scripts" / "hooks"
 
 
-def test_omp_extension_missing_hook_script_never_blocks_the_users_tool(tmp_path: Path):
-    """반증: 스크립트 부재를 spawn 실패(126)로 흘리면 block이 되어 그 세션의 모든
-    bash/write가 막힌다. 부재는 설치·해석 문제이지 정책 위반이 아니다.
+def test_omp_extension_separates_no_install_from_a_deleted_guard(tmp_path: Path):
+    """부재의 두 종류를 가른다.
 
-    동시에 가드가 약해지지 않았는지도 본다 — 스크립트가 있는데 0이 아닌 종료면
-    여전히 막아야 한다.
+    설치본을 못 찾은 것은 이 프로젝트가 agent-flow를 안 쓰는 상태다 — 도구를 막으면
+    세션이 통째로 죽는다. 반대로 설치본은 있는데 관리 hook만 사라진 것은 가드 제거이고,
+    거기서 통과시키면 `rm` 한 번으로 그 세션의 승인·경계 가드가 전부 꺼진다.
     """
     source = _extension_source()
     root = tmp_path.resolve()
 
-    absent = root / "absent"
-    _seed_install(absent)
-    stdout, stderr = _run_bash_tool_call(absent, source)
-    assert json.loads(stdout) is None, "hook 스크립트 부재가 사용자 도구 차단이 되면 안 된다"
+    # 설치본 없음: kit.json이 없으므로 해석이 실패한다.
+    unmanaged = root / "unmanaged"
+    (unmanaged / ".omp" / "extensions").mkdir(parents=True)
+    stdout, stderr = _run_bash_tool_call(unmanaged, source)
+    assert json.loads(stdout) is None, "설치본이 없는 프로젝트의 도구를 막으면 안 된다"
     assert "agent-flow hooks are not registered" in stderr, (
         "조용히 삼키면 등록 누락을 아무도 볼 수 없다 — 이 버그의 원인이 그것이었다"
     )
     assert stderr.count("agent-flow hooks are not registered") == 1, (
         "세션당 한 번만 낸다"
     )
+
+    # 설치본은 있는데 관리 hook만 없음: fail-closed.
+    stripped = root / "stripped"
+    _seed_install(stripped)
+    stdout, stderr = _run_bash_tool_call(stripped, source)
+    assert json.loads(stdout) == {
+        "block": True,
+        "reason": "agent-flow managed hook is missing: "
+        + str(stripped / ".agent-flow" / "scripts" / "hooks" / "guard-protected-branch.sh"),
+    }, "설치본 안에서 가드가 사라진 것은 정책 위반으로 다뤄야 한다"
+    assert "agent-flow hooks are not registered" in stderr
 
     denying = root / "denying"
     hooks = _seed_install(denying)
