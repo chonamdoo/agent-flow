@@ -40,6 +40,7 @@ import {
   isBundledSkillManifest,
   isPruneBackupName,
   isRetiredHookCommand,
+  KIT_ASSETS_RELATIVE,
   KIT_ROOT,
   makeHooksExecutable,
   managedHookDigests,
@@ -1231,11 +1232,15 @@ function install() {
   );
   // 복사 단계는 내용이 다르면 손대지 않으므로 kit이 고친 형제 파일과 템플릿이 기존
   // 설치본에 닿지 않는다. `SKILL.md`는 index hash가 오라클이고, 나머지는 이 기록이다.
-  syncKitAssets(PROJECT, path.join(KIT_ROOT, "skills"), path.join(AF_DIR, "skills"), recordedAssets, writtenAssets, {
-    skip: isBundledSkillManifest,
-  });
-  syncKitAssets(PROJECT, path.join(KIT_ROOT, "templates"), path.join(AF_DIR, "templates"), recordedAssets, writtenAssets);
-  writeKitAssetRecord(PROJECT, writtenAssets);
+  if (recordedAssets) {
+    syncKitAssets(PROJECT, path.join(KIT_ROOT, "skills"), path.join(AF_DIR, "skills"), recordedAssets, writtenAssets, {
+      skip: isBundledSkillManifest,
+    });
+    syncKitAssets(PROJECT, path.join(KIT_ROOT, "templates"), path.join(AF_DIR, "templates"), recordedAssets, writtenAssets);
+    writeKitAssetRecord(PROJECT, writtenAssets);
+  } else {
+    console.warn(`warning: ${KIT_ASSETS_RELATIVE} is unreadable; kit asset sync skipped (delete it to re-bootstrap)`);
+  }
   copyDir(
     path.join(KIT_ROOT, "templates"),
     path.join(AF_DIR, "runtime", "python", "agent_flow", "templates"),

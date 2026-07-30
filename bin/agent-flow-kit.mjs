@@ -35,6 +35,7 @@ import {
   isBundledSkillManifest,
   isPruneBackupName,
   isRetiredHookCommand,
+  KIT_ASSETS_RELATIVE,
   KIT_ROOT,
   makeHooksExecutable,
   managedHookDigests,
@@ -264,11 +265,15 @@ function installProject(requestedRoot) {
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "templates"), path.join(agentFlowDir, "templates"), forceManaged, new Set(), true, forceManaged);
   // 복사 단계는 내용이 다르면 손대지 않으므로 kit이 고친 형제 파일과 템플릿이 기존
   // 설치본에 닿지 않는다. `SKILL.md`는 index hash가 오라클이고, 나머지는 이 기록이다.
-  syncKitAssets(root, path.join(KIT_ROOT, "skills"), path.join(agentFlowDir, "skills"), recordedAssets, writtenAssets, {
-    skip: isBundledSkillManifest,
-  });
-  syncKitAssets(root, path.join(KIT_ROOT, "templates"), path.join(agentFlowDir, "templates"), recordedAssets, writtenAssets);
-  writeKitAssetRecord(root, writtenAssets);
+  if (recordedAssets) {
+    syncKitAssets(root, path.join(KIT_ROOT, "skills"), path.join(agentFlowDir, "skills"), recordedAssets, writtenAssets, {
+      skip: isBundledSkillManifest,
+    });
+    syncKitAssets(root, path.join(KIT_ROOT, "templates"), path.join(agentFlowDir, "templates"), recordedAssets, writtenAssets);
+    writeKitAssetRecord(root, writtenAssets);
+  } else {
+    console.warn(`warning: ${KIT_ASSETS_RELATIVE} is unreadable; kit asset sync skipped (delete it to re-bootstrap)`);
+  }
   const skillIndex = installProjectSkills(root, agentFlowDir, previousSkillIndex, forceManaged, installSelection);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "scripts"), path.join(agentFlowDir, "scripts"), forceManaged);
   // scripts 복사는 사용자 편집을 보호해 덮지 않는다. managed hook은 그 보호가 곧

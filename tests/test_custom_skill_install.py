@@ -2010,3 +2010,22 @@ def test_a_synced_sibling_asset_does_not_block_profile_pruning(tmp_path: Path, b
 
     dropped = project / ".agent-flow" / "skills" / "android-guides"
     assert not dropped.exists(), sorted(item.name for item in dropped.rglob("*"))
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_a_corrupt_asset_record_does_not_trigger_a_bulk_overwrite(tmp_path: Path, binary: str) -> None:
+    """반증: 잘린 기록을 "기록 없음"으로 읽으면 부트스트랩 분기로 떨어져 살아 있는
+    사용자 편집을 한꺼번에 덮는다."""
+    project = tmp_path / f"project-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+    edited = project / _SIBLING_RELATIVE
+    edited.write_text("# 우리 규칙\n", encoding="utf-8")
+    (project / ".agent-flow" / "kit-assets.json").write_text('{"version": 1, "fil', encoding="utf-8")
+
+    result = _install_with(binary, project)
+
+    assert result.returncode == 0, result.stderr
+    assert edited.read_text(encoding="utf-8") == "# 우리 규칙\n"
+    assert not (project / ".agent-flow" / "backups").exists()
+    assert "kit asset sync skipped" in result.stderr
