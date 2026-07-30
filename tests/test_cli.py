@@ -8,6 +8,7 @@ import os
 import site
 import shlex
 import shutil
+import stat
 import sys
 import tempfile
 import unittest
@@ -1719,6 +1720,125 @@ class CliTest(unittest.TestCase):
             )
             self.assertIn("Treat the status command output as the only source of truth.", agent_flow_skill)
             self.assertIn("Do not run install just because a new session started.", agent_flow_skill)
+
+    def test_node_installers_write_the_spec_approval_launcher(self) -> None:
+        """chat `승인` hook이 실행할 launcher는 install이 심는다.
+
+        이게 없으면 `_agent_flow_command()`가 None을 돌려주고 두 hook은 조용히
+        exit 0 한다 — 사용자에게는 승인이 무시된 것으로만 보인다. 그래서 파일
+        존재와 권한만이 아니라 **실제로 CLI를 태우는지**까지 확인한다.
+        """
+        for installer in ("agent-flow-kit.mjs", "agent-flow-install.mjs"):
+            with self.subTest(installer=installer):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    project_root = Path(temp_dir) / "project"
+                    project_root.mkdir()
+                    result = subprocess.run(
+                        (
+                            _node_executable(),
+                            str(Path(__file__).resolve().parents[1] / "bin" / installer),
+                            "install",
+                        ),
+                        cwd=project_root,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    launcher = project_root / ".agent-flow" / "bin" / "agent-flow"
+                    self.assertTrue(launcher.is_file())
+                    mode = launcher.stat().st_mode
+                    self.assertTrue(mode & stat.S_IXUSR)
+                    self.assertFalse(mode & (stat.S_IWGRP | stat.S_IWOTH))
+                    kit = json.loads(
+                        (project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8")
+                    )
+                    self.assertEqual(
+                        kit["project_launcher_digest"],
+                        hashlib.sha256(launcher.read_bytes()).hexdigest(),
+                    )
+                    launched = subprocess.run(
+                        (str(launcher), "spec", "confirm", "--help"),
+                        cwd=temp_dir,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(launched.returncode, 0, launched.stderr)
+                    self.assertIn("spec confirm", launched.stdout)
+                    source = launcher.read_text(encoding="utf-8")
+                    # 실행할 인터프리터는 install이 정해 절대경로로 박는다. 실행
+                    # 시점에 후보를 탐색하면 agent가 갈아끼울 수 있는 자리가 그대로
+                    # 승인 위조 경로가 된다.
+                    self.assertNotIn("AGENT_FLOW_PYTHON", source)
+                    self.assertNotIn("command -v", source)
+                    self.assertRegex(source, r"\npython='/[^']+'\n")
+                    # 상속 환경으로 실행 대상을 바꿀 수 없어야 한다: PYTHONPATH에
+                    # 가짜 agent_flow를 심어도 관리 runtime이 이긴다.
+                    decoy = Path(temp_dir) / "decoy"
+                    (decoy / "agent_flow").mkdir(parents=True)
+                    (decoy / "agent_flow" / "__init__.py").write_text("", encoding="utf-8")
+                    (decoy / "agent_flow" / "cli.py").write_text(
+                        "def main(argv=None):\n    print('decoy')\n    return 0\n",
+                        encoding="utf-8",
+                    )
+                    hijacked = subprocess.run(
+                        (str(launcher), "spec", "confirm", "--help"),
+                        cwd=temp_dir,
+                        env={**os.environ, "PYTHONPATH": str(decoy)},
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(hijacked.returncode, 0, hijacked.stderr)
+                    self.assertIn("spec confirm", hijacked.stdout)
+                    self.assertNotIn("decoy", hijacked.stdout)
+                    kit_python = kit["project_launcher_python"]
+                    self.assertEqual(
+                        kit_python["sha256"],
+                        hashlib.sha256(Path(kit_python["path"]).read_bytes()).hexdigest(),
+                    )
+                    # user-site를 끄는 `-I`가 가능하면 그걸 써야 한다. `-E`는
+                    # user-site를 남겨 `usercustomize`가 이 프로세스에서 돈다.
+                    isolated = subprocess.run(
+                        (kit_python["path"], "-I", "-c", "import yaml"),
+                        capture_output=True,
+                        check=False,
+                    )
+                    if isolated.returncode == 0:
+                        self.assertEqual(kit_python["flag"], "-I")
+                        self.assertIn(" -I -c ", source)
+                    # 반증: 승인 경로의 cwd는 agent가 매일 파일을 쓰는 체크아웃이다.
+                    # `-c`가 sys.path에 남기는 cwd를 지우지 않으면 저장소에 놓인 평범한
+                    # `argparse.py` 하나가 capability 토큰을 들고 실행된다. `-I`는
+                    # 그것까지 막지만, user-site에만 yaml이 있는 배치는 `-E`로 내려가므로
+                    # bootstrap 자체가 cwd를 지우는지를 그 플래그로 확인한다.
+                    (project_root / "argparse.py").write_text(
+                        "import sys\n"
+                        "sys.stderr.write('cwd-shadow ran\\n')\n"
+                        "raise SystemExit(0)\n",
+                        encoding="utf-8",
+                    )
+                    unisolated = launcher.parent / "agent-flow-unisolated"
+                    unisolated.write_text(
+                        source.replace(
+                            f" {kit_python['flag']} -c ", " -E -c "
+                        ),
+                        encoding="utf-8",
+                    )
+                    unisolated.chmod(0o755)
+                    for variant in (launcher, unisolated):
+                        shadowed = subprocess.run(
+                            (str(variant), "spec", "confirm", "--help"),
+                            cwd=project_root,
+                            text=True,
+                            capture_output=True,
+                            check=False,
+                        )
+                        self.assertNotIn("cwd-shadow ran", shadowed.stderr)
+                        self.assertEqual(shadowed.returncode, 0, shadowed.stderr)
+                        self.assertIn("spec confirm", shadowed.stdout)
+
     def test_node_installer_writes_cwd_independent_hook_commands(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project with space"
@@ -8377,6 +8497,19 @@ if (codexContext !== undefined) {
                 encoding="utf-8",
             )
             launcher.chmod(0o755)
+            # hook은 실행 직전 kit.json에 기록된 digest와 대조한다. 기록이 없으면
+            # 실행을 거부하므로, 이 fixture도 설치본과 같은 기록을 갖춰야 한다.
+            (root / ".agent-flow" / "kit.json").write_text(
+                json.dumps(
+                    {
+                        "hooks": True,
+                        "project_launcher_digest": hashlib.sha256(
+                            launcher.read_bytes()
+                        ).hexdigest(),
+                    }
+                ),
+                encoding="utf-8",
+            )
             worktree = root / ".agent-flow" / "worktrees" / "feat-child"
             worktree.mkdir(parents=True)
             untrusted_calls = root / "untrusted-hook-cli-calls"

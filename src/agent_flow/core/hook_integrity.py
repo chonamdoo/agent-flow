@@ -105,6 +105,12 @@ MANAGED_HOOK_PLACEMENT = {
 
 HOOK_DIR_RELATIVE = Path(".agent-flow") / "scripts" / "hooks"
 KIT_JSON_RELATIVE = Path(".agent-flow") / "kit.json"
+# spec 승인 hook이 CLI를 실행하는 유일한 경로. 이 파일이 없으면 hook은 실행할
+# 것을 못 찾아 조용히 exit 0 하고, 사용자는 채팅 `승인`이 무시되는 이유를
+# 어디에서도 못 본다. 그래서 등록과 같은 급으로 런 시작 때 대조한다.
+PROJECT_LAUNCHER_RELATIVE = Path(".agent-flow") / "bin" / "agent-flow"
+# launcher가 실제로 태울 CLI. digest만 맞고 이게 없으면 launcher는 exit 127이다.
+RUNTIME_CLI_RELATIVE = Path(".agent-flow") / "runtime" / "python" / "agent_flow" / "cli.py"
 
 # install이 실제로 쓰는 등록 파일들. JSON host는 이벤트별 구조를 그대로 읽고,
 # OMP 확장은 kit이 통째로 생성하는 소스라 스크립트 이름 존재만 본다.
@@ -228,6 +234,7 @@ def _verify_root(root: Path) -> HookIntegrityReport:
     if expected_enabled:
         violations.extend(_missing_registrations(root, surfaces))
         violations.extend(_managed_hook_digest_violations(root, kit))
+        violations.extend(_project_launcher_violations(root, kit))
         violations.extend(_misplaced_managed_hooks(surfaces))
     else:
         violations.extend(_unexpected_registrations(surfaces))
@@ -316,6 +323,135 @@ def _managed_hook_digest_violations(
             continue
         if actual != recorded:
             yield f"managed hook content digest does not match kit.json: {script}"
+
+
+def _project_launcher_violations(root: Path, kit: dict) -> Iterator[str]:
+    """승인 hook이 실행할 launcher를 hook과 **같은 기준**으로 대조한다.
+
+    hook의 `_agent_flow_command()`도 같은 다섯 항목 + kit.json digest를 본다. 두
+    기준이 갈라지면 게이트가 통과하는데 hook만 거부하거나(승인이 무음으로 무시),
+    반대로 게이트가 거부한 launcher를 hook이 매 프롬프트마다 실행한다.
+
+    launcher가 **실행될 수 있는지**도 같이 본다. digest만 맞고 관리 runtime이
+    없으면 launcher는 exit 127이고, hook은 그 stderr를 버리므로 사용자에게는
+    승인이 무시된 것으로만 보인다.
+    """
+    if "project_launcher_digest" not in kit:
+        # 변조와 "이 설치본이 launcher 도입보다 오래됨"을 구분한다. 상위 문구가
+        # "변조가 아님을 확인한 뒤 재설치"라고 경고하므로, 섞으면 업그레이드
+        # 사용자를 변조 조사로 보낸다.
+        yield (
+            "this installation predates the managed launcher; re-run "
+            "`node bin/agent-flow-kit.mjs install` from the leader checkout"
+        )
+        return
+    recorded = kit["project_launcher_digest"]
+    if recorded is None:
+        # install이 launcher를 못 만든 상태다(PyYAML 인터프리터 없음). 여기서
+        # "재설치하라"만 말하면 같은 결과가 반복되므로 원인 쪽을 가리킨다.
+        yield (
+            "install could not create the managed launcher; fix the interpreter it "
+            "reported as `managed launcher not installed` (PyYAML is required) and "
+            "re-run `node bin/agent-flow-kit.mjs install` from the leader checkout"
+        )
+        return
+    if not isinstance(recorded, str) or not re.fullmatch(r"[0-9a-f]{64}", recorded):
+        yield (
+            "kit.json has no valid content digest for the managed launcher: "
+            f"{PROJECT_LAUNCHER_RELATIVE}"
+        )
+        return
+    path = root / PROJECT_LAUNCHER_RELATIVE
+    try:
+        identity = path.lstat()
+    except OSError:
+        yield (
+            "managed launcher is missing, so chat SPEC confirmation cannot run: "
+            f"{PROJECT_LAUNCHER_RELATIVE}"
+        )
+        return
+    if not stat.S_ISREG(identity.st_mode):
+        yield f"managed launcher is not a regular file: {PROJECT_LAUNCHER_RELATIVE}"
+        return
+    if identity.st_uid != os.getuid():
+        yield f"managed launcher is not owned by the current user: {PROJECT_LAUNCHER_RELATIVE}"
+    if identity.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        yield f"managed launcher is group or world writable: {PROJECT_LAUNCHER_RELATIVE}"
+    if not os.access(path, os.X_OK):
+        yield f"managed launcher is not executable: {PROJECT_LAUNCHER_RELATIVE}"
+    if not _is_file(root / RUNTIME_CLI_RELATIVE):
+        yield (
+            "managed python runtime is missing, so the launcher cannot run the CLI: "
+            f"{RUNTIME_CLI_RELATIVE}"
+        )
+    try:
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        yield (
+            "managed launcher cannot be read for digest verification: "
+            f"{PROJECT_LAUNCHER_RELATIVE}"
+        )
+        return
+    if actual != recorded:
+        yield f"managed launcher content digest does not match kit.json: {PROJECT_LAUNCHER_RELATIVE}"
+    yield from _launcher_python_violations(kit)
+
+
+def _launcher_python_violations(kit: dict) -> Iterator[str]:
+    """launcher가 exec하는 인터프리터도 대조한다.
+
+    launcher 바이트만 보면 그가 실행하는 대상은 무검증으로 남는다 — 그 자리를
+    갈아끼우면 digest는 그대로 일치한 채 승인 capability를 넘겨받는다.
+    """
+    record = kit.get("project_launcher_python")
+    if record is None and "project_launcher_python" in kit:
+        # launcher를 못 만든 설치본이다. 그 사유는 digest 분기가 이미 말한다.
+        return
+    if not isinstance(record, dict):
+        yield (
+            "kit.json does not record the interpreter the managed launcher execs; "
+            "re-run `node bin/agent-flow-kit.mjs install` from the leader checkout"
+        )
+        return
+    recorded_path = record.get("path")
+    recorded_digest = record.get("sha256")
+    if not isinstance(recorded_path, str) or not recorded_path:
+        yield "kit.json records no path for the managed launcher interpreter"
+        return
+    if not isinstance(recorded_digest, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", recorded_digest
+    ):
+        yield f"kit.json records no valid digest for the managed launcher interpreter: {recorded_path}"
+        return
+    interpreter = Path(recorded_path)
+    try:
+        identity = interpreter.lstat()
+    except OSError:
+        yield f"the interpreter the managed launcher execs is missing: {recorded_path}"
+        return
+    # install은 realpath를 박으므로 여기 symlink가 보이면 그 자체가 교체 신호다.
+    if not stat.S_ISREG(identity.st_mode):
+        yield f"the managed launcher interpreter is not a regular file: {recorded_path}"
+        return
+    if not os.access(interpreter, os.X_OK):
+        # launcher의 두 exit 127 분기 중 하나다. 게이트가 이걸 안 보면 hook은
+        # 그 실패를 DEVNULL로 버려 사용자에게는 승인 무음으로만 보인다.
+        yield f"the managed launcher interpreter is not executable: {recorded_path}"
+    # 권한 비트는 이 자리에서 쓸 수 있는 신호가 아니다. 실측: GitHub runner의
+    # `/opt/hostedtoolcache/Python/.../python3.12`는 world-writable이고 homebrew의
+    # toolchain은 group-writable이다. 그걸 위반으로 보면 정당한 환경의 모든 run이
+    # 시작 거부된다. 교체는 아래 digest가 잡는다 — 그게 이 검사의 오라클이다.
+    try:
+        actual = hashlib.sha256(interpreter.read_bytes()).hexdigest()
+    except OSError:
+        yield f"the managed launcher interpreter cannot be read for digest verification: {recorded_path}"
+        return
+    if actual != recorded_digest:
+        # python 업그레이드도 여기로 온다. 그래서 문구가 재설치를 안내한다.
+        yield (
+            "the managed launcher interpreter changed since install: "
+            f"{recorded_path}; re-run `node bin/agent-flow-kit.mjs install` from the leader checkout"
+        )
 
 
 def _unexpected_registrations(surfaces: tuple[_Surface, ...]) -> Iterator[str]:
