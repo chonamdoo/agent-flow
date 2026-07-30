@@ -118,6 +118,17 @@ def lint_profiles(root: Path, profile_ids: list[str], files: list[str] | None = 
     }
 
 
+def inactive_lint_profile_ids(root: Path, profile_ids: list[str], candidates: list[str]) -> list[str]:
+    inactive: list[str] = []
+    for profile_id in profile_ids:
+        architecture = load_profile_payload(profile_id).get("architecture")
+        if not isinstance(architecture, dict) or not isinstance(architecture.get("roles"), list):
+            continue
+        if not architecture_lint_is_active(root, architecture, candidates):
+            inactive.append(profile_id)
+    return inactive
+
+
 def expanded_lint_profile_ids(profile_ids: list[str], candidates: list[str]) -> list[str]:
     expanded = list(profile_ids)
     if "react-native" in expanded and "android" not in expanded:
@@ -609,12 +620,25 @@ def main(argv: list[str] | None = None) -> int:
     root = Path(args.root).resolve()
     try:
         profile_ids = active_profile_ids(root, args.profile)
-        findings_by_profile = lint_profiles(root, profile_ids, files=args.files)
+        # `lint_profiles`가 안에서 하는 확장을 여기서도 해 둔다. 출력이 실제로 검사한
+        # profile 집합과 어긋나면 "무엇이 비적용이었나"가 다시 불명확해진다.
+        candidates = normalized_candidate_files(
+            args.files if args.files is not None else changed_files(root)
+        )
+        profile_ids = expanded_lint_profile_ids(profile_ids, candidates)
+        findings_by_profile = lint_profiles(root, profile_ids, files=candidates)
+        inactive = inactive_lint_profile_ids(root, profile_ids, candidates)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 1
     if not any(findings_by_profile.values()):
-        print(f"{','.join(profile_ids)}: architecture lint passed")
+        # 필수 gate가 한 파일도 검사하지 않고 "passed"를 찍으면 운영자는 통과와
+        # 비적용을 구분할 수 없다. 활성 조건을 도입한 순간부터 둘은 다른 사실이다.
+        checked = [profile_id for profile_id in profile_ids if profile_id not in inactive]
+        if checked:
+            print(f"{','.join(checked)}: architecture lint passed")
+        if inactive:
+            print(f"{','.join(inactive)}: architecture lint n/a (activation_roots absent)")
         return 0
     print(f"{','.join(profile_ids)}: architecture lint failed", file=sys.stderr)
     for profile_id, findings in findings_by_profile.items():

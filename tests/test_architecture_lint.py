@@ -194,3 +194,46 @@ def test_core_database_role_is_mapped_and_dependency_gated():
     assert ":core:database" in forbidden_gradle_dependencies("feature-presentation", {})
     assert ":core:database" in forbidden_gradle_dependencies("feature-api", {"feature": "home"})
     assert ":core:database" not in forbidden_gradle_dependencies("core-data", {})
+
+
+def test_inactive_profile_is_reported_separately_from_passed(tmp_path, capsys):
+    """반증: 한 파일도 검사하지 않은 필수 gate가 "passed"를 찍으면 통과와 비적용이 같아진다."""
+    from agent_flow.core.architecture_lint import inactive_lint_profile_ids, main
+
+    flat = tmp_path / "flat"
+    (flat / "core" / "data" / "src" / "main").mkdir(parents=True)
+    probe = flat / "core" / "data" / "src" / "main" / "Repo.kt"
+    probe.write_text("package com.example.core.data\nclass Repo\n", encoding="utf-8")
+
+    assert inactive_lint_profile_ids(flat, ["android"], ["core/data/src/main/Repo.kt"]) == ["android"]
+    assert main(
+        ["--root", str(flat), "--profile", "android", "--files", "core/data/src/main/Repo.kt"]
+    ) == 0
+    out = capsys.readouterr().out
+    assert "android: architecture lint n/a (activation_roots absent)" in out
+    assert "architecture lint passed" not in out
+
+    adopted = tmp_path / "adopted"
+    (adopted / "core" / "domain" / "auth").mkdir(parents=True)
+    assert inactive_lint_profile_ids(adopted, ["android"], []) == []
+    assert main(["--root", str(adopted), "--profile", "android", "--files"]) == 0
+    assert "android: architecture lint passed" in capsys.readouterr().out
+
+
+def test_schema_role_vocabulary_covers_every_shipped_role():
+    """반증: 어떤 코드도 이 열거를 파싱하지 않아 profile이 role을 늘릴 때마다 낡는다."""
+    profiles_dir = KIT_ROOT / "src" / "agent_flow" / "profiles"
+    schema = yaml.safe_load((profiles_dir / "_schema.yaml").read_text(encoding="utf-8"))
+    declared = {
+        part.strip()
+        for part in schema["optional"]["architecture"]["roles"][0]["id"].split("|")
+    }
+    shipped: set[str] = set()
+    for path in sorted(profiles_dir.glob("*.yaml")):
+        if path.stem.startswith("_"):
+            continue
+        architecture = (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("architecture") or {}
+        for role in architecture.get("roles") or []:
+            shipped.add(role["id"])
+    assert shipped - declared == set()
+    assert declared - shipped == set()

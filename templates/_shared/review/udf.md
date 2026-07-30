@@ -42,9 +42,11 @@ stateless for the same reason a hand-written screen does.
 
 4. **`viewmodel-statein-initial-load`** — flow-backed state terminates in one
    shared `stateIn` value, not a `stateIn` per call site or per collector, and
-   initial loading starts when the route collects rather than in `init`. Where the
-   skill's `SharingStarted` guidance applies, confirm no caller reads the stale
-   `.value` as a fresh source after the subscriber timeout.
+   initial loading starts when the route collects rather than in `init`. The skill
+   states the exception: a screen whose product behavior requires an explicit user
+   action to begin loading satisfies this item, so a button-initiated load is not
+   a finding. Where the skill's `SharingStarted` guidance applies, confirm no
+   caller reads the stale `.value` as a fresh source after the subscriber timeout.
 
 5. **`udf-stateless-content-composable`** — screen and content composables do not
    call `hiltViewModel()`, `viewModel()`, `collectAsStateWithLifecycle()`, or a
