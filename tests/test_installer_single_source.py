@@ -383,6 +383,8 @@ _SHARED_ONLY = (
     "pruneRetiredHooks", "pruneRetiredHookScripts", "mergeHookSettings",
     "mergeHookConfig", "claudeHooksSettings", "codexHooksSettings",
     "skillIndexBlock", "upsertSkillIndexBlock",
+    "extractCliOption", "cliOptionValue", "requestedInstallRootOption",
+    "withoutInstallRootOption", "assertInstallRootIsFinal",
 )
 
 

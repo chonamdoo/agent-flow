@@ -1626,3 +1626,165 @@ def test_plain_install_refreshes_a_managed_hook_to_match_its_recorded_digest(
     assert reports and all(report.ok for report in reports), [
         list(report.violations) for report in reports
     ]
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_install_root_option_targets_another_project(tmp_path: Path, binary: str) -> None:
+    """반증: `--root`가 무시되면 cwd에 깔고 성공으로 끝난다 — 어디 설치됐는지 알 길이 없다."""
+    elsewhere = tmp_path / f"elsewhere-{binary}"
+    elsewhere.mkdir()
+    target = tmp_path / f"target-{binary}"
+    target.mkdir()
+
+    result = _install_with(binary, elsewhere, "--root", str(target))
+
+    assert result.returncode == 0, result.stderr
+    assert (target / ".agent-flow" / "kit.json").is_file()
+    assert not (elsewhere / ".agent-flow").exists()
+    assert not (elsewhere / "AGENTS.md").exists()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_install_root_rejects_a_path_that_is_not_a_directory(tmp_path: Path, binary: str) -> None:
+    """install은 없는 경로를 mkdir로 만들어 낸다. 오타가 빈 트리를 심고 성공하면 안 된다."""
+    project = tmp_path / f"project-{binary}"
+    project.mkdir()
+    missing = tmp_path / f"missing-{binary}"
+
+    result = _install_with(binary, project, "--root", str(missing))
+
+    # 주석이 주장하는 계약은 "한 줄"이다. substring만 보면 try/catch를 통째로 지워도
+    # node의 uncaught 출력에 같은 문장이 있어 통과한다.
+    assert result.returncode == 1
+    assert result.stderr.strip() == f"--root must be an existing directory: {missing}"
+    assert not missing.exists()
+    assert not (project / ".agent-flow").exists()
+
+
+def test_run_install_does_not_swallow_the_root_option(tmp_path: Path) -> None:
+    """`run install`은 `--root`를 읽는 runWorkflowCommand 앞에서 가로챈다. 그 분기가
+    인자를 안 넘기면 같은 계열의 플래그가 조용히 죽고 cwd에 설치된다."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    target = tmp_path / "target"
+    target.mkdir()
+
+    result = subprocess.run(
+        (_node(), str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"), "run", "install", "--root", str(target)),
+        cwd=elsewhere,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (target / ".agent-flow" / "kit.json").is_file()
+    assert not (elsewhere / ".agent-flow").exists()
+
+
+def test_relative_install_root_resolves_against_the_caller_cwd(tmp_path: Path) -> None:
+    """자식 kit install은 이미 해석된 경로를 cwd로 받는다. `--root`를 그대로
+    넘기면 자식이 제 cwd 기준으로 한 번 더 풀어 다른 곳을 가리킨다."""
+    project = tmp_path / "workspace"
+    (project / "app").mkdir(parents=True)
+
+    result = _install_with("agent-flow-install.mjs", project, "--root", "app")
+
+    assert result.returncode == 0, result.stderr
+    # 자식 kit install이 죽어도 부모는 경고 한 줄로 낮추고 제 손으로 kit.json을 쓴다.
+    # `prompts/`는 kit install만 만들므로 위임 성공의 오라클이다.
+    assert "agent-flow-kit install skipped" not in result.stderr
+    assert (project / "app" / ".agent-flow" / "prompts").is_dir()
+    assert (project / "app" / ".agent-flow" / "kit.json").is_file()
+    assert not (project / ".agent-flow").exists()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_install_root_inside_a_git_repo_names_the_root_it_would_use(tmp_path: Path, binary: str) -> None:
+    """`resolveInstallRoot`는 git root로 걸어 올라간다. 사용자가 이름을 댄 자리가
+    조용히 바뀌면 지금 고치는 버그와 같은 모양이 된다."""
+    repo = tmp_path / f"repo-{binary}"
+    (repo / "packages" / "app").mkdir(parents=True)
+    subprocess.run(("git", "init", "-q", str(repo)), check=True)
+    caller = tmp_path / f"caller-{binary}"
+    caller.mkdir()
+
+    result = _install_with(binary, caller, "--root", str(repo / "packages" / "app"))
+
+    assert result.returncode == 1
+    assert "resolves to" in result.stderr
+    assert not (repo / "packages" / "app" / ".agent-flow").exists()
+    assert not (repo / ".agent-flow").exists()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_symlinked_worktree_root_is_blocked_by_both_entry_points(tmp_path: Path, binary: str) -> None:
+    """두 진입점의 worktree 판정은 각각 realpath와 path.resolve다. `--root`를
+    정규화하지 않으면 심볼릭 링크 하나가 한쪽 guard만 통과한다."""
+    leader = tmp_path / f"leader-{binary}"
+    worktree = leader / ".agent-flow" / "worktrees" / "feat-x"
+    worktree.mkdir(parents=True)
+    alias = tmp_path / f"alias-{binary}"
+    alias.symlink_to(worktree)
+    caller = tmp_path / f"caller-{binary}"
+    caller.mkdir()
+
+    result = _install_with(binary, caller, "--root", str(alias))
+
+    assert result.returncode == 1, result.stdout
+    assert list(worktree.iterdir()) == []
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize("value", ["--root=", "--root:empty", "--root:flag"])
+def test_install_root_requires_a_real_value(tmp_path: Path, binary: str, value: str) -> None:
+    """빈 값은 cwd로 접혀 원래 버그와 같은 결과를 내고, `-`로 시작하는 값은 다음
+    플래그를 root로 삼킨다 — 그 이름의 디렉터리가 있으면 실제로 거기 설치된다."""
+    project = tmp_path / f"project-{binary}-{value}"
+    project.mkdir()
+    (project / "--force-managed").mkdir()
+    args = {
+        "--root=": ("--root=",),
+        "--root:empty": ("--root", ""),
+        "--root:flag": ("--root", "--force-managed"),
+    }[value]
+
+    result = _install_with(binary, project, *args)
+
+    assert result.returncode == 1
+    assert result.stderr.strip() == "--root requires a value"
+    assert not (project / ".agent-flow").exists()
+    assert not (project / "--force-managed" / ".agent-flow").exists()
+
+
+def test_root_option_is_not_validated_before_the_command_dispatch(tmp_path: Path) -> None:
+    """`--root` 해석이 커맨드 디스패치보다 먼저 돌면 install이 아닌 커맨드가
+    받지도 않는 플래그의 오류로 죽는다."""
+    project = tmp_path / "project"
+    project.mkdir()
+
+    result = subprocess.run(
+        (_node(), str(KIT_ROOT / "bin" / "agent-flow-install.mjs"), "bogus", "--root", str(tmp_path / "nope")),
+        cwd=project,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert result.stderr.strip() == "Unknown command: bogus"
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_install_root_pointing_at_the_marker_dir_is_blocked_the_same_way(tmp_path: Path, binary: str) -> None:
+    """두 진입점의 root 해석이 갈리면 한쪽만 `<proj>/.agent-flow/.agent-flow`를 만든다."""
+    project = tmp_path / f"proj-{binary}"
+    (project / ".agent-flow").mkdir(parents=True)
+    caller = tmp_path / f"caller-{binary}"
+    caller.mkdir()
+
+    result = _install_with(binary, caller, "--root", str(project / ".agent-flow"))
+
+    assert result.returncode == 1
+    assert "resolves to" in result.stderr
+    assert list((project / ".agent-flow").iterdir()) == []
