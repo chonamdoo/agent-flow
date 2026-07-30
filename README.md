@@ -20,6 +20,9 @@ pip install -e <path-to-this-kit>
 
 # 2. Bootstrap the project (creates .agent-flow/, injects CLAUDE.md / AGENTS.md blocks)
 npx <path-to-this-kit> install
+
+# 다른 프로젝트에 설치할 때는 --root를 쓴다. 그 디렉터리로 cd 할 필요가 없다.
+npx <path-to-this-kit> install --root <project-path>
 ```
 
 The order matters: `pip install -e` first, then `npx ... install`. The bootstrap markdown references the `agent-flow` binary, which step 1 makes available.

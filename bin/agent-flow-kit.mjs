@@ -16,13 +16,16 @@ import {
   AGENT_FLOW_COMMAND,
   architectureReviewerSkillMarkdown,
   arrayValue,
+  assertInstallRootIsFinal,
   backupIfDifferent,
   claudeHooksSettings,
+  cliOptionValue,
   codexConfigPath,
   codexHooksSettings,
   COMMAND_TOOL_MATCHER,
   ensureChildPath,
   escapeRegex,
+  extractCliOption,
   fullFeatureSkillMarkdown,
   hasChildWithSuffix,
   HOME,
@@ -58,6 +61,7 @@ import {
   removeGitignoreEntries,
   removeLegacyProjectSkillCopies,
   removeOmpHooksExtension,
+  requestedInstallRootOption,
   retiredHookScripts,
   safeSkillName,
   shellQuote,
@@ -111,8 +115,17 @@ const GENERATED_PROJECT_SKILL_NAMES = new Set([
   "product-brief",
   "push-watch",
 ]);
-function installProject() {
-  const requestedRoot = process.cwd();
+
+function requestedInstallRoot() {
+  const requested = requestedInstallRootOption(installArgs, process.cwd());
+  if (requested === undefined) {
+    return process.cwd();
+  }
+  assertInstallRootIsFinal(requested, resolveInstallRoot(requested));
+  return requested;
+}
+
+function installProject(requestedRoot) {
   const managedWorktreeRoot = resolveManagedWorktreeRoot(requestedRoot);
   if (
     managedWorktreeRoot
@@ -506,55 +519,6 @@ function relayPythonRunLifecycle(subcommand, args, root) {
 
 function hasCliOption(args, name) {
   return args.some((arg) => arg === name || arg.startsWith(`${name}=`));
-}
-
-function cliOptionValue(args, name) {
-  let value;
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === name) {
-      if (index + 1 >= args.length) {
-        throw new Error(`${name} requires a value`);
-      }
-      if (value !== undefined) {
-        throw new Error(`${name} may only be specified once`);
-      }
-      value = args[index + 1];
-      index += 1;
-    } else if (arg.startsWith(`${name}=`)) {
-      if (value !== undefined) {
-        throw new Error(`${name} may only be specified once`);
-      }
-      value = arg.slice(name.length + 1);
-    }
-  }
-  return value;
-}
-
-function extractCliOption(args, name) {
-  const kept = [];
-  let value;
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === name) {
-      if (index + 1 >= args.length) {
-        throw new Error(`${name} requires a value`);
-      }
-      if (value !== undefined) {
-        throw new Error(`${name} may only be specified once`);
-      }
-      value = args[index + 1];
-      index += 1;
-    } else if (arg.startsWith(`${name}=`)) {
-      if (value !== undefined) {
-        throw new Error(`${name} may only be specified once`);
-      }
-      value = arg.slice(name.length + 1);
-    } else {
-      kept.push(arg);
-    }
-  }
-  return { value, args: kept };
 }
 
 // `--workflow`와 갈리는 지점까지 좁힌 접두 판정과 짝을 이룬다. 편집 거리 2는
@@ -2699,12 +2663,12 @@ function installedPythonRuntimePath(root) {
 
 try {
   if (command === "install") {
-    installProject();
+    installProject(requestedInstallRoot());
     process.exit(0);
   }
 
   if (command === "run" && process.argv[3] === "install") {
-    installProject();
+    installProject(requestedInstallRoot());
     process.exit(0);
   }
 
@@ -2729,7 +2693,7 @@ try {
     runPythonCliCommand(command, process.argv.slice(3), { interactive: true });
   }
 
-  console.error("usage: agent-flow-kit <command> [...] — install [--force-managed] | gates [--profile <id>] [--phase <pre-commit|pre-push|post-merge|all>] [--worktree <name>] | architecture-lint [--profile <id>] [--files ...] | run <install|start|status|next|advance|push-watch|push-watch-tick> | any other command is handled by the Python CLI (spec, status, continue, skills, ...)");
+  console.error("usage: agent-flow-kit <command> [...] — install [--root <existing dir>] [--force-managed] | gates [--profile <id>] [--phase <pre-commit|pre-push|post-merge|all>] [--worktree <name>] | architecture-lint [--profile <id>] [--files ...] | run <install|start|status|next|advance|push-watch|push-watch-tick> | any other command is handled by the Python CLI (spec, status, continue, skills, ...)");
   process.exit(1);
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));

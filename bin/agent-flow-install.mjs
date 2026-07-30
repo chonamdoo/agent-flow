@@ -21,6 +21,7 @@ import {
   AGENT_FLOW_COMMAND,
   architectureReviewerSkillMarkdown,
   arrayValue,
+  assertInstallRootIsFinal,
   backupIfDifferent,
   claudeHooksSettings,
   codexConfigPath,
@@ -63,6 +64,7 @@ import {
   removeGitignoreEntries,
   removeLegacyProjectSkillCopies,
   removeOmpHooksExtension,
+  requestedInstallRootOption,
   retiredHookScripts,
   safeSkillName,
   shellQuote,
@@ -77,6 +79,7 @@ import {
   upsertGitignore,
   upsertSkillIndexBlock,
   validateSkillDependencies,
+  withoutInstallRootOption,
   writePruneBackup,
 } from "../lib/installer-shared.mjs";
 
@@ -105,10 +108,28 @@ const LEAKY_GIT_ENV_VARS = [
   "GIT_CEILING_DIRECTORIES",
 ];
 
-// 이 표식이 남아 있으면 OMP 확장 파일을 kit 소유로 보고 업그레이드한다.
-const REQUESTED_PROJECT = process.cwd();
+// `--root` 오류는 메시지 한 줄로 끝낸다. 모듈 최상단에서 그냥 throw하면 사용자가
+// 오타 하나에 스택 트레이스를 받는다.
+function requestedProject() {
+  try {
+    const requested = requestedInstallRootOption(INSTALL_ARGS, process.cwd());
+    if (requested === undefined) {
+      return process.cwd();
+    }
+    assertInstallRootIsFinal(requested, resolveInstallProject(requested));
+    return requested;
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+}
+
+// `--root`는 install만 받는다. 커맨드 디스패치보다 먼저 도는 자리라, 여기서
+// 무조건 해석하면 `bogus --root /nope`가 `Unknown command`가 아니라 root 오류로 죽는다.
+const REQUESTED_PROJECT = process.argv[2] === "install" ? requestedProject() : process.cwd();
 const PROJECT = resolveInstallProject(REQUESTED_PROJECT);
 const AF_DIR = path.join(PROJECT, ".agent-flow");
+
 const PROJECT_SKILL_HOSTS = Object.freeze(["claude", "codex", "omp"]);
 const BUNDLED_HOST_SKILL_NAMES = new Set([
   "agent-flow",
@@ -156,6 +177,14 @@ function resolveInstallProject(start) {
   if (managedRoot) return managedRoot;
   const gitCommonRoot = resolveGitCommonWorktreeRoot(start);
   if (gitCommonRoot) return gitCommonRoot;
+  // `agent-flow-kit.mjs`의 `resolveInstallRoot`와 같은 폴백이다. 여기만 빠지면
+  // `--root <proj>/.agent-flow`가 kit에서는 rc 1로 막히고 여기서는 rc 0으로
+  // `<proj>/.agent-flow/.agent-flow`를 만든다 — 두 진입점의 rc가 갈린다.
+  const parts = start.split(path.sep);
+  const markerIndex = parts.lastIndexOf(".agent-flow");
+  if (markerIndex !== -1) {
+    return parts.slice(0, markerIndex).join(path.sep) || path.sep;
+  }
   return start;
 }
 
@@ -1027,7 +1056,9 @@ function runKitInstall() {
   // 여기서 먼저 실행하지 않으면 assertInstalled가 요구하는 파일이 빠진다.
   // 단, kit.mjs는 yaml 가능한 python이 필요하므로 없는 환경에서는 경고 후 계속한다.
   const kitCli = path.join(path.dirname(fileURLToPath(import.meta.url)), "agent-flow-kit.mjs");
-  const forwarded = INSTALL_ARGS.filter((arg) => arg !== "install");
+  // 자식은 이미 해석된 PROJECT를 cwd로 받는다. 상대 `--root`를 그대로 넘기면
+  // 자식이 제 cwd 기준으로 한 번 더 풀어 다른 곳을 가리킨다.
+  const forwarded = withoutInstallRootOption(INSTALL_ARGS).filter((arg) => arg !== "install");
   const args = [kitCli, "install", ...forwarded];
   const result = spawnSync(process.execPath, args, { cwd: PROJECT, encoding: "utf8" });
   // kit.mjs의 stdout은 여기서 갇힌다. prune 알림만은 사용자가 잃은 파일과
@@ -1350,7 +1381,7 @@ const cmd = process.argv[2];
 if (cmd === "install") {
   install();
 } else if (cmd === "--help" || cmd === "-h" || !cmd) {
-  console.log("Usage: npx <agent-flow-package> install [--force-managed]");
+  console.log("Usage: npx <agent-flow-package> install [--root <existing dir>] [--force-managed]");
   process.exit(0);
 } else {
   console.error(`Unknown command: ${cmd}`);
