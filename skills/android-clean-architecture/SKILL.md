@@ -80,8 +80,10 @@ HomeRepositoryImpl -> HomeRemoteDataSource -> HomeApiService
   performs navigation/platform calls, and passes plain state/callbacks down.
 - Screen/content composables are stateless and do not call `hiltViewModel()`,
   `viewModel()`, lifecycle collection, or navigation APIs.
-- ViewModels inject use cases/platform abstractions, not repositories impls,
-  data sources, API services, DTOs, `Context`, `Activity`, or `NavController`.
+- ViewModels inject use cases, one context's repository interface, and platform
+  abstractions — never repository impls, data sources, API services, DTOs,
+  `Context`, `Activity`, or `NavController`. A use case is required when the call
+  crosses contexts, orders multi-step side effects, or translates error codes.
 - UI state is immutable and explicit for loading/error/empty/offline/success
   states that can occur.
 - Domain-to-UI mapping lives in presentation mappers.
@@ -134,7 +136,7 @@ hilt-composition-root: pass|fail
 repository-impl-direct-api-service: pass|fail
 remote-data-source-boundary: pass|fail
 feature-api-public-contract-only: pass|fail
-viewmodel-injects-usecases-only: pass|fail|n/a
+viewmodel-dependency-boundary: usecase|single-context-repository|fail|n/a
 compose-route-screen-split: pass|fail|n/a
 ```
 

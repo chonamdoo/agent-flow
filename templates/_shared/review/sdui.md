@@ -20,10 +20,15 @@ diff touches none of these, mark the completion gate `n/a`.
    confirm token resolution lives only in the design-system module. A numeric
    fallback in the token table is resilience, not permission.
 
-2. **`sdui-room-ssot`** — state holders and UI observe a storage flow, never an
-   API response. Confirm the screen flow originates from a DAO `Flow`, that no
-   network data source is injected into a state holder, and that refresh returns
-   `Result<Unit>` instead of a screen.
+2. **`sdui-room-ssot-scope`** — state holders and UI observe a storage flow for
+   the state that must survive a process restart and is shared across screens,
+   never an API response. Confirm the durable screen flow originates from a DAO or
+   DataStore `Flow`, that no network data source is injected into a state holder,
+   and that refresh returns `Result<Unit>` instead of a screen. Then name which
+   observed state this change treats as durable and which as ephemeral — progress
+   flags, one-shot effects, command responses, clock offset, cursor pages,
+   credentials, and media bytes belong outside storage, and holding them there is
+   not a finding.
 
 3. **`sdui-action-finite-vocabulary`** — every action `type` in the payload has a
    counterpart in the sealed action model, the executor `when` is exhaustive with
@@ -85,7 +90,7 @@ every screen the renderer serves.
 ## Completion Gate
 sdui-architecture: applied
 sdui-design-token-only: pass|fail
-sdui-room-ssot: pass|fail|n/a
+sdui-room-ssot-scope: pass|fail|n/a
 sdui-action-finite-vocabulary: pass|fail|n/a
 sdui-parse-depth-limit: pass|fail|n/a
 sdui-unknown-node-fallback: pass|fail|n/a

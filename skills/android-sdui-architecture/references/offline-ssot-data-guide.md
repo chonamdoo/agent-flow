@@ -4,16 +4,34 @@ Source: PART 1-8, plus PART 6 (whole).
 
 ## Rule
 
-Room is the single source of truth. The UI subscribes to Room only, never to an
-API response.
+Local storage is the single source of truth for the state a screen observes when
+that state must survive a process restart **and** is shared by two or more
+screens. The UI subscribes to storage for that state, never to an API response.
+Structure, queries, and lists live in Room; settings, toggles, and small scalars
+live in DataStore. The storage engine follows the shape of the data, not a rule
+about Room.
 
 ```text
-API response -> validate/parse -> Room write -> Flow emit -> state holder -> Compose
+API response -> validate/parse -> storage write -> Flow emit -> state holder -> Compose
 ```
 
 Three reasons: offline render from the last successful response, cross-screen
 state consistency because every screen observes the same table, and instant
 render through stale-while-revalidate.
+
+## Outside storage
+
+These are observed state and still do not belong in storage:
+
+- refresh/progress flags and cold-load failure state
+- one-shot effects (navigate, toast, scroll) and command responses
+- server clock offset and staleness computed from it
+- cursor pages held for the current scroll
+- auth credentials and media bytes
+
+Excluding them from storage does not excuse a shortcut: data that bypasses
+storage still crosses a repository and arrives as a domain model. The UI never
+subscribes to a DTO or an API response, in any case.
 
 ## Storage strategy
 

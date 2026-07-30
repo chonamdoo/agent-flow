@@ -356,3 +356,33 @@ def test_promoted_presentation_rules_stay_project_neutral():
         "TaraeTypography",
     ):
         assert project_local not in text
+
+
+def test_viewmodel_dependency_boundary_replaces_the_usecase_only_marker():
+    """반증: 조건절 없는 marker를 남겨 두면 use case 3개짜리 저장소가 전면 fail이 된다."""
+    clean = (SKILLS / "android-clean-architecture" / "SKILL.md").read_text(encoding="utf-8")
+    assert "viewmodel-injects-usecases-only" not in clean
+    assert (
+        "viewmodel-dependency-boundary: usecase|single-context-repository|fail|n/a" in clean
+    )
+
+    presentation = PRESENTATION_SKILL.read_text(encoding="utf-8")
+    assert "single context's repository interface" in presentation
+    # 조건 셋이 문장에 남아 있어야 "언제 use case인가"가 판정 가능하다.
+    assert "two or more contexts" in presentation
+    assert "order carries meaning" in presentation
+
+    ssot_sources = (
+        SDUI_SKILL,
+        SKILLS / "android-sdui-architecture" / "references" / "offline-ssot-data-guide.md",
+        SKILLS / "android-sdui-architecture" / "references" / "sdui-review-checklist.md",
+        REVIEW_ANGLES / "sdui.md",
+    )
+    for path in ssot_sources:
+        text = path.read_text(encoding="utf-8")
+        assert "sdui-room-ssot:" not in text
+        assert "Room is the single source of truth" not in text
+    assert "sdui-room-ssot-scope: pass|fail|n/a" in SDUI_SKILL.read_text(encoding="utf-8")
+    assert "sdui-room-ssot-scope: pass|fail|n/a" in (REVIEW_ANGLES / "sdui.md").read_text(
+        encoding="utf-8"
+    )

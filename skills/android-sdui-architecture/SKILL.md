@@ -41,7 +41,9 @@ Three axes hold the design together (PART 3-1):
 
 1. **Hybrid rendering** — layout tree for free composition, semantic components
    for fixed design.
-2. **Offline-first** — Room is the single source of truth; UI observes Room only.
+2. **Offline-first** — local storage is the single source of truth for the state
+   the screen must survive a process restart with. `offline-ssot-data-guide.md`
+   names what stays outside it.
 3. **UDF** — state flows storage to UI, events flow UI to the state holder.
 
 ## Module Shape
@@ -94,7 +96,8 @@ Read only the matching file.
 ## Review Checklist
 
 1. **Design tokens only** — styling JSON carries token names, never raw dp or hex.
-2. **Room is the source of truth** — state holders observe storage, not responses.
+2. **Storage is the source of truth, in scope** — durable shared screen state is
+   observed from storage; ephemeral state is named and excluded.
 3. **Finite action vocabulary** — every action `type` is in the sealed vocabulary.
 4. **Parse depth limit** — the recursive parser caps depth and falls back past it.
 5. **Unknown node fallback** — unsupported types render a fallback, never crash.
@@ -112,7 +115,7 @@ Include these in the completion artifact or review output:
 ```text
 sdui-architecture: applied
 sdui-design-token-only: pass|fail
-sdui-room-ssot: pass|fail|n/a
+sdui-room-ssot-scope: pass|fail|n/a
 sdui-action-finite-vocabulary: pass|fail|n/a
 sdui-parse-depth-limit: pass|fail|n/a
 sdui-unknown-node-fallback: pass|fail|n/a

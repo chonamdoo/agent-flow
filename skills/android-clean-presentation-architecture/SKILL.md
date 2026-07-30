@@ -49,11 +49,12 @@ For Android/Kotlin/Compose/KMP implementation or review:
 
 ## Architecture Rule
 
-- `presentation` depends on domain use cases and platform/UI abstractions.
+- `presentation` depends on domain contracts and platform/UI abstractions.
 - `domain` owns repository interfaces, use cases, and domain models.
 - `data` implements domain repositories and binds implementations to interfaces.
 - `network` provides Retrofit/API infrastructure.
-- ViewModels do not inject Retrofit APIs, data sources, or repository implementations directly when a domain use case exists.
+- A ViewModel may inject a **single context's repository interface** directly. Put a use case in `core/domain/<context>` when one of these holds: (a) it combines repositories from two or more contexts, (b) it runs multi-step side effects whose order carries meaning (reservation, fence, polling), (c) it translates transport or domain error codes into the screen's result type. Do not write a use case that forwards one repository method without changing its arguments.
+- In every case presentation injects neither a repository implementation, nor a data source, nor an API service.
 - Keep public feature contracts, including route keys and exported entry contracts, in `feature:*:api` when the repo uses feature api/presentation split.
 - Keep Compose screens, routes, ViewModels, UI contracts, UI models, and mappers in `feature:*:presentation`.
 - DTOs, entities owned by data, Retrofit models, data sources, and data DI must not reach presentation.
@@ -104,7 +105,7 @@ Route arguments and startup:
 ViewModels are screen-level state holders:
 - annotate with `@HiltViewModel`
 - use `@Inject constructor`
-- inject domain use cases and platform abstractions
+- inject use cases, a single context's repository interface, and platform abstractions
 - expose immutable `StateFlow<ScreenUiState>`
 - keep mutable state private
 - accept user input through named callbacks for simple screens or `fun onAction(action: ScreenUiAction)` for branchy screens
@@ -234,7 +235,7 @@ stateless-content rule — a node renderer is a content composable.
 
 ## Review Checklist
 
-- `ViewModel` constructor injects use cases/platform abstractions, not data implementation classes.
+- `ViewModel` constructor injects use cases, one context's repository interface, and platform abstractions — never a repository implementation, data source, or API service. A use case is required only for the cross-context, ordered-side-effect, or error-translation cases named in the Architecture Rule.
 - `uiState` is public immutable `StateFlow`; mutable state is private.
 - `UiState` is `@Stable sealed interface` unless the repo has a documented exception.
 - `UiState` is explicit for not-ready/loading/refreshing/placeholder/empty/error/offline/permission/success states that can occur; no fake domain default.
