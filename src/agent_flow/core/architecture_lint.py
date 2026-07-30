@@ -351,7 +351,7 @@ def is_token_boundary(haystack: str, start: int, end: int) -> bool:
     previous = haystack[start - 1] if start else ""
     if previous.isalnum() and not starts_new_word(haystack[start:end], previous):
         return False
-    return ends_at_boundary(haystack, end)
+    return ends_at_boundary(haystack, end, haystack[start:end])
 
 
 def starts_new_word(matched: str, previous: str) -> bool:
@@ -366,22 +366,29 @@ def starts_new_word(matched: str, previous: str) -> bool:
     return not previous.isupper() or not matched.isupper()
 
 
-def ends_at_boundary(haystack: str, end: int) -> bool:
-    if ends_word(haystack, end):
+def ends_at_boundary(haystack: str, end: int, matched: str) -> bool:
+    if ends_word(haystack, end, matched):
         return True
     # 복수형은 같은 타입을 가리킨다. `views.py`, `OrderDtosMapper`가 실제 위반 이름이다.
     # `Screenshot`은 `s` 다음이 소문자 `h`라 여전히 단어 중간이다.
     return any(
         haystack[end : end + len(plural)].lower() == plural
-        and ends_word(haystack, end + len(plural))
+        and ends_word(haystack, end + len(plural), matched)
         for plural in ("s", "es")
     )
 
 
-def ends_word(haystack: str, end: int) -> bool:
+def ends_word(haystack: str, end: int, matched: str) -> bool:
     following = haystack[end : end + 1]
-    # 숫자와 한글은 단어를 잇지 않는다(`OrderDto2`, 주석의 `OrderDto를`).
-    return not following.isalnum() or not following.islower()
+    if not following.isalnum():
+        return True
+    if not following.isupper():
+        # 숫자와 한글은 단어를 잇지 않는다(`OrderDto2`, 주석의 `OrderDto를`).
+        return not following.islower()
+    # 전부 대문자인 매치 뒤에 대문자가 둘 더 이어지면 같은 대문자 런의 안쪽이다
+    # (`SCREENSHOT`·`SCREENING_STATUS`의 `SCREEN`). `DTOMapper`처럼 대문자 하나
+    # 뒤에 소문자가 오면 거기서 단어가 새로 시작한다.
+    return not (matched.isupper() and haystack[end + 1 : end + 2].isupper())
 
 
 def validate_package_suffix(rel_path: str, text: str, role: dict[str, Any], captures: dict[str, str]) -> list[Finding]:

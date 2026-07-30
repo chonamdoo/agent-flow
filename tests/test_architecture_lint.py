@@ -76,6 +76,16 @@ def test_word_interior_match_is_not_a_forbidden_token():
     assert _forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", 'const val IDENTITY_KEY = "identity"\n') == []
 
 
+def test_uppercase_run_interior_is_not_a_forbidden_token():
+    # 게이트를 막던 이름들의 SCREAMING_SNAKE 형태. 대문자 런 안쪽도 단어 중간이다.
+    assert _forbidden(WEB_DOMAIN_ROLE, "Chat.ts", "const SCREENING_STATUS = 1\n") == []
+    assert _forbidden(WEB_DOMAIN_ROLE, "Chat.ts", "const SCREENSHOT_DIR = 1\n") == []
+    assert _forbidden(WEB_DOMAIN_ROLE, "Chat.ts", "const COMPONENTRY_CODE = 1\n") == []
+    # 대문자 런이 토큰에서 끝나면 진짜 참조다.
+    assert len(_forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", "const val USER_DTO = 1\n")) == 1
+    assert len(_forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", "class DTOMapper\n")) == 1
+
+
 def test_camel_hump_and_separator_boundaries_are_reported():
     findings = _forbidden(ANDROID_PRESENTATION_ROLE, "ChatScreen.kt", "import io.levvels.samantha.core.data.chat.ChatEntity\n")
     assert len(findings) == 1

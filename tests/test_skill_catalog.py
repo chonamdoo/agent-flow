@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import sys
 from pathlib import Path
 
@@ -43,6 +42,28 @@ def _upstream_skill(directory: Path, name: str, description: str) -> Path:
 
 def _host_root(directory: Path) -> SkillRoot:
     return SkillRoot(source="host", template=str(directory / "{skill}" / "SKILL.md"))
+
+
+def _bundled_shipped_skill(project: Path, name: str) -> Path:
+    """install이 kit skill을 앉히는 자리. source가 `bundled`라 스스로 선언해야 활성화된다."""
+    return _write_skill(
+        project / ".agent-flow" / "skills",
+        name,
+        (REPO / "skills" / name / "SKILL.md").read_text(encoding="utf-8"),
+    )
+
+
+def _required_for(project: Path, changed_files: list[str]) -> set[str]:
+    return {
+        skill.name
+        for skill in resolve_phase_skills(
+            project_root=project,
+            phase_id="implement",
+            changed_files=changed_files,
+            host="claude",
+        ).required
+    }
+
 
 
 def test_external_skill_without_workflow_phases_enters_catalog(tmp_path):
@@ -259,27 +280,9 @@ def test_doctor_reports_a_project_skill_that_shadows_an_installed_one(tmp_path, 
     assert collisions == ["edge-to-edge"]
 
 
-def _bundled_shipped_skill(project: Path, name: str) -> None:
-    """install이 kit skill을 앉히는 자리. source가 `bundled`라 스스로 선언해야 활성화된다."""
-    destination = project / ".agent-flow" / "skills" / name
-    destination.mkdir(parents=True)
-    shutil.copyfile(REPO / "skills" / name / "SKILL.md", destination / "SKILL.md")
-
-
-def _required_for(project: Path, changed_files: list[str]) -> set[str]:
-    return {
-        skill.name
-        for skill in resolve_phase_skills(
-            project_root=project,
-            phase_id="implement",
-            changed_files=changed_files,
-            host="claude",
-        ).required
-    }
-
-
-def test_shipped_presentation_skill_activates_on_a_presentation_change(tmp_path):
+def test_shipped_presentation_skill_activates_on_a_presentation_change(tmp_path, monkeypatch):
     """설치만 되고 활성화가 안 되면 UDF·use case 규칙이 프롬프트에 영원히 안 들어온다."""
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
     project = tmp_path / "app"
     _bundled_shipped_skill(project, "android-clean-presentation-architecture")
 
@@ -291,7 +294,9 @@ def test_shipped_presentation_skill_activates_on_a_presentation_change(tmp_path)
     assert "android-clean-presentation-architecture" in required
 
 
-def test_shipped_presentation_skill_stays_off_for_a_data_layer_change(tmp_path):
+def test_shipped_presentation_skill_stays_off_for_a_data_layer_change(tmp_path, monkeypatch):
+    """pathGlobs가 presentation 밖으로 넓어지면 이 테스트만 깨져야 한다."""
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
     project = tmp_path / "app"
     _bundled_shipped_skill(project, "android-clean-presentation-architecture")
 
