@@ -367,17 +367,21 @@ def starts_new_word(matched: str, previous: str) -> bool:
 
 
 def ends_at_boundary(haystack: str, end: int) -> bool:
-    following = haystack[end : end + 1]
-    if not following.isalnum() or not following.islower():
-        # 숫자와 한글은 단어를 잇지 않는다(`OrderDto2`, 주석의 `OrderDto를`).
+    if ends_word(haystack, end):
         return True
-    # 복수형은 같은 타입을 가리킨다. `views.py`, `routers.py`, `dtos.ts`가 실제 위반
-    # 파일명이다. `Screenshot`은 `s` 다음이 `h`라 여전히 단어 중간이다.
+    # 복수형은 같은 타입을 가리킨다. `views.py`, `OrderDtosMapper`가 실제 위반 이름이다.
+    # `Screenshot`은 `s` 다음이 소문자 `h`라 여전히 단어 중간이다.
     return any(
         haystack[end : end + len(plural)].lower() == plural
-        and not haystack[end + len(plural) : end + len(plural) + 1].isalnum()
+        and ends_word(haystack, end + len(plural))
         for plural in ("s", "es")
     )
+
+
+def ends_word(haystack: str, end: int) -> bool:
+    following = haystack[end : end + 1]
+    # 숫자와 한글은 단어를 잇지 않는다(`OrderDto2`, 주석의 `OrderDto를`).
+    return not following.isalnum() or not following.islower()
 
 
 def validate_package_suffix(rel_path: str, text: str, role: dict[str, Any], captures: dict[str, str]) -> list[Finding]:

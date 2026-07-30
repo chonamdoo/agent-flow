@@ -97,6 +97,9 @@ def test_plural_and_non_lowercase_suffixes_are_reported():
     assert len(_forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", "class OrderDto2\n")) == 1
     # 이 저장소는 한국어 주석이 규칙이다. 한글이 뒤에 붙어도 단어는 끝난 것이다.
     assert len(_forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", "// OrderDto를 만든다\n")) == 1
+    # 복수형 뒤에 다시 대문자로 단어가 시작하면 그 자리도 경계다.
+    assert len(_forbidden(IOS_DOMAIN_ROLE, "Order.swift", "struct ViewsMapper {}\n")) == 1
+    assert len(_forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", "class OrderDtosMapper\n")) == 1
 
 
 def test_file_name_is_also_checked():
