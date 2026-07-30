@@ -73,6 +73,7 @@ import {
   tomlBasicString,
   uniqueStrings,
   unquoteShellWord,
+  upgradeBundledSkills,
   upsertGitignore,
   upsertSkillIndexBlock,
   validateSkillDependencies,
@@ -219,6 +220,14 @@ function installProject(requestedRoot) {
     architectureReviewerSkillMarkdown(),
   );
   writeManagedFile(path.join(agentFlowDir, "skills", "push-watch", "SKILL.md"), pushWatchSkillMarkdown());
+  upgradeBundledSkills(
+    root,
+    path.join(KIT_ROOT, "skills"),
+    path.join(agentFlowDir, "skills"),
+    previousSkillIndex,
+    installSelection.copyRootNames,
+    GENERATED_PROJECT_SKILL_NAMES,
+  );
   copyBundledDirIfMissingOrSame(
     path.join(KIT_ROOT, "skills"),
     path.join(agentFlowDir, "skills"),

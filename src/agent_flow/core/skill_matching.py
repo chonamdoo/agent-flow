@@ -213,7 +213,7 @@ def _entry_terms(entry: SkillCatalogEntry, terms: Sequence[str]) -> tuple[str, .
 
 
 def _term_in(term: str, text: str) -> bool:
-    """단어 경계로 본다.
+    r"""단어 경계로 본다.
 
     부분문자열로 보면 `chart`가 `charting`에 걸려 무관한 플랫폼 skill이 required까지
     올라간다(실측). 복수형은 허용하므로 `modifier`는 `modifiers`에 계속 걸린다 —

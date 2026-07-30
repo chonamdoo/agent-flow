@@ -1788,3 +1788,122 @@ def test_install_root_pointing_at_the_marker_dir_is_blocked_the_same_way(tmp_pat
     assert result.returncode == 1
     assert "resolves to" in result.stderr
     assert list((project / ".agent-flow").iterdir()) == []
+
+
+_UPGRADE_PROBE_SKILL = "code-generation-discipline"
+
+
+def _record_installed_hash(project: Path, name: str) -> None:
+    """이전 install이 쓴 그대로라고 기록한다. 사용자가 손대지 않았다는 뜻이다."""
+    index_path = project / ".agent-flow" / "skills" / "index.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    body = (project / ".agent-flow" / "skills" / name / "SKILL.md").read_text(encoding="utf-8")
+    digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    found = False
+    for skill in index["skills"]:
+        if skill.get("name") == name:
+            skill["hash"] = digest
+            found = True
+    # 못 찾고 지나가면 갱신 조건이 성립하지 않아, 원인과 무관한 단언이 대신 깨진다.
+    assert found, (name, sorted(skill.get("name") for skill in index["skills"]))
+    index_path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_reinstall_upgrades_an_untouched_bundled_skill(tmp_path: Path, binary: str) -> None:
+    """반증: "내용이 다르면 사용자 편집"으로만 보호하면 kit이 고친 skill이 기존
+    설치본에 영영 닿지 않는다 — 실측으로 `workflowPhases` 개정이 설치된 프로젝트
+    어디에도 도달하지 못했고 그 skill은 계속 활성화되지 않았다."""
+    project = tmp_path / f"project-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+    installed = project / ".agent-flow" / "skills" / _UPGRADE_PROBE_SKILL / "SKILL.md"
+    shipped = (KIT_ROOT / "skills" / _UPGRADE_PROBE_SKILL / "SKILL.md").read_text(encoding="utf-8")
+    assert installed.is_file()
+
+    # 옛 kit이 배포했던 판본을 흉내낸다. 사용자는 손대지 않았다.
+    installed.write_text("---\nname: old\n---\n\n# 옛 판본\n", encoding="utf-8")
+    _record_installed_hash(project, _UPGRADE_PROBE_SKILL)
+
+    result = _install_with(binary, project)
+
+    assert result.returncode == 0, result.stderr
+    assert installed.read_text(encoding="utf-8") == shipped
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_reinstall_keeps_a_user_edited_bundled_skill(tmp_path: Path, binary: str) -> None:
+    """불변: 갱신이 사용자 편집을 덮으면 그 자리에 둔 프로젝트 규칙이 사라진다."""
+    project = tmp_path / f"project-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+    installed = project / ".agent-flow" / "skills" / _UPGRADE_PROBE_SKILL / "SKILL.md"
+    edited = "---\nname: code-generation-discipline\n---\n\n# 우리 규칙\n"
+    # index의 hash는 그대로 둔다 — 기록과 내용이 갈리는 것이 곧 사용자 편집이다.
+    installed.write_text(edited, encoding="utf-8")
+
+    result = _install_with(binary, project)
+
+    assert result.returncode == 0, result.stderr
+    assert installed.read_text(encoding="utf-8") == edited
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_skill_upgrade_reports_what_it_changed(tmp_path: Path, binary: str) -> None:
+    """무음 교체가 원래 버그를 수개월 가렸다. install.mjs 경로는 실제 갱신을 자식이
+    하므로, 자식 stdout을 걸러 내면 그 경로만 다시 조용해진다."""
+    project = tmp_path / f"project-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+    installed = project / ".agent-flow" / "skills" / _UPGRADE_PROBE_SKILL / "SKILL.md"
+    installed.write_text("---\nname: old\n---\n\n# 옛 판본\n", encoding="utf-8")
+    _record_installed_hash(project, _UPGRADE_PROBE_SKILL)
+
+    result = _install_with(binary, project)
+
+    assert result.returncode == 0, result.stderr
+    assert f"upgraded skill: {_UPGRADE_PROBE_SKILL}" in result.stdout
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_skill_upgrade_does_not_revert_a_sibling_file(tmp_path: Path, binary: str) -> None:
+    """오라클은 `SKILL.md` 하나다. 형제 파일까지 덮으면 근거 없는 되돌림이 된다."""
+    project = tmp_path / f"project-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+    sibling = next(
+        (
+            item
+            for item in (project / ".agent-flow" / "skills" / "android-guides" / "references").glob("*.md")
+        ),
+        None,
+    )
+    if sibling is None:
+        pytest.skip("android-guides references are not installed for this selection")
+    sibling.write_text("# 우리 팀 규칙\n", encoding="utf-8")
+    installed = project / ".agent-flow" / "skills" / _UPGRADE_PROBE_SKILL / "SKILL.md"
+    installed.write_text("---\nname: old\n---\n\n# 옛 판본\n", encoding="utf-8")
+    _record_installed_hash(project, _UPGRADE_PROBE_SKILL)
+
+    assert _install_with(binary, project).returncode == 0
+
+    assert sibling.read_text(encoding="utf-8") == "# 우리 팀 규칙\n"
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_an_upgraded_skill_can_still_be_dropped_by_narrowing_the_profile(tmp_path: Path, binary: str) -> None:
+    """갱신이 skill 디렉터리에 여분 파일을 남기면 `dirContentsMatch`의 항목 수 비교가
+    어긋나 profile을 좁혀도 그 skill이 지워지지 않는다. `--profile ios`가 실제로
+    떨어뜨리는 skill이어야 하므로 android 전용 이름을 쓴다."""
+    dropped = "android-clean-presentation-architecture"
+    project = tmp_path / f"project-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+    skill_dir = project / ".agent-flow" / "skills" / dropped
+    (skill_dir / "SKILL.md").write_text("---\nname: old\n---\n\n# 옛 판본\n", encoding="utf-8")
+    _record_installed_hash(project, dropped)
+    assert _install_with(binary, project).returncode == 0
+
+    assert _install_with(binary, project, "--profile", "ios").returncode == 0
+
+    assert not skill_dir.exists(), sorted(item.name for item in skill_dir.iterdir())
