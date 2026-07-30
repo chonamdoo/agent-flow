@@ -102,26 +102,36 @@ def _resolved_hook_dir(root: Path, source: str) -> Path:
 
 
 def _run_bash_tool_call(root: Path, source: str) -> tuple[str, str]:
-    """확장의 tool_call 핸들러를 Bash 이벤트로 한 번 돌린다."""
+    """확장의 tool_call 핸들러를 Bash 이벤트로 한 번 돌린다.
+
+    top-level await 대신 `.then`을 쓴다 — `--input-type=module -e`에서의 TLA 지원은
+    node 버전에 따라 갈리고, CI(node 20)에서 이 하네스만 exit 1로 죽었다.
+    """
     target = _install_extension(root, source)
     driver = (
         f"import ext from {json.dumps(str(target))};\n"
         "const handlers = {};\n"
-        "const pi = { setLabel() {}, on(name, fn) { (handlers[name] ||= []).push(fn); } };\n"
+        "const pi = { setLabel() {}, on(name, fn) { (handlers[name] = handlers[name] || []).push(fn); } };\n"
         "ext(pi);\n"
-        "const out = await handlers.tool_call[0](\n"
+        "handlers.tool_call[0](\n"
         '  { toolName: "Bash", type: "PreToolUse", input: { command: "echo hi" } },\n'
         f"  {{ cwd: {json.dumps(str(root))} }},\n"
-        ");\n"
-        "process.stdout.write(JSON.stringify(out ?? null));\n"
+        ").then((out) => {\n"
+        "  process.stdout.write(JSON.stringify(out ?? null));\n"
+        "}).catch((error) => {\n"
+        "  process.stderr.write('driver failed: ' + (error?.stack || String(error)) + '\\n');\n"
+        "  process.exitCode = 1;\n"
+        "});\n"
     )
     result = subprocess.run(
         (_node(), "--input-type=module", "-e", driver),
         cwd=root,
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
     )
+    # 실패를 CalledProcessError로 흘리면 node가 남긴 사유가 리포트에서 사라진다.
+    assert result.returncode == 0, f"driver exited {result.returncode}: {result.stderr}"
     return result.stdout, result.stderr
 
 
