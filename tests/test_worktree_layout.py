@@ -34,6 +34,7 @@ from agent_flow.core.worktrees import (
     remove_worktree,
 )
 from agent_flow.cli import _verified_checkout_identity
+from agent_flow.core.state import _safe_relative_path
 from agent_flow.core.worktree_isolation import (
     WorktreeIsolationError,
     adopted_worktree_parent,
@@ -220,3 +221,30 @@ def test_identity_command_refuses_a_recreated_checkout(tmp_path: Path):
     _git("worktree", "add", "-q", str(created.path), "feat/slice", cwd=root)
 
     assert _verified_checkout_identity(root=root, path=created.path) is None
+
+
+def test_recorded_checkout_path_survives_an_agent_flow_component_in_the_project_path(
+    tmp_path: Path,
+):
+    """`.agent-flow`를 포함한 경로에 프로젝트가 있어도 기록이 그 checkout을 가리킨다.
+
+    원본이 아니라 잘라낸 경로로 판정하면 leader 아래의 없는 자리가 기록된다.
+    """
+    root = tmp_path / ".agent-flow" / "repos" / "app"
+    root.mkdir(parents=True)
+    checkout = tmp_path / ".agent-flow" / "repos" / "app.worktrees" / "feat-x"
+    checkout.mkdir(parents=True)
+
+    recorded = _safe_relative_path(str(checkout), root=root)
+
+    assert not Path(recorded).is_absolute()
+    assert (root / recorded).resolve() == checkout.resolve()
+
+
+def test_recorded_checkout_path_keeps_the_legacy_shape(tmp_path: Path):
+    """예전 자리는 예전처럼 `.agent-flow/worktrees/<name>`로 기록된다."""
+    root = _leader(tmp_path)
+    legacy = legacy_managed_root(root) / "feat-old"
+    legacy.mkdir(parents=True)
+
+    assert _safe_relative_path(str(legacy), root=root) == ".agent-flow/worktrees/feat-old"

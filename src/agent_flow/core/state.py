@@ -267,15 +267,22 @@ def _relative_run_dir(run_dir: str) -> str:
     return run_dir
 
 
+def _is_absolute_path_text(value: str) -> bool:
+    return bool(Path(value).is_absolute() or re.match(r"^[A-Za-z]:[\\/]", value))
+
+
 def _safe_relative_path(path: str, *, root: Path | None = None) -> str:
     """상태 파일에 호스트 절대 경로를 남기지 않으면서 어디인지는 잃지 않는다.
 
     checkout이 leader 밖(현재 기본 자리)이면 leader 기준 상대 경로가 되므로 `..`로
     시작한다. 그마저 불가능할 때만 이름으로 내려간다 — 이름만 남으면 진단에서
     "어디에 있었는가"가 사라진다.
+
+    판정은 **원본** 경로로 한다. `_relative_run_dir`를 먼저 태우면 프로젝트가
+    `.agent-flow`를 포함한 경로에 있을 때(`/x/.agent-flow/repos/app`) 절대 경로가
+    거기서 잘려 leader 아래의 없는 자리를 가리킨다.
     """
-    rel_path = _relative_run_dir(path)
-    if Path(rel_path).is_absolute() or re.match(r"^[A-Za-z]:[\\/]", rel_path):
+    if _is_absolute_path_text(path):
         if root is not None:
             try:
                 # 양쪽을 realpath로 맞춘다. macOS의 `/var` -> `/private/var`처럼 한쪽만
@@ -285,8 +292,11 @@ def _safe_relative_path(path: str, *, root: Path | None = None) -> str:
                 )
             except (OSError, ValueError):
                 pass
+        trimmed = _relative_run_dir(path)
+        if not _is_absolute_path_text(trimmed):
+            return trimmed
         return Path(path.replace("\\", "/")).name or "worktree"
-    return rel_path
+    return _relative_run_dir(path)
 
 
 def _status_value(value: object) -> str:
