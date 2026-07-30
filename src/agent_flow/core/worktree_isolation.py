@@ -890,12 +890,19 @@ def record_adopted_checkout(*, root, name, path, registration_identity) -> Path:
         },
         sort_keys=True,
     )
-    # symlink를 따라가면 인가 기록을 저장소 밖에 쓰게 된다. host 바인딩 파일과 같은
-    # 등급의 상태이므로 같은 계약을 건다.
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-    handle = os.open(record, flags, 0o600)
-    with os.fdopen(handle, "w", encoding="utf-8") as stream:
-        stream.write(f"{payload}\n")
+    # 기존 자리를 열어 자르면 안 된다. `O_NOFOLLOW`는 symlink만 막고 hard link는
+    # 통과시키므로, 기록 자리가 남의 파일과 연결돼 있으면 `O_TRUNC`가 그 파일을 먼저
+    # 비운다. 배타 생성한 임시 파일에 쓴 뒤 atomic rename으로 갈아 끼운다.
+    staging = record.with_name(f"{record.name}.{os.getpid()}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    handle = os.open(staging, flags, 0o600)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(f"{payload}\n")
+        os.replace(staging, record)
+    except BaseException:
+        staging.unlink(missing_ok=True)
+        raise
     return record
 
 

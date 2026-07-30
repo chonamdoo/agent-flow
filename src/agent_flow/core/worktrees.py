@@ -2595,6 +2595,10 @@ def bootstrap_host_hook_surfaces(*, leader: Path, checkout: Path) -> tuple[str, 
         seen.add(key)
         if target.is_symlink() or _has_symlinked_component(checkout, target):
             continue
+        if target.exists() and not target.is_file():
+            # 대상이 디렉터리면 `copy2`가 실패하지 않고 그 안에 같은 이름으로 복사한다.
+            # host가 읽는 자리는 여전히 비어 있는데 설치됐다고 보고하게 된다.
+            continue
         if target.is_file() and target.read_bytes() == source.read_bytes():
             continue
         target.parent.mkdir(parents=True, exist_ok=True)

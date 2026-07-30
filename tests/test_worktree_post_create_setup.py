@@ -281,3 +281,44 @@ def test_host_hook_bootstrap_is_a_no_op_in_the_leader(tmp_path: Path):
     _hook_registration(leader)
 
     assert bootstrap_host_hook_surfaces(leader=leader, checkout=leader) == ()
+
+
+def test_host_hook_bootstrap_skips_a_target_that_is_not_a_regular_file(tmp_path: Path):
+    """반증: 대상이 디렉터리면 `copy2`는 실패하지 않고 그 안에 같은 이름으로 복사한다.
+    host가 읽는 자리는 여전히 비어 있는데 설치됐다고 보고하면 그 checkout의 강제 hook이
+    없는 것을 아무도 모른다."""
+    leader, checkout = tmp_path / "leader", tmp_path / "wt"
+    _repo(leader)
+    checkout.mkdir()
+    _hook_registration(leader)
+    settings = Path(".claude") / "settings.json"
+    (checkout / settings).mkdir(parents=True)
+
+    installed = bootstrap_host_hook_surfaces(leader=leader, checkout=checkout)
+
+    assert str(settings) not in installed
+    assert (checkout / settings).is_dir()
+    assert list((checkout / settings).iterdir()) == []
+
+
+def test_host_hook_bootstrap_keeps_every_backup_slot(tmp_path: Path):
+    """반증: 슬롯이 하나면 두 번째 갱신이 사용자 원본 백업을 기계 사본으로 덮는다.
+    installer(`nextFreeBackupPath`)와 같은 순번 규약이어야 한다."""
+    leader, checkout = tmp_path / "leader", tmp_path / "wt"
+    _repo(leader)
+    checkout.mkdir()
+    _hook_registration(leader)
+    settings = Path(".claude") / "settings.json"
+    assert bootstrap_host_hook_surfaces(leader=leader, checkout=checkout)
+    (checkout / settings).write_text("USER EDIT", encoding="utf-8")
+
+    (leader / settings).write_text("LEADER V2", encoding="utf-8")
+    assert bootstrap_host_hook_surfaces(leader=leader, checkout=checkout)
+    (leader / settings).write_text("LEADER V3", encoding="utf-8")
+    assert bootstrap_host_hook_surfaces(leader=leader, checkout=checkout)
+
+    backups = sorted(p.name for p in (checkout / ".claude").iterdir() if ".bak" in p.name)
+    assert backups == ["settings.json.bak", "settings.json.bak.1"]
+    assert (checkout / ".claude" / "settings.json.bak").read_text(
+        encoding="utf-8"
+    ) == "USER EDIT"
