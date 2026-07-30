@@ -14,12 +14,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+from agent_flow.core.profile_routing import routable_group_skills
+from agent_flow.core.skill_matching import routable_names
 from agent_flow.core.skill_resolver import (
     SkillCatalogEntry,
     active_host,
     catalog_files,
     catalog_stamp,
     discover_skill_catalog,
+    entry_can_activate,
+    expand_dependencies,
     skill_roots,
 )
 
@@ -33,6 +37,10 @@ DEAD_DECLARATION = "dead-declaration"
 UNROUTED = "unrouted"
 SHADOWED = "shadowed"
 COLLISION = "collision"
+
+# 스스로 "reference-only, not a standalone workflow skill"이라고 선언한 이름. 다른 skill이
+# 파일 경로로 인용해 쓰므로 phase 활성화 대상이 아니고, 미라우팅 보고에서 제외한다.
+_ROUTING_EXEMPT = frozenset({"android-guides"})
 
 
 @dataclass(frozen=True)
@@ -77,6 +85,7 @@ def scan(
     profile: dict | None = None,
     host: str | None = None,
     env: dict[str, str] | None = None,
+    workflow_skills: Sequence[str] = (),
 ) -> CatalogScan:
     resolved_host = active_host(env) if host is None else host
     roots = skill_roots(project_root, profile=profile, host=resolved_host, env=env)
@@ -85,7 +94,7 @@ def scan(
     shadowed = _shadowed_files(files, entries)
     findings = list(_lock_findings(read_lock(project_root), entries))
     findings.extend(_declaration_findings(profile, entries))
-    findings.extend(_unrouted_findings(profile, entries))
+    findings.extend(_unrouted_findings(profile, entries, workflow_skills))
     findings.extend(_collision_findings(files, entries))
     if shadowed:
         findings.append(
@@ -204,20 +213,42 @@ def _declaration_findings(
 
 
 def _unrouted_findings(
-    profile: dict | None, entries: Sequence[SkillCatalogEntry]
+    profile: dict | None,
+    entries: Sequence[SkillCatalogEntry],
+    workflow_skills: Sequence[str] = (),
 ) -> list[CatalogFinding]:
-    # 지연 import: skill_matching이 resolver를 되짚어 참조한다.
-    from agent_flow.core.skill_matching import routable_names
+    """어떤 활성화 경로에도 걸리지 않는 설치본.
 
-    reachable = set(declared_skill_names(profile)) | routable_names(profile, entries)
+    축은 네 개다: profile 표(selectors 있는 group), 어휘 라우팅, workflow phase 선언,
+    그리고 이 셋에 걸린 skill이 끌어오는 dependencies. 축을 조건식 분기로 두면
+    축이 늘 때마다 분기가 늘어난다 — 그래서 합집합 하나로 표현한다.
+
+    `bundled`/`project`를 검사에서 빼 두는 동안 profile이 설치하는 25개 중 21개가
+    어느 phase에도 붙지 않은 채로 남았다. source는 보고 문구에만 쓴다.
+    """
+    # str 하나를 넘긴 호출을 문자 단위로 순회하면 모든 이름이 미라우팅으로 뒤집힌다.
+    declared_raw = [workflow_skills] if isinstance(workflow_skills, str) else list(workflow_skills)
+    declared = set(_string_list(declared_raw))
+    reachable = set(
+        expand_dependencies(
+            sorted(
+                routable_group_skills(profile)
+                | routable_names(profile, entries)
+                | declared
+                | {entry.name for entry in entries if entry_can_activate(entry)}
+            ),
+            entries,
+        )
+    )
     return [
         CatalogFinding(
             UNROUTED,
             entry.name,
-            f"{entry.source} root에 있으나 어떤 어휘에도 걸리지 않는다",
+            f"{entry.source} root에 있으나 어떤 활성화 경로에도 걸리지 않는다",
+            "표에 selectors를 주거나 SKILL.md frontmatter에 workflowPhases/pathGlobs를 선언한다",
         )
         for entry in entries
-        if entry.source in {"host", "shared", "fetched", "vendor"} and entry.name not in reachable
+        if entry.name not in reachable and entry.name not in _ROUTING_EXEMPT
     ]
 
 

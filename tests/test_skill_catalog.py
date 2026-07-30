@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
+
+import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 SRC = str(REPO / "src")
@@ -17,11 +20,15 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 from agent_flow.core import skill_catalog
+from agent_flow.core.phase_workflow import declared_phase_skills
+from agent_flow.core.profiles import load_profile_payload
 from agent_flow.core.skill_resolver import (
     SkillRoot,
     discover_skill_catalog,
     resolve_phase_skills,
 )
+
+PROFILES_DIR = REPO / "src" / "agent_flow" / "profiles"
 
 
 def _write_skill(directory: Path, name: str, body: str) -> Path:
@@ -53,7 +60,9 @@ def _bundled_shipped_skill(project: Path, name: str) -> Path:
     )
 
 
-def _required_for(project: Path, changed_files: list[str]) -> set[str]:
+def _required_for(
+    project: Path, changed_files: list[str], *, profile: dict | None = None
+) -> set[str]:
     return {
         skill.name
         for skill in resolve_phase_skills(
@@ -61,6 +70,7 @@ def _required_for(project: Path, changed_files: list[str]) -> set[str]:
             phase_id="implement",
             changed_files=changed_files,
             host="claude",
+            profile=profile,
         ).required
     }
 
@@ -280,29 +290,133 @@ def test_doctor_reports_a_project_skill_that_shadows_an_installed_one(tmp_path, 
     assert collisions == ["edge-to-edge"]
 
 
-def test_shipped_presentation_skill_activates_on_a_presentation_change(tmp_path, monkeypatch):
-    """설치만 되고 활성화가 안 되면 UDF·use case 규칙이 프롬프트에 영원히 안 들어온다."""
+def test_doctor_reports_an_unrouted_bundled_skill(tmp_path, monkeypatch):
+    """실측: `bundled`/`project`를 검사에서 빼 둔 탓에 profile이 설치하는 25개 중 21개가
+    어느 phase에도 붙지 않는 상태로 방치됐다. 관측이 없으면 그 드리프트는 조용하다."""
     monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
     project = tmp_path / "app"
-    _bundled_shipped_skill(project, "android-clean-presentation-architecture")
+    shipped = project / ".agent-flow" / "skills"
+    _upstream_skill(shipped, "orphan-guide", "Use when nothing routes it.")
+    _upstream_skill(shipped, "phase-declared-guide", "Use when a workflow phase declares it.")
 
-    required = _required_for(
+    result = skill_catalog.scan(
         project,
-        ["feature/chat/presentation/src/main/java/io/levvels/samantha/feature/chat/presentation/ChatViewModel.kt"],
+        profile={},
+        host="claude",
+        workflow_skills=("phase-declared-guide",),
     )
 
-    assert "android-clean-presentation-architecture" in required
+    unrouted = [
+        finding.name for finding in result.findings if finding.kind == skill_catalog.UNROUTED
+    ]
+    assert "orphan-guide" in unrouted
+    assert "phase-declared-guide" not in unrouted
 
 
-def test_shipped_presentation_skill_stays_off_for_a_data_layer_change(tmp_path, monkeypatch):
-    """pathGlobs가 presentation 밖으로 넓어지면 이 테스트만 깨져야 한다."""
+# 활성 profile을 함께 준다. profile 없이 판정하면 표(`required_review`)의 glob이
+# skill frontmatter의 좁은 범위를 덮어쓰는 역전을 가드가 볼 수 없다.
+_PRESENTATION_PROFILES = {
+    "android-clean-presentation-architecture": "android",
+    "react-clean-presentation-architecture": "nextjs",
+    "react-native-clean-presentation-architecture": "react-native",
+    "ios-clean-presentation-architecture": "ios",
+}
+
+_PRESENTATION_CHANGES = {
+    "android-clean-presentation-architecture": "feature/chat/presentation/src/main/java/io/levvels/samantha/feature/chat/presentation/ChatViewModel.kt",
+    "react-clean-presentation-architecture": "src/features/chat/presentation/ChatContainer.tsx",
+    "react-native-clean-presentation-architecture": "src/features/chat/presentation/ChatScreen.tsx",
+    "ios-clean-presentation-architecture": "Sources/Features/Chat/Presentation/ChatViewModel.swift",
+}
+
+_DATA_LAYER_CHANGES = {
+    "android-clean-presentation-architecture": "core/data/chat/src/main/java/io/levvels/samantha/core/data/chat/ChatRepositoryImpl.kt",
+    "react-clean-presentation-architecture": "src/core/data/chat/ChatRepositoryImpl.ts",
+    "react-native-clean-presentation-architecture": "src/core/data/chat/ChatRepositoryImpl.ts",
+    "ios-clean-presentation-architecture": "Sources/Core/Data/Chat/ChatRepositoryImpl.swift",
+}
+
+
+@pytest.mark.parametrize("name", sorted(_PRESENTATION_PROFILES))
+def test_shipped_presentation_skills_activate_on_a_presentation_change(name, tmp_path, monkeypatch):
+    """설치만 되고 활성화가 안 되면 상태 기반 UI 계약이 프롬프트에 영원히 안 들어온다.
+
+    android만 frontmatter를 선언한 상태라 나머지 세 스택은 설치돼도 켜지지 않았다."""
     monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
-    project = tmp_path / "app"
-    _bundled_shipped_skill(project, "android-clean-presentation-architecture")
+    project = tmp_path / name
+    _bundled_shipped_skill(project, name)
+    profile = load_profile_payload(_PRESENTATION_PROFILES[name])
 
-    required = _required_for(
-        project,
-        ["core/data/chat/src/main/java/io/levvels/samantha/core/data/chat/ChatRepositoryImpl.kt"],
+    required = _required_for(project, [_PRESENTATION_CHANGES[name]], profile=profile)
+
+    assert name in required
+
+
+@pytest.mark.parametrize("name", sorted(_PRESENTATION_PROFILES))
+def test_shipped_presentation_skills_stay_off_for_a_data_layer_change(name, tmp_path, monkeypatch):
+    """반증: 표의 glob이 스택 파일 전체면 데이터 계층 변경에도 presentation skill이 붙는다.
+
+    실측으로 ios 표가 `**/*.swift`와 함께 presentation skill 이름을 갖고 있었고, profile을
+    안 넘기던 이 가드는 그 역전을 통과시켰다."""
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    project = tmp_path / name
+    _bundled_shipped_skill(project, name)
+    profile = load_profile_payload(_PRESENTATION_PROFILES[name])
+
+    required = _required_for(project, [_DATA_LAYER_CHANGES[name]], profile=profile)
+
+    assert name not in required
+
+
+def _profile_ids() -> list[str]:
+    return sorted(
+        path.stem for path in PROFILES_DIR.glob("*.yaml") if not path.stem.startswith("_")
     )
 
-    assert "android-clean-presentation-architecture" not in required
+
+def test_declared_phase_skills_degrades_on_an_unreadable_workflow(tmp_path):
+    """반증: 깨진 workflow 하나에 예외가 새면 `skills doctor`가 traceback으로 죽는다.
+
+    수집을 조용히 비우는 것도 안 된다 — 그러면 그 workflow만 선언한 skill이 미라우팅
+    오탐으로 찍힌다. 읽은 것은 남기고 못 읽은 사유를 함께 돌려줘야 한다."""
+    workflows = tmp_path / "workflows"
+    workflows.mkdir()
+    shutil.copy(REPO / "src" / "agent_flow" / "workflows" / "default.yaml", workflows / "default.yaml")
+    (workflows / "broken.yaml").write_text("phases: [\n", encoding="utf-8")
+
+    declared = declared_phase_skills(tmp_path)
+
+    assert "code-generation-discipline" in declared.names
+    assert [error for error in declared.errors if error.startswith("workflow broken:")]
+
+
+def test_every_profile_install_name_is_activation_reachable(tmp_path, monkeypatch):
+    """설치와 활성화는 다른 층이다. 실측으로 install 25개 중 4개만 활성화 가능했고,
+    나머지 21개는 어느 phase에도 붙지 않았다. 이 테스트가 그 드리프트의 재발 가드다.
+
+    판정은 doctor와 같은 함수로 한다 — 여기서 도달 가능성을 다시 정의하면 두 기준이
+    갈라져 통과하면서 죽어 있는 상태가 다시 만들어진다."""
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    declared = declared_phase_skills(REPO).names
+
+    unreachable: dict[str, list[str]] = {}
+    for profile_id in _profile_ids():
+        payload = load_profile_payload(profile_id)
+        install = (payload.get("skills") or {}).get("install") or []
+        if not install:
+            continue
+        project = tmp_path / profile_id
+        for name in install:
+            _bundled_shipped_skill(project, name)
+
+        result = skill_catalog.scan(
+            project, profile=payload, host="claude", workflow_skills=declared
+        )
+        unrouted = {
+            finding.name for finding in result.findings if finding.kind == skill_catalog.UNROUTED
+        }
+        blocked = sorted(set(install) & unrouted)
+        if blocked:
+            unreachable[profile_id] = blocked
+
+    assert unreachable == {}

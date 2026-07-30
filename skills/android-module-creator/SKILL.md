@@ -1,6 +1,9 @@
 ---
 name: android-module-creator
 description: Android module creation workflow for new feature modules and Clean Architecture slices, including Gradle registration, convention plugin selection, dependency direction, Hilt bindings, and initial screen scaffolding. Use when creating a new Android module or feature slice; do not use for non-Android packages or presentation-only screen edits inside an existing module.
+workflowPhases: [design, ddd-design, implement, implement-fix, green, refactor]
+taskTerms: [new module, module creation, feature slice, convention plugin, 모듈 생성, 새 모듈, 피처 슬라이스, gradle 모듈]
+pathGlobs: ["**/settings.gradle.kts", "**/settings.gradle", "**/build-logic/**"]
 ---
 
 # Android Module Creator

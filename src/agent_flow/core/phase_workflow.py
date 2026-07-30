@@ -42,6 +42,18 @@ class PhaseWorkflowDefinition:
         }
 
 
+@dataclass(frozen=True)
+class DeclaredPhaseSkills:
+    """workflow가 이름으로 선언한 skill과, 읽지 못한 workflow의 사유.
+
+    수집을 조용히 비우면 doctor가 정상 선언된 skill을 미라우팅으로 오탐한다. 그래서
+    부분 실패를 값으로 들고 나가고, 그것을 어떻게 알릴지는 호출자가 정한다.
+    """
+
+    names: tuple[str, ...] = ()
+    errors: tuple[str, ...] = ()
+
+
 def find_kit_root(start: Path | None = None) -> Path:
     """Locate the agent-flow kit root.
 
@@ -84,6 +96,38 @@ def _packaged_workflow_path(name: str) -> Path | None:
     path = package_dir / "workflows" / f"{name}.yaml"
     ensure_child_path(package_dir / "workflows", path, "workflow")
     return path if path.is_file() else None
+
+
+def workflow_names(kit_root: Path) -> tuple[str, ...]:
+    """읽을 수 있는 workflow 이름 전부. 정의가 어디 사는지 아는 곳은 이 모듈뿐이다."""
+    directories = [kit_root / "workflows"]
+    package_dir = package_root()
+    if package_dir is not None:
+        directories.append(package_dir / "workflows")
+    names: set[str] = set()
+    for directory in directories:
+        if not directory.is_dir():
+            continue
+        names.update(path.stem for path in directory.glob("*.yaml") if not path.stem.startswith("_"))
+    return tuple(sorted(names))
+
+
+def declared_phase_skills(kit_root: Path) -> DeclaredPhaseSkills:
+    """모든 workflow의 phase가 required·optional로 선언한 skill 이름."""
+    names: list[str] = []
+    errors: list[str] = []
+    for name in workflow_names(kit_root):
+        try:
+            definition = load_phase_workflow_definition(kit_root, name)
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            errors.append(f"workflow {name}: {exc}")
+            continue
+        for phase in definition.phases:
+            if phase.skills is None:
+                continue
+            names.extend(phase.skills.required)
+            names.extend(phase.skills.optional)
+    return DeclaredPhaseSkills(tuple(dict.fromkeys(names)), tuple(errors))
 
 
 def load_phase_workflow_definition(kit_root: Path, name: str) -> PhaseWorkflowDefinition:

@@ -45,8 +45,6 @@ Use this skill for Android feature work where presentation code should follow a 
 For Android/Kotlin/Compose/KMP implementation or review:
 - Load every matching local `compose-*`, `kotlin-*`, `navigation-3`, `edge-to-edge`, `adaptive`, and `testing-setup` `SKILL.md` named by the active Android profile.
 - Prefer project-local skills under `.agent-flow/local-skills/<skill>/SKILL.md`; otherwise use `.agent-flow/skills/<skill>/SKILL.md` or the current host's configured local skill directory.
-- Record loaded skills as `android-local-skills-used: <skill list>`.
-- Use `android-local-skills-used: n/a` only when no matching Android/Compose/Kotlin skill exists.
 - Do not say "Compose/Kotlin convention applied" or approve Compose/Kotlin code if matching local skill files were not explicitly loaded in the current work session.
 
 ## Architecture Rule

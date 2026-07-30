@@ -268,13 +268,6 @@ phases:
       observation hook. When the hook is active the runner reads the log
       directly and your marker value does not decide anything.
 
-      If Android/Kotlin/Compose/KMP files are changed, add:
-
-          android-local-skills: checked
-          android-local-skills-used: <skill list>
-          chrisbanes-skills: checked|n/a
-          chrisbanes-skills-used: <skill list or n/a>
-
       Output: artifacts/red.log.
 
   - id: green
@@ -326,13 +319,6 @@ phases:
           ui-state-modeling: n/a
           presentation-mapping-boundary: n/a
           di-boundary: n/a
-
-      If Android/Kotlin/Compose/KMP files are changed, add:
-
-          android-local-skills: checked
-          android-local-skills-used: <skill list>
-          chrisbanes-skills: checked|n/a
-          chrisbanes-skills-used: <skill list or n/a>
 
       Output: artifacts/green.log.
 
@@ -388,13 +374,6 @@ phases:
           ui-state-modeling: n/a
           presentation-mapping-boundary: n/a
           di-boundary: n/a
-
-      If Android/Kotlin/Compose/KMP files are changed, add:
-
-          android-local-skills: checked
-          android-local-skills-used: <skill list>
-          chrisbanes-skills: checked|n/a
-          chrisbanes-skills-used: <skill list or n/a>
 
       Output: artifacts/refactor.md.
 
@@ -537,13 +516,6 @@ phases:
           mapping-boundary-check: applied
           solid-clean-architecture-check: applied
 
-      If Android/Kotlin/Compose/KMP files are changed, add:
-
-          android-local-skills: checked
-          android-local-skills-used: <skill list>
-          chrisbanes-skills: checked|n/a
-          chrisbanes-skills-used: <skill list or n/a>
-
       Output: artifacts/multi-review.md.
 
   - id: architecture-review
@@ -641,13 +613,6 @@ phases:
           presentation-mapping-boundary: n/a
           di-boundary: n/a
 
-      If Android/Kotlin/Compose/KMP files are changed, add:
-
-          android-local-skills: checked
-          android-local-skills-used: <skill list>
-          chrisbanes-skills: checked|n/a
-          chrisbanes-skills-used: <skill list or n/a>
-
   - id: gates
     description: Run project verification gates after reviewer approve. Runner routes fail→fix-loop, pass→commit.
     artifact: artifacts/gate-results.json
@@ -723,13 +688,6 @@ phases:
           ui-state-modeling: n/a
           presentation-mapping-boundary: n/a
           di-boundary: n/a
-
-      If Android/Kotlin/Compose/KMP files are changed, add:
-
-          android-local-skills: checked
-          android-local-skills-used: <skill list>
-          chrisbanes-skills: checked|n/a
-          chrisbanes-skills-used: <skill list or n/a>
 
       Output: artifacts/fix-loop.md.
 

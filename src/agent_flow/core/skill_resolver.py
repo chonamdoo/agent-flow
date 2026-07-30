@@ -293,7 +293,7 @@ def resolve_phase_skills(
         else:
             optional_names.append(match.name)
 
-    required_names = _expand_dependencies(required_names, catalog)
+    required_names = expand_dependencies(required_names, catalog)
     optional_names = [name for name in optional_names if name not in required_names]
 
     # 우리가 이름으로 선언한 skill만 활성 host로 좁힌다. 그 이름은 미설치일 수 있고,
@@ -635,22 +635,33 @@ def selector_matches(
     )
 
 
+def entry_can_activate(entry: SkillCatalogEntry) -> bool:
+    """phase와 변경 범위를 빼고, 이 엔트리가 **켜질 수 있는가**.
+
+    `_entry_activates`의 phase/선택자 대조 앞부분이 곧 이 질문이고, doctor의 도달
+    가능성 판정도 같은 질문을 한다. 두 곳이 각자 조건을 적으면 조용히 갈라진다.
+    """
+    if entry.selector_declared and not (entry.task_terms or entry.path_globs):
+        # 선언했는데 전부 빈 값이면 "무조건 활성화"가 아니라 "아무것도 안 걸림"이다.
+        # 그렇지 않으면 `taskTerms: ""` 하나로 모든 phase에 조용히 얹힌다.
+        return False
+    if entry.source == "project-local":
+        # drop-box는 사용자가 넣은 것 자체가 근거다. 선언을 요구하지 않는다.
+        return True
+    # upstream SKILL.md는 `workflowPhases`를 선언하지 않는다. 카탈로그에는 담되
+    # 자동 활성화는 하지 않는다 — 이 가드가 없으면 host에 깔린 skill 전량이
+    # 선택자 없는 엔트리로 required가 된다.
+    return bool(entry.phase_declared and entry.workflow_phases)
+
+
 def _entry_activates(
     entry: SkillCatalogEntry, phase_id: str, changed_files: Sequence[str], task_text: str
 ) -> bool:
     if phase_id not in entry.workflow_phases:
         return False
-    if not entry.phase_declared and entry.source != "project-local":
-        # upstream SKILL.md는 `workflowPhases`를 선언하지 않는다. 카탈로그에는 담되
-        # 자동 활성화는 하지 않는다 — 이 가드가 없으면 host에 깔린 skill 전량이
-        # 선택자 없는 엔트리로 required가 된다.
+    if not entry_can_activate(entry):
         return False
-    if entry.selector_declared:
-        # 선언했는데 전부 빈 값이면 "무조건 활성화"가 아니라 "아무것도 안 걸림"이다.
-        # 그렇지 않으면 `taskTerms: ""` 하나로 모든 phase에 조용히 얹힌다.
-        if not entry.task_terms and not entry.path_globs:
-            return False
-    elif not entry.task_terms and not entry.path_globs:
+    if not entry.selector_declared and not entry.task_terms and not entry.path_globs:
         return True
     return selector_matches(
         task_terms=entry.task_terms,
@@ -669,7 +680,7 @@ def _glob_matches(pattern: str, candidate: str) -> bool:
     return False
 
 
-def _expand_dependencies(names: Sequence[str], catalog: Sequence[SkillCatalogEntry]) -> list[str]:
+def expand_dependencies(names: Sequence[str], catalog: Sequence[SkillCatalogEntry]) -> list[str]:
     by_name = {entry.name: entry for entry in catalog}
     out = list(names)
     queue = list(names)

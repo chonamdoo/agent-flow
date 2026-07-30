@@ -27,6 +27,7 @@ from agent_flow.core.local_skills import (
 from agent_flow.core.profile_routing import (
     RoutedSkill,
     missing_routed_report,
+    routable_group_skills,
     routed_profile_skills,
 )
 from agent_flow.core.profiles import load_profile_payload
@@ -62,6 +63,14 @@ def _install(home: Path, name: str, description: str) -> Path:
     path.write_text(f"---\nname: {name}\ndescription: {description}\n---\n", encoding="utf-8")
     return path
 
+
+PROFILES_DIR = REPO / "src" / "agent_flow" / "profiles"
+
+
+def _profile_ids() -> list[str]:
+    return sorted(
+        path.stem for path in PROFILES_DIR.glob("*.yaml") if not path.stem.startswith("_")
+    )
 
 
 def test_section_phases_cover_exactly_the_gated_phases():
@@ -145,7 +154,11 @@ def test_unrelated_profiles_never_route_android_vocabulary(profile_id, tmp_path,
     )
 
     assert "edge-to-edge" not in {skill.name for skill in resolution.required}
-    assert _route(profile_id, phase_id="implement", changed_files=["src/a.py"], task_text="") == ()
+    # 이 profile의 표가 스스로 라우팅되는 것은 정상이다. 금지 조건은 android 이름이
+    # 여기 섞이는 것 하나다 — `== ()`로 적으면 표가 죽어 있어야만 통과한다.
+    routed = _names(_route(profile_id, phase_id="implement", changed_files=["src/a.py"], task_text=""))
+    android = _names(_route("android", phase_id="implement", changed_files=["A.kt"], task_text=""))
+    assert not routed & android
 
 
 def test_react_native_reaches_native_vocabulary_only_through_native_paths(tmp_path, monkeypatch):
@@ -212,6 +225,47 @@ def test_first_profile_owns_a_duplicated_group():
     assert [group["skills"] for group in merged["skills"]["required_review"]] == [["a"]]
 
 
+def test_merge_keeps_each_profile_group():
+    """반증: 6개 profile 전부가 `group: profile`을 쓴다. group id만으로 dedupe하면
+    다중 profile 프로젝트에서 두 번째 profile의 표가 통째로 사라진다."""
+    merged = merged_profile_payload(
+        [load_profile_payload("android"), load_profile_payload("python")]
+    )
+
+    routed = [set(group["skills"]) for group in merged["skills"]["required_review"]]
+    assert any("android-code-review" in skills for skills in routed), routed
+    assert any("python-api-clean-architecture" in skills for skills in routed), routed
+
+
+def test_routable_group_skills_drops_selectorless_groups():
+    """반증: 이름이 선언돼 있다는 것만으로 도달 가능하다고 세면 doctor는 활성화되지
+    않는 skill을 통과시킨다. selectors 없는 group은 어떤 변경에도 걸리지 않는다."""
+    profile = {
+        "skills": {
+            "required_review": [
+                {"group": "profile", "skills": ["scoped"], "path_globs": ["**/*.py"]},
+                {"group": "loose", "skills": ["unscoped"]},
+            ]
+        }
+    }
+
+    assert routable_group_skills(profile) == {"scoped"}
+
+
+def test_every_profile_group_declares_selectors():
+    """selectors 없는 `required_review` group은 표가 있으나 죽어 있다 — 어떤 변경에도
+    걸리지 않으므로 그 이름은 어느 phase에도 올라가지 않는다."""
+    selectorless = [
+        f"{profile_id}:{group.get('group', '')}"
+        for profile_id in _profile_ids()
+        for group in (load_profile_payload(profile_id).get("skills") or {}).get("required_review")
+        or []
+        if not (group.get("task_terms") or group.get("path_globs"))
+    ]
+
+    assert selectorless == []
+
+
 def test_resolver_surfaces_a_vocabulary_matched_skill(tmp_path, monkeypatch):
     """반증: resolver가 어휘 결과를 안 받으면 그 skill은 프롬프트에도 게이트에도 없다."""
     home = tmp_path / "home"
@@ -241,7 +295,7 @@ def test_missing_bundled_skill_must_be_named_in_the_gate(tmp_path, monkeypatch):
     gate = (
         "## Completion Gate\n"
         "skill-availability: degraded\n"
-        "skill-read-evidence: unavailable\n"
+        "skill-use-evidence: unavailable\n"
         "project-local-skills: checked\n"
         "project-local-skills-used: n/a\n"
         "missing-required-profile-skills: none\n"
@@ -266,7 +320,7 @@ def test_unrelated_profile_gate_stays_silent(tmp_path):
     gate = (
         "## Completion Gate\n"
         "skill-availability: pass\n"
-        "skill-read-evidence: unavailable\n"
+        "skill-use-evidence: unavailable\n"
         "project-local-skills: checked\n"
         "project-local-skills-used: n/a\n"
     )
@@ -280,7 +334,10 @@ def test_unrelated_profile_gate_stays_silent(tmp_path):
         task_text="recomposition jank insets compose state",
     )
 
-    assert not [item for item in missing if item.startswith("missing-required-profile-skills:")]
+    reports = [item for item in missing if item.startswith("missing-required-profile-skills:")]
+    # python 표가 자기 skill의 부재를 보고하는 것은 정상이다. 금지 조건은 compose/android
+    # 어휘가 python 게이트에 android 이름을 끌어오는 것 하나다.
+    assert not [item for item in reports if "android" in item], reports
 
 
 def test_prompt_contract_lists_every_marker_the_gate_demands(tmp_path):
@@ -295,7 +352,7 @@ def test_prompt_contract_lists_every_marker_the_gate_demands(tmp_path):
     block = local_skill_prompt_block(project, "implement", **common)
     contract = block.split("```text")[1].split("```")[0]
     artifact = "## Completion Gate\n" + contract.replace(
-        "skill-read-evidence: verified|unavailable", "skill-read-evidence: unavailable"
+        "skill-use-evidence: verified|unavailable", "skill-use-evidence: unavailable"
     )
 
     assert missing_local_skill_markers(artifact, project, "implement", **common) == []
