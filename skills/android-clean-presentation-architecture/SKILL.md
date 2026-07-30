@@ -173,6 +173,29 @@ Keep UI-local state local:
 - scroll, focus, text field editing state, pager state, and animation state can stay in Compose unless they drive business or repository work
 - if UI-local state coordinates multiple fields and operations, extract a plain state holder remembered in composition
 
+## Server-Driven Screen Exception
+
+Screens whose layout is authored by the server follow this contract with three
+scoped exceptions. Everything not listed here still applies, including the
+stateless-content rule — a node renderer is a content composable.
+
+- **Names are reversed; judge by direction.** A server-driven codebase commonly
+  calls the upward input type `ScreenEvent` and the downward one-shot type
+  `UiEffect`. `ScreenEvent` plays the role this document calls `UiAction`, and
+  `UiEffect` plays the role it calls `UiEvent`. Decide which role a type has from
+  the direction it travels, never from its suffix.
+- **A screen whose `UiState` carries the server node tree needs no per-screen
+  `UiModel` or mapper.** `Success(screen: Screen)` is a complete state type when
+  `Screen` is the parsed node model; the mapping boundary belongs to the node
+  parser, which already converted the payload into client types. Per-screen
+  presentation models return as soon as a screen owns its own layout.
+- **One shared abstract state holder for server-driven screens is a documented
+  exception to the `BaseViewModel` prohibition.** The shared holder owns the whole
+  state pipeline — storage flow, refresh, effect channel — because every
+  server-driven screen has the same pipeline. Subclasses supply only the screen id
+  and screen-specific context values. A subclass that reaches into the state
+  pipeline is a screen that should not be server-driven.
+
 ## Navigation Rule
 
 - Feature api modules define serializable route keys or public route contracts.

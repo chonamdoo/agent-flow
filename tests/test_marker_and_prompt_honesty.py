@@ -305,3 +305,29 @@ def test_udf_review_angle_is_dispatched():
         "derived-state-precomputed: pass|fail|n/a",
     ):
         assert marker in text
+
+
+def _frontmatter(path: Path) -> dict:
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith("---\n")
+    body = text.split("---\n", 2)[1]
+    return yaml.safe_load(body) or {}
+
+
+def test_sdui_depends_on_the_presentation_contract():
+    """반증: dependencies에 presentation이 없어 SDUI 세션은 UDF 원문을 한 번도 읽지 않았다."""
+    dependencies = _frontmatter(SDUI_SKILL).get("dependencies") or []
+    assert "android-clean-architecture" in dependencies
+    assert "android-clean-presentation-architecture" in dependencies
+
+    presentation = PRESENTATION_SKILL.read_text(encoding="utf-8")
+    assert "## Server-Driven Screen Exception" in presentation
+    # 이름이 반대로 붙는다는 사실이 예외 절의 핵심이다. 방향으로 판정하게 만든다.
+    assert "ScreenEvent" in presentation and "UiEffect" in presentation
+    assert presentation.index("## Server-Driven Screen Exception") < presentation.index(
+        "## Navigation Rule"
+    )
+
+    sdui_angle = (REVIEW_ANGLES / "sdui.md").read_text(encoding="utf-8")
+    assert "sdui-udf-contract: pass|fail|n/a" in sdui_angle
+    assert "sdui-udf-contract: pass|fail|n/a" in SDUI_SKILL.read_text(encoding="utf-8")

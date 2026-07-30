@@ -62,11 +62,22 @@ diff touches none of these, mark the completion gate `n/a`.
    occurrence identified; report `n/a` when repository-wide repetition was not
    surveyed, and say so rather than guessing.
 
+9. **`sdui-udf-contract`** — the UDF direction survives the server-driven
+   indirection. Confirm the upward type (often named `ScreenEvent`) carries only
+   UI input, that the downward one-shot type (often named `UiEffect`) leaves
+   through a buffered `Channel`, never `StateFlow`, and that renderers and node
+   composables stay stateless: no `hiltViewModel()`, `viewModel()`,
+   `collectAsStateWithLifecycle()`, or navigation API below the screen entry.
+   `templates/_shared/review/udf.md` judges the rest; this item only fixes the
+   two contracts SDUI indirection can quietly break.
+
 ## Must-fix policy
 
 Items 1 through 6 are correctness or contract failures. Any `fail` there produces
 `verdict: request-changes`. Item 7 is must-fix when an interactive node was added
-or changed, otherwise should-fix. Item 8 is never must-fix on its own.
+or changed, otherwise should-fix. Item 8 is never must-fix on its own. Item 9 is
+must-fix: a durable state riding the effect channel or a stateful renderer breaks
+every screen the renderer serves.
 
 ## Required completion gate
 
@@ -81,6 +92,7 @@ sdui-unknown-node-fallback: pass|fail|n/a
 sdui-list-key-contenttype: pass|fail|n/a
 sdui-accessibility-field: pass|fail|n/a
 sdui-semantic-promotion: pass|fail|n/a
+sdui-udf-contract: pass|fail|n/a
 ```
 
 ## Output format
