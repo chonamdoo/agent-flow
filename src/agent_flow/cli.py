@@ -29,7 +29,6 @@ from agent_flow.core.context_contract import (
     offload_tool_output,
     write_system_invariants,
 )
-from agent_flow.core.commands import run_safe_command
 from agent_flow.core.design_ledger import (
     LEDGER_SOURCE_PHASES,
     SPEC_SET_USER_REPLY,
@@ -107,6 +106,7 @@ from agent_flow.core.worktrees import (
     WorktreeLockedError,
     WorktreeAlreadyExistsError,
     WorktreeStatus,
+    adopt_worktree,
     assert_worktree_unlocked,
     attach_worktree,
     create_worktree,
@@ -114,6 +114,7 @@ from agent_flow.core.worktrees import (
     cleanup_state_root,
     UnknownWorktreeSetupAction,
     WORKTREE_SETUP_ACTIONS,
+    bootstrap_host_hook_surfaces,
     copy_declared_worktree_files,
     DEFAULT_SLUG_MAX_LENGTH,
     describe_slug,
@@ -134,13 +135,20 @@ from agent_flow.core.hook_integrity import (
     HookIntegrityError,
     assert_managed_hooks_registered,
 )
+from agent_flow.core.host_write_boundary import assert_adoption_allowed
 from agent_flow.core.worktree_isolation import (
     WorktreeIsolationError,
+    adopted_worktree_parent,
     assert_cwd_bound,
     assert_leader_unchanged,
     capture_leader_snapshot,
+    git_common_dir,
     git_repo_state,
+    git_safe,
+    git_toplevel,
+    leader_root_for,
     provider_lease,
+    registered_worktree_at,
     same_worktree_path,
     verify_linked_worktree,
     worker_claim_lock,
@@ -435,6 +443,10 @@ def main(argv: list[str] | None = None) -> int:
     worktree_remove.add_argument("--name", required=True)
     worktree_remove.add_argument("--keep-branch", action="store_true")
     worktree_remove.add_argument("--allow-unmerged", action="store_true")
+    worktree_adopt = worktree_subparsers.add_parser("adopt")
+    worktree_adopt.add_argument("--root", default=".")
+    worktree_adopt.add_argument("--path", required=True)
+    worktree_adopt.add_argument("--allow-dirty", action="store_true")
 
     team_parser = subparsers.add_parser("team")
     team_subparsers = team_parser.add_subparsers(dest="team_command", required=True)
@@ -571,10 +583,21 @@ def main(argv: list[str] | None = None) -> int:
     args._worktree_explicit = bool(getattr(args, "worktree", None))
     requested_root = Path(getattr(args, "root", ".")).resolve()
     root = requested_root
-    root, inferred_worktree = _resolve_cli_root_context(
+    root, inferred_worktree, unadopted_checkout = _resolve_cli_root_context(
         root,
         getattr(args, "worktree", None),
     )
+    if unadopted_checkout is not None and args.command in {"run", "start"}:
+        # 조용히 leader root만 반환하면 사용자가 서 있는 checkout이 아닌 곳에서 런이
+        # 돌고, task 이름으로 세 번째 worktree까지 생긴다. 여기서 멈추는 쪽이 낫다.
+        print(
+            f"{unadopted_checkout} is a linked worktree of {root} that agent-flow has "
+            f"not adopted. {_unadopted_next_step(root=root, checkout=unadopted_checkout)} "
+            f"Or pass `--root {shlex.quote(str(root))}` to work in the leader checkout "
+            "instead.",
+            file=sys.stderr,
+        )
+        return 2
     inferred_registration_identity: str | None = None
     if (
         args.command in {"run", "start"}
@@ -1253,6 +1276,27 @@ def main(argv: list[str] | None = None) -> int:
                 print(_format_cli_error(exc), file=sys.stderr)
                 return 2
             print(f"{status.name} {status.branch} {status.path}")
+            return 0
+        if args.worktree_command == "adopt":
+            try:
+                # 인가는 워커가 스스로 줄 수 없다. 명령 문자열도 cwd도 호출자가 고르니
+                # 호출자가 고를 수 없는 것으로 판정한다 — 활성 run이 있으면 거절이다.
+                assert_adoption_allowed(root=root)
+                status = adopt_worktree(
+                    root=root,
+                    path=Path(args.path),
+                    allow_dirty=args.allow_dirty,
+                )
+                _apply_worktree_setup(root=root, checkout=status.path)
+            except (
+                OSError,
+                ValueError,
+                RuntimeError,
+                subprocess.CalledProcessError,
+            ) as exc:
+                print(_format_cli_error(exc), file=sys.stderr)
+                return 2
+            print(f"{status.name} {status.branch} {status.path} adopted")
             return 0
         if args.worktree_command == "status":
             try:
@@ -2318,7 +2362,9 @@ def _warn_if_cwd_is_other_checkout(*, root: Path, target: Path) -> None:
     관리 루트 밖 checkout에 붙는 것은 지원 범위가 아니다. 그렇다고 조용히 다른
     자리에서 돌면 사용자는 서 있던 checkout에서 작업이 도는 줄 안다.
     """
-    result = run_safe_command(("git", "rev-parse", "--show-toplevel"), cwd=Path.cwd())
+    result = git_safe(
+        "rev-parse", "--show-toplevel", cwd=Path.cwd(), optional_locks=False
+    )
     if not result.ok:
         return
     checkout = Path(result.stdout.strip())
@@ -2471,11 +2517,23 @@ def _declared_worktree_copies(profile: dict) -> list[str]:
 
 
 def _apply_worktree_setup(*, root: Path, checkout: Path) -> None:
-    """profile이 선언한 gitignored 머신 설정을 새 checkout으로 옮긴다.
+    """새 checkout을 쓸 수 있게 만든다: host hook 등록 표면 + profile 선언 설정.
 
     실패해도 worktree 생성을 되돌리지 않는다. 설정이 없어서 빌드가 한 번 실패하는 것과
     방금 만든 checkout이 통째로 사라지는 것은 무게가 다르다. 대신 무엇이 빠졌는지 알린다.
     """
+    # hook 등록 표면은 profile 선언과 무관하다(언어가 아니라 host의 문제다). profile
+    # 해석이 실패해 아래에서 early return하더라도 이건 먼저 끝내 둔다.
+    try:
+        installed = bootstrap_host_hook_surfaces(leader=root, checkout=checkout)
+    except OSError as exc:
+        print(
+            f"warning: host hook bootstrap failed: {_format_cli_error(exc)}",
+            file=sys.stderr,
+        )
+    else:
+        if installed:
+            print(f"worktree host hooks installed: {', '.join(installed)}")
     try:
         _profile_id, profile = _load_profile(_find_kit_root(), root)
         declared = _declared_worktree_copies(profile)
@@ -2657,19 +2715,78 @@ def _print_legacy_js_state_migration(root: Path) -> None:
 
 
 
-def _resolve_cli_root_context(root: Path, worktree: str | None) -> tuple[Path, str | None]:
+def _resolve_cli_root_context(
+    root: Path, worktree: str | None
+) -> tuple[Path, str | None, Path | None]:
+    """(config root, worktree 이름, 채택되지 않은 checkout).
+
+    세 번째 값이 non-None이면 cwd가 이 저장소의 linked worktree인데 agent-flow가
+    채택한 기록이 없다는 뜻이다. 진입 명령은 그 상태에서 멈춘다.
+    """
     managed = _managed_worktree_context(root)
     if managed is not None:
         leader_root, inferred_worktree = managed
-        return leader_root, worktree or inferred_worktree
+        return leader_root, worktree or inferred_worktree, None
     cwd_managed = _managed_worktree_context(Path.cwd())
     if cwd_managed is not None and (_same_path(root, Path.cwd()) or _same_path(root, cwd_managed[0])):
         leader_root, inferred_worktree = cwd_managed
-        return leader_root, worktree or inferred_worktree
+        return leader_root, worktree or inferred_worktree, None
+    leader_root = leader_root_for(root)
+    if leader_root is not None:
+        # 경로 모양이 관리 규약과 달라도 이 저장소의 linked worktree다. 인식 근거를
+        # 경로에서 등록부로 옮기는 자리가 여기다.
+        checkout = _registered_checkout(leader_root=leader_root, path=root)
+        if checkout is None:
+            return leader_root, worktree, None
+        if adopted_worktree_parent(root=leader_root, path=checkout) is not None:
+            return leader_root, worktree or checkout.name, None
+        return leader_root, worktree, checkout
     git_common_root = _git_common_worktree_root(root)
     if git_common_root is not None:
-        return git_common_root, worktree
-    return root, worktree
+        return git_common_root, worktree, None
+    return root, worktree, None
+
+
+def _registered_checkout(*, leader_root: Path, path: Path) -> Path | None:
+    """``path``가 leader가 아닌 checkout에 서 있으면 그 checkout 경로.
+
+    등록부를 읽을 수 없거나 등록 행이 없어도 경로를 돌려준다. 호출자는 그 답을
+    미채택으로 취급해 진입을 막는다 — 증명 실패를 통과로 접으면 격리 없이 leader에서
+    도는 쪽으로 흐른다. leader(또는 그 하위 디렉터리)면 ``None``이다.
+    """
+    top_level = git_toplevel(path)
+    if top_level is None or _same_path(top_level, leader_root):
+        return None
+    try:
+        registered = registered_worktree_at(leader_root, top_level)
+    except WorktreeIsolationError:
+        return top_level
+    if registered is None or registered.prunable:
+        # 등록 행이 없다 = 이 checkout이 이 저장소의 관리 대상이라는 증명이 없다.
+        # 예전처럼 leader로 접으면(디렉터리를 옮긴 worktree가 이 상태다) 사용자가
+        # 서 있는 자리가 아닌 곳에서 런이 돈다. 증명 실패는 통과가 아니다.
+        return top_level
+    return registered.path
+
+
+def _unadopted_next_step(*, root: Path, checkout: Path) -> str:
+    """미채택 checkout에서 실제로 통하는 다음 명령 한 줄.
+
+    상태를 보지 않고 `adopt`만 안내하면 닫힌 루프가 된다. 디렉터리만 옮겨진 checkout은
+    등록이 prunable이라 `adopt`가 "등록된 worktree가 없다"로 거절하고, 그 사용자에게
+    필요한 것은 `git worktree repair`다.
+    """
+    adopt = f"Adopt it with `agent-flow worktree adopt --path {shlex.quote(str(checkout))}`."
+    try:
+        registered = registered_worktree_at(root, checkout)
+    except WorktreeIsolationError:
+        return adopt
+    if registered is None or registered.prunable:
+        return (
+            f"Its git registration is stale; run `git worktree repair "
+            f"{shlex.quote(str(checkout))}` first, then {adopt[0].lower()}{adopt[1:]}"
+        )
+    return adopt
 
 
 def _managed_worktree_context(path: Path) -> tuple[Path, str] | None:
@@ -2687,17 +2804,15 @@ def _managed_worktree_context(path: Path) -> tuple[Path, str] | None:
 
 
 def _git_common_worktree_root(root: Path) -> Path | None:
-    # worktree root 탐지는 relay 진입점이므로 git hang을 짧게 실패 처리한다.
-    top_level = run_safe_command(("git", "rev-parse", "--show-toplevel"), cwd=root)
-    common_dir = run_safe_command(("git", "rev-parse", "--git-common-dir"), cwd=root)
-    if not top_level.ok or not common_dir.ok:
+    # anchor 유도는 sanitize된 git으로만 한다. ambient GIT_DIR/GIT_COMMON_DIR을
+    # 상속한 채 물으면 대답이 다른 저장소를 가리키고, 그 부모가 그대로 config root와
+    # state root가 된다(kit.json을 심은 decoy면 hook 무결성 게이트까지 통과한다).
+    if git_toplevel(root) is None:
         return None
-    common_path = Path(common_dir.stdout.strip())
-    if not common_path.is_absolute():
-        common_path = Path(top_level.stdout.strip()) / common_path
-    if common_path.name != ".git":
+    common_path = git_common_dir(root)
+    if common_path is None or common_path.name != ".git":
         return None
-    return common_path.parent.resolve()
+    return common_path.parent
 
 
 def _same_path(left: Path, right: Path) -> bool:

@@ -32,6 +32,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
+from agent_flow.core.worktree_isolation import leader_root_for
+
 # install이 심는 정확히 그 스크립트들. JS 쪽 등록 지점 3곳
 # (`bin/agent-flow-install.mjs`, `bin/agent-flow-kit.mjs`,
 # `scripts/check-agent-flow-parity.mjs`)과 갈라지면 parity가 잡는다.
@@ -156,10 +158,19 @@ class _Surface:
 
 
 def find_install_root(start) -> Path | None:
-    """`.agent-flow/kit.json`을 가진 가장 가까운 조상. hook 자신과 같은 규칙이다."""
+    """이 checkout이 딛고 있는 설치본. leader를 먼저 묻고, 그다음 조상 탐색이다.
+
+    순서가 중요하다. 조상 탐색을 먼저 하면 (1) `$HOME/.agent-flow/kit.json`이 있는
+    사용자에게는 홈이 모든 저장소의 설치본을 가려 버리고, (2) 워커가 자기 checkout에
+    `.agent-flow/kit.json`을 쓰면 그 파일이 자기 무결성 기준선이 된다. leader를 먼저
+    확정하면 두 경로 모두 닫힌다 — leader의 git dir은 워커가 쓸 수 없다.
+    """
     if start is None:
         return None
     current = Path(start)
+    leader = leader_root_for(current)
+    if leader is not None and _is_file(leader / KIT_JSON_RELATIVE):
+        return leader
     for candidate in [current, *current.parents]:
         if _is_file(candidate / KIT_JSON_RELATIVE):
             return candidate

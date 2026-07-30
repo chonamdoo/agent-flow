@@ -4,18 +4,28 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
+SRC = str(Path(__file__).resolve().parents[1] / "src")
+if SRC not in sys.path:
+    sys.path.insert(0, SRC)
+
 from agent_flow.artifact import create_run
 from agent_flow.core.host_write_boundary import (
     HostWriteBoundaryError,
+    assert_adoption_allowed,
     host_write_boundary_violation,
     record_host_checkout_binding,
 )
-from agent_flow.core.worktree_isolation import WorktreeIsolationError
+from agent_flow.core.worktree_isolation import (
+    WorktreeIsolationError,
+    adopted_record_path,
+)
 from agent_flow.core.worktrees import (
+    adopt_worktree,
     create_worktree,
     plan_worktree,
     list_registered_worktrees,
@@ -353,7 +363,7 @@ def test_active_run_without_registered_worktree_fails_closed(tmp_path: Path):
 
     with pytest.raises(
         HostWriteBoundaryError,
-        match="no unique registered worktree",
+        match="no provable registered worktree owner",
     ):
         host_write_boundary_violation(
             _write_payload(root / "leaked.py", session="unbound"),
@@ -386,14 +396,115 @@ def test_active_run_in_external_worktree_is_not_trusted(tmp_path: Path):
         checkout_registration_identity=registration,
     )
 
+    # 채택 기록이 없으면 claim의 소유 checkout을 증명할 수 없다. 등록만 된 checkout이
+    # 자기 이름의 런타임 상태를 만들어 놓는 것으로는 신뢰를 얻지 못한다.
     with pytest.raises(
-        WorktreeIsolationError,
-        match="not a direct child of a managed root",
+        HostWriteBoundaryError,
+        match="no provable registered worktree owner",
     ):
         host_write_boundary_violation(
             _write_payload(checkout / "feature.py", session="unbound"),
             root,
         )
+
+
+def test_adoption_is_refused_while_a_run_is_active(tmp_path: Path):
+    root, statuses, _runs = _setup(tmp_path)
+    outside = tmp_path / "worker-made"
+    _git("worktree", "add", "-b", "feat/worker-made", str(outside), cwd=root)
+
+    # `git worktree add`는 경계의 write 명령 집합에 없어 워커도 실행할 수 있다. 채택까지
+    # 실행할 수 있으면 워커가 스스로 임의 checkout을 인가해 쓰기 경계를 넓힌다. 명령
+    # 문자열(`env agent-flow …`)도 cwd(`cd /tmp && …`)도 호출자가 고르므로, 호출자가
+    # 고를 수 없는 것으로 판정한다 — 활성 run의 존재다.
+    with pytest.raises(HostWriteBoundaryError, match="refusing to adopt while runs are active"):
+        assert_adoption_allowed(root=root)
+
+    for status in statuses:
+        (worktree_runtime_root(root=root, name=status.name) / ".agent-flow" / "runs").rename(
+            worktree_runtime_root(root=root, name=status.name) / ".agent-flow" / "runs-done"
+        )
+    assert assert_adoption_allowed(root=root) is None
+
+
+def test_bound_session_cannot_write_the_adoption_record(tmp_path: Path):
+    root, statuses, runs = _setup(tmp_path)
+    record_host_checkout_binding(_status_payload(root, statuses[0], runs[0]), root)
+    record = adopted_record_path(root=root, name=statuses[0].name)
+    assert record is not None
+
+    # 채택 기록이 워커의 쓰기 허용 구역(런타임 상태 디렉터리) 안에 있으면 워커가 자기
+    # 이름의 기록에서 경로만 바꿔 관리 루트 밖 디렉터리를 자기 checkout으로 만든다.
+    assert host_write_boundary_violation(_write_payload(record), root) is not None
+    assert (
+        host_write_boundary_violation(
+            _command_payload(f"tee {record}", cwd=statuses[0].path), root
+        )
+        is not None
+    )
+
+
+def test_adopted_external_worktree_is_trusted(tmp_path: Path):
+    """불변: 채택은 사람이 주는 인가다. 받은 checkout은 관리 루트 밖이어도 신뢰된다."""
+    root, _, _ = _setup(tmp_path)
+    checkout = tmp_path / "external-worktree"
+    _git(
+        "worktree",
+        "add",
+        "-b",
+        "feat/external-worktree",
+        str(checkout),
+        cwd=root,
+    )
+    # 채택이 먼저다. runtime state가 이미 있으면 attach가 manifest를 쓰지 않고 돌아간다.
+    status = adopt_worktree(root=root, path=checkout, allow_dirty=True)
+    runtime_root = worktree_runtime_root(root=root, name=status.name)
+    run_dir = create_run(
+        runtime_root,
+        "default",
+        "external",
+        checkout_identity=f"worktree:{status.name}",
+        checkout_registration_identity=status.registration_identity,
+    )
+    binding = record_host_checkout_binding(
+        _status_payload(root, status, run_dir),
+        root,
+    )
+
+    assert binding is not None
+    assert host_write_boundary_violation(
+        _write_payload(checkout / "feature.py"),
+        root,
+    ) is None
+
+
+def test_basename_collision_does_not_poison_unrelated_worktrees(tmp_path: Path):
+    """반증: claim을 디렉터리 이름으로 묶으면 같은 basename 하나로 저장소 전역이 죽는다.
+
+    소유자는 manifest에 적힌 경로가 지목한다.
+    """
+    root, statuses, runs = _setup(tmp_path)
+    first = statuses[0]
+    collision = tmp_path / "elsewhere" / first.path.name
+    collision.parent.mkdir()
+    _git(
+        "worktree",
+        "add",
+        "-b",
+        "feat/collision",
+        str(collision),
+        cwd=root,
+    )
+    binding = record_host_checkout_binding(
+        _status_payload(root, first, runs[0]),
+        root,
+    )
+
+    assert binding is not None
+    assert host_write_boundary_violation(
+        _write_payload(first.path / "feature.py"),
+        root,
+    ) is None
 
 
 def test_bound_shell_requires_current_worktree_cwd_and_blocks_sibling_paths(

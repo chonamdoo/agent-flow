@@ -205,3 +205,20 @@ def test_checkout_roots_link_leader_and_worktree_both_ways(tmp_path):
     assert str(checkout.resolve()) in from_leader
     assert str(leader.resolve()) in from_worktree
     assert str(checkout.resolve()) in from_worktree
+
+
+def test_registered_external_worktree_counts_as_a_checkout_root(tmp_path):
+    """불변: 등록부가 authority다.
+
+    관리 루트 밖 linked worktree(Orca 워크스페이스 등)는 `.agent-flow/worktrees`
+    디렉터리 스캔에 안 잡힌다. 목록에서 빠지면 그 checkout에서 읽은 skill이 전부
+    미인정으로 차단된다.
+    """
+    from agent_flow.core.local_skills import _checkout_roots
+
+    leader, _ = _leader_with_worktree(tmp_path)
+    external = tmp_path / "orca" / "feat-y"
+    external.parent.mkdir(parents=True)
+    _git("worktree", "add", "-q", "-b", "feat/y", str(external), "HEAD", cwd=leader)
+
+    assert str(external.resolve()) in _checkout_roots(leader)

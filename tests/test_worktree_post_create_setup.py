@@ -11,6 +11,8 @@ symlink가 맞지만, 그건 host write boundary가 symlink 대상을 해석해 
 """
 from __future__ import annotations
 
+import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -19,7 +21,10 @@ SRC = str(Path(__file__).resolve().parents[1] / "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-from agent_flow.core.worktrees import copy_declared_worktree_files
+from agent_flow.core.worktrees import (
+    bootstrap_host_hook_surfaces,
+    copy_declared_worktree_files,
+)
 
 
 def _git(*args: str, cwd: Path) -> None:
@@ -195,3 +200,84 @@ def test_duplicate_declarations_are_collapsed():
     same = {"branching": {"worktree_setup": {"copy": ["local.properties"]}}}
     union = {"profiles": [same, dict(same)]}
     assert _declared_worktree_copies(union) == ["local.properties"]
+
+
+def _hook_registration(leader: Path) -> None:
+    command = f"/bin/bash {leader / '.agent-flow' / 'scripts' / 'hooks' / 'guard.sh'}"
+    for relative, body in (
+        (Path(".claude") / "settings.json", json.dumps({"hooks": {"PreToolUse": [command]}})),
+        (Path(".Codex") / "hooks.json", json.dumps({"hooks": {"PreToolUse": [command]}})),
+        (Path(".omp") / "extensions" / "agent-flow-hooks.ts", 'runHook("guard.sh", payload);\n'),
+    ):
+        target = leader / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body, encoding="utf-8")
+
+
+def test_host_hook_registration_files_are_copied_into_the_checkout(tmp_path: Path):
+    """반증: host는 cwd의 등록 파일만 읽는다. 없는 checkout에서는 강제 hook이 한 개도
+    안 뜨는데 무결성 게이트는 leader를 보므로 초록불이 켜진다."""
+    leader, checkout = tmp_path / "leader", tmp_path / "wt"
+    _repo(leader)
+    checkout.mkdir()
+    _hook_registration(leader)
+
+    installed = bootstrap_host_hook_surfaces(leader=leader, checkout=checkout)
+
+    assert set(installed) == {
+        str(Path(".claude") / "settings.json"),
+        str(Path(".Codex") / "hooks.json"),
+        str(Path(".omp") / "extensions" / "agent-flow-hooks.ts"),
+    }
+    for relative in installed:
+        assert (checkout / relative).read_text(encoding="utf-8") == (
+            leader / relative
+        ).read_text(encoding="utf-8")
+
+
+def test_host_hook_bootstrap_is_idempotent_when_the_checkout_copy_matches(tmp_path: Path):
+    """불변: 내용이 같으면 다시 쓰지 않는다. 이 부트스트랩은 create/attach/adopt마다
+    도는데 매번 덮으면 등록 파일의 mtime이 계속 흔들려, 어떤 설치가 실제로 등록을
+    바꿨는지 구분할 수 없다."""
+    leader, checkout = tmp_path / "leader", tmp_path / "wt"
+    _repo(leader)
+    checkout.mkdir()
+    _hook_registration(leader)
+    first = bootstrap_host_hook_surfaces(leader=leader, checkout=checkout)
+    assert first
+    # 다시 쓰면 copy2가 leader의 mtime을 실어 오므로 이 표식이 지워진다.
+    for relative in first:
+        os.utime(checkout / relative, ns=(0, 0))
+
+    again = bootstrap_host_hook_surfaces(leader=leader, checkout=checkout)
+
+    assert again == ()
+    for relative in first:
+        assert (checkout / relative).stat().st_mtime_ns == 0
+
+
+def test_host_hook_bootstrap_refreshes_a_stale_checkout_copy(tmp_path: Path):
+    """반증: kit 업그레이드로 leader 등록이 바뀌었는데 묵은 checkout 사본을 그대로 두면
+    그 checkout에서만 새 hook이 안 뜬다. 무결성 게이트는 leader 설치본만 보므로 초록불이
+    켜진 채 그 자리만 무력화된다."""
+    leader, checkout = tmp_path / "leader", tmp_path / "wt"
+    _repo(leader)
+    checkout.mkdir()
+    _hook_registration(leader)
+    assert bootstrap_host_hook_surfaces(leader=leader, checkout=checkout)
+    settings = Path(".claude") / "settings.json"
+    upgraded = json.dumps({"hooks": {"PreToolUse": ["/bin/bash guard-v2.sh"]}})
+    (leader / settings).write_text(upgraded, encoding="utf-8")
+
+    installed = bootstrap_host_hook_surfaces(leader=leader, checkout=checkout)
+
+    assert str(settings) in installed
+    assert (checkout / settings).read_text(encoding="utf-8") == upgraded
+
+
+def test_host_hook_bootstrap_is_a_no_op_in_the_leader(tmp_path: Path):
+    leader = tmp_path / "leader"
+    _repo(leader)
+    _hook_registration(leader)
+
+    assert bootstrap_host_hook_surfaces(leader=leader, checkout=leader) == ()

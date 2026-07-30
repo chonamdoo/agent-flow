@@ -9,6 +9,22 @@ import { fileURLToPath } from "node:url";
 
 import { activeInstallProfileIds, installedProfileFileNames } from "../lib/installer-shared.mjs";
 
+// Python `LEAKY_GIT_ENV_VARS`(`src/agent_flow/core/worktree_isolation.py`) 및 두
+// installer와 같은 목록이다. ambient discovery 변수가 남아 있으면 이 검사가 검사
+// 대상이 아닌 다른 checkout을 보고 통과/실패를 낸다. INSTALL_ROOT 계산이 모듈
+// 최상단에서 git을 부르므로 그보다 위에 있어야 한다(아래면 TDZ로 죽는다).
+const LEAKY_GIT_ENV_VARS = [
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_COMMON_DIR",
+  "GIT_INDEX_FILE",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_NAMESPACE",
+  "GIT_PREFIX",
+  "GIT_CEILING_DIRECTORIES",
+];
+
 const SOURCE_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
 const SOURCE_IS_MANAGED_WORKTREE = resolveManagedWorktreeRoot(SOURCE_ROOT) !== null;
@@ -359,6 +375,10 @@ assertCodeReviewerCoversWorkflowMarkers("full-feature", "multi-review");
 assertCodeReviewerCoversWorkflowMarkers("full-feature", "architecture-review");
 
 assertAllWorkflowContracts();
+// 같은 git discovery 변수 목록이 7군데에 복사되어 있고 지금까지는 주석만 "같아야
+// 한다"고 말했다. 한 군데만 밀려도 그 진입점에서만 ambient GIT_*가 살아남아 남의
+// checkout을 보고, 증상은 전혀 다른 곳에서 터진다. 실제로 목록을 추출해 강제한다.
+assertLeakyGitEnvParity();
 assertContains("bin/agent-flow-kit.mjs", "RUNTIME_PYTHON_RELATIVE");
 assertContains("bin/agent-flow-kit.mjs", "src\", \"agent_flow");
 assertContains("src/agent_flow/core/gates.py", "\".agent-flow\" / \"runtime\" / \"python\"");
@@ -703,16 +723,27 @@ function resolveGitCommonWorktreeRoot(start) {
   if (!topLevel || !commonDir) {
     return null;
   }
-  const resolvedCommonDir = path.resolve(topLevel, commonDir);
+  // --git-common-dir은 cwd 기준 상대경로를 낸다. topLevel 기준으로 풀면 cwd가
+  // 하위 디렉토리일 때 어긋난다. 두 installer의 같은 함수와 기준을 맞춘다.
+  const resolvedCommonDir = path.resolve(start, commonDir);
   if (path.basename(resolvedCommonDir) !== ".git") {
     return null;
   }
   return path.dirname(resolvedCommonDir);
 }
 
+function gitEnv() {
+  const env = { ...process.env };
+  for (const name of LEAKY_GIT_ENV_VARS) {
+    delete env[name];
+  }
+  return env;
+}
+
 function gitOutput(cwd, args) {
   const result = spawnSync("git", args, {
     cwd,
+    env: gitEnv(),
     encoding: "utf8",
     stdio: ["ignore", "pipe", "ignore"],
     timeout: 30_000,
@@ -815,6 +846,59 @@ function assertPythonContract(label, code) {
   if (result.error || result.status !== 0) {
     failures.push(`${label} failed: ${result.error?.message || result.stderr.trim() || result.status}`);
   }
+}
+
+// 나열 순서는 파일마다 자유다(집합만 같아야 한다). 심볼 이름도 파일마다 다르므로
+// 파일별로 어느 선언을 볼지 명시한다.
+function assertLeakyGitEnvParity() {
+  const declarations = [
+    ["src/agent_flow/core/worktree_isolation.py", "LEAKY_GIT_ENV_VARS"],
+    ["bin/agent-flow-install.mjs", "LEAKY_GIT_ENV_VARS"],
+    ["bin/agent-flow-kit.mjs", "GIT_DISCOVERY_ENV"],
+    ["scripts/check-agent-flow-parity.mjs", "LEAKY_GIT_ENV_VARS"],
+    ["lib/omp-hooks-extension.mjs", "GIT_DISCOVERY_ENV"],
+    ["scripts/hooks/record-skill-read.py", "LEAKY_GIT_ENV_VARS"],
+    ["scripts/hooks/record-command-run.py", "LEAKY_GIT_ENV_VARS"],
+  ];
+  const extracted = [];
+  for (const [rel, symbol] of declarations) {
+    const names = leakyGitEnvNames(rel, symbol);
+    if (names === null) {
+      continue;
+    }
+    if (names.length === 0) {
+      // 선언을 못 찾으면 "일치함"으로 넘어가면 안 된다. 이름을 바꾼 쪽이
+      // 검사에서 조용히 빠지는 게 정확히 이 검사가 막으려는 상황이다.
+      failures.push(`${rel} ${symbol} declaration not found`);
+      continue;
+    }
+    extracted.push([rel, new Set(names)]);
+  }
+  if (extracted.length < 2) {
+    return;
+  }
+  const [baseRel, baseNames] = extracted[0];
+  for (const [rel, names] of extracted.slice(1)) {
+    const missing = [...baseNames].filter((name) => !names.has(name));
+    const extra = [...names].filter((name) => !baseNames.has(name));
+    if (missing.length > 0 || extra.length > 0) {
+      failures.push(`${rel} git discovery env list differs from ${baseRel}: missing=${missing.join(",") || "<none>"} extra=${extra.join(",") || "<none>"}`);
+    }
+  }
+}
+
+function leakyGitEnvNames(rel, symbol) {
+  const text = readIfExists(rel);
+  if (text === null) {
+    return null;
+  }
+  // JS 배열과 Python 튜플을 같은 규칙으로 읽는다. 목록 안에는 중첩 괄호가 없어
+  // 첫 닫는 괄호까지 잘라도 안전하다.
+  const match = new RegExp(String.raw`\b${symbol}\s*=\s*[[(]([^)\]]*)[)\]]`).exec(text);
+  if (!match) {
+    return [];
+  }
+  return [...match[1].matchAll(/"([A-Z_]+)"/g)].map((entry) => entry[1]);
 }
 
 function assertAllWorkflowContracts() {

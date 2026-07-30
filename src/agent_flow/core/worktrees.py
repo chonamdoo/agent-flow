@@ -17,16 +17,23 @@ from typing import Any, Callable, Iterable, Iterator, Sequence
 
 from agent_flow.artifact import ACTIVE_MARKER, find_active_runs, read_meta, write_meta
 from agent_flow.core.commands import run_safe_command
+from agent_flow.core.hook_integrity import (
+    JSON_REGISTRATION_FILES,
+    OMP_REGISTRATION_FILE,
+)
 from agent_flow.core.worktree_isolation import (
     RegisteredWorktree,
     FileLeaseUnavailable,
     WorktreeIsolationError,
+    adopted_worktree_parent,
     assert_worktree_mergeable,
     exclusive_file_lease,
+    forget_adopted_checkout,
     git_repo_state,
     git_safe,
     list_registered_worktrees,
     real_path,
+    record_adopted_checkout,
     registered_worktree_at,
     same_worktree_path,
     shared_file_lease,
@@ -243,6 +250,7 @@ def attach_worktree(
     branch: str | None = None,
     allow_dirty: bool = False,
     expected_registration_identity: str | None = None,
+    adopt: bool = False,
 ) -> WorktreeStatus | None:
     """등록부가 아는 관리형 checkout에 그대로 붙는다. 붙을 대상이 없으면 ``None``.
 
@@ -275,13 +283,18 @@ def attach_worktree(
         raise RuntimeError(
             "leader workspace is dirty; pass --allow-dirty to use a worktree anyway"
         )
-    if not _is_managed_child(root=root, path=registered.path):
-        # 관리 루트 밖 checkout에 붙는 것은 지원 범위가 아니다. 그렇다고 생성
-        # 경로로 흘려보내면 selector를 디렉터리 이름으로 뭉개 엉뚱한 checkout을
+    if (
+        not adopt
+        and not _is_managed_child(root=root, path=registered.path)
+        and not _adopted(root=root, path=registered.path)
+    ):
+        # 관리 루트 밖 checkout은 등록만으로 들어오지 못한다. 등록은 git이 해 주는
+        # 것이고 워커도 할 수 있으므로, leader가 서명한 manifest를 요구한다. 그렇다고
+        # 생성 경로로 흘려보내면 selector를 디렉터리 이름으로 뭉개 엉뚱한 checkout을
         # 만든다(절대경로 selector는 경로 전체가 이름이 된다).
         raise ValueError(
-            f"worktree {registered.path} is not a direct child of {_managed_root(root)}; "
-            f"attaching to a checkout there is not supported"
+            f"worktree {registered.path} is outside {_managed_root(root)} and is not "
+            f"adopted; run `agent-flow worktree adopt --path {registered.path}` first"
         )
     if not (registered.path / ".git").is_file():
         # 등록은 남았는데 checkout이 사라졌다. 생성 경로가 prune 후 다시 만든다.
@@ -334,9 +347,12 @@ def attach_worktree(
         )
         runtime_root = _runtime_root_for_status(root=root, status=status)
         if runtime_root is None:
+            # 이름은 같지만 메타데이터가 다른 checkout의 것이다. 어느 자리가 막고
+            # 있는지 말해 주지 않으면 사용자는 "채택하라"는 안내와 "채택 거부" 사이를
+            # 무한히 왕복한다.
             raise ValueError(
                 f"worktree {registered.path.name} has conflicting agent-flow metadata; "
-                "refusing attach"
+                f"refusing attach. {_conflicting_metadata_hint(root=root, status=status)}"
             )
         if runtime_root.exists():
             if status.base_oid:
@@ -363,6 +379,58 @@ def attach_worktree(
         )
         write_worktree_manifest(root=root, status=status)
         return status
+
+
+def adopt_worktree(
+    *,
+    root: Path,
+    path: Path,
+    allow_dirty: bool = False,
+) -> WorktreeStatus:
+    """등록부가 아는 checkout 하나를 lifecycle metadata와 함께 채택한다.
+
+    경로 모양은 묻지 않는다. git이 이 저장소의 linked worktree로 등록했고 gitdir 왕복
+    검증을 통과하면 된다. 이 명령이 채택의 유일한 진입점인 이유는 인가를 사람이
+    주어야 하기 때문이다 — `git worktree add`는 워커도 할 수 있고 그 호출은 host
+    write boundary의 write 명령 집합에 없다.
+
+    채택은 브랜치 소유권을 주장하지 않는다(`branch_created_by_agent_flow=False`).
+    terminal cleanup은 checkout만 제거하고 브랜치는 보존한다.
+    """
+    checkout = real_path(path)
+    status = attach_worktree(
+        root=root,
+        selector=str(checkout),
+        allow_dirty=allow_dirty,
+        adopt=True,
+    )
+    if status is None:
+        raise ValueError(
+            f"no linked worktree of {root} is registered at {path}; "
+            "create it with `git worktree add` first"
+        )
+    # 기록은 manifest가 아니라 워커 쓰기 구역 밖의 `adopted/`에 남긴다. 이후의 모든
+    # 인가 판정(`adopted_worktree_parent`, `trusted_checkout_paths`)이 이 파일을 본다.
+    try:
+        record_adopted_checkout(
+            root=root,
+            name=status.name,
+            path=status.path,
+            registration_identity=status.registration_identity,
+        )
+    except (OSError, WorktreeIsolationError) as exc:
+        # attach는 이미 끝났다. 그 사실을 말하지 않으면 사용자는 "채택하라"는 안내와
+        # 원시 errno 사이에서 지금 상태가 무엇인지 알 수 없다.
+        raise WorktreeIsolationError(
+            f"attached {status.path} but could not record the adoption: {exc}. "
+            "That checkout is still unadopted — clear the cause and run the same "
+            "command again"
+        ) from exc
+    return status
+
+
+def _adopted(*, root: Path, path: Path) -> bool:
+    return adopted_worktree_parent(root=root, path=path) is not None
 
 
 def _is_managed_child(*, root: Path, path: Path) -> bool:
@@ -2147,6 +2215,16 @@ def _manifest_oid(payload: dict | None, key: str) -> str | None:
     return value if value is not None and _is_oid(value) else None
 
 
+def _manifest_path_value(*, root: Path, path: Path) -> str:
+    # 관리 루트 안 checkout은 leader 기준 상대경로로 남긴다(설치본을 옮겨도 유효).
+    # 관리 루트 밖 checkout은 상대화가 불가능하므로 절대경로를 쓴다 — 읽는 쪽
+    # (`_metadata_belongs_to_path`)이 이미 두 형태를 모두 해석한다.
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(real_path(path))
+
+
 def write_worktree_manifest(*, root: Path, status: WorktreeStatus) -> Path:
     """소비되는 키만 쓴다.
 
@@ -2158,7 +2236,7 @@ def write_worktree_manifest(*, root: Path, status: WorktreeStatus) -> Path:
     path = _runtime_state_root(root=root, name=status.name) / "manifest.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "path": str(status.path.relative_to(root)),
+        "path": _manifest_path_value(root=root, path=status.path),
         "branch": status.branch,
         "base_ref": status.base_ref,
         "base_oid": status.base_oid,
@@ -2229,6 +2307,7 @@ def remove_worktree_metadata(*, root: Path, name: str, path: Path | None = None)
         shutil.rmtree(runtime_root)
     if legacy_manifest.exists():
         legacy_manifest.unlink()
+    forget_adopted_checkout(root=root, name=key)
 
 
 def _runtime_state_key(*, root: Path, name: str) -> str:
@@ -2265,6 +2344,21 @@ def _metadata_belongs_to_path(*, root: Path, key: str, path: Path) -> bool:
     if not candidate.is_absolute():
         candidate = root / candidate
     return same_worktree_path(candidate, path)
+
+
+def _conflicting_metadata_hint(*, root: Path, status: WorktreeStatus) -> str:
+    try:
+        key = _runtime_state_key(root=root, name=status.name)
+    except ValueError:
+        return "the registry key for that name is unusable"
+    runtime_root = _runtime_state_root(root=root, name=key)
+    payload = _state_key_manifest(root=root, key=key)
+    recorded = payload.get("path") if isinstance(payload, dict) else None
+    owner = f" and records {recorded}" if isinstance(recorded, str) and recorded else ""
+    return (
+        f"registry key {runtime_root} belongs to another checkout{owner}; "
+        "remove that metadata directory to free the name"
+    )
 
 
 def _git_dirty(root: Path) -> bool:
@@ -2442,6 +2536,73 @@ def run_declared_worktree_actions(
         except (OSError, subprocess.SubprocessError) as exc:
             print(f"warning: worktree setup action {name} failed: {exc}", file=sys.stderr)
     return tuple(ran)
+
+
+# host가 cwd에서 읽는 등록 파일. 목록을 다시 적으면 새 표면이 hook_integrity에만
+# 추가됐을 때 checkout에는 안 깔리고, 그 결손은 게이트가 leader만 보므로 조용하다.
+HOST_HOOK_REGISTRATION_FILES = JSON_REGISTRATION_FILES + (OMP_REGISTRATION_FILE,)
+
+
+def _next_free_backup(target: Path) -> Path:
+    """비어 있는 백업 슬롯. 한 슬롯만 두면 두 번째 갱신이 첫 백업을 덮는다."""
+    candidate = target.with_name(f"{target.name}.bak")
+    index = 1
+    while candidate.exists() or candidate.is_symlink():
+        candidate = target.with_name(f"{target.name}.bak.{index}")
+        index += 1
+    return candidate
+
+
+def bootstrap_host_hook_surfaces(*, leader: Path, checkout: Path) -> tuple[str, ...]:
+    """host가 cwd에서 읽는 hook 등록 파일을 새 checkout에도 둔다.
+
+    host(claude/codex/omp)는 cwd의 등록 파일만 읽고 상위로 올라가지 않는다. 이 파일이
+    없는 checkout에서는 강제 hook이 한 개도 뜨지 않는데, 무결성 게이트는 설치본
+    (=leader)을 검사하므로 초록불이 켜진다 — 탐지되지 않는 무력화다.
+
+    복사로 충분한 이유: 등록된 command는 leader의 절대경로다(installer가 그렇게 쓴다).
+    반대로 hook 스크립트 자체를 복사하면 스크립트가 자기 위치에서 project root를
+    유도해 worktree를 leader로 착각하고, 그 실패는 hook을 allow로 접는다 — 그래서
+    스크립트는 복사하지 않는다. omp 확장은 자기 위치가 아니라 kit.json에서 root를
+    유도하므로 같은 규칙으로 안전하다.
+
+    사본은 leader와 내용이 다르면 갱신하고, 덮기 전 `<name>.bak`(이미 있으면 `.bak.1`,
+    `.bak.2` …)을 남긴다. `_apply_worktree_setup`이 create·attach마다 돌기 때문에 갱신
+    하지 않으면 kit 업그레이드로 hook 집합이 바뀐 뒤에도 그 checkout만 옛 등록을 들고
+    돈다. 백업 순번은 installer(`nextFreeBackupPath`)와 같은 규약이다 — 한 슬롯만 두면
+    두 번째 갱신이 사용자 원본 백업을 기계 사본으로 덮는다.
+
+    **보장 범위**: 등록 파일을 leader와 같게 만들어 두는 것까지다. 그 뒤 checkout 안에서
+    지워지거나 symlink로 바뀐 사본은 여기서 조용히 skip되고, run 시작 게이트는 설치본
+    (=leader)만 검사하므로 그 결손은 탐지되지 않는다.
+    """
+    if same_worktree_path(leader, checkout):
+        return ()
+    installed: list[str] = []
+    seen: set[tuple[int, int]] = set()
+    for relative in HOST_HOOK_REGISTRATION_FILES:
+        source = leader / relative
+        target = checkout / relative
+        if not source.is_file() or _has_symlinked_component(leader, source):
+            continue
+        # 대소문자를 무시하는 파일시스템에서는 `.Codex`와 `.codex`가 같은 파일이다.
+        # 두 이름으로 각각 쓰면 leader에 없는 이름의 디렉터리가 checkout에 생긴다.
+        # `normcase`는 POSIX에서 항등이라 경로 문자열로는 구분할 수 없다 — inode로 본다.
+        info = source.stat()
+        key = (info.st_dev, info.st_ino)
+        if key in seen:
+            continue
+        seen.add(key)
+        if target.is_symlink() or _has_symlinked_component(checkout, target):
+            continue
+        if target.is_file() and target.read_bytes() == source.read_bytes():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.is_file():
+            shutil.copy2(target, _next_free_backup(target))
+        shutil.copy2(source, target)
+        installed.append(str(relative))
+    return tuple(installed)
 
 
 def copy_declared_worktree_files(

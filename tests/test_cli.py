@@ -3005,7 +3005,7 @@ design-values-confirmed: n/a
                     self.assertFalse((project_root / ".agent-flow" / "kit.json").exists())
                     self.assertFalse((worktree / ".agent-flow" / "kit.json").exists())
 
-    def test_node_installer_from_external_codex_worktree_updates_git_common_install(self) -> None:
+    def test_node_installer_from_external_codex_worktree_is_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
@@ -3016,6 +3016,7 @@ design-values-confirmed: n/a
             subprocess.run(("git", "worktree", "add", "-q", "--detach", str(worktree), "HEAD"), cwd=project_root, check=True)
             node = _node_executable()
             env = _node_test_env(HOME=str(home))
+            leader_kit = (project_root / ".agent-flow" / "kit.json").read_bytes()
 
             result = subprocess.run(
                 (
@@ -3030,11 +3031,19 @@ design-values-confirmed: n/a
                 check=False,
             )
 
+            # leader를 PROJECT로 잡아 install을 끝내는 예전 경로는 leader의
+            # CLAUDE.md/AGENTS.md를 백업 없이 덮고, tracked `.gitignore`를 고쳐 leader를
+            # dirty로 만들고, 미선택 profile을 지운다. 그래서 여기서는 아무것도 쓰지
+            # 않는다. 다만 leader에 설치본이 이미 있으면 "할 일이 없음"이지 실패가
+            # 아니라서 managed worktree 분기와 같은 rc 0으로 건너뛴다 - 같은 정책인데
+            # rc만 갈라지면 install을 CI/부트스트랩에 넣은 사용자가 worktree 안에서만
+            # 스크립트 전진이 죽는다.
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertTrue((project_root / ".agent-flow" / "kit.json").is_file())
+            self.assertIn("worktree install skipped", result.stdout)
+            self.assertEqual((project_root / ".agent-flow" / "kit.json").read_bytes(), leader_kit)
             self.assertFalse((worktree / ".agent-flow" / "kit.json").exists())
 
-    def test_legacy_node_installer_from_external_codex_worktree_updates_git_common_install(self) -> None:
+    def test_legacy_node_installer_from_external_codex_worktree_is_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir) / "project"
             project_root.mkdir()
@@ -3045,6 +3054,7 @@ design-values-confirmed: n/a
             subprocess.run(("git", "worktree", "add", "-q", "--detach", str(worktree), "HEAD"), cwd=project_root, check=True)
             node = _node_executable()
             env = _node_test_env(HOME=str(home))
+            leader_kit = (project_root / ".agent-flow" / "kit.json").read_bytes()
 
             result = subprocess.run(
                 (
@@ -3060,8 +3070,94 @@ design-values-confirmed: n/a
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertTrue((project_root / ".agent-flow" / "kit.json").is_file())
+            self.assertIn("worktree install skipped", result.stdout)
+            self.assertEqual((project_root / ".agent-flow" / "kit.json").read_bytes(), leader_kit)
+            self.assertFalse((project_root / "CLAUDE.md").exists())
             self.assertFalse((worktree / ".agent-flow" / "kit.json").exists())
+
+    def test_node_installers_from_linked_worktree_without_leader_install_are_blocked(self) -> None:
+        # 위 두 테스트는 leader에 설치본이 있는 분기(rc 0 skip)를 고정한다. 없는 분기는
+        # 여전히 fail-closed여야 한다 - 조용히 leader를 PROJECT로 잡으면 다른 checkout의
+        # install이 leader의 tracked 파일을 갈아치운다. `_init_git_repo`는 stub kit.json을
+        # 만들므로 여기서는 맨 git repo로 세운다.
+        installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            node = _node_executable()
+            for installer_name in installers:
+                with self.subTest(installer=installer_name):
+                    project_root = root / f"{installer_name}-bare-leader"
+                    project_root.mkdir()
+                    subprocess.run(("git", "init", "-q", "-b", "main"), cwd=project_root, check=True)
+                    subprocess.run(("git", "config", "user.email", "test@example.com"), cwd=project_root, check=True)
+                    subprocess.run(("git", "config", "user.name", "Test User"), cwd=project_root, check=True)
+                    (project_root / "README.md").write_text("# test\n", encoding="utf-8")
+                    subprocess.run(("git", "add", "-A"), cwd=project_root, check=True)
+                    subprocess.run(("git", "commit", "-q", "-m", "init"), cwd=project_root, check=True)
+                    home = root / f"{installer_name}-home"
+                    worktree = home / ".codex" / "worktrees" / "slice" / "project"
+                    worktree.parent.mkdir(parents=True)
+                    subprocess.run(
+                        ("git", "worktree", "add", "-q", "--detach", str(worktree), "HEAD"),
+                        cwd=project_root,
+                        check=True,
+                    )
+
+                    result = subprocess.run(
+                        (
+                            node,
+                            str(Path(__file__).resolve().parents[1] / "bin" / installer_name),
+                            "install",
+                        ),
+                        cwd=worktree,
+                        env=_node_test_env(HOME=str(home)),
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertIn("linked worktree install blocked", result.stderr)
+                    self.assertFalse((project_root / ".agent-flow" / "kit.json").exists())
+                    self.assertFalse((worktree / ".agent-flow" / "kit.json").exists())
+
+    def test_node_installers_from_leader_subdirectory_install_into_leader(self) -> None:
+        # `git rev-parse --git-common-dir`은 cwd 기준 상대경로를 낸다: leader 루트에서는
+        # `.git`, `<leader>/src`에서는 `../.git`. 그래서 leader 판정은 cwd(start) 기준으로
+        # 풀어야 한다. toplevel 기준으로 풀면 `<leader>/src`에서 leader의 부모가 leader로
+        # 잡혀 toplevel과 갈라지고, worktree가 하나도 없는데도 install이
+        # "linked worktree install blocked"로 죽는다.
+        installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            node = _node_executable()
+            for installer_name in installers:
+                with self.subTest(installer=installer_name):
+                    project_root = root / f"{installer_name}-leader-subdir"
+                    source_dir = project_root / "src"
+                    source_dir.mkdir(parents=True)
+                    _init_git_repo(project_root)
+
+                    result = subprocess.run(
+                        (
+                            node,
+                            str(Path(__file__).resolve().parents[1] / "bin" / installer_name),
+                            "install",
+                        ),
+                        cwd=source_dir,
+                        env=_node_test_env(),
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertNotIn("worktree install blocked", result.stderr)
+                    self.assertTrue((project_root / ".agent-flow" / "kit.json").is_file(), result.stdout)
+                    self.assertTrue((project_root / ".claude" / "settings.json").is_file(), result.stdout)
+                    # 하위 디렉터리가 자기 설치본을 갖게 되면 leader와 두 벌이 된다.
+                    self.assertFalse((source_dir / ".agent-flow").exists())
+                    self.assertFalse((source_dir / ".claude").exists())
 
     def test_node_runner_rejects_unbound_external_codex_worktree_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

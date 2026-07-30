@@ -11,7 +11,12 @@ from agent_flow.core.markers import completion_gate_marker_values
 from agent_flow.core.commands import run_safe_command
 from agent_flow.core.profiles import active_profile_ids, load_profile_payload
 from agent_flow.core.profile_routing import routed_profile_skills
-from agent_flow.core.worktree_isolation import git_repo_state, leader_root_for
+from agent_flow.core.worktree_isolation import (
+    WorktreeIsolationError,
+    git_repo_state,
+    leader_root_for,
+    list_registered_worktrees,
+)
 from agent_flow.core.skill_resolver import (
     CODE_PHASES,
     PhaseSkills,
@@ -381,7 +386,17 @@ def _checkout_roots(project_root: Path) -> tuple[str, ...]:
     leader = leader_root_for(project_root)
     if leader is not None:
         add(leader)
-    checkout_parent = Path(leader if leader is not None else project_root) / ".agent-flow" / "worktrees"
+    base = Path(leader if leader is not None else project_root)
+    try:
+        # 등록부가 authority다. 관리 루트 밖 linked worktree(Orca 워크스페이스 등)는
+        # 디렉터리 스캔에 안 잡히고, 그러면 그 checkout에서 읽은 skill이 전부
+        # 미인정으로 차단된다. 조회가 실패하면 아래 스캔 결과만 남는다 — 실패로
+        # 목록을 넓히지는 않는다.
+        for registered in list_registered_worktrees(base):
+            add(registered.path)
+    except WorktreeIsolationError:
+        pass
+    checkout_parent = base / ".agent-flow" / "worktrees"
     try:
         entries = sorted(checkout_parent.iterdir())
     except OSError:

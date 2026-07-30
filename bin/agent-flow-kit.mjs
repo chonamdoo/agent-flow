@@ -122,6 +122,21 @@ function installProject() {
     }
     return;
   }
+  // linked worktree(Orca의 `~/orca/workspaces/<repo>/<slug>` 등)도 managed worktree와
+  // 같은 정책이다. `resolveInstallRoot`가 leader로 올라가 버리면 다른 checkout에서
+  // leader의 tracked 파일(bootstrap markdown, .gitignore, profiles)을 갈아치운다.
+  const linkedLeader = resolveLinkedWorktreeLeader(requestedRoot);
+  if (linkedLeader) {
+    // managed 분기와 같은 종료코드 정책이다(leader에 설치본이 있으면 skip + rc 0).
+    // 갈라지면 install을 CI/부트스트랩에 넣은 사용자가 worktree 안에서만 죽는다.
+    if (fs.existsSync(path.join(linkedLeader, ".agent-flow", "kit.json"))) {
+      console.log(`agent-flow already installed root=${linkedLeader}`);
+      console.log("worktree install skipped; reinstall from the leader checkout if needed");
+    } else {
+      throw new Error("linked worktree install blocked; install from the leader checkout first");
+    }
+    return;
+  }
   const root = resolveInstallRoot(requestedRoot);
   const agentFlowDir = path.join(root, ".agent-flow");
   const profile = detectProfile(root);
@@ -849,6 +864,8 @@ function resolveInstallRoot(start) {
   if (markerIndex !== -1) {
     return parts.slice(0, markerIndex).join(path.sep) || path.sep;
   }
+  // non-git 프로젝트(git repo가 아니거나 git 실행 불가)의 마지막 수단이다. 위의 git
+  // 기반 판정이 전부 null을 낸 경우이므로, 여기서 cwd를 그대로 install root로 쓴다.
   return start;
 }
 
@@ -924,6 +941,19 @@ function resolveGitCommonWorktreeRoot(start) {
     return null;
   }
   return path.dirname(resolvedCommonDir);
+}
+
+// linked worktree 판정. leader를 cwd와 직접 비교하면 `<leader>/src`처럼 leader의
+// 하위 디렉토리에서 install하는 정상 경로까지 막힌다 - 그래서 이 checkout의
+// toplevel과 견준다. linked worktree에서만 toplevel(worktree root)과
+// leader(git common dir의 부모)가 갈라진다.
+function resolveLinkedWorktreeLeader(start) {
+  const topLevel = gitOutput(start, ["rev-parse", "--show-toplevel"]);
+  const leader = resolveGitCommonWorktreeRoot(start);
+  if (!topLevel || !leader || samePath(leader, topLevel)) {
+    return null;
+  }
+  return leader;
 }
 
 function gitOutput(cwd, args) {
