@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 KIT_ROOT = Path(__file__).resolve().parent.parent
@@ -196,6 +197,18 @@ def test_core_database_role_is_mapped_and_dependency_gated():
     assert ":core:database" not in forbidden_gradle_dependencies("core-data", {})
 
 
+def test_container_build_file_does_not_bind_to_placeholder_role():
+    """반증: leaf 모듈의 build.gradle.kts가 `<adapter>` 하위 모듈로 오인됐다."""
+    from agent_flow.core.architecture_lint import match_role
+
+    roles = _android_architecture()["roles"]
+    match = match_role("core/platform/build.gradle.kts", roles)
+
+    assert match is not None
+    assert match.role["id"] == "core-platform"
+    assert match.captures == {}
+
+
 def test_inactive_profile_is_reported_separately_from_passed(tmp_path, capsys):
     """반증: 한 파일도 검사하지 않은 필수 gate가 "passed"를 찍으면 통과와 비적용이 같아진다."""
     from agent_flow.core.architecture_lint import inactive_lint_profile_ids, main
@@ -218,6 +231,66 @@ def test_inactive_profile_is_reported_separately_from_passed(tmp_path, capsys):
     assert inactive_lint_profile_ids(adopted, ["android"], []) == []
     assert main(["--root", str(adopted), "--profile", "android", "--files"]) == 0
     assert "android: architecture lint passed" in capsys.readouterr().out
+
+    assert main(["--root", str(tmp_path), "--profile", "generic", "--files"]) == 0
+    out = capsys.readouterr().out
+    assert "generic: architecture lint n/a (architecture contract absent)" in out
+    assert "architecture lint passed" not in out
+
+
+def test_changed_file_discovery_fails_closed_when_git_fails(tmp_path, monkeypatch):
+    """반증: git 실패가 빈 후보가 되면 필수 architecture gate가 거짓 green이 된다."""
+    from agent_flow.core import architecture_lint
+    from agent_flow.core.commands import SafeCommandResult
+
+    (tmp_path / ".git").mkdir()
+    failed = SafeCommandResult(
+        args=("git", "diff"),
+        returncode=128,
+        stdout="",
+        stderr="fatal: cannot read index",
+    )
+    monkeypatch.setattr(architecture_lint, "run_safe_command", lambda *args, **kwargs: failed)
+
+    with pytest.raises(ValueError, match="git diff.*cannot read index"):
+        architecture_lint.changed_files(tmp_path)
+
+
+def test_unmapped_files_outside_managed_roots_do_not_fail_android_lint(tmp_path):
+    """반증: 채택 저장소의 build-logic 변경까지 role 미매핑으로 막으면 필수 gate가 개발을 멈춘다."""
+    from agent_flow.core.architecture_lint import lint_project
+
+    (tmp_path / "core" / "domain" / "auth").mkdir(parents=True)
+    outside = tmp_path / "build-logic" / "convention" / "ConventionPlugin.kt"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("class ConventionPlugin\n", encoding="utf-8")
+    inside = tmp_path / "core" / "unmapped" / "Thing.kt"
+    inside.parent.mkdir(parents=True)
+    inside.write_text("class Thing\n", encoding="utf-8")
+
+    assert lint_project(tmp_path, "android", files=[str(outside.relative_to(tmp_path))]) == []
+    findings = lint_project(tmp_path, "android", files=[str(inside.relative_to(tmp_path))])
+    assert [finding.message for finding in findings] == [
+        "path is outside profile architecture role mapping"
+    ]
+
+
+def test_react_native_android_escalation_keeps_js_app_out_of_android_profile(tmp_path):
+    """반증: android 변경이 하나 있다고 Expo Router의 app 트리까지 Android 규칙으로 보면 안 된다."""
+    from agent_flow.core.architecture_lint import lint_profiles
+
+    native = tmp_path / "android" / "app" / "src" / "main" / "MainActivity.kt"
+    native.parent.mkdir(parents=True)
+    native.write_text("class MainActivity\n", encoding="utf-8")
+    route = tmp_path / "app" / "(tabs)" / "index.tsx"
+    route.parent.mkdir(parents=True)
+    route.write_text("export class CheckoutDto {}\n", encoding="utf-8")
+    files = [str(native.relative_to(tmp_path)), str(route.relative_to(tmp_path))]
+
+    findings = lint_profiles(tmp_path, ["react-native"], files=files)
+
+    assert "android" in findings
+    assert all(finding.path != str(route.relative_to(tmp_path)) for finding in findings["android"])
 
 
 def test_schema_role_vocabulary_covers_every_shipped_role():
@@ -265,6 +338,32 @@ def test_failure_headline_names_only_the_profiles_it_checked(tmp_path, capsys):
     assert "android: architecture lint n/a (activation_roots absent)" in err
 
 
+def test_failure_output_separates_passed_and_unconfigured_profiles(tmp_path, capsys):
+    """반증: 다른 profile 하나가 실패해도 나머지 pass와 n/a 사실은 사라지면 안 된다."""
+    from agent_flow.core.architecture_lint import main
+
+    root = tmp_path / "mixed-status"
+    (root / "src" / "core" / "domain" / "auth").mkdir(parents=True)
+    (root / "src" / "core" / "data" / "auth").mkdir(parents=True)
+    source = root / "src" / "core" / "domain" / "auth" / "Thing.py"
+    source.write_text("class Screen:\n    pass\n", encoding="utf-8")
+
+    assert main(
+        [
+            "--root",
+            str(root),
+            "--profile",
+            "nextjs,python,generic",
+            "--files",
+            "src/core/domain/auth/Thing.py",
+        ]
+    ) == 1
+    err = capsys.readouterr().err
+    assert "nextjs: architecture lint failed" in err
+    assert "python: architecture lint passed" in err
+    assert "generic: architecture lint n/a (architecture contract absent)" in err
+
+
 def _shipped_role_ids() -> set[str]:
     profiles_dir = KIT_ROOT / "src" / "agent_flow" / "profiles"
     shipped: set[str] = set()
@@ -281,13 +380,15 @@ def test_every_shipped_role_declares_its_gradle_stance():
     """반증: 표에 없는 role은 의존 규칙 0개로 조용히 통과한다. 무제약과 누락이 같아진다."""
     from agent_flow.core.architecture_lint import (
         FORBIDDEN_GRADLE_MODULES,
+        REQUIRED_GRADLE_MODULES,
         UNCONSTRAINED_GRADLE_ROLES,
     )
 
-    covered = set(FORBIDDEN_GRADLE_MODULES) | set(UNCONSTRAINED_GRADLE_ROLES)
+    constrained = set(FORBIDDEN_GRADLE_MODULES) | set(REQUIRED_GRADLE_MODULES)
+    covered = constrained | set(UNCONSTRAINED_GRADLE_ROLES)
     assert _shipped_role_ids() - covered == set()
     assert covered - _shipped_role_ids() == set()
-    assert set(FORBIDDEN_GRADLE_MODULES) & set(UNCONSTRAINED_GRADLE_ROLES) == set()
+    assert constrained & set(UNCONSTRAINED_GRADLE_ROLES) == set()
 
 
 def test_unresolved_placeholder_module_is_dropped_instead_of_silently_dead():

@@ -335,6 +335,13 @@ def test_sdui_depends_on_the_presentation_contract():
     assert "sdui-udf-contract: pass|fail|n/a" in sdui_angle
     assert "sdui-udf-contract: pass|fail|n/a" in SDUI_SKILL.read_text(encoding="utf-8")
 
+    checklist = (SDUI_SKILL.parent / "references" / "sdui-review-checklist.md").read_text(
+        encoding="utf-8"
+    )
+    item_nine = checklist.split("## 9. `sdui-udf-contract`", 1)[1]
+    for evidence_rule in ("Source:", "Rule:", "How to check:", "Verdict:"):
+        assert evidence_rule in item_nine
+
 
 def test_promoted_presentation_rules_stay_project_neutral():
     """반증: `AppResult<T>`를 올렸다가 존재하지 않는 타입을 요구한 적이 있다."""
@@ -409,6 +416,14 @@ def test_the_three_contradicted_rules_are_reconciled():
     presentation = PRESENTATION_SKILL.read_text(encoding="utf-8")
     assert "where acquisition happens, not the call shape" in presentation
     assert "stateful overload" in presentation
+    assert "screen/content composables" not in presentation.lower()
+    assert "stateless rendering composables" in presentation
+    clean = (SKILLS / "android-clean-architecture" / "SKILL.md").read_text(encoding="utf-8")
+    assert "screen/content composables" not in clean.lower()
+    assert "stateless rendering composables" in clean.lower()
+    udf = " ".join((REVIEW_ANGLES / "udf.md").read_text(encoding="utf-8").split())
+    assert "screen and content composables do not" not in udf
+    assert "content composables below the screen entry do not" in udf
 
     # 존재하지 않는 타입 요구가 android profile의 다른 앵글로 옮겨가지 않게 함께 본다.
     generalized = (

@@ -48,9 +48,10 @@ stateless for the same reason a hand-written screen does.
    a finding. Where the skill's `SharingStarted` guidance applies, confirm no
    caller reads the stale `.value` as a fresh source after the subscriber timeout.
 
-5. **`udf-stateless-content-composable`** — screen and content composables do not
-   call `hiltViewModel()`, `viewModel()`, `collectAsStateWithLifecycle()`, or a
-   navigation API. They receive `uiState` plus callbacks and emit actions upward.
+5. **`udf-stateless-content-composable`** — content composables below the screen
+   entry do not call `hiltViewModel()`, `viewModel()`,
+   `collectAsStateWithLifecycle()`, or a navigation API. They receive `uiState`
+   plus callbacks and emit actions upward.
 
 6. **`udf-route-owns-collection`** — the screen entry composable (a `*Route`, or
    the stateful overload of a same-named screen) owns state-holder acquisition,

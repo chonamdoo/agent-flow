@@ -84,8 +84,8 @@ HomeRepositoryImpl -> HomeRemoteDataSource -> HomeApiService
 
 - Route/top-level wiring obtains ViewModel, collects state/events with lifecycle,
   performs navigation/platform calls, and passes plain state/callbacks down.
-- Screen/content composables are stateless and do not call `hiltViewModel()`,
-  `viewModel()`, lifecycle collection, or navigation APIs.
+- Stateless rendering composables do not call `hiltViewModel()`, `viewModel()`,
+  lifecycle collection, or navigation APIs; route/top-level entry wiring owns them.
 - ViewModels inject use cases, one context's repository interface, and platform
   abstractions — never repository impls, data sources, API services, DTOs,
   `Context`, `Activity`, or `NavController`. A use case is required when the call

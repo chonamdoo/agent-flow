@@ -193,8 +193,8 @@ Split state-holder wiring from rendering. The screen entry composable — a `*Ro
 - route/top-level wiring collects `uiState` with `collectAsStateWithLifecycle()`
 - route/top-level wiring collects `uiEventFlow` inside `LaunchedEffect` and lifecycle-aware collection when the screen needs navigation or snackbars
 - pass plain `uiState` and callbacks to child composables
-- screen/content composables are stateless: receive `uiState` and callbacks, render, and emit actions upward
-- screen/content composables should not call `hiltViewModel()`, `viewModel()`, `collectAsStateWithLifecycle()`, or navigation APIs
+- stateless rendering composables receive `uiState` and callbacks, render, and emit actions upward
+- stateless rendering composables do not call `hiltViewModel()`, `viewModel()`, `collectAsStateWithLifecycle()`, or navigation APIs
 - child composables should not know about Hilt, repositories, use cases, or ViewModels
 - collect navigation and one-shot commands with `collect`, not `collectLatest`
 - Preview and Compose UI tests target the stateless screen/content composable with a fake `UiState`.
@@ -250,7 +250,7 @@ stateless-content rule — a node renderer is a content composable.
 - Preview and Compose UI tests render the stateless screen with a fake `UiState`.
 - the screen entry composable (a route, or the stateful overload of a same-named screen) collects with lifecycle APIs and passes state/callbacks downward.
 - that same entry composable owns state-holder acquisition, state collection, one-shot event collection, and navigation/platform calls; a multi-holder screen may receive its holders as parameters.
-- Screen/content composables are stateless and do not obtain ViewModels, lifecycle flows, Hilt dependencies, or navigation APIs.
+- Stateless rendering composables do not obtain ViewModels, lifecycle flows, Hilt dependencies, or navigation APIs; the explicitly stateful screen entry owns that wiring.
 - `@Provides` and `@Binds` are placed in the layer that owns the constructed dependency.
 - assisted ViewModel factories pass only route values through assisted parameters.
 - use cases with `@Inject constructor` are not manually bound without need.

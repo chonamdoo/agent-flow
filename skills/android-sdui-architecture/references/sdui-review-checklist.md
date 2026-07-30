@@ -131,3 +131,20 @@ compare the count against the existing semantic component list.
 Verdict: `fail` only with a concrete third occurrence identified. `n/a` is the
 correct verdict when the change is diff-local and repository-wide repetition was
 not surveyed — say so rather than guessing.
+
+## 9. `sdui-udf-contract`
+
+Source: PART 11.
+
+Rule: the upward event type carries only UI input, the downward one-shot type
+uses a deliberate single-consumer channel that neither drops nor replays, and
+renderers stay stateless.
+
+How to check: inspect the event/effect types and their transport, then inspect
+renderer and node composables for state-holder creation, state collection, or
+navigation calls below the screen entry.
+
+Verdict: `fail` when durable state rides the effect channel, the effect transport
+drops or replays one-shot work, or a renderer/node composable owns screen state
+or navigation. `n/a` when the change does not touch these contracts.
+

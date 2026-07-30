@@ -23,7 +23,7 @@ from agent_flow.core.artifacts import (
     write_recovery,
     write_stage_result,
 )
-from agent_flow.core.architecture_lint import lint_profiles
+from agent_flow.core.architecture_lint import main as architecture_lint_main
 from agent_flow.core.context_contract import (
     append_context_event,
     check_system_invariants,
@@ -991,18 +991,18 @@ def main(argv: list[str] | None = None) -> int:
                 _profile_source_root(root, requested_root, getattr(args, "worktree", None)),
                 args.profile,
             )
-            findings_by_profile = lint_profiles(command_root, profile_ids, files=args.files)
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 1
-        if not any(findings_by_profile.values()):
-            print(f"{','.join(profile_ids)}: architecture lint passed")
-            return 0
-        print(f"{','.join(profile_ids)}: architecture lint failed", file=sys.stderr)
-        for profile_id, findings in findings_by_profile.items():
-            for finding in findings:
-                print(f"- [{profile_id}] {finding.path}: {finding.message}", file=sys.stderr)
-        return 1
+        lint_args = [
+            "--root",
+            str(command_root),
+            "--profile",
+            ",".join(profile_ids),
+        ]
+        if args.files is not None:
+            lint_args.extend(["--files", *args.files])
+        return architecture_lint_main(lint_args)
 
     if args.command == "eval":
         fixture_path = _resolve_project_path(root, args.fixtures) if args.fixtures else None
