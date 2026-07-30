@@ -60,7 +60,9 @@ def _bundled_shipped_skill(project: Path, name: str) -> Path:
     )
 
 
-def _required_for(project: Path, changed_files: list[str]) -> set[str]:
+def _required_for(
+    project: Path, changed_files: list[str], *, profile: dict | None = None
+) -> set[str]:
     return {
         skill.name
         for skill in resolve_phase_skills(
@@ -68,6 +70,7 @@ def _required_for(project: Path, changed_files: list[str]) -> set[str]:
             phase_id="implement",
             changed_files=changed_files,
             host="claude",
+            profile=profile,
         ).required
     }
 
