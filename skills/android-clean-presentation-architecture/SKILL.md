@@ -1,6 +1,9 @@
 ---
 name: android-clean-presentation-architecture
 description: Defines Android Clean Architecture presentation-layer guidance for Hilt DI, ViewModel, StateFlow uiState, one-shot UI events, and Compose screen wiring. Use when creating, modifying, or reviewing Android feature presentation code for state-based UI and domain-to-UiModel boundaries.
+workflowPhases: [design, ddd-design, implement, implement-fix, red, green, refactor, fix-loop, review, final-review, multi-review, architecture-review, pr-comment-fix, pr-ci-fix]
+taskTerms: [viewmodel, uistate, uievent, uiaction, uimodel, stateflow, state holder, compose screen, 상태 홀더, 화면 상태, 프레젠테이션]
+pathGlobs: ["**/*ViewModel.kt", "**/*UiState.kt", "**/*Screen.kt", "**/presentation/src/main/**/*.kt"]
 required_markers:
   - "presentation-skill: android"
   - "presentation-state-based-development: applied|n/a"

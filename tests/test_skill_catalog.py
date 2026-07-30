@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -256,3 +257,47 @@ def test_doctor_reports_a_project_skill_that_shadows_an_installed_one(tmp_path, 
         finding.name for finding in result.findings if finding.kind == skill_catalog.COLLISION
     ]
     assert collisions == ["edge-to-edge"]
+
+
+def _bundled_shipped_skill(project: Path, name: str) -> None:
+    """install이 kit skill을 앉히는 자리. source가 `bundled`라 스스로 선언해야 활성화된다."""
+    destination = project / ".agent-flow" / "skills" / name
+    destination.mkdir(parents=True)
+    shutil.copyfile(REPO / "skills" / name / "SKILL.md", destination / "SKILL.md")
+
+
+def _required_for(project: Path, changed_files: list[str]) -> set[str]:
+    return {
+        skill.name
+        for skill in resolve_phase_skills(
+            project_root=project,
+            phase_id="implement",
+            changed_files=changed_files,
+            host="claude",
+        ).required
+    }
+
+
+def test_shipped_presentation_skill_activates_on_a_presentation_change(tmp_path):
+    """설치만 되고 활성화가 안 되면 UDF·use case 규칙이 프롬프트에 영원히 안 들어온다."""
+    project = tmp_path / "app"
+    _bundled_shipped_skill(project, "android-clean-presentation-architecture")
+
+    required = _required_for(
+        project,
+        ["feature/chat/presentation/src/main/java/io/levvels/samantha/feature/chat/presentation/ChatViewModel.kt"],
+    )
+
+    assert "android-clean-presentation-architecture" in required
+
+
+def test_shipped_presentation_skill_stays_off_for_a_data_layer_change(tmp_path):
+    project = tmp_path / "app"
+    _bundled_shipped_skill(project, "android-clean-presentation-architecture")
+
+    required = _required_for(
+        project,
+        ["core/data/chat/src/main/java/io/levvels/samantha/core/data/chat/ChatRepositoryImpl.kt"],
+    )
+
+    assert "android-clean-presentation-architecture" not in required
