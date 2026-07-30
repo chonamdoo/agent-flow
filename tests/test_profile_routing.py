@@ -27,6 +27,7 @@ from agent_flow.core.local_skills import (
 from agent_flow.core.profile_routing import (
     RoutedSkill,
     missing_routed_report,
+    routable_group_skills,
     routed_profile_skills,
 )
 from agent_flow.core.profiles import load_profile_payload
