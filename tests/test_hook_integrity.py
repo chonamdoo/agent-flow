@@ -488,22 +488,19 @@ def test_replaced_launcher_interpreter_is_detected(tmp_path):
     )
 
 
-def test_world_writable_launcher_interpreter_is_detected(tmp_path):
-    """group write는 정상 환경(homebrew, CI toolcache)이라 위반이 아니다.
+def test_writable_launcher_interpreter_is_not_a_violation(tmp_path):
+    """권한 비트는 이 자리에서 쓸 수 있는 신호가 아니다.
 
-    거기까지 막으면 정당한 설치본의 모든 run이 시작 거부된다 — 교체는 digest가 잡는다.
+    실측: GitHub runner의 `/opt/hostedtoolcache/Python/.../python3.12`는 world-writable이고
+    homebrew toolchain은 group-writable이다. 그걸 위반으로 보면 정당한 환경의 모든 run이
+    시작 거부된다. 교체 탐지는 digest가 맡는다.
     """
     _install(tmp_path)
     interpreter = tmp_path / ".agent-flow" / "python-stub"
-    interpreter.chmod(0o775)
-    assert not any(
-        "writable" in value for value in _violations(tmp_path)
-    )
-    interpreter.chmod(0o777)
-    assert any(
-        "managed launcher interpreter is world writable" in value
-        for value in _violations(tmp_path)
-    )
+    for mode in (0o775, 0o777):
+        interpreter.chmod(mode)
+        assert not any("writable" in value for value in _violations(tmp_path))
+    interpreter.chmod(0o755)
 
 
 def test_kit_json_without_the_launcher_interpreter_is_detected(tmp_path):

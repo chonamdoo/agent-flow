@@ -437,11 +437,10 @@ def _launcher_python_violations(kit: dict) -> Iterator[str]:
         # launcher의 두 exit 127 분기 중 하나다. 게이트가 이걸 안 보면 hook은
         # 그 실패를 DEVNULL로 버려 사용자에게는 승인 무음으로만 보인다.
         yield f"the managed launcher interpreter is not executable: {recorded_path}"
-    if identity.st_mode & stat.S_IWOTH:
-        # group write는 위반으로 보지 않는다. homebrew와 CI 이미지의 toolchain
-        # (`/opt/hostedtoolcache/...`)이 정상적으로 group-writable이라, 그걸 막으면
-        # 정당한 환경의 모든 run이 시작 거부된다. 교체 자체는 아래 digest가 잡는다.
-        yield f"the managed launcher interpreter is world writable: {recorded_path}"
+    # 권한 비트는 이 자리에서 쓸 수 있는 신호가 아니다. 실측: GitHub runner의
+    # `/opt/hostedtoolcache/Python/.../python3.12`는 world-writable이고 homebrew의
+    # toolchain은 group-writable이다. 그걸 위반으로 보면 정당한 환경의 모든 run이
+    # 시작 거부된다. 교체는 아래 digest가 잡는다 — 그게 이 검사의 오라클이다.
     try:
         actual = hashlib.sha256(interpreter.read_bytes()).hexdigest()
     except OSError:
