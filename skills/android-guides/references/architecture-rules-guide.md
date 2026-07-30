@@ -40,24 +40,31 @@ ownership notes. Project-local rules win when they are explicit.
 
 ## Error Type Ownership
 
-- Keep domain-facing app errors and results in a shared domain error module, for
-  example `core/domain/error/model/AppError.kt`, `AppResult.kt`,
-  `Severity.kt`, `HttpStatus.kt`, and `ServerCode.kt`.
-- Keep raw transport failures in `core/network/error/NetworkFailure.kt`.
-- `HttpStatus` and `ServerCode` may stay in network only when they remain raw
-  diagnostics. If `AppError` exposes them as field types, own them in domain to
-  avoid a domain-to-network dependency.
+These rules apply to whatever typed error and result abstraction the project
+actually declares. The names below are illustrative, not required types.
+
+- Keep domain-facing errors and the project's result type in a shared domain
+  error module, for example under `core/domain/error/`, together with the
+  severity and server/status code types that error exposes as fields.
+- Keep raw transport failures in the network module, for example
+  `core/network/error/NetworkFailure.kt`.
+- Status and server code types may stay in network only while they remain raw
+  diagnostics. Once the domain error exposes them as field types, own them in
+  domain to avoid a domain-to-network dependency.
+- If the project defines no typed result or error abstraction, follow its
+  existing `Result`/exception contract. Do not introduce one as a review
+  requirement.
 
 ## Error Flow
 
-- Remote data sources call Retrofit and may throw or return `NetworkFailure`.
-- Repository implementations in `core:data:*` catch `NetworkFailure`, map it to
-  `AppError`, and return `AppResult<T>`.
-- Use cases return `AppResult<T>` and add `AppError` only for domain/business
-  rule failures.
-- ViewModels map `AppResult<T>` to `UiState` and `UiEvent`.
-- Presentation mappers map `AppError` to feature `ErrorUiModel` or shared
-  presentation error models.
+- Remote data sources call Retrofit and may throw or return a transport failure.
+- Repository implementations in `core:data:*` catch the transport failure, map it
+  to the domain error, and return the project's result type.
+- Use cases return that same result type and add domain errors only for
+  domain/business rule failures.
+- ViewModels map the result type to `UiState` and `UiEvent`.
+- Presentation mappers map the domain error to a feature `ErrorUiModel` or a
+  shared presentation error model.
 - Routes collect state/events and perform navigation or platform UI. ViewModels
   must not depend on `Router`, `NavController`, or `Context`.
 
@@ -69,16 +76,16 @@ ownership notes. Project-local rules win when they are explicit.
   `source.remote`/`source.local`, DTOs in `model`, and conversions in `mapper`?
 - Does the repository act as the single source of truth when cache/local data
   exists?
-- Is `NetworkFailure -> AppError` translated once in repository/data mappers,
-  not in use cases or ViewModels?
-- Does presentation expose `ErrorUiModel`, not `AppError` or `NetworkFailure`,
-  to composables?
+- Is the transport-failure to domain-error translation done once in
+  repository/data mappers, not in use cases or ViewModels?
+- Does presentation expose `ErrorUiModel`, not the domain error or the transport
+  failure type, to composables?
 
 ## Anti-patterns
 
 - DTOs, request models, or response models under `api` or `source.remote`.
 - Retrofit, OkHttp, serialization, or `NetworkFailure` types leaking into
   domain or presentation.
-- `AppError -> ErrorUiModel` mapping inside composables.
+- Domain-error to presentation-error mapping inside composables.
 - Base ViewModel, inherited error hooks, class delegation, or global event buses
   for ordinary feature error handling.

@@ -188,8 +188,8 @@ The composable renders these fields. It must not derive them from `items[index �
 
 ## Compose Screen Rule
 
-Split state-holder wiring from rendering:
-- route/top-level wiring obtains the ViewModel with `hiltViewModel()`
+Split state-holder wiring from rendering. The screen entry composable — a `*Route`, or the stateful overload of a same-named `*Screen` — owns wiring; the stateless composable renders. The constraint is **where acquisition happens, not the call shape**: a screen with several state holders may receive holders the navigation entry created as parameters.
+- the screen entry composable obtains the ViewModel with `hiltViewModel()`, or receives it from the navigation entry that created it
 - route/top-level wiring collects `uiState` with `collectAsStateWithLifecycle()`
 - route/top-level wiring collects `uiEventFlow` inside `LaunchedEffect` and lifecycle-aware collection when the screen needs navigation or snackbars
 - pass plain `uiState` and callbacks to child composables
@@ -248,8 +248,8 @@ stateless-content rule — a node renderer is a content composable.
 - mixed section lists use one sealed `*ListItemUiModel` with stable keys, `contentType`, and an exhaustive `when`.
 - neighbor/index/selection display flags are precomputed in the state holder or mapper, not derived inside a composable.
 - Preview and Compose UI tests render the stateless screen with a fake `UiState`.
-- Route/top-level Compose wiring collects with lifecycle APIs and passes state/callbacks downward.
-- Route/top-level wiring owns ViewModel collection, one-shot event collection, and navigation/platform calls.
+- the screen entry composable (a route, or the stateful overload of a same-named screen) collects with lifecycle APIs and passes state/callbacks downward.
+- that same entry composable owns state-holder acquisition, state collection, one-shot event collection, and navigation/platform calls; a multi-holder screen may receive its holders as parameters.
 - Screen/content composables are stateless and do not obtain ViewModels, lifecycle flows, Hilt dependencies, or navigation APIs.
 - `@Provides` and `@Binds` are placed in the layer that owns the constructed dependency.
 - assisted ViewModel factories pass only route values through assisted parameters.

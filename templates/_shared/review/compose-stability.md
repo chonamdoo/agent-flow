@@ -9,12 +9,13 @@ Review Jetpack Compose code for recomposition correctness and stability.
    - Are `List`/`Map` parameters using `ImmutableList` / `ImmutableMap` from `kotlinx.collections.immutable` (not raw `List<T>`)?
 
 2. **Recomposition scope isolation**
-   - Are state collection points pushed as far down the tree as possible (`collectAsStateWithLifecycle()` placed near the consuming composable, not at the screen root)?
+   - Is the **read** of a state value as close to its consumer as possible, so one value change does not recompose the whole screen? Lambda parameters, `derivedStateOf`, and deferred reads inside `Modifier` are the tools; narrowing the read is the goal.
+   - Does flow **collection** stay at the route or top-level composable? `skills/android-clean-presentation-architecture/SKILL.md` Compose Screen Rule owns that boundary: pushing `collectAsStateWithLifecycle()` into a content composable is a UDF violation, not an optimization. Narrow the read, never the collection point.
    - Does a high-frequency state (input, scroll, animation) cause a parent composable to recompose unnecessarily?
 
 3. **State hoisting decisions**
    - Are state owners chosen based on who needs to read AND modify, not just convention?
-   - Are `StateFlow` references passed when collection at child level avoids parent recomposition (vs collecting at parent and passing values)?
+   - Where a child owns UI-local state, is the owner the lowest composable that both reads and writes it? Do not hand a state holder's flow to a child so it can collect there — hoist the value, or pass a lambda that defers the read.
 
 4. **Strong Skipping Mode (Kotlin 2.0.20+) compatibility**
    - Does the change rely on `===` reference equality? Lambdas captured in stable scopes?

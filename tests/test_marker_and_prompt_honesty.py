@@ -386,3 +386,24 @@ def test_viewmodel_dependency_boundary_replaces_the_usecase_only_marker():
     assert "sdui-room-ssot-scope: pass|fail|n/a" in (REVIEW_ANGLES / "sdui.md").read_text(
         encoding="utf-8"
     )
+
+
+def test_the_three_contradicted_rules_are_reconciled():
+    """반증: 두 문서가 같은 어휘로 정반대를 요구하면 리뷰어가 어느 쪽이든 fail을 낼 수 있다."""
+    stability = (REVIEW_ANGLES / "compose-stability.md").read_text(encoding="utf-8")
+    # 값 읽기는 아래로, flow 수집은 진입 composable에. 둘을 구분하지 않으면 UDF와 충돌한다.
+    assert "Narrow the read, never the collection point." in stability
+    assert "skills/android-clean-presentation-architecture/SKILL.md" in stability
+
+    presentation = PRESENTATION_SKILL.read_text(encoding="utf-8")
+    assert "where acquisition happens, not the call shape" in presentation
+    assert "stateful overload" in presentation
+
+    guide = (
+        SKILLS / "android-guides" / "references" / "architecture-rules-guide.md"
+    ).read_text(encoding="utf-8")
+    # samantha 전역에 없는 타입이었다. 프로젝트가 선언한 추상으로 일반화한다.
+    assert "AppResult" not in guide
+    assert "AppError" not in guide
+    assert "the project's result type" in guide
+    assert "existing `Result`/exception contract" in guide
