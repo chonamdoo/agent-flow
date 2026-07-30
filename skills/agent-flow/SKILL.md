@@ -16,7 +16,7 @@ agent-flow run "<task>"
 ```
 
 Do not reinstall agent-flow for each task. Install is project setup, not the normal task entry.
-In a git repo, `agent-flow run "<task>"` starts the run inside `.agent-flow/worktrees/feat-<slug>/` on branch `feat/<slug>`.
+In a git repo, `agent-flow run "<task>"` starts the run inside the sibling folder `<repo>.worktrees/feat-<slug>/` on branch `feat/<slug>`.
 
 When the user types `/agent-flow` with no task:
 
