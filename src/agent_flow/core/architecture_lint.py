@@ -321,10 +321,63 @@ def validate_forbidden_tokens(rel_path: str, text: str, role: dict[str, Any]) ->
     for token in forbidden:
         if not isinstance(token, str) or not token:
             continue
-        lowered_token = token.lower()
-        if any(lowered_token in haystack.lower() for haystack in haystacks):
+        if any(contains_forbidden_token(haystack, token) for haystack in haystacks):
             findings.append(Finding(rel_path, f"{role.get('id', 'role')} contains forbidden token {token}"))
     return findings
+
+
+def contains_forbidden_token(haystack: str, token: str) -> bool:
+    # 원문에서 직접 찾는다. `haystack.lower()`로 접으면 `İ`처럼 소문자화가 길이를 바꾸는
+    # 문자에서 인덱스가 밀려 경계 판정이 엉뚱한 문자를 보거나 IndexError로 게이트가 죽는다.
+    pattern = re.compile(re.escape(token), re.IGNORECASE)
+    position = 0
+    # 겹치는 매치도 봐야 한다. `forbidden`은 사용자가 편집하는 값이라 앞 매치가 경계에서
+    # 떨어졌을 때 그 안쪽의 유효한 험프를 건너뛰면 진짜 위반을 놓친다.
+    while (match := pattern.search(haystack, position)) is not None:
+        if is_token_boundary(haystack, match.start(), match.end()):
+            return True
+        position = match.start() + 1
+    return False
+
+
+def is_token_boundary(haystack: str, start: int, end: int) -> bool:
+    """식별자 경계에서만 토큰을 인정한다.
+
+    단순 부분문자열 비교는 `identity`를 `Entity`로, `Overview`를 `View`로 잡아 필수
+    pre-commit gate가 오탐으로 커밋을 막는다. 반대로 대소문자만 구분하면 `CheckoutDTO`가
+    `Dto`를 피해 진짜 위반을 놓친다. 그래서 단어가 새로 시작하는 자리와 단어가 끝나는
+    자리만 경계로 본다.
+    """
+    previous = haystack[start - 1] if start else ""
+    if previous.isalnum() and not starts_new_word(haystack[start:end], previous):
+        return False
+    return ends_at_boundary(haystack, end)
+
+
+def starts_new_word(matched: str, previous: str) -> bool:
+    head = matched[:1]
+    if not head.isalnum():
+        return True
+    if not head.isupper():
+        # `identity`의 `entity`, `Preview`의 `view`. 소문자 연속은 한 단어다.
+        return False
+    # 대문자 연속 안쪽은 험프가 아니다(`IDENTITY`의 `ENTITY`). 반대로 약어 뒤에 붙은
+    # 혼합 대소문자 토큰은 별개 단어다(`APIView`, `UIViewController`의 `View`).
+    return not previous.isupper() or not matched.isupper()
+
+
+def ends_at_boundary(haystack: str, end: int) -> bool:
+    following = haystack[end : end + 1]
+    if not following.isalnum() or not following.islower():
+        # 숫자와 한글은 단어를 잇지 않는다(`OrderDto2`, 주석의 `OrderDto를`).
+        return True
+    # 복수형은 같은 타입을 가리킨다. `views.py`, `routers.py`, `dtos.ts`가 실제 위반
+    # 파일명이다. `Screenshot`은 `s` 다음이 `h`라 여전히 단어 중간이다.
+    return any(
+        haystack[end : end + len(plural)].lower() == plural
+        and not haystack[end + len(plural) : end + len(plural) + 1].isalnum()
+        for plural in ("s", "es")
+    )
 
 
 def validate_package_suffix(rel_path: str, text: str, role: dict[str, Any], captures: dict[str, str]) -> list[Finding]:
