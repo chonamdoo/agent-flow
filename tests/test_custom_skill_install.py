@@ -1833,7 +1833,11 @@ def test_reinstall_upgrades_an_untouched_bundled_skill(tmp_path: Path, binary: s
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
 def test_reinstall_keeps_a_user_edited_bundled_skill(tmp_path: Path, binary: str) -> None:
-    """불변: 갱신이 사용자 편집을 덮으면 그 자리에 둔 프로젝트 규칙이 사라진다."""
+    """불변: 갱신이 사용자 편집을 덮으면 그 자리에 둔 프로젝트 규칙이 사라진다.
+
+    한 번으로는 부족하다. index의 hash는 발견 시점의 파일에서 뽑으므로, 편집을 한 번
+    건너뛰고 나면 그 편집 내용이 "우리가 쓴 것"으로 기록돼 다음 재설치에서 오라클이
+    일치하고 편집이 덮인다 — 재설치 두 번이면 잃는다."""
     project = tmp_path / f"project-{binary}"
     project.mkdir()
     assert _install_with(binary, project).returncode == 0
@@ -1842,10 +1846,10 @@ def test_reinstall_keeps_a_user_edited_bundled_skill(tmp_path: Path, binary: str
     # index의 hash는 그대로 둔다 — 기록과 내용이 갈리는 것이 곧 사용자 편집이다.
     installed.write_text(edited, encoding="utf-8")
 
-    result = _install_with(binary, project)
-
-    assert result.returncode == 0, result.stderr
-    assert installed.read_text(encoding="utf-8") == edited
+    for _ in range(3):
+        result = _install_with(binary, project)
+        assert result.returncode == 0, result.stderr
+        assert installed.read_text(encoding="utf-8") == edited
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])

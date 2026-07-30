@@ -46,6 +46,7 @@ import {
   nextFreeBackupPath,
   ompExtensionIsKitOwned,
   planReviewerSkillMarkdown,
+  preserveKitSkillHashes,
   productBriefSkillMarkdown,
   projectLauncherDigest,
   projectLauncherPythonRecord,
@@ -719,7 +720,7 @@ function installProjectSkills(forceManaged = false, installSelection = null) {
     }
   }
   links.push(...removeStaleProjectSkillLinks(selected.skills, previousIndex, forceManaged));
-  const index = { ...selected, links };
+  const index = preserveKitSkillHashes({ ...selected, links }, previousIndex, path.join(KIT_ROOT, "skills"));
   fs.writeFileSync(path.join(AF_DIR, "skills", "index.json"), `${JSON.stringify(index, null, 2)}\n`);
   return index;
 }

@@ -43,6 +43,7 @@ import {
   nextFreeBackupPath,
   ompExtensionIsKitOwned,
   planReviewerSkillMarkdown,
+  preserveKitSkillHashes,
   productBriefSkillMarkdown,
   projectLauncherDigest,
   projectLauncherPythonRecord,
@@ -1651,7 +1652,7 @@ function installProjectSkills(root, agentFlowDir, previousIndex, force = false, 
     }
   }
   links.push(...removeStaleProjectSkillLinks(root, selected.skills, previousIndex, force));
-  const index = { ...selected, links };
+  const index = preserveKitSkillHashes({ ...selected, links }, previousIndex, path.join(KIT_ROOT, "skills"));
   fs.writeFileSync(
     path.join(agentFlowDir, "skills", "index.json"),
     `${JSON.stringify(index, null, 2)}\n`,
