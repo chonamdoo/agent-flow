@@ -275,6 +275,156 @@ def test_cleanup_preserves_checkout_with_ignored_files(tmp_path: Path) -> None:
     assert W.worktree_branch_exists(root=root, branch=status.branch)
 
 
+def _ignore_host_dirs(root: Path) -> None:
+    (root / ".gitignore").write_text(".claude/\n.Codex/\n.codex/\n.omp/\n", encoding="utf-8")
+    _git("add", ".gitignore", cwd=root)
+    _git("commit", "-m", "chore: ignore host dirs", cwd=root)
+
+
+def _provisioned_checkout(root: Path, name: str) -> tuple[W.WorktreeStatus, Path]:
+    # 등록 파일은 checkout이 생긴 뒤에 leader에 나타난다(설치·업그레이드가 그 순서다).
+    # 먼저 쓰면 host 디렉터리를 ignore하지 않은 저장소에서 leader가 dirty가 되어
+    # `create_worktree` 자체가 거부하고, 그러면 그 조합을 아예 지나갈 수 없다.
+    status, run_dir = _managed_run(root, name)
+    for rel in W.HOST_HOOK_REGISTRATION_FILES:
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"hook: {root}\n", encoding="utf-8")
+    written = W.provision_host_hook_registrations(leader=root, checkout=status.path)
+    assert written, "등록 파일이 하나도 깔리지 않으면 이 검사는 아무것도 반증하지 못한다"
+    return status, run_dir
+
+
+def test_cleanup_is_not_blocked_by_the_host_hook_registrations_it_provisioned(
+    tmp_path: Path,
+) -> None:
+    """반증: agent-flow가 스스로 깐 등록 파일을 dirty로 세면 관리 worktree는
+    정리 자체가 영영 막힌다 — 모든 checkout이 누적된다."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _ignore_host_dirs(root)
+    status, run_dir = _provisioned_checkout(root, "provisioned")
+
+    result = W.run_worktree_cleanup_transaction(
+        root=root,
+        checkout_path=status.path,
+        run_dir=run_dir,
+        target_branch="main",
+        integration_strategy="merge",
+    )
+    W.complete_worktree_cleanup(result)
+
+    assert not status.path.exists()
+
+
+def test_a_modified_registration_file_still_blocks_cleanup(tmp_path: Path) -> None:
+    """불변: 제외는 leader 바이트와 동일할 때뿐이다. 사용자가 손댄 등록 파일은
+    버려도 되는 파일이 아니다."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _ignore_host_dirs(root)
+    status, run_dir = _provisioned_checkout(root, "edited-registration")
+    edited = status.path / ".claude" / "settings.json"
+    edited.write_text(edited.read_text(encoding="utf-8") + "x", encoding="utf-8")
+
+    with pytest.raises(W.CleanupBlockedError, match="checkout is dirty"):
+        W.run_worktree_cleanup_transaction(
+            root=root,
+            checkout_path=status.path,
+            run_dir=run_dir,
+            target_branch="main",
+            integration_strategy="merge",
+        )
+
+    assert status.path.exists()
+
+
+def test_user_leftovers_still_block_cleanup_next_to_the_registrations(
+    tmp_path: Path,
+) -> None:
+    """반증: 제외 목록이 넓어지면 사용자가 남긴 미추적 파일까지 조용히 지워진다."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _ignore_host_dirs(root)
+    status, run_dir = _provisioned_checkout(root, "leftover")
+    leftover = status.path / "scratch.txt"
+    leftover.write_text("작업 중이던 메모\n", encoding="utf-8")
+
+    with pytest.raises(W.CleanupBlockedError, match="checkout is dirty"):
+        W.run_worktree_cleanup_transaction(
+            root=root,
+            checkout_path=status.path,
+            run_dir=run_dir,
+            target_branch="main",
+            integration_strategy="merge",
+        )
+
+    assert leftover.read_text(encoding="utf-8") == "작업 중이던 메모\n"
+
+
+def test_a_stray_file_inside_a_registration_directory_blocks_cleanup(
+    tmp_path: Path,
+) -> None:
+    """반증: `--ignored=matching`은 ignore된 `.claude/`를 한 줄로 **접어서** 준다.
+
+    그 레코드를 경로 이름만 보고 제외하면 같은 접힘 안에 숨은 사용자 파일까지 함께
+    지워진다. 접힌 레코드는 디렉터리를 직접 walk해서 우리가 깐 등록만 있음을 증명할
+    때에만 뺄 수 있다.
+    """
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _ignore_host_dirs(root)
+    status, run_dir = _provisioned_checkout(root, "stray-inside")
+    stray = status.path / ".claude" / "settings.json.bak"
+    stray.write_text("직접 만든 백업\n", encoding="utf-8")
+
+    with pytest.raises(W.CleanupBlockedError, match="checkout is dirty"):
+        W.run_worktree_cleanup_transaction(
+            root=root,
+            checkout_path=status.path,
+            run_dir=run_dir,
+            target_branch="main",
+            integration_strategy="merge",
+        )
+
+    assert stray.read_text(encoding="utf-8") == "직접 만든 백업\n"
+
+
+def test_cleanup_completes_when_the_worktree_commit_does_not_ignore_host_dirs(
+    tmp_path: Path,
+) -> None:
+    """반증: worktree는 HEAD/base_ref에서 나오므로 그 커밋의 `.gitignore`가 host
+    디렉터리를 담지 않을 수 있다(installer는 leader의 작업본만 고친다). 그러면
+    provision된 파일이 untracked로 남아 `assert_worktree_mergeable`과 `--force` 없는
+    `git worktree remove`가 그 checkout을 영구히 정리 불가로 만든다 — provision 자체가
+    checkout을 누적시킨다. 여기서 깐 것은 저장소 공유 exclude로 함께 가려야 한다.
+    """
+    root = tmp_path / "repo"
+    _init_repo(root)
+    status, run_dir = _provisioned_checkout(root, "unignored")
+
+    assert not (root / ".gitignore").exists(), (
+        "host 디렉터리가 ignore된 상태에서는 이 검사가 아무것도 반증하지 못한다"
+    )
+    assert _git("status", "--porcelain", cwd=status.path).stdout == "", (
+        "provision된 파일이 untracked로 남으면 `assert_worktree_mergeable`과 `--force`"
+        " 없는 `git worktree remove`가 이 checkout을 영구히 정리 불가로 만든다"
+    )
+
+    result = W.run_worktree_cleanup_transaction(
+        root=root,
+        checkout_path=status.path,
+        run_dir=run_dir,
+        target_branch="main",
+        integration_strategy="merge",
+    )
+    W.complete_worktree_cleanup(result)
+
+    assert not status.path.exists()
+    assert not W.worktree_branch_exists(root=root, branch=status.branch)
+
+
+
 def test_unmerged_head_is_archived_but_checkout_and_ref_are_preserved(
     tmp_path: Path,
 ) -> None:

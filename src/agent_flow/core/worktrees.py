@@ -17,6 +17,10 @@ from typing import Any, Callable, Iterable, Iterator, Sequence
 
 from agent_flow.artifact import ACTIVE_MARKER, find_active_runs, read_meta, write_meta
 from agent_flow.core.commands import run_safe_command
+from agent_flow.core.hook_integrity import (
+    JSON_REGISTRATION_FILES,
+    OMP_REGISTRATION_FILE,
+)
 from agent_flow.core.worktree_isolation import (
     RegisteredWorktree,
     FileLeaseUnavailable,
@@ -1317,23 +1321,116 @@ def _validate_cleanup_snapshot(
     ):
         _assert_commit_oid(root=root, oid=oid)
     if require_clean:
-        status = git_safe(
-            "-C",
-            str(path),
-            "status",
-            "--porcelain",
-            "--ignored=matching",
-            cwd=path,
-            optional_locks=False,
+        _assert_cleanup_checkout_clean(root=root, path=path)
+
+
+def _assert_cleanup_checkout_clean(*, root: Path, path: Path) -> None:
+    status = git_safe(
+        "-C",
+        str(path),
+        "status",
+        "--porcelain=v1",
+        # `-z`는 경로를 인용하지 않으므로 비ASCII 경로도 그대로 온다. 이 저장소의 다른
+        # status 파서(`core/local_skills.py`)와 같은 형태이기도 하다.
+        "-z",
+        "-uall",
+        # ignore된 디렉터리를 파일 단위로 펴면(`--ignored=traditional`) node_modules를
+        # 가진 트리에서 출력이 수만 행으로 늘고, 그 비용이 timeout과 겹치면 정리가
+        # 영구히 막힌다. 접힌 형태로 싸게 받고 우리가 깐 등록만 아래에서 직접 증명해 뺀다.
+        "--ignored=matching",
+        cwd=path,
+        optional_locks=False,
+        # 같은 파일의 다른 git 호출과 같은 여유를 준다. 기본 30초를 넘기면 `status.ok`가
+        # False가 되어 이 checkout은 정리 불가로 굳는다.
+        timeout_s=GIT_WORKTREE_TIMEOUT_S,
+    )
+    if not status.ok:
+        raise CleanupBlockedError(
+            f"cannot inspect checkout status at {path}; preserving checkout"
         )
-        if not status.ok:
-            raise CleanupBlockedError(
-                f"cannot inspect checkout status at {path}; preserving checkout"
+    provisioned = _unmodified_host_hook_registrations(root=root, checkout=path)
+    for record, rel in _porcelain_z_records(status.stdout):
+        if rel in provisioned:
+            continue
+        if (
+            record.startswith("!! ")
+            and rel in _HOST_HOOK_REGISTRATION_DIRS
+            and _dir_holds_only_provisioned_registrations(
+                checkout=path, rel_dir=rel, provisioned=provisioned
             )
-        if status.stdout.strip():
-            raise CleanupBlockedError(
-                f"checkout is dirty at {path}; preserving checkout"
-            )
+        ):
+            continue
+        raise CleanupBlockedError(f"checkout is dirty at {path}; preserving checkout")
+
+
+def _porcelain_z_records(stdout: str) -> Iterator[tuple[str, str]]:
+    """`--porcelain=v1 -z` 출력을 (레코드, 경로)로 끊는다.
+
+    `-z`는 rename/copy 레코드의 원래 경로를 NUL로 끊긴 **별도 필드**로 하나 더 붙인다.
+    그 필드를 레코드로 읽으면 경로 앞 세 글자가 상태로 해석돼 임의 경로가 화이트리스트에
+    걸릴 수 있다. 그래서 rename/copy 뒤 한 필드는 건너뛴다.
+    """
+    fields = stdout.split("\0")
+    index = 0
+    while index < len(fields):
+        record = fields[index]
+        index += 1
+        if not record:
+            continue
+        yield record, record[3:]
+        if "R" in record[:2] or "C" in record[:2]:
+            index += 1
+
+
+def _dir_holds_only_provisioned_registrations(
+    *, checkout: Path, rel_dir: str, provisioned: set[str]
+) -> bool:
+    """접힌 ignore 레코드가 정말 우리가 깐 등록 파일만 담고 있는가.
+
+    git이 디렉터리 하나로 접어 준 레코드는 그 안에 무엇이 있는지 말해 주지 않는다.
+    `.claude/settings.json.bak`이나 사용자가 남긴 파일이 같은 접힘 안에 숨는다. 그래서
+    직접 walk해서 그 안의 **모든** 파일이 우리가 깐 등록이고 leader 바이트와 같음을
+    증명할 때만 dirty 집계에서 뺀다. 증명 못 하면 dirty로 남긴다.
+    """
+    base = checkout / rel_dir.rstrip("/")
+    try:
+        if base.is_symlink() or not base.is_dir():
+            return False
+        proven = 0
+        for entry in base.rglob("*"):
+            # symlink는 따라간 곳이 checkout 밖일 수 있어 바이트 동일성으로도 증명이 안 된다.
+            if entry.is_symlink():
+                return False
+            if entry.is_dir():
+                continue
+            if entry.relative_to(checkout).as_posix() not in provisioned:
+                return False
+            proven += 1
+        return proven > 0
+    except OSError:
+        return False
+
+
+def _unmodified_host_hook_registrations(*, root: Path, checkout: Path) -> set[str]:
+    """checkout에 있는 것이 leader 등록 파일 그대로인 경로들.
+
+    agent-flow가 스스로 깐 파일이다. 이걸 dirty로 세면 관리 worktree는 정리 자체가
+    영영 막힌다. 사용자가 한 바이트라도 손대면 동일성이 깨져 다시 dirty로 잡힌다.
+    """
+    unmodified: set[str] = set()
+    for rel in HOST_HOOK_REGISTRATION_FILES:
+        source, target = root / rel, checkout / rel
+        try:
+            if (
+                source.is_file()
+                and target.is_file()
+                and not target.is_symlink()
+                and source.read_bytes() == target.read_bytes()
+            ):
+                unmodified.add(rel)
+        except OSError:
+            continue
+    return unmodified
 
 
 def _remove_journal_checkout(
@@ -2375,13 +2472,16 @@ class UnknownWorktreeSetupAction(ValueError):
     """선언에 없는 이름. 조용히 넘기면 선언했는데 아무 일도 일어나지 않는다."""
 
 
-def _register_git_exclude(leader: Path, pattern: str) -> None:
+def _register_git_exclude(leader: Path, *patterns: str) -> None:
     """`node_modules/`처럼 슬래시로 끝나는 항목은 디렉터리만 맞아서 symlink 자체를
     못 가린다. 루트 고정 패턴을 따로 적어야 worktree 정리가 막히지 않는다.
 
     worktree를 지울 때 이 항목은 지우지 않는다. 저장소가 공유하는 파일이라 다른
     worktree가 아직 같은 symlink를 쓰고 있을 수 있다. 추적 중인 경로는 exclude로
     가려지지 않으므로 남겨도 손해가 없다.
+
+    여러 패턴을 한 번에 받는다. 호출마다 `git rev-parse`가 한 번 뜨므로 등록 파일
+    네 개를 각각 부르면 그 spawn이 그대로 네 배가 된다.
     """
     # leader가 그 자체로 linked worktree면 `.git`은 디렉터리가 아니라 파일이다.
     common = Path(_run_git(leader, "rev-parse", "--git-common-dir").stdout.strip())
@@ -2390,10 +2490,14 @@ def _register_git_exclude(leader: Path, pattern: str) -> None:
     exclude = common / "info" / "exclude"
     exclude.parent.mkdir(parents=True, exist_ok=True)
     current = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
-    if pattern in current.split():
+    known = set(current.split())
+    missing = [pattern for pattern in patterns if pattern not in known]
+    if not missing:
         return
     prefix = "" if not current or current.endswith("\n") else "\n"
-    exclude.write_text(f"{current}{prefix}{pattern}\n", encoding="utf-8")
+    exclude.write_text(
+        current + prefix + "".join(f"{pattern}\n" for pattern in missing), encoding="utf-8"
+    )
 
 
 def _link_node_modules(*, leader: Path, checkout: Path) -> bool:
@@ -2478,6 +2582,219 @@ def copy_declared_worktree_files(
         shutil.copy2(source, target)
         copied.append(name)
     return tuple(copied)
+
+
+# host 세션(Claude/Codex/OMP)이 UserPromptSubmit hook을 찾는 등록 파일들.
+# installer는 leader checkout에만 이 파일을 심는다.
+#
+# 목록은 `hook_integrity`에서 가져온다. 같은 언어 안에 두 벌을 두면 새 host를 한쪽에만
+# 추가했을 때 등록 검증은 도는데 worktree에는 그 파일이 깔리지 않아 이 버그가 그 host에서
+# 그대로 되살아난다. `hook_integrity`는 표준 라이브러리만 임포트하므로 순환이 없다.
+HOST_HOOK_REGISTRATION_FILES: tuple[str, ...] = tuple(
+    path.as_posix() for path in (*JSON_REGISTRATION_FILES, OMP_REGISTRATION_FILE)
+)
+_OMP_REGISTRATION_REL = OMP_REGISTRATION_FILE.as_posix()
+
+# git이 접어서 보고할 수 있는 등록 디렉터리들(`.claude/`, `.omp/`, `.omp/extensions/` …).
+_HOST_HOOK_REGISTRATION_DIRS: frozenset[str] = frozenset(
+    "/".join(rel.split("/")[:depth]) + "/"
+    for rel in HOST_HOOK_REGISTRATION_FILES
+    for depth in range(1, len(rel.split("/")))
+)
+
+# kit이 생성한 OMP 확장의 표지와 생성 서명. `lib/omp-hooks-extension.mjs`의
+# `OMP_EXTENSION_MARKER`와 `lib/installer-shared.mjs:466`의 `ompExtensionIsKitOwned`가
+# 쓰는 것과 같은 기준이다 — 같은 파일의 소유권을 두 곳이 다르게 판정하면 한쪽은 덮고
+# 다른 쪽은 남겨서 checkout과 leader의 등록이 영구히 어긋난다. 표지는 이번 버전부터
+# 붙으므로 그 이전 설치본을 위해 생성 서명도 함께 인정한다.
+_OMP_EXTENSION_MARKER = "agent-flow: managed omp extension"
+_OMP_EXTENSION_SIGNATURE = "export default function agentFlowHooks("
+# installer가 등록하는 command는 전부 이 디렉터리를 가리킨다(`hookScriptCommand`).
+_MANAGED_HOOK_COMMAND_DIR = ".agent-flow/scripts/hooks/"
+
+
+def provision_host_hook_registrations(
+    *, leader: Path, checkout: Path
+) -> tuple[str, ...]:
+    """leader의 host hook 등록 파일을 managed checkout에도 깐다.
+
+    등록 파일이 leader에만 있으면 worktree checkout을 cwd로 연 host 세션에는
+    UserPromptSubmit hook이 아예 등록되지 않는다 — 그 세션에서 `승인`이라고 답해도
+    아무 일도 일어나지 않는 이유다.
+
+    등록 안의 command는 leader 절대경로를 가리키므로 파일을 그대로 복사하면 된다.
+    leader 파일은 읽기만 한다. 내용이 이미 같으면 쓰지 않으므로 반복 호출해도 무해하다.
+
+    이미 있는 target은 kit이 깐 모양일 때만 덮는다. 사용자가 쓴 것으로 보이면 손대지
+    않고 사유를 말한다 — 같은 모듈의 `copy_declared_worktree_files`가 문서화한 계약이고,
+    덮으면 그 checkout의 host 설정이 백업도 경고도 없이 사라진다.
+
+    반환값은 실제로 쓴 상대경로들이다.
+    """
+    leader_base = Path(os.path.normpath(str(leader)))
+    checkout_base = Path(os.path.normpath(str(checkout)))
+    if same_worktree_path(leader_base, checkout_base):
+        return ()
+    written: list[str] = []
+    for rel in HOST_HOOK_REGISTRATION_FILES:
+        try:
+            if _provision_one_host_hook_registration(
+                leader_base=leader_base, checkout_base=checkout_base, rel=rel
+            ):
+                written.append(rel)
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            # 조용한 삼킴이 이 버그의 원인이었다. 등록이 빠졌으면 사유를 말한다.
+            _warn_host_hook_registration_skipped(
+                rel=rel, checkout=checkout_base, reason=str(exc)
+            )
+    if written:
+        _exclude_provisioned_host_hook_registrations(
+            leader=leader_base, checkout=checkout_base, rels=written
+        )
+    return tuple(written)
+
+
+def _exclude_provisioned_host_hook_registrations(
+    *, leader: Path, checkout: Path, rels: Iterable[str]
+) -> None:
+    """방금 깐 등록 파일을 저장소 공유 exclude에 올린다.
+
+    worktree는 HEAD/base_ref에서 나오므로 그 커밋의 `.gitignore`에 `.omp/`가 없을 수
+    있다. 그러면 여기서 깐 파일이 untracked로 남아 `assert_worktree_mergeable`과
+    `--force` 없는 `git worktree remove`가 그 checkout을 영구히 정리 불가로 만든다.
+    `_link_node_modules`가 같은 이유로 같은 자리를 쓴다. 실패해도 등록 자체는 살려 둔다 —
+    hook 없는 세션이 정리 못 하는 checkout보다 나쁘다.
+    """
+    try:
+        _register_git_exclude(leader, *(f"/{rel}" for rel in rels))
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        print(
+            f"warning: host hook registrations in {checkout} are not git-excluded: {exc};"
+            " worktree cleanup may refuse to remove this checkout",
+            file=sys.stderr,
+        )
+
+
+def _warn_host_hook_registration_skipped(*, rel: str, checkout: Path, reason: str) -> None:
+    """등록이 빠진 채로 조용히 넘어가면 그 checkout의 채팅 `승인`은 아무 흔적 없이
+    무시된다 — 이 버그의 원래 증상이 그것이다. 사유와 해결 방법을 함께 낸다."""
+    print(
+        f"warning: host hook registration {rel} not provisioned in {checkout}: {reason}",
+        file=sys.stderr,
+    )
+
+
+def _provision_one_host_hook_registration(
+    *, leader_base: Path, checkout_base: Path, rel: str
+) -> bool:
+    source = _worktree_setup_path(leader_base, rel)
+    target = _worktree_setup_path(checkout_base, rel)
+    if _has_symlinked_component(leader_base, source):
+        _warn_host_hook_registration_skipped(
+            rel=rel,
+            checkout=checkout_base,
+            reason="the leader path has a symlinked component; replace it with a real file"
+            " so the registration can be copied",
+        )
+        return False
+    # leader에 없는 것은 그 host를 설치하지 않았다는 뜻이다. 정상 상태라 말하지 않는다.
+    if not source.is_file():
+        return False
+    if _has_symlinked_component(checkout_base, target) or target.is_symlink():
+        _warn_host_hook_registration_skipped(
+            rel=rel,
+            checkout=checkout_base,
+            reason="the checkout path is or goes through a symlink, so the copy would land"
+            " outside the checkout; remove the symlink",
+        )
+        return False
+    payload = source.read_bytes()
+    existing = target.read_bytes() if target.is_file() else None
+    if existing == payload:
+        return False
+    # tracked 판정은 git 호출이라 쓸 일이 있을 때만 묻는다. `status`/`continue`가
+    # 매번 이 함수를 타므로 정상 상태에서 git을 4번 더 돌리면 그게 상시 비용이 된다.
+    #
+    # 프로젝트가 이 경로를 추적하면 등록 파일은 사용자 소유다. 덮으면 사용자 설정이
+    # 사라지고 worktree가 dirty가 되어 정리 게이트까지 막힌다.
+    if _is_tracked_path(checkout=checkout_base, rel=rel):
+        _warn_host_hook_registration_skipped(
+            rel=rel,
+            checkout=checkout_base,
+            reason="tracked by git; commit the agent-flow hook entry or untrack the file",
+        )
+        return False
+    if existing is not None and not _host_hook_registration_is_kit_owned(
+        rel=rel, payload=existing
+    ):
+        _warn_host_hook_registration_skipped(
+            rel=rel,
+            checkout=checkout_base,
+            reason="the checkout already has a registration this kit did not write;"
+            " merge the agent-flow hook entry into it by hand or delete the file",
+        )
+        return False
+    _make_host_hook_parents(base=checkout_base, target=target)
+    target.write_bytes(payload)
+    os.chmod(target, 0o644)
+    return True
+
+
+def _host_hook_registration_is_kit_owned(*, rel: str, payload: bytes) -> bool:
+    """checkout에 이미 있는 등록 파일이 kit이 깐 모양인가.
+
+    kit이 깐 것이면 덮어야 등록 갱신이 checkout까지 번진다. 사용자가 쓴 것으로 보이면
+    손대지 않아야 그 설정이 살아남는다. 판정할 수 없는 것은 사용자 소유로 본다 —
+    잘못 덮으면 사용자 데이터가 사라지고, 잘못 남겨도 사유가 stderr로 나온다.
+    """
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    if rel == _OMP_REGISTRATION_REL:
+        return _OMP_EXTENSION_MARKER in text or _OMP_EXTENSION_SIGNATURE in text
+    try:
+        document = json.loads(text)
+    except ValueError:
+        return False
+    commands = list(_json_hook_commands(document))
+    # 등록이 하나도 없으면 kit이 쓴 결과일 수 없다. 하나라도 관리 네임스페이스 밖을
+    # 가리키면 사용자가 자기 hook을 넣어 둔 파일이다.
+    return bool(commands) and all(
+        _MANAGED_HOOK_COMMAND_DIR in command for command in commands
+    )
+
+
+def _json_hook_commands(node: Any) -> Iterator[str]:
+    """등록 JSON 어디에 있든 hook command 문자열만 모은다.
+
+    host마다 이벤트 키가 다르고 사용자 키가 같은 파일에 섞이므로 모양을 고정할 수 없다.
+    """
+    if isinstance(node, dict):
+        command = node.get("command")
+        if isinstance(command, str):
+            yield command
+        for value in node.values():
+            yield from _json_hook_commands(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _json_hook_commands(value)
+
+
+def _make_host_hook_parents(*, base: Path, target: Path) -> None:
+    missing: list[Path] = []
+    for parent in [target.parent, *target.parent.parents]:
+        if parent.exists() or parent == base or base not in parent.parents:
+            break
+        missing.append(parent)
+    for parent in reversed(missing):
+        parent.mkdir(mode=0o755)
+
+
+def _is_tracked_path(*, checkout: Path, rel: str) -> bool:
+    return git_safe(
+        "ls-files", "--error-unmatch", "--", rel, cwd=checkout, optional_locks=False
+    ).ok
 
 
 def _run_git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:

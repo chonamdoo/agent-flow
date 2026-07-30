@@ -28,6 +28,7 @@ import {
   HOME,
   hookScriptCommand,
   installedProfileFileNames,
+  installProjectLauncher,
   isPruneBackupName,
   isRetiredHookCommand,
   KIT_ROOT,
@@ -40,6 +41,7 @@ import {
   ompExtensionIsKitOwned,
   planReviewerSkillMarkdown,
   productBriefSkillMarkdown,
+  projectLauncherDigest,
   PRUNE_BACKUP_SUFFIX,
   PRUNE_BACKUP_VERSIONED,
   PRUNE_NOTICE_PREFIX,
@@ -141,6 +143,8 @@ function installProject() {
   fs.mkdirSync(path.join(agentFlowDir, "skills", "agent-flow"), { recursive: true });
   fs.mkdirSync(path.join(agentFlowDir, "skills", "full-feature-workflow"), { recursive: true });
 
+  // digest는 심은 파일에서 뽑으므로 payload보다 먼저 심는다.
+  installProjectLauncher(root);
   const installTimestamp = new Date().toISOString();
   const payload = {
     install_scope: "project",
@@ -157,6 +161,7 @@ function installProject() {
     // 계속 돈다 — version은 하드코딩이라 릴리스 없이 바뀐 자산을 구분하지 못한다.
     kit_source_digest: kitSourceDigest(),
     managed_hook_digests: managedHookDigests(),
+    project_launcher_digest: projectLauncherDigest(root),
   };
 
   writeManagedFile(path.join(agentFlowDir, "workflows", "full-feature.yaml"), fullFeatureWorkflowYaml());

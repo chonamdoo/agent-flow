@@ -714,6 +714,408 @@ def test_host_confirmation_is_bound_to_the_current_worktree(
     assert spec_set_is_confirmed(run_dir, parsed.items)
 
 
+SPEC_ARTIFACT = (
+    "## Spec Items\n\n"
+    "SPEC-1: Empty search results show the empty state.\n"
+    "verify: test:test_empty_search_results_show_the_empty_state\n\n"
+    "## Completion Gate\n\n"
+    "spec-items: SPEC-1\n"
+)
+
+
+def _pending_worktree_run(project: Path):
+    """leader에 등록된 managed worktree + SPEC 확인 대기 중인 active run."""
+    from agent_flow.artifact import create_run, read_meta, write_meta
+    from agent_flow.core.worktrees import (
+        create_worktree,
+        plan_worktree,
+        worktree_runtime_root,
+    )
+
+    status = create_worktree(
+        root=project,
+        plan=plan_worktree(root=project, name="feat-bound"),
+    )
+    runtime_root = worktree_runtime_root(root=project, name=status.name)
+    run_dir = create_run(
+        runtime_root,
+        "default",
+        "bound task",
+        checkout_identity=f"worktree:{status.name}",
+        checkout_registration_identity=status.registration_identity,
+    )
+    meta = read_meta(run_dir)
+    meta["current_phase"] = "design"
+    write_meta(run_dir, meta)
+    (run_dir / "design.md").write_text(SPEC_ARTIFACT, encoding="utf-8")
+    return status, run_dir
+
+
+def _bind_host_session(project: Path, status, run_dir: Path, session: str) -> None:
+    from agent_flow.core.host_write_boundary import record_host_checkout_binding
+
+    next_command = f"agent-flow continue --root {project} --worktree {status.name}"
+    payload = {
+        "tool_name": "bash",
+        "tool_input": {
+            "command": f"agent-flow status --root {project} --worktree {status.name}"
+        },
+        "session_id": session,
+        "exit_code": 0,
+        "output": "status_json: "
+        + json.dumps(
+            {
+                "status": "awaiting_host",
+                "run": f"default/{run_dir.name}",
+                "next_command": next_command,
+            }
+        ),
+        "cwd": str(project),
+    }
+    assert record_host_checkout_binding(payload, project) is not None
+
+
+def test_host_confirmation_from_leader_cwd_follows_the_session_binding(
+    project,
+    monkeypatch,
+):
+    status, run_dir = _pending_worktree_run(project)
+    _bind_host_session(project, status, run_dir, "bound-session")
+    parsed = parse_spec_item_section(SPEC_ARTIFACT)
+
+    monkeypatch.chdir(project)
+    assert main(
+        [
+            "spec",
+            "prepare-confirmation",
+            "--root",
+            str(project),
+            "--hook-capability-hash",
+            HOOK_CAPABILITY_HASH,
+            "--session-id",
+            "bound-session",
+        ]
+    ) == 0
+    challenge = json.loads(
+        (run_dir / "spec-user-confirmation.pending.json").read_text(encoding="utf-8")
+    )
+    assert challenge["checkout_identity"] == f"worktree:{status.name}"
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("승인"))
+    assert main(
+        [
+            "spec",
+            "confirm",
+            "--root",
+            str(project),
+            "--hook-capability",
+            HOOK_CAPABILITY,
+            "--from-user-prompt",
+            "--session-id",
+            "bound-session",
+        ]
+    ) == 0
+    assert spec_set_is_confirmed(run_dir, parsed.items)
+    confirmation = json.loads(
+        (run_dir / "spec-user-confirmation.json").read_text(encoding="utf-8")
+    )
+    assert confirmation["provenance"] == "host-user-prompt"
+    assert (
+        confirmation["attestation"]["checkout_identity"] == f"worktree:{status.name}"
+    )
+
+
+def test_host_confirmation_from_leader_cwd_without_binding_records_nothing(
+    project,
+    monkeypatch,
+):
+    _status, run_dir = _pending_worktree_run(project)
+    parsed = parse_spec_item_section(SPEC_ARTIFACT)
+
+    monkeypatch.chdir(project)
+    assert main(
+        [
+            "spec",
+            "prepare-confirmation",
+            "--root",
+            str(project),
+            "--hook-capability-hash",
+            HOOK_CAPABILITY_HASH,
+            "--session-id",
+            "unbound-session",
+        ]
+    ) == 0
+    assert not (run_dir / "spec-user-confirmation.pending.json").exists()
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("승인"))
+    assert main(
+        [
+            "spec",
+            "confirm",
+            "--root",
+            str(project),
+            "--hook-capability",
+            HOOK_CAPABILITY,
+            "--from-user-prompt",
+            "--session-id",
+            "unbound-session",
+        ]
+    ) == 0
+    assert not (run_dir / "spec-user-confirmation.json").exists()
+    assert not spec_set_is_confirmed(run_dir, parsed.items)
+
+
+def test_host_confirmation_ignores_another_sessions_binding(
+    project,
+    monkeypatch,
+):
+    status, run_dir = _pending_worktree_run(project)
+    _bind_host_session(project, status, run_dir, "other-session")
+    parsed = parse_spec_item_section(SPEC_ARTIFACT)
+
+    monkeypatch.chdir(project)
+    assert main(
+        [
+            "spec",
+            "prepare-confirmation",
+            "--root",
+            str(project),
+            "--hook-capability-hash",
+            HOOK_CAPABILITY_HASH,
+            "--session-id",
+            "current-session",
+        ]
+    ) == 0
+    assert not (run_dir / "spec-user-confirmation.pending.json").exists()
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("승인"))
+    assert main(
+        [
+            "spec",
+            "confirm",
+            "--root",
+            str(project),
+            "--hook-capability",
+            HOOK_CAPABILITY,
+            "--from-user-prompt",
+            "--session-id",
+            "current-session",
+        ]
+    ) == 0
+    assert not (run_dir / "spec-user-confirmation.json").exists()
+    assert not spec_set_is_confirmed(run_dir, parsed.items)
+
+
+def _pending_leader_run(project: Path, run_id: str) -> Path:
+    """leader state root에서 SPEC 확인을 기다리는 active run."""
+    run_dir = project / ".agent-flow" / "runs" / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "active").touch()
+    (run_dir / "meta.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "workflow": "default",
+                "task": "leader task",
+                "started_at": "2026-07-27T21:04:17+00:00",
+                "current_phase": "design",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "design.md").write_text(SPEC_ARTIFACT, encoding="utf-8")
+    return run_dir
+
+
+def _leave_spec_wait(run_dir: Path) -> None:
+    """run을 SPEC 대기에서 빼되 active로 남긴다 — binding은 active run을 요구한다."""
+    from agent_flow.artifact import read_meta, write_meta
+
+    meta = read_meta(run_dir)
+    meta["current_phase"] = "implement"
+    write_meta(run_dir, meta)
+
+
+def test_host_confirmation_falls_back_to_the_leader_run_when_the_binding_has_none(
+    project,
+    monkeypatch,
+):
+    """binding이 leader를 대치하면 leader run 승인이 사라진다 — 순서 있는 fallback."""
+    status, worktree_run = _pending_worktree_run(project)
+    leader_run = _pending_leader_run(project, "leader-r1")
+    _bind_host_session(project, status, worktree_run, "bound-session")
+    _leave_spec_wait(worktree_run)
+    parsed = parse_spec_item_section(SPEC_ARTIFACT)
+
+    monkeypatch.chdir(project)
+    assert main(
+        [
+            "spec",
+            "prepare-confirmation",
+            "--root",
+            str(project),
+            "--hook-capability-hash",
+            HOOK_CAPABILITY_HASH,
+            "--session-id",
+            "bound-session",
+        ]
+    ) == 0
+    challenge = json.loads(
+        (leader_run / "spec-user-confirmation.pending.json").read_text(encoding="utf-8")
+    )
+    assert challenge["checkout_identity"] == "leader"
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("승인"))
+    assert main(
+        [
+            "spec",
+            "confirm",
+            "--root",
+            str(project),
+            "--hook-capability",
+            HOOK_CAPABILITY,
+            "--from-user-prompt",
+            "--session-id",
+            "bound-session",
+        ]
+    ) == 0
+    assert spec_set_is_confirmed(leader_run, parsed.items)
+    assert not (worktree_run / "spec-user-confirmation.json").exists()
+
+
+def test_host_confirmation_prefers_the_bound_worktree_over_a_pending_leader_run(
+    project,
+    monkeypatch,
+):
+    """양쪽이 pending이어도 모호로 죽지 않는다 — bound checkout이 이긴다."""
+    status, worktree_run = _pending_worktree_run(project)
+    leader_run = _pending_leader_run(project, "leader-r1")
+    _bind_host_session(project, status, worktree_run, "bound-session")
+    parsed = parse_spec_item_section(SPEC_ARTIFACT)
+
+    monkeypatch.chdir(project)
+    assert main(
+        [
+            "spec",
+            "prepare-confirmation",
+            "--root",
+            str(project),
+            "--hook-capability-hash",
+            HOOK_CAPABILITY_HASH,
+            "--session-id",
+            "bound-session",
+        ]
+    ) == 0
+    assert not (leader_run / "spec-user-confirmation.pending.json").exists()
+    challenge = json.loads(
+        (worktree_run / "spec-user-confirmation.pending.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert challenge["checkout_identity"] == f"worktree:{status.name}"
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("승인"))
+    assert main(
+        [
+            "spec",
+            "confirm",
+            "--root",
+            str(project),
+            "--hook-capability",
+            HOOK_CAPABILITY,
+            "--from-user-prompt",
+            "--session-id",
+            "bound-session",
+        ]
+    ) == 0
+    assert spec_set_is_confirmed(worktree_run, parsed.items)
+    assert not spec_set_is_confirmed(leader_run, parsed.items)
+
+
+def test_host_confirmation_refuses_a_binding_whose_leader_snapshot_moved(
+    project,
+    monkeypatch,
+    capsys,
+):
+    """binding의 다른 소비자와 같은 leader tripwire를 승인 경로도 통과해야 한다."""
+    status, worktree_run = _pending_worktree_run(project)
+    _bind_host_session(project, status, worktree_run, "bound-session")
+    parsed = parse_spec_item_section(SPEC_ARTIFACT)
+
+    # binding 기록 이후 leader가 변했다 — 워커 누출인지 사람의 편집인지 알 수 없다.
+    (project / "README.md").write_text("leaked\n", encoding="utf-8")
+
+    monkeypatch.chdir(project)
+    assert main(
+        [
+            "spec",
+            "prepare-confirmation",
+            "--root",
+            str(project),
+            "--hook-capability-hash",
+            HOOK_CAPABILITY_HASH,
+            "--session-id",
+            "bound-session",
+        ]
+    ) == 0
+    assert not (worktree_run / "spec-user-confirmation.pending.json").exists()
+    # 조용히 leader-only로 내려가면 "승인이 무시된다"와 분간되지 않는다.
+    assert "host session binding is unusable" in capsys.readouterr().err
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("승인"))
+    assert main(
+        [
+            "spec",
+            "confirm",
+            "--root",
+            str(project),
+            "--hook-capability",
+            HOOK_CAPABILITY,
+            "--from-user-prompt",
+            "--session-id",
+            "bound-session",
+        ]
+    ) == 0
+    assert not (worktree_run / "spec-user-confirmation.json").exists()
+    assert not spec_set_is_confirmed(worktree_run, parsed.items)
+
+
+def _worktree_with_leader_registration(project: Path, name: str):
+    """managed checkout + leader에만 있는 host hook 등록 파일."""
+    from agent_flow.core.worktrees import create_worktree, plan_worktree
+
+    status = create_worktree(root=project, plan=plan_worktree(root=project, name=name))
+    registration = project / ".claude" / "settings.json"
+    registration.parent.mkdir(parents=True, exist_ok=True)
+    registration.write_text('{"hooks": {"UserPromptSubmit": []}}\n', encoding="utf-8")
+    return status, registration
+
+
+def test_status_provisions_host_hook_registrations_into_the_checkout(
+    project,
+    capsys,
+):
+    """업그레이드 전 checkout의 치유 지점이 실제로 배선되어 있는지."""
+    status, registration = _worktree_with_leader_registration(project, "feat-heal")
+    target = status.path / ".claude" / "settings.json"
+    assert not target.exists()
+
+    assert main(["status", "--root", str(project), "--worktree", status.name]) == 0
+    assert target.read_bytes() == registration.read_bytes()
+    # 지금 열려 있는 세션은 등록 파일을 이미 읽었다 — 다음 수를 말해야 한다.
+    assert "다시 시작" in capsys.readouterr().out
+
+
+def test_abort_does_not_provision_host_hook_registrations_into_the_checkout(
+    project,
+):
+    """걷어낼 checkout에 등록 파일을 깔 이유가 없다 — abort는 질의/종료뿐이다."""
+    status, _registration = _worktree_with_leader_registration(project, "feat-drop")
+
+    assert main(["abort", "--root", str(project), "--worktree", status.name]) == 0
+    assert not (status.path / ".claude").exists()
+
+
 def test_cli_spec_confirmation_resolves_current_python_active_meta_run_from_user_prompt(
     project,
     monkeypatch,
@@ -813,6 +1215,22 @@ def test_a_second_spec_artifact_cannot_displace_a_confirmed_one(project):
     assert spec_set_is_confirmed(run_dir, parsed.items)
 
 
+def _record_launcher_digest(project: Path, launcher: Path) -> None:
+    """hook이 대조하는 kit.json digest. 바이트에서 계산해야 반증이 성립한다."""
+    kit = project / ".agent-flow" / "kit.json"
+    kit.parent.mkdir(parents=True, exist_ok=True)
+    kit.write_text(
+        json.dumps(
+            {
+                "project_launcher_digest": hashlib.sha256(
+                    launcher.read_bytes()
+                ).hexdigest()
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_fresh_session_host_prepare_then_exact_prompt_consumes_once(project):
     run_dir = project / ".agent-flow" / "runs" / "20260727-210417"
     run_dir.mkdir(parents=True)
@@ -849,6 +1267,8 @@ def test_fresh_session_host_prepare_then_exact_prompt_consumes_once(project):
         encoding="utf-8",
     )
     launcher.chmod(0o755)
+    # hook은 실행 직전 kit.json이 기록한 digest와 launcher 바이트를 대조한다.
+    _record_launcher_digest(project, launcher)
     env = os.environ.copy()
     env["AGENT_FLOW"] = str(launcher)
     env["PYTHONPATH"] = str(SRC)
@@ -943,6 +1363,33 @@ def test_fresh_session_host_prepare_then_exact_prompt_consumes_once(project):
     replay = run_hook(confirm_hook, current_payload)
     assert replay.returncode == 0
     assert invocation_marker.is_file()
+    assert not confirmation_path.exists()
+    assert not spec_set_is_confirmed(run_dir, parsed.items)
+
+    # 반증: kit.json이 기록한 digest와 다른 launcher는 hook이 아예 실행하지 않는다.
+    # 이 대조가 없으면 launcher를 갈아끼운 쪽이 다음 프롬프트에서 승인 capability를
+    # 그대로 받는다. uid/mode는 그대로 통과하므로 digest만이 이걸 막는다.
+    invocation_marker.unlink()
+    # 직전 replay가 challenge를 소진했다 — 정상 launcher라면 아래 prepare가 새로 깐다.
+    assert not pending_path.exists()
+    launcher.write_text(
+        f"#!{sys.executable}\n"
+        "from pathlib import Path\n"
+        f"Path({str(invocation_marker)!r}).touch()\n"
+        "raise SystemExit(0)\n",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o755)
+    assert launcher.stat().st_mode & 0o022 == 0
+
+    refused = run_hook(prepare_hook, stale_payload)
+    assert refused.returncode == 0
+    assert not invocation_marker.exists()
+    assert not pending_path.exists()
+
+    refused_confirm = run_hook(confirm_hook, current_payload)
+    assert refused_confirm.returncode == 0
+    assert not invocation_marker.exists()
     assert not confirmation_path.exists()
     assert not spec_set_is_confirmed(run_dir, parsed.items)
 

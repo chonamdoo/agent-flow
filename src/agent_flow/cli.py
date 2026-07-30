@@ -122,6 +122,7 @@ from agent_flow.core.worktrees import (
     find_pending_worktree_cleanup,
     known_worktree_names,
     plan_worktree,
+    provision_host_hook_registrations,
     remove_worktree_metadata,
     remove_worktree,
     removable_worktrees,
@@ -129,6 +130,11 @@ from agent_flow.core.worktrees import (
     worktree_branch_exists,
     worktree_runtime_root,
     worktree_run_activation,
+)
+from agent_flow.core.host_write_boundary import (
+    HostCheckoutBinding,
+    HostWriteBoundaryError,
+    bound_worktree_for_session,
 )
 from agent_flow.core.hook_integrity import (
     HookIntegrityError,
@@ -727,7 +733,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             _assert_relay_checkout_identity(root, args.worktree, args.checkout_identity)
             run_root, state_root = (
-                _worktree_context(root, args.worktree)
+                _worktree_context(root, args.worktree, provision=True)
                 if args.worktree
                 else (root, root)
             )
@@ -803,7 +809,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             _assert_relay_checkout_identity(root, args.worktree, args.checkout_identity)
             run_root, state_root = (
-                _worktree_context(root, args.worktree)
+                _worktree_context(root, args.worktree, provision=True)
                 if args.worktree
                 else (root, root)
             )
@@ -1023,6 +1029,7 @@ def main(argv: list[str] | None = None) -> int:
                     artifact_value=args.artifact,
                     inferred_worktree=inferred_worktree,
                     interactive=not args.from_user_prompt,
+                    session_id=args.session_id if args.from_user_prompt else None,
                 )
                 if target is None:
                     if args.from_user_prompt:
@@ -1065,6 +1072,7 @@ def main(argv: list[str] | None = None) -> int:
                     artifact_value=None,
                     inferred_worktree=inferred_worktree,
                     interactive=False,
+                    session_id=args.session_id,
                 )
                 if target is None:
                     return 0
@@ -2141,13 +2149,23 @@ def _worktree_root(root: Path, name: str) -> Path | None:
     return None
 
 
-def _worktree_context(root: Path, name: str) -> tuple[Path | None, Path]:
+def _worktree_context(
+    root: Path,
+    name: str,
+    *,
+    provision: bool = False,
+) -> tuple[Path | None, Path]:
     status = get_worktree_status(root=root, name=name)
     pending = find_pending_worktree_cleanup(root=root, selector=name)
     if pending is not None:
         checkout_root = status.path if _worktree_checkout_exists(status) else root
         return checkout_root, cleanup_state_root(pending)
     if _worktree_checkout_exists(status):
+        if provision:
+            # 업그레이드 전에 만들어진 checkout도 여기서 등록 파일을 얻는다. host
+            # 세션이 실제로 그 checkout에서 일하는 지점(`continue`/`status`)만
+            # 부른다 — `abort`는 걷어낼 checkout이라 등록을 깔 이유가 없다.
+            _provision_host_hooks(root=root, checkout=status.path)
         return status.path, worktree_runtime_root(root=root, name=status.name)
     known = _known_worktree_names(root)
     suffix = f" known worktrees: {', '.join(known)}" if known else " no known worktrees"
@@ -2470,12 +2488,37 @@ def _declared_worktree_copies(profile: dict) -> list[str]:
     return names
 
 
+def _provision_host_hooks(*, root: Path, checkout: Path) -> None:
+    """checkout에서 연 host 세션도 UserPromptSubmit hook을 갖도록 등록 파일을 깐다.
+
+    profile 해석과 무관하다 — profile이 깨져도 hook 등록까지 같이 잃으면 안 된다.
+    이미 같은 내용이면 아무것도 쓰지 않으므로 매 실행마다 불러도 무해하다.
+    """
+    try:
+        written = provision_host_hook_registrations(leader=root, checkout=checkout)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        print(
+            f"warning: host hook registration skipped: {_format_cli_error(exc)}",
+            file=sys.stderr,
+        )
+        return
+    if written:
+        # host는 등록 파일을 세션 시작 시점에 읽는다. 방금 깔았다고 지금 열려 있는
+        # 세션에 hook이 생기지는 않으므로 다음 수를 함께 말해야 한다.
+        print(
+            f"host hook registrations provisioned: {', '.join(written)} — "
+            f"이 checkout({checkout})에서 열린 host 세션을 다시 시작해야 hook이 "
+            "로드됩니다."
+        )
+
+
 def _apply_worktree_setup(*, root: Path, checkout: Path) -> None:
     """profile이 선언한 gitignored 머신 설정을 새 checkout으로 옮긴다.
 
     실패해도 worktree 생성을 되돌리지 않는다. 설정이 없어서 빌드가 한 번 실패하는 것과
     방금 만든 checkout이 통째로 사라지는 것은 무게가 다르다. 대신 무엇이 빠졌는지 알린다.
     """
+    _provision_host_hooks(root=root, checkout=checkout)
     try:
         _profile_id, profile = _load_profile(_find_kit_root(), root)
         declared = _declared_worktree_copies(profile)
@@ -2947,6 +2990,7 @@ def _resolve_spec_confirmation_target(
     artifact_value: str | None,
     inferred_worktree: str | None,
     interactive: bool,
+    session_id: str | None = None,
 ) -> _SpecConfirmationTarget | None:
     if run_dir_value is not None:
         run_dir = _resolve_project_path(root, run_dir_value)
@@ -2963,15 +3007,12 @@ def _resolve_spec_confirmation_target(
         )
 
     candidates: list[_SpecConfirmationTarget] = []
-    seen: set[Path] = set()
     for state_root, checkout_identity in _spec_confirmation_state_roots(
         root,
         inferred_worktree=inferred_worktree,
+        session_id=session_id,
     ):
         for active in find_active_runs(state_root):
-            if active.path in seen:
-                continue
-            seen.add(active.path)
             artifact = _spec_artifact_waiting_for_confirmation(
                 active.path,
                 pending_only=True,
@@ -2984,7 +3025,10 @@ def _resolve_spec_confirmation_target(
                         checkout_identity=checkout_identity,
                     )
                 )
-
+        # 우선순위가 낮은 root의 candidate를 섞으면 양쪽이 pending일 때 아래 모호
+        # 거부에 걸려 승인이 사라진다. 하나라도 나온 root에서 멈춘다.
+        if candidates:
+            break
 
     if not candidates:
         return None
@@ -3015,15 +3059,72 @@ def _spec_confirmation_state_roots(
     root: Path,
     *,
     inferred_worktree: str | None,
+    session_id: str | None = None,
 ) -> tuple[tuple[Path, str], ...]:
-    if inferred_worktree is None:
+    """SPEC 확인 대상을 찾을 state root를 우선순위 순으로 낸다.
+
+    호출자는 candidate가 나온 첫 root에서 멈춘다. bound checkout이 leader를
+    대치하면 leader run의 승인이 사라지고, 반대로 둘을 한꺼번에 스캔하면 양쪽이
+    pending일 때 모호로 판정되어 역시 무음 실패다. 순서 있는 fallback만이 형제
+    worktree 추측 금지와 leader 승인을 동시에 지킨다.
+    """
+    if inferred_worktree is not None:
+        return (
+            (
+                worktree_runtime_root(root=root, name=inferred_worktree),
+                _checkout_identity(inferred_worktree),
+            ),
+        )
+    binding = _bound_host_checkout(root, session_id)
+    if binding is None:
         return ((root, "leader"),)
     return (
         (
-            worktree_runtime_root(root=root, name=inferred_worktree),
-            _checkout_identity(inferred_worktree),
+            binding.checkout.runtime_root,
+            _checkout_identity(binding.checkout.name),
         ),
+        (root, "leader"),
     )
+
+
+def _bound_host_checkout(
+    root: Path,
+    session_id: str | None,
+) -> HostCheckoutBinding | None:
+    """leader cwd에서 도는 host 세션이 증명적으로 묶인 managed checkout.
+
+    binding 파일이 세션↔checkout 1:1 결합의 유일한 증거다. 없으면 형제 worktree를
+    추측으로 고르지 않고 leader만 본다. 승인은 load-bearing 보안 경계이므로 다른
+    binding 소비자(`host_write_boundary_violation`, binding 재확인)와 같은 leader
+    tripwire 검증을 통과한 binding만 쓴다.
+    """
+    if not session_id:
+        return None
+    try:
+        binding = bound_worktree_for_session(session_id, root)
+        if binding is None:
+            return None
+        assert_leader_unchanged(
+            root,
+            binding.leader_snapshot,
+            worker_root=binding.checkout.checkout,
+            include_ignored=False,
+        )
+        return binding
+    except (
+        HostWriteBoundaryError,
+        WorktreeIsolationError,
+        OSError,
+        ValueError,
+    ) as exc:
+        # 조용히 leader-only로 내려가면 "승인이 무시된다"와 분간되지 않는다.
+        # 사유는 보이되 `spec confirm` 자체는 그대로 exit 0을 유지한다.
+        print(
+            "warning: host session binding is unusable, falling back to the "
+            f"leader checkout: {_format_cli_error(exc)}",
+            file=sys.stderr,
+        )
+        return None
 
 
 def _spec_artifact_waiting_for_confirmation(

@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
-import { activeInstallProfileIds, installedProfileFileNames } from "../lib/installer-shared.mjs";
+import { activeInstallProfileIds, installedProfileFileNames, PROJECT_LAUNCHER_RELATIVE } from "../lib/installer-shared.mjs";
 
 const SOURCE_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
@@ -231,7 +231,13 @@ for (const installer of ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"]
   // 등록 무결성은 런 시작 시 hook_integrity가 kit.json과 대조한다.
   assertAbsent(installer, "[hooks.state.", "install must not launder managed hook approval");
   assertAbsent(installer, "trusted_hash", "install must not launder managed hook approval");
+  // launcher가 없으면 host의 chat 승인 hook은 실행할 것을 못 찾아 조용히 끝난다.
+  // 두 진입점 중 한쪽만 심으면 그 조합에서만 승인이 죽어 재현이 안 된다.
+  assertContains(installer, "installProjectLauncher(");
 }
+// 경로·digest 키가 JS/Python/hook 세 곳에서 같은 값인지, 그리고 hook이 실행 직전
+// digest를 대조하는지. 문자열 grep만으로는 이 언어 경계가 하나도 묶이지 않는다.
+assertLauncherContractIsSingleValued();
 
 // 관리 hook 이름의 등록 지점은 Node 1곳(`lib/managed-hooks.mjs`)과 Python 1곳이다.
 // 언어 경계라 합칠 수 없으므로 둘이 같은지는 계속 확인한다.
@@ -1255,6 +1261,97 @@ function assertInstalledHookParity(label, tempRoot) {
   }
   if (!ompExtensionText.includes("syncRootContextFiles") || !ompExtensionText.includes("modifiedRootContextFiles")) {
     failures.push(`${label} omp extension missing root AGENTS.md/CLAUDE.md sync`);
+  }
+  assertInstalledLauncherParity(label, tempRoot);
+}
+
+// launcher는 chat 승인 hook이 CLI를 태우는 유일한 경로다. 문자열 grep으로는
+// `if (false)`로 감싼 호출이나 재설치에서 갱신되지 않는 digest를 못 잡는다.
+// 이 하네스는 실제 설치 결과물을 보므로 그 두 가지를 실제로 반증한다.
+function assertInstalledLauncherParity(label, tempRoot) {
+  const launcher = path.join(tempRoot, pythonLauncherRelative());
+  const identity = fs.lstatSync(launcher, { throwIfNoEntry: false });
+  if (!identity || !identity.isFile()) {
+    failures.push(`${label} install missing the managed launcher: ${pythonLauncherRelative()}`);
+    return;
+  }
+  if (!(identity.mode & 0o100)) {
+    failures.push(`${label} managed launcher is not executable`);
+  }
+  if (identity.mode & 0o022) {
+    failures.push(`${label} managed launcher is group or world writable`);
+  }
+  const kit = readJsonSafe(path.join(tempRoot, ".agent-flow", "kit.json"));
+  const digest = createHash("sha256").update(fs.readFileSync(launcher)).digest("hex");
+  if (kit?.[pythonLauncherDigestKey()] !== digest) {
+    failures.push(
+      `${label} kit.json ${pythonLauncherDigestKey()} does not match the installed launcher`,
+    );
+  }
+  const runtimeCli = path.join(tempRoot, pythonRuntimeCliRelative());
+  if (!fs.existsSync(runtimeCli)) {
+    failures.push(`${label} install missing the runtime the launcher execs: ${pythonRuntimeCliRelative()}`);
+  }
+}
+
+// launcher 경로와 digest 키는 JS(installer-shared)·Python(hook_integrity)·hook
+// 스크립트 세 곳이 각자 선언한다. 언어 경계라 합칠 수 없으므로 같은 값인지 본다 —
+// 한쪽만 바뀌면 모든 run이 시작 거부되거나(게이트) 승인이 조용히 죽는다(hook).
+function pythonLauncherRelative() {
+  const source = fs.readFileSync(
+    path.join(SOURCE_ROOT, "src", "agent_flow", "core", "hook_integrity.py"),
+    "utf8",
+  );
+  const block = source.match(/PROJECT_LAUNCHER_RELATIVE = ([^\n]+)/);
+  if (!block) {
+    throw new Error("PROJECT_LAUNCHER_RELATIVE not found in hook_integrity.py");
+  }
+  return [...block[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]).join(path.sep);
+}
+
+function pythonRuntimeCliRelative() {
+  const source = fs.readFileSync(
+    path.join(SOURCE_ROOT, "src", "agent_flow", "core", "hook_integrity.py"),
+    "utf8",
+  );
+  const block = source.match(/RUNTIME_CLI_RELATIVE = ([^\n]+)/);
+  if (!block) {
+    throw new Error("RUNTIME_CLI_RELATIVE not found in hook_integrity.py");
+  }
+  return [...block[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]).join(path.sep);
+}
+
+function pythonLauncherDigestKey() {
+  const source = fs.readFileSync(
+    path.join(SOURCE_ROOT, "src", "agent_flow", "core", "hook_integrity.py"),
+    "utf8",
+  );
+  const match = source.match(/kit\.get\("(project_launcher_digest[^"]*)"\)/);
+  if (!match) {
+    throw new Error("launcher digest key not found in hook_integrity.py");
+  }
+  return match[1];
+}
+
+function assertLauncherContractIsSingleValued() {
+  const jsRelative = PROJECT_LAUNCHER_RELATIVE;
+  if (jsRelative !== pythonLauncherRelative()) {
+    failures.push(
+      `launcher path differs: installer-shared has ${jsRelative}, hook_integrity has ${pythonLauncherRelative()}`,
+    );
+  }
+  for (const hookName of ["prepare-spec-user-prompt.py", "confirm-spec-user-prompt.py"]) {
+    const source = fs.readFileSync(path.join(SOURCE_ROOT, "scripts", "hooks", hookName), "utf8");
+    // hook은 자기 위치에서 install root를 유도하므로 경로 리터럴이 계약이다.
+    if (!source.includes('parents[2]') || !source.includes('"bin" / "agent-flow"')) {
+      failures.push(`${hookName} must resolve the launcher at parents[2]/bin/agent-flow`);
+    }
+    if (!source.includes(pythonLauncherDigestKey())) {
+      failures.push(`${hookName} must verify the ${pythonLauncherDigestKey()} recorded in kit.json`);
+    }
+  }
+  for (const installer of ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"]) {
+    assertContains(installer, `${pythonLauncherDigestKey()}: projectLauncherDigest(`);
   }
 }
 

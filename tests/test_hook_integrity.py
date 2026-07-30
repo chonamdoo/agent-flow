@@ -24,6 +24,8 @@ from agent_flow.core.hook_integrity import (
     MANAGED_HOOK_PLACEMENT,
     MANAGED_HOOK_SCRIPTS,
     OBSERVATIONAL_HOOK_SCRIPTS,
+    PROJECT_LAUNCHER_RELATIVE,
+    RUNTIME_CLI_RELATIVE,
     HookIntegrityError,
     assert_managed_hooks_registered,
     find_install_root,
@@ -65,6 +67,13 @@ def _install(root: Path, *, hooks: bool = True) -> Path:
         script = hook_dir / name
         script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         script.chmod(0o755)
+    launcher = root / PROJECT_LAUNCHER_RELATIVE
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    runtime_cli = root / RUNTIME_CLI_RELATIVE
+    runtime_cli.parent.mkdir(parents=True, exist_ok=True)
+    runtime_cli.write_text("", encoding="utf-8")
     digests = {
         name: hashlib.sha256((hook_dir / name).read_bytes()).hexdigest()
         for name in MANAGED_HOOK_SCRIPTS
@@ -75,6 +84,9 @@ def _install(root: Path, *, hooks: bool = True) -> Path:
                 "profile": "generic",
                 "hooks": hooks,
                 "managed_hook_digests": digests,
+                "project_launcher_digest": hashlib.sha256(
+                    launcher.read_bytes()
+                ).hexdigest(),
             }
         ),
         encoding="utf-8",
@@ -364,6 +376,81 @@ def test_untrusted_interpreter_on_a_managed_command_is_detected(tmp_path):
     assert any(
         "does not register confirm-spec-user-prompt.py" in value
         for value in violations
+    )
+
+
+def test_missing_project_launcher_is_detected(tmp_path):
+    """launcher가 없으면 승인 hook은 실행할 것을 못 찾아 조용히 끝난다.
+
+    등록만 검사하면 이 상태가 정상으로 보인다 — 실제로 그래서 채팅 `승인`이
+    어느 host에서도 무시되는데 아무 경고도 없었다.
+    """
+    _install(tmp_path)
+    (tmp_path / PROJECT_LAUNCHER_RELATIVE).unlink()
+    assert any("managed launcher is missing" in value for value in _violations(tmp_path))
+
+
+def test_non_executable_project_launcher_is_detected(tmp_path):
+    _install(tmp_path)
+    (tmp_path / PROJECT_LAUNCHER_RELATIVE).chmod(0o644)
+    assert any("managed launcher is not executable" in value for value in _violations(tmp_path))
+
+
+def test_group_writable_project_launcher_is_detected(tmp_path):
+    """hook은 group/other write 비트가 붙은 launcher를 거부한다. 게이트도 같이 거부해야 한다."""
+    _install(tmp_path)
+    (tmp_path / PROJECT_LAUNCHER_RELATIVE).chmod(0o775)
+    assert any(
+        "managed launcher is group or world writable" in value
+        for value in _violations(tmp_path)
+    )
+
+
+def test_replaced_project_launcher_content_is_detected(tmp_path):
+    """내용을 갈아끼우면 승인 기록을 위조하는 실행 경로가 된다."""
+    _install(tmp_path)
+    launcher = tmp_path / PROJECT_LAUNCHER_RELATIVE
+    launcher.write_text("#!/bin/sh\ntouch /tmp/pwned\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    assert any(
+        "managed launcher content digest does not match kit.json" in value
+        for value in _violations(tmp_path)
+    )
+
+
+def test_kit_json_without_launcher_digest_reads_as_an_old_install(tmp_path):
+    """구버전 설치본과 변조를 같은 문구로 말하면 업그레이드 사용자를 변조 조사로 보낸다."""
+    _install(tmp_path)
+    kit_path = tmp_path / ".agent-flow" / "kit.json"
+    payload = json.loads(kit_path.read_text(encoding="utf-8"))
+    del payload["project_launcher_digest"]
+    kit_path.write_text(json.dumps(payload), encoding="utf-8")
+    violations = _violations(tmp_path)
+    assert any("predates the managed launcher" in value for value in violations)
+    assert not any("does not match kit.json" in value for value in violations)
+
+
+def test_kit_json_with_a_malformed_launcher_digest_is_detected(tmp_path):
+    _install(tmp_path)
+    kit_path = tmp_path / ".agent-flow" / "kit.json"
+    payload = json.loads(kit_path.read_text(encoding="utf-8"))
+    payload["project_launcher_digest"] = "not-a-digest"
+    kit_path.write_text(json.dumps(payload), encoding="utf-8")
+    assert any(
+        "no valid content digest for the managed launcher" in value
+        for value in _violations(tmp_path)
+    )
+
+
+def test_missing_runtime_behind_the_launcher_is_detected(tmp_path):
+    """digest만 맞고 runtime이 없으면 launcher는 exit 127이고 hook은 그 stderr를 버린다.
+
+    게이트가 이걸 안 보면 사용자에게는 패치 전과 똑같이 `승인`이 무시된 것으로만 보인다.
+    """
+    _install(tmp_path)
+    (tmp_path / RUNTIME_CLI_RELATIVE).unlink()
+    assert any(
+        "managed python runtime is missing" in value for value in _violations(tmp_path)
     )
 
 

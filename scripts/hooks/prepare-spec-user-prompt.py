@@ -13,7 +13,8 @@ from pathlib import Path
 
 
 def _agent_flow_command() -> tuple[str, ...] | None:
-    candidate = Path(__file__).resolve().parents[2] / "bin" / "agent-flow"
+    install_root = Path(__file__).resolve().parents[2]
+    candidate = install_root / "bin" / "agent-flow"
     try:
         identity = candidate.lstat()
     except OSError:
@@ -25,7 +26,27 @@ def _agent_flow_command() -> tuple[str, ...] | None:
         or not os.access(candidate, os.X_OK)
     ):
         return None
+    if not _launcher_digest_matches(install_root, candidate):
+        return None
     return (str(candidate),)
+
+
+def _launcher_digest_matches(install_root: Path, launcher: Path) -> bool:
+    """kit.json이 기록한 내용과 같은 launcher만 실행한다.
+
+    이 검사가 없으면 launcher를 갈아끼운 쪽이 다음 사용자 입력 때 승인 capability를
+    그대로 받는다. 런 시작 게이트(`hook_integrity`)는 런당 1회지만 이 hook은 모든
+    프롬프트에서 돌기 때문에, 실행 직전 대조가 없으면 노출 창이 반대로 넓다.
+    """
+    try:
+        recorded = json.loads(
+            (install_root / "kit.json").read_text(encoding="utf-8")
+        ).get("project_launcher_digest")
+        if not isinstance(recorded, str) or len(recorded) != 64:
+            return False
+        return hashlib.sha256(launcher.read_bytes()).hexdigest() == recorded
+    except (OSError, ValueError):
+        return False
 
 
 def main() -> int:

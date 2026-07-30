@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -45,6 +46,208 @@ def test_omp_hooks_extension_source_defined_once():
     assert definers == ["lib/omp-hooks-extension.mjs"], (
         f"ompHooksExtensionSource()를 정의하는 파일이 하나가 아니다: {definers}"
     )
+
+
+def _extension_source() -> str:
+    """확장 소스는 실제로 생성해서 본다. 모듈 텍스트만 읽으면 `String.raw` 템플릿의
+    보간이 끼어들어 심기는 바이트와 다른 것을 검사하게 된다.
+    """
+    return subprocess.run(
+        (
+            _node(),
+            "--input-type=module",
+            "-e",
+            "import { ompHooksExtensionSource } from "
+            f"{json.dumps(str(KIT_ROOT / 'lib' / 'omp-hooks-extension.mjs'))};"
+            "process.stdout.write(ompHooksExtensionSource());",
+        ),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+
+def _git(cwd: Path, *args: str) -> None:
+    git = shutil.which("git")
+    if git is None:
+        pytest.skip("git을 찾을 수 없다")
+    subprocess.run((git, *args), cwd=cwd, check=True, capture_output=True, text=True)
+
+
+def _install_extension(root: Path, source: str, extra: str = "") -> Path:
+    """host가 실제로 심는 자리에 둔다. ROOT 산정이 이 위치에 달려 있다."""
+    target = root / ".omp" / "extensions" / "agent-flow-hooks.mjs"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(source + extra, encoding="utf-8")
+    return target
+
+
+def _resolved_hook_dir(root: Path, source: str) -> Path:
+    target = _install_extension(root, source, "\nexport const __HOOK_DIR = HOOK_DIR;\n")
+    return Path(
+        subprocess.run(
+            (
+                _node(),
+                "--input-type=module",
+                "-e",
+                f"import({json.dumps(str(target))})"
+                ".then((m) => process.stdout.write(m.__HOOK_DIR));",
+            ),
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )
+
+
+def _run_bash_tool_call(root: Path, source: str) -> tuple[str, str]:
+    """확장의 tool_call 핸들러를 Bash 이벤트로 한 번 돌린다."""
+    target = _install_extension(root, source)
+    driver = (
+        f"import ext from {json.dumps(str(target))};\n"
+        "const handlers = {};\n"
+        "const pi = { setLabel() {}, on(name, fn) { (handlers[name] ||= []).push(fn); } };\n"
+        "ext(pi);\n"
+        "const out = await handlers.tool_call[0](\n"
+        '  { toolName: "Bash", type: "PreToolUse", input: { command: "echo hi" } },\n'
+        f"  {{ cwd: {json.dumps(str(root))} }},\n"
+        ");\n"
+        "process.stdout.write(JSON.stringify(out ?? null));\n"
+    )
+    result = subprocess.run(
+        (_node(), "--input-type=module", "-e", driver),
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout, result.stderr
+
+
+def _seed_install(root: Path) -> Path:
+    hooks = root / ".agent-flow" / "scripts" / "hooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    (root / ".agent-flow" / "kit.json").write_text("{}", encoding="utf-8")
+    return hooks
+
+
+def test_omp_extension_resolves_its_hook_dir_from_the_install_root(tmp_path: Path):
+    """반증: worktree checkout에서 연 OMP 세션은 ROOT가 worktree라 hook을 못 찾는다.
+
+    문자열 대조가 아니라 생성본을 실제로 임포트해 HOOK_DIR 값을 잰다. 문자열만 보면
+    탐색을 중화해도(한 칸 건너뛰기, 폴백 변경) 통과한다. 여기서 고른 값은 보고용이
+    아니라 실제로 실행할 hook 디렉터리다.
+    """
+    source = _extension_source()
+    root = tmp_path.resolve()
+
+    leader = root / "leader"
+    leader.mkdir()
+    _git(leader, "init", "-q")
+    (leader / ".gitignore").write_text(".agent-flow/\n.omp/\n", encoding="utf-8")
+    _git(leader, "add", "-A")
+    _git(
+        leader,
+        "-c",
+        "user.email=t@t",
+        "-c",
+        "user.name=t",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-q",
+        "-m",
+        "init",
+    )
+    leader_hooks = _seed_install(leader)
+    checkout = leader / ".agent-flow" / "worktrees" / "w1"
+    _git(leader, "worktree", "add", "-q", "-b", "w1", str(checkout))
+
+    # 조상에 있는 남의 프로젝트 설치본. 자기 설치본이 없는 checkout이 이것을 집으면
+    # 남의 hook 스크립트가 이 cwd로 실행된다.
+    foreign = root / "foreign"
+    foreign_hooks = _seed_install(foreign)
+    outsider = foreign / "child"
+    outsider.mkdir()
+    _git(outsider, "init", "-q")
+
+    # 같은 저장소 안의 더 가까운 설치본. 판정 기준은 kit.json 하나뿐이라 hooks
+    # 디렉터리가 지워진 설치본도 여전히 이 설치본이다 — Python 쪽 형제 함수
+    # find_install_root와 같은 조건이어야 두 구현이 같은 설치본을 고른다. 여기에
+    # scripts/hooks 존재를 더하면 이 checkout이 조상 것을 집는다.
+    nested = leader / "pkg" / "app"
+    nested.mkdir(parents=True)
+    (leader / "pkg" / ".agent-flow").mkdir()
+    (leader / "pkg" / ".agent-flow" / "kit.json").write_text("{}", encoding="utf-8")
+    nested_hooks = leader / "pkg" / ".agent-flow" / "scripts" / "hooks"
+
+    # leader 밖에 수동으로 만든 worktree. 조상 어디에도 설치본이 없지만 같은
+    # 저장소이므로 leader 설치본은 남의 것이 아니다.
+    detached = root / "manual-wt"
+    _git(leader, "worktree", "add", "-q", "-b", "w2", str(detached))
+
+    assert _resolved_hook_dir(leader, source) == leader_hooks
+    assert _resolved_hook_dir(checkout, source) == leader_hooks, (
+        "managed checkout이 leader 설치본에 닿지 못하면 채팅 승인이 그대로 무시된다"
+    )
+    assert _resolved_hook_dir(nested, source) == nested_hooks, (
+        "가장 가까운 조상의 설치본이 아니면 다른 프로젝트의 hook을 돌리는 것이다"
+    )
+    assert _resolved_hook_dir(detached, source) == leader_hooks, (
+        "leader 밖 worktree가 hook을 못 찾으면 그 세션의 채팅 승인은 무음이다"
+    )
+    resolved = _resolved_hook_dir(outsider, source)
+    assert resolved != foreign_hooks, "조상의 남의 설치본을 집으면 안 된다"
+    assert resolved == outsider / ".agent-flow" / "scripts" / "hooks"
+
+
+def test_omp_extension_missing_hook_script_never_blocks_the_users_tool(tmp_path: Path):
+    """반증: 스크립트 부재를 spawn 실패(126)로 흘리면 block이 되어 그 세션의 모든
+    bash/write가 막힌다. 부재는 설치·해석 문제이지 정책 위반이 아니다.
+
+    동시에 가드가 약해지지 않았는지도 본다 — 스크립트가 있는데 0이 아닌 종료면
+    여전히 막아야 한다.
+    """
+    source = _extension_source()
+    root = tmp_path.resolve()
+
+    absent = root / "absent"
+    _seed_install(absent)
+    stdout, stderr = _run_bash_tool_call(absent, source)
+    assert json.loads(stdout) is None, "hook 스크립트 부재가 사용자 도구 차단이 되면 안 된다"
+    assert "agent-flow hooks are not registered" in stderr, (
+        "조용히 삼키면 등록 누락을 아무도 볼 수 없다 — 이 버그의 원인이 그것이었다"
+    )
+    assert stderr.count("agent-flow hooks are not registered") == 1, (
+        "세션당 한 번만 낸다"
+    )
+
+    denying = root / "denying"
+    hooks = _seed_install(denying)
+    for name in (
+        "guard-protected-branch.sh",
+        "guard-host-worktree.sh",
+        "guard-spec-approval.sh",
+    ):
+        script = hooks / name
+        script.write_text('echo "denied by " >&2\nexit 1\n', encoding="utf-8")
+        script.chmod(0o755)
+    stdout, _ = _run_bash_tool_call(denying, source)
+    assert json.loads(stdout) == {"block": True, "reason": "denied by"}, (
+        "스크립트가 있는데 0이 아닌 종료면 가드는 그대로 막아야 한다"
+    )
+
+
+def test_omp_extension_reads_the_session_id_from_the_session_manager():
+    """반증: 이 fallback을 지우면 session_id 없이 hook이 돌아 승인이 조용히 무시된다.
+
+    실측(omp 17.1.8): input/tool_call/tool_result 어느 이벤트에도 식별자가 없어
+    direct 후보는 전부 비고, 이 getter가 유일한 출처다.
+    """
+    source = _extension_source()
+    assert "ctx?.sessionManager?.getSessionId?.()" in source
+    assert "session_id: sessionIdentity(event, ctx)" in source
 
 
 def test_managed_hook_scripts_declared_once_per_language():

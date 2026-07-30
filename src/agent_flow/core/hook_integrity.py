@@ -105,6 +105,12 @@ MANAGED_HOOK_PLACEMENT = {
 
 HOOK_DIR_RELATIVE = Path(".agent-flow") / "scripts" / "hooks"
 KIT_JSON_RELATIVE = Path(".agent-flow") / "kit.json"
+# spec 승인 hook이 CLI를 실행하는 유일한 경로. 이 파일이 없으면 hook은 실행할
+# 것을 못 찾아 조용히 exit 0 하고, 사용자는 채팅 `승인`이 무시되는 이유를
+# 어디에서도 못 본다. 그래서 등록과 같은 급으로 런 시작 때 대조한다.
+PROJECT_LAUNCHER_RELATIVE = Path(".agent-flow") / "bin" / "agent-flow"
+# launcher가 실제로 태울 CLI. digest만 맞고 이게 없으면 launcher는 exit 127이다.
+RUNTIME_CLI_RELATIVE = Path(".agent-flow") / "runtime" / "python" / "agent_flow" / "cli.py"
 
 # install이 실제로 쓰는 등록 파일들. JSON host는 이벤트별 구조를 그대로 읽고,
 # OMP 확장은 kit이 통째로 생성하는 소스라 스크립트 이름 존재만 본다.
@@ -228,6 +234,7 @@ def _verify_root(root: Path) -> HookIntegrityReport:
     if expected_enabled:
         violations.extend(_missing_registrations(root, surfaces))
         violations.extend(_managed_hook_digest_violations(root, kit))
+        violations.extend(_project_launcher_violations(root, kit))
         violations.extend(_misplaced_managed_hooks(surfaces))
     else:
         violations.extend(_unexpected_registrations(surfaces))
@@ -316,6 +323,68 @@ def _managed_hook_digest_violations(
             continue
         if actual != recorded:
             yield f"managed hook content digest does not match kit.json: {script}"
+
+
+def _project_launcher_violations(root: Path, kit: dict) -> Iterator[str]:
+    """승인 hook이 실행할 launcher를 hook과 **같은 기준**으로 대조한다.
+
+    hook의 `_agent_flow_command()`도 같은 다섯 항목 + kit.json digest를 본다. 두
+    기준이 갈라지면 게이트가 통과하는데 hook만 거부하거나(승인이 무음으로 무시),
+    반대로 게이트가 거부한 launcher를 hook이 매 프롬프트마다 실행한다.
+
+    launcher가 **실행될 수 있는지**도 같이 본다. digest만 맞고 관리 runtime이
+    없으면 launcher는 exit 127이고, hook은 그 stderr를 버리므로 사용자에게는
+    승인이 무시된 것으로만 보인다.
+    """
+    recorded = kit.get("project_launcher_digest")
+    if recorded is None:
+        # 변조와 "이 설치본이 launcher 도입보다 오래됨"을 구분한다. 상위 문구가
+        # "변조가 아님을 확인한 뒤 재설치"라고 경고하므로, 섞으면 업그레이드
+        # 사용자를 변조 조사로 보낸다.
+        yield (
+            "this installation predates the managed launcher; re-run "
+            "`node bin/agent-flow-kit.mjs install` from the leader checkout"
+        )
+        return
+    if not isinstance(recorded, str) or not re.fullmatch(r"[0-9a-f]{64}", recorded):
+        yield (
+            "kit.json has no valid content digest for the managed launcher: "
+            f"{PROJECT_LAUNCHER_RELATIVE}"
+        )
+        return
+    path = root / PROJECT_LAUNCHER_RELATIVE
+    try:
+        identity = path.lstat()
+    except OSError:
+        yield (
+            "managed launcher is missing, so chat SPEC confirmation cannot run: "
+            f"{PROJECT_LAUNCHER_RELATIVE}"
+        )
+        return
+    if not stat.S_ISREG(identity.st_mode):
+        yield f"managed launcher is not a regular file: {PROJECT_LAUNCHER_RELATIVE}"
+        return
+    if identity.st_uid != os.getuid():
+        yield f"managed launcher is not owned by the current user: {PROJECT_LAUNCHER_RELATIVE}"
+    if identity.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        yield f"managed launcher is group or world writable: {PROJECT_LAUNCHER_RELATIVE}"
+    if not os.access(path, os.X_OK):
+        yield f"managed launcher is not executable: {PROJECT_LAUNCHER_RELATIVE}"
+    if not _is_file(root / RUNTIME_CLI_RELATIVE):
+        yield (
+            "managed python runtime is missing, so the launcher cannot run the CLI: "
+            f"{RUNTIME_CLI_RELATIVE}"
+        )
+    try:
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        yield (
+            "managed launcher cannot be read for digest verification: "
+            f"{PROJECT_LAUNCHER_RELATIVE}"
+        )
+        return
+    if actual != recorded:
+        yield f"managed launcher content digest does not match kit.json: {PROJECT_LAUNCHER_RELATIVE}"
 
 
 def _unexpected_registrations(surfaces: tuple[_Surface, ...]) -> Iterator[str]:
