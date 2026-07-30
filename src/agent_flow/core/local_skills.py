@@ -60,8 +60,10 @@ def merged_profile_payload(payloads: Sequence[dict]) -> dict:
     `update`만 하면 뒤 profile이 앞 profile의 `skills.required_review`와 `skills.external`을
     통째로 덮는다. react-native + android처럼 둘 다 활성인 조합에서 한쪽 routing이
     조용히 사라지는 경로가 그것이다. 순서는 `active_profile_ids()`가 준 순서를
-    유지하고, 같은 그룹/domain 이름은 **먼저 온 profile이 이긴다** — detect 우선순위가
-    곧 소유권이다.
+    유지하고, domain 이름은 **먼저 온 profile이 이긴다** — detect 우선순위가 곧 소유권이다.
+    `required_review` group은 그 규칙을 쓸 수 없다: 6개 profile 전부가 `group: profile`을
+    쓰므로 group 이름만으로 dedupe하면 두 번째 profile의 표가 통째로 사라진다. 그래서
+    소유 profile id와 group 이름의 쌍으로 dedupe한다.
     """
     merged: dict = {}
     sources: list = []
@@ -82,7 +84,7 @@ def merged_profile_payload(payloads: Sequence[dict]) -> dict:
             for group in skills["required_review"]:
                 if not isinstance(group, dict):
                     continue
-                key = str(group.get("group", ""))
+                key = f"{payload.get('id', '')}:{group.get('group', '')}"
                 if key in seen_groups:
                     continue
                 seen_groups.add(key)

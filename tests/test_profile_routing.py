@@ -212,6 +212,47 @@ def test_first_profile_owns_a_duplicated_group():
     assert [group["skills"] for group in merged["skills"]["required_review"]] == [["a"]]
 
 
+def test_merge_keeps_each_profile_group():
+    """반증: 6개 profile 전부가 `group: profile`을 쓴다. group id만으로 dedupe하면
+    다중 profile 프로젝트에서 두 번째 profile의 표가 통째로 사라진다."""
+    merged = merged_profile_payload(
+        [load_profile_payload("android"), load_profile_payload("python")]
+    )
+
+    routed = [set(group["skills"]) for group in merged["skills"]["required_review"]]
+    assert any("android-code-review" in skills for skills in routed), routed
+    assert any("python-api-clean-architecture" in skills for skills in routed), routed
+
+
+def test_routable_group_skills_drops_selectorless_groups():
+    """반증: 이름이 선언돼 있다는 것만으로 도달 가능하다고 세면 doctor는 활성화되지
+    않는 skill을 통과시킨다. selectors 없는 group은 어떤 변경에도 걸리지 않는다."""
+    profile = {
+        "skills": {
+            "required_review": [
+                {"group": "profile", "skills": ["scoped"], "path_globs": ["**/*.py"]},
+                {"group": "loose", "skills": ["unscoped"]},
+            ]
+        }
+    }
+
+    assert routable_group_skills(profile) == {"scoped"}
+
+
+def test_every_profile_group_declares_selectors():
+    """selectors 없는 `required_review` group은 표가 있으나 죽어 있다 — 어떤 변경에도
+    걸리지 않으므로 그 이름은 어느 phase에도 올라가지 않는다."""
+    selectorless = [
+        f"{profile_id}:{group.get('group', '')}"
+        for profile_id in _profile_ids()
+        for group in (load_profile_payload(profile_id).get("skills") or {}).get("required_review")
+        or []
+        if not (group.get("task_terms") or group.get("path_globs"))
+    ]
+
+    assert selectorless == []
+
+
 def test_resolver_surfaces_a_vocabulary_matched_skill(tmp_path, monkeypatch):
     """반증: resolver가 어휘 결과를 안 받으면 그 skill은 프롬프트에도 게이트에도 없다."""
     home = tmp_path / "home"
