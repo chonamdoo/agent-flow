@@ -392,6 +392,11 @@ def _checkout_roots(project_root: Path) -> tuple[str, ...]:
         # 미인정으로 차단된다. 조회가 실패하면 아래 스캔 결과만 남는다 — 실패로
         # 목록을 넓히지는 않는다.
         for registered in list_registered_worktrees(base):
+            # prunable 등록은 checkout이 이미 사라진 자리다. 그 경로를 root로 인정하면
+            # 같은 자리에 만든 평범한 디렉터리의 `skills/<name>/SKILL.md`가 leader 정본을
+            # 읽은 것으로 통과한다 — 증거 게이트가 그 경로를 checkout 상대경로로만 본다.
+            if registered.prunable or not (registered.path / ".git").exists():
+                continue
             add(registered.path)
     except WorktreeIsolationError:
         pass
