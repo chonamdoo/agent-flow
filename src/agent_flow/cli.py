@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+import yaml
+
 from agent_flow.adapters.registry import detect_adapter
 from agent_flow.adapters.templates import PromptContext, render_stage_prompt
 from agent_flow.core.artifacts import (
@@ -47,7 +49,11 @@ from agent_flow.core.design_ledger import (
 from agent_flow.core.design_value_check import missing_spec_item_evidence
 from agent_flow.core.gates import GateCommand, run_gates
 from agent_flow.core.kit_digest import warn_if_installed_kit_is_stale
-from agent_flow.core.phase_workflow import load_phase_workflow_definition
+from agent_flow.core.phase_workflow import (
+    DeclaredPhaseSkills,
+    declared_phase_skills,
+    load_phase_workflow_definition,
+)
 from agent_flow.core.profiles import (
     DEFAULT_GATE_PHASE,
     GATE_PHASE_ALL,
@@ -2746,6 +2752,19 @@ def _is_legacy_run_dir(path: Path) -> bool:
     return not any(child.is_dir() and (child / "manifest.json").exists() for child in path.iterdir())
 
 
+def _workflow_declarations() -> DeclaredPhaseSkills:
+    """doctor의 활성화 경로 축 하나 — workflow phase가 이름으로 선언한 skill.
+
+    수집 실패를 조용히 빈 값으로 퇴화시키면 doctor가 정상 선언된 skill을 미라우팅으로
+    오탐한다. 그래서 읽지 못한 workflow는 사유를 그대로 들고 나온다.
+    """
+    try:
+        kit_root = _find_kit_root()
+    except (OSError, RuntimeError) as exc:
+        return DeclaredPhaseSkills((), (f"workflow declarations unavailable: {exc}",))
+    return declared_phase_skills(kit_root)
+
+
 def _run_skills_command(args: argparse.Namespace, root: Path) -> int:
     profile_ids = active_profile_ids(root, getattr(args, "profile", None) or "auto")
     payloads = [load_profile_payload(profile_id) for profile_id in profile_ids]
@@ -2765,14 +2784,30 @@ def _run_skills_command(args: argparse.Namespace, root: Path) -> int:
 
     if args.skills_command in {"scan", "doctor"}:
         merged = merged_profile_payload(payloads)
-        result = skill_catalog.scan(root, profile=merged)
+        declared = _workflow_declarations()
+        for error in declared.errors:
+            print(error, file=sys.stderr)
+        result = skill_catalog.scan(root, profile=merged, workflow_skills=declared.names)
         sources = ", ".join(
             f"{source} {count}" for source, count in sorted(result.by_source().items())
         )
         print(f"catalog: {len(result.entries)} skills ({sources}) stamp={result.stamp[:12]}")
+        findings = list(result.findings)
+        if declared.errors and not declared.names:
+            # 축이 통째로 없으면 UNROUTED는 전부 오탐이다. 진짜 finding과 형식이 같아
+            # 구별되지 않으므로 인쇄하지 않고 그 사실을 남긴다.
+            findings = [item for item in findings if item.kind != skill_catalog.UNROUTED]
+            print("degraded: workflow declarations unavailable; unrouted findings suppressed")
+        elif declared.errors:
+            # 축소된 선언 집합으로 판정하면 그 workflow만 선언한 skill이 미라우팅
+            # 오탐으로 찍힌다. stdout만 보는 소비자가 정상 결과와 구별할 수 있어야 한다.
+            print(
+                f"degraded: workflow declarations incomplete "
+                f"({len(declared.errors)} workflow(s) unreadable); unrouted findings may be false"
+            )
         if args.skills_command == "scan" and not getattr(args, "no_write", False):
             print(f"lock: {skill_catalog.write_lock(root, result).relative_to(root)}")
-        for finding in result.findings:
+        for finding in findings:
             line = f"{finding.kind} {finding.name}"
             if finding.detail:
                 line = f"{line} — {finding.detail}"
@@ -2784,7 +2819,7 @@ def _run_skills_command(args: argparse.Namespace, root: Path) -> int:
     if args.skills_command in {"resolve", "prompt", "markers"}:
         try:
             definition = load_phase_workflow_definition(_find_kit_root(), args.workflow)
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, yaml.YAMLError) as exc:
             print(str(exc), file=sys.stderr)
             return 2
         phase = next((item for item in definition.phases if item.id == args.phase), None)
