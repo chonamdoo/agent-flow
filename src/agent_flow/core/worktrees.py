@@ -688,18 +688,24 @@ def run_worktree_cleanup_transaction(
                     if step == "archive":
                         _archive_cleanup_run(journal_path=journal_path, journal=journal)
                     elif step == "integration_proof":
-                        _record_integration_proof(root=root, journal=journal)
+                        _record_integration_proof(
+                            root=root,
+                            journal=journal,
+                            target_branch=target_branch,
+                        )
                     elif step == "checkout_removal":
                         _remove_journal_checkout(
                             root=root,
                             journal_path=journal_path,
                             journal=journal,
+                            target_branch=target_branch,
                         )
                     elif step == "branch_ref_cas":
                         _delete_journal_branch(
                             root=root,
                             journal_path=journal_path,
                             journal=journal,
+                            target_branch=target_branch,
                         )
                     else:
                         _remove_journal_metadata(root=root, journal=journal)
@@ -926,6 +932,14 @@ def _prepare_or_load_cleanup_journal(
     target_ref = ""
     target_oid = None
     for candidate in _branch_ref_candidates(root=root, branch=target_branch):
+        candidate_oid = _ref_oid(root=root, ref=candidate)
+        if candidate_oid is None:
+            continue
+        _refresh_remote_branch_ref(
+            root=root,
+            ref=candidate,
+            branch=target_branch,
+        )
         candidate_oid = _ref_oid(root=root, ref=candidate)
         if candidate_oid is not None:
             target_ref = candidate
@@ -1365,8 +1379,14 @@ def _assert_cleanup_owner_active(
         )
 
 
-def _record_integration_proof(*, root: Path, journal: dict[str, Any]) -> None:
-    target_oid = _refresh_integration_target(root=root, journal=journal)
+def _record_integration_proof(
+    *, root: Path, journal: dict[str, Any], target_branch: str
+) -> None:
+    target_oid = _refresh_integration_target(
+        root=root,
+        journal=journal,
+        target_branch=target_branch,
+    )
     _validate_cleanup_snapshot(root=root, journal=journal, require_clean=True)
     _prove_recorded_integration(
         root=root,
@@ -1375,8 +1395,11 @@ def _record_integration_proof(*, root: Path, journal: dict[str, Any]) -> None:
     )
 
 
-def _refresh_integration_target(*, root: Path, journal: dict[str, Any]) -> str:
+def _refresh_integration_target(
+    *, root: Path, journal: dict[str, Any], target_branch: str
+) -> str:
     target_ref = journal["target"]["ref"]
+    _refresh_remote_branch_ref(root=root, ref=target_ref, branch=target_branch)
     current = _ref_oid(root=root, ref=target_ref)
     if current is None:
         raise CleanupBlockedError(
@@ -1644,7 +1667,11 @@ def _prune_empty_host_hook_parents(*, checkout: Path, target: Path) -> None:
 
 
 def _remove_journal_checkout(
-    *, root: Path, journal_path: Path, journal: dict[str, Any]
+    *,
+    root: Path,
+    journal_path: Path,
+    journal: dict[str, Any],
+    target_branch: str,
 ) -> None:
     path = Path(journal["checkout"]["path"])
     registered = _registered_at_path(root=root, path=path)
@@ -1654,7 +1681,11 @@ def _remove_journal_checkout(
         journal_path=journal_path,
         journal=journal,
     )
-    _record_integration_proof(root=root, journal=journal)
+    _record_integration_proof(
+        root=root,
+        journal=journal,
+        target_branch=target_branch,
+    )
     journal["updated_at"] = _utc_now()
     _write_cleanup_journal(journal_path, journal)
     # `--force` 없는 `git worktree remove`는 untracked 파일 하나에도 거부한다. 우리가
@@ -1668,7 +1699,11 @@ def _remove_journal_checkout(
 
 
 def _delete_journal_branch(
-    *, root: Path, journal_path: Path, journal: dict[str, Any]
+    *,
+    root: Path,
+    journal_path: Path,
+    journal: dict[str, Any],
+    target_branch: str,
 ) -> None:
     checkout = journal["checkout"]
     if not checkout["delete_branch"] or not checkout["branch_owned"]:
@@ -1682,7 +1717,11 @@ def _delete_journal_branch(
         raise CleanupBlockedError(
             "worktree branch ref changed before CAS; preserving branch ref"
         )
-    target_oid = _refresh_integration_target(root=root, journal=journal)
+    target_oid = _refresh_integration_target(
+        root=root,
+        journal=journal,
+        target_branch=target_branch,
+    )
     _prove_recorded_integration(
         root=root,
         journal=journal,
@@ -2202,17 +2241,47 @@ def worktree_branch_exists(*, root: Path, branch: str) -> bool:
     return result.ok
 
 
-def _branch_ref_candidates(*, root: Path, branch: str) -> Iterator[str]:
-    yield f"refs/heads/{branch}"
+def _configured_remote_names(root: Path) -> list[str]:
     remotes = git_safe("remote", cwd=root, optional_locks=False)
     if not remotes.ok:
-        return
-    names = sorted(set(remotes.stdout.splitlines()))
+        return []
+    names = sorted({name for name in remotes.stdout.splitlines() if name})
     if "origin" in names:
         names.remove("origin")
         names.insert(0, "origin")
-    for remote in names:
+    return names
+
+
+def _branch_ref_candidates(*, root: Path, branch: str) -> Iterator[str]:
+    yield f"refs/heads/{branch}"
+    for remote in _configured_remote_names(root):
         yield f"refs/remotes/{remote}/{branch}"
+
+
+def _refresh_remote_branch_ref(*, root: Path, ref: str, branch: str) -> None:
+    if ref == f"refs/heads/{branch}":
+        return
+    for remote in _configured_remote_names(root):
+        if ref != f"refs/remotes/{remote}/{branch}":
+            continue
+        result = git_safe(
+            "fetch",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "--",
+            remote,
+            f"+refs/heads/{branch}:{ref}",
+            cwd=root,
+        )
+        if not result.ok:
+            raise CleanupBlockedError(
+                f"cannot refresh cleanup target from remote {remote};"
+                " preserving checkout"
+            )
+        return
+    raise CleanupBlockedError(
+        "cleanup remote target is not configured; preserving checkout"
+    )
 
 
 def _default_base_ref(root: Path) -> str:

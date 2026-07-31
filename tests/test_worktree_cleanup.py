@@ -95,9 +95,31 @@ def test_cleanup_uses_remote_tracking_target_when_local_branch_is_absent(
     root = tmp_path / "repo"
     _init_repo(root)
     target_oid = _git("rev-parse", "main", cwd=root).stdout.strip()
-    _git("remote", "add", "upstream", str(root), cwd=root)
-    _git("update-ref", "refs/remotes/upstream/release", target_oid, cwd=root)
+    remote = tmp_path / "remote.git"
+    remote.mkdir()
+    _git("init", "--bare", cwd=remote)
+    _git("remote", "add", "upstream", str(remote), cwd=root)
+    _git("push", "upstream", f"{target_oid}:refs/heads/release", cwd=root)
     status, run_dir = _managed_run(root, "remote-target")
+    (status.path / "f.txt").write_text("merged feature\n", encoding="utf-8")
+    _git("add", "f.txt", cwd=status.path)
+    _git("commit", "-m", "feature", cwd=status.path)
+    integrated_oid = _git("rev-parse", "HEAD", cwd=status.path).stdout.strip()
+    _git(
+        "push",
+        "upstream",
+        f"{integrated_oid}:refs/heads/release",
+        cwd=status.path,
+    )
+    _git("update-ref", "refs/remotes/upstream/release", target_oid, cwd=root)
+    assert (
+        _git("rev-parse", "refs/remotes/upstream/release", cwd=root).stdout.strip()
+        == target_oid
+    )
+    fetch_head = root / _git(
+        "rev-parse", "--git-path", "FETCH_HEAD", cwd=root
+    ).stdout.strip()
+    fetch_head.write_text("user fetch state\n", encoding="utf-8")
 
     journal_path, journal = W._prepare_or_load_cleanup_journal(
         root=root,
@@ -110,7 +132,7 @@ def test_cleanup_uses_remote_tracking_target_when_local_branch_is_absent(
 
     assert journal["target"] == {
         "ref": "refs/remotes/upstream/release",
-        "expected_oid": target_oid,
+        "expected_oid": integrated_oid,
     }
     result = W.run_worktree_cleanup_transaction(
         root=root,
@@ -122,6 +144,11 @@ def test_cleanup_uses_remote_tracking_target_when_local_branch_is_absent(
     assert result.journal_path == journal_path
     W.complete_worktree_cleanup(result)
     assert not status.path.exists()
+    assert (
+        _git("rev-parse", "refs/remotes/upstream/release", cwd=root).stdout.strip()
+        == integrated_oid
+    )
+    assert fetch_head.read_text(encoding="utf-8") == "user fetch state\n"
 
 
 def test_run_lifecycle_lease_is_shared_and_recovers_after_owner_crash(
