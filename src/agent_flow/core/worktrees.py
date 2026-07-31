@@ -2204,7 +2204,14 @@ def _default_base_ref(root: Path) -> str:
     declared = _profile_base_ref(root)
     if declared:
         return declared
-    for ref in ("main", "origin/main", "master", "origin/master", "develop", "origin/develop"):
+    for ref in (
+        "refs/heads/main",
+        "refs/remotes/origin/main",
+        "refs/heads/master",
+        "refs/remotes/origin/master",
+        "refs/heads/develop",
+        "refs/remotes/origin/develop",
+    ):
         if _git_commit_ref_exists(root=root, ref=ref):
             return ref
     return "HEAD"
@@ -2248,7 +2255,10 @@ def _profile_base_ref(root: Path) -> str:
         # `-`로 시작하는 값은 git argv에서 옵션으로 읽힌다. ref로 취급하지 않는다.
         if not declared or declared.startswith("-") or declared.split() != [declared]:
             continue
-        for ref in (declared, f"origin/{declared}"):
+        for ref in (
+            f"refs/heads/{declared}",
+            f"refs/remotes/origin/{declared}",
+        ):
             if _git_commit_ref_exists(root=root, ref=ref):
                 return ref
     return ""

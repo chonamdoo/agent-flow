@@ -226,3 +226,40 @@ def test_custom_installed_profile_declared_base_wins_over_main(tmp_path: Path):
     status = create_worktree(root=root, plan=plan_worktree(root=root, name="feat"))
 
     assert _git("rev-parse", "HEAD", cwd=status.path) == develop_tip
+
+
+def test_profile_base_ignores_same_named_tag_when_only_remote_branch_exists(
+    tmp_path: Path,
+):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _init_repo(root)
+    tag_tip = _git("rev-parse", "main", cwd=root)
+    _git("checkout", "-b", "release", cwd=root)
+    (root / "f.txt").write_text("remote release\n", encoding="utf-8")
+    _git("add", ".", cwd=root)
+    _git("commit", "-m", "release ahead", cwd=root)
+    release_tip = _git("rev-parse", "HEAD", cwd=root)
+    _git("checkout", "main", cwd=root)
+    _git("update-ref", "refs/remotes/origin/release", release_tip, cwd=root)
+    _git("branch", "-D", "release", cwd=root)
+    _git("tag", "release", tag_tip, cwd=root)
+    _declare_profile(root, "my-stack")
+    profiles = root / ".agent-flow" / "profiles"
+    profiles.mkdir(parents=True)
+    (profiles / "my-stack.yaml").write_text(
+        "id: my-stack\n"
+        "branching:\n"
+        "  base: release\n"
+        "  integration: release\n"
+        "pr:\n"
+        "  target_branch: release\n"
+        "  merge_strategy: merge\n",
+        encoding="utf-8",
+    )
+
+    status = create_worktree(root=root, plan=plan_worktree(root=root, name="feat"))
+
+    assert tag_tip != release_tip
+    assert _git("rev-parse", "HEAD", cwd=status.path) == release_tip
+    assert _manifest(root, "feat-feat")["base_ref"] == "refs/remotes/origin/release"
