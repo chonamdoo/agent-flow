@@ -12,13 +12,12 @@
 from __future__ import annotations
 
 import os
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
 from agent_flow.core.profile_routing import IMPLEMENTATION_PHASES, REVIEW_PHASES
-from agent_flow.core.skill_resolver import SkillCatalogEntry, selector_matches
+from agent_flow.core.skill_resolver import SkillCatalogEntry, selector_matches, term_in
 
 REQUIRED = "required"
 OFFERED = "offered"
@@ -197,7 +196,6 @@ def _domain_active(
 # spreadsheets…"를 실어서 `spreadsheet` 어휘에 걸렸다. 긍정 매칭만 하므로 배제 조항은
 # 신호에서 빼야 한다 — 아니면 "쓰지 말라"는 문장이 그 skill을 불러온다.
 _NEGATION_MARKERS = ("do not use", "do not trigger", "do not apply", "don't use")
-_TERM_CACHE: dict[str, "re.Pattern[str]"] = {}
 
 
 def _entry_terms(entry: SkillCatalogEntry, terms: Sequence[str]) -> tuple[str, ...]:
@@ -213,24 +211,9 @@ def _entry_terms(entry: SkillCatalogEntry, terms: Sequence[str]) -> tuple[str, .
 
 
 def _term_in(term: str, text: str) -> bool:
-    r"""단어 경계로 본다.
-
-    부분문자열로 보면 `chart`가 `charting`에 걸려 무관한 플랫폼 skill이 required까지
-    올라간다(실측). 복수형은 허용하므로 `modifier`는 `modifiers`에 계속 걸린다 —
-    그 오탐은 어휘를 구절로 좁혀서 막는다(`compose modifier`, `modifier chain`).
-
-    경계는 ASCII 영숫자로만 잡는다. `\w`를 쓰면 한글이 word 문자라서
-    `status bar가`처럼 조사가 붙은 한국어 task 문구가 전부 미매치가 된다.
-
-    복수 접미사는 허용한다. skill description은 term을 복수로 쓰는 쪽이 흔해서
-    (`turbo modules`, `slide decks`, `mcp servers`) 금지하면 정탐 13건이 사라졌다.
-    `charting`처럼 복수형이 아닌 확장은 계속 배제된다.
-    """
-    pattern = _TERM_CACHE.get(term)
-    if pattern is None:
-        pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(term)}(?:e?s)?(?![A-Za-z0-9_])")
-        _TERM_CACHE[term] = pattern
-    return pattern.search(text) is not None
+    """단어 경계 판정은 `skill_resolver.term_in` 하나다. frontmatter 선언과 어휘
+    라우팅이 다른 규칙으로 갈리면 같은 문구가 경로에 따라 다르게 붙는다."""
+    return term_in(term, text)
 
 
 def _positive_description(description: str) -> str:

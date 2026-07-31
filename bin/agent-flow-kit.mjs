@@ -19,6 +19,7 @@ import {
   assertInstallRootIsFinal,
   backupIfDifferent,
   claudeHooksSettings,
+  canonicalPath,
   cliOptionValue,
   codexConfigPath,
   codexHooksSettings,
@@ -27,8 +28,9 @@ import {
   escapeRegex,
   extractCliOption,
   fullFeatureSkillMarkdown,
+  gitOutput,
+  gitEnv,
   hasChildWithSuffix,
-  HOME,
   hookScriptCommand,
   installedProfileFileNames,
   installProjectLauncher,
@@ -66,8 +68,14 @@ import {
   removeLegacyProjectSkillCopies,
   removeOmpHooksExtension,
   requestedInstallRootOption,
+  resolveManagedWorktreeRoot,
+  resolveManagedWorktreeContext,
+  resolveLinkedWorktreeLeader,
+  resolveInstallRoot,
+  resolveGitCommonWorktreeRoot,
   retiredHookScripts,
   safeSkillName,
+  samePath,
   shellQuote,
   SKILL_INDEX_END,
   SKILL_INDEX_START,
@@ -383,7 +391,10 @@ function installProject(requestedRoot) {
 
   fs.writeFileSync(path.join(agentFlowDir, "kit.json"), `${JSON.stringify(payload, null, 2)}\n`, "utf8");
   syncSkillSources(root);
-  console.log(`agent-flow installed profile=${profile}`);
+  // root를 같이 낸다. `--root`를 줬든 cwd에서 유도했든, 어디에 설치됐는지 보이지
+  // 않으면 잘못된 checkout에 깔린 것을 알 방법이 없다 - 실제로 leader 대신
+  // worktree에 깔린 것을 한참 뒤에야 알아챘다.
+  console.log(`agent-flow installed profile=${profile} root=${root}`);
 }
 
 // 설치 시점에 1회만 돈다. 런타임에는 절대 호출하지 않는다 — 사용자에게 매번 물어보지 않기 위한 지점이다.
@@ -579,31 +590,7 @@ function editDistance(left, right) {
   return previous[right.length];
 }
 
-// Python `git_safe`(`core/worktree_isolation.py`)와 같은 목적이다. 오염된 ambient
-// GIT_DIR/GIT_WORK_TREE가 우리 git을 요청한 cwd 밖으로 돌리면 JS와 Python이 서로
-// 다른 root를 고른다.
-const GIT_DISCOVERY_ENV = [
-  "GIT_DIR",
-  "GIT_WORK_TREE",
-  "GIT_COMMON_DIR",
-  "GIT_INDEX_FILE",
-  "GIT_OBJECT_DIRECTORY",
-  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-  "GIT_CEILING_DIRECTORIES",
-  "GIT_NAMESPACE",
-  "GIT_PREFIX",
-];
 
-function gitEnv() {
-  const env = { ...process.env };
-  for (const name of GIT_DISCOVERY_ENV) {
-    delete env[name];
-  }
-  // 분기 대상 메시지를 결정적으로 유지한다. 이 명령에만 적용된다.
-  env.LC_ALL = "C";
-  env.LANG = "C";
-  return env;
-}
 
 function loadWorkflowDefinition(name) {
   if (!/^[A-Za-z0-9_-]+$/.test(name)) {
@@ -851,71 +838,16 @@ function resolveAgentFlowRoot(start) {
   }
 }
 
-function resolveInstallRoot(start) {
-  const worktreeRoot = resolveManagedWorktreeRoot(start);
-  if (worktreeRoot) {
-    return worktreeRoot;
-  }
-  const gitCommonRoot = resolveGitCommonWorktreeRoot(start);
-  if (gitCommonRoot) {
-    return gitCommonRoot;
-  }
-  const parts = start.split(path.sep);
-  const markerIndex = parts.lastIndexOf(".agent-flow");
-  if (markerIndex !== -1) {
-    return parts.slice(0, markerIndex).join(path.sep) || path.sep;
-  }
-  // non-git 프로젝트(git repo가 아니거나 git 실행 불가)의 마지막 수단이다. 위의 git
-  // 기반 판정이 전부 null을 낸 경우이므로, 여기서 cwd를 그대로 install root로 쓴다.
-  return start;
-}
 
-function resolveManagedWorktreeRoot(start) {
-  return resolveManagedWorktreeContext(start)?.root ?? null;
-}
 
-function resolveManagedWorktreeContext(start) {
-  const resolved = canonicalPath(start);
-  const parts = resolved.split(path.sep);
-  const markers = new Set([".agent-flow", ".codex", ".Codex", ".omp"]);
-  for (let index = parts.length - 3; index >= 0; index -= 1) {
-    if (parts[index + 1] !== "worktrees") continue;
-    if (!markers.has(parts[index])) continue;
-    const root = parts.slice(0, index).join(path.sep) || path.sep;
-    if (
-      HOME
-      && samePath(root, HOME)
-      && [".codex", ".Codex", ".omp"].includes(parts[index])
-    ) {
-      continue;
-    }
-    return { root, name: parts[index + 2] };
-  }
-  return null;
-}
 
-function canonicalPath(value) {
-  try {
-    return fs.realpathSync.native(value);
-  } catch {
-    return path.resolve(value);
-  }
-}
 
-function samePath(left, right) {
-  try {
-    return fs.realpathSync.native(left) === fs.realpathSync.native(right);
-  } catch {
-    // 심볼릭 링크가 섞인 임시 경로에서도 홈 비교는 보수적으로 처리한다.
-    return path.resolve(left) === path.resolve(right);
-  }
-}
 
 
 function currentCheckoutIdentity(root) {
   const cwd = canonicalPath(process.cwd());
   const managed = resolveManagedWorktreeContext(cwd);
-  if (managed && samePath(managed.root, root)) {
+  if (managed?.name && samePath(managed.root, root)) {
     return `worktree:${managed.name}`;
   }
   // 채택 판정이 leader containment보다 먼저다. 채택된 checkout이 `<leader>/.worktrees/foo`
@@ -979,58 +911,12 @@ function adoptedCheckoutName(root, cwd) {
   return verified === `worktree:${name}` ? name : null;
 }
 
-function resolveGitCommonWorktreeRoot(start) {
-  const topLevel = gitOutput(start, ["rev-parse", "--show-toplevel"]);
-  const commonDir = gitOutput(start, ["rev-parse", "--git-common-dir"]);
-  if (!topLevel || !commonDir) {
-    return null;
-  }
-  const resolvedCommonDir = path.resolve(start, commonDir);
-  if (path.basename(resolvedCommonDir) !== ".git") {
-    return null;
-  }
-  return path.dirname(resolvedCommonDir);
-}
 
 // linked worktree 판정. leader를 cwd와 직접 비교하면 `<leader>/src`처럼 leader의
 // 하위 디렉토리에서 install하는 정상 경로까지 막힌다 - 그래서 이 checkout의
 // toplevel과 견준다. linked worktree에서만 toplevel(worktree root)과
 // leader(git common dir의 부모)가 갈라진다.
-function resolveLinkedWorktreeLeader(start) {
-  const topLevel = gitOutput(start, ["rev-parse", "--show-toplevel"]);
-  const leader = resolveGitCommonWorktreeRoot(start);
-  if (!topLevel || !leader || samePath(leader, topLevel)) {
-    return null;
-  }
-  return leader;
-}
 
-function gitOutput(cwd, args) {
-  const result = safeSpawnSync("git", args, {
-    cwd,
-    env: gitEnv(),
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  if (result.error) {
-    // git을 실행조차 못 했다. 바이너리가 없으면(ENOENT) 대안이 경로 스캔뿐이지만,
-    // 타임아웃처럼 "돌긴 했는데 대답을 못 받은" 경우까지 조용히 넘기면 어느
-    // 저장소인지 모르는 채로 계속 간다.
-    if (result.error.code === "ENOENT") {
-      return null;
-    }
-    throw new Error(`git ${args.join(" ")} failed: ${result.error.message}`);
-  }
-  if (result.status !== 0) {
-    // 비영 종료는 "여기는 그 질문에 답할 수 있는 저장소가 아니다"다. 저장소 아님,
-    // bare repo, 열 수 없는 repo format, dubious ownership이 전부 여기로 온다.
-    // 이걸 오류로 올리면 non-git 디렉터리에서 install조차 못 한다. 호출자의 폴백은
-    // `.agent-flow/kit.json`이 실제로 있는 자리만 고르는 앵커된 탐색이라 안전하다.
-    return null;
-  }
-  const output = result.stdout.trim();
-  return output || null;
-}
 
 const DEFAULT_RELAY_TIMEOUT_MS = 30_000;
 // gates는 프로파일 게이트를 순차로 돌린다. 개별 게이트 상한은 Python `--timeout`이

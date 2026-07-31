@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -109,8 +110,8 @@ def test_plural_and_non_lowercase_suffixes_are_reported():
     assert len(_forbidden(PY_DOMAIN_ROLE, "views.py", "def handle(): ...\n")) == 1
     assert len(_forbidden(WEB_DOMAIN_ROLE, "index.ts", "export * from './screens'\n")) == 1
     assert len(_forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", "class OrderDto2\n")) == 1
-    # 이 저장소는 한국어 주석이 규칙이다. 한글이 뒤에 붙어도 단어는 끝난 것이다.
-    assert len(_forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", "// OrderDto를 만든다\n")) == 1
+    # 한글이 뒤에 붙어도 단어는 끝난 것이다. Kotlin은 한글 식별자를 허용한다.
+    assert len(_forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", "val OrderDto목록 = 1\n")) == 1
     # 복수형 뒤에 다시 대문자로 단어가 시작하면 그 자리도 경계다.
     assert len(_forbidden(IOS_DOMAIN_ROLE, "Order.swift", "struct ViewsMapper {}\n")) == 1
     assert len(_forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", "class OrderDtosMapper\n")) == 1
@@ -420,3 +421,238 @@ def test_unresolved_placeholder_module_is_dropped_instead_of_silently_dead():
     without_feature = forbidden_gradle_dependencies("feature-api", {})
     assert all(":presentation" not in module for module in without_feature)
     assert ":core:data" in without_feature
+
+
+def test_comments_and_string_literals_are_not_code():
+    """주석·문자열의 토큰까지 세면 `@media screen`과 문서 URL이 필수 gate를 막는다."""
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", "// 참고: https://x/#screen\nconst a = 1\n") == []
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", "/* @media screen */\nconst a = 1\n") == []
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", 'const css = "@media screen";\n') == []
+    assert _forbidden(IOS_DOMAIN_ROLE, "Chat.swift", "// ViewModel 설명\nstruct A {}\n") == []
+    assert _forbidden(PY_DOMAIN_ROLE, "chat.py", "# View 관련 메모\nx = 1\n") == []
+
+
+def test_module_specifiers_stay_code_even_though_they_are_strings():
+    """반증: 문자열을 통째로 지우면 `export * from './screens'` 같은 진짜 위반이 사라진다."""
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "index.ts", "export * from './screens'\n")) == 1
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "index.ts", 'import { X } from "./ChatScreen"\n')) == 1
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "index.ts", 'const x = require("./ChatScreen")\n')) == 1
+
+
+def test_masking_survives_inputs_that_used_to_crash_or_swallow_code():
+    """마스킹이 필수 gate를 죽이거나 진짜 위반을 삼키면 안 된다."""
+    # 파일이 백슬래시로 끝나면 예전에는 IndexError로 gate가 죽었다.
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", 'const a = "abc\\') == []
+    # 짝 없는 따옴표가 다음 줄의 진짜 위반을 지우면 안 된다 - 개행 이스케이프 포함.
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", 'const a = "x\\\nconst b = Dto\n')) == 1
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const a = 'x\nconst b = Dto\n")) == 1
+    # `//`는 문맥 없이 주석이 아니다. 스킴과 정규식 뒤의 코드가 살아 있어야 한다.
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const r = /^https?:\\/\\//.test(Dto.url)\n")) == 1
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.tsx", "<T>http://x {Dto.name}</T>\n")) == 1
+    # 여러 줄 template literal의 닫는 backtick이 새 문자열을 열면 안 된다.
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const m = `a\nb` + Dto.name\n")) == 1
+    # 문자열 보간 안은 코드다. Kotlin/Compose 소스에서 흔하다.
+    assert len(_forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", 'val s = "${orderDto.id}"\n')) == 1
+
+
+def test_module_specifiers_are_found_by_the_quote_prefix_not_the_line():
+    """줄 전체를 보면 `export const CSS = '@media screen'`까지 코드로 남는다."""
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", "export const CSS = '@media screen'\n") == []
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "index.ts", "import {\n  X,\n} from './screens'\n")) == 1
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "index.ts", "await import('./ChatScreen')\n")) == 1
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "index.ts", "require( './ChatScreen')\n")) == 1
+
+
+def test_gradle_readers_do_not_count_commented_out_declarations():
+    """같은 gate의 gradle 판독기가 주석을 읽으면 주석만으로 위반이 난다."""
+    from agent_flow.core.architecture_lint import code_only
+
+    build = 'dependencies {\n  // implementation(project(":feature:home:presentation"))\n}\n'
+    stripped = code_only("build.gradle.kts", build, mask_strings=False)
+    assert ":feature:home:presentation" not in stripped
+    # 문자열은 남는다 - gradle 판독기에는 문자열이 곧 데이터다.
+    live = 'dependencies {\n  implementation(project(":core:data"))\n}\n'
+    assert ":core:data" in code_only("build.gradle.kts", live, mask_strings=False)
+
+
+def test_interpolation_is_code_only_where_the_language_has_it():
+    """한 벌로 뭉뚱그리면 없애려던 문자열 오탐이 다른 자리에 생긴다."""
+    # 보간이 없는 언어/따옴표에서는 그냥 문자열이다.
+    assert _forbidden(PY_DOMAIN_ROLE, "chat.py", 'pattern = "${view}"\n') == []
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const p = '${screen}'\n") == []
+    # 있는 곳에서는 코드다.
+    assert len(_forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", 'val s = "${orderDto.id}"\n')) == 1
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const s = `${OrderDto.name}`\n")) == 1
+
+
+def test_an_unclosed_interpolation_does_not_disable_the_rest_of_the_file():
+    """`${` 하나가 파일 끝까지 마스킹을 끄면 뒤따르는 주석이 전부 코드가 된다."""
+    assert _forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", 'val T = "${"\n// Dto 메모\n') == []
+    from agent_flow.core.architecture_lint import code_only
+
+    build = 'val tpl = "${"\ndependencies {\n  // implementation(project(":a:b"))\n}\n'
+    assert ":a:b" not in code_only("build.gradle.kts", build, mask_strings=False)
+
+
+def test_backticks_and_slashes_follow_the_language_not_a_guess():
+    """Kotlin backtick은 escaped identifier고, `case 1://`의 `:`는 스킴이 아니다."""
+    assert len(_forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", "val `dtoState` = 1\n")) == 1
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", "switch (x) { case 1://Screen 메모\n}\n") == []
+    # Groovy `from`은 모듈 지정자가 아니다.
+    assert _forbidden(ANDROID_PRESENTATION_ROLE, "build.gradle", "copy { from 'src/main/dto' }\n") == []
+
+
+def test_every_language_keeps_its_own_interpolation_as_code():
+    """보간식은 문자열 안에 있어도 코드다. 마스킹하면 위반을 조용히 놓친다."""
+    # `View`와 `ViewModel` 둘 다 걸린다 - 세는 건 보간이 코드로 남았는가다.
+    assert _forbidden(IOS_DOMAIN_ROLE, "Chat.swift", 'let s = "\\(ViewModel.value)"\n')
+    assert len(_forbidden(PY_DOMAIN_ROLE, "chat.py", 'x = f"{ApiClient.value}"\n')) == 1
+    # Kotlin/Groovy는 중괄호 없는 `$name`도 보간이다.
+    assert len(_forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", 'val s = "$orderDto"\n')) == 1
+    # 접두사 없는 리터럴과 `{{` 이스케이프는 보간이 아니다.
+    assert _forbidden(PY_DOMAIN_ROLE, "chat.py", 'x = "{ApiClient.value}"\n') == []
+    assert _forbidden(PY_DOMAIN_ROLE, "chat.py", 'x = f"{{ApiClient}}"\n') == []
+    assert _forbidden(IOS_DOMAIN_ROLE, "Chat.swift", 'let s = "ViewModel 설명"\n') == []
+
+
+def test_a_string_inside_an_interpolation_is_not_the_end_of_the_outer_string():
+    """안쪽 따옴표를 종료로 보면 보간식 앞부분의 위반이 지워진다."""
+    assert len(_forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", 'val s = "${orderDto.format("x")}"\n')) == 1
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", 'const s = `${OrderDto.format("x")}`\n')) == 1
+    # 그래도 못 닫힌 보간은 파일을 열어두지 않는다.
+    assert _forbidden(IOS_DOMAIN_ROLE, "Chat.swift", 'let T = "\\("\n// Dto 메모\n') == []
+    assert _forbidden(PY_DOMAIN_ROLE, "chat.py", 'x = f"{"\n# Dto 메모\n') == []
+
+
+def test_jsx_body_contractions_are_not_string_starts():
+    """`it's`의 아포스트로피를 문자열 시작으로 보면 그 줄 나머지가 뒤집힌다."""
+    assert _forbidden(WEB_DOMAIN_ROLE, "Chat.tsx", "<p>it's {t('@media screen')}</p>\n") == []
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "Chat.tsx", "<p>don't</p>{renderScreen()}\n")) == 1
+    # 키워드 뒤는 예외다. minified JS가 `case"x"`, `return'x'` 모양으로 나온다.
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.jsx", "switch(x){case'screen':break}\n") == []
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.jsx", "return'screen'\n") == []
+
+
+def test_regex_literals_do_not_open_strings():
+    """정규식 본문의 따옴표가 문자열을 열면 그 줄 나머지가 지워진다."""
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", "s.replace(/'/g, '') + OrderDto.x\n")) == 1
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.tsx", ".replace(/`([^`]+)`/g, '$1').map(OrderDto)\n")) == 1
+    # 패턴 본문은 데이터다. 나눗셈은 정규식이 아니다.
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const r = /Dto/.test(x)\n") == []
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const q = a / b; const w = c / d;\n") == []
+
+
+def test_js_line_continuation_does_not_flip_quote_parity():
+    """줄 끝 백슬래시는 JS에서 합법이다. 끊으면 닫는 따옴표가 여는 따옴표가 된다."""
+    source = 'const s = "@media \\\nscreen";\nconst u = "Dto";\n'
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", source) == []
+    # 다른 언어에서는 여전히 짝 없는 따옴표로 본다.
+    assert len(_forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", 'val s = "x\\\nval b = Dto\n')) == 1
+
+
+def test_only_real_schemes_keep_a_double_slash_as_code():
+    """`case KIND://`의 라벨까지 스킴으로 보면 주석이 코드로 남는다."""
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", "switch(k){case KIND://screen 메모\n}\n") == []
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const o = { key://screen 메모\n}\n") == []
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "Chat.tsx", "<a>https://x {Dto.n}</a>\n")) == 1
+
+
+def test_non_code_inside_an_interpolation_is_still_not_code():
+    """보간식을 건너뛰기만 하면 그 안의 문자열·주석이 코드로 남는다."""
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", 'const s = `${theme("@media screen")}`\n') == []
+    assert _forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", 'val s = "${fmt("@media dto")}"\n') == []
+    assert _forbidden(IOS_DOMAIN_ROLE, "Chat.swift", 'let s = "\\(f("@media view"))"\n') == []
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const s = `${x /* screen */}`\n") == []
+    # 보간식 자체는 그대로 코드다.
+    assert len(_forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", 'val s = "${orderDto.format("x")}"\n')) == 1
+
+
+def test_jsx_braces_are_not_regex_starts():
+    """`{a} / {b}`는 비율 표기다. 정규식으로 보면 뒤 엘리먼트가 통째로 지워진다."""
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "Chat.tsx", "<div>{n} / {m} <Screen /></div>\n")) == 1
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "Chat.tsx", "<span>{used} / {OrderDto.total}</span>\n")) == 1
+
+
+def test_a_regex_in_keyword_position_is_still_a_regex():
+    """`return /re/`의 `/`를 나눗셈으로 보면 본문의 따옴표가 줄을 삼킨다."""
+    source = """return /['\\"]/.test(s) && OrderDto.x\n"""
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", source)) == 1
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", "throw /'/.test(s) ? new ScreenError() : e\n")) == 1
+    # 후위 증감 뒤는 나눗셈이다.
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const r = i++ / OrderDto.SIZE / total;\n")) == 1
+
+
+def test_a_failed_interpolation_scan_leaves_the_buffer_untouched():
+    """먼저 지워 놓고 실패하면 호출자가 되돌릴 수 없다 - 파일 끝까지 사라진다."""
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const a = `${/* note }`;\nexport class OrderDto {}\n")) == 1
+    assert len(_forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", 'val a = "${/* note }"\nclass OrderDto\n')) == 1
+
+
+def test_comment_rules_inside_an_interpolation_follow_the_language():
+    """`.py` 보간식의 `//`는 floor division이고, JS 보간식의 `/../`는 정규식이다."""
+    assert len(_forbidden(PY_DOMAIN_ROLE, "chat.py", 'msg = f"{total // ApiClient.count}"\n')) == 1
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const s = `${orderDto.path.replace(/\\//g, '-')}`\n")) == 1
+
+
+def test_module_specifiers_win_over_the_contraction_rule():
+    """`from'react'`의 여는 따옴표를 축약형으로 보면 따옴표 짝이 뒤집힌다."""
+    assert _forbidden(WEB_DOMAIN_ROLE, "Chat.tsx", "import a from'aaa';import c from'bbb'\n") == []
+    # 속성 접근자도 문자열이 올 수 있는 자리다.
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "Chat.tsx", "class A { get'name'(){ return OrderDto; } }\n")) == 1
+
+
+def test_only_real_python_prefixes_enable_interpolation():
+    """글자만 훑으면 `if\"{x}\"`의 `if`가 f 접두사로 통한다."""
+    assert _forbidden(PY_DOMAIN_ROLE, "chat.py", 'if"{api_client}" in s:\n    pass\n') == []
+
+
+def test_line_continuations_do_not_rescan_the_file_each_time():
+    """continuation마다 파일 끝까지 다시 훑으면 O(n^2)다 - 실측 24KB에 1.2초였다."""
+    from agent_flow.core.architecture_lint import code_only
+
+    source = 'const s = "' + "@media \\\n" * 4000 + '";\n'
+    started = time.perf_counter()
+    code_only("big.ts", source)
+    assert time.perf_counter() - started < 2.0
+
+
+def test_a_keyword_named_property_is_not_a_regex_position():
+    """`cfg.default / 2`의 프로퍼티 이름은 키워드가 아니다. 양방향으로 깨진다."""
+    # 누락 방향: 정규식으로 보면 뒤쪽 참조가 지워진다.
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const r = cfg.default / OrderDto.count / 2;\n")) == 1
+    # 오탐 방향: 주석의 첫 슬래시가 정규식 종료로 잡혀 주석 본문이 코드로 남는다.
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const r = cfg.default / 2 // OrderDto 는 data 전용\n") == []
+    # 보간식 안에서는 닫는 중괄호까지 삼켜 보간 전체가 사라진다.
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const s = `${ obj.default / 2 }` + OrderDto.x\n")) == 1
+    # `$`는 JS 식별자 문자다. 잘라 읽으면 `obs$in`의 `in`이 키워드가 된다.
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const off = obs$in / OrderDto.size / 2;\n")) == 1
+
+
+def test_regex_position_keywords_are_narrower_than_literal_position_ones():
+    """`from`/`async`는 흔한 변수명이다. 정규식 자리로 보면 나눗셈이 깨진다."""
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const off = from / OrderDto.pageSize / 2;\n")) == 1
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const off = async / OrderDto.size / 2;\n")) == 1
+    # 진짜 키워드 자리는 그대로 정규식이다.
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const r = typeof /re/;\nconst u = OrderDto;\n")) == 1
+    # 화살표 함수 뒤도 값 자리다.
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", "xs.filter(s => /Dto/.test(s))\n") == []
+
+
+def test_a_failed_regex_scan_does_not_rescan_the_rest_of_the_line():
+    """줄에 미닫힘 `/`가 여럿이면 매번 줄 끝까지 훑어 이차식이 된다."""
+    from agent_flow.core.architecture_lint import code_only
+
+    source = "const s = `${ x" + ",/[a" * 2000 + " }`\n"
+    started = time.perf_counter()
+    code_only("big.ts", source)
+    assert time.perf_counter() - started < 1.0
+
+
+def test_skip_balanced_leaves_the_buffer_untouched_when_it_fails():
+    """실패 경로에서 out을 고치면 호출자가 되돌릴 수 없다."""
+    from agent_flow.core.architecture_lint import skip_balanced, syntax_for
+
+    text = 'const a = `${/* note }`;\nexport class OrderDto {}\n'
+    out = list(text)
+    assert skip_balanced(out, text, text.index("${") + 1, "{", "}", "`", "brace", syntax_for(".ts")) == -1
+    assert "".join(out) == text

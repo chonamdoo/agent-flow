@@ -33,7 +33,6 @@ import {
   escapeRegex,
   fullFeatureSkillMarkdown,
   hasChildWithSuffix,
-  HOME,
   hookScriptCommand,
   installedProfileFileNames,
   installProjectLauncher,
@@ -72,8 +71,12 @@ import {
   removeOmpHooksExtension,
   reportSkippedUserEdit,
   requestedInstallRootOption,
+  resolveManagedWorktreeRoot,
+  resolveLinkedWorktreeLeader,
+  resolveInstallRoot,
   retiredHookScripts,
   safeSkillName,
+  samePath,
   shellQuote,
   SKILL_INDEX_END,
   SKILL_INDEX_START,
@@ -101,24 +104,6 @@ const FORCE_MANAGED = INSTALL_ARGS.includes("--force-managed");
 const HOOKS_FLAG_OFF = INSTALL_ARGS.includes("--no-hooks");
 const HOOKS_FLAG_ON = INSTALL_ARGS.includes("--hooks");
 let hooksDisabled = HOOKS_FLAG_OFF;
-// Python `LEAKY_GIT_ENV_VARS`(`src/agent_flow/core/worktree_isolation.py`)와 같은
-// 목록이어야 한다. ambient discovery 변수가 하나라도 남으면 우리 git이 요청한 cwd
-// 밖을 본다 - 실측으로 `GIT_COMMON_DIR=/private/tmp/af-decoy/.git`만 있어도
-// `rev-parse --git-common-dir`이 decoy를 반환하고, 그 부모가 install PROJECT가 됐다.
-// PROJECT 계산이 모듈 최상단에서 곧바로 git을 부르므로, 이 상수는 그보다 위에
-// 있어야 한다(아래에 두면 TDZ로 로드 자체가 죽는다).
-const LEAKY_GIT_ENV_VARS = [
-  "GIT_DIR",
-  "GIT_WORK_TREE",
-  "GIT_COMMON_DIR",
-  "GIT_INDEX_FILE",
-  "GIT_OBJECT_DIRECTORY",
-  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-  "GIT_NAMESPACE",
-  "GIT_PREFIX",
-  "GIT_CEILING_DIRECTORIES",
-];
-
 // `--root` 오류는 메시지 한 줄로 끝낸다. 모듈 최상단에서 그냥 throw하면 사용자가
 // 오타 하나에 스택 트레이스를 받는다.
 function requestedProject() {
@@ -127,8 +112,20 @@ function requestedProject() {
     if (requested === undefined) {
       return process.cwd();
     }
-    assertInstallRootIsFinal(requested, resolveInstallProject(requested));
+    assertInstallRootIsFinal(requested, resolveInstallRoot(requested));
     return requested;
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+}
+
+// `resolveInstallRoot`는 git이 대답을 못 주면 throw한다. 이 상수는 모듈 평가 중에
+// 계산되므로 파일 끝 dispatch의 try/catch가 받지 못한다 - 감싸지 않으면 모든 명령이
+// 생 Node 스택 트레이스로 죽는다(`--help`까지).
+function installRoot(requested) {
+  try {
+    return resolveInstallRoot(requested);
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);
@@ -138,7 +135,10 @@ function requestedProject() {
 // `--root`는 install만 받는다. 커맨드 디스패치보다 먼저 도는 자리라, 여기서
 // 무조건 해석하면 `bogus --root /nope`가 `Unknown command`가 아니라 root 오류로 죽는다.
 const REQUESTED_PROJECT = process.argv[2] === "install" ? requestedProject() : process.cwd();
-const PROJECT = resolveInstallProject(REQUESTED_PROJECT);
+// `--root`와 같은 이유로 install에서만 푼다. 모든 명령이 계산하면 git이 못 도는
+// 환경에서 `--help`와 `Unknown command`까지 git 오류로 죽는다. `AF_DIR`은 install
+// 밖에서 쓰이지 않는다.
+const PROJECT = process.argv[2] === "install" ? installRoot(REQUESTED_PROJECT) : REQUESTED_PROJECT;
 const AF_DIR = path.join(PROJECT, ".agent-flow");
 
 const PROJECT_SKILL_HOSTS = Object.freeze(["claude", "codex", "omp"]);
@@ -168,95 +168,16 @@ function ensureDir(p) {
   fs.mkdirSync(p, { recursive: true });
 }
 
-function resolveManagedWorktreeRoot(start) {
-  const parts = path.resolve(start).split(path.sep);
-  const markers = new Set([".agent-flow", ".codex", ".Codex", ".omp"]);
-  for (let index = parts.length - 2; index >= 0; index -= 1) {
-    if (parts[index + 1] !== "worktrees") continue;
-    if (!markers.has(parts[index])) continue;
-    const root = parts.slice(0, index).join(path.sep) || path.sep;
-    if (HOME && samePath(root, HOME) && (parts[index] === ".codex" || parts[index] === ".Codex" || parts[index] === ".omp")) {
-      continue;
-    }
-    return root;
-  }
-  return null;
-}
 
-function resolveInstallProject(start) {
-  const managedRoot = resolveManagedWorktreeRoot(start);
-  if (managedRoot) return managedRoot;
-  const gitCommonRoot = resolveGitCommonWorktreeRoot(start);
-  if (gitCommonRoot) return gitCommonRoot;
-  // `agent-flow-kit.mjs`의 `resolveInstallRoot`와 같은 폴백이다. 여기만 빠지면
-  // `--root <proj>/.agent-flow`가 kit에서는 rc 1로 막히고 여기서는 rc 0으로
-  // `<proj>/.agent-flow/.agent-flow`를 만든다 — 두 진입점의 rc가 갈린다.
-  const parts = start.split(path.sep);
-  const markerIndex = parts.lastIndexOf(".agent-flow");
-  if (markerIndex !== -1) {
-    return parts.slice(0, markerIndex).join(path.sep) || path.sep;
-  }
-  return start;
-}
 
-function resolveGitCommonWorktreeRoot(start) {
-  const topLevel = gitOutput(start, ["rev-parse", "--show-toplevel"]);
-  const commonDir = gitOutput(start, ["rev-parse", "--git-common-dir"]);
-  if (!topLevel || !commonDir) {
-    return null;
-  }
-  // `git rev-parse --git-common-dir`은 **cwd 기준** 상대경로("../.git" 등)를 낸다.
-  // topLevel 기준으로 풀면 cwd가 하위 디렉토리일 때 한 단계씩 어긋난 경로가 나온다.
-  // `bin/agent-flow-kit.mjs`의 같은 함수도 start 기준이라 그쪽과 맞췄다.
-  const resolvedCommonDir = path.resolve(start, commonDir);
-  if (path.basename(resolvedCommonDir) !== ".git") {
-    return null;
-  }
-  return path.dirname(resolvedCommonDir);
-}
 
 // linked worktree 판정. leader를 cwd와 직접 비교하면 `<leader>/src`처럼 leader의
 // 하위 디렉토리에서 install하는 정상 경로까지 막힌다 - 그래서 이 checkout의
 // toplevel과 견준다. linked worktree에서만 toplevel(worktree root)과
 // leader(git common dir의 부모)가 갈라진다.
-function resolveLinkedWorktreeLeader(start) {
-  const topLevel = gitOutput(start, ["rev-parse", "--show-toplevel"]);
-  const leader = resolveGitCommonWorktreeRoot(start);
-  if (!topLevel || !leader || samePath(leader, topLevel)) {
-    return null;
-  }
-  return leader;
-}
 
-function gitEnv() {
-  const env = { ...process.env };
-  for (const name of LEAKY_GIT_ENV_VARS) {
-    delete env[name];
-  }
-  return env;
-}
 
-function gitOutput(cwd, args) {
-  const result = spawnSync("git", args, {
-    cwd,
-    env: gitEnv(),
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"],
-  });
-  if (result.error || result.status !== 0) {
-    return null;
-  }
-  const output = result.stdout.trim();
-  return output || null;
-}
 
-function samePath(left, right) {
-  try {
-    return fs.realpathSync.native(left) === fs.realpathSync.native(right);
-  } catch {
-    return path.resolve(left) === path.resolve(right);
-  }
-}
 
 
 // 설치된 skill 목록을 AGENTS.md 안에 직접 심는다.
@@ -1396,7 +1317,10 @@ function install() {
 
   console.log(`agent-flow installed`);
   console.log(`  profile : ${profile}`);
-  console.log(`  root    : ${AF_DIR}`);
+  // 두 진입점이 같은 `root` 라벨로 다른 것을 냈다 - 여기는 `.agent-flow` 디렉토리,
+  // kit은 프로젝트 루트. 확인하고 싶은 것은 "leader에 깔렸나 worktree에 깔렸나"라
+  // 프로젝트 루트 쪽으로 맞춘다.
+  console.log(`  root    : ${PROJECT}`);
   console.log(`  skills  : ${skillsCopied.written} written, ${skillsCopied.skipped} skipped`);
   console.log(`  workflows: ${workflowsCopied.written} written, ${workflowsCopied.skipped} skipped`);
   console.log(`  profiles : ${profilesCopied.written} written, ${profilesCopied.pruned} pruned`);

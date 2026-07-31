@@ -4,6 +4,7 @@ import argparse
 import re
 import sys
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -421,13 +422,501 @@ def validate_forbidden_tokens(rel_path: str, text: str, role: dict[str, Any]) ->
     forbidden = role.get("forbidden")
     if not isinstance(forbidden, list):
         return findings
-    haystacks = [Path(rel_path).name, text]
+    haystacks = [Path(rel_path).name, code_only(rel_path, text)]
     for token in forbidden:
         if not isinstance(token, str) or not token:
             continue
         if any(contains_forbidden_token(haystack, token) for haystack in haystacks):
             findings.append(Finding(rel_path, f"{role.get('id', 'role')} contains forbidden token {token}"))
     return findings
+
+# 주석과 문자열 리터럴은 코드가 아니다. 거기 있는 토큰까지 위반으로 세면 `@media
+# screen`, 문서 URL의 `#view`, 예시 코드 블록이 필수 pre-commit gate를 막는다 —
+# 원래 보고된 70건과 같은 클래스다. 파서를 붙이는 대신 비-코드 구간을 공백으로
+# 지운다. 길이를 유지하므로 뒤따르는 경계 판정이 그대로 성립한다.
+#
+# 결과를 다시 이 함수에 넣지 않는다. 마스킹된 텍스트는 더 이상 그 언어의 소스가
+# 아니라(주석이 지워지며 따옴표 짝이 바뀐다) 2회차는 다른 답을 낸다.
+
+# 문자열 문법은 언어마다 다르다. 한 벌로 뭉뚱그리면 없애려던 오탐이 다른 자리에
+# 생기거나(`.py`의 `"${screen}"`에는 보간이 없다) 진짜 위반을 놓친다(Swift
+# `"\(viewModel)"`은 코드다). 보간 방식을 확장자별로 가른다.
+#   brace  - `${...}`만 (JS template literal)
+#   dollar - `${...}`와 `$name` (Kotlin/Groovy 큰따옴표)
+#   swift  - `\(...)`
+#   fstring- `{...}`, 단 `f` 접두사가 붙은 리터럴에서만
+JS_SUFFIXES = {".ts", ".tsx", ".js", ".jsx"}
+JSX_SUFFIXES = {".tsx", ".jsx"}
+INTERPOLATION_STYLES = {
+    ".ts": ("`", "brace"),
+    ".tsx": ("`", "brace"),
+    ".js": ("`", "brace"),
+    ".jsx": ("`", "brace"),
+    ".kt": ('"', "dollar"),
+    ".kts": ('"', "dollar"),
+    ".gradle": ('"', "dollar"),
+    ".swift": ('"', "swift"),
+    ".py": ("\"'", "fstring"),
+}
+
+
+@dataclass(frozen=True)
+class Syntax:
+    """확장자 하나에서 굳어지는 문법 규칙. 파일당 한 번만 만든다."""
+
+    javascript: bool
+    jsx: bool
+    slash_comments: bool
+    hash_comments: bool
+    marks: str
+    interpolating_marks: str
+    style: str
+
+
+def syntax_for(suffix: str) -> Syntax:
+    # `.py`만 `#` 주석이고 `SOURCE_SUFFIXES`의 나머지는 전부 `//` 계열이다. 모르는
+    # 확장자도 `//` 쪽으로 둔다 - 여기 오기 전에 이미 확장자로 걸러진다.
+    javascript = suffix in JS_SUFFIXES
+    hash_comments = suffix == ".py"
+    interpolating_marks, style = INTERPOLATION_STYLES.get(suffix, ("", ""))
+    return Syntax(
+        javascript=javascript,
+        jsx=suffix in JSX_SUFFIXES,
+        slash_comments=not hash_comments,
+        hash_comments=hash_comments,
+        # backtick은 JS에서만 문자열이다. Kotlin에서는 escaped identifier라
+        # 문자열로 보면 그 안의 위반을 놓친다.
+        marks="\"'`" if javascript else "\"'",
+        interpolating_marks=interpolating_marks,
+        style=style,
+    )
+
+
+def code_only(rel_path: str, text: str, mask_strings: bool = True) -> str:
+    syntax = syntax_for(Path(rel_path).suffix)
+    out = list(text)
+    index = 0
+    length = len(text)
+    # `text[index:]`로 꼬리를 뜨면 문자마다 파일 전체를 복사해 O(n^2)가 된다.
+    # 필수 pre-commit gate라 실측 9.2MB에 9초였다 - `startswith(pat, index)`로 본다.
+    # `regex_end` 실패는 줄 끝까지 훑는다. 한 줄에 그런 `/`가 여럿이면 이차식이
+    # 되므로(실측 31KB 한 줄에 4.2초) 실패한 줄은 그 줄이 끝날 때까지 건너뛴다.
+    # 실패는 "이 줄에 닫는 `/`가 없다"는 뜻이라 같은 줄의 뒤쪽도 정규식이 아니다.
+    regex_blocked_until = -1
+    while index < length:
+        char = text[index]
+        if char == "/" and syntax.javascript and index >= regex_blocked_until and is_regex_start(text, index, syntax):
+            closed = regex_end(text, index)
+            if closed != -1:
+                if mask_strings:
+                    blank_span(out, index + 1, closed)
+                index = closed
+                continue
+            regex_blocked_until = line_end(text, index)
+        if syntax.slash_comments and text.startswith("//", index) and not is_url_scheme_slash(text, index):
+            index = blank_until(out, text, index, "\n", keep_terminator=True)
+            continue
+        if syntax.slash_comments and text.startswith("/*", index):
+            index = blank_until(out, text, index + 2, "*/")
+            continue
+        if syntax.hash_comments and char == "#":
+            index = blank_until(out, text, index, "\n", keep_terminator=True)
+            continue
+        if text.startswith(('"""', "'''"), index):
+            # 삼중 따옴표는 보간을 따로 보지 않는다. 여러 줄 문자열이라 한 줄 가드가
+            # 안 서고, 그 안의 보간까지 좇으면 스캐너가 파서가 된다.
+            index = blank_until(out if mask_strings else None, text, index + 3, char * 3)
+            continue
+        if char in syntax.marks:
+            # gradle 판독기는 문자열이 곧 데이터다(`project(":core:data")`). 주석만
+            # 지우고 문자열은 남긴다.
+            # 모듈 지정자 판정이 먼저다. `import a from'react'`의 여는 따옴표를
+            # contraction으로 건너뛰면 닫는 따옴표가 여는 따옴표로 뒤집힌다.
+            keep = not mask_strings or (syntax.javascript and is_module_specifier(text, index))
+            if not keep and syntax.jsx and is_jsx_contraction(text, index):
+                index += 1
+                continue
+            style = syntax.style if char in syntax.interpolating_marks else ""
+            if style == "fstring" and not has_format_prefix(text, index):
+                style = ""
+            index = blank_string(None if keep else out, text, index, style, syntax)
+            continue
+        index += 1
+    return "".join(out)
+
+
+def blank_span(out: list[str], start: int, stop: int) -> None:
+    for position in range(start, stop):
+        out[position] = " "
+
+
+# `//`는 문맥 없이 주석이 아니다. `https://x`의 스킴과 정규식 `/^https?:\/\//`의
+# 이스케이프된 슬래시 뒤에 붙으면 그 줄 뒤쪽의 진짜 코드까지 지운다. 앞 글자만 보면
+# `case KIND://메모`의 라벨까지 스킴이 되므로 실제 스킴만 목록으로 센다. 코드 위치의
+# 맨 URL은 JSX 본문에서나 나오니 닫힌 집합으로 충분하다.
+URL_SCHEMES = frozenset(
+    {
+        "http", "https", "ftp", "ftps", "file", "ws", "wss",
+        "mailto", "data", "blob", "content", "market", "intent", "app", "about",
+    }
+)
+
+
+def is_url_scheme_slash(text: str, index: int) -> bool:
+    if index == 0:
+        return False
+    if text[index - 1] == "\\":
+        return True
+    if text[index - 1] != ":" or index < 2:
+        return False
+    return identifier_before(text, index - 1).lower() in URL_SCHEMES
+
+
+def identifier_before(text: str, end: int) -> str:
+    start = end
+    while start > 0 and is_identifier_part(text[start - 1]):
+        start -= 1
+    return text[start:end]
+
+
+# JS 문법상 식별자 문자 바로 뒤에는 문자열이 올 수 없다(`x'a'`는 SyntaxError).
+# 그래서 JSX 본문의 `it's`는 문자열 시작이 아니다. 키워드 뒤는 예외다 -
+# minified JS의 `case"x"`, `return'x'`, `get'name'()`이 그 모양이다.
+JS_KEYWORDS_BEFORE_LITERAL = frozenset(
+    {
+        "case", "return", "typeof", "in", "of", "new", "delete", "void",
+        "do", "else", "throw", "yield", "await", "instanceof", "default",
+        "get", "set", "static", "async", "extends", "from", "import", "export",
+    }
+)
+# 정규식이 올 수 있는 자리는 더 좁다. `from`/`get`/`export`는 흔한 변수·프로퍼티
+# 이름이라 여기 넣으면 `const off = from / size / 2`의 나눗셈이 정규식이 된다.
+JS_KEYWORDS_BEFORE_REGEX = frozenset(
+    {
+        "case", "return", "typeof", "in", "of", "new", "delete", "void",
+        "do", "else", "throw", "yield", "await", "instanceof", "default",
+    }
+)
+
+
+def is_jsx_contraction(text: str, index: int) -> bool:
+    if text[index] != "'" or index == 0:
+        return False
+    if not is_identifier_part(text[index - 1]):
+        return False
+    if not is_identifier_start(text[index + 1 : index + 2]):
+        return False
+    return identifier_before(text, index) not in JS_KEYWORDS_BEFORE_LITERAL
+
+
+# 정규식 리터럴 본문의 따옴표가 문자열을 열면 그 줄 나머지가 지워진다. 실측으로
+# `s.replace(/'/g, '')` 한 줄이 뒤따르는 코드를 통째로 삼켰다. 나눗셈과 가르는
+# 기준은 앞의 마지막 비공백 문자이거나, 그 앞 단어가 키워드인가다.
+REGEX_START_PREFIX = frozenset("=(,:[!&|?+;{}>\n")
+# JSX 본문의 `{a} / {b}`는 비율 표기지 정규식이 아니다. `.tsx`/`.jsx`에서 중괄호를
+# 정규식 시작으로 보면 `<div>{n} / {m} <Screen /></div>`의 뒤쪽이 통째로 지워진다.
+JSX_REGEX_START_PREFIX = REGEX_START_PREFIX - frozenset("{}")
+
+
+def is_regex_start(text: str, index: int, syntax: Syntax) -> bool:
+    if text.startswith(("//", "/*"), index):
+        return False
+    position = index - 1
+    while position >= 0 and text[position] in " \t":
+        position -= 1
+    if position < 0:
+        return True
+    # 후위 증감 뒤는 나눗셈이다. `i++ / size`를 정규식으로 보면 뒤가 지워진다.
+    if position > 0 and text[position - 1 : position + 1] in ("++", "--"):
+        return False
+    if is_identifier_part(text[position]):
+        # `return /re/.test(s)`처럼 키워드 뒤는 값 자리다. 다만 `cfg.default / 2`의
+        # 프로퍼티 이름은 키워드가 아니다 - 멤버 접근이면 나눗셈이다. `$`는 JS
+        # 식별자 문자인데 `is_identifier_part`가 빼므로 `obs$in`도 여기서 걸린다.
+        word = identifier_before(text, position + 1)
+        if text[position - len(word) : position - len(word) + 1] in (".", "$", "#"):
+            return False
+        return word in JS_KEYWORDS_BEFORE_REGEX
+    prefix = JSX_REGEX_START_PREFIX if syntax.jsx else REGEX_START_PREFIX
+    return text[position] in prefix
+
+
+def line_end(text: str, index: int) -> int:
+    found = text.find("\n", index)
+    return len(text) if found == -1 else found
+
+
+def regex_end(text: str, start: int) -> int:
+    """정규식 리터럴의 끝(플래그 포함) 다음 위치. 한 줄 안에서 못 닫으면 -1.
+
+    패턴 본문은 데이터다. 코드로 남기면 `/Dto/` 같은 패턴이 위반으로 잡힌다.
+    """
+    position = start + 1
+    length = len(text)
+    in_class = False
+    while position < length:
+        char = text[position]
+        if char == "\\":
+            position += 2
+            continue
+        if char == "\n":
+            return -1
+        if char == "[":
+            in_class = True
+        elif char == "]":
+            in_class = False
+        elif char == "/" and not in_class:
+            position += 1
+            while position < length and is_identifier_part(text[position]):
+                position += 1
+            return position
+        position += 1
+    return -1
+
+
+# Python 문자열 접두사는 닫힌 집합이다. 글자만 훑으면 `if"{x}"`의 `if`가 f 접두사로
+# 통과해, 보간이 없는 문자열이 코드로 남는다.
+FORMAT_PREFIXES = frozenset({"f", "F", "fr", "fR", "Fr", "FR", "rf", "rF", "Rf", "RF"})
+
+
+def has_format_prefix(text: str, quote: int) -> bool:
+    return identifier_before(text, quote) in FORMAT_PREFIXES
+
+
+def blank_until(out: list[str] | None, text: str, start: int, terminator: str, keep_terminator: bool = False) -> int:
+    end = text.find(terminator, start)
+    stop = len(text) if end == -1 else min(end + len(terminator), len(text))
+    if out is not None:
+        for position in range(start, stop):
+            if not (keep_terminator and text[position] == terminator):
+                out[position] = " "
+    return stop
+
+
+# 모듈 지정자는 문자열이지만 코드 참조다. 지우면 `export * from './screens'` 같은
+# 진짜 위반이 사라진다. 줄 전체를 보면 `export const CSS = '@media screen'`까지
+# 코드로 남아 없애려던 오탐이 살아난다 - 따옴표 **바로 앞**만 본다. 그래야 여러 줄
+# import(`} from './screens'`)와 `await import('./x')`도 함께 걸린다. JS에서만 쓴다 -
+# Groovy `copy { from 'src/main/screens' }`까지 보존하면 그쪽이 오탐이 된다.
+MODULE_SPECIFIER_RE = re.compile(
+    r"(?:^|[^A-Za-z0-9_$])(?:from|import|export)\s*$"
+    r"|(?:^|[^A-Za-z0-9_$])(?:import|require)\s*\(\s*$"
+)
+MODULE_SPECIFIER_LOOKBEHIND = 32
+
+
+def is_module_specifier(text: str, index: int) -> bool:
+    return bool(MODULE_SPECIFIER_RE.search(text[max(0, index - MODULE_SPECIFIER_LOOKBEHIND) : index]))
+
+
+def blank_string(
+    out: list[str] | None,
+    text: str,
+    start: int,
+    style: str,
+    syntax: Syntax,
+) -> int:
+    """문자열 하나를 지나가며 `out`이 있으면 그 구간을 공백으로 만든다.
+
+    보간식 안쪽은 코드로 남긴다. `"${viewModel.state}"`, `"\\(viewModel.state)"`,
+    `f"{api_client.value}"`는 문자열 안에 있어도 코드다.
+    """
+    mark = text[start]
+    length = len(text)
+    position = start + 1
+    # line continuation 판정은 문자열당 한 번이다. continuation마다 파일 끝까지
+    # 다시 훑으면 O(n^2)가 된다 - 실측 24KB에 1.2초, 2배마다 4배였다.
+    continues: bool | None = None
+    while position < length:
+        char = text[position]
+        if char == mark:
+            return position + 1
+        # 짝이 없는 따옴표 하나가 파일 끝까지 지우면 진짜 위반이 통째로 사라진다.
+        # backtick만 예외다 - 여러 줄 template literal이 정상 문법이다.
+        if char in "\n\r" and mark != "`":
+            return position
+        if char == "\\":
+            if style == "swift" and text[position + 1 : position + 2] == "(":
+                closed = skip_balanced(out, text, position + 1, "(", ")", mark, style, syntax)
+                if closed != -1:
+                    position = closed
+                    continue
+            # 파일이 백슬래시로 끝나면 건너뛴 자리가 범위 밖이다. 여기서 멈추지
+            # 않으면 필수 gate가 finding 대신 IndexError로 죽는다.
+            if position + 1 >= length:
+                return length
+            skipped = escaped_newline_length(text, position)
+            if skipped and mark != "`":
+                # JS는 줄 끝 백슬래시가 합법적인 line continuation이다. 여기서
+                # 끊으면 닫는 따옴표가 여는 따옴표로 뒤집혀 줄 나머지가 밀린다.
+                # 다른 언어이거나 뒤에서 안 닫히면 짝 없는 따옴표로 본다.
+                if continues is None:
+                    continues = syntax.javascript and closes_later(text, position + skipped, mark)
+                if not continues:
+                    return position
+                if out is not None:
+                    for blank in range(position, position + skipped):
+                        if text[blank] != "\n":
+                            out[blank] = " "
+                position += skipped
+                continue
+            if out is not None:
+                out[position] = " "
+                out[position + 1] = " "
+            position += 2
+            continue
+        following = text[position + 1 : position + 2]
+        if style in ("brace", "dollar") and char == "$" and following == "{":
+            closed = skip_balanced(out, text, position + 1, "{", "}", mark, style, syntax)
+            if closed != -1:
+                position = closed
+                continue
+        if style == "dollar" and char == "$" and is_identifier_start(following):
+            # Kotlin/Groovy는 중괄호 없는 `$name`도 보간이다. 이름 부분만 코드다.
+            position += 1
+            while position < length and is_identifier_part(text[position]):
+                position += 1
+            continue
+        if style == "fstring" and char == "{":
+            if following == "{":
+                # `{{`는 리터럴 중괄호다. 보간이 아니다.
+                if out is not None:
+                    out[position] = " "
+                    out[position + 1] = " "
+                position += 2
+                continue
+            closed = skip_balanced(out, text, position, "{", "}", mark, style, syntax)
+            if closed != -1:
+                position = closed
+                continue
+        if out is not None:
+            out[position] = " "
+        position += 1
+    return length
+
+
+def escaped_newline_length(text: str, backslash: int) -> int:
+    """`\\` 다음이 줄바꿈이면 그 이스케이프의 길이. 아니면 0."""
+    if text[backslash + 1 : backslash + 2] == "\n":
+        return 2
+    if text[backslash + 1 : backslash + 3] == "\r\n":
+        return 3
+    return 0
+
+
+def closes_later(text: str, start: int, mark: str) -> bool:
+    """이 문자열이 뒤에서 실제로 닫히는가. 이스케이프를 건너뛰며 본다."""
+    position = start
+    length = len(text)
+    while position < length:
+        char = text[position]
+        if char == "\\":
+            position += 2
+            continue
+        if char == mark:
+            return True
+        position += 1
+    return False
+
+
+def is_identifier_start(char: str) -> bool:
+    return bool(char) and (char == "_" or (char.isascii() and char.isalpha()))
+
+
+def is_identifier_part(char: str) -> bool:
+    return char == "_" or (char.isascii() and char.isalnum())
+
+
+def skip_balanced(
+    out: list[str] | None,
+    text: str,
+    opener: int,
+    open_char: str,
+    close_char: str,
+    mark: str,
+    style: str,
+    syntax: Syntax,
+) -> int:
+    """짝이 맞는 닫는 괄호 다음을 돌려준다. 문자열 안에서 못 찾으면 -1.
+
+    못 찾았는데 파일 끝을 돌려주면 그 지점부터 마스킹이 통째로 꺼진다 - `"${"`
+    하나가 뒤따르는 주석 전부를 코드로 만든다.
+
+    보간식 안의 문자열은 바깥 문자열의 끝이 아니다. `"${orderDto.format("x")}"`에서
+    안쪽 따옴표를 종료로 보면 앞부분의 `orderDto`까지 지워 위반을 놓친다. 다만 그
+    안쪽 문자열과 주석은 여전히 코드가 아니므로 같이 지운다.
+
+    실패하면 `out`을 건드리지 않는다. 먼저 지워 놓고 -1을 내면 호출자가 되돌릴 수
+    없어, 안 닫힌 `/*` 하나가 파일 끝까지 공백으로 만든다.
+    """
+    # `.py` 보간식에는 주석이 없다. `//`는 floor division이다.
+    slash_comments = style != "fstring"
+    depth = 0
+    position = opener
+    length = len(text)
+    spans: list[tuple[int, int]] = []
+    regex_blocked_until = -1
+    while position < length:
+        char = text[position]
+        if char in "\"'`":
+            closed = skip_nested_string(text, position, mark)
+            if closed == -1:
+                return -1
+            spans.append((position + 1, closed - 1))
+            position = closed
+            continue
+        if char == "/" and syntax.javascript and position >= regex_blocked_until and is_regex_start(text, position, syntax):
+            closed = regex_end(text, position)
+            if closed != -1:
+                spans.append((position + 1, closed))
+                position = closed
+                continue
+            regex_blocked_until = line_end(text, position)
+        if slash_comments and text.startswith("/*", position):
+            closed = text.find("*/", position + 2)
+            if closed == -1:
+                return -1
+            spans.append((position, closed + 2))
+            position = closed + 2
+            continue
+        if slash_comments and text.startswith("//", position) and not is_url_scheme_slash(text, position):
+            closed = text.find("\n", position)
+            if closed == -1:
+                return -1
+            spans.append((position, closed))
+            position = closed
+            continue
+        if char == open_char:
+            depth += 1
+        elif char == close_char:
+            depth -= 1
+            if depth == 0:
+                if out is not None:
+                    for span_start, span_stop in spans:
+                        blank_span(out, span_start, span_stop)
+                return position + 1
+        elif char == "\n" and mark != "`":
+            return -1
+        position += 1
+    return -1
+
+
+def skip_nested_string(text: str, start: int, mark: str) -> int:
+    """보간식 안의 문자열 하나를 지나 그 다음 위치를 돌려준다. 못 닫으면 -1."""
+    nested = text[start]
+    position = start + 1
+    length = len(text)
+    while position < length:
+        char = text[position]
+        if char == "\\":
+            position += 2
+            continue
+        if char == nested:
+            return position + 1
+        if char == "\n" and mark != "`":
+            return -1
+        position += 1
+    return -1
 
 
 def contains_forbidden_token(haystack: str, token: str) -> bool:
@@ -595,14 +1084,20 @@ def expected_modules(role: dict[str, Any], captures: dict[str, str]) -> list[str
     return expected
 
 
-def declared_gradle_modules(root: Path) -> set[str]:
+def declared_gradle_modules(root: Path) -> frozenset[str]:
+    """변경 파일마다 다시 읽지 않는다. per-file 루프 안에서 불린다."""
     settings = next((root / name for name in ("settings.gradle.kts", "settings.gradle") if (root / name).is_file()), None)
     if settings is None:
-        return set()
-    text = settings.read_text(encoding="utf-8", errors="replace")
-    modules = set(re.findall(r"['\"](:[A-Za-z0-9_:-]+)['\"]", text))
-    modules.update(re.findall(r"include\s+['\"](:[A-Za-z0-9_:-]+)['\"]", text))
-    return modules
+        return frozenset()
+    stat = settings.stat()
+    return cached_gradle_modules(settings, stat.st_mtime_ns, stat.st_size)
+
+
+@lru_cache(maxsize=32)
+def cached_gradle_modules(settings: Path, mtime_ns: int, size: int) -> frozenset[str]:
+    text = code_only(settings.name, settings.read_text(encoding="utf-8", errors="replace"), mask_strings=False)
+    # 일반 패턴이 `include ":x"`도 이미 잡는다.
+    return frozenset(re.findall(r"['\"](:[A-Za-z0-9_:-]+)['\"]", text))
 
 
 def role_build_file(root: Path, pattern: str, captures: dict[str, str], rel_path: str | None = None) -> Path | None:
@@ -619,7 +1114,9 @@ def role_build_file(root: Path, pattern: str, captures: dict[str, str], rel_path
 
 
 def gradle_project_dependencies(path: Path) -> set[str]:
-    text = path.read_text(encoding="utf-8", errors="replace")
+    # 주석 처리된 `// implementation(project(":feature:home:presentation"))`을
+    # 선언으로 세면 같은 gate가 주석 때문에 오탐을 낸다.
+    text = code_only(path.name, path.read_text(encoding="utf-8", errors="replace"), mask_strings=False)
     dependencies = set(re.findall(r"project\(\s*['\"](:[A-Za-z0-9_:-]+)['\"]\s*\)", text))
     dependencies.update(re.findall(r"project\s+['\"](:[A-Za-z0-9_:-]+)['\"]", text))
     dependencies.update(

@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -2189,3 +2190,24 @@ def test_tripwire_retry_predicate_only_fires_on_lock_contention():
     )
     # 같은 문구를 실어도 tripwire 관측 실패가 아니면 재시도 대상이 아니다.
     assert not W_ISO.tripwire_git_lock_retryable(HookIntegrityError(_LOCK_STDERR))
+
+
+def test_managed_worktree_context_tolerates_a_missing_checkout_name() -> None:
+    """`<marker>/worktrees`로 끝나는 경로에는 이름이 없다. 무가드로 읽으면 IndexError다."""
+    from agent_flow.cli import _managed_worktree_context
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        container = Path(temp_dir) / "proj" / ".agent-flow" / "worktrees"
+        container.mkdir(parents=True)
+        assert _managed_worktree_context(container) == (container.parent.parent.resolve(), None)
+        checkout = container / "foo"
+        checkout.mkdir()
+        assert _managed_worktree_context(checkout) == (container.parent.parent.resolve(), "foo")
+
+
+def test_checkout_identity_never_emits_a_literal_none() -> None:
+    """`worktree:None`이 나가면 하류가 그걸 checkout 이름으로 받는다."""
+    from agent_flow.cli import _checkout_identity
+
+    assert _checkout_identity(None) == "leader"
+    assert _checkout_identity("foo") == "worktree:foo"

@@ -2861,7 +2861,7 @@ def _unadopted_next_step(*, root: Path, checkout: Path) -> str:
     return adopt
 
 
-def _managed_worktree_context(path: Path) -> tuple[Path, str] | None:
+def _managed_worktree_context(path: Path) -> tuple[Path, str | None] | None:
     resolved = path.resolve()
     parts = resolved.parts
     markers = {".agent-flow", ".codex", ".Codex", ".omp"}
@@ -2871,7 +2871,9 @@ def _managed_worktree_context(path: Path) -> tuple[Path, str] | None:
         root = Path(*parts[:index])
         if parts[index] in {".codex", ".Codex", ".omp"} and _same_path(root, _home_path()):
             continue
-        return root, parts[index + 2]
+        # `<marker>/worktrees`로 끝나는 경로에는 이름이 없다. 무가드로 읽으면 그
+        # 자리에서 IndexError로 죽는다. JS 쌍둥이도 여기서 null을 낸다.
+        return root, parts[index + 2] if index + 2 < len(parts) else None
     return None
 
 
@@ -3241,7 +3243,9 @@ def _verified_checkout_identity(*, root: Path, path: Path) -> str | None:
         return "leader"
     managed = _managed_worktree_context(checkout)
     if managed is not None and _same_path(managed[0], root):
-        return f"worktree:{managed[1]}"
+        # 이름 없는 컨테이너 경로에서는 `None`이 온다. f-string으로 바로 끼우면
+        # 리터럴 `worktree:None`이 나가고 하류가 그걸 이름으로 받는다.
+        return _checkout_identity(managed[1])
     if adopted_worktree_parent(root=root, path=checkout) is None:
         return None
     try:
