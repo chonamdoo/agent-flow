@@ -217,6 +217,25 @@ def test_override_rejects_a_target_that_differs_from_integration(tmp_path):
     assert str(path) in str(excinfo.value)
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "branching: null\n",
+        "pr: null\n",
+        "branching:\n  integration: null\n",
+        "pr:\n  target_branch: null\n",
+    ],
+    ids=["null-branching", "null-pr", "null-integration", "null-target"],
+)
+def test_override_rejects_a_non_string_branch_contract(tmp_path, body):
+    path = _write_override(tmp_path, "android", body)
+
+    with pytest.raises(ValueError, match="equal non-empty strings") as excinfo:
+        load_profile_payload("android", tmp_path)
+
+    assert str(path) in str(excinfo.value)
+
+
 def test_runner_profile_loading_applies_the_project_override(tmp_path):
     _write_override(
         tmp_path,
