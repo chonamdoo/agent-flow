@@ -183,6 +183,20 @@ def apply_project_profile_override(
     for key in PROJECT_OVERRIDE_KEYS:
         if key in override:
             merged[key] = _deep_merge(payload.get(key), override[key])
+    branching = merged.get("branching")
+    pr = merged.get("pr")
+    if isinstance(branching, dict) and isinstance(pr, dict):
+        integration = branching.get("integration")
+        target = pr.get("target_branch")
+        if (
+            isinstance(integration, str)
+            and isinstance(target, str)
+            and integration != target
+        ):
+            raise ValueError(
+                "profile override must keep branching.integration and "
+                f"pr.target_branch equal: {path}"
+            )
     return merged
 
 

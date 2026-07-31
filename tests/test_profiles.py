@@ -199,12 +199,28 @@ def test_override_rejects_a_foreign_profile_id(tmp_path):
         load_profile_payload("android", tmp_path)
 
 
+
+def test_override_rejects_a_target_that_differs_from_integration(tmp_path):
+    path = _write_override(
+        tmp_path,
+        "android",
+        "pr:\n"
+        '  target_branch: "develop"\n',
+    )
+
+    with pytest.raises(ValueError, match="branching.integration") as excinfo:
+        load_profile_payload("android", tmp_path)
+
+    assert str(path) in str(excinfo.value)
+
+
 def test_runner_profile_loading_applies_the_project_override(tmp_path):
     _write_override(
         tmp_path,
         "android",
         "branching:\n"
         '  base: "release/26.7.10.x"\n'
+        '  integration: "release/26.7.10.x"\n'
         "pr:\n"
         '  target_branch: "release/26.7.10.x"\n',
     )
