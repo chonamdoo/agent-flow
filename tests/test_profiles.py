@@ -256,8 +256,17 @@ def test_override_rejects_an_invalid_branch_contract(tmp_path, body):
         'pr:\n  target_branch: "release branch"\n',
         'branching:\n  integration: "foo..bar"\n'
         'pr:\n  target_branch: "foo..bar"\n',
+        'branching:\n  base: "release/.candidate"\n',
+        'branching:\n  base: "release.lock/next"\n',
     ],
-    ids=["base-space", "base-double-dot", "target-space", "target-double-dot"],
+    ids=[
+        "base-space",
+        "base-double-dot",
+        "target-space",
+        "target-double-dot",
+        "dot-component",
+        "lock-component",
+    ],
 )
 def test_override_rejects_an_unsafe_git_branch(tmp_path, body):
     path = _write_override(tmp_path, "android", body)
@@ -352,6 +361,30 @@ def test_project_profile_rejects_an_id_that_differs_from_its_filename(tmp_path):
     with pytest.raises(ValueError, match="profile id mismatch: my-stack"):
         load_profile_payload("my-stack", tmp_path)
     with pytest.raises(ValueError, match="profile id mismatch: my-stack"):
+        load_runner_profile(KIT_ROOT / "src" / "agent_flow", tmp_path)
+
+
+def test_project_profile_rejects_an_invalid_branch_contract_without_override(tmp_path):
+    profiles = tmp_path / ".agent-flow" / "profiles"
+    profiles.mkdir(parents=True)
+    (profiles / "my-stack.yaml").write_text(
+        "id: my-stack\n"
+        "branching:\n"
+        "  base: null\n"
+        "  integration: develop\n"
+        "pr:\n"
+        "  target_branch: develop\n"
+        "  merge_strategy: merge\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".agent-flow" / "kit.json").write_text(
+        '{"profiles":["my-stack"]}\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="branch contract"):
+        load_profile_payload("my-stack", tmp_path)
+    with pytest.raises(ValueError, match="branch contract"):
         load_runner_profile(KIT_ROOT / "src" / "agent_flow", tmp_path)
 
 

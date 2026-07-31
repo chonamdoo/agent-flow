@@ -2989,7 +2989,7 @@ def _workflow_declarations() -> DeclaredPhaseSkills:
 
 def _run_skills_command(args: argparse.Namespace, root: Path) -> int:
     profile_ids = active_profile_ids(root, getattr(args, "profile", None) or "auto")
-    payloads = [load_profile_payload(profile_id) for profile_id in profile_ids]
+    payloads = [load_profile_payload(profile_id, root) for profile_id in profile_ids]
 
     if args.skills_command == "sync":
         exit_code = 0

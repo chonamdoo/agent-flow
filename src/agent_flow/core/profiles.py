@@ -193,10 +193,16 @@ def apply_project_profile_override(
     """
     path = project_profile_override_path(root, profile_id)
     if not path.is_file():
-        return payload
+        return _validate_project_profile_branch_contract(
+            payload,
+            source=project_profile_path(root, profile_id),
+        )
     override = yaml.safe_load(path.read_text(encoding="utf-8"))
     if override is None:
-        return payload
+        return _validate_project_profile_branch_contract(
+            payload,
+            source=project_profile_path(root, profile_id),
+        )
     if not isinstance(override, dict):
         raise ValueError(f"profile override must be a mapping: {path}")
     declared_id = override.get("id")
@@ -214,8 +220,14 @@ def apply_project_profile_override(
     for key in PROJECT_OVERRIDE_KEYS:
         if key in override:
             merged[key] = _deep_merge(payload.get(key), override[key])
-    branching = merged.get("branching")
-    pr = merged.get("pr")
+    return _validate_project_profile_branch_contract(merged, source=path)
+
+
+def _validate_project_profile_branch_contract(
+    payload: dict[str, Any], *, source: Path
+) -> dict[str, Any]:
+    branching = payload.get("branching")
+    pr = payload.get("pr")
     base = branching.get("base") if isinstance(branching, dict) else None
     integration = branching.get("integration") if isinstance(branching, dict) else None
     target = pr.get("target_branch") if isinstance(pr, dict) else None
@@ -232,17 +244,17 @@ def apply_project_profile_override(
         or strategy not in {"merge", "squash", "rebase"}
     ):
         raise ValueError(
-            "invalid profile override branch contract: branching.base and "
+            "invalid project profile branch contract: branching.base and "
             "branching.integration must be non-empty strings; pr.target_branch "
             "must equal branching.integration; pr.merge_strategy must be merge, "
-            f"squash, or rebase: {path}"
+            f"squash, or rebase: {source}"
         )
     try:
         for branch in (base, integration, target):
             validate_git_branch(branch)
     except ValueError as exc:
-        raise ValueError(f"invalid profile override branch contract: {path}: {exc}") from exc
-    return merged
+        raise ValueError(f"invalid project profile branch contract: {source}: {exc}") from exc
+    return payload
 
 
 def _deep_merge(base: object, patch: object) -> object:

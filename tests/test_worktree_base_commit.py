@@ -215,7 +215,11 @@ def test_custom_installed_profile_declared_base_wins_over_main(tmp_path: Path):
     (profiles / "my-stack.yaml").write_text(
         "id: my-stack\n"
         "branching:\n"
-        "  base: develop\n",
+        "  base: develop\n"
+        "  integration: develop\n"
+        "pr:\n"
+        "  target_branch: develop\n"
+        "  merge_strategy: merge\n",
         encoding="utf-8",
     )
 

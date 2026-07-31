@@ -112,7 +112,7 @@ def test_cli_exposes_refresh(tmp_path, monkeypatch):
         cli, "parse_skill_sources", lambda payload: (SkillSource("probe", "fetch", "u", "main", "", ""),)
     )
     monkeypatch.setattr(cli, "active_profile_ids", lambda root, requested: ["generic"])
-    monkeypatch.setattr(cli, "load_profile_payload", lambda profile_id: {})
+    monkeypatch.setattr(cli, "load_profile_payload", lambda profile_id, root=None: {})
     monkeypatch.setattr(
         cli,
         "sync_skill_sources",
@@ -121,3 +121,28 @@ def test_cli_exposes_refresh(tmp_path, monkeypatch):
     assert cli.main(["skills", "sync", "--root", str(tmp_path)]) == 0
     assert cli.main(["skills", "sync", "--root", str(tmp_path), "--refresh"]) == 0
     assert seen == [False, True]
+
+
+def test_skills_sync_loads_an_installed_custom_profile(tmp_path, capsys):
+    from agent_flow import cli
+
+    profiles = tmp_path / ".agent-flow" / "profiles"
+    profiles.mkdir(parents=True)
+    (profiles / "my-stack.yaml").write_text(
+        "id: my-stack\n"
+        "gates: []\n"
+        "branching:\n"
+        "  base: develop\n"
+        "  integration: develop\n"
+        "pr:\n"
+        "  target_branch: develop\n"
+        "  merge_strategy: merge\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".agent-flow" / "kit.json").write_text(
+        '{"profiles":["my-stack"]}\n',
+        encoding="utf-8",
+    )
+
+    assert cli.main(["skills", "sync", "--root", str(tmp_path)]) == 0
+    assert capsys.readouterr().out.strip() == "my-stack: no skill_sources declared"

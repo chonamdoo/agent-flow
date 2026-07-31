@@ -19,6 +19,7 @@ def validate_git_branch(value: str) -> None:
         not value
         or value.startswith("-")
         or value.startswith(".")
+        or value == "@"
         or value.startswith("/")
         or value.endswith("/")
         or value.endswith(".")
@@ -26,6 +27,10 @@ def validate_git_branch(value: str) -> None:
         or ".." in value
         or "//" in value
         or "@{" in value
+        or any(
+            component.startswith(".") or component.endswith(".lock")
+            for component in value.split("/")
+        )
         or any(ord(ch) < 32 or ch == "\x7f" or ch in invalid_chars for ch in value)
     )
     if invalid:
