@@ -717,6 +717,26 @@ def test_binding_status_must_match_a_verified_active_run(tmp_path: Path):
         record_host_checkout_binding(payload, root)
 
 
+def test_parallel_run_binds_from_lines_when_status_json_is_truncated(tmp_path: Path):
+    root, statuses, runs = _setup(tmp_path)
+    first = statuses[0]
+    payload = _status_payload(root, first, runs[0])
+    payload["tool_input"]["command"] = f"agent-flow run new-task --root {root}"
+    payload["output"] = (
+        f"run: default/{runs[0].name}\n"
+        f"next_command: agent-flow continue --root {root} --worktree {first.name}\n"
+        'status_json: {"next_command": "agent-flow continue'
+    )
+
+    binding = record_host_checkout_binding(payload, root)
+
+    assert binding is not None
+    assert host_write_boundary_violation(
+        _write_payload(first.path / "feature.py"),
+        root,
+    ) is None
+
+
 def test_patch_paths_are_checked_even_without_a_structured_path_field(tmp_path: Path):
     root, statuses, runs = _setup(tmp_path)
     first, second = statuses

@@ -72,6 +72,8 @@ _PATCH_PATH = re.compile(
     re.MULTILINE,
 )
 _STATUS_JSON = re.compile(r"(?:^|\n)status_json:\s*", re.MULTILINE)
+_STATUS_RUN = re.compile(r"(?:^|\n)run:\s*([^\r\n]+)", re.MULTILINE)
+_STATUS_NEXT_COMMAND = re.compile(r"(?:^|\n)next_command:\s*([^\r\n]+)", re.MULTILINE)
 _BINDING_VERSION = 2
 _BINDING_DIR = "host-sessions"
 _LIFECYCLE_COMMANDS = frozenset({"continue", "run", "start", "status"})
@@ -907,6 +909,8 @@ def _first_number(value: object, keys: tuple[str, ...]) -> int | None:
 
 def _last_status_payload(payload: object) -> dict[str, Any] | None:
     found: list[dict[str, Any]] = []
+    structured_runs: list[str] = []
+    structured_next_commands: list[str] = []
     decoder = json.JSONDecoder()
     for text in _output_strings(payload):
         for match in _STATUS_JSON.finditer(text):
@@ -916,7 +920,20 @@ def _last_status_payload(payload: object) -> dict[str, Any] | None:
                 continue
             if isinstance(value, dict):
                 found.append(value)
-    return found[-1] if found else None
+        structured_runs.extend(
+            match.group(1).strip() for match in _STATUS_RUN.finditer(text)
+        )
+        structured_next_commands.extend(
+            match.group(1).strip() for match in _STATUS_NEXT_COMMAND.finditer(text)
+        )
+    if found:
+        return found[-1]
+    if not structured_runs or not structured_next_commands:
+        return None
+    return {
+        "run": structured_runs[-1],
+        "next_command": structured_next_commands[-1],
+    }
 
 
 def _output_strings(payload: object) -> Iterable[str]:
