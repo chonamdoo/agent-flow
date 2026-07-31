@@ -625,7 +625,7 @@ def selector_matches(
     frontmatter 선언과 profile 표가 같은 판정을 쓰도록 여기 하나만 둔다.
     """
     haystack = task_text.lower()
-    if any(term.lower() in haystack for term in task_terms if term):
+    if any(term_in(term.lower(), haystack) for term in task_terms if term):
         return True
     normalized = [str(path).replace("\\", "/") for path in changed_files]
     return any(
@@ -633,6 +633,26 @@ def selector_matches(
         for pattern in path_globs
         for candidate in normalized
     )
+
+
+_TERM_PATTERNS: dict[str, re.Pattern[str]] = {}
+
+
+def term_in(term: str, text: str) -> bool:
+    """단어 경계로 본다.
+
+    부분문자열로 보면 `프레젠테이션`이 "팀 프레젠테이션으로 정리한다"에 걸리고
+    `uistate`가 `GUIStateMachine`에 걸려, 무관한 task가 skill을 required로 올린다.
+
+    경계는 ASCII 영숫자로만 잡는다. `\w`를 쓰면 한글이 word 문자라서 `화면 상태를`
+    처럼 조사가 붙은 한국어 task 문구가 전부 미매치가 된다. 복수 접미사는 허용한다 —
+    `skill_matching._term_in`과 같은 규칙이고, 그쪽이 이 함수를 쓴다.
+    """
+    pattern = _TERM_PATTERNS.get(term)
+    if pattern is None:
+        pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(term)}(?:e?s)?(?![A-Za-z0-9_])")
+        _TERM_PATTERNS[term] = pattern
+    return pattern.search(text) is not None
 
 
 def entry_can_activate(entry: SkillCatalogEntry) -> bool:

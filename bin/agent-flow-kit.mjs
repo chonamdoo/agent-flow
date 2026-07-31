@@ -588,20 +588,6 @@ function editDistance(left, right) {
   return previous[right.length];
 }
 
-// Python `git_safe`(`core/worktree_isolation.py`)와 같은 목적이다. 오염된 ambient
-// GIT_DIR/GIT_WORK_TREE가 우리 git을 요청한 cwd 밖으로 돌리면 JS와 Python이 서로
-// 다른 root를 고른다.
-const GIT_DISCOVERY_ENV = [
-  "GIT_DIR",
-  "GIT_WORK_TREE",
-  "GIT_COMMON_DIR",
-  "GIT_INDEX_FILE",
-  "GIT_OBJECT_DIRECTORY",
-  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-  "GIT_CEILING_DIRECTORIES",
-  "GIT_NAMESPACE",
-  "GIT_PREFIX",
-];
 
 
 function loadWorkflowDefinition(name) {

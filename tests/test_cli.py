@@ -4299,11 +4299,9 @@ if (codexContext !== undefined) {
         cwd에서 두 런타임이 서로 다른 root를 고른다.
         """
         node = _node_executable()
-        kit = (
-            Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs"
-        ).read_text(encoding="utf-8")
-        start = kit.index("const GIT_DISCOVERY_ENV")
-        end = kit.index("\n}\n", kit.index("function gitOutput(cwd, args)")) + 3
+        shared = (
+            Path(__file__).resolve().parents[1] / "lib" / "installer-shared.mjs"
+        ).as_posix()
         with tempfile.TemporaryDirectory() as temp_dir:
             here = Path(temp_dir) / "here"
             elsewhere = Path(temp_dir) / "elsewhere"
@@ -4311,14 +4309,12 @@ if (codexContext !== undefined) {
                 repo.mkdir()
                 subprocess.run(("git", "init", "-q"), cwd=repo, check=True)
             probe = Path(temp_dir) / "probe.mjs"
+            # 사본을 잘라 붙이지 않고 배포되는 모듈을 그대로 부른다. 두 진입점이 이제
+            # 이 하나를 쓰므로 여기만 막으면 둘 다 막힌다.
             probe.write_text(
-                "import { spawnSync } from 'node:child_process';\n"
+                f"import {{ gitOutput }} from '{shared}';\n"
                 + "import process from 'node:process';\n"
-                + "const DEFAULT_RELAY_TIMEOUT_MS = 30_000;\n"
-                + "function safeSpawnSync(c, a, o = {}) "
-                + "{ return spawnSync(c, a, { ...o, timeout: o.timeout ?? DEFAULT_RELAY_TIMEOUT_MS }); }\n"
-                + kit[start:end]
-                + "\nconsole.log(gitOutput(process.argv[2], "
+                + "console.log(gitOutput(process.argv[2], "
                 + "['rev-parse', '--show-toplevel']));\n",
                 encoding="utf-8",
             )
