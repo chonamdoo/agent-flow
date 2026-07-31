@@ -14,6 +14,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 SRC = str(Path(__file__).resolve().parents[1] / "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
@@ -141,6 +143,40 @@ def test_forced_profile_base_wins_over_installed_profile(
     _git("checkout", "main", cwd=root)
     _declare_profile(root, "android")
     monkeypatch.setenv("AGENT_FLOW_PROFILE", "spring")
+
+    status = create_worktree(root=root, plan=plan_worktree(root=root, name="feat"))
+
+    assert _git("rev-parse", "HEAD", cwd=status.path) == develop_tip
+    assert _manifest(root, "feat-feat")["base_oid"] == develop_tip
+
+
+@pytest.mark.parametrize("forced", [True, False], ids=["env-profile", "kit-profile"])
+def test_unknown_profile_fallback_uses_the_generic_base_override(
+    tmp_path: Path,
+    monkeypatch,
+    forced: bool,
+):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _init_repo(root)
+    _git("branch", "develop", cwd=root)
+    _git("checkout", "develop", cwd=root)
+    (root / "f.txt").write_text("develop only\n", encoding="utf-8")
+    _git("add", ".", cwd=root)
+    _git("commit", "-m", "develop advance", cwd=root)
+    develop_tip = _git("rev-parse", "HEAD", cwd=root)
+    _git("checkout", "main", cwd=root)
+    _declare_profile(root, "android" if forced else "missing")
+    (root / ".agent-flow" / "profiles").mkdir(parents=True, exist_ok=True)
+    (root / ".agent-flow" / "profiles" / "generic.local.yaml").write_text(
+        "branching:\n"
+        "  base: develop\n",
+        encoding="utf-8",
+    )
+    if forced:
+        monkeypatch.setenv("AGENT_FLOW_PROFILE", "missing")
+    else:
+        monkeypatch.setenv("AGENT_FLOW_FALLBACK_GENERIC", "1")
 
     status = create_worktree(root=root, plan=plan_worktree(root=root, name="feat"))
 

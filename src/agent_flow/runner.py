@@ -74,7 +74,11 @@ from agent_flow.core.worktree_isolation import (
     real_path,
     sanitized_worker_env,
 )
-from agent_flow.core.profiles import GATE_PHASE_ALL, apply_project_profile_override
+from agent_flow.core.profiles import (
+    GATE_PHASE_ALL,
+    apply_project_profile_override,
+    project_profile_path,
+)
 from agent_flow.core.phase_workflow import (
     package_root,
     find_kit_root,
@@ -1713,6 +1717,10 @@ def _load_single_profile(
 
     profile_path = kit_root / "profiles" / f"{profile_id}.yaml"
     _ensure_child_path(kit_root / "profiles", profile_path, "profile")
+    if project_root is not None:
+        installed_profile = project_profile_path(project_root, profile_id)
+        if installed_profile.is_file():
+            profile_path = installed_profile
     if not profile_path.exists():
         # 워크플로 정의와 같은 규율이다 — 정본은 패키지 자원이고 kit root 사본은
         # 설치본이 덮어쓰는 자리다. 사본이 없다고 "없는 profile"로 판정하면
@@ -1738,6 +1746,10 @@ def _load_single_profile(
         )
         profile_id = "generic"
         profile_path = kit_root / "profiles" / "generic.yaml"
+        if project_root is not None:
+            installed_generic = project_profile_path(project_root, profile_id)
+            if installed_generic.is_file():
+                profile_path = installed_generic
         if not profile_path.exists():
             packaged_generic = _packaged_profile_path("generic")
             if packaged_generic is not None:

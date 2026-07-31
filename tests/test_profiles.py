@@ -236,3 +236,31 @@ def test_runner_profile_loading_applies_the_project_override(tmp_path):
     assert profile_id == "android"
     assert payload["branching"]["base"] == "release/26.7.10.x"
     assert payload["pr"]["target_branch"] == "release/26.7.10.x"
+
+
+def test_runner_profile_loading_prefers_an_installed_custom_profile(tmp_path):
+    profiles = tmp_path / ".agent-flow" / "profiles"
+    profiles.mkdir(parents=True)
+    (profiles / "my-stack.yaml").write_text(
+        "id: my-stack\n"
+        "branching:\n"
+        "  base: develop\n"
+        "  integration: develop\n"
+        "pr:\n"
+        "  target_branch: develop\n"
+        "  merge_strategy: merge\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".agent-flow" / "kit.json").write_text(
+        '{"profiles":["my-stack"]}\n',
+        encoding="utf-8",
+    )
+
+    profile_id, payload = load_runner_profile(
+        KIT_ROOT / "src" / "agent_flow",
+        tmp_path,
+    )
+
+    assert profile_id == "my-stack"
+    assert payload["branching"]["base"] == "develop"
+    assert payload["pr"]["target_branch"] == "develop"

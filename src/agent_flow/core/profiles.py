@@ -19,6 +19,12 @@ DEFAULT_GATE_PHASE = "pre-commit"
 GATE_PHASE_ALL = "all"
 # 프로젝트가 배포 profile 위에 얹는 파일. install이 덮지 않는 유일한 자리다.
 PROJECT_OVERRIDE_SUFFIX = ".local.yaml"
+
+
+class _UnknownProfileError(ValueError):
+    pass
+
+
 # override가 실제로 반영되는 키만 받는다. 근거는 `apply_project_profile_override`.
 PROJECT_OVERRIDE_KEYS: tuple[str, ...] = ("branching", "pr")
 
@@ -111,12 +117,27 @@ def load_profile(profile_id: str) -> ProjectProfile:
     )
 
 
-def load_profile_payload(profile_id: str, root: Path | None = None) -> dict[str, Any]:
-    text = (
-        _read_profile_text(profile_id)
-        if root is None
-        else _read_project_profile_text(root, profile_id)
-    )
+def load_profile_payload(
+    profile_id: str,
+    root: Path | None = None,
+    *,
+    fallback_unknown_to_generic: bool = False,
+) -> dict[str, Any]:
+    try:
+        text = (
+            _read_profile_text(profile_id)
+            if root is None
+            else _read_project_profile_text(root, profile_id)
+        )
+    except _UnknownProfileError:
+        if not fallback_unknown_to_generic:
+            raise
+        profile_id = "generic"
+        text = (
+            _read_profile_text(profile_id)
+            if root is None
+            else _read_project_profile_text(root, profile_id)
+        )
     payload = yaml.safe_load(text)
     if not isinstance(payload, dict):
         raise ValueError(f"profile must be a mapping: {profile_id}")
@@ -125,12 +146,16 @@ def load_profile_payload(profile_id: str, root: Path | None = None) -> dict[str,
     return apply_project_profile_override(payload, profile_id=profile_id, root=root)
 
 
+def project_profile_path(root: Path, profile_id: str) -> Path:
+    return _project_profile_path(root, profile_id, suffix=".yaml")
+
+
 def project_profile_override_path(root: Path, profile_id: str) -> Path:
     return _project_profile_path(root, profile_id, suffix=PROJECT_OVERRIDE_SUFFIX)
 
 
 def _read_project_profile_text(root: Path, profile_id: str) -> str:
-    path = _project_profile_path(root, profile_id, suffix=".yaml")
+    path = project_profile_path(root, profile_id)
     if path.is_file():
         return path.read_text(encoding="utf-8")
     return _read_profile_text(profile_id)
@@ -252,7 +277,7 @@ def _read_profile_text(profile_id: str) -> str:
         return package_path.read_text(encoding="utf-8")
     repo_path = Path(__file__).resolve().parents[3] / "profiles" / f"{safe_id}.yaml"
     if not repo_path.is_file():
-        raise ValueError(f"unknown profile: {profile_id}")
+        raise _UnknownProfileError(f"unknown profile: {profile_id}")
     return repo_path.read_text(encoding="utf-8")
 
 
