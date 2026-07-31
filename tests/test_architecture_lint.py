@@ -472,3 +472,30 @@ def test_gradle_readers_do_not_count_commented_out_declarations():
     # 문자열은 남는다 - gradle 판독기에는 문자열이 곧 데이터다.
     live = 'dependencies {\n  implementation(project(":core:data"))\n}\n'
     assert ":core:data" in code_only("build.gradle.kts", live, mask_strings=False)
+
+
+def test_interpolation_is_code_only_where_the_language_has_it():
+    """한 벌로 뭉뚱그리면 없애려던 문자열 오탐이 다른 자리에 생긴다."""
+    # 보간이 없는 언어/따옴표에서는 그냥 문자열이다.
+    assert _forbidden(PY_DOMAIN_ROLE, "chat.py", 'pattern = "${view}"\n') == []
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const p = '${screen}'\n") == []
+    # 있는 곳에서는 코드다.
+    assert len(_forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", 'val s = "${orderDto.id}"\n')) == 1
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const s = `${OrderDto.name}`\n")) == 1
+
+
+def test_an_unclosed_interpolation_does_not_disable_the_rest_of_the_file():
+    """`${` 하나가 파일 끝까지 마스킹을 끄면 뒤따르는 주석이 전부 코드가 된다."""
+    assert _forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", 'val T = "${"\n// Dto 메모\n') == []
+    from agent_flow.core.architecture_lint import code_only
+
+    build = 'val tpl = "${"\ndependencies {\n  // implementation(project(":a:b"))\n}\n'
+    assert ":a:b" not in code_only("build.gradle.kts", build, mask_strings=False)
+
+
+def test_backticks_and_slashes_follow_the_language_not_a_guess():
+    """Kotlin backtick은 escaped identifier고, `case 1://`의 `:`는 스킴이 아니다."""
+    assert len(_forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", "val `dtoState` = 1\n")) == 1
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", "switch (x) { case 1://Screen 메모\n}\n") == []
+    # Groovy `from`은 모듈 지정자가 아니다.
+    assert _forbidden(ANDROID_PRESENTATION_ROLE, "build.gradle", "copy { from 'src/main/dto' }\n") == []

@@ -433,17 +433,39 @@ def validate_forbidden_tokens(rel_path: str, text: str, role: dict[str, Any]) ->
 # screen`, 문서 URL의 `#view`, 예시 코드 블록이 필수 pre-commit gate를 막는다 —
 # 원래 보고된 70건과 같은 클래스다. 파서를 붙이는 대신 비-코드 구간을 공백으로
 # 지운다. 길이를 유지하므로 뒤따르는 경계 판정이 그대로 성립한다.
+
+# 문자열 문법은 언어마다 다르다. 한 벌로 뭉뚱그리면 없애려던 오탐이 다른 자리에
+# 생긴다 - `.py`의 `"${screen}"`에는 보간이 없고, Kotlin의 backtick은 문자열이
+# 아니라 escaped identifier다.
+JS_SUFFIXES = {".ts", ".tsx", ".js", ".jsx"}
+INTERPOLATING_MARKS = {
+    ".ts": "`",
+    ".tsx": "`",
+    ".js": "`",
+    ".jsx": "`",
+    ".kt": '"',
+    ".kts": '"',
+    ".gradle": '"',
+}
+
+
 def code_only(rel_path: str, text: str, mask_strings: bool = True) -> str:
     # `.py`만 `#` 주석이고 `SOURCE_SUFFIXES`의 나머지는 전부 `//` 계열이다. 모르는
     # 확장자도 `//` 쪽으로 둔다 - 여기 오기 전에 이미 확장자로 걸러진다.
-    hash_comments = Path(rel_path).suffix == ".py"
+    suffix = Path(rel_path).suffix
+    hash_comments = suffix == ".py"
     slash_comments = not hash_comments
+    javascript = suffix in JS_SUFFIXES
+    interpolating = INTERPOLATING_MARKS.get(suffix, "")
+    # backtick은 JS에서만 문자열이다. Kotlin에서는 escaped identifier라
+    # (`val ``screen state```) 문자열로 보면 그 안의 위반을 놓친다.
+    marks = "\"'`" if javascript else "\"'"
     out = list(text)
     index = 0
     length = len(text)
     while index < length:
         rest = text[index:]
-        if slash_comments and rest.startswith("//") and not is_slash_in_code(text, index):
+        if slash_comments and rest.startswith("//") and not is_url_scheme_slash(text, index):
             index = blank_until(out, text, index, "\n", keep_terminator=True)
             continue
         if slash_comments and rest.startswith("/*"):
@@ -456,20 +478,33 @@ def code_only(rel_path: str, text: str, mask_strings: bool = True) -> str:
         if quote:
             index = blank_until(out if mask_strings else None, text, index + 3, quote)
             continue
-        if text[index] in "\"'`":
+        if text[index] in marks:
             # gradle 판독기는 문자열이 곧 데이터다(`project(":core:data")`). 주석만
             # 지우고 문자열은 남긴다.
-            keep = not mask_strings or is_module_specifier(text, index)
-            index = blank_string(None if keep else out, text, index)
+            keep = not mask_strings or (javascript and is_module_specifier(text, index))
+            index = blank_string(
+                None if keep else out,
+                text,
+                index,
+                interpolates=text[index] == interpolating,
+            )
             continue
         index += 1
     return "".join(out)
 
 
 # `//`는 문맥 없이 주석이 아니다. `https://x`의 스킴과 정규식 `/^https?:\/\//`의
-# 이스케이프된 슬래시 뒤에 붙으면, 그 줄 뒤쪽의 진짜 코드까지 지운다.
-def is_slash_in_code(text: str, index: int) -> bool:
-    return index > 0 and text[index - 1] in ":\\"
+# 이스케이프된 슬래시 뒤에 붙으면 그 줄 뒤쪽의 진짜 코드까지 지운다. 스킴은 앞이
+# 반드시 글자다 - `case 1://메모`의 `:`까지 코드로 보면 주석을 놓친다.
+def is_url_scheme_slash(text: str, index: int) -> bool:
+    if index == 0:
+        return False
+    if text[index - 1] == "\\":
+        return True
+    if text[index - 1] != ":" or index < 2:
+        return False
+    previous = text[index - 2]
+    return previous.isascii() and previous.isalpha()
 
 
 def blank_until(out: list[str] | None, text: str, start: int, terminator: str, keep_terminator: bool = False) -> int:
@@ -484,8 +519,9 @@ def blank_until(out: list[str] | None, text: str, start: int, terminator: str, k
 
 # 모듈 지정자는 문자열이지만 코드 참조다. 지우면 `export * from './screens'` 같은
 # 진짜 위반이 사라진다. 줄 전체를 보면 `export const CSS = '@media screen'`까지
-# 코드로 남아 이 커밋이 없애려던 오탐이 그대로 살아난다 - 따옴표 **바로 앞**만 본다.
-# 그래야 여러 줄 import(`} from './screens'`)와 `await import('./x')`도 함께 걸린다.
+# 코드로 남아 없애려던 오탐이 살아난다 - 따옴표 **바로 앞**만 본다. 그래야 여러 줄
+# import(`} from './screens'`)와 `await import('./x')`도 함께 걸린다. JS에서만 쓴다 -
+# Groovy `copy { from 'src/main/screens' }`까지 보존하면 그쪽이 오탐이 된다.
 MODULE_SPECIFIER_RE = re.compile(
     r"(?:^|[^A-Za-z0-9_$])(?:from|import|export)\s*$"
     r"|(?:^|[^A-Za-z0-9_$])(?:import|require)\s*\(\s*$"
@@ -497,11 +533,11 @@ def is_module_specifier(text: str, index: int) -> bool:
     return bool(MODULE_SPECIFIER_RE.search(text[max(0, index - MODULE_SPECIFIER_LOOKBEHIND) : index]))
 
 
-def blank_string(out: list[str] | None, text: str, start: int) -> int:
+def blank_string(out: list[str] | None, text: str, start: int, interpolates: bool = False) -> int:
     """문자열 하나를 지나가며 `out`이 있으면 그 구간을 공백으로 만든다.
 
-    `${...}` 보간은 남긴다. `"${viewModel.state}"`는 문자열 안에 있어도 코드고,
-    Kotlin/Compose 소스에서 흔하다 - 지우면 진짜 위반을 놓친다.
+    `interpolates`면 `${...}` 안쪽을 코드로 남긴다. `"${viewModel.state}"`는
+    문자열 안에 있어도 코드고, Kotlin/Compose 소스에서 흔하다.
     """
     mark = text[start]
     length = len(text)
@@ -527,28 +563,37 @@ def blank_string(out: list[str] | None, text: str, start: int) -> int:
                 out[position] = " "
             position += 2
             continue
-        if char == "$" and text[position + 1 : position + 2] == "{":
-            position = skip_interpolation(text, position + 1)
-            continue
+        if interpolates and char == "$" and text[position + 1 : position + 2] == "{":
+            closed = skip_interpolation(text, position + 1, mark)
+            if closed != -1:
+                position = closed
+                continue
         if out is not None:
             out[position] = " "
         position += 1
     return length
 
 
-def skip_interpolation(text: str, brace: int) -> int:
-    """`${` 안쪽을 코드로 남기고 짝이 맞는 `}` 다음을 돌려준다."""
+def skip_interpolation(text: str, brace: int, mark: str) -> int:
+    """짝이 맞는 `}` 다음을 돌려준다. 문자열 안에서 못 찾으면 -1.
+
+    못 찾았는데 파일 끝을 돌려주면 그 지점부터 마스킹이 통째로 꺼진다 - `"${"`
+    하나가 뒤따르는 주석 전부를 코드로 만든다.
+    """
     depth = 0
     position = brace
     while position < len(text):
-        if text[position] == "{":
+        char = text[position]
+        if char == "{":
             depth += 1
-        elif text[position] == "}":
+        elif char == "}":
             depth -= 1
             if depth == 0:
                 return position + 1
+        elif char == mark or (char == "\n" and mark != "`"):
+            return -1
         position += 1
-    return len(text)
+    return -1
 
 
 def contains_forbidden_token(haystack: str, token: str) -> bool:
