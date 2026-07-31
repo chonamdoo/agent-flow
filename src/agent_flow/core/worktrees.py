@@ -2392,17 +2392,19 @@ def _default_base_ref(root: Path) -> str:
 
 
 def _profile_base_ref(root: Path) -> str:
-    """`profile.branching.base`가 지명한 ref. 없거나 이 저장소에 없으면 빈 문자열.
+    """Resolve the profile-declared base ref when the repository can prove it.
 
-    이 자리를 이름 목록으로만 두면 release-first 저장소에서 profile이 `base:
-    release/x`를 선언해도 worktree는 `origin/main`에서 갈라진다 — 선언은 프롬프트로만
-    흐르고 실제 `git worktree add`는 그것을 못 본다. 선언을 먼저 보고, 그 ref가 실제로
-    있을 때만 쓴다. 없는 ref로 내려가면 worktree 생성 자체가 죽기 때문이다.
+    An explicit project/forced profile is a contract, so an unavailable base fails closed.
+    An auto-detected profile is only a default and may fall through to the repository's
+    conventional branch names.
     """
     try:
         from agent_flow.core.profiles import active_profile_ids, load_profile_payload
 
         forced_profile = os.environ.get("AGENT_FLOW_PROFILE")
+        explicit_profile = bool(forced_profile) or (
+            root / ".agent-flow" / "kit.json"
+        ).is_file()
         fallback_unknown = bool(forced_profile) or (
             os.environ.get("AGENT_FLOW_FALLBACK_GENERIC") == "1"
         )
@@ -2442,9 +2444,11 @@ def _profile_base_ref(root: Path) -> str:
                 ref=ref,
             ) and _git_commit_ref_exists(root=root, ref=ref):
                 return ref
-        raise WorktreeIsolationError(
-            f"profile base branch is unavailable: {declared}"
-        )
+        if explicit_profile:
+            raise WorktreeIsolationError(
+                f"profile base branch is unavailable: {declared}"
+            )
+        return ""
     return ""
 
 
