@@ -7438,7 +7438,15 @@ if (codexContext !== undefined) {
                     self.assertEqual(main(["gates", "--root", str(root), "--phase", "all"]), 0)
 
             commands = [command.command for command in captured]
-            architecture_command = (sys.executable, "-m", "agent_flow.core.architecture_lint", "--profile", "android,react-native")
+            architecture_command = (
+                sys.executable,
+                "-m",
+                "agent_flow.core.architecture_lint",
+                "--profile",
+                "android,react-native",
+                "--profile-root",
+                str(root.resolve()),
+            )
             self.assertIn(architecture_command, commands)
             self.assertNotIn((sys.executable, "-m", "agent_flow.core.architecture_lint", "--profile", "android"), commands)
             self.assertNotIn((sys.executable, "-m", "agent_flow.core.architecture_lint", "--profile", "react-native"), commands)
@@ -7527,7 +7535,15 @@ if (codexContext !== undefined) {
                     )
             self.assertEqual(output.getvalue().strip(), "android,react-native: 8/8 gates passed")
             self.assertIn(
-                (sys.executable, "-m", "agent_flow.core.architecture_lint", "--profile", "android,react-native"),
+                (
+                    sys.executable,
+                    "-m",
+                    "agent_flow.core.architecture_lint",
+                    "--profile",
+                    "android,react-native",
+                    "--profile-root",
+                    str(root.resolve()),
+                ),
                 [command.command for command in captured],
             )
 

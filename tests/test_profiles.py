@@ -6,6 +6,7 @@ pre-push 게이트까지 돌린다(issue #130).
 """
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -16,6 +17,8 @@ KIT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(KIT_ROOT / "src"))
 
 from agent_flow.cli import _profile_gate_commands  # noqa: E402
+from agent_flow.core.architecture_lint import main as architecture_lint_main  # noqa: E402
+from agent_flow.core.local_skills import resolved_profile  # noqa: E402
 from agent_flow.core.profiles import (  # noqa: E402
     DEFAULT_GATE_PHASE,
     GATE_PHASE_ALL,
@@ -240,9 +243,15 @@ def test_runner_profile_loading_applies_the_project_override(tmp_path):
 
 def test_runner_profile_loading_prefers_an_installed_custom_profile(tmp_path):
     profiles = tmp_path / ".agent-flow" / "profiles"
+    lint_root = tmp_path / "worktree"
+    lint_root.mkdir()
     profiles.mkdir(parents=True)
     (profiles / "my-stack.yaml").write_text(
         "id: my-stack\n"
+        "gates:\n"
+        "  - id: architecture-lint\n"
+        '    command: ["agent-flow", "architecture-lint", "--profile", "my-stack"]\n'
+        "    required: true\n"
         "branching:\n"
         "  base: develop\n"
         "  integration: develop\n"
@@ -264,3 +273,35 @@ def test_runner_profile_loading_prefers_an_installed_custom_profile(tmp_path):
     assert profile_id == "my-stack"
     assert payload["branching"]["base"] == "develop"
     assert payload["pr"]["target_branch"] == "develop"
+    commands = _profile_gate_commands(["my-stack"], root=tmp_path)
+    assert commands[0].gate_id == "architecture-lint"
+    assert commands[0].command[-2:] == ("--profile-root", str(tmp_path))
+    lint = subprocess.run(
+        commands[0].command,
+        cwd=lint_root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert lint.returncode == 0, lint.stderr
+
+
+def test_resolved_profile_applies_the_project_override(tmp_path):
+    _write_override(
+        tmp_path,
+        "android",
+        "branching:\n"
+        "  base: develop\n"
+        "  integration: develop\n"
+        "pr:\n"
+        "  target_branch: develop\n",
+    )
+    (tmp_path / ".agent-flow" / "kit.json").write_text(
+        '{"profiles":["android"]}\n',
+        encoding="utf-8",
+    )
+
+    profile = resolved_profile(tmp_path)
+
+    assert profile is not None
+    assert profile["branching"]["base"] == "develop"

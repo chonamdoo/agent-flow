@@ -921,11 +921,15 @@ def main(argv: list[str] | None = None) -> int:
         if command_root is None:
             return 1
         try:
-            profile_ids = active_profile_ids(
-                _profile_source_root(root, requested_root, getattr(args, "worktree", None)),
-                args.profile,
+            profile_root = _profile_source_root(
+                root, requested_root, getattr(args, "worktree", None)
             )
-            commands = _profile_gate_commands(profile_ids, phase=args.phase)
+            profile_ids = active_profile_ids(profile_root, args.profile)
+            commands = _profile_gate_commands(
+                profile_ids,
+                root=profile_root,
+                phase=args.phase,
+            )
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 1
@@ -987,16 +991,18 @@ def main(argv: list[str] | None = None) -> int:
         if command_root is None:
             return 1
         try:
-            profile_ids = active_profile_ids(
-                _profile_source_root(root, requested_root, getattr(args, "worktree", None)),
-                args.profile,
+            profile_root = _profile_source_root(
+                root, requested_root, getattr(args, "worktree", None)
             )
+            profile_ids = active_profile_ids(profile_root, args.profile)
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 1
         lint_args = [
             "--root",
             str(command_root),
+            "--profile-root",
+            str(profile_root),
             "--profile",
             ",".join(profile_ids),
         ]
@@ -2119,7 +2125,12 @@ def _resolve_project_path(root: Path, value: str) -> Path:
     return resolve_project_path(root, value)
 
 
-def _profile_gate_commands(profile_ids: list[str], *, phase: str = DEFAULT_GATE_PHASE) -> list[GateCommand]:
+def _profile_gate_commands(
+    profile_ids: list[str],
+    *,
+    root: Path | None = None,
+    phase: str = DEFAULT_GATE_PHASE,
+) -> list[GateCommand]:
     commands: list[tuple[int, GateCommand]] = []
     seen: set[tuple[str, ...]] = set()
     multi_profile = len(profile_ids) > 1
@@ -2127,17 +2138,25 @@ def _profile_gate_commands(profile_ids: list[str], *, phase: str = DEFAULT_GATE_
     architecture_lint_profile = ",".join(profile_ids)
     order = 0
     for profile_id in profile_ids:
-        profile = load_profile(profile_id)
+        profile = load_profile(profile_id, root)
         for gate in profile.gates:
             if phase != GATE_PHASE_ALL and gate.phase != phase:
                 continue
-            command = _normalize_profile_gate_command(profile.profile_id, gate.gate_id, gate.command)
+            command = _normalize_profile_gate_command(
+                profile.profile_id,
+                gate.gate_id,
+                gate.command,
+                profile_root=root,
+            )
             required = gate.required
             gate_id = f"{profile.profile_id}:{gate.gate_id}" if multi_profile else gate.gate_id
             if multi_profile and _is_architecture_lint_gate(gate.gate_id, gate.command):
                 if architecture_lint_added:
                     continue
-                command = _architecture_lint_command(architecture_lint_profile)
+                command = _architecture_lint_command(
+                    architecture_lint_profile,
+                    profile_root=root,
+                )
                 gate_id = "architecture-lint"
                 required = True
                 architecture_lint_added = True
@@ -2159,19 +2178,41 @@ def _is_architecture_lint_gate(gate_id: str, command: tuple[str, ...]) -> bool:
     return gate_id == "architecture-lint" or "architecture-lint" in command
 
 
-def _normalize_profile_gate_command(profile_id: str, gate_id: str, command: tuple[str, ...]) -> tuple[str, ...]:
+def _normalize_profile_gate_command(
+    profile_id: str,
+    gate_id: str,
+    command: tuple[str, ...],
+    *,
+    profile_root: Path | None = None,
+) -> tuple[str, ...]:
     if _is_architecture_lint_gate(gate_id, command):
         profile_index = command.index("--profile") + 1 if "--profile" in command else -1
         if profile_index > 0 and profile_index < len(command):
-            return _architecture_lint_command(command[profile_index])
+            return _architecture_lint_command(
+                command[profile_index],
+                profile_root=profile_root,
+            )
     if profile_id == "python" and command:
         if command[0] in {"mypy", "pytest", "ruff"}:
             return (sys.executable, "-m", command[0], *command[1:])
     return command
 
 
-def _architecture_lint_command(profile_ids: str) -> tuple[str, ...]:
-    return (sys.executable, "-m", "agent_flow.core.architecture_lint", "--profile", profile_ids)
+def _architecture_lint_command(
+    profile_ids: str,
+    *,
+    profile_root: Path | None = None,
+) -> tuple[str, ...]:
+    command = (
+        sys.executable,
+        "-m",
+        "agent_flow.core.architecture_lint",
+        "--profile",
+        profile_ids,
+    )
+    if profile_root is None:
+        return command
+    return (*command, "--profile-root", str(profile_root))
 
 
 def _gate_order_key(gate: GateCommand) -> tuple[int, int, str]:

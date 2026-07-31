@@ -100,8 +100,8 @@ def active_profile_ids(root: Path, requested: str = "auto") -> list[str]:
     return [detect_profile(root)]
 
 
-def load_profile(profile_id: str) -> ProjectProfile:
-    payload = load_profile_payload(profile_id)
+def load_profile(profile_id: str, root: Path | None = None) -> ProjectProfile:
+    payload = load_profile_payload(profile_id, root)
     if not isinstance(payload, dict):
         raise ValueError(f"profile must be a mapping: {profile_id}")
     if payload.get("id") != profile_id:
