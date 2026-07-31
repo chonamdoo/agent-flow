@@ -151,6 +151,148 @@ def test_cleanup_uses_remote_tracking_target_when_local_branch_is_absent(
     assert fetch_head.read_text(encoding="utf-8") == "user fetch state\n"
 
 
+def test_cleanup_selects_the_remote_that_contains_the_merged_head(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    target_oid = _git("rev-parse", "main", cwd=root).stdout.strip()
+    origin = tmp_path / "origin.git"
+    upstream = tmp_path / "upstream.git"
+    for remote in (origin, upstream):
+        remote.mkdir()
+        _git("init", "--bare", cwd=remote)
+    _git("remote", "add", "origin", str(origin), cwd=root)
+    _git("remote", "add", "upstream", str(upstream), cwd=root)
+    _git("push", "origin", f"{target_oid}:refs/heads/release", cwd=root)
+    _git("push", "upstream", f"{target_oid}:refs/heads/release", cwd=root)
+    status, run_dir = _managed_run(root, "fork-target")
+    (status.path / "f.txt").write_text("merged feature\n", encoding="utf-8")
+    _git("add", "f.txt", cwd=status.path)
+    _git("commit", "-m", "feature", cwd=status.path)
+    integrated_oid = _git("rev-parse", "HEAD", cwd=status.path).stdout.strip()
+    _git(
+        "push",
+        "upstream",
+        f"{integrated_oid}:refs/heads/release",
+        cwd=status.path,
+    )
+    _git("update-ref", "refs/remotes/origin/release", target_oid, cwd=root)
+    _git("update-ref", "refs/remotes/upstream/release", target_oid, cwd=root)
+
+    journal_path, journal = W._prepare_or_load_cleanup_journal(
+        root=root,
+        checkout_path=status.path,
+        run_dir=run_dir,
+        target_branch="release",
+        integration_strategy="merge",
+        delete_branch=True,
+    )
+
+    assert journal["target"] == {
+        "ref": "refs/remotes/upstream/release",
+        "expected_oid": integrated_oid,
+    }
+    result = W.run_worktree_cleanup_transaction(
+        root=root,
+        checkout_path=status.path,
+        run_dir=run_dir,
+        target_branch="release",
+        integration_strategy="merge",
+    )
+    assert result.journal_path == journal_path
+    W.complete_worktree_cleanup(result)
+    assert not status.path.exists()
+
+
+def test_cleanup_resume_reselects_the_remote_that_later_contains_the_head(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    target_oid = _git("rev-parse", "main", cwd=root).stdout.strip()
+    origin = tmp_path / "origin.git"
+    upstream = tmp_path / "upstream.git"
+    for remote in (origin, upstream):
+        remote.mkdir()
+        _git("init", "--bare", cwd=remote)
+    _git("remote", "add", "origin", str(origin), cwd=root)
+    _git("remote", "add", "upstream", str(upstream), cwd=root)
+    _git("push", "origin", f"{target_oid}:refs/heads/release", cwd=root)
+    _git("push", "upstream", f"{target_oid}:refs/heads/release", cwd=root)
+    status, run_dir = _managed_run(root, "resume-fork-target")
+    (status.path / "f.txt").write_text("merged later\n", encoding="utf-8")
+    _git("add", "f.txt", cwd=status.path)
+    _git("commit", "-m", "feature", cwd=status.path)
+    integrated_oid = _git("rev-parse", "HEAD", cwd=status.path).stdout.strip()
+
+    with pytest.raises(W.CleanupBlockedError, match="cannot prove"):
+        W.run_worktree_cleanup_transaction(
+            root=root,
+            checkout_path=status.path,
+            run_dir=run_dir,
+            target_branch="release",
+            integration_strategy="merge",
+        )
+    pending = W.find_pending_worktree_cleanup(root=root, selector=status.name)
+    assert pending is not None
+    initial = json.loads(pending.journal_path.read_text(encoding="utf-8"))
+    assert initial["target"]["ref"] == "refs/remotes/origin/release"
+
+    _git(
+        "push",
+        "upstream",
+        f"{integrated_oid}:refs/heads/release",
+        cwd=status.path,
+    )
+    resumed = W.run_worktree_cleanup_transaction(
+        root=root,
+        checkout_path=status.path,
+        run_dir=pending.run_dir,
+        target_branch="release",
+        integration_strategy="merge",
+    )
+    journal = json.loads(resumed.journal_path.read_text(encoding="utf-8"))
+
+    assert journal["target"] == {
+        "ref": "refs/remotes/upstream/release",
+        "expected_oid": integrated_oid,
+    }
+    W.complete_worktree_cleanup(resumed)
+    assert not status.path.exists()
+
+
+def test_cleanup_rejects_a_stale_remote_target_when_refresh_fails(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _git("remote", "add", "upstream", str(tmp_path / "missing.git"), cwd=root)
+    status, run_dir = _managed_run(root, "stale-remote-target")
+    (status.path / "f.txt").write_text("only in stale ref\n", encoding="utf-8")
+    _git("add", "f.txt", cwd=status.path)
+    _git("commit", "-m", "feature", cwd=status.path)
+    integrated_oid = _git("rev-parse", "HEAD", cwd=status.path).stdout.strip()
+    _git(
+        "update-ref",
+        "refs/remotes/upstream/release",
+        integrated_oid,
+        cwd=root,
+    )
+
+    with pytest.raises(W.CleanupBlockedError, match="target or worktree branch OID"):
+        W.run_worktree_cleanup_transaction(
+            root=root,
+            checkout_path=status.path,
+            run_dir=run_dir,
+            target_branch="release",
+            integration_strategy="merge",
+        )
+
+    assert status.path.exists()
+    assert W.worktree_branch_exists(root=root, branch=status.branch)
+
+
 def test_run_lifecycle_lease_is_shared_and_recovers_after_owner_crash(
     tmp_path: Path,
 ) -> None:

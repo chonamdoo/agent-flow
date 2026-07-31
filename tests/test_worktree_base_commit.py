@@ -20,6 +20,9 @@ SRC = str(Path(__file__).resolve().parents[1] / "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
+from agent_flow.core import worktrees as worktrees_module
+from agent_flow.core.commands import SafeCommandResult
+from agent_flow.core.worktree_isolation import WorktreeIsolationError
 from agent_flow.core.worktrees import (
     create_worktree,
     plan_worktree,
@@ -184,18 +187,17 @@ def test_unknown_profile_fallback_uses_the_generic_base_override(
     assert _manifest(root, "feat-feat")["base_oid"] == develop_tip
 
 
-def test_missing_declared_base_falls_back_to_the_name_list(tmp_path: Path):
-    """불변: 선언한 브랜치가 이 저장소에 없으면 worktree 생성이 죽지 않는다."""
+def test_missing_declared_base_is_rejected(tmp_path: Path):
     root = tmp_path / "repo"
     root.mkdir()
     _init_repo(root)
-    main_tip = _git("rev-parse", "main", cwd=root)
-    # develop이 없는 저장소에 develop을 선언한다.
     _declare_profile(root, "spring")
 
-    status = create_worktree(root=root, plan=plan_worktree(root=root, name="feat"))
-
-    assert _git("rev-parse", "HEAD", cwd=status.path) == main_tip
+    with pytest.raises(
+        WorktreeIsolationError,
+        match="profile base branch is unavailable: develop",
+    ):
+        plan_worktree(root=root, name="feat")
 
 
 def test_custom_installed_profile_declared_base_wins_over_main(tmp_path: Path):
@@ -264,3 +266,97 @@ def test_profile_base_ignores_same_named_tag_when_only_remote_branch_exists(
     assert tag_tip != release_tip
     assert _git("rev-parse", "HEAD", cwd=status.path) == release_tip
     assert _manifest(root, "feat-feat")["base_ref"] == "refs/remotes/upstream/release"
+
+
+def test_profile_base_fetches_a_missing_remote_tracking_ref(tmp_path: Path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _init_repo(root)
+    remote = tmp_path / "remote.git"
+    remote.mkdir()
+    _git("init", "--bare", cwd=remote)
+    _git("remote", "add", "upstream", str(remote), cwd=root)
+    _git("checkout", "-b", "release", cwd=root)
+    (root / "f.txt").write_text("remote release\n", encoding="utf-8")
+    _git("add", ".", cwd=root)
+    _git("commit", "-m", "release ahead", cwd=root)
+    release_tip = _git("rev-parse", "HEAD", cwd=root)
+    _git("push", "upstream", "release:refs/heads/release", cwd=root)
+    _git("checkout", "main", cwd=root)
+    _git("branch", "-D", "release", cwd=root)
+    _git("update-ref", "-d", "refs/remotes/upstream/release", cwd=root)
+    _declare_profile(root, "my-stack")
+    profiles = root / ".agent-flow" / "profiles"
+    profiles.mkdir(parents=True)
+    (profiles / "my-stack.yaml").write_text(
+        "id: my-stack\n"
+        "branching:\n"
+        "  base: release\n"
+        "  integration: release\n"
+        "pr:\n"
+        "  target_branch: release\n"
+        "  merge_strategy: merge\n",
+        encoding="utf-8",
+    )
+
+    status = create_worktree(root=root, plan=plan_worktree(root=root, name="feat"))
+
+    assert _git("rev-parse", "HEAD", cwd=status.path) == release_tip
+    assert _manifest(root, "feat-feat")["base_ref"] == "refs/remotes/upstream/release"
+
+
+def test_profile_base_fetch_retries_remote_ref_lock_contention(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    _init_repo(root)
+    remote = tmp_path / "remote.git"
+    remote.mkdir()
+    _git("init", "--bare", cwd=remote)
+    _git("remote", "add", "upstream", str(remote), cwd=root)
+    _git("checkout", "-b", "release", cwd=root)
+    (root / "f.txt").write_text("remote release\n", encoding="utf-8")
+    _git("add", ".", cwd=root)
+    _git("commit", "-m", "release ahead", cwd=root)
+    release_tip = _git("rev-parse", "HEAD", cwd=root)
+    _git("push", "upstream", "release:refs/heads/release", cwd=root)
+    _git("checkout", "main", cwd=root)
+    _git("branch", "-D", "release", cwd=root)
+    _git("update-ref", "-d", "refs/remotes/upstream/release", cwd=root)
+    _declare_profile(root, "my-stack")
+    profiles = root / ".agent-flow" / "profiles"
+    profiles.mkdir(parents=True)
+    (profiles / "my-stack.yaml").write_text(
+        "id: my-stack\n"
+        "branching:\n"
+        "  base: release\n"
+        "  integration: release\n"
+        "pr:\n"
+        "  target_branch: release\n"
+        "  merge_strategy: merge\n",
+        encoding="utf-8",
+    )
+    real_git_safe = worktrees_module.git_safe
+    fetch_attempts = 0
+
+    def contend_once(*args, **kwargs):
+        nonlocal fetch_attempts
+        if args and args[0] == "fetch":
+            fetch_attempts += 1
+            if fetch_attempts == 1:
+                return SafeCommandResult(
+                    args=tuple(args),
+                    returncode=128,
+                    stdout="",
+                    stderr="fatal: cannot lock ref 'refs/remotes/upstream/release'",
+                )
+        return real_git_safe(*args, **kwargs)
+
+    monkeypatch.setattr(worktrees_module, "git_safe", contend_once)
+
+    status = create_worktree(root=root, plan=plan_worktree(root=root, name="feat"))
+
+    assert fetch_attempts == 2
+    assert _git("rev-parse", "HEAD", cwd=status.path) == release_tip

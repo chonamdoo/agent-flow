@@ -5,28 +5,28 @@ import json
 import os
 import re
 import secrets
-import stat
 import shutil
+import stat
 import subprocess
-import tempfile
 import sys
+import tempfile
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, Sequence
+from typing import Any
 
 from agent_flow.artifact import ACTIVE_MARKER, find_active_runs, read_meta, write_meta
-from agent_flow.core.commands import run_safe_command
-from agent_flow.core.security import validate_git_branch
 from agent_flow.core.hook_integrity import (
     JSON_REGISTRATION_FILES,
     OMP_REGISTRATION_FILE,
     managed_path_hook_name,
 )
+from agent_flow.core.security import validate_git_branch
 from agent_flow.core.worktree_isolation import (
-    RegisteredWorktree,
     FileLeaseUnavailable,
+    RegisteredWorktree,
     WorktreeIsolationError,
     adopted_worktree_parent,
     assert_worktree_mergeable,
@@ -34,6 +34,7 @@ from agent_flow.core.worktree_isolation import (
     forget_adopted_checkout,
     git_repo_state,
     git_safe,
+    is_git_lock_contention,
     list_registered_worktrees,
     real_path,
     record_adopted_checkout,
@@ -45,7 +46,6 @@ from agent_flow.core.worktree_isolation import (
     worktree_creation_lock,
     worktree_path_key,
 )
-
 
 PROTECTED_WORKTREE_BRANCHES = {"main", "master", "develop"}
 GIT_WORKTREE_TIMEOUT_S = 300
@@ -268,7 +268,7 @@ def _create_worktree(
                 require_merged=False,
                 allow_unmerged=False,
             )
-        except Exception as cleanup_exc:
+        except Exception as cleanup_exc:  # noqa: BLE001
             # 롤백까지 실패하면 등록된 worktree가 manifest 없이 남는다. 원본
             # 예외를 가리지 않도록 경고로 표면화한다.
             print(
@@ -374,7 +374,7 @@ def attach_worktree(
     # 주장하지 않으므로 terminal cleanup은 checkout만 제거하고 branch는 보존한다.
     with worktree_creation_lock(root):
         current = _registered_at_path(root=root, path=registered.path)
-        if not _same_registration(registered, current):
+        if current is None or not _same_registration(registered, current):
             raise ValueError(
                 f"worktree registration changed while attaching {registered.path}; "
                 "re-run the command"
@@ -891,6 +891,12 @@ def _prepare_or_load_cleanup_journal(
             journal=journal,
             checkout_path=checkout_path,
         )
+        _refresh_cleanup_target_for_resume(
+            root=root,
+            journal_path=journal_path,
+            journal=journal,
+            target_branch=target_branch,
+        )
         return journal_path, journal
 
     registered = _registered_at_path(root=root, path=checkout_path)
@@ -929,27 +935,37 @@ def _prepare_or_load_cleanup_journal(
     validate_git_branch(target_branch)
     if target_branch == status.branch:
         raise CleanupBlockedError("cleanup target branch cannot be the worktree branch")
-    target_ref = ""
-    target_oid = None
+    branch_oid = _ref_oid(root=root, ref=f"refs/heads/{status.branch}")
+    target_candidates: list[tuple[str, str]] = []
     for candidate in _branch_ref_candidates(root=root, branch=target_branch):
-        candidate_oid = _ref_oid(root=root, ref=candidate)
-        if candidate_oid is None:
+        try:
+            _refresh_remote_branch_ref(
+                root=root,
+                ref=candidate,
+                branch=target_branch,
+            )
+        except CleanupBlockedError:
             continue
-        _refresh_remote_branch_ref(
-            root=root,
-            ref=candidate,
-            branch=target_branch,
-        )
         candidate_oid = _ref_oid(root=root, ref=candidate)
         if candidate_oid is not None:
-            target_ref = candidate
-            target_oid = candidate_oid
-            break
-    branch_oid = _ref_oid(root=root, ref=f"refs/heads/{status.branch}")
-    if target_oid is None or branch_oid is None:
+            target_candidates.append((candidate, candidate_oid))
+    if branch_oid is None or not target_candidates:
         raise CleanupBlockedError(
             "target or worktree branch OID is unknown; preserving checkout"
         )
+    target_ref, target_oid = next(
+        (
+            candidate
+            for candidate in target_candidates
+            if _integration_method(
+                root=root,
+                head_oid=branch_oid,
+                target_oid=candidate[1],
+            )
+            is not None
+        ),
+        target_candidates[0],
+    )
     if registered.head != branch_oid:
         raise CleanupBlockedError(
             "worktree registration and branch ref disagree; preserving checkout"
@@ -966,9 +982,7 @@ def _prepare_or_load_cleanup_journal(
         )
 
     digest = hashlib.sha256(
-        f"{worktree_path_key(_git_common_dir(root))}\0{worktree_path_key(status.path)}".encode(
-            "utf-8"
-        )
+        f"{worktree_path_key(_git_common_dir(root))}\0{worktree_path_key(status.path)}".encode()
     ).hexdigest()[:16]
     archive_state = (
         _agent_flow_state_dir(root)
@@ -1379,6 +1393,51 @@ def _assert_cleanup_owner_active(
         )
 
 
+def _refresh_cleanup_target_for_resume(
+    *,
+    root: Path,
+    journal_path: Path,
+    journal: dict[str, Any],
+    target_branch: str,
+) -> None:
+    if journal["steps"]["integration_proof"]["status"] != "pending":
+        return
+    head_oid = journal["checkout"]["expected_head_oid"]
+    for candidate in _branch_ref_candidates(root=root, branch=target_branch):
+        try:
+            _refresh_remote_branch_ref(
+                root=root,
+                ref=candidate,
+                branch=target_branch,
+            )
+        except CleanupBlockedError:
+            continue
+        candidate_oid = _ref_oid(root=root, ref=candidate)
+        if candidate_oid is None or not (
+            _is_ancestor(root=root, ancestor=head_oid, descendant=candidate_oid)
+            or _merge_tree_is_noop(
+                root=root,
+                head_oid=head_oid,
+                target_oid=candidate_oid,
+            )
+        ):
+            continue
+        if (
+            journal["target"]["ref"] == candidate
+            and journal["target"]["expected_oid"] == candidate_oid
+        ):
+            return
+        journal["target"] = {
+            "ref": candidate,
+            "expected_oid": candidate_oid,
+        }
+        journal["integration"]["proof"] = "pending"
+        journal["integration"]["method"] = None
+        journal["updated_at"] = _utc_now()
+        _write_cleanup_journal(journal_path, journal)
+        return
+
+
 def _record_integration_proof(
     *, root: Path, journal: dict[str, Any], target_branch: str
 ) -> None:
@@ -1425,11 +1484,8 @@ def _prove_recorded_integration(
         raise CleanupBlockedError(
             "recorded base is not an ancestor of recorded head; proof is unknown"
         )
-    if _is_ancestor(root=root, ancestor=head_oid, descendant=target_oid):
-        method = "head-ancestor-of-target"
-    elif _merge_tree_is_noop(root=root, head_oid=head_oid, target_oid=target_oid):
-        method = "merge-tree-noop"
-    else:
+    method = _integration_method(root=root, head_oid=head_oid, target_oid=target_oid)
+    if method is None:
         raise CleanupBlockedError(
             "cannot prove recorded head is integrated into recorded target; "
             "preserving checkout and branch"
@@ -1437,6 +1493,14 @@ def _prove_recorded_integration(
     journal["integration"]["proof"] = "verified"
     journal["integration"]["method"] = method
     journal["integration"]["verified_at"] = _utc_now()
+
+
+def _integration_method(*, root: Path, head_oid: str, target_oid: str) -> str | None:
+    if _is_ancestor(root=root, ancestor=head_oid, descendant=target_oid):
+        return "head-ancestor-of-target"
+    if _merge_tree_is_noop(root=root, head_oid=head_oid, target_oid=target_oid):
+        return "merge-tree-noop"
+    return None
 
 
 def _validate_cleanup_snapshot(
@@ -1462,7 +1526,7 @@ def _validate_cleanup_snapshot(
             "worktree branch ref changed since cleanup preparation; preserving checkout"
         )
     target_oid = _ref_oid(root=root, ref=journal["target"]["ref"])
-    if target_oid != journal["target"]["expected_oid"]:
+    if target_oid is None or target_oid != journal["target"]["expected_oid"]:
         raise CleanupBlockedError(
             "integration target drifted since cleanup preparation; preserving checkout"
         )
@@ -2258,12 +2322,12 @@ def _branch_ref_candidates(*, root: Path, branch: str) -> Iterator[str]:
         yield f"refs/remotes/{remote}/{branch}"
 
 
-def _refresh_remote_branch_ref(*, root: Path, ref: str, branch: str) -> None:
-    if ref == f"refs/heads/{branch}":
-        return
-    for remote in _configured_remote_names(root):
-        if ref != f"refs/remotes/{remote}/{branch}":
-            continue
+def _fetch_remote_branch_ref(
+    *, root: Path, remote: str, branch: str, ref: str
+) -> bool:
+    ref_existed = _git_commit_ref_exists(root=root, ref=ref)
+
+    def fetch() -> bool:
         result = git_safe(
             "fetch",
             "--no-tags",
@@ -2272,8 +2336,40 @@ def _refresh_remote_branch_ref(*, root: Path, ref: str, branch: str) -> None:
             remote,
             f"+refs/heads/{branch}:{ref}",
             cwd=root,
+            timeout_s=GIT_WORKTREE_TIMEOUT_S,
+            optional_locks=False,
         )
-        if not result.ok:
+        if result.ok:
+            return True
+        detail = f"{result.stderr}\n{result.stdout}"
+        if is_git_lock_contention(detail):
+            if not ref_existed and _git_commit_ref_exists(root=root, ref=ref):
+                return True
+            raise WorktreeIsolationError(detail.strip())
+        return False
+
+    try:
+        return with_git_lock_retry(
+            fetch,
+            is_retryable=lambda exc: isinstance(exc, WorktreeIsolationError)
+            and is_git_lock_contention(str(exc)),
+        )
+    except WorktreeIsolationError:
+        return not ref_existed and _git_commit_ref_exists(root=root, ref=ref)
+
+
+def _refresh_remote_branch_ref(*, root: Path, ref: str, branch: str) -> None:
+    if ref == f"refs/heads/{branch}":
+        return
+    for remote in _configured_remote_names(root):
+        if ref != f"refs/remotes/{remote}/{branch}":
+            continue
+        if not _fetch_remote_branch_ref(
+            root=root,
+            remote=remote,
+            branch=branch,
+            ref=ref,
+        ):
             raise CleanupBlockedError(
                 f"cannot refresh cleanup target from remote {remote};"
                 " preserving checkout"
@@ -2319,7 +2415,7 @@ def _profile_base_ref(root: Path) -> str:
             )
             for profile_id in profile_ids
         ]
-    except Exception:
+    except Exception:  # noqa: BLE001
         # profile을 못 읽는 것은 worktree를 못 만들 이유가 아니다. 이름 목록으로 내려간다.
         return ""
     for payload in payloads:
@@ -2330,12 +2426,25 @@ def _profile_base_ref(root: Path) -> str:
         if not isinstance(declared, str):
             continue
         declared = declared.strip()
-        # `-`로 시작하는 값은 git argv에서 옵션으로 읽힌다. ref로 취급하지 않는다.
         if not declared or declared.startswith("-") or declared.split() != [declared]:
             continue
-        for ref in _branch_ref_candidates(root=root, branch=declared):
+        local_ref = f"refs/heads/{declared}"
+        if _git_commit_ref_exists(root=root, ref=local_ref):
+            return local_ref
+        for remote in _configured_remote_names(root):
+            ref = f"refs/remotes/{remote}/{declared}"
             if _git_commit_ref_exists(root=root, ref=ref):
                 return ref
+            if _fetch_remote_branch_ref(
+                root=root,
+                remote=remote,
+                branch=declared,
+                ref=ref,
+            ) and _git_commit_ref_exists(root=root, ref=ref):
+                return ref
+        raise WorktreeIsolationError(
+            f"profile base branch is unavailable: {declared}"
+        )
     return ""
 
 
