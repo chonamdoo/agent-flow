@@ -2029,3 +2029,15 @@ def test_a_corrupt_asset_record_does_not_trigger_a_bulk_overwrite(tmp_path: Path
     assert edited.read_text(encoding="utf-8") == "# 우리 규칙\n"
     assert not (project / ".agent-flow" / "backups").exists()
     assert "kit asset sync skipped" in result.stderr
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_install_banner_names_the_root_it_wrote_to(tmp_path: Path, binary: str) -> None:
+    """어디에 깔렸는지 안 보이면 잘못된 checkout에 깔린 것을 알 방법이 없다."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    result = _install_with(binary, project)
+    assert result.returncode == 0, result.stderr
+    assert str(project.resolve()) in result.stdout
+    # `.agent-flow` 디렉토리가 아니라 프로젝트 루트다 - 두 진입점이 같은 것을 낸다.
+    assert f"{project.resolve()}/.agent-flow\n" not in result.stdout

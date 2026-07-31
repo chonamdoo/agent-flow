@@ -1311,7 +1311,10 @@ function install() {
 
   console.log(`agent-flow installed`);
   console.log(`  profile : ${profile}`);
-  console.log(`  root    : ${AF_DIR}`);
+  // 두 진입점이 같은 `root` 라벨로 다른 것을 냈다 - 여기는 `.agent-flow` 디렉토리,
+  // kit은 프로젝트 루트. 확인하고 싶은 것은 "leader에 깔렸나 worktree에 깔렸나"라
+  // 프로젝트 루트 쪽으로 맞춘다.
+  console.log(`  root    : ${PROJECT}`);
   console.log(`  skills  : ${skillsCopied.written} written, ${skillsCopied.skipped} skipped`);
   console.log(`  workflows: ${workflowsCopied.written} written, ${workflowsCopied.skipped} skipped`);
   console.log(`  profiles : ${profilesCopied.written} written, ${profilesCopied.pruned} pruned`);

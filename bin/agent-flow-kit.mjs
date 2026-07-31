@@ -392,7 +392,10 @@ function installProject(requestedRoot) {
 
   fs.writeFileSync(path.join(agentFlowDir, "kit.json"), `${JSON.stringify(payload, null, 2)}\n`, "utf8");
   syncSkillSources(root);
-  console.log(`agent-flow installed profile=${profile}`);
+  // root를 같이 낸다. `--root`를 줬든 cwd에서 유도했든, 어디에 설치됐는지 보이지
+  // 않으면 잘못된 checkout에 깔린 것을 알 방법이 없다 - 실제로 leader 대신
+  // worktree에 깔린 것을 한참 뒤에야 알아챘다.
+  console.log(`agent-flow installed profile=${profile} root=${root}`);
 }
 
 // 설치 시점에 1회만 돈다. 런타임에는 절대 호출하지 않는다 — 사용자에게 매번 물어보지 않기 위한 지점이다.

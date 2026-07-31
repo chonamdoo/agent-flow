@@ -1439,7 +1439,10 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout.strip(), "agent-flow installed profile=generic")
+            self.assertEqual(
+                result.stdout.strip(),
+                f"agent-flow installed profile=generic root={project_root.resolve()}",
+            )
             kit = json.loads((project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
             self.assertEqual(kit["profile"], "generic")
             self.assertEqual(kit["install_scope"], "project")
@@ -2381,7 +2384,10 @@ class CliTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout.strip(), "agent-flow installed profile=generic")
+            self.assertEqual(
+                result.stdout.strip(),
+                f"agent-flow installed profile=generic root={project_root.resolve()}",
+            )
             self.assertTrue((project_root / ".agent-flow" / "kit.json").is_file())
 
     def test_node_installer_skips_managed_worktree_reinstall(self) -> None:
@@ -3832,7 +3838,10 @@ if (codexContext !== undefined) {
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout.strip(), "agent-flow installed profile=node")
+            self.assertEqual(
+                result.stdout.strip(),
+                f"agent-flow installed profile=node root={project_root.resolve()}",
+            )
             kit = json.loads((project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
             self.assertEqual(kit["profile"], "node")
 
