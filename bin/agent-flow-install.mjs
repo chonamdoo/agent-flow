@@ -120,10 +120,22 @@ function requestedProject() {
   }
 }
 
+// `resolveInstallRoot`는 git이 대답을 못 주면 throw한다. 이 상수는 모듈 평가 중에
+// 계산되므로 파일 끝 dispatch의 try/catch가 받지 못한다 - 감싸지 않으면 모든 명령이
+// 생 Node 스택 트레이스로 죽는다(`--help`까지).
+function installRoot(requested) {
+  try {
+    return resolveInstallRoot(requested);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+}
+
 // `--root`는 install만 받는다. 커맨드 디스패치보다 먼저 도는 자리라, 여기서
 // 무조건 해석하면 `bogus --root /nope`가 `Unknown command`가 아니라 root 오류로 죽는다.
 const REQUESTED_PROJECT = process.argv[2] === "install" ? requestedProject() : process.cwd();
-const PROJECT = resolveInstallRoot(REQUESTED_PROJECT);
+const PROJECT = installRoot(REQUESTED_PROJECT);
 const AF_DIR = path.join(PROJECT, ".agent-flow");
 
 const PROJECT_SKILL_HOSTS = Object.freeze(["claude", "codex", "omp"]);

@@ -639,7 +639,7 @@ _TERM_PATTERNS: dict[str, re.Pattern[str]] = {}
 
 
 def term_in(term: str, text: str) -> bool:
-    """단어 경계로 본다.
+    r"""단어 경계로 본다.
 
     부분문자열로 보면 `uistate`가 `GUIStateMachine`에, `chart`가 `charting`에 걸려
     무관한 task가 skill을 required로 올린다.

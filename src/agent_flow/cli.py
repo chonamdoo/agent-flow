@@ -2861,7 +2861,7 @@ def _unadopted_next_step(*, root: Path, checkout: Path) -> str:
     return adopt
 
 
-def _managed_worktree_context(path: Path) -> tuple[Path, str] | None:
+def _managed_worktree_context(path: Path) -> tuple[Path, str | None] | None:
     resolved = path.resolve()
     parts = resolved.parts
     markers = {".agent-flow", ".codex", ".Codex", ".omp"}
@@ -2871,7 +2871,9 @@ def _managed_worktree_context(path: Path) -> tuple[Path, str] | None:
         root = Path(*parts[:index])
         if parts[index] in {".codex", ".Codex", ".omp"} and _same_path(root, _home_path()):
             continue
-        return root, parts[index + 2]
+        # `<marker>/worktrees`로 끝나는 경로에는 이름이 없다. 무가드로 읽으면 그
+        # 자리에서 IndexError로 죽는다. JS 쌍둥이도 여기서 null을 낸다.
+        return root, parts[index + 2] if index + 2 < len(parts) else None
     return None
 
 

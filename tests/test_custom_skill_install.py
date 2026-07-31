@@ -2041,3 +2041,26 @@ def test_install_banner_names_the_root_it_wrote_to(tmp_path: Path, binary: str) 
     assert str(project.resolve()) in result.stdout
     # `.agent-flow` 디렉토리가 아니라 프로젝트 루트다 - 두 진입점이 같은 것을 낸다.
     assert f"{project.resolve()}/.agent-flow\n" not in result.stdout
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_the_worktrees_container_is_not_an_install_target(tmp_path: Path, binary: str) -> None:
+    """`<marker>/worktrees`는 형제 checkout을 담는 자리다. 설치본이 생기면 안 된다."""
+    container = tmp_path / "proj" / ".agent-flow" / "worktrees"
+    container.mkdir(parents=True)
+    result = _install_with(binary, container)
+    assert result.returncode == 1, result.stdout
+    assert not (container / ".agent-flow").exists()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_an_unusable_git_reports_one_line_not_a_stack_trace(tmp_path: Path, binary: str) -> None:
+    """`PROJECT`는 모듈 상수라 dispatch의 try/catch가 받지 못한다."""
+    fake_bin = tmp_path / "bin"
+    (fake_bin / "git").mkdir(parents=True)  # spawn이 EACCES를 낸다
+    project = tmp_path / "proj"
+    project.mkdir()
+    result = _install_with(binary, project, env={**os.environ, "PATH": str(fake_bin)})
+    assert result.returncode == 1
+    assert "git rev-parse" in result.stderr
+    assert "at " not in result.stderr, result.stderr
