@@ -521,3 +521,46 @@ def test_a_string_inside_an_interpolation_is_not_the_end_of_the_outer_string():
     # 그래도 못 닫힌 보간은 파일을 열어두지 않는다.
     assert _forbidden(IOS_DOMAIN_ROLE, "Chat.swift", 'let T = "\\("\n// Dto 메모\n') == []
     assert _forbidden(PY_DOMAIN_ROLE, "chat.py", 'x = f"{"\n# Dto 메모\n') == []
+
+
+def test_jsx_body_contractions_are_not_string_starts():
+    """`it's`의 아포스트로피를 문자열 시작으로 보면 그 줄 나머지가 뒤집힌다."""
+    assert _forbidden(WEB_DOMAIN_ROLE, "Chat.tsx", "<p>it's {t('@media screen')}</p>\n") == []
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "Chat.tsx", "<p>don't</p>{renderScreen()}\n")) == 1
+    # 키워드 뒤는 예외다. minified JS가 `case"x"`, `return'x'` 모양으로 나온다.
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.jsx", "switch(x){case'screen':break}\n") == []
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.jsx", "return'screen'\n") == []
+
+
+def test_regex_literals_do_not_open_strings():
+    """정규식 본문의 따옴표가 문자열을 열면 그 줄 나머지가 지워진다."""
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", "s.replace(/'/g, '') + OrderDto.x\n")) == 1
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.tsx", ".replace(/`([^`]+)`/g, '$1').map(OrderDto)\n")) == 1
+    # 패턴 본문은 데이터다. 나눗셈은 정규식이 아니다.
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const r = /Dto/.test(x)\n") == []
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const q = a / b; const w = c / d;\n") == []
+
+
+def test_js_line_continuation_does_not_flip_quote_parity():
+    """줄 끝 백슬래시는 JS에서 합법이다. 끊으면 닫는 따옴표가 여는 따옴표가 된다."""
+    source = 'const s = "@media \\\nscreen";\nconst u = "Dto";\n'
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", source) == []
+    # 다른 언어에서는 여전히 짝 없는 따옴표로 본다.
+    assert len(_forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", 'val s = "x\\\nval b = Dto\n')) == 1
+
+
+def test_only_real_schemes_keep_a_double_slash_as_code():
+    """`case KIND://`의 라벨까지 스킴으로 보면 주석이 코드로 남는다."""
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", "switch(k){case KIND://screen 메모\n}\n") == []
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const o = { key://screen 메모\n}\n") == []
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "Chat.tsx", "<a>https://x {Dto.n}</a>\n")) == 1
+
+
+def test_non_code_inside_an_interpolation_is_still_not_code():
+    """보간식을 건너뛰기만 하면 그 안의 문자열·주석이 코드로 남는다."""
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", 'const s = `${theme("@media screen")}`\n') == []
+    assert _forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", 'val s = "${fmt("@media dto")}"\n') == []
+    assert _forbidden(IOS_DOMAIN_ROLE, "Chat.swift", 'let s = "\\(f("@media view"))"\n') == []
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const s = `${x /* screen */}`\n") == []
+    # 보간식 자체는 그대로 코드다.
+    assert len(_forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", 'val s = "${orderDto.format("x")}"\n')) == 1
