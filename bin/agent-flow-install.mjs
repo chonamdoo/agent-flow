@@ -32,6 +32,7 @@ import {
   ensureChildPath,
   escapeRegex,
   fullFeatureSkillMarkdown,
+  gitOutput,
   hasChildWithSuffix,
   HOME,
   hookScriptCommand,
@@ -72,8 +73,12 @@ import {
   removeOmpHooksExtension,
   reportSkippedUserEdit,
   requestedInstallRootOption,
+  resolveManagedWorktreeRoot,
+  resolveLinkedWorktreeLeader,
+  resolveInstallRoot,
   retiredHookScripts,
   safeSkillName,
+  samePath,
   shellQuote,
   SKILL_INDEX_END,
   SKILL_INDEX_START,
@@ -107,17 +112,6 @@ let hooksDisabled = HOOKS_FLAG_OFF;
 // `rev-parse --git-common-dir`이 decoy를 반환하고, 그 부모가 install PROJECT가 됐다.
 // PROJECT 계산이 모듈 최상단에서 곧바로 git을 부르므로, 이 상수는 그보다 위에
 // 있어야 한다(아래에 두면 TDZ로 로드 자체가 죽는다).
-const LEAKY_GIT_ENV_VARS = [
-  "GIT_DIR",
-  "GIT_WORK_TREE",
-  "GIT_COMMON_DIR",
-  "GIT_INDEX_FILE",
-  "GIT_OBJECT_DIRECTORY",
-  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-  "GIT_NAMESPACE",
-  "GIT_PREFIX",
-  "GIT_CEILING_DIRECTORIES",
-];
 
 // `--root` 오류는 메시지 한 줄로 끝낸다. 모듈 최상단에서 그냥 throw하면 사용자가
 // 오타 하나에 스택 트레이스를 받는다.
@@ -127,7 +121,7 @@ function requestedProject() {
     if (requested === undefined) {
       return process.cwd();
     }
-    assertInstallRootIsFinal(requested, resolveInstallProject(requested));
+    assertInstallRootIsFinal(requested, resolveInstallRoot(requested));
     return requested;
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
@@ -138,7 +132,7 @@ function requestedProject() {
 // `--root`는 install만 받는다. 커맨드 디스패치보다 먼저 도는 자리라, 여기서
 // 무조건 해석하면 `bogus --root /nope`가 `Unknown command`가 아니라 root 오류로 죽는다.
 const REQUESTED_PROJECT = process.argv[2] === "install" ? requestedProject() : process.cwd();
-const PROJECT = resolveInstallProject(REQUESTED_PROJECT);
+const PROJECT = resolveInstallRoot(REQUESTED_PROJECT);
 const AF_DIR = path.join(PROJECT, ".agent-flow");
 
 const PROJECT_SKILL_HOSTS = Object.freeze(["claude", "codex", "omp"]);
@@ -168,95 +162,16 @@ function ensureDir(p) {
   fs.mkdirSync(p, { recursive: true });
 }
 
-function resolveManagedWorktreeRoot(start) {
-  const parts = path.resolve(start).split(path.sep);
-  const markers = new Set([".agent-flow", ".codex", ".Codex", ".omp"]);
-  for (let index = parts.length - 2; index >= 0; index -= 1) {
-    if (parts[index + 1] !== "worktrees") continue;
-    if (!markers.has(parts[index])) continue;
-    const root = parts.slice(0, index).join(path.sep) || path.sep;
-    if (HOME && samePath(root, HOME) && (parts[index] === ".codex" || parts[index] === ".Codex" || parts[index] === ".omp")) {
-      continue;
-    }
-    return root;
-  }
-  return null;
-}
 
-function resolveInstallProject(start) {
-  const managedRoot = resolveManagedWorktreeRoot(start);
-  if (managedRoot) return managedRoot;
-  const gitCommonRoot = resolveGitCommonWorktreeRoot(start);
-  if (gitCommonRoot) return gitCommonRoot;
-  // `agent-flow-kit.mjs`의 `resolveInstallRoot`와 같은 폴백이다. 여기만 빠지면
-  // `--root <proj>/.agent-flow`가 kit에서는 rc 1로 막히고 여기서는 rc 0으로
-  // `<proj>/.agent-flow/.agent-flow`를 만든다 — 두 진입점의 rc가 갈린다.
-  const parts = start.split(path.sep);
-  const markerIndex = parts.lastIndexOf(".agent-flow");
-  if (markerIndex !== -1) {
-    return parts.slice(0, markerIndex).join(path.sep) || path.sep;
-  }
-  return start;
-}
 
-function resolveGitCommonWorktreeRoot(start) {
-  const topLevel = gitOutput(start, ["rev-parse", "--show-toplevel"]);
-  const commonDir = gitOutput(start, ["rev-parse", "--git-common-dir"]);
-  if (!topLevel || !commonDir) {
-    return null;
-  }
-  // `git rev-parse --git-common-dir`은 **cwd 기준** 상대경로("../.git" 등)를 낸다.
-  // topLevel 기준으로 풀면 cwd가 하위 디렉토리일 때 한 단계씩 어긋난 경로가 나온다.
-  // `bin/agent-flow-kit.mjs`의 같은 함수도 start 기준이라 그쪽과 맞췄다.
-  const resolvedCommonDir = path.resolve(start, commonDir);
-  if (path.basename(resolvedCommonDir) !== ".git") {
-    return null;
-  }
-  return path.dirname(resolvedCommonDir);
-}
 
 // linked worktree 판정. leader를 cwd와 직접 비교하면 `<leader>/src`처럼 leader의
 // 하위 디렉토리에서 install하는 정상 경로까지 막힌다 - 그래서 이 checkout의
 // toplevel과 견준다. linked worktree에서만 toplevel(worktree root)과
 // leader(git common dir의 부모)가 갈라진다.
-function resolveLinkedWorktreeLeader(start) {
-  const topLevel = gitOutput(start, ["rev-parse", "--show-toplevel"]);
-  const leader = resolveGitCommonWorktreeRoot(start);
-  if (!topLevel || !leader || samePath(leader, topLevel)) {
-    return null;
-  }
-  return leader;
-}
 
-function gitEnv() {
-  const env = { ...process.env };
-  for (const name of LEAKY_GIT_ENV_VARS) {
-    delete env[name];
-  }
-  return env;
-}
 
-function gitOutput(cwd, args) {
-  const result = spawnSync("git", args, {
-    cwd,
-    env: gitEnv(),
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"],
-  });
-  if (result.error || result.status !== 0) {
-    return null;
-  }
-  const output = result.stdout.trim();
-  return output || null;
-}
 
-function samePath(left, right) {
-  try {
-    return fs.realpathSync.native(left) === fs.realpathSync.native(right);
-  } catch {
-    return path.resolve(left) === path.resolve(right);
-  }
-}
 
 
 // 설치된 skill 목록을 AGENTS.md 안에 직접 심는다.

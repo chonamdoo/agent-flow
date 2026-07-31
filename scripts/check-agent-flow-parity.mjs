@@ -859,7 +859,7 @@ function assertPythonContract(label, code) {
 function assertLeakyGitEnvParity() {
   const declarations = [
     ["src/agent_flow/core/worktree_isolation.py", "LEAKY_GIT_ENV_VARS"],
-    ["bin/agent-flow-install.mjs", "LEAKY_GIT_ENV_VARS"],
+    ["lib/installer-shared.mjs", "LEAKY_GIT_ENV_VARS"],
     ["bin/agent-flow-kit.mjs", "GIT_DISCOVERY_ENV"],
     ["scripts/check-agent-flow-parity.mjs", "LEAKY_GIT_ENV_VARS"],
     ["lib/omp-hooks-extension.mjs", "GIT_DISCOVERY_ENV"],
