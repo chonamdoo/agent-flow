@@ -210,23 +210,26 @@ def apply_project_profile_override(
             merged[key] = _deep_merge(payload.get(key), override[key])
     branching = merged.get("branching")
     pr = merged.get("pr")
-    if not isinstance(branching, dict) or not isinstance(pr, dict):
-        raise ValueError(
-            "profile override must keep branching.integration and "
-            f"pr.target_branch equal non-empty strings: {path}"
-        )
-    integration = branching.get("integration")
-    target = pr.get("target_branch")
+    base = branching.get("base") if isinstance(branching, dict) else None
+    integration = branching.get("integration") if isinstance(branching, dict) else None
+    target = pr.get("target_branch") if isinstance(pr, dict) else None
+    strategy = pr.get("merge_strategy") if isinstance(pr, dict) else None
     if (
-        not isinstance(integration, str)
+        not isinstance(base, str)
+        or not base.strip()
+        or not isinstance(integration, str)
         or not integration.strip()
         or not isinstance(target, str)
         or not target.strip()
         or integration != target
+        or not isinstance(strategy, str)
+        or strategy not in {"merge", "squash", "rebase"}
     ):
         raise ValueError(
-            "profile override must keep branching.integration and "
-            f"pr.target_branch equal non-empty strings: {path}"
+            "invalid profile override branch contract: branching.base and "
+            "branching.integration must be non-empty strings; pr.target_branch "
+            "must equal branching.integration; pr.merge_strategy must be merge, "
+            f"squash, or rebase: {path}"
         )
     return merged
 

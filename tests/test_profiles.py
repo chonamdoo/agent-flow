@@ -222,15 +222,26 @@ def test_override_rejects_a_target_that_differs_from_integration(tmp_path):
     [
         "branching: null\n",
         "pr: null\n",
+        "branching:\n  base: null\n",
         "branching:\n  integration: null\n",
         "pr:\n  target_branch: null\n",
+        "pr:\n  merge_strategy: null\n",
+        "pr:\n  merge_strategy: octopus\n",
     ],
-    ids=["null-branching", "null-pr", "null-integration", "null-target"],
+    ids=[
+        "null-branching",
+        "null-pr",
+        "null-base",
+        "null-integration",
+        "null-target",
+        "null-strategy",
+        "unknown-strategy",
+    ],
 )
-def test_override_rejects_a_non_string_branch_contract(tmp_path, body):
+def test_override_rejects_an_invalid_branch_contract(tmp_path, body):
     path = _write_override(tmp_path, "android", body)
 
-    with pytest.raises(ValueError, match="equal non-empty strings") as excinfo:
+    with pytest.raises(ValueError, match="branch contract") as excinfo:
         load_profile_payload("android", tmp_path)
 
     assert str(path) in str(excinfo.value)
