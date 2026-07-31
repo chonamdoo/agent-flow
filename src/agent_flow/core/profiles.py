@@ -8,6 +8,8 @@ from typing import Any
 
 import yaml
 
+from agent_flow.core.security import ensure_child_path, validate_safe_name
+
 
 # `profiles/_schema.yaml`의 gates[].phase가 선언하는 전체 집합.
 GATE_PHASES: tuple[str, ...] = ("pre-commit", "pre-push", "post-merge")
@@ -110,7 +112,12 @@ def load_profile(profile_id: str) -> ProjectProfile:
 
 
 def load_profile_payload(profile_id: str, root: Path | None = None) -> dict[str, Any]:
-    payload = yaml.safe_load(_read_profile_text(profile_id))
+    text = (
+        _read_profile_text(profile_id)
+        if root is None
+        else _read_project_profile_text(root, profile_id)
+    )
+    payload = yaml.safe_load(text)
     if not isinstance(payload, dict):
         raise ValueError(f"profile must be a mapping: {profile_id}")
     if root is None:
@@ -119,7 +126,24 @@ def load_profile_payload(profile_id: str, root: Path | None = None) -> dict[str,
 
 
 def project_profile_override_path(root: Path, profile_id: str) -> Path:
-    return root / ".agent-flow" / "profiles" / f"{profile_id}{PROJECT_OVERRIDE_SUFFIX}"
+    return _project_profile_path(root, profile_id, suffix=PROJECT_OVERRIDE_SUFFIX)
+
+
+def _read_project_profile_text(root: Path, profile_id: str) -> str:
+    path = _project_profile_path(root, profile_id, suffix=".yaml")
+    if path.is_file():
+        return path.read_text(encoding="utf-8")
+    return _read_profile_text(profile_id)
+
+
+def _project_profile_path(root: Path, profile_id: str, *, suffix: str) -> Path:
+    profiles_root = root / ".agent-flow" / "profiles"
+    safe_id = validate_safe_name(profile_id, "profile")
+    return ensure_child_path(
+        profiles_root,
+        profiles_root / f"{safe_id}{suffix}",
+        "profile",
+    )
 
 
 def apply_project_profile_override(
@@ -208,10 +232,11 @@ def _gate_phase_from_payload(value: object, *, profile_id: str, gate_id: str) ->
 
 
 def _read_profile_text(profile_id: str) -> str:
-    package_path = resources.files("agent_flow").joinpath("profiles", f"{profile_id}.yaml")
+    safe_id = validate_safe_name(profile_id, "profile")
+    package_path = resources.files("agent_flow").joinpath("profiles", f"{safe_id}.yaml")
     if package_path.is_file():
         return package_path.read_text(encoding="utf-8")
-    repo_path = Path(__file__).resolve().parents[3] / "profiles" / f"{profile_id}.yaml"
+    repo_path = Path(__file__).resolve().parents[3] / "profiles" / f"{safe_id}.yaml"
     if not repo_path.is_file():
         raise ValueError(f"unknown profile: {profile_id}")
     return repo_path.read_text(encoding="utf-8")

@@ -137,3 +137,29 @@ def test_missing_declared_base_falls_back_to_the_name_list(tmp_path: Path):
     status = create_worktree(root=root, plan=plan_worktree(root=root, name="feat"))
 
     assert _git("rev-parse", "HEAD", cwd=status.path) == main_tip
+
+
+def test_custom_installed_profile_declared_base_wins_over_main(tmp_path: Path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _init_repo(root)
+    _git("branch", "develop", cwd=root)
+    _git("checkout", "develop", cwd=root)
+    (root / "f.txt").write_text("custom develop\n", encoding="utf-8")
+    _git("add", ".", cwd=root)
+    _git("commit", "-m", "custom develop ahead", cwd=root)
+    develop_tip = _git("rev-parse", "develop", cwd=root)
+    _git("checkout", "main", cwd=root)
+    _declare_profile(root, "my-stack")
+    profiles = root / ".agent-flow" / "profiles"
+    profiles.mkdir(parents=True)
+    (profiles / "my-stack.yaml").write_text(
+        "id: my-stack\n"
+        "branching:\n"
+        "  base: develop\n",
+        encoding="utf-8",
+    )
+
+    status = create_worktree(root=root, plan=plan_worktree(root=root, name="feat"))
+
+    assert _git("rev-parse", "HEAD", cwd=status.path) == develop_tip
