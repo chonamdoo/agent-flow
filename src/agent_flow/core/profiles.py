@@ -228,6 +228,20 @@ def _validate_project_profile_branch_contract(
 ) -> dict[str, Any]:
     branching = payload.get("branching")
     pr = payload.get("pr")
+    declares_contract = (
+        isinstance(branching, dict)
+        and ("base" in branching or "integration" in branching)
+    ) or (
+        isinstance(pr, dict)
+        and ("target_branch" in pr or "merge_strategy" in pr)
+    )
+    invalid_section = (
+        "branching" in payload and not isinstance(branching, dict)
+    ) or (
+        "pr" in payload and not isinstance(pr, dict)
+    )
+    if not declares_contract and not invalid_section:
+        return payload
     base = branching.get("base") if isinstance(branching, dict) else None
     integration = branching.get("integration") if isinstance(branching, dict) else None
     target = pr.get("target_branch") if isinstance(pr, dict) else None

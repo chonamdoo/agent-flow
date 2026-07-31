@@ -22,6 +22,7 @@ def validate_git_branch(value: str) -> None:
         or value == "@"
         or value == "HEAD"
         or value.startswith("/")
+        or value.startswith("refs/")
         or value.endswith("/")
         or value.endswith(".")
         or value.endswith(".lock")

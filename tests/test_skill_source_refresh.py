@@ -131,12 +131,10 @@ def test_skills_sync_loads_an_installed_custom_profile(tmp_path, capsys):
     (profiles / "my-stack.yaml").write_text(
         "id: my-stack\n"
         "gates: []\n"
-        "branching:\n"
-        "  base: develop\n"
-        "  integration: develop\n"
-        "pr:\n"
-        "  target_branch: develop\n"
-        "  merge_strategy: merge\n",
+        "skill_sources:\n"
+        "  - id: probe\n"
+        "    kind: host-managed\n"
+        "    install_hint: managed externally\n",
         encoding="utf-8",
     )
     (tmp_path / ".agent-flow" / "kit.json").write_text(
@@ -145,4 +143,4 @@ def test_skills_sync_loads_an_installed_custom_profile(tmp_path, capsys):
     )
 
     assert cli.main(["skills", "sync", "--root", str(tmp_path)]) == 0
-    assert capsys.readouterr().out.strip() == "my-stack: no skill_sources declared"
+    assert capsys.readouterr().out.strip() == "my-stack: probe skipped managed externally"

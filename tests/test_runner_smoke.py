@@ -870,6 +870,7 @@ def test_worktree_branch_validation_rejects_invalid_refs(tmp_path: Path):
         "foo//bar",
         "foo.lock",
         "HEAD",
+        "refs/heads/task",
     ]
     for branch in invalid_branches:
         result = _run_cli(["run", "task", "--worktree", "task", "--worktree-branch", branch], project)
