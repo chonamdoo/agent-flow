@@ -89,6 +89,40 @@ def test_cleanup_completes_while_another_checkout_holds_a_provider_lease(
     assert not W.worktree_branch_exists(root=root, branch=status.branch)
 
 
+def test_cleanup_uses_remote_tracking_target_when_local_branch_is_absent(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    target_oid = _git("rev-parse", "main", cwd=root).stdout.strip()
+    _git("update-ref", "refs/remotes/origin/release", target_oid, cwd=root)
+    status, run_dir = _managed_run(root, "remote-target")
+
+    journal_path, journal = W._prepare_or_load_cleanup_journal(
+        root=root,
+        checkout_path=status.path,
+        run_dir=run_dir,
+        target_branch="release",
+        integration_strategy="merge",
+        delete_branch=True,
+    )
+
+    assert journal["target"] == {
+        "ref": "refs/remotes/origin/release",
+        "expected_oid": target_oid,
+    }
+    result = W.run_worktree_cleanup_transaction(
+        root=root,
+        checkout_path=status.path,
+        run_dir=run_dir,
+        target_branch="release",
+        integration_strategy="merge",
+    )
+    assert result.journal_path == journal_path
+    W.complete_worktree_cleanup(result)
+    assert not status.path.exists()
+
+
 def test_run_lifecycle_lease_is_shared_and_recovers_after_owner_crash(
     tmp_path: Path,
 ) -> None:

@@ -925,6 +925,9 @@ def _prepare_or_load_cleanup_journal(
     if target_branch == status.branch:
         raise CleanupBlockedError("cleanup target branch cannot be the worktree branch")
     target_oid = _ref_oid(root=root, ref=target_ref)
+    if target_oid is None:
+        target_ref = f"refs/remotes/origin/{target_branch}"
+        target_oid = _ref_oid(root=root, ref=target_ref)
     branch_oid = _ref_oid(root=root, ref=f"refs/heads/{status.branch}")
     if target_oid is None or branch_oid is None:
         raise CleanupBlockedError(
@@ -1037,7 +1040,10 @@ def _validate_cleanup_resume(
         raise CleanupBlockedError("cleanup journal escapes the repository state root")
     if journal["repository"] != _cleanup_repository_identity(root):
         raise CleanupBlockedError("cleanup journal repository identity changed")
-    if journal["target"]["ref"] != f"refs/heads/{target_branch}":
+    if journal["target"]["ref"] not in (
+        f"refs/heads/{target_branch}",
+        f"refs/remotes/origin/{target_branch}",
+    ):
         raise CleanupBlockedError("cleanup target branch changed since journal preparation")
     if real_path(Path(journal["checkout"]["path"])) != real_path(checkout_path):
         raise CleanupBlockedError("cleanup checkout path changed since journal preparation")
