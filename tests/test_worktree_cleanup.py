@@ -95,7 +95,8 @@ def test_cleanup_uses_remote_tracking_target_when_local_branch_is_absent(
     root = tmp_path / "repo"
     _init_repo(root)
     target_oid = _git("rev-parse", "main", cwd=root).stdout.strip()
-    _git("update-ref", "refs/remotes/origin/release", target_oid, cwd=root)
+    _git("remote", "add", "upstream", str(root), cwd=root)
+    _git("update-ref", "refs/remotes/upstream/release", target_oid, cwd=root)
     status, run_dir = _managed_run(root, "remote-target")
 
     journal_path, journal = W._prepare_or_load_cleanup_journal(
@@ -108,7 +109,7 @@ def test_cleanup_uses_remote_tracking_target_when_local_branch_is_absent(
     )
 
     assert journal["target"] == {
-        "ref": "refs/remotes/origin/release",
+        "ref": "refs/remotes/upstream/release",
         "expected_oid": target_oid,
     }
     result = W.run_worktree_cleanup_transaction(

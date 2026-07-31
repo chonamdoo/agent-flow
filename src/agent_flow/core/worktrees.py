@@ -921,13 +921,16 @@ def _prepare_or_load_cleanup_journal(
             f"recorded base OID is missing for {checkout_path}; preserving it"
         )
     validate_git_branch(target_branch)
-    target_ref = f"refs/heads/{target_branch}"
     if target_branch == status.branch:
         raise CleanupBlockedError("cleanup target branch cannot be the worktree branch")
-    target_oid = _ref_oid(root=root, ref=target_ref)
-    if target_oid is None:
-        target_ref = f"refs/remotes/origin/{target_branch}"
-        target_oid = _ref_oid(root=root, ref=target_ref)
+    target_ref = ""
+    target_oid = None
+    for candidate in _branch_ref_candidates(root=root, branch=target_branch):
+        candidate_oid = _ref_oid(root=root, ref=candidate)
+        if candidate_oid is not None:
+            target_ref = candidate
+            target_oid = candidate_oid
+            break
     branch_oid = _ref_oid(root=root, ref=f"refs/heads/{status.branch}")
     if target_oid is None or branch_oid is None:
         raise CleanupBlockedError(
@@ -1040,9 +1043,8 @@ def _validate_cleanup_resume(
         raise CleanupBlockedError("cleanup journal escapes the repository state root")
     if journal["repository"] != _cleanup_repository_identity(root):
         raise CleanupBlockedError("cleanup journal repository identity changed")
-    if journal["target"]["ref"] not in (
-        f"refs/heads/{target_branch}",
-        f"refs/remotes/origin/{target_branch}",
+    if journal["target"]["ref"] not in set(
+        _branch_ref_candidates(root=root, branch=target_branch)
     ):
         raise CleanupBlockedError("cleanup target branch changed since journal preparation")
     if real_path(Path(journal["checkout"]["path"])) != real_path(checkout_path):
@@ -2200,20 +2202,27 @@ def worktree_branch_exists(*, root: Path, branch: str) -> bool:
     return result.ok
 
 
+def _branch_ref_candidates(*, root: Path, branch: str) -> Iterator[str]:
+    yield f"refs/heads/{branch}"
+    remotes = git_safe("remote", cwd=root, optional_locks=False)
+    if not remotes.ok:
+        return
+    names = sorted(set(remotes.stdout.splitlines()))
+    if "origin" in names:
+        names.remove("origin")
+        names.insert(0, "origin")
+    for remote in names:
+        yield f"refs/remotes/{remote}/{branch}"
+
+
 def _default_base_ref(root: Path) -> str:
     declared = _profile_base_ref(root)
     if declared:
         return declared
-    for ref in (
-        "refs/heads/main",
-        "refs/remotes/origin/main",
-        "refs/heads/master",
-        "refs/remotes/origin/master",
-        "refs/heads/develop",
-        "refs/remotes/origin/develop",
-    ):
-        if _git_commit_ref_exists(root=root, ref=ref):
-            return ref
+    for branch in ("main", "master", "develop"):
+        for ref in _branch_ref_candidates(root=root, branch=branch):
+            if _git_commit_ref_exists(root=root, ref=ref):
+                return ref
     return "HEAD"
 
 
@@ -2255,10 +2264,7 @@ def _profile_base_ref(root: Path) -> str:
         # `-`로 시작하는 값은 git argv에서 옵션으로 읽힌다. ref로 취급하지 않는다.
         if not declared or declared.startswith("-") or declared.split() != [declared]:
             continue
-        for ref in (
-            f"refs/heads/{declared}",
-            f"refs/remotes/origin/{declared}",
-        ):
+        for ref in _branch_ref_candidates(root=root, branch=declared):
             if _git_commit_ref_exists(root=root, ref=ref):
                 return ref
     return ""
