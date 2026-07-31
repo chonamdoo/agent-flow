@@ -387,9 +387,9 @@ _SHARED_ONLY = (
     "withoutInstallRootOption", "assertInstallRootIsFinal", "upgradeBundledSkills",
     "preserveKitSkillHashes", "syncKitAssets", "readKitAssetRecord", "writeKitAssetRecord",
     "isBundledSkillManifest", "reportSkippedUserEdit",
-    # `lib/omp-hooks-extension.mjs`는 OMP 확장 소스를 따로 만들어 내는 산출물이라
-    # 같은 이름의 사본을 스스로 갖는다. 여기서 세는 것은 두 install 진입점이다.
-    "canonicalPath",
+    # `samePath`/`gitEnv`/`resolveInstallRoot`는 뺐다. `lib/omp-hooks-extension.mjs`가
+    # 생성물 안에 같은 이름을 들고 있어 이 검사로는 셀 수 없다.
+    "canonicalPath", "gitOutput",
     "resolveManagedWorktreeContext", "resolveManagedWorktreeRoot",
     "resolveGitCommonWorktreeRoot", "resolveLinkedWorktreeLeader",
 )

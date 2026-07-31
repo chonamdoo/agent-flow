@@ -436,3 +436,39 @@ def test_module_specifiers_stay_code_even_though_they_are_strings():
     assert len(_forbidden(WEB_DOMAIN_ROLE, "index.ts", "export * from './screens'\n")) == 1
     assert len(_forbidden(WEB_DOMAIN_ROLE, "index.ts", 'import { X } from "./ChatScreen"\n')) == 1
     assert len(_forbidden(WEB_DOMAIN_ROLE, "index.ts", 'const x = require("./ChatScreen")\n')) == 1
+
+
+def test_masking_survives_inputs_that_used_to_crash_or_swallow_code():
+    """마스킹이 필수 gate를 죽이거나 진짜 위반을 삼키면 안 된다."""
+    # 파일이 백슬래시로 끝나면 예전에는 IndexError로 gate가 죽었다.
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", 'const a = "abc\\') == []
+    # 짝 없는 따옴표가 다음 줄의 진짜 위반을 지우면 안 된다 - 개행 이스케이프 포함.
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", 'const a = "x\\\nconst b = Dto\n')) == 1
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const a = 'x\nconst b = Dto\n")) == 1
+    # `//`는 문맥 없이 주석이 아니다. 스킴과 정규식 뒤의 코드가 살아 있어야 한다.
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const r = /^https?:\\/\\//.test(Dto.url)\n")) == 1
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.tsx", "<T>http://x {Dto.name}</T>\n")) == 1
+    # 여러 줄 template literal의 닫는 backtick이 새 문자열을 열면 안 된다.
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const m = `a\nb` + Dto.name\n")) == 1
+    # 문자열 보간 안은 코드다. Kotlin/Compose 소스에서 흔하다.
+    assert len(_forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", 'val s = "${orderDto.id}"\n')) == 1
+
+
+def test_module_specifiers_are_found_by_the_quote_prefix_not_the_line():
+    """줄 전체를 보면 `export const CSS = '@media screen'`까지 코드로 남는다."""
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", "export const CSS = '@media screen'\n") == []
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "index.ts", "import {\n  X,\n} from './screens'\n")) == 1
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "index.ts", "await import('./ChatScreen')\n")) == 1
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "index.ts", "require( './ChatScreen')\n")) == 1
+
+
+def test_gradle_readers_do_not_count_commented_out_declarations():
+    """같은 gate의 gradle 판독기가 주석을 읽으면 주석만으로 위반이 난다."""
+    from agent_flow.core.architecture_lint import code_only
+
+    build = 'dependencies {\n  // implementation(project(":feature:home:presentation"))\n}\n'
+    stripped = code_only("build.gradle.kts", build, mask_strings=False)
+    assert ":feature:home:presentation" not in stripped
+    # 문자열은 남는다 - gradle 판독기에는 문자열이 곧 데이터다.
+    live = 'dependencies {\n  implementation(project(":core:data"))\n}\n'
+    assert ":core:data" in code_only("build.gradle.kts", live, mask_strings=False)

@@ -641,11 +641,15 @@ _TERM_PATTERNS: dict[str, re.Pattern[str]] = {}
 def term_in(term: str, text: str) -> bool:
     """단어 경계로 본다.
 
-    부분문자열로 보면 `프레젠테이션`이 "팀 프레젠테이션으로 정리한다"에 걸리고
-    `uistate`가 `GUIStateMachine`에 걸려, 무관한 task가 skill을 required로 올린다.
+    부분문자열로 보면 `uistate`가 `GUIStateMachine`에, `chart`가 `charting`에 걸려
+    무관한 task가 skill을 required로 올린다.
 
     경계는 ASCII 영숫자로만 잡는다. `\w`를 쓰면 한글이 word 문자라서 `화면 상태를`
-    처럼 조사가 붙은 한국어 task 문구가 전부 미매치가 된다. 복수 접미사는 허용한다 —
+    처럼 조사가 붙은 한국어 task 문구가 전부 미매치가 된다. 그래서 한글 term은
+    경계가 없는 것과 같다 - `프레젠테이션`은 "팀 프레젠테이션으로"에 계속 걸린다.
+    그 오탐은 어휘를 구절로 좁혀서 막는다.
+
+    복수 접미사는 허용한다. skill description이 term을 복수로 쓰는 쪽이 흔하다 —
     `skill_matching._term_in`과 같은 규칙이고, 그쪽이 이 함수를 쓴다.
     """
     pattern = _TERM_PATTERNS.get(term)

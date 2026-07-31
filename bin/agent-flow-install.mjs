@@ -32,9 +32,7 @@ import {
   ensureChildPath,
   escapeRegex,
   fullFeatureSkillMarkdown,
-  gitOutput,
   hasChildWithSuffix,
-  HOME,
   hookScriptCommand,
   installedProfileFileNames,
   installProjectLauncher,
@@ -106,13 +104,6 @@ const FORCE_MANAGED = INSTALL_ARGS.includes("--force-managed");
 const HOOKS_FLAG_OFF = INSTALL_ARGS.includes("--no-hooks");
 const HOOKS_FLAG_ON = INSTALL_ARGS.includes("--hooks");
 let hooksDisabled = HOOKS_FLAG_OFF;
-// Python `LEAKY_GIT_ENV_VARS`(`src/agent_flow/core/worktree_isolation.py`)와 같은
-// 목록이어야 한다. ambient discovery 변수가 하나라도 남으면 우리 git이 요청한 cwd
-// 밖을 본다 - 실측으로 `GIT_COMMON_DIR=/private/tmp/af-decoy/.git`만 있어도
-// `rev-parse --git-common-dir`이 decoy를 반환하고, 그 부모가 install PROJECT가 됐다.
-// PROJECT 계산이 모듈 최상단에서 곧바로 git을 부르므로, 이 상수는 그보다 위에
-// 있어야 한다(아래에 두면 TDZ로 로드 자체가 죽는다).
-
 // `--root` 오류는 메시지 한 줄로 끝낸다. 모듈 최상단에서 그냥 throw하면 사용자가
 // 오타 하나에 스택 트레이스를 받는다.
 function requestedProject() {

@@ -31,7 +31,6 @@ import {
   gitOutput,
   gitEnv,
   hasChildWithSuffix,
-  HOME,
   hookScriptCommand,
   installedProfileFileNames,
   installProjectLauncher,
@@ -848,7 +847,7 @@ function resolveAgentFlowRoot(start) {
 function currentCheckoutIdentity(root) {
   const cwd = canonicalPath(process.cwd());
   const managed = resolveManagedWorktreeContext(cwd);
-  if (managed && samePath(managed.root, root)) {
+  if (managed?.name && samePath(managed.root, root)) {
     return `worktree:${managed.name}`;
   }
   // 채택 판정이 leader containment보다 먼저다. 채택된 checkout이 `<leader>/.worktrees/foo`

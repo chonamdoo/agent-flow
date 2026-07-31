@@ -431,10 +431,13 @@ def test_selector_terms_match_on_word_boundaries():
             task_terms=[term], path_globs=[], changed_files=[], task_text=text
         )
 
-    assert not matched("presentation", "팀 프레젠테이션 자료를 만든다")
+    # 옛 substring 규칙에서 실제로 True였던 것들이다.
     assert not matched("uistate", "guistatemachine을 고친다")
     assert not matched("chart", "charting 라이브러리를 붙인다")
+    assert not matched("state", "restated 요구사항 정리")
     # 복수형은 허용한다. skill 설명이 term을 복수로 쓰는 쪽이 흔하다.
     assert matched("modifier", "compose modifiers 정리")
     # 한글 조사가 붙어도 경계다. `\\w`로 잡으면 한국어 task가 전부 미매치가 된다.
     assert matched("상태", "화면 상태를 정리한다")
+    # 한글은 ASCII 경계 밖이라 경계가 없는 것과 같다. 그 오탐은 구절로 좁혀서 막는다.
+    assert matched("프레젠테이션", "팀 프레젠테이션으로 정리한다")
