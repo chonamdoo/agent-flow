@@ -3243,7 +3243,9 @@ def _verified_checkout_identity(*, root: Path, path: Path) -> str | None:
         return "leader"
     managed = _managed_worktree_context(checkout)
     if managed is not None and _same_path(managed[0], root):
-        return f"worktree:{managed[1]}"
+        # 이름 없는 컨테이너 경로에서는 `None`이 온다. f-string으로 바로 끼우면
+        # 리터럴 `worktree:None`이 나가고 하류가 그걸 이름으로 받는다.
+        return _checkout_identity(managed[1])
     if adopted_worktree_parent(root=root, path=checkout) is None:
         return None
     try:

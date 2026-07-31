@@ -2060,7 +2060,16 @@ def test_an_unusable_git_reports_one_line_not_a_stack_trace(tmp_path: Path, bina
     (fake_bin / "git").mkdir(parents=True)  # spawn이 EACCES를 낸다
     project = tmp_path / "proj"
     project.mkdir()
-    result = _install_with(binary, project, env={**os.environ, "PATH": str(fake_bin)})
+    env = {**os.environ, "PATH": str(fake_bin)}
+    result = _install_with(binary, project, env=env)
     assert result.returncode == 1
     assert "git rev-parse" in result.stderr
     assert "at " not in result.stderr, result.stderr
+    # git이 못 돌아도 install이 아닌 명령은 root를 물을 이유가 없다. kit은 예외다 -
+    # 모르는 명령을 Python CLI로 넘기고 그쪽이 root를 필요로 한다(main과 같다).
+    if binary == "agent-flow-install.mjs":
+        help_result = subprocess.run(
+            (_node(), str(KIT_ROOT / "bin" / binary), "--help"),
+            cwd=project, text=True, capture_output=True, check=False, env=env,
+        )
+        assert help_result.returncode == 0, help_result.stderr

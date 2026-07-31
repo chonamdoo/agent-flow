@@ -135,7 +135,10 @@ function installRoot(requested) {
 // `--root`는 install만 받는다. 커맨드 디스패치보다 먼저 도는 자리라, 여기서
 // 무조건 해석하면 `bogus --root /nope`가 `Unknown command`가 아니라 root 오류로 죽는다.
 const REQUESTED_PROJECT = process.argv[2] === "install" ? requestedProject() : process.cwd();
-const PROJECT = installRoot(REQUESTED_PROJECT);
+// `--root`와 같은 이유로 install에서만 푼다. 모든 명령이 계산하면 git이 못 도는
+// 환경에서 `--help`와 `Unknown command`까지 git 오류로 죽는다. `AF_DIR`은 install
+// 밖에서 쓰이지 않는다.
+const PROJECT = process.argv[2] === "install" ? installRoot(REQUESTED_PROJECT) : REQUESTED_PROJECT;
 const AF_DIR = path.join(PROJECT, ".agent-flow");
 
 const PROJECT_SKILL_HOSTS = Object.freeze(["claude", "codex", "omp"]);

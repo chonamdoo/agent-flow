@@ -2203,3 +2203,11 @@ def test_managed_worktree_context_tolerates_a_missing_checkout_name() -> None:
         checkout = container / "foo"
         checkout.mkdir()
         assert _managed_worktree_context(checkout) == (container.parent.parent.resolve(), "foo")
+
+
+def test_checkout_identity_never_emits_a_literal_none() -> None:
+    """`worktree:None`이 나가면 하류가 그걸 checkout 이름으로 받는다."""
+    from agent_flow.cli import _checkout_identity
+
+    assert _checkout_identity(None) == "leader"
+    assert _checkout_identity("foo") == "worktree:foo"
