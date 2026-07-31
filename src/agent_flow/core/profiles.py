@@ -8,7 +8,11 @@ from typing import Any
 
 import yaml
 
-from agent_flow.core.security import ensure_child_path, validate_safe_name
+from agent_flow.core.security import (
+    ensure_child_path,
+    validate_git_branch,
+    validate_safe_name,
+)
 
 
 # `profiles/_schema.yaml`의 gates[].phase가 선언하는 전체 집합.
@@ -141,6 +145,8 @@ def load_profile_payload(
     payload = yaml.safe_load(text)
     if not isinstance(payload, dict):
         raise ValueError(f"profile must be a mapping: {profile_id}")
+    if payload.get("id") != profile_id:
+        raise ValueError(f"profile id mismatch: {profile_id}")
     if root is None:
         return payload
     return apply_project_profile_override(payload, profile_id=profile_id, root=root)
@@ -231,6 +237,11 @@ def apply_project_profile_override(
             "must equal branching.integration; pr.merge_strategy must be merge, "
             f"squash, or rebase: {path}"
         )
+    try:
+        for branch in (base, integration, target):
+            validate_git_branch(branch)
+    except ValueError as exc:
+        raise ValueError(f"invalid profile override branch contract: {path}: {exc}") from exc
     return merged
 
 

@@ -18,6 +18,7 @@ from typing import Any, Callable, Iterable, Iterator, Sequence
 
 from agent_flow.artifact import ACTIVE_MARKER, find_active_runs, read_meta, write_meta
 from agent_flow.core.commands import run_safe_command
+from agent_flow.core.security import validate_git_branch
 from agent_flow.core.hook_integrity import (
     JSON_REGISTRATION_FILES,
     OMP_REGISTRATION_FILE,
@@ -496,7 +497,7 @@ def _is_creation_layout_child(*, root: Path, path: Path) -> bool:
 
 
 def _assert_requestable_branch(branch: str) -> None:
-    _validate_branch(branch)
+    validate_git_branch(branch)
     if branch in PROTECTED_WORKTREE_BRANCHES:
         raise ValueError(f"protected worktree branch is not allowed: {branch}")
     if not branch.startswith("feat/"):
@@ -919,7 +920,7 @@ def _prepare_or_load_cleanup_journal(
         raise CleanupBlockedError(
             f"recorded base OID is missing for {checkout_path}; preserving it"
         )
-    _validate_branch(target_branch)
+    validate_git_branch(target_branch)
     target_ref = f"refs/heads/{target_branch}"
     if target_branch == status.branch:
         raise CleanupBlockedError("cleanup target branch cannot be the worktree branch")
@@ -2444,7 +2445,7 @@ def _planned_branch(name: str) -> str | None:
         return None
     branch = f"feat/{safe.removeprefix('feat-')}"
     try:
-        _validate_branch(branch)
+        validate_git_branch(branch)
     except ValueError:
         return None
     return None if branch in PROTECTED_WORKTREE_BRANCHES else branch
@@ -2494,7 +2495,7 @@ def _manifest_branch(payload: dict | None) -> str | None:
     if not isinstance(value, str):
         return None
     try:
-        _validate_branch(value)
+        validate_git_branch(value)
     except ValueError:
         return None
     return value
@@ -3569,7 +3570,7 @@ def _live_branch(*, root: Path, path: Path) -> str | None:
     if not branch:
         return None
     try:
-        _validate_branch(branch)
+        validate_git_branch(branch)
     except ValueError:
         return None
     return branch
@@ -3603,20 +3604,3 @@ def _registered_worktree_paths(root: Path) -> set[Path]:
     }
 
 
-def _validate_branch(value: str) -> None:
-    invalid_chars = set(" ~^:?*[\\")
-    invalid = (
-        not value
-        or value.startswith("-")
-        or value.startswith(".")
-        or value.startswith("/")
-        or value.endswith("/")
-        or value.endswith(".")
-        or value.endswith(".lock")
-        or ".." in value
-        or "//" in value
-        or "@{" in value
-        or any(ord(ch) < 32 or ch == "\x7f" or ch in invalid_chars for ch in value)
-    )
-    if invalid:
-        raise ValueError(f"unsafe worktree branch: {value}")

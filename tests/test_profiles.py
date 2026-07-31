@@ -247,6 +247,27 @@ def test_override_rejects_an_invalid_branch_contract(tmp_path, body):
     assert str(path) in str(excinfo.value)
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        'branching:\n  base: "release branch"\n',
+        'branching:\n  base: "foo..bar"\n',
+        'branching:\n  integration: "release branch"\n'
+        'pr:\n  target_branch: "release branch"\n',
+        'branching:\n  integration: "foo..bar"\n'
+        'pr:\n  target_branch: "foo..bar"\n',
+    ],
+    ids=["base-space", "base-double-dot", "target-space", "target-double-dot"],
+)
+def test_override_rejects_an_unsafe_git_branch(tmp_path, body):
+    path = _write_override(tmp_path, "android", body)
+
+    with pytest.raises(ValueError, match="unsafe worktree branch") as excinfo:
+        load_profile_payload("android", tmp_path)
+
+    assert str(path) in str(excinfo.value)
+
+
 def test_runner_profile_loading_applies_the_project_override(tmp_path):
     _write_override(
         tmp_path,
@@ -314,6 +335,24 @@ def test_runner_profile_loading_prefers_an_installed_custom_profile(tmp_path):
         check=False,
     )
     assert lint.returncode == 0, lint.stderr
+
+
+def test_project_profile_rejects_an_id_that_differs_from_its_filename(tmp_path):
+    profiles = tmp_path / ".agent-flow" / "profiles"
+    profiles.mkdir(parents=True)
+    (profiles / "my-stack.yaml").write_text(
+        "id: other\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".agent-flow" / "kit.json").write_text(
+        '{"profiles":["my-stack"]}\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="profile id mismatch: my-stack"):
+        load_profile_payload("my-stack", tmp_path)
+    with pytest.raises(ValueError, match="profile id mismatch: my-stack"):
+        load_runner_profile(KIT_ROOT / "src" / "agent_flow", tmp_path)
 
 
 def test_resolved_profile_applies_the_project_override(tmp_path):

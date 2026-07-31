@@ -1758,6 +1758,8 @@ def _load_single_profile(
     raw = yaml.safe_load(profile_path.read_text()) or {}
     if not isinstance(raw, dict):
         raise ValueError(f"profile {profile_path}: top-level must be a mapping")
+    if raw.get("id") != profile_id:
+        raise ValueError(f"profile id mismatch: {profile_id}")
     if project_root is not None:
         raw = apply_project_profile_override(raw, profile_id=profile_id, root=project_root)
     return profile_id, raw
