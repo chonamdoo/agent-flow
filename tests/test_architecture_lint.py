@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -564,3 +565,52 @@ def test_non_code_inside_an_interpolation_is_still_not_code():
     assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const s = `${x /* screen */}`\n") == []
     # 보간식 자체는 그대로 코드다.
     assert len(_forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", 'val s = "${orderDto.format("x")}"\n')) == 1
+
+
+def test_jsx_braces_are_not_regex_starts():
+    """`{a} / {b}`는 비율 표기다. 정규식으로 보면 뒤 엘리먼트가 통째로 지워진다."""
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "Chat.tsx", "<div>{n} / {m} <Screen /></div>\n")) == 1
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "Chat.tsx", "<span>{used} / {OrderDto.total}</span>\n")) == 1
+
+
+def test_a_regex_in_keyword_position_is_still_a_regex():
+    """`return /re/`의 `/`를 나눗셈으로 보면 본문의 따옴표가 줄을 삼킨다."""
+    source = """return /['\\"]/.test(s) && OrderDto.x\n"""
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", source)) == 1
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", "throw /'/.test(s) ? new ScreenError() : e\n")) == 1
+    # 후위 증감 뒤는 나눗셈이다.
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const r = i++ / OrderDto.SIZE / total;\n")) == 1
+
+
+def test_a_failed_interpolation_scan_leaves_the_buffer_untouched():
+    """먼저 지워 놓고 실패하면 호출자가 되돌릴 수 없다 - 파일 끝까지 사라진다."""
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const a = `${/* note }`;\nexport class OrderDto {}\n")) == 1
+    assert len(_forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", 'val a = "${/* note }"\nclass OrderDto\n')) == 1
+
+
+def test_comment_rules_inside_an_interpolation_follow_the_language():
+    """`.py` 보간식의 `//`는 floor division이고, JS 보간식의 `/../`는 정규식이다."""
+    assert len(_forbidden(PY_DOMAIN_ROLE, "chat.py", 'msg = f"{total // ApiClient.count}"\n')) == 1
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const s = `${orderDto.path.replace(/\\//g, '-')}`\n")) == 1
+
+
+def test_module_specifiers_win_over_the_contraction_rule():
+    """`from'react'`의 여는 따옴표를 축약형으로 보면 따옴표 짝이 뒤집힌다."""
+    assert _forbidden(WEB_DOMAIN_ROLE, "Chat.tsx", "import a from'aaa';import c from'bbb'\n") == []
+    # 속성 접근자도 문자열이 올 수 있는 자리다.
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "Chat.tsx", "class A { get'name'(){ return OrderDto; } }\n")) == 1
+
+
+def test_only_real_python_prefixes_enable_interpolation():
+    """글자만 훑으면 `if\"{x}\"`의 `if`가 f 접두사로 통한다."""
+    assert _forbidden(PY_DOMAIN_ROLE, "chat.py", 'if"{api_client}" in s:\n    pass\n') == []
+
+
+def test_line_continuations_do_not_rescan_the_file_each_time():
+    """continuation마다 파일 끝까지 다시 훑으면 O(n^2)다 - 실측 24KB에 1.2초였다."""
+    from agent_flow.core.architecture_lint import code_only
+
+    source = 'const s = "' + "@media \\\n" * 4000 + '";\n'
+    started = time.perf_counter()
+    code_only("big.ts", source)
+    assert time.perf_counter() - started < 2.0
