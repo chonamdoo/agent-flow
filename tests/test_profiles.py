@@ -23,7 +23,9 @@ from agent_flow.core.profiles import (  # noqa: E402
     ProfileGate,
     _gate_from_payload,
     load_profile,
+    load_profile_payload,
 )
+from agent_flow.runner import _load_profile as load_runner_profile  # noqa: E402
 
 PROFILES_DIR = KIT_ROOT / "src" / "agent_flow" / "profiles"
 
@@ -132,3 +134,89 @@ def test_every_profile_declares_the_branching_contract_it_owns(profile_id):
     assert branching.get("base")
     assert branching.get("integration")
     assert pr.get("target_branch")
+
+
+def _write_override(root: Path, profile_id: str, body: str) -> Path:
+    target = root / ".agent-flow" / "profiles" / f"{profile_id}.local.yaml"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(body, encoding="utf-8")
+    return target
+
+
+def test_project_override_replaces_the_branch_contract(tmp_path):
+    """불변: 재설치가 덮는 파일 밖에서 프로젝트가 base/PR target을 정할 수 있다.
+
+    반증: 배포 profile을 직접 고치면 다음 install이 `base: main`으로 되돌리고,
+    되돌아간 것을 아무도 모른 채 worktree가 다른 줄기에서 갈라졌다.
+    """
+    _write_override(
+        tmp_path,
+        "android",
+        "branching:\n"
+        "  strategy: release-first\n"
+        '  base: "release/26.7.10.x"\n'
+        '  integration: "release/26.7.10.x"\n'
+        "pr:\n"
+        '  target_branch: "release/26.7.10.x"\n',
+    )
+
+    payload = load_profile_payload("android", tmp_path)
+
+    assert payload["branching"]["strategy"] == "release-first"
+    assert payload["branching"]["base"] == "release/26.7.10.x"
+    assert payload["pr"]["target_branch"] == "release/26.7.10.x"
+    # 선언하지 않은 형제 값은 배포 profile 그대로 남는다.
+    assert payload["branching"]["worktree_setup"]["copy"] == ["local.properties"]
+    assert payload["pr"]["merge_strategy"] == "merge"
+    assert payload["gates"] == load_profile_payload("android")["gates"]
+
+
+def test_override_is_ignored_without_a_project_root():
+    """불변: root 없이 부르는 경로(gates/lint)는 배포 profile만 본다."""
+    assert load_profile_payload("android")["branching"]["base"] == "main"
+
+
+def test_override_rejects_keys_it_would_not_apply(tmp_path):
+    """불변: 반영되지 않는 선언은 조용히 삼키지 않는다.
+
+    gates를 여기서 받으면 `agent-flow gates`는 root 없이 payload를 읽으므로 override가
+    무시되고, 사용자는 걸렸다고 믿는다.
+    """
+    path = _write_override(tmp_path, "android", "gates: []\n")
+
+    with pytest.raises(ValueError) as excinfo:
+        load_profile_payload("android", tmp_path)
+
+    assert "gates" in str(excinfo.value)
+    assert str(path) in str(excinfo.value)
+
+
+def test_override_rejects_a_foreign_profile_id(tmp_path):
+    """불변: 파일 이름과 다른 profile을 선언하면 어느 profile을 고친 건지 알 수 없다."""
+    _write_override(tmp_path, "android", "id: ios\nbranching:\n  base: develop\n")
+
+    with pytest.raises(ValueError, match="id mismatch"):
+        load_profile_payload("android", tmp_path)
+
+
+def test_runner_profile_loading_applies_the_project_override(tmp_path):
+    _write_override(
+        tmp_path,
+        "android",
+        "branching:\n"
+        '  base: "release/26.7.10.x"\n'
+        "pr:\n"
+        '  target_branch: "release/26.7.10.x"\n',
+    )
+    (tmp_path / ".agent-flow" / "kit.json").write_text(
+        '{"profiles":["android"]}\n', encoding="utf-8"
+    )
+
+    profile_id, payload = load_runner_profile(
+        KIT_ROOT / "src" / "agent_flow",
+        tmp_path,
+    )
+
+    assert profile_id == "android"
+    assert payload["branching"]["base"] == "release/26.7.10.x"
+    assert payload["pr"]["target_branch"] == "release/26.7.10.x"

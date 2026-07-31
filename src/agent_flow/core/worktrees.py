@@ -2194,10 +2194,47 @@ def worktree_branch_exists(*, root: Path, branch: str) -> bool:
 
 
 def _default_base_ref(root: Path) -> str:
+    declared = _profile_base_ref(root)
+    if declared:
+        return declared
     for ref in ("main", "origin/main", "master", "origin/master", "develop", "origin/develop"):
         if _git_commit_ref_exists(root=root, ref=ref):
             return ref
     return "HEAD"
+
+
+def _profile_base_ref(root: Path) -> str:
+    """`profile.branching.base`가 지명한 ref. 없거나 이 저장소에 없으면 빈 문자열.
+
+    이 자리를 이름 목록으로만 두면 release-first 저장소에서 profile이 `base:
+    release/x`를 선언해도 worktree는 `origin/main`에서 갈라진다 — 선언은 프롬프트로만
+    흐르고 실제 `git worktree add`는 그것을 못 본다. 선언을 먼저 보고, 그 ref가 실제로
+    있을 때만 쓴다. 없는 ref로 내려가면 worktree 생성 자체가 죽기 때문이다.
+    """
+    try:
+        from agent_flow.core.profiles import active_profile_ids, load_profile_payload
+
+        payloads = [
+            load_profile_payload(profile_id, root) for profile_id in active_profile_ids(root)
+        ]
+    except Exception:
+        # profile을 못 읽는 것은 worktree를 못 만들 이유가 아니다. 이름 목록으로 내려간다.
+        return ""
+    for payload in payloads:
+        branching = payload.get("branching") if isinstance(payload, dict) else None
+        if not isinstance(branching, dict):
+            continue
+        declared = branching.get("base")
+        if not isinstance(declared, str):
+            continue
+        declared = declared.strip()
+        # `-`로 시작하는 값은 git argv에서 옵션으로 읽힌다. ref로 취급하지 않는다.
+        if not declared or declared.startswith("-") or declared.split() != [declared]:
+            continue
+        for ref in (declared, f"origin/{declared}"):
+            if _git_commit_ref_exists(root=root, ref=ref):
+                return ref
+    return ""
 
 
 def _git_commit_ref_exists(*, root: Path, ref: str) -> bool:
@@ -2586,22 +2623,29 @@ def _metadata_belongs_to_path(*, root: Path, key: str, path: Path) -> bool:
     (현재/예전) 둘 다 본다. 한쪽만 보면 예전 자리 잔재의 런타임 메타데이터가 남아
     그 이름이 `worktree list`에 계속 다시 나타난다.
     """
+    managed_paths = (
+        managed_worktrees_root(root) / key,
+        legacy_managed_root(root) / key,
+    )
     payload = _state_key_manifest(root=root, key=key)
     if payload is None:
-        return any(
-            same_worktree_path(candidate_root / key, path)
-            for candidate_root in (
-                managed_worktrees_root(root),
-                legacy_managed_root(root),
-            )
-        )
+        return any(same_worktree_path(candidate, path) for candidate in managed_paths)
     recorded = payload.get("path")
     if not isinstance(recorded, str) or not recorded:
         return False
     candidate = Path(recorded)
     if not candidate.is_absolute():
         candidate = root / candidate
-    return same_worktree_path(candidate, path)
+    if same_worktree_path(candidate, path):
+        return True
+    # checkout이 사라진 뒤 layout이 legacy 자리에서 현재 자리로 바뀌어도 같은 key의
+    # 두 관리 경로끼리는 소유권을 이어 간다. 존재하는 다른 경로는 절대 신뢰하지 않는다.
+    return (
+        not candidate.exists()
+        and not path.exists()
+        and any(same_worktree_path(candidate, managed) for managed in managed_paths)
+        and any(same_worktree_path(path, managed) for managed in managed_paths)
+    )
 
 
 def _conflicting_metadata_hint(*, root: Path, status: WorktreeStatus) -> str:

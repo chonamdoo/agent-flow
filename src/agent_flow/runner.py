@@ -74,7 +74,7 @@ from agent_flow.core.worktree_isolation import (
     real_path,
     sanitized_worker_env,
 )
-from agent_flow.core.profiles import GATE_PHASE_ALL
+from agent_flow.core.profiles import GATE_PHASE_ALL, apply_project_profile_override
 from agent_flow.core.phase_workflow import (
     package_root,
     find_kit_root,
@@ -1666,6 +1666,7 @@ def _load_profile(kit_root: Path, project_root: Path) -> tuple[str, dict[str, An
             strict_missing=False,
             explicit_fallback=explicit_fallback,
             source="AGENT_FLOW_PROFILE",
+            project_root=project_root,
         )
 
     from_kit_profiles = _read_kit_profiles(project_root)
@@ -1674,6 +1675,7 @@ def _load_profile(kit_root: Path, project_root: Path) -> tuple[str, dict[str, An
             kit_root,
             from_kit_profiles,
             explicit_fallback=explicit_fallback,
+            project_root=project_root,
         )
 
     from_kit = _read_kit_profile(project_root)
@@ -1684,6 +1686,7 @@ def _load_profile(kit_root: Path, project_root: Path) -> tuple[str, dict[str, An
         strict_missing=bool(from_kit),
         explicit_fallback=explicit_fallback,
         source=".agent-flow/kit.json:profile" if from_kit else "default",
+        project_root=project_root,
     )
 
 
@@ -1704,6 +1707,7 @@ def _load_single_profile(
     strict_missing: bool,
     explicit_fallback: bool,
     source: str,
+    project_root: Path | None = None,
 ) -> tuple[str, dict[str, Any]]:
     _validate_yaml_name(profile_id, "profile")
 
@@ -1742,6 +1746,8 @@ def _load_single_profile(
     raw = yaml.safe_load(profile_path.read_text()) or {}
     if not isinstance(raw, dict):
         raise ValueError(f"profile {profile_path}: top-level must be a mapping")
+    if project_root is not None:
+        raw = apply_project_profile_override(raw, profile_id=profile_id, root=project_root)
     return profile_id, raw
 
 
@@ -1750,6 +1756,7 @@ def _load_profile_union(
     profile_ids: list[str],
     *,
     explicit_fallback: bool,
+    project_root: Path | None = None,
 ) -> tuple[str, dict[str, Any]]:
     loaded: list[tuple[str, dict[str, Any]]] = []
     for profile_id in profile_ids:
@@ -1760,6 +1767,7 @@ def _load_profile_union(
                 strict_missing=True,
                 explicit_fallback=explicit_fallback,
                 source=".agent-flow/kit.json:profiles",
+                project_root=project_root,
             )
         )
     deduped = _dedupe_loaded_profiles(loaded)
@@ -1770,6 +1778,7 @@ def _load_profile_union(
             strict_missing=False,
             explicit_fallback=explicit_fallback,
             source="default",
+            project_root=project_root,
         )
     if len(deduped) == 1:
         return deduped[0]

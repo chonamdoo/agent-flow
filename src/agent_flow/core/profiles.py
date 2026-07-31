@@ -15,6 +15,10 @@ GATE_PHASES: tuple[str, ...] = ("pre-commit", "pre-push", "post-merge")
 DEFAULT_GATE_PHASE = "pre-commit"
 # phase 필터를 끄는 선택자. 실제 gate가 이 값을 phase로 선언할 수는 없다.
 GATE_PHASE_ALL = "all"
+# 프로젝트가 배포 profile 위에 얹는 파일. install이 덮지 않는 유일한 자리다.
+PROJECT_OVERRIDE_SUFFIX = ".local.yaml"
+# override가 실제로 반영되는 키만 받는다. 근거는 `apply_project_profile_override`.
+PROJECT_OVERRIDE_KEYS: tuple[str, ...] = ("branching", "pr")
 
 
 @dataclass(frozen=True)
@@ -105,11 +109,68 @@ def load_profile(profile_id: str) -> ProjectProfile:
     )
 
 
-def load_profile_payload(profile_id: str) -> dict[str, Any]:
+def load_profile_payload(profile_id: str, root: Path | None = None) -> dict[str, Any]:
     payload = yaml.safe_load(_read_profile_text(profile_id))
     if not isinstance(payload, dict):
         raise ValueError(f"profile must be a mapping: {profile_id}")
-    return payload
+    if root is None:
+        return payload
+    return apply_project_profile_override(payload, profile_id=profile_id, root=root)
+
+
+def project_profile_override_path(root: Path, profile_id: str) -> Path:
+    return root / ".agent-flow" / "profiles" / f"{profile_id}{PROJECT_OVERRIDE_SUFFIX}"
+
+
+def apply_project_profile_override(
+    payload: dict[str, Any], *, profile_id: str, root: Path
+) -> dict[str, Any]:
+    """`<root>/.agent-flow/profiles/<id>.local.yaml`을 배포 profile 위에 얹는다.
+
+    install은 배포 profile을 덮어써야 새 필드가 기존 설치본에 닿는다. 그래서 프로젝트가
+    그 파일을 직접 고치면 다음 install에 사라지고, 사라진 것을 아무도 모른 채 base와 PR
+    target이 kit 기본값으로 돌아간다. 별도 파일이라야 install이 손대지 않는다 —
+    `pruneUninstalledProfiles`는 kit에 같은 이름이 있는 파일만 지운다.
+
+    branch 계약만 받는다. gates/architecture/skills까지 열면 override가 반영되는 경로와
+    무시되는 경로가 갈리므로(그쪽 호출자는 root를 넘기지 않는다), 그 키는 거부한다.
+    조용히 무시하면 사용자는 선언이 걸렸다고 믿는다.
+    """
+    path = project_profile_override_path(root, profile_id)
+    if not path.is_file():
+        return payload
+    override = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if override is None:
+        return payload
+    if not isinstance(override, dict):
+        raise ValueError(f"profile override must be a mapping: {path}")
+    declared_id = override.get("id")
+    if declared_id is not None and declared_id != profile_id:
+        raise ValueError(f"profile override id mismatch: {path} declares {declared_id!r}")
+    unsupported = sorted(
+        key for key in override if key != "id" and key not in PROJECT_OVERRIDE_KEYS
+    )
+    if unsupported:
+        raise ValueError(
+            f"profile override supports only {', '.join(PROJECT_OVERRIDE_KEYS)}: "
+            f"remove {', '.join(unsupported)} from {path}"
+        )
+    merged = dict(payload)
+    for key in PROJECT_OVERRIDE_KEYS:
+        if key in override:
+            merged[key] = _deep_merge(payload.get(key), override[key])
+    return merged
+
+
+def _deep_merge(base: object, patch: object) -> object:
+    # 리스트는 합치지 않고 통째로 갈아 끼운다. 순서가 의미를 갖는 값(gate 순서, ref 후보)
+    # 에서 append 병합은 선언한 적 없는 순서를 만든다.
+    if not isinstance(base, dict) or not isinstance(patch, dict):
+        return patch
+    merged = dict(base)
+    for key, value in patch.items():
+        merged[key] = _deep_merge(base.get(key), value)
+    return merged
 
 
 def _gate_from_payload(item: object, *, profile_id: str) -> ProfileGate:

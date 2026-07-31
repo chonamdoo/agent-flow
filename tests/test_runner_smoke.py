@@ -534,6 +534,72 @@ def test_worktree_remove_cleans_stale_metadata_but_preserves_unproved_ref(tmp_pa
     assert _branch_exists(project, "feat/ghost")
 
 
+
+def test_worktree_remove_clears_runtime_metadata_with_obsolete_manifest_path(
+    tmp_path: Path,
+):
+    project = tmp_path / "obsolete-stale-worktree"
+    project.mkdir()
+    _init_git_project(project)
+    runtime_root = _worktree_runtime_root(project, "feat-ghost")
+    runtime_root.mkdir(parents=True)
+    obsolete_path = project / ".agent-flow" / "worktrees" / "feat-ghost"
+    (runtime_root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "path": str(obsolete_path),
+                "branch": "feat/ghost",
+                "base_ref": "main",
+                "base_oid": "",
+                "branch_created_by_agent_flow": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    r_remove = _run_cli(["worktree", "remove", "--name", "ghost", "--keep-branch"], project)
+
+    assert r_remove.returncode == 0, r_remove.stderr
+    assert "removed stale metadata" in r_remove.stdout
+    assert not runtime_root.exists()
+    r_list = _run_cli(["worktree", "list"], project)
+    assert r_list.returncode == 0, r_list.stderr
+    assert "no worktrees" in r_list.stdout
+
+
+def test_worktree_remove_preserves_an_occupied_path_when_manifest_uses_old_layout(
+    tmp_path: Path,
+):
+    project = tmp_path / "occupied-stale-worktree"
+    project.mkdir()
+    _init_git_project(project)
+    runtime_root = _worktree_runtime_root(project, "feat-ghost")
+    runtime_root.mkdir(parents=True)
+    occupied_path = _managed(project) / "feat-ghost"
+    occupied_path.mkdir(parents=True)
+    data = occupied_path / "keep.txt"
+    data.write_text("keep\n", encoding="utf-8")
+    obsolete_path = project / ".agent-flow" / "worktrees" / "feat-ghost"
+    (runtime_root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "path": str(obsolete_path),
+                "branch": "feat/ghost",
+                "base_ref": "main",
+                "base_oid": "",
+                "branch_created_by_agent_flow": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    r_remove = _run_cli(["worktree", "remove", "--name", "ghost", "--keep-branch"], project)
+
+    assert r_remove.returncode == 0, r_remove.stderr
+    assert runtime_root.exists()
+    assert data.read_text(encoding="utf-8") == "keep\n"
+
+
 def test_worktree_status_tolerates_corrupt_manifest(tmp_path: Path):
     project = tmp_path / "corrupt-manifest"
     project.mkdir()

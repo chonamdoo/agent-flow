@@ -89,3 +89,51 @@ def test_worktree_is_created_from_the_resolved_commit(tmp_path: Path):
     recorded = _manifest(root, "feat-feat")["base_oid"]
     actual = _git("rev-parse", "HEAD", cwd=status.path)
     assert actual == recorded
+
+
+def _declare_profile(root: Path, profile_id: str) -> None:
+    kit = root / ".agent-flow"
+    kit.mkdir(parents=True, exist_ok=True)
+    (kit / "kit.json").write_text(
+        json.dumps({"kit": "agent-flow", "profiles": [profile_id]}) + "\n", encoding="utf-8"
+    )
+
+
+def test_profile_declared_base_wins_over_the_name_list(tmp_path: Path):
+    """불변: profile이 base를 지명하면 worktree는 거기서 갈라진다.
+
+    이름 목록(`main` 우선)만 보면 release-first/gitflow 저장소가 선언과 다른 줄기에서
+    작업을 시작하고, PR target과 base가 어긋난 채로 리뷰까지 간다.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    _init_repo(root)
+    _git("branch", "develop", cwd=root)
+    _git("checkout", "develop", cwd=root)
+    (root / "f.txt").write_text("develop only\n", encoding="utf-8")
+    _git("add", ".", cwd=root)
+    _git("commit", "-m", "develop ahead", cwd=root)
+    develop_tip = _git("rev-parse", "develop", cwd=root)
+    _git("checkout", "main", cwd=root)
+    assert develop_tip != _git("rev-parse", "main", cwd=root)
+    # spring profile이 `branching.base: develop`을 선언한다.
+    _declare_profile(root, "spring")
+
+    status = create_worktree(root=root, plan=plan_worktree(root=root, name="feat"))
+
+    assert _git("rev-parse", "HEAD", cwd=status.path) == develop_tip
+    assert _manifest(root, "feat-feat")["base_oid"] == develop_tip
+
+
+def test_missing_declared_base_falls_back_to_the_name_list(tmp_path: Path):
+    """불변: 선언한 브랜치가 이 저장소에 없으면 worktree 생성이 죽지 않는다."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    _init_repo(root)
+    main_tip = _git("rev-parse", "main", cwd=root)
+    # develop이 없는 저장소에 develop을 선언한다.
+    _declare_profile(root, "spring")
+
+    status = create_worktree(root=root, plan=plan_worktree(root=root, name="feat"))
+
+    assert _git("rev-parse", "HEAD", cwd=status.path) == main_tip
