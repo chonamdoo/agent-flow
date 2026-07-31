@@ -421,13 +421,96 @@ def validate_forbidden_tokens(rel_path: str, text: str, role: dict[str, Any]) ->
     forbidden = role.get("forbidden")
     if not isinstance(forbidden, list):
         return findings
-    haystacks = [Path(rel_path).name, text]
+    haystacks = [Path(rel_path).name, code_only(rel_path, text)]
     for token in forbidden:
         if not isinstance(token, str) or not token:
             continue
         if any(contains_forbidden_token(haystack, token) for haystack in haystacks):
             findings.append(Finding(rel_path, f"{role.get('id', 'role')} contains forbidden token {token}"))
     return findings
+
+# 주석과 문자열 리터럴은 코드가 아니다. 거기 있는 토큰까지 위반으로 세면 `@media
+# screen`, 문서 URL의 `#view`, 예시 코드 블록이 필수 pre-commit gate를 막는다 —
+# 원래 보고된 70건과 같은 클래스다. 파서를 붙이는 대신 비-코드 구간을 공백으로
+# 지운다. 길이를 유지하므로 뒤따르는 경계 판정이 그대로 성립한다.
+def code_only(rel_path: str, text: str) -> str:
+    suffix = Path(rel_path).suffix
+    if suffix not in SOURCE_SUFFIXES:
+        return text
+    hash_comments = suffix == ".py"
+    slash_comments = not hash_comments
+    out = list(text)
+    index = 0
+    length = len(text)
+    while index < length:
+        rest = text[index:]
+        if slash_comments and rest.startswith("//"):
+            index = blank_until(out, text, index, "\n", keep_terminator=True)
+            continue
+        if slash_comments and rest.startswith("/*"):
+            index = blank_until(out, text, index + 2, "*/")
+            continue
+        if hash_comments and rest.startswith("#"):
+            index = blank_until(out, text, index, "\n", keep_terminator=True)
+            continue
+        quote = next((mark for mark in ('"""', "'''") if rest.startswith(mark)), "")
+        if quote:
+            index = blank_until(out, text, index + 3, quote)
+            continue
+        if text[index] in "\"'`":
+            # import/export의 모듈 경로는 문자열이지만 코드 참조다. 지우면
+            # `export * from './screens'` 같은 진짜 위반이 사라진다.
+            if is_module_specifier_line(text, index):
+                index = skip_string(text, index)
+            else:
+                index = blank_string(out, text, index)
+            continue
+        index += 1
+    return "".join(out)
+
+
+def blank_until(out: list[str], text: str, start: int, terminator: str, keep_terminator: bool = False) -> int:
+    end = text.find(terminator, start)
+    stop = len(text) if end == -1 else min(end + len(terminator), len(text))
+    for position in range(start, stop):
+        if not (keep_terminator and text[position] == terminator):
+            out[position] = " "
+    return stop
+
+
+MODULE_SPECIFIER_RE = re.compile(r"^\s*(?:export|import)\b|\brequire\s*\($")
+
+
+def is_module_specifier_line(text: str, index: int) -> bool:
+    prefix = text[text.rfind("\n", 0, index) + 1 : index]
+    return bool(MODULE_SPECIFIER_RE.search(prefix))
+
+
+def skip_string(text: str, start: int) -> int:
+    mark = text[start]
+    position = start + 1
+    while position < len(text) and text[position] != mark:
+        if text[position] == "\n":
+            break
+        if text[position] == "\\":
+            position += 1
+        position += 1
+    return min(position + 1, len(text))
+
+
+def blank_string(out: list[str], text: str, start: int) -> int:
+    mark = text[start]
+    position = start + 1
+    while position < len(text) and text[position] != mark:
+        # 줄바꿈에서 끊는다. 짝이 없는 따옴표 하나가 파일 끝까지 지우면 진짜 위반이
+        # 통째로 사라진다.
+        if text[position] == "\n":
+            break
+        if text[position] == "\\":
+            position += 1
+        out[position] = " "
+        position += 1
+    return min(position + 1, len(text))
 
 
 def contains_forbidden_token(haystack: str, token: str) -> bool:

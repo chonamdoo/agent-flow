@@ -109,8 +109,8 @@ def test_plural_and_non_lowercase_suffixes_are_reported():
     assert len(_forbidden(PY_DOMAIN_ROLE, "views.py", "def handle(): ...\n")) == 1
     assert len(_forbidden(WEB_DOMAIN_ROLE, "index.ts", "export * from './screens'\n")) == 1
     assert len(_forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", "class OrderDto2\n")) == 1
-    # 이 저장소는 한국어 주석이 규칙이다. 한글이 뒤에 붙어도 단어는 끝난 것이다.
-    assert len(_forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", "// OrderDto를 만든다\n")) == 1
+    # 한글이 뒤에 붙어도 단어는 끝난 것이다. Kotlin은 한글 식별자를 허용한다.
+    assert len(_forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", "val OrderDto목록 = 1\n")) == 1
     # 복수형 뒤에 다시 대문자로 단어가 시작하면 그 자리도 경계다.
     assert len(_forbidden(IOS_DOMAIN_ROLE, "Order.swift", "struct ViewsMapper {}\n")) == 1
     assert len(_forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", "class OrderDtosMapper\n")) == 1
@@ -420,3 +420,19 @@ def test_unresolved_placeholder_module_is_dropped_instead_of_silently_dead():
     without_feature = forbidden_gradle_dependencies("feature-api", {})
     assert all(":presentation" not in module for module in without_feature)
     assert ":core:data" in without_feature
+
+
+def test_comments_and_string_literals_are_not_code():
+    """주석·문자열의 토큰까지 세면 `@media screen`과 문서 URL이 필수 gate를 막는다."""
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", "// 참고: https://x/#screen\nconst a = 1\n") == []
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", "/* @media screen */\nconst a = 1\n") == []
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", 'const css = "@media screen";\n') == []
+    assert _forbidden(IOS_DOMAIN_ROLE, "Chat.swift", "// ViewModel 설명\nstruct A {}\n") == []
+    assert _forbidden(PY_DOMAIN_ROLE, "chat.py", "# View 관련 메모\nx = 1\n") == []
+
+
+def test_module_specifiers_stay_code_even_though_they_are_strings():
+    """반증: 문자열을 통째로 지우면 `export * from './screens'` 같은 진짜 위반이 사라진다."""
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "index.ts", "export * from './screens'\n")) == 1
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "index.ts", 'import { X } from "./ChatScreen"\n')) == 1
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "index.ts", 'const x = require("./ChatScreen")\n')) == 1
