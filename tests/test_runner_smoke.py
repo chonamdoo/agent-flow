@@ -860,7 +860,17 @@ def test_worktree_branch_validation_rejects_invalid_refs(tmp_path: Path):
     project.mkdir()
     _init_git_project(project)
 
-    invalid_branches = ["foo bar", "foo~1", "foo:bar", "foo^", ".foo", "foo/", "foo//bar", "foo.lock"]
+    invalid_branches = [
+        "foo bar",
+        "foo~1",
+        "foo:bar",
+        "foo^",
+        ".foo",
+        "foo/",
+        "foo//bar",
+        "foo.lock",
+        "HEAD",
+    ]
     for branch in invalid_branches:
         result = _run_cli(["run", "task", "--worktree", "task", "--worktree-branch", branch], project)
         assert result.returncode == 2

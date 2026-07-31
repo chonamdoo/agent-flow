@@ -258,6 +258,8 @@ def test_override_rejects_an_invalid_branch_contract(tmp_path, body):
         'pr:\n  target_branch: "foo..bar"\n',
         'branching:\n  base: "release/.candidate"\n',
         'branching:\n  base: "release.lock/next"\n',
+        'branching:\n  base: HEAD\n  integration: HEAD\n'
+        'pr:\n  target_branch: HEAD\n',
     ],
     ids=[
         "base-space",
@@ -266,6 +268,7 @@ def test_override_rejects_an_invalid_branch_contract(tmp_path, body):
         "target-double-dot",
         "dot-component",
         "lock-component",
+        "head",
     ],
 )
 def test_override_rejects_an_unsafe_git_branch(tmp_path, body):

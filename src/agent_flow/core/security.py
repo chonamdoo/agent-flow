@@ -20,6 +20,7 @@ def validate_git_branch(value: str) -> None:
         or value.startswith("-")
         or value.startswith(".")
         or value == "@"
+        or value == "HEAD"
         or value.startswith("/")
         or value.endswith("/")
         or value.endswith(".")
