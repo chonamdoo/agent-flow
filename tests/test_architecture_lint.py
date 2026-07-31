@@ -499,3 +499,25 @@ def test_backticks_and_slashes_follow_the_language_not_a_guess():
     assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", "switch (x) { case 1://Screen 메모\n}\n") == []
     # Groovy `from`은 모듈 지정자가 아니다.
     assert _forbidden(ANDROID_PRESENTATION_ROLE, "build.gradle", "copy { from 'src/main/dto' }\n") == []
+
+
+def test_every_language_keeps_its_own_interpolation_as_code():
+    """보간식은 문자열 안에 있어도 코드다. 마스킹하면 위반을 조용히 놓친다."""
+    # `View`와 `ViewModel` 둘 다 걸린다 - 세는 건 보간이 코드로 남았는가다.
+    assert _forbidden(IOS_DOMAIN_ROLE, "Chat.swift", 'let s = "\\(ViewModel.value)"\n')
+    assert len(_forbidden(PY_DOMAIN_ROLE, "chat.py", 'x = f"{ApiClient.value}"\n')) == 1
+    # Kotlin/Groovy는 중괄호 없는 `$name`도 보간이다.
+    assert len(_forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", 'val s = "$orderDto"\n')) == 1
+    # 접두사 없는 리터럴과 `{{` 이스케이프는 보간이 아니다.
+    assert _forbidden(PY_DOMAIN_ROLE, "chat.py", 'x = "{ApiClient.value}"\n') == []
+    assert _forbidden(PY_DOMAIN_ROLE, "chat.py", 'x = f"{{ApiClient}}"\n') == []
+    assert _forbidden(IOS_DOMAIN_ROLE, "Chat.swift", 'let s = "ViewModel 설명"\n') == []
+
+
+def test_a_string_inside_an_interpolation_is_not_the_end_of_the_outer_string():
+    """안쪽 따옴표를 종료로 보면 보간식 앞부분의 위반이 지워진다."""
+    assert len(_forbidden(ANDROID_PRESENTATION_ROLE, "Chat.kt", 'val s = "${orderDto.format("x")}"\n')) == 1
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", 'const s = `${OrderDto.format("x")}`\n')) == 1
+    # 그래도 못 닫힌 보간은 파일을 열어두지 않는다.
+    assert _forbidden(IOS_DOMAIN_ROLE, "Chat.swift", 'let T = "\\("\n// Dto 메모\n') == []
+    assert _forbidden(PY_DOMAIN_ROLE, "chat.py", 'x = f"{"\n# Dto 메모\n') == []

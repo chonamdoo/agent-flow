@@ -433,19 +433,28 @@ def validate_forbidden_tokens(rel_path: str, text: str, role: dict[str, Any]) ->
 # screen`, 문서 URL의 `#view`, 예시 코드 블록이 필수 pre-commit gate를 막는다 —
 # 원래 보고된 70건과 같은 클래스다. 파서를 붙이는 대신 비-코드 구간을 공백으로
 # 지운다. 길이를 유지하므로 뒤따르는 경계 판정이 그대로 성립한다.
+#
+# 결과를 다시 이 함수에 넣지 않는다. 마스킹된 텍스트는 더 이상 그 언어의 소스가
+# 아니라(주석이 지워지며 따옴표 짝이 바뀐다) 2회차는 다른 답을 낸다.
 
 # 문자열 문법은 언어마다 다르다. 한 벌로 뭉뚱그리면 없애려던 오탐이 다른 자리에
-# 생긴다 - `.py`의 `"${screen}"`에는 보간이 없고, Kotlin의 backtick은 문자열이
-# 아니라 escaped identifier다.
+# 생기거나(`.py`의 `"${screen}"`에는 보간이 없다) 진짜 위반을 놓친다(Swift
+# `"\(viewModel)"`은 코드다). 보간 방식을 확장자별로 가른다.
+#   brace  - `${...}`만 (JS template literal)
+#   dollar - `${...}`와 `$name` (Kotlin/Groovy 큰따옴표)
+#   swift  - `\(...)`
+#   fstring- `{...}`, 단 `f` 접두사가 붙은 리터럴에서만
 JS_SUFFIXES = {".ts", ".tsx", ".js", ".jsx"}
-INTERPOLATING_MARKS = {
-    ".ts": "`",
-    ".tsx": "`",
-    ".js": "`",
-    ".jsx": "`",
-    ".kt": '"',
-    ".kts": '"',
-    ".gradle": '"',
+INTERPOLATION_STYLES = {
+    ".ts": ("`", "brace"),
+    ".tsx": ("`", "brace"),
+    ".js": ("`", "brace"),
+    ".jsx": ("`", "brace"),
+    ".kt": ('"', "dollar"),
+    ".kts": ('"', "dollar"),
+    ".gradle": ('"', "dollar"),
+    ".swift": ('"', "swift"),
+    ".py": ("\"'", "fstring"),
 }
 
 
@@ -456,9 +465,9 @@ def code_only(rel_path: str, text: str, mask_strings: bool = True) -> str:
     hash_comments = suffix == ".py"
     slash_comments = not hash_comments
     javascript = suffix in JS_SUFFIXES
-    interpolating = INTERPOLATING_MARKS.get(suffix, "")
+    interpolating_marks, interpolation_style = INTERPOLATION_STYLES.get(suffix, ("", ""))
     # backtick은 JS에서만 문자열이다. Kotlin에서는 escaped identifier라
-    # (`val ``screen state```) 문자열로 보면 그 안의 위반을 놓친다.
+    # 문자열로 보면 그 안의 위반을 놓친다.
     marks = "\"'`" if javascript else "\"'"
     out = list(text)
     index = 0
@@ -476,18 +485,18 @@ def code_only(rel_path: str, text: str, mask_strings: bool = True) -> str:
             continue
         quote = next((mark for mark in ('"""', "'''") if rest.startswith(mark)), "")
         if quote:
+            # 삼중 따옴표는 보간을 따로 보지 않는다. 여러 줄 문자열이라 한 줄 가드가
+            # 안 서고, 그 안의 보간까지 좇으면 스캐너가 파서가 된다.
             index = blank_until(out if mask_strings else None, text, index + 3, quote)
             continue
         if text[index] in marks:
             # gradle 판독기는 문자열이 곧 데이터다(`project(":core:data")`). 주석만
             # 지우고 문자열은 남긴다.
             keep = not mask_strings or (javascript and is_module_specifier(text, index))
-            index = blank_string(
-                None if keep else out,
-                text,
-                index,
-                interpolates=text[index] == interpolating,
-            )
+            style = interpolation_style if text[index] in interpolating_marks else ""
+            if style == "fstring" and not has_format_prefix(text, index):
+                style = ""
+            index = blank_string(None if keep else out, text, index, style)
             continue
         index += 1
     return "".join(out)
@@ -505,6 +514,15 @@ def is_url_scheme_slash(text: str, index: int) -> bool:
         return False
     previous = text[index - 2]
     return previous.isascii() and previous.isalpha()
+
+
+def has_format_prefix(text: str, quote: int) -> bool:
+    """`f"..."`처럼 f 접두사가 붙은 Python 리터럴인가."""
+    start = quote
+    while start > 0 and text[start - 1].isascii() and text[start - 1].isalpha():
+        start -= 1
+    prefix = text[start:quote]
+    return len(prefix) <= 2 and "f" in prefix.lower()
 
 
 def blank_until(out: list[str] | None, text: str, start: int, terminator: str, keep_terminator: bool = False) -> int:
@@ -533,11 +551,11 @@ def is_module_specifier(text: str, index: int) -> bool:
     return bool(MODULE_SPECIFIER_RE.search(text[max(0, index - MODULE_SPECIFIER_LOOKBEHIND) : index]))
 
 
-def blank_string(out: list[str] | None, text: str, start: int, interpolates: bool = False) -> int:
+def blank_string(out: list[str] | None, text: str, start: int, style: str = "") -> int:
     """문자열 하나를 지나가며 `out`이 있으면 그 구간을 공백으로 만든다.
 
-    `interpolates`면 `${...}` 안쪽을 코드로 남긴다. `"${viewModel.state}"`는
-    문자열 안에 있어도 코드고, Kotlin/Compose 소스에서 흔하다.
+    보간식 안쪽은 코드로 남긴다. `"${viewModel.state}"`, `"\\(viewModel.state)"`,
+    `f"{api_client.value}"`는 문자열 안에 있어도 코드다.
     """
     mark = text[start]
     length = len(text)
@@ -551,6 +569,11 @@ def blank_string(out: list[str] | None, text: str, start: int, interpolates: boo
         if char == "\n" and mark != "`":
             return position
         if char == "\\":
+            if style == "swift" and text[position + 1 : position + 2] == "(":
+                closed = skip_balanced(text, position + 1, "(", ")", mark)
+                if closed != -1:
+                    position = closed
+                    continue
             # 파일이 백슬래시로 끝나면 건너뛴 자리가 범위 밖이다. 여기서 멈추지
             # 않으면 필수 gate가 finding 대신 IndexError로 죽는다.
             if position + 1 >= length:
@@ -563,8 +586,27 @@ def blank_string(out: list[str] | None, text: str, start: int, interpolates: boo
                 out[position] = " "
             position += 2
             continue
-        if interpolates and char == "$" and text[position + 1 : position + 2] == "{":
-            closed = skip_interpolation(text, position + 1, mark)
+        following = text[position + 1 : position + 2]
+        if style in ("brace", "dollar") and char == "$" and following == "{":
+            closed = skip_balanced(text, position + 1, "{", "}", mark)
+            if closed != -1:
+                position = closed
+                continue
+        if style == "dollar" and char == "$" and is_identifier_start(following):
+            # Kotlin/Groovy는 중괄호 없는 `$name`도 보간이다. 이름 부분만 코드다.
+            position += 1
+            while position < length and is_identifier_part(text[position]):
+                position += 1
+            continue
+        if style == "fstring" and char == "{":
+            if following == "{":
+                # `{{`는 리터럴 중괄호다. 보간이 아니다.
+                if out is not None:
+                    out[position] = " "
+                    out[position + 1] = " "
+                position += 2
+                continue
+            closed = skip_balanced(text, position, "{", "}", mark)
             if closed != -1:
                 position = closed
                 continue
@@ -574,23 +616,58 @@ def blank_string(out: list[str] | None, text: str, start: int, interpolates: boo
     return length
 
 
-def skip_interpolation(text: str, brace: int, mark: str) -> int:
-    """짝이 맞는 `}` 다음을 돌려준다. 문자열 안에서 못 찾으면 -1.
+def is_identifier_start(char: str) -> bool:
+    return bool(char) and (char == "_" or (char.isascii() and char.isalpha()))
+
+
+def is_identifier_part(char: str) -> bool:
+    return char == "_" or (char.isascii() and char.isalnum())
+
+
+def skip_balanced(text: str, opener: int, open_char: str, close_char: str, mark: str) -> int:
+    """짝이 맞는 닫는 괄호 다음을 돌려준다. 문자열 안에서 못 찾으면 -1.
 
     못 찾았는데 파일 끝을 돌려주면 그 지점부터 마스킹이 통째로 꺼진다 - `"${"`
     하나가 뒤따르는 주석 전부를 코드로 만든다.
+
+    보간식 안의 문자열은 바깥 문자열의 끝이 아니다. `"${orderDto.format("x")}"`에서
+    안쪽 따옴표를 종료로 보면 앞부분의 `orderDto`까지 지워 위반을 놓친다.
     """
     depth = 0
-    position = brace
-    while position < len(text):
+    position = opener
+    length = len(text)
+    while position < length:
         char = text[position]
-        if char == "{":
+        if char in "\"'`":
+            position = skip_nested_string(text, position, mark)
+            if position == -1:
+                return -1
+            continue
+        if char == open_char:
             depth += 1
-        elif char == "}":
+        elif char == close_char:
             depth -= 1
             if depth == 0:
                 return position + 1
-        elif char == mark or (char == "\n" and mark != "`"):
+        elif char == "\n" and mark != "`":
+            return -1
+        position += 1
+    return -1
+
+
+def skip_nested_string(text: str, start: int, mark: str) -> int:
+    """보간식 안의 문자열 하나를 지나 그 다음 위치를 돌려준다. 못 닫으면 -1."""
+    nested = text[start]
+    position = start + 1
+    length = len(text)
+    while position < length:
+        char = text[position]
+        if char == "\\":
+            position += 2
+            continue
+        if char == nested:
+            return position + 1
+        if char == "\n" and mark != "`":
             return -1
         position += 1
     return -1
