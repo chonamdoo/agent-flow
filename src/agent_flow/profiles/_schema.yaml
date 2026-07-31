@@ -3,6 +3,23 @@
 # Profiles describe per-stack behavior without leaking that knowledge into
 # workflow definitions. A workflow phase reads e.g. profile.gates and acts
 # accordingly; the workflow itself stays stack-neutral.
+#
+# 프로젝트별 값(`base`가 `release/26.7.x`인 저장소 등)은 이 파일들을 직접 고치지
+# 않는다. install이 배포 profile을 덮어써야 새 필드가 기존 설치본에 닿으므로, 직접
+# 편집한 값은 다음 install에 사라진다. 대신 같은 디렉터리에 override를 둔다:
+#
+#   .agent-flow/profiles/<profile-id>.local.yaml
+#
+# install이 손대지 않는 유일한 자리이고, `branching`과 `pr`만 받는다(그 외 키는
+# 거부된다 — 반영되지 않는 선언을 조용히 삼키지 않기 위해서다). dict는 깊게 병합하고
+# 리스트와 스칼라는 통째로 대체한다. 예:
+#
+#   branching:
+#     strategy: release-first
+#     base: "release/26.7.10.x"
+#     integration: "release/26.7.10.x"
+#   pr:
+#     target_branch: "release/26.7.10.x"
 
 version: 1
 

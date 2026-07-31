@@ -8,6 +8,12 @@ from typing import Any
 
 import yaml
 
+from agent_flow.core.security import (
+    ensure_child_path,
+    validate_git_branch,
+    validate_safe_name,
+)
+
 
 # `profiles/_schema.yaml`의 gates[].phase가 선언하는 전체 집합.
 GATE_PHASES: tuple[str, ...] = ("pre-commit", "pre-push", "post-merge")
@@ -15,6 +21,16 @@ GATE_PHASES: tuple[str, ...] = ("pre-commit", "pre-push", "post-merge")
 DEFAULT_GATE_PHASE = "pre-commit"
 # phase 필터를 끄는 선택자. 실제 gate가 이 값을 phase로 선언할 수는 없다.
 GATE_PHASE_ALL = "all"
+# 프로젝트가 배포 profile 위에 얹는 파일. install이 덮지 않는 유일한 자리다.
+PROJECT_OVERRIDE_SUFFIX = ".local.yaml"
+
+
+class _UnknownProfileError(ValueError):
+    pass
+
+
+# override가 실제로 반영되는 키만 받는다. 근거는 `apply_project_profile_override`.
+PROJECT_OVERRIDE_KEYS: tuple[str, ...] = ("branching", "pr")
 
 
 @dataclass(frozen=True)
@@ -88,8 +104,8 @@ def active_profile_ids(root: Path, requested: str = "auto") -> list[str]:
     return [detect_profile(root)]
 
 
-def load_profile(profile_id: str) -> ProjectProfile:
-    payload = load_profile_payload(profile_id)
+def load_profile(profile_id: str, root: Path | None = None) -> ProjectProfile:
+    payload = load_profile_payload(profile_id, root)
     if not isinstance(payload, dict):
         raise ValueError(f"profile must be a mapping: {profile_id}")
     if payload.get("id") != profile_id:
@@ -105,11 +121,165 @@ def load_profile(profile_id: str) -> ProjectProfile:
     )
 
 
-def load_profile_payload(profile_id: str) -> dict[str, Any]:
-    payload = yaml.safe_load(_read_profile_text(profile_id))
+def load_profile_payload(
+    profile_id: str,
+    root: Path | None = None,
+    *,
+    fallback_unknown_to_generic: bool = False,
+) -> dict[str, Any]:
+    try:
+        text = (
+            _read_profile_text(profile_id)
+            if root is None
+            else _read_project_profile_text(root, profile_id)
+        )
+    except _UnknownProfileError:
+        if not fallback_unknown_to_generic:
+            raise
+        profile_id = "generic"
+        text = (
+            _read_profile_text(profile_id)
+            if root is None
+            else _read_project_profile_text(root, profile_id)
+        )
+    payload = yaml.safe_load(text)
     if not isinstance(payload, dict):
         raise ValueError(f"profile must be a mapping: {profile_id}")
+    if payload.get("id") != profile_id:
+        raise ValueError(f"profile id mismatch: {profile_id}")
+    if root is None:
+        return payload
+    return apply_project_profile_override(payload, profile_id=profile_id, root=root)
+
+
+def project_profile_path(root: Path, profile_id: str) -> Path:
+    return _project_profile_path(root, profile_id, suffix=".yaml")
+
+
+def project_profile_override_path(root: Path, profile_id: str) -> Path:
+    return _project_profile_path(root, profile_id, suffix=PROJECT_OVERRIDE_SUFFIX)
+
+
+def _read_project_profile_text(root: Path, profile_id: str) -> str:
+    path = project_profile_path(root, profile_id)
+    if path.is_file():
+        return path.read_text(encoding="utf-8")
+    return _read_profile_text(profile_id)
+
+
+def _project_profile_path(root: Path, profile_id: str, *, suffix: str) -> Path:
+    profiles_root = root / ".agent-flow" / "profiles"
+    safe_id = validate_safe_name(profile_id, "profile")
+    return ensure_child_path(
+        profiles_root,
+        profiles_root / f"{safe_id}{suffix}",
+        "profile",
+    )
+
+
+def apply_project_profile_override(
+    payload: dict[str, Any], *, profile_id: str, root: Path
+) -> dict[str, Any]:
+    """`<root>/.agent-flow/profiles/<id>.local.yaml`을 배포 profile 위에 얹는다.
+
+    install은 배포 profile을 덮어써야 새 필드가 기존 설치본에 닿는다. 그래서 프로젝트가
+    그 파일을 직접 고치면 다음 install에 사라지고, 사라진 것을 아무도 모른 채 base와 PR
+    target이 kit 기본값으로 돌아간다. 별도 파일이라야 install이 손대지 않는다 —
+    `pruneUninstalledProfiles`는 kit에 같은 이름이 있는 파일만 지운다.
+
+    branch 계약만 받는다. gates/architecture/skills까지 열면 override가 반영되는 경로와
+    무시되는 경로가 갈리므로(그쪽 호출자는 root를 넘기지 않는다), 그 키는 거부한다.
+    조용히 무시하면 사용자는 선언이 걸렸다고 믿는다.
+    """
+    path = project_profile_override_path(root, profile_id)
+    if not path.is_file():
+        return _validate_project_profile_branch_contract(
+            payload,
+            source=project_profile_path(root, profile_id),
+        )
+    override = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if override is None:
+        return _validate_project_profile_branch_contract(
+            payload,
+            source=project_profile_path(root, profile_id),
+        )
+    if not isinstance(override, dict):
+        raise ValueError(f"profile override must be a mapping: {path}")
+    declared_id = override.get("id")
+    if declared_id is not None and declared_id != profile_id:
+        raise ValueError(f"profile override id mismatch: {path} declares {declared_id!r}")
+    unsupported = sorted(
+        key for key in override if key != "id" and key not in PROJECT_OVERRIDE_KEYS
+    )
+    if unsupported:
+        raise ValueError(
+            f"profile override supports only {', '.join(PROJECT_OVERRIDE_KEYS)}: "
+            f"remove {', '.join(unsupported)} from {path}"
+        )
+    merged = dict(payload)
+    for key in PROJECT_OVERRIDE_KEYS:
+        if key in override:
+            merged[key] = _deep_merge(payload.get(key), override[key])
+    return _validate_project_profile_branch_contract(merged, source=path)
+
+
+def _validate_project_profile_branch_contract(
+    payload: dict[str, Any], *, source: Path
+) -> dict[str, Any]:
+    branching = payload.get("branching")
+    pr = payload.get("pr")
+    declares_contract = (
+        isinstance(branching, dict)
+        and ("base" in branching or "integration" in branching)
+    ) or (
+        isinstance(pr, dict)
+        and ("target_branch" in pr or "merge_strategy" in pr)
+    )
+    invalid_section = (
+        "branching" in payload and not isinstance(branching, dict)
+    ) or (
+        "pr" in payload and not isinstance(pr, dict)
+    )
+    if not declares_contract and not invalid_section:
+        return payload
+    base = branching.get("base") if isinstance(branching, dict) else None
+    integration = branching.get("integration") if isinstance(branching, dict) else None
+    target = pr.get("target_branch") if isinstance(pr, dict) else None
+    strategy = pr.get("merge_strategy") if isinstance(pr, dict) else None
+    if (
+        not isinstance(base, str)
+        or not base.strip()
+        or not isinstance(integration, str)
+        or not integration.strip()
+        or not isinstance(target, str)
+        or not target.strip()
+        or integration != target
+        or not isinstance(strategy, str)
+        or strategy not in {"merge", "squash", "rebase"}
+    ):
+        raise ValueError(
+            "invalid project profile branch contract: branching.base and "
+            "branching.integration must be non-empty strings; pr.target_branch "
+            "must equal branching.integration; pr.merge_strategy must be merge, "
+            f"squash, or rebase: {source}"
+        )
+    try:
+        for branch in (base, integration, target):
+            validate_git_branch(branch)
+    except ValueError as exc:
+        raise ValueError(f"invalid project profile branch contract: {source}: {exc}") from exc
     return payload
+
+
+def _deep_merge(base: object, patch: object) -> object:
+    # 리스트는 합치지 않고 통째로 갈아 끼운다. 순서가 의미를 갖는 값(gate 순서, ref 후보)
+    # 에서 append 병합은 선언한 적 없는 순서를 만든다.
+    if not isinstance(base, dict) or not isinstance(patch, dict):
+        return patch
+    merged = dict(base)
+    for key, value in patch.items():
+        merged[key] = _deep_merge(base.get(key), value)
+    return merged
 
 
 def _gate_from_payload(item: object, *, profile_id: str) -> ProfileGate:
@@ -147,12 +317,13 @@ def _gate_phase_from_payload(value: object, *, profile_id: str, gate_id: str) ->
 
 
 def _read_profile_text(profile_id: str) -> str:
-    package_path = resources.files("agent_flow").joinpath("profiles", f"{profile_id}.yaml")
+    safe_id = validate_safe_name(profile_id, "profile")
+    package_path = resources.files("agent_flow").joinpath("profiles", f"{safe_id}.yaml")
     if package_path.is_file():
         return package_path.read_text(encoding="utf-8")
-    repo_path = Path(__file__).resolve().parents[3] / "profiles" / f"{profile_id}.yaml"
+    repo_path = Path(__file__).resolve().parents[3] / "profiles" / f"{safe_id}.yaml"
     if not repo_path.is_file():
-        raise ValueError(f"unknown profile: {profile_id}")
+        raise _UnknownProfileError(f"unknown profile: {profile_id}")
     return repo_path.read_text(encoding="utf-8")
 
 

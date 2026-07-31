@@ -5,27 +5,28 @@ import json
 import os
 import re
 import secrets
-import stat
 import shutil
+import stat
 import subprocess
-import tempfile
 import sys
+import tempfile
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, Sequence
+from typing import Any
 
 from agent_flow.artifact import ACTIVE_MARKER, find_active_runs, read_meta, write_meta
-from agent_flow.core.commands import run_safe_command
 from agent_flow.core.hook_integrity import (
     JSON_REGISTRATION_FILES,
     OMP_REGISTRATION_FILE,
     managed_path_hook_name,
 )
+from agent_flow.core.security import validate_git_branch
 from agent_flow.core.worktree_isolation import (
-    RegisteredWorktree,
     FileLeaseUnavailable,
+    RegisteredWorktree,
     WorktreeIsolationError,
     adopted_worktree_parent,
     assert_worktree_mergeable,
@@ -33,6 +34,7 @@ from agent_flow.core.worktree_isolation import (
     forget_adopted_checkout,
     git_repo_state,
     git_safe,
+    is_git_lock_contention,
     list_registered_worktrees,
     real_path,
     record_adopted_checkout,
@@ -44,7 +46,6 @@ from agent_flow.core.worktree_isolation import (
     worktree_creation_lock,
     worktree_path_key,
 )
-
 
 PROTECTED_WORKTREE_BRANCHES = {"main", "master", "develop"}
 GIT_WORKTREE_TIMEOUT_S = 300
@@ -267,7 +268,7 @@ def _create_worktree(
                 require_merged=False,
                 allow_unmerged=False,
             )
-        except Exception as cleanup_exc:
+        except Exception as cleanup_exc:  # noqa: BLE001
             # 롤백까지 실패하면 등록된 worktree가 manifest 없이 남는다. 원본
             # 예외를 가리지 않도록 경고로 표면화한다.
             print(
@@ -373,7 +374,7 @@ def attach_worktree(
     # 주장하지 않으므로 terminal cleanup은 checkout만 제거하고 branch는 보존한다.
     with worktree_creation_lock(root):
         current = _registered_at_path(root=root, path=registered.path)
-        if not _same_registration(registered, current):
+        if current is None or not _same_registration(registered, current):
             raise ValueError(
                 f"worktree registration changed while attaching {registered.path}; "
                 "re-run the command"
@@ -496,7 +497,7 @@ def _is_creation_layout_child(*, root: Path, path: Path) -> bool:
 
 
 def _assert_requestable_branch(branch: str) -> None:
-    _validate_branch(branch)
+    validate_git_branch(branch)
     if branch in PROTECTED_WORKTREE_BRANCHES:
         raise ValueError(f"protected worktree branch is not allowed: {branch}")
     if not branch.startswith("feat/"):
@@ -687,18 +688,24 @@ def run_worktree_cleanup_transaction(
                     if step == "archive":
                         _archive_cleanup_run(journal_path=journal_path, journal=journal)
                     elif step == "integration_proof":
-                        _record_integration_proof(root=root, journal=journal)
+                        _record_integration_proof(
+                            root=root,
+                            journal=journal,
+                            target_branch=target_branch,
+                        )
                     elif step == "checkout_removal":
                         _remove_journal_checkout(
                             root=root,
                             journal_path=journal_path,
                             journal=journal,
+                            target_branch=target_branch,
                         )
                     elif step == "branch_ref_cas":
                         _delete_journal_branch(
                             root=root,
                             journal_path=journal_path,
                             journal=journal,
+                            target_branch=target_branch,
                         )
                     else:
                         _remove_journal_metadata(root=root, journal=journal)
@@ -884,6 +891,12 @@ def _prepare_or_load_cleanup_journal(
             journal=journal,
             checkout_path=checkout_path,
         )
+        _refresh_cleanup_target_for_resume(
+            root=root,
+            journal_path=journal_path,
+            journal=journal,
+            target_branch=target_branch,
+        )
         return journal_path, journal
 
     registered = _registered_at_path(root=root, path=checkout_path)
@@ -919,16 +932,40 @@ def _prepare_or_load_cleanup_journal(
         raise CleanupBlockedError(
             f"recorded base OID is missing for {checkout_path}; preserving it"
         )
-    _validate_branch(target_branch)
-    target_ref = f"refs/heads/{target_branch}"
+    validate_git_branch(target_branch)
     if target_branch == status.branch:
         raise CleanupBlockedError("cleanup target branch cannot be the worktree branch")
-    target_oid = _ref_oid(root=root, ref=target_ref)
     branch_oid = _ref_oid(root=root, ref=f"refs/heads/{status.branch}")
-    if target_oid is None or branch_oid is None:
+    target_candidates: list[tuple[str, str]] = []
+    for candidate in _branch_ref_candidates(root=root, branch=target_branch):
+        try:
+            _refresh_remote_branch_ref(
+                root=root,
+                ref=candidate,
+                branch=target_branch,
+            )
+        except CleanupBlockedError:
+            continue
+        candidate_oid = _ref_oid(root=root, ref=candidate)
+        if candidate_oid is not None:
+            target_candidates.append((candidate, candidate_oid))
+    if branch_oid is None or not target_candidates:
         raise CleanupBlockedError(
             "target or worktree branch OID is unknown; preserving checkout"
         )
+    target_ref, target_oid = next(
+        (
+            candidate
+            for candidate in target_candidates
+            if _integration_method(
+                root=root,
+                head_oid=branch_oid,
+                target_oid=candidate[1],
+            )
+            is not None
+        ),
+        target_candidates[0],
+    )
     if registered.head != branch_oid:
         raise CleanupBlockedError(
             "worktree registration and branch ref disagree; preserving checkout"
@@ -945,9 +982,7 @@ def _prepare_or_load_cleanup_journal(
         )
 
     digest = hashlib.sha256(
-        f"{worktree_path_key(_git_common_dir(root))}\0{worktree_path_key(status.path)}".encode(
-            "utf-8"
-        )
+        f"{worktree_path_key(_git_common_dir(root))}\0{worktree_path_key(status.path)}".encode()
     ).hexdigest()[:16]
     archive_state = (
         _agent_flow_state_dir(root)
@@ -1036,7 +1071,9 @@ def _validate_cleanup_resume(
         raise CleanupBlockedError("cleanup journal escapes the repository state root")
     if journal["repository"] != _cleanup_repository_identity(root):
         raise CleanupBlockedError("cleanup journal repository identity changed")
-    if journal["target"]["ref"] != f"refs/heads/{target_branch}":
+    if journal["target"]["ref"] not in set(
+        _branch_ref_candidates(root=root, branch=target_branch)
+    ):
         raise CleanupBlockedError("cleanup target branch changed since journal preparation")
     if real_path(Path(journal["checkout"]["path"])) != real_path(checkout_path):
         raise CleanupBlockedError("cleanup checkout path changed since journal preparation")
@@ -1356,8 +1393,59 @@ def _assert_cleanup_owner_active(
         )
 
 
-def _record_integration_proof(*, root: Path, journal: dict[str, Any]) -> None:
-    target_oid = _refresh_integration_target(root=root, journal=journal)
+def _refresh_cleanup_target_for_resume(
+    *,
+    root: Path,
+    journal_path: Path,
+    journal: dict[str, Any],
+    target_branch: str,
+) -> None:
+    if journal["steps"]["integration_proof"]["status"] != "pending":
+        return
+    head_oid = journal["checkout"]["expected_head_oid"]
+    for candidate in _branch_ref_candidates(root=root, branch=target_branch):
+        try:
+            _refresh_remote_branch_ref(
+                root=root,
+                ref=candidate,
+                branch=target_branch,
+            )
+        except CleanupBlockedError:
+            continue
+        candidate_oid = _ref_oid(root=root, ref=candidate)
+        if candidate_oid is None or not (
+            _is_ancestor(root=root, ancestor=head_oid, descendant=candidate_oid)
+            or _merge_tree_is_noop(
+                root=root,
+                head_oid=head_oid,
+                target_oid=candidate_oid,
+            )
+        ):
+            continue
+        if (
+            journal["target"]["ref"] == candidate
+            and journal["target"]["expected_oid"] == candidate_oid
+        ):
+            return
+        journal["target"] = {
+            "ref": candidate,
+            "expected_oid": candidate_oid,
+        }
+        journal["integration"]["proof"] = "pending"
+        journal["integration"]["method"] = None
+        journal["updated_at"] = _utc_now()
+        _write_cleanup_journal(journal_path, journal)
+        return
+
+
+def _record_integration_proof(
+    *, root: Path, journal: dict[str, Any], target_branch: str
+) -> None:
+    target_oid = _refresh_integration_target(
+        root=root,
+        journal=journal,
+        target_branch=target_branch,
+    )
     _validate_cleanup_snapshot(root=root, journal=journal, require_clean=True)
     _prove_recorded_integration(
         root=root,
@@ -1366,8 +1454,11 @@ def _record_integration_proof(*, root: Path, journal: dict[str, Any]) -> None:
     )
 
 
-def _refresh_integration_target(*, root: Path, journal: dict[str, Any]) -> str:
+def _refresh_integration_target(
+    *, root: Path, journal: dict[str, Any], target_branch: str
+) -> str:
     target_ref = journal["target"]["ref"]
+    _refresh_remote_branch_ref(root=root, ref=target_ref, branch=target_branch)
     current = _ref_oid(root=root, ref=target_ref)
     if current is None:
         raise CleanupBlockedError(
@@ -1393,11 +1484,8 @@ def _prove_recorded_integration(
         raise CleanupBlockedError(
             "recorded base is not an ancestor of recorded head; proof is unknown"
         )
-    if _is_ancestor(root=root, ancestor=head_oid, descendant=target_oid):
-        method = "head-ancestor-of-target"
-    elif _merge_tree_is_noop(root=root, head_oid=head_oid, target_oid=target_oid):
-        method = "merge-tree-noop"
-    else:
+    method = _integration_method(root=root, head_oid=head_oid, target_oid=target_oid)
+    if method is None:
         raise CleanupBlockedError(
             "cannot prove recorded head is integrated into recorded target; "
             "preserving checkout and branch"
@@ -1405,6 +1493,14 @@ def _prove_recorded_integration(
     journal["integration"]["proof"] = "verified"
     journal["integration"]["method"] = method
     journal["integration"]["verified_at"] = _utc_now()
+
+
+def _integration_method(*, root: Path, head_oid: str, target_oid: str) -> str | None:
+    if _is_ancestor(root=root, ancestor=head_oid, descendant=target_oid):
+        return "head-ancestor-of-target"
+    if _merge_tree_is_noop(root=root, head_oid=head_oid, target_oid=target_oid):
+        return "merge-tree-noop"
+    return None
 
 
 def _validate_cleanup_snapshot(
@@ -1430,7 +1526,7 @@ def _validate_cleanup_snapshot(
             "worktree branch ref changed since cleanup preparation; preserving checkout"
         )
     target_oid = _ref_oid(root=root, ref=journal["target"]["ref"])
-    if target_oid != journal["target"]["expected_oid"]:
+    if target_oid is None or target_oid != journal["target"]["expected_oid"]:
         raise CleanupBlockedError(
             "integration target drifted since cleanup preparation; preserving checkout"
         )
@@ -1635,7 +1731,11 @@ def _prune_empty_host_hook_parents(*, checkout: Path, target: Path) -> None:
 
 
 def _remove_journal_checkout(
-    *, root: Path, journal_path: Path, journal: dict[str, Any]
+    *,
+    root: Path,
+    journal_path: Path,
+    journal: dict[str, Any],
+    target_branch: str,
 ) -> None:
     path = Path(journal["checkout"]["path"])
     registered = _registered_at_path(root=root, path=path)
@@ -1645,7 +1745,11 @@ def _remove_journal_checkout(
         journal_path=journal_path,
         journal=journal,
     )
-    _record_integration_proof(root=root, journal=journal)
+    _record_integration_proof(
+        root=root,
+        journal=journal,
+        target_branch=target_branch,
+    )
     journal["updated_at"] = _utc_now()
     _write_cleanup_journal(journal_path, journal)
     # `--force` 없는 `git worktree remove`는 untracked 파일 하나에도 거부한다. 우리가
@@ -1659,7 +1763,11 @@ def _remove_journal_checkout(
 
 
 def _delete_journal_branch(
-    *, root: Path, journal_path: Path, journal: dict[str, Any]
+    *,
+    root: Path,
+    journal_path: Path,
+    journal: dict[str, Any],
+    target_branch: str,
 ) -> None:
     checkout = journal["checkout"]
     if not checkout["delete_branch"] or not checkout["branch_owned"]:
@@ -1673,7 +1781,11 @@ def _delete_journal_branch(
         raise CleanupBlockedError(
             "worktree branch ref changed before CAS; preserving branch ref"
         )
-    target_oid = _refresh_integration_target(root=root, journal=journal)
+    target_oid = _refresh_integration_target(
+        root=root,
+        journal=journal,
+        target_branch=target_branch,
+    )
     _prove_recorded_integration(
         root=root,
         journal=journal,
@@ -2193,11 +2305,151 @@ def worktree_branch_exists(*, root: Path, branch: str) -> bool:
     return result.ok
 
 
+def _configured_remote_names(root: Path) -> list[str]:
+    remotes = git_safe("remote", cwd=root, optional_locks=False)
+    if not remotes.ok:
+        return []
+    names = sorted({name for name in remotes.stdout.splitlines() if name})
+    if "origin" in names:
+        names.remove("origin")
+        names.insert(0, "origin")
+    return names
+
+
+def _branch_ref_candidates(*, root: Path, branch: str) -> Iterator[str]:
+    yield f"refs/heads/{branch}"
+    for remote in _configured_remote_names(root):
+        yield f"refs/remotes/{remote}/{branch}"
+
+
+def _fetch_remote_branch_ref(
+    *, root: Path, remote: str, branch: str, ref: str
+) -> bool:
+    ref_existed = _git_commit_ref_exists(root=root, ref=ref)
+
+    def fetch() -> bool:
+        result = git_safe(
+            "fetch",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "--",
+            remote,
+            f"+refs/heads/{branch}:{ref}",
+            cwd=root,
+            timeout_s=GIT_WORKTREE_TIMEOUT_S,
+            optional_locks=False,
+        )
+        if result.ok:
+            return True
+        detail = f"{result.stderr}\n{result.stdout}"
+        if is_git_lock_contention(detail):
+            if not ref_existed and _git_commit_ref_exists(root=root, ref=ref):
+                return True
+            raise WorktreeIsolationError(detail.strip())
+        return False
+
+    try:
+        return with_git_lock_retry(
+            fetch,
+            is_retryable=lambda exc: isinstance(exc, WorktreeIsolationError)
+            and is_git_lock_contention(str(exc)),
+        )
+    except WorktreeIsolationError:
+        return not ref_existed and _git_commit_ref_exists(root=root, ref=ref)
+
+
+def _refresh_remote_branch_ref(*, root: Path, ref: str, branch: str) -> None:
+    if ref == f"refs/heads/{branch}":
+        return
+    for remote in _configured_remote_names(root):
+        if ref != f"refs/remotes/{remote}/{branch}":
+            continue
+        if not _fetch_remote_branch_ref(
+            root=root,
+            remote=remote,
+            branch=branch,
+            ref=ref,
+        ):
+            raise CleanupBlockedError(
+                f"cannot refresh cleanup target from remote {remote};"
+                " preserving checkout"
+            )
+        return
+    raise CleanupBlockedError(
+        "cleanup remote target is not configured; preserving checkout"
+    )
+
+
 def _default_base_ref(root: Path) -> str:
-    for ref in ("main", "origin/main", "master", "origin/master", "develop", "origin/develop"):
-        if _git_commit_ref_exists(root=root, ref=ref):
-            return ref
+    declared = _profile_base_ref(root)
+    if declared:
+        return declared
+    for branch in ("main", "master", "develop"):
+        for ref in _branch_ref_candidates(root=root, branch=branch):
+            if _git_commit_ref_exists(root=root, ref=ref):
+                return ref
     return "HEAD"
+
+
+def _profile_base_ref(root: Path) -> str:
+    """Resolve the profile-declared base ref when the repository can prove it.
+
+    An explicit project/forced profile is a contract, so an unavailable base fails closed.
+    An auto-detected profile is only a default and may fall through to the repository's
+    conventional branch names.
+    """
+    try:
+        from agent_flow.core.profiles import active_profile_ids, load_profile_payload
+
+        forced_profile = os.environ.get("AGENT_FLOW_PROFILE")
+        explicit_profile = bool(forced_profile) or (
+            root / ".agent-flow" / "kit.json"
+        ).is_file()
+        fallback_unknown = bool(forced_profile) or (
+            os.environ.get("AGENT_FLOW_FALLBACK_GENERIC") == "1"
+        )
+        profile_ids = [forced_profile] if forced_profile else active_profile_ids(root)
+        payloads = [
+            load_profile_payload(
+                profile_id,
+                root,
+                fallback_unknown_to_generic=fallback_unknown,
+            )
+            for profile_id in profile_ids
+        ]
+    except Exception:  # noqa: BLE001
+        # profile을 못 읽는 것은 worktree를 못 만들 이유가 아니다. 이름 목록으로 내려간다.
+        return ""
+    for payload in payloads:
+        branching = payload.get("branching") if isinstance(payload, dict) else None
+        if not isinstance(branching, dict):
+            continue
+        declared = branching.get("base")
+        if not isinstance(declared, str):
+            continue
+        declared = declared.strip()
+        if not declared or declared.startswith("-") or declared.split() != [declared]:
+            continue
+        local_ref = f"refs/heads/{declared}"
+        if _git_commit_ref_exists(root=root, ref=local_ref):
+            return local_ref
+        for remote in _configured_remote_names(root):
+            ref = f"refs/remotes/{remote}/{declared}"
+            if _git_commit_ref_exists(root=root, ref=ref):
+                return ref
+            if _fetch_remote_branch_ref(
+                root=root,
+                remote=remote,
+                branch=declared,
+                ref=ref,
+            ) and _git_commit_ref_exists(root=root, ref=ref):
+                return ref
+        if explicit_profile:
+            raise WorktreeIsolationError(
+                f"profile base branch is unavailable: {declared}"
+            )
+        return ""
+    return ""
 
 
 def _git_commit_ref_exists(*, root: Path, ref: str) -> bool:
@@ -2397,7 +2649,7 @@ def _planned_branch(name: str) -> str | None:
         return None
     branch = f"feat/{safe.removeprefix('feat-')}"
     try:
-        _validate_branch(branch)
+        validate_git_branch(branch)
     except ValueError:
         return None
     return None if branch in PROTECTED_WORKTREE_BRANCHES else branch
@@ -2447,7 +2699,7 @@ def _manifest_branch(payload: dict | None) -> str | None:
     if not isinstance(value, str):
         return None
     try:
-        _validate_branch(value)
+        validate_git_branch(value)
     except ValueError:
         return None
     return value
@@ -2586,22 +2838,29 @@ def _metadata_belongs_to_path(*, root: Path, key: str, path: Path) -> bool:
     (현재/예전) 둘 다 본다. 한쪽만 보면 예전 자리 잔재의 런타임 메타데이터가 남아
     그 이름이 `worktree list`에 계속 다시 나타난다.
     """
+    managed_paths = (
+        managed_worktrees_root(root) / key,
+        legacy_managed_root(root) / key,
+    )
     payload = _state_key_manifest(root=root, key=key)
     if payload is None:
-        return any(
-            same_worktree_path(candidate_root / key, path)
-            for candidate_root in (
-                managed_worktrees_root(root),
-                legacy_managed_root(root),
-            )
-        )
+        return any(same_worktree_path(candidate, path) for candidate in managed_paths)
     recorded = payload.get("path")
     if not isinstance(recorded, str) or not recorded:
         return False
     candidate = Path(recorded)
     if not candidate.is_absolute():
         candidate = root / candidate
-    return same_worktree_path(candidate, path)
+    if same_worktree_path(candidate, path):
+        return True
+    # checkout이 사라진 뒤 layout이 legacy 자리에서 현재 자리로 바뀌어도 같은 key의
+    # 두 관리 경로끼리는 소유권을 이어 간다. 존재하는 다른 경로는 절대 신뢰하지 않는다.
+    return (
+        not candidate.exists()
+        and not path.exists()
+        and any(same_worktree_path(candidate, managed) for managed in managed_paths)
+        and any(same_worktree_path(path, managed) for managed in managed_paths)
+    )
 
 
 def _conflicting_metadata_hint(*, root: Path, status: WorktreeStatus) -> str:
@@ -3515,7 +3774,7 @@ def _live_branch(*, root: Path, path: Path) -> str | None:
     if not branch:
         return None
     try:
-        _validate_branch(branch)
+        validate_git_branch(branch)
     except ValueError:
         return None
     return branch
@@ -3549,20 +3808,3 @@ def _registered_worktree_paths(root: Path) -> set[Path]:
     }
 
 
-def _validate_branch(value: str) -> None:
-    invalid_chars = set(" ~^:?*[\\")
-    invalid = (
-        not value
-        or value.startswith("-")
-        or value.startswith(".")
-        or value.startswith("/")
-        or value.endswith("/")
-        or value.endswith(".")
-        or value.endswith(".lock")
-        or ".." in value
-        or "//" in value
-        or "@{" in value
-        or any(ord(ch) < 32 or ch == "\x7f" or ch in invalid_chars for ch in value)
-    )
-    if invalid:
-        raise ValueError(f"unsafe worktree branch: {value}")

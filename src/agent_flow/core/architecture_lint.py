@@ -95,8 +95,14 @@ class RoleMatch:
     pattern: str
 
 
-def lint_project(root: Path, profile_id: str, files: list[str] | None = None) -> list[Finding]:
-    profile = load_profile_payload(profile_id)
+def lint_project(
+    root: Path,
+    profile_id: str,
+    files: list[str] | None = None,
+    *,
+    profile_root: Path | None = None,
+) -> list[Finding]:
+    profile = load_profile_payload(profile_id, profile_root or root)
     architecture = profile.get("architecture")
     if not isinstance(architecture, dict):
         return []
@@ -130,17 +136,29 @@ def lint_project(root: Path, profile_id: str, files: list[str] | None = None) ->
     return findings
 
 
-def lint_profiles(root: Path, profile_ids: list[str], files: list[str] | None = None) -> dict[str, list[Finding]]:
+def lint_profiles(
+    root: Path,
+    profile_ids: list[str],
+    files: list[str] | None = None,
+    *,
+    profile_root: Path | None = None,
+) -> dict[str, list[Finding]]:
     requested_profile_ids = list(profile_ids)
     candidates = normalized_candidate_files(files if files is not None else changed_files(root))
     profile_ids = expanded_lint_profile_ids(requested_profile_ids, candidates)
+    source_root = profile_root or root
     if len(profile_ids) <= 1:
         return {
-            profile_id: lint_project(root, profile_id, files=files)
+            profile_id: lint_project(
+                root,
+                profile_id,
+                files=files,
+                profile_root=source_root,
+            )
             for profile_id in profile_ids
         }
     contexts = {
-        profile_id: profile_lint_context(profile_id)
+        profile_id: profile_lint_context(profile_id, source_root)
         for profile_id in profile_ids
     }
     android_is_supplemental = (
@@ -168,15 +186,29 @@ def lint_profiles(root: Path, profile_ids: list[str], files: list[str] | None = 
         for profile_id in relevant_profiles:
             selected[profile_id].append(rel_path)
     return {
-        profile_id: lint_project(root, profile_id, files=profile_files)
+        profile_id: lint_project(
+            root,
+            profile_id,
+            files=profile_files,
+            profile_root=source_root,
+        )
         for profile_id, profile_files in selected.items()
     }
 
 
-def inactive_lint_profile_ids(root: Path, profile_ids: list[str], candidates: list[str]) -> list[str]:
+def inactive_lint_profile_ids(
+    root: Path,
+    profile_ids: list[str],
+    candidates: list[str],
+    *,
+    profile_root: Path | None = None,
+) -> list[str]:
     inactive: list[str] = []
     for profile_id in profile_ids:
-        architecture = load_profile_payload(profile_id).get("architecture")
+        architecture = load_profile_payload(
+            profile_id,
+            profile_root or root,
+        ).get("architecture")
         if not isinstance(architecture, dict):
             continue
         roles = architecture.get("roles")
@@ -187,10 +219,13 @@ def inactive_lint_profile_ids(root: Path, profile_ids: list[str], candidates: li
     return inactive
 
 
-def unconfigured_lint_profile_ids(profile_ids: list[str]) -> list[str]:
+def unconfigured_lint_profile_ids(
+    profile_ids: list[str],
+    root: Path | None = None,
+) -> list[str]:
     unconfigured: list[str] = []
     for profile_id in profile_ids:
-        architecture = load_profile_payload(profile_id).get("architecture")
+        architecture = load_profile_payload(profile_id, root).get("architecture")
         if not isinstance(architecture, dict):
             unconfigured.append(profile_id)
             continue
@@ -208,8 +243,11 @@ def expanded_lint_profile_ids(profile_ids: list[str], candidates: list[str]) -> 
     return expanded
 
 
-def profile_lint_context(profile_id: str) -> tuple[list[object], tuple[str, ...]]:
-    profile = load_profile_payload(profile_id)
+def profile_lint_context(
+    profile_id: str,
+    root: Path | None = None,
+) -> tuple[list[object], tuple[str, ...]]:
+    profile = load_profile_payload(profile_id, root)
     architecture = profile.get("architecture")
     if not isinstance(architecture, dict):
         return ([], ())
@@ -1201,13 +1239,15 @@ def package_segment(value: str) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agent-flow architecture-lint")
     parser.add_argument("--root", default=".")
+    parser.add_argument("--profile-root")
     parser.add_argument("--profile", default="auto")
     parser.add_argument("--files", nargs="*")
     args = parser.parse_args(argv)
     root = Path(args.root).resolve()
+    profile_root = Path(args.profile_root).resolve() if args.profile_root else root
     try:
-        profile_ids = active_profile_ids(root, args.profile)
-        unconfigured = unconfigured_lint_profile_ids(profile_ids)
+        profile_ids = active_profile_ids(profile_root, args.profile)
+        unconfigured = unconfigured_lint_profile_ids(profile_ids, profile_root)
         if profile_ids and len(unconfigured) == len(profile_ids):
             print(
                 f"{','.join(unconfigured)}: architecture lint n/a "
@@ -1219,10 +1259,20 @@ def main(argv: list[str] | None = None) -> int:
         candidates = normalized_candidate_files(
             args.files if args.files is not None else changed_files(root)
         )
-        findings_by_profile = lint_profiles(root, profile_ids, files=candidates)
+        findings_by_profile = lint_profiles(
+            root,
+            profile_ids,
+            files=candidates,
+            profile_root=profile_root,
+        )
         profile_ids = list(findings_by_profile)
-        inactive = inactive_lint_profile_ids(root, profile_ids, candidates)
-        unconfigured = unconfigured_lint_profile_ids(profile_ids)
+        inactive = inactive_lint_profile_ids(
+            root,
+            profile_ids,
+            candidates,
+            profile_root=profile_root,
+        )
+        unconfigured = unconfigured_lint_profile_ids(profile_ids, profile_root)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 1

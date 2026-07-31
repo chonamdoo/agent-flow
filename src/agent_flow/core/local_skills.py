@@ -131,7 +131,7 @@ def resolved_profile(project_root: Path, requested: str | None = None) -> dict |
     """
     try:
         payloads = [
-            load_profile_payload(profile_id)
+            load_profile_payload(profile_id, project_root)
             for profile_id in active_profile_ids(project_root, requested or "auto")
         ]
     except Exception as exc:  # yaml 오류까지 포함해야 status가 traceback으로 죽지 않는다
