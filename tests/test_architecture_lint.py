@@ -614,3 +614,45 @@ def test_line_continuations_do_not_rescan_the_file_each_time():
     started = time.perf_counter()
     code_only("big.ts", source)
     assert time.perf_counter() - started < 2.0
+
+
+def test_a_keyword_named_property_is_not_a_regex_position():
+    """`cfg.default / 2`의 프로퍼티 이름은 키워드가 아니다. 양방향으로 깨진다."""
+    # 누락 방향: 정규식으로 보면 뒤쪽 참조가 지워진다.
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const r = cfg.default / OrderDto.count / 2;\n")) == 1
+    # 오탐 방향: 주석의 첫 슬래시가 정규식 종료로 잡혀 주석 본문이 코드로 남는다.
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const r = cfg.default / 2 // OrderDto 는 data 전용\n") == []
+    # 보간식 안에서는 닫는 중괄호까지 삼켜 보간 전체가 사라진다.
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const s = `${ obj.default / 2 }` + OrderDto.x\n")) == 1
+    # `$`는 JS 식별자 문자다. 잘라 읽으면 `obs$in`의 `in`이 키워드가 된다.
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const off = obs$in / OrderDto.size / 2;\n")) == 1
+
+
+def test_regex_position_keywords_are_narrower_than_literal_position_ones():
+    """`from`/`async`는 흔한 변수명이다. 정규식 자리로 보면 나눗셈이 깨진다."""
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const off = from / OrderDto.pageSize / 2;\n")) == 1
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const off = async / OrderDto.size / 2;\n")) == 1
+    # 진짜 키워드 자리는 그대로 정규식이다.
+    assert len(_forbidden(WEB_DOMAIN_ROLE, "chat.ts", "const r = typeof /re/;\nconst u = OrderDto;\n")) == 1
+    # 화살표 함수 뒤도 값 자리다.
+    assert _forbidden(WEB_DOMAIN_ROLE, "chat.ts", "xs.filter(s => /Dto/.test(s))\n") == []
+
+
+def test_a_failed_regex_scan_does_not_rescan_the_rest_of_the_line():
+    """줄에 미닫힘 `/`가 여럿이면 매번 줄 끝까지 훑어 이차식이 된다."""
+    from agent_flow.core.architecture_lint import code_only
+
+    source = "const s = `${ x" + ",/[a" * 2000 + " }`\n"
+    started = time.perf_counter()
+    code_only("big.ts", source)
+    assert time.perf_counter() - started < 1.0
+
+
+def test_skip_balanced_leaves_the_buffer_untouched_when_it_fails():
+    """실패 경로에서 out을 고치면 호출자가 되돌릴 수 없다."""
+    from agent_flow.core.architecture_lint import skip_balanced, syntax_for
+
+    text = 'const a = `${/* note }`;\nexport class OrderDto {}\n'
+    out = list(text)
+    assert skip_balanced(out, text, text.index("${") + 1, "{", "}", "`", "brace", syntax_for(".ts")) == -1
+    assert "".join(out) == text

@@ -499,15 +499,20 @@ def code_only(rel_path: str, text: str, mask_strings: bool = True) -> str:
     length = len(text)
     # `text[index:]`로 꼬리를 뜨면 문자마다 파일 전체를 복사해 O(n^2)가 된다.
     # 필수 pre-commit gate라 실측 9.2MB에 9초였다 - `startswith(pat, index)`로 본다.
+    # `regex_end` 실패는 줄 끝까지 훑는다. 한 줄에 그런 `/`가 여럿이면 이차식이
+    # 되므로(실측 31KB 한 줄에 4.2초) 실패한 줄은 그 줄이 끝날 때까지 건너뛴다.
+    # 실패는 "이 줄에 닫는 `/`가 없다"는 뜻이라 같은 줄의 뒤쪽도 정규식이 아니다.
+    regex_blocked_until = -1
     while index < length:
         char = text[index]
-        if char == "/" and syntax.javascript and is_regex_start(text, index, syntax):
+        if char == "/" and syntax.javascript and index >= regex_blocked_until and is_regex_start(text, index, syntax):
             closed = regex_end(text, index)
             if closed != -1:
                 if mask_strings:
                     blank_span(out, index + 1, closed)
                 index = closed
                 continue
+            regex_blocked_until = line_end(text, index)
         if syntax.slash_comments and text.startswith("//", index) and not is_url_scheme_slash(text, index):
             index = blank_until(out, text, index, "\n", keep_terminator=True)
             continue
@@ -584,6 +589,14 @@ JS_KEYWORDS_BEFORE_LITERAL = frozenset(
         "get", "set", "static", "async", "extends", "from", "import", "export",
     }
 )
+# 정규식이 올 수 있는 자리는 더 좁다. `from`/`get`/`export`는 흔한 변수·프로퍼티
+# 이름이라 여기 넣으면 `const off = from / size / 2`의 나눗셈이 정규식이 된다.
+JS_KEYWORDS_BEFORE_REGEX = frozenset(
+    {
+        "case", "return", "typeof", "in", "of", "new", "delete", "void",
+        "do", "else", "throw", "yield", "await", "instanceof", "default",
+    }
+)
 
 
 def is_jsx_contraction(text: str, index: int) -> bool:
@@ -599,7 +612,7 @@ def is_jsx_contraction(text: str, index: int) -> bool:
 # 정규식 리터럴 본문의 따옴표가 문자열을 열면 그 줄 나머지가 지워진다. 실측으로
 # `s.replace(/'/g, '')` 한 줄이 뒤따르는 코드를 통째로 삼켰다. 나눗셈과 가르는
 # 기준은 앞의 마지막 비공백 문자이거나, 그 앞 단어가 키워드인가다.
-REGEX_START_PREFIX = frozenset("=(,:[!&|?+;{}\n")
+REGEX_START_PREFIX = frozenset("=(,:[!&|?+;{}>\n")
 # JSX 본문의 `{a} / {b}`는 비율 표기지 정규식이 아니다. `.tsx`/`.jsx`에서 중괄호를
 # 정규식 시작으로 보면 `<div>{n} / {m} <Screen /></div>`의 뒤쪽이 통째로 지워진다.
 JSX_REGEX_START_PREFIX = REGEX_START_PREFIX - frozenset("{}")
@@ -617,10 +630,20 @@ def is_regex_start(text: str, index: int, syntax: Syntax) -> bool:
     if position > 0 and text[position - 1 : position + 1] in ("++", "--"):
         return False
     if is_identifier_part(text[position]):
-        # `return /re/.test(s)`처럼 키워드 뒤는 값 자리다.
-        return identifier_before(text, position + 1) in JS_KEYWORDS_BEFORE_LITERAL
+        # `return /re/.test(s)`처럼 키워드 뒤는 값 자리다. 다만 `cfg.default / 2`의
+        # 프로퍼티 이름은 키워드가 아니다 - 멤버 접근이면 나눗셈이다. `$`는 JS
+        # 식별자 문자인데 `is_identifier_part`가 빼므로 `obs$in`도 여기서 걸린다.
+        word = identifier_before(text, position + 1)
+        if text[position - len(word) : position - len(word) + 1] in (".", "$", "#"):
+            return False
+        return word in JS_KEYWORDS_BEFORE_REGEX
     prefix = JSX_REGEX_START_PREFIX if syntax.jsx else REGEX_START_PREFIX
     return text[position] in prefix
+
+
+def line_end(text: str, index: int) -> int:
+    found = text.find("\n", index)
+    return len(text) if found == -1 else found
 
 
 def regex_end(text: str, start: int) -> int:
@@ -652,7 +675,7 @@ def regex_end(text: str, start: int) -> int:
 
 
 # Python 문자열 접두사는 닫힌 집합이다. 글자만 훑으면 `if"{x}"`의 `if`가 f 접두사로
-# 통해 보간이 없는 문자열이 코드로 남는다.
+# 통과해, 보간이 없는 문자열이 코드로 남는다.
 FORMAT_PREFIXES = frozenset({"f", "F", "fr", "fR", "Fr", "FR", "rf", "rF", "Rf", "RF"})
 
 
@@ -832,6 +855,7 @@ def skip_balanced(
     position = opener
     length = len(text)
     spans: list[tuple[int, int]] = []
+    regex_blocked_until = -1
     while position < length:
         char = text[position]
         if char in "\"'`":
@@ -841,12 +865,13 @@ def skip_balanced(
             spans.append((position + 1, closed - 1))
             position = closed
             continue
-        if char == "/" and syntax.javascript and is_regex_start(text, position, syntax):
+        if char == "/" and syntax.javascript and position >= regex_blocked_until and is_regex_start(text, position, syntax):
             closed = regex_end(text, position)
             if closed != -1:
                 spans.append((position + 1, closed))
                 position = closed
                 continue
+            regex_blocked_until = line_end(text, position)
         if slash_comments and text.startswith("/*", position):
             closed = text.find("*/", position + 2)
             if closed == -1:
