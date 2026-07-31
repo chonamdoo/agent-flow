@@ -2214,8 +2214,10 @@ def _profile_base_ref(root: Path) -> str:
     try:
         from agent_flow.core.profiles import active_profile_ids, load_profile_payload
 
+        forced_profile = os.environ.get("AGENT_FLOW_PROFILE")
+        profile_ids = [forced_profile] if forced_profile else active_profile_ids(root)
         payloads = [
-            load_profile_payload(profile_id, root) for profile_id in active_profile_ids(root)
+            load_profile_payload(profile_id, root) for profile_id in profile_ids
         ]
     except Exception:
         # profile을 못 읽는 것은 worktree를 못 만들 이유가 아니다. 이름 목록으로 내려간다.

@@ -125,6 +125,29 @@ def test_profile_declared_base_wins_over_the_name_list(tmp_path: Path):
     assert _manifest(root, "feat-feat")["base_oid"] == develop_tip
 
 
+def test_forced_profile_base_wins_over_installed_profile(
+    tmp_path: Path,
+    monkeypatch,
+):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _init_repo(root)
+    _git("branch", "develop", cwd=root)
+    _git("checkout", "develop", cwd=root)
+    (root / "f.txt").write_text("develop only\n", encoding="utf-8")
+    _git("add", ".", cwd=root)
+    _git("commit", "-m", "develop advance", cwd=root)
+    develop_tip = _git("rev-parse", "HEAD", cwd=root)
+    _git("checkout", "main", cwd=root)
+    _declare_profile(root, "android")
+    monkeypatch.setenv("AGENT_FLOW_PROFILE", "spring")
+
+    status = create_worktree(root=root, plan=plan_worktree(root=root, name="feat"))
+
+    assert _git("rev-parse", "HEAD", cwd=status.path) == develop_tip
+    assert _manifest(root, "feat-feat")["base_oid"] == develop_tip
+
+
 def test_missing_declared_base_falls_back_to_the_name_list(tmp_path: Path):
     """불변: 선언한 브랜치가 이 저장소에 없으면 worktree 생성이 죽지 않는다."""
     root = tmp_path / "repo"
