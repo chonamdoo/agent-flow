@@ -343,6 +343,8 @@ def read_ledger(run_dir: Path) -> DesignLedger:
             errors.append("active SPEC fingerprints do not match spec capture state")
         if capture.get("task_digest", "") != recorded_task_digest:
             errors.append("task does not match spec capture state")
+        if capture.get("active_design_values_digest") != _design_values_digest(values):
+            errors.append("design values do not match spec capture state")
     source_path = _source_artifact_path(run_dir, source)
     if source_path is None:
         errors.append("source artifact is missing")
@@ -355,7 +357,15 @@ def read_ledger(run_dir: Path) -> DesignLedger:
             source_specs = parse_spec_item_section(source_text)
             if source_specs.errors:
                 errors.append("source artifact SPEC items are invalid")
-            if parse_design_values(source_text) != values:
+            source_values = parse_design_values(source_text)
+            if (
+                source_values != values
+                and (
+                    not isinstance(capture, dict)
+                    or capture.get("unconfirmed_design_values_digest")
+                    != _design_values_digest(source_values)
+                )
+            ):
                 errors.append("source artifact design values do not match design-spec.md")
     return DesignLedger(
         exists=True,
@@ -574,11 +584,47 @@ def confirm_current_spec_changes(run_dir: Path) -> Path:
     phase_id, source_path, parsed = current_spec_source(run_dir)
     if not parsed.items:
         raise ValueError("SPEC source artifact has no items")
+    source_text = source_path.read_text(encoding="utf-8")
+    ledger = read_ledger(run_dir)
+    if not ledger.exists:
+        confirmation_path = record_spec_confirmation(run_dir, parsed.items)
+        capture_design_ledger(run_dir, phase_id, source_text)
+        return confirmation_path
+    if not pending_spec_changes(run_dir, parsed.items):
+        raise ValueError("no pending SPEC changes to confirm")
+    expected_source_error = "source artifact design values do not match design-spec.md"
+    capture = _read_json(run_dir / SPEC_CAPTURE_FILE)
+    can_snapshot_unconfirmed_values = (
+        isinstance(capture, dict)
+        and not capture.get("unconfirmed_design_values_digest")
+    )
+    blocking_errors = tuple(
+        error
+        for error in ledger.errors
+        if error != expected_source_error or not can_snapshot_unconfirmed_values
+    )
+    if blocking_errors:
+        detail = "; ".join(blocking_errors)
+        raise ValueError(f"cannot confirm SPEC changes: {detail}")
+    source_values = parse_design_values(source_text)
     confirmation_path = record_spec_confirmation(run_dir, parsed.items)
-    capture_design_ledger(
+    updated = DesignLedger(
+        exists=True,
+        source_phase=ledger.source_phase,
+        values=ledger.values,
+        spec_items=parsed.items,
+        source_digest=ledger.source_digest,
+        spec_digest=spec_set_digest(parsed.items),
+        task_digest=ledger.task_digest,
+    )
+    write_ledger(run_dir, updated)
+    _write_capture_state(
         run_dir,
-        phase_id,
-        source_path.read_text(encoding="utf-8"),
+        updated,
+        source_items=parsed.items,
+        unconfirmed_design_values=(
+            source_values if source_values != ledger.values else None
+        ),
     )
     return confirmation_path
 
@@ -655,7 +701,6 @@ def _manual_spec_item(run_dir: Path, spec_id: str) -> SpecItem:
         raise ValueError(f"{canonical_id} does not use manual verification")
     return item
 
-
 def _manual_approval_statement(item: SpecItem) -> str:
     return f"APPROVE {item.spec_id} {_spec_fingerprint(item)[:12]}"
 
@@ -665,11 +710,17 @@ def _spec_fingerprint(item: SpecItem) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _design_values_digest(values: tuple[tuple[str, str], ...]) -> str:
+    payload = json.dumps(values, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _write_capture_state(
     run_dir: Path,
     ledger: DesignLedger,
     *,
     source_items: tuple[SpecItem, ...],
+    unconfirmed_design_values: tuple[tuple[str, str], ...] | None = None,
 ) -> None:
     _write_json_atomic(
         run_dir / SPEC_CAPTURE_FILE,
@@ -684,7 +735,13 @@ def _write_capture_state(
             "active_spec_fingerprints": [
                 _spec_fingerprint(item) for item in ledger.spec_items
             ],
+            "active_design_values_digest": _design_values_digest(ledger.values),
             "task_digest": ledger.task_digest,
+            "unconfirmed_design_values_digest": (
+                _design_values_digest(unconfirmed_design_values)
+                if unconfirmed_design_values is not None
+                else ""
+            ),
         },
     )
 

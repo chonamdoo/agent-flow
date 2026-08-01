@@ -250,6 +250,93 @@ design-values: none
     assert active[0].requirement == "Empty search results show a retry action."
 
 
+def test_spec_confirmation_preserves_unshown_design_values(tmp_path):
+    initial = SPEC_ARTIFACT.replace(
+        "\n## Completion Gate",
+        "\nspacing: 16dp\n\n## Completion Gate",
+    )
+    before = _capture(tmp_path, "design", initial)
+    changed = initial.replace(
+        "Empty search results show the empty state.",
+        "Empty search results show a retry action.",
+    ).replace("spacing: 16dp", "spacing: 24dp")
+    (tmp_path / "design.md").write_text(changed, encoding="utf-8")
+
+    confirm_current_spec_changes(tmp_path)
+
+    after = read_ledger(tmp_path)
+    assert pending_spec_changes_for_run(tmp_path) == ()
+    assert after.spec_items[0].requirement == "Empty search results show a retry action."
+    assert after.values == before.values == (("spacing", "16dp"),)
+    assert after.source_digest == before.source_digest
+
+    (tmp_path / "design.md").write_text(
+        changed.replace("spacing: 24dp", "spacing: 32dp"),
+        encoding="utf-8",
+    )
+    assert (
+        "source artifact design values do not match design-spec.md"
+        in read_ledger(tmp_path).errors
+    )
+
+    changed_again = changed.replace(
+        "\n## Design Values",
+        "\nSPEC-3: Empty state offers a retry action.\n"
+        "verify: test:test_empty_state_retry\n\n"
+        "## Design Values",
+    ).replace("spacing: 24dp", "spacing: 32dp")
+    (tmp_path / "design.md").write_text(changed_again, encoding="utf-8")
+    with pytest.raises(
+        ValueError,
+        match="source artifact design values do not match",
+    ):
+        confirm_current_spec_changes(tmp_path)
+
+
+def test_spec_confirmation_rejects_tampered_ledger_design_values(tmp_path):
+    initial = SPEC_ARTIFACT.replace(
+        "\n## Completion Gate",
+        "\nspacing: 16dp\n\n## Completion Gate",
+    )
+    _capture(tmp_path, "design", initial)
+    ledger_path = tmp_path / LEDGER_FILE
+    ledger_path.write_text(
+        ledger_path.read_text(encoding="utf-8").replace(
+            "spacing: 16dp",
+            "spacing: 24dp",
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "design.md").write_text(
+        initial.replace(
+            "Empty search results show the empty state.",
+            "Empty search results show a retry action.",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="design values do not match spec capture state",
+    ):
+        confirm_current_spec_changes(tmp_path)
+
+
+def test_design_value_only_change_cannot_use_spec_confirmation(tmp_path):
+    initial = SPEC_ARTIFACT.replace(
+        "\n## Completion Gate",
+        "\nspacing: 16dp\n\n## Completion Gate",
+    )
+    _capture(tmp_path, "design", initial)
+    (tmp_path / "design.md").write_text(
+        initial.replace("spacing: 16dp", "spacing: 24dp"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="no pending SPEC changes"):
+        confirm_current_spec_changes(tmp_path)
+
+
 def test_ledger_tampering_or_missing_capture_state_fails_closed(tmp_path):
     _capture(tmp_path, "design", SPEC_ARTIFACT)
     ledger_path = tmp_path / LEDGER_FILE
