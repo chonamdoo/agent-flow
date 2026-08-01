@@ -1269,6 +1269,9 @@ _RUNTIME_WRITE_PATHS = tuple(
     f"{_AGENT_FLOW_PREFIX}/skills-read.jsonl",
     f"{_AGENT_FLOW_PREFIX}/commands-run.jsonl",
 )
+# Finder가 checkout을 열어 둔 것만으로 비결정적으로 갱신한다. 프로젝트 동작이나
+# 실행 표면을 바꾸지 않는 이 basename만 status와 tracked digest 양쪽에서 뺀다.
+_AMBIENT_METADATA_BASENAMES = (".DS_Store",)
 # 심층 스캔에 함께 넣는 **실행 표면**. 다음 phase가 실제로 실행하는 바이너리와
 # host의 hook 등록 파일이다. `--ignored=matching`은 ignore된 디렉터리를 한 줄로
 # 접어서 그 안쪽 교체가 통째로 안 보인다. 실측 BLIND였던 자리를 그대로 편다:
@@ -1471,6 +1474,14 @@ def _tracked_content_digest(leader_root) -> str:
         "--",
         ".",
         *(f":(exclude){path}" for path in _RUNTIME_WRITE_PATHS),
+        *(
+            f":(glob,exclude){basename}"
+            for basename in _AMBIENT_METADATA_BASENAMES
+        ),
+        *(
+            f":(glob,exclude)**/{basename}"
+            for basename in _AMBIENT_METADATA_BASENAMES
+        ),
         cwd=leader_root,
         timeout_s=_TRIPWIRE_TIMEOUT_S,
         optional_locks=False,
@@ -1617,12 +1628,15 @@ def _is_status_code(prefix: str) -> bool:
 def _is_excluded_path(path: str) -> bool:
     """비교에서 뺄 경로인가.
 
-    세 종류다. (1) agent-flow가 스스로 쓰는 상태 디렉터리. (2) 접힌
-    ``.agent-flow/`` 디렉터리 레코드 — 심층 스캔이 안을 파일 단위로 이미
-    보고하므로 정보가 없고, 디렉터리가 생기고 사라지는 것만으로 변화가 생긴다.
-    ``.agent-flow/runtime`` 아래에서 실행으로 생기는 bytecode(``__pycache__``).
+    네 종류다. (1) OS가 자동 갱신하는 ambient metadata. (2) agent-flow가 스스로
+    쓰는 상태 디렉터리. (3) 접힌 ``.agent-flow/`` 디렉터리 레코드 — 심층 스캔이
+    안을 파일 단위로 이미 보고하므로 정보가 없고, 디렉터리가 생기고 사라지는
+    것만으로 변화가 생긴다. (4) ``.agent-flow/runtime`` 아래에서 실행으로
+    생기는 bytecode(``__pycache__``).
     """
     trimmed = path.rstrip("/")
+    if trimmed.rsplit("/", 1)[-1] in _AMBIENT_METADATA_BASENAMES:
+        return True
     if trimmed == _AGENT_FLOW_PREFIX:
         return True
     parts = trimmed.split("/")
