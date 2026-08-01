@@ -1287,6 +1287,45 @@ def test_tripwire_ignores_agent_runtime_writes(tmp_path):
         W_ISO.assert_leader_unchanged(tmp_path, before)
 
 
+def test_tripwire_ignores_finder_ds_store_updates(tmp_path):
+    _isolated(tmp_path, "finder-metadata")
+    before = W_ISO.capture_leader_snapshot(tmp_path)
+    root_metadata = tmp_path / ".DS_Store"
+    nested_metadata = tmp_path / ".agent-flow" / ".DS_Store"
+    nested_metadata.parent.mkdir(parents=True, exist_ok=True)
+
+    def assert_metadata_is_ignored() -> None:
+        try:
+            W_ISO.assert_leader_unchanged(tmp_path, before)
+        except W_ISO.WorktreeIsolationError as exc:
+            pytest.fail(f"Finder metadata triggered the leader tripwire: {exc}")
+
+    root_metadata.write_bytes(b"root-v1")
+    nested_metadata.write_bytes(b"nested-v1")
+    assert_metadata_is_ignored()
+
+    root_metadata.write_bytes(b"root-v2")
+    nested_metadata.write_bytes(b"nested-v2")
+    assert_metadata_is_ignored()
+
+    root_metadata.unlink()
+    nested_metadata.unlink()
+    assert_metadata_is_ignored()
+
+    root_metadata.write_bytes(b"tracked-v1")
+    nested_metadata.write_bytes(b"tracked-nested-v1")
+    _git("add", "-f", ".DS_Store", ".agent-flow/.DS_Store", cwd=tmp_path)
+    _git("commit", "-m", "track Finder metadata", cwd=tmp_path)
+    before = W_ISO.capture_leader_snapshot(tmp_path)
+    root_metadata.write_bytes(b"tracked-v2")
+    nested_metadata.write_bytes(b"tracked-nested-v2")
+    assert_metadata_is_ignored()
+
+    (tmp_path / "worker-leak.txt").write_text("leaked\n", encoding="utf-8")
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
 def test_tripwire_detects_hook_planted_in_leader(tmp_path):
     """불변: `.agent-flow/scripts/hooks/`는 감시한다.
 
