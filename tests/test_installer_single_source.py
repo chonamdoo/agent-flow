@@ -543,6 +543,36 @@ def test_previously_duplicated_helper_is_defined_once(name: str):
     )
 
 
+@pytest.mark.parametrize("xdg_state_home", ["", "~/.agent-flow", r"~\.agent-flow"])
+def test_js_does_not_treat_user_central_worktrees_as_project_markers(
+    tmp_path: Path, xdg_state_home: str
+):
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    source = KIT_ROOT / "lib" / "installer-shared.mjs"
+    script = (
+        "import { resolveManagedWorktreeContext as resolve } from "
+        f"{json.dumps(str(source))};"
+        "process.stdout.write(JSON.stringify(["
+        f"resolve({json.dumps(str(home / '.agent-flow' / 'worktrees' / 'project-a1b2c3d4e5f6' / 'feat-task' / 'src'))}),"
+        f"resolve({json.dumps(str(project / '.agent-flow' / 'worktrees' / 'feat-task' / 'src'))})"
+        "]));"
+    )
+    result = subprocess.run(
+        (_node(), "--input-type=module", "-e", script),
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env={**os.environ, "HOME": str(home), "XDG_STATE_HOME": xdg_state_home},
+        timeout=60,
+    )
+
+    central, local = json.loads(result.stdout)
+    assert central is None
+    assert local == {"root": str(project), "name": "feat-task"}
+
+
 def test_hooks_disabled_is_passed_in_not_read_from_the_entry_point():
     """불변: 공유 본문이 진입점 전역을 읽으면 그 진입점에서만 도는 코드가 된다.
 

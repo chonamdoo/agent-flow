@@ -192,7 +192,7 @@ phases:
       Create the worktree with `agent-flow worktree create --name feat-<slug>`
       before implementation — not with `git worktree add`, which skips the
       creation lock, base selection, and the adoption record. The default
-      location is the sibling folder `<repo>.worktrees/feat-<slug>/` and the
+      location is `~/.agent-flow/worktrees/<repo-id>/feat-<slug>/` and the
       default branch naming is `feat/<slug>`. Do not continue from the leader
       checkout.
       Output: worktree.md (branch name, base, worktree path).

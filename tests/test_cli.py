@@ -89,6 +89,20 @@ def _strip_markdown_frontmatter(text: str) -> str:
 
 
 class CliTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._previous_xdg_state_home = os.environ.get("XDG_STATE_HOME")
+        cls._xdg_state_home = tempfile.TemporaryDirectory()
+        os.environ["XDG_STATE_HOME"] = cls._xdg_state_home.name
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._xdg_state_home.cleanup()
+        if cls._previous_xdg_state_home is None:
+            os.environ.pop("XDG_STATE_HOME", None)
+        else:
+            os.environ["XDG_STATE_HOME"] = cls._previous_xdg_state_home
+
     def test_init_creates_agent_flow_dirs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir).resolve()
@@ -2896,7 +2910,9 @@ design-values-confirmed: n/a
 
             self.assertIn("already active", output.getvalue())
             self.assertFalse((managed_worktrees_root(root) / "feat-other").exists())
-            self.assertFalse((managed_worktrees_root(worktree)).exists())
+            self.assertEqual(
+                managed_worktrees_root(worktree), managed_worktrees_root(root)
+            )
 
     def test_python_cli_consent_starts_run_in_current_managed_worktree(self) -> None:
         from agent_flow.core.worktrees import create_worktree
@@ -8176,7 +8192,7 @@ if (codexContext !== undefined) {
                     )
                 self.assertEqual(
                     output.getvalue().strip(),
-                    f"feat-slice-a feat/slice-a {expected} exists",
+                    f"feat-slice-a feat/slice-a {expected.resolve()} exists",
                     name,
                 )
 
@@ -8418,6 +8434,25 @@ if (codexContext !== undefined) {
                         home / ".omp" / "worktrees" / "global-task" / "src"
                     )
                 )
+
+    def test_python_does_not_treat_user_central_worktrees_as_project_markers(self) -> None:
+        from agent_flow.cli import _managed_worktree_context
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            home = Path(temp_dir) / "home"
+            checkout = (
+                home
+                / ".agent-flow"
+                / "worktrees"
+                / "project-a1b2c3d4e5f6"
+                / "feat-task"
+                / "src"
+            )
+            with mock.patch.dict(
+                os.environ,
+                {"HOME": str(home), "XDG_STATE_HOME": ""},
+            ):
+                self.assertIsNone(_managed_worktree_context(checkout))
 
 
 

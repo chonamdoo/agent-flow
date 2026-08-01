@@ -7,7 +7,13 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
-import { activeInstallProfileIds, installedProfileFileNames, PROJECT_LAUNCHER_RELATIVE } from "../lib/installer-shared.mjs";
+import {
+  activeInstallProfileIds,
+  installedProfileFileNames,
+  PROJECT_LAUNCHER_RELATIVE,
+  resolveLinkedWorktreeLeader,
+  resolveManagedWorktreeContext,
+} from "../lib/installer-shared.mjs";
 
 // Python `LEAKY_GIT_ENV_VARS`(`src/agent_flow/core/worktree_isolation.py`) 및 두
 // installer와 같은 목록이다. ambient discovery 변수가 남아 있으면 이 검사가 검사
@@ -26,8 +32,8 @@ const LEAKY_GIT_ENV_VARS = [
 ];
 
 const SOURCE_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const HOME = process.env.HOME || process.env.USERPROFILE || "";
-const SOURCE_IS_MANAGED_WORKTREE = resolveManagedWorktreeRoot(SOURCE_ROOT) !== null;
+const SOURCE_IS_MANAGED_WORKTREE = resolveManagedWorktreeRoot(SOURCE_ROOT) !== null
+  || resolveLinkedWorktreeLeader(SOURCE_ROOT) !== null;
 const CHECK_INSTALLED_COPY = !SOURCE_IS_MANAGED_WORKTREE;
 // 워크플로·프로파일 정의는 설치 가능한 패키지 안에 한 벌만 산다. 예전에는 루트에
 // 같은 파일이 또 있었고, 이 스크립트가 둘의 바이트 동일성을 지켰다.
@@ -699,28 +705,7 @@ function resolveInstalledRoot(start) {
 }
 
 function resolveManagedWorktreeRoot(start) {
-  const parts = start.split(path.sep);
-  const markers = new Set([".agent-flow", ".codex", ".Codex", ".omp"]);
-  for (let index = parts.length - 2; index >= 0; index -= 1) {
-    if (parts[index + 1] !== "worktrees") continue;
-    if (!markers.has(parts[index])) continue;
-    const root = parts.slice(0, index).join(path.sep) || path.sep;
-    // 홈의 전역 Codex/OMP worktree는 설치 루트가 아니라 git common root를 따라간다.
-    if (HOME && samePath(root, HOME) && (parts[index] === ".codex" || parts[index] === ".Codex" || parts[index] === ".omp")) {
-      continue;
-    }
-    return root;
-  }
-  return null;
-}
-
-function samePath(left, right) {
-  try {
-    return fs.realpathSync.native(left) === fs.realpathSync.native(right);
-  } catch {
-    // 심볼릭 링크가 섞인 임시 경로에서도 홈 비교는 보수적으로 처리한다.
-    return path.resolve(left) === path.resolve(right);
-  }
+  return resolveManagedWorktreeContext(start)?.root ?? null;
 }
 
 function resolveGitCommonWorktreeRoot(start) {

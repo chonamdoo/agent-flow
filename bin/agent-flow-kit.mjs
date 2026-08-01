@@ -2189,7 +2189,7 @@ ${AGENT_FLOW_COMMAND} run "<task>"
 \`\`\`
 
 install은 프로젝트당 1회만 수행합니다. 새 세션이 시작됐다는 이유로 install을 다시 실행하지 않습니다.
-Follow the CLI output exactly. Git projects start inside the sibling folder \`<repo>.worktrees/feat-<slug>/\` without switching the leader branch; continue with the printed \`next_command\`.
+Follow the CLI output exactly. Git projects start inside \`~/.agent-flow/worktrees/<repo-id>/feat-<slug>/\` without switching the leader branch; continue with the printed \`next_command\`.
 
 run의 status가 SPEC 추가·수정·삭제를 보고하면 변경 목록만 사용자에게 보여 확인을 요청합니다. 사용자가 현재 대화에서 명확히 동의하면 agent가 status에 출력된 \`${AGENT_FLOW_COMMAND} spec confirm --run-dir <run-dir>\`을 실행합니다.
 \`manual\` verify 항목도 사용자에게 현재 대화에서 확인한 뒤 agent가 \`${AGENT_FLOW_COMMAND} spec approve <spec-id> --run-dir <run-dir>\`을 실행합니다.
@@ -2248,7 +2248,7 @@ ${AGENT_FLOW_COMMAND} run "<task>"
 \`\`\`
 
 Do not reinstall agent-flow for each task. Install is project setup, not the normal task entry.
-In a git repo, \`${AGENT_FLOW_COMMAND} run "<task>"\` starts the run inside the sibling folder \`<repo>.worktrees/feat-<slug>/\` on branch \`feat/<slug>\`.
+In a git repo, \`${AGENT_FLOW_COMMAND} run "<task>"\` starts the run inside \`~/.agent-flow/worktrees/<repo-id>/feat-<slug>/\` on branch \`feat/<slug>\`.
 
 When the user types \`/agent-flow\` with no task:
 
