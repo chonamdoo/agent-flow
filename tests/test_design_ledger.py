@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shlex
 import sys
 from pathlib import Path
 
@@ -24,26 +25,20 @@ from agent_flow.core.design_ledger import (
     LEDGER_FILE,
     MANUAL_SPEC_APPROVALS_FILE,
     SPEC_CAPTURE_FILE,
-    SPEC_SET_USER_REPLY,
-    attest_user_spec_confirmation,
     capture_design_ledger,
+    confirm_current_spec_changes,
     ledger_prompt_block,
-    manual_spec_approval_statement,
     missing_design_value_markers,
     parse_design_values,
     parse_spec_item_section,
+    pending_spec_changes_for_run,
     read_ledger,
     read_manual_spec_approvals,
-    prepare_and_attest_user_spec_confirmation,
-    prepare_user_spec_confirmation,
-    record_spec_set_confirmation,
-    spec_set_confirmation_statement,
-    spec_set_is_confirmed,
+    render_spec_changes,
 )
-from agent_flow.runner import Phase, Runner
+from agent_flow.runner import Phase
 
-HOOK_CAPABILITY = "a" * 64
-HOOK_CAPABILITY_HASH = hashlib.sha256(HOOK_CAPABILITY.encode()).hexdigest()
+
 
 ARTIFACT = """# prd
 
@@ -79,13 +74,6 @@ design-values: none
 
 def _capture(run_dir: Path, phase_id: str, artifact: str):
     (run_dir / f"{phase_id}.md").write_text(artifact, encoding="utf-8")
-    parsed = parse_spec_item_section(artifact)
-    if parsed.items and not parsed.errors:
-        record_spec_set_confirmation(
-            run_dir,
-            parsed.items,
-            spec_set_confirmation_statement(parsed.items),
-        )
     return capture_design_ledger(run_dir, phase_id, artifact)
 
 
@@ -158,25 +146,11 @@ def test_spec_items_round_trip_and_prompt_injection(tmp_path):
     assert "SPEC-2: SearchResults uses the empty-state copy." in prompt
     assert "verify: symbol:SearchResults=No results" in prompt
 
-def test_source_spec_set_requires_confirmation_and_invalidates_on_change(tmp_path):
-    parsed = parse_spec_item_section(SPEC_ARTIFACT)
-    expected = spec_set_confirmation_statement(parsed.items)
-    confirmation_message = (
-        "spec-confirmation: current user confirmation required; "
-        f"reply exactly `{SPEC_SET_USER_REPLY}` in this chat "
-        "(fallback: `agent-flow spec confirm`)"
-    )
+def test_initial_spec_set_is_baselined_without_separate_confirmation(tmp_path):
+    ledger = _capture(tmp_path, "design", SPEC_ARTIFACT)
 
-    missing = design_value_check.missing_spec_item_evidence(
-        tmp_path,
-        tmp_path,
-        "design",
-        SPEC_ARTIFACT,
-        task_text="Implement both requirements.",
-    )
-    assert missing == [confirmation_message]
-
-    record_spec_set_confirmation(tmp_path, parsed.items, expected)
+    assert tuple(item.spec_id for item in ledger.spec_items) == ("SPEC-1", "SPEC-2")
+    assert pending_spec_changes_for_run(tmp_path) == ()
     assert design_value_check.missing_spec_item_evidence(
         tmp_path,
         tmp_path,
@@ -184,246 +158,183 @@ def test_source_spec_set_requires_confirmation_and_invalidates_on_change(tmp_pat
         SPEC_ARTIFACT,
         task_text="Implement both requirements.",
     ) == []
-
-    changed = SPEC_ARTIFACT.replace(
-        "Empty search results show the empty state.",
-        "Empty search results show a retry action.",
-    )
-    changed_missing = design_value_check.missing_spec_item_evidence(
-        tmp_path,
-        tmp_path,
-        "design",
-        changed,
-        task_text="Implement both requirements.",
-    )
-    assert changed_missing == [confirmation_message]
+    prompt = ledger_prompt_block(tmp_path)
+    assert "SPEC Changes Awaiting User Confirmation" not in prompt
+    assert "agent-flow spec confirm" not in prompt
 
 
-def test_runner_recaptures_changed_source_after_reconfirmation(tmp_path):
+def test_later_addition_is_reported_without_replacing_the_active_baseline(tmp_path):
     _capture(tmp_path, "design", SPEC_ARTIFACT)
     changed = SPEC_ARTIFACT.replace(
-        "Empty search results show the empty state.",
-        "Empty search results show a retry action.",
+        "\n## Design Values",
+        "\nSPEC-3: Empty state offers a retry action.\n"
+        "verify: test:test_empty_state_retry\n\n"
+        "## Design Values",
     )
     (tmp_path / "design.md").write_text(changed, encoding="utf-8")
-    parsed = parse_spec_item_section(changed)
-    record_spec_set_confirmation(
-        tmp_path,
-        parsed.items,
-        spec_set_confirmation_statement(parsed.items),
-    )
-    assert design_value_check.missing_spec_item_evidence(
-        tmp_path,
-        tmp_path,
-        "design",
-        changed,
-        task_text="Implement both requirements.",
-    ) == []
 
-    runner = Runner(tmp_path, run_dir=tmp_path)
-    assert runner._next_index(0, Phase(id="design", description="")) == (1, False)
-    assert read_ledger(tmp_path).spec_items[0].requirement == (
-        "Empty search results show a retry action."
-    )
+    changes = pending_spec_changes_for_run(tmp_path)
+    prompt = ledger_prompt_block(tmp_path)
+    rendered = render_spec_changes(changes)
+
+    assert [(change.kind, change.spec_id) for change in changes] == [
+        ("added", "SPEC-3")
+    ]
+    assert "### Added" in rendered
+    assert "SPEC-3: Empty state offers a retry action." in rendered
+    assert "### Confirmed Spec Items" in prompt
+    assert "SPEC-1: Empty search results show the empty state." in prompt
+    assert "### SPEC Changes Awaiting User Confirmation" in prompt
+    assert "SPEC-3: Empty state offers a retry action." in prompt
+    assert "Unchanged confirmed SPEC work may continue" in prompt
+    assert "do not start added or modified SPEC work" in prompt
+    assert "agent-flow spec confirm" in prompt
+    assert "do not ask the user to run a terminal command" in prompt
 
 
-def test_host_confirmation_requires_matching_one_time_challenge(tmp_path):
-    parsed = parse_spec_item_section(SPEC_ARTIFACT)
-    legacy_confirmation = record_spec_set_confirmation(
-        tmp_path,
-        parsed.items,
-        spec_set_confirmation_statement(parsed.items),
+def test_pending_prompt_shell_quotes_the_run_path(tmp_path):
+    run_dir = tmp_path / "run $'quoted"
+    run_dir.mkdir()
+    _capture(run_dir, "design", SPEC_ARTIFACT)
+    changed = SPEC_ARTIFACT.replace(
+        "\n## Design Values",
+        "\nSPEC-3: Empty state offers a retry action.\n"
+        "verify: test:test_empty_state_retry\n\n"
+        "## Design Values",
     )
-    legacy_payload = json.loads(legacy_confirmation.read_text(encoding="utf-8"))
-    legacy_payload["provenance"] = "host-user-prompt"
-    legacy_confirmation.write_text(
-        json.dumps(legacy_payload),
+    (run_dir / "design.md").write_text(changed, encoding="utf-8")
+
+    prompt = ledger_prompt_block(run_dir)
+
+    assert (
+        "agent-flow spec confirm --run-dir "
+        f"{shlex.quote(str(run_dir))}"
+    ) in prompt
+
+
+def test_modified_and_deleted_items_require_only_delta_confirmation(tmp_path):
+    _capture(tmp_path, "design", SPEC_ARTIFACT)
+    changed = """# design
+
+## Spec Items
+
+SPEC-1: Empty search results show a retry action.
+verify: test:test_empty_search_results_show_the_empty_state
+
+## Completion Gate
+
+spec-items: SPEC-1
+design-values: none
+"""
+    (tmp_path / "design.md").write_text(changed, encoding="utf-8")
+
+    changes = pending_spec_changes_for_run(tmp_path)
+    assert [(change.kind, change.spec_id) for change in changes] == [
+        ("modified", "SPEC-1"),
+        ("deleted", "SPEC-2"),
+    ]
+    rendered = render_spec_changes(changes)
+    assert "### Modified" in rendered
+    assert "requirement before: Empty search results show the empty state." in rendered
+    assert "requirement after: Empty search results show a retry action." in rendered
+    assert "### Deleted" in rendered
+    assert read_ledger(tmp_path).spec_items == parse_spec_item_section(
+        SPEC_ARTIFACT
+    ).items
+
+    confirm_current_spec_changes(tmp_path)
+
+    assert pending_spec_changes_for_run(tmp_path) == ()
+    active = read_ledger(tmp_path).spec_items
+    assert tuple(item.spec_id for item in active) == ("SPEC-1",)
+    assert active[0].requirement == "Empty search results show a retry action."
+
+
+def test_spec_confirmation_preserves_unshown_design_values(tmp_path):
+    initial = SPEC_ARTIFACT.replace(
+        "\n## Completion Gate",
+        "\nspacing: 16dp\n\n## Completion Gate",
+    )
+    before = _capture(tmp_path, "design", initial)
+    changed = initial.replace(
+        "Empty search results show the empty state.",
+        "Empty search results show a retry action.",
+    ).replace("spacing: 16dp", "spacing: 24dp")
+    (tmp_path / "design.md").write_text(changed, encoding="utf-8")
+
+    confirm_current_spec_changes(tmp_path)
+
+    after = read_ledger(tmp_path)
+    assert pending_spec_changes_for_run(tmp_path) == ()
+    assert after.spec_items[0].requirement == "Empty search results show a retry action."
+    assert after.values == before.values == (("spacing", "16dp"),)
+    assert after.source_digest == before.source_digest
+
+    (tmp_path / "design.md").write_text(
+        changed.replace("spacing: 24dp", "spacing: 32dp"),
         encoding="utf-8",
     )
-    assert not spec_set_is_confirmed(tmp_path, parsed.items)
-    legacy_confirmation.unlink()
-
-    challenge = prepare_user_spec_confirmation(
-        tmp_path,
-        parsed.items,
-        session_id="session-current",
-        checkout_identity="worktree:feature",
-        hook_capability_hash=HOOK_CAPABILITY_HASH,
-    )
-    assert challenge is not None and challenge.is_file()
-
     assert (
-        attest_user_spec_confirmation(
-            tmp_path,
-            parsed.items,
-            prompt=SPEC_SET_USER_REPLY,
-            session_id="session-stale",
-            checkout_identity="worktree:feature",
-            hook_capability=HOOK_CAPABILITY,
-        )
-        is None
+        "source artifact design values do not match design-spec.md"
+        in read_ledger(tmp_path).errors
     )
-    assert challenge.is_file()
-    assert (
-        attest_user_spec_confirmation(
-            tmp_path,
-            parsed.items,
-            prompt=SPEC_SET_USER_REPLY,
-            session_id="session-current",
-            checkout_identity="leader",
-            hook_capability=HOOK_CAPABILITY,
-        )
-        is None
-    )
-    assert challenge.is_file()
 
-    assert (
-        attest_user_spec_confirmation(
-            tmp_path,
-            parsed.items,
-            prompt=SPEC_SET_USER_REPLY,
-            session_id="session-current",
-            checkout_identity="worktree:feature",
-            hook_capability="b" * 64,
-        )
-        is None
-    )
-    assert challenge.is_file()
-    confirmation = attest_user_spec_confirmation(
-        tmp_path,
-        parsed.items,
-        prompt=SPEC_SET_USER_REPLY,
-        session_id="session-current",
-        checkout_identity="worktree:feature",
-        hook_capability=HOOK_CAPABILITY,
-    )
-    assert confirmation is not None and confirmation.is_file()
-    assert spec_set_is_confirmed(tmp_path, parsed.items)
-    payload = json.loads(confirmation.read_text(encoding="utf-8"))
-    assert payload["attestation"]["run_id"] == tmp_path.name
-    assert payload["attestation"]["session_id"] == "session-current"
-
-    confirmation.unlink()
-    assert (
-        attest_user_spec_confirmation(
-            tmp_path,
-            parsed.items,
-            prompt=SPEC_SET_USER_REPLY,
-            session_id="session-current",
-            checkout_identity="worktree:feature",
-            hook_capability=HOOK_CAPABILITY,
-        )
-        is None
-    )
-    assert not spec_set_is_confirmed(tmp_path, parsed.items)
+    changed_again = changed.replace(
+        "\n## Design Values",
+        "\nSPEC-3: Empty state offers a retry action.\n"
+        "verify: test:test_empty_state_retry\n\n"
+        "## Design Values",
+    ).replace("spacing: 24dp", "spacing: 32dp")
+    (tmp_path / "design.md").write_text(changed_again, encoding="utf-8")
+    with pytest.raises(
+        ValueError,
+        match="source artifact design values do not match",
+    ):
+        confirm_current_spec_changes(tmp_path)
 
 
-def test_exact_approval_consumes_only_same_session_prepared_challenge(tmp_path):
-    parsed = parse_spec_item_section(SPEC_ARTIFACT)
-    stale = prepare_user_spec_confirmation(
-        tmp_path,
-        parsed.items,
-        session_id="session-stale",
-        checkout_identity="worktree:feature",
-        hook_capability_hash=HOOK_CAPABILITY_HASH,
+def test_spec_confirmation_rejects_tampered_ledger_design_values(tmp_path):
+    initial = SPEC_ARTIFACT.replace(
+        "\n## Completion Gate",
+        "\nspacing: 16dp\n\n## Completion Gate",
     )
-    assert stale is not None
-    stale_payload = json.loads(stale.read_text(encoding="utf-8"))
+    _capture(tmp_path, "design", initial)
+    ledger_path = tmp_path / LEDGER_FILE
+    ledger_path.write_text(
+        ledger_path.read_text(encoding="utf-8").replace(
+            "spacing: 16dp",
+            "spacing: 24dp",
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "design.md").write_text(
+        initial.replace(
+            "Empty search results show the empty state.",
+            "Empty search results show a retry action.",
+        ),
+        encoding="utf-8",
+    )
 
-    assert (
-        prepare_and_attest_user_spec_confirmation(
-            tmp_path,
-            parsed.items,
-            prompt=SPEC_SET_USER_REPLY,
-            session_id="session-fresh",
-            checkout_identity="worktree:feature",
-            hook_capability=HOOK_CAPABILITY,
-        )
-        is None
-    )
-    assert json.loads(stale.read_text(encoding="utf-8")) == stale_payload
-    assert not spec_set_is_confirmed(tmp_path, parsed.items)
-
-    fresh = prepare_user_spec_confirmation(
-        tmp_path,
-        parsed.items,
-        session_id="session-fresh",
-        checkout_identity="worktree:feature",
-        hook_capability_hash=HOOK_CAPABILITY_HASH,
-    )
-    assert fresh is not None
-    fresh_payload = json.loads(fresh.read_text(encoding="utf-8"))
-    assert fresh_payload["challenge_id"] != stale_payload["challenge_id"]
-
-    confirmation = prepare_and_attest_user_spec_confirmation(
-        tmp_path,
-        parsed.items,
-        prompt=SPEC_SET_USER_REPLY,
-        session_id="session-fresh",
-        checkout_identity="worktree:feature",
-        hook_capability=HOOK_CAPABILITY,
-    )
-    assert confirmation is not None
-    payload = json.loads(confirmation.read_text(encoding="utf-8"))
-    assert payload["attestation"]["session_id"] == "session-fresh"
-    assert payload["attestation"]["challenge_id"] == fresh_payload["challenge_id"]
-    assert payload["attestation"]["run_identity"] == str(tmp_path.resolve())
-    assert spec_set_is_confirmed(tmp_path, parsed.items)
-
-    confirmation.unlink()
-    assert (
-        prepare_and_attest_user_spec_confirmation(
-            tmp_path,
-            parsed.items,
-            prompt=SPEC_SET_USER_REPLY,
-            session_id="session-fresh",
-            checkout_identity="worktree:feature",
-            hook_capability=HOOK_CAPABILITY,
-        )
-        is None
-    )
-    assert not spec_set_is_confirmed(tmp_path, parsed.items)
+    with pytest.raises(
+        ValueError,
+        match="design values do not match spec capture state",
+    ):
+        confirm_current_spec_changes(tmp_path)
 
 
-def test_recorded_approval_survives_a_later_session_preparing_again(tmp_path):
-    """반증: `agent-flow continue`로 세션을 갈아타면 승인이 사라졌다.
+def test_design_value_only_change_cannot_use_spec_confirmation(tmp_path):
+    initial = SPEC_ARTIFACT.replace(
+        "\n## Completion Gate",
+        "\nspacing: 16dp\n\n## Completion Gate",
+    )
+    _capture(tmp_path, "design", initial)
+    (tmp_path / "design.md").write_text(
+        initial.replace("spacing: 16dp", "spacing: 24dp"),
+        encoding="utf-8",
+    )
 
-    사용자가 승인한 사실은 SPEC 집합·run·checkout에 묶인다. session_id는 그
-    키 입력을 전달한 채팅 창일 뿐이라, 세션이 바뀌었다는 이유로 기록을 지우면
-    정상 재개가 곧 동의 파기가 된다.
-    """
-    parsed = parse_spec_item_section(SPEC_ARTIFACT)
-    prepare_user_spec_confirmation(
-        tmp_path,
-        parsed.items,
-        session_id="session-a",
-        checkout_identity="worktree:feature",
-        hook_capability_hash=HOOK_CAPABILITY_HASH,
-    )
-    confirmation = prepare_and_attest_user_spec_confirmation(
-        tmp_path,
-        parsed.items,
-        prompt=SPEC_SET_USER_REPLY,
-        session_id="session-a",
-        checkout_identity="worktree:feature",
-        hook_capability=HOOK_CAPABILITY,
-    )
-    assert confirmation is not None
-    recorded = json.loads(confirmation.read_text(encoding="utf-8"))
-
-    assert (
-        prepare_user_spec_confirmation(
-            tmp_path,
-            parsed.items,
-            session_id="session-b",
-            checkout_identity="worktree:feature",
-            hook_capability_hash=HOOK_CAPABILITY_HASH,
-        )
-        is None
-    )
-    assert confirmation.is_file()
-    assert json.loads(confirmation.read_text(encoding="utf-8")) == recorded
-    assert spec_set_is_confirmed(tmp_path, parsed.items)
+    with pytest.raises(ValueError, match="no pending SPEC changes"):
+        confirm_current_spec_changes(tmp_path)
 
 
 def test_ledger_tampering_or_missing_capture_state_fails_closed(tmp_path):
@@ -457,7 +368,7 @@ verify: manual
     capture_state = json.loads(
         (tmp_path / SPEC_CAPTURE_FILE).read_text(encoding="utf-8")
     )
-    fingerprint = capture_state["spec_fingerprints"][0]
+    fingerprint = capture_state["active_spec_fingerprints"][0]
     (tmp_path / MANUAL_SPEC_APPROVALS_FILE).write_text(
         json.dumps(
             {
@@ -488,7 +399,7 @@ verify: manual
 
     prompt = ledger_prompt_block(tmp_path)
 
-    assert "Ask the user for explicit approval" in prompt
+    assert "For a manual verification, ask the user in this chat." in prompt
     assert "agent-flow spec approve <SPEC-ID> --run-dir <run-dir>" in prompt
 
 def test_source_spec_items_require_one_valid_verifier(tmp_path):
@@ -583,12 +494,6 @@ def test_source_spec_items_marker_matches_the_ordered_set(tmp_path):
         "spec-items: SPEC-1",
     )
 
-    parsed = parse_spec_item_section(artifact)
-    record_spec_set_confirmation(
-        tmp_path,
-        parsed.items,
-        spec_set_confirmation_statement(parsed.items),
-    )
     assert design_value_check.missing_spec_item_evidence(
         tmp_path,
         tmp_path,

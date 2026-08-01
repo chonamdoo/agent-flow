@@ -54,7 +54,10 @@ GIT_WORKTREE_TIMEOUT_S = 300
 # `os.rename`만 있다 — POSIX의 `renameat`은 대상이 있어도 원자적으로 덮으므로 같은 것이다.
 _DIR_FD_SUPPORTED = (
     os.open in os.supports_dir_fd
+    and os.link in os.supports_dir_fd
     and os.rename in os.supports_dir_fd
+    and os.mkdir in os.supports_dir_fd
+    and os.stat in os.supports_dir_fd
     and os.unlink in os.supports_dir_fd
 )
 CLEANUP_JOURNAL_VERSION = 3
@@ -3293,7 +3296,7 @@ def copy_declared_worktree_files(
     return tuple(copied)
 
 
-# host 세션(Claude/Codex/OMP)이 UserPromptSubmit hook을 찾는 등록 파일들.
+# host 세션(Claude/Codex/OMP)이 managed hook을 찾는 등록 파일들.
 # installer는 leader checkout에만 이 파일을 심는다.
 #
 # 목록은 `hook_integrity`에서 가져온다. 같은 언어 안에 두 벌을 두면 새 host를 한쪽에만
@@ -3337,16 +3340,115 @@ class _HostHookProvisionState:
     tracked: dict[str, bool]
     index_identity: str
     dirty: bool = False
+    retirable: set[str] | None = None
+
+
+def provision_registered_worktree_host_hooks(
+    *, root: Path
+) -> tuple[tuple[Path, tuple[str, ...]], ...]:
+    """현재 등록된 managed/adopted checkout의 host hook 등록을 leader와 맞춘다."""
+    synced: list[tuple[Path, tuple[str, ...]]] = []
+    with worktree_creation_lock(root):
+        registered_worktrees = tuple(
+            registered
+            for registered in removable_worktrees(root=root)
+            if (
+                _is_managed_child(root=root, path=registered.path)
+                or _adopted(root=root, path=registered.path)
+            )
+        )
+        if registered_worktrees and not _DIR_FD_SUPPORTED:
+            raise WorktreeIsolationError(
+                "registered worktree hook sync requires secure dir-fd operations"
+            )
+        for registered in registered_worktrees:
+            if registered.prunable:
+                continue
+            if not registered.registration_identity:
+                raise WorktreeIsolationError(
+                    f"worktree registration identity is unavailable: {registered.path}"
+                )
+            try:
+                before = registered.path.lstat()
+            except FileNotFoundError:
+                continue
+            if registered.path.is_symlink() or not stat.S_ISDIR(before.st_mode):
+                raise WorktreeIsolationError(
+                    f"worktree path is not a trusted directory: {registered.path}"
+                )
+            checkout = verify_linked_worktree(
+                root=root,
+                path=registered.path,
+                expected_branch=registered.branch,
+                managed_root=registered.path.parent,
+            )
+            after = checkout.lstat()
+            checkout_identity = (before.st_dev, before.st_ino)
+            if (after.st_dev, after.st_ino) != checkout_identity:
+                raise WorktreeIsolationError(
+                    f"worktree path changed during hook sync: {checkout}"
+                )
+            _assert_worktree_registration_identity(
+                root=root,
+                checkout=checkout,
+                expected=registered.registration_identity,
+            )
+            written = provision_host_hook_registrations(
+                leader=root,
+                checkout=checkout,
+                expected_registration_identity=registered.registration_identity,
+                expected_checkout_identity=checkout_identity,
+            )
+            synced.append((checkout, written))
+    return tuple(synced)
+
+
+def _assert_worktree_registration_identity(
+    *, root: Path, checkout: Path, expected: str
+) -> None:
+    current = registered_worktree_at(root, checkout)
+    if (
+        current is None
+        or current.prunable
+        or current.registration_identity != expected
+    ):
+        raise WorktreeIsolationError(
+            f"worktree registration changed during hook sync: {checkout}"
+        )
+
+
+def _assert_checkout_path_identity(
+    *, checkout: Path, expected: tuple[int, int] | None
+) -> None:
+    if expected is None:
+        raise WorktreeIsolationError("worktree checkout identity is unavailable")
+    try:
+        current = checkout.lstat()
+    except OSError as exc:
+        raise WorktreeIsolationError(
+            f"worktree path changed during hook sync: {checkout}"
+        ) from exc
+    if (
+        checkout.is_symlink()
+        or not stat.S_ISDIR(current.st_mode)
+        or (current.st_dev, current.st_ino) != expected
+    ):
+        raise WorktreeIsolationError(
+            f"worktree path changed during hook sync: {checkout}"
+        )
 
 
 def provision_host_hook_registrations(
-    *, leader: Path, checkout: Path
+    *,
+    leader: Path,
+    checkout: Path,
+    expected_registration_identity: str | None = None,
+    expected_checkout_identity: tuple[int, int] | None = None,
 ) -> tuple[str, ...]:
     """leader의 host hook 등록 파일을 managed checkout에도 깐다.
 
     등록 파일이 leader에만 있으면 worktree checkout을 cwd로 연 host 세션에는
-    UserPromptSubmit hook이 아예 등록되지 않는다 — 그 세션에서 `승인`이라고 답해도
-    아무 일도 일어나지 않는 이유다.
+    보호 브랜치와 worktree 경계 hook이 등록되지 않는다.
 
     등록 안의 command는 leader 절대경로를 가리키므로 파일을 그대로 복사하면 된다.
     leader 파일은 읽기만 한다. 내용이 이미 같으면 쓰지 않으므로 반복 호출해도 무해하다.
@@ -3358,30 +3460,95 @@ def provision_host_hook_registrations(
     여기서 깐 파일은 `git worktree remove` 직전에 `_retire_provisioned_host_hook_registrations`가
     걷어낸다. 저장소 공유 exclude로 가리면 leader 루트의 같은 경로까지 영구히 숨는다.
 
-    반환값은 실제로 쓴 상대경로들이다.
+    반환값은 실제로 변경한 상대경로들이다.
     """
     leader_base = Path(os.path.normpath(str(leader)))
     checkout_base = Path(os.path.normpath(str(checkout)))
     if same_worktree_path(leader_base, checkout_base):
         return ()
-    state = _load_host_hook_state(checkout_base)
-    written: list[str] = []
-    for rel in HOST_HOOK_REGISTRATION_FILES:
-        try:
-            done, reason = _provision_one_host_hook_registration(
-                leader_base=leader_base,
-                checkout_base=checkout_base,
-                rel=rel,
-                state=state,
-            )
-        except (OSError, ValueError, subprocess.SubprocessError) as exc:
-            # 조용한 삼킴이 이 버그의 원인이었다. 등록이 빠졌으면 사유를 말한다.
-            done, reason = False, str(exc)
-        if done:
-            written.append(rel)
-        _record_host_hook_skip(
-            state=state, rel=rel, checkout=checkout_base, reason=reason
+    if (expected_registration_identity is None) != (
+        expected_checkout_identity is None
+    ):
+        raise WorktreeIsolationError(
+            "worktree hook sync requires both registration and checkout identities"
         )
+    checkout_fd: int | None = None
+    if expected_checkout_identity is not None:
+        if not expected_registration_identity or not _DIR_FD_SUPPORTED:
+            raise WorktreeIsolationError(
+                "worktree hook sync cannot bind the registered checkout securely"
+            )
+        checkout_fd = os.open(
+            checkout_base,
+            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+        )
+        opened = os.fstat(checkout_fd)
+        if (opened.st_dev, opened.st_ino) != expected_checkout_identity:
+            os.close(checkout_fd)
+            raise WorktreeIsolationError(
+                f"worktree path changed before hook sync: {checkout_base}"
+            )
+        _assert_worktree_registration_identity(
+            root=leader_base,
+            checkout=checkout_base,
+            expected=expected_registration_identity,
+        )
+        _assert_checkout_path_identity(
+            checkout=checkout_base,
+            expected=expected_checkout_identity,
+        )
+    state = (
+        _HostHookProvisionState(
+            path=None,
+            skipped={},
+            tracked={},
+            index_identity="",
+        )
+        if checkout_fd is not None
+        else _load_host_hook_state(checkout_base)
+    )
+    written: list[str] = []
+    try:
+        for rel in HOST_HOOK_REGISTRATION_FILES:
+            if expected_registration_identity is not None:
+                _assert_worktree_registration_identity(
+                    root=leader_base,
+                    checkout=checkout_base,
+                    expected=expected_registration_identity,
+                )
+                _assert_checkout_path_identity(
+                    checkout=checkout_base,
+                    expected=expected_checkout_identity,
+                )
+            try:
+                done, reason = _provision_one_host_hook_registration(
+                    leader_base=leader_base,
+                    checkout_base=checkout_base,
+                    rel=rel,
+                    state=state,
+                    checkout_fd=checkout_fd,
+                )
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                # 조용한 삼킴이 이 버그의 원인이었다. 등록이 빠졌으면 사유를 말한다.
+                done, reason = False, str(exc)
+            if expected_registration_identity is not None:
+                _assert_worktree_registration_identity(
+                    root=leader_base,
+                    checkout=checkout_base,
+                    expected=expected_registration_identity,
+                )
+                _assert_checkout_path_identity(
+                    checkout=checkout_base,
+                    expected=expected_checkout_identity,
+                )
+            if done:
+                written.append(rel)
+            _record_host_hook_skip(
+                state=state, rel=rel, checkout=checkout_base, reason=reason
+            )
+    finally:
+        if checkout_fd is not None:
+            os.close(checkout_fd)
     _save_host_hook_state(state)
     return tuple(written)
 
@@ -3416,8 +3583,9 @@ def _provision_one_host_hook_registration(
     checkout_base: Path,
     rel: str,
     state: _HostHookProvisionState,
+    checkout_fd: int | None,
 ) -> tuple[bool, str | None]:
-    """(썼는가, skip 사유). 사유가 None이면 skip이 아니다 — 보고는 호출자가 한다."""
+    """(변경했는가, skip 사유). 사유가 None이면 skip이 아니다 — 보고는 호출자가 한다."""
     source = _worktree_setup_path(leader_base, rel)
     target = _worktree_setup_path(checkout_base, rel)
     if _has_symlinked_component(leader_base, source):
@@ -3425,9 +3593,37 @@ def _provision_one_host_hook_registration(
             "the leader path has a symlinked component; replace it with a real file"
             " so the registration can be copied"
         )
-    # leader에 없는 것은 그 host를 설치하지 않았다는 뜻이다. 정상 상태라 말하지 않는다.
+    if checkout_fd is not None:
+        return _provision_one_host_hook_registration_at(
+            leader=leader_base,
+            checkout=checkout_base,
+            source=source,
+            rel=rel,
+            state=state,
+            checkout_fd=checkout_fd,
+        )
     if not source.is_file():
-        return False, None
+        if (
+            _has_symlinked_component(checkout_base, target)
+            or target.is_symlink()
+            or not target.is_file()
+        ):
+            return False, None
+        if state.retirable is None:
+            state.retirable = _kit_owned_host_hook_registrations(
+                root=leader_base,
+                checkout=checkout_base,
+            )
+        if rel not in state.retirable:
+            return False, None
+        if not _unlink_kit_owned_host_hook_registration(
+            leader=leader_base,
+            checkout=checkout_base,
+            rel=rel,
+            checkout_fd=checkout_fd,
+        ):
+            return False, None
+        return True, None
     if _has_symlinked_component(checkout_base, target) or target.is_symlink():
         return False, (
             "the checkout path is or goes through a symlink, so the copy would land"
@@ -3451,31 +3647,571 @@ def _provision_one_host_hook_registration(
             "the checkout already has a registration this kit did not write;"
             " merge the agent-flow hook entry into it by hand or delete the file"
         )
-    _make_host_hook_parents(base=checkout_base, target=target)
-    _write_host_hook_registration(target=target, payload=payload)
+    _write_host_hook_registration(
+        checkout=checkout_base,
+        target=target,
+        payload=payload,
+        checkout_fd=checkout_fd,
+    )
     return True, None
 
 
-def _write_host_hook_registration(*, target: Path, payload: bytes) -> None:
-    """등록 파일을 그 자리에 원자적으로 놓는다.
 
-    대상 inode에 바로 쓰면 안 된다. 그 자리가 checkout 밖 파일과 hard link면 그 원본이
-    함께 덮인다(`is_file()`은 hard link를 통과시킨다). 임시 파일에 쓴 뒤 rename하면
-    디렉터리 엔트리만 바뀌어 링크된 inode는 그대로다.
 
-    부모 디렉터리는 fd로 고정한다. 이름으로 열면 검사와 쓰기 사이에 워커가 `.claude`를
-    저장소 밖 디렉터리 symlink로 바꿔치기해 그쪽 등록 파일을 덮게 만들 수 있다 —
-    무작위 파일명은 그 TOCTOU를 막지 못한다.
-    """
+def _provision_one_host_hook_registration_at(
+    *,
+    leader: Path,
+    checkout: Path,
+    source: Path,
+    rel: str,
+    state: _HostHookProvisionState,
+    checkout_fd: int,
+) -> tuple[bool, str | None]:
+    with _locked_verified_worktree_index(
+        leader=leader,
+        checkout=checkout,
+        checkout_fd=checkout_fd,
+    ) as gitdir_fd:
+        return _provision_one_host_hook_registration_at_locked(
+            leader=leader,
+            checkout=checkout,
+            source=source,
+            rel=rel,
+            state=state,
+            checkout_fd=checkout_fd,
+            gitdir_fd=gitdir_fd,
+        )
+
+
+@contextmanager
+def _locked_verified_worktree_index(
+    *, leader: Path, checkout: Path, checkout_fd: int
+):
+    gitdir_fd = _open_verified_worktree_gitdir(
+        leader=leader,
+        checkout=checkout,
+        checkout_fd=checkout_fd,
+    )
+    lock_fd: int | None = None
+    lock_identity: tuple[int, int] | None = None
+    try:
+        try:
+            lock_fd = os.open(
+                "index.lock",
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=gitdir_fd,
+            )
+        except FileExistsError as exc:
+            raise WorktreeIsolationError(
+                f"worktree index is being changed during hook sync: {checkout}"
+            ) from exc
+        identity = os.fstat(lock_fd)
+        lock_identity = (identity.st_dev, identity.st_ino)
+        yield gitdir_fd
+    finally:
+        try:
+            if lock_fd is not None:
+                os.close(lock_fd)
+            if lock_identity is not None:
+                try:
+                    current = os.stat(
+                        "index.lock",
+                        dir_fd=gitdir_fd,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError as exc:
+                    raise WorktreeIsolationError(
+                        f"worktree index lock disappeared during hook sync: {checkout}"
+                    ) from exc
+                if (current.st_dev, current.st_ino) != lock_identity:
+                    raise WorktreeIsolationError(
+                        f"worktree index lock changed during hook sync: {checkout}"
+                    )
+                os.unlink("index.lock", dir_fd=gitdir_fd)
+        finally:
+            os.close(gitdir_fd)
+
+
+def _open_verified_worktree_gitdir(
+    *, leader: Path, checkout: Path, checkout_fd: int
+) -> int:
+    pointer = _read_host_hook_registration_at(parent=checkout_fd, name=".git")
+    if pointer is None or not pointer[0].startswith(b"gitdir:"):
+        raise WorktreeIsolationError(
+            f"verified worktree git pointer is unavailable: {checkout}"
+        )
+    try:
+        value = pointer[0].decode("utf-8").partition(":")[2].strip()
+    except UnicodeDecodeError as exc:
+        raise WorktreeIsolationError(
+            f"verified worktree git pointer is not UTF-8: {checkout}"
+        ) from exc
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        candidate = checkout / candidate
+    candidate = Path(os.path.normpath(candidate))
+    admin_root = _git_common_dir(leader) / "worktrees"
+    if candidate.parent != admin_root or not candidate.name:
+        raise WorktreeIsolationError(
+            f"worktree git pointer escaped the common git dir: {checkout}"
+        )
+    root_fd = os.open(
+        admin_root,
+        os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        gitdir_fd = os.open(
+            candidate.name,
+            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=root_fd,
+        )
+    finally:
+        os.close(root_fd)
+    try:
+        backlink = _read_host_hook_registration_at(
+            parent=gitdir_fd,
+            name="gitdir",
+        )
+        if backlink is None:
+            raise WorktreeIsolationError(
+                f"worktree git admin backlink is unavailable: {checkout}"
+            )
+        try:
+            backlink_path = Path(backlink[0].decode("utf-8").strip())
+        except UnicodeDecodeError as exc:
+            raise WorktreeIsolationError(
+                f"worktree git admin backlink is not UTF-8: {checkout}"
+            ) from exc
+        if not backlink_path.is_absolute():
+            backlink_path = candidate / backlink_path
+        if real_path(backlink_path) != real_path(checkout / ".git"):
+            raise WorktreeIsolationError(
+                f"worktree git admin directory belongs to another checkout: {checkout}"
+            )
+        current_pointer = _read_host_hook_registration_at(
+            parent=checkout_fd,
+            name=".git",
+        )
+        if current_pointer != pointer:
+            raise WorktreeIsolationError(
+                f"worktree git pointer changed during hook sync: {checkout}"
+            )
+        return gitdir_fd
+    except BaseException:
+        os.close(gitdir_fd)
+        raise
+
+
+def _provision_one_host_hook_registration_at_locked(
+    *,
+    leader: Path,
+    checkout: Path,
+    source: Path,
+    rel: str,
+    state: _HostHookProvisionState,
+    checkout_fd: int,
+    gitdir_fd: int,
+) -> tuple[bool, str | None]:
+    source_exists = source.is_file()
+    target = _worktree_setup_path(checkout, rel)
+    try:
+        parent = _open_host_hook_parent(
+            checkout=checkout,
+            target=target,
+            checkout_fd=checkout_fd,
+            create=source_exists,
+        )
+    except FileNotFoundError:
+        return False, None
+    try:
+        existing = _read_host_hook_registration_at(parent=parent, name=target.name)
+        if not source_exists:
+            if existing is None:
+                return False, None
+            if _host_hook_path_is_tracked_at(
+                gitdir_fd=gitdir_fd,
+                rel=rel,
+                state=state,
+            ):
+                return False, None
+            if not _host_hook_registration_is_kit_owned(
+                leader=leader,
+                rel=rel,
+                payload=existing[0],
+            ):
+                return False, None
+            return _retire_host_hook_registration_at(
+                parent=parent,
+                name=target.name,
+                leader=leader,
+                rel=rel,
+                expected=existing[1],
+            ), None
+
+        payload = source.read_bytes()
+        if existing is not None and existing[0] == payload:
+            return False, None
+        if _host_hook_path_is_tracked_at(
+            gitdir_fd=gitdir_fd,
+            rel=rel,
+            state=state,
+        ):
+            return (
+                False,
+                "tracked by git; commit the agent-flow hook entry or untrack the file",
+            )
+        if existing is not None and not _host_hook_registration_is_kit_owned(
+            leader=leader,
+            rel=rel,
+            payload=existing[0],
+        ):
+            return (
+                False,
+                "the checkout already has a registration this kit did not write;"
+                " merge the agent-flow hook entry into it by hand or delete the file",
+            )
+        changed = _replace_host_hook_registration_at(
+            parent=parent,
+            name=target.name,
+            payload=payload,
+            leader=leader,
+            rel=rel,
+            expected=existing[1] if existing is not None else None,
+        )
+        return (
+            (True, None)
+            if changed
+            else (False, "the checkout registration changed concurrently; retry install")
+        )
+    finally:
+        os.close(parent)
+
+
+def _read_host_hook_registration_at(
+    *, parent: int, name: str
+) -> tuple[bytes, tuple[int, int]] | None:
+    try:
+        handle = os.open(
+            name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent,
+        )
+    except FileNotFoundError:
+        return None
+    with os.fdopen(handle, "rb") as stream:
+        identity = os.fstat(stream.fileno())
+        payload = stream.read()
+    if not stat.S_ISREG(identity.st_mode):
+        raise WorktreeIsolationError(f"host hook registration is not a file: {name}")
+    return payload, (identity.st_dev, identity.st_ino)
+
+
+def _host_hook_path_is_tracked_at(
+    *, gitdir_fd: int, rel: str, state: _HostHookProvisionState
+) -> bool:
+    cached = state.tracked.get(rel)
+    if cached is not None:
+        return cached
+    result = git_safe(
+        "--git-dir=.",
+        "ls-files",
+        "--",
+        rel,
+        cwd=Path("/"),
+        optional_locks=False,
+        pass_fds=(gitdir_fd,),
+        cwd_fd=gitdir_fd,
+    )
+    if not result.ok:
+        raise WorktreeIsolationError(
+            "cannot inspect the verified worktree index during hook sync: "
+            f"{result.stderr.strip() or result.error or 'git did not answer'}"
+        )
+    tracked = rel in result.stdout.splitlines()
+    if state.index_identity:
+        state.tracked[rel] = tracked
+        state.dirty = True
+    return tracked
+
+
+
+
+def _retire_host_hook_registration_at(
+    *,
+    parent: int,
+    name: str,
+    leader: Path,
+    rel: str,
+    expected: tuple[int, int],
+) -> bool:
+    quarantine = f"{name}.agent-flow-retired.{os.getpid()}.{secrets.token_hex(8)}"
+    try:
+        os.rename(name, quarantine, src_dir_fd=parent, dst_dir_fd=parent)
+    except FileNotFoundError:
+        return False
+    moved = _read_host_hook_registration_at(parent=parent, name=quarantine)
+    if (
+        moved is None
+        or moved[1] != expected
+        or not _host_hook_registration_is_kit_owned(
+            leader=leader,
+            rel=rel,
+            payload=moved[0],
+        )
+    ):
+        _restore_host_hook_registration_at(
+            parent=parent,
+            name=name,
+            quarantine=quarantine,
+        )
+        return False
+    os.unlink(quarantine, dir_fd=parent)
+    return True
+
+
+def _replace_host_hook_registration_at(
+    *,
+    parent: int,
+    name: str,
+    payload: bytes,
+    leader: Path,
+    rel: str,
+    expected: tuple[int, int] | None,
+) -> bool:
+    staging = _write_host_hook_staging_at(parent=parent, name=name, payload=payload)
+    quarantine: str | None = None
+    try:
+        if expected is not None:
+            quarantine = (
+                f"{name}.agent-flow-replaced.{os.getpid()}.{secrets.token_hex(8)}"
+            )
+            try:
+                os.rename(name, quarantine, src_dir_fd=parent, dst_dir_fd=parent)
+            except FileNotFoundError:
+                return False
+            moved = _read_host_hook_registration_at(
+                parent=parent,
+                name=quarantine,
+            )
+            if (
+                moved is None
+                or moved[1] != expected
+                or not _host_hook_registration_is_kit_owned(
+                    leader=leader,
+                    rel=rel,
+                    payload=moved[0],
+                )
+            ):
+                _restore_host_hook_registration_at(
+                    parent=parent,
+                    name=name,
+                    quarantine=quarantine,
+                )
+                quarantine = None
+                return False
+        try:
+            os.link(
+                staging,
+                name,
+                src_dir_fd=parent,
+                dst_dir_fd=parent,
+                follow_symlinks=False,
+            )
+        except FileExistsError:
+            if quarantine is not None:
+                _restore_host_hook_registration_at(
+                    parent=parent,
+                    name=name,
+                    quarantine=quarantine,
+                )
+                quarantine = None
+            return False
+        if quarantine is not None:
+            os.unlink(quarantine, dir_fd=parent)
+            quarantine = None
+        return True
+    finally:
+        try:
+            os.unlink(staging, dir_fd=parent)
+        except FileNotFoundError:
+            pass
+        if quarantine is not None:
+            raise WorktreeIsolationError(
+                f"concurrent registration preserved as {quarantine}; retry install"
+            )
+
+
+def _write_host_hook_staging_at(*, parent: int, name: str, payload: bytes) -> str:
+    staging = f"{name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+    handle = os.open(
+        staging,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o644,
+        dir_fd=parent,
+    )
+    try:
+        with os.fdopen(handle, "wb") as stream:
+            stream.write(payload)
+    except BaseException:
+        try:
+            os.unlink(staging, dir_fd=parent)
+        except OSError:
+            pass
+        raise
+    return staging
+
+
+def _restore_host_hook_registration_at(
+    *, parent: int, name: str, quarantine: str
+) -> None:
+    try:
+        os.link(
+            quarantine,
+            name,
+            src_dir_fd=parent,
+            dst_dir_fd=parent,
+            follow_symlinks=False,
+        )
+    except FileExistsError as exc:
+        raise WorktreeIsolationError(
+            f"concurrent registration preserved as {quarantine}; retry install"
+        ) from exc
+    os.unlink(quarantine, dir_fd=parent)
+
+
+def _unlink_kit_owned_host_hook_registration(
+    *,
+    leader: Path,
+    checkout: Path,
+    rel: str,
+    checkout_fd: int | None,
+) -> bool:
+    """검사한 managed 파일과 같은 inode만 stable parent fd에서 지운다."""
+    target = _worktree_setup_path(checkout, rel)
     if _DIR_FD_SUPPORTED:
-        parent = os.open(
-            target.parent, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+        parent = _open_host_hook_parent(
+            checkout=checkout,
+            target=target,
+            checkout_fd=checkout_fd,
+        )
+        try:
+            try:
+                handle = os.open(
+                    target.name,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=parent,
+                )
+            except FileNotFoundError:
+                return False
+            with os.fdopen(handle, "rb") as stream:
+                observed = os.fstat(stream.fileno())
+                payload = stream.read()
+            if not stat.S_ISREG(observed.st_mode):
+                return False
+            if not _host_hook_registration_is_kit_owned(
+                leader=leader,
+                rel=rel,
+                payload=payload,
+            ):
+                return False
+            try:
+                current = os.stat(
+                    target.name,
+                    dir_fd=parent,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                return False
+            if (current.st_dev, current.st_ino) != (observed.st_dev, observed.st_ino):
+                return False
+            os.unlink(target.name, dir_fd=parent)
+            return True
+        finally:
+            os.close(parent)
+
+    try:
+        observed = target.lstat()
+        payload = target.read_bytes()
+        current = target.lstat()
+    except OSError:
+        return False
+    if (
+        target.is_symlink()
+        or not stat.S_ISREG(observed.st_mode)
+        or (current.st_dev, current.st_ino) != (observed.st_dev, observed.st_ino)
+        or not _host_hook_registration_is_kit_owned(
+            leader=leader,
+            rel=rel,
+            payload=payload,
+        )
+    ):
+        return False
+    target.unlink()
+    return True
+
+
+def _open_host_hook_parent(
+    *,
+    checkout: Path,
+    target: Path,
+    checkout_fd: int | None = None,
+    create: bool = False,
+) -> int:
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = (
+        os.dup(checkout_fd)
+        if checkout_fd is not None
+        else os.open(checkout, flags)
+    )
+    try:
+        for component in target.parent.relative_to(checkout).parts:
+            try:
+                child = os.open(component, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                try:
+                    os.mkdir(component, 0o755, dir_fd=descriptor)
+                except FileExistsError:
+                    pass
+                child = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _write_host_hook_registration(
+    *,
+    checkout: Path,
+    target: Path,
+    payload: bytes,
+    checkout_fd: int | None,
+) -> None:
+    """등록 파일을 stable checkout fd 아래에 원자적으로 놓는다."""
+    if _DIR_FD_SUPPORTED:
+        parent = _open_host_hook_parent(
+            checkout=checkout,
+            target=target,
+            checkout_fd=checkout_fd,
+            create=True,
         )
         try:
             _replace_at(parent=parent, name=target.name, payload=payload)
         finally:
             os.close(parent)
         return
+    if checkout_fd is not None:
+        raise WorktreeIsolationError(
+            "registered worktree hook sync requires secure dir-fd operations"
+        )
+    _make_host_hook_parents(base=checkout, target=target)
     handle, staging_name = tempfile.mkstemp(
         dir=str(target.parent), prefix=f"{target.name}.", suffix=".tmp"
     )
@@ -3541,7 +4277,10 @@ def _host_hook_registration_is_kit_owned(
     # hook 밖의 키(`permissions`, `env`, MCP 설정 …)는 installer가 병합해 보존하는
     # 사용자 소유다. 그 부분이 leader와 다르면 이 checkout에만 있는 설정이므로
     # 파일째 덮으면 조용히 사라진다 — 그때는 사용자 소유로 본다.
-    leader_document = _load_registration_document(leader / rel)
+    leader_path = leader / rel
+    leader_document = _load_registration_document(leader_path)
+    if leader_document is None and not leader_path.is_file():
+        return _non_hook_keys(document) == {}
     return _non_hook_keys(document) == _non_hook_keys(leader_document)
 
 
@@ -3605,9 +4344,15 @@ def _host_hook_path_is_tracked(
     return tracked
 
 
-def _load_host_hook_state(checkout: Path) -> _HostHookProvisionState:
+def _load_host_hook_state(
+    checkout: Path, *, gitdir: Path | None = None
+) -> _HostHookProvisionState:
     """읽지 못하면 기억이 없는 것과 같다 — 경고를 한 번 더 내고 다시 기록한다."""
-    path = _host_hook_state_path(checkout)
+    path = (
+        gitdir / _HOST_HOOK_STATE_NAME
+        if gitdir is not None
+        else _host_hook_state_path(checkout)
+    )
     identity = _git_index_identity(path)
     payload: dict[str, Any] = {}
     if path is not None:

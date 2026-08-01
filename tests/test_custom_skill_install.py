@@ -4,7 +4,6 @@ import hashlib
 import json
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -933,63 +932,158 @@ def test_installer_packages_review_angles_with_the_python_runtime(
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_user_prompt_spec_hooks_prepare_before_confirm_for_every_host(
+def test_installer_omits_spec_confirmation_hooks(
     tmp_path: Path, binary: str
 ) -> None:
-    project = tmp_path / f"ordered-user-prompt-{binary}"
+    project = tmp_path / f"no-user-prompt-{binary}"
     project.mkdir()
 
     result = _install_with(binary, project)
     assert result.returncode == 0, result.stderr
 
-    expected = [
-        "prepare-spec-user-prompt.py",
-        "confirm-spec-user-prompt.py",
-    ]
     for relative in (
         ".claude/settings.json",
         ".Codex/hooks.json",
         ".codex/hooks.json",
     ):
         payload = json.loads((project / relative).read_text(encoding="utf-8"))
-        commands = [
-            hook["command"]
-            for entry in payload["hooks"]["UserPromptSubmit"]
-            for hook in entry["hooks"]
-        ]
-        parsed = [shlex.split(command) for command in commands]
-        assert [Path(parts[-1]).name for parts in parsed] == expected, (
-            binary,
-            relative,
-            commands,
-        )
-        assert all(parts[:2] == ["/usr/bin/python3", "-I"] for parts in parsed)
+        assert "UserPromptSubmit" not in payload["hooks"]
 
     extension = (
         project / ".omp" / "extensions" / "agent-flow-hooks.ts"
     ).read_text(encoding="utf-8")
-    hook_runner = extension.split(
-        "async function runSpecUserPromptHooks", 1
-    )[1].split(
-        "function sessionProvenance", 1
-    )[0]
-    assert hook_runner.index(
-        'await runHook("prepare-spec-user-prompt.py"'
-    ) < hook_runner.index(
-        'await runHook("confirm-spec-user-prompt.py"'
-    )
-    assert 'const command = scriptName.endsWith(".py") ? "/usr/bin/python3" : "/bin/bash";' in extension
-    assert 'const args = scriptName.endsWith(".py") ? ["-I", scriptPath] : [scriptPath];' in extension
+    assert "prepare-spec-user-prompt.py" not in extension
+    assert "confirm-spec-user-prompt.py" not in extension
+    assert 'pi.on("input"' not in extension
+    assert 'pi.on("before_agent_start"' not in extension
 
-
-def _spec_confirmation_contract(text: str) -> str:
-    start = text.index("run이 SPEC 확인 대기로 막히면")
-    end = text.index("\n\n### ", start)
-    return text[start:end]
+    hooks = project / ".agent-flow" / "scripts" / "hooks"
+    assert not (hooks / "prepare-spec-user-prompt.py").exists()
+    assert not (hooks / "confirm-spec-user-prompt.py").exists()
+    assert not (hooks / "guard-spec-approval.sh").exists()
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_installer_outputs_use_current_chat_spec_confirmation_contract(
+def test_reinstall_prunes_retired_spec_confirmation_hooks(
+    tmp_path: Path, binary: str
+) -> None:
+    project = tmp_path / f"retired-spec-hooks-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+
+    retired = (
+        "prepare-spec-user-prompt.py",
+        "confirm-spec-user-prompt.py",
+        "guard-spec-approval.sh",
+    )
+    settings_path = project / ".claude" / "settings.json"
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    settings["hooks"]["UserPromptSubmit"] = [
+        {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": f".agent-flow/scripts/hooks/{name}",
+                }
+                for name in retired
+            ]
+        }
+    ]
+    settings_path.write_text(
+        json.dumps(settings, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    hooks_dir = project / ".agent-flow" / "scripts" / "hooks"
+    for name in retired:
+        (hooks_dir / name).write_text("# retired\n", encoding="utf-8")
+
+    result = _install_with(binary, project)
+    assert result.returncode == 0, result.stderr
+
+    installed = settings_path.read_text(encoding="utf-8")
+    for name in retired:
+        assert name not in installed
+        assert not (hooks_dir / name).exists()
+        assert (hooks_dir / f"{name}.removed").is_file()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_reinstall_provisions_hooks_into_existing_managed_worktrees(
+    tmp_path: Path, binary: str
+) -> None:
+    project = tmp_path / f"existing-worktree-{binary}"
+    project.mkdir()
+    (project / ".gitignore").write_text(
+        ".agent-flow/\n.claude/\n.Codex/\n.codex/\n.omp/\nAGENTS.md\nCLAUDE.md\n",
+        encoding="utf-8",
+    )
+    (project / "tracked.txt").write_text("base\n", encoding="utf-8")
+    for command in (
+        ("git", "init", "-b", "main"),
+        ("git", "config", "user.email", "t@t"),
+        ("git", "config", "user.name", "t"),
+        ("git", "add", "."),
+        ("git", "commit", "-m", "init"),
+    ):
+        subprocess.run(command, cwd=project, check=True, capture_output=True)
+    assert _install_with(binary, project).returncode == 0
+
+    launcher = project / ".agent-flow" / "bin" / "agent-flow"
+    created = subprocess.run(
+        (
+            str(launcher),
+            "worktree",
+            "create",
+            "--root",
+            str(project),
+            "--name",
+            "existing",
+            "--allow-dirty",
+        ),
+        cwd=project,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert created.returncode == 0, created.stderr
+    checkout = Path(created.stdout.strip().splitlines()[-1].split(maxsplit=2)[2])
+    assert checkout.is_dir()
+    for rel in (
+        ".claude/settings.json",
+        ".Codex/hooks.json",
+        ".codex/hooks.json",
+        ".omp/extensions/agent-flow-hooks.ts",
+    ):
+        (checkout / rel).unlink(missing_ok=True)
+
+    result = _install_with(binary, project)
+
+    assert result.returncode == 0, result.stderr
+    for rel in (
+        ".claude/settings.json",
+        ".Codex/hooks.json",
+        ".codex/hooks.json",
+        ".omp/extensions/agent-flow-hooks.ts",
+    ):
+        source = project / rel
+        if source.is_file():
+            assert (checkout / rel).read_bytes() == source.read_bytes()
+
+    disabled = _install_with(binary, project, "--no-hooks")
+    assert disabled.returncode == 0, disabled.stderr
+    for rel in (
+        ".claude/settings.json",
+        ".Codex/hooks.json",
+        ".codex/hooks.json",
+    ):
+        target = checkout / rel
+        if target.is_file():
+            assert ".agent-flow/scripts/hooks/" not in target.read_text(encoding="utf-8")
+    assert not (checkout / ".omp/extensions/agent-flow-hooks.ts").exists()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_installer_outputs_use_explicit_spec_confirmation_contract(
     tmp_path: Path, binary: str
 ) -> None:
     project = tmp_path / f"spec-confirmation-{binary}"
@@ -998,14 +1092,6 @@ def test_installer_outputs_use_current_chat_spec_confirmation_contract(
     result = _install_with(binary, project)
     assert result.returncode == 0, result.stderr
 
-    canonical_bootstrap = (
-        KIT_ROOT / "bootstrap" / "AGENTS.md.template"
-    ).read_text(encoding="utf-8")
-    expected_context_contract = _spec_confirmation_contract(canonical_bootstrap)
-    legacy_confirm = (
-        "agent-flow spec confirm --run-dir <run-dir> "
-        "--artifact <run-dir>/artifacts/design.md"
-    )
     for relative_path in (
         "AGENTS.md",
         "CLAUDE.md",
@@ -1013,21 +1099,14 @@ def test_installer_outputs_use_current_chat_spec_confirmation_contract(
         ".agent-flow/bootstrap/CLAUDE.md",
     ):
         installed = (project / relative_path).read_text(encoding="utf-8")
-        assert _spec_confirmation_contract(installed) == expected_context_contract
-        assert "현재 대화의 새 turn으로 정확히 `승인`" in installed
+        assert "`agent-flow spec confirm --run-dir <run-dir>`" in installed
         assert (
-            "대상 worktree의 대화형 터미널에서 경로 없는 fallback "
-            "`agent-flow spec confirm`"
-        ) in installed
-        assert (
-            "`manual` verify 항목은 사용자가 "
+            "`manual` verify 항목도 사용자에게 현재 대화에서 확인한 뒤 agent가 "
             "`agent-flow spec approve <spec-id> --run-dir <run-dir>`"
         ) in installed
-        assert (
-            "agent는 fallback·manual 승인 명령이나 user-prompt hook을 "
-            "대신 실행하지 않습니다."
-        ) in installed
-        assert legacy_confirm not in installed
+        assert "현재 대화의 새 turn으로 정확히 `승인`" not in installed
+        assert "user-prompt hook" not in installed
+        assert "사용자 터미널 명령 실행을 요구하지 않습니다" in installed
 
     canonical_skill = (
         KIT_ROOT / "skills" / "agent-flow" / "SKILL.md"
@@ -1036,20 +1115,14 @@ def test_installer_outputs_use_current_chat_spec_confirmation_contract(
         project / ".agent-flow" / "skills" / "agent-flow" / "SKILL.md"
     ).read_text(encoding="utf-8")
     assert installed_skill == canonical_skill
-    assert "reply exactly `승인` in a new turn of the current chat" in installed_skill
+    assert "agent-flow spec confirm --run-dir <run-dir>" in installed_skill
     assert (
-        "path-free fallback `agent-flow spec confirm` from the target worktree"
-        in installed_skill
-    )
-    assert (
-        "A `manual` verifier still requires the user to run "
+        "For a `manual` verifier, ask in chat and then run "
         "`agent-flow spec approve <spec-id> --run-dir <run-dir>`."
     ) in installed_skill
-    assert (
-        "Never run the fallback or manual approval command, or invoke the "
-        "user-prompt hook yourself."
-    ) in installed_skill
-    assert legacy_confirm not in installed_skill
+    assert "reply exactly `승인`" not in installed_skill
+    assert "user-prompt hook" not in installed_skill
+    assert "ask the user to enter a terminal command" in installed_skill
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
@@ -1190,6 +1263,15 @@ def test_install_removes_broad_codex_project_trust(tmp_path: Path, binary: str) 
         cwd=project, text=True, capture_output=True, check=False, env=env,
     )
     assert result.returncode == 0, result.stderr
+    launched = subprocess.run(
+        (str(project / ".agent-flow" / "bin" / "agent-flow"), "--help"),
+        cwd=project,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+    )
+    assert launched.returncode == 0, launched.stderr
 
     config = home / ".codex" / "config.toml"
     text = config.read_text(encoding="utf-8") if config.is_file() else ""
@@ -1197,6 +1279,100 @@ def test_install_removes_broad_codex_project_trust(tmp_path: Path, binary: str) 
     assert "trust_level" not in text
     assert "hooks.state" not in text
     assert "trusted_hash" not in text
+
+
+@pytest.mark.parametrize("failure", ["rev-parse", "worktree"])
+def test_host_hook_sync_fails_closed_when_git_discovery_fails(
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    project = tmp_path / "project"
+    launcher = project / ".agent-flow" / "bin" / "agent-flow"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    if failure == "rev-parse":
+        (project / ".git").mkdir()
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    git = fake_bin / "git"
+    git.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "rev-parse" ]; then\n'
+        '  if [ "$FAILURE" = "rev-parse" ]; then exit 23; fi\n'
+        '  printf "%s\\n" "$FAKE_TOP"\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 23\n",
+        encoding="utf-8",
+    )
+    git.chmod(0o755)
+    module = (KIT_ROOT / "lib" / "installer-shared.mjs").as_uri()
+    code = (
+        f"import {{ syncManagedWorktreeHostHooks }} from {json.dumps(module)};"
+        f"syncManagedWorktreeHostHooks({json.dumps(str(project))});"
+    )
+    env = {
+        **os.environ,
+        "PATH": str(fake_bin),
+        "FAKE_TOP": str(project),
+        "FAILURE": failure,
+    }
+
+    result = subprocess.run(
+        (_node(), "--input-type=module", "-e", code),
+        cwd=project,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+    )
+
+    assert result.returncode != 0
+    expected = (
+        "cannot resolve repository root"
+        if failure == "rev-parse"
+        else "cannot enumerate linked worktrees"
+    )
+    assert expected in result.stderr
+
+
+def test_host_hook_sync_does_not_spawn_for_unicode_leader_only_repo(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "한글 repo"
+    project.mkdir()
+    subprocess.run(
+        ("git", "init", "-b", "main"),
+        cwd=project,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    marker = tmp_path / "launcher-ran"
+    launcher = project / ".agent-flow" / "bin" / "agent-flow"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text(
+        f"#!/bin/sh\nprintf ran > {str(marker)!r}\n",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o755)
+    module = (KIT_ROOT / "lib" / "installer-shared.mjs").as_uri()
+    code = (
+        f"import {{ syncManagedWorktreeHostHooks }} from {json.dumps(module)};"
+        f"syncManagedWorktreeHostHooks({json.dumps(str(project))});"
+    )
+
+    result = subprocess.run(
+        (_node(), "--input-type=module", "-e", code),
+        cwd=project,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not marker.exists()
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])

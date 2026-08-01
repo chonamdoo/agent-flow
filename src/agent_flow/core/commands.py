@@ -32,14 +32,26 @@ def run_safe_command(
     input_text: str | None = None,
     timeout_s: float = DEFAULT_COMMAND_TIMEOUT_S,
     env: dict | None = None,
+    pass_fds: tuple[int, ...] = (),
+    cwd_fd: int | None = None,
 ) -> SafeCommandResult:
     # Timeout은 직접 자식만이 아니라 그 자식이 띄운 CLI까지 함께 종료한다. 그렇지
     # 않으면 호출자는 fail-closed로 돌아와도 뒤에 남은 프로세스가 쓰기를 계속한다.
     command = tuple(str(arg) for arg in args)
+    if cwd_fd is not None:
+        if os.name == "nt":
+            return SafeCommandResult(
+                args=command,
+                returncode=None,
+                stdout="",
+                stderr="directory-fd cwd is unavailable on Windows",
+                error="directory-fd cwd is unavailable on Windows",
+            )
+        pass_fds = tuple(dict.fromkeys((*pass_fds, cwd_fd)))
     try:
         process = subprocess.Popen(
             command,
-            cwd=cwd,
+            cwd=None if cwd_fd is not None else cwd,
             env=env,
             stdin=subprocess.PIPE if input_text is not None else None,
             stdout=subprocess.PIPE,
@@ -48,6 +60,15 @@ def run_safe_command(
             start_new_session=os.name != "nt",
             creationflags=(
                 subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+            ),
+            close_fds=True,
+            pass_fds=pass_fds,
+            # Python has no cwd-fd argument. fchdir is a single async-signal-safe
+            # syscall, and avoids reopening a verified directory by path.
+            preexec_fn=(
+                (lambda: os.fchdir(cwd_fd))
+                if cwd_fd is not None and os.name != "nt"
+                else None
             ),
         )
         try:

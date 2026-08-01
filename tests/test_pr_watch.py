@@ -81,6 +81,20 @@ def test_has_comments_when_review_changes_requested():
     assert snap.status == "has_comments"
 
 
+def test_coderabbit_summary_comment_is_not_actionable():
+    snap = _classify(1, {
+        "state": "OPEN", "title": "x",
+        "statusCheckRollup": [
+            {"name": "test", "conclusion": "SUCCESS", "status": "COMPLETED"},
+        ],
+        "reviews": [],
+        "comments": [
+            {"author": {"login": "coderabbitai"}, "body": "Summary by CodeRabbit"},
+        ],
+    })
+    assert snap.status == "green"
+
+
 def test_external_ci_pending_classified():
     """External CI (commit-status protocol) uses `state: PENDING`, not `status`."""
     snap = _classify(1, {

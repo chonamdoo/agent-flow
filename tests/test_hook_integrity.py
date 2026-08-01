@@ -188,12 +188,12 @@ def test_missing_hook_script_on_disk_is_detected(tmp_path):
 
 def test_modified_managed_hook_content_is_detected(tmp_path):
     _install(tmp_path)
-    script = tmp_path / HOOK_DIR / "guard-spec-approval.sh"
+    script = tmp_path / HOOK_DIR / "guard-host-worktree.sh"
     script.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
 
     assert any(
         "content digest does not match" in violation
-        and "guard-spec-approval.sh" in violation
+        and "guard-host-worktree.sh" in violation
         for violation in _violations(tmp_path)
     )
 
@@ -373,9 +373,9 @@ def test_untrusted_interpreter_on_a_managed_command_is_detected(tmp_path):
     _install(tmp_path)
 
     def replace_interpreter(payload):
-        for block in payload["hooks"]["UserPromptSubmit"]:
+        for block in payload["hooks"]["PostToolUse"]:
             for hook in block["hooks"]:
-                if "confirm-spec-user-prompt.py" in hook["command"]:
+                if "record-skill-read.py" in hook["command"]:
                     hook["command"] = hook["command"].replace(
                         "/usr/bin/python3 -I",
                         "python3",
@@ -385,16 +385,15 @@ def test_untrusted_interpreter_on_a_managed_command_is_detected(tmp_path):
     violations = _violations(tmp_path)
     assert any("extra shell syntax" in value for value in violations)
     assert any(
-        "does not register confirm-spec-user-prompt.py" in value
+        "does not register record-skill-read.py" in value
         for value in violations
     )
 
 
 def test_missing_project_launcher_is_detected(tmp_path):
-    """launcher가 없으면 승인 hook은 실행할 것을 못 찾아 조용히 끝난다.
+    """managed launcher가 없으면 Python CLI 실행 경로가 유실된다.
 
-    등록만 검사하면 이 상태가 정상으로 보인다 — 실제로 그래서 채팅 `승인`이
-    어느 host에서도 무시되는데 아무 경고도 없었다.
+    등록 무결성이 launcher 자체도 함께 검증해야 한다.
     """
     _install(tmp_path)
     (tmp_path / PROJECT_LAUNCHER_RELATIVE).unlink()
@@ -485,6 +484,30 @@ def test_replaced_launcher_interpreter_is_detected(tmp_path):
     interpreter.chmod(0o755)
     assert any(
         "managed launcher interpreter changed since install" in value
+        for value in _violations(tmp_path)
+    )
+
+
+def test_launcher_interpreter_symlink_target_swap_is_detected(tmp_path):
+    _install(tmp_path)
+    interpreter = tmp_path / ".agent-flow" / "python-stub"
+    original = tmp_path / ".agent-flow" / "python-original"
+    replacement = tmp_path / ".agent-flow" / "python-replacement"
+    interpreter.rename(original)
+    interpreter.symlink_to(original.name)
+    kit_path = tmp_path / ".agent-flow" / "kit.json"
+    payload = json.loads(kit_path.read_text(encoding="utf-8"))
+    payload["project_launcher_python"]["realpath"] = str(original)
+    kit_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert not any("interpreter" in value for value in _violations(tmp_path))
+
+    replacement.write_bytes(original.read_bytes())
+    replacement.chmod(0o755)
+    interpreter.unlink()
+    interpreter.symlink_to(replacement.name)
+    assert any(
+        "interpreter target changed since install" in value
         for value in _violations(tmp_path)
     )
 

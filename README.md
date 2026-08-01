@@ -46,12 +46,12 @@ agent-flow abort --worktree "feat-user-profile"
 agent-flow worktree list
 agent-flow worktree remove --name "feat-user-profile"
 
-# SPEC ledger (design / prd items)
-# On supported Codex, Claude, and OMP hosts, reply exactly `승인` in the current
-# chat. If the managed user-prompt hook is unavailable, run the path-free
-# fallback from the target worktree and type `승인` in its interactive prompt.
-agent-flow spec confirm
-# A confirmation observed from an agent shell voids the approval.
+# SPEC ledger (initial list is baselined automatically)
+# Later additions, modifications, and deletions are shown as a delta.
+agent-flow spec changes --run-dir <run-dir>
+# After the user clearly confirms that delta in chat, the agent records it.
+agent-flow spec confirm --run-dir <run-dir>
+# Manual verifiers follow the same chat-confirmation flow.
 agent-flow spec approve <spec-id> --run-dir <run-dir>
 
 # Gates

@@ -22,11 +22,7 @@ from pathlib import Path
 
 from agent_flow.adapters.base import Adapter
 from agent_flow.core.artifacts import run_gate_nonce
-from agent_flow.core.design_ledger import (
-    parse_spec_item_section,
-    record_spec_set_confirmation,
-    spec_set_confirmation_statement,
-)
+from agent_flow.core.design_ledger import capture_design_ledger
 
 
 # stub-success가 만든 artifact임을 나타내는 표식. runner는 이 표식이 있는
@@ -120,16 +116,9 @@ class GenericAdapter(Adapter):
                         "design-values: none\n"
                     )
                     artifact.write_text(content, encoding="utf-8")
-                    # stub은 사람과 agent를 통째로 대신한다. 확인 기록이 없으면
-                    # 원장 capture가 fail-closed로 막혀 state machine 픽스처가
-                    # 첫 phase에서 멈춘다 - 마커 검사를 건너뛰는 것과 같은 계약이다.
-                    parsed = parse_spec_item_section(content)
-                    if parsed.items and not parsed.errors:
-                        record_spec_set_confirmation(
-                            run_dir,
-                            parsed.items,
-                            spec_set_confirmation_statement(parsed.items),
-                        )
+                    # stub-success는 host 없는 state-machine smoke 전용이다.
+                    # runner보다 먼저 source ledger를 capture한다.
+                    capture_design_ledger(run_dir, phase.id, content)
                     return True
                 artifact.write_text(
                     f"# {phase.id}\n\n"

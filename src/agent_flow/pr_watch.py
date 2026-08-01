@@ -264,6 +264,7 @@ def _is_bot_comment(comment: dict[str, Any]) -> bool:
         "github-actions",
         "dependabot",
         "codecov",
+        "coderabbitai",
         "coveralls",
         "sonarcloud",
         "vercel",

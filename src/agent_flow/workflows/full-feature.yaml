@@ -74,15 +74,9 @@ phases:
       Every item must have exactly one verifier. Record `spec-items: none` only
       when the run task contains no user instruction.
 
-      After writing `artifacts/prd.md`, show the user the complete ordered SPEC
-      list and ask them to reply exactly `승인` in the current chat. Do not treat
-      quoted text, an earlier message, or agent-authored text as approval. The
-      managed user-prompt hook records only the current exact reply. If that
-      host hook is unavailable, tell the user to run the short fallback
-      `agent-flow spec confirm` from the target worktree. Never run the fallback
-      or invoke the approval hook yourself. The confirmation covers the complete
-      ordered set; any requirement or verifier edit requires a new confirmation
-      before this phase can complete.
+      Do not ask for separate approval of the initial SPEC list. If the list is
+      changed later, the workflow status reports only added, modified, and
+      deleted items for user confirmation; unchanged baseline items stay active.
 
       ## Design Values
       Record every concrete value the user supplied as one `key: value` line
@@ -485,8 +479,8 @@ phases:
         - `test:<name>` — an observed test command that ran that name and exited 0
         - `symbol:<symbol>=<value>` — the value added in a changed file that
           contains the symbol
-        - `manual` — a user approval record, which only the user can create with
-          `agent-flow spec approve`
+        - `manual` — explicit user confirmation in chat, followed by the agent
+          recording it with `agent-flow spec approve`
       Recorded design values must appear in the diff. When a value reaches the
       code through a token, declare it as
       `design-values-implemented: <key>=<token>` and that token must be in the
