@@ -39,11 +39,8 @@ from agent_flow.core.worktree_isolation import leader_root_for
 # `scripts/check-agent-flow-parity.mjs`)과 갈라지면 parity가 잡는다.
 MANAGED_HOOK_SCRIPTS = (
     "bind-host-worktree.py",
-    "confirm-spec-user-prompt.py",
     "guard-protected-branch.sh",
     "guard-host-worktree.sh",
-    "guard-spec-approval.sh",
-    "prepare-spec-user-prompt.py",
     "show-phase-status.sh",
     "comment-checker.py",
     "record-skill-read.py",
@@ -70,20 +67,9 @@ MANAGED_HOOK_PLACEMENT = {
         "PostToolUse",
         "^(Bash|bash|shell|run_terminal_cmd|execute_command|local_shell|terminal)$",
     ),
-    "confirm-spec-user-prompt.py": ("UserPromptSubmit", ""),
     "guard-protected-branch.sh": ("PreToolUse", "Bash"),
     "guard-host-worktree.sh": (
         "PreToolUse",
-        "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit|"
-        "Bash|bash|shell|run_terminal_cmd|execute_command|local_shell|terminal)$",
-    ),
-    "guard-spec-approval.sh": (
-        "PreToolUse",
-        "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit|"
-        "Bash|bash|shell|run_terminal_cmd|execute_command|local_shell|terminal)$",
-    ),
-    "prepare-spec-user-prompt.py": (
-        "PostToolUse",
         "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit|"
         "Bash|bash|shell|run_terminal_cmd|execute_command|local_shell|terminal)$",
     ),
@@ -107,9 +93,7 @@ MANAGED_HOOK_PLACEMENT = {
 
 HOOK_DIR_RELATIVE = Path(".agent-flow") / "scripts" / "hooks"
 KIT_JSON_RELATIVE = Path(".agent-flow") / "kit.json"
-# spec 승인 hook이 CLI를 실행하는 유일한 경로. 이 파일이 없으면 hook은 실행할
-# 것을 못 찾아 조용히 exit 0 하고, 사용자는 채팅 `승인`이 무시되는 이유를
-# 어디에서도 못 본다. 그래서 등록과 같은 급으로 런 시작 때 대조한다.
+# managed launcher와 포함된 Python runtime도 hook과 같은 설치 무결성 경계다.
 PROJECT_LAUNCHER_RELATIVE = Path(".agent-flow") / "bin" / "agent-flow"
 # launcher가 실제로 태울 CLI. digest만 맞고 이게 없으면 launcher는 exit 127이다.
 RUNTIME_CLI_RELATIVE = Path(".agent-flow") / "runtime" / "python" / "agent_flow" / "cli.py"
@@ -337,16 +321,7 @@ def _managed_hook_digest_violations(
 
 
 def _project_launcher_violations(root: Path, kit: dict) -> Iterator[str]:
-    """승인 hook이 실행할 launcher를 hook과 **같은 기준**으로 대조한다.
-
-    hook의 `_agent_flow_command()`도 같은 다섯 항목 + kit.json digest를 본다. 두
-    기준이 갈라지면 게이트가 통과하는데 hook만 거부하거나(승인이 무음으로 무시),
-    반대로 게이트가 거부한 launcher를 hook이 매 프롬프트마다 실행한다.
-
-    launcher가 **실행될 수 있는지**도 같이 본다. digest만 맞고 관리 runtime이
-    없으면 launcher는 exit 127이고, hook은 그 stderr를 버리므로 사용자에게는
-    승인이 무시된 것으로만 보인다.
-    """
+    """설치본의 managed launcher와 포함된 Python runtime을 대조한다."""
     if "project_launcher_digest" not in kit:
         # 변조와 "이 설치본이 launcher 도입보다 오래됨"을 구분한다. 상위 문구가
         # "변조가 아님을 확인한 뒤 재설치"라고 경고하므로, 섞으면 업그레이드
@@ -377,7 +352,7 @@ def _project_launcher_violations(root: Path, kit: dict) -> Iterator[str]:
         identity = path.lstat()
     except OSError:
         yield (
-            "managed launcher is missing, so chat SPEC confirmation cannot run: "
+            "managed launcher is missing, so the installed CLI cannot run: "
             f"{PROJECT_LAUNCHER_RELATIVE}"
         )
         return
@@ -425,6 +400,7 @@ def _launcher_python_violations(kit: dict) -> Iterator[str]:
         )
         return
     recorded_path = record.get("path")
+    recorded_realpath = record.get("realpath")
     recorded_digest = record.get("sha256")
     if not isinstance(recorded_path, str) or not recorded_path:
         yield "kit.json records no path for the managed launcher interpreter"
@@ -437,12 +413,32 @@ def _launcher_python_violations(kit: dict) -> Iterator[str]:
     interpreter = Path(recorded_path)
     try:
         identity = interpreter.lstat()
+        resolved = interpreter.resolve(strict=True)
+        target_identity = resolved.stat()
     except OSError:
         yield f"the interpreter the managed launcher execs is missing: {recorded_path}"
         return
-    # install은 realpath를 박으므로 여기 symlink가 보이면 그 자체가 교체 신호다.
-    if not stat.S_ISREG(identity.st_mode):
-        yield f"the managed launcher interpreter is not a regular file: {recorded_path}"
+    if not stat.S_ISREG(identity.st_mode) and not stat.S_ISLNK(identity.st_mode):
+        yield f"the managed launcher interpreter is not a regular file or symlink: {recorded_path}"
+        return
+    if not stat.S_ISREG(target_identity.st_mode):
+        yield f"the managed launcher interpreter target is not a regular file: {recorded_path}"
+        return
+    if stat.S_ISLNK(identity.st_mode):
+        if not isinstance(recorded_realpath, str) or not Path(recorded_realpath).is_absolute():
+            yield f"kit.json records no target for the managed launcher interpreter: {recorded_path}"
+            return
+        if resolved != Path(recorded_realpath):
+            yield (
+                "the managed launcher interpreter target changed since install: "
+                f"{recorded_path}; re-run `node bin/agent-flow-kit.mjs install` from the leader checkout"
+            )
+            return
+    elif isinstance(recorded_realpath, str) and resolved != Path(recorded_realpath):
+        yield (
+            "the managed launcher interpreter target changed since install: "
+            f"{recorded_path}; re-run `node bin/agent-flow-kit.mjs install` from the leader checkout"
+        )
         return
     if not os.access(interpreter, os.X_OK):
         # launcher의 두 exit 127 분기 중 하나다. 게이트가 이걸 안 보면 hook은

@@ -1425,16 +1425,6 @@ function assertLauncherContractIsSingleValued() {
       `launcher path differs: installer-shared has ${jsRelative}, hook_integrity has ${pythonLauncherRelative()}`,
     );
   }
-  for (const hookName of ["prepare-spec-user-prompt.py", "confirm-spec-user-prompt.py"]) {
-    const source = fs.readFileSync(path.join(SOURCE_ROOT, "scripts", "hooks", hookName), "utf8");
-    // hook은 자기 위치에서 install root를 유도하므로 경로 리터럴이 계약이다.
-    if (!source.includes('parents[2]') || !source.includes('"bin" / "agent-flow"')) {
-      failures.push(`${hookName} must resolve the launcher at parents[2]/bin/agent-flow`);
-    }
-    if (!source.includes(pythonLauncherDigestKey())) {
-      failures.push(`${hookName} must verify the ${pythonLauncherDigestKey()} recorded in kit.json`);
-    }
-  }
   for (const installer of ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"]) {
     assertContains(installer, `${pythonLauncherDigestKey()}: projectLauncherDigest(`);
   }

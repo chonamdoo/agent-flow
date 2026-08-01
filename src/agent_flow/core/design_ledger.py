@@ -13,16 +13,12 @@ phase 간 유일한 운반체가 "압축되는 host 대화 컨텍스트"였다. 
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
 import hashlib
 import json
-import os
 import re
-import secrets
+import shlex
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import BinaryIO, Iterator
 
 from agent_flow.core.command_evidence import is_concrete_test_selector
 from agent_flow.core.markers import (
@@ -37,10 +33,7 @@ SPEC_LEDGER_SECTION = "spec items"
 SPEC_MARKER = "spec-items:"
 MANUAL_SPEC_APPROVALS_FILE = "spec-manual-approvals.json"
 SPEC_CAPTURE_FILE = "spec-capture.json"
-SPEC_SET_CONFIRMATION_FILE = "spec-user-confirmation.json"
-SPEC_SET_CHALLENGE_FILE = "spec-user-confirmation.pending.json"
-SPEC_SET_CHALLENGE_LOCK_FILE = "spec-user-confirmation.lock"
-SPEC_SET_USER_REPLY = "승인"
+SPEC_CONFIRMATION_FILE = "spec-confirmed.json"
 
 # 원장을 만드는 phase. 여기서만 값이 들어오고, 나머지 phase는 읽기만 한다.
 LEDGER_SOURCE_PHASES = frozenset({"design", "prd"})
@@ -58,6 +51,18 @@ class SpecItem:
 class SpecParseResult:
     items: tuple[SpecItem, ...]
     errors: tuple[str, ...]
+
+@dataclass(frozen=True)
+class SpecChange:
+    kind: str
+    before: SpecItem | None
+    after: SpecItem | None
+
+    @property
+    def spec_id(self) -> str:
+        item = self.after or self.before
+        assert item is not None
+        return item.spec_id
 
 
 @dataclass(frozen=True)
@@ -89,24 +94,23 @@ def capture_design_ledger(run_dir: Path, phase_id: str, artifact_text: str) -> D
     parsed = parse_spec_item_section(artifact_text)
     if parsed.errors:
         raise ValueError("; ".join(parsed.errors))
-    if parsed.items and not spec_set_is_confirmed(run_dir, parsed.items):
-        raise ValueError("SPEC set requires fresh interactive user confirmation")
+    active_items = _spec_baseline_items(run_dir, parsed.items, persist=True)
     task_record = read_run_task_record(run_dir)
     if task_record.errors:
         raise ValueError("; ".join(task_record.errors))
     source_digest = hashlib.sha256(artifact_text.encode("utf-8")).hexdigest()
-    spec_digest = spec_set_digest(parsed.items)
+    spec_digest = spec_set_digest(active_items)
     ledger = DesignLedger(
         exists=True,
         source_phase=phase_id,
         values=values,
-        spec_items=parsed.items,
+        spec_items=active_items,
         source_digest=source_digest,
         spec_digest=spec_digest,
         task_digest=task_record.digest,
     )
     write_ledger(run_dir, ledger)
-    _write_capture_state(run_dir, ledger)
+    _write_capture_state(run_dir, ledger, source_items=parsed.items)
     return ledger
 
 
@@ -311,12 +315,8 @@ def read_ledger(run_dir: Path) -> DesignLedger:
         errors.append("missing source artifact digest")
     if recorded_spec_digest != calculated_spec_digest:
         errors.append("SPEC set digest does not match design-spec.md")
-    if parsed.items and not spec_set_is_confirmed(run_dir, parsed.items):
-        errors.append(
-            "SPEC set does not have current user confirmation "
-            f"(reply exactly `{SPEC_SET_USER_REPLY}` in the chat; fallback: "
-            "`agent-flow spec confirm`)"
-        )
+    if parsed.items != _spec_baseline_items(run_dir, parsed.items):
+        errors.append("SPEC baseline snapshot does not match design-spec.md")
     if task_record.sealed and not recorded_task_digest:
         errors.append("task digest is missing from design-spec.md")
     if recorded_task_digest and task_record.digest != recorded_task_digest:
@@ -335,12 +335,12 @@ def read_ledger(run_dir: Path) -> DesignLedger:
             errors.append("source phase does not match spec capture state")
         if capture.get("source_digest") != source_digest:
             errors.append("source artifact digest does not match spec capture state")
-        if capture.get("spec_digest") != calculated_spec_digest:
-            errors.append("SPEC set does not match spec capture state")
-        if capture.get("spec_fingerprints") != [
+        if capture.get("active_spec_digest") != calculated_spec_digest:
+            errors.append("active SPEC set does not match spec capture state")
+        if capture.get("active_spec_fingerprints") != [
             _spec_fingerprint(item) for item in parsed.items
         ]:
-            errors.append("SPEC fingerprints do not match spec capture state")
+            errors.append("active SPEC fingerprints do not match spec capture state")
         if capture.get("task_digest", "") != recorded_task_digest:
             errors.append("task does not match spec capture state")
     source_path = _source_artifact_path(run_dir, source)
@@ -352,16 +352,9 @@ def read_ledger(run_dir: Path) -> DesignLedger:
         except OSError:
             errors.append("source artifact cannot be read")
         else:
-            current_source_digest = hashlib.sha256(
-                source_text.encode("utf-8")
-            ).hexdigest()
-            if current_source_digest != source_digest:
-                errors.append("source artifact changed after SPEC capture")
             source_specs = parse_spec_item_section(source_text)
             if source_specs.errors:
                 errors.append("source artifact SPEC items are invalid")
-            elif source_specs.items != parsed.items:
-                errors.append("source artifact SPEC items do not match design-spec.md")
             if parse_design_values(source_text) != values:
                 errors.append("source artifact design values do not match design-spec.md")
     return DesignLedger(
@@ -399,7 +392,6 @@ def read_manual_spec_approvals(run_dir: Path) -> frozenset[str]:
         if (
             raw.get("spec_fingerprint") == fingerprint
             and raw.get("statement") == _manual_approval_statement(item)
-            and raw.get("provenance") == "interactive-user"
         ):
             approved.add(spec_id)
     return frozenset(approved)
@@ -431,7 +423,6 @@ def record_manual_spec_approval(
             "spec_id": approved_id,
             "spec_fingerprint": _spec_fingerprint(manual_items[approved_id]),
             "statement": _manual_approval_statement(manual_items[approved_id]),
-            "provenance": "interactive-user",
         }
         for approved_id in sorted(approved)
         if approved_id in manual_items
@@ -446,396 +437,201 @@ def spec_set_digest(items: tuple[SpecItem, ...]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def spec_set_confirmation_statement(items: tuple[SpecItem, ...]) -> str:
-    return f"CONFIRM SPEC SET {spec_set_digest(items)[:12]}"
+def _spec_baseline_items(
+    run_dir: Path,
+    candidate_items: tuple[SpecItem, ...],
+    *,
+    persist: bool = False,
+) -> tuple[SpecItem, ...]:
+    confirmation_path = run_dir / SPEC_CONFIRMATION_FILE
+    if confirmation_path.is_file():
+        return read_confirmed_spec_items(run_dir)
+    baseline = candidate_items
+    try:
+        ledger_text = (run_dir / LEDGER_FILE).read_text(encoding="utf-8")
+    except OSError:
+        ledger_text = ""
+    if ledger_text:
+        legacy = parse_spec_item_section(ledger_text)
+        if not legacy.errors and legacy.items:
+            baseline = legacy.items
+    if persist:
+        record_spec_confirmation(run_dir, baseline)
+    return baseline
 
 
-def record_spec_set_confirmation(
+def read_confirmed_spec_items(run_dir: Path) -> tuple[SpecItem, ...]:
+    payload = _read_json(run_dir / SPEC_CONFIRMATION_FILE)
+    if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+        return ()
+    items: list[SpecItem] = []
+    seen: set[str] = set()
+    for raw in payload["items"]:
+        if not isinstance(raw, dict):
+            return ()
+        spec_id = raw.get("spec_id")
+        requirement = raw.get("requirement")
+        verification = raw.get("verification")
+        if (
+            not isinstance(spec_id, str)
+            or re.fullmatch(r"SPEC-[1-9]\d*", spec_id) is None
+            or spec_id in seen
+            or not isinstance(requirement, str)
+            or not requirement.strip()
+            or not isinstance(verification, str)
+            or not _valid_spec_verification(verification)
+        ):
+            return ()
+        seen.add(spec_id)
+        items.append(
+            SpecItem(
+                spec_id=spec_id,
+                requirement=requirement.strip(),
+                verification=verification.strip(),
+            )
+        )
+    return tuple(items)
+
+
+def record_spec_confirmation(
     run_dir: Path,
     items: tuple[SpecItem, ...],
-    statement: str,
 ) -> Path:
-    expected_statement = spec_set_confirmation_statement(items)
-    if statement.strip() != expected_statement:
-        raise ValueError(f"confirmation statement must be: {expected_statement}")
-    return _write_spec_set_confirmation(
-        run_dir,
-        items,
-        provenance="interactive-user",
-    )
-
-
-def prepare_user_spec_confirmation(
-    run_dir: Path,
-    items: tuple[SpecItem, ...],
-    *,
-    session_id: str,
-    checkout_identity: str,
-    hook_capability_hash: str,
-) -> Path | None:
-    with _spec_confirmation_lock(run_dir):
-        return _prepare_user_spec_confirmation(
-            run_dir,
-            items,
-            session_id=session_id,
-            checkout_identity=checkout_identity,
-            hook_capability_hash=hook_capability_hash,
-        )
-
-
-def prepare_and_attest_user_spec_confirmation(
-    run_dir: Path,
-    items: tuple[SpecItem, ...],
-    *,
-    prompt: str,
-    session_id: str,
-    checkout_identity: str,
-    hook_capability: str,
-) -> Path | None:
-    """같은 session에서 미리 준비된 challenge를 한 번만 소비한다."""
-    if prompt != SPEC_SET_USER_REPLY:
-        return None
-    with _spec_confirmation_lock(run_dir):
-        return _attest_user_spec_confirmation(
-            run_dir,
-            items,
-            prompt=prompt,
-            session_id=session_id,
-            checkout_identity=checkout_identity,
-            hook_capability=hook_capability,
-        )
-
-
-def _prepare_user_spec_confirmation(
-    run_dir: Path,
-    items: tuple[SpecItem, ...],
-    *,
-    session_id: str,
-    checkout_identity: str,
-    hook_capability_hash: str,
-) -> Path | None:
-    session_id = session_id.strip()
-    checkout_identity = checkout_identity.strip()
-    if not session_id or not checkout_identity:
-        raise ValueError("SPEC confirmation challenge requires session and checkout identity")
-    if re.fullmatch(r"[0-9a-f]{64}", hook_capability_hash) is None:
-        raise ValueError("SPEC hook capability hash is invalid")
-    path = run_dir / SPEC_SET_CHALLENGE_FILE
-    expected = _spec_confirmation_subject(
-        run_dir,
-        items,
-        session_id=session_id,
-        checkout_identity=checkout_identity,
-    )
-    confirmation_path = run_dir / SPEC_SET_CONFIRMATION_FILE
-    confirmation = _read_json(confirmation_path)
-    if (
-        isinstance(confirmation, dict)
-        and _spec_confirmation_matches(confirmation, items)
-        and confirmation.get("provenance") == "interactive-user"
-    ):
-        path.unlink(missing_ok=True)
-        return None
-    if _host_spec_confirmation_matches(run_dir, items, confirmation):
-        path.unlink(missing_ok=True)
-        return None
-    if _spec_confirmation_subject_was_consumed(run_dir, expected):
-        path.unlink(missing_ok=True)
-        return None
-    existing = _read_json(path)
-    if (
-        isinstance(existing, dict)
-        and all(existing.get(key) == value for key, value in expected.items())
-        and isinstance(existing.get("challenge_id"), str)
-        and existing["challenge_id"]
-        and existing.get("hook_capability_hash") == hook_capability_hash
-    ):
-        return path
+    path = run_dir / SPEC_CONFIRMATION_FILE
     _write_json_atomic(
         path,
         {
-            **expected,
-            "challenge_id": secrets.token_hex(16),
-            "hook_capability_hash": hook_capability_hash,
+            "items": [
+                {
+                    "spec_id": item.spec_id,
+                    "requirement": item.requirement,
+                    "verification": item.verification,
+                }
+                for item in items
+            ]
         },
     )
     return path
 
 
-def attest_user_spec_confirmation(
+def pending_spec_changes(
     run_dir: Path,
-    items: tuple[SpecItem, ...],
-    *,
-    prompt: str,
-    session_id: str,
-    checkout_identity: str,
-    hook_capability: str,
-) -> Path | None:
-    if prompt != SPEC_SET_USER_REPLY:
-        return None
-    with _spec_confirmation_lock(run_dir):
-        return _attest_user_spec_confirmation(
-            run_dir,
-            items,
-            prompt=prompt,
-            session_id=session_id,
-            checkout_identity=checkout_identity,
-            hook_capability=hook_capability,
-        )
+    candidate_items: tuple[SpecItem, ...],
+) -> tuple[SpecChange, ...]:
+    confirmed = _spec_baseline_items(run_dir, candidate_items)
+    confirmed_by_id = {item.spec_id: item for item in confirmed}
+    candidate_by_id = {item.spec_id: item for item in candidate_items}
+    changes: list[SpecChange] = []
+    for item in candidate_items:
+        previous = confirmed_by_id.get(item.spec_id)
+        if previous is None:
+            changes.append(SpecChange("added", None, item))
+        elif previous != item:
+            changes.append(SpecChange("modified", previous, item))
+    for item in confirmed:
+        if item.spec_id not in candidate_by_id:
+            changes.append(SpecChange("deleted", item, None))
+    return tuple(changes)
 
 
-def _attest_user_spec_confirmation(
+def current_spec_source(
     run_dir: Path,
-    items: tuple[SpecItem, ...],
-    *,
-    prompt: str,
-    session_id: str,
-    checkout_identity: str,
-    hook_capability: str,
-) -> Path | None:
-    if prompt != SPEC_SET_USER_REPLY:
-        return None
-    session_id = session_id.strip()
-    checkout_identity = checkout_identity.strip()
-    if not session_id or not checkout_identity:
-        return None
-    capability_hash = hashlib.sha256(hook_capability.encode("utf-8")).hexdigest()
-    challenge_path = run_dir / SPEC_SET_CHALLENGE_FILE
-    challenge = _read_json(challenge_path)
-    expected = _spec_confirmation_subject(
-        run_dir,
-        items,
-        session_id=session_id,
-        checkout_identity=checkout_identity,
-    )
-    if not _spec_confirmation_challenge_matches(
-        challenge,
-        expected,
-        hook_capability_hash=capability_hash,
-    ):
-        return None
-    assert isinstance(challenge, dict)
-    challenge_id = challenge["challenge_id"]
-    claimed_path = run_dir / f".{SPEC_SET_CHALLENGE_FILE}.{challenge_id}.consuming"
-    consumed_path = run_dir / f".{SPEC_SET_CHALLENGE_FILE}.{challenge_id}.consumed"
+) -> tuple[str, Path, SpecParseResult]:
+    phase_id = ""
     try:
-        challenge_path.replace(claimed_path)
-    except FileNotFoundError:
-        return None
-    consumed = False
+        ledger_text = (run_dir / LEDGER_FILE).read_text(encoding="utf-8")
+    except OSError:
+        ledger_text = ""
+    if ledger_text:
+        phase_id = _ledger_header(ledger_text, "Source phase")
+    candidates: list[tuple[str, Path | None]] = []
+    if phase_id:
+        candidates.append((phase_id, _source_artifact_path(run_dir, phase_id)))
+    candidates.extend(
+        (candidate_phase, _source_artifact_path(run_dir, candidate_phase))
+        for candidate_phase in ("design", "prd")
+        if candidate_phase != phase_id
+    )
+    for candidate_phase, path in candidates:
+        if path is None:
+            continue
+        parsed = parse_spec_item_section(path.read_text(encoding="utf-8"))
+        if parsed.errors:
+            raise ValueError("; ".join(parsed.errors))
+        return candidate_phase, path, parsed
+    raise ValueError(f"run has no SPEC source artifact: {run_dir}")
+
+
+def pending_spec_changes_for_run(run_dir: Path) -> tuple[SpecChange, ...]:
     try:
-        challenge = _read_json(claimed_path)
-        if (
-            not _spec_confirmation_challenge_matches(challenge, expected)
-            or challenge.get("challenge_id") != challenge_id
-            or challenge.get("hook_capability_hash") != capability_hash
-        ):
-            return None
-        claimed_path.replace(consumed_path)
-        consumed = True
-        return _write_spec_set_confirmation(
-            run_dir,
-            items,
-            provenance="host-user-prompt",
-            attestation={
-                "challenge_id": challenge_id,
-                "session_id": session_id,
-                "checkout_identity": checkout_identity,
-                "run_id": run_dir.name,
-                "run_identity": str(run_dir.resolve()),
-                "approved_at": datetime.now(timezone.utc).isoformat(),
-                "spec_digest": spec_set_digest(items),
-                "hook_capability_hash": capability_hash,
-            },
-        )
-    finally:
-        if not consumed:
-            claimed_path.unlink(missing_ok=True)
+        _, _, parsed = current_spec_source(run_dir)
+    except ValueError:
+        return ()
+    return pending_spec_changes(run_dir, parsed.items)
 
 
-def _spec_confirmation_subject(
-    run_dir: Path,
-    items: tuple[SpecItem, ...],
-    *,
-    session_id: str,
-    checkout_identity: str,
-) -> dict[str, object]:
-    return {
-        "spec_digest": spec_set_digest(items),
-        "spec_fingerprints": [_spec_fingerprint(item) for item in items],
-        "session_id": session_id,
-        "run_id": run_dir.name,
-        "run_identity": str(run_dir.resolve()),
-        "checkout_identity": checkout_identity,
-    }
-
-
-def _spec_confirmation_challenge_matches(
-    payload: object,
-    expected: dict[str, object],
-    *,
-    hook_capability_hash: str | None = None,
-) -> bool:
-    if (
-        not isinstance(payload, dict)
-        or not isinstance(payload.get("challenge_id"), str)
-        or re.fullmatch(r"[0-9a-f]{32}", payload["challenge_id"]) is None
-        or not isinstance(payload.get("hook_capability_hash"), str)
-        or re.fullmatch(r"[0-9a-f]{64}", payload["hook_capability_hash"]) is None
-        or not all(payload.get(key) == value for key, value in expected.items())
-    ):
-        return False
-    return (
-        hook_capability_hash is None
-        or payload["hook_capability_hash"] == hook_capability_hash
-    )
-
-
-def _spec_confirmation_subject_was_consumed(
-    run_dir: Path,
-    expected: dict[str, object],
-) -> bool:
-    return any(
-        _spec_confirmation_challenge_matches(_read_json(path), expected)
-        for path in run_dir.glob(f".{SPEC_SET_CHALLENGE_FILE}.*.consumed")
-    )
-
-
-@contextmanager
-def _spec_confirmation_lock(run_dir: Path) -> Iterator[None]:
-    run_dir.mkdir(parents=True, exist_ok=True)
-    with (run_dir / SPEC_SET_CHALLENGE_LOCK_FILE).open("a+b") as stream:
-        _lock_confirmation_file(stream)
-        try:
-            yield
-        finally:
-            _unlock_confirmation_file(stream)
-
-
-def _lock_confirmation_file(stream: BinaryIO) -> None:
-    if os.name == "nt":
-        import msvcrt
-
-        stream.seek(0, 2)
-        if stream.tell() == 0:
-            stream.write(b"\0")
-            stream.flush()
-        stream.seek(0)
-        msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
-        return
-    import fcntl
-
-    fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
-
-
-def _unlock_confirmation_file(stream: BinaryIO) -> None:
-    if os.name == "nt":
-        import msvcrt
-
-        stream.seek(0)
-        msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
-        return
-    import fcntl
-
-    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
-
-
-def spec_set_is_confirmed(run_dir: Path, items: tuple[SpecItem, ...]) -> bool:
-    payload = _read_json(run_dir / SPEC_SET_CONFIRMATION_FILE)
-    if not isinstance(payload, dict) or not _spec_confirmation_matches(payload, items):
-        return False
-    if payload.get("provenance") == "interactive-user":
-        return True
-    return _host_spec_confirmation_matches(run_dir, items, payload)
-
-
-def _host_spec_confirmation_matches(
-    run_dir: Path,
-    items: tuple[SpecItem, ...],
-    payload: object,
-) -> bool:
-    if (
-        not isinstance(payload, dict)
-        or not _spec_confirmation_matches(payload, items)
-        or payload.get("provenance") != "host-user-prompt"
-    ):
-        return False
-    attestation = payload.get("attestation")
-    if not isinstance(attestation, dict):
-        return False
-    challenge_id = attestation.get("challenge_id")
-    session_id = attestation.get("session_id")
-    checkout_identity = attestation.get("checkout_identity")
-    approved_at = attestation.get("approved_at")
-    hook_capability_hash = attestation.get("hook_capability_hash")
-    if (
-        not isinstance(challenge_id, str)
-        or re.fullmatch(r"[0-9a-f]{32}", challenge_id) is None
-        or not isinstance(session_id, str)
-        or not session_id
-        or session_id != session_id.strip()
-        or not isinstance(checkout_identity, str)
-        or not checkout_identity
-        or checkout_identity != checkout_identity.strip()
-        or not isinstance(approved_at, str)
-        or not approved_at
-        or not isinstance(hook_capability_hash, str)
-        or re.fullmatch(r"[0-9a-f]{64}", hook_capability_hash) is None
-    ):
-        return False
-    subject = _spec_confirmation_subject(
+def confirm_current_spec_changes(run_dir: Path) -> Path:
+    phase_id, source_path, parsed = current_spec_source(run_dir)
+    if not parsed.items:
+        raise ValueError("SPEC source artifact has no items")
+    confirmation_path = record_spec_confirmation(run_dir, parsed.items)
+    capture_design_ledger(
         run_dir,
-        items,
-        session_id=session_id,
-        checkout_identity=checkout_identity,
+        phase_id,
+        source_path.read_text(encoding="utf-8"),
     )
-    if (
-        attestation.get("spec_digest") != subject["spec_digest"]
-        or attestation.get("run_id") != subject["run_id"]
-        or attestation.get("run_identity") != subject["run_identity"]
+    return confirmation_path
+
+
+def render_spec_changes(changes: tuple[SpecChange, ...]) -> str:
+    if not changes:
+        return "No SPEC changes require confirmation."
+    sections: list[str] = []
+    for kind, title in (
+        ("added", "Added"),
+        ("modified", "Modified"),
+        ("deleted", "Deleted"),
     ):
-        return False
-    consumed = _read_json(
-        run_dir / f".{SPEC_SET_CHALLENGE_FILE}.{challenge_id}.consumed"
-    )
-    return (
-        _spec_confirmation_challenge_matches(
-            consumed,
-            subject,
-            hook_capability_hash=hook_capability_hash,
-        )
-        and isinstance(consumed, dict)
-        and consumed.get("challenge_id") == challenge_id
-    )
-
-
-def _write_spec_set_confirmation(
-    run_dir: Path,
-    items: tuple[SpecItem, ...],
-    *,
-    provenance: str,
-    attestation: dict[str, str] | None = None,
-) -> Path:
-    path = run_dir / SPEC_SET_CONFIRMATION_FILE
-    payload: dict[str, object] = {
-        "spec_digest": spec_set_digest(items),
-        "spec_fingerprints": [_spec_fingerprint(item) for item in items],
-        "statement": spec_set_confirmation_statement(items),
-        "provenance": provenance,
-    }
-    if attestation is not None:
-        payload["attestation"] = attestation
-    _write_json_atomic(path, payload)
-    return path
-
-
-def _spec_confirmation_matches(payload: dict, items: tuple[SpecItem, ...]) -> bool:
-    return (
-        payload.get("spec_digest") == spec_set_digest(items)
-        and payload.get("spec_fingerprints")
-        == [_spec_fingerprint(item) for item in items]
-        and payload.get("statement") == spec_set_confirmation_statement(items)
-    )
+        selected = [change for change in changes if change.kind == kind]
+        if not selected:
+            continue
+        lines = [f"### {title}"]
+        for change in selected:
+            if kind == "added":
+                assert change.after is not None
+                lines.extend(
+                    (
+                        f"- {change.after.spec_id}: {change.after.requirement}",
+                        f"  verify: {change.after.verification}",
+                    )
+                )
+            elif kind == "deleted":
+                assert change.before is not None
+                lines.extend(
+                    (
+                        f"- {change.before.spec_id}: {change.before.requirement}",
+                        f"  verify: {change.before.verification}",
+                    )
+                )
+            else:
+                assert change.before is not None and change.after is not None
+                lines.append(f"- {change.spec_id}")
+                if change.before.requirement != change.after.requirement:
+                    lines.extend(
+                        (
+                            f"  requirement before: {change.before.requirement}",
+                            f"  requirement after: {change.after.requirement}",
+                        )
+                    )
+                if change.before.verification != change.after.verification:
+                    lines.extend(
+                        (
+                            f"  verify before: {change.before.verification}",
+                            f"  verify after: {change.after.verification}",
+                        )
+                    )
+        sections.append("\n".join(lines))
+    return "\n\n".join(sections)
 
 
 def _manual_spec_item(run_dir: Path, spec_id: str) -> SpecItem:
@@ -869,17 +665,26 @@ def _spec_fingerprint(item: SpecItem) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _write_capture_state(run_dir: Path, ledger: DesignLedger) -> None:
+def _write_capture_state(
+    run_dir: Path,
+    ledger: DesignLedger,
+    *,
+    source_items: tuple[SpecItem, ...],
+) -> None:
     _write_json_atomic(
         run_dir / SPEC_CAPTURE_FILE,
         {
             "source_phase": ledger.source_phase,
             "source_digest": ledger.source_digest,
-            "spec_digest": ledger.spec_digest,
-            "task_digest": ledger.task_digest,
-            "spec_fingerprints": [
+            "source_spec_digest": spec_set_digest(source_items),
+            "source_spec_fingerprints": [
+                _spec_fingerprint(item) for item in source_items
+            ],
+            "active_spec_digest": ledger.spec_digest,
+            "active_spec_fingerprints": [
                 _spec_fingerprint(item) for item in ledger.spec_items
             ],
+            "task_digest": ledger.task_digest,
         },
     )
 
@@ -991,7 +796,8 @@ def ledger_prompt_block(run_dir: Path) -> str:
             "This block is injected into every phase prompt, so the run cannot "
             "advance until it is valid: redo the source phase, or start a new run."
         )
-    if _run_task_text(run_dir) and not ledger.spec_items:
+    pending_changes = pending_spec_changes_for_run(run_dir)
+    if _run_task_text(run_dir) and not ledger.spec_items and not pending_changes:
         raise RuntimeError("design-spec.md has no SPEC items for a non-empty task")
     header = (
         "\n## Design specification ledger (injected by the runner)\n\n"
@@ -1005,23 +811,38 @@ def ledger_prompt_block(run_dir: Path) -> str:
             for item in ledger.spec_items
         )
         manual_instruction = (
-            "Manual verification is not an artifact claim. Ask the user for explicit "
-            "approval and tell the user to run "
-            "`agent-flow spec approve <SPEC-ID> --run-dir <run-dir>` in their "
-            "interactive terminal. Never run the approval command or write its "
-            "record on the user's behalf: if that command is observed in your own "
-            "shell, the record is rejected and the run blocks.\n\n"
+            "For a manual verification, ask the user in this chat. After a clear "
+            "affirmative reply, run `agent-flow spec approve <SPEC-ID> --run-dir "
+            "<run-dir>` yourself. Do not require an exact phrase and never ask the "
+            "user to enter a terminal command.\n\n"
             if any(item.verification.strip().lower() == "manual" for item in ledger.spec_items)
             else ""
         )
         spec_block = (
-            "### Spec Items\n\n"
+            "### Confirmed Spec Items\n\n"
             f"{specs}\n\n"
-            "Every SPEC item must be satisfied by its recorded verification evidence.\n\n"
+            "Every confirmed SPEC item must be satisfied by its recorded "
+            "verification evidence.\n\n"
             f"{manual_instruction}"
         )
     else:
-        spec_block = "No spec items were recorded for this run.\n\n"
+        spec_block = "No SPEC items have been confirmed yet.\n\n"
+    if pending_changes:
+        changes = render_spec_changes(pending_changes)
+        pending_block = (
+            "### SPEC Changes Awaiting User Confirmation\n\n"
+            f"{changes}\n\n"
+            "Show only these added, modified, or deleted items to the user and ask "
+            "whether to apply them. Any clear affirmative reply is enough; do not "
+            "require an exact token and do not ask the user to run a terminal "
+            "command. After the user confirms, run `agent-flow spec confirm "
+            f"--run-dir {shlex.quote(str(run_dir))}` yourself. Until then, do not start added or "
+            "modified SPEC work. Unchanged confirmed SPEC work may continue, and "
+            "the previously confirmed version of modified or deleted items remains "
+            "active.\n\n"
+        )
+    else:
+        pending_block = ""
     if ledger.values:
         values = "\n".join(f"- `{key}`: `{value}`" for key, value in ledger.values)
         value_block = (
@@ -1035,7 +856,7 @@ def ledger_prompt_block(run_dir: Path) -> str:
             "No design values were recorded for this run. Do not invent numbers, "
             "colors, or tokens that are not in the task or the codebase.\n"
         )
-    return header + spec_block + value_block
+    return header + spec_block + pending_block + value_block
 
 
 def _strip_bullet(line: str) -> str:

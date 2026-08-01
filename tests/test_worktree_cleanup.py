@@ -494,13 +494,16 @@ def _kit_registration_bytes(root: Path, rel: str) -> str:
             "export default function agentFlowHooks(ctx) {}\n"
         )
     command = (
-        f"/usr/bin/python3 -I '{root}/.agent-flow/scripts/hooks/confirm-spec-user-prompt.py'"
+        f"/bin/bash '{root}/.agent-flow/scripts/hooks/guard-protected-branch.sh'"
     )
     return json.dumps(
         {
             "hooks": {
-                "UserPromptSubmit": [
-                    {"hooks": [{"type": "command", "command": command}]}
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{"type": "command", "command": command}],
+                    }
                 ]
             }
         }

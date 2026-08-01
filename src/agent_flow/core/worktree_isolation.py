@@ -1765,6 +1765,8 @@ def git_safe(
     timeout_s: Optional[int] = None,
     optional_locks: bool = True,
     input_text: str | None = None,
+    pass_fds: tuple[int, ...] = (),
+    cwd_fd: int | None = None,
 ):
     """Run git with git-discovery env vars stripped so cwd stays authoritative.
 
@@ -1784,7 +1786,15 @@ def git_safe(
     if not optional_locks:
         env["GIT_OPTIONAL_LOCKS"] = "0"
     command = ("git",) + tuple(str(a) for a in args)
-    options = {"cwd": cwd, "env": env, "input_text": input_text}
+    options = {
+        "cwd": cwd,
+        "env": env,
+        "input_text": input_text,
+    }
+    if pass_fds:
+        options["pass_fds"] = pass_fds
+    if cwd_fd is not None:
+        options["cwd_fd"] = cwd_fd
     if timeout_s is not None:
         options["timeout_s"] = timeout_s
     return run_safe_command(command, **options)

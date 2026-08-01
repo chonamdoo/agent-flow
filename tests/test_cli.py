@@ -26,12 +26,7 @@ from tests.test_hook_integrity import _install as _install_managed_hooks
 from agent_flow.cli import main
 from agent_flow.adapters.templates import PromptContext, render_stage_prompt
 from agent_flow.core.gates import GateCommand, run_gate
-from agent_flow.core.design_ledger import (
-    capture_design_ledger,
-    parse_spec_item_section,
-    record_spec_set_confirmation,
-    spec_set_confirmation_statement,
-)
+from agent_flow.core.design_ledger import capture_design_ledger
 from agent_flow.core.phase_workflow import load_phase_workflow_definition
 from agent_flow.core.hook_integrity import find_install_root
 from agent_flow.core.kit_digest import kit_source_digest
@@ -1599,60 +1594,22 @@ class CliTest(unittest.TestCase):
                 ]
                 self.assertIn(expected_comment_checker, codex_hook_commands)
                 self.assertNotIn(str(Path(__file__).resolve().parents[1]), "\n".join(codex_hook_commands))
-                user_prompt_commands = [
-                    hook["command"]
-                    for entry in codex_hooks["hooks"]["UserPromptSubmit"]
-                    for hook in entry["hooks"]
-                ]
-                self.assertEqual(
-                    user_prompt_commands,
-                    [
-                        f"/usr/bin/python3 -I "
-                        f"'{project_root.resolve() / '.agent-flow' / 'scripts' / 'hooks' / name}'"
-                        for name in (
-                            "prepare-spec-user-prompt.py",
-                            "confirm-spec-user-prompt.py",
-                        )
-                    ],
-                )
+                self.assertNotIn("UserPromptSubmit", codex_hooks["hooks"])
             omp_extension = project_root / ".omp" / "extensions" / "agent-flow-hooks.ts"
             self.assertTrue(omp_extension.is_file())
             omp_extension_text = omp_extension.read_text(encoding="utf-8")
             self.assertNotIn("guard-worktree.sh", omp_extension_text)
             self.assertIn("guard-protected-branch.sh", omp_extension_text)
             self.assertIn("guard-host-worktree.sh", omp_extension_text)
-            self.assertIn("guard-spec-approval.sh", omp_extension_text)
-            self.assertIn("prepare-spec-user-prompt.py", omp_extension_text)
+            self.assertNotIn("guard-spec-approval.sh", omp_extension_text)
+            self.assertNotIn("prepare-spec-user-prompt.py", omp_extension_text)
             self.assertIn("comment-checker.py", omp_extension_text)
             self.assertIn("show-phase-status.sh", omp_extension_text)
-            self.assertIn("confirm-spec-user-prompt.py", omp_extension_text)
+            self.assertNotIn("confirm-spec-user-prompt.py", omp_extension_text)
             self.assertIn("bind-host-worktree.py", omp_extension_text)
-            self.assertIn('pi.on("input"', omp_extension_text)
-            self.assertIn('event?.source !== "interactive"', omp_extension_text)
-            self.assertIn("session_id: sessionIdentity(event, ctx)", omp_extension_text)
-            self.assertIn('pi.on("before_agent_start"', omp_extension_text)
-            omp_input_handler = omp_extension_text.split('pi.on("input"', 1)[1].split(
-                'pi.on("before_agent_start"', 1
-            )[0]
-            self.assertIn(
-                'await runSpecUserPromptHooks(prompt, event, ctx, "allow-unknown")',
-                omp_input_handler,
-            )
-            self.assertIn(
-                'await runSpecUserPromptHooks(prompt, event, ctx, "require-user")',
-                omp_extension_text,
-            )
-            self.assertIn("async function runSpecUserPromptHooks", omp_extension_text)
+            self.assertNotIn('pi.on("input"', omp_extension_text)
+            self.assertNotIn('pi.on("before_agent_start"', omp_extension_text)
             self.assertIn("export default function agentFlowHooks", omp_extension_text)
-            omp_prompt_helper = omp_extension_text.split("async function runSpecUserPromptHooks", 1)[1].split(
-                "export default function agentFlowHooks", 1
-            )[0]
-            self.assertIn('await runHook("prepare-spec-user-prompt.py"', omp_prompt_helper)
-            self.assertIn('await runHook("confirm-spec-user-prompt.py"', omp_prompt_helper)
-            self.assertLess(
-                omp_prompt_helper.index('await runHook("prepare-spec-user-prompt.py"'),
-                omp_prompt_helper.index('await runHook("confirm-spec-user-prompt.py"'),
-            )
             self.assertIn("session_shutdown", omp_extension_text)
             self.assertIn('pi.on("context"', omp_extension_text)
             self.assertIn('message?.customType === "agent-flow-model-context"', omp_extension_text)
@@ -1669,12 +1626,6 @@ class CliTest(unittest.TestCase):
             self.assertTrue((project_root / ".omp" / "skills" / "agent-flow" / "SKILL.md").exists())
             self.assertTrue(
                 os.access(project_root / ".agent-flow" / "scripts" / "hooks" / "comment-checker.py", os.X_OK)
-            )
-            self.assertTrue(
-                os.access(
-                    project_root / ".agent-flow" / "scripts" / "hooks" / "confirm-spec-user-prompt.py",
-                    os.X_OK,
-                )
             )
             self.assertTrue(
                 os.access(
@@ -1741,13 +1692,8 @@ class CliTest(unittest.TestCase):
             self.assertIn("Treat the status command output as the only source of truth.", agent_flow_skill)
             self.assertIn("Do not run install just because a new session started.", agent_flow_skill)
 
-    def test_node_installers_write_the_spec_approval_launcher(self) -> None:
-        """chat `승인` hook이 실행할 launcher는 install이 심는다.
-
-        이게 없으면 `_agent_flow_command()`가 None을 돌려주고 두 hook은 조용히
-        exit 0 한다 — 사용자에게는 승인이 무시된 것으로만 보인다. 그래서 파일
-        존재와 권한만이 아니라 **실제로 CLI를 태우는지**까지 확인한다.
-        """
+    def test_node_installers_write_the_managed_launcher(self) -> None:
+        """install이 심는 launcher가 고정된 managed Python CLI를 실행한다."""
         for installer in ("agent-flow-kit.mjs", "agent-flow-install.mjs"):
             with self.subTest(installer=installer):
                 with tempfile.TemporaryDirectory() as temp_dir:
@@ -1787,9 +1733,8 @@ class CliTest(unittest.TestCase):
                     self.assertEqual(launched.returncode, 0, launched.stderr)
                     self.assertIn("spec confirm", launched.stdout)
                     source = launcher.read_text(encoding="utf-8")
-                    # 실행할 인터프리터는 install이 정해 절대경로로 박는다. 실행
-                    # 시점에 후보를 탐색하면 agent가 갈아끼울 수 있는 자리가 그대로
-                    # 승인 위조 경로가 된다.
+                    # 실행할 인터프리터는 install이 정한 절대경로로 고정한다.
+                    # 실행 시점의 PATH나 환경으로 runtime을 바꿀 수 없어야 한다.
                     self.assertNotIn("AGENT_FLOW_PYTHON", source)
                     self.assertNotIn("command -v", source)
                     self.assertRegex(source, r"\npython='/[^']+'\n")
@@ -1828,11 +1773,9 @@ class CliTest(unittest.TestCase):
                     if isolated.returncode == 0:
                         self.assertEqual(kit_python["flag"], "-I")
                         self.assertIn(" -I -c ", source)
-                    # 반증: 승인 경로의 cwd는 agent가 매일 파일을 쓰는 체크아웃이다.
-                    # `-c`가 sys.path에 남기는 cwd를 지우지 않으면 저장소에 놓인 평범한
-                    # `argparse.py` 하나가 capability 토큰을 들고 실행된다. `-I`는
-                    # 그것까지 막지만, user-site에만 yaml이 있는 배치는 `-E`로 내려가므로
-                    # bootstrap 자체가 cwd를 지우는지를 그 플래그로 확인한다.
+                    # managed CLI의 cwd는 쓰기 가능한 checkout이다. `-c`가
+                    # sys.path에 남기는 cwd를 지우지 않으면 저장소의 `argparse.py`
+                    # 같은 파일이 CLI 프로세스에서 실행된다.
                     (project_root / "argparse.py").write_text(
                         "import sys\n"
                         "sys.stderr.write('cwd-shadow ran\\n')\n"
@@ -1906,7 +1849,7 @@ class CliTest(unittest.TestCase):
             settings = json.loads(settings_path.read_text(encoding="utf-8"))
             commands = [
                 hook["command"]
-                for event in ("PreToolUse", "UserPromptSubmit", "PostToolUse", "Stop")
+                for event in ("PreToolUse", "PostToolUse", "Stop")
                 for entry in settings["hooks"][event]
                 for hook in entry["hooks"]
             ]
@@ -1914,12 +1857,8 @@ class CliTest(unittest.TestCase):
             expected = [
                 f"/bin/bash '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-protected-branch.sh'}'",
                 f"/bin/bash '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-host-worktree.sh'}'",
-                f"/bin/bash '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-spec-approval.sh'}'",
-                f"/usr/bin/python3 -I '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'prepare-spec-user-prompt.py'}'",
-                f"/usr/bin/python3 -I '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'confirm-spec-user-prompt.py'}'",
                 f"/usr/bin/python3 -I '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'comment-checker.py'}'",
                 f"/bin/bash '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'guard-host-worktree.sh'}'",
-                f"/usr/bin/python3 -I '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'prepare-spec-user-prompt.py'}'",
                 f"/usr/bin/python3 -I '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'record-skill-read.py'}'",
                 f"/usr/bin/python3 -I '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'record-command-run.py'}'",
                 f"/usr/bin/python3 -I '{resolved_root / '.agent-flow' / 'scripts' / 'hooks' / 'bind-host-worktree.py'}'",
@@ -2807,7 +2746,6 @@ design-values-confirmed: n/a
                 + _node_project_local_gate("prd")
             )
             artifact.write_text(source_artifact, encoding="utf-8")
-            _confirm_node_spec_set(run_dir, source_artifact)
 
             result = subprocess.run(
                 (
@@ -3863,16 +3801,7 @@ if (codexContext !== undefined) {
             kit = json.loads((project_root / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
             self.assertEqual(kit["profile"], "node")
 
-    def test_node_cli_routes_spec_confirm_to_the_interactive_python_cli(self) -> None:
-        """워크플로가 안내하는 `agent-flow spec confirm`은 래퍼에서도 살아 있어야 한다.
-
-        래퍼가 받지 않으면 usage만 나온다. 사용자는 그때부터 인터프리터와
-        PYTHONPATH를 손으로 찾게 되고, PyYAML 없는 시스템 python을 타면
-        ModuleNotFoundError로 끝난다. 실제로 SPEC 승인이 그 자리에서 멈췄다.
-
-        상대경로 artifact와 종료 코드까지 함께 본다. cwd를 KIT_ROOT로 넘기면
-        사용자가 준 상대경로가 엉뚱한 곳에서 풀린다.
-        """
+    def test_node_cli_routes_spec_confirm_to_the_python_cli(self) -> None:
         node = _node_executable()
         cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -3900,8 +3829,6 @@ if (codexContext !== undefined) {
                     "confirm",
                     "--run-dir",
                     ".agent-flow/runs/r1",
-                    "--artifact",
-                    ".agent-flow/runs/r1/artifacts/design.md",
                 ),
                 cwd=project_root,
                 text=True,
@@ -3912,35 +3839,16 @@ if (codexContext !== undefined) {
         combined = result.stdout + result.stderr
         self.assertNotIn("usage: agent-flow-kit", combined)
         self.assertNotIn("ModuleNotFoundError", combined)
-        # cwd 기준으로 상대경로가 풀렸고, 승인 문구를 받는 자리까지 닿았다는 증거다.
-        # 여기서 멈추는 이유는 파이프로 물린 stdin이 TTY가 아니기 때문뿐이다.
-        self.assertIn("foreground user terminal", combined)
-        self.assertEqual(result.returncode, 2)
+        self.assertIn("SPEC changes confirmed:", combined)
+        self.assertEqual(result.returncode, 0)
 
-    def test_node_cli_routes_short_spec_confirm_to_the_active_run(self) -> None:
+    def test_node_cli_requires_explicit_run_dir_for_spec_confirm(self) -> None:
         node = _node_executable()
         cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
         with tempfile.TemporaryDirectory() as temp_dir:
-            project_root = Path(temp_dir) / "project"
-            run_dir = project_root / ".agent-flow" / "runs" / "r1"
-            run_dir.mkdir(parents=True)
-            (run_dir / "active").touch()
-            (run_dir / "meta.json").write_text(
-                json.dumps(
-                    {
-                        "task": "demo",
-                        "started_at": "2026-01-01T00:00:00+00:00",
-                        "current_phase": "design",
-                    }
-                ),
-                encoding="utf-8",
-            )
-            artifact = run_dir / "artifacts" / "design.md"
-            artifact.parent.mkdir()
-            artifact.write_text(_SPEC_CONFIRM_ARTIFACT, encoding="utf-8")
             result = subprocess.run(
                 (node, cli, "spec", "confirm"),
-                cwd=project_root,
+                cwd=temp_dir,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -3949,11 +3857,11 @@ if (codexContext !== undefined) {
 
         combined = result.stdout + result.stderr
         self.assertNotIn("usage: agent-flow-kit", combined)
-        self.assertIn("foreground user terminal", combined)
+        self.assertIn("--run-dir", combined)
         self.assertEqual(result.returncode, 2)
 
     def test_node_cli_forwards_stdin_to_the_python_cli(self) -> None:
-        """승인 문구는 사람이 직접 친다. stdin을 끊으면 그 입력이 CLI에 닿지 않는다."""
+        """Python CLI 하위 명령이 stdin을 쓰는 경우 wrapper가 그대로 전달한다."""
         node = _node_executable()
         cli = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -7268,6 +7176,69 @@ if (codexContext !== undefined) {
                 any(line.startswith("missing_completion_markers: ") for line in lines)
             )
 
+    def test_status_reports_only_later_spec_delta_and_agent_confirm_command(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            run_dir = root / ".agent-flow" / "runs" / "r1"
+            _set_node_phase(run_dir, "implement", workflow="default")
+            initial = (
+                "## Spec Items\n"
+                "SPEC-1: Keep the confirmed behavior.\n"
+                "verify: symbol:Behavior=confirmed\n"
+                "## Design Values\n"
+                "## Completion Gate\n"
+                "spec-items: SPEC-1\n"
+                "design-values: none\n"
+            )
+            (run_dir / "design.md").write_text(initial, encoding="utf-8")
+            capture_design_ledger(run_dir, "design", initial)
+            changed = initial.replace(
+                "## Design Values",
+                "SPEC-2: Add the new behavior.\n"
+                "verify: symbol:NewBehavior=enabled\n"
+                "## Design Values",
+            )
+            (run_dir / "design.md").write_text(changed, encoding="utf-8")
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["status", "--root", str(root)]), 0)
+            status = output.getvalue()
+            delta = status.partition("### Added")[2].partition("spec_scope:")[0]
+            self.assertIn("spec_changes: awaiting_confirmation", status)
+            self.assertIn("SPEC-2: Add the new behavior.", delta)
+            self.assertNotIn("SPEC-1", delta)
+            self.assertIn(
+                "spec_scope: changed items paused; unchanged confirmed items may continue",
+                status,
+            )
+            self.assertIn(
+                f"spec_confirm_command: agent-flow spec confirm --run-dir {run_dir.resolve()}",
+                status,
+            )
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    main(
+                        [
+                            "spec",
+                            "confirm",
+                            "--run-dir",
+                            str(run_dir),
+                            "--root",
+                            str(root),
+                        ]
+                    ),
+                    0,
+                )
+            confirmed_output = io.StringIO()
+            with contextlib.redirect_stdout(confirmed_output):
+                self.assertEqual(main(["status", "--root", str(root)]), 0)
+            self.assertNotIn(
+                "spec_changes: awaiting_confirmation",
+                confirmed_output.getvalue(),
+            )
+
     def test_profile_detection_for_node_and_python(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -8397,275 +8368,6 @@ if (codexContext !== undefined) {
                 self.assertEqual(blocked_after_subshell.returncode, 2, command)
                 self.assertIn("보호 브랜치", blocked_after_subshell.stderr)
 
-    def test_guard_spec_approval_blocks_agent_owned_confirmation_paths(self) -> None:
-        script = (
-            Path(__file__).resolve().parents[1]
-            / "scripts"
-            / "hooks"
-            / "guard-spec-approval.sh"
-        )
-        blocked_payloads = (
-            {
-                "cwd": str(Path(__file__).resolve().parents[1]),
-                "tool_input": {"command": "agent-flow spec confirm"},
-            },
-            {
-                "cwd": str(Path(__file__).resolve().parents[1]),
-                "tool_input": {
-                    "command": (
-                        "/usr/bin/env -i PATH=/usr/bin agent-flow "
-                        "spec approve SPEC-1"
-                    )
-                },
-            },
-            {
-                "cwd": str(Path(__file__).resolve().parents[1]),
-                "tool_input": {
-                    "command": "python3 scripts/hooks/confirm-spec-user-prompt.py"
-                },
-            },
-            {
-                "cwd": str(Path(__file__).resolve().parents[1]),
-                "tool_input": {
-                    "file_path": "/tmp/run/spec-user-confirmation.json"
-                },
-            },
-            {
-                "cwd": str(Path(__file__).resolve().parents[1]),
-                "tool_input": {
-                    "file_path": (
-                        "/tmp/project/.agent-flow/runtime/"
-                        "spec-hook-capabilities/session-capability"
-                    )
-                },
-            },
-            {
-                "cwd": str(Path(__file__).resolve().parents[1]),
-                "tool_input": {
-                    "command": (
-                        "printf forged > "
-                        ".agent-flow/runs/r/spec-user-confirmation.pending.nonce.consuming"
-                    )
-                },
-            },
-            {
-                "cwd": str(Path(__file__).resolve().parents[1]),
-                "tool_input": {
-                    "command": "command agent-flow spec confirm"
-                },
-            },
-            {
-                "cwd": str(Path(__file__).resolve().parents[1]),
-                "tool_input": {
-                    "command": "eval 'exec agent-flow spec confirm'"
-                },
-            },
-            {
-                "cwd": str(Path(__file__).resolve().parents[1]),
-                "tool_input": {
-                    "command": (
-                        "python3 -c 'from agent_flow.core.design_ledger import "
-                        "attest_user_spec_confirmation'"
-                    )
-                },
-            },
-            {
-                "cwd": str(Path(__file__).resolve().parents[1]),
-                "tool_input": {
-                    "command": (
-                        "agent-flow spec prepare-confirmation --session-id s"
-                    )
-                },
-            },
-            {
-                "cwd": str(Path(__file__).resolve().parents[1]),
-                "tool_input": {
-                    "command": "python3 scripts/hooks/prepare-spec-user-prompt.py"
-                },
-            },
-            {
-                "cwd": str(Path(__file__).resolve().parents[1]),
-                "tool_input": {
-                    "file_path": (
-                        "/tmp/project/.agent-flow/commands-run.jsonl"
-                    )
-                },
-            },
-            {
-                "cwd": str(Path(__file__).resolve().parents[1]),
-                "tool_input": {
-                    "command": (
-                        "truncate -s 0 .agent-flow/commands-run.jsonl"
-                    )
-                },
-            },
-        )
-        for payload in blocked_payloads:
-            blocked = subprocess.run(
-                ("bash", str(script)),
-                input=json.dumps(payload),
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(blocked.returncode, 2, payload)
-            self.assertIn("사용자 전용 SPEC 승인", blocked.stderr)
-
-        for command in (
-            "agent-flow spec confirm --help",
-            "agent-flow spec prepare-confirmation --help",
-            "python3 -m pytest -q tests/test_cli.py",
-        ):
-            allowed = subprocess.run(
-                ("bash", str(script)),
-                input=json.dumps(
-                    {
-                        "cwd": str(Path(__file__).resolve().parents[1]),
-                        "tool_input": {"command": command},
-                    }
-                ),
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(allowed.returncode, 0, command)
-
-    def test_guard_spec_approval_uses_fixed_python_interpreter(self) -> None:
-        script = (
-            Path(__file__).resolve().parents[1]
-            / "scripts"
-            / "hooks"
-            / "guard-spec-approval.sh"
-        )
-        with tempfile.TemporaryDirectory() as temp_dir:
-            fake_bin = Path(temp_dir) / "bin"
-            fake_bin.mkdir()
-            marker = Path(temp_dir) / "untrusted-python-ran"
-            fake_python = fake_bin / "python3"
-            fake_python.write_text(
-                f"#!/bin/sh\n: > {shlex.quote(str(marker))}\nexit 0\n",
-                encoding="utf-8",
-            )
-            fake_python.chmod(0o755)
-            env = dict(os.environ)
-            env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
-            result = subprocess.run(
-                [str(script)],
-                input=json.dumps(
-                    {
-                        "command": (
-                            "agent-flow spec confirm --run-dir r "
-                            "--artifact design.md"
-                        )
-                    }
-                ),
-                text=True,
-                capture_output=True,
-                env=env,
-            )
-
-        self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertFalse(marker.exists())
-
-
-    def test_guard_spec_approval_streams_payloads_larger_than_argv(self) -> None:
-        script = (
-            Path(__file__).resolve().parents[1]
-            / "scripts"
-            / "hooks"
-            / "guard-spec-approval.sh"
-        )
-        payload = {
-            "cwd": str(Path(__file__).resolve().parents[1]),
-            "tool_input": {
-                "command": "agent-flow spec confirm",
-                "padding": "x" * 3_000_000,
-            },
-        }
-
-        blocked = subprocess.run(
-            ("bash", str(script)),
-            input=json.dumps(payload),
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-
-        self.assertEqual(blocked.returncode, 2, blocked.stderr)
-        self.assertIn("사용자 전용 SPEC 승인", blocked.stderr)
-
-    def test_guard_spec_approval_ignores_payload_cwd_modules(self) -> None:
-        script = (
-            Path(__file__).resolve().parents[1]
-            / "scripts"
-            / "hooks"
-            / "guard-spec-approval.sh"
-        )
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            package = root / "src" / "agent_flow" / "core"
-            package.mkdir(parents=True)
-            (package.parent / "__init__.py").write_text("", encoding="utf-8")
-            (package / "__init__.py").write_text("", encoding="utf-8")
-            (package / "command_evidence.py").write_text(
-                "def command_executes_agent_spec_approval(command):\n"
-                "    return False\n",
-                encoding="utf-8",
-            )
-            blocked = subprocess.run(
-                ("bash", str(script)),
-                input=json.dumps(
-                    {
-                        "cwd": str(root),
-                        "tool_input": {"command": "agent-flow spec confirm"},
-                    }
-                ),
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-
-        self.assertEqual(blocked.returncode, 2, blocked.stderr)
-        self.assertIn("사용자 전용 SPEC 승인", blocked.stderr)
-
-    def test_guard_spec_approval_blocks_checker_errors(self) -> None:
-        source = (
-            Path(__file__).resolve().parents[1]
-            / "scripts"
-            / "hooks"
-            / "guard-spec-approval.sh"
-        )
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            hook = root / "scripts" / "hooks" / source.name
-            hook.parent.mkdir(parents=True)
-            shutil.copy2(source, hook)
-            package = root / "src" / "agent_flow" / "core"
-            package.mkdir(parents=True)
-            (package.parent / "__init__.py").write_text("", encoding="utf-8")
-            (package / "__init__.py").write_text("", encoding="utf-8")
-            (package / "command_evidence.py").write_text(
-                "def command_executes_agent_spec_approval(command):\n"
-                "    raise RuntimeError('checker failed')\n",
-                encoding="utf-8",
-            )
-
-            blocked = subprocess.run(
-                ("bash", str(hook)),
-                cwd=root,
-                input=json.dumps(
-                    {
-                        "cwd": str(root),
-                        "tool_input": {"command": "printf safe"},
-                    }
-                ),
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-
-        self.assertEqual(blocked.returncode, 2, blocked.stderr)
-        self.assertIn("검사기가 안전한 허용 결정을 내리지 못했습니다", blocked.stderr)
 
     def test_cli_imports_without_fcntl(self) -> None:
         env = os.environ.copy()
@@ -8717,106 +8419,6 @@ if (codexContext !== undefined) {
                     )
                 )
 
-
-    def test_spec_hooks_resolve_the_project_installed_cli_from_a_worktree(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            hook_dir = root / ".agent-flow" / "scripts" / "hooks"
-            hook_dir.mkdir(parents=True)
-            source_hooks = Path(__file__).resolve().parents[1] / "scripts" / "hooks"
-            for name in (
-                "prepare-spec-user-prompt.py",
-                "confirm-spec-user-prompt.py",
-            ):
-                shutil.copy2(source_hooks / name, hook_dir / name)
-            calls = root / "hook-cli-calls.jsonl"
-            launcher = root / ".agent-flow" / "bin" / "agent-flow"
-            launcher.parent.mkdir(parents=True)
-            launcher.write_text(
-                f"#!{sys.executable}\n"
-                "import json, sys\n"
-                "from pathlib import Path\n"
-                f"path = Path({str(calls)!r})\n"
-                "with path.open('a', encoding='utf-8') as stream:\n"
-                "    stream.write(json.dumps(sys.argv[1:]) + '\\n')\n",
-                encoding="utf-8",
-            )
-            launcher.chmod(0o755)
-            # hook은 실행 직전 kit.json에 기록된 digest와 대조한다. 기록이 없으면
-            # 실행을 거부하므로, 이 fixture도 설치본과 같은 기록을 갖춰야 한다.
-            (root / ".agent-flow" / "kit.json").write_text(
-                json.dumps(
-                    {
-                        "hooks": True,
-                        "project_launcher_digest": hashlib.sha256(
-                            launcher.read_bytes()
-                        ).hexdigest(),
-                    }
-                ),
-                encoding="utf-8",
-            )
-            worktree = managed_worktrees_root(root) / "feat-child"
-            worktree.mkdir(parents=True)
-            untrusted_calls = root / "untrusted-hook-cli-calls"
-            untrusted = worktree / ".agent-flow" / "bin" / "agent-flow"
-            untrusted.parent.mkdir(parents=True)
-            untrusted.write_text(
-                f"#!{sys.executable}\n"
-                "from pathlib import Path\n"
-                f"Path({str(untrusted_calls)!r}).write_text('called')\n",
-                encoding="utf-8",
-            )
-            untrusted.chmod(0o755)
-            env = os.environ.copy()
-            env["AGENT_FLOW"] = str(untrusted)
-            env["PATH"] = f"{untrusted.parent}:/usr/bin:/bin"
-
-            for name, prompt in (
-                ("prepare-spec-user-prompt.py", None),
-                ("confirm-spec-user-prompt.py", "승인"),
-            ):
-                payload = {
-                    "hook_event_name": (
-                        "UserPromptSubmit" if prompt is not None else "PostToolUse"
-                    ),
-                    "cwd": str(worktree),
-                    "session_id": "session-hook",
-                }
-                if prompt is not None:
-                    payload["prompt"] = prompt
-                result = subprocess.run(
-                    (sys.executable, str(hook_dir / name)),
-                    input=json.dumps(payload),
-                    text=True,
-                    capture_output=True,
-                    env=env,
-                    check=False,
-                )
-                self.assertEqual(result.returncode, 0, result.stderr)
-
-            recorded = [
-                json.loads(line)
-                for line in calls.read_text(encoding="utf-8").splitlines()
-            ]
-            # 승인 경로의 challenge 회전 주체는 confirm hook 하나다. 그래서
-            # UserPromptSubmit에서는 prepare-confirmation과 confirm이 같은
-            # 프로세스에서 짝으로 나온다.
-            self.assertEqual(recorded[0][:2], ["spec", "prepare-confirmation"])
-            self.assertEqual(recorded[1][:2], ["spec", "prepare-confirmation"])
-            self.assertEqual(recorded[2][:2], ["spec", "confirm"])
-            for call in recorded:
-                self.assertIn(str(worktree), call)
-            prepare_hash = recorded[1][
-                recorded[1].index("--hook-capability-hash") + 1
-            ]
-            confirm_capability = recorded[2][
-                recorded[2].index("--hook-capability") + 1
-            ]
-            self.assertEqual(
-                prepare_hash,
-                hashlib.sha256(confirm_capability.encode()).hexdigest(),
-            )
-            self.assertFalse(untrusted_calls.exists())
 
 
     def test_team_state_init_task_worker_and_status(self) -> None:
@@ -11515,20 +11117,11 @@ def _node_gate_results(run_dir, body: dict) -> str:
     return json.dumps(body, sort_keys=True) + "\n"
 
 
-def _confirm_node_spec_set(run_dir, artifact: str) -> None:
-    parsed = parse_spec_item_section(artifact)
-    record_spec_set_confirmation(
-        Path(run_dir),
-        parsed.items,
-        spec_set_confirmation_statement(parsed.items),
-    )
-
 
 def _capture_node_spec_source(run_dir, artifact: str) -> None:
     source_path = Path(run_dir) / "artifacts" / "prd.md"
     source_path.parent.mkdir(parents=True, exist_ok=True)
     source_path.write_text(artifact, encoding="utf-8")
-    _confirm_node_spec_set(run_dir, artifact)
     capture_design_ledger(Path(run_dir), "prd", artifact)
 
 
@@ -11572,13 +11165,6 @@ def _node_spec_gate(run_dir) -> str:
         "SPEC-1: Complete the requested test workflow.\n"
         f"verify: test:{test_name}\n\n"
     )
-    if run_dir is not None:
-        parsed = parse_spec_item_section(spec_block)
-        record_spec_set_confirmation(
-            Path(run_dir),
-            parsed.items,
-            spec_set_confirmation_statement(parsed.items),
-        )
     return spec_block
 
 

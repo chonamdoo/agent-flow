@@ -23,19 +23,15 @@ from typing import Sequence
 
 from agent_flow.core.commands import run_safe_command
 from agent_flow.core.command_evidence import (
-    CommandRunEvidence,
-    agent_run_spec_approvals,
     is_test_command_execution,
     read_command_evidence,
     resolve_test_command_tokens,
 )
 from agent_flow.core.design_ledger import (
     LEDGER_SOURCE_PHASES,
-    SPEC_SET_USER_REPLY,
     parse_spec_item_section,
     read_manual_spec_approvals,
     read_ledger,
-    spec_set_is_confirmed,
 )
 from agent_flow.core.markers import completion_gate_marker_values
 from agent_flow.core.phase_workflow import overall_review_route_key
@@ -88,25 +84,6 @@ def missing_spec_item_evidence(
                 "spec-items: at least one SPEC item "
                 "(the run task contains user instructions; 'none' is not allowed)"
             )
-        if (
-            parsed.items
-            and not parsed.errors
-            and not spec_set_is_confirmed(run_dir, parsed.items)
-        ):
-            missing.append(
-                "spec-confirmation: current user confirmation required; "
-                f"reply exactly `{SPEC_SET_USER_REPLY}` in this chat "
-                "(fallback: `agent-flow spec confirm`)"
-            )
-        missing.extend(
-            _agent_recorded_approvals(
-                read_command_evidence(
-                    evidence_root or project_root,
-                    since=since,
-                    cwd_root=project_root,
-                )
-            )
-        )
         return missing
     if phase_id not in DESIGN_VALUE_PHASES:
         return []
@@ -124,9 +101,6 @@ def missing_spec_item_evidence(
         since=since,
         cwd_root=project_root,
     )
-    agent_recorded = _agent_recorded_approvals(evidence)
-    if agent_recorded:
-        return agent_recorded
     changed = (
         changed_file_evidence(project_root, profile=profile)
         if any(item.verification.lower().startswith("symbol:") for item in ledger.spec_items)
@@ -173,21 +147,6 @@ def missing_spec_item_evidence(
             unmet.append(f"{item.spec_id}: manual (no user approval record)")
     return unmet
 
-
-def _agent_recorded_approvals(evidence: CommandRunEvidence) -> list[str]:
-    """agent가 사용자 대신 승인 CLI를 돌렸는가.
-
-    확인 record는 파일이라 agent도 쓸 수 있다. 위조 자체를 막을 수는 없지만
-    "agent가 그 명령을 돌렸다"는 관측은 host tool이 남기므로 주장자가 뒤집을 수
-    없다. hook이 없는 host에서는 로그가 없어 이 검사는 축퇴한다.
-    """
-    if not agent_run_spec_approvals(evidence):
-        return []
-    return [
-        "spec-confirmation: an approval command or managed approval hook ran in "
-        "the agent's shell; only the user may approve through chat or their own "
-        "terminal"
-    ]
 
 
 def missing_design_value_implementations(
