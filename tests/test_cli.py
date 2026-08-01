@@ -1630,10 +1630,28 @@ class CliTest(unittest.TestCase):
             self.assertIn('pi.on("input"', omp_extension_text)
             self.assertIn('event?.source !== "interactive"', omp_extension_text)
             self.assertIn("session_id: sessionIdentity(event, ctx)", omp_extension_text)
-            omp_input_handler = omp_extension_text.split('pi.on("input"', 1)[1].split('pi.on("context"', 1)[0]
+            self.assertIn('pi.on("before_agent_start"', omp_extension_text)
+            omp_input_handler = omp_extension_text.split('pi.on("input"', 1)[1].split(
+                'pi.on("before_agent_start"', 1
+            )[0]
+            self.assertIn(
+                'await runSpecUserPromptHooks(prompt, event, ctx, "allow-unknown")',
+                omp_input_handler,
+            )
+            self.assertIn(
+                'await runSpecUserPromptHooks(prompt, event, ctx, "require-user")',
+                omp_extension_text,
+            )
+            self.assertIn("async function runSpecUserPromptHooks", omp_extension_text)
+            self.assertIn("export default function agentFlowHooks", omp_extension_text)
+            omp_prompt_helper = omp_extension_text.split("async function runSpecUserPromptHooks", 1)[1].split(
+                "export default function agentFlowHooks", 1
+            )[0]
+            self.assertIn('await runHook("prepare-spec-user-prompt.py"', omp_prompt_helper)
+            self.assertIn('await runHook("confirm-spec-user-prompt.py"', omp_prompt_helper)
             self.assertLess(
-                omp_input_handler.index('await runHook("prepare-spec-user-prompt.py"'),
-                omp_input_handler.index('await runHook("confirm-spec-user-prompt.py"'),
+                omp_prompt_helper.index('await runHook("prepare-spec-user-prompt.py"'),
+                omp_prompt_helper.index('await runHook("confirm-spec-user-prompt.py"'),
             )
             self.assertIn("session_shutdown", omp_extension_text)
             self.assertIn('pi.on("context"', omp_extension_text)
