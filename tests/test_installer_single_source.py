@@ -7,12 +7,15 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Literal, TypedDict
 
 import pytest
 
@@ -64,6 +67,8 @@ def _extension_source() -> str:
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        timeout=60,
     ).stdout
 
 
@@ -71,7 +76,15 @@ def _git(cwd: Path, *args: str) -> None:
     git = shutil.which("git")
     if git is None:
         pytest.skip("git을 찾을 수 없다")
-    subprocess.run((git, *args), cwd=cwd, check=True, capture_output=True, text=True)
+    subprocess.run(
+        (git, *args),
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=60,
+    )
 
 
 def _install_extension(root: Path, source: str, extra: str = "") -> Path:
@@ -129,10 +142,250 @@ def _run_bash_tool_call(root: Path, source: str) -> tuple[str, str]:
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        timeout=60,
     )
     # 실패를 CalledProcessError로 흘리면 node가 남긴 사유가 리포트에서 사라진다.
     assert result.returncode == 0, f"driver exited {result.returncode}: {result.stderr}"
     return result.stdout, result.stderr
+
+
+def _run_command_result_handler(
+    root: Path,
+    source: str,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    hooks = _seed_install(root)
+    shutil.copy2(
+        KIT_ROOT / "scripts" / "hooks" / "record-command-run.py",
+        hooks / "record-command-run.py",
+    )
+    binding_log = root / ".agent-flow" / "binding-events.jsonl"
+    binding_recorder = (
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "payload = json.load(sys.stdin)\n"
+        f"with Path({str(binding_log)!r}).open('a', encoding='utf-8') as stream:\n"
+        "    stream.write(json.dumps(payload) + '\\n')\n"
+    )
+    (hooks / "bind-host-worktree.py").write_text(binding_recorder, encoding="utf-8")
+    for script_name in (
+        "record-skill-read.py",
+        "worktree-tripwire.py",
+        "prepare-spec-user-prompt.py",
+    ):
+        (hooks / script_name).write_text("pass\n", encoding="utf-8")
+    (hooks / "guard-host-worktree.sh").write_text("exit 0\n", encoding="utf-8")
+
+    target = _install_extension(root, source)
+    events = [
+        {
+            "type": "tool_result",
+            "toolName": "bash",
+            "input": {"command": "python3 -m pytest -q tests/test_ok.py"},
+            "content": [{"type": "text", "text": "1 passed"}],
+            "details": {"timeoutSeconds": 60, "wallTimeMs": 12},
+            "isError": False,
+        },
+        {
+            "type": "tool_result",
+            "toolName": "bash",
+            "input": {"command": "python3 -c 'raise SystemExit(7)'"},
+            "content": [{"type": "text", "text": "Command exited with code 7"}],
+            "details": {"timeoutSeconds": 60, "wallTimeMs": 12, "exitCode": 7},
+            "isError": True,
+        },
+        {
+            "type": "tool_result",
+            "toolName": "bash",
+            "input": {"command": "python3 -c 'raise SystemExit(9)'"},
+            "content": [{"type": "text", "text": "Command exited with code 9"}],
+            "details": {"timeoutSeconds": 60, "wallTimeMs": 12, "exitCode": 9},
+            "isError": False,
+        },
+        {
+            "type": "tool_result",
+            "toolName": "bash",
+            "input": {"command": "python3 -m pytest -q tests/test_async.py"},
+            "content": [{"type": "text", "text": "Process running in background"}],
+            "details": {
+                "timeoutSeconds": 60,
+                "wallTimeMs": 12,
+                "async": {"state": "running"},
+            },
+            "isError": False,
+        },
+        {
+            "type": "tool_result",
+            "toolName": "bash",
+            "input": {"command": "python3 -m pytest -q tests/test_timeout.py"},
+            "content": [{"type": "text", "text": "Deadline exceeded"}],
+            "details": {"timeoutSeconds": 60, "wallTimeMs": 60_000, "timedOut": True},
+            "isError": False,
+        },
+    ]
+    driver = (
+        f"import ext from {json.dumps(str(target))};\n"
+        "const handlers = {};\n"
+        "const pi = { setLabel() {}, on(name, fn) { (handlers[name] = handlers[name] || []).push(fn); } };\n"
+        "ext(pi);\n"
+        f"const events = {json.dumps(events)};\n"
+        f"const ctx = {{ cwd: {json.dumps(str(root))}, sessionManager: {{ getSessionId() {{ return 'session-1'; }} }} }};\n"
+        "async function run() {\n"
+        "  for (const event of events) {\n"
+        "    await handlers.tool_result[0](event, ctx);\n"
+        "  }\n"
+        "}\n"
+        "run().catch((error) => {\n"
+        "  process.stderr.write('driver failed: ' + (error?.stack || String(error)) + '\\n');\n"
+        "  process.exitCode = 1;\n"
+        "});\n"
+    )
+    result = subprocess.run(
+        (_node(), "--input-type=module", "-e", driver),
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=60,
+    )
+    assert result.returncode == 0, f"driver exited {result.returncode}: {result.stderr}"
+    command_log = root / ".agent-flow" / "commands-run.jsonl"
+    command_events = [
+        json.loads(line) for line in command_log.read_text(encoding="utf-8").splitlines()
+    ]
+    binding_events = [
+        json.loads(line) for line in binding_log.read_text(encoding="utf-8").splitlines()
+    ]
+    return command_events, binding_events
+
+class _RecordedPromptEvent(TypedDict):
+    script: str
+    payload: dict[str, object]
+
+
+
+def _run_prompt_handler(
+    root: Path,
+    source: str,
+    *,
+    event_names: tuple[Literal["input", "before_agent_start", "event_loop_turn"], ...],
+    prompt: str,
+    session_id: str = "session-1",
+    session_kind: Literal["user", "subagent", "unknown"] = "user",
+    record_hooks: bool = True,
+    before_agent_start_source: str | None = None,
+) -> list[_RecordedPromptEvent]:
+    event_log = root / ".agent-flow" / "prompt-events.jsonl"
+    if record_hooks:
+        hooks = _seed_install(root)
+        recorder = (
+            "import json, sys\n"
+            "from pathlib import Path\n"
+            "payload = json.loads(sys.stdin.buffer.read().decode('utf-8'))\n"
+            "record = {'script': Path(__file__).name, 'payload': payload}\n"
+            f"with Path({str(event_log)!r}).open('a', encoding='utf-8') as stream:\n"
+            "    stream.write(json.dumps(record) + '\\n')\n"
+        )
+        for script_name in (
+            "prepare-spec-user-prompt.py",
+            "confirm-spec-user-prompt.py",
+        ):
+            (hooks / script_name).write_text(recorder, encoding="utf-8")
+
+    target = _install_extension(root, source)
+    events = [
+        {
+            "type": event_name,
+            "prompt": prompt,
+            **(
+                {"text": prompt, "source": "interactive"}
+                if event_name == "input"
+                else (
+                    {"source": before_agent_start_source}
+                    if before_agent_start_source is not None
+                    else {}
+                )
+            ),
+        }
+        for event_name in event_names
+    ]
+    if session_kind == "subagent":
+        (root / "parent.jsonl").write_text("{}\n", encoding="utf-8")
+        artifacts_dir = root / "parent"
+        artifacts_dir.mkdir(exist_ok=True)
+        session_file = artifacts_dir / "child.jsonl"
+    else:
+        session_file = root / "session.jsonl"
+        artifacts_dir = root / "session"
+    session_file.write_text("{}\n", encoding="utf-8")
+    session_path_methods = (
+        f", getSessionFile() {{ return {json.dumps(str(session_file))}; }}"
+        f", getArtifactsDir() {{ return {json.dumps(str(artifacts_dir))}; }}"
+        if session_kind != "unknown"
+        else ""
+    )
+    driver = (
+        f"import ext from {json.dumps(str(target))};\n"
+        "const handlers = {};\n"
+        "const pi = { setLabel() {}, on(name, fn) { (handlers[name] = handlers[name] || []).push(fn); } };\n"
+        "ext(pi);\n"
+        f"const events = {json.dumps(events)};\n"
+        f"const ctx = {{ cwd: {json.dumps(str(root))}, sessionManager: {{ getSessionId() {{ return {json.dumps(session_id)}; }}{session_path_methods} }} }};\n"
+        "async function run() {\n"
+        "  for (const event of events) {\n"
+        "    if (event.type === 'event_loop_turn') { await new Promise((resolve) => setImmediate(resolve)); continue; }\n"
+        "    for (const handler of handlers[event.type] || []) {\n"
+        "      await handler(event, ctx);\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+        "run().catch((error) => {\n"
+        "  process.stderr.write('driver failed: ' + (error?.stack || String(error)) + '\\n');\n"
+        "  process.exitCode = 1;\n"
+        "});\n"
+    )
+    env = os.environ.copy()
+    env["OMP_SESSION_ID"] = "ambient-session"
+    result = subprocess.run(
+        (_node(), "--input-type=module", "-e", driver),
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=env,
+        timeout=60,
+    )
+    assert result.returncode == 0, (
+        f"{','.join(event_names)} driver exited {result.returncode}: {result.stderr}"
+    )
+    routes_to_hooks = prompt == "승인" and (
+        "before_agent_start" in event_names
+        or ("input" in event_names and session_kind == "unknown")
+    )
+    if routes_to_hooks and session_kind == "subagent":
+        assert "ignored SPEC approval from OMP subagent session" in result.stderr
+    elif (
+        "before_agent_start" in event_names
+        and prompt == "승인"
+        and session_kind == "unknown"
+    ):
+        assert "cannot verify top-level OMP session" in result.stderr
+    else:
+        assert "SPEC approval" not in result.stderr
+    if not event_log.exists():
+        return []
+    recorded: list[_RecordedPromptEvent] = []
+    for line in event_log.read_text(encoding="utf-8").splitlines():
+        event = json.loads(line)
+        assert isinstance(event, dict)
+        assert isinstance(event.get("script"), str)
+        assert isinstance(event.get("payload"), dict)
+        recorded.append(
+            {"script": event["script"], "payload": event["payload"]}
+        )
+    return recorded
 
 
 def _seed_install(root: Path) -> Path:
@@ -270,6 +523,320 @@ def test_omp_extension_reads_the_session_id_from_the_session_manager():
     source = _extension_source()
     assert "ctx?.sessionManager?.getSessionId?.()" in source
     assert "session_id: sessionIdentity(event, ctx)" in source
+
+
+def test_omp_extension_normalizes_v17_bash_result_exit_codes(tmp_path: Path):
+    """반증: OMP v17.2.1은 완료된 foreground 성공에서 exitCode를 생략하므로
+    명시적 성공만 0으로 정규화하고 running/timeout 결과는 성공으로 만들지 않아야 한다.
+    """
+    command_events, binding_events = _run_command_result_handler(
+        tmp_path,
+        _extension_source(),
+    )
+    assert [event["exit_code"] for event in command_events] == [0, 7, 9, None, None]
+    assert [event["output"] for event in binding_events] == [
+        "1 passed",
+        "Command exited with code 7",
+        "Command exited with code 9",
+        "Process running in background",
+        "Deadline exceeded",
+    ]
+
+
+def test_omp_extension_routes_exact_before_agent_start_prompt_to_confirmation_hooks(
+    tmp_path: Path,
+):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    try:
+        from agent_flow.core.design_ledger import SPEC_SET_USER_REPLY
+    finally:
+        sys.path.pop(0)
+    source = _extension_source()
+    assert f"return prompt === {json.dumps(SPEC_SET_USER_REPLY, ensure_ascii=False)}" in source
+
+    before_agent_start = tmp_path / "before-agent-start"
+    before_agent_start.mkdir()
+    events = _run_prompt_handler(
+        before_agent_start,
+        source,
+        event_names=("before_agent_start",),
+        prompt="승인",
+    )
+    assert [event["script"] for event in events] == [
+        "prepare-spec-user-prompt.py",
+        "confirm-spec-user-prompt.py",
+    ]
+    for event in events:
+        assert event["payload"] == {
+            "hook_event_name": "UserPromptSubmit",
+            "cwd": str(before_agent_start),
+            "prompt": "승인",
+            "session_id": "session-1",
+        }
+
+    real_user = tmp_path / "real-user"
+    real_user.mkdir()
+    linked_user = tmp_path / "linked-user"
+    linked_user.symlink_to(real_user, target_is_directory=True)
+    linked_events = _run_prompt_handler(
+        linked_user,
+        source,
+        event_names=("before_agent_start",),
+        prompt="승인",
+    )
+    assert [event["script"] for event in linked_events] == [
+        "prepare-spec-user-prompt.py",
+        "confirm-spec-user-prompt.py",
+    ]
+
+    subagent = tmp_path / "subagent"
+    subagent.mkdir()
+    assert (
+        _run_prompt_handler(
+            subagent,
+            source,
+            event_names=("before_agent_start",),
+            prompt="승인",
+            session_id="subagent-1",
+            session_kind="subagent",
+        )
+        == []
+    )
+
+    spoofed_subagent = tmp_path / "spoofed-subagent"
+    spoofed_subagent.mkdir()
+    assert (
+        _run_prompt_handler(
+            spoofed_subagent,
+            source,
+            event_names=("before_agent_start",),
+            prompt="승인",
+            session_id="subagent-2",
+            session_kind="subagent",
+            before_agent_start_source="interactive",
+        )
+        == []
+    )
+    interactive_subagent = tmp_path / "interactive-subagent"
+    interactive_subagent.mkdir()
+    assert (
+        _run_prompt_handler(
+            interactive_subagent,
+            source,
+            event_names=("input",),
+            prompt="승인",
+            session_id="subagent-3",
+            session_kind="subagent",
+        )
+        == []
+    )
+
+
+    unknown_session = tmp_path / "unknown-session"
+    unknown_session.mkdir()
+    assert (
+        _run_prompt_handler(
+            unknown_session,
+            source,
+            event_names=("before_agent_start",),
+            prompt="승인",
+            session_kind="unknown",
+        )
+        == []
+    )
+
+    other_prompt = tmp_path / "other-prompt"
+    other_prompt.mkdir()
+    assert (
+        _run_prompt_handler(
+            other_prompt,
+            source,
+            event_names=("before_agent_start",),
+            prompt="승인 아님",
+        )
+        == []
+    )
+    other_input = tmp_path / "other-input"
+    other_input.mkdir()
+    assert (
+        _run_prompt_handler(
+            other_input,
+            source,
+            event_names=("input", "before_agent_start"),
+            prompt="승인 아님",
+        )
+        == []
+    )
+    input_only = tmp_path / "input-only"
+    input_only.mkdir()
+    input_events = _run_prompt_handler(
+        input_only,
+        source,
+        event_names=("input",),
+        prompt="승인",
+    )
+    assert input_events == []
+
+    legacy_input = tmp_path / "legacy-input"
+    legacy_input.mkdir()
+    legacy_input_events = _run_prompt_handler(
+        legacy_input,
+        source,
+        event_names=("input",),
+        prompt="승인",
+        session_kind="unknown",
+    )
+    assert [event["script"] for event in legacy_input_events] == [
+        "prepare-spec-user-prompt.py",
+        "confirm-spec-user-prompt.py",
+    ]
+
+    interactive = tmp_path / "interactive"
+    interactive.mkdir()
+    interactive_events = _run_prompt_handler(
+        interactive,
+        source,
+        event_names=("input", "before_agent_start"),
+        prompt="승인",
+    )
+    assert [event["script"] for event in interactive_events] == [
+        "prepare-spec-user-prompt.py",
+        "confirm-spec-user-prompt.py",
+    ]
+    later_turn = tmp_path / "later-turn"
+    later_turn.mkdir()
+    later_turn_events = _run_prompt_handler(
+        later_turn,
+        source,
+        event_names=("input", "event_loop_turn", "before_agent_start"),
+        prompt="승인",
+    )
+    assert [event["script"] for event in later_turn_events] == [
+        "prepare-spec-user-prompt.py",
+        "confirm-spec-user-prompt.py",
+    ]
+
+    end_to_end = tmp_path / "end-to-end"
+    end_to_end.mkdir()
+    _git(end_to_end, "init", "-b", "main")
+    _git(end_to_end, "config", "user.email", "test@example.com")
+    _git(end_to_end, "config", "user.name", "Test")
+    (end_to_end / "README.md").write_text("base\n", encoding="utf-8")
+    _git(end_to_end, "add", ".")
+    _git(end_to_end, "-c", "commit.gpgsign=false", "commit", "-m", "base")
+    run_dir = end_to_end / ".agent-flow" / "runs" / "20260731-162211"
+    run_dir.mkdir(parents=True)
+    (run_dir / "active").touch()
+    (run_dir / "meta.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_dir.name,
+                "workflow": "default",
+                "task": "Verify OMP approval routing.",
+                "started_at": "2026-07-31T16:22:11+00:00",
+                "current_phase": "design",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "design.md").write_text(
+        "## Spec Items\n\n"
+        "SPEC-1: The exact user approval is recorded.\n"
+        "verify: test:test_exact_user_approval_is_recorded\n\n"
+        "## Completion Gate\n\n"
+        "spec-items: SPEC-1\n",
+        encoding="utf-8",
+    )
+    install_root = end_to_end / ".agent-flow"
+    hook_dir = install_root / "scripts" / "hooks"
+    hook_dir.mkdir(parents=True)
+    for script_name in (
+        "prepare-spec-user-prompt.py",
+        "confirm-spec-user-prompt.py",
+    ):
+        shutil.copy2(KIT_ROOT / "scripts" / "hooks" / script_name, hook_dir)
+    launcher = install_root / "bin" / "agent-flow"
+    launcher.parent.mkdir()
+    launcher.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        f"sys.path.insert(0, {str(KIT_ROOT / 'src')!r})\n"
+        "from agent_flow.cli import main\n"
+        "raise SystemExit(main())\n",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o700)
+    (install_root / "kit.json").write_text(
+        json.dumps(
+            {
+                "project_launcher_digest": hashlib.sha256(
+                    launcher.read_bytes()
+                ).hexdigest()
+            }
+        ),
+        encoding="utf-8",
+    )
+    _run_prompt_handler(
+        end_to_end,
+        source,
+        event_names=("before_agent_start",),
+        prompt="승인",
+        session_id="user-session",
+        record_hooks=False,
+    )
+    confirmation = json.loads(
+        (run_dir / "spec-user-confirmation.json").read_text(encoding="utf-8")
+    )
+    assert confirmation["provenance"] == "host-user-prompt"
+    assert confirmation["attestation"]["session_id"] == "user-session"
+    confirmation_bytes = (
+        run_dir / "spec-user-confirmation.json"
+    ).read_bytes()
+    _run_prompt_handler(
+        end_to_end,
+        source,
+        event_names=("input", "before_agent_start"),
+        prompt="승인",
+        session_id="user-session",
+        record_hooks=False,
+    )
+    assert (
+        run_dir / "spec-user-confirmation.json"
+    ).read_bytes() == confirmation_bytes
+    _run_prompt_handler(
+        end_to_end,
+        source,
+        event_names=("before_agent_start",),
+        prompt="승인",
+        session_id="user-session",
+        record_hooks=False,
+    )
+    assert (
+        run_dir / "spec-user-confirmation.json"
+    ).read_bytes() == confirmation_bytes
+    assert not (run_dir / "spec-user-confirmation.pending.json").exists()
+    (run_dir / "spec-user-confirmation.json").unlink()
+    _run_prompt_handler(
+        end_to_end,
+        source,
+        event_names=("before_agent_start",),
+        prompt="승인",
+        session_id="subagent-session",
+        session_kind="subagent",
+        record_hooks=False,
+    )
+    assert not (run_dir / "spec-user-confirmation.json").exists()
+    _run_prompt_handler(
+        end_to_end,
+        source,
+        event_names=("input",),
+        prompt="승인",
+        session_id="subagent-session",
+        session_kind="subagent",
+        record_hooks=False,
+    )
+    assert not (run_dir / "spec-user-confirmation.json").exists()
+
 
 
 def test_managed_hook_scripts_declared_once_per_language():

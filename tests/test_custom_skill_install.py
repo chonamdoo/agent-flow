@@ -968,12 +968,14 @@ def test_user_prompt_spec_hooks_prepare_before_confirm_for_every_host(
     extension = (
         project / ".omp" / "extensions" / "agent-flow-hooks.ts"
     ).read_text(encoding="utf-8")
-    input_handler = extension.split('pi.on("input"', 1)[1].split(
-        'pi.on("context"', 1
+    hook_runner = extension.split(
+        "async function runSpecUserPromptHooks", 1
+    )[1].split(
+        "function sessionProvenance", 1
     )[0]
-    assert input_handler.index(
+    assert hook_runner.index(
         'await runHook("prepare-spec-user-prompt.py"'
-    ) < input_handler.index(
+    ) < hook_runner.index(
         'await runHook("confirm-spec-user-prompt.py"'
     )
     assert 'const command = scriptName.endsWith(".py") ? "/usr/bin/python3" : "/bin/bash";' in extension
