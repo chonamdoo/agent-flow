@@ -1046,7 +1046,7 @@ def test_reinstall_provisions_hooks_into_existing_managed_worktrees(
         check=False,
     )
     assert created.returncode == 0, created.stderr
-    checkout = project.parent / f"{project.name}.worktrees" / "feat-existing"
+    checkout = Path(created.stdout.strip().splitlines()[-1].split(maxsplit=2)[2])
     assert checkout.is_dir()
     for rel in (
         ".claude/settings.json",
