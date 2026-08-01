@@ -1,11 +1,11 @@
-"""새 checkout이 leader 프로젝트 폴더 **밖**에 태어나는지 본다.
+"""새 checkout이 프로젝트 밖의 사용자 전용 중앙 경로에 태어나는지 본다.
 
-안에 두면 leader를 열어 둔 IDE가 worktree 작업에 반응해 leader 쪽 캐시를 건드린다.
-tripwire는 그 변경을 정당하게 오염으로 보고하고, 남은 phase가 전부 막힌다. 그래서
-기본 자리는 leader의 형제 폴더다.
+leader 안에 두면 IDE가 worktree 작업에 반응해 leader 쪽 캐시를 건드린다. tripwire는
+그 변경을 정당하게 오염으로 보고하고 남은 phase를 막으므로, 외부 격리는 유지하면서
+저장소별 checkout을 ``~/.agent-flow/worktrees/<repo-id>`` 아래 모은다.
 
-layout을 옮기면 신뢰의 근거도 함께 옮겨야 한다. marker 경로는 모양만으로 관리형임을
-증명했지만 형제 폴더는 그렇지 않다 — 그래서 생성 자신이 채택 기록을 남긴다.
+layout을 옮기면 신뢰의 근거도 함께 옮겨야 한다. 외부 경로는 모양만으로 관리형임을
+증명할 수 없으므로 생성 자신이 채택 기록을 남긴다.
 """
 from __future__ import annotations
 
@@ -33,11 +33,12 @@ from agent_flow.core.worktrees import (
     known_worktree_names,
     legacy_managed_root,
     managed_worktrees_root,
+    sibling_managed_root,
     plan_worktree,
     remove_worktree,
     remove_worktree_metadata,
 )
-from agent_flow.cli import _verified_checkout_identity
+from agent_flow.cli import _resolve_cli_root_context, _verified_checkout_identity
 from agent_flow.core.state import _safe_relative_path
 from agent_flow.core.worktree_isolation import (
     WorktreeIsolationError,
@@ -68,17 +69,46 @@ def _leader(tmp_path: Path) -> Path:
     return _leader_at(tmp_path / "myapp")
 
 
-def test_created_checkout_lands_outside_the_leader_project(tmp_path: Path):
+
+def test_default_root_uses_the_agent_flow_directory_in_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    root = _leader(tmp_path)
+    home = tmp_path / "home"
+    monkeypatch.delenv("XDG_STATE_HOME")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+    location = managed_worktrees_root(root)
+
+    assert location.parent == home / ".agent-flow" / "worktrees"
+
+
+def test_created_checkout_lands_in_the_user_state_root(tmp_path: Path):
     root = _leader(tmp_path)
 
     status = create_worktree(root=root, plan=plan_worktree(root=root, name="slice"))
 
+    expected_parent = Path(os.environ["XDG_STATE_HOME"]) / "worktrees"
     assert status.path.parent == managed_worktrees_root(root)
+    assert status.path.parent.parent == expected_parent
+    assert status.path.parent.name.startswith("myapp-")
     assert root.resolve() not in status.path.resolve().parents
 
 
+def test_repository_ids_separate_clones_with_the_same_directory_name(tmp_path: Path):
+    first = _leader_at(tmp_path / "first" / "myapp")
+    second = _leader_at(tmp_path / "second" / "myapp")
+
+    first_root = managed_worktrees_root(first)
+    second_root = managed_worktrees_root(second)
+
+    assert first_root != second_root
+    assert first_root.name.startswith("myapp-")
+    assert second_root.name.startswith("myapp-")
+
+
 def test_creation_records_its_own_adoption(tmp_path: Path):
-    """형제 폴더는 모양으로 증명되지 않는다. 생성이 기록을 남겨야 경계가 신뢰한다."""
+    """외부 중앙 폴더는 모양으로 증명되지 않는다. 생성이 기록을 남겨야 경계가 신뢰한다."""
     root = _leader(tmp_path)
 
     status = create_worktree(root=root, plan=plan_worktree(root=root, name="slice"))
@@ -90,8 +120,8 @@ def test_creation_records_its_own_adoption(tmp_path: Path):
     assert verify_linked_worktree(root=root, path=status.path) == status.path.resolve()
 
 
-def test_sibling_layout_alone_does_not_prove_management(tmp_path: Path):
-    """형제 경로는 누구나 만들 수 있다. 모양이 아니라 채택 기록이 근거다.
+def test_external_layout_alone_does_not_prove_management(tmp_path: Path):
+    """외부 경로는 누구나 만들 수 있다. 모양이 아니라 채택 기록이 근거다.
 
     모양으로 인정하면 raw `git worktree add`가 미채택 차단을 우회하고, 그 checkout은
     나중에 host write boundary가 소유를 증명하지 못해 run이 막힌다.
@@ -106,14 +136,14 @@ def test_sibling_layout_alone_does_not_prove_management(tmp_path: Path):
 
     # marker 자리는 모양만으로 관리형이다 — 예전 생성 규약이 쓰던 자리다.
     assert _is_managed_child(root=root, path=legacy)
-    # 형제 자리는 생성이 남긴 기록으로만 관리형이 된다.
+    # 외부 자리는 생성이 남긴 기록으로만 관리형이 된다.
     assert not _is_managed_child(root=root, path=created.path)
     assert not _is_managed_child(root=root, path=raw)
     assert adopted_worktree_parent(root=root, path=created.path) is not None
     assert adopted_worktree_parent(root=root, path=raw) is None
 
 
-def test_raw_sibling_checkout_must_be_adopted_before_attach(tmp_path: Path):
+def test_raw_central_checkout_must_be_adopted_before_attach(tmp_path: Path):
     root = _leader(tmp_path)
     raw = managed_worktrees_root(root) / "feat-raw"
     raw.parent.mkdir(parents=True, exist_ok=True)
@@ -127,17 +157,18 @@ def test_raw_sibling_checkout_must_be_adopted_before_attach(tmp_path: Path):
     assert attached is not None and same_worktree_path(attached.path, raw)
 
 
-def test_names_are_enumerated_from_both_layouts(tmp_path: Path):
-    """정리 명령은 목록으로 대상을 찾는다. 한쪽만 스캔하면 잔재가 안 보인다."""
+def test_names_are_enumerated_from_all_layouts(tmp_path: Path):
+    """정리 명령은 현재 중앙 자리와 이전 외부·내부 자리의 대상을 모두 찾는다."""
     root = _leader(tmp_path)
     create_worktree(root=root, plan=plan_worktree(root=root, name="slice"))
-    stale = legacy_managed_root(root) / "feat-stale"
-    stale.mkdir(parents=True)
+    previous = sibling_managed_root(root) / "feat-previous"
+    previous.mkdir(parents=True)
+    legacy = legacy_managed_root(root) / "feat-legacy"
+    legacy.mkdir(parents=True)
 
     names = known_worktree_names(root=root)
 
-    assert "feat-slice" in names
-    assert "feat-stale" in names
+    assert {"feat-slice", "feat-previous", "feat-legacy"} <= set(names)
 
 
 def test_status_resolves_the_created_checkout(tmp_path: Path):
@@ -151,33 +182,81 @@ def test_status_resolves_the_created_checkout(tmp_path: Path):
     assert status.branch_created_by_agent_flow is True
 
 
-def test_creation_falls_back_when_the_parent_is_not_writable(tmp_path: Path):
-    """상위에 쓸 수 없으면 예전 자리로 내려간다. 생성이 아예 막히는 것보다 낫다."""
+def test_central_root_is_stable_from_a_linked_checkout(tmp_path: Path):
+    root = _leader(tmp_path)
+    created = create_worktree(root=root, plan=plan_worktree(root=root, name="slice"))
+
+    assert managed_worktrees_root(created.path) == managed_worktrees_root(root)
+
+
+def test_status_resolves_a_previous_sibling_checkout(tmp_path: Path):
+    root = _leader(tmp_path)
+    previous = sibling_managed_root(root) / "feat-previous"
+    previous.parent.mkdir(parents=True)
+    _git("worktree", "add", "-q", "-b", "feat/previous", str(previous), "main", cwd=root)
+
+    status = get_worktree_status(root=root, name="feat-previous")
+
+    assert same_worktree_path(status.path, previous)
+    assert status.branch == "feat/previous"
+
+
+def test_cli_routes_a_home_central_checkout_back_to_its_leader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    root = _leader(tmp_path)
+    home = tmp_path / "home"
+    monkeypatch.delenv("XDG_STATE_HOME")
+    monkeypatch.setenv("HOME", str(home))
+    created = create_worktree(root=root, plan=plan_worktree(root=root, name="slice"))
+
+    config_root, worktree, unadopted = _resolve_cli_root_context(created.path, None)
+
+    assert same_worktree_path(config_root, root)
+    assert worktree == created.name
+    assert unadopted is None
+
+
+def test_central_layout_does_not_require_a_writable_leader_parent(tmp_path: Path):
     parent = tmp_path / "ro"
     parent.mkdir()
-    root = parent / "myapp"
-    root.mkdir()
-    _git("init", "-b", "main", ".", cwd=root)
+    root = _leader_at(parent / "myapp")
     parent.chmod(0o500)
     try:
-        assert managed_worktrees_root(root) == legacy_managed_root(root)
+        created = create_worktree(root=root, plan=plan_worktree(root=root, name="slice"))
     finally:
         parent.chmod(0o700)
 
+    assert created.path.parent == managed_worktrees_root(root)
+    assert created.path.parent != sibling_managed_root(root)
 
-def test_planted_symlink_at_the_sibling_root_is_refused(tmp_path: Path):
-    """부모가 남의 것일 수 있다. 심어 둔 symlink를 따라가면 소스가 그쪽에 생긴다."""
+
+def test_previous_sibling_root_is_not_selected_or_scanned(tmp_path: Path):
     root = _leader(tmp_path)
     attacker = tmp_path / "attacker"
-    attacker.mkdir()
-    (tmp_path / "myapp.worktrees").symlink_to(attacker)
-
-    assert managed_worktrees_root(root) == legacy_managed_root(root)
+    decoy = attacker / "feat-decoy"
+    decoy.mkdir(parents=True)
+    sibling_managed_root(root).symlink_to(attacker)
 
     created = create_worktree(root=root, plan=plan_worktree(root=root, name="slice"))
 
-    assert created.path.parent == legacy_managed_root(root)
-    assert list(attacker.iterdir()) == []
+    assert created.path.parent == managed_worktrees_root(root)
+    assert created.path.parent != sibling_managed_root(root)
+    assert "feat-decoy" not in known_worktree_names(root=root)
+    assert decoy.is_dir()
+    stale = get_worktree_status(root=root, name="feat-decoy")
+    assert not same_worktree_path(stale.path, decoy)
+    remove_worktree(root=root, status=stale, require_merged=False)
+    assert decoy.is_dir()
+
+
+def test_unsafe_duplicate_layout_does_not_hide_the_safe_legacy_root(tmp_path: Path):
+    root = _leader(tmp_path)
+    legacy = legacy_managed_root(root)
+    (legacy / "feat-legacy").mkdir(parents=True)
+    sibling_managed_root(root).symlink_to(legacy)
+
+    assert "feat-legacy" in known_worktree_names(root=root)
 
 
 def test_creation_refuses_a_symlink_planted_after_path_selection(tmp_path: Path):
@@ -190,6 +269,38 @@ def test_creation_refuses_a_symlink_planted_after_path_selection(tmp_path: Path)
 
     with pytest.raises(WorktreeIsolationError, match="unsafe parent"):
         _ensure_creation_root(planted)
+
+
+def test_creation_refuses_a_symlinked_central_container(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    root = _leader(tmp_path)
+    state_home = tmp_path / "state"
+    state_home.mkdir()
+    attacker = tmp_path / "attacker"
+    attacker.mkdir()
+    (state_home / "worktrees").symlink_to(attacker)
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
+
+    with pytest.raises(WorktreeIsolationError, match="unsafe parent"):
+        create_worktree(root=root, plan=plan_worktree(root=root, name="slice"))
+
+    assert list(attacker.iterdir()) == []
+
+
+def test_creation_refuses_a_shared_write_state_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    root = _leader(tmp_path)
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o777)
+    monkeypatch.setenv("XDG_STATE_HOME", str(shared / "state"))
+    try:
+        with pytest.raises(WorktreeIsolationError, match="unsafe parent"):
+            create_worktree(root=root, plan=plan_worktree(root=root, name="slice"))
+    finally:
+        shared.chmod(0o700)
 
 
 def test_legacy_in_checkout_manifest_is_read_and_removed(tmp_path: Path):
@@ -302,8 +413,9 @@ def test_creation_root_is_owner_only(tmp_path: Path):
 
     create_worktree(root=root, plan=plan_worktree(root=root, name="slice"))
 
-    mode = managed_worktrees_root(root).stat().st_mode
-    assert not mode & (stat.S_IRWXG | stat.S_IRWXO)
+    creation_root = managed_worktrees_root(root)
+    for private_root in (creation_root.parent.parent, creation_root.parent, creation_root):
+        assert not private_root.stat().st_mode & (stat.S_IRWXG | stat.S_IRWXO)
 
 
 def test_existing_creation_root_is_hardened(tmp_path: Path):
@@ -319,22 +431,15 @@ def test_existing_creation_root_is_hardened(tmp_path: Path):
     assert created.path.exists()
 
 
-def test_shared_parent_keeps_checkouts_inside_the_repo(tmp_path: Path):
-    """부모를 남이 쓸 수 있으면 형제 자리를 고르지 않는다.
-
-    rename 권한은 항목이 아니라 부모가 준다. 우리가 0700으로 만들어도 공격자가
-    그 디렉터리를 rename하고 symlink로 갈아끼울 수 있다 — 권한 강화로는 못 막는다.
-    """
+def test_shared_leader_parent_does_not_change_the_central_layout(tmp_path: Path):
     parent = tmp_path / "shared"
     parent.mkdir()
     root = _leader_at(parent / "myapp")
     os.chmod(parent, 0o777)
+    try:
+        created = create_worktree(root=root, plan=plan_worktree(root=root, name="slice"))
+    finally:
+        os.chmod(parent, 0o700)
 
-    assert managed_worktrees_root(root) == legacy_managed_root(root)
-
-    created = create_worktree(root=root, plan=plan_worktree(root=root, name="slice"))
-    assert created.path.parent == legacy_managed_root(root)
-
-    # sticky bit가 있으면 남의 항목을 갈아끼울 수 없다 — `/tmp`가 그 형태다.
-    os.chmod(parent, 0o1777)
-    assert managed_worktrees_root(root) == parent / "myapp.worktrees"
+    assert created.path.parent == managed_worktrees_root(root)
+    assert created.path.parent != sibling_managed_root(root)

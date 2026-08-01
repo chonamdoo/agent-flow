@@ -139,6 +139,7 @@ from agent_flow.core.worktrees import (
     worktree_branch_exists,
     worktree_runtime_root,
     worktree_run_activation,
+    user_worktrees_root,
 )
 from agent_flow.core.host_write_boundary import (
     HostCheckoutBinding,
@@ -2904,6 +2905,11 @@ def _unadopted_next_step(*, root: Path, checkout: Path) -> str:
 
 def _managed_worktree_context(path: Path) -> tuple[Path, str | None] | None:
     resolved = path.resolve()
+    central_root = user_worktrees_root().resolve()
+    # 사용자 중앙 컨테이너의 `.agent-flow/worktrees`는 프로젝트 marker가 아니다.
+    # 여기서 leader를 HOME으로 오인하면 status/run/start가 실제 저장소를 떠난다.
+    if resolved == central_root or central_root in resolved.parents:
+        return None
     parts = resolved.parts
     markers = {".agent-flow", ".codex", ".Codex", ".omp"}
     for index in range(len(parts) - 2, 0, -1):
