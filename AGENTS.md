@@ -32,7 +32,7 @@ scripts/hooks/          ← PreToolUse/PostToolUse/Stop hooks (guard-protected-b
 - `full-feature`는 `gates` fail → `fix-loop` → `gates` 순환. `default`의 gates는 `implement` completion marker로 강제한다.
 - `multi-review`는 활성 host(현재 사용 중인 CLI)의 sub-agent 2개가 필수. 활성 host가 아닌 추가 provider는 optional이며, 2+ 독립 reviewer 없이는 approve 불가.
 - `architecture-review`의 `request-changes`/`blocked` verdict → `refactor`로 라우팅.
-- worktree는 `agent-flow worktree create --name feat-<slug>`로 만든다. 기본 자리는 leader의 형제 폴더 `<repo>.worktrees/<name>`이다 — 프로젝트 폴더 안에 두면 leader를 열어 둔 IDE가 worktree 작업에 반응해 leader의 `.gradle/` 같은 캐시를 건드리고, leader tripwire가 그것을 오염으로 보고해 남은 phase가 exit 2로 막힌다. 예전 자리(`.agent-flow/worktrees/<name>`)의 checkout은 계속 인식된다. leader worktree에서 `git checkout`/`git switch`로 브랜치를 바꾸지 않는다.
+- worktree는 `agent-flow worktree create --name feat-<slug>`로 만든다. 기본 자리는 `~/.agent-flow/worktrees/<repo-id>/<name>`이다 — 프로젝트 폴더 안에 두면 leader를 열어 둔 IDE가 worktree 작업에 반응해 leader의 `.gradle/` 같은 캐시를 건드리고, leader tripwire가 그것을 오염으로 보고해 남은 phase가 exit 2로 막힌다. 이전 자리(`<repo>.worktrees/<name>`, `.agent-flow/worktrees/<name>`)의 checkout은 계속 인식된다. leader worktree에서 `git checkout`/`git switch`로 브랜치를 바꾸지 않는다.
 - 그 밖의 linked worktree(Orca `~/orca/workspaces/<repo>/<slug>` 등)는 `agent-flow worktree adopt --path <checkout>`으로 채택해야 인식된다. 채택 전에 그 안에서 `run`/`start`를 치면 blocker다 — git 등록만으로 인가하면 워커가 `git worktree add`로 자기 권한을 만들 수 있다. install은 언제나 leader checkout에서만 한다(linked worktree에서 실행하면 차단된다).
 
 Workflow Contract와 Context Economy는 아래 agent-flow 블록이 canonical source다. 여기에 중복으로 적지 않는다.
@@ -49,9 +49,9 @@ agent-flow status
 install은 프로젝트당 1회만 수행합니다. 새 세션이 시작됐다는 이유로 install을 다시 실행하지 않습니다.
 Follow the CLI output exactly. If no run is active, start with `agent-flow run "<task>"`. If a run is active, continue with the printed `next_command`.
 
-run이 SPEC 확인 대기로 막히면 지원되는 Codex·Claude·OMP host에서는 사용자에게 현재 대화의 새 turn으로 정확히 `승인`이라고 답해 달라고 안내합니다. managed user-prompt hook이 현재 pending SPEC을 확인합니다. hook을 사용할 수 없을 때만 사용자가 대상 worktree의 대화형 터미널에서 경로 없는 fallback `agent-flow spec confirm`을 직접 실행합니다.
-`manual` verify 항목은 사용자가 `agent-flow spec approve <spec-id> --run-dir <run-dir>`를 실행해야 승인 record가 남습니다.
-agent는 fallback·manual 승인 명령이나 user-prompt hook을 대신 실행하지 않습니다. agent 셸에서 관측된 확인·승인은 무효 처리됩니다.
+run의 status가 SPEC 추가·수정·삭제를 보고하면 변경 목록만 사용자에게 보여 확인을 요청합니다. 사용자가 현재 대화에서 명확히 동의하면 agent가 status에 출력된 `agent-flow spec confirm --run-dir <run-dir>`을 실행합니다.
+`manual` verify 항목도 사용자에게 현재 대화에서 확인한 뒤 agent가 `agent-flow spec approve <spec-id> --run-dir <run-dir>`을 실행합니다.
+정확한 승인 문구나 사용자 터미널 명령 실행을 요구하지 않습니다.
 
 ### Workflow Contract
 

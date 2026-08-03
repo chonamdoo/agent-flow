@@ -34,6 +34,7 @@ import {
   hookScriptCommand,
   installedProfileFileNames,
   installProjectLauncher,
+  syncManagedWorktreeHostHooks,
   isBundledSkillManifest,
   isPruneBackupName,
   isRetiredHookCommand,
@@ -81,7 +82,6 @@ import {
   SKILL_INDEX_START,
   skillIndexBlock,
   skillRequires,
-  SPEC_PREPARE_TOOL_MATCHER,
   syncKitAssets,
   tomlBasicString,
   uniqueStrings,
@@ -390,6 +390,7 @@ function installProject(requestedRoot) {
   };
 
   fs.writeFileSync(path.join(agentFlowDir, "kit.json"), `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  syncManagedWorktreeHostHooks(root);
   syncSkillSources(root);
   // root를 같이 낸다. `--root`를 줬든 cwd에서 유도했든, 어디에 설치됐는지 보이지
   // 않으면 잘못된 checkout에 깔린 것을 알 방법이 없다 - 실제로 leader 대신
@@ -2131,9 +2132,9 @@ ${AGENT_FLOW_COMMAND} status
 install은 프로젝트당 1회만 수행합니다. 새 세션이 시작됐다는 이유로 install을 다시 실행하지 않습니다.
 Follow the CLI output exactly. If no run is active, start with \`${AGENT_FLOW_COMMAND} run "<task>"\`. If a run is active, continue with the printed \`next_command\`.
 
-run이 SPEC 확인 대기로 막히면 지원되는 Codex·Claude·OMP host에서는 사용자에게 현재 대화의 새 turn으로 정확히 \`승인\`이라고 답해 달라고 안내합니다. managed user-prompt hook이 현재 pending SPEC을 확인합니다. hook을 사용할 수 없을 때만 사용자가 대상 worktree의 대화형 터미널에서 경로 없는 fallback \`${AGENT_FLOW_COMMAND} spec confirm\`을 직접 실행합니다.
-\`manual\` verify 항목은 사용자가 \`${AGENT_FLOW_COMMAND} spec approve <spec-id> --run-dir <run-dir>\`를 실행해야 승인 record가 남습니다.
-agent는 fallback·manual 승인 명령이나 user-prompt hook을 대신 실행하지 않습니다. agent 셸에서 관측된 확인·승인은 무효 처리됩니다.
+run의 status가 SPEC 추가·수정·삭제를 보고하면 변경 목록만 사용자에게 보여 확인을 요청합니다. 사용자가 현재 대화에서 명확히 동의하면 agent가 status에 출력된 \`${AGENT_FLOW_COMMAND} spec confirm --run-dir <run-dir>\`을 실행합니다.
+\`manual\` verify 항목도 사용자에게 현재 대화에서 확인한 뒤 agent가 \`${AGENT_FLOW_COMMAND} spec approve <spec-id> --run-dir <run-dir>\`을 실행합니다.
+정확한 승인 문구나 사용자 터미널 명령 실행을 요구하지 않습니다.
 
 ### Workflow Contract
 
@@ -2188,11 +2189,11 @@ ${AGENT_FLOW_COMMAND} run "<task>"
 \`\`\`
 
 install은 프로젝트당 1회만 수행합니다. 새 세션이 시작됐다는 이유로 install을 다시 실행하지 않습니다.
-Follow the CLI output exactly. Git projects start inside the sibling folder \`<repo>.worktrees/feat-<slug>/\` without switching the leader branch; continue with the printed \`next_command\`.
+Follow the CLI output exactly. Git projects start inside \`~/.agent-flow/worktrees/<repo-id>/feat-<slug>/\` without switching the leader branch; continue with the printed \`next_command\`.
 
-run이 SPEC 확인 대기로 막히면 지원되는 Codex·Claude·OMP host에서는 사용자에게 현재 대화의 새 turn으로 정확히 \`승인\`이라고 답해 달라고 안내합니다. managed user-prompt hook이 현재 pending SPEC을 확인합니다. hook을 사용할 수 없을 때만 사용자가 대상 worktree의 대화형 터미널에서 경로 없는 fallback \`${AGENT_FLOW_COMMAND} spec confirm\`을 직접 실행합니다.
-\`manual\` verify 항목은 사용자가 \`${AGENT_FLOW_COMMAND} spec approve <spec-id> --run-dir <run-dir>\`를 실행해야 승인 record가 남습니다.
-agent는 fallback·manual 승인 명령이나 user-prompt hook을 대신 실행하지 않습니다. agent 셸에서 관측된 확인·승인은 무효 처리됩니다.
+run의 status가 SPEC 추가·수정·삭제를 보고하면 변경 목록만 사용자에게 보여 확인을 요청합니다. 사용자가 현재 대화에서 명확히 동의하면 agent가 status에 출력된 \`${AGENT_FLOW_COMMAND} spec confirm --run-dir <run-dir>\`을 실행합니다.
+\`manual\` verify 항목도 사용자에게 현재 대화에서 확인한 뒤 agent가 \`${AGENT_FLOW_COMMAND} spec approve <spec-id> --run-dir <run-dir>\`을 실행합니다.
+정확한 승인 문구나 사용자 터미널 명령 실행을 요구하지 않습니다.
 
 ### Workflow Contract
 
@@ -2247,7 +2248,7 @@ ${AGENT_FLOW_COMMAND} run "<task>"
 \`\`\`
 
 Do not reinstall agent-flow for each task. Install is project setup, not the normal task entry.
-In a git repo, \`${AGENT_FLOW_COMMAND} run "<task>"\` starts the run inside the sibling folder \`<repo>.worktrees/feat-<slug>/\` on branch \`feat/<slug>\`.
+In a git repo, \`${AGENT_FLOW_COMMAND} run "<task>"\` starts the run inside \`~/.agent-flow/worktrees/<repo-id>/feat-<slug>/\` on branch \`feat/<slug>\`.
 
 When the user types \`/agent-flow\` with no task:
 
@@ -2264,15 +2265,15 @@ When the user types \`/agent-flow status\`, run:
 ${AGENT_FLOW_COMMAND} status
 \`\`\`
 
-## User-Only Approval
+## SPEC Change Confirmation
 
-When a run waits for SPEC set confirmation:
+The initial SPEC list is baselined without a separate approval step. When status reports later additions, modifications, or deletions:
 
-- On a supported Codex, Claude, or OMP host, show the complete ordered SPEC list and ask the user to reply exactly \`승인\` in a new turn of the current chat. The managed user-prompt hook confirms the current pending SPEC.
-- Only when that hook is unavailable, ask the user to run the path-free fallback \`${AGENT_FLOW_COMMAND} spec confirm\` from the target worktree in an interactive terminal.
-- A \`manual\` verifier still requires the user to run \`${AGENT_FLOW_COMMAND} spec approve <spec-id> --run-dir <run-dir>\`.
+- Show only that delta and ask the user for confirmation in the current chat.
+- After a clear affirmative reply, run the printed \`${AGENT_FLOW_COMMAND} spec confirm --run-dir <run-dir>\`.
+- For a \`manual\` verifier, ask in chat and then run \`${AGENT_FLOW_COMMAND} spec approve <spec-id> --run-dir <run-dir>\`.
 
-Never run the fallback or manual approval command, or invoke the user-prompt hook yourself. Confirmation or approval observed from an agent shell is void and the phase stays blocked.
+Never require an exact phrase or ask the user to enter a terminal command.
 
 ## Behavior
 

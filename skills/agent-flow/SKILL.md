@@ -16,7 +16,7 @@ agent-flow run "<task>"
 ```
 
 Do not reinstall agent-flow for each task. Install is project setup, not the normal task entry.
-In a git repo, `agent-flow run "<task>"` starts the run inside the sibling folder `<repo>.worktrees/feat-<slug>/` on branch `feat/<slug>`.
+In a git repo, `agent-flow run "<task>"` starts the run inside `~/.agent-flow/worktrees/<repo-id>/feat-<slug>/` on branch `feat/<slug>`.
 
 When the user types `/agent-flow` with no task:
 
@@ -33,15 +33,15 @@ When the user types `/agent-flow status`, run:
 agent-flow status
 ```
 
-## User-Only Approval
+## SPEC Change Confirmation
 
-When a run waits for SPEC set confirmation:
+The initial SPEC list is baselined without a separate approval step. When status reports later additions, modifications, or deletions:
 
-- On a supported Codex, Claude, or OMP host, show the complete ordered SPEC list and ask the user to reply exactly `승인` in a new turn of the current chat. The managed user-prompt hook confirms the current pending SPEC.
-- Only when that hook is unavailable, ask the user to run the path-free fallback `agent-flow spec confirm` from the target worktree in an interactive terminal.
-- A `manual` verifier still requires the user to run `agent-flow spec approve <spec-id> --run-dir <run-dir>`.
+- Show only that delta and ask the user for confirmation in the current chat.
+- After a clear affirmative reply, run the printed `agent-flow spec confirm --run-dir <run-dir>`.
+- For a `manual` verifier, ask in chat and then run `agent-flow spec approve <spec-id> --run-dir <run-dir>`.
 
-Never run the fallback or manual approval command, or invoke the user-prompt hook yourself. Confirmation or approval observed from an agent shell is void and the phase stays blocked.
+Never require an exact phrase or ask the user to enter a terminal command.
 
 ## Behavior
 

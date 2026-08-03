@@ -32,18 +32,13 @@ from agent_flow.core.context_contract import (
     write_system_invariants,
 )
 from agent_flow.core.design_ledger import (
-    LEDGER_SOURCE_PHASES,
-    SPEC_SET_USER_REPLY,
-    prepare_and_attest_user_spec_confirmation,
     capture_design_ledger,
+    confirm_current_spec_changes,
     ledger_prompt_block,
     manual_spec_approval_statement,
-    parse_spec_item_section,
+    pending_spec_changes_for_run,
     record_manual_spec_approval,
-    prepare_user_spec_confirmation,
-    record_spec_set_confirmation,
-    spec_set_confirmation_statement,
-    spec_set_is_confirmed,
+    render_spec_changes,
 )
 from agent_flow.core.design_value_check import missing_spec_item_evidence
 from agent_flow.core.gates import GateCommand, run_gates
@@ -132,6 +127,7 @@ from agent_flow.core.worktrees import (
     managed_worktrees_root,
     plan_worktree,
     provision_host_hook_registrations,
+    provision_registered_worktree_host_hooks,
     remove_worktree_metadata,
     remove_worktree,
     removable_worktrees,
@@ -139,11 +135,7 @@ from agent_flow.core.worktrees import (
     worktree_branch_exists,
     worktree_runtime_root,
     worktree_run_activation,
-)
-from agent_flow.core.host_write_boundary import (
-    HostCheckoutBinding,
-    HostWriteBoundaryError,
-    bound_worktree_for_session,
+    user_worktrees_root,
 )
 from agent_flow.core.hook_integrity import (
     HookIntegrityError,
@@ -172,7 +164,7 @@ from agent_flow.core.state import RunRequest, RunState, start_run, status_summar
 from agent_flow.core.workflow import load_workflow
 from agent_flow.eval import run_eval
 from agent_flow.memory.entities import EntityMemoryIndex
-from agent_flow.artifact import find_active_run, find_active_runs, mark_inactive, read_meta
+from agent_flow.artifact import find_active_run, mark_inactive, read_meta
 from agent_flow.runner import Runner, ResumeMode, _find_kit_root, _load_profile
 from agent_flow.providers.host import list_host_providers
 from agent_flow.providers.subprocess import (
@@ -346,27 +338,11 @@ def main(argv: list[str] | None = None) -> int:
     spec_approve.add_argument("--run-dir", required=True)
     spec_approve.add_argument("--root", default=".")
     spec_confirm = spec_subparsers.add_parser("confirm")
-    spec_confirm.add_argument("--run-dir")
+    spec_confirm.add_argument("--run-dir", required=True)
     spec_confirm.add_argument("--root", default=".")
-    spec_confirm.add_argument("--artifact")
-    spec_confirm.add_argument(
-        "--from-user-prompt",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    spec_confirm.add_argument("--session-id", help=argparse.SUPPRESS)
-    spec_confirm.add_argument("--hook-capability", help=argparse.SUPPRESS)
-    spec_prepare_confirmation = spec_subparsers.add_parser(
-        "prepare-confirmation",
-        help=argparse.SUPPRESS,
-    )
-    spec_prepare_confirmation.add_argument("--root", default=".")
-    spec_prepare_confirmation.add_argument("--session-id", required=True)
-    spec_prepare_confirmation.add_argument(
-        "--hook-capability-hash",
-        required=True,
-        help=argparse.SUPPRESS,
-    )
+    spec_changes = spec_subparsers.add_parser("changes")
+    spec_changes.add_argument("--run-dir", required=True)
+    spec_changes.add_argument("--root", default=".")
     spec_capture = spec_subparsers.add_parser("capture")
     spec_capture.add_argument("--root", default=".")
     spec_capture.add_argument("--run-dir", required=True)
@@ -464,6 +440,10 @@ def main(argv: list[str] | None = None) -> int:
     worktree_identity = worktree_subparsers.add_parser("identity")
     worktree_identity.add_argument("--root", default=".")
     worktree_identity.add_argument("--path", default=".")
+    worktree_sync_host_hooks = worktree_subparsers.add_parser(
+        "sync-host-hooks", help=argparse.SUPPRESS
+    )
+    worktree_sync_host_hooks.add_argument("--root", default=".")
 
     team_parser = subparsers.add_parser("team")
     team_subparsers = team_parser.add_subparsers(dest="team_command", required=True)
@@ -859,6 +839,7 @@ def main(argv: list[str] | None = None) -> int:
                 config_root=root,
                 project_root=run_root,
             )
+            _print_pending_spec_change_status(active.path)
             return 0
         if _legacy_js_state_exists(root):
             _print_legacy_js_state_migration(root)
@@ -1048,95 +1029,21 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "spec":
         try:
-            if args.spec_command == "confirm":
-                if args.from_user_prompt and (
-                    args.run_dir is not None or args.artifact is not None
-                ):
-                    raise ValueError(
-                        "--from-user-prompt does not accept run or artifact paths"
-                    )
-                if args.from_user_prompt and not args.hook_capability:
-                    raise ValueError(
-                        "host user-prompt confirmation requires a hook capability"
-                    )
-                if not args.from_user_prompt and args.hook_capability is not None:
-                    raise ValueError(
-                        "--hook-capability is reserved for host user-prompt confirmation"
-                    )
-                target = _resolve_spec_confirmation_target(
-                    root,
-                    run_dir_value=args.run_dir,
-                    artifact_value=args.artifact,
-                    inferred_worktree=inferred_worktree,
-                    interactive=not args.from_user_prompt,
-                    session_id=args.session_id if args.from_user_prompt else None,
-                )
-                if target is None:
-                    if args.from_user_prompt:
-                        return 0
-                    raise ValueError("no active run is waiting for SPEC confirmation")
-                parsed = parse_spec_item_section(
-                    target.artifact.read_text(encoding="utf-8")
-                )
-                if parsed.errors or not parsed.items:
-                    raise ValueError(
-                        "invalid SPEC set: "
-                        + "; ".join(parsed.errors or ("no SPEC items",))
-                    )
-                if args.from_user_prompt:
-                    if not args.session_id:
-                        return 0
-                    confirmation_path = prepare_and_attest_user_spec_confirmation(
-                        target.run_dir,
-                        parsed.items,
-                        prompt=sys.stdin.read(),
-                        session_id=args.session_id,
-                        checkout_identity=target.checkout_identity,
-                        hook_capability=args.hook_capability,
-                    )
-                    if confirmation_path is None:
-                        return 0
-                else:
-                    _read_interactive_approval(SPEC_SET_USER_REPLY)
-                    confirmation_path = record_spec_set_confirmation(
-                        target.run_dir,
-                        parsed.items,
-                        spec_set_confirmation_statement(parsed.items),
-                    )
-                print(f"SPEC set confirmed: {confirmation_path}")
-                return 0
-            if args.spec_command == "prepare-confirmation":
-                target = _resolve_spec_confirmation_target(
-                    root,
-                    run_dir_value=None,
-                    artifact_value=None,
-                    inferred_worktree=inferred_worktree,
-                    interactive=False,
-                    session_id=args.session_id,
-                )
-                if target is None:
-                    return 0
-                parsed = parse_spec_item_section(
-                    target.artifact.read_text(encoding="utf-8")
-                )
-                if parsed.errors or not parsed.items:
-                    return 0
-                prepare_user_spec_confirmation(
-                    target.run_dir,
-                    parsed.items,
-                    session_id=args.session_id,
-                    checkout_identity=target.checkout_identity,
-                    hook_capability_hash=args.hook_capability_hash,
-                )
-                return 0
             run_dir = _resolve_project_path(root, args.run_dir)
+            if args.spec_command == "confirm":
+                confirmation_path = confirm_current_spec_changes(run_dir)
+                print(f"SPEC changes confirmed: {confirmation_path}")
+                return 0
+            if args.spec_command == "changes":
+                changes = pending_spec_changes_for_run(run_dir)
+                print(render_spec_changes(changes))
+                return 0
             if args.spec_command == "approve":
                 expected = manual_spec_approval_statement(run_dir, args.spec_id)
-                statement = _read_interactive_approval(expected)
                 approval_path = record_manual_spec_approval(
                     run_dir,
                     args.spec_id,
-                    statement,
+                    expected,
                 )
                 print(f"SPEC approved: {approval_path}")
                 return 0
@@ -1335,6 +1242,18 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 return 1
             print(identity)
+            return 0
+        if args.worktree_command == "sync-host-hooks":
+            try:
+                provision_registered_worktree_host_hooks(root=root)
+            except (
+                OSError,
+                ValueError,
+                RuntimeError,
+                subprocess.SubprocessError,
+            ) as exc:
+                print(_format_cli_error(exc), file=sys.stderr)
+                return 2
             return 0
         if args.worktree_command == "status":
             try:
@@ -2606,7 +2525,7 @@ def _declared_worktree_copies(profile: dict) -> list[str]:
 
 
 def _provision_host_hooks(*, root: Path, checkout: Path) -> None:
-    """checkout에서 연 host 세션도 UserPromptSubmit hook을 갖도록 등록 파일을 깐다.
+    """checkout에서 연 host 세션에도 managed hook 등록 파일을 provision한다.
 
     profile 해석과 무관하다 — profile이 깨져도 hook 등록까지 같이 잃으면 안 된다.
     이미 같은 내용이면 아무것도 쓰지 않으므로 매 실행마다 불러도 무해하다.
@@ -2904,6 +2823,11 @@ def _unadopted_next_step(*, root: Path, checkout: Path) -> str:
 
 def _managed_worktree_context(path: Path) -> tuple[Path, str | None] | None:
     resolved = path.resolve()
+    central_root = user_worktrees_root().resolve()
+    # 사용자 중앙 컨테이너의 `.agent-flow/worktrees`는 프로젝트 marker가 아니다.
+    # 여기서 leader를 HOME으로 오인하면 status/run/start가 실제 저장소를 떠난다.
+    if resolved == central_root or central_root in resolved.parents:
+        return None
     parts = resolved.parts
     markers = {".agent-flow", ".codex", ".Codex", ".omp"}
     for index in range(len(parts) - 2, 0, -1):
@@ -3134,51 +3058,6 @@ def _skill_context(root: Path, args: argparse.Namespace) -> dict:
     }
 
 
-def _read_interactive_approval(expected: str) -> str:
-    if not _is_foreground_user_terminal():
-        raise RuntimeError(
-            "SPEC approval requires one foreground user terminal attached to "
-            "stdin, stdout, and stderr; agents and redirected or synthetic "
-            "sessions cannot approve"
-        )
-    print(f"Type exactly to approve: {expected}")
-    statement = sys.stdin.readline().strip()
-    if statement != expected:
-        raise RuntimeError("approval statement did not match exactly")
-    return statement
-
-
-def _is_foreground_user_terminal() -> bool:
-    if any(
-        os.environ.get(name)
-        for name in (
-            "CLAUDECODE",
-            "CLAUDE_CLI",
-            "CODEX_CLI",
-            "CODEX_HOME",
-            "OMPCODE",
-            "OMP_PROFILE",
-        )
-    ):
-        return False
-    streams = (sys.stdin, sys.stdout, sys.stderr)
-    try:
-        fds = tuple(stream.fileno() for stream in streams)
-        if any(not stream.isatty() or not os.isatty(fd) for stream, fd in zip(streams, fds)):
-            return False
-        if len({os.fstat(fd).st_rdev for fd in fds}) != 1:
-            return False
-        getpgrp = getattr(os, "getpgrp", None)
-        getsid = getattr(os, "getsid", None)
-        tcgetpgrp = getattr(os, "tcgetpgrp", None)
-        if getpgrp is None or getsid is None or tcgetpgrp is None:
-            return False
-        process_group = getpgrp()
-        if any(tcgetpgrp(fd) != process_group for fd in fds):
-            return False
-        return getsid(os.getpid()) == getsid(os.getppid())
-    except (AttributeError, OSError, TypeError, ValueError):
-        return False
 
 
 def _read_run_state(run_dir: Path) -> dict:
@@ -3192,77 +3071,6 @@ def _read_run_state(run_dir: Path) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
-@dataclass(frozen=True)
-class _SpecConfirmationTarget:
-    run_dir: Path
-    artifact: Path
-    checkout_identity: str
-
-
-def _resolve_spec_confirmation_target(
-    root: Path,
-    *,
-    run_dir_value: str | None,
-    artifact_value: str | None,
-    inferred_worktree: str | None,
-    interactive: bool,
-    session_id: str | None = None,
-) -> _SpecConfirmationTarget | None:
-    if run_dir_value is not None:
-        run_dir = _resolve_project_path(root, run_dir_value)
-        if artifact_value is not None:
-            artifact = _resolve_project_path(root, artifact_value)
-        else:
-            artifact = _spec_artifact_waiting_for_confirmation(run_dir, pending_only=False)
-            if artifact is None:
-                raise ValueError(f"run has no current SPEC source artifact: {run_dir}")
-        return _SpecConfirmationTarget(
-            run_dir=run_dir,
-            artifact=artifact,
-            checkout_identity=_checkout_identity(inferred_worktree),
-        )
-
-    candidates: list[_SpecConfirmationTarget] = []
-    for state_root, checkout_identity in _spec_confirmation_state_roots(
-        root,
-        inferred_worktree=inferred_worktree,
-        session_id=session_id,
-    ):
-        for active in find_active_runs(state_root):
-            artifact = _spec_artifact_waiting_for_confirmation(
-                active.path,
-                pending_only=True,
-            )
-            if artifact is not None:
-                candidates.append(
-                    _SpecConfirmationTarget(
-                        run_dir=active.path,
-                        artifact=artifact,
-                        checkout_identity=checkout_identity,
-                    )
-                )
-        # 우선순위가 낮은 root의 candidate를 섞으면 양쪽이 pending일 때 아래 모호
-        # 거부에 걸려 승인이 사라진다. 하나라도 나온 root에서 멈춘다.
-        if candidates:
-            break
-
-    if not candidates:
-        return None
-    if len(candidates) == 1:
-        target = candidates[0]
-        if artifact_value is None:
-            return target
-        return _SpecConfirmationTarget(
-            run_dir=target.run_dir,
-            artifact=_resolve_project_path(root, artifact_value),
-            checkout_identity=target.checkout_identity,
-        )
-    if not interactive:
-        return None
-    raise ValueError(
-        "pathless SPEC confirmation requires exactly one pending run in the "
-        "current checkout"
-    )
 
 
 def _checkout_identity(inferred_worktree: str | None) -> str:
@@ -3298,112 +3106,19 @@ def _verified_checkout_identity(*, root: Path, path: Path) -> str | None:
     return f"worktree:{checkout.name}"
 
 
-def _spec_confirmation_state_roots(
-    root: Path,
-    *,
-    inferred_worktree: str | None,
-    session_id: str | None = None,
-) -> tuple[tuple[Path, str], ...]:
-    """SPEC 확인 대상을 찾을 state root를 우선순위 순으로 낸다.
 
-    호출자는 candidate가 나온 첫 root에서 멈춘다. bound checkout이 leader를
-    대치하면 leader run의 승인이 사라지고, 반대로 둘을 한꺼번에 스캔하면 양쪽이
-    pending일 때 모호로 판정되어 역시 무음 실패다. 순서 있는 fallback만이 형제
-    worktree 추측 금지와 leader 승인을 동시에 지킨다.
-    """
-    if inferred_worktree is not None:
-        return (
-            (
-                worktree_runtime_root(root=root, name=inferred_worktree),
-                _checkout_identity(inferred_worktree),
-            ),
-        )
-    try:
-        binding = _bound_host_checkout(root, session_id)
-    except WorktreeIsolationError as exc:
-        # leader가 binding 기록 이후 바뀌었다. 여기서 leader-only로 내려가면 승인이
-        # 사용자가 고른 worktree가 아니라 leader run에 기록된다 — 생략보다 나쁘다.
-        # 형제 소비자(`host_write_boundary_violation`)도 같은 예외를 위반으로 올린다.
-        print(
-            "warning: refusing to resolve a SPEC confirmation while the leader "
-            f"checkout differs from the host session binding: {_format_cli_error(exc)}",
-            file=sys.stderr,
-        )
-        return ()
-    if binding is None:
-        return ((root, "leader"),)
-    return (
-        (
-            binding.checkout.runtime_root,
-            _checkout_identity(binding.checkout.name),
-        ),
-        (root, "leader"),
+
+def _print_pending_spec_change_status(run_dir: Path) -> None:
+    changes = pending_spec_changes_for_run(run_dir)
+    if not changes:
+        return
+    print("spec_changes: awaiting_confirmation")
+    print(render_spec_changes(changes))
+    print("spec_scope: changed items paused; unchanged confirmed items may continue")
+    print(
+        "spec_confirm_command: agent-flow spec confirm --run-dir "
+        f"{shlex.quote(str(run_dir))}"
     )
-
-
-def _bound_host_checkout(
-    root: Path,
-    session_id: str | None,
-) -> HostCheckoutBinding | None:
-    """leader cwd에서 도는 host 세션이 증명적으로 묶인 managed checkout.
-
-    binding 파일이 세션↔checkout 1:1 결합의 유일한 증거다. 없으면 형제 worktree를
-    추측으로 고르지 않고 leader만 본다. 승인은 load-bearing 보안 경계이므로 다른
-    binding 소비자(`host_write_boundary_violation`, binding 재확인)와 같은 leader
-    tripwire 검증을 통과한 binding만 쓴다 — 그 검증 실패는 호출자가 fail-closed로
-    처리하도록 그대로 올린다.
-
-    binding을 **읽지** 못하는 것은 다른 사건이라 leader-only로 내려간다. 이 사유는
-    hook 경로에서는 stderr가 버려져 사용자에게 닿지 않고, `spec confirm`을 직접
-    실행할 때만 보인다.
-    """
-    if not session_id:
-        return None
-    try:
-        binding = bound_worktree_for_session(session_id, root)
-        if binding is None:
-            return None
-        assert_leader_unchanged(
-            root,
-            binding.leader_snapshot,
-            worker_root=binding.checkout.checkout,
-            include_ignored=False,
-        )
-        return binding
-    except (HostWriteBoundaryError, OSError, ValueError) as exc:
-        print(
-            "warning: host session binding is unusable, falling back to the "
-            f"leader checkout: {_format_cli_error(exc)}",
-            file=sys.stderr,
-        )
-        return None
-
-
-def _spec_artifact_waiting_for_confirmation(
-    run_dir: Path,
-    *,
-    pending_only: bool,
-) -> Path | None:
-    meta = _read_run_state(run_dir)
-    phase_id = str(meta.get("current_phase") or meta.get("phase") or "")
-    if phase_id not in LEDGER_SOURCE_PHASES:
-        return None
-    for artifact in (
-        run_dir / f"{phase_id}.md",
-        run_dir / "artifacts" / f"{phase_id}.md",
-    ):
-        if not artifact.is_file():
-            continue
-        parsed = parse_spec_item_section(artifact.read_text(encoding="utf-8"))
-        if parsed.errors or not parsed.items:
-            continue
-        if pending_only and spec_set_is_confirmed(run_dir, parsed.items):
-            # 한 run의 현재 SPEC artifact는 하나다. 확인된 것을 건너뛰고 다음
-            # 후보로 넘어가면, agent가 두 번째 artifact를 써 두는 것만으로
-            # 사용자가 이미 승인한 집합이 다른 집합으로 갈아치워진다.
-            return None
-        return artifact
-    return None
 
 
 def _spec_run_context(run_dir: Path) -> dict:

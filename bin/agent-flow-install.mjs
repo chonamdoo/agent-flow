@@ -36,6 +36,7 @@ import {
   hookScriptCommand,
   installedProfileFileNames,
   installProjectLauncher,
+  syncManagedWorktreeHostHooks,
   isBundledSkillManifest,
   isPruneBackupName,
   isRetiredHookCommand,
@@ -83,7 +84,6 @@ import {
   SKILL_UPGRADE_NOTICE_PREFIX,
   skillIndexBlock,
   skillRequires,
-  SPEC_PREPARE_TOOL_MATCHER,
   syncKitAssets,
   tomlBasicString,
   uniqueStrings,
@@ -1050,7 +1050,7 @@ function install() {
   // 자식 kit install이 index를 다시 쓴다. 그 뒤에 읽으면 "사용자가 손댔는가"를
   // 가르는 hash가 방금 관측한 현재 내용으로 갱신돼 있어 오라클이 사라진다.
   const previousSkillIndex = readJsonIfExists(path.join(AF_DIR, "skills", "index.json"));
-  runKitInstall();
+  const delegatedKitInstalled = runKitInstall();
   ensureDir(path.join(AF_DIR, "runs"));
   ensureDir(path.join(AF_DIR, "memory"));
   ensureDir(path.join(AF_DIR, "memory", "lore"));
@@ -1314,6 +1314,9 @@ function install() {
     path.join(AF_DIR, "kit.json"),
     JSON.stringify(kitJson, null, 2)
   );
+  if (delegatedKitInstalled) {
+    syncManagedWorktreeHostHooks(PROJECT);
+  }
 
   console.log(`agent-flow installed`);
   console.log(`  profile : ${profile}`);

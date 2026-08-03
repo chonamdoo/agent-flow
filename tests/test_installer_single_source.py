@@ -7,7 +7,9 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -64,6 +66,8 @@ def _extension_source() -> str:
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        timeout=60,
     ).stdout
 
 
@@ -71,7 +75,15 @@ def _git(cwd: Path, *args: str) -> None:
     git = shutil.which("git")
     if git is None:
         pytest.skip("git을 찾을 수 없다")
-    subprocess.run((git, *args), cwd=cwd, check=True, capture_output=True, text=True)
+    subprocess.run(
+        (git, *args),
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=60,
+    )
 
 
 def _install_extension(root: Path, source: str, extra: str = "") -> Path:
@@ -129,10 +141,122 @@ def _run_bash_tool_call(root: Path, source: str) -> tuple[str, str]:
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        timeout=60,
     )
     # 실패를 CalledProcessError로 흘리면 node가 남긴 사유가 리포트에서 사라진다.
     assert result.returncode == 0, f"driver exited {result.returncode}: {result.stderr}"
     return result.stdout, result.stderr
+
+
+def _run_command_result_handler(
+    root: Path,
+    source: str,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    hooks = _seed_install(root)
+    shutil.copy2(
+        KIT_ROOT / "scripts" / "hooks" / "record-command-run.py",
+        hooks / "record-command-run.py",
+    )
+    binding_log = root / ".agent-flow" / "binding-events.jsonl"
+    binding_recorder = (
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "payload = json.load(sys.stdin)\n"
+        f"with Path({str(binding_log)!r}).open('a', encoding='utf-8') as stream:\n"
+        "    stream.write(json.dumps(payload) + '\\n')\n"
+    )
+    (hooks / "bind-host-worktree.py").write_text(binding_recorder, encoding="utf-8")
+    for script_name in (
+        "record-skill-read.py",
+        "worktree-tripwire.py",
+    ):
+        (hooks / script_name).write_text("pass\n", encoding="utf-8")
+    (hooks / "guard-host-worktree.sh").write_text("exit 0\n", encoding="utf-8")
+
+    target = _install_extension(root, source)
+    events = [
+        {
+            "type": "tool_result",
+            "toolName": "bash",
+            "input": {"command": "python3 -m pytest -q tests/test_ok.py"},
+            "content": [{"type": "text", "text": "1 passed"}],
+            "details": {"timeoutSeconds": 60, "wallTimeMs": 12},
+            "isError": False,
+        },
+        {
+            "type": "tool_result",
+            "toolName": "bash",
+            "input": {"command": "python3 -c 'raise SystemExit(7)'"},
+            "content": [{"type": "text", "text": "Command exited with code 7"}],
+            "details": {"timeoutSeconds": 60, "wallTimeMs": 12, "exitCode": 7},
+            "isError": True,
+        },
+        {
+            "type": "tool_result",
+            "toolName": "bash",
+            "input": {"command": "python3 -c 'raise SystemExit(9)'"},
+            "content": [{"type": "text", "text": "Command exited with code 9"}],
+            "details": {"timeoutSeconds": 60, "wallTimeMs": 12, "exitCode": 9},
+            "isError": False,
+        },
+        {
+            "type": "tool_result",
+            "toolName": "bash",
+            "input": {"command": "python3 -m pytest -q tests/test_async.py"},
+            "content": [{"type": "text", "text": "Process running in background"}],
+            "details": {
+                "timeoutSeconds": 60,
+                "wallTimeMs": 12,
+                "async": {"state": "running"},
+            },
+            "isError": False,
+        },
+        {
+            "type": "tool_result",
+            "toolName": "bash",
+            "input": {"command": "python3 -m pytest -q tests/test_timeout.py"},
+            "content": [{"type": "text", "text": "Deadline exceeded"}],
+            "details": {"timeoutSeconds": 60, "wallTimeMs": 60_000, "timedOut": True},
+            "isError": False,
+        },
+    ]
+    driver = (
+        f"import ext from {json.dumps(str(target))};\n"
+        "const handlers = {};\n"
+        "const pi = { setLabel() {}, on(name, fn) { (handlers[name] = handlers[name] || []).push(fn); } };\n"
+        "ext(pi);\n"
+        f"const events = {json.dumps(events)};\n"
+        f"const ctx = {{ cwd: {json.dumps(str(root))}, sessionManager: {{ getSessionId() {{ return 'session-1'; }} }} }};\n"
+        "async function run() {\n"
+        "  for (const event of events) {\n"
+        "    await handlers.tool_result[0](event, ctx);\n"
+        "  }\n"
+        "}\n"
+        "run().catch((error) => {\n"
+        "  process.stderr.write('driver failed: ' + (error?.stack || String(error)) + '\\n');\n"
+        "  process.exitCode = 1;\n"
+        "});\n"
+    )
+    result = subprocess.run(
+        (_node(), "--input-type=module", "-e", driver),
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=60,
+    )
+    assert result.returncode == 0, f"driver exited {result.returncode}: {result.stderr}"
+    command_log = root / ".agent-flow" / "commands-run.jsonl"
+    command_events = [
+        json.loads(line) for line in command_log.read_text(encoding="utf-8").splitlines()
+    ]
+    binding_events = [
+        json.loads(line) for line in binding_log.read_text(encoding="utf-8").splitlines()
+    ]
+    return command_events, binding_events
+
 
 
 def _seed_install(root: Path) -> Path:
@@ -217,7 +341,7 @@ def test_omp_extension_separates_no_install_from_a_deleted_guard(tmp_path: Path)
 
     설치본을 못 찾은 것은 이 프로젝트가 agent-flow를 안 쓰는 상태다 — 도구를 막으면
     세션이 통째로 죽는다. 반대로 설치본은 있는데 관리 hook만 사라진 것은 가드 제거이고,
-    거기서 통과시키면 `rm` 한 번으로 그 세션의 승인·경계 가드가 전부 꺼진다.
+    거기서 통과시키면 `rm` 한 번으로 그 세션의 경계 가드가 전부 꺼진다.
     """
     source = _extension_source()
     root = tmp_path.resolve()
@@ -250,7 +374,6 @@ def test_omp_extension_separates_no_install_from_a_deleted_guard(tmp_path: Path)
     for name in (
         "guard-protected-branch.sh",
         "guard-host-worktree.sh",
-        "guard-spec-approval.sh",
     ):
         script = hooks / name
         script.write_text('echo "denied by " >&2\nexit 1\n', encoding="utf-8")
@@ -261,15 +384,27 @@ def test_omp_extension_separates_no_install_from_a_deleted_guard(tmp_path: Path)
     )
 
 
-def test_omp_extension_reads_the_session_id_from_the_session_manager():
-    """반증: 이 fallback을 지우면 session_id 없이 hook이 돌아 승인이 조용히 무시된다.
 
-    실측(omp 17.1.8): input/tool_call/tool_result 어느 이벤트에도 식별자가 없어
-    direct 후보는 전부 비고, 이 getter가 유일한 출처다.
+
+def test_omp_extension_normalizes_v17_bash_result_exit_codes(tmp_path: Path):
+    """반증: OMP v17.2.1은 완료된 foreground 성공에서 exitCode를 생략하므로
+    명시적 성공만 0으로 정규화하고 running/timeout 결과는 성공으로 만들지 않아야 한다.
     """
-    source = _extension_source()
-    assert "ctx?.sessionManager?.getSessionId?.()" in source
-    assert "session_id: sessionIdentity(event, ctx)" in source
+    command_events, binding_events = _run_command_result_handler(
+        tmp_path,
+        _extension_source(),
+    )
+    assert [event["exit_code"] for event in command_events] == [0, 7, 9, None, None]
+    assert [event["output"] for event in binding_events] == [
+        "1 passed",
+        "Command exited with code 7",
+        "Command exited with code 9",
+        "Process running in background",
+        "Deadline exceeded",
+    ]
+
+
+
 
 
 def test_managed_hook_scripts_declared_once_per_language():
@@ -406,6 +541,36 @@ def test_previously_duplicated_helper_is_defined_once(name: str):
     assert definers == ["lib/installer-shared.mjs"], (
         f"{name}()를 정의하는 파일이 하나가 아니다: {definers}"
     )
+
+
+@pytest.mark.parametrize("xdg_state_home", ["", "~/.agent-flow", r"~\.agent-flow"])
+def test_js_does_not_treat_user_central_worktrees_as_project_markers(
+    tmp_path: Path, xdg_state_home: str
+):
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    source = KIT_ROOT / "lib" / "installer-shared.mjs"
+    script = (
+        "import { resolveManagedWorktreeContext as resolve } from "
+        f"{json.dumps(str(source))};"
+        "process.stdout.write(JSON.stringify(["
+        f"resolve({json.dumps(str(home / '.agent-flow' / 'worktrees' / 'project-a1b2c3d4e5f6' / 'feat-task' / 'src'))}),"
+        f"resolve({json.dumps(str(project / '.agent-flow' / 'worktrees' / 'feat-task' / 'src'))})"
+        "]));"
+    )
+    result = subprocess.run(
+        (_node(), "--input-type=module", "-e", script),
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env={**os.environ, "HOME": str(home), "XDG_STATE_HOME": xdg_state_home},
+        timeout=60,
+    )
+
+    central, local = json.loads(result.stdout)
+    assert central is None
+    assert local == {"root": str(project), "name": "feat-task"}
 
 
 def test_hooks_disabled_is_passed_in_not_read_from_the_entry_point():

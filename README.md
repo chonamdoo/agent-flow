@@ -6,7 +6,7 @@ Project-agnostic AI workflow kit. Start with `/agent-flow` in Claude Code or Cod
 
 ## Philosophy
 
-1. **One trigger to remember.** `/agent-flow <task>` in Claude / Codex, backed by `agent-flow run "<task>"`. Git projects start inside the sibling folder `<repo>.worktrees/feat-<slug>/` on branch `feat/<slug>`, leaving the leader checkout untouched; installer setup is not repeated per task.
+1. **One trigger to remember.** `/agent-flow <task>` in Claude / Codex, backed by `agent-flow run "<task>"`. Git projects start inside `~/.agent-flow/worktrees/<repo-id>/feat-<slug>/` on branch `feat/<slug>`, leaving the leader checkout untouched; installer setup is not repeated per task.
 2. **Artifacts as state machine.** Each run writes state under `.agent-flow/runs/`; git-backed worktree runs keep runtime state under the repository git dir at `.git/agent-flow/worktrees/feat-<slug>/`. Context loss never loses progress.
 3. **Chain is enforcement.** The next phase cannot start until the previous artifact exists. The slash trigger is only the entry point; the artifact chain blocks skipping.
 4. **Stack-agnostic core, profile-specific knobs.** Workflow YAML stays generic. Profiles supply branching strategy, gate commands, review angles, vocabulary.
@@ -46,12 +46,12 @@ agent-flow abort --worktree "feat-user-profile"
 agent-flow worktree list
 agent-flow worktree remove --name "feat-user-profile"
 
-# SPEC ledger (design / prd items)
-# On supported Codex, Claude, and OMP hosts, reply exactly `승인` in the current
-# chat. If the managed user-prompt hook is unavailable, run the path-free
-# fallback from the target worktree and type `승인` in its interactive prompt.
-agent-flow spec confirm
-# A confirmation observed from an agent shell voids the approval.
+# SPEC ledger (initial list is baselined automatically)
+# Later additions, modifications, and deletions are shown as a delta.
+agent-flow spec changes --run-dir <run-dir>
+# After the user clearly confirms that delta in chat, the agent records it.
+agent-flow spec confirm --run-dir <run-dir>
+# Manual verifiers follow the same chat-confirmation flow.
 agent-flow spec approve <spec-id> --run-dir <run-dir>
 
 # Gates

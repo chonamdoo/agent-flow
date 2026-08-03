@@ -12,6 +12,7 @@ symlink가 맞지만, 그건 host write boundary가 symlink 대상을 해석해 
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -28,7 +29,9 @@ from agent_flow.core.worktrees import (
     HOST_HOOK_REGISTRATION_FILES,
     copy_declared_worktree_files,
     provision_host_hook_registrations,
+    provision_registered_worktree_host_hooks,
 )
+from agent_flow.core.worktree_isolation import WorktreeIsolationError
 
 
 def _git(*args: str, cwd: Path) -> None:
@@ -218,7 +221,7 @@ def _leader_with_host_hooks(root: Path) -> None:
         target = root / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(
-            _hook_command(root, "confirm-spec-user-prompt.py") + "\n", encoding="utf-8"
+            _hook_command(root, "comment-checker.py") + "\n", encoding="utf-8"
         )
 
 
@@ -237,8 +240,7 @@ def _leader_registration_bytes(leader: Path) -> dict[str, bytes]:
 
 
 def test_managed_checkout_gets_the_host_hook_registrations(tmp_path: Path):
-    """반증: 등록 파일이 leader에만 있으면 worktree에서 연 host 세션은 UserPromptSubmit
-    hook 없이 돈다 — 그 세션의 `승인`은 아무 일도 일으키지 않는다."""
+    """leader의 host 경계 hook 등록이 managed checkout에도 provision된다."""
     leader = tmp_path / "leader"
     _leader_with_host_hooks(leader)
     checkout = _managed_checkout(leader, "feat-hooks")
@@ -251,10 +253,79 @@ def test_managed_checkout_gets_the_host_hook_registrations(tmp_path: Path):
     assert set(written) <= set(HOST_HOOK_REGISTRATION_FILES)
     for rel in HOST_HOOK_REGISTRATION_FILES:
         text = (checkout / rel).read_text(encoding="utf-8")
-        assert _hook_command(leader, "confirm-spec-user-prompt.py") in text, (
+        assert _hook_command(leader, "comment-checker.py") in text, (
             f"{rel}의 command가 leader 절대경로를 가리키지 않는다: {text!r}"
         )
     assert _leader_registration_bytes(leader) == before, "leader 등록 파일은 읽기 전용이다"
+
+
+def test_registered_managed_checkout_gets_host_hooks_on_reinstall(tmp_path: Path):
+    """재설치는 이미 존재하는 managed checkout도 다시 provision한다."""
+    leader = tmp_path / "leader"
+    _leader_with_host_hooks(leader)
+    checkout = _managed_checkout(leader, "feat-existing")
+
+    synced = provision_registered_worktree_host_hooks(root=leader)
+
+    assert len(synced) == 1
+    assert synced[0][0] == checkout.resolve()
+    assert set(synced[0][1]) <= set(HOST_HOOK_REGISTRATION_FILES)
+    assert set(synced[0][1])
+    for rel, payload in _leader_registration_bytes(leader).items():
+        assert (checkout / rel).read_bytes() == payload
+
+
+@pytest.mark.parametrize(
+    ("registration_identity", "checkout_identity", "message"),
+    [
+        ("wrong", None, "both registration and checkout identities"),
+        ("wrong", (-1, -1), "path changed before hook sync"),
+    ],
+)
+def test_hook_sync_fails_closed_when_checkout_binding_does_not_match(
+    tmp_path: Path,
+    registration_identity: str,
+    checkout_identity: tuple[int, int] | None,
+    message: str,
+):
+    leader = tmp_path / "leader"
+    _leader_with_host_hooks(leader)
+    checkout = _managed_checkout(leader, "feat-binding")
+
+    with pytest.raises(WorktreeIsolationError, match=message):
+        provision_host_hook_registrations(
+            leader=leader,
+            checkout=checkout,
+            expected_registration_identity=registration_identity,
+            expected_checkout_identity=checkout_identity,
+        )
+
+    for rel in HOST_HOOK_REGISTRATION_FILES:
+        assert not (checkout / rel).exists()
+
+def test_reinstall_without_worktrees_does_not_require_dir_fd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    leader = tmp_path / "leader"
+    _leader_with_host_hooks(leader)
+    monkeypatch.setattr(W, "_DIR_FD_SUPPORTED", False)
+
+    assert provision_registered_worktree_host_hooks(root=leader) == ()
+
+
+
+def test_reinstall_does_not_trust_an_unadopted_sibling_worktree(tmp_path: Path):
+    leader = tmp_path / "leader"
+    _leader_with_host_hooks(leader)
+    checkout = leader.parent / f"{leader.name}.worktrees" / "raw"
+    checkout.parent.mkdir()
+    _git("worktree", "add", "-b", "feat/raw", str(checkout), "HEAD", cwd=leader)
+
+    synced = provision_registered_worktree_host_hooks(root=leader)
+
+    assert synced == ()
+    for rel in HOST_HOOK_REGISTRATION_FILES:
+        assert not (checkout / rel).exists()
 
 
 def test_tracked_registration_file_is_never_overwritten(tmp_path: Path, capsys):
@@ -262,8 +333,8 @@ def test_tracked_registration_file_is_never_overwritten(tmp_path: Path, capsys):
 
     덮으면 사용자 설정이 사라지고 worktree가 dirty가 되어 정리 게이트까지 막힌다.
 
-    반증: 조용히 건너뛰면 그 checkout은 hook 미등록으로 남고 사용자는 채팅 `승인`이
-    무시되는 이유를 어디에서도 못 본다 — 이 버그의 원래 증상이 그것이다.
+    반증: 조용히 건너뛰면 그 checkout은 hook 미등록으로 남고 사용자는 격리
+    가드가 빠진 이유를 어디에서도 못 본다.
     """
     leader = tmp_path / "leader"
     _leader_with_host_hooks(leader)
@@ -274,7 +345,7 @@ def test_tracked_registration_file_is_never_overwritten(tmp_path: Path, capsys):
     checkout = _managed_checkout(leader, "feat-tracked")
     # leader의 작업본만 installer가 덮은 상태. 내용이 달라 동일성 skip에 걸리지 않는다.
     (leader / tracked).write_text(
-        _hook_command(leader, "confirm-spec-user-prompt.py") + "\n", encoding="utf-8"
+        _hook_command(leader, "comment-checker.py") + "\n", encoding="utf-8"
     )
 
     written = provision_host_hook_registrations(leader=leader, checkout=checkout)
@@ -312,7 +383,7 @@ def _kit_settings_json(leader: Path, script: str) -> str:
     return json.dumps(
         {
             "hooks": {
-                "UserPromptSubmit": [
+                "PostToolUse": [
                     {
                         "hooks": [
                             {"type": "command", "command": _hook_command(leader, script)}
@@ -334,6 +405,144 @@ def _kit_omp_extension(script: str) -> str:
     )
 
 
+@pytest.mark.parametrize("operation", ["replace", "retire"])
+def test_fd_transaction_preserves_a_registration_replaced_after_inspection(
+    tmp_path: Path, operation: str
+):
+    leader = tmp_path / "leader"
+    _leader_with_host_hooks(leader)
+    checkout = _managed_checkout(leader, f"feat-race-{operation}")
+    target = checkout / ".claude" / "settings.json"
+    target.parent.mkdir()
+    target.write_text(
+        _kit_settings_json(leader, "comment-checker.py"),
+        encoding="utf-8",
+    )
+    inspected = target.stat()
+    expected = (inspected.st_dev, inspected.st_ino)
+    target.unlink()
+    mine = b'{"hooks":{"PostToolUse":[{"command":"./mine"}]}}'
+    target.write_bytes(mine)
+    parent = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        if operation == "replace":
+            changed = W._replace_host_hook_registration_at(
+                parent=parent,
+                name=target.name,
+                payload=_kit_settings_json(
+                    leader, "bind-host-worktree.py"
+                ).encode(),
+                leader=leader,
+                rel=".claude/settings.json",
+                expected=expected,
+            )
+        else:
+            changed = W._retire_host_hook_registration_at(
+                parent=parent,
+                name=target.name,
+                leader=leader,
+                rel=".claude/settings.json",
+                expected=expected,
+            )
+    finally:
+        os.close(parent)
+
+    assert not changed
+    assert target.read_bytes() == mine
+
+
+def test_pinned_git_admin_ignores_pointer_swap_and_blocks_index_writers(
+    tmp_path: Path,
+):
+    leader = tmp_path / "leader"
+    _leader_with_host_hooks(leader)
+    rel = ".claude/settings.json"
+    _git("add", rel, cwd=leader)
+    _git("commit", "-m", "track registration", cwd=leader)
+    checkout = _managed_checkout(leader, "feat-pinned-index")
+    checkout_fd = os.open(checkout, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with W._locked_verified_worktree_index(
+            leader=leader,
+            checkout=checkout,
+            checkout_fd=checkout_fd,
+        ) as gitdir_fd:
+            pointer = checkout / ".git"
+            original = pointer.read_bytes()
+            pointer.write_text("gitdir: /tmp/untrusted-admin\n", encoding="utf-8")
+            try:
+                state = W._HostHookProvisionState(
+                    path=None,
+                    skipped={},
+                    tracked={},
+                    index_identity="",
+                )
+                assert W._host_hook_path_is_tracked_at(
+                    gitdir_fd=gitdir_fd,
+                    rel=rel,
+                    state=state,
+                )
+            finally:
+                pointer.write_bytes(original)
+
+            (checkout / "race.txt").write_text("race\n", encoding="utf-8")
+            blocked = subprocess.run(
+                ("git", "add", "race.txt"),
+                cwd=checkout,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert blocked.returncode != 0
+            assert "index.lock" in blocked.stderr
+    finally:
+        os.close(checkout_fd)
+
+
+def test_missing_leader_registration_retires_only_kit_owned_checkout_files(
+    tmp_path: Path,
+):
+    leader = tmp_path / "leader"
+    _leader_with_host_hooks(leader)
+    managed = {
+        ".claude/settings.json": _kit_settings_json(
+            leader, "comment-checker.py"
+        ),
+        ".omp/extensions/agent-flow-hooks.ts": _kit_omp_extension("confirm"),
+    }
+    for rel, content in managed.items():
+        (leader / rel).write_text(content, encoding="utf-8")
+    checkout = _managed_checkout(leader, "feat-disable-hooks")
+    provision_host_hook_registrations(leader=leader, checkout=checkout)
+    for rel in managed:
+        (leader / rel).unlink()
+
+    changed = provision_host_hook_registrations(leader=leader, checkout=checkout)
+
+    assert set(managed) <= set(changed)
+    for rel in managed:
+        assert not (checkout / rel).exists()
+
+
+def test_missing_leader_registration_keeps_user_owned_checkout_file(
+    tmp_path: Path,
+):
+    leader = tmp_path / "leader"
+    _leader_with_host_hooks(leader)
+    rel = ".claude/settings.json"
+    (leader / rel).unlink()
+    checkout = _managed_checkout(leader, "feat-user-hooks")
+    target = checkout / rel
+    target.parent.mkdir()
+    target.write_text('{"hooks":{"PostToolUse":[{"command":"./mine"}]}}', encoding="utf-8")
+    before = target.read_bytes()
+
+    changed = provision_host_hook_registrations(leader=leader, checkout=checkout)
+
+    assert rel not in changed
+    assert target.read_bytes() == before
+
+
 def test_a_user_written_registration_in_the_checkout_is_not_overwritten(
     tmp_path: Path, capsys
 ):
@@ -344,7 +553,7 @@ def test_a_user_written_registration_in_the_checkout_is_not_overwritten(
     leader = tmp_path / "leader"
     _leader_with_host_hooks(leader)
     (leader / ".claude/settings.json").write_text(
-        _kit_settings_json(leader, "confirm-spec-user-prompt.py"), encoding="utf-8"
+        _kit_settings_json(leader, "comment-checker.py"), encoding="utf-8"
     )
     (leader / ".omp/extensions/agent-flow-hooks.ts").write_text(
         _kit_omp_extension("confirm"), encoding="utf-8"
@@ -357,7 +566,7 @@ def test_a_user_written_registration_in_the_checkout_is_not_overwritten(
         json.dumps(
             {
                 "hooks": {
-                    "UserPromptSubmit": [
+                    "PostToolUse": [
                         {"hooks": [{"type": "command", "command": "/usr/bin/env my-hook"}]}
                     ]
                 }
@@ -390,13 +599,13 @@ def test_user_keys_next_to_managed_hooks_are_not_overwritten(tmp_path: Path, cap
     _leader_with_host_hooks(leader)
     json_rel = ".claude/settings.json"
     (leader / json_rel).write_text(
-        _kit_settings_json(leader, "confirm-spec-user-prompt.py"), encoding="utf-8"
+        _kit_settings_json(leader, "comment-checker.py"), encoding="utf-8"
     )
     checkout = _managed_checkout(leader, "feat-user-keys")
 
     mine = checkout / json_rel
     mine.parent.mkdir()
-    document = json.loads(_kit_settings_json(leader, "confirm-spec-user-prompt.py"))
+    document = json.loads(_kit_settings_json(leader, "comment-checker.py"))
     document["permissions"] = {"allow": ["Bash(ls:*)"]}
     mine.write_text(json.dumps(document), encoding="utf-8")
     before = mine.read_bytes()
@@ -410,13 +619,13 @@ def test_user_keys_next_to_managed_hooks_are_not_overwritten(tmp_path: Path, cap
 
 def test_a_registration_this_kit_wrote_is_upgraded_in_place(tmp_path: Path):
     """반증: 소유 판정이 "이미 있으면 손대지 않는다"로 굳으면 등록 갱신이 checkout까지
-    번지지 않는다. 그 checkout은 낡은 command를 계속 부르고 `승인`은 다시 무시된다.
+    번지지 않는다. 그 checkout은 낡은 command를 계속 부르게 된다.
     """
     leader = tmp_path / "leader"
     _leader_with_host_hooks(leader)
     json_rel, omp_rel = ".claude/settings.json", ".omp/extensions/agent-flow-hooks.ts"
     (leader / json_rel).write_text(
-        _kit_settings_json(leader, "confirm-spec-user-prompt.py"), encoding="utf-8"
+        _kit_settings_json(leader, "comment-checker.py"), encoding="utf-8"
     )
     (leader / omp_rel).write_text(_kit_omp_extension("confirm"), encoding="utf-8")
     checkout = _managed_checkout(leader, "feat-upgrade")
@@ -424,7 +633,7 @@ def test_a_registration_this_kit_wrote_is_upgraded_in_place(tmp_path: Path):
     stale_json = checkout / json_rel
     stale_json.parent.mkdir()
     stale_json.write_text(
-        _kit_settings_json(leader, "prepare-spec-user-prompt.py"), encoding="utf-8"
+        _kit_settings_json(leader, "record-skill-read.py"), encoding="utf-8"
     )
     stale_omp = checkout / omp_rel
     stale_omp.parent.mkdir(parents=True)
@@ -443,8 +652,8 @@ def test_a_registration_this_kit_wrote_is_upgraded_in_place(tmp_path: Path):
 def test_a_symlinked_registration_target_is_skipped_with_a_reason(
     tmp_path: Path, capsys
 ):
-    """반증: symlink 거부가 조용하면 그 checkout은 hook 미등록으로 남고, 사용자는
-    `승인`이 무시되는 이유를 못 본다. 따라간 곳이 checkout 밖일 수 있어 쓸 수는 없다."""
+    """반증: symlink 거부가 조용하면 그 checkout은 hook 미등록으로 남는다.
+    따라간 곳이 checkout 밖일 수 있어 쓸 수는 없다."""
     leader = tmp_path / "leader"
     _leader_with_host_hooks(leader)
     checkout = _managed_checkout(leader, "feat-symlink")
@@ -524,7 +733,7 @@ def _settings_json_with_command(command: str) -> str:
     return json.dumps(
         {
             "hooks": {
-                "UserPromptSubmit": [
+                "PostToolUse": [
                     {"hooks": [{"type": "command", "command": command}]}
                 ]
             }
@@ -543,7 +752,7 @@ def test_a_user_wrapper_around_a_managed_hook_is_not_overwritten(
     _leader_with_host_hooks(leader)
     rel = ".claude/settings.json"
     (leader / rel).write_text(
-        _kit_settings_json(leader, "confirm-spec-user-prompt.py"), encoding="utf-8"
+        _kit_settings_json(leader, "comment-checker.py"), encoding="utf-8"
     )
     checkout = _managed_checkout(leader, "feat-wrapper")
     mine = checkout / rel
@@ -577,7 +786,7 @@ def test_a_registration_pointing_at_another_installation_is_not_overwritten(
     _leader_with_host_hooks(leader)
     rel = ".claude/settings.json"
     (leader / rel).write_text(
-        _kit_settings_json(leader, "confirm-spec-user-prompt.py"), encoding="utf-8"
+        _kit_settings_json(leader, "comment-checker.py"), encoding="utf-8"
     )
     other = tmp_path / "other-install"
     (other / ".agent-flow" / "scripts" / "hooks").mkdir(parents=True)
@@ -585,7 +794,7 @@ def test_a_registration_pointing_at_another_installation_is_not_overwritten(
     mine = checkout / rel
     mine.parent.mkdir()
     mine.write_text(
-        _kit_settings_json(other, "confirm-spec-user-prompt.py"), encoding="utf-8"
+        _kit_settings_json(other, "comment-checker.py"), encoding="utf-8"
     )
     before = mine.read_bytes()
 
@@ -615,7 +824,7 @@ def test_an_unfixable_skip_is_reported_once_and_stops_spawning_git(
     _git("commit", "-m", "track claude settings", cwd=leader)
     checkout = _managed_checkout(leader, "feat-quiet")
     (leader / tracked).write_text(
-        _kit_settings_json(leader, "confirm-spec-user-prompt.py"), encoding="utf-8"
+        _kit_settings_json(leader, "comment-checker.py"), encoding="utf-8"
     )
 
     provision_host_hook_registrations(leader=leader, checkout=checkout)
@@ -645,7 +854,7 @@ def test_a_changed_skip_reason_is_reported_again(tmp_path: Path, capsys):
     _leader_with_host_hooks(leader)
     rel = ".claude/settings.json"
     (leader / rel).write_text(
-        _kit_settings_json(leader, "confirm-spec-user-prompt.py"), encoding="utf-8"
+        _kit_settings_json(leader, "comment-checker.py"), encoding="utf-8"
     )
     checkout = _managed_checkout(leader, "feat-changed-reason")
     mine = checkout / rel

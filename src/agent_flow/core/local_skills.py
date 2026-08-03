@@ -186,9 +186,9 @@ class SkillReadEvidence:
 def _checkout_relative(path: Path, roots: Sequence[str]) -> str | None:
     """path를 담고 있는 체크아웃 root를 찾아 그 기준 상대경로를 돌려준다.
 
-    **가장 긴** root가 이긴다. worktree 체크아웃은 leader 안에 있어서
-    (`<leader>/.agent-flow/worktrees/<name>`) leader가 접두사로 먼저 걸리면
-    상대경로가 `.agent-flow/worktrees/...`로 나와 같은 skill을 못 알아본다.
+    **가장 긴** root가 이긴다. checkout root 목록에는 leader와 예전 내부 worktree
+    (`<leader>/.agent-flow/worktrees/<name>`)가 함께 있을 수 있다. leader가 접두사로
+    먼저 걸리면 상대경로가 `.agent-flow/worktrees/...`가 되어 같은 skill을 못 알아본다.
     """
     text = str(path)
     best: str | None = None

@@ -11,7 +11,7 @@
 
 install은 프로젝트당 1회만 수행합니다. 새 세션이 시작됐다는 이유로 install을 다시 실행하지 않습니다.
 `/agent-flow <task>`를 보면 프로젝트 루트에서 `agent-flow run "<task>"`를 실행하세요.
-git repo에서는 이 명령이 `<repo>.worktrees/feat-<slug>/` worktree를 만들고 그 안에서 run을 시작합니다.
+git repo에서는 이 명령이 `~/.agent-flow/worktrees/<repo-id>/feat-<slug>/` worktree를 만들고 그 안에서 run을 시작합니다.
 `/agent-flow`만 입력되면 프로젝트 루트에서 `agent-flow status`로 active run을 확인하세요.
 active run이 있으면 status 출력의 `next_command`를 그대로 실행하고, 없으면 `/agent-flow <task>` 형식으로 작업을 요청하세요.
 활성 workflow와 current phase는 항상 `agent-flow status` 출력 기준입니다. `agent-flow continue`나 `agent-flow run advance`를 추측하지 마세요.
@@ -48,9 +48,9 @@ phase 프롬프트가 이번 변경에 필요한 skill을 나열합니다 — re
 ```
 `/agent-flow`는 shell path가 아니라 agent-flow skill trigger로 취급하세요.
 
-run이 SPEC 확인 대기로 막히면 지원되는 Codex·Claude·OMP host에서는 사용자에게 현재 대화의 새 turn으로 정확히 `승인`이라고 답해 달라고 안내합니다. managed user-prompt hook이 현재 pending SPEC을 확인합니다. hook을 사용할 수 없을 때만 사용자가 대상 worktree의 대화형 터미널에서 경로 없는 fallback `agent-flow spec confirm`을 직접 실행합니다.
-`manual` verify 항목은 사용자가 `agent-flow spec approve <spec-id> --run-dir <run-dir>`를 실행해야 승인 record가 남습니다.
-agent는 fallback·manual 승인 명령이나 user-prompt hook을 대신 실행하지 않습니다. agent 셸에서 관측된 확인·승인은 무효 처리됩니다.
+run의 status가 SPEC 추가·수정·삭제를 보고하면 변경 목록만 사용자에게 보여 확인을 요청합니다. 사용자가 현재 대화에서 명확히 동의하면 agent가 status에 출력된 `agent-flow spec confirm --run-dir <run-dir>`을 실행합니다.
+`manual` verify 항목도 사용자에게 현재 대화에서 확인한 뒤 agent가 `agent-flow spec approve <spec-id> --run-dir <run-dir>`을 실행합니다.
+정확한 승인 문구나 사용자 터미널 명령 실행을 요구하지 않습니다.
 
 ### Artifact
 
@@ -60,10 +60,10 @@ run artifact는 `.agent-flow/runs/<run-id>/`에 저장됩니다. 컨텍스트가
 
 git worktree는 `agent-flow worktree create --name feat-<slug>`로 만듭니다. 손으로 `git worktree add`를
 하지 않습니다 — 그 경로는 creation lock, base 결정, 채택 기록, worktree setup을 모두 건너뜁니다.
-기본 자리는 프로젝트 루트의 형제 폴더 `<repo>.worktrees/feat-<slug>/`, 기본 브랜치는 `feat/<slug>`입니다.
+기본 자리는 `~/.agent-flow/worktrees/<repo-id>/feat-<slug>/`, 기본 브랜치는 `feat/<slug>`입니다.
 프로젝트 폴더 **안**에 두지 않습니다: leader를 열어 둔 IDE가 worktree 작업에 반응해 leader 쪽
 캐시(`.gradle/` 등)를 건드리고, leader tripwire가 그것을 오염으로 보고해 남은 phase가 멈춥니다.
-예전 자리(`.agent-flow/worktrees/<name>/`)에 이미 있는 checkout은 그대로 인식됩니다.
+이전 자리(`<repo>.worktrees/<name>/`, `.agent-flow/worktrees/<name>/`)의 checkout은 그대로 인식됩니다.
 브랜치만 만들지 않습니다 — 물리적 worktree가 병렬 작업 격리에 필수입니다.
 Claude/Codex/OMP hook이 자동 차단하는 보호 브랜치 commit/push와 leader checkout/switch 금지는 모든 host에서 동일하게 지킵니다.
 
