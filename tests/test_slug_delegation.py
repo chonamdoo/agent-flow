@@ -94,9 +94,11 @@ def test_task_is_passed_as_an_argument_not_a_shell_string():
     뿐이어야 한다.
     """
     show_argv = [sys.executable, "-c", "import sys; print(sys.argv[1])", "{task}"]
+    # 이어진 구분자는 하나로 접는다 — `; rm` 자리의 `--`가 `-`가 된다. 셸을 거쳤다면
+    # 애초에 이 출력이 나오지 않는다.
     assert delegated_slug(
         task="drop; rm -rf ~", command=show_argv, timeout_s=10
-    ) == "drop-rm--rf"
+    ) == "drop-rm-rf"
 
 
 def test_empty_command_declaration_is_skipped():

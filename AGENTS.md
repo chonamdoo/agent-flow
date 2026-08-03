@@ -30,7 +30,7 @@ scripts/hooks/          ← PreToolUse/PostToolUse/Stop hooks (guard-protected-b
 ## Gotchas
 
 - `full-feature`는 `gates` fail → `fix-loop` → `gates` 순환. `default`의 gates는 `implement` completion marker로 강제한다.
-- `multi-review`는 활성 host(현재 사용 중인 CLI)의 sub-agent 2개가 필수. 활성 host가 아닌 추가 provider는 optional이며, 2+ 독립 reviewer 없이는 approve 불가.
+- `multi-review`는 설치된 Claude/Codex CLI reviewer subprocess 2개 이상이 필수. OMP는 host/controller로만 쓰고 reviewer provider pool에서는 제외되며, 2+ 독립 reviewer 없이는 approve 불가.
 - `architecture-review`의 `request-changes`/`blocked` verdict → `refactor`로 라우팅.
 - worktree는 `agent-flow worktree create --name feat-<slug>`로 만든다. 기본 자리는 `~/.agent-flow/worktrees/<repo-id>/<name>`이다 — 프로젝트 폴더 안에 두면 leader를 열어 둔 IDE가 worktree 작업에 반응해 leader의 `.gradle/` 같은 캐시를 건드리고, leader tripwire가 그것을 오염으로 보고해 남은 phase가 exit 2로 막힌다. 이전 자리(`<repo>.worktrees/<name>`, `.agent-flow/worktrees/<name>`)의 checkout은 계속 인식된다. leader worktree에서 `git checkout`/`git switch`로 브랜치를 바꾸지 않는다.
 - 그 밖의 linked worktree(Orca `~/orca/workspaces/<repo>/<slug>` 등)는 `agent-flow worktree adopt --path <checkout>`으로 채택해야 인식된다. 채택 전에 그 안에서 `run`/`start`를 치면 blocker다 — git 등록만으로 인가하면 워커가 `git worktree add`로 자기 권한을 만들 수 있다. install은 언제나 leader checkout에서만 한다(linked worktree에서 실행하면 차단된다).
@@ -59,7 +59,7 @@ run의 status가 SPEC 추가·수정·삭제를 보고하면 변경 목록만 �
 - phase 이동은 status의 `next_command`를 그대로 따른다. `agent-flow continue`나 `agent-flow run advance`를 추측하지 않는다.
 - `default.yaml`: design → slice-plan → worktree → implement → comment-authoring → final-review → gates ↔ fix-loop → comment-authoring → final-review → gates → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge → cleanup
 - `full-feature.yaml`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → comment-authoring → multi-review → architecture-review → gates ↔ fix-loop → comment-authoring → multi-review → architecture-review → gates → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
-- `multi-review`는 현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수다. 두 sub-agent를 병렬 실행하고, `reviewer-source: sub-agent`를 기록한 뒤 sub-agent를 닫는다. 마지막에 `## Overall`과 `verdict: approve` 또는 `verdict: request-changes`만 기록한다. 활성 host가 아닌 추가 provider는 optional이다.
+- `multi-review`는 설치된 Claude/Codex CLI reviewer subprocess 2개 이상이 필수다. 두 reviewer를 병렬 실행하고 각 결과에 `reviewer-source: sub-agent`를 기록한다. 마지막에 `## Overall`과 `verdict: approve` 또는 `verdict: request-changes`만 기록한다. OMP는 host/controller로만 쓰고 reviewer provider로는 쓰지 않는다.
 
 ### Context Economy
 
@@ -70,7 +70,12 @@ run의 status가 SPEC 추가·수정·삭제를 보고하면 변경 목록만 �
 - 모든 guide를 항상 로드하지 말고 변경 파일에 필요한 guide만 읽는다.
 - 프로젝트 skill은 `skills/<name>/SKILL.md` 또는 private `.agent-flow/local-skills/<name>/SKILL.md`에 둔다.
 <!-- agent-flow:skills:start -->
-- 설치된 skill 인덱스가 아직 없다. install이 이 자리에 채운다.
+```text
+[agent-flow skill index]|root: .agent-flow/skills
+|IMPORTANT: 아래 파일이 기억보다 우선한다. 변경 대상을 먼저 훑고, scope가 걸리는 것만 읽는다.
+|always:{code-generation-discipline,comment-authoring-discipline}
+|on-demand:{agent-flow,agent-flow-concise-output,architecture-reviewer,clean-architecture,clean-architecture-core,code-review,codebase-design,comment-checker,ddd-architecture,domain-modeling,full-feature-workflow,grill-with-docs,grilling,plan-reviewer,product-brief,push-watch,python-api-clean-architecture,python-development-guide,resolving-merge-conflicts,tdd,to-prd}
+```
 <!-- agent-flow:skills:end -->
 - 인덱스에 없는 skill은 이 프로젝트에 설치돼 있지 않다. 런타임에 설치를 묻지 말고 `agent-flow skills sync`에 맡긴다.
 - Claude/Codex/OMP 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.

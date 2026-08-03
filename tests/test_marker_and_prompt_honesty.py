@@ -63,6 +63,59 @@ def test_enum_marker_still_rejects_illegal_values():
     assert missing_markers(text, ("usecase-interface: required|optional|n/a",)) != []
 
 
+def test_subheading_does_not_end_the_completion_gate():
+    """하위 heading은 섹션 경계가 아니다.
+
+    `### Notes` 한 줄에서 수집을 끊으면 그 아래 마커가 artifact에 있는데도
+    missing으로 잡힌다. 사용자에게는 다 써 넣은 문서가 이유 없이 막히는 것으로만
+    보이고, 원인이 본문이 아니라 heading 깊이라는 단서는 어디에도 없다.
+    """
+    text = "## Completion Gate\ncache-required: yes\n### Notes\ndesign-values: latency-first\n"
+    assert missing_markers(text, ("cache-required: yes|no", "design-values:")) == []
+
+
+def test_same_level_heading_still_ends_the_completion_gate():
+    text = "## Completion Gate\ncache-required: yes\n## Next Section\ndesign-values: latency-first\n"
+    assert missing_markers(text, ("design-values:",)) == ["design-values:"]
+
+
+def test_list_continuation_line_is_not_mistaken_for_a_code_block():
+    """리스트 항목에 딸린 들여쓴 줄은 indented code block이 아니다.
+
+    통째로 버리면 마커를 리스트 밑에 적은 artifact가 다 써 넣고도 missing으로
+    막힌다. 원인이 본문이 아니라 들여쓰기 폭이라는 단서는 어디에도 없다.
+    """
+    text = "## Completion Gate\n- group\n    cache-required: yes\n"
+    assert missing_markers(text, ("cache-required: yes|no",)) == []
+
+
+def test_indented_code_block_is_still_not_a_marker():
+    """빈 줄 뒤의 4칸 들여쓰기는 코드다. 예시가 게이트를 통과시키면 안 된다."""
+    text = "## Completion Gate\nexample follows:\n\n    cache-required: yes\n"
+    assert missing_markers(text, ("cache-required: yes|no",)) == ["cache-required: yes|no"]
+
+
+def test_paragraph_continuation_line_is_not_a_code_block():
+    """빈 줄이 없으면 코드가 열리지 않는다 — CommonMark가 쓰는 신호가 그것이다."""
+    text = "## Completion Gate\nintro\n    cache-required: yes\n"
+    assert missing_markers(text, ("cache-required: yes|no",)) == []
+
+
+def test_indented_code_block_ends_at_the_first_unindented_line():
+    text = "## Completion Gate\n\n    code line\ncache-required: yes\n"
+    assert missing_markers(text, ("cache-required: yes|no",)) == []
+
+
+def test_indented_gate_heading_does_not_open_the_gate():
+    """반증: 코드/본문만 가르면 문단에 들여쓴 `## Completion Gate`가 게이트를 연다.
+
+    빈 줄이 없으면 코드 블록이 아니지만, 4칸 들여쓴 줄은 CommonMark에서 heading이
+    될 수도 없다. 두 판정은 별개다 — 이걸 합치면 문단 안의 예시가 게이트를 통과시킨다.
+    """
+    text = "notes\n    ## Completion Gate\n    cache-required: yes\n"
+    assert missing_markers(text, ("cache-required: yes|no",)) == ["cache-required: yes|no"]
+
+
 # --- P6 -----------------------------------------------------------------
 
 
@@ -203,7 +256,9 @@ def test_stub_mode_does_not_bypass_markers_for_authored_artifacts(tmp_path, monk
     phase = Phase(id="implement", description="d", required_markers=("clean-architecture: applied",))
 
     (run_dir / "implement.md").write_text("# implement\n\nno gate here\n", encoding="utf-8")
-    assert runner._missing_required_markers(phase) == ["clean-architecture: applied"]
+    # 이 phase는 test 실행 증거 게이트 대상이기도 하다. 여기서 검사하는 것은
+    # "선언한 마커가 여전히 강제되는가" 하나이므로 목록 전체를 고정하지 않는다.
+    assert "clean-architecture: applied" in runner._missing_required_markers(phase)
 
     (run_dir / "implement.md").write_text(
         f"# implement\n\n<!-- {STUB_SENTINEL} -->\n", encoding="utf-8"
@@ -228,7 +283,7 @@ def test_stub_sentinel_is_absent_outside_stub_mode(tmp_path, monkeypatch):
     (run_dir / "implement.md").write_text(
         f"# implement\n\n<!-- {STUB_SENTINEL} -->\n", encoding="utf-8"
     )
-    assert runner._missing_required_markers(phase) == ["clean-architecture: applied"]
+    assert "clean-architecture: applied" in runner._missing_required_markers(phase)
 
 
 _ANDROID_SELF_REPORT_MARKERS = (

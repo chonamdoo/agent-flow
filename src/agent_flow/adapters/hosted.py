@@ -22,6 +22,7 @@ from agent_flow.multi_review import (
     Distribution,
     ReviewerJob,
     distribute,
+    distribute_final_review,
     reviewer_result_error,
     run_distribution,
 )
@@ -65,8 +66,8 @@ _CODEX_HINT = """\
   subprocesses. Aggregate their per-angle artifacts; do not replace them with
   in-session Codex sub-agents.
 - Each reviewer section must include `reviewer-source: sub-agent`.
-- Per-angle artifacts are written as `final-review-<angle>.md`; aggregate them
-  into the final `final-review.md` summary.
+- Per-angle artifacts are written as `<phase>-<angle>[-<provider>].md`;
+  aggregate them into the phase's own summary artifact.
 - Cite file:line references using the `path/to/file:42` format.
 """
 
@@ -121,9 +122,9 @@ class HostedAdapter(Adapter):
             )
             failures = _required_reviewer_failures(distribution, results)
             if distribution.fallback_to_generic:
-                failures.append("active host reviewer CLI is unavailable")
+                failures.append("no usable Claude/Codex reviewer CLI is available")
             if distribution.insufficient_reviewers:
-                failures.append("fewer than two active-host reviewers were assigned")
+                failures.append("fewer than two reviewer processes were assigned")
             if failures:
                 raise WorktreeIsolationError(
                     "required reviewer subprocesses failed closed: "
@@ -144,7 +145,11 @@ def _run_multi_review_distribution(
     adapter: Adapter,
 ) -> tuple[Distribution, list[SubprocessResult]]:
     jobs = _reviewer_jobs(phase, run_dir, project_root, adapter)
-    distribution = distribute(jobs, host=adapter.name)
+    distribution = (
+        distribute_final_review(jobs, host=adapter.name)
+        if phase.id == "final-review"
+        else distribute(jobs, host=adapter.name)
+    )
     results = run_distribution(distribution, project_root)
     return distribution, results
 
@@ -172,8 +177,9 @@ def _reviewer_jobs(
             "You are one read-only reviewer subprocess. Do not invoke "
             "`agent-flow status`, do not continue the workflow, and do not "
             "write the aggregate phase artifact named above. Return only this "
-            "angle's review in your final stdout; the parent records it at "
-            f"`{angle_output}`. Include `reviewer-source: sub-agent`.\n\n"
+            "angle's review in your final stdout; the parent writes it to this "
+            "angle's per-provider artifact in the run directory. Include "
+            "`reviewer-source: sub-agent`.\n\n"
             f"## Review angle\n\n"
             f"- id: {angle_id}\n"
             f"{_review_angle_prompt(project_root, item.get('prompt', ''))}\n"
@@ -262,16 +268,35 @@ def _required_reviewer_failures(
     results: list[SubprocessResult],
 ) -> list[str]:
     by_id = {result.job_id: result for result in results}
-    failures: list[str] = []
-    for job_id in sorted(distribution.required_job_ids):
-        result = by_id.get(job_id)
-        if result is None:
-            failures.append(f"{job_id}: missing result")
-        else:
-            reason = reviewer_result_error(result)
+    if not distribution.accept_any_provider:
+        failures: list[str] = []
+        for job_id in sorted(distribution.required_job_ids):
+            result = by_id.get(job_id)
+            if result is None:
+                failures.append(f"{job_id}: missing result")
+            else:
+                reason = reviewer_result_error(result)
+                if reason is not None:
+                    failures.append(f"{job_id}: {reason}")
+        return failures
+
+    provider_failures: list[str] = []
+    for cli_name, jobs in distribution.by_cli.items():
+        failures = []
+        for job in jobs:
+            job_id = f"{cli_name}-{job.angle_id}"
+            result = by_id.get(job_id)
+            reason = (
+                "missing result"
+                if result is None
+                else reviewer_result_error(result)
+            )
             if reason is not None:
-                failures.append(f"{job_id}: {reason}")
-    return failures
+                failures.append(f"{job.angle_id}: {reason}")
+        if not failures:
+            return []
+        provider_failures.append(f"{cli_name}: " + ", ".join(failures))
+    return provider_failures or ["no reviewer provider completed every angle"]
 
 
 def _multi_reviewer_block(
@@ -289,6 +314,12 @@ def _multi_reviewer_block(
     if distribution is None:
         return "\n".join(lines) + "\n"
     lines.extend(("", f"Distribution summary: {distribution.summary()}."))
+    if distribution.skipped_providers:
+        # 조용한 축소는 승인 근거를 흔든다. 어떤 provider가 왜 빠졌는지 적는다.
+        lines.append(
+            "Skipped providers (prior attempt left a failure artifact): "
+            + ", ".join(distribution.skipped_providers)
+        )
     if distribution.fallback_to_generic:
         lines.extend(
             (
@@ -306,16 +337,33 @@ def _multi_reviewer_block(
         for job in jobs:
             job_id = f"{cli_name}-{job.angle_id}"
             result = by_id.get(job_id)
-            status = (
-                "pass"
-                if result is not None and reviewer_result_error(result) is None
-                else "optional-failed"
-            )
+            if result is None:
+                status = "skipped"
+            elif reviewer_result_error(result) is None:
+                status = "pass"
+            else:
+                status = (
+                    "unavailable"
+                    if distribution.accept_any_provider
+                    else "optional-failed"
+                )
             source = (
-                "required"
-                if job_id in distribution.required_job_ids
-                else "optional"
+                "candidate"
+                if distribution.accept_any_provider
+                else (
+                    "required"
+                    if job_id in distribution.required_job_ids
+                    else "optional"
+                )
             )
+            # skip된 angle의 artifact는 이번 시도가 쓴 것이 아니다. 경로를 그대로
+            # 나열하면 host가 수정 전 코드에 대한 낡은 리뷰를 현재 결과로 집계한다.
+            if result is None:
+                lines.append(
+                    f"- {cli_name}:{job.angle_id} ({source}, {status}) "
+                    "-> no artifact from this attempt; ignore any stale file"
+                )
+                continue
             lines.append(
                 f"- {cli_name}:{job.angle_id} ({source}, {status}) "
                 f"-> `{job.output_path.name}`"

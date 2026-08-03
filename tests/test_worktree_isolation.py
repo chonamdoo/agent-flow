@@ -827,6 +827,73 @@ def test_real_provider_process_is_confined_to_attested_checkout(tmp_path):
     sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").is_file(),
     reason="macOS sandbox-exec confinement is required",
 )
+def test_provider_commits_from_its_worktree_without_reaching_git_control_files(tmp_path):
+    """반증: 공유 gitdir를 통째로 막으면 worker는 자기 작업을 커밋조차 못 한다.
+
+    linked worktree의 index·objects·refs는 checkout이 아니라 leader의 git common
+    dir 아래 있다. 그 자리를 열지 않으면 `git add` 한 줄이
+    `Unable to create '<leader>/.git/worktrees/<name>/index.lock'`로 죽고,
+    사용자에게는 leader가 있는 폴더가 통째로 잠긴 것처럼 보인다. 반대로 통째로
+    열면 다음 git 실행 때 코드를 실행시킬 자리(hooks·config)가 열린다. 그래서
+    커밋은 되고 그 자리는 계속 막혀 있다는 것을 함께 고정한다.
+    """
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text(".agent-flow/\n", encoding="utf-8")
+    _git("add", ".gitignore", cwd=tmp_path)
+    _git("commit", "-m", "ignore runtime", cwd=tmp_path)
+    worker = W.create_worktree(
+        root=tmp_path,
+        plan=W.plan_worktree(root=tmp_path, name="worker"),
+    )
+    common = real_path(tmp_path / ".git")
+    gitdir = common / "worktrees" / worker.path.name
+    program = (
+        "import json, subprocess, sys\n"
+        "from pathlib import Path\n"
+        "common, gitdir = map(Path, sys.argv[1:3])\n"
+        "def denied(path):\n"
+        "    try:\n"
+        "        path.write_text('leak', encoding='utf-8')\n"
+        "        return False\n"
+        "    except OSError:\n"
+        "        return True\n"
+        "Path('committed.txt').write_text('work\\n', encoding='utf-8')\n"
+        "add = subprocess.run(['git', 'add', 'committed.txt'], capture_output=True, text=True)\n"
+        "commit = subprocess.run(['git', 'commit', '-m', 'worker commit'], "
+        "capture_output=True, text=True)\n"
+        "result = {'add': add.returncode, 'commit': commit.returncode,\n"
+        "          'stderr': (add.stderr + commit.stderr).strip(),\n"
+        "          'hooks': denied(common / 'hooks' / 'pre-commit'),\n"
+        "          'config': denied(common / 'config'),\n"
+        "          'config-worktree': denied(gitdir / 'config.worktree'),\n"
+        "          'commondir': denied(gitdir / 'commondir')}\n"
+        "Path('gitwrite.json').write_text(json.dumps(result), encoding='utf-8')\n"
+    )
+    result = run_provider(
+        ProviderCommand(
+            name="git-write-probe",
+            argv=(sys.executable, "-c", program, str(common), str(gitdir)),
+        ),
+        prompt="",
+        cwd=worker.path,
+    )
+
+    assert result.failed is False, result.stderr
+    observed = json.loads((worker.path / "gitwrite.json").read_text(encoding="utf-8"))
+    assert observed["add"] == 0, observed["stderr"]
+    assert observed["commit"] == 0, observed["stderr"]
+    assert observed["hooks"] is True
+    assert observed["config"] is True
+    assert observed["config-worktree"] is True
+    assert observed["commondir"] is True
+    landed = _git("log", "-1", "--format=%s", cwd=worker.path).stdout.strip()
+    assert landed == "worker commit"
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").is_file(),
+    reason="macOS sandbox-exec confinement is required",
+)
 def test_provider_revalidates_worktree_identity_after_spawn(tmp_path, monkeypatch):
     _init_repo(tmp_path)
     worker = W.create_worktree(

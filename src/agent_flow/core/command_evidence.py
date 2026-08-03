@@ -29,7 +29,12 @@ COMMANDS_RUN_LOG = Path(".agent-flow") / "commands-run.jsonl"
 
 # 재현 테스트를 요구하는 phase. `bugfix`에는 red phase 자체가 없어서
 # "같은 버그 10번 재현"의 직접 원인이 여기였다.
-TEST_EVIDENCE_PHASES = frozenset({"red", "implement-fix"})
+#
+# `default`는 red/implement-fix 어느 쪽도 갖지 않는다. 그래서 "모든 프로젝트에
+# 적용된다"고 스스로 적어 둔 기본 워크플로만 테스트 실행 증거를 한 번도 요구하지
+# 않는 상태였다 — bugfix에 있던 구멍과 같은 것이 기본 경로에 그대로 있었다.
+# 구현이 일어나는 `implement`와 고침이 일어나는 `fix-loop`가 그 자리다.
+TEST_EVIDENCE_PHASES = frozenset({"red", "implement-fix", "implement", "fix-loop"})
 
 TEST_RUN_EVIDENCE_MARKER = "test-run-evidence: verified|unavailable"
 

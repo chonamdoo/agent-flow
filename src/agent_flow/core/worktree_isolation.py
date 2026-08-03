@@ -966,6 +966,15 @@ def git_common_dir(path) -> Optional[Path]:
     return _git_common_dir(path)
 
 
+def git_dir(path) -> Optional[Path]:
+    """sanitize된 git으로 얻은 이 checkout 전용 git dir. 같은 이유로 이 함수만 쓴다.
+
+    linked worktree면 `<common>/worktrees/<name>`이고, 그 자리가 index·HEAD처럼
+    checkout 하나에만 속한 상태를 담는다.
+    """
+    return _git_dir(path)
+
+
 def git_toplevel(path) -> Optional[Path]:
     """sanitize된 git으로 얻은 checkout 최상위. 같은 이유로 이 함수만 쓴다."""
     return _git_toplevel(path)
@@ -1833,6 +1842,16 @@ def _git_common_dir(path) -> Optional[Path]:
     if not candidate.is_absolute():
         candidate = Path(path) / candidate
     return real_path(candidate)
+
+
+def _git_dir(path) -> Optional[Path]:
+    result = git_safe("rev-parse", "--absolute-git-dir", cwd=path, optional_locks=False)
+    if not result.ok:
+        return None
+    raw = result.stdout.strip()
+    if not raw:
+        return None
+    return real_path(Path(raw))
 
 
 def _current_branch(path) -> Optional[str]:

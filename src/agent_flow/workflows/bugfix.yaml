@@ -47,9 +47,11 @@ phases:
       approve: qa
       request-changes: implement-fix
     prompt: |
-      Run at least two independent sub-agent reviewers in parallel. Each reviewer
-      checks the reproduced failure, the fix scope, regression coverage, and
-      unintended behavior changes.
+      agent-flow already ran the reviewers as confined subprocesses on the
+      installed Claude/Codex pool. Do not launch reviewer CLIs yourself:
+      aggregate the per-angle artifacts the runner lists. At least two
+      independent reviewer processes must cover the reproduced failure, the fix
+      scope, regression coverage, and unintended behavior changes.
       Each reviewer section must include `reviewer-source: sub-agent` and an
       independent verdict: approve or request-changes. Any request-changes from
       any reviewer makes the overall verdict request-changes.

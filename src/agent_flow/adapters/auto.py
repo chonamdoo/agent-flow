@@ -8,8 +8,9 @@ Detection order:
 The Claude / Codex / OMP hosts share a single `HostedAdapter` class
 parameterized by name; only the hint string differs.
 
-Note: this picks the *host* adapter only. Multi-reviewer optional providers
-are opt-in via AGENT_FLOW_REVIEWERS; see cli_detect.py and multi_review.py.
+Note: this picks the *host* adapter only. Reviewer providers are a separate,
+narrower pool (Claude/Codex); AGENT_FLOW_REVIEWERS can only narrow it further.
+See cli_detect.py and multi_review.py.
 """
 from __future__ import annotations
 

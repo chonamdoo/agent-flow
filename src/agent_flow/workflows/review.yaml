@@ -19,8 +19,11 @@ phases:
       approve: handoff
       request-changes: handoff
     prompt: |
-      Run at least two independent sub-agent reviewers in parallel. Each reviewer
-      checks bugs, regressions, missing tests, and contract drift.
+      agent-flow already ran the reviewers as confined subprocesses on the
+      installed Claude/Codex pool. Do not launch reviewer CLIs yourself:
+      aggregate the per-angle artifacts the runner lists. At least two
+      independent reviewer processes must cover bugs, regressions, missing
+      tests, and contract drift.
       Each reviewer section must include `reviewer-source: sub-agent` and an
       independent verdict: approve or request-changes. Any request-changes from
       any reviewer makes the overall verdict request-changes.

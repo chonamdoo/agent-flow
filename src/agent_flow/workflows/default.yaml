@@ -222,6 +222,9 @@ phases:
       - "ui-state-modeling: explicit|n/a"
       - "presentation-mapping-boundary: domain-to-uimodel|n/a"
       - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a"
+      - "regression-test:"
+      - "red-observed:"
+      - "test-run-evidence: verified|unavailable"
     prompt: |
       For each slice in slice-plan.md, in order, run the TDD cycle:
 
@@ -343,9 +346,9 @@ phases:
     skills:
       required: [code-generation-discipline, code-review, architecture-reviewer, clean-architecture, clean-architecture-core]
     description: |
-      Final review. Requires at least two independent active-host reviewer
-      sub-agents launched in OS-confined subprocesses before approve. Profiles
-      add stack-specific specialists on top.
+      Final review. Requires at least two independent reviewer subprocesses
+      from the Claude/Codex pool before approve. Profiles add stack-specific
+      specialists on top.
     multi_review: true
     required_markers:
       - "skills_checked: true"
@@ -384,17 +387,19 @@ phases:
       approve: gates
       request-changes: fix-loop
     prompt: |
-      Spawn at least two active-host reviewer sub-agents (Codex sub-agent in
-      Codex, Claude sub-agent in Claude, OMP sub-agent in OMP) in parallel
-      through agent-flow's verified OS-confined subprocess boundary. Additional
-      non-host providers are optional extras when available:
+      agent-flow already ran this phase's reviewers as confined subprocesses on
+      installed Claude and Codex CLIs only. Do not launch reviewer CLIs
+      yourself: read the per-angle artifacts the runner lists and aggregate
+      them. A provider that was unavailable, timed out, or exhausted its plan is
+      dropped from its remaining angles; at least one provider must have
+      completed every angle, with at least two independent reviewer processes
+      total:
         - Generalist (templates/_shared/review/architecture.md)
         - Architecture-design specialist (templates/_shared/review/architecture-design.md) — MANDATORY
         - Clean Architecture specialist (templates/_shared/review/clean-architecture.md) — MANDATORY
         - Plus angles declared in profile.review_angles
-      Never replace a failed subprocess with controller-session work. Each
-      reviewer section must include `reviewer-source: sub-agent`. After
-      recording each sub-agent result, close that sub-agent session. Aggregate
+      Never use OMP or controller-session work as a reviewer fallback. Each
+      reviewer section must include `reviewer-source: sub-agent`. Aggregate
       findings into final-review.md with severity (must-fix /
       should-fix / note) and source angle. Cite paths as `path/to/file:line`.
       Apply agent-flow-concise-output: one finding per line, Korean concise
@@ -509,6 +514,9 @@ phases:
       - "ui-state-modeling: explicit|n/a"
       - "presentation-mapping-boundary: domain-to-uimodel|n/a"
       - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a"
+      - "regression-test:"
+      - "red-observed:"
+      - "test-run-evidence: verified|unavailable"
     routes:
       default: comment-authoring
     prompt: |

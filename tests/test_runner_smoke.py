@@ -276,6 +276,33 @@ def test_abort_clears_marker(tmp_path: Path):
     assert (active / "design.md").exists()
 
 
+def test_abort_closes_a_run_whose_checkout_was_deleted(tmp_path: Path):
+    """반증: checkout 폴더를 지운 run은 닫을 길이 없으면 저장소를 막는다.
+
+    남은 `active` 마커는 그 이름의 `worktree remove`를 막고, host write boundary는
+    소유자를 증명할 수 없는 claim으로 보고 이 프로젝트의 모든 write/bash에서
+    raise한다. 경로 검증 때문에 `abort`가 거부되면 복구 명령이 아예 없다.
+    """
+    project = tmp_path / "abandoned"
+    project.mkdir()
+    _init_git_project(project)
+
+    assert _run_cli(["run", "abandoned task"], project).returncode == 0
+    plan = plan_worktree(root=project, name="abandoned task")
+    runs_dir = (
+        worktree_runtime_root(root=project, name=plan.name) / ".agent-flow" / "runs"
+    )
+    active = next(p for p in runs_dir.iterdir() if (p / "active").exists())
+    shutil.rmtree(plan.path)
+    subprocess.run(("git", "worktree", "prune"), cwd=project, check=True)
+
+    aborted = _run_cli(["abort", "--worktree", plan.name, "--yes"], project)
+
+    assert aborted.returncode == 0, aborted.stderr
+    assert not (active / "active").exists()
+    assert (active / "design.md").exists(), "artifacts must survive the abort"
+
+
 def test_worktree_run_continue_status_abort(tmp_path: Path):
     project = tmp_path / "parallel"
     project.mkdir()

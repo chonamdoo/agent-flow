@@ -105,6 +105,15 @@ class _ActiveRunClaim:
     metadata: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class _CheckoutSurvey:
+    """한 번의 git 조회로 얻는 checkout 지형. active만으로는 부족하다 —
+    run이 붙지 않은 등록 worktree도 남의 작업이라 쓰기 대상이 되면 안 된다."""
+
+    active: tuple[ActiveCheckout, ...]
+    registered: tuple[Path, ...]
+
+
 
 
 def assert_adoption_allowed(*, root: Path) -> None:
@@ -150,12 +159,15 @@ def record_host_checkout_binding(payload: object, project_root: Path) -> Path | 
     run_id = run_value.rsplit("/", 1)[-1].strip()
     if not selector or not run_id:
         return None
-    context = _active_checkout(root, selector=selector, run_id=run_id)
+    # 열거는 한 번만 한다. 두 번 돌면 active run 수에 비례하는 검증 비용이 그대로
+    # 두 배가 되고, hook 실행 시간 제한을 넘긴 세션은 binding을 못 받아 guard가 모든
+    # write를 막는다. run 3개에서 그 교착이 실측됐다(10.7~11.6s, 제한 8s).
+    active = _active_checkouts(root)
+    context = _active_checkout(root, selector=selector, run_id=run_id, active=active)
     if context is None:
         raise HostWriteBoundaryError(
             "status output did not identify one verified active managed worktree"
         )
-    active = _active_checkouts(root)
     existing = _load_binding(root, session_id, active)
     if existing is not None:
         if (
@@ -201,7 +213,8 @@ def host_write_boundary_violation(payload: object, project_root: Path) -> str | 
     tool_name = _first_string(payload, ("tool_name", "toolName", "tool")).lower()
     if tool_name not in _COMMAND_TOOLS | _WRITE_TOOLS:
         return None
-    active = _active_checkouts(root)
+    survey = _survey_checkouts(root)
+    active = survey.active
     if not active:
         return None
     command = _first_string(payload, tuple(_COMMAND_KEYS))
@@ -225,13 +238,16 @@ def host_write_boundary_violation(payload: object, project_root: Path) -> str | 
         return str(exc)
 
     current = binding.checkout
+    protected = _protected_write_roots(root, survey, current)
     if tool_name in _WRITE_TOOLS:
         write_base = _write_base(payload)
         targets = tuple(_write_targets(payload))
         if not targets:
             return "the write target could not be proven to belong to the bound worktree"
         for target in targets:
-            violation = _target_violation(target, current, base=write_base)
+            violation = _target_violation(
+                target, current, base=write_base, protected=protected
+            )
             if violation is not None:
                 return violation
         return None
@@ -253,7 +269,7 @@ def host_write_boundary_violation(payload: object, project_root: Path) -> str | 
             )
         selector = _worktree_selector(command)
         if selector is not None:
-            selected = _active_checkout(root, selector=selector)
+            selected = _active_checkout(root, selector=selector, active=active)
             if selected is None or selected.checkout != current.checkout:
                 return (
                     f"this host session is bound to {current.checkout}; refusing a lifecycle "
@@ -299,32 +315,40 @@ def host_write_boundary_violation(payload: object, project_root: Path) -> str | 
             resolved, current.runtime_root
         ):
             continue
-        for other in active:
-            if _is_within(resolved, other.checkout) or _is_within(resolved, root):
+        # 명령이 이름만 대도 다른 checkout에 닿는 형태(`git -C <sibling> checkout -- .`,
+        # `tar -xf a.tar -C <sibling>`)가 있다. 그래서 후보 경로는 쓰기 대상 여부를
+        # 가리지 않고 protected 목록 전체로 본다 — active뿐 아니라 정리 전 형제도.
+        for other_root in protected:
+            if _is_within(resolved, other_root):
                 return (
                     f"shell command references checkout path {resolved} outside the bound "
                     f"worktree {current.checkout}"
                 )
     # 위 후보 루프는 **다른 checkout**을 지킨다. 그것만으로는 `Write` 도구가 받는
-    # 제약과 어긋난다 — `_target_violation`은 worktree 밖이면 무조건 거부하는데,
-    # 셸은 leader/타 checkout만 보므로 `Write(/tmp/x)`는 막히고
-    # `touch /tmp/x`는 통과했다. 같은 규칙을 셸의 **쓰기 대상**에만 적용한다.
+    # 제약과 어긋난다 — 셸의 쓰기 대상도 같은 protected 목록으로 판정해야
+    # `Write(<leader>/x)`는 막히고 `touch <leader>/x`는 통과하는 구멍이 생기지 않는다.
     # 후보 전부에 적용하면 `/usr/bin/python3` 같은 읽기 경로까지 막힌다.
     for target in _command_write_targets(command):
-        violation = _target_violation(target, current, base=declared_cwd)
+        violation = _target_violation(
+            target, current, base=declared_cwd, protected=protected
+        )
         if violation is not None:
             return violation
     return None
 
 
 def _active_checkouts(root: Path) -> tuple[ActiveCheckout, ...]:
+    return _survey_checkouts(root).active
+
+
+def _survey_checkouts(root: Path) -> _CheckoutSurvey:
     git_dir = root / ".git"
     if not git_dir.exists() and not git_dir.is_symlink():
-        return ()
+        return _CheckoutSurvey(active=(), registered=())
     _require_directory(git_dir, label="trusted leader git directory")
     runtime_claims = _runtime_active_claims(root)
     if not runtime_claims:
-        return ()
+        return _CheckoutSurvey(active=(), registered=())
     registered_by_path: dict[Path, Any] = {}
     for registered in list_registered_worktrees(root):
         checkout = real_path(registered.path)
@@ -338,6 +362,16 @@ def _active_checkouts(root: Path) -> tuple[ActiveCheckout, ...]:
             root=root, name=name, registered_by_path=registered_by_path
         )
         if entry is None:
+            # checkout이 아예 사라졌으면 그 run은 이어질 수 없고 지킬 대상도 없다.
+            # 그걸 조작으로 보고 raise하면 hook이 이 프로젝트의 **모든** write와
+            # bash에서 죽는다 — 워크트리 폴더를 지운 것만으로 복구 불가가 된다.
+            # 되살릴 경로는 `agent-flow abort --worktree <name>`이다.
+            if _claim_checkout_is_absent(
+                root=root, name=name, registered=tuple(registered_by_path)
+            ):
+                continue
+            # 자리는 있는데 등록만 없는 경우는 다르다. 살아 있는 checkout의 등록이
+            # 사라진 것이므로 fail-closed를 유지한다.
             raise HostWriteBoundaryError(
                 "active run state has no provable registered worktree owner: "
                 f"{name}"
@@ -385,7 +419,10 @@ def _active_checkouts(root: Path) -> tuple[ActiveCheckout, ...]:
                 run_id=run.run_id,
             )
         )
-    return tuple(contexts)
+    return _CheckoutSurvey(
+        active=tuple(contexts),
+        registered=tuple(sorted(registered_by_path)),
+    )
 
 
 def _registered_for_claim(
@@ -411,19 +448,50 @@ def _registered_for_claim(
     return None
 
 
+def _claim_checkout_is_absent(
+    *,
+    root: Path,
+    name: str,
+    registered: tuple[Path, ...],
+) -> bool:
+    """이 claim이 가리킬 수 있는 자리가 **하나도** 디스크에 없는가.
+
+    자리가 살아 있는데 소유 증명만 없는 경우(관리 자리 밖의 등록 checkout이 자기
+    이름으로 런타임 상태를 만든 경우)는 조작 신호다 — 여기서 "없다"고 답하면
+    그 fail-closed가 사라진다. 그래서 신뢰 후보뿐 아니라 **같은 이름으로 등록된
+    살아 있는 checkout**도 존재로 센다.
+    """
+    if any(path.name == name and path.exists() for path in registered):
+        return False
+    try:
+        candidates = trusted_checkout_paths(root=root, name=name)
+    except (OSError, RuntimeError, ValueError):
+        # 후보를 못 세우면 없다고 단정하지 않는다. 판정은 호출자의 fail-closed로.
+        return False
+    return not any(candidate.exists() for candidate in candidates)
+
+
 def _active_checkout(
     root: Path,
     *,
     selector: str,
     run_id: str | None = None,
+    active: tuple[ActiveCheckout, ...] | None = None,
 ) -> ActiveCheckout | None:
+    """``active``를 주면 그 목록에서 고른다. 열거는 active run 수에 비례해 비싸다.
+
+    열거 한 번이 run마다 `verify_linked_worktree`(git 왕복)를 돈다. 호출부가 이미
+    목록을 갖고 있는데 여기서 다시 열거하면 같은 검증을 두 번 치르고, 그 두 배가
+    host hook의 실행 시간 제한을 넘기면 세션이 binding되지 못한 채 guard에 막힌다 —
+    run이 늘수록 확실히 막히는 쪽으로 기운다.
+    """
     matches: list[ActiveCheckout] = []
     path_candidates = [_resolve_path(selector, root)]
     try:
         path_candidates.append(_resolve_path(selector, Path.cwd()))
     except OSError:
         pass
-    for context in _active_checkouts(root):
+    for context in (_active_checkouts(root) if active is None else active):
         selected = selector in {context.name, context.branch}
         selected = selected or any(
             candidate is not None and candidate == context.checkout
@@ -597,12 +665,42 @@ def _load_binding(
     return None
 
 
+def _protected_write_roots(
+    root: Path,
+    survey: _CheckoutSurvey,
+    current: ActiveCheckout,
+) -> tuple[Path, ...]:
+    """bound 세션이 건드리면 안 되는 자리. leader와 **등록된** 형제 checkout 전부다.
+
+    active만 담으면 run이 끝나고 아직 정리되지 않은 형제 worktree — 커밋 안 된
+    작업이 그대로 있는 자리 — 가 열린다.
+    """
+    roots = [root]
+    roots.extend(path for path in survey.registered if path != current.checkout)
+    roots.extend(
+        context.runtime_root
+        for context in survey.active
+        if context.checkout != current.checkout
+    )
+    return tuple(roots)
+
+
 def _target_violation(
     target: str,
     current: ActiveCheckout,
     *,
     base: Path | None,
+    protected: tuple[Path, ...],
 ) -> str | None:
+    """이 경계는 **다른 checkout의 작업**을 지킨다. 세션을 파일시스템에서 격리하는
+    장치가 아니다.
+
+    이전에는 bound worktree 밖이면 무조건 거부했다. 그러면 leader가
+    `~/Downloads` 같은 폴더 안에 있을 때 프로젝트와 무관한 파일 한 줄
+    (`~/Downloads/note.md`, `/tmp/x`)까지 권한 오류처럼 막혀서, 실제로 지켜야 할
+    leader·형제 worktree 거부와 구분되지 않았다. 그래서 `protected`에 든 자리만
+    막는다.
+    """
     text = target.strip()
     if _VIRTUAL_PATH.match(text):
         if _SAFE_VIRTUAL_PATH.match(text):
@@ -624,10 +722,30 @@ def _target_violation(
         resolved, current.runtime_root
     ):
         return None
-    return (
-        f"write target {resolved} is outside the bound worktree {current.checkout}; "
-        "stop and resume from the printed worktree path"
-    )
+    # glob은 셸이 펼친다. `<leader의 부모>/*`를 리터럴 경로로 보면 보호 root를 품는
+    # 판정에서 빠져나간다 — metachar 앞까지의 실제 디렉터리로 판정한다.
+    container = _glob_free_prefix(resolved)
+    for other_root in protected:
+        # 안쪽만 보면 `rm -rf ~/Downloads`처럼 보호 root를 **품는** 경로가 통과한다.
+        # 그 한 줄이 leader와 형제 checkout을 통째로 지운다.
+        if _is_within(resolved, other_root) or _is_within(other_root, container):
+            return (
+                f"write target {resolved} is outside the bound worktree "
+                f"{current.checkout}; stop and resume from the printed worktree path"
+            )
+    return None
+
+
+_GLOB_METACHARS = frozenset("*?[")
+
+
+def _glob_free_prefix(path: Path) -> Path:
+    parts = path.parts
+    for index, part in enumerate(parts):
+        if any(character in _GLOB_METACHARS for character in part):
+            return Path(*parts[:index]) if index else path
+    return path
+    return None
 
 
 def _write_targets(payload: object) -> Iterable[str]:
@@ -751,8 +869,33 @@ _WRITE_OPERAND_COMMANDS = frozenset(
         "truncate", "tee", "chmod", "chown", "chgrp",
     }
 )
-# 마지막 피연산자만 목적지인 명령.
-_WRITE_DEST_LAST_COMMANDS = frozenset({"cp", "mv", "ln", "install", "rsync"})
+# 마지막 피연산자만 목적지인 명령. 원본은 읽기만 한다.
+_WRITE_DEST_LAST_COMMANDS = frozenset({"cp", "install", "rsync"})
+# 원본과 목적지 모두 쓰기 대상인 명령. 목적지만 보면 형제 checkout의 파일을
+# 밖으로 옮기거나(`mv`) 별칭을 만들어(`ln`) 그 checkout의 내용을 바꿀 수 있다.
+_WRITE_ALL_OPERAND_COMMANDS = frozenset({"mv", "ln"})
+# 실제 명령 앞에 붙어 이름을 가리는 wrapper. 벗기지 않으면 `env touch <sibling>/x`가
+# 어떤 쓰기 명령에도 걸리지 않는다.
+_COMMAND_NAME_WRAPPERS = frozenset({"env", "command", "nohup", "nice", "stdbuf", "time"})
+_ENV_ASSIGNMENT_TOKEN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _unwrap_command_argv(argv: list[str]) -> list[str]:
+    unwrapped = list(argv)
+    while unwrapped:
+        head = unwrapped[0]
+        if _ENV_ASSIGNMENT_TOKEN.match(head):
+            unwrapped = unwrapped[1:]
+            continue
+        if os.path.basename(head).lower() in _COMMAND_NAME_WRAPPERS:
+            unwrapped = [
+                token
+                for token in unwrapped[1:]
+                if not token.startswith("-")
+            ]
+            continue
+        return unwrapped
+    return unwrapped
 
 
 def _shell_tokens(command: str) -> list[str]:
@@ -771,9 +914,18 @@ def _command_write_targets(command: str) -> tuple[str, ...]:
     def drain() -> None:
         if not argv:
             return
-        name = os.path.basename(argv[0]).lower()
-        operands = [token for token in argv[1:] if not token.startswith("-")]
+        unwrapped = _unwrap_command_argv(argv)
+        if not unwrapped:
+            argv.clear()
+            return
+        name = os.path.basename(unwrapped[0]).lower()
+        operands = [token for token in unwrapped[1:] if not token.startswith("-")]
+        flags = [token for token in unwrapped[1:] if token.startswith("-")]
         if name in _WRITE_OPERAND_COMMANDS:
+            targets.extend(operands)
+        elif name in _WRITE_ALL_OPERAND_COMMANDS and len(operands) >= 2:
+            targets.extend(operands)
+        elif name == "rsync" and "--remove-source-files" in flags:
             targets.extend(operands)
         elif name in _WRITE_DEST_LAST_COMMANDS and len(operands) >= 2:
             targets.append(operands[-1])
