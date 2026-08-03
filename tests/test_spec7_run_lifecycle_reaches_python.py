@@ -3,7 +3,7 @@
 kit.mjs의 소스를 읽어 두 가지를 확인한다.
 1. PYTHON_RUN_LIFECYCLE Set에 네 명령이 모두 있다.
 2. relayPythonRunLifecycle이 runPythonCliCommand를 호출하고, runPythonCliCommand는
-   agent_flow.cli를 subprocess로 실행한다 — Node 판정 경로는 없다.
+   검증된 전역 bootstrap을 실행한다 — project-local executable 경로는 없다.
 """
 from __future__ import annotations
 
@@ -43,17 +43,23 @@ def test_relay_calls_python_cli_module():
     assert "runPythonCliCommand(" in body, "relayPythonRunLifecycle가 runPythonCliCommand를 호출하지 않음"
 
 
-def test_python_cli_spawns_agent_flow_cli():
-    """불변: runPythonCliCommand는 agent_flow.cli 모듈을 subprocess로 실행한다."""
-    # _extract_function은 중첩 구조에서 조기 종료하므로 전체 소스에서 확인한다.
-    # runPythonCliCommand 선언 위치부터 뒤에 나오는 함수 선언 전까지 검색.
+def test_python_cli_spawns_the_verified_global_bootstrap():
+    """불변: Node relay는 project-local executable이 아닌 전역 bootstrap을 실행한다."""
     start = KIT.find("function runPythonCliCommand(")
-    assert start != -1, "runPythonCliCommand 선언 없음"
+    assert start != -1
     next_fn = KIT.find("\nfunction ", start + 1)
     segment = KIT[start:next_fn] if next_fn != -1 else KIT[start:]
-    assert '"agent_flow.cli"' in segment or "'agent_flow.cli'" in segment, (
-        "runPythonCliCommand가 agent_flow.cli를 실행하지 않음"
-    )
+    assert "pythonCliInvocation(" in segment
+    assert "invocation.command" in segment
+    assert "...invocation.args" in segment
+
+    selector = _extract_function(KIT, "pythonCliInvocation")
+    assert "sharedHookLauncherInvocation()" in selector
+    assert "fs.realpathSync.native(root)" in selector
+    assert '"--root"' in selector
+    assert '"--cli"' in selector
+    assert '".agent-flow", "bin", "agent-flow"' not in selector
+    assert '"-m", "agent_flow.cli"' not in selector
 
 
 def test_run_lifecycle_short_circuits_before_node_judgement():

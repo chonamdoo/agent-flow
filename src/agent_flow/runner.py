@@ -23,6 +23,7 @@ Adapter contract:
     (advance to the next phase) or False if the host AI must follow up
     (emit prompt, exit, wait for `agent-flow continue`).
 """
+
 from __future__ import annotations
 
 import json
@@ -57,7 +58,10 @@ from agent_flow.core.design_value_check import (
     missing_design_value_implementations,
     missing_spec_item_evidence,
 )
-from agent_flow.core.hook_integrity import assert_managed_hooks_registered
+from agent_flow.core.hook_integrity import (
+    assert_managed_hooks_registered,
+    managed_hook_runtime_digest,
+)
 from agent_flow.core.worktrees import (
     CleanupBlockedError,
     complete_worktree_cleanup,
@@ -113,14 +117,45 @@ CONVENTIONAL_COMMIT_RE = re.compile(
     r"(?:\([^)]+\))?!?: \S.*$"
 )
 DDD_REQUIRED_DESIGN_SECTIONS = (
-    ("bounded context", ("bounded context", "bounded contexts", "context map", "컨텍스트")),
-    ("ubiquitous language", ("ubiquitous language", "ubiquitous language terms", "domain language", "보편 언어", "유비쿼터스 언어")),
+    (
+        "bounded context",
+        ("bounded context", "bounded contexts", "context map", "컨텍스트"),
+    ),
+    (
+        "ubiquitous language",
+        (
+            "ubiquitous language",
+            "ubiquitous language terms",
+            "domain language",
+            "보편 언어",
+            "유비쿼터스 언어",
+        ),
+    ),
     ("aggregate", ("aggregate", "aggregates", "aggregate root", "애그리거트")),
     ("entity", ("entity", "entities", "엔티티")),
     ("value object", ("value object", "value objects", "vo", "값 객체")),
     ("domain event", ("domain event", "domain events", "도메인 이벤트")),
-    ("domain invariant", ("domain invariant", "domain invariants", "invariant", "invariants", "도메인 불변식", "불변식")),
-    ("domain flow", ("domain flow", "domain flows", "domain workflow", "domain workflows", "도메인 흐름")),
+    (
+        "domain invariant",
+        (
+            "domain invariant",
+            "domain invariants",
+            "invariant",
+            "invariants",
+            "도메인 불변식",
+            "불변식",
+        ),
+    ),
+    (
+        "domain flow",
+        (
+            "domain flow",
+            "domain flows",
+            "domain workflow",
+            "domain workflows",
+            "도메인 흐름",
+        ),
+    ),
 )
 
 
@@ -137,7 +172,7 @@ class Phase:
     pause_after: bool = False
     optional: bool = False
     multi_review: bool = False  # Triggers fan-out hint in adapter envelope
-    cite_lore: bool = False     # Inject relevant lore into prompt envelope
+    cite_lore: bool = False  # Inject relevant lore into prompt envelope
     routes: dict[str, str] | None = None
     required_markers: tuple[str, ...] = ()
     artifact: str = ""
@@ -182,6 +217,7 @@ class Runner:
         # 첫 `capture_leader_snapshot`보다 먼저 돈다. 뒤에서 돌면 이미 오염된
         # 상태를 tripwire 기준선으로 굳혀 격리 검증 전체가 무의미해진다.
         assert_managed_hooks_registered(self.project_root, self.config_root)
+        hook_runtime_digest = managed_hook_runtime_digest(self.config_root)
         if mode == ResumeMode.START:
             activation = (
                 worktree_run_activation(
@@ -204,6 +240,7 @@ class Runner:
                     checkout_registration_identity=(
                         self.checkout_registration_identity
                     ),
+                    hook_runtime_digest=hook_runtime_digest,
                 )
             print(f"▶ run started : {self.run_dir.name}")
             print(f"▶ task        : {task}")
@@ -211,16 +248,13 @@ class Runner:
             assert self.run_dir is not None
             meta = read_meta(self.run_dir)
             stored_checkout = meta.get("checkout_identity")
-            if (
-                isinstance(stored_checkout, str)
-                and stored_checkout.startswith("worktree:")
+            if isinstance(stored_checkout, str) and stored_checkout.startswith(
+                "worktree:"
             ):
                 with worktree_run_activation(
                     root=self.config_root,
                     path=self.project_root,
-                    registration_identity=meta.get(
-                        "checkout_registration_identity"
-                    ),
+                    registration_identity=meta.get("checkout_registration_identity"),
                 ):
                     pass
             print(f"▶ resuming    : {self.run_dir.name}")
@@ -229,7 +263,9 @@ class Runner:
         adapter = detect_adapter()
         self._adapter_name = adapter.name
         clis = detect_available_clis()
-        cli_summary = ", ".join(c.name for c in clis) if clis else "none (generic fallback)"
+        cli_summary = (
+            ", ".join(c.name for c in clis) if clis else "none (generic fallback)"
+        )
         print(f"▶ host adapter: {adapter.name}")
         print(f"▶ available  : {cli_summary}")
         print(f"▶ profile    : {self.profile_id}")
@@ -243,7 +279,9 @@ class Runner:
         adapter._profile_id = self.profile_id
         adapter._architecture = self.architecture
         adapter._config_root = self.config_root
-        adapter._task_text = read_meta(self.run_dir).get("task", "") if self.run_dir else ""
+        adapter._task_text = (
+            read_meta(self.run_dir).get("task", "") if self.run_dir else ""
+        )
         adapter._changed_files = changed_files(self.project_root)
 
         # Auto-cite lore: search the local lore index for entries relevant
@@ -251,7 +289,8 @@ class Runner:
         # Empty list when memory dir is missing or no matches.
         meta_for_lore = read_meta(self.run_dir) if self.run_dir else {}
         adapter._lore_citations = _search_lore(
-            self.project_root, meta_for_lore.get("task", ""),
+            self.project_root,
+            meta_for_lore.get("task", ""),
         )
 
         # 이 실행이 worktree 안이라면 뒤에 있는 leader 체크아웃이 지켜야 할
@@ -276,10 +315,9 @@ class Runner:
                 write_meta(self.run_dir, meta)
             if self._has_artifact(phase):
                 artifact = self._existing_artifact_path(phase)
-                blocked_reason = (
-                    self._stale_artifact_block_reason(artifact, meta)
-                    or self._artifact_block_reason(artifact)
-                )
+                blocked_reason = self._stale_artifact_block_reason(
+                    artifact, meta
+                ) or self._artifact_block_reason(artifact)
                 if blocked_reason:
                     print(
                         f"\n═══ phase '{phase.id}' is blocked. "
@@ -358,7 +396,9 @@ class Runner:
                     snapshot=leader_before,
                 )
             completed = adapter.execute(
-                phase, run_dir=self.run_dir, project_root=self.project_root,
+                phase,
+                run_dir=self.run_dir,
+                project_root=self.project_root,
             )
             if leader_before is not None:
                 assert_leader_unchanged(
@@ -383,10 +423,9 @@ class Runner:
                 )
                 return
             artifact = self._existing_artifact_path(phase)
-            blocked_reason = (
-                self._stale_artifact_block_reason(artifact, meta)
-                or self._artifact_block_reason(artifact)
-            )
+            blocked_reason = self._stale_artifact_block_reason(
+                artifact, meta
+            ) or self._artifact_block_reason(artifact)
             if blocked_reason:
                 print(
                     f"\n═══ phase '{phase.id}' is blocked. "
@@ -418,8 +457,7 @@ class Runner:
                 return
             if phase.pause_after:
                 print(
-                    f"\n═══ pause: '{phase.id}' 결과 검토 후 "
-                    f"`{self.next_command}` ═══"
+                    f"\n═══ pause: '{phase.id}' 결과 검토 후 `{self.next_command}` ═══"
                 )
                 self._print_structured_status(
                     status="blocked",
@@ -606,7 +644,9 @@ class Runner:
         if phase.multi_review:
             key = _multi_review_route_key(text, phase.id)
         elif phase.id == "gates":
-            key = _gates_route_key(text, nonce=str(read_meta(self.run_dir).get("gate_nonce", "")))
+            key = _gates_route_key(
+                text, nonce=str(read_meta(self.run_dir).get("gate_nonce", ""))
+            )
             if key == "default":
                 # `passed: true`인 파일이 fix-loop로 되돌려지는 이유는 결과 목록에
                 # 안 보인다. 말하지 않으면 같은 명령을 세 번 재시도하다 round cap에
@@ -620,21 +660,33 @@ class Runner:
                     )
         else:
             key = _route_key(text)
-        if key == "approve" and phase.routes.get("request-changes") and has_failure_markers(text):
-            print("  [route] approve overridden to request-changes: Completion Gate has failure markers")
+        if (
+            key == "approve"
+            and phase.routes.get("request-changes")
+            and has_failure_markers(text)
+        ):
+            print(
+                "  [route] approve overridden to request-changes: Completion Gate has failure markers"
+            )
             key = "request-changes"
         target = phase.routes.get(key)
         if target is None:
             target = phase.routes.get("default")
         if phase.multi_review:
             if key == "missing-reviewer":
-                print("  [block] multi-review requires 1+ independent sub-agent reviewer verdict")
+                print(
+                    "  [block] multi-review requires 1+ independent sub-agent reviewer verdict"
+                )
                 return current_index, True
             if key == "insufficient-reviewers":
-                print("  [block] multi-review requires 2+ independent sub-agent reviewer verdicts")
+                print(
+                    "  [block] multi-review requires 2+ independent sub-agent reviewer verdicts"
+                )
                 return current_index, True
             if key == "invalid-verdict":
-                print("  [block] multi-review requires overall verdict approve or request-changes")
+                print(
+                    "  [block] multi-review requires overall verdict approve or request-changes"
+                )
                 return current_index, True
             if key == "default":
                 print(
@@ -649,7 +701,12 @@ class Runner:
             if rounds > FIX_LOOP_MAX_ROUNDS:
                 print(f"  [block] fix-loop exceeded {FIX_LOOP_MAX_ROUNDS} rounds")
                 return current_index, True
-        elif phase.id == "gates" and target and target != "block" and "fix-loop" in phase.routes.values():
+        elif (
+            phase.id == "gates"
+            and target
+            and target != "block"
+            and "fix-loop" in phase.routes.values()
+        ):
             # reviewer approve 이후 QA가 최종 통과할 때만 reset한다. review 재실행
             # 단계에서 reset하면 QA/review loop cap이 무력화된다.
             self._reset_fix_loop_rounds()
@@ -663,15 +720,17 @@ class Runner:
             for i, candidate in enumerate(self.phases):
                 if candidate.id == target:
                     if i <= current_index:
-                        for stale_phase in self.phases[i:current_index + 1]:
+                        for stale_phase in self.phases[i : current_index + 1]:
                             stale_artifact = self._existing_artifact_path(stale_phase)
                             if stale_artifact.exists():
                                 stale_artifact.unlink()
                     elif i > current_index + 1:
-                        for skipped in self.phases[current_index + 1:i]:
+                        for skipped in self.phases[current_index + 1 : i]:
                             skipped_artifact = self._artifact_path(skipped)
                             if not skipped_artifact.exists():
-                                skipped_artifact.parent.mkdir(parents=True, exist_ok=True)
+                                skipped_artifact.parent.mkdir(
+                                    parents=True, exist_ok=True
+                                )
                                 skipped_artifact.write_text(
                                     f"# {skipped.id}\n\nstatus: skipped\nreason: route_to_{target}\n",
                                     encoding="utf-8",
@@ -687,9 +746,13 @@ class Runner:
         artifact = self._existing_artifact_path(phase)
         if not artifact.exists():
             return
-        capture_design_ledger(self.run_dir, phase.id, artifact.read_text(encoding="utf-8"))
+        capture_design_ledger(
+            self.run_dir, phase.id, artifact.read_text(encoding="utf-8")
+        )
 
-    def _advance_phase(self, meta: dict[str, Any], phase_index: int, blocked: bool) -> None:
+    def _advance_phase(
+        self, meta: dict[str, Any], phase_index: int, blocked: bool
+    ) -> None:
         """route 결과를 meta에 반영한다.
 
         `blocked`면 제자리에 멈춘 것이므로 진입이 아니다. 여기서 시각을 밀면
@@ -720,7 +783,11 @@ class Runner:
         phase_id = (
             self.phases[phase_index].id if phase_index < len(self.phases) else None
         )
-        if entering or meta.get("current_phase") != phase_id or not meta.get("phase_entered_at"):
+        if (
+            entering
+            or meta.get("current_phase") != phase_id
+            or not meta.get("phase_entered_at")
+        ):
             meta["phase_entered_at"] = datetime.now(timezone.utc).isoformat()
         meta["phase_index"] = phase_index
         meta["current_phase"] = phase_id
@@ -889,7 +956,9 @@ class Runner:
             return "generic_stub_artifact"
         return None
 
-    def _stale_artifact_block_reason(self, artifact: Path, meta: dict[str, Any]) -> str | None:
+    def _stale_artifact_block_reason(
+        self, artifact: Path, meta: dict[str, Any]
+    ) -> str | None:
         entered_at = _meta_timestamp(
             meta.get("phase_entered_at")
             or meta.get("updated_at")
@@ -906,7 +975,10 @@ class Runner:
         return None
 
     def _has_artifact(self, phase: Phase) -> bool:
-        return self._artifact_path(phase).exists() or self._legacy_artifact_path(phase).exists()
+        return (
+            self._artifact_path(phase).exists()
+            or self._legacy_artifact_path(phase).exists()
+        )
 
     def _print_structured_status(
         self,
@@ -919,7 +991,9 @@ class Runner:
     ) -> None:
         assert self.run_dir is not None
         meta = read_meta(self.run_dir)
-        required_artifact_text = str(required_artifact) if required_artifact is not None else None
+        required_artifact_text = (
+            str(required_artifact) if required_artifact is not None else None
+        )
         report_text = str(report) if report is not None else None
         next_command = "none" if status == "complete" else self.next_command
         payload = {
@@ -1077,7 +1151,12 @@ def _gates_route_key(text: str, *, nonce: str = "") -> str:
         normalized_status = status.strip().lower().replace("_", "-")
         if payload["passed"] is True and normalized_status in {"green", "approve"}:
             return normalized_status if proven else "default"
-        if payload["passed"] is False and normalized_status in {"request-changes", "blocked", "error", "pending"}:
+        if payload["passed"] is False and normalized_status in {
+            "request-changes",
+            "blocked",
+            "error",
+            "pending",
+        }:
             return normalized_status
     if payload["passed"] is True:
         return "green" if proven else "default"
@@ -1197,8 +1276,6 @@ def _gate_result_has_evidence(result: dict[str, object]) -> bool:
     return False
 
 
-
-
 def _independent_reviewer_verdict_count(text: str) -> int:
     return len(_independent_reviewer_verdicts(text))
 
@@ -1227,22 +1304,32 @@ def _independent_reviewer_verdicts(text: str) -> dict[str, str]:
         if source_match:
             key = _normalized_reviewer_id(source_match.group(1))
             if key:
-                state = reviewers.setdefault(key, {"has_source": False, "subagent": False, "verdict": None})
+                state = reviewers.setdefault(
+                    key, {"has_source": False, "subagent": False, "verdict": None}
+                )
                 state["has_source"] = True
                 if _is_subagent_source(source_match.group(2)):
                     state["subagent"] = True
             continue
         if current_reviewer is not None and _line_marks_subagent_source(lowered):
-            state = reviewers.setdefault(current_reviewer, {"has_source": False, "subagent": False, "verdict": None})
+            state = reviewers.setdefault(
+                current_reviewer,
+                {"has_source": False, "subagent": False, "verdict": None},
+            )
             state["has_source"] = True
             state["subagent"] = True
             continue
         if current_reviewer is not None and _line_marks_non_subagent_source(lowered):
-            reviewers.setdefault(current_reviewer, {"has_source": True, "subagent": False, "verdict": None})
+            reviewers.setdefault(
+                current_reviewer,
+                {"has_source": True, "subagent": False, "verdict": None},
+            )
             continue
         if "verdict:" not in lowered:
             continue
-        verdict_match = re.match(r"^(.*?)verdict:\s*(approve|request-changes)\s*$", stripped)
+        verdict_match = re.match(
+            r"^(.*?)verdict:\s*(approve|request-changes)\s*$", stripped
+        )
         if not verdict_match:
             continue
         prefix = verdict_match.group(1).strip(" -").lower()
@@ -1252,9 +1339,14 @@ def _independent_reviewer_verdicts(text: str) -> dict[str, str]:
         if prefix:
             key = _normalized_reviewer_id(prefix)
             if key:
-                reviewers.setdefault(key, {"has_source": False, "subagent": False, "verdict": None})["verdict"] = verdict
+                reviewers.setdefault(
+                    key, {"has_source": False, "subagent": False, "verdict": None}
+                )["verdict"] = verdict
         elif current_reviewer is not None:
-            reviewers.setdefault(current_reviewer, {"has_source": False, "subagent": False, "verdict": None})["verdict"] = verdict
+            reviewers.setdefault(
+                current_reviewer,
+                {"has_source": False, "subagent": False, "verdict": None},
+            )["verdict"] = verdict
     return {
         reviewer: str(state["verdict"])
         for reviewer, state in reviewers.items()
@@ -1406,7 +1498,9 @@ def _missing_commit_evidence(project_root: Path, text: str) -> list[str]:
         return errors
 
     head = git_safe(
-        "rev-parse", "--verify", "HEAD^{commit}",
+        "rev-parse",
+        "--verify",
+        "HEAD^{commit}",
         cwd=project_root,
         optional_locks=False,
     )
@@ -1419,7 +1513,10 @@ def _missing_commit_evidence(project_root: Path, text: str) -> list[str]:
         errors.append("delivery evidence: commit-oid does not match current HEAD")
 
     branch = git_safe(
-        "symbolic-ref", "--quiet", "--short", "HEAD",
+        "symbolic-ref",
+        "--quiet",
+        "--short",
+        "HEAD",
         cwd=project_root,
         optional_locks=False,
     )
@@ -1431,7 +1528,9 @@ def _missing_commit_evidence(project_root: Path, text: str) -> list[str]:
         )
 
     status = git_safe(
-        "status", "--porcelain=v1", "--untracked-files=normal",
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=normal",
         cwd=project_root,
         optional_locks=False,
     )
@@ -1441,7 +1540,10 @@ def _missing_commit_evidence(project_root: Path, text: str) -> list[str]:
         errors.append("delivery evidence: git worktree is not clean")
 
     subject = git_safe(
-        "show", "-s", "--format=%s", head_oid,
+        "show",
+        "-s",
+        "--format=%s",
+        head_oid,
         cwd=project_root,
         optional_locks=False,
     )
@@ -1486,12 +1588,17 @@ def _missing_push_pr_evidence(
         errors.append("delivery evidence: pr-url must be an HTTPS URL")
 
     head = git_safe(
-        "rev-parse", "--verify", "HEAD^{commit}",
+        "rev-parse",
+        "--verify",
+        "HEAD^{commit}",
         cwd=project_root,
         optional_locks=False,
     )
     branch = git_safe(
-        "symbolic-ref", "--quiet", "--short", "HEAD",
+        "symbolic-ref",
+        "--quiet",
+        "--short",
+        "HEAD",
         cwd=project_root,
         optional_locks=False,
     )
@@ -1515,19 +1622,24 @@ def _missing_push_pr_evidence(
     else:
         remote_ref = f"refs/heads/{branch_name}"
         remote = git_safe(
-            "ls-remote", "--heads", fields["remote"], remote_ref,
+            "ls-remote",
+            "--heads",
+            fields["remote"],
+            remote_ref,
             cwd=project_root,
             timeout_s=30,
             optional_locks=False,
         )
-        rows = [line.split() for line in remote.stdout.splitlines()] if remote.ok else []
+        rows = (
+            [line.split() for line in remote.stdout.splitlines()] if remote.ok else []
+        )
         matching = [
-            row[0].lower()
-            for row in rows
-            if len(row) == 2 and row[1] == remote_ref
+            row[0].lower() for row in rows if len(row) == 2 and row[1] == remote_ref
         ]
         if len(matching) != 1:
-            errors.append("delivery evidence: cannot prove the pushed remote branch OID")
+            errors.append(
+                "delivery evidence: cannot prove the pushed remote branch OID"
+            )
         elif matching[0] != head_oid or matching[0] != fields["remote-oid"].lower():
             errors.append(
                 "delivery evidence: local HEAD, remote-oid, and pushed branch OID differ"
@@ -1535,7 +1647,11 @@ def _missing_push_pr_evidence(
 
     pr = run_safe_command(
         (
-            "gh", "pr", "view", fields["pr-url"], "--json",
+            "gh",
+            "pr",
+            "view",
+            fields["pr-url"],
+            "--json",
             "url,baseRefName,headRefName,headRefOid",
         ),
         cwd=project_root,
@@ -1587,7 +1703,9 @@ def _status_value(value: object) -> str:
 
 
 def _is_git_repo(project_root: Path) -> bool:
-    result = run_safe_command(["git", "rev-parse", "--is-inside-work-tree"], cwd=project_root, timeout_s=5)
+    result = run_safe_command(
+        ["git", "rev-parse", "--is-inside-work-tree"], cwd=project_root, timeout_s=5
+    )
     return result.ok and result.stdout.strip() == "true"
 
 
@@ -1602,7 +1720,10 @@ def _missing_ddd_design_terms(run_dir: Path) -> list[str]:
         return ["ddd-design.md or design.md"]
 
     section_titles = _design_section_titles(text)
-    if any(_section_title_matches(section_titles, alias) for alias in ("service-layer refactor", "service layer refactor")):
+    if any(
+        _section_title_matches(section_titles, alias)
+        for alias in ("service-layer refactor", "service layer refactor")
+    ):
         return ["ddd mode cannot be service-layer refactor"]
     return [
         label
@@ -1626,7 +1747,9 @@ def _design_section_titles(text: str) -> list[str]:
         if heading:
             titles.append(_normalize_design_heading(heading.group(1)))
             continue
-        label = re.match(r"^(?:[-*+]\s+|\d+[.)]\s+)(?:\*\*)?([^:]{1,80}?)(?:\*\*)?\s*:", stripped)
+        label = re.match(
+            r"^(?:[-*+]\s+|\d+[.)]\s+)(?:\*\*)?([^:]{1,80}?)(?:\*\*)?\s*:", stripped
+        )
         if label:
             titles.append(_normalize_design_heading(label.group(1)))
     return titles
@@ -1641,7 +1764,10 @@ def _normalize_design_heading(value: str) -> str:
 
 def _section_title_matches(section_titles: list[str], alias: str) -> bool:
     normalized_alias = _normalize_design_heading(alias)
-    return any(title == normalized_alias or title.startswith(f"{normalized_alias} ") for title in section_titles)
+    return any(
+        title == normalized_alias or title.startswith(f"{normalized_alias} ")
+        for title in section_titles
+    )
 
 
 def _load_profile(kit_root: Path, project_root: Path) -> tuple[str, dict[str, Any]]:
@@ -1661,6 +1787,7 @@ def _load_profile(kit_root: Path, project_root: Path) -> tuple[str, dict[str, An
     them shoot their foot).
     """
     import os
+
     forced = os.environ.get("AGENT_FLOW_PROFILE")
     explicit_fallback = os.environ.get("AGENT_FLOW_FALLBACK_GENERIC") == "1"
     if forced:
@@ -1761,7 +1888,9 @@ def _load_single_profile(
     if raw.get("id") != profile_id:
         raise ValueError(f"profile id mismatch: {profile_id}")
     if project_root is not None:
-        raw = apply_project_profile_override(raw, profile_id=profile_id, root=project_root)
+        raw = apply_project_profile_override(
+            raw, profile_id=profile_id, root=project_root
+        )
     return profile_id, raw
 
 
@@ -1816,7 +1945,9 @@ def _load_profile_union(
     }
 
 
-def _dedupe_loaded_profiles(profiles: list[tuple[str, dict[str, Any]]]) -> list[tuple[str, dict[str, Any]]]:
+def _dedupe_loaded_profiles(
+    profiles: list[tuple[str, dict[str, Any]]],
+) -> list[tuple[str, dict[str, Any]]]:
     deduped: list[tuple[str, dict[str, Any]]] = []
     seen: set[str] = set()
     for profile_id, profile in profiles:
@@ -1827,7 +1958,9 @@ def _dedupe_loaded_profiles(profiles: list[tuple[str, dict[str, Any]]]) -> list[
     return deduped
 
 
-def _merge_profile_list_field(profiles: list[tuple[str, dict[str, Any]]], field: str) -> list[Any]:
+def _merge_profile_list_field(
+    profiles: list[tuple[str, dict[str, Any]]], field: str
+) -> list[Any]:
     merged: list[Any] = []
     seen: set[str] = set()
     for _, profile in profiles:

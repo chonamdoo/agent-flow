@@ -20,7 +20,6 @@ from typing import Any
 from agent_flow.artifact import ACTIVE_MARKER, find_active_runs, read_meta, write_meta
 from agent_flow.core.hook_integrity import (
     JSON_REGISTRATION_FILES,
-    OMP_REGISTRATION_FILE,
     managed_path_hook_name,
 )
 from agent_flow.core.security import validate_git_branch
@@ -91,7 +90,6 @@ class CleanupTransactionResult:
     run_dir: Path
 
 
-
 class AmbiguousWorktreeSelector(ValueError):
     """선택자가 등록된 worktree 여러 개와 맞았다.
 
@@ -99,10 +97,14 @@ class AmbiguousWorktreeSelector(ValueError):
     후보를 그대로 노출하고 멈춘다.
     """
 
-    def __init__(self, selector: str, candidates: tuple[RegisteredWorktree, ...]) -> None:
+    def __init__(
+        self, selector: str, candidates: tuple[RegisteredWorktree, ...]
+    ) -> None:
         self.selector = selector
         self.candidates = candidates
-        rendered = ", ".join(f"{item.path} ({item.branch or 'detached'})" for item in candidates)
+        rendered = ", ".join(
+            f"{item.path} ({item.branch or 'detached'})" for item in candidates
+        )
         super().__init__(
             f"worktree selector is ambiguous: {selector}; candidates: {rendered}; "
             f"re-run with the exact path or branch"
@@ -188,12 +190,12 @@ def _create_worktree(
     reuse_existing: bool = True,
 ) -> WorktreeStatus:
     if not allow_dirty and _git_dirty(root):
-        raise RuntimeError("leader workspace is dirty; pass --allow-dirty to create a worktree anyway")
+        raise RuntimeError(
+            "leader workspace is dirty; pass --allow-dirty to create a worktree anyway"
+        )
     if plan.path.exists():
         if not reuse_existing:
-            raise WorktreeAlreadyExistsError(
-                f"worktree already exists: {plan.path}"
-            )
+            raise WorktreeAlreadyExistsError(f"worktree already exists: {plan.path}")
         if not (plan.path / ".git").exists():
             raise RuntimeError(
                 f"worktree path exists but is not a git worktree: {plan.path}. "
@@ -221,34 +223,66 @@ def _create_worktree(
         return existing
     _ensure_creation_root(plan.path.parent)
     branch_created = _add_worktree_locked(root=root, plan=plan)
-    # Fail closed: trust the path only after git confirms it is a linked
-    # worktree of this repo on the expected branch.
-    # containment는 생성 규약이 정한 checkout 부모를 그대로 넘긴다. 실질 증명은
-    # 아래 gitdir 왕복 검증이다.
-    verify_linked_worktree(
-        root=root,
-        path=plan.path,
-        expected_branch=plan.branch,
-        managed_root=plan.path.parent,
-    )
-    registered = _registered_at_path(root=root, path=plan.path)
-    if registered is None or registered.registration_identity is None:
-        raise WorktreeIsolationError(
-            f"cannot prove worktree registration identity after creation: {plan.path}"
-        )
-    base_oid = _merge_base_oid(root=plan.path, left="HEAD", right=plan.base_ref)
-    status = WorktreeStatus(
-        name=plan.name,
-        branch=plan.branch,
-        path=plan.path,
-        exists=True,
-        branch_created_by_agent_flow=branch_created,
-        requested_name=plan.requested_name,
-        base_ref=plan.base_ref,
-        base_oid=base_oid,
-        registration_identity=registered.registration_identity,
-    )
+    created_registration: RegisteredWorktree | None = None
+    created_checkout_identity: tuple[int, int] | None = None
+    created_branch_oid: str | None = None
     try:
+        checkout_info = plan.path.lstat()
+        if stat.S_ISLNK(checkout_info.st_mode) or not stat.S_ISDIR(
+            checkout_info.st_mode
+        ):
+            raise WorktreeIsolationError(
+                f"created worktree path is not a directory: {plan.path}"
+            )
+        created_checkout_identity = (checkout_info.st_dev, checkout_info.st_ino)
+        created_registration = registered_worktree_at(root, plan.path)
+        if (
+            created_registration is None
+            or created_registration.branch != plan.branch
+            or created_registration.registration_identity is None
+        ):
+            raise WorktreeIsolationError(
+                f"cannot capture worktree registration identity after creation: {plan.path}"
+            )
+        if branch_created:
+            created_branch_oid = _ref_oid(
+                root=root, ref=f"refs/heads/{plan.branch}"
+            )
+            if (
+                created_branch_oid is None
+                or created_registration.head != created_branch_oid
+            ):
+                raise WorktreeIsolationError(
+                    f"cannot capture owned branch identity after creation: {plan.branch}"
+                )
+
+        # Fail closed: trust the path only after git confirms it is a linked
+        # worktree of this repo on the expected branch.
+        # containment는 생성 규약이 정한 checkout 부모를 그대로 넘긴다. 실질 증명은
+        # 아래 gitdir 왕복 검증이다.
+        verify_linked_worktree(
+            root=root,
+            path=plan.path,
+            expected_branch=plan.branch,
+            managed_root=plan.path.parent,
+        )
+        registered = _registered_at_path(root=root, path=plan.path)
+        if registered is None or registered.registration_identity is None:
+            raise WorktreeIsolationError(
+                f"cannot prove worktree registration identity after creation: {plan.path}"
+            )
+        base_oid = _merge_base_oid(root=plan.path, left="HEAD", right=plan.base_ref)
+        status = WorktreeStatus(
+            name=plan.name,
+            branch=plan.branch,
+            path=plan.path,
+            exists=True,
+            branch_created_by_agent_flow=branch_created,
+            requested_name=plan.requested_name,
+            base_ref=plan.base_ref,
+            base_oid=base_oid,
+            registration_identity=registered.registration_identity,
+        )
         write_worktree_manifest(root=root, status=status)
         # 새 기본 자리는 marker 후보가 아니다. 경계가 claim의 소유 checkout을 고르는
         # 근거(`trusted_checkout_paths`)는 marker layout 아니면 채택 기록뿐이므로,
@@ -259,24 +293,58 @@ def _create_worktree(
             path=status.path,
             registration_identity=status.registration_identity,
         )
-    except Exception:
+    except BaseException:
         try:
-            # create_worktree still owns the shared repository lease here. Calling
-            # public remove_worktree would try to upgrade that lease to exclusive
-            # and fail, leaving an unpublished checkout behind.
-            _remove_worktree_locked(
-                root=root,
-                status=status,
-                delete_branch=True,
-                require_merged=False,
-                allow_unmerged=False,
+            current_registration = registered_worktree_at(root, plan.path)
+            if created_registration is None or not _same_registration(
+                created_registration, current_registration
+            ):
+                raise WorktreeIsolationError(
+                    f"worktree registration changed after creation at {plan.path}; "
+                    "preserving checkout"
+                )
+            _assert_checkout_path_identity(
+                checkout=plan.path, expected=created_checkout_identity
             )
-        except Exception as cleanup_exc:  # noqa: BLE001
-            # 롤백까지 실패하면 등록된 worktree가 manifest 없이 남는다. 원본
-            # 예외를 가리지 않도록 경고로 표면화한다.
+            _assert_not_locked(path=plan.path, entry=current_registration)
+            if branch_created:
+                current_branch_oid = _ref_oid(
+                    root=root, ref=f"refs/heads/{plan.branch}"
+                )
+                if (
+                    created_branch_oid is None
+                    or current_branch_oid != created_branch_oid
+                ):
+                    raise WorktreeIsolationError(
+                        f"owned branch changed after creation: {plan.branch}; "
+                        "preserving checkout and branch"
+                    )
+
+            with_git_lock_retry(
+                lambda: _run_git(root, "worktree", "remove", str(plan.path))
+            )
+            if registered_worktree_at(root, plan.path) is not None:
+                raise WorktreeIsolationError(
+                    f"worktree registration remains after rollback: {plan.path}"
+                )
+            if os.path.lexists(plan.path):
+                raise WorktreeIsolationError(
+                    f"worktree path remains after rollback: {plan.path}"
+                )
+            if branch_created and created_branch_oid is not None:
+                _delete_branch_ref_cas(
+                    root=root,
+                    branch=plan.branch,
+                    expected_oid=created_branch_oid,
+                )
+            remove_worktree_metadata(root=root, name=plan.name, path=plan.path)
+        except BaseException as cleanup_exc:
             print(
-                f"warning: could not roll back worktree {status.name} at {status.path} "
-                f"after the manifest write failed: {cleanup_exc}",
+                f"warning: could not fully roll back failed worktree creation "
+                f"{plan.name} at {plan.path}: {cleanup_exc}; inspect "
+                f"`git worktree list --porcelain`, "
+                f"`git show-ref --verify refs/heads/{plan.branch}`, and agent-flow "
+                "worktree metadata before cleaning them manually",
                 file=sys.stderr,
             )
         raise
@@ -347,7 +415,9 @@ def attach_worktree(
             f"check out a branch before starting a run there"
         )
     if registered.branch in PROTECTED_WORKTREE_BRANCHES:
-        raise ValueError(f"protected worktree branch is not allowed: {registered.branch}")
+        raise ValueError(
+            f"protected worktree branch is not allowed: {registered.branch}"
+        )
     if branch is not None:
         # 요청된 브랜치는 생성 경로와 같은 규칙을 통과해야 한다. 붙는 대상의
         # 기존 브랜치가 아니라 사용자가 방금 넘긴 값에 대한 검사다.
@@ -516,7 +586,15 @@ def _add_worktree_locked(*, root: Path, plan: WorktreePlan) -> bool:
             _run_git(root, "worktree", "add", str(plan.path), plan.branch)
             created["branch"] = False
         else:
-            _run_git(root, "worktree", "add", "-b", plan.branch, str(plan.path), plan.base_ref)
+            _run_git(
+                root,
+                "worktree",
+                "add",
+                "-b",
+                plan.branch,
+                str(plan.path),
+                plan.base_ref,
+            )
             created["branch"] = True
 
     # 생성 전체가 이미 `create_worktree`의 creation lock 안이다. 같은 파일을
@@ -562,7 +640,9 @@ def _remove_worktree_locked(
                 f"cannot resolve the leader checkout for {root}; refusing to remove {status.path}"
             )
     elif same_worktree_path(leader, status.path):
-        raise WorktreeIsolationError(f"refusing to remove the leader checkout: {status.path}")
+        raise WorktreeIsolationError(
+            f"refusing to remove the leader checkout: {status.path}"
+        )
 
     registered = _registered_at_path(root=root, path=status.path)
     _assert_not_locked(path=status.path, entry=registered)
@@ -608,7 +688,11 @@ def _remove_worktree_locked(
         branch, expected_oid = branch_delete
         _delete_branch_ref_cas(root=root, branch=branch, expected_oid=expected_oid)
     remove_worktree_metadata(root=root, name=status.name, path=status.path)
-    if not live and status.path.is_dir() and _is_creation_layout_child(root=root, path=status.path):
+    if (
+        not live
+        and status.path.is_dir()
+        and _is_creation_layout_child(root=root, path=status.path)
+    ):
         try:
             status.path.rmdir()
         except OSError:
@@ -624,7 +708,9 @@ def _assert_registration_and_ref_unchanged(
 ) -> None:
     current = _registered_at_path(root=root, path=status.path)
     _assert_not_locked(path=status.path, entry=current)
-    if expected_registration is not None and not _same_registration(expected_registration, current):
+    if expected_registration is not None and not _same_registration(
+        expected_registration, current
+    ):
         raise WorktreeIsolationError(
             f"worktree registration changed while removing {status.path}; re-run the command"
         )
@@ -640,7 +726,6 @@ def _assert_registration_and_ref_unchanged(
                 f"branch ref changed while removing {status.path}; "
                 f"expected {expected_oid}, found {current_oid or 'missing'}"
             )
-
 
 
 def run_worktree_cleanup_transaction(
@@ -667,7 +752,11 @@ def run_worktree_cleanup_transaction(
         return CleanupTransactionResult(journal_path=journal_path, run_dir=archived_run)
 
     runtime_root = Path(journal["run"]["source_state_root"])
-    lock_root = runtime_root if runtime_root.exists() else Path(journal["run"]["archive_state_root"])
+    lock_root = (
+        runtime_root
+        if runtime_root.exists()
+        else Path(journal["run"]["archive_state_root"])
+    )
     with _cleanup_lease(root, checkout_path) as cleanup_lease:
         journal["leases"]["cleanup"] = {
             "path": str(cleanup_lease),
@@ -714,11 +803,15 @@ def run_worktree_cleanup_transaction(
                     _record_cleanup_failure(journal_path, journal, str(exc))
                     exc.journal_path = journal_path
                     exc.run_dir = (
-                        archived_run if archived_run.exists() else Path(journal["run"]["source_dir"])
+                        archived_run
+                        if archived_run.exists()
+                        else Path(journal["run"]["source_dir"])
                     )
                     raise
                 except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
-                    message = f"cleanup step {step} failed: {exc}; preserving remaining state"
+                    message = (
+                        f"cleanup step {step} failed: {exc}; preserving remaining state"
+                    )
                     _record_cleanup_failure(journal_path, journal, message)
                     raise CleanupBlockedError(
                         message,
@@ -754,10 +847,7 @@ def complete_worktree_cleanup(result: CleanupTransactionResult) -> Path:
     if (
         journal.get("status") not in {"steps_complete", "complete"}
         or journal.get("integration", {}).get("proof") != "verified"
-        or any(
-            journal["steps"][step]["status"] != "done"
-            for step in CLEANUP_STEPS
-        )
+        or any(journal["steps"][step]["status"] != "done" for step in CLEANUP_STEPS)
     ):
         raise CleanupBlockedError(
             "cleanup transaction is incomplete; active run remains retryable",
@@ -799,6 +889,7 @@ def complete_worktree_cleanup(result: CleanupTransactionResult) -> Path:
         marker.unlink()
     return result.run_dir
 
+
 def _cleanup_terminal_publication_complete(
     *, run_dir: Path, journal_path: Path
 ) -> bool:
@@ -813,7 +904,6 @@ def _cleanup_terminal_publication_complete(
         and meta.get("cleanup_journal") == str(journal_path)
         and not (run_dir / ACTIVE_MARKER).exists()
     )
-
 
 
 def find_pending_worktree_cleanup(
@@ -842,12 +932,11 @@ def find_pending_worktree_cleanup(
         archive = Path(journal["run"]["archive_dir"])
         source = Path(journal["run"]["source_dir"])
         run_dir = archive if archive.exists() else source
-        if (
-            journal.get("status") == "complete"
-            and _cleanup_terminal_publication_complete(
-                run_dir=run_dir,
-                journal_path=path,
-            )
+        if journal.get(
+            "status"
+        ) == "complete" and _cleanup_terminal_publication_complete(
+            run_dir=run_dir,
+            journal_path=path,
         ):
             continue
         matches.append(
@@ -918,10 +1007,7 @@ def _prepare_or_load_cleanup_journal(
         raise CleanupBlockedError(
             f"run checkout identity is unknown or mismatched for {checkout_path}; preserving it"
         )
-    if (
-        meta.get("checkout_registration_identity")
-        != registered.registration_identity
-    ):
+    if meta.get("checkout_registration_identity") != registered.registration_identity:
         raise CleanupBlockedError(
             f"run checkout registration changed for {checkout_path}; preserving it"
         )
@@ -1024,9 +1110,7 @@ def _prepare_or_load_cleanup_journal(
         "leases": {
             "cleanup": {
                 "path": str(
-                    _agent_flow_state_dir(root)
-                    / "cleanup-leases"
-                    / "repository.lock"
+                    _agent_flow_state_dir(root) / "cleanup-leases" / "repository.lock"
                 ),
                 "state": "pending",
             },
@@ -1040,8 +1124,7 @@ def _prepare_or_load_cleanup_journal(
             "archive_digest": None,
         },
         "steps": {
-            step: {"status": "pending", "completed_at": None}
-            for step in CLEANUP_STEPS
+            step: {"status": "pending", "completed_at": None} for step in CLEANUP_STEPS
         },
         "created_at": now,
         "updated_at": now,
@@ -1075,22 +1158,26 @@ def _validate_cleanup_resume(
     if journal["target"]["ref"] not in set(
         _branch_ref_candidates(root=root, branch=target_branch)
     ):
-        raise CleanupBlockedError("cleanup target branch changed since journal preparation")
+        raise CleanupBlockedError(
+            "cleanup target branch changed since journal preparation"
+        )
     if real_path(Path(journal["checkout"]["path"])) != real_path(checkout_path):
-        raise CleanupBlockedError("cleanup checkout path changed since journal preparation")
+        raise CleanupBlockedError(
+            "cleanup checkout path changed since journal preparation"
+        )
     allowed = {
         Path(journal["run"]["source_dir"]),
         Path(journal["run"]["archive_dir"]),
     }
     if run_dir not in allowed:
-        raise CleanupBlockedError("cleanup resume run directory does not match journal owner")
+        raise CleanupBlockedError(
+            "cleanup resume run directory does not match journal owner"
+        )
     _bind_run_to_cleanup(
         run_dir=run_dir,
         journal_path=journal_path,
         checkout_identity=journal["checkout"]["identity"],
-        checkout_registration_identity=journal["checkout"][
-            "registration_identity"
-        ],
+        checkout_registration_identity=journal["checkout"]["registration_identity"],
     )
 
 
@@ -1105,8 +1192,7 @@ def _bind_run_to_cleanup(
     if (
         meta.get("run_id") != run_dir.name
         or meta.get("checkout_identity") != checkout_identity
-        or meta.get("checkout_registration_identity")
-        != checkout_registration_identity
+        or meta.get("checkout_registration_identity") != checkout_registration_identity
     ):
         raise CleanupBlockedError(
             f"run identity is unknown or mismatched at {run_dir}; preserving checkout"
@@ -1116,9 +1202,7 @@ def _bind_run_to_cleanup(
     write_meta(run_dir, meta)
 
 
-def _archive_historical_runs(
-    *, journal_path: Path, journal: dict[str, Any]
-) -> None:
+def _archive_historical_runs(*, journal_path: Path, journal: dict[str, Any]) -> None:
     source_runs = Path(journal["run"]["source_state_root"]) / ".agent-flow" / "runs"
     archive_runs = Path(journal["run"]["archive_state_root"]) / ".agent-flow" / "runs"
     owner = Path(journal["run"]["source_dir"])
@@ -1169,9 +1253,7 @@ def _archive_historical_runs(
                 )
             continue
         destination.parent.mkdir(parents=True, exist_ok=True)
-        temporary = destination.with_name(
-            f".{destination.name}.tmp-{os.getpid()}"
-        )
+        temporary = destination.with_name(f".{destination.name}.tmp-{os.getpid()}")
         if temporary.exists():
             shutil.rmtree(temporary)
         try:
@@ -1190,9 +1272,7 @@ def _archive_historical_runs(
                 shutil.rmtree(temporary)
 
 
-def _archive_cleanup_run(
-    *, journal_path: Path, journal: dict[str, Any]
-) -> None:
+def _archive_cleanup_run(*, journal_path: Path, journal: dict[str, Any]) -> None:
     _archive_historical_runs(journal_path=journal_path, journal=journal)
     source = Path(journal["run"]["source_dir"])
     archive = Path(journal["run"]["archive_dir"])
@@ -1222,13 +1302,9 @@ def _archive_cleanup_run(
             )
         return
     if not source.is_dir():
-        raise CleanupBlockedError(
-            f"source run disappeared before archive: {source}"
-        )
+        raise CleanupBlockedError(f"source run disappeared before archive: {source}")
     if _run_tree_digest(source) != expected_digest:
-        raise CleanupBlockedError(
-            f"source run changed before archive copy: {source}"
-        )
+        raise CleanupBlockedError(f"source run changed before archive copy: {source}")
     archive.parent.mkdir(parents=True, exist_ok=True)
     temporary = archive.with_name(f".{archive.name}.tmp-{os.getpid()}")
     if temporary.exists():
@@ -1240,9 +1316,7 @@ def _archive_cleanup_run(
                 f"source run changed during archive copy: {source}"
             )
         if _run_tree_digest(temporary) != expected_digest:
-            raise CleanupBlockedError(
-                f"archive copy checksum mismatch: {temporary}"
-            )
+            raise CleanupBlockedError(f"archive copy checksum mismatch: {temporary}")
         os.replace(temporary, archive)
     finally:
         if temporary.exists():
@@ -1285,7 +1359,9 @@ def _run_tree_digest(root: Path, *, exclude_lifecycle: bool = True) -> str:
         raise CleanupBlockedError(f"run archive is not a real directory: {root}")
     digest = hashlib.sha256(b"agent-flow-run-archive-v1\0")
     try:
-        paths = sorted(root.rglob("*"), key=lambda path: path.relative_to(root).as_posix())
+        paths = sorted(
+            root.rglob("*"), key=lambda path: path.relative_to(root).as_posix()
+        )
     except OSError as exc:
         raise CleanupBlockedError(f"cannot enumerate run archive: {root}") from exc
     for path in paths:
@@ -1320,9 +1396,7 @@ def _run_tree_digest(root: Path, *, exclude_lifecycle: bool = True) -> str:
     return digest.hexdigest()
 
 
-def _digest_run_file(
-    *, path: Path, expected: os.stat_result, digest: Any
-) -> None:
+def _digest_run_file(*, path: Path, expected: os.stat_result, digest: Any) -> None:
     nofollow = getattr(os, "O_NOFOLLOW", None)
     if nofollow is None:
         raise CleanupBlockedError(
@@ -1336,11 +1410,11 @@ def _digest_run_file(
         ) from exc
     try:
         opened = os.fstat(fd)
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or (opened.st_dev, opened.st_ino, opened.st_size)
-            != (expected.st_dev, expected.st_ino, expected.st_size)
-        ):
+        if not stat.S_ISREG(opened.st_mode) or (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+        ) != (expected.st_dev, expected.st_ino, expected.st_size):
             raise CleanupBlockedError(
                 f"run archive entry identity changed during checksum: {path}"
             )
@@ -1350,10 +1424,7 @@ def _digest_run_file(
                 break
             digest.update(chunk)
         after = os.fstat(fd)
-        if (
-            after.st_size != opened.st_size
-            or after.st_mtime_ns != opened.st_mtime_ns
-        ):
+        if after.st_size != opened.st_size or after.st_mtime_ns != opened.st_mtime_ns:
             raise CleanupBlockedError(
                 f"run archive entry changed during checksum: {path}"
             )
@@ -1514,8 +1585,7 @@ def _validate_cleanup_snapshot(
         registered is None
         or registered.branch != checkout["branch"]
         or registered.head != checkout["expected_head_oid"]
-        or registered.registration_identity
-        != checkout["registration_identity"]
+        or registered.registration_identity != checkout["registration_identity"]
     ):
         raise CleanupBlockedError(
             "worktree registration changed since cleanup preparation; preserving checkout"
@@ -1649,7 +1719,7 @@ def _kit_owned_host_hook_registrations(*, root: Path, checkout: Path) -> set[str
     # 그 이름으로 unlink하면 **추적 중인 쌍둥이**가 지워져 checkout이 dirty가 된다.
     # 경로 문자열은 대소문자를 정규화하지 않으므로 inode로 같은 파일인지 본다.
     tracked_nodes: set[tuple[int, int]] = set()
-    for rel in HOST_HOOK_REGISTRATION_FILES:
+    for rel in _MANAGED_HOST_HOOK_REGISTRATION_FILES:
         if not _tracked_in_checkout(checkout=checkout, rel=rel):
             continue
         try:
@@ -1657,7 +1727,7 @@ def _kit_owned_host_hook_registrations(*, root: Path, checkout: Path) -> set[str
         except OSError:
             continue
         tracked_nodes.add((info.st_dev, info.st_ino))
-    for rel in HOST_HOOK_REGISTRATION_FILES:
+    for rel in _MANAGED_HOST_HOOK_REGISTRATION_FILES:
         target = checkout / rel
         try:
             if target.is_symlink() or not target.is_file():
@@ -1666,7 +1736,9 @@ def _kit_owned_host_hook_registrations(*, root: Path, checkout: Path) -> set[str
             payload = target.read_bytes()
         except OSError:
             continue
-        if not _host_hook_registration_is_kit_owned(leader=root, rel=rel, payload=payload):
+        if not _host_hook_registration_is_kit_owned(
+            leader=root, rel=rel, payload=payload
+        ):
             continue
         # git이 추적하는 파일은 provision이 쓰지도 않았고 정리가 지워서도 안 된다.
         # 지우면 그 checkout이 삭제된 tracked 파일로 dirty가 되어 정리가 막힌다 —
@@ -1834,9 +1906,7 @@ def _assert_commit_oid(*, root: Path, oid: str) -> None:
         optional_locks=False,
     )
     if not result.ok or result.stdout.strip() != oid:
-        raise CleanupBlockedError(
-            f"recorded commit OID cannot be resolved: {oid}"
-        )
+        raise CleanupBlockedError(f"recorded commit OID cannot be resolved: {oid}")
 
 
 def _is_ancestor(*, root: Path, ancestor: str, descendant: str) -> bool:
@@ -1919,7 +1989,6 @@ def _cleanup_repository_identity(root: Path) -> dict[str, str | int]:
     }
 
 
-
 def _valid_cleanup_repository_identity(value: object) -> bool:
     if not isinstance(value, dict):
         return False
@@ -1951,9 +2020,7 @@ def _load_cleanup_journal(path: Path) -> dict[str, Any]:
         not in {"cleanup_pending", "steps_complete", "complete"}
         or not _valid_cleanup_repository_identity(payload.get("repository"))
         or not isinstance(payload.get("checkout"), dict)
-        or not isinstance(
-            payload["checkout"].get("registration_identity"), str
-        )
+        or not isinstance(payload["checkout"].get("registration_identity"), str)
         or not payload["checkout"]["registration_identity"]
         or not isinstance(payload.get("steps"), dict)
         or any(
@@ -1992,9 +2059,7 @@ def _write_cleanup_journal(path: Path, payload: dict[str, Any]) -> None:
             temporary.unlink()
 
 
-def _record_cleanup_failure(
-    path: Path, journal: dict[str, Any], message: str
-) -> None:
+def _record_cleanup_failure(path: Path, journal: dict[str, Any], message: str) -> None:
     journal["status"] = "cleanup_pending"
     journal["last_error"] = {
         "message": message,
@@ -2006,6 +2071,7 @@ def _record_cleanup_failure(
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
 
 def _same_registration(
     before: RegisteredWorktree, after: RegisteredWorktree | None
@@ -2117,9 +2183,6 @@ def _run_start_exclusion(runtime_root: Path | None) -> Iterator[None]:
         ) from exc
 
 
-
-
-
 def _runtime_root_for_status(*, root: Path, status: WorktreeStatus) -> Path | None:
     try:
         key = _runtime_state_key(root=root, name=status.name)
@@ -2228,7 +2291,9 @@ def _delete_branch_ref_cas(
                 f"integration target changed during CAS delete: {target_ref}; "
                 "preserving branch ref"
             )
-        detail = result.stderr.strip() or result.error or f"git exited {result.returncode}"
+        detail = (
+            result.stderr.strip() or result.error or f"git exited {result.returncode}"
+        )
         raise WorktreeIsolationError(
             f"branch ref CAS failed for {ref} at {expected_oid}: {detail}; "
             "the ref was preserved"
@@ -2281,9 +2346,7 @@ def _ref_oid(*, root: Path, ref: str) -> str | None:
 
 
 def _merge_base_oid(*, root: Path, left: str, right: str) -> str:
-    result = git_safe(
-        "merge-base", left, right, cwd=root, optional_locks=False
-    )
+    result = git_safe("merge-base", left, right, cwd=root, optional_locks=False)
     oid = result.stdout.strip() if result.ok else ""
     if not _is_oid(oid):
         raise WorktreeIsolationError(
@@ -2301,7 +2364,12 @@ def _is_oid(value: object) -> bool:
 def worktree_branch_exists(*, root: Path, branch: str) -> bool:
     # 관측이다. ref 조회에 index.lock을 잡으면 동시에 도는 워커와 경합을 만든다.
     result = git_safe(
-        "show-ref", "--verify", "--quiet", f"refs/heads/{branch}", cwd=root, optional_locks=False
+        "show-ref",
+        "--verify",
+        "--quiet",
+        f"refs/heads/{branch}",
+        cwd=root,
+        optional_locks=False,
     )
     return result.ok
 
@@ -2323,9 +2391,7 @@ def _branch_ref_candidates(*, root: Path, branch: str) -> Iterator[str]:
         yield f"refs/remotes/{remote}/{branch}"
 
 
-def _fetch_remote_branch_ref(
-    *, root: Path, remote: str, branch: str, ref: str
-) -> bool:
+def _fetch_remote_branch_ref(*, root: Path, remote: str, branch: str, ref: str) -> bool:
     ref_existed = _git_commit_ref_exists(root=root, ref=ref)
 
     def fetch() -> bool:
@@ -2352,8 +2418,10 @@ def _fetch_remote_branch_ref(
     try:
         return with_git_lock_retry(
             fetch,
-            is_retryable=lambda exc: isinstance(exc, WorktreeIsolationError)
-            and is_git_lock_contention(str(exc)),
+            is_retryable=lambda exc: (
+                isinstance(exc, WorktreeIsolationError)
+                and is_git_lock_contention(str(exc))
+            ),
         )
     except WorktreeIsolationError:
         return not ref_existed and _git_commit_ref_exists(root=root, ref=ref)
@@ -2403,9 +2471,9 @@ def _profile_base_ref(root: Path) -> str:
         from agent_flow.core.profiles import active_profile_ids, load_profile_payload
 
         forced_profile = os.environ.get("AGENT_FLOW_PROFILE")
-        explicit_profile = bool(forced_profile) or (
-            root / ".agent-flow" / "kit.json"
-        ).is_file()
+        explicit_profile = (
+            bool(forced_profile) or (root / ".agent-flow" / "kit.json").is_file()
+        )
         fallback_unknown = bool(forced_profile) or (
             os.environ.get("AGENT_FLOW_FALLBACK_GENERIC") == "1"
         )
@@ -2455,7 +2523,12 @@ def _profile_base_ref(root: Path) -> str:
 
 def _git_commit_ref_exists(*, root: Path, ref: str) -> bool:
     result = git_safe(
-        "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", cwd=root, optional_locks=False
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        f"{ref}^{{commit}}",
+        cwd=root,
+        optional_locks=False,
     )
     # git을 호출할 수 없으면 기본 ref 후보가 없는 것으로 보고 HEAD fallback을 쓴다.
     return result.ok
@@ -2745,12 +2818,16 @@ def write_worktree_manifest(*, root: Path, status: WorktreeStatus) -> Path:
         "base_oid": status.base_oid,
         "branch_created_by_agent_flow": status.branch_created_by_agent_flow,
     }
-    path.write_text(f"{json.dumps(payload, indent=2, sort_keys=True)}\n", encoding="utf-8")
+    path.write_text(
+        f"{json.dumps(payload, indent=2, sort_keys=True)}\n", encoding="utf-8"
+    )
     return path
 
 
 def worktree_runtime_root(*, root: Path, name: str) -> Path:
-    return _runtime_state_root(root=root, name=resolve_worktree_name(root=root, name=name))
+    return _runtime_state_root(
+        root=root, name=resolve_worktree_name(root=root, name=name)
+    )
 
 
 def resolve_worktree_name(*, root: Path, name: str) -> str:
@@ -2764,7 +2841,7 @@ def resolve_worktree_name(*, root: Path, name: str) -> str:
     if name in candidates:
         return name
     if name.startswith("feat/"):
-        dashed = f"feat-{name[len('feat/'):]}"
+        dashed = f"feat-{name[len('feat/') :]}"
         if dashed in candidates:
             return dashed
     return _feature_worktree_name(name)
@@ -2785,7 +2862,9 @@ def known_worktree_names(*, root: Path) -> list[str]:
     return sorted(names)
 
 
-def remove_worktree_metadata(*, root: Path, name: str, path: Path | None = None) -> None:
+def remove_worktree_metadata(
+    *, root: Path, name: str, path: Path | None = None
+) -> None:
     """``name``의 런타임 메타데이터를 지운다.
 
     ``path``를 주면 그 등록 경로의 소유임을 증명한 경우에만 지운다. 정규화된 키는
@@ -2803,7 +2882,9 @@ def remove_worktree_metadata(*, root: Path, name: str, path: Path | None = None)
     except ValueError:
         # agent-flow 이름 규칙으로 정규화되지 않는 이름에는 애초에 메타데이터가 없다.
         return
-    if path is not None and not _metadata_belongs_to_path(root=root, key=key, path=path):
+    if path is not None and not _metadata_belongs_to_path(
+        root=root, key=key, path=path
+    ):
         return
     runtime_root = _runtime_state_root(root=root, name=key)
     if runtime_root.exists():
@@ -2883,11 +2964,18 @@ def _git_dirty(root: Path) -> bool:
     # 관측이다. status는 기본적으로 index를 refresh하며 index.lock을 잡으므로
     # 동시에 도는 워커의 실제 쓰기와 경합을 만든다.
     result = git_safe(
-        "status", "--porcelain", cwd=root, timeout_s=GIT_WORKTREE_TIMEOUT_S, optional_locks=False
+        "status",
+        "--porcelain",
+        cwd=root,
+        timeout_s=GIT_WORKTREE_TIMEOUT_S,
+        optional_locks=False,
     )
     if not result.ok:
         raise subprocess.CalledProcessError(
-            result.returncode or 1, result.args, output=result.stdout, stderr=result.stderr
+            result.returncode or 1,
+            result.args,
+            output=result.stdout,
+            stderr=result.stderr,
         )
     dirty_lines = [
         line
@@ -2934,10 +3022,14 @@ def _repository_checkout_root(root: Path) -> Path:
 
 def _repository_worktree_id(root: Path) -> str:
     common_dir = _git_common_dir(root)
-    repository_name = common_dir.parent.name if common_dir.name == ".git" else common_dir.stem
+    repository_name = (
+        common_dir.parent.name if common_dir.name == ".git" else common_dir.stem
+    )
     safe_name = re.sub(r"[^a-zA-Z0-9._-]+", "-", repository_name).strip("._-")
     safe_name = safe_name[:64] or "repository"
-    digest = hashlib.sha256(worktree_path_key(common_dir).encode("utf-8")).hexdigest()[:12]
+    digest = hashlib.sha256(worktree_path_key(common_dir).encode("utf-8")).hexdigest()[
+        :12
+    ]
     return f"{safe_name}-{digest}"
 
 
@@ -3046,7 +3138,9 @@ def _ensure_creation_root(path: Path) -> None:
 
 def _ensure_private_directory(path: Path) -> None:
     if not path.is_absolute():
-        raise WorktreeIsolationError(f"private worktree directory must be absolute: {path}")
+        raise WorktreeIsolationError(
+            f"private worktree directory must be absolute: {path}"
+        )
     if not path.exists():
         parent = path.parent
         if not parent.exists():
@@ -3112,7 +3206,10 @@ def _runtime_state_root(*, root: Path, name: str) -> Path:
 
 
 def _worktree_manifest_path(*, root: Path, name: str) -> Path:
-    return _runtime_state_root(root=root, name=_feature_worktree_name(name)) / "manifest.json"
+    return (
+        _runtime_state_root(root=root, name=_feature_worktree_name(name))
+        / "manifest.json"
+    )
 
 
 def _agent_flow_git_dir(root: Path) -> Path:
@@ -3208,7 +3305,8 @@ def _register_git_exclude(leader: Path, *patterns: str) -> None:
         return
     prefix = "" if not current or current.endswith("\n") else "\n"
     exclude.write_text(
-        current + prefix + "".join(f"{pattern}\n" for pattern in missing), encoding="utf-8"
+        current + prefix + "".join(f"{pattern}\n" for pattern in missing),
+        encoding="utf-8",
     )
 
 
@@ -3256,7 +3354,9 @@ def run_declared_worktree_actions(
             if WORKTREE_SETUP_ACTIONS[name](leader=leader, checkout=checkout):
                 ran.append(name)
         except (OSError, subprocess.SubprocessError) as exc:
-            print(f"warning: worktree setup action {name} failed: {exc}", file=sys.stderr)
+            print(
+                f"warning: worktree setup action {name} failed: {exc}", file=sys.stderr
+            )
     return tuple(ran)
 
 
@@ -3296,31 +3396,36 @@ def copy_declared_worktree_files(
     return tuple(copied)
 
 
-# host 세션(Claude/Codex/OMP)이 managed hook을 찾는 등록 파일들.
-# installer는 leader checkout에만 이 파일을 심는다.
-#
-# 목록은 `hook_integrity`에서 가져온다. 같은 언어 안에 두 벌을 두면 새 host를 한쪽에만
-# 추가했을 때 등록 검증은 도는데 worktree에는 그 파일이 깔리지 않아 이 버그가 그 host에서
-# 그대로 되살아난다. `hook_integrity`는 표준 라이브러리만 임포트하므로 순환이 없다.
+# Global host adapter 이전에 worktree에 설치되던 legacy project-local 등록 경로.
+# 새로 복사하지 않고 kit 소유 파일을 정리할 때만 사용한다.
 HOST_HOOK_REGISTRATION_FILES: tuple[str, ...] = tuple(
-    path.as_posix() for path in (*JSON_REGISTRATION_FILES, OMP_REGISTRATION_FILE)
+    path.as_posix() for path in JSON_REGISTRATION_FILES
 )
-_OMP_REGISTRATION_REL = OMP_REGISTRATION_FILE.as_posix()
+_OMP_REGISTRATION_REL = ".omp/extensions/agent-flow-hooks.ts"
+_MANAGED_HOST_HOOK_REGISTRATION_FILES = (
+    *HOST_HOOK_REGISTRATION_FILES,
+    _OMP_REGISTRATION_REL,
+)
 
 # git이 접어서 보고할 수 있는 등록 디렉터리들(`.claude/`, `.omp/`, `.omp/extensions/` …).
 _HOST_HOOK_REGISTRATION_DIRS: frozenset[str] = frozenset(
     "/".join(rel.split("/")[:depth]) + "/"
-    for rel in HOST_HOOK_REGISTRATION_FILES
+    for rel in _MANAGED_HOST_HOOK_REGISTRATION_FILES
     for depth in range(1, len(rel.split("/")))
 )
 
-# kit이 생성한 OMP 확장의 표지와 생성 서명. `lib/omp-hooks-extension.mjs`의
-# `OMP_EXTENSION_MARKER`와 `lib/installer-shared.mjs`의 `ompExtensionIsKitOwned`가
-# 쓰는 것과 같은 기준이다 — 같은 파일의 소유권을 두 곳이 다르게 판정하면 한쪽은 덮고
-# 다른 쪽은 남겨서 checkout과 leader의 등록이 영구히 어긋난다. 표지는 이번 버전부터
-# 붙으므로 그 이전 설치본을 위해 생성 서명도 함께 인정한다.
-_OMP_EXTENSION_MARKER = "agent-flow: managed omp extension"
-_OMP_EXTENSION_SIGNATURE = "export default function agentFlowHooks("
+# 표지는 생성물의 첫 줄과 정확히 일치해야 한다. 표지 도입 전 배포본은 저장소 이력에서
+# 확인한 payload digest만 인정해 사용자 extension의 함수 이름을 소유권으로 오인하지 않는다.
+_OMP_EXTENSION_MARKER_PREFIX = b"// agent-flow: managed omp extension\n"
+_LEGACY_OMP_EXTENSION_DIGESTS = frozenset(
+    {
+        "7e70b38f3e1c4dff4c4f1a332b5722c51650950b1ce3cfe2349cdf89fd057fab",
+        "fbadd85779b310d2f167678efaa46178b707a07652ec9aaa6518624a4db7814a",
+        "82cb954fdbfa5a7555811eb0c8928c51446d556c6b0d38b3ac4fc464a6e59fa2",
+        "be7c56d960720ac3589c0b3150b249e4e1219e8be138ca36cb59060f9ec945e7",
+        "bee7a36d235c5310c7c627c89942977395590fde67b274fa330ddafa7f68e527",
+    }
+)
 # provision skip 사유와 tracked 판정을 기억하는 파일 이름. checkout의 private git admin
 # 디렉터리에 두므로 worktree를 dirty로 만들지 않고 `git worktree remove`가 함께 지운다.
 _HOST_HOOK_STATE_NAME = "agent-flow-host-hooks.json"
@@ -3340,13 +3445,12 @@ class _HostHookProvisionState:
     tracked: dict[str, bool]
     index_identity: str
     dirty: bool = False
-    retirable: set[str] | None = None
 
 
 def provision_registered_worktree_host_hooks(
     *, root: Path
 ) -> tuple[tuple[Path, tuple[str, ...]], ...]:
-    """현재 등록된 managed/adopted checkout의 host hook 등록을 leader와 맞춘다."""
+    """등록된 managed/adopted checkout의 legacy local host 등록을 정리한다."""
     synced: list[tuple[Path, tuple[str, ...]]] = []
     with worktree_creation_lock(root):
         registered_worktrees = tuple(
@@ -3407,11 +3511,7 @@ def _assert_worktree_registration_identity(
     *, root: Path, checkout: Path, expected: str
 ) -> None:
     current = registered_worktree_at(root, checkout)
-    if (
-        current is None
-        or current.prunable
-        or current.registration_identity != expected
-    ):
+    if current is None or current.prunable or current.registration_identity != expected:
         raise WorktreeIsolationError(
             f"worktree registration changed during hook sync: {checkout}"
         )
@@ -3445,30 +3545,12 @@ def provision_host_hook_registrations(
     expected_registration_identity: str | None = None,
     expected_checkout_identity: tuple[int, int] | None = None,
 ) -> tuple[str, ...]:
-    """leader의 host hook 등록 파일을 managed checkout에도 깐다.
-
-    등록 파일이 leader에만 있으면 worktree checkout을 cwd로 연 host 세션에는
-    보호 브랜치와 worktree 경계 hook이 등록되지 않는다.
-
-    등록 안의 command는 leader 절대경로를 가리키므로 파일을 그대로 복사하면 된다.
-    leader 파일은 읽기만 한다. 내용이 이미 같으면 쓰지 않으므로 반복 호출해도 무해하다.
-
-    이미 있는 target은 kit이 깐 모양일 때만 덮는다. 사용자가 쓴 것으로 보이면 손대지
-    않고 사유를 말한다 — 같은 모듈의 `copy_declared_worktree_files`가 문서화한 계약이고,
-    덮으면 그 checkout의 host 설정이 백업도 경고도 없이 사라진다.
-
-    여기서 깐 파일은 `git worktree remove` 직전에 `_retire_provisioned_host_hook_registrations`가
-    걷어낸다. 저장소 공유 exclude로 가리면 leader 루트의 같은 경로까지 영구히 숨는다.
-
-    반환값은 실제로 변경한 상대경로들이다.
-    """
+    """Worktree의 legacy project-local host 등록 중 kit 소유 파일만 제거한다."""
     leader_base = Path(os.path.normpath(str(leader)))
     checkout_base = Path(os.path.normpath(str(checkout)))
     if same_worktree_path(leader_base, checkout_base):
         return ()
-    if (expected_registration_identity is None) != (
-        expected_checkout_identity is None
-    ):
+    if (expected_registration_identity is None) != (expected_checkout_identity is None):
         raise WorktreeIsolationError(
             "worktree hook sync requires both registration and checkout identities"
         )
@@ -3509,7 +3591,7 @@ def provision_host_hook_registrations(
     )
     written: list[str] = []
     try:
-        for rel in HOST_HOOK_REGISTRATION_FILES:
+        for rel in _MANAGED_HOST_HOOK_REGISTRATION_FILES:
             if expected_registration_identity is not None:
                 _assert_worktree_registration_identity(
                     root=leader_base,
@@ -3529,7 +3611,6 @@ def provision_host_hook_registrations(
                     checkout_fd=checkout_fd,
                 )
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
-                # 조용한 삼킴이 이 버그의 원인이었다. 등록이 빠졌으면 사유를 말한다.
                 done, reason = False, str(exc)
             if expected_registration_identity is not None:
                 _assert_worktree_registration_identity(
@@ -3585,84 +3666,70 @@ def _provision_one_host_hook_registration(
     state: _HostHookProvisionState,
     checkout_fd: int | None,
 ) -> tuple[bool, str | None]:
-    """(변경했는가, skip 사유). 사유가 None이면 skip이 아니다 — 보고는 호출자가 한다."""
-    source = _worktree_setup_path(leader_base, rel)
+    """Legacy project-local 등록에서 kit 소유 hook만 제거한다."""
     target = _worktree_setup_path(checkout_base, rel)
-    if _has_symlinked_component(leader_base, source):
-        return False, (
-            "the leader path has a symlinked component; replace it with a real file"
-            " so the registration can be copied"
-        )
     if checkout_fd is not None:
         return _provision_one_host_hook_registration_at(
             leader=leader_base,
             checkout=checkout_base,
-            source=source,
             rel=rel,
             state=state,
             checkout_fd=checkout_fd,
         )
-    if not source.is_file():
-        if (
-            _has_symlinked_component(checkout_base, target)
-            or target.is_symlink()
-            or not target.is_file()
-        ):
-            return False, None
-        if state.retirable is None:
-            state.retirable = _kit_owned_host_hook_registrations(
-                root=leader_base,
-                checkout=checkout_base,
-            )
-        if rel not in state.retirable:
-            return False, None
-        if not _unlink_kit_owned_host_hook_registration(
-            leader=leader_base,
-            checkout=checkout_base,
-            rel=rel,
-            checkout_fd=checkout_fd,
-        ):
-            return False, None
-        return True, None
-    if _has_symlinked_component(checkout_base, target) or target.is_symlink():
-        return False, (
-            "the checkout path is or goes through a symlink, so the copy would land"
-            " outside the checkout; remove the symlink"
-        )
-    payload = source.read_bytes()
-    existing = target.read_bytes() if target.is_file() else None
-    if existing == payload:
-        return False, None
-    # tracked 판정은 git 호출이라 쓸 일이 있을 때만 묻는다. `status`/`continue`가
-    # 매번 이 함수를 타므로 정상 상태에서 git을 4번 더 돌리면 그게 상시 비용이 된다.
-    #
-    # 프로젝트가 이 경로를 추적하면 등록 파일은 사용자 소유다. 덮으면 사용자 설정이
-    # 사라지고 worktree가 dirty가 되어 정리 게이트까지 막힌다.
-    if _host_hook_path_is_tracked(checkout=checkout_base, rel=rel, state=state):
-        return False, "tracked by git; commit the agent-flow hook entry or untrack the file"
-    if existing is not None and not _host_hook_registration_is_kit_owned(
-        leader=leader_base, rel=rel, payload=existing
+    if (
+        _has_symlinked_component(checkout_base, target)
+        or target.is_symlink()
+        or not target.is_file()
     ):
-        return False, (
-            "the checkout already has a registration this kit did not write;"
-            " merge the agent-flow hook entry into it by hand or delete the file"
+        return False, None
+    try:
+        observed = target.lstat()
+        payload = target.read_bytes()
+        current = target.lstat()
+    except OSError:
+        return False, None
+    if not stat.S_ISREG(observed.st_mode) or (current.st_dev, current.st_ino) != (
+        observed.st_dev,
+        observed.st_ino,
+    ):
+        return False, None
+    changed, replacement = _pruned_host_hook_registration(
+        leader=leader_base,
+        rel=rel,
+        payload=payload,
+    )
+    if not changed:
+        return False, None
+    if replacement is None:
+        return (
+            _unlink_kit_owned_host_hook_registration(
+                leader=leader_base,
+                checkout=checkout_base,
+                rel=rel,
+                checkout_fd=None,
+            ),
+            None,
         )
+    try:
+        latest = target.lstat()
+    except OSError:
+        return False, None
+    if (latest.st_dev, latest.st_ino) != (observed.st_dev, observed.st_ino):
+        return False, None
     _write_host_hook_registration(
         checkout=checkout_base,
         target=target,
-        payload=payload,
-        checkout_fd=checkout_fd,
+        payload=replacement,
+        mode=stat.S_IMODE(observed.st_mode),
+        checkout_fd=None,
     )
     return True, None
-
-
 
 
 def _provision_one_host_hook_registration_at(
     *,
     leader: Path,
     checkout: Path,
-    source: Path,
     rel: str,
     state: _HostHookProvisionState,
     checkout_fd: int,
@@ -3675,7 +3742,6 @@ def _provision_one_host_hook_registration_at(
         return _provision_one_host_hook_registration_at_locked(
             leader=leader,
             checkout=checkout,
-            source=source,
             rel=rel,
             state=state,
             checkout_fd=checkout_fd,
@@ -3684,9 +3750,7 @@ def _provision_one_host_hook_registration_at(
 
 
 @contextmanager
-def _locked_verified_worktree_index(
-    *, leader: Path, checkout: Path, checkout_fd: int
-):
+def _locked_verified_worktree_index(*, leader: Path, checkout: Path, checkout_fd: int):
     gitdir_fd = _open_verified_worktree_gitdir(
         leader=leader,
         checkout=checkout,
@@ -3698,10 +3762,7 @@ def _locked_verified_worktree_index(
         try:
             lock_fd = os.open(
                 "index.lock",
-                os.O_WRONLY
-                | os.O_CREAT
-                | os.O_EXCL
-                | getattr(os, "O_NOFOLLOW", 0),
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
                 0o600,
                 dir_fd=gitdir_fd,
             )
@@ -3810,40 +3871,39 @@ def _provision_one_host_hook_registration_at_locked(
     *,
     leader: Path,
     checkout: Path,
-    source: Path,
     rel: str,
     state: _HostHookProvisionState,
     checkout_fd: int,
     gitdir_fd: int,
 ) -> tuple[bool, str | None]:
-    source_exists = source.is_file()
     target = _worktree_setup_path(checkout, rel)
     try:
         parent = _open_host_hook_parent(
             checkout=checkout,
             target=target,
             checkout_fd=checkout_fd,
-            create=source_exists,
+            create=False,
         )
     except FileNotFoundError:
         return False, None
     try:
         existing = _read_host_hook_registration_at(parent=parent, name=target.name)
-        if not source_exists:
-            if existing is None:
-                return False, None
-            if _host_hook_path_is_tracked_at(
-                gitdir_fd=gitdir_fd,
-                rel=rel,
-                state=state,
-            ):
-                return False, None
-            if not _host_hook_registration_is_kit_owned(
-                leader=leader,
-                rel=rel,
-                payload=existing[0],
-            ):
-                return False, None
+        if existing is None:
+            return False, None
+        if _host_hook_path_is_tracked_at(
+            gitdir_fd=gitdir_fd,
+            rel=rel,
+            state=state,
+        ):
+            return False, None
+        changed, replacement = _pruned_host_hook_registration(
+            leader=leader,
+            rel=rel,
+            payload=existing[0],
+        )
+        if not changed:
+            return False, None
+        if replacement is None:
             return _retire_host_hook_registration_at(
                 parent=parent,
                 name=target.name,
@@ -3851,49 +3911,22 @@ def _provision_one_host_hook_registration_at_locked(
                 rel=rel,
                 expected=existing[1],
             ), None
-
-        payload = source.read_bytes()
-        if existing is not None and existing[0] == payload:
-            return False, None
-        if _host_hook_path_is_tracked_at(
-            gitdir_fd=gitdir_fd,
-            rel=rel,
-            state=state,
-        ):
-            return (
-                False,
-                "tracked by git; commit the agent-flow hook entry or untrack the file",
-            )
-        if existing is not None and not _host_hook_registration_is_kit_owned(
-            leader=leader,
-            rel=rel,
-            payload=existing[0],
-        ):
-            return (
-                False,
-                "the checkout already has a registration this kit did not write;"
-                " merge the agent-flow hook entry into it by hand or delete the file",
-            )
-        changed = _replace_host_hook_registration_at(
+        return _replace_pruned_host_hook_registration_at(
             parent=parent,
             name=target.name,
-            payload=payload,
+            payload=replacement,
             leader=leader,
             rel=rel,
-            expected=existing[1] if existing is not None else None,
-        )
-        return (
-            (True, None)
-            if changed
-            else (False, "the checkout registration changed concurrently; retry install")
-        )
+            expected=existing[1],
+            mode=existing[2],
+        ), None
     finally:
         os.close(parent)
 
 
 def _read_host_hook_registration_at(
     *, parent: int, name: str
-) -> tuple[bytes, tuple[int, int]] | None:
+) -> tuple[bytes, tuple[int, int], int] | None:
     try:
         handle = os.open(
             name,
@@ -3907,7 +3940,7 @@ def _read_host_hook_registration_at(
         payload = stream.read()
     if not stat.S_ISREG(identity.st_mode):
         raise WorktreeIsolationError(f"host hook registration is not a file: {name}")
-    return payload, (identity.st_dev, identity.st_ino)
+    return payload, (identity.st_dev, identity.st_ino), stat.S_IMODE(identity.st_mode)
 
 
 def _host_hook_path_is_tracked_at(
@@ -3938,6 +3971,20 @@ def _host_hook_path_is_tracked_at(
     return tracked
 
 
+def _backup_legacy_omp_extension(*, leader: Path, payload: bytes) -> Path:
+    backup_dir = leader / ".agent-flow" / "backups" / "legacy-omp"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(payload).hexdigest()[:12]
+    with tempfile.NamedTemporaryFile(
+        mode="wb",
+        prefix=f"agent-flow-hooks.ts.removed.{digest}.",
+        dir=backup_dir,
+        delete=False,
+    ) as stream:
+        stream.write(payload)
+        backup = Path(stream.name)
+    backup.chmod(0o644)
+    return backup
 
 
 def _retire_host_hook_registration_at(
@@ -3969,6 +4016,8 @@ def _retire_host_hook_registration_at(
             quarantine=quarantine,
         )
         return False
+    if rel == _OMP_REGISTRATION_REL:
+        _backup_legacy_omp_extension(leader=leader, payload=moved[0])
     os.unlink(quarantine, dir_fd=parent)
     return True
 
@@ -4045,17 +4094,98 @@ def _replace_host_hook_registration_at(
             )
 
 
-def _write_host_hook_staging_at(*, parent: int, name: str, payload: bytes) -> str:
+def _replace_pruned_host_hook_registration_at(
+    *,
+    parent: int,
+    name: str,
+    payload: bytes,
+    leader: Path,
+    rel: str,
+    expected: tuple[int, int],
+    mode: int,
+) -> bool:
+    staging = _write_host_hook_staging_at(
+        parent=parent,
+        name=name,
+        payload=payload,
+        mode=mode,
+    )
+    quarantine = f"{name}.agent-flow-replaced.{os.getpid()}.{secrets.token_hex(8)}"
+    try:
+        try:
+            os.rename(name, quarantine, src_dir_fd=parent, dst_dir_fd=parent)
+        except FileNotFoundError:
+            return False
+        moved = _read_host_hook_registration_at(parent=parent, name=quarantine)
+        if moved is None or moved[1] != expected or moved[2] != mode:
+            _restore_host_hook_registration_at(
+                parent=parent,
+                name=name,
+                quarantine=quarantine,
+            )
+            quarantine = ""
+            return False
+        changed, replacement = _pruned_host_hook_registration(
+            leader=leader,
+            rel=rel,
+            payload=moved[0],
+        )
+        if not changed or replacement != payload:
+            _restore_host_hook_registration_at(
+                parent=parent,
+                name=name,
+                quarantine=quarantine,
+            )
+            quarantine = ""
+            return False
+        try:
+            os.link(
+                staging,
+                name,
+                src_dir_fd=parent,
+                dst_dir_fd=parent,
+                follow_symlinks=False,
+            )
+        except FileExistsError:
+            _restore_host_hook_registration_at(
+                parent=parent,
+                name=name,
+                quarantine=quarantine,
+            )
+            quarantine = ""
+            return False
+        os.unlink(quarantine, dir_fd=parent)
+        quarantine = ""
+        return True
+    finally:
+        try:
+            os.unlink(staging, dir_fd=parent)
+        except FileNotFoundError:
+            pass
+        if quarantine:
+            raise WorktreeIsolationError(
+                f"concurrent registration preserved as {quarantine}; retry install"
+            )
+
+
+def _write_host_hook_staging_at(
+    *,
+    parent: int,
+    name: str,
+    payload: bytes,
+    mode: int = 0o644,
+) -> str:
     staging = f"{name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
     handle = os.open(
         staging,
         os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-        0o644,
+        mode,
         dir_fd=parent,
     )
     try:
         with os.fdopen(handle, "wb") as stream:
             stream.write(payload)
+        os.chmod(staging, mode, dir_fd=parent)
     except BaseException:
         try:
             os.unlink(staging, dir_fd=parent)
@@ -4128,7 +4258,10 @@ def _unlink_kit_owned_host_hook_registration(
                 return False
             if (current.st_dev, current.st_ino) != (observed.st_dev, observed.st_ino):
                 return False
+            if rel == _OMP_REGISTRATION_REL:
+                _backup_legacy_omp_extension(leader=leader, payload=payload)
             os.unlink(target.name, dir_fd=parent)
+            _prune_empty_host_hook_parents(checkout=checkout, target=target)
             return True
         finally:
             os.close(parent)
@@ -4150,7 +4283,10 @@ def _unlink_kit_owned_host_hook_registration(
         )
     ):
         return False
+    if rel == _OMP_REGISTRATION_REL:
+        _backup_legacy_omp_extension(leader=leader, payload=payload)
     target.unlink()
+    _prune_empty_host_hook_parents(checkout=checkout, target=target)
     return True
 
 
@@ -4163,9 +4299,7 @@ def _open_host_hook_parent(
 ) -> int:
     flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
     descriptor = (
-        os.dup(checkout_fd)
-        if checkout_fd is not None
-        else os.open(checkout, flags)
+        os.dup(checkout_fd) if checkout_fd is not None else os.open(checkout, flags)
     )
     try:
         for component in target.parent.relative_to(checkout).parts:
@@ -4193,6 +4327,7 @@ def _write_host_hook_registration(
     target: Path,
     payload: bytes,
     checkout_fd: int | None,
+    mode: int,
 ) -> None:
     """등록 파일을 stable checkout fd 아래에 원자적으로 놓는다."""
     if _DIR_FD_SUPPORTED:
@@ -4203,7 +4338,12 @@ def _write_host_hook_registration(
             create=True,
         )
         try:
-            _replace_at(parent=parent, name=target.name, payload=payload)
+            _replace_at(
+                parent=parent,
+                name=target.name,
+                payload=payload,
+                mode=mode,
+            )
         finally:
             os.close(parent)
         return
@@ -4219,20 +4359,21 @@ def _write_host_hook_registration(
     try:
         with os.fdopen(handle, "wb") as stream:
             stream.write(payload)
-        os.chmod(staging, 0o644)
+        os.chmod(staging, mode)
         os.replace(staging, target)
     except BaseException:
         staging.unlink(missing_ok=True)
         raise
 
 
-def _replace_at(*, parent: int, name: str, payload: bytes) -> None:
+def _replace_at(*, parent: int, name: str, payload: bytes, mode: int) -> None:
     staging = f"{name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    handle = os.open(staging, flags, 0o644, dir_fd=parent)
+    handle = os.open(staging, flags, mode, dir_fd=parent)
     try:
         with os.fdopen(handle, "wb") as stream:
             stream.write(payload)
+        os.chmod(staging, mode, dir_fd=parent)
         os.rename(staging, name, src_dir_fd=parent, dst_dir_fd=parent)
     except BaseException:
         try:
@@ -4240,6 +4381,72 @@ def _replace_at(*, parent: int, name: str, payload: bytes) -> None:
         except OSError:
             pass
         raise
+
+
+def _pruned_host_hook_registration(
+    *,
+    leader: Path,
+    rel: str,
+    payload: bytes,
+) -> tuple[bool, bytes | None]:
+    """사용자 JSON은 남기고 exact managed hook command만 제거한다."""
+    if rel == _OMP_REGISTRATION_REL:
+        return (
+            _host_hook_registration_is_kit_owned(
+                leader=leader,
+                rel=rel,
+                payload=payload,
+            ),
+            None,
+        )
+    try:
+        document = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return False, None
+    if not isinstance(document, dict) or not isinstance(document.get("hooks"), dict):
+        return False, None
+    hooks = document["hooks"]
+    changed = False
+    for event, entries in list(hooks.items()):
+        if not isinstance(entries, list):
+            continue
+        event_changed = False
+        kept_entries: list[Any] = []
+        for entry in entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get("hooks"), list):
+                kept_entries.append(entry)
+                continue
+            entry_hooks = entry["hooks"]
+            kept_hooks = [
+                hook
+                for hook in entry_hooks
+                if not (
+                    isinstance(hook, dict)
+                    and isinstance(hook.get("command"), str)
+                    and managed_path_hook_name(leader, hook["command"]) is not None
+                )
+            ]
+            if len(kept_hooks) == len(entry_hooks):
+                kept_entries.append(entry)
+                continue
+            changed = True
+            event_changed = True
+            if kept_hooks:
+                updated = dict(entry)
+                updated["hooks"] = kept_hooks
+                kept_entries.append(updated)
+        if event_changed:
+            if kept_entries:
+                hooks[event] = kept_entries
+            else:
+                del hooks[event]
+    if not changed:
+        return False, None
+    if not hooks:
+        del document["hooks"]
+    if not document:
+        return True, None
+    return True, f"{json.dumps(document, indent=2)}\n".encode()
 
 
 def _host_hook_registration_is_kit_owned(
@@ -4257,12 +4464,15 @@ def _host_hook_registration_is_kit_owned(
     **다른 설치본**의 hook을 가리키는 command가 둘 다 kit 소유로 읽혀 경고 없이 덮인다.
     그 함수는 이 leader가 실제로 생성하는 절대경로 하나만 인정한다.
     """
+    if rel == _OMP_REGISTRATION_REL:
+        return (
+            payload.startswith(_OMP_EXTENSION_MARKER_PREFIX)
+            or hashlib.sha256(payload).hexdigest() in _LEGACY_OMP_EXTENSION_DIGESTS
+        )
     try:
         text = payload.decode("utf-8")
     except UnicodeDecodeError:
         return False
-    if rel == _OMP_REGISTRATION_REL:
-        return _OMP_EXTENSION_MARKER in text or _OMP_EXTENSION_SIGNATURE in text
     try:
         document = json.loads(text)
     except ValueError:
@@ -4274,14 +4484,10 @@ def _host_hook_registration_is_kit_owned(
         managed_path_hook_name(leader, command) is None for command in commands
     ):
         return False
-    # hook 밖의 키(`permissions`, `env`, MCP 설정 …)는 installer가 병합해 보존하는
-    # 사용자 소유다. 그 부분이 leader와 다르면 이 checkout에만 있는 설정이므로
-    # 파일째 덮으면 조용히 사라진다 — 그때는 사용자 소유로 본다.
-    leader_path = leader / rel
-    leader_document = _load_registration_document(leader_path)
-    if leader_document is None and not leader_path.is_file():
-        return _non_hook_keys(document) == {}
-    return _non_hook_keys(document) == _non_hook_keys(leader_document)
+    # hook 밖의 키(`permissions`, `env`, MCP 설정 …)는 사용자 소유다. Global
+    # registration으로 전환된 뒤 leader의 project-local 파일은 정본이 아니므로,
+    # checkout 문서 자체에 사용자 키가 없을 때만 legacy kit 소유로 본다.
+    return _non_hook_keys(document) == {}
 
 
 def _load_registration_document(path: Path) -> Any:
@@ -4390,7 +4596,7 @@ def _host_hook_state_mapping(payload: dict[str, Any], key: str) -> dict[str, Any
     return {
         rel: entry
         for rel, entry in value.items()
-        if isinstance(rel, str) and rel in HOST_HOOK_REGISTRATION_FILES
+        if isinstance(rel, str) and rel in _MANAGED_HOST_HOOK_REGISTRATION_FILES
     }
 
 
@@ -4458,17 +4664,26 @@ def _run_git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
             output=result.stdout,
             stderr=result.stderr,
         )
-    return subprocess.CompletedProcess(result.args, result.returncode or 0, result.stdout, result.stderr)
+    return subprocess.CompletedProcess(
+        result.args, result.returncode or 0, result.stdout, result.stderr
+    )
 
 
-def _owned_branch_for_live_worktree(*, root: Path, status: WorktreeStatus) -> str | None:
+def _owned_branch_for_live_worktree(
+    *, root: Path, status: WorktreeStatus
+) -> str | None:
     planned_branch = _planned_branch(status.name)
     if planned_branch is None:
         return None
     if not status.branch_created_by_agent_flow or status.branch != planned_branch:
         return None
     result = git_safe(
-        "-C", str(status.path), "branch", "--show-current", cwd=root, optional_locks=False
+        "-C",
+        str(status.path),
+        "branch",
+        "--show-current",
+        cwd=root,
+        optional_locks=False,
     )
     if not result.ok:
         return None
@@ -4500,11 +4715,16 @@ def describe_slug(value: str) -> SlugQuality:
     dropped = tuple(
         word
         for word in value.split()
-        if any(char.isalnum() and not _SLUG_SAFE_CHAR_RE.match(char.lower()) for char in word)
+        if any(
+            char.isalnum() and not _SLUG_SAFE_CHAR_RE.match(char.lower())
+            for char in word
+        )
     )
     if not safe or safe.startswith(".") or ".." in safe:
         if not any(char.isalnum() for char in lowered):
-            raise ValueError(f"worktree name must contain at least one safe character: {value}")
+            raise ValueError(
+                f"worktree name must contain at least one safe character: {value}"
+            )
         # 한글 등 비ASCII task도 기본 worktree 이름으로 쓸 수 있게 안정적인 fallback을 둔다.
         digest = hashlib.sha1(lowered.encode("utf-8")).hexdigest()[:8]
         return SlugQuality(slug=f"task-{digest}", kind="digest", dropped=dropped)
@@ -4625,9 +4845,7 @@ def _registered_worktree_paths(root: Path) -> set[Path]:
         return set()
     prefix = "worktree "
     return {
-        real_path(line[len(prefix):].strip())
+        real_path(line[len(prefix) :].strip())
         for line in result.stdout.splitlines()
         if line.startswith(prefix)
     }
-
-

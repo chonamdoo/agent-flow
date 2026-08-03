@@ -12,6 +12,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from agent_flow.core.artifacts import init_project
+from agent_flow.core.runtime_binding import bind_run_runtime, unbind_run_runtime
 from agent_flow.core.workflow import load_workflow
 
 
@@ -21,6 +22,7 @@ class RunRequest:
     task: str
     adapter: str
     profile: str
+    hook_runtime_digest: str
     architecture: str = "default"
     run_id: str | None = None
     worktree: dict[str, str] | None = None
@@ -34,13 +36,16 @@ class RunState:
     adapter: str
     profile: str
     architecture: str
+    hook_runtime_digest: str
     status: str
     created_at: str
     run_dir: Path
     worktree: dict[str, str] | None = None
 
 
-def start_run(*, root: Path, request: RunRequest, project_root: Path | None = None) -> RunState:
+def start_run(
+    *, root: Path, request: RunRequest, project_root: Path | None = None
+) -> RunState:
     init_project(root)
     run_id = request.run_id or _new_run_id()
     run_dir = root / ".agent-flow" / "runs" / request.workflow_id / run_id
@@ -52,20 +57,25 @@ def start_run(*, root: Path, request: RunRequest, project_root: Path | None = No
         adapter=request.adapter,
         profile=request.profile,
         architecture=request.architecture,
+        hook_runtime_digest=request.hook_runtime_digest,
         status="running",
         created_at=_now(),
         run_dir=run_dir,
         worktree=request.worktree,
     )
     try:
+        bind_run_runtime(run_dir, request.hook_runtime_digest)
         # `root`는 worktree run에서 git-private state root다. checkout 경로는 그
         # 기준으로 적으면 `../../../..` 체인이 되므로 leader 프로젝트 루트로 적는다.
         _write_json(
             run_dir / "manifest.json",
             _state_payload(state, root=project_root or root),
         )
-        _append_event(run_dir, "started", {"profile": state.profile, "adapter": state.adapter})
+        _append_event(
+            run_dir, "started", {"profile": state.profile, "adapter": state.adapter}
+        )
     except Exception:
+        unbind_run_runtime(run_dir)
         shutil.rmtree(run_dir)
         raise
     return state
@@ -75,7 +85,9 @@ def status_summary(root: Path) -> str:
     runs_root = root / ".agent-flow" / "runs"
     if not runs_root.exists():
         return "no runs"
-    manifests = sorted(runs_root.glob("*/*/manifest.json"), key=lambda p: p.stat().st_mtime)
+    manifests = sorted(
+        runs_root.glob("*/*/manifest.json"), key=lambda p: p.stat().st_mtime
+    )
     if not manifests:
         return "no runs"
     manifest = None
@@ -85,7 +97,9 @@ def status_summary(root: Path) -> str:
             candidate_payload = json.loads(candidate.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if all(candidate_payload.get(key) for key in ("workflow_id", "run_id", "status")):
+        if all(
+            candidate_payload.get(key) for key in ("workflow_id", "run_id", "status")
+        ):
             manifest = candidate
             payload = candidate_payload
             break
@@ -103,7 +117,9 @@ def status_summary(root: Path) -> str:
         resolved_run_dir,
         payload.get("current_phase") or payload.get("phase"),
     )
-    required_artifact = _relative_run_dir(required_artifact) if required_artifact is not None else None
+    required_artifact = (
+        _relative_run_dir(required_artifact) if required_artifact is not None else None
+    )
     status = _structured_status(raw_status, required_artifact)
     reason = _reason_for_status(raw_status, required_artifact)
     next_command, next_command_template, required_action = _next_command_for_status(
@@ -144,9 +160,7 @@ def status_summary(root: Path) -> str:
             f"status_json: {json.dumps(status_payload, sort_keys=True)}",
         ]
     )
-    return "\n".join(
-        lines
-    )
+    return "\n".join(lines)
 
 
 def _append_event(run_dir: Path, event: str, details: dict[str, str]) -> None:
@@ -157,9 +171,14 @@ def _append_event(run_dir: Path, event: str, details: dict[str, str]) -> None:
 
 def _state_payload(state: RunState, *, root: Path | None = None) -> dict[str, str]:
     payload = asdict(state)
+    del payload["hook_runtime_digest"]
     # design-spec.md의 task digest와 대조된다. `artifact.create_run`과 같은 계약이다.
-    payload["task_digest"] = hashlib.sha256(state.task.strip().encode("utf-8")).hexdigest()
-    payload["run_dir"] = str(Path(".agent-flow") / "runs" / state.workflow_id / state.run_id)
+    payload["task_digest"] = hashlib.sha256(
+        state.task.strip().encode("utf-8")
+    ).hexdigest()
+    payload["run_dir"] = str(
+        Path(".agent-flow") / "runs" / state.workflow_id / state.run_id
+    )
     if isinstance(payload.get("worktree"), dict):
         worktree = dict(payload["worktree"])
         raw_path = worktree.get("path")
@@ -179,7 +198,9 @@ def _resolve_run_dir(root: Path, run_dir: str) -> Path:
 def _write_json(path: Path, payload: object) -> None:
     # 중단(Ctrl-C 등) 시 manifest가 반쯤 쓰인 채 남지 않도록 원자적으로 교체한다.
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(f"{json.dumps(payload, indent=2, sort_keys=True)}\n", encoding="utf-8")
+    tmp.write_text(
+        f"{json.dumps(payload, indent=2, sort_keys=True)}\n", encoding="utf-8"
+    )
     tmp.replace(path)
 
 
@@ -253,7 +274,9 @@ def _expected_artifact_ids(workflow) -> list[str]:
     for stage in workflow.stages:
         count = stage.replicas if stage.parallel else 1
         for replica in range(1, count + 1):
-            artifact_ids.append(stage.stage_id if count == 1 else f"{stage.stage_id}-{replica}")
+            artifact_ids.append(
+                stage.stage_id if count == 1 else f"{stage.stage_id}-{replica}"
+            )
     return artifact_ids
 
 
@@ -287,9 +310,7 @@ def _safe_relative_path(path: str, *, root: Path | None = None) -> str:
             try:
                 # 양쪽을 realpath로 맞춘다. macOS의 `/var` -> `/private/var`처럼 한쪽만
                 # 심링크를 지나면 상대 경로가 엉뚱한 자리를 가리킨다.
-                return os.path.relpath(
-                    os.path.realpath(path), os.path.realpath(root)
-                )
+                return os.path.relpath(os.path.realpath(path), os.path.realpath(root))
             except (OSError, ValueError):
                 pass
         trimmed = _relative_run_dir(path)

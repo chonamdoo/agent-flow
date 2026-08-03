@@ -41,6 +41,8 @@ _WRITE_TOOLS = frozenset(
         "edit",
         "multiedit",
         "multi_edit",
+        "write_file",
+        "edit_file",
     }
 )
 _COMMAND_KEYS = frozenset({"command", "cmd", "script", "shell_command"})
@@ -278,6 +280,9 @@ def host_write_boundary_violation(payload: object, project_root: Path) -> str | 
     )
     if literal_violation is not None:
         return literal_violation
+    indirect_violation = _command_indirect_writer_violation(command)
+    if indirect_violation is not None:
+        return indirect_violation
     if declared_cwd is None or not _is_within(declared_cwd, current.checkout):
         return (
             f"shell cwd is not bound to {current.checkout}; pass that exact worktree as "
@@ -753,6 +758,69 @@ _WRITE_OPERAND_COMMANDS = frozenset(
 )
 # 마지막 피연산자만 목적지인 명령.
 _WRITE_DEST_LAST_COMMANDS = frozenset({"cp", "mv", "ln", "install", "rsync"})
+_INLINE_CODE_FLAGS = {
+    "python": frozenset({"-c"}),
+    "node": frozenset({"-e", "--eval", "-p", "--print"}),
+    "ruby": frozenset({"-e"}),
+    "perl": frozenset({"-e"}),
+    "php": frozenset({"-r"}),
+    "lua": frozenset({"-e"}),
+    "sh": frozenset({"-c"}),
+    "bash": frozenset({"-c"}),
+    "zsh": frozenset({"-c"}),
+    "fish": frozenset({"-c"}),
+    "osascript": frozenset({"-e"}),
+    "swift": frozenset({"-e"}),
+}
+_COMMAND_WRAPPERS = frozenset({"command", "env", "nohup"})
+
+
+def _interpreter_name(value: str) -> str:
+    name = os.path.basename(value).lower()
+    if re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", name):
+        return "python"
+    return name
+
+
+def _command_indirect_writer_violation(command: str) -> str | None:
+    argv: list[str] = []
+
+    def inspect() -> str | None:
+        if not argv:
+            return None
+        index = 0
+        while index < len(argv):
+            name = _interpreter_name(argv[index])
+            if name not in _COMMAND_WRAPPERS:
+                break
+            index += 1
+            while index < len(argv) and (
+                argv[index].startswith("-")
+                or ("=" in argv[index] and not argv[index].startswith(("/", "./", "../")))
+            ):
+                index += 1
+        if index >= len(argv):
+            return None
+        name = _interpreter_name(argv[index])
+        flags = _INLINE_CODE_FLAGS.get(name)
+        if flags is None:
+            return None
+        if any(token in flags for token in argv[index + 1 :]):
+            return (
+                f"inline {name} code cannot be proven to stay inside the bound worktree; "
+                "write a script in that worktree and execute the reviewed file instead"
+            )
+        return None
+
+    for token in _shell_tokens(command):
+        if token in _SHELL_SEPARATORS:
+            violation = inspect()
+            if violation is not None:
+                return violation
+            argv.clear()
+        else:
+            argv.append(token)
+    return inspect()
 
 
 def _shell_tokens(command: str) -> list[str]:
@@ -775,6 +843,28 @@ def _command_write_targets(command: str) -> tuple[str, ...]:
         operands = [token for token in argv[1:] if not token.startswith("-")]
         if name in _WRITE_OPERAND_COMMANDS:
             targets.extend(operands)
+        elif name == "cp" and len(operands) >= 2:
+            hardlink = any(
+                token == "--link"
+                or (
+                    token.startswith("-")
+                    and not token.startswith("--")
+                    and "l" in token[1:]
+                )
+                for token in argv[1:]
+            )
+            targets.extend(operands if hardlink else operands[-1:])
+        elif name == "ln" and len(operands) >= 2:
+            symbolic = any(
+                token == "--symbolic"
+                or (
+                    token.startswith("-")
+                    and not token.startswith("--")
+                    and "s" in token[1:]
+                )
+                for token in argv[1:]
+            )
+            targets.extend(operands[-1:] if symbolic else operands)
         elif name in _WRITE_DEST_LAST_COMMANDS and len(operands) >= 2:
             targets.append(operands[-1])
         elif name == "dd":

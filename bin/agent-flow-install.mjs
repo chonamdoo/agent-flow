@@ -10,84 +10,59 @@
 
 import fs from "node:fs";
 import crypto from "node:crypto";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { SKILL_DEPENDENCIES, mergeInstallSelectionWithPrevious, resolveInstallSelection } from "../lib/skill-selection.mjs";
-import { OMP_EXTENSION_MARKER, ompHooksExtensionSource } from "../lib/omp-hooks-extension.mjs";
-import { MANAGED_HOOK_SCRIPTS, RETIRED_MANAGED_HOOK_SCRIPTS } from "../lib/managed-hooks.mjs";
+import { mergeInstallSelectionWithPrevious, resolveInstallSelection } from "../lib/skill-selection.mjs";
+import { installSharedHookRuntime } from "../lib/shared-hook-runtime.mjs";
+import { publishManagedProjectCutover } from "../lib/installer-cutover.mjs";
 import {
   activeInstallProfileIds,
-  AGENT_FLOW_COMMAND,
   architectureReviewerSkillMarkdown,
   ASSET_BACKUP_NOTICE_PREFIX,
   ASSET_UPGRADE_NOTICE_PREFIX,
   arrayValue,
+  assertProjectHookPathsSafe,
   assertInstallRootIsFinal,
   backupIfDifferent,
-  claudeHooksSettings,
-  codexConfigPath,
-  codexHooksSettings,
-  COMMAND_TOOL_MATCHER,
   ensureChildPath,
-  escapeRegex,
   fullFeatureSkillMarkdown,
   hasChildWithSuffix,
-  hookScriptCommand,
   installedProfileFileNames,
-  installProjectLauncher,
+  installGlobalHookRegistrations,
   syncManagedWorktreeHostHooks,
   isBundledSkillManifest,
   isPruneBackupName,
-  isRetiredHookCommand,
   KIT_ASSETS_RELATIVE,
   KIT_ROOT,
-  makeHooksExecutable,
-  managedHookDigests,
-  managedHookScriptName,
-  mergeHookConfig,
-  mergeHookSettings,
-  nextFreeBackupPath,
-  ompExtensionIsKitOwned,
+  pathHasSymlink,
   planReviewerSkillMarkdown,
   preserveKitSkillHashes,
   productBriefSkillMarkdown,
-  projectLauncherDigest,
-  projectLauncherPythonRecord,
-  PRUNE_BACKUP_SUFFIX,
-  PRUNE_BACKUP_VERSIONED,
   PRUNE_NOTICE_PREFIX,
-  pruneRetiredHooks,
   pruneRetiredHookScripts,
   pruneRetiredManagedScripts,
   pruneUninstalledProfiles,
   pushWatchSkillMarkdown,
-  READ_TOOL_MATCHER,
-  readHookSettings,
   readJsonIfExists,
   readKitAssetRecord,
   removeCodexBroadTrustState,
   removeGitignoreEntries,
   removeLegacyProjectSkillCopies,
-  removeOmpHooksExtension,
   reportSkippedUserEdit,
   requestedInstallRootOption,
+  resolveManagedPython,
+  prepareLegacyProjectRuntimeRetirement,
   resolveManagedWorktreeRoot,
   resolveLinkedWorktreeLeader,
   resolveInstallRoot,
-  retiredHookScripts,
   safeSkillName,
   samePath,
-  shellQuote,
-  SKILL_INDEX_END,
-  SKILL_INDEX_START,
   SKILL_UPGRADE_NOTICE_PREFIX,
-  skillIndexBlock,
   skillRequires,
   syncKitAssets,
-  tomlBasicString,
   uniqueStrings,
-  unquoteShellWord,
   upgradeBundledSkills,
   upsertGitignore,
   upsertSkillIndexBlock,
@@ -313,9 +288,6 @@ function copyDir(
         continue;
       }
       if (isRoot && excludedRootDirs.has(entry.name)) {
-        const r = removeDirIfSame(srcPath, destPath, force);
-        written += r.written;
-        skipped += r.skipped;
         continue;
       }
       const r = copyDir(
@@ -452,15 +424,6 @@ function writeManagedFile(pathName, content) {
 
 
 
-// kit.mjs와 같은 계약: 은퇴한 hook을 기존 settings에서 걷어낸다. 안 그러면 사라진
-// 스크립트를 host가 계속 실행해 셸이 막힌다.
-// 관측 hook(`record-*`)은 PostToolUse, 강제 hook은 PreToolUse. 이 구분을 어기면
-// 관측자가 판정자로 승격되고, 스크립트가 없거나 죽는 순간 host가 그걸 차단으로
-// 읽어 사용자 도구가 통째로 막힌다. 런 시작 시 `core/hook_integrity.py`가
-// 이 목록과 배치를 kit.json 기록과 대조한다.
-
-
-// hook을 끄면 "관리 대상 전부를 은퇴시킨 것"과 같다. kit.mjs와 같은 계약이다.
 
 
 
@@ -475,59 +438,11 @@ function writeManagedFile(pathName, content) {
 
 
 
-function installCodexHooks(root) {
-  const settingsPaths = [
-    path.join(root, ".Codex", "hooks.json"),
-    path.join(root, ".codex", "hooks.json"),
-  ];
-  const settings = {};
-  for (const settingsPath of settingsPaths) {
-    mergeHookConfig(settings, readHookSettings(settingsPath), hooksDisabled);
-  }
-  mergeHookSettings(settings, codexHooksSettings(root).hooks, hooksDisabled);
-  for (const settingsPath of settingsPaths) {
-    ensureDir(path.dirname(settingsPath));
-    fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
-  }
-  return true;
-}
-
-
-function installClaudeHooks(root) {
-  const settingsPath = path.join(root, ".claude", "settings.json");
-  const settings = readHookSettings(settingsPath);
-  mergeHookSettings(settings, claudeHooksSettings(root).hooks, hooksDisabled);
-  ensureDir(path.dirname(settingsPath));
-  fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
-}
 
 
 
-// managed hook은 digest가 `kit.json`에 기록되고 run 시작이 그 일치를 요구한다
-// (`hook_integrity`). "내용이 다르면 덮지 않는다"만 걸어 두면 kit 업그레이드가
-// 정의상 내용이 다른 경우라 digest는 새 값, 파일은 옛 값으로 갈라져 run이 막힌다.
-function upgradeManagedHooks(root, src, dest) {
-  if (!fs.existsSync(src)) {
-    return;
-  }
-  fs.mkdirSync(dest, { recursive: true });
-  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
-    if (!entry.isFile()) {
-      continue;
-    }
-    const source = path.join(src, entry.name);
-    const content = fs.readFileSync(source, "utf8");
-    const target = path.join(dest, entry.name);
-    const backup = backupIfDifferent(root, target, content);
-    if (backup) {
-      // 백업은 hook 디렉터리 안에 남는다. 실행 권한을 그대로 물려주면
-      // `hook_integrity`가 관리 대상 아닌 실행 파일로 보고 run 시작을 막는다.
-      fs.chmodSync(backup, 0o644);
-    }
-    fs.writeFileSync(target, content, "utf8");
-    fs.chmodSync(target, fs.statSync(source).mode & 0o777);
-  }
-}
+
+
 
 function upgradeBundledProfiles(root, src, dest, keepNames) {
   if (!fs.existsSync(src)) {
@@ -556,46 +471,7 @@ function upgradeBundledProfiles(root, src, dest, keepNames) {
 
 
 
-function installOmpHooks(root) {
-  // 다른 host의 hook 설정은 병합이라 업그레이드가 저절로 되지만, 이 확장은
-  // 통째로 kit이 만든 파일이다. "내용이 다르면 덮지 않는다"만 걸어 두면
-  // 업그레이드가 정의상 내용이 다른 경우라 영구히 고착된다.
-  const target = path.join(root, ".omp", "extensions", "agent-flow-hooks.ts");
-  if (!ompExtensionIsKitOwned(target) && !FORCE_MANAGED) {
-    console.warn(
-      `agent-flow: ${path.relative(root, target)} is not kit-managed; ` +
-        "leaving it alone. Re-run with --force-managed to replace it.",
-    );
-    return false;
-  }
-  // kit 소유여도 사용자가 손댔을 수 있다. 서명만으로는 구분이 안 되므로
-  // 다른 내용이면 지우기 전에 사본을 남긴다.
-  backupIfDifferent(root, target, ompHooksExtensionSource());
-  return writeFileIfMissingOrSame(target, ompHooksExtensionSource(), true);
-}
 
-function pruneManagedHookRegistrations(root) {
-  for (const rel of [
-    [".claude", "settings.json"],
-    [".Codex", "hooks.json"],
-    [".codex", "hooks.json"],
-  ]) {
-    const target = path.join(root, ...rel);
-    if (!fs.existsSync(target)) {
-      continue;
-    }
-    let settings;
-    try {
-      settings = JSON.parse(fs.readFileSync(target, "utf8"));
-    } catch {
-      continue;
-    }
-    if (pruneRetiredHooks(settings, false, hooksDisabled)) {
-      fs.writeFileSync(target, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
-      console.log(`  - hooks disabled: cleared ${path.join(...rel)}`);
-    }
-  }
-}
 
 
 
@@ -971,22 +847,12 @@ function previousSkillHash(previousIndex, name) {
 
 
 
-function pathHasSymlink(root, target) {
-  const relative = path.relative(root, target);
-  const parts = relative.split(path.sep).filter(Boolean);
-  let cursor = root;
-  for (const part of parts) {
-    cursor = path.join(cursor, part);
-    const stat = lstatIfExists(cursor);
-    if (stat && stat.isSymbolicLink()) return true;
-  }
-  return false;
-}
+
 
 function runKitInstall() {
   // kit.mjs가 prompts/rules/bootstrap/concise-output의 canonical generator다.
   // 여기서 먼저 실행하지 않으면 assertInstalled가 요구하는 파일이 빠진다.
-  // 단, kit.mjs는 yaml 가능한 python이 필요하므로 없는 환경에서는 경고 후 계속한다.
+  // 자식 실패 뒤 자체 publish를 계속하면 실패한 install을 성공으로 덮으므로 그대로 중단한다.
   const kitCli = path.join(path.dirname(fileURLToPath(import.meta.url)), "agent-flow-kit.mjs");
   // 자식은 이미 해석된 PROJECT를 cwd로 받는다. 상대 `--root`를 그대로 넘기면
   // 자식이 제 cwd 기준으로 한 번 더 풀어 다른 곳을 가리킨다.
@@ -1008,8 +874,7 @@ function runKitInstall() {
   }
   if (result.status !== 0) {
     const detail = (result.stderr || result.stdout || String(result.error || "unknown error")).trim().split("\n")[0];
-    console.error(`warning: agent-flow-kit install skipped (${detail}); .agent-flow prompts/bootstrap may be incomplete until \`agent-flow-kit install\` succeeds`);
-    return false;
+    throw new Error(`agent-flow-kit install failed (${detail})`);
   }
   return true;
 }
@@ -1047,9 +912,15 @@ function install() {
     process.exitCode = 1;
     return;
   }
+  assertProjectHookPathsSafe(PROJECT);
   // 자식 kit install이 index를 다시 쓴다. 그 뒤에 읽으면 "사용자가 손댔는가"를
   // 가르는 hash가 방금 관측한 현재 내용으로 갱신돼 있어 오라클이 사라진다.
   const previousSkillIndex = readJsonIfExists(path.join(AF_DIR, "skills", "index.json"));
+  const previousKit = readJsonIfExists(path.join(AF_DIR, "kit.json"));
+  const retireLegacyRuntime = prepareLegacyProjectRuntimeRetirement(
+    PROJECT,
+    previousKit,
+  );
   const delegatedKitInstalled = runKitInstall();
   ensureDir(path.join(AF_DIR, "runs"));
   ensureDir(path.join(AF_DIR, "memory"));
@@ -1058,6 +929,11 @@ function install() {
   ensureDir(path.join(AF_DIR, "local-skills"));
 
   const profile = detectProfile();
+  const hookRuntime = installSharedHookRuntime({
+    kitRoot: KIT_ROOT,
+    managedPython: resolveManagedPython({ projectRoot: PROJECT, kitRoot: KIT_ROOT }),
+    force: FORCE_MANAGED,
+  });
   let installSelection = resolveInstallSelection({ args: INSTALL_ARGS, detectedProfile: profile, kitRoot: KIT_ROOT, projectRoot: PROJECT });
   installSelection = mergeInstallSelectionWithPrevious(installSelection, previousSkillIndex, KIT_ROOT, PROJECT);
 
@@ -1131,9 +1007,8 @@ function install() {
   // 추가한 필드(skill_sources 등)가 기존 설치본에 영영 안 닿는다.
   // 덮기 전에는 사본을 남긴다.
   //
-  // 여기 깔리는 것은 이 프로젝트가 실제로 쓰는 stack + generic + _schema뿐이다.
-  // runtime 패키지 사본(`runtime/python/agent_flow/profiles/`)은 좁히지 않는다 —
-  // 그쪽이 실제 read path이자 override가 참조할 카탈로그다(`agent-flow-kit.mjs` 참조).
+  // profile override 카탈로그는 프로젝트 데이터로 설치하지만, 실행할 Python은
+  // digest로 주소를 정한 비공개 shared runtime에만 배포한다.
   const installedProfileNames = installedProfileFileNames(
     activeInstallProfileIds(profile, installSelection),
   );
@@ -1158,51 +1033,29 @@ function install() {
       skip: isBundledSkillManifest,
     });
     syncKitAssets(PROJECT, path.join(KIT_ROOT, "templates"), path.join(AF_DIR, "templates"), recordedAssets, writtenAssets);
-    writeKitAssetRecord(PROJECT, writtenAssets);
   } else {
     console.warn(`warning: ${KIT_ASSETS_RELATIVE} is unreadable; kit asset sync skipped (delete it to re-bootstrap)`);
   }
-  copyDir(
-    path.join(KIT_ROOT, "templates"),
-    path.join(AF_DIR, "runtime", "python", "agent_flow", "templates"),
-    new Set(),
-    true,
-    true,
-    true,
-  );
   const scriptsCopied = copyDir(
     path.join(KIT_ROOT, "scripts"),
     path.join(AF_DIR, "scripts"),
-    new Set(),
+    new Set(["hooks", "hook-runtime"]),
     true,
     FORCE_MANAGED,
-  );
-  upgradeManagedHooks(
-    PROJECT,
-    path.join(KIT_ROOT, "scripts", "hooks"),
-    path.join(AF_DIR, "scripts", "hooks"),
   );
   if (!samePath(PROJECT, KIT_ROOT)) {
     removeDirIfSame(path.join(KIT_ROOT, "scripts"), path.join(PROJECT, "scripts"), FORCE_MANAGED);
   }
   hooksDisabled = HOOKS_FLAG_OFF || (!HOOKS_FLAG_ON && readJsonIfExists(path.join(AF_DIR, "kit.json"))?.hooks === false);
-  pruneRetiredHookScripts(PROJECT, hooksDisabled);
-  pruneRetiredManagedScripts(PROJECT);
-  makeHooksExecutable(PROJECT);
-  // kit.mjs 쪽 install이 실패해도(PyYAML 없는 환경) 이 진입점이 kit.json을 덮는다.
-  // launcher를 여기서 한 번 더 보장하지 않으면 그 조합에서 승인 경로만 조용히 죽는다.
-  installProjectLauncher(PROJECT);
-  let codexHooksCopied = false;
-  let ompHooksCopied = false;
   removeCodexBroadTrustState(PROJECT);
-  if (hooksDisabled) {
-    pruneManagedHookRegistrations(PROJECT);
-    removeOmpHooksExtension(PROJECT);
-  } else {
-    codexHooksCopied = installCodexHooks(PROJECT);
-    installClaudeHooks(PROJECT);
-    ompHooksCopied = installOmpHooks(PROJECT);
-  }
+  const hostHome = fs.realpathSync.native(os.homedir());
+  const {
+    ompInstalled: ompHooksCopied,
+    codexInstalled: codexHooksCopied,
+  } = installGlobalHookRegistrations(hostHome, {
+    force: FORCE_MANAGED,
+    hooksDisabled: false,
+  });
   const codexAgentsCopied = copyDir(
     path.join(KIT_ROOT, ".Codex", "agents"),
     path.join(PROJECT, ".Codex", "agents"),
@@ -1286,9 +1139,8 @@ function install() {
     installed_at: typeof existingKit?.installed_at === "string" ? existingKit.installed_at : installTimestamp,
     updated_at: installTimestamp,
     kit_source_digest: existingKit?.kit_source_digest,
-    managed_hook_digests: managedHookDigests(),
-    project_launcher_digest: projectLauncherDigest(PROJECT),
-    project_launcher_python: projectLauncherPythonRecord(),
+    hook_runtime: hookRuntime,
+    shared_hook_home: path.dirname(path.dirname(hookRuntime.launcher_path)),
     skills_copied: skillsCopied,
     workflows_copied: workflowsCopied,
     profiles_copied: profilesCopied,
@@ -1310,12 +1162,18 @@ function install() {
       warnings: skillIndex.warnings.length,
     },
   };
-  fs.writeFileSync(
-    path.join(AF_DIR, "kit.json"),
-    JSON.stringify(kitJson, null, 2)
-  );
+  publishManagedProjectCutover({
+    root: PROJECT,
+    manifest: kitJson,
+    retireLegacyRuntime,
+  });
   if (delegatedKitInstalled) {
     syncManagedWorktreeHostHooks(PROJECT);
+  }
+  pruneRetiredHookScripts(PROJECT, hooksDisabled, FORCE_MANAGED, recordedAssets);
+  pruneRetiredManagedScripts(PROJECT);
+  if (recordedAssets) {
+    writeKitAssetRecord(PROJECT, writtenAssets);
   }
 
   console.log(`agent-flow installed`);

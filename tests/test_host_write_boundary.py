@@ -67,6 +67,7 @@ def _setup(tmp_path: Path):
             f"task-{name}",
             checkout_identity=f"worktree:{status.name}",
             checkout_registration_identity=status.registration_identity,
+            hook_runtime_digest="0" * 64,
         )
         statuses.append(status)
         runs.append(run_dir)
@@ -93,6 +94,19 @@ def _install_boundary_hooks(root: Path) -> Path:
         dirs_exist_ok=True,
     )
     return hooks
+
+
+def _installed_hook_environment(root: Path) -> dict[str, str]:
+    return {
+        **os.environ,
+        "AGENT_FLOW_PROJECT_ROOT": str(root),
+        "AGENT_FLOW_RUNTIME_DIR": str(root / ".agent-flow" / "runtime" / "python"),
+        "AGENT_FLOW_MANAGED_PYTHON": "/usr/bin/python3",
+        "AGENT_FLOW_VERIFIED_IMPORT_BOOTSTRAP": (
+            "import sys; "
+            f"sys.path.insert(0, {str(root / '.agent-flow' / 'runtime' / 'python')!r})"
+        ),
+    }
 
 
 def _status_payload(root: Path, status, run_dir: Path, session: str = "session-1"):
@@ -213,6 +227,57 @@ def test_shell_write_target_obeys_the_same_rule_as_the_write_tool(tmp_path: Path
     )
     assert redirect_violation is not None
 
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "ln {source} {destination}",
+        "ln -- {source} {destination}",
+        "cp --link {source} {destination}",
+    ),
+)
+def test_shell_hardlink_source_obeys_the_write_boundary(
+    tmp_path: Path,
+    command: str,
+) -> None:
+    root, statuses, runs = _setup(tmp_path)
+    first, _second = statuses
+    record_host_checkout_binding(_status_payload(root, first, runs[0]), root)
+    outside = tmp_path / "shared-runtime"
+    outside.write_text("trusted\n", encoding="utf-8")
+    destination = first.path / "alias"
+
+    violation = host_write_boundary_violation(
+        _command_payload(
+            command.format(source=outside, destination=destination),
+            cwd=first.path,
+        ),
+        root,
+    )
+
+    assert violation is not None
+    assert "outside the bound worktree" in violation
+
+
+def test_shell_symbolic_link_source_remains_read_only(
+    tmp_path: Path,
+) -> None:
+    root, statuses, runs = _setup(tmp_path)
+    first, _second = statuses
+    record_host_checkout_binding(_status_payload(root, first, runs[0]), root)
+    outside = tmp_path / "shared-runtime"
+    outside.write_text("trusted\n", encoding="utf-8")
+
+    violation = host_write_boundary_violation(
+        _command_payload(
+            f"ln -s {outside} {first.path / 'alias'}",
+            cwd=first.path,
+        ),
+        root,
+    )
+
+    assert violation is None
 
 def test_shell_reads_outside_the_worktree_stay_allowed(tmp_path: Path):
     """불변: 쓰기 경계가 읽기까지 막으면 인터프리터·도구 호출이 전부 죽는다.
@@ -397,6 +462,7 @@ def test_active_run_in_external_worktree_is_not_trusted(tmp_path: Path):
         "external",
         checkout_identity=f"worktree:{checkout.name}",
         checkout_registration_identity=registration,
+        hook_runtime_digest="0" * 64,
     )
 
     # 채택 기록이 없으면 claim의 소유 checkout을 증명할 수 없다. 등록만 된 checkout이
@@ -468,6 +534,7 @@ def test_adopted_external_worktree_is_trusted(tmp_path: Path):
         "external",
         checkout_identity=f"worktree:{status.name}",
         checkout_registration_identity=status.registration_identity,
+        hook_runtime_digest="0" * 64,
     )
     binding = record_host_checkout_binding(
         _status_payload(root, status, run_dir),
@@ -560,13 +627,9 @@ def test_bound_shell_blocks_embedded_leader_literals_and_relative_symlinks(
     assert symlinked is not None and "outside the bound worktree" in symlinked
 
 
-def test_bound_shell_allows_dynamic_path_commands_at_static_check(
+def test_bound_shell_blocks_inline_dynamic_path_commands(
     tmp_path: Path,
 ):
-    """정책 변경: 정적 분석은 인라인 코드를 더 이상 막지 않는다.
-
-    실제 쓰기 탐지는 PostToolUse worktree-tripwire.py 가 담당한다.
-    """
     root, statuses, runs = _setup(tmp_path)
     first = statuses[0]
     record_host_checkout_binding(_status_payload(root, first, runs[0]), root)
@@ -583,8 +646,8 @@ def test_bound_shell_allows_dynamic_path_commands_at_static_check(
         root,
     )
 
-    # 정적 분석은 이제 통과한다. 실제 쓰기는 PostToolUse tripwire 가 탐지한다.
-    assert violation is None
+    assert violation is not None
+    assert "inline python code cannot be proven" in violation
     assert not (root / "dynamic-leak.py").exists()
 
 
@@ -824,9 +887,11 @@ def test_binding_directory_symlink_is_rejected(tmp_path: Path):
 def test_installed_hooks_bind_then_block_a_leader_write(tmp_path: Path):
     root, statuses, runs = _setup(tmp_path)
     hooks = _install_boundary_hooks(root)
+    environment = _installed_hook_environment(root)
 
     binding = subprocess.run(
         ("/usr/bin/python3", "-I", str(hooks / "bind-host-worktree.py")),
+        env=environment,
         cwd=root,
         input=json.dumps(_status_payload(root, statuses[0], runs[0])),
         text=True,
@@ -835,6 +900,7 @@ def test_installed_hooks_bind_then_block_a_leader_write(tmp_path: Path):
     )
     blocked = subprocess.run(
         ("/bin/bash", str(hooks / "guard-host-worktree.sh")),
+        env=environment,
         cwd=root,
         input=json.dumps(_write_payload(root / "leaked.py")),
         text=True,
@@ -850,8 +916,10 @@ def test_installed_hooks_bind_then_block_a_leader_write(tmp_path: Path):
 def test_installed_guard_stops_after_a_dynamic_leader_leak(tmp_path: Path):
     root, statuses, runs = _setup(tmp_path)
     hooks = _install_boundary_hooks(root)
+    environment = _installed_hook_environment(root)
     binding = subprocess.run(
         ("/usr/bin/python3", "-I", str(hooks / "bind-host-worktree.py")),
+        env=environment,
         cwd=root,
         input=json.dumps(_status_payload(root, statuses[0], runs[0])),
         text=True,
@@ -862,6 +930,7 @@ def test_installed_guard_stops_after_a_dynamic_leader_leak(tmp_path: Path):
 
     blocked = subprocess.run(
         ("/bin/bash", str(hooks / "guard-host-worktree.sh")),
+        env=environment,
         cwd=root,
         input=json.dumps(_write_payload(statuses[0].path / "safe.py")),
         text=True,
@@ -881,9 +950,11 @@ def test_installed_guard_allows_non_git_projects_without_active_worktrees(
     root = tmp_path / "non-git"
     root.mkdir()
     hooks = _install_boundary_hooks(root)
+    environment = _installed_hook_environment(root)
 
     result = subprocess.run(
         ("/bin/bash", str(hooks / "guard-host-worktree.sh")),
+        env=environment,
         cwd=root,
         input=json.dumps(_write_payload(root / "feature.py")),
         text=True,

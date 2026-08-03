@@ -57,9 +57,9 @@ def _managed_run(root: Path, name: str = "cleanup") -> tuple[W.WorktreeStatus, P
         run_id="run-cleanup",
         checkout_identity=f"worktree:{status.name}",
         checkout_registration_identity=status.registration_identity,
+        hook_runtime_digest="0" * 64,
     )
     return status, run_dir
-
 
 
 def test_cleanup_completes_while_another_checkout_holds_a_provider_lease(
@@ -116,9 +116,9 @@ def test_cleanup_uses_remote_tracking_target_when_local_branch_is_absent(
         _git("rev-parse", "refs/remotes/upstream/release", cwd=root).stdout.strip()
         == target_oid
     )
-    fetch_head = root / _git(
-        "rev-parse", "--git-path", "FETCH_HEAD", cwd=root
-    ).stdout.strip()
+    fetch_head = (
+        root / _git("rev-parse", "--git-path", "FETCH_HEAD", cwd=root).stdout.strip()
+    )
     fetch_head.write_text("user fetch state\n", encoding="utf-8")
 
     journal_path, journal = W._prepare_or_load_cleanup_journal(
@@ -326,14 +326,26 @@ def test_run_lifecycle_lease_is_shared_and_recovers_after_owner_crash(
             with W._run_start_exclusion(state_root):
                 pytest.fail("cleanup entered while create-run lease was held")
         with pytest.raises(RuntimeError, match="another agent-flow run"):
-            create_run(state_root, "default", "blocked", run_id="blocked")
+            create_run(
+                state_root,
+                "default",
+                "blocked",
+                run_id="blocked",
+                hook_runtime_digest="0" * 64,
+            )
     finally:
         holder.kill()
         holder.wait(timeout=5)
 
     with W._run_start_exclusion(state_root):
         pass
-    run_dir = create_run(state_root, "default", "recovered", run_id="recovered")
+    run_dir = create_run(
+        state_root,
+        "default",
+        "recovered",
+        run_id="recovered",
+        hook_runtime_digest="0" * 64,
+    )
     assert (run_dir / "active").is_file()
     assert lock_path.is_file()
 
@@ -367,7 +379,8 @@ def test_run_activation_blocks_cleanup_until_active_marker_is_durable(
                     "    create_run("
                     "state, 'default', 'activation', run_id='activation-run', "
                     "checkout_identity='worktree:activation', "
-                    "checkout_registration_identity=str(identity))",
+                    "checkout_registration_identity=str(identity), "
+                    "hook_runtime_digest='0' * 64)",
                 )
             ),
             str(root),
@@ -454,7 +467,6 @@ def test_manual_removal_preserves_checkout_with_active_run(tmp_path: Path) -> No
     assert W.worktree_branch_exists(root=root, branch=status.branch)
 
 
-
 def test_cleanup_preserves_checkout_with_ignored_files(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     _init_repo(root)
@@ -480,7 +492,9 @@ def test_cleanup_preserves_checkout_with_ignored_files(tmp_path: Path) -> None:
 
 
 def _ignore_host_dirs(root: Path) -> None:
-    (root / ".gitignore").write_text(".claude/\n.Codex/\n.codex/\n.omp/\n", encoding="utf-8")
+    (root / ".gitignore").write_text(
+        ".claude/\n.Codex/\n.codex/\n.omp/\n", encoding="utf-8"
+    )
     _git("add", ".gitignore", cwd=root)
     _git("commit", "-m", "chore: ignore host dirs", cwd=root)
 
@@ -493,8 +507,12 @@ def _kit_registration_bytes(root: Path, rel: str) -> str:
             "// agent-flow: managed omp extension\n"
             "export default function agentFlowHooks(ctx) {}\n"
         )
+    runtime = json.loads(
+        (root / ".agent-flow" / "kit.json").read_text(encoding="utf-8")
+    )["hook_runtime"]
     command = (
-        f"/bin/bash '{root}/.agent-flow/scripts/hooks/guard-protected-branch.sh'"
+        f"'{runtime['python']}' -I '{runtime['launcher_path']}' "
+        f"--root '{root.resolve()}' --hook 'guard-protected-branch.sh'"
     )
     return json.dumps(
         {
@@ -510,26 +528,50 @@ def _kit_registration_bytes(root: Path, rel: str) -> str:
     )
 
 
-def _provisioned_checkout(root: Path, name: str) -> tuple[W.WorktreeStatus, Path]:
-    # 등록 파일은 checkout이 생긴 뒤에 leader에 나타난다(설치·업그레이드가 그 순서다).
-    # 먼저 쓰면 host 디렉터리를 ignore하지 않은 저장소에서 leader가 dirty가 되어
-    # `create_worktree` 자체가 거부하고, 그러면 그 조합을 아예 지나갈 수 없다.
+def _legacy_registration_checkout(
+    root: Path, name: str
+) -> tuple[W.WorktreeStatus, Path]:
     status, run_dir = _managed_run(root, name)
-    (root / ".agent-flow" / "scripts" / "hooks").mkdir(parents=True, exist_ok=True)
+    (root / ".agent-flow").mkdir(parents=True, exist_ok=True)
+    (root / ".agent-flow" / "kit.json").write_text(
+        json.dumps(
+            {
+                "hook_runtime": {
+                    "python": "/usr/bin/python3",
+                    "launcher_path": str(
+                        (
+                            root.parent / "shared-home" / "bin" / "agent-flow-hook"
+                        ).resolve()
+                    ),
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
     for rel in W.HOST_HOOK_REGISTRATION_FILES:
-        target = root / rel
+        target = status.path / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(_kit_registration_bytes(root, rel), encoding="utf-8")
-    written = W.provision_host_hook_registrations(leader=root, checkout=status.path)
-    assert written, "등록 파일이 하나도 깔리지 않으면 이 검사는 아무것도 반증하지 못한다"
     return status, run_dir
 
 
-def test_cleanup_is_not_blocked_by_the_host_hook_registrations_it_provisioned(
+def _provisioned_checkout(root: Path, name: str) -> tuple[W.WorktreeStatus, Path]:
+    status, run_dir = _legacy_registration_checkout(root, name)
+    removed = W.provision_host_hook_registrations(
+        leader=root, checkout=status.path
+    )
+    assert removed
+    assert all(
+        not (status.path / rel).exists()
+        for rel in W.HOST_HOOK_REGISTRATION_FILES
+    )
+    return status, run_dir
+
+
+def test_cleanup_is_not_blocked_after_legacy_host_registrations_are_removed(
     tmp_path: Path,
 ) -> None:
-    """반증: agent-flow가 스스로 깐 등록 파일을 dirty로 세면 관리 worktree는
-    정리 자체가 영영 막힌다 — 모든 checkout이 누적된다."""
+    """Global adapter 전환 시 legacy project-local 등록을 제거하고 정리한다."""
     root = tmp_path / "repo"
     _init_repo(root)
     _ignore_host_dirs(root)
@@ -547,18 +589,24 @@ def test_cleanup_is_not_blocked_by_the_host_hook_registrations_it_provisioned(
     assert not status.path.exists()
 
 
-def test_a_modified_registration_file_still_blocks_cleanup(tmp_path: Path) -> None:
-    """불변: 제외는 kit 소유로 읽히는 등록뿐이다. 사용자가 손대 kit이 생성할 수 없는
-    모양이 된 파일은 버려도 되는 파일이 아니다."""
+def test_a_modified_legacy_registration_file_still_blocks_cleanup(
+    tmp_path: Path,
+) -> None:
+    """사용자가 손댄 legacy 등록은 kit 소유로 오인해 제거하지 않는다."""
     root = tmp_path / "repo"
     _init_repo(root)
     _ignore_host_dirs(root)
-    status, run_dir = _provisioned_checkout(root, "edited-registration")
+    status, run_dir = _legacy_registration_checkout(root, "edited-registration")
     edited = status.path / ".claude" / "settings.json"
     edited.write_text(edited.read_text(encoding="utf-8") + "x", encoding="utf-8")
     assert not W._host_hook_registration_is_kit_owned(
         leader=root, rel=".claude/settings.json", payload=edited.read_bytes()
-    ), "손댄 파일이 여전히 kit 소유로 읽히면 이 검사는 아무것도 반증하지 못한다"
+    )
+    removed = W.provision_host_hook_registrations(
+        leader=root, checkout=status.path
+    )
+    assert ".claude/settings.json" not in removed
+    assert edited.is_file()
 
     with pytest.raises(W.CleanupBlockedError, match="checkout is dirty"):
         W.run_worktree_cleanup_transaction(
@@ -609,6 +657,7 @@ def test_a_stray_file_inside_a_registration_directory_blocks_cleanup(
     _ignore_host_dirs(root)
     status, run_dir = _provisioned_checkout(root, "stray-inside")
     stray = status.path / ".claude" / "settings.json.bak"
+    stray.parent.mkdir(parents=True, exist_ok=True)
     stray.write_text("직접 만든 백업\n", encoding="utf-8")
 
     with pytest.raises(W.CleanupBlockedError, match="checkout is dirty"):
@@ -631,25 +680,16 @@ def _git_common_exclude(root: Path) -> str:
     return exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
 
 
-def test_cleanup_completes_when_the_worktree_commit_does_not_ignore_host_dirs(
+def test_cleanup_completes_without_project_local_host_registrations(
     tmp_path: Path,
 ) -> None:
-    """반증: worktree는 HEAD/base_ref에서 나오므로 그 커밋의 `.gitignore`가 host
-    디렉터리를 담지 않을 수 있다(installer는 leader의 작업본만 고친다). 그러면
-    provision된 파일이 untracked로 남아 `assert_worktree_mergeable`과 `--force` 없는
-    `git worktree remove`가 그 checkout을 영구히 정리 불가로 만든다 — provision 자체가
-    checkout을 누적시킨다. 정리 직전에 우리가 깐 것만 걷어내야 한다.
-    """
+    """Global adapter 전환 후 host 등록은 checkout을 dirty로 만들지 않는다."""
     root = tmp_path / "repo"
     _init_repo(root)
     status, run_dir = _provisioned_checkout(root, "unignored")
 
-    assert not (root / ".gitignore").exists(), (
-        "host 디렉터리가 ignore된 상태에서는 이 검사가 아무것도 반증하지 못한다"
-    )
-    assert "?? .claude/" in _git("status", "--porcelain", cwd=status.path).stdout, (
-        "provision된 파일이 untracked로 보이지 않으면 이 검사는 아무것도 반증하지 못한다"
-    )
+    assert not (root / ".gitignore").exists()
+    assert _git("status", "--porcelain", cwd=status.path).stdout == ""
 
     result = W.run_worktree_cleanup_transaction(
         root=root,
@@ -664,26 +704,23 @@ def test_cleanup_completes_when_the_worktree_commit_does_not_ignore_host_dirs(
     assert not W.worktree_branch_exists(root=root, branch=status.branch)
 
 
-def test_provisioning_never_hides_the_leaders_own_host_settings(tmp_path: Path) -> None:
-    """반증: `info/exclude`는 git common dir에 있어 leader와 모든 worktree가 공유한다.
-
-    거기에 루트 고정 `/.claude/settings.json`을 올리면 **leader 루트의 그 파일**도 함께
-    숨는다. 그 파일은 installer가 사용자 내용에 병합해 넣는 사용자 파일이라, worktree를
-    하나 만든 것만으로 사용자가 커밋하려던 설정이 `git status`에서 사라지고 `git add`가
-    거부된다 — worktree를 지워도 남는다.
-    """
+def test_legacy_cleanup_never_hides_the_leaders_own_host_settings(
+    tmp_path: Path,
+) -> None:
+    """Legacy 등록 제거는 저장소 공용 exclude나 leader 설정을 건드리지 않는다."""
     root = tmp_path / "repo"
     _init_repo(root)
     before = _git_common_exclude(root)
     status, _ = _provisioned_checkout(root, "no-leader-exclude")
+    leader_settings = root / ".claude" / "settings.json"
+    leader_settings.parent.mkdir(parents=True, exist_ok=True)
+    leader_settings.write_text('{"user": true}\n', encoding="utf-8")
 
-    assert _git_common_exclude(root) == before, (
-        "provision이 저장소 공유 exclude를 건드렸다 — leader의 같은 경로까지 영구히 숨는다"
+    assert _git_common_exclude(root) == before
+    assert (
+        ".claude/settings.json"
+        in _git("status", "--porcelain", "-uall", cwd=root).stdout
     )
-    assert ".claude/settings.json" in _git(
-        "status", "--porcelain", "-uall", cwd=root
-    ).stdout, "leader의 사용자 host 설정이 `git status`에서 사라졌다"
-    # exclude에 걸리면 `git add`가 "ignored by one of your .gitignore files"로 거부한다.
     _git("add", "--dry-run", "--", ".claude/settings.json", cwd=root)
     assert status.path.exists()
 
@@ -693,7 +730,9 @@ def test_unmerged_head_is_archived_but_checkout_and_ref_are_preserved(
 ) -> None:
     root = tmp_path / "repo"
     _init_repo(root)
-    status = W.create_worktree(root=root, plan=W.plan_worktree(root=root, name="unmerged"))
+    status = W.create_worktree(
+        root=root, plan=W.plan_worktree(root=root, name="unmerged")
+    )
     (status.path / "feature.txt").write_text("not integrated\n", encoding="utf-8")
     _git("add", ".", cwd=status.path)
     _git("commit", "-m", "feat: unmerged", cwd=status.path)
@@ -705,6 +744,7 @@ def test_unmerged_head_is_archived_but_checkout_and_ref_are_preserved(
         run_id="run-unmerged",
         checkout_identity=f"worktree:{status.name}",
         checkout_registration_identity=status.registration_identity,
+        hook_runtime_digest="0" * 64,
     )
 
     with pytest.raises(W.CleanupBlockedError, match="cannot prove") as caught:
@@ -914,9 +954,7 @@ def test_cleanup_resume_rejects_tampered_checkout_identity(
     assert pending is not None
     journal = json.loads(pending.journal_path.read_text(encoding="utf-8"))
     journal["checkout"][field] = (
-        str(tmp_path / "different-worktree")
-        if field == "path"
-        else "0" * 40
+        str(tmp_path / "different-worktree") if field == "path" else "0" * 40
     )
     pending.journal_path.write_text(
         json.dumps(journal),
@@ -952,6 +990,7 @@ def test_cleanup_archives_inactive_run_history_before_metadata_removal(
         run_id="run-old",
         checkout_identity=f"worktree:{status.name}",
         checkout_registration_identity=status.registration_identity,
+        hook_runtime_digest="0" * 64,
     )
     (old_run / "evidence.txt").write_text("keep me\n", encoding="utf-8")
     mark_inactive(old_run)
@@ -962,6 +1001,7 @@ def test_cleanup_archives_inactive_run_history_before_metadata_removal(
         run_id="run-current",
         checkout_identity=f"worktree:{status.name}",
         checkout_registration_identity=status.registration_identity,
+        hook_runtime_digest="0" * 64,
     )
 
     result = W.run_worktree_cleanup_transaction(
@@ -977,6 +1017,7 @@ def test_cleanup_archives_inactive_run_history_before_metadata_removal(
     assert (archived_old / "evidence.txt").read_text(encoding="utf-8") == "keep me\n"
     assert read_meta(archived_old)["run_id"] == "run-old"
     assert not state_root.exists()
+
 
 def test_status_prefers_pending_cleanup_runtime_while_checkout_still_exists(
     tmp_path: Path,
@@ -1006,11 +1047,10 @@ def test_status_prefers_pending_cleanup_runtime_while_checkout_still_exists(
     checkout_root, state_root = cli_module._worktree_context(root, status.name)
     assert checkout_root == status.path
     assert state_root == W.cleanup_state_root(pending)
-    assert cli_module.main(
-        ["status", "--root", str(root), "--worktree", status.name]
-    ) == 0
+    assert (
+        cli_module.main(["status", "--root", str(root), "--worktree", status.name]) == 0
+    )
     assert "run-cleanup" in capsys.readouterr().out
-
 
 
 def test_cleanup_resume_rejects_archive_payload_tampering(tmp_path: Path) -> None:
@@ -1175,8 +1215,7 @@ def test_branch_cas_retries_lock_contention_and_remains_idempotent(
                     returncode=128,
                     stdout="",
                     stderr=(
-                        "fatal: Unable to create '.git/packed-refs.lock': "
-                        "File exists."
+                        "fatal: Unable to create '.git/packed-refs.lock': File exists."
                     ),
                 )
         return real_git_safe(*args, **kwargs)
@@ -1248,6 +1287,9 @@ def test_runner_resume_rejects_recreated_checkout_registration(
         "assert_managed_hooks_registered",
         lambda *_args: None,
     )
+    monkeypatch.setattr(
+        runner_module, "managed_hook_runtime_digest", lambda *_args: "digest"
+    )
 
     with pytest.raises(W.WorktreeIsolationError, match="registration changed"):
         runner.run(ResumeMode.RESUME)
@@ -1271,12 +1313,19 @@ def test_runner_does_not_complete_from_cleanup_artifact_alone(
     meta["phase_index"] = len(runner.phases)
     meta["current_phase"] = None
     write_meta(run_dir, meta)
-    (run_dir / "cleanup.md").write_text("# cleanup\n\nstatus: complete\n", encoding="utf-8")
+    (run_dir / "cleanup.md").write_text(
+        "# cleanup\n\nstatus: complete\n", encoding="utf-8"
+    )
 
     class Adapter:
         name = "generic"
 
-    monkeypatch.setattr(runner_module, "assert_managed_hooks_registered", lambda *_args: None)
+    monkeypatch.setattr(
+        runner_module, "assert_managed_hooks_registered", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        runner_module, "managed_hook_runtime_digest", lambda *_args: "digest"
+    )
     monkeypatch.setattr(runner_module, "detect_adapter", lambda: Adapter())
     monkeypatch.setattr(runner_module, "detect_available_clis", lambda: [])
 
@@ -1322,7 +1371,12 @@ def test_runner_completes_after_journaled_clean_integrated_cleanup(
     class Adapter:
         name = "generic"
 
-    monkeypatch.setattr(runner_module, "assert_managed_hooks_registered", lambda *_args: None)
+    monkeypatch.setattr(
+        runner_module, "assert_managed_hooks_registered", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        runner_module, "managed_hook_runtime_digest", lambda *_args: "digest"
+    )
     monkeypatch.setattr(runner_module, "detect_adapter", lambda: Adapter())
     monkeypatch.setattr(runner_module, "detect_available_clis", lambda: [])
 

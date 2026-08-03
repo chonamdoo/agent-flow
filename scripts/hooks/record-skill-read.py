@@ -170,7 +170,7 @@ def git_leader_checkout(start: Path) -> Path | None:
     env = {name: value for name, value in os.environ.items() if name not in LEAKY_GIT_ENV_VARS}
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "--git-common-dir"],
+            ["/usr/bin/git", "rev-parse", "--git-common-dir"],
             cwd=str(start),
             env=env,
             capture_output=True,

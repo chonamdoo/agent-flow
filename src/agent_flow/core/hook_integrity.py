@@ -1,30 +1,16 @@
-"""관리 hook 등록 무결성 — 런 시작 시 `kit.json` 기록과 실제 등록을 대조한다.
+"""관리 hook 등록 무결성 — 런 시작 시 shared dispatcher 등록과 runtime을 대조한다.
 
-tripwire(`assert_leader_unchanged`)는 런 *도중*의 변경만 본다. 런이 시작될 때
-이미 오염돼 있으면 `capture_leader_snapshot`이 그 오염을 그대로 기준선으로
-굳혀서 tripwire까지 통째로 무의미해진다. 그래서 이 검증은 **반드시 첫
-`capture_leader_snapshot`보다 먼저** 돈다.
-
-변경탐지가 아니라 대조인 이유는 오라클이 있기 때문이다. install이 심는
-스크립트 집합(`MANAGED_HOOK_SCRIPTS`)과 hook 사용 여부(`kit.json:hooks`)가
-기대값이다. 그래서 판정은 "없으면 위반"이 아니라 **"기록과 다르면 위반"**이다.
-`--no-hooks` 설치와 hook 미지원 host는 파일 상태 검사에서는 정상으로 보고하지만,
-런 시작 게이트는 강제 hook이 없는 상태를 안전하다고 증명할 수 없어 거부한다.
-
-**관측 hook은 PostToolUse, 강제 hook은 PreToolUse.** PreToolUse는 host가 허용/
-차단 판정을 기대하는 자리라, 관측용 스크립트를 거기 달면 스크립트가 없거나
-죽는 순간 host가 그것을 차단으로 읽어 사용자 도구가 통째로 막힌다. 관측자를
-늘리려던 변경이 실행 경로를 끊는 것이 이 계약이 막는 사고다.
-판정 범위는 **관리 네임스페이스**(`.agent-flow/scripts/hooks/`)로 한정한다.
-그 밖의 사용자 hook은 정당한 설정이라 오라클이 없다 — 런 *도중*에 그 파일들이
-바뀌는 것은 tripwire 심층 스캔(`worktree_isolation._EXEC_SURFACE_PATHS`)이 본다.
+tripwire(`assert_leader_unchanged`)는 런 도중의 변경만 본다. 런 시작 전에 global
+dispatcher, immutable runtime bundle, host 등록을 검증해야 오염된 상태를 기준선으로
+굳히지 않는다. 프로젝트에는 실행 가능한 hook 코드가 없어야 하며, JSON host는
+정확히 하나의 shared dispatcher command만 각 지원 이벤트에 등록한다.
 """
+
 from __future__ import annotations
 
 import hashlib
 import json
 import os
-import posixpath
 import re
 import shlex
 import stat
@@ -34,84 +20,74 @@ from typing import Iterator
 
 from agent_flow.core.worktree_isolation import leader_root_for
 
-# install이 심는 정확히 그 스크립트들. JS 쪽 등록 지점 3곳
-# (`bin/agent-flow-install.mjs`, `bin/agent-flow-kit.mjs`,
-# `scripts/check-agent-flow-parity.mjs`)과 갈라지면 parity가 잡는다.
-MANAGED_HOOK_SCRIPTS = (
-    "bind-host-worktree.py",
-    "guard-protected-branch.sh",
-    "guard-host-worktree.sh",
-    "show-phase-status.sh",
-    "comment-checker.py",
-    "record-skill-read.py",
-    "record-command-run.py",
-    "worktree-tripwire.py",
-)
-
-# 판정하지 않고 기록만 하는 hook. 항상 exit 0이며 PreToolUse에 달면 안 된다.
-OBSERVATIONAL_HOOK_SCRIPTS = (
-    "record-skill-read.py",
-    "record-command-run.py",
-)
-
-# host가 허용/차단을 기대하는 이벤트. 관측 hook 금지 구역이다.
-ENFORCEMENT_EVENT = "PreToolUse"
-
-# 스크립트별 기대 이벤트와 matcher. **이름 집합만 대조하면 자리 바꾸기를 못 본다** —
-# `guard-protected-branch.sh`를 PostToolUse로 옮기면 보호 브랜치 명령이 *실행된 뒤*
-# hook이 불려 차단이 사라지는데, 이름은 그대로라 통과한다. matcher도 같은 이유다:
-# `"Bash"`를 `"^$"`로 바꾸면 등록은 남고 hook은 영영 안 불린다.
-# JS installer의 실제 등록과 갈라지면 parity가 잡는다.
-MANAGED_HOOK_PLACEMENT = {
-    "bind-host-worktree.py": (
-        "PostToolUse",
-        "^(Bash|bash|shell|run_terminal_cmd|execute_command|local_shell|terminal)$",
-    ),
-    "guard-protected-branch.sh": ("PreToolUse", "Bash"),
-    "guard-host-worktree.sh": (
+# JSON host가 shared dispatcher에 위임하는 canonical event와 matcher.
+MANAGED_JSON_EVENT_PLACEMENT = {
+    "PreToolUse": (
         "PreToolUse",
-        "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit|"
-        "Bash|bash|shell|run_terminal_cmd|execute_command|local_shell|terminal)$",
+        "^(Bash|bash|shell|run_terminal_cmd|execute_command|local_shell|terminal|"
+        "apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit|"
+        "write_file|edit_file)$",
     ),
-    "comment-checker.py": (
+    "PostToolUse": (
         "PostToolUse",
-        "^(apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit)$",
+        "^(Bash|bash|shell|run_terminal_cmd|execute_command|local_shell|terminal|"
+        "apply_patch|Write|Edit|MultiEdit|write|edit|multi_edit|multiedit|"
+        "write_file|edit_file|"
+        "Read|read|read_file|view|cat|Skill|skill)$",
     ),
-    # 값은 한 줄로 둔다. parity 파서가 암시적 문자열 연결을 접지 못해 항목이 무음으로
-    # 탈락하고, 그러면 JS/Python 갈라짐이 CI를 통과한다.
-    "record-skill-read.py": ("PostToolUse", "^(Read|read|read_file|view|cat|Skill|skill|Bash|bash|shell|run_terminal_cmd|execute_command|local_shell|terminal)$"),
-    "record-command-run.py": (
-        "PostToolUse",
-        "^(Bash|bash|shell|run_terminal_cmd|execute_command|local_shell|terminal)$",
-    ),
-    "worktree-tripwire.py": (
-        "PostToolUse",
-        "^(Bash|bash|shell|run_terminal_cmd|execute_command|local_shell|terminal)$",
-    ),
-    "show-phase-status.sh": ("Stop", ""),
+    "Stop": ("Stop", ""),
 }
+MANAGED_HOOK_EVENTS = tuple(f"@{event}" for event in MANAGED_JSON_EVENT_PLACEMENT)
 
 HOOK_DIR_RELATIVE = Path(".agent-flow") / "scripts" / "hooks"
+LEGACY_PROJECT_HOOK_FILES = (
+    *(
+        HOOK_DIR_RELATIVE / name
+        for name in (
+            "bind-host-worktree.py",
+            "guard-protected-branch.sh",
+            "guard-host-worktree.sh",
+            "show-phase-status.sh",
+            "comment-checker.py",
+            "record-skill-read.py",
+            "record-command-run.py",
+            "worktree-tripwire.py",
+            "guard-worktree.sh",
+            "guard-worktree-write.py",
+            "prepare-spec-user-prompt.py",
+            "confirm-spec-user-prompt.py",
+            "guard-spec-approval.sh",
+        )
+    ),
+    Path(".agent-flow") / "scripts" / "hook-runtime" / "agent-flow-hook.py",
+)
 KIT_JSON_RELATIVE = Path(".agent-flow") / "kit.json"
-# managed launcher와 포함된 Python runtime도 hook과 같은 설치 무결성 경계다.
-PROJECT_LAUNCHER_RELATIVE = Path(".agent-flow") / "bin" / "agent-flow"
-# launcher가 실제로 태울 CLI. digest만 맞고 이게 없으면 launcher는 exit 127이다.
-RUNTIME_CLI_RELATIVE = Path(".agent-flow") / "runtime" / "python" / "agent_flow" / "cli.py"
+SHARED_RUNTIME_CLI_ENTRYPOINT = "agent-flow-cli.py"
 
-# install이 실제로 쓰는 등록 파일들. JSON host는 이벤트별 구조를 그대로 읽고,
-# OMP 확장은 kit이 통째로 생성하는 소스라 스크립트 이름 존재만 본다.
 JSON_REGISTRATION_FILES = (
     Path(".claude") / "settings.json",
     Path(".Codex") / "hooks.json",
     Path(".codex") / "hooks.json",
 )
-OMP_REGISTRATION_FILE = Path(".omp") / "extensions" / "agent-flow-hooks.ts"
-
-# 관리 디렉터리 안에서 hook이 아닌 것으로 인정하는 이름. `--no-hooks`가 남기는
-# 은퇴 사본과 실행으로 생기는 bytecode다.
-_NON_HOOK_SUFFIXES = (".removed",)
-_NON_HOOK_DIRS = ("__pycache__",)
 _SAFE_HOOK_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def _global_omp_registration_file() -> Path:
+    configured = os.environ.get("AGENT_FLOW_OMP_EXTENSION")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return (
+        Path.home() / ".omp" / "agent" / "extensions" / "agent-flow-hooks.ts"
+    ).resolve()
+
+
+def _shared_hook_home() -> Path:
+    configured = os.environ.get("AGENT_FLOW_HOME") or os.environ.get(
+        "AGENT_FLOW_SHARED_HOME"
+    )
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return (Path.home() / ".agent-flow").resolve()
 
 
 class HookIntegrityError(RuntimeError):
@@ -121,7 +97,7 @@ class HookIntegrityError(RuntimeError):
 @dataclass(frozen=True)
 class HookIntegrityReport:
     root: Path
-    recorded: bool          # kit.json에 `hooks` 기록이 있는가
+    recorded: bool  # kit.json에 `hooks` 기록이 있는가
     expected_enabled: bool
     violations: tuple[str, ...]
 
@@ -144,7 +120,9 @@ class _Surface:
         return {script for _, _, script in self.entries}
 
     def placements(self, script: str) -> set[tuple[str, str]]:
-        return {(event, matcher) for event, matcher, name in self.entries if name == script}
+        return {
+            (event, matcher) for event, matcher, name in self.entries if name == script
+        }
 
 
 def find_install_root(start) -> Path | None:
@@ -165,6 +143,17 @@ def find_install_root(start) -> Path | None:
         if _is_file(candidate / KIT_JSON_RELATIVE):
             return candidate
     return None
+
+
+def managed_hook_runtime_digest(root: Path) -> str:
+    install_root = find_install_root(root)
+    if install_root is None:
+        raise HookIntegrityError("managed hook installation could not be found")
+    runtime = _read_kit_json(install_root).get("hook_runtime")
+    digest = runtime.get("digest") if isinstance(runtime, dict) else None
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise HookIntegrityError("kit.json has no valid shared hook runtime digest")
+    return digest
 
 
 def assert_managed_hooks_registered(*roots) -> tuple[HookIntegrityReport, ...]:
@@ -216,25 +205,24 @@ def verify_managed_hooks(*roots) -> tuple[HookIntegrityReport, ...]:
 def _verify_root(root: Path) -> HookIntegrityReport:
     kit = _read_kit_json(root)
     if not isinstance(kit.get("hooks"), bool):
-        return HookIntegrityReport(root, recorded=False, expected_enabled=False, violations=())
+        return HookIntegrityReport(
+            root, recorded=False, expected_enabled=False, violations=()
+        )
     expected_enabled = bool(kit["hooks"])
     surfaces = tuple(_read_surfaces(root))
     violations: list[str] = []
-    violations.extend(_unapproved_scripts_on_disk(root))
+    violations.extend(_legacy_project_hook_violations(root))
     violations.extend(
         f"cannot read the hook registration file: {surface.name}"
         for surface in surfaces
         if surface.present and not surface.readable
     )
     if expected_enabled:
-        violations.extend(_missing_registrations(root, surfaces))
-        violations.extend(_managed_hook_digest_violations(root, kit))
-        violations.extend(_project_launcher_violations(root, kit))
+        violations.extend(_missing_registrations(surfaces))
+        violations.extend(_shared_hook_runtime_violations(root, kit))
         violations.extend(_misplaced_managed_hooks(surfaces))
-    else:
-        violations.extend(_unexpected_registrations(surfaces))
-    violations.extend(_unapproved_registrations(surfaces))
-    violations.extend(_malformed_registrations(surfaces))
+        violations.extend(_unapproved_registrations(surfaces))
+        violations.extend(_malformed_registrations(surfaces))
     return HookIntegrityReport(
         root,
         recorded=True,
@@ -243,264 +231,472 @@ def _verify_root(root: Path) -> HookIntegrityReport:
     )
 
 
-def _unapproved_scripts_on_disk(root: Path) -> Iterator[str]:
-    """관리 디렉터리에 관리 대상이 아닌 실행 파일이 있는가.
-
-    등록 전에 심어 두고 다음 install이 등록을 만들어 주기를 기다리는 경로를
-    막는다. 등록 검사만으로는 그 시점을 못 본다.
-    """
-    hook_dir = root / HOOK_DIR_RELATIVE
-    try:
-        entries = sorted(hook_dir.iterdir())
-    except OSError:
-        # 못 읽는 디렉터리를 예외로 흘리면 복구 명령까지 같이 죽는다.
-        return
-    for entry in entries:
-        name = entry.name
-        if name in MANAGED_HOOK_SCRIPTS or name in _NON_HOOK_DIRS:
-            continue
-        if name.endswith(_NON_HOOK_SUFFIXES):
-            continue
-        try:
-            info = entry.stat()
-        except OSError:
-            continue
-        if not stat.S_ISREG(info.st_mode):
-            continue
-        if info.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
-            yield f"unapproved executable in the managed hook directory: {name}"
+def _legacy_project_hook_violations(root: Path) -> Iterator[str]:
+    for relative in LEGACY_PROJECT_HOOK_FILES:
+        if _is_file(root / relative):
+            yield f"project-local managed hook code must be removed: {relative}"
 
 
-def _missing_registrations(root: Path, surfaces: tuple[_Surface, ...]) -> Iterator[str]:
-    hook_dir = root / HOOK_DIR_RELATIVE
-    for script in MANAGED_HOOK_SCRIPTS:
-        if not _is_file(hook_dir / script):
-            yield f"managed hook script is missing from disk: {script}"
+def _missing_registrations(surfaces: tuple[_Surface, ...]) -> Iterator[str]:
     for surface in surfaces:
         if not surface.present:
-            yield f"{surface.name} is missing, so no managed hook is registered there"
+            yield f"{surface.name} is missing, so no shared dispatcher is registered there"
             continue
         if not surface.readable:
             continue
         registered = surface.scripts()
-        for script in MANAGED_HOOK_SCRIPTS:
-            if script not in registered:
-                yield f"{surface.name} does not register {script}"
+        for event in MANAGED_HOOK_EVENTS:
+            if event not in registered:
+                yield f"{surface.name} does not delegate {event[1:]} to the shared dispatcher"
 
 
-def _managed_hook_digest_violations(
-    root: Path, kit: dict
+def _trusted_stable_python_violations(
+    interpreter: Path, *, label: str
 ) -> Iterator[str]:
-    expected = kit.get("managed_hook_digests")
-    if not isinstance(expected, dict):
-        yield "kit.json does not record managed hook content digests"
+    if not interpreter.is_absolute():
+        yield f"{label} is not an absolute path: {interpreter}"
         return
-    hook_dir = root / HOOK_DIR_RELATIVE
-    for script in MANAGED_HOOK_SCRIPTS:
-        recorded = expected.get(script)
-        if not isinstance(recorded, str) or not re.fullmatch(
-            r"[0-9a-f]{64}", recorded
+    try:
+        resolved = interpreter.resolve(strict=True)
+        identity = resolved.stat()
+    except OSError:
+        yield f"{label} is missing: {interpreter}"
+        return
+    if resolved != interpreter:
+        yield f"{label} is not a stable realpath: {interpreter}"
+        return
+    trusted_uids = {0, os.getuid()}
+    if not stat.S_ISREG(identity.st_mode):
+        yield f"{label} is not a regular file: {interpreter}"
+    if identity.st_uid not in trusted_uids:
+        yield f"{label} has a foreign owner: {interpreter}"
+    if identity.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        yield f"{label} is group or world writable: {interpreter}"
+    if not os.access(interpreter, os.X_OK):
+        yield f"{label} is not executable: {interpreter}"
+    for directory in interpreter.parents:
+        try:
+            directory_identity = directory.stat()
+        except OSError:
+            yield f"{label} ancestor is missing: {directory}"
+            return
+        if (
+            not stat.S_ISDIR(directory_identity.st_mode)
+            or directory_identity.st_uid not in trusted_uids
+            or directory_identity.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
         ):
-            yield f"kit.json has no valid content digest for managed hook: {script}"
-            continue
-        path = hook_dir / script
-        try:
-            identity = path.lstat()
-        except OSError:
-            continue
-        if not stat.S_ISREG(identity.st_mode) or stat.S_ISLNK(identity.st_mode):
-            yield f"managed hook script is not a regular owned file: {script}"
-            continue
-        try:
-            actual = hashlib.sha256(path.read_bytes()).hexdigest()
-        except OSError:
-            yield f"managed hook script cannot be read for digest verification: {script}"
-            continue
-        if actual != recorded:
-            yield f"managed hook content digest does not match kit.json: {script}"
+            yield f"{label} ancestor is unsafe: {directory}"
+            return
 
 
-def _project_launcher_violations(root: Path, kit: dict) -> Iterator[str]:
-    """설치본의 managed launcher와 포함된 Python runtime을 대조한다."""
-    if "project_launcher_digest" not in kit:
-        # 변조와 "이 설치본이 launcher 도입보다 오래됨"을 구분한다. 상위 문구가
-        # "변조가 아님을 확인한 뒤 재설치"라고 경고하므로, 섞으면 업그레이드
-        # 사용자를 변조 조사로 보낸다.
+def _legacy_trusted_system_python() -> str | None:
+    for candidate in (Path("/usr/bin/python3"), Path("/usr/local/bin/python3")):
+        try:
+            resolved = candidate.resolve(strict=True)
+            if resolved.stat().st_uid != 0:
+                continue
+        except OSError:
+            continue
+        if not tuple(
+            _trusted_stable_python_violations(
+                resolved, label="legacy shared hook Python interpreter"
+            )
+        ):
+            return str(resolved)
+    return None
+
+
+def _shared_hook_runtime_violations(root: Path, kit: dict) -> Iterator[str]:
+    record = kit.get("hook_runtime")
+    if not isinstance(record, dict):
         yield (
-            "this installation predates the managed launcher; re-run "
+            "this installation does not select a shared hook runtime; re-run "
             "`node bin/agent-flow-kit.mjs install` from the leader checkout"
         )
         return
-    recorded = kit["project_launcher_digest"]
-    if recorded is None:
-        # install이 launcher를 못 만든 상태다(PyYAML 인터프리터 없음). 여기서
-        # "재설치하라"만 말하면 같은 결과가 반복되므로 원인 쪽을 가리킨다.
-        yield (
-            "install could not create the managed launcher; fix the interpreter it "
-            "reported as `managed launcher not installed` (PyYAML is required) and "
-            "re-run `node bin/agent-flow-kit.mjs install` from the leader checkout"
-        )
+    if record.get("protocol_version") != 1:
+        yield "kit.json selects an unsupported shared hook runtime protocol"
         return
-    if not isinstance(recorded, str) or not re.fullmatch(r"[0-9a-f]{64}", recorded):
-        yield (
-            "kit.json has no valid content digest for the managed launcher: "
-            f"{PROJECT_LAUNCHER_RELATIVE}"
-        )
+    digest = record.get("digest")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        yield "kit.json has no valid shared hook runtime digest"
         return
-    path = root / PROJECT_LAUNCHER_RELATIVE
+
+    recorded_launcher = record.get("launcher_path")
+    if not isinstance(recorded_launcher, str) or not os.path.isabs(recorded_launcher):
+        yield "kit.json records an invalid shared hook launcher path"
+        return
+    launcher = Path(recorded_launcher).resolve(strict=False)
+    if launcher.name != "agent-flow-hook" or launcher.parent.name != "bin":
+        yield "kit.json records the shared hook launcher outside the global store"
+        return
+    home = launcher.parent.parent
+    if home != _shared_hook_home():
+        yield "kit.json records the shared hook launcher outside the configured global store"
+        return
+    runtime = home / "runtimes" / digest / "agent-flow-hook.py"
+    recorded_runtime = record.get("path")
+    if (
+        not isinstance(recorded_runtime, str)
+        or not os.path.isabs(recorded_runtime)
+        or Path(recorded_runtime).resolve(strict=False) != runtime
+    ):
+        yield "kit.json selects a shared hook runtime outside the digest store"
+    yield from _runtime_bundle_violations(home, digest)
+    recorded_python = record.get("python")
+
+    state_path = home / "hook-runtime.json"
+    try:
+        state = _read_owned_json(state_path)
+    except (OSError, ValueError):
+        yield f"shared hook runtime state is missing, unsafe, or unreadable: {state_path}"
+        return
+    launcher_digest = state.get("launcher_digest") if isinstance(state, dict) else None
+    accepted_launcher_digests = (
+        state.get("launcher_digests", [launcher_digest])
+        if isinstance(state, dict)
+        else None
+    )
+    state_python = (
+        state.get("python")
+        if isinstance(state, dict) and "python" in state
+        else _legacy_trusted_system_python()
+    )
+    if (
+        not isinstance(state, dict)
+        or state.get("protocol_version") != 1
+        or not isinstance(launcher_digest, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", launcher_digest)
+        or not isinstance(accepted_launcher_digests, list)
+        or not accepted_launcher_digests
+        or any(
+            not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+            for value in accepted_launcher_digests
+        )
+        or not isinstance(state_python, str)
+        or not os.path.isabs(state_python)
+    ):
+        yield f"shared hook runtime state is invalid: {state_path}"
+        return
+    yield from _trusted_stable_python_violations(
+        Path(state_python), label="owned shared hook state Python interpreter"
+    )
+    if not isinstance(recorded_python, str):
+        yield "kit.json records an invalid historical shared hook Python interpreter"
+    else:
+        yield from _trusted_stable_python_violations(
+            Path(recorded_python), label="historical shared hook Python interpreter"
+        )
+    yield from _shared_executable_violations(
+        launcher,
+        expected_digest=tuple(accepted_launcher_digests),
+        label="shared hook launcher",
+    )
+    yield from _managed_project_registry_violations(root, home)
+    yield from _global_omp_adapter_violations(state)
+
+
+def _runtime_bundle_entries(runtime_dir: Path) -> tuple[list[str], str | None]:
+    entries: list[str] = []
+
+    def visit(current: Path, relative: Path) -> str | None:
+        try:
+            children = list(current.iterdir())
+        except OSError as exc:
+            return f"runtime bundle directory is unreadable: {exc}"
+        for child in children:
+            child_relative = relative / child.name
+            try:
+                identity = child.lstat()
+            except OSError as exc:
+                return f"runtime bundle entry is unreadable: {exc}"
+            if stat.S_ISLNK(identity.st_mode):
+                return f"runtime bundle contains a symlink: {child_relative}"
+            if stat.S_ISDIR(identity.st_mode):
+                if (
+                    identity.st_uid != os.getuid()
+                    or stat.S_IMODE(identity.st_mode) != 0o555
+                ):
+                    return f"runtime bundle directory is unsafe: {child_relative}"
+                failure = visit(child, child_relative)
+                if failure:
+                    return failure
+            elif stat.S_ISREG(identity.st_mode):
+                entries.append(child_relative.as_posix())
+            else:
+                return f"runtime bundle contains an unsupported entry: {child_relative}"
+        return None
+
+    failure = visit(runtime_dir, Path())
+    return sorted(entries), failure
+
+
+def _runtime_bundle_violations(home: Path, digest: str) -> Iterator[str]:
+    runtime_dir = home / "runtimes" / digest
+    try:
+        identity = runtime_dir.lstat()
+    except OSError:
+        yield f"selected shared hook runtime directory is missing: {runtime_dir}"
+        return
+    if (
+        not stat.S_ISDIR(identity.st_mode)
+        or stat.S_ISLNK(identity.st_mode)
+        or identity.st_uid != os.getuid()
+        or stat.S_IMODE(identity.st_mode) != 0o555
+    ):
+        yield f"selected shared hook runtime directory is unsafe: {runtime_dir}"
+        return
+    manifest_path = runtime_dir / "runtime-manifest.json"
+    try:
+        manifest = _read_owned_json(manifest_path)
+        if stat.S_IMODE(manifest_path.stat().st_mode) != 0o444:
+            raise ValueError("runtime manifest mode is unsafe")
+    except (OSError, ValueError):
+        yield f"selected shared hook runtime manifest is unsafe or unreadable: {manifest_path}"
+        return
+    files = manifest.get("files")
+    policy = manifest.get("policy_sequence")
+    cli_entrypoint = manifest.get("cli_entrypoint")
+    if (
+        manifest.get("protocol_version") != 1
+        or manifest.get("runtime_digest") != digest
+        or manifest.get("entrypoint") != "agent-flow-hook.py"
+        or cli_entrypoint != SHARED_RUNTIME_CLI_ENTRYPOINT
+        or not isinstance(files, list)
+        or not isinstance(policy, dict)
+    ):
+        yield f"selected shared hook runtime manifest is invalid: {manifest_path}"
+        return
+    canonical = {
+        "protocol_version": manifest["protocol_version"],
+        "entrypoint": manifest["entrypoint"],
+        "cli_entrypoint": cli_entrypoint,
+        "policy_sequence": policy,
+        "files": files,
+    }
+    encoded = json.dumps(canonical, separators=(",", ":"), ensure_ascii=False).encode()
+    if hashlib.sha256(encoded).hexdigest() != digest:
+        yield f"selected shared hook runtime manifest digest does not match: {manifest_path}"
+        return
+    seen: set[str] = set()
+    for item in files:
+        if not isinstance(item, dict):
+            yield f"selected shared hook runtime file record is invalid: {manifest_path}"
+            continue
+        relative = item.get("path")
+        expected = item.get("sha256")
+        mode = item.get("mode")
+        if (
+            not isinstance(relative, str)
+            or not relative
+            or Path(relative).is_absolute()
+            or ".." in Path(relative).parts
+            or relative in seen
+            or not isinstance(expected, str)
+            or re.fullmatch(r"[0-9a-f]{64}", expected) is None
+            or mode not in (0o444, 0o555)
+        ):
+            yield f"selected shared hook runtime file record is invalid: {manifest_path}"
+            continue
+        seen.add(relative)
+        file_path = runtime_dir / relative
+        try:
+            content = _read_owned_file(file_path, mode)
+        except (OSError, ValueError):
+            yield f"selected shared hook runtime file is unsafe or unreadable: {file_path}"
+            continue
+        if hashlib.sha256(content).hexdigest() != expected:
+            yield f"selected shared hook runtime file digest does not match: {file_path}"
+    if manifest["entrypoint"] not in seen or cli_entrypoint not in seen:
+        yield f"selected shared hook runtime omits a required entrypoint: {manifest_path}"
+    entries, entry_failure = _runtime_bundle_entries(runtime_dir)
+    if entry_failure:
+        yield f"selected shared hook runtime is unsafe: {entry_failure}"
+    elif entries != sorted(["runtime-manifest.json", *seen]):
+        yield f"selected shared hook runtime contains unrecorded files: {runtime_dir}"
+
+
+def _managed_project_registry_violations(root: Path, home: Path) -> Iterator[str]:
+    registry_path = home / "managed-projects.json"
+    try:
+        registry = _read_owned_json(registry_path)
+        if stat.S_IMODE(registry_path.stat().st_mode) != 0o600:
+            raise ValueError("managed project registry mode is unsafe")
+    except (OSError, ValueError):
+        yield f"managed project registry is missing, unsafe, or unreadable: {registry_path}"
+        return
+    canonical_root = str(root.resolve())
+    projects = (
+        registry.get("projects") if registry.get("protocol_version") == 1 else None
+    )
+    record = projects.get(canonical_root) if isinstance(projects, dict) else None
+    accepted = (
+        record.get("accepted_kit_digests", []) if isinstance(record, dict) else []
+    )
+    if (
+        not isinstance(record, dict)
+        or record.get("root") != canonical_root
+        or not isinstance(record.get("kit_digest"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", record["kit_digest"]) is None
+        or not isinstance(accepted, list)
+        or any(
+            not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None
+            for value in accepted
+        )
+    ):
+        yield f"managed project registry does not contain a valid record for: {canonical_root}"
+        return
+    try:
+        content = _read_owned_file(root / KIT_JSON_RELATIVE, 0o644)
+    except (OSError, ValueError):
+        yield f"registered project manifest is unsafe or unreadable: {root / KIT_JSON_RELATIVE}"
+        return
+    if hashlib.sha256(content).hexdigest() not in {record["kit_digest"], *accepted}:
+        yield f"project manifest digest does not match the private registry: {canonical_root}"
+
+
+def _global_omp_adapter_violations(state: dict) -> Iterator[str]:
+    record = state.get("omp_adapter")
+    if not isinstance(record, dict):
+        yield "shared hook runtime state does not record the global OMP adapter"
+        return
+    expected_path = _global_omp_registration_file()
+    digest = record.get("digest")
+    accepted = record.get("accepted_digests", [digest])
+    if record.get("path") != str(expected_path):
+        yield "shared hook runtime state records the wrong global OMP adapter path"
+    if (
+        not isinstance(digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        or not isinstance(accepted, list)
+        or not accepted
+        or any(
+            not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None
+            for value in accepted
+        )
+    ):
+        yield "shared hook runtime state has no valid global OMP adapter digest"
+        return
+    try:
+        content = _read_owned_file(expected_path, 0o644)
+    except (OSError, ValueError):
+        yield f"global OMP adapter is missing, unsafe, or unreadable: {expected_path}"
+        return
+    actual = hashlib.sha256(content).hexdigest()
+    if actual not in accepted:
+        yield (
+            "global OMP adapter content digest does not match its runtime record: "
+            f"{expected_path}"
+        )
+
+
+def _read_owned_file(path: Path, mode: int) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        identity = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(identity.st_mode)
+            or identity.st_uid != os.getuid()
+            or identity.st_nlink != 1
+            or stat.S_IMODE(identity.st_mode) != mode
+        ):
+            raise ValueError("unsafe owned file")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            return stream.read()
+    finally:
+        os.close(descriptor)
+
+
+def _read_owned_json(path: Path) -> dict:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        identity = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(identity.st_mode)
+            or identity.st_uid != os.getuid()
+            or identity.st_nlink != 1
+            or identity.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        ):
+            raise ValueError("unsafe owned JSON file")
+        with os.fdopen(descriptor, "r", encoding="utf-8", closefd=False) as stream:
+            payload = json.load(stream)
+    finally:
+        os.close(descriptor)
+    if not isinstance(payload, dict):
+        raise ValueError("owned JSON file is not an object")
+    return payload
+
+
+def _shared_executable_violations(
+    path: Path,
+    *,
+    label: str,
+    expected_digest: str | tuple[str, ...],
+) -> Iterator[str]:
     try:
         identity = path.lstat()
     except OSError:
-        yield (
-            "managed launcher is missing, so the installed CLI cannot run: "
-            f"{PROJECT_LAUNCHER_RELATIVE}"
-        )
+        yield f"{label} is missing: {path}"
         return
-    if not stat.S_ISREG(identity.st_mode):
-        yield f"managed launcher is not a regular file: {PROJECT_LAUNCHER_RELATIVE}"
+    if not stat.S_ISREG(identity.st_mode) or stat.S_ISLNK(identity.st_mode):
+        yield f"{label} is not a regular owned file: {path}"
         return
+    if identity.st_nlink != 1:
+        yield f"{label} has unsafe link count: {path}"
     if identity.st_uid != os.getuid():
-        yield f"managed launcher is not owned by the current user: {PROJECT_LAUNCHER_RELATIVE}"
+        yield f"{label} is not owned by the current user: {path}"
     if identity.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-        yield f"managed launcher is group or world writable: {PROJECT_LAUNCHER_RELATIVE}"
+        yield f"{label} is group or world writable: {path}"
     if not os.access(path, os.X_OK):
-        yield f"managed launcher is not executable: {PROJECT_LAUNCHER_RELATIVE}"
-    if not _is_file(root / RUNTIME_CLI_RELATIVE):
-        yield (
-            "managed python runtime is missing, so the launcher cannot run the CLI: "
-            f"{RUNTIME_CLI_RELATIVE}"
-        )
+        yield f"{label} is not executable: {path}"
     try:
         actual = hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError:
-        yield (
-            "managed launcher cannot be read for digest verification: "
-            f"{PROJECT_LAUNCHER_RELATIVE}"
-        )
+        yield f"{label} cannot be read for digest verification: {path}"
         return
-    if actual != recorded:
-        yield f"managed launcher content digest does not match kit.json: {PROJECT_LAUNCHER_RELATIVE}"
-    yield from _launcher_python_violations(kit)
+    accepted = (
+        {expected_digest} if isinstance(expected_digest, str) else set(expected_digest)
+    )
+    if actual not in accepted:
+        yield f"{label} content digest does not match its runtime record: {path}"
 
 
-def _launcher_python_violations(kit: dict) -> Iterator[str]:
-    """launcher가 exec하는 인터프리터도 대조한다.
-
-    launcher 바이트만 보면 그가 실행하는 대상은 무검증으로 남는다 — 그 자리를
-    갈아끼우면 digest는 그대로 일치한 채 승인 capability를 넘겨받는다.
-    """
-    record = kit.get("project_launcher_python")
-    if record is None and "project_launcher_python" in kit:
-        # launcher를 못 만든 설치본이다. 그 사유는 digest 분기가 이미 말한다.
-        return
-    if not isinstance(record, dict):
-        yield (
-            "kit.json does not record the interpreter the managed launcher execs; "
-            "re-run `node bin/agent-flow-kit.mjs install` from the leader checkout"
-        )
-        return
-    recorded_path = record.get("path")
-    recorded_realpath = record.get("realpath")
-    recorded_digest = record.get("sha256")
-    if not isinstance(recorded_path, str) or not recorded_path:
-        yield "kit.json records no path for the managed launcher interpreter"
-        return
-    if not isinstance(recorded_digest, str) or not re.fullmatch(
-        r"[0-9a-f]{64}", recorded_digest
-    ):
-        yield f"kit.json records no valid digest for the managed launcher interpreter: {recorded_path}"
-        return
-    interpreter = Path(recorded_path)
-    try:
-        identity = interpreter.lstat()
-        resolved = interpreter.resolve(strict=True)
-        target_identity = resolved.stat()
-    except OSError:
-        yield f"the interpreter the managed launcher execs is missing: {recorded_path}"
-        return
-    if not stat.S_ISREG(identity.st_mode) and not stat.S_ISLNK(identity.st_mode):
-        yield f"the managed launcher interpreter is not a regular file or symlink: {recorded_path}"
-        return
-    if not stat.S_ISREG(target_identity.st_mode):
-        yield f"the managed launcher interpreter target is not a regular file: {recorded_path}"
-        return
-    if stat.S_ISLNK(identity.st_mode):
-        if not isinstance(recorded_realpath, str) or not Path(recorded_realpath).is_absolute():
-            yield f"kit.json records no target for the managed launcher interpreter: {recorded_path}"
-            return
-        if resolved != Path(recorded_realpath):
-            yield (
-                "the managed launcher interpreter target changed since install: "
-                f"{recorded_path}; re-run `node bin/agent-flow-kit.mjs install` from the leader checkout"
-            )
-            return
-    elif isinstance(recorded_realpath, str) and resolved != Path(recorded_realpath):
-        yield (
-            "the managed launcher interpreter target changed since install: "
-            f"{recorded_path}; re-run `node bin/agent-flow-kit.mjs install` from the leader checkout"
-        )
-        return
-    if not os.access(interpreter, os.X_OK):
-        # launcher의 두 exit 127 분기 중 하나다. 게이트가 이걸 안 보면 hook은
-        # 그 실패를 DEVNULL로 버려 사용자에게는 승인 무음으로만 보인다.
-        yield f"the managed launcher interpreter is not executable: {recorded_path}"
-    # 권한 비트는 이 자리에서 쓸 수 있는 신호가 아니다. 실측: GitHub runner의
-    # `/opt/hostedtoolcache/Python/.../python3.12`는 world-writable이고 homebrew의
-    # toolchain은 group-writable이다. 그걸 위반으로 보면 정당한 환경의 모든 run이
-    # 시작 거부된다. 교체는 아래 digest가 잡는다 — 그게 이 검사의 오라클이다.
-    try:
-        actual = hashlib.sha256(interpreter.read_bytes()).hexdigest()
-    except OSError:
-        yield f"the managed launcher interpreter cannot be read for digest verification: {recorded_path}"
-        return
-    if actual != recorded_digest:
-        # python 업그레이드도 여기로 온다. 그래서 문구가 재설치를 안내한다.
-        yield (
-            "the managed launcher interpreter changed since install: "
-            f"{recorded_path}; re-run `node bin/agent-flow-kit.mjs install` from the leader checkout"
-        )
-
-
-def _unexpected_registrations(surfaces: tuple[_Surface, ...]) -> Iterator[str]:
-    for surface in surfaces:
-        for script in sorted(surface.scripts() & set(MANAGED_HOOK_SCRIPTS)):
-            yield f"hooks are disabled in kit.json but {surface.name} still registers {script}"
 
 
 def _unapproved_registrations(surfaces: tuple[_Surface, ...]) -> Iterator[str]:
     for surface in surfaces:
-        for script in sorted(surface.scripts() - set(MANAGED_HOOK_SCRIPTS)):
-            yield f"{surface.name} registers an unapproved managed-path hook: {script}"
+        for event in sorted(surface.scripts() - set(MANAGED_HOOK_EVENTS)):
+            yield f"{surface.name} delegates an unapproved dispatcher event: {event[1:]}"
 
 
 def _misplaced_managed_hooks(surfaces: tuple[_Surface, ...]) -> Iterator[str]:
-    """이벤트와 matcher가 계약과 같은가.
-
-    이름 집합만 대조하면 `guard-protected-branch.sh`를 PostToolUse로 옮기는 것을
-    못 본다 — 등록은 남고 hook은 명령이 *실행된 뒤* 불려 차단이 사라진다.
-    matcher도 같다: `"Bash"`를 안 맞는 패턴으로 바꾸면 hook은 영영 안 불린다.
-    """
     for surface in surfaces:
-        if not surface.present or not surface.readable or not surface.entries:
+        if not surface.present or not surface.readable:
             continue
-        # OMP 확장은 생성된 소스라 이벤트/matcher가 JSON 필드가 아니다. 그 배치는
-        # 두 installer의 확장 소스를 바이트 비교하는 parity가 지킨다.
-        if all(event == "" for event, _, _ in surface.entries):
-            continue
-        for script, (event, matcher) in sorted(MANAGED_HOOK_PLACEMENT.items()):
-            found = surface.placements(script)
-            if not found or (event, matcher) in found:
+        for event_name, (expected_event, expected_matcher) in sorted(
+            MANAGED_JSON_EVENT_PLACEMENT.items()
+        ):
+            marker = f"@{event_name}"
+            found = [
+                (event, matcher)
+                for event, matcher, name in surface.entries
+                if name == marker
+            ]
+            if len(found) > 1:
+                yield (
+                    f"{surface.name} registers {event_name} dispatcher {len(found)} times; "
+                    "exactly one registration is required"
+                )
                 continue
-            actual = ", ".join(f"{ev or '(no event)'}/{mt or '(no matcher)'}" for ev, mt in sorted(found))
-            reason = (
-                "observation hooks must stay off PreToolUse or a failing observer "
-                "becomes a block decision"
-                if script in OBSERVATIONAL_HOOK_SCRIPTS
-                else "an enforcement hook off its event or matcher never blocks anything"
-            )
+            if not found or found[0] == (expected_event, expected_matcher):
+                continue
+            actual_event, actual_matcher = found[0]
             yield (
-                f"{surface.name} registers {script} at {actual}, expected "
-                f"{event}/{matcher or '(no matcher)'}; {reason}"
+                f"{surface.name} registers {event_name} dispatcher at "
+                f"{actual_event or '(no event)'}/{actual_matcher or '(no matcher)'}, expected "
+                f"{expected_event}/{expected_matcher or '(no matcher)'}"
             )
 
 
@@ -508,55 +704,32 @@ def _malformed_registrations(surfaces: tuple[_Surface, ...]) -> Iterator[str]:
     for surface in surfaces:
         for command in sorted(set(surface.malformed)):
             yield (
-                f"{surface.name} registers a managed hook path with extra shell syntax: "
-                f"{command!r}; the shell would swallow the hook's exit code"
+                f"{surface.name} registers a shared dispatcher path with extra shell syntax: "
+                f"{command!r}; the shell would swallow the dispatcher's exit code"
             )
 
 
 def _read_surfaces(root: Path) -> Iterator[_Surface]:
-    """install이 쓰는 등록 파일마다 `(event, script)` 목록을 만든다.
-
-    존재하지 않는 파일도 레코드를 남긴다. 없는 것을 건너뛰면 등록 파일을
-    통째로 지우는 것이 가장 싼 우회가 된다.
-    """
+    """Global JSON host 등록 파일마다 shared dispatcher event 목록을 만든다."""
+    home = Path.home()
     for relative in JSON_REGISTRATION_FILES:
-        path = root / relative
+        path = home / relative
         if not _is_file(path):
-            yield _Surface(str(relative), present=False, readable=False, entries=())
+            yield _Surface(str(path), present=False, readable=False, entries=())
             continue
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            # 읽지 못하는 등록 파일을 "등록 없음"으로 접으면, 파일을 깨뜨리는
-            # 것만으로 검증이 사라진다. 읽기 실패 자체를 위반으로 든다.
-            yield _Surface(str(relative), present=True, readable=False, entries=())
+            yield _Surface(str(path), present=True, readable=False, entries=())
             continue
         entries, malformed = _json_registrations(root, payload)
         yield _Surface(
-            str(relative),
+            str(path),
             present=True,
             readable=True,
             entries=entries,
             malformed=malformed,
         )
-    omp = root / OMP_REGISTRATION_FILE
-    if not _is_file(omp):
-        yield _Surface(str(OMP_REGISTRATION_FILE), present=False, readable=False, entries=())
-        return
-    try:
-        text = omp.read_text(encoding="utf-8")
-    except OSError:
-        yield _Surface(str(OMP_REGISTRATION_FILE), present=True, readable=False, entries=())
-        return
-    # OMP 확장은 kit이 통째로 생성하는 소스다. 이벤트 자리는 소스 안의
-    # `pi.on(...)` 핸들러라 여기서 판정하지 않는다. 그 배치는 두 installer의
-    # 확장 소스가 바이트 단위로 같은지 보는 parity가 지킨다.
-    yield _Surface(
-        str(OMP_REGISTRATION_FILE),
-        present=True,
-        readable=True,
-        entries=tuple(("", "", script) for script in MANAGED_HOOK_SCRIPTS if script in text),
-    )
 
 
 def _json_registrations(
@@ -573,9 +746,9 @@ def _json_registrations(
         for block in blocks:
             matcher = block.get("matcher", "") if isinstance(block, dict) else ""
             for command in _entry_commands(block):
-                script = managed_path_hook_name(root, command)
-                if script is not None:
-                    entries.append((str(event), str(matcher or ""), script))
+                event_name = managed_path_hook_name(root, command)
+                if event_name is not None:
+                    entries.append((str(event), str(matcher or ""), event_name))
                 elif mentions_managed_hook_dir(root, command):
                     malformed.append(command)
     return tuple(entries), tuple(malformed)
@@ -593,54 +766,138 @@ def _entry_commands(entry: object) -> Iterator[str]:
 
 
 def managed_path_hook_name(root: Path, command: str) -> str | None:
-    """Return the script name only for one exact trusted hook invocation."""
+    """현재 dispatcher와 이전 project-local command의 literal argv를 판별한다."""
+    runtime_record = _read_kit_json(root).get("hook_runtime")
+    recorded_python = (
+        runtime_record.get("python") if isinstance(runtime_record, dict) else None
+    )
+    recorded_launcher = (
+        runtime_record.get("launcher_path")
+        if isinstance(runtime_record, dict)
+        else None
+    )
+    recorded_bootstrap_digest = (
+        runtime_record.get("bootstrap_digest")
+        if isinstance(runtime_record, dict)
+        else None
+    )
+    try:
+        state = _read_owned_json(_shared_hook_home() / "hook-runtime.json")
+    except (OSError, ValueError):
+        return None
+    current_python = (
+        state.get("python")
+        if isinstance(state, dict) and "python" in state
+        else _legacy_trusted_system_python()
+    )
+    if (
+        not isinstance(state, dict)
+        or state.get("protocol_version") != 1
+        or not isinstance(current_python, str)
+        or not os.path.isabs(current_python)
+        or tuple(
+            _trusted_stable_python_violations(
+                Path(current_python),
+                label="owned shared hook state Python interpreter",
+            )
+        )
+        or not isinstance(recorded_launcher, str)
+        or not os.path.isabs(recorded_launcher)
+    ):
+        return None
     try:
         tokens = shlex.split(command, posix=True)
     except ValueError:
         return None
-    if len(tokens) == 2 and tokens[0] == "/bin/bash":
+    if (
+        len(tokens) == 6
+        and tokens[:3] == [current_python, "-I", "-c"]
+        and isinstance(recorded_bootstrap_digest, str)
+        and re.fullmatch(r"[0-9a-f]{64}", recorded_bootstrap_digest) is not None
+        and hashlib.sha256(tokens[3].encode()).hexdigest()
+        == recorded_bootstrap_digest
+        and tokens[4] == "--event"
+        and _SAFE_HOOK_NAME.fullmatch(tokens[5]) is not None
+    ):
+        expected = (
+            f"{_quote_shell_word(current_python)} -I -c "
+            f"{_quote_shell_word(tokens[3])} --event "
+            f"{_quote_shell_word(tokens[5])}"
+        )
+        return f"@{tokens[5]}" if command == expected else None
+    if (
+        len(tokens) == 5
+        and tokens[:4] == [current_python, "-I", recorded_launcher, "--event"]
+        and _SAFE_HOOK_NAME.fullmatch(tokens[4]) is not None
+    ):
+        expected = (
+            f"{_quote_shell_word(current_python)} -I "
+            f"{_quote_shell_word(recorded_launcher)} --event "
+            f"{_quote_shell_word(tokens[4])}"
+        )
+        return f"@{tokens[4]}" if command == expected else None
+    resolved_root = str(root.resolve())
+    if (
+        len(tokens) == 7
+        and tokens[:4] == [recorded_python, "-I", recorded_launcher, "--root"]
+        and tokens[4:6] == [resolved_root, "--hook"]
+        and tokens[6] in {path.name for path in LEGACY_PROJECT_HOOK_FILES}
+    ):
+        expected = (
+            f"{_quote_shell_word(recorded_python)} -I "
+            f"{_quote_shell_word(recorded_launcher)} --root "
+            f"{_quote_shell_word(resolved_root)} --hook "
+            f"{_quote_shell_word(tokens[6])}"
+        )
+        return tokens[6] if command == expected else None
+    candidate: str | None = None
+    if len(tokens) == 1:
+        candidate = tokens[0]
+    elif len(tokens) == 2 and tokens[0] == "/bin/bash" and tokens[1].endswith(".sh"):
         candidate = tokens[1]
-        expected_suffix = ".sh"
     elif (
         len(tokens) == 3
-        and tokens[:2] == ["/usr/bin/python3", "-I"]
+        and tokens[:2] == [recorded_python, "-I"]
+        and tokens[2].endswith(".py")
     ):
         candidate = tokens[2]
-        expected_suffix = ".py"
-    else:
-        return None
-    normalized = candidate.replace("\\", "/")
-    name = posixpath.basename(normalized)
-    if (
-        not name.endswith(expected_suffix)
-        or not _SAFE_HOOK_NAME.fullmatch(name)
-    ):
-        return None
-    try:
-        parent = os.path.realpath(posixpath.dirname(normalized))
-        expected = os.path.realpath(Path(root) / HOOK_DIR_RELATIVE)
-    except OSError:
-        return None
-    return name if parent == expected else None
+    if candidate is not None:
+        normalized = candidate.replace("\\", "/")
+        normalized_root = str(root.resolve()).replace("\\", "/")
+        for relative in LEGACY_PROJECT_HOOK_FILES:
+            script_name = relative.name
+            if normalized in {
+                f".agent-flow/scripts/hooks/{script_name}",
+                f"scripts/hooks/{script_name}",
+                f"{normalized_root}/.agent-flow/scripts/hooks/{script_name}",
+                f"{normalized_root}/scripts/hooks/{script_name}",
+            }:
+                return script_name
+    for relative in LEGACY_PROJECT_HOOK_FILES:
+        script_name = relative.name
+        expected = (
+            f"cd {_quote_shell_word(resolved_root)} && "
+            f"{_quote_shell_word(str(root.resolve() / relative))}"
+        )
+        if command == expected:
+            return script_name
+    return None
+
+
+def _quote_shell_word(value: str) -> str:
+    return "'" + value.replace("'", "'\\''") + "'"
 
 
 def mentions_managed_hook_dir(root: Path, command: str) -> bool:
-    """정확한 호출은 아니지만 관리 hook 경로를 품고 있는가.
-
-    이걸 조용히 무시하면 후행 셸 구문이 곧 무증거가 된다.
-    """
+    """형식이 잘못된 command가 global shared launcher를 가리키는지 본다."""
     normalized = _unquote(command).replace("\\", "/")
-    marker = f"/{HOOK_DIR_RELATIVE.as_posix()}/"
-    index = normalized.rfind(marker)
-    if index < 0:
-        return False
-    # 앞부분은 통짜 명령의 일부라 인용부호나 `sh -c` 같은 래퍼를 달고 있다.
-    # 경로로 쓰인 마지막 토큰만 떼어 루트와 대조한다.
-    head = normalized[:index].split()[-1] if normalized[:index].split() else ""
-    try:
-        return os.path.realpath(head.lstrip("'\"")) == os.path.realpath(root)
-    except OSError:
-        return False
+    runtime_record = _read_kit_json(root).get("hook_runtime")
+    launcher = (
+        runtime_record.get("launcher_path")
+        if isinstance(runtime_record, dict)
+        else None
+    )
+    return isinstance(launcher, str) and launcher.replace("\\", "/") in normalized
 
 
 def _unquote(value: str) -> str:

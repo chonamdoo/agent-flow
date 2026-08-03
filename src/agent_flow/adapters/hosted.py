@@ -169,7 +169,10 @@ def _reviewer_jobs(
         angle_prompt = (
             f"{base_prompt}\n\n"
             "## Isolated reviewer process contract\n\n"
-            "You are one read-only reviewer subprocess. Do not invoke "
+            "You are one read-only reviewer subprocess. Do not spawn nested "
+            "sub-agents, delegate work, or start background processes or jobs. "
+            "Terminate and wait for every child process before returning your "
+            "final stdout; no descendant may remain active. Do not invoke "
             "`agent-flow status`, do not continue the workflow, and do not "
             "write the aggregate phase artifact named above. Return only this "
             "angle's review in your final stdout; the parent records it at "

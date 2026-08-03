@@ -5,7 +5,9 @@ import json
 import os
 import re
 import shutil
+import shlex
 import subprocess
+import stat
 import sys
 from pathlib import Path
 
@@ -23,6 +25,22 @@ def _node() -> str:
     return node
 
 
+def _install_env(project: Path, env: dict[str, str] | None) -> dict[str, str]:
+    result = dict(os.environ if env is None else env)
+    if result.get("HOME") == os.environ.get("HOME"):
+        home = project.parent / f".{project.name}-agent-flow-home"
+        home.mkdir(parents=True, exist_ok=True)
+        result["HOME"] = str(home)
+    if result.get("AGENT_FLOW_HOME") == os.environ.get("AGENT_FLOW_HOME"):
+        result["AGENT_FLOW_HOME"] = str(Path(result["HOME"]) / ".agent-flow")
+    return result
+
+
+def _installed_omp_extension(project: Path) -> Path:
+    home = Path(_install_env(project, None)["HOME"])
+    return home / ".omp" / "agent" / "extensions" / "agent-flow-hooks.ts"
+
+
 def _install(
     project: Path,
     *args: str,
@@ -34,7 +52,7 @@ def _install(
         text=True,
         capture_output=True,
         check=False,
-        env=env,
+        env=_install_env(project, env),
     )
 
 
@@ -68,21 +86,27 @@ def test_project_skill_links_all_hosts_and_index_omits_body(tmp_path: Path) -> N
     }
     for host_root in host_roots.values():
         assert (host_root / "my-skill" / "SKILL.md").exists()
-    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    index = json.loads(
+        (project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8")
+    )
     selected = next(skill for skill in index["skills"] if skill["name"] == "my-skill")
     assert selected["source"] == "project"
     assert set(selected["hosts"]) == {"claude", "codex", "omp"}
     assert "BODY SHOULD NOT BE IN INDEX" not in json.dumps(index)
 
 
-def test_bundled_workflow_skills_are_internal_and_host_skills_are_registered(tmp_path: Path) -> None:
+def test_bundled_workflow_skills_are_internal_and_host_skills_are_registered(
+    tmp_path: Path,
+) -> None:
     project = tmp_path / "project"
     project.mkdir()
 
     result = _install(project)
 
     assert result.returncode == 0, result.stderr
-    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    index = json.loads(
+        (project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8")
+    )
     host_skills = {
         "agent-flow",
         "android-appshell-error-handling",
@@ -118,22 +142,30 @@ def test_bundled_workflow_skills_are_internal_and_host_skills_are_registered(tmp
     assert matt_skill_closure <= indexed
     # host 디렉토리 link는 host skill 7종으로 제한한다.
     assert {link["name"] for link in index["links"]} == host_skills
-    assert (project / ".agent-flow" / "skills" / "domain-modeling" / "SKILL.md").exists()
-    assert (project / ".agent-flow" / "skills" / "full-feature-workflow" / "SKILL.md").exists()
+    assert (
+        project / ".agent-flow" / "skills" / "domain-modeling" / "SKILL.md"
+    ).exists()
+    assert (
+        project / ".agent-flow" / "skills" / "full-feature-workflow" / "SKILL.md"
+    ).exists()
     for host_dir in (".Codex", ".claude"):
         for skill in matt_skill_closure:
             assert not (project / host_dir / "skills" / skill).exists()
     assert not (project / ".Codex" / "skills" / "full-feature-workflow").exists()
 
 
-def test_clean_architecture_skills_install_core_and_platform_dependency_graph(tmp_path: Path) -> None:
+def test_clean_architecture_skills_install_core_and_platform_dependency_graph(
+    tmp_path: Path,
+) -> None:
     project = tmp_path / "project"
     project.mkdir()
 
     result = _install(project)
 
     assert result.returncode == 0, result.stderr
-    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    index = json.loads(
+        (project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8")
+    )
     skills = {skill["name"]: skill for skill in index["skills"]}
     platform_skills = {
         "android-clean-architecture",
@@ -168,15 +200,21 @@ def test_clean_architecture_skills_install_core_and_platform_dependency_graph(tm
     assert "https://" not in core + android + alias
 
 
-def test_android_profile_installs_android_skills_and_common_dependencies_only(tmp_path: Path) -> None:
+def test_android_profile_installs_android_skills_and_common_dependencies_only(
+    tmp_path: Path,
+) -> None:
     project = tmp_path / "android-project"
     project.mkdir()
-    (project / "settings.gradle.kts").write_text("pluginManagement {}\n", encoding="utf-8")
+    (project / "settings.gradle.kts").write_text(
+        "pluginManagement {}\n", encoding="utf-8"
+    )
 
     result = _install(project)
 
     assert result.returncode == 0, result.stderr
-    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    index = json.loads(
+        (project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8")
+    )
     names = {skill["name"] for skill in index["skills"]}
     matt_skill_closure = {
         "code-review",
@@ -197,17 +235,23 @@ def test_android_profile_installs_android_skills_and_common_dependencies_only(tm
     assert "android-sdui-architecture" in names
     assert "react-native-clean-architecture" not in names
     assert "ios-clean-architecture" not in names
-    assert not (project / ".agent-flow" / "skills" / "react-native-clean-architecture").exists()
+    assert not (
+        project / ".agent-flow" / "skills" / "react-native-clean-architecture"
+    ).exists()
 
 
-def test_multi_profile_install_uses_union_and_dependency_closure(tmp_path: Path) -> None:
+def test_multi_profile_install_uses_union_and_dependency_closure(
+    tmp_path: Path,
+) -> None:
     project = tmp_path / "mixed-project"
     project.mkdir()
 
     result = _install(project, "--profile", "android", "--profile", "react-native")
 
     assert result.returncode == 0, result.stderr
-    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    index = json.loads(
+        (project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8")
+    )
     names = {skill["name"] for skill in index["skills"]}
     assert index["selection"]["profiles"] == ["android", "react-native"]
     assert "clean-architecture-core" in names
@@ -225,7 +269,9 @@ def test_reinstall_preserves_previously_selected_profile_skills(tmp_path: Path) 
     second = _install(project, "--profile", "android")
     assert second.returncode == 0, second.stderr
 
-    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    index = json.loads(
+        (project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8")
+    )
     names = {skill["name"] for skill in index["skills"]}
     assert index["selection"]["profiles"] == ["android", "react-native"]
     assert "android-clean-architecture" in names
@@ -241,7 +287,9 @@ def test_plain_reinstall_preserves_filtered_profile_selection(tmp_path: Path) ->
     second = _install(project)
     assert second.returncode == 0, second.stderr
 
-    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    index = json.loads(
+        (project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8")
+    )
     names = {skill["name"] for skill in index["skills"]}
     assert index["selection"]["mode"] == "filtered"
     assert index["selection"]["profiles"] == ["android"]
@@ -250,18 +298,26 @@ def test_plain_reinstall_preserves_filtered_profile_selection(tmp_path: Path) ->
     assert "ios-clean-architecture" not in names
 
 
-def test_plain_reinstall_preserves_filtered_selection_over_detected_profile(tmp_path: Path) -> None:
+def test_plain_reinstall_preserves_filtered_selection_over_detected_profile(
+    tmp_path: Path,
+) -> None:
     project = tmp_path / "rn-project"
     project.mkdir()
-    (project / "package.json").write_text('{"dependencies":{"react-native":"latest"}}\n', encoding="utf-8")
-    (project / "settings.gradle.kts").write_text("pluginManagement {}\n", encoding="utf-8")
+    (project / "package.json").write_text(
+        '{"dependencies":{"react-native":"latest"}}\n', encoding="utf-8"
+    )
+    (project / "settings.gradle.kts").write_text(
+        "pluginManagement {}\n", encoding="utf-8"
+    )
 
     first = _install(project, "--profile", "android")
     assert first.returncode == 0, first.stderr
     second = _install(project)
     assert second.returncode == 0, second.stderr
 
-    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    index = json.loads(
+        (project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8")
+    )
     names = {skill["name"] for skill in index["skills"]}
     assert index["selection"]["mode"] == "filtered"
     assert index["selection"]["profiles"] == ["android"]
@@ -269,7 +325,9 @@ def test_plain_reinstall_preserves_filtered_selection_over_detected_profile(tmp_
     assert "react-native-clean-architecture" not in names
 
 
-def test_filtered_reinstall_after_all_install_does_not_preserve_unselected_platforms(tmp_path: Path) -> None:
+def test_filtered_reinstall_after_all_install_does_not_preserve_unselected_platforms(
+    tmp_path: Path,
+) -> None:
     project = tmp_path / "android-project"
     project.mkdir()
 
@@ -278,25 +336,33 @@ def test_filtered_reinstall_after_all_install_does_not_preserve_unselected_platf
     second = _install(project, "--profile", "android")
     assert second.returncode == 0, second.stderr
 
-    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    index = json.loads(
+        (project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8")
+    )
     names = {skill["name"] for skill in index["skills"]}
     assert index["selection"]["profiles"] == ["android"]
     assert "android-clean-architecture" in names
     assert "react-native-clean-architecture" not in names
     assert "ios-clean-architecture" not in names
-    assert not (project / ".agent-flow" / "skills" / "react-native-clean-architecture").exists()
+    assert not (
+        project / ".agent-flow" / "skills" / "react-native-clean-architecture"
+    ).exists()
     assert not (project / ".agent-flow" / "skills" / "ios-clean-architecture").exists()
 
 
 def test_ios_project_auto_selects_ios_profile_skills(tmp_path: Path) -> None:
     project = tmp_path / "ios-project"
     project.mkdir()
-    (project / "Package.swift").write_text("// swift-tools-version: 5.9\n", encoding="utf-8")
+    (project / "Package.swift").write_text(
+        "// swift-tools-version: 5.9\n", encoding="utf-8"
+    )
 
     result = _install(project)
 
     assert result.returncode == 0, result.stderr
-    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    index = json.loads(
+        (project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8")
+    )
     names = {skill["name"] for skill in index["skills"]}
     assert index["selection"]["profiles"] == ["ios"]
     assert "ios-clean-architecture" in names
@@ -305,23 +371,31 @@ def test_ios_project_auto_selects_ios_profile_skills(tmp_path: Path) -> None:
     assert "react-native-clean-architecture" not in names
 
 
-def test_react_native_project_with_gradle_auto_selects_react_native_profile(tmp_path: Path) -> None:
+def test_react_native_project_with_gradle_auto_selects_react_native_profile(
+    tmp_path: Path,
+) -> None:
     project = tmp_path / "rn-project"
     project.mkdir()
-    (project / "package.json").write_text('{"dependencies":{"react-native":"latest"}}\n', encoding="utf-8")
+    (project / "package.json").write_text(
+        '{"dependencies":{"react-native":"latest"}}\n', encoding="utf-8"
+    )
     (project / "settings.gradle.kts").write_text("", encoding="utf-8")
 
     result = _install(project)
 
     assert result.returncode == 0, result.stderr
-    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    index = json.loads(
+        (project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8")
+    )
     names = {skill["name"] for skill in index["skills"]}
     assert index["selection"]["profiles"] == ["react-native"]
     assert "react-native-clean-architecture" in names
     assert "android-code-review" not in names
 
 
-def test_skill_metadata_dependencies_are_indexed_and_auto_installed(tmp_path: Path) -> None:
+def test_skill_metadata_dependencies_are_indexed_and_auto_installed(
+    tmp_path: Path,
+) -> None:
     project = tmp_path / "project"
     project.mkdir()
     dependency = project / "skills" / "dependency-skill"
@@ -352,7 +426,9 @@ def test_skill_metadata_dependencies_are_indexed_and_auto_installed(tmp_path: Pa
     result = _install(project, "--skills", "consumer-skill")
 
     assert result.returncode == 0, result.stderr
-    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    index = json.loads(
+        (project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8")
+    )
     skills = {skill["name"]: skill for skill in index["skills"]}
     assert {"consumer-skill", "dependency-skill"} <= set(skills)
     assert skills["consumer-skill"]["id"] == "consumer-skill-id"
@@ -363,7 +439,9 @@ def test_skill_metadata_dependencies_are_indexed_and_auto_installed(tmp_path: Pa
     assert (project / ".claude" / "skills" / "dependency-skill" / "SKILL.md").exists()
 
 
-def test_local_skill_priority_beats_project_and_bundled_conflict_is_recorded(tmp_path: Path) -> None:
+def test_local_skill_priority_beats_project_and_bundled_conflict_is_recorded(
+    tmp_path: Path,
+) -> None:
     project = tmp_path / "project"
     project.mkdir()
     _skill(project / "skills" / "agent-flow", "PROJECT")
@@ -372,10 +450,14 @@ def test_local_skill_priority_beats_project_and_bundled_conflict_is_recorded(tmp
     result = _install(project)
 
     assert result.returncode == 0, result.stderr
-    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    index = json.loads(
+        (project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8")
+    )
     selected = next(skill for skill in index["skills"] if skill["name"] == "agent-flow")
     assert selected["source"] == "local"
-    conflict = next(conflict for conflict in index["conflicts"] if conflict["name"] == "agent-flow")
+    conflict = next(
+        conflict for conflict in index["conflicts"] if conflict["name"] == "agent-flow"
+    )
     assert conflict["selected"] == ".agent-flow/local-skills/agent-flow/SKILL.md"
     assert "skills/agent-flow/SKILL.md" in conflict["ignored"]
 
@@ -404,7 +486,6 @@ def test_host_limited_skill_links_only_omp(tmp_path: Path) -> None:
     assert (project / ".omp" / "skills" / "omp-only" / "SKILL.md").exists()
     assert not (project / ".Codex" / "skills" / "omp-only").exists()
     assert not (project / ".claude" / "skills" / "omp-only").exists()
-
 
 
 def test_host_limited_skill_accepts_yaml_block_list(tmp_path: Path) -> None:
@@ -444,7 +525,9 @@ def test_existing_user_modified_skill_is_not_overwritten(tmp_path: Path) -> None
 
     assert result.returncode == 0, result.stderr
     assert (dest / "SKILL.md").read_text(encoding="utf-8") == "user modified\n"
-    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    index = json.loads(
+        (project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8")
+    )
     assert any(link["status"] == "skipped-user-modified" for link in index["links"])
 
 
@@ -454,20 +537,30 @@ def test_skill_hash_updates_and_local_skills_are_gitignored(tmp_path: Path) -> N
     skill_dir = project / "skills" / "my-skill"
     _skill(skill_dir, "v1")
     assert _install(project).returncode == 0
-    index1 = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
-    hash1 = next(skill["hash"] for skill in index1["skills"] if skill["name"] == "my-skill")
+    index1 = json.loads(
+        (project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8")
+    )
+    hash1 = next(
+        skill["hash"] for skill in index1["skills"] if skill["name"] == "my-skill"
+    )
 
     _skill(skill_dir, "v2")
     assert _install(project).returncode == 0
-    index2 = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
-    hash2 = next(skill["hash"] for skill in index2["skills"] if skill["name"] == "my-skill")
+    index2 = json.loads(
+        (project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8")
+    )
+    hash2 = next(
+        skill["hash"] for skill in index2["skills"] if skill["name"] == "my-skill"
+    )
 
     assert hash1 != hash2
     gitignore = (project / ".gitignore").read_text(encoding="utf-8")
     assert ".agent-flow/" in gitignore or ".agent-flow/local-skills/" in gitignore
 
 
-def test_skill_frontmatter_name_cannot_escape_host_skill_directory(tmp_path: Path) -> None:
+def test_skill_frontmatter_name_cannot_escape_host_skill_directory(
+    tmp_path: Path,
+) -> None:
     project = tmp_path / "project"
     project.mkdir()
     skill_dir = project / "skills" / "safe-folder"
@@ -484,12 +577,16 @@ def test_skill_frontmatter_name_cannot_escape_host_skill_directory(tmp_path: Pat
     result = _install(project)
 
     assert result.returncode == 0, result.stderr
-    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    index = json.loads(
+        (project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8")
+    )
     assert any("unsafe skill name ignored" in warning for warning in index["warnings"])
     assert not (tmp_path / "outside").exists()
 
 
-def test_skill_frontmatter_dotdot_name_is_sanitized_without_install_failure(tmp_path: Path) -> None:
+def test_skill_frontmatter_dotdot_name_is_sanitized_without_install_failure(
+    tmp_path: Path,
+) -> None:
     project = tmp_path / "project"
     project.mkdir()
     skill_dir = project / "skills" / "safe-folder"
@@ -506,7 +603,9 @@ def test_skill_frontmatter_dotdot_name_is_sanitized_without_install_failure(tmp_
     result = _install(project)
 
     assert result.returncode == 0, result.stderr
-    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    index = json.loads(
+        (project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8")
+    )
     assert all(skill["name"] != ".." for skill in index["skills"])
 
 
@@ -526,7 +625,9 @@ def test_stale_host_skill_link_removed_when_hosts_change(tmp_path: Path) -> None
     assert not (project / ".Codex" / "skills" / "demo").exists()
 
 
-def test_stale_broken_host_skill_symlink_removed_when_skill_deleted(tmp_path: Path) -> None:
+def test_stale_broken_host_skill_symlink_removed_when_skill_deleted(
+    tmp_path: Path,
+) -> None:
     project = tmp_path / "project"
     project.mkdir()
     skill_dir = project / "skills" / "demo"
@@ -552,7 +653,9 @@ def test_stale_copied_host_skill_dir_removed_when_skill_deleted(tmp_path: Path) 
     if codex_link.is_symlink():
         codex_link.unlink()
         codex_link.mkdir(parents=True)
-        (codex_link / "SKILL.md").write_text((skill_dir / "SKILL.md").read_text(encoding="utf-8"), encoding="utf-8")
+        (codex_link / "SKILL.md").write_text(
+            (skill_dir / "SKILL.md").read_text(encoding="utf-8"), encoding="utf-8"
+        )
 
     (skill_dir / "SKILL.md").unlink()
     result = _install(project)
@@ -561,7 +664,9 @@ def test_stale_copied_host_skill_dir_removed_when_skill_deleted(tmp_path: Path) 
     assert not codex_link.exists()
 
 
-def test_host_skill_root_symlink_is_skipped_not_written_outside_project(tmp_path: Path) -> None:
+def test_host_skill_root_symlink_fails_before_writing_outside_project(
+    tmp_path: Path,
+) -> None:
     project = tmp_path / "project"
     outside = tmp_path / "outside"
     project.mkdir()
@@ -571,16 +676,43 @@ def test_host_skill_root_symlink_is_skipped_not_written_outside_project(tmp_path
 
     result = _install(project)
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode != 0
+    assert "refusing symlinked project hook registration" in result.stderr
     assert not (outside / "skills" / "demo").exists()
-    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
-    assert any(link["status"] == "skipped-host-root-symlink" for link in index["links"])
+    assert not (project / ".agent-flow" / "kit.json").exists()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_nested_managed_symlink_fails_before_writing_outside_project(
+    tmp_path: Path,
+    binary: str,
+) -> None:
+    project = tmp_path / f"nested-managed-{binary}"
+    outside = tmp_path / f"outside-{binary}"
+    managed_skills = project / ".agent-flow" / "skills"
+    managed_skills.mkdir(parents=True)
+    outside.mkdir()
+    outside_skill = outside / "SKILL.md"
+    outside_skill.write_text("outside\n", encoding="utf-8")
+    (managed_skills / "product-brief").symlink_to(
+        outside,
+        target_is_directory=True,
+    )
+
+    result = _install_with(binary, project)
+
+    assert result.returncode != 0
+    assert "symlinked project managed path" in result.stderr
+    assert outside_skill.read_text(encoding="utf-8") == "outside\n"
+    assert not (project / ".agent-flow" / "kit.json").exists()
 
 
 def test_android_upstream_skills_are_not_installed_or_vendored(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
-    (project / "settings.gradle").write_text("pluginManagement { repositories { google() } }\n", encoding="utf-8")
+    (project / "settings.gradle").write_text(
+        "pluginManagement { repositories { google() } }\n", encoding="utf-8"
+    )
 
     result = _install(project)
 
@@ -595,41 +727,68 @@ def test_android_upstream_skills_are_not_installed_or_vendored(tmp_path: Path) -
     kit = json.loads((project / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
     assert "android_skills" not in kit
     assert "chrisbanes_skills" not in kit
-    bootstrap = (project / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8")
+    bootstrap = (project / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(
+        encoding="utf-8"
+    )
     assert "missing local <group>: <skill>" in bootstrap
-    android_profile = (project / ".agent-flow" / "profiles" / "android.yaml").read_text(encoding="utf-8")
-    assert "url: https://github.com/skydoves/compose-performance-skills" in android_profile
+    android_profile = (project / ".agent-flow" / "profiles" / "android.yaml").read_text(
+        encoding="utf-8"
+    )
+    assert (
+        "url: https://github.com/skydoves/compose-performance-skills" in android_profile
+    )
     assert "kind: host-managed" in android_profile
 
 
 def _installed_profile_yaml(project: Path, *, runtime: bool = False) -> set[str]:
     base = project / ".agent-flow"
-    directory = (
-        base / "runtime" / "python" / "agent_flow" / "profiles" if runtime else base / "profiles"
-    )
+    if runtime:
+        kit = json.loads((base / "kit.json").read_text(encoding="utf-8"))
+        directory = (
+            Path(kit["hook_runtime"]["path"]).parent
+            / "runtime"
+            / "python"
+            / "agent_flow"
+            / "profiles"
+        )
+    else:
+        directory = base / "profiles"
     return {entry.name for entry in directory.iterdir() if entry.suffix == ".yaml"}
 
 
 def _bundled_profile_yaml() -> set[str]:
-    return {entry.name for entry in (KIT_ROOT / "src" / "agent_flow" / "profiles").glob("*.yaml")}
+    return {
+        entry.name
+        for entry in (KIT_ROOT / "src" / "agent_flow" / "profiles").glob("*.yaml")
+    }
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_install_scopes_profiles_to_the_detected_stack(tmp_path: Path, binary: str) -> None:
+def test_install_scopes_profiles_to_the_detected_stack(
+    tmp_path: Path, binary: str
+) -> None:
     # 두 진입점이 keep-set을 각자 구하므로 둘 다 태운다. 갈라지면 install.mjs로 깐
     # 프로젝트만 profile이 전부 남는다.
     project = tmp_path / f"scoped-profiles-{binary}"
     project.mkdir()
-    (project / "settings.gradle").write_text("pluginManagement { repositories { google() } }\n", encoding="utf-8")
+    (project / "settings.gradle").write_text(
+        "pluginManagement { repositories { google() } }\n", encoding="utf-8"
+    )
 
     result = _install_with(binary, project)
 
     assert result.returncode == 0, result.stderr
-    assert _installed_profile_yaml(project) == {"_schema.yaml", "generic.yaml", "android.yaml"}
+    assert _installed_profile_yaml(project) == {
+        "_schema.yaml",
+        "generic.yaml",
+        "android.yaml",
+    }
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_install_keeps_the_full_runtime_profile_catalog(tmp_path: Path, binary: str) -> None:
+def test_install_keeps_the_full_runtime_profile_catalog(
+    tmp_path: Path, binary: str
+) -> None:
     """반증: runtime 사본이 profile YAML의 실제 read path이자 override의 자원이다.
 
     여기를 좁히면 `gates --profile ios`가 `unknown profile: ios`로 죽고,
@@ -637,7 +796,9 @@ def test_install_keeps_the_full_runtime_profile_catalog(tmp_path: Path, binary: 
     """
     project = tmp_path / f"runtime-catalog-{binary}"
     project.mkdir()
-    (project / "settings.gradle").write_text("pluginManagement { repositories { google() } }\n", encoding="utf-8")
+    (project / "settings.gradle").write_text(
+        "pluginManagement { repositories { google() } }\n", encoding="utf-8"
+    )
 
     result = _install_with(binary, project)
 
@@ -645,14 +806,19 @@ def test_install_keeps_the_full_runtime_profile_catalog(tmp_path: Path, binary: 
     assert _installed_profile_yaml(project, runtime=True) == _bundled_profile_yaml()
 
 
-def test_installed_runtime_loads_a_profile_the_project_did_not_select(tmp_path: Path) -> None:
+def test_installed_runtime_loads_a_profile_the_project_did_not_select(
+    tmp_path: Path,
+) -> None:
     """`--profile` / `AGENT_FLOW_PROFILE` override가 설치 후에도 살아 있어야 한다."""
     project = tmp_path / "override-project"
     project.mkdir()
-    (project / "settings.gradle").write_text("pluginManagement { repositories { google() } }\n", encoding="utf-8")
+    (project / "settings.gradle").write_text(
+        "pluginManagement { repositories { google() } }\n", encoding="utf-8"
+    )
     assert _install(project).returncode == 0
 
-    runtime = project / ".agent-flow" / "runtime" / "python"
+    kit = json.loads((project / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
+    runtime = Path(kit["hook_runtime"]["path"]).parent / "runtime" / "python"
     probe = (
         "from pathlib import Path\n"
         "from agent_flow.core.profiles import active_profile_ids, load_profile\n"
@@ -696,20 +862,28 @@ def test_react_native_carries_its_android_vocabulary_without_the_android_profile
         "react-native.yaml",
     }
     installed = yaml.safe_load(
-        (project / ".agent-flow" / "profiles" / "react-native.yaml").read_text(encoding="utf-8")
+        (project / ".agent-flow" / "profiles" / "react-native.yaml").read_text(
+            encoding="utf-8"
+        )
     )
-    domains = {domain["id"]: domain for domain in installed["skills"]["external"]["domains"]}
+    domains = {
+        domain["id"]: domain for domain in installed["skills"]["external"]["domains"]
+    }
     assert domains["android-native"]["path_globs"] == ["android/**"]
 
 
-def test_install_keeps_the_detected_profile_when_another_is_requested(tmp_path: Path) -> None:
+def test_install_keeps_the_detected_profile_when_another_is_requested(
+    tmp_path: Path,
+) -> None:
     """worktree에는 kit.json이 없어 런타임이 감지 profile로 되돌아간다.
 
     그래서 감지 id는 선택하지 않아도 이 프로젝트에 걸린다.
     """
     project = tmp_path / "gradle-as-ios"
     project.mkdir()
-    (project / "settings.gradle").write_text("pluginManagement { repositories { google() } }\n", encoding="utf-8")
+    (project / "settings.gradle").write_text(
+        "pluginManagement { repositories { google() } }\n", encoding="utf-8"
+    )
 
     result = _install(project, "--profile", "ios")
 
@@ -728,7 +902,9 @@ def test_install_keeps_the_detected_profile_when_another_is_requested(tmp_path: 
 def test_install_scopes_profiles_to_requested_profiles(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
-    (project / "settings.gradle").write_text("pluginManagement { repositories { google() } }\n", encoding="utf-8")
+    (project / "settings.gradle").write_text(
+        "pluginManagement { repositories { google() } }\n", encoding="utf-8"
+    )
 
     result = _install(project, "--profile", "android,ios")
 
@@ -741,10 +917,14 @@ def test_install_scopes_profiles_to_requested_profiles(tmp_path: Path) -> None:
     }
 
 
-def test_reinstall_prunes_foreign_profiles_and_keeps_custom_ones(tmp_path: Path) -> None:
+def test_reinstall_prunes_foreign_profiles_and_keeps_custom_ones(
+    tmp_path: Path,
+) -> None:
     project = tmp_path / "project"
     project.mkdir()
-    (project / "settings.gradle").write_text("pluginManagement { repositories { google() } }\n", encoding="utf-8")
+    (project / "settings.gradle").write_text(
+        "pluginManagement { repositories { google() } }\n", encoding="utf-8"
+    )
     assert _install(project).returncode == 0
 
     # 예전 설치본은 배포되는 profile을 전부 받았다. 업그레이드가 그것을 걷어내야 한다.
@@ -752,9 +932,13 @@ def test_reinstall_prunes_foreign_profiles_and_keeps_custom_ones(tmp_path: Path)
     installed_dir = project / ".agent-flow" / "profiles"
     for source in bundled.glob("*.yaml"):
         shutil.copyfile(source, installed_dir / source.name)
-    (installed_dir / "my-stack.yaml").write_text("id: my-stack\ngates: []\n", encoding="utf-8")
+    (installed_dir / "my-stack.yaml").write_text(
+        "id: my-stack\ngates: []\n", encoding="utf-8"
+    )
     edited = installed_dir / "nextjs.yaml"
-    edited.write_text(edited.read_text(encoding="utf-8") + "# local tweak\n", encoding="utf-8")
+    edited.write_text(
+        edited.read_text(encoding="utf-8") + "# local tweak\n", encoding="utf-8"
+    )
 
     result = _install(project)
 
@@ -774,7 +958,9 @@ def test_reinstall_prunes_foreign_profiles_and_keeps_custom_ones(tmp_path: Path)
 def test_reinstall_is_quiet_when_pruning_loses_nothing(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
-    (project / "settings.gradle").write_text("pluginManagement { repositories { google() } }\n", encoding="utf-8")
+    (project / "settings.gradle").write_text(
+        "pluginManagement { repositories { google() } }\n", encoding="utf-8"
+    )
     assert _install(project).returncode == 0
 
     # 손대지 않은 kit 사본을 지우는 것은 잃는 것이 없다. 그때도 알리면 "정리했다"는
@@ -806,7 +992,9 @@ def test_no_profile_enumerates_external_skill_names() -> None:
 def test_external_sources_declare_host_roots_without_installing() -> None:
     """설치는 사용자 소유다. 우리는 경로만 해석하고 fetch는 관리자 없는 소스에만 쓴다."""
     android = yaml.safe_load(
-        (KIT_ROOT / "src" / "agent_flow" / "profiles" / "android.yaml").read_text(encoding="utf-8")
+        (KIT_ROOT / "src" / "agent_flow" / "profiles" / "android.yaml").read_text(
+            encoding="utf-8"
+        )
     )
     sources = {source["id"]: source for source in android["skill_sources"]}
 
@@ -832,12 +1020,16 @@ def test_sdui_skill_is_android_only(tmp_path: Path) -> None:
     """반증: SDUI는 Android 전용이다. 다른 profile까지 따라가면 안 된다."""
     project = tmp_path / "python-project"
     project.mkdir()
-    (project / "pyproject.toml").write_text('[project]\nname = "x"\nversion = "0"\n', encoding="utf-8")
+    (project / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0"\n', encoding="utf-8"
+    )
 
     result = _install(project)
 
     assert result.returncode == 0, result.stderr
-    index = json.loads((project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8"))
+    index = json.loads(
+        (project / ".agent-flow" / "skills" / "index.json").read_text(encoding="utf-8")
+    )
     names = {skill["name"] for skill in index["skills"]}
     assert index["selection"]["profiles"] == ["python"]
     assert "android-sdui-architecture" not in names
@@ -852,7 +1044,9 @@ def test_profile_yaml_install_list_matches_fallback_map(tmp_path: Path) -> None:
     import re
 
     kit = Path(__file__).resolve().parents[1]
-    yaml_text = (kit / "src" / "agent_flow" / "profiles" / "android.yaml").read_text(encoding="utf-8")
+    yaml_text = (kit / "src" / "agent_flow" / "profiles" / "android.yaml").read_text(
+        encoding="utf-8"
+    )
     block = yaml_text.split("\nskills:\n", 1)[1].split("\n  required_review:", 1)[0]
     from_yaml = sorted(re.findall(r"^\s+- ([A-Za-z0-9._-]+)$", block, re.M))
 
@@ -867,8 +1061,9 @@ def _hook_state(project: Path) -> dict:
     import json as _json
 
     names = set()
+    home = Path(_install_env(project, None)["HOME"])
     for rel in (".claude/settings.json", ".Codex/hooks.json", ".codex/hooks.json"):
-        path = project / rel
+        path = home / rel
         if not path.is_file():
             continue
         payload = _json.loads(path.read_text(encoding="utf-8"))
@@ -877,18 +1072,30 @@ def _hook_state(project: Path) -> dict:
                 for hook in entry.get("hooks") or []:
                     command = hook.get("command") or ""
                     if command:
-                        names.add(command.split("/")[-1].strip("'\""))
+                        tokens = shlex.split(command)
+                        if "--hook" in tokens:
+                            names.add(tokens[tokens.index("--hook") + 1])
+                        elif "--event" in tokens:
+                            names.add(f"@{tokens[tokens.index('--event') + 1]}")
+    project_registered = any(
+        "agent-flow-hook" in (project / rel).read_text(encoding="utf-8")
+        for rel in (".claude/settings.json", ".Codex/hooks.json", ".codex/hooks.json")
+        if (project / rel).is_file()
+    )
     hooks_dir = project / ".agent-flow" / "scripts" / "hooks"
     scripts = (
         {p.name for p in hooks_dir.iterdir() if p.suffix in {".sh", ".py"}}
         if hooks_dir.is_dir()
         else set()
     )
-    kit = _json.loads((project / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
+    kit = _json.loads(
+        (project / ".agent-flow" / "kit.json").read_text(encoding="utf-8")
+    )
     return {
         "registered": names,
+        "project_registered": project_registered,
         "scripts": scripts,
-        "omp": (project / ".omp" / "extensions" / "agent-flow-hooks.ts").exists(),
+        "omp": _installed_omp_extension(project).exists(),
         "flag": kit.get("hooks"),
     }
 
@@ -901,8 +1108,142 @@ def _install_with(
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         (_node(), str(KIT_ROOT / "bin" / binary), "install", *args),
-        cwd=project, text=True, capture_output=True, check=False, env=env,
+        cwd=project,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=_install_env(project, env),
     )
+
+
+def _global_dispatch(
+    *,
+    home: Path,
+    project: Path,
+    event: str,
+    payload: dict,
+    env: dict[str, str],
+) -> subprocess.CompletedProcess[str]:
+    settings = json.loads(
+        (home / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    command = settings["hooks"][event][0]["hooks"][0]["command"]
+    return subprocess.run(
+        shlex.split(command),
+        cwd=project,
+        env=env,
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+def _seed_legacy_cutover_hook(
+    project: Path,
+) -> tuple[Path, str, Path, bytes, Path, str]:
+    settings_path = project / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    command = ".agent-flow/scripts/hooks/guard-protected-branch.sh"
+    settings_content = (
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Bash",
+                            "hooks": [{"type": "command", "command": command}],
+                        }
+                    ]
+                }
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    settings_path.write_text(settings_content, encoding="utf-8")
+    script = project / command
+    script.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(KIT_ROOT / "scripts" / "hooks" / script.name, script)
+    script_content = script.read_bytes()
+    record_path = project / ".agent-flow" / "kit-assets.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    relative = script.relative_to(project).as_posix()
+    digest = hashlib.sha256(script_content).hexdigest()
+    record["files"][relative] = digest
+    record_path.write_text(f"{json.dumps(record, indent=2)}\n", encoding="utf-8")
+    return settings_path, settings_content, script, script_content, record_path, relative
+
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_first_install_launcher_publish_interruption_retries_without_force(
+    tmp_path: Path,
+    binary: str,
+) -> None:
+    project = tmp_path / f"first-runtime-transition-{binary}"
+    home = tmp_path / f"first-runtime-transition-home-{binary}"
+    shared_home = home / "private-agent-flow"
+    project.mkdir()
+    home.mkdir()
+    environment = {
+        **os.environ,
+        "HOME": str(home),
+        "AGENT_FLOW_HOME": str(shared_home),
+        "PYTHON": sys.executable,
+        "AGENT_FLOW_SKIP_CODEX_TRUST": "1",
+    }
+
+    interrupted = _install_with(
+        binary,
+        project,
+        env={
+            **environment,
+            "AGENT_FLOW_TEST_PUBLISH_FAULT": "after-launcher-publish",
+        },
+    )
+
+    assert interrupted.returncode != 0
+    state = json.loads(
+        (shared_home / "hook-runtime.json").read_text(encoding="utf-8")
+    )
+    launcher = shared_home / "bin" / "agent-flow-hook"
+    assert hashlib.sha256(launcher.read_bytes()).hexdigest() == state["launcher_digest"]
+
+    retried = _install_with(binary, project, env=environment)
+
+    assert retried.returncode == 0, retried.stderr
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_installer_registers_the_final_manifest_in_private_global_state(
+    tmp_path: Path,
+    binary: str,
+) -> None:
+    project = tmp_path / binary
+    home = tmp_path / f"{binary}-home"
+    shared_home = home / "private-agent-flow"
+    project.mkdir()
+    home.mkdir()
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "AGENT_FLOW_HOME": str(shared_home),
+        "PYTHON": sys.executable,
+        "AGENT_FLOW_SKIP_CODEX_TRUST": "1",
+    }
+
+    result = _install_with(binary, project, env=env)
+
+    assert result.returncode == 0, result.stderr
+    manifest = project / ".agent-flow" / "kit.json"
+    registry_path = shared_home / "managed-projects.json"
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    canonical_root = str(project.resolve())
+    assert registry["projects"][canonical_root] == {
+        "root": canonical_root,
+        "kit_digest": hashlib.sha256(manifest.read_bytes()).hexdigest(),
+    }
+    assert stat.S_IMODE(registry_path.stat().st_mode) == 0o600
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
@@ -915,9 +1256,9 @@ def test_installer_packages_review_angles_with_the_python_runtime(
     result = _install_with(binary, project)
 
     assert result.returncode == 0, result.stderr
+    kit = json.loads((project / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
     installed_review_root = (
-        project
-        / ".agent-flow"
+        Path(kit["hook_runtime"]["path"]).parent
         / "runtime"
         / "python"
         / "agent_flow"
@@ -932,26 +1273,23 @@ def test_installer_packages_review_angles_with_the_python_runtime(
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_installer_omits_spec_confirmation_hooks(
-    tmp_path: Path, binary: str
-) -> None:
+def test_installer_omits_spec_confirmation_hooks(tmp_path: Path, binary: str) -> None:
     project = tmp_path / f"no-user-prompt-{binary}"
     project.mkdir()
 
     result = _install_with(binary, project)
     assert result.returncode == 0, result.stderr
 
+    home = Path(_install_env(project, None)["HOME"])
     for relative in (
         ".claude/settings.json",
         ".Codex/hooks.json",
         ".codex/hooks.json",
     ):
-        payload = json.loads((project / relative).read_text(encoding="utf-8"))
+        payload = json.loads((home / relative).read_text(encoding="utf-8"))
         assert "UserPromptSubmit" not in payload["hooks"]
 
-    extension = (
-        project / ".omp" / "extensions" / "agent-flow-hooks.ts"
-    ).read_text(encoding="utf-8")
+    extension = _installed_omp_extension(project).read_text(encoding="utf-8")
     assert "prepare-spec-user-prompt.py" not in extension
     assert "confirm-spec-user-prompt.py" not in extension
     assert 'pi.on("input"' not in extension
@@ -977,7 +1315,8 @@ def test_reinstall_prunes_retired_spec_confirmation_hooks(
         "guard-spec-approval.sh",
     )
     settings_path = project / ".claude" / "settings.json"
-    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings = {"hooks": {}}
     settings["hooks"]["UserPromptSubmit"] = [
         {
             "hooks": [
@@ -994,6 +1333,7 @@ def test_reinstall_prunes_retired_spec_confirmation_hooks(
         encoding="utf-8",
     )
     hooks_dir = project / ".agent-flow" / "scripts" / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
     for name in retired:
         (hooks_dir / name).write_text("# retired\n", encoding="utf-8")
 
@@ -1003,12 +1343,497 @@ def test_reinstall_prunes_retired_spec_confirmation_hooks(
     installed = settings_path.read_text(encoding="utf-8")
     for name in retired:
         assert name not in installed
-        assert not (hooks_dir / name).exists()
-        assert (hooks_dir / f"{name}.removed").is_file()
+        assert (hooks_dir / name).read_text(encoding="utf-8") == "# retired\n"
+        assert not (hooks_dir / f"{name}.removed").exists()
+    assert result.stderr.count("preserved user-edited retired hook") == len(retired)
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_reinstall_provisions_hooks_into_existing_managed_worktrees(
+def test_reinstall_prunes_known_project_local_managed_hooks_after_record_loss(
+    tmp_path: Path,
+    binary: str,
+) -> None:
+    project = tmp_path / f"known-managed-hooks-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+    hooks_dir = project / ".agent-flow" / "scripts" / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    managed = (
+        "bind-host-worktree.py",
+        "guard-protected-branch.sh",
+        "guard-host-worktree.sh",
+        "show-phase-status.sh",
+        "comment-checker.py",
+        "record-skill-read.py",
+        "record-command-run.py",
+        "worktree-tripwire.py",
+    )
+    for name in managed:
+        shutil.copy2(KIT_ROOT / "scripts" / "hooks" / name, hooks_dir / name)
+
+    result = _install_with(binary, project)
+
+    assert result.returncode == 0, result.stderr
+    assert all(not (hooks_dir / name).exists() for name in managed)
+    assert "preserved user-edited retired hook" not in result.stderr
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_failed_cutover_keeps_asset_ownership_for_retry(
+    tmp_path: Path,
+    binary: str,
+) -> None:
+    project = tmp_path / f"cutover-retry-{binary}"
+    project.mkdir()
+    for command in (
+        ("git", "init", "-q", "-b", "main"),
+        ("git", "config", "user.email", "test@example.com"),
+        ("git", "config", "user.name", "Test"),
+    ):
+        subprocess.run(command, cwd=project, check=True)
+    (project / "tracked").write_text("tracked\n", encoding="utf-8")
+    subprocess.run(("git", "add", "tracked"), cwd=project, check=True)
+    subprocess.run(("git", "commit", "-q", "-m", "init"), cwd=project, check=True)
+    linked = tmp_path / f"linked-{binary}"
+    subprocess.run(
+        ("git", "worktree", "add", "-q", "-b", f"feat/{binary}", str(linked)),
+        cwd=project,
+        check=True,
+    )
+    assert _install_with(binary, project).returncode == 0
+
+    retired = project / ".agent-flow" / "scripts" / "hooks" / "guard-worktree-write.py"
+    retired.parent.mkdir(parents=True, exist_ok=True)
+    retired.write_text("# installer-owned\n", encoding="utf-8")
+    record_path = project / ".agent-flow" / "kit-assets.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    relative = retired.relative_to(project).as_posix()
+    record["files"][relative] = hashlib.sha256(retired.read_bytes()).hexdigest()
+    record_path.write_text(f"{json.dumps(record, indent=2)}\n", encoding="utf-8")
+
+    adopted = project / ".git" / "agent-flow" / "adopted"
+    adopted.mkdir(parents=True, exist_ok=True)
+    unsafe_record = adopted / f"{linked.name}.json"
+    unsafe_record.write_text(
+        json.dumps(
+            {
+                "path": str(linked.resolve()),
+                "registration_identity": "invalid",
+            }
+        ),
+        encoding="utf-8",
+    )
+    unsafe_record.chmod(0o644)
+
+    interrupted = _install_with(binary, project)
+
+    assert interrupted.returncode != 0
+    preserved = json.loads(record_path.read_text(encoding="utf-8"))
+    assert preserved["files"][relative] == record["files"][relative]
+    unsafe_record.unlink()
+
+    retried = _install_with(binary, project)
+
+    assert retried.returncode == 0, retried.stderr
+    assert not retired.exists()
+
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_pre_manifest_publish_failure_restores_legacy_hook_for_retry(
+    tmp_path: Path,
+    binary: str,
+) -> None:
+    project = tmp_path / f"pre-manifest-cutover-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+    manifest_path = project / ".agent-flow" / "kit.json"
+    previous_manifest = manifest_path.read_bytes()
+    (
+        settings_path,
+        settings_content,
+        script,
+        script_content,
+        record_path,
+        relative,
+    ) = _seed_legacy_cutover_hook(project)
+    previous_record = record_path.read_bytes()
+
+    interrupted = _install_with(
+        binary,
+        project,
+        env={
+            **os.environ,
+            "AGENT_FLOW_TEST_PUBLISH_FAULT": "after-transition-registry",
+        },
+    )
+
+    assert interrupted.returncode != 0
+    assert manifest_path.read_bytes() == previous_manifest
+    assert settings_path.read_text(encoding="utf-8") == settings_content
+    assert script.read_bytes() == script_content
+    assert record_path.read_bytes() == previous_record
+
+    retried = _install_with(binary, project)
+
+    assert retried.returncode == 0, retried.stderr
+    assert relative not in settings_path.read_text(encoding="utf-8")
+    assert not script.exists()
+    assert relative not in json.loads(record_path.read_text(encoding="utf-8"))["files"]
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_manifest_publish_interruption_uses_digest_transition(
+    tmp_path: Path,
+    binary: str,
+) -> None:
+    project = tmp_path / f"retirement-handoff-{binary}"
+    home = tmp_path / f"retirement-handoff-home-{binary}"
+    shared_home = home / "private-agent-flow"
+    project.mkdir()
+    home.mkdir()
+    environment = {
+        **os.environ,
+        "HOME": str(home),
+        "AGENT_FLOW_HOME": str(shared_home),
+        "PYTHON": sys.executable,
+        "AGENT_FLOW_SKIP_CODEX_TRUST": "1",
+    }
+    assert _install_with(binary, project, env=environment).returncode == 0
+    manifest_path = project / ".agent-flow" / "kit.json"
+    installed_content = manifest_path.read_bytes()
+    installed = json.loads(installed_content)
+    legacy_manifest = {
+        key: value
+        for key, value in installed.items()
+        if key not in {"hook_runtime", "shared_hook_home"}
+    }
+    manifest_path.write_text(
+        f"{json.dumps(legacy_manifest, indent=2)}\n",
+        encoding="utf-8",
+    )
+    legacy_content = manifest_path.read_bytes()
+    (
+        settings_path,
+        _settings_content,
+        script,
+        _script_content,
+        record_path,
+        relative,
+    ) = _seed_legacy_cutover_hook(project)
+    marker = tmp_path / f"mutable-legacy-hook-ran-{binary}"
+    script.write_text(
+        f"#!/bin/sh\nprintf ran > {shlex.quote(str(marker))}\nexit 97\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    ownership = json.loads(record_path.read_text(encoding="utf-8"))
+    ownership["files"][relative] = hashlib.sha256(script.read_bytes()).hexdigest()
+    record_path.write_text(
+        f"{json.dumps(ownership, indent=2)}\n",
+        encoding="utf-8",
+    )
+
+    interrupted = _install_with(
+        binary,
+        project,
+        env={
+            **environment,
+            "AGENT_FLOW_TEST_PUBLISH_FAULT": "after-manifest",
+        },
+    )
+
+    assert interrupted.returncode != 0
+    published_content = manifest_path.read_bytes()
+    assert published_content != legacy_content
+    assert relative not in settings_path.read_text(encoding="utf-8")
+    assert script.exists()
+    registry_path = shared_home / "managed-projects.json"
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    record = registry["projects"][str(project.resolve())]
+    assert record["kit_digest"] == hashlib.sha256(installed_content).hexdigest()
+    assert record["accepted_kit_digests"] == [
+        hashlib.sha256(published_content).hexdigest()
+    ]
+    assert stat.S_IMODE(registry_path.stat().st_mode) == 0o600
+
+    dispatch = _global_dispatch(
+        home=home,
+        project=project,
+        event="PostToolUse",
+        payload={
+            "cwd": str(project),
+            "tool_name": "Skill",
+            "tool_input": {},
+        },
+        env=environment,
+    )
+
+    assert dispatch.returncode == 0, dispatch.stderr
+    assert not marker.exists()
+
+    retried = _install_with(binary, project, env=environment)
+
+    assert retried.returncode == 0, retried.stderr
+    assert not script.exists()
+    final = json.loads(registry_path.read_text(encoding="utf-8"))
+    final_record = final["projects"][str(project.resolve())]
+    assert "accepted_kit_digests" not in final_record
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+@pytest.mark.parametrize(
+    "fault",
+    ["after-project-registry-commit", "throw:after-project-registry-commit"],
+)
+def test_project_registry_commit_interruption_keeps_cutover_state_for_retry(
+    tmp_path: Path,
+    binary: str,
+    fault: str,
+) -> None:
+    project = tmp_path / f"post-manifest-cutover-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+    manifest_path = project / ".agent-flow" / "kit.json"
+    previous_manifest = manifest_path.read_bytes()
+    (
+        settings_path,
+        _settings_content,
+        script,
+        script_content,
+        record_path,
+        relative,
+    ) = _seed_legacy_cutover_hook(project)
+
+    interrupted = _install_with(
+        binary,
+        project,
+        env={
+            **os.environ,
+            "AGENT_FLOW_TEST_PUBLISH_FAULT": fault,
+        },
+    )
+
+    assert interrupted.returncode != 0
+    assert manifest_path.read_bytes() != previous_manifest
+    assert relative not in settings_path.read_text(encoding="utf-8")
+    assert script.read_bytes() == script_content
+    interrupted_record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert interrupted_record["files"][relative] == hashlib.sha256(script_content).hexdigest()
+
+    retried = _install_with(binary, project)
+
+    assert retried.returncode == 0, retried.stderr
+    assert not script.exists()
+    assert relative not in json.loads(record_path.read_text(encoding="utf-8"))["files"]
+
+def test_cutover_rejects_project_hook_registration_changed_after_snapshot(
+    tmp_path: Path,
+) -> None:
+    binary = "agent-flow-kit.mjs"
+    project = tmp_path / "cutover-cas"
+    project.mkdir()
+    environment = _install_env(project, None)
+    assert _install_with(binary, project, env=environment).returncode == 0
+    settings_path, _, _, _, _, _ = _seed_legacy_cutover_hook(project)
+    binary_url = (KIT_ROOT / "bin" / binary).as_uri()
+    source = f"""
+import fs from "node:fs";
+import path from "node:path";
+const settings = {json.dumps(str(settings_path))};
+const originalRead = fs.readFileSync.bind(fs);
+const originalWrite = fs.writeFileSync.bind(fs);
+let changed = false;
+fs.readFileSync = (target, ...args) => {{
+  const content = originalRead(target, ...args);
+  if (!changed && typeof target === "string" && path.resolve(target) === settings) {{
+    changed = true;
+    const payload = JSON.parse(
+      Buffer.isBuffer(content) ? content.toString("utf8") : content
+    );
+    payload.user_setting = "preserve";
+    originalWrite(settings, JSON.stringify(payload, null, 2) + "\\n", "utf8");
+  }}
+  return content;
+}};
+process.argv = [process.execPath, {json.dumps(str(KIT_ROOT / "bin" / binary))}, "install"];
+await import({json.dumps(binary_url)});
+"""
+
+    result = subprocess.run(
+        (_node(), "--input-type=module", "-e", source),
+        cwd=project,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "project hook registration changed before cutover" in result.stderr
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert settings["user_setting"] == "preserve"
+    assert settings["hooks"]["PreToolUse"]
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_retirement_failure_rolls_back_manifest_and_project_registration(
+    tmp_path: Path,
+    binary: str,
+) -> None:
+    project = tmp_path / f"retirement-rollback-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+    manifest_path = project / ".agent-flow" / "kit.json"
+    previous_manifest = manifest_path.read_bytes()
+    settings_path, settings_content, script, script_content, _, _ = (
+        _seed_legacy_cutover_hook(project)
+    )
+    invalid_omp_extension = project / ".omp" / "extensions" / "agent-flow-hooks.ts"
+    invalid_omp_extension.mkdir(parents=True)
+
+    failed = _install_with(binary, project)
+
+    assert failed.returncode != 0
+    assert manifest_path.read_bytes() == previous_manifest
+    assert settings_path.read_text(encoding="utf-8") == settings_content
+    assert script.read_bytes() == script_content
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_post_retirement_failure_restores_manifest_registration_and_launcher(
+    tmp_path: Path,
+    binary: str,
+) -> None:
+    project = tmp_path / f"post-retirement-rollback-{binary}"
+    project.mkdir()
+    environment = _install_env(project, None)
+    assert _install_with(binary, project, env=environment).returncode == 0
+    settings_path, settings_content, _, _, _, _ = _seed_legacy_cutover_hook(project)
+    launcher = project / ".agent-flow" / "bin" / "agent-flow"
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    launcher_content = b"#!/bin/sh\nexit 0\n"
+    launcher.write_bytes(launcher_content)
+    launcher.chmod(0o755)
+    manifest_path = project / ".agent-flow" / "kit.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["project_launcher_digest"] = hashlib.sha256(launcher_content).hexdigest()
+    manifest_path.write_text(f"{json.dumps(manifest, indent=2)}\n", encoding="utf-8")
+    previous_manifest = manifest_path.read_bytes()
+    registry_path = Path(environment["AGENT_FLOW_HOME"]) / "managed-projects.json"
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    registry["projects"][str(project.resolve())]["kit_digest"] = hashlib.sha256(
+        previous_manifest
+    ).hexdigest()
+    registry_path.write_text(f"{json.dumps(registry, indent=2)}\n", encoding="utf-8")
+
+    failed = _install_with(
+        binary,
+        project,
+        env={
+            **environment,
+            "AGENT_FLOW_TEST_PUBLISH_FAULT": "throw:after-cutover",
+        },
+    )
+
+    assert failed.returncode != 0
+    assert "injected publication failure: after-cutover" in failed.stderr
+    assert manifest_path.read_bytes() == previous_manifest
+    assert settings_path.read_text(encoding="utf-8") == settings_content
+    assert launcher.read_bytes() == launcher_content
+    backup_dir = project / ".agent-flow" / "backups" / "retired" / "bin"
+    assert not (backup_dir.exists() and list(backup_dir.glob("agent-flow*")))
+
+    retried = _install_with(binary, project, env=environment)
+
+    assert retried.returncode == 0, retried.stderr
+    assert not launcher.exists()
+    assert not (backup_dir.exists() and list(backup_dir.glob("agent-flow*")))
+
+
+def test_owned_legacy_launcher_backup_is_deleted_after_retirement(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "legacy-launcher-backup"
+    project.mkdir()
+    environment = _install_env(project, None)
+    assert _install_with("agent-flow-kit.mjs", project, env=environment).returncode == 0
+    launcher = project / ".agent-flow" / "bin" / "agent-flow"
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    launcher_content = b"#!/bin/sh\nexit 0\n"
+    launcher.write_bytes(launcher_content)
+    launcher.chmod(0o755)
+    launcher_digest = hashlib.sha256(launcher_content).hexdigest()
+    manifest_path = project / ".agent-flow" / "kit.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["project_launcher_digest"] = launcher_digest
+    manifest_path.write_text(f"{json.dumps(manifest, indent=2)}\n", encoding="utf-8")
+    registry_path = Path(environment["AGENT_FLOW_HOME"]) / "managed-projects.json"
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    registry["projects"][str(project.resolve())]["kit_digest"] = hashlib.sha256(
+        manifest_path.read_bytes()
+    ).hexdigest()
+    registry_path.write_text(f"{json.dumps(registry, indent=2)}\n", encoding="utf-8")
+    module = (KIT_ROOT / "lib" / "installer-shared.mjs").as_uri()
+    source = (
+        f"import fs from 'node:fs';"
+        f"import {{ prepareLegacyProjectRuntimeRetirement }} from {json.dumps(module)};"
+        f"const root={json.dumps(str(project))};"
+        "const manifest=JSON.parse(fs.readFileSync(root+'/.agent-flow/kit.json','utf8'));"
+        "prepareLegacyProjectRuntimeRetirement(root, manifest)().commit();"
+    )
+
+    retired = subprocess.run(
+        (_node(), "--input-type=module", "-e", source),
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert retired.returncode == 0, retired.stderr
+    backup_dir = project / ".agent-flow" / "backups" / "retired" / "bin"
+    assert not launcher.exists()
+    assert not (backup_dir.exists() and list(backup_dir.glob("agent-flow*")))
+
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_retired_hook_cleanup_restores_source_when_interrupted_after_backup(
+    tmp_path: Path,
+    binary: str,
+) -> None:
+    project = tmp_path / f"retired-hook-rollback-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+    retired = project / ".agent-flow" / "scripts" / "hooks" / "guard-spec-approval.sh"
+    retired.parent.mkdir(parents=True, exist_ok=True)
+    retired.write_text("#!/bin/sh\nexit 2\n", encoding="utf-8")
+    retired.chmod(0o755)
+    environment = {
+        **os.environ,
+        "AGENT_FLOW_TEST_PUBLISH_FAULT": "after-backup",
+    }
+
+    interrupted = _install_with(
+        binary,
+        project,
+        "--force-managed",
+        env=environment,
+    )
+
+    assert interrupted.returncode != 0
+    assert retired.read_text(encoding="utf-8") == "#!/bin/sh\nexit 2\n"
+    assert stat.S_IMODE(retired.stat().st_mode) == 0o755
+    assert retired.with_name("guard-spec-approval.sh.removed").is_file()
+
+    recovered = _install_with(binary, project, "--force-managed")
+    assert recovered.returncode == 0, recovered.stderr
+    assert not retired.exists()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_reinstall_retires_hooks_from_existing_managed_worktrees(
     tmp_path: Path, binary: str
 ) -> None:
     project = tmp_path / f"existing-worktree-{binary}"
@@ -1028,10 +1853,10 @@ def test_reinstall_provisions_hooks_into_existing_managed_worktrees(
         subprocess.run(command, cwd=project, check=True, capture_output=True)
     assert _install_with(binary, project).returncode == 0
 
-    launcher = project / ".agent-flow" / "bin" / "agent-flow"
     created = subprocess.run(
         (
-            str(launcher),
+            _node(),
+            str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"),
             "worktree",
             "create",
             "--root",
@@ -1044,42 +1869,40 @@ def test_reinstall_provisions_hooks_into_existing_managed_worktrees(
         text=True,
         capture_output=True,
         check=False,
+        env=_install_env(project, None),
     )
     assert created.returncode == 0, created.stderr
     checkout = Path(created.stdout.strip().splitlines()[-1].split(maxsplit=2)[2])
     assert checkout.is_dir()
-    for rel in (
+    registration_paths = (
         ".claude/settings.json",
         ".Codex/hooks.json",
         ".codex/hooks.json",
-        ".omp/extensions/agent-flow-hooks.ts",
-    ):
-        (checkout / rel).unlink(missing_ok=True)
+    )
+    home = Path(_install_env(project, None)["HOME"])
 
+    def seed_legacy_registrations() -> None:
+        for rel in registration_paths:
+            target = checkout / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((home / rel).read_bytes())
+        omp_target = checkout / ".omp/extensions/agent-flow-hooks.ts"
+        omp_target.parent.mkdir(parents=True, exist_ok=True)
+        omp_target.write_bytes(_installed_omp_extension(project).read_bytes())
+
+    def assert_legacy_registrations_absent() -> None:
+        for rel in (*registration_paths, ".omp/extensions/agent-flow-hooks.ts"):
+            assert not (checkout / rel).exists()
+
+    seed_legacy_registrations()
     result = _install_with(binary, project)
-
     assert result.returncode == 0, result.stderr
-    for rel in (
-        ".claude/settings.json",
-        ".Codex/hooks.json",
-        ".codex/hooks.json",
-        ".omp/extensions/agent-flow-hooks.ts",
-    ):
-        source = project / rel
-        if source.is_file():
-            assert (checkout / rel).read_bytes() == source.read_bytes()
+    assert_legacy_registrations_absent()
 
+    seed_legacy_registrations()
     disabled = _install_with(binary, project, "--no-hooks")
     assert disabled.returncode == 0, disabled.stderr
-    for rel in (
-        ".claude/settings.json",
-        ".Codex/hooks.json",
-        ".codex/hooks.json",
-    ):
-        target = checkout / rel
-        if target.is_file():
-            assert ".agent-flow/scripts/hooks/" not in target.read_text(encoding="utf-8")
-    assert not (checkout / ".omp/extensions/agent-flow-hooks.ts").exists()
+    assert_legacy_registrations_absent()
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
@@ -1108,9 +1931,9 @@ def test_installer_outputs_use_explicit_spec_confirmation_contract(
         assert "user-prompt hook" not in installed
         assert "사용자 터미널 명령 실행을 요구하지 않습니다" in installed
 
-    canonical_skill = (
-        KIT_ROOT / "skills" / "agent-flow" / "SKILL.md"
-    ).read_text(encoding="utf-8")
+    canonical_skill = (KIT_ROOT / "skills" / "agent-flow" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
     installed_skill = (
         project / ".agent-flow" / "skills" / "agent-flow" / "SKILL.md"
     ).read_text(encoding="utf-8")
@@ -1126,15 +1949,72 @@ def test_installer_outputs_use_explicit_spec_confirmation_contract(
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_no_hooks_removes_every_managed_hook_and_survives_reinstall(
+def test_global_omp_conflict_is_fatal_unless_force_managed(
     tmp_path: Path, binary: str
 ) -> None:
-    """불변: hook을 끄면 등록·스크립트·OMP 확장이 모두 사라지고 재설치가 되살리지 않는다.
+    project = tmp_path / f"omp-conflict-{binary}"
+    home = tmp_path / f"omp-conflict-home-{binary}"
+    project.mkdir()
+    home.mkdir()
+    target = home / ".omp" / "agent" / "extensions" / "agent-flow-hooks.ts"
+    target.parent.mkdir(parents=True)
+    user_content = "export const userOwned = true;\n"
+    target.write_text(user_content, encoding="utf-8")
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "AGENT_FLOW_HOME": str(home / ".agent-flow"),
+        "AGENT_FLOW_SKIP_CODEX_TRUST": "1",
+        "PYTHON": sys.executable,
+    }
 
-    되살아나면 끈 의미가 없다 — 사용자는 install 한 번마다 다시 꺼야 한다.
-    두 진입점 모두 같은 계약이어야 한다. installer는 kit에 위임한 뒤 kit.json을
-    자기 것으로 덮으므로, 한쪽만 고치면 재설치에서 조용히 되살아난다.
-    """
+    blocked = _install_with(binary, project, env=env)
+
+    assert blocked.returncode != 0
+    assert "not kit-managed" in blocked.stderr
+    assert "agent-flow installed" not in blocked.stdout
+    assert target.read_text(encoding="utf-8") == user_content
+    assert not (project / ".agent-flow" / "kit.json").exists()
+
+    forced = _install_with(binary, project, "--force-managed", env=env)
+
+    assert forced.returncode == 0, forced.stderr
+    assert target.read_text(encoding="utf-8").startswith(
+        "// agent-flow: managed omp extension\n"
+    )
+    assert (project / ".agent-flow" / "kit.json").is_file()
+    backups = sorted(target.parent.glob(f"{target.name}.bak.*"))
+    assert len(backups) == 1
+    assert backups[0].read_text(encoding="utf-8") == user_content
+
+    modified_managed = target.read_text(encoding="utf-8") + "// user modification\n"
+    target.write_text(modified_managed, encoding="utf-8")
+    reinstalled = _install_with(binary, project, env=env)
+    assert reinstalled.returncode != 0
+    assert "different managed installation" in reinstalled.stderr
+    assert target.read_text(encoding="utf-8") == modified_managed
+
+    forced_reinstall = _install_with(
+        binary,
+        project,
+        "--force-managed",
+        env=env,
+    )
+    assert forced_reinstall.returncode == 0, forced_reinstall.stderr
+    backups = sorted(target.parent.glob(f"{target.name}.bak.*"))
+    assert len(backups) == 2
+    assert {backup.read_text(encoding="utf-8") for backup in backups} == {
+        user_content,
+        modified_managed,
+    }
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_project_hook_toggle_preserves_global_bootstrap(
+    tmp_path: Path, binary: str
+) -> None:
+    """Project opt-out removes project activation while preserving the global OMP adapter."""
+
     def _install(project: Path, *args: str):  # noqa: ANN202 - 로컬 바인딩
         return _install_with(binary, project, *args)
 
@@ -1143,28 +2023,219 @@ def test_no_hooks_removes_every_managed_hook_and_survives_reinstall(
 
     assert _install(project).returncode == 0
     on = _hook_state(project)
-    assert on["registered"], "기본 설치는 hook을 등록해야 한다"
+    assert on["registered"], "기본 설치는 global hook을 등록해야 한다"
+    assert on["project_registered"] is False
     assert on["flag"] is True
+    registered = on["registered"]
 
     assert _install(project, "--no-hooks").returncode == 0
     off = _hook_state(project)
-    assert off["registered"] == set()
+    assert off["registered"] == registered
+    assert off["project_registered"] is False
     assert off["scripts"] == set()
-    assert off["omp"] is False
+    assert off["omp"] is True
     assert off["flag"] is False
 
-    # 플래그 없이 재설치, force까지 — 둘 다 되살리면 안 된다.
+    # 플래그 없이 재설치, force까지 — project opt-in을 되살리면 안 된다.
     assert _install(project).returncode == 0
-    assert _hook_state(project)["registered"] == set()
+    assert _hook_state(project)["registered"] == registered
     assert _install(project, "--force-managed").returncode == 0
-    assert _hook_state(project)["registered"] == set()
+    assert _hook_state(project)["registered"] == registered
 
-def test_standalone_no_hooks_prunes_stale_json_when_delegated_kit_fails(
+    assert _install(project, "--hooks").returncode == 0
+    restored = _hook_state(project)
+    assert restored["registered"] == registered
+    assert restored["project_registered"] is False
+    assert restored["omp"] is True
+    assert restored["flag"] is True
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_no_hooks_removes_actual_legacy_interpreter_commands(
+    tmp_path: Path, binary: str
+) -> None:
+    project = tmp_path / "legacy hooks off"
+    project.mkdir()
+    hook_dir = project.resolve() / ".agent-flow" / "scripts" / "hooks"
+    legacy_shell = f"/bin/bash '{hook_dir / 'guard-protected-branch.sh'}'"
+    legacy_python = f"/usr/bin/python3 -I '{hook_dir / 'comment-checker.py'}'"
+    stale = {
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "Bash",
+                    "hooks": [
+                        {"type": "command", "command": legacy_shell},
+                        {"type": "command", "command": legacy_python},
+                        {"type": "command", "command": "./custom-hook.sh"},
+                    ],
+                }
+            ]
+        }
+    }
+    for relative in (".claude/settings.json", ".Codex/hooks.json"):
+        target = project / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(stale), encoding="utf-8")
+
+    result = _install_with(binary, project, "--no-hooks")
+
+    assert result.returncode == 0, result.stderr
+    for relative in (".claude/settings.json", ".Codex/hooks.json"):
+        text = (project / relative).read_text(encoding="utf-8")
+        assert legacy_shell not in text
+        assert legacy_python not in text
+        assert "./custom-hook.sh" in text
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_install_refuses_symlinked_legacy_registration(
+    tmp_path: Path, binary: str
+) -> None:
+    project = tmp_path / f"symlink-{binary}"
+    project.mkdir()
+    hook_dir = project.resolve() / ".agent-flow" / "scripts" / "hooks"
+    outside = tmp_path / f"{binary}.settings.json"
+    outside.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Bash",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": (
+                                        f"/bin/bash '{hook_dir / 'guard-protected-branch.sh'}'"
+                                    ),
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    original = outside.read_bytes()
+    target = project / ".claude" / "settings.json"
+    target.parent.mkdir()
+    target.symlink_to(outside)
+
+    result = _install_with(binary, project)
+
+    assert result.returncode != 0
+    assert "refusing symlinked project hook registration" in result.stderr
+    assert target.is_symlink()
+    assert outside.read_bytes() == original
+    assert not (project / ".agent-flow" / "kit.json").exists()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_install_refuses_symlinked_project_hook_parent(
+    tmp_path: Path,
+    binary: str,
+) -> None:
+    project = tmp_path / f"project-parent-symlink-{binary}"
+    home = tmp_path / f"project-parent-symlink-home-{binary}"
+    outside = tmp_path / f"outside-parent-{binary}"
+    project.mkdir()
+    home.mkdir()
+    outside.mkdir()
+    settings = outside / "settings.json"
+    settings.write_text('{"flag": true}\n', encoding="utf-8")
+    original = settings.read_bytes()
+    (project / ".claude").symlink_to(outside, target_is_directory=True)
+    environment = {
+        **os.environ,
+        "HOME": str(home),
+        "AGENT_FLOW_HOME": str(home / ".agent-flow"),
+        "AGENT_FLOW_SKIP_CODEX_TRUST": "1",
+        "PYTHON": sys.executable,
+    }
+
+    result = _install_with(binary, project, env=environment)
+
+    assert result.returncode != 0
+    assert "refusing symlinked project hook registration" in result.stderr
+    assert settings.read_bytes() == original
+    assert not (project / ".agent-flow" / "kit.json").exists()
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_install_refuses_symlinked_global_settings_before_local_cutover(
+    tmp_path: Path,
+    binary: str,
+) -> None:
+    project = tmp_path / f"global-symlink-{binary}"
+    home = tmp_path / f"global-symlink-home-{binary}"
+    project.mkdir()
+    home.mkdir()
+    outside = tmp_path / f"{binary}.global-settings.json"
+    outside.write_text("{}\n", encoding="utf-8")
+    original = outside.read_bytes()
+    global_settings = home / ".claude" / "settings.json"
+    global_settings.parent.mkdir(parents=True)
+    global_settings.symlink_to(outside)
+    local_settings = project / ".claude" / "settings.json"
+    local_settings.parent.mkdir(parents=True)
+    local_content = json.dumps(
+        {
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": (
+                                    ".agent-flow/scripts/hooks/"
+                                    "guard-protected-branch.sh"
+                                ),
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+    )
+    local_settings.write_text(local_content, encoding="utf-8")
+    legacy_script = (
+        project
+        / ".agent-flow"
+        / "scripts"
+        / "hooks"
+        / "guard-protected-branch.sh"
+    )
+    legacy_script.parent.mkdir(parents=True)
+    shutil.copy2(
+        KIT_ROOT / "scripts" / "hooks" / legacy_script.name,
+        legacy_script,
+    )
+    legacy_script_content = legacy_script.read_bytes()
+    environment = {
+        **os.environ,
+        "HOME": str(home),
+        "AGENT_FLOW_HOME": str(home / ".agent-flow"),
+        "AGENT_FLOW_SKIP_CODEX_TRUST": "1",
+        "PYTHON": sys.executable,
+    }
+
+    result = _install_with(binary, project, env=environment)
+
+    assert result.returncode != 0
+    assert "refusing symlinked project hook registration" in result.stderr
+    assert global_settings.is_symlink()
+    assert outside.read_bytes() == original
+    assert local_settings.read_text(encoding="utf-8") == local_content
+    assert legacy_script.read_bytes() == legacy_script_content
+    assert not (project / ".agent-flow" / "kit.json").exists()
+
+
+def test_standalone_propagates_delegated_kit_failure(
     tmp_path: Path,
 ) -> None:
-    """Standalone cleanup must not depend on delegated kit success."""
-    import os
-
     project = tmp_path / "delegated-kit-failure"
     project.mkdir()
     stale = {
@@ -1183,10 +2254,11 @@ def test_standalone_no_hooks_prunes_stale_json_when_delegated_kit_fails(
             ]
         }
     }
+    before = json.dumps(stale)
     for relative in (".claude/settings.json", ".Codex/hooks.json"):
         target = project / relative
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(stale), encoding="utf-8")
+        target.write_text(before, encoding="utf-8")
 
     fail_delegated_kit = tmp_path / "fail-delegated-kit.cjs"
     fail_delegated_kit.write_text(
@@ -1198,38 +2270,13 @@ def test_standalone_no_hooks_prunes_stale_json_when_delegated_kit_fails(
         **os.environ,
         "NODE_OPTIONS": f"--require={fail_delegated_kit}",
     }
-    result = _install_with(
-        "agent-flow-install.mjs", project, "--no-hooks", env=env
-    )
+    result = _install_with("agent-flow-install.mjs", project, "--no-hooks", env=env)
 
-    assert result.returncode == 0, result.stderr
-    assert "agent-flow-kit install skipped" in result.stderr
+    assert result.returncode != 0
+    assert "agent-flow-kit install failed" in result.stderr
     for relative in (".claude/settings.json", ".Codex/hooks.json"):
-        text = (project / relative).read_text(encoding="utf-8")
-        assert "guard-protected-branch.sh" not in text
-        assert "./custom-hook.sh" in text
-    assert _hook_state(project)["scripts"] == set()
-
-
-
-@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_hooks_flag_restores_them(tmp_path: Path, binary: str) -> None:
-    """불변: 되돌릴 수 있어야 한다. 끄기가 편도면 그건 삭제다."""
-    def _install(project: Path, *args: str):  # noqa: ANN202
-        return _install_with(binary, project, *args)
-
-    project = tmp_path / "hooks-back"
-    project.mkdir()
-
-    assert _install(project, "--no-hooks").returncode == 0
-    assert _hook_state(project)["registered"] == set()
-
-    assert _install(project, "--hooks").returncode == 0
-    back = _hook_state(project)
-    assert "record-skill-read.py" in back["registered"]
-    assert "guard-protected-branch.sh" in back["registered"]
-    assert back["omp"] is True
-    assert back["flag"] is True
+        assert (project / relative).read_text(encoding="utf-8") == before
+    assert not (project / ".agent-flow" / "kit.json").exists()
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
@@ -1255,16 +2302,28 @@ def test_install_removes_broad_codex_project_trust(tmp_path: Path, binary: str) 
 
     env["PYTHON"] = sys.executable
     env["PYTHONPATH"] = os.pathsep.join(
-        p for p in (str(Path(yaml.__file__).resolve().parents[1]), env.get("PYTHONPATH")) if p
+        p
+        for p in (str(Path(yaml.__file__).resolve().parents[1]), env.get("PYTHONPATH"))
+        if p
     )
 
     result = subprocess.run(
         (_node(), str(KIT_ROOT / "bin" / binary), "install"),
-        cwd=project, text=True, capture_output=True, check=False, env=env,
+        cwd=project,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
     )
     assert result.returncode == 0, result.stderr
     launched = subprocess.run(
-        (str(project / ".agent-flow" / "bin" / "agent-flow"), "--help"),
+        (
+            _node(),
+            str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"),
+            "spec",
+            "confirm",
+            "--help",
+        ),
         cwd=project,
         text=True,
         capture_output=True,
@@ -1287,10 +2346,7 @@ def test_host_hook_sync_fails_closed_when_git_discovery_fails(
     failure: str,
 ) -> None:
     project = tmp_path / "project"
-    launcher = project / ".agent-flow" / "bin" / "agent-flow"
-    launcher.parent.mkdir(parents=True)
-    launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    launcher.chmod(0o755)
+    project.mkdir()
     if failure == "rev-parse":
         (project / ".git").mkdir()
     fake_bin = tmp_path / "bin"
@@ -1374,11 +2430,66 @@ def test_host_hook_sync_does_not_spawn_for_unicode_leader_only_repo(
     assert result.returncode == 0, result.stderr
     assert not marker.exists()
 
+def test_host_hook_sync_uses_verified_global_bootstrap(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    for command in (
+        ("git", "init", "-b", "main"),
+        ("git", "config", "user.email", "test@example.com"),
+        ("git", "config", "user.name", "Test"),
+    ):
+        subprocess.run(command, cwd=project, check=True, capture_output=True)
+    (project / "README").write_text("tracked\n", encoding="utf-8")
+    for command in (
+        ("git", "add", "README"),
+        ("git", "commit", "-m", "init"),
+    ):
+        subprocess.run(command, cwd=project, check=True, capture_output=True)
+    linked = tmp_path / "linked"
+    subprocess.run(
+        ("git", "worktree", "add", "-b", "feat/linked", str(linked), "HEAD"),
+        cwd=project,
+        check=True,
+        capture_output=True,
+    )
+    env = _install_env(project, None)
+    installed = _install(project, env=env)
+    assert installed.returncode == 0, installed.stderr
+
+    marker = tmp_path / "project-launcher-ran"
+    launcher = project / ".agent-flow" / "bin" / "agent-flow"
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    launcher.write_text(
+        f"#!/bin/sh\nprintf ran > {shlex.quote(str(marker))}\nexit 91\n",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o755)
+    module = (KIT_ROOT / "lib" / "installer-shared.mjs").as_uri()
+    code = (
+        f"import {{ syncManagedWorktreeHostHooks }} from {json.dumps(module)};"
+        f"syncManagedWorktreeHostHooks({json.dumps(str(project))});"
+    )
+    result = subprocess.run(
+        (_node(), "--input-type=module", "-e", code),
+        cwd=project,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    assert not marker.exists()
+
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
 @pytest.mark.parametrize("hooks_flag", [(), ("--no-hooks",)])
 def test_install_output_satisfies_the_run_start_hook_gate(
-    tmp_path: Path, binary: str, hooks_flag: tuple[str, ...]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    binary: str,
+    hooks_flag: tuple[str, ...],
 ) -> None:
     """불변: installer가 만든 상태는 런 시작 게이트를 그대로 통과한다.
 
@@ -1392,9 +2503,16 @@ def test_install_output_satisfies_the_run_start_hook_gate(
 
     project = tmp_path / f"gate-{binary}-{len(hooks_flag)}"
     project.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
     result = subprocess.run(
         (_node(), str(KIT_ROOT / "bin" / binary), "install", *hooks_flag),
-        cwd=project, text=True, capture_output=True, check=False,
+        cwd=project,
+        text=True,
+        capture_output=True,
+        check=False,
+        env={**os.environ, "HOME": str(home)},
     )
     assert result.returncode == 0, result.stderr
 
@@ -1406,7 +2524,9 @@ def test_install_output_satisfies_the_run_start_hook_gate(
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_broken_host_skill_symlink_does_not_brick_install(tmp_path: Path, binary: str) -> None:
+def test_broken_host_skill_symlink_does_not_brick_install(
+    tmp_path: Path, binary: str
+) -> None:
     """반증: `existsSync`는 심링크를 따라가 끊어진 링크에 false를 준다.
 
     그러면 stale link 정리 분기를 못 타고 링크 생성이 `EEXIST`로 죽어 install이
@@ -1415,13 +2535,12 @@ def test_broken_host_skill_symlink_does_not_brick_install(tmp_path: Path, binary
     """
     project = tmp_path / "broken-link"
     project.mkdir()
-    first = subprocess.run(
-        (_node(), str(KIT_ROOT / "bin" / binary), "install"),
-        cwd=project, text=True, capture_output=True, check=False,
-    )
+    first = _install_with(binary, project)
     assert first.returncode == 0, first.stderr
     links = sorted(
-        entry for entry in (project / ".claude" / "skills").iterdir() if entry.is_symlink()
+        entry
+        for entry in (project / ".claude" / "skills").iterdir()
+        if entry.is_symlink()
     )
     if not links:
         pytest.skip("this platform copied instead of symlinking host skills")
@@ -1432,12 +2551,11 @@ def test_broken_host_skill_symlink_does_not_brick_install(tmp_path: Path, binary
     dangling.symlink_to(project / "gone" / dangling.name)
     assert dangling.is_symlink() and not dangling.exists()
 
-    result = subprocess.run(
-        (_node(), str(KIT_ROOT / "bin" / binary), "install"),
-        cwd=project, text=True, capture_output=True, check=False,
-    )
+    result = _install_with(binary, project)
     assert result.returncode == 0, result.stderr
-    assert (dangling / "SKILL.md").is_file(), f"stale link was not repaired (was {target})"
+    assert (dangling / "SKILL.md").is_file(), (
+        f"stale link was not repaired (was {target})"
+    )
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
@@ -1450,7 +2568,6 @@ def test_installers_never_probe_a_link_path_with_existssync(binary: str) -> None
     source = (KIT_ROOT / "bin" / binary).read_text(encoding="utf-8")
     assert "lstatIfExists(destDir)" in source
     assert "fs.existsSync(destDir)" not in source
-
 
 
 def test_cross_tree_install_keeps_the_targets_tracked_scripts(tmp_path: Path) -> None:
@@ -1476,14 +2593,18 @@ def test_cross_tree_install_keeps_the_targets_tracked_scripts(tmp_path: Path) ->
     assert (project / "scripts").is_dir()
     status = subprocess.run(
         ["git", "status", "--porcelain", "--", "scripts"],
-        cwd=project, text=True, capture_output=True, check=True,
+        cwd=project,
+        text=True,
+        capture_output=True,
+        check=True,
     ).stdout
     assert " D " not in status and not status.startswith("D "), status
 
 
-
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-@pytest.mark.parametrize("script_name", ["check-context-docs.mjs", "check-context-docs.ts"])
+@pytest.mark.parametrize(
+    "script_name", ["check-context-docs.mjs", "check-context-docs.ts"]
+)
 def test_reinstall_removes_retired_context_checker(
     tmp_path: Path, binary: str, script_name: str
 ) -> None:
@@ -1523,7 +2644,9 @@ def _indexed_names(block: str, group: str) -> set[str]:
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_install_writes_the_skill_index_into_agents_md(tmp_path: Path, binary: str) -> None:
+def test_install_writes_the_skill_index_into_agents_md(
+    tmp_path: Path, binary: str
+) -> None:
     """설치된 skill을 AGENTS.md 안에서 바로 보여야 한다.
 
     `index.json`을 읽으라고 안내만 하면 그건 판단 지점이고, agent는 그 판단을
@@ -1541,7 +2664,9 @@ def test_install_writes_the_skill_index_into_agents_md(tmp_path: Path, binary: s
     assert installed
     for file_name in ("AGENTS.md", "CLAUDE.md"):
         block = _skill_index_block(project, file_name)
-        assert "[agent-flow skill index]" in block, f"{file_name} 인덱스가 채워지지 않았다"
+        assert "[agent-flow skill index]" in block, (
+            f"{file_name} 인덱스가 채워지지 않았다"
+        )
         listed = _indexed_names(block, "always") | _indexed_names(block, "on-demand")
         assert listed == installed, f"{file_name}: {installed ^ listed}"
 
@@ -1563,7 +2688,9 @@ def test_passive_delivery_lands_on_the_always_line(tmp_path: Path, binary: str) 
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_reinstall_does_not_duplicate_the_skill_index(tmp_path: Path, binary: str) -> None:
+def test_reinstall_does_not_duplicate_the_skill_index(
+    tmp_path: Path, binary: str
+) -> None:
     """반증: 블록을 덧붙이면 재설치마다 AGENTS.md가 자란다."""
     project = tmp_path / f"reinstall-{binary}"
     project.mkdir()
@@ -1587,11 +2714,15 @@ def _workflow_backups(project: Path, stem: str) -> dict[str, str]:
 
 
 def _kit_json(project: Path) -> dict:
-    return json.loads((project / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
+    return json.loads(
+        (project / ".agent-flow" / "kit.json").read_text(encoding="utf-8")
+    )
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_pruned_custom_workflow_leaves_a_backup_and_says_where(tmp_path: Path, binary: str) -> None:
+def test_pruned_custom_workflow_leaves_a_backup_and_says_where(
+    tmp_path: Path, binary: str
+) -> None:
     """반증: prune이 사용자가 만든 workflow를 경고도 사본도 없이 지웠다.
 
     알리지 않으면 사용자는 자기 workflow가 사라진 것을 다음 run이 깨질 때 안다.
@@ -1622,7 +2753,9 @@ def test_pruned_custom_workflow_leaves_a_backup_and_says_where(tmp_path: Path, b
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_repeated_install_never_multiplies_workflow_backups(tmp_path: Path, binary: str) -> None:
+def test_repeated_install_never_multiplies_workflow_backups(
+    tmp_path: Path, binary: str
+) -> None:
     """불변: 백업은 잃은 버전당 하나다.
 
     `.removed`가 prune 대상에 남아 있으면 다음 install이 백업을 지운다. 반대로
@@ -1637,7 +2770,9 @@ def test_repeated_install_never_multiplies_workflow_backups(tmp_path: Path, bina
     for _ in range(3):
         custom.write_text(first, encoding="utf-8")
         assert _install_with(binary, project).returncode == 0
-    assert _workflow_backups(project, "my-custom.yaml") == {"my-custom.yaml.removed": first}
+    assert _workflow_backups(project, "my-custom.yaml") == {
+        "my-custom.yaml.removed": first
+    }
 
     second = "id: my-custom\nphases: [edited]\n"
     for _ in range(2):
@@ -1708,61 +2843,93 @@ def test_legacy_kit_json_keeps_installed_at_and_gains_updated_at(
     assert fresh["installed_at"] <= fresh["updated_at"]
 
 
-def _hook_matchers(project: Path, script: str) -> list[str]:
+def _hook_matchers(
+    project: Path, command_name: str, event_name: str | None = None
+) -> list[str]:
     matchers: list[str] = []
+    home = Path(_install_env(project, None)["HOME"])
     for relative in (".claude/settings.json", ".Codex/hooks.json", ".codex/hooks.json"):
-        path = project / relative
+        path = home / relative
         if not path.is_file():
             continue
         payload = json.loads(path.read_text(encoding="utf-8"))
-        for entries in (payload.get("hooks") or {}).values():
+        for event, entries in (payload.get("hooks") or {}).items():
+            if event_name is not None and event != event_name:
+                continue
             for entry in entries:
                 commands = " ".join(
                     str(hook.get("command", "")) for hook in entry.get("hooks") or []
                 )
-                if script in commands:
+                if command_name in commands:
                     matchers.append(str(entry.get("matcher", "")))
     return matchers
 
 
-def _tool_names(matcher: str) -> list[str]:
-    return matcher.removeprefix("^(").removesuffix(")$").split("|")
-
-
-def test_skill_use_observer_records_every_tool_its_matcher_admits(tmp_path: Path) -> None:
-    """등록과 소비가 갈라지면 matcher가 붙인 tool이 조용히 버려진다."""
+def test_pretooluse_registration_delegates_every_tool_to_launcher(
+    tmp_path: Path,
+) -> None:
     project = tmp_path / "project"
     project.mkdir()
-    (project / "pyproject.toml").write_text("[project]\nname = \"x\"\n", encoding="utf-8")
+    (project / "pyproject.toml").write_text('[project]\nname = "x"\n', encoding="utf-8")
+
+    installed = _install(project)
+
+    assert installed.returncode == 0, installed.stderr
+    matchers = _hook_matchers(project, "agent-flow-hook", "PreToolUse")
+    assert matchers
+    assert set(matchers) == {""}
+
+
+def test_skill_use_observer_records_each_supported_tool_class(tmp_path: Path) -> None:
+    """Shared dispatcher가 지원하는 tool class별 payload를 관측 hook에 전달한다."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "pyproject.toml").write_text('[project]\nname = "x"\n', encoding="utf-8")
     assert _install(project).returncode == 0
     skill = project / "demo" / "SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_text("---\nname: demo\n---\n", encoding="utf-8")
-    hook = project / ".agent-flow" / "scripts" / "hooks" / "record-skill-read.py"
+    runtime_record = _kit_json(project)["hook_runtime"]
+    launcher = Path(runtime_record["launcher_path"])
 
-    matchers = _hook_matchers(project, "record-skill-read.py")
+    matchers = _hook_matchers(project, "agent-flow-hook", "PostToolUse")
     assert matchers
+    tools = ("Skill", "Bash", "Read", "read_file", "view", "cat")
     for matcher in matchers:
-        for tool in ("Skill", "Bash", "Read"):
+        for tool in tools:
             assert re.match(matcher, tool), matcher
 
     log = project / ".agent-flow" / "skills-read.jsonl"
-    for tool in _tool_names(matchers[0]):
+    for tool in tools:
         log.unlink(missing_ok=True)
         payload = {
             "tool_name": tool,
             "cwd": str(project),
-            "tool_input": {"command": f"cat {skill}", "skill": "demo", "path": str(skill)},
+            "tool_input": {
+                "command": f"cat {skill}",
+                "skill": "demo",
+                "path": str(skill),
+            },
         }
-        subprocess.run(
-            (sys.executable, str(hook)),
+        result = subprocess.run(
+            (
+                runtime_record["python"],
+                "-I",
+                str(launcher),
+                "--root",
+                str(project),
+                "--event",
+                "PostToolUse",
+            ),
             input=json.dumps(payload),
             capture_output=True,
             text=True,
             cwd=str(project),
+            env=_install_env(project, None),
             timeout=30,
             check=False,
         )
+        assert result.returncode == 0, result.stderr
         assert log.is_file(), tool
 
 
@@ -1779,24 +2946,32 @@ def test_installers_do_not_enumerate_external_skill_names() -> None:
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
 def test_plain_install_refreshes_a_managed_hook_to_match_its_recorded_digest(
-    tmp_path: Path, binary: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, binary: str
 ) -> None:
-    """digest는 갱신되고 hook 파일은 안 갱신되면 run 시작이 막힌다 — 평범한 install로 복구돼야 한다."""
+    """변조된 stable launcher는 평범한 install로 기록 digest에 맞게 복구한다."""
     project = tmp_path / "project"
     project.mkdir()
-    (project / "pyproject.toml").write_text("[project]\nname = \"x\"\n", encoding="utf-8")
+    home = project.parent / f".{project.name}-agent-flow-home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("AGENT_FLOW_HOME", str(home / ".agent-flow"))
+    (project / "pyproject.toml").write_text('[project]\nname = "x"\n', encoding="utf-8")
     assert _install_with(binary, project).returncode == 0
-    hook = project / ".agent-flow" / "scripts" / "hooks" / "record-skill-read.py"
-    hook.write_text("# stale copy from an older kit\n", encoding="utf-8")
+    runtime_record = _kit_json(project)["hook_runtime"]
+    hook = Path(runtime_record["launcher_path"])
+    hook.write_text("# stale launcher from an older kit\n", encoding="utf-8")
     os.chmod(hook, 0o755)
 
     assert _install_with(binary, project).returncode == 0
 
-    recorded = json.loads((project / ".agent-flow" / "kit.json").read_text(encoding="utf-8"))
-    digest = recorded["managed_hook_digests"]["record-skill-read.py"]
-    assert hashlib.sha256(hook.read_bytes()).hexdigest() == digest
+    shared_state = json.loads(
+        (Path(os.environ["HOME"]) / ".agent-flow" / "hook-runtime.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert (
+        hashlib.sha256(hook.read_bytes()).hexdigest() == shared_state["launcher_digest"]
+    )
     assert os.access(hook, os.X_OK)
-    # digest만 보면 백업이 남긴 실행 파일이 run 시작을 막는 것을 놓친다.
     sys.path.insert(0, str(KIT_ROOT / "src"))
     from agent_flow.core.hook_integrity import verify_managed_hooks
 
@@ -1807,7 +2982,9 @@ def test_plain_install_refreshes_a_managed_hook_to_match_its_recorded_digest(
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_install_root_option_targets_another_project(tmp_path: Path, binary: str) -> None:
+def test_install_root_option_targets_another_project(
+    tmp_path: Path, binary: str
+) -> None:
     """반증: `--root`가 무시되면 cwd에 깔고 성공으로 끝난다 — 어디 설치됐는지 알 길이 없다."""
     elsewhere = tmp_path / f"elsewhere-{binary}"
     elsewhere.mkdir()
@@ -1823,7 +3000,9 @@ def test_install_root_option_targets_another_project(tmp_path: Path, binary: str
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_install_root_rejects_a_path_that_is_not_a_directory(tmp_path: Path, binary: str) -> None:
+def test_install_root_rejects_a_path_that_is_not_a_directory(
+    tmp_path: Path, binary: str
+) -> None:
     """install은 없는 경로를 mkdir로 만들어 낸다. 오타가 빈 트리를 심고 성공하면 안 된다."""
     project = tmp_path / f"project-{binary}"
     project.mkdir()
@@ -1846,13 +3025,23 @@ def test_run_install_does_not_swallow_the_root_option(tmp_path: Path) -> None:
     elsewhere.mkdir()
     target = tmp_path / "target"
     target.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
 
     result = subprocess.run(
-        (_node(), str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"), "run", "install", "--root", str(target)),
+        (
+            _node(),
+            str(KIT_ROOT / "bin" / "agent-flow-kit.mjs"),
+            "run",
+            "install",
+            "--root",
+            str(target),
+        ),
         cwd=elsewhere,
         text=True,
         capture_output=True,
         check=False,
+        env=_install_env(target, {**os.environ, "HOME": str(home)}),
     )
 
     assert result.returncode == 0, result.stderr
@@ -1878,7 +3067,9 @@ def test_relative_install_root_resolves_against_the_caller_cwd(tmp_path: Path) -
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_install_root_inside_a_git_repo_names_the_root_it_would_use(tmp_path: Path, binary: str) -> None:
+def test_install_root_inside_a_git_repo_names_the_root_it_would_use(
+    tmp_path: Path, binary: str
+) -> None:
     """`resolveInstallRoot`는 git root로 걸어 올라간다. 사용자가 이름을 댄 자리가
     조용히 바뀌면 지금 고치는 버그와 같은 모양이 된다."""
     repo = tmp_path / f"repo-{binary}"
@@ -1896,7 +3087,9 @@ def test_install_root_inside_a_git_repo_names_the_root_it_would_use(tmp_path: Pa
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_symlinked_worktree_root_is_blocked_by_both_entry_points(tmp_path: Path, binary: str) -> None:
+def test_symlinked_worktree_root_is_blocked_by_both_entry_points(
+    tmp_path: Path, binary: str
+) -> None:
     """두 진입점의 worktree 판정은 각각 realpath와 path.resolve다. `--root`를
     정규화하지 않으면 심볼릭 링크 하나가 한쪽 guard만 통과한다."""
     leader = tmp_path / f"leader-{binary}"
@@ -1915,7 +3108,9 @@ def test_symlinked_worktree_root_is_blocked_by_both_entry_points(tmp_path: Path,
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
 @pytest.mark.parametrize("value", ["--root=", "--root:empty", "--root:flag"])
-def test_install_root_requires_a_real_value(tmp_path: Path, binary: str, value: str) -> None:
+def test_install_root_requires_a_real_value(
+    tmp_path: Path, binary: str, value: str
+) -> None:
     """빈 값은 cwd로 접혀 원래 버그와 같은 결과를 내고, `-`로 시작하는 값은 다음
     플래그를 root로 삼킨다 — 그 이름의 디렉터리가 있으면 실제로 거기 설치된다."""
     project = tmp_path / f"project-{binary}-{value}"
@@ -1935,14 +3130,22 @@ def test_install_root_requires_a_real_value(tmp_path: Path, binary: str, value: 
     assert not (project / "--force-managed" / ".agent-flow").exists()
 
 
-def test_root_option_is_not_validated_before_the_command_dispatch(tmp_path: Path) -> None:
+def test_root_option_is_not_validated_before_the_command_dispatch(
+    tmp_path: Path,
+) -> None:
     """`--root` 해석이 커맨드 디스패치보다 먼저 돌면 install이 아닌 커맨드가
     받지도 않는 플래그의 오류로 죽는다."""
     project = tmp_path / "project"
     project.mkdir()
 
     result = subprocess.run(
-        (_node(), str(KIT_ROOT / "bin" / "agent-flow-install.mjs"), "bogus", "--root", str(tmp_path / "nope")),
+        (
+            _node(),
+            str(KIT_ROOT / "bin" / "agent-flow-install.mjs"),
+            "bogus",
+            "--root",
+            str(tmp_path / "nope"),
+        ),
         cwd=project,
         text=True,
         capture_output=True,
@@ -1954,7 +3157,9 @@ def test_root_option_is_not_validated_before_the_command_dispatch(tmp_path: Path
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_install_root_pointing_at_the_marker_dir_is_blocked_the_same_way(tmp_path: Path, binary: str) -> None:
+def test_install_root_pointing_at_the_marker_dir_is_blocked_the_same_way(
+    tmp_path: Path, binary: str
+) -> None:
     """두 진입점의 root 해석이 갈리면 한쪽만 `<proj>/.agent-flow/.agent-flow`를 만든다."""
     project = tmp_path / f"proj-{binary}"
     (project / ".agent-flow").mkdir(parents=True)
@@ -1975,7 +3180,9 @@ def _record_installed_hash(project: Path, name: str) -> None:
     """이전 install이 쓴 그대로라고 기록한다. 사용자가 손대지 않았다는 뜻이다."""
     index_path = project / ".agent-flow" / "skills" / "index.json"
     index = json.loads(index_path.read_text(encoding="utf-8"))
-    body = (project / ".agent-flow" / "skills" / name / "SKILL.md").read_text(encoding="utf-8")
+    body = (project / ".agent-flow" / "skills" / name / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
     digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
     found = False
     for skill in index["skills"]:
@@ -1988,7 +3195,9 @@ def _record_installed_hash(project: Path, name: str) -> None:
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_reinstall_upgrades_an_untouched_bundled_skill(tmp_path: Path, binary: str) -> None:
+def test_reinstall_upgrades_an_untouched_bundled_skill(
+    tmp_path: Path, binary: str
+) -> None:
     """반증: "내용이 다르면 사용자 편집"으로만 보호하면 kit이 고친 skill이 기존
     설치본에 영영 닿지 않는다 — 실측으로 `workflowPhases` 개정이 설치된 프로젝트
     어디에도 도달하지 못했고 그 skill은 계속 활성화되지 않았다."""
@@ -1996,7 +3205,9 @@ def test_reinstall_upgrades_an_untouched_bundled_skill(tmp_path: Path, binary: s
     project.mkdir()
     assert _install_with(binary, project).returncode == 0
     installed = project / ".agent-flow" / "skills" / _UPGRADE_PROBE_SKILL / "SKILL.md"
-    shipped = (KIT_ROOT / "skills" / _UPGRADE_PROBE_SKILL / "SKILL.md").read_text(encoding="utf-8")
+    shipped = (KIT_ROOT / "skills" / _UPGRADE_PROBE_SKILL / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
     assert installed.is_file()
 
     # 옛 kit이 배포했던 판본을 흉내낸다. 사용자는 손대지 않았다.
@@ -2010,7 +3221,9 @@ def test_reinstall_upgrades_an_untouched_bundled_skill(tmp_path: Path, binary: s
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_reinstall_keeps_a_user_edited_bundled_skill(tmp_path: Path, binary: str) -> None:
+def test_reinstall_keeps_a_user_edited_bundled_skill(
+    tmp_path: Path, binary: str
+) -> None:
     """불변: 갱신이 사용자 편집을 덮으면 그 자리에 둔 프로젝트 규칙이 사라진다.
 
     한 번으로는 부족하다. index의 hash는 발견 시점의 파일에서 뽑으므로, 편집을 한 번
@@ -2048,7 +3261,9 @@ def test_skill_upgrade_reports_what_it_changed(tmp_path: Path, binary: str) -> N
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_skill_upgrade_does_not_revert_a_sibling_file(tmp_path: Path, binary: str) -> None:
+def test_skill_upgrade_does_not_revert_a_sibling_file(
+    tmp_path: Path, binary: str
+) -> None:
     """오라클은 `SKILL.md` 하나다. 형제 파일까지 덮으면 근거 없는 되돌림이 된다."""
     project = tmp_path / f"project-{binary}"
     project.mkdir()
@@ -2056,7 +3271,9 @@ def test_skill_upgrade_does_not_revert_a_sibling_file(tmp_path: Path, binary: st
     sibling = next(
         (
             item
-            for item in (project / ".agent-flow" / "skills" / "android-guides" / "references").glob("*.md")
+            for item in (
+                project / ".agent-flow" / "skills" / "android-guides" / "references"
+            ).glob("*.md")
         ),
         None,
     )
@@ -2073,7 +3290,9 @@ def test_skill_upgrade_does_not_revert_a_sibling_file(tmp_path: Path, binary: st
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_an_upgraded_skill_can_still_be_dropped_by_narrowing_the_profile(tmp_path: Path, binary: str) -> None:
+def test_an_upgraded_skill_can_still_be_dropped_by_narrowing_the_profile(
+    tmp_path: Path, binary: str
+) -> None:
     """갱신이 skill 디렉터리에 여분 파일을 남기면 `dirContentsMatch`의 항목 수 비교가
     어긋나 profile을 좁혀도 그 skill이 지워지지 않는다. `--profile ios`가 실제로
     떨어뜨리는 skill이어야 하므로 android 전용 이름을 쓴다."""
@@ -2082,7 +3301,9 @@ def test_an_upgraded_skill_can_still_be_dropped_by_narrowing_the_profile(tmp_pat
     project.mkdir()
     assert _install_with(binary, project).returncode == 0
     skill_dir = project / ".agent-flow" / "skills" / dropped
-    (skill_dir / "SKILL.md").write_text("---\nname: old\n---\n\n# 옛 판본\n", encoding="utf-8")
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: old\n---\n\n# 옛 판본\n", encoding="utf-8"
+    )
     _record_installed_hash(project, dropped)
     assert _install_with(binary, project).returncode == 0
 
@@ -2091,13 +3312,19 @@ def test_an_upgraded_skill_can_still_be_dropped_by_narrowing_the_profile(tmp_pat
     assert not skill_dir.exists(), sorted(item.name for item in skill_dir.iterdir())
 
 
-_SIBLING_RELATIVE = Path(".agent-flow/skills/android-guides/references/architecture-rules-guide.md")
+_SIBLING_RELATIVE = Path(
+    ".agent-flow/skills/android-guides/references/architecture-rules-guide.md"
+)
 _TEMPLATE_RELATIVE = Path(".agent-flow/templates/_shared/review/sdui.md")
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-@pytest.mark.parametrize("relative", [_SIBLING_RELATIVE, _TEMPLATE_RELATIVE], ids=["sibling", "template"])
-def test_kit_assets_without_a_record_are_upgraded_once(tmp_path: Path, binary: str, relative: Path) -> None:
+@pytest.mark.parametrize(
+    "relative", [_SIBLING_RELATIVE, _TEMPLATE_RELATIVE], ids=["sibling", "template"]
+)
+def test_kit_assets_without_a_record_are_upgraded_once(
+    tmp_path: Path, binary: str, relative: Path
+) -> None:
     """반증: `SKILL.md` 밖 자산은 오라클이 없어 낡은 채로 남았다 — review 템플릿 4개가
     실제로 그랬다. 기록이 생기기 전에 깔린 프로젝트는 사본을 남기고 한 번 갱신한다."""
     project = tmp_path / f"project-{binary}-{relative.name}"
@@ -2118,15 +3345,22 @@ def test_kit_assets_without_a_record_are_upgraded_once(tmp_path: Path, binary: s
     assert backup.read_text(encoding="utf-8") == "# 낡은 판본\n"
     # 사본은 미러 트리 밖에 남는다. 안에 남기면 profile을 좁혀도 그 skill이 안 지워진다.
     assert not list(target.parent.glob("*.bak*"))
-    assert f"backup: .agent-flow/backups/{relative.relative_to('.agent-flow').as_posix()}" in result.stdout
+    assert (
+        f"backup: .agent-flow/backups/{relative.relative_to('.agent-flow').as_posix()}"
+        in result.stdout
+    )
 
     again = _install_with(binary, project)
     assert f"upgraded: {relative.as_posix()}" not in again.stdout
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-@pytest.mark.parametrize("relative", [_SIBLING_RELATIVE, _TEMPLATE_RELATIVE], ids=["sibling", "template"])
-def test_kit_assets_keep_a_user_edit_across_reinstalls(tmp_path: Path, binary: str, relative: Path) -> None:
+@pytest.mark.parametrize(
+    "relative", [_SIBLING_RELATIVE, _TEMPLATE_RELATIVE], ids=["sibling", "template"]
+)
+def test_kit_assets_keep_a_user_edit_across_reinstalls(
+    tmp_path: Path, binary: str, relative: Path
+) -> None:
     """불변: 기록과 다른 내용은 사용자 편집이다. 몇 번을 재설치해도 남아야 한다."""
     project = tmp_path / f"project-{binary}-{relative.name}"
     project.mkdir()
@@ -2139,7 +3373,9 @@ def test_kit_assets_keep_a_user_edit_across_reinstalls(tmp_path: Path, binary: s
         assert result.returncode == 0, result.stderr
         assert target.read_text(encoding="utf-8") == "# 우리 규칙\n"
         # 복사 단계와 동기화 단계가 같은 파일을 각각 판정한다. 둘 다 알리면 잡음이 된다.
-        assert result.stdout.count(f"skipped (user-modified): {relative.as_posix()}") == 1
+        assert (
+            result.stdout.count(f"skipped (user-modified): {relative.as_posix()}") == 1
+        )
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
@@ -2150,7 +3386,9 @@ def test_install_records_the_kit_assets_it_wrote(tmp_path: Path, binary: str) ->
 
     assert _install_with(binary, project).returncode == 0
 
-    record = json.loads((project / ".agent-flow" / "kit-assets.json").read_text(encoding="utf-8"))
+    record = json.loads(
+        (project / ".agent-flow" / "kit-assets.json").read_text(encoding="utf-8")
+    )
     assert record["version"] == 1
     assert _SIBLING_RELATIVE.as_posix() in record["files"]
     assert _TEMPLATE_RELATIVE.as_posix() in record["files"]
@@ -2159,22 +3397,31 @@ def test_install_records_the_kit_assets_it_wrote(tmp_path: Path, binary: str) ->
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_reinstall_reports_a_skipped_user_edited_skill(tmp_path: Path, binary: str) -> None:
+def test_reinstall_reports_a_skipped_user_edited_skill(
+    tmp_path: Path, binary: str
+) -> None:
     """무음 skip이 "왜 kit 개정이 안 왔는가"를 물을 자리를 없앴다."""
     project = tmp_path / f"project-{binary}"
     project.mkdir()
     assert _install_with(binary, project).returncode == 0
     installed = project / ".agent-flow" / "skills" / _UPGRADE_PROBE_SKILL / "SKILL.md"
-    installed.write_text("---\nname: code-generation-discipline\n---\n\n# 우리 규칙\n", encoding="utf-8")
+    installed.write_text(
+        "---\nname: code-generation-discipline\n---\n\n# 우리 규칙\n", encoding="utf-8"
+    )
 
     result = _install_with(binary, project)
 
     assert result.returncode == 0, result.stderr
-    assert f"skipped (user-modified): .agent-flow/skills/{_UPGRADE_PROBE_SKILL}/SKILL.md" in result.stdout
+    assert (
+        f"skipped (user-modified): .agent-flow/skills/{_UPGRADE_PROBE_SKILL}/SKILL.md"
+        in result.stdout
+    )
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_a_synced_sibling_asset_does_not_block_profile_pruning(tmp_path: Path, binary: str) -> None:
+def test_a_synced_sibling_asset_does_not_block_profile_pruning(
+    tmp_path: Path, binary: str
+) -> None:
     """반증: 사본을 skill 디렉터리 안에 남기면 `dirContentsMatch`의 항목 수 비교가
     어긋나 profile을 좁혀도 그 skill이 다시는 지워지지 않는다."""
     project = tmp_path / f"project-{binary}"
@@ -2191,7 +3438,9 @@ def test_a_synced_sibling_asset_does_not_block_profile_pruning(tmp_path: Path, b
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_a_corrupt_asset_record_does_not_trigger_a_bulk_overwrite(tmp_path: Path, binary: str) -> None:
+def test_a_corrupt_asset_record_does_not_trigger_a_bulk_overwrite(
+    tmp_path: Path, binary: str
+) -> None:
     """반증: 잘린 기록을 "기록 없음"으로 읽으면 부트스트랩 분기로 떨어져 살아 있는
     사용자 편집을 한꺼번에 덮는다."""
     project = tmp_path / f"project-{binary}"
@@ -2199,7 +3448,9 @@ def test_a_corrupt_asset_record_does_not_trigger_a_bulk_overwrite(tmp_path: Path
     assert _install_with(binary, project).returncode == 0
     edited = project / _SIBLING_RELATIVE
     edited.write_text("# 우리 규칙\n", encoding="utf-8")
-    (project / ".agent-flow" / "kit-assets.json").write_text('{"version": 1, "fil', encoding="utf-8")
+    (project / ".agent-flow" / "kit-assets.json").write_text(
+        '{"version": 1, "fil', encoding="utf-8"
+    )
 
     result = _install_with(binary, project)
 
@@ -2222,7 +3473,9 @@ def test_install_banner_names_the_root_it_wrote_to(tmp_path: Path, binary: str) 
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_the_worktrees_container_is_not_an_install_target(tmp_path: Path, binary: str) -> None:
+def test_the_worktrees_container_is_not_an_install_target(
+    tmp_path: Path, binary: str
+) -> None:
     """`<marker>/worktrees`는 형제 checkout을 담는 자리다. 설치본이 생기면 안 된다."""
     container = tmp_path / "proj" / ".agent-flow" / "worktrees"
     container.mkdir(parents=True)
@@ -2232,7 +3485,9 @@ def test_the_worktrees_container_is_not_an_install_target(tmp_path: Path, binary
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
-def test_an_unusable_git_reports_one_line_not_a_stack_trace(tmp_path: Path, binary: str) -> None:
+def test_an_unusable_git_reports_one_line_not_a_stack_trace(
+    tmp_path: Path, binary: str
+) -> None:
     """`PROJECT`는 모듈 상수라 dispatch의 try/catch가 받지 못한다."""
     fake_bin = tmp_path / "bin"
     (fake_bin / "git").mkdir(parents=True)  # spawn이 EACCES를 낸다
@@ -2248,6 +3503,10 @@ def test_an_unusable_git_reports_one_line_not_a_stack_trace(tmp_path: Path, bina
     if binary == "agent-flow-install.mjs":
         help_result = subprocess.run(
             (_node(), str(KIT_ROOT / "bin" / binary), "--help"),
-            cwd=project, text=True, capture_output=True, check=False, env=env,
+            cwd=project,
+            text=True,
+            capture_output=True,
+            check=False,
+            env=env,
         )
         assert help_result.returncode == 0, help_result.stderr

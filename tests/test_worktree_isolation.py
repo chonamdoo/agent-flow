@@ -4,6 +4,7 @@ Every guard has a falsification case: a deliberately injected violation that mus
 raise. Detection-only guards pair "does not raise" with a mutation case, so a
 dead assertion cannot pass silently.
 """
+
 from __future__ import annotations
 
 import json
@@ -57,12 +58,19 @@ def _init_repo(root: Path) -> None:
     _git("commit", "-m", "init", cwd=root)
 
 
-def _init_repo_with_managed_hooks(root: Path) -> None:
+def _init_repo_with_managed_hooks(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """run 시작 게이트가 요구하는 managed hook 등록까지 세운다.
 
     tripwire 테스트는 leader의 더러움·ignored 상태를 직접 구성하므로 hook 설치가
     관측을 바꾼다. 그래서 run을 실제로 시작하는 테스트만 이걸 쓴다.
     """
+    home = root / "test-home"
+    home.mkdir()
+    monkeypatch.setenv("AGENT_FLOW_HOME", str(home / ".agent-flow"))
+    monkeypatch.setenv(
+        "AGENT_FLOW_OMP_EXTENSION",
+        str(home / ".omp" / "agent" / "extensions" / "agent-flow-hooks.ts"),
+    )
     _git("init", "-b", "main", cwd=root)
     _git("config", "user.email", "t@t", cwd=root)
     _git("config", "user.name", "t", cwd=root)
@@ -79,6 +87,36 @@ def _init_repo_with_managed_hooks(root: Path) -> None:
 def _managed(root: Path) -> Path:
     """생성 규약이 정한 자리. 리터럴로 박으면 layout 변경을 테스트가 먼저 막는다."""
     return W.managed_worktrees_root(root)
+
+
+def test_runtime_metadata_readers_can_access_strict_umask_outputs(
+    tmp_path: Path,
+) -> None:
+    from agent_flow.artifact import create_run
+
+    project = tmp_path / "project"
+    project.mkdir()
+    _init_repo(project)
+    state_root = tmp_path / "state"
+    previous_umask = os.umask(0o077)
+    try:
+        run = create_run(
+            state_root,
+            "default",
+            "mode contract",
+            hook_runtime_digest="1" * 64,
+        )
+        adopted = W_ISO.record_adopted_checkout(
+            root=project,
+            name="mode-contract",
+            path=project,
+            registration_identity="2" * 64,
+        )
+    finally:
+        os.umask(previous_umask)
+
+    assert ((run / "meta.json").stat().st_mode & 0o777) == 0o644
+    assert (adopted.stat().st_mode & 0o777) == 0o600
 
 
 def test_path_scoped_lookup_separates_query_failure_from_absence(tmp_path: Path):
@@ -104,6 +142,7 @@ def test_path_scoped_lookup_separates_query_failure_from_absence(tmp_path: Path)
     with pytest.raises(W_ISO.WorktreeIsolationError):
         W_ISO.registered_worktree_at(broken, status.path)
 
+
 def test_path_scoped_lookup_computes_only_the_target_fingerprint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -111,7 +150,9 @@ def test_path_scoped_lookup_computes_only_the_target_fingerprint(
     """불변: 등록 수만큼 지문을 계산하면 lifecycle 연산당 O(N²)로 증폭된다."""
     _init_repo(tmp_path)
     targets = [
-        W.create_worktree(root=tmp_path, plan=W.plan_worktree(root=tmp_path, name=f"n{i}"))
+        W.create_worktree(
+            root=tmp_path, plan=W.plan_worktree(root=tmp_path, name=f"n{i}")
+        )
         for i in range(4)
     ]
     real_identity = W_ISO._registered_worktree_identity
@@ -166,9 +207,7 @@ def test_file_lease_rejects_parent_swap_between_validation_and_open(
 
     def swapping_open(path, flags, mode=0o777, *, dir_fd=None):
         nonlocal swapped
-        opens_lock = (
-            dir_fd is None and Path(path) == lock_path
-        ) or (
+        opens_lock = (dir_fd is None and Path(path) == lock_path) or (
             dir_fd is not None and str(path) == lock_path.name
         )
         if opens_lock and not swapped:
@@ -217,7 +256,6 @@ def test_file_lease_rejects_path_inode_replacement_after_open(
     assert replaced is True
 
 
-
 def test_file_lease_rejects_path_replacement_while_locking(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -246,14 +284,19 @@ def test_file_lease_rejects_path_replacement_while_locking(
 
 
 def test_sanitized_env_strips_leaky_git_vars():
-    base = {"GIT_DIR": "/x/.git", "GIT_WORK_TREE": "/x", "GIT_COMMON_DIR": "/x/.git",
-            "GIT_INDEX_FILE": "/x/index", "PATH": "/usr/bin", "HOME": "/home/u"}
+    base = {
+        "GIT_DIR": "/x/.git",
+        "GIT_WORK_TREE": "/x",
+        "GIT_COMMON_DIR": "/x/.git",
+        "GIT_INDEX_FILE": "/x/index",
+        "PATH": "/usr/bin",
+        "HOME": "/home/u",
+    }
     env = sanitized_worker_env(base_env=base)
     for leaked in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"):
         assert leaked not in env
     # non-git vars survive
     assert env["PATH"] == "/usr/bin" and env["HOME"] == "/home/u"
-
 
 
 def test_verify_accepts_valid_worktree(tmp_path):
@@ -284,7 +327,9 @@ def test_create_can_atomically_refuse_an_existing_worktree(tmp_path: Path):
 def test_verify_rejects_leader(tmp_path):
     _init_repo(tmp_path)
     with pytest.raises(WorktreeIsolationError):
-        verify_linked_worktree(root=tmp_path, path=tmp_path, managed_root=_managed(tmp_path))
+        verify_linked_worktree(
+            root=tmp_path, path=tmp_path, managed_root=_managed(tmp_path)
+        )
 
 
 def test_verify_rejects_unregistered_dir(tmp_path):
@@ -337,7 +382,9 @@ def test_verify_rejects_a_git_pointer_to_a_sibling_worktree(tmp_path: Path):
     (first.path / ".git").write_bytes((second.path / ".git").read_bytes())
 
     # 훔친 gitdir 포인터는 채택 지문을 먼저 깬다 — 관리 루트 판정에서 걸린다.
-    with pytest.raises(WorktreeIsolationError, match="not a direct child of a managed root"):
+    with pytest.raises(
+        WorktreeIsolationError, match="not a direct child of a managed root"
+    ):
         verify_linked_worktree(root=tmp_path, path=first.path)
 
     # 그릇을 호출자가 지정해 그 판정을 건너뛰어도 gitdir 왕복 검증이 잡는다.
@@ -352,8 +399,9 @@ def test_verify_rejects_wrong_branch(tmp_path):
     plan = W.plan_worktree(root=tmp_path, name="beta")
     status = W.create_worktree(root=tmp_path, plan=plan)
     with pytest.raises(WorktreeIsolationError):
-        verify_linked_worktree(root=tmp_path, path=status.path, expected_branch="feat/not-this")
-
+        verify_linked_worktree(
+            root=tmp_path, path=status.path, expected_branch="feat/not-this"
+        )
 
 
 def test_assert_cwd_bound_rejects_mismatch(tmp_path):
@@ -366,46 +414,55 @@ def test_assert_cwd_bound_rejects_mismatch(tmp_path):
         assert_cwd_bound(worktree_path=a, cwd=b)
 
 
-
 def test_scope_gate_rejects_overlap_without_isolation():
     with pytest.raises(WorktreeIsolationError):
-        assert_scopes_isolated([
-            WorkerScope("a", ("src/x.py",), False),
-            WorkerScope("b", ("src/x.py",), False),
-        ])
+        assert_scopes_isolated(
+            [
+                WorkerScope("a", ("src/x.py",), False),
+                WorkerScope("b", ("src/x.py",), False),
+            ]
+        )
 
 
 def test_scope_gate_rejects_prefix_overlap_without_isolation():
     with pytest.raises(WorktreeIsolationError):
-        assert_scopes_isolated([
-            WorkerScope("a", ("src",), False),
-            WorkerScope("b", ("src/deep/y.py",), True),
-        ])
+        assert_scopes_isolated(
+            [
+                WorkerScope("a", ("src",), False),
+                WorkerScope("b", ("src/deep/y.py",), True),
+            ]
+        )
 
 
 def test_scope_gate_rejects_glob_without_both_isolated():
     with pytest.raises(WorktreeIsolationError):
-        assert_scopes_isolated([
-            WorkerScope("a", ("src/*",), True),
-            WorkerScope("b", ("docs/y",), False),
-        ])
+        assert_scopes_isolated(
+            [
+                WorkerScope("a", ("src/*",), True),
+                WorkerScope("b", ("docs/y",), False),
+            ]
+        )
 
 
 def test_scope_gate_allows_overlap_when_both_isolated():
     """불변: 겹치는 write scope는 양쪽 모두 worktree 격리를 선언했을 때만 통과한다."""
     overlapping = ("src/x.py",)
     # 통과해야 하는 쪽: 둘 다 격리 선언.
-    assert_scopes_isolated([
-        WorkerScope("a", overlapping, True),
-        WorkerScope("b", overlapping, True),
-    ])
+    assert_scopes_isolated(
+        [
+            WorkerScope("a", overlapping, True),
+            WorkerScope("b", overlapping, True),
+        ]
+    )
     # 게이트가 실제로 판단하고 있다는 증거: 플래그 하나만 뒤집으면 거부된다.
     # 가드를 `return` 한 줄로 비우면 이 절이 실패한다.
     with pytest.raises(WorktreeIsolationError) as rejected:
-        assert_scopes_isolated([
-            WorkerScope("a", overlapping, True),
-            WorkerScope("b", overlapping, False),
-        ])
+        assert_scopes_isolated(
+            [
+                WorkerScope("a", overlapping, True),
+                WorkerScope("b", overlapping, False),
+            ]
+        )
     message = str(rejected.value)
     assert "'a'" in message and "'b'" in message
 
@@ -413,17 +470,20 @@ def test_scope_gate_allows_overlap_when_both_isolated():
 def test_scope_gate_allows_disjoint():
     """불변: 서로 겹치지 않는 scope는 격리 선언이 없어도 통과한다."""
     # 통과해야 하는 쪽: 경로가 겹치지 않음.
-    assert_scopes_isolated([
-        WorkerScope("a", ("src/a.py",), False),
-        WorkerScope("b", ("src/b.py",), False),
-    ])
+    assert_scopes_isolated(
+        [
+            WorkerScope("a", ("src/a.py",), False),
+            WorkerScope("b", ("src/b.py",), False),
+        ]
+    )
     # 경로 하나만 겹치게 바꾸면 같은 입력이 거부된다 — disjoint 판정이 실재한다.
     with pytest.raises(WorktreeIsolationError):
-        assert_scopes_isolated([
-            WorkerScope("a", ("src/a.py",), False),
-            WorkerScope("b", ("src/a.py",), False),
-        ])
-
+        assert_scopes_isolated(
+            [
+                WorkerScope("a", ("src/a.py",), False),
+                WorkerScope("b", ("src/a.py",), False),
+            ]
+        )
 
 
 def test_mergeable_rejects_dirty(tmp_path):
@@ -512,7 +572,6 @@ def test_remove_rejects_recreated_checkout_with_same_path_branch_and_head(
     assert real_path(status.path) in _registered(tmp_path)
 
 
-
 def test_registration_identity_survives_git_lock_and_unlock(tmp_path: Path):
     _init_repo(tmp_path)
     status = W.create_worktree(
@@ -526,8 +585,14 @@ def test_registration_identity_survives_git_lock_and_unlock(tmp_path: Path):
     after = W._registered_at_path(root=tmp_path, path=status.path)
 
     assert before is not None and before.registration_identity is not None
-    assert locked is not None and locked.registration_identity == before.registration_identity
-    assert after is not None and after.registration_identity == before.registration_identity
+    assert (
+        locked is not None
+        and locked.registration_identity == before.registration_identity
+    )
+    assert (
+        after is not None
+        and after.registration_identity == before.registration_identity
+    )
 
 
 def test_attach_rejects_recreated_checkout_after_reuse_consent(tmp_path: Path):
@@ -567,19 +632,24 @@ def test_orphan_registration_is_pruned(tmp_path):
     status = W.create_worktree(root=tmp_path, plan=plan)
     # simulate a crash: remove the checkout dir but leave git's registration.
     import shutil
+
     shutil.rmtree(status.path)
     assert plan.path in {p for p in _registered(tmp_path)}
     # re-create must recover deterministically (prune under the creation lock).
     status2 = W.create_worktree(root=tmp_path, plan=plan)
     assert status2.path.exists()
-    verify_linked_worktree(root=tmp_path, path=status2.path, expected_branch=plan.branch)
+    verify_linked_worktree(
+        root=tmp_path, path=status2.path, expected_branch=plan.branch
+    )
 
 
 def _registered(root: Path):
     out = _git("worktree", "list", "--porcelain", cwd=root).stdout
-    return {real_path(line[len("worktree "):].strip())
-            for line in out.splitlines() if line.startswith("worktree ")}
-
+    return {
+        real_path(line[len("worktree ") :].strip())
+        for line in out.splitlines()
+        if line.startswith("worktree ")
+    }
 
 
 def test_create_is_fail_closed_on_persistent_git_failure(tmp_path, monkeypatch):
@@ -592,7 +662,9 @@ def test_create_is_fail_closed_on_persistent_git_failure(tmp_path, monkeypatch):
     def _boom(root, *args):
         if args[:2] == ("worktree", "add"):
             attempts.append(args)
-            raise subprocess.CalledProcessError(1, ("git",) + args, stderr="fatal: index.lock exists")
+            raise subprocess.CalledProcessError(
+                1, ("git",) + args, stderr="fatal: index.lock exists"
+            )
         return _orig(root, *args)
 
     monkeypatch.setattr(W, "_run_git", _boom)
@@ -625,6 +697,101 @@ def test_create_is_fail_closed_on_persistent_git_failure(tmp_path, monkeypatch):
     assert _git("status", "--porcelain", cwd=tmp_path).stdout == baseline
 
 
+@pytest.mark.parametrize(
+    ("failure_point", "target"),
+    (
+        ("verify", "verify_linked_worktree"),
+        ("registration", "_registered_at_path"),
+        ("merge-base", "_merge_base_oid"),
+    ),
+)
+@pytest.mark.parametrize("branch_preexists", (False, True))
+def test_create_rolls_back_every_pre_manifest_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+    target: str,
+    branch_preexists: bool,
+) -> None:
+    _init_repo(tmp_path)
+    suffix = "existing" if branch_preexists else "owned"
+    plan = W.plan_worktree(
+        root=tmp_path,
+        name=f"pre-manifest-{failure_point}-{suffix}",
+    )
+    runtime_root = W.worktree_runtime_root(root=tmp_path, name=plan.name)
+    adopted_record = W_ISO.adopted_record_path(root=tmp_path, name=plan.name)
+    assert adopted_record is not None
+
+    existing_oid = None
+    if branch_preexists:
+        created = _git("branch", plan.branch, plan.base_ref, cwd=tmp_path)
+        assert created.returncode == 0, created.stderr
+        existing_oid = _git(
+            "rev-parse", f"refs/heads/{plan.branch}", cwd=tmp_path
+        ).stdout.strip()
+
+    def fail_pre_manifest(**_kwargs):
+        raise RuntimeError(f"{failure_point} failed")
+
+    monkeypatch.setattr(W, target, fail_pre_manifest)
+
+    with pytest.raises(RuntimeError, match=rf"^{failure_point} failed$"):
+        W.create_worktree(root=tmp_path, plan=plan)
+
+    assert not plan.path.exists()
+    assert real_path(plan.path) not in _registered(tmp_path)
+    assert not (runtime_root / "manifest.json").exists()
+    assert not adopted_record.exists()
+    assert W.worktree_branch_exists(
+        root=tmp_path, branch=plan.branch
+    ) is branch_preexists
+    if existing_oid is not None:
+        branch_oid = _git(
+            "rev-parse", f"refs/heads/{plan.branch}", cwd=tmp_path
+        ).stdout.strip()
+        assert branch_oid == existing_oid
+
+
+def test_create_rollback_preserves_a_replaced_checkout_and_changed_branch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _init_repo(tmp_path)
+    plan = W.plan_worktree(root=tmp_path, name="rollback-identity-change")
+
+    def replace_before_failure(**_kwargs):
+        removed = _git("worktree", "remove", str(plan.path), cwd=tmp_path)
+        assert removed.returncode == 0, removed.stderr
+        replaced = _git("worktree", "add", str(plan.path), plan.branch, cwd=tmp_path)
+        assert replaced.returncode == 0, replaced.stderr
+        changed = _git(
+            "commit",
+            "--allow-empty",
+            "-m",
+            "external branch change",
+            cwd=plan.path,
+        )
+        assert changed.returncode == 0, changed.stderr
+        raise RuntimeError("verify failed after external replacement")
+
+    monkeypatch.setattr(W, "verify_linked_worktree", replace_before_failure)
+
+    with pytest.raises(
+        RuntimeError, match=r"^verify failed after external replacement$"
+    ):
+        W.create_worktree(root=tmp_path, plan=plan)
+
+    warning = capsys.readouterr().err
+    assert "could not fully roll back failed worktree creation" in warning
+    assert "worktree registration changed after creation" in warning
+    assert "git worktree list --porcelain" in warning
+    assert "git show-ref --verify" in warning
+    assert plan.path.exists()
+    assert real_path(plan.path) in _registered(tmp_path)
+    assert W.worktree_branch_exists(root=tmp_path, branch=plan.branch)
+
 
 def _create_one(root: Path, name: str) -> subprocess.CompletedProcess:
     code = (
@@ -640,7 +807,9 @@ def _create_one(root: Path, name: str) -> subprocess.CompletedProcess:
     ) % (SRC, str(root), name)
     env = dict(os.environ)
     env["PYTHONPATH"] = SRC
-    return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env)
+    return subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, env=env
+    )
 
 
 def test_parallel_creation_is_isolated_and_leaves_main_clean(tmp_path):
@@ -669,11 +838,11 @@ def test_parallel_creation_is_isolated_and_leaves_main_clean(tmp_path):
     assert (tmp_path / "f.txt").read_text(encoding="utf-8") == leader_f
     assert _git("rev-parse", "HEAD", cwd=tmp_path).stdout.strip() == leader_head
     dirty = [
-        line for line in _git("status", "--porcelain", cwd=tmp_path).stdout.splitlines()
+        line
+        for line in _git("status", "--porcelain", cwd=tmp_path).stdout.splitlines()
         if line and not line[3:].startswith(".agent-flow")
     ]
     assert dirty == [], f"leader checkout was contaminated: {dirty}"
-
 
 
 def _cli(argv, cwd, env=None):
@@ -682,9 +851,16 @@ def _cli(argv, cwd, env=None):
     if env:
         full.update(env)
     return subprocess.run(
-        [sys.executable, "-c",
-         "import sys; from agent_flow.cli import main; sys.exit(main(sys.argv[1:]))", *argv],
-        cwd=str(cwd), capture_output=True, text=True, env=full,
+        [
+            sys.executable,
+            "-c",
+            "import sys; from agent_flow.cli import main; sys.exit(main(sys.argv[1:]))",
+            *argv,
+        ],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        env=full,
     )
 
 
@@ -692,18 +868,92 @@ def _cli(argv, cwd, env=None):
     sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").is_file(),
     reason="macOS sandbox-exec confinement is required",
 )
-def test_e2e_team_run_next_confines_worker_writes_and_git(tmp_path):
-    _init_repo_with_managed_hooks(tmp_path)
-    assert _cli(["team", "init", "--root", ".", "--name", "ft"], cwd=tmp_path).returncode == 0
-    assert _cli(["team", "task", "--root", ".", "--team", "ft", "--id", "t1",
-                 "--subject", "s", "--description", "d"], cwd=tmp_path).returncode == 0
-    assert _cli(["team", "worker", "--root", ".", "--team", "ft", "--name", "w1",
-                 "--role", "impl"], cwd=tmp_path).returncode == 0
-    assert _cli(["team", "brief", "--root", ".", "--team", "ft", "--task", "t1",
-                 "--worker", "w1", "--brief", "Use the worker-brief contract.",
-                 "--write-scope", "src/feature"], cwd=tmp_path).returncode == 0
-    assert _cli(["team", "approve-worker", "--root", ".", "--team", "ft", "--task", "t1",
-                 "--worker", "w1", "--write-scope", "src/feature"], cwd=tmp_path).returncode == 0
+def test_e2e_team_run_next_confines_worker_writes_and_git(tmp_path, monkeypatch):
+    _init_repo_with_managed_hooks(tmp_path, monkeypatch)
+    assert (
+        _cli(["team", "init", "--root", ".", "--name", "ft"], cwd=tmp_path).returncode
+        == 0
+    )
+    assert (
+        _cli(
+            [
+                "team",
+                "task",
+                "--root",
+                ".",
+                "--team",
+                "ft",
+                "--id",
+                "t1",
+                "--subject",
+                "s",
+                "--description",
+                "d",
+            ],
+            cwd=tmp_path,
+        ).returncode
+        == 0
+    )
+    assert (
+        _cli(
+            [
+                "team",
+                "worker",
+                "--root",
+                ".",
+                "--team",
+                "ft",
+                "--name",
+                "w1",
+                "--role",
+                "impl",
+            ],
+            cwd=tmp_path,
+        ).returncode
+        == 0
+    )
+    assert (
+        _cli(
+            [
+                "team",
+                "brief",
+                "--root",
+                ".",
+                "--team",
+                "ft",
+                "--task",
+                "t1",
+                "--worker",
+                "w1",
+                "--brief",
+                "Use the worker-brief contract.",
+                "--write-scope",
+                "src/feature",
+            ],
+            cwd=tmp_path,
+        ).returncode
+        == 0
+    )
+    assert (
+        _cli(
+            [
+                "team",
+                "approve-worker",
+                "--root",
+                ".",
+                "--team",
+                "ft",
+                "--task",
+                "t1",
+                "--worker",
+                "w1",
+                "--write-scope",
+                "src/feature",
+            ],
+            cwd=tmp_path,
+        ).returncode
+        == 0
+    )
 
     # Worker writes its report into a worktree file. A poisoned GIT_DIR in the
     # parent env must not redirect the worker's writes or git discovery to main.
@@ -714,14 +964,32 @@ def test_e2e_team_run_next_confines_worker_writes_and_git(tmp_path):
         "open('worker-out.txt','w').write(report)\n"
     )
     poisoned = {"GIT_DIR": str(tmp_path / ".git"), "GIT_WORK_TREE": str(tmp_path)}
-    res = _cli(["team", "run-next", "--root", ".", "--team", "ft", "--worker", "w1",
-                "--command", sys.executable, "-c", worker], cwd=tmp_path, env=poisoned)
+    res = _cli(
+        [
+            "team",
+            "run-next",
+            "--root",
+            ".",
+            "--team",
+            "ft",
+            "--worker",
+            "w1",
+            "--command",
+            sys.executable,
+            "-c",
+            worker,
+        ],
+        cwd=tmp_path,
+        env=poisoned,
+    )
     assert res.returncode == 0, res.stderr
     assert "t1 completed" in res.stdout
 
     wt = _managed(tmp_path) / "feat-t1-w1"
     assert (wt / "worker-out.txt").exists(), "worker output missing from its worktree"
-    assert not (tmp_path / "worker-out.txt").exists(), "worker leaked a write into the leader"
+    assert not (tmp_path / "worker-out.txt").exists(), (
+        "worker leaked a write into the leader"
+    )
 
     report = (wt / "worker-out.txt").read_text(encoding="utf-8")
     assert f"CWD={real_path(wt)}" in report
@@ -731,7 +999,8 @@ def test_e2e_team_run_next_confines_worker_writes_and_git(tmp_path):
 
     # leader tracked tree stayed clean.
     dirty = [
-        line for line in _git("status", "--porcelain", cwd=tmp_path).stdout.splitlines()
+        line
+        for line in _git("status", "--porcelain", cwd=tmp_path).stdout.splitlines()
         if line and not line[3:].startswith(".agent-flow")
     ]
     assert dirty == []
@@ -803,9 +1072,7 @@ def test_real_provider_process_is_confined_to_attested_checkout(tmp_path):
 
     assert result.failed is False, result.stderr
     assert (worker.path / "inside.txt").read_text(encoding="utf-8") == "inside\n"
-    denied = json.loads(
-        (worker.path / "confinement.json").read_text(encoding="utf-8")
-    )
+    denied = json.loads((worker.path / "confinement.json").read_text(encoding="utf-8"))
     assert denied == {
         "leader": True,
         "sibling": True,
@@ -906,6 +1173,7 @@ def test_read_only_provider_cannot_write_verified_worktree(tmp_path):
     assert result.stdout.strip() == "denied"
     assert not marker.exists()
 
+
 @pytest.mark.skipif(
     sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").is_file(),
     reason="macOS sandbox-exec confinement is required",
@@ -1002,9 +1270,8 @@ def test_escaped_provider_descendant_keeps_repository_lease(tmp_path):
     assert probe_provider_leases(worker.path) == "active"
     deadline = time.monotonic() + 3
     while (
-        (not done.exists() or probe_provider_leases(worker.path) != "inactive")
-        and time.monotonic() < deadline
-    ):
+        not done.exists() or probe_provider_leases(worker.path) != "inactive"
+    ) and time.monotonic() < deadline:
         time.sleep(0.01)
     assert done.exists()
     assert probe_provider_leases(worker.path) == "inactive"
@@ -1066,8 +1333,7 @@ def test_provider_output_is_bounded_for_sync_and_parallel_paths(tmp_path):
         f"provider output exceeded {MAX_PROVIDER_OUTPUT_BYTES} bytes"
     )
     assert (
-        len(parallel_result.stdout.encode())
-        + len(parallel_result.stderr.encode())
+        len(parallel_result.stdout.encode()) + len(parallel_result.stderr.encode())
         <= MAX_PROVIDER_OUTPUT_BYTES
     )
 
@@ -1126,6 +1392,7 @@ def test_provider_timeouts_reap_sync_and_parallel_processes(tmp_path):
 
 def test_git_repo_state_classifies(tmp_path):
     from agent_flow.core import worktree_isolation as wi
+
     # fresh temp dir is not a git repo (and not under one)
     assert wi.git_repo_state(tmp_path) == "non-repo"
     _init_repo(tmp_path)
@@ -1135,12 +1402,16 @@ def test_git_repo_state_classifies(tmp_path):
 def test_git_repo_state_unknown_on_git_failure(tmp_path, monkeypatch):
     from agent_flow.core import worktree_isolation as wi
     from agent_flow.core.commands import SafeCommandResult
+
     _init_repo(tmp_path)
     # a git call that times out must classify as unknown, not non-repo, so the
     # caller fails closed instead of running a worker unisolated in the leader.
     monkeypatch.setattr(
-        wi, "git_safe",
-        lambda *a, **k: SafeCommandResult(args=("git",), returncode=None, stdout="", stderr="", timed_out=True),
+        wi,
+        "git_safe",
+        lambda *a, **k: SafeCommandResult(
+            args=("git",), returncode=None, stdout="", stderr="", timed_out=True
+        ),
     )
     assert wi.git_repo_state(tmp_path) == "unknown"
 
@@ -1149,57 +1420,125 @@ def test_scope_gate_ignores_same_worker_self_overlap():
     """불변: 같은 worker의 자기 자신과의 겹침은 충돌이 아니고, 다른 worker면 충돌이다."""
     same_scope = ("src/x.py",)
     # 한 worker가 두 task에 같은 scope로 승인된 경우는 충돌이 아니다.
-    assert_scopes_isolated([
-        WorkerScope("w1", same_scope, False),
-        WorkerScope("w1", same_scope, False),
-    ])
+    assert_scopes_isolated(
+        [
+            WorkerScope("w1", same_scope, False),
+            WorkerScope("w1", same_scope, False),
+        ]
+    )
     # worker 이름 하나만 바꾸면 동일한 scope가 거부된다 — 자기 겹침 예외가
     # 게이트를 통째로 무력화한 것이 아님을 보인다.
     with pytest.raises(WorktreeIsolationError):
-        assert_scopes_isolated([
-            WorkerScope("w1", same_scope, False),
-            WorkerScope("w2", same_scope, False),
-        ])
+        assert_scopes_isolated(
+            [
+                WorkerScope("w1", same_scope, False),
+                WorkerScope("w2", same_scope, False),
+            ]
+        )
 
 
 def test_e2e_non_git_provider_launch_is_rejected(tmp_path):
-    assert _cli(
-        ["team", "init", "--root", ".", "--name", "ft"],
-        cwd=tmp_path,
-    ).returncode == 0
-    assert _cli(
-        [
-            "team", "task", "--root", ".", "--team", "ft", "--id", "t1",
-            "--subject", "s", "--description", "d",
-        ],
-        cwd=tmp_path,
-    ).returncode == 0
-    assert _cli(
-        [
-            "team", "worker", "--root", ".", "--team", "ft", "--name", "w1",
-            "--role", "impl",
-        ],
-        cwd=tmp_path,
-    ).returncode == 0
-    assert _cli(
-        [
-            "team", "brief", "--root", ".", "--team", "ft", "--task", "t1",
-            "--worker", "w1", "--brief", "b", "--write-scope", "src/feature",
-        ],
-        cwd=tmp_path,
-    ).returncode == 0
-    assert _cli(
-        [
-            "team", "approve-worker", "--root", ".", "--team", "ft",
-            "--task", "t1", "--worker", "w1", "--write-scope", "src/feature",
-        ],
-        cwd=tmp_path,
-    ).returncode == 0
+    assert (
+        _cli(
+            ["team", "init", "--root", ".", "--name", "ft"],
+            cwd=tmp_path,
+        ).returncode
+        == 0
+    )
+    assert (
+        _cli(
+            [
+                "team",
+                "task",
+                "--root",
+                ".",
+                "--team",
+                "ft",
+                "--id",
+                "t1",
+                "--subject",
+                "s",
+                "--description",
+                "d",
+            ],
+            cwd=tmp_path,
+        ).returncode
+        == 0
+    )
+    assert (
+        _cli(
+            [
+                "team",
+                "worker",
+                "--root",
+                ".",
+                "--team",
+                "ft",
+                "--name",
+                "w1",
+                "--role",
+                "impl",
+            ],
+            cwd=tmp_path,
+        ).returncode
+        == 0
+    )
+    assert (
+        _cli(
+            [
+                "team",
+                "brief",
+                "--root",
+                ".",
+                "--team",
+                "ft",
+                "--task",
+                "t1",
+                "--worker",
+                "w1",
+                "--brief",
+                "b",
+                "--write-scope",
+                "src/feature",
+            ],
+            cwd=tmp_path,
+        ).returncode
+        == 0
+    )
+    assert (
+        _cli(
+            [
+                "team",
+                "approve-worker",
+                "--root",
+                ".",
+                "--team",
+                "ft",
+                "--task",
+                "t1",
+                "--worker",
+                "w1",
+                "--write-scope",
+                "src/feature",
+            ],
+            cwd=tmp_path,
+        ).returncode
+        == 0
+    )
 
     result = _cli(
         [
-            "team", "run-next", "--root", ".", "--team", "ft",
-            "--worker", "w1", "--command", sys.executable, "-c",
+            "team",
+            "run-next",
+            "--root",
+            ".",
+            "--team",
+            "ft",
+            "--worker",
+            "w1",
+            "--command",
+            sys.executable,
+            "-c",
             "print('must not run')",
         ],
         cwd=tmp_path,
@@ -1259,7 +1598,10 @@ def test_tripwire_detects_leader_branch_switch(tmp_path):
         W_ISO.assert_leader_unchanged(tmp_path, before)
     assert "branch switched" in str(caught.value)
     # 되돌리지 않는다. 사용자가 어디에 있는지 스스로 알 수 있어야 한다.
-    assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=tmp_path).stdout.strip() == "sneaky"
+    assert (
+        _git("rev-parse", "--abbrev-ref", "HEAD", cwd=tmp_path).stdout.strip()
+        == "sneaky"
+    )
 
 
 def test_tripwire_ignores_agent_runtime_writes(tmp_path):
@@ -1469,7 +1811,9 @@ def test_recovery_commands_bypass_tripwire(tmp_path):
 
     # 복구 명령은 tripwire를 거치지 않으므로 오염을 치우지도 않는다. 판단은
     # 사용자 몫으로 남고, 명령이 막히지 않는다는 사실만 보장한다.
-    assert (tmp_path / "f.txt").read_text(encoding="utf-8") == "leader is contaminated\n"
+    assert (tmp_path / "f.txt").read_text(
+        encoding="utf-8"
+    ) == "leader is contaminated\n"
     assert (tmp_path / "stray.txt").exists()
 
     # git 저장소가 아닌 프로젝트에서도 같은 명령이 그대로 동작해야 한다.
@@ -1483,10 +1827,15 @@ def test_recovery_commands_bypass_tripwire(tmp_path):
         ["abort", "--root", "."],
     ):
         result = _cli(argv, cwd=plain)
-        assert result.returncode == 0, f"{argv} blocked in non-git: {result.stdout}{result.stderr}"
+        assert result.returncode == 0, (
+            f"{argv} blocked in non-git: {result.stdout}{result.stderr}"
+        )
 
 
-def test_recovery_commands_survive_a_hook_integrity_violation(tmp_path):
+def test_recovery_commands_survive_a_hook_integrity_violation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
     """불변: 런 시작 게이트가 막는 상태에서도 복구 명령은 통과한다.
 
     tripwire 오염만 검사하던 위 테스트는 이 실패 유형을 안 덮는다. 게이트를
@@ -1494,6 +1843,10 @@ def test_recovery_commands_survive_a_hook_integrity_violation(tmp_path):
     """
     project = tmp_path / "proj"
     project.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("AGENT_FLOW_HOME", str(home / ".agent-flow"))
     node = shutil.which("node")
     if node is None:
         pytest.skip("node is required")
@@ -1504,13 +1857,13 @@ def test_recovery_commands_survive_a_hook_integrity_violation(tmp_path):
     assert installed.returncode == 0, installed.stderr
     _init_repo(project)
 
-    # #102가 실증한 붕괴 경로 그대로: 읽기 hook 등록만 지운다.
-    settings_path = project / ".claude" / "settings.json"
+    # Global 등록을 망가뜨려도 복구 명령은 실행되어야 한다.
+    settings_path = home / ".claude" / "settings.json"
     settings = json.loads(settings_path.read_text(encoding="utf-8"))
     settings["hooks"]["PostToolUse"] = [
         entry
         for entry in settings["hooks"]["PostToolUse"]
-        if not any("record-skill-read.py" in hook["command"] for hook in entry["hooks"])
+        if not any("agent-flow-hook" in hook["command"] for hook in entry["hooks"])
     ]
     settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
 
@@ -1560,7 +1913,7 @@ def test_multi_review_reviewer_env_is_sanitized(tmp_path, monkeypatch):
     from agent_flow import multi_review as MR
     from agent_flow.cli_detect import CliInfo
 
-    _init_repo_with_managed_hooks(tmp_path)
+    _init_repo_with_managed_hooks(tmp_path, monkeypatch)
     plan = W.plan_worktree(root=tmp_path, name="multi-review")
     status = W.create_worktree(root=tmp_path, plan=plan)
     linked = status.path
@@ -1604,14 +1957,12 @@ def test_multi_review_reviewer_env_is_sanitized(tmp_path, monkeypatch):
     assert f"TOP={real_path(linked)}" in rendered
 
 
-def test_multi_review_rejects_non_linked_cwd_before_spawn(
-    tmp_path, monkeypatch
-):
+def test_multi_review_rejects_non_linked_cwd_before_spawn(tmp_path, monkeypatch):
     from agent_flow import multi_review as MR
     from agent_flow.cli_detect import CliInfo
     from agent_flow import subprocess_pool as POOL
 
-    _init_repo_with_managed_hooks(tmp_path)
+    _init_repo_with_managed_hooks(tmp_path, monkeypatch)
     out = tmp_path / "angle.md"
     fake = CliInfo(
         name="probe",
@@ -1692,7 +2043,12 @@ def test_reused_worktree_is_verified(tmp_path):
     intruder = tmp_path / "intruder"
     intruder.mkdir()
     _init_repo(intruder)
-    assert _git("worktree", "add", "-b", plan.branch, str(plan.path), cwd=intruder).returncode == 0
+    assert (
+        _git(
+            "worktree", "add", "-b", plan.branch, str(plan.path), cwd=intruder
+        ).returncode
+        == 0
+    )
     assert (plan.path / ".git").is_file()
 
     with pytest.raises(WorktreeIsolationError):
@@ -1790,7 +2146,11 @@ def test_state_root_refuses_to_fall_back_into_the_leader(tmp_path, monkeypatch):
     def _no_common_dir(*args, **kwargs):
         if args[:2] == ("rev-parse", "--git-common-dir"):
             return SafeCommandResult(
-                args=("git",), returncode=None, stdout="", stderr="timed out", timed_out=True
+                args=("git",),
+                returncode=None,
+                stdout="",
+                stderr="timed out",
+                timed_out=True,
             )
         return real_git_safe(*args, **kwargs)
 
@@ -1808,7 +2168,9 @@ def test_tripwire_watches_installed_runtime_code(tmp_path):
     사각지대가 된다. 정당하게 생기는 것은 bytecode뿐이다.
     """
     status, before = _isolated(tmp_path, "runtime")
-    planted = tmp_path / ".agent-flow" / "runtime" / "python" / "agent_flow" / "runner.py"
+    planted = (
+        tmp_path / ".agent-flow" / "runtime" / "python" / "agent_flow" / "runner.py"
+    )
     planted.parent.mkdir(parents=True, exist_ok=True)
     planted.write_text("import os\n", encoding="utf-8")
     with pytest.raises(W_ISO.WorktreeIsolationError):
@@ -1818,7 +2180,9 @@ def test_tripwire_watches_installed_runtime_code(tmp_path):
 def test_tripwire_ignores_generated_bytecode(tmp_path):
     """불변: `__pycache__`/`.pyc`는 실행하면 저절로 생긴다. 오탐이면 안 된다."""
     status, before = _isolated(tmp_path, "pyc")
-    cache = tmp_path / ".agent-flow" / "runtime" / "python" / "agent_flow" / "__pycache__"
+    cache = (
+        tmp_path / ".agent-flow" / "runtime" / "python" / "agent_flow" / "__pycache__"
+    )
     cache.mkdir(parents=True, exist_ok=True)
     (cache / "runner.cpython-312.pyc").write_bytes(b"\x00bytecode\n")
     W_ISO.assert_leader_unchanged(tmp_path, before)
@@ -1856,7 +2220,16 @@ def test_state_dirs_match_artifacts_init(tmp_path):
     """
     from agent_flow.core import artifacts
 
-    expected = {"runs", "state", "handoffs", "team", "archive", "context", "memory", "worktrees"}
+    expected = {
+        "runs",
+        "state",
+        "handoffs",
+        "team",
+        "archive",
+        "context",
+        "memory",
+        "worktrees",
+    }
     assert set(W_ISO.AGENT_FLOW_STATE_DIRS) == expected
 
     artifacts.init_project(tmp_path)
@@ -1878,6 +2251,8 @@ def test_tripwire_sees_inside_gitignored_agent_flow(tmp_path):
     planted.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     with pytest.raises(W_ISO.WorktreeIsolationError):
         W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
 def test_tripwire_detects_arbitrary_ignored_rewrite_with_restored_mtime(tmp_path):
     target = tmp_path / ".scratch" / "cache.bin"
     target.parent.mkdir(parents=True)
@@ -1902,8 +2277,6 @@ def test_tripwire_detects_arbitrary_ignored_rewrite_with_restored_mtime(tmp_path
 
     with pytest.raises(W_ISO.WorktreeIsolationError):
         W_ISO.assert_leader_unchanged(tmp_path, before)
-
-
 
 
 def test_tripwire_ignores_the_folded_agent_flow_record(tmp_path):
@@ -1980,7 +2353,9 @@ def test_tripwire_ignores_agent_flow_runtime_state_in_tracked_diff(tmp_path):
     W.create_worktree(root=tmp_path, plan=plan)
     before = capture_leader_snapshot(tmp_path)
 
-    state_file.write_text('{"tasks": [{"id": "T1", "status": "in_progress"}]}\n', encoding="utf-8")
+    state_file.write_text(
+        '{"tasks": [{"id": "T1", "status": "in_progress"}]}\n', encoding="utf-8"
+    )
     W_ISO.assert_leader_unchanged(tmp_path, before)
 
     # 무장 해제가 아니다. 같은 실행에서 진짜 소스 변경은 여전히 잡힌다.
@@ -1997,8 +2372,12 @@ _LOCK_STDERR = (
 
 def _git_result(*, returncode=0, stdout="", stderr="", timed_out=False, error=None):
     return SafeCommandResult(
-        args=("git",), returncode=returncode, stdout=stdout, stderr=stderr,
-        timed_out=timed_out, error=error,
+        args=("git",),
+        returncode=returncode,
+        stdout=stdout,
+        stderr=stderr,
+        timed_out=timed_out,
+        error=error,
     )
 
 
@@ -2036,14 +2415,27 @@ def _intercept_git_safe(monkeypatch, respond):
 @pytest.mark.parametrize(
     "canned, marker",
     [
-        (dict(returncode=None, stderr="command timed out after 120s", timed_out=True), "timed out"),
-        (dict(returncode=None, stderr="[Errno 2] git not found",
-              error="[Errno 2] git not found"), "could not run git"),
+        (
+            dict(
+                returncode=None, stderr="command timed out after 120s", timed_out=True
+            ),
+            "timed out",
+        ),
+        (
+            dict(
+                returncode=None,
+                stderr="[Errno 2] git not found",
+                error="[Errno 2] git not found",
+            ),
+            "could not run git",
+        ),
         (dict(returncode=128, stderr="fatal: bad object HEAD"), "git exited 128"),
     ],
     ids=["timeout", "spawn-failure", "nonzero-exit"],
 )
-def test_git_fact_fails_closed_with_a_distinct_diagnostic(tmp_path, monkeypatch, canned, marker):
+def test_git_fact_fails_closed_with_a_distinct_diagnostic(
+    tmp_path, monkeypatch, canned, marker
+):
     """불변: git이 대답하지 못하면 빈 사실을 지어내지 않는다.
 
     반증: non-zero exit만 검사에서 빠져 있었다. `rev-parse HEAD`는 unborn/broken
@@ -2053,8 +2445,11 @@ def test_git_fact_fails_closed_with_a_distinct_diagnostic(tmp_path, monkeypatch,
     _init_repo(tmp_path)
     _intercept_git_safe(
         monkeypatch,
-        lambda args, _n: _git_result(**canned)
-        if args[0] == "rev-parse" and "--git-dir" not in args else None,
+        lambda args, _n: (
+            _git_result(**canned)
+            if args[0] == "rev-parse" and "--git-dir" not in args
+            else None
+        ),
     )
     with pytest.raises(WorktreeIsolationError) as failed:
         capture_leader_snapshot(tmp_path)
@@ -2088,6 +2483,7 @@ def test_non_git_project_disarms_before_any_git_fact(tmp_path, monkeypatch):
     disarm 판정이 `_git_fact` 뒤로 밀리면 git 없는 사용자가 모든 phase에서
     막힌다 — 지킬 leader가 없는데 fail-closed가 걸리는 셈이다.
     """
+
     def _must_not_run(*args, **kwargs):
         raise AssertionError("disarm 판정이 _git_fact 뒤로 밀렸다")
 
@@ -2161,8 +2557,11 @@ def test_tripwire_gives_up_on_persistent_lock_contention(tmp_path, monkeypatch):
     _patch_isolation_sleep(monkeypatch, sleeps.append)
     calls = _intercept_git_safe(
         monkeypatch,
-        lambda args, _n: _git_result(returncode=128, stderr=_LOCK_STDERR)
-        if args[0] == "status" else None,
+        lambda args, _n: (
+            _git_result(returncode=128, stderr=_LOCK_STDERR)
+            if args[0] == "status"
+            else None
+        ),
     )
     with pytest.raises(WorktreeIsolationError) as failed:
         capture_leader_snapshot(tmp_path)
@@ -2172,7 +2571,7 @@ def test_tripwire_gives_up_on_persistent_lock_contention(tmp_path, monkeypatch):
     assert "index.lock" in str(failed.value)
     assert len([c for c in calls if c[0] == "status"]) == W_ISO._GIT_LOCK_RETRY_ATTEMPTS
     assert sleeps == [
-        W_ISO._GIT_LOCK_RETRY_BASE_DELAY_S * (2 ** i)
+        W_ISO._GIT_LOCK_RETRY_BASE_DELAY_S * (2**i)
         for i in range(W_ISO._GIT_LOCK_RETRY_ATTEMPTS - 1)
     ]
 
@@ -2180,11 +2579,16 @@ def test_tripwire_gives_up_on_persistent_lock_contention(tmp_path, monkeypatch):
 def test_tripwire_does_not_retry_a_non_lock_git_failure(tmp_path, monkeypatch):
     """불변: lock 경합이 아닌 git 오류는 다시 물어도 같은 답이므로 즉시 멈춘다."""
     _init_repo(tmp_path)
-    _patch_isolation_sleep(monkeypatch, lambda _s: pytest.fail("non-lock 오류를 재시도했다"))
+    _patch_isolation_sleep(
+        monkeypatch, lambda _s: pytest.fail("non-lock 오류를 재시도했다")
+    )
     calls = _intercept_git_safe(
         monkeypatch,
-        lambda args, _n: _git_result(returncode=128, stderr="fatal: not a valid object name")
-        if args[0] == "status" else None,
+        lambda args, _n: (
+            _git_result(returncode=128, stderr="fatal: not a valid object name")
+            if args[0] == "status"
+            else None
+        ),
     )
     with pytest.raises(WorktreeIsolationError):
         capture_leader_snapshot(tmp_path)
@@ -2200,14 +2604,15 @@ def test_tripwire_reports_a_real_leader_diff_without_retrying(tmp_path, monkeypa
     _init_repo(tmp_path)
     before = capture_leader_snapshot(tmp_path)
     (tmp_path / "f.txt").write_text("worker leak\n", encoding="utf-8")
-    _patch_isolation_sleep(monkeypatch, lambda _s: pytest.fail("실제 diff를 재시도했다"))
+    _patch_isolation_sleep(
+        monkeypatch, lambda _s: pytest.fail("실제 diff를 재시도했다")
+    )
     observed: list = []
     monkeypatch.setattr(
         W_ISO,
         "_leader_status",
         lambda root, *, include_ignored=True, _real=W_ISO._leader_status: (
-            observed.append(root)
-            or _real(root, include_ignored=include_ignored)
+            observed.append(root) or _real(root, include_ignored=include_ignored)
         ),
     )
     with pytest.raises(WorktreeIsolationError) as failed:
@@ -2222,10 +2627,14 @@ def test_tripwire_retry_predicate_only_fires_on_lock_contention():
     from agent_flow.core.hook_integrity import HookIntegrityError
 
     assert W_ISO.tripwire_git_lock_retryable(
-        WorktreeIsolationError(f"cannot read leader working tree status: {_LOCK_STDERR}")
+        WorktreeIsolationError(
+            f"cannot read leader working tree status: {_LOCK_STDERR}"
+        )
     )
     assert not W_ISO.tripwire_git_lock_retryable(
-        WorktreeIsolationError("leader checkout changed during the phase: HEAD moved a -> b")
+        WorktreeIsolationError(
+            "leader checkout changed during the phase: HEAD moved a -> b"
+        )
     )
     # 같은 문구를 실어도 tripwire 관측 실패가 아니면 재시도 대상이 아니다.
     assert not W_ISO.tripwire_git_lock_retryable(HookIntegrityError(_LOCK_STDERR))
@@ -2238,10 +2647,16 @@ def test_managed_worktree_context_tolerates_a_missing_checkout_name() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         container = Path(temp_dir) / "proj" / ".agent-flow" / "worktrees"
         container.mkdir(parents=True)
-        assert _managed_worktree_context(container) == (container.parent.parent.resolve(), None)
+        assert _managed_worktree_context(container) == (
+            container.parent.parent.resolve(),
+            None,
+        )
         checkout = container / "foo"
         checkout.mkdir()
-        assert _managed_worktree_context(checkout) == (container.parent.parent.resolve(), "foo")
+        assert _managed_worktree_context(checkout) == (
+            container.parent.parent.resolve(),
+            "foo",
+        )
 
 
 def test_checkout_identity_never_emits_a_literal_none() -> None:

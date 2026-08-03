@@ -10,10 +10,15 @@ import { fileURLToPath } from "node:url";
 import {
   activeInstallProfileIds,
   installedProfileFileNames,
-  PROJECT_LAUNCHER_RELATIVE,
   resolveLinkedWorktreeLeader,
   resolveManagedWorktreeContext,
 } from "../lib/installer-shared.mjs";
+import {
+  MANAGED_HOOK_POLICY_SEQUENCES,
+  MANAGED_HOOK_SCRIPTS,
+  RETIRED_MANAGED_HOOK_SCRIPTS,
+} from "../lib/managed-hooks.mjs";
+import { SHARED_HOOK_PROTOCOL_VERSION } from "../lib/shared-hook-runtime.mjs";
 
 // Python `LEAKY_GIT_ENV_VARS`(`src/agent_flow/core/worktree_isolation.py`) 및 두
 // installer와 같은 목록이다. ambient discovery 변수가 남아 있으면 이 검사가 검사
@@ -232,52 +237,41 @@ function assertAbsent(rel, needle, why) {
   }
 }
 
-// 넓은 trust를 걷어내는 본문과 skill 인덱스 본문은 이제 공유 모듈에만 있다.
+// 보안상 중요한 host hook 등록 본문은 공유 모듈에만 둔다. 각 installer는 옵션만
+// 넘겨야 하며, 사본을 만들면 경로 검증이나 사용자 파일 보존 정책이 갈라진다.
+for (const helper of [
+  "assertProjectHookPathsSafe",
+  "installCodexHooks",
+  "installClaudeHooks",
+  "installOmpHooks",
+  "installGlobalHookRegistrations",
+]) {
+  assertContains("lib/installer-shared.mjs", `export function ${helper}(`);
+}
 assertContains("lib/installer-shared.mjs", "export function removeCodexBroadTrustState(root)");
 assertContains("lib/installer-shared.mjs", "export function skillIndexBlock(root)");
 assertContains("lib/installer-shared.mjs", "export function upsertSkillIndexBlock(root)");
 assertContains("lib/installer-shared.mjs", 'export const SKILL_INDEX_START = "<!-- agent-flow:skills:start -->"');
 
-// `installCodexHooks`/`installClaudeHooks`/`installOmpHooks` 본문은 각 진입점의
-// 전역을 읽어 아직 각자 갖고 있다. 아래 단언은 그 본문에 걸린 계약이라 두 파일을
-// 모두 봐야 한다 — 한쪽만 보면 다른 쪽에서 승인 세탁이 검사 없이 되살아난다.
 for (const installer of ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"]) {
   assertNotContains(installer, "function installCodexTrustState(root)");
-  assertContains(installer, "function installOmpHooks(root)");
-  assertContains(installer, ".omp\", \"extensions\", \"agent-flow-hooks.ts");
-  // 두 진입점이 같은 인덱스를 만들어야 한다. 한쪽만 채우면 install 순서에 따라
-  // AGENTS.md의 인덱스가 있었다 없었다 한다.
+  for (const helper of [
+    "assertProjectHookPathsSafe",
+    "installCodexHooks",
+    "installClaudeHooks",
+    "installOmpHooks",
+    "installGlobalHookRegistrations",
+  ]) {
+    assertNotContains(installer, `function ${helper}(`);
+  }
+  assertContains(installer, "installGlobalHookRegistrations(");
   assertContains(installer, "upsertSkillIndexBlock(");
-  // install이 **현재 등록된** hook의 해시를 trusted로 되받아 적으면, 변조된
-  // 등록이 다음 install에서 승인 상태로 세탁된다. 읽는 코드도 없었다.
-  // 등록 무결성은 런 시작 시 hook_integrity가 kit.json과 대조한다.
   assertAbsent(installer, "[hooks.state.", "install must not launder managed hook approval");
   assertAbsent(installer, "trusted_hash", "install must not launder managed hook approval");
-  // launcher가 없으면 host의 chat 승인 hook은 실행할 것을 못 찾아 조용히 끝난다.
-  // 두 진입점 중 한쪽만 심으면 그 조합에서만 승인이 죽어 재현이 안 된다.
-  assertContains(installer, "installProjectLauncher(");
 }
-// 경로·digest 키가 JS/Python/hook 세 곳에서 같은 값인지, 그리고 hook이 실행 직전
-// digest를 대조하는지. 문자열 grep만으로는 이 언어 경계가 하나도 묶이지 않는다.
-assertLauncherContractIsSingleValued();
 
-// 관리 hook 이름의 등록 지점은 Node 1곳(`lib/managed-hooks.mjs`)과 Python 1곳이다.
-// 언어 경계라 합칠 수 없으므로 둘이 같은지는 계속 확인한다.
-{
-  const jsManagedScripts = (() => {
-    const text = readIfExists("lib/managed-hooks.mjs");
-    if (text === null) return null;
-    const match = text.match(/const MANAGED_HOOK_SCRIPTS = \[([\s\S]*?)\];/);
-    if (!match) {
-      failures.push("lib/managed-hooks.mjs missing MANAGED_HOOK_SCRIPTS");
-      return null;
-    }
-    return [...match[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]).sort();
-  })();
-  if (jsManagedScripts && jsManagedScripts.length === 0) {
-    failures.push("lib/managed-hooks.mjs declares no managed hook scripts");
-  }
-}
+assertManagedHookContractParity();
+assertSharedHookRuntimeContractParity();
 
 const fullFeatureWorkflowCopies = [
   `${PACKAGED_WORKFLOWS}/full-feature.yaml`,
@@ -391,9 +385,6 @@ assertAllWorkflowContracts();
 // 한다"고 말했다. 한 군데만 밀려도 그 진입점에서만 ambient GIT_*가 살아남아 남의
 // checkout을 보고, 증상은 전혀 다른 곳에서 터진다. 실제로 목록을 추출해 강제한다.
 assertLeakyGitEnvParity();
-assertContains("bin/agent-flow-kit.mjs", "RUNTIME_PYTHON_RELATIVE");
-assertContains("bin/agent-flow-kit.mjs", "src\", \"agent_flow");
-assertContains("src/agent_flow/core/gates.py", "\".agent-flow\" / \"runtime\" / \"python\"");
 // artifact 경로 정규화는 한 벌만 존재해야 한다. artifacts.py가 자기 규칙을 다시
 // 쓰면 command와 gate 출력이 서로 다른 경로를 기록한다.
 assertContains("src/agent_flow/core/gates.py", "def relativize_local_path");
@@ -839,6 +830,143 @@ function assertPythonContract(label, code) {
   }
 }
 
+function readPythonJsonContract(label, code) {
+  const env = {
+    ...process.env,
+    PYTHONPATH: [path.join(SOURCE_ROOT, "src"), process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
+  };
+  const result = spawnSync(preferredPython(), ["-c", code], {
+    cwd: SOURCE_ROOT,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    env,
+    timeout: 30_000,
+  });
+  if (result.error || result.status !== 0) {
+    failures.push(`${label} failed: ${result.error?.message || result.stderr.trim() || result.status}`);
+    return null;
+  }
+  try {
+    return JSON.parse(result.stdout);
+  } catch {
+    failures.push(`${label} returned invalid JSON`);
+    return null;
+  }
+}
+
+function normalizedContract(value) {
+  if (Array.isArray(value)) {
+    return value.map(normalizedContract);
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value).sort().map((key) => [key, normalizedContract(value[key])]),
+    );
+  }
+  return value;
+}
+
+function assertContractValuesEqual(label, jsValue, pythonValue) {
+  const js = JSON.stringify(normalizedContract(jsValue));
+  const python = JSON.stringify(normalizedContract(pythonValue));
+  if (js !== python) {
+    failures.push(`${label} differs: JavaScript=${js} Python=${python}`);
+  }
+}
+
+function assertManagedHookContractParity() {
+  const python = readPythonJsonContract("Python managed hook contract", `
+import json
+from agent_flow.core.hook_integrity import (
+    LEGACY_PROJECT_HOOK_FILES,
+    MANAGED_JSON_EVENT_PLACEMENT,
+)
+
+print(json.dumps({
+    "legacy_project_hook_files": sorted(path.as_posix() for path in LEGACY_PROJECT_HOOK_FILES),
+    "event_placement": MANAGED_JSON_EVENT_PLACEMENT,
+}))
+`);
+  if (python === null) {
+    return;
+  }
+  const managedNames = [
+    ...MANAGED_HOOK_SCRIPTS,
+    ...RETIRED_MANAGED_HOOK_SCRIPTS,
+  ];
+  const legacyProjectHookFiles = [
+    ...managedNames.map((name) => `.agent-flow/scripts/hooks/${name}`),
+    ".agent-flow/scripts/hook-runtime/agent-flow-hook.py",
+  ].sort();
+  const eventPlacement = Object.fromEntries(
+    Object.entries(MANAGED_HOOK_POLICY_SEQUENCES).map(([event, policy]) => [
+      event,
+      [event, policy.matcher],
+    ]),
+  );
+  assertContractValuesEqual(
+    "managed and retired project hook files",
+    legacyProjectHookFiles,
+    python.legacy_project_hook_files,
+  );
+  assertContractValuesEqual(
+    "canonical managed hook event placement",
+    eventPlacement,
+    python.event_placement,
+  );
+}
+
+function ompToolNames(source, symbol) {
+  const match = new RegExp(`const\\s+${symbol}\\s*=\\s*/\\^\\(([^)]*)\\)\\$/i`).exec(source);
+  if (!match) {
+    failures.push(`lib/omp-hooks-extension.mjs missing ${symbol} vocabulary`);
+    return null;
+  }
+  return [...new Set(match[1].split("|").map((name) => name.toLowerCase()))].sort();
+}
+
+function assertSharedHookRuntimeContractParity() {
+  const python = readPythonJsonContract("Python shared hook runtime contract", `
+import json
+import runpy
+
+runtime = runpy.run_path("scripts/hook-runtime/agent-flow-hook.py")
+print(json.dumps({
+    "protocol_version": runtime["PROTOCOL_VERSION"],
+    "tool_classes": {
+        "command": sorted(runtime["COMMAND_TOOLS"]),
+        "write": sorted(runtime["WRITE_TOOLS"]),
+        "read": sorted(runtime["READ_TOOLS"]),
+    },
+}))
+`);
+  const ompSource = readIfExists("lib/omp-hooks-extension.mjs");
+  if (python === null || ompSource === null) {
+    return;
+  }
+  const command = ompToolNames(ompSource, "COMMAND_TOOL_RE");
+  const write = ompToolNames(ompSource, "WRITE_TOOL_RE");
+  const read = ompToolNames(ompSource, "READ_TOOL_RE");
+  const skill = ompToolNames(ompSource, "SKILL_TOOL_RE");
+  if (!command || !write || !read || !skill) {
+    return;
+  }
+  assertContractValuesEqual(
+    "shared hook protocol version",
+    SHARED_HOOK_PROTOCOL_VERSION,
+    python.protocol_version,
+  );
+  assertContractValuesEqual(
+    "shared hook tool-class vocabulary",
+    {
+      command,
+      write,
+      read: [...new Set([...read, ...skill])].sort(),
+    },
+    python.tool_classes,
+  );
+}
+
 // 나열 순서는 파일마다 자유다(집합만 같아야 한다). 심볼 이름도 파일마다 다르므로
 // 파일별로 어느 선언을 볼지 명시한다.
 function assertLeakyGitEnvParity() {
@@ -947,6 +1075,32 @@ function assertCleanInstallCopiesTemplates() {
   }
 }
 
+function installerParityEnv(root) {
+  return {
+    ...process.env,
+    HOME: path.join(root, ".test-home"),
+    AGENT_FLOW_SKIP_CODEX_TRUST: "1",
+  };
+}
+
+
+function removeParityTree(target) {
+  let state;
+  try {
+    state = fs.lstatSync(target);
+  } catch {
+    return;
+  }
+  if (state.isDirectory() && !state.isSymbolicLink()) {
+    fs.chmodSync(target, 0o700);
+    for (const name of fs.readdirSync(target)) {
+      removeParityTree(path.join(target, name));
+    }
+  }
+  fs.rmSync(target, { recursive: true, force: true });
+}
+
+
 function assertInstallerSelfInstallKeepsSourceScripts(installer) {
   const label = `bin/${installer}`;
   const tempParent = fs.mkdtempSync(path.join(os.tmpdir(), "agent-flow-self-install-parity-"));
@@ -969,7 +1123,7 @@ function assertInstallerSelfInstallKeepsSourceScripts(installer) {
     }
     const result = spawnSync(process.execPath, [path.join(tempKitRoot, "bin", installer), "install", "--force-managed"], {
       cwd: tempKitRoot,
-      env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1" },
+      env: installerParityEnv(tempParent),
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
@@ -981,11 +1135,11 @@ function assertInstallerSelfInstallKeepsSourceScripts(installer) {
     if (!fs.existsSync(sourceChecker)) {
       failures.push(`${label} self install removed source scripts/hooks/comment-checker.py`);
     }
-    if (!fs.existsSync(path.join(tempKitRoot, ".agent-flow", "scripts", "hooks", "comment-checker.py"))) {
-      failures.push(`${label} self install missing .agent-flow/scripts/hooks/comment-checker.py`);
+    if (fs.existsSync(path.join(tempKitRoot, ".agent-flow", "scripts", "hooks"))) {
+      failures.push(`${label} self install retained project-local managed hooks`);
     }
   } finally {
-    fs.rmSync(tempParent, { recursive: true, force: true });
+    removeParityTree(tempParent);
   }
 }
 
@@ -993,7 +1147,7 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
   const label = `bin/${installer}`;
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agent-flow-install-parity-"));
   try {
-    const seededHooksPath = path.join(tempRoot, ".Codex", "hooks.json");
+    const seededHooksPath = path.join(tempRoot, ".test-home", ".Codex", "hooks.json");
     fs.mkdirSync(path.dirname(seededHooksPath), { recursive: true });
     fs.writeFileSync(
       seededHooksPath,
@@ -1015,7 +1169,7 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
     );
     const result = spawnSync(process.execPath, [path.join(SOURCE_ROOT, "bin", installer), "install", "--force-managed"], {
       cwd: tempRoot,
-      env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1" },
+      env: installerParityEnv(tempRoot),
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
@@ -1036,51 +1190,58 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
         failures.push(`${label} clean install ${installedRel} differs from ${rel}`);
       }
     }
-    const installedChecker = path.join(tempRoot, ".agent-flow", "scripts", "hooks", "comment-checker.py");
+    const projectLocalHooks = path.join(tempRoot, ".agent-flow", "scripts", "hooks");
+    const sharedHome = path.join(
+      tempRoot,
+      ".test-home",
+      ".agent-flow",
+    );
     for (const [rel, installedHooks] of [
-      [".Codex/hooks.json", path.join(tempRoot, ".Codex", "hooks.json")],
-      [".codex/hooks.json", path.join(tempRoot, ".codex", "hooks.json")],
+      [".Codex/hooks.json", path.join(tempRoot, ".test-home", ".Codex", "hooks.json")],
+      [".codex/hooks.json", path.join(tempRoot, ".test-home", ".codex", "hooks.json")],
     ]) {
       if (!fs.existsSync(installedHooks)) {
         failures.push(`${label} clean install missing ${rel}`);
         continue;
       }
       const hooksText = fs.readFileSync(installedHooks, "utf8");
-      if (!hooksText.includes("comment-checker.py")) {
-        failures.push(`${label} clean install ${rel} missing comment-checker hook`);
+      if (!hooksText.includes("--event") || hooksText.includes("comment-checker.py")) {
+        failures.push(`${label} clean install ${rel} does not use event-level dispatch`);
       }
       if (!hooksText.includes("custom-post-hook")) {
         failures.push(`${label} clean install ${rel} did not preserve existing custom hook`);
       }
-      if (!hooksText.includes(installedChecker)) {
-        failures.push(`${label} clean install ${rel} does not use installed comment-checker`);
+      if (
+        !hooksText.includes(sharedHome)
+        || !hooksText.includes("-I -c")
+        || !hooksText.includes("agent-flow-hook")
+      ) {
+        failures.push(`${label} clean install ${rel} does not use the verified shared hook bootstrap`);
       }
       if (hooksText.includes(SOURCE_ROOT)) {
         failures.push(`${label} clean install ${rel} leaks source root`);
       }
     }
-    if (!fs.existsSync(installedChecker)) {
-      failures.push(`${label} clean install missing .agent-flow/scripts/hooks/comment-checker.py`);
-    } else {
-      try {
-        fs.accessSync(installedChecker, fs.constants.X_OK);
-      } catch {
-        failures.push(`${label} clean install comment-checker.py is not executable`);
-      }
+    if (fs.existsSync(projectLocalHooks)) {
+      failures.push(`${label} clean install retained project-local managed hooks`);
     }
     if (fs.existsSync(path.join(tempRoot, "scripts", "hooks", "comment-checker.py"))) {
       failures.push(`${label} clean install duplicated legacy scripts/hooks/comment-checker.py`);
     }
-    const claudeSettingsPath = path.join(tempRoot, ".claude", "settings.json");
+    const claudeSettingsPath = path.join(tempRoot, ".test-home", ".claude", "settings.json");
     if (!fs.existsSync(claudeSettingsPath)) {
       failures.push(`${label} clean install missing .claude/settings.json`);
     } else {
       const claudeSettingsText = fs.readFileSync(claudeSettingsPath, "utf8");
-      if (!claudeSettingsText.includes("PostToolUse") || !claudeSettingsText.includes("comment-checker.py")) {
-        failures.push(`${label} clean install .claude/settings.json missing comment-checker PostToolUse hook`);
+      if (!claudeSettingsText.includes("--event") || claudeSettingsText.includes("comment-checker.py")) {
+        failures.push(`${label} clean install .claude/settings.json does not use event-level dispatch`);
       }
-      if (!claudeSettingsText.includes(installedChecker)) {
-        failures.push(`${label} clean install .claude/settings.json does not use installed comment-checker`);
+      if (
+        !claudeSettingsText.includes(sharedHome)
+        || !claudeSettingsText.includes("-I -c")
+        || !claudeSettingsText.includes("agent-flow-hook")
+      ) {
+        failures.push(`${label} clean install .claude/settings.json does not use the verified shared hook bootstrap`);
       }
       if (claudeSettingsText.includes(SOURCE_ROOT)) {
         failures.push(`${label} clean install .claude/settings.json leaks source root`);
@@ -1095,7 +1256,7 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
     const forceResult = spawnSync(process.execPath, [path.join(SOURCE_ROOT, "bin", installer), "install", "--force-managed"], {
       cwd: tempRoot,
       encoding: "utf8",
-      env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1" },
+      env: installerParityEnv(tempRoot),
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
     });
@@ -1139,7 +1300,7 @@ function assertInstallerCleanInstallCopiesTemplates(installer) {
     assertSkillIndexBlockMatchesInstall(label, tempRoot);
     assertInstallerWorkflowBackupAndTimestamps(label, tempRoot, installer);
   } finally {
-    fs.rmSync(tempRoot, { recursive: true, force: true });
+    removeParityTree(tempRoot);
   }
 }
 
@@ -1164,7 +1325,7 @@ function assertInstallerWorkflowBackupAndTimestamps(label, tempRoot, installer) 
     const result = spawnSync(process.execPath, [path.join(SOURCE_ROOT, "bin", installer), ...args], {
       cwd: tempRoot,
       encoding: "utf8",
-      env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1" },
+      env: installerParityEnv(tempRoot),
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
     });
@@ -1201,7 +1362,7 @@ function assertInstallerWorkflowBackupAndTimestamps(label, tempRoot, installer) 
   const migration = spawnSync(process.execPath, [path.join(SOURCE_ROOT, "bin", installer), "install"], {
     cwd: tempRoot,
     encoding: "utf8",
-    env: { ...process.env, AGENT_FLOW_SKIP_CODEX_TRUST: "1" },
+    env: installerParityEnv(tempRoot),
     stdio: ["ignore", "pipe", "pipe"],
     timeout: 30_000,
   });
@@ -1226,97 +1387,80 @@ function readJsonSafe(pathName) {
   }
 }
 
-// 배치 계약이 이름 목록을 전부 담고 있는지 세려면 이름 목록도 Python에서 읽어야 한다.
-function pythonManagedHookScripts() {
-  const source = fs.readFileSync(path.join(SOURCE_ROOT, "src", "agent_flow", "core", "hook_integrity.py"), "utf8");
-  const block = source.match(/MANAGED_HOOK_SCRIPTS = \(([\s\S]*?)\)/);
-  if (!block) {
-    throw new Error("MANAGED_HOOK_SCRIPTS not found in hook_integrity.py");
-  }
-  return [...block[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
-}
-
-// Python이 무결성 검증에 쓰는 배치 계약을 그대로 읽는다. JS에 사본을 두면
-// 두 목록이 갈라지고, 갈라진 순간 parity가 지키는 대상이 사라진다.
-function pythonManagedHookPlacement() {
-  const source = fs.readFileSync(path.join(SOURCE_ROOT, "src", "agent_flow", "core", "hook_integrity.py"), "utf8");
-  const block = source.match(/MANAGED_HOOK_PLACEMENT = \{([\s\S]*?)\n\}/);
-  if (!block) {
-    throw new Error("MANAGED_HOOK_PLACEMENT not found in hook_integrity.py");
-  }
-  const placement = {};
-  // 값이 여러 줄 문자열로 쪼개져 있어도 읽는다. Python은 암시적 연결을 하나의
-  // 문자열로 보는데, 리터럴 하나만 집으면 계약이 조용히 반쪽으로 읽힌다.
-  // 마지막 항목은 블록 캡처가 끝나는 자리라 뒤에 개행이 없다.
-  const entry = /"([^"]+)":\s*\(([\s\S]*?)\),(?:\n|$)/g;
-  for (const match of block[1].matchAll(entry)) {
-    const literals = [...match[2].matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((item) => item[1]);
-    if (literals.length === 0) {
-      continue;
-    }
-    const [event, ...rest] = literals;
-    placement[match[1]] = [event, rest.join("").replaceAll("\\\\", "\\")];
-  }
-  // 개수를 세지 않으면 정규식이 못 읽는 형태(암시적 문자열 연결 등)로 적힌 항목이
-  // 무음으로 빠지고, 그 항목의 JS/Python 갈라짐이 이 검사를 통과한다. 실측으로
-  // `record-skill-read.py`가 그렇게 빠져 있었다.
-  const managed = pythonManagedHookScripts();
-  const missing = managed.filter((name) => !(name in placement));
-  if (missing.length > 0) {
-    throw new Error(`MANAGED_HOOK_PLACEMENT entries unreadable: ${missing.join(", ")}`);
-  }
-  return placement;
-}
 
 function assertInstalledHookParity(label, tempRoot) {
-  const claude = readJsonSafe(path.join(tempRoot, ".claude", "settings.json"));
-  const codex = readJsonSafe(path.join(tempRoot, ".Codex", "hooks.json"));
-  const lowerCodex = readJsonSafe(path.join(tempRoot, ".codex", "hooks.json"));
-  const ompExtension = path.join(tempRoot, ".omp", "extensions", "agent-flow-hooks.ts");
+  const globalHome = path.join(tempRoot, ".test-home");
+  const claude = readJsonSafe(path.join(globalHome, ".claude", "settings.json"));
+  const codex = readJsonSafe(path.join(globalHome, ".Codex", "hooks.json"));
+  const lowerCodex = readJsonSafe(path.join(globalHome, ".codex", "hooks.json"));
+  const sharedHome = path.join(tempRoot, ".test-home", ".agent-flow");
+  const ompExtension = path.join(
+    tempRoot,
+    ".test-home",
+    ".omp",
+    "agent",
+    "extensions",
+    "agent-flow-hooks.ts",
+  );
   if (!claude?.hooks || !codex?.hooks || !lowerCodex?.hooks || !fs.existsSync(ompExtension)) {
     failures.push(`${label} install missing claude, codex, or omp hook settings`);
     return;
   }
-  // 이름 목록을 여기서 따로 들면 Python 계약과 갈라진다. 실제 등록을
-  // `MANAGED_HOOK_PLACEMENT`와 직접 대조한다 — 이벤트/matcher까지 포함해서.
-  // 이 대조가 Python의 hook_integrity가 믿는 계약을 실제 installer 출력에 묶는다.
-  const placement = pythonManagedHookPlacement();
-  const managedScripts = Object.keys(placement);
   for (const [host, settings] of [["claude", claude], ["codex", codex], ["codex-lower", lowerCodex]]) {
-    for (const [script, [event, matcher]] of Object.entries(placement)) {
+    for (const [event, policy] of Object.entries(MANAGED_HOOK_POLICY_SEQUENCES)) {
       const found = [];
       for (const [registeredEvent, blocks] of Object.entries(settings.hooks ?? {})) {
         for (const block of Array.isArray(blocks) ? blocks : []) {
           const commands = (block.hooks ?? []).map((hook) => String(hook.command ?? ""));
-          if (commands.some((command) => command.includes(`/hooks/${script}`))) {
+          if (commands.some((command) =>
+            command.includes("agent-flow-hook")
+            && command.includes("--event")
+            && command.includes(event))) {
             found.push([registeredEvent, String(block.matcher ?? "")]);
           }
         }
       }
-      if (found.length === 0) {
-        failures.push(`${label} ${host} hooks missing ${script}`);
-        continue;
-      }
-      if (!found.some(([ev, mt]) => ev === event && mt === matcher)) {
+      if (found.length !== 1 || found[0][0] !== event || found[0][1] !== policy.matcher) {
         const actual = found.map(([ev, mt]) => `${ev}/${mt || "(none)"}`).join(", ");
         failures.push(
-          `${label} ${host} registers ${script} at ${actual}, python contract says ${event}/${matcher || "(none)"}`,
+          `${label} ${host} event dispatcher ${event}/${policy.matcher || "(none)"} mismatch: ${actual || "missing"}`,
         );
       }
     }
-    const stopEntries = settings.hooks.Stop;
-    if (Array.isArray(stopEntries) && stopEntries.length !== 1) {
-      failures.push(`${label} ${host} Stop hook entries must stay 1 after reinstall, got ${stopEntries.length}`);
+  }
+  const state = readJsonSafe(path.join(sharedHome, "hook-runtime.json"));
+  const runtimeManifest = state?.active_runtime_digest
+    ? readJsonSafe(path.join(sharedHome, "runtimes", state.active_runtime_digest, "runtime-manifest.json"))
+    : null;
+  if (
+    !state
+    || !runtimeManifest
+    || JSON.stringify(runtimeManifest.policy_sequence) !== JSON.stringify(MANAGED_HOOK_POLICY_SEQUENCES)
+  ) {
+    failures.push(`${label} shared runtime manifest policy sequence is missing or stale`);
+  } else {
+    const files = new Set(runtimeManifest.files.map((item) => item.path));
+    for (const policy of Object.values(MANAGED_HOOK_POLICY_SEQUENCES)) {
+      for (const scripts of Object.values(policy).filter(Array.isArray)) {
+        for (const script of scripts) {
+          if (!files.has(`hooks/${script}`)) {
+            failures.push(`${label} shared runtime bundle missing hooks/${script}`);
+          }
+        }
+      }
     }
+  }
+  if (fs.existsSync(path.join(tempRoot, ".agent-flow", "scripts", "hooks"))) {
+    failures.push(`${label} install retained project-local managed hooks`);
   }
   const ompExtensionText = fs.readFileSync(ompExtension, "utf8");
-  for (const script of managedScripts) {
-    if (!ompExtensionText.includes(script)) {
-      failures.push(`${label} omp extension missing ${script}`);
-    }
-  }
-  if (!ompExtensionText.includes("tool_call") || !ompExtensionText.includes("tool_result") || !ompExtensionText.includes("session_shutdown")) {
-    failures.push(`${label} omp extension missing tool/session hook events`);
+  if (
+    !ompExtensionText.includes("agent-flow-hook")
+    || !ompExtensionText.includes("tool_call")
+    || !ompExtensionText.includes("tool_result")
+    || !ompExtensionText.includes("session_shutdown")
+  ) {
+    failures.push(`${label} omp extension missing shared dispatcher events`);
   }
   if (!ompExtensionText.includes("pi.on(\"context\"") || !ompExtensionText.includes('message?.customType === "agent-flow-model-context"') || !ompExtensionText.includes('message?.details?.source === "agent-flow-omp-model-context"') || !ompExtensionText.includes('message?.role === "user"') || !ompExtensionText.includes('text.startsWith("<context>")') || !ompExtensionText.includes('/<file\\b[^>]*\\bsource="agent-flow-omp-model-context"/.test(text)')) {
     failures.push(`${label} omp extension must scrub stale hidden root context messages`);
@@ -1330,90 +1474,8 @@ function assertInstalledHookParity(label, tempRoot) {
   if (!ompExtensionText.includes("syncRootContextFiles") || !ompExtensionText.includes("modifiedRootContextFiles")) {
     failures.push(`${label} omp extension missing root AGENTS.md/CLAUDE.md sync`);
   }
-  assertInstalledLauncherParity(label, tempRoot);
 }
 
-// launcher는 chat 승인 hook이 CLI를 태우는 유일한 경로다. 이 하네스가 잡는 것은
-// **최종 설치 상태**다 — 호출을 `if (false)`로 감싸거나 심는 자리를 없애면 잡힌다.
-// 심는 순서(digest보다 나중)는 여기서 안 보인다. 그건 tests/test_cli.py의
-// `test_node_installers_write_the_spec_approval_launcher`가 digest 일치로 잡는다.
-function assertInstalledLauncherParity(label, tempRoot) {
-  const launcher = path.join(tempRoot, pythonLauncherRelative());
-  const identity = fs.lstatSync(launcher, { throwIfNoEntry: false });
-  if (!identity || !identity.isFile()) {
-    failures.push(`${label} install missing the managed launcher: ${pythonLauncherRelative()}`);
-    return;
-  }
-  if (!(identity.mode & 0o100)) {
-    failures.push(`${label} managed launcher is not executable`);
-  }
-  if (identity.mode & 0o022) {
-    failures.push(`${label} managed launcher is group or world writable`);
-  }
-  const kit = readJsonSafe(path.join(tempRoot, ".agent-flow", "kit.json"));
-  const digest = createHash("sha256").update(fs.readFileSync(launcher)).digest("hex");
-  if (kit?.[pythonLauncherDigestKey()] !== digest) {
-    failures.push(
-      `${label} kit.json ${pythonLauncherDigestKey()} does not match the installed launcher`,
-    );
-  }
-  const runtimeCli = path.join(tempRoot, pythonRuntimeCliRelative());
-  if (!fs.existsSync(runtimeCli)) {
-    failures.push(`${label} install missing the runtime the launcher execs: ${pythonRuntimeCliRelative()}`);
-  }
-}
-
-// launcher 경로와 digest 키는 JS(installer-shared)·Python(hook_integrity)·hook
-// 스크립트 세 곳이 각자 선언한다. 언어 경계라 합칠 수 없으므로 같은 값인지 본다 —
-// 한쪽만 바뀌면 모든 run이 시작 거부되거나(게이트) 승인이 조용히 죽는다(hook).
-function pythonLauncherRelative() {
-  const source = fs.readFileSync(
-    path.join(SOURCE_ROOT, "src", "agent_flow", "core", "hook_integrity.py"),
-    "utf8",
-  );
-  const block = source.match(/PROJECT_LAUNCHER_RELATIVE = ([^\n]+)/);
-  if (!block) {
-    throw new Error("PROJECT_LAUNCHER_RELATIVE not found in hook_integrity.py");
-  }
-  return [...block[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]).join(path.sep);
-}
-
-function pythonRuntimeCliRelative() {
-  const source = fs.readFileSync(
-    path.join(SOURCE_ROOT, "src", "agent_flow", "core", "hook_integrity.py"),
-    "utf8",
-  );
-  const block = source.match(/RUNTIME_CLI_RELATIVE = ([^\n]+)/);
-  if (!block) {
-    throw new Error("RUNTIME_CLI_RELATIVE not found in hook_integrity.py");
-  }
-  return [...block[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]).join(path.sep);
-}
-
-function pythonLauncherDigestKey() {
-  const source = fs.readFileSync(
-    path.join(SOURCE_ROOT, "src", "agent_flow", "core", "hook_integrity.py"),
-    "utf8",
-  );
-  // 접근 형태(`kit.get(...)` / `kit[...]` / `... in kit`)는 바뀔 수 있으니 키 이름만 본다.
-  const match = source.match(/"(project_launcher_digest)"/);
-  if (!match) {
-    throw new Error("launcher digest key not found in hook_integrity.py");
-  }
-  return match[1];
-}
-
-function assertLauncherContractIsSingleValued() {
-  const jsRelative = PROJECT_LAUNCHER_RELATIVE;
-  if (jsRelative !== pythonLauncherRelative()) {
-    failures.push(
-      `launcher path differs: installer-shared has ${jsRelative}, hook_integrity has ${pythonLauncherRelative()}`,
-    );
-  }
-  for (const installer of ["bin/agent-flow-kit.mjs", "bin/agent-flow-install.mjs"]) {
-    assertContains(installer, `${pythonLauncherDigestKey()}: projectLauncherDigest(`);
-  }
-}
 
 // AGENTS.md에 심은 인덱스가 실제 설치본과 같은가.
 //

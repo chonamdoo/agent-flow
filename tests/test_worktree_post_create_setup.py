@@ -9,12 +9,16 @@ worktree 안에서 고쳐도 leader로 새면 안 된다. `node_modules` 같은 
 symlink가 맞지만, 그건 host write boundary가 symlink 대상을 해석해 worktree 밖 쓰기로
 판정하는 문제와 얽히므로 별도로 다룬다.
 """
+
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
+import shlex
 import subprocess
+import stat
 import sys
 from pathlib import Path
 
@@ -59,8 +63,12 @@ def test_declared_machine_config_is_copied_into_the_worktree(tmp_path: Path):
         leader=leader, checkout=checkout, names=["local.properties", ".env"]
     )
 
-    assert copied == ("local.properties",), "선언했지만 leader에 없는 것까지 세면 안 된다"
-    assert (checkout / "local.properties").read_text(encoding="utf-8") == "sdk.dir=/opt/android\n"
+    assert copied == ("local.properties",), (
+        "선언했지만 leader에 없는 것까지 세면 안 된다"
+    )
+    assert (checkout / "local.properties").read_text(
+        encoding="utf-8"
+    ) == "sdk.dir=/opt/android\n"
     assert not (checkout / ".env").exists()
 
 
@@ -77,7 +85,9 @@ def test_copy_does_not_overwrite_what_the_worktree_already_has(tmp_path: Path):
     )
 
     assert copied == ()
-    assert (checkout / "local.properties").read_text(encoding="utf-8") == "sdk.dir=/opt/mine\n"
+    assert (checkout / "local.properties").read_text(
+        encoding="utf-8"
+    ) == "sdk.dir=/opt/mine\n"
 
 
 def test_copy_refuses_to_escape_the_worktree(tmp_path: Path):
@@ -210,7 +220,11 @@ def test_duplicate_declarations_are_collapsed():
 
 
 def _hook_command(leader: Path, script: str) -> str:
-    return f"/usr/bin/python3 -I '{leader}/.agent-flow/scripts/hooks/{script}'"
+    return (
+        f"'{Path(sys.executable).resolve()}' -I "
+        f"'{Path.home() / '.agent-flow' / 'bin' / 'agent-flow-hook'}' "
+        f"--root '{leader}' --hook '{script}'"
+    )
 
 
 def _leader_with_host_hooks(root: Path) -> None:
@@ -223,6 +237,19 @@ def _leader_with_host_hooks(root: Path) -> None:
         target.write_text(
             _hook_command(root, "comment-checker.py") + "\n", encoding="utf-8"
         )
+    (root / ".agent-flow" / "kit.json").write_text(
+        json.dumps(
+            {
+                "hook_runtime": {
+                    "python": str(Path(sys.executable).resolve()),
+                    "launcher_path": str(
+                        Path.home() / ".agent-flow" / "bin" / "agent-flow-hook"
+                    ),
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def _managed_checkout(leader: Path, name: str) -> Path:
@@ -239,40 +266,34 @@ def _leader_registration_bytes(leader: Path) -> dict[str, bytes]:
     }
 
 
-def test_managed_checkout_gets_the_host_hook_registrations(tmp_path: Path):
-    """leader의 host 경계 hook 등록이 managed checkout에도 provision된다."""
+def test_managed_checkout_does_not_get_project_local_host_registrations(
+    tmp_path: Path,
+):
     leader = tmp_path / "leader"
     _leader_with_host_hooks(leader)
     checkout = _managed_checkout(leader, "feat-hooks")
     before = _leader_registration_bytes(leader)
 
-    written = provision_host_hook_registrations(leader=leader, checkout=checkout)
+    changed = provision_host_hook_registrations(leader=leader, checkout=checkout)
 
-    # `.codex`와 `.Codex`는 대소문자를 구분하지 않는 파일시스템에서 한 자리다.
-    # 그런 곳에서는 둘 중 하나만 실제 쓰기로 잡히므로 목록 대신 결과를 본다.
-    assert set(written) <= set(HOST_HOOK_REGISTRATION_FILES)
-    for rel in HOST_HOOK_REGISTRATION_FILES:
-        text = (checkout / rel).read_text(encoding="utf-8")
-        assert _hook_command(leader, "comment-checker.py") in text, (
-            f"{rel}의 command가 leader 절대경로를 가리키지 않는다: {text!r}"
-        )
-    assert _leader_registration_bytes(leader) == before, "leader 등록 파일은 읽기 전용이다"
+    assert changed == ()
+    for rel in (*HOST_HOOK_REGISTRATION_FILES, ".omp/extensions/agent-flow-hooks.ts"):
+        assert not (checkout / rel).exists()
+    assert _leader_registration_bytes(leader) == before
 
 
-def test_registered_managed_checkout_gets_host_hooks_on_reinstall(tmp_path: Path):
-    """재설치는 이미 존재하는 managed checkout도 다시 provision한다."""
+def test_registered_managed_checkout_remains_free_of_project_local_hooks(
+    tmp_path: Path,
+):
     leader = tmp_path / "leader"
     _leader_with_host_hooks(leader)
     checkout = _managed_checkout(leader, "feat-existing")
 
     synced = provision_registered_worktree_host_hooks(root=leader)
 
-    assert len(synced) == 1
-    assert synced[0][0] == checkout.resolve()
-    assert set(synced[0][1]) <= set(HOST_HOOK_REGISTRATION_FILES)
-    assert set(synced[0][1])
-    for rel, payload in _leader_registration_bytes(leader).items():
-        assert (checkout / rel).read_bytes() == payload
+    assert synced == ((checkout.resolve(), ()),)
+    for rel in (*HOST_HOOK_REGISTRATION_FILES, ".omp/extensions/agent-flow-hooks.ts"):
+        assert not (checkout / rel).exists()
 
 
 @pytest.mark.parametrize(
@@ -303,6 +324,7 @@ def test_hook_sync_fails_closed_when_checkout_binding_does_not_match(
     for rel in HOST_HOOK_REGISTRATION_FILES:
         assert not (checkout / rel).exists()
 
+
 def test_reinstall_without_worktrees_does_not_require_dir_fd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -311,7 +333,6 @@ def test_reinstall_without_worktrees_does_not_require_dir_fd(
     monkeypatch.setattr(W, "_DIR_FD_SUPPORTED", False)
 
     assert provision_registered_worktree_host_hooks(root=leader) == ()
-
 
 
 def test_reinstall_does_not_trust_an_unadopted_sibling_worktree(tmp_path: Path):
@@ -328,14 +349,7 @@ def test_reinstall_does_not_trust_an_unadopted_sibling_worktree(tmp_path: Path):
         assert not (checkout / rel).exists()
 
 
-def test_tracked_registration_file_is_never_overwritten(tmp_path: Path, capsys):
-    """불변: 프로젝트가 `.claude/settings.json`을 추적하면 그 파일은 사용자 소유다.
-
-    덮으면 사용자 설정이 사라지고 worktree가 dirty가 되어 정리 게이트까지 막힌다.
-
-    반증: 조용히 건너뛰면 그 checkout은 hook 미등록으로 남고 사용자는 격리
-    가드가 빠진 이유를 어디에서도 못 본다.
-    """
+def test_tracked_registration_file_is_never_removed(tmp_path: Path):
     leader = tmp_path / "leader"
     _leader_with_host_hooks(leader)
     tracked = ".claude/settings.json"
@@ -343,39 +357,32 @@ def test_tracked_registration_file_is_never_overwritten(tmp_path: Path, capsys):
     _git("add", tracked, cwd=leader)
     _git("commit", "-m", "track claude settings", cwd=leader)
     checkout = _managed_checkout(leader, "feat-tracked")
-    # leader의 작업본만 installer가 덮은 상태. 내용이 달라 동일성 skip에 걸리지 않는다.
-    (leader / tracked).write_text(
-        _hook_command(leader, "comment-checker.py") + "\n", encoding="utf-8"
-    )
 
-    written = provision_host_hook_registrations(leader=leader, checkout=checkout)
+    changed = provision_host_hook_registrations(leader=leader, checkout=checkout)
 
-    assert tracked not in written
+    assert changed == ()
     assert (checkout / tracked).read_text(encoding="utf-8") == "COMMITTED\n"
-    assert ".omp/extensions/agent-flow-hooks.ts" in written, (
-        "추적 하나 때문에 나머지 등록까지 멈추면 안 된다"
-    )
-    reported = capsys.readouterr().err
-    assert tracked in reported and "tracked by git" in reported, (
-        f"tracked skip이 사유를 말하지 않는다: {reported!r}"
-    )
-    assert "untrack" in reported, "사유만 말하고 해결 방법을 말하지 않으면 사용자가 못 고친다"
 
 
-def test_reprovisioning_writes_nothing(tmp_path: Path):
-    """불변: run 해석 지점에서 매번 불리므로 두 번째부터는 쓰기가 없어야 한다."""
+def test_legacy_registration_cleanup_is_idempotent(tmp_path: Path):
     leader = tmp_path / "leader"
     _leader_with_host_hooks(leader)
     checkout = _managed_checkout(leader, "feat-idempotent")
-    provision_host_hook_registrations(leader=leader, checkout=checkout)
-    stamps = {
-        rel: (checkout / rel).stat().st_mtime_ns for rel in HOST_HOOK_REGISTRATION_FILES
-    }
+    json_rel = ".claude/settings.json"
+    omp_rel = ".omp/extensions/agent-flow-hooks.ts"
+    _write_registration(
+        checkout,
+        json_rel,
+        _kit_settings_json(leader, "comment-checker.py"),
+    )
+    _write_registration(checkout, omp_rel, _kit_omp_extension("confirm"))
 
+    changed = provision_host_hook_registrations(leader=leader, checkout=checkout)
+
+    assert set(changed) == {json_rel, omp_rel}
+    assert not (checkout / json_rel).exists()
+    assert not (checkout / omp_rel).exists()
     assert provision_host_hook_registrations(leader=leader, checkout=checkout) == ()
-    assert {
-        rel: (checkout / rel).stat().st_mtime_ns for rel in HOST_HOOK_REGISTRATION_FILES
-    } == stamps
 
 
 def _kit_settings_json(leader: Path, script: str) -> str:
@@ -386,7 +393,10 @@ def _kit_settings_json(leader: Path, script: str) -> str:
                 "PostToolUse": [
                     {
                         "hooks": [
-                            {"type": "command", "command": _hook_command(leader, script)}
+                            {
+                                "type": "command",
+                                "command": _hook_command(leader, script),
+                            }
                         ]
                     }
                 ]
@@ -403,6 +413,12 @@ def _kit_omp_extension(script: str) -> str:
         f"  return {script!r};\n"
         "}\n"
     )
+
+
+def _write_registration(root: Path, rel: str, content: str) -> None:
+    target = root / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
 
 
 @pytest.mark.parametrize("operation", ["replace", "retire"])
@@ -429,9 +445,7 @@ def test_fd_transaction_preserves_a_registration_replaced_after_inspection(
             changed = W._replace_host_hook_registration_at(
                 parent=parent,
                 name=target.name,
-                payload=_kit_settings_json(
-                    leader, "bind-host-worktree.py"
-                ).encode(),
+                payload=_kit_settings_json(leader, "bind-host-worktree.py").encode(),
                 leader=leader,
                 rel=".claude/settings.json",
                 expected=expected,
@@ -499,27 +513,20 @@ def test_pinned_git_admin_ignores_pointer_swap_and_blocks_index_writers(
         os.close(checkout_fd)
 
 
-def test_missing_leader_registration_retires_only_kit_owned_checkout_files(
-    tmp_path: Path,
-):
+def test_cleanup_retires_only_kit_owned_checkout_files(tmp_path: Path):
     leader = tmp_path / "leader"
     _leader_with_host_hooks(leader)
     managed = {
-        ".claude/settings.json": _kit_settings_json(
-            leader, "comment-checker.py"
-        ),
+        ".claude/settings.json": _kit_settings_json(leader, "comment-checker.py"),
         ".omp/extensions/agent-flow-hooks.ts": _kit_omp_extension("confirm"),
     }
-    for rel, content in managed.items():
-        (leader / rel).write_text(content, encoding="utf-8")
     checkout = _managed_checkout(leader, "feat-disable-hooks")
-    provision_host_hook_registrations(leader=leader, checkout=checkout)
-    for rel in managed:
-        (leader / rel).unlink()
+    for rel, content in managed.items():
+        _write_registration(checkout, rel, content)
 
     changed = provision_host_hook_registrations(leader=leader, checkout=checkout)
 
-    assert set(managed) <= set(changed)
+    assert set(changed) == set(managed)
     for rel in managed:
         assert not (checkout / rel).exists()
 
@@ -534,7 +541,9 @@ def test_missing_leader_registration_keeps_user_owned_checkout_file(
     checkout = _managed_checkout(leader, "feat-user-hooks")
     target = checkout / rel
     target.parent.mkdir()
-    target.write_text('{"hooks":{"PostToolUse":[{"command":"./mine"}]}}', encoding="utf-8")
+    target.write_text(
+        '{"hooks":{"PostToolUse":[{"command":"./mine"}]}}', encoding="utf-8"
+    )
     before = target.read_bytes()
 
     changed = provision_host_hook_registrations(leader=leader, checkout=checkout)
@@ -543,21 +552,11 @@ def test_missing_leader_registration_keeps_user_owned_checkout_file(
     assert target.read_bytes() == before
 
 
-def test_a_user_written_registration_in_the_checkout_is_not_overwritten(
-    tmp_path: Path, capsys
+def test_a_user_written_registration_in_the_checkout_is_preserved(
+    tmp_path: Path,
 ):
-    """반증: 미추적 등록 파일을 그냥 덮으면 사용자가 그 checkout에 직접 둔 host 설정이
-    백업도 경고도 없이 사라진다. `status`/`continue`가 매번 이 경로를 타므로 사용자가
-    다시 써 넣어도 다음 명령에 또 짓밟힌다.
-    """
     leader = tmp_path / "leader"
     _leader_with_host_hooks(leader)
-    (leader / ".claude/settings.json").write_text(
-        _kit_settings_json(leader, "comment-checker.py"), encoding="utf-8"
-    )
-    (leader / ".omp/extensions/agent-flow-hooks.ts").write_text(
-        _kit_omp_extension("confirm"), encoding="utf-8"
-    )
     checkout = _managed_checkout(leader, "feat-user-owned")
 
     mine_json = checkout / ".claude" / "settings.json"
@@ -567,7 +566,11 @@ def test_a_user_written_registration_in_the_checkout_is_not_overwritten(
             {
                 "hooks": {
                     "PostToolUse": [
-                        {"hooks": [{"type": "command", "command": "/usr/bin/env my-hook"}]}
+                        {
+                            "hooks": [
+                                {"type": "command", "command": "/usr/bin/env my-hook"}
+                            ]
+                        }
                     ]
                 }
             }
@@ -579,22 +582,13 @@ def test_a_user_written_registration_in_the_checkout_is_not_overwritten(
     mine_ts.write_text("export const mine = 1;\n", encoding="utf-8")
     before = {mine_json: mine_json.read_bytes(), mine_ts: mine_ts.read_bytes()}
 
-    written = provision_host_hook_registrations(leader=leader, checkout=checkout)
+    changed = provision_host_hook_registrations(leader=leader, checkout=checkout)
 
-    assert ".claude/settings.json" not in written
-    assert ".omp/extensions/agent-flow-hooks.ts" not in written
+    assert changed == ()
     assert {path: path.read_bytes() for path in before} == before
-    reported = capsys.readouterr().err
-    for rel in (".claude/settings.json", ".omp/extensions/agent-flow-hooks.ts"):
-        assert rel in reported, f"{rel}을 건너뛴 사유가 없다: {reported!r}"
-    assert "this kit did not write" in reported
 
 
-def test_user_keys_next_to_managed_hooks_are_not_overwritten(tmp_path: Path, capsys):
-    """반증: hook command만 보고 kit 소유로 판정하면, 같은 파일에 사용자가 둔
-    `permissions`/`env`/MCP 설정이 leader 파일로 통째 교체돼 조용히 사라진다.
-    installer의 `mergeHookConfig`가 그 공존을 보존하므로 흔한 구성이다.
-    """
+def test_user_keys_and_hooks_next_to_managed_hooks_are_preserved(tmp_path: Path):
     leader = tmp_path / "leader"
     _leader_with_host_hooks(leader)
     json_rel = ".claude/settings.json"
@@ -607,27 +601,55 @@ def test_user_keys_next_to_managed_hooks_are_not_overwritten(tmp_path: Path, cap
     mine.parent.mkdir()
     document = json.loads(_kit_settings_json(leader, "comment-checker.py"))
     document["permissions"] = {"allow": ["Bash(ls:*)"]}
+    hook_dir = leader / ".agent-flow" / "scripts" / "hooks"
+    document["hooks"]["PostToolUse"][0]["hooks"] = [
+        {
+            "type": "command",
+            "command": (
+                "/usr/bin/python3 -I "
+                f"{shlex.quote(str(hook_dir / 'comment-checker.py'))}"
+            ),
+        },
+        {
+            "type": "command",
+            "command": (
+                f"/bin/bash {shlex.quote(str(hook_dir / 'guard-protected-branch.sh'))}"
+            ),
+        },
+        {
+            "type": "command",
+            "command": (
+                f"cd '{leader.resolve()}' && '{hook_dir / 'prepare-spec-user-prompt.py'}'"
+            ),
+        },
+        {"type": "command", "command": "./mine"},
+    ]
     mine.write_text(json.dumps(document), encoding="utf-8")
-    before = mine.read_bytes()
+    mine.chmod(0o600)
 
     written = provision_host_hook_registrations(leader=leader, checkout=checkout)
 
-    assert json_rel not in written
-    assert mine.read_bytes() == before
-    assert json_rel in capsys.readouterr().err
+    assert json_rel in written
+    assert json.loads(mine.read_text(encoding="utf-8")) == {
+        "hooks": {
+            "PostToolUse": [
+                {
+                    "hooks": [{"type": "command", "command": "./mine"}],
+                }
+            ]
+        },
+        "permissions": {"allow": ["Bash(ls:*)"]},
+    }
+    assert stat.S_IMODE(mine.stat().st_mode) == 0o600
 
 
-def test_a_registration_this_kit_wrote_is_upgraded_in_place(tmp_path: Path):
-    """반증: 소유 판정이 "이미 있으면 손대지 않는다"로 굳으면 등록 갱신이 checkout까지
-    번지지 않는다. 그 checkout은 낡은 command를 계속 부르게 된다.
-    """
+def test_signature_only_user_omp_extension_is_preserved(tmp_path: Path):
     leader = tmp_path / "leader"
     _leader_with_host_hooks(leader)
     json_rel, omp_rel = ".claude/settings.json", ".omp/extensions/agent-flow-hooks.ts"
     (leader / json_rel).write_text(
         _kit_settings_json(leader, "comment-checker.py"), encoding="utf-8"
     )
-    (leader / omp_rel).write_text(_kit_omp_extension("confirm"), encoding="utf-8")
     checkout = _managed_checkout(leader, "feat-upgrade")
 
     stale_json = checkout / json_rel
@@ -635,25 +657,22 @@ def test_a_registration_this_kit_wrote_is_upgraded_in_place(tmp_path: Path):
     stale_json.write_text(
         _kit_settings_json(leader, "record-skill-read.py"), encoding="utf-8"
     )
-    stale_omp = checkout / omp_rel
-    stale_omp.parent.mkdir(parents=True)
-    # 표지가 붙기 전 설치본. 생성 서명만으로도 kit 소유로 인정해야 업그레이드가 닿는다.
-    stale_omp.write_text(
-        "export default function agentFlowHooks(ctx) { return 'stale'; }\n", encoding="utf-8"
+    user_omp = checkout / omp_rel
+    user_omp.parent.mkdir(parents=True)
+    user_payload = (
+        "export default function agentFlowHooks(ctx) { return 'user-owned'; }\n"
     )
+    user_omp.write_text(user_payload, encoding="utf-8")
 
     written = provision_host_hook_registrations(leader=leader, checkout=checkout)
 
-    assert json_rel in written and omp_rel in written
-    assert stale_json.read_bytes() == (leader / json_rel).read_bytes()
-    assert stale_omp.read_bytes() == (leader / omp_rel).read_bytes()
+    assert json_rel in written
+    assert omp_rel not in written
+    assert not stale_json.exists()
+    assert user_omp.read_text(encoding="utf-8") == user_payload
 
 
-def test_a_symlinked_registration_target_is_skipped_with_a_reason(
-    tmp_path: Path, capsys
-):
-    """반증: symlink 거부가 조용하면 그 checkout은 hook 미등록으로 남는다.
-    따라간 곳이 checkout 밖일 수 있어 쓸 수는 없다."""
+def test_a_symlinked_registration_target_is_preserved(tmp_path: Path):
     leader = tmp_path / "leader"
     _leader_with_host_hooks(leader)
     checkout = _managed_checkout(leader, "feat-symlink")
@@ -663,12 +682,11 @@ def test_a_symlinked_registration_target_is_skipped_with_a_reason(
     target.parent.mkdir()
     target.symlink_to(outside)
 
-    written = provision_host_hook_registrations(leader=leader, checkout=checkout)
+    changed = provision_host_hook_registrations(leader=leader, checkout=checkout)
 
-    assert ".claude/settings.json" not in written
-    assert outside.read_text(encoding="utf-8") == "{}\n", "symlink를 따라 밖에 썼다"
-    reported = capsys.readouterr().err
-    assert ".claude/settings.json" in reported and "symlink" in reported
+    assert changed == ()
+    assert target.is_symlink()
+    assert outside.read_text(encoding="utf-8") == "{}\n"
 
 
 def _kit_generated_registrations(leader: Path) -> tuple[str, str]:
@@ -699,61 +717,99 @@ def _kit_generated_registrations(leader: Path) -> tuple[str, str]:
         text=True,
     ).stdout
     generated = json.loads(payload)
+    settings = json.loads(generated["settings"])
+    first_command = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    tokens = shlex.split(first_command)
+    (leader / ".agent-flow" / "kit.json").write_text(
+        json.dumps(
+            {
+                "hook_runtime": {
+                    "python": tokens[0],
+                    "launcher_path": str(
+                        Path.home() / ".agent-flow" / "bin" / "agent-flow-hook"
+                    ),
+                    "bootstrap_digest": hashlib.sha256(tokens[3].encode()).hexdigest(),
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
     return generated["settings"], generated["extension"]
 
 
-def test_kit_ownership_matches_what_the_installers_actually_generate(tmp_path: Path):
-    """반증: 소유 판정 기준이 실제 생산물과 갈라지면 두 방향 모두 사고다 — kit이 깐
-    등록을 사용자 것으로 오판하면 갱신이 checkout에 영영 닿지 않고, 반대로 오판하면
-    사용자 파일을 덮는다. 여기서는 installer가 생성한 바이트가 kit 소유로 읽히는지 본다.
-    """
+def test_cleanup_ownership_matches_what_installers_actually_generated(
+    tmp_path: Path,
+):
     leader = tmp_path / "leader"
     _leader_with_host_hooks(leader)
     json_rel, omp_rel = ".claude/settings.json", ".omp/extensions/agent-flow-hooks.ts"
     settings, extension = _kit_generated_registrations(leader)
     checkout = _managed_checkout(leader, "feat-real-bytes")
-
-    # checkout에는 installer가 깐 그대로, leader에는 그 뒤 갱신된 등록이 있는 상태.
     for rel, generated in ((json_rel, settings), (omp_rel, extension)):
         stale = checkout / rel
         stale.parent.mkdir(parents=True, exist_ok=True)
         stale.write_text(generated, encoding="utf-8")
-        (leader / rel).write_text(generated + "\n", encoding="utf-8")
 
-    written = provision_host_hook_registrations(leader=leader, checkout=checkout)
+    changed = provision_host_hook_registrations(leader=leader, checkout=checkout)
 
-    for rel in (json_rel, omp_rel):
-        assert rel in written, (
-            f"installer가 생성한 {rel}을 kit 소유로 읽지 못했다 — 갱신이 checkout에 닿지 않는다"
+    assert set(changed) == {json_rel, omp_rel}
+    assert not (checkout / json_rel).exists()
+    assert not (checkout / omp_rel).exists()
+    backups = tuple(
+        (leader / ".agent-flow" / "backups" / "legacy-omp").glob(
+            "agent-flow-hooks.ts.removed.*"
         )
-        assert (checkout / rel).read_bytes() == (leader / rel).read_bytes()
+    )
+    assert len(backups) == 1
+    assert backups[0].read_text(encoding="utf-8") == extension
+
+
+def test_omp_marker_must_be_the_exact_first_line(tmp_path: Path):
+    leader = tmp_path / "leader"
+    leader.mkdir()
+    rel = ".omp/extensions/agent-flow-hooks.ts"
+    user_payload = (
+        "export const mine = true;\n"
+        "// agent-flow: managed omp extension\n"
+        "export default function agentFlowHooks() {}\n"
+    ).encode()
+
+    assert not W._host_hook_registration_is_kit_owned(
+        leader=leader, rel=rel, payload=user_payload
+    )
+
+
+def test_known_legacy_omp_digest_is_owned(tmp_path: Path, monkeypatch):
+    leader = tmp_path / "leader"
+    leader.mkdir()
+
+    class LegacyDigest:
+        def hexdigest(self) -> str:
+            return "7e70b38f3e1c4dff4c4f1a332b5722c51650950b1ce3cfe2349cdf89fd057fab"
+
+    monkeypatch.setattr(W.hashlib, "sha256", lambda _payload: LegacyDigest())
+
+    assert W._host_hook_registration_is_kit_owned(
+        leader=leader,
+        rel=".omp/extensions/agent-flow-hooks.ts",
+        payload=b"historical generated payload",
+    )
 
 
 def _settings_json_with_command(command: str) -> str:
     return json.dumps(
         {
             "hooks": {
-                "PostToolUse": [
-                    {"hooks": [{"type": "command", "command": command}]}
-                ]
+                "PostToolUse": [{"hooks": [{"type": "command", "command": command}]}]
             }
         }
     )
 
 
-def test_a_user_wrapper_around_a_managed_hook_is_not_overwritten(
-    tmp_path: Path, capsys
-):
-    """반증: 관리 hook 디렉터리를 **부분문자열**로 찾으면 사용자가 그 hook을 감싸서 넣은
-    항목까지 kit 소유로 읽힌다. 그 래퍼(로깅·알림)는 백업도 경고도 없이 사라지고,
-    `status`/`continue`가 매번 이 경로를 타므로 다시 써 넣어도 또 짓밟힌다.
-    """
+def test_a_user_wrapper_around_a_managed_hook_is_preserved(tmp_path: Path):
     leader = tmp_path / "leader"
     _leader_with_host_hooks(leader)
     rel = ".claude/settings.json"
-    (leader / rel).write_text(
-        _kit_settings_json(leader, "comment-checker.py"), encoding="utf-8"
-    )
     checkout = _managed_checkout(leader, "feat-wrapper")
     mine = checkout / rel
     mine.parent.mkdir()
@@ -766,109 +822,27 @@ def test_a_user_wrapper_around_a_managed_hook_is_not_overwritten(
     )
     before = mine.read_bytes()
 
-    written = provision_host_hook_registrations(leader=leader, checkout=checkout)
+    changed = provision_host_hook_registrations(leader=leader, checkout=checkout)
 
-    assert rel not in written
-    assert mine.read_bytes() == before, "관리 hook을 감싼 사용자 래퍼를 덮었다"
-    reported = capsys.readouterr().err
-    assert rel in reported and "this kit did not write" in reported, (
-        f"덮지 않은 사유가 없다: {reported!r}"
-    )
+    assert changed == ()
+    assert mine.read_bytes() == before
 
 
-def test_a_registration_pointing_at_another_installation_is_not_overwritten(
-    tmp_path: Path, capsys
+def test_a_registration_pointing_at_another_installation_is_preserved(
+    tmp_path: Path,
 ):
-    """반증: 부분문자열 판정은 **다른 설치본**의 hook 디렉터리를 가리키는 command도 kit
-    소유로 읽는다. 이 leader가 생성할 수 없는 command라면 사용자가 넣은 것이다.
-    """
     leader = tmp_path / "leader"
     _leader_with_host_hooks(leader)
     rel = ".claude/settings.json"
-    (leader / rel).write_text(
-        _kit_settings_json(leader, "comment-checker.py"), encoding="utf-8"
-    )
     other = tmp_path / "other-install"
     (other / ".agent-flow" / "scripts" / "hooks").mkdir(parents=True)
     checkout = _managed_checkout(leader, "feat-foreign")
     mine = checkout / rel
     mine.parent.mkdir()
-    mine.write_text(
-        _kit_settings_json(other, "comment-checker.py"), encoding="utf-8"
-    )
+    mine.write_text(_kit_settings_json(other, "comment-checker.py"), encoding="utf-8")
     before = mine.read_bytes()
 
-    written = provision_host_hook_registrations(leader=leader, checkout=checkout)
+    changed = provision_host_hook_registrations(leader=leader, checkout=checkout)
 
-    assert rel not in written
-    assert mine.read_bytes() == before, "다른 설치본을 가리키는 등록을 이 leader 것으로 덮었다"
-    reported = capsys.readouterr().err
-    assert rel in reported and "this kit did not write" in reported, (
-        f"덮지 않은 사유가 없다: {reported!r}"
-    )
-
-
-def test_an_unfixable_skip_is_reported_once_and_stops_spawning_git(
-    tmp_path: Path, capsys, monkeypatch
-):
-    """반증: `status`는 host 세션이 매 턴 돌리는 명령이다. 사유를 기억하지 않으면 고칠
-    수 없는 구성에서 같은 경고가 무한히 쌓여 아무도 읽지 않고, tracked 판정도 호출마다
-    `git ls-files`를 새로 띄운다 — 그 케이스는 구조적으로 내용 동일성 skip을 통과할 수
-    없으므로 그 spawn이 영구 비용이 된다.
-    """
-    leader = tmp_path / "leader"
-    _leader_with_host_hooks(leader)
-    tracked = ".claude/settings.json"
-    (leader / tracked).write_text("COMMITTED\n", encoding="utf-8")
-    _git("add", tracked, cwd=leader)
-    _git("commit", "-m", "track claude settings", cwd=leader)
-    checkout = _managed_checkout(leader, "feat-quiet")
-    (leader / tracked).write_text(
-        _kit_settings_json(leader, "comment-checker.py"), encoding="utf-8"
-    )
-
-    provision_host_hook_registrations(leader=leader, checkout=checkout)
-    assert "tracked by git" in capsys.readouterr().err, (
-        "첫 호출에서 사유를 말하지 않으면 사용자는 고칠 기회를 못 얻는다"
-    )
-
-    spawned: list[tuple[str, ...]] = []
-    real_git_safe = W.git_safe
-
-    def _counting_git_safe(*args, **kwargs):
-        spawned.append(args)
-        return real_git_safe(*args, **kwargs)
-
-    monkeypatch.setattr(W, "git_safe", _counting_git_safe)
-    provision_host_hook_registrations(leader=leader, checkout=checkout)
-
-    assert capsys.readouterr().err == "", "같은 사유를 매 호출마다 반복해서 낸다"
-    assert [args for args in spawned if args[:1] == ("ls-files",)] == [], (
-        f"tracked 판정이 호출마다 git을 띄운다: {spawned!r}"
-    )
-
-
-def test_a_changed_skip_reason_is_reported_again(tmp_path: Path, capsys):
-    """불변: 기억은 같은 사유의 반복만 없앤다. 사유가 바뀌면 그건 새 사건이다."""
-    leader = tmp_path / "leader"
-    _leader_with_host_hooks(leader)
-    rel = ".claude/settings.json"
-    (leader / rel).write_text(
-        _kit_settings_json(leader, "comment-checker.py"), encoding="utf-8"
-    )
-    checkout = _managed_checkout(leader, "feat-changed-reason")
-    mine = checkout / rel
-    mine.parent.mkdir()
-    mine.write_text(_settings_json_with_command("/usr/bin/env my-hook"), encoding="utf-8")
-
-    provision_host_hook_registrations(leader=leader, checkout=checkout)
-    assert "this kit did not write" in capsys.readouterr().err
-
-    mine.unlink()
-    mine.parent.rmdir()
-    (checkout / ".claude").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
-
-    provision_host_hook_registrations(leader=leader, checkout=checkout)
-
-    reported = capsys.readouterr().err
-    assert "symlink" in reported, f"사유가 바뀌었는데 침묵한다: {reported!r}"
+    assert changed == ()
+    assert mine.read_bytes() == before

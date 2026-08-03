@@ -2,31 +2,33 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
-
-_COMMAND_TOOLS = frozenset({
-    "bash", "shell", "run_terminal_cmd", "execute_command", "local_shell", "terminal",
-})
+exec(os.environ["AGENT_FLOW_VERIFIED_IMPORT_BOOTSTRAP"], globals())
 
 
-def _load_boundary(script_dir: Path):
-    install_root = script_dir.resolve().parents[1]
-    for source in (
-        install_root / "runtime" / "python",
-        install_root / "src",
-    ):
-        module = source / "agent_flow" / "core" / "host_write_boundary.py"
-        if module.is_file():
-            sys.path.insert(0, str(source))
-            break
-    else:
-        return None, None, None
+_COMMAND_TOOLS = frozenset(
+    {
+        "bash",
+        "shell",
+        "run_terminal_cmd",
+        "execute_command",
+        "local_shell",
+        "terminal",
+    }
+)
+
+
+def _load_boundary():
     from agent_flow.core.host_write_boundary import bound_worktree_for_session
-    from agent_flow.core.worktree_isolation import assert_leader_unchanged, WorktreeIsolationError
+    from agent_flow.core.worktree_isolation import (
+        assert_leader_unchanged,
+        WorktreeIsolationError,
+    )
 
-    project_root = install_root.parent if install_root.name == ".agent-flow" else install_root
+    project_root = Path(os.environ["AGENT_FLOW_PROJECT_ROOT"]).resolve()
     return (
         project_root,
         bound_worktree_for_session,
@@ -51,7 +53,7 @@ def main() -> int:
         return 0
     session_id = session_id.strip()
 
-    project_root, get_binding, isolation = _load_boundary(Path(__file__).resolve().parent)
+    project_root, get_binding, isolation = _load_boundary()
     if project_root is None:
         return 0
 
@@ -75,7 +77,9 @@ def main() -> int:
             include_ignored=False,
         )
     except WorktreeIsolationError as exc:
-        print("worktree-tripwire: write outside bound worktree detected", file=sys.stderr)
+        print(
+            "worktree-tripwire: write outside bound worktree detected", file=sys.stderr
+        )
         print(f"  {exc}", file=sys.stderr)
         print(
             f"Stop and resume from the bound worktree: {binding.checkout.checkout}",

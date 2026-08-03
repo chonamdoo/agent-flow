@@ -6,86 +6,62 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
-import { fileURLToPath } from "node:url";
-import { SKILL_DEPENDENCIES, mergeInstallSelectionWithPrevious, resolveInstallSelection } from "../lib/skill-selection.mjs";
-import { OMP_EXTENSION_MARKER, ompHooksExtensionSource } from "../lib/omp-hooks-extension.mjs";
-import { MANAGED_HOOK_SCRIPTS, RETIRED_MANAGED_HOOK_SCRIPTS } from "../lib/managed-hooks.mjs";
+import { mergeInstallSelectionWithPrevious, resolveInstallSelection } from "../lib/skill-selection.mjs";
+import {
+  installSharedHookRuntime,
+  sharedHookLauncherInvocation,
+} from "../lib/shared-hook-runtime.mjs";
+import { publishManagedProjectCutover } from "../lib/installer-cutover.mjs";
 import {
   activeInstallProfileIds,
   AGENT_FLOW_COMMAND,
   architectureReviewerSkillMarkdown,
   arrayValue,
+  assertProjectHookPathsSafe,
   assertInstallRootIsFinal,
   backupIfDifferent,
-  claudeHooksSettings,
   canonicalPath,
   cliOptionValue,
-  codexConfigPath,
-  codexHooksSettings,
-  COMMAND_TOOL_MATCHER,
   ensureChildPath,
-  escapeRegex,
   extractCliOption,
   fullFeatureSkillMarkdown,
   gitOutput,
   gitEnv,
   hasChildWithSuffix,
-  hookScriptCommand,
   installedProfileFileNames,
-  installProjectLauncher,
+  installGlobalHookRegistrations,
   syncManagedWorktreeHostHooks,
   isBundledSkillManifest,
   isPruneBackupName,
-  isRetiredHookCommand,
   KIT_ASSETS_RELATIVE,
   KIT_ROOT,
-  makeHooksExecutable,
-  managedHookDigests,
-  managedHookScriptName,
-  mergeHookConfig,
-  mergeHookSettings,
-  nextFreeBackupPath,
-  ompExtensionIsKitOwned,
+  pathHasSymlink,
   planReviewerSkillMarkdown,
   preserveKitSkillHashes,
   productBriefSkillMarkdown,
-  projectLauncherDigest,
-  projectLauncherPythonRecord,
-  PRUNE_BACKUP_SUFFIX,
-  PRUNE_BACKUP_VERSIONED,
   PRUNE_NOTICE_PREFIX,
-  pruneRetiredHooks,
   pruneRetiredHookScripts,
   pruneRetiredManagedScripts,
   pruneUninstalledProfiles,
   pushWatchSkillMarkdown,
-  READ_TOOL_MATCHER,
-  readHookSettings,
   readJsonIfExists,
   readKitAssetRecord,
   removeCodexBroadTrustState,
   removeGitignoreEntries,
   removeLegacyProjectSkillCopies,
-  removeOmpHooksExtension,
   requestedInstallRootOption,
   resolveManagedWorktreeRoot,
+  resolveManagedPython,
+  prepareLegacyProjectRuntimeRetirement,
   resolveManagedWorktreeContext,
   resolveLinkedWorktreeLeader,
   resolveInstallRoot,
   resolveGitCommonWorktreeRoot,
-  retiredHookScripts,
   safeSkillName,
   samePath,
-  shellQuote,
-  SKILL_INDEX_END,
-  SKILL_INDEX_START,
-  skillIndexBlock,
   skillRequires,
   syncKitAssets,
-  tomlBasicString,
   uniqueStrings,
-  unquoteShellWord,
   upgradeBundledSkills,
   upsertGitignore,
   upsertSkillIndexBlock,
@@ -98,7 +74,6 @@ const command = process.argv[2];
 // 워크플로·프로파일 정의의 정본은 설치 가능한 패키지 안이다. 루트에 사본을 두면
 // 같은 파일이 두 벌이 되고, 둘이 갈라지지 않았는지 보는 검사가 따로 필요해진다.
 const PACKAGED_ASSETS = path.join(KIT_ROOT, "src", "agent_flow");
-const RUNTIME_PYTHON_RELATIVE = path.join(".agent-flow", "runtime", "python");
 const installArgs = process.argv.slice(3);
 const forceManaged = installArgs.includes("--force-managed");
 // hook 비활성은 프로젝트 설정이다. 한 번 끄면 재설치가 되살리지 않는다.
@@ -169,15 +144,26 @@ function installProject(requestedRoot) {
     return;
   }
   const root = resolveInstallRoot(requestedRoot);
+  assertProjectHookPathsSafe(root);
   const agentFlowDir = path.join(root, ".agent-flow");
   const profile = detectProfile(root);
   let installSelection = resolveInstallSelection({ args: installArgs, detectedProfile: profile, kitRoot: KIT_ROOT, projectRoot: root });
   const existingPayload = readExistingKit(agentFlowDir);
+  const retireLegacyRuntime = prepareLegacyProjectRuntimeRetirement(
+    root,
+    existingPayload,
+  );
   // 명시 플래그 > 이전 설정 > 기본(켜짐)
   hooksDisabled = hooksFlagOff || (!hooksFlagOn && existingPayload?.hooks === false);
   const previousSkillIndex = readJsonIfExists(path.join(agentFlowDir, "skills", "index.json"));
   installSelection = mergeInstallSelectionWithPrevious(installSelection, previousSkillIndex, KIT_ROOT, root);
   const phases = fullFeaturePhases();
+  const sourceDigest = kitSourceDigest();
+  const hookRuntime = installSharedHookRuntime({
+    kitRoot: KIT_ROOT,
+    managedPython: resolveManagedPython({ projectRoot: root, kitRoot: KIT_ROOT }),
+    force: forceManaged,
+  });
 
   for (const name of ["runs", "state", "handoffs", "team", "worktrees", "workflows", "skills", "templates", "prompts", "rules", "bootstrap"]) {
     fs.mkdirSync(path.join(agentFlowDir, name), { recursive: true });
@@ -187,8 +173,6 @@ function installProject(requestedRoot) {
   fs.mkdirSync(path.join(agentFlowDir, "skills", "agent-flow"), { recursive: true });
   fs.mkdirSync(path.join(agentFlowDir, "skills", "full-feature-workflow"), { recursive: true });
 
-  // digest는 심은 파일에서 뽑으므로 payload보다 먼저 심는다.
-  installProjectLauncher(root);
   const installTimestamp = new Date().toISOString();
   const payload = {
     install_scope: "project",
@@ -203,10 +187,9 @@ function installProject(requestedRoot) {
     updated_at: installTimestamp,
     // 설치본이 어느 kit source에서 왔는지. 이 값이 없으면 낡은 설치본이 조용히
     // 계속 돈다 — version은 하드코딩이라 릴리스 없이 바뀐 자산을 구분하지 못한다.
-    kit_source_digest: kitSourceDigest(),
-    managed_hook_digests: managedHookDigests(),
-    project_launcher_digest: projectLauncherDigest(root),
-    project_launcher_python: projectLauncherPythonRecord(),
+    kit_source_digest: sourceDigest,
+    hook_runtime: hookRuntime,
+    shared_hook_home: path.dirname(path.dirname(hookRuntime.launcher_path)),
   };
 
   writeManagedFile(path.join(agentFlowDir, "workflows", "full-feature.yaml"), fullFeatureWorkflowYaml());
@@ -278,40 +261,15 @@ function installProject(requestedRoot) {
       skip: isBundledSkillManifest,
     });
     syncKitAssets(root, path.join(KIT_ROOT, "templates"), path.join(agentFlowDir, "templates"), recordedAssets, writtenAssets);
-    writeKitAssetRecord(root, writtenAssets);
   } else {
     console.warn(`warning: ${KIT_ASSETS_RELATIVE} is unreadable; kit asset sync skipped (delete it to re-bootstrap)`);
   }
   const skillIndex = installProjectSkills(root, agentFlowDir, previousSkillIndex, forceManaged, installSelection);
-  copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, "scripts"), path.join(agentFlowDir, "scripts"), forceManaged);
-  // scripts 복사는 사용자 편집을 보호해 덮지 않는다. managed hook은 그 보호가 곧
-  // digest 불일치이므로 별도로 갱신한다.
-  upgradeManagedHooks(
-    root,
-    path.join(KIT_ROOT, "scripts", "hooks"),
-    path.join(agentFlowDir, "scripts", "hooks"),
-  );
-  // 이 runtime 패키지 사본의 profile은 좁히지 않는다. `find_kit_root()`가 설치본에서
-  // 이 디렉터리로 떨어지므로 profile YAML을 실제로 읽는 자리가 여기이고, override는
-  // 설치 때 고르지 않은 profile도 지명할 수 있다 — 좁히면 `gates --profile ios`가
-  // `unknown profile: ios`로 죽고, `AGENT_FLOW_PROFILE=ios`는 경고만 내고 `generic`
-  // 으로 조용히 내려앉는다(`runner.py` `_load_single_profile`). 위 `.agent-flow/profiles/`
-  // 가 "이 프로젝트의 stack"을 보여 주는 자리이고, 이쪽은 override가 참조할 카탈로그다.
   copyBundledDirIfMissingOrSame(
-    path.join(KIT_ROOT, "src", "agent_flow"),
-    path.join(root, RUNTIME_PYTHON_RELATIVE, "agent_flow"),
-    true,
-    new Set(),
-    true,
-    true,
-  );
-  copyBundledDirIfMissingOrSame(
-    path.join(KIT_ROOT, "templates"),
-    path.join(root, RUNTIME_PYTHON_RELATIVE, "agent_flow", "templates"),
-    true,
-    new Set(),
-    true,
-    true,
+    path.join(KIT_ROOT, "scripts"),
+    path.join(agentFlowDir, "scripts"),
+    forceManaged,
+    new Set(["hooks", "hook-runtime"]),
   );
   if (!samePath(root, KIT_ROOT)) {
     removeManagedDirIfSame(path.join(KIT_ROOT, "scripts"), path.join(root, "scripts"), forceManaged);
@@ -321,9 +279,6 @@ function installProject(requestedRoot) {
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "rules", "context"), path.join(root, ".Codex", "rules", "context"), forceManaged);
   copyBundledDirIfMissingOrSame(path.join(KIT_ROOT, ".Codex", "context"), path.join(root, ".Codex", "context"), forceManaged);
   removeCodexBroadTrustState(root);
-  if (!hooksDisabled) {
-    installCodexHooks(root);
-  }
   writeManagedFileIfMissingOrSame(
     path.join(root, ".Codex", "rules", "codebase-rubric.md"),
     fs.readFileSync(path.join(KIT_ROOT, ".Codex", "rules", "codebase-rubric.md"), "utf8"),
@@ -369,18 +324,11 @@ function installProject(requestedRoot) {
   upsertBootstrapBlock(path.join(root, "AGENTS.md"), "AGENTS.md", root);
   upsertBootstrapBlock(path.join(root, "CLAUDE.md"), "CLAUDE.md", root);
   upsertSkillIndexBlock(root);
-  pruneRetiredHookScripts(root, hooksDisabled);
-  pruneRetiredManagedScripts(root);
-  makeHooksExecutable(root);
-  if (hooksDisabled) {
-    // 등록을 지우는 것은 prune이 한다. 여기서는 host별 설정을 한 번 더 훑어
-    // 남은 항목을 걷어내고, 통째로 kit이 만든 OMP 확장은 파일째 치운다.
-    pruneManagedHookRegistrations(root);
-    removeOmpHooksExtension(root);
-  } else {
-    installClaudeHooks(root);
-    installOmpHooks(root);
-  }
+  const hostHome = fs.realpathSync.native(os.homedir());
+  installGlobalHookRegistrations(hostHome, {
+    force: forceManaged,
+    hooksDisabled: false,
+  });
 
   payload.skill_index = {
     path: ".agent-flow/skills/index.json",
@@ -389,9 +337,18 @@ function installProject(requestedRoot) {
     warnings: skillIndex.warnings.length,
   };
 
-  fs.writeFileSync(path.join(agentFlowDir, "kit.json"), `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  publishManagedProjectCutover({
+    root,
+    manifest: payload,
+    retireLegacyRuntime,
+  });
   syncManagedWorktreeHostHooks(root);
   syncSkillSources(root);
+  pruneRetiredHookScripts(root, hooksDisabled, forceManaged, recordedAssets);
+  pruneRetiredManagedScripts(root);
+  if (recordedAssets) {
+    writeKitAssetRecord(root, writtenAssets);
+  }
   // root를 같이 낸다. `--root`를 줬든 cwd에서 유도했든, 어디에 설치됐는지 보이지
   // 않으면 잘못된 checkout에 깔린 것을 알 방법이 없다 - 실제로 leader 대신
   // worktree에 깔린 것을 한참 뒤에야 알아챘다.
@@ -412,8 +369,8 @@ function syncSkillSources(root) {
   }
 }
 
-// Lifecycle state has one owner: the Python CLI. JS only translates the
-// compatibility command names and never creates or advances run state.
+// lifecycle state의 유일한 소유자는 Python CLI다. JS는 호환 명령 이름만 변환하며
+// run state를 만들거나 phase를 진행하지 않는다.
 const PYTHON_RUN_LIFECYCLE = new Set(["start", "status", "next", "advance"]);
 const JS_RUN_SUBCOMMAND_NAMES = [
   "start",
@@ -638,7 +595,8 @@ function exportWorkflowDefinition(name) {
     stdio: ["ignore", "pipe", "pipe"],
     env: {
       ...process.env,
-      PYTHONPATH: [path.join(KIT_ROOT, "src"), process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
+      PYTHONPATH: path.join(KIT_ROOT, "src"),
+      PYTHONNOUSERSITE: "1",
     },
     timeout: 10_000,
   });
@@ -1131,26 +1089,6 @@ function assertPythonRuntimeInstalled(root) {
   if (!fs.existsSync(installMarker)) {
     throw new Error("agent-flow is not installed. run: agent-flow-kit install");
   }
-  const required = [
-    installMarker,
-    path.join(root, RUNTIME_PYTHON_RELATIVE, "agent_flow", "__init__.py"),
-    path.join(root, RUNTIME_PYTHON_RELATIVE, "agent_flow", "cli.py"),
-    path.join(
-      root,
-      RUNTIME_PYTHON_RELATIVE,
-      "agent_flow",
-      "templates",
-      "_shared",
-      "review",
-      "architecture.md",
-    ),
-  ];
-  const missing = required.filter((filePath) => !fs.existsSync(filePath));
-  if (missing.length > 0) {
-    throw new Error(
-      `agent-flow is not installed or its Python runtime is incomplete. Re-run agent-flow-kit install. Missing: ${missing.join(", ")}`,
-    );
-  }
 }
 
 function assertInstalled(root) {
@@ -1444,7 +1382,6 @@ function copyBundledDirIfMissingOrSame(
         continue;
       }
       if (isRoot && excludedRootDirs.has(entry.name)) {
-        removeManagedDirIfSame(srcPath, destPath, force);
         continue;
       }
       copyBundledDirIfMissingOrSame(srcPath, destPath, force, excludedRootDirs, false, pruneExtraneous, preservedExtraneousRootNames, null, backupPrunedRoot);
@@ -1915,63 +1852,18 @@ function previousSkillHash(previousIndex, name) {
 
 
 
-function pathHasSymlink(root, target) {
-  const relative = path.relative(root, target);
-  const parts = relative.split(path.sep).filter(Boolean);
-  let cursor = root;
-  for (const part of parts) {
-    cursor = path.join(cursor, part);
-    const stat = lstatIfExists(cursor);
-    if (stat && stat.isSymbolicLink()) {
-      return true;
-    }
-  }
-  return false;
-}
+
+
 
 function preferredPython() {
-  const virtualEnvPython = process.env.VIRTUAL_ENV
-    ? path.join(process.env.VIRTUAL_ENV, process.platform === "win32" ? "Scripts/python.exe" : "bin/python")
-    : null;
-  // HOME이 바뀌면 user-site의 yaml을 잃는 시스템 python 대신 kit 자체 venv를 우선한다.
-  const kitVenvPython = path.join(KIT_ROOT, ".venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
-  const leaderRoot = resolveManagedWorktreeRoot(KIT_ROOT);
-  const leaderVenvPython = leaderRoot
-    ? path.join(leaderRoot, ".venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python")
-    : null;
-  const candidates = [
-    process.env.PYTHON,
-    process.env.PYTHON_EXECUTABLE,
-    virtualEnvPython,
-    fs.existsSync(kitVenvPython) ? kitVenvPython : null,
-    leaderVenvPython && fs.existsSync(leaderVenvPython) ? leaderVenvPython : null,
-    "python3.12",
-    "python3.11",
-    "python3.10",
-    "python3",
-    "python",
-  ].filter(Boolean);
-  for (const candidate of candidates) {
-    const result = safeSpawnSync(candidate, ["--version"], { stdio: "ignore" });
-    if (!result.error && result.status === 0 && pythonSupportsWorkflowExport(candidate)) {
-      return candidate;
-    }
+  if (
+    command === "install"
+    || (command === "run" && process.argv[3] === "install")
+  ) {
+    const projectRoot = resolveInstallRoot(requestedInstallRoot());
+    return resolveManagedPython({ projectRoot, kitRoot: KIT_ROOT }).python;
   }
-  // 이 경로는 workflow export 말고도 spec confirm과 status가 함께 탄다. 무엇이
-  // 없는지와 무엇을 하면 되는지를 같이 적지 않으면 사용자는 인터프리터를 손으로
-  // 찾아 헤매다 PyYAML 없는 python을 타고 ModuleNotFoundError를 본다.
-  throw new Error(
-    "no Python with PyYAML found. Install it (pip install pyyaml) or point PYTHON at an interpreter that has it. "
-    + `Tried: ${candidates.join(", ")}`,
-  );
-}
-
-function pythonSupportsWorkflowExport(candidate) {
-  const result = safeSpawnSync(candidate, ["-c", "import yaml"], {
-    stdio: "ignore",
-    timeout: 5_000,
-  });
-  return !result.error && result.status === 0;
+  return sharedHookLauncherInvocation().python;
 }
 
 function assertFreshArtifact(state, phase, artifact) {
@@ -1999,7 +1891,8 @@ function runSkillsCli(args) {
     stdio: ["ignore", "pipe", "pipe"],
     env: {
       ...process.env,
-      PYTHONPATH: [path.join(KIT_ROOT, "src"), process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
+      PYTHONPATH: path.join(KIT_ROOT, "src"),
+      PYTHONNOUSERSITE: "1",
     },
     timeout: 15_000,
   });
@@ -2318,16 +2211,6 @@ function phasePrompt(phase) {
 
 
 
-// 관리 대상에서 빠진 hook은 기존 설치본 settings에 그대로 남는다. mergeHookSettings는
-// additive-only라서, 스크립트 파일만 지우면 host가 없는 경로를 계속 실행해 셸이 통째로
-// 막힌다. 은퇴한 이름을 여기 남겨 install 때 등록에서 걷어낸다.
-// 관측 hook(`record-*`)은 PostToolUse, 강제 hook은 PreToolUse. 이 구분을 어기면
-// 관측자가 판정자로 승격되고, 스크립트가 없거나 죽는 순간 host가 그걸 차단으로
-// 읽어 사용자 도구가 통째로 막힌다. 런 시작 시 `core/hook_integrity.py`가
-// 이 목록과 배치를 kit.json 기록과 대조한다.
-
-// hook을 끄면 "관리 대상 전부를 은퇴시킨 것"과 같다. 별도 제거 경로를 새로
-// 만들지 않고 이미 검증된 prune 경로를 그대로 태운다.
 
 
 
@@ -2343,30 +2226,8 @@ function phasePrompt(phase) {
 
 
 
-function installCodexHooks(root) {
-  const settingsPaths = [
-    path.join(root, ".Codex", "hooks.json"),
-    path.join(root, ".codex", "hooks.json"),
-  ];
-  const settings = {};
-  for (const settingsPath of settingsPaths) {
-    mergeHookConfig(settings, readHookSettings(settingsPath), hooksDisabled);
-  }
-  mergeHookSettings(settings, codexHooksSettings(root).hooks, hooksDisabled);
-  for (const settingsPath of settingsPaths) {
-    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-    fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
-  }
-}
 
 
-function installClaudeHooks(root) {
-  const settingsPath = path.join(root, ".claude", "settings.json");
-  const settings = readHookSettings(settingsPath);
-  mergeHookSettings(settings, claudeHooksSettings(root).hooks, hooksDisabled);
-  fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-  fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
-}
 
 
 
@@ -2387,79 +2248,13 @@ function upgradeBundledProfiles(root, src, dest, keepNames) {
   pruneUninstalledProfiles(root, src, dest, keepNames);
 }
 
-// managed hook은 digest가 `kit.json`에 기록되고 run 시작이 그 일치를 요구한다
-// (`hook_integrity`). "내용이 다르면 덮지 않는다"만 걸어 두면 kit 업그레이드가
-// 정의상 내용이 다른 경우라 digest는 새 값, 파일은 옛 값으로 갈라져 run이 막힌다.
-// profile과 같은 취급을 한다 — 덮되 사본을 남긴다.
-function upgradeManagedHooks(root, src, dest) {
-  if (!fs.existsSync(src)) {
-    return;
-  }
-  fs.mkdirSync(dest, { recursive: true });
-  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
-    if (!entry.isFile()) {
-      continue;
-    }
-    const source = path.join(src, entry.name);
-    const content = fs.readFileSync(source, "utf8");
-    const target = path.join(dest, entry.name);
-    const backup = backupIfDifferent(root, target, content);
-    if (backup) {
-      // 백업은 hook 디렉터리 안에 남는다. 실행 권한을 그대로 물려주면
-      // `hook_integrity`가 관리 대상 아닌 실행 파일로 보고 run 시작을 막는다.
-      fs.chmodSync(backup, 0o644);
-    }
-    fs.writeFileSync(target, content, "utf8");
-    fs.chmodSync(target, fs.statSync(source).mode & 0o777);
-  }
-}
 
 
 
 
 
 
-function installOmpHooks(root) {
-  // 다른 host의 hook 설정은 병합이라 업그레이드가 저절로 되지만, 이 확장은
-  // 통째로 kit이 만든 파일이다. "내용이 다르면 덮지 않는다"만 걸어 두면
-  // 업그레이드가 정의상 내용이 다른 경우라 영구히 고착된다.
-  const target = path.join(root, ".omp", "extensions", "agent-flow-hooks.ts");
-  if (!ompExtensionIsKitOwned(target) && !forceManaged) {
-    console.warn(
-      `agent-flow: ${path.relative(root, target)} is not kit-managed; ` +
-        "leaving it alone. Re-run with --force-managed to replace it.",
-    );
-    return false;
-  }
-  // kit 소유여도 사용자가 손댔을 수 있다. 서명만으로는 구분이 안 되므로
-  // 다른 내용이면 지우기 전에 사본을 남긴다.
-  backupIfDifferent(root, target, ompHooksExtensionSource());
-  return writeManagedFileIfMissingOrSame(target, ompHooksExtensionSource(), true);
-}
 
-function pruneManagedHookRegistrations(root) {
-  // 등록만 걷어낸다. hook 스크립트 자체는 pruneRetiredHookScripts가 치운다.
-  for (const rel of [
-    [".claude", "settings.json"],
-    [".Codex", "hooks.json"],
-    [".codex", "hooks.json"],
-  ]) {
-    const target = path.join(root, ...rel);
-    if (!fs.existsSync(target)) {
-      continue;
-    }
-    let settings;
-    try {
-      settings = JSON.parse(fs.readFileSync(target, "utf8"));
-    } catch {
-      continue;  // 사용자 파일이 깨져 있으면 건드리지 않는다.
-    }
-    if (pruneRetiredHooks(settings, false, hooksDisabled)) {
-      fs.writeFileSync(target, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
-      console.log(`  - hooks disabled: cleared ${path.join(...rel)}`);
-    }
-  }
-}
 
 
 
@@ -2512,27 +2307,48 @@ function runGates(args) {
 }
 
 function pythonCliEnv() {
-  const root = resolveAgentFlowRoot(process.cwd());
-  const pythonPathEntries = [
-    root ? installedPythonRuntimePath(root) : "",
-    path.join(KIT_ROOT, "src"),
-    process.env.PYTHONPATH,
-  ].filter(Boolean);
+  const env = { ...process.env };
+  delete env.PYTHONHOME;
+  delete env.PYTHONPATH;
+  return env;
+}
+
+function pythonCliInvocation(cwd) {
+  const root = resolveAgentFlowRoot(cwd);
+  if (!root) {
+    throw new Error("agent-flow project root cannot be resolved");
+  }
+  assertPythonRuntimeInstalled(root);
+  const resolvedRoot = fs.realpathSync.native(root);
+  const invocation = sharedHookLauncherInvocation();
   return {
-    ...process.env,
-    PYTHONPATH: [...new Set(pythonPathEntries)].join(path.delimiter),
+    command: invocation.python,
+    args: [
+      "-I",
+      "-c",
+      invocation.bootstrap,
+      "--root",
+      resolvedRoot,
+      "--cli",
+    ],
+    env: pythonCliEnv(),
   };
 }
+
 
 // 판정을 Python에 묻는다. 지문 검증을 두 언어로 구현하면 갈라지고, 갈라진 쪽이
 // 느슨하면 그쪽이 유효한 우회로가 된다.
 function pythonCliOutput(subcommand, args, { cwd = process.cwd() } = {}) {
+  const requestedRoot = cliOptionValue(args, "--root");
+  const invocation = pythonCliInvocation(
+    requestedRoot ? path.resolve(cwd, requestedRoot) : cwd,
+  );
   const result = safeSpawnSync(
-    preferredPython(),
-    ["-m", "agent_flow.cli", subcommand, ...args],
+    invocation.command,
+    [...invocation.args, subcommand, ...args],
     {
       cwd,
-      env: pythonCliEnv(),
+      env: invocation.env,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30000,
@@ -2545,19 +2361,22 @@ function pythonCliOutput(subcommand, args, { cwd = process.cwd() } = {}) {
 }
 
 function runPythonCliCommand(subcommand, args, { interactive = false } = {}) {
-  const env = pythonCliEnv();
+  const requestedRoot = cliOptionValue(args, "--root");
+  const invocation = pythonCliInvocation(
+    requestedRoot ? path.resolve(process.cwd(), requestedRoot) : process.cwd(),
+  );
   // gates는 프로파일 게이트 전체를 순차로 돌린다. 이 저장소에서 가장 비싼 게이트는
   // `pytest -q`로 실측 5분대다. relay용 30초 상한을 걸면 정상 실행이 끝나기 전에
   // 죽는다. 개별 게이트 상한은 Python `--timeout`이 소유하고, wrapper는 그 총량만
   // 감싼다. interactive는 사람이 타이핑하는 동안 기다려야 하므로 상한 자체가 없다.
   const result = safeSpawnSync(
-    preferredPython(),
-    ["-m", "agent_flow.cli", subcommand, ...args],
+    invocation.command,
+    [...invocation.args, subcommand, ...args],
     {
-      // Python CLI는 `--root` 기본값 "."을 여기서 받는다. 그 뒤 leader/git-common
-      // root로 옮겨 가므로 cwd는 최종 기준이 아니라 그 해석의 출발점이다.
+      // runtime 선택은 invocation의 절대 `--root`에 이미 고정됐다. cwd는 Python
+      // subcommand가 상대 사용자 인자를 해석하는 작업 디렉터리로만 넘긴다.
       cwd: process.cwd(),
-      env,
+      env: invocation.env,
       encoding: "utf8",
       // 승인 문구는 사람에게서 직접 받는다. stdin을 끊으면 TTY 검사에서 죽는다.
       // relay로 도는 명령은 반대로 stdin을 끊어야 입력 대기로 멈추지 않는다.
@@ -2571,10 +2390,6 @@ function runPythonCliCommand(subcommand, args, { interactive = false } = {}) {
   process.exit(result.status ?? 1);
 }
 
-function installedPythonRuntimePath(root) {
-  const runtimePath = path.join(root, RUNTIME_PYTHON_RELATIVE);
-  return fs.existsSync(path.join(runtimePath, "agent_flow", "__init__.py")) ? runtimePath : "";
-}
 
 try {
   if (command === "install") {

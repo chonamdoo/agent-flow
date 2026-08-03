@@ -14,12 +14,15 @@ Robustness fixes applied (post-review):
   - create_run produces unique run_ids with a counter suffix when timestamp
     collision occurs (sub-second double-invocation)
 """
+
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import re
 import secrets
+import shutil
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -37,6 +40,7 @@ from agent_flow.core.design_value_check import missing_spec_item_evidence
 from agent_flow.core.skill_resolver import PhaseSkills
 from agent_flow.core.phase_workflow import find_kit_root, load_phase_workflow_definition
 from agent_flow.core.security import validate_safe_name
+from agent_flow.core.runtime_binding import bind_run_runtime, unbind_run_runtime
 from agent_flow.core.worktree_isolation import (
     FileLeaseUnavailable,
     exclusive_file_lease,
@@ -68,10 +72,14 @@ class ActiveRun:
         config_root: Path | None = None,
         project_root: Path | None = None,
     ) -> None:
-        artifacts = sorted(str(p.relative_to(self.path)) for p in self.path.rglob("*") if p.is_file())
+        artifacts = sorted(
+            str(p.relative_to(self.path)) for p in self.path.rglob("*") if p.is_file()
+        )
         meta = read_meta(self.path)
         current_phase = meta.get("current_phase") or "-"
-        artifact_rel, _markers, _skills = _phase_contract(self.path, self.workflow, current_phase)
+        artifact_rel, _markers, _skills = _phase_contract(
+            self.path, self.workflow, current_phase
+        )
         required_artifact = (
             _existing_phase_artifact(self.path, current_phase, artifact_rel)
             if current_phase != "-" and artifact_rel is not None
@@ -113,7 +121,9 @@ class ActiveRun:
             "task": self.task,
             "current_phase": current_phase,
             "reason": reason,
-            "required_artifact": str(required_artifact) if required_artifact is not None else None,
+            "required_artifact": str(required_artifact)
+            if required_artifact is not None
+            else None,
             "next_command": next_command,
             "missing_completion_markers": missing_markers,
         }
@@ -187,6 +197,7 @@ def create_run(
     run_id: str | None = None,
     checkout_identity: str | None = None,
     checkout_registration_identity: str | None = None,
+    hook_runtime_digest: str,
 ) -> Path:
     """Create a new run directory. Refuses if an active run exists."""
     if run_id is not None:
@@ -197,9 +208,7 @@ def create_run(
             checkout_identity.startswith("worktree:")
             and checkout_registration_identity is None
         ):
-            raise ValueError(
-                "worktree checkout registration identity is required"
-            )
+            raise ValueError("worktree checkout registration identity is required")
     if checkout_registration_identity is not None:
         if (
             checkout_identity is None
@@ -211,6 +220,11 @@ def create_run(
             int(checkout_registration_identity, 16)
         except ValueError as exc:
             raise ValueError("invalid checkout registration identity") from exc
+    if (
+        not isinstance(hook_runtime_digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", hook_runtime_digest) is None
+    ):
+        raise ValueError("invalid hook runtime digest")
     runs_dir = project_root / RUNS_DIRNAME
     runs_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -236,32 +250,49 @@ def create_run(
 
             run_path = runs_dir / run_id
             run_path.mkdir()
-            meta = {
-                "run_id": run_id,
-                "workflow": workflow,
-                "task": task,
-                # design-spec.md의 task digest와 대조되는 값. 런 도중 task를 바꿔치기하면
-                # 원장이 가리키는 사용자 지시와 어긋나므로 gate가 막는다.
-                "task_digest": hashlib.sha256(task.strip().encode("utf-8")).hexdigest(),
-                "started_at": now.isoformat(),
-                "current_phase": None,
-                # gate-results.json의 출처 표식. `agent-flow gates`만 이 값을 찍는다.
-                # 손으로 쓴 JSON은 값을 모르므로 green으로 라우팅되지 않는다.
-                # 파일에 있는 값이라 복사는 가능하다 — 적대적 위조가 아니라
-                # "실수로 손으로 쓰는 것"을 막는 층이다.
-                "gate_nonce": secrets.token_hex(16),
-            }
-            if architecture:
-                meta["architecture"] = architecture
-            if checkout_identity is not None:
-                meta["checkout_identity"] = checkout_identity
-            if checkout_registration_identity is not None:
-                meta["checkout_registration_identity"] = (
-                    checkout_registration_identity
-                )
-            write_meta(run_path, meta)
-            (run_path / ACTIVE_MARKER).write_text("")
-            return run_path
+            runtime_bound = False
+            try:
+                meta = {
+                    "run_id": run_id,
+                    "workflow": workflow,
+                    "task": task,
+                    # design-spec.md의 task digest와 대조되는 값. 런 도중 task를 바꿔치기하면
+                    # 원장이 가리키는 사용자 지시와 어긋나므로 gate가 막는다.
+                    "task_digest": hashlib.sha256(task.strip().encode("utf-8")).hexdigest(),
+                    "started_at": now.isoformat(),
+                    "current_phase": None,
+                    # gate-results.json의 출처 표식. `agent-flow gates`만 이 값을 찍는다.
+                    # 손으로 쓴 JSON은 값을 모르므로 green으로 라우팅되지 않는다.
+                    # 파일에 있는 값이라 복사는 가능하다 — 적대적 위조가 아니라
+                    # "실수로 손으로 쓰는 것"을 막는 층이다.
+                    "gate_nonce": secrets.token_hex(16),
+                }
+                if architecture:
+                    meta["architecture"] = architecture
+                if checkout_identity is not None:
+                    meta["checkout_identity"] = checkout_identity
+                if checkout_registration_identity is not None:
+                    meta["checkout_registration_identity"] = checkout_registration_identity
+                write_meta(run_path, meta)
+                bind_run_runtime(run_path, hook_runtime_digest)
+                runtime_bound = True
+                (run_path / ACTIVE_MARKER).write_text("")
+                return run_path
+            except Exception:
+                try:
+                    shutil.rmtree(run_path)
+                except FileNotFoundError:
+                    run_removed = True
+                except Exception:
+                    run_removed = False
+                else:
+                    run_removed = True
+                if runtime_bound and run_removed:
+                    try:
+                        unbind_run_runtime(run_path)
+                    except Exception:
+                        pass
+                raise
     except FileLeaseUnavailable as exc:
         raise ActiveRunExists(
             "another agent-flow run is starting or its lifecycle lock is unsafe; "
@@ -275,7 +306,7 @@ def _validate_checkout_identity(value: str) -> None:
     prefix = "worktree:"
     if not value.startswith(prefix):
         raise ValueError(f"invalid checkout identity: {value!r}")
-    name = value[len(prefix):]
+    name = value[len(prefix) :]
     if (
         not name
         or name in {".", ".."}
@@ -317,6 +348,7 @@ def write_meta(run_path: Path, meta: dict) -> None:
     tmp = target.with_suffix(target.suffix + ".tmp")
     try:
         tmp.write_text(json.dumps(meta, indent=2))
+        os.chmod(tmp, 0o644)
         os.replace(tmp, target)
     except Exception:
         if tmp.exists():
@@ -331,6 +363,7 @@ def mark_inactive(run_path: Path) -> None:
     marker = run_path / ACTIVE_MARKER
     if marker.exists():
         marker.unlink()
+    unbind_run_runtime(run_path)
 
 
 def has_artifact(run_path: Path, phase_id: str) -> bool:
@@ -415,14 +448,20 @@ def _phase_contract(
     project_root = run_path.parents[2] if len(run_path.parents) >= 3 else None
     candidates: list[Path] = []
     if project_root is not None:
-        candidates.append(project_root / ".agent-flow" / "workflows" / f"{workflow}.yaml")
+        candidates.append(
+            project_root / ".agent-flow" / "workflows" / f"{workflow}.yaml"
+        )
     # runner와 같은 kit root를 우선해 phase routing과 marker 검증이 같은 YAML을 본다.
     try:
         candidates.append(find_kit_root() / "workflows" / f"{workflow}.yaml")
     except RuntimeError:
         pass
-    candidates.append(Path(__file__).resolve().parent / "workflows" / f"{workflow}.yaml")
-    candidates.append(Path(__file__).resolve().parents[2] / "workflows" / f"{workflow}.yaml")
+    candidates.append(
+        Path(__file__).resolve().parent / "workflows" / f"{workflow}.yaml"
+    )
+    candidates.append(
+        Path(__file__).resolve().parents[2] / "workflows" / f"{workflow}.yaml"
+    )
     for path in candidates:
         if not path.exists():
             continue
@@ -452,8 +491,14 @@ def _phase_contract(
     return (Path(f"{phase_id}.md") if phase_id != "-" else None, (), None)
 
 
-def _existing_phase_artifact(run_path: Path, phase_id: str, artifact_rel: Path | None) -> Path:
-    artifact = run_path / artifact_rel if artifact_rel is not None else run_path / f"{phase_id}.md"
+def _existing_phase_artifact(
+    run_path: Path, phase_id: str, artifact_rel: Path | None
+) -> Path:
+    artifact = (
+        run_path / artifact_rel
+        if artifact_rel is not None
+        else run_path / f"{phase_id}.md"
+    )
     legacy_artifact = run_path / f"{phase_id}.md"
     if not artifact.exists() and legacy_artifact.exists():
         return legacy_artifact

@@ -1,7 +1,22 @@
 #!/bin/bash
 # agent-flow PreToolUse hook: main/master/develop 브랜치에서 커밋·푸시 차단
-INPUT=$(cat)
-PROTECTED_BRANCH=$(python3 -c "
+INPUT=$(/bin/cat) || {
+  echo "BLOCKED: 보호 브랜치 판정 입력을 읽지 못했습니다." >&2
+  exit 2
+}
+MANAGED_PYTHON="${AGENT_FLOW_MANAGED_PYTHON:-/usr/bin/python3}"
+case "$MANAGED_PYTHON" in
+  /*) ;;
+  *)
+    echo "BLOCKED: 보호 브랜치 판정 Python 경로가 안전하지 않습니다." >&2
+    exit 2
+    ;;
+esac
+if [ ! -x "$MANAGED_PYTHON" ]; then
+  echo "BLOCKED: 보호 브랜치 판정 Python을 실행할 수 없습니다. host session을 다시 시작하세요." >&2
+  exit 2
+fi
+if ! PROTECTED_BRANCH=$("$MANAGED_PYTHON" -I -c "
 import sys, json
 import os
 import re
@@ -76,7 +91,7 @@ def current_branch(global_args, cwd):
     # git이 멈추거나 없을 때 hook이 도구 호출을 무기한 막지 않도록 방어한다.
     try:
         result = subprocess.run(
-            ['git', *global_args, 'branch', '--show-current'],
+            ['/usr/bin/git', *global_args, 'branch', '--show-current'],
             cwd=cwd,
             text=True,
             stdout=subprocess.PIPE,
@@ -120,8 +135,8 @@ def inspect_tokens(tokens, cwd):
             return branch, cwd
     return '', cwd
 
-def classify(command):
-    cwd_stack = [os.getcwd()]
+def classify(command, initial_cwd):
+    cwd_stack = [initial_cwd]
     current = []
     for token in shell_tokens(command):
         if token in ';&|':
@@ -152,8 +167,16 @@ def classify(command):
     return ''
 
 d = json.load(sys.stdin)
-print(classify(command_from(d)))
-" 2>/dev/null <<< "$INPUT")
+initial_cwd = d.get('cwd') if isinstance(d.get('cwd'), str) else ''
+if not initial_cwd or not os.path.isdir(initial_cwd):
+    initial_cwd = os.environ.get('AGENT_FLOW_PROJECT_ROOT', '')
+if not initial_cwd or not os.path.isdir(initial_cwd):
+    initial_cwd = os.getcwd()
+print(classify(command_from(d), initial_cwd))
+" 2>/dev/null <<< "$INPUT"); then
+  echo "BLOCKED: 보호 브랜치 판정기를 실행하지 못했습니다." >&2
+  exit 2
+fi
 
 if [ -z "$PROTECTED_BRANCH" ]; then
   exit 0

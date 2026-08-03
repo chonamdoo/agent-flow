@@ -65,6 +65,7 @@ def _setup(tmp_path: Path):
             f"task-{name}",
             checkout_identity=f"worktree:{status.name}",
             checkout_registration_identity=status.registration_identity,
+            hook_runtime_digest="0" * 64,
         )
         statuses.append(status)
         runs.append(run_dir)
@@ -130,6 +131,17 @@ def _install_tripwire_hook(root: Path) -> Path:
     return hooks
 
 
+def _hook_env(root: Path) -> dict[str, str]:
+    runtime = root / ".agent-flow" / "runtime" / "python"
+    return {
+        **os.environ,
+        "AGENT_FLOW_PROJECT_ROOT": str(root),
+        "AGENT_FLOW_VERIFIED_IMPORT_BOOTSTRAP": (
+            f"import sys\nsys.path.insert(0, {str(runtime)!r})"
+        ),
+    }
+
+
 def test_echo_dollar_home_passes_static_check(tmp_path: Path):
     """$HOME 처럼 변수 확장이 있는 명령은 이제 정적 분석을 통과한다."""
     root, statuses, runs = _setup(tmp_path)
@@ -173,11 +185,8 @@ def test_command_substitution_passes_static_check(tmp_path: Path):
     assert violation is None
 
 
-def test_python_inline_code_passes_static_check(tmp_path: Path):
-    """python3 -c 인라인 코드는 이제 정적 분석을 통과한다.
-
-    실제 쓰기 탐지는 PostToolUse worktree-tripwire.py 가 담당한다.
-    """
+def test_python_inline_code_is_blocked_before_execution(tmp_path: Path):
+    """inline Python은 임의 경로에 쓸 수 있어 정적으로 경계를 증명할 수 없다."""
     root, statuses, runs = _setup(tmp_path)
     first = statuses[0]
     record_host_checkout_binding(_status_payload(root, first, runs[0]), root)
@@ -190,11 +199,12 @@ def test_python_inline_code_passes_static_check(tmp_path: Path):
         root,
     )
 
-    assert violation is None
+    assert violation is not None
+    assert "inline python code cannot be proven" in violation
 
 
-def test_shell_minus_c_passes_static_check(tmp_path: Path):
-    """bash -c 인라인 코드는 이제 정적 분석을 통과한다."""
+def test_shell_inline_code_is_blocked_before_execution(tmp_path: Path):
+    """inline shell도 임의 경로에 쓸 수 있어 정적으로 경계를 증명할 수 없다."""
     root, statuses, runs = _setup(tmp_path)
     first = statuses[0]
     record_host_checkout_binding(_status_payload(root, first, runs[0]), root)
@@ -204,7 +214,8 @@ def test_shell_minus_c_passes_static_check(tmp_path: Path):
         root,
     )
 
-    assert violation is None
+    assert violation is not None
+    assert "inline bash code cannot be proven" in violation
 
 
 def test_tripwire_fires_on_leader_write(tmp_path: Path):
@@ -216,6 +227,7 @@ def test_tripwire_fires_on_leader_write(tmp_path: Path):
     subprocess.run(
         ("/usr/bin/python3", "-I", str(hooks / "bind-host-worktree.py")),
         cwd=root,
+        env=_hook_env(root),
         input=json.dumps(_status_payload(root, statuses[0], runs[0])),
         text=True,
         capture_output=True,
@@ -228,6 +240,7 @@ def test_tripwire_fires_on_leader_write(tmp_path: Path):
     result = subprocess.run(
         ("/usr/bin/python3", "-I", str(hooks / "worktree-tripwire.py")),
         cwd=root,
+        env=_hook_env(root),
         input=json.dumps(
             _command_payload("echo $HOME", cwd=statuses[0].path)
         ),
@@ -248,6 +261,7 @@ def test_tripwire_silent_on_worktree_write(tmp_path: Path):
     subprocess.run(
         ("/usr/bin/python3", "-I", str(hooks / "bind-host-worktree.py")),
         cwd=root,
+        env=_hook_env(root),
         input=json.dumps(_status_payload(root, statuses[0], runs[0])),
         text=True,
         capture_output=True,
@@ -260,6 +274,7 @@ def test_tripwire_silent_on_worktree_write(tmp_path: Path):
     result = subprocess.run(
         ("/usr/bin/python3", "-I", str(hooks / "worktree-tripwire.py")),
         cwd=root,
+        env=_hook_env(root),
         input=json.dumps(
             _command_payload("echo $HOME", cwd=statuses[0].path)
         ),
@@ -279,6 +294,7 @@ def test_tripwire_silent_when_no_binding(tmp_path: Path):
     result = subprocess.run(
         ("/usr/bin/python3", "-I", str(hooks / "worktree-tripwire.py")),
         cwd=root,
+        env=_hook_env(root),
         input=json.dumps(
             _command_payload("echo hello", cwd=root, session="unbound-session")
         ),
@@ -365,6 +381,7 @@ def test_tripwire_ignores_work_that_was_already_in_a_sibling(tmp_path: Path):
     subprocess.run(
         ("/usr/bin/python3", "-I", str(hooks / "bind-host-worktree.py")),
         cwd=root,
+        env=_hook_env(root),
         input=json.dumps(_status_payload(root, statuses[0], runs[0])),
         text=True,
         capture_output=True,
@@ -374,6 +391,7 @@ def test_tripwire_ignores_work_that_was_already_in_a_sibling(tmp_path: Path):
     result = subprocess.run(
         ("/usr/bin/python3", "-I", str(hooks / "worktree-tripwire.py")),
         cwd=root,
+        env=_hook_env(root),
         input=json.dumps(_command_payload("echo $HOME", cwd=statuses[0].path)),
         text=True,
         capture_output=True,

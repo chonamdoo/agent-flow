@@ -93,8 +93,24 @@ DOC_ID_RE = re.compile(r"\b[A-Z]{2,}(?:-[A-Z0-9]+)*-\d{2,}\b")
 # 공개 표준은 문서 번호가 아니라 이름의 일부다.
 DOC_ID_ALLOWED_PREFIXES = frozenset(
     {
-        "UTF", "ISO", "RFC", "SHA", "MD", "AES", "RSA", "HTTP", "IPV", "TLS", "SSL",
-        "PEP", "PKCS", "API", "CVE", "IEEE", "ANSI", "ECMA",
+        "UTF",
+        "ISO",
+        "RFC",
+        "SHA",
+        "MD",
+        "AES",
+        "RSA",
+        "HTTP",
+        "IPV",
+        "TLS",
+        "SSL",
+        "PEP",
+        "PKCS",
+        "API",
+        "CVE",
+        "IEEE",
+        "ANSI",
+        "ECMA",
     }
 )
 
@@ -158,13 +174,18 @@ def main() -> int:
     print("comment-checker: newly added low-value comments detected", file=sys.stderr)
     for file_path, line, text in findings[:20]:
         print(f"- {file_path}:{line}: {text}", file=sys.stderr)
-    print("Keep WHY, constraint, workaround, security, performance, concurrency, or public API comments; remove comments that only restate code.", file=sys.stderr)
+    print(
+        "Keep WHY, constraint, workaround, security, performance, concurrency, or public API comments; remove comments that only restate code.",
+        file=sys.stderr,
+    )
     return 2
 
 
 def check_payload(payload: object) -> Iterable[tuple[str, int, str]]:
     tool = str(find_first(payload, ("tool_name", "tool")) or "")
-    if tool and not re.search(r"(apply_patch|write|edit|multiedit|multi_edit)", tool, re.IGNORECASE):
+    if tool and not re.search(
+        r"(apply_patch|write|edit|multiedit|multi_edit)", tool, re.IGNORECASE
+    ):
         return []
 
     tool_input = find_first(payload, ("tool_input", "input", "parameters"))
@@ -175,7 +196,11 @@ def check_payload(payload: object) -> Iterable[tuple[str, int, str]]:
     if not isinstance(tool_input, dict):
         tool_input = {}
 
-    patch_text = string_value(tool_input.get("command")) or string_value(tool_input.get("patch")) or ""
+    patch_text = (
+        string_value(tool_input.get("command"))
+        or string_value(tool_input.get("patch"))
+        or ""
+    )
     if "*** Begin Patch" in patch_text:
         return check_patch(patch_text)
 
@@ -191,7 +216,9 @@ def check_payload(payload: object) -> Iterable[tuple[str, int, str]]:
 
 
 def check_edit_mapping(tool_input: dict[str, object]) -> list[tuple[str, int, str]]:
-    file_path = string_value(tool_input.get("file_path")) or string_value(tool_input.get("path"))
+    file_path = string_value(tool_input.get("file_path")) or string_value(
+        tool_input.get("path")
+    )
     if not file_path or not should_check_file(file_path):
         return []
 
@@ -201,11 +228,17 @@ def check_edit_mapping(tool_input: dict[str, object]) -> list[tuple[str, int, st
         or string_value(tool_input.get("newStr"))
         or ""
     )
-    old_text = string_value(tool_input.get("old_string")) or string_value(tool_input.get("oldStr")) or ""
+    old_text = (
+        string_value(tool_input.get("old_string"))
+        or string_value(tool_input.get("oldStr"))
+        or ""
+    )
     if not new_text:
         return []
 
-    old_counts = Counter(normalize_comment_text(text) for _, text in comment_lines(old_text, file_path))
+    old_counts = Counter(
+        normalize_comment_text(text) for _, text in comment_lines(old_text, file_path)
+    )
     findings: list[tuple[str, int, str]] = []
     for line, text in comment_lines(new_text, file_path):
         normalized = normalize_comment_text(text)
@@ -367,12 +400,17 @@ def comment_lines(
             else:
                 end += 2
             block_text = text[block_start:end]
-            block_has_allowed_context = bool(ALLOWED_REASON_RE.search(normalize_comment_text(block_text)))
+            block_has_allowed_context = bool(
+                ALLOWED_REASON_RE.search(normalize_comment_text(block_text))
+            )
             for offset, block_part in enumerate(block_text.splitlines()):
                 current_line = block_line + offset
                 if allowed_lines is None or current_line in allowed_lines:
                     cleaned = strip_comment_marker(block_part)
-                    if block_has_allowed_context and not should_check_comment_in_allowed_block(cleaned):
+                    if (
+                        block_has_allowed_context
+                        and not should_check_comment_in_allowed_block(cleaned)
+                    ):
                         continue
                     yield current_line, cleaned
             line += block_text.count("\n")
@@ -382,7 +420,10 @@ def comment_lines(
 
 
 def supports_hash_comments(file_path: str) -> bool:
-    return Path(file_path).suffix.lower() in {".py", ".sh", ".yaml", ".yml"} or not file_path
+    return (
+        Path(file_path).suffix.lower() in {".py", ".sh", ".yaml", ".yml"}
+        or not file_path
+    )
 
 
 def is_regex_start(text: str, index: int, file_path: str) -> bool:
@@ -524,7 +565,9 @@ def should_check_file(file_path: str) -> bool:
 
 
 def is_excluded_path(file_path: str) -> bool:
-    parts = tuple(part.lower() for part in re.split(r"[\\/]+", file_path) if part and part != ".")
+    parts = tuple(
+        part.lower() for part in re.split(r"[\\/]+", file_path) if part and part != "."
+    )
     if EXCLUDED_PATH_PARTS.intersection(parts):
         return True
     if parts and parts[-1] in EXCLUDED_TOOL_MEMORY_NAMES:

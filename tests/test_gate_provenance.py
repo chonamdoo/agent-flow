@@ -34,19 +34,27 @@ FORGED = json.dumps(
 
 
 def test_create_run_mints_a_gate_nonce(tmp_path):
-    run_dir = create_run(tmp_path, "default", "task")
+    run_dir = create_run(
+        tmp_path, "default", "task", hook_runtime_digest="0" * 64
+    )
     nonce = read_meta(run_dir).get("gate_nonce")
     assert isinstance(nonce, str) and len(nonce) >= 32
 
 
 def test_two_runs_get_different_nonces(tmp_path):
-    first = create_run(tmp_path / "a", "default", "task")
-    second = create_run(tmp_path / "b", "default", "task")
+    first = create_run(
+        tmp_path / "a", "default", "task", hook_runtime_digest="0" * 64
+    )
+    second = create_run(
+        tmp_path / "b", "default", "task", hook_runtime_digest="0" * 64
+    )
     assert read_meta(first)["gate_nonce"] != read_meta(second)["gate_nonce"]
 
 
 def test_cli_written_results_carry_the_nonce(tmp_path):
-    run_dir = create_run(tmp_path, "default", "task")
+    run_dir = create_run(
+        tmp_path, "default", "task", hook_runtime_digest="0" * 64
+    )
     path = write_gate_results(
         run_dir=run_dir,
         results=[GateResult("test", ("pytest", "-q"), True, 0, "ok", "")],
@@ -153,7 +161,9 @@ def test_results_without_a_recorded_gate_phase_are_not_blocked():
 
 
 def test_cli_written_results_record_the_gate_phase(tmp_path):
-    run_dir = create_run(tmp_path, "default", "task")
+    run_dir = create_run(
+        tmp_path, "default", "task", hook_runtime_digest="0" * 64
+    )
     path = write_gate_results(
         run_dir=run_dir,
         results=[GateResult("test", ("pytest", "-q"), True, 0, "ok", "")],
@@ -184,7 +194,9 @@ def test_gates_cli_records_the_phase_it_filtered_on(tmp_path, phase, expected_ro
 
     from agent_flow.cli import main
 
-    run_dir = create_run(tmp_path, "default", "task")
+    run_dir = create_run(
+        tmp_path, "default", "task", hook_runtime_digest="0" * 64
+    )
     results = [GateResult("lint", ("ruff", "check", "."), True, 0, "ok", "")]
     with mock.patch("agent_flow.cli.run_gates", return_value=results):
         exit_code = main(
@@ -216,7 +228,9 @@ def test_gates_cli_says_why_a_partial_phase_will_not_pass(capsys, tmp_path):
 
     from agent_flow.cli import main
 
-    run_dir = create_run(tmp_path, "default", "task")
+    run_dir = create_run(
+        tmp_path, "default", "task", hook_runtime_digest="0" * 64
+    )
     results = [GateResult("lint", ("ruff", "check", "."), True, 0, "ok", "")]
     with mock.patch("agent_flow.cli.run_gates", return_value=results):
         main(

@@ -6,13 +6,16 @@ stops instead of silently falling back to the leader checkout. Every
 worker-spawning path shares one audited definition of "isolated" so a single
 missed check cannot leak writes into main.
 """
+
 from __future__ import annotations
 
 import contextlib
 import errno
+
 try:
     import fcntl
 except ModuleNotFoundError:
+
     class _UnavailableFcntl:
         LOCK_SH = LOCK_EX = LOCK_NB = LOCK_UN = 0
 
@@ -39,9 +42,9 @@ from agent_flow.core.commands import run_safe_command
 class WorktreeIsolationError(RuntimeError):
     """An isolation guarantee could not be proven; the caller must fail closed."""
 
+
 class FileLeaseUnavailable(WorktreeIsolationError):
     """A kernel-backed file lease cannot be acquired safely."""
-
 
 
 # git honors these env vars over cwd-based discovery. A worker that inherits any
@@ -108,6 +111,7 @@ class ProviderLease:
     @property
     def active(self) -> bool:
         return self._active
+
     @property
     def process_lifetime_fds(self) -> tuple[int]:
         if not self._active or self._slot_fd < 0:
@@ -116,15 +120,12 @@ class ProviderLease:
             )
         return (self._slot_fd,)
 
-
     def release(self) -> None:
         _release_provider_lease(self)
 
 
 @contextlib.contextmanager
-def provider_lease(
-    root, *, capacity: Optional[int] = None
-) -> Iterator[ProviderLease]:
+def provider_lease(root, *, capacity: Optional[int] = None) -> Iterator[ProviderLease]:
     """Hold one canonical repository slot until the provider tree is finished."""
 
     lease = acquire_provider_lease(root=root, capacity=capacity)
@@ -134,9 +135,7 @@ def provider_lease(
         lease.release()
 
 
-def acquire_provider_lease(
-    *, root, capacity: Optional[int] = None
-) -> ProviderLease:
+def acquire_provider_lease(*, root, capacity: Optional[int] = None) -> ProviderLease:
     """Acquire a non-stale repository-global provider capability.
 
     Slot ownership is a kernel ``flock`` held by this process. A crash releases
@@ -168,9 +167,7 @@ def acquire_provider_lease(
                 candidate_path = _provider_slot_path(registry_dir, candidate)
                 candidate_fd = _open_lock_file(candidate_path, create=True)
                 try:
-                    fcntl.flock(
-                        candidate_fd, fcntl.LOCK_EX | fcntl.LOCK_NB
-                    )
+                    fcntl.flock(candidate_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     _assert_lock_file_binding(candidate_path, candidate_fd)
                 except WorktreeIsolationError:
                     os.close(candidate_fd)
@@ -225,22 +222,14 @@ def acquire_provider_lease(
 def assert_provider_lease(lease: ProviderLease, *, root) -> None:
     """Require a live capability for the same canonical repository."""
 
-    if (
-        not isinstance(lease, ProviderLease)
-        or not lease.active
-        or not lease.capability
-    ):
-        raise ProviderLeaseUnavailable(
-            "a live provider lease capability is required"
-        )
+    if not isinstance(lease, ProviderLease) or not lease.active or not lease.capability:
+        raise ProviderLeaseUnavailable("a live provider lease capability is required")
     key = (
         str(lease.common_dir / _PROVIDER_LEASE_DIR),
         lease.slot,
     )
     with _IN_PROCESS_PROVIDER_LEASES_LOCK:
-        registered = (
-            _IN_PROCESS_PROVIDER_LEASES.get(key) == lease.capability
-        )
+        registered = _IN_PROCESS_PROVIDER_LEASES.get(key) == lease.capability
     if not registered:
         raise ProviderLeaseUnavailable(
             "provider lease capability is not owned by this process"
@@ -385,14 +374,11 @@ def _strict_provider_capacity(value: Optional[int]) -> int:
                 ) from exc
     else:
         if isinstance(value, bool) or not isinstance(value, int):
-            raise WorktreeIsolationError(
-                "provider capacity must be an integer"
-            )
+            raise WorktreeIsolationError("provider capacity must be an integer")
         capacity = value
     if capacity < 1 or capacity > _MAX_PROVIDER_CAPACITY:
         raise WorktreeIsolationError(
-            "provider capacity must be between "
-            f"1 and {_MAX_PROVIDER_CAPACITY}"
+            f"provider capacity must be between 1 and {_MAX_PROVIDER_CAPACITY}"
         )
     return capacity
 
@@ -508,6 +494,7 @@ def _assert_lock_file_binding(path: Path, fd: int) -> None:
             f"repository lease path no longer names the opened lock file: {path}"
         )
 
+
 def _ensure_lease_parent(path: Path) -> None:
     """Create the lease directory chain through the one private-dir creator."""
     target = path.parent
@@ -527,9 +514,7 @@ def exclusive_file_lease(path: Path) -> Iterator[None]:
         _ensure_lease_parent(path)
         fd = _open_lock_file(path, create=True)
     except (OSError, WorktreeIsolationError) as exc:
-        raise FileLeaseUnavailable(
-            f"cannot establish file lease at {path}"
-        ) from exc
+        raise FileLeaseUnavailable(f"cannot establish file lease at {path}") from exc
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -543,9 +528,7 @@ def exclusive_file_lease(path: Path) -> Iterator[None]:
                 raise FileLeaseUnavailable(
                     f"file lease is already held at {path}"
                 ) from exc
-            raise FileLeaseUnavailable(
-                f"cannot acquire file lease at {path}"
-            ) from exc
+            raise FileLeaseUnavailable(f"cannot acquire file lease at {path}") from exc
         yield
     finally:
         try:
@@ -563,9 +546,7 @@ def shared_file_lease(path: Path) -> Iterator[None]:
         _ensure_lease_parent(path)
         fd = _open_lock_file(path, create=True)
     except (OSError, WorktreeIsolationError) as exc:
-        raise FileLeaseUnavailable(
-            f"cannot establish file lease at {path}"
-        ) from exc
+        raise FileLeaseUnavailable(f"cannot establish file lease at {path}") from exc
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
@@ -579,9 +560,7 @@ def shared_file_lease(path: Path) -> Iterator[None]:
                 raise FileLeaseUnavailable(
                     f"file lease is already held exclusively at {path}"
                 ) from exc
-            raise FileLeaseUnavailable(
-                f"cannot acquire file lease at {path}"
-            ) from exc
+            raise FileLeaseUnavailable(f"cannot acquire file lease at {path}") from exc
         yield
     finally:
         try:
@@ -590,7 +569,6 @@ def shared_file_lease(path: Path) -> Iterator[None]:
             pass
         finally:
             os.close(fd)
-
 
 
 def _lock_registry(fd: int) -> None:
@@ -611,9 +589,7 @@ def _lock_registry(fd: int) -> None:
             time.sleep(_LOCK_POLL_S)
 
 
-def _prepare_provider_registry(
-    registry_dir: Path, requested_capacity: int
-) -> None:
+def _prepare_provider_registry(registry_dir: Path, requested_capacity: int) -> None:
     state_path = registry_dir / _PROVIDER_REGISTRY_STATE
     if os.path.lexists(state_path):
         current_capacity = _read_provider_registry_capacity(state_path)
@@ -642,9 +618,7 @@ def _read_provider_registry_capacity(path: Path) -> int:
     nofollow = getattr(os, "O_NOFOLLOW", None)
     cloexec = getattr(os, "O_CLOEXEC", None)
     if nofollow is None or cloexec is None:
-        raise WorktreeIsolationError(
-            "secure provider registry reads are unsupported"
-        )
+        raise WorktreeIsolationError("secure provider registry reads are unsupported")
     fd = os.open(path, os.O_RDONLY | nofollow | cloexec)
     try:
         info = os.fstat(fd)
@@ -663,9 +637,7 @@ def _read_provider_registry_capacity(path: Path) -> int:
         or set(payload) != {"version", "capacity"}
         or payload.get("version") != _PROVIDER_LEASE_VERSION
     ):
-        raise WorktreeIsolationError(
-            "provider lease registry metadata is malformed"
-        )
+        raise WorktreeIsolationError("provider lease registry metadata is malformed")
     capacity = payload.get("capacity")
     if (
         isinstance(capacity, bool)
@@ -673,9 +645,7 @@ def _read_provider_registry_capacity(path: Path) -> int:
         or capacity < 1
         or capacity > _MAX_PROVIDER_CAPACITY
     ):
-        raise WorktreeIsolationError(
-            "provider lease registry capacity is invalid"
-        )
+        raise WorktreeIsolationError("provider lease registry capacity is invalid")
     return capacity
 
 
@@ -684,9 +654,7 @@ def _write_provider_registry_capacity(path: Path, capacity: int) -> None:
         "version": _PROVIDER_LEASE_VERSION,
         "capacity": capacity,
     }
-    fd, raw_temp = tempfile.mkstemp(
-        prefix=".registry-", suffix=".tmp", dir=path.parent
-    )
+    fd, raw_temp = tempfile.mkstemp(prefix=".registry-", suffix=".tmp", dir=path.parent)
     temp_path = Path(raw_temp)
     try:
         os.fchmod(fd, 0o600)
@@ -708,15 +676,10 @@ def _provider_slot_path(registry_dir: Path, slot: int) -> Path:
     return registry_dir / f"slot-{slot:04d}.lock"
 
 
-def _probe_provider_slots(
-    registry_dir: Path, capacity: int
-) -> ProviderLeaseState:
+def _probe_provider_slots(registry_dir: Path, capacity: int) -> ProviderLeaseState:
     registry_key = str(registry_dir)
     with _IN_PROCESS_PROVIDER_LEASES_LOCK:
-        if any(
-            key[0] == registry_key
-            for key in _IN_PROCESS_PROVIDER_LEASES
-        ):
+        if any(key[0] == registry_key for key in _IN_PROCESS_PROVIDER_LEASES):
             return "active"
     locked: list[int] = []
     try:
@@ -792,6 +755,7 @@ def assert_cwd_bound(*, worktree_path, cwd) -> None:
         raise WorktreeIsolationError(
             f"worker cwd {got} is not bound to worktree {want}"
         )
+
 
 def managed_worktree_root(*, root, path) -> Path:
     """Return the exact recognized managed root containing ``path``."""
@@ -897,10 +861,15 @@ def record_adopted_checkout(*, root, name, path, registration_identity) -> Path:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     handle = os.open(staging, flags, 0o600)
     try:
+        os.fchmod(handle, 0o600)
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
             stream.write(f"{payload}\n")
         os.replace(staging, record)
     except BaseException:
+        try:
+            os.close(handle)
+        except OSError:
+            pass
         staging.unlink(missing_ok=True)
         raise
     return record
@@ -971,7 +940,6 @@ def git_toplevel(path) -> Optional[Path]:
     return _git_toplevel(path)
 
 
-
 def _read_stable_regular_text(
     path: Path,
     *,
@@ -979,7 +947,9 @@ def _read_stable_regular_text(
     label: str,
 ) -> str:
     if not hasattr(os, "O_NOFOLLOW"):
-        raise WorktreeIsolationError(f"{label} cannot be opened without no-follow support")
+        raise WorktreeIsolationError(
+            f"{label} cannot be opened without no-follow support"
+        )
     try:
         fd = os.open(
             path,
@@ -1000,7 +970,9 @@ def _read_stable_regular_text(
         or opened.st_nlink != 1
         or len(content) > 4096
     ):
-        raise WorktreeIsolationError(f"{label} identity changed or is not trusted: {path}")
+        raise WorktreeIsolationError(
+            f"{label} identity changed or is not trusted: {path}"
+        )
     return content.decode("utf-8", errors="replace").strip()
 
 
@@ -1063,7 +1035,9 @@ def verify_linked_worktree(
         label="worktree .git pointer",
     )
     if not gitdir_line.startswith("gitdir:"):
-        raise WorktreeIsolationError(f"malformed linked worktree .git pointer: {target}")
+        raise WorktreeIsolationError(
+            f"malformed linked worktree .git pointer: {target}"
+        )
 
     # Same repository: the git common dir seen from the leader and from the
     # worktree must be identical, or the target belongs to another repo.
@@ -1147,7 +1121,9 @@ def assert_worktree_mergeable(*, root, path) -> None:
         "-C", str(target), "rev-parse", "HEAD", cwd=target, optional_locks=False
     )
     if not tip.ok or not tip.stdout.strip():
-        raise _tripwire_git_error(f"cannot resolve worktree HEAD before cleanup: {target}", tip)
+        raise _tripwire_git_error(
+            f"cannot resolve worktree HEAD before cleanup: {target}", tip
+        )
     tip_sha = tip.stdout.strip()
 
     leader_head = _leader_head_sha(root)
@@ -1155,7 +1131,12 @@ def assert_worktree_mergeable(*, root, path) -> None:
         raise WorktreeIsolationError("cannot resolve leader HEAD for merge proof")
 
     ancestor = git_safe(
-        "merge-base", "--is-ancestor", tip_sha, leader_head, cwd=root, optional_locks=False
+        "merge-base",
+        "--is-ancestor",
+        tip_sha,
+        leader_head,
+        cwd=root,
+        optional_locks=False,
     )
     if ancestor.returncode == 1 and not ancestor.stderr.strip():
         # exit 1은 git이 정상 실행되어 "조상이 아니다"라고 답한 것이다. 그 외의
@@ -1189,7 +1170,9 @@ def assert_scopes_isolated(scopes: Sequence[WorkerScope]) -> None:
             a, b = items[i], items[j]
             if a.worker == b.worker:
                 continue
-            if _scopes_overlap(a, b) and not (a.worktree_isolated and b.worktree_isolated):
+            if _scopes_overlap(a, b) and not (
+                a.worktree_isolated and b.worktree_isolated
+            ):
                 raise WorktreeIsolationError(
                     f"overlapping write scope between {a.worker!r} and {b.worker!r} "
                     "requires declared worktree isolation on both"
@@ -1300,10 +1283,10 @@ _STAMP_CHUNK_BYTES = 64 * 1024
 
 @dataclass(frozen=True)
 class LeaderSnapshot:
-    head: str              # git rev-parse HEAD (unborn HEAD fails closed)
-    branch: str            # git rev-parse --abbrev-ref HEAD ("HEAD" when detached)
-    status: str            # normalized git status records, newline joined
-    armed: bool = True     # False면 지킬 leader가 없다(비-git 프로젝트)
+    head: str  # git rev-parse HEAD (unborn HEAD fails closed)
+    branch: str  # git rev-parse --abbrev-ref HEAD ("HEAD" when detached)
+    status: str  # normalized git status records, newline joined
+    armed: bool = True  # False면 지킬 leader가 없다(비-git 프로젝트)
 
     def records(self) -> tuple[str, ...]:
         return tuple(self.status.split("\n")) if self.status else ()
@@ -1399,8 +1382,7 @@ def assert_leader_unchanged(
         + ". Nothing was modified or reverted - the leader is exactly as you left it. "
         "If a worker leaked these writes, move them into the worker checkout and clean "
         "the leader. If they are your own edits, commit or stash them before re-running "
-        "so the tripwire has a stable baseline."
-        + recovery
+        "so the tripwire has a stable baseline." + recovery
     )
 
 
@@ -1439,11 +1421,7 @@ def _snapshot_diff(before: LeaderSnapshot, after: LeaderSnapshot) -> list[str]:
 
 def _leader_status(leader_root, *, include_ignored: bool = True) -> str:
     """Return a content-sensitive snapshot of every non-runtime leader path."""
-    status_args = (
-        ("-uall", "--ignored=traditional")
-        if include_ignored
-        else ("-uall",)
-    )
+    status_args = ("-uall", "--ignored=traditional") if include_ignored else ("-uall",)
     entries = dict(_status_records(leader_root, status_args))
     kept = sorted(
         (record, path)
@@ -1474,14 +1452,8 @@ def _tracked_content_digest(leader_root) -> str:
         "--",
         ".",
         *(f":(exclude){path}" for path in _RUNTIME_WRITE_PATHS),
-        *(
-            f":(glob,exclude){basename}"
-            for basename in _AMBIENT_METADATA_BASENAMES
-        ),
-        *(
-            f":(glob,exclude)**/{basename}"
-            for basename in _AMBIENT_METADATA_BASENAMES
-        ),
+        *(f":(glob,exclude){basename}" for basename in _AMBIENT_METADATA_BASENAMES),
+        *(f":(glob,exclude)**/{basename}" for basename in _AMBIENT_METADATA_BASENAMES),
         cwd=leader_root,
         timeout_s=_TRIPWIRE_TIMEOUT_S,
         optional_locks=False,
@@ -1567,7 +1539,9 @@ def _tripwire_git_error(message: str, result) -> WorktreeIsolationError:
     else:
         cause = f"git exited {result.returncode}"
     detail = result.stderr.strip() or result.error or ""
-    return WorktreeIsolationError(f"{message}: {cause}" + (f": {detail}" if detail else ""))
+    return WorktreeIsolationError(
+        f"{message}: {cause}" + (f": {detail}" if detail else "")
+    )
 
 
 def _status_records(leader_root, extra_args: Sequence[str]) -> list[tuple[str, str]]:
@@ -1766,7 +1740,7 @@ def with_git_lock_retry(
         except Exception as exc:
             last = exc
             if attempt < attempts - 1 and check(exc):
-                time.sleep(base_delay_s * (2 ** attempt))
+                time.sleep(base_delay_s * (2**attempt))
                 continue
             raise
     assert last is not None
@@ -1836,7 +1810,9 @@ def _git_common_dir(path) -> Optional[Path]:
 
 
 def _current_branch(path) -> Optional[str]:
-    result = git_safe("rev-parse", "--abbrev-ref", "HEAD", cwd=path, optional_locks=False)
+    result = git_safe(
+        "rev-parse", "--abbrev-ref", "HEAD", cwd=path, optional_locks=False
+    )
     if not result.ok:
         return None
     return result.stdout.strip() or None
@@ -2000,8 +1976,8 @@ class RegisteredWorktree:
     바꾸면 조회가 깨지지만, git이 보고한 경로는 규칙과 무관하게 항상 맞다.
     """
 
-    path: Path                    # realpath된 절대경로
-    branch: Optional[str]         # 'refs/heads/x' -> 'x'; detached면 None
+    path: Path  # realpath된 절대경로
+    branch: Optional[str]  # 'refs/heads/x' -> 'x'; detached면 None
     head: Optional[str] = None
     bare: bool = False
     locked: bool = False
@@ -2046,7 +2022,9 @@ def registered_worktree_at(root, path) -> Optional[RegisteredWorktree]:
 def _registered_worktree_payload(root) -> str:
     result = git_safe("worktree", "list", "--porcelain", cwd=root, optional_locks=False)
     if not result.ok:
-        raise _tripwire_git_error(f"cannot list registered worktrees for {root}", result)
+        raise _tripwire_git_error(
+            f"cannot list registered worktrees for {root}", result
+        )
     return result.stdout
 
 

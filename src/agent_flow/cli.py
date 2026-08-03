@@ -140,7 +140,9 @@ from agent_flow.core.worktrees import (
 from agent_flow.core.hook_integrity import (
     HookIntegrityError,
     assert_managed_hooks_registered,
+    managed_hook_runtime_digest,
 )
+from agent_flow.core.runtime_binding import unbind_run_runtime
 from agent_flow.core.host_write_boundary import assert_adoption_allowed
 from agent_flow.core.worktree_isolation import (
     WorktreeIsolationError,
@@ -235,7 +237,9 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="reuse the managed worktree inferred from the current directory",
     )
-    start_parser.add_argument("--phase-runner", action="store_true", help=argparse.SUPPRESS)
+    start_parser.add_argument(
+        "--phase-runner", action="store_true", help=argparse.SUPPRESS
+    )
     start_parser.add_argument("--checkout-identity", help=argparse.SUPPRESS)
 
     status_parser = subparsers.add_parser("status")
@@ -273,7 +277,9 @@ def main(argv: list[str] | None = None) -> int:
     detect_parser.add_argument("--root", default=".")
 
     provider_parser = subparsers.add_parser("provider")
-    provider_subparsers = provider_parser.add_subparsers(dest="provider_command", required=True)
+    provider_subparsers = provider_parser.add_subparsers(
+        dest="provider_command", required=True
+    )
     provider_subparsers.add_parser("list")
 
     gates_parser = subparsers.add_parser("gates")
@@ -306,13 +312,17 @@ def main(argv: list[str] | None = None) -> int:
     tools_lint.add_argument("--root", default=".")
 
     workflow_parser = subparsers.add_parser("workflow")
-    workflow_subparsers = workflow_parser.add_subparsers(dest="workflow_command", required=True)
+    workflow_subparsers = workflow_parser.add_subparsers(
+        dest="workflow_command", required=True
+    )
     workflow_export = workflow_subparsers.add_parser("export")
     workflow_export.add_argument("--workflow", default="full-feature")
     workflow_export.add_argument("--format", choices=("json",), default="json")
 
     skills_parser = subparsers.add_parser("skills")
-    skills_subparsers = skills_parser.add_subparsers(dest="skills_command", required=True)
+    skills_subparsers = skills_parser.add_subparsers(
+        dest="skills_command", required=True
+    )
     for name in ("sync", "resolve", "prompt", "markers", "scan", "doctor"):
         sub = skills_subparsers.add_parser(name)
         sub.add_argument("--root", default=".")
@@ -329,7 +339,6 @@ def main(argv: list[str] | None = None) -> int:
             sub.add_argument("--since", type=float, default=None)
         if name == "scan":
             sub.add_argument("--no-write", action="store_true")
-
 
     spec_parser = subparsers.add_parser("spec")
     spec_subparsers = spec_parser.add_subparsers(dest="spec_command", required=True)
@@ -358,7 +367,9 @@ def main(argv: list[str] | None = None) -> int:
     spec_markers.add_argument("--phase", required=True)
     spec_markers.add_argument("--artifact", required=True)
     context_parser = subparsers.add_parser("context")
-    context_subparsers = context_parser.add_subparsers(dest="context_command", required=True)
+    context_subparsers = context_parser.add_subparsers(
+        dest="context_command", required=True
+    )
     context_init = context_subparsers.add_parser("init")
     context_init.add_argument("--root", default=".")
     context_init.add_argument("--run-dir")
@@ -379,7 +390,9 @@ def main(argv: list[str] | None = None) -> int:
     context_write_invariants.add_argument("--root", default=".")
 
     memory_parser = subparsers.add_parser("memory")
-    memory_subparsers = memory_parser.add_subparsers(dest="memory_command", required=True)
+    memory_subparsers = memory_parser.add_subparsers(
+        dest="memory_command", required=True
+    )
     memory_entities = memory_subparsers.add_parser("entities")
     memory_entities.add_argument("--root", default=".")
     memory_entities.add_argument("--dir")
@@ -410,14 +423,18 @@ def main(argv: list[str] | None = None) -> int:
     review_parser.add_argument("--reviews", nargs="+", required=True)
 
     review_command_parser = subparsers.add_parser("review")
-    review_command_subparsers = review_command_parser.add_subparsers(dest="review_command", required=True)
+    review_command_subparsers = review_command_parser.add_subparsers(
+        dest="review_command", required=True
+    )
     review_retry = review_command_subparsers.add_parser("retry")
     review_retry.add_argument("--root", default=".")
     review_retry.add_argument("--reviewer", required=True)
     review_retry.add_argument("--retry-after")
 
     worktree_parser = subparsers.add_parser("worktree")
-    worktree_subparsers = worktree_parser.add_subparsers(dest="worktree_command", required=True)
+    worktree_subparsers = worktree_parser.add_subparsers(
+        dest="worktree_command", required=True
+    )
     worktree_create = worktree_subparsers.add_parser("create")
     worktree_create.add_argument("--root", default=".")
     worktree_create.add_argument("--name", required=True)
@@ -494,7 +511,9 @@ def main(argv: list[str] | None = None) -> int:
     team_approve.add_argument("--team", required=True)
     team_approve.add_argument("--task", required=True)
     team_approve.add_argument("--reviewer", default="lead")
-    team_approve.add_argument("--verdict", choices=("approve", "request-changes"), required=True)
+    team_approve.add_argument(
+        "--verdict", choices=("approve", "request-changes"), required=True
+    )
     team_approve.add_argument("--notes", default="")
     team_worker = team_subparsers.add_parser("worker")
     team_worker.add_argument("--root", default=".")
@@ -505,7 +524,9 @@ def main(argv: list[str] | None = None) -> int:
     team_run_next.add_argument("--root", default=".")
     team_run_next.add_argument("--team", required=True)
     team_run_next.add_argument("--worker", required=True)
-    team_run_next.add_argument("--command", dest="command_argv", nargs=argparse.REMAINDER, required=True)
+    team_run_next.add_argument(
+        "--command", dest="command_argv", nargs=argparse.REMAINDER, required=True
+    )
     team_claim = team_subparsers.add_parser("claim")
     team_claim.add_argument("--root", default=".")
     team_claim.add_argument("--team", required=True)
@@ -614,18 +635,18 @@ def main(argv: list[str] | None = None) -> int:
                     "cannot prove the inferred worktree registration before "
                     "requesting reuse consent"
                 )
-            inferred_registration_identity = (
-                inferred_status.registration_identity
-            )
+            inferred_registration_identity = inferred_status.registration_identity
         except (OSError, ValueError, RuntimeError) as exc:
             print(_format_cli_error(exc), file=sys.stderr)
             return 2
-    if inferred_worktree is not None and hasattr(args, "worktree") and args.worktree is None:
+    if (
+        inferred_worktree is not None
+        and hasattr(args, "worktree")
+        and args.worktree is None
+    ):
         args.worktree = inferred_worktree
     reuse_entry_commands = {"run", "start"}
-    reuse_preapproved = bool(
-        getattr(args, "reuse_existing_worktree", False)
-    )
+    reuse_preapproved = bool(getattr(args, "reuse_existing_worktree", False))
     if (
         args.command in reuse_entry_commands
         and reuse_preapproved
@@ -653,7 +674,6 @@ def main(argv: list[str] | None = None) -> int:
     # 사용자는 kit을 올린 뒤에도 낡은 설치본을 끝까지 못 본다.
     if args.command in _KIT_FRESHNESS_COMMANDS:
         warn_if_installed_kit_is_stale(root, _find_kit_root())
-
 
     if args.command == "init":
         init_project(root)
@@ -698,7 +718,12 @@ def main(argv: list[str] | None = None) -> int:
                     allow_dirty=args.allow_dirty,
                     expected_registration_identity=inferred_registration_identity,
                 )
-            except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
+            except (
+                OSError,
+                ValueError,
+                RuntimeError,
+                subprocess.CalledProcessError,
+            ) as exc:
                 print(_format_cli_error(exc), file=sys.stderr)
                 return 2
             print(f"worktree: {worktree_status.name} {worktree_status.path}")
@@ -708,10 +733,7 @@ def main(argv: list[str] | None = None) -> int:
         if active is not None:
             print(f"already active: {active.run_id} (task: {active.task!r})")
             if worktree_name is None and repo_state == "repo":
-                print(
-                    "parallel worktree run: "
-                    'agent-flow run "<task>"'
-                )
+                print('parallel worktree run: agent-flow run "<task>"')
             return 2
         try:
             Runner(
@@ -721,7 +743,10 @@ def main(argv: list[str] | None = None) -> int:
                 workflow=args.workflow,
                 architecture=args.architecture,
                 next_command=_continue_command(
-                    root, worktree_status.name if worktree_status is not None else worktree_name
+                    root,
+                    worktree_status.name
+                    if worktree_status is not None
+                    else worktree_name,
                 ),
                 checkout_identity=_checkout_identity(
                     worktree_status.name if worktree_status is not None else None
@@ -735,7 +760,13 @@ def main(argv: list[str] | None = None) -> int:
                 mode=ResumeMode.START,
                 task=args.task,
             )
-        except (OSError, ValueError, RuntimeError, KeyError, subprocess.CalledProcessError) as exc:
+        except (
+            OSError,
+            ValueError,
+            RuntimeError,
+            KeyError,
+            subprocess.CalledProcessError,
+        ) as exc:
             if worktree_status is not None and not worktree_preexisting:
                 _cleanup_worktree_after_failure(root, worktree_status, exc)
             else:
@@ -762,8 +793,10 @@ def main(argv: list[str] | None = None) -> int:
             else None
         )
         active = find_active_run(state_root)
-        resume_run_dir = active.path if active is not None else (
-            pending_cleanup.run_dir if pending_cleanup is not None else None
+        resume_run_dir = (
+            active.path
+            if active is not None
+            else (pending_cleanup.run_dir if pending_cleanup is not None else None)
         )
         if resume_run_dir is None:
             if _legacy_js_state_exists(root):
@@ -785,7 +818,13 @@ def main(argv: list[str] | None = None) -> int:
                 config_root=root,
                 next_command=_continue_command(root, args.worktree),
             ).run(mode=ResumeMode.RESUME)
-        except (OSError, ValueError, RuntimeError, KeyError, subprocess.CalledProcessError) as exc:
+        except (
+            OSError,
+            ValueError,
+            RuntimeError,
+            KeyError,
+            subprocess.CalledProcessError,
+        ) as exc:
             # `run`과 같은 처리다. tripwire가 raise하면 traceback 대신 사유를
             # 보여야 사용자가 다음 수를 안다.
             print(_format_cli_error(exc), file=sys.stderr)
@@ -794,7 +833,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "abort":
         try:
-            run_root, state_root = _worktree_context(root, args.worktree) if args.worktree else (root, root)
+            run_root, state_root = (
+                _worktree_context(root, args.worktree)
+                if args.worktree
+                else (root, root)
+            )
         except ValueError as exc:
             print(_format_cli_error(exc), file=sys.stderr)
             return 2
@@ -898,7 +941,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if snapshot.status == "error" else 0
 
     if args.command == "gates":
-        command_root = _command_project_root(root, requested_root, getattr(args, "worktree", None))
+        command_root = _command_project_root(
+            root, requested_root, getattr(args, "worktree", None)
+        )
         if command_root is None:
             return 1
         try:
@@ -925,7 +970,8 @@ def main(argv: list[str] | None = None) -> int:
             # 때문에 잃지 않도록 필요한 때만 계산한다.
             run_base = (
                 worktree_runtime_root(root=root, name=args.worktree)
-                if getattr(args, "worktree", None) and not Path(args.run_dir).is_absolute()
+                if getattr(args, "worktree", None)
+                and not Path(args.run_dir).is_absolute()
                 else root
             )
             write_gate_results(
@@ -954,7 +1000,9 @@ def main(argv: list[str] | None = None) -> int:
                 f"({len(results) - len(failed)}/{len(results)} total gates passed)"
             )
         else:
-            print(f"{','.join(profile_ids)}: {len(results) - len(failed)}/{len(results)} gates passed")
+            print(
+                f"{','.join(profile_ids)}: {len(results) - len(failed)}/{len(results)} gates passed"
+            )
         timed_out = [result for result in results if result.timed_out]
         if timed_out:
             # 검증이 끊긴 것을 성공으로 돌려주면 exit code를 읽는 shell/CI가
@@ -968,7 +1016,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if failed_required else 0
 
     if args.command == "architecture-lint":
-        command_root = _command_project_root(root, requested_root, getattr(args, "worktree", None))
+        command_root = _command_project_root(
+            root, requested_root, getattr(args, "worktree", None)
+        )
         if command_root is None:
             return 1
         try:
@@ -992,7 +1042,9 @@ def main(argv: list[str] | None = None) -> int:
         return architecture_lint_main(lint_args)
 
     if args.command == "eval":
-        fixture_path = _resolve_project_path(root, args.fixtures) if args.fixtures else None
+        fixture_path = (
+            _resolve_project_path(root, args.fixtures) if args.fixtures else None
+        )
         run_dir = _resolve_project_path(root, args.run_dir) if args.run_dir else None
         results = run_eval(
             root=root,
@@ -1020,11 +1072,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "workflow":
         if args.workflow_command == "export":
             try:
-                definition = load_phase_workflow_definition(_find_kit_root(), args.workflow)
+                definition = load_phase_workflow_definition(
+                    _find_kit_root(), args.workflow
+                )
             except (OSError, ValueError) as exc:
                 print(str(exc), file=sys.stderr)
                 return 2
-            print(json.dumps(definition.to_json_dict(), ensure_ascii=False, sort_keys=True))
+            print(
+                json.dumps(
+                    definition.to_json_dict(), ensure_ascii=False, sort_keys=True
+                )
+            )
             return 0
 
     if args.command == "spec":
@@ -1090,7 +1148,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if args.command == "context":
-        run_dir = _resolve_project_path(root, args.run_dir) if getattr(args, "run_dir", None) else None
+        run_dir = (
+            _resolve_project_path(root, args.run_dir)
+            if getattr(args, "run_dir", None)
+            else None
+        )
         if args.context_command == "init":
             print(ensure_context_contract(root=root, run_dir=run_dir))
             return 0
@@ -1103,10 +1165,18 @@ def main(argv: list[str] | None = None) -> int:
             if not isinstance(details, dict):
                 print("details JSON must be an object", file=sys.stderr)
                 return 2
-            print(append_context_event(root=root, run_dir=run_dir, event=args.event, details=details))
+            print(
+                append_context_event(
+                    root=root, run_dir=run_dir, event=args.event, details=details
+                )
+            )
             return 0
         if args.context_command == "offload":
-            print(offload_tool_output(root=root, run_dir=run_dir, name=args.name, content=args.content))
+            print(
+                offload_tool_output(
+                    root=root, run_dir=run_dir, name=args.name, content=args.content
+                )
+            )
             return 0
         if args.context_command == "check-invariants":
             failures = check_system_invariants(root=root, run_dir=run_dir)
@@ -1129,7 +1199,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "memory":
         if args.memory_command == "entities":
-            memory_dir = _resolve_project_path(root, args.dir) if args.dir else root / ".agent-flow" / "memory" / "entities"
+            memory_dir = (
+                _resolve_project_path(root, args.dir)
+                if args.dir
+                else root / ".agent-flow" / "memory" / "entities"
+            )
             index = EntityMemoryIndex.load(memory_dir)
             print(
                 f"entities: {len(index.entries)} entries "
@@ -1202,9 +1276,16 @@ def main(argv: list[str] | None = None) -> int:
         if args.worktree_command == "create":
             try:
                 plan = plan_worktree(root=root, name=args.name, branch=args.branch)
-                status = create_worktree(root=root, plan=plan, allow_dirty=args.allow_dirty)
+                status = create_worktree(
+                    root=root, plan=plan, allow_dirty=args.allow_dirty
+                )
                 _apply_worktree_setup(root=root, checkout=status.path)
-            except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
+            except (
+                OSError,
+                ValueError,
+                RuntimeError,
+                subprocess.CalledProcessError,
+            ) as exc:
                 print(_format_cli_error(exc), file=sys.stderr)
                 return 2
             print(f"{status.name} {status.branch} {status.path}")
@@ -1291,8 +1372,12 @@ def main(argv: list[str] | None = None) -> int:
                         rows.append(f"{name} - {path} stale")
                 else:
                     if worktree_path_key(status.path) not in listed:
-                        state = "exists" if _worktree_checkout_exists(status) else "stale"
-                        rows.append(f"{status.name} {status.branch} {status.path} {state}")
+                        state = (
+                            "exists" if _worktree_checkout_exists(status) else "stale"
+                        )
+                        rows.append(
+                            f"{status.name} {status.branch} {status.path} {state}"
+                        )
             if not rows:
                 print("no worktrees")
                 return 0
@@ -1338,7 +1423,9 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"removed stale metadata {status.name}; kept path {status.path}")
             else:
                 print(f"removed stale metadata {status.name} {status.path}")
-            if not args.keep_branch and worktree_branch_exists(root=root, branch=status.branch):
+            if not args.keep_branch and worktree_branch_exists(
+                root=root, branch=status.branch
+            ):
                 # agent-flow가 만든 브랜치라는 증거가 없어 남긴 경우다. 조용히 두면
                 # 사용자는 정리가 끝난 줄 안다.
                 print(f"kept branch {status.branch}")
@@ -1348,7 +1435,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.team_command == "list":
             teams = list_teams(root=root)
             for team in teams:
-                print(f"{team.name} tasks={team.task_count} workers={team.worker_count} path={team.path}")
+                print(
+                    f"{team.name} tasks={team.task_count} workers={team.worker_count} path={team.path}"
+                )
             return 0
         if args.team_command == "archive":
             archive = archive_team(root=root, team_name=args.team, reason=args.reason)
@@ -1357,13 +1446,20 @@ def main(argv: list[str] | None = None) -> int:
         if args.team_command == "archive-list":
             archives = list_team_archives(root=root)
             for archive in archives:
-                print(f"{archive.name} archived_at={archive.archived_at} reason={archive.reason} path={archive.archive_path}")
+                print(
+                    f"{archive.name} archived_at={archive.archived_at} reason={archive.reason} path={archive.archive_path}"
+                )
             return 0
         if args.team_command == "archive-restore":
             try:
-                archive = restore_team_archive(root=root, archive_path=Path(args.archive_path))
+                archive = restore_team_archive(
+                    root=root, archive_path=Path(args.archive_path)
+                )
             except Exception as exc:
-                summary = {"valid": False, "errors": [f"cannot restore team archive: {exc}"]}
+                summary = {
+                    "valid": False,
+                    "errors": [f"cannot restore team archive: {exc}"],
+                }
                 report_error = _write_import_report(args.report, summary)
                 if report_error is not None:
                     print(report_error)
@@ -1386,7 +1482,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.team_command == "init":
             config = init_team(root=root, name=args.name, description=args.description)
-            print(f"{config.name} {root / '.agent-flow' / 'state' / 'team' / config.name}")
+            print(
+                f"{config.name} {root / '.agent-flow' / 'state' / 'team' / config.name}"
+            )
             return 0
         if args.team_command == "task":
             task = add_task(
@@ -1418,7 +1516,9 @@ def main(argv: list[str] | None = None) -> int:
                 reviewer=args.reviewer,
                 write_scope=args.write_scope,
             )
-            print(f"{approval.task_id} approved-worker {approval.worker} {approval.write_scope}")
+            print(
+                f"{approval.task_id} approved-worker {approval.worker} {approval.write_scope}"
+            )
             return 0
         if args.team_command == "result":
             result = write_worker_result(
@@ -1442,7 +1542,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{approval.task_id} {approval.verdict} {approval.reviewer}")
             return 0
         if args.team_command == "worker":
-            worker = add_worker(root=root, team_name=args.team, worker_name=args.name, role=args.role)
+            worker = add_worker(
+                root=root, team_name=args.team, worker_name=args.name, role=args.role
+            )
             print(f"{worker.name} {worker.role} {worker.status}")
             return 0
         if args.team_command == "run-next":
@@ -1450,7 +1552,9 @@ def main(argv: list[str] | None = None) -> int:
                 print("command is required")
                 return 1
             status = team_status(root=root, team_name=args.team, detail=True)
-            pending = next((task for task in status["tasks"] if task.status == "pending"), None)
+            pending = next(
+                (task for task in status["tasks"] if task.status == "pending"), None
+            )
             if pending is None:
                 print("no pending task")
                 return 1
@@ -1589,8 +1693,7 @@ def main(argv: list[str] | None = None) -> int:
                             result=output,
                         )
                     print(
-                        f"{task.task_id} {task.status} "
-                        f"worktree={worktree_status.path}"
+                        f"{task.task_id} {task.status} worktree={worktree_status.path}"
                     )
                     return 1 if result.failed else 0
             except (
@@ -1664,7 +1767,9 @@ def main(argv: list[str] | None = None) -> int:
             )
             for message in messages:
                 state = "read" if message.read else "unread"
-                print(f"{message.message_id} {message.from_actor} {state} {message.body}")
+                print(
+                    f"{message.message_id} {message.from_actor} {state} {message.body}"
+                )
             return 0
         if args.team_command == "mark-read":
             message = mark_message_read(
@@ -1684,7 +1789,9 @@ def main(argv: list[str] | None = None) -> int:
                 alive=not args.dead,
             )
             state = "alive" if heartbeat.alive else "dead"
-            print(f"{heartbeat.worker} {heartbeat.status} {state} {heartbeat.updated_at}")
+            print(
+                f"{heartbeat.worker} {heartbeat.status} {state} {heartbeat.updated_at}"
+            )
             return 0
         if args.team_command == "shutdown":
             signal = request_shutdown(
@@ -1712,24 +1819,44 @@ def main(argv: list[str] | None = None) -> int:
             )
             for heartbeat in status["heartbeats"]:
                 state = "alive" if heartbeat.alive else "dead"
-                print(f"{heartbeat.worker} {heartbeat.status} {state} {heartbeat.updated_at}")
+                print(
+                    f"{heartbeat.worker} {heartbeat.status} {state} {heartbeat.updated_at}"
+                )
             if args.detail:
                 for task in status["tasks"]:
                     owner = task.owner or "-"
-                    print(f"task {task.task_id} {task.status} owner={owner} subject={task.subject}")
+                    print(
+                        f"task {task.task_id} {task.status} owner={owner} subject={task.subject}"
+                    )
                 unread_counts = status["unread_counts"]
                 for worker in status["workers"]:
                     unread = unread_counts.get(worker.name, 0)
-                    print(f"worker {worker.name} role={worker.role} status={worker.status} unread={unread}")
+                    print(
+                        f"worker {worker.name} role={worker.role} status={worker.status} unread={unread}"
+                    )
                 for signal in status["shutdowns"]:
                     state = "acknowledged" if signal.acknowledged else "pending"
-                    print(f"shutdown {signal.signal_id} worker={signal.worker} {state} reason={signal.reason}")
+                    print(
+                        f"shutdown {signal.signal_id} worker={signal.worker} {state} reason={signal.reason}"
+                    )
             return 0
         if args.team_command == "export":
-            print(json.dumps(export_team_state(root=root, team_name=args.team), indent=2, sort_keys=True))
+            print(
+                json.dumps(
+                    export_team_state(root=root, team_name=args.team),
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
             return 0
         if args.team_command == "archive-export":
-            print(json.dumps(export_team_archive(archive_path=Path(args.archive_path)), indent=2, sort_keys=True))
+            print(
+                json.dumps(
+                    export_team_archive(archive_path=Path(args.archive_path)),
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
             return 0
         if args.team_command == "import-validate":
             payload = _read_json_file(args.file)
@@ -1746,7 +1873,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.team_command == "import-dry-run":
             payload = _read_json_file(args.file)
             if isinstance(payload, str):
-                report_error = _write_import_report(args.report, {"valid": False, "errors": [payload]})
+                report_error = _write_import_report(
+                    args.report, {"valid": False, "errors": [payload]}
+                )
                 if report_error is not None:
                     print(report_error)
                     return 1
@@ -1774,7 +1903,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.team_command == "import-apply":
             payload = _read_json_file(args.file)
             if isinstance(payload, str):
-                report_error = _write_import_report(args.report, {"valid": False, "errors": [payload]})
+                report_error = _write_import_report(
+                    args.report, {"valid": False, "errors": [payload]}
+                )
                 if report_error is not None:
                     print(report_error)
                     return 1
@@ -1817,6 +1948,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         try:
             assert_managed_hooks_registered(root)
+            hook_runtime_digest = managed_hook_runtime_digest(root)
         except HookIntegrityError as exc:
             print(_format_cli_error(exc), file=sys.stderr)
             return 2
@@ -1832,9 +1964,7 @@ def main(argv: list[str] | None = None) -> int:
                 _assert_entry_checkout_identity(
                     root=root,
                     worktree=None if implicit_phase_worktree else worktree_name,
-                    branch=(
-                        None if implicit_phase_worktree else args.worktree_branch
-                    ),
+                    branch=(None if implicit_phase_worktree else args.worktree_branch),
                     claimed=args.checkout_identity,
                 )
             except (OSError, ValueError, RuntimeError) as exc:
@@ -1872,9 +2002,7 @@ def main(argv: list[str] | None = None) -> int:
                     raise ValueError(
                         "checkout identity changed during worktree resolution; refusing to start"
                     )
-                run_root = (
-                    worktree_status.path if worktree_status is not None else root
-                )
+                run_root = worktree_status.path if worktree_status is not None else root
                 Runner(
                     run_root,
                     state_root=state_root,
@@ -1883,9 +2011,7 @@ def main(argv: list[str] | None = None) -> int:
                     architecture=args.architecture,
                     next_command=_continue_command(
                         root,
-                        worktree_status.name
-                        if worktree_status is not None
-                        else None,
+                        worktree_status.name if worktree_status is not None else None,
                     ),
                     requested_run_id=args.run_id,
                     checkout_identity=actual_identity,
@@ -1916,6 +2042,7 @@ def main(argv: list[str] | None = None) -> int:
                         task=args.task,
                         adapter=adapter,
                         profile=profile,
+                        hook_runtime_digest=hook_runtime_digest,
                         architecture=args.architecture,
                         run_id=args.run_id,
                         worktree=worktree,
@@ -1930,8 +2057,8 @@ def main(argv: list[str] | None = None) -> int:
             KeyError,
             subprocess.CalledProcessError,
         ) as exc:
-            if state is not None and state.run_dir.exists():
-                shutil.rmtree(state.run_dir)
+            if state is not None:
+                _rollback_started_run(state)
             if worktree_status is not None and not worktree_preexisting:
                 _cleanup_worktree_after_failure(root, worktree_status, exc)
             else:
@@ -1941,6 +2068,19 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     return 1
+
+
+def _rollback_started_run(state: RunState) -> None:
+    try:
+        shutil.rmtree(state.run_dir)
+    except FileNotFoundError:
+        pass
+    except Exception:
+        return
+    try:
+        unbind_run_runtime(state.run_dir)
+    except Exception:
+        pass
 
 
 def _write_stage_prompts(*, root: Path, state: RunState, workflow) -> None:
@@ -1983,7 +2123,9 @@ def _write_import_report(path: str | None, report: dict[str, object]) -> str | N
     report_path = Path(path)
     try:
         report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text(f"{json.dumps(report, indent=2, sort_keys=True)}\n", encoding="utf-8")
+        report_path.write_text(
+            f"{json.dumps(report, indent=2, sort_keys=True)}\n", encoding="utf-8"
+        )
     except OSError as exc:
         return f"cannot write import report: {exc}"
     return None
@@ -2000,7 +2142,9 @@ def _team_run_next_prompt(
 ) -> str | None:
     safe_team = safe_team_name(team_name)
     safe_worker = safe_worker_name(worker_name)
-    contract_dir = root / ".agent-flow" / "state" / "team" / safe_team / "tasks" / task_id
+    contract_dir = (
+        root / ".agent-flow" / "state" / "team" / safe_team / "tasks" / task_id
+    )
     approvals_path = contract_dir / "workers_approved.json"
     brief_path = contract_dir / "worker-brief.md"
     if not approvals_path.exists() or not brief_path.exists():
@@ -2068,7 +2212,11 @@ def _profile_gate_commands(
                 profile_root=root,
             )
             required = gate.required
-            gate_id = f"{profile.profile_id}:{gate.gate_id}" if multi_profile else gate.gate_id
+            gate_id = (
+                f"{profile.profile_id}:{gate.gate_id}"
+                if multi_profile
+                else gate.gate_id
+            )
             if multi_profile and _is_architecture_lint_gate(gate.gate_id, gate.command):
                 if architecture_lint_added:
                     continue
@@ -2140,9 +2288,14 @@ def _gate_order_key(gate: GateCommand) -> tuple[int, int, str]:
     lowered = f"{gate_id} {command}".lower()
     if any(token in lowered for token in ("build", "assemble", "xcodebuild")):
         return (0, _profile_gate_kind_tiebreaker(lowered), gate_id)
-    if any(token in lowered for token in ("typecheck", "tsc", "mypy", "pyright", "type ")):
+    if any(
+        token in lowered for token in ("typecheck", "tsc", "mypy", "pyright", "type ")
+    ):
         return (1, _profile_gate_kind_tiebreaker(lowered), gate_id)
-    if any(token in lowered for token in ("lint", "ruff", "detekt", "ktlint", "architecture-lint")):
+    if any(
+        token in lowered
+        for token in ("lint", "ruff", "detekt", "ktlint", "architecture-lint")
+    ):
         return (2, _profile_gate_kind_tiebreaker(lowered), gate_id)
     if "test" in lowered or "pytest" in lowered:
         return (3, _profile_gate_kind_tiebreaker(lowered), gate_id)
@@ -2160,7 +2313,12 @@ def _profile_gate_kind_tiebreaker(text: str) -> int:
 def _resolve_run_dir(root: Path, value: str | None) -> Path | None:
     run_dir = _resolve_project_path(root, value) if value else _latest_run_dir(root)
     if run_dir is None:
-        print("no runs" if value is None else f"run dir not found: {_resolve_project_path(root, value)}", file=sys.stderr)
+        print(
+            "no runs"
+            if value is None
+            else f"run dir not found: {_resolve_project_path(root, value)}",
+            file=sys.stderr,
+        )
         return None
     if not run_dir.is_dir():
         print(f"run dir not found: {run_dir}", file=sys.stderr)
@@ -2174,7 +2332,9 @@ def _worktree_root(root: Path, name: str) -> Path | None:
         return status.path
     known = _known_worktree_names(root)
     suffix = f" known worktrees: {', '.join(known)}" if known else " no known worktrees"
-    print(f"worktree not found or missing path: {status.name}.{suffix}", file=sys.stderr)
+    print(
+        f"worktree not found or missing path: {status.name}.{suffix}", file=sys.stderr
+    )
     return None
 
 
@@ -2198,7 +2358,9 @@ def _worktree_context(
         return status.path, worktree_runtime_root(root=root, name=status.name)
     known = _known_worktree_names(root)
     suffix = f" known worktrees: {', '.join(known)}" if known else " no known worktrees"
-    print(f"worktree not found or missing path: {status.name}.{suffix}", file=sys.stderr)
+    print(
+        f"worktree not found or missing path: {status.name}.{suffix}", file=sys.stderr
+    )
     return None, worktree_runtime_root(root=root, name=status.name)
 
 
@@ -2219,9 +2381,7 @@ def _confirm_inferred_worktree_reuse(
         )
         return False
     try:
-        answer = input(
-            f"Existing worktree detected: {name} ({path}). Reuse it? [y/N] "
-        )
+        answer = input(f"Existing worktree detected: {name} ({path}). Reuse it? [y/N] ")
     except EOFError:
         answer = ""
     if answer.strip().lower() in {"y", "yes"}:
@@ -2253,7 +2413,7 @@ def _slug_naming_for_active_host(root: Path) -> tuple[list[str], int]:
     if isinstance(nested, list):
         sources.extend(item for item in nested if isinstance(item, dict))
     for source in sources:
-        naming = ((source.get("branching") or {}).get("naming") or {})
+        naming = (source.get("branching") or {}).get("naming") or {}
         declared = (naming.get("slug_command") or {}).get(host)
         if isinstance(declared, list) and declared:
             limit = naming.get("max_slug_length")
@@ -2380,7 +2540,9 @@ def _warn_if_cwd_is_other_checkout(*, root: Path, target: Path) -> None:
     )
 
 
-def _command_project_root(config_root: Path, requested_root: Path, worktree: str | None) -> Path | None:
+def _command_project_root(
+    config_root: Path, requested_root: Path, worktree: str | None
+) -> Path | None:
     if worktree is None:
         return config_root
     managed = _managed_worktree_context(requested_root)
@@ -2392,7 +2554,9 @@ def _command_project_root(config_root: Path, requested_root: Path, worktree: str
     return _worktree_root(config_root, worktree)
 
 
-def _profile_source_root(config_root: Path, requested_root: Path, worktree: str | None) -> Path:
+def _profile_source_root(
+    config_root: Path, requested_root: Path, worktree: str | None
+) -> Path:
     if worktree is None:
         return config_root
     managed = _managed_worktree_context(requested_root)
@@ -2559,7 +2723,10 @@ def _apply_worktree_setup(*, root: Path, checkout: Path) -> None:
         _profile_id, profile = _load_profile(_find_kit_root(), root)
         declared = _declared_worktree_copies(profile)
     except Exception as exc:  # profile 해석 실패가 worktree 생성을 막을 이유는 없다
-        print(f"warning: skipped worktree setup: {_format_cli_error(exc)}", file=sys.stderr)
+        print(
+            f"warning: skipped worktree setup: {_format_cli_error(exc)}",
+            file=sys.stderr,
+        )
         return
     # 복사와 동작은 서로 독립이다. 한쪽이 실패했다고 다른 쪽을 건너뛰면 선언한
     # 동작이 조용히 빠진다.
@@ -2594,7 +2761,7 @@ def _declared_worktree_actions(profile: dict) -> dict:
         sources.extend(item for item in nested if isinstance(item, dict))
     actions: dict = {}
     for source in sources:
-        setup = ((source.get("branching") or {}).get("worktree_setup") or {})
+        setup = (source.get("branching") or {}).get("worktree_setup") or {}
         if not isinstance(setup, dict):
             continue
         for key, value in setup.items():
@@ -2627,7 +2794,9 @@ def _run_worktree_setup_actions(*, root: Path, checkout: Path, profile: dict) ->
         print(f"worktree setup ran: {', '.join(ran)}")
 
 
-def _cleanup_worktree_after_failure(root: Path, status, original: BaseException) -> None:
+def _cleanup_worktree_after_failure(
+    root: Path, status, original: BaseException
+) -> None:
     if _keep_failed_worktree():
         # 왜 남았는지 말하지 않으면 유출과 구분되지 않는다.
         print(
@@ -2734,8 +2903,6 @@ def _print_legacy_js_state_migration(root: Path) -> None:
     )
 
 
-
-
 def _resolve_cli_root_context(
     root: Path, worktree: str | None
 ) -> tuple[Path, str | None, Path | None]:
@@ -2749,7 +2916,9 @@ def _resolve_cli_root_context(
         leader_root, inferred_worktree = managed
         return leader_root, worktree or inferred_worktree, None
     cwd_managed = _managed_worktree_context(Path.cwd())
-    if cwd_managed is not None and (_same_path(root, Path.cwd()) or _same_path(root, cwd_managed[0])):
+    if cwd_managed is not None and (
+        _same_path(root, Path.cwd()) or _same_path(root, cwd_managed[0])
+    ):
         leader_root, inferred_worktree = cwd_managed
         return leader_root, worktree or inferred_worktree, None
     cwd_leader = leader_root_for(Path.cwd())
@@ -2834,7 +3003,9 @@ def _managed_worktree_context(path: Path) -> tuple[Path, str | None] | None:
         if parts[index] not in markers or parts[index + 1] != "worktrees":
             continue
         root = Path(*parts[:index])
-        if parts[index] in {".codex", ".Codex", ".omp"} and _same_path(root, _home_path()):
+        if parts[index] in {".codex", ".Codex", ".omp"} and _same_path(
+            root, _home_path()
+        ):
             continue
         # `<marker>/worktrees`로 끝나는 경로에는 이름이 없다. 무가드로 읽으면 그
         # 자리에서 IndexError로 죽는다. JS 쌍둥이도 여기서 null을 낸다.
@@ -2897,7 +3068,10 @@ def _run_activity_files(path: Path) -> list[Path]:
 def _is_legacy_run_dir(path: Path) -> bool:
     if not (path / "meta.json").exists():
         return False
-    return not any(child.is_dir() and (child / "manifest.json").exists() for child in path.iterdir())
+    return not any(
+        child.is_dir() and (child / "manifest.json").exists()
+        for child in path.iterdir()
+    )
 
 
 def _workflow_declarations() -> DeclaredPhaseSkills:
@@ -2924,8 +3098,12 @@ def _run_skills_command(args: argparse.Namespace, root: Path) -> int:
             if not sources:
                 print(f"{profile_id}: no skill_sources declared")
                 continue
-            for result in sync_skill_sources(sources, refresh=bool(getattr(args, "refresh", False))):
-                print(f"{profile_id}: {result.source_id} {result.status} {result.detail}".rstrip())
+            for result in sync_skill_sources(
+                sources, refresh=bool(getattr(args, "refresh", False))
+            ):
+                print(
+                    f"{profile_id}: {result.source_id} {result.status} {result.detail}".rstrip()
+                )
                 if result.status == "failed":
                     exit_code = 1
         return exit_code
@@ -2935,17 +3113,25 @@ def _run_skills_command(args: argparse.Namespace, root: Path) -> int:
         declared = _workflow_declarations()
         for error in declared.errors:
             print(error, file=sys.stderr)
-        result = skill_catalog.scan(root, profile=merged, workflow_skills=declared.names)
+        result = skill_catalog.scan(
+            root, profile=merged, workflow_skills=declared.names
+        )
         sources = ", ".join(
             f"{source} {count}" for source, count in sorted(result.by_source().items())
         )
-        print(f"catalog: {len(result.entries)} skills ({sources}) stamp={result.stamp[:12]}")
+        print(
+            f"catalog: {len(result.entries)} skills ({sources}) stamp={result.stamp[:12]}"
+        )
         findings = list(result.findings)
         if declared.errors and not declared.names:
             # 축이 통째로 없으면 UNROUTED는 전부 오탐이다. 진짜 finding과 형식이 같아
             # 구별되지 않으므로 인쇄하지 않고 그 사실을 남긴다.
-            findings = [item for item in findings if item.kind != skill_catalog.UNROUTED]
-            print("degraded: workflow declarations unavailable; unrouted findings suppressed")
+            findings = [
+                item for item in findings if item.kind != skill_catalog.UNROUTED
+            ]
+            print(
+                "degraded: workflow declarations unavailable; unrouted findings suppressed"
+            )
         elif declared.errors:
             # 축소된 선언 집합으로 판정하면 그 workflow만 선언한 skill이 미라우팅
             # 오탐으로 찍힌다. stdout만 보는 소비자가 정상 결과와 구별할 수 있어야 한다.
@@ -2970,7 +3156,9 @@ def _run_skills_command(args: argparse.Namespace, root: Path) -> int:
         except (OSError, ValueError, yaml.YAMLError) as exc:
             print(str(exc), file=sys.stderr)
             return 2
-        phase = next((item for item in definition.phases if item.id == args.phase), None)
+        phase = next(
+            (item for item in definition.phases if item.id == args.phase), None
+        )
         if phase is None:
             # 조용히 "요구 없음"으로 답하면 gate가 통과해 버린다. phase가
             # workflow에 없다는 건 상태가 어긋났다는 뜻이므로 fail-closed다.
@@ -3026,7 +3214,11 @@ def _run_skills_command(args: argparse.Namespace, root: Path) -> int:
             task_text=context["task_text"],
         )
         for skill in resolution.required:
-            state = skill.display_path(root) if skill.exists else f"MISSING ({skill.install_hint})"
+            state = (
+                skill.display_path(root)
+                if skill.exists
+                else f"MISSING ({skill.install_hint})"
+            )
             print(f"required {skill.name}: {state}")
         for skill in resolution.optional:
             state = skill.display_path(root) if skill.exists else "not installed"
@@ -3058,8 +3250,6 @@ def _skill_context(root: Path, args: argparse.Namespace) -> dict:
     }
 
 
-
-
 def _read_run_state(run_dir: Path) -> dict:
     meta = read_meta(run_dir)
     if meta:
@@ -3069,8 +3259,6 @@ def _read_run_state(run_dir: Path) -> dict:
     except (OSError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
-
-
 
 
 def _checkout_identity(inferred_worktree: str | None) -> str:
@@ -3104,8 +3292,6 @@ def _verified_checkout_identity(*, root: Path, path: Path) -> str | None:
     if registered is None or registered.prunable:
         return None
     return f"worktree:{checkout.name}"
-
-
 
 
 def _print_pending_spec_change_status(run_dir: Path) -> None:
@@ -3146,12 +3332,14 @@ def _active_run_meta(root: Path) -> dict:
             candidates.append(meta)
     if not candidates:
         return {}
-    dated = [(ts, meta) for meta in candidates if (ts := _run_meta_timestamp(meta)) is not None]
+    dated = [
+        (ts, meta)
+        for meta in candidates
+        if (ts := _run_meta_timestamp(meta)) is not None
+    ]
     if dated:
         return max(dated, key=lambda pair: pair[0])[1]
     return candidates[0]
-
-
 
 
 def _skill_state_roots(root: Path):

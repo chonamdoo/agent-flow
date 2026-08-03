@@ -7,15 +7,16 @@ boundary; an in-session sub-agent is never accepted as an isolation fallback.
 AGENT_FLOW_REVIEWERS may add cross-host providers. Without that opt-in, two or
 more independent processes from the active host satisfy reviewer independence.
 """
+
 from __future__ import annotations
 
 import json
 import os
 import re
 import shlex
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-import tempfile
 from pathlib import Path
 
 from agent_flow.cli_detect import (
@@ -26,10 +27,10 @@ from agent_flow.cli_detect import (
 )
 from agent_flow.core.hook_integrity import assert_managed_hooks_registered
 from agent_flow.core.worktree_isolation import (
+    WorktreeIsolationError,
     assert_leader_unchanged,
     capture_leader_snapshot,
     leader_root_for,
-    WorktreeIsolationError,
     sanitized_worker_env,
 )
 from agent_flow.subprocess_pool import SubprocessJob, SubprocessResult, run_parallel
@@ -41,9 +42,9 @@ _REVIEWER_PROVENANCE_RE = re.compile(
 
 @dataclass
 class ReviewerJob:
-    angle_id: str           # e.g. "architecture-design", "compose-stability"
-    prompt: str             # full angle prompt text (rendered)
-    output_path: Path       # artifact target
+    angle_id: str  # 예: "architecture-design", "compose-stability"
+    prompt: str  # 렌더링된 전체 관점별 프롬프트
+    output_path: Path  # 산출물 경로
     artifact_root: Path
 
 
@@ -105,12 +106,10 @@ def distribute(jobs: list[ReviewerJob], host: str | None = None) -> Distribution
     }
     for cli_name in optional:
         by_cli[cli_name] = [
-            _optional_reviewer_job(job, cli_name=cli_name)
-            for job in jobs
+            _optional_reviewer_job(job, cli_name=cli_name) for job in jobs
         ]
     required_job_ids = frozenset(
-        _subprocess_job_id(installed_host.name, job)
-        for job in jobs
+        _subprocess_job_id(installed_host.name, job) for job in jobs
     )
     return Distribution(
         by_cli=by_cli,
@@ -147,13 +146,14 @@ def _reviewer_cli_args(
     project_root: Path,
 ) -> tuple[str, ...]:
     root = str(project_root.resolve())
+    # 바깥 `run_provider`가 이미 sandbox-exec로 격리하므로 macOS에서는 중첩된
+    # Codex sandbox를 초기화할 수 없다.
     if cli.name == "codex":
         return (
             *cli.invoke,
             "--ephemeral",
             "--ignore-user-config",
-            "--sandbox",
-            "read-only",
+            "--dangerously-bypass-approvals-and-sandbox",
             "--cd",
             root,
             prompt,
@@ -181,7 +181,7 @@ def _reviewer_cli_args(
 def run_distribution(
     distribution: Distribution,
     project_root: Path,
-    timeout_s: int = 600,
+    timeout_s: int = 1200,
 ) -> list[SubprocessResult]:
     """Execute every assigned angle in an independent confined subprocess.
 
@@ -209,12 +209,17 @@ def run_distribution(
                 project_root=project_root,
             )
             sub_id = _subprocess_job_id(cli_name, job)
-            sub_jobs.append(SubprocessJob(
-                job_id=sub_id, binary=binary, args=args,
-                cwd=project_root, timeout_s=timeout_s,
-                env=reviewer_env,
-                allow_workspace_writes=False,
-            ))
+            sub_jobs.append(
+                SubprocessJob(
+                    job_id=sub_id,
+                    binary=binary,
+                    args=args,
+                    cwd=project_root,
+                    timeout_s=timeout_s,
+                    env=reviewer_env,
+                    allow_workspace_writes=False,
+                )
+            )
             _validate_review_artifact(job)
             job_to_output[sub_id] = job
 
@@ -228,9 +233,6 @@ def run_distribution(
     assert_managed_hooks_registered(project_root, leader)
     leader_before = capture_leader_snapshot(leader) if leader is not None else None
     results = run_parallel(sub_jobs)
-    # Write each artifact at the angle's intended output_path so the host AI
-    # can aggregate them into final-review.md.
-    #
     # 기록이 tripwire보다 **먼저**다. 순서를 뒤집으면 오탐 1회에 완료된
     # 리뷰어 N명의 산출물이 통째로 사라진다.
     for r in results:
@@ -387,7 +389,11 @@ def _parse_retry_after(text: str) -> str:
     if relative:
         amount = int(relative.group(1))
         unit = relative.group(2).lower()
-        delta = timedelta(hours=amount) if unit.startswith("h") else timedelta(minutes=amount)
+        delta = (
+            timedelta(hours=amount)
+            if unit.startswith("h")
+            else timedelta(minutes=amount)
+        )
         return (now + delta).isoformat()
 
     match = re.search(
@@ -406,12 +412,17 @@ def _parse_retry_after(text: str) -> str:
         hour += 12
     if suffix == "am" and hour == 12:
         hour = 0
-    candidate = datetime.now().astimezone().replace(
-        hour=hour,
-        minute=minute,
-        second=0,
-        microsecond=0,
-    ).astimezone(timezone.utc)
+    candidate = (
+        datetime.now()
+        .astimezone()
+        .replace(
+            hour=hour,
+            minute=minute,
+            second=0,
+            microsecond=0,
+        )
+        .astimezone(timezone.utc)
+    )
     if candidate <= now:
         candidate += timedelta(days=1)
     return candidate.isoformat()

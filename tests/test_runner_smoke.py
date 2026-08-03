@@ -1024,7 +1024,13 @@ def test_checkout_identity_rejects_path_components_and_controls(
     from agent_flow.artifact import create_run
 
     with pytest.raises(ValueError, match="checkout identity"):
-        create_run(tmp_path, "default", "task", checkout_identity=identity)
+        create_run(
+            tmp_path,
+            "default",
+            "task",
+            checkout_identity=identity,
+            hook_runtime_digest="0" * 64,
+        )
 
 
 def test_worktree_checkout_identity_requires_registration_provenance(
@@ -1041,6 +1047,7 @@ def test_worktree_checkout_identity_requires_registration_provenance(
             "default",
             "task",
             checkout_identity="worktree:feat-task",
+            hook_runtime_digest="0" * 64,
         )
 
 
@@ -2308,6 +2315,28 @@ def test_multi_review_jobs_include_mandatory_baseline(tmp_path: Path):
     assert "Review Angle" in jobs[0].prompt
     assert "Architecture Design" in jobs[1].prompt
     assert "Clean Architecture" in jobs[2].prompt
+
+
+def test_multi_review_jobs_forbid_nested_agents_and_background_jobs(tmp_path: Path):
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.adapters.hosted import HostedAdapter, _reviewer_jobs
+    from agent_flow.runner import Phase
+
+    adapter = HostedAdapter("omp")
+    adapter._profile_snapshot = {"review_angles": []}
+    phase = Phase(id="final-review", description="", multi_review=True)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    prompt = _reviewer_jobs(phase, run_dir, KIT_ROOT, adapter)[0].prompt
+
+    assert "one read-only reviewer subprocess" in prompt
+    assert "Do not spawn nested sub-agents, delegate work" in prompt
+    assert "start background processes or jobs" in prompt
+    assert "Terminate and wait for every child process" in prompt
+    assert "no descendant may remain active" in prompt
+    assert "Return only this angle's review in your final stdout" in prompt
+    assert "Include `reviewer-source: sub-agent`" in prompt
 
 
 def test_multi_review_jobs_dedupe_profile_baseline(tmp_path: Path):
