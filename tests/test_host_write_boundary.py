@@ -186,43 +186,74 @@ def test_host_binding_allows_only_its_checkout_and_runtime(tmp_path: Path):
     assert sibling_violation is not None and "outside the bound worktree" in sibling_violation
 
 
+def test_command_write_targets_sees_wrappers_moves_and_globs():
+    """반증: 명령 이름이 wrapper에 가려지거나 원본이 목적지가 아니면 대상을 놓친다.
+
+    이 추출기가 놓치면 경계 판정은 아예 호출되지 않는다 — 뒤의 protected 목록이
+    아무리 정확해도 통과다.
+    """
+    from agent_flow.core.host_write_boundary import _command_write_targets
+
+    assert _command_write_targets("env touch /tmp/x") == ("/tmp/x",)
+    assert _command_write_targets("FOO=1 nohup rm -rf /tmp/y") == ("/tmp/y",)
+    assert set(_command_write_targets("mv /a/one /b/two")) == {"/a/one", "/b/two"}
+    assert set(_command_write_targets("ln /a/one /b/two")) == {"/a/one", "/b/two"}
+    assert _command_write_targets("cp /a/one /b/two") == ("/b/two",)
+    assert set(
+        _command_write_targets("rsync --remove-source-files /a/one /b/two")
+    ) == {"/a/one", "/b/two"}
+    assert _command_write_targets("rm -rf /tmp/dir/*") == ("/tmp/dir/*",)
+
+
 def test_shell_write_target_obeys_the_same_rule_as_the_write_tool(tmp_path: Path):
     """반증: `Write`가 막는 자리를 `bash`가 열어 주면 경계는 없는 것과 같다.
 
-    두 경로가 같은 규칙을 쓰는지 한 대상으로 대조한다. 규칙이 갈리면 에이전트는
-    거부당한 write를 그대로 셸로 옮겨 적기만 하면 된다.
+    대상은 idle 형제 checkout이다. 두 경로가 같은 대상을 같은 결론으로 판정하는지,
+    그리고 무관한 자리는 둘 다 통과하는지 대조한다.
     """
     root, statuses, runs = _setup(tmp_path)
-    first, _second = statuses
+    first, second = statuses
     record_host_checkout_binding(_status_payload(root, first, runs[0]), root)
+    (runs[1] / "active").unlink()
 
-    outside = tmp_path / "outside.txt"
-    write_violation = host_write_boundary_violation(_write_payload(outside), root)
+    leaked = second.path / "leaked.txt"
+    write_violation = host_write_boundary_violation(_write_payload(leaked), root)
     shell_violation = host_write_boundary_violation(
-        _command_payload(f"touch {outside}", cwd=first.path),
+        _command_payload(f"touch {leaked}", cwd=first.path),
         root,
     )
     assert write_violation is not None
-    assert shell_violation is not None, "bash가 Write와 달리 worktree 밖 쓰기를 통과시켰다"
+    assert shell_violation is not None, "bash가 Write와 달리 형제 checkout 쓰기를 통과시켰다"
     assert "outside the bound worktree" in shell_violation
 
     # 리다이렉션도 같은 대상이다. 명령 이름만 보면 이 형태를 놓친다.
     redirect_violation = host_write_boundary_violation(
-        _command_payload(f"printf x > {outside}", cwd=first.path),
+        _command_payload(f"printf x > {leaked}", cwd=first.path),
         root,
     )
     assert redirect_violation is not None
+
+    # checkout 어디에도 속하지 않는 자리는 두 경로 모두 통과한다. leader가
+    # `~/Downloads` 같은 폴더 안에 있을 때 무관한 파일까지 막지 않는다.
+    unrelated = tmp_path / "outside.txt"
+    assert host_write_boundary_violation(_write_payload(unrelated), root) is None
+    assert host_write_boundary_violation(
+        _command_payload(f"touch {unrelated}", cwd=first.path),
+        root,
+    ) is None
 
 
 def test_shell_reads_outside_the_worktree_stay_allowed(tmp_path: Path):
     """불변: 쓰기 경계가 읽기까지 막으면 인터프리터·도구 호출이 전부 죽는다.
 
-    변이 케이스로 짝을 이룬다 — 같은 절대 경로를 쓰기 대상으로 바꾸면 거부돼야
-    한다. 그래야 "읽기 허용"이 경계를 통째로 끈 결과가 아님이 증명된다.
+    무관한 자리는 읽기도 쓰기도 통과한다. 변이 케이스로 형제 checkout을 짝지어
+    대조한다 — 그쪽은 읽기든 쓰기든 거부다. 그래야 "무관한 자리 허용"이 경계를
+    통째로 끈 결과가 아님이 증명된다.
     """
     root, statuses, runs = _setup(tmp_path)
-    first, _second = statuses
+    first, second = statuses
     record_host_checkout_binding(_status_payload(root, first, runs[0]), root)
+    (runs[1] / "active").unlink()
 
     tool = tmp_path / "tool.py"
     tool.write_text("print('hi')\n", encoding="utf-8")
@@ -234,7 +265,78 @@ def test_shell_reads_outside_the_worktree_stay_allowed(tmp_path: Path):
     assert host_write_boundary_violation(
         _command_payload(f"truncate -s 0 {tool}", cwd=first.path),
         root,
+    ) is None
+    assert host_write_boundary_violation(
+        _command_payload(f"python3 {second.path / 'README.md'} --check", cwd=first.path),
+        root,
     ) is not None
+    assert host_write_boundary_violation(
+        _command_payload(f"git -C {second.path} checkout -- .", cwd=first.path),
+        root,
+    ) is not None
+
+
+def test_idle_registered_sibling_worktree_stays_protected(tmp_path: Path):
+    """반증: run이 끝난 형제 checkout도 남의 작업이다.
+
+    protected를 active 목록만으로 만들면, 정리 전 형제 worktree의 커밋 안 된
+    작업이 bound 세션의 쓰기에 열린다. 무관한 자리 허용과 짝으로 대조한다.
+    """
+    root, statuses, runs = _setup(tmp_path)
+    first, second = statuses
+    record_host_checkout_binding(_status_payload(root, first, runs[0]), root)
+    (runs[1] / "active").unlink()
+
+    write_violation = host_write_boundary_violation(
+        _write_payload(second.path / "leaked.py"),
+        root,
+    )
+    shell_violation = host_write_boundary_violation(
+        _command_payload(f"touch {second.path / 'leaked.py'}", cwd=first.path),
+        root,
+    )
+
+    assert write_violation is not None
+    assert "outside the bound worktree" in write_violation
+    assert shell_violation is not None
+    assert host_write_boundary_violation(
+        _write_payload(tmp_path / "outside.txt"),
+        root,
+    ) is None
+
+
+def test_boundary_blocks_paths_that_contain_or_drain_other_checkouts(tmp_path: Path):
+    """반증: 보호 대상의 **안쪽**만 보면 두 구멍이 남는다.
+
+    1) 보호 대상을 품는 경로 한 줄(`rm -rf <leader의 부모>`)이 leader를 통째로 지운다.
+    2) `mv`는 목적지만 검사하면 형제 checkout의 파일을 밖으로 옮겨 그 checkout에서 지운다.
+    """
+    root, statuses, runs = _setup(tmp_path)
+    first, second = statuses
+    record_host_checkout_binding(_status_payload(root, first, runs[0]), root)
+
+    ancestor = host_write_boundary_violation(
+        _command_payload(f"rm -rf {root.parent}", cwd=first.path),
+        root,
+    )
+    drained = host_write_boundary_violation(
+        _command_payload(
+            f"mv {second.path / 'README.md'} {tmp_path / 'stolen.md'}",
+            cwd=first.path,
+        ),
+        root,
+    )
+    unrelated_move = host_write_boundary_violation(
+        _command_payload(
+            f"mv {tmp_path / 'a.md'} {tmp_path / 'b.md'}",
+            cwd=first.path,
+        ),
+        root,
+    )
+
+    assert ancestor is not None
+    assert drained is not None
+    assert unrelated_move is None
 
 
 def test_host_binding_rejects_recreated_active_run_checkout(tmp_path: Path):
