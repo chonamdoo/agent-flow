@@ -150,12 +150,15 @@ def record_host_checkout_binding(payload: object, project_root: Path) -> Path | 
     run_id = run_value.rsplit("/", 1)[-1].strip()
     if not selector or not run_id:
         return None
-    context = _active_checkout(root, selector=selector, run_id=run_id)
+    # 열거는 한 번만 한다. 두 번 돌면 active run 수에 비례하는 검증 비용이 그대로
+    # 두 배가 되고, hook 실행 시간 제한을 넘긴 세션은 binding을 못 받아 guard가 모든
+    # write를 막는다. run 3개에서 그 교착이 실측됐다(10.7~11.6s, 제한 8s).
+    active = _active_checkouts(root)
+    context = _active_checkout(root, selector=selector, run_id=run_id, active=active)
     if context is None:
         raise HostWriteBoundaryError(
             "status output did not identify one verified active managed worktree"
         )
-    active = _active_checkouts(root)
     existing = _load_binding(root, session_id, active)
     if existing is not None:
         if (
@@ -253,7 +256,7 @@ def host_write_boundary_violation(payload: object, project_root: Path) -> str | 
             )
         selector = _worktree_selector(command)
         if selector is not None:
-            selected = _active_checkout(root, selector=selector)
+            selected = _active_checkout(root, selector=selector, active=active)
             if selected is None or selected.checkout != current.checkout:
                 return (
                     f"this host session is bound to {current.checkout}; refusing a lifecycle "
@@ -416,14 +419,22 @@ def _active_checkout(
     *,
     selector: str,
     run_id: str | None = None,
+    active: tuple[ActiveCheckout, ...] | None = None,
 ) -> ActiveCheckout | None:
+    """``active``를 주면 그 목록에서 고른다. 열거는 active run 수에 비례해 비싸다.
+
+    열거 한 번이 run마다 `verify_linked_worktree`(git 왕복)를 돈다. 호출부가 이미
+    목록을 갖고 있는데 여기서 다시 열거하면 같은 검증을 두 번 치르고, 그 두 배가
+    host hook의 실행 시간 제한을 넘기면 세션이 binding되지 못한 채 guard에 막힌다 —
+    run이 늘수록 확실히 막히는 쪽으로 기운다.
+    """
     matches: list[ActiveCheckout] = []
     path_candidates = [_resolve_path(selector, root)]
     try:
         path_candidates.append(_resolve_path(selector, Path.cwd()))
     except OSError:
         pass
-    for context in _active_checkouts(root):
+    for context in (_active_checkouts(root) if active is None else active):
         selected = selector in {context.name, context.branch}
         selected = selected or any(
             candidate is not None and candidate == context.checkout
