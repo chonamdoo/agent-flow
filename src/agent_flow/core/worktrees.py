@@ -4618,8 +4618,14 @@ def delegated_slug(
     first_line = next(
         (line for line in (result.stdout or "").splitlines() if line.strip()), ""
     )
+    candidate = first_line.strip().strip("\"'")
+    # 경로 모양의 출력은 이름이 아니라 자리다. 정규화가 `../../etc/passwd`를
+    # `etc-passwd`로, `.hidden`을 `hidden`으로 세탁하면 host가 낸 쓰레기가
+    # 그럴듯한 브랜치 이름이 되어 task를 대표하지 않는 이름이 남는다.
+    if candidate.startswith(".") or ".." in candidate or "/" in candidate:
+        return None
     try:
-        quality = describe_slug(first_line.strip().strip("\"'"))
+        quality = describe_slug(candidate)
     except ValueError:
         return None
     if quality.kind != "ascii":
