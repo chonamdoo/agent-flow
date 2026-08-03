@@ -45,7 +45,7 @@ from agent_flow.artifact import (
     read_meta,
     write_meta,
 )
-from agent_flow.cli_detect import detect_available_clis
+from agent_flow.cli_detect import CliInfo, REVIEW_CLI_NAMES, detect_available_clis
 from agent_flow.core.commands import run_safe_command
 from agent_flow.core.command_evidence import missing_test_evidence_markers
 from agent_flow.core.design_ledger import (
@@ -144,6 +144,12 @@ class Phase:
     skills: PhaseSkills | None = None
 
 
+def _phase_available_clis(clis: list[CliInfo], phase: Phase | None) -> list[CliInfo]:
+    if phase is None or not phase.multi_review:
+        return clis
+    return [cli for cli in clis if cli.name in REVIEW_CLI_NAMES]
+
+
 class Runner:
     def __init__(
         self,
@@ -228,8 +234,23 @@ class Runner:
 
         adapter = detect_adapter()
         self._adapter_name = adapter.name
-        clis = detect_available_clis()
-        cli_summary = ", ".join(c.name for c in clis) if clis else "none (generic fallback)"
+        assert self.run_dir is not None
+        run_meta = read_meta(self.run_dir)
+        banner_index = int(run_meta.get("phase_index", 0) or 0)
+        banner_phase = (
+            self.phases[banner_index]
+            if 0 <= banner_index < len(self.phases)
+            else None
+        )
+        clis = _phase_available_clis(detect_available_clis(), banner_phase)
+        if clis:
+            cli_summary = ", ".join(c.name for c in clis)
+        elif banner_phase is not None and banner_phase.multi_review:
+            # review phase는 host fallback이 없다. "generic fallback"이라고 적으면
+            # 없는 우회로를 안내한다.
+            cli_summary = "none (review blocked: install claude or codex)"
+        else:
+            cli_summary = "none (generic fallback)"
         print(f"▶ host adapter: {adapter.name}")
         print(f"▶ available  : {cli_summary}")
         print(f"▶ profile    : {self.profile_id}")
@@ -243,15 +264,14 @@ class Runner:
         adapter._profile_id = self.profile_id
         adapter._architecture = self.architecture
         adapter._config_root = self.config_root
-        adapter._task_text = read_meta(self.run_dir).get("task", "") if self.run_dir else ""
+        adapter._task_text = run_meta.get("task", "")
         adapter._changed_files = changed_files(self.project_root)
 
         # Auto-cite lore: search the local lore index for entries relevant
         # to the task description and inject them into the prompt envelope.
         # Empty list when memory dir is missing or no matches.
-        meta_for_lore = read_meta(self.run_dir) if self.run_dir else {}
         adapter._lore_citations = _search_lore(
-            self.project_root, meta_for_lore.get("task", ""),
+            self.project_root, run_meta.get("task", ""),
         )
 
         # 이 실행이 worktree 안이라면 뒤에 있는 leader 체크아웃이 지켜야 할

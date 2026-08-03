@@ -106,7 +106,7 @@ agent-flow-new/
 ```
 design → slice-plan → ═══ pause ═══
        → worktree → implement (TDD red→green→refactor inside, per slice)
-       → final-review (multi_review: true — fans out across installed CLIs)
+       → final-review (multi_review: true — fans out across the Claude/Codex reviewer pool)
        → fix-loop → commit → push-pr → pr-watch → merge → cleanup
 ```
 
@@ -116,16 +116,15 @@ The AI collapses or expands phases per task. A 1-line fix may produce a single-q
 
 Each `profiles/<stack>.yaml` declares: `branching`, `gates`, `review_angles`, `artifacts`, `vocabulary`, `commit_convention`, `pr`. See `profiles/_schema.yaml`. The runner parses the active profile (resolved from `.agent-flow/kit.json:profile` or `AGENT_FLOW_PROFILE`) and injects it into every phase prompt — the host AI sees real data, not "look it up somewhere".
 
-## Multi-CLI fan-out
+## Reviewer fan-out
 
-For phases marked `multi_review: true` (currently `final-review`), the runner distributes review angles round-robin across installed CLIs:
+For phases marked `multi_review: true`, review angles run only on the installed **Claude and Codex** CLIs. OMP can be the host/controller, but it is never a reviewer provider. `final-review` fans every angle out to both providers; other `multi_review` phases run every angle on one primary provider plus any opted-in extra:
 
-- **3 CLIs detected** → 1 angle per CLI (most diverse review)
-- **2 CLIs** → round-robin (host CLI last)
-- **1 CLI** → all angles on that CLI (host adapter handles in-host parallelism — Claude `Task` tool, etc.)
-- **0 CLIs** → host AI handles all angles itself
+- **Claude + Codex installed** → `final-review` runs every angle on both, and a provider whose probe fails is dropped from its remaining angles
+- **one of them installed** → all angles run on that provider, still as independent subprocesses
+- **neither installed** → the phase fails closed; the controller session never records a reviewer verdict itself
 
-Override with `AGENT_FLOW_REVIEWERS="claude,codex"`. Per-angle artifacts (`final-review-<angle>.md`) survive partial timeouts — one slow CLI does not block siblings.
+`AGENT_FLOW_REVIEWERS="codex"` narrows `final-review` to the named providers; for other `multi_review` phases it adds the named Claude/Codex providers alongside the primary one. Names outside the Claude/Codex pool are ignored. Per-angle artifacts (`final-review-<angle>-<provider>.md`) survive partial timeouts — one slow CLI does not block siblings.
 
 ## Honesty notes
 

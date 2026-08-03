@@ -1,11 +1,8 @@
 """Multi-reviewer distribution and OS-confined parallel execution.
 
-Every review angle runs in a separate provider process bound to the verified
-linked worktree. The active host CLI participates through the same subprocess
-boundary; an in-session sub-agent is never accepted as an isolation fallback.
-
-AGENT_FLOW_REVIEWERS may add cross-host providers. Without that opt-in, two or
-more independent processes from the active host satisfy reviewer independence.
+Every review angle runs in a separate Claude or Codex process bound to the
+verified linked worktree. An in-session sub-agent is never accepted as an
+isolation fallback.
 """
 from __future__ import annotations
 
@@ -20,6 +17,7 @@ from pathlib import Path
 
 from agent_flow.cli_detect import (
     CliInfo,
+    REVIEW_CLI_NAMES,
     cli_by_name,
     detect_available_clis,
     detect_host_cli,
@@ -36,6 +34,12 @@ from agent_flow.subprocess_pool import SubprocessJob, SubprocessResult, run_para
 
 _REVIEWER_PROVENANCE_RE = re.compile(
     r"(?m)^\s*(?:-\s*)?reviewer-source:\s*sub-agent\s*$"
+)
+_PROVIDER_FAILURE_RE = re.compile(
+    r"(?m)^(?:- status: (?:ERROR|TIMEOUT)|reason: reviewer_rate_limited)$"
+)
+_REVIEWER_SANDBOX_FAILURE_SIGNALS = (
+    "sandbox_apply: operation not permitted",
 )
 
 
@@ -55,13 +59,17 @@ class Distribution:
     insufficient_reviewers: bool = False
     host: str | None = None
     required_job_ids: frozenset[str] = frozenset()
+    accept_any_provider: bool = False
+    # 이전 시도의 실패 artifact 때문에 제외된 provider. 조용히 한 provider로
+    # 줄어드는 것을 host가 알아야 한다.
+    skipped_providers: tuple[str, ...] = ()
 
     def empty(self) -> bool:
         return not self.by_cli and not self.fallback_to_generic
 
     def summary(self) -> str:
         if self.fallback_to_generic:
-            return "host-native sub-agent required (host records reviewer verdict)"
+            return "no Claude/Codex reviewer CLI available (multi-review blocked)"
         parts = [f"{cli}:{len(jobs)}" for cli, jobs in self.by_cli.items() if jobs]
         if self.host:
             parts.append(f"(host={self.host})")
@@ -75,9 +83,70 @@ def resolve_review_clis() -> list[CliInfo]:
     out: list[CliInfo] = []
     for name in (n.strip() for n in forced.split(",")):
         cli = cli_by_name(name)
-        if cli is not None:
+        if cli is not None and cli.name in REVIEW_CLI_NAMES:
             out.append(cli)
     return out
+
+
+def distribute_final_review(
+    jobs: list[ReviewerJob],
+    host: str | None = None,
+) -> Distribution:
+    """Assign final-review angles to available Claude and Codex processes."""
+    if not jobs:
+        return Distribution()
+    host = host or detect_host_cli()
+    # AGENT_FLOW_REVIEWERS는 pool을 **좁히는** 스위치다. 여기서 무시하면 문서가
+    # 약속한 좁히기가 final-review에서만 조용히 풀린다.
+    narrowed = {cli.name for cli in resolve_review_clis()}
+    available = {
+        cli.name: cli
+        for cli in detect_available_clis()
+        if cli.name in REVIEW_CLI_NAMES
+        and (not narrowed or cli.name in narrowed)
+    }
+    by_cli: dict[str, list[ReviewerJob]] = {}
+    latched: dict[str, list[ReviewerJob]] = {}
+    for cli_name in REVIEW_CLI_NAMES:
+        if cli_name not in available:
+            continue
+        assigned = [
+            _reviewer_job_for_cli(job, cli_name=cli_name)
+            for job in jobs
+        ]
+        if any(_existing_provider_failure(job) for job in assigned):
+            latched[cli_name] = assigned
+            continue
+        by_cli[cli_name] = assigned
+    # 이전 시도에서 실패한 provider는 건너뛴다. 단 모두 실패했다면 건너뛰기가
+    # 보호가 아니라 교착이다 — per-angle 실패 artifact는 phase 재시도에서 지워지지
+    # 않으므로, 그대로 두면 fix-loop을 돌아도 final-review가 영구히 raise한다.
+    if not by_cli and latched:
+        by_cli = latched
+        latched = {}
+    if not by_cli:
+        return Distribution(
+            fallback_jobs=list(jobs),
+            fallback_to_generic=True,
+            insufficient_reviewers=True,
+            host=host,
+            accept_any_provider=True,
+        )
+    required_job_ids = frozenset(
+        _subprocess_job_id(cli_name, job)
+        for cli_name, assigned in by_cli.items()
+        for job in assigned
+    )
+    # 독립성 기준은 process 수다. angle 1개라도 provider 2개면 독립 reviewer 2개다.
+    reviewer_processes = sum(len(assigned) for assigned in by_cli.values())
+    return Distribution(
+        by_cli=by_cli,
+        insufficient_reviewers=reviewer_processes < 2,
+        host=host,
+        required_job_ids=required_job_ids,
+        accept_any_provider=True,
+        skipped_providers=tuple(latched),
+    )
 
 
 def distribute(jobs: list[ReviewerJob], host: str | None = None) -> Distribution:
@@ -85,11 +154,18 @@ def distribute(jobs: list[ReviewerJob], host: str | None = None) -> Distribution
     if not jobs:
         return Distribution()
     host = host or detect_host_cli()
-    installed_host = next(
-        (cli for cli in detect_available_clis() if cli.name == host),
-        None,
+    available = {
+        cli.name: cli
+        for cli in detect_available_clis()
+        if cli.name in REVIEW_CLI_NAMES
+    }
+    primary_name = (
+        host
+        if host in available
+        else next((name for name in REVIEW_CLI_NAMES if name in available), None)
     )
-    if installed_host is None:
+    primary_cli = available.get(primary_name) if primary_name is not None else None
+    if primary_cli is None:
         return Distribution(
             fallback_jobs=list(jobs),
             fallback_to_generic=True,
@@ -97,11 +173,11 @@ def distribute(jobs: list[ReviewerJob], host: str | None = None) -> Distribution
             host=host,
         )
 
-    by_cli = {installed_host.name: list(jobs)}
+    by_cli = {primary_cli.name: list(jobs)}
     optional = {
         cli.name: cli
         for cli in resolve_review_clis()
-        if cli.name != installed_host.name
+        if cli.name != primary_cli.name
     }
     for cli_name in optional:
         by_cli[cli_name] = [
@@ -109,7 +185,7 @@ def distribute(jobs: list[ReviewerJob], host: str | None = None) -> Distribution
             for job in jobs
         ]
     required_job_ids = frozenset(
-        _subprocess_job_id(installed_host.name, job)
+        _subprocess_job_id(primary_cli.name, job)
         for job in jobs
     )
     return Distribution(
@@ -136,6 +212,37 @@ def _optional_reviewer_job(
     )
 
 
+def _reviewer_job_for_cli(
+    job: ReviewerJob,
+    *,
+    cli_name: str,
+) -> ReviewerJob:
+    output = job.output_path.with_name(
+        f"{job.output_path.stem}-{cli_name}{job.output_path.suffix}"
+    )
+    return ReviewerJob(
+        angle_id=job.angle_id,
+        prompt=job.prompt,
+        output_path=output,
+        artifact_root=job.artifact_root,
+    )
+
+
+def _existing_provider_failure(job: ReviewerJob) -> str | None:
+    """이전 시도가 남긴 실패 artifact. 판정은 **header 블록**만 본다 —
+    리뷰 본문이 `- status: ERROR`를 인용해도 provider가 탈락하면 안 된다."""
+    output = job.output_path
+    if output.is_symlink() or not output.is_file():
+        return None
+    header_lines: list[str] = []
+    for line in output.read_text(encoding="utf-8")[:1024].splitlines():
+        if line.startswith("## "):
+            break
+        header_lines.append(line)
+    match = _PROVIDER_FAILURE_RE.search("\n".join(header_lines))
+    return match.group(0) if match is not None else None
+
+
 def _subprocess_job_id(cli_name: str, job: ReviewerJob) -> str:
     return f"{cli_name}-{job.angle_id}"
 
@@ -148,12 +255,13 @@ def _reviewer_cli_args(
 ) -> tuple[str, ...]:
     root = str(project_root.resolve())
     if cli.name == "codex":
+        # 바깥 provider sandbox가 이미 read-only를 강제한다. Codex sandbox까지 중첩하면 macOS sandbox_apply가 실패한다.
         return (
             *cli.invoke,
             "--ephemeral",
             "--ignore-user-config",
             "--sandbox",
-            "read-only",
+            "danger-full-access",
             "--cd",
             root,
             prompt,
@@ -166,15 +274,6 @@ def _reviewer_cli_args(
             "--no-session-persistence",
             prompt,
         )
-    if cli.name == "omp":
-        return (
-            *cli.invoke,
-            "--no-session",
-            f"--cwd={root}",
-            "--tools=read,grep,glob,bash",
-            "--auto-approve",
-            prompt,
-        )
     return (*cli.invoke, prompt)
 
 
@@ -183,16 +282,14 @@ def run_distribution(
     project_root: Path,
     timeout_s: int = 600,
 ) -> list[SubprocessResult]:
-    """Execute every assigned angle in an independent confined subprocess.
-
-    The active host is not special here. Running it through the same provider
-    boundary is what makes reviewer isolation enforceable rather than prompt
-    advice.
+    """Final-review probes each selected provider once in parallel. A provider
+    whose probe fails is excluded from the remaining angle wave; other
+    multi-review phases retain the single parallel wave.
     """
     if distribution.fallback_to_generic or distribution.empty():
         return []
 
-    sub_jobs: list[SubprocessJob] = []
+    sub_jobs_by_cli: dict[str, list[SubprocessJob]] = {}
     job_to_output: dict[str, ReviewerJob] = {}
     # 리뷰어 자식은 부모 환경을 통째로 물려받으면 오염된 GIT_DIR/GIT_WORK_TREE로
     # leader 저장소에 그대로 닿는다. git 탐색 env를 벗겨서 cwd를 권위로 만든다.
@@ -201,6 +298,7 @@ def run_distribution(
         cli = cli_by_name(cli_name)
         if cli is None or not jobs:
             continue
+        assigned: list[SubprocessJob] = []
         for job in jobs:
             binary = cli.binaries[0]
             args = _reviewer_cli_args(
@@ -209,7 +307,7 @@ def run_distribution(
                 project_root=project_root,
             )
             sub_id = _subprocess_job_id(cli_name, job)
-            sub_jobs.append(SubprocessJob(
+            assigned.append(SubprocessJob(
                 job_id=sub_id, binary=binary, args=args,
                 cwd=project_root, timeout_s=timeout_s,
                 env=reviewer_env,
@@ -217,8 +315,9 @@ def run_distribution(
             ))
             _validate_review_artifact(job)
             job_to_output[sub_id] = job
+        sub_jobs_by_cli[cli_name] = assigned
 
-    if not sub_jobs:
+    if not sub_jobs_by_cli:
         return []
 
     # project_root가 worktree면 그 뒤의 leader 체크아웃이 지켜야 할 대상이다.
@@ -227,7 +326,28 @@ def run_distribution(
     # 스냅샷보다 먼저다. 오염된 등록 상태를 기준선으로 굳히면 안 된다.
     assert_managed_hooks_registered(project_root, leader)
     leader_before = capture_leader_snapshot(leader) if leader is not None else None
-    results = run_parallel(sub_jobs)
+    if distribution.accept_any_provider:
+        probes = [jobs[0] for jobs in sub_jobs_by_cli.values()]
+        results = run_parallel(probes)
+        available = {
+            result.job_id.split("-", 1)[0]
+            for result in results
+            if reviewer_result_error(result) is None
+        }
+        remaining = [
+            job
+            for cli_name, jobs in sub_jobs_by_cli.items()
+            if cli_name in available
+            for job in jobs[1:]
+        ]
+        if remaining:
+            results.extend(run_parallel(remaining))
+    else:
+        results = run_parallel([
+            job
+            for jobs in sub_jobs_by_cli.values()
+            for job in jobs
+        ])
     # Write each artifact at the angle's intended output_path so the host AI
     # can aggregate them into final-review.md.
     #
@@ -296,6 +416,21 @@ def reviewer_result_error(result: SubprocessResult) -> str | None:
     rate_limit = _rate_limit_payload(result)
     if rate_limit is not None:
         return f"rate limited until {rate_limit['retry_after']}"
+    # 리뷰어가 본문에서 sandbox 오류 문자열을 **인용**한 정상 리뷰를 실패로 채점하면
+    # 이 저장소를 리뷰할 때마다 provider가 탈락한다. rate limit 판정과 같은 예외를
+    # 쓴다 — 정상 종료 + provenance면 인용으로 본다. 실제 sandbox_apply 실패는 CLI가
+    # 아예 실행되지 못하므로 provenance가 남지 않는다.
+    if not (
+        result.returncode == 0
+        and _REVIEWER_PROVENANCE_RE.search(result.stdout)
+    ):
+        diagnostics = "\n".join(
+            part
+            for part in (result.stdout, result.error or "")
+            if part
+        ).lower()
+        if any(signal in diagnostics for signal in _REVIEWER_SANDBOX_FAILURE_SIGNALS):
+            return "reviewer sandbox unavailable"
     if result.timed_out:
         return "timeout"
     if result.error:

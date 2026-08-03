@@ -442,22 +442,20 @@ phases:
       approve: architecture-review
       request-changes: fix-loop
     prompt: |
-      Run at least two independent active-host reviewer sub-agents in parallel
-      through agent-flow's verified OS-confined subprocess boundary. Each
-      reviewer uses code-reviewer.md as basis and outputs an independent
-      verdict: approve or request-changes.
+      agent-flow already ran this phase's reviewers as confined subprocesses on
+      the installed Claude/Codex pool. Do not launch reviewer CLIs yourself:
+      read the per-angle artifacts the runner lists and aggregate them. At least
+      two independent reviewer processes must have produced a verdict, each
+      using code-reviewer.md as basis: approve or request-changes.
       For architecture/SOLID findings, reviewers also apply
       `skills/clean-architecture-core/SKILL.md` and the compatibility markers
       in `skills/clean-architecture/SKILL.md`; any must-avoid or failing
       checklist condition from the core skill makes the overall verdict
       `request-changes`.
       Any request-changes from any reviewer makes the overall verdict
-      request-changes. Default reviewers are active-host sub-agents (Codex
-      sub-agent in Codex, Claude sub-agent in Claude, OMP sub-agent in OMP).
-      Additional non-host providers are optional when available. Provider
-      failure blocks review; never fall back to controller-session work. Each
-      reviewer section must include `reviewer-source: sub-agent`. After
-      recording each sub-agent result, close that sub-agent session. Record
+      request-changes. Reviewers are installed Claude and Codex CLIs only.
+      Never use OMP or controller-session work as a reviewer fallback. Each
+      reviewer section must include `reviewer-source: sub-agent`. Record
       per-reviewer verdicts and end with `## Overall` followed by exactly one
       verdict line: `verdict: approve` or `verdict: request-changes`.
       Apply agent-flow-concise-output: one finding per line, Korean concise
@@ -549,14 +547,13 @@ phases:
       approve: gates
       request-changes: refactor
     prompt: |
-      Run two independent active-host reviewer sub-agents through agent-flow's
-      verified OS-confined subprocess boundary before QA. Each required
-      reviewer section must include `reviewer-source: sub-agent`.
-      Optional cross-host reviewers may be recorded as extra evidence, but they
-      do not replace the two active-host sub-agent reviewers. A failed required
-      reviewer process blocks approval and must not be replaced by
-      controller-session work. After recording each result, close that
-      sub-agent session.
+      agent-flow already ran this phase's reviewers as confined subprocesses on
+      the installed Claude/Codex pool before QA. Do not launch reviewer CLIs
+      yourself: aggregate the per-angle artifacts the runner lists. Two
+      independent reviewer processes are required and each reviewer section must
+      include `reviewer-source: sub-agent`. A failed required reviewer process
+      blocks approval and must never be replaced by OMP or controller-session
+      work.
       Compare code against domain-grill.md and ddd-design.md. Check layer
       violations, repository boundary leaks, naming drift, and dependency
       direction. Apply `skills/ddd-architecture/SKILL.md` first for domain fit,
