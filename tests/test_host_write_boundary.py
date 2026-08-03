@@ -305,6 +305,32 @@ def test_idle_registered_sibling_worktree_stays_protected(tmp_path: Path):
     ) is None
 
 
+def test_absent_checkout_claim_is_skipped_but_a_present_one_fails_closed(tmp_path: Path):
+    """반증: worktree 폴더를 지운 것만으로 hook이 저장소 전체에서 죽으면 복구가 없다.
+
+    등록도 자리도 없는 claim은 잔재다 — 이어질 run도, 지킬 작업물도 없다. 반대로
+    자리는 있는데 등록만 사라진 경우는 살아 있는 checkout의 등록이 뜯긴 것이므로
+    계속 fail-closed다.
+    """
+    root, statuses, runs = _setup(tmp_path)
+    first, second = statuses
+    record_host_checkout_binding(_status_payload(root, first, runs[0]), root)
+    shutil.rmtree(second.path)
+    _git("worktree", "prune", cwd=root)
+
+    assert host_write_boundary_violation(
+        _write_payload(first.path / "feature.py"),
+        root,
+    ) is None
+
+    second.path.mkdir(parents=True)
+    with pytest.raises(
+        HostWriteBoundaryError,
+        match="no provable registered worktree owner",
+    ):
+        host_write_boundary_violation(_write_payload(first.path / "feature.py"), root)
+
+
 def test_boundary_blocks_paths_that_contain_or_drain_other_checkouts(tmp_path: Path):
     """반증: 보호 대상의 **안쪽**만 보면 두 구멍이 남는다.
 
@@ -457,6 +483,11 @@ def test_unbound_host_cannot_write_while_worktree_runs_are_active(tmp_path: Path
 
 
 def test_active_run_without_registered_worktree_fails_closed(tmp_path: Path):
+    """자리는 남아 있고 등록만 사라진 claim은 조작 신호다.
+
+    자리까지 사라진 경우는 끝난 run으로 본다 —
+    `test_absent_checkout_claim_is_skipped_but_a_present_one_fails_closed`가 그 짝이다.
+    """
     root, statuses, _ = _setup(tmp_path)
     _git(
         "worktree",
@@ -465,6 +496,7 @@ def test_active_run_without_registered_worktree_fails_closed(tmp_path: Path):
         str(statuses[0].path),
         cwd=root,
     )
+    statuses[0].path.mkdir(parents=True)
 
     with pytest.raises(
         HostWriteBoundaryError,

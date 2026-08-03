@@ -532,18 +532,23 @@ def remove_worktree(
     delete_branch: bool = True,
     require_merged: bool = True,
     allow_unmerged: bool = False,
-) -> None:
-    """Remove one checkout only while repository-wide cleanup exclusion is held."""
+    force_metadata: bool = False,
+) -> bool:
+    """Remove one checkout only while repository-wide cleanup exclusion is held.
+
+    Returns whether the runtime metadata for this name was cleared.
+    """
     with _cleanup_lease(root, status.path):
         runtime_root = _runtime_root_for_status(root=root, status=status)
         with _run_start_exclusion(runtime_root):
             _assert_no_active_runs(runtime_root)
-            _remove_worktree_locked(
+            return _remove_worktree_locked(
                 root=root,
                 status=status,
                 delete_branch=delete_branch,
                 require_merged=require_merged,
                 allow_unmerged=allow_unmerged,
+                force_metadata=force_metadata,
             )
 
 
@@ -554,7 +559,8 @@ def _remove_worktree_locked(
     delete_branch: bool,
     require_merged: bool,
     allow_unmerged: bool,
-) -> None:
+    force_metadata: bool = False,
+) -> bool:
     leader = leader_worktree_path(root)
     if leader is None:
         if git_repo_state(root) != "non-repo":
@@ -607,12 +613,18 @@ def _remove_worktree_locked(
     if branch_delete is not None:
         branch, expected_oid = branch_delete
         _delete_branch_ref_cas(root=root, branch=branch, expected_oid=expected_oid)
-    remove_worktree_metadata(root=root, name=status.name, path=status.path)
+    metadata_removed = remove_worktree_metadata(
+        root=root,
+        name=status.name,
+        path=status.path,
+        force=force_metadata,
+    )
     if not live and status.path.is_dir() and _is_creation_layout_child(root=root, path=status.path):
         try:
             status.path.rmdir()
         except OSError:
             pass
+    return metadata_removed
 
 
 def _assert_registration_and_ref_unchanged(
@@ -2785,8 +2797,14 @@ def known_worktree_names(*, root: Path) -> list[str]:
     return sorted(names)
 
 
-def remove_worktree_metadata(*, root: Path, name: str, path: Path | None = None) -> None:
-    """``name``의 런타임 메타데이터를 지운다.
+def remove_worktree_metadata(
+    *,
+    root: Path,
+    name: str,
+    path: Path | None = None,
+    force: bool = False,
+) -> bool:
+    """``name``의 런타임 메타데이터를 지운다. 실제로 지웠으면 True.
 
     ``path``를 주면 그 등록 경로의 소유임을 증명한 경우에만 지운다. 정규화된 키는
     서로 다른 등록 경로를 한 자리로 접는다 — 관리형 ``.../feat-demo``와 외부
@@ -2797,21 +2815,63 @@ def remove_worktree_metadata(*, root: Path, name: str, path: Path | None = None)
     (`worktree_runtime_root`). 증명만 정규화하면 ``feat-issue#110``의 소유 판정을
     형제 ``feat-issue-110``의 manifest가 대신 내려 먼저 False가 되고, 대상 자신의
     죽은 active 마커가 남아 같은 자리의 다음 run을 `already active`로 막는다.
+
+    ``force``는 증명을 건너뛰지만 **양쪽 경로가 모두 없을 때만** 그렇게 한다.
+    다른 머신에서 복사돼 온 manifest처럼 이 머신의 어느 layout에도 속하지 않는
+    기록은 증명이 영구히 실패해서, 그것 없이는 지울 방법이 없다. 살아 있는
+    checkout의 상태는 force로도 지우지 않는다.
     """
     try:
         key = _runtime_state_key(root=root, name=name)
     except ValueError:
         # agent-flow 이름 규칙으로 정규화되지 않는 이름에는 애초에 메타데이터가 없다.
-        return
+        return False
     if path is not None and not _metadata_belongs_to_path(root=root, key=key, path=path):
-        return
+        if not (force and _metadata_paths_are_absent(root=root, key=key, path=path)):
+            return False
     runtime_root = _runtime_state_root(root=root, name=key)
+    removed = False
     if runtime_root.exists():
         shutil.rmtree(runtime_root)
+        removed = True
     for legacy_manifest in _in_checkout_manifest_paths(root=root, key=key):
         if legacy_manifest.exists():
             legacy_manifest.unlink()
+            removed = True
     forget_adopted_checkout(root=root, name=key)
+    return removed
+
+
+def worktree_metadata_is_unreachable(*, root: Path, name: str, path: Path) -> bool:
+    """이 이름의 런타임 메타데이터가 이 머신에서 소유 증명이 **영구히** 불가능한가.
+
+    다른 머신에서 복사돼 온 기록처럼 양쪽 경로가 다 없으면 증명이 통과할 날이 오지
+    않는다. 그런 기록은 `--force-metadata` 없이는 지울 방법이 없으므로 호출자가
+    그 사실을 알려야 한다. 살아 있는 자리를 지키느라 보존한 경우는 여기 들지 않는다.
+    """
+    try:
+        key = _runtime_state_key(root=root, name=name)
+    except ValueError:
+        return False
+    if _metadata_belongs_to_path(root=root, key=key, path=path):
+        return False
+    return _metadata_paths_are_absent(root=root, key=key, path=path)
+
+
+def _metadata_paths_are_absent(*, root: Path, key: str, path: Path) -> bool:
+    """기록된 경로와 대상 경로가 **둘 다** 디스크에 없는가."""
+    if path.exists():
+        return False
+    payload = _state_key_manifest(root=root, key=key)
+    if payload is None:
+        return True
+    recorded = payload.get("path")
+    if not isinstance(recorded, str) or not recorded:
+        return True
+    candidate = Path(recorded)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    return not candidate.exists()
 
 
 def _runtime_state_key(*, root: Path, name: str) -> str:

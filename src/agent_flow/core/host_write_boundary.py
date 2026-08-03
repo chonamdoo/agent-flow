@@ -362,6 +362,16 @@ def _survey_checkouts(root: Path) -> _CheckoutSurvey:
             root=root, name=name, registered_by_path=registered_by_path
         )
         if entry is None:
+            # checkout이 아예 사라졌으면 그 run은 이어질 수 없고 지킬 대상도 없다.
+            # 그걸 조작으로 보고 raise하면 hook이 이 프로젝트의 **모든** write와
+            # bash에서 죽는다 — 워크트리 폴더를 지운 것만으로 복구 불가가 된다.
+            # 되살릴 경로는 `agent-flow abort --worktree <name>`이다.
+            if _claim_checkout_is_absent(
+                root=root, name=name, registered=tuple(registered_by_path)
+            ):
+                continue
+            # 자리는 있는데 등록만 없는 경우는 다르다. 살아 있는 checkout의 등록이
+            # 사라진 것이므로 fail-closed를 유지한다.
             raise HostWriteBoundaryError(
                 "active run state has no provable registered worktree owner: "
                 f"{name}"
@@ -436,6 +446,29 @@ def _registered_for_claim(
         if entry is not None:
             return entry
     return None
+
+
+def _claim_checkout_is_absent(
+    *,
+    root: Path,
+    name: str,
+    registered: tuple[Path, ...],
+) -> bool:
+    """이 claim이 가리킬 수 있는 자리가 **하나도** 디스크에 없는가.
+
+    자리가 살아 있는데 소유 증명만 없는 경우(관리 자리 밖의 등록 checkout이 자기
+    이름으로 런타임 상태를 만든 경우)는 조작 신호다 — 여기서 "없다"고 답하면
+    그 fail-closed가 사라진다. 그래서 신뢰 후보뿐 아니라 **같은 이름으로 등록된
+    살아 있는 checkout**도 존재로 센다.
+    """
+    if any(path.name == name and path.exists() for path in registered):
+        return False
+    try:
+        candidates = trusted_checkout_paths(root=root, name=name)
+    except (OSError, RuntimeError, ValueError):
+        # 후보를 못 세우면 없다고 단정하지 않는다. 판정은 호출자의 fail-closed로.
+        return False
+    return not any(candidate.exists() for candidate in candidates)
 
 
 def _active_checkout(

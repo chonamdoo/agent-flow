@@ -336,6 +336,33 @@ def test_legacy_in_checkout_manifest_is_read_and_removed(tmp_path: Path):
     assert not manifest.exists()
 
 
+def test_imported_metadata_needs_force_and_reports_when_kept(tmp_path: Path):
+    """반증: 다른 머신에서 복사돼 온 metadata는 소유 증명이 영구히 실패한다.
+
+    그 상태로 지웠다고 보고하면 사용자는 목록에 계속 뜨는 이유를 알 수 없고, 지울
+    방법도 없다. 기본은 보존 + 사실 보고, 명시적 force일 때만 삭제다. 살아 있는
+    자리는 force로도 지우지 않는다.
+    """
+    root = _leader(tmp_path)
+    key = "feat-imported"
+    state_root = root / ".git" / "agent-flow" / "worktrees" / key
+    state_root.mkdir(parents=True)
+    foreign = Path("/Users/someone-else/Downloads/project.worktrees") / key
+    (state_root / "manifest.json").write_text(
+        json.dumps({"name": key, "branch": "feat/imported", "path": str(foreign)}),
+        encoding="utf-8",
+    )
+    target = managed_worktrees_root(root) / key
+
+    assert remove_worktree_metadata(root=root, name=key, path=target) is False
+    assert state_root.exists()
+
+    assert remove_worktree_metadata(
+        root=root, name=key, path=target, force=True
+    ) is True
+    assert not state_root.exists()
+
+
 def test_reusing_an_existing_checkout_records_its_adoption(tmp_path: Path):
     """create가 성공했는데 run이 미채택으로 막히면 사용자에게는 이유 없는 차단이다."""
     root = _leader(tmp_path)
