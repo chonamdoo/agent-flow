@@ -222,6 +222,9 @@ phases:
       - "ui-state-modeling: explicit|n/a"
       - "presentation-mapping-boundary: domain-to-uimodel|n/a"
       - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a"
+      - "regression-test:"
+      - "red-observed:"
+      - "test-run-evidence: verified|unavailable"
     prompt: |
       For each slice in slice-plan.md, in order, run the TDD cycle:
 
@@ -509,6 +512,9 @@ phases:
       - "ui-state-modeling: explicit|n/a"
       - "presentation-mapping-boundary: domain-to-uimodel|n/a"
       - "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a"
+      - "regression-test:"
+      - "red-observed:"
+      - "test-run-evidence: verified|unavailable"
     routes:
       default: comment-authoring
     prompt: |
