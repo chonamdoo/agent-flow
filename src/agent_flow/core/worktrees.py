@@ -4494,7 +4494,10 @@ _SLUG_SAFE_CHAR_RE = re.compile(r"[a-z0-9]")
 
 def describe_slug(value: str) -> SlugQuality:
     lowered = value.strip().lower()
-    safe = re.sub(r"[^a-z0-9._-]+", "-", lowered).strip("-")
+    safe = re.sub(r"[^a-z0-9._-]+", "-", lowered)
+    # 버려진 글자마다 구분자를 하나씩 남기면 원문의 `-` 양옆이 같이 치환돼
+    # `ui---cta`가 된다. 이어진 구분자는 하나로 접고 양끝에서는 걷어낸다.
+    safe = re.sub(r"[-._]{2,}", "-", safe).strip("-._")
     # 토큰 단위로 생사를 보면 `로그인화면Figma구현`처럼 붙여 쓴 task가 통째로
     # 살아남은 것이 된다. 실제로 지워진 글자를 기준으로 센다.
     dropped = tuple(
@@ -4502,6 +4505,11 @@ def describe_slug(value: str) -> SlugQuality:
         for word in value.split()
         if any(char.isalnum() and not _SLUG_SAFE_CHAR_RE.match(char.lower()) for char in word)
     )
+    # 글자가 하나도 없는 slug는 이름이 아니다. `1-1 홈 화면`은 `1-1`만 남겨
+    # 브랜치를 만들지만 그 이름으로는 어떤 작업인지 누구도 알 수 없고, 다음 번호
+    # 작업과 충돌한다. 비ASCII task와 같은 취급으로 digest fallback을 쓴다.
+    if not any("a" <= char <= "z" for char in safe):
+        safe = ""
     if not safe or safe.startswith(".") or ".." in safe:
         if not any(char.isalnum() for char in lowered):
             raise ValueError(f"worktree name must contain at least one safe character: {value}")
@@ -4601,22 +4609,6 @@ def _live_branch(*, root: Path, path: Path) -> str | None:
     except ValueError:
         return None
     return branch
-
-
-def _registered_managed_worktree_names(root: Path) -> set[str]:
-    """git이 등록한 checkout 중 managed root 바로 아래 있는 것들의 이름.
-
-    디렉터리가 지워져도 등록은 남으므로 디스크 스캔만으로는 안 보인다. 이름을
-    다시 `<managed>/<name>`으로 되돌릴 수 있는 자리만 후보로 받는다 — 그 밖의
-    등록은 이름만으로 경로를 복원할 수 없어 remove가 엉뚱한 곳을 가리킨다.
-    """
-    managed_root = real_path(root / ".agent-flow" / "worktrees")
-    leader = real_path(root)
-    return {
-        path.name
-        for path in _registered_worktree_paths(root)
-        if path != leader and path.parent == managed_root
-    }
 
 
 def _registered_worktree_paths(root: Path) -> set[Path]:

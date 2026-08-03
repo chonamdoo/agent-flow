@@ -125,3 +125,30 @@ def test_non_ascii_glued_to_ascii_is_still_partial(task: str):
     quality = describe_slug(task)
     assert quality.kind == "partial", f"{task} -> {quality.kind}"
     assert quality.dropped, "무엇이 사라졌는지 말해야 한다"
+
+
+def test_dropped_words_do_not_pile_up_separators():
+    """반증: `1-1 홈 UI - CTA 6dp 적용`이 `feat/1-1-ui---cta-6dp`를 만들었다.
+
+    버려진 글자마다 구분자를 하나씩 남기면 원문의 `-` 양옆이 같이 치환된다.
+    브랜치 이름에 그대로 드러나므로 조용한 결함이 아니라 눈에 띄는 흉터다.
+    """
+    quality = describe_slug("1-1 홈 UI - CTA 6dp 적용")
+    assert quality.slug == "1-1-ui-cta-6dp"
+    assert "--" not in quality.slug
+
+
+def test_slug_without_letters_falls_back_to_a_digest():
+    """반증: `1-1`은 브랜치 이름이 아니다.
+
+    그 이름으로는 어떤 작업인지 누구도 알 수 없고, 다음 번호 작업과 충돌한다.
+    비ASCII task와 같은 취급으로 digest를 쓴다.
+    """
+    quality = describe_slug("1-1")
+    assert quality.kind == "digest"
+    assert quality.slug.startswith("task-")
+
+
+def test_a_single_dot_inside_a_word_survives():
+    """불변: 구분자 접기가 `v1.2` 같은 진짜 값을 망가뜨리면 안 된다."""
+    assert describe_slug("v1.2 release").slug == "v1.2-release"
