@@ -1598,6 +1598,13 @@ def _tracked_content_digest(leader_root) -> str:
 
     읽지 못하면 sentinel을 남기지 않고 raise한다. sentinel은 다음 스냅샷과
     무조건 어긋나 오탐이 되고, 오탐은 완료된 산출물을 버리게 만든다.
+
+    진단용 필터는 전부 끈다. `.gitattributes`가 지목하는 diff driver의 `textconv`와
+    `command`는 저장소가 커밋해 두는 값이므로, 켜 두면 **관측 대상이 관측 방법을
+    고른다**. 결과는 두 가지다. 양쪽 출력이 같아지는 필터에서는 diff가 0바이트가 되어
+    이 digest가 상수로 굳고(재수정 신호 상실), git이 그 프로그램을 스냅샷마다 실제로
+    실행한다(경계 코드가 저장소 설정에 코드 실행을 허용). `--binary`는 그 위에서
+    바이너리 파일을 축약 sha 한 줄이 아니라 내용 자체로 비교하게 한다.
     """
     # pathspec이 없으면 agent-flow 자신의 상태 쓰기가 digest를 바꾼다. `.agent-flow/`가
     # git-tracked인 프로젝트에서 `claim_task` 한 번에 완료된 task가 failed로 되돌아갔다.
@@ -1605,6 +1612,9 @@ def _tracked_content_digest(leader_root) -> str:
         "diff",
         "HEAD",
         "--no-color",
+        "--binary",
+        "--no-ext-diff",
+        "--no-textconv",
         "--",
         ".",
         *(f":(exclude){path}" for path in _RUNTIME_WRITE_PATHS),
