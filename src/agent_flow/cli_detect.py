@@ -1,9 +1,9 @@
 """Detect which AI CLIs are installed on PATH.
 
 The runner uses this to (a) pick a host adapter when none is forced and
-(b) distribute multi-reviewer phases across whichever CLIs are present.
-A user with multiple CLIs installed gets diverse opinions; a user with only one
-host gets parallel sub-agents within that host.
+(b) fan multi-reviewer phases out across the review pool. `KNOWN_CLIS` lists
+every host CLI; `REVIEW_CLI_NAMES` is the narrower reviewer pool. OMP can host a
+run but is never a reviewer provider, so a review phase sees Claude/Codex only.
 """
 from __future__ import annotations
 
@@ -28,6 +28,7 @@ KNOWN_CLIS: tuple[CliInfo, ...] = (
     # Oh My Pi CLI one-shot: `omp -p "<prompt>"`
     CliInfo(name="omp", binaries=("omp",), invoke=("-p",)),
 )
+REVIEW_CLI_NAMES = ("claude", "codex")
 
 
 def detect_available_clis() -> list[CliInfo]:

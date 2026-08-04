@@ -30,10 +30,14 @@ scripts/hooks/          ← PreToolUse/PostToolUse/Stop hooks (guard-protected-b
 ## Gotchas
 
 - `full-feature`는 `gates` fail → `fix-loop` → `gates` 순환. `default`의 gates는 `implement` completion marker로 강제한다.
-- `multi-review`는 활성 host(현재 사용 중인 CLI)의 sub-agent 2개가 필수. 활성 host가 아닌 추가 provider는 optional이며, 2+ 독립 reviewer 없이는 approve 불가.
+- `multi-review`는 설치된 Claude/Codex CLI reviewer subprocess 2개 이상이 필수. OMP는 host/controller로만 쓰고 reviewer provider pool에서는 제외되며, 2+ 독립 reviewer 없이는 approve 불가.
 - `architecture-review`의 `request-changes`/`blocked` verdict → `refactor`로 라우팅.
 - worktree는 `agent-flow worktree create --name feat-<slug>`로 만든다. 기본 자리는 `~/.agent-flow/worktrees/<repo-id>/<name>`이다 — 프로젝트 폴더 안에 두면 leader를 열어 둔 IDE가 worktree 작업에 반응해 leader의 `.gradle/` 같은 캐시를 건드리고, leader tripwire가 그것을 오염으로 보고해 남은 phase가 exit 2로 막힌다. 이전 자리(`<repo>.worktrees/<name>`, `.agent-flow/worktrees/<name>`)의 checkout은 계속 인식된다. leader worktree에서 `git checkout`/`git switch`로 브랜치를 바꾸지 않는다.
 - 그 밖의 linked worktree(Orca `~/orca/workspaces/<repo>/<slug>` 등)는 `agent-flow worktree adopt --path <checkout>`으로 채택해야 인식된다. 채택 전에 그 안에서 `run`/`start`를 치면 blocker다 — git 등록만으로 인가하면 워커가 `git worktree add`로 자기 권한을 만들 수 있다. install은 언제나 leader checkout에서만 한다(linked worktree에서 실행하면 차단된다).
+- host write boundary(`scripts/hooks/guard-host-worktree.sh` → `core/host_write_boundary.py`)의 **사전 차단은 두 개뿐이다**: 보호 경로(leader·등록된 형제 checkout·런타임 상태)가 명령 텍스트에 리터럴로 나타나면 거부, 그리고 되돌릴 수 없는 명령(`rm`/`rmdir`/`shred`/`mv`, `git checkout|restore|clean|reset`)이 그 경로에 닿을 수 있으면 거부. 명령별 "쓰기 대상" 표를 다시 만들지 않는다 — 셸 문법은 무한하고 목록은 유한해서, 그 방향은 예외만 늘리고 무엇이 막히는지 말할 수 없게 한다(`tests/test_host_write_boundary.py::test_pre_block_surface_stays_two_rules`가 되살아나면 깨진다).
+- 동적 경로(`$(...)`, 변수)와 worktree 안 심링크를 거친 **되돌릴 수 있는** 쓰기는 사전에 막지 않는다. leader 쪽은 PostToolUse tripwire(`scripts/hooks/worktree-tripwire.py`)가 매 명령마다 내용까지 비교해 잡는다. 형제 checkout과 unbound 세션은 사후 탐지가 없다(`worktree-tripwire.py:65,68`) — 그래서 그 둘에 대한 리터럴 차단은 느슨하게 하지 않는다.
+- 판정 불가는 차단이 아니다. 셸 파싱 실패나 cwd 미선언은 통과시키고(파괴 명령만 예외), 대신 lifecycle 명령(`status`/`continue`/`run`/`start`)은 **어떤 상태에서도** 통과시킨다. 경계가 만든 교착의 해제 명령이 그 경계 뒤에 있으면 탈출구가 0이 된다. 그 면제 목록을 넓히지 않는다 — 면제된 경로는 리터럴 차단·파괴 목록·tripwire를 한꺼번에 건너뛰므로, `eval --judge-command`가 임의 argv 실행 통로가 되고 `worktree remove --name`이 형제 checkout을 지운다(`tests/test_host_write_boundary.py::test_lifecycle_exemption_stays_narrow`가 지킨다).
+- leader가 정상 fast-forward하면 그것은 drift가 아니다. HEAD 완화는 같은 브랜치·조상 관계·leader 자신의 reflog 기록 **셋을 모두** 만족할 때만 준다(`core/worktree_isolation.py:_head_drift_kind`). 그래서 stale baseline을 손으로 푸는 명령이 없다 — 대신 `reset --hard`(조상 아님), 브랜치 전환, 밖에서 밀어 넣은 ref는 그대로 걸린다. 스냅샷 **형식**이 바뀐 기록은 비교하지 않고 재캡처한다(`LeaderSnapshot.version`) — 형식 차이를 오염으로 보고하면 진행 중인 run 전부가 근거 없이 막힌다.
 
 Workflow Contract와 Context Economy는 아래 agent-flow 블록이 canonical source다. 여기에 중복으로 적지 않는다.
 
@@ -59,7 +63,7 @@ run의 status가 SPEC 추가·수정·삭제를 보고하면 변경 목록만 �
 - phase 이동은 status의 `next_command`를 그대로 따른다. `agent-flow continue`나 `agent-flow run advance`를 추측하지 않는다.
 - `default.yaml`: design → slice-plan → worktree → implement → comment-authoring → final-review → gates ↔ fix-loop → comment-authoring → final-review → gates → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge → cleanup
 - `full-feature.yaml`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → comment-authoring → multi-review → architecture-review → gates ↔ fix-loop → comment-authoring → multi-review → architecture-review → gates → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
-- `multi-review`는 현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수다. 두 sub-agent를 병렬 실행하고, `reviewer-source: sub-agent`를 기록한 뒤 sub-agent를 닫는다. 마지막에 `## Overall`과 `verdict: approve` 또는 `verdict: request-changes`만 기록한다. 활성 host가 아닌 추가 provider는 optional이다.
+- `multi-review`는 설치된 Claude/Codex CLI reviewer subprocess 2개 이상이 필수다. 두 reviewer를 병렬 실행하고 각 결과에 `reviewer-source: sub-agent`를 기록한다. 마지막에 `## Overall`과 `verdict: approve` 또는 `verdict: request-changes`만 기록한다. OMP는 host/controller로만 쓰고 reviewer provider로는 쓰지 않는다.
 
 ### Context Economy
 
@@ -70,7 +74,12 @@ run의 status가 SPEC 추가·수정·삭제를 보고하면 변경 목록만 �
 - 모든 guide를 항상 로드하지 말고 변경 파일에 필요한 guide만 읽는다.
 - 프로젝트 skill은 `skills/<name>/SKILL.md` 또는 private `.agent-flow/local-skills/<name>/SKILL.md`에 둔다.
 <!-- agent-flow:skills:start -->
-- 설치된 skill 인덱스가 아직 없다. install이 이 자리에 채운다.
+```text
+[agent-flow skill index]|root: .agent-flow/skills
+|IMPORTANT: 아래 파일이 기억보다 우선한다. 변경 대상을 먼저 훑고, scope가 걸리는 것만 읽는다.
+|always:{code-generation-discipline,comment-authoring-discipline}
+|on-demand:{agent-flow,agent-flow-concise-output,architecture-reviewer,clean-architecture,clean-architecture-core,code-review,codebase-design,comment-checker,ddd-architecture,domain-modeling,full-feature-workflow,grill-with-docs,grilling,plan-reviewer,product-brief,push-watch,python-api-clean-architecture,python-development-guide,resolving-merge-conflicts,tdd,to-prd}
+```
 <!-- agent-flow:skills:end -->
 - 인덱스에 없는 skill은 이 프로젝트에 설치돼 있지 않다. 런타임에 설치를 묻지 말고 `agent-flow skills sync`에 맡긴다.
 - Claude/Codex/OMP 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.

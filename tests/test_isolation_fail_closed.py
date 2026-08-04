@@ -546,6 +546,35 @@ def test_provider_sandbox_writes_only_to_the_verified_worktree(tmp_path):
         f'(allow file-write* (subpath "{scratch.resolve()}"))'
         in read_only_profile
     )
+    # 반증: 이 규칙이 read-only 실행에도 붙어 있으면, workspace가 잠긴 reviewer가
+    # 공유 gitdir의 ref를 직접 덮어써 protected branch를 옮길 수 있다. hook 기반
+    # commit/push 보호는 파일을 직접 쓰는 이 경로를 보지 못한다.
+    #
+    # `gitdir`도 같은 분기로 닫힌다. 그쪽은 보안이 아니라 기능 축이다 — index와
+    # HEAD가 거기 있어서, 열려 있으면 read-only 계약이 이름만 남는다.
+    common = (leader / ".git").resolve()
+    worker_gitdir = W_ISO.git_dir(linked)
+    assert worker_gitdir is not None
+    shared_subpaths = (
+        worker_gitdir,
+        common / "refs",
+        common / "logs",
+        common / "objects",
+    )
+    for shared in shared_subpaths:
+        assert (
+            f'(allow file-write* (subpath "{shared}"))' not in read_only_profile
+        ), f"read-only 실행에 공유 git 쓰기가 열려 있다: {shared}"
+    for locked in (common / "packed-refs", common / "packed-refs.lock"):
+        assert (
+            f'(allow file-write* (literal "{locked}"))' not in read_only_profile
+        ), f"read-only 실행에 공유 git 쓰기가 열려 있다: {locked}"
+    # 커밋해야 하는 실행에는 그대로 열려 있어야 한다. 이 양성 단언이 없으면 위
+    # `not in` 검사가 규칙 문자열 포맷 변경만으로 조용히 공허해진다.
+    for shared in shared_subpaths:
+        assert f'(allow file-write* (subpath "{shared}"))' in profile, shared
+    for locked in (common / "packed-refs", common / "packed-refs.lock"):
+        assert f'(allow file-write* (literal "{locked}"))' in profile, locked
     for parent in (Path.home().resolve(), leader.resolve(), linked.resolve()):
         for name in (".claude", ".Codex", ".codex", ".omp", ".agents"):
             assert (

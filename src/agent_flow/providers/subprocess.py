@@ -19,6 +19,8 @@ from agent_flow.core.worktree_isolation import (
     WorktreeIsolationError,
     assert_cwd_bound,
     assert_provider_lease,
+    git_common_dir,
+    git_dir,
     leader_root_for,
     managed_worktree_root,
     provider_lease,
@@ -650,6 +652,13 @@ def _macos_sandbox_profile(
     git_control_rules = (
         f'(deny file-write* (literal "{_sandbox_path(canonical / ".git")}"))',
     )
+    # 공유 gitdir 쓰기는 **커밋할 프로세스에만** 준다. read-only 실행(reviewer)은
+    # 커밋하지 않으므로 이 규칙이 필요 없고, 주면 workspace가 잠긴 프로세스가
+    # `<common>/refs/heads/<protected>`를 직접 덮어써 hook 기반 commit/push 보호를
+    # 우회할 수 있다. 그쪽은 파일시스템 권한이 유일한 방어다.
+    git_shared_rules = (
+        _git_shared_write_rules(canonical) if allow_workspace_writes else ()
+    )
     scratch_rules = (
         (f'(allow file-write* (subpath "{_sandbox_path(real_path(scratch))}"))',)
         if scratch is not None
@@ -662,10 +671,50 @@ def _macos_sandbox_profile(
             "(deny file-write*)",
             *workspace_rules,
             *scratch_rules,
+            *git_shared_rules,
             *git_control_rules,
             '(allow file-write-data (literal "/dev/null"))',
             *protected_rules,
         )
+    )
+
+
+def _git_shared_write_rules(worktree: Path) -> tuple[str, ...]:
+    """linked worktree가 자기 작업을 커밋하는 데 필요한 공유 gitdir 자리만 연다.
+
+    linked worktree의 index·HEAD·objects·refs는 checkout 안이 아니라 leader의 git
+    common dir 아래에 있다. 그 자리를 통째로 막으면 provider의 `git add` 한 줄이
+    `Unable to create '<leader>/.git/worktrees/<name>/index.lock': Operation not
+    permitted`로 죽는다 — worktree 안에서 아무것도 커밋할 수 없다는 뜻이고,
+    leader가 사용자 홈의 보호 폴더에 있으면 그 폴더가 잠긴 것처럼 보인다.
+
+    그래서 커밋 경로만 열고, 다음 git 실행 때 코드를 실행시킬 수 있는 자리는 계속
+    막는다: `hooks/`와 `config`는 애초에 열지 않고, worktree 전용 gitdir 안에서도
+    `config.worktree`(`core.hooksPath` 재지정)와 `commondir`(저장소 재지정)는 명시적으로
+    되막는다. sandbox 규칙은 마지막에 일치한 것이 이기므로 deny를 뒤에 둔다.
+    """
+    common = git_common_dir(worktree)
+    gitdir = git_dir(worktree)
+    if common is None or gitdir is None:
+        raise WorktreeIsolationError(
+            f"provider sandbox cannot resolve the git directories for: {worktree}"
+        )
+    allowed_subpaths = (gitdir, common / "objects", common / "refs", common / "logs")
+    allowed_literals = (common / "packed-refs", common / "packed-refs.lock")
+    denied_literals = (gitdir / "config.worktree", gitdir / "commondir")
+    return (
+        *(
+            f'(allow file-write* (subpath "{_sandbox_path(path)}"))'
+            for path in allowed_subpaths
+        ),
+        *(
+            f'(allow file-write* (literal "{_sandbox_path(path)}"))'
+            for path in allowed_literals
+        ),
+        *(
+            f'(deny file-write* (literal "{_sandbox_path(path)}"))'
+            for path in denied_literals
+        ),
     )
 
 

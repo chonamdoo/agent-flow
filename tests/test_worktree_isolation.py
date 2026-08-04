@@ -827,6 +827,73 @@ def test_real_provider_process_is_confined_to_attested_checkout(tmp_path):
     sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").is_file(),
     reason="macOS sandbox-exec confinement is required",
 )
+def test_provider_commits_from_its_worktree_without_reaching_git_control_files(tmp_path):
+    """반증: 공유 gitdir를 통째로 막으면 worker는 자기 작업을 커밋조차 못 한다.
+
+    linked worktree의 index·objects·refs는 checkout이 아니라 leader의 git common
+    dir 아래 있다. 그 자리를 열지 않으면 `git add` 한 줄이
+    `Unable to create '<leader>/.git/worktrees/<name>/index.lock'`로 죽고,
+    사용자에게는 leader가 있는 폴더가 통째로 잠긴 것처럼 보인다. 반대로 통째로
+    열면 다음 git 실행 때 코드를 실행시킬 자리(hooks·config)가 열린다. 그래서
+    커밋은 되고 그 자리는 계속 막혀 있다는 것을 함께 고정한다.
+    """
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text(".agent-flow/\n", encoding="utf-8")
+    _git("add", ".gitignore", cwd=tmp_path)
+    _git("commit", "-m", "ignore runtime", cwd=tmp_path)
+    worker = W.create_worktree(
+        root=tmp_path,
+        plan=W.plan_worktree(root=tmp_path, name="worker"),
+    )
+    common = real_path(tmp_path / ".git")
+    gitdir = common / "worktrees" / worker.path.name
+    program = (
+        "import json, subprocess, sys\n"
+        "from pathlib import Path\n"
+        "common, gitdir = map(Path, sys.argv[1:3])\n"
+        "def denied(path):\n"
+        "    try:\n"
+        "        path.write_text('leak', encoding='utf-8')\n"
+        "        return False\n"
+        "    except OSError:\n"
+        "        return True\n"
+        "Path('committed.txt').write_text('work\\n', encoding='utf-8')\n"
+        "add = subprocess.run(['git', 'add', 'committed.txt'], capture_output=True, text=True)\n"
+        "commit = subprocess.run(['git', 'commit', '-m', 'worker commit'], "
+        "capture_output=True, text=True)\n"
+        "result = {'add': add.returncode, 'commit': commit.returncode,\n"
+        "          'stderr': (add.stderr + commit.stderr).strip(),\n"
+        "          'hooks': denied(common / 'hooks' / 'pre-commit'),\n"
+        "          'config': denied(common / 'config'),\n"
+        "          'config-worktree': denied(gitdir / 'config.worktree'),\n"
+        "          'commondir': denied(gitdir / 'commondir')}\n"
+        "Path('gitwrite.json').write_text(json.dumps(result), encoding='utf-8')\n"
+    )
+    result = run_provider(
+        ProviderCommand(
+            name="git-write-probe",
+            argv=(sys.executable, "-c", program, str(common), str(gitdir)),
+        ),
+        prompt="",
+        cwd=worker.path,
+    )
+
+    assert result.failed is False, result.stderr
+    observed = json.loads((worker.path / "gitwrite.json").read_text(encoding="utf-8"))
+    assert observed["add"] == 0, observed["stderr"]
+    assert observed["commit"] == 0, observed["stderr"]
+    assert observed["hooks"] is True
+    assert observed["config"] is True
+    assert observed["config-worktree"] is True
+    assert observed["commondir"] is True
+    landed = _git("log", "-1", "--format=%s", cwd=worker.path).stdout.strip()
+    assert landed == "worker commit"
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").is_file(),
+    reason="macOS sandbox-exec confinement is required",
+)
 def test_provider_revalidates_worktree_identity_after_spawn(tmp_path, monkeypatch):
     _init_repo(tmp_path)
     worker = W.create_worktree(
@@ -1252,7 +1319,10 @@ def test_tripwire_detects_parent_traversal_write(tmp_path):
 
 
 def test_tripwire_detects_leader_branch_switch(tmp_path):
-    """불변: 삭제한 guard-worktree.sh가 막던 leader 브랜치 전환을 tripwire가 대신 잡는다."""
+    """불변: 브랜치가 바뀌면 워킹트리 내용이 통째로 달라지는데 status 축은 clean이다.
+
+    HEAD 완화는 **같은 브랜치**의 전진에만 준다. 브랜치 전환은 그 조건에서 빠진다.
+    """
     status, before = _isolated(tmp_path, "branch")
     _git("checkout", "-q", "-b", "sneaky", cwd=tmp_path)
     with pytest.raises(W_ISO.WorktreeIsolationError) as caught:
@@ -1260,6 +1330,58 @@ def test_tripwire_detects_leader_branch_switch(tmp_path):
     assert "branch switched" in str(caught.value)
     # 되돌리지 않는다. 사용자가 어디에 있는지 스스로 알 수 있어야 한다.
     assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=tmp_path).stdout.strip() == "sneaky"
+
+
+def test_tripwire_accepts_a_same_branch_advance_the_leader_recorded(tmp_path):
+    """반증: 사람의 평범한 `git pull`로 워커가 멈추면 그 정지를 푸는 수단이 따로
+    필요해지고, 그 수단이 다시 경계 뒤에 갇힌다.
+
+    같은 브랜치 + 조상 관계 + leader reflog 기록 셋을 모두 만족하면 워커 소행이
+    아님이 증명되므로 통과한다.
+    """
+    status, before = _isolated(tmp_path, "advance")
+    (tmp_path / "human.txt").write_text("human commit\n", encoding="utf-8")
+    _git("add", "human.txt", cwd=tmp_path)
+    _git("commit", "-q", "-m", "human advances the leader", cwd=tmp_path)
+    W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
+def test_tripwire_detects_a_head_move_the_leader_never_recorded(tmp_path):
+    """불변: 공유 ref를 leader 밖에서 밀어 넣으면 leader reflog는 그대로다.
+
+    다른 worktree가 `update-ref`로 leader의 브랜치를 움직였을 때의 관측 상태를,
+    leader에서 커밋한 뒤 reflog 마지막 줄을 지워 그대로 재현한다. 대조군은 같은
+    커밋을 reflog 손대지 않은 상태로 둔 위 테스트다.
+    """
+    status, before = _isolated(tmp_path, "external")
+    (tmp_path / "pushed.txt").write_text("from elsewhere\n", encoding="utf-8")
+    _git("add", "pushed.txt", cwd=tmp_path)
+    _git("commit", "-q", "-m", "pushed from elsewhere", cwd=tmp_path)
+    reflog = tmp_path / ".git" / "logs" / "HEAD"
+    kept = reflog.read_text(encoding="utf-8").splitlines()[:-1]
+    reflog.write_text("".join(f"{line}\n" for line in kept), encoding="utf-8")
+    with pytest.raises(W_ISO.WorktreeIsolationError) as caught:
+        W_ISO.assert_leader_unchanged(tmp_path, before)
+    message = str(caught.value)
+    assert "HEAD moved" in message
+    assert "without the leader checkout recording it" in message
+
+
+def test_tripwire_detects_a_leader_reset_even_though_the_leader_recorded_it(tmp_path):
+    """불변: reflog 기록만으로 정상이라 부르면 leader를 겨눈 `reset --hard`가 통과한다.
+
+    그 명령은 leader에서 도는 것이므로 leader reflog에 남는다. 조상 관계가 함께
+    요구되어야 뒤로 가는 이동이 걸린다.
+    """
+    status, before = _isolated(tmp_path, "reset")
+    (tmp_path / "doomed.txt").write_text("about to vanish\n", encoding="utf-8")
+    _git("add", "doomed.txt", cwd=tmp_path)
+    _git("commit", "-q", "-m", "commit that a reset would drop", cwd=tmp_path)
+    after_commit = W_ISO.capture_leader_snapshot(tmp_path)
+    _git("reset", "-q", "--hard", "HEAD~1", cwd=tmp_path)
+    with pytest.raises(W_ISO.WorktreeIsolationError) as caught:
+        W_ISO.assert_leader_unchanged(tmp_path, after_commit)
+    assert "HEAD moved" in str(caught.value)
 
 
 def test_tripwire_ignores_agent_runtime_writes(tmp_path):
@@ -1426,6 +1548,155 @@ def test_tripwire_detects_content_change_of_already_dirty_file(tmp_path):
     (tmp_path / "tracked.txt").write_text("worker overwrote it\n", encoding="utf-8")
     with pytest.raises(W_ISO.WorktreeIsolationError):
         W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
+def test_legacy_format_baseline_is_not_reported_as_drift(tmp_path):
+    """반증: 형식이 바뀌면 낡은 기록은 **항상** 달라 보인다.
+
+    실측: `--binary`를 `--full-index`로 바꾸자 같은 트리에서도 `tracked-content`
+    digest가 달라져, 아무도 leader를 건드리지 않았는데 기존 baseline이 "working tree
+    gained/lost ..." 오탐으로 막혔다. 그 오탐은 근거가 없어 사용자가 풀 방법도 없다.
+
+    그래서 버전이 다른 기록은 판정하지 않는다. 비교 가능한 정보가 없는 기록에
+    "변했다"라고 답하는 것은 탐지가 아니라 고장이다.
+    """
+    _isolated(tmp_path, "snapshot-version")
+    current = W_ISO.capture_leader_snapshot(tmp_path)
+    assert current.version == W_ISO.LEADER_SNAPSHOT_VERSION
+    assert current.comparable
+
+    # 낡은 형식을 흉내 낸다: 같은 시점이지만 status 문자열 형식이 다르다.
+    legacy = W_ISO.LeaderSnapshot(
+        head=current.head,
+        branch=current.branch,
+        status="예전 형식에서는 이 줄들이 달랐다",
+        armed=True,
+        version=0,
+    )
+    assert not legacy.comparable
+    assert W_ISO.classify_leader_drift(tmp_path, legacy) is None
+    W_ISO.assert_leader_unchanged(tmp_path, legacy)
+
+    # 같은 내용을 현재 버전으로 기록하면 그건 진짜 차이이므로 반드시 잡혀야 한다.
+    mislabelled = W_ISO.LeaderSnapshot(
+        head=current.head,
+        branch=current.branch,
+        status=legacy.status,
+        armed=True,
+    )
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, mislabelled)
+
+
+def test_snapshot_payload_round_trips_the_format_version(tmp_path):
+    """불변: 저장 형태에 버전이 남아야 다음 판독이 형식을 구분할 수 있다."""
+    _isolated(tmp_path, "snapshot-payload")
+    snapshot = W_ISO.capture_leader_snapshot(tmp_path)
+    payload = W_ISO.leader_snapshot_payload(snapshot)
+
+    assert payload["version"] == W_ISO.LEADER_SNAPSHOT_VERSION
+    assert set(payload) == {"head", "branch", "status", "armed", "version"}
+    assert W_ISO.LeaderSnapshot(**payload) == snapshot
+
+
+def test_a_stored_record_without_a_version_reads_as_legacy(tmp_path):
+    """실제 경로: 구버전이 남긴 JSON에는 `version` 키가 아예 없다."""
+    _isolated(tmp_path, "snapshot-legacy-read")
+    snapshot = W_ISO.capture_leader_snapshot(tmp_path)
+    stored = W_ISO.leader_snapshot_payload(snapshot)
+    stored.pop("version")
+
+    assert W_ISO.recorded_snapshot_version(stored.get("version")) == 0
+    # bool은 int의 서브클래스라 따로 걸러야 한다.
+    assert W_ISO.recorded_snapshot_version(True) == 0
+    assert W_ISO.recorded_snapshot_version("1") == 0
+    assert W_ISO.recorded_snapshot_version(1) == 1
+
+
+def test_tripwire_watches_paths_git_was_told_to_ignore(tmp_path):
+    """반증: `assume-unchanged`/`skip-worktree`는 status와 diff를 **동시에** 침묵시킨다.
+
+    그 표시가 붙은 파일에 대한 쓰기는 두 신호 어디에도 남지 않는다. 사전 차단을
+    두 규칙(보호 경로 리터럴, 파괴 명령)으로 줄인 뒤 tripwire가 주 기제가 됐으므로
+    이 침묵은 그냥 구멍이다 — 표시 여부와 무관하게 "phase 도중 leader는 그대로"라는
+    계약은 같다.
+
+    sparse checkout은 제외 파일 **전부**를 `S`로 표시한다. 그 파일들은 디스크에 없으니
+    감시 대상이 아니어야 한다 — 아니면 monorepo 하나가 스냅샷마다 수만 줄을 만든다.
+    """
+    _isolated(tmp_path, "index-flags")
+    assumed = tmp_path / "assumed.txt"
+    skipped = tmp_path / "skipped.txt"
+    absent = tmp_path / "sparse-excluded.txt"
+    for path in (assumed, skipped, absent):
+        path.write_text("v1\n", encoding="utf-8")
+    _git("add", "assumed.txt", "skipped.txt", "sparse-excluded.txt", cwd=tmp_path)
+    _git("commit", "-m", "tracked files behind index flags", cwd=tmp_path)
+    _git("update-index", "--assume-unchanged", "assumed.txt", cwd=tmp_path)
+    _git("update-index", "--skip-worktree", "skipped.txt", cwd=tmp_path)
+    _git("update-index", "--skip-worktree", "sparse-excluded.txt", cwd=tmp_path)
+    absent.unlink()
+
+    before = W_ISO.capture_leader_snapshot(tmp_path)
+    assert "sparse-excluded.txt" not in before.status
+
+    assumed.write_text("worker overwrote it\n", encoding="utf-8")
+    # 전제 확인: git은 정말로 침묵한다. 이 두 줄이 깨지면 이 테스트의 이유가 사라진다.
+    assert _git("status", "--porcelain", cwd=tmp_path).stdout.strip() == ""
+    assert _git("diff", "HEAD", "--name-only", cwd=tmp_path).stdout.strip() == ""
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, before)
+
+    assumed.write_text("v1\n", encoding="utf-8")
+    skipped.write_text("worker overwrote it\n", encoding="utf-8")
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, before)
+
+    # 되돌리면 통과해야 한다. 표시된 경로를 감시한다는 것이 상수 오탐을 뜻하면 안 된다.
+    skipped.write_text("v1\n", encoding="utf-8")
+    W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
+def test_tracked_digest_ignores_repo_configured_diff_drivers(tmp_path):
+    """반증: `git diff`의 출력과 **실행 방식**을 관측 대상이 고를 수 있다.
+
+    `.gitattributes`가 지목한 driver의 `textconv`/`command`는 diff 본문을 그
+    프로그램의 출력으로 대체하고, git은 스냅샷마다 그것을 실제로 실행한다. 그러면
+    두 가지가 깨진다.
+
+    (1) 양쪽 출력이 같아지는 필터에서는 tracked-content digest가 상수가 되어 재수정
+    신호를 잃는다. leader 오염 탐지가 `_path_content_stamp` 한 겹에만 남는다.
+    (2) tripwire가 저장소 설정이 고른 프로그램을 실행한다. 관측이 관측 대상에게
+    코드 실행을 허용하면 그건 경계가 아니다.
+    """
+    _isolated(tmp_path, "diff-driver")
+    (tmp_path / ".gitattributes").write_text(
+        "masked.txt diff=fixed\n", encoding="utf-8"
+    )
+    masked = tmp_path / "masked.txt"
+    masked.write_text("a=1\n", encoding="utf-8")
+    _git("add", ".gitattributes", "masked.txt", cwd=tmp_path)
+    _git("commit", "-m", "tracked file behind a diff driver", cwd=tmp_path)
+    # 스크립트와 마커는 leader 밖에 둔다. 안에 두면 그 자체가 상태 변경이 된다.
+    marker = tmp_path.parent / f"{tmp_path.name}-driver-ran"
+    driver = tmp_path.parent / f"{tmp_path.name}-driver.sh"
+    driver.write_text(
+        f"#!/bin/sh\n: > {marker}\nexit 0\n",
+        encoding="utf-8",
+    )
+    driver.chmod(0o755)
+
+    for setting in ("diff.fixed.textconv", "diff.fixed.command"):
+        _git("config", setting, str(driver), cwd=tmp_path)
+        masked.write_text("dirty before the phase\n", encoding="utf-8")
+        first = W_ISO._tracked_content_digest(tmp_path)
+        masked.write_text("worker overwrote it\n", encoding="utf-8")
+        assert W_ISO._tracked_content_digest(tmp_path) != first, setting
+
+        marker.unlink(missing_ok=True)
+        W_ISO.capture_leader_snapshot(tmp_path)
+        assert not marker.exists(), f"{setting} ran repo-configured code in the tripwire"
+        _git("config", "--unset", setting, cwd=tmp_path)
 
 
 def test_tripwire_never_touches_user_work(tmp_path):

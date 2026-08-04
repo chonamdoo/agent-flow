@@ -130,7 +130,7 @@ class GenericAdapter(Adapter):
             self._write_blocked_stub(
                 phase,
                 run_dir,
-                reason="No AI host detected; active-host reviewer sub-agents are unavailable.",
+                reason="No AI host detected; no Claude/Codex reviewer subprocess is available.",
             )
             return True
         if mode == "stub":

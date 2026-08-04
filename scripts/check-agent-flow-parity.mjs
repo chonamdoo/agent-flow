@@ -440,10 +440,10 @@ for (const rel of fullFeatureWorkflowCopies) {
   assertContains(rel, "comment-authoring: applied");
   assertContains(rel, "comment-checker: checked|unavailable|n/a");
   assertContains(rel, "`n/a` only when the changed diff has no");
-  assertContains(rel, "Default reviewers are active-host sub-agents");
+  assertContains(rel, "Reviewers are installed Claude and Codex CLIs only");
   assertNotContains(rel, "Gemini sub-agent in Gemini");
   assertContains(rel, "reviewer-source: sub-agent");
-  assertContains(rel, "close that sub-agent session");
+  assertContains(rel, "Never use OMP or controller-session work");
   assertContains(rel, "## Overall");
   assertContains(rel, "verdict: approve");
   assertContains(rel, "verdict: request-changes");
@@ -461,10 +461,10 @@ if (CHECK_INSTALLED_COPY) {
     assertSame(`${PACKAGED_WORKFLOWS}/${entry}`, `.agent-flow/workflows/${entry}`);
   }
 }
-assertContains(`${PACKAGED_WORKFLOWS}/default.yaml`, "active-host reviewer sub-agents");
+assertContains(`${PACKAGED_WORKFLOWS}/default.yaml`, "installed Claude and Codex CLIs only");
 assertNotContains(`${PACKAGED_WORKFLOWS}/default.yaml`, "Gemini sub-agent");
 assertContains(`${PACKAGED_WORKFLOWS}/default.yaml`, "reviewer-source: sub-agent");
-assertContains(`${PACKAGED_WORKFLOWS}/default.yaml`, "close that sub-agent session");
+assertContains(`${PACKAGED_WORKFLOWS}/default.yaml`, "Never use OMP or controller-session work");
 assertContains(`${PACKAGED_WORKFLOWS}/default.yaml`, "## Overall");
 assertContains(`${PACKAGED_WORKFLOWS}/default.yaml`, "verdict: approve");
 assertContains(`${PACKAGED_WORKFLOWS}/default.yaml`, "verdict: request-changes");
@@ -474,11 +474,11 @@ assertContains(`${PACKAGED_WORKFLOWS}/default.yaml`, "comment-scope: final-pass-
 assertContains("skills/code-generation-discipline/SKILL.md", "Write comments only when code alone cannot carry the reason or contract.");
 assertNotContains("skills/code-generation-discipline/SKILL.md", "Every new or modified code block must include Korean " + "comments");
 if (CHECK_INSTALLED_COPY) {
-  assertContains(".agent-flow/prompts/multi-review.md", "Default reviewers are active-host sub-agents");
+  assertContains(".agent-flow/prompts/multi-review.md", "Reviewers are installed Claude and Codex CLIs only");
   assertContains(".agent-flow/prompts/multi-review.md", "skills_checked: true");
   assertNotContains(".agent-flow/prompts/multi-review.md", "Gemini sub-agent");
   assertContains(".agent-flow/prompts/multi-review.md", "reviewer-source: sub-agent");
-  assertContains(".agent-flow/prompts/multi-review.md", "close that sub-agent session");
+  assertContains(".agent-flow/prompts/multi-review.md", "Never use OMP or controller-session work");
   assertContains(".agent-flow/prompts/multi-review.md", "## Overall");
   assertContains(".agent-flow/prompts/multi-review.md", "verdict: approve");
   assertContains(".agent-flow/prompts/multi-review.md", "verdict: request-changes");
@@ -651,11 +651,11 @@ for (const rel of [
   assertContains(rel, "install은 프로젝트당 1회만");
   assertContains(rel, "next_command");
   assertContains(rel, "짧은 한글");
-  assertContains(rel, "현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수");
-  assertContains(rel, "활성 host가 아닌 추가 provider는 optional");
+  assertContains(rel, "설치된 Claude/Codex CLI reviewer subprocess 2개 이상이 필수");
+  assertContains(rel, "OMP는 host/controller로만 쓰고 reviewer provider로는 쓰지 않는다");
   assertNotContains(rel, "예: Claude/Gemini");
   assertContains(rel, "reviewer-source: sub-agent");
-  assertContains(rel, "sub-agent를 닫는다");
+  assertNotContains(rel, "활성 host");
   assertContains(rel, "## Overall");
   assertContains(rel, "verdict: approve");
   assertContains(rel, "verdict: request-changes");
@@ -673,10 +673,10 @@ if (CHECK_INSTALLED_COPY) {
   assertContains(".agent-flow/rules/workflow-contract.md", "agent-flow gates --phase all");
   assertContains(".agent-flow/rules/workflow-contract.md", "default workflow, gates run as their own phase");
   assertContains(".agent-flow/rules/workflow-contract.md", "short Korean");
-  assertContains(".agent-flow/rules/workflow-contract.md", "two active-host sub-agents");
+  assertContains(".agent-flow/rules/workflow-contract.md", "two independent Claude/Codex reviewer subprocesses");
   assertNotContains(".agent-flow/rules/workflow-contract.md", "Gemini sub-agent in Gemini");
   assertContains(".agent-flow/rules/workflow-contract.md", "reviewer-source: sub-agent");
-  assertContains(".agent-flow/rules/workflow-contract.md", "close that sub-agent session");
+  assertContains(".agent-flow/rules/workflow-contract.md", "OMP and controller-session work are never reviewer providers");
   assertContains(".agent-flow/rules/workflow-contract.md", "## Overall");
   assertContains(".agent-flow/rules/workflow-contract.md", "verdict: approve");
   assertContains(".agent-flow/rules/workflow-contract.md", "verdict: request-changes");

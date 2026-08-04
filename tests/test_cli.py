@@ -292,8 +292,8 @@ class CliTest(unittest.TestCase):
         self.assertIn("Do not refactor", phases["comment-authoring"]["prompt"])
         self.assertEqual(phases["multi-review"]["routes"]["request-changes"], "fix-loop")
         self.assertTrue(phases["multi-review"]["multi_review"])
-        self.assertIn("Default reviewers are active-host sub-agents", phases["multi-review"]["prompt"])
-        self.assertIn("close that sub-agent session", phases["multi-review"]["prompt"])
+        self.assertIn("Reviewers are installed Claude and Codex CLIs only", phases["multi-review"]["prompt"])
+        self.assertIn("Never use OMP or controller-session work", phases["multi-review"]["prompt"])
         self.assertIn("reviewer-source: sub-agent", phases["multi-review"]["prompt"])
         self.assertIn("## Overall", phases["multi-review"]["prompt"])
         self.assertIn("verdict: approve", phases["multi-review"]["prompt"])
@@ -337,6 +337,9 @@ class CliTest(unittest.TestCase):
                 "ui-state-modeling: explicit|n/a",
                 "presentation-mapping-boundary: domain-to-uimodel|n/a",
                 "di-boundary: hilt|context-provider|tsyringe|swift-environment|factory|swift-dependencies|swinject|needle|direct|existing|n/a",
+                "regression-test:",
+                "red-observed:",
+                "test-run-evidence: verified|unavailable",
             ],
         )
         self.assertEqual(default_phases["final-review"]["routes"]["request-changes"], "fix-loop")
@@ -353,9 +356,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("hook-parity-check: pass|fail", default_phases["final-review"]["required_markers"])
         self.assertIn("codex-claude-parity-check: pass|fail", default_phases["final-review"]["prompt"])
         self.assertIn("hook-parity-check: pass|fail", default_phases["final-review"]["prompt"])
-        self.assertIn("at least two active-host reviewer sub-agents", default_phases["final-review"]["prompt"])
         self.assertIn("reviewer-source: sub-agent", default_phases["final-review"]["prompt"])
-        self.assertIn("close that sub-agent session", default_phases["final-review"]["prompt"])
         self.assertIn("## Overall", default_phases["final-review"]["prompt"])
         self.assertIn("verdict: approve", default_phases["final-review"]["prompt"])
         self.assertIn("verdict: request-changes", default_phases["final-review"]["prompt"])
@@ -369,6 +370,25 @@ class CliTest(unittest.TestCase):
         self.assertEqual(default_phases["pr-watch"]["routes"]["pending"], "block")
         self.assertEqual(default_phases["pr-comment-fix"]["routes"]["default"], "pr-watch")
         self.assertEqual(default_phases["pr-ci-fix"]["routes"]["default"], "pr-watch")
+
+    def test_default_final_review_uses_claude_codex_provider_policy(self) -> None:
+        import yaml
+
+        workflow_path = (
+            Path(__file__).resolve().parents[1]
+            / "src"
+            / "agent_flow"
+            / "workflows"
+            / "default.yaml"
+        )
+        payload = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+        phases = {phase["id"]: phase for phase in payload["phases"]}
+        prompt = phases["final-review"]["prompt"]
+
+        self.assertIn("installed Claude and Codex CLIs only", prompt)
+        self.assertIn("Do not launch reviewer CLIs", prompt)
+        self.assertIn("dropped from its remaining angles", prompt)
+        self.assertIn("Never use OMP or controller-session work", prompt)
 
     def test_workflow_export_outputs_normalized_phase_contract(self) -> None:
         output = io.StringIO()
@@ -651,6 +671,8 @@ class CliTest(unittest.TestCase):
             ),
         ]
         codex = CliInfo("codex", ("codex",), ("exec",))
+        claude = CliInfo("claude", ("claude",), ("-p",))
+        omp = CliInfo("omp", ("omp",), ("-p",))
         with (
             mock.patch.dict(os.environ, {}, clear=True),
             mock.patch(
@@ -677,6 +699,8 @@ class CliTest(unittest.TestCase):
             self.assertEqual(residual_host_jobs(distribution), jobs)
         with mock.patch.dict(os.environ, {"AGENT_FLOW_REVIEWERS": "codex"}, clear=True):
             self.assertEqual([cli.name for cli in resolve_review_clis()], ["codex"])
+        with mock.patch.dict(os.environ, {"AGENT_FLOW_REVIEWERS": "omp"}, clear=True):
+            self.assertEqual(resolve_review_clis(), [])
         with (
             mock.patch.dict(
                 os.environ,
@@ -702,6 +726,253 @@ class CliTest(unittest.TestCase):
                 for job in assigned
             ]
             self.assertEqual(len(outputs), len(set(outputs)))
+        with (
+            mock.patch.dict(os.environ, {}, clear=True),
+            mock.patch(
+                "agent_flow.multi_review.detect_available_clis",
+                return_value=[claude, codex, omp],
+            ),
+        ):
+            distribution = distribute(jobs, host="omp")
+            self.assertEqual(tuple(distribution.by_cli), ("claude",))
+            self.assertNotIn("omp", distribution.by_cli)
+
+    def test_final_review_uses_only_claude_and_codex(self) -> None:
+        from agent_flow.cli_detect import CliInfo
+        from agent_flow.multi_review import ReviewerJob, distribute_final_review
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            jobs = [
+                ReviewerJob("generalist", "prompt", root / "generalist.md", root),
+                ReviewerJob("architecture", "prompt", root / "architecture.md", root),
+            ]
+            clis = [
+                CliInfo("claude", ("claude",), ("-p",)),
+                CliInfo("codex", ("codex",), ("exec",)),
+                CliInfo("omp", ("omp",), ("-p",)),
+            ]
+            with mock.patch(
+                "agent_flow.multi_review.detect_available_clis",
+                return_value=clis,
+            ):
+                distribution = distribute_final_review(jobs, host="omp")
+
+            self.assertEqual(tuple(distribution.by_cli), ("claude", "codex"))
+            self.assertTrue(distribution.accept_any_provider)
+            self.assertEqual(len(distribution.required_job_ids), 4)
+            self.assertTrue(all(
+                "-omp" not in str(job.output_path)
+                for assigned in distribution.by_cli.values()
+                for job in assigned
+            ))
+            # angle 1개라도 provider 2개면 독립 process 2개다. angle 수로 세면
+            # 정상 배분이 blocked로 뒤집힌다.
+            with mock.patch(
+                "agent_flow.multi_review.detect_available_clis",
+                return_value=clis,
+            ):
+                one_angle = distribute_final_review(jobs[:1], host="omp")
+            self.assertFalse(one_angle.insufficient_reviewers)
+            with mock.patch(
+                "agent_flow.multi_review.detect_available_clis",
+                return_value=[clis[0], clis[2]],
+            ):
+                lone_provider = distribute_final_review(jobs[:1], host="omp")
+            self.assertTrue(lone_provider.insufficient_reviewers)
+
+            distribution.by_cli["claude"][0].output_path.write_text(
+                "# claude-generalist\n\n- status: ERROR\n",
+                encoding="utf-8",
+            )
+            with mock.patch(
+                "agent_flow.multi_review.detect_available_clis",
+                return_value=clis,
+            ):
+                retry = distribute_final_review(jobs, host="omp")
+            self.assertEqual(tuple(retry.by_cli), ("codex",))
+            self.assertEqual(retry.skipped_providers, ("claude",))
+
+            # 두 provider가 모두 실패 artifact를 남기면 건너뛰기는 교착이다.
+            # 그때는 latch를 풀고 둘 다 다시 돌린다.
+            distribution.by_cli["codex"][0].output_path.write_text(
+                "# codex-generalist\n\n- status: TIMEOUT\n",
+                encoding="utf-8",
+            )
+            with mock.patch(
+                "agent_flow.multi_review.detect_available_clis",
+                return_value=clis,
+            ):
+                deadlocked = distribute_final_review(jobs, host="omp")
+            self.assertEqual(tuple(deadlocked.by_cli), ("claude", "codex"))
+            self.assertFalse(deadlocked.fallback_to_generic)
+
+            # 리뷰 본문이 실패 marker를 인용해도 provider는 살아 있어야 한다.
+            for cli_name in ("claude", "codex"):
+                distribution.by_cli[cli_name][0].output_path.write_text(
+                    f"# {cli_name}-generalist\n\n- status: OK\n\n"
+                    "## review output\n\n- note: 앞 라운드 artifact는 `- status: ERROR`였다\n",
+                    encoding="utf-8",
+                )
+            with mock.patch(
+                "agent_flow.multi_review.detect_available_clis",
+                return_value=clis,
+            ):
+                quoted = distribute_final_review(jobs, host="omp")
+            self.assertEqual(tuple(quoted.by_cli), ("claude", "codex"))
+
+    def test_final_review_honors_reviewer_pool_narrowing(self) -> None:
+        from agent_flow.cli_detect import CliInfo
+        from agent_flow.multi_review import ReviewerJob, distribute_final_review
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            jobs = [
+                ReviewerJob("generalist", "prompt", root / "generalist.md", root),
+                ReviewerJob("architecture", "prompt", root / "architecture.md", root),
+            ]
+            clis = [
+                CliInfo("claude", ("claude",), ("-p",)),
+                CliInfo("codex", ("codex",), ("exec",)),
+            ]
+            with (
+                mock.patch.dict(
+                    os.environ, {"AGENT_FLOW_REVIEWERS": "codex"}, clear=True
+                ),
+                mock.patch(
+                    "agent_flow.multi_review.detect_available_clis",
+                    return_value=clis,
+                ),
+            ):
+                narrowed = distribute_final_review(jobs, host="claude")
+
+            self.assertEqual(tuple(narrowed.by_cli), ("codex",))
+            self.assertFalse(narrowed.fallback_to_generic)
+
+    def test_final_review_stops_failed_provider_after_probe(self) -> None:
+        from agent_flow.adapters.hosted import _required_reviewer_failures
+        from agent_flow.cli_detect import CliInfo
+        from agent_flow.multi_review import Distribution, ReviewerJob, run_distribution
+        from agent_flow.subprocess_pool import SubprocessResult
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            by_cli = {
+                cli_name: [
+                    ReviewerJob(
+                        angle_id,
+                        "prompt",
+                        root / f"{cli_name}-{angle_id}.md",
+                        root,
+                    )
+                    for angle_id in ("generalist", "architecture")
+                ]
+                for cli_name in ("claude", "codex")
+            }
+            distribution = Distribution(
+                by_cli=by_cli,
+                required_job_ids=frozenset({
+                    f"{cli_name}-{job.angle_id}"
+                    for cli_name, jobs in by_cli.items()
+                    for job in jobs
+                }),
+                accept_any_provider=True,
+            )
+            clis = {
+                "claude": CliInfo("claude", ("claude",), ("-p",)),
+                "codex": CliInfo("codex", ("codex",), ("exec",)),
+            }
+            launches: list[list[str]] = []
+
+            def fake_parallel(jobs):
+                job_ids = [job.job_id for job in jobs]
+                launches.append(job_ids)
+                if len(launches) == 1:
+                    return [
+                        # 정상 리뷰. sandbox 문구가 stderr 잡음으로 섞여도 결과는 유효하다.
+                        SubprocessResult(
+                            job_id="claude-generalist",
+                            returncode=0,
+                            stdout="reviewer-source: sub-agent\nclean",
+                            stderr='+ stderr="sandbox-exec: sandbox_apply: Operation not permitted"',
+                        ),
+                        # 실제 sandbox 실패. CLI가 실행되지 못해 provenance가 없다.
+                        SubprocessResult(
+                            job_id="codex-generalist",
+                            returncode=1,
+                            stdout="sandbox-exec: sandbox_apply: Operation not permitted",
+                        ),
+                    ]
+                return [
+                    SubprocessResult(
+                        job_id=job.job_id,
+                        returncode=0,
+                        stdout="reviewer-source: sub-agent\nclean",
+                    )
+                    for job in jobs
+                ]
+
+            with (
+                mock.patch(
+                    "agent_flow.multi_review.cli_by_name",
+                    side_effect=lambda name: clis[name],
+                ),
+                mock.patch(
+                    "agent_flow.multi_review.run_parallel",
+                    side_effect=fake_parallel,
+                ),
+                mock.patch(
+                    "agent_flow.multi_review.assert_managed_hooks_registered",
+                ),
+                mock.patch(
+                    "agent_flow.multi_review.leader_root_for",
+                    return_value=None,
+                ),
+            ):
+                results = run_distribution(distribution, root)
+
+            self.assertEqual(
+                launches,
+                [
+                    ["claude-generalist", "codex-generalist"],
+                    ["claude-architecture"],
+                ],
+            )
+            self.assertFalse((root / "codex-architecture.md").exists())
+            self.assertIn(
+                "reviewer sandbox unavailable",
+                (root / "codex-generalist.md").read_text(encoding="utf-8"),
+            )
+            self.assertEqual(
+                _required_reviewer_failures(distribution, results),
+                [],
+            )
+
+    def test_reviewer_result_error_ignores_quoted_sandbox_diagnostics(self) -> None:
+        """반증: 리뷰 본문의 인용을 실패 신호로 읽으면 이 저장소 리뷰가 자기 자신을 탈락시킨다."""
+        from agent_flow.multi_review import reviewer_result_error
+        from agent_flow.subprocess_pool import SubprocessResult
+
+        quoted = SubprocessResult(
+            job_id="codex-generalist",
+            returncode=0,
+            stdout=(
+                "reviewer-source: sub-agent\n"
+                "- note, src/agent_flow/multi_review.py:42, "
+                "'sandbox_apply: Operation not permitted' 문자열을 실패 신호로 쓴다\n"
+            ),
+        )
+        real_failure = SubprocessResult(
+            job_id="codex-generalist",
+            returncode=1,
+            stdout="sandbox-exec: sandbox_apply: Operation not permitted",
+        )
+
+        self.assertIsNone(reviewer_result_error(quoted))
+        self.assertEqual(
+            reviewer_result_error(real_failure),
+            "reviewer sandbox unavailable",
+        )
 
     def test_review_angle_artifact_path_is_confined_to_run_dir(self) -> None:
         from agent_flow.adapters.hosted import _review_angle_output
@@ -738,7 +1009,28 @@ class CliTest(unittest.TestCase):
             self.assertEqual(escaped.read_text(encoding="utf-8"), "preserve")
 
 
-    def test_reviewer_cli_args_disable_writes_and_session_persistence(self) -> None:
+    def test_review_phase_available_clis_excludes_omp(self) -> None:
+        from agent_flow.cli_detect import CliInfo
+        from agent_flow.runner import Phase, _phase_available_clis
+
+        clis = [
+            CliInfo("claude", ("claude",), ("-p",)),
+            CliInfo("codex", ("codex",), ("exec",)),
+            CliInfo("omp", ("omp",), ("-p",)),
+        ]
+        self.assertEqual(_phase_available_clis(clis, Phase("implement", "")), clis)
+        self.assertEqual(
+            [
+                cli.name
+                for cli in _phase_available_clis(
+                    clis,
+                    Phase("final-review", "", multi_review=True),
+                )
+            ],
+            ["claude", "codex"],
+        )
+
+    def test_reviewer_cli_args_defer_writes_to_outer_sandbox_and_disable_sessions(self) -> None:
         from agent_flow.cli_detect import CliInfo
         from agent_flow.multi_review import _reviewer_cli_args
 
@@ -749,7 +1041,7 @@ class CliTest(unittest.TestCase):
             project_root=project,
         )
         self.assertIn("--ephemeral", codex)
-        self.assertEqual(codex[codex.index("--sandbox") + 1], "read-only")
+        self.assertEqual(codex[codex.index("--sandbox") + 1], "danger-full-access")
         self.assertEqual(codex[codex.index("--cd") + 1], str(project.resolve()))
 
         claude = _reviewer_cli_args(
@@ -760,14 +1052,14 @@ class CliTest(unittest.TestCase):
         self.assertIn("--no-session-persistence", claude)
         self.assertEqual(claude[claude.index("--permission-mode") + 1], "plan")
 
+        # OMP는 reviewer provider pool 밖이다. 전용 인자 분기를 남기면 pool이
+        # 다시 열릴 때 그 분기가 근거처럼 읽힌다.
         omp = _reviewer_cli_args(
             CliInfo("omp", ("omp",), ("-p",)),
             prompt="review",
             project_root=project,
         )
-        self.assertIn("--no-session", omp)
-        self.assertIn(f"--cwd={project.resolve()}", omp)
-        self.assertIn("--tools=read,grep,glob,bash", omp)
+        self.assertEqual(omp, ("-p", "review"))
 
     def test_adapter_completion_prompt_uses_status_next_command(self) -> None:
         from agent_flow.adapters.generic import GenericAdapter
@@ -1673,7 +1965,7 @@ class CliTest(unittest.TestCase):
                 (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
-                "현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수",
+                "설치된 Claude/Codex CLI reviewer subprocess 2개 이상이 필수",
                 (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
@@ -1697,7 +1989,7 @@ class CliTest(unittest.TestCase):
                 (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
-                "현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수",
+                "설치된 Claude/Codex CLI reviewer subprocess 2개 이상이 필수",
                 (project_root / "AGENTS.md").read_text(encoding="utf-8"),
             )
             agent_flow_skill = (project_root / ".agent-flow" / "skills" / "agent-flow" / "SKILL.md").read_text(
@@ -3730,14 +4022,14 @@ if (codexContext !== undefined) {
             self.assertEqual(subprocess.run((node, cli, "install"), cwd=project_root, check=False).returncode, 0)
 
             self.assertIn("id: full-feature", workflow.read_text(encoding="utf-8"))
-            self.assertIn("Default reviewers are active-host sub-agents", workflow.read_text(encoding="utf-8"))
+            self.assertIn("Reviewers are installed Claude and Codex CLIs only", workflow.read_text(encoding="utf-8"))
             self.assertNotIn("Gemini sub-agent", workflow.read_text(encoding="utf-8"))
             self.assertIn("multi_review: true", workflow.read_text(encoding="utf-8"))
             self.assertIn("status: ci-failed", prompt.read_text(encoding="utf-8"))
             self.assertIn("def main(", runtime_lint.read_text(encoding="utf-8"))
             self.assertNotIn("stale runtime", runtime_lint.read_text(encoding="utf-8"))
             self.assertIn(
-                "Default reviewers are active-host sub-agents",
+                "Reviewers are installed Claude and Codex CLIs only",
                 (project_root / ".agent-flow" / "prompts" / "multi-review.md").read_text(encoding="utf-8"),
             )
             self.assertNotIn(
@@ -3749,7 +4041,7 @@ if (codexContext !== undefined) {
                 (project_root / ".agent-flow" / "prompts" / "multi-review.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
-                "close that sub-agent session",
+                "Never use OMP or controller-session work",
                 (project_root / ".agent-flow" / "prompts" / "multi-review.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
@@ -3766,16 +4058,16 @@ if (codexContext !== undefined) {
             )
             self.assertIn('agent-flow run "<task>"', bootstrap.read_text(encoding="utf-8"))
             self.assertIn('agent-flow run "<task>"', claude_bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수", bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("현재 사용 중인 CLI(활성 host)의 sub-agent 2개가 필수", claude_bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("활성 host가 아닌 추가 provider는 optional", bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("활성 host가 아닌 추가 provider는 optional", claude_bootstrap.read_text(encoding="utf-8"))
+            self.assertIn("설치된 Claude/Codex CLI reviewer subprocess 2개 이상이 필수", bootstrap.read_text(encoding="utf-8"))
+            self.assertIn("설치된 Claude/Codex CLI reviewer subprocess 2개 이상이 필수", claude_bootstrap.read_text(encoding="utf-8"))
+            self.assertIn("OMP는 host/controller로만 쓰고 reviewer provider로는 쓰지 않는다", bootstrap.read_text(encoding="utf-8"))
+            self.assertIn("OMP는 host/controller로만 쓰고 reviewer provider로는 쓰지 않는다", claude_bootstrap.read_text(encoding="utf-8"))
             self.assertNotIn("예: Claude/Gemini", bootstrap.read_text(encoding="utf-8"))
             self.assertNotIn("예: Claude/Gemini", claude_bootstrap.read_text(encoding="utf-8"))
             self.assertIn("reviewer-source: sub-agent", bootstrap.read_text(encoding="utf-8"))
             self.assertIn("reviewer-source: sub-agent", claude_bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("sub-agent를 닫는다", bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("sub-agent를 닫는다", claude_bootstrap.read_text(encoding="utf-8"))
+            self.assertIn("두 reviewer를 병렬 실행하고", bootstrap.read_text(encoding="utf-8"))
+            self.assertIn("두 reviewer를 병렬 실행하고", claude_bootstrap.read_text(encoding="utf-8"))
             self.assertIn("## Overall", bootstrap.read_text(encoding="utf-8"))
             self.assertIn("## Overall", claude_bootstrap.read_text(encoding="utf-8"))
             self.assertIn("verdict: approve", bootstrap.read_text(encoding="utf-8"))
@@ -3784,10 +4076,10 @@ if (codexContext !== undefined) {
             self.assertIn("verdict: request-changes", claude_bootstrap.read_text(encoding="utf-8"))
             self.assertIn("Full Feature Workflow", skill.read_text(encoding="utf-8"))
             self.assertIn("Workflow Contract", rules.read_text(encoding="utf-8"))
-            self.assertIn("two active-host sub-agents", rules.read_text(encoding="utf-8"))
+            self.assertIn("two independent Claude/Codex reviewer subprocesses", rules.read_text(encoding="utf-8"))
             self.assertNotIn("Gemini sub-agent", rules.read_text(encoding="utf-8"))
             self.assertIn("reviewer-source: sub-agent", rules.read_text(encoding="utf-8"))
-            self.assertIn("close that sub-agent session", rules.read_text(encoding="utf-8"))
+            self.assertIn("OMP and controller-session work are never reviewer providers", rules.read_text(encoding="utf-8"))
             self.assertIn("## Overall", rules.read_text(encoding="utf-8"))
             self.assertIn("verdict: approve", rules.read_text(encoding="utf-8"))
             self.assertIn("verdict: request-changes", rules.read_text(encoding="utf-8"))
@@ -4789,7 +5081,10 @@ if (codexContext !== undefined) {
             self.assertIn("api-contract-guide/SKILL.md", phase_prompt.stdout)
             self.assertIn("project-local-skill-docs: applied", phase_prompt.stdout)
             artifact.parent.mkdir(parents=True, exist_ok=True)
-            artifact.write_text(_node_implement_gate(local_skill=False), encoding="utf-8")
+            artifact.write_text(
+                _node_implement_gate(local_skill=False, run_dir=run_dir),
+                encoding="utf-8",
+            )
 
             missing_local = subprocess.run(
                 (node, cli, "run", "advance"),
@@ -4803,7 +5098,7 @@ if (codexContext !== undefined) {
             self.assertIn("project-local-skill-docs: applied", missing_local.stdout)
 
             artifact.write_text(
-                _node_implement_gate(local_skill=True).replace("api, ", ""),
+                _node_implement_gate(local_skill=True, run_dir=run_dir).replace("api, ", ""),
                 encoding="utf-8",
             )
             partial_local = subprocess.run(
@@ -4815,7 +5110,10 @@ if (codexContext !== undefined) {
             )
             self.assertIn("project-local-skills-used:", partial_local.stdout)
 
-            artifact.write_text(_node_implement_gate(local_skill=True), encoding="utf-8")
+            artifact.write_text(
+                _node_implement_gate(local_skill=True, run_dir=run_dir),
+                encoding="utf-8",
+            )
             advanced = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=plan.path,
@@ -5531,7 +5829,10 @@ if (codexContext !== undefined) {
             self.assertIn("current_phase: fix-loop", result.stdout)
 
             fix_loop_artifact = run_dir / _node_phase_artifact("fix-loop")
-            fix_loop_artifact.write_text(_node_phase_content("fix-loop"), encoding="utf-8")
+            fix_loop_artifact.write_text(
+                _node_phase_content("fix-loop", run_dir=run_dir),
+                encoding="utf-8",
+            )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=plan.path,
@@ -5661,7 +5962,10 @@ if (codexContext !== undefined) {
             self.assertIn("current_phase: fix-loop", result.stdout)
 
             fix_loop_artifact = run_dir / _node_phase_artifact("fix-loop")
-            fix_loop_artifact.write_text(_node_phase_content("fix-loop"), encoding="utf-8")
+            fix_loop_artifact.write_text(
+                _node_phase_content("fix-loop", run_dir=run_dir),
+                encoding="utf-8",
+            )
             result = subprocess.run(
                 (node, cli, "run", "advance"),
                 cwd=plan.path,
@@ -5702,7 +6006,10 @@ if (codexContext !== undefined) {
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("current_phase: fix-loop", result.stdout)
 
-            fix_loop_artifact.write_text(_node_phase_content("fix-loop"), encoding="utf-8")
+            fix_loop_artifact.write_text(
+                _node_phase_content("fix-loop", run_dir=run_dir),
+                encoding="utf-8",
+            )
             self.assertEqual(
                 subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode,
                 0,
@@ -5843,7 +6150,10 @@ if (codexContext !== undefined) {
                 gates_artifact.write_text('{"passed": false}\n', encoding="utf-8")
                 self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
                 fix_artifact = run_dir / _node_phase_artifact("fix-loop")
-                fix_artifact.write_text(_node_phase_content("fix-loop"), encoding="utf-8")
+                fix_artifact.write_text(
+                    _node_phase_content("fix-loop", run_dir=run_dir),
+                    encoding="utf-8",
+                )
                 self.assertEqual(subprocess.run((node, cli, "run", "advance"), cwd=plan.path, check=False).returncode, 0)
 
             for phase in ("comment-authoring", "multi-review", "architecture-review"):
@@ -11105,7 +11415,10 @@ def _node_project_local_applied_gate() -> str:
     )
 
 
-def _node_implement_gate(*, local_skill: bool) -> str:
+def _node_implement_gate(*, local_skill: bool, run_dir=None) -> str:
+    if run_dir is not None:
+        _record_node_test_evidence(Path(run_dir), exit_code=1)
+        _record_node_test_evidence(Path(run_dir), exit_code=0)
     return (
         "## Completion Gate\n"
         "skills_checked: true\n"
@@ -11113,6 +11426,9 @@ def _node_implement_gate(*, local_skill: bool) -> str:
         + "clean-architecture: applied\n"
         + (_node_project_local_applied_gate() if local_skill else _node_project_local_gate())
         + _node_presentation_gate()
+        + "regression-test: tests/test_x.py::test_bug\n"
+        + "red-observed: 1\n"
+        + "test-run-evidence: verified\n"
     )
 
 
@@ -11206,6 +11522,9 @@ def _node_spec_gate(run_dir) -> str:
 def _node_phase_content(phase: str, prefix: str = "", run_dir=None) -> str:
     content = f"{prefix}{phase}\n"
     if run_dir is not None and phase in {"final-review", "multi-review"}:
+        _record_node_test_evidence(Path(run_dir), exit_code=0)
+    if run_dir is not None and phase in {"implement", "fix-loop"}:
+        _record_node_test_evidence(Path(run_dir), exit_code=1)
         _record_node_test_evidence(Path(run_dir), exit_code=0)
     skills_gate = (
         "## Completion Gate\n"
@@ -11352,8 +11671,20 @@ def _node_phase_content(phase: str, prefix: str = "", run_dir=None) -> str:
             + "clean-architecture: applied\n"
             + _node_project_local_gate(phase)
             + _node_presentation_gate()
+            + "regression-test: tests/test_x.py::test_bug\n"
+            + "red-observed: 1\n"
+            + "test-run-evidence: verified\n"
         )
-    if phase in {"green", "refactor", "fix-loop", "pr-comment-fix", "pr-ci-fix"}:
+    if phase == "fix-loop":
+        return (
+            content
+            + skills_gate
+            + "clean-architecture: applied\n"
+            + "regression-test: tests/test_x.py::test_bug\n"
+            + "red-observed: 1\n"
+            + "test-run-evidence: verified\n"
+        )
+    if phase in {"green", "refactor", "pr-comment-fix", "pr-ci-fix"}:
         return content + skills_gate + "clean-architecture: applied\n"
     if phase == "red":
         if run_dir is not None:

@@ -45,7 +45,7 @@ from agent_flow.artifact import (
     read_meta,
     write_meta,
 )
-from agent_flow.cli_detect import detect_available_clis
+from agent_flow.cli_detect import CliInfo, REVIEW_CLI_NAMES, detect_available_clis
 from agent_flow.core.commands import run_safe_command
 from agent_flow.core.command_evidence import missing_test_evidence_markers
 from agent_flow.core.design_ledger import (
@@ -65,12 +65,16 @@ from agent_flow.core.worktrees import (
     worktree_run_activation,
 )
 from agent_flow.core.worktree_isolation import (
+    HOST_PHASE_LEADER_BASELINE_KEY,
+    LEADER_SNAPSHOT_VERSION,
     LeaderSnapshot,
     WorktreeIsolationError,
     assert_leader_unchanged,
     capture_leader_snapshot,
     git_safe,
     leader_root_for,
+    leader_snapshot_payload,
+    recorded_snapshot_version,
     real_path,
     sanitized_worker_env,
 )
@@ -106,7 +110,12 @@ GIT_DEPENDENT_PHASES = {
     "merge-approval",
 }
 FIX_LOOP_MAX_ROUNDS = 3
-_HOST_PHASE_LEADER_BASELINE = "host_phase_leader_baseline"
+# 키 이름은 baseline을 쓰는 쪽과 읽는 쪽이 공유해야 한다.
+_HOST_PHASE_LEADER_BASELINE = HOST_PHASE_LEADER_BASELINE_KEY
+# baseline **레코드 자체**의 필드 구성 버전. 그 안에 담기는 스냅샷의 형식 버전은
+# 별개 축이고 `LeaderSnapshot.version`이 들고 있다. 이 값은 `run_id`/`phase_id`/
+# `phase_index`/`leader_root`/`snapshot`의 의미가 바뀔 때만 올린다.
+_HOST_PHASE_BASELINE_RECORD_VERSION = 1
 PROTECTED_BRANCHES = frozenset({"main", "master", "develop"})
 CONVENTIONAL_COMMIT_RE = re.compile(
     r"^(?:feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)"
@@ -142,6 +151,12 @@ class Phase:
     required_markers: tuple[str, ...] = ()
     artifact: str = ""
     skills: PhaseSkills | None = None
+
+
+def _phase_available_clis(clis: list[CliInfo], phase: Phase | None) -> list[CliInfo]:
+    if phase is None or not phase.multi_review:
+        return clis
+    return [cli for cli in clis if cli.name in REVIEW_CLI_NAMES]
 
 
 class Runner:
@@ -228,8 +243,23 @@ class Runner:
 
         adapter = detect_adapter()
         self._adapter_name = adapter.name
-        clis = detect_available_clis()
-        cli_summary = ", ".join(c.name for c in clis) if clis else "none (generic fallback)"
+        assert self.run_dir is not None
+        run_meta = read_meta(self.run_dir)
+        banner_index = int(run_meta.get("phase_index", 0) or 0)
+        banner_phase = (
+            self.phases[banner_index]
+            if 0 <= banner_index < len(self.phases)
+            else None
+        )
+        clis = _phase_available_clis(detect_available_clis(), banner_phase)
+        if clis:
+            cli_summary = ", ".join(c.name for c in clis)
+        elif banner_phase is not None and banner_phase.multi_review:
+            # review phase는 host fallback이 없다. "generic fallback"이라고 적으면
+            # 없는 우회로를 안내한다.
+            cli_summary = "none (review blocked: install claude or codex)"
+        else:
+            cli_summary = "none (generic fallback)"
         print(f"▶ host adapter: {adapter.name}")
         print(f"▶ available  : {cli_summary}")
         print(f"▶ profile    : {self.profile_id}")
@@ -243,15 +273,14 @@ class Runner:
         adapter._profile_id = self.profile_id
         adapter._architecture = self.architecture
         adapter._config_root = self.config_root
-        adapter._task_text = read_meta(self.run_dir).get("task", "") if self.run_dir else ""
+        adapter._task_text = run_meta.get("task", "")
         adapter._changed_files = changed_files(self.project_root)
 
         # Auto-cite lore: search the local lore index for entries relevant
         # to the task description and inject them into the prompt envelope.
         # Empty list when memory dir is missing or no matches.
-        meta_for_lore = read_meta(self.run_dir) if self.run_dir else {}
         adapter._lore_citations = _search_lore(
-            self.project_root, meta_for_lore.get("task", ""),
+            self.project_root, run_meta.get("task", ""),
         )
 
         # 이 실행이 worktree 안이라면 뒤에 있는 leader 체크아웃이 지켜야 할
@@ -361,12 +390,7 @@ class Runner:
                 phase, run_dir=self.run_dir, project_root=self.project_root,
             )
             if leader_before is not None:
-                assert_leader_unchanged(
-                    leader_root,
-                    leader_before,
-                    run_id=self.run_dir.name,
-                    worker_root=self.project_root,
-                )
+                self._assert_leader_unchanged(leader_root, leader_before)
             meta = read_meta(self.run_dir)
             self._stamp_phase(meta, phase_index)
             write_meta(self.run_dir, meta)
@@ -510,9 +534,19 @@ class Runner:
             )
         assert self.run_dir is not None
         expected_root = str(real_path(leader_root))
+        record_version = recorded_snapshot_version(raw.get("version"))
+        if record_version != _HOST_PHASE_BASELINE_RECORD_VERSION:
+            # 레코드 필드 구성이 다르면 그 안의 값들을 현재 의미로 읽을 수 없다.
+            # 스냅샷 형식과 같은 처리를 한다 — 하드 raise로 막으면 업그레이드를
+            # 걸친 run이 재개 불가가 되고, 그건 이 경로가 없애려던 교착이다.
+            self._migrate_stale_host_phase_baseline(
+                meta,
+                f"record format v{record_version}",
+                f"v{_HOST_PHASE_BASELINE_RECORD_VERSION}",
+            )
+            return None
         if (
-            raw.get("version") != 1
-            or raw.get("run_id") != self.run_dir.name
+            raw.get("run_id") != self.run_dir.name
             or raw.get("phase_id") != phase.id
             or isinstance(raw.get("phase_index"), bool)
             or raw.get("phase_index") != phase_index
@@ -523,11 +557,17 @@ class Runner:
                 "run, phase, or leader checkout"
             )
         snapshot_raw = raw.get("snapshot")
-        if not isinstance(snapshot_raw, dict) or set(snapshot_raw) != {
+        if not isinstance(snapshot_raw, dict) or not {
             "head",
             "branch",
             "status",
             "armed",
+        } <= set(snapshot_raw) <= {
+            "head",
+            "branch",
+            "status",
+            "armed",
+            "version",
         }:
             raise WorktreeIsolationError(
                 "durable host-phase leader snapshot is malformed"
@@ -552,14 +592,45 @@ class Runner:
             branch=branch,
             status=status,
             armed=True,
+            version=recorded_snapshot_version(snapshot_raw.get("version")),
         )
+        if not snapshot.comparable:
+            self._migrate_stale_host_phase_baseline(
+                meta,
+                f"snapshot format v{snapshot.version}",
+                f"v{LEADER_SNAPSHOT_VERSION}",
+            )
+            return None
+        self._assert_leader_unchanged(leader_root, snapshot)
+        return snapshot
+
+    def _migrate_stale_host_phase_baseline(
+        self, meta: dict[str, Any], recorded: str, expected: str
+    ) -> None:
+        """비교할 수 없는 기록을 버린다. 이 phase가 새 형식으로 다시 찍는다.
+
+        형식이 다른 기록을 그대로 대조하면 **항상** 차이가 나온다 — leader를 아무도
+        건드리지 않아도 그렇다. 그 오탐은 진행 중인 run 전부를 막고 근거가 없으므로
+        사용자가 풀 방법도 없다. 하드 raise도 같은 결과다(run 재개 불가).
+        """
+        assert self.run_dir is not None
+        print(
+            f"  [migrate] host-phase leader baseline was recorded in "
+            f"{recorded}; re-capturing as {expected}"
+        )
+        meta.pop(_HOST_PHASE_LEADER_BASELINE, None)
+        write_meta(self.run_dir, meta)
+
+    def _assert_leader_unchanged(
+        self, leader_root: Path, snapshot: LeaderSnapshot
+    ) -> None:
+        assert self.run_dir is not None
         assert_leader_unchanged(
             leader_root,
             snapshot,
             run_id=self.run_dir.name,
             worker_root=self.project_root,
         )
-        return snapshot
 
     def _persist_host_phase_leader_baseline(
         self,
@@ -580,17 +651,12 @@ class Runner:
                 "host-phase leader baseline changed without phase advancement"
             )
         meta[_HOST_PHASE_LEADER_BASELINE] = {
-            "version": 1,
+            "version": _HOST_PHASE_BASELINE_RECORD_VERSION,
             "run_id": self.run_dir.name,
             "phase_id": phase.id,
             "phase_index": phase_index,
             "leader_root": str(real_path(leader_root)),
-            "snapshot": {
-                "head": snapshot.head,
-                "branch": snapshot.branch,
-                "status": snapshot.status,
-                "armed": snapshot.armed,
-            },
+            "snapshot": leader_snapshot_payload(snapshot),
         }
         write_meta(self.run_dir, meta)
 

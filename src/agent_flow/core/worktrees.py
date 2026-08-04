@@ -532,18 +532,23 @@ def remove_worktree(
     delete_branch: bool = True,
     require_merged: bool = True,
     allow_unmerged: bool = False,
-) -> None:
-    """Remove one checkout only while repository-wide cleanup exclusion is held."""
+    force_metadata: bool = False,
+) -> bool:
+    """Remove one checkout only while repository-wide cleanup exclusion is held.
+
+    Returns whether the runtime metadata for this name was cleared.
+    """
     with _cleanup_lease(root, status.path):
         runtime_root = _runtime_root_for_status(root=root, status=status)
         with _run_start_exclusion(runtime_root):
             _assert_no_active_runs(runtime_root)
-            _remove_worktree_locked(
+            return _remove_worktree_locked(
                 root=root,
                 status=status,
                 delete_branch=delete_branch,
                 require_merged=require_merged,
                 allow_unmerged=allow_unmerged,
+                force_metadata=force_metadata,
             )
 
 
@@ -554,7 +559,8 @@ def _remove_worktree_locked(
     delete_branch: bool,
     require_merged: bool,
     allow_unmerged: bool,
-) -> None:
+    force_metadata: bool = False,
+) -> bool:
     leader = leader_worktree_path(root)
     if leader is None:
         if git_repo_state(root) != "non-repo":
@@ -607,12 +613,18 @@ def _remove_worktree_locked(
     if branch_delete is not None:
         branch, expected_oid = branch_delete
         _delete_branch_ref_cas(root=root, branch=branch, expected_oid=expected_oid)
-    remove_worktree_metadata(root=root, name=status.name, path=status.path)
+    metadata_removed = remove_worktree_metadata(
+        root=root,
+        name=status.name,
+        path=status.path,
+        force=force_metadata,
+    )
     if not live and status.path.is_dir() and _is_creation_layout_child(root=root, path=status.path):
         try:
             status.path.rmdir()
         except OSError:
             pass
+    return metadata_removed
 
 
 def _assert_registration_and_ref_unchanged(
@@ -2785,8 +2797,14 @@ def known_worktree_names(*, root: Path) -> list[str]:
     return sorted(names)
 
 
-def remove_worktree_metadata(*, root: Path, name: str, path: Path | None = None) -> None:
-    """``name``의 런타임 메타데이터를 지운다.
+def remove_worktree_metadata(
+    *,
+    root: Path,
+    name: str,
+    path: Path | None = None,
+    force: bool = False,
+) -> bool:
+    """``name``의 런타임 메타데이터를 지운다. 실제로 지웠으면 True.
 
     ``path``를 주면 그 등록 경로의 소유임을 증명한 경우에만 지운다. 정규화된 키는
     서로 다른 등록 경로를 한 자리로 접는다 — 관리형 ``.../feat-demo``와 외부
@@ -2797,21 +2815,63 @@ def remove_worktree_metadata(*, root: Path, name: str, path: Path | None = None)
     (`worktree_runtime_root`). 증명만 정규화하면 ``feat-issue#110``의 소유 판정을
     형제 ``feat-issue-110``의 manifest가 대신 내려 먼저 False가 되고, 대상 자신의
     죽은 active 마커가 남아 같은 자리의 다음 run을 `already active`로 막는다.
+
+    ``force``는 증명을 건너뛰지만 **양쪽 경로가 모두 없을 때만** 그렇게 한다.
+    다른 머신에서 복사돼 온 manifest처럼 이 머신의 어느 layout에도 속하지 않는
+    기록은 증명이 영구히 실패해서, 그것 없이는 지울 방법이 없다. 살아 있는
+    checkout의 상태는 force로도 지우지 않는다.
     """
     try:
         key = _runtime_state_key(root=root, name=name)
     except ValueError:
         # agent-flow 이름 규칙으로 정규화되지 않는 이름에는 애초에 메타데이터가 없다.
-        return
+        return False
     if path is not None and not _metadata_belongs_to_path(root=root, key=key, path=path):
-        return
+        if not (force and _metadata_paths_are_absent(root=root, key=key, path=path)):
+            return False
     runtime_root = _runtime_state_root(root=root, name=key)
+    removed = False
     if runtime_root.exists():
         shutil.rmtree(runtime_root)
+        removed = True
     for legacy_manifest in _in_checkout_manifest_paths(root=root, key=key):
         if legacy_manifest.exists():
             legacy_manifest.unlink()
+            removed = True
     forget_adopted_checkout(root=root, name=key)
+    return removed
+
+
+def worktree_metadata_is_unreachable(*, root: Path, name: str, path: Path) -> bool:
+    """이 이름의 런타임 메타데이터가 이 머신에서 소유 증명이 **영구히** 불가능한가.
+
+    다른 머신에서 복사돼 온 기록처럼 양쪽 경로가 다 없으면 증명이 통과할 날이 오지
+    않는다. 그런 기록은 `--force-metadata` 없이는 지울 방법이 없으므로 호출자가
+    그 사실을 알려야 한다. 살아 있는 자리를 지키느라 보존한 경우는 여기 들지 않는다.
+    """
+    try:
+        key = _runtime_state_key(root=root, name=name)
+    except ValueError:
+        return False
+    if _metadata_belongs_to_path(root=root, key=key, path=path):
+        return False
+    return _metadata_paths_are_absent(root=root, key=key, path=path)
+
+
+def _metadata_paths_are_absent(*, root: Path, key: str, path: Path) -> bool:
+    """기록된 경로와 대상 경로가 **둘 다** 디스크에 없는가."""
+    if path.exists():
+        return False
+    payload = _state_key_manifest(root=root, key=key)
+    if payload is None:
+        return True
+    recorded = payload.get("path")
+    if not isinstance(recorded, str) or not recorded:
+        return True
+    candidate = Path(recorded)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    return not candidate.exists()
 
 
 def _runtime_state_key(*, root: Path, name: str) -> str:
@@ -2879,7 +2939,13 @@ def _conflicting_metadata_hint(*, root: Path, status: WorktreeStatus) -> str:
     )
 
 
-def _git_dirty(root: Path) -> bool:
+def leader_dirty_paths(root: Path) -> tuple[str, ...]:
+    """leader에 남아 있는 미커밋 작업의 status 레코드.
+
+    "dirty"의 정의를 두 벌로 두지 않기 위해 진입 게이트(`_git_dirty`)와 경고가
+    같은 값을 본다. 둘이 갈리면 게이트는 통과시키고 경고는 침묵하는 조합이 생기고,
+    그 조합에서 사용자는 자기 작업이 보호 대상 밖이라는 사실을 끝까지 모른다.
+    """
     # 관측이다. status는 기본적으로 index를 refresh하며 index.lock을 잡으므로
     # 동시에 도는 워커의 실제 쓰기와 경합을 만든다.
     result = git_safe(
@@ -2889,12 +2955,15 @@ def _git_dirty(root: Path) -> bool:
         raise subprocess.CalledProcessError(
             result.returncode or 1, result.args, output=result.stdout, stderr=result.stderr
         )
-    dirty_lines = [
+    return tuple(
         line
         for line in result.stdout.splitlines()
         if not _is_agent_flow_status_line(line)
-    ]
-    return bool(dirty_lines)
+    )
+
+
+def _git_dirty(root: Path) -> bool:
+    return bool(leader_dirty_paths(root))
 
 
 def user_worktrees_root() -> Path:
@@ -4494,7 +4563,10 @@ _SLUG_SAFE_CHAR_RE = re.compile(r"[a-z0-9]")
 
 def describe_slug(value: str) -> SlugQuality:
     lowered = value.strip().lower()
-    safe = re.sub(r"[^a-z0-9._-]+", "-", lowered).strip("-")
+    safe = re.sub(r"[^a-z0-9._-]+", "-", lowered)
+    # 버려진 글자마다 구분자를 하나씩 남기면 원문의 `-` 양옆이 같이 치환돼
+    # `ui---cta`가 된다. 이어진 구분자는 하나로 접고 양끝에서는 걷어낸다.
+    safe = re.sub(r"[-._]{2,}", "-", safe).strip("-._")
     # 토큰 단위로 생사를 보면 `로그인화면Figma구현`처럼 붙여 쓴 task가 통째로
     # 살아남은 것이 된다. 실제로 지워진 글자를 기준으로 센다.
     dropped = tuple(
@@ -4502,6 +4574,11 @@ def describe_slug(value: str) -> SlugQuality:
         for word in value.split()
         if any(char.isalnum() and not _SLUG_SAFE_CHAR_RE.match(char.lower()) for char in word)
     )
+    # 글자가 하나도 없는 slug는 이름이 아니다. `1-1 홈 화면`은 `1-1`만 남겨
+    # 브랜치를 만들지만 그 이름으로는 어떤 작업인지 누구도 알 수 없고, 다음 번호
+    # 작업과 충돌한다. 비ASCII task와 같은 취급으로 digest fallback을 쓴다.
+    if not any("a" <= char <= "z" for char in safe):
+        safe = ""
     if not safe or safe.startswith(".") or ".." in safe:
         if not any(char.isalnum() for char in lowered):
             raise ValueError(f"worktree name must contain at least one safe character: {value}")
@@ -4550,8 +4627,14 @@ def delegated_slug(
     first_line = next(
         (line for line in (result.stdout or "").splitlines() if line.strip()), ""
     )
+    candidate = first_line.strip().strip("\"'")
+    # 경로 모양의 출력은 이름이 아니라 자리다. 정규화가 `../../etc/passwd`를
+    # `etc-passwd`로, `.hidden`을 `hidden`으로 세탁하면 host가 낸 쓰레기가
+    # 그럴듯한 브랜치 이름이 되어 task를 대표하지 않는 이름이 남는다.
+    if candidate.startswith(".") or ".." in candidate or "/" in candidate:
+        return None
     try:
-        quality = describe_slug(first_line.strip().strip("\"'"))
+        quality = describe_slug(candidate)
     except ValueError:
         return None
     if quality.kind != "ascii":
@@ -4601,22 +4684,6 @@ def _live_branch(*, root: Path, path: Path) -> str | None:
     except ValueError:
         return None
     return branch
-
-
-def _registered_managed_worktree_names(root: Path) -> set[str]:
-    """git이 등록한 checkout 중 managed root 바로 아래 있는 것들의 이름.
-
-    디렉터리가 지워져도 등록은 남으므로 디스크 스캔만으로는 안 보인다. 이름을
-    다시 `<managed>/<name>`으로 되돌릴 수 있는 자리만 후보로 받는다 — 그 밖의
-    등록은 이름만으로 경로를 복원할 수 없어 remove가 엉뚱한 곳을 가리킨다.
-    """
-    managed_root = real_path(root / ".agent-flow" / "worktrees")
-    leader = real_path(root)
-    return {
-        path.name
-        for path in _registered_worktree_paths(root)
-        if path != leader and path.parent == managed_root
-    }
 
 
 def _registered_worktree_paths(root: Path) -> set[Path]:

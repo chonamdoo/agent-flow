@@ -123,12 +123,14 @@ from agent_flow.core.worktrees import (
     find_pending_worktree_cleanup,
     existing_checkout_path,
     known_worktree_names,
+    leader_dirty_paths,
     legacy_managed_root,
     managed_worktrees_root,
     plan_worktree,
     provision_host_hook_registrations,
     provision_registered_worktree_host_hooks,
     remove_worktree_metadata,
+    worktree_metadata_is_unreachable,
     remove_worktree,
     removable_worktrees,
     resolve_worktree,
@@ -433,6 +435,14 @@ def main(argv: list[str] | None = None) -> int:
     worktree_remove.add_argument("--name", required=True)
     worktree_remove.add_argument("--keep-branch", action="store_true")
     worktree_remove.add_argument("--allow-unmerged", action="store_true")
+    worktree_remove.add_argument(
+        "--force-metadata",
+        action="store_true",
+        help=(
+            "drop runtime metadata whose recorded path is gone and outside this "
+            "repository's worktree layout (imported or relocated state)"
+        ),
+    )
     worktree_adopt = worktree_subparsers.add_parser("adopt")
     worktree_adopt.add_argument("--root", default=".")
     worktree_adopt.add_argument("--path", required=True)
@@ -786,7 +796,6 @@ def main(argv: list[str] | None = None) -> int:
                 next_command=_continue_command(root, args.worktree),
             ).run(mode=ResumeMode.RESUME)
         except (OSError, ValueError, RuntimeError, KeyError, subprocess.CalledProcessError) as exc:
-            # `run`과 같은 처리다. tripwire가 raise하면 traceback 대신 사유를
             # 보여야 사용자가 다음 수를 안다.
             print(_format_cli_error(exc), file=sys.stderr)
             return 2
@@ -794,7 +803,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "abort":
         try:
-            run_root, state_root = _worktree_context(root, args.worktree) if args.worktree else (root, root)
+            run_root, state_root = (
+                _worktree_context(root, args.worktree, require_checkout=False)
+                if args.worktree
+                else (root, root)
+            )
         except ValueError as exc:
             print(_format_cli_error(exc), file=sys.stderr)
             return 2
@@ -1319,11 +1332,12 @@ def main(argv: list[str] | None = None) -> int:
                     return 1
             checkout_was_live = _worktree_checkout_exists(status)
             try:
-                remove_worktree(
+                metadata_removed = remove_worktree(
                     root=root,
                     status=status,
                     delete_branch=not args.keep_branch,
                     allow_unmerged=args.allow_unmerged,
+                    force_metadata=args.force_metadata,
                 )
             except (
                 subprocess.CalledProcessError,
@@ -1334,14 +1348,32 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             if checkout_was_live:
                 print(f"removed {status.name} {status.path}")
-            elif status.path.exists():
+            elif metadata_removed and status.path.exists():
                 print(f"removed stale metadata {status.name}; kept path {status.path}")
-            else:
+            elif metadata_removed:
                 print(f"removed stale metadata {status.name} {status.path}")
             if not args.keep_branch and worktree_branch_exists(root=root, branch=status.branch):
                 # agent-flow가 만든 브랜치라는 증거가 없어 남긴 경우다. 조용히 두면
                 # 사용자는 정리가 끝난 줄 안다.
                 print(f"kept branch {status.branch}")
+            if not checkout_was_live and not metadata_removed:
+                # 지웠다고 말하고 남겨 두면 사용자는 목록에 계속 뜨는 이유를 모른다.
+                # 살아 있는 자리를 지키느라 보존한 것은 정상 동작이고, 이 머신에서
+                # 소유 증명이 영구히 불가능한 기록만 막다른 길이다.
+                if worktree_metadata_is_unreachable(
+                    root=root, name=status.name, path=status.path
+                ):
+                    print(
+                        f"kept runtime metadata {status.name}: its recorded path is not "
+                        "this repository's worktree layout (imported or relocated "
+                        "state). Re-run with --force-metadata to drop it.",
+                        file=sys.stderr,
+                    )
+                    return 1
+                print(
+                    f"kept runtime metadata {status.name}: it belongs to another "
+                    "registered checkout"
+                )
             return 0
 
     if args.command == "team":
@@ -2183,6 +2215,7 @@ def _worktree_context(
     name: str,
     *,
     provision: bool = False,
+    require_checkout: bool = True,
 ) -> tuple[Path | None, Path]:
     status = get_worktree_status(root=root, name=name)
     pending = find_pending_worktree_cleanup(root=root, selector=name)
@@ -2196,10 +2229,20 @@ def _worktree_context(
             # 부른다 — `abort`는 걷어낼 checkout이라 등록을 깔 이유가 없다.
             _provision_host_hooks(root=root, checkout=status.path)
         return status.path, worktree_runtime_root(root=root, name=status.name)
+    runtime_root = worktree_runtime_root(root=root, name=status.name)
+    if not require_checkout and (runtime_root / ".agent-flow" / "runs").is_dir():
+        # checkout이 사라진 run은 `abort` 말고는 닫을 길이 없다. 경로 검증으로
+        # 막으면 active 마커가 영구히 남아 그 이름의 정리와 host boundary를 막는다.
+        # abort는 run 상태만 만지므로 checkout이 없어도 할 일이 그대로 있다.
+        print(
+            f"checkout is gone for {status.name}; closing its run state only",
+            file=sys.stderr,
+        )
+        return root, runtime_root
     known = _known_worktree_names(root)
     suffix = f" known worktrees: {', '.join(known)}" if known else " no known worktrees"
     print(f"worktree not found or missing path: {status.name}.{suffix}", file=sys.stderr)
-    return None, worktree_runtime_root(root=root, name=status.name)
+    return None, runtime_root
 
 
 def _confirm_inferred_worktree_reuse(
@@ -2336,6 +2379,7 @@ def _resolve_entry_worktree(
             # 경우 파일이 없을 수 있다. 이미 있으면 건너뛰므로 반복해도 무해하다.
             _apply_worktree_setup(root=root, checkout=attached.path)
             _warn_if_cwd_is_other_checkout(root=root, target=attached.path)
+            _warn_leader_dirty_work(root)
             return attached, True
     if not explicit:
         selector = _derive_worktree_selector(root=root, task=selector)
@@ -2356,7 +2400,36 @@ def _resolve_entry_worktree(
         raise
     _apply_worktree_setup(root=root, checkout=status.path)
     _warn_if_cwd_is_other_checkout(root=root, target=status.path)
+    _warn_leader_dirty_work(root)
     return status, False
+
+
+def _warn_leader_dirty_work(root: Path) -> None:
+    """leader의 미커밋 작업은 tripwire의 **보호 대상이 아니라 배경**임을 알린다.
+
+    `capture_leader_snapshot`은 run 시작 시점의 상태를 그대로 기준선으로 굳힌다.
+    그래서 이미 있던 미커밋 변경은 그 뒤의 변화만 비교하는 tripwire에 걸리지 않고,
+    실제로 잃을 수 있는 것은 정확히 그 작업뿐이다(커밋된 것은 clone으로 복구된다).
+
+    여기까지 dirty로 왔다는 것은 사용자가 `--allow-dirty`로 진입 게이트를 이미
+    면제했다는 뜻이다. 그러니 다시 막지 않고 한 줄만 알린다. 차단으로 바꾸면
+    면제 옵션이 무의미해지고, 관측 실패를 차단으로 접으면 git이 대답하지 못하는
+    순간마다 run 시작이 죽는다 — 그래서 실패는 침묵으로 넘긴다.
+    """
+    try:
+        dirty = leader_dirty_paths(root)
+    except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError):
+        return
+    if not dirty:
+        return
+    shown = ", ".join(line[3:] or line for line in dirty[:5])
+    more = f" (+{len(dirty) - 5})" if len(dirty) > 5 else ""
+    print(
+        f"warning: leader has uncommitted work that the isolation tripwire will treat "
+        f"as its baseline, not as protected content: {shown}{more}. "
+        "Commit or stash it if it must survive a worker mistake.",
+        file=sys.stderr,
+    )
 
 
 def _warn_if_cwd_is_other_checkout(*, root: Path, target: Path) -> None:

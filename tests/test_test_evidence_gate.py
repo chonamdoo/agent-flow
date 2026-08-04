@@ -159,7 +159,15 @@ def test_profile_without_a_test_gate_falls_back(tmp_path):
 
 @pytest.mark.parametrize(
     "workflow,phase_id",
-    [("full-feature", "red"), ("bugfix", "implement-fix")],
+    [
+        ("full-feature", "red"),
+        ("bugfix", "implement-fix"),
+        # `default`는 "모든 프로젝트에 적용된다"고 스스로 적어 둔 기본 워크플로인데
+        # 두 phase 어느 쪽도 게이트 대상이 아니어서 테스트 실행 증거를 한 번도
+        # 요구하지 않았다 — bugfix에 있던 구멍이 기본 경로에 그대로 있었다.
+        ("default", "implement"),
+        ("default", "fix-loop"),
+    ],
 )
 @pytest.mark.parametrize("copy", ["src/agent_flow/workflows"])
 def test_workflows_require_the_regression_markers(workflow, phase_id, copy):

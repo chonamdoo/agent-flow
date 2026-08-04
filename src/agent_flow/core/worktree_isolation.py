@@ -966,6 +966,15 @@ def git_common_dir(path) -> Optional[Path]:
     return _git_common_dir(path)
 
 
+def git_dir(path) -> Optional[Path]:
+    """sanitize된 git으로 얻은 이 checkout 전용 git dir. 같은 이유로 이 함수만 쓴다.
+
+    linked worktree면 `<common>/worktrees/<name>`이고, 그 자리가 index·HEAD처럼
+    checkout 하나에만 속한 상태를 담는다.
+    """
+    return _git_dir(path)
+
+
 def git_toplevel(path) -> Optional[Path]:
     """sanitize된 git으로 얻은 checkout 최상위. 같은 이유로 이 함수만 쓴다."""
     return _git_toplevel(path)
@@ -1297,6 +1306,16 @@ _TRIPWIRE_TIMEOUT_S = 120
 _STATUS_CODES = frozenset(" MADRCUT?!")
 _STAMP_CHUNK_BYTES = 64 * 1024
 
+# 스냅샷 **형식** 버전. `_leader_status`가 담는 내용이 바뀌면 올린다.
+#
+# 버전이 없으면 "형식이 달라 비교 불가"와 "leader가 변했다"를 구분할 수 없다.
+# 실측: `--binary`를 `--full-index`로 바꾸자 같은 트리에서도 `tracked-content`
+# digest가 달라져, 아무도 leader를 건드리지 않았는데 기존 baseline이 "working tree
+# gained/lost tracked-content ..." 오탐으로 막혔다. 형식이 다른 스냅샷은 비교 가능한
+# 정보를 담고 있지 않으므로 그때는 차단이 아니라 재캡처가 맞다. 저장된 기록에
+# 버전이 없으면 legacy(0)로 읽는다.
+LEADER_SNAPSHOT_VERSION = 1
+
 
 @dataclass(frozen=True)
 class LeaderSnapshot:
@@ -1304,9 +1323,31 @@ class LeaderSnapshot:
     branch: str            # git rev-parse --abbrev-ref HEAD ("HEAD" when detached)
     status: str            # normalized git status records, newline joined
     armed: bool = True     # False면 지킬 leader가 없다(비-git 프로젝트)
+    version: int = LEADER_SNAPSHOT_VERSION
 
     def records(self) -> tuple[str, ...]:
         return tuple(self.status.split("\n")) if self.status else ()
+
+    @property
+    def comparable(self) -> bool:
+        """이 기록을 지금 찍은 스냅샷과 대조할 수 있는가."""
+        return self.version == LEADER_SNAPSHOT_VERSION
+
+
+def leader_snapshot_payload(snapshot: LeaderSnapshot) -> dict:
+    """스냅샷을 저장 형태로. 두 저장소(run meta, session binding)가 같은 모양을 쓴다."""
+    return {
+        "head": snapshot.head,
+        "branch": snapshot.branch,
+        "status": snapshot.status,
+        "armed": snapshot.armed,
+        "version": snapshot.version,
+    }
+
+
+def recorded_snapshot_version(raw: object) -> int:
+    """저장된 기록의 형식 버전. 없거나 정수가 아니면 legacy(0)."""
+    return raw if isinstance(raw, int) and not isinstance(raw, bool) else 0
 
 
 def capture_leader_snapshot(
@@ -1357,6 +1398,156 @@ def capture_leader_snapshot(
     )
 
 
+HOST_PHASE_LEADER_BASELINE_KEY = "host_phase_leader_baseline"
+_EXTERNAL_HEAD_DRIFT = "external-head"
+_DRIFT_GUIDANCE = {
+    "status": (
+        "The leader working tree no longer matches the baseline. Restore those "
+        "paths - commit, stash, or clean them - then re-run."
+    ),
+    "branch": (
+        "The leader is on a different branch than the baseline, so its working tree "
+        "may now hold a different commit's content. Switch it back before continuing."
+    ),
+    "non-fast-forward": (
+        "The leader HEAD did not move forward from the baseline (rebase, reset, or "
+        "force-push), so commits this run was built on may be gone. Investigate "
+        "before continuing."
+    ),
+    _EXTERNAL_HEAD_DRIFT: (
+        "The leader HEAD moved without the leader checkout recording it, so the "
+        "move came from somewhere else - another worktree writing the shared refs, "
+        "or a rewrite that dropped the reflog. Investigate before continuing."
+    ),
+}
+
+
+@dataclass(frozen=True)
+class LeaderDrift:
+    """기준선과 현재 leader의 차이. **무엇이** 달라졌는지만 담는다.
+
+    귀속(누가 썼는가)은 스냅샷 차이로 알 수 없다. 대신 종류를 나눈다 — 종류마다
+    사용자가 할 수 있는 다음 수가 다르기 때문이다.
+    """
+
+    kind: str
+    reasons: tuple[str, ...]
+    before: LeaderSnapshot
+    after: LeaderSnapshot
+
+
+
+
+class LeaderDriftError(WorktreeIsolationError):
+    """tripwire가 **실제 leader 변경**을 봤다. 관측 실패와 구분해야 한다.
+
+    호출자는 복구 안내를 종류별로 갈라야 하고, 그 판단 근거는 예외 문자열이
+    아니라 이 ``drift``다.
+    """
+
+    def __init__(self, message: str, drift: LeaderDrift) -> None:
+        super().__init__(message)
+        self.drift = drift
+
+
+def classify_leader_drift(
+    leader_root: Path,
+    before: LeaderSnapshot,
+    *,
+    include_ignored: bool = True,
+    after: LeaderSnapshot | None = None,
+) -> LeaderDrift | None:
+    """기준선과의 차이를 종류로 나눈다. 차이가 없으면 ``None``.
+
+    축이 둘이고 비교 방식이 다르다. working tree는 등호로 본다 — 워커가 흘린
+    쓰기가 여기 남는다. HEAD는 등호로 보지 않는다. 사람이 leader에서 평범한
+    `git pull`을 하는 것은 정상이고, 그것까지 오염으로 접으면 런이 남의 정상
+    작업에 멈춘 뒤 그 정지를 푸는 수단이 다시 필요해진다.
+
+    HEAD 축의 판정 조건은 ``_head_drift_kind``에 있다.
+
+    형식이 다른 기록은 판정하지 않는다(``None``). 낡은 형식의 status 문자열은 지금
+    찍은 것과 애초에 같을 수 없어서, 비교하면 **항상** 차이가 나온다 — leader를
+    아무도 건드리지 않아도 그렇다. 그 오탐은 진행 중인 run 전체를 막고, 근거가
+    없으므로 사용자가 풀 방법도 없다. 저장 주인(run meta, session binding)이 낡은
+    기록을 버리고 다시 찍는 것이 유일하게 의미 있는 처리다.
+    """
+    if not before.armed or not before.comparable:
+        return None
+    observed = (
+        after
+        if after is not None
+        else capture_leader_snapshot(leader_root, include_ignored=include_ignored)
+    )
+    if not observed.armed:
+        raise WorktreeIsolationError(
+            f"leader stopped being a git repository during the phase: {leader_root}"
+        )
+    head_drift = _head_drift_kind(leader_root, before, observed)
+    reasons = _snapshot_diff(before, observed, include_head=head_drift is not None)
+    if not reasons:
+        return None
+    # HEAD 축이 어긋났으면 그쪽을 우선한다. 두 축이 함께 어긋난 경우 status 안내
+    # ("commit, stash, or clean")는 HEAD 문제에 아무 소용이 없다.
+    kind = head_drift or "status"
+    return LeaderDrift(
+        kind=kind,
+        reasons=tuple(reasons),
+        before=before,
+        after=observed,
+    )
+
+
+
+def _head_drift_kind(
+    leader_root: Path, before: LeaderSnapshot, observed: LeaderSnapshot
+) -> str | None:
+    """HEAD 축이 어긋났는가, 어긋났으면 어느 조건에서인가. 정상 전진이면 ``None``.
+
+    완화는 셋을 **모두** 만족할 때만 준다. 같은 브랜치, 이전 HEAD가 새 HEAD의
+    조상, 그 이동이 leader 자신의 reflog에 기록됨. 하나만 봤을 때 각각 무엇을
+    놓치는지 실측으로 확인했다 — reflog만 보면 `git -C <leader> reset --hard
+    HEAD~1`이 통과하고(leader에서 도는 명령이라 reflog에 남는다), 조상 관계만
+    보면 형제 worktree가 공유 ref에 밀어 넣은 커밋이 통과한다.
+
+    어느 조건에서 탈락했는지 그대로 돌려주는 이유는 안내문 때문이다. "leader가
+    기록하지 않았다"는 문구를 leader가 분명히 기록한 전환·reset에 붙이면 사용자가
+    엉뚱한 곳을 조사한다.
+    """
+    if before.branch != observed.branch:
+        return "branch"
+    if before.head == observed.head:
+        return None
+    if not _is_ancestor(leader_root, before.head, observed.head):
+        return "non-fast-forward"
+    if not _head_moved_inside_leader(leader_root, observed.head):
+        return _EXTERNAL_HEAD_DRIFT
+    return None
+
+
+def leader_drift_message(
+    drift: LeaderDrift,
+    *,
+    worker_root: Path | None = None,
+) -> str:
+    """차단 사유 + 그 종류에 **실제로 통하는** 다음 수."""
+    guidance = _DRIFT_GUIDANCE.get(
+        drift.kind, "Investigate the leader before continuing."
+    )
+    resume = (
+        f" Resume only from the worker checkout: {real_path(worker_root)}."
+        if worker_root is not None
+        else ""
+    )
+    return (
+        "leader checkout changed during the phase: "
+        + "; ".join(drift.reasons)
+        + ". Nothing was modified or reverted - the leader is exactly as you left it. "
+        + guidance
+        + resume
+    )
+
+
 def assert_leader_unchanged(
     leader_root: Path,
     before: LeaderSnapshot,
@@ -1365,42 +1556,28 @@ def assert_leader_unchanged(
     worker_root: Path | None = None,
     include_ignored: bool = True,
 ) -> None:
-    """leader가 phase 진입 시점과 동일한지 검증한다. **아무것도 바꾸지 않는다.**
+    """워커가 leader를 건드리지 않았는지 검증한다. **아무것도 바꾸지 않는다.**
 
-    불변식은 하나뿐이다: HEAD + 현재 브랜치 + working tree 상태가 ``before``와
-    같다. 어긋나면 그 사실만 보고하고 멈춘다.
+    불변식은 "leader가 비트 단위로 그대로"가 아니라 "이 런이 leader를 건드리지
+    않았다"이다. 그래서 working tree는 등호로 보고, HEAD 이동은 leader 자신의
+    reflog에 기록됐는지로 본다. 사람의 `pull`/`checkout`은 통과하고, 공유 ref를
+    밖에서 밀어 넣은 이동은 걸린다.
 
-    되돌리지 않는 이유: 변경의 출처를 스냅샷 차이만으로는 알 수 없다. worker가
-    흘린 것일 수도, 사람이 같은 시각에 leader를 편집한 것일 수도 있다. 귀속이
-    불가능한 신호로 ``reset --hard``를 돌리면 사람의 미커밋 작업을 파괴한다.
+    되돌리지 않는 이유: working tree 변경의 출처는 스냅샷 차이만으로 알 수 없다.
+    worker가 흘린 것일 수도, 사람이 같은 시각에 leader를 편집한 것일 수도 있다.
+    귀속이 불가능한 신호로 ``reset --hard``를 돌리면 사람의 미커밋 작업을 파괴한다.
     탐지해서 멈추는 것만으로 "조용히 넘어가지 않는다"는 목적은 달성된다.
     """
-    if not before.armed:
-        return
-    after = capture_leader_snapshot(
+    drift = classify_leader_drift(
         leader_root,
+        before,
         include_ignored=include_ignored,
     )
-    if not after.armed:
-        raise WorktreeIsolationError(
-            f"leader stopped being a git repository during the phase: {leader_root}"
-        )
-    reasons = _snapshot_diff(before, after)
-    if not reasons:
+    if drift is None:
         return
-    recovery = (
-        f" Resume only from the worker checkout: {real_path(worker_root)}."
-        if worker_root is not None
-        else ""
-    )
-    raise WorktreeIsolationError(
-        "leader checkout changed during the phase: "
-        + "; ".join(reasons)
-        + ". Nothing was modified or reverted - the leader is exactly as you left it. "
-        "If a worker leaked these writes, move them into the worker checkout and clean "
-        "the leader. If they are your own edits, commit or stash them before re-running "
-        "so the tripwire has a stable baseline."
-        + recovery
+    raise LeaderDriftError(
+        leader_drift_message(drift, worker_root=worker_root),
+        drift,
     )
 
 
@@ -1420,12 +1597,15 @@ def leader_root_for(worker_root) -> Optional[Path]:
     return leader
 
 
-def _snapshot_diff(before: LeaderSnapshot, after: LeaderSnapshot) -> list[str]:
+def _snapshot_diff(
+    before: LeaderSnapshot, after: LeaderSnapshot, *, include_head: bool = True
+) -> list[str]:
     reasons: list[str] = []
-    if before.head != after.head:
-        reasons.append(f"HEAD moved {before.head[:12]} -> {after.head[:12]}")
-    if before.branch != after.branch:
-        reasons.append(f"branch switched {before.branch!r} -> {after.branch!r}")
+    if include_head:
+        if before.head != after.head:
+            reasons.append(f"HEAD moved {before.head[:12]} -> {after.head[:12]}")
+        if before.branch != after.branch:
+            reasons.append(f"branch switched {before.branch!r} -> {after.branch!r}")
     known = set(before.records())
     seen = set(after.records())
     gained = sorted(_status_record_path(r) for r in seen - known)
@@ -1452,11 +1632,73 @@ def _leader_status(leader_root, *, include_ignored: bool = True) -> str:
     )
     lines = [record for record, _ in kept]
     lines.append(f"tracked-content {_tracked_content_digest(leader_root)}")
+    seen = {path for _, path in kept}
     for _, path in kept:
         stamp = _path_content_stamp(leader_root, path)
         if stamp:
             lines.append(stamp)
+    # status와 diff가 **둘 다** 침묵하는 경로들. 여기서 직접 해시하지 않으면 그
+    # 파일에 대한 쓰기는 어느 신호에도 남지 않는다(실측: 두 출력 모두 빈 문자열).
+    # 전수 해시한다. 상한을 두면 그 뒤로 밀린 파일의 내용 변경이 영구히 안 보이고,
+    # 그것은 탐지 실패 중 최악인 조용한 미탐지다. 비용 근거도 없다 — 실측으로
+    # tracked 3000개 전수 sha256이 58ms로, 이미 매 스냅샷마다 도는 `git status`
+    # 한 번(60ms)보다 싸다. 표시가 없는 저장소에서는 이 순회가 0회다.
+    unwatched = [path for path in _index_flagged_paths(leader_root) if path not in seen]
+    for path in unwatched:
+        if not _path_is_present(leader_root, path):
+            # sparse checkout은 제외 파일 전부를 표시한다. 디스크에 없는 경로는
+            # leader의 내용이 아니므로 스냅샷에 넣지 않는다.
+            continue
+        stamp = _path_content_stamp(leader_root, path)
+        if stamp:
+            lines.append(f"unwatched {stamp}")
     return "\n".join(lines)
+
+
+def _index_flagged_paths(leader_root) -> tuple[str, ...]:
+    """`assume-unchanged`/`skip-worktree`로 표시된 tracked 경로.
+
+    이 표시는 git에게 "이 파일의 변경을 보지 말라"는 지시다. 그래서 `status`도
+    `diff HEAD`도 그 파일의 쓰기를 보고하지 않는다. 사전 차단을 두 규칙으로 줄인
+    뒤 tripwire가 주 기제가 됐으므로, 그 침묵은 그냥 구멍이다 — 표시 여부와
+    무관하게 "phase 도중 leader는 그대로"라는 계약은 같다.
+
+    sparse checkout은 제외된 파일 **전부**를 `S`로 표시한다. 그 파일들은 디스크에
+    없으므로 호출자가 존재 여부로 걸러낸다 — 없는 파일은 leader의 내용이 아니다.
+    """
+    result = git_safe(
+        "ls-files",
+        "-v",
+        "-z",
+        cwd=leader_root,
+        timeout_s=_TRIPWIRE_TIMEOUT_S,
+        optional_locks=False,
+    )
+    if not result.ok:
+        raise _tripwire_git_error(
+            f"cannot read leader index flags in {leader_root}", result
+        )
+    flagged: list[str] = []
+    for record in result.stdout.split("\0"):
+        if len(record) < 3 or record[1] != " ":
+            continue
+        tag, path = record[0], record[2:]
+        # 소문자 = assume-unchanged, `S` = skip-worktree. 정상(`H`)은 대상이 아니다.
+        if not (tag.islower() or tag == "S"):
+            continue
+        if _is_excluded_path(path):
+            continue
+        flagged.append(path)
+    return tuple(sorted(flagged))
+
+
+def _path_is_present(leader_root, relative: str) -> bool:
+    try:
+        (Path(leader_root) / relative).lstat()
+    except OSError:
+        return False
+    return True
+
 
 
 def _tracked_content_digest(leader_root) -> str:
@@ -1464,6 +1706,18 @@ def _tracked_content_digest(leader_root) -> str:
 
     읽지 못하면 sentinel을 남기지 않고 raise한다. sentinel은 다음 스냅샷과
     무조건 어긋나 오탐이 되고, 오탐은 완료된 산출물을 버리게 만든다.
+
+    진단용 필터는 전부 끈다. `.gitattributes`가 지목하는 diff driver의 `textconv`와
+    `command`는 저장소가 커밋해 두는 값이므로, 켜 두면 **관측 대상이 관측 방법을
+    고른다**. 결과는 두 가지다. 양쪽 출력이 같아지는 필터에서는 diff가 0바이트가 되어
+    이 digest가 상수로 굳고(재수정 신호 상실), git이 그 프로그램을 스냅샷마다 실제로
+    실행한다(경계 코드가 저장소 설정에 코드 실행을 허용).
+
+    내용 자체는 싣지 않는다. `--full-index`가 내는 `index <40hex>..<40hex>` 헤더의
+    뒤쪽 sha는 git이 워킹트리 blob을 직접 해싱해 채우므로 1바이트 변경도 그 줄에
+    반영된다. `--binary`로 patch 본문까지 받으면 탐지력은 같은데 비용만 내용 크기에
+    비례한다 — 실측(32MB 바이너리 1바이트 수정) 43.2MB/0.63s 대 179B/0.06s.
+    `--no-renames`는 무관한 파일 추가가 diff 표현을 흔드는 잡음을 없앤다.
     """
     # pathspec이 없으면 agent-flow 자신의 상태 쓰기가 digest를 바꾼다. `.agent-flow/`가
     # git-tracked인 프로젝트에서 `claim_task` 한 번에 완료된 task가 failed로 되돌아갔다.
@@ -1471,6 +1725,10 @@ def _tracked_content_digest(leader_root) -> str:
         "diff",
         "HEAD",
         "--no-color",
+        "--full-index",
+        "--no-renames",
+        "--no-ext-diff",
+        "--no-textconv",
         "--",
         ".",
         *(f":(exclude){path}" for path in _RUNTIME_WRITE_PATHS),
@@ -1673,6 +1931,7 @@ def worker_claim_lock(root, *, timeout_s: int = _LOCK_TIMEOUT_S) -> Iterator[Non
         yield
 
 
+
 @contextlib.contextmanager
 def _cross_process_lock(root, name: str, *, timeout_s: int) -> Iterator[None]:
     common = _git_common_dir(root)
@@ -1835,6 +2094,16 @@ def _git_common_dir(path) -> Optional[Path]:
     return real_path(candidate)
 
 
+def _git_dir(path) -> Optional[Path]:
+    result = git_safe("rev-parse", "--absolute-git-dir", cwd=path, optional_locks=False)
+    if not result.ok:
+        return None
+    raw = result.stdout.strip()
+    if not raw:
+        return None
+    return real_path(Path(raw))
+
+
 def _current_branch(path) -> Optional[str]:
     result = git_safe("rev-parse", "--abbrev-ref", "HEAD", cwd=path, optional_locks=False)
     if not result.ok:
@@ -1847,6 +2116,77 @@ def _leader_head_sha(root) -> Optional[str]:
     if not result.ok:
         return None
     return result.stdout.strip() or None
+
+
+def _is_ancestor(leader_root, old: str, new: str) -> bool:
+    """``old``가 ``new``의 조상인가. 판정 불가는 **아니다**로 접는다.
+
+    이 답은 "HEAD 이동을 정상 전진으로 볼 수 있는가"의 근거다. 모르는 것을
+    "그렇다"로 접으면 `reset --hard`나 force-push로 사라진 커밋 위에서 런이
+    계속된다. exit 1(조상 아님)과 exit 128(객체 없음)은 둘 다 "아니다"다.
+    """
+    if not old or not new:
+        return False
+    result = git_safe(
+        "merge-base",
+        "--is-ancestor",
+        old,
+        new,
+        cwd=leader_root,
+        timeout_s=_TRIPWIRE_TIMEOUT_S,
+        optional_locks=False,
+    )
+    if result.timed_out or result.error is not None:
+        return False
+    return result.returncode == 0
+
+
+# reflog 마지막 줄만 필요하다. 오래된 저장소의 `logs/HEAD`는 수 MB까지 자라므로
+# 끝에서 이만큼만 읽는다. 한 줄은 sha 두 개 + 서명 + 메시지라 넉넉하다.
+_REFLOG_TAIL_BYTES = 8192
+
+
+def _head_moved_inside_leader(leader_root, observed_head: str) -> bool:
+    """지금 HEAD가 leader 자신의 reflog가 마지막으로 적은 값인가.
+
+    git은 HEAD reflog를 checkout마다 따로 쓴다 — leader는 `.git/logs/HEAD`,
+    linked worktree는 `.git/worktrees/<name>/logs/HEAD`. 그래서 leader에서 실행한
+    명령만 leader의 reflog에 남는다. tip이 지금 HEAD와 같으면 그 이동은 leader
+    안에서 일어난 것이고, 사람의 `pull`/`checkout`/`commit`이 여기 속한다.
+
+    이것은 사고와 정상 워크플로를 가르는 판별기이지 적대적 보증이 아니다.
+    `.git`이 공유되므로 워커가 `GIT_DIR`을 leader로 겨눠 직접 append하면 이
+    신호를 위조할 수 있다. 그 경로는 사전 차단이 막아야 한다.
+
+    판정 불가는 "밖에서 움직였다"로 접는다. reflog가 없거나 읽히지 않으면
+    이동을 정당하다고 부를 근거가 없다.
+    """
+    if not observed_head:
+        return False
+    git_directory = _git_dir(leader_root)
+    if git_directory is None:
+        return False
+    log = git_directory / "logs" / "HEAD"
+    try:
+        size = log.stat().st_size
+        with log.open("rb") as handle:
+            if size > _REFLOG_TAIL_BYTES:
+                handle.seek(size - _REFLOG_TAIL_BYTES)
+            tail = handle.read()
+    except OSError:
+        return False
+    lines = [line for line in tail.split(b"\n") if line.strip()]
+    if not lines:
+        return False
+    # `<old-sha> <new-sha> <name> <email> <ts> <tz>\t<message>`
+    fields = lines[-1].split(b" ", 2)
+    if len(fields) < 2:
+        return False
+    try:
+        tip = fields[1].decode("ascii")
+    except UnicodeDecodeError:
+        return False
+    return tip == observed_head
 
 
 def _read_registration_file(path: Path) -> tuple[os.stat_result, bytes] | None:

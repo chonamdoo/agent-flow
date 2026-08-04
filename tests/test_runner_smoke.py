@@ -276,6 +276,33 @@ def test_abort_clears_marker(tmp_path: Path):
     assert (active / "design.md").exists()
 
 
+def test_abort_closes_a_run_whose_checkout_was_deleted(tmp_path: Path):
+    """반증: checkout 폴더를 지운 run은 닫을 길이 없으면 저장소를 막는다.
+
+    남은 `active` 마커는 그 이름의 `worktree remove`를 막고, host write boundary는
+    소유자를 증명할 수 없는 claim으로 보고 이 프로젝트의 모든 write/bash에서
+    raise한다. 경로 검증 때문에 `abort`가 거부되면 복구 명령이 아예 없다.
+    """
+    project = tmp_path / "abandoned"
+    project.mkdir()
+    _init_git_project(project)
+
+    assert _run_cli(["run", "abandoned task"], project).returncode == 0
+    plan = plan_worktree(root=project, name="abandoned task")
+    runs_dir = (
+        worktree_runtime_root(root=project, name=plan.name) / ".agent-flow" / "runs"
+    )
+    active = next(p for p in runs_dir.iterdir() if (p / "active").exists())
+    shutil.rmtree(plan.path)
+    subprocess.run(("git", "worktree", "prune"), cwd=project, check=True)
+
+    aborted = _run_cli(["abort", "--worktree", plan.name, "--yes"], project)
+
+    assert aborted.returncode == 0, aborted.stderr
+    assert not (active / "active").exists()
+    assert (active / "design.md").exists(), "artifacts must survive the abort"
+
+
 def test_worktree_run_continue_status_abort(tmp_path: Path):
     project = tmp_path / "parallel"
     project.mkdir()
@@ -431,6 +458,160 @@ def test_hosted_phase_durable_baseline_detects_post_adapter_leader_write(
     assert f"Resume only from the worker checkout: {checkout.path.resolve()}" in str(
         caught.value
     )
+
+
+def test_hosted_phase_baseline_in_an_older_format_is_re_captured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+):
+    """반증: 형식이 바뀐 뒤 낡은 기록을 그대로 대조하면 진행 중인 run 전부가
+    근거 없이 막힌다. 그 오탐은 사용자가 풀 방법도 없다.
+
+    낡은 기록은 버리고 이 phase에서 새 형식으로 다시 찍는다. 대가는 업그레이드를
+    걸친 그 phase 하나의 탐지이고, 그게 모든 run을 막는 것보다 작다.
+    """
+    from agent_flow.adapters.hosted import HostedAdapter
+    from agent_flow.artifact import read_meta, write_meta
+    from agent_flow.core import worktrees as worktrees_module
+    from agent_flow.core.worktree_isolation import LEADER_SNAPSHOT_VERSION
+    from agent_flow.runner import Phase, ResumeMode, Runner
+    import agent_flow.runner as runner_module
+
+    project = tmp_path / "legacy-host-baseline"
+    project.mkdir()
+    _init_git_project(project)
+    (project / ".gitignore").write_text(".agent-flow/\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", ".gitignore"], cwd=project, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "ignore runtime"],
+        cwd=project,
+        check=True,
+        capture_output=True,
+    )
+    plan = worktrees_module.plan_worktree(root=project, name="legacy-phase")
+    checkout = worktrees_module.create_worktree(root=project, plan=plan)
+    state_root = project / ".git" / "agent-flow" / "worktrees" / checkout.name
+    monkeypatch.setattr(
+        runner_module, "detect_adapter", lambda: HostedAdapter("codex")
+    )
+    monkeypatch.setattr(
+        runner_module, "assert_managed_hooks_registered", lambda *a, **k: None
+    )
+    phase = Phase(id="legacy-phase", description="host writes artifact")
+    started = Runner(
+        checkout.path,
+        state_root=state_root,
+        config_root=project,
+        workflow="development",
+    )
+    started.phases = [phase]
+    started.run(ResumeMode.START, task="legacy baseline")
+    assert started.run_dir is not None
+    run_dir = started.run_dir
+
+    # 구버전이 남긴 기록: `version` 키가 없고 status 문자열 형식도 다르다.
+    meta = read_meta(run_dir)
+    baseline = dict(meta["host_phase_leader_baseline"])
+    assert baseline["snapshot"]["version"] == LEADER_SNAPSHOT_VERSION
+    stale = dict(baseline["snapshot"])
+    stale.pop("version")
+    stale["status"] = "예전 형식에서는 이 줄들이 달랐다"
+    baseline["snapshot"] = stale
+    meta["host_phase_leader_baseline"] = baseline
+    write_meta(run_dir, meta)
+
+    (run_dir / "legacy-phase.md").write_text(
+        "# legacy phase\n\nstatus: complete\n", encoding="utf-8"
+    )
+    resumed = Runner(
+        checkout.path,
+        state_root=state_root,
+        config_root=project,
+        run_dir=run_dir,
+    )
+    resumed.phases = [phase]
+    resumed.run(ResumeMode.RESUME)
+
+    assert "[migrate]" in capsys.readouterr().out
+    # 낡은 키는 버려졌다. skip 경로의 `_advance_phase`가 한 번 더 pop하므로 완료된
+    # run의 meta에는 baseline이 남지 않는다 — 남아 있다면 재캡처가 아니라 낡은
+    # 기록을 그대로 들고 있다는 뜻이다.
+    assert read_meta(run_dir).get("host_phase_leader_baseline") is None
+
+
+def test_hosted_phase_baseline_with_an_older_record_format_is_re_captured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+):
+    """반증: 레코드 축의 버전 불일치를 하드 raise로 막으면 그것도 run을 재개 불가로
+    만든다 — 스냅샷 축에서 없앤 교착과 같은 것이다.
+
+    레코드 필드 구성이 다르면 그 안의 값을 현재 의미로 읽을 수 없으므로, 스냅샷
+    형식과 같은 재캡처 경로로 보낸다.
+    """
+    from agent_flow.adapters.hosted import HostedAdapter
+    from agent_flow.artifact import read_meta, write_meta
+    from agent_flow.core import worktrees as worktrees_module
+    from agent_flow.runner import Phase, ResumeMode, Runner
+    import agent_flow.runner as runner_module
+
+    project = tmp_path / "legacy-record-baseline"
+    project.mkdir()
+    _init_git_project(project)
+    (project / ".gitignore").write_text(".agent-flow/\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", ".gitignore"], cwd=project, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "ignore runtime"],
+        cwd=project,
+        check=True,
+        capture_output=True,
+    )
+    plan = worktrees_module.plan_worktree(root=project, name="record-phase")
+    checkout = worktrees_module.create_worktree(root=project, plan=plan)
+    state_root = project / ".git" / "agent-flow" / "worktrees" / checkout.name
+    monkeypatch.setattr(
+        runner_module, "detect_adapter", lambda: HostedAdapter("codex")
+    )
+    monkeypatch.setattr(
+        runner_module, "assert_managed_hooks_registered", lambda *a, **k: None
+    )
+    phase = Phase(id="record-phase", description="host writes artifact")
+    started = Runner(
+        checkout.path,
+        state_root=state_root,
+        config_root=project,
+        workflow="development",
+    )
+    started.phases = [phase]
+    started.run(ResumeMode.START, task="legacy record")
+    assert started.run_dir is not None
+    run_dir = started.run_dir
+
+    # 이 브랜치의 이전 커밋이 남긴 상태: 레코드 축 버전이 2다.
+    meta = read_meta(run_dir)
+    baseline = dict(meta["host_phase_leader_baseline"])
+    baseline["version"] = 2
+    meta["host_phase_leader_baseline"] = baseline
+    write_meta(run_dir, meta)
+
+    (run_dir / "record-phase.md").write_text(
+        "# record phase\n\nstatus: complete\n", encoding="utf-8"
+    )
+    resumed = Runner(
+        checkout.path,
+        state_root=state_root,
+        config_root=project,
+        run_dir=run_dir,
+    )
+    resumed.phases = [phase]
+    resumed.run(ResumeMode.RESUME)
+
+    out = capsys.readouterr().out
+    assert "[migrate]" in out
+    assert "record format v2" in out
+    assert read_meta(run_dir).get("host_phase_leader_baseline") is None
 
 
 def test_run_reuses_current_worktree_only_with_explicit_consent(tmp_path: Path):
@@ -1186,6 +1367,11 @@ def test_worktree_attach_keeps_the_dirty_leader_guard(tmp_path: Path):
 
     allowed = _run_cli(["run", "task", "--worktree", "task", "--allow-dirty"], project)
     assert allowed.returncode == 0, allowed.stderr
+    # 면제에는 대가가 있고, 그것을 알려야 한다. 이미 있던 미커밋 변경은
+    # `capture_leader_snapshot`이 기준선으로 굳히므로 tripwire의 보호 대상이 아니라
+    # 배경이 된다 — 워커 사고로 실제로 잃을 수 있는 것은 정확히 이 파일들뿐이다.
+    assert "dirty.txt" in allowed.stderr
+    assert "baseline" in allowed.stderr
 
 
 def test_implicit_task_selector_never_attaches_to_a_registered_worktree(tmp_path: Path):
