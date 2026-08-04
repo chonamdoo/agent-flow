@@ -1378,8 +1378,8 @@ _DRIFT_GUIDANCE = {
         "paths - commit, stash, or clean them - then re-run."
     ),
     "branch": (
-        "The leader is on a different branch, so its working tree now holds a "
-        "different commit's content. Switch it back before continuing."
+        "The leader is on a different branch than the baseline, so its working tree "
+        "may now hold a different commit's content. Switch it back before continuing."
     ),
     "non-fast-forward": (
         "The leader HEAD did not move forward from the baseline (rebase, reset, or "
