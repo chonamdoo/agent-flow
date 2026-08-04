@@ -1319,7 +1319,10 @@ def test_tripwire_detects_parent_traversal_write(tmp_path):
 
 
 def test_tripwire_detects_leader_branch_switch(tmp_path):
-    """불변: 삭제한 guard-worktree.sh가 막던 leader 브랜치 전환을 tripwire가 대신 잡는다."""
+    """불변: 브랜치가 바뀌면 워킹트리 내용이 통째로 달라지는데 status 축은 clean이다.
+
+    HEAD 완화는 **같은 브랜치**의 전진에만 준다. 브랜치 전환은 그 조건에서 빠진다.
+    """
     status, before = _isolated(tmp_path, "branch")
     _git("checkout", "-q", "-b", "sneaky", cwd=tmp_path)
     with pytest.raises(W_ISO.WorktreeIsolationError) as caught:
@@ -1327,6 +1330,58 @@ def test_tripwire_detects_leader_branch_switch(tmp_path):
     assert "branch switched" in str(caught.value)
     # 되돌리지 않는다. 사용자가 어디에 있는지 스스로 알 수 있어야 한다.
     assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=tmp_path).stdout.strip() == "sneaky"
+
+
+def test_tripwire_accepts_a_same_branch_advance_the_leader_recorded(tmp_path):
+    """반증: 사람의 평범한 `git pull`로 워커가 멈추면 그 정지를 푸는 수단이 따로
+    필요해지고, 그 수단이 다시 경계 뒤에 갇힌다.
+
+    같은 브랜치 + 조상 관계 + leader reflog 기록 셋을 모두 만족하면 워커 소행이
+    아님이 증명되므로 통과한다.
+    """
+    status, before = _isolated(tmp_path, "advance")
+    (tmp_path / "human.txt").write_text("human commit\n", encoding="utf-8")
+    _git("add", "human.txt", cwd=tmp_path)
+    _git("commit", "-q", "-m", "human advances the leader", cwd=tmp_path)
+    W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
+def test_tripwire_detects_a_head_move_the_leader_never_recorded(tmp_path):
+    """불변: 공유 ref를 leader 밖에서 밀어 넣으면 leader reflog는 그대로다.
+
+    다른 worktree가 `update-ref`로 leader의 브랜치를 움직였을 때의 관측 상태를,
+    leader에서 커밋한 뒤 reflog 마지막 줄을 지워 그대로 재현한다. 대조군은 같은
+    커밋을 reflog 손대지 않은 상태로 둔 위 테스트다.
+    """
+    status, before = _isolated(tmp_path, "external")
+    (tmp_path / "pushed.txt").write_text("from elsewhere\n", encoding="utf-8")
+    _git("add", "pushed.txt", cwd=tmp_path)
+    _git("commit", "-q", "-m", "pushed from elsewhere", cwd=tmp_path)
+    reflog = tmp_path / ".git" / "logs" / "HEAD"
+    kept = reflog.read_text(encoding="utf-8").splitlines()[:-1]
+    reflog.write_text("".join(f"{line}\n" for line in kept), encoding="utf-8")
+    with pytest.raises(W_ISO.WorktreeIsolationError) as caught:
+        W_ISO.assert_leader_unchanged(tmp_path, before)
+    message = str(caught.value)
+    assert "HEAD moved" in message
+    assert "without the leader checkout recording it" in message
+
+
+def test_tripwire_detects_a_leader_reset_even_though_the_leader_recorded_it(tmp_path):
+    """불변: reflog 기록만으로 정상이라 부르면 leader를 겨눈 `reset --hard`가 통과한다.
+
+    그 명령은 leader에서 도는 것이므로 leader reflog에 남는다. 조상 관계가 함께
+    요구되어야 뒤로 가는 이동이 걸린다.
+    """
+    status, before = _isolated(tmp_path, "reset")
+    (tmp_path / "doomed.txt").write_text("about to vanish\n", encoding="utf-8")
+    _git("add", "doomed.txt", cwd=tmp_path)
+    _git("commit", "-q", "-m", "commit that a reset would drop", cwd=tmp_path)
+    after_commit = W_ISO.capture_leader_snapshot(tmp_path)
+    _git("reset", "-q", "--hard", "HEAD~1", cwd=tmp_path)
+    with pytest.raises(W_ISO.WorktreeIsolationError) as caught:
+        W_ISO.assert_leader_unchanged(tmp_path, after_commit)
+    assert "HEAD moved" in str(caught.value)
 
 
 def test_tripwire_ignores_agent_runtime_writes(tmp_path):

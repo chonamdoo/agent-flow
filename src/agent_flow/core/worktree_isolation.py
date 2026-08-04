@@ -1305,10 +1305,7 @@ _TRIPWIRE_TIMEOUT_S = 120
 # porcelain v1 상태 문자. 레코드 앞 두 글자가 전부 여기 속할 때만 경로 접두어로 본다.
 _STATUS_CODES = frozenset(" MADRCUT?!")
 _STAMP_CHUNK_BYTES = 64 * 1024
-# git이 변경을 보고하지 않도록 표시된 경로를 직접 해시하는 상한. sparse checkout은
-# 제외 파일 전부를 표시하지만 그 파일들은 디스크에 없어 이 상한에 닿지 않는다.
-# 실제로 존재하는 표시 파일이 이 수를 넘는 저장소는 tripwire가 감당할 대상이 아니다.
-_FLAGGED_STAMP_LIMIT = 64
+
 
 
 @dataclass(frozen=True)
@@ -1371,19 +1368,28 @@ def capture_leader_snapshot(
 
 
 HOST_PHASE_LEADER_BASELINE_KEY = "host_phase_leader_baseline"
-_FAST_FORWARD_DRIFT = "fast-forward"
+# 스냅샷 관측 방식이 바뀔 때 올린다. 구버전 스냅샷은 현재 관측과 비교할 수
+# 없으므로, 값이 다르면 비교하지 않고 거부해야 한다.
+HOST_PHASE_LEADER_BASELINE_VERSION = 2
+_EXTERNAL_HEAD_DRIFT = "external-head"
 _DRIFT_GUIDANCE = {
     "status": (
         "The leader working tree no longer matches the baseline. Restore those "
         "paths - commit, stash, or clean them - then re-run."
     ),
     "branch": (
-        "The leader is on a different branch. Switch it back before continuing; "
-        "agent-flow never moves the leader branch during a run."
+        "The leader is on a different branch, so its working tree now holds a "
+        "different commit's content. Switch it back before continuing."
     ),
     "non-fast-forward": (
-        "The leader history was rewritten (rebase, reset, or force-push), so the "
-        "baseline cannot be carried forward. Investigate before continuing."
+        "The leader HEAD did not move forward from the baseline (rebase, reset, or "
+        "force-push), so commits this run was built on may be gone. Investigate "
+        "before continuing."
+    ),
+    _EXTERNAL_HEAD_DRIFT: (
+        "The leader HEAD moved without the leader checkout recording it, so the "
+        "move came from somewhere else - another worktree writing the shared refs, "
+        "or a rewrite that dropped the reflog. Investigate before continuing."
     ),
 }
 
@@ -1401,14 +1407,7 @@ class LeaderDrift:
     before: LeaderSnapshot
     after: LeaderSnapshot
 
-    @property
-    def recoverable(self) -> bool:
-        """확인만 하면 기준선을 앞으로 옮겨도 되는 전이인가.
 
-        하나뿐이다: 같은 브랜치, 같은 working tree, 이전 HEAD가 새 HEAD의 조상 —
-        즉 평범한 `git pull`의 모양.
-        """
-        return self.kind == _FAST_FORWARD_DRIFT
 
 
 class LeaderDriftError(WorktreeIsolationError):
@@ -1432,9 +1431,12 @@ def classify_leader_drift(
 ) -> LeaderDrift | None:
     """기준선과의 차이를 종류로 나눈다. 차이가 없으면 ``None``.
 
-    좁은 복구(fast-forward)는 **마지막에** 판정한다. 다른 신호가 하나라도 섞여
-    있으면 재바인딩 대상이 아니다 — dirty tree나 브랜치 이동을 fast-forward로
-    접으면 검증되지 않은 상태가 새 기준선으로 굳는다.
+    축이 둘이고 비교 방식이 다르다. working tree는 등호로 본다 — 워커가 흘린
+    쓰기가 여기 남는다. HEAD는 등호로 보지 않는다. 사람이 leader에서 평범한
+    `git pull`을 하는 것은 정상이고, 그것까지 오염으로 접으면 런이 남의 정상
+    작업에 멈춘 뒤 그 정지를 푸는 수단이 다시 필요해진다.
+
+    HEAD 축의 판정 조건은 ``_head_drift_kind``에 있다.
     """
     if not before.armed:
         return None
@@ -1447,17 +1449,13 @@ def classify_leader_drift(
         raise WorktreeIsolationError(
             f"leader stopped being a git repository during the phase: {leader_root}"
         )
-    reasons = _snapshot_diff(before, observed)
+    head_drift = _head_drift_kind(leader_root, before, observed)
+    reasons = _snapshot_diff(before, observed, include_head=head_drift is not None)
     if not reasons:
         return None
-    if set(before.records()) != set(observed.records()):
-        kind = "status"
-    elif before.branch != observed.branch:
-        kind = "branch"
-    elif _is_ancestor(leader_root, before.head, observed.head):
-        kind = _FAST_FORWARD_DRIFT
-    else:
-        kind = "non-fast-forward"
+    # HEAD 축이 어긋났으면 그쪽을 우선한다. 두 축이 함께 어긋난 경우 status 안내
+    # ("commit, stash, or clean")는 HEAD 문제에 아무 소용이 없다.
+    kind = head_drift or "status"
     return LeaderDrift(
         kind=kind,
         reasons=tuple(reasons),
@@ -1466,32 +1464,42 @@ def classify_leader_drift(
     )
 
 
+
+def _head_drift_kind(
+    leader_root: Path, before: LeaderSnapshot, observed: LeaderSnapshot
+) -> str | None:
+    """HEAD 축이 어긋났는가, 어긋났으면 어느 조건에서인가. 정상 전진이면 ``None``.
+
+    완화는 셋을 **모두** 만족할 때만 준다. 같은 브랜치, 이전 HEAD가 새 HEAD의
+    조상, 그 이동이 leader 자신의 reflog에 기록됨. 하나만 봤을 때 각각 무엇을
+    놓치는지 실측으로 확인했다 — reflog만 보면 `git -C <leader> reset --hard
+    HEAD~1`이 통과하고(leader에서 도는 명령이라 reflog에 남는다), 조상 관계만
+    보면 형제 worktree가 공유 ref에 밀어 넣은 커밋이 통과한다.
+
+    어느 조건에서 탈락했는지 그대로 돌려주는 이유는 안내문 때문이다. "leader가
+    기록하지 않았다"는 문구를 leader가 분명히 기록한 전환·reset에 붙이면 사용자가
+    엉뚱한 곳을 조사한다.
+    """
+    if before.branch != observed.branch:
+        return "branch"
+    if before.head == observed.head:
+        return None
+    if not _is_ancestor(leader_root, before.head, observed.head):
+        return "non-fast-forward"
+    if not _head_moved_inside_leader(leader_root, observed.head):
+        return _EXTERNAL_HEAD_DRIFT
+    return None
+
+
 def leader_drift_message(
     drift: LeaderDrift,
     *,
     worker_root: Path | None = None,
-    recovery_command: str = "",
 ) -> str:
-    """차단 사유 + 그 종류에 **실제로 통하는** 다음 수.
-
-    이전 안내는 모든 차이에 "commit 또는 stash"를 붙였다. HEAD가 앞으로 간
-    경우에는 그게 해결책이 아니라서, 할 수 있는 게 없는 안내가 됐다 — 그리고
-    그 상태에서 status/continue까지 막히면 복구 경로가 아예 사라진다.
-    """
-    if drift.recoverable:
-        guidance = (
-            "The leader fast-forwarded on the same branch with an unchanged working "
-            "tree, which is what a normal `git pull` looks like. Confirm that is what "
-            "happened, then move the recorded baseline forward with "
-            + (
-                recovery_command
-                or "`agent-flow host-session rebind` (see `--help` for selectors)"
-            )
-        )
-    else:
-        guidance = _DRIFT_GUIDANCE.get(
-            drift.kind, "Investigate the leader before continuing."
-        )
+    """차단 사유 + 그 종류에 **실제로 통하는** 다음 수."""
+    guidance = _DRIFT_GUIDANCE.get(
+        drift.kind, "Investigate the leader before continuing."
+    )
     resume = (
         f" Resume only from the worker checkout: {real_path(worker_root)}."
         if worker_root is not None
@@ -1513,16 +1521,17 @@ def assert_leader_unchanged(
     run_id: str = "",
     worker_root: Path | None = None,
     include_ignored: bool = True,
-    recovery_command: str = "",
 ) -> None:
-    """leader가 phase 진입 시점과 동일한지 검증한다. **아무것도 바꾸지 않는다.**
+    """워커가 leader를 건드리지 않았는지 검증한다. **아무것도 바꾸지 않는다.**
 
-    불변식은 하나뿐이다: HEAD + 현재 브랜치 + working tree 상태가 ``before``와
-    같다. 어긋나면 그 사실과 그 종류에 맞는 복구 경로만 보고하고 멈춘다.
+    불변식은 "leader가 비트 단위로 그대로"가 아니라 "이 런이 leader를 건드리지
+    않았다"이다. 그래서 working tree는 등호로 보고, HEAD 이동은 leader 자신의
+    reflog에 기록됐는지로 본다. 사람의 `pull`/`checkout`은 통과하고, 공유 ref를
+    밖에서 밀어 넣은 이동은 걸린다.
 
-    되돌리지 않는 이유: 변경의 출처를 스냅샷 차이만으로는 알 수 없다. worker가
-    흘린 것일 수도, 사람이 같은 시각에 leader를 편집한 것일 수도 있다. 귀속이
-    불가능한 신호로 ``reset --hard``를 돌리면 사람의 미커밋 작업을 파괴한다.
+    되돌리지 않는 이유: working tree 변경의 출처는 스냅샷 차이만으로 알 수 없다.
+    worker가 흘린 것일 수도, 사람이 같은 시각에 leader를 편집한 것일 수도 있다.
+    귀속이 불가능한 신호로 ``reset --hard``를 돌리면 사람의 미커밋 작업을 파괴한다.
     탐지해서 멈추는 것만으로 "조용히 넘어가지 않는다"는 목적은 달성된다.
     """
     drift = classify_leader_drift(
@@ -1533,11 +1542,7 @@ def assert_leader_unchanged(
     if drift is None:
         return
     raise LeaderDriftError(
-        leader_drift_message(
-            drift,
-            worker_root=worker_root,
-            recovery_command=recovery_command,
-        ),
+        leader_drift_message(drift, worker_root=worker_root),
         drift,
     )
 
@@ -1558,12 +1563,15 @@ def leader_root_for(worker_root) -> Optional[Path]:
     return leader
 
 
-def _snapshot_diff(before: LeaderSnapshot, after: LeaderSnapshot) -> list[str]:
+def _snapshot_diff(
+    before: LeaderSnapshot, after: LeaderSnapshot, *, include_head: bool = True
+) -> list[str]:
     reasons: list[str] = []
-    if before.head != after.head:
-        reasons.append(f"HEAD moved {before.head[:12]} -> {after.head[:12]}")
-    if before.branch != after.branch:
-        reasons.append(f"branch switched {before.branch!r} -> {after.branch!r}")
+    if include_head:
+        if before.head != after.head:
+            reasons.append(f"HEAD moved {before.head[:12]} -> {after.head[:12]}")
+        if before.branch != after.branch:
+            reasons.append(f"branch switched {before.branch!r} -> {after.branch!r}")
     known = set(before.records())
     seen = set(after.records())
     gained = sorted(_status_record_path(r) for r in seen - known)
@@ -1597,18 +1605,19 @@ def _leader_status(leader_root, *, include_ignored: bool = True) -> str:
             lines.append(stamp)
     # status와 diff가 **둘 다** 침묵하는 경로들. 여기서 직접 해시하지 않으면 그
     # 파일에 대한 쓰기는 어느 신호에도 남지 않는다(실측: 두 출력 모두 빈 문자열).
+    # 전수 해시한다. 상한을 두면 그 뒤로 밀린 파일의 내용 변경이 영구히 안 보이고,
+    # 그것은 탐지 실패 중 최악인 조용한 미탐지다. 비용 근거도 없다 — 실측으로
+    # tracked 3000개 전수 sha256이 58ms로, 이미 매 스냅샷마다 도는 `git status`
+    # 한 번(60ms)보다 싸다. 표시가 없는 저장소에서는 이 순회가 0회다.
     unwatched = [path for path in _index_flagged_paths(leader_root) if path not in seen]
-    present = [
-        path for path in unwatched if _path_is_present(leader_root, path)
-    ]
-    for path in present[:_FLAGGED_STAMP_LIMIT]:
+    for path in unwatched:
+        if not _path_is_present(leader_root, path):
+            # sparse checkout은 제외 파일 전부를 표시한다. 디스크에 없는 경로는
+            # leader의 내용이 아니므로 스냅샷에 넣지 않는다.
+            continue
         stamp = _path_content_stamp(leader_root, path)
         if stamp:
             lines.append(f"unwatched {stamp}")
-    if len(present) > _FLAGGED_STAMP_LIMIT:
-        # 상한을 넘는 표시는 해시하지 않는다. 그래도 개수는 남겨서 집합이 바뀌면
-        # 스냅샷이 달라지게 한다 — 조용히 없는 것처럼 두지 않는다.
-        lines.append(f"unwatched-overflow {len(present)}")
     return "\n".join(lines)
 
 
@@ -1657,6 +1666,7 @@ def _path_is_present(leader_root, relative: str) -> bool:
     return True
 
 
+
 def _tracked_content_digest(leader_root) -> str:
     """tracked 파일의 실제 내용 변화. 상태 문자만으로는 안 보이는 재수정을 잡는다.
 
@@ -1667,8 +1677,13 @@ def _tracked_content_digest(leader_root) -> str:
     `command`는 저장소가 커밋해 두는 값이므로, 켜 두면 **관측 대상이 관측 방법을
     고른다**. 결과는 두 가지다. 양쪽 출력이 같아지는 필터에서는 diff가 0바이트가 되어
     이 digest가 상수로 굳고(재수정 신호 상실), git이 그 프로그램을 스냅샷마다 실제로
-    실행한다(경계 코드가 저장소 설정에 코드 실행을 허용). `--binary`는 그 위에서
-    바이너리 파일을 축약 sha 한 줄이 아니라 내용 자체로 비교하게 한다.
+    실행한다(경계 코드가 저장소 설정에 코드 실행을 허용).
+
+    내용 자체는 싣지 않는다. `--full-index`가 내는 `index <40hex>..<40hex>` 헤더의
+    뒤쪽 sha는 git이 워킹트리 blob을 직접 해싱해 채우므로 1바이트 변경도 그 줄에
+    반영된다. `--binary`로 patch 본문까지 받으면 탐지력은 같은데 비용만 내용 크기에
+    비례한다 — 실측(32MB 바이너리 1바이트 수정) 43.2MB/0.63s 대 179B/0.06s.
+    `--no-renames`는 무관한 파일 추가가 diff 표현을 흔드는 잡음을 없앤다.
     """
     # pathspec이 없으면 agent-flow 자신의 상태 쓰기가 digest를 바꾼다. `.agent-flow/`가
     # git-tracked인 프로젝트에서 `claim_task` 한 번에 완료된 task가 failed로 되돌아갔다.
@@ -1676,7 +1691,8 @@ def _tracked_content_digest(leader_root) -> str:
         "diff",
         "HEAD",
         "--no-color",
-        "--binary",
+        "--full-index",
+        "--no-renames",
         "--no-ext-diff",
         "--no-textconv",
         "--",
@@ -1881,19 +1897,6 @@ def worker_claim_lock(root, *, timeout_s: int = _LOCK_TIMEOUT_S) -> Iterator[Non
         yield
 
 
-@contextlib.contextmanager
-def host_session_lock(root, *, timeout_s: int = _LOCK_TIMEOUT_S) -> Iterator[None]:
-    """Serialize host-session baseline reads and writes.
-
-    A rebind verifies a leader transition and then updates two files (the run's
-    phase baseline and the session binding). Without one lock over both, a
-    concurrent recorder can interleave and leave the pair describing different
-    leader states - which is exactly the stale-baseline deadlock the rebind
-    exists to clear.
-    """
-    with _cross_process_lock(root, "host-session.lock", timeout_s=timeout_s):
-        yield
-
 
 @contextlib.contextmanager
 def _cross_process_lock(root, name: str, *, timeout_s: int) -> Iterator[None]:
@@ -2084,10 +2087,9 @@ def _leader_head_sha(root) -> Optional[str]:
 def _is_ancestor(leader_root, old: str, new: str) -> bool:
     """``old``가 ``new``의 조상인가. 판정 불가는 **아니다**로 접는다.
 
-    이 답은 "기준선을 앞으로 옮겨도 되는가"의 근거로만 쓰인다. 모르는 것을
-    "그렇다"로 접으면 force-push나 rebase를 clean fast-forward로 통과시켜
-    사라진 커밋 위에 새 기준선을 굳힌다. exit 1(조상 아님)과 exit 128(객체 없음)
-    은 둘 다 "아니다"로 같은 쪽에 선다.
+    이 답은 "HEAD 이동을 정상 전진으로 볼 수 있는가"의 근거다. 모르는 것을
+    "그렇다"로 접으면 `reset --hard`나 force-push로 사라진 커밋 위에서 런이
+    계속된다. exit 1(조상 아님)과 exit 128(객체 없음)은 둘 다 "아니다"다.
     """
     if not old or not new:
         return False
@@ -2103,6 +2105,54 @@ def _is_ancestor(leader_root, old: str, new: str) -> bool:
     if result.timed_out or result.error is not None:
         return False
     return result.returncode == 0
+
+
+# reflog 마지막 줄만 필요하다. 오래된 저장소의 `logs/HEAD`는 수 MB까지 자라므로
+# 끝에서 이만큼만 읽는다. 한 줄은 sha 두 개 + 서명 + 메시지라 넉넉하다.
+_REFLOG_TAIL_BYTES = 8192
+
+
+def _head_moved_inside_leader(leader_root, observed_head: str) -> bool:
+    """지금 HEAD가 leader 자신의 reflog가 마지막으로 적은 값인가.
+
+    git은 HEAD reflog를 checkout마다 따로 쓴다 — leader는 `.git/logs/HEAD`,
+    linked worktree는 `.git/worktrees/<name>/logs/HEAD`. 그래서 leader에서 실행한
+    명령만 leader의 reflog에 남는다. tip이 지금 HEAD와 같으면 그 이동은 leader
+    안에서 일어난 것이고, 사람의 `pull`/`checkout`/`commit`이 여기 속한다.
+
+    이것은 사고와 정상 워크플로를 가르는 판별기이지 적대적 보증이 아니다.
+    `.git`이 공유되므로 워커가 `GIT_DIR`을 leader로 겨눠 직접 append하면 이
+    신호를 위조할 수 있다. 그 경로는 사전 차단이 막아야 한다.
+
+    판정 불가는 "밖에서 움직였다"로 접는다. reflog가 없거나 읽히지 않으면
+    이동을 정당하다고 부를 근거가 없다.
+    """
+    if not observed_head:
+        return False
+    git_directory = _git_dir(leader_root)
+    if git_directory is None:
+        return False
+    log = git_directory / "logs" / "HEAD"
+    try:
+        size = log.stat().st_size
+        with log.open("rb") as handle:
+            if size > _REFLOG_TAIL_BYTES:
+                handle.seek(size - _REFLOG_TAIL_BYTES)
+            tail = handle.read()
+    except OSError:
+        return False
+    lines = [line for line in tail.split(b"\n") if line.strip()]
+    if not lines:
+        return False
+    # `<old-sha> <new-sha> <name> <email> <ts> <tz>\t<message>`
+    fields = lines[-1].split(b" ", 2)
+    if len(fields) < 2:
+        return False
+    try:
+        tip = fields[1].decode("ascii")
+    except UnicodeDecodeError:
+        return False
+    return tip == observed_head
 
 
 def _read_registration_file(path: Path) -> tuple[os.stat_result, bytes] | None:

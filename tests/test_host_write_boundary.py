@@ -18,14 +18,9 @@ from agent_flow.core.host_write_boundary import (
     HostWriteBoundaryError,
     assert_adoption_allowed,
     host_write_boundary_violation,
-    rebind_host_leader_baseline,
     record_host_checkout_binding,
 )
-from agent_flow.core.worktree_isolation import (
-    WorktreeIsolationError,
-    adopted_record_path,
-    capture_leader_snapshot,
-)
+from agent_flow.core.worktree_isolation import adopted_record_path
 from agent_flow.core.worktrees import (
     adopt_worktree,
     create_worktree,
@@ -71,26 +66,6 @@ def _fast_forward_leader(root: Path, tmp_path: Path) -> tuple[str, str]:
     _git("worktree", "remove", "--force", str(feeder), cwd=root)
     return old, _git_out("rev-parse", "HEAD", cwd=root)
 
-
-def _plant_phase_baseline(root: Path, run_dir: Path) -> None:
-    """runner가 검증하는 durable baseline을 현재 leader 상태로 심는다."""
-    snapshot = capture_leader_snapshot(root)
-    meta_path = run_dir / "meta.json"
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    meta["host_phase_leader_baseline"] = {
-        "version": 1,
-        "run_id": run_dir.name,
-        "phase_id": "implement",
-        "phase_index": 0,
-        "leader_root": str(root.resolve()),
-        "snapshot": {
-            "head": snapshot.head,
-            "branch": snapshot.branch,
-            "status": snapshot.status,
-            "armed": True,
-        },
-    }
-    meta_path.write_text(json.dumps(meta), encoding="utf-8")
 
 
 def _setup(tmp_path: Path):
@@ -1216,24 +1191,23 @@ def test_virtual_write_targets_do_not_escape_the_filesystem_boundary(tmp_path: P
     assert "virtual write target is not trusted" in violation
 
 
-def test_stale_fast_forward_baseline_keeps_lifecycle_open_and_rebinds(tmp_path: Path):
-    """반증: 정상 pull 하나로 status까지 막히면 복구 경로가 아예 사라진다.
+def test_a_normal_leader_pull_does_not_stop_the_worker(tmp_path: Path):
+    """반증: 정상 pull 하나로 워커가 멈추면 그 정지를 푸는 수단이 따로 필요해진다.
 
-    leader가 같은 브랜치에서 clean fast-forward하면 기록된 기준선은 stale이 된다.
-    그때 (1) lifecycle 명령은 통과해야 하고, (2) 차단 메시지는 이 세션에 맞는 정확한
-    복구 명령을 담아야 하고, (3) 그 명령 한 번으로 session binding과 run phase
-    baseline이 **함께** 앞으로 가야 한다. 하나라도 빠지면 run은 그 자리에서 멈춘다.
+    사람이 leader에서 fast-forward하면 그 이동은 leader 자신의 reflog에 남는다.
+    워커가 건드린 것이 아니므로 차단 대상이 아니고, 워커의 쓰기는 계속 열려야 한다.
     """
     root, statuses, runs = _setup(tmp_path)
     first = statuses[0]
-    binding_path = record_host_checkout_binding(
+    assert record_host_checkout_binding(
         _status_payload(root, first, runs[0]), root
-    )
-    assert binding_path is not None
-    _plant_phase_baseline(root, runs[0])
-    old, new = _fast_forward_leader(root, tmp_path)
-    session_key = binding_path.stem
+    ) is not None
 
+    _fast_forward_leader(root, tmp_path)
+
+    assert host_write_boundary_violation(
+        _write_payload(first.path / "feature.py"), root
+    ) is None
     assert host_write_boundary_violation(
         _command_payload(
             f"agent-flow status --root {root} --worktree {first.name}",
@@ -1242,98 +1216,69 @@ def test_stale_fast_forward_baseline_keeps_lifecycle_open_and_rebinds(tmp_path: 
         root,
     ) is None
 
+
+def test_leader_branch_switch_still_stops_the_worker(tmp_path: Path):
+    """불변: 브랜치가 바뀌면 워킹트리가 통째로 다른 커밋 내용이 된다.
+
+    그 상태에서는 `git diff HEAD`가 clean이라 status 축이 아무 신호도 내지 않으므로,
+    HEAD 축이 잡아야 한다. 완화는 **같은 브랜치**의 전진에만 준다.
+    """
+    root, statuses, runs = _setup(tmp_path)
+    first = statuses[0]
+    assert record_host_checkout_binding(
+        _status_payload(root, first, runs[0]), root
+    ) is not None
+
+    _git("checkout", "-q", "-b", "leader-side-branch", cwd=root)
+
     blocked = host_write_boundary_violation(
         _write_payload(first.path / "feature.py"), root
     )
     assert blocked is not None
-    assert "fast-forwarded on the same branch" in blocked
-    assert f"--session-key {session_key}" in blocked
-    assert f"--expected-old-head {old}" in blocked
-    assert f"--expected-new-head {new}" in blocked
+    assert "branch switched" in blocked
 
-    rebound = rebind_host_leader_baseline(
-        project_root=root,
-        session_key=session_key,
-        expected_old_head=old,
-        expected_new_head=new,
-    )
 
-    assert set(rebound.moved) == {"session binding", "run phase baseline"}
-    assert rebound.new_head == new
-    assert host_write_boundary_violation(
+def test_head_moved_without_the_leader_recording_it_is_blocked(tmp_path: Path):
+    """불변: 공유 ref를 leader 밖에서 밀어 넣은 이동은 leader reflog에 남지 않는다.
+
+    git은 HEAD reflog를 checkout마다 따로 쓴다. 그래서 다른 worktree가 공유 ref를
+    직접 갱신하면 leader의 `logs/HEAD`는 그대로다. 마지막 줄을 지워 그 관측 상태를
+    그대로 재현한다.
+    """
+    root, statuses, runs = _setup(tmp_path)
+    first = statuses[0]
+    assert record_host_checkout_binding(
+        _status_payload(root, first, runs[0]), root
+    ) is not None
+
+    _fast_forward_leader(root, tmp_path)
+    reflog = root / ".git" / "logs" / "HEAD"
+    kept = reflog.read_text(encoding="utf-8").splitlines()[:-1]
+    reflog.write_text("".join(f"{line}\n" for line in kept), encoding="utf-8")
+
+    blocked = host_write_boundary_violation(
         _write_payload(first.path / "feature.py"), root
-    ) is None
-    planted = json.loads((runs[0] / "meta.json").read_text(encoding="utf-8"))
-    assert planted["host_phase_leader_baseline"]["snapshot"]["head"] == new
-    assert planted["host_phase_leader_baseline"]["phase_id"] == "implement"
-    # 같은 명령을 다시 쳐도 안전해야 한다. 사용자는 성공 여부를 모른 채 재시도한다.
-    assert rebind_host_leader_baseline(
-        project_root=root,
-        session_key=session_key,
-        expected_old_head=old,
-        expected_new_head=new,
-    ).moved == ()
-
-
-def test_rebind_refuses_everything_but_a_clean_fast_forward(tmp_path: Path):
-    """불변: 검증되지 않은 상태를 새 기준선으로 굳히면 tripwire는 없는 것과 같다."""
-    root, statuses, runs = _setup(tmp_path)
-    binding_path = record_host_checkout_binding(
-        _status_payload(root, statuses[0], runs[0]), root
     )
-    assert binding_path is not None
-    session_key = binding_path.stem
-    old, new = _fast_forward_leader(root, tmp_path)
-
-    scratch = root / "user-scratch.txt"
-    scratch.write_text("uncommitted\n", encoding="utf-8")
-    with pytest.raises(HostWriteBoundaryError, match="not a clean fast-forward"):
-        rebind_host_leader_baseline(
-            project_root=root,
-            session_key=session_key,
-            expected_old_head=old,
-            expected_new_head=new,
-        )
-    scratch.unlink()
-
-    with pytest.raises(HostWriteBoundaryError, match="not --expected-new-head"):
-        rebind_host_leader_baseline(
-            project_root=root,
-            session_key=session_key,
-            expected_old_head=old,
-            expected_new_head="0" * 40,
-        )
-
-    with pytest.raises(HostWriteBoundaryError, match="not inside an active worktree"):
-        rebind_host_leader_baseline(
-            project_root=root,
-            run_dir=tmp_path,
-            expected_old_head=old,
-            expected_new_head=new,
-        )
-
-    # 거절은 아무것도 쓰지 않았다는 뜻이어야 한다.
-    payload = json.loads(binding_path.read_text(encoding="utf-8"))
-    assert payload["leader_snapshot"]["head"] == old
+    assert blocked is not None
+    assert "HEAD moved" in blocked
+    assert "without the leader checkout recording it" in blocked
 
 
-def test_rebind_moves_the_phase_baseline_from_the_run_dir_alone(tmp_path: Path):
-    """runner가 막힌 사용자가 아는 selector는 run-dir 하나다. 그것만으로도 풀려야 한다."""
+def test_worker_writes_into_the_leader_are_still_caught(tmp_path: Path):
+    """HEAD 비교를 완화해도 working tree 축은 등호 그대로여야 한다."""
     root, statuses, runs = _setup(tmp_path)
-    _plant_phase_baseline(root, runs[0])
-    old, new = _fast_forward_leader(root, tmp_path)
+    first = statuses[0]
+    assert record_host_checkout_binding(
+        _status_payload(root, first, runs[0]), root
+    ) is not None
 
-    rebound = rebind_host_leader_baseline(
-        project_root=root,
-        run_dir=runs[0],
-        expected_old_head=old,
-        expected_new_head=new,
+    (root / "leaked.txt").write_text("worker spill\n", encoding="utf-8")
+
+    blocked = host_write_boundary_violation(
+        _write_payload(first.path / "feature.py"), root
     )
-
-    assert rebound.moved == ("run phase baseline",)
-    assert rebound.session_key is None
-    planted = json.loads((runs[0] / "meta.json").read_text(encoding="utf-8"))
-    assert planted["host_phase_leader_baseline"]["snapshot"]["head"] == new
+    assert blocked is not None
+    assert "working tree gained" in blocked
 
 
 def test_unbound_session_keeps_its_own_idle_checkout_writable(tmp_path: Path):
@@ -1391,11 +1336,43 @@ def test_pre_block_surface_stays_two_rules():
 
     for reversible in (
         "touch", "cp", "tee", "chmod", "chown", "dd", "sed", "ln",
-        "rsync", "install", "truncate", "mkdir", "unlink",
+        "rsync", "install", "truncate", "mkdir",
     ):
         assert reversible not in boundary._DESTRUCTIVE_COMMANDS, reversible
     for recoverable in ("commit", "add", "status", "stash", "switch"):
         assert recoverable not in boundary._DESTRUCTIVE_GIT_SUBCOMMANDS, recoverable
+
+
+def test_lifecycle_exemption_stays_narrow():
+    """계약: lifecycle 면제는 워커가 자기 런을 진행시키는 명령에만 준다.
+
+    면제된 경로는 R1 리터럴 검사·R2 파괴 목록·leader tripwire를 한꺼번에 건너뛴다.
+    그래서 이 목록에 이름을 더하는 것은 그 셋을 그 명령에 대해 끄는 것과 같다.
+    실행으로 확인된 결과: `eval --judge-command`는 임의 argv를 실행하고,
+    `worktree remove --name`은 형제 checkout을 지우고, `record-stage --run-dir`은
+    남의 런 산출물을 덮어쓴다.
+    """
+    import agent_flow.core.host_write_boundary as boundary
+
+    assert boundary._LIFECYCLE_COMMANDS == frozenset(
+        {"continue", "run", "start", "status"}
+    ), "lifecycle 면제 범위가 바뀌었다 — 늘렸다면 경로형 인자 검증이 먼저 필요하다"
+
+
+def test_agent_flow_calls_outside_the_exemption_still_face_the_boundary(tmp_path: Path):
+    """불변: 면제 밖 서브커맨드는 leader 경로를 인자로 받아도 경계를 통과 못 한다."""
+    root, statuses, runs = _setup(tmp_path)
+    first = statuses[0]
+    record_host_checkout_binding(_status_payload(root, first, runs[0]), root)
+
+    for command in (
+        f"agent-flow eval --root {root} --judge-command touch {root}/pwned",
+        f"agent-flow worktree remove --root {root} --name {statuses[1].name}",
+        f"agent-flow record-stage --run-dir {runs[1]} --stage implement",
+    ):
+        assert host_write_boundary_violation(
+            _command_payload(command, cwd=first.path), root
+        ) is not None, f"면제 밖 명령이 통과했다: {command}"
 
 
 def test_recovery_command_passes_in_every_blocked_state(tmp_path: Path):

@@ -13,15 +13,11 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from agent_flow.core.worktree_isolation import (
-    HOST_PHASE_LEADER_BASELINE_KEY,
-    LeaderDrift,
     LeaderDriftError,
     LeaderSnapshot,
     WorktreeIsolationError,
     assert_leader_unchanged,
     capture_leader_snapshot,
-    classify_leader_drift,
-    host_session_lock,
     leader_drift_message,
     list_registered_worktrees,
     managed_worktree_root,
@@ -80,12 +76,12 @@ _PATCH_PATH = re.compile(
 _STATUS_JSON = re.compile(r"(?:^|\n)status_json:\s*", re.MULTILINE)
 _STATUS_RUN = re.compile(r"(?:^|\n)run:\s*([^\r\n]+)", re.MULTILINE)
 _STATUS_NEXT_COMMAND = re.compile(r"(?:^|\n)next_command:\s*([^\r\n]+)", re.MULTILINE)
-_BINDING_VERSION = 2
+# leader baseline 관측 방식이 바뀌면 이전 버전이 기록한 스냅샷과는 비교 자체가
+# 성립하지 않는다. 그 상태로 비교하면 정리해도 사라지지 않는 drift가 남는다.
+_BINDING_VERSION = 3
 _BINDING_DIR = "host-sessions"
-# 재바인딩 selector. session key는 binding 파일명과 같은 sha256 digest이고, SHA는
-# 사용자가 손으로 옮겨 적는 값이라 접두어를 허용한다.
-_SESSION_KEY_TEXT = re.compile(r"^[0-9a-f]{64}$")
-_HEAD_TEXT = re.compile(r"^[0-9a-fA-F]{7,40}$")
+# 워커가 **자기 런을 진행시키는** 명령. 면제 범위를 넓히면 안 되는 이유는
+# `_is_lifecycle_command` docstring에 있다.
 _LIFECYCLE_COMMANDS = frozenset({"continue", "run", "start", "status"})
 
 
@@ -231,12 +227,12 @@ def record_host_checkout_binding(payload: object, project_root: Path) -> Path | 
     if not session_id:
         return None
     command = _first_string(payload, tuple(_COMMAND_KEYS))
-    # guard가 허용하는 형태와 **같은 판정**을 써야 한다. 여기만 이름을 요구하면
-    # 설치본을 경로로 부른 세션은 통과는 하되 binding을 못 받아, 계속 unbound로
-    # 남는다 — 그게 바로 복구가 되지 않던 상태다.
-    if not command or not _is_lifecycle_command(
+    # 이름으로 고르지 않는다. binding에 필요한 근거는 아래에서 전부 확인한다 —
+    # 신뢰된 설치 산출물의 호출인가, exit 0인가, 출력에 실제 status payload가
+    # 있는가. status를 내지 않는 명령은 그 셋에서 자동으로 탈락한다.
+    if not command or _agent_flow_arguments(
         command, root=root, cwd=_session_cwd(payload, command)
-    ):
+    ) is None:
         return None
     exit_code = _first_number(payload, ("exit_code", "exitCode", "returncode", "return_code"))
     if exit_code not in (None, 0):
@@ -271,25 +267,12 @@ def record_host_checkout_binding(payload: object, project_root: Path) -> Path | 
                 f"host session is already bound to {existing.checkout.checkout}; "
                 f"refusing to bind {context.checkout}"
             )
-        try:
-            assert_leader_unchanged(
-                root,
-                existing.leader_snapshot,
-                worker_root=existing.checkout.checkout,
-                include_ignored=False,
-            )
-        except LeaderDriftError as exc:
-            # 여기서 조용히 새 스냅샷을 덮어쓰면 leader 변경의 감사 근거가 사라진다.
-            # 그렇다고 아무 경로도 주지 않으면 정상 pull 하나로 status/continue까지
-            # 막힌 교착이 남는다. 그래서 종류에 맞는 복구 명령만 정확히 알려준다.
-            raise LeaderDriftError(
-                leader_drift_message(
-                    exc.drift,
-                    worker_root=existing.checkout.checkout,
-                    recovery_command=_rebind_command(root, existing, exc.drift),
-                ),
-                exc.drift,
-            ) from exc
+        assert_leader_unchanged(
+            root,
+            existing.leader_snapshot,
+            worker_root=existing.checkout.checkout,
+            include_ignored=False,
+        )
         return _binding_path(root, session_id)
     leader_snapshot = capture_leader_snapshot(root, include_ignored=False)
     binding_path = _binding_path(root, session_id)
@@ -336,9 +319,9 @@ def host_write_boundary_violation(payload: object, project_root: Path) -> str | 
         and command
         and _is_lifecycle_command(command, root=root, cwd=session_cwd)
     ):
-        # lifecycle 명령은 미바인딩과 stale baseline 양쪽의 **유일한** 복구 경로다.
-        # leader drift 검증을 그 앞에 두면 정상 fast-forward 하나가 복구 명령까지
-        # 막아 run을 영구 정지시킨다.
+        # agent-flow 자신의 호출은 leader drift 검증 앞에 둔다. 그 검증이 앞에
+        # 서면 leader가 움직인 순간 status/continue까지 함께 막혀, 경계가 자기가
+        # 만든 정지 상태의 유일한 해제 수단을 스스로 막는다.
         if binding is None:
             return None
         return _lifecycle_violation(
@@ -367,11 +350,7 @@ def host_write_boundary_violation(payload: object, project_root: Path) -> str | 
             include_ignored=False,
         )
     except LeaderDriftError as exc:
-        return leader_drift_message(
-            exc.drift,
-            worker_root=current.checkout,
-            recovery_command=_rebind_command(root, binding, exc.drift),
-        )
+        return leader_drift_message(exc.drift, worker_root=current.checkout)
     except WorktreeIsolationError as exc:
         return str(exc)
     return _scope_violation(
@@ -406,9 +385,10 @@ def _lifecycle_violation(
 ) -> str | None:
     """bound 세션의 lifecycle 명령. 자기 프로젝트·자기 worktree·자기 자리만 허용한다.
 
-    leader tripwire보다 **먼저** 돈다. drift는 status/continue로만 풀리므로 그
-    검증을 앞에 세우면 복구 자체가 불가능해진다. 대신 여기서 대상이 이 세션의
-    worktree인지는 그대로 검증하므로, 다른 run으로 새어 나가지는 못한다.
+    leader tripwire보다 **먼저** 돈다. drift가 그 검증 앞에 서면 leader가 움직인
+    순간 워커가 자기 런을 확인하거나 이어 갈 수단까지 함께 막힌다. 대신 여기서
+    대상이 이 세션의 worktree인지는 그대로 검증하므로, 다른 run으로 새어 나가지는
+    못한다.
     """
     operation = _lifecycle_operation(command, root=root, cwd=cwd)
     if operation in {"run", "start"}:
@@ -1586,6 +1566,19 @@ def _is_lifecycle_command(
     root: Path | None = None,
     cwd: Path | None = None,
 ) -> bool:
+    """이 명령이 워커가 **자기 런을 진행시키는** 호출인가.
+
+    면제 대상을 이 네 개로 좁혀 둔다. 서브커맨드 이름을 안 보고 agent-flow 호출
+    전체를 면제하면, 면제된 경로가 R1 리터럴 검사·R2 파괴 목록·leader tripwire를
+    한꺼번에 건너뛴다. 그 상태에서 `eval --judge-command`는 임의 argv를 실행하고,
+    `worktree remove --name`은 형제 checkout을 지우고, `record-stage --run-dir`은
+    남의 런 산출물을 덮어쓴다 — 셋 다 실행으로 확인됐다. ``_lifecycle_violation``이
+    검증하는 인자는 `--root`/`--worktree`뿐이라 그 축들을 대신 막지 못한다.
+
+    이 목록이 CLI보다 뒤처져 새 명령을 가둘 위험은 남는다. 그것을 목록 확장으로
+    풀면 위 우회가 되살아나므로, 확장이 필요해지면 먼저
+    ``_lifecycle_violation``에 경로형 인자 검증을 세워야 한다.
+    """
     arguments = _agent_flow_arguments(command, root=root, cwd=cwd)
     if not arguments:
         return False
@@ -1726,332 +1719,6 @@ def bound_worktree_for_session(
         return None
     return _load_binding(root, session_id, active)
 
-
-def _rebind_command(
-    root: Path, binding: HostCheckoutBinding, drift: LeaderDrift
-) -> str:
-    return (
-        "`agent-flow host-session rebind"
-        f" --root {shlex.quote(str(root))}"
-        f" --session-key {binding.session_key}"
-        f" --expected-old-head {drift.before.head}"
-        f" --expected-new-head {drift.after.head}`"
-    )
-
-
-@dataclass(frozen=True)
-class HostBaselineRebind:
-    """검증된 재바인딩 한 건의 결과. 무엇을 옮겼는지 호출자가 그대로 보고한다."""
-
-    old_head: str
-    new_head: str
-    branch: str
-    session_key: str | None
-    binding_path: Path | None
-    run_dir: Path | None
-    moved: tuple[str, ...]
-
-
-def rebind_host_leader_baseline(
-    *,
-    project_root: Path,
-    session_key: str | None = None,
-    run_dir: Path | None = None,
-    expected_old_head: str,
-    expected_new_head: str,
-) -> HostBaselineRebind:
-    """검증된 fast-forward **하나**만 기록된 기준선에 반영한다.
-
-    stale baseline은 leader가 정상적으로 앞으로 간 뒤에도 남는다(평범한 pull).
-    그걸 `status`가 조용히 덮어쓰게 하면 leader 변경의 감사 근거가 사라지고,
-    아무도 못 옮기게 하면 status/continue까지 막힌 교착이 남는다. 그래서 복구는
-    **사용자가 SHA 두 개를 명시하는** 이 명령 하나로만 한다.
-
-    허용 조건은 전부 필요하다: 같은 프로젝트·session·run, 같은 branch, 같은
-    working tree, 이전 HEAD가 새 HEAD의 조상, 그리고 넘긴 두 SHA가 실제 관측과
-    일치. 하나라도 어긋나면 아무것도 쓰지 않는다. 재실행은 idempotent다 — 이미
-    새 HEAD를 기록한 기준선은 성공으로 넘긴다.
-    """
-    root = _validated_project_root(project_root)
-    if session_key is None and run_dir is None:
-        raise HostWriteBoundaryError(
-            "host-session rebind needs --session-key, --run-dir, or both"
-        )
-    old = _validated_head(expected_old_head, label="--expected-old-head")
-    new = _validated_head(expected_new_head, label="--expected-new-head")
-    if old == new:
-        raise HostWriteBoundaryError(
-            "--expected-old-head and --expected-new-head name the same commit; "
-            "there is no transition to record"
-        )
-    with host_session_lock(root):
-        survey = _survey_checkouts(root)
-        binding: HostCheckoutBinding | None = None
-        binding_path: Path | None = None
-        key: str | None = None
-        if session_key is not None:
-            key = _validated_session_key(session_key)
-            binding_path = _binding_dir(root) / f"{key}.json"
-            binding = _load_binding_file(binding_path, key, root, survey.active)
-            if binding is None:
-                raise HostWriteBoundaryError(
-                    f"host session {key} has no binding attached to an active run in "
-                    f"{root}; there is nothing to rebind"
-                )
-        target_run = _rebind_run_dir(
-            root, survey, binding=binding, requested=run_dir
-        )
-        meta: dict[str, Any] | None = None
-        phase_snapshot: LeaderSnapshot | None = None
-        if target_run is not None and (target_run / "meta.json").exists():
-            meta = _read_trusted_json(target_run / "meta.json")
-            phase_snapshot = _phase_baseline_snapshot(
-                meta.get(HOST_PHASE_LEADER_BASELINE_KEY), root
-            )
-        if binding is None and phase_snapshot is None:
-            raise HostWriteBoundaryError(
-                "no recorded leader baseline matches the given selectors"
-            )
-        # 두 기준선은 범위가 다르게 찍힌다(binding은 ignored 제외). 그래도 HEAD와
-        # branch는 같은 시점을 가리켜야 한다. 어긋났다면 한쪽이 이미 손으로
-        # 고쳐진 것이므로 둘 다 건드리지 않는다.
-        if (
-            binding is not None
-            and phase_snapshot is not None
-            and (
-                binding.leader_snapshot.head != phase_snapshot.head
-                or binding.leader_snapshot.branch != phase_snapshot.branch
-            )
-        ):
-            raise HostWriteBoundaryError(
-                "the session binding and the run phase baseline disagree about the "
-                f"leader ({binding.leader_snapshot.head} vs {phase_snapshot.head}); "
-                "refusing to rebind either"
-            )
-        observed_loose = (
-            capture_leader_snapshot(root, include_ignored=False)
-            if binding is not None
-            else None
-        )
-        observed_strict = (
-            capture_leader_snapshot(root, include_ignored=True)
-            if phase_snapshot is not None
-            else None
-        )
-        move_binding = binding is not None and _verified_forward(
-            root=root,
-            label="session binding",
-            stored=binding.leader_snapshot,
-            observed=observed_loose,
-            old=old,
-            new=new,
-        )
-        move_phase = phase_snapshot is not None and _verified_forward(
-            root=root,
-            label="run phase baseline",
-            stored=phase_snapshot,
-            observed=observed_strict,
-            old=old,
-            new=new,
-        )
-        current = observed_loose or observed_strict
-        assert current is not None
-        moved: list[str] = []
-        if move_binding or move_phase:
-            # 검증과 쓰기 사이에 leader가 또 움직였다면, 방금 통과한 판정과 다른
-            # 상태를 기준선으로 굳히게 된다. 그 전에 멈춘다.
-            _assert_leader_still(root, observed_loose, observed_strict)
-            if move_phase:
-                assert meta is not None and target_run is not None
-                assert observed_strict is not None
-                baseline = dict(meta[HOST_PHASE_LEADER_BASELINE_KEY])
-                baseline["snapshot"] = _snapshot_payload(observed_strict)
-                meta[HOST_PHASE_LEADER_BASELINE_KEY] = baseline
-                _write_json_atomic(target_run / "meta.json", meta)
-                moved.append("run phase baseline")
-            if move_binding:
-                assert binding_path is not None and observed_loose is not None
-                payload = _read_trusted_json(binding_path)
-                payload["leader_snapshot"] = _snapshot_payload(observed_loose)
-                payload["rebound_at"] = time.time()
-                _write_json_atomic(binding_path, payload)
-                moved.append("session binding")
-        return HostBaselineRebind(
-            old_head=old,
-            new_head=current.head,
-            branch=current.branch,
-            session_key=key,
-            binding_path=binding_path,
-            run_dir=target_run,
-            moved=tuple(moved),
-        )
-
-
-def _verified_forward(
-    *,
-    root: Path,
-    label: str,
-    stored: LeaderSnapshot,
-    observed: LeaderSnapshot | None,
-    old: str,
-    new: str,
-) -> bool:
-    """이 기준선을 ``observed``로 옮겨야 하는가.
-
-    ``False``도 성공이다 — 이미 새 HEAD를 기록한 기준선은 재실행에서 그냥 넘긴다.
-    거절은 예외로만 나간다.
-    """
-    assert observed is not None
-    if _head_matches(stored.head, new):
-        return False
-    if not _head_matches(stored.head, old):
-        raise HostWriteBoundaryError(
-            f"the {label} records HEAD {stored.head}, which is neither "
-            f"--expected-old-head {old} nor --expected-new-head {new}"
-        )
-    if not _head_matches(observed.head, new):
-        raise HostWriteBoundaryError(
-            f"the leader is at HEAD {observed.head}, not --expected-new-head {new}"
-        )
-    drift = classify_leader_drift(root, stored, after=observed)
-    if drift is None:
-        return False
-    if not drift.recoverable:
-        raise HostWriteBoundaryError(
-            f"refusing to rebind the {label}: "
-            + "; ".join(drift.reasons)
-            + f" is not a clean fast-forward ({drift.kind})"
-        )
-    return True
-
-
-def _assert_leader_still(
-    root: Path,
-    loose: LeaderSnapshot | None,
-    strict: LeaderSnapshot | None,
-) -> None:
-    """검증에 쓴 관측이 아직 유효한가. 아니면 아무것도 쓰지 않고 멈춘다."""
-    for observed, include_ignored in ((loose, False), (strict, True)):
-        if observed is None:
-            continue
-        drift = classify_leader_drift(
-            root, observed, include_ignored=include_ignored
-        )
-        if drift is not None:
-            raise HostWriteBoundaryError(
-                "the leader changed again while verifying the rebind ("
-                + "; ".join(drift.reasons)
-                + "); nothing was written - re-run with the current SHAs"
-            )
-
-
-def _rebind_run_dir(
-    root: Path,
-    survey: _CheckoutSurvey,
-    *,
-    binding: HostCheckoutBinding | None,
-    requested: Path | None,
-) -> Path | None:
-    """재바인딩 대상 run 디렉터리. binding이 있으면 그 run이 정본이다.
-
-    사용자가 준 경로를 그대로 믿지 않는다 — 활성 run의 런타임 자리 안이어야 하고,
-    binding까지 주어졌다면 그 run과 같은 자리여야 한다. 그러지 않으면 이 명령이
-    임의 경로의 JSON을 덮어쓰는 도구가 된다.
-    """
-    expected: Path | None = None
-    if binding is not None:
-        expected = (
-            binding.checkout.runtime_root
-            / ".agent-flow"
-            / "runs"
-            / binding.checkout.run_id
-        )
-    target = real_path(requested) if requested is not None else expected
-    if target is None:
-        return None
-    if expected is not None and target != expected:
-        raise HostWriteBoundaryError(
-            f"--run-dir {target} is not the run bound to this session ({expected})"
-        )
-    _require_directory(target, label="active run directory")
-    if not any(
-        _is_within(target, context.runtime_root) for context in survey.active
-    ):
-        raise HostWriteBoundaryError(
-            f"--run-dir {target} is not inside an active worktree runtime root"
-        )
-    return target
-
-
-def _phase_baseline_snapshot(raw: object, root: Path) -> LeaderSnapshot | None:
-    """meta.json의 phase baseline을 스냅샷으로 읽는다. 없으면 ``None``.
-
-    형태가 깨졌으면 raise한다. runner가 같은 값을 더 엄격하게 다시 검증하므로,
-    여기서 조용히 무시하면 runner에서 그대로 막히는 상태를 "복구했다"고 보고한다.
-    """
-    if raw is None:
-        return None
-    if not isinstance(raw, dict) or raw.get("version") != 1:
-        raise HostWriteBoundaryError(
-            "the durable host-phase leader baseline is malformed"
-        )
-    if raw.get("leader_root") != str(real_path(root)):
-        raise HostWriteBoundaryError(
-            "the durable host-phase leader baseline names another leader checkout"
-        )
-    snapshot = raw.get("snapshot")
-    if not isinstance(snapshot, dict):
-        raise HostWriteBoundaryError(
-            "the durable host-phase leader snapshot is malformed"
-        )
-    head = snapshot.get("head")
-    branch = snapshot.get("branch")
-    status = snapshot.get("status")
-    if (
-        not isinstance(head, str)
-        or not head
-        or not isinstance(branch, str)
-        or not branch
-        or not isinstance(status, str)
-        or snapshot.get("armed") is not True
-    ):
-        raise HostWriteBoundaryError(
-            "the durable host-phase leader snapshot is incomplete"
-        )
-    return LeaderSnapshot(head=head, branch=branch, status=status, armed=True)
-
-
-def _snapshot_payload(snapshot: LeaderSnapshot) -> dict[str, Any]:
-    return {
-        "head": snapshot.head,
-        "branch": snapshot.branch,
-        "status": snapshot.status,
-        "armed": snapshot.armed,
-    }
-
-
-def _validated_session_key(value: str) -> str:
-    text = (value or "").strip().lower()
-    if not _SESSION_KEY_TEXT.match(text):
-        raise HostWriteBoundaryError(
-            "--session-key must be the 64-character host session digest printed in "
-            "the boundary message"
-        )
-    return text
-
-
-def _validated_head(value: str, *, label: str) -> str:
-    text = (value or "").strip()
-    if not _HEAD_TEXT.match(text):
-        raise HostWriteBoundaryError(
-            f"{label} must be a 7-40 character hex commit id, not {value!r}"
-        )
-    return text.lower()
-
-
-def _head_matches(head: str, expected: str) -> bool:
-    """``expected``는 접두어여도 된다. 비교 대상이 언제나 **하나**뿐이라 모호하지 않다."""
-    return bool(head) and head.lower().startswith(expected)
 
 
 def _is_within(path: Path, root: Path) -> bool:

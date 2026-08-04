@@ -143,11 +143,7 @@ from agent_flow.core.hook_integrity import (
     HookIntegrityError,
     assert_managed_hooks_registered,
 )
-from agent_flow.core.host_write_boundary import (
-    HostWriteBoundaryError,
-    assert_adoption_allowed,
-    rebind_host_leader_baseline,
-)
+from agent_flow.core.host_write_boundary import assert_adoption_allowed
 from agent_flow.core.worktree_isolation import (
     WorktreeIsolationError,
     adopted_worktree_parent,
@@ -248,20 +244,6 @@ def main(argv: list[str] | None = None) -> int:
     status_parser.add_argument("--root", default=".")
     status_parser.add_argument("--worktree")
     status_parser.add_argument("--checkout-identity", help=argparse.SUPPRESS)
-
-    # leader가 정상적으로 앞으로 간 뒤에도 기록된 기준선은 그대로 남아 tripwire가
-    # 계속 걸린다. 그 상태를 `status`가 조용히 덮어쓰게 하면 leader 변경의 감사
-    # 근거가 사라지므로, 복구는 사용자가 SHA 두 개를 명시하는 이 명령으로만 한다.
-    host_session_parser = subparsers.add_parser("host-session")
-    host_session_subparsers = host_session_parser.add_subparsers(
-        dest="host_session_command", required=True
-    )
-    host_session_rebind = host_session_subparsers.add_parser("rebind")
-    host_session_rebind.add_argument("--root", default=".")
-    host_session_rebind.add_argument("--session-key")
-    host_session_rebind.add_argument("--run-dir")
-    host_session_rebind.add_argument("--expected-old-head", required=True)
-    host_session_rebind.add_argument("--expected-new-head", required=True)
 
     report_parser = subparsers.add_parser("report")
     report_parser.add_argument("--root", default=".")
@@ -880,39 +862,6 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         print(status_summary(state_root))
         return 0
-
-    if args.command == "host-session":
-        if args.host_session_command == "rebind":
-            if not args.session_key and not args.run_dir:
-                print(
-                    "pass --session-key (from the boundary message), --run-dir, or both",
-                    file=sys.stderr,
-                )
-                return 2
-            try:
-                rebound = rebind_host_leader_baseline(
-                    project_root=root,
-                    session_key=args.session_key,
-                    run_dir=Path(args.run_dir) if args.run_dir else None,
-                    expected_old_head=args.expected_old_head,
-                    expected_new_head=args.expected_new_head,
-                )
-            except (HostWriteBoundaryError, WorktreeIsolationError, OSError) as exc:
-                print(_format_cli_error(exc), file=sys.stderr)
-                return 2
-            if not rebound.moved:
-                print(
-                    f"already current: recorded baselines are at {rebound.new_head[:12]} "
-                    f"on {rebound.branch}"
-                )
-                return 0
-            print(
-                f"rebound {', '.join(rebound.moved)}: "
-                f"{rebound.old_head[:12]} -> {rebound.new_head[:12]} on {rebound.branch}"
-            )
-            if rebound.run_dir is not None:
-                print(f"run: {rebound.run_dir}")
-            return 0
 
     if args.command == "report":
         run_dir = _resolve_run_dir(root, args.run_dir)
