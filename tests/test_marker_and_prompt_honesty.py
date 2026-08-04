@@ -96,8 +96,50 @@ def test_indented_code_block_is_still_not_a_marker():
 
 
 def test_paragraph_continuation_line_is_not_a_code_block():
-    """빈 줄이 없으면 코드가 열리지 않는다 — CommonMark가 쓰는 신호가 그것이다."""
+    """문단에 이어지는 들여쓴 줄은 코드가 아니다 — lazy continuation이다."""
     text = "## Completion Gate\nintro\n    cache-required: yes\n"
+    assert missing_markers(text, ("cache-required: yes|no",)) == []
+
+
+def test_indented_line_right_after_the_gate_heading_is_a_code_block():
+    """반증: 빈 줄만 조건으로 삼으면 heading 바로 뒤의 예시가 게이트를 통과했다.
+
+    heading은 문단이 아니므로 그 다음 줄의 4칸 들여쓰기는 CommonMark에서 코드
+    블록을 연다. 이 줄을 본문으로 읽으면 marker를 하나도 안 쓴 artifact가
+    코드 예시만으로 완료 판정을 받는다.
+    """
+    text = "## Completion Gate\n    cache-required: yes\n"
+    assert missing_markers(text, ("cache-required: yes|no",)) == ["cache-required: yes|no"]
+
+
+def test_indented_line_right_after_a_thematic_break_is_a_code_block():
+    """thematic break도 문단이 아니다. 같은 규칙이 적용된다."""
+    text = "## Completion Gate\n\nintro\n\n---\n    cache-required: yes\n"
+    assert missing_markers(text, ("cache-required: yes|no",)) == ["cache-required: yes|no"]
+
+
+def test_indented_line_right_after_a_setext_underline_is_a_code_block():
+    """setext underline은 문단을 닫는다. 그 다음 들여쓴 줄은 코드다."""
+    text = "## Completion Gate\n\nintro\n===\n    cache-required: yes\n"
+    assert missing_markers(text, ("cache-required: yes|no",)) == ["cache-required: yes|no"]
+
+
+def test_underline_without_an_open_paragraph_is_just_a_paragraph():
+    """반증: 상태를 안 보고 `===`를 문단 종료로 읽으면 정상 marker가 코드가 된다.
+
+    setext underline은 바로 위에 열린 문단이 있을 때만 성립한다. 빈 줄 뒤의
+    `===`는 그냥 문단이므로 다음 줄은 lazy continuation이다.
+    """
+    text = "## Completion Gate\n\n===\n    cache-required: yes\n"
+    assert missing_markers(text, ("cache-required: yes|no",)) == []
+
+
+def test_a_fence_line_closes_an_open_indented_code_block():
+    """fence opener는 3칸까지만 들여쓸 수 있어 열려 있던 indented code를 끝낸다.
+
+    닫지 않으면 그 뒤의 들여쓴 marker가 코드로 버려져 정상 artifact가 막힌다.
+    """
+    text = "## Completion Gate\n\n    code\n```x```\n    cache-required: yes\n"
     assert missing_markers(text, ("cache-required: yes|no",)) == []
 
 

@@ -652,7 +652,13 @@ def _macos_sandbox_profile(
     git_control_rules = (
         f'(deny file-write* (literal "{_sandbox_path(canonical / ".git")}"))',
     )
-    git_shared_rules = _git_shared_write_rules(canonical)
+    # 공유 gitdir 쓰기는 **커밋할 프로세스에만** 준다. read-only 실행(reviewer)은
+    # 커밋하지 않으므로 이 규칙이 필요 없고, 주면 workspace가 잠긴 프로세스가
+    # `<common>/refs/heads/<protected>`를 직접 덮어써 hook 기반 commit/push 보호를
+    # 우회할 수 있다. 그쪽은 파일시스템 권한이 유일한 방어다.
+    git_shared_rules = (
+        _git_shared_write_rules(canonical) if allow_workspace_writes else ()
+    )
     scratch_rules = (
         (f'(allow file-write* (subpath "{_sandbox_path(real_path(scratch))}"))',)
         if scratch is not None
