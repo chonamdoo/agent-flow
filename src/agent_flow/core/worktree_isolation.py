@@ -1305,6 +1305,10 @@ _TRIPWIRE_TIMEOUT_S = 120
 # porcelain v1 상태 문자. 레코드 앞 두 글자가 전부 여기 속할 때만 경로 접두어로 본다.
 _STATUS_CODES = frozenset(" MADRCUT?!")
 _STAMP_CHUNK_BYTES = 64 * 1024
+# git이 변경을 보고하지 않도록 표시된 경로를 직접 해시하는 상한. sparse checkout은
+# 제외 파일 전부를 표시하지만 그 파일들은 디스크에 없어 이 상한에 닿지 않는다.
+# 실제로 존재하는 표시 파일이 이 수를 넘는 저장소는 tripwire가 감당할 대상이 아니다.
+_FLAGGED_STAMP_LIMIT = 64
 
 
 @dataclass(frozen=True)
@@ -1586,11 +1590,71 @@ def _leader_status(leader_root, *, include_ignored: bool = True) -> str:
     )
     lines = [record for record, _ in kept]
     lines.append(f"tracked-content {_tracked_content_digest(leader_root)}")
+    seen = {path for _, path in kept}
     for _, path in kept:
         stamp = _path_content_stamp(leader_root, path)
         if stamp:
             lines.append(stamp)
+    # status와 diff가 **둘 다** 침묵하는 경로들. 여기서 직접 해시하지 않으면 그
+    # 파일에 대한 쓰기는 어느 신호에도 남지 않는다(실측: 두 출력 모두 빈 문자열).
+    unwatched = [path for path in _index_flagged_paths(leader_root) if path not in seen]
+    present = [
+        path for path in unwatched if _path_is_present(leader_root, path)
+    ]
+    for path in present[:_FLAGGED_STAMP_LIMIT]:
+        stamp = _path_content_stamp(leader_root, path)
+        if stamp:
+            lines.append(f"unwatched {stamp}")
+    if len(present) > _FLAGGED_STAMP_LIMIT:
+        # 상한을 넘는 표시는 해시하지 않는다. 그래도 개수는 남겨서 집합이 바뀌면
+        # 스냅샷이 달라지게 한다 — 조용히 없는 것처럼 두지 않는다.
+        lines.append(f"unwatched-overflow {len(present)}")
     return "\n".join(lines)
+
+
+def _index_flagged_paths(leader_root) -> tuple[str, ...]:
+    """`assume-unchanged`/`skip-worktree`로 표시된 tracked 경로.
+
+    이 표시는 git에게 "이 파일의 변경을 보지 말라"는 지시다. 그래서 `status`도
+    `diff HEAD`도 그 파일의 쓰기를 보고하지 않는다. 사전 차단을 두 규칙으로 줄인
+    뒤 tripwire가 주 기제가 됐으므로, 그 침묵은 그냥 구멍이다 — 표시 여부와
+    무관하게 "phase 도중 leader는 그대로"라는 계약은 같다.
+
+    sparse checkout은 제외된 파일 **전부**를 `S`로 표시한다. 그 파일들은 디스크에
+    없으므로 호출자가 존재 여부로 걸러낸다 — 없는 파일은 leader의 내용이 아니다.
+    """
+    result = git_safe(
+        "ls-files",
+        "-v",
+        "-z",
+        cwd=leader_root,
+        timeout_s=_TRIPWIRE_TIMEOUT_S,
+        optional_locks=False,
+    )
+    if not result.ok:
+        raise _tripwire_git_error(
+            f"cannot read leader index flags in {leader_root}", result
+        )
+    flagged: list[str] = []
+    for record in result.stdout.split("\0"):
+        if len(record) < 3 or record[1] != " ":
+            continue
+        tag, path = record[0], record[2:]
+        # 소문자 = assume-unchanged, `S` = skip-worktree. 정상(`H`)은 대상이 아니다.
+        if not (tag.islower() or tag == "S"):
+            continue
+        if _is_excluded_path(path):
+            continue
+        flagged.append(path)
+    return tuple(sorted(flagged))
+
+
+def _path_is_present(leader_root, relative: str) -> bool:
+    try:
+        (Path(leader_root) / relative).lstat()
+    except OSError:
+        return False
+    return True
 
 
 def _tracked_content_digest(leader_root) -> str:

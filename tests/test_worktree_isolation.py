@@ -1495,6 +1495,50 @@ def test_tripwire_detects_content_change_of_already_dirty_file(tmp_path):
         W_ISO.assert_leader_unchanged(tmp_path, before)
 
 
+def test_tripwire_watches_paths_git_was_told_to_ignore(tmp_path):
+    """반증: `assume-unchanged`/`skip-worktree`는 status와 diff를 **동시에** 침묵시킨다.
+
+    그 표시가 붙은 파일에 대한 쓰기는 두 신호 어디에도 남지 않는다. 사전 차단을
+    두 규칙(보호 경로 리터럴, 파괴 명령)으로 줄인 뒤 tripwire가 주 기제가 됐으므로
+    이 침묵은 그냥 구멍이다 — 표시 여부와 무관하게 "phase 도중 leader는 그대로"라는
+    계약은 같다.
+
+    sparse checkout은 제외 파일 **전부**를 `S`로 표시한다. 그 파일들은 디스크에 없으니
+    감시 대상이 아니어야 한다 — 아니면 monorepo 하나가 스냅샷마다 수만 줄을 만든다.
+    """
+    _isolated(tmp_path, "index-flags")
+    assumed = tmp_path / "assumed.txt"
+    skipped = tmp_path / "skipped.txt"
+    absent = tmp_path / "sparse-excluded.txt"
+    for path in (assumed, skipped, absent):
+        path.write_text("v1\n", encoding="utf-8")
+    _git("add", "assumed.txt", "skipped.txt", "sparse-excluded.txt", cwd=tmp_path)
+    _git("commit", "-m", "tracked files behind index flags", cwd=tmp_path)
+    _git("update-index", "--assume-unchanged", "assumed.txt", cwd=tmp_path)
+    _git("update-index", "--skip-worktree", "skipped.txt", cwd=tmp_path)
+    _git("update-index", "--skip-worktree", "sparse-excluded.txt", cwd=tmp_path)
+    absent.unlink()
+
+    before = W_ISO.capture_leader_snapshot(tmp_path)
+    assert "sparse-excluded.txt" not in before.status
+
+    assumed.write_text("worker overwrote it\n", encoding="utf-8")
+    # 전제 확인: git은 정말로 침묵한다. 이 두 줄이 깨지면 이 테스트의 이유가 사라진다.
+    assert _git("status", "--porcelain", cwd=tmp_path).stdout.strip() == ""
+    assert _git("diff", "HEAD", "--name-only", cwd=tmp_path).stdout.strip() == ""
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, before)
+
+    assumed.write_text("v1\n", encoding="utf-8")
+    skipped.write_text("worker overwrote it\n", encoding="utf-8")
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, before)
+
+    # 되돌리면 통과해야 한다. 표시된 경로를 감시한다는 것이 상수 오탐을 뜻하면 안 된다.
+    skipped.write_text("v1\n", encoding="utf-8")
+    W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
 def test_tracked_digest_ignores_repo_configured_diff_drivers(tmp_path):
     """반증: `git diff`의 출력과 **실행 방식**을 관측 대상이 고를 수 있다.
 
