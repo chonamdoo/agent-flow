@@ -19,8 +19,10 @@ from agent_flow.core.worktree_isolation import (
     assert_leader_unchanged,
     capture_leader_snapshot,
     leader_drift_message,
+    leader_snapshot_payload,
     list_registered_worktrees,
     managed_worktree_root,
+    recorded_snapshot_version,
     real_path,
     trusted_checkout_paths,
     verify_linked_worktree,
@@ -76,9 +78,10 @@ _PATCH_PATH = re.compile(
 _STATUS_JSON = re.compile(r"(?:^|\n)status_json:\s*", re.MULTILINE)
 _STATUS_RUN = re.compile(r"(?:^|\n)run:\s*([^\r\n]+)", re.MULTILINE)
 _STATUS_NEXT_COMMAND = re.compile(r"(?:^|\n)next_command:\s*([^\r\n]+)", re.MULTILINE)
-# leader baseline 관측 방식이 바뀌면 이전 버전이 기록한 스냅샷과는 비교 자체가
-# 성립하지 않는다. 그 상태로 비교하면 정리해도 사라지지 않는 drift가 남는다.
-_BINDING_VERSION = 3
+# binding **파일 스키마** 버전. 스냅샷 형식은 별개 축이고
+# `LeaderSnapshot.version`이 들고 있다 — 스냅샷 형식이 바뀌었다고 이걸 올리면
+# 낡은 스냅샷 하나 때문에 binding 파일 전체를 못 읽는 것으로 처리된다.
+_BINDING_VERSION = 2
 _BINDING_DIR = "host-sessions"
 # 워커가 **자기 런을 진행시키는** 명령. 면제 범위를 넓히면 안 되는 이유는
 # `_is_lifecycle_command` docstring에 있다.
@@ -286,12 +289,7 @@ def record_host_checkout_binding(payload: object, project_root: Path) -> Path | 
             "runtime_root": str(context.runtime_root),
             "run_id": context.run_id,
             "recorded_at": time.time(),
-            "leader_snapshot": {
-                "head": leader_snapshot.head,
-                "branch": leader_snapshot.branch,
-                "status": leader_snapshot.status,
-                "armed": leader_snapshot.armed,
-            },
+            "leader_snapshot": leader_snapshot_payload(leader_snapshot),
         },
     )
     return binding_path
@@ -952,7 +950,18 @@ def _load_binding_file(
         branch=branch,
         status=status,
         armed=True,
+        version=recorded_snapshot_version(snapshot_payload.get("version")),
     )
+    if not leader_snapshot.comparable:
+        # 낡은 형식은 대조하면 항상 차이가 난다. 그것을 leader 오염으로 보고하면
+        # 업그레이드 한 번에 모든 bound 세션의 write가 근거 없이 막힌다. binding이
+        # 없는 것으로 읽어서 다음 lifecycle 명령이 새 형식으로 다시 맺게 한다.
+        #
+        # 대가: 그 사이 세션은 unbound이므로 "한 세션은 한 worktree" 불변식이 한 번
+        # 열린다. 다른 checkout으로 갈아타려면 그 checkout의 status 출력을 위조해야
+        # 하고(`record_host_checkout_binding`이 payload로 대상을 고른다), leader와
+        # 활성 worktree는 unbound 세션에게 계속 닫혀 있다. 형식 전환 1회의 창이다.
+        return None
     for context in active:
         if (
             payload.get("checkout") == str(context.checkout)

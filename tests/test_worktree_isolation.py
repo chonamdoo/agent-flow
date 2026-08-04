@@ -1550,6 +1550,69 @@ def test_tripwire_detects_content_change_of_already_dirty_file(tmp_path):
         W_ISO.assert_leader_unchanged(tmp_path, before)
 
 
+def test_legacy_format_baseline_is_not_reported_as_drift(tmp_path):
+    """반증: 형식이 바뀌면 낡은 기록은 **항상** 달라 보인다.
+
+    실측: `--binary`를 `--full-index`로 바꾸자 같은 트리에서도 `tracked-content`
+    digest가 달라져, 아무도 leader를 건드리지 않았는데 기존 baseline이 "working tree
+    gained/lost ..." 오탐으로 막혔다. 그 오탐은 근거가 없어 사용자가 풀 방법도 없다.
+
+    그래서 버전이 다른 기록은 판정하지 않는다. 비교 가능한 정보가 없는 기록에
+    "변했다"라고 답하는 것은 탐지가 아니라 고장이다.
+    """
+    _isolated(tmp_path, "snapshot-version")
+    current = W_ISO.capture_leader_snapshot(tmp_path)
+    assert current.version == W_ISO.LEADER_SNAPSHOT_VERSION
+    assert current.comparable
+
+    # 낡은 형식을 흉내 낸다: 같은 시점이지만 status 문자열 형식이 다르다.
+    legacy = W_ISO.LeaderSnapshot(
+        head=current.head,
+        branch=current.branch,
+        status="예전 형식에서는 이 줄들이 달랐다",
+        armed=True,
+        version=0,
+    )
+    assert not legacy.comparable
+    assert W_ISO.classify_leader_drift(tmp_path, legacy) is None
+    W_ISO.assert_leader_unchanged(tmp_path, legacy)
+
+    # 같은 내용을 현재 버전으로 기록하면 그건 진짜 차이이므로 반드시 잡혀야 한다.
+    mislabelled = W_ISO.LeaderSnapshot(
+        head=current.head,
+        branch=current.branch,
+        status=legacy.status,
+        armed=True,
+    )
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, mislabelled)
+
+
+def test_snapshot_payload_round_trips_the_format_version(tmp_path):
+    """불변: 저장 형태에 버전이 남아야 다음 판독이 형식을 구분할 수 있다."""
+    _isolated(tmp_path, "snapshot-payload")
+    snapshot = W_ISO.capture_leader_snapshot(tmp_path)
+    payload = W_ISO.leader_snapshot_payload(snapshot)
+
+    assert payload["version"] == W_ISO.LEADER_SNAPSHOT_VERSION
+    assert set(payload) == {"head", "branch", "status", "armed", "version"}
+    assert W_ISO.LeaderSnapshot(**payload) == snapshot
+
+
+def test_a_stored_record_without_a_version_reads_as_legacy(tmp_path):
+    """실제 경로: 구버전이 남긴 JSON에는 `version` 키가 아예 없다."""
+    _isolated(tmp_path, "snapshot-legacy-read")
+    snapshot = W_ISO.capture_leader_snapshot(tmp_path)
+    stored = W_ISO.leader_snapshot_payload(snapshot)
+    stored.pop("version")
+
+    assert W_ISO.recorded_snapshot_version(stored.get("version")) == 0
+    # bool은 int의 서브클래스라 따로 걸러야 한다.
+    assert W_ISO.recorded_snapshot_version(True) == 0
+    assert W_ISO.recorded_snapshot_version("1") == 0
+    assert W_ISO.recorded_snapshot_version(1) == 1
+
+
 def test_tripwire_watches_paths_git_was_told_to_ignore(tmp_path):
     """반증: `assume-unchanged`/`skip-worktree`는 status와 diff를 **동시에** 침묵시킨다.
 

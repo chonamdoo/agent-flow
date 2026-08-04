@@ -66,13 +66,15 @@ from agent_flow.core.worktrees import (
 )
 from agent_flow.core.worktree_isolation import (
     HOST_PHASE_LEADER_BASELINE_KEY,
-    HOST_PHASE_LEADER_BASELINE_VERSION,
+    LEADER_SNAPSHOT_VERSION,
     LeaderSnapshot,
     WorktreeIsolationError,
     assert_leader_unchanged,
     capture_leader_snapshot,
     git_safe,
     leader_root_for,
+    leader_snapshot_payload,
+    recorded_snapshot_version,
     real_path,
     sanitized_worker_env,
 )
@@ -110,6 +112,10 @@ GIT_DEPENDENT_PHASES = {
 FIX_LOOP_MAX_ROUNDS = 3
 # 키 이름은 baseline을 쓰는 쪽과 읽는 쪽이 공유해야 한다.
 _HOST_PHASE_LEADER_BASELINE = HOST_PHASE_LEADER_BASELINE_KEY
+# baseline **레코드 자체**의 필드 구성 버전. 그 안에 담기는 스냅샷의 형식 버전은
+# 별개 축이고 `LeaderSnapshot.version`이 들고 있다. 이 값은 `run_id`/`phase_id`/
+# `phase_index`/`leader_root`/`snapshot`의 의미가 바뀔 때만 올린다.
+_HOST_PHASE_BASELINE_RECORD_VERSION = 1
 PROTECTED_BRANCHES = frozenset({"main", "master", "develop"})
 CONVENTIONAL_COMMIT_RE = re.compile(
     r"^(?:feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)"
@@ -528,15 +534,17 @@ class Runner:
             )
         assert self.run_dir is not None
         expected_root = str(real_path(leader_root))
-        if raw.get("version") != HOST_PHASE_LEADER_BASELINE_VERSION:
-            # 관측 방식이 바뀐 뒤에는 구버전 스냅샷과 비교 자체가 성립하지 않는다.
-            # 그대로 비교하면 정리해도 사라지지 않는 drift가 남아 런이 갇힌다.
-            raise WorktreeIsolationError(
-                "durable host-phase leader baseline was written by an older "
-                f"agent-flow (format {raw.get('version')!r}, expected "
-                f"{HOST_PHASE_LEADER_BASELINE_VERSION}); start a new run - the "
-                "recorded snapshot cannot be compared against current observations"
+        record_version = recorded_snapshot_version(raw.get("version"))
+        if record_version != _HOST_PHASE_BASELINE_RECORD_VERSION:
+            # 레코드 필드 구성이 다르면 그 안의 값들을 현재 의미로 읽을 수 없다.
+            # 스냅샷 형식과 같은 처리를 한다 — 하드 raise로 막으면 업그레이드를
+            # 걸친 run이 재개 불가가 되고, 그건 이 경로가 없애려던 교착이다.
+            self._migrate_stale_host_phase_baseline(
+                meta,
+                f"record format v{record_version}",
+                f"v{_HOST_PHASE_BASELINE_RECORD_VERSION}",
             )
+            return None
         if (
             raw.get("run_id") != self.run_dir.name
             or raw.get("phase_id") != phase.id
@@ -549,11 +557,17 @@ class Runner:
                 "run, phase, or leader checkout"
             )
         snapshot_raw = raw.get("snapshot")
-        if not isinstance(snapshot_raw, dict) or set(snapshot_raw) != {
+        if not isinstance(snapshot_raw, dict) or not {
             "head",
             "branch",
             "status",
             "armed",
+        } <= set(snapshot_raw) <= {
+            "head",
+            "branch",
+            "status",
+            "armed",
+            "version",
         }:
             raise WorktreeIsolationError(
                 "durable host-phase leader snapshot is malformed"
@@ -578,9 +592,34 @@ class Runner:
             branch=branch,
             status=status,
             armed=True,
+            version=recorded_snapshot_version(snapshot_raw.get("version")),
         )
+        if not snapshot.comparable:
+            self._migrate_stale_host_phase_baseline(
+                meta,
+                f"snapshot format v{snapshot.version}",
+                f"v{LEADER_SNAPSHOT_VERSION}",
+            )
+            return None
         self._assert_leader_unchanged(leader_root, snapshot)
         return snapshot
+
+    def _migrate_stale_host_phase_baseline(
+        self, meta: dict[str, Any], recorded: str, expected: str
+    ) -> None:
+        """비교할 수 없는 기록을 버린다. 이 phase가 새 형식으로 다시 찍는다.
+
+        형식이 다른 기록을 그대로 대조하면 **항상** 차이가 나온다 — leader를 아무도
+        건드리지 않아도 그렇다. 그 오탐은 진행 중인 run 전부를 막고 근거가 없으므로
+        사용자가 풀 방법도 없다. 하드 raise도 같은 결과다(run 재개 불가).
+        """
+        assert self.run_dir is not None
+        print(
+            f"  [migrate] host-phase leader baseline was recorded in "
+            f"{recorded}; re-capturing as {expected}"
+        )
+        meta.pop(_HOST_PHASE_LEADER_BASELINE, None)
+        write_meta(self.run_dir, meta)
 
     def _assert_leader_unchanged(
         self, leader_root: Path, snapshot: LeaderSnapshot
@@ -612,17 +651,12 @@ class Runner:
                 "host-phase leader baseline changed without phase advancement"
             )
         meta[_HOST_PHASE_LEADER_BASELINE] = {
-            "version": HOST_PHASE_LEADER_BASELINE_VERSION,
+            "version": _HOST_PHASE_BASELINE_RECORD_VERSION,
             "run_id": self.run_dir.name,
             "phase_id": phase.id,
             "phase_index": phase_index,
             "leader_root": str(real_path(leader_root)),
-            "snapshot": {
-                "head": snapshot.head,
-                "branch": snapshot.branch,
-                "status": snapshot.status,
-                "armed": snapshot.armed,
-            },
+            "snapshot": leader_snapshot_payload(snapshot),
         }
         write_meta(self.run_dir, meta)
 

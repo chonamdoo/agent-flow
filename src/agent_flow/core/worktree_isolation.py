@@ -1306,6 +1306,15 @@ _TRIPWIRE_TIMEOUT_S = 120
 _STATUS_CODES = frozenset(" MADRCUT?!")
 _STAMP_CHUNK_BYTES = 64 * 1024
 
+# 스냅샷 **형식** 버전. `_leader_status`가 담는 내용이 바뀌면 올린다.
+#
+# 버전이 없으면 "형식이 달라 비교 불가"와 "leader가 변했다"를 구분할 수 없다.
+# 실측: `--binary`를 `--full-index`로 바꾸자 같은 트리에서도 `tracked-content`
+# digest가 달라져, 아무도 leader를 건드리지 않았는데 기존 baseline이 "working tree
+# gained/lost tracked-content ..." 오탐으로 막혔다. 형식이 다른 스냅샷은 비교 가능한
+# 정보를 담고 있지 않으므로 그때는 차단이 아니라 재캡처가 맞다. 저장된 기록에
+# 버전이 없으면 legacy(0)로 읽는다.
+LEADER_SNAPSHOT_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -1314,9 +1323,31 @@ class LeaderSnapshot:
     branch: str            # git rev-parse --abbrev-ref HEAD ("HEAD" when detached)
     status: str            # normalized git status records, newline joined
     armed: bool = True     # False면 지킬 leader가 없다(비-git 프로젝트)
+    version: int = LEADER_SNAPSHOT_VERSION
 
     def records(self) -> tuple[str, ...]:
         return tuple(self.status.split("\n")) if self.status else ()
+
+    @property
+    def comparable(self) -> bool:
+        """이 기록을 지금 찍은 스냅샷과 대조할 수 있는가."""
+        return self.version == LEADER_SNAPSHOT_VERSION
+
+
+def leader_snapshot_payload(snapshot: LeaderSnapshot) -> dict:
+    """스냅샷을 저장 형태로. 두 저장소(run meta, session binding)가 같은 모양을 쓴다."""
+    return {
+        "head": snapshot.head,
+        "branch": snapshot.branch,
+        "status": snapshot.status,
+        "armed": snapshot.armed,
+        "version": snapshot.version,
+    }
+
+
+def recorded_snapshot_version(raw: object) -> int:
+    """저장된 기록의 형식 버전. 없거나 정수가 아니면 legacy(0)."""
+    return raw if isinstance(raw, int) and not isinstance(raw, bool) else 0
 
 
 def capture_leader_snapshot(
@@ -1368,9 +1399,6 @@ def capture_leader_snapshot(
 
 
 HOST_PHASE_LEADER_BASELINE_KEY = "host_phase_leader_baseline"
-# 스냅샷 관측 방식이 바뀔 때 올린다. 구버전 스냅샷은 현재 관측과 비교할 수
-# 없으므로, 값이 다르면 비교하지 않고 거부해야 한다.
-HOST_PHASE_LEADER_BASELINE_VERSION = 2
 _EXTERNAL_HEAD_DRIFT = "external-head"
 _DRIFT_GUIDANCE = {
     "status": (
@@ -1437,8 +1465,14 @@ def classify_leader_drift(
     작업에 멈춘 뒤 그 정지를 푸는 수단이 다시 필요해진다.
 
     HEAD 축의 판정 조건은 ``_head_drift_kind``에 있다.
+
+    형식이 다른 기록은 판정하지 않는다(``None``). 낡은 형식의 status 문자열은 지금
+    찍은 것과 애초에 같을 수 없어서, 비교하면 **항상** 차이가 나온다 — leader를
+    아무도 건드리지 않아도 그렇다. 그 오탐은 진행 중인 run 전체를 막고, 근거가
+    없으므로 사용자가 풀 방법도 없다. 저장 주인(run meta, session binding)이 낡은
+    기록을 버리고 다시 찍는 것이 유일하게 의미 있는 처리다.
     """
-    if not before.armed:
+    if not before.armed or not before.comparable:
         return None
     observed = (
         after

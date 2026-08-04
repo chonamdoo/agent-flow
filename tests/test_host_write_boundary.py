@@ -20,7 +20,10 @@ from agent_flow.core.host_write_boundary import (
     host_write_boundary_violation,
     record_host_checkout_binding,
 )
-from agent_flow.core.worktree_isolation import adopted_record_path
+from agent_flow.core.worktree_isolation import (
+    LEADER_SNAPSHOT_VERSION,
+    adopted_record_path,
+)
 from agent_flow.core.worktrees import (
     adopt_worktree,
     create_worktree,
@@ -1279,6 +1282,50 @@ def test_worker_writes_into_the_leader_are_still_caught(tmp_path: Path):
     )
     assert blocked is not None
     assert "working tree gained" in blocked
+
+
+def test_a_binding_with_a_legacy_snapshot_rebinds_instead_of_blocking(tmp_path: Path):
+    """반증: 낡은 형식 스냅샷을 그대로 대조하면 bound 세션의 모든 write가 근거 없이
+    막힌다. 업그레이드 한 번에 진행 중인 세션 전부가 그렇게 된다.
+
+    binding을 없는 것으로 읽어 다음 lifecycle 명령이 새 형식으로 다시 맺게 한다.
+    """
+    root, statuses, runs = _setup(tmp_path)
+    first = statuses[0]
+    binding_path = record_host_checkout_binding(
+        _status_payload(root, first, runs[0]), root
+    )
+    assert binding_path is not None
+
+    # 구버전이 남긴 binding: 스냅샷에 `version` 키가 없고 status 형식도 다르다.
+    payload = json.loads(binding_path.read_text(encoding="utf-8"))
+    snapshot = dict(payload["leader_snapshot"])
+    assert snapshot.pop("version") is not None
+    snapshot["status"] = "예전 형식에서는 이 줄들이 달랐다"
+    payload["leader_snapshot"] = snapshot
+    binding_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    # unbound로 읽히므로 leader는 계속 닫혀 있고 lifecycle 명령은 열려 있다.
+    blocked = host_write_boundary_violation(_write_payload(root / "leaked.py"), root)
+    assert blocked is not None and "not bound to an active worktree" in blocked
+    assert host_write_boundary_violation(
+        _command_payload(
+            f"agent-flow status --root {root} --worktree {first.name}",
+            cwd=first.path,
+        ),
+        root,
+    ) is None
+
+    # 그 lifecycle 명령의 출력이 새 형식으로 다시 맺는다.
+    rebound = record_host_checkout_binding(
+        _status_payload(root, first, runs[0]), root
+    )
+    assert rebound == binding_path
+    fresh = json.loads(binding_path.read_text(encoding="utf-8"))
+    assert fresh["leader_snapshot"]["version"] == LEADER_SNAPSHOT_VERSION
+    assert host_write_boundary_violation(
+        _write_payload(first.path / "feature.py"), root
+    ) is None
 
 
 def test_unbound_session_keeps_its_own_idle_checkout_writable(tmp_path: Path):
