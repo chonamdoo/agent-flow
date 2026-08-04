@@ -1495,6 +1495,92 @@ def test_tripwire_detects_content_change_of_already_dirty_file(tmp_path):
         W_ISO.assert_leader_unchanged(tmp_path, before)
 
 
+def test_tripwire_watches_paths_git_was_told_to_ignore(tmp_path):
+    """반증: `assume-unchanged`/`skip-worktree`는 status와 diff를 **동시에** 침묵시킨다.
+
+    그 표시가 붙은 파일에 대한 쓰기는 두 신호 어디에도 남지 않는다. 사전 차단을
+    두 규칙(보호 경로 리터럴, 파괴 명령)으로 줄인 뒤 tripwire가 주 기제가 됐으므로
+    이 침묵은 그냥 구멍이다 — 표시 여부와 무관하게 "phase 도중 leader는 그대로"라는
+    계약은 같다.
+
+    sparse checkout은 제외 파일 **전부**를 `S`로 표시한다. 그 파일들은 디스크에 없으니
+    감시 대상이 아니어야 한다 — 아니면 monorepo 하나가 스냅샷마다 수만 줄을 만든다.
+    """
+    _isolated(tmp_path, "index-flags")
+    assumed = tmp_path / "assumed.txt"
+    skipped = tmp_path / "skipped.txt"
+    absent = tmp_path / "sparse-excluded.txt"
+    for path in (assumed, skipped, absent):
+        path.write_text("v1\n", encoding="utf-8")
+    _git("add", "assumed.txt", "skipped.txt", "sparse-excluded.txt", cwd=tmp_path)
+    _git("commit", "-m", "tracked files behind index flags", cwd=tmp_path)
+    _git("update-index", "--assume-unchanged", "assumed.txt", cwd=tmp_path)
+    _git("update-index", "--skip-worktree", "skipped.txt", cwd=tmp_path)
+    _git("update-index", "--skip-worktree", "sparse-excluded.txt", cwd=tmp_path)
+    absent.unlink()
+
+    before = W_ISO.capture_leader_snapshot(tmp_path)
+    assert "sparse-excluded.txt" not in before.status
+
+    assumed.write_text("worker overwrote it\n", encoding="utf-8")
+    # 전제 확인: git은 정말로 침묵한다. 이 두 줄이 깨지면 이 테스트의 이유가 사라진다.
+    assert _git("status", "--porcelain", cwd=tmp_path).stdout.strip() == ""
+    assert _git("diff", "HEAD", "--name-only", cwd=tmp_path).stdout.strip() == ""
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, before)
+
+    assumed.write_text("v1\n", encoding="utf-8")
+    skipped.write_text("worker overwrote it\n", encoding="utf-8")
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, before)
+
+    # 되돌리면 통과해야 한다. 표시된 경로를 감시한다는 것이 상수 오탐을 뜻하면 안 된다.
+    skipped.write_text("v1\n", encoding="utf-8")
+    W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
+def test_tracked_digest_ignores_repo_configured_diff_drivers(tmp_path):
+    """반증: `git diff`의 출력과 **실행 방식**을 관측 대상이 고를 수 있다.
+
+    `.gitattributes`가 지목한 driver의 `textconv`/`command`는 diff 본문을 그
+    프로그램의 출력으로 대체하고, git은 스냅샷마다 그것을 실제로 실행한다. 그러면
+    두 가지가 깨진다.
+
+    (1) 양쪽 출력이 같아지는 필터에서는 tracked-content digest가 상수가 되어 재수정
+    신호를 잃는다. leader 오염 탐지가 `_path_content_stamp` 한 겹에만 남는다.
+    (2) tripwire가 저장소 설정이 고른 프로그램을 실행한다. 관측이 관측 대상에게
+    코드 실행을 허용하면 그건 경계가 아니다.
+    """
+    _isolated(tmp_path, "diff-driver")
+    (tmp_path / ".gitattributes").write_text(
+        "masked.txt diff=fixed\n", encoding="utf-8"
+    )
+    masked = tmp_path / "masked.txt"
+    masked.write_text("a=1\n", encoding="utf-8")
+    _git("add", ".gitattributes", "masked.txt", cwd=tmp_path)
+    _git("commit", "-m", "tracked file behind a diff driver", cwd=tmp_path)
+    # 스크립트와 마커는 leader 밖에 둔다. 안에 두면 그 자체가 상태 변경이 된다.
+    marker = tmp_path.parent / f"{tmp_path.name}-driver-ran"
+    driver = tmp_path.parent / f"{tmp_path.name}-driver.sh"
+    driver.write_text(
+        f"#!/bin/sh\n: > {marker}\nexit 0\n",
+        encoding="utf-8",
+    )
+    driver.chmod(0o755)
+
+    for setting in ("diff.fixed.textconv", "diff.fixed.command"):
+        _git("config", setting, str(driver), cwd=tmp_path)
+        masked.write_text("dirty before the phase\n", encoding="utf-8")
+        first = W_ISO._tracked_content_digest(tmp_path)
+        masked.write_text("worker overwrote it\n", encoding="utf-8")
+        assert W_ISO._tracked_content_digest(tmp_path) != first, setting
+
+        marker.unlink(missing_ok=True)
+        W_ISO.capture_leader_snapshot(tmp_path)
+        assert not marker.exists(), f"{setting} ran repo-configured code in the tripwire"
+        _git("config", "--unset", setting, cwd=tmp_path)
+
+
 def test_tripwire_never_touches_user_work(tmp_path):
     """불변: 감지는 하되 **아무것도 되돌리지 않는다.** 사용자의 미커밋 작업이 살아남아야 한다.
 

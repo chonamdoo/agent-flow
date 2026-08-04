@@ -13,10 +13,16 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from agent_flow.core.worktree_isolation import (
+    HOST_PHASE_LEADER_BASELINE_KEY,
+    LeaderDrift,
+    LeaderDriftError,
     LeaderSnapshot,
     WorktreeIsolationError,
     assert_leader_unchanged,
     capture_leader_snapshot,
+    classify_leader_drift,
+    host_session_lock,
+    leader_drift_message,
     list_registered_worktrees,
     managed_worktree_root,
     real_path,
@@ -76,6 +82,10 @@ _STATUS_RUN = re.compile(r"(?:^|\n)run:\s*([^\r\n]+)", re.MULTILINE)
 _STATUS_NEXT_COMMAND = re.compile(r"(?:^|\n)next_command:\s*([^\r\n]+)", re.MULTILINE)
 _BINDING_VERSION = 2
 _BINDING_DIR = "host-sessions"
+# 재바인딩 selector. session key는 binding 파일명과 같은 sha256 digest이고, SHA는
+# 사용자가 손으로 옮겨 적는 값이라 접두어를 허용한다.
+_SESSION_KEY_TEXT = re.compile(r"^[0-9a-f]{64}$")
+_HEAD_TEXT = re.compile(r"^[0-9a-fA-F]{7,40}$")
 _LIFECYCLE_COMMANDS = frozenset({"continue", "run", "start", "status"})
 
 
@@ -97,6 +107,84 @@ class HostCheckoutBinding:
     session_key: str
     checkout: ActiveCheckout
     leader_snapshot: LeaderSnapshot
+
+
+@dataclass(frozen=True)
+class SessionScope:
+    """이 세션이 자기 것으로 주장할 수 있는 자리.
+
+    bound 세션은 binding이 지목한 active checkout이고, unbound 세션은 자기가 서
+    있는 checkout이다. 판정 규칙은 하나다 — 자기 자리 안은 열고, **다른
+    checkout의 작업**은 막는다.
+
+    unbound 세션에도 자리를 주는 이유: 활성 run이 하나라도 있으면 unbound 세션의
+    모든 write/command를 통째로 막던 시절엔, 그 run과 무관한 세션 —
+    agent-flow가 만들지 않은 worktree에서 자기 브랜치를 커밋·푸시하는 세션 — 이
+    함께 죽었다. 지켜야 하는 것은 저장소 전체가 아니라 남의 작업이다.
+    """
+
+    checkout: Path | None
+    runtime_root: Path | None
+    bound: bool
+
+    def owns(self, path: Path) -> bool:
+        return (self.checkout is not None and _is_within(path, self.checkout)) or (
+            self.runtime_root is not None and _is_within(path, self.runtime_root)
+        )
+
+    def reject_target(self, resolved: Path, owner: Path) -> str:
+        if self.bound:
+            return (
+                f"write target {resolved} is outside the bound worktree "
+                f"{self.checkout}; stop and resume from the printed worktree path"
+            )
+        return self._unbound_reject(f"write target {resolved}", owner)
+
+    def reject_reference(self, reference: object, owner: Path) -> str:
+        if self.bound:
+            return (
+                f"shell command references checkout path {reference} outside the bound "
+                f"worktree {self.checkout}"
+            )
+        return self._unbound_reject(f"shell command reference {reference}", owner)
+
+    def reject_unprovable(self, subject: str) -> str:
+        if self.bound:
+            return f"the {subject} could not be proven to belong to the bound worktree"
+        return (
+            f"this host session is not bound to an active worktree and the {subject} "
+            "could not be placed in a checkout; declare the host cwd, or run the "
+            "printed agent-flow status/continue command first"
+        )
+
+    def reject_relative(self, target: str) -> str:
+        if self.bound:
+            return (
+                f"relative write target {target!r} has no trusted host cwd; "
+                "resume the host from the bound worktree"
+            )
+        return (
+            f"relative write target {target!r} has no trusted host cwd; this host "
+            "session is not bound to an active worktree, so agent-flow cannot tell "
+            "whose work it would touch"
+        )
+
+    def reject_destructive(self, name: str, target: Path, owner: Path) -> str:
+        return (
+            f"`{name}` is refused: {target} reaches {owner}, which belongs to another "
+            "checkout of this repository. Unlike ordinary writes this cannot be "
+            "detected after the fact and undone, so it is blocked up front"
+            + (f"; run it inside {self.checkout} instead" if self.checkout else "")
+        )
+
+    def _unbound_reject(self, subject: str, owner: Path) -> str:
+        own = f" Work inside {self.checkout} instead." if self.checkout else ""
+        return (
+            f"this host session is not bound to an active worktree; {subject} belongs "
+            f"to {owner}, which agent-flow protects while a run is active. Run the "
+            "printed agent-flow status/continue command from that worktree first."
+            + own
+        )
 
 
 @dataclass(frozen=True)
@@ -143,7 +231,12 @@ def record_host_checkout_binding(payload: object, project_root: Path) -> Path | 
     if not session_id:
         return None
     command = _first_string(payload, tuple(_COMMAND_KEYS))
-    if not command or not _is_lifecycle_command(command):
+    # guard가 허용하는 형태와 **같은 판정**을 써야 한다. 여기만 이름을 요구하면
+    # 설치본을 경로로 부른 세션은 통과는 하되 binding을 못 받아, 계속 unbound로
+    # 남는다 — 그게 바로 복구가 되지 않던 상태다.
+    if not command or not _is_lifecycle_command(
+        command, root=root, cwd=_session_cwd(payload, command)
+    ):
         return None
     exit_code = _first_number(payload, ("exit_code", "exitCode", "returncode", "return_code"))
     if exit_code not in (None, 0):
@@ -178,12 +271,25 @@ def record_host_checkout_binding(payload: object, project_root: Path) -> Path | 
                 f"host session is already bound to {existing.checkout.checkout}; "
                 f"refusing to bind {context.checkout}"
             )
-        assert_leader_unchanged(
-            root,
-            existing.leader_snapshot,
-            worker_root=existing.checkout.checkout,
-            include_ignored=False,
-        )
+        try:
+            assert_leader_unchanged(
+                root,
+                existing.leader_snapshot,
+                worker_root=existing.checkout.checkout,
+                include_ignored=False,
+            )
+        except LeaderDriftError as exc:
+            # 여기서 조용히 새 스냅샷을 덮어쓰면 leader 변경의 감사 근거가 사라진다.
+            # 그렇다고 아무 경로도 주지 않으면 정상 pull 하나로 status/continue까지
+            # 막힌 교착이 남는다. 그래서 종류에 맞는 복구 명령만 정확히 알려준다.
+            raise LeaderDriftError(
+                leader_drift_message(
+                    exc.drift,
+                    worker_root=existing.checkout.checkout,
+                    recovery_command=_rebind_command(root, existing, exc.drift),
+                ),
+                exc.drift,
+            ) from exc
         return _binding_path(root, session_id)
     leader_snapshot = capture_leader_snapshot(root, include_ignored=False)
     binding_path = _binding_path(root, session_id)
@@ -220,33 +326,180 @@ def host_write_boundary_violation(payload: object, project_root: Path) -> str | 
     command = _first_string(payload, tuple(_COMMAND_KEYS))
     session_id = _first_string(payload, ("session_id", "sessionId"))
     binding = _load_binding(root, session_id, active) if session_id else None
-    if binding is None:
-        if tool_name in _COMMAND_TOOLS and command and _is_lifecycle_command(command):
+    # 이 cwd는 두 곳에서 같은 값이어야 한다: 설치된 CLI를 상대 경로로 부른 경우의
+    # 기준점과, unbound 세션의 자리 판정. 따로 구하면 한쪽만 맞는 상태가 생긴다.
+    # 명령 유무로 가르지 않는다 — write 도구는 command가 비어 있고, 그때 cwd를
+    # 버리면 자기 checkout에서 일하는 세션이 자기 파일을 못 쓴다.
+    session_cwd = _session_cwd(payload, command)
+    if (
+        tool_name in _COMMAND_TOOLS
+        and command
+        and _is_lifecycle_command(command, root=root, cwd=session_cwd)
+    ):
+        # lifecycle 명령은 미바인딩과 stale baseline 양쪽의 **유일한** 복구 경로다.
+        # leader drift 검증을 그 앞에 두면 정상 fast-forward 하나가 복구 명령까지
+        # 막아 run을 영구 정지시킨다.
+        if binding is None:
             return None
-        return (
-            "this host session is not bound to an active worktree; run the printed "
-            "agent-flow status/continue command first, then retry from that worktree"
+        return _lifecycle_violation(
+            payload,
+            command,
+            root=root,
+            current=binding.checkout,
+            active=active,
+            cwd=session_cwd,
         )
+    if binding is None:
+        return _unbound_violation(
+            payload,
+            root=root,
+            survey=survey,
+            command=command,
+            tool_name=tool_name,
+            cwd=session_cwd,
+        )
+    current = binding.checkout
     try:
         assert_leader_unchanged(
             root,
             binding.leader_snapshot,
-            worker_root=binding.checkout.checkout,
+            worker_root=current.checkout,
             include_ignored=False,
+        )
+    except LeaderDriftError as exc:
+        return leader_drift_message(
+            exc.drift,
+            worker_root=current.checkout,
+            recovery_command=_rebind_command(root, binding, exc.drift),
         )
     except WorktreeIsolationError as exc:
         return str(exc)
+    return _scope_violation(
+        payload,
+        root=root,
+        scope=SessionScope(
+            checkout=current.checkout,
+            runtime_root=current.runtime_root,
+            bound=True,
+        ),
+        protected=_protected_write_roots(root, survey, current),
+        active=active,
+        command=command,
+        tool_name=tool_name,
+        command_cwd=(
+            _declared_command_cwd(payload, command, current.checkout)
+            if command
+            else None
+        ),
+        require_cwd_inside_scope=True,
+    )
 
-    current = binding.checkout
-    protected = _protected_write_roots(root, survey, current)
+
+def _lifecycle_violation(
+    payload: object,
+    command: str,
+    *,
+    root: Path,
+    current: ActiveCheckout,
+    active: tuple[ActiveCheckout, ...],
+    cwd: Path | None,
+) -> str | None:
+    """bound 세션의 lifecycle 명령. 자기 프로젝트·자기 worktree·자기 자리만 허용한다.
+
+    leader tripwire보다 **먼저** 돈다. drift는 status/continue로만 풀리므로 그
+    검증을 앞에 세우면 복구 자체가 불가능해진다. 대신 여기서 대상이 이 세션의
+    worktree인지는 그대로 검증하므로, 다른 run으로 새어 나가지는 못한다.
+    """
+    operation = _lifecycle_operation(command, root=root, cwd=cwd)
+    if operation in {"run", "start"}:
+        return (
+            f"this host session is bound to {current.checkout}; refusing to start "
+            "a new run until the current worktree session is complete"
+        )
+    command_root = _lifecycle_root(command, current.checkout, root=root, cwd=cwd)
+    if command_root not in {root, current.checkout}:
+        return (
+            f"this host session is bound to {root}; refusing a lifecycle command "
+            f"for another project root ({command_root})"
+        )
+    selector = _worktree_selector(command, root=root, cwd=cwd)
+    if selector is not None:
+        selected = _active_checkout(root, selector=selector, active=active)
+        if selected is None or selected.checkout != current.checkout:
+            return (
+                f"this host session is bound to {current.checkout}; refusing a lifecycle "
+                f"command for another worktree ({selector})"
+            )
+    lifecycle_cwd = _declared_command_cwd(payload, command, current.checkout)
+    if lifecycle_cwd is None or not _is_within(lifecycle_cwd, current.checkout):
+        return (
+            f"lifecycle cwd is not bound to {current.checkout}; resume the host "
+            "from that exact worktree"
+        )
+    return None
+
+
+def _unbound_violation(
+    payload: object,
+    *,
+    root: Path,
+    survey: _CheckoutSurvey,
+    command: str,
+    tool_name: str,
+    cwd: Path | None,
+) -> str | None:
+    """binding이 없는 세션. 자리는 **선언된 cwd**로만 증명된다.
+
+    leader와 활성 worktree는 unbound 세션에게 계속 닫혀 있다 — 그 둘이야말로
+    bind 전에 새는 워커가 노리는 자리다. 열리는 건 활성 run이 없는 등록 checkout
+    하나, 즉 이 세션이 실제로 서서 일하는 자기 작업 자리뿐이다. 그래야 옆 worktree
+    의 run 때문에 무관한 checkout의 commit/push가 죽지 않는다.
+    """
+    standing = _standing_checkout(root, survey, cwd)
+    ownable = (
+        standing is not None
+        and standing != root
+        and _active_checkout_at(survey, standing) is None
+    )
+    scope = SessionScope(
+        checkout=standing if ownable else None,
+        runtime_root=None,
+        bound=False,
+    )
+    return _scope_violation(
+        payload,
+        root=root,
+        scope=scope,
+        protected=_unbound_protected_roots(root, survey, scope.checkout),
+        active=survey.active,
+        command=command,
+        tool_name=tool_name,
+        command_cwd=cwd,
+        require_cwd_inside_scope=False,
+    )
+
+
+def _scope_violation(
+    payload: object,
+    *,
+    root: Path,
+    scope: SessionScope,
+    protected: tuple[Path, ...],
+    active: tuple[ActiveCheckout, ...],
+    command: str,
+    tool_name: str,
+    command_cwd: Path | None,
+    require_cwd_inside_scope: bool,
+) -> str | None:
+    """자리가 정해진 뒤의 공통 판정. bound/unbound가 같은 규칙을 쓴다."""
     if tool_name in _WRITE_TOOLS:
-        write_base = _write_base(payload)
         targets = tuple(_write_targets(payload))
         if not targets:
-            return "the write target could not be proven to belong to the bound worktree"
+            return scope.reject_unprovable("write target")
+        write_base = _write_base(payload)
         for target in targets:
             violation = _target_violation(
-                target, current, base=write_base, protected=protected
+                target, scope, base=write_base, protected=protected
             )
             if violation is not None:
                 return violation
@@ -254,87 +507,144 @@ def host_write_boundary_violation(payload: object, project_root: Path) -> str | 
 
     if not command:
         return "the shell command could not be inspected at the worktree boundary"
-    if _is_lifecycle_command(command):
-        operation = _lifecycle_operation(command)
-        if operation in {"run", "start"}:
-            return (
-                f"this host session is bound to {current.checkout}; refusing to start "
-                "a new run until the current worktree session is complete"
-            )
-        command_root = _lifecycle_root(command, current.checkout)
-        if command_root not in {root, current.checkout}:
-            return (
-                f"this host session is bound to {root}; refusing a lifecycle command "
-                f"for another project root ({command_root})"
-            )
-        selector = _worktree_selector(command)
-        if selector is not None:
-            selected = _active_checkout(root, selector=selector, active=active)
-            if selected is None or selected.checkout != current.checkout:
-                return (
-                    f"this host session is bound to {current.checkout}; refusing a lifecycle "
-                    f"command for another worktree ({selector})"
-                )
-        lifecycle_cwd = _declared_command_cwd(payload, command, current.checkout)
-        if lifecycle_cwd is None or not _is_within(
-            lifecycle_cwd, current.checkout
-        ):
-            return (
-                f"lifecycle cwd is not bound to {current.checkout}; resume the host "
-                "from that exact worktree"
-            )
-        return None
-
-    declared_cwd = _declared_command_cwd(payload, command, current.checkout)
+    # 셸 판정은 두 개뿐이다. 명령이 **무엇을 쓰려는지** 맞히지 않는다 — 셸 문법은
+    # 무한하고 우리 목록은 유한해서, 그 방향은 예외를 끝없이 붙이면서도 실제로
+    # 무엇이 막히는지 말할 수 없게 만든다.
+    #
+    #   R1 보호 경로 리터럴: 명령 텍스트에 leader·형제 checkout·런타임 상태 경로가
+    #      나타나면 거부. 문자열 스캔이라 파서가 필요 없다.
+    #   R2 파괴 명령 금지 목록: `rm`/`mv`/`git checkout|restore|reset|clean`처럼
+    #      되돌릴 수 없는 몇 개만, 보호 경로에 닿을 수 있으면 거부.
+    #
+    # 동적 경로(`$(...)`, 변수, 셸 확장)는 정적으로 볼 수 없다. 그 구멍은 파서로
+    # 메우지 않고 phase 경계의 tripwire(`assert_leader_unchanged`)가 내용까지
+    # 비교해서 잡는다. R2가 있는 이유는 그 tripwire가 **탐지 전용**이라
+    # `rm -rf <leader>` 한 줄은 잡아도 이미 늦기 때문이다.
     literal_violation = _command_literal_violation(
         command,
-        current=current,
-        root=root,
-        active=active,
+        scope=scope,
+        protected=protected,
     )
     if literal_violation is not None:
         return literal_violation
-    if declared_cwd is None or not _is_within(declared_cwd, current.checkout):
+    if require_cwd_inside_scope and (
+        scope.checkout is None
+        or command_cwd is None
+        or not _is_within(command_cwd, scope.checkout)
+    ):
         return (
-            f"shell cwd is not bound to {current.checkout}; pass that exact worktree as "
+            f"shell cwd is not bound to {scope.checkout}; pass that exact worktree as "
             "the tool cwd or start the command with an explicit cd into it"
         )
-    for candidate in _command_path_candidates(command, declared_cwd):
-        resolved = _resolve_path(candidate, declared_cwd)
+    probe = command_cwd or scope.checkout or root
+    for candidate in _command_path_candidates(command, probe):
+        if command_cwd is None and not _is_absolute_text(candidate):
+            # cwd를 증명하지 못한 세션에서 상대 경로를 leader 기준으로 풀면 없는
+            # 위반을 만들어 낸다. 그런 세션은 절대 경로만 판정한다.
+            continue
+        resolved = _resolve_path(candidate, probe)
         if resolved is None:
             continue
         # worktree 안에서 만든 심링크는 그 worktree의 것으로 본다. 실경로만 보면
         # leader의 `node_modules`를 공유한 순간 그 안의 실행 파일이 전부 막힌다.
-        logical = _logical_path(candidate, declared_cwd)
-        if logical is not None and (
-            _is_within(logical, current.checkout)
-            or _is_within(logical, current.runtime_root)
-        ):
+        logical = _logical_path(candidate, probe)
+        if logical is not None and scope.owns(logical):
             continue
-        if _is_within(resolved, current.checkout) or _is_within(
-            resolved, current.runtime_root
-        ):
+        if scope.owns(resolved):
             continue
-        # 명령이 이름만 대도 다른 checkout에 닿는 형태(`git -C <sibling> checkout -- .`,
-        # `tar -xf a.tar -C <sibling>`)가 있다. 그래서 후보 경로는 쓰기 대상 여부를
-        # 가리지 않고 protected 목록 전체로 본다 — active뿐 아니라 정리 전 형제도.
         for other_root in protected:
             if _is_within(resolved, other_root):
-                return (
-                    f"shell command references checkout path {resolved} outside the bound "
-                    f"worktree {current.checkout}"
-                )
-    # 위 후보 루프는 **다른 checkout**을 지킨다. 그것만으로는 `Write` 도구가 받는
-    # 제약과 어긋난다 — 셸의 쓰기 대상도 같은 protected 목록으로 판정해야
-    # `Write(<leader>/x)`는 막히고 `touch <leader>/x`는 통과하는 구멍이 생기지 않는다.
-    # 후보 전부에 적용하면 `/usr/bin/python3` 같은 읽기 경로까지 막힌다.
-    for target in _command_write_targets(command):
-        violation = _target_violation(
-            target, current, base=declared_cwd, protected=protected
-        )
-        if violation is not None:
-            return violation
+                return scope.reject_reference(resolved, other_root)
+    return _destructive_violation(
+        command,
+        scope=scope,
+        protected=protected,
+        cwd=command_cwd,
+    )
+
+
+def _session_cwd(payload: object, command: str) -> Path | None:
+    """세션이 서 있다고 **선언한** 자리. 없으면 ``None``.
+
+    bound 세션의 판정과 같은 증거를 쓴다: payload cwd, tool cwd, 그리고 명령
+    앞머리의 `cd`. 여기서 대상 경로를 근거로 삼으면 안 된다 — 쓰기 대상이 자기
+    권한을 스스로 만들어 내는 순환이 된다.
+    """
+    base = _write_base(payload)
+    if not command:
+        return base
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return base
+    if len(tokens) < 2 or tokens[0] not in {"cd", "pushd"}:
+        return base
+    moved = _resolve_path(tokens[1], base or Path(os.sep))
+    if moved is None:
+        return base
+    if base is None and not _is_absolute_text(tokens[1]):
+        return None
+    return moved
+
+
+def _standing_checkout(
+    root: Path,
+    survey: _CheckoutSurvey,
+    cwd: Path | None,
+) -> Path | None:
+    """``cwd``를 담는 이 저장소의 checkout. 가장 안쪽 것이 이긴다.
+
+    leader 폴더 **안**에 등록된 worktree(옛 자리 규약)가 있을 수 있어서, 바깥부터
+    맞히면 worktree 안의 세션을 leader 소속으로 잘못 읽는다.
+    """
+    if cwd is None:
+        return None
+    best: Path | None = None
+    for candidate in (root, *survey.registered):
+        if not _is_within(cwd, candidate):
+            continue
+        if best is None or len(str(candidate)) > len(str(best)):
+            best = candidate
+    return best
+
+
+def _active_checkout_at(
+    survey: _CheckoutSurvey, path: Path
+) -> ActiveCheckout | None:
+    for context in survey.active:
+        if context.checkout == path:
+            return context
     return None
+
+
+def _unbound_protected_roots(
+    root: Path,
+    survey: _CheckoutSurvey,
+    standing: Path | None,
+) -> tuple[Path, ...]:
+    """unbound 세션이 건드리면 안 되는 자리.
+
+    leader, 등록된 checkout 전부, 활성 run의 런타임 상태, 그리고 신뢰 상태
+    디렉터리다. 빠지는 건 이 세션이 서 있는 checkout 하나뿐이고, 그것도 활성
+    run이 없을 때만이다(``standing``은 그 조건을 이미 통과한 값이다).
+    """
+    roots = [root, *survey.registered]
+    roots.extend(context.runtime_root for context in survey.active)
+    kept = [path for path in roots if path != standing]
+    # standing이 leader일 때도 런타임·binding 상태는 남의 것이다. leader를 빼는
+    # 경로가 생기더라도 이 자리는 항상 닫아 둔다.
+    kept.append(root / ".git" / "agent-flow")
+    return tuple(dict.fromkeys(kept))
+
+
+def _is_absolute_text(value: str) -> bool:
+    text = value.strip().strip("\"'")
+    if not text:
+        return False
+    try:
+        return Path(text).expanduser().is_absolute()
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 def _active_checkouts(root: Path) -> tuple[ActiveCheckout, ...]:
@@ -618,7 +928,20 @@ def _load_binding(
     session_id: str,
     active: tuple[ActiveCheckout, ...],
 ) -> HostCheckoutBinding | None:
-    path = _binding_path(root, session_id)
+    return _load_binding_file(
+        _binding_path(root, session_id),
+        _session_key(session_id),
+        root,
+        active,
+    )
+
+
+def _load_binding_file(
+    path: Path,
+    session_key: str,
+    root: Path,
+    active: tuple[ActiveCheckout, ...],
+) -> HostCheckoutBinding | None:
     try:
         info = path.lstat()
         if not path.is_file() or path.is_symlink() or info.st_nlink != 1:
@@ -658,7 +981,7 @@ def _load_binding(
             and payload.get("run_id") == context.run_id
         ):
             return HostCheckoutBinding(
-                session_key=_session_key(session_id),
+                session_key=session_key,
                 checkout=context,
                 leader_snapshot=leader_snapshot,
             )
@@ -687,7 +1010,7 @@ def _protected_write_roots(
 
 def _target_violation(
     target: str,
-    current: ActiveCheckout,
+    scope: SessionScope,
     *,
     base: Path | None,
     protected: tuple[Path, ...],
@@ -711,16 +1034,11 @@ def _target_violation(
     except (OSError, RuntimeError, ValueError):
         relative = True
     if relative and base is None:
-        return (
-            f"relative write target {target!r} has no trusted host cwd; "
-            "resume the host from the bound worktree"
-        )
-    resolved = _resolve_path(target, base or current.checkout)
+        return scope.reject_relative(target)
+    resolved = _resolve_path(target, base or scope.checkout or Path(os.sep))
     if resolved is None:
         return f"write target is not a valid filesystem path: {target!r}"
-    if _is_within(resolved, current.checkout) or _is_within(
-        resolved, current.runtime_root
-    ):
+    if scope.owns(resolved):
         return None
     # glob은 셸이 펼친다. `<leader의 부모>/*`를 리터럴 경로로 보면 보호 root를 품는
     # 판정에서 빠져나간다 — metachar 앞까지의 실제 디렉터리로 판정한다.
@@ -729,10 +1047,7 @@ def _target_violation(
         # 안쪽만 보면 `rm -rf ~/Downloads`처럼 보호 root를 **품는** 경로가 통과한다.
         # 그 한 줄이 leader와 형제 checkout을 통째로 지운다.
         if _is_within(resolved, other_root) or _is_within(other_root, container):
-            return (
-                f"write target {resolved} is outside the bound worktree "
-                f"{current.checkout}; stop and resume from the printed worktree path"
-            )
+            return scope.reject_target(resolved, other_root)
     return None
 
 
@@ -832,11 +1147,17 @@ def _declared_command_cwd(
     return None
 
 
-def _command_path_candidates(command: str, cwd: Path) -> Iterable[str]:
+def _command_path_candidates(command: str, cwd: Path) -> tuple[str, ...]:
+    """명령에 리터럴로 등장한 경로 후보. 읽기 경로까지 포함한다.
+
+    파싱 실패는 거부가 아니다. 판정 불가를 전부 차단으로 접으면 인용부호 하나가
+    어긋난 명령 때문에 무관한 작업까지 죽는다. 보호 경로 리터럴은 파서 없이도
+    ``_command_literal_violation``이 잡으므로, 여기서는 빈 결과로 물러난다.
+    """
     try:
         tokens = shlex.split(command, posix=True)
-    except ValueError as exc:
-        raise HostWriteBoundaryError("cannot parse shell command safely") from exc
+    except ValueError:
+        return ()
     candidates: list[str] = []
     for token in tokens:
         stripped = token.strip(";&|()<>")
@@ -856,26 +1177,32 @@ def _command_path_candidates(command: str, cwd: Path) -> Iterable[str]:
     return tuple(candidates)
 
 
-# 셸이 **쓰는** 자리만 고른다. `_command_path_candidates`는 읽기 경로까지 모으므로
-# 그 전부를 worktree 안으로 강제하면 `python3 /usr/bin/thing.py` 같은 정상 호출이
-# 막힌다. 리터럴로 특정된 쓰기 대상만 본다.
 _SHELL_SEPARATORS = frozenset({";", "&&", "||", "|", "&", "|&"})
-_WRITE_REDIRECTS = frozenset({">", ">>"})
-# `2>&1`은 fd 복제라 파일 대상이 아니다. 뒤 토큰을 목적지로 읽으면 `1`을 경로로 본다.
-_NON_FILE_REDIRECTS = frozenset({">&", "<&", "<", "<<", "<<<"})
-_WRITE_OPERAND_COMMANDS = frozenset(
-    {
-        "touch", "mkdir", "rmdir", "rm", "unlink", "shred",
-        "truncate", "tee", "chmod", "chown", "chgrp",
-    }
+# 되돌릴 수 없는 명령. tripwire는 탐지 전용이라 이 계열은 사후에 잡아도 늦다.
+# 목록은 짧게 유지한다 — 여기 이름을 늘리는 것은 "셸이 무엇을 쓰는지 맞히기"로
+# 되돌아가는 길이다. 판정 기준은 "무엇을 쓰는가"가 아니라 "복구가 불가능한가"다.
+_DESTRUCTIVE_COMMANDS = frozenset({"rm", "rmdir", "shred", "mv"})
+_DESTRUCTIVE_GIT_SUBCOMMANDS = frozenset({"checkout", "restore", "clean", "reset"})
+# `git worktree`는 두 번째 낱말로 갈린다. `list`/`add`까지 막으면 조회와 채택이
+# 죽고, 남의 작업을 지우는 것은 `remove`(`--force`면 미커밋 변경까지)와 경로를
+# 옮기는 `move`뿐이다. `prune`은 **이미 사라진** 등록만 정리하므로 되돌릴 작업물이
+# 없다 — 그래서 넣지 않는다.
+_DESTRUCTIVE_GIT_WORKTREE_VERBS = frozenset({"remove", "move"})
+# `find` 자체는 조회다. 되돌릴 수 없게 만드는 것은 이 flag들이고, `-exec`는 뒤에
+# 오는 명령이 파괴 계열일 때만이다. 조건 없이 `-exec`를 막으면
+# `find . -name '*.kt' -exec grep -l x {} +` 같은 흔한 조회가 함께 죽는다.
+_FIND_DESTRUCTIVE_FLAGS = frozenset({"-delete", "-ok"})
+_FIND_EXEC_FLAGS = frozenset({"-exec", "-execdir"})
+# `chmod`는 파일 하나면 되돌릴 수 있다. 재귀 형태만 원래 mode 조합을 잃는다.
+# `-r`은 포함하지 않는다 — chmod에서 그것은 재귀가 아니라 read 권한 제거다.
+_CHMOD_RECURSIVE_FLAGS = frozenset({"-R", "--recursive"})
+# `git -C <path> checkout`처럼 값을 받는 flag를 건너뛰지 않으면 그 값이 서브명령으로
+# 읽혀 판정이 빗나간다.
+_GIT_VALUE_FLAGS = frozenset(
+    {"-C", "-c", "--git-dir", "--work-tree", "--exec-path", "--namespace"}
 )
-# 마지막 피연산자만 목적지인 명령. 원본은 읽기만 한다.
-_WRITE_DEST_LAST_COMMANDS = frozenset({"cp", "install", "rsync"})
-# 원본과 목적지 모두 쓰기 대상인 명령. 목적지만 보면 형제 checkout의 파일을
-# 밖으로 옮기거나(`mv`) 별칭을 만들어(`ln`) 그 checkout의 내용을 바꿀 수 있다.
-_WRITE_ALL_OPERAND_COMMANDS = frozenset({"mv", "ln"})
-# 실제 명령 앞에 붙어 이름을 가리는 wrapper. 벗기지 않으면 `env touch <sibling>/x`가
-# 어떤 쓰기 명령에도 걸리지 않는다.
+# 실제 명령 앞에 붙어 이름을 가리는 wrapper. 벗기지 않으면 `env rm -rf .`가
+# 파괴 목록에 걸리지 않는다.
 _COMMAND_NAME_WRAPPERS = frozenset({"env", "command", "nohup", "nice", "stdbuf", "time"})
 _ENV_ASSIGNMENT_TOKEN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
@@ -907,81 +1234,159 @@ def _shell_tokens(command: str) -> list[str]:
         raise HostWriteBoundaryError("cannot parse shell command safely") from exc
 
 
-def _command_write_targets(command: str) -> tuple[str, ...]:
-    targets: list[str] = []
-    argv: list[str] = []
+def _shell_segments(command: str) -> tuple[tuple[str, ...], ...]:
+    """구분자로 나눈 argv 목록. 파싱 실패는 빈 결과다.
 
-    def drain() -> None:
-        if not argv:
-            return
-        unwrapped = _unwrap_command_argv(argv)
-        if not unwrapped:
-            argv.clear()
-            return
-        name = os.path.basename(unwrapped[0]).lower()
-        operands = [token for token in unwrapped[1:] if not token.startswith("-")]
-        flags = [token for token in unwrapped[1:] if token.startswith("-")]
-        if name in _WRITE_OPERAND_COMMANDS:
-            targets.extend(operands)
-        elif name in _WRITE_ALL_OPERAND_COMMANDS and len(operands) >= 2:
-            targets.extend(operands)
-        elif name == "rsync" and "--remove-source-files" in flags:
-            targets.extend(operands)
-        elif name in _WRITE_DEST_LAST_COMMANDS and len(operands) >= 2:
-            targets.append(operands[-1])
-        elif name == "dd":
-            targets.extend(
-                token.partition("=")[2]
-                for token in argv[1:]
-                if token.startswith("of=")
-            )
-        elif name == "sed" and any(
-            token.startswith("-i") for token in argv[1:] if token.startswith("-")
-        ):
-            # 첫 피연산자는 스크립트고, 제자리 편집 대상은 그 뒤다.
-            targets.extend(operands[1:])
-        argv.clear()
-
-    tokens = _shell_tokens(command)
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
+    파싱 실패를 거부로 접지 않는 이유는 ``_command_path_candidates``와 같다 —
+    보호 경로 리터럴은 파서 없이 잡히고, 판정 불가를 차단으로 바꾸면 무관한
+    명령까지 죽는다.
+    """
+    try:
+        tokens = _shell_tokens(command)
+    except HostWriteBoundaryError:
+        return ()
+    segments: list[tuple[str, ...]] = []
+    current: list[str] = []
+    for token in tokens:
         if token in _SHELL_SEPARATORS:
-            drain()
+            if current:
+                segments.append(tuple(current))
+            current = []
+            continue
+        current.append(token)
+    if current:
+        segments.append(tuple(current))
+    return tuple(segments)
+
+
+def _destructive_segments(command: str) -> tuple[tuple[str, ...], ...]:
+    return tuple(
+        segment for segment in _shell_segments(command) if _is_destructive(segment)
+    )
+
+
+def _is_destructive(segment: tuple[str, ...]) -> bool:
+    """되돌릴 수 없는 형태인가.
+
+    이름만으로 갈리는 것은 `_DESTRUCTIVE_COMMANDS`뿐이다. 나머지 셋은 같은 이름이
+    조회로도 쓰이므로 flag를 봐야 한다 — 이름만 보고 막으면 `git worktree list`,
+    `find -name`, `chmod +x` 같은 정상 사용이 함께 죽는다. 이 세 개가 조건부인
+    이유는 정확히 그것이고, 목록을 늘릴 때도 같은 질문을 통과해야 한다:
+    **이 형태는 되돌릴 수 없는가.**
+    """
+    argv = _unwrap_command_argv(list(segment))
+    if not argv:
+        return False
+    name = os.path.basename(argv[0]).lower()
+    if name in _DESTRUCTIVE_COMMANDS:
+        return True
+    if name == "chmod":
+        return any(token in _CHMOD_RECURSIVE_FLAGS for token in argv[1:])
+    if name == "find":
+        return _find_is_destructive(argv[1:])
+    if name == "git":
+        return _git_is_destructive(argv[1:])
+    return False
+
+
+def _find_is_destructive(arguments: tuple[str, ...] | list[str]) -> bool:
+    for index, token in enumerate(arguments):
+        if token in _FIND_DESTRUCTIVE_FLAGS:
+            return True
+        if token in _FIND_EXEC_FLAGS and index + 1 < len(arguments):
+            if os.path.basename(arguments[index + 1]).lower() in _DESTRUCTIVE_COMMANDS:
+                return True
+    return False
+
+
+def _git_is_destructive(arguments: tuple[str, ...] | list[str]) -> bool:
+    verbs: list[str] = []
+    index = 0
+    while index < len(arguments) and len(verbs) < 2:
+        token = arguments[index]
+        if token in _GIT_VALUE_FLAGS:
+            index += 2
+            continue
+        if token.startswith("-"):
             index += 1
             continue
-        if token in _WRITE_REDIRECTS:
-            if index + 1 < len(tokens):
-                targets.append(tokens[index + 1])
-            index += 2
-            continue
-        if token in _NON_FILE_REDIRECTS:
-            index += 2
-            continue
-        argv.append(token)
+        verbs.append(token.lower())
         index += 1
-    drain()
-    return tuple(target for target in targets if target.strip())
+    if not verbs:
+        return False
+    if verbs[0] == "worktree":
+        return len(verbs) > 1 and verbs[1] in _DESTRUCTIVE_GIT_WORKTREE_VERBS
+    return verbs[0] in _DESTRUCTIVE_GIT_SUBCOMMANDS
+
+
+def _destructive_violation(
+    command: str,
+    *,
+    scope: SessionScope,
+    protected: tuple[Path, ...],
+    cwd: Path | None,
+) -> str | None:
+    """파괴 명령이 보호 경로에 닿을 수 있는가.
+
+    대상은 리터럴 피연산자, 피연산자가 없으면 **cwd 자신**이다. `git clean -fd`와
+    `git reset --hard`는 경로를 적지 않고도 현재 디렉터리를 되돌린다.
+
+    보호 경로를 **품는** 경로도 거부한다(`rm -rf <leader의 부모>`). 이 포함 검사를
+    읽기 명령에까지 적용하면 `ls ~/Downloads`가 막히므로, 파괴 목록 안에서만 한다.
+
+    cwd를 증명하지 못하면 이 계열만 거부한다. 상대 경로를 어디에 붙일지 모르는
+    상태에서 되돌릴 수 없는 명령을 통과시키면, 그 한 줄의 대가가 복구 불가다.
+    """
+    segments = _destructive_segments(command)
+    if not segments:
+        return None
+    if cwd is None:
+        return scope.reject_unprovable("destructive command")
+    for segment in segments:
+        for target in _destructive_targets(segment, cwd):
+            for other_root in protected:
+                if _is_within(target, other_root) or _is_within(other_root, target):
+                    return scope.reject_destructive(segment[0], target, other_root)
+    return None
+
+
+def _destructive_targets(segment: tuple[str, ...], cwd: Path) -> tuple[Path, ...]:
+    targets: list[Path] = []
+    for token in _unwrap_command_argv(list(segment))[1:]:
+        if token.startswith("-") or not token.strip(_SHELL_PUNCTUATION):
+            continue
+        resolved = _resolve_path(token, cwd)
+        if resolved is not None:
+            # glob은 셸이 펼친다. metachar 앞까지의 실제 디렉터리로 판정한다.
+            targets.append(_glob_free_prefix(resolved))
+    return tuple(targets) if targets else (cwd,)
 
 
 
 def _command_literal_violation(
     command: str,
     *,
-    current: ActiveCheckout,
-    root: Path,
-    active: tuple[ActiveCheckout, ...],
+    scope: SessionScope,
+    protected: tuple[Path, ...],
 ) -> str | None:
+    """보호 경로가 명령 텍스트에 리터럴로 나타나는가.
+
+    파서를 쓰지 않는다. 인용, 리다이렉션, wrapper, 어떤 문법으로 감싸도 경로
+    문자열 자체는 명령에 남기 때문이다. 그래서 이것이 셸 쪽의 주 판정이고, 토큰
+    기반 검사는 상대 경로를 풀기 위한 보조다.
+    """
     allowed = tuple(
         sorted(
-            {str(current.checkout), str(current.runtime_root)},
+            {
+                str(path)
+                for path in (scope.checkout, scope.runtime_root)
+                if path is not None
+            },
             key=len,
             reverse=True,
         )
     )
-    protected = {str(root)}
-    protected.update(str(context.checkout) for context in active)
-    for prefix in sorted(protected, key=len, reverse=True):
+    for prefix in sorted({str(path) for path in protected}, key=len, reverse=True):
         start = 0
         while True:
             index = command.find(prefix, start)
@@ -990,10 +1395,7 @@ def _command_literal_violation(
             suffix = command[index + len(prefix) : index + len(prefix) + 1]
             boundary = not suffix or suffix in {"/", "\\", "'", '"', " ", "\t", ":", ")", "]", "}"}
             if boundary and not any(command.startswith(path, index) for path in allowed):
-                return (
-                    f"shell command references checkout path {prefix} outside the bound "
-                    f"worktree {current.checkout}"
-                )
+                return scope.reject_reference(prefix, Path(prefix))
             start = index + len(prefix)
     return None
 
@@ -1137,15 +1539,54 @@ def _direct_shell_argv(command: str) -> tuple[str, ...] | None:
     return argv
 
 
-def _agent_flow_arguments(command: str) -> tuple[str, ...] | None:
+def _agent_flow_arguments(
+    command: str,
+    *,
+    root: Path | None = None,
+    cwd: Path | None = None,
+) -> tuple[str, ...] | None:
     argv = _direct_shell_argv(command)
-    if not argv or argv[0] not in {"agent-flow", "agent-flow-kit"}:
+    if not argv:
         return None
-    return argv[1:]
+    if argv[0] in {"agent-flow", "agent-flow-kit"}:
+        return argv[1:]
+    if root is not None and _is_installed_cli(argv[0], root=root, cwd=cwd):
+        return argv[1:]
+    return None
 
 
-def _is_lifecycle_command(command: str) -> bool:
-    arguments = _agent_flow_arguments(command)
+def _is_installed_cli(token: str, *, root: Path, cwd: Path | None) -> bool:
+    """이 argv[0]이 **이 프로젝트에 설치된** CLI 실체인가.
+
+    이름만 인정하면 PATH에 없는 환경에서 복구 경로가 사라진다. 실제로 그 상태에
+    갇힌 세션이 있었다 — 활성 run 때문에 모든 write가 막혔는데, 유일한 해제 명령이
+    PATH에 없어서 경로로 부르면 거부됐다. 경계의 복구 명령이 그 경계 뒤에 있으면
+    그건 경계가 아니라 교착이다.
+
+    그래서 이름 대신 **설치 산출물과의 경로 동일성**으로 판정한다. 이름만 흉내 낸
+    실행 파일(`node /tmp/agent-flow-kit.mjs`, `/tmp/agent-flow`)은 통과하지 못하고,
+    이 shim 자체는 leader 안이라 경계가 다른 세션의 수정을 막는다.
+    """
+    if "/" not in token:
+        return False
+    installed = root / ".agent-flow" / "bin" / "agent-flow"
+    try:
+        info = installed.lstat()
+    except OSError:
+        return False
+    if installed.is_symlink() or not stat.S_ISREG(info.st_mode):
+        return False
+    resolved = _resolve_path(token, cwd or root)
+    return resolved is not None and resolved == real_path(installed)
+
+
+def _is_lifecycle_command(
+    command: str,
+    *,
+    root: Path | None = None,
+    cwd: Path | None = None,
+) -> bool:
+    arguments = _agent_flow_arguments(command, root=root, cwd=cwd)
     if not arguments:
         return False
     if arguments[0] == "run" and len(arguments) > 1 and arguments[1] in {
@@ -1156,8 +1597,13 @@ def _is_lifecycle_command(command: str) -> bool:
     return arguments[0] in _LIFECYCLE_COMMANDS
 
 
-def _lifecycle_operation(command: str) -> str | None:
-    arguments = _agent_flow_arguments(command)
+def _lifecycle_operation(
+    command: str,
+    *,
+    root: Path | None = None,
+    cwd: Path | None = None,
+) -> str | None:
+    arguments = _agent_flow_arguments(command, root=root, cwd=cwd)
     if not arguments:
         return None
     if arguments[0] == "run" and len(arguments) > 1 and arguments[1] in {
@@ -1168,8 +1614,14 @@ def _lifecycle_operation(command: str) -> str | None:
     return arguments[0]
 
 
-def _lifecycle_root(command: str, default: Path) -> Path:
-    arguments = _agent_flow_arguments(command) or ()
+def _lifecycle_root(
+    command: str,
+    default: Path,
+    *,
+    root: Path | None = None,
+    cwd: Path | None = None,
+) -> Path:
+    arguments = _agent_flow_arguments(command, root=root, cwd=cwd) or ()
     for index, token in enumerate(arguments):
         if token == "--root" and index + 1 < len(arguments):
             return real_path(Path(arguments[index + 1]).expanduser())
@@ -1178,8 +1630,13 @@ def _lifecycle_root(command: str, default: Path) -> Path:
     return real_path(default)
 
 
-def _worktree_selector(command: str) -> str | None:
-    arguments = _agent_flow_arguments(command)
+def _worktree_selector(
+    command: str,
+    *,
+    root: Path | None = None,
+    cwd: Path | None = None,
+) -> str | None:
+    arguments = _agent_flow_arguments(command, root=root, cwd=cwd)
     if arguments is None:
         return None
     for index, token in enumerate(arguments):
@@ -1190,7 +1647,7 @@ def _worktree_selector(command: str) -> str | None:
     return None
 
 
-def _binding_path(root: Path, session_id: str) -> Path:
+def _binding_dir(root: Path) -> Path:
     current = _require_directory(
         root / ".git",
         label="trusted leader git directory",
@@ -1212,7 +1669,11 @@ def _binding_path(root: Path, session_id: str) -> Path:
         raise HostWriteBoundaryError(
             f"cannot secure host binding directory {current}"
         ) from exc
-    return current / f"{_session_key(session_id)}.json"
+    return current
+
+
+def _binding_path(root: Path, session_id: str) -> Path:
+    return _binding_dir(root) / f"{_session_key(session_id)}.json"
 
 
 def _session_key(session_id: str) -> str:
@@ -1264,6 +1725,333 @@ def bound_worktree_for_session(
     if not active:
         return None
     return _load_binding(root, session_id, active)
+
+
+def _rebind_command(
+    root: Path, binding: HostCheckoutBinding, drift: LeaderDrift
+) -> str:
+    return (
+        "`agent-flow host-session rebind"
+        f" --root {shlex.quote(str(root))}"
+        f" --session-key {binding.session_key}"
+        f" --expected-old-head {drift.before.head}"
+        f" --expected-new-head {drift.after.head}`"
+    )
+
+
+@dataclass(frozen=True)
+class HostBaselineRebind:
+    """검증된 재바인딩 한 건의 결과. 무엇을 옮겼는지 호출자가 그대로 보고한다."""
+
+    old_head: str
+    new_head: str
+    branch: str
+    session_key: str | None
+    binding_path: Path | None
+    run_dir: Path | None
+    moved: tuple[str, ...]
+
+
+def rebind_host_leader_baseline(
+    *,
+    project_root: Path,
+    session_key: str | None = None,
+    run_dir: Path | None = None,
+    expected_old_head: str,
+    expected_new_head: str,
+) -> HostBaselineRebind:
+    """검증된 fast-forward **하나**만 기록된 기준선에 반영한다.
+
+    stale baseline은 leader가 정상적으로 앞으로 간 뒤에도 남는다(평범한 pull).
+    그걸 `status`가 조용히 덮어쓰게 하면 leader 변경의 감사 근거가 사라지고,
+    아무도 못 옮기게 하면 status/continue까지 막힌 교착이 남는다. 그래서 복구는
+    **사용자가 SHA 두 개를 명시하는** 이 명령 하나로만 한다.
+
+    허용 조건은 전부 필요하다: 같은 프로젝트·session·run, 같은 branch, 같은
+    working tree, 이전 HEAD가 새 HEAD의 조상, 그리고 넘긴 두 SHA가 실제 관측과
+    일치. 하나라도 어긋나면 아무것도 쓰지 않는다. 재실행은 idempotent다 — 이미
+    새 HEAD를 기록한 기준선은 성공으로 넘긴다.
+    """
+    root = _validated_project_root(project_root)
+    if session_key is None and run_dir is None:
+        raise HostWriteBoundaryError(
+            "host-session rebind needs --session-key, --run-dir, or both"
+        )
+    old = _validated_head(expected_old_head, label="--expected-old-head")
+    new = _validated_head(expected_new_head, label="--expected-new-head")
+    if old == new:
+        raise HostWriteBoundaryError(
+            "--expected-old-head and --expected-new-head name the same commit; "
+            "there is no transition to record"
+        )
+    with host_session_lock(root):
+        survey = _survey_checkouts(root)
+        binding: HostCheckoutBinding | None = None
+        binding_path: Path | None = None
+        key: str | None = None
+        if session_key is not None:
+            key = _validated_session_key(session_key)
+            binding_path = _binding_dir(root) / f"{key}.json"
+            binding = _load_binding_file(binding_path, key, root, survey.active)
+            if binding is None:
+                raise HostWriteBoundaryError(
+                    f"host session {key} has no binding attached to an active run in "
+                    f"{root}; there is nothing to rebind"
+                )
+        target_run = _rebind_run_dir(
+            root, survey, binding=binding, requested=run_dir
+        )
+        meta: dict[str, Any] | None = None
+        phase_snapshot: LeaderSnapshot | None = None
+        if target_run is not None and (target_run / "meta.json").exists():
+            meta = _read_trusted_json(target_run / "meta.json")
+            phase_snapshot = _phase_baseline_snapshot(
+                meta.get(HOST_PHASE_LEADER_BASELINE_KEY), root
+            )
+        if binding is None and phase_snapshot is None:
+            raise HostWriteBoundaryError(
+                "no recorded leader baseline matches the given selectors"
+            )
+        # 두 기준선은 범위가 다르게 찍힌다(binding은 ignored 제외). 그래도 HEAD와
+        # branch는 같은 시점을 가리켜야 한다. 어긋났다면 한쪽이 이미 손으로
+        # 고쳐진 것이므로 둘 다 건드리지 않는다.
+        if (
+            binding is not None
+            and phase_snapshot is not None
+            and (
+                binding.leader_snapshot.head != phase_snapshot.head
+                or binding.leader_snapshot.branch != phase_snapshot.branch
+            )
+        ):
+            raise HostWriteBoundaryError(
+                "the session binding and the run phase baseline disagree about the "
+                f"leader ({binding.leader_snapshot.head} vs {phase_snapshot.head}); "
+                "refusing to rebind either"
+            )
+        observed_loose = (
+            capture_leader_snapshot(root, include_ignored=False)
+            if binding is not None
+            else None
+        )
+        observed_strict = (
+            capture_leader_snapshot(root, include_ignored=True)
+            if phase_snapshot is not None
+            else None
+        )
+        move_binding = binding is not None and _verified_forward(
+            root=root,
+            label="session binding",
+            stored=binding.leader_snapshot,
+            observed=observed_loose,
+            old=old,
+            new=new,
+        )
+        move_phase = phase_snapshot is not None and _verified_forward(
+            root=root,
+            label="run phase baseline",
+            stored=phase_snapshot,
+            observed=observed_strict,
+            old=old,
+            new=new,
+        )
+        current = observed_loose or observed_strict
+        assert current is not None
+        moved: list[str] = []
+        if move_binding or move_phase:
+            # 검증과 쓰기 사이에 leader가 또 움직였다면, 방금 통과한 판정과 다른
+            # 상태를 기준선으로 굳히게 된다. 그 전에 멈춘다.
+            _assert_leader_still(root, observed_loose, observed_strict)
+            if move_phase:
+                assert meta is not None and target_run is not None
+                assert observed_strict is not None
+                baseline = dict(meta[HOST_PHASE_LEADER_BASELINE_KEY])
+                baseline["snapshot"] = _snapshot_payload(observed_strict)
+                meta[HOST_PHASE_LEADER_BASELINE_KEY] = baseline
+                _write_json_atomic(target_run / "meta.json", meta)
+                moved.append("run phase baseline")
+            if move_binding:
+                assert binding_path is not None and observed_loose is not None
+                payload = _read_trusted_json(binding_path)
+                payload["leader_snapshot"] = _snapshot_payload(observed_loose)
+                payload["rebound_at"] = time.time()
+                _write_json_atomic(binding_path, payload)
+                moved.append("session binding")
+        return HostBaselineRebind(
+            old_head=old,
+            new_head=current.head,
+            branch=current.branch,
+            session_key=key,
+            binding_path=binding_path,
+            run_dir=target_run,
+            moved=tuple(moved),
+        )
+
+
+def _verified_forward(
+    *,
+    root: Path,
+    label: str,
+    stored: LeaderSnapshot,
+    observed: LeaderSnapshot | None,
+    old: str,
+    new: str,
+) -> bool:
+    """이 기준선을 ``observed``로 옮겨야 하는가.
+
+    ``False``도 성공이다 — 이미 새 HEAD를 기록한 기준선은 재실행에서 그냥 넘긴다.
+    거절은 예외로만 나간다.
+    """
+    assert observed is not None
+    if _head_matches(stored.head, new):
+        return False
+    if not _head_matches(stored.head, old):
+        raise HostWriteBoundaryError(
+            f"the {label} records HEAD {stored.head}, which is neither "
+            f"--expected-old-head {old} nor --expected-new-head {new}"
+        )
+    if not _head_matches(observed.head, new):
+        raise HostWriteBoundaryError(
+            f"the leader is at HEAD {observed.head}, not --expected-new-head {new}"
+        )
+    drift = classify_leader_drift(root, stored, after=observed)
+    if drift is None:
+        return False
+    if not drift.recoverable:
+        raise HostWriteBoundaryError(
+            f"refusing to rebind the {label}: "
+            + "; ".join(drift.reasons)
+            + f" is not a clean fast-forward ({drift.kind})"
+        )
+    return True
+
+
+def _assert_leader_still(
+    root: Path,
+    loose: LeaderSnapshot | None,
+    strict: LeaderSnapshot | None,
+) -> None:
+    """검증에 쓴 관측이 아직 유효한가. 아니면 아무것도 쓰지 않고 멈춘다."""
+    for observed, include_ignored in ((loose, False), (strict, True)):
+        if observed is None:
+            continue
+        drift = classify_leader_drift(
+            root, observed, include_ignored=include_ignored
+        )
+        if drift is not None:
+            raise HostWriteBoundaryError(
+                "the leader changed again while verifying the rebind ("
+                + "; ".join(drift.reasons)
+                + "); nothing was written - re-run with the current SHAs"
+            )
+
+
+def _rebind_run_dir(
+    root: Path,
+    survey: _CheckoutSurvey,
+    *,
+    binding: HostCheckoutBinding | None,
+    requested: Path | None,
+) -> Path | None:
+    """재바인딩 대상 run 디렉터리. binding이 있으면 그 run이 정본이다.
+
+    사용자가 준 경로를 그대로 믿지 않는다 — 활성 run의 런타임 자리 안이어야 하고,
+    binding까지 주어졌다면 그 run과 같은 자리여야 한다. 그러지 않으면 이 명령이
+    임의 경로의 JSON을 덮어쓰는 도구가 된다.
+    """
+    expected: Path | None = None
+    if binding is not None:
+        expected = (
+            binding.checkout.runtime_root
+            / ".agent-flow"
+            / "runs"
+            / binding.checkout.run_id
+        )
+    target = real_path(requested) if requested is not None else expected
+    if target is None:
+        return None
+    if expected is not None and target != expected:
+        raise HostWriteBoundaryError(
+            f"--run-dir {target} is not the run bound to this session ({expected})"
+        )
+    _require_directory(target, label="active run directory")
+    if not any(
+        _is_within(target, context.runtime_root) for context in survey.active
+    ):
+        raise HostWriteBoundaryError(
+            f"--run-dir {target} is not inside an active worktree runtime root"
+        )
+    return target
+
+
+def _phase_baseline_snapshot(raw: object, root: Path) -> LeaderSnapshot | None:
+    """meta.json의 phase baseline을 스냅샷으로 읽는다. 없으면 ``None``.
+
+    형태가 깨졌으면 raise한다. runner가 같은 값을 더 엄격하게 다시 검증하므로,
+    여기서 조용히 무시하면 runner에서 그대로 막히는 상태를 "복구했다"고 보고한다.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or raw.get("version") != 1:
+        raise HostWriteBoundaryError(
+            "the durable host-phase leader baseline is malformed"
+        )
+    if raw.get("leader_root") != str(real_path(root)):
+        raise HostWriteBoundaryError(
+            "the durable host-phase leader baseline names another leader checkout"
+        )
+    snapshot = raw.get("snapshot")
+    if not isinstance(snapshot, dict):
+        raise HostWriteBoundaryError(
+            "the durable host-phase leader snapshot is malformed"
+        )
+    head = snapshot.get("head")
+    branch = snapshot.get("branch")
+    status = snapshot.get("status")
+    if (
+        not isinstance(head, str)
+        or not head
+        or not isinstance(branch, str)
+        or not branch
+        or not isinstance(status, str)
+        or snapshot.get("armed") is not True
+    ):
+        raise HostWriteBoundaryError(
+            "the durable host-phase leader snapshot is incomplete"
+        )
+    return LeaderSnapshot(head=head, branch=branch, status=status, armed=True)
+
+
+def _snapshot_payload(snapshot: LeaderSnapshot) -> dict[str, Any]:
+    return {
+        "head": snapshot.head,
+        "branch": snapshot.branch,
+        "status": snapshot.status,
+        "armed": snapshot.armed,
+    }
+
+
+def _validated_session_key(value: str) -> str:
+    text = (value or "").strip().lower()
+    if not _SESSION_KEY_TEXT.match(text):
+        raise HostWriteBoundaryError(
+            "--session-key must be the 64-character host session digest printed in "
+            "the boundary message"
+        )
+    return text
+
+
+def _validated_head(value: str, *, label: str) -> str:
+    text = (value or "").strip()
+    if not _HEAD_TEXT.match(text):
+        raise HostWriteBoundaryError(
+            f"{label} must be a 7-40 character hex commit id, not {value!r}"
+        )
+    return text.lower()
+
+
+def _head_matches(head: str, expected: str) -> bool:
+    """``expected``는 접두어여도 된다. 비교 대상이 언제나 **하나**뿐이라 모호하지 않다."""
+    return bool(head) and head.lower().startswith(expected)
 
 
 def _is_within(path: Path, root: Path) -> bool:

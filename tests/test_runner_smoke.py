@@ -1213,6 +1213,11 @@ def test_worktree_attach_keeps_the_dirty_leader_guard(tmp_path: Path):
 
     allowed = _run_cli(["run", "task", "--worktree", "task", "--allow-dirty"], project)
     assert allowed.returncode == 0, allowed.stderr
+    # 면제에는 대가가 있고, 그것을 알려야 한다. 이미 있던 미커밋 변경은
+    # `capture_leader_snapshot`이 기준선으로 굳히므로 tripwire의 보호 대상이 아니라
+    # 배경이 된다 — 워커 사고로 실제로 잃을 수 있는 것은 정확히 이 파일들뿐이다.
+    assert "dirty.txt" in allowed.stderr
+    assert "baseline" in allowed.stderr
 
 
 def test_implicit_task_selector_never_attaches_to_a_registered_worktree(tmp_path: Path):

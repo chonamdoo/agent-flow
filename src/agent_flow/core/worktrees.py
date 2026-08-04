@@ -2939,7 +2939,13 @@ def _conflicting_metadata_hint(*, root: Path, status: WorktreeStatus) -> str:
     )
 
 
-def _git_dirty(root: Path) -> bool:
+def leader_dirty_paths(root: Path) -> tuple[str, ...]:
+    """leader에 남아 있는 미커밋 작업의 status 레코드.
+
+    "dirty"의 정의를 두 벌로 두지 않기 위해 진입 게이트(`_git_dirty`)와 경고가
+    같은 값을 본다. 둘이 갈리면 게이트는 통과시키고 경고는 침묵하는 조합이 생기고,
+    그 조합에서 사용자는 자기 작업이 보호 대상 밖이라는 사실을 끝까지 모른다.
+    """
     # 관측이다. status는 기본적으로 index를 refresh하며 index.lock을 잡으므로
     # 동시에 도는 워커의 실제 쓰기와 경합을 만든다.
     result = git_safe(
@@ -2949,12 +2955,15 @@ def _git_dirty(root: Path) -> bool:
         raise subprocess.CalledProcessError(
             result.returncode or 1, result.args, output=result.stdout, stderr=result.stderr
         )
-    dirty_lines = [
+    return tuple(
         line
         for line in result.stdout.splitlines()
         if not _is_agent_flow_status_line(line)
-    ]
-    return bool(dirty_lines)
+    )
+
+
+def _git_dirty(root: Path) -> bool:
+    return bool(leader_dirty_paths(root))
 
 
 def user_worktrees_root() -> Path:

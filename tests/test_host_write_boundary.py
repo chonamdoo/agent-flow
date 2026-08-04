@@ -18,11 +18,13 @@ from agent_flow.core.host_write_boundary import (
     HostWriteBoundaryError,
     assert_adoption_allowed,
     host_write_boundary_violation,
+    rebind_host_leader_baseline,
     record_host_checkout_binding,
 )
 from agent_flow.core.worktree_isolation import (
     WorktreeIsolationError,
     adopted_record_path,
+    capture_leader_snapshot,
 )
 from agent_flow.core.worktrees import (
     adopt_worktree,
@@ -41,6 +43,54 @@ def _git(*args: str, cwd: Path) -> None:
         capture_output=True,
         text=True,
     )
+
+
+def _git_out(*args: str, cwd: Path) -> str:
+    return subprocess.run(
+        ("git", *args),
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _fast_forward_leader(root: Path, tmp_path: Path) -> tuple[str, str]:
+    """leader를 같은 브랜치에서 clean fast-forward한다. 평범한 `git pull`의 모양이다.
+
+    feeder checkout은 leader 밖에 만들고 바로 지운다 — 남겨 두면 등록 worktree가
+    하나 늘어 판정 대상이 달라진다.
+    """
+    old = _git_out("rev-parse", "HEAD", cwd=root)
+    feeder = tmp_path / "feeder"
+    _git("worktree", "add", "-b", "feeder", str(feeder), "main", cwd=root)
+    (feeder / "pulled.txt").write_text("pulled\n", encoding="utf-8")
+    _git("add", "pulled.txt", cwd=feeder)
+    _git("commit", "-m", "upstream commit", cwd=feeder)
+    _git("merge", "--ff-only", "feeder", cwd=root)
+    _git("worktree", "remove", "--force", str(feeder), cwd=root)
+    return old, _git_out("rev-parse", "HEAD", cwd=root)
+
+
+def _plant_phase_baseline(root: Path, run_dir: Path) -> None:
+    """runner가 검증하는 durable baseline을 현재 leader 상태로 심는다."""
+    snapshot = capture_leader_snapshot(root)
+    meta_path = run_dir / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["host_phase_leader_baseline"] = {
+        "version": 1,
+        "run_id": run_dir.name,
+        "phase_id": "implement",
+        "phase_index": 0,
+        "leader_root": str(root.resolve()),
+        "snapshot": {
+            "head": snapshot.head,
+            "branch": snapshot.branch,
+            "status": snapshot.status,
+            "armed": True,
+        },
+    }
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
 
 
 def _setup(tmp_path: Path):
@@ -186,23 +236,76 @@ def test_host_binding_allows_only_its_checkout_and_runtime(tmp_path: Path):
     assert sibling_violation is not None and "outside the bound worktree" in sibling_violation
 
 
-def test_command_write_targets_sees_wrappers_moves_and_globs():
-    """반증: 명령 이름이 wrapper에 가려지거나 원본이 목적지가 아니면 대상을 놓친다.
+def test_destructive_detection_sees_wrappers_and_splits_conditional_forms():
+    """반증: 이름만 보면 조회를 막고, wrapper를 안 벗기면 파괴를 놓친다.
 
-    이 추출기가 놓치면 경계 판정은 아예 호출되지 않는다 — 뒤의 protected 목록이
-    아무리 정확해도 통과다.
+    셸 판정은 두 개뿐이다 — 보호 경로 리터럴(파서 불필요)과 이 파괴 목록. 리터럴이
+    등장하지 않는 형태(`cd <leader> && env rm -rf .`)에서는 이 목록만 남으므로,
+    `env`나 `VAR=1` 뒤에 숨은 이름을 놓치면 되돌릴 수 없는 명령이 그대로 통과한다.
+
+    반대로 `git worktree`/`find`/`chmod`는 같은 이름이 조회로도 쓰인다. 이름만 보고
+    막으면 `git worktree list`, `find -name`, `chmod +x`가 함께 죽는다. 그래서 이
+    셋만 flag로 갈리고, 그 분기가 이 테스트의 본론이다.
     """
-    from agent_flow.core.host_write_boundary import _command_write_targets
+    from agent_flow.core.host_write_boundary import _destructive_segments
 
-    assert _command_write_targets("env touch /tmp/x") == ("/tmp/x",)
-    assert _command_write_targets("FOO=1 nohup rm -rf /tmp/y") == ("/tmp/y",)
-    assert set(_command_write_targets("mv /a/one /b/two")) == {"/a/one", "/b/two"}
-    assert set(_command_write_targets("ln /a/one /b/two")) == {"/a/one", "/b/two"}
-    assert _command_write_targets("cp /a/one /b/two") == ("/b/two",)
-    assert set(
-        _command_write_targets("rsync --remove-source-files /a/one /b/two")
-    ) == {"/a/one", "/b/two"}
-    assert _command_write_targets("rm -rf /tmp/dir/*") == ("/tmp/dir/*",)
+    assert _destructive_segments("env rm -rf /tmp/x")
+    assert _destructive_segments("FOO=1 nohup rm -rf /tmp/y")
+    assert _destructive_segments("echo hi && rm -rf /tmp/z")
+    assert _destructive_segments("git -C /x checkout -- .")
+    assert _destructive_segments("git clean -fd")
+    assert _destructive_segments("git worktree remove /x")
+    assert _destructive_segments("git -C /r worktree move /a /b")
+    assert _destructive_segments("find . -name x -delete")
+    assert _destructive_segments("find . -exec rm {} +")
+    assert _destructive_segments("find . -execdir shred {} +")
+    assert _destructive_segments("chmod -R 755 /x")
+    assert _destructive_segments("chmod --recursive 700 .")
+
+    # 파괴가 아닌 것을 목록에 넣는 것은 "셸이 무엇을 쓰는지 맞히기"로 되돌아가는
+    # 길이다. 그 방향은 예외를 끝없이 만들고, 무엇이 막히는지 말할 수 없게 한다.
+    assert not _destructive_segments("cp /a/one /b/two")
+    assert not _destructive_segments("printf x > /tmp/q")
+    assert not _destructive_segments("git commit -m 'rm stuff'")
+    assert not _destructive_segments("git worktree list")
+    assert not _destructive_segments("git worktree add /a -b feat/a")
+    # prune은 이미 사라진 등록만 정리한다. 되돌릴 작업물이 없다.
+    assert not _destructive_segments("git worktree prune")
+    assert not _destructive_segments("find . -name '*.kt'")
+    # `-exec`는 뒤에 오는 명령으로 갈린다. 조건 없이 막으면 이 흔한 조회가 죽는다.
+    assert not _destructive_segments("find . -name '*.kt' -exec grep -l x {} +")
+    assert not _destructive_segments("chmod +x script.sh")
+    # chmod의 `-r`은 재귀가 아니라 read 권한 제거다. 재귀로 읽으면 오탐이다.
+    assert not _destructive_segments("chmod -r file")
+
+
+def test_destructive_command_is_blocked_before_it_reaches_another_checkout(
+    tmp_path: Path,
+):
+    """불변: tripwire는 탐지 전용이라 `rm -rf`는 사후에 잡아도 되돌릴 수 없다.
+
+    보호 경로를 **품는** 경로까지 본다(`rm -rf <leader의 부모>`). 반대로 자기
+    checkout 안에서 도는 같은 명령은 통과해야 한다 — 그러지 않으면 worktree에서
+    빌드 산출물 정리조차 못 한다.
+    """
+    root, _statuses, _runs = _setup(tmp_path)
+    mine = tmp_path / "mine"
+    _git("worktree", "add", "-b", "feat/destructive", str(mine), cwd=root)
+
+    def judge(command: str, cwd: Path) -> str | None:
+        return host_write_boundary_violation(
+            _command_payload(command, cwd=cwd, session="mine"), root
+        )
+
+    assert judge("rm -rf build", mine) is None
+    assert judge("git reset --hard HEAD~1", mine) is None
+
+    ancestor = judge(f"rm -rf {tmp_path}", mine)
+    leader_cwd = judge("rm -rf .", root)
+
+    assert ancestor is not None
+    assert "cannot be detected after the fact" in ancestor
+    assert leader_cwd is not None
 
 
 def test_shell_write_target_obeys_the_same_rule_as_the_write_tool(tmp_path: Path):
@@ -669,9 +772,21 @@ def test_bound_shell_requires_current_worktree_cwd_and_blocks_sibling_paths(
     assert wrong_cwd is not None and "shell cwd is not bound" in wrong_cwd
     assert sibling_path is not None and "outside the bound worktree" in sibling_path
 
-def test_bound_shell_blocks_embedded_leader_literals_and_relative_symlinks(
+
+def test_bound_shell_blocks_leader_literals_and_irreversible_symlink_escapes(
     tmp_path: Path,
 ):
+    """경계 계약: 리터럴은 사전에 막고, 심링크 경유 쓰기는 종류로 갈린다.
+
+    worktree 안에 만든 심링크가 leader를 가리킬 수 있다. 그 심링크로 **되돌릴 수
+    없는** 명령이 나가면 사전에 막는다 — tripwire는 탐지 전용이라 늦다. 반대로
+    보통 쓰기(`printf ... > leak`)는 통과시키고 phase 경계의 tripwire가 잡는다.
+    심링크 이름만으로는 읽기와 쓰기를 구분할 수 없고, 구분하려고 명령별 규칙을
+    다시 세우면 `./node_modules/.bin/tsc`(leader의 공유 의존성을 가리키는 심링크)
+    같은 정상 호출까지 함께 막힌다 —
+    `test_worktree_tripwire.py::test_symlinked_node_modules_binary_is_not_a_violation`이
+    그 짝이다.
+    """
     root, statuses, runs = _setup(tmp_path)
     first = statuses[0]
     record_host_checkout_binding(_status_payload(root, first, runs[0]), root)
@@ -685,13 +800,68 @@ def test_bound_shell_blocks_embedded_leader_literals_and_relative_symlinks(
         ),
         root,
     )
-    symlinked = host_write_boundary_violation(
+    destructive = host_write_boundary_violation(
+        _command_payload("rm -f leak", cwd=first.path),
+        root,
+    )
+    reversible = host_write_boundary_violation(
         _command_payload("printf leaked > leak", cwd=first.path),
         root,
     )
 
     assert embedded is not None and "outside the bound worktree" in embedded
-    assert symlinked is not None and "outside the bound worktree" in symlinked
+    assert destructive is not None
+    assert "cannot be detected after the fact" in destructive
+    # 정적 분석이 놓는 자리다. 놓은 채로 두는 근거는 tripwire가 내용까지 비교해
+    # 같은 쓰기를 phase 경계에서 잡는다는 것이다.
+    assert reversible is None
+
+
+def test_path_qualified_installed_cli_counts_as_a_lifecycle_command(tmp_path: Path):
+    """반증: 복구 명령을 이름으로만 인정하면 PATH에 없는 환경에서 복구가 불가능하다.
+
+    실제로 그 상태가 있었다 — 활성 run 때문에 모든 write가 막혔는데, 유일한 해제
+    명령이 PATH에 없어서 경로로 부르면 거부됐다. 경계의 복구 명령이 그 경계 뒤에
+    있으면 그건 경계가 아니라 교착이다. 그래서 이름이 아니라 설치 산출물과의 경로
+    동일성으로 인정하고, 이름만 흉내 낸 실행 파일은 계속 거부한다.
+    """
+    root, statuses, runs = _setup(tmp_path)
+    first = statuses[0]
+    shim = root / ".agent-flow" / "bin" / "agent-flow"
+    shim.parent.mkdir(parents=True, exist_ok=True)
+    shim.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    shim.chmod(0o755)
+    impostor = tmp_path / "agent-flow"
+    impostor.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    impostor.chmod(0o755)
+
+    installed = host_write_boundary_violation(
+        _command_payload(
+            f"{shim} status --root {root} --worktree {first.name}",
+            session="unbound",
+            host_cwd=root,
+        ),
+        root,
+    )
+    forged = host_write_boundary_violation(
+        _command_payload(
+            f"{impostor} status --root {root} --worktree {first.name}",
+            session="unbound",
+            host_cwd=root,
+        ),
+        root,
+    )
+
+    assert installed is None
+    assert forged is not None
+    # 같은 판정이 binding에도 쓰여야 한다. guard만 열리고 binding이 안 되면
+    # 세션은 계속 unbound로 남아 복구가 끝나지 않는다.
+    payload = _status_payload(root, first, runs[0], session="unbound")
+    payload["tool_input"]["command"] = (
+        f"{shim} status --root {root} --worktree {first.name}"
+    )
+    payload["cwd"] = str(root)
+    assert record_host_checkout_binding(payload, root) is not None
 
 
 def test_bound_shell_allows_dynamic_path_commands_at_static_check(
@@ -1044,3 +1214,217 @@ def test_virtual_write_targets_do_not_escape_the_filesystem_boundary(tmp_path: P
 
     assert violation is not None
     assert "virtual write target is not trusted" in violation
+
+
+def test_stale_fast_forward_baseline_keeps_lifecycle_open_and_rebinds(tmp_path: Path):
+    """반증: 정상 pull 하나로 status까지 막히면 복구 경로가 아예 사라진다.
+
+    leader가 같은 브랜치에서 clean fast-forward하면 기록된 기준선은 stale이 된다.
+    그때 (1) lifecycle 명령은 통과해야 하고, (2) 차단 메시지는 이 세션에 맞는 정확한
+    복구 명령을 담아야 하고, (3) 그 명령 한 번으로 session binding과 run phase
+    baseline이 **함께** 앞으로 가야 한다. 하나라도 빠지면 run은 그 자리에서 멈춘다.
+    """
+    root, statuses, runs = _setup(tmp_path)
+    first = statuses[0]
+    binding_path = record_host_checkout_binding(
+        _status_payload(root, first, runs[0]), root
+    )
+    assert binding_path is not None
+    _plant_phase_baseline(root, runs[0])
+    old, new = _fast_forward_leader(root, tmp_path)
+    session_key = binding_path.stem
+
+    assert host_write_boundary_violation(
+        _command_payload(
+            f"agent-flow status --root {root} --worktree {first.name}",
+            cwd=first.path,
+        ),
+        root,
+    ) is None
+
+    blocked = host_write_boundary_violation(
+        _write_payload(first.path / "feature.py"), root
+    )
+    assert blocked is not None
+    assert "fast-forwarded on the same branch" in blocked
+    assert f"--session-key {session_key}" in blocked
+    assert f"--expected-old-head {old}" in blocked
+    assert f"--expected-new-head {new}" in blocked
+
+    rebound = rebind_host_leader_baseline(
+        project_root=root,
+        session_key=session_key,
+        expected_old_head=old,
+        expected_new_head=new,
+    )
+
+    assert set(rebound.moved) == {"session binding", "run phase baseline"}
+    assert rebound.new_head == new
+    assert host_write_boundary_violation(
+        _write_payload(first.path / "feature.py"), root
+    ) is None
+    planted = json.loads((runs[0] / "meta.json").read_text(encoding="utf-8"))
+    assert planted["host_phase_leader_baseline"]["snapshot"]["head"] == new
+    assert planted["host_phase_leader_baseline"]["phase_id"] == "implement"
+    # 같은 명령을 다시 쳐도 안전해야 한다. 사용자는 성공 여부를 모른 채 재시도한다.
+    assert rebind_host_leader_baseline(
+        project_root=root,
+        session_key=session_key,
+        expected_old_head=old,
+        expected_new_head=new,
+    ).moved == ()
+
+
+def test_rebind_refuses_everything_but_a_clean_fast_forward(tmp_path: Path):
+    """불변: 검증되지 않은 상태를 새 기준선으로 굳히면 tripwire는 없는 것과 같다."""
+    root, statuses, runs = _setup(tmp_path)
+    binding_path = record_host_checkout_binding(
+        _status_payload(root, statuses[0], runs[0]), root
+    )
+    assert binding_path is not None
+    session_key = binding_path.stem
+    old, new = _fast_forward_leader(root, tmp_path)
+
+    scratch = root / "user-scratch.txt"
+    scratch.write_text("uncommitted\n", encoding="utf-8")
+    with pytest.raises(HostWriteBoundaryError, match="not a clean fast-forward"):
+        rebind_host_leader_baseline(
+            project_root=root,
+            session_key=session_key,
+            expected_old_head=old,
+            expected_new_head=new,
+        )
+    scratch.unlink()
+
+    with pytest.raises(HostWriteBoundaryError, match="not --expected-new-head"):
+        rebind_host_leader_baseline(
+            project_root=root,
+            session_key=session_key,
+            expected_old_head=old,
+            expected_new_head="0" * 40,
+        )
+
+    with pytest.raises(HostWriteBoundaryError, match="not inside an active worktree"):
+        rebind_host_leader_baseline(
+            project_root=root,
+            run_dir=tmp_path,
+            expected_old_head=old,
+            expected_new_head=new,
+        )
+
+    # 거절은 아무것도 쓰지 않았다는 뜻이어야 한다.
+    payload = json.loads(binding_path.read_text(encoding="utf-8"))
+    assert payload["leader_snapshot"]["head"] == old
+
+
+def test_rebind_moves_the_phase_baseline_from_the_run_dir_alone(tmp_path: Path):
+    """runner가 막힌 사용자가 아는 selector는 run-dir 하나다. 그것만으로도 풀려야 한다."""
+    root, statuses, runs = _setup(tmp_path)
+    _plant_phase_baseline(root, runs[0])
+    old, new = _fast_forward_leader(root, tmp_path)
+
+    rebound = rebind_host_leader_baseline(
+        project_root=root,
+        run_dir=runs[0],
+        expected_old_head=old,
+        expected_new_head=new,
+    )
+
+    assert rebound.moved == ("run phase baseline",)
+    assert rebound.session_key is None
+    planted = json.loads((runs[0] / "meta.json").read_text(encoding="utf-8"))
+    assert planted["host_phase_leader_baseline"]["snapshot"]["head"] == new
+
+
+def test_unbound_session_keeps_its_own_idle_checkout_writable(tmp_path: Path):
+    """반증: 옆 worktree의 run 때문에 무관한 checkout의 commit/push까지 죽으면 안 된다.
+
+    unbound 세션에게 열리는 자리는 자기가 서 있는 idle checkout 하나뿐이다. leader와
+    활성 worktree는 그대로 닫혀 있다 — bind 전에 새는 워커가 노리는 자리가 거기다.
+    """
+    root, statuses, _ = _setup(tmp_path)
+    mine = tmp_path / "mine"
+    _git("worktree", "add", "-b", "feat/mine", str(mine), cwd=root)
+
+    assert host_write_boundary_violation(
+        _write_payload(mine / "feature.py", session="mine", host_cwd=mine),
+        root,
+    ) is None
+    assert host_write_boundary_violation(
+        _command_payload("git commit -am wip", cwd=mine, session="mine"),
+        root,
+    ) is None
+
+    leader = host_write_boundary_violation(
+        _write_payload(root / "leaked.py", session="mine", host_cwd=mine),
+        root,
+    )
+    sibling = host_write_boundary_violation(
+        _write_payload(statuses[0].path / "leaked.py", session="mine", host_cwd=mine),
+        root,
+    )
+
+    assert leader is not None and "not bound to an active worktree" in leader
+    assert sibling is not None and "not bound to an active worktree" in sibling
+
+
+def test_pre_block_surface_stays_two_rules():
+    """계약: 사전 차단은 두 개뿐이다 — 보호 경로 리터럴, 되돌릴 수 없는 명령 목록.
+
+    명령별 "쓰기 대상" 표를 다시 들이면 무한한 셸 문법을 유한한 목록으로 쫓는
+    예전 구조로 돌아간다. 그 구조가 표 6개(`_WRITE_OPERAND_COMMANDS`,
+    `_WRITE_DEST_LAST_COMMANDS`, `_WRITE_ALL_OPERAND_COMMANDS`, 리다이렉트 2개,
+    `_command_write_targets`)를 만들었고, 그 표들이 예외 행렬의 출처였다.
+
+    파괴 목록의 판정 기준은 "무엇을 쓰는가"가 아니라 "복구가 불가능한가"다. 복구
+    가능한 쓰기가 목록에 들어오는 순간 같은 미끄러짐이 다시 시작된다.
+    """
+    import agent_flow.core.host_write_boundary as boundary
+
+    revived = sorted(
+        name
+        for name in vars(boundary)
+        if name.startswith(("_WRITE_OPERAND", "_WRITE_DEST", "_WRITE_ALL_OPERAND"))
+        or name in {"_WRITE_REDIRECTS", "_NON_FILE_REDIRECTS", "_command_write_targets"}
+    )
+    assert not revived, f"명령별 쓰기 대상 표가 되살아났다: {revived}"
+
+    for reversible in (
+        "touch", "cp", "tee", "chmod", "chown", "dd", "sed", "ln",
+        "rsync", "install", "truncate", "mkdir", "unlink",
+    ):
+        assert reversible not in boundary._DESTRUCTIVE_COMMANDS, reversible
+    for recoverable in ("commit", "add", "status", "stash", "switch"):
+        assert recoverable not in boundary._DESTRUCTIVE_GIT_SUBCOMMANDS, recoverable
+
+
+def test_recovery_command_passes_in_every_blocked_state(tmp_path: Path):
+    """불변: 경계가 만든 교착의 해제 명령은 그 경계 뒤에 있으면 안 된다.
+
+    지금까지 나온 세 건 — unbound 전면 차단, stale baseline 교착, 경로 지정 호출
+    거부 — 는 서로 다른 버그가 아니라 이 불변식이 깨진 세 표현이었다. 네 상태
+    전부에서 lifecycle 명령이 통과해야 한다. 하나라도 막히면 그 상태에 갇힌
+    세션에는 탈출구가 없다.
+    """
+    root, statuses, runs = _setup(tmp_path)
+    first = statuses[0]
+    lifecycle = f"agent-flow status --root {root} --worktree {first.name}"
+
+    assert host_write_boundary_violation(
+        _command_payload(lifecycle, session="nobody", host_cwd=root), root
+    ) is None, "unbound 세션이 복구 명령을 실행할 수 없다"
+
+    record_host_checkout_binding(_status_payload(root, first, runs[0]), root)
+    assert host_write_boundary_violation(
+        _command_payload(lifecycle, cwd=first.path), root
+    ) is None, "bound 세션이 복구 명령을 실행할 수 없다"
+
+    _fast_forward_leader(root, tmp_path)
+    assert host_write_boundary_violation(
+        _command_payload(lifecycle, cwd=first.path), root
+    ) is None, "정상 fast-forward 뒤에 복구 명령이 막혔다"
+
+    (root / "user-scratch.txt").write_text("uncommitted\n", encoding="utf-8")
+    assert host_write_boundary_violation(
+        _command_payload(lifecycle, cwd=first.path), root
+    ) is None, "leader가 dirty해진 뒤에 복구 명령이 막혔다"

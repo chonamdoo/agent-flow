@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -65,11 +66,14 @@ from agent_flow.core.worktrees import (
     worktree_run_activation,
 )
 from agent_flow.core.worktree_isolation import (
+    HOST_PHASE_LEADER_BASELINE_KEY,
+    LeaderDriftError,
     LeaderSnapshot,
     WorktreeIsolationError,
     assert_leader_unchanged,
     capture_leader_snapshot,
     git_safe,
+    leader_drift_message,
     leader_root_for,
     real_path,
     sanitized_worker_env,
@@ -106,7 +110,8 @@ GIT_DEPENDENT_PHASES = {
     "merge-approval",
 }
 FIX_LOOP_MAX_ROUNDS = 3
-_HOST_PHASE_LEADER_BASELINE = "host_phase_leader_baseline"
+# 이름이 두 벌이면 rebind 복구 명령이 runner가 읽는 키와 다른 키를 고칠 수 있다.
+_HOST_PHASE_LEADER_BASELINE = HOST_PHASE_LEADER_BASELINE_KEY
 PROTECTED_BRANCHES = frozenset({"main", "master", "develop"})
 CONVENTIONAL_COMMIT_RE = re.compile(
     r"^(?:feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)"
@@ -381,12 +386,7 @@ class Runner:
                 phase, run_dir=self.run_dir, project_root=self.project_root,
             )
             if leader_before is not None:
-                assert_leader_unchanged(
-                    leader_root,
-                    leader_before,
-                    run_id=self.run_dir.name,
-                    worker_root=self.project_root,
-                )
+                self._assert_leader_unchanged(leader_root, leader_before)
             meta = read_meta(self.run_dir)
             self._stamp_phase(meta, phase_index)
             write_meta(self.run_dir, meta)
@@ -573,13 +573,42 @@ class Runner:
             status=status,
             armed=True,
         )
-        assert_leader_unchanged(
-            leader_root,
-            snapshot,
-            run_id=self.run_dir.name,
-            worker_root=self.project_root,
-        )
+        self._assert_leader_unchanged(leader_root, snapshot)
         return snapshot
+
+    def _assert_leader_unchanged(
+        self, leader_root: Path, snapshot: LeaderSnapshot
+    ) -> None:
+        """tripwire 판정 + 이 run에 맞는 복구 명령.
+
+        정상 `git pull` 하나로도 기준선은 stale이 된다. 그때 "commit 또는 stash"만
+        안내하면 사용자가 할 수 있는 일이 없고, run은 그 자리에서 영구 정지한다.
+        그래서 clean fast-forward에는 이 run의 baseline을 지목하는 정확한 명령을
+        싣는다.
+        """
+        assert self.run_dir is not None
+        try:
+            assert_leader_unchanged(
+                leader_root,
+                snapshot,
+                run_id=self.run_dir.name,
+                worker_root=self.project_root,
+            )
+        except LeaderDriftError as exc:
+            raise LeaderDriftError(
+                leader_drift_message(
+                    exc.drift,
+                    worker_root=self.project_root,
+                    recovery_command=(
+                        "`agent-flow host-session rebind"
+                        f" --root {shlex.quote(str(leader_root))}"
+                        f" --run-dir {shlex.quote(str(self.run_dir))}"
+                        f" --expected-old-head {exc.drift.before.head}"
+                        f" --expected-new-head {exc.drift.after.head}`"
+                    ),
+                ),
+                exc.drift,
+            ) from exc
 
     def _persist_host_phase_leader_baseline(
         self,

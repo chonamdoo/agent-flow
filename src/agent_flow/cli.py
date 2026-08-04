@@ -123,6 +123,7 @@ from agent_flow.core.worktrees import (
     find_pending_worktree_cleanup,
     existing_checkout_path,
     known_worktree_names,
+    leader_dirty_paths,
     legacy_managed_root,
     managed_worktrees_root,
     plan_worktree,
@@ -142,7 +143,11 @@ from agent_flow.core.hook_integrity import (
     HookIntegrityError,
     assert_managed_hooks_registered,
 )
-from agent_flow.core.host_write_boundary import assert_adoption_allowed
+from agent_flow.core.host_write_boundary import (
+    HostWriteBoundaryError,
+    assert_adoption_allowed,
+    rebind_host_leader_baseline,
+)
 from agent_flow.core.worktree_isolation import (
     WorktreeIsolationError,
     adopted_worktree_parent,
@@ -243,6 +248,20 @@ def main(argv: list[str] | None = None) -> int:
     status_parser.add_argument("--root", default=".")
     status_parser.add_argument("--worktree")
     status_parser.add_argument("--checkout-identity", help=argparse.SUPPRESS)
+
+    # leader가 정상적으로 앞으로 간 뒤에도 기록된 기준선은 그대로 남아 tripwire가
+    # 계속 걸린다. 그 상태를 `status`가 조용히 덮어쓰게 하면 leader 변경의 감사
+    # 근거가 사라지므로, 복구는 사용자가 SHA 두 개를 명시하는 이 명령으로만 한다.
+    host_session_parser = subparsers.add_parser("host-session")
+    host_session_subparsers = host_session_parser.add_subparsers(
+        dest="host_session_command", required=True
+    )
+    host_session_rebind = host_session_subparsers.add_parser("rebind")
+    host_session_rebind.add_argument("--root", default=".")
+    host_session_rebind.add_argument("--session-key")
+    host_session_rebind.add_argument("--run-dir")
+    host_session_rebind.add_argument("--expected-old-head", required=True)
+    host_session_rebind.add_argument("--expected-new-head", required=True)
 
     report_parser = subparsers.add_parser("report")
     report_parser.add_argument("--root", default=".")
@@ -861,6 +880,39 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         print(status_summary(state_root))
         return 0
+
+    if args.command == "host-session":
+        if args.host_session_command == "rebind":
+            if not args.session_key and not args.run_dir:
+                print(
+                    "pass --session-key (from the boundary message), --run-dir, or both",
+                    file=sys.stderr,
+                )
+                return 2
+            try:
+                rebound = rebind_host_leader_baseline(
+                    project_root=root,
+                    session_key=args.session_key,
+                    run_dir=Path(args.run_dir) if args.run_dir else None,
+                    expected_old_head=args.expected_old_head,
+                    expected_new_head=args.expected_new_head,
+                )
+            except (HostWriteBoundaryError, WorktreeIsolationError, OSError) as exc:
+                print(_format_cli_error(exc), file=sys.stderr)
+                return 2
+            if not rebound.moved:
+                print(
+                    f"already current: recorded baselines are at {rebound.new_head[:12]} "
+                    f"on {rebound.branch}"
+                )
+                return 0
+            print(
+                f"rebound {', '.join(rebound.moved)}: "
+                f"{rebound.old_head[:12]} -> {rebound.new_head[:12]} on {rebound.branch}"
+            )
+            if rebound.run_dir is not None:
+                print(f"run: {rebound.run_dir}")
+            return 0
 
     if args.command == "report":
         run_dir = _resolve_run_dir(root, args.run_dir)
@@ -2378,6 +2430,7 @@ def _resolve_entry_worktree(
             # 경우 파일이 없을 수 있다. 이미 있으면 건너뛰므로 반복해도 무해하다.
             _apply_worktree_setup(root=root, checkout=attached.path)
             _warn_if_cwd_is_other_checkout(root=root, target=attached.path)
+            _warn_leader_dirty_work(root)
             return attached, True
     if not explicit:
         selector = _derive_worktree_selector(root=root, task=selector)
@@ -2398,7 +2451,36 @@ def _resolve_entry_worktree(
         raise
     _apply_worktree_setup(root=root, checkout=status.path)
     _warn_if_cwd_is_other_checkout(root=root, target=status.path)
+    _warn_leader_dirty_work(root)
     return status, False
+
+
+def _warn_leader_dirty_work(root: Path) -> None:
+    """leader의 미커밋 작업은 tripwire의 **보호 대상이 아니라 배경**임을 알린다.
+
+    `capture_leader_snapshot`은 run 시작 시점의 상태를 그대로 기준선으로 굳힌다.
+    그래서 이미 있던 미커밋 변경은 그 뒤의 변화만 비교하는 tripwire에 걸리지 않고,
+    실제로 잃을 수 있는 것은 정확히 그 작업뿐이다(커밋된 것은 clone으로 복구된다).
+
+    여기까지 dirty로 왔다는 것은 사용자가 `--allow-dirty`로 진입 게이트를 이미
+    면제했다는 뜻이다. 그러니 다시 막지 않고 한 줄만 알린다. 차단으로 바꾸면
+    면제 옵션이 무의미해지고, 관측 실패를 차단으로 접으면 git이 대답하지 못하는
+    순간마다 run 시작이 죽는다 — 그래서 실패는 침묵으로 넘긴다.
+    """
+    try:
+        dirty = leader_dirty_paths(root)
+    except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError):
+        return
+    if not dirty:
+        return
+    shown = ", ".join(line[3:] or line for line in dirty[:5])
+    more = f" (+{len(dirty) - 5})" if len(dirty) > 5 else ""
+    print(
+        f"warning: leader has uncommitted work that the isolation tripwire will treat "
+        f"as its baseline, not as protected content: {shown}{more}. "
+        "Commit or stash it if it must survive a worker mistake.",
+        file=sys.stderr,
+    )
 
 
 def _warn_if_cwd_is_other_checkout(*, root: Path, target: Path) -> None:
