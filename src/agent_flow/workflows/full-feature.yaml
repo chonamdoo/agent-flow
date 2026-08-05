@@ -5,9 +5,10 @@ description: |
   DDD/Clean design, TDD implementation, review loops, PR watch, and approved
   merge.
 
-  Routing is enforced by the Python runner (src/agent_flow/runner.py). This YAML
-  is the phase definition source; that runner is the routing authority - it reads
-  `routes` and applies the fix-loop round cap. JS holds no lifecycle state.
+  This YAML is the phase definition source. `routes` is parsed and validated by
+  src/agent_flow/core/phase_workflow.py; the routing decision and the fix-loop
+  round cap belong to the Python runner (src/agent_flow/runner.py). JS relays the
+  run lifecycle (start/status/next/advance) to that runner and never advances it.
 
 context_policy: ".Codex/rules/context/agent-flow-context-map.md"
 

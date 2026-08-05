@@ -8,7 +8,7 @@
 ## Architecture
 
 ```text
-bin/agent-flow-kit.mjs  ← JS runner (phase routing, install, artifact validation)
+bin/agent-flow-kit.mjs  ← JS 진입점 (install, artifact validation, push-watch). phase routing은 하지 않는다
 src/agent_flow/         ← Python CLI (runner, adapters, gates, multi-review, worktrees)
 src/agent_flow/workflows/  ← Source YAML (full-feature, bugfix, review 등). 정본은 여기 한 벌뿐이다
 src/agent_flow/profiles/   ← Stack별 profile (android, nextjs, python 등)
@@ -21,9 +21,10 @@ scripts/hooks/          ← PreToolUse/PostToolUse/Stop hooks (guard-protected-b
 
 ## Key Files
 
-- `src/agent_flow/workflows/*.yaml`: phase 순서와 routes의 단일 진실 소스. 루트에 사본을 두지 않는다 — 두 벌이면 둘을 맞추는 검사가 따로 필요해진다. JS는 Python `workflow export` JSON을 소비한다 (`bin/agent-flow-kit.mjs:385`).
-- `bin/agent-flow-kit.mjs`: install·설치 자산 동기화용 JS 진입점. lifecycle 상태를 만들거나 전진시키지 않고 `start`/`status`/`next`/`advance`를 Python CLI로 넘긴다.
-- `src/agent_flow/runner.py`: Python runner. **routing authority다** — YAML routes 파싱과 fix-loop round cap이 전부 여기 있다.
+- `src/agent_flow/workflows/*.yaml`: phase 순서와 routes의 단일 진실 소스. 루트에 사본을 두지 않는다 — 두 벌이면 둘을 맞추는 검사가 따로 필요해진다. JS는 Python `workflow export` JSON을 소비한다 (`bin/agent-flow-kit.mjs` `exportWorkflowDefinition()`).
+- `bin/agent-flow-kit.mjs`: install·설치 자산 동기화용 JS 진입점. `start`/`status`/`next`/`advance`는 Python CLI로 넘기고 run lifecycle을 전진시키지 않는다. 자기 상태를 쓰는 곳은 `push-watch` 하나뿐이다.
+- `src/agent_flow/core/phase_workflow.py`: workflow YAML 로더. `routes` 파싱과 route target 검증이 여기 있다.
+- `src/agent_flow/runner.py`: Python runner. **routing authority다** — 어느 route로 갈지 고르는 판정과 fix-loop round cap이 여기 있다.
 - `src/agent_flow/profiles/_schema.yaml`: profile 필드 스키마 (gates, branching, worktree).
 - `skills/code-generation-discipline/SKILL.md`: 코드 생성 기준의 canonical source.
 
