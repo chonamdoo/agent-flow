@@ -556,6 +556,38 @@ function upgradeBundledProfiles(root, src, dest, keepNames) {
 
 
 
+// omp는 `.claude/agents/*.md`를 subagent로 더 이상 읽지 않는다(oh-my-pi #2209).
+// `.omp` agent root에 같은 파일이 없으면 OMP host의 multi-review는 kit이 만들지
+// 않은 파일을 reviewer로 띄운다. 본문 source는 `.claude/agents` 한 벌뿐이다 —
+// kit에 세 번째 사본을 두면 셋을 맞추는 검사가 또 필요해진다.
+//
+// source는 kit이 아니라 **설치된** `.claude/agents`다. kit을 읽으면 사용자가
+// `.claude/agents`를 고친 프로젝트에서 Claude host는 사용자본, OMP host는 번들본을
+// 보게 된다 — 같은 프로젝트에서 host마다 리뷰 기준이 갈리는 것이 이 버그의 실체다.
+//
+// `copyDir`을 쓰지 않는다. 이 파일은 통째로 생성된 내용이라 "내용이 다르면 사용자
+// 편집으로 보고 건너뛴다"를 걸면 업그레이드가 정의상 내용이 다른 경우라 영구히
+// 고착된다 — installOmpHooks와 같은 이유, 같은 처리다.
+function installOmpAgents(root) {
+  const source = path.join(root, ".claude", "agents");
+  if (!fs.existsSync(source)) {
+    return false;
+  }
+  const dest = path.join(root, ".omp", "agents");
+  ensureDir(dest);
+  let wrote = false;
+  for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+    if (!entry.isFile()) {
+      continue;
+    }
+    const content = fs.readFileSync(path.join(source, entry.name), "utf8");
+    const target = path.join(dest, entry.name);
+    backupIfDifferent(root, target, content);
+    wrote = writeFileIfMissingOrSame(target, content, true) || wrote;
+  }
+  return wrote;
+}
+
 function installOmpHooks(root) {
   // 다른 host의 hook 설정은 병합이라 업그레이드가 저절로 되지만, 이 확장은
   // 통째로 kit이 만든 파일이다. "내용이 다르면 덮지 않는다"만 걸어 두면
@@ -1181,6 +1213,7 @@ function install() {
     true,
     FORCE_MANAGED,
   );
+  const ompAgentsCopied = installOmpAgents(PROJECT);
   const contextRulesCopied = copyDir(
     path.join(KIT_ROOT, ".Codex", "rules", "context"),
     path.join(PROJECT, ".Codex", "rules", "context"),
@@ -1259,6 +1292,7 @@ function install() {
     templates_copied: templatesCopied,
     codex_agents_copied: codexAgentsCopied,
     claude_agents_copied: claudeAgentsCopied,
+    omp_agents_copied: ompAgentsCopied,
     codex_hooks_copied: codexHooksCopied,
     omp_hooks_copied: ompHooksCopied,
     context_tree_copied: contextTreeCopied,

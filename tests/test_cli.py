@@ -5,6 +5,7 @@ import hashlib
 import functools
 import io
 import os
+import re
 import site
 import shlex
 import shutil
@@ -84,6 +85,11 @@ def _strip_markdown_frontmatter(text: str) -> str:
         return text
     end = text.find("\n---\n", 4)
     return text if end == -1 else text[end + len("\n---\n") :].lstrip("\n")
+
+
+def _is_installer_backup(name: str) -> bool:
+    """`backupIfDifferent`(lib/installer-shared.mjs)가 남기는 사본 이름."""
+    return re.search(r"\.bak(\.\d+)?$", name) is not None
 
 
 
@@ -1861,6 +1867,14 @@ class CliTest(unittest.TestCase):
             )
             self.assertEqual(code_reviewer, _strip_markdown_frontmatter(claude_code_reviewer))
             self.assertIn("name: code-reviewer", claude_code_reviewer)
+            # omp는 `.claude/agents`를 더 이상 subagent로 읽지 않는다(oh-my-pi #2209).
+            # 이 자리가 비면 OMP host의 multi-review는 kit이 만들지 않은 아무 파일이나
+            # reviewer로 띄운다.
+            self.assertTrue((project_root / ".omp" / "agents" / "code-reviewer.md").is_file())
+            omp_code_reviewer = (project_root / ".omp" / "agents" / "code-reviewer.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertEqual(claude_code_reviewer, omp_code_reviewer)
             self.assertTrue((project_root / ".Codex" / "context" / "tree.jsonl").is_file())
             self.assertIn("verdict: approve | request-changes", code_reviewer)
             self.assertIn("project-local-skills: checked|n/a", code_reviewer)
@@ -3773,6 +3787,107 @@ design-values-confirmed: n/a
                     )
                     self.assertEqual(codex_reviewer, _strip_markdown_frontmatter(claude_reviewer))
                     self.assertIn("name: code-reviewer", claude_reviewer)
+                    omp_reviewer = (project_root / ".omp" / "agents" / "code-reviewer.md").read_text(
+                        encoding="utf-8"
+                    )
+                    self.assertEqual(claude_reviewer, omp_reviewer)
+                    # 파일 하나만 대조하면 `.claude/agents`에 agent가 하나 늘 때
+                    # `.omp` 쪽 누락을 못 잡는다.
+                    claude_agents = {
+                        entry.name: entry.read_text(encoding="utf-8")
+                        for entry in sorted((project_root / ".claude" / "agents").iterdir())
+                        if entry.is_file()
+                    }
+                    omp_agents = {
+                        entry.name: entry.read_text(encoding="utf-8")
+                        for entry in sorted((project_root / ".omp" / "agents").iterdir())
+                        if entry.is_file() and not _is_installer_backup(entry.name)
+                    }
+                    self.assertEqual(claude_agents, omp_agents)
+
+    def test_node_installers_replace_stale_omp_reviewer_agent(self) -> None:
+        """설치 전에 있던 다른 내용은 백업 뒤 교체한다.
+
+        omp가 `.claude/agents`를 읽던 시절의 사본이 그 자리에 남아 있는 것이
+        이 회귀의 실체다. "다르면 사용자 편집으로 보고 건너뛴다"를 걸면 그 사본이
+        영구히 남아 OMP host만 옛 reviewer 기준으로 리뷰한다.
+        """
+        installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
+        stale = "---\nname: code-reviewer\ndescription: stale\n---\n\n# 옛 사본\n"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            node = _node_executable()
+            for installer_name in installers:
+                with self.subTest(installer=installer_name):
+                    project_root = root / f"{installer_name}-stale-omp-agent"
+                    stale_agent = project_root / ".omp" / "agents" / "code-reviewer.md"
+                    stale_agent.parent.mkdir(parents=True)
+                    stale_agent.write_text(stale, encoding="utf-8")
+                    result = subprocess.run(
+                        (
+                            node,
+                            str(Path(__file__).resolve().parents[1] / "bin" / installer_name),
+                            "install",
+                        ),
+                        cwd=project_root,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    claude_reviewer = (project_root / ".claude" / "agents" / "code-reviewer.md").read_text(
+                        encoding="utf-8"
+                    )
+                    self.assertEqual(claude_reviewer, stale_agent.read_text(encoding="utf-8"))
+                    backups = [
+                        entry
+                        for entry in stale_agent.parent.iterdir()
+                        if entry.is_file() and _is_installer_backup(entry.name)
+                    ]
+                    self.assertEqual([entry.read_text(encoding="utf-8") for entry in backups], [stale])
+
+    def test_node_installers_mirror_user_edited_claude_reviewer_to_omp(self) -> None:
+        """`.omp/agents`는 kit이 아니라 설치된 `.claude/agents`를 따라간다.
+
+        kit을 source로 삼으면 `.claude/agents`를 고친 프로젝트에서 Claude host는
+        사용자본, OMP host는 번들본을 보게 된다. host마다 리뷰 기준이 갈리는 것이
+        이 회귀가 막으려는 것이라, 같은 갈림을 여기서 다시 만들면 안 된다.
+        """
+        installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            node = _node_executable()
+            installer_args = ("install",)
+            for installer_name in installers:
+                with self.subTest(installer=installer_name):
+                    project_root = root / f"{installer_name}-user-edited-reviewer"
+                    project_root.mkdir()
+                    installer = str(Path(__file__).resolve().parents[1] / "bin" / installer_name)
+                    first = subprocess.run(
+                        (node, installer, *installer_args),
+                        cwd=project_root,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(first.returncode, 0, first.stderr)
+
+                    claude_agent = project_root / ".claude" / "agents" / "code-reviewer.md"
+                    edited = f"{claude_agent.read_text(encoding='utf-8')}\n프로젝트 규칙 한 줄.\n"
+                    claude_agent.write_text(edited, encoding="utf-8")
+                    second = subprocess.run(
+                        (node, installer, *installer_args),
+                        cwd=project_root,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(second.returncode, 0, second.stderr)
+
+                    self.assertEqual(edited, claude_agent.read_text(encoding="utf-8"))
+                    omp_agent = project_root / ".omp" / "agents" / "code-reviewer.md"
+                    self.assertEqual(edited, omp_agent.read_text(encoding="utf-8"))
 
     def test_node_installers_omp_hook_syncs_root_context_files(self) -> None:
         installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
