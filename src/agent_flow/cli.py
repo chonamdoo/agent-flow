@@ -1258,7 +1258,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.worktree_command == "sync-host-hooks":
             try:
-                provision_registered_worktree_host_hooks(root=root)
+                synced = provision_registered_worktree_host_hooks(root=root)
             except (
                 OSError,
                 ValueError,
@@ -1267,6 +1267,13 @@ def main(argv: list[str] | None = None) -> int:
             ) as exc:
                 print(_format_cli_error(exc), file=sys.stderr)
                 return 2
+            # install이 이 명령을 호출하는 유일한 자리다(`lib/installer-shared.mjs`).
+            # hook만 맞추고 선언된 머신 설정을 빼면, agent-flow가 만들지 않은
+            # checkout(Orca workspace, 손으로 만든 worktree)은 `local.properties`가
+            # 없어서 빌드가 leader에서만 된다. 같은 sweep에서 함께 채운다.
+            _sync_declared_worktree_files(
+                root=root, checkouts=tuple(checkout for checkout, _ in synced)
+            )
             return 0
         if args.worktree_command == "status":
             try:
@@ -2657,6 +2664,59 @@ def _apply_worktree_setup(*, root: Path, checkout: Path) -> None:
                 file=sys.stderr,
             )
     _run_worktree_setup_actions(root=root, checkout=checkout, profile=profile)
+
+
+def _sync_declared_worktree_files(
+    *, root: Path, checkouts: tuple[Path, ...]
+) -> None:
+    """이미 등록된 checkout들에 선언된 머신 설정을 채운다.
+
+    `_apply_worktree_setup`은 agent-flow가 checkout을 만들거나 붙일 때만 돈다. 그
+    경로를 지나지 않은 worktree는 `local.properties` 같은 gitignored 설정이 계속
+    없어서, 빌드가 leader에서만 되는 상태로 남는다. install이 hook을 맞추러 등록
+    목록을 훑을 때 같이 채운다.
+
+    소유가 증명된 checkout만 대상이다 — 대상 목록을 만드는
+    `provision_registered_worktree_host_hooks`가 managed/adopted만 돌려준다.
+    등록만으로 쓰면 워커가 `git worktree add`로 자기 자리를 만들어 leader의 설정을
+    받아 갈 수 있다.
+
+    이미 있는 파일은 `copy_declared_worktree_files`가 건드리지 않는다. 실패는 알리고
+    넘어간다 — 설정 하나 때문에 install을 되돌릴 이유가 없다.
+    """
+    if not checkouts:
+        return
+    try:
+        _profile_id, profile = _load_profile(_find_kit_root(), root)
+        declared = [str(name) for name in _declared_worktree_copies(profile)]
+    except Exception as exc:  # profile 해석 실패가 install을 막을 이유는 없다
+        print(
+            f"warning: skipped worktree config sync: {_format_cli_error(exc)}",
+            file=sys.stderr,
+        )
+        return
+    if not declared:
+        return
+    for checkout in checkouts:
+        try:
+            copied = copy_declared_worktree_files(
+                leader=root, checkout=checkout, names=declared
+            )
+        except (ValueError, OSError) as exc:
+            print(
+                f"warning: worktree config sync failed for {checkout}: "
+                f"{_format_cli_error(exc)}",
+                file=sys.stderr,
+            )
+            continue
+        if copied:
+            # stderr로 낸다. install이 이 명령을 자식 프로세스로 돌리면서 stdout은
+            # 버리고 stderr만 사용자에게 전달한다(`lib/installer-shared.mjs`) —
+            # stdout에 쓰면 무엇이 채워졌는지 아무도 못 본다.
+            print(
+                f"worktree config copied into {checkout}: {', '.join(copied)}",
+                file=sys.stderr,
+            )
 
 
 def _declared_worktree_actions(profile: dict) -> dict:
