@@ -308,6 +308,31 @@ def test_reinstall_backfills_declared_config_into_registered_checkouts(tmp_path:
     assert (edited / "local.properties").read_text(encoding="utf-8") == "sdk.dir=/opt/mine\n"
 
 
+def test_reinstall_does_not_backfill_config_into_unowned_checkouts(tmp_path: Path):
+    """불변: 등록만으로는 leader 설정을 받아 가지 못한다.
+
+    이 sweep이 등록 목록만 보고 복사하면, 워커가 `git worktree add`로 자기 자리를
+    만들어 leader의 `local.properties`(SDK 경로, 서명 키 경로 같은 머신 설정)를
+    받아 갈 수 있다. 대상은 소유가 증명된 managed/adopted checkout뿐이다.
+    """
+    from agent_flow.cli import main as cli_main
+
+    leader = tmp_path / "leader"
+    _leader_with_host_hooks(leader)
+    (leader / ".agent-flow" / "kit.json").write_text(
+        json.dumps({"kit": "agent-flow", "profile": "android"}), encoding="utf-8"
+    )
+    (leader / "local.properties").write_text("sdk.dir=/opt/leader\n", encoding="utf-8")
+    # managed 자리(`.agent-flow/worktrees/`) 밖이고 adopt한 적도 없다. git에는
+    # 정상 등록돼 있으므로 등록 목록만 보는 구현은 이것도 대상으로 삼는다.
+    outsider = tmp_path / "outsider"
+    _git("worktree", "add", "-b", "feat/outsider", str(outsider), "HEAD", cwd=leader)
+
+    assert cli_main(["worktree", "sync-host-hooks", "--root", str(leader)]) == 0
+
+    assert not (outsider / "local.properties").exists()
+
+
 @pytest.mark.parametrize(
     ("registration_identity", "checkout_identity", "message"),
     [
