@@ -330,8 +330,12 @@ def _validate_project_profile_override_shape(
     architecture = override.get("architecture")
     if "architecture" in override and not isinstance(architecture, dict):
         raise ValueError(f"profile override architecture must be a mapping: {source}")
+    has_roles = isinstance(architecture, dict) and "roles" in architecture
     roles = architecture.get("roles") if isinstance(architecture, dict) else None
-    if roles is not None and (
+    # 키가 있으면서 값이 없는 `roles:`도 거부한다. `None`을 "선언 안 함"으로 접으면
+    # `_deep_merge`가 배포본 role 표를 `None`으로 갈아 끼우고, `lint_project`는
+    # roles가 list가 아니면 finding 0개를 돌려준다 — 오타 한 줄이 필수 gate를 끈다.
+    if has_roles and (
         not isinstance(roles, list) or not all(isinstance(role, dict) for role in roles)
     ):
         raise ValueError(

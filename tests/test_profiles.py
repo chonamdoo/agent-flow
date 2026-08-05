@@ -573,6 +573,9 @@ def test_override_lists_replace_instead_of_appending(tmp_path):
         "architecture: android\n",
         "architecture:\n  roles: core-domain\n",
         "architecture:\n  roles:\n    - core-domain\n",
+        # 키가 있고 값이 없는 경우. `None`을 "선언 안 함"으로 접으면 배포본 표가
+        # `None`으로 교체되고 lint가 finding 0개를 돌려준다.
+        "architecture:\n  roles:\n",
     ],
 )
 def test_override_rejects_an_architecture_shape_the_lint_would_drop(tmp_path, body):
