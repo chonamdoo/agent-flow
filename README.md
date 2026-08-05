@@ -106,8 +106,10 @@ agent-flow-new/
 ```
 design → slice-plan → ═══ pause ═══
        → worktree → implement (TDD red→green→refactor inside, per slice)
+       → comment-authoring
        → final-review (multi_review: true — fans out across the Claude/Codex reviewer pool)
-       → fix-loop → commit → push-pr → pr-watch → merge → cleanup
+       → gates ↔ fix-loop → comment-authoring → final-review → gates
+       → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge → cleanup
 ```
 
 The AI collapses or expands phases per task. A 1-line fix may produce a single-question interview, a one-paragraph design, and a one-slice plan; a feature deepens every phase.

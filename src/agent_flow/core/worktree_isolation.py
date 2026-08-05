@@ -24,6 +24,7 @@ except ModuleNotFoundError:
 import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 import tempfile
@@ -31,6 +32,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Iterator, Literal, Optional, Sequence, TypeVar
 
 from agent_flow.core.commands import run_safe_command
@@ -1281,26 +1283,6 @@ _RUNTIME_WRITE_PATHS = tuple(
 # Finder가 checkout을 열어 둔 것만으로 비결정적으로 갱신한다. 프로젝트 동작이나
 # 실행 표면을 바꾸지 않는 이 basename만 status와 tracked digest 양쪽에서 뺀다.
 _AMBIENT_METADATA_BASENAMES = (".DS_Store",)
-# 심층 스캔에 함께 넣는 **실행 표면**. 다음 phase가 실제로 실행하는 바이너리와
-# host의 hook 등록 파일이다. `--ignored=matching`은 ignore된 디렉터리를 한 줄로
-# 접어서 그 안쪽 교체가 통째로 안 보인다. 실측 BLIND였던 자리를 그대로 편다:
-# `.venv/bin/agent-flow` 덮어쓰기, `node_modules/.bin/*`, `.claude/hooks/pre.sh`.
-#
-# 전면 확대가 아니라 화이트리스트인 이유는 성능이다. `node_modules` 전체를
-# phase당 두 번 해시하면 tripwire가 런보다 비싸진다.
-#
-# host hook 등록 파일을 빼면 안 된다 — 워커가 leader의 `.claude/settings.json`을
-# 갈아끼워 **다음 phase의 권한 판정 자리 자체**를 무탐지로 바꿀 수 있다.
-# 런 *시작 전*의 오염은 이걸로 안 보인다. 그건 `hook_integrity`가 본다.
-_EXEC_SURFACE_PATHS = (
-    ".venv/bin",
-    "node_modules/.bin",
-    ".claude/settings.json",
-    ".claude/hooks",
-    ".Codex/hooks.json",
-    ".codex/hooks.json",
-    ".omp/extensions",
-)
 _TRIPWIRE_TIMEOUT_S = 120
 # porcelain v1 상태 문자. 레코드 앞 두 글자가 전부 여기 속할 때만 경로 접두어로 본다.
 _STATUS_CODES = frozenset(" MADRCUT?!")
@@ -1556,7 +1538,11 @@ def assert_leader_unchanged(
     worker_root: Path | None = None,
     include_ignored: bool = True,
 ) -> None:
-    """워커가 leader를 건드리지 않았는지 검증한다. **아무것도 바꾸지 않는다.**
+    """워커가 leader를 건드리지 않았는지 검증한다.
+
+    **working tree와 ref는 바꾸지 않는다.** `.git/agent-flow/` 런타임 영역에는
+    stamp 캐시를 쓴다(`_content_stamps`) — 그 자리는 `git status`가 보지 않으므로
+    판정 대상 자체를 흔들지 않는다.
 
     불변식은 "leader가 비트 단위로 그대로"가 아니라 "이 런이 leader를 건드리지
     않았다"이다. 그래서 working tree는 등호로 보고, HEAD 이동은 leader 자신의
@@ -1633,26 +1619,247 @@ def _leader_status(leader_root, *, include_ignored: bool = True) -> str:
     lines = [record for record, _ in kept]
     lines.append(f"tracked-content {_tracked_content_digest(leader_root)}")
     seen = {path for _, path in kept}
-    for _, path in kept:
-        stamp = _path_content_stamp(leader_root, path)
-        if stamp:
-            lines.append(stamp)
+    watched = [path for _, path in kept]
     # status와 diff가 **둘 다** 침묵하는 경로들. 여기서 직접 해시하지 않으면 그
     # 파일에 대한 쓰기는 어느 신호에도 남지 않는다(실측: 두 출력 모두 빈 문자열).
     # 전수 해시한다. 상한을 두면 그 뒤로 밀린 파일의 내용 변경이 영구히 안 보이고,
-    # 그것은 탐지 실패 중 최악인 조용한 미탐지다. 비용 근거도 없다 — 실측으로
-    # tracked 3000개 전수 sha256이 58ms로, 이미 매 스냅샷마다 도는 `git status`
-    # 한 번(60ms)보다 싸다. 표시가 없는 저장소에서는 이 순회가 0회다.
-    unwatched = [path for path in _index_flagged_paths(leader_root) if path not in seen]
-    for path in unwatched:
-        if not _path_is_present(leader_root, path):
-            # sparse checkout은 제외 파일 전부를 표시한다. 디스크에 없는 경로는
-            # leader의 내용이 아니므로 스냅샷에 넣지 않는다.
-            continue
-        stamp = _path_content_stamp(leader_root, path)
-        if stamp:
-            lines.append(f"unwatched {stamp}")
+    # 그것은 탐지 실패 중 최악인 조용한 미탐지다. 표시가 없는 저장소에서는 이
+    # 순회가 0회다.
+    #
+    # 비용은 대상 개수가 아니라 **총 바이트**에 비례한다(실측: 5000개 × 512KB =
+    # 2.5GB에 1.99초, `git status` 자체는 0.02초로 상수). Android leader처럼
+    # `build/`, `.gradle/`가 `--ignored=traditional`로 펼쳐지면 대상이 수십만 개가
+    # 되고, 그것을 phase마다 두 번(baseline 캡처 + drift 검사) 돌면 `continue` 한
+    # 번이 수십 초가 된다. 그래서 캡 대신 **다시 읽지 않는다**: `_content_stamps`가
+    # inode 신원으로 캐시하고 미스만 병렬로 해시한다. 대상 집합도 탐지력도 그대로다.
+    unwatched = [
+        path
+        for path in _index_flagged_paths(leader_root)
+        # sparse checkout은 제외 파일 전부를 표시한다. 디스크에 없는 경로는
+        # leader의 내용이 아니므로 스냅샷에 넣지 않는다.
+        if path not in seen and _path_is_present(leader_root, path)
+    ]
+    # 두 목록을 한 번에 넘긴다. 나눠 부르면 뒤 호출의 저장이 앞 호출이 채운 항목을
+    # "이번 sweep에서 못 봤다"고 판단해 지워버린다.
+    stamps = _content_stamps(
+        leader_root, watched + unwatched, cached=include_ignored
+    )
+    lines.extend(stamp for stamp in stamps[: len(watched)] if stamp)
+    lines.extend(
+        f"unwatched {stamp}" for stamp in stamps[len(watched) :] if stamp
+    )
     return "\n".join(lines)
+
+
+_STAMP_CACHE_VERSION = 1
+_STAMP_DIGEST_TEXT = re.compile(r"[0-9a-f]{16}")
+# leader별 ctime 신뢰성 판정 결과. 프로세스당 한 번만 실측한다.
+_STAMP_CACHE_TRUST: dict[str, bool] = {}
+_STAMP_CACHE_TRUST_LOCK = threading.Lock()
+# 이 개수 아래로는 스레드풀을 만들지 않는다. 풀 생성 비용이 해싱보다 비싸지는
+# 구간이고, `host_write_boundary`를 통해 도구 호출마다 도는 경로가 여기 속한다.
+_STAMP_PARALLEL_THRESHOLD = 32
+
+
+def _stamp_cache_path(leader_root) -> Path | None:
+    """캐시 자리. leader의 `.git`이 디렉터리가 아니면 캐싱을 포기한다.
+
+    `.git/` 아래는 `git status`가 절대 보고하지 않으므로 캐시 자체가 스냅샷을
+    흔들지 않는다. 신뢰 구역은 host-session binding·worktree routing state와 같다.
+    이 캐시를 위조할 수 있는 주체는 그 파일들과 baseline이 담긴 run `meta.json`도
+    똑같이 쓸 수 있으므로, 새로 열리는 노출 등급은 없다.
+    """
+    git_dir = Path(leader_root) / ".git"
+    try:
+        if not git_dir.is_dir():
+            return None
+    except OSError:
+        return None
+    return git_dir / "agent-flow" / "tripwire-stamp-cache.json"
+
+
+def _ctime_reveals_restored_mtime(directory: Path) -> bool:
+    """이 파일시스템에서 ``st_ctime_ns``가 mtime 복원 교체를 드러내는가.
+
+    캐시의 탐지력이 전적으로 여기 걸려 있다. 전제가 깨지는 자리가 실제로 있다:
+    Windows의 ``st_ctime``은 **생성 시각**이라 재작성해도 그대로고, 타임스탬프
+    granularity가 1초인 파일시스템에서는 같은 초 안의 교체가 identity 동일이 된다.
+    두 경우 모두 캐시 적중으로 둔갑해
+    ``test_tripwire_detects_arbitrary_ignored_rewrite_with_restored_mtime``이 못 박은
+    공격이 조용히 통과한다 — 전수 해시하던 원본 대비 **탐지 회귀**다.
+
+    그래서 추론하지 않고 그 공격을 그대로 재연해 본다. 통과하지 못하면 이 leader에
+    대해 캐싱을 끈다. 잃는 것은 성능뿐이다.
+    """
+    probe = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=str(directory), delete=False
+        ) as handle:
+            probe = Path(handle.name)
+            handle.write(b"aaaaaa")
+        before = probe.stat()
+        probe.write_bytes(b"bbbbbb")  # 같은 크기로 내용 교체
+        os.utime(probe, ns=(before.st_atime_ns, before.st_mtime_ns))
+        after = probe.stat()
+        return (
+            after.st_size == before.st_size
+            and after.st_mtime_ns == before.st_mtime_ns
+            and after.st_ctime_ns != before.st_ctime_ns
+        )
+    except OSError:
+        return False
+    finally:
+        if probe is not None:
+            with contextlib.suppress(OSError):
+                probe.unlink()
+
+
+def _stamp_cache_dir(leader_root) -> tuple[Path, int] | None:
+    """캐시를 쓸 수 있고 믿을 수 있는 디렉터리와, 그 판정이 유효한 device.
+
+    `.git`이 파일인 leader(`--separate-git-dir`)에서는 `_stamp_cache_path`가
+    ``None``을 내므로 캐싱이 통째로 꺼진다 — 그 저장소만 여전히 전수 해시로 돈다.
+
+    device를 함께 돌려주는 이유는 probe의 유효 범위 때문이다. probe는 이 디렉터리
+    한 곳에서만 도는데 `git status --ignored=traditional`은 마운트 경계에서 멈추지
+    않는다. `<leader>/build`가 다른 볼륨이면 그 볼륨의 ``st_ctime`` 의미가 달라도
+    probe는 그것을 보지 못한다 — 한 device의 판정을 다른 device로 일반화하는 것이
+    바로 이 함수가 피하려는 추론이다.
+    """
+    path = _stamp_cache_path(leader_root)
+    if path is None:
+        return None
+    directory = path.parent
+    try:
+        # 신뢰 구역 디렉터리다. `host_write_boundary._binding_dir`가 같은 부모를
+        # `0o700`으로 만든다 — 여기서 먼저 만들면서 umask 기본값(`0o755`)으로 두면,
+        # 그쪽은 이미 존재하는 디렉터리의 모드를 고치지 않으므로 영구히 느슨해진다.
+        # `mkdir(mode=...)`는 umask에 깎이므로 `chmod`로 확정한다.
+        directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+        directory.chmod(0o700)
+        device = directory.stat().st_dev
+    except OSError:
+        return None
+    key = str(directory)
+    with _STAMP_CACHE_TRUST_LOCK:
+        trusted = _STAMP_CACHE_TRUST.get(key)
+        if trusted is None:
+            # 두 번 재연해 둘 다 통과할 때만 믿는다. granularity가 1초인
+            # 파일시스템에서 write와 `utime`이 초 경계를 걸치면 한 번은 우연히
+            # 통과할 수 있다.
+            trusted = all(
+                _ctime_reveals_restored_mtime(directory) for _ in range(2)
+            )
+            _STAMP_CACHE_TRUST[key] = trusted
+    return (directory, device) if trusted else None
+
+
+def _load_stamp_cache(leader_root) -> dict:
+    """저장된 항목. 형식이 다르거나 깨졌으면 빈 것으로 본다.
+
+    버전 키가 필요한 이유는 결정성이다. digest 절단 길이(`[:16]`)나 엔트리 스키마가
+    바뀐 뒤 낡은 항목이 섞이면 같은 leader의 스냅샷 문자열이 **캐시 온도에 따라**
+    달라져서, baseline과 검사가 서로 다른 형식을 보게 된다. chunk 크기는 여기 속하지
+    않는다 — sha256은 chunk 경계와 무관하게 같은 digest를 낸다.
+    """
+    path = _stamp_cache_path(leader_root)
+    if path is None:
+        return {}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError):
+        # 캐시는 성능 장치다. 깨졌으면 없는 것으로 보고 다시 해시한다 — 여기서
+        # 실패를 올리면 탐지와 무관한 이유로 run이 멈춘다.
+        return {}
+    if not isinstance(loaded, dict) or loaded.get("v") != _STAMP_CACHE_VERSION:
+        return {}
+    entries = loaded.get("entries")
+    return entries if isinstance(entries, dict) else {}
+
+
+def _save_stamp_cache(leader_root, entries: dict, keep: set[str]) -> None:
+    """이번 sweep에서 본 경로만 남겨 다시 쓴다. **전수 sweep에서만 부른다.**
+
+    지워진 파일의 항목을 남기면 캐시가 단조 증가해서, 결국 그것을 읽고 쓰는 비용이
+    아끼려던 해싱 비용 자리를 대신 차지한다. 반대로 부분 sweep
+    (``include_ignored=False``)에서 같은 prune을 돌리면 ignored 항목이 통째로
+    날아가 다음 전수 sweep이 다시 cold가 된다 — 그 경로는 도구 호출마다 도므로
+    사실상 캐시가 없는 것과 같아진다. 그래서 저장은 전수 sweep에만 준다.
+
+    저장 직전에 디스크를 다시 읽어 병합한다. 같은 leader에서 sweep이 겹쳐 돌 때
+    나중 쓰기가 앞의 항목을 통째로 덮는 것을 줄인다. 그래도 남는 경합의 대가는
+    재해시뿐이라 탐지에는 영향이 없다.
+    """
+    resolved = _stamp_cache_dir(leader_root)
+    path = _stamp_cache_path(leader_root)
+    if resolved is None or path is None:
+        return
+    directory, _device = resolved
+    merged = {**_load_stamp_cache(leader_root), **entries}
+    pruned = {key: value for key, value in merged.items() if key in keep}
+    staged = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=str(directory), delete=False
+        ) as handle:
+            staged = Path(handle.name)
+            json.dump({"v": _STAMP_CACHE_VERSION, "entries": pruned}, handle)
+        # 부분 기록이 보이면 다음 읽기가 통째로 버리므로 원자적으로 갈아끼운다.
+        os.replace(staged, path)
+        staged = None
+    except OSError:
+        return
+    finally:
+        # `os.replace`가 실패하면 임시 파일이 그대로 남는다. 이 경로가 phase마다
+        # 도는 자리라 지우지 않으면 `.git/agent-flow/`에 계속 쌓인다.
+        if staged is not None:
+            with contextlib.suppress(OSError):
+                staged.unlink()
+
+
+def _content_stamps(
+    leader_root, relatives: Sequence[str], *, cached: bool
+) -> list[str]:
+    """`relatives`의 stamp 줄을 입력 순서 그대로 돌려준다.
+
+    캐시 미스만 해시하고, 그 해싱을 병렬로 돌린다. `hashlib`과 파일 읽기는 GIL을
+    놓으므로 스레드로 실제 병렬이 된다 — 첫 sweep(캐시가 빈 상태)도 코어 수만큼
+    빨라진다. 순서는 `map`이 보장하므로 스냅샷 문자열은 결정적이다. 공유 `cache`
+    dict에 락을 걸지 않는 것은 CPython의 dict 연산이 원자적이고 키가 경로별로
+    갈리기 때문이다 — free-threaded 런타임에서는 이 근거가 사라진다.
+
+    `cached=False`는 부분 sweep(`include_ignored=False`)이다. 캐시를 아예 열지
+    않는다. 그 sweep의 대상은 ignored를 뺀 몇 개뿐이라 캐시로 아낄 것이 없는 반면,
+    `host_write_boundary`를 통해 **도구 호출마다** 돌기 때문에 파일을 여는 것 자체가
+    비용이다 — 실측으로 76만 항목 캐시는 76.6MB이고 읽는 데만 0.29초다.
+    """
+    resolved = _stamp_cache_dir(leader_root) if cached else None
+    cache: dict | None = None
+    device: int | None = None
+    if resolved is not None:
+        _directory, device = resolved
+        cache = _load_stamp_cache(leader_root)
+    if len(relatives) >= _STAMP_PARALLEL_THRESHOLD:
+        with ThreadPoolExecutor(
+            max_workers=min(8, (os.cpu_count() or 4))
+        ) as pool:
+            stamps = list(
+                pool.map(
+                    lambda relative: _path_content_stamp(
+                        leader_root, relative, cache, device
+                    ),
+                    relatives,
+                )
+            )
+    else:
+        stamps = [
+            _path_content_stamp(leader_root, relative, cache, device)
+            for relative in relatives
+        ]
+    if cache is not None:
+        _save_stamp_cache(leader_root, cache, set(relatives))
+    return stamps
 
 
 def _index_flagged_paths(leader_root) -> tuple[str, ...]:
@@ -1752,7 +1959,27 @@ def _tracked_content_digest(leader_root) -> str:
     return hashlib.sha256(result.stdout.encode("utf-8", "replace")).hexdigest()[:16]
 
 
-def _path_content_stamp(leader_root, relative: str) -> str:
+def _stamp_identity(info) -> str:
+    """이 파일이 "그대로"인지 판정하는 키.
+
+    `ctime_ns`가 들어가는 것이 핵심이다. mtime만 쓰면
+    `test_tripwire_detects_arbitrary_ignored_rewrite_with_restored_mtime`이 못 박은
+    공격 — 같은 크기로 내용을 갈아치우고 `os.utime`으로 mtime을 되돌리는 것 — 이
+    캐시 적중으로 둔갑해 조용히 통과한다. `ctime`은 유저스페이스가 되돌릴 수 없어서
+    그 교체를 드러낸다(실측: 같은 크기 재작성 + mtime 복원 뒤 `st_ctime_ns`가 바뀐다).
+    """
+    return (
+        f"{info.st_dev}:{info.st_ino}:{info.st_size}"
+        f":{info.st_mtime_ns}:{info.st_ctime_ns}"
+    )
+
+
+def _path_content_stamp(
+    leader_root,
+    relative: str,
+    cache: dict | None = None,
+    cache_device: int | None = None,
+) -> str:
     """untracked/ignored 파일의 내용 지표. 디렉터리 레코드는 건너뛴다.
 
     mtime이 아니라 내용을 해시한다. ``lstat``을 쓰는 이유는 파일을 같은 내용의
@@ -1769,10 +1996,30 @@ def _path_content_stamp(leader_root, relative: str) -> str:
             return f"stamp {relative} symlink {os.readlink(target)}"
         if not stat.S_ISREG(info.st_mode):
             return ""
+        identity = _stamp_identity(info)
+        # probe한 device에서만 캐시를 인정한다. 다른 볼륨은 `st_ctime` 의미가
+        # 달라도 probe가 그것을 보지 못했으므로, 적중을 주면 mtime 복원 교체가
+        # 조용히 통과한다.
+        usable = cache is not None and info.st_dev == cache_device
+        cached = cache.get(relative) if usable else None
+        if (
+            isinstance(cached, list)
+            and len(cached) == 2
+            and cached[0] == identity
+            # digest도 형식 계약 안에 있다. 개행이 섞이면 stamp 한 줄이 여러 줄로
+            # 쪼개져 `LeaderSnapshot.records()`가 가짜 record를 읽는다.
+            and _STAMP_DIGEST_TEXT.fullmatch(str(cached[1]))
+        ):
+            # 내용을 다시 읽지 않는다. 이 경로가 이 sweep 비용의 전부다 — Android
+            # leader의 `build/`처럼 phase 사이에 아무도 건드리지 않는 수십만 파일을
+            # 매번 전수 해시하고 있었다(실측: 2.5GB에 2초, phase당 두 번).
+            return f"stamp {relative} {info.st_size} {cached[1]}"
         digest = hashlib.sha256()
         with target.open("rb") as handle:
             for chunk in iter(lambda: handle.read(_STAMP_CHUNK_BYTES), b""):
                 digest.update(chunk)
+        if usable:
+            cache[relative] = [identity, digest.hexdigest()[:16]]
     except OSError:
         # ""를 돌려주면 이 파일의 stamp 줄이 통째로 빠져 내용 변화가 영구히 안
         # 보인다. sentinel은 결정적이라 unreadable이 유지되는 동안 오탐이 없고,

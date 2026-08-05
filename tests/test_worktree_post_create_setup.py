@@ -275,6 +275,64 @@ def test_registered_managed_checkout_gets_host_hooks_on_reinstall(tmp_path: Path
         assert (checkout / rel).read_bytes() == payload
 
 
+def test_reinstall_backfills_declared_config_into_registered_checkouts(tmp_path: Path):
+    """반증: 밖에서 만들어진 worktree는 복사 경로를 지나지 않아 영원히 설정이 없다.
+
+    `_apply_worktree_setup`은 agent-flow가 checkout을 만들거나 붙일 때만 돈다. Orca
+    workspace나 손으로 만든 `git worktree add`는 그 경로를 지나지 않으므로
+    `local.properties`가 없고, 빌드가 leader에서만 된다. install이 hook을 맞추러 등록
+    목록을 훑는 그 sweep에서 같이 채워야 한다.
+
+    이미 있는 파일은 덮지 않는다 — worktree 안에서 고친 SDK 경로가 조용히 사라지면
+    복사가 도움이 아니라 사고다.
+    """
+    from agent_flow.cli import main as cli_main
+
+    leader = tmp_path / "leader"
+    _leader_with_host_hooks(leader)
+    # 이 sweep은 install이 부르는 자리다. profile은 설치본 `kit.json`이 정하므로
+    # (`_load_profile`), 감지만으로는 android 선언이 붙지 않는다.
+    (leader / ".agent-flow" / "kit.json").write_text(
+        json.dumps({"kit": "agent-flow", "profile": "android"}), encoding="utf-8"
+    )
+    (leader / "local.properties").write_text("sdk.dir=/opt/leader\n", encoding="utf-8")
+    fresh = _managed_checkout(leader, "feat-fresh")
+    edited = _managed_checkout(leader, "feat-edited")
+    (edited / "local.properties").write_text("sdk.dir=/opt/mine\n", encoding="utf-8")
+
+    # 함수가 아니라 install이 실제로 치는 명령을 몬다. 빠져 있던 것이 함수가 아니라
+    # 이 sweep에서 그 함수를 부르는 자리였다.
+    assert cli_main(["worktree", "sync-host-hooks", "--root", str(leader)]) == 0
+
+    assert (fresh / "local.properties").read_text(encoding="utf-8") == "sdk.dir=/opt/leader\n"
+    assert (edited / "local.properties").read_text(encoding="utf-8") == "sdk.dir=/opt/mine\n"
+
+
+def test_reinstall_does_not_backfill_config_into_unowned_checkouts(tmp_path: Path):
+    """불변: 등록만으로는 leader 설정을 받아 가지 못한다.
+
+    이 sweep이 등록 목록만 보고 복사하면, 워커가 `git worktree add`로 자기 자리를
+    만들어 leader의 `local.properties`(SDK 경로, 서명 키 경로 같은 머신 설정)를
+    받아 갈 수 있다. 대상은 소유가 증명된 managed/adopted checkout뿐이다.
+    """
+    from agent_flow.cli import main as cli_main
+
+    leader = tmp_path / "leader"
+    _leader_with_host_hooks(leader)
+    (leader / ".agent-flow" / "kit.json").write_text(
+        json.dumps({"kit": "agent-flow", "profile": "android"}), encoding="utf-8"
+    )
+    (leader / "local.properties").write_text("sdk.dir=/opt/leader\n", encoding="utf-8")
+    # managed 자리(`.agent-flow/worktrees/`) 밖이고 adopt한 적도 없다. git에는
+    # 정상 등록돼 있으므로 등록 목록만 보는 구현은 이것도 대상으로 삼는다.
+    outsider = tmp_path / "outsider"
+    _git("worktree", "add", "-b", "feat/outsider", str(outsider), "HEAD", cwd=leader)
+
+    assert cli_main(["worktree", "sync-host-hooks", "--root", str(leader)]) == 0
+
+    assert not (outsider / "local.properties").exists()
+
+
 @pytest.mark.parametrize(
     ("registration_identity", "checkout_identity", "message"),
     [

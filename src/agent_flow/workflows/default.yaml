@@ -303,6 +303,9 @@ phases:
           ui-state-modeling: n/a
           presentation-mapping-boundary: n/a
           di-boundary: n/a
+          regression-test: <test id that reproduces the required behavior>
+          red-observed: <exit code of the failing run>
+          test-run-evidence: verified|unavailable
 
   - id: comment-authoring
     skills:
@@ -549,6 +552,9 @@ phases:
           ui-state-modeling: n/a
           presentation-mapping-boundary: n/a
           di-boundary: n/a
+          regression-test: <test id that reproduces the required behavior>
+          red-observed: <exit code of the failing run>
+          test-run-evidence: verified|unavailable
 
       Output: fix-loop.md.
 

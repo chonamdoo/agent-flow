@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import shutil
 import subprocess
 import tempfile
@@ -15,6 +16,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest import mock
 from types import SimpleNamespace
 
 import pytest
@@ -2175,6 +2177,251 @@ def test_tripwire_detects_arbitrary_ignored_rewrite_with_restored_mtime(tmp_path
         W_ISO.assert_leader_unchanged(tmp_path, before)
 
 
+
+
+def _repo_with_ignored_scratch(tmp_path, payload: bytes = b"before"):
+    target = tmp_path / ".scratch" / "cache.bin"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(payload)
+    (tmp_path / ".gitignore").write_text(
+        ".agent-flow/\n.scratch/\n",
+        encoding="utf-8",
+    )
+    _init_repo(tmp_path)
+    W.create_worktree(
+        root=tmp_path,
+        plan=W.plan_worktree(root=tmp_path, name="stamp-cache"),
+    )
+    return target
+
+
+def test_warm_stamp_cache_still_detects_restored_mtime_rewrite(tmp_path):
+    """불변: stamp 캐시가 mtime 복원 교체를 가리지 않는다.
+
+    캐시는 파일을 다시 읽지 않으려고 넣은 성능 장치다. 그 키가 mtime까지였다면
+    같은 크기로 내용을 갈아치우고 `os.utime`으로 mtime을 되돌리는 공격이 캐시
+    적중으로 둔갑해 조용히 통과한다. 앞선 회귀 테스트는 캐시가 비어 있는 첫
+    스냅샷만 덮으므로, **캐시가 데워진 뒤**를 따로 못 박아야 한다.
+    """
+    target = _repo_with_ignored_scratch(tmp_path)
+    # 두 번 찍어 캐시를 채운다. 이 상태가 phase 두 번째 이후의 실제 조건이다.
+    W_ISO.capture_leader_snapshot(tmp_path)
+    before = W_ISO.capture_leader_snapshot(tmp_path)
+    original_times = target.stat()
+
+    target.write_bytes(b"after!")
+    os.utime(target, ns=(original_times.st_atime_ns, original_times.st_mtime_ns))
+
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, before)
+
+
+def test_warm_stamp_cache_avoids_rereading_unchanged_files(tmp_path):
+    """계약: 안 바뀐 파일은 두 번째 sweep에서 다시 읽지 않는다.
+
+    이 캐시가 조용히 멈춰도 결과는 여전히 옳아서 테스트가 통과한다 — 잃는 것은
+    성능뿐이라 아무도 모른 채 `continue` 한 번이 다시 수십 초가 된다. 그래서
+    "다시 해시하지 않는다"를 직접 센다.
+    """
+    target = _repo_with_ignored_scratch(tmp_path)
+    W_ISO.capture_leader_snapshot(tmp_path)
+
+    opened: list[str] = []
+    real_open = Path.open
+
+    def counting_open(self, *args, **kwargs):
+        if self == target:
+            opened.append(str(self))
+        return real_open(self, *args, **kwargs)
+
+    with mock.patch.object(Path, "open", counting_open):
+        warm = W_ISO.capture_leader_snapshot(tmp_path)
+        assert opened == [], "캐시 적중인데 파일을 다시 읽었다"
+
+        target.write_bytes(b"changed!")
+        # `Path.write_bytes`도 `Path.open`을 지난다. 지우지 않으면 바로 위 쓰기가
+        # 카운터를 채워, 재해시가 통째로 사라져도 아래 단언이 통과한다.
+        opened.clear()
+        changed = W_ISO.capture_leader_snapshot(tmp_path)
+        assert opened, "내용이 바뀌었는데 다시 읽지 않았다"
+
+    assert warm.status != changed.status
+
+
+def test_partial_sweep_does_not_evict_the_ignored_entries(tmp_path):
+    """불변: 부분 sweep이 전수 sweep의 캐시를 지우지 않는다.
+
+    `host_write_boundary`는 `include_ignored=False`로 **도구 호출마다** 이 sweep을
+    돈다. 그 sweep이 "이번에 본 경로만 남긴다"를 그대로 적용하면 ignored 항목이
+    통째로 날아가고, 다음 phase tripwire가 다시 전수 해시로 돌아간다 — 캐시가
+    있으나 마나가 된다.
+    """
+    target = _repo_with_ignored_scratch(tmp_path)
+    W_ISO.capture_leader_snapshot(tmp_path)  # 전수 sweep으로 캐시를 채운다
+
+    W_ISO.capture_leader_snapshot(tmp_path, include_ignored=False)
+
+    opened: list[str] = []
+    real_open = Path.open
+
+    def counting_open(self, *args, **kwargs):
+        if self == target:
+            opened.append(str(self))
+        return real_open(self, *args, **kwargs)
+
+    with mock.patch.object(Path, "open", counting_open):
+        W_ISO.capture_leader_snapshot(tmp_path)
+
+    assert opened == [], "부분 sweep이 ignored 항목을 캐시에서 지웠다"
+
+
+def test_stamp_cache_is_disabled_when_ctime_cannot_reveal_the_attack(tmp_path):
+    """불변: ctime을 믿을 수 없는 파일시스템에서는 캐싱하지 않는다.
+
+    Windows의 `st_ctime`은 생성 시각이고, granularity가 1초인 파일시스템에서는
+    같은 초 안의 교체가 identity 동일이 된다. 그런 자리에서 캐시를 켜면 못 박은
+    mtime 복원 공격이 적중으로 둔갑한다 — 전수 해시하던 원본 대비 탐지 회귀다.
+    성능을 잃더라도 탐지를 잃지 않는 쪽으로 닫는다.
+    """
+    target = _repo_with_ignored_scratch(tmp_path)
+    W_ISO._STAMP_CACHE_TRUST.clear()
+
+    with mock.patch.object(W_ISO, "_ctime_reveals_restored_mtime", lambda _: False):
+        W_ISO.capture_leader_snapshot(tmp_path)
+        assert not (
+            tmp_path / ".git" / "agent-flow" / "tripwire-stamp-cache.json"
+        ).exists(), "믿을 수 없는 파일시스템인데 캐시를 남겼다"
+
+        opened: list[str] = []
+        real_open = Path.open
+
+        def counting_open(self, *args, **kwargs):
+            if self == target:
+                opened.append(str(self))
+            return real_open(self, *args, **kwargs)
+
+        with mock.patch.object(Path, "open", counting_open):
+            W_ISO.capture_leader_snapshot(tmp_path)
+        assert opened, "캐싱을 껐는데도 파일을 다시 읽지 않았다"
+
+    W_ISO._STAMP_CACHE_TRUST.clear()
+
+
+def test_stamp_cache_of_another_format_version_is_discarded(tmp_path):
+    """불변: 형식이 다른 캐시는 판정에 쓰지 않는다.
+
+    digest 절단 길이나 엔트리 스키마가 바뀐 뒤 낡은 항목이 섞이면 같은 leader의
+    스냅샷 문자열이 캐시 온도에 따라 달라진다. baseline과 검사가 서로 다른 형식을 보면
+    그 차이는 leader 변경이 아니라 형식 차이인데, 판정은 그것을 구분하지 못한다.
+    """
+    _repo_with_ignored_scratch(tmp_path)
+    fresh = W_ISO.capture_leader_snapshot(tmp_path)
+    cache_file = tmp_path / ".git" / "agent-flow" / "tripwire-stamp-cache.json"
+    stale = json.loads(cache_file.read_text(encoding="utf-8"))
+    stale["v"] = W_ISO._STAMP_CACHE_VERSION + 1
+    for key in stale["entries"]:
+        stale["entries"][key] = [stale["entries"][key][0], "deadbeefdeadbeef"]
+    cache_file.write_text(json.dumps(stale), encoding="utf-8")
+
+    # 낡은 형식의 digest를 재사용했다면 스냅샷이 달라진다.
+    assert W_ISO.capture_leader_snapshot(tmp_path).status == fresh.status
+
+
+def test_cold_and_warm_sweeps_produce_the_same_snapshot(tmp_path):
+    """불변: 캐시 적중 여부가 스냅샷 문자열을 바꾸지 않는다.
+
+    hit 경로와 miss 경로가 서로 다른 stamp 줄을 내면, 같은 leader인데 캐시 온도만
+    달라도 drift로 읽힌다 — 아무도 건드리지 않은 leader가 상시 오탐이 되고
+    사용자에게는 풀 방법이 없다.
+    """
+    _repo_with_ignored_scratch(tmp_path)
+    cold = W_ISO.capture_leader_snapshot(tmp_path)
+    warm = W_ISO.capture_leader_snapshot(tmp_path)
+
+    assert cold.status == warm.status
+    W_ISO.assert_leader_unchanged(tmp_path, cold)
+
+
+def test_stamp_cache_directory_keeps_the_trust_zone_mode(tmp_path):
+    """불변: 캐시가 `.git/agent-flow`를 느슨하게 만들지 않는다.
+
+    같은 부모를 `host_write_boundary._binding_dir`가 `0o700`으로 만든다. 그쪽은
+    이미 있는 디렉터리의 모드를 고치지 않으므로, tripwire가 먼저 umask 기본값으로
+    만들면 신뢰 구역 부모가 영구히 `0o755`로 남는다.
+    """
+    # worktree를 만들지 않는다. 그 경로가 먼저 `.git/agent-flow`를 0o700으로
+    # 만들어 버리면 tripwire가 스스로 만드는 경우를 검사하지 못한다 — 전수 sweep은
+    # host binding 없이도 도는 자리가 있어 이쪽이 먼저 만들 수 있다.
+    (tmp_path / ".scratch").mkdir()
+    (tmp_path / ".scratch" / "cache.bin").write_bytes(b"before")
+    (tmp_path / ".gitignore").write_text(".agent-flow/\n.scratch/\n", encoding="utf-8")
+    _init_repo(tmp_path)
+    directory = tmp_path / ".git" / "agent-flow"
+    assert not directory.exists(), "tripwire가 첫 생성자가 아니면 이 검사는 무의미하다"
+
+    W_ISO.capture_leader_snapshot(tmp_path)
+
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+
+
+def test_stamp_cache_is_not_trusted_on_another_device(tmp_path):
+    """불변: probe한 볼륨 밖의 파일에는 캐시 적중을 주지 않는다.
+
+    `git status --ignored=traditional`은 마운트 경계에서 멈추지 않는다. probe는
+    `.git/agent-flow` 한 곳에서만 도는데, `<leader>/build`가 다른 볼륨이면 그
+    볼륨의 `st_ctime`이 교체를 드러내지 않을 수 있다. 그 볼륨을 probe한 볼륨과
+    같다고 보면, 같은 크기 재작성 + mtime 복원이 캐시 적중으로 둔갑해 조용히
+    통과한다.
+
+    그 파일시스템을 여기서 흉내 낸다: 내용이 바뀌어도 `lstat`이 끝까지 같은
+    (dev, size, mtime, ctime)을 보고하는 볼륨이다. device 게이트가 없으면 캐시가
+    적중해 스냅샷이 그대로가 되고, 교체는 영영 안 보인다.
+    """
+    target = _repo_with_ignored_scratch(tmp_path)
+    real_lstat = Path.lstat
+    frozen = real_lstat(target)
+    foreign = os.stat_result(
+        (
+            frozen.st_mode, frozen.st_ino, frozen.st_dev + 1, frozen.st_nlink,
+            frozen.st_uid, frozen.st_gid, frozen.st_size,
+            int(frozen.st_atime), int(frozen.st_mtime), int(frozen.st_ctime),
+        )
+    )
+
+    def unrevealing(self):
+        return foreign if self == target else real_lstat(self)
+
+    with mock.patch.object(Path, "lstat", unrevealing):
+        before = W_ISO.capture_leader_snapshot(tmp_path)
+        target.write_bytes(b"after!")  # 같은 크기, 신원은 그대로 보고된다
+        after = W_ISO.capture_leader_snapshot(tmp_path)
+
+    assert after.status != before.status, (
+        "probe하지 않은 볼륨의 파일에 캐시 적중을 줘서 내용 교체를 놓쳤다"
+    )
+
+
+def test_stamp_cache_digest_of_a_wrong_shape_is_ignored(tmp_path):
+    """불변: 캐시의 digest 값이 스냅샷 줄 구조를 깨지 못한다.
+
+    stamp는 한 줄이 한 record다. digest에 개행이 섞이면 그 줄이 여러 줄로 쪼개져
+    `LeaderSnapshot.records()`가 가짜 record를 읽는다. 캐시는 "형식이 다르면 빈
+    것으로 본다"고 계약했으므로 digest도 그 계약 안에 있어야 한다.
+    """
+    _repo_with_ignored_scratch(tmp_path)
+    clean = W_ISO.capture_leader_snapshot(tmp_path)
+    cache_file = tmp_path / ".git" / "agent-flow" / "tripwire-stamp-cache.json"
+    poisoned = json.loads(cache_file.read_text(encoding="utf-8"))
+    for key in poisoned["entries"]:
+        poisoned["entries"][key] = [
+            poisoned["entries"][key][0],
+            "dead\nstamp fake/path 0 beef",
+        ]
+    cache_file.write_text(json.dumps(poisoned), encoding="utf-8")
+
+    after = W_ISO.capture_leader_snapshot(tmp_path)
+    assert after.status == clean.status
+    assert not any("fake/path" in record for record in after.records())
 
 
 def test_tripwire_ignores_the_folded_agent_flow_record(tmp_path):

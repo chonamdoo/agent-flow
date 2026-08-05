@@ -17,7 +17,13 @@ tripwire(`assert_leader_unchanged`)는 런 *도중*의 변경만 본다. 런이 
 늘리려던 변경이 실행 경로를 끊는 것이 이 계약이 막는 사고다.
 판정 범위는 **관리 네임스페이스**(`.agent-flow/scripts/hooks/`)로 한정한다.
 그 밖의 사용자 hook은 정당한 설정이라 오라클이 없다 — 런 *도중*에 그 파일들이
-바뀌는 것은 tripwire 심층 스캔(`worktree_isolation._EXEC_SURFACE_PATHS`)이 본다.
+바뀌는 것은 tripwire의 leader 스냅샷(`worktree_isolation._leader_status`)이 본다.
+그 스냅샷은 화이트리스트가 아니라 ignore된 경로까지 훑고 내용을 해시하므로 hook
+등록 파일도 그 안에 들어온다(`_is_excluded_path`가 빼는 자리는 제외). 그 탐지를
+못 박는 것은 `tests/test_worktree_isolation.py`의
+`test_tripwire_detects_hook_content_swap`,
+`test_tripwire_sees_inside_gitignored_agent_flow`,
+`test_tripwire_detects_execution_surface_replacement`다.
 """
 from __future__ import annotations
 
