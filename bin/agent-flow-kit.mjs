@@ -1195,6 +1195,17 @@ function assertInstalled(root) {
       throw new Error(`agent-flow is not installed correctly: ${path.relative(root, codeReviewer)} is empty`);
     }
   }
+  // 존재와 비어있지 않음만 보면 옛 사본이 그대로 통과한다. 이 회귀의 실체가 정확히
+  // 그 상태다 — 재설치하지 않은 프로젝트에서 OMP host만 옛 reviewer를 로드한 채
+  // push-watch가 돈다. `.omp`는 `.claude`를 그대로 미러링하므로 바이트로 대조한다.
+  const claudeReviewer = fs.readFileSync(path.join(root, ".claude", "agents", "code-reviewer.md"), "utf8");
+  const ompReviewer = fs.readFileSync(path.join(root, ".omp", "agents", "code-reviewer.md"), "utf8");
+  if (claudeReviewer !== ompReviewer) {
+    throw new Error(
+      "agent-flow is not installed correctly: .omp/agents/code-reviewer.md does not match"
+        + " .claude/agents/code-reviewer.md. run: agent-flow-kit install",
+    );
+  }
 }
 
 // install이 target으로 복사하는 자산의 지문. `.Codex/agents`와 `.claude/agents`는

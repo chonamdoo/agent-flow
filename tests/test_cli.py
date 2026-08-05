@@ -3889,6 +3889,40 @@ design-values-confirmed: n/a
                     omp_agent = project_root / ".omp" / "agents" / "code-reviewer.md"
                     self.assertEqual(edited, omp_agent.read_text(encoding="utf-8"))
 
+    def test_kit_push_watch_rejects_stale_omp_reviewer_agent(self) -> None:
+        """재설치하지 않은 프로젝트를 통과시키지 않는다.
+
+        존재와 비어있지 않음만 보면 옛 사본이 그대로 통과한다. 그러면 OMP host만
+        옛 reviewer를 로드한 채 push-watch가 돈다 — 이 회귀의 실체가 그 상태다.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "stale-omp-assert"
+            project_root.mkdir()
+            node = _node_executable()
+            installer = str(Path(__file__).resolve().parents[1] / "bin" / "agent-flow-kit.mjs")
+            installed = subprocess.run(
+                (node, installer, "install"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+
+            omp_agent = project_root / ".omp" / "agents" / "code-reviewer.md"
+            omp_agent.write_text("---\nname: code-reviewer\ndescription: stale\n---\n", encoding="utf-8")
+            blocked = subprocess.run(
+                (node, installer, "run", "push-watch"),
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(blocked.returncode, 0)
+            # returncode만 보면 git repo 부재 같은 다른 실패와 구분되지 않는다.
+            self.assertIn(".omp/agents/code-reviewer.md", blocked.stderr)
+            self.assertIn("run: agent-flow-kit install", blocked.stderr)
+
     def test_node_installers_omp_hook_syncs_root_context_files(self) -> None:
         installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
         with tempfile.TemporaryDirectory() as temp_dir:
