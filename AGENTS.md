@@ -79,7 +79,28 @@ run의 status가 SPEC 추가·수정·삭제를 보고하면 변경 목록만 �
 [agent-flow skill index]|root: .agent-flow/skills
 |IMPORTANT: 아래 파일이 기억보다 우선한다. 변경 대상을 먼저 훑고, scope가 걸리는 것만 읽는다.
 |always:{code-generation-discipline,comment-authoring-discipline}
-|on-demand:{agent-flow,agent-flow-concise-output,architecture-reviewer,clean-architecture,clean-architecture-core,code-review,codebase-design,comment-checker,ddd-architecture,domain-modeling,full-feature-workflow,grill-with-docs,grilling,plan-reviewer,product-brief,push-watch,python-api-clean-architecture,python-development-guide,resolving-merge-conflicts,tdd,to-prd}
+|on-demand:
+|  agent-flow: Use when the user types /agent-flow, asks to start or continue the project workflow, or wants Claude, Codex, or OMP to drive the agent-flow…
+|  agent-flow-concise-output: Korean concise output adapter for agent-flow review, commit, and artifact output.
+|  architecture-reviewer: Use during the full-feature architecture-review phase.
+|  clean-architecture: Compatibility alias for Clean Architecture review and design.
+|  clean-architecture-core: Platform-neutral Clean Architecture contract for semantic layers, dependency direction, use cases, repository/source/cache/mapper boundarie…
+|  code-review: Review the changes since a fixed point (commit, branch, tag, or merge-base) along two axes — Standards (does the code follow this repo's do…
+|  codebase-design: Shared vocabulary for designing deep modules.
+|  comment-checker: Use when installing, configuring, or reviewing agent-flow comment-checker hooks that detect newly added low-value comments without blocking…
+|  ddd-architecture: Domain-Driven Design skill for agent-flow design and final-review phases.
+|  domain-modeling: Build and sharpen a project's domain model.
+|  full-feature-workflow: Use this skill for feature work in this project.
+|  grill-with-docs: A relentless interview to sharpen a plan or design, which also creates docs (ADR's and glossary) as we go.
+|  grilling: Grill the user relentlessly about a plan, decision, or idea.
+|  plan-reviewer: Use during the full-feature plan-review phase.
+|  product-brief: Use during the full-feature product-brief phase.
+|  push-watch: Use this skill after local verification is complete and the branch is ready to publish.
+|  python-api-clean-architecture: Python API-service Clean Architecture adapter for the platform-neutral clean-architecture-core contract.
+|  python-development-guide: Python-specific implementation and review checklist.
+|  resolving-merge-conflicts: Use when you need to resolve an in-progress git merge/rebase conflict.
+|  tdd: Test-driven development.
+|  to-prd: Synthesizes the current conversation and codebase context into a PRD, then writes or publishes it according to the caller's requested outpu…
 ```
 <!-- agent-flow:skills:end -->
 - 인덱스에 없는 skill은 이 프로젝트에 설치돼 있지 않다. 런타임에 설치를 묻지 말고 `agent-flow skills sync`에 맡긴다.
