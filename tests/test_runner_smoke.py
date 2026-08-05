@@ -1200,8 +1200,43 @@ def test_an_override_wins_over_the_installed_profile_for_the_same_id(
     )
 
     declarations = leader_tripwire_declarations(project)
-    assert [path.name for path, _ in declarations] == ["generic.local.yaml"]
+    assert [
+        (profile_id, path.name if path else None, value)
+        for profile_id, path, value in declarations
+    ] == [("generic", "generic.local.yaml", "tracked-only")]
     assert leader_sweep_include_ignored(project) is False
+
+
+def test_a_profile_that_omits_the_declaration_counts_as_the_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """반증: 생략을 건너뛰면 한 profile의 선언만으로 run 전체가 조용히 좁아진다.
+
+    react-native+android처럼 stack이 둘 붙은 저장소에서 한쪽만 `tracked-only`를
+    적으면, 기본값 `all`을 기대한 다른 profile의 감시가 그 선언 하나로 꺼진다.
+    생략은 침묵이 아니라 `all`이다.
+    """
+    from agent_flow.core.leader_tripwire import (
+        LeaderTripwireDeclarationError,
+        leader_sweep_include_ignored,
+        leader_tripwire_declarations,
+    )
+
+    project, _checkout, _state_root, _artifact = _leader_tripwire_project(
+        tmp_path, monkeypatch, "tripwire-omitted", declared="tracked-only"
+    )
+    profiles = project / ".agent-flow" / "profiles"
+    (profiles / "android.yaml").write_text("id: android\n", encoding="utf-8")
+    (project / ".agent-flow" / "kit.json").write_text(
+        json.dumps({"profiles": ["generic", "android"]}), encoding="utf-8"
+    )
+
+    assert [
+        (profile_id, value) for profile_id, _path, value in
+        leader_tripwire_declarations(project)
+    ] == [("generic", "tracked-only"), ("android", "all")]
+    with pytest.raises(LeaderTripwireDeclarationError, match="conflicting"):
+        leader_sweep_include_ignored(project)
 
 
 def test_conflicting_declarations_are_not_folded_to_the_wider_scope(

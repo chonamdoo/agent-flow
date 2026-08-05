@@ -61,24 +61,28 @@ def leader_sweep_include_ignored(leader_root: Path | None) -> bool:
         # 지킬 leader가 없다(leader에서 그대로 도는 실행). 좁힐 대상도 없다.
         return True
     declarations = leader_tripwire_declarations(leader_root)
-    values = {value for _, value in declarations}
+    values = {value for _, _, value in declarations}
     if len(values) > 1:
         raise LeaderTripwireDeclarationError(
             "active profiles declare conflicting branching.leader_tripwire values: "
             + ", ".join(
-                f"{value} ({_leader_relative(leader_root, path)})"
-                for path, value in declarations
+                f"{profile_id}={value}"
+                + (f" ({_leader_relative(leader_root, path)})" if path else " (default)")
+                for profile_id, path, value in declarations
             )
         )
     if not values or values == {LEADER_SWEEP_ALL}:
         return True
-    for path, _value in declarations:
+    for _profile_id, path, _value in declarations:
+        assert path is not None  # tracked-only는 선언이 있어야만 나온다
         _assert_declaration_is_tracked(leader_root, path)
     return False
 
 
-def leader_tripwire_declarations(leader_root: Path) -> tuple[tuple[Path, str], ...]:
-    """profile id마다 **하나씩**, 그 id의 실효 선언과 그것을 담은 파일.
+def leader_tripwire_declarations(
+    leader_root: Path,
+) -> tuple[tuple[str, Path | None, str], ...]:
+    """active profile마다 하나씩, `(profile id, 선언 파일, 실효 값)`.
 
     후보는 id당 두 개뿐이다: `<id>.yaml`(install이 덮는 배포 사본)과
     `<id>.local.yaml`(install이 손대지 않는 override). 목록이 profile 수에
@@ -86,15 +90,19 @@ def leader_tripwire_declarations(leader_root: Path) -> tuple[tuple[Path, str], .
 
     같은 id 안에서는 override가 이긴다. `_schema.yaml`이 "스칼라는 통째로
     대체한다"고 선언했으므로 그 자리에서만 다르게 병합하면 선언과 동작이 갈린다.
-    상충 판정은 **서로 다른 profile id 사이**에서만 한다 — android+react-native
-    처럼 두 stack이 붙은 저장소에서 한쪽만 좁히는 것은 해석이 갈리는 일이다.
+
+    **선언하지 않은 profile은 건너뛰지 않고 기본값 `all`로 센다.** 건너뛰면
+    android+react-native처럼 stack이 둘 붙은 저장소에서 한쪽만 `tracked-only`를
+    적었을 때 상충이 보고되지 않고 run 전체가 조용히 좁아진다 — 기본값 `all`을
+    기대한 profile의 감시가 그 선언 하나로 꺼진다. 생략은 침묵이 아니라 `all`이다.
 
     값 검증을 여기서 하는 이유는 모르는 값을 기본값으로 접지 않기 위해서다.
     `traked-only` 같은 오타를 조용히 `all`로 읽으면 프로젝트는 껐다고 믿는데 run은
     계속 막히고, 반대로 접으면 켰다고 믿는 프로젝트의 탐지가 조용히 꺼진다.
     """
-    found: list[tuple[Path, str]] = []
+    found: list[tuple[str, Path | None, str]] = []
     for profile_id in active_profile_ids(leader_root, "auto"):
+        declaration: tuple[Path, str] | None = None
         for path in (
             project_profile_override_path(leader_root, profile_id),
             project_profile_path(leader_root, profile_id),
@@ -107,8 +115,12 @@ def leader_tripwire_declarations(leader_root: Path) -> tuple[tuple[Path, str], .
                     "profile branching.leader_tripwire must be one of "
                     f"{', '.join(LEADER_SWEEP_SCOPES)}: got {value!r} in {path}"
                 )
-            found.append((path, value))
+            declaration = (path, value)
             break
+        if declaration is None:
+            found.append((profile_id, None, LEADER_SWEEP_ALL))
+        else:
+            found.append((profile_id, declaration[0], declaration[1]))
     return tuple(found)
 
 

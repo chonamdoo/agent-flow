@@ -338,6 +338,8 @@ def _validate_project_profile_override_shape(
             f"profile override architecture.roles must be a list of mappings: {source}"
         )
     if isinstance(roles, list):
+        for role in roles:
+            _validate_override_role_fields(role, source=source)
         _assert_override_keeps_shipped_role_declarations(roles, packaged, source=source)
     _validate_override_leader_tripwire(override, source=source)
     if "gates" not in override:
@@ -351,6 +353,43 @@ def _validate_project_profile_override_shape(
             _gate_from_payload(item, profile_id=profile_id)
     except ValueError as exc:
         raise ValueError(f"invalid profile override gate: {source}: {exc}") from exc
+
+
+# role 필드가 소비자에게 어떤 모양으로 읽히는가. 이름을 고른 목록이 아니라
+# `architecture_lint`가 그 값을 쓰는 방식이다 — 리스트로 순회하는 것과 문자열로
+# 비교하는 것.
+_ROLE_LIST_FIELDS: tuple[str, ...] = ("paths", "modules", "forbidden")
+_ROLE_TEXT_FIELDS: tuple[str, ...] = ("id", "package_suffix", "pair_with")
+
+
+def _validate_override_role_fields(role: dict[str, Any], *, source: Path) -> None:
+    """role 필드가 소비자가 순회할 수 있는 모양인가.
+
+    `paths: "core/domain"`처럼 list 자리에 스칼라를 쓰면 `match_role`과
+    `role_owns_module`이 `isinstance(..., list)`에서 조용히 건너뛴다. 그러면 필수
+    architecture gate가 `n/a`이거나 무위반으로 보이고, 오타는 어디에도 보고되지
+    않는다. 소비자가 침묵하므로 선언 자리에서 막는다.
+    """
+    for field in _ROLE_LIST_FIELDS:
+        if field not in role:
+            continue
+        value = role[field]
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) and item for item in value
+        ):
+            raise ValueError(
+                f"profile override architecture.roles[{role.get('id')!r}].{field} "
+                f"must be a list of non-empty strings: {source}"
+            )
+    for field in _ROLE_TEXT_FIELDS:
+        if field not in role:
+            continue
+        value = role[field]
+        if not isinstance(value, str) or not value:
+            raise ValueError(
+                f"profile override architecture.roles[{role.get('id')!r}].{field} "
+                f"must be a non-empty string: {source}"
+            )
 
 
 def _assert_override_keeps_shipped_role_declarations(
