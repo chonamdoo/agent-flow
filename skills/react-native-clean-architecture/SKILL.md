@@ -1,6 +1,8 @@
 ---
 name: react-native-clean-architecture
 description: React Native and Expo Clean Architecture adapter for the platform-neutral clean-architecture-core contract. Use for shared package layout, RN platform adapters, Context Provider composition root, optional TSyringe, native bridge boundaries, repository/source/mapper boundaries, and RN architecture review.
+requires:
+  - clean-architecture-core
 ---
 
 # React Native Clean Architecture

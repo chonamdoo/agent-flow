@@ -1,6 +1,8 @@
 ---
 name: react-clean-architecture
 description: React Web and Next.js Clean Architecture adapter for the platform-neutral clean-architecture-core contract. Use for monorepo package layout, Context Provider composition root, optional TSyringe, state holder/component boundaries, repository/source/mapper boundaries, and React architecture review.
+requires:
+  - clean-architecture-core
 ---
 
 # React Clean Architecture

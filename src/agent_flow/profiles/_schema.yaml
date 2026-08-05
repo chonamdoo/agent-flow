@@ -96,6 +96,10 @@ optional:
       enabled: "bool; when false the vocabulary is parsed but never routed"
       required_max: "int; deterministic truncation of the required tier"
       offered_max: "int; deterministic truncation of the offered tier"
+      required_budget_bytes: "int; default 24000, 0 disables. Byte ceiling for the required tier;
+        overflow is demoted to offered. The match that crosses the ceiling is admitted and
+        selection stops there, so the tier can reach budget + that one document. Counts only
+        this vocabulary tier - profile declared skills and their dependencies are never budgeted."
       pins: ["exact skill name to force into the required tier when matched by a domain"]
       domains:
         - id: "stable domain id owned by this repo, not by upstream"

@@ -1,6 +1,8 @@
 ---
 name: clean-architecture
 description: Compatibility alias for Clean Architecture review and design. Use clean-architecture-core as the canonical source, then load the matching platform clean architecture skill for Android, iOS, React, React Native, or Python API details.
+requires:
+  - clean-architecture-core
 ---
 
 # Clean Architecture Compatibility Alias

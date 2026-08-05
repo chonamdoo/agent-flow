@@ -8,9 +8,10 @@ import process from "node:process";
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { SKILL_DEPENDENCIES, mergeInstallSelectionWithPrevious, resolveInstallSelection } from "../lib/skill-selection.mjs";
+import { mergeInstallSelectionWithPrevious, resolveInstallSelection } from "../lib/skill-selection.mjs";
 import { OMP_EXTENSION_MARKER, ompHooksExtensionSource } from "../lib/omp-hooks-extension.mjs";
 import { MANAGED_HOOK_SCRIPTS, RETIRED_MANAGED_HOOK_SCRIPTS } from "../lib/managed-hooks.mjs";
+import { parseSimpleYaml, splitFrontmatter } from "../lib/frontmatter.mjs";
 import {
   activeInstallProfileIds,
   AGENT_FLOW_COMMAND,
@@ -81,7 +82,6 @@ import {
   SKILL_INDEX_END,
   SKILL_INDEX_START,
   skillIndexBlock,
-  skillRequires,
   syncKitAssets,
   tomlBasicString,
   uniqueStrings,
@@ -1678,7 +1678,7 @@ function discoverSkills(baseDir, source, root, ignoredNames = new Set(), allowed
 }
 
 function parseSkillMetadata(text, fallbackName) {
-  const frontmatter = splitSkillFrontmatter(text);
+  const frontmatter = splitFrontmatter(text);
   const metadata = frontmatter ? parseSimpleYaml(frontmatter) : {};
   const warnings = [];
   const parsedName = String(metadata.name || fallbackName);
@@ -1697,7 +1697,7 @@ function parseSkillMetadata(text, fallbackName) {
       warnings.push(`unknown host ignored: ${normalized}`);
     }
   }
-  const body = text.replace(/^---\n[\s\S]*?\n---\n?/, "");
+  const body = text.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "");
   const useWhen = body.split(/\r?\n/).find((line) => /^\s*use when\b/i.test(line));
   return {
     id: String(metadata.id || name),
@@ -1711,7 +1711,7 @@ function parseSkillMetadata(text, fallbackName) {
     platforms: arrayValue(metadata.platforms),
     stacks: arrayValue(metadata.stacks),
     dependencies: uniqueStrings([...arrayValue(metadata.dependencies), ...arrayValue(metadata.requires)]),
-    requires: uniqueStrings([...skillRequires(name), ...arrayValue(metadata.dependencies), ...arrayValue(metadata.requires)]),
+    requires: uniqueStrings([...arrayValue(metadata.dependencies), ...arrayValue(metadata.requires)]),
     optionalDependencies: arrayValue(metadata.optionalDependencies),
     references: arrayValue(metadata.references),
     hostSupport: arrayValue(metadata.hostSupport),
@@ -1792,47 +1792,6 @@ function lstatIfExists(pathName) {
     }
     throw error;
   }
-}
-
-function splitSkillFrontmatter(text) {
-  if (!text.startsWith("---\n")) {
-    return null;
-  }
-  const end = text.indexOf("\n---\n", 4);
-  if (end === -1) {
-    return null;
-  }
-  return text.slice(4, end);
-}
-
-function parseSimpleYaml(text) {
-  const metadata = {};
-  let listKey = null;
-  for (const line of text.split(/\r?\n/)) {
-    const listItem = line.match(/^\s+-\s*(.+)$/);
-    if (listItem && listKey) {
-      metadata[listKey].push(listItem[1].trim().replace(/^['"]|['"]$/g, ""));
-      continue;
-    }
-    const match = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
-    if (!match) {
-      listKey = null;
-      continue;
-    }
-    const key = match[1];
-    const raw = match[2].trim();
-    if (raw.startsWith("[") && raw.endsWith("]")) {
-      metadata[key] = raw.slice(1, -1).split(",").map((item) => item.trim().replace(/^['"]|['"]$/g, "")).filter(Boolean);
-      listKey = null;
-    } else if (raw === "") {
-      metadata[key] = [];
-      listKey = key;
-    } else {
-      metadata[key] = raw.replace(/^['"]|['"]$/g, "");
-      listKey = null;
-    }
-  }
-  return metadata;
 }
 
 function linkProjectSkill(root, skill, host, previousIndex, force = false) {

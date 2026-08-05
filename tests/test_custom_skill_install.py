@@ -1516,10 +1516,26 @@ def _skill_index_block(project: Path, file_name: str = "AGENTS.md") -> str:
 
 
 def _indexed_names(block: str, group: str) -> set[str]:
+    """`always`는 이름만 있는 한 줄, `on-demand`는 요약을 단 여러 줄이다."""
     match = re.search(rf"\|{group}:\{{([^}}]*)\}}", block)
-    if not match:
+    if match:
+        return {name.strip() for name in match.group(1).split(",") if name.strip()}
+    if f"|{group}:" not in block:
         return set()
-    return {name.strip() for name in match.group(1).split(",") if name.strip()}
+    return set(_group_entries(block, group))
+def _group_entries(block: str, group: str) -> dict[str, str]:
+    entries: dict[str, str] = {}
+    collecting = False
+    for line in block.splitlines():
+        if line.startswith(f"|{group}:"):
+            collecting = True
+            continue
+        if collecting:
+            if not line.startswith("|  "):
+                break
+            name, _, summary = line[3:].partition(":")
+            entries[name.strip()] = summary.strip()
+    return entries
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
@@ -2251,3 +2267,51 @@ def test_an_unusable_git_reports_one_line_not_a_stack_trace(tmp_path: Path, bina
             cwd=project, text=True, capture_output=True, check=False, env=env,
         )
         assert help_result.returncode == 0, help_result.stderr
+
+
+def _on_demand_summaries(block: str) -> dict[str, str]:
+    return _group_entries(block, "on-demand")
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_skill_index_on_demand_carries_summary(tmp_path: Path, binary: str) -> None:
+    """반증: 이름만 주면 "scope 걸리는 것만 읽어라"를 판단할 재료가 없다."""
+    project = tmp_path / f"summary-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+
+    summaries = _on_demand_summaries(_skill_index_block(project))
+    assert summaries, "on-demand 요약이 하나도 없다"
+    assert all(summaries.values()), [name for name, text in summaries.items() if not text]
+    assert "tdd" in summaries
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_skill_index_summary_matches_python_rule(tmp_path: Path, binary: str) -> None:
+    """반증: JS가 자기 자르기 규칙을 새로 만들면 같은 skill이 index와 프롬프트에서 달라진다."""
+    sys.path.insert(0, str(KIT_ROOT / "src"))
+    from agent_flow.core.skill_resolver import skill_summary
+
+    project = tmp_path / f"summary-rule-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+
+    summaries = _on_demand_summaries(_skill_index_block(project))
+    mismatches = {
+        name: (text, skill_summary(project / ".agent-flow" / "skills" / name / "SKILL.md"))
+        for name, text in summaries.items()
+        if text != skill_summary(project / ".agent-flow" / "skills" / name / "SKILL.md")
+    }
+    assert mismatches == {}
+
+
+@pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])
+def test_skill_index_always_line_stays_name_only(tmp_path: Path, binary: str) -> None:
+    """반증: always 목록까지 요약을 붙이면 상시 컨텍스트 비용이 커진다."""
+    project = tmp_path / f"always-{binary}"
+    project.mkdir()
+    assert _install_with(binary, project).returncode == 0
+
+    block = _skill_index_block(project)
+    always_line = next(line for line in block.splitlines() if line.startswith("|always:"))
+    assert ":" not in always_line[len("|always:"):]

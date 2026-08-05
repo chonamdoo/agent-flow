@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Sequence
 
@@ -48,6 +48,10 @@ class ExternalConfig:
     enabled: bool = False
     required_max: int = 6
     offered_max: int = 20
+    # 개수는 열람 비용을 대표하지 못한다. 실측으로 host skill 하나가 71,590 B였고
+    # 상위 6개 합이 214,501 B였다 — 개수 캡만으로는 required 6장이 그대로 통과한다.
+    # profile이 `0`으로 끌 수 있다.
+    required_budget_bytes: int = 24_000
     pins: tuple[str, ...] = ()
     domains: tuple[ExternalDomain, ...] = ()
 
@@ -63,6 +67,9 @@ class ExternalMatch:
     path: Path | None = None
     source: str = "host"
 
+    def demoted(self) -> "ExternalMatch":
+        return replace(self, tier=OFFERED)
+
 
 def parse_external(profile: dict | None, *, env: dict[str, str] | None = None) -> ExternalConfig:
     block = None
@@ -76,6 +83,7 @@ def parse_external(profile: dict | None, *, env: dict[str, str] | None = None) -
         enabled=_enabled(bool(block.get("enabled", False)), env),
         required_max=_positive_int(block.get("required_max"), 6),
         offered_max=_positive_int(block.get("offered_max"), 20),
+        required_budget_bytes=_external_budget(block.get("required_budget_bytes")),
         pins=tuple(_string_list(block.get("pins"))),
         domains=tuple(_domains(block.get("domains"))),
     )
@@ -150,8 +158,47 @@ def _truncate(
 ) -> tuple[ExternalMatch, ...]:
     ordered = sorted(matches, key=lambda item: (item.tier != REQUIRED, item.domain, item.name))
     required = _round_robin([item for item in ordered if item.tier == REQUIRED], config.required_max)
-    offered = _round_robin([item for item in ordered if item.tier == OFFERED], config.offered_max)
+    required, demoted = _within_budget(required, config.required_budget_bytes)
+    offered_candidates = [item for item in ordered if item.tier == OFFERED]
+    offered = _round_robin(
+        list(demoted) + offered_candidates,
+        config.offered_max,
+    )
     return tuple(required + offered)
+
+
+
+def _within_budget(
+    matches: Sequence[ExternalMatch], budget: int
+) -> tuple[list[ExternalMatch], list[ExternalMatch]]:
+    """required 합계를 바이트로 자르고 초과분은 offered로 넘긴다.
+
+    경계를 넘긴 문서는 넣고 멈춘다. 건너뛰면 순위가 뒤집혀 가장 구체적인(= 대체로
+    가장 큰) skill이 작고 덜 관련된 것에 밀린다. 그래서 상한은 `budget`이 아니라
+    `budget + 마지막으로 들어간 문서`다. profile이 이름으로 선언한 skill과 dependency
+    확장분은 여기 오지 않는다 — 예산은 어휘 휴리스틱 tier에만 건다.
+    """
+    if budget <= 0:
+        return list(matches), []
+    kept: list[ExternalMatch] = []
+    demoted: list[ExternalMatch] = []
+    used = 0
+    for index, match in enumerate(matches):
+        if used >= budget:
+            demoted.extend(item.demoted() for item in matches[index:])
+            break
+        kept.append(match)
+        used += _match_bytes(match)
+    return kept, demoted
+
+
+def _match_bytes(match: ExternalMatch) -> int:
+    if match.path is None:
+        return 0
+    try:
+        return match.path.stat().st_size
+    except OSError:
+        return 0
 
 
 def _round_robin(matches: Sequence[ExternalMatch], limit: int) -> list[ExternalMatch]:
@@ -255,6 +302,13 @@ def _enabled(declared: bool, env: dict[str, str] | None) -> bool:
     if override in {"off", "0", "false"}:
         return False
     return declared
+
+
+def _external_budget(value: object) -> int:
+    """`0`은 명시적 해제다. `_positive_int`는 0을 버리고 기본값으로 되돌린다."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 24_000
+    return max(0, value)
 
 
 def _positive_int(value: object, default: int) -> int:

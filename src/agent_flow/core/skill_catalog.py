@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -35,12 +36,21 @@ NEW = "new"
 REMOVED = "removed"
 DEAD_DECLARATION = "dead-declaration"
 UNROUTED = "unrouted"
+UNOWNED_ADAPTER = "unowned-adapter"
 SHADOWED = "shadowed"
 COLLISION = "collision"
 
 # 스스로 "reference-only, not a standalone workflow skill"이라고 선언한 이름. 다른 skill이
 # 파일 경로로 인용해 쓰므로 phase 활성화 대상이 아니고, 미라우팅 보고에서 제외한다.
 _ROUTING_EXEMPT = frozenset({"android-guides"})
+
+# kit이 설치하는 자리는 `<root>/.omp/extensions/`뿐이다. 아래는 kit이 만들지도
+# 갱신하지도 않는 전역 자리인데, 여기에 kit 표지를 단 파일이 있으면 재설치로도
+# 낫지 않는 상태가 된다 — 실측으로 미병합 브랜치가 남긴 전역 adapter 하나가
+# 저장소의 모든 tool 호출을 막았고, kit은 그 경로를 아예 몰라 진단조차 못 했다.
+# 소유를 증명할 수 없으므로 지우지 않는다. 이름으로 지목하는 것까지가 이 진단이다.
+_UNMANAGED_GLOBAL_ADAPTERS = (Path(".omp") / "agent" / "extensions" / "agent-flow-hooks.ts",)
+_OMP_EXTENSION_MARKER = "agent-flow: managed omp extension"
 
 
 @dataclass(frozen=True)
@@ -86,6 +96,7 @@ def scan(
     host: str | None = None,
     env: dict[str, str] | None = None,
     workflow_skills: Sequence[str] = (),
+    home: Path | None = None,
 ) -> CatalogScan:
     resolved_host = active_host(env) if host is None else host
     roots = skill_roots(project_root, profile=profile, host=resolved_host, env=env)
@@ -96,6 +107,7 @@ def scan(
     findings.extend(_declaration_findings(profile, entries))
     findings.extend(_unrouted_findings(profile, entries, workflow_skills))
     findings.extend(_collision_findings(files, entries))
+    findings.extend(_unowned_adapter_findings(Path.home() if home is None else home))
     if shadowed:
         findings.append(
             CatalogFinding(
@@ -137,6 +149,56 @@ def _collision_findings(
         for name, paths in sorted(seen.items())
         if len(paths) > 1
     ]
+
+
+
+# marker는 파일 첫 줄에 있다. 전체를 읽을 이유가 없고, 상한이 없으면 진단이 임의 크기
+# 파일에 끌려간다.
+_ADAPTER_HEAD_BYTES = 64 * 1024
+
+
+def _read_plain_file_head(path: Path) -> str | None:
+    """열어 둔 descriptor로 검증하고 앞부분만 읽는다.
+
+    `lstat` 후 경로를 다시 열면 그 사이에 symlink나 FIFO로 바뀔 수 있다. 그러면 이
+    자리에 없는 남의 파일로 소유권을 판정하거나 열기에서 멈춘다. `O_NOFOLLOW`로 링크를
+    거부하고 `O_NONBLOCK`으로 FIFO 대기를 끊은 뒤, 같은 descriptor를 `fstat`으로 본다.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            return None
+        return os.read(descriptor, _ADAPTER_HEAD_BYTES).decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+
+
+def _unowned_adapter_findings(home: Path) -> list[CatalogFinding]:
+    """kit 표지를 달았지만 kit이 관리하지 않는 자리에 있는 host adapter."""
+    findings: list[CatalogFinding] = []
+    for relative in _UNMANAGED_GLOBAL_ADAPTERS:
+        path = home / relative
+        text = _read_plain_file_head(path)
+        if text is None:
+            continue
+        if _OMP_EXTENSION_MARKER not in text:
+            continue
+        findings.append(
+            CatalogFinding(
+                UNOWNED_ADAPTER,
+                str(path),
+                "kit이 설치하지 않는 자리에 kit 표지를 단 adapter가 있다. "
+                "install이 갱신하지 못하므로 kit과 어긋난 채로 tool 호출을 막을 수 있다",
+                "이 파일의 출처를 확인하고 직접 옮기거나 지운다. install은 이 경로를 건드리지 않는다",
+            )
+        )
+    return findings
 
 
 def write_lock(project_root: Path, result: CatalogScan) -> Path:

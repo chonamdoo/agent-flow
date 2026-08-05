@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 KIT_ROOT = Path(__file__).resolve().parents[1]
 BIN = KIT_ROOT / "bin"
@@ -513,7 +514,7 @@ _SHARED_ONLY = (
     "productBriefSkillMarkdown", "pushWatchSkillMarkdown", "hookScriptCommand",
     "isPruneBackupName", "writePruneBackup", "managedHookScriptName",
     "managedHookDigests", "codexConfigPath", "ompExtensionIsKitOwned",
-    "removeOmpHooksExtension", "safeSkillName", "skillRequires",
+    "removeOmpHooksExtension", "safeSkillName",
     "readJsonIfExists", "retiredHookScripts", "isRetiredHookCommand",
     "pruneRetiredHooks", "pruneRetiredHookScripts", "mergeHookSettings",
     "mergeHookConfig", "claudeHooksSettings", "codexHooksSettings",
@@ -585,3 +586,203 @@ def test_hooks_disabled_is_passed_in_not_read_from_the_entry_point():
         assert signature is not None, name
         assert "hooksDisabled" in signature.group(1), name
         assert "hooksDisabled =" not in signature.group(1), name
+
+
+
+
+def _frontmatter_parse(text: str) -> dict:
+    """설치 경로가 실제로 쓰는 파서로 파싱한다. 텍스트 검사가 아니라 동작 검사다."""
+    module = KIT_ROOT / "lib" / "frontmatter.mjs"
+    return json.loads(
+        subprocess.run(
+            (
+                _node(),
+                "--input-type=module",
+                "-e",
+                "import { parseSimpleYaml } from "
+                f"{json.dumps(str(module))};"
+                "let raw = '';"
+                "process.stdin.on('data', (chunk) => { raw += chunk; });"
+                "process.stdin.on('end', () => "
+                "process.stdout.write(JSON.stringify(parseSimpleYaml(raw))));",
+            ),
+            input=text,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=60,
+        ).stdout
+    )
+
+
+def test_frontmatter_parser_is_single_source():
+    """반증: 파서가 세 벌이면 한쪽만 고쳐도 index와 선택 로직이 갈라진다."""
+    definers = [
+        name
+        for name, text in _js_sources().items()
+        if "function parseSimpleYaml(" in text
+    ]
+    assert definers == ["lib/frontmatter.mjs"], (
+        f"parseSimpleYaml()을 정의하는 파일이 하나가 아니다: {definers}"
+    )
+
+
+def test_frontmatter_folded_scalar_matches_python():
+    """반증: `description: >`가 `\">\"` 한 글자로 기록되면 JS와 Python이 갈라진다."""
+    text = "name: x\ndescription: >\n  Line one continues\n  here and here.\n  Second sentence.\n"
+    assert _frontmatter_parse(text)["description"] == yaml.safe_load(text)["description"]
+
+
+def test_frontmatter_literal_scalar_matches_python():
+    text = "name: y\ndescription: |\n  Line one\n  Line two\n"
+    assert _frontmatter_parse(text)["description"] == yaml.safe_load(text)["description"]
+
+
+def test_frontmatter_plain_scalar_and_lists_unchanged():
+    """반증: block scalar를 붙이며 기존 단일 행/리스트 파싱이 깨지면 설치가 조용히 바뀐다."""
+    text = (
+        "name: z\n"
+        "description: one line\n"
+        "requires:\n"
+        "  - alpha\n"
+        "  - beta\n"
+        "tags: [a, b]\n"
+    )
+    parsed = _frontmatter_parse(text)
+    assert parsed["name"] == "z"
+    assert parsed["description"] == "one line"
+    assert parsed["requires"] == ["alpha", "beta"]
+    assert parsed["tags"] == ["a", "b"]
+
+
+def test_installed_skill_descriptions_match_python():
+    """반증: 실제 배포 skill 중 block scalar를 쓰는 것이 index에 잘못 기록된다."""
+    mismatches = []
+    for skill in sorted((KIT_ROOT / "skills").glob("*/SKILL.md")):
+        text = skill.read_text(encoding="utf-8")
+        if not text.startswith("---\n"):
+            continue
+        end = text.index("\n---", 4)
+        frontmatter = text[4:end + 1]
+        expected = yaml.safe_load(frontmatter) or {}
+        parsed = _frontmatter_parse(frontmatter)
+        if str(expected.get("description", "")) != str(parsed.get("description", "")):
+            mismatches.append(skill.parent.name)
+    assert mismatches == [], f"JS/Python description이 갈린 skill: {mismatches}"
+
+
+def test_frontmatter_crlf_summary_matches_python():
+    """반증: CRLF 파일에서 JS만 summary가 비면 index와 프롬프트가 다시 갈린다."""
+    module = KIT_ROOT / "lib" / "frontmatter.mjs"
+    text = "---\r\nname: custom\r\ndescription: First sentence. Second sentence.\r\n---\r\n\r\n# custom\r\n"
+    summary = subprocess.run(
+        (
+            _node(),
+            "--input-type=module",
+            "-e",
+            "import { skillSummaryFromMarkdown } from "
+            f"{json.dumps(str(module))};"
+            "let raw = '';"
+            "process.stdin.on('data', (chunk) => { raw += chunk; });"
+            "process.stdin.on('end', () => process.stdout.write(skillSummaryFromMarkdown(raw)));",
+        ),
+        input=text,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=60,
+    ).stdout
+    frontmatter = text.split("\r\n---", 1)[0][4:]
+    assert summary == yaml.safe_load(frontmatter)["description"].split(". ")[0] + "."
+
+
+def test_frontmatter_splitter_is_single_source():
+    """반증: 분리기가 여러 벌이면 CRLF 같은 입력에서 진입점마다 다른 metadata를 본다."""
+    definers = [
+        name
+        for name, text in _js_sources().items()
+        if "function splitSkillFrontmatter(" in text or "export function splitFrontmatter(" in text
+    ]
+    assert definers == ["lib/frontmatter.mjs"], (
+        f"frontmatter 분리기를 정의하는 파일이 하나가 아니다: {definers}"
+    )
+
+
+def test_crlf_skill_metadata_matches_python():
+    """반증: CRLF 파일에서 name/description/requires가 비면 설치 선택과 index가 갈린다."""
+    text = (
+        "---\r\nname: crlf-skill\r\ndescription: First sentence. Second sentence.\r\n"
+        "requires:\r\n  - other-skill\r\n---\r\n\r\n# crlf-skill\r\n"
+    )
+    module = KIT_ROOT / "lib" / "frontmatter.mjs"
+    parsed = json.loads(
+        subprocess.run(
+            (
+                _node(),
+                "--input-type=module",
+                "-e",
+                "import { parseSimpleYaml, splitFrontmatter } from "
+                f"{json.dumps(str(module))};"
+                "let raw = '';"
+                "process.stdin.on('data', (chunk) => { raw += chunk; });"
+                "process.stdin.on('end', () => process.stdout.write("
+                "JSON.stringify(parseSimpleYaml(splitFrontmatter(raw) ?? ''))));",
+            ),
+            input=text,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=60,
+        ).stdout
+    )
+    expected = yaml.safe_load(text.split("\r\n---", 1)[0][4:])
+    assert parsed["name"] == expected["name"]
+    assert parsed["description"] == expected["description"]
+    assert parsed["requires"] == expected["requires"]
+
+
+def test_frontmatter_block_scalar_shapes_match_python():
+    """반증: 접기·chomping·more-indented 처리가 PyYAML과 갈리면 같은 SKILL.md가 두 값이 된다."""
+    module = KIT_ROOT / "lib" / "frontmatter.mjs"
+    shapes = (
+        "d: >\n  a\n\n  b\n",
+        "d: >\n  a\n\n\n  b\n",
+        "d: >-\n  a\n  b\n",
+        "d: |+\n  a\n\n",
+        "d: |\n  a\n\n  b\n",
+        "d: >\n  a\n    indented\n  b\n",
+        "d: >\n  a\n    i1\n    i2\n  b\n",
+        "d: >\n  a\n\n    ind\n  b\n",
+        "d: >\n    only\n",
+        "d: |\n",
+    )
+    mismatches = []
+    for text in shapes:
+        parsed = json.loads(
+            subprocess.run(
+                (
+                    _node(),
+                    "--input-type=module",
+                    "-e",
+                    "import { parseSimpleYaml } from "
+                    f"{json.dumps(str(module))};"
+                    "let raw = '';"
+                    "process.stdin.on('data', (chunk) => { raw += chunk; });"
+                    "process.stdin.on('end', () => "
+                    "process.stdout.write(JSON.stringify(parseSimpleYaml(raw).d)));",
+                ),
+                input=text,
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=60,
+            ).stdout
+        )
+        expected = yaml.safe_load(text)["d"]
+        if parsed != expected:
+            mismatches.append((text, parsed, expected))
+    assert mismatches == []

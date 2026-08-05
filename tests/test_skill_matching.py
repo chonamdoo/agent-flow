@@ -21,7 +21,12 @@ from agent_flow.core.skill_matching import (
     routable_names,
 )
 from agent_flow.core.local_skills import local_skill_prompt_block
-from agent_flow.core.skill_resolver import SkillCatalogEntry, resolve_phase_skills
+from agent_flow.core.skill_resolver import (
+    SkillCatalogEntry,
+    SkillRoot,
+    discover_skill_catalog,
+    resolve_phase_skills,
+)
 
 
 def _entry(name: str, description: str = "", source: str = "host") -> SkillCatalogEntry:
@@ -436,3 +441,110 @@ def test_a_vendor_skill_installed_under_the_project_routes(tmp_path, monkeypatch
     )
     assert matched.exists
     assert matched.source == "vendor"
+
+
+def _write_skill(directory: Path, name: str, body: str) -> Path:
+    path = directory / name / "SKILL.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def _host_root(directory: Path) -> SkillRoot:
+    return SkillRoot(source="host", template=str(directory / "{skill}" / "SKILL.md"))
+
+
+def _external_profile(budget: int | None = None) -> dict:
+    external = {
+        "enabled": True,
+        "domains": [
+            {"id": "d", "terms": ["compose"], "phases": ["implementation"]},
+        ],
+    }
+    if budget is not None:
+        external["required_budget_bytes"] = budget
+    return {"skills": {"external": external}}
+
+
+def _sized_host_skill(directory: Path, name: str, size: int) -> Path:
+    body = (
+        f"---\nname: {name}\ndescription: Compose guidance for {name}.\n---\n\n"
+        + "x" * size
+    )
+    return _write_skill(directory, name, body)
+
+
+def _external_matches(tmp_path: Path, sizes: dict[str, int], budget: int | None):
+    from agent_flow.core.skill_matching import match_external
+
+    host = tmp_path / "host"
+    for name, size in sizes.items():
+        _sized_host_skill(host, name, size)
+    catalog = discover_skill_catalog(tmp_path, (_host_root(host),))
+    return match_external(
+        _external_profile(budget),
+        catalog,
+        phase_id="implement",
+        task_text="compose work",
+    )
+
+
+def test_external_required_respects_byte_budget(tmp_path: Path) -> None:
+    """반증: 개수만 세면 71KB 한 장이 6장 몫의 열람을 요구하고도 캡을 통과한다."""
+    sizes = {"compose-a": 20_000, "compose-b": 20_000, "compose-c": 20_000}
+    matches = _external_matches(tmp_path, sizes, 24_000)
+    required = [item.name for item in matches if item.tier == "required"]
+    offered = [item.name for item in matches if item.tier == "offered"]
+    assert len(required) < len(sizes), "예산을 넘겼는데 전부 required로 남았다"
+    assert set(required) | set(offered) == set(sizes), "강등된 skill이 사라졌다"
+
+
+def test_external_budget_admits_the_document_that_crosses(tmp_path: Path) -> None:
+    """반증: 넘긴 문서를 건너뛰면 순위가 뒤집혀 큰 정확한 skill이 작은 것에 밀린다.
+
+    예산 아래에서 시작한 문서는 경계를 넘겨도 들어가고, 거기서 멈춘다.
+    """
+    sizes = {"compose-a": 20_000, "compose-b": 20_000, "compose-c": 5_000}
+    matches = _external_matches(tmp_path, sizes, 24_000)
+    required = [item.name for item in matches if item.tier == "required"]
+    offered = [item.name for item in matches if item.tier == "offered"]
+    assert required == ["compose-a", "compose-b"]
+    assert offered == ["compose-c"]
+
+
+def test_external_budget_applies_without_profile_configuration(tmp_path: Path) -> None:
+    """반증: 기본이 꺼짐이면 아무 profile도 켜지 않아 예산이 죽은 코드가 된다."""
+    sizes = {"compose-a": 30_000, "compose-b": 30_000}
+    matches = _external_matches(tmp_path, sizes, None)
+    required = [item.name for item in matches if item.tier == "required"]
+    assert required == ["compose-a"]
+
+
+def test_external_budget_zero_disables_the_ceiling(tmp_path: Path) -> None:
+    """profile이 명시적으로 끌 수 있어야 한다. `0`이 그 해제 값이다."""
+    sizes = {"compose-a": 30_000, "compose-b": 30_000}
+    matches = _external_matches(tmp_path, sizes, 0)
+    required = [item.name for item in matches if item.tier == "required"]
+    assert sorted(required) == ["compose-a", "compose-b"]
+
+
+def test_external_budget_admits_an_oversize_first_document(tmp_path: Path) -> None:
+    """설계값 `external_budget_admit_crossing_doc: true`. 예산보다 큰 문서라도 순위가 앞이면
+    넣고 멈춘다 — 건너뛰면 가장 구체적인 skill이 작고 덜 관련된 것에 밀린다."""
+    sizes = {"compose-a": 71_590, "compose-b": 5_000}
+    matches = _external_matches(tmp_path, sizes, 24_000)
+    required = [item.name for item in matches if item.tier == "required"]
+    offered = [item.name for item in matches if item.tier == "offered"]
+    assert required == ["compose-a"]
+    assert offered == ["compose-b"]
+
+
+def test_external_budget_stops_after_the_crossing_document(tmp_path: Path) -> None:
+    """초과는 마지막에 들어간 문서 하나로 끝난다. 그 뒤 매치는 전부 offered다."""
+    budget = 24_000
+    sizes = {f"compose-{index}": 9_000 for index in range(6)}
+    matches = _external_matches(tmp_path, sizes, budget)
+    required = [item for item in matches if item.tier == "required"]
+    total = sum(item.path.stat().st_size for item in required if item.path is not None)
+    assert len(required) == 3
+    assert total - 9_000 < budget

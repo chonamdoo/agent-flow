@@ -13,9 +13,10 @@ import crypto from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { SKILL_DEPENDENCIES, mergeInstallSelectionWithPrevious, resolveInstallSelection } from "../lib/skill-selection.mjs";
+import { mergeInstallSelectionWithPrevious, resolveInstallSelection } from "../lib/skill-selection.mjs";
 import { OMP_EXTENSION_MARKER, ompHooksExtensionSource } from "../lib/omp-hooks-extension.mjs";
 import { MANAGED_HOOK_SCRIPTS, RETIRED_MANAGED_HOOK_SCRIPTS } from "../lib/managed-hooks.mjs";
+import { parseSimpleYaml, splitFrontmatter } from "../lib/frontmatter.mjs";
 import {
   activeInstallProfileIds,
   AGENT_FLOW_COMMAND,
@@ -83,7 +84,6 @@ import {
   SKILL_INDEX_START,
   SKILL_UPGRADE_NOTICE_PREFIX,
   skillIndexBlock,
-  skillRequires,
   syncKitAssets,
   tomlBasicString,
   uniqueStrings,
@@ -218,7 +218,7 @@ function bootstrapMarkdown(label) {
 
 function bootstrapLocalSkillName(skillPath, fallback) {
   try {
-    const frontmatter = splitSkillFrontmatter(fs.readFileSync(skillPath, "utf8"));
+    const frontmatter = splitFrontmatter(fs.readFileSync(skillPath, "utf8"));
     if (frontmatter) {
       const parsed = String(parseSimpleYaml(frontmatter).name || "").trim();
       if (parsed) {
@@ -747,7 +747,7 @@ function discoverSkills(baseDir, source, ignoredNames = new Set(), allowedNames 
 }
 
 function parseSkillMetadata(text, fallbackName) {
-  const frontmatter = splitSkillFrontmatter(text);
+  const frontmatter = splitFrontmatter(text);
   const metadata = frontmatter ? parseSimpleYaml(frontmatter) : {};
   const warnings = [];
   const parsedName = String(metadata.name || fallbackName);
@@ -761,7 +761,7 @@ function parseSkillMetadata(text, fallbackName) {
     if (knownHosts.has(normalized)) hosts.push(normalized);
     else if (normalized) warnings.push(`unknown host ignored: ${normalized}`);
   }
-  const body = text.replace(/^---\n[\s\S]*?\n---\n?/, "");
+  const body = text.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "");
   const useWhen = body.split(/\r?\n/).find((line) => /^\s*use when\b/i.test(line));
   return {
     id: String(metadata.id || name),
@@ -775,7 +775,7 @@ function parseSkillMetadata(text, fallbackName) {
     platforms: arrayValue(metadata.platforms),
     stacks: arrayValue(metadata.stacks),
     dependencies: uniqueStrings([...arrayValue(metadata.dependencies), ...arrayValue(metadata.requires)]),
-    requires: uniqueStrings([...skillRequires(name), ...arrayValue(metadata.dependencies), ...arrayValue(metadata.requires)]),
+    requires: uniqueStrings([...arrayValue(metadata.dependencies), ...arrayValue(metadata.requires)]),
     optionalDependencies: arrayValue(metadata.optionalDependencies),
     references: arrayValue(metadata.references),
     hostSupport: arrayValue(metadata.hostSupport),
@@ -845,42 +845,6 @@ function lstatIfExists(pathName) {
     if (error && error.code === "ENOENT") return null;
     throw error;
   }
-}
-
-function splitSkillFrontmatter(text) {
-  if (!text.startsWith("---\n")) return null;
-  const end = text.indexOf("\n---\n", 4);
-  return end === -1 ? null : text.slice(4, end);
-}
-
-function parseSimpleYaml(text) {
-  const metadata = {};
-  let listKey = null;
-  for (const line of text.split(/\r?\n/)) {
-    const listItem = line.match(/^\s+-\s*(.+)$/);
-    if (listItem && listKey) {
-      metadata[listKey].push(listItem[1].trim().replace(/^['"]|['"]$/g, ""));
-      continue;
-    }
-    const match = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
-    if (!match) {
-      listKey = null;
-      continue;
-    }
-    const raw = match[2].trim();
-    const key = match[1];
-    if (raw.startsWith("[") && raw.endsWith("]")) {
-      metadata[key] = raw.slice(1, -1).split(",").map((item) => item.trim().replace(/^['"]|['"]$/g, "")).filter(Boolean);
-      listKey = null;
-    } else if (raw === "") {
-      metadata[key] = [];
-      listKey = key;
-    } else {
-      metadata[key] = raw.replace(/^['"]|['"]$/g, "");
-      listKey = null;
-    }
-  }
-  return metadata;
 }
 
 function linkProjectSkill(skill, host, previousIndex, forceManaged = false) {
