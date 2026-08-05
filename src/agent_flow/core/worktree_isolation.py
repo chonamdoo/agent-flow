@@ -1418,6 +1418,38 @@ class LeaderDrift:
     after: LeaderSnapshot
 
 
+STATUS_DRIFT_KIND = "status"
+
+
+def leader_drift_paths(drift: "LeaderDrift") -> tuple[str, ...]:
+    """달라진 경로 **전부**. ``LeaderDrift.reasons``와 달리 자르지 않는다.
+
+    `_snapshot_diff`는 사람이 읽는 한 줄이라 8개에서 끊는다. 그 잘린 목록을
+    승인의 근거로 쓰면 승인은 관측 전체에 붙는데 공개는 8개까지만 되고, 잘림
+    개수는 leader에 쓸 수 있는 쪽이 스스로 만들 수 있다 — 데코이 8개 뒤에 심은
+    hook이 한 번도 보이지 않은 채 새 기준선이 된다(실측).
+    """
+    known = set(drift.before.records())
+    seen = set(drift.after.records())
+    changed = (seen - known) | (known - seen)
+    return tuple(sorted({_drift_record_path(record) for record in changed}))
+
+
+def _drift_record_path(record: str) -> str:
+    """한 레코드가 가리키는 경로. 같은 파일의 status 줄과 stamp 줄을 한 이름으로 접는다.
+
+    접지 않으면 파일 하나가 목록에 두 번 뜨고, 크기·digest가 섞인 줄이 경로처럼
+    보여 사용자가 무엇을 승인하는지 읽기 어려워진다.
+    """
+    fields = record.split(" ")
+    if fields[:1] == ["unwatched"]:
+        fields = fields[1:]
+    # `stamp <relative> <size> <digest>` — 뒤 둘은 내용 지표지 경로가 아니다.
+    if len(fields) == 4 and fields[0] == "stamp":
+        return fields[1]
+    return _status_record_path(record)
+
+
 
 
 class LeaderDriftError(WorktreeIsolationError):

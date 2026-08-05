@@ -67,11 +67,15 @@ from agent_flow.core.worktrees import (
 from agent_flow.core.worktree_isolation import (
     HOST_PHASE_LEADER_BASELINE_KEY,
     LEADER_SNAPSHOT_VERSION,
+    STATUS_DRIFT_KIND,
+    LeaderDrift,
+    LeaderDriftError,
     LeaderSnapshot,
     WorktreeIsolationError,
     assert_leader_unchanged,
     capture_leader_snapshot,
     git_safe,
+    leader_drift_paths,
     leader_root_for,
     leader_snapshot_payload,
     recorded_snapshot_version,
@@ -116,6 +120,12 @@ _HOST_PHASE_LEADER_BASELINE = HOST_PHASE_LEADER_BASELINE_KEY
 # 별개 축이고 `LeaderSnapshot.version`이 들고 있다. 이 값은 `run_id`/`phase_id`/
 # `phase_index`/`leader_root`/`snapshot`의 의미가 바뀔 때만 올린다.
 _HOST_PHASE_BASELINE_RECORD_VERSION = 1
+# 사용자가 확인한 leader 변경을 담는 자리. baseline과 **다른 키**여야 한다 —
+# baseline 레코드는 필드 집합을 등호로 검사하므로 여기에 얹으면 malformed가 된다.
+_HOST_PHASE_LEADER_DRIFT = "host_phase_leader_drift"
+_LEADER_DRIFT_ACKNOWLEDGEMENTS = "leader_drift_acknowledgements"
+_HOST_PHASE_DRIFT_RECORD_VERSION = 1
+ACCEPT_LEADER_DRIFT_FLAG = "--accept-leader-drift"
 PROTECTED_BRANCHES = frozenset({"main", "master", "develop"})
 CONVENTIONAL_COMMIT_RE = re.compile(
     r"^(?:feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)"
@@ -172,6 +182,7 @@ class Runner:
         requested_run_id: str | None = None,
         checkout_identity: str | None = None,
         checkout_registration_identity: str | None = None,
+        accept_leader_drift: bool = False,
     ) -> None:
         if architecture not in ARCHITECTURE_MODES:
             raise ValueError(f"invalid architecture mode: {architecture!r}")
@@ -185,6 +196,7 @@ class Runner:
         self.requested_run_id = requested_run_id
         self.checkout_identity = checkout_identity
         self.checkout_registration_identity = checkout_registration_identity
+        self.accept_leader_drift = accept_leader_drift
         self.kit_root = _find_kit_root()
         if run_dir is not None:
             meta = read_meta(run_dir)
@@ -601,8 +613,75 @@ class Runner:
                 f"v{LEADER_SNAPSHOT_VERSION}",
             )
             return None
+        accepted = self._accept_recorded_leader_drift(
+            meta=meta, raw=raw, leader_root=leader_root
+        )
+        if accepted is not None:
+            return accepted
         self._assert_leader_unchanged(leader_root, snapshot)
+        if meta.pop(_HOST_PHASE_LEADER_DRIFT, None) is not None:
+            # leader가 스스로 돌아왔다. 남은 보고 기록은 나중에 같은 상태가 우연히
+            # 재현될 때 승인을 대신 서 줄 수 있으므로 여기서 버린다.
+            assert self.run_dir is not None
+            write_meta(self.run_dir, meta)
         return snapshot
+
+    def _accept_recorded_leader_drift(
+        self,
+        *,
+        meta: dict[str, Any],
+        raw: dict[str, Any],
+        leader_root: Path,
+    ) -> LeaderSnapshot | None:
+        """사용자가 확인한 leader 변경만 새 기준선으로 굳힌다. 아니면 ``None``.
+
+        경로를 비교에서 빼지 않는 이유: ignored 경로에는 빌드 산출물만 있는 게
+        아니라 host가 **실행하는** 것도 있다(`.agent-flow/scripts/hooks/`,
+        `.claude/hooks/`, `.venv/bin`). 예외 목록을 만들면 그 자리의 변조가 영원히
+        조용해진다. 그래서 탐지 범위는 그대로 두고 응답만 바꾼다 — 무엇이 바뀌었는지
+        전부 보여주고, 사람이 받아들인 그 상태에서 다시 시작한다.
+
+        승인은 **보여준 그 상태**에만 붙는다. 보고 이후 leader가 또 움직였으면
+        기록을 버리고 통과시키지 않는다. 그러지 않으면 승인 한 번이 이후의 모든
+        변경까지 함께 덮어, 사람이 본 적 없는 오염이 기준선이 된다.
+        """
+        assert self.run_dir is not None
+        if not self.accept_leader_drift:
+            return None
+        recorded = meta.get(_HOST_PHASE_LEADER_DRIFT)
+        if (
+            not isinstance(recorded, dict)
+            or recorded.get("version") != _HOST_PHASE_DRIFT_RECORD_VERSION
+            or recorded.get("run_id") != self.run_dir.name
+            or recorded.get("kind") != STATUS_DRIFT_KIND
+            or not isinstance(recorded.get("observed"), dict)
+        ):
+            return None
+        observed = capture_leader_snapshot(leader_root)
+        if leader_snapshot_payload(observed) != recorded["observed"]:
+            # 보고한 상태가 아니다. 기록을 버려 다음 검사가 현재 차이를 새로 보고한다.
+            meta.pop(_HOST_PHASE_LEADER_DRIFT, None)
+            write_meta(self.run_dir, meta)
+            return None
+        paths = [str(path) for path in recorded.get("paths") or ()]
+        meta[_HOST_PHASE_LEADER_BASELINE] = {
+            **raw,
+            "snapshot": leader_snapshot_payload(observed),
+        }
+        meta.setdefault(_LEADER_DRIFT_ACKNOWLEDGEMENTS, []).append(
+            {
+                "at": datetime.now(timezone.utc).isoformat(),
+                "phase_id": raw.get("phase_id"),
+                "paths": paths,
+            }
+        )
+        meta.pop(_HOST_PHASE_LEADER_DRIFT, None)
+        write_meta(self.run_dir, meta)
+        print(
+            f"  [accepted] leader drift acknowledged ({len(paths)} paths); "
+            "re-baselined to the state reported above"
+        )
+        return observed
 
     def _migrate_stale_host_phase_baseline(
         self, meta: dict[str, Any], recorded: str, expected: str
@@ -625,12 +704,50 @@ class Runner:
         self, leader_root: Path, snapshot: LeaderSnapshot
     ) -> None:
         assert self.run_dir is not None
-        assert_leader_unchanged(
-            leader_root,
-            snapshot,
-            run_id=self.run_dir.name,
-            worker_root=self.project_root,
-        )
+        try:
+            assert_leader_unchanged(
+                leader_root,
+                snapshot,
+                run_id=self.run_dir.name,
+                worker_root=self.project_root,
+            )
+        except LeaderDriftError as exc:
+            paths = self._record_leader_drift(exc.drift)
+            if exc.drift.kind != STATUS_DRIFT_KIND:
+                # HEAD 축은 "Investigate before continuing"이 안내다. 여기에 해제
+                # 명령을 광고하면 `reset --hard`로 사라진 커밋까지 승인된다.
+                raise
+            # 잘리지 않은 전체 목록. 승인은 관측 전체에 붙으므로 공개도 전체여야
+            # 한다 — 데코이 뒤에 숨긴 경로가 안 보인 채 기준선이 되면 안 된다.
+            print(f"  [leader-drift] {len(paths)} changed paths:")
+            for path in paths:
+                print(f"    {path}")
+            raise LeaderDriftError(
+                f"{exc} All {len(paths)} changed paths are listed above. "
+                "Yours and not the worker's? "
+                f"`{self.next_command} {ACCEPT_LEADER_DRIFT_FLAG}` re-baselines to "
+                "exactly that state and records the acknowledgement.",
+                exc.drift,
+            ) from None
+
+    def _record_leader_drift(self, drift: LeaderDrift) -> tuple[str, ...]:
+        """보고한 상태를 남기고 공개할 경로를 돌려준다.
+
+        승인은 이 기록과 대조해서만 통한다. `reasons`가 아니라 `paths`를 남기는
+        이유는 `reasons`가 8개에서 잘리기 때문이다.
+        """
+        assert self.run_dir is not None
+        paths = leader_drift_paths(drift)
+        meta = read_meta(self.run_dir)
+        meta[_HOST_PHASE_LEADER_DRIFT] = {
+            "version": _HOST_PHASE_DRIFT_RECORD_VERSION,
+            "run_id": self.run_dir.name,
+            "kind": drift.kind,
+            "paths": list(paths),
+            "observed": leader_snapshot_payload(drift.after),
+        }
+        write_meta(self.run_dir, meta)
+        return paths
 
     def _persist_host_phase_leader_baseline(
         self,

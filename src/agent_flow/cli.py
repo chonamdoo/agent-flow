@@ -167,7 +167,13 @@ from agent_flow.core.workflow import load_workflow
 from agent_flow.eval import run_eval
 from agent_flow.memory.entities import EntityMemoryIndex
 from agent_flow.artifact import find_active_run, mark_inactive, read_meta
-from agent_flow.runner import Runner, ResumeMode, _find_kit_root, _load_profile
+from agent_flow.runner import (
+    ACCEPT_LEADER_DRIFT_FLAG,
+    Runner,
+    ResumeMode,
+    _find_kit_root,
+    _load_profile,
+)
 from agent_flow.providers.host import list_host_providers
 from agent_flow.providers.subprocess import (
     ProviderCommand,
@@ -211,6 +217,14 @@ def main(argv: list[str] | None = None) -> int:
     continue_parser.add_argument("--root", default=".")
     continue_parser.add_argument("--worktree")
     continue_parser.add_argument("--checkout-identity", help=argparse.SUPPRESS)
+    continue_parser.add_argument(
+        ACCEPT_LEADER_DRIFT_FLAG,
+        action="store_true",
+        help=(
+            "accept the leader change reported by the previous run and re-baseline "
+            "to it; only valid for the exact state that was reported"
+        ),
+    )
 
     abort_parser = subparsers.add_parser("abort")
     abort_parser.add_argument("--root", default=".")
@@ -794,6 +808,7 @@ def main(argv: list[str] | None = None) -> int:
                 state_root=state_root,
                 config_root=root,
                 next_command=_continue_command(root, args.worktree),
+                accept_leader_drift=args.accept_leader_drift,
             ).run(mode=ResumeMode.RESUME)
         except (OSError, ValueError, RuntimeError, KeyError, subprocess.CalledProcessError) as exc:
             # 보여야 사용자가 다음 수를 안다.

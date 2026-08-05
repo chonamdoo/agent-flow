@@ -29,6 +29,60 @@ def command_from(value):
                 return found
     return ''
 
+_CWD_KEYS = ('cwd', 'workdir', 'working_directory')
+# host_write_boundary._tool_input과 같은 키·같은 순서. 첫 번째로 **존재하는** 키가
+# 이긴다. 여기서 tool_input만 읽으면 payload를 input/parameters로 싣는 host에서
+# command_from은 재귀로 명령을 찾아 검사하는데 cwd만 버려진다 — 세션이 worktree에
+# 서 있으면 leader의 main 커밋이 통과한다.
+_TOOL_INPUT_KEYS = ('tool_input', 'input', 'parameters')
+
+def tool_input_of(value):
+    if not isinstance(value, dict):
+        return None
+    for key in _TOOL_INPUT_KEYS:
+        if key in value:
+            container = value[key]
+            return container if isinstance(container, dict) else None
+    return None
+
+def tool_cwd_from(value):
+    # command_from과 달리 payload 전체를 뒤지지 않는다. 깊은 중첩은 RecursionError를
+    # 내는데 이 python의 stderr는 버려지므로 판정이 빈 문자열이 되고 가드가 통째로
+    # 사라진다. 게다가 무관한 하위 dict(tool_input.env.cwd 등)의 값은 실행 자리를
+    # 옮기지 않으면서 판정만 옮긴다. 못 찾으면 세션 cwd로 접히므로 차단 쪽으로 실패한다.
+    tool_input = tool_input_of(value)
+    if tool_input is None:
+        return ''
+    for key in _CWD_KEYS:
+        if isinstance(tool_input.get(key), str) and tool_input[key].strip():
+            return tool_input[key].strip()
+    return ''
+
+def payload_cwd(value):
+    if isinstance(value, dict):
+        raw = value.get('cwd')
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    return ''
+
+def resolve_cwd(raw, base):
+    # 실재하지 않는 선언은 자리를 옮기지 못한다. 그 경로에서 브랜치를 물으면
+    # git이 실패하고, 실패는 미판정이라 보호 브랜치 명령이 그대로 통과한다.
+    if not raw:
+        return base
+    candidate = os.path.expanduser(raw)
+    if not os.path.isabs(candidate):
+        candidate = os.path.join(base, candidate)
+    candidate = os.path.abspath(candidate)
+    return candidate if os.path.isdir(candidate) else base
+
+def declared_cwd(value):
+    # 세션 프로세스의 cwd는 host가 세션을 연 자리(대개 leader)다. 도구 호출이
+    # 선언한 자리와 다르면 worktree에서 도는 명령을 leader의 브랜치로 판정한다.
+    # host_write_boundary._declared_command_cwd와 같은 증거·순서를 쓴다: payload
+    # cwd를 기준으로 tool cwd를 풀고, 명령 앞머리의 cd는 inspect_tokens가 얹는다.
+    return resolve_cwd(tool_cwd_from(value), resolve_cwd(payload_cwd(value), os.getcwd()))
+
 def skip_env(tokens):
     index = 1
     while index < len(tokens):
@@ -120,8 +174,8 @@ def inspect_tokens(tokens, cwd):
             return branch, cwd
     return '', cwd
 
-def classify(command):
-    cwd_stack = [os.getcwd()]
+def classify(command, cwd):
+    cwd_stack = [cwd]
     current = []
     for token in shell_tokens(command):
         if token in ';&|':
@@ -152,7 +206,7 @@ def classify(command):
     return ''
 
 d = json.load(sys.stdin)
-print(classify(command_from(d)))
+print(classify(command_from(d), declared_cwd(d)))
 " 2>/dev/null <<< "$INPUT")
 
 if [ -z "$PROTECTED_BRANCH" ]; then

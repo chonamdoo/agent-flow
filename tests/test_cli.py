@@ -8694,6 +8694,236 @@ if (codexContext !== undefined) {
                 self.assertEqual(blocked_after_subshell.returncode, 2, command)
                 self.assertIn("보호 브랜치", blocked_after_subshell.stderr)
 
+    def test_guard_protected_branch_reads_the_declared_tool_cwd(self) -> None:
+        """세션 프로세스의 cwd가 아니라 도구 호출이 선언한 자리로 판정해야 한다.
+
+        host는 세션을 leader에서 연다. 그 자리를 브랜치 판정에 쓰면 worktree를
+        tool cwd로 정확히 넘긴 커밋이 leader의 main으로 읽혀 막히고, 반대로
+        leader를 향한 커밋이 세션이 서 있는 worktree 이름으로 통과한다.
+        `host_write_boundary._session_cwd`는 이미 선언된 cwd를 쓴다.
+        """
+        script = Path(__file__).resolve().parents[1] / "scripts" / "hooks" / "guard-protected-branch.sh"
+
+        def guard(
+            payload: dict, cwd: Path, env: dict | None = None
+        ) -> subprocess.CompletedProcess:
+            return subprocess.run(
+                ("bash", str(script)),
+                cwd=cwd,
+                input=json.dumps(payload),
+                text=True,
+                capture_output=True,
+                check=False,
+                env={**os.environ, **env} if env else None,
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_git_repo(root)
+            feature_worktree = root / "feature-worktree"
+            subprocess.run(
+                ("git", "worktree", "add", "-q", "-b", "feat/test", str(feature_worktree), "main"),
+                cwd=root,
+                check=True,
+            )
+
+            for key in ("cwd", "workdir", "working_directory"):
+                allowed = guard(
+                    {
+                        "tool_name": "Bash",
+                        "tool_input": {"command": "git commit -m test", key: str(feature_worktree)},
+                    },
+                    root,
+                )
+                self.assertEqual(allowed.returncode, 0, f"{key}: {allowed.stderr}")
+
+            allowed_payload_cwd = guard(
+                {
+                    "tool_name": "Bash",
+                    "cwd": str(feature_worktree),
+                    "tool_input": {"command": "git push origin main"},
+                },
+                root,
+            )
+            self.assertEqual(allowed_payload_cwd.returncode, 0, allowed_payload_cwd.stderr)
+
+            # payload 층은 `cwd`만 읽는다. `_declared_command_cwd`가 그렇고, 넓히면
+            # 검증하지 않은 분기가 통과 방향으로 남는다.
+            for payload_key in ("workdir", "working_directory"):
+                blocked_payload_alias = guard(
+                    {
+                        "tool_name": "Bash",
+                        payload_key: str(feature_worktree),
+                        "tool_input": {"command": "git commit -m test"},
+                    },
+                    root,
+                )
+                self.assertEqual(
+                    blocked_payload_alias.returncode, 2, f"{payload_key}: {blocked_payload_alias.stderr}"
+                )
+
+            # tool input 컨테이너 이름은 host마다 다르다. `command_from`은 재귀로
+            # `input.command`를 찾아 검사하는데 cwd만 `tool_input`에서 찾으면,
+            # 세션이 worktree에 선 상태에서 leader를 향한 보호 브랜치 커밋이
+            # feature branch로 읽혀 통과한다. `_tool_input`과 같은 키를 쓴다.
+            for container in ("input", "parameters"):
+                blocked_leader_target = guard(
+                    {
+                        "tool_name": "Bash",
+                        container: {"command": "git commit -m test", "cwd": str(root)},
+                    },
+                    feature_worktree,
+                )
+                self.assertEqual(
+                    blocked_leader_target.returncode, 2, f"{container}: {blocked_leader_target.stderr}"
+                )
+
+                allowed_worktree_target = guard(
+                    {
+                        "tool_name": "Bash",
+                        container: {
+                            "command": "git commit -m test",
+                            "cwd": str(feature_worktree),
+                        },
+                    },
+                    root,
+                )
+                self.assertEqual(
+                    allowed_worktree_target.returncode, 0, f"{container}: {allowed_worktree_target.stderr}"
+                )
+
+            # 첫 번째로 **존재하는** 컨테이너가 이긴다(`_tool_input`과 동일).
+            # "첫 번째 dict"로 완화하면 앞선 컨테이너가 비-dict일 때 뒤쪽 선언이
+            # 자리를 만들어 낸다 — 통과 방향으로 실패한다.
+            blocked_shadowed_container = guard(
+                {
+                    "tool_name": "Bash",
+                    "tool_input": "not-a-dict",
+                    "input": {"command": "git commit -m test", "cwd": str(feature_worktree)},
+                },
+                root,
+            )
+            self.assertEqual(
+                blocked_shadowed_container.returncode, 2, blocked_shadowed_container.stderr
+            )
+
+            allowed_relative = guard(
+                {
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "git commit -m test", "cwd": "feature-worktree"},
+                },
+                root,
+            )
+            self.assertEqual(allowed_relative.returncode, 0, allowed_relative.stderr)
+
+            # 반대 방향. 선언을 읽지 않으면 세션이 선 worktree(feat/test) 때문에
+            # leader의 main을 향한 커밋이 통과한다.
+            blocked_by_declaration = guard(
+                {
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "git commit -m test", "cwd": str(root)},
+                },
+                feature_worktree,
+            )
+            self.assertEqual(blocked_by_declaration.returncode, 2, blocked_by_declaration.stderr)
+            self.assertIn("보호 브랜치", blocked_by_declaration.stderr)
+
+            # 실재하지 않는 선언은 권한을 만들지 않는다. 세션 cwd로 접는다.
+            blocked_missing_declaration = guard(
+                {
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "git commit -m test", "cwd": "/no/such/path"},
+                },
+                root,
+            )
+            self.assertEqual(blocked_missing_declaration.returncode, 2, blocked_missing_declaration.stderr)
+
+            # 실행 자리를 옮기지 않는 필드는 판정도 옮기지 못한다. env는 환경변수
+            # map이라 모델이 자유롭게 채울 수 있고, cwd 자리에 담긴 컨테이너도
+            # 선언이 아니다. payload를 재귀로 뒤지면 이 둘이 자리로 채택된다.
+            for decoy in (
+                {"command": "git commit -m test", "env": {"cwd": str(feature_worktree)}},
+                {"command": "git commit -m test", "cwd": [{"cwd": str(feature_worktree)}]},
+            ):
+                blocked_decoy = guard({"tool_name": "Bash", "tool_input": decoy}, root)
+                self.assertEqual(blocked_decoy.returncode, 2, blocked_decoy.stderr)
+
+            # payload cwd만 엉터리여도 세션 cwd로 접혀 차단이 남는다.
+            blocked_bogus_payload_cwd = guard(
+                {
+                    "tool_name": "Bash",
+                    "cwd": "/no/such/path",
+                    "tool_input": {"command": "git commit -m test"},
+                },
+                root,
+            )
+            self.assertEqual(
+                blocked_bogus_payload_cwd.returncode, 2, blocked_bogus_payload_cwd.stderr
+            )
+
+            # 디렉터리가 아닌 선언은 자리가 될 수 없다. 파일을 cwd로 주면 git
+            # subprocess가 OSError를 내고, 미판정은 차단이 아니라 통과다.
+            blocked_file_declaration = guard(
+                {
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "git commit -m test", "cwd": "/dev/null"},
+                },
+                root,
+            )
+            self.assertEqual(
+                blocked_file_declaration.returncode, 2, blocked_file_declaration.stderr
+            )
+
+            allowed_home_relative = guard(
+                {
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "git commit -m test", "cwd": "~/feature-worktree"},
+                },
+                root,
+                {"HOME": str(root)},
+            )
+            self.assertEqual(allowed_home_relative.returncode, 0, allowed_home_relative.stderr)
+
+            # tool cwd가 payload cwd를 이긴다. host는 payload에 세션 자리를 싣고
+            # 개별 호출에서만 worktree를 지정할 수 있다.
+            allowed_tool_cwd_wins = guard(
+                {
+                    "tool_name": "Bash",
+                    "cwd": str(root),
+                    "tool_input": {"command": "git commit -m test", "cwd": str(feature_worktree)},
+                },
+                root,
+            )
+            self.assertEqual(allowed_tool_cwd_wins.returncode, 0, allowed_tool_cwd_wins.stderr)
+
+            # 상대 tool cwd는 세션이 아니라 payload cwd를 기준으로 푼다. 같은
+            # 이름을 양쪽에 두어야 기준을 바꾼 구현이 leader의 main으로 떨어진다.
+            (feature_worktree / "nested").mkdir()
+            (root / "nested").mkdir()
+            allowed_relative_to_payload = guard(
+                {
+                    "tool_name": "Bash",
+                    "cwd": str(feature_worktree),
+                    "tool_input": {"command": "git commit -m test", "cwd": "nested"},
+                },
+                root,
+            )
+            self.assertEqual(
+                allowed_relative_to_payload.returncode, 0, allowed_relative_to_payload.stderr
+            )
+
+            # 명령 앞머리의 cd는 세션이 아니라 선언한 자리 위에 얹힌다. 세션은
+            # feat/test에 서 있고 선언은 leader이므로, 기준을 세션으로 되돌린
+            # 구현에서는 이 상대 cd가 feat/test로 떨어져 차단이 사라진다.
+            blocked_relative_cd = guard(
+                {
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "cd nested && git commit -m test", "cwd": str(root)},
+                },
+                feature_worktree,
+            )
+            self.assertEqual(blocked_relative_cd.returncode, 2, blocked_relative_cd.stderr)
+
 
     def test_cli_imports_without_fcntl(self) -> None:
         env = os.environ.copy()
