@@ -1281,26 +1281,6 @@ _RUNTIME_WRITE_PATHS = tuple(
 # Finder가 checkout을 열어 둔 것만으로 비결정적으로 갱신한다. 프로젝트 동작이나
 # 실행 표면을 바꾸지 않는 이 basename만 status와 tracked digest 양쪽에서 뺀다.
 _AMBIENT_METADATA_BASENAMES = (".DS_Store",)
-# 심층 스캔에 함께 넣는 **실행 표면**. 다음 phase가 실제로 실행하는 바이너리와
-# host의 hook 등록 파일이다. `--ignored=matching`은 ignore된 디렉터리를 한 줄로
-# 접어서 그 안쪽 교체가 통째로 안 보인다. 실측 BLIND였던 자리를 그대로 편다:
-# `.venv/bin/agent-flow` 덮어쓰기, `node_modules/.bin/*`, `.claude/hooks/pre.sh`.
-#
-# 전면 확대가 아니라 화이트리스트인 이유는 성능이다. `node_modules` 전체를
-# phase당 두 번 해시하면 tripwire가 런보다 비싸진다.
-#
-# host hook 등록 파일을 빼면 안 된다 — 워커가 leader의 `.claude/settings.json`을
-# 갈아끼워 **다음 phase의 권한 판정 자리 자체**를 무탐지로 바꿀 수 있다.
-# 런 *시작 전*의 오염은 이걸로 안 보인다. 그건 `hook_integrity`가 본다.
-_EXEC_SURFACE_PATHS = (
-    ".venv/bin",
-    "node_modules/.bin",
-    ".claude/settings.json",
-    ".claude/hooks",
-    ".Codex/hooks.json",
-    ".codex/hooks.json",
-    ".omp/extensions",
-)
 _TRIPWIRE_TIMEOUT_S = 120
 # porcelain v1 상태 문자. 레코드 앞 두 글자가 전부 여기 속할 때만 경로 접두어로 본다.
 _STATUS_CODES = frozenset(" MADRCUT?!")

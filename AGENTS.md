@@ -22,8 +22,8 @@ scripts/hooks/          ← PreToolUse/PostToolUse/Stop hooks (guard-protected-b
 ## Key Files
 
 - `src/agent_flow/workflows/*.yaml`: phase 순서와 routes의 단일 진실 소스. 루트에 사본을 두지 않는다 — 두 벌이면 둘을 맞추는 검사가 따로 필요해진다. JS는 Python `workflow export` JSON을 소비한다 (`bin/agent-flow-kit.mjs:385`).
-- `bin/agent-flow-kit.mjs`: JS runner. `nextPhaseIndex()`가 phase의 routes로 다음 phase index를 계산하고 fix-loop round cap을 적용한다.
-- `src/agent_flow/runner.py`: Python runner. YAML routes 파싱, fix-loop round cap.
+- `bin/agent-flow-kit.mjs`: install·설치 자산 동기화용 JS 진입점. lifecycle 상태를 만들거나 전진시키지 않고 `start`/`status`/`next`/`advance`를 Python CLI로 넘긴다.
+- `src/agent_flow/runner.py`: Python runner. **routing authority다** — YAML routes 파싱과 fix-loop round cap이 전부 여기 있다.
 - `src/agent_flow/profiles/_schema.yaml`: profile 필드 스키마 (gates, branching, worktree).
 - `skills/code-generation-discipline/SKILL.md`: 코드 생성 기준의 canonical source.
 
