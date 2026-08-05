@@ -1,6 +1,8 @@
 ---
 name: python-api-clean-architecture
 description: Python API-service Clean Architecture adapter for the platform-neutral clean-architecture-core contract. Use for FastAPI/Django/Flask API handlers, app container/factory DI, usecase/repository/source/mapper boundaries, and Python API architecture review without a UI presentation layer.
+requires:
+  - clean-architecture-core
 ---
 
 # Python API Clean Architecture

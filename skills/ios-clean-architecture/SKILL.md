@@ -1,6 +1,8 @@
 ---
 name: ios-clean-architecture
 description: iOS Clean Architecture adapter for the platform-neutral clean-architecture-core contract. Use for Swift source/package layout, SwiftUI/UIKit presentation, Swinject or local factory composition root, repository/source/mapper boundaries, and iOS architecture review.
+requires:
+  - clean-architecture-core
 ---
 
 # iOS Clean Architecture

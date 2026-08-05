@@ -441,3 +441,170 @@ def test_selector_terms_match_on_word_boundaries():
     assert matched("상태", "화면 상태를 정리한다")
     # 한글은 ASCII 경계 밖이라 경계가 없는 것과 같다. 그 오탐은 구절로 좁혀서 막는다.
     assert matched("프레젠테이션", "팀 프레젠테이션으로 정리한다")
+
+
+
+SHIPPED_SKILLS = REPO / "skills"
+
+MIGRATED_DEPENDENCIES = {
+    "clean-architecture": ["clean-architecture-core"],
+    "android-clean-architecture": ["clean-architecture-core"],
+    "ios-clean-architecture": ["clean-architecture-core"],
+    "react-clean-architecture": ["clean-architecture-core"],
+    "react-native-clean-architecture": ["clean-architecture-core"],
+    "python-api-clean-architecture": ["clean-architecture-core"],
+    "grill-with-docs": ["domain-modeling", "grilling"],
+    "tdd": ["codebase-design", "code-review"],
+}
+
+
+def _shipped_catalog():
+    root = SkillRoot(source="project", template=str(SHIPPED_SKILLS / "{skill}" / "SKILL.md"))
+    return discover_skill_catalog(REPO, (root,))
+
+
+def test_alias_expands_to_clean_architecture_core():
+    """반증: JS 표에만 있으면 Python 런타임은 alias 한 벌만 읽고 정본을 놓친다."""
+    from agent_flow.core.skill_resolver import expand_dependencies
+
+    expanded = expand_dependencies(["clean-architecture"], _shipped_catalog())
+    assert "clean-architecture-core" in expanded
+
+
+def test_shipped_skill_dependencies_are_declared_in_frontmatter():
+    """반증: 매핑 8개 중 하나라도 frontmatter 밖에 남으면 두 언어가 갈린다."""
+    from agent_flow.core.skill_resolver import expand_dependencies
+
+    catalog = _shipped_catalog()
+    missing = {
+        name: [dep for dep in deps if dep not in expand_dependencies([name], catalog)]
+        for name, deps in MIGRATED_DEPENDENCIES.items()
+    }
+    assert {name: gap for name, gap in missing.items() if gap} == {}
+
+
+def test_skill_selection_has_no_dependency_table():
+    """반증: 표가 남아 있으면 정본이 둘이라 다음 skill 추가에서 다시 갈린다."""
+    sources = {
+        path.name: path.read_text(encoding="utf-8")
+        for path in sorted((REPO / "lib").glob("*.mjs")) + sorted((REPO / "bin").glob("*.mjs"))
+    }
+    holders = [name for name, text in sources.items() if "SKILL_DEPENDENCIES" in text]
+    assert holders == [], f"SKILL_DEPENDENCIES가 아직 남아 있다: {holders}"
+
+
+
+
+def test_profile_declared_skills_ignore_the_external_budget(tmp_path: Path) -> None:
+    """반증: 예산이 정본 규범까지 떨구면 read gate에서 핵심 skill이 빠진다."""
+    from agent_flow.core.skill_resolver import expand_dependencies
+
+    catalog = _shipped_catalog()
+    expanded = expand_dependencies(["clean-architecture", "tdd"], catalog)
+    assert "clean-architecture-core" in expanded
+    assert "codebase-design" in expanded
+
+
+
+MANAGED_ADAPTER_BODY = "// agent-flow: managed omp extension\nexport default function agentFlowHooks(pi) {}\n"
+
+
+def _global_adapter(home: Path, body: str = MANAGED_ADAPTER_BODY) -> Path:
+    path = home / ".omp" / "agent" / "extensions" / "agent-flow-hooks.ts"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def test_doctor_reports_unowned_global_omp_adapter(tmp_path: Path) -> None:
+    """반증: 못 보면 오늘처럼 kit이 만들지도 관리하지도 않는 adapter가 모든 tool을 막고도
+    재설치로 낫지 않는다."""
+    project = tmp_path / "project"
+    (project / ".agent-flow" / "skills").mkdir(parents=True)
+    home = tmp_path / "home"
+    adapter = _global_adapter(home)
+
+    result = skill_catalog.scan(project, home=home)
+
+    findings = [item for item in result.findings if item.kind == skill_catalog.UNOWNED_ADAPTER]
+    assert len(findings) == 1, [item.kind for item in result.findings]
+    assert str(adapter) in findings[0].name + findings[0].detail
+
+
+def test_doctor_ignores_a_home_without_a_global_adapter(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    (project / ".agent-flow" / "skills").mkdir(parents=True)
+    home = tmp_path / "home"
+    home.mkdir()
+
+    result = skill_catalog.scan(project, home=home)
+
+    assert [item for item in result.findings if item.kind == skill_catalog.UNOWNED_ADAPTER] == []
+
+
+def test_doctor_ignores_a_foreign_file_without_the_kit_marker(tmp_path: Path) -> None:
+    """반증: marker 없이 보고하면 남의 확장을 kit 산출물로 지목한다."""
+    project = tmp_path / "project"
+    (project / ".agent-flow" / "skills").mkdir(parents=True)
+    home = tmp_path / "home"
+    _global_adapter(home, "export default function somebodyElse() {}\n")
+
+    result = skill_catalog.scan(project, home=home)
+
+    assert [item for item in result.findings if item.kind == skill_catalog.UNOWNED_ADAPTER] == []
+
+
+def test_doctor_adapter_scan_does_not_touch_the_file(tmp_path: Path) -> None:
+    """반증: 진단이 파일을 고치면 소유를 증명하지 못한 것을 훼손한다."""
+    project = tmp_path / "project"
+    (project / ".agent-flow" / "skills").mkdir(parents=True)
+    home = tmp_path / "home"
+    adapter = _global_adapter(home)
+    before = (adapter.read_bytes(), adapter.stat().st_mtime_ns)
+
+    skill_catalog.scan(project, home=home)
+
+    assert (adapter.read_bytes(), adapter.stat().st_mtime_ns) == before
+
+
+def test_doctor_ignores_a_symlinked_global_adapter(tmp_path: Path) -> None:
+    """반증: 링크를 따라가면 이 자리에 없는 남의 파일로 소유권을 판정한다."""
+    project = tmp_path / "project"
+    (project / ".agent-flow" / "skills").mkdir(parents=True)
+    home = tmp_path / "home"
+    elsewhere = tmp_path / "elsewhere.ts"
+    elsewhere.write_text(MANAGED_ADAPTER_BODY, encoding="utf-8")
+    link = home / ".omp" / "agent" / "extensions" / "agent-flow-hooks.ts"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(elsewhere)
+
+    result = skill_catalog.scan(project, home=home)
+
+    assert [item for item in result.findings if item.kind == skill_catalog.UNOWNED_ADAPTER] == []
+
+
+def test_crlf_skill_enters_the_catalog_with_metadata(tmp_path: Path) -> None:
+    """반증: Python이 CRLF frontmatter를 못 읽으면 그 skill은 선언 없는 엔트리로 떨어진다."""
+    host = tmp_path / "host"
+    _write_skill(
+        host,
+        "crlf-skill",
+        "---\r\nname: crlf-skill\r\ndescription: Compose guidance. Second sentence.\r\n"
+        "requires:\r\n  - other-skill\r\n---\r\n\r\n# crlf-skill\r\n",
+    )
+    catalog = discover_skill_catalog(tmp_path, (_host_root(host),))
+    entry = next(item for item in catalog if item.name == "crlf-skill")
+    assert entry.description == "Compose guidance. Second sentence."
+    assert entry.dependencies == ("other-skill",)
+
+
+def test_crlf_skill_summary_matches_the_shared_rule(tmp_path: Path) -> None:
+    from agent_flow.core.skill_resolver import skill_summary
+
+    host = tmp_path / "host"
+    path = _write_skill(
+        host,
+        "crlf-summary",
+        "---\r\nname: crlf-summary\r\ndescription: First sentence. Second sentence.\r\n---\r\n",
+    )
+    assert skill_summary(path) == "First sentence."

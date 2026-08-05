@@ -11374,14 +11374,28 @@ def _node_presentation_gate() -> str:
 
 @functools.lru_cache(maxsize=None)
 def _node_declared_skills(phase: str) -> tuple[str, ...]:
-    """workflow YAML이 그 phase에 선언한 required skill. fixture가 진실 소스를 직접 읽는다."""
+    """workflow YAML 선언 + frontmatter가 선언한 의존까지. fixture가 진실 소스를 직접 읽는다.
+
+    선언만 읽으면 skill이 `requires:`로 끌어오는 정본(예: alias → core)이 빠져
+    marker가 런타임 요구와 어긋난다.
+    """
     from agent_flow.core.phase_workflow import find_kit_root, load_phase_workflow_definition
+    from agent_flow.core.skill_resolver import (
+        SkillRoot,
+        discover_skill_catalog,
+        expand_dependencies,
+    )
 
     kit_root = find_kit_root()
     for workflow in ("full-feature", "default", "bugfix", "review", "development"):
         for item in load_phase_workflow_definition(kit_root, workflow).phases:
             if item.id == phase and item.skills:
-                return item.skills.required
+                root = SkillRoot(
+                    source="project",
+                    template=str(kit_root / "skills" / "{skill}" / "SKILL.md"),
+                )
+                catalog = discover_skill_catalog(kit_root, (root,))
+                return tuple(expand_dependencies(list(item.skills.required), catalog))
     return ()
 
 
@@ -11408,8 +11422,9 @@ def _node_project_local_applied_gate() -> str:
         "skill-availability: pass\n"
         "skill-use-evidence: unavailable\n"
         "project-local-skills: checked\n"
-        "project-local-skills-used: code-generation-discipline, tdd, clean-architecture,"
-        " api, api-contract-guide, figma-screen-spec, merge-review-flow, pr-review-flow,"
+        "project-local-skills-used: "
+        + ", ".join(_node_declared_skills("implement"))
+        + ", api, api-contract-guide, figma-screen-spec, merge-review-flow, pr-review-flow,"
         " release-branch-review, release-first-branch-pr, samantha-architecture-guide\n"
         "project-local-skill-docs: applied\n"
     )

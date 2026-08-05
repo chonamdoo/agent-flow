@@ -603,7 +603,9 @@ def _read_frontmatter(skill_path: Path) -> dict | None:
         text = skill_path.read_text(encoding="utf-8")
     except OSError:
         return None
-    match = re.match(r"\A---\n(?P<body>[\s\S]*?)\n---", text)
+    # CRLF로 저장된 SKILL.md도 같은 metadata를 내야 한다. LF만 받으면 그 파일은
+    # name/description/requires가 통째로 비고, JS 쪽 파서와 결과가 갈린다.
+    match = re.match(r"\A---\r?\n(?P<body>[\s\S]*?)\r?\n---", text)
     if not match:
         return None
     try:

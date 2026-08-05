@@ -1,6 +1,8 @@
 ---
 name: android-clean-architecture
 description: Android/Kotlin platform adapter for `clean-architecture-core` that maps the core contract to Gradle modules, Kotlin packages, Hilt, Retrofit data sources, and Android platform boundaries. Use when applying Clean Architecture to Android modules or reviewing module/data/DI boundaries; pair with android-clean-presentation-architecture for ViewModel, UiState, Compose screen, or presentation-only work.
+requires:
+  - clean-architecture-core
 ---
 
 # Android Clean Architecture

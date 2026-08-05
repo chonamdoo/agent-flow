@@ -1447,12 +1447,14 @@ function assertSkillIndexBlockMatchesInstall(label, tempRoot) {
       failures.push(`${label} ${fileName} skill index block was never filled`);
       continue;
     }
-    const listed = new Set(
-      [...block.matchAll(/\|(?:always|on-demand):\{([^}]*)\}/g)]
+    // `always`는 이름만 있는 한 줄, `on-demand`는 요약을 단 여러 줄이다.
+    const listed = new Set([
+      ...[...block.matchAll(/\|always:\{([^}]*)\}/g)]
         .flatMap((match) => match[1].split(","))
         .map((name) => name.trim())
         .filter(Boolean),
-    );
+      ...[...block.matchAll(/^\|\s{2}([^:\n]+):/gm)].map((match) => match[1].trim()),
+    ]);
     for (const name of expected) {
       if (!listed.has(name)) {
         failures.push(`${label} ${fileName} skill index omits installed skill: ${name}`);
