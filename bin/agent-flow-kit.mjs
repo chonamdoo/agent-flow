@@ -343,8 +343,8 @@ function installProject(requestedRoot) {
     );
   }
   writeManagedFile(path.join(agentFlowDir, "rules", "workflow-contract.md"), workflowContract());
-  writeManagedFile(path.join(agentFlowDir, "bootstrap", "AGENTS.md"), bootstrapMarkdown("AGENTS.md"));
-  writeManagedFile(path.join(agentFlowDir, "bootstrap", "CLAUDE.md"), bootstrapMarkdown("CLAUDE.md"));
+  writeManagedFile(path.join(agentFlowDir, "bootstrap", "AGENTS.md"), managedBootstrapMarkdown("AGENTS.md"));
+  writeManagedFile(path.join(agentFlowDir, "bootstrap", "CLAUDE.md"), managedBootstrapMarkdown("CLAUDE.md"));
   const gitignorePath = path.join(root, ".gitignore");
   upsertGitignore(gitignorePath, [
     ".agent-flow/",
@@ -366,8 +366,8 @@ function installProject(requestedRoot) {
     "graphify-out/cost.json",
   ]);
   removeLegacyProjectSkillCopies(root, "graphify");
-  upsertBootstrapBlock(path.join(root, "AGENTS.md"), "AGENTS.md", root);
-  upsertBootstrapBlock(path.join(root, "CLAUDE.md"), "CLAUDE.md", root);
+  upsertBootstrapBlock(path.join(root, "AGENTS.md"), "AGENTS.md");
+  upsertBootstrapBlock(path.join(root, "CLAUDE.md"), "CLAUDE.md");
   upsertSkillIndexBlock(root);
   pruneRetiredHookScripts(root, hooksDisabled);
   pruneRetiredManagedScripts(root);
@@ -2076,49 +2076,33 @@ function hasGateEvidence(result) {
 // 낡는다. 그래서 블록에는 자리만 두고 여기서 그 자리만 바꾼다.
 
 
-function upsertBootstrapBlock(pathName, label, root) {
+// 루트 `AGENTS.md`/`CLAUDE.md` 블록과 `.agent-flow/bootstrap/<label>` 관리 사본은
+// 둘 다 이 한 벌에서 나온다: `bootstrap/<label>.template`.
+//
+// 예전에는 두 생성기가 각자 텍스트를 들고 있었고, 그 벌들이 실제로 갈라졌다:
+// 신규 install(`agent-flow-install.mjs`)은 템플릿을 쓰고 이 파일은 리터럴을 써서,
+// 같은 프로젝트의 AGENTS.md가 어느 쪽이 마지막으로 돌았는지에 따라 다른 내용이 됐다.
+// parity 검사는 그 리터럴을 아예 보지 않아 드리프트를 잡지도 못했다.
+//
+// 템플릿을 못 읽으면 던진다. 조용히 지나가면 "블록을 안 쓴 것"이 정상 결과가 되고,
+// 리터럴 시절 내용이 남은 파일이 그대로 방치돼 드리프트가 되살아난다.
+function readBootstrapTemplate(label) {
+  const templatePath = path.join(KIT_ROOT, "bootstrap", `${label}.template`);
+  try {
+    return { path: templatePath, text: fs.readFileSync(templatePath, "utf8") };
+  } catch (error) {
+    throw new Error(`bootstrap template unreadable: ${templatePath} (${error?.message || error})`);
+  }
+}
+
+function upsertBootstrapBlock(pathName, label) {
   const start = "<!-- agent-flow:start -->";
   const end = "<!-- agent-flow:end -->";
-  const block = `${start}
-## Agent Flow
-
-Before feature work, check status first:
-
-\`\`\`bash
-${AGENT_FLOW_COMMAND} status
-\`\`\`
-
-install은 프로젝트당 1회만 수행합니다. 새 세션이 시작됐다는 이유로 install을 다시 실행하지 않습니다.
-Follow the CLI output exactly. If no run is active, start with \`${AGENT_FLOW_COMMAND} run "<task>"\`. If a run is active, continue with the printed \`next_command\`.
-
-run의 status가 SPEC 추가·수정·삭제를 보고하면 변경 목록만 사용자에게 보여 확인을 요청합니다. 사용자가 현재 대화에서 명확히 동의하면 agent가 status에 출력된 \`${AGENT_FLOW_COMMAND} spec confirm --run-dir <run-dir>\`을 실행합니다.
-\`manual\` verify 항목도 사용자에게 현재 대화에서 확인한 뒤 agent가 \`${AGENT_FLOW_COMMAND} spec approve <spec-id> --run-dir <run-dir>\`을 실행합니다.
-정확한 승인 문구나 사용자 터미널 명령 실행을 요구하지 않습니다.
-
-### Workflow Contract
-
-- 활성 workflow와 current phase는 항상 \`${AGENT_FLOW_COMMAND} status\` 출력 기준이다.
-- phase 이동은 status의 \`next_command\`를 그대로 따른다. \`${AGENT_FLOW_COMMAND} continue\`나 \`${AGENT_FLOW_COMMAND} run advance\`를 추측하지 않는다.
-- \`default.yaml\`: design → slice-plan → worktree → implement → comment-authoring → final-review → gates ↔ fix-loop → comment-authoring → final-review → gates → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge → cleanup
-- \`full-feature.yaml\`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → comment-authoring → multi-review → architecture-review → gates ↔ fix-loop → comment-authoring → multi-review → architecture-review → gates → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
-- \`multi-review\`는 설치된 Claude/Codex CLI reviewer subprocess 2개 이상이 필수다. 두 reviewer를 병렬 실행하고 각 결과에 \`reviewer-source: sub-agent\`를 기록한다. 마지막에 \`## Overall\`과 \`verdict: approve\` 또는 \`verdict: request-changes\`만 기록한다. OMP는 host/controller로만 쓰고 reviewer provider로는 쓰지 않는다.
-
-### Context Economy
-
-- Claude/Codex/OMP user-facing 답변은 기본적으로 짧은 한글로 한다.
-- 코드/명령/식별자는 영어 그대로 유지한다.
-- 긴 설명, 긴 로그, 전체 파일 붙여넣기 금지.
-- 필요한 경우만 current phase, action, \`next_command\`, blocker를 요약한다.
-- 모든 guide를 항상 로드하지 말고 변경 파일에 필요한 guide만 읽는다.
-- 프로젝트 skill은 \`skills/<name>/SKILL.md\` 또는 private \`.agent-flow/local-skills/<name>/SKILL.md\`에 둔다.
-<!-- agent-flow:skills:start -->
-- 설치된 skill 인덱스가 아직 없다. install이 이 자리에 채운다.
-<!-- agent-flow:skills:end -->
-- 인덱스에 없는 skill은 이 프로젝트에 설치돼 있지 않다. 런타임에 설치를 묻지 말고 \`${AGENT_FLOW_COMMAND} skills sync\`에 맡긴다.
-- Claude/Codex/OMP 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.
-- Claude/Codex/OMP hook이 자동 차단하는 보호 브랜치 commit/push와 leader checkout/switch 금지는 모든 host에서 동일하게 지킨다.
-${end}
-`;
+  const template = readBootstrapTemplate(label);
+  const block = template.text;
+  if (!block.includes(start) || !block.includes(end)) {
+    throw new Error(`bootstrap template has no ${start} / ${end} markers: ${template.path}`);
+  }
   const current = fs.existsSync(pathName) ? fs.readFileSync(pathName, "utf8") : "";
   if (current.includes(start) && current.includes(end)) {
     const before = current.slice(0, current.indexOf(start));
@@ -2138,45 +2122,47 @@ ${end}
 
 
 
-function bootstrapMarkdown(label) {
-  return `# ${label} Agent Flow Bootstrap
+// `.agent-flow/bootstrap/<label>`는 루트 블록의 **관리 사본**이다 — 루트 파일을 지웠거나
+// 손으로 고친 프로젝트에서 "install이 심는 계약이 원래 무엇이었나"를 확인하는 자리다.
+//
+// 예전에는 이 함수가 자기 문구를 지어냈고, 그래서 정확히 예고된 대로 갈라졌다:
+// 템플릿에만 있는 `--workflow` 선택 기준, leader 빌드 금지, gates-only 검증 정책 셋이
+// 사본에는 없었다. parity의 needle 루프는 템플릿만 보므로 그 드리프트를 잡지도 못했다.
+// 그래서 이제 짓지 않고 파생시킨다: 제목 한 줄 + 마커를 뗀 정본 본문.
+//
+// 본문은 label과 무관하게 늘 `AGENTS.md.template`에서 온다. `CLAUDE.md.template`은
+// 루트용 포인터(본문 대신 `AGENTS.md` import 한 줄)라 사본의 몸통이 될 수 없다.
+// 두 label의 사본이 제목만 다른 이유가 이것이고, parity가 그 동일성을 단언한다.
+const CANONICAL_BOOTSTRAP_LABEL = "AGENTS.md";
 
-Before feature work, run:
+// 마커는 루트 파일 **안에서** 블록의 경계를 표시하는 장치라 독립 사본에는 뜻이 없다.
+// 리터럴 대신 패턴으로 잡는다: parity가 두 installer 소스에 마커 리터럴이 다시
+// 나타나는 것을 금지한다 — 그 리터럴은 "템플릿에서 읽는다"가 "여기서 짓는다"로
+// 되돌아갔다는 신호이기 때문이다.
+const BOOTSTRAP_MARKER_LINE = /^<!--\s*agent-flow:([a-z:]*)\s*-->$/;
 
-\`\`\`bash
-${AGENT_FLOW_COMMAND} run "<task>"
-\`\`\`
-
-install은 프로젝트당 1회만 수행합니다. 새 세션이 시작됐다는 이유로 install을 다시 실행하지 않습니다.
-Follow the CLI output exactly. Git projects start inside \`~/.agent-flow/worktrees/<repo-id>/feat-<slug>/\` without switching the leader branch; continue with the printed \`next_command\`.
-
-run의 status가 SPEC 추가·수정·삭제를 보고하면 변경 목록만 사용자에게 보여 확인을 요청합니다. 사용자가 현재 대화에서 명확히 동의하면 agent가 status에 출력된 \`${AGENT_FLOW_COMMAND} spec confirm --run-dir <run-dir>\`을 실행합니다.
-\`manual\` verify 항목도 사용자에게 현재 대화에서 확인한 뒤 agent가 \`${AGENT_FLOW_COMMAND} spec approve <spec-id> --run-dir <run-dir>\`을 실행합니다.
-정확한 승인 문구나 사용자 터미널 명령 실행을 요구하지 않습니다.
-
-### Workflow Contract
-
-- 활성 workflow와 current phase는 항상 \`${AGENT_FLOW_COMMAND} status\` 출력 기준이다.
-- phase 이동은 status의 \`next_command\`를 그대로 따른다. \`${AGENT_FLOW_COMMAND} continue\`나 \`${AGENT_FLOW_COMMAND} run advance\`를 추측하지 않는다.
-- \`default.yaml\`: design → slice-plan → worktree → implement → comment-authoring → final-review → gates ↔ fix-loop → comment-authoring → final-review → gates → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge → cleanup
-- \`full-feature.yaml\`: domain-grill → product-brief → prd → slice-plan → plan-review → ddd-design → worktree → run-start → red → green → refactor → comment-authoring → multi-review → architecture-review → gates ↔ fix-loop → comment-authoring → multi-review → architecture-review → gates → commit → push-pr → pr-watch ↔ pr-comment-fix/pr-ci-fix → merge-approval → merge → handoff
-- \`multi-review\`는 설치된 Claude/Codex CLI reviewer subprocess 2개 이상이 필수다. 두 reviewer를 병렬 실행하고 각 결과에 \`reviewer-source: sub-agent\`를 기록한다. 마지막에 \`## Overall\`과 \`verdict: approve\` 또는 \`verdict: request-changes\`만 기록한다. OMP는 host/controller로만 쓰고 reviewer provider로는 쓰지 않는다.
-
-### Context Economy
-
-- Claude/Codex/OMP user-facing 답변은 기본적으로 짧은 한글로 한다.
-- 코드/명령/식별자는 영어 그대로 유지한다.
-- 긴 설명, 긴 로그, 전체 파일 붙여넣기 금지.
-- 필요한 경우만 current phase, action, \`next_command\`, blocker를 요약한다.
-- 모든 guide를 항상 로드하지 말고 변경 파일에 필요한 guide만 읽는다.
-- 프로젝트 skill은 \`skills/<name>/SKILL.md\` 또는 private \`.agent-flow/local-skills/<name>/SKILL.md\`에 둔다.
-- install/bootstrap 후 \`.agent-flow/skills/index.json\` metadata를 보고 필요한 skill만 읽는다. 모든 SKILL.md 전문을 항상 읽지 않는다.
-- Claude/Codex/OMP 프로젝트 skill 경로는 leader checkout의 install 결과를 따른다. worktree 안에서 install, index 재생성, skill link 재생성을 하지 않는다.
-- Claude/Codex/OMP hook이 자동 차단하는 보호 브랜치 commit/push와 leader checkout/switch 금지는 모든 host에서 동일하게 지킨다.
-
-During code generation, modification, and code review phases, apply \`code-generation-discipline\`. Resolve required skills from active profile metadata, installed skill index, changed files, and task scope. Load only the touched profile skill union.
-The phase prompt lists the skills for this change — required ones with paths, in-scope ones by name. That list is resolved per run from the active profile's skill vocabulary, the skills installed on this machine, the changed files, and the task text. Read the required ones; call the in-scope ones by name only when the change actually touches them. No configuration enumerates installed external skill names: vocabulary is declared instead, so an upstream add, delete, or rename needs no edit here. If a required local skill is missing, report \`missing local <group>: <skill>\` with the profile source URL and ask the user to install it.
-`;
+function managedBootstrapMarkdown(label) {
+  const template = readBootstrapTemplate(CANONICAL_BOOTSTRAP_LABEL);
+  const lines = template.text.split(/\r?\n/);
+  const body = [];
+  let insideSkillIndex = false;
+  for (const line of lines) {
+    const marker = BOOTSTRAP_MARKER_LINE.exec(line.trim());
+    if (marker) {
+      // skill 인덱스 자리는 install이 **루트 파일에만** 채운다. 사본에 그 자리를
+      // 남기면 "아직 없다. install이 채운다"가 영원히 참이 되지 않는 문장으로 굳는다.
+      if (marker[1] === "skills:start") insideSkillIndex = true;
+      else if (marker[1] === "skills:end") insideSkillIndex = false;
+      continue;
+    }
+    if (insideSkillIndex) continue;
+    body.push(line);
+  }
+  const text = body.join("\n").trim();
+  if (!text) {
+    throw new Error(`bootstrap template has no body outside markers: ${template.path}`);
+  }
+  return `# ${label} Agent Flow Bootstrap\n\n${text}\n`;
 }
 
 function newRunId() {

@@ -686,7 +686,8 @@ def test_runner_gate_precedes_every_leader_snapshot(tmp_path, monkeypatch):
     monkeypatch.setattr(
         runner_module,
         "capture_leader_snapshot",
-        lambda root: order.append("snapshot") or LeaderSnapshot(head="h", branch="b", status=""),
+        lambda root, **kwargs: order.append("snapshot")
+        or LeaderSnapshot(head="h", branch="b", status=""),
     )
     monkeypatch.setattr(runner_module, "assert_leader_unchanged", lambda *a, **k: None)
 

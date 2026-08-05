@@ -874,6 +874,452 @@ def test_hosted_phase_baseline_with_an_older_record_format_is_re_captured(
     assert read_meta(run_dir).get("host_phase_leader_baseline") is None
 
 
+def _declare_leader_tripwire(project: Path, declared: str, *, track: bool) -> Path:
+    """`<id>.local.yaml`에 sweep 범위를 선언한다.
+
+    `.agent-flow/`는 install이 gitignore에 넣으므로 추적하려면 `-f`가 필요하다.
+    좁히는 선언이 추적돼야 한다는 규칙이 바로 그 점을 요구한다.
+    """
+    override = project / ".agent-flow" / "profiles"
+    override.mkdir(parents=True, exist_ok=True)
+    path = override / "generic.local.yaml"
+    path.write_text(
+        f"branching:\n  leader_tripwire: {declared}\n", encoding="utf-8"
+    )
+    if track:
+        subprocess.run(
+            ["git", "add", "-f", str(path.relative_to(project))],
+            cwd=project,
+            check=True,
+            capture_output=True,
+        )
+        # 커밋까지 한다. staged 상태로 두면 그 파일 자체가 baseline의 미커밋 변경이
+        # 되어, 범위 전환을 보려는 테스트가 선언 행위의 drift에 먼저 걸린다.
+        subprocess.run(
+            ["git", "commit", "-m", "declare leader_tripwire"],
+            cwd=project,
+            check=True,
+            capture_output=True,
+        )
+    return path
+
+
+def _leader_tripwire_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    *,
+    declared: str | None,
+    track_declaration: bool = True,
+):
+    """leader에 gitignored 빌드 산출물이 있는 프로젝트 + worktree 한 벌."""
+    from agent_flow.adapters.hosted import HostedAdapter
+    from agent_flow.core import worktrees as worktrees_module
+    import agent_flow.runner as runner_module
+
+    project = tmp_path / name
+    project.mkdir()
+    _init_git_project(project)
+    (project / ".gitignore").write_text(
+        ".agent-flow/\nbuild/\n", encoding="utf-8"
+    )
+    subprocess.run(
+        ["git", "add", ".gitignore"], cwd=project, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "ignore build output"],
+        cwd=project,
+        check=True,
+        capture_output=True,
+    )
+    if declared is not None:
+        _declare_leader_tripwire(project, declared, track=track_declaration)
+    artifact = project / "build" / "out.jar"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("v1", encoding="utf-8")
+
+    plan = worktrees_module.plan_worktree(root=project, name=f"{name}-phase")
+    checkout = worktrees_module.create_worktree(root=project, plan=plan)
+    monkeypatch.setattr(
+        runner_module, "detect_adapter", lambda: HostedAdapter("codex")
+    )
+    monkeypatch.setattr(
+        runner_module, "assert_managed_hooks_registered", lambda *a, **k: None
+    )
+    state_root = project / ".git" / "agent-flow" / "worktrees" / checkout.name
+    return project, checkout, state_root, artifact
+
+
+@pytest.mark.parametrize(
+    "declared, blocks",
+    [(None, True), ("all", True), ("tracked-only", False)],
+)
+def test_profile_decides_whether_leader_build_output_blocks_the_phase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declared, blocks
+):
+    """leader에 열어 둔 IDE·build daemon이 phase를 막는지 profile이 정한다.
+
+    반증 짝이 파라미터에 있다. `tracked-only`에서 막히면 knob이 아무것도 하지
+    않은 것이고, `all`(과 미선언)에서 안 막히면 탐지가 통째로 사라진 것이다.
+    """
+    from agent_flow.core.worktree_isolation import LeaderDriftError
+    from agent_flow.runner import Phase, ResumeMode, Runner
+
+    project, checkout, state_root, artifact = _leader_tripwire_project(
+        tmp_path, monkeypatch, f"tripwire-{declared or 'default'}", declared=declared
+    )
+    phase = Phase(id="build-phase", description="host writes artifact")
+    runner = Runner(
+        checkout.path,
+        state_root=state_root,
+        config_root=project,
+        workflow="development",
+    )
+    runner.phases = [phase]
+
+    # phase 진입과 종료 사이에 leader의 gitignored 산출물이 바뀐다.
+    original = runner._assert_leader_unchanged
+
+    def churn_then_assert(leader_root, snapshot):
+        artifact.write_text("v2", encoding="utf-8")
+        original(leader_root, snapshot)
+
+    runner._assert_leader_unchanged = churn_then_assert
+
+    if blocks:
+        with pytest.raises(LeaderDriftError):
+            runner.run(ResumeMode.START, task="leader build churn")
+    else:
+        runner.run(ResumeMode.START, task="leader build churn")
+
+
+def test_tracked_writes_still_block_under_the_narrow_sweep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """`tracked-only`가 좁힌 것은 ignored뿐이다. 추적 경로 유출은 그대로 막힌다."""
+    from agent_flow.core.worktree_isolation import LeaderDriftError
+    from agent_flow.runner import Phase, ResumeMode, Runner
+
+    project, checkout, state_root, _artifact = _leader_tripwire_project(
+        tmp_path, monkeypatch, "tripwire-tracked-leak", declared="tracked-only"
+    )
+    phase = Phase(id="leak-phase", description="host writes artifact")
+    runner = Runner(
+        checkout.path,
+        state_root=state_root,
+        config_root=project,
+        workflow="development",
+    )
+    runner.phases = [phase]
+    original = runner._assert_leader_unchanged
+
+    def leak_then_assert(leader_root, snapshot):
+        (project / "leaked.py").write_text("worker leak\n", encoding="utf-8")
+        original(leader_root, snapshot)
+
+    runner._assert_leader_unchanged = leak_then_assert
+
+    with pytest.raises(LeaderDriftError):
+        runner.run(ResumeMode.START, task="worker leak")
+
+
+def test_narrowing_mid_run_is_reported_before_the_new_scope_takes_effect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+):
+    """반증: 범위 전환에서 대조 없이 baseline을 버리면 그 phase 하나가 검사 없는
+    통과가 된다. 워커가 노릴 자리가 정확히 그 창이다.
+
+    전환 자체(추적 파일을 leader에 커밋)는 정상 fast-forward라 drift가 아니다.
+    확인하려는 것은 그 phase가 **대조를 건너뛰지 않는다**는 것 — 같은 창에 섞인
+    다른 유출이 그대로 보고되어야 한다.
+    """
+    from agent_flow.core.worktree_isolation import LeaderDriftError
+    from agent_flow.artifact import read_meta
+    from agent_flow.runner import Phase, ResumeMode, Runner
+
+    project, checkout, state_root, artifact = _leader_tripwire_project(
+        tmp_path, monkeypatch, "tripwire-scope-flip", declared=None
+    )
+    phase = Phase(id="scope-phase", description="host writes artifact")
+    started = Runner(
+        checkout.path,
+        state_root=state_root,
+        config_root=project,
+        workflow="development",
+    )
+    started.phases = [phase]
+    started.run(ResumeMode.START, task="full sweep baseline")
+    assert started.run_dir is not None
+    run_dir = started.run_dir
+    assert (
+        read_meta(run_dir)["host_phase_leader_baseline"]["snapshot"]["scope"] == "all"
+    )
+
+    # 사람이 범위를 좁힌다. 추적된 자리여야 효력이 있다.
+    _declare_leader_tripwire(project, "tracked-only", track=True)
+    # 같은 창에 섞인 유출. 전환이 대조를 건너뛰면 이것이 조용히 통과한다.
+    (project / "leaked.py").write_text("worker leak\n", encoding="utf-8")
+    (run_dir / "scope-phase.md").write_text(
+        "# scope phase\n\nstatus: complete\n", encoding="utf-8"
+    )
+
+    def resume(*, accept: bool) -> Runner:
+        runner = Runner(
+            checkout.path,
+            state_root=state_root,
+            config_root=project,
+            run_dir=run_dir,
+            accept_leader_drift=accept,
+        )
+        assert runner._leader_include_ignored is False
+        runner.phases = [phase]
+        runner.run(ResumeMode.RESUME)
+        return runner
+
+    with pytest.raises(LeaderDriftError):
+        resume(accept=False)
+    out = capsys.readouterr().out
+    assert "[leader-drift]" in out
+    assert "leaked.py" in out
+
+    # 승인은 이 분기에서도 도달 가능해야 한다. 대조 뒤에 두면 raise가 그 아래를
+    # 건너뛰어 baseline이 그대로 남고, 다음 재개가 같은 지점에서 다시 막힌다 —
+    # leader가 계속 움직이는 상황(= 이 knob이 존재하는 이유)에서 광고된 해제
+    # 명령이 무효가 된다. 유출을 치우지 않은 채 통과하는 것이 그 증거다.
+    resume(accept=True)
+    accepted_out = capsys.readouterr().out
+    assert "[accepted]" in accepted_out
+    assert "[migrate]" in accepted_out
+    assert (project / "leaked.py").exists()
+
+
+def test_narrowing_must_be_declared_where_the_narrowed_sweep_can_see_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """반증: 선언 자리가 좁힌 뒤 안 보이면 knob이 스스로를 승인한다.
+
+    `.agent-flow/`는 install이 gitignore에 넣고, 도구 호출마다 도는 tripwire는
+    이미 부분 sweep이다. 그 파일을 본 적 있는 통제는 phase 경계의 전수 sweep
+    하나뿐이었다 — 워커가 거기에 `tracked-only`를 흘리면 그 파일이 자신을
+    감시하던 유일한 눈을 끈다. 추적되지 않은 선언은 효력이 없어야 한다.
+    """
+    from agent_flow.core.worktree_isolation import WorktreeIsolationError
+    from agent_flow.runner import Phase, ResumeMode, Runner
+
+    project, checkout, state_root, _artifact = _leader_tripwire_project(
+        tmp_path,
+        monkeypatch,
+        "tripwire-untracked-declaration",
+        declared="tracked-only",
+        track_declaration=False,
+    )
+    with pytest.raises(WorktreeIsolationError, match="could not see"):
+        Runner(
+            checkout.path,
+            state_root=state_root,
+            config_root=project,
+            workflow="development",
+        )
+
+    # 형제 파일만 추적된 경우도 거부한다. 디렉터리 단위로 물으면 팀이 공유하려고
+    # `android.local.yaml` 하나를 추적하는 순간, 워커가 흘린 다른 파일의
+    # `tracked-only`가 그대로 효력을 갖는다.
+    sibling = project / ".agent-flow" / "profiles" / "android.local.yaml"
+    sibling.write_text("pr:\n  target_branch: main\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "-f", str(sibling.relative_to(project))],
+        cwd=project,
+        check=True,
+        capture_output=True,
+    )
+    with pytest.raises(WorktreeIsolationError, match="could not see"):
+        Runner(
+            checkout.path,
+            state_root=state_root,
+            config_root=project,
+            workflow="development",
+        )
+
+    # 선언한 그 파일을 추적하면 통과한다. 규칙은 "추적된 자리에서만"이지 "금지"가 아니다.
+    _declare_leader_tripwire(project, "tracked-only", track=True)
+    runner = Runner(
+        checkout.path,
+        state_root=state_root,
+        config_root=project,
+        workflow="development",
+    )
+    assert runner._leader_include_ignored is False
+    runner.phases = [Phase(id="ok-phase", description="host writes artifact")]
+    runner.run(ResumeMode.START, task="tracked declaration")
+
+
+def test_an_unknown_leader_tripwire_value_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """오타를 기본값으로 접으면 선언과 동작이 갈라진다. 어느 방향으로 접어도 그렇다."""
+    from agent_flow.core.leader_tripwire import (
+        leader_sweep_include_ignored,
+        leader_tripwire_declarations,
+    )
+
+    # leader가 없으면 지킬 바깥 대상이 없다. 그때만 판정이 면제된다.
+    assert leader_sweep_include_ignored(None) is True
+
+    project, _checkout, _state_root, _artifact = _leader_tripwire_project(
+        tmp_path, monkeypatch, "tripwire-bad-value", declared=None
+    )
+    assert leader_sweep_include_ignored(project) is True
+
+    _declare_leader_tripwire(project, "traked-only", track=True)
+    with pytest.raises(ValueError, match="leader_tripwire"):
+        leader_tripwire_declarations(project)
+    with pytest.raises(ValueError, match="leader_tripwire"):
+        leader_sweep_include_ignored(project)
+
+
+def test_an_override_wins_over_the_installed_profile_for_the_same_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """`_schema.yaml`이 "스칼라는 통째로 대체한다"고 선언했다. 이 필드만 다르게
+    병합하면 선언과 동작이 갈린다.
+
+    추적 요구는 **이긴 파일**에 붙는다 — 지지 않은 파일이 추적됐다는 이유로
+    통과시키면 파일 단위 판정이 다시 디렉터리 단위가 된다.
+    """
+    from agent_flow.core.leader_tripwire import (
+        leader_sweep_include_ignored,
+        leader_tripwire_declarations,
+    )
+
+    project, _checkout, _state_root, _artifact = _leader_tripwire_project(
+        tmp_path, monkeypatch, "tripwire-precedence", declared="tracked-only"
+    )
+    installed = project / ".agent-flow" / "profiles" / "generic.yaml"
+    installed.write_text(
+        "id: generic\nbranching:\n  leader_tripwire: all\n", encoding="utf-8"
+    )
+
+    declarations = leader_tripwire_declarations(project)
+    assert [
+        (profile_id, path.name if path else None, value)
+        for profile_id, path, value in declarations
+    ] == [("generic", "generic.local.yaml", "tracked-only")]
+    assert leader_sweep_include_ignored(project) is False
+
+
+def test_a_profile_that_omits_the_declaration_counts_as_the_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """반증: 생략을 건너뛰면 한 profile의 선언만으로 run 전체가 조용히 좁아진다.
+
+    react-native+android처럼 stack이 둘 붙은 저장소에서 한쪽만 `tracked-only`를
+    적으면, 기본값 `all`을 기대한 다른 profile의 감시가 그 선언 하나로 꺼진다.
+    생략은 침묵이 아니라 `all`이다.
+    """
+    from agent_flow.core.leader_tripwire import (
+        LeaderTripwireDeclarationError,
+        leader_sweep_include_ignored,
+        leader_tripwire_declarations,
+    )
+
+    project, _checkout, _state_root, _artifact = _leader_tripwire_project(
+        tmp_path, monkeypatch, "tripwire-omitted", declared="tracked-only"
+    )
+    profiles = project / ".agent-flow" / "profiles"
+    (profiles / "android.yaml").write_text("id: android\n", encoding="utf-8")
+    (project / ".agent-flow" / "kit.json").write_text(
+        json.dumps({"profiles": ["generic", "android"]}), encoding="utf-8"
+    )
+
+    assert [
+        (profile_id, value) for profile_id, _path, value in
+        leader_tripwire_declarations(project)
+    ] == [("generic", "tracked-only"), ("android", "all")]
+    with pytest.raises(LeaderTripwireDeclarationError, match="conflicting"):
+        leader_sweep_include_ignored(project)
+
+
+def test_the_forced_profile_env_chooses_the_sweep_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """반증: Runner는 `AGENT_FLOW_PROFILE`을 최우선으로 profile을 고른다. sweep
+    해석만 `kit.json`을 보면 env로 강제한 profile의 선언이 무시된다.
+
+    그러면 gates·branching은 android로 돌면서 leader snapshot은 generic 기본값
+    범위로 찍혀, 고치려던 그 drift가 그대로 phase를 막는다.
+    """
+    from agent_flow.core.leader_tripwire import leader_sweep_include_ignored
+
+    project, _checkout, _state_root, _artifact = _leader_tripwire_project(
+        tmp_path, monkeypatch, "tripwire-forced-profile", declared=None
+    )
+    profiles = project / ".agent-flow" / "profiles"
+    profiles.mkdir(parents=True, exist_ok=True)
+    android = profiles / "android.local.yaml"
+    android.write_text(
+        "branching:\n  leader_tripwire: tracked-only\n", encoding="utf-8"
+    )
+    subprocess.run(
+        ["git", "add", "-f", str(android.relative_to(project))],
+        cwd=project,
+        check=True,
+        capture_output=True,
+    )
+
+    # kit.json은 generic이다. env 없이는 android의 선언이 보이지 않는다.
+    assert leader_sweep_include_ignored(project) is True
+
+    monkeypatch.setenv("AGENT_FLOW_PROFILE", "android")
+    assert leader_sweep_include_ignored(project) is False
+
+
+def test_conflicting_declarations_are_not_folded_to_the_wider_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """반증: 갈리는 선언을 넓은 쪽으로 조용히 접으면 그것도 선언과 동작의 분리다.
+
+    android+react-native처럼 stack이 둘 붙은 저장소에서 한쪽만 좁히면 해석이
+    갈린다. 같은 id의 override는 상충이 아니라 대체다(위 테스트).
+    """
+    from agent_flow.core.leader_tripwire import (
+        LeaderTripwireDeclarationError,
+        leader_sweep_include_ignored,
+    )
+
+    project, _checkout, _state_root, _artifact = _leader_tripwire_project(
+        tmp_path, monkeypatch, "tripwire-conflict", declared="tracked-only"
+    )
+    profiles = project / ".agent-flow" / "profiles"
+    (profiles / "android.yaml").write_text(
+        "id: android\nbranching:\n  leader_tripwire: all\n", encoding="utf-8"
+    )
+    (project / ".agent-flow" / "kit.json").write_text(
+        json.dumps({"profiles": ["generic", "android"]}), encoding="utf-8"
+    )
+    with pytest.raises(LeaderTripwireDeclarationError, match="conflicting"):
+        leader_sweep_include_ignored(project)
+
+
+def test_an_unreadable_profile_folds_to_the_full_sweep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+):
+    """반증: 읽기 실패를 올리면 손상된 `kit.json` 하나가 run을 재개 불가로 만든다.
+
+    모르면 넓게 본다. 잘못된 **선언**만 올린다 — 그쪽은 접으면 프로젝트가 좁혔다고
+    믿는데 run은 계속 전수로 도는 상태가 된다.
+    """
+    from agent_flow.core.leader_tripwire import leader_sweep_include_ignored_for
+
+    project, _checkout, _state_root, _artifact = _leader_tripwire_project(
+        tmp_path, monkeypatch, "tripwire-unreadable", declared="tracked-only"
+    )
+    (project / ".agent-flow" / "kit.json").write_text(
+        json.dumps({"profiles": ["../etc"]}), encoding="utf-8"
+    )
+    assert leader_sweep_include_ignored_for(project) is True
+    assert "전수 sweep" in capsys.readouterr().err
+
+
 def test_run_reuses_current_worktree_only_with_explicit_consent(tmp_path: Path):
     project = tmp_path / "reuse-current"
     project.mkdir()

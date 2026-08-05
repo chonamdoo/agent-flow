@@ -194,12 +194,17 @@ function ensureDir(p) {
 // 시점에는 아직 목록이 확정되지 않아, 거기서 채우면 한 install 안에서 곧바로
 // 낡는다. 그래서 블록에는 자리만 두고 여기서 그 자리만 바꾼다.
 
+// 정본은 `bootstrap/<label>.template` 한 벌이고, `agent-flow-kit.mjs`의
+// `upsertBootstrapBlock`도 같은 파일을 읽는다. 못 읽으면 던진다 — 조용히 건너뛰면
+// "블록을 안 쓴 것"이 정상 결과가 되고, 이전 install이 남긴 낡은 블록이 그대로 방치된다.
 function bootstrapMarkdown(label) {
   const tmplPath = path.join(KIT_ROOT, "bootstrap", `${label}.template`);
-  if (!fs.existsSync(tmplPath)) {
-    return;
+  let block;
+  try {
+    block = fs.readFileSync(tmplPath, "utf8");
+  } catch (error) {
+    throw new Error(`bootstrap template unreadable: ${tmplPath} (${error?.message || error})`);
   }
-  let block = fs.readFileSync(tmplPath, "utf8");
   const targetPath = path.join(PROJECT, label);
   const start = "<!-- agent-flow:start -->";
   const end = "<!-- agent-flow:end -->";

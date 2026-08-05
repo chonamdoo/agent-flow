@@ -25,6 +25,6 @@ Run the smallest meaningful gate first:
 Then run the profile gate, usually:
 
 ```bash
-./gradlew assembleDevDebug
+./gradlew assembleDebug
 ```
 

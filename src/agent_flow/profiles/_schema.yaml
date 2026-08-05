@@ -10,9 +10,12 @@
 #
 #   .agent-flow/profiles/<profile-id>.local.yaml
 #
-# install이 손대지 않는 유일한 자리이고, `branching`과 `pr`만 받는다(그 외 키는
-# 거부된다 — 반영되지 않는 선언을 조용히 삼키지 않기 위해서다). dict는 깊게 병합하고
-# 리스트와 스칼라는 통째로 대체한다. 예:
+# install이 손대지 않는 유일한 자리이고, `architecture`·`branching`·`gates`·`pr`만
+# 받는다(그 외 키는 거부된다 — 반영되지 않는 선언을 조용히 삼키지 않기 위해서다).
+# dict는 깊게 병합하고 리스트와 스칼라는 통째로 대체한다. 리스트를 대체로 두는
+# 이유는 `gates`와 `architecture.roles` 때문이다: 저장소가 자기 모듈 구조를
+# 선언하는 것은 배포본 표에 **덧붙이는** 일이 아니라 **대신하는** 일이고, 이어
+# 붙이면 맞지 않는 배포본 role이 남아 오탐이 계속된다. 예:
 #
 #   branching:
 #     strategy: release-first
@@ -35,6 +38,27 @@ optional:
     base: "branch name to start work from"
     integration: "branch where PRs target"
     worktree: "required | optional | disabled"
+    # phase 경계 tripwire가 leader를 훑는 범위. 생략하면 `all`.
+    #
+    # `all`은 `git status --ignored`까지 본다. 그래서 leader에 열어 둔 IDE나 build
+    # daemon이 `build/`·`.gradle/`·`.idea/`를 건드리기만 해도 drift로 잡힌다.
+    # 실측(Android leader): ignored 8,395개 중 8,038개가 `build/`였고, 승인
+    # (`--accept-leader-drift`)은 보고된 그 상태에만 붙으므로 daemon이 계속 쓰는
+    # 동안에는 승인 자체가 무효화돼 수렴하지 않았다.
+    #
+    # `tracked-only`는 git이 무시하는 경로를 뺀다. 매 도구 호출마다 도는
+    # PostToolUse tripwire가 이미 이 범위로 돈다(`scripts/hooks/worktree-tripwire.py`).
+    #
+    # 고를 수 있는 값이 둘뿐인 것이 이 필드의 설계다. "이 경로만 빼 달라"를 받기
+    # 시작하면 목록은 저장소마다 자라고, 나중에는 무엇이 감시되는지 아무도 말할 수
+    # 없게 된다. 두 값의 경계는 둘 다 git이 정의하므로 여기서 자랄 것이 없다.
+    #
+    # 끄면 잃는 것: ignored 경로에는 host가 **실행하는** 것도 있다
+    # (`.claude/hooks/`, `.venv/bin`). 그중 managed hook 변조는 install이 기록한
+    # digest(`kit.json:managed_hook_digests`)를 run 시작이 대조하므로 이 범위와
+    # 무관하게 계속 잡힌다. 그 밖의 ignored 실행 파일 변조는 `tracked-only`에서
+    # 탐지되지 않는다.
+    leader_tripwire: "all | tracked-only"
     naming:
       prefix: "namespace prefix for agent-generated branches (e.g. feat/)"
       slug_style: "kebab-case | snake_case"
