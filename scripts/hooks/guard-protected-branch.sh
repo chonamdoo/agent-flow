@@ -30,16 +30,28 @@ def command_from(value):
     return ''
 
 _CWD_KEYS = ('cwd', 'workdir', 'working_directory')
+# host_write_boundary._tool_input과 같은 키·같은 순서. 첫 번째로 **존재하는** 키가
+# 이긴다. 여기서 tool_input만 읽으면 payload를 input/parameters로 싣는 host에서
+# command_from은 재귀로 명령을 찾아 검사하는데 cwd만 버려진다 — 세션이 worktree에
+# 서 있으면 leader의 main 커밋이 통과한다.
+_TOOL_INPUT_KEYS = ('tool_input', 'input', 'parameters')
+
+def tool_input_of(value):
+    if not isinstance(value, dict):
+        return None
+    for key in _TOOL_INPUT_KEYS:
+        if key in value:
+            container = value[key]
+            return container if isinstance(container, dict) else None
+    return None
 
 def tool_cwd_from(value):
     # command_from과 달리 payload 전체를 뒤지지 않는다. 깊은 중첩은 RecursionError를
     # 내는데 이 python의 stderr는 버려지므로 판정이 빈 문자열이 되고 가드가 통째로
     # 사라진다. 게다가 무관한 하위 dict(tool_input.env.cwd 등)의 값은 실행 자리를
     # 옮기지 않으면서 판정만 옮긴다. 못 찾으면 세션 cwd로 접히므로 차단 쪽으로 실패한다.
-    if not isinstance(value, dict):
-        return ''
-    tool_input = value.get('tool_input')
-    if not isinstance(tool_input, dict):
+    tool_input = tool_input_of(value)
+    if tool_input is None:
         return ''
     for key in _CWD_KEYS:
         if isinstance(tool_input.get(key), str) and tool_input[key].strip():

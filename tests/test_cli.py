@@ -8762,6 +8762,51 @@ if (codexContext !== undefined) {
                     blocked_payload_alias.returncode, 2, f"{payload_key}: {blocked_payload_alias.stderr}"
                 )
 
+            # tool input 컨테이너 이름은 host마다 다르다. `command_from`은 재귀로
+            # `input.command`를 찾아 검사하는데 cwd만 `tool_input`에서 찾으면,
+            # 세션이 worktree에 선 상태에서 leader를 향한 보호 브랜치 커밋이
+            # feature branch로 읽혀 통과한다. `_tool_input`과 같은 키를 쓴다.
+            for container in ("input", "parameters"):
+                blocked_leader_target = guard(
+                    {
+                        "tool_name": "Bash",
+                        container: {"command": "git commit -m test", "cwd": str(root)},
+                    },
+                    feature_worktree,
+                )
+                self.assertEqual(
+                    blocked_leader_target.returncode, 2, f"{container}: {blocked_leader_target.stderr}"
+                )
+
+                allowed_worktree_target = guard(
+                    {
+                        "tool_name": "Bash",
+                        container: {
+                            "command": "git commit -m test",
+                            "cwd": str(feature_worktree),
+                        },
+                    },
+                    root,
+                )
+                self.assertEqual(
+                    allowed_worktree_target.returncode, 0, f"{container}: {allowed_worktree_target.stderr}"
+                )
+
+            # 첫 번째로 **존재하는** 컨테이너가 이긴다(`_tool_input`과 동일).
+            # "첫 번째 dict"로 완화하면 앞선 컨테이너가 비-dict일 때 뒤쪽 선언이
+            # 자리를 만들어 낸다 — 통과 방향으로 실패한다.
+            blocked_shadowed_container = guard(
+                {
+                    "tool_name": "Bash",
+                    "tool_input": "not-a-dict",
+                    "input": {"command": "git commit -m test", "cwd": str(feature_worktree)},
+                },
+                root,
+            )
+            self.assertEqual(
+                blocked_shadowed_container.returncode, 2, blocked_shadowed_container.stderr
+            )
+
             allowed_relative = guard(
                 {
                     "tool_name": "Bash",
