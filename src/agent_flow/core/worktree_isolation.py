@@ -1298,6 +1298,28 @@ _STAMP_CHUNK_BYTES = 64 * 1024
 # 버전이 없으면 legacy(0)로 읽는다.
 LEADER_SNAPSHOT_VERSION = 1
 
+# sweep scope. `all`은 ignored까지 훑고, `tracked-only`는 git이 무시하는 경로를
+# 뺀다. 값이 둘뿐인 이유가 곧 이 knob의 설계다 — 경로 예외 목록을 열면 그 목록은
+# 저장소마다 자라고, 나중에는 무엇이 감시되는지 아무도 말할 수 없게 된다. 여기서
+# 고를 수 있는 것은 "전부"와 "git이 추적하는 것"뿐이고 둘 다 git이 정의한다.
+LEADER_SWEEP_ALL = "all"
+LEADER_SWEEP_TRACKED_ONLY = "tracked-only"
+LEADER_SWEEP_SCOPES = (LEADER_SWEEP_ALL, LEADER_SWEEP_TRACKED_ONLY)
+
+
+def leader_sweep_scope(include_ignored: bool) -> str:
+    return LEADER_SWEEP_ALL if include_ignored else LEADER_SWEEP_TRACKED_ONLY
+
+
+def leader_sweep_includes_ignored(scope: str) -> bool:
+    """기록된 범위를 다시 sweep 인자로. `leader_sweep_scope`의 역방향이다.
+
+    이 매핑을 소비 지점마다 인라인으로 다시 쓰면 방향이 하나만 뒤집혀도 baseline과
+    관측의 범위가 갈리고, 그 불일치는 leader를 아무도 건드리지 않아도 항상 drift로
+    보고된다. 두 방향 모두 여기 한 곳에 둔다.
+    """
+    return scope == LEADER_SWEEP_ALL
+
 
 @dataclass(frozen=True)
 class LeaderSnapshot:
@@ -1306,6 +1328,10 @@ class LeaderSnapshot:
     status: str            # normalized git status records, newline joined
     armed: bool = True     # False면 지킬 leader가 없다(비-git 프로젝트)
     version: int = LEADER_SNAPSHOT_VERSION
+    # 어느 범위를 훑어 담은 기록인가. 범위가 다른 두 기록은 형식이 다른 것과 똑같이
+    # **항상** 다르다 — leader를 아무도 건드리지 않아도 그렇다. 그래서 범위를 기록에
+    # 실어 두고, 다를 때는 차단이 아니라 재캡처로 보낸다.
+    scope: str = LEADER_SWEEP_ALL
 
     def records(self) -> tuple[str, ...]:
         return tuple(self.status.split("\n")) if self.status else ()
@@ -1314,6 +1340,10 @@ class LeaderSnapshot:
     def comparable(self) -> bool:
         """이 기록을 지금 찍은 스냅샷과 대조할 수 있는가."""
         return self.version == LEADER_SNAPSHOT_VERSION
+
+    def comparable_within(self, scope: str) -> bool:
+        """`scope` 범위로 찍을 스냅샷과 대조할 수 있는가."""
+        return self.comparable and self.scope == scope
 
 
 def leader_snapshot_payload(snapshot: LeaderSnapshot) -> dict:
@@ -1324,12 +1354,24 @@ def leader_snapshot_payload(snapshot: LeaderSnapshot) -> dict:
         "status": snapshot.status,
         "armed": snapshot.armed,
         "version": snapshot.version,
+        "scope": snapshot.scope,
     }
 
 
 def recorded_snapshot_version(raw: object) -> int:
     """저장된 기록의 형식 버전. 없거나 정수가 아니면 legacy(0)."""
     return raw if isinstance(raw, int) and not isinstance(raw, bool) else 0
+
+
+def recorded_snapshot_scope(raw: object) -> str:
+    """저장된 기록의 sweep 범위. 없거나 모르는 값이면 legacy 기본인 전수 sweep.
+
+    이 knob이 없던 시절의 기록에는 이 필드가 없고, 그때 찍힌 것은 전부 전수
+    sweep이다. 그래서 결측은 `all`로 읽는 것이 사실과 맞다. 모르는 문자열까지
+    `all`로 접는 이유는 다르다 — 그때 비교가 성립하는 척하면 안 되고, `all`로
+    읽어 두면 tracked-only 실행에서 범위 불일치로 걸려 재캡처된다.
+    """
+    return raw if raw in LEADER_SWEEP_SCOPES else LEADER_SWEEP_ALL
 
 
 def capture_leader_snapshot(
@@ -1349,7 +1391,13 @@ def capture_leader_snapshot(
     """
     state = git_repo_state(leader_root)
     if state == "non-repo":
-        return LeaderSnapshot(head="", branch="", status="", armed=False)
+        return LeaderSnapshot(
+            head="",
+            branch="",
+            status="",
+            armed=False,
+            scope=leader_sweep_scope(include_ignored),
+        )
     if state == "unknown":
         raise WorktreeIsolationError(
             f"cannot read leader git state for the isolation tripwire: {leader_root}"
@@ -1375,6 +1423,7 @@ def capture_leader_snapshot(
                 leader_root,
                 include_ignored=include_ignored,
             ),
+            scope=leader_sweep_scope(include_ignored),
         ),
         is_retryable=retryable,
     )

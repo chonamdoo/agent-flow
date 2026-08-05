@@ -140,7 +140,7 @@ def test_other_phases_are_not_checked(tmp_path):
 def test_gradle_gate_requires_every_token(tmp_path):
     """반증: `./gradlew assembleDebug`가 test gate 증거로 인정되면 안 된다."""
     root = _project(tmp_path)
-    _observe(root, "./gradlew assembleDevDebug", exit_code=0)
+    _observe(root, "./gradlew assembleDebug", exit_code=0)
     missing = missing_test_evidence_markers(root, "red", GATE, profile=ANDROID_PROFILE)
     assert any("no test command was observed" in item for item in missing)
     _observe(root, "./gradlew test --tests X", exit_code=1)

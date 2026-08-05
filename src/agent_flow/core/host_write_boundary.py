@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from agent_flow.core.worktree_isolation import (
+    LEADER_SWEEP_TRACKED_ONLY,
     LeaderDriftError,
     LeaderSnapshot,
     WorktreeIsolationError,
@@ -22,6 +23,7 @@ from agent_flow.core.worktree_isolation import (
     leader_snapshot_payload,
     list_registered_worktrees,
     managed_worktree_root,
+    recorded_snapshot_scope,
     recorded_snapshot_version,
     real_path,
     trusted_checkout_paths,
@@ -951,8 +953,11 @@ def _load_binding_file(
         status=status,
         armed=True,
         version=recorded_snapshot_version(snapshot_payload.get("version")),
+        scope=recorded_snapshot_scope(snapshot_payload.get("scope")),
     )
-    if not leader_snapshot.comparable:
+    # 이 경로는 언제나 부분 sweep으로 찍고 부분 sweep으로 대조한다. 범위가 다른
+    # 기록은 형식이 다른 기록과 똑같이 대조하면 항상 차이가 난다.
+    if not leader_snapshot.comparable_within(LEADER_SWEEP_TRACKED_ONLY):
         # 낡은 형식은 대조하면 항상 차이가 난다. 그것을 leader 오염으로 보고하면
         # 업그레이드 한 번에 모든 bound 세션의 write가 근거 없이 막힌다. binding이
         # 없는 것으로 읽어서 다음 lifecycle 명령이 새 형식으로 다시 맺게 한다.

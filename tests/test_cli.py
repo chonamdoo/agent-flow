@@ -1529,6 +1529,14 @@ class CliTest(unittest.TestCase):
             ordinary_python.write_text("def main(): pass\n", encoding="utf-8")
             self.assertEqual(lint_project(root, "python", files=[str(ordinary_python.relative_to(root))]), [])
 
+            # 아래 python 단정은 그 profile의 strict lint가 켜져 있어야 성립한다.
+            # `src/core/`가 있다는 사실만으로는 켜지지 않고, 빈 디렉터리도 근거가
+            # 아니다 - role 패턴이 맞는 자리에 **소스가 실제로 있어야** 계약을
+            # 채택한 저장소다.
+            adopted = root / "src" / "core" / "domain" / "billing"
+            adopted.mkdir(parents=True)
+            (adopted / "invoice.py").write_text("value = 1\n", encoding="utf-8")
+
             python_wrong = root / "src" / "core" / "wrong" / "thing.py"
             python_wrong.parent.mkdir(parents=True, exist_ok=True)
             python_wrong.write_text("value = 1\n", encoding="utf-8")
@@ -1926,8 +1934,10 @@ class CliTest(unittest.TestCase):
             self.assertNotIn("modelSpecificProjectContext", omp_extension_text)
             self.assertNotIn("contextMessage(", omp_extension_text)
             self.assertNotIn("content.trimEnd()", omp_extension_text)
-            self.assertIn("syncRootContextFiles", omp_extension_text)
-            self.assertIn("modifiedRootContextFiles", omp_extension_text)
+            # 루트 CLAUDE.md는 AGENTS.md의 포인터다. 전체 파일 미러가 살아 있으면
+            # 그 포인터가 첫 write에서 AGENTS.md 전문 사본으로 되돌아간다.
+            self.assertNotIn("syncRootContextFiles", omp_extension_text)
+            self.assertNotIn("CLAUDE.md", omp_extension_text)
             self.assertNotIn(str(Path(__file__).resolve().parents[1]), omp_extension_text)
             self.assertTrue((project_root / ".omp" / "skills" / "agent-flow" / "SKILL.md").exists())
             self.assertTrue(
@@ -1980,10 +1990,9 @@ class CliTest(unittest.TestCase):
                 'agent-flow run "<task>"',
                 (project_root / "AGENTS.md").read_text(encoding="utf-8"),
             )
-            self.assertIn(
-                'agent-flow run "<task>"',
-                (project_root / "CLAUDE.md").read_text(encoding="utf-8"),
-            )
+            claude_pointer = (project_root / "CLAUDE.md").read_text(encoding="utf-8")
+            self.assertIn("`AGENTS.md`를 먼저 읽고", claude_pointer)
+            self.assertNotIn("### Workflow Contract", claude_pointer)
             self.assertIn(
                 'agent-flow run "<task>"',
                 (project_root / ".agent-flow" / "bootstrap" / "AGENTS.md").read_text(encoding="utf-8"),
@@ -3774,7 +3783,15 @@ design-values-confirmed: n/a
                     self.assertEqual(codex_reviewer, _strip_markdown_frontmatter(claude_reviewer))
                     self.assertIn("name: code-reviewer", claude_reviewer)
 
-    def test_node_installers_omp_hook_syncs_root_context_files(self) -> None:
+    def test_node_installers_omp_hook_leaves_root_context_files_alone(self) -> None:
+        """불변: hook은 루트 AGENTS.md/CLAUDE.md를 쓰지 않는다.
+
+        예전에는 이 자리가 두 파일의 바이트 동일성을 요구했다. 루트 CLAUDE.md가
+        AGENTS.md를 가리키는 한 줄 포인터가 된 뒤로 그 미러는 포인터를 첫 write에서
+        전문 사본으로 되돌리는 값만 있다. OMP는 루트 CLAUDE.md를 읽지도 않는다 —
+        `claude` discovery provider의 경로는 `.claude/CLAUDE.md`와
+        `~/.claude/CLAUDE.md`뿐이고, 루트 AGENTS.md는 `agents-md` provider가 읽는다.
+        """
         installers = ("agent-flow-kit.mjs", "agent-flow-install.mjs")
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -3824,17 +3841,15 @@ await handlers.get("tool_result")(
   { toolName: "Write", input: { file_path: "CLAUDE.md" } },
   { cwd: process.cwd() },
 );
-if (fs.readFileSync("AGENTS.md", "utf8") !== fs.readFileSync("CLAUDE.md", "utf8")) {
-  throw new Error("CLAUDE.md did not sync to AGENTS.md");
-}
-
-fs.writeFileSync("AGENTS.md", "agents-updated\\n", "utf8");
 await handlers.get("tool_result")(
   { toolName: "Edit", input: { path: "AGENTS.md" } },
   { cwd: process.cwd() },
 );
-if (fs.readFileSync("CLAUDE.md", "utf8") !== fs.readFileSync("AGENTS.md", "utf8")) {
-  throw new Error("AGENTS.md did not sync to CLAUDE.md");
+if (fs.readFileSync("CLAUDE.md", "utf8") !== "claude-updated\\n") {
+  throw new Error("hook rewrote CLAUDE.md");
+}
+if (fs.readFileSync("AGENTS.md", "utf8") !== "agents-old\\n") {
+  throw new Error("hook rewrote AGENTS.md");
 }
 
 const staleModelContext = {
@@ -4066,8 +4081,12 @@ if (codexContext !== undefined) {
             self.assertNotIn("예: Claude/Gemini", claude_bootstrap.read_text(encoding="utf-8"))
             self.assertIn("reviewer-source: sub-agent", bootstrap.read_text(encoding="utf-8"))
             self.assertIn("reviewer-source: sub-agent", claude_bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("두 reviewer를 병렬 실행하고", bootstrap.read_text(encoding="utf-8"))
-            self.assertIn("두 reviewer를 병렬 실행하고", claude_bootstrap.read_text(encoding="utf-8"))
+            parallel_contract = (
+                "두 reviewer를 검증된 worktree에 바인딩한 별도 OS sandbox subprocess로 "
+                "병렬 실행하고"
+            )
+            self.assertIn(parallel_contract, bootstrap.read_text(encoding="utf-8"))
+            self.assertIn(parallel_contract, claude_bootstrap.read_text(encoding="utf-8"))
             self.assertIn("## Overall", bootstrap.read_text(encoding="utf-8"))
             self.assertIn("## Overall", claude_bootstrap.read_text(encoding="utf-8"))
             self.assertIn("verdict: approve", bootstrap.read_text(encoding="utf-8"))
@@ -9095,6 +9114,94 @@ if (codexContext !== undefined) {
                 )
             self.assertIn("task task-1 completed owner=worker-1 subject=Implement login", status_output.getvalue())
 
+
+    @unittest.skipUnless(
+        sys.platform == "darwin" and Path("/usr/bin/sandbox-exec").is_file(),
+        "macOS sandbox-exec confinement is required",
+    )
+    def test_team_run_next_sweeps_the_scope_the_profile_declared(self) -> None:
+        """반증: 이 경로의 sweep 범위 배선이 빠져도 team 테스트는 전부 green이었다.
+
+        `tracked-only`를 선언한 프로젝트의 team claim만 leader의 gitignored
+        산출물에 걸려 워커 결과가 failed로 되돌아간다. 파라미터 짝으로 양방향을
+        고정한다 — `tracked-only`에서 전수 sweep이 나가면 배선이 빠진 것이고,
+        미선언에서 좁은 sweep이 나가면 탐지가 통째로 사라진 것이다.
+        """
+        from agent_flow import cli as cli_module
+        from agent_flow.core.worktree_isolation import leader_sweep_scope
+
+        for declared, include_ignored in ((None, True), ("tracked-only", False)):
+            with self.subTest(declared=declared):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    _init_git_repo(root)
+                    if declared is not None:
+                        declaration = root / ".agent-flow" / "profiles"
+                        declaration.mkdir(parents=True, exist_ok=True)
+                        path = declaration / "generic.local.yaml"
+                        path.write_text(
+                            f"branching:\n  leader_tripwire: {declared}\n",
+                            encoding="utf-8",
+                        )
+                        subprocess.run(
+                            ["git", "add", "-f", str(path.relative_to(root))],
+                            cwd=root,
+                            check=True,
+                            capture_output=True,
+                        )
+                        subprocess.run(
+                            ["git", "commit", "-m", "declare leader_tripwire"],
+                            cwd=root,
+                            check=True,
+                            capture_output=True,
+                        )
+                    _create_team_with_task_and_worker(root)
+                    _approve_worker_for_task(root)
+
+                    captured: list[bool] = []
+                    asserted: list[bool] = []
+                    real_capture = cli_module.capture_leader_snapshot
+
+                    def record_capture(leader_root, *, include_ignored=True):
+                        captured.append(include_ignored)
+                        return real_capture(leader_root, include_ignored=include_ignored)
+
+                    def record_assert(leader_root, before, **kwargs):
+                        asserted.append(kwargs.get("include_ignored"))
+
+                    with mock.patch.object(
+                        cli_module, "capture_leader_snapshot", record_capture
+                    ), mock.patch.object(
+                        cli_module, "assert_leader_unchanged", record_assert
+                    ):
+                        with contextlib.redirect_stdout(io.StringIO()):
+                            self.assertEqual(
+                                main(
+                                    [
+                                        "team",
+                                        "run-next",
+                                        "--root",
+                                        str(root),
+                                        "--team",
+                                        "feature-team",
+                                        "--worker",
+                                        "worker-1",
+                                        "--command",
+                                        sys.executable,
+                                        "-c",
+                                        "print('runtime ok')",
+                                    ]
+                                ),
+                                0,
+                            )
+
+                    self.assertEqual(captured, [include_ignored])
+                    # 대조는 기록된 범위를 되읽는다. 다시 해석하면 워커가 도는 동안
+                    # 선언이 바뀌었을 때 baseline과 관측의 범위가 갈린다.
+                    self.assertEqual(
+                        asserted,
+                        [leader_sweep_scope(include_ignored) == "all"],
+                    )
     @unittest.skipUnless(
         sys.platform == "darwin" and Path("/usr/bin/sandbox-exec").is_file(),
         "macOS sandbox-exec confinement is required",

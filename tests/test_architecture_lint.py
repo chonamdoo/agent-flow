@@ -141,6 +141,20 @@ def _android_architecture() -> dict[str, Any]:
     return yaml.safe_load(ANDROID_PROFILE.read_text(encoding="utf-8"))["architecture"]
 
 
+def _adopted_core_domain_module(root: Path, context: str = "auth") -> Path:
+    """채택된 nested 모듈. 빈 디렉터리는 채택의 증거가 아니라 소스가 증거다.
+
+    `core/domain/schemas/`처럼 소스 없는 디렉터리가 증거로 통하면 평면 저장소가 strict로
+    켜진다. 활성 픽스처도 그래서 실제 모듈 모양이어야 한다.
+    """
+    module = root / "core" / "domain" / context
+    module.mkdir(parents=True)
+    (module / "build.gradle.kts").write_text(
+        f'android {{ namespace = "com.example.core.domain.{context}" }}\n', encoding="utf-8"
+    )
+    return module
+
+
 def test_android_lint_activates_only_on_adopted_roots(tmp_path):
     """반증: 평면 `core/*` 저장소에서 필수 gate가 변경 파일 전량을 미매핑으로 잡았다."""
     from agent_flow.core.architecture_lint import architecture_lint_is_active
@@ -163,7 +177,7 @@ def test_android_lint_activates_only_on_adopted_roots(tmp_path):
     )
 
     adopted = tmp_path / "adopted"
-    (adopted / "core" / "domain" / "auth").mkdir(parents=True)
+    _adopted_core_domain_module(adopted)
     assert architecture_lint_is_active(adopted, architecture, ["app/Main.kt"]) is True
 
     react_native = tmp_path / "rn"
@@ -247,7 +261,7 @@ def test_inactive_profile_is_reported_separately_from_passed(tmp_path, capsys):
     assert "architecture lint passed" not in out
 
     adopted = tmp_path / "adopted"
-    (adopted / "core" / "domain" / "auth").mkdir(parents=True)
+    _adopted_core_domain_module(adopted)
     assert inactive_lint_profile_ids(adopted, ["android"], []) == []
     assert main(["--root", str(adopted), "--profile", "android", "--files"]) == 0
     assert "android: architecture lint passed" in capsys.readouterr().out
@@ -280,7 +294,7 @@ def test_unmapped_files_outside_managed_roots_do_not_fail_android_lint(tmp_path)
     """반증: 채택 저장소의 build-logic 변경까지 role 미매핑으로 막으면 필수 gate가 개발을 멈춘다."""
     from agent_flow.core.architecture_lint import lint_project
 
-    (tmp_path / "core" / "domain" / "auth").mkdir(parents=True)
+    _adopted_core_domain_module(tmp_path)
     outside = tmp_path / "build-logic" / "convention" / "ConventionPlugin.kt"
     outside.parent.mkdir(parents=True)
     outside.write_text("class ConventionPlugin\n", encoding="utf-8")
@@ -656,3 +670,233 @@ def test_skip_balanced_leaves_the_buffer_untouched_when_it_fails():
     out = list(text)
     assert skip_balanced(out, text, text.index("${") + 1, "{", "}", "`", "brace", syntax_for(".ts")) == -1
     assert "".join(out) == text
+
+
+
+def _source(path: Path, text: str) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path.name
+
+
+def _flat_android_repository(root: Path) -> list[str]:
+    """실측 대상 저장소의 모양. `core/domain`은 있지만 그 아래가 `src/`뿐이다."""
+    files = [
+        "core/domain/build.gradle.kts",
+        "core/domain/src/main/java/com/example/domain/Journey.kt",
+        "core/data/src/main/java/com/example/data/JourneyRepository.kt",
+        "core/model/src/main/java/com/example/model/Stop.kt",
+        "feature/journey/src/main/java/com/example/journey/JourneyScreen.kt",
+    ]
+    for rel_path in files:
+        _source(root / rel_path, "package com.example\n")
+    return files
+
+
+def test_flat_layout_is_not_governed_just_because_the_root_directory_exists(tmp_path):
+    """반증: `core/domain/`이 있다는 이유로 strict가 켜져 변경 파일 전량이 미매핑이 됐다(436개 중 182개)."""
+    from agent_flow.core.architecture_lint import architecture_lint_is_active, lint_project
+
+    flat = tmp_path / "flat"
+    files = _flat_android_repository(flat)
+    assert (flat / "core" / "domain").is_dir()
+
+    # 존재는 채택의 증거가 아니다. `core/domain/<context>`가 맞출 디렉터리가 없다 —
+    # `src`/`build`는 role 매칭이 이미 예약 세그먼트로 거부하는 이름이다.
+    assert architecture_lint_is_active(flat, _android_architecture(), files) is False
+    assert lint_project(flat, "android", files=files) == []
+
+
+def test_nested_layout_stays_governed_and_still_catches_violations(tmp_path):
+    """활성 범위를 좁히는 변경이 정당한 저장소를 끄면 필수 gate가 무음 통과가 된다."""
+    from agent_flow.core.architecture_lint import architecture_lint_is_active, lint_project
+
+    nested = tmp_path / "nested"
+    (nested / "core" / "data" / "journey").mkdir(parents=True)
+    _source(
+        nested / "core" / "domain" / "journey" / "build.gradle.kts",
+        'android { namespace = "com.example.core.domain.journey" }\n',
+    )
+    offender = "core/domain/journey/src/main/java/com/example/core/domain/journey/JourneyViewModel.kt"
+    _source(
+        nested / offender,
+        "package com.example.core.domain.journey\n\nclass JourneyViewModel\n",
+    )
+
+    assert architecture_lint_is_active(nested, _android_architecture(), [offender]) is True
+    assert [
+        (finding.path, finding.message) for finding in lint_project(nested, "android", files=[offender])
+    ] == [(offender, "core-domain contains forbidden token ViewModel")]
+
+
+def test_a_directory_without_source_is_not_adoption_evidence(tmp_path):
+    """반증: `core/domain/schemas/`(Room `room.schemaLocation`의 기본 위치) 하나만 있어도
+    평면 저장소가 strict로 켜져 변경 파일 전량이 미매핑이 됐다.
+
+    증거를 예약 세그먼트 이름 목록에 기대면 레이아웃이 하나 나올 때마다 목록이 늘어난다.
+    아래 `match_pattern` 단정이 그 사실을 못 박는다 — 패턴은 맞는다. 활성을 막는 것은
+    이름이 아니라 "그 아래에 소스가 없다"는 성질이다.
+    """
+    from agent_flow.core.architecture_lint import (
+        architecture_lint_is_active,
+        lint_project,
+        match_pattern,
+    )
+
+    for name, artifact in (("schemas", "x.json"), ("libs", "x.aar"), ("main", None)):
+        assert match_pattern(f"core/domain/{name}", "core/domain/<context>") is not None
+        flat = tmp_path / name
+        files = _flat_android_repository(flat)
+        placeholder = flat / "core" / "domain" / name
+        placeholder.mkdir(parents=True)
+        if artifact:
+            (placeholder / artifact).write_text("{}\n", encoding="utf-8")
+        assert architecture_lint_is_active(flat, _android_architecture(), files) is False, name
+        assert lint_project(flat, "android", files=files) == []
+
+
+def test_a_module_holding_source_is_still_adoption_evidence(tmp_path):
+    """반증 짝: 증거를 좁히다 실제 모듈까지 끄면 필수 gate가 조용히 무음 통과가 된다.
+
+    변경 후보는 role 패턴 밖(`build-logic/`)이라 후보만으로는 켜지지 않는다. 활성은
+    디스크의 `core/domain/journey/` 아래 `.kt`에서만 나온다.
+    """
+    from agent_flow.core.architecture_lint import architecture_lint_is_active, lint_project
+
+    nested = tmp_path / "nested"
+    (nested / "core" / "data" / "journey").mkdir(parents=True)
+    offender = "core/domain/journey/src/main/java/com/example/core/domain/journey/JourneyViewModel.kt"
+    _source(nested / offender, "package com.example.core.domain.journey\n\nclass JourneyViewModel\n")
+    unrelated = "build-logic/src/main/kotlin/Conventions.kt"
+    _source(nested / unrelated, "package conventions\n")
+
+    assert architecture_lint_is_active(nested, _android_architecture(), [unrelated]) is True
+    assert [
+        (finding.path, finding.message) for finding in lint_project(nested, "android", files=[offender])
+    ] == [(offender, "core-domain contains forbidden token ViewModel")]
+
+
+def test_a_build_file_violation_is_reported_once_not_once_per_source_file(tmp_path):
+    """반증: build 파일 단위 검사가 소스 파일마다 다시 돌아 같은 위반을 6배로 부풀렸다(raw 273 / distinct 45)."""
+    from agent_flow.core.architecture_lint import lint_project
+
+    root = tmp_path / "nested"
+    (root / "core" / "data" / "journey").mkdir(parents=True)
+    build_file = "core/domain/journey/build.gradle.kts"
+    _source(
+        root / build_file,
+        'android { namespace = "com.example.core.domain.journey" }\n'
+        'dependencies { implementation(project(":core:data:journey")) }\n',
+    )
+    package = "core/domain/journey/src/main/java/com/example/core/domain/journey"
+    clean = f"{package}/Journey.kt"
+    _source(root / clean, "package com.example.core.domain.journey\n\nclass Journey\n")
+    offenders = [f"{package}/JourneyViewModel.kt", f"{package}/StopViewModel.kt"]
+    for rel_path in offenders:
+        _source(root / rel_path, "package com.example.core.domain.journey\n\nclass Holder\n")
+
+    findings = lint_project(root, "android", files=[clean, *offenders])
+
+    # 세 소스 파일이 모두 같은 모듈 build 파일을 다시 읽지만 위반은 하나다.
+    assert [
+        finding.path for finding in findings if "forbidden Gradle dependency" in finding.message
+    ] == [build_file]
+    # 접는 기준은 `(path, message)`다. 파일별 위반은 파일 수만큼 남아야 한다 —
+    # 메시지가 같다고 뭉개면 위반한 파일 목록이 사라진다.
+    assert [
+        finding.path for finding in findings if "forbidden token ViewModel" in finding.message
+    ] == offenders
+
+
+def _presentation_module(root: Path, deps: str) -> tuple[str, str]:
+    build_file = "feature/journey/presentation/build.gradle.kts"
+    _source(
+        root / build_file,
+        'android { namespace = "com.example.feature.journey.presentation" }\n'
+        f"dependencies {{ {deps} }}\n",
+    )
+    source = (
+        "feature/journey/presentation/src/main/java/com/example/feature/journey"
+        "/presentation/JourneyScreen.kt"
+    )
+    _source(
+        root / source,
+        "package com.example.feature.journey.presentation\n\nclass JourneyScreen\n",
+    )
+    return build_file, source
+
+
+def test_a_required_module_is_only_required_when_a_role_declares_it(tmp_path):
+    """반증: `feature-presentation`은 `:feature:<f>:api` 의존을 요구하는데, 그 role을
+    선언하지 않은 평면 profile에서는 요구할 대상 자체가 없다. 실측으로 저장소 하나에
+    존재하지 않는 모듈을 요구하는 오탐이 5건이었다.
+
+    반증 짝: `feature-api` role이 선언된 profile에서는 그대로 요구돼야 한다. 안 그러면
+    이 변경은 규칙을 고친 게 아니라 지운 것이다.
+    """
+    from agent_flow.core.architecture_lint import lint_project
+
+    governed = tmp_path / "governed"
+    _adopted_core_domain_module(governed, "journey")
+    build_file, source = _presentation_module(governed, "")
+
+    # shipped android profile은 `feature-api` role을 선언한다 — 요구가 살아 있어야 한다.
+    assert (build_file, "feature-presentation must depend on :feature:journey:api") in [
+        (finding.path, finding.message)
+        for finding in lint_project(governed, "android", files=[source])
+    ]
+
+    # 같은 저장소, `feature-api`가 없는 profile. 요구할 대상이 없으므로 요구도 없다.
+    flat_profile = governed / ".agent-flow" / "profiles"
+    flat_profile.mkdir(parents=True, exist_ok=True)
+    architecture = _android_architecture()
+    architecture["roles"] = [
+        role for role in architecture["roles"] if role.get("id") != "feature-api"
+    ]
+    (flat_profile / "android.yaml").write_text(
+        yaml.safe_dump({"id": "android", "architecture": architecture}, allow_unicode=True),
+        encoding="utf-8",
+    )
+    assert [
+        finding.message
+        for finding in lint_project(governed, "android", files=[source])
+        if "must depend on" in finding.message
+    ] == []
+
+
+def test_role_module_ownership_matches_on_coordinates_not_substrings(tmp_path):
+    """placeholder는 세그먼트 하나다. 깊이가 다른 좌표를 같다고 보면 규칙이 조용히 꺼진다."""
+    from agent_flow.core.architecture_lint import module_pattern_matches, role_owns_module
+
+    assert module_pattern_matches(":feature:<feature>:api", ":feature:journey:api")
+    assert not module_pattern_matches(":feature:<feature>:api", ":feature:journey")
+    assert not module_pattern_matches(":feature:<feature>:api", ":feature:journey:api:v2")
+    assert not module_pattern_matches(":feature:<feature>:api", ":feature::api")
+    assert module_pattern_matches(":core:domain", ":core:domain")
+    assert not module_pattern_matches(":core:domain", ":core:data")
+
+    roles = [{"id": "feature-api", "modules": [":feature:<feature>:api"]}, "not a dict"]
+    assert role_owns_module(roles, ":feature:journey:api")
+    assert not role_owns_module(roles, ":feature:journey:presentation")
+    assert not role_owns_module([], ":feature:journey:api")
+
+
+def test_every_activation_root_has_a_role_pattern_that_can_prove_adoption():
+    """반증: role 표와 어긋난 activation_root는 어떤 저장소에서도 켜지지 않아 필수 gate가 조용히 n/a가 된다."""
+    from agent_flow.core.architecture_lint import activation_role_patterns
+
+    profiles_dir = KIT_ROOT / "src" / "agent_flow" / "profiles"
+    checked = 0
+    for path in sorted(profiles_dir.glob("*.yaml")):
+        if path.stem.startswith("_"):
+            continue
+        architecture = (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("architecture") or {}
+        if architecture.get("strict_when_roots_present") is not True:
+            continue
+        roles = architecture.get("roles") or []
+        for activation_root in architecture.get("activation_roots") or []:
+            assert activation_role_patterns(roles, (activation_root.strip("/"),)), (
+                f"{path.name}: activation root {activation_root} has no role path under it"
+            )
+            checked += 1
+    assert checked > 0

@@ -19,7 +19,14 @@ gates:
     required: true
     phase: pre-commit
   - id: build
-    command: ["./gradlew", "assembleDevDebug"]
+    # `assembleDevDebug`는 `dev` productFlavor를 선언한 저장소에만 있는 태스크다.
+    # flavor 없는 저장소(실측: 대상 Android 저장소는 `productFlavors` 선언 0건)에서는
+    # 태스크 이름 단계에서 exit=1이 되어, 이 gate가 빌드 상태를 한 번도 관측하지 못한
+    # 채 항상 실패했다. `assembleDebug`는 AGP가 flavor 없는 프로젝트에 항상 만들고,
+    # flavor가 있는 프로젝트에서도 모든 flavor의 debug variant를 묶는 anchor 태스크로
+    # 존재한다. flavor 특정 variant만 빌드하려는 저장소는 `<id>.local.yaml`의 gates로
+    # 이 표를 교체한다.
+    command: ["./gradlew", "assembleDebug"]
     required: true
     phase: pre-push
   - id: test

@@ -58,6 +58,7 @@ from agent_flow.core.design_value_check import (
     missing_spec_item_evidence,
 )
 from agent_flow.core.hook_integrity import assert_managed_hooks_registered
+from agent_flow.core.leader_tripwire import leader_sweep_include_ignored
 from agent_flow.core.worktrees import (
     CleanupBlockedError,
     complete_worktree_cleanup,
@@ -78,6 +79,9 @@ from agent_flow.core.worktree_isolation import (
     leader_drift_paths,
     leader_root_for,
     leader_snapshot_payload,
+    leader_sweep_includes_ignored,
+    leader_sweep_scope,
+    recorded_snapshot_scope,
     recorded_snapshot_version,
     real_path,
     sanitized_worker_env,
@@ -204,6 +208,14 @@ class Runner:
             self.architecture = meta.get("architecture", architecture)
         self.phases = _load_workflow(self.kit_root, self.workflow_name)
         self.profile_id, self.profile = _load_profile(self.kit_root, self.config_root)
+        # run 한 번 안에서 범위가 바뀌면 baseline과 관측이 서로 다른 범위가 된다.
+        # 여기서 한 번 정해 굳힌다. 병합된 `self.profile`이 아니라 leader의 선언
+        # 파일을 직접 보는 해석기를 쓴다 — 병합은 어느 파일이 선언했는지를 지우고,
+        # 좁힘 판정에는 바로 그 provenance가 필요하다.
+        self._leader_include_ignored = leader_sweep_include_ignored(
+            leader_root_for(self.project_root)
+        )
+        self._leader_scope = leader_sweep_scope(self._leader_include_ignored)
 
     def run(self, mode: ResumeMode, task: str = "") -> None:
         # 첫 `capture_leader_snapshot`보다 먼저 돈다. 뒤에서 돌면 이미 오염된
@@ -391,7 +403,9 @@ class Runner:
                 continue
             print(f"  [run]  {phase.id} — {phase.description}")
             if leader_root is not None and leader_before is None:
-                leader_before = capture_leader_snapshot(leader_root)
+                leader_before = capture_leader_snapshot(
+                    leader_root, include_ignored=self._leader_include_ignored
+                )
                 self._persist_host_phase_leader_baseline(
                     phase=phase,
                     phase_index=phase_index,
@@ -580,6 +594,7 @@ class Runner:
             "status",
             "armed",
             "version",
+            "scope",
         }:
             raise WorktreeIsolationError(
                 "durable host-phase leader snapshot is malformed"
@@ -605,12 +620,43 @@ class Runner:
             status=status,
             armed=True,
             version=recorded_snapshot_version(snapshot_raw.get("version")),
+            scope=recorded_snapshot_scope(snapshot_raw.get("scope")),
         )
         if not snapshot.comparable:
             self._migrate_stale_host_phase_baseline(
                 meta,
                 f"snapshot format v{snapshot.version}",
                 f"v{LEADER_SNAPSHOT_VERSION}",
+            )
+            return None
+        if not snapshot.comparable_within(self._leader_scope):
+            # profile이 sweep 범위를 바꿨다. 범위가 다른 두 기록은 leader를 아무도
+            # 건드리지 않아도 항상 다르므로 새 범위로 다시 찍어야 한다.
+            #
+            # 다만 형식 전환과 달리 여기서는 **기록된 범위로 먼저 대조한다**. 형식은
+            # kit 업그레이드가 바꾸지만 범위는 파일 한 줄이 바꾸고, 그 파일은 워커가
+            # 닿을 수 있는 자리에 있다. 대조 없이 버리면 범위를 좁히는 그 phase 하나가
+            # 검사 없는 통과가 되고, 그 창이 정확히 워커가 노릴 자리다.
+            #
+            # 승인 경로를 대조보다 **앞에** 둔다. 뒤에 두면 도달하지 못한다 — 대조가
+            # raise하면 그 아래가 실행되지 않고 baseline도 그대로 남아, 다음 재개가
+            # 같은 지점에서 다시 막힌다. 그러면 이 knob이 존재하는 이유인 "leader가
+            # 계속 움직이는 상황"에서 광고된 해제 명령이 무효가 된다.
+            recorded_include_ignored = leader_sweep_includes_ignored(snapshot.scope)
+            accepted = self._accept_recorded_leader_drift(
+                meta=meta,
+                raw=raw,
+                leader_root=leader_root,
+                include_ignored=recorded_include_ignored,
+            )
+            if accepted is None:
+                self._assert_leader_unchanged(
+                    leader_root, snapshot, include_ignored=recorded_include_ignored
+                )
+            self._migrate_stale_host_phase_baseline(
+                meta,
+                f"sweep scope {snapshot.scope}",
+                self._leader_scope,
             )
             return None
         accepted = self._accept_recorded_leader_drift(
@@ -632,6 +678,7 @@ class Runner:
         meta: dict[str, Any],
         raw: dict[str, Any],
         leader_root: Path,
+        include_ignored: bool | None = None,
     ) -> LeaderSnapshot | None:
         """사용자가 확인한 leader 변경만 새 기준선으로 굳힌다. 아니면 ``None``.
 
@@ -657,7 +704,17 @@ class Runner:
             or not isinstance(recorded.get("observed"), dict)
         ):
             return None
-        observed = capture_leader_snapshot(leader_root)
+        # 보고했던 그 범위로 다시 찍는다. 범위 전환 중이라면 기록은 옛 범위로
+        # 만들어졌으므로, 새 범위로 찍어 비교하면 leader가 그대로여도 절대 일치하지
+        # 않아 승인이 영원히 성립하지 않는다.
+        observed = capture_leader_snapshot(
+            leader_root,
+            include_ignored=(
+                self._leader_include_ignored
+                if include_ignored is None
+                else include_ignored
+            ),
+        )
         if leader_snapshot_payload(observed) != recorded["observed"]:
             # 보고한 상태가 아니다. 기록을 버려 다음 검사가 현재 차이를 새로 보고한다.
             meta.pop(_HOST_PHASE_LEADER_DRIFT, None)
@@ -701,7 +758,11 @@ class Runner:
         write_meta(self.run_dir, meta)
 
     def _assert_leader_unchanged(
-        self, leader_root: Path, snapshot: LeaderSnapshot
+        self,
+        leader_root: Path,
+        snapshot: LeaderSnapshot,
+        *,
+        include_ignored: bool | None = None,
     ) -> None:
         assert self.run_dir is not None
         try:
@@ -710,6 +771,11 @@ class Runner:
                 snapshot,
                 run_id=self.run_dir.name,
                 worker_root=self.project_root,
+                include_ignored=(
+                    self._leader_include_ignored
+                    if include_ignored is None
+                    else include_ignored
+                ),
             )
         except LeaderDriftError as exc:
             paths = self._record_leader_drift(exc.drift)

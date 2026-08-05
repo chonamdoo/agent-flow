@@ -817,14 +817,20 @@ def test_external_sources_declare_host_roots_without_installing() -> None:
     assert sources["skydoves-compose-performance"]["kind"] == "fetch"
 
 
-def test_bootstrap_and_kit_keep_the_missing_skill_wording() -> None:
-    """부재를 알리는 문구는 계약이다. 사라지면 사용자가 무엇을 깔아야 하는지 알 수 없다."""
-    kit_text = (KIT_ROOT / "bin" / "agent-flow-kit.mjs").read_text(encoding="utf-8")
+def test_bootstrap_template_and_skill_keep_the_missing_skill_wording() -> None:
+    """부재를 알리는 문구는 계약이다. 사라지면 사용자가 무엇을 깔아야 하는지 알 수 없다.
+
+    문구의 정본은 `bootstrap/AGENTS.md.template` 한 벌이다. 예전에는 이 검사가
+    `bin/agent-flow-kit.mjs`를 봤는데, 그건 kit가 같은 본문을 리터럴로 또 들고 있던
+    시절의 자리다. 지금 kit는 그 템플릿에서 파생만 하므로 kit 소스에서 문구를 찾으면
+    문구가 멀쩡해도 실패한다 — 설치본 쪽 계약은 같은 파일의 install 테스트가 본다.
+    """
+    template_text = (KIT_ROOT / "bootstrap" / "AGENTS.md.template").read_text(encoding="utf-8")
     review_text = (KIT_ROOT / "skills" / "android-code-review" / "SKILL.md").read_text(
         encoding="utf-8"
     )
 
-    assert "missing local <group>: <skill>" in kit_text
+    assert "missing local <group>: <skill>" in template_text
     assert "missing local <group>: <skill>" in review_text
 
 
@@ -1092,9 +1098,11 @@ def test_installer_outputs_use_explicit_spec_confirmation_contract(
     result = _install_with(binary, project)
     assert result.returncode == 0, result.stderr
 
+    # 루트 `CLAUDE.md`는 이 목록에 없다. 그건 `AGENTS.md`를 가리키는 포인터라
+    # 규약 문장을 사본으로 들고 있지 않다. `.agent-flow/bootstrap/*`는 루트 블록이
+    # 아니라 관리 사본 생성기의 산출물이라 두 label이 모두 본문을 담는다.
     for relative_path in (
         "AGENTS.md",
-        "CLAUDE.md",
         ".agent-flow/bootstrap/AGENTS.md",
         ".agent-flow/bootstrap/CLAUDE.md",
     ):
@@ -1107,6 +1115,10 @@ def test_installer_outputs_use_explicit_spec_confirmation_contract(
         assert "현재 대화의 새 turn으로 정확히 `승인`" not in installed
         assert "user-prompt hook" not in installed
         assert "사용자 터미널 명령 실행을 요구하지 않습니다" in installed
+
+    pointer = (project / "CLAUDE.md").read_text(encoding="utf-8")
+    assert "`AGENTS.md`를 먼저 읽고" in pointer
+    assert "### Workflow Contract" not in pointer
 
     canonical_skill = (
         KIT_ROOT / "skills" / "agent-flow" / "SKILL.md"
@@ -1555,11 +1567,16 @@ def test_install_writes_the_skill_index_into_agents_md(tmp_path: Path, binary: s
         if entry.is_dir() and (entry / "SKILL.md").is_file()
     }
     assert installed
-    for file_name in ("AGENTS.md", "CLAUDE.md"):
-        block = _skill_index_block(project, file_name)
-        assert "[agent-flow skill index]" in block, f"{file_name} 인덱스가 채워지지 않았다"
-        listed = _indexed_names(block, "always") | _indexed_names(block, "on-demand")
-        assert listed == installed, f"{file_name}: {installed ^ listed}"
+    # 인덱스는 canonical instruction file 한 곳에만 심는다. 루트 `CLAUDE.md`는
+    # `AGENTS.md`를 가리키는 포인터라 인덱스 자리가 없고, 두 곳에 심으면 둘이 같은지
+    # 보는 검사가 또 필요해진다.
+    block = _skill_index_block(project, "AGENTS.md")
+    assert "[agent-flow skill index]" in block, "AGENTS.md 인덱스가 채워지지 않았다"
+    listed = _indexed_names(block, "always") | _indexed_names(block, "on-demand")
+    assert listed == installed, f"AGENTS.md: {installed ^ listed}"
+    assert "<!-- agent-flow:skills:start -->" not in (
+        project / "CLAUDE.md"
+    ).read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("binary", ["agent-flow-kit.mjs", "agent-flow-install.mjs"])

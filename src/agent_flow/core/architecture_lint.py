@@ -131,9 +131,23 @@ def lint_project(
         findings.extend(validate_package_suffix(rel_path, text, match.role, match.captures))
         findings.extend(validate_gradle_namespace(root, rel_path, match))
         findings.extend(validate_declared_modules(root, rel_path, match.role, match.captures))
-        findings.extend(validate_gradle_dependencies(root, rel_path, match))
+        findings.extend(validate_gradle_dependencies(root, rel_path, match, roles))
         findings.extend(validate_pair(root, rel_path, roles, match))
-    return findings
+    # 같은 `(path, message)`를 두 번 보고하지 않는다. 실제로 접히는 검사는
+    # `validate_gradle_dependencies` 하나다 — 그 검사만 finding 경로를 모듈의
+    # `build.gradle.kts`로 잡으므로, 같은 모듈의 소스 파일마다 다시 돌아도 좌표가
+    # 같아져 한 줄로 겹친다. 실측(평면 Android 저장소, 소스 468개): raw 159 /
+    # distinct 7 — 22배로 부풀면 운영자가 실제 위반 개수를 읽을 수 없다.
+    #
+    # `validate_gradle_namespace`·`validate_declared_modules`·`validate_pair`는 모듈
+    # build 파일을 **읽지만** `rel_path`로 보고한다. 그래서 모듈 하나의 namespace 위반이
+    # 소스 3개면 경로 3개로 남고 접히지 않는다 — 그게 의도다. 위반이 어느 파일에서
+    # 걸렸는지가 사라지면 운영자가 고칠 자리를 잃는다.
+    #
+    # 검사별로 처방하지 않고 집계 지점에서 한 번 접는다. 검사를 더할 때 dedupe를 다시
+    # 붙일 자리가 없어야 한다. `dict.fromkeys`는 최초 등장 순서를 지키므로 출력이
+    # 계속 변경 파일 순서를 따라간다.
+    return list(dict.fromkeys(findings))
 
 
 def lint_profiles(
@@ -289,9 +303,118 @@ def architecture_lint_is_active(root: Path, architecture: dict[str, Any], candid
     )
     if not roots:
         return True
-    return any(root_path_is_active(candidate, roots) for candidate in candidates) or any(
-        (root / activation_root).exists() for activation_root in roots
+    roles = architecture.get("roles")
+    # 판정 기준은 하나다 — activation_root 아래에 놓인 role 패턴이 **실제로** 매치되는가.
+    # 앞선 판정은 디렉터리 존재만 봤다. 평면 레이아웃 저장소는 `core/domain/` 아래가
+    # `src/`뿐인데도 그 디렉터리가 있다는 이유로 strict 모드가 켜지고, 정작
+    # `core/domain/<context>`는 아무것도 못 맞춰 변경 파일 전량이 미매핑 finding이
+    # 됐다(실측 436개 중 182개). 존재는 채택의 증거가 아니다. 패턴이 맞는 것이 증거다.
+    patterns = activation_role_patterns(roles if isinstance(roles, list) else [], roots)
+    # 변경 후보를 먼저 본다 — 계약을 채택하는 그 커밋에는 아직 디스크에 디렉터리가 없다.
+    # 후보가 activation_root 아래인지 따로 묻지 않는다. 패턴 자체가 그 아래에 있으므로
+    # 매치되면 후보도 그 아래다. 같은 사실을 두 규칙으로 묻지 않는다.
+    if any(
+        match_pattern(candidate, pattern) is not None
+        for candidate in candidates
+        for pattern in patterns
+    ):
+        return True
+    # 패턴이 하나도 없으면 여기서 False다. activation_roots가 role 표와 어긋나게 선언된
+    # 경우인데, CLI는 그것을 "n/a"로 따로 찍으므로 무음 통과가 되지는 않는다.
+    return any(activation_pattern_matches_on_disk(root, pattern) for pattern in patterns)
+
+
+def activation_role_patterns(roles: list[object], activation_roots: tuple[str, ...]) -> tuple[str, ...]:
+    """activation_root 자신이거나 그 아래에 놓인 role path 패턴. 채택 여부의 증거가 될 패턴들이다."""
+    patterns: list[str] = []
+    for role in roles:
+        if not isinstance(role, dict):
+            continue
+        paths = role.get("paths")
+        if not isinstance(paths, list):
+            continue
+        for pattern in paths:
+            if not isinstance(pattern, str):
+                continue
+            normalized = pattern.strip("/")
+            if not normalized or normalized in patterns:
+                continue
+            if root_path_is_active(normalized, activation_roots):
+                patterns.append(normalized)
+    return tuple(patterns)
+
+
+def activation_pattern_matches_on_disk(root: Path, pattern: str) -> bool:
+    """이 패턴 자리에 **소스를 가진** 모듈 디렉터리가 하나라도 있는가.
+
+    증거는 두 겹이다. (1) 열거한 경로가 `match_pattern`을 통과하는가 — 예약 세그먼트
+    판정을 여기서 새로 쓰면 role 매칭 규칙이 두 벌이 된다. (2) 그 경로 아래에
+    `SOURCE_SUFFIXES` 파일이 하나라도 있는가.
+
+    (2)가 이름 목록이 아니라 **성질**인 것이 핵심이다. 디렉터리 존재만 보면 Room의
+    `room.schemaLocation` 기본 위치인 `core/domain/schemas/`(json만 있다)나 aar 보관
+    디렉터리 `libs/`가 채택 증거로 통한다. 실측: 평면 저장소에 `core/domain/schemas/`
+    하나만 있어도 strict가 켜지고 변경 파일이 전량 미매핑 finding이 됐다. 그런 이름을
+    예외 목록으로 빼면 레이아웃이 하나 나올 때마다 목록이 늘고, 활성 조건이 어디서
+    결정되는지 더는 한자리에서 읽히지 않는다. "소스가 있는가"는 빈 디렉터리와 산출물
+    보관소를 전부 걸러내면서 실제 모듈은 항상 통과시키므로, 새 이름이 나와도 규칙이
+    자라지 않는다. 반증 방향도 막혀 있다 — 소스가 있는데 비활성이 되려면 그 확장자가
+    `SOURCE_SUFFIXES`에 없어야 하고, 그건 lint가 애초에 읽지 않는 파일이다.
+
+    placeholder 자리만 `*`로 바꿔 그 깊이만 열거하므로 후보를 찾을 때 트리를 걷지
+    않는다. 증거 탐색은 후보마다 첫 소스에서 즉시 멈추고 `IGNORED_PARTS` 아래로는
+    내려가지 않는다.
+
+    메모이즈하지 않는다. 이 판정은 변경 파일 루프 **밖**, profile당 한 번 불리므로
+    파일 수에 비례하지 않는다(실측 436파일 저장소 전체 lint가 0.05초).
+    `cached_gradle_modules`처럼 mtime으로 키를 잡을 수도 없다 —
+    `src/features/<feature>/api`의 답은 `src/features`뿐 아니라 각 `<feature>`
+    디렉터리의 내용에도 달려 있어서, 정적 접두사의 mtime만으로는 무효화가 안 되고
+    조용히 낡은 False를 돌려준다. 이득 없는 캐시로 오답을 살 이유가 없다.
+    """
+    glob_pattern = "/".join(
+        "*" if re.fullmatch(r"<[a-zA-Z][a-zA-Z0-9_-]*>", part) else part
+        for part in pattern.split("/")
     )
+    for path in root.glob(glob_pattern):
+        if not path.is_dir():
+            continue
+        if match_pattern(path.relative_to(root).as_posix(), pattern) is None:
+            continue
+        if holds_source_file(path):
+            return True
+    return False
+
+
+def holds_source_file(directory: Path) -> bool:
+    """이 디렉터리 아래에 `SOURCE_SUFFIXES` 파일이 하나라도 있는가. 첫 증거에서 멈춘다.
+
+    `IGNORED_PARTS`는 `build`/`node_modules`처럼 산출물·의존성 트리를 이미 알고 있다.
+    그 안으로 내려가지 않는 이유는 비용이다 — 대상 저장소의 `build/`는 8천 파일이고,
+    거기서 첫 `.kt`를 찾는 것은 채택의 증거도 아니다.
+
+    같은 깊이의 파일을 다 본 뒤 하위로 내려간다. 모듈 루트의 `build.gradle.kts`가
+    보통 첫 증거이므로 대개 iterdir 한 번으로 끝난다.
+    """
+    pending = [directory]
+    while pending:
+        try:
+            entries = list(pending.pop().iterdir())
+        except OSError:
+            # 권한이나 경합으로 못 읽는 디렉터리는 증거가 없는 것으로 본다. 여기서
+            # 예외를 올리면 필수 gate가 활성 판정 단계에서 죽는다.
+            continue
+        subdirectories: list[Path] = []
+        for entry in entries:
+            if entry.is_dir():
+                # symlink는 따라가지 않는다. 순환 하나로 필수 gate가 멈춘다.
+                if not entry.is_symlink() and entry.name not in IGNORED_PARTS:
+                    subdirectories.append(entry)
+                continue
+            if entry.suffix in SOURCE_SUFFIXES:
+                return True
+        pending.extend(subdirectories)
+    return False
 
 
 def root_path_is_active(rel_path: str, activation_roots: tuple[str, ...]) -> bool:
@@ -1091,7 +1214,9 @@ def validate_declared_modules(root: Path, rel_path: str, role: dict[str, Any], c
     return [Finding(rel_path, f"Gradle module {module} is not declared in settings") for module in missing]
 
 
-def validate_gradle_dependencies(root: Path, rel_path: str, match: RoleMatch) -> list[Finding]:
+def validate_gradle_dependencies(
+    root: Path, rel_path: str, match: RoleMatch, roles: list[object]
+) -> list[Finding]:
     build_file = role_build_file(root, match.pattern, match.captures, rel_path)
     if build_file is None:
         return []
@@ -1103,9 +1228,50 @@ def validate_gradle_dependencies(root: Path, rel_path: str, match: RoleMatch) ->
             findings.append(Finding(str(build_file.relative_to(root)), f"{role_id} has forbidden Gradle dependency {module}"))
     required = required_gradle_dependencies(role_id, match.captures)
     for module in required:
+        # 이 표의 required 항목은 전부 **다른 role이 소유한 모듈**이다
+        # (`core-data` → core-domain, `feature-presentation` → feature-api,
+        # `navigation-impl` → navigation-api). 그 role을 선언하지 않은 profile에서
+        # 그 모듈을 요구하는 것은 계층 위반이 아니라 표와 저장소 구조의 불일치다 —
+        # 평면 레이아웃에서 `:feature:<f>:api`를 요구한 오탐이 실측으로 5건이었다.
+        #
+        # 판정 근거를 settings.gradle의 모듈 목록이 아니라 **role 선언**에 두는
+        # 이유: 모듈이 지워졌다는 사실만으로 규칙이 꺼지면, 그 모듈을 없애고 의존을
+        # 끊는 변경이 조용히 통과한다. role이 남아 있는 한 규칙도 남는다.
+        if not role_owns_module(roles, module):
+            continue
         if module not in dependencies:
             findings.append(Finding(str(build_file.relative_to(root)), f"{role_id} must depend on {module}"))
     return findings
+
+
+def role_owns_module(roles: list[object], module: str) -> bool:
+    """활성 profile의 어떤 role이 이 모듈을 소유한다고 선언했는가."""
+    for role in roles:
+        if not isinstance(role, dict):
+            continue
+        declared = role.get("modules")
+        if not isinstance(declared, list):
+            continue
+        for pattern in declared:
+            if isinstance(pattern, str) and module_pattern_matches(pattern, module):
+                return True
+    return False
+
+
+def module_pattern_matches(pattern: str, module: str) -> bool:
+    """`:feature:<feature>:api` 같은 placeholder 패턴이 이 모듈 좌표와 맞는가.
+
+    placeholder는 세그먼트 하나를 받는다. 세그먼트 수가 다르면 다른 좌표다.
+    """
+    pattern_parts = pattern.split(":")
+    module_parts = module.split(":")
+    if len(pattern_parts) != len(module_parts):
+        return False
+    return all(
+        (expected.startswith("<") and expected.endswith(">") and bool(actual))
+        or expected == actual
+        for expected, actual in zip(pattern_parts, module_parts)
+    )
 
 
 def expected_modules(role: dict[str, Any], captures: dict[str, str]) -> list[str]:

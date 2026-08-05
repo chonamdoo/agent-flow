@@ -1597,7 +1597,7 @@ def test_snapshot_payload_round_trips_the_format_version(tmp_path):
     payload = W_ISO.leader_snapshot_payload(snapshot)
 
     assert payload["version"] == W_ISO.LEADER_SNAPSHOT_VERSION
-    assert set(payload) == {"head", "branch", "status", "armed", "version"}
+    assert set(payload) == {"head", "branch", "status", "armed", "version", "scope"}
     assert W_ISO.LeaderSnapshot(**payload) == snapshot
 
 
@@ -1613,6 +1613,81 @@ def test_a_stored_record_without_a_version_reads_as_legacy(tmp_path):
     assert W_ISO.recorded_snapshot_version(True) == 0
     assert W_ISO.recorded_snapshot_version("1") == 0
     assert W_ISO.recorded_snapshot_version(1) == 1
+
+
+def test_sweep_scope_decides_whether_ignored_writes_are_drift(tmp_path):
+    """knob의 본질: 같은 쓰기가 범위에 따라 drift이기도 하고 아니기도 하다.
+
+    반증 짝을 둔다 — `all`에서 잡히지 않으면 knob을 끄는 의미가 없고,
+    `tracked-only`에서 잡히면 knob이 아무것도 하지 않은 것이다.
+    """
+    _isolated(tmp_path, "sweep-scope")
+    (tmp_path / ".gitignore").write_text("build/\n", encoding="utf-8")
+    _git("add", "-A", cwd=tmp_path)
+    _git("commit", "-q", "-m", "ignore build output", cwd=tmp_path)
+    artifact = tmp_path / "build" / "out.jar"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("v1", encoding="utf-8")
+
+    full_before = W_ISO.capture_leader_snapshot(tmp_path)
+    tracked_before = W_ISO.capture_leader_snapshot(tmp_path, include_ignored=False)
+    assert full_before.scope == W_ISO.LEADER_SWEEP_ALL
+    assert tracked_before.scope == W_ISO.LEADER_SWEEP_TRACKED_ONLY
+
+    artifact.write_text("v2", encoding="utf-8")
+
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(tmp_path, full_before)
+    W_ISO.assert_leader_unchanged(
+        tmp_path, tracked_before, include_ignored=False
+    )
+
+    # tracked 경로 쓰기는 범위와 무관하게 잡힌다. 좁힌 것은 ignored뿐이다.
+    (tmp_path / "README.md").write_text("worker leak\n", encoding="utf-8")
+    with pytest.raises(W_ISO.WorktreeIsolationError):
+        W_ISO.assert_leader_unchanged(
+            tmp_path, tracked_before, include_ignored=False
+        )
+
+
+def test_records_from_a_different_sweep_scope_are_not_comparable(tmp_path):
+    """반증: 범위가 다른 두 기록은 leader가 그대로여도 항상 다르다.
+
+    그 차이를 오염으로 보고하면 knob을 켠 첫 phase에서 run이 근거 없이 막힌다.
+    형식 버전과 같은 처리를 받아야 한다 — 차단이 아니라 재캡처.
+    """
+    _isolated(tmp_path, "sweep-scope-compare")
+    full = W_ISO.capture_leader_snapshot(tmp_path)
+    tracked = W_ISO.capture_leader_snapshot(tmp_path, include_ignored=False)
+
+    assert full.comparable_within(W_ISO.LEADER_SWEEP_ALL)
+    assert not full.comparable_within(W_ISO.LEADER_SWEEP_TRACKED_ONLY)
+    assert tracked.comparable_within(W_ISO.LEADER_SWEEP_TRACKED_ONLY)
+    assert not tracked.comparable_within(W_ISO.LEADER_SWEEP_ALL)
+
+    # 형식이 낡으면 범위가 맞아도 대조 불가여야 한다.
+    legacy = W_ISO.LeaderSnapshot(
+        head=full.head,
+        branch=full.branch,
+        status=full.status,
+        armed=True,
+        version=0,
+        scope=W_ISO.LEADER_SWEEP_ALL,
+    )
+    assert not legacy.comparable_within(W_ISO.LEADER_SWEEP_ALL)
+
+
+def test_a_stored_record_without_a_scope_reads_as_the_full_sweep(tmp_path):
+    """실제 경로: knob 이전 기록에는 `scope` 키가 없고, 그때는 전부 전수 sweep이었다."""
+    _isolated(tmp_path, "snapshot-legacy-scope")
+    stored = W_ISO.leader_snapshot_payload(W_ISO.capture_leader_snapshot(tmp_path))
+    stored.pop("scope")
+
+    assert W_ISO.recorded_snapshot_scope(stored.get("scope")) == W_ISO.LEADER_SWEEP_ALL
+    assert W_ISO.recorded_snapshot_scope("tracked-only") == W_ISO.LEADER_SWEEP_TRACKED_ONLY
+    # 모르는 값을 조용히 받아들이면 선언과 동작이 갈라진다.
+    assert W_ISO.recorded_snapshot_scope("traked-only") == W_ISO.LEADER_SWEEP_ALL
+    assert W_ISO.recorded_snapshot_scope(None) == W_ISO.LEADER_SWEEP_ALL
 
 
 def test_tripwire_watches_paths_git_was_told_to_ignore(tmp_path):

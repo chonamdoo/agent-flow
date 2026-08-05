@@ -144,7 +144,9 @@ from agent_flow.core.hook_integrity import (
     assert_managed_hooks_registered,
 )
 from agent_flow.core.host_write_boundary import assert_adoption_allowed
+from agent_flow.core.leader_tripwire import leader_sweep_include_ignored_for
 from agent_flow.core.worktree_isolation import (
+    leader_sweep_includes_ignored,
     WorktreeIsolationError,
     adopted_worktree_parent,
     assert_cwd_bound,
@@ -1588,7 +1590,14 @@ def main(argv: list[str] | None = None) -> int:
                             worktree_path=worktree_status.path,
                             cwd=worker_cwd,
                         )
-                        leader_before = capture_leader_snapshot(root)
+                        # 여기서 지키는 leader는 `root` 자신이고 선언도 거기서
+                        # 읽는다. 범위를 기본값으로 두면 `tracked-only`를 선언한
+                        # 프로젝트의 team claim만 leader의 gitignored 산출물에
+                        # 걸려 워커 결과가 failed로 되돌아간다.
+                        leader_include_ignored = leader_sweep_include_ignored_for(root)
+                        leader_before = capture_leader_snapshot(
+                            root, include_ignored=leader_include_ignored
+                        )
                         claimed = claim_task(
                             root=root,
                             team_name=args.team,
@@ -1612,6 +1621,10 @@ def main(argv: list[str] | None = None) -> int:
                             leader_before,
                             run_id=claimed.task_id,
                             worker_root=worker_cwd,
+                            # 범위는 기록에서 되읽는다. 다시 해석하면 워커가 도는
+                            # 동안 선언이 바뀌었을 때 baseline과 관측의 범위가
+                            # 갈리고, 그 불일치는 항상 drift로 보고된다.
+                            include_ignored=leader_sweep_includes_ignored(leader_before.scope),
                         )
                     except WorktreeIsolationError as exc:
                         message = _format_cli_error(exc)

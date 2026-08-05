@@ -23,7 +23,9 @@ from agent_flow.cli_detect import (
     detect_host_cli,
 )
 from agent_flow.core.hook_integrity import assert_managed_hooks_registered
+from agent_flow.core.leader_tripwire import leader_sweep_include_ignored_for
 from agent_flow.core.worktree_isolation import (
+    leader_sweep_includes_ignored,
     assert_leader_unchanged,
     capture_leader_snapshot,
     leader_root_for,
@@ -325,7 +327,14 @@ def run_distribution(
     leader = leader_root_for(project_root)
     # 스냅샷보다 먼저다. 오염된 등록 상태를 기준선으로 굳히면 안 된다.
     assert_managed_hooks_registered(project_root, leader)
-    leader_before = capture_leader_snapshot(leader) if leader is not None else None
+    # 범위는 profile이 정한다. 여기서 기본값으로 두면 `tracked-only`를 선언한
+    # 프로젝트도 이 경로에서만 전수 sweep으로 돌아 막힌다 — reviewer subprocess를
+    # 병렬로 돌리는 이 창이 phase 중 가장 길어서 leader의 gitignored 산출물이
+    # 바뀔 확률도 가장 높다. 즉 고치려던 마찰이 정확히 여기서 재발한다.
+    leader_before = None
+    if leader is not None:
+        include_ignored = leader_sweep_include_ignored_for(leader)
+        leader_before = capture_leader_snapshot(leader, include_ignored=include_ignored)
     if distribution.accept_any_provider:
         probes = [jobs[0] for jobs in sub_jobs_by_cli.values()]
         results = run_parallel(probes)
@@ -359,11 +368,15 @@ def run_distribution(
             continue
         _write_review_artifact(job, _render_angle_result(r))
     if leader_before is not None:
+        # 범위는 기록에서 되읽는다. 여기서 다시 profile을 해석하면 리뷰가 도는
+        # 동안 선언이 바뀌었을 때 baseline과 관측이 서로 다른 범위가 되고, 그
+        # 불일치는 leader를 아무도 건드리지 않아도 항상 diff로 나온다.
         assert_leader_unchanged(
             leader,
             leader_before,
             run_id="multi-review",
             worker_root=project_root,
+            include_ignored=leader_sweep_includes_ignored(leader_before.scope),
         )
     return results
 

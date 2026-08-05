@@ -54,7 +54,7 @@ Use this as the common implementation discipline. Do not score it. Apply it as a
 - Confirm the requested behavior is actually implemented.
 - Check language/framework guide violations only when they create real defects, runtime risk, accessibility regression, hook rule violation, hydration/server-client boundary risk, performance regression, security risk, test failure, or project-rule violation.
 - Run the verification command chosen before editing, plus build/typecheck/lint/tests when relevant.
-- Resolve build, run, test, and lint commands from the active profile gates (`.agent-flow/profiles/<profile>.yaml`) or the installed skill/CLI docs, not from a web search. The profile already defines them (for example, Android builds with `./gradlew assembleDevDebug`, tests with `./gradlew test`). Only web-search when no profile gate, project script, or skill documents the command.
+- Resolve build, run, test, and lint commands from the active profile gates (`.agent-flow/profiles/<profile>.yaml`) or the installed skill/CLI docs, not from a web search. The profile already defines them (for example, Android builds with `./gradlew assembleDebug`, tests with `./gradlew test`). Only web-search when no profile gate, project script, or skill documents the command.
 - If review or QA fails, return to the fix phase before continuing.
 - Do not report completion if verification was not run or could not run.
 - Summarize changed files, verification, and remaining risk briefly. Do not paste long logs or whole files.
