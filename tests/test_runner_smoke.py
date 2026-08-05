@@ -1239,6 +1239,40 @@ def test_a_profile_that_omits_the_declaration_counts_as_the_default(
         leader_sweep_include_ignored(project)
 
 
+def test_the_forced_profile_env_chooses_the_sweep_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """반증: Runner는 `AGENT_FLOW_PROFILE`을 최우선으로 profile을 고른다. sweep
+    해석만 `kit.json`을 보면 env로 강제한 profile의 선언이 무시된다.
+
+    그러면 gates·branching은 android로 돌면서 leader snapshot은 generic 기본값
+    범위로 찍혀, 고치려던 그 drift가 그대로 phase를 막는다.
+    """
+    from agent_flow.core.leader_tripwire import leader_sweep_include_ignored
+
+    project, _checkout, _state_root, _artifact = _leader_tripwire_project(
+        tmp_path, monkeypatch, "tripwire-forced-profile", declared=None
+    )
+    profiles = project / ".agent-flow" / "profiles"
+    profiles.mkdir(parents=True, exist_ok=True)
+    android = profiles / "android.local.yaml"
+    android.write_text(
+        "branching:\n  leader_tripwire: tracked-only\n", encoding="utf-8"
+    )
+    subprocess.run(
+        ["git", "add", "-f", str(android.relative_to(project))],
+        cwd=project,
+        check=True,
+        capture_output=True,
+    )
+
+    # kit.json은 generic이다. env 없이는 android의 선언이 보이지 않는다.
+    assert leader_sweep_include_ignored(project) is True
+
+    monkeypatch.setenv("AGENT_FLOW_PROFILE", "android")
+    assert leader_sweep_include_ignored(project) is False
+
+
 def test_conflicting_declarations_are_not_folded_to_the_wider_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

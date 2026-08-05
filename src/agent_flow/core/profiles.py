@@ -359,7 +359,7 @@ def _validate_project_profile_override_shape(
 # `architecture_lint`가 그 값을 쓰는 방식이다 — 리스트로 순회하는 것과 문자열로
 # 비교하는 것.
 _ROLE_LIST_FIELDS: tuple[str, ...] = ("paths", "modules", "forbidden")
-_ROLE_TEXT_FIELDS: tuple[str, ...] = ("id", "package_suffix", "pair_with")
+_ROLE_OPTIONAL_TEXT_FIELDS: tuple[str, ...] = ("package_suffix", "pair_with")
 
 
 def _validate_override_role_fields(role: dict[str, Any], *, source: Path) -> None:
@@ -369,7 +369,17 @@ def _validate_override_role_fields(role: dict[str, Any], *, source: Path) -> Non
     `role_owns_module`이 `isinstance(..., list)`에서 조용히 건너뛴다. 그러면 필수
     architecture gate가 `n/a`이거나 무위반으로 보이고, 오타는 어디에도 보고되지
     않는다. 소비자가 침묵하므로 선언 자리에서 막는다.
+
+    `id`만 **없어도** 거부한다. 나머지는 없으면 "그 제약을 두지 않는다"는 완결된
+    선언이지만, id는 의미 좌표다 — 빠지면 `validate_gradle_dependencies`가
+    `role_id=""`로 `FORBIDDEN_GRADLE_MODULES`/`REQUIRED_GRADLE_MODULES`를 조회해
+    role id로 키가 잡힌 gradle 규칙 전부를 조용히 건너뛴다.
     """
+    if "id" not in role:
+        raise ValueError(
+            "profile override architecture.roles entries must declare id "
+            f"(gradle dependency rules are keyed by it): {source}"
+        )
     for field in _ROLE_LIST_FIELDS:
         if field not in role:
             continue
@@ -381,7 +391,7 @@ def _validate_override_role_fields(role: dict[str, Any], *, source: Path) -> Non
                 f"profile override architecture.roles[{role.get('id')!r}].{field} "
                 f"must be a list of non-empty strings: {source}"
             )
-    for field in _ROLE_TEXT_FIELDS:
+    for field in ("id", *_ROLE_OPTIONAL_TEXT_FIELDS):
         if field not in role:
             continue
         value = role[field]

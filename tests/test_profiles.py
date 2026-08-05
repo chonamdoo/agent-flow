@@ -591,6 +591,38 @@ def test_override_rejects_an_architecture_shape_the_lint_would_drop(tmp_path, bo
 @pytest.mark.parametrize(
     "body",
     [
+        # list 자리의 스칼라. `match_role`/`role_owns_module`이 조용히 건너뛴다.
+        "architecture:\n  roles:\n    - id: core-domain\n      paths: core/domain\n",
+        "architecture:\n  roles:\n    - id: core-domain\n      paths: [\"core/domain\"]\n"
+        "      modules: \":core:domain\"\n",
+        "architecture:\n  roles:\n    - id: core-domain\n      paths: [\"core/domain\"]\n"
+        "      forbidden: Dto\n",
+        "architecture:\n  roles:\n    - id: core-domain\n      paths: [\"\"]\n",
+        # id가 빠지면 gradle 규칙이 `role_id=\"\"`로 조회돼 통째로 꺼진다.
+        "architecture:\n  roles:\n    - paths: [\"core/domain\"]\n"
+        "      modules: [\":core:domain\"]\n",
+        "architecture:\n  roles:\n    - id: \"\"\n      paths: [\"core/domain\"]\n",
+    ],
+)
+def test_override_rejects_a_role_field_the_lint_would_skip(tmp_path, body):
+    """불변: 소비자가 침묵하는 모양은 선언 자리에서 막는다.
+
+    `paths: "core/domain"`은 `isinstance(..., list)`에서 건너뛰어져 role이 아무
+    파일도 잡지 못하고, id 누락은 role id로 키가 잡힌 gradle 규칙 전부를 끈다.
+    둘 다 필수 gate가 "무위반"으로 보이는 결과가 된다.
+    """
+    path = _android_override(tmp_path, body)
+
+    with pytest.raises(ValueError) as excinfo:
+        load_profile_payload("android", tmp_path)
+
+    assert "roles" in str(excinfo.value)
+    assert str(path) in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
         "gates: build\n",
         "gates:\n  - build\n",
         "gates:\n  - command: [\"./gradlew\", \"assembleDebug\"]\n",

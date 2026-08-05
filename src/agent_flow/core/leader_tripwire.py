@@ -16,8 +16,8 @@ leader daemon이 gitignored 산출물을 건드릴 확률이 phase 중 가장 �
 """
 from __future__ import annotations
 
+import os
 import sys
-from pathlib import Path
 
 import yaml
 
@@ -99,9 +99,14 @@ def leader_tripwire_declarations(
     값 검증을 여기서 하는 이유는 모르는 값을 기본값으로 접지 않기 위해서다.
     `traked-only` 같은 오타를 조용히 `all`로 읽으면 프로젝트는 껐다고 믿는데 run은
     계속 막히고, 반대로 접으면 켰다고 믿는 프로젝트의 탐지가 조용히 꺼진다.
+
+    profile 선택은 소비자와 같은 규칙을 따른다. `AGENT_FLOW_PROFILE`이 최우선이다
+    — Runner가 그 env로 profile을 고르는데 여기만 `kit.json`을 보면, env로 강제한
+    profile의 선언이 무시돼 gates는 android로 돌면서 sweep은 generic 기본값으로
+    찍힌다. 고치려던 그 drift가 그대로 phase를 막는다.
     """
     found: list[tuple[str, Path | None, str]] = []
-    for profile_id in active_profile_ids(leader_root, "auto"):
+    for profile_id in active_profile_ids(leader_root, _requested_profiles()):
         declaration: tuple[Path, str] | None = None
         for path in (
             project_profile_override_path(leader_root, profile_id),
@@ -122,6 +127,15 @@ def leader_tripwire_declarations(
         else:
             found.append((profile_id, declaration[0], declaration[1]))
     return tuple(found)
+
+
+def _requested_profiles() -> str:
+    """소비자가 쓰는 profile 선택 규칙. `AGENT_FLOW_PROFILE`이 최우선이다.
+
+    `runner._load_profile`이 이 env를 먼저 보고, `cli`의 `--profile auto`도 같은
+    자리를 통과한다. 여기서만 `kit.json`을 보면 강제된 profile의 선언이 사라진다.
+    """
+    return os.environ.get("AGENT_FLOW_PROFILE") or "auto"
 
 
 def _declared_in_file(path: Path) -> object | None:
